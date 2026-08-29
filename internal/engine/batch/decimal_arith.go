@@ -3,6 +3,7 @@ package batch
 import (
 	"math/big"
 	"math/bits"
+	"strings"
 )
 
 // Exact fixed-point arithmetic over the Int128 carrier.
@@ -14,14 +15,64 @@ import (
 //
 // Every function here answers the same two questions: the EXACT value the two
 // operands name at the requested output scale, and whether that value has an
-// Int128. `ok=false` is never "close enough" — it means the caller must raise
-// 22003 rather than show anyone the first return.
+// Int128. A status other than DecimalOK is never "close enough" — it means
+// the caller must raise the SQLSTATE the status names rather than show anyone
+// the first return.
+//
+// **DecimalOK means the value fits the CARRIER, not the declared (p,s).** The
+// two bounds are different: 9 + (10^38-1), whose result type by ADR-0024 item
+// 3 is DECIMAL(38,0), is 10^38+8 — an Int128 the carrier holds happily and a
+// value DECIMAL(38,0) cannot declare. A wiring site that must honour item 4
+// ("a value with no exact carrier AT ITS DECLARED TYPE is a 22003 error")
+// wants the DecimalAddAt / SubAt / MulAt / DivAt / ModAt wrappers below, which
+// fold DecimalFitsPrecision in; the bare ops leave that bound to the caller
+// because some callers (an intermediate, an unconstrained result) have none.
 //
 // Shape of each op: an Int128 fast path (no allocation, no math/big), and an
 // exact big.Int fallback taken only when an INTERMEDIATE overflows the carrier.
 // The fallback is not a second opinion — it is the same rule computed at a
 // width the intermediate needs, so `a*b` at a large product scale still answers
 // when the result at outScale fits. Both paths round once, at outScale.
+
+// DecimalStatus is why a fixed-point operation did or did not produce a value.
+// It exists because "no answer" has two causes that PostgreSQL reports as two
+// different conditions, and a single bool made them one: a caller writing
+// `if !ok { raise 22003 }` reports a numeric overflow for `x / 0`.
+type DecimalStatus uint8
+
+const (
+	// DecimalOK: the first return is the exact value at the requested scale.
+	// It fits the Int128 carrier; see the package note above on why that is
+	// not the same as fitting a declared (p,s).
+	DecimalOK DecimalStatus = iota
+	// DecimalOverflow: the exact value has no Int128 (or, from the ...At
+	// wrappers, no value at the declared precision). SQLSTATE 22003,
+	// numeric_value_out_of_range.
+	DecimalOverflow
+	// DecimalDivByZero: the divisor is zero, for both / and %. SQLSTATE
+	// 22012, division_by_zero.
+	DecimalDivByZero
+	// DecimalInvalidScale: a negative scale was asked for. Not a user-visible
+	// condition — a column's scale is non-negative by DDL — so a caller that
+	// sees this has a planner defect to report as an internal error, not a
+	// numeric one.
+	DecimalInvalidScale
+)
+
+// String names the status, for the error messages the wiring sites build.
+func (s DecimalStatus) String() string {
+	switch s {
+	case DecimalOK:
+		return "ok"
+	case DecimalOverflow:
+		return "numeric value out of range"
+	case DecimalDivByZero:
+		return "division by zero"
+	case DecimalInvalidScale:
+		return "invalid scale"
+	}
+	return "unknown decimal status"
+}
 
 // Mul returns d * other and reports whether the EXACT product fits an Int128.
 //
@@ -169,15 +220,23 @@ func divMag(nHi, nLo, dHi, dLo uint64) (qHi, qLo, rHi, rLo uint64) {
 		pHi, pLo, fits := mulU64Mag(qhat, dHi, dLo)
 		if fits && cmpMag(pHi, pLo, nHi, nLo) <= 0 {
 			hi, lo := subMag(nHi, nLo, pHi, pLo)
-			// A correction step in the other direction, so the result is
-			// right whatever the estimate did: the remainder must be below
-			// the divisor.
+			// A guard, not a step this estimate needs: Knuth's normalized
+			// qhat is never BELOW the true quotient, so the remainder here
+			// is already under the divisor and this loop is provably dead
+			// today. It is kept so the function stays correct under any
+			// future estimate, and because "remainder < divisor" is the
+			// cheapest possible assertion of that.
 			for cmpMag(hi, lo, dHi, dLo) >= 0 {
 				qhat++
 				hi, lo = subMag(hi, lo, dHi, dLo)
 			}
 			return 0, qhat, hi, lo
 		}
+		// The load-bearing correction: the estimate can exceed the true
+		// quotient by up to two, and near the top of the range that overshoot
+		// also makes qhat*d overflow 128 bits — which is why mulU64Mag
+		// reports the overflow instead of wrapping, and why `fits` is part of
+		// the test above rather than an assumption.
 		qhat-- // cannot underflow: the true quotient is at least 1 and satisfies the test
 	}
 }
@@ -336,20 +395,20 @@ func Rescale(v Int128, fromScale, toScale int) (Int128, bool) {
 
 // DecimalAdd returns a (at aScale) + b (at bScale) as an unscaled value at
 // outScale, exactly, rounded half away from zero if outScale is narrower than
-// the sum's own scale. ok=false when the exact result has no Int128.
-func DecimalAdd(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, bool) {
+// the sum's own scale. DecimalOverflow when the exact result has no Int128.
+func DecimalAdd(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, DecimalStatus) {
 	return decAddSub(a, aScale, b, bScale, outScale, false)
 }
 
 // DecimalSub returns a (at aScale) - b (at bScale) at outScale, under the same
 // contract as DecimalAdd.
-func DecimalSub(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, bool) {
+func DecimalSub(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, DecimalStatus) {
 	return decAddSub(a, aScale, b, bScale, outScale, true)
 }
 
-func decAddSub(a Int128, aScale int, b Int128, bScale, outScale int, sub bool) (Int128, bool) {
+func decAddSub(a Int128, aScale int, b Int128, bScale, outScale int, sub bool) (Int128, DecimalStatus) {
 	if aScale < 0 || bScale < 0 || outScale < 0 {
-		return Int128{}, false
+		return Int128{}, DecimalInvalidScale
 	}
 	common := max(aScale, bScale)
 	x, okA := Rescale(a, aScale, common)
@@ -364,12 +423,12 @@ func decAddSub(a Int128, aScale int, b Int128, bScale, outScale int, sub bool) (
 		}
 		if ok {
 			if out, ok := Rescale(sum, common, outScale); ok {
-				return out, true
+				return out, DecimalOK
 			}
 			// The sum itself fit and the rescale did not: the exact result
 			// has no Int128 at outScale, and no wider intermediate changes
 			// that. Rescale already rounded once, so this is final.
-			return Int128{}, false
+			return Int128{}, DecimalOverflow
 		}
 	}
 	// An operand's rescale or the sum overflowed the carrier. The exact
@@ -382,21 +441,30 @@ func decAddSub(a Int128, aScale int, b Int128, bScale, outScale int, sub bool) (
 	} else {
 		n.Add(n, m)
 	}
-	return bigRescale(n, common, outScale)
+	return decStatus(bigRescale(n, common, outScale))
+}
+
+// decStatus lifts an internal (value, fits-the-carrier) pair into the public
+// status, so the only way a caller can see a value is with DecimalOK.
+func decStatus(v Int128, ok bool) (Int128, DecimalStatus) {
+	if !ok {
+		return Int128{}, DecimalOverflow
+	}
+	return v, DecimalOK
 }
 
 // DecimalMul returns a (at aScale) * b (at bScale) at outScale. The product's
 // natural scale is aScale+bScale; outScale below that rounds half away from
-// zero, exactly once. ok=false when the exact result has no Int128.
-func DecimalMul(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, bool) {
+// zero, exactly once. DecimalOverflow when the exact result has no Int128.
+func DecimalMul(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, DecimalStatus) {
 	if aScale < 0 || bScale < 0 || outScale < 0 {
-		return Int128{}, false
+		return Int128{}, DecimalInvalidScale
 	}
 	if p, ok := a.Mul(b); ok {
 		if out, ok := Rescale(p, aScale+bScale, outScale); ok {
-			return out, true
+			return out, DecimalOK
 		}
-		return Int128{}, false
+		return Int128{}, DecimalOverflow
 	}
 	// The 128-bit product overflowed. At a narrower outScale the ANSWER may
 	// still fit — DECIMAL(38,10) x DECIMAL(38,10) declared (38,6) is the
@@ -404,10 +472,10 @@ func DecimalMul(a Int128, aScale int, b Int128, bScale int, outScale int) (Int12
 	// product on a scale well below s1+s2 — so the product is taken at 256
 	// bits and divided back down.
 	if drop := aScale + bScale - outScale; drop >= 1 && drop <= 19 {
-		return mulRescale256(a, b, drop)
+		return decStatus(mulRescale256(a, b, drop))
 	}
 	n := new(big.Int).Mul(a.BigInt(), b.BigInt())
-	return bigRescale(n, aScale+bScale, outScale)
+	return decStatus(bigRescale(n, aScale+bScale, outScale))
 }
 
 // mulRescale256 multiplies two Int128s and divides the exact 256-bit product
@@ -467,13 +535,15 @@ func mulRescale256(a, b Int128, drop int) (Int128, bool) {
 // second time: 0.1249 rounded to scale 3 is 0.125 and rounded again to scale 2
 // is 0.13, where the one correct answer is 0.12. One division, one rounding.
 //
-// ok=false when the exact result has no Int128 AND when b is zero. A caller
-// raising SQLSTATE must test b.IsZero() itself: division by zero is 22012 and
-// an unrepresentable quotient is 22003, and this bool does not tell them
-// apart.
-func DecimalDiv(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, bool) {
-	if aScale < 0 || bScale < 0 || outScale < 0 || b.IsZero() {
-		return Int128{}, false
+// DecimalDivByZero and DecimalOverflow are separate answers here, and they
+// are separate SQLSTATEs — 22012 and 22003 — so a caller must branch on the
+// status rather than on "did it produce a value".
+func DecimalDiv(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, DecimalStatus) {
+	if aScale < 0 || bScale < 0 || outScale < 0 {
+		return Int128{}, DecimalInvalidScale
+	}
+	if b.IsZero() {
+		return Int128{}, DecimalDivByZero
 	}
 	// value = (a/10^aScale) / (b/10^bScale), so the unscaled result at
 	// outScale is a * 10^(outScale+bScale-aScale) / b. A negative exponent
@@ -500,7 +570,7 @@ func DecimalDiv(a Int128, aScale int, b Int128, bScale int, outScale int) (Int12
 		q, r, ok := num.QuoRem(den)
 		if ok {
 			if r.IsZero() {
-				return q, true
+				return q, DecimalOK
 			}
 			magR, okR := absInt128(r)
 			magD, okD := absInt128(den)
@@ -510,9 +580,9 @@ func DecimalDiv(a Int128, aScale int, b Int128, bScale int, outScale int) (Int12
 					if num.IsNegative() != den.IsNegative() {
 						step = step.Neg()
 					}
-					return q.AddChecked(step)
+					return decStatus(q.AddChecked(step))
 				}
-				return q, true
+				return q, DecimalOK
 			}
 		}
 	}
@@ -522,34 +592,90 @@ func DecimalDiv(a Int128, aScale int, b Int128, bScale int, outScale int) (Int12
 	} else {
 		bd.Mul(bd, bigPow10(-e))
 	}
-	return bigDivRound(bn, bd)
+	return decStatus(bigDivRound(bn, bd))
 }
 
 // DecimalMod returns the remainder of a (at aScale) / b (at bScale) at
 // outScale. The remainder takes the sign of the DIVIDEND, PostgreSQL's rule
 // and Go's; its natural scale is max(aScale,bScale).
 //
-// ok=false when the exact result has no Int128 and when b is zero — see
-// DecimalDiv on telling those apart.
-func DecimalMod(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, bool) {
-	if aScale < 0 || bScale < 0 || outScale < 0 || b.IsZero() {
-		return Int128{}, false
+// A zero divisor is DecimalDivByZero: PostgreSQL raises 22012 for `%` exactly
+// as it does for `/`, so the two ops report it the same way here.
+func DecimalMod(a Int128, aScale int, b Int128, bScale int, outScale int) (Int128, DecimalStatus) {
+	if aScale < 0 || bScale < 0 || outScale < 0 {
+		return Int128{}, DecimalInvalidScale
+	}
+	if b.IsZero() {
+		return Int128{}, DecimalDivByZero
 	}
 	common := max(aScale, bScale)
 	x, okA := Rescale(a, aScale, common)
 	y, okB := Rescale(b, bScale, common)
 	if okA && okB && !y.IsZero() {
 		if _, r, ok := x.QuoRem(y); ok {
-			return Rescale(r, common, outScale)
+			return decStatus(Rescale(r, common, outScale))
 		}
 	}
 	n := new(big.Int).Mul(a.BigInt(), bigPow10(common-aScale))
 	m := new(big.Int).Mul(b.BigInt(), bigPow10(common-bScale))
 	if m.Sign() == 0 {
-		return Int128{}, false
+		return Int128{}, DecimalDivByZero
 	}
 	r := new(big.Int).Rem(n, m) // Rem truncates toward zero: the sign of n
-	return bigRescale(r, common, outScale)
+	return decStatus(bigRescale(r, common, outScale))
+}
+
+// The ...At wrappers are the ops with ADR-0024 item 4 folded in: they compute
+// at the declared scale s and then check the declared precision p, so a value
+// that has an Int128 but no place in DECIMAL(p,s) comes back DecimalOverflow
+// rather than as a number the column cannot hold. That second bound is the
+// one the bare ops leave to the caller (see the package note), and the reason
+// it is easy to forget is that the two disagree only near the top of the
+// range: 9 + (10^38-1) at DECIMAL(38,0) is a perfectly good Int128.
+//
+// p <= 0 keeps the codebase's "unconstrained" meaning: no precision bound to
+// apply, only the carrier's.
+
+// DecimalAddAt returns a + b at the declared DECIMAL(p, s).
+func DecimalAddAt(a Int128, aScale int, b Int128, bScale, p, s int) (Int128, DecimalStatus) {
+	v, st := DecimalAdd(a, aScale, b, bScale, s)
+	return decimalAtPrecision(v, st, p)
+}
+
+// DecimalSubAt returns a - b at the declared DECIMAL(p, s).
+func DecimalSubAt(a Int128, aScale int, b Int128, bScale, p, s int) (Int128, DecimalStatus) {
+	v, st := DecimalSub(a, aScale, b, bScale, s)
+	return decimalAtPrecision(v, st, p)
+}
+
+// DecimalMulAt returns a * b at the declared DECIMAL(p, s).
+func DecimalMulAt(a Int128, aScale int, b Int128, bScale, p, s int) (Int128, DecimalStatus) {
+	v, st := DecimalMul(a, aScale, b, bScale, s)
+	return decimalAtPrecision(v, st, p)
+}
+
+// DecimalDivAt returns a / b at the declared DECIMAL(p, s).
+func DecimalDivAt(a Int128, aScale int, b Int128, bScale, p, s int) (Int128, DecimalStatus) {
+	v, st := DecimalDiv(a, aScale, b, bScale, s)
+	return decimalAtPrecision(v, st, p)
+}
+
+// DecimalModAt returns a % b at the declared DECIMAL(p, s).
+func DecimalModAt(a Int128, aScale int, b Int128, bScale, p, s int) (Int128, DecimalStatus) {
+	v, st := DecimalMod(a, aScale, b, bScale, s)
+	return decimalAtPrecision(v, st, p)
+}
+
+// decimalAtPrecision applies the declared-precision bound to a value the
+// carrier already accepted.
+func decimalAtPrecision(v Int128, st DecimalStatus, p int) (Int128, DecimalStatus) {
+	if st != DecimalOK {
+		return Int128{}, st
+	}
+	if !DecimalFitsPrecision(v, p) {
+		return Int128{}, DecimalOverflow
+	}
+	return v, DecimalOK
 }
 
 // bigPow10 returns 10^n as a big.Int, for n >= 0.
@@ -613,18 +739,21 @@ func narrowInt128(b *big.Int) (Int128, bool) {
 //	e1 / e2          : s = max(6, s1 + p2 + 1) ; p = p1 - s1 + s2 + s
 //	e1 % e2          : p = min(p1-s1, p2-s2) + max(s1,s2)     ; s = max(s1,s2)
 //
-// op is the SQL operator text: "+", "-", "*", "/", "%" (and "mod" for the
-// function spelling). An op with no DECIMAL rule returns (0, 0), which is the
-// codebase's "unconstrained / not known" sentinel.
+// op is the SQL operator text, matched case-insensitively: "+", "-", "*",
+// "/", "%" (and "mod" for the function spelling). ok=false for an op with no
+// DECIMAL rule, and then (p,s) is (0,0) — which the caller must NOT use as a
+// type, because 0 is this codebase's "unconstrained" precision and a scale of
+// 0 would silently truncate every fraction digit. It is a "there is no rule
+// here" answer, not a type.
 //
 // The result always comes back through AdjustDecimalPrecisionScale, so it is
 // a type the carrier can declare. An INTEGER operand is DECIMAL(10,0) or
 // (19,0) — the caller decides which and passes it in.
-func DecimalResultType(op string, p1, s1, p2, s2 int) (int, int) {
+func DecimalResultType(op string, p1, s1, p2, s2 int) (int, int, bool) {
 	p1, s1 = normalizeDecimalPS(p1, s1)
 	p2, s2 = normalizeDecimalPS(p2, s2)
 	var p, s int
-	switch op {
+	switch strings.ToLower(strings.TrimSpace(op)) {
 	case "+", "-":
 		s = max(s1, s2)
 		p = s + max(p1-s1, p2-s2) + 1
@@ -638,9 +767,10 @@ func DecimalResultType(op string, p1, s1, p2, s2 int) (int, int) {
 		s = max(s1, s2)
 		p = min(p1-s1, p2-s2) + s
 	default:
-		return 0, 0
+		return 0, 0, false
 	}
-	return AdjustDecimalPrecisionScale(p, s)
+	p, s = AdjustDecimalPrecisionScale(p, s)
+	return p, s, true
 }
 
 // AdjustDecimalPrecisionScale brings a computed (p,s) back inside the

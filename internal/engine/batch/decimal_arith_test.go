@@ -495,30 +495,30 @@ func TestDecimalFitsPrecisionMatchesTheUnexportedTwins(t *testing.T) {
 
 func TestDecimalOps(t *testing.T) {
 	tests := []struct {
-		name     string
-		op       string
-		a        string
-		aScale   int
-		b        string
-		bScale   int
-		outScale int
-		want     string
-		wantErr  bool
+		name       string
+		op         string
+		a          string
+		aScale     int
+		b          string
+		bScale     int
+		outScale   int
+		want       string
+		wantStatus DecimalStatus
 	}{
 		{name: "add across scales", op: "+", a: "105", aScale: 2, b: "25", bScale: 1, outScale: 2, want: "355"},
 		{name: "add rounds half away from zero", op: "+", a: "5", aScale: 1, b: "0", bScale: 0, outScale: 0, want: "1"},
 		{name: "add rounds negative half away from zero", op: "+", a: "-5", aScale: 1, b: "0", bScale: 0, outScale: 0, want: "-1"},
-		{name: "add overflows the carrier", op: "+", a: "170141183460469231731687303715884105727", aScale: 0, b: "1", bScale: 0, outScale: 0, wantErr: true},
+		{name: "add overflows the carrier", op: "+", a: "170141183460469231731687303715884105727", aScale: 0, b: "1", bScale: 0, outScale: 0, wantStatus: DecimalOverflow},
 		{name: "add whose intermediate overflows but whose answer fits", op: "+", a: "170141183460469231731687303715884105727", aScale: 2, b: "1", bScale: 0, outScale: 0, want: "1701411834604692317316873037158841058"},
 		{name: "sub across scales", op: "-", a: "105", aScale: 2, b: "25", bScale: 1, outScale: 2, want: "-145"},
 		{name: "sub to zero", op: "-", a: "12345", aScale: 2, b: "12345", bScale: 2, outScale: 2, want: "0"},
-		{name: "sub underflows the carrier", op: "-", a: "-170141183460469231731687303715884105728", aScale: 0, b: "1", bScale: 0, outScale: 0, wantErr: true},
+		{name: "sub underflows the carrier", op: "-", a: "-170141183460469231731687303715884105728", aScale: 0, b: "1", bScale: 0, outScale: 0, wantStatus: DecimalOverflow},
 		{name: "mul at the natural scale", op: "*", a: "12345", aScale: 2, b: "100", bScale: 2, outScale: 4, want: "1234500"},
 		{name: "mul rescaled down", op: "*", a: "12345", aScale: 2, b: "100", bScale: 2, outScale: 2, want: "12345"},
 		{name: "mul rounds half away from zero", op: "*", a: "5", aScale: 1, b: "3", bScale: 1, outScale: 1, want: "2"},
 		{name: "mul of negatives", op: "*", a: "-250", aScale: 2, b: "-400", bScale: 2, outScale: 4, want: "100000"},
 		{name: "mul whose product needs 256 bits but whose answer fits", op: "*", a: "100000000000000000000000000000000000000", aScale: 38, b: "100000000000000000000000000000000000000", bScale: 38, outScale: 2, want: "100"},
-		{name: "mul that cannot fit at any scale it is asked for", op: "*", a: "100000000000000000000000000000000000000", aScale: 0, b: "100000000000000000000000000000000000000", bScale: 0, outScale: 0, wantErr: true},
+		{name: "mul that cannot fit at any scale it is asked for", op: "*", a: "100000000000000000000000000000000000000", aScale: 0, b: "100000000000000000000000000000000000000", bScale: 0, outScale: 0, wantStatus: DecimalOverflow},
 		{name: "one third", op: "/", a: "1", aScale: 0, b: "3", bScale: 0, outScale: 6, want: "333333"},
 		{name: "two thirds rounds away from zero", op: "/", a: "2", aScale: 0, b: "3", bScale: 0, outScale: 6, want: "666667"},
 		{name: "minus two thirds rounds away from zero", op: "/", a: "-2", aScale: 0, b: "3", bScale: 0, outScale: 6, want: "-666667"},
@@ -526,34 +526,38 @@ func TestDecimalOps(t *testing.T) {
 		{name: "division by a fraction", op: "/", a: "1", aScale: 0, b: "5", bScale: 1, outScale: 2, want: "200"},
 		{name: "a half rounds up at scale zero", op: "/", a: "1", aScale: 0, b: "2", bScale: 0, outScale: 0, want: "1"},
 		{name: "minus a half rounds down at scale zero", op: "/", a: "-1", aScale: 0, b: "2", bScale: 0, outScale: 0, want: "-1"},
-		{name: "division by zero has no answer", op: "/", a: "1", aScale: 0, b: "0", bScale: 0, outScale: 2, wantErr: true},
-		{name: "division whose quotient is too wide", op: "/", a: "170141183460469231731687303715884105727", aScale: 0, b: "1", bScale: 2, outScale: 0, wantErr: true},
+		{name: "division by zero has no answer", op: "/", a: "1", aScale: 0, b: "0", bScale: 0, outScale: 2, wantStatus: DecimalDivByZero},
+		{name: "division whose quotient is too wide", op: "/", a: "170141183460469231731687303715884105727", aScale: 0, b: "1", bScale: 2, outScale: 0, wantStatus: DecimalOverflow},
 		{name: "mod keeps the dividend's sign", op: "%", a: "-7", aScale: 0, b: "3", bScale: 0, outScale: 0, want: "-1"},
 		{name: "mod ignores the divisor's sign", op: "%", a: "7", aScale: 0, b: "-3", bScale: 0, outScale: 0, want: "1"},
 		{name: "mod across scales", op: "%", a: "55", aScale: 1, b: "25", bScale: 1, outScale: 1, want: "5"},
 		{name: "mod smaller than its divisor", op: "%", a: "105", aScale: 2, b: "25", bScale: 1, outScale: 2, want: "105"},
-		{name: "mod by zero has no answer", op: "%", a: "1", aScale: 0, b: "0", bScale: 0, outScale: 0, wantErr: true},
-		{name: "a sum that fits but not at the scale it was asked for", op: "+", a: "170141183460469231731687303715884105727", aScale: 0, b: "0", bScale: 0, outScale: 1, wantErr: true},
-		{name: "a product that fits but not at the scale it was asked for", op: "*", a: "170141183460469231731687303715884105727", aScale: 0, b: "1", bScale: 0, outScale: 1, wantErr: true},
+		{name: "mod by zero has no answer", op: "%", a: "1", aScale: 0, b: "0", bScale: 0, outScale: 0, wantStatus: DecimalDivByZero},
+		{name: "a sum that fits but not at the scale it was asked for", op: "+", a: "170141183460469231731687303715884105727", aScale: 0, b: "0", bScale: 0, outScale: 1, wantStatus: DecimalOverflow},
+		{name: "a product that fits but not at the scale it was asked for", op: "*", a: "170141183460469231731687303715884105727", aScale: 0, b: "1", bScale: 0, outScale: 1, wantStatus: DecimalOverflow},
 		{name: "div with the power of ten on the divisor", op: "/", a: "12345", aScale: 4, b: "2", bScale: 0, outScale: 0, want: "1"},
 		{name: "div whose divisor cannot be widened in the carrier", op: "/", a: "1", aScale: 38, b: "3", bScale: 0, outScale: 0, want: "0"},
-		{name: "add refuses a negative scale", op: "+", a: "1", aScale: -1, b: "1", bScale: 0, outScale: 0, wantErr: true},
-		{name: "sub refuses a negative out scale", op: "-", a: "1", aScale: 0, b: "1", bScale: 0, outScale: -1, wantErr: true},
-		{name: "mul refuses a negative scale", op: "*", a: "1", aScale: 0, b: "1", bScale: -2, outScale: 0, wantErr: true},
-		{name: "div refuses a negative scale", op: "/", a: "1", aScale: 0, b: "1", bScale: -1, outScale: 0, wantErr: true},
-		{name: "mod refuses a negative scale", op: "%", a: "1", aScale: -1, b: "1", bScale: 0, outScale: 0, wantErr: true},
+		{name: "add refuses a negative scale", op: "+", a: "1", aScale: -1, b: "1", bScale: 0, outScale: 0, wantStatus: DecimalInvalidScale},
+		{name: "sub refuses a negative out scale", op: "-", a: "1", aScale: 0, b: "1", bScale: 0, outScale: -1, wantStatus: DecimalInvalidScale},
+		{name: "mul refuses a negative scale", op: "*", a: "1", aScale: 0, b: "1", bScale: -2, outScale: 0, wantStatus: DecimalInvalidScale},
+		{name: "div refuses a negative scale", op: "/", a: "1", aScale: 0, b: "1", bScale: -1, outScale: 0, wantStatus: DecimalInvalidScale},
+		{name: "mod refuses a negative scale", op: "%", a: "1", aScale: -1, b: "1", bScale: 0, outScale: 0, wantStatus: DecimalInvalidScale},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a, b := arithParse(t, tt.a), arithParse(t, tt.b)
-			got, ok := decimalOp(tt.op, a, tt.aScale, b, tt.bScale, tt.outScale)
-			if ok == tt.wantErr {
-				t.Fatalf("%s(%s@%d, %s@%d)@%d ok = %v, want %v",
-					tt.op, tt.a, tt.aScale, tt.b, tt.bScale, tt.outScale, ok, !tt.wantErr)
+			got, st := decimalOp(tt.op, a, tt.aScale, b, tt.bScale, tt.outScale)
+			if st != tt.wantStatus {
+				t.Fatalf("%s(%s@%d, %s@%d)@%d status = %v, want %v",
+					tt.op, tt.a, tt.aScale, tt.b, tt.bScale, tt.outScale, st, tt.wantStatus)
 			}
-			if !tt.wantErr && got.String() != tt.want {
+			if st == DecimalOK && got.String() != tt.want {
 				t.Fatalf("%s(%s@%d, %s@%d)@%d = %s, want %s",
 					tt.op, tt.a, tt.aScale, tt.b, tt.bScale, tt.outScale, got, tt.want)
+			}
+			if st != DecimalOK && !got.IsZero() {
+				t.Fatalf("%s returned %s alongside status %v; a refusal must carry no value",
+					tt.op, got, st)
 			}
 		})
 	}
@@ -561,7 +565,7 @@ func TestDecimalOps(t *testing.T) {
 
 // decimalOp dispatches by SQL operator, so the tables and the differential
 // test can name an operation the way the planner will.
-func decimalOp(op string, a Int128, aScale int, b Int128, bScale, outScale int) (Int128, bool) {
+func decimalOp(op string, a Int128, aScale int, b Int128, bScale, outScale int) (Int128, DecimalStatus) {
 	switch op {
 	case "+":
 		return DecimalAdd(a, aScale, b, bScale, outScale)
@@ -623,17 +627,28 @@ func TestDecimalOpsMatchBigRatAtTheADRResultType(t *testing.T) {
 		a := arithRandUnscaled(t, rng, p1)
 		b := arithRandUnscaled(t, rng, p2)
 		for _, op := range ops {
-			p, s := DecimalResultType(op, p1, s1, p2, s2)
+			p, s, okType := DecimalResultType(op, p1, s1, p2, s2)
+			if !okType {
+				t.Fatalf("DecimalResultType has no rule for %q", op)
+			}
 			if p != rawDecimalResultPrecision(op, p1, s1, p2, s2) {
 				adjusted++
 			}
 			ref := arithRefOp(op, a, s1, b, s2)
-			got, ok := decimalOp(op, a, s1, b, s2, s)
+			got, st := decimalOp(op, a, s1, b, s2, s)
+			ok := st == DecimalOK
 			if ref == nil {
-				if ok {
-					t.Fatalf("%s(%s@%d, %s@%d) answered %s for a zero divisor", op, a, s1, b, s2, got)
+				// A zero divisor is 22012, and it must never be reported as
+				// the 22003 an overflow gets.
+				if st != DecimalDivByZero {
+					t.Fatalf("%s(%s@%d, %s@%d) status = %v for a zero divisor, want %v",
+						op, a, s1, b, s2, st, DecimalDivByZero)
 				}
 				continue
+			}
+			if st == DecimalDivByZero || st == DecimalInvalidScale {
+				t.Fatalf("%s(%s@%d, %s@%d)@%d status = %v with a real divisor and non-negative scales",
+					op, a, s1, b, s2, s, st)
 			}
 			want := arithRoundRatHalfAway(ref, s)
 			wantOK := arithFits(want)
@@ -731,9 +746,13 @@ func TestDecimalMulWideMatchesBigRat(t *testing.T) {
 			if _, ok := a.Mul(b); ok {
 				t.Fatalf("this case must overflow the 128-bit product to reach the wide path")
 			}
-			got, ok := DecimalMul(a, tt.aScale, b, tt.bScale, tt.outScale)
-			if ok == tt.wantErr {
-				t.Fatalf("DecimalMul ok = %v, want %v", ok, !tt.wantErr)
+			got, st := DecimalMul(a, tt.aScale, b, tt.bScale, tt.outScale)
+			want := DecimalOK
+			if tt.wantErr {
+				want = DecimalOverflow
+			}
+			if st != want {
+				t.Fatalf("DecimalMul status = %v, want %v", st, want)
 			}
 			if !tt.wantErr && got.String() != tt.want {
 				t.Fatalf("DecimalMul = %s, want %s", got, tt.want)
@@ -760,7 +779,8 @@ func TestDecimalMulWideMatchesBigRat(t *testing.T) {
 		}
 		want := arithRoundRatHalfAway(
 			new(big.Rat).Mul(arithRat(a, aScale), arithRat(b, bScale)), outScale)
-		got, ok := DecimalMul(a, aScale, b, bScale, outScale)
+		got, st := DecimalMul(a, aScale, b, bScale, outScale)
+		ok := st == DecimalOK
 		if ok != arithFits(want) {
 			t.Fatalf("DecimalMul(%s@%d, %s@%d)@%d ok = %v, want %v (exact %s)",
 				a, aScale, b, bScale, outScale, ok, arithFits(want), want)
@@ -796,9 +816,9 @@ func TestDecimalDivRoundsOnceNotTwice(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := DecimalDiv(Int128From(tc.a), tc.aScale, Int128From(tc.b), tc.bScale, tc.outScale)
-			if !ok {
-				t.Fatalf("DecimalDiv(%d, %d) refused", tc.a, tc.b)
+			got, st := DecimalDiv(Int128From(tc.a), tc.aScale, Int128From(tc.b), tc.bScale, tc.outScale)
+			if st != DecimalOK {
+				t.Fatalf("DecimalDiv(%d, %d) refused: %v", tc.a, tc.b, st)
 			}
 			if got.String() != tc.want {
 				t.Fatalf("DecimalDiv(%d, %d)@%d = %s, want %s", tc.a, tc.b, tc.outScale, got, tc.want)
@@ -821,23 +841,29 @@ func TestDecimalResultTypeFollowsADR0024(t *testing.T) {
 		op             string
 		p1, s1, p2, s2 int
 		wantP, wantS   int
+		wantOK         bool
 	}{
-		{name: "add of two money columns", op: "+", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 16, wantS: 2},
-		{name: "add across scales", op: "+", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 19, wantS: 4},
-		{name: "sub uses the same rule as add", op: "-", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 19, wantS: 4},
-		{name: "add of a decimal and an integer", op: "+", p1: 10, s1: 2, p2: 19, s2: 0, wantP: 22, wantS: 2},
-		{name: "mul of two money columns", op: "*", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 31, wantS: 4},
-		{name: "mul past 38 gives up fraction digits, never integer digits", op: "*", p1: 30, s1: 10, p2: 30, s2: 10, wantP: 38, wantS: 6},
-		{name: "div of two money columns", op: "/", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 33, wantS: 18},
-		{name: "div keeps at least six fraction digits", op: "/", p1: 10, s1: 0, p2: 4, s2: 0, wantP: 16, wantS: 6},
-		{name: "mod takes the narrower integer part", op: "%", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 11, wantS: 4},
+		{name: "add of two money columns", op: "+", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 16, wantS: 2, wantOK: true},
+		{name: "add across scales", op: "+", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 19, wantS: 4, wantOK: true},
+		{name: "sub uses the same rule as add", op: "-", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 19, wantS: 4, wantOK: true},
+		{name: "add of a decimal and an integer", op: "+", p1: 10, s1: 2, p2: 19, s2: 0, wantP: 22, wantS: 2, wantOK: true},
+		{name: "mul of two money columns", op: "*", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 31, wantS: 4, wantOK: true},
+		{name: "mul past 38 gives up fraction digits, never integer digits", op: "*", p1: 30, s1: 10, p2: 30, s2: 10, wantP: 38, wantS: 6, wantOK: true},
+		{name: "div of two money columns", op: "/", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 33, wantS: 18, wantOK: true},
+		{name: "div keeps at least six fraction digits", op: "/", p1: 10, s1: 0, p2: 4, s2: 0, wantP: 16, wantS: 6, wantOK: true},
+		{name: "mod takes the narrower integer part", op: "%", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 11, wantS: 4, wantOK: true},
 		{name: "an unknown operator has no rule", op: "||", p1: 10, s1: 2, p2: 10, s2: 2, wantP: 0, wantS: 0},
-		{name: "mod spelled as a function", op: "mod", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 11, wantS: 4},
-		{name: "an operand type no column could declare is repaired", op: "+", p1: 0, s1: -3, p2: 5, s2: 2, wantP: 6, wantS: 2},
+		{name: "an empty operator has no rule", op: "", p1: 10, s1: 2, p2: 10, s2: 2, wantP: 0, wantS: 0},
+		{name: "the operator is matched case-insensitively", op: " MOD ", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 11, wantS: 4, wantOK: true},
+		{name: "mod spelled as a function", op: "mod", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 11, wantS: 4, wantOK: true},
+		{name: "an operand type no column could declare is repaired", op: "+", p1: 0, s1: -3, p2: 5, s2: 2, wantP: 6, wantS: 2, wantOK: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, s := DecimalResultType(tt.op, tt.p1, tt.s1, tt.p2, tt.s2)
+			p, s, ok := DecimalResultType(tt.op, tt.p1, tt.s1, tt.p2, tt.s2)
+			if ok != tt.wantOK {
+				t.Fatalf("DecimalResultType(%q, ...) ok = %v, want %v", tt.op, ok, tt.wantOK)
+			}
 			if p != tt.wantP || s != tt.wantS {
 				t.Fatalf("DecimalResultType(%q, %d,%d, %d,%d) = (%d,%d), want (%d,%d)",
 					tt.op, tt.p1, tt.s1, tt.p2, tt.s2, p, s, tt.wantP, tt.wantS)
@@ -852,7 +878,10 @@ func TestDecimalResultTypeIsAlwaysDeclarable(t *testing.T) {
 			for s1 := 0; s1 <= p1; s1++ {
 				for p2 := 1; p2 <= MaxDecimalPrecision; p2 += 7 {
 					for s2 := 0; s2 <= p2; s2 += 5 {
-						p, s := DecimalResultType(op, p1, s1, p2, s2)
+						p, s, ok := DecimalResultType(op, p1, s1, p2, s2)
+						if !ok {
+							t.Fatalf("%s has no rule", op)
+						}
 						if p < 1 || p > MaxDecimalPrecision {
 							t.Fatalf("%s(%d,%d / %d,%d) gave precision %d", op, p1, s1, p2, s2, p)
 						}
@@ -924,6 +953,224 @@ func TestAdjustDecimalPrecisionScaleGivesUpFractionDigitsFirst(t *testing.T) {
 				t.Fatalf("(%d,%d) -> (%d,%d): integer digits given up with the fraction still above its floor %d",
 					p, s, gotP, gotS, floor)
 			}
+		}
+	}
+}
+
+// TestDecimalOpsAtDeclaredPrecision is the gap the ...At wrappers close: the
+// bare ops answer whether the value fits the CARRIER, and ADR-0024 item 4 is
+// about whether it fits the DECLARED TYPE. The two disagree near the top of
+// the range, and the disagreement is silent — a wiring site that checked only
+// the status would store a value its own column cannot describe.
+func TestDecimalOpsAtDeclaredPrecision(t *testing.T) {
+	// 9 + (10^38-1) is 10^38+8: a fine Int128, and no DECIMAL(38,0).
+	nines := arithParse(t, "99999999999999999999999999999999999999")
+	nine := Int128From(9)
+	p, s, ok := DecimalResultType("+", 38, 0, 1, 0)
+	if !ok || p != MaxDecimalPrecision || s != 0 {
+		t.Fatalf("DecimalResultType(+, 38,0, 1,0) = (%d,%d,%v), want (38,0,true)", p, s, ok)
+	}
+	if v, st := DecimalAdd(nines, 0, nine, 0, s); st != DecimalOK ||
+		v.String() != "100000000000000000000000000000000000008" {
+		t.Fatalf("DecimalAdd = (%s, %v); the carrier holds this value", v, st)
+	}
+	if v, st := DecimalAddAt(nines, 0, nine, 0, p, s); st != DecimalOverflow {
+		t.Fatalf("DecimalAddAt = (%s, %v), want %v", v, st, DecimalOverflow)
+	}
+
+	tests := []struct {
+		name           string
+		op             string
+		a, b           string
+		aScale, bScale int
+		p, s           int
+		want           string
+		wantStatus     DecimalStatus
+	}{
+		{name: "add inside the declared type", op: "+", a: "105", b: "25", aScale: 2, bScale: 1, p: 9, s: 2, want: "355"},
+		{name: "add past the declared type", op: "+", a: "999999999", b: "1", aScale: 0, bScale: 0, p: 9, s: 0, wantStatus: DecimalOverflow},
+		{name: "sub past the declared type", op: "-", a: "-999999999", b: "1", aScale: 0, bScale: 0, p: 9, s: 0, wantStatus: DecimalOverflow},
+		{name: "mul past the declared type", op: "*", a: "1000", b: "1000", aScale: 0, bScale: 0, p: 6, s: 0, wantStatus: DecimalOverflow},
+		{name: "mul inside the declared type", op: "*", a: "1000", b: "1000", aScale: 0, bScale: 0, p: 7, s: 0, want: "1000000"},
+		{name: "div past the declared type", op: "/", a: "1000000", b: "1", aScale: 0, bScale: 0, p: 6, s: 0, wantStatus: DecimalOverflow},
+		{name: "div by zero stays 22012, not 22003", op: "/", a: "1", b: "0", aScale: 0, bScale: 0, p: 9, s: 2, wantStatus: DecimalDivByZero},
+		{name: "mod by zero stays 22012, not 22003", op: "%", a: "1", b: "0", aScale: 0, bScale: 0, p: 9, s: 2, wantStatus: DecimalDivByZero},
+		{name: "mod inside the declared type", op: "%", a: "7", b: "3", aScale: 0, bScale: 0, p: 9, s: 0, want: "1"},
+		{name: "an unconstrained precision applies only the carrier's bound", op: "+", a: "999999999", b: "1", aScale: 0, bScale: 0, p: 0, s: 0, want: "1000000000"},
+		{name: "a negative scale is still a planner defect", op: "+", a: "1", b: "1", aScale: -1, bScale: 0, p: 9, s: 0, wantStatus: DecimalInvalidScale},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b := arithParse(t, tt.a), arithParse(t, tt.b)
+			var got Int128
+			var st DecimalStatus
+			switch tt.op {
+			case "+":
+				got, st = DecimalAddAt(a, tt.aScale, b, tt.bScale, tt.p, tt.s)
+			case "-":
+				got, st = DecimalSubAt(a, tt.aScale, b, tt.bScale, tt.p, tt.s)
+			case "*":
+				got, st = DecimalMulAt(a, tt.aScale, b, tt.bScale, tt.p, tt.s)
+			case "/":
+				got, st = DecimalDivAt(a, tt.aScale, b, tt.bScale, tt.p, tt.s)
+			case "%":
+				got, st = DecimalModAt(a, tt.aScale, b, tt.bScale, tt.p, tt.s)
+			}
+			if st != tt.wantStatus {
+				t.Fatalf("%sAt status = %v, want %v", tt.op, st, tt.wantStatus)
+			}
+			if st == DecimalOK && got.String() != tt.want {
+				t.Fatalf("%sAt = %s, want %s", tt.op, got, tt.want)
+			}
+			if st != DecimalOK && !got.IsZero() {
+				t.Fatalf("%sAt returned %s alongside status %v", tt.op, got, st)
+			}
+		})
+	}
+}
+
+// TestDecimalOpsAtMatchTheBareOpsPlusThePrecisionCheck is the wrappers' whole
+// contract, over random declared types: the same value the bare op produces,
+// and DecimalOverflow exactly where DecimalFitsPrecision says no.
+func TestDecimalOpsAtMatchTheBareOpsPlusThePrecisionCheck(t *testing.T) {
+	rng := rand.New(rand.NewSource(8191))
+	ops := []string{"+", "-", "*", "/", "%"}
+	narrowed := 0
+	for i := 0; i < 3000; i++ {
+		p1 := rng.Intn(MaxDecimalPrecision) + 1
+		s1 := rng.Intn(p1 + 1)
+		p2 := rng.Intn(MaxDecimalPrecision) + 1
+		s2 := rng.Intn(p2 + 1)
+		a := arithRandUnscaled(t, rng, p1)
+		b := arithRandUnscaled(t, rng, p2)
+		for _, op := range ops {
+			p, s, ok := DecimalResultType(op, p1, s1, p2, s2)
+			if !ok {
+				t.Fatalf("no rule for %q", op)
+			}
+			bare, bareSt := decimalOp(op, a, s1, b, s2, s)
+			var got Int128
+			var st DecimalStatus
+			switch op {
+			case "+":
+				got, st = DecimalAddAt(a, s1, b, s2, p, s)
+			case "-":
+				got, st = DecimalSubAt(a, s1, b, s2, p, s)
+			case "*":
+				got, st = DecimalMulAt(a, s1, b, s2, p, s)
+			case "/":
+				got, st = DecimalDivAt(a, s1, b, s2, p, s)
+			case "%":
+				got, st = DecimalModAt(a, s1, b, s2, p, s)
+			}
+			if bareSt != DecimalOK {
+				if st != bareSt {
+					t.Fatalf("%sAt status = %v, the bare op says %v", op, st, bareSt)
+				}
+				continue
+			}
+			if DecimalFitsPrecision(bare, p) {
+				if st != DecimalOK || !got.Equal(bare) {
+					t.Fatalf("%sAt = (%s, %v), want (%s, ok)", op, got, st, bare)
+				}
+				continue
+			}
+			narrowed++
+			if st != DecimalOverflow {
+				t.Fatalf("%sAt status = %v for %s, which DECIMAL(%d,%d) cannot hold", op, st, bare, p, s)
+			}
+		}
+	}
+	if narrowed == 0 {
+		t.Fatal("no case landed inside the carrier but past its declared precision")
+	}
+}
+
+func TestDecimalStatusString(t *testing.T) {
+	for _, tt := range []struct {
+		st   DecimalStatus
+		want string
+	}{
+		{DecimalOK, "ok"},
+		{DecimalOverflow, "numeric value out of range"},
+		{DecimalDivByZero, "division by zero"},
+		{DecimalInvalidScale, "invalid scale"},
+		{DecimalStatus(200), "unknown decimal status"},
+	} {
+		if got := tt.st.String(); got != tt.want {
+			t.Fatalf("DecimalStatus(%d).String() = %q, want %q", tt.st, got, tt.want)
+		}
+	}
+}
+
+// TestMulU64Mag covers the overflow report the division estimate depends on.
+// It is reached only when Knuth's qhat overshoots at the very top of the
+// range, so the random corpus never lands there — but if it wrapped instead
+// of reporting, the correction loop would accept a quotient that is too
+// large, so it is tested directly.
+func TestMulU64Mag(t *testing.T) {
+	tests := []struct {
+		name           string
+		m, dHi, dLo    uint64
+		wantHi, wantLo uint64
+		wantOK         bool
+	}{
+		{name: "zero", m: 0, dHi: 1 << 63, dLo: 0, wantOK: true},
+		{name: "narrow product", m: 3, dHi: 0, dLo: 5, wantLo: 15, wantOK: true},
+		{name: "carries into the high word", m: 2, dHi: 1, dLo: 0, wantHi: 2, wantOK: true},
+		{name: "the widest product that still fits", m: 2, dHi: 1<<63 - 1, dLo: ^uint64(0), wantHi: ^uint64(0), wantLo: ^uint64(0) - 1, wantOK: true},
+		{name: "the high partial product alone overflows", m: 2, dHi: 1 << 63, dLo: 0, wantOK: false},
+		{name: "the high partial product overflows by more than one", m: 4, dHi: 1 << 63, dLo: 0, wantOK: false},
+		// m*dHi is exactly 2^64-1 (h1 == 0), and m*dLo then carries past it.
+		{name: "the sum of the partial products carries out", m: 3, dHi: (1<<64 - 1) / 3, dLo: 1 << 63, wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hi, lo, ok := mulU64Mag(tt.m, tt.dHi, tt.dLo)
+			if ok != tt.wantOK {
+				t.Fatalf("mulU64Mag(%d, %d, %d) ok = %v, want %v", tt.m, tt.dHi, tt.dLo, ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if hi != tt.wantHi || lo != tt.wantLo {
+				t.Fatalf("mulU64Mag(%d, %d, %d) = (%d, %d), want (%d, %d)",
+					tt.m, tt.dHi, tt.dLo, hi, lo, tt.wantHi, tt.wantLo)
+			}
+			// Against big.Int, including the fit decision.
+			d := new(big.Int).Lsh(new(big.Int).SetUint64(tt.dHi), 64)
+			d.Add(d, new(big.Int).SetUint64(tt.dLo))
+			want := d.Mul(d, new(big.Int).SetUint64(tt.m))
+			got := new(big.Int).Lsh(new(big.Int).SetUint64(hi), 64)
+			got.Add(got, new(big.Int).SetUint64(lo))
+			if got.Cmp(want) != 0 {
+				t.Fatalf("mulU64Mag = %s, want %s", got, want)
+			}
+		})
+	}
+	// And the fit decision itself, at random.
+	rng := rand.New(rand.NewSource(6151))
+	limit := new(big.Int).Lsh(big.NewInt(1), 128)
+	for i := 0; i < 20000; i++ {
+		m := rng.Uint64()
+		dHi, dLo := rng.Uint64(), rng.Uint64()
+		if i%3 == 0 {
+			dHi >>= uint(rng.Intn(64))
+		}
+		d := new(big.Int).Lsh(new(big.Int).SetUint64(dHi), 64)
+		d.Add(d, new(big.Int).SetUint64(dLo))
+		want := new(big.Int).Mul(d, new(big.Int).SetUint64(m))
+		hi, lo, ok := mulU64Mag(m, dHi, dLo)
+		if ok != (want.Cmp(limit) < 0) {
+			t.Fatalf("mulU64Mag(%d, %d, %d) ok = %v, exact product %s", m, dHi, dLo, ok, want)
+		}
+		if !ok {
+			continue
+		}
+		got := new(big.Int).Lsh(new(big.Int).SetUint64(hi), 64)
+		got.Add(got, new(big.Int).SetUint64(lo))
+		if got.Cmp(want) != 0 {
+			t.Fatalf("mulU64Mag(%d, %d, %d) = %s, want %s", m, dHi, dLo, got, want)
 		}
 	}
 }

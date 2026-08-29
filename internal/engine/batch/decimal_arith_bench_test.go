@@ -14,6 +14,20 @@ import (
 // DECIMAL(15,2) is TPC-H's money column, its product is (31,4), and its
 // quotient is (33,18) — so the division benchmark is measuring the scale the
 // planner will really ask for, not a convenient small one.
+//
+// Two shapes still reach the exact big.Int arm, and both are ordinary types
+// rather than pathological ones:
+//
+//   - a wide DIVISION, where the rescaled dividend needs more than 128 bits
+//     (DECIMAL(38,10) / DECIMAL(38,10) at the rule's (38,6));
+//   - a wide MULTIPLY whose drop is 20 or more, i.e. the two input scales sum
+//     past the output's by more than a uint64 divisor can express
+//     (DECIMAL(38,20) x DECIMAL(38,20) at (38,6), drop 34).
+//
+// Both want the same missing kernel, a 256-by-128 division; mulRescale256
+// covers the multiply only while the drop stays inside one uint64. The
+// benchmarks below measure both cliffs so the decision to build that kernel
+// has a number attached.
 
 const benchDecimalN = DefaultBatchSize
 
@@ -117,9 +131,9 @@ func BenchmarkDecimalMulRescaled2048(b *testing.B) {
 }
 
 // BenchmarkDecimalMulWide2048 multiplies two DECIMAL(38,10) batches at scale
-// 6, where the 128-bit product overflows for most rows and the exact big.Int
-// fallback runs: the cost of the arm that keeps a representable answer from
-// being reported as an error.
+// 6, where the 128-bit product overflows for most rows: the cost of the arm
+// that keeps a representable answer from being reported as an error. The drop
+// is 14, so this is mulRescale256 — the machine-word path, not big.Int.
 func BenchmarkDecimalMulWide2048(b *testing.B) {
 	x, y, out := benchDecimalOperands(6, 38)
 	b.ReportAllocs()
@@ -127,6 +141,21 @@ func BenchmarkDecimalMulWide2048(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for j := range x {
 			out[j], _ = DecimalMul(x[j], 10, y[j], 10, 6)
+		}
+	}
+	benchDecimalReport(b, len(x))
+}
+
+// BenchmarkDecimalMulWideBigArm2048 multiplies two DECIMAL(38,20) batches at
+// scale 6. The drop is 34, past the single uint64 divisor mulRescale256 uses,
+// so this is the big.Int arm of the multiply — the second cliff, measured.
+func BenchmarkDecimalMulWideBigArm2048(b *testing.B) {
+	x, y, out := benchDecimalOperands(14, 38)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := range x {
+			out[j], _ = DecimalMul(x[j], 20, y[j], 20, 6)
 		}
 	}
 	benchDecimalReport(b, len(x))
