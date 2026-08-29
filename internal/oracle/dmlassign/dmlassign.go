@@ -41,7 +41,10 @@ type Case struct {
 
 	// State is the SQLSTATE PostgreSQL raises, for the cells that must be
 	// REFUSED. A cell with a State must leave the row unchanged.
-	State string
+	// MergeState overrides it on the MERGE arm, where a spelling legal over
+	// one relation can be ambiguous over two.
+	State      string
+	MergeState string
 }
 
 // Target is the fixture the expectations were read against:
@@ -49,9 +52,15 @@ type Case struct {
 //	mv  (id 1, n 10, d 1.50, f 2.5, s 'ab')   -- the UPDATE / MERGE target
 //	mvs (id 1, k 7, dk 3.25, fk 0.5, sk 'zz') -- the MERGE source
 //
-// The source's column names are deliberately DISJOINT from the target's, so an
-// unqualified reference in a MERGE is never ambiguous and every cell tests
-// what its name says it does.
+// The source's VALUE column names (k, dk, fk, sk) are deliberately DISJOINT
+// from the target's, so an unqualified reference in a MERGE resolves to exactly
+// one relation and every cell tests what its name says it does.
+//
+// `id` is the deliberate exception: BOTH relations spell it, because a matrix
+// in which no name is shared cannot see the one answer that is worse than a
+// wrong error — silently picking a side. `SET n = id` is 1 over one relation
+// and 42702 over two, and that pair is a cell (protocol item 2: a fixture whose
+// values cannot distinguish the two rules passes for the wrong reason).
 const (
 	TargetDDL = "CREATE TABLE mv (id INT64, n INT64, d DECIMAL(9,2), f FLOAT64, s STRING)"
 	SourceDDL = "CREATE TABLE mvs (id INT64, k INT64, dk DECIMAL(9,2), fk FLOAT64, sk STRING)"
@@ -73,6 +82,17 @@ func Matrix() []Case {
 		{Name: "DECIMAL column into INT64 rounds", Set: "n = d", Merge: "n = s.dk", Col: "n",
 			Want: "2", MergeWant: "3"},
 		{Name: "expression into INT64", Set: "n = 1 + 1", Col: "n", Want: "2"},
+		// The same spelling over one relation and over two. `id` is the one
+		// name the target and the source share, so the UPDATE arm answers and
+		// the MERGE arm must refuse rather than quietly take a side.
+		{Name: "unqualified name both relations spell", Set: "n = id", Col: "n",
+			Want: "1", MergeState: "42702"},
+		{Name: "the same name qualified by the target", Set: "n = id", Merge: "n = t.id",
+			Col: "n", Want: "1"},
+		{Name: "the same name qualified by the source", Set: "n = id", Merge: "n = s.id",
+			Col: "n", Want: "1"},
+		{Name: "an ambiguous name inside a function", Set: "n = ABS(id)", Col: "n",
+			Want: "1", MergeState: "42702"},
 		{Name: "expression over the column into INT64", Set: "n = n + 1", Merge: "n = t.n + 1",
 			Col: "n", Want: "11"},
 		{Name: "text naming no number into INT64", Set: "n = 'abc'", Col: "n", State: "22P02"},
@@ -131,4 +151,12 @@ func (c Case) MergeValue() string {
 		return c.MergeWant
 	}
 	return c.Want
+}
+
+// MergeSQLState is the SQLSTATE expected on the MERGE arm.
+func (c Case) MergeSQLState() string {
+	if c.MergeState != "" {
+		return c.MergeState
+	}
+	return c.State
 }

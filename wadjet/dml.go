@@ -572,7 +572,18 @@ func parseOnKeys(onCond, targetAlias, sourceAlias string) ([]onKeyPair, error) {
 		} else if lAlias == sourceAlias && rAlias == targetAlias {
 			pair = onKeyPair{TargetCol: rCol, SourceCol: lCol}
 		} else {
-			return nil, fmt.Errorf("ON condition columns must reference target (%s) and source (%s): %s", targetAlias, sourceAlias, part)
+			// A qualifier naming neither relation is 42P01 — the same code the
+			// SET half raises for it. This failed with no SQLSTATE at all, and
+			// it fails HERE, before checkOnKeys ever runs, so the code has to
+			// be carried at this site (#678 re-review N2).
+			for _, a := range []string{lAlias, rAlias} {
+				if a != "" && a != targetAlias && a != sourceAlias {
+					return nil, sqlerr.New("42P01", "missing FROM-clause entry for table %q", a)
+				}
+			}
+			return nil, sqlerr.New("42601",
+				"ON condition columns must reference target (%s) and source (%s): %s",
+				targetAlias, sourceAlias, part)
 		}
 		keys = append(keys, pair)
 	}
@@ -775,6 +786,20 @@ func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
 func (ev *mergeEvaluator) resolveRef(ref *plansql.ColRef) (parquet.Column, string, error) {
 	col := strings.ToLower(ref.Column)
 	if ref.Table == "" {
+		// A name BOTH relations spell is AMBIGUOUS, and silently picking one
+		// is the worst of the three possible answers. mergedByName is filled
+		// source-first, so an unqualified reference used to take the SOURCE's
+		// column without a word — and the shape that decides it is the
+		// canonical one: `MERGE INTO dim d USING stg s ON d.id = s.id WHEN
+		// MATCHED THEN UPDATE SET name = name`, where the writer means the
+		// source's and no reader of the statement can tell. PostgreSQL raises
+		// 42702 and so does this (#678 re-review N1).
+		_, inTarget := ev.colByName[col]
+		_, inSource := ev.srcByName[col]
+		if inTarget && inSource {
+			return parquet.Column{}, "", sqlerr.New("42702",
+				"column reference %q is ambiguous", ref.Column)
+		}
 		c, ok := ev.mergedByName[col]
 		if !ok {
 			return parquet.Column{}, "", sqlerr.New("42703", "column %q does not exist", ref.Column)
@@ -969,6 +994,8 @@ func assignEvaluatedValue(v any, col parquet.Column) (any, error) {
 // already on the value path and is left alone.
 func assignDecimalValue(v any, col parquet.Column) (any, error) {
 	switch t := v.(type) {
+	case bool:
+		return nil, datatypeMismatch(v, col)
 	case int:
 		v = strconv.FormatInt(int64(t), 10)
 	case int8:
@@ -980,12 +1007,52 @@ func assignDecimalValue(v any, col parquet.Column) (any, error) {
 	case int64:
 		v = strconv.FormatInt(t, 10)
 	}
-	// Validated here so the failure names the SET clause rather than a flush,
-	// and rounded to the column's scale by the one checked converter (#647).
-	if _, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); err != nil {
+	// Resolved and validated here so the failure names the SET clause rather
+	// than a flush, and rounded to the column's scale by the one checked
+	// converter (#647).
+	d, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale)
+	if err != nil {
 		return nil, err
 	}
-	return v, nil
+	// And handed on as the CANONICAL text at the column's scale, not as
+	// whatever box arrived. Two things read this box, and only one of them
+	// re-derives the value: the writer parses it again, but
+	// ingest.formatPartitionValue prints it VERBATIM into the partition
+	// directory name. So an INSERT of 10.00 wrote `d=10.00` while
+	// `UPDATE SET d = n` with n = 10 wrote `d=10` — one value, two
+	// directories, and a scan that has to read both to answer for either
+	// (#678 re-review N4). Rendering here makes the two paths agree by
+	// construction; PostgreSQL renders numeric(9,2) the same way
+	// (10::bigint::numeric(9,2) is 10.00).
+	return d.Text(col.Scale), nil
+}
+
+// datatypeMismatch is PostgreSQL's 42804 for a value whose TYPE the column
+// cannot take at all — as opposed to 22P02 (the text does not spell a value of
+// that type) or 22003 (it does, and the column cannot hold it).
+//
+// BOOL is the case that reaches it: `SET n = b` used to fail at
+// ingest.checkType with "expected integer, got bool" and no SQLSTATE, and
+// `SET d = b` reached DecimalValueFromBox's default and answered 22P02, where
+// PostgreSQL says 42804 for both (#678 re-review N3). A bool assigned to a
+// TEXT column is NOT here: PostgreSQL accepts it and stores 'true'.
+func datatypeMismatch(v any, col parquet.Column) error {
+	return sqlerr.New("42804", "column %q is of type %s but expression is of type %s",
+		col.Name, col.Type, dmlBoxTypeName(v))
+}
+
+func dmlBoxTypeName(v any) string {
+	switch v.(type) {
+	case bool:
+		return "boolean"
+	case int, int8, int16, int32, int64:
+		return "bigint"
+	case float32, float64:
+		return "double precision"
+	case string:
+		return "text"
+	}
+	return fmt.Sprintf("%T", v)
 }
 
 // assignIntegerValue rounds, ranges and narrows a value into an integer
@@ -993,13 +1060,17 @@ func assignDecimalValue(v any, col parquet.Column) (any, error) {
 //
 // A fractional value ROUNDS half away from zero and only a value outside the
 // column's range (NaN and the infinities included) is 22003 — PostgreSQL's
-// numeric-to-integer assignment cast. The rounding of a float8 column's exact
-// half differs there (PostgreSQL rounds float8 half to EVEN, so `SET n = f`
-// with f = 2.5 gives 2 where this gives 3); the engine boxes a numeric
-// expression and a float8 column identically, so one rule has to serve both,
-// and half-away-from-zero is the one that matches the far commoner spelling
-// (`SET n = 0 - 2.5` is -3 in PostgreSQL). Recorded as a residual rather than
-// guessed at.
+// numeric-to-integer assignment cast.
+//
+// TODO(#699): PostgreSQL rounds a float8 half to EVEN and a numeric half AWAY
+// from zero, and this engine boxes both families as float64, so one rule has
+// to serve both. Half-away-from-zero is kept because it matches the far
+// commoner spelling (`SET n = 0 - 2.5` is -3 in PostgreSQL); `SET n = f` with
+// a FLOAT64 column holding exactly 2.5 stores 3 where PostgreSQL stores 2.
+// Closing it needs the source expression's declared TYPE, which expr.Expr does
+// not carry. The divergence is PINNED, not merely described, by
+// TestFloatHalfRoundingIsPinnedToTheNumericRule — changing this rule fails
+// that test in either direction.
 //
 // The range check reaches PORT (uint16) and PROTOCOL (uint8) too, because
 // nothing below this line re-checks either — convertValue does, but only for
@@ -1008,6 +1079,8 @@ func assignDecimalValue(v any, col parquet.Column) (any, error) {
 func assignIntegerValue(v any, col parquet.Column) (any, error) {
 	var n int64
 	switch t := v.(type) {
+	case bool:
+		return nil, datatypeMismatch(v, col)
 	case int64:
 		n = t
 	case int32:
@@ -1060,6 +1133,9 @@ func assignIntegerValue(v any, col parquet.Column) (any, error) {
 // every other numeric box a float column can already hold (ingest.checkType
 // takes float32, float64, int, int32, int64).
 func assignFloatValue(v any, col parquet.Column) (any, error) {
+	if _, isBool := v.(bool); isBool {
+		return nil, datatypeMismatch(v, col)
+	}
 	s, ok := v.(string)
 	if !ok {
 		return v, nil

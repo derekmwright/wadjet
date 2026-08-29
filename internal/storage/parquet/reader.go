@@ -1679,6 +1679,35 @@ func (d Decimal128) String() string {
 	return n.Or(n, new(big.Int).SetUint64(d.Lo)).String()
 }
 
+// Text renders the value at a declared SCALE — the canonical spelling of the
+// number this unscaled integer represents in a DECIMAL(p, scale) column, which
+// is what String() deliberately is not (it renders the carrier).
+//
+// It exists because the box a DML assignment hands on is read by two things
+// that do NOT agree about what to do with it: the writer parses it again, but
+// ingest.formatPartitionValue prints it VERBATIM into a partition directory
+// name. Handing on `10` where an INSERT of the same value hands on `10.00`
+// puts one value in two directories (#678 re-review N4). Rendering here, once,
+// makes every producer of a DECIMAL box able to agree.
+func (d Decimal128) Text(scale int) string {
+	digits := d.String()
+	if scale <= 0 {
+		return digits
+	}
+	neg := len(digits) > 0 && digits[0] == '-'
+	if neg {
+		digits = digits[1:]
+	}
+	for len(digits) <= scale {
+		digits = "0" + digits
+	}
+	out := digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
+	if neg {
+		return "-" + out
+	}
+	return out
+}
+
 // decimalFromBytesRaw converts big-endian byte array to Int128 (hi, lo).
 //
 // Its one caller, decodeDecimalValues, refuses an entry wider than
