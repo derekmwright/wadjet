@@ -311,11 +311,25 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 		return nil, fmt.Errorf("reading source %q: %w", info.Source, err)
 	}
 
-	// Read all target rows via a query
-	targetSQL := fmt.Sprintf("SELECT * FROM %s", info.Target)
-	targetResult, err := db.Query(ctx, targetSQL)
+	// Read the target's LIVE rows, each one carrying the (file, row-in-file)
+	// it came from.
+	//
+	// It used to be `SELECT * FROM target`, and the matched rows were recorded
+	// as indices into THAT result's order, while the delete-marker loop
+	// re-derived physical positions by walking the manifest's file order.
+	// Nothing made the two orders agree. Over a single-file target they
+	// happened to; over a three-file target 8 of 12 runs deleted the WRONG
+	// PHYSICAL ROW — id=2 destroyed and id=1 duplicated, on a MERGE that
+	// returned success (#676). Carrying the position with the row is the only
+	// way the two ends can refer to the same thing; there is no global row
+	// index to be right about.
+	//
+	// The scan also skips rows a delete marker has already removed, which is
+	// #674's rule for MERGE: a superseded copy is not a row to match, and
+	// counting it would shift every position after it.
+	targetRows, err := db.readMergeTarget(ctx, info.Target, targetMeta.Schema.Columns)
 	if err != nil {
-		return nil, fmt.Errorf("reading target %q: %w", info.Target, err)
+		return nil, err
 	}
 
 	// Build type map for value conversion in SET/VALUES clauses
@@ -351,7 +365,8 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 
 	for _, srcRow := range sourceResult.Rows {
 		matched := false
-		for tIdx, tgtRow := range targetResult.Rows {
+		for tIdx := range targetRows {
+			tgtRow := targetRows[tIdx].row
 			if matchByKeys(srcRow, tgtRow, onKeys) {
 				matched = true
 				merged := buildMergedRow(srcRow, sourceAlias, tgtRow, targetAlias)
@@ -398,41 +413,25 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 		}
 	}
 
-	// Delete all matched target rows (they'll be re-inserted if UPDATE, or dropped if DELETE)
+	// Mark the matched target rows (they are re-inserted if UPDATE, dropped if
+	// DELETE). The position comes from the row that matched — no second scan,
+	// no second ordering to disagree with the first.
 	if len(matchedTargetIndices) > 0 {
-		// We need to find the actual file positions of matched target rows.
-		// Re-scan the target table to map logical row indices to file positions.
-		manifest, err := db.catalog.GetManifest(ctx, info.Target)
-		if err != nil {
-			return nil, fmt.Errorf("reading manifest: %w", err)
-		}
-
-		logicalIdx := 0
-		for _, part := range manifest.Partitions {
-			for _, file := range part.Files {
-				b, err := db.readParquetFile(ctx, file.Path, targetMeta.Schema.Columns)
-				if err != nil {
-					return nil, fmt.Errorf("reading file %s: %w", file.Path, err)
-				}
-				if b == nil {
-					continue
-				}
-				var fileIndices []int64
-				for i := 0; i < b.Len; i++ {
-					if matchedTargetIndices[logicalIdx] {
-						fileIndices = append(fileIndices, int64(i))
-					}
-					logicalIdx++
-				}
-				if len(fileIndices) > 0 {
-					deleteMarkers = append(deleteMarkers, catalog.DeleteMarker{
-						FilePath:   file.Path,
-						RowIndices: fileIndices,
-					})
-				}
+		byFile := make(map[string][]int64)
+		var order []string
+		for tIdx := range matchedTargetIndices {
+			tr := targetRows[tIdx]
+			if _, seen := byFile[tr.file]; !seen {
+				order = append(order, tr.file)
 			}
+			byFile[tr.file] = append(byFile[tr.file], tr.pos)
 		}
-
+		for _, path := range order {
+			deleteMarkers = append(deleteMarkers, catalog.DeleteMarker{
+				FilePath:   path,
+				RowIndices: byFile[path],
+			})
+		}
 	}
 
 	// Insert new/updated rows BEFORE the markers that delete what they
@@ -460,6 +459,56 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 		RowsAffected: rowsAffected,
 		Command:      "MERGE",
 	}, nil
+}
+
+// mergeTargetRow is one live row of a MERGE target together with WHERE IT IS.
+//
+// The position travels with the row because the two ends of a MERGE — the
+// match and the delete marker — have to name the same physical row, and the
+// only thing that can make them agree is carrying the identity rather than
+// re-deriving it. Re-deriving it is what #676 was: matched rows were indices
+// into `SELECT *` order and markers were re-derived from manifest order, two
+// orders nothing reconciled.
+type mergeTargetRow struct {
+	row  map[string]any
+	file string
+	pos  int64 // row index WITHIN file, which is what a DeleteMarker stores
+}
+
+// readMergeTarget reads a table's live rows in manifest order, each carrying
+// its (file, row-in-file).
+//
+// Live means the delete markers are applied, the same filter the SELECT path
+// applies and the DML match scans now apply (#674): a superseded copy is not a
+// row a MERGE can match, and letting it occupy a position would shift every
+// row after it.
+func (db *DB) readMergeTarget(ctx context.Context, table string, schema []parquet.Column) ([]mergeTargetRow, error) {
+	manifest, err := db.catalog.GetManifest(ctx, table)
+	if err != nil {
+		return nil, fmt.Errorf("reading manifest for %q: %w", table, err)
+	}
+	gone := catalog.DeletedRowsByFile(manifest.DeleteMarkers)
+
+	var out []mergeTargetRow
+	for _, part := range manifest.Partitions {
+		for _, file := range part.Files {
+			b, err := db.readParquetFile(ctx, file.Path, schema)
+			if err != nil {
+				return nil, fmt.Errorf("reading file %s: %w", file.Path, err)
+			}
+			if b == nil {
+				continue
+			}
+			removed := gone[file.Path]
+			for i := 0; i < b.Len; i++ {
+				if removed[int64(i)] {
+					continue
+				}
+				out = append(out, mergeTargetRow{row: b.RowAt(i), file: file.Path, pos: int64(i)})
+			}
+		}
+	}
+	return out, nil
 }
 
 // buildMergedRow creates a row with columns from both source and target,
