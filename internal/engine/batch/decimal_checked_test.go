@@ -1,6 +1,7 @@
 package batch
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -112,6 +113,63 @@ func TestSetValueCheckedRefusesTheIngestReinterpretation(t *testing.T) {
 	}
 	if got := v.GetValue(0); got != "1.75" {
 		t.Errorf("Int128 box: got %v, want 1.75", got)
+	}
+}
+
+// TestSetValueCheckedFloatBoxIsExactOrError holds the float arms to the same
+// promise the rest of SetValueChecked makes.
+//
+// SetValue's float arms go through Int128FromFloat64 — scale in float64, then
+// convert through int64 — which loses digits past ~16 significant ones and is
+// undefined past 2^63. The checked sibling spells the float as its SHORTEST
+// round-trip decimal, which is the unique decimal that reads back as the same
+// float and is what PostgreSQL prints for it, then resolves that text through
+// the checked parser. So the value stored is the one the float names, or the
+// call reports why it cannot be (ADR-0024 item 4).
+func TestSetValueCheckedFloatBoxIsExactOrError(t *testing.T) {
+	store := func(t *testing.T, scale int, box any) (string, error) {
+		t.Helper()
+		v := NewVectorWithScale(TypeDecimal, 1, scale)
+		if err := v.SetValueChecked(0, box); err != nil {
+			return "", err
+		}
+		s, _ := v.GetValue(0).(string)
+		return s, nil
+	}
+
+	// A float32's shortest spelling is the float32 one: 0.1, not the 0.100000001490116119384765625
+	// that its exact binary expansion names, and not float64's 0.10000000149011612.
+	if got, err := store(t, 4, float32(0.1)); err != nil || got != "0.1000" {
+		t.Errorf("float32(0.1) at scale 4 = %q, %v; want 0.1000", got, err)
+	}
+	if got, err := store(t, 2, 12.75); err != nil || got != "12.75" {
+		t.Errorf("float64(12.75) at scale 2 = %q, %v; want 12.75", got, err)
+	}
+	// Digits below the column's scale truncate, as every text conversion into
+	// a narrower scale does — that is the declared type, not a float defect.
+	if got, err := store(t, 2, 1.239); err != nil || got != "1.23" {
+		t.Errorf("float64(1.239) at scale 2 = %q, %v; want 1.23", got, err)
+	}
+
+	// Past the carrier: 1e30 at scale 10 needs 10^40, so this is the same
+	// refusal a text box gets (#553) rather than Int128FromFloat64's
+	// undefined int64 conversion.
+	if _, err := store(t, 10, 1e30); err == nil {
+		t.Error("1e30 at scale 10 has no Int128 and must be reported")
+	} else if got := sqlerr.StateOf(err); got != "22003" {
+		t.Errorf("SQLSTATE = %q, want 22003; err = %v", got, err)
+	}
+
+	// NaN and the infinities have no DECIMAL value at all. ADR-0024 item 6
+	// makes NaN a comparison literal and never a stored one, so refusing is
+	// the answer here too — the unchecked writer stored 0 or a garbage
+	// carrier for them.
+	for _, box := range []any{math.NaN(), math.Inf(1), math.Inf(-1), float32(math.Inf(1))} {
+		if got, err := store(t, 2, box); err == nil {
+			t.Errorf("%v was stored as %q; it has no DECIMAL value", box, got)
+		} else if st := sqlerr.StateOf(err); st != "22P02" {
+			t.Errorf("%v: SQLSTATE = %q, want 22P02; err = %v", box, st, err)
+		}
 	}
 }
 

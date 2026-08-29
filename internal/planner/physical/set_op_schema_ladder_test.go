@@ -13,6 +13,10 @@ func f64Col(name string) parquet.Column {
 	return parquet.Column{Name: name, Type: parquet.TypeFloat64, Nullable: true}
 }
 
+func f32Col(name string) parquet.Column {
+	return parquet.Column{Name: name, Type: parquet.TypeFloat32, Nullable: true}
+}
+
 // TestUnifySetOpSchemasWidensEveryRung is #541's TYPE half: the single-process
 // path resolves a set operation's output type through the SAME two functions
 // the stage DAG uses — setOpWiden for the ladder and setOpDecimalTarget for
@@ -45,11 +49,20 @@ func TestUnifySetOpSchemasWidensEveryRung(t *testing.T) {
 		// 3); the FLOAT64-first order was the loud store failure (shape 2).
 		{"decimal_then_double", d92, f64, parquet.TypeFloat64, 0, 0},
 		{"double_then_decimal", f64, d92, parquet.TypeFloat64, 0, 0},
-		{"decimal_then_real", d92, f32, parquet.TypeFloat64, 0, 0},
-		{"real_then_decimal", f32, d92, parquet.TypeFloat64, 0, 0},
 		{"bigint_then_double", i64, f64, parquet.TypeFloat64, 0, 0},
 		{"double_then_bigint", f64, i64, parquet.TypeFloat64, 0, 0},
 		{"real_then_double", f32, f64, parquet.TypeFloat64, 0, 0},
+		{"double_then_real", f64, f32, parquet.TypeFloat64, 0, 0},
+		// float4 is PREFERRED too, so it beats every EXACT type and only
+		// float8 beats it — `real ∪ numeric` and `real ∪ integer/bigint` are
+		// real on live postgres:17, in either order. Widening them to float8
+		// would re-render a real's 0.1 as 0.10000000149011612.
+		{"decimal_then_real", d92, f32, parquet.TypeFloat32, 0, 0},
+		{"real_then_decimal", f32, d92, parquet.TypeFloat32, 0, 0},
+		{"int_then_real", i32, f32, parquet.TypeFloat32, 0, 0},
+		{"real_then_int", f32, i32, parquet.TypeFloat32, 0, 0},
+		{"bigint_then_real", i64, f32, parquet.TypeFloat32, 0, 0},
+		{"real_then_bigint", f32, i64, parquet.TypeFloat32, 0, 0},
 		// `integer ∪ bigint` is bigint.
 		{"int_then_bigint", i32, i64, parquet.TypeInt64, 0, 0},
 		// Two DECIMALs take the DAG's rule: max scale, precision rebuilt from
@@ -146,6 +159,13 @@ func TestCoerceSetOpArmRowsMovesEveryRung(t *testing.T) {
 		{"decimal_text_to_double", decCol("v", 9, 2), f64Col("v"), "12.75", 12.75},
 		{"bigint_to_double", parquet.Column{Name: "v", Type: parquet.TypeInt64}, f64Col("v"), int64(7), float64(7)},
 		{"real_to_double", parquet.Column{Name: "v", Type: parquet.TypeFloat32}, f64Col("v"), float32(0.5), 0.5},
+		// The float32 rung. The box has to be narrowed HERE, not left as a
+		// float64 for SetValue to narrow at the store: the dedup key reads
+		// the box (keyValueText's TypeFloat32 arm), so an un-narrowed arm
+		// would key as a different number from an arm that arrived real.
+		{"decimal_text_to_real", decCol("v", 9, 2), f32Col("v"), "12.75", float32(12.75)},
+		{"bigint_to_real", parquet.Column{Name: "v", Type: parquet.TypeInt64}, f32Col("v"), int64(7), float32(7)},
+		{"double_to_real", f64Col("v"), f32Col("v"), 0.5, float32(0.5)},
 		// `integer ∪ bigint`: the value does not move, the box does.
 		{"int_to_bigint", parquet.Column{Name: "v", Type: parquet.TypeInt32},
 			parquet.Column{Name: "v", Type: parquet.TypeInt64}, int32(3), int64(3)},
@@ -257,6 +277,36 @@ func TestSetOpCheckedIntDecimalTextCarriesSQLSTATE(t *testing.T) {
 	}
 	if got := sqlerr.StateOf(err); got != "22003" {
 		t.Fatalf("SQLSTATE = %q, want 22003; err = %v", got, err)
+	}
+}
+
+// TestSetOpKeyerNeverKeysASaturatedDecimal is the key-side twin of #553.
+//
+// keyValueText resolved a DECIMAL box through the SATURATING parser and
+// discarded ScaledDecimal.Sat, so every value with no Int128 at the column's
+// scale would have keyed as Int128Max — one key for an unbounded set of
+// distinct numbers, which merges members of a UNION and matches unequal rows
+// in an INTERSECT.
+//
+// It cannot fire through the adapter, because the text it is handed is
+// FormatDecimal output for a value the column already holds. That is an
+// argument about the caller, not a property of the keyer, and this test makes
+// it a property: two distinct out-of-range texts must key apart.
+func TestSetOpKeyerNeverKeysASaturatedDecimal(t *testing.T) {
+	col := decCol("v", 38, 10)
+	// Both need more than 38 digits at scale 10, so both used to saturate to
+	// Int128Max — and they are different numbers.
+	a := keyValueText(&col, "1000000000000000000000000000000")
+	b := keyValueText(&col, "2000000000000000000000000000000")
+	if a == b {
+		t.Fatalf("two distinct out-of-range values share the key %q: a saturating parse makes "+
+			"Int128Max the key for every one of them, which merges them in a UNION", a)
+	}
+	// In-range values are unaffected, and still key by NUMBER rather than by
+	// rendering: 12.75 and 12.7500 are one member (#474).
+	narrow, wide := decCol("v", 9, 2), decCol("v", 18, 4)
+	if keyValueText(&narrow, "12.75") != keyValueText(&wide, "12.7500") {
+		t.Error("12.75 at scale 2 and 12.7500 at scale 4 are one value and must be one key")
 	}
 }
 

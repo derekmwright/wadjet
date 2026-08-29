@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -29,7 +30,16 @@ import (
 // batch.FromRowsChecked, so a value with no Int128 at the union's scale is a
 // 22003 error rather than the saturated end of the carrier's range.
 //
-// Every expectation below is PostgreSQL 17's, per the issue bodies.
+// Every expectation below is PostgreSQL 17's, per the issue bodies and (for
+// the float4 rung) verified live with pg_typeof over the union itself.
+//
+// THIS FILE, with physical/set_op_schema_ladder_test.go, is the CI-VISIBLE
+// proof for #541. The pg-oracle corpus entry that used to pin the bug
+// (SetOpUnionAllDoubleWithDecimal) is ungated now, but that arm SKIPS when no
+// PostgreSQL server is reachable, so it proves nothing in a run without one;
+// and the coordinator two-path entries this fix un-pinned were already stale
+// (fixed earlier by physical.setOpKeyer and by #547). These two files need no
+// server and no cluster.
 func setopTypeDB(t *testing.T) *DB {
 	t.Helper()
 	ctx := context.Background()
@@ -64,6 +74,12 @@ func setopTypeDB(t *testing.T) *DB {
 	create("t_f8",
 		[]parquet.Column{{Name: "f", Type: parquet.TypeFloat64, Nullable: true}},
 		[]map[string]any{{"f": 0.5}})
+	// A real holding 0.1, the value that makes the float4/float8 rung
+	// OBSERVABLE: as a real it renders 0.1, and the same bits under a double
+	// precision result render 0.10000000149011612.
+	create("t_f4",
+		[]parquet.Column{{Name: "r", Type: parquet.TypeFloat32, Nullable: true}},
+		[]map[string]any{{"r": float32(0.1)}})
 	create("t_i32",
 		[]parquet.Column{{Name: "s", Type: parquet.TypeInt32, Nullable: true}},
 		[]map[string]any{{"s": int32(3)}})
@@ -124,10 +140,39 @@ func TestSetOpReconcilesArmsOfDifferentType(t *testing.T) {
 			parquet.TypeInt64, []string{"1", "3"}},
 		{"bigint_then_int", "SELECT i AS v FROM t_int UNION ALL SELECT s FROM t_i32",
 			parquet.TypeInt64, []string{"1", "3"}},
+		// float4 is a PREFERRED type of the numeric category too, so it beats
+		// every EXACT type it meets and only float8 beats it. Verified live
+		// on postgres:17-alpine with pg_typeof over the union: `real ∪
+		// integer`, `real ∪ bigint` and `real ∪ numeric` are all real, in
+		// either arm order, and the real arm's 0.1 stays 0.1.
+		//
+		// These are the non-vacuous half of the rung: widening them to float8
+		// keeps the same BITS and changes the printed number, because a
+		// float32 spelled to float64 precision is 0.10000000149011612 — a
+		// value neither engine holds.
+		{"real_then_bigint", "SELECT r AS v FROM t_f4 UNION ALL SELECT i FROM t_int",
+			parquet.TypeFloat32, []string{"0.1", "1"}},
+		{"bigint_then_real", "SELECT i AS v FROM t_int UNION ALL SELECT r FROM t_f4",
+			parquet.TypeFloat32, []string{"0.1", "1"}},
+		{"real_then_numeric", "SELECT r AS v FROM t_f4 UNION ALL SELECT d FROM t_dec4",
+			parquet.TypeFloat32, []string{"0.1", "2.5"}},
+		{"numeric_then_real", "SELECT d AS v FROM t_dec4 UNION ALL SELECT r FROM t_f4",
+			parquet.TypeFloat32, []string{"0.1", "2.5"}},
+		// Only float8 outranks float4, and there the widening IS the answer —
+		// PostgreSQL prints 0.10000000149011612 for this union too.
+		{"real_then_double", "SELECT r AS v FROM t_f4 UNION ALL SELECT f FROM t_f8",
+			parquet.TypeFloat64, []string{"0.10000000149011612", "0.5"}},
+		{"double_then_real", "SELECT f AS v FROM t_f8 UNION ALL SELECT r FROM t_f4",
+			parquet.TypeFloat64, []string{"0.10000000149011612", "0.5"}},
 		// A DISTINCT form, so the dedup key is exercised on a widened column
 		// too: the two arms hold different numbers, so both survive.
 		{"union_distinct_across_types", "SELECT d AS v FROM t_dec4 UNION SELECT i FROM t_int",
 			parquet.TypeDecimal, []string{"1.0000", "2.5000"}},
+		// The same on the float rung. The key reads the BOX, so both arms
+		// have to arrive already narrowed to float32 or the widened arm keys
+		// as a third member.
+		{"union_distinct_real_with_bigint", "SELECT r AS v FROM t_f4 UNION SELECT i FROM t_int",
+			parquet.TypeFloat32, []string{"0.1", "1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res, err := db.Query(ctx, tc.sql)
@@ -195,23 +240,26 @@ func TestSetOpDecimalWithNoCarrierIsAnError(t *testing.T) {
 	}
 }
 
+// setopCellText renders a result cell the way its BOX says it should be — a
+// float32 at float32 precision, a float64 at float64 precision — which is what
+// makes the float4/float8 rung visible to a value assertion at all. Both
+// spellings are shortest-round-trip, the rule PostgreSQL's float output uses.
 func setopCellText(t *testing.T, v any) string {
 	t.Helper()
 	switch tv := v.(type) {
 	case string:
 		return tv
 	case float64:
-		return strings.TrimRight(strings.TrimRight(bigFloatText(tv), "0"), ".")
+		return strconv.FormatFloat(tv, 'g', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(tv), 'g', -1, 32)
 	case int64:
-		return bigIntText(tv)
+		return strconv.FormatInt(tv, 10)
 	case int32:
-		return bigIntText(int64(tv))
+		return strconv.FormatInt(int64(tv), 10)
 	case nil:
 		return "NULL"
 	}
 	t.Fatalf("unexpected cell %#v (%T)", v, v)
 	return ""
 }
-
-func bigFloatText(f float64) string { return new(big.Float).SetFloat64(f).Text('f', 6) }
-func bigIntText(n int64) string     { return new(big.Int).SetInt64(n).String() }

@@ -671,18 +671,28 @@ func setOpNodeResultTypes(n *logical.Node) []setOpColType {
 	return out
 }
 
-// setOpWiden is the numeric ladder: INT32 → INT64 → DECIMAL → FLOAT64.
+// setOpWiden is the numeric ladder: INT32 → INT64 → DECIMAL → FLOAT32 →
+// FLOAT64.
 //
-// FLOAT32 widens to FLOAT64 rather than staying itself because the cast
-// evaluator produces a float64, so declaring FLOAT32 would mis-describe the
-// values.
+// Every rung is PostgreSQL's, verified against postgres:17-alpine with
+// pg_typeof over the union itself:
 //
-// The two rungs around DECIMAL are PostgreSQL's, verified against
-// postgres:17-alpine: `numeric UNION ALL bigint` resolves to numeric (an
-// integer converts to numeric implicitly and not back), and `numeric UNION
-// ALL double precision` resolves to double precision (float8 is the
-// PREFERRED type of the numeric category). Arm ORDER does not change either
-// answer there, and does not change it here.
+//	`numeric UNION ALL bigint`          → numeric
+//	`numeric UNION ALL double precision`→ double precision
+//	`real    UNION ALL integer/bigint`  → real
+//	`real    UNION ALL numeric`         → real
+//	`real    UNION ALL double precision`→ double precision
+//
+// Arm ORDER changes none of them, and changes none of them here.
+//
+// FLOAT32 gets its OWN rung rather than sharing FLOAT64's. Both are PREFERRED
+// types of PostgreSQL's numeric category, so each beats the exact types
+// (integer, numeric) it meets and only float8 beats float4 — and the
+// difference is a VALUE, not just an OID: a real column holding 0.1 renders
+// 0.1, and the same column widened to double precision renders
+// 0.10000000149011612, which is the float32 value spelled to float64
+// precision and is not what either engine holds. `CREATE TABLE t (x FLOAT)`
+// declares a FLOAT32 column here, so this is reachable from plain DDL.
 func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if a == b {
 		return a, true
@@ -695,8 +705,10 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 			return 2
 		case parquet.TypeDecimal:
 			return 3
-		case parquet.TypeFloat32, parquet.TypeFloat64:
+		case parquet.TypeFloat32:
 			return 4
+		case parquet.TypeFloat64:
+			return 5
 		}
 		return 0
 	}
@@ -705,8 +717,10 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 		return 0, false
 	}
 	switch {
-	case ra == 4 || rb == 4:
+	case ra == 5 || rb == 5:
 		return parquet.TypeFloat64, true
+	case ra == 4 || rb == 4:
+		return parquet.TypeFloat32, true
 	case ra == 3 || rb == 3:
 		return parquet.TypeDecimal, true
 	}
@@ -719,6 +733,14 @@ func setOpCastExpr(e string, to parquet.TypeID) (string, bool) {
 	switch to {
 	case parquet.TypeInt64:
 		return "CAST(" + e + " AS BIGINT)", true
+	case parquet.TypeFloat32:
+		// The evaluator's REAL arm produces a float64 box; the FLOAT32 the
+		// projection declares is what narrows it at the store
+		// (Vector.SetValue's TypeFloat32 arm). Both halves are needed: without
+		// the cast an integer or DECIMAL arm keeps its own box, and without
+		// the declaration the column would be float8 and render a real's 0.1
+		// as 0.10000000149011612.
+		return "CAST(" + e + " AS REAL)", true
 	case parquet.TypeFloat64:
 		return "CAST(" + e + " AS DOUBLE)", true
 	}

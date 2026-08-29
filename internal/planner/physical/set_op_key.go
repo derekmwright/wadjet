@@ -106,8 +106,18 @@ func keyValueText(c *parquet.Column, v any) string {
 			// stripping does the scale normalization: 12.75 keys alike at
 			// scale 2 and at scale 4, which is what the comparator says and
 			// what #474 already made the columnar key do.
-			if sd, ok := batch.DecimalTextAt(s, int(c.Scale)); ok {
-				return string(batch.AppendDecimalKey(nil, sd.Unscaled, int(c.Scale)))
+			//
+			// The CHECKED parser, so a saturated value can never become a
+			// key. The text here is FormatDecimal output for a value the
+			// column already holds, so it cannot be out of range today — and
+			// the checked call is what keeps that a structural fact rather
+			// than an argument: Int128Max is one key for every out-of-range
+			// value, so a saturating parse would silently merge distinct
+			// members of a UNION (the key-side twin of #553). An error falls
+			// through to the `%v` rendering below, which is injective for
+			// decimal text and so is a correct, if unnormalized, key.
+			if d, err := batch.ParseDecimalStringChecked(s, int(c.Scale)); err == nil {
+				return string(batch.AppendDecimalKey(nil, d, int(c.Scale)))
 			}
 		}
 	case parquet.TypeCIDR:

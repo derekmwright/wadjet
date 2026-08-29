@@ -54,6 +54,12 @@ func sodSchema() parquet.Schema {
 		{Name: "u4", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
 		{Name: "i8", Type: parquet.TypeInt64, Nullable: true},
 		{Name: "f8", Type: parquet.TypeFloat64, Nullable: true},
+		// f4 mirrors f8's values as a REAL. Every one of them is a binary
+		// fraction (12.75, 0.5, -0.5, 0, 2, 1, 1.5, -2.5), so float32 and
+		// float64 hold the identical number and a value comparison across the
+		// two paths is exact — what differs between float4 and float8 here is
+		// the declared TYPE, which is the point of the rung (#541 follow-up).
+		{Name: "f4", Type: parquet.TypeFloat32, Nullable: true},
 	}}
 }
 
@@ -120,6 +126,7 @@ func sodData() []map[string]any {
 		}
 		if !r.f8Nil {
 			m["f8"] = r.f8
+			m["f4"] = float32(r.f8)
 		}
 		rows = append(rows, m)
 	}
@@ -194,6 +201,12 @@ func sodRat(v any) (*big.Rat, bool) {
 		return new(big.Rat).SetInt64(int64(n)), true
 	case float64:
 		r := new(big.Rat).SetFloat64(n)
+		return r, r != nil
+	case float32:
+		// A FLOAT32 result column boxes as a float32 (Vector.GetValue), and
+		// widening it to float64 here is exact — the rational is the number
+		// the float32 holds, not a re-rounding of it.
+		r := new(big.Rat).SetFloat64(float64(n))
 		return r, r != nil
 	}
 	return nil, false
@@ -420,6 +433,118 @@ func TestSetOpDecimalScaleTwoPath(t *testing.T) {
 			if len(arms) == 2 && (!sodRatsEqual(got[0], got[1]) || gotNulls[0] != gotNulls[1]) {
 				t.Errorf("the two paths disagree on %s\n  single-process %s\n  stage DAG      %s",
 					sql, sodShow(got[0], gotNulls[0]), sodShow(got[1], gotNulls[1]))
+			}
+		})
+	}
+}
+
+// TestSetOpFloat32ArmsTwoPath holds both paths to PostgreSQL's float4 rung.
+//
+// float4 and float8 are BOTH preferred types of PostgreSQL's numeric category,
+// so a real beats every exact type it meets and only a double precision beats
+// it. Verified live on postgres:17-alpine with pg_typeof over the union
+// itself, in both arm orders:
+//
+//	real ∪ integer / bigint  → real
+//	real ∪ numeric(9,2)      → real
+//	real ∪ double precision  → double precision
+//
+// Sharing one ladder rung with float8 made `real ∪ anything exact` answer
+// double precision, which re-renders a real's 0.1 as 0.10000000149011612.
+// This gate is on BOTH arms because the two paths reach the rung by different
+// machinery — the DAG CASTs each arm's projection (setOpCastExpr, now with a
+// REAL destination) while the single-process adapter rewrites the boxes
+// (coerceSetOpArmRows) — so a rung added to one and not the other is exactly
+// the drift #541 asked to make impossible.
+//
+// f4 mirrors f8's values, all binary fractions, so the NUMBERS are identical
+// under either float width and any disagreement here is the type resolution
+// and nothing else. The rendering difference the rung really costs is asserted
+// on values in wadjet/setop_type_reconciliation_test.go, which has a real
+// holding 0.1.
+func TestSetOpFloat32ArmsTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	// The f4 column restated exactly: f8's values, which float32 holds
+	// without rounding.
+	var f4 []*big.Rat
+	var f4Nulls int
+	for _, r := range sodRows() {
+		if r.f8Nil {
+			f4Nulls++
+			continue
+		}
+		f4 = append(f4, new(big.Rat).SetFloat64(float64(float32(r.f8))))
+	}
+	e2, e2Nulls := sodExpect("e2")
+	i8, i8Nulls := sodExpect("i8")
+	f8, f8Nulls := f4, f4Nulls // same numbers, wider column
+
+	// An arm the union resolves to REAL is held to the float32 rounding of
+	// its values, which is what PostgreSQL answers too: e2's -0.01 has no
+	// float32, and `numeric(9,2) '-0.01' UNION ALL real` prints -0.01 on
+	// postgres:17 because that is the shortest decimal that reads back as
+	// float32(-0.01). Comparing against the exact rational instead would
+	// demand a precision neither engine claims.
+	asReal := func(vals []*big.Rat) []*big.Rat {
+		out := make([]*big.Rat, 0, len(vals))
+		for _, v := range vals {
+			f, _ := v.Float32()
+			out = append(out, new(big.Rat).SetFloat64(float64(f)))
+		}
+		return out
+	}
+	e2AsReal := asReal(e2)
+	i8AsReal := asReal(i8)
+
+	cat := func(a, b []*big.Rat) []*big.Rat {
+		return append(append([]*big.Rat(nil), a...), b...)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		sql       string
+		wantVals  []*big.Rat
+		wantNulls int
+	}{
+		{"real_with_bigint", "SELECT f4 AS v FROM %[1]s UNION ALL SELECT i8 FROM %[1]s",
+			cat(f4, i8AsReal), f4Nulls + i8Nulls},
+		{"bigint_with_real", "SELECT i8 AS v FROM %[1]s UNION ALL SELECT f4 FROM %[1]s",
+			cat(i8AsReal, f4), f4Nulls + i8Nulls},
+		{"real_with_decimal", "SELECT f4 AS v FROM %[1]s UNION ALL SELECT e2 FROM %[1]s",
+			cat(f4, e2AsReal), f4Nulls + e2Nulls},
+		{"decimal_with_real", "SELECT e2 AS v FROM %[1]s UNION ALL SELECT f4 FROM %[1]s",
+			cat(e2AsReal, f4), f4Nulls + e2Nulls},
+		// The one rung that DOES widen: only float8 outranks float4.
+		{"real_with_double", "SELECT f4 AS v FROM %[1]s UNION ALL SELECT f8 FROM %[1]s",
+			cat(f4, f8), f4Nulls + f8Nulls},
+		{"double_with_real", "SELECT f8 AS v FROM %[1]s UNION ALL SELECT f4 FROM %[1]s",
+			cat(f8, f4), f4Nulls + f8Nulls},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf(tc.sql, sodTable)
+			sv, sn := sodRats(t, "single", dtpRun(t, ctx, single, coord, sql, false), "v")
+			dv, dn := sodRats(t, "dag", dtpRun(t, ctx, single, coord, sql, true), "v")
+			for _, arm := range []struct {
+				name  string
+				vals  []*big.Rat
+				nulls int
+			}{{"single", sv, sn}, {"dag", dv, dn}} {
+				if !sodRatsEqual(arm.vals, tc.wantVals) || arm.nulls != tc.wantNulls {
+					t.Errorf("%s: %s\n  got  %s\n  want %s", arm.name, sql,
+						sodShow(arm.vals, arm.nulls), sodShow(tc.wantVals, tc.wantNulls))
+				}
+			}
+			if !sodRatsEqual(sv, dv) || sn != dn {
+				t.Errorf("the two paths disagree on %s\n  single-process %s\n  stage DAG      %s",
+					sql, sodShow(sv, sn), sodShow(dv, dn))
 			}
 		})
 	}

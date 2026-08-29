@@ -34,7 +34,28 @@ func TestSetOpWidenLadder(t *testing.T) {
 		// is the PREFERRED type of PostgreSQL's numeric category.
 		{d, f64, f64, true},
 		{f64, d, f64, true},
-		{d, f32, f64, true},
+		// float4 is PREFERRED too, so it beats every EXACT type it meets and
+		// only float8 beats it. Verified live on postgres:17-alpine with
+		// pg_typeof over the union itself, both arm orders:
+		//
+		//	real ∪ integer          → real
+		//	real ∪ bigint           → real
+		//	real ∪ numeric(9,2)     → real
+		//	real ∪ double precision → double precision
+		//
+		// This rung is a VALUE question, not only an OID one: a real column
+		// holding 0.1 renders 0.1, and the same value under a double
+		// precision result renders 0.10000000149011612 — the float32 spelled
+		// to float64 precision, which is a number neither engine holds.
+		// `CREATE TABLE t (x FLOAT)` declares a FLOAT32 column here, so a
+		// plain DDL table reaches it.
+		{d, f32, f32, true},
+		{f32, d, f32, true},
+		{f32, i32, f32, true},
+		{i32, f32, f32, true},
+		{f32, i64, f32, true},
+		{i64, f32, f32, true},
+		{f64, f32, f64, true},
 		// Nothing outside the numeric family widens: making the files line
 		// up by rendering a number as text would answer a different query.
 		{d, parquet.TypeString, 0, false},

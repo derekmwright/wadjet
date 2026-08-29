@@ -1135,19 +1135,22 @@ func (v *Vector) SetValue(i int, val any) {
 //
 // SetValue's DECIMAL arms answer a conversion they cannot make exactly with
 // the nearest thing they can store — the saturated end of the Int128 range
-// for text too wide at this scale, zero for text that is not a number, and
-// the raw carrier for an integer box. Each is right for the caller it was
-// built for (a comparison bound, #462; ingest's already-scaled carrier,
-// ADR-0018 §4) and each is a silently wrong ROW anywhere else: a 10^30 union
-// arm came back as 17014118346046923173168730371.5884105727 (#553) and an
-// integer arm came back divided by 10^scale (#547/#541).
+// for text too wide at this scale, zero for text that is not a number, the
+// raw carrier for an integer box, and a float64 round trip for a float box.
+// Each is right for the caller it was built for (a comparison bound, #462;
+// ingest's already-scaled carrier, ADR-0018 §4) and each is a silently wrong
+// ROW anywhere else: a 10^30 union arm came back as
+// 17014118346046923173168730371.5884105727 (#553) and an integer arm came
+// back divided by 10^scale (#547/#541).
 //
 // So this sibling exists rather than a signature change on SetValue: the
 // unchecked writer keeps its callers and its cost, and every value-producing
 // row→batch path (FromRowsChecked, and through it the single-process
-// set-operation adapter) takes this one. The errors carry PostgreSQL's
-// SQLSTATEs — 22003 for a value with no carrier, 22P02 for text that names no
-// number (ADR-0024 item 4).
+// set-operation adapter) takes this one. Every DECIMAL box is exact-or-error
+// here — text through the checked parser, a float through its shortest
+// round-trip spelling, an integer refused outright — and the errors carry
+// PostgreSQL's SQLSTATEs: 22003 for a value with no carrier, 22P02 for text
+// that names no number (ADR-0024 item 4).
 //
 // Every other type, and every other box, delegates to SetValue unchanged.
 func (v *Vector) SetValueChecked(i int, val any) error {
@@ -1176,8 +1179,40 @@ func (v *Vector) SetValueChecked(i int, val any) error {
 				"an integer is a value at scale 0 and must be multiplied by 10^%d first "+
 				"(ADR-0018 §4, ADR-0024 item 4)",
 			tv, v.DecimalData.Scale, v.DecimalData.Scale)
+	case float64:
+		return v.setCheckedDecimalFloat(i, tv, 64)
+	case float32:
+		return v.setCheckedDecimalFloat(i, float64(tv), 32)
 	}
 	v.SetValue(i, val)
+	return nil
+}
+
+// setCheckedDecimalFloat stores a float box into a DECIMAL column EXACTLY or
+// not at all.
+//
+// SetValue's float arms go through Int128FromFloat64, which multiplies by
+// 10^scale in float64 and then converts through int64 — so it loses digits
+// past float64's ~16 significant ones and is undefined past 2^63 entirely.
+// That is the unchecked writer's contract and it stays. Here the promise is
+// exact-or-error (ADR-0024 item 4), so the float is spelled as its SHORTEST
+// round-trip decimal text — the unique decimal that reads back as this same
+// float, which is also what PostgreSQL prints for it — and resolved through
+// the checked text path, which reports 22003 when that decimal has no Int128
+// at the column's scale. bitSize picks the float32 or float64 spelling, so a
+// real holding 0.1 stores as 0.1 rather than as its 55-digit exact expansion.
+//
+// A float with no decimal spelling at all (NaN and the infinities) has no
+// DECIMAL value either: strconv writes "NaN"/"+Inf" and the checked parser
+// reports 22P02. ADR-0024 item 6 makes NaN a comparison literal and never a
+// stored value, so refusing is the answer there too.
+func (v *Vector) setCheckedDecimalFloat(i int, f float64, bitSize int) error {
+	d, err := ParseDecimalStringChecked(strconv.FormatFloat(f, 'f', -1, bitSize), v.DecimalData.Scale)
+	if err != nil {
+		return err
+	}
+	v.Nulls.SetValid(i)
+	v.DecimalData.Data[i] = d
 	return nil
 }
 

@@ -44,14 +44,18 @@ import (
 //     as an UNSCALED carrier and divided every integer by 10^scale (1 came
 //     back as 0.01).
 //
-//   - FLOAT64 over anything numeric. float8 is the PREFERRED type of
-//     PostgreSQL's numeric category, so `numeric ∪ double precision` is
-//     double precision in EITHER arm order. Unreconciled, the arm order
-//     decided the answer: with the DECIMAL arm first the result stayed
-//     DECIMAL (a wrong OID on the wire, right-looking values), and with the
-//     FLOAT64 arm first the DECIMAL arm's rendered text was stored into a
-//     FLOAT64 vector and the #361 guard failed the query outright — the two
-//     halves of #541.
+//   - A FLOAT over anything numeric. float4 and float8 are both PREFERRED
+//     types of PostgreSQL's numeric category, so each beats the exact types
+//     it meets and only float8 beats float4: `numeric ∪ double precision` is
+//     double precision, `numeric ∪ real` is real, in EITHER arm order.
+//     Unreconciled, the arm order decided the answer: with the DECIMAL arm
+//     first the result stayed DECIMAL (a wrong OID on the wire, right-looking
+//     values), and with the FLOAT arm first the DECIMAL arm's rendered text
+//     was stored into a float vector and the #361 guard failed the query
+//     outright — the two halves of #541. Keeping real REAL is a value
+//     question as well as an OID one: a real column holding 0.1 renders 0.1,
+//     and the same value widened to double precision renders
+//     0.10000000149011612.
 //
 //   - INT32 over INT64. `integer ∪ bigint` is bigint. No VALUE moves here,
 //     which is why this rung used to be skipped; the OID does, and a client
@@ -132,6 +136,12 @@ func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
 		}
 		col.Type = parquet.TypeFloat64
 		col.Precision, col.Scale = 0, 0
+	case parquet.TypeFloat32:
+		if l.Type == parquet.TypeFloat32 {
+			return parquet.Column{}, false
+		}
+		col.Type = parquet.TypeFloat32
+		col.Precision, col.Scale = 0, 0
 	case parquet.TypeInt64:
 		if l.Type == parquet.TypeInt64 {
 			return parquet.Column{}, false
@@ -205,16 +215,18 @@ func setOpColTypeFromColumn(c parquet.Column) (setOpColType, bool) {
 //     DECIMAL box takes (ParseDecimalString at FromRows, DecimalTextAt at the
 //     dedup key), so it arrives at its true value and keys the same as an
 //     equal DECIMAL value.
-//   - DECIMAL text box → FLOAT64 column: the #361 silent-write guard refuses
+//   - DECIMAL text box → FLOAT column: the #361 silent-write guard refuses
 //     the store and the whole query fails, where PostgreSQL answers (#541
-//     shape 2). Converted to the float64 the widened column holds.
+//     shape 2). Converted to the float the widened column holds — narrowed to
+//     float32 in the BOX for a real result, so the dedup key sees the same
+//     number the already-real arm produces.
 //   - DECIMAL text box → wider DECIMAL column: exact as text, but the value
 //     may not FIT the widened (p,s) — the union's own type decision can put a
 //     value out of range that both arms held comfortably (#552). Checked, not
 //     assumed.
-//   - integer / float32 box → FLOAT64 or INT64 column: widened here rather
-//     than relying on SetValue's own conversions, so the dedup key sees one
-//     box shape per column.
+//   - integer / float box → FLOAT32, FLOAT64 or INT64 column: converted here
+//     rather than relying on SetValue's own conversions, so the dedup key
+//     sees one box shape per column.
 //
 // Every value the unified DECIMAL cannot hold is a "numeric field overflow"
 // ERROR carrying SQLSTATE 22003, worded to match the stage DAG
@@ -291,6 +303,11 @@ func setOpArmNeedsMove(src, dst parquet.Column) bool {
 		case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32:
 			return true
 		}
+	case parquet.TypeFloat32:
+		switch src.Type {
+		case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat64:
+			return true
+		}
 	case parquet.TypeInt64:
 		return src.Type == parquet.TypeInt32
 	}
@@ -308,7 +325,21 @@ func setOpMoveValue(v any, src, dst parquet.Column) (any, error) {
 		}
 		return setOpCheckedIntDecimalText(v, dst.Name, dst.Precision, dst.Scale)
 	case parquet.TypeFloat64:
-		return setOpFloat64Value(v, dst.Name)
+		return setOpFloatValue(v, dst.Name, "double precision")
+	case parquet.TypeFloat32:
+		f, err := setOpFloatValue(v, dst.Name, "real")
+		if err != nil {
+			return nil, err
+		}
+		if f64, ok := f.(float64); ok {
+			// float32 in the BOX, not merely in the declaration: the dedup key
+			// reads the box (physical.keyValueText's TypeFloat32 arm keys
+			// through kernel.KeyFloat32Bits), and a float64 box that only
+			// narrows later at the store would key as a different number from
+			// the arm that arrived already narrowed.
+			return float32(f64), nil
+		}
+		return f, nil
 	case parquet.TypeInt64:
 		switch iv := v.(type) {
 		case int32:
@@ -383,10 +414,15 @@ func setOpCheckedDecimalText(v any, name string, precision, scale int) (any, err
 	return s, nil
 }
 
-// setOpFloat64Value moves a numeric box into the float8 a set operation
-// resolved to. A DECIMAL box is its rendered TEXT, which is why the FLOAT64
-// rung failed the store outright before this existed (#541 shape 2).
-func setOpFloat64Value(v any, name string) (any, error) {
+// setOpFloatValue moves a numeric box into the float a set operation resolved
+// to, as a float64; the FLOAT32 caller narrows the result. A DECIMAL box is
+// its rendered TEXT, which is why the float rung failed the store outright
+// before this existed (#541 shape 2).
+//
+// typeName is the SQL spelling of the target, so an out-of-range or
+// unparseable value is reported against the type the query actually resolved
+// to rather than always against double precision.
+func setOpFloatValue(v any, name, typeName string) (any, error) {
 	switch fv := v.(type) {
 	case float64:
 		return fv, nil
@@ -403,10 +439,10 @@ func setOpFloat64Value(v any, name string) (any, error) {
 		if err != nil {
 			if ne, isNum := err.(*strconv.NumError); isNum && ne.Err == strconv.ErrRange {
 				return nil, sqlerr.New("22003",
-					"numeric field overflow: %s is out of range for double precision, the type this "+
-						"set operation's arms agree on for column %q", fv, name)
+					"numeric field overflow: %s is out of range for %s, the type this "+
+						"set operation's arms agree on for column %q", fv, typeName, name)
 			}
-			return nil, sqlerr.New("22P02", "invalid input syntax for type double precision: %q", fv)
+			return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %q", typeName, fv)
 		}
 		return f, nil
 	}
