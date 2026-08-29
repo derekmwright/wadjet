@@ -313,8 +313,8 @@ func TestLegacyPrecisionZeroDecimalReadsAsBareDecimal(t *testing.T) {
 		want    int64
 	}{
 		{"12", 12},
-		{"12.34", 12},   // rounds to zero fractional digits
-		{"12.5", 13},    // half away from zero, as PostgreSQL assigns
+		{"12.34", 12}, // rounds to zero fractional digits
+		{"12.5", 13},  // half away from zero, as PostgreSQL assigns
 		{"-12.5", -13},
 	} {
 		info := parseDMLOrFatal(t, fmt.Sprintf("INSERT INTO legacy_dec (id, d) VALUES (%d, %s)", id, tc.literal))

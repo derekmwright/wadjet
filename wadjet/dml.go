@@ -131,13 +131,17 @@ func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*Exe
 		return nil, fmt.Errorf("parsing WHERE clause: %w", err)
 	}
 
+	// Rows an earlier statement already removed are not rows this one can
+	// match (#674).
+	gone := catalog.DeletedRowsByFile(manifest.DeleteMarkers)
+
 	// Scan each file to find matching rows
 	var totalDeleted int64
 	var markers []catalog.DeleteMarker
 
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
-			deleted, err := db.scanFileForDeletes(ctx, file.Path, schema, predicate)
+			deleted, err := db.scanFileForDeletes(ctx, file.Path, schema, predicate, gone[file.Path])
 			if err != nil {
 				return nil, fmt.Errorf("scanning file %s: %w", file.Path, err)
 			}
@@ -226,6 +230,12 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 	var ing *ingest.Ingester
 	var markers []catalog.DeleteMarker
 
+	// Rows an earlier statement already removed are not rows this one can
+	// match. Without this an UPDATE re-emitted every superseded copy beside
+	// the live one and marked its file again, so re-updating one row produced
+	// 1, then 2, then 4 rows (#674).
+	gone := catalog.DeletedRowsByFile(manifest.DeleteMarkers)
+
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
 			b, err := db.readParquetFile(ctx, file.Path, schema)
@@ -235,7 +245,7 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 			if b == nil {
 				continue
 			}
-			matchedIndices, err := MatchDMLRows(ctx, b, predicate)
+			matchedIndices, err := MatchDMLRows(ctx, b, predicate, gone[file.Path])
 			if err != nil {
 				// A predicate that cannot answer fails the STATEMENT, before
 				// any marker is committed.
@@ -704,7 +714,7 @@ func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, co
 
 // scanFileForDeletes reads a Parquet file and returns indices of rows matching the predicate.
 // If predicate is nil (no WHERE), all rows are matched.
-func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []parquet.Column, predicate DMLPredicate) ([]int64, error) {
+func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []parquet.Column, predicate DMLPredicate, deleted map[int64]bool) ([]int64, error) {
 	b, err := db.readParquetFile(ctx, filePath, schema)
 	if err != nil {
 		return nil, err
@@ -712,7 +722,7 @@ func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []
 	if b == nil {
 		return nil, nil
 	}
-	return MatchDMLRows(ctx, b, predicate)
+	return MatchDMLRows(ctx, b, predicate, deleted)
 }
 
 // readParquetFile downloads and decodes a Parquet file into a RecordBatch.
@@ -793,6 +803,18 @@ func BuildDMLPredicate(whereSQL string) (DMLPredicate, error) {
 // MatchDMLRows returns the indices of b's rows the statement matches, and is
 // the ONLY place a DMLPredicate is allowed to be called.
 //
+// deleted is the set of row positions in THIS file that a delete marker has
+// already removed (catalog.DeletedRowsByFile), and passing it is not optional
+// — a nil map means "this file has no markers", not "do not check". The
+// parameter exists rather than a second entry point precisely because the
+// defect was that every DML match scan simply did not look: an UPDATE matched
+// rows its own earlier UPDATEs had superseded, re-ingested them beside the
+// live copy and marked the source file again, so re-updating one row produced
+// 1, then 2, then 4 rows — silently, on plain INT64 columns (#674). The
+// SELECT path has applied this filter all along (scan.Scanner), which is why
+// the row COUNT a client saw was wrong and the DML's own view was internally
+// consistent.
+//
 // Expression evaluation has no error return (ADR-0019): the one class of
 // condition that cannot answer with a value and must not answer with NULL —
 // a division by zero, an invalid cast — raises a panic carrying a
@@ -808,11 +830,13 @@ func BuildDMLPredicate(whereSQL string) (DMLPredicate, error) {
 // batch, no per-row cost. It owns nothing — no lock, no channel, no
 // reservation — so discharging its obligations (ADR-0019 §2a) is exactly
 // returning the error.
-func MatchDMLRows(ctx context.Context, b *batch.RecordBatch, predicate DMLPredicate) (matched []int64, err error) {
+func MatchDMLRows(ctx context.Context, b *batch.RecordBatch, predicate DMLPredicate, deleted map[int64]bool) (matched []int64, err error) {
 	if predicate == nil {
-		matched = make([]int64, b.Len)
-		for i := range matched {
-			matched[i] = int64(i)
+		matched = make([]int64, 0, b.Len)
+		for i := 0; i < b.Len; i++ {
+			if !deleted[int64(i)] {
+				matched = append(matched, int64(i))
+			}
 		}
 		return matched, nil
 	}
@@ -822,6 +846,11 @@ func MatchDMLRows(ctx context.Context, b *batch.RecordBatch, predicate DMLPredic
 		}
 	}()
 	for i := 0; i < b.Len; i++ {
+		// Visibility BEFORE the predicate: a deleted row is not a row, so it
+		// is not one the predicate is entitled to be asked about either.
+		if deleted[int64(i)] {
+			continue
+		}
 		if predicate(b, i) {
 			matched = append(matched, int64(i))
 		}

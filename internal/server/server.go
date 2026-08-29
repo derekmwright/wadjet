@@ -705,6 +705,10 @@ func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.D
 	var markers []catalog.DeleteMarker
 	schema := tableMeta.Schema.Columns
 
+	// Rows an earlier statement already removed are not rows this one can
+	// match — the filter the SELECT path has always applied (#674).
+	gone := catalog.DeletedRowsByFile(manifest.DeleteMarkers)
+
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
 			b, err := readDMLFile(ctx, cat, file.Path, schema)
@@ -714,7 +718,7 @@ func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.D
 			if b == nil {
 				continue
 			}
-			indices, err := wadjet.MatchDMLRows(ctx, b, predicate)
+			indices, err := wadjet.MatchDMLRows(ctx, b, predicate, gone[file.Path])
 			if err != nil {
 				return nil, err
 			}
@@ -771,6 +775,12 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 	var ing *ingest.Ingester
 	var markers []catalog.DeleteMarker
 
+	// Rows an earlier statement already removed are not rows this one can
+	// match. Without this an UPDATE re-emitted every superseded copy beside
+	// the live one and marked its file again, so re-updating one row produced
+	// 1, then 2, then 4 rows (#674).
+	gone := catalog.DeletedRowsByFile(manifest.DeleteMarkers)
+
 	// Per-file streaming: box only the matched rows (the previous ToRows
 	// boxed every row of every file even at zero WHERE selectivity), hand
 	// them to the ingester, then commit that file's delete markers —
@@ -797,7 +807,7 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			if b == nil {
 				continue
 			}
-			indices, err := wadjet.MatchDMLRows(ctx, b, predicate)
+			indices, err := wadjet.MatchDMLRows(ctx, b, predicate, gone[file.Path])
 			if err != nil {
 				// A predicate that cannot answer fails the STATEMENT, before
 				// any marker is committed.

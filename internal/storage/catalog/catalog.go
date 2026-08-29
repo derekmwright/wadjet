@@ -651,6 +651,33 @@ func (c *Catalog) AddNewFiles(_ context.Context, tableName string, partValues ma
 	return c.addFiles(tableName, partValues, partPath, owned, mergeNewFileEntries)
 }
 
+// DeletedRowsByFile indexes a manifest's delete markers by file path, as the
+// set of row positions WITHIN that file which no longer exist.
+//
+// Every reader of a table owes this filter. The scanner applies it (its own
+// deleteMarkers map is the same thing, built at Init) and so the SELECT path
+// has always been right; the DML match scans did not, so an UPDATE matched
+// rows in files its own earlier UPDATEs had already superseded, re-emitted
+// them, and DOUBLED the row on every re-update — 1, 2, 4 (#674). A merge-on-
+// read table has exactly one definition of which rows exist, and it is this.
+func DeletedRowsByFile(markers []DeleteMarker) map[string]map[int64]bool {
+	if len(markers) == 0 {
+		return nil
+	}
+	out := make(map[string]map[int64]bool, len(markers))
+	for _, dm := range markers {
+		set := out[dm.FilePath]
+		if set == nil {
+			set = make(map[int64]bool, len(dm.RowIndices))
+			out[dm.FilePath] = set
+		}
+		for _, idx := range dm.RowIndices {
+			set[idx] = true
+		}
+	}
+	return out
+}
+
 // AddDeleteMarkers adds delete markers to a table's manifest using CAS.
 // Merges new markers with existing ones for the same file.
 func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers []DeleteMarker) error {
