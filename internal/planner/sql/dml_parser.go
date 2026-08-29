@@ -351,6 +351,18 @@ func collectUntil(l *lexer, stops ...TokenType) string {
 		} else if tok.typ == TokenRParen {
 			depth--
 		}
+		// A string token's value arrives with its quotes STRIPPED and its ''
+		// escapes resolved (lexer.go, TokenString). Joining that verbatim
+		// makes `SET s = 'archived'` and `SET s = archived` the same text, so
+		// nothing downstream can tell a string LITERAL from a COLUMN
+		// REFERENCE — which is what forced the SET resolver to guess, and what
+		// made it store the source text of an expression it could not read
+		// (#678). Re-quoting restores the one thing the caller needs: an
+		// expression it can PARSE.
+		if tok.typ == TokenString {
+			parts = append(parts, "'"+strings.ReplaceAll(tok.val, "'", "''")+"'")
+			continue
+		}
 		parts = append(parts, tok.val)
 	}
 	return strings.Join(parts, " ")

@@ -696,14 +696,14 @@ func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.D
 		return nil, fmt.Errorf("reading manifest: %w", err)
 	}
 
-	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL)
+	schema := tableMeta.Schema.Columns
+	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL, info.Table, schema)
 	if err != nil {
-		return nil, fmt.Errorf("parsing WHERE: %w", err)
+		return nil, err
 	}
 
 	var totalDeleted int64
 	var markers []catalog.DeleteMarker
-	schema := tableMeta.Schema.Columns
 
 	// Rows an earlier statement already removed are not rows this one can
 	// match — the filter the SELECT path has always applied (#674).
@@ -749,28 +749,21 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 		return nil, fmt.Errorf("reading manifest: %w", err)
 	}
 
-	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL)
-	if err != nil {
-		return nil, fmt.Errorf("parsing WHERE: %w", err)
-	}
-
-	// Resolve every SET clause ONCE, against the column's full declaration,
-	// BEFORE the loop below touches a file — a conversion that can fail must
-	// not run after a delete marker is committed (wadjet.ConvertValueForColumn).
-	colByName := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
-	for _, col := range tableMeta.Schema.Columns {
-		colByName[col.Name] = col
-	}
-	setValues := make(map[string]any, len(info.SetClauses))
-	for _, sc := range info.SetClauses {
-		v, convErr := wadjet.ConvertValueForColumn(sc.Value, colByName[sc.Column])
-		if convErr != nil {
-			return nil, fmt.Errorf("SET %s: %w", sc.Column, convErr)
-		}
-		setValues[sc.Column] = v
-	}
-
 	schema := tableMeta.Schema.Columns
+	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL, info.Table, schema)
+	if err != nil {
+		return nil, err
+	}
+
+	// Resolve every SET clause ONCE, against the schema and the column's full
+	// declaration, BEFORE the loop below touches a file: an unknown target is
+	// 42703 and a value the column cannot hold is refused here rather than
+	// after a delete marker is committed (#647, #678).
+	assigns, err := wadjet.ResolveDMLSetClauses(info.SetClauses, info.Table, schema)
+	if err != nil {
+		return nil, err
+	}
+
 	var totalUpdated int64
 	var ing *ingest.Ingester
 	var markers []catalog.DeleteMarker
@@ -816,13 +809,9 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			if len(indices) == 0 {
 				continue
 			}
-			updatedRows := make([]map[string]any, 0, len(indices))
-			for _, idx := range indices {
-				row := b.RowAt(int(idx))
-				for col, v := range setValues {
-					row[col] = v
-				}
-				updatedRows = append(updatedRows, row)
+			updatedRows, err := wadjet.BuildUpdatedRows(ctx, b, indices, assigns)
+			if err != nil {
+				return nil, err
 			}
 			if ing == nil {
 				ing = ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())

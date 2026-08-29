@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +14,9 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -126,9 +129,9 @@ func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*Exe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.WhereSQL)
+	predicate, err := BuildDMLPredicate(info.WhereSQL, info.Table, schema)
 	if err != nil {
-		return nil, fmt.Errorf("parsing WHERE clause: %w", err)
+		return nil, err
 	}
 
 	// Rows an earlier statement already removed are not rows this one can
@@ -180,27 +183,18 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.WhereSQL)
+	predicate, err := BuildDMLPredicate(info.WhereSQL, info.Table, schema)
 	if err != nil {
-		return nil, fmt.Errorf("parsing WHERE clause: %w", err)
+		return nil, err
 	}
 
-	// Resolve every SET clause ONCE, against the column's full declaration,
-	// BEFORE the loop below touches a file. A conversion that can fail must
-	// not run after a delete marker is committed (see ConvertValueForColumn),
-	// and resolving up front also means the per-row work below is a map
-	// assignment that cannot fail at all.
-	colByName := make(map[string]parquet.Column, len(schema))
-	for _, col := range schema {
-		colByName[col.Name] = col
-	}
-	setValues := make(map[string]any, len(info.SetClauses))
-	for _, sc := range info.SetClauses {
-		v, err := ConvertValueForColumn(sc.Value, colByName[sc.Column])
-		if err != nil {
-			return nil, fmt.Errorf("SET %s: %w", sc.Column, err)
-		}
-		setValues[sc.Column] = v
+	// Resolve every SET clause ONCE, against the schema and the column's full
+	// declaration, BEFORE the loop below touches a file: an unknown target is
+	// 42703 and a literal a column cannot hold is refused here rather than
+	// after a delete marker is committed (#647, #678).
+	assigns, err := ResolveDMLSetClauses(info.SetClauses, info.Table, schema)
+	if err != nil {
+		return nil, err
 	}
 
 	// Per-file streaming: box only the matched rows, hand them to the
@@ -255,14 +249,10 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 				continue
 			}
 
-			// Apply the already-resolved SET values to the matched rows.
-			updatedRows := make([]map[string]any, 0, len(matchedIndices))
-			for _, idx := range matchedIndices {
-				row := b.RowAt(int(idx))
-				for col, v := range setValues {
-					row[col] = v
-				}
-				updatedRows = append(updatedRows, row)
+			// Apply the already-resolved SET assignments to the matched rows.
+			updatedRows, err := BuildUpdatedRows(ctx, b, matchedIndices, assigns)
+			if err != nil {
+				return nil, err
 			}
 
 			if ing == nil {
@@ -332,15 +322,6 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 		return nil, err
 	}
 
-	// Build type map for value conversion in SET/VALUES clauses
-	// The whole COLUMN, not its TypeID: a MERGE value is judged against the
-	// target's declared (p, s) as it is resolved, before any marker is
-	// written (#647 re-review).
-	colByName := make(map[string]parquet.Column, len(targetMeta.Schema.Columns))
-	for _, col := range targetMeta.Schema.Columns {
-		colByName[col.Name] = col
-	}
-
 	targetAlias := info.TargetAlias
 	if targetAlias == "" {
 		targetAlias = info.Target
@@ -349,6 +330,12 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 	if sourceAlias == "" {
 		sourceAlias = info.Source
 	}
+
+	// The resolver for every SET / VALUES expression. It carries the target's
+	// declared columns — a MERGE value is judged against the target's declared
+	// (p, s) as it is resolved, before any marker is written (#647 re-review)
+	// — and the merged namespace an expression is evaluated in (#678).
+	ev := db.buildMergeEvaluator(ctx, info, targetMeta.Schema.Columns, targetAlias, sourceAlias)
 
 	// Parse ON condition into equality key pairs for row matching
 	onKeys, err := parseOnKeys(info.OnCondition, targetAlias, sourceAlias)
@@ -382,7 +369,7 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 						for k, v := range tgtRow {
 							updatedRow[k] = v
 						}
-						if err := applySetClauses(updatedRow, wc.SQL, merged, colByName); err != nil {
+						if err := applySetClauses(updatedRow, wc.SQL, merged, ev); err != nil {
 							return nil, fmt.Errorf("applying SET: %w", err)
 						}
 						updateRows = append(updateRows, updatedRow)
@@ -401,7 +388,7 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 					continue
 				}
 				if strings.ToUpper(wc.Action) == "INSERT" {
-					newRow, err := buildInsertRow(wc.SQL, srcRow, sourceAlias, colByName)
+					newRow, err := buildInsertRow(wc.SQL, srcRow, sourceAlias, ev)
 					if err != nil {
 						return nil, fmt.Errorf("building INSERT row: %w", err)
 					}
@@ -605,7 +592,7 @@ func matchByKeys(srcRow, tgtRow map[string]any, keys []onKeyPair) bool {
 
 // applySetClauses applies "SET col = expr, ..." to a row.
 // The merged row provides both source and target column values for expressions.
-func applySetClauses(row map[string]any, setSQL string, merged map[string]any, colByName map[string]parquet.Column) error {
+func applySetClauses(row map[string]any, setSQL string, merged map[string]any, ev *mergeEvaluator) error {
 	// Strip SET keyword prefix (parser includes it in the raw SQL)
 	sql := strings.TrimSpace(setSQL)
 	if strings.HasPrefix(strings.ToUpper(sql), "SET ") {
@@ -625,8 +612,15 @@ func applySetClauses(row map[string]any, setSQL string, merged map[string]any, c
 		}
 		valExpr := strings.TrimSpace(part[eqIdx+1:])
 
-		// Resolve the value from the merged row
-		val, err := resolveSetValue(valExpr, merged, colByName[col])
+		// The target column must EXIST. It used to be looked up in a map whose
+		// zero value is a Column of type BOOL with an empty name, so
+		// `SET nosuchcol = 1` silently assigned into a key nothing reads and
+		// the statement reported success (#678).
+		target, err := ev.targetColumn(col)
+		if err != nil {
+			return err
+		}
+		val, err := ev.value(valExpr, merged, target)
 		if err != nil {
 			return fmt.Errorf("SET %s: %w", col, err)
 		}
@@ -666,41 +660,204 @@ func splitSetClauses(s string) []string {
 	return parts
 }
 
-// resolveSetValue resolves a SET expression value from the merged row context,
-// against the TARGET COLUMN's full declaration.
+// mergeEvaluator resolves a MERGE's SET / INSERT VALUES expressions against
+// the target's declared columns and the merged (source + target) row.
 //
-// It used to take a TypeID and SWALLOW every conversion failure — the quoted
-// arm discarded the error outright and the literal arm answered the raw
-// expression TEXT — so a MERGE value the target could not hold was first
-// judged at the parquet leaf, after the statement had decided what to delete
-// (#647 re-review). A column REFERENCE is checked too: its box comes from the
-// source table and may be a DECIMAL at another scale or past the target's
-// precision, which is exactly the shape a MERGE exists to move.
-func resolveSetValue(expr string, merged map[string]any, col parquet.Column) (any, error) {
-	expr = strings.TrimSpace(expr)
+// It replaces a resolver that answered an expression it could not evaluate
+// with the expression's own SOURCE TEXT. For a typed column that was reported
+// as an error, but the STRING arm of the literal converter cannot fail, so for
+// a STRING target the text always won: `SET s = UPPER(s.name)` stored the
+// twelve characters "UPPER(s.name)" (#678). PostgreSQL evaluates it, and so
+// does this.
+type mergeEvaluator struct {
+	target      string
+	colByName   map[string]parquet.Column // the TARGET's columns, by lowercase name
+	mergedCols  []parquet.Column          // the merged row's batch schema
+	sourceKnown bool                      // false when the source's declared schema is unavailable
+}
 
-	// Try direct column reference (e.g., "s.name")
-	if v, ok := merged[expr]; ok {
+// buildMergeEvaluator assembles the merged namespace from the two tables'
+// DECLARED schemas, so an evaluated expression sees the same types the storage
+// does — no inference from Go boxes, which is where a DECIMAL or a DATE (both
+// boxed as strings) would be silently mistyped.
+//
+// The plain (unqualified) name of a column present in both resolves to the
+// SOURCE, because that is what buildMergedRow's map holds: it writes the
+// target's names first and the source's over them.
+func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
+	targetCols []parquet.Column, targetAlias, sourceAlias string) *mergeEvaluator {
+
+	ev := &mergeEvaluator{target: info.Target, colByName: make(map[string]parquet.Column, len(targetCols))}
+	for _, c := range targetCols {
+		ev.colByName[strings.ToLower(c.Name)] = c
+	}
+
+	var sourceCols []parquet.Column
+	if srcMeta, err := db.catalog.GetTable(ctx, info.Source); err == nil {
+		sourceCols = srcMeta.Schema.Columns
+		ev.sourceKnown = true
+	}
+
+	plain := make(map[string]bool, len(targetCols)+len(sourceCols))
+	add := func(c parquet.Column, name string) {
+		c.Name = name
+		ev.mergedCols = append(ev.mergedCols, c)
+	}
+	for _, c := range sourceCols {
+		add(c, strings.ToLower(c.Name))
+		add(c, sourceAlias+"."+strings.ToLower(c.Name))
+		plain[strings.ToLower(c.Name)] = true
+	}
+	for _, c := range targetCols {
+		if !plain[strings.ToLower(c.Name)] {
+			add(c, strings.ToLower(c.Name))
+		}
+		add(c, targetAlias+"."+strings.ToLower(c.Name))
+	}
+	return ev
+}
+
+// targetColumn resolves a SET / INSERT target name against the target table.
+func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
+	col, ok := ev.colByName[strings.ToLower(strings.TrimSpace(name))]
+	if !ok {
+		return parquet.Column{}, sqlerr.New("42703",
+			"column %q of relation %q does not exist", name, ev.target)
+	}
+	return col, nil
+}
+
+// value resolves one SET / VALUES expression against the merged row.
+//
+// A column REFERENCE is checked as well as converted: its box comes from the
+// source table and may be a DECIMAL at another scale or past the target's
+// precision, which is exactly the shape a MERGE exists to move (#647).
+func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.Column) (any, error) {
+	text = strings.TrimSpace(text)
+
+	// A direct reference, in the exact spelling the merged row holds.
+	if v, ok := merged[text]; ok {
 		return v, checkValueForColumn(v, col)
 	}
-	// Try without quotes
-	if len(expr) >= 2 && expr[0] == '\'' && expr[len(expr)-1] == '\'' {
-		return ConvertValueForColumn(expr, col)
+
+	node, err := plansql.ParseExpression(text)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %q: %w", text, err)
 	}
-	// Try as literal
-	v, err := ConvertValueForColumn(expr, col)
-	if err == nil {
+	if lit, isLit := dmlLiteralText(node); isLit {
+		return ConvertValueForColumn(lit, col)
+	}
+	// A reference the parse resolves but the map spells differently
+	// (unqualified where the row holds it qualified, or the other way).
+	if ref, ok := unwrapDMLParens(node).(*plansql.ColRef); ok {
+		for _, spelling := range []string{ref.Column, ref.Table + "." + ref.Column} {
+			if v, ok := merged[spelling]; ok {
+				return v, checkValueForColumn(v, col)
+			}
+		}
+	}
+
+	if !ev.sourceKnown {
+		// Evaluating needs the source's DECLARED types; inferring them from
+		// the boxed values is how a DECIMAL or a DATE (both boxed as strings)
+		// would be silently mistyped. Refusing is the honest answer, and it is
+		// strictly better than the source text this used to store.
+		return nil, sqlerr.New("0A000",
+			"MERGE cannot evaluate %q: the source %q has no declared schema to resolve it against",
+			text, ev.target)
+	}
+	compiled, err := expr.Compile(node)
+	if err != nil {
+		return nil, fmt.Errorf("compiling %q: %w", text, err)
+	}
+	b := batch.FromRows(ev.mergedCols, []map[string]any{lowercaseKeys(merged)})
+	v, err := coerceEvaluatedValue(compiled.Eval(b, 0), col)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkValueForColumn(v, col); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// lowercaseKeys re-spells a merged row's keys the way the merged batch schema
+// names its columns, so a qualified reference written in any case resolves.
+func lowercaseKeys(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+// coerceEvaluatedValue narrows an evaluated box to the one the target column's
+// carrier holds, and REFUSES the narrowing that would lose the value.
+//
+// The expression engine has one numeric result box per family, not one per
+// column type: every REAL evaluates to float64, and every integral column
+// (INT32, PORT, PROTOCOL, DATE) reads back as int64. Assigning such a result
+// to an integer column is the one narrowing storage cannot do for itself —
+// ingest.checkType refuses a float64 into an INT64 column outright, so
+// `SET n = ABS(x)` failed with "expected integer, got float64" for a value
+// that is a perfectly good integer.
+//
+// A fractional result ROUNDS, half away from zero, and only a value outside
+// the column's range (NaN and the infinities included) is 22003. That is
+// PostgreSQL's assignment cast, verified live on postgres:17-alpine:
+//
+//	SET n = 1 + 0.5      -> 2        SET n = 2.4  -> 2
+//	SET n = -2.5         -> -3       SET n = 5/2  -> 2 (integer division)
+//	SET i = 3000000000   -> 22003 integer out of range
+//	SET n = 'nan'::float8 -> 22003 bigint out of range
+//
+// The range check on the narrow integer types is the same rule reaching one
+// level further: a PORT is a uint16 and a PROTOCOL a uint8, and nothing below
+// this line re-checks either (convertValue does, but only for literals), so an
+// out-of-range value would truncate into a port no real port can be.
+func coerceEvaluatedValue(v any, col parquet.Column) (any, error) {
+	switch col.Type {
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
+	default:
 		return v, nil
 	}
-	// Not a column reference and not a literal this converter reads. The raw
-	// text is what this path has always answered for an expression it cannot
-	// evaluate; it stays for the STRING targets where the text IS the value,
-	// and is reported for every typed column, where storing the expression's
-	// source text is a wrong value rather than an unevaluated one.
-	if col.Type == parquet.TypeString {
-		return expr, nil
+	var n int64
+	switch t := v.(type) {
+	case nil:
+		return nil, nil
+	case int64:
+		n = t
+	case int32:
+		n = int64(t)
+	case int:
+		n = int64(t)
+	case float64:
+		r := math.Round(t) // Go's Round is half AWAY FROM ZERO, like PostgreSQL's
+		if math.IsNaN(r) || math.IsInf(r, 0) || r < -9.223372036854776e18 || r > 9.223372036854776e18 {
+			return nil, sqlerr.New("22003", "%s out of range", col.Type)
+		}
+		n = int64(r)
+	case float32:
+		return coerceEvaluatedValue(float64(t), col)
+	default:
+		return v, nil
 	}
-	return nil, err
+	lo, hi := int64(math.MinInt64), int64(math.MaxInt64)
+	switch col.Type {
+	case parquet.TypeInt32:
+		lo, hi = math.MinInt32, math.MaxInt32
+	case parquet.TypePort:
+		lo, hi = 0, 65535
+	case parquet.TypeProtocol:
+		lo, hi = 0, 255
+	}
+	if n < lo || n > hi {
+		return nil, sqlerr.New("22003", "%s value %d out of range [%d, %d]", col.Type, n, lo, hi)
+	}
+	if col.Type == parquet.TypeInt64 {
+		return n, nil
+	}
+	return int32(n), nil
 }
 
 // checkValueForColumn is ConvertValueForColumn's half for a value that is
@@ -716,7 +873,7 @@ func checkValueForColumn(v any, col parquet.Column) error {
 
 // buildInsertRow builds a new row from the INSERT clause of a WHEN NOT MATCHED.
 // SQL format: "(col1, col2) VALUES (expr1, expr2)"
-func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, colByName map[string]parquet.Column) (map[string]any, error) {
+func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, ev *mergeEvaluator) (map[string]any, error) {
 	merged := buildAliasedRow(srcRow, srcAlias)
 	sql := strings.TrimSpace(insertSQL)
 
@@ -752,7 +909,11 @@ func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, co
 
 	row := make(map[string]any, len(columns))
 	for i, col := range columns {
-		val, err := resolveSetValue(strings.TrimSpace(values[i]), merged, colByName[col])
+		target, err := ev.targetColumn(col)
+		if err != nil {
+			return nil, err
+		}
+		val, err := ev.value(strings.TrimSpace(values[i]), merged, target)
 		if err != nil {
 			return nil, fmt.Errorf("column %q: %w", col, err)
 		}
@@ -818,20 +979,70 @@ func (db *DB) readParquetFile(ctx context.Context, filePath string, schema []par
 // every row, which is what a DML statement with no WHERE means.
 type DMLPredicate func(*batch.RecordBatch, int) bool
 
-// BuildDMLPredicate compiles a DML WHERE clause. An empty clause compiles to
-// nil — "every row".
+// checkDMLColumns resolves every column an expression names against a table's
+// declared schema, raising PostgreSQL's 42703 for one that does not exist.
+//
+// A qualifier is accepted only when it names the table itself; anything else
+// (`other.col`) is a reference to a relation the statement does not have,
+// which PostgreSQL reports as 42P01. A ROW FIELD PATH (`rw.f`) is a
+// qualified-looking name that is NOT a table reference (ADR-0022), so a
+// qualifier matching a ROW column of this table resolves as one.
+func checkDMLColumns(node plansql.Node, table string, schema []parquet.Column) error {
+	refs, err := plansql.ColumnRefs(node)
+	if err != nil {
+		return sqlerr.Wrap("0A000", err)
+	}
+	byName := make(map[string]parquet.Column, len(schema))
+	for _, c := range schema {
+		byName[strings.ToLower(c.Name)] = c
+	}
+	for _, ref := range refs {
+		if ref.Table != "" && !strings.EqualFold(ref.Table, table) {
+			// A ROW field path, not a relation: `rw.f` where rw is a ROW
+			// column of this table.
+			if parent, ok := byName[strings.ToLower(ref.Table)]; ok && parent.Type == parquet.TypeRow {
+				continue
+			}
+			return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
+		}
+		if _, ok := byName[strings.ToLower(ref.Column)]; !ok {
+			// PostgreSQL's system columns resolve to NULL here rather than to
+			// an address this engine cannot honour, which is what makes a
+			// client's `DELETE ... WHERE ctid = '(0,1)'` match nothing instead
+			// of addressing a row the user never saw (physical.validate).
+			// The query path makes that allowance; so must this one.
+			if physical.IsPGSystemColumn(ref.Column) {
+				continue
+			}
+			return sqlerr.New("42703", "column %q does not exist", ref.Column)
+		}
+	}
+	return nil
+}
+
+// BuildDMLPredicate compiles a DML WHERE clause against a table's schema. An
+// empty clause compiles to nil — "every row".
+//
+// The SCHEMA is a parameter, not an optional extra, because the DML doors do
+// not go through the planner and so had no name-resolution step at all:
+// `UPDATE t SET n = 1 WHERE nosuchcol = 1` compiled fine, evaluated to NULL on
+// every row and reported "UPDATE 0", where PostgreSQL raises 42703 (#678).
+// Every column the clause names is resolved here, before anything executes.
 //
 // It is exported because the HTTP DML executors are a second copy of the
 // embedded ones and had a third and fourth copy of this compile step. A
 // predicate is only half of the contract, though; MatchDMLRows is the other
 // half and is the one that must be used to RUN it.
-func BuildDMLPredicate(whereSQL string) (DMLPredicate, error) {
+func BuildDMLPredicate(whereSQL, table string, schema []parquet.Column) (DMLPredicate, error) {
 	if strings.TrimSpace(whereSQL) == "" {
 		return nil, nil
 	}
 	node, err := plansql.ParseExpression(whereSQL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing expression %q: %w", whereSQL, err)
+	}
+	if err := checkDMLColumns(node, table, schema); err != nil {
+		return nil, err
 	}
 
 	compiled, err := expr.Compile(node)
@@ -847,6 +1058,162 @@ func BuildDMLPredicate(whereSQL string) (DMLPredicate, error) {
 		bv, ok := v.(bool)
 		return ok && bv
 	}, nil
+}
+
+// DMLAssignment is one resolved `SET column = ...`: the target column's full
+// declaration, plus EITHER a constant or a compiled expression.
+type DMLAssignment struct {
+	Column   string
+	col      parquet.Column
+	constant any       // used when expr is nil
+	expr     expr.Expr // per-row evaluation
+}
+
+// ResolveDMLSetClauses resolves an UPDATE's SET list against the table's
+// schema, before anything executes.
+//
+// Two defects met here (#678). `UPDATE t SET nosuchcol = 1` reported
+// "UPDATE 1": the assignment was dropped into a map nothing read and the
+// matched rows were rewritten unchanged, where PostgreSQL raises 42703. And
+// the value was read ONLY as a literal, through a converter whose STRING arm
+// cannot fail — so `SET s = UPPER(s)` stored the seven characters "UPPER(s)"
+// into the column. PostgreSQL evaluates it, and so does this now.
+//
+// Whether a SET value is a literal is decided from its PARSE, not from
+// whether a conversion succeeded, because for a STRING column the conversion
+// always succeeds and the literal path always won. A `*plansql.Lit` takes the
+// constant path — which is what keeps #647's declaration checks
+// (ConvertValueForColumn's DECIMAL precision, the temporal accept-sets)
+// running on the values that have them; anything else is compiled and
+// evaluated per row against the file's own batch, which carries the table's
+// declared types.
+func ResolveDMLSetClauses(clauses []plansql.SetClause, table string, schema []parquet.Column) ([]DMLAssignment, error) {
+	byName := make(map[string]parquet.Column, len(schema))
+	for _, c := range schema {
+		byName[strings.ToLower(c.Name)] = c
+	}
+	out := make([]DMLAssignment, 0, len(clauses))
+	for _, sc := range clauses {
+		// A QUALIFIED target (`SET t.n = 1`) never arrives here: the UPDATE
+		// parser requires `=` after the column name and refuses the dot,
+		// which is the same answer PostgreSQL gives (it reads the qualifier
+		// as a column of the relation and raises 42703 for it). MERGE spells
+		// its own qualified targets and strips them in applySetClauses.
+		name := strings.ToLower(strings.TrimSpace(sc.Column))
+		col, ok := byName[name]
+		if !ok {
+			return nil, sqlerr.New("42703", "column %q of relation %q does not exist", name, table)
+		}
+
+		node, err := plansql.ParseExpression(sc.Value)
+		if err != nil {
+			return nil, fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err)
+		}
+		if text, isLit := dmlLiteralText(node); isLit {
+			v, err := ConvertValueForColumn(text, col)
+			if err != nil {
+				return nil, fmt.Errorf("SET %s: %w", name, err)
+			}
+			out = append(out, DMLAssignment{Column: name, col: col, constant: v})
+			continue
+		}
+		if err := checkDMLColumns(node, table, schema); err != nil {
+			return nil, fmt.Errorf("SET %s: %w", name, err)
+		}
+		compiled, err := expr.Compile(node)
+		if err != nil {
+			return nil, fmt.Errorf("SET %s: compiling %q: %w", name, sc.Value, err)
+		}
+		out = append(out, DMLAssignment{Column: name, col: col, expr: compiled})
+	}
+	return out, nil
+}
+
+// dmlLiteralText reports whether an expression is a CONSTANT, and if so gives
+// the text ConvertValueForColumn should read.
+//
+// The text comes from the parsed node, not from the clause's source, because
+// the two are not the same string: the lexer resolves a string literal's
+// doubled-apostrophe escapes, so a literal spelling `it` + escape + `s`
+// re-quoted for parsing still carries the escape while its VALUE is `it's`.
+// Reading it back off the node is exact.
+//
+// A sign in front of a number is part of the constant. The SET text is
+// rebuilt from tokens, which puts a space there (`- 1.50`), and routing that
+// through the expression evaluator instead would resolve a DECIMAL through a
+// float64 — inexact for values a float cannot hold, where the literal path
+// parses the digits (ADR-0018 §4).
+func dmlLiteralText(n plansql.Node) (string, bool) {
+	switch e := unwrapDMLParens(n).(type) {
+	case *plansql.Lit:
+		if e.Kind == plansql.LitNull {
+			return "NULL", true
+		}
+		return e.Value, true
+	case *plansql.UnaryOp:
+		if e.Op != "-" && e.Op != "+" {
+			return "", false
+		}
+		inner, ok := unwrapDMLParens(e.Inner).(*plansql.Lit)
+		if !ok || inner.Kind != plansql.LitNumber {
+			return "", false
+		}
+		if e.Op == "+" {
+			return inner.Value, true
+		}
+		return "-" + inner.Value, true
+	}
+	return "", false
+}
+
+func unwrapDMLParens(n plansql.Node) plansql.Node {
+	for {
+		p, ok := n.(*plansql.ParenNode)
+		if !ok {
+			return n
+		}
+		n = p.Inner
+	}
+}
+
+// BuildUpdatedRows boxes b's matched rows with the assignments applied.
+//
+// It carries the same panic boundary MatchDMLRows does and for the same
+// reason: a SET expression is evaluated by the same engine as a WHERE, so
+// `SET n = 1/0` raises a FatalEvalPanic that must become 22012 on the
+// statement rather than a dead connection (ADR-0019, #677). One deferred call
+// per file, nothing per row.
+//
+// A value the target column cannot hold is refused HERE, before any delete
+// marker is committed — the rule #647 established for literals, applied to
+// computed values too.
+func BuildUpdatedRows(ctx context.Context, b *batch.RecordBatch, matched []int64, assigns []DMLAssignment) (rows []map[string]any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			rows, err = nil, exec.RecoverQueryPanic(ctx, "DML SET expression", r)
+		}
+	}()
+	rows = make([]map[string]any, 0, len(matched))
+	for _, idx := range matched {
+		row := b.RowAt(int(idx))
+		for i := range assigns {
+			a := &assigns[i]
+			if a.expr == nil {
+				row[a.Column] = a.constant
+				continue
+			}
+			v, err := coerceEvaluatedValue(a.expr.Eval(b, int(idx)), a.col)
+			if err != nil {
+				return nil, fmt.Errorf("SET %s: %w", a.Column, err)
+			}
+			if err := checkValueForColumn(v, a.col); err != nil {
+				return nil, fmt.Errorf("SET %s: %w", a.Column, err)
+			}
+			row[a.Column] = v
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
 }
 
 // MatchDMLRows returns the indices of b's rows the statement matches, and is

@@ -66,8 +66,13 @@ func TestParseUpdate_Basic(t *testing.T) {
 	if q.Update.SetClauses[0].Column != "name" {
 		t.Fatalf("expected column 'name', got %q", q.Update.SetClauses[0].Column)
 	}
-	if q.Update.SetClauses[0].Value != "Bob" {
-		t.Fatalf("expected value \"Bob\", got %q", q.Update.SetClauses[0].Value)
+	// The value is the expression's SQL TEXT, quotes included. It used to be
+	// the lexer's unquoted token value, which made `SET name = 'Bob'` and
+	// `SET name = Bob` the same string — so no consumer could tell a string
+	// LITERAL from a COLUMN REFERENCE, and the SET resolver had to guess
+	// (#678). The reversal is deliberate.
+	if q.Update.SetClauses[0].Value != "'Bob'" {
+		t.Fatalf("expected value \"'Bob'\", got %q", q.Update.SetClauses[0].Value)
 	}
 	if q.Update.WhereSQL != "id = 1" {
 		t.Fatalf("expected WHERE 'id = 1', got %q", q.Update.WhereSQL)
@@ -86,9 +91,9 @@ func TestParseUpdate_MultipleSets(t *testing.T) {
 		col string
 		val string
 	}{
-		{"name", "Bob"},
+		{"name", "'Bob'"},
 		{"age", "30"},
-		{"status", "active"},
+		{"status", "'active'"},
 	}
 	for i, exp := range expected {
 		if q.Update.SetClauses[i].Column != exp.col {

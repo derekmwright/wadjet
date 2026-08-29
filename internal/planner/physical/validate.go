@@ -1124,3 +1124,13 @@ var pgSystemColumns = map[string]bool{
 	"cmax":     true,
 	"tableoid": true,
 }
+
+// IsPGSystemColumn reports whether a name is one of those, for the DML doors.
+// They do not go through this package's validation at all, and their own
+// name-resolution step (#678) has to make the same allowance the query path
+// makes — otherwise `DELETE ... WHERE ctid = '(0,1)'`, which PostgreSQL
+// accepts and this engine deliberately answers by matching nothing, would
+// become a 42703.
+func IsPGSystemColumn(name string) bool {
+	return pgSystemColumns[strings.ToLower(name)]
+}

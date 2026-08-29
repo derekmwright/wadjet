@@ -1353,6 +1353,19 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 			sql: `UPDATE mk_outer SET n = 1 WHERE 1/0 = 1`},
 		{name: "UpdateWhereInvalidCast",
 			sql: `UPDATE mk_outer SET n = 1 WHERE id = CAST('abc' AS integer)`},
+		// A DML statement naming a column that does not exist. The DML doors do
+		// not go through the planner, so they had no name-resolution step at
+		// all: `SET nosuchcol = 1` answered "UPDATE 1" with the assignment
+		// silently dropped, and `WHERE nosuchcol = 1` answered "UPDATE 0"
+		// because the reference evaluated to NULL on every row (#678, the #653
+		// class one door over). Both are 42703 here. Again neither engine
+		// reaches a row, so neither fixture is mutated.
+		{name: "UpdateUnknownSetColumn",
+			sql: `UPDATE mk_outer SET nosuchcol = 1`},
+		{name: "UpdateUnknownWhereColumn",
+			sql: `UPDATE mk_outer SET n = 1 WHERE nosuchcol = 1`},
+		{name: "DeleteUnknownWhereColumn",
+			sql: `DELETE FROM mk_outer WHERE nosuchcol = 1`},
 		// A short leading field PostgreSQL reads as a MONTH under MDY: '31/1/2'
 		// and '13/1/2' are month 31 and month 13, which PostgreSQL rejects
 		// with 22008. wadjet refuses the SHAPE (a non-4-digit leading field is
