@@ -1196,6 +1196,9 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "DecimalModuloByZero", sql: `SELECT d_2 % 0 FROM dec_probe`},
 		{name: "DecimalCastPastPrecision", sql: `SELECT CAST(d_2 AS numeric(3,2)) FROM dec_probe`},
 		{name: "DecimalCastFromNonNumericText", sql: `SELECT CAST('abc' AS numeric(9,2))`},
+		// PostgreSQL has no boolean-to-numeric cast: the TYPE PAIR is wrong,
+		// not the text, so it is 42846 cannot_coerce and not 22P02.
+		{name: "DecimalCastFromBoolean", sql: `SELECT CAST(TRUE AS numeric(9,2))`},
 		// An integer result with no int64 (#637). PostgreSQL refuses it as
 		// `bigint out of range`; wadjet WRAPPED, which is a different number
 		// wearing the right type.

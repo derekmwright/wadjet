@@ -209,10 +209,13 @@ func castDecimalValue(v any, scale int) (batch.Int128, bool) {
 	case string:
 		return castDecimalFromText(tv, scale), true
 	case bool:
-		// PostgreSQL has no boolean-to-numeric cast at all ("cannot cast type
-		// boolean to numeric"), so there is no rule to follow. Refusing here
-		// rather than answering 0/1 keeps the divergence one-sided.
-		raiseInvalidTextRepresentation("numeric", strconv.FormatBool(tv))
+		// PostgreSQL has no boolean-to-numeric cast at all, and refuses it as
+		// 42846 cannot_coerce — the type pair is wrong, not the text — which
+		// is the same code and the same message cast_bool.go raises in the
+		// other direction. Answering 0/1 instead would invent a cast the
+		// authority does not have.
+		_ = tv
+		panic(fatalEval{sqlerr.New("42846", "cannot cast type boolean to numeric")})
 	}
 	raiseInvalidTextRepresentation("numeric", toString(v))
 	return batch.Int128{}, false
