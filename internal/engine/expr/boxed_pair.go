@@ -162,18 +162,21 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		switch strings.ToLower(v.Name) {
 		case "greatest", "least":
 			return joinOperandKinds(v.Args, b)
-		case "element_at":
-			// element_at lifts a value OUT of a container, so its kind is the
-			// container's ELEMENT kind — exactly the reason a ROW field path
-			// is classified from the field above. The element type is on the
-			// vector (Vector.Child), which is the only place it exists at
-			// this point, so a DECIMAL element compares as a decimal instead
-			// of falling through to compare()'s byte order: without it
-			// `GREATEST(element_at(arr, 1), d)` picked 3.00 over 12.7501,
-			// because "3.00" sorts above "12.7501" as text.
-			return elementOperandKind(v.Args, b)
 		}
 		return boxUnknown, true
+	case *elementAtExpr:
+		// element_at lifts a value OUT of a container, so its kind is the
+		// container's ELEMENT kind — exactly the reason a ROW field path is
+		// classified from the field above. The element type is on the vector
+		// (Vector.Child), which is the only place it exists at this point,
+		// so a DECIMAL element compares as a decimal instead of falling
+		// through to compare()'s byte order: without it
+		// `GREATEST(element_at(arr, 1), '2')` picked "2" over 12.75, because
+		// "2" sorts above "12.75" as text.
+		//
+		// The COMPILED node, not the *FuncCall: element_at compiles to this
+		// type (#607), so an arm keyed on the function call is dead code.
+		return elementOperandKind(v.arg0, b)
 	case *Case:
 		// A CASE answers with one of its RESULTS (the operand and the WHEN
 		// conditions only steer), so those are what decide its kind.
@@ -198,11 +201,8 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 //
 // unsettled while the column does not resolve, for classifyOperand's reason —
 // a name that resolves in no batch yet says nothing about the next one.
-func elementOperandKind(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
-	if len(args) == 0 {
-		return boxUnknown, true
-	}
-	col, ok := args[0].(*ColRef)
+func elementOperandKind(container Expr, b *batch.RecordBatch) (boxKind, bool) {
+	col, ok := container.(*ColRef)
 	if !ok {
 		return boxUnknown, true
 	}
@@ -214,6 +214,15 @@ func elementOperandKind(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 	if child == nil {
 		return boxUnknown, true
 	}
+	if staticallyMap(container, b) {
+		// A MAP materializes as ARRAY(ROW("key","value")), and element_at
+		// answers the VALUE — so the element kind is the second field's,
+		// never the entry row's.
+		if len(child.Children) != 2 {
+			return boxUnknown, true
+		}
+		child = child.Children[1]
+	}
 	switch child.Type {
 	case batch.TypeDecimal:
 		return boxDecimal, true
@@ -223,6 +232,16 @@ func elementOperandKind(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 		return boxText, true
 	}
 	return boxUnknown, true
+}
+
+// eitherDecimal reports whether either of the first two armed operands is
+// declared DECIMAL. It is the gate a site uses before reading two boxes as the
+// numbers they name rather than as the strings they are.
+func (a *extremumArms) eitherDecimal(b *batch.RecordBatch) bool {
+	if a == nil || len(a.ops) < 2 {
+		return false
+	}
+	return a.ops[0].resolve(b) == boxDecimal || a.ops[1].resolve(b) == boxDecimal
 }
 
 // joinOperandKinds is classifyOperand over a set of alternatives that one

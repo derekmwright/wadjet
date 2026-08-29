@@ -243,25 +243,34 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 			}
 			var decided []DeclType
 			guess, guessed := DeclType{}, false
-			sawUnknown := false
 			for _, i := range candidates {
 				if i < 0 || i >= nargs {
 					continue
 				}
-				t, c := argType(i)
-				switch c {
+				switch t, c := argType(i); c {
 				case Decided:
 					decided = append(decided, t)
 				case Guessed:
 					if !guessed {
 						guess, guessed = t, true
 					}
-				default:
-					// An operand that named no type but still PRODUCES a
-					// value — see CommonDeclType's decline.
-					if !t.Untyped {
-						sawUnknown = true
-					}
+				}
+			}
+			// sawUnknown is computed over EVERY argument, not over the
+			// candidate list. The two are the same for coalesce/greatest/
+			// least and different for nullif, whose candidate list is [0]
+			// while argument 1 is the one it COMPARES against — and an
+			// operand this layer cannot type produces a DECIMAL at its own
+			// scale whether or not the result is taken from it.
+			// `NULLIF(a, (SELECT b …))` therefore declared numeric(9,2)
+			// from argument 0 alone, no decline fired, and the runtime
+			// compared "12.75" against "12.7500" by bytes and answered 12.75
+			// where PostgreSQL answers NULL.
+			sawUnknown := false
+			for i := 0; i < nargs; i++ {
+				if t, c := argType(i); c == Undecided && !t.Untyped {
+					sawUnknown = true
+					break
 				}
 			}
 			if d, ok := CommonDeclType(decided, sawUnknown); ok {

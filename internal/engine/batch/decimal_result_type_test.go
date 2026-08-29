@@ -91,7 +91,13 @@ func TestCanonicalDecimalText(t *testing.T) {
 		{"12.75", "12.7500", "0012.75", "+12.75", "1.275e1"},
 		{"0", "0.00", "-0", "0e5"},
 		{"-0.01", "-0.0100"},
-		{"1000", "1.000e3"},
+		// The INTEGER spellings. The trailing-zero strip has to run at every
+		// exponent, not only at negative ones: stopping at exp >= 0 left
+		// "100" keyed 100e0 while "1e2" keyed 1e2, two keys for one number —
+		// reachable from `d IN (SELECT s FROM t)` over a STRING column whose
+		// text spells an integer either way.
+		{"100", "1e2", "1.0e2", "0.1e3", "100.00", "+100"},
+		{"1000", "1.000e3", "10e2", "1e3"},
 	}
 	for _, group := range same {
 		var key string
@@ -125,6 +131,56 @@ func TestCanonicalDecimalText(t *testing.T) {
 	for _, notANumber := range []string{"abc", "", "NaN", "12.7.5"} {
 		if _, ok := CanonicalDecimalText(notANumber); ok {
 			t.Errorf("CanonicalDecimalText(%q) answered; it names no number", notANumber)
+		}
+	}
+}
+
+// TestCanonicalDecimalTextAgreesWithAppendDecimalKey holds the TEXT key to the
+// same grouping as the columnar one. AppendDecimalKey keys a stored (Int128,
+// scale) pair and CanonicalDecimalText keys the rendering of that same value,
+// and a set operation, a join and an IN subquery can each key one side each
+// way — so two values that group together under one must group together under
+// the other (ADR-0012 item 8).
+func TestCanonicalDecimalTextAgreesWithAppendDecimalKey(t *testing.T) {
+	// One value written at four scales, plus its neighbours at each.
+	type cell struct {
+		unscaled Int128
+		scale    int
+	}
+	cells := []cell{
+		{Int128From(1275), 2}, {Int128From(127500), 4}, {Int128From(1275000), 5},
+		{Int128From(127501), 4}, {Int128From(127499), 4},
+		{Int128From(-1), 2}, {Int128From(-100), 4},
+		{Int128From(0), 0}, {Int128From(0), 6},
+		{Int128From(100), 0}, {Int128From(10000), 2},
+	}
+	colKey := map[string][]int{}
+	txtKey := map[string][]int{}
+	for i, c := range cells {
+		ck := string(AppendDecimalKey(nil, c.unscaled, c.scale))
+		colKey[ck] = append(colKey[ck], i)
+		tk, ok := CanonicalDecimalText(c.unscaled.FormatDecimal(c.scale))
+		if !ok {
+			t.Fatalf("cell %d: CanonicalDecimalText(%q) declined", i,
+				c.unscaled.FormatDecimal(c.scale))
+		}
+		txtKey[tk] = append(txtKey[tk], i)
+	}
+	group := func(m map[string][]int) map[int]int {
+		out := map[int]int{}
+		for _, members := range m {
+			for _, i := range members {
+				out[i] = members[0]
+			}
+		}
+		return out
+	}
+	colGroups, txtGroups := group(colKey), group(txtKey)
+	for i := range cells {
+		if colGroups[i] != txtGroups[i] {
+			t.Errorf("cell %d (%s at scale %d): the columnar key groups it with %d, the text key with %d",
+				i, cells[i].unscaled.FormatDecimal(cells[i].scale), cells[i].scale,
+				colGroups[i], txtGroups[i])
 		}
 	}
 }

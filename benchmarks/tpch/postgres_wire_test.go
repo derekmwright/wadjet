@@ -823,6 +823,27 @@ func wireCorpus() []wireCase {
 				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "GreatestAcrossDecimalScalesZeroRows",
 			sql: `SELECT GREATEST(d_2, d_4) AS v FROM dec_probe WHERE d_key = -1`},
+		// An AGGREGATE whose argument is a choice expression is still an
+		// aggregate call, and PostgreSQL gives every one of those typmod -1.
+		// The plan cannot type these — aggSpecOutputDecimal declines a
+		// non-bare-ColRef input — so gating the wire mark on "the plan says
+		// DECIMAL" skipped exactly them while the runtime schema resolved a
+		// real (p,s), and the modifier went out on the wire.
+		{name: "MaxOverAChoiceOfOneDecimalColumn",
+			sql: `SELECT MAX(COALESCE(d_2, d_2)) AS v FROM dec_probe WHERE d_key IN (1, 2, 3)`},
+		{name: "MinOverAChoiceOfOneDecimalColumn",
+			sql: `SELECT MIN(GREATEST(d_2, d_2)) AS v FROM dec_probe WHERE d_key IN (1, 2, 3)`},
+		{name: "SumOverAChoiceAcrossDecimalScales",
+			sql: `SELECT SUM(COALESCE(d_2, d_4)) AS v FROM dec_probe WHERE d_key IN (1, 2, 3)`,
+			pins: map[string]string{
+				// The SUM inherits its argument's rendering: COALESCE takes
+				// the narrow column on every row here, which wadjet renders
+				// at the common scale and PostgreSQL at the value's own.
+				wirePropFloatRender: choiceDecimalDigitsPin,
+			}},
+		{name: "MinOverACaseOfOneDecimalColumn",
+			sql: `SELECT MIN(CASE WHEN d_key > 1 THEN d_2 ELSE d_2 END) AS v FROM dec_probe
+				WHERE d_key IN (1, 2, 3)`},
 		// A set operation over an arm that carries NO modifier is
 		// unconstrained however well the arms' widths line up — the shape
 		// "the arms' (p,s) disagree" alone cannot see.

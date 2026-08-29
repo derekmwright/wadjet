@@ -538,10 +538,13 @@ func CanonicalDecimalText(s string) (string, bool) {
 		return "", false
 	}
 	digits = strings.TrimLeft(digits, "0")
-	// Trailing fraction zeros carry no value: 12.7500 and 12.75 are one
-	// number. Only FRACTION zeros are dropped — a trailing zero with a
-	// non-negative exponent is a factor of ten.
-	for exp < 0 && len(digits) > 0 && digits[len(digits)-1] == '0' {
+	// Trailing zeros carry no value ONCE THE EXPONENT ABSORBS THEM: 12.7500
+	// and 12.75 are one number, and so are 100, 1e2, 1.0e2 and 0.1e3. The
+	// strip must therefore run at every exponent, not only at negative ones
+	// — stopping at exp >= 0 left "100" keyed 100e0 and "1e2" keyed 1e2, two
+	// keys for one number, reachable from `d IN (SELECT s FROM t)` over a
+	// STRING column whose text spells an integer either way.
+	for len(digits) > 0 && digits[len(digits)-1] == '0' {
 		digits, exp = digits[:len(digits)-1], exp+1
 	}
 	if digits == "" {

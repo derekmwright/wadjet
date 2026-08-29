@@ -2814,6 +2814,27 @@ func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
 		}
 		return args[0]
 	}
+	// The pair rule did not apply, which happens when one operand has no
+	// declaration this layer can read — a scalar subquery, a container
+	// element. compare() would then order two DECIMAL renderings by BYTES,
+	// and "12.75" is not "12.7500" bytewise though they are one number:
+	// `NULLIF(d, (SELECT d4 …))` answered the row where PostgreSQL answers
+	// NULL. Whenever EITHER side is declared DECIMAL and both boxes are
+	// numeric text, they are compared as the numbers they name. The gate is
+	// the DECLARATION, so a genuine STRING column holding numeric-looking
+	// text still compares as text (#504).
+	if arms.eitherDecimal(b) {
+		if ls, ok := args[0].(string); ok {
+			if rs, ok := args[1].(string); ok {
+				if c, ok := batch.CompareDecimalTexts(ls, rs); ok {
+					if c == 0 {
+						return nil
+					}
+					return args[0]
+				}
+			}
+		}
+	}
 	if compare(args[0], args[1], CmpEq) {
 		return nil
 	}

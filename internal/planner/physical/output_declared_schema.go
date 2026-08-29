@@ -222,7 +222,7 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 	if out := setOpWireUnconstrainedDecimal(root); out != nil {
 		return out
 	}
-	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
+	projs, childTypes, _, ok := declaredProjectionInputs(root)
 	if !ok {
 		return nil
 	}
@@ -236,9 +236,14 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 		if name == "" {
 			continue
 		}
-		if declaredProjectionDecl(proj, childTypes, strictInt).ID != parquet.TypeDecimal {
-			continue
-		}
+		// No "is it DECIMAL" precondition. The plan cannot always type an
+		// aggregate — aggSpecOutputDecimal declines a non-bare-ColRef input,
+		// so `MAX(COALESCE(a, a))` resolved to the STRING fallback here
+		// while the RUNTIME schema declared numeric(9,2), and skipping it
+		// left the wire carrying a modifier PostgreSQL drops for every
+		// aggregate call. An entry for a column that turns out not to be
+		// DECIMAL is vacuous: pgTypeMod consults this only on the DECIMAL
+		// arm, and every other type's modifier is -1 already.
 		if projectionKeepsTypmod(proj, childTypes, computed) {
 			continue
 		}
@@ -292,7 +297,17 @@ func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool)
 			return 0, 0, false
 		}
 		c, ok := decls.colDecl(n)
-		if !ok || c.Type != parquet.TypeDecimal || c.Precision <= 0 {
+		if !ok {
+			return 0, 0, false
+		}
+		if c.Type != parquet.TypeDecimal {
+			// A non-DECIMAL column carries no numeric modifier, and that is
+			// an ANSWER rather than an absence: (0,0) agrees with itself, so
+			// a bare reference to one keeps whatever it has and a fold that
+			// mixes one with a numeric(p,s) disagrees and drops to -1.
+			return 0, 0, true
+		}
+		if c.Precision <= 0 {
 			return 0, 0, false
 		}
 		return c.Precision, c.Scale, true

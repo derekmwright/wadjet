@@ -32,6 +32,11 @@ func ddrOpen(t *testing.T) *DB {
 		{Name: "id", Type: parquet.TypeInt64},
 		{Name: "a", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
 		{Name: "b", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
+		// A DECIMAL ARRAY, so element_at over a real container has somewhere
+		// to be tested: arr[1] is a's value and arr[2] is 3.00 on every row.
+		{Name: "arr", Type: parquet.TypeArray, Nullable: true,
+			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeDecimal,
+				Precision: 9, Scale: 2, Nullable: true}},
 	}}
 	if err := db.CreateTable(ctx, ddrTable, schema, nil); err != nil {
 		t.Fatal(err)
@@ -43,18 +48,24 @@ func ddrOpen(t *testing.T) *DB {
 		}
 		return parquet.Decimal128{Hi: hi, Lo: uint64(v)}
 	}
+	arr := func(first int64, present bool) []any {
+		if !present {
+			return []any{nil, dec(300)}
+		}
+		return []any{dec(first), dec(300)}
+	}
 	rows := []map[string]any{
 		// a = 12.75 (scale 2), b = 12.7500 / 12.7501 / 12.7499 (scale 4):
 		// the ±1-ulp neighbourhood where a rounded comparison and an exact
 		// one disagree.
-		{"id": int64(1), "a": dec(1275), "b": dec(127500)},
-		{"id": int64(2), "a": dec(1275), "b": dec(127501)},
-		{"id": int64(3), "a": dec(1275), "b": dec(127499)},
+		{"id": int64(1), "a": dec(1275), "b": dec(127500), "arr": arr(1275, true)},
+		{"id": int64(2), "a": dec(1275), "b": dec(127501), "arr": arr(1275, true)},
+		{"id": int64(3), "a": dec(1275), "b": dec(127499), "arr": arr(1275, true)},
 		// "2.00" sorts above "10.0000" as TEXT and below it as a number.
-		{"id": int64(4), "a": dec(200), "b": dec(100000)},
-		{"id": int64(5), "a": dec(-1), "b": dec(-100)},
-		{"id": int64(6), "b": dec(10000)},
-		{"id": int64(7), "a": dec(1275)},
+		{"id": int64(4), "a": dec(200), "b": dec(100000), "arr": arr(200, true)},
+		{"id": int64(5), "a": dec(-1), "b": dec(-100), "arr": arr(-1, true)},
+		{"id": int64(6), "b": dec(10000), "arr": arr(0, false)},
+		{"id": int64(7), "a": dec(1275), "arr": arr(1275, true)},
 	}
 	ing := db.NewIngester(ddrTable, schema, nil, ingest.Config{MaxBufferRows: len(rows) + 1})
 	if err := ing.Ingest(ctx, rows); err != nil {
@@ -555,26 +566,142 @@ func TestDecimalBesideAnIntegerIsDataDependent(t *testing.T) {
 
 // TestDecimalChoiceOverAContainerElementComparesByValue is the runtime half of
 // the review's P0-1: element_at lifts a value OUT of a container, so its kind
-// is the container's ELEMENT kind. Without that arm the pair fell through to
-// compare()'s byte order and GREATEST picked "3.00" over "12.7501".
+// is the container's ELEMENT kind. Without that arm the pair falls through to
+// compare()'s byte order, and "2" sorts above "12.75" while 2 is below it.
+//
+// The arm has to be keyed on the COMPILED node: element_at compiles to
+// expr.elementAtExpr (#607), so the arm the first attempt put under *FuncCall
+// was dead code and every one of these was still ordered by bytes.
 //
 // The DECLARED type of such an expression is still undecided — the planner
 // carries no element type for a top-level ARRAY column — so the fold declines
-// and the projection keeps its pre-ADR-0024 answer; what this pins is that
-// the COMPARISON is exact wherever it runs.
+// and the projection keeps its pre-ADR-0024 STRING fallback, which renders
+// the decimal text unchanged. What this pins is that the COMPARISON is exact
+// wherever it runs.
 func TestDecimalChoiceOverAContainerElementComparesByValue(t *testing.T) {
 	db := ddrOpen(t)
-	// GREATEST inside a predicate: the extremum is picked by VALUE, so the
-	// rows where b is the larger number are exactly the rows returned.
-	res := ddrQuery(t, db,
-		"SELECT id FROM "+ddrTable+" WHERE GREATEST(a, b) = b ORDER BY id")
-	var got []string
-	for _, r := range res.Rows {
-		got = append(got, fmt.Sprintf("%v", r["id"]))
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want string
+	}{
+		// arr[1] is a's value on every row and arr[2] is 3.00.
+		{"a container element equals the column it was built from",
+			"SELECT id FROM " + ddrTable + " WHERE element_at(arr, 1) = a ORDER BY id",
+			"[map[id:1] map[id:2] map[id:3] map[id:4] map[id:5] map[id:7]]"},
+		// GREATEST against a QUOTED literal, which PostgreSQL types FROM the
+		// other operand. 2 wins outright on rows 5 and 6 and ties row 4's
+		// 2.00; reading the pair as TEXT would have made "2" win everywhere,
+		// because "2" sorts above "12.75".
+		{"greatest over a container element and a quoted literal",
+			"SELECT id FROM " + ddrTable + " WHERE GREATEST(element_at(arr, 1), '2') = '2' ORDER BY id",
+			"[map[id:4] map[id:5] map[id:6]]"},
+		// Against the WIDER column, where the two renderings differ in
+		// length and byte order disagrees with numeric order.
+		{"greatest over a container element and a wider decimal",
+			"SELECT id FROM " + ddrTable + " WHERE GREATEST(element_at(arr, 1), b) > 5 ORDER BY id",
+			"[map[id:1] map[id:2] map[id:3] map[id:4] map[id:7]]"},
+		{"least over a container element and a wider decimal",
+			"SELECT id FROM " + ddrTable + " WHERE LEAST(element_at(arr, 1), b) = element_at(arr, 1) ORDER BY id",
+			"[map[id:1] map[id:2] map[id:4] map[id:5] map[id:7]]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			if got := fmt.Sprintf("%v", res.Rows); got != tc.want {
+				t.Errorf("%s\n  got  %s\n  want %s", tc.sql, got, tc.want)
+			}
+		})
 	}
-	// b wins on 1 (equal), 2, 4 and 6; a wins on 3, 5 (equal) and 7 (b NULL).
-	want := []string{"1", "2", "4", "5", "6"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("GREATEST(a, b) = b matched %v, want %v", got, want)
+}
+
+// TestNullifComparesByValueAgainstAnUndeclaredOperand is the review's second
+// P0.
+//
+// NULLIF's candidate list is [0] — it mirrors argument 0 and nothing else —
+// so the safety decline, which was computed over the CANDIDATES, never looked
+// at argument 1. `NULLIF(a, (SELECT b …))` therefore declared numeric(9,2)
+// from argument 0 alone, no decline fired, arms.order found no rule for a
+// DECIMAL against an untypable operand, and compare() decided "12.75" is not
+// "12.7500" by BYTES — answering the row where PostgreSQL answers NULL.
+//
+// Two fixes, and both are needed: expr.Ret.Resolve computes sawUnknown over
+// EVERY evaluated argument (the candidate list is right for the TYPE and
+// TYPMOD folds and wrong for this), and evalNullIf compares two numeric-text
+// boxes as the numbers they name whenever either operand is DECLARED DECIMAL
+// — never by sniffing the boxes, so a STRING column still compares as text
+// (#504).
+func TestNullifComparesByValueAgainstAnUndeclaredOperand(t *testing.T) {
+	db := ddrOpen(t)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want string
+	}{
+		// 12.75 = 12.7500, so rows 1, 2 and 3 are NULL; row 6's a is NULL;
+		// row 7's a equals it too. Exactly PostgreSQL's answer.
+		{"against a scalar subquery",
+			"SELECT id FROM " + ddrTable + " WHERE NULLIF(a, (SELECT b FROM " + ddrTable +
+				" WHERE id = 1)) IS NULL ORDER BY id",
+			"[map[id:1] map[id:2] map[id:3] map[id:6] map[id:7]]"},
+		// arr[1] IS a on every row, so every row is NULL.
+		{"against a container element",
+			"SELECT id FROM " + ddrTable + " WHERE NULLIF(a, element_at(arr, 1)) IS NULL ORDER BY id",
+			"[map[id:1] map[id:2] map[id:3] map[id:4] map[id:5] map[id:6] map[id:7]]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			if got := fmt.Sprintf("%v", res.Rows); got != tc.want {
+				t.Errorf("%s\n  got  %s\n  want %s", tc.sql, got, tc.want)
+			}
+		})
+	}
+
+	// The PROJECTED form of the same shape is a loud refusal rather than an
+	// answer: the fold declines (argument 1 names no type and produces a
+	// value), so the call keeps nullif's FLOAT64 fallback and the decimal
+	// text has nowhere to go. That is what this engine answered before
+	// ADR-0024 too — a scalar subquery has no declaration for the planner to
+	// read, which is the gap TODO(#555) closes.
+	if _, err := db.Query(context.Background(),
+		"SELECT NULLIF(a, (SELECT b FROM "+ddrTable+" WHERE id = 1)) AS c FROM "+ddrTable); err == nil {
+		t.Error("a projected NULLIF over a scalar subquery answered; the fold must decline " +
+			"while the operand has no declaration")
+	}
+}
+
+// TestAggregateOverAChoiceCarriesNoTypmod: PostgreSQL gives every aggregate
+// call typmod -1, and an aggregate whose ARGUMENT is a choice expression is
+// still an aggregate call. The plan cannot always type one — aggSpecOutput
+// Decimal declines a non-bare-ColRef input — so gating the mark on "the plan
+// says this is DECIMAL" skipped exactly those, and the wire went out carrying
+// the (p,s) the runtime schema had resolved. The mark is unconditional for an
+// aggregate and for a window function now (ADR-0024 item 5).
+func TestAggregateOverAChoiceCarriesNoTypmod(t *testing.T) {
+	db := ddrOpen(t)
+	for _, tc := range []struct {
+		sql string
+		col string
+	}{
+		{"SELECT MAX(COALESCE(a, a)) AS m FROM " + ddrTable, "m"},
+		{"SELECT MIN(COALESCE(a, a)) AS m FROM " + ddrTable, "m"},
+		{"SELECT SUM(COALESCE(a, b)) AS m FROM " + ddrTable, "m"},
+		{"SELECT MAX(GREATEST(a, a)) AS m FROM " + ddrTable, "m"},
+		{"SELECT MIN(CASE WHEN id > 1 THEN a ELSE a END) AS m FROM " + ddrTable, "m"},
+	} {
+		res := ddrQuery(t, db, tc.sql)
+		var found bool
+		for _, m := range res.ColumnMetas {
+			if m.Name != tc.col {
+				continue
+			}
+			found = true
+			if !m.WireUnconstrained {
+				t.Errorf("%s: WireUnconstrained = false; PostgreSQL declares every aggregate "+
+					"call unconstrained numeric", tc.sql)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: column %q not in result", tc.sql, tc.col)
+		}
 	}
 }
