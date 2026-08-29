@@ -174,6 +174,12 @@ func ValidateNativeDAGShape(stages []Stage) error {
 				s.ID, s.Type, len(s.ProjectExprs), stageProjectionOutputs(&s))
 		}
 	}
+	// A stage whose Filter or Project belongs to ONE consumer must not have
+	// two: the other would read the filtered stream. See
+	// shared_cte_producer.go.
+	if err := assertNoConsumerScopedFilterOnSharedStage(stages); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -65,11 +65,34 @@ Three parts:
    on a stage that ignores it. This is the #349 precedent: fail where
    the shape is visible.
 
-The conservation half — a pass that DELETES a carrying stage — is not
-expressible as a per-stage check, so it is a gate:
-`TestStageDAGCarriesEveryFilterAndProjection` asserts that every
-predicate stage emission attached is still readable off some stage after
-every rewriting pass, over TPC-H and the shape corpus.
+4. **A SHARED producer carries nothing consumer-specific.** A CTE
+   referenced more than once is planned ONCE — that dedup is what keeps
+   Q15's two chains from drifting — so its terminal stage belongs to
+   every reference equally. A WHERE above one reference is not a
+   property of the CTE. `filterCarrierIndex` refuses such a stage as a
+   carrier (the reference gets a `StageProject` of its own), and
+   `Stage.ConsumerScoped` + `assertNoConsumerScopedFilterOnSharedStage`
+   catch a later pass that gives a scoped carrier a second consumer.
+
+Three things a per-stage check cannot see are gates instead
+(`TestStageDAGCarriesEveryFilterAndProjection`, over TPC-H plus the shape
+corpus):
+
+- **conservation** — every predicate and every projection output stage
+  emission attached is still readable off some stage after every
+  rewriting pass (a pass that DELETES a carrier);
+- **name resolvability** — every expression on a carrier resolves against
+  that carrier's INPUT SCHEMA, not merely against its stage type. The two
+  differ exactly where the class is silent: `expr.ColRef.Eval` answers nil
+  for a name it cannot resolve, so the predicate is UNKNOWN on every row.
+  Join stages are excluded and named as excluded, because their input is
+  the qualified union of two sides and asserting over it produces false
+  refusals;
+- **output reachability** — every `OutputRename.From` on the gather is a
+  column some stage really emits. This is the only one that sees a
+  projection that was NEVER ATTACHED: nothing was deleted and nothing is
+  misplaced, the SELECT list simply became nobody's job, and the client
+  gets the producer's raw columns.
 
 ## Alternatives rejected
 
@@ -88,8 +111,24 @@ every rewriting pass, over TPC-H and the shape corpus.
   projection therefore carries a name only where the stage has none a
   consumer can use — a computed group key, or an expression over the
   aggregate's outputs.
+- **Let any projection-capable stage carry the outer SELECT list.**
+  Tried, and it broke `SELECT DISTINCT COALESCE(x, 0)`: the list is
+  written against the producer's OUTPUT, which for a scan, join, window,
+  sort, limit or project IS its input's columns, and for an AGGREGATE is
+  the group keys and aggregate outputs. Re-evaluating `COALESCE(x, 0)`
+  over a stream that no longer carries `x` answers nothing. The
+  aggregate's route is `absorbAggregateOutputProjection`, which spells
+  against the output names.
 
 ## Consequences
+
+- `StageProject` is Singleton with `Tasks: 1`, so it SERIALIZES its
+  input: one task reads every partition. That is correct for a per-row
+  operator and cheap for the shapes it is emitted for (a filter above a
+  CTE reference, above an aggregate's SELECT list), all of which sit
+  above an already-collapsed producer. It would not be acceptable above
+  a wide partitioned scan, and the planner never puts it there — but a
+  future pass that does must give the stage a partitioned variant first.
 
 - The class is closed structurally: a new stage type, a new fragment
   builder, or a pass that deletes a stage now fails one of the two

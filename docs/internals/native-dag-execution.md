@@ -134,6 +134,8 @@ it did not:
 | deduped `cte-alias` | `flattenCTEAliases` deleted the carrier; its target is SHARED with the other reference and must not be filtered for it | e |
 | aggregate output alias | the predicate was re-spelled into the group key's INPUT expression (`gk>3` → `(g+1)>3`), which the aggregate's OUTPUT — a column literally named `g + 1` — cannot evaluate | f |
 | `window` | `attachScanSelectProjections` accepted only a scan or a join, so the SELECT list above a window was never computed | g |
+| a SHARED CTE body's terminal | the FIRST reference walked emits the real producer, so its WHERE landed on the stage every OTHER reference reads | A1/B3 |
+| `sort` / `limit` | nothing ever populated `ProjectExprs` on one, so a SELECT list above an `ORDER BY … LIMIT` was never applied and the client got the producer's raw column | B2/D |
 
 Every one answered WITHOUT the predicate or the projection, silently, because
 no operator ever saw a name it could not resolve.
@@ -165,13 +167,30 @@ above an `ORDER BY … LIMIT` sees the LIMIT's rows), `buildWindowFragment` and
 `buildLimitFragment` and `buildAggregateFragment` (projection),
 `buildProjectFragment` (both).
 
+A stage that is the terminal of a CTE body referenced MORE THAN ONCE is never
+a carrier at all: every reference reads its output, so the reference carrying
+the predicate gets a `StageProject` of its own. `Stage.ConsumerScoped` records
+a carrier whose filter belongs to one consumer, and
+`assertNoConsumerScopedFilterOnSharedStage` refuses a plan where such a stage
+has two.
+
 `ValidateNativeDAGShape` refuses any plan that still attaches either field to
 a stage that ignores it — a loud refusal in place of a silently different
-answer — and
-`TestStageDAGCarriesEveryFilterAndProjection` (`filter_carrier_test.go`) is
-the structural gate: every predicate stage emission attached must still be
-readable off some stage after every rewriting pass, over TPC-H and the shape
-corpus.
+answer — and `TestStageDAGCarriesEveryFilterAndProjection`
+(`filter_carrier_test.go`) is the structural gate, in four parts over TPC-H
+and the shape corpus:
+
+1. **placement by type** — `ValidateNativeDAGShape` itself;
+2. **placement by SCHEMA** — every expression on a carrier resolves against
+   that carrier's INPUT (`carrier_schema.go`). A stage type that reads the
+   field and an expression it cannot resolve give the SAME silent answer;
+   joins are excluded, because their input is the qualified union of two
+   sides;
+3. **conservation** — every predicate AND every projection output that stage
+   emission attached is still readable off some stage afterwards;
+4. **output reachability** — every `OutputRename.From` on the gather names a
+   column some stage emits. This is the only part that sees a projection that
+   was NEVER attached, which is what B2 was.
 
 ## Synthetic sort keys: the column a Project would have computed
 

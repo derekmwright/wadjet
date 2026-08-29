@@ -53,10 +53,12 @@ func aggregateProjectionTarget(project *logical.Node, stages []Stage, from int) 
 	if project == nil || project.Type != logical.NodeProject || len(project.Children) != 1 {
 		return 0, false
 	}
-	// Only a Project reading the aggregate DIRECTLY. Anything in between (a
-	// Sort, another Project, a join) emits or renames on its own terms and
-	// is a different question.
-	if child := project.Children[0]; child == nil || child.Type != logical.NodeAggregate {
+	// Only a Project reading the aggregate's OUTPUT. A HAVING sits between
+	// the two as a Filter and changes nothing about the columns, so the walk
+	// descends through it (logical.AggregateBelowProject); anything else in
+	// between — a Sort, another Project, a join — emits or renames on its own
+	// terms and is a different question.
+	if logical.AggregateBelowProject(project) == nil {
 		return 0, false
 	}
 	for i := len(stages) - 1; i >= from; i-- {

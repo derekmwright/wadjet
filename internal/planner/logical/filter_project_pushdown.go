@@ -304,17 +304,45 @@ func newProjRefs(n *Node) projRefs {
 // OUTPUT — one row per group, columns named by the group keys and the
 // aggregates.
 func readsAnAggregate(n *Node) bool {
-	return len(n.Children) == 1 && n.Children[0] != nil && n.Children[0].Type == NodeAggregate
+	return AggregateBelowProject(n) != nil
+}
+
+// AggregateBelowProject returns the Aggregate whose OUTPUT rows this Project
+// reads, or nil when it reads something else.
+//
+// A HAVING is a Filter between the two, and it changes nothing about the
+// rows: it drops whole groups, it does not restore the aggregate's input
+// columns. Stopping at it is what made a CTE with both a HAVING and an outer
+// WHERE on a computed group key answer zero rows (#656 shape f with a
+// HAVING), so the walk descends through it.
+func AggregateBelowProject(n *Node) *Node {
+	if n == nil || n.Type != NodeProject {
+		return nil
+	}
+	for c := n; c != nil && len(c.Children) == 1; c = c.Children[0] {
+		switch child := c.Children[0]; {
+		case child == nil:
+			return nil
+		case child.Type == NodeAggregate:
+			return child
+		case child.Type == NodeFilter:
+			// HAVING: keep descending.
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 // aggregateGroupKeys is the GROUP BY key list of the Aggregate this Project
 // reads, lowercased and trimmed; nil when it reads something else.
 func aggregateGroupKeys(n *Node) map[string]bool {
-	if !readsAnAggregate(n) {
+	agg := AggregateBelowProject(n)
+	if agg == nil {
 		return nil
 	}
-	out := make(map[string]bool, len(n.Children[0].GroupBy))
-	for _, k := range n.Children[0].GroupBy {
+	out := make(map[string]bool, len(agg.GroupBy))
+	for _, k := range agg.GroupBy {
 		out[strings.ToLower(strings.TrimSpace(k))] = true
 	}
 	return out
@@ -621,9 +649,16 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			ast, changed = resolveFilterInSubtree(ast, n.Children[0], changed, subst)
 			ast, changed = resolveFilterInSubtree(ast, n.Children[1], changed, subst)
 			return ast, changed
-		case NodeDistinct, NodeSort, NodeLimit:
-			// None of the three renames anything, so the walk continues
-			// through them. Sort and LIMIT DO emit stages, and a predicate
+		case NodeDistinct, NodeSort, NodeLimit, NodeWindow:
+			// None of the four renames anything, so the walk continues
+			// through them. A WINDOW forwards every input column and appends
+			// its own outputs, so a predicate above one still names the
+			// Projects below it — stopping here left `WHERE gk = 1` above a
+			// window over `SELECT g AS gk` naming a column the window's
+			// input does not carry, UNKNOWN on every row, zero rows in
+			// silence (the #653 class, one operator over).
+			//
+			// Sort and LIMIT DO emit stages, and a predicate
 			// re-spelled past one names the SOURCE column their stream
 			// carries rather than the alias the query wrote — which is right
 			// exactly when no pass materialized the alias onto the producing

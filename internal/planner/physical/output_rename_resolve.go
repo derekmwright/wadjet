@@ -40,6 +40,10 @@ import (
 //     aggregate itself had to resolve);
 //   - a Join recurses into both output-visible children (probe side only for
 //     semi/anti), first substitution wins.
+//
+// See resolveOutputRenameSource / resolveOutputRenameSourceForGather below for
+// the one place the two callers disagree.
+
 // aggregateGroupKeyName returns the name an aggregate stage emits for a
 // computed SELECT-list item that IS one of its GROUP BY keys — the key's own
 // expression text, which is what the worker's pre-aggregate projection
@@ -62,7 +66,20 @@ func aggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) 
 	return "", false
 }
 
+// resolveOutputRenameSource is the EXPRESSION-rewriting form: it resolves only
+// the renames a stage really performs.
 func resolveOutputRenameSource(name string, child *logical.Node) string {
+	return resolveRenameSource(name, child, false)
+}
+
+// resolveOutputRenameSourceForGather additionally resolves a computed alias
+// over an AGGREGATE to the group key's expression TEXT, which is the name the
+// aggregate stage emits when nothing renamed it.
+func resolveOutputRenameSourceForGather(name string, child *logical.Node) string {
+	return resolveRenameSource(name, child, true)
+}
+
+func resolveRenameSource(name string, child *logical.Node, forGather bool) string {
 	resolved := name
 	if child == nil || name == "" {
 		return resolved
@@ -79,13 +96,21 @@ func resolveOutputRenameSource(name string, child *logical.Node) string {
 			bare := derivedScopeBareName(resolved, n)
 			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				if proj.IsAgg || proj.Column == "" {
-					// A computed alias over an AGGREGATE is the exception:
-					// the aggregate stage emits a computed GROUP BY key
-					// under the exact TEXT of its expression, not under the
-					// alias, so the gather looked for `gk` and found `g + 1`
-					// and the client got the expression text as the column
-					// name (#656 shape f, with no WHERE above it).
-					if src, ok := aggregateGroupKeyName(proj, n); ok {
+					// A computed alias over an AGGREGATE is the exception,
+					// and only for the GATHER's rename: the aggregate stage
+					// emits a computed GROUP BY key under the exact TEXT of
+					// its expression, not under the alias, so the gather
+					// looked for `gk`, found `g + 1`, and the client got the
+					// expression text as the column name (#656 shape f with
+					// no WHERE above it).
+					//
+					// forGather gates it because the other callers rewrite
+					// EXPRESSIONS. absorbAggregateOutputProjection may put
+					// that rename on the aggregate stage, and then the stream
+					// really does carry `gk` — an expression re-spelled to
+					// `"g + 1" * 10` would name the column that projection
+					// renamed away, and answered NULL on every row.
+					if src, ok := aggregateGroupKeyName(proj, n); ok && forGather {
 						return src
 					}
 					// Otherwise: the stage that evaluates it emits it under
@@ -108,14 +133,14 @@ func resolveOutputRenameSource(name string, child *logical.Node) string {
 		case n.Type == logical.NodeAggregate:
 			return resolved
 		case n.Type == logical.NodeJoin && len(n.Children) == 2:
-			if r := resolveOutputRenameSource(resolved, n.Children[0]); !strings.EqualFold(r, resolved) {
+			if r := resolveRenameSource(resolved, n.Children[0], forGather); !strings.EqualFold(r, resolved) {
 				return r
 			}
 			jt := strings.ToLower(n.JoinType)
 			if jt == "semi" || jt == "anti" {
 				return resolved
 			}
-			return resolveOutputRenameSource(resolved, n.Children[1])
+			return resolveRenameSource(resolved, n.Children[1], forGather)
 		}
 		if len(n.Children) == 1 {
 			n = n.Children[0]

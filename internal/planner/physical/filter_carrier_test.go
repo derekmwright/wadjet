@@ -2,6 +2,7 @@ package physical
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -72,6 +73,42 @@ func fcpCorpus() []struct{ name, sql string } {
 		{"681/ComputedAggregateAliasAsAJoinKey",
 			`SELECT COUNT(*) AS n FROM nation a JOIN ` +
 				`(SELECT n_regionkey AS g, COUNT(*) + 1 AS k FROM nation GROUP BY n_regionkey) b ON a.n_nationkey = b.k`},
+		// The adversarial-review round. Every one of these was silent or loud
+		// on a plan the earlier gates accepted, because they checked the
+		// stage TYPE and the predicate TEXT and never the carrier's input
+		// schema or how many consumers it had.
+		{"A1/WhereOnTheFirstOfTwoCTERefs",
+			`WITH c AS (SELECT n_nationkey AS id, n_regionkey AS v FROM nation WHERE n_nationkey < 100) ` +
+				`SELECT COUNT(*) AS n FROM (SELECT id FROM c WHERE v > 2 UNION ALL SELECT id FROM c) u`},
+		{"A2/WhereAboveAWindowNamingAnAlias",
+			`SELECT COUNT(*) AS n FROM (SELECT id, gk, ROW_NUMBER() OVER (PARTITION BY gk ORDER BY id) AS rn ` +
+				`FROM (SELECT n_nationkey AS id, n_regionkey AS gk FROM nation) c) x WHERE gk = 1`},
+		{"A3/WindowArgumentExpressionOverAnAlias",
+			`WITH c AS (SELECT n_nationkey AS id, n_regionkey AS v FROM nation) ` +
+				`SELECT id, SUM(v * 2) OVER () AS s FROM c`},
+		{"B1/AggregateOutputAliasWithAHaving",
+			`WITH c AS (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n FROM nation GROUP BY n_regionkey + 1 ` +
+				`HAVING COUNT(*) > 1) SELECT gk, n FROM c WHERE gk > 3`},
+		{"B2/SelectListAboveASortAndLimit",
+			`SELECT n_nationkey * 2 AS d FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 5) s`},
+		{"B2/SelectListAboveASortAndLimitThenOrdered",
+			`SELECT n_nationkey * 2 AS d FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 5) s ORDER BY d`},
+		{"B3/WhereOnOneJoinArmOfATwiceReferencedCTE",
+			`WITH c AS (SELECT n_nationkey AS id, n_regionkey AS v FROM nation WHERE n_nationkey < 100) ` +
+				`SELECT COUNT(*) AS n FROM (SELECT id FROM c WHERE v > 2) x JOIN (SELECT id AS j FROM c) y ON x.id = y.j`},
+		{"D/ComputedAliasOverAnAggregateAliasOrdered",
+			`WITH c AS (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n FROM nation GROUP BY n_regionkey + 1) ` +
+				`SELECT gk * 10 AS gk10 FROM c WHERE gk > 3 ORDER BY gk10`},
+		// The SELECT list over an aggregate's OUTPUT, which must NOT take the
+		// forwards-input-columns route: the stream carries the group key
+		// under its expression text, not `l_extendedprice`, so re-evaluating
+		// COALESCE there answers nothing. Attaching it was this round's own
+		// regression, caught by the two-path invariance suite.
+		{"ctl/DistinctComputedGroupKey",
+			`SELECT DISTINCT COALESCE(n_regionkey, 0) AS c1 FROM nation`},
+		{"ctl/DistinctComputedGroupKeyOverAJoin",
+			`SELECT DISTINCT COALESCE(n2.n_regionkey, 0) AS c1 FROM nation n1 ` +
+				`LEFT JOIN nation n2 ON n1.n_nationkey = n2.n_regionkey`},
 		// Controls: shapes that were already right, so a fix that broke them
 		// would show up here rather than only in the two-path gates.
 		{"ctl/HavingBelowTheSelectList",
@@ -90,7 +127,7 @@ func fcpCorpus() []struct{ name, sql string } {
 func TestStageDAGCarriesEveryFilterAndProjection(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
-	plan := func(t *testing.T, sql string) ([]string, []Stage) {
+	plan := func(t *testing.T, sql string) ([]string, []string, []Stage) {
 		t.Helper()
 		parsed, err := plansql.Parse(sql)
 		if err != nil {
@@ -113,15 +150,90 @@ func TestStageDAGCarriesEveryFilterAndProjection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PlanDistributed: %v", err)
 		}
-		return p.AttachedFilterExprs(), stages
+		return p.AttachedFilterExprs(), p.AttachedProjectionOutputs(), stages
 	}
 
 	check := func(t *testing.T, name, sql string) {
 		t.Helper()
-		attached, stages := plan(t, sql)
-		// PLACEMENT. The same check the coordinator runs before dispatch.
+		attached, projections, stages := plan(t, sql)
+		// PLACEMENT, part 1: the stage TYPE reads the field at all, and no
+		// stage with two consumers carries something scoped to one of them.
+		// The same checks the coordinator runs before dispatch.
 		if err := ValidateNativeDAGShape(stages); err != nil {
 			t.Errorf("%s: %v\n  SQL: %s\n%s", name, err, sql, renderStagesForPlacement(stages))
+		}
+		// PLACEMENT, part 2: the carrier's INPUT SCHEMA resolves every name
+		// the expression uses. A stage type that reads the field and an
+		// expression it cannot resolve produce the SAME silent answer — the
+		// predicate is UNKNOWN on every row — and only this half sees it.
+		idx := make(map[string]int, len(stages))
+		for i := range stages {
+			idx[stages[i].ID] = i
+		}
+		for i := range stages {
+			emitted, modelled := carrierInputColumns(stages, idx, i)
+			if !modelled {
+				continue
+			}
+			for _, e := range stages[i].FilterExprs {
+				if missing := unresolvableColumnRefs(e, emitted); len(missing) > 0 {
+					t.Errorf("%s: stage %s (%s) filters on %q and its input carries no %v — "+
+						"the predicate is UNKNOWN on every row, so the query answers WITHOUT "+
+						"it (#656)\n  input: %v\n  SQL: %s\n%s",
+						name, stages[i].ID, stages[i].Type, e, missing,
+						sortedNames(emitted), sql, renderStagesForPlacement(stages))
+				}
+			}
+			for _, pe := range stages[i].ProjectExprs {
+				if missing := unresolvableColumnRefs(pe.Expr, emitted); len(missing) > 0 {
+					t.Errorf("%s: stage %s (%s) projects %q AS %q and its input carries no %v — "+
+						"the column comes back NULL (#656)\n  input: %v\n  SQL: %s\n%s",
+						name, stages[i].ID, stages[i].Type, pe.Expr, pe.Name, missing,
+						sortedNames(emitted), sql, renderStagesForPlacement(stages))
+				}
+			}
+		}
+		// OUTPUT REACHABILITY. The half neither conservation nor placement
+		// can supply: a projection that was NEVER ATTACHED. Nothing was
+		// deleted and nothing is on a wrong stage — the SELECT list simply
+		// did not become anyone's job, and the client gets the producer's
+		// raw columns under their source names. The gather's own rename list
+		// is where it shows, because its source names a column no stage
+		// emits.
+		if gather, emitted, modelled := gatherOutputSources(stages); modelled {
+			for _, r := range gather.OutputRenames {
+				if r.Expr != nil || r.From == "" {
+					continue // the gather computes this one itself
+				}
+				// WHOLE-NAME, not merely resolvable refs: the gather can
+				// rename and drop, never evaluate. A From that is an
+				// EXPRESSION rather than a column the producer emits means
+				// nothing computed it — `SELECT id*2 AS d FROM (… ORDER BY
+				// id LIMIT 5)` left From="id * 2" over a stream carrying
+				// only `id`, and the client got `id`.
+				if _, resolves := lookupEmittedColumn(emitted, r.From); !resolves {
+					t.Errorf("%s: the gather renames %q to %q and no stage emits a column of "+
+						"that name — nothing computed the SELECT list, so the client gets the "+
+						"producer's raw columns (#656)\n  emitted: %v\n  SQL: %s\n%s",
+						name, r.From, r.To, sortedNames(emitted), sql,
+						renderStagesForPlacement(stages))
+				}
+			}
+		}
+		// CONSERVATION, projections: a pass that deletes a projection's
+		// carrier drops the SELECT list exactly as it drops a predicate.
+		emittedNames := map[string]bool{}
+		for i := range stages {
+			for _, n := range stageProjectionOutputs(&stages[i]) {
+				emittedNames[n] = true
+			}
+		}
+		for _, want := range projections {
+			if !emittedNames[want] {
+				t.Errorf("%s: stage emission attached a projection emitting %q and no stage in "+
+					"the final plan emits it — its carrier was deleted (#656)\n  SQL: %s\n%s",
+					name, want, sql, renderStagesForPlacement(stages))
+			}
 		}
 		// CONSERVATION. Measured against what stage emission ATTACHED rather
 		// than against the logical Filter nodes, because the optimizer
@@ -260,4 +372,14 @@ func renderStagesForPlacement(stages []Stage) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// sortedNames renders an emitted-column set for a failure message.
+func sortedNames(emitted map[string]string) []string {
+	out := make([]string, 0, len(emitted))
+	for _, v := range emitted {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }

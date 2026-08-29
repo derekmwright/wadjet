@@ -436,6 +436,14 @@ type Stage struct {
 	// only its own copy, and references to the FIRST alias resolve to NULL
 	// downstream.
 	QualifyAllBuildCols bool
+
+	// ConsumerScoped marks a stage carrying a Filter or a Project that
+	// belongs to ONE of its consumers — a predicate written above a CTE
+	// REFERENCE rather than inside the CTE's body. A stage like that must
+	// never acquire a second consumer, because the second would read the
+	// filtered stream (#656 follow-up); assertNoConsumerScopedFilterOn-
+	// SharedStage is the check, and ValidateNativeDAGShape runs it.
+	ConsumerScoped bool
 }
 
 // OutputRename pairs a worker-emitted column name with the SELECT-list alias
@@ -906,6 +914,16 @@ type Planner struct {
 	// Q15 ~50% under multi-file scans (project_q15_dual_chain_float_drift).
 	// Reset at the start of generateStages so each query gets a fresh map.
 	ctePlannedTerminal map[string]string
+	// cteTerminals maps a CTE body's terminal stage ID to whether that CTE
+	// is referenced MORE THAN ONCE. Presence means "this stage is a CTE
+	// body's output, so a Filter above it belongs to ONE reference"; a true
+	// value means every reference reads it, so nothing consumer-specific may
+	// be attached to it at all — see filterCarrierIndex.
+	cteTerminals map[string]bool
+	// cteRefCounts is how many times each CTE name appears in the logical
+	// plan, counted once before the walk because the second reference is
+	// only discovered after the first has already emitted its stages.
+	cteRefCounts map[string]int
 
 	// scanDeletes caches the merge-on-read DELETE state walkStages read for
 	// each base table, table name → (file path → file-absolute deleted row
@@ -970,6 +988,11 @@ type Planner struct {
 	// stage during the last PlanDistributed. AttachedFilterExprs exposes it
 	// for the conservation gate; see filter_carrier.go.
 	attachedFilterExprs []string
+	// attachedProjectionOutputs records the projection OUTPUT names that
+	// were on a stage the moment stage emission finished. A pass that
+	// deletes the carrying stage drops the projection exactly as it drops a
+	// predicate, and only tracking both catches it.
+	attachedProjectionOutputs []string
 }
 
 // refuseJoin parks the first refusal; PlanDistributed returns it. First one
@@ -2743,13 +2766,29 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		if pn := findOutputProjectionNode(node); pn != nil && len(pn.Children) == 1 {
 			renameChild = pn.Children[0]
 		}
+		// A name some stage's projection already MATERIALIZES is the name
+		// the stream carries; resolving it back to a source column would
+		// point the gather at the column that projection renamed away.
+		// absorbAggregateOutputProjection is what makes this reachable: it
+		// puts `g + 1 AS gk` on the aggregate stage during stage emission,
+		// so by the time the renames are computed the stream really does
+		// carry `gk` (#656).
+		materialized := map[string]bool{}
+		for i := range stages {
+			for _, n := range stageProjectionOutputs(&stages[i]) {
+				materialized[n] = true
+			}
+		}
 		for i := range renames {
+			if materialized[strings.ToLower(renames[i].From)] {
+				continue
+			}
 			if src, ok := p.aggStageRenames[strings.ToLower(renames[i].From)]; ok {
 				renames[i].From = src
 				continue
 			}
 			if renames[i].Expr == nil {
-				renames[i].From = resolveOutputRenameSource(renames[i].From, renameChild)
+				renames[i].From = resolveOutputRenameSourceForGather(renames[i].From, renameChild)
 			}
 		}
 		for i := range stages {
@@ -3040,9 +3079,17 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		isPlainScan := s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0
 		isJoin := (s.Type == StageHashJoin || s.Type == StageBroadcastJoin || s.Type == StageSortMergeJoin) &&
 			len(s.GroupByCols) == 0
-		// A WINDOW producer takes the same aliased projection, with one
-		// difference that is the whole of #656 shape g: its OpProject runs
-		// ABOVE the operator, not below it. The window fragment forwards
+		// A WINDOW, SORT, LIMIT or PROJECT producer takes the same aliased
+		// projection, with one difference that is the whole of #656 shape g:
+		// its OpProject runs ABOVE the operator, not below it. All four
+		// FORWARD their input's columns, which is what makes the SELECT list
+		// — written against the producer's output — evaluable there. An
+		// AGGREGATE is deliberately NOT in that set: its output is group keys
+		// and aggregate outputs, not its input's columns, so a SELECT list
+		// written over `COALESCE(l_extendedprice, 0)` would re-evaluate
+		// COALESCE against a stream that no longer carries l_extendedprice.
+		// absorbAggregateOutputProjection is the aggregate's route, and it
+		// spells against the OUTPUT names. The window fragment forwards
 		// every input column and appends its own outputs, so the SELECT
 		// list — written against exactly that — is evaluable there, and
 		// without it the DAG returned the window's raw input plus the window
@@ -3050,7 +3097,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// window still has to be covered by the projection, which the check
 		// below already enforces for the join path.
 		isWindow := s.Type == StageWindow
-		if !isPlainScan && !isJoin && !isWindow {
+		if !isPlainScan && !isJoin && !isWindow && !forwardsInputColumns(s.Type) {
 			// Something else computes between here and the gather (fused
 			// scan-aggregates project via their aggregate machinery).
 			return
@@ -3106,7 +3153,15 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// sort stage's — must resolve among the projection's outputs:
 		// OpProject narrows the schema to exactly its projections. Bail
 		// (keep old behavior) when uncovered.
-		sortKeys := append([]SortKeySpec(nil), s.SortKeys...)
+		// A stage that projects AFTER its own operator has already ordered
+		// by its own keys before the projection runs, so those keys need not
+		// survive it; a scan or a join projects BEFORE its fused ordering
+		// and they must. The sort ABOVE (viaSort) always must — the
+		// projection is below it either way.
+		var sortKeys []SortKeySpec
+		if !projectionRunsAfterStageOperator(s.Type) {
+			sortKeys = append(sortKeys, s.SortKeys...)
+		}
 		if viaSort != nil {
 			sortKeys = append(sortKeys, viaSort.SortKeys...)
 		}
@@ -3117,17 +3172,21 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		if !hasExpr && !sortKeysNeedAlias(sortKeys, specs, aliased) {
 			return
 		}
-		for _, k := range sortKeys {
-			covered := false
-			for _, sp := range aliased {
-				if strings.EqualFold(sp.Name, k.Column) {
-					covered = true
-					break
-				}
-			}
-			if !covered {
+		if !projectionCoversSortKeys(aliased, sortKeys) {
+			// The projection cannot go BELOW this ordering: OpProject
+			// narrows the batch to its outputs, so a sort key it does not
+			// emit would be gone by the time the sort ran. Put it ABOVE the
+			// standalone sort instead, where the ordering has already
+			// happened — `SELECT id * 2 AS d FROM (SELECT id FROM t ORDER BY
+			// id LIMIT 5) s` orders by `id` and returns `d`, and declining
+			// here is what returned the raw `id` column instead (#656
+			// follow-up).
+			if viaSort == nil || len(viaSort.ProjectExprs) > 0 {
 				return
 			}
+			viaSort.ProjectExprs = aliased
+			repointGatherRenames(gather, aliased)
+			return
 		}
 		s.ProjectExprs = aliased
 		// This fragment now emits the SELECT list under its FINAL names, so
@@ -3144,14 +3203,30 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// term (#320). Hidden columns are appended last precisely so the
 		// leading indices still line up — and leaving them unnamed here is
 		// what drops them: the gather projects to exactly the names it lists.
-		if len(gather.OutputRenames) <= len(aliased) {
-			for j := range gather.OutputRenames {
-				if gather.OutputRenames[j].Expr == nil {
-					gather.OutputRenames[j].From = aliased[j].Name
-				}
-			}
-		}
+		repointGatherRenames(gather, aliased)
 		return
+	}
+}
+
+// repointGatherRenames points each of the gather's source names at the name
+// the producing fragment now emits, once a projection has been attached to
+// it.
+//
+// Not merely redundant: when one item's alias shadows another item's source
+// column ("n_name AS n_comment, n_comment AS c"), the stale pair matches the
+// column this projection already renamed and renames it a second time — both
+// outputs came back named "c". The rename list carries only the VISIBLE
+// select items, so it can be shorter than the projection when the plan
+// materialized an ORDER BY term (#320); hidden columns are appended last
+// precisely so the leading indices still line up.
+func repointGatherRenames(gather *Stage, aliased []ProjectExprSpec) {
+	if gather == nil || len(gather.OutputRenames) > len(aliased) {
+		return
+	}
+	for j := range gather.OutputRenames {
+		if gather.OutputRenames[j].Expr == nil {
+			gather.OutputRenames[j].From = aliased[j].Name
+		}
 	}
 }
 
@@ -4215,6 +4290,8 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	// (typically when emitScalarProducerStages re-walks a CTE-referencing
 	// scalar subquery, which would otherwise double-compute the CTE).
 	p.ctePlannedTerminal = make(map[string]string)
+	p.cteTerminals = make(map[string]bool)
+	p.cteRefCounts = countCTEReferences(node)
 	p.scanDeletes = nil
 	p.limitStageRoot = node
 	p.setOpErr = nil
@@ -4223,7 +4300,12 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.inSubqueryErr = nil
 	p.aggStageRenames = nil
 	p.attachedFilterExprs = nil
+	p.attachedProjectionOutputs = nil
 	p.walkStages(node, &stages, nil)
+	for i := range stages {
+		p.attachedProjectionOutputs = append(p.attachedProjectionOutputs,
+			stageProjectionOutputs(&stages[i])...)
+	}
 	// A project stage filterCarrierIndex reserved for a predicate that then
 	// turned out to have no text is a full materialization round-trip for
 	// nothing. Drop it before anything else reads the graph.
@@ -5125,7 +5207,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		before := len(*stages)
 		defer func() {
 			if len(*stages) > before {
-				p.ctePlannedTerminal[cacheKey] = (*stages)[len(*stages)-1].ID
+				termID := (*stages)[len(*stages)-1].ID
+				p.ctePlannedTerminal[cacheKey] = termID
+				// Referenced more than once: every reference reads this
+				// stage's output, so nothing consumer-specific may be
+				// attached to it (#656 follow-up).
+				p.cteTerminals[termID] = p.cteRefCounts[strings.ToLower(node.CTEName)] > 1
 			}
 		}()
 	}
@@ -5637,7 +5724,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// SELECT list over an AGGREGATE: `(SELECT g, COUNT(*)+1 AS k …
 			// GROUP BY g) b` joined ON b.k names a column the aggregate
 			// stage does not emit, and the shuffle refused the plan (#681).
-			if idx, ok := aggregateProjectionTarget(child, *stages, childStart); ok {
+			if idx, ok := aggregateProjectionTarget(child, *stages, childStart); ok &&
+				!p.cteTerminals[(*stages)[idx].ID] {
 				absorbAggregateOutputProjection(child, &(*stages)[idx])
 			}
 			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
@@ -5926,7 +6014,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// projection, which is what filterCarrierIndex arranges once the
 		// stage carries one (#656 shape f).
 		if len(node.Children) == 1 {
-			if idx, ok := aggregateProjectionTarget(node.Children[0], *stages, preFilterCount); ok {
+			if idx, ok := aggregateProjectionTarget(node.Children[0], *stages, preFilterCount); ok &&
+				!p.cteTerminals[(*stages)[idx].ID] {
+				// Never onto a CTE body's terminal: an OpProject NARROWS,
+				// and every other reference of that CTE reads the same
+				// stage (#656 follow-up).
 				absorbAggregateOutputProjection(node.Children[0], &(*stages)[idx])
 			}
 		}
@@ -5940,7 +6032,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// predicate land on a merge_sort a later pass deletes, on a
 			// deduped cte-alias that never dispatches, or on a stage whose
 			// projection runs above the filter slot (#656).
-			filterIdx := filterCarrierIndex(stages)
+			filterIdx := filterCarrierIndex(stages, p.cteTerminals)
 			if filterIdx < 0 {
 				break
 			}
@@ -6138,7 +6230,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// for the whole stage: the keys are shared across its OVER
 			// clauses, and computing a shared key twice would put two
 			// columns of one name on the batch.
-			WindowKeyExprs: windowKeySpecs(winKeys),
+			WindowKeyExprs: respellWindowKeyExprs(windowKeySpecs(winKeys), winChild),
 			WindowCols:     winCols,
 		}
 		// Only depend on leaf stages from subtree (not transitive deps like scan).

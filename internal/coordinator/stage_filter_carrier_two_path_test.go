@@ -474,6 +474,252 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		}
 	})
 
+	// --- the adversarial-review round -------------------------------------
+	//
+	// Every shape below was silent or loud on a plan the first round's gates
+	// accepted. They are here because the gates could not see them, not
+	// because the shapes are exotic: two of them are a CTE referenced twice.
+
+	t.Run("A1/WhereOnTheFirstOfTwoCTERefs", func(t *testing.T) {
+		// The FIRST reference walked emits the CTE body's real producer, so
+		// its WHERE landed on the very stage the OTHER reference reads —
+		// every reference saw the filtered stream. 109 became 18, silently,
+		// and 209 became 27 with three references. The mirror of the
+		// deduped-alias case, which round one closed while opening this.
+		const lit = 90000000
+		var filtered, all int64
+		for _, r := range rows {
+			if r.id >= 100 {
+				continue
+			}
+			all++
+			if v, ok := r.c.(int64); ok && v > lit {
+				filtered++
+			}
+		}
+		for _, c := range []struct {
+			name string
+			sql  string
+			want int64
+		}{
+			{"TwoRefs", `WITH c AS (SELECT id, c_i64 AS v FROM %[1]s WHERE id < 100) ` +
+				`SELECT COUNT(*) AS n FROM (SELECT id FROM c WHERE v > %[2]d UNION ALL ` +
+				`SELECT id FROM c) u`, filtered + all},
+			{"ThreeRefs", `WITH c AS (SELECT id, c_i64 AS v FROM %[1]s WHERE id < 100) ` +
+				`SELECT COUNT(*) AS n FROM (SELECT id FROM c WHERE v > %[2]d UNION ALL ` +
+				`SELECT id FROM c UNION ALL SELECT id FROM c) u`, filtered + 2*all},
+			// The same through a JOIN rather than a union (#656 B3).
+			{"ThroughAJoin", `WITH c AS (SELECT id, c_i64 AS v FROM %[1]s WHERE id < 100) ` +
+				`SELECT COUNT(*) AS n FROM (SELECT id FROM c WHERE v > %[2]d) x ` +
+				`JOIN (SELECT id AS j FROM c) y ON x.id = y.j`, filtered},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sfcScalar(t, ctx, single, coord, fmt.Sprintf(c.sql, tbl, lit), "n", c.want)
+			})
+		}
+	})
+	t.Run("A2/WhereAboveAWindowNamingAnAlias", func(t *testing.T) {
+		// resolveFilterInSubtree walked through Distinct, Sort and LIMIT but
+		// not a WINDOW, so `gk` reached the window stage's filter naming a
+		// column its input does not carry: UNKNOWN on every row, zero rows.
+		var want int64
+		for _, r := range rows {
+			if r.id >= 50 {
+				continue
+			}
+			if g, ok := r.g.(int32); ok && g == 1 {
+				want++
+			}
+		}
+		sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+			`WITH c AS (SELECT id, g AS gk, c_i64 AS v FROM %s WHERE id < 50) `+
+				`SELECT COUNT(*) AS n FROM (SELECT id, gk, `+
+				`ROW_NUMBER() OVER (PARTITION BY gk ORDER BY id) AS rn FROM c) x WHERE gk = 1`,
+			tbl), "n", want)
+	})
+	t.Run("A3/WindowArgumentExpressionOverAnAlias", func(t *testing.T) {
+		// The window ARGUMENT is materialized as __winkey_N, and its
+		// EXPRESSION TEXT still named the CTE's alias — round one re-spelled
+		// only the bare InputCol. NULL on every row.
+		var sum int64
+		for _, r := range rows[:5] {
+			sum += r.c.(int64) * 2
+		}
+		sql := fmt.Sprintf(
+			`WITH c AS (SELECT id, c_i64 AS v FROM %s WHERE id < 5) `+
+				`SELECT id, SUM(v * 2) OVER () AS s FROM c ORDER BY id`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			res := sfcRun(t, arm, sql)
+			for _, r := range res.Rows {
+				got, ok := numAsInt(r["s"])
+				if !ok || got != sum {
+					t.Errorf("%s arm answered %v, want %d\n  SQL: %s", arm.name, r["s"], sum, sql)
+				}
+			}
+		}
+	})
+	t.Run("B1/AggregateOutputAliasWithAHaving", func(t *testing.T) {
+		// A HAVING is a Filter between the SELECT list and the aggregate, and
+		// both the projection carrier and the logical substitution guard
+		// stopped at it. The CTE form answered 0 on the DAG, the derived form
+		// 0 on BOTH paths, and the join form failed loud.
+		want := map[int64]int64{}
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok {
+				want[int64(g)+1]++
+			}
+		}
+		for k, v := range want {
+			if k <= 3 || v <= 5 {
+				delete(want, k)
+			}
+		}
+		for _, c := range []struct{ name, sql string }{
+			{"CTE", `WITH c AS (SELECT g+1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g+1 ` +
+				`HAVING COUNT(*) > 5) SELECT gk, n FROM c WHERE gk > 3 ORDER BY gk`},
+			{"Derived", `SELECT gk, n FROM (SELECT g+1 AS gk, COUNT(*) AS n FROM %[1]s ` +
+				`GROUP BY g+1 HAVING COUNT(*) > 5) s WHERE gk > 3 ORDER BY gk`},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sql := fmt.Sprintf(c.sql, tbl)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					got := map[int64]int64{}
+					for _, r := range res.Rows {
+						gk, _ := numAsInt(r["gk"])
+						n, _ := numAsInt(r["n"])
+						got[gk] = n
+					}
+					if fmt.Sprint(got) != fmt.Sprint(want) {
+						t.Errorf("%s arm answered %v, want %v\n  SQL: %s", arm.name, got, want, sql)
+					}
+				}
+			})
+		}
+		t.Run("Join", func(t *testing.T) {
+			counts := map[any]int64{}
+			for _, r := range rows {
+				counts[r.g]++
+			}
+			ids := map[int64]bool{}
+			for _, r := range rows {
+				ids[r.id] = true
+			}
+			var want int64
+			for _, cnt := range counts {
+				if cnt > 5 && ids[cnt+1] {
+					want++
+				}
+			}
+			sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+				`SELECT COUNT(*) AS n FROM %[1]s a JOIN (SELECT g, COUNT(*)+1 AS k FROM %[1]s `+
+					`GROUP BY g HAVING COUNT(*) > 5) b ON a.id = b.k`, tbl), "n", want)
+		})
+	})
+	t.Run("B2/SelectListAboveASortAndLimit", func(t *testing.T) {
+		// Nothing ever populated ProjectExprs on a sort or a limit stage
+		// despite the slots, so the SELECT list above one was never applied:
+		// the DAG returned the producer's raw column, under its own name.
+		want := []int64{0, 2, 4, 6, 8}
+		for _, c := range []struct{ name, sql string }{
+			{"Unordered", `SELECT id * 2 AS d FROM (SELECT id FROM %s ORDER BY id LIMIT 5) s`},
+			{"Ordered", `SELECT id * 2 AS d FROM (SELECT id FROM %s ORDER BY id LIMIT 5) s ORDER BY d`},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sql := fmt.Sprintf(c.sql, tbl)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if !sameNames(res.Columns, []string{"d"}) {
+						t.Errorf("%s arm returned columns %v, want [d]\n  SQL: %s",
+							arm.name, res.Columns, sql)
+					}
+					var got []int64
+					for _, r := range res.Rows {
+						v, _ := numAsInt(r["d"])
+						got = append(got, v)
+					}
+					if c.name == "Ordered" && fmt.Sprint(got) != fmt.Sprint(want) {
+						t.Errorf("%s arm answered %v, want %v\n  SQL: %s", arm.name, got, want, sql)
+					}
+					if len(got) != 5 {
+						t.Errorf("%s arm returned %d rows, want 5", arm.name, len(got))
+					}
+				}
+			})
+		}
+	})
+	t.Run("D/ComputedAliasOverAnAggregateAliasOrdered", func(t *testing.T) {
+		// A SELECT list computed over an aggregate-output alias, ordered by
+		// its own output: the sort keyed on a name nothing emitted.
+		var want []int64
+		seen := map[int64]bool{}
+		for _, r := range rows {
+			g, ok := r.g.(int32)
+			if !ok {
+				continue
+			}
+			if gk := int64(g) + 1; gk > 3 && !seen[gk] {
+				seen[gk] = true
+				want = append(want, gk*10)
+			}
+		}
+		for i := range want {
+			for j := i + 1; j < len(want); j++ {
+				if want[j] < want[i] {
+					want[i], want[j] = want[j], want[i]
+				}
+			}
+		}
+		sql := fmt.Sprintf(
+			`WITH c AS (SELECT g+1 AS gk, COUNT(*) AS n FROM %s GROUP BY g+1) `+
+				`SELECT gk*10 AS gk10 FROM c WHERE gk > 3 ORDER BY gk10`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			res := sfcRun(t, arm, sql)
+			var got []int64
+			for _, r := range res.Rows {
+				v, _ := numAsInt(r["gk10"])
+				got = append(got, v)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("%s arm answered %v, want %v\n  SQL: %s", arm.name, got, want, sql)
+			}
+		}
+	})
+	t.Run("C/WindowOverADecimalExpressionIsFloat", func(t *testing.T) {
+		// NOT a placement defect, and pinned here so the claim is checkable:
+		// DECIMAL arithmetic itself lands in float64 today (the TODO(#555)
+		// in nodeDeclaredType — expr.BinOpNumeric has no Int128 Mul), so
+		// `SELECT c_dec * 2` is float on both paths and a window over it
+		// declares what the value really is. PostgreSQL answers 20.0020.
+		// When #555 lands this pin fails, which is the signal to re-declare
+		// the materialized window key DECIMAL.
+		for _, sql := range []string{
+			fmt.Sprintf(`SELECT id, c_dec * 2 AS d FROM %s WHERE id < 5 ORDER BY id`, tbl),
+			fmt.Sprintf(`SELECT id, SUM(c_dec * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`, tbl),
+		} {
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				for _, r := range res.Rows {
+					for _, col := range []string{"d", "s"} {
+						v, present := r[col]
+						if !present {
+							continue
+						}
+						if _, isFloat := v.(float64); !isFloat {
+							t.Errorf("%s arm returned %T for %q; the #555 pin expected float64. "+
+								"If DECIMAL arithmetic is exact now, re-declare the materialized "+
+								"window key DECIMAL and delete this pin.\n  SQL: %s",
+								arm.name, v, col, sql)
+						}
+					}
+				}
+			}
+		}
+	})
+
 	// --- controls: shapes that were already right --------------------------
 
 	t.Run("ctl/HavingStillRunsBelowTheSelectList", func(t *testing.T) {

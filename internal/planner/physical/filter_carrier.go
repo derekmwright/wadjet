@@ -53,6 +53,15 @@ func (p *Planner) AttachedFilterExprs() []string {
 	return append([]string(nil), p.attachedFilterExprs...)
 }
 
+// AttachedProjectionOutputs lists the projection OUTPUT names that were on a
+// stage the moment the last PlanDistributed finished emitting stages. Every
+// one must still be emitted by some stage in the final plan — the projection
+// half of the conservation gate, which a pass that deletes a projection's
+// carrier breaks exactly as it breaks a predicate's.
+func (p *Planner) AttachedProjectionOutputs() []string {
+	return append([]string(nil), p.attachedProjectionOutputs...)
+}
+
 // FilterAliasSpec is the alternate, query-written spelling of one predicate.
 // See Stage.FilterAliases.
 type FilterAliasSpec struct {
@@ -108,29 +117,66 @@ func stageEvaluatesFilter(s *Stage) bool {
 		return true
 	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
 		return true
-	case StageProject:
-		// buildProjectFragment runs the filter ABOVE its own projection, so
-		// this stage type can always take one more.
-		return true
-	case StageAggregate, StageFinalAggregate, StageMergeAggregate,
+	case StageProject, StageAggregate, StageFinalAggregate, StageMergeAggregate,
 		StageSort, StageMergeSort, StageWindow, StageLimit, StageUnion:
+		// All of these run their projection ABOVE their filter slot — the
+		// order a Project above them needs — so a predicate that must run
+		// above THAT projection cannot share the slot. It gets its own
+		// StageProject.
 		return len(s.ProjectExprs) == 0
+	}
+	return false
+}
+
+// projectionRunsAfterStageOperator reports whether a stage's ProjectExprs are
+// applied AFTER its own operator, so a sort key the stage itself orders by
+// does not have to survive the projection.
+//
+// The difference decides where a SELECT list may be attached: a scan or a
+// join projects BEFORE its fused ordering, so that ordering's keys must be
+// among the projection's outputs; a sort, window, limit or project stage
+// projects after, so they need not be.
+func projectionRunsAfterStageOperator(typ string) bool {
+	switch typ {
+	case StageSort, StageMergeSort, StageWindow, StageLimit, StageProject:
+		return true
 	}
 	return false
 }
 
 // filterCarrierIndex returns the index of the stage a Filter's predicates
 // should be attached to, appending a StageProject above the last emitted
-// stage when that stage would not run them.
+// stage when that stage would not run them, or when it is SHARED.
+//
+// cteTerminals maps a CTE body's terminal stage ID to whether that CTE is
+// referenced more than once. Presence means the predicate sits ABOVE a CTE
+// reference rather than inside its body, so it belongs to one consumer; a
+// true value means every reference reads that stage, and the predicate must
+// not land on it at all.
+//
+// The FIRST reference walked emits the body's real producer, so
+// `filterIdx = len(*stages)-1` put its WHERE on the very stage the OTHER
+// references read, and every one of them saw a filtered stream:
+// `WITH c AS (…) SELECT … FROM (SELECT id FROM c WHERE v>x UNION ALL
+// SELECT id FROM c)` answered 18 rows where PostgreSQL answers 109, and 27
+// where three references answer 119. It is the mirror of the deduped-alias
+// case ADR-0025 already names — closed there, open here — and silent the
+// same way.
 //
 // Returns -1 when there is no stage to attach to at all, which the caller
 // treats as "nothing to do" exactly as it did before.
-func filterCarrierIndex(stages *[]Stage) int {
+func filterCarrierIndex(stages *[]Stage, cteTerminals map[string]bool) int {
 	last := len(*stages) - 1
 	if last < 0 {
 		return -1
 	}
-	if stageEvaluatesFilter(&(*stages)[last]) {
+	shared, isCTETerminal := cteTerminals[(*stages)[last].ID]
+	if !shared && stageEvaluatesFilter(&(*stages)[last]) {
+		// A single-reference CTE body's terminal may carry it, but it is
+		// marked: a later pass that gives the stage a second consumer turns
+		// this into the shared case, and assertNoConsumerScopedFilterOn-
+		// SharedStage is what notices.
+		(*stages)[last].ConsumerScoped = (*stages)[last].ConsumerScoped || isCTETerminal
 		return last
 	}
 	depID := (*stages)[last].ID
