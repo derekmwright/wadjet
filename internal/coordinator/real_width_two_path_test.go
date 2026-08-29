@@ -307,11 +307,12 @@ func rwpWant() []rwpCase {
 		// every non-negative column; rows 22 and 23 are why these can fail.
 		//
 		// The CASE forces the row-at-a-time evaluator, which is what the DAG
-		// compiles every scan-pushed filter to — so this is the arm the fix
-		// has to reach on the distributed path. The BARE spelling is left out
-		// deliberately: the vectorized kernel still reads a quoted constant as
-		// 0.0 (#646, the float arm of #536), pinned in the pg-oracle corpus
-		// and in wadjet.TestFloatColumnsKeepTheirOwnNaNRule rather than here.
+		// compiles every scan-pushed filter to — so this is the arm #534's fix
+		// had to reach on the distributed path. The BARE spelling used to be
+		// left out here, because the vectorized kernel read a quoted constant
+		// as 0.0; #646 closed that, so the bare forms are gated in the #646
+		// block below (GtQuotedNegInfinity and its neighbours) and the
+		// pg-oracle pins are deleted.
 		{"GtNegInfinityInCase", "CASE WHEN r_val > '-Infinity' THEN 1 ELSE 0 END = 1",
 			join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
 		{"LtNegInfinityInCase", "CASE WHEN r_val < '-Infinity' THEN 1 ELSE 0 END = 1", nil},
@@ -446,6 +447,61 @@ func rwpWant() []rwpCase {
 		{"KeyNullifQuoted", "NULLIF(r_key, '3') IS NULL", []int64{3}},
 		{"KeyEqUnderscore", "r_key = '1_0'", []int64{10}},
 		{"KeyEqHex", "r_key = '0x0A'", []int64{10}},
+
+		// --- The COMPOSITE's type is the call's, not the pair's (#646 review)
+		//
+		// GREATEST/LEAST, CASE and COALESCE resolve ONE type over every
+		// argument (select_common_type) and coerce the unknown-typed literal
+		// to THAT. Reading each argument's OWN type instead — which is what a
+		// pairwise comparison does, and what a kind folded down to "some
+		// number" leaves the row's BOX to decide — gives three different
+		// wrong answers, and all three are here:
+		//
+		//   - a PG-SUPERSET REGRESSION, where the pair's narrower type
+		//     refuses a literal the call's type reads. `GREATEST(r_key,
+		//     '3.1', d_val)` folds to double precision and answers; asking
+		//     bigint's input function for '3.1' is 22P02.
+		//   - a SILENT one, where the literal is read at the wrong WIDTH.
+		//   - a DATA-DEPENDENT one, where the box differs per row: the NULL
+		//     row of `COALESCE(r_val, 0)` boxes an int64 and every other row
+		//     a float64.
+		//
+		// Row 18 is all-NULL and row 21 is NaN, and both are in these answers
+		// on purpose: PostgreSQL's GREATEST/LEAST SKIP a NULL argument (so
+		// `GREATEST(NULL,'3.1',NULL)` is 3.1, which is > 0) and NaN is the
+		// greatest float (so it wins every GREATEST and fails every `<=`).
+		{"GreatestIntQuotedFracDouble", "GREATEST(r_key, '3.1', d_val) > 0", seq(0, 23)},
+		{"LeastIntQuotedFracDouble", "LEAST(r_key, '3.1', d_val) > 0", join(seq(1, 18), []int64{20, 21})},
+		// The literal is out of REAL's range and inside DOUBLE's, and the
+		// call folds to double — so it is a value, not the 22003 the real
+		// arm would raise.
+		{"GreatestRealQuotedOverReal", "GREATEST(r_val, '1e39', d_val) > 0", seq(0, 23)},
+		{"LeastRealQuotedOverReal", "LEAST(r_val, '1e39', d_val) > 0", join(seq(0, 18), []int64{20, 21})},
+		// No literal inside the call at all: the composite's own folded type
+		// is what the OUTER quoted literal is coerced to. real ∪ bigint is
+		// real, so '3.1' narrows and finds row 3.
+		{"GreatestIntRealEqQuoted", "GREATEST(r_key, r_val) = '3.1'", []int64{3}},
+		{"CaseIntRealEqQuoted", "CASE WHEN r_key > 0 THEN r_key ELSE r_val END = '3.1'", nil},
+		{"CoalesceRealIntEqQuoted", "COALESCE(r_val, 0) = '3.1'", []int64{3}},
+		// The same COALESCE against a literal only the REAL rounding can
+		// match: 16777217 narrows onto row 20's 2^24.
+		{"CoalesceRealIntEqQuotedBig", "COALESCE(r_val, 0) = '16777217'", []int64{20}},
+		{"CoalesceIntRealEqQuoted", "COALESCE(r_key, 0) = '3'", []int64{3}},
+		// WIDTH, in both directions over one literal. The three-argument form
+		// folds to DOUBLE, where 16777217 is exact and beats the bound; the
+		// two-argument form folds to REAL, where it rounds to 2^24 and does
+		// not. Same literal, same bound, opposite answers — which is the
+		// whole of "the call's type decides".
+		{"GreatestRealQuotedIntDouble", "GREATEST(r_val, '16777217', d_val) <= 16777216.5", nil},
+		{"GreatestDoubleQuotedIntReal", "GREATEST(d_val, '16777217', r_val) <= 16777216.5", nil},
+		{"GreatestRealOnlyQuotedInt", "GREATEST(r_val, '16777217') <= 16777216.5",
+			join(seq(0, 20), []int64{22, 23})},
+		// Argument ORDER changes nothing, which is why the permutation is
+		// here: the fold is over the SET of arguments.
+		{"GreatestDoubleQuotedFracInt", "GREATEST(d_val, '3.1', r_key) > 0", seq(0, 23)},
+		{"GreatestIntQuotedIntDouble", "GREATEST(r_key, '3', d_val) > 0", seq(0, 23)},
+		// A composite inside another boxed site.
+		{"NullifGreatestIntRealQuoted", "NULLIF(GREATEST(r_key, r_val), '3.1') IS NULL", []int64{3}},
 	}
 }
 
@@ -709,6 +765,22 @@ func TestQuotedNumericLiteralRefusalIsOnBothPaths(t *testing.T) {
 			`invalid input syntax for type real: "abc"`},
 		{"NullOnlyPredicate", "r_val IS NULL AND r_val = 'abc'",
 			`invalid input syntax for type real: "abc"`},
+		// --- the COMPOSITE's folded type is what the message names --------
+		//
+		// A literal no numeric type can read is still refused inside a
+		// composite, and the type in the message is the CALL's, not the first
+		// column's: PostgreSQL folds `GREATEST(bigint, 'abc', double)` to
+		// double precision and says so.
+		{"GreatestGarbageFoldsToDouble", "GREATEST(r_key, 'abc', d_val) > 0",
+			`invalid input syntax for type double precision: "abc"`},
+		{"LeastGarbageFoldsToDouble", "LEAST(r_key, 'abc', d_val) > 0",
+			`invalid input syntax for type double precision: "abc"`},
+		// A range failure follows the fold too: real ∪ int4 is real, so
+		// '1e39' is out of range HERE where the double fold above reads it.
+		{"CoalesceRealIntOverReal", "COALESCE(r_val, 0) = '1e39'",
+			`"1e39" is out of range for type real`},
+		{"GreatestRealOnlyOverReal", "GREATEST(r_val, '1e39') > 0",
+			`"1e39" is out of range for type real`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sql := fmt.Sprintf("SELECT r_key FROM %s WHERE %s", rwpTable, c.where)
@@ -726,6 +798,120 @@ func TestQuotedNumericLiteralRefusalIsOnBothPaths(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), c.want) {
 					t.Errorf("%s: %s raised %v, want a refusal naming %q", arm.name, sql, err, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestExtremumWinnerIsMaterializedAtTheCallsType is the VALUE half of the
+// composite rule (#646 review): when the QUOTED literal is the argument that
+// wins, GREATEST/LEAST must answer the NUMBER at the call's folded type — not
+// the Go string the literal arrived as.
+//
+// Returning the string was a crash on one argument order and a wrong value on
+// the other: `GREATEST(d_val, '16777217', r_val)` projected four characters
+// into a FLOAT64 vector ("cannot store string into FLOAT64 vector") while
+// `GREATEST(r_val, '16777217', d_val)` answered the string through a path that
+// happened to accept it. PostgreSQL answers the double 16777217 for both.
+//
+// Every case picks a row on which the LITERAL wins, so the assertion is on the
+// literal's own materialization rather than on which argument was chosen: row
+// 19 holds zero in r_val and d_val. The fold is DOUBLE (real ∪ double), where
+// 16777217 is exact — the two-argument REAL fold, where it rounds to 2^24, is
+// asserted as a row set by GreatestRealOnlyQuotedInt above. Both wants are
+// PostgreSQL 17.11's over this fixture.
+//
+// The DECLARED type of the call is a SEPARATE layer and it is still the first
+// decided argument's, not the fold's — expr.CommonDeclType returns decided[0]
+// for a mixed numeric list, which its own TODO(#555) defers. So these two
+// cases put the DOUBLE column first, where the declaration agrees with the
+// fold and the materialized value survives into the output vector. The
+// permutations where it does not are pinned below, with PostgreSQL's answer
+// recorded, so lifting that deferral shows up as those pins failing.
+func TestExtremumWinnerIsMaterializedAtTheCallsType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, c := range []struct {
+		name string
+		expr string
+		key  int
+		want float64
+	}{
+		// This one is the ex-CRASH: returning the literal's Go string here
+		// raised "cannot store string into FLOAT64 vector".
+		{"GreatestDoubleQuotedReal", "GREATEST(d_val, '16777217', r_val)", 19, 16777217},
+		{"LeastDoubleQuotedReal", "LEAST(d_val, '-16777217', r_val)", 19, -16777217},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT %s AS v FROM %s WHERE r_key = %d", c.expr, rwpTable, c.key)
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+				if len(rows) != 1 {
+					t.Fatalf("%s: %s returned %d rows, want 1", arm.name, sql, len(rows))
+				}
+				got, ok := rows[0]["v"].(float64)
+				if !ok {
+					t.Fatalf("%s: %s answered %#v (%T), want a float64 — PostgreSQL answers %v",
+						arm.name, sql, rows[0]["v"], rows[0]["v"], c.want)
+				}
+				if got != c.want {
+					t.Errorf("%s: %s = %v, want %v (PostgreSQL 17)", arm.name, sql, got, c.want)
+				}
+			}
+		})
+	}
+
+	// PINNED: the same value through a call whose FIRST decided argument is
+	// narrower than the fold. The comparison and the materialization are the
+	// fold's — that is what this commit fixed, and the row-set entries above
+	// prove it — but the projection's DECLARED type is expr.CommonDeclType's
+	// decided[0], so the output vector narrows the answer on the way in:
+	// real for GREATEST(real, …, double) and bigint for GREATEST(bigint, …,
+	// double). PostgreSQL declares double precision for both.
+	//
+	// These are asserted at what wadjet ANSWERS today, with PostgreSQL's
+	// answer named, because the gap is expr.CommonDeclType's deferred
+	// numeric fold (its own TODO(#555)) and not this rule's: widening it
+	// changes the declared type of every mixed-numeric COALESCE, GREATEST,
+	// LEAST, NULLIF and CASE in the engine, which is #555's arc and needs
+	// #555's gates. Deleting these pins is that fix's proof.
+	for _, c := range []struct {
+		name   string
+		expr   string
+		key    int
+		want   any     // what wadjet answers, through the narrower declaration
+		pgWant float64 // what PostgreSQL answers
+	}{
+		{"PinnedRealFirstNarrowsTheFold", "GREATEST(r_val, '16777217', d_val)", 19,
+			float32(16777216), 16777217},
+		{"PinnedBigintFirstTruncatesTheFold", "GREATEST(r_key, '3.5', d_val)", 0,
+			int64(3), 3.5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT %s AS v FROM %s WHERE r_key = %d", c.expr, rwpTable, c.key)
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+				if len(rows) != 1 {
+					t.Fatalf("%s: %s returned %d rows, want 1", arm.name, sql, len(rows))
+				}
+				if got := rows[0]["v"]; got != c.want {
+					t.Errorf("%s: %s = %#v (%T), pinned at %#v; PostgreSQL answers %v "+
+						"— if this now agrees with PostgreSQL, DELETE the pin",
+						arm.name, sql, got, got, c.want, c.pgWant)
 				}
 			}
 		})

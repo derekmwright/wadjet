@@ -261,11 +261,6 @@ type extremumRefusal struct {
 	// `GREATEST(bigint_col, '3.1', 2.5)` would fold to bigint and refuse a
 	// query PostgreSQL answers as numeric.
 	litTyp []batch.TypeID
-	// unknownArg records an argument neither a column nor a literal — a
-	// function call, a CAST, a scalar subquery — whose type this layer cannot
-	// read. The fold is then a LOWER BOUND on PostgreSQL's, so a refusal is
-	// only safe for a literal EVERY numeric type refuses; see check.
-	unknownArg bool
 }
 
 // extremumArms is pickExtremum's full arming: the refusal above, plus one
@@ -279,6 +274,102 @@ type extremumArms struct {
 	refuse *extremumRefusal
 	ops    []boxOperand
 	texts  []string
+	// common caches the CALL's folded kind — select_common_type over every
+	// argument — as int32(k)+1, 0 while unsettled. It is what every pair
+	// compares at, because PostgreSQL resolves GREATEST/LEAST's type ONCE and
+	// coerces the unknown-typed literal to THAT: `GREATEST(bigint, '3.1',
+	// double)` is a double comparison there and answers, where coercing the
+	// literal per PAIR asked bigint's input function for it and raised 22P02.
+	// Same publish boxOperand.kind uses, for the same reason.
+	common atomic.Int32
+}
+
+// commonKind folds every non-quoted argument's kind through PostgreSQL's
+// select_common_type ladder, and answers boxUnknown when the fold cannot be
+// made — an argument whose declaration this layer cannot read makes the fold a
+// LOWER BOUND on PostgreSQL's, and a lower bound is what refuses at the wrong
+// width.
+func (a *extremumArms) commonKind(b *batch.RecordBatch) boxKind {
+	if v := a.common.Load(); v != 0 {
+		return boxKind(v - 1)
+	}
+	kind, have, settled := boxUnknown, false, true
+	for i := range a.ops {
+		k := a.ops[i].resolve(b)
+		if a.ops[i].kind.Load() == 0 {
+			settled = false
+		}
+		if k == boxQuoted {
+			continue // unknown-typed: it is the operand being coerced
+		}
+		k = foldKind(a.ops[i].expr, k)
+		if !have {
+			kind, have = k, true
+			continue
+		}
+		if k == kind {
+			continue
+		}
+		w, ok := widerNumberKind(k, kind)
+		if !ok {
+			kind, have = boxUnknown, true
+			break
+		}
+		kind = w
+	}
+	if !have {
+		kind = boxUnknown
+	}
+	if settled {
+		a.common.Store(int32(kind) + 1)
+	}
+	return kind
+}
+
+// materialize is the VALUE half of the same rule: the argument that wins is
+// returned AT THE CALL'S TYPE, not in whatever box it arrived in.
+//
+// A QUOTED literal arrives as a Go string, and pickExtremum returned that
+// string when the literal won — so `GREATEST(r_val, '16777217', d_val)`
+// projected the four characters and the store raised "cannot store string into
+// FLOAT64 vector", while the comparison that chose it had already been made at
+// the wrong width. PostgreSQL answers the double 16777217.
+func (a *extremumArms) materialize(b *batch.RecordBatch, idx int, v any) any {
+	if a == nil || idx < 0 || idx >= len(a.ops) {
+		return v
+	}
+	if a.ops[idx].resolve(b) != boxQuoted {
+		return v
+	}
+	typ, ok := numberKindType(a.commonKind(b))
+	if !ok {
+		return v
+	}
+	text := a.texts[idx]
+	switch typ {
+	case batch.TypeFloat64:
+		f, st := kernel.FloatLitText(text, 64)
+		if st != kernel.NumConstOK {
+			return v
+		}
+		return f
+	case batch.TypeFloat32:
+		// float64 of the NARROWED value, which is how ColRef.Eval boxes a
+		// real column — so a real-typed GREATEST and a real column agree on
+		// the box as well as on the value.
+		f, st := kernel.FloatLitText(text, 32)
+		if st != kernel.NumConstOK {
+			return v
+		}
+		return float64(float32(f))
+	case batch.TypeInt32, batch.TypeInt64:
+		n, st := kernel.IntLitText(text)
+		if st != kernel.NumConstOK {
+			return v
+		}
+		return n
+	}
+	return v
 }
 
 // armExtremumArms builds the per-argument table. It is always built — unlike
@@ -318,6 +409,21 @@ func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (c in
 	}
 	lk := a.ops[li].resolve(b)
 	rk := a.ops[ri].resolve(b)
+	// Every pair compares at the CALL's folded type, never at the type of the
+	// argument this pair happens to hold: PostgreSQL coerces the unknown-typed
+	// literal to select_common_type's answer once, for the whole call. Reading
+	// each argument's own type instead made `GREATEST(r_key, '3.1', d_val)`
+	// refuse with "for type bigint" on the (r_key, '3.1') pair, where
+	// PostgreSQL folds to double precision and answers — the same finding #517
+	// made about the refusal, one level down in the comparison.
+	if ck := a.commonKind(b); isNumberKind(ck) {
+		if isNumberKind(lk) {
+			lk = ck
+		}
+		if isNumberKind(rk) {
+			rk = ck
+		}
+	}
 	if !pairApplies(lk, rk, a.texts[li], a.texts[ri]) {
 		return 0, false, false
 	}
@@ -370,7 +476,6 @@ func armExtremum(argExprs []Expr) *extremumRefusal {
 				continue
 			}
 		}
-		r.unknownArg = true
 	}
 	if !any {
 		return nil
@@ -431,34 +536,52 @@ func numericConstType(lit *Lit) (batch.TypeID, bool) {
 // third, which is a different type in the message for the same query — and it
 // re-introduced #517's own finding one level down: a refusal that depends on
 // which operand won a comparison is not a type rule.
-func (r *extremumRefusal) check(b *batch.RecordBatch) {
+// folded is the CALL's common type when the arms could fold one
+// (extremumArms.commonKind), and foldedOK=false when they could not — an
+// argument whose declaration this layer cannot read. Only the first case can
+// refuse a literal that SOME numeric type accepts, because a fold that missed
+// an argument is a LOWER BOUND on PostgreSQL's: `GREATEST(k, '3.1', d_val)`
+// folds to double there and ANSWERS, and refusing it against the columns this
+// layer happened to see was a PG-superset regression.
+//
+// Where the fold failed, only a literal EVERY numeric type refuses is safe to
+// raise on — `GREATEST(k, 'abc', <a subquery>)` refuses whatever the subquery
+// turns out to be — and the type NAMED in that message is the column-only
+// fold, which can differ from PostgreSQL's when the unreadable argument would
+// have widened it. A missed refusal is the conservative side; the plan-time
+// binder catches the shapes it can prove.
+func (r *extremumRefusal) check(b *batch.RecordBatch, folded batch.TypeID, foldedOK bool) {
 	if r == nil {
 		return
 	}
-	typ, ok := r.commonType(b)
+	typ, ok := folded, foldedOK
 	if !ok {
-		return
+		typ, ok = r.commonType(b)
+		if !ok {
+			return
+		}
 	}
 	for i, m := range r.mask {
 		if m == 0 {
 			continue
 		}
-		if r.unknownArg {
-			// An argument this layer cannot type could WIDEN the fold past the
-			// type computed here, so only a literal EVERY numeric type refuses
-			// is safe to raise on: `GREATEST(k, 'abc', <a subquery>)` refuses
-			// whatever the subquery turns out to be, while `GREATEST(k, '3.1',
-			// <a subquery>)` must not — PostgreSQL answers it when the
-			// subquery is a float. A missed refusal is the conservative side;
-			// the plan-time binder catches the shapes it can prove.
-			if !m.refusesEveryNumericType() {
-				continue
-			}
+		if !foldedOK && !m.refusesEveryNumericType() {
+			continue
 		}
 		if st, refuse := m.refuses(typ); refuse {
 			raiseQuotedLitRefusal(typ, r.bad[i], st)
 		}
 	}
+}
+
+// checkRefusal is extremumArms' own entry to it, so the refusal and the
+// COMPARISON fold the call's type through exactly one function.
+func (a *extremumArms) checkRefusal(b *batch.RecordBatch) {
+	if a == nil {
+		return
+	}
+	typ, ok := numberKindType(a.commonKind(b))
+	a.refuse.check(b, typ, ok)
 }
 
 // commonType folds this call's COLUMN arguments to the one type PostgreSQL's

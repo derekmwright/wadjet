@@ -120,32 +120,66 @@ func isNumberKind(k boxKind) bool {
 	return false
 }
 
-// numberKindType is a number-kind operand's effective type: the DECLARATION
-// where the kind carries one, and the box otherwise. A numeric literal and a
-// computed expression have no declaration this layer can read, and for these
-// four types the box is exact — none of them shares a Go box with another,
-// which is the whole reason DECIMAL and STRING need a declaration and these
-// do not (ADR-0012 item 8).
-func numberKindType(k boxKind, v any) batch.TypeID {
+// numberKindType is a number-kind operand's effective type, and ok=false for
+// boxNumber — the kind that says "a number whose DECLARED type this layer
+// could not read".
+//
+// It used to fall back to the ROW'S BOX there, and that was the bug the #646
+// review found. A box is a property of one row: `COALESCE(r_val, 0)` boxes an
+// int64 on the row where r_val is NULL and a float64 everywhere else, so the
+// literal beside it was coerced with the INTEGER input function on one row and
+// the double one on the next — `COALESCE(r_val,0) = '3.1'` raised 22P02
+// "bigint" when the NULL row was present and answered 0 rows when it was not.
+// PostgreSQL resolves COALESCE's type ONCE (real here) and answers 1 row.
+//
+// So a kind with no declaration answers "no rule" and the caller falls through
+// to compare(), which is the conservative side: a missed refusal, never a
+// refusal at a width nothing resolved. joinOperandKinds now folds a composite's
+// arms into a CONCRETE kind through the same ladder PostgreSQL uses, so the
+// composites that matter reach here with a real type rather than boxNumber.
+func numberKindType(k boxKind) (batch.TypeID, bool) {
 	switch k {
 	case boxInt32:
-		return batch.TypeInt32
+		return batch.TypeInt32, true
 	case boxInt64:
-		return batch.TypeInt64
+		return batch.TypeInt64, true
 	case boxFloat32:
-		return batch.TypeFloat32
+		return batch.TypeFloat32, true
 	case boxFloat64:
-		return batch.TypeFloat64
+		return batch.TypeFloat64, true
 	}
-	switch v.(type) {
-	case int32:
-		return batch.TypeInt32
-	case float32:
-		return batch.TypeFloat32
-	case float64:
-		return batch.TypeFloat64
+	return 0, false
+}
+
+// numberKindOf is numberKindType's inverse: the kind that carries a declared
+// numeric type, and boxNumber for a type this layer has no kind for.
+func numberKindOf(t batch.TypeID) boxKind {
+	switch t {
+	case batch.TypeInt32:
+		return boxInt32
+	case batch.TypeInt64:
+		return boxInt64
+	case batch.TypeFloat32:
+		return boxFloat32
+	case batch.TypeFloat64:
+		return boxFloat64
 	}
-	return batch.TypeInt64
+	return boxNumber
+}
+
+// widerNumberKind folds two number kinds the way PostgreSQL's
+// select_common_type does, through the one ladder widerNumericType states
+// (INT32 < INT64 < DECIMAL < FLOAT32 < FLOAT64). ok=false when either side has
+// no declared type, because a fold with an unknown operand is a LOWER BOUND on
+// PostgreSQL's and a lower bound is what produces a refusal at the wrong
+// width.
+func widerNumberKind(a, b boxKind) (boxKind, bool) {
+	ta, oka := numberKindType(a)
+	tb, okb := numberKindType(b)
+	if !oka || !okb {
+		return boxNumber, false
+	}
+	return numberKindOf(widerNumericType(ta, tb)), true
 }
 
 // classifyOperand reports an operand's declared kind and whether that answer
@@ -352,6 +386,31 @@ func (a *extremumArms) decimalVsUnclassifiable(b *batch.RecordBatch) bool {
 	return (l == boxDecimal && r == boxUnknown) || (r == boxDecimal && l == boxUnknown)
 }
 
+// foldKind upgrades an arm's kind for the common-type fold: a NUMERIC LITERAL
+// classifies as boxNumber (its declaration is its spelling, not a column's),
+// and PostgreSQL folds its own type in — an unsuffixed constant is `numeric`
+// once it carries a point or an exponent and the narrowest integer type that
+// holds it otherwise. Without this, `COALESCE(real_col, 0)` folded real with a
+// typeless arm and lost the width.
+//
+// A fold landing on DECIMAL answers boxNumber (numberKindOf has no DECIMAL
+// rung), which makes the join fall through rather than claim the DECIMAL text
+// rule for a value that is not decimal text.
+func foldKind(e Expr, k boxKind) boxKind {
+	if k != boxNumber {
+		return k
+	}
+	lit, ok := e.(*Lit)
+	if !ok {
+		return k
+	}
+	t, ok := numericConstType(lit)
+	if !ok {
+		return k
+	}
+	return numberKindOf(t)
+}
+
 // joinOperandKinds is classifyOperand over a set of alternatives that one
 // value is chosen from.
 //
@@ -383,6 +442,7 @@ func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 		if k == boxQuoted {
 			continue // unknown-typed: takes whatever the others declare
 		}
+		k = foldKind(a, k)
 		if !have {
 			kind, have = k, true
 			continue
@@ -393,13 +453,22 @@ func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 			kind = boxDecimal
 		case isNumberKind(k) && isNumberKind(kind):
 			// Two numbers that are not the SAME number: an int column beside a
-			// float one, or either beside a numeric literal. The join keeps
-			// "a value from here is a real number" — which is all boxNumber
-			// claims and all the rules below need — and drops the declared
-			// width, because there is no single one. Collapsing to boxUnknown
-			// instead would take the QUOTED-literal rule away from
-			// `GREATEST(i, f) = '3'`, which had it before the kinds split.
-			kind = boxNumber
+			// float one, or either beside a numeric literal. PostgreSQL resolves
+			// ONE type for the whole expression (select_common_type) and the
+			// value it produces is of THAT type, so the join folds through the
+			// same ladder rather than dropping the width.
+			//
+			// Dropping it — collapsing to boxNumber — is what made
+			// `COALESCE(r_val, 0) = '3.1'` read the literal with the INTEGER
+			// input function on the row where r_val is NULL (the box is the
+			// int64 0 there) and the double one everywhere else: 22P02 or 0 rows
+			// depending on the DATA, where PostgreSQL resolves real once and
+			// answers 1 row.
+			w, ok := widerNumberKind(k, kind)
+			if !ok {
+				return boxUnknown, settled
+			}
+			kind = w
 		default:
 			return boxUnknown, settled
 		}
@@ -688,12 +757,16 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, u
 	// int_col < 'NaN'` returned every row, and `f < '3.1'` over a real column
 	// compared at double width.
 	case isNumberKind(lk) && rk == boxQuoted:
-		if c, ok := quotedNumberOrder(numberKindType(lk, lv), lv, rText); ok {
-			return c, true, false
+		if typ, ok := numberKindType(lk); ok {
+			if c, ok := quotedNumberOrder(typ, lv, rText); ok {
+				return c, true, false
+			}
 		}
 	case isNumberKind(rk) && lk == boxQuoted:
-		if c, ok := quotedNumberOrder(numberKindType(rk, rv), rv, lText); ok {
-			return -c, true, false
+		if typ, ok := numberKindType(rk); ok {
+			if c, ok := quotedNumberOrder(typ, rv, lText); ok {
+				return -c, true, false
+			}
 		}
 	// A BOOL column against a QUOTED literal, in boolean order (FALSE <
 	// TRUE), the literal read through PostgreSQL's input grammar (#574). A

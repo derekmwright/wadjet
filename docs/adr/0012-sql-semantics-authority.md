@@ -1500,6 +1500,41 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     GREATEST/LEAST at that binder, because its equality test is the same
     question their ordering is.
 
+    **Inside a COMPOSITE the type is the CALL'S, folded once over every
+    argument.** (Added 2026-08-29 from this item's own review.)
+    GREATEST/LEAST, CASE and COALESCE resolve one type through
+    `select_common_type` and coerce the unknown-typed literal to THAT, so
+    `GREATEST(bigint, '3.1', double precision)` is a double comparison and
+    answers where the bigint input function would raise 22P02. Three things
+    have to read that one fold or they disagree with each other: the REFUSAL
+    (`extremumArms.checkRefusal`), the COMPARISON of every (best, candidate)
+    pair — which is pairwise and must NOT use the pair's own types — and the
+    VALUE, because the argument that wins comes back at the call's type and a
+    quoted literal arrives as a Go string. Reading each argument's own type
+    instead produced all three failures at once: a PG-superset regression
+    (`GREATEST(k, '3.1', d)` refused), a silent width error
+    (`GREATEST(r, '16777217', d)` read at real width), and a crash (the
+    literal's string stored into a FLOAT64 vector).
+
+    A kind that has NO declared type must answer "no rule" rather than fall
+    back to the ROW'S BOX. `COALESCE(real_col, 0)` boxes an int64 on the row
+    where the column is NULL and a float64 on every other, so a box-driven
+    reading coerced the literal with the INTEGER input function on one row and
+    the double one on the next — `COALESCE(r,0) = '3.1'` raised 22P02 with the
+    NULL row present and answered zero rows without it, where PostgreSQL
+    resolves real once and answers one row. Where the fold cannot be made —
+    an argument this layer cannot type — only a literal EVERY numeric type
+    refuses may raise, because a partial fold is a LOWER BOUND and a lower
+    bound is what refuses at the wrong width.
+
+    **The DECLARED type of such a call is still `decided[0]`, not the fold**
+    (`expr.CommonDeclType`), so a projection of `GREATEST(real, …, double)`
+    narrows the double answer back into a real vector. That is the deferred
+    numeric fold its own `TODO(#555)` names, not this rule's; it is pinned in
+    `coordinator.TestExtremumWinnerIsMaterializedAtTheCallsType` with
+    PostgreSQL's answer recorded, so lifting the deferral shows up as those
+    pins failing.
+
     **The boxed layer resolves the column's WIDTH from its DECLARATION.**
     `expr.ColRef.Eval` widens on the way out — a FLOAT32 column boxes as
     float64 and an INT32 one as int64 — so a box-driven rule would compare

@@ -2913,7 +2913,7 @@ func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
 	// BEFORE the NULL short-circuit for the reason the other sites run it
 	// first: the refusal is a property of the operand PAIR's DECLARATIONS,
 	// not of the row's values (ADR-0012 item 6's neighbourhood).
-	arms.refuse.check(b)
+	arms.checkRefusal(b)
 	if args[0] == nil || args[1] == nil {
 		return args[0]
 	}
@@ -2983,9 +2983,7 @@ func pickExtremum(b *batch.RecordBatch, args []any, op CmpOp, arms *extremumArms
 	// `LEAST(k, 'abc', d)` answer on the same three arguments (#517), and it
 	// also skipped a call with fewer than two non-NULL arguments entirely,
 	// where PostgreSQL still raises.
-	if arms != nil {
-		arms.refuse.check(b)
-	}
+	arms.checkRefusal(b)
 	var best any
 	bestIdx := -1
 	for i, a := range args {
@@ -3021,7 +3019,10 @@ func pickExtremum(b *batch.RecordBatch, args []any, op CmpOp, arms *extremumArms
 			best, bestIdx = a, i
 		}
 	}
-	return best
+	// The winner comes back AT THE CALL'S TYPE. A quoted literal arrives as a
+	// Go string, and returning that string projected four characters into a
+	// FLOAT64 vector; PostgreSQL answers the number.
+	return arms.materialize(b, bestIdx, best)
 }
 
 // EvalVec evaluates the function for an entire batch, writing results to out.

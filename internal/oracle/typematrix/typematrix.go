@@ -534,16 +534,19 @@ var networkFuncArg = map[string]string{
 // between this expr path and the stage DAG (#492, fixed) — this corpus now
 // gates it instead of skipping it as a known bug.
 //
-// c_port/c_proto are UNQUOTED (a bare numeric literal, `c_port = 1724`),
-// not a quoted string like the other four: both are Int32-backed, and a
-// QUOTED numeric literal against an Int32/Int64/PORT/PROTOCOL column hits a
-// different, pre-existing bug (#493) — kernel.toInt64's string case
-// calls parseTimestampString, not a plain integer parse, so `c_port =
-// '1724'` silently compares against 0 on one engine and something else
-// again on the other. That is a real defect (filed, not fixed here — out
-// of this corpus's territory), not a reason to leave PORT/PROTOCOL out of
-// this consumer class: the unquoted form is how a `PORT = <int>` /
-// `PROTOCOL = <int>` predicate is actually written.
+// c_port/c_proto carry the UNQUOTED spelling here (a bare numeric literal,
+// `c_port = 1724`), because that is how a `PORT = <int>` / `PROTOCOL = <int>`
+// predicate is actually written. The QUOTED spelling used to be a defect and
+// is now a gate of its own: networkQuotedLit below.
+//
+// It used to say the quoted form "hits a different, pre-existing bug (#493) —
+// kernel.toInt64's string case calls parseTimestampString, not a plain
+// integer parse, so `c_port = '1724'` silently compares against 0". That was
+// true when it was written and is not any more: #536 gave the integer arms
+// PostgreSQL's integer input grammar and #646 gave every numeric column type
+// the same rule, so `c_port = '1724'` reads 1724 and answers the same row on
+// both engines. The record is corrected rather than deleted because the
+// omission it explained is gone with it.
 var networkLit = map[string]string{
 	"c_ipv4":  "'10.0.2.188'",
 	"c_ipv6":  "'2001:db8::2bc'",
@@ -551,6 +554,23 @@ var networkLit = map[string]string{
 	"c_mac":   "'aa:bb:cc:00:02:bc'",
 	"c_port":  "1724",
 	"c_proto": "188",
+}
+
+// networkQuotedLit is networkLit's QUOTED spelling for the two Int32-backed
+// network types, which is a DIFFERENT predicate to resolve even though it
+// names the same number: PostgreSQL types an unknown-typed literal from the
+// column and coerces it with that column's own input function (ADR-0012 item
+// 13), so `c_port = '1724'` is the integer comparison `c_port = 1724` and
+// `c_port = 'abc'` is 22P02 rather than a comparison against zero.
+//
+// PORT and PROTOCOL have no PostgreSQL analog, so this corpus — wadjet
+// against itself across the stage DAG, the kill switches and the
+// pooled/poisoned batch arms — is where the two spellings are held to one
+// answer. The four address types keep the quoted spelling they already had in
+// networkLit; only these two had to be left unquoted.
+var networkQuotedLit = map[string]string{
+	"c_port":  "'1724'",
+	"c_proto": "'188'",
 }
 
 // networkOrdLit gives c_ipv6 and c_cidr an ORDERING literal (`<`). Only
@@ -716,6 +736,22 @@ func Corpus() []Query {
 			if lit, ok := networkOrdLit[n]; ok {
 				add("litcmp_ord_"+n,
 					fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE %s < %s ORDER BY id`, n, tbl, n, lit),
+					oracle.CmpOrdered, n)
+			}
+			// The QUOTED spelling for PORT/PROTOCOL, which the comment above
+			// used to say was omitted because it was a defect (#646 closed it).
+			// It must select the same rows as the unquoted litcmp_ entry: one
+			// number, two spellings, one predicate.
+			if lit, ok := networkQuotedLit[n]; ok {
+				add("litcmp_quoted_"+n,
+					fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE %s = %s ORDER BY id`, n, tbl, n, lit),
+					oracle.CmpOrdered, n)
+				// And through a BOXED site, which reaches expr.boxedPair rather
+				// than the vectorized kernel — the arm that answered every row
+				// for an integer column before #646.
+				add("litcmp_quoted_case_"+n,
+					fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE CASE WHEN %s = %s THEN 1 ELSE 0 END = 1 ORDER BY id`,
+						n, tbl, n, lit),
 					oracle.CmpOrdered, n)
 			}
 			for _, x := range networkExtraLit {

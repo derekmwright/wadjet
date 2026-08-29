@@ -1049,6 +1049,37 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "BigintEqQuotedUnderscore", sql: `SELECT r_key FROM real_probe WHERE r_key = '1_0' ORDER BY r_key`},
 		pgCase{name: "BigintEqQuotedHex", sql: `SELECT r_key FROM real_probe WHERE r_key = '0x0A' ORDER BY r_key`},
 
+		// A COMPOSITE resolves ONE type over every argument
+		// (select_common_type) and coerces the unknown-typed literal to THAT
+		// — not to whichever argument the comparison happens to pair it with.
+		// `GREATEST(bigint, '3.1', double)` folds to double precision and
+		// ANSWERS; asking bigint's input function for '3.1' is 22P02, which is
+		// a PG-SUPERSET regression, and reading the width off the row's BOX
+		// makes the answer depend on the DATA (the NULL row of
+		// `COALESCE(real, 0)` boxes an int64 and every other row a float64).
+		// All three shapes are here, plus a permutation, because the fold is
+		// over the SET of arguments and argument order changes nothing.
+		pgCase{name: "GreatestIntQuotedFracDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_key, '3.1', d_val) > 0`},
+		pgCase{name: "LeastIntQuotedFracDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE LEAST(r_key, '3.1', d_val) > 0`},
+		pgCase{name: "GreatestDoubleQuotedFracInt", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(d_val, '3.1', r_key) > 0`},
+		// The literal is out of REAL's range and inside DOUBLE's: a value
+		// under the call's double fold, a 22003 under the real column's own.
+		pgCase{name: "GreatestRealQuotedOverReal", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_val, '1e39', d_val) > 0`},
+		pgCase{name: "LeastRealQuotedOverReal", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE LEAST(r_val, '1e39', d_val) > 0`},
+		// No literal inside the composite: its own folded type is what the
+		// OUTER quoted literal is coerced to. real ∪ bigint is real, so '3.1'
+		// narrows and finds the row.
+		pgCase{name: "GreatestIntRealEqQuoted", sql: `SELECT r_key FROM real_probe WHERE GREATEST(r_key, r_val) = '3.1' ORDER BY r_key`},
+		pgCase{name: "CaseIntRealEqQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_key > 0 THEN r_key ELSE r_val END = '3.1'`},
+		pgCase{name: "CoalesceRealIntEqQuoted", sql: `SELECT r_key FROM real_probe WHERE COALESCE(r_val, 0) = '3.1' ORDER BY r_key`},
+		pgCase{name: "CoalesceRealIntEqQuotedBig", sql: `SELECT r_key FROM real_probe WHERE COALESCE(r_val, 0) = '16777217' ORDER BY r_key`},
+		pgCase{name: "NullifGreatestIntRealQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE NULLIF(GREATEST(r_key, r_val), '3.1') IS NULL`},
+		// WIDTH in both directions over ONE literal: the three-argument form
+		// folds to double, where 16777217 is exact and beats the bound; the
+		// two-argument form folds to real, where it rounds onto 2^24.
+		pgCase{name: "GreatestRealQuotedIntDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_val, '16777217', d_val) <= 16777216.5`},
+		pgCase{name: "GreatestRealOnlyQuotedInt", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_val, '16777217') <= 16777216.5`},
+
 		// SINGLE-element real IN — the arity split #549's re-review turned up.
 		// PostgreSQL folds `real IN (x)` to `= 'x'::double precision` (WIDEN),
 		// not the multi-element `= ANY(real[])` (NARROW), so a single
