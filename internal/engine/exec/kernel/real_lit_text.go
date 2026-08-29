@@ -125,17 +125,19 @@ func trimLeadingZeros(s string) string {
 	return s[i:]
 }
 
-// RealLitTextOverflow reports whether literal TEXT names a finite number whose
-// magnitude exceeds real's range — the condition that makes PostgreSQL's cast
-// of an IN list to real[] fail with 22003.
+// RealLitTextUnrepresentable reports whether literal TEXT names a number a
+// `real` cannot carry, in either direction — the condition that makes
+// PostgreSQL's cast of an IN list to real[] fail with 22003. Both directions:
+// 1e40 overflows to +Inf and 1e-46 underflows to 0.0, and each would match
+// rows the predicate must not (see kernel.Float32Fit).
 //
 // Text, not a float64 box: the box has already been through the compiler's
 // numeric conversion, and a literal past float64's OWN range (1e400) arrives
 // there as +Inf, which is a legal real value and would be waved through.
 // Reading the digits keeps "the user wrote a number too big for a real" apart
 // from "the user wrote infinity", which PostgreSQL also keeps apart (#549's
-// Float32LitOverflow draws the same distinction for a boxed value).
-func RealLitTextOverflow(text string) bool {
+// Float32FitOf draws the same distinction for a boxed value).
+func RealLitTextUnrepresentable(text string) bool {
 	s := strings.TrimSpace(text)
 	if s == "" {
 		return false
@@ -153,7 +155,27 @@ func RealLitTextOverflow(text string) bool {
 	if math.IsInf(f, 0) && !litTextIsInfinity(s) {
 		return true
 	}
-	return Float32LitOverflow(f)
+	// BELOW float64's own range there is no error to read: ParseFloat answers
+	// a plain 0 for 1e-400, so the box says "zero" — a legal real — where the
+	// digits say a non-zero number no float can carry. PostgreSQL refuses
+	// `real IN (1e-400, 3.1)` with the same underflow message it gives 1e-46,
+	// naming all four hundred digits, so the digits decide here too. This is
+	// the small-magnitude mirror of the infinity check above.
+	if f == 0 && !litTextIsZero(s) {
+		return true
+	}
+	return Float32FitOf(f) != Float32Fits
+}
+
+// litTextIsZero reports whether a numeric literal's own digits are all zeros —
+// "0", "0.000", "-0e10" — as opposed to naming a number too small for the
+// float64 the text was parsed into.
+func litTextIsZero(s string) bool {
+	mant, _, ok := splitExponent(strings.TrimLeft(s, "+-"))
+	if !ok {
+		return false
+	}
+	return strings.IndexAny(mant, "123456789") < 0
 }
 
 // litTextIsInfinity reports whether the text SPELLS infinity, as opposed to

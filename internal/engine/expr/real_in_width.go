@@ -32,8 +32,9 @@ import (
 // The binding below narrows for exactly the lists the kernel narrows for, so
 // the two paths answer one predicate:
 //
-//   - the probed operand is a bare FLOAT32 column (resolved from the batch,
-//     since the compiler has no schema);
+//   - the probed operand is REAL-TYPED (resolved from the batch, since the
+//     compiler has no schema) — a real column, an explicit cast to real, or
+//     unary ± over either, which is what PostgreSQL calls real;
 //   - the list holds MORE THAN ONE member (the syntactic count, NULL members
 //     included — PostgreSQL casts `{3.1,NULL}` to real[] as readily as
 //     `{3.1,7.1}`);
@@ -54,7 +55,11 @@ import (
 // realLitSet binds a FLOAT32 column against an all-numeric-literal IN list of
 // arity two or more, and answers membership at REAL width.
 type realLitSet struct {
-	col *ColRef
+	// probe is the operand the list is tested against. It is an Expr, not a
+	// *ColRef: PostgreSQL decides the array's width from the operand's own
+	// TYPE, and `-r_val` and `CAST(d_val AS REAL)` are real-typed without
+	// being columns (realTypedOperand).
+	probe Expr
 	// set holds the literals already narrowed to float32 — the same set
 	// kernel.float32InSet builds, so both paths probe identical keys. Go map
 	// keys compare with `==`, which folds -0.0 and +0.0 into one key (the
@@ -66,16 +71,18 @@ type realLitSet struct {
 	// three-valued logic but still counts toward the ARITY above, and a miss
 	// with a NULL in the list is UNKNOWN rather than FALSE.
 	sawNull bool
-	// overflow is the source text of a FINITE literal whose magnitude exceeds
-	// real's range. Narrowing it yields ±Inf, which would MATCH a genuine
-	// infinite row; PostgreSQL raises 22003 for the whole predicate when it
-	// casts the array to real[], and so does the kernel (exec.floatConstError).
+	// overflow is the source text of a literal a real cannot carry, in either
+	// direction: one past real's range narrows to ±Inf and would MATCH a
+	// genuine infinite row, one below its smallest denormal narrows to 0.0 and
+	// would match every zero row. PostgreSQL raises 22003 for the whole
+	// predicate when it casts the array to real[], and so does the kernel
+	// (exec.floatConstError).
 	overflow    string
 	hasOverflow bool
-	// notReal caches "the probed operand is not a FLOAT32 column", which is a
-	// pure function of a declaration and so is settled by the first batch that
-	// resolves the name. Same publish decimalLitCmp.notDecimal uses, for the
-	// same reason: these nodes are shared across parallel pipeline workers and
+	// notReal caches "the probed operand is not REAL-typed", which is a pure
+	// function of declarations and so is settled by the first batch that
+	// resolves them. Same publish decimalLitCmp.notDecimal uses, for the same
+	// reason: these nodes are shared across parallel pipeline workers and
 	// concurrent writers can only ever agree.
 	notReal atomic.Bool
 }
@@ -84,14 +91,13 @@ type realLitSet struct {
 // returns nil when any of the rule's conditions above fails. The column's TYPE
 // is not among them — no schema is available at compile time — so a binding is
 // provisional until applies() sees a batch.
-func bindRealLitList(col Expr, values []Expr) *realLitSet {
-	c, ok := bareCol(col)
-	if !ok || len(values) < 2 {
+func bindRealLitList(probe Expr, values []Expr) *realLitSet {
+	if probe == nil || len(values) < 2 {
 		// Arity 1 (and the degenerate empty list) WIDENS in PostgreSQL, which
 		// is what the unbound path already does.
 		return nil
 	}
-	r := &realLitSet{col: c, set: make(map[float32]struct{}, len(values))}
+	r := &realLitSet{probe: probe, set: make(map[float32]struct{}, len(values))}
 	for _, v := range values {
 		lit, ok := realListMember(v)
 		if !ok {
@@ -105,7 +111,7 @@ func bindRealLitList(col Expr, values []Expr) *realLitSet {
 		if !ok {
 			return nil // a quoted or non-numeric literal: see the file comment
 		}
-		if kernel.Float32LitOverflow(f64) {
+		if kernel.Float32FitOf(f64) != kernel.Float32Fits {
 			r.overflow, r.hasOverflow = litOverflowText(lit), true
 			continue
 		}
@@ -142,6 +148,12 @@ func realListMember(e Expr) (*Lit, bool) {
 	if lit, ok := e.(*Lit); ok {
 		return lit, true
 	}
+	// Unary MINUS over a literal never reaches here — compileWithCtx folds it
+	// into the literal, negating Val and Text together (#369, #452) — but
+	// unary PLUS is not folded, and `+3.1` is the same constant to PostgreSQL.
+	if u, ok := e.(*UnaryOp); ok && u.Op == "+" {
+		return realListMember(u.Operand)
+	}
 	c, ok := e.(*Cast)
 	if !ok {
 		return nil, false
@@ -151,11 +163,30 @@ func realListMember(e Expr) (*Lit, bool) {
 	default:
 		return nil, false
 	}
-	lit, ok := c.Operand.(*Lit)
-	if !ok {
-		return nil, false
+	return realListMember(c.Operand)
+}
+
+// realBox narrows a REAL-typed operand's boxed value back to the float32 it
+// came from.
+//
+// Two boxes reach it and both are exact. A FLOAT32 column boxes as
+// float64(float32) (ColRef.Eval), and widening then narrowing round-trips bit
+// for bit; a CAST to REAL boxes a float32 outright. Unary ± over either keeps
+// the box it was handed for the float32 column case (UnaryOp negates a
+// float64 as a float64) — and negation is exact in binary floating point, so
+// narrowing the negated double gives the negated real.
+//
+// An integer box declines: `-r_val` where r_val is an integer column is not a
+// real, and applies() has already established the operand's type, so this is
+// only a guard against a box the type did not predict.
+func realBox(v any) (float32, bool) {
+	switch f := v.(type) {
+	case float32:
+		return f, true
+	case float64:
+		return float32(f), true
 	}
-	return lit, true
+	return 0, false
 }
 
 // literalFloat64 reads a literal's box as a number, refusing the string box on
@@ -185,19 +216,18 @@ func litOverflowText(lit *Lit) string {
 	return toString(lit.Val)
 }
 
-// applies reports whether this batch's probed operand really is a FLOAT32
-// column, and raises 22003 for an over-range literal once it is — the error
-// belongs to the predicate, not to a row, and PostgreSQL raises it whether or
-// not any row would have matched.
+// applies reports whether this batch's probed operand is REAL-typed, and
+// raises 22003 for an unrepresentable literal once it is — the error belongs
+// to the predicate, not to a row, and PostgreSQL raises it whether or not any
+// row would have matched. (The planner refuses the same list before any task
+// is dispatched; this is the backstop for a predicate it could not type.)
 func (r *realLitSet) applies(b *batch.RecordBatch) bool {
 	if r == nil || r.notReal.Load() {
 		return false
 	}
-	r.col.resolve(b)
-	if r.col.idx < 0 || r.col.idx >= len(b.Columns) || r.col.typ != batch.TypeFloat32 {
-		if r.col.idx >= 0 && r.col.idx < len(b.Columns) {
-			// The name resolved to a column of another type: no batch will
-			// change that answer.
+	real, settled := realTypedOperand(r.probe, b)
+	if !real {
+		if settled {
 			r.notReal.Store(true)
 		}
 		return false
@@ -206,6 +236,53 @@ func (r *realLitSet) applies(b *batch.RecordBatch) bool {
 		raiseNumericOutOfRange("real", r.overflow)
 	}
 	return true
+}
+
+// realTypedOperand is physical.realTypedNode's runtime twin: it reports
+// whether an operand's own type is REAL, and whether that answer is SETTLED
+// (safe to cache for the rest of the query).
+//
+// The two must keep answering alike — the planner refuses a list this narrows,
+// and a disagreement would mean one of them acting on a predicate the other
+// calls something else. The shapes are PostgreSQL's, read off EXPLAIN VERBOSE:
+// a real column, an explicit cast to real, and unary ± over either are real;
+// `r_val + 0` is DOUBLE PRECISION (an integer literal added to a real gives
+// float8 there) and must stay widened, which is why this does not simply walk
+// down to a column.
+//
+// Unsettled means "this batch cannot answer" — a column name that resolves in
+// no batch yet says nothing about the next one — the same distinction
+// classifyOperand draws for boxedPair.
+func realTypedOperand(e Expr, b *batch.RecordBatch) (real, settled bool) {
+	switch n := e.(type) {
+	case *ColRef:
+		if n.structField != "" {
+			// A ROW field path: its declared type is fieldTyp, and a FLOAT32
+			// field reads through the boxed path exactly as a column does.
+			n.resolve(b)
+			if n.idx < 0 || n.idx >= len(b.Columns) {
+				return false, false
+			}
+			return n.fieldTyp == batch.TypeFloat32, true
+		}
+		n.resolve(b)
+		if n.idx < 0 || n.idx >= len(b.Columns) {
+			return false, false
+		}
+		return n.typ == batch.TypeFloat32, true
+	case *Cast:
+		switch strings.ToLower(strings.TrimSpace(n.DestType)) {
+		case "real", "float4":
+			return true, true
+		}
+		return false, true
+	case *UnaryOp:
+		if n.Op == "-" || n.Op == "+" {
+			return realTypedOperand(n.Operand, b)
+		}
+		return false, true
+	}
+	return false, true
 }
 
 // contains probes the narrowed set with the column's own float32 value.

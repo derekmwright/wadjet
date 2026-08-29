@@ -2,6 +2,7 @@ package expr
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -70,7 +71,7 @@ func TestCastToRealNarrowsToFloat32(t *testing.T) {
 //
 // An already-infinite value is representable and passes through — the
 // distinction between "too big to be a real" and "is infinity", which the
-// literal-side refusal draws too (kernel.RealLitTextOverflow).
+// literal-side refusal draws too (kernel.RealLitTextUnrepresentable).
 func TestCastToRealRefusesUnrepresentableValues(t *testing.T) {
 	b := batch.NewRecordBatch([]parquet.Column{{Name: "x", Type: parquet.TypeInt64}}, 1)
 	b.Columns[0].SetValue(0, int64(1))
@@ -80,6 +81,11 @@ func TestCastToRealRefusesUnrepresentableValues(t *testing.T) {
 		{"CAST(1e40 AS REAL)", "overflow"},
 		{"CAST(-1e40 AS REAL)", "overflow"},
 		{"CAST(1e-50 AS REAL)", "underflow"},
+		// The boundary: real's smallest denormal is about 1.4e-45, and
+		// PostgreSQL draws the line in the gap below it —
+		// `CAST(1e-46 AS real)` raises where `CAST(1e-45 AS real)` answers.
+		{"CAST(1e-46 AS REAL)", "underflow"},
+		{"CAST(-1e-46 AS REAL)", "underflow"},
 	} {
 		err := catchFatalEval(t, func() { compileExprSQL(t, c.sql).Eval(b, 0) })
 		if err == nil {
@@ -96,6 +102,9 @@ func TestCastToRealRefusesUnrepresentableValues(t *testing.T) {
 		"CAST(CAST('Infinity' AS DOUBLE PRECISION) AS REAL)",
 		"CAST(0 AS REAL)",
 		"CAST(0.0 AS REAL)",
+		// A denormal is a value, not a failure: PostgreSQL answers 1e-45.
+		"CAST(1e-45 AS REAL)",
+		"CAST(-1e-45 AS REAL)",
 	} {
 		if err := catchFatalEval(t, func() { compileExprSQL(t, sql).Eval(b, 0) }); err != nil {
 			t.Errorf("%s raised %v; the value is representable", sql, err)
@@ -161,6 +170,53 @@ func TestCastDestTypeRealSpellings(t *testing.T) {
 		got, ok := castDestType(spelling)
 		if !ok || got != batch.TypeFloat64 {
 			t.Errorf("castDestType(%q) = (%v, %v), want (FLOAT64, true)", spelling, got, ok)
+		}
+	}
+}
+
+// TestCastToRealMessageFollowsTheOperand pins WHICH 22003 message a refused
+// cast gives, because PostgreSQL has two and picks by what is being cast:
+//
+//	CAST(1e40 AS real)          -> "1000…000" is out of range for type real
+//	CAST(1e40::float8 AS real)  -> value out of range: overflow
+//
+// The first is the numeric->real cast failing during constant folding, so it
+// names the numeric's own digits — the same digits, and the same renderer
+// (kernel.RealOverflowText), the IN-list refusal prints, so one query cannot
+// produce two spellings of one refusal. The second is float8->real at runtime,
+// which has no literal to name. Wadjet gave the runtime text for both.
+//
+// Every want below is postgres:17's, read off the server verbatim.
+func TestCastToRealMessageFollowsTheOperand(t *testing.T) {
+	b := batch.NewRecordBatch([]parquet.Column{{Name: "x", Type: parquet.TypeInt64}}, 1)
+	b.Columns[0].SetValue(0, int64(1))
+	b.Len = 1
+
+	cases := []struct{ sql, want string }{
+		// LITERAL operand: the numeric's digits, expanded, never in exponent
+		// form, whatever the query spelled.
+		{"CAST(1e40 AS REAL)", `"10000000000000000000000000000000000000000" is out of range for type real`},
+		{"CAST(1e+40 AS REAL)", `"10000000000000000000000000000000000000000" is out of range for type real`},
+		{"CAST(-1e40 AS REAL)", `"-10000000000000000000000000000000000000000" is out of range for type real`},
+		{"CAST(1e-46 AS REAL)", `"0.0000000000000000000000000000000000000000000001" is out of range for type real`},
+		// NON-LITERAL operand: no literal to name, so the runtime text, in
+		// whichever direction the conversion failed.
+		{"CAST(CAST(1e40 AS DOUBLE PRECISION) AS REAL)", "value out of range: overflow"},
+		{"CAST(CAST(1e-46 AS DOUBLE PRECISION) AS REAL)", "value out of range: underflow"},
+		{"CAST(x * 1e40 AS REAL)", "value out of range: overflow"},
+		{"CAST(x * 1e-46 AS REAL)", "value out of range: underflow"},
+	}
+	for _, c := range cases {
+		err := catchFatalEval(t, func() { compileExprSQL(t, c.sql).Eval(b, 0) })
+		if err == nil {
+			t.Errorf("%s did not raise; PostgreSQL raises 22003 %s", c.sql, c.want)
+			continue
+		}
+		if got := sqlerr.StateOf(err); got != "22003" {
+			t.Errorf("%s: SQLSTATE %q, want 22003 (%v)", c.sql, got, err)
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s raised %q, want the message naming %s", c.sql, err.Error(), c.want)
 		}
 	}
 }

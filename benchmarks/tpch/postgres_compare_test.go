@@ -892,6 +892,58 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "RealInCastReal", sql: `SELECT r_key FROM real_probe WHERE r_val IN (CAST(3.1 AS REAL), 7.1) ORDER BY r_key`},
 		pgCase{name: "DoubleEqCastReal", sql: `SELECT r_key FROM real_probe WHERE d_val = CAST(3.1 AS REAL) ORDER BY r_key`},
 
+		// The array cast follows the OPERAND'S TYPE, not "is it a column".
+		// PostgreSQL resolves the list's element type over the members AND the
+		// probed expression, so any real-typed left operand pulls the array to
+		// real[] (EXPLAIN VERBOSE):
+		//
+		//	-r_val IN (-3.1, -7.1)          -> ((- r_val) = ANY ('{-3.1,-7.1}'::real[]))
+		//	CAST(d_val AS REAL) IN (3.1,…)  -> ((d_val)::real = ANY ('{3.1,7.1}'::real[]))
+		//	(r_val + 0) IN (3.1, 7.1)       -> (… = ANY ('{3.1,7.1}'::double precision[]))
+		//
+		// The last is the control: an integer literal added to a real gives
+		// DOUBLE PRECISION there (pg_typeof), so that shape STAYS widened and
+		// matches nothing — which is why the rule cannot be "walk down to a
+		// column". The `=` companions are the scalar halves, which widen
+		// whatever the operand is.
+		pgCase{name: "RealInNegatedOperand", sql: `SELECT r_key FROM real_probe WHERE -r_val IN (-3.1, -7.1) ORDER BY r_key`},
+		pgCase{name: "RealEqNegatedOperand", sql: `SELECT r_key FROM real_probe WHERE -r_val = -3.1 ORDER BY r_key`},
+		pgCase{name: "RealInCastToRealOperand", sql: `SELECT r_key FROM real_probe WHERE CAST(d_val AS REAL) IN (3.1, 7.1) ORDER BY r_key`},
+		pgCase{name: "RealEqCastToRealOperand", sql: `SELECT r_key FROM real_probe WHERE CAST(d_val AS REAL) = 3.1 ORDER BY r_key`},
+		pgCase{name: "RealInPlusZeroOperand", sql: `SELECT r_key FROM real_probe WHERE (r_val + 0) IN (3.1, 7.1) ORDER BY r_key`},
+		// A NEGATIVE member is still a constant: the sign is a unary operator
+		// over the literal in the AST, and reading that as "not a constant"
+		// took the narrowing — and the 22003 refusal — away from the whole
+		// list. PostgreSQL narrows exactly as it does for a positive member.
+		pgCase{name: "RealInNegativeMember", sql: `SELECT r_key FROM real_probe WHERE r_val IN (-1.0, 3.1) ORDER BY r_key`},
+		// real's smallest denormal is about 1.4e-45, so 1e-45 is representable
+		// and the list narrows around it. Its neighbour 1e-46 is NOT, and
+		// PostgreSQL refuses that whole predicate with 22003 — an error the
+		// oracle cannot express as a row set, gated instead by
+		// coordinator.TestRealInOverRangeLiteralRaisesOnBothPaths.
+		pgCase{name: "RealInDenormalBoundary", sql: `SELECT r_key FROM real_probe WHERE r_val IN (1e-45, 3.1) ORDER BY r_key`},
+
+		// A set operation reconciles its arms' types, which is where a
+		// newly-narrowing CAST TO REAL could go wrong in either direction — by
+		// widening straight back, or by dragging the other arm down. Live on
+		// postgres:17 (pg_typeof over the union's output plus the values):
+		//
+		//	real UNION ALL double precision  ->  double precision
+		//	real UNION ALL bigint            ->  real
+		//	real UNION ALL real              ->  real
+		//
+		// so the real arm's values WIDEN in the first (3.1 as a real prints
+		// 3.0999999046325684 once it is a double) and the integer arm NARROWS
+		// in the second. The wire arm reads the OID as well as the value,
+		// which is the half a value oracle cannot see.
+		pgCase{name: "RealUnionDouble", sql: `SELECT v FROM (SELECT CAST(r_val AS REAL) AS v FROM real_probe WHERE r_key IN (3,7) UNION ALL SELECT d_val FROM real_probe WHERE r_key = 3) s ORDER BY v`},
+		pgCase{name: "RealUnionInteger", sql: `SELECT v FROM (SELECT CAST(d_val AS REAL) AS v FROM real_probe WHERE r_key IN (3,7) UNION ALL SELECT r_key FROM real_probe WHERE r_key = 5) s ORDER BY v`},
+		pgCase{name: "RealUnionReal", sql: `SELECT v FROM (SELECT CAST(3.1 AS REAL) AS v FROM real_probe WHERE r_key = 0 UNION ALL SELECT CAST(7.1 AS REAL) FROM real_probe WHERE r_key = 0) s ORDER BY v`},
+		// A filter ABOVE a real-typed union: the literal widens against the
+		// union's real output exactly as it does against a real column, so the
+		// non-representable 3.1 matches nothing.
+		pgCase{name: "RealFilterAboveUnion", sql: `SELECT COUNT(*) AS n FROM (SELECT CAST(d_val AS REAL) AS v FROM real_probe UNION ALL SELECT CAST(d_val AS REAL) FROM real_probe) s WHERE s.v = 3.1`},
+
 		// An INTEGER literal against a float column keeps PostgreSQL's float
 		// TOTAL order — NaN greatest and equal to itself (ADR-0012 item 8).
 		// The row-at-a-time comparison used Go's IEEE operators for a mixed

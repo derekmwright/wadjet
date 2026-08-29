@@ -169,28 +169,73 @@ func TestInFilterFloat32OverflowDeclines(t *testing.T) {
 	}
 }
 
-// TestFloat32LitOverflow is the unit check for the overflow predicate that
-// distinguishes a finite-but-too-large literal (error) from a genuine ±Inf or
-// NaN (legal value).
-func TestFloat32LitOverflow(t *testing.T) {
+// TestFloat32FitOf is the unit check for the one primitive every real-width
+// refusal reads: the literal declines here and in exec.floatConstError, and
+// expr.Cast's REAL arm. It has to separate four answers, because PostgreSQL
+// does (utils/adt/float.c, and float4in for the literal form):
+//
+//   - a finite value past real's range OVERFLOWS (narrowing gives +/-Inf,
+//     which would MATCH a genuine infinite row);
+//   - a non-zero value below real's smallest denormal UNDERFLOWS (narrowing
+//     gives 0.0, which would match every row holding zero);
+//   - a value that is ITSELF +/-Inf, NaN or zero is a legal real and FITS;
+//   - the denormal boundary itself FITS: 1e-45 is representable, 1e-46 is not,
+//     which is where PostgreSQL draws the line (`SELECT CAST(1e-45 AS real)`
+//     answers 1e-45, `CAST(1e-46 AS real)` raises 22003).
+func TestFloat32FitOf(t *testing.T) {
 	cases := []struct {
 		v    float64
-		want bool
+		want Float32Fit
 	}{
-		{1e40, true},             // finite, past FLT_MAX → +Inf
-		{-1e40, true},            // finite, past -FLT_MAX → -Inf
-		{3.5e38, true},           // just past FLT_MAX (~3.4028e38)
-		{3.4e38, false},          // inside real's range
-		{0.1, false},             // ordinary
-		{math.Inf(1), false},     // already Inf: a legal real value
-		{math.Inf(-1), false},    // already -Inf
-		{math.NaN(), false},      // NaN is not an overflow
-		{math.MaxFloat32, false}, // exactly the boundary is representable
+		{1e40, Float32Overflows},   // finite, past FLT_MAX -> +Inf
+		{-1e40, Float32Overflows},  // finite, past -FLT_MAX -> -Inf
+		{3.5e38, Float32Overflows}, // just past FLT_MAX (~3.4028e38)
+		{1e-46, Float32Underflows}, // non-zero, rounds to 0.0 in real
+		{-1e-46, Float32Underflows},
+		{1e-50, Float32Underflows},
+		// Denormal: real's smallest is about 1.4e-45, so 1e-45 survives as a
+		// denormal and must NOT be refused.
+		{1e-45, Float32Fits},
+		{-1e-45, Float32Fits},
+		{math.SmallestNonzeroFloat32, Float32Fits},
+		{3.4e38, Float32Fits},          // inside real's range
+		{math.MaxFloat32, Float32Fits}, // exactly the boundary is representable
+		{-math.MaxFloat32, Float32Fits},
+		{0.1, Float32Fits}, // ordinary
+		{0, Float32Fits},   // zero is a value, not an underflow
+		{math.Copysign(0, -1), Float32Fits},
+		{math.Inf(1), Float32Fits},  // already Inf: a legal real value
+		{math.Inf(-1), Float32Fits}, // already -Inf
+		{math.NaN(), Float32Fits},   // NaN is neither direction of failure
 	}
 	for _, tc := range cases {
-		if got := Float32LitOverflow(tc.v); got != tc.want {
-			t.Errorf("Float32LitOverflow(%v) = %v, want %v", tc.v, got, tc.want)
+		if got := Float32FitOf(tc.v); got != tc.want {
+			t.Errorf("Float32FitOf(%v) = %v, want %v", tc.v, got, tc.want)
 		}
+		// The boxed predicate is the same question with a box around it, and
+		// the two must never disagree — exec.floatConstError reads one and
+		// float32InSet the other for the SAME list.
+		if got, want := Float32LitUnrepresentable(tc.v), tc.want != Float32Fits; got != want {
+			t.Errorf("Float32LitUnrepresentable(%v) = %v, want %v", tc.v, got, want)
+		}
+	}
+}
+
+// TestInFilterFloat32UnderflowDeclines is the other direction of
+// TestInFilterFloat32OverflowDeclines, and the one that was a WRONG ANSWER
+// rather than a miss: float32(1e-46) is 0.0, so the list matched every row
+// holding zero. The kernel must decline so the caller raises 22003, exactly as
+// PostgreSQL refuses `real IN (1e-46, 3.1)`.
+func TestInFilterFloat32UnderflowDeclines(t *testing.T) {
+	if kern := ResolveInFilterKernel(batch.TypeFloat32, []any{1e-46, 1.5}, false); kern != nil {
+		t.Fatal("underflowing literal in a multi-element list built a kernel; it must decline so the caller raises 22003")
+	}
+	// The representable neighbour, and a genuine zero, still build one.
+	if kern := ResolveInFilterKernel(batch.TypeFloat32, []any{1e-45, 1.5}, false); kern == nil {
+		t.Fatal("1e-45 is a real denormal and must build a kernel")
+	}
+	if kern := ResolveInFilterKernel(batch.TypeFloat32, []any{0.0, 1.5}, false); kern == nil {
+		t.Fatal("zero is a legal real value and must build a kernel")
 	}
 }
 

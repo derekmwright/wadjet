@@ -96,7 +96,7 @@ func refuseRealInNode(node plansql.Node, decls colDecls) error {
 }
 
 // refuseRealInList applies PostgreSQL's rule to one IN list: the array cast
-// happens only when the probed operand is a REAL column and the list has more
+// happens only when the probed operand is REAL-typed and the list has more
 // than one member, all of them constants — the same conditions
 // expr.bindRealLitList and kernel.ResolveInFilterKernelArity narrow under, so
 // a query this refuses is exactly a query that would have narrowed.
@@ -107,49 +107,122 @@ func refuseRealInList(n *plansql.InExpr, decls colDecls) error {
 		// nothing for `real IN (1e40)`.
 		return nil
 	}
-	col, ok := n.Left.(*plansql.ColRef)
-	if !ok {
-		return nil
-	}
-	if t, ok := decls.colType(col); !ok || t != parquet.TypeFloat32 {
+	if !realTypedNode(n.Left, decls) {
 		return nil
 	}
 	for _, v := range n.Values {
-		lit, ok := realListLiteral(v)
+		text, ok := realListLiteralText(v)
 		if !ok {
 			// A non-constant member takes the array away entirely:
 			// PostgreSQL plans an OR of widened scalar comparisons, and no
 			// cast to real[] happens for any member.
 			return nil
 		}
-		if lit == nil || lit.Kind != plansql.LitNumber {
-			continue
-		}
-		if !kernel.RealLitTextOverflow(lit.Value) {
+		if text == "" || !kernel.RealLitTextUnrepresentable(text) {
 			continue
 		}
 		return sqlerr.New("22003", "%q is out of range for type real",
-			kernel.RealOverflowText(lit.Value))
+			kernel.RealOverflowText(text))
 	}
 	return nil
 }
 
-// realListLiteral unwraps a member to its literal, mirroring
-// expr.realListMember: a bare literal, or a CAST to REAL over one, keeps the
-// list at real width; anything else is not a constant this rule applies to.
-// A NULL member is a literal and contributes nothing, which is why the second
-// result distinguishes "not a literal" from "a literal with no number in it".
-func realListLiteral(e plansql.Node) (*plansql.Lit, bool) {
-	switch n := e.(type) {
-	case *plansql.Lit:
-		return n, true
+// realTypedNode reports whether an operand's own type is REAL, which is what
+// decides the array cast — not whether it is a bare column.
+//
+// PostgreSQL resolves the list's element type over the members AND the probed
+// expression, so any real-typed left operand pulls the array to real[]
+// (EXPLAIN VERBOSE, postgres:17):
+//
+//	-r_val IN (-3.1, -7.1)          -> ((- r_val) = ANY ('{-3.1,-7.1}'::real[]))
+//	CAST(d_val AS REAL) IN (3.1,…)  -> ((d_val)::real = ANY ('{3.1,7.1}'::real[]))
+//	(r_val + 0) IN (3.1, 7.1)       -> (… = ANY ('{3.1,7.1}'::double precision[]))
+//
+// The third is why this cannot simply follow the operand down to a column: an
+// integer literal added to a real gives DOUBLE PRECISION in PostgreSQL
+// (pg_typeof(r_val + 0) is `double precision`), so that shape must stay
+// widened. Unary ± is the one operator that preserves real.
+//
+// It is NOT nodeDeclaredType. That function deliberately collapses FLOAT32 to
+// FLOAT64 for unary ± — it types the COLUMN a projection allocates, where the
+// engine materializes `-f32col` as a float64 — and reading it here would
+// answer "double" for the very shape PostgreSQL calls real. The two questions
+// are different; expr.realTypedOperand is this one's runtime twin and the two
+// must keep answering alike.
+func realTypedNode(node plansql.Node, decls colDecls) bool {
+	switch n := node.(type) {
 	case *plansql.ParenNode:
-		return realListLiteral(n.Inner)
+		return realTypedNode(n.Inner, decls)
+	case *plansql.ColRef:
+		t, ok := decls.colType(n)
+		return ok && t == parquet.TypeFloat32
 	case *plansql.CastNode:
 		switch strings.ToLower(strings.TrimSpace(n.TypeName)) {
 		case "real", "float4":
-			return realListLiteral(n.Inner)
+			return true
+		}
+	case *plansql.UnaryOp:
+		if n.Op == "-" || n.Op == "+" {
+			return realTypedNode(n.Inner, decls)
 		}
 	}
-	return nil, false
+	return false
+}
+
+// realListLiteralText unwraps a member to the numeric text the refusal reads,
+// mirroring expr.realListMember: a bare literal, a CAST to REAL over one, or
+// either behind unary ±, keeps the list at real width; anything else is not a
+// constant this rule applies to.
+//
+// The sign travels WITH the text. A negated member used to make the whole
+// member "not a literal", which disarmed the check for the entire list —
+// `r_val IN (-1.0, 1e40)` was not refused at all — and it is also what the
+// 22003 message has to print: PostgreSQL names
+// "-10000000000000000000000000000000000000000" for `IN (-1e40, 3.1)`.
+//
+// An empty text is a member with no number in it (NULL, a quoted string), which
+// contributes nothing and must not be mistaken for "not a constant" — hence the
+// second result rather than a nil check.
+func realListLiteralText(e plansql.Node) (string, bool) {
+	switch n := e.(type) {
+	case *plansql.Lit:
+		if n.Kind != plansql.LitNumber {
+			return "", true
+		}
+		return n.Value, true
+	case *plansql.ParenNode:
+		return realListLiteralText(n.Inner)
+	case *plansql.CastNode:
+		switch strings.ToLower(strings.TrimSpace(n.TypeName)) {
+		case "real", "float4":
+			return realListLiteralText(n.Inner)
+		}
+	case *plansql.UnaryOp:
+		switch n.Op {
+		case "+":
+			return realListLiteralText(n.Inner)
+		case "-":
+			text, ok := realListLiteralText(n.Inner)
+			if !ok || text == "" {
+				return text, ok
+			}
+			return negateNumericText(text), true
+		}
+	}
+	return "", false
+}
+
+// negateNumericText flips a numeric literal's sign in its TEXT, which is where
+// the exactness lives: the literal may be wider than a float64 (1e400), so
+// negating a parsed value would lose it.
+func negateNumericText(text string) string {
+	t := strings.TrimSpace(text)
+	switch {
+	case strings.HasPrefix(t, "-"):
+		return t[1:]
+	case strings.HasPrefix(t, "+"):
+		return "-" + t[1:]
+	default:
+		return "-" + t
+	}
 }

@@ -1942,14 +1942,15 @@ func (e *In) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil {
 		return false, true
 	}
-	// A FLOAT32 column against a multi-element literal list compares at REAL
-	// width, not at the double width this boxed path would otherwise use
-	// (#633): the box is float64(float32), so narrowing it back recovers the
-	// stored value exactly. The list's own NULL rule is unchanged — a miss
-	// with a NULL member is UNKNOWN, never FALSE.
+	// A REAL-typed operand against a multi-element literal list compares at
+	// REAL width, not at the double width this boxed path would otherwise use
+	// (#633). A FLOAT32 column boxes as float64(float32), so narrowing it back
+	// recovers the stored value exactly; a CAST to REAL boxes as a float32
+	// already. The list's own NULL rule is unchanged — a miss with a NULL
+	// member is UNKNOWN, never FALSE.
 	if e.f32.applies(b) {
-		if f, ok := lv.(float64); ok {
-			if e.f32.contains(float32(f)) {
+		if f, ok := realBox(lv); ok {
+			if e.f32.contains(f) {
 				return !e.Not, false
 			}
 			if e.f32.sawNull {
@@ -5786,18 +5787,17 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// and an unqualified FLOAT is the latter) — verified with pg_typeof —
 		// so only the two spellings that really name float4 narrow.
 		f := ToFloat64(v)
-		g := float32(f)
-		// PostgreSQL refuses a float8->float4 conversion that loses the value
-		// outright rather than answering +/-Inf or 0 (float.c's overflow and
+		// PostgreSQL refuses a conversion that loses the value outright rather
+		// than answering an infinity or a zero (float.c's overflow and
 		// underflow checks, both SQLSTATE 22003). A value that is ALREADY
 		// infinite, or already zero, is representable and passes through.
-		if math.IsInf(float64(g), 0) && !math.IsInf(f, 0) {
-			raiseFloatRangeError("overflow")
+		// kernel.Float32FitOf is the one place that rule lives — the IN-list
+		// refusals read it too, so `CAST(x AS REAL)` and `x IN (lit)` cannot
+		// disagree about what a real can hold.
+		if fit := kernel.Float32FitOf(f); fit != kernel.Float32Fits {
+			raiseRealConversionError(e.Operand, f, fit)
 		}
-		if g == 0 && f != 0 {
-			raiseFloatRangeError("underflow")
-		}
-		return g
+		return float32(f)
 	case "float", "double", "float8", "double precision", "float64":
 		return ToFloat64(v)
 	case "decimal", "numeric":

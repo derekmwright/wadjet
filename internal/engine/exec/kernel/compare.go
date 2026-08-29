@@ -1172,13 +1172,14 @@ func floatInSet(values []any) (map[float64]struct{}, bool) {
 // redundant with the map, and why `==` keys give -0.0/+0.0 the same answer
 // PostgreSQL gives).
 //
-// ok is false when a FINITE literal overflows real's range — float32(1e40) is
-// +Inf. Inserting that +Inf would make `f IN (1e40)` MATCH a genuine +Inf row,
-// a false positive, where PostgreSQL raises 22003 for the whole predicate (it
-// does not silently drop the offending element). Declining the set lets the
-// caller raise that error. A literal that is ITSELF ±Inf (e.g. 'Infinity'::real)
-// is a legal real value, not an overflow, and stays in the set so it matches
-// the corresponding infinite rows — the distinction Float32LitOverflow draws.
+// ok is false when a literal does not FIT a real, in either direction —
+// float32(1e40) is +Inf and float32(1e-46) is 0. Inserting either would make
+// the list MATCH rows it must not (a genuine +Inf row, or every row holding
+// 0.0 — the shape `real IN (1e-46, 3.1)` answered with the zero row), where
+// PostgreSQL raises 22003 for the whole predicate rather than silently
+// dropping the offending element. Declining the set lets the caller raise it.
+// A literal that is ITSELF ±Inf (e.g. 'Infinity'::real), or itself zero, is a
+// legal real value and stays in the set — the distinction Float32FitOf draws.
 func float32InSet(values []any) (set map[float32]struct{}, hasNaN, ok bool) {
 	set = make(map[float32]struct{}, len(values))
 	for _, v := range values {
@@ -1188,7 +1189,7 @@ func float32InSet(values []any) (set map[float32]struct{}, hasNaN, ok bool) {
 			hasNaN = true
 			continue
 		}
-		if math.IsInf(float64(f), 0) && !math.IsInf(f64, 0) {
+		if Float32FitOf(f64) != Float32Fits {
 			return nil, false, false
 		}
 		set[f] = struct{}{}
@@ -1196,18 +1197,48 @@ func float32InSet(values []any) (set map[float32]struct{}, hasNaN, ok bool) {
 	return set, hasNaN, true
 }
 
-// Float32LitOverflow reports whether v is a finite number whose magnitude
-// exceeds real's range, so narrowing it to float32 yields ±Inf. PostgreSQL
-// raises 22003 ("out of range for type real") for such a literal in a real
-// comparison; this is the check exec.floatConstError turns into that error,
-// the same "nil kernel, caller raises" convention DateLiteralDays serves for
-// DATE. A value that is already ±Inf or NaN is not an overflow.
-func Float32LitOverflow(v any) bool {
-	f64 := toFloat64(v)
-	if math.IsNaN(f64) || math.IsInf(f64, 0) {
-		return false
+// Float32Fit says whether a float64 survives the conversion to float32, and
+// which way it fails when it does not. PostgreSQL refuses BOTH directions with
+// SQLSTATE 22003 and two different texts (utils/adt/float.c), so one primitive
+// answers every site that has to make the distinction: the literal refusals
+// here and in exec.floatConstError, and expr.Cast's REAL arm.
+type Float32Fit int
+
+const (
+	Float32Fits Float32Fit = iota
+	// Float32Overflows: a finite value whose magnitude exceeds real's range,
+	// so narrowing yields ±Inf — which would MATCH a genuine infinite row.
+	Float32Overflows
+	// Float32Underflows: a non-zero value that rounds to zero in real, which
+	// would MATCH the rows holding 0.0. `real IN (1e-46, 3.1)` selected the
+	// zero row for exactly this reason before the arm existed; PostgreSQL
+	// refuses the list. The boundary is real's smallest DENORMAL: 1e-45 is
+	// representable and must not be refused, 1e-46 is not.
+	Float32Underflows
+)
+
+// Float32FitOf classifies one float64 against real's range. NaN and ±Inf are
+// legal real values and always fit.
+func Float32FitOf(f float64) Float32Fit {
+	if f != f || math.IsInf(f, 0) {
+		return Float32Fits
 	}
-	return math.IsInf(float64(float32(f64)), 0)
+	g := float32(f)
+	switch {
+	case math.IsInf(float64(g), 0):
+		return Float32Overflows
+	case g == 0 && f != 0:
+		return Float32Underflows
+	}
+	return Float32Fits
+}
+
+// Float32LitUnrepresentable reports whether a literal's boxed value is one
+// PostgreSQL refuses to put in a `real`. It is the check exec.floatConstError
+// turns into 22003, the same "nil kernel, caller raises" convention
+// DateLiteralDays serves for DATE.
+func Float32LitUnrepresentable(v any) bool {
+	return Float32FitOf(toFloat64(v)) != Float32Fits
 }
 
 // inFilterFloat32 probes a FLOAT32 column against a float32 set. The set holds

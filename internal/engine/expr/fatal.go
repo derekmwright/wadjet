@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -110,13 +111,32 @@ func IsCompileRefusal(err error) bool {
 	return IsUnknownFunc(err) || IsInvalidLiteral(err)
 }
 
-// raiseFloatRangeError aborts the query with SQLSTATE 22003, PostgreSQL's
-// numeric_value_out_of_range, for a binary-float conversion that cannot carry
-// the value: a float8 past float4's range ("overflow"), or a non-zero float8
-// that rounds to zero in float4 ("underflow"). Both texts are PostgreSQL's own
-// (utils/adt/float.c), which spells this conversion's failure differently from
-// a LITERAL that will not fit a type — that one names the digits and the type
-// (kernel.RealOverflowText, raiseNumericOutOfRange).
-func raiseFloatRangeError(kind string) {
+// raiseRealConversionError aborts a CAST to REAL that cannot carry its value,
+// with SQLSTATE 22003 and the message PostgreSQL gives for THIS operand.
+//
+// PostgreSQL has two, and which one it uses depends on what is being cast:
+//
+//	CAST(1e40 AS real)          -> "1000…000" is out of range for type real
+//	CAST(1e40::float8 AS real)  -> value out of range: overflow
+//
+// The first is the numeric->real cast failing during constant folding, so it
+// names the numeric's own digits; the second is float8->real at runtime, which
+// has no literal to name. Wadjet gave the runtime text for both. A LITERAL
+// operand takes the first form, rendered by kernel.RealOverflowText — the same
+// renderer the IN-list refusal uses, so one query cannot produce two spellings
+// of one refusal.
+func raiseRealConversionError(operand Expr, f float64, fit kernel.Float32Fit) {
+	if lit, ok := operand.(*Lit); ok {
+		text := lit.Text
+		if text == "" {
+			text = toString(lit.Val)
+		}
+		panic(fatalEval{sqlerr.New("22003", "%q is out of range for type real",
+			kernel.RealOverflowText(text))})
+	}
+	kind := "overflow"
+	if fit == kernel.Float32Underflows {
+		kind = "underflow"
+	}
 	panic(fatalEval{sqlerr.New("22003", "value out of range: %s", kind)})
 }

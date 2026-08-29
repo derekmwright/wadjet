@@ -291,3 +291,142 @@ func catchFatalEval(t *testing.T, fn func()) (err error) {
 	fn()
 	return nil
 }
+
+// realTypedRows is the fixture the OPERAND-TYPE cases read: the same numbers
+// as a `real` and as a `double precision`, plus an integer key, so the rule
+// "the operand's own type decides" can be told apart from "walk down to a
+// column".
+func realTypedRows() *batch.RecordBatch {
+	schema := []parquet.Column{
+		{Name: "r", Type: parquet.TypeFloat32, Nullable: true},
+		{Name: "d", Type: parquet.TypeFloat64, Nullable: true},
+		{Name: "k", Type: parquet.TypeInt64},
+	}
+	vals := []any{float32(0) + 0.1, float32(1) + 0.1, float32(2) + 0.1, float32(3) + 0.1,
+		float32(1.5), nil, float32(16777216)}
+	b := batch.NewRecordBatch(schema, len(vals))
+	for i, v := range vals {
+		b.Columns[2].SetValue(i, int64(i))
+		if v == nil {
+			b.Columns[0].Nulls.SetNull(i)
+			b.Columns[1].Nulls.SetNull(i)
+			continue
+		}
+		b.Columns[0].SetValue(i, v)
+		b.Columns[1].SetValue(i, float64(v.(float32)))
+	}
+	b.Len = len(vals)
+	return b
+}
+
+// TestRealTypedOperandFollowsPostgresOperandType is physical.realTypedNode's
+// runtime twin held to the same answers — the two decide the same thing on the
+// two paths (the planner refuses a list this narrows), so a disagreement would
+// mean one of them acting on a predicate the other calls something else.
+//
+// PostgreSQL resolves the array's element type over the members AND the probed
+// expression, so a real-typed operand pulls the list to real[] even when it is
+// not a column (EXPLAIN VERBOSE, postgres:17):
+//
+//	-r IN (-0.1, -3.1)       -> ((- r) = ANY ('{-0.1,-3.1}'::real[]))
+//	(r + 0) IN (0.1, 3.1)    -> ((r + '0'::float8) = ANY ('{0.1,3.1}'::float8[]))
+//
+// The second is the control: an integer literal added to a real gives DOUBLE
+// PRECISION there, so arithmetic does NOT preserve real and this cannot simply
+// follow the operand down to a column.
+func TestRealTypedOperandFollowsPostgresOperandType(t *testing.T) {
+	b := realTypedRows()
+
+	cases := []struct {
+		sql           string
+		real, settled bool
+	}{
+		{"r", true, true},
+		{"d", false, true},
+		{"k", false, true},
+		{"CAST(d AS REAL)", true, true},
+		{"CAST(d AS float4)", true, true},
+		{"CAST(r AS DOUBLE PRECISION)", false, true},
+		// PostgreSQL's bare FLOAT is double precision.
+		{"CAST(r AS FLOAT)", false, true},
+		{"CAST(r AS INTEGER)", false, true},
+		{"-r", true, true},
+		{"+r", true, true},
+		{"-(-r)", true, true},
+		{"-CAST(d AS REAL)", true, true},
+		{"-d", false, true},
+		{"r + 0", false, true},
+		{"r * 1", false, true},
+		{"(r)", true, true},
+	}
+	for _, c := range cases {
+		gotReal, gotSettled := realTypedOperand(compileExprSQL(t, c.sql), b)
+		if gotReal != c.real || gotSettled != c.settled {
+			t.Errorf("realTypedOperand(%s) = (%v, %v), want (%v, %v) (PostgreSQL 17)",
+				c.sql, gotReal, gotSettled, c.real, c.settled)
+		}
+	}
+
+	// A name this batch cannot resolve is UNSETTLED: the next batch may carry
+	// it, so the answer must not be cached as "not real". (A WHERE over a
+	// column no batch resolves is #653, a different defect entirely.)
+	if real, settled := realTypedOperand(compileExprSQL(t, "nosuchcol"), b); real || settled {
+		t.Errorf("realTypedOperand(nosuchcol) = (%v, %v), want (false, false) — an unresolved name settles nothing",
+			real, settled)
+	}
+}
+
+// TestRealInNarrowsForARealTypedOperand is the row path's half of the same
+// rule — the evaluator the stage DAG compiles every scan-pushed filter to.
+// Wants are postgres:17's over the identical rows:
+//
+//	CREATE TABLE rw2 (k int, r real, d double precision);
+//	INSERT INTO rw2 VALUES (0,0.1,0.1),(1,1.1,1.1),(2,2.1,2.1),(3,3.1,3.1),
+//	                       (4,1.5,1.5),(5,NULL,NULL),(6,16777216,16777216);
+func TestRealInNarrowsForARealTypedOperand(t *testing.T) {
+	b := realTypedRows()
+
+	cases := []struct {
+		sql  string
+		want []bool
+	}{
+		// NARROW: the operand is real-typed, so the array is real[] and the
+		// members become the reals rows 0 and 3 hold.
+		{"-r IN (-0.1, -3.1)", []bool{true, false, false, true, false, false, false}},
+		{"+r IN (0.1, 3.1)", []bool{true, false, false, true, false, false, false}},
+		{"CAST(d AS REAL) IN (0.1, 3.1)", []bool{true, false, false, true, false, false, false}},
+		// WIDEN: `r + 0` is double precision, so the members stay doubles and
+		// 0.1 is not the double the real row widens to.
+		{"(r + 0) IN (0.1, 3.1)", []bool{false, false, false, false, false, false, false}},
+		// The scalar halves widen whatever the operand is.
+		{"-r = -3.1", []bool{false, false, false, false, false, false, false}},
+		{"CAST(d AS REAL) = 3.1", []bool{false, false, false, false, false, false, false}},
+	}
+	for _, c := range cases {
+		pred := FilterPredicate(compileExprSQL(t, c.sql))
+		for row := 0; row < b.Len; row++ {
+			if got := pred(b, row); got != c.want[row] {
+				t.Errorf("row %d: %s = %v, want %v (PostgreSQL 17)", row, c.sql, got, c.want[row])
+			}
+		}
+	}
+}
+
+// TestRealBoxNarrowsEitherBox pins what the narrowed probe accepts. Two boxes
+// reach it and both are exact: a FLOAT32 column boxes as float64(float32)
+// (ColRef.Eval), which round-trips bit for bit, and a CAST to REAL boxes a
+// float32 outright. Anything else is a box the operand's type did not predict
+// and must decline rather than be coerced.
+func TestRealBoxNarrowsEitherBox(t *testing.T) {
+	if got, ok := realBox(float32(3.1)); !ok || got != float32(3.1) {
+		t.Errorf("realBox(float32 3.1) = (%v, %v), want (3.1, true)", got, ok)
+	}
+	if got, ok := realBox(float64(float32(3.1))); !ok || got != float32(3.1) {
+		t.Errorf("realBox(widened float32) = (%v, %v), want (3.1, true)", got, ok)
+	}
+	for _, v := range []any{int64(3), int32(3), "3.1", nil, true} {
+		if got, ok := realBox(v); ok {
+			t.Errorf("realBox(%#v) = (%v, true), want declined", v, got)
+		}
+	}
+}

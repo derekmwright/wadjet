@@ -247,6 +247,39 @@ func rwpWant() []rwpCase {
 		// order for the same reason.
 		{"DoubleGtIntegerLiteral", "d_val > 1", join(seq(1, 15), []int64{17, 20, 21})},
 		{"DoubleNeIntegerLiteral", "d_val <> 1", join(seq(0, 17), []int64{19, 20, 21})},
+
+		// --- A NEGATIVE member is still a constant ---
+		//
+		// The sign is a unary operator over the literal in the AST, and
+		// reading that as "not a constant" took the narrowing — and the
+		// refusal below — away from the whole list. PostgreSQL narrows exactly
+		// as it does for a positive member.
+		{"InMultiNegativeMember", "r_val IN (-1.0, 3.1)", []int64{3}},
+
+		// --- A REAL-TYPED OPERAND, not just a real column ---
+		//
+		// PostgreSQL resolves the array's element type over the members AND
+		// the probed expression, so any real-typed left operand pulls the list
+		// to real[] (EXPLAIN VERBOSE):
+		//
+		//	-r_val IN (-3.1, -7.1)         -> ((- r_val) = ANY ('{-3.1,-7.1}'::real[]))
+		//	CAST(d_val AS REAL) IN (3.1,…) -> ((d_val)::real = ANY ('{3.1,7.1}'::real[]))
+		//	(r_val + 0) IN (3.1, 7.1)      -> (… = ANY ('{3.1,7.1}'::double precision[]))
+		//
+		// The third is the control: an INTEGER literal added to a real gives
+		// DOUBLE PRECISION in PostgreSQL (pg_typeof), so that one must STAY
+		// widened — which is why the rule is the operand's resolved TYPE and
+		// not "walk down to a column". The two `=` companions are the scalar
+		// halves, which widen whatever the operand is.
+		{"NegatedOperandIn", "-r_val IN (-3.1, -7.1)", []int64{3, 7}},
+		{"NegatedOperandEq", "-r_val = -3.1", nil},
+		{"CastToRealOperandIn", "CAST(d_val AS REAL) IN (3.1, 7.1)", []int64{3, 7}},
+		{"CastToRealOperandEq", "CAST(d_val AS REAL) = 3.1", nil},
+		{"PlusZeroOperandStaysWidened", "(r_val + 0) IN (3.1, 7.1)", nil},
+
+		// A literal at real's smallest DENORMAL is representable and must NOT
+		// be refused — the boundary the underflow refusal has to respect.
+		{"InMultiDenormalBoundary", "r_val IN (1e-45, 3.1)", []int64{3}},
 	}
 }
 
@@ -292,6 +325,16 @@ func TestRealComparisonWidthTwoPath(t *testing.T) {
 // asserting the text is what keeps the two spellings from drifting apart again.
 const pgRealOverflowText = `"10000000000000000000000000000000000000000" is out of range for type real`
 
+// The other three refusals PostgreSQL gives for a real[] cast, each with its
+// own digits. Two are the same rule in the other direction or with a sign; the
+// UNDERFLOW one is a separate failure mode: 1e-46 narrows to 0.0, which would
+// MATCH every row holding zero rather than merely miss, so the list answered
+// {3, 19} where PostgreSQL refuses it.
+const (
+	pgRealUnderflowText = `"0.0000000000000000000000000000000000000000000001" is out of range for type real`
+	pgRealNegOverflow   = `"-10000000000000000000000000000000000000000" is out of range for type real`
+)
+
 // TestRealInOverRangeLiteralRaisesOnBothPaths is the error half of the arity
 // rule, which only shows up once the row path narrows too (#633).
 //
@@ -317,22 +360,38 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 	coord := tmdCluster(t, ctx)
 	single := tmdStandalone(t, ctx)
 
-	raises := fmt.Sprintf("SELECT r_key FROM %s WHERE r_val IN (1e40, 3.1) ORDER BY r_key", rwpTable)
-	for _, arm := range []struct {
-		name string
-		run  func() error
-	}{
-		{"single", func() error { _, err := tmdRunSingle(ctx, single, raises); return err }},
-		{"dag", func() error { _, err := tmdRunDAG(ctx, coord, raises); return err }},
+	// Each shape with the exact digits PostgreSQL names for it. The list is
+	// the four ways a member can fail to be a real: too large, too large and
+	// negative, too small to be anything but zero, and too large behind a
+	// real-typed EXPRESSION rather than a column.
+	for _, c := range []struct{ where, want string }{
+		{"r_val IN (1e40, 3.1)", pgRealOverflowText},
+		{"r_val IN (-1e40, 3.1)", pgRealNegOverflow},
+		// UNDERFLOW. 1e-46 narrows to 0.0, so the list did not merely miss —
+		// it MATCHED the row holding zero, answering {3, 19} where PostgreSQL
+		// refuses the query. Its representable neighbour 1e-45 is asserted as
+		// a VALUE case (InMultiDenormalBoundary) so the boundary is pinned
+		// from both sides.
+		{"r_val IN (1e-46, 3.1)", pgRealUnderflowText},
+		{"-r_val IN (1e40, 3.1)", pgRealOverflowText},
 	} {
-		err := arm.run()
-		if err == nil {
-			t.Errorf("%s: %s returned rows; PostgreSQL raises 22003", arm.name, raises)
-			continue
-		}
-		if !strings.Contains(err.Error(), pgRealOverflowText) {
-			t.Errorf("%s: %s raised %v, want the 22003 refusal naming %q",
-				arm.name, raises, err, pgRealOverflowText)
+		sql := fmt.Sprintf("SELECT r_key FROM %s WHERE %s ORDER BY r_key", rwpTable, c.where)
+		for _, arm := range []struct {
+			name string
+			run  func() error
+		}{
+			{"single", func() error { _, err := tmdRunSingle(ctx, single, sql); return err }},
+			{"dag", func() error { _, err := tmdRunDAG(ctx, coord, sql); return err }},
+		} {
+			err := arm.run()
+			if err == nil {
+				t.Errorf("%s: %s returned rows; PostgreSQL raises 22003", arm.name, sql)
+				continue
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s: %s raised %v, want the 22003 refusal naming %q",
+					arm.name, sql, err, c.want)
+			}
 		}
 	}
 
@@ -343,17 +402,25 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 	// in the row loop: the kernel resolves on the first BATCH, so an empty
 	// scan never raised, and the row evaluator raises on the first non-NULL
 	// value, so a predicate that only ever meets NULLs never raised either.
-	for _, sql := range []string{
+	for _, c := range []struct{ where, want string }{
 		// Reachable, but only ever on rows whose r_val IS NULL — the boxed
 		// path returns on the nil operand before it can raise.
-		fmt.Sprintf("SELECT r_key FROM %s WHERE r_val IS NULL AND r_val IN (1e40, 3.1)", rwpTable),
+		{"r_val IS NULL AND r_val IN (1e40, 3.1)", pgRealOverflowText},
 		// Not reachable at all: no row survives the first conjunct, so
 		// neither the kernel nor the row evaluator ever sees the list.
-		fmt.Sprintf("SELECT r_key FROM %s WHERE r_key < 0 AND r_val IN (1e40, 3.1)", rwpTable),
+		{"r_key < 0 AND r_val IN (1e40, 3.1)", pgRealOverflowText},
 		// The negated form: PostgreSQL raises for `NOT IN` too — the cast
 		// happens whatever the operator does with the result.
-		fmt.Sprintf("SELECT r_key FROM %s WHERE r_key < 0 AND r_val NOT IN (1e40, 3.1)", rwpTable),
+		{"r_key < 0 AND r_val NOT IN (1e40, 3.1)", pgRealOverflowText},
+		// A NEGATIVE member beside the offending one. The sign is a unary
+		// operator over the literal in the AST, and reading that as "not a
+		// constant" disarmed the whole check: this returned 0 rows on BOTH
+		// paths, since no row reaches the predicate to trip the backstop.
+		{"r_key < 0 AND r_val IN (-1.0, 1e40)", pgRealOverflowText},
+		// The underflow, unreachable, so only a plan-time refusal can see it.
+		{"r_key < 0 AND r_val IN (1e-46, 3.1)", pgRealUnderflowText},
 	} {
+		sql := fmt.Sprintf("SELECT r_key FROM %s WHERE %s", rwpTable, c.where)
 		for _, arm := range []struct {
 			name string
 			run  func() error
@@ -367,9 +434,9 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 					arm.name, sql)
 				continue
 			}
-			if !strings.Contains(err.Error(), pgRealOverflowText) {
+			if !strings.Contains(err.Error(), c.want) {
 				t.Errorf("%s: %s raised %v, want the 22003 refusal naming %q",
-					arm.name, sql, err, pgRealOverflowText)
+					arm.name, sql, err, c.want)
 			}
 		}
 	}
@@ -461,6 +528,94 @@ func TestRealKeyedOperationsAreUnmovedByWidth(t *testing.T) {
 			}
 			if got := strings.Join(parts, ","); got != want {
 				t.Errorf("%s: %s\n  got  %s\n  want %s (PostgreSQL 17)", arm.name, sql, got, want)
+			}
+		}
+	})
+}
+
+// TestRealCastMeetsSetOperationLadder is the interaction gate between the two
+// changes that landed together: `CAST(x AS REAL)` now produces a FLOAT32, and
+// a set operation now has a float4 rung in its type ladder (#541).
+//
+// A set operation reconciles its arms' types, so a real arm meeting a wider or
+// narrower one is exactly where a newly-narrowing cast could go wrong — either
+// by widening straight back (the no-op returning) or by dragging the other arm
+// down. PostgreSQL's answers, live on postgres:17 (`pg_typeof` over the union's
+// output plus the values):
+//
+//	real UNION ALL double precision  ->  double precision
+//	real UNION ALL integer           ->  real
+//	real UNION ALL real              ->  real
+//
+// so the real arm's values WIDEN in the first (3.1 as a real prints
+// 3.0999999046325684 once it is a double) and the integer arm NARROWS in the
+// second. The last case puts a filter above a real-typed union, which widens
+// its literal exactly as it would over a real column.
+func TestRealCastMeetsSetOperationLadder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	cases := []struct {
+		name string
+		sql  string
+		want []string // the v column, ordered, rendered
+	}{
+		// real ∪ double → double: the real arm's two values widen and print
+		// their double expansions, the double arm's prints 3.1.
+		{"RealUnionDouble", fmt.Sprintf(
+			`SELECT v FROM (SELECT CAST(r_val AS REAL) AS v FROM %s WHERE r_key IN (3,7)
+			  UNION ALL SELECT d_val FROM %s WHERE r_key = 3) s ORDER BY v`, rwpTable, rwpTable),
+			[]string{"3.0999999046325684", "3.1", "7.099999904632568"}},
+		// real ∪ integer → real: the integer arm's 5 becomes a real, and the
+		// real arm keeps float32's shortest round-trip rendering.
+		{"RealUnionInteger", fmt.Sprintf(
+			`SELECT v FROM (SELECT CAST(d_val AS REAL) AS v FROM %s WHERE r_key IN (3,7)
+			  UNION ALL SELECT r_key FROM %s WHERE r_key = 5) s ORDER BY v`, rwpTable, rwpTable),
+			[]string{"3.1", "5", "7.1"}},
+		{"RealUnionReal", fmt.Sprintf(
+			`SELECT v FROM (SELECT CAST(3.1 AS REAL) AS v FROM %s WHERE r_key = 0
+			  UNION ALL SELECT CAST(7.1 AS REAL) FROM %s WHERE r_key = 0) s ORDER BY v`, rwpTable, rwpTable),
+			[]string{"3.1", "7.1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				rows := dtpRun(t, ctx, single, coord, c.sql, arm.dag)
+				got := make([]string, 0, len(rows))
+				for _, r := range rows {
+					got = append(got, fmt.Sprint(r["v"]))
+				}
+				if strings.Join(got, ",") != strings.Join(c.want, ",") {
+					t.Errorf("%s: %s\n  got  %v\n  want %v (PostgreSQL 17)",
+						arm.name, c.sql, got, c.want)
+				}
+			}
+		})
+	}
+
+	// A filter ABOVE a real-typed union: the literal widens against the
+	// union's real output exactly as it does against a real column, so the
+	// non-representable 3.1 matches nothing.
+	t.Run("FilterAboveRealUnion", func(t *testing.T) {
+		sql := fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM (SELECT CAST(d_val AS REAL) AS v FROM %s
+			  UNION ALL SELECT CAST(d_val AS REAL) FROM %s) s WHERE s.v = 3.1`, rwpTable, rwpTable)
+		for _, arm := range []struct {
+			name string
+			dag  bool
+		}{{"single", false}, {"dag", true}} {
+			rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+			if len(rows) != 1 || fmt.Sprint(rows[0]["n"]) != "0" {
+				t.Errorf("%s: %s = %v, want 0 (PostgreSQL 17)", arm.name, sql, rows)
 			}
 		}
 	})

@@ -809,9 +809,11 @@ func dateConstError(typ batch.TypeID, value any) error {
 // postgres:17) — and ADR-0012 makes PostgreSQL the authority on
 // error-versus-not, so this is its SQLSTATE.
 //
-// It exists because the #549 fix narrows each IN literal to float32; a finite
-// literal past FLT_MAX narrows to +Inf, and inserting that would make the
-// predicate MATCH a genuine +Inf row (a false positive) instead of erroring.
+// It exists because the #549 fix narrows each IN literal to float32, and a
+// literal that does not FIT a real narrows onto a value that does: one past
+// FLT_MAX becomes +Inf and would MATCH a genuine +Inf row, one below real's
+// smallest denormal becomes 0.0 and would match every zero row (`real IN
+// (1e-46, 3.1)` answered with the zero row before the underflow arm existed).
 // kernel.ResolveInFilterKernel returns a nil kernel for that list, and this
 // turns the same condition into the error PostgreSQL gives. A literal that is
 // itself ±Inf is a legal real value, not an overflow, and does not reach here.
@@ -819,7 +821,7 @@ func floatConstError(typ batch.TypeID, value any, litText string) error {
 	if typ != batch.TypeFloat32 || value == nil {
 		return nil
 	}
-	if !kernel.Float32LitOverflow(value) {
+	if !kernel.Float32LitUnrepresentable(value) {
 		return nil
 	}
 	// The literal's SOURCE TEXT, expanded the way PostgreSQL's numeric output
