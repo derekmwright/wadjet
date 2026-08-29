@@ -164,15 +164,33 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 		out[term] = k
 	}
 	for _, we := range node.WindowExprs {
-		// The ARGUMENT is a key candidate too, for the one shape that cannot
-		// be resolved by name: a ROW field path. `SUM(rw.f) OVER ()` reached
-		// the operator as the bare `f`, resolved to no input vector, and
-		// answered NULL in every row (#603). Anything else — a bare column, a
-		// qualified reference, `*`, a literal — keeps today's route, where
-		// exec.Window's qualified-to-bare fallback settles it.
+		// The ARGUMENT is a key candidate too, and for the same reason the
+		// terms are: exec.Window reads it by NAME off the input batch, so an
+		// argument no column is named after resolves to no input vector and
+		// the operator writes NULL in every row.
+		//
+		// Two spellings do that. A ROW FIELD PATH — `SUM(rw.f) OVER ()`
+		// reached the operator as the bare `f` (#603). And an EXPRESSION —
+		// `SUM(d * 2) OVER ()`, `AVG(CASE …) OVER ()`, `MAX(COALESCE(x, 0))
+		// OVER ()` — which nothing ever computed, so every window over an
+		// expression answered NULL on both paths, for every input type
+		// (#672). Both are materialized as __winkey_N and read under that
+		// name, exactly as a computed PARTITION BY term is.
+		//
+		// A bare or qualified column keeps today's route (exec.Window's
+		// qualified-to-bare fallback settles it), and `*` and a literal are
+		// not arguments to materialize at all: COUNT(*) counts rows, and a
+		// constant is one the operator already has.
 		if col := strings.TrimSpace(we.InputColumn()); col != "" {
 			if ast, err := plansql.ParseExpression(col); err == nil {
-				if ref, isCol := ast.(*plansql.ColRef); isCol && fieldOf(colFields, ref) != nil {
+				switch e := ast.(type) {
+				case *plansql.ColRef:
+					if fieldOf(colFields, e) != nil {
+						add(col)
+					}
+				case *plansql.StarNode, *plansql.Lit, *plansql.IntervalLit:
+					// Nothing to compute.
+				default:
 					add(col)
 				}
 			}

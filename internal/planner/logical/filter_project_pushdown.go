@@ -273,10 +273,72 @@ var volatileFuncs = map[string]bool{
 type projRefs struct {
 	outs  map[string]projOutput
 	names map[string]bool
+	// subst, when non-nil, collects the lowercased OUTPUT names this Project
+	// substituted away. ResolveFilterThroughProjects hands them to the stage
+	// DAG, which cannot otherwise tell which names the query's own spelling
+	// used — and choosing between the two spellings later needs to know what
+	// to look for on the producing fragment (#656).
+	subst *[]string
+	// overAgg marks a Project whose INPUT is an aggregate's OUTPUT, and
+	// groupBys are that aggregate's GROUP BY keys. Below such a Project the
+	// rows are one per GROUP, so an output's defining expression is
+	// evaluable there only when the aggregate itself emits a column of that
+	// name: `g + 1 AS gk` over `GROUP BY g + 1` substitutes to `(g + 1) > 3`,
+	// an expression over `g`, which the aggregate's output does not carry.
+	// Both paths then answered ZERO rows for a query PostgreSQL answers
+	// (#656 shape f, through a derived table).
+	overAgg  bool
+	groupBys map[string]bool
 }
 
 func newProjRefs(n *Node) projRefs {
-	return projRefs{outs: projectSubstitutions(n.Projections), names: nodeScopeNames(n)}
+	return projRefs{
+		outs:     projectSubstitutions(n.Projections),
+		names:    nodeScopeNames(n),
+		overAgg:  readsAnAggregate(n),
+		groupBys: aggregateGroupKeys(n),
+	}
+}
+
+// readsAnAggregate reports whether this Project's input is an Aggregate's
+// OUTPUT — one row per group, columns named by the group keys and the
+// aggregates.
+func readsAnAggregate(n *Node) bool {
+	return len(n.Children) == 1 && n.Children[0] != nil && n.Children[0].Type == NodeAggregate
+}
+
+// aggregateGroupKeys is the GROUP BY key list of the Aggregate this Project
+// reads, lowercased and trimmed; nil when it reads something else.
+func aggregateGroupKeys(n *Node) map[string]bool {
+	if !readsAnAggregate(n) {
+		return nil
+	}
+	out := make(map[string]bool, len(n.Children[0].GroupBy))
+	for _, k := range n.Children[0].GroupBy {
+		out[strings.ToLower(strings.TrimSpace(k))] = true
+	}
+	return out
+}
+
+// withSubstitutionLog returns a copy of p that records every output name it
+// substitutes away into names.
+func (p projRefs) withSubstitutionLog(names *[]string) projRefs {
+	p.subst = names
+	return p
+}
+
+// record notes one substituted output name, de-duplicated and lowercased.
+func (p projRefs) record(name string) {
+	if p.subst == nil || name == "" {
+		return
+	}
+	low := strings.ToLower(name)
+	for _, s := range *p.subst {
+		if s == low {
+			return
+		}
+	}
+	*p.subst = append(*p.subst, low)
 }
 
 // inScope reports whether a qualifier names the relation scope this Project
@@ -316,12 +378,12 @@ func (p projRefs) resolve(ref *plansql.ColRef) (plansql.Node, bool) {
 		if !ok {
 			return nil, true
 		}
-		return p.apply(o, "")
+		return p.apply(o, ref.Column, "")
 	}
 	// A projection that aliases the QUALIFIED spelling itself owns the name
 	// outright (`n1.n_name AS "n1.n_name"`).
 	if o, ok := p.outs[strings.ToLower(ref.String())]; ok {
-		return p.apply(o, "")
+		return p.apply(o, ref.String(), "")
 	}
 	// Step 2 applies when the qualifier is one this Project can answer for:
 	// its own relation scope, or one of its outputs (the ROW-container
@@ -332,24 +394,34 @@ func (p projRefs) resolve(ref *plansql.ColRef) (plansql.Node, bool) {
 		return nil, true
 	}
 	if o, ok := p.outs[strings.ToLower(ref.Column)]; ok {
-		return p.apply(o, "")
+		return p.apply(o, ref.Column, "")
 	}
 	if isContainer {
-		return p.apply(container, ref.Column)
+		return p.apply(container, ref.Table, ref.Column)
 	}
 	return nil, true
 }
 
 // apply turns one matched output into the replacement text. field is the ROW
 // field to keep, or "" for a plain column reference.
-func (p projRefs) apply(o projOutput, field string) (plansql.Node, bool) {
+func (p projRefs) apply(o projOutput, name, field string) (plansql.Node, bool) {
 	if o.unsafe {
 		return nil, false
 	}
 	if o.def == nil {
 		return nil, true // passthrough: the input carries the same name
 	}
+	// Below an aggregate's output the rows are one per GROUP. A definition
+	// that is not a bare column of that output — a computed group key, an
+	// expression over one — evaluates against columns the group rows do not
+	// have, so it must not be substituted in either direction: the swap keeps
+	// the Filter above the Project, and the DAG keeps the alias and evaluates
+	// it above the projection that materializes it.
+	if p.overAgg && !p.evaluableOverGroups(o.def) {
+		return nil, false
+	}
 	if field == "" {
+		p.record(name)
 		return o.def, true
 	}
 	// The qualifier is substituted and the field kept, so the definition has
@@ -359,7 +431,21 @@ func (p projRefs) apply(o projOutput, field string) (plansql.Node, bool) {
 	if ref == nil || ref.Table != "" {
 		return nil, false
 	}
+	p.record(name)
 	return &plansql.ColRef{Table: ref.Column, Column: field}, true
+}
+
+// evaluableOverGroups reports whether a projection's definition can be
+// evaluated against an aggregate's OUTPUT rows: a bare column reference the
+// aggregate emits (a group key spelled as a column, or an aggregate's own
+// output), and nothing else.
+func (p projRefs) evaluableOverGroups(def plansql.Node) bool {
+	ref := simpleColRef(def)
+	if ref == nil {
+		return false
+	}
+	return p.groupBys[strings.ToLower(strings.TrimSpace(ref.String()))] ||
+		p.groupBys[strings.ToLower(ref.Column)]
 }
 
 // nodeScopeNames is the set of relation names a reference into this subtree
@@ -502,22 +588,27 @@ func rewriteASTThroughProject(ast plansql.Node, p projRefs) (plansql.Node, bool)
 //
 // Returns (nil, false) when nothing changed; the caller then ships the
 // predicate exactly as it did before.
-func ResolveFilterThroughProjects(pred Predicate, child *Node) (plansql.Node, bool) {
+// aliases lists the OUTPUT names the rewrite substituted away, lowercased —
+// the spellings the predicate carried before this pass touched it. The DAG
+// needs them to decide whether the producing fragment carries the alias or
+// the source column (physical.resolveFilterAliasSpelling, #656).
+func ResolveFilterThroughProjects(pred Predicate, child *Node) (ast plansql.Node, aliases []string, ok bool) {
 	if pred.ASTExpr == nil {
-		return nil, false
+		return nil, nil, false
 	}
-	ast, changed := resolveFilterInSubtree(pred.ASTExpr, child, false)
+	var subst []string
+	ast, changed := resolveFilterInSubtree(pred.ASTExpr, child, false, &subst)
 	if !changed {
-		return nil, false
+		return nil, nil, false
 	}
-	return ast, true
+	return ast, subst, true
 }
 
 // resolveFilterInSubtree walks the producing subtree applying each rename it
 // meets, and returns the expression as the stage carrying the filter will see
 // it. A subtree it cannot model STOPS the walk with whatever has been settled
 // so far, which is the spelling the predicate had on entry to that subtree.
-func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool) (plansql.Node, bool) {
+func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]string) (plansql.Node, bool) {
 	for ; n != nil; n = n.Children[0] {
 		switch n.Type {
 		case NodeJoin:
@@ -527,13 +618,20 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool) (plansql.No
 			if len(n.Children) != 2 {
 				return ast, changed
 			}
-			ast, changed = resolveFilterInSubtree(ast, n.Children[0], changed)
-			ast, changed = resolveFilterInSubtree(ast, n.Children[1], changed)
+			ast, changed = resolveFilterInSubtree(ast, n.Children[0], changed, subst)
+			ast, changed = resolveFilterInSubtree(ast, n.Children[1], changed, subst)
 			return ast, changed
-		case NodeDistinct:
-			// Emits no stage and renames nothing.
+		case NodeDistinct, NodeSort, NodeLimit:
+			// None of the three renames anything, so the walk continues
+			// through them. Sort and LIMIT DO emit stages, and a predicate
+			// re-spelled past one names the SOURCE column their stream
+			// carries rather than the alias the query wrote — which is right
+			// exactly when no pass materialized the alias onto the producing
+			// fragment. That is not knowable here, so both spellings travel
+			// to the stage and physical.resolveFilterAliasSpelling picks
+			// once attachScanSelectProjections has decided (#656).
 		case NodeProject:
-			newAST, ok := rewriteASTThroughProject(ast, newProjRefs(n))
+			newAST, ok := rewriteASTThroughProject(ast, newProjRefs(n).withSubstitutionLog(subst))
 			if !ok {
 				return ast, changed
 			}
@@ -541,9 +639,8 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool) (plansql.No
 				ast, changed = newAST, true
 			}
 		default:
-			// Sort and LIMIT emit stages of their own carrying the names
-			// above them; everything else emits a stage under names the
-			// predicate can already see.
+			// Everything else emits a stage under names the predicate can
+			// already see.
 			return ast, changed
 		}
 		if len(n.Children) != 1 {

@@ -42,6 +42,39 @@ const (
 	// each keeping n rows is not the first n rows of their union.
 	StageLimit = "limit"
 
+	// StageProject applies a projection and/or a filter to its single
+	// dependency's output and nothing else.
+	//
+	// It exists because a logical Project emits no stage on the DAG and a
+	// logical Filter is appended to whatever stage was emitted last. Both
+	// shortcuts are sound only when the stage underneath can express what it
+	// is handed; when it cannot — a Filter above a Project that has itself
+	// been materialized onto the producer, a Filter above a deduped
+	// `cte-alias` whose target is SHARED with another reference and must not
+	// be filtered for it — the predicate used to be attached to a stage that
+	// ignored it or that a later pass deleted, and the query answered
+	// without it (#656).
+	//
+	// Singleton and one task, for StageLimit's reason: one task reading
+	// every partition of its input is always correct for a per-row operator,
+	// and the stage is only ever emitted for shapes that had no answer at
+	// all before. Fragment shape:
+	//
+	//	[OpShuffleSource, OpProject?, OpFilter?, sink]
+	//
+	// The filter runs ABOVE the projection — a predicate that reaches this
+	// stage is one written against the projection's outputs.
+	StageProject = "project"
+
+	// The stage types walkStages spells as literals. Named here so the
+	// planner-side mirrors of the coordinator's fragment builders
+	// (stageEvaluatesFilter, stageAppliesProjection) can enumerate them
+	// without repeating string literals that a typo would silently drop out
+	// of a switch.
+	StageFinalAggregate = "final_aggregate"
+	StageMergeAggregate = "merge_aggregate"
+	StageMergeSort      = "merge_sort"
+
 	// Exchange stages — inserted by EnsureDistribution.
 	// Repartition is the rename of the legacy "shuffle" type; the string
 	// value changes so that the old name does not silently leak through.

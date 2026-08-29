@@ -437,7 +437,16 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 			return nil, fmt.Errorf("parse projection %q: %w", p.Expr, err)
 		}
 		if ref, ok := node.(*plansql.ColRef); ok {
-			src := ref.String()
+			// The UNQUOTED spelling, which is the name a batch column
+			// carries and the one expr.Compile resolves a ColRef by
+			// (compile.go: `name := n.Column`). ColRef.String() re-quotes a
+			// delimited identifier, so it named `"g + 1"` — quotes included
+			// — for a column really called `g + 1`, and the projection
+			// failed on a column the batch did carry (#656).
+			src := ref.Column
+			if ref.Table != "" {
+				src = ref.Table + "." + ref.Column
+			}
 			projCols = append(projCols, exec.ProjectColumn{
 				Name:       p.Name,
 				DirectCopy: src,

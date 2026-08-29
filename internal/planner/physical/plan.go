@@ -109,6 +109,21 @@ type Stage struct {
 	// empty/misaligned degrades to count-based splitting.
 	ScanFileSizes []int64
 	FilterExprs   []string // SQL filter expressions pushed down to scan
+	// FilterAliases is FilterExprs' second spelling, index-aligned with it:
+	// the predicate as the QUERY wrote it, naming a Project's OUTPUT
+	// columns, where FilterExprs[i] holds the same predicate re-spelled into
+	// the source columns those Projects read. A zero entry means the two
+	// spellings are the same and there is nothing to choose between.
+	//
+	// Both are needed because which one a stage can evaluate is not known
+	// when walkStages attaches the predicate. A Project emits no stage of
+	// its own, so the usual answer is the source spelling — but
+	// attachScanSelectProjections may later put an alias-naming OpProject on
+	// the producing fragment, and then the stream carries the ALIAS and not
+	// the source column. resolveFilterAliasSpelling settles it at the end of
+	// planning, once that pass has run, exactly as resolveDerivedAliasSortKeys
+	// settles the same question for a sort key (#656, #467).
+	FilterAliases []FilterAliasSpec
 
 	// Aggregate metadata
 	GroupByCols []string
@@ -950,6 +965,11 @@ type Planner struct {
 	// single-process path answers under the alias. Reset at the start of
 	// generateStages.
 	aggStageRenames map[string]string
+
+	// attachedFilterExprs records the predicates walkStages attached to a
+	// stage during the last PlanDistributed. AttachedFilterExprs exposes it
+	// for the conservation gate; see filter_carrier.go.
+	attachedFilterExprs []string
 }
 
 // refuseJoin parks the first refusal; PlanDistributed returns it. First one
@@ -2131,6 +2151,17 @@ func flattenCTEAliases(stages []Stage) []Stage {
 				s.ScalarDependencies[ph] = resolve(t)
 			}
 		}
+		// …and a set operation's per-arm producer. UnionArms[i].DepStage
+		// must stay equal to Dependencies[i] — ValidateNativeDAGShape checks
+		// exactly that — and this loop used to rewrite the second list
+		// without the first, so a UNION ALL over a CTE referenced twice
+		// refused the plan: `arm 1 names producer "cte-alias-1" but
+		// Dependencies[1] is "scan-0"` (#660).
+		for j, arm := range s.UnionArms {
+			if t, ok := aliasTarget[arm.DepStage]; ok {
+				s.UnionArms[j].DepStage = resolve(t)
+			}
+		}
 	}
 	// Drop alias stages.
 	out := make([]Stage, 0, len(stages))
@@ -2521,6 +2552,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseUnrepresentableRealInList(node); err != nil {
 		return nil, err
 	}
+	// A subquery in the SELECT list has no distributed lowering either — the
+	// scalar-producer machinery covers predicates only, and the worker's
+	// compiler has no SubqueryRunner (#659). Refuse before stage generation
+	// so the coordinator routes the query onto its local engine instead of
+	// failing every task three times.
+	if err := refuseScalarSubqueryProjections(node); err != nil {
+		return nil, err
+	}
 	stages := p.generateStages(node)
 	if p.setOpErr != nil {
 		return nil, p.setOpErr
@@ -2761,6 +2800,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// and names the wrong column (a shadowing alias) or none at all
 	// everywhere else.
 	resolveDerivedAliasSortKeys(stages)
+	// #656: and the same repair for a PREDICATE that names a derived table's
+	// SELECT-list alias. Runs after attachScanSelectProjections for the same
+	// reason the two sort-key passes do — the alias is real exactly where
+	// that pass materialized it.
+	resolveFilterAliasSpelling(stages)
 	// #423: the worker's scan reads column TYPES from the FILE, and a
 	// parquet file cannot express nine of ours. Declare the catalog's
 	// schema for every table this plan scans so a file written before the
@@ -2871,8 +2915,16 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// downstream can correct a spec the way exec.Project corrects a
 		// placeholder (#568).
 		if p.ASTExpr != nil && (!isSimpleColRefForRename(p.ASTExpr) || astIsFieldPath(p.ASTExpr, colTypes)) {
-			if referencesSyntheticAgg(p.ASTExpr) {
-				return // wrapped aggregate — evaluated at the gather
+			if referencesSyntheticAgg(p.ASTExpr) || referencesSyntheticWindow(p.ASTExpr) {
+				// A wrapped aggregate or window (`SUM(x) OVER (…) + 1`) is
+				// evaluated at the GATHER, from an OutputRename.Expr written
+				// against the synthetic output column. Its Expr text is the
+				// ABBREVIATED spelling (`sum(x) OVER (...) + 1`), which no
+				// parser accepts — before the window branch below existed
+				// this returned by the stage-type check instead, and
+				// attaching it made every task fail to compile it (#610's
+				// shapes, caught by the #656 window branch).
+				return
 			}
 			hasExpr = true
 			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
@@ -2988,7 +3040,17 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		isPlainScan := s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0
 		isJoin := (s.Type == StageHashJoin || s.Type == StageBroadcastJoin || s.Type == StageSortMergeJoin) &&
 			len(s.GroupByCols) == 0
-		if !isPlainScan && !isJoin {
+		// A WINDOW producer takes the same aliased projection, with one
+		// difference that is the whole of #656 shape g: its OpProject runs
+		// ABOVE the operator, not below it. The window fragment forwards
+		// every input column and appends its own outputs, so the SELECT
+		// list — written against exactly that — is evaluable there, and
+		// without it the DAG returned the window's raw input plus the window
+		// column where the query asked for `UPPER(s)`. A sort above the
+		// window still has to be covered by the projection, which the check
+		// below already enforces for the join path.
+		isWindow := s.Type == StageWindow
+		if !isPlainScan && !isJoin && !isWindow {
 			// Something else computes between here and the gather (fused
 			// scan-aggregates project via their aggregate machinery).
 			return
@@ -4160,7 +4222,12 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.correlatedErr = nil
 	p.inSubqueryErr = nil
 	p.aggStageRenames = nil
+	p.attachedFilterExprs = nil
 	p.walkStages(node, &stages, nil)
+	// A project stage filterCarrierIndex reserved for a predicate that then
+	// turned out to have no text is a full materialization round-trip for
+	// nothing. Drop it before anything else reads the graph.
+	stages = pruneEmptyProjectStages(stages)
 	// Resolve cte-alias phantoms emitted by walkStages dedup. Must happen
 	// before fuseJoinStages so fusion sees real stage IDs everywhere.
 	stages = flattenCTEAliases(stages)
@@ -4659,9 +4726,19 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 	for n := child; n != nil; {
 		if n.Type == logical.NodeProject {
 			bare := derivedScopeBareName(resolved, n)
-			if proj := projectionForName(n.Projections, resolved, bare); proj != nil &&
-				proj.Column != "" && !strings.EqualFold(proj.Column, resolved) {
+			proj := projectionForName(n.Projections, resolved, bare)
+			switch {
+			case proj != nil && proj.Column != "" && !strings.EqualFold(proj.Column, resolved):
 				resolved = proj.Column
+			case proj != nil && proj.Column == "" && bare != "" && !strings.EqualFold(bare, resolved):
+				// A COMPUTED output (`COUNT(*) + 1 AS k`) has no source
+				// column to chase. It exists on the DAG only under its own
+				// alias — absorbAggregateOutputProjection materializes it on
+				// the producing stage — so the key is the BARE alias, and
+				// the walk stops: nothing below this Project carries it.
+				// Before, the qualified spelling travelled to the worker and
+				// the shuffle refused it (`key "b.k" not in schema`, #681).
+				return bare
 			}
 		}
 		if n.Type == logical.NodeJoin && len(n.Children) == 2 {
@@ -5398,6 +5475,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Desc:      ob.Desc,
 				NullsLast: resolveNullsLast(ob),
 			}
+			// A projection absorbed onto the producer while this subtree was
+			// walked (absorbAggregateOutputProjection) MAKES the alias real
+			// and narrows the stream to it, so the name the resolver chased
+			// the key to — a group key's expression text — no longer reaches
+			// this sort. Key on the alias the producer emits.
+			if !strings.EqualFold(key.Column, ob.Column) &&
+				producerMaterializesName((*stages)[preCount:], ob.Column) {
+				key.Column = cleanExpr(ob.Column)
+			}
 			// A key still spelled __sortkey_N names a column the logical
 			// Project materializes and no stage does. Record what defines
 			// it; resolveHiddenSortKeys settles it at the end of planning,
@@ -5547,6 +5633,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// downstream read — the ON residual, the projected output —
 			// sees NULL (#383).
 			absorbComputedSubqueryProjection(child, (*stages)[childStart:], false)
+			// …and the same materialization for a join input that is a
+			// SELECT list over an AGGREGATE: `(SELECT g, COUNT(*)+1 AS k …
+			// GROUP BY g) b` joined ON b.k names a column the aggregate
+			// stage does not emit, and the shuffle refused the plan (#681).
+			if idx, ok := aggregateProjectionTarget(child, *stages, childStart); ok {
+				absorbAggregateOutputProjection(child, &(*stages)[idx])
+			}
 			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
 		}
 		// Map logical join type to canonical short form. Needed before the
@@ -5822,16 +5915,38 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Walk children first. Try to push filter expressions down to the
 		// appropriate stage: scan stages get predicate pushdown, join/aggregate
 		// stages evaluate filters post-execution.
+		preFilterCount := len(*stages)
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
+		}
+		// A SELECT list between this predicate and an aggregate names the
+		// aggregate's outputs by the query's aliases, which no stage emits.
+		// Carry it onto the aggregate stage so the predicate has an alias to
+		// be evaluated against — and so it is evaluated ABOVE the
+		// projection, which is what filterCarrierIndex arranges once the
+		// stage carries one (#656 shape f).
+		if len(node.Children) == 1 {
+			if idx, ok := aggregateProjectionTarget(node.Children[0], *stages, preFilterCount); ok {
+				absorbAggregateOutputProjection(node.Children[0], &(*stages)[idx])
+			}
 		}
 		if len(node.Predicates) > 0 && len(*stages) > 0 {
 			// Capture the filter-carrying stage by INDEX (not pointer) because
 			// subsequent producer-stage emissions may append to *stages and
 			// invalidate any held pointer.
-			filterIdx := len(*stages) - 1
+			// The stage that will RUN the predicate — the last one emitted
+			// when it qualifies, and otherwise a StageProject inserted above
+			// it. Attaching to `len(*stages)-1` unconditionally is what let a
+			// predicate land on a merge_sort a later pass deletes, on a
+			// deduped cte-alias that never dispatches, or on a stage whose
+			// projection runs above the filter slot (#656).
+			filterIdx := filterCarrierIndex(stages)
+			if filterIdx < 0 {
+				break
+			}
 			for _, pred := range node.Predicates {
-				var exprStr string
+				var exprStr, aliasStr string
+				var aliasNames []string
 				// A Project emits no stage here, so a predicate naming one of
 				// its RENAMED or computed outputs would reach the producing
 				// fragment as a column that fragment's schema does not carry
@@ -5841,19 +5956,27 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// never writes to the logical plan the single-process path
 				// shares.
 				if len(node.Children) == 1 {
-					if ast, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0]); ok {
-						exprStr = ast.String()
+					if ast, names, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0]); ok {
+						exprStr, aliasNames = ast.String(), names
 					}
 				}
+				// The spelling the query wrote, kept alongside the resolved
+				// one: which of the two the carrying stage can evaluate is
+				// decided at the end of planning (Stage.FilterAliases).
 				switch {
-				case exprStr != "":
 				case pred.Raw != "":
-					exprStr = pred.Raw
+					aliasStr = pred.Raw
 				case pred.ASTExpr != nil:
-					exprStr = pred.ASTExpr.String()
+					aliasStr = pred.ASTExpr.String()
+				}
+				if exprStr == "" {
+					exprStr = aliasStr
 				}
 				if exprStr == "" {
 					continue
+				}
+				if strings.EqualFold(aliasStr, exprStr) || len(aliasNames) == 0 {
+					aliasStr, aliasNames = "", nil
 				}
 				// Resolve scalar subqueries. Under native-DAG, CTE-referencing
 				// subqueries are deferred to the coordinator — this call returns
@@ -5912,6 +6035,25 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// Re-index after any appends.
 				fs := &(*stages)[filterIdx]
 				fs.FilterExprs = append(fs.FilterExprs, resolvedExpr)
+				// Counted so a gate can assert CONSERVATION: every predicate
+				// stage emission attached has to survive every rewriting
+				// pass as a slot some stage still carries. A pass that
+				// deletes the carrier without migrating the field is exactly
+				// how shapes a–e of #656 answered without their WHERE.
+				p.attachedFilterExprs = append(p.attachedFilterExprs, resolvedExpr)
+				if aliasStr != "" {
+					// Either spelling may be the one that survives
+					// resolveFilterAliasSpelling; the gate accepts whichever.
+					p.attachedFilterExprs[len(p.attachedFilterExprs)-1] =
+						resolvedExpr + "\x00" + aliasStr
+				}
+				// Index-aligned: every FilterExprs entry gets an alias slot,
+				// zero when there is no second spelling to choose from.
+				for len(fs.FilterAliases) < len(fs.FilterExprs)-1 {
+					fs.FilterAliases = append(fs.FilterAliases, FilterAliasSpec{})
+				}
+				fs.FilterAliases = append(fs.FilterAliases,
+					FilterAliasSpec{Expr: aliasStr, Names: aliasNames})
 			}
 		}
 
@@ -5922,6 +6064,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		stageID := fmt.Sprintf("window-%d", len(*stages))
 		winKeys := resolveWindowKeys(node)
+		var winChild *logical.Node
+		if len(node.Children) == 1 {
+			winChild = node.Children[0]
+		}
 		var winCols []WindowColSpec
 		for _, we := range node.WindowExprs {
 			// Resolved by the same helper buildWindow uses, so the stage
@@ -5936,12 +6082,45 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// send the worker the name #585 could not resolve.
 				orderBy = append(orderBy, SortKeySpec{Column: ec.OrderBy[i].Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
 			}
+			// A key naming a derived table's or CTE's SELECT-list alias
+			// (`PARTITION BY gk` over `SELECT g AS gk`) is bound by neither
+			// of resolveWindowKeys' two arms: it is not a qualified
+			// reference and not an expression to materialize. The
+			// single-process pipeline never notices — the Project below the
+			// window is a real operator there — but on the DAG that Project
+			// emits no stage, so the window's input carries the SOURCE
+			// column and the worker refused the key outright (#658).
+			// Resolved here rather than in a late pass because a PARTITION
+			// BY key is also the stage's distribution: the exchange that
+			// clusters the window's input is keyed on it, and rewriting the
+			// key after EnsureDistribution would leave the two disagreeing.
+			partitionBy := append([]string(nil), ec.PartitionBy...)
+			for i, pb := range partitionBy {
+				if src := derivedAliasSourceColumn(pb, winChild); src != "" {
+					partitionBy[i] = cleanExpr(src)
+				}
+			}
+			for i := range orderBy {
+				if src := derivedAliasSourceColumn(orderBy[i].Column, winChild); src != "" {
+					orderBy[i].Column = cleanExpr(src)
+				}
+			}
+			// …and the ARGUMENT, which exec.Window also reads by name off
+			// the input batch: `SUM(v) OVER ()` over `SELECT c_i64 AS v`
+			// found no vector called `v` and wrote NULL in every row, the
+			// silent half of the same defect. A materialized argument is
+			// already a __winkey_N the fragment computes, and
+			// derivedAliasSourceColumn leaves those (and `*`) alone.
+			inputCol := ec.InputCol
+			if src := derivedAliasSourceColumn(inputCol, winChild); src != "" {
+				inputCol = cleanExpr(src)
+			}
 			winCols = append(winCols, WindowColSpec{
 				Func:           we.Func,
-				InputCol:       ec.InputCol,
+				InputCol:       inputCol,
 				OutputCol:      ec.OutputCol,
 				OutputType:     ec.OutputType,
-				PartitionBy:    ec.PartitionBy,
+				PartitionBy:    partitionBy,
 				OrderBy:        orderBy,
 				Frame:          we.Frame,
 				LagLeadOffset:  ec.LagLeadOffset,

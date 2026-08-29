@@ -118,7 +118,60 @@ the embedded engine per policy shape.
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
-| **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather, and every other consumer resolves them back to source names — see §Derived-table aliases |
+| **`NodeProject`** | **nothing — passthrough**, unless a consumer needs it materialized | same `default` case; aliases recovered at gather, and every other consumer resolves them back to source names — see §Derived-table aliases and §Where a Filter and a Project land |
+
+## Where a Filter and a Project land (the #656 class)
+
+`walkStages` lowers a Filter by appending its predicate to the stage it just
+emitted, and a Project by emitting nothing at all. Both shortcuts hold only
+while the stage underneath **runs what it is handed**, and for five producers
+it did not:
+
+| producer | what happened | shape |
+|---|---|---|
+| `merge_sort` over a `sort` | `collapseRedundantFinalMergeSort` DELETED the carrier, predicate and all | a–d |
+| `sort` | `buildSortFragment` was the one fragment builder with no `OpFilter` slot | a–d |
+| deduped `cte-alias` | `flattenCTEAliases` deleted the carrier; its target is SHARED with the other reference and must not be filtered for it | e |
+| aggregate output alias | the predicate was re-spelled into the group key's INPUT expression (`gk>3` → `(g+1)>3`), which the aggregate's OUTPUT — a column literally named `g + 1` — cannot evaluate | f |
+| `window` | `attachScanSelectProjections` accepted only a scan or a join, so the SELECT list above a window was never computed | g |
+
+Every one answered WITHOUT the predicate or the projection, silently, because
+no operator ever saw a name it could not resolve.
+
+Three things close it (`planner/physical/filter_carrier.go`):
+
+- **`stageEvaluatesFilter` / `stageAppliesProjection`** are the planner-side
+  mirrors of the coordinator's fragment builders — per stage type, does the
+  fragment emit an `OpFilter` for `FilterExprs` and an `OpProject` for
+  `ProjectExprs`, and does the projection run ABOVE the filter slot. They are
+  deliberately NOT `projectableProducer`, which answers a different question
+  (can a computed sort key be materialized INTO this fragment, BELOW its
+  ordering).
+- **`filterCarrierIndex`** gives a predicate a stage that will run it: the
+  last emitted stage when it qualifies, and otherwise a **`project` stage**
+  (`StageProject`, Singleton, one dep, fragment
+  `[OpShuffleSource, OpProject?, OpFilter?, sink]`) inserted above it. The
+  filter runs ABOVE the projection there — that is why the stage is separate.
+- **`resolveFilterAliasSpelling`** settles which of a predicate's two
+  spellings the carrier can evaluate. `Stage.FilterAliases` carries the
+  query's own spelling beside the resolved one, because whether the producing
+  fragment emits the ALIAS or the SOURCE column is decided later, by
+  `attachScanSelectProjections` — the same deferral
+  `resolveDerivedAliasSortKeys` makes for a sort key.
+
+Fragment builders that now carry what the planner attaches:
+`buildSortFragment` (filter + projection, both ABOVE `OpSort` — so a WHERE
+above an `ORDER BY … LIMIT` sees the LIMIT's rows), `buildWindowFragment` and
+`buildLimitFragment` and `buildAggregateFragment` (projection),
+`buildProjectFragment` (both).
+
+`ValidateNativeDAGShape` refuses any plan that still attaches either field to
+a stage that ignores it — a loud refusal in place of a silently different
+answer — and
+`TestStageDAGCarriesEveryFilterAndProjection` (`filter_carrier_test.go`) is
+the structural gate: every predicate stage emission attached must still be
+readable off some stage after every rewriting pass, over TPC-H and the shape
+corpus.
 
 ## Synthetic sort keys: the column a Project would have computed
 
@@ -907,6 +960,30 @@ The real distributed algorithm for this shape is a dependent join / general
 non-equi decorrelation — a separate feature, exactly as #346 grew
 INTERSECT/EXCEPT stages after their refusal landed.
 
+## SELECT-list subqueries (refused → routed local)
+
+An UNCORRELATED subquery has a distributed lowering in a PREDICATE and none in
+a PROJECTION. `resolveFilterSubqueries` replaces it with a `:scalar_N`
+placeholder, `emitScalarProducerStages` emits a producer stage for it,
+`Stage.ScalarDependencies` records the edge and
+`substituteScalarDependencies` splices the value into the filter text before
+dispatch. Nothing does any of that for a SELECT-list item:
+`attachScanSelectProjections` attaches the list verbatim and the worker's
+compiler has no `SubqueryRunner`, so every task failed three times with
+`compile projection "(SELECT MAX(v) FROM c)": subqueries require a
+SubqueryRunner` — for a query PostgreSQL and the single-process pipeline both
+answer (#659). Loud, but a legal query with no answer.
+
+`refuseScalarSubqueryProjections` (`physical/scalar_projection_refusal.go`)
+refuses it before stage generation with
+`ErrScalarSubqueryProjectionDistributed`, and the coordinator routes it to the
+local pipeline (`runScalarProjectionLocal`, counter
+`ScalarProjectionLocalRoutes()`) — the same route the correlated, DISTINCT and
+IN-set refusals take. It is not CTE-specific: the same failure reproduced over
+a base table and a dimension, so a CTE-narrow refusal would have left the
+commoner spelling failing. A subquery in a WHERE or a HAVING is untouched and
+still runs on the DAG.
+
 ## IN-subqueries the semi-join rewrite declines (materialized → set literal)
 
 `WHERE x IN (SELECT …)` has ONE distributed lowering:
@@ -967,8 +1044,26 @@ round-trip test — and has been deleted; the spec rides
 **Fragment shape** (`coordinator/execute_stage_dag.go buildWindowFragment`):
 
 ```
-[OpShuffleSource, OpWindow, OpFilter?(predicate above the window), <sink>]
+[OpShuffleSource, OpWindow, OpFilter?(predicate above the window),
+ OpProject?(SELECT list above the window), <sink>]
 ```
+
+The `OpProject` is #656 shape g: a Project above a window emitted no stage and
+`attachScanSelectProjections` accepted only a scan or a join, so
+`SELECT id, UPPER(s) FROM (… ROW_NUMBER() OVER … ) x` came back as the
+window's raw input plus the window column. It runs ABOVE the operator and
+narrows the output, which is what distinguishes it from `WindowKeyExprs` —
+those are evaluated BEFORE the operator partitions, and APPEND to the batch.
+
+`WindowKeyExprs` now also carries a window function's **argument** expression.
+`resolveWindowKeys` materialized only the PARTITION BY / ORDER BY terms, so
+`WindowColumn.InputCol` named a column the batch did not carry and
+`SUM(d * 2) OVER ()` answered NULL on every row, on BOTH paths, for every
+input type (#672). It is materialized as `__winkey_N` exactly as a computed
+partition key is; `*` and a literal are excluded (COUNT(*) counts rows), and a
+bare or qualified column keeps `exec.Window`'s name lookup. The argument list
+splits on a TOP-LEVEL comma (`logical.firstWindowArg`) — the old
+`SplitN(…, ",", 2)` cut `COALESCE(c, 0) * 2` into `COALESCE(c`.
 
 There is deliberately **no `OpSort`** ahead of the window. A window's ORDER BY
 defines its FRAME, not the stream: `exec.Window` groups its input by

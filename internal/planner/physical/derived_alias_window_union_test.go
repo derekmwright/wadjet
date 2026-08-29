@@ -27,13 +27,15 @@ func TestDerivedAliasSortKeyOverAWindowProducer(t *testing.T) {
 	if len(sort.SortKeys) != 1 {
 		t.Fatalf("sort has %d keys, want 1", len(sort.SortKeys))
 	}
+	// Two repairs can settle this, and the invariant is that ONE of them
+	// did: either the key is pointed at the source column
+	// (resolveDerivedAliasSortKeys) or the window fragment now MATERIALIZES
+	// the alias, because attachScanSelectProjections can attach a SELECT
+	// list to a window producer since #656. The emitted-column check below
+	// is the assertion either way; this one only says which happened.
 	key := sort.SortKeys[0].Column
-	if strings.EqualFold(key, "k") {
-		t.Fatalf("sort key is still the derived alias %q — no stage emits it, so the task fails "+
-			`with 'sort: key column "k" does not exist in the input schema'`, key)
-	}
-	if !strings.EqualFold(key, "s_suppkey") {
-		t.Errorf("sort key %q, want the source column s_suppkey", key)
+	if !strings.EqualFold(key, "s_suppkey") && !strings.EqualFold(key, "k") {
+		t.Errorf("sort key %q, want the source column s_suppkey or the materialized alias k", key)
 	}
 	if len(sort.Dependencies) != 1 {
 		t.Fatalf("sort has %d dependencies, want 1", len(sort.Dependencies))

@@ -3276,6 +3276,24 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Project migration: always on the fragment path, for the window
+		// stage's reason — there is no legacy single-op handler, so an
+		// unclaimed project stage would ship with Operators == nil and die
+		// in executeStage.
+		if stage.Type == physical.StageProject {
+			if t.Operators != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: project stage already claimed by another migration", stage.ID)
+			}
+			var fusedSubject string
+			if fusion != nil {
+				fusedSubject = fusion.replySubject
+			}
+			ops, ferr := buildProjectFragment(stage, &t, taskInputs, fusedSubject)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build project fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		// Union migration: one arm per task, always on the fragment path.
 		// There is no legacy single-op execution for a union stage, so an
 		// unclaimed one would silently dispatch as a no-op pipe that
@@ -3944,6 +3962,17 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 			Predicates: append([]string(nil), t.PostFilterExprs...),
 		})
 	}
+	// The SELECT list a Project ABOVE the aggregate would have computed —
+	// `SELECT g+1 AS gk, COUNT(*) AS n … GROUP BY g+1` names its group-key
+	// output by the alias, and a computed one (`COUNT(*)+1 AS k`) exists
+	// nowhere until something evaluates it. It runs AFTER the HAVING filter,
+	// which names the aggregate's own outputs, and BEFORE a fused sort —
+	// fuseSortIntoPredecessor refuses to fold into a predecessor whose
+	// projection does not cover the sort's keys, so a key that reaches here
+	// is one this OpProject still emits (#656 shape f, #681).
+	if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+		ops = append(ops, op)
+	}
 	if len(sorts) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:         distributed.OpSort,
@@ -4125,6 +4154,16 @@ func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs m
 			Predicates: append([]string(nil), t.PostFilterExprs...),
 		})
 	}
+	// The SELECT list a Project ABOVE the window would have computed. Unlike
+	// WindowKeyExprs — which the window operator evaluates BEFORE it
+	// partitions, and which APPENDS to the batch — this one narrows the
+	// window's output to the projection, so it is an ordinary OpProject
+	// placed after the operator. Without it a `SELECT id, UPPER(s) FROM
+	// (… ROW_NUMBER() OVER … ) x` came back as the window's raw input plus
+	// the window column (#656 shape g).
+	if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+		ops = append(ops, op)
+	}
 	if gatherReplySubject != "" {
 		ops = append(ops, distributed.OpSpec{
 			Type:         distributed.OpGatherSink,
@@ -4175,6 +4214,67 @@ func buildLimitFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 	// A predicate walkStages pushed onto this stage names the LIMIT's output
 	// columns, so it runs after the operator — and it has to run at all: an
 	// unemitted filter is a silently unfiltered answer.
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	// …and the SELECT list a Project above the LIMIT would have computed.
+	if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+		ops = append(ops, op)
+	}
+	if gatherReplySubject != "" {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpGatherSink,
+			ReplySubject: gatherReplySubject,
+		})
+	} else {
+		ops = append(ops, distributed.OpSpec{Type: distributed.OpUnpartitionedSink})
+	}
+	return ops, nil
+}
+
+// buildProjectFragment translates a project stage's task into a fragment:
+//
+//	[OpShuffleSource, OpProject?, OpFilter?, <sink>]
+//
+// The stage exists for the shapes where a Project or a Filter has nowhere
+// else to go: a predicate above a projection that was itself materialized
+// onto the producing fragment (so the producer's own filter slot runs
+// UNDERNEATH it), and a predicate above a deduped `cte-alias` whose target is
+// shared with another reference of the same CTE and must not be filtered for
+// it (#656). The filter runs ABOVE the projection here — that is the whole
+// reason the stage is separate.
+//
+// One task, reading every partition of its input: a projection and a filter
+// are per-row, so any partitioning would be exact, and Singleton is the
+// simple answer for a stage the planner emits only where nothing ran at all
+// before.
+func buildProjectFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
+	if len(taskInputs) != 1 {
+		return nil, fmt.Errorf("project fragment: expected 1 input alias, got %d", len(taskInputs))
+	}
+	if len(stage.ProjectExprs) == 0 && len(t.PostFilterExprs) == 0 {
+		return nil, fmt.Errorf("project fragment: stage %s carries neither a projection nor a filter", stage.ID)
+	}
+	var alias string
+	var files []string
+	for k, v := range taskInputs {
+		alias, files = k, v
+		break
+	}
+	ops := []distributed.OpSpec{
+		{
+			Type:        distributed.OpShuffleSource,
+			InputAlias:  alias,
+			InputFiles:  files,
+			InputBucket: t.DataBucket,
+		},
+	}
+	if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+		ops = append(ops, op)
+	}
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:       distributed.OpFilter,
@@ -4292,7 +4392,16 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 // buildSortFragment translates a sort / merge_sort stage's task into a
 // fragment Operators[] pipeline:
 //
-//	[OpShuffleSource, OpSort, OpUnpartitionedSink | OpGatherSink]
+//	[OpShuffleSource, OpSort, OpFilter?, OpProject?, OpUnpartitionedSink | OpGatherSink]
+//
+// The filter and the projection run ABOVE the sort, which is what makes them
+// correct for the shapes that put them there: a WHERE above an `ORDER BY …
+// LIMIT` inside a CTE or derived table must see the LIMIT's rows, not the
+// pre-limit ones, and OpSort applies its SortLimit truncation in Finalize —
+// before any of its output reaches the next operator. Until #656 this builder
+// was the only one that dropped `t.PostFilterExprs` on the floor, so the
+// predicate walkStages had attached to the stage was never evaluated and the
+// query answered as if the WHERE were not there.
 //
 // Same one-output-file-per-task shape the legacy executeStageSort emitted
 // when the terminal sink is OpUnpartitionedSink; downstream consumers
@@ -4328,7 +4437,7 @@ func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map
 			ReplySubject: gatherReplySubject,
 		}
 	}
-	return []distributed.OpSpec{
+	ops := []distributed.OpSpec{
 		{
 			Type:        distributed.OpShuffleSource,
 			InputAlias:  alias,
@@ -4341,8 +4450,21 @@ func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map
 			SortLimit:    stage.Limit,
 			HasSortLimit: stage.HasLimit,
 		},
-		terminal,
-	}, nil
+	}
+	// A predicate walkStages pushed onto this stage names the sort's OUTPUT
+	// columns and must run above its LIMIT (#656 shapes a–d).
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	// …and the SELECT list a Project above the sort would have computed.
+	if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+		ops = append(ops, op)
+	}
+	ops = append(ops, terminal)
+	return ops, nil
 }
 
 // finalAggregateFanoutCandidate reports whether a stage qualifies for

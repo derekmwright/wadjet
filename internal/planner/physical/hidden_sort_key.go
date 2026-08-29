@@ -165,6 +165,24 @@ func sortInputStage(stages []Stage, idx map[string]int, i int) *Stage {
 	return &stages[depIdx]
 }
 
+// forwardsInputColumns reports whether a stage's fragment ships its input's
+// columns onward — so the columns its stream carries have to be read off the
+// stage BELOW it, not off its own (empty) column lists.
+//
+// A window stage is the case that made this necessary: its Stage carries
+// WindowCols and nothing else, so stageEmittedColumns alone reports it as
+// emitting nothing while the fragment forwards every input column and appends
+// the window outputs. Sort, merge_sort, limit and project answer the same way
+// — none of them narrows anything unless it carries ProjectExprs, which
+// stageEmittedColumns already reads first (#656).
+func forwardsInputColumns(typ string) bool {
+	switch typ {
+	case StageWindow, StageSort, StageMergeSort, StageLimit, StageProject:
+		return true
+	}
+	return false
+}
+
 // passThroughDepth bounds the walk below a pass-through stage. Stage graphs
 // are acyclic and these chains are one or two long in practice; the bound is
 // there so a malformed graph cannot spin.
@@ -180,7 +198,7 @@ const passThroughDepth = 8
 // window outputs. Every other stage type answers for itself.
 func emittedThroughPassThrough(stages []Stage, idx map[string]int, s *Stage) map[string]string {
 	emitted := stageEmittedColumns(s)
-	for depth := 0; s != nil && s.Type == StageWindow && depth < passThroughDepth; depth++ {
+	for depth := 0; s != nil && forwardsInputColumns(s.Type) && depth < passThroughDepth; depth++ {
 		for _, w := range s.WindowCols {
 			if w.OutputCol != "" {
 				emitted[strings.ToLower(w.OutputCol)] = w.OutputCol
@@ -213,7 +231,7 @@ func materializedThroughPassThrough(stages []Stage, idx map[string]int, s *Stage
 		if projectionMaterializes(s, name) {
 			return true
 		}
-		if s.Type != StageWindow || len(s.Dependencies) != 1 {
+		if !forwardsInputColumns(s.Type) || len(s.Dependencies) != 1 {
 			return false
 		}
 		depIdx, ok := idx[s.Dependencies[0]]
@@ -366,7 +384,26 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 	if key.Column == "" || logical.IsHiddenSortColumn(key.Column) {
 		return // the synthetic-key mechanism above owns those
 	}
-	resolved := key.Column
+	if src := derivedAliasSourceColumn(key.Column, child); src != "" {
+		key.AliasSource = src
+	}
+}
+
+// derivedAliasSourceColumn resolves a name that may be a DERIVED TABLE's or
+// CTE's SELECT-list alias to the column the DAG's streams actually carry,
+// walking the Projects between the consumer and its producer. It returns ""
+// when the name is not such an alias, when it names an aggregate output or a
+// computed alias (neither has a source column to point at), or when the walk
+// reaches a producer it cannot reason about.
+//
+// Chained renames resolve level by level (`j` → `k` → `s_nationkey`), each
+// Project substituting at most once because a projection list is
+// simultaneous.
+func derivedAliasSourceColumn(name string, child *logical.Node) string {
+	if name == "" {
+		return ""
+	}
+	resolved := name
 	for n := child; n != nil; {
 		switch n.Type {
 		case logical.NodeProject:
@@ -376,7 +413,7 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 				break
 			}
 			if proj.IsAgg || proj.Column == "" {
-				return // aggregate output or computed alias — not ours
+				return "" // aggregate output or computed alias — not ours
 			}
 			next := proj.Column
 			if proj.Expr != "" {
@@ -388,7 +425,7 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 				next = proj.Expr
 			}
 			if strings.EqualFold(next, resolved) {
-				return // self-rename, nothing to point at
+				return "" // self-rename, nothing to point at
 			}
 			resolved = next
 		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
@@ -405,9 +442,10 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 		}
 		n = n.Children[0]
 	}
-	if !strings.EqualFold(resolved, key.Column) {
-		key.AliasSource = resolved
+	if strings.EqualFold(resolved, name) {
+		return ""
 	}
+	return resolved
 }
 
 // resolveDerivedAliasSortKeys points every sort key that names a derived

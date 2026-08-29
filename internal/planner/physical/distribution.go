@@ -287,7 +287,7 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: keys}
 		}
 		return RequiredDistribution{Kind: RequiredAny}
-	case StageLimit:
+	case StageLimit, StageProject:
 		// RequiredAny, and honestly so: a Singleton stage's single task
 		// reads EVERY partition of its input (partitionFilesForWorker with
 		// workerCount == 1), which is exactly what makes the bound global.
@@ -462,6 +462,13 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 		// bound worth removing: the stage's OUTPUT is at most LIMIT rows,
 		// and there is no sharded way to take the first n of a union
 		// anyway — that is the property the stage exists to provide.
+		return Distribution{Kind: DistSingleton}
+	case StageProject:
+		// One task, reading every partition of its input. A projection and
+		// a filter are per-row and would be exact under any partitioning;
+		// Singleton is the simple answer, and the stage is only emitted for
+		// shapes whose predicate or projection had no home at all before
+		// (#656). Its output is at most its input's row count.
 		return Distribution{Kind: DistSingleton}
 	case StagePipeline, "table_func":
 		return Distribution{Kind: DistSingleton}

@@ -40,6 +40,28 @@ import (
 //     aggregate itself had to resolve);
 //   - a Join recurses into both output-visible children (probe side only for
 //     semi/anti), first substitution wins.
+// aggregateGroupKeyName returns the name an aggregate stage emits for a
+// computed SELECT-list item that IS one of its GROUP BY keys — the key's own
+// expression text, which is what the worker's pre-aggregate projection
+// computes it under. ok=false for anything else, including an aggregate
+// output (whose AggSpec.OutputCol already IS the alias).
+func aggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) (string, bool) {
+	if proj.IsAgg || proj.Expr == "" || len(projectNode.Children) != 1 {
+		return "", false
+	}
+	agg := projectNode.Children[0]
+	if agg == nil || agg.Type != logical.NodeAggregate {
+		return "", false
+	}
+	want := strings.ToLower(strings.TrimSpace(proj.Expr))
+	for _, k := range agg.GroupBy {
+		if strings.ToLower(strings.TrimSpace(k)) == want {
+			return strings.ToLower(k), true
+		}
+	}
+	return "", false
+}
+
 func resolveOutputRenameSource(name string, child *logical.Node) string {
 	resolved := name
 	if child == nil || name == "" {
@@ -57,8 +79,17 @@ func resolveOutputRenameSource(name string, child *logical.Node) string {
 			bare := derivedScopeBareName(resolved, n)
 			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				if proj.IsAgg || proj.Column == "" {
-					// Aggregate output or computed alias — the stage that
-					// evaluates it emits it under this very name.
+					// A computed alias over an AGGREGATE is the exception:
+					// the aggregate stage emits a computed GROUP BY key
+					// under the exact TEXT of its expression, not under the
+					// alias, so the gather looked for `gk` and found `g + 1`
+					// and the client got the expression text as the column
+					// name (#656 shape f, with no WHERE above it).
+					if src, ok := aggregateGroupKeyName(proj, n); ok {
+						return src
+					}
+					// Otherwise: the stage that evaluates it emits it under
+					// this very name.
 					return resolved
 				}
 				// Plain rename: prefer the qualifier-preserving Expr

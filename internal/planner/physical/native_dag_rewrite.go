@@ -113,6 +113,27 @@ func ValidateNativeDAGShape(stages []Stage) error {
 				return fmt.Errorf("native-DAG: limit stage %s carries Tasks=%d, must be exactly 1 — "+
 					"k tasks each keeping n rows is not the first n rows of their union", s.ID, s.Tasks)
 			}
+		case StageProject:
+			// buildProjectFragment reads exactly one input alias, and a
+			// stage carrying neither a projection nor a filter is a full
+			// materialization round-trip for nothing — always a planner
+			// bug, never a shape. Fail where it is visible (the #349
+			// precedent).
+			if len(s.Dependencies) != 1 {
+				return fmt.Errorf("native-DAG: project stage %s has %d dependencies, expected 1",
+					s.ID, len(s.Dependencies))
+			}
+			if len(s.ProjectExprs) == 0 && len(s.FilterExprs) == 0 {
+				return fmt.Errorf("native-DAG: project stage %s carries neither a projection nor a filter", s.ID)
+			}
+			if s.Distribution.Kind != DistSingleton {
+				return fmt.Errorf("native-DAG: project stage %s is %v, must be Singleton",
+					s.ID, s.Distribution.Kind)
+			}
+			if s.Tasks != 1 {
+				return fmt.Errorf("native-DAG: project stage %s carries Tasks=%d, must be exactly 1",
+					s.ID, s.Tasks)
+			}
 		case StageUnion:
 			// Arm i is dispatched as task i reading Dependencies[i], so the
 			// two lists must stay index-aligned. A pass that rewired one
@@ -136,6 +157,21 @@ func ValidateNativeDAGShape(stages []Stage) error {
 		if s.MergeGroupCount > 0 {
 			return fmt.Errorf("native-DAG: stage %s has MergeGroupCount=%d (intermediate tier of a merge tree); collapseMergeTreesForNativeDAG should have flattened it",
 				s.ID, s.MergeGroupCount)
+		}
+		// The structural half of #656: a predicate or a projection on a
+		// stage whose fragment never reads the field is not a slow query or
+		// a loud failure — it is the query answered WITHOUT it. Nothing
+		// downstream can notice, because no operator ever sees a name it
+		// cannot resolve. Refuse the plan here, where the shape is visible.
+		if len(s.FilterExprs) > 0 && !stageRunsFilterExprs(s.Type) {
+			return fmt.Errorf("native-DAG: stage %s (%s) carries %d filter expression(s) %v "+
+				"that its fragment does not evaluate — the predicate would be silently dropped",
+				s.ID, s.Type, len(s.FilterExprs), s.FilterExprs)
+		}
+		if len(s.ProjectExprs) > 0 && !stageAppliesProjection(&s) {
+			return fmt.Errorf("native-DAG: stage %s (%s) carries %d projection(s) %v "+
+				"that its fragment does not evaluate — the SELECT list would be silently dropped",
+				s.ID, s.Type, len(s.ProjectExprs), stageProjectionOutputs(&s))
 		}
 	}
 	return nil
@@ -189,6 +225,25 @@ func ValidateNativeDAGShape(stages []Stage) error {
 //
 // Downstream references to a dropped sort are rewritten to the
 // predecessor.
+// projectionCoversSortKeys reports whether every sort key names one of the
+// projection's outputs. An OpProject narrows the batch to exactly its
+// projections, so a key it does not emit cannot be sorted on downstream of it.
+func projectionCoversSortKeys(specs []ProjectExprSpec, keys []SortKeySpec) bool {
+	for _, k := range keys {
+		covered := false
+		for _, sp := range specs {
+			if strings.EqualFold(sp.Name, k.Column) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
+}
+
 func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 	idIndex := make(map[string]int, len(stages))
 	for i := range stages {
@@ -223,6 +278,21 @@ func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 		}
 		if len(pred.SortKeys) > 0 {
 			continue // don't clobber existing post-sort
+		}
+		// A sort carrying a WHERE or a SELECT list of its own runs both
+		// ABOVE its own ordering (buildSortFragment). Folding the ordering
+		// into the predecessor DELETES this stage, and the predecessor
+		// applies its own filter BEFORE the fused sort — so the predicate
+		// would either vanish or run under the LIMIT it was written above.
+		// Keep the stage (#656).
+		if len(s.FilterExprs) > 0 || len(s.ProjectExprs) > 0 {
+			continue
+		}
+		// The predecessor's projection runs BEFORE the fused sort and
+		// NARROWS the batch to its outputs, so a sort key it does not emit
+		// would be gone by the time the sort ran.
+		if len(pred.ProjectExprs) > 0 && !projectionCoversSortKeys(pred.ProjectExprs, s.SortKeys) {
+			continue
 		}
 		// Shard-local fold (sharded sort/limit finals): a grouped
 		// final_aggregate under an ORDER BY + LIMIT collapses to one task
@@ -402,6 +472,36 @@ func collapseRedundantFinalMergeSort(stages []Stage) []Stage {
 		}
 		if dep.Distribution.Kind != DistSingleton {
 			continue
+		}
+		// The merge_sort is where walkStages attached a WHERE that sits
+		// ABOVE this ORDER BY (it is the last stage the Sort case emits), so
+		// dropping the stage used to drop the predicate with it — the query
+		// then answered as if the WHERE were not written (#656 shapes a–d).
+		// The merge is a no-op pass-through over an already-sorted single
+		// input, so the filter and any projection mean the same thing one
+		// stage down: buildSortFragment runs both ABOVE OpSort, and OpSort
+		// truncates to its SortLimit in Finalize, so a filter above an
+		// `ORDER BY … LIMIT` still sees the limited rows. A sort that
+		// already carries either is left alone rather than silently merged
+		// into.
+		if len(ms.FilterExprs) > 0 || len(ms.ProjectExprs) > 0 {
+			if len(stages[depIdx].FilterExprs) > 0 || len(stages[depIdx].ProjectExprs) > 0 {
+				continue
+			}
+			stages[depIdx].FilterExprs = append(stages[depIdx].FilterExprs, ms.FilterExprs...)
+			// The second spelling travels with the first, index-aligned:
+			// resolveFilterAliasSpelling reads it off the stage that ends up
+			// carrying the predicate, not the one that first held it.
+			stages[depIdx].FilterAliases = append(stages[depIdx].FilterAliases, ms.FilterAliases...)
+			stages[depIdx].ProjectExprs = append(stages[depIdx].ProjectExprs, ms.ProjectExprs...)
+			if len(ms.ScalarDependencies) > 0 {
+				if stages[depIdx].ScalarDependencies == nil {
+					stages[depIdx].ScalarDependencies = make(map[string]string, len(ms.ScalarDependencies))
+				}
+				for k, v := range ms.ScalarDependencies {
+					stages[depIdx].ScalarDependencies[k] = v
+				}
+			}
 		}
 		removed[ms.ID] = dep.ID
 	}

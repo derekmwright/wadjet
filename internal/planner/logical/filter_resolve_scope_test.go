@@ -32,7 +32,7 @@ func resolveTopFilter(t *testing.T, sql string) string {
 	if filter == nil {
 		t.Fatalf("no Filter node in the optimized plan for %q", sql)
 	}
-	ast, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0])
+	ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0])
 	if !ok {
 		return ""
 	}
@@ -88,15 +88,22 @@ func TestResolveFilterThroughProjectsScoping(t *testing.T) {
 		{"NestedRename",
 			`WITH a AS (SELECT c_i64 AS u FROM t), b AS (SELECT u AS v FROM a) SELECT COUNT(*) FROM b WHERE v > 0`,
 			"c_i64 > 0"},
-		// A Sort or a LIMIT EMITS a stage carrying the names above it, so the
-		// walk must not re-spell past one — the filter lands on that stage,
-		// not on the scan below the Project.
-		{"StopsAtSort",
+		// A Sort or a LIMIT emits a stage, and that stage's STREAM is
+		// whatever its producer emits — source columns, unless some pass put
+		// an alias-naming projection on the producing fragment. This walk
+		// cannot know which, so it resolves through both and the alias
+		// spelling travels beside the result (physical.Stage.FilterAliases);
+		// physical.resolveFilterAliasSpelling picks once that is settled.
+		//
+		// Declining here instead was what made #656 shapes a–d silent: the
+		// predicate kept an alias no stage under the sort emitted, and — on
+		// the merge_sort a later pass deletes — was dropped outright.
+		{"ResolvesThroughSort",
 			`WITH c AS (SELECT id, c_i64 AS v FROM t ORDER BY id) SELECT id FROM c WHERE v > 0`,
-			""},
-		{"StopsAtLimit",
+			"c_i64 > 0"},
+		{"ResolvesThroughLimit",
 			`WITH c AS (SELECT id, c_i64 AS v FROM t ORDER BY id LIMIT 10) SELECT id FROM c WHERE v > 0`,
-			""},
+			"c_i64 > 0"},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {

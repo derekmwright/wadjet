@@ -386,7 +386,38 @@ func (w WindowExpr) InputColumn() string {
 	if strings.EqualFold(strings.TrimSpace(w.Func), "ntile") {
 		return ""
 	}
-	return strings.TrimSpace(strings.SplitN(w.InputCol, ",", 2)[0])
+	return strings.TrimSpace(firstWindowArg(w.InputCol))
+}
+
+// firstWindowArg returns the first argument of a window function's argument
+// list — the VALUE argument, dropping LAG/LEAD's offset and default and
+// NTH_VALUE's n.
+//
+// The split is on a TOP-LEVEL comma. A plain SplitN cut at the first comma
+// anywhere, so `COALESCE(c, 0) * 2` came back as `COALESCE(c` — an argument
+// nothing could compile, which is one more way a window over an expression
+// answered NULL (#672). Commas inside parentheses and inside string literals
+// belong to the argument, not to the list.
+func firstWindowArg(args string) string {
+	depth := 0
+	inStr := false
+	for i := 0; i < len(args); i++ {
+		switch c := args[i]; {
+		case c == '\'':
+			// '' inside a literal is an escaped quote; toggling twice on it
+			// leaves the state right either way.
+			inStr = !inStr
+		case inStr:
+			// Nothing else is punctuation inside a string literal.
+		case c == '(' || c == '[':
+			depth++
+		case c == ')' || c == ']':
+			depth--
+		case c == ',' && depth == 0:
+			return args[:i]
+		}
+	}
+	return args
 }
 
 // OrderExpr is a sort expression.

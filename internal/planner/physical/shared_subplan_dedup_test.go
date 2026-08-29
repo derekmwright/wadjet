@@ -392,6 +392,11 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// not interchangeable.
 		"ScanDeletes": "hashed",
 		"FilterExprs": "hashed", "GroupByCols": "hashed", "AggSpecs": "hashed",
+		// FilterAliases rides with FilterExprs: it is the same predicates'
+		// second spelling, index-aligned, and two subtrees whose predicates
+		// resolved from different aliases are not interchangeable — the
+		// spelling that survives resolveFilterAliasSpelling depends on it.
+		"FilterAliases": "hashed",
 		"GroupByAll": "hashed", "SortKeys": "hashed", "Limit": "hashed",
 		// HasLimit rides with Limit: without it, two subtrees with a
 		// genuine LIMIT 0 vs. no LIMIT at all would hash identically and

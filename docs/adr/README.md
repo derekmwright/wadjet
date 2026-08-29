@@ -42,3 +42,4 @@ Conventions:
 | [0022](0022-a-row-field-path-is-not-a-column-reference.md) | A ROW field path is not a column reference: it is resolved from its parent's declaration and materialized like a computed expression | Accepted |
 | [0023](0023-group-key-and-group-value-are-two-encodings.md) | A group's KEY and its VALUE are two encodings; never decode one out of the other | Accepted |
 | [0024](0024-decimal-is-finite-fixed-point-with-postgres-result-types.md) | DECIMAL is a finite 128-bit fixed-point type that follows PostgreSQL's result-TYPE rules | Accepted |
+| [0025](0025-a-stage-never-carries-what-its-fragment-will-not-run.md) | A stage never carries a predicate or a projection its fragment will not run | Accepted |

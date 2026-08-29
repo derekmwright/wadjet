@@ -270,20 +270,15 @@ func TestCTERenamedColumnSiblingShapesTwoPath(t *testing.T) {
 			`WITH c AS (SELECT g AS gk, c_i64 AS v FROM %s) `+
 				`SELECT gk, COUNT(*) AS n FROM c GROUP BY gk HAVING COUNT(*) > 1 ORDER BY gk`,
 			typematrix.Table)},
-		// A window's PARTITION BY naming a RENAMED output is a DIFFERENT
-		// mechanism, and this entry is here to say so rather than to gate it.
-		// resolveWindowKeys binds a QUALIFIED reference to an input column and
-		// materializes an EXPRESSION, but a bare reference to a Project's
-		// alias is neither: the single-process window reads it off the
-		// Project's output, and on the DAG the Project emits no stage, so the
-		// worker refuses with `window: PARTITION BY "gk" is not a column of
-		// its input`. It reproduces identically through a DERIVED TABLE, with
-		// no CTE anywhere, so it is not #653's cause — and unlike #653 it is
-		// LOUD. Fixing it needs a DAG-side repair pass of its own, the way
-		// resolveDerivedAliasSortKeys is the sort keys': resolveWindowKeys is
-		// deliberately shared by both paths and the two have different input
-		// schemas at the window, so the binding cannot be made there.
-		{name: "WindowPartitionBy", dagRefuses: `is not a column of its input`, sql: fmt.Sprintf(
+		// A window's PARTITION BY naming a RENAMED output. It used to be
+		// pinned here as a separate LOUD defect (`window: PARTITION BY "gk"
+		// is not a column of its input`) rather than gated, on the reasoning
+		// that resolveWindowKeys is shared by both paths and cannot make the
+		// binding. It is fixed as part of #656/#658: the DAG resolves the key
+		// to its source column at stage EMISSION, where the key is still the
+		// window stage's clustering key, so the binding never has to be made
+		// in the shared resolver at all. Gated on both arms now.
+		{name: "WindowPartitionBy", sql: fmt.Sprintf(
 			`WITH c AS (SELECT id, g AS gk, c_i64 AS v FROM %s WHERE id < 200) `+
 				`SELECT id, ROW_NUMBER() OVER (PARTITION BY gk ORDER BY id) AS rn `+
 				`FROM c ORDER BY id`, typematrix.Table)},

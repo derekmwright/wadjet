@@ -231,6 +231,10 @@ type Coordinator struct {
 	// IN-subquery the planner could not materialize into a literal set, and
 	// which ran on the coordinator-local pipeline instead (#524).
 	localInSubquery atomic.Int64
+	// localScalarProjection counts queries whose plan the stage DAG refused
+	// for a subquery in the SELECT list, and which ran on the
+	// coordinator-local pipeline instead (#659).
+	localScalarProjection atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -969,6 +973,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// though the DAG has no stage for the predicate (#524).
 		if errors.Is(err, physical.ErrInSubqueryDistributed) {
 			return c.runInSubqueryLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a subquery in the SELECT list, whose only distributed lowering
+		// was to ship the SQL text to a worker with no SubqueryRunner and
+		// fail every task (#659). The single-process pipeline compiles it
+		// against a real runner.
+		if errors.Is(err, physical.ErrScalarSubqueryProjectionDistributed) {
+			return c.runScalarProjectionLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}

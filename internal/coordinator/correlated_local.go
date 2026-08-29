@@ -54,6 +54,26 @@ func (c *Coordinator) runInSubqueryLocal(ctx context.Context, queryID string, lo
 		"IN subquery with no distributed stage", &c.localInSubquery)
 }
 
+// runScalarProjectionLocal executes a query the stage DAG refused
+// (physical.ErrScalarSubqueryProjectionDistributed) on the coordinator-local
+// single-process pipeline, where a SELECT-list subquery compiles against a
+// real SubqueryRunner.
+//
+// The DAG's scalar-producer machinery covers predicates only; a subquery in
+// the SELECT list reached the worker as expression text and failed every task
+// (#659). Refusing at plan time and routing here turns a hard failure into
+// the answer, exactly as #359 does for correlated subqueries.
+func (c *Coordinator) runScalarProjectionLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"SELECT-list subquery with no distributed stage", &c.localScalarProjection)
+}
+
+// ScalarProjectionLocalRoutes reports how many plans refused for a SELECT-list
+// subquery were routed to the coordinator-local pipeline (#659).
+func (c *Coordinator) ScalarProjectionLocalRoutes() int64 {
+	return c.localScalarProjection.Load()
+}
+
 // InSubqueryLocalRoutes reports how many plans refused for an unmaterializable
 // IN-subquery were routed to the coordinator-local pipeline. Separate from the
 // other two counters so a suite can assert WHICH refusal fired.

@@ -1250,6 +1250,15 @@ func TestSetOpDerivedTableArmsTwoPath(t *testing.T) {
 			"SELECT v FROM (SELECT e2 AS v FROM %[1]s UNION ALL SELECT e4 FROM %[1]s) t " +
 				"UNION ALL SELECT ew FROM %[1]s",
 			cat(e2, e4, ew), e2Nulls + e4Nulls + ewNulls},
+		// The same CTE feeding BOTH arms. Pinned as a residual until #660:
+		// walkStages' CTE dedup gives the second reference a `cte-alias`
+		// phantom, and flattenCTEAliases rewrote Dependencies without
+		// UnionArms[i].DepStage, so the plan was REFUSED (`arm 1 names
+		// producer "cte-alias-1" but Dependencies[1] is "scan-0"`). Asserted
+		// on both arms now.
+		{"a_cte_referenced_by_both_arms",
+			"WITH c AS (SELECT e2 AS x FROM %[1]s) SELECT x AS v FROM c UNION ALL SELECT x FROM c",
+			cat(e2, e2), e2Nulls * 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sql := fmt.Sprintf(tc.sql, sodTable)
@@ -1263,12 +1272,10 @@ func TestSetOpDerivedTableArmsTwoPath(t *testing.T) {
 	// arm projection this test is about, and each fails the day it starts
 	// working.
 	for _, tc := range []struct{ name, issue, sql string }{
-		// #660: the same CTE feeding BOTH arms.
-		{"a_cte_referenced_by_both_arms", "#660",
-			"WITH c AS (SELECT e2 AS x FROM %[1]s) SELECT x AS v FROM c UNION ALL SELECT x FROM c"},
 		// #656's family: an ORDER BY inside a derived-table arm makes the arm
 		// a merge_sort producer, which the union stage's dependency list does
-		// not name.
+		// not name. Distinct from the Filter/Project placement #656 fixed —
+		// this is the set-operation emitter's own arm→producer wiring.
 		{"an_order_by_inside_a_derived_table_arm", "#656",
 			"SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s) a UNION ALL " +
 				"SELECT y FROM (SELECT e4 AS y FROM %[1]s ORDER BY id LIMIT 3) b"},
