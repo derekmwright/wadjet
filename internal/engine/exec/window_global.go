@@ -58,6 +58,18 @@ import (
 type globalWindowStats struct {
 	n   int64
 	sum []float64 // per group column; only aggregates fill these
+	// decSum[i] is the EXACT Int128 total for a SUM/AVG column whose input
+	// and output are both DECIMAL, and decOverflow[i] says it left the
+	// carrier's range. The float sum beside it is unused for those columns:
+	// a windowed SUM over a DECIMAL answers what the grouped one answers,
+	// which is exact (#586, ADR-0012 item 9).
+	decSum      []Int128Sum
+	decOverflow []bool
+	// cnt[i] counts the NON-NULL rows a SUM/AVG column saw. SQL excludes
+	// NULLs from an aggregate's input, so AVG divides by this rather than by
+	// the row count, and a column whose every row is NULL answers NULL
+	// rather than 0.
+	cnt []int64
 	// notSummable[i] marks a SUM/AVG column whose input type has no numeric
 	// reading (IPV4, MAC, the byte-backed types, the containers). Its answer
 	// is NULL, the same as the grouped aggregate's — see vecFloat64 (#412).
@@ -67,6 +79,87 @@ type globalWindowStats struct {
 	nth         []any
 	minV        []any
 	maxV        []any
+}
+
+// Int128Sum is batch.Int128 under a name that says what it holds here. The
+// alias keeps the streaming state's declarations readable next to the float
+// ones they parallel.
+type Int128Sum = batch.Int128
+
+// globalDecAgg describes one group column's exact-DECIMAL SUM/AVG, resolved
+// ONCE from the pass schema rather than per row.
+//
+// The two paths through this file — the pass-1 scalar collector and the
+// pass-2 running streamer — both consult it, so the decision "is this column
+// exact" is made in one place and cannot come out differently in the two
+// passes over the same query.
+type globalDecAgg struct {
+	exact bool
+	// addScale is how many digits the AVG division adds: the declared output
+	// scale minus the input's. Zero for SUM, which keeps the input's scale.
+	addScale int
+}
+
+func globalDecAggs(schema []parquet.Column, g windowSpecGroup, inputIdxs []int) []globalDecAgg {
+	out := make([]globalDecAgg, len(g.cols))
+	for i, wc := range g.cols {
+		ii := inputIdxs[i]
+		if !windowAccumulates(wc.Func) || ii < 0 || ii >= len(schema) {
+			continue
+		}
+		in := schema[ii]
+		oc := windowOutputColumn(wc, schema)
+		if in.Type != parquet.TypeDecimal || oc.Type != parquet.TypeDecimal {
+			continue
+		}
+		if oc.Scale < in.Scale {
+			continue // see windowDecimalFrames: never produced by the rule
+		}
+		out[i] = globalDecAgg{exact: true, addScale: oc.Scale - in.Scale}
+	}
+	return out
+}
+
+// decAvgMemo caches one column's last exact AVG division. Both writers below
+// answer MANY rows from ONE (sum, count) — every row of a whole-input window,
+// every row of a closed ORDER-BY peer group — and batch.DecimalAvg falls to an
+// allocating big.Int division whenever the sum scaled by 10^addScale leaves
+// int64, which a wide DECIMAL's does routinely. windowDecimalFrames carries
+// the same memo for the same reason.
+type decAvgMemo struct {
+	sum   Int128Sum
+	count int64
+	q     Int128Sum
+	valid bool
+}
+
+// writeGlobalDecAgg writes one exact-DECIMAL SUM/AVG answer for row r, or
+// leaves it NULL when the frame contributed no non-NULL row.
+func writeGlobalDecAgg(vec *batch.Vector, r int, wc WindowColumn, da globalDecAgg,
+	sum Int128Sum, cnt int64, overflow bool, memo *decAvgMemo) error {
+	if overflow {
+		if wc.Func == WinAvg {
+			return windowDecimalAvgUnrepresentable(wc.OutputCol)
+		}
+		return windowDecimalSumOverflow(wc.OutputCol)
+	}
+	if cnt == 0 {
+		return nil
+	}
+	if wc.Func == WinAvg {
+		if !memo.valid || memo.count != cnt || !memo.sum.Equal(sum) {
+			q, ok := batch.DecimalAvg(sum, cnt, da.addScale)
+			if !ok {
+				return windowDecimalAvgUnrepresentable(wc.OutputCol)
+			}
+			*memo = decAvgMemo{sum: sum, count: cnt, q: q, valid: true}
+		}
+		vec.DecimalData.Data[r] = memo.q
+	} else {
+		vec.DecimalData.Data[r] = sum
+	}
+	vec.Nulls.SetValid(r)
+	return nil
 }
 
 // globalInputIdxs resolves each group column's input column index in schema
@@ -115,6 +208,9 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 	nc := len(g.cols)
 	st := &globalWindowStats{
 		sum:         make([]float64, nc),
+		decSum:      make([]Int128Sum, nc),
+		decOverflow: make([]bool, nc),
+		cnt:         make([]int64, nc),
 		notSummable: make([]bool, nc),
 		first:       make([]any, nc),
 		last:        make([]any, nc),
@@ -124,6 +220,7 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 	}
 	inputIdxs := globalInputIdxs(schema, g)
 	cmps := globalInputCompares(schema, inputIdxs)
+	decAgg := globalDecAggs(schema, g, inputIdxs)
 	for {
 		b, err := m.Next()
 		if err != nil {
@@ -143,10 +240,24 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 				switch wc.Func {
 				case WinSum, WinAvg:
 					if len(wc.OrderBy) == 0 {
-						f, ok := vecFloat64(b.Columns[ii], r)
+						col := b.Columns[ii]
+						if decAgg[i].exact {
+							if col.Nulls.IsNullFast(r) {
+								continue
+							}
+							v, ok := st.decSum[i].AddChecked(col.DecimalData.Data[r])
+							st.decSum[i] = v
+							st.decOverflow[i] = st.decOverflow[i] || !ok
+							st.cnt[i]++
+							continue
+						}
+						f, ok := vecFloat64(col, r)
 						if !ok {
 							st.notSummable[i] = true
 							continue
+						}
+						if !col.Nulls.IsNullFast(r) {
+							st.cnt[i]++
 						}
 						st.sum[i] += f
 					}
@@ -213,12 +324,26 @@ type globalWindowStreamer struct {
 	inputCmp []boxedCompare
 	resolved bool
 
+	// decAgg[i] marks a SUM/AVG column that accumulates EXACTLY (both its
+	// input and its output are DECIMAL) and carries AVG's added scale;
+	// avgMemo[i] caches its last division (see decAvgMemo).
+	decAgg  []globalDecAgg
+	avgMemo []decAvgMemo
+
 	// carried state
 	rowIdx    int64 // rows consumed from the merger
 	rank      int64 // current rank (rank/percent_rank)
 	denseRank int64
 	runSum    []float64 // per col, running aggregates
-	runCount  []int64
+	// runDecSum is runSum's exact twin for a DECIMAL column, with the
+	// overflow flag ADR-0012 item 9 makes sticky, and runNonNull is the
+	// count both of them divide by: SQL excludes NULLs from an aggregate's
+	// input, so AVG's denominator is the rows that contributed and a frame
+	// of only NULLs answers NULL rather than 0.
+	runDecSum  []Int128Sum
+	runDecOver []bool
+	runNonNull []int64
+	runCount   []int64
 	// notSummable[i] marks an ORDER-BY'd SUM/AVG column whose input type has
 	// no numeric reading. Its rows stay NULL, matching the grouped aggregate
 	// (vecFloat64, #412). The peer backfill reads it, so it cannot be a
@@ -264,6 +389,9 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 		rank:        1,
 		denseRank:   1,
 		runSum:      make([]float64, nc),
+		runDecSum:   make([]Int128Sum, nc),
+		runDecOver:  make([]bool, nc),
+		runNonNull:  make([]int64, nc),
 		runCount:    make([]int64, nc),
 		notSummable: make([]bool, nc),
 		runMin:      make([]any, nc),
@@ -276,6 +404,8 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 		leadCursor:  make([]int64, nc),
 	}
 	s.inputCmp = globalInputCompares(schema, s.inputIdxs)
+	s.decAgg = globalDecAggs(schema, g, s.inputIdxs)
+	s.avgMemo = make([]decAvgMemo, nc)
 	for i, wc := range g.cols {
 		switch wc.Func {
 		case WinLag:
@@ -395,7 +525,9 @@ func (s *globalWindowStreamer) Next() (*batch.RecordBatch, error) {
 		}
 		if nb == nil {
 			s.eof = true
-			s.finishEOF()
+			if err := s.finishEOF(); err != nil {
+				return nil, err
+			}
 			s.markResolved()
 			continue
 		}
@@ -407,14 +539,16 @@ func (s *globalWindowStreamer) Next() (*batch.RecordBatch, error) {
 				return nil, err
 			}
 		}
-		s.ingest(nb)
+		if err := s.ingest(nb); err != nil {
+			return nil, err
+		}
 		s.markResolved()
 	}
 }
 
 // ingest appends the group's output vectors to nb, computes every
 // immediately-resolvable value, and advances lookahead resolution.
-func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) {
+func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) error {
 	numInput := len(s.schema)
 	// Augment: copy the schema header before appending (it aliases the pass
 	// schema slice; appending in place could clobber its backing array).
@@ -450,7 +584,9 @@ func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) {
 			if s.holdPeers {
 				// Peer group [peerCursor, i64) closed: its rows' frames end
 				// here, and the running state now covers exactly them.
-				s.backfillPeerFrame(i64)
+				if err := s.backfillPeerFrame(i64); err != nil {
+					return err
+				}
 			}
 			if s.needCumeDist {
 				// Peer group [peerStart, i64) closed: cume_dist = i64/n.
@@ -465,7 +601,9 @@ func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) {
 			if ii := s.inputIdxs[i]; ii >= 0 && ii < numInput {
 				inVec = nb.Columns[ii]
 			}
-			s.computeImmediate(wc, i, vec, r, i64, n, inVec, nb)
+			if err := s.computeImmediate(wc, i, vec, r, i64, n, inVec, nb); err != nil {
+				return err
+			}
 		}
 
 		s.prevB, s.prevRow = nb, r
@@ -475,11 +613,12 @@ func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) {
 	// Lead resolution: rows up to rowIdx-1 are visible, so any row r with
 	// r+offset <= rowIdx-1 can resolve its lead value now.
 	s.resolveLeads()
+	return nil
 }
 
 // computeImmediate writes row r's value for every function that needs no
 // lookahead. Lead and cume_dist rows are left for their resolvers.
-func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *batch.Vector, r int, rowIdx, n int64, inVec *batch.Vector, nb *batch.RecordBatch) {
+func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *batch.Vector, r int, rowIdx, n int64, inVec *batch.Vector, nb *batch.RecordBatch) error {
 	switch wc.Func {
 	case WinRowNumber:
 		vec.Int64Data[r] = rowIdx + 1
@@ -505,46 +644,33 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 	// Their frame ends at the end of the row's peer group, so the value is
 	// written by backfillPeerFrame once that group closes; writing the
 	// running value per row is the same answer only when no two rows tie.
-	case WinSum:
+	case WinSum, WinAvg:
 		if len(wc.OrderBy) > 0 {
-			f, ok := vecFloat64(inVec, r)
-			if !ok {
-				// No numeric reading for this column type: NULL, which is
-				// what vec already holds and what the grouped SUM answers.
-				s.notSummable[i] = true
-				return
-			}
-			s.runSum[i] += f
-			return
+			return s.accumulateRunning(wc, i, r, inVec)
 		}
 		if s.stats.notSummable[i] {
-			return
+			return nil
 		}
-		vec.Float64Data[r] = s.stats.sum[i]
+		if s.decAgg[i].exact {
+			return writeGlobalDecAgg(vec, r, wc, s.decAgg[i],
+				s.stats.decSum[i], s.stats.cnt[i], s.stats.decOverflow[i], &s.avgMemo[i])
+		}
+		if s.stats.cnt[i] == 0 {
+			return nil // every row NULL: SQL says NULL, not 0
+		}
+		if wc.Func == WinAvg {
+			vec.Float64Data[r] = s.stats.sum[i] / float64(s.stats.cnt[i])
+		} else {
+			vec.Float64Data[r] = s.stats.sum[i]
+		}
 		vec.Nulls.SetValid(r)
 
 	case WinCount:
 		if len(wc.OrderBy) > 0 {
 			s.runCount[i]++
-			return
+			return nil
 		}
 		vec.Int64Data[r] = n
-		vec.Nulls.SetValid(r)
-
-	case WinAvg:
-		if len(wc.OrderBy) > 0 {
-			f, ok := vecFloat64(inVec, r)
-			if !ok {
-				s.notSummable[i] = true
-				return
-			}
-			s.runSum[i] += f
-			return
-		}
-		if s.stats.notSummable[i] {
-			return
-		}
-		vec.Float64Data[r] = s.stats.sum[i] / float64(n)
 		vec.Nulls.SetValid(r)
 
 	case WinMin:
@@ -556,7 +682,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			if s.runMin[i] == nil || (v != nil && s.inputCmp[i](v, s.runMin[i]) < 0) {
 				s.runMin[i] = v
 			}
-			return
+			return nil
 		}
 		vec.SetValue(r, s.stats.minV[i])
 
@@ -569,7 +695,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			if s.runMax[i] == nil || (v != nil && s.inputCmp[i](v, s.runMax[i]) > 0) {
 				s.runMax[i] = v
 			}
-			return
+			return nil
 		}
 		vec.SetValue(r, s.stats.maxV[i])
 
@@ -602,7 +728,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 
 	case WinLastValue:
 		if len(wc.OrderBy) > 0 {
-			return // backfillPeerFrame: the last row of the peer group
+			return nil // backfillPeerFrame: the last row of the peer group
 		}
 		vec.SetValue(r, s.stats.last[i])
 
@@ -640,7 +766,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 
 	case WinNthValue:
 		if len(wc.OrderBy) > 0 {
-			return // backfillPeerFrame: NULL until the frame reaches n rows
+			return nil // backfillPeerFrame: NULL until the frame reaches n rows
 		}
 		nth := wc.NthValueN
 		if nth <= 0 {
@@ -652,6 +778,48 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			vec.SetValue(r, nil)
 		}
 	}
+	return nil
+}
+
+// accumulateRunning folds row r into the running SUM/AVG state of an
+// ORDER-BY'd column. Its value is not written here: the default frame ends at
+// the row's ORDER-BY PEER GROUP, so backfillPeerFrame writes it once that
+// group closes.
+//
+// The DECIMAL arm is exact and its overflow is STICKY, matching the grouped
+// aggregate and the in-memory frame accumulator (windowDecimalFrames): a
+// running total that leaves the carrier's range fails the query rather than
+// reporting a wrapped number, and it stays failed even if later rows bring
+// it back (ADR-0012 item 9).
+func (s *globalWindowStreamer) accumulateRunning(wc WindowColumn, i, r int, inVec *batch.Vector) error {
+	if s.decAgg[i].exact {
+		if inVec.Nulls.IsNullFast(r) {
+			return nil
+		}
+		v, ok := s.runDecSum[i].AddChecked(inVec.DecimalData.Data[r])
+		s.runDecSum[i] = v
+		s.runNonNull[i]++
+		if !ok {
+			s.runDecOver[i] = true
+			if wc.Func == WinAvg {
+				return windowDecimalAvgUnrepresentable(wc.OutputCol)
+			}
+			return windowDecimalSumOverflow(wc.OutputCol)
+		}
+		return nil
+	}
+	f, ok := vecFloat64(inVec, r)
+	if !ok {
+		// No numeric reading for this column type: NULL, which is what the
+		// output vector already holds and what the grouped SUM answers.
+		s.notSummable[i] = true
+		return nil
+	}
+	if inVec != nil && !inVec.Nulls.IsNullFast(r) {
+		s.runNonNull[i]++
+	}
+	s.runSum[i] += f
+	return nil
 }
 
 // peerDeferred reports whether f's value under the DEFAULT frame depends on
@@ -680,7 +848,7 @@ func peerDeferred(f WindowFunc) bool {
 //
 // Writes go out in ascending row order, per column, across successive calls,
 // which is what a variable-length output vector's offsets require.
-func (s *globalWindowStreamer) backfillPeerFrame(end int64) {
+func (s *globalWindowStreamer) backfillPeerFrame(end int64) error {
 	numInput := len(s.schema)
 	for i, wc := range s.g.cols {
 		if !peerDeferred(wc.Func) || len(wc.OrderBy) == 0 {
@@ -714,20 +882,31 @@ func (s *globalWindowStreamer) backfillPeerFrame(end int64) {
 			}
 			vec := pb.outVec(numInput, i)
 			switch wc.Func {
-			case WinSum:
+			case WinSum, WinAvg:
 				if s.notSummable[i] {
 					continue // no numeric reading: NULL, as vec already is
 				}
-				vec.Float64Data[lr] = s.runSum[i]
+				if s.decAgg[i].exact {
+					if err := writeGlobalDecAgg(vec, lr, wc, s.decAgg[i],
+						s.runDecSum[i], s.runNonNull[i], s.runDecOver[i], &s.avgMemo[i]); err != nil {
+						return err
+					}
+					continue
+				}
+				if s.runNonNull[i] == 0 {
+					continue // frame holds only NULLs: SQL says NULL, not 0
+				}
+				if wc.Func == WinAvg {
+					// The rows that CONTRIBUTED, not `end`: a NULL is not
+					// part of an aggregate's input, and dividing by the row
+					// count answered a number PostgreSQL does not.
+					vec.Float64Data[lr] = s.runSum[i] / float64(s.runNonNull[i])
+				} else {
+					vec.Float64Data[lr] = s.runSum[i]
+				}
 				vec.Nulls.SetValid(lr)
 			case WinCount:
 				vec.Int64Data[lr] = s.runCount[i]
-				vec.Nulls.SetValid(lr)
-			case WinAvg:
-				if s.notSummable[i] {
-					continue
-				}
-				vec.Float64Data[lr] = s.runSum[i] / float64(end)
 				vec.Nulls.SetValid(lr)
 			default:
 				vec.SetValue(lr, val)
@@ -735,6 +914,7 @@ func (s *globalWindowStreamer) backfillPeerFrame(end int64) {
 		}
 	}
 	s.peerCursor = end
+	return nil
 }
 
 // resolveLeads fills lead values for rows whose lookahead target has
@@ -798,7 +978,7 @@ func (s *globalWindowStreamer) backfillCumeDist(end int64) {
 
 // finishEOF resolves everything still outstanding once the stream ends:
 // lead rows past the end (default/NULL) and the final cume_dist group.
-func (s *globalWindowStreamer) finishEOF() {
+func (s *globalWindowStreamer) finishEOF() error {
 	numInput := len(s.schema)
 	for i, wc := range s.g.cols {
 		if wc.Func != WinLead {
@@ -835,11 +1015,14 @@ func (s *globalWindowStreamer) finishEOF() {
 		}
 	}
 	if s.holdPeers && s.rowIdx > s.peerCursor {
-		s.backfillPeerFrame(s.rowIdx) // final peer group closes at EOF
+		if err := s.backfillPeerFrame(s.rowIdx); err != nil { // final peer group closes at EOF
+			return err
+		}
 	}
 	if s.needCumeDist && s.rowIdx > s.cdCursor {
 		s.backfillCumeDist(s.rowIdx) // final group: cd = n/n = 1
 	}
+	return nil
 }
 
 // markResolved advances emitFrom past every pending batch whose rows are all

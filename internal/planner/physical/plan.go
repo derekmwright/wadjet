@@ -12015,8 +12015,13 @@ func parseWindowFunc(s string) exec.WindowFunc {
 
 // windowOutputType declares the output type of an INPUT-INDEPENDENT window
 // function — the rank family, whose answer is a position or a ratio computed
-// from the frame, plus the aggregate window functions, which finalize to the
-// same type whatever they consumed (COUNT to int64, SUM/AVG to float64).
+// from the frame, plus COUNT, which finalizes to int64 whatever it consumed.
+//
+// SUM and AVG reach this list only as a FALLBACK. Over a DECIMAL they answer
+// DECIMAL, exactly as the grouped forms do (#586, ADR-0012 item 9), and
+// windowSpecOutputType resolves that from the input column; the float64 here
+// is what every other numeric input still gets, and what an input the planner
+// could not type at all falls back to.
 //
 // The value functions — lag, lead, first_value, last_value, nth_value — are
 // NOT here: they return a value taken from their input column rather than
@@ -12077,7 +12082,8 @@ func windowValueFunc(fn string) bool {
 func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
-	if !windowValueFunc(fn) && !minMax {
+	sumAvg := fn == "sum" || fn == "avg"
+	if !windowValueFunc(fn) && !minMax && !sumAvg {
 		return expr.Decl(windowOutputType(fn))
 	}
 	// The same spelling buildWindow hands exec as the input column, so the
@@ -12106,6 +12112,28 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColDecls(node.Children[0]))
 	if conf != expr.Decided {
 		return expr.Decl(windowOutputType(fn))
+	}
+	if sumAvg {
+		// SUM and AVG do NOT copy an input value, so their declaration is
+		// not the input's: they accumulate, and over a DECIMAL they answer
+		// what the GROUPED SUM/AVG answer — DECIMAL(38,s) and
+		// DECIMAL(38,min(s+4,38)), exactly (#586, #475, ADR-0012 item 9,
+		// ADR-0024 item 2). `SUM(d) GROUP BY g` and `SUM(d) OVER (PARTITION
+		// BY g)` are the same question written twice; a client that reads
+		// both in one result set was getting numeric for one and float8 for
+		// the other, with the window's digits past a float64's ~16 already
+		// gone.
+		//
+		// Every other input type keeps the float64 the name list answers.
+		// PostgreSQL's sum(int4) is bigint and sum(int8)/avg(int) are
+		// numeric; wadjet's GROUPED aggregate answers float64 for an integer
+		// column too, and the two spellings have to keep agreeing, so that
+		// divergence moves when the aggregate's does — not here.
+		if t.ID != parquet.TypeDecimal || !t.DecKnown {
+			return expr.Decl(windowOutputType(fn))
+		}
+		prec, scale := exec.WindowDecimalAggMeta(parseWindowFunc(fn), t.Scale)
+		return expr.DeclDecimal(prec, scale)
 	}
 	if minMax {
 		// MIN/MAX copy an input value through the same GetValue/SetValue

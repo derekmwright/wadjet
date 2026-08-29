@@ -405,10 +405,10 @@ func openRunMerger(dir string, schema []parquet.Column, keys []SortKey, runs []s
 // group's window output columns, and computes them. The input is already
 // sorted by (partitionBy, orderBy), so no per-column re-sort happens — the
 // stream order IS the window order.
-func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column, g windowSpecGroup) *batch.RecordBatch {
+func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column, g windowSpecGroup) (*batch.RecordBatch, error) {
 	combined := windowConcatBatches(parts, schema)
 	if combined == nil || combined.Len == 0 {
-		return nil
+		return nil, nil
 	}
 	n := combined.Len
 	base := len(schema)
@@ -435,9 +435,11 @@ func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column,
 		for j, key := range wc.OrderBy {
 			orderIdxs[j] = combined.ColumnIndex(key.Column)
 		}
-		computePartitionColumnar(combined, combined.Columns[base+i], 0, n, wc, inputIdx, orderIdxs)
+		if err := computePartitionColumnar(combined, combined.Columns[base+i], 0, n, wc, inputIdx, orderIdxs); err != nil {
+			return nil, err
+		}
 	}
-	return combined
+	return combined, nil
 }
 
 // chunkBatch splits a batch into DefaultBatchSize pieces so a huge partition
@@ -502,8 +504,13 @@ func windowDiskPass(dir string, schema []parquet.Column, runs []string, g window
 		if parts == nil {
 			break
 		}
-		combined := computeWindowPartition(parts, schema, g)
+		combined, cerr := computeWindowPartition(parts, schema, g)
 		walker.releasePartition(bytes)
+		if cerr != nil {
+			sw.abort()
+			removeRunFiles(runs)
+			return nil, nil, cerr
+		}
 		if combined == nil {
 			continue
 		}

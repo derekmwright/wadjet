@@ -215,11 +215,19 @@ func TestWindowSpecOutputTypeResolvesDecimal(t *testing.T) {
 		{"max", "MAX", "a", expr.DeclDecimal(9, 2)},
 		{"first_value", "first_value", "a", expr.DeclDecimal(9, 2)},
 		{"lag", "lag", "a, 1", expr.DeclDecimal(9, 2)},
-		// SUM/AVG over a window still finalize in float64 (#586 is not in
-		// this change's scope), so the name list answers for them.
-		{"sum still float64", "sum", "a", expr.Decl(parquet.TypeFloat64)},
+		// SUM/AVG do NOT keep the input's (p,s): they accumulate, so they
+		// declare what the GROUPED SUM/AVG over the same column declare —
+		// DECIMAL(38,s) and DECIMAL(38,min(s+4,38)) (#586, #475, ADR-0012
+		// item 9). The two spellings of one question owe one answer type.
+		{"sum", "sum", "a", expr.DeclDecimal(38, 2)},
+		{"avg", "AVG", "a", expr.DeclDecimal(38, 6)},
 		// An unconstrained DECIMAL declines, as it does for a projection.
 		{"an unconstrained DECIMAL declines", "min", "nops", expr.Decl(parquet.TypeFloat64)},
+		{"sum over an unconstrained DECIMAL declines", "sum", "nops", expr.Decl(parquet.TypeFloat64)},
+		// An INT column keeps the float64 the name list answers. PostgreSQL
+		// says bigint/numeric there, and the GROUPED aggregate answers
+		// float64 too — the two move together or not at all.
+		{"sum over an int stays float64", "sum", "n", expr.Decl(parquet.TypeFloat64)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := windowSpecOutputType(win, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})

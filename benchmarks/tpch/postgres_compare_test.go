@@ -2468,6 +2468,85 @@ func postgresSemanticsCases() []pgCase {
 			MIN(d_wide) OVER () AS lo, MAX(d_wide) OVER () AS hi
 			FROM dec_probe ORDER BY d_key`},
 
+		// Windowed SUM/AVG over a DECIMAL (#586, #475). MIN/MAX above COPY an
+		// input value; these ACCUMULATE one, and until ADR-0024 they did it
+		// in float64 and declared FLOAT64 — so `SUM(d) OVER (PARTITION BY g)`
+		// answered 4.1266696257e+06 where `SUM(d) … GROUP BY g` answered
+		// 4126669.6257 for the same rows. Both spellings are here so the
+		// oracle sees them agree with PostgreSQL and with each other.
+		//
+		// exactNumeric on every SUM: PostgreSQL's sum(numeric) is exact and
+		// so is wadjet's, so anything short of digit-for-digit equality is a
+		// defect — and a float rendering agrees about the first six digits
+		// whatever the accumulator did, which is exactly how #455's grouped
+		// half shipped green.
+		pgCase{name: "WindowSumDecimalScale2Partition", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER (PARTITION BY d_grp) AS w_sum FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowSumDecimalScale4Running", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_4) OVER (ORDER BY d_key) AS run_sum FROM dec_probe ORDER BY d_key`},
+		// The WIDE arm: every value needs more than 64 bits, so a float64
+		// accumulator loses everything past the 16th digit while still
+		// looking like a number.
+		pgCase{name: "WindowSumDecimalWide", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_wide) OVER (PARTITION BY d_grp) AS w_sum,
+			SUM(d_wide) OVER () AS all_sum FROM dec_probe ORDER BY d_key`},
+		// A SLIDING frame, where the accumulator RETRACTS the row leaving the
+		// frame. That subtraction has to be exact and checked; a float
+		// running total additionally loses associativity, so the same frame
+		// reached by adding and subtracting is a different number from the
+		// one reached by summing its rows.
+		pgCase{name: "WindowSumDecimalSlidingFrame", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_wide) OVER (PARTITION BY d_grp ORDER BY d_key
+				ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) AS slide_sum,
+			SUM(d_2) OVER (ORDER BY d_key ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS slide2
+			FROM dec_probe ORDER BY d_key`},
+		// An EMPTY frame is NULL, not 0 — the distinction a running total
+		// that starts at zero cannot make on its own.
+		pgCase{name: "WindowSumDecimalEmptyFrame", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER (PARTITION BY d_grp ORDER BY d_key
+				ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS back_sum
+			FROM dec_probe ORDER BY d_key`},
+		// A partition whose every value is NULL answers NULL, and a partition
+		// with SOME NULLs excludes them from the sum AND from AVG's
+		// denominator — PostgreSQL's rule, which an AVG dividing by the
+		// frame's WIDTH gets wrong on every frame containing one.
+		pgCase{name: "WindowSumAvgDecimalNullPartition", exactNumeric: true, sql: `SELECT d_key, m,
+			SUM(v) OVER (PARTITION BY m) AS s FROM (
+				SELECT d_key, CASE WHEN d_key % 11 = 0 THEN 0 ELSE 1 END AS m,
+					CASE WHEN d_key % 11 = 0 THEN NULL ELSE d_4 END AS v
+				FROM dec_probe) s ORDER BY d_key`},
+		// AVG keeps the FLOAT comparison, and for exactly the reason the
+		// grouped WideDecimalAvg does: both engines divide exactly, but
+		// PostgreSQL picks a result scale giving at least 16 significant
+		// digits while wadjet widens the input scale by a fixed 4
+		// (batch.AvgScaleIncrement, ADR-0012 item 9). The two agree to
+		// min(both scales) and differ in how many digits past that they keep,
+		// which no exact comparison can express. What IS gated here is that
+		// the window's AVG agrees with PostgreSQL's numeric division at all —
+		// a float64 accumulator diverges well before the 16th digit.
+		pgCase{name: "WindowAvgDecimalScale2Partition", sql: `SELECT d_key,
+			AVG(d_2) OVER (PARTITION BY d_grp) AS w_avg FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowAvgDecimalWideRunning", sql: `SELECT d_key,
+			AVG(d_wide) OVER (ORDER BY d_key) AS run_avg FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowAvgDecimalSlidingFrame", sql: `SELECT d_key,
+			AVG(d_4) OVER (PARTITION BY d_grp ORDER BY d_key
+				ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) AS slide_avg
+			FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowAvgDecimalNullPartition", sql: `SELECT d_key, m,
+			AVG(v) OVER (PARTITION BY m) AS a FROM (
+				SELECT d_key, CASE WHEN d_key % 11 = 0 THEN 0 ELSE 1 END AS m,
+					CASE WHEN d_key % 11 = 0 THEN NULL ELSE d_4 END AS v
+				FROM dec_probe) s ORDER BY d_key`},
+		// The CONTROL: the windowed and the GROUPED spelling of one question,
+		// in one query, over the same rows. They are the same number, so a
+		// change that moved only one of them shows here even if both look
+		// plausible on their own.
+		pgCase{name: "WindowSumMatchesGroupedSum", exactNumeric: true, sql: `SELECT g, w, s
+			FROM (SELECT DISTINCT d_grp AS g, SUM(d_4) OVER (PARTITION BY d_grp) AS w
+				FROM dec_probe) a
+			JOIN (SELECT d_grp AS g2, SUM(d_4) AS s FROM dec_probe GROUP BY d_grp) b
+				ON a.g = b.g2 ORDER BY g`},
+
 		// The types that ALREADY worked, so the widening did not disturb
 		// them: STRING, DATE (stored as text on both sides — see
 		// createPostgresSchema), TIMESTAMP-free INT and FLOAT.

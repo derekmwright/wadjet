@@ -531,6 +531,25 @@ const (
 	// renders the fraction at its declared scale instead of trimming it. The
 	// two properties are gated again.
 
+	// avgDecimalDigitsPin is a DELIBERATE difference of SCALE, recorded in
+	// ADR-0012 item 9: PostgreSQL's numeric division picks a result scale
+	// giving at least 16 significant digits, while wadjet widens the input's
+	// scale by a fixed 4 (batch.AvgScaleIncrement) so that the same query
+	// over more rows cannot silently change the scale of its own output
+	// column. Both engines divide EXACTLY and agree to min(both scales);
+	// they differ only in how many digits past that they print, which is a
+	// difference no value comparison can express.
+	//
+	// It is pinned on float_text_render ALONE — the property for "same
+	// number, different spelling". The OID, the declared size, the modifier
+	// and the normalised value all agree, and those are what #586 is about:
+	// a right average under a float8 OID is the defect a value oracle cannot
+	// see.
+	avgDecimalDigitsPin = "DELIBERATE (ADR-0012 item 9): AVG over a numeric widens the input's " +
+		"scale by a fixed 4 (batch.AvgScaleIncrement) where PostgreSQL picks a scale giving at " +
+		"least 16 significant digits. Both engines divide EXACTLY and agree to min(both scales); " +
+		"they differ only in how many digits past that they print"
+
 	// setOpDecimalDigitsPin is a DELIBERATE difference of CARRIER, recorded in
 	// ADR-0012 item 12: PostgreSQL's numeric is variable-scale, so a set
 	// operation renders each arm's rows at that ARM's original scale
@@ -708,6 +727,35 @@ func wireCorpus() []wireCase {
 		// agree with PostgreSQL and neither is pinned.
 		{name: "WindowMinOverDecimalColumnZeroRows",
 			sql: `SELECT d_key, MIN(d_2) OVER (PARTITION BY d_grp) AS lo FROM dec_probe WHERE d_key = -1`},
+		// The ACCUMULATING windowed aggregates (#586, #475). MIN/MAX above
+		// copy an input value; SUM and AVG build one, and until ADR-0024 they
+		// built it in float64 and went out under OID 701 where PostgreSQL
+		// sends 1700 — a value oracle reading "4126669.6257" against
+		// 4.1266696257e+06 sees two spellings of one number and cannot say
+		// which type the client will bind. Only this arm can.
+		//
+		// No pin on either: the OID, the size and the modifier (-1, since a
+		// window function is a function call — ADR-0024 item 5) all agree
+		// with PostgreSQL now, and the SUM's digits agree too, since
+		// sum(numeric(9,2)) keeps scale 2 on both engines.
+		{name: "WindowSumOverDecimalColumn",
+			sql: `SELECT d_key, SUM(d_2) OVER (PARTITION BY d_grp) AS s FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		// The ZERO-ROW form, described from the PLAN alone with no batch to
+		// re-type from — the path that made #587 visible for MIN and would
+		// have hidden a FLOAT64 SUM declaration the same way.
+		{name: "WindowSumOverDecimalColumnZeroRows",
+			sql: `SELECT d_key, SUM(d_2) OVER (PARTITION BY d_grp) AS s FROM dec_probe WHERE d_key = -1`},
+		// AVG's printed DIGITS are a deliberate divergence and are pinned
+		// (wadjet prints scale+4, PostgreSQL a scale giving 16 significant
+		// digits); its OID, size, modifier and normalised value are not, and
+		// they are what this entry is for.
+		{name: "WindowAvgOverDecimalColumn",
+			sql: `SELECT d_key, AVG(d_2) OVER (PARTITION BY d_grp) AS a FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{wirePropFloatRender: avgDecimalDigitsPin}},
+		{name: "WindowAvgOverDecimalColumnZeroRows",
+			sql: `SELECT d_key, AVG(d_2) OVER (PARTITION BY d_grp) AS a FROM dec_probe WHERE d_key = -1`},
 		// The CONTROL for the two above: MIN/MAX over a window of a
 		// non-DECIMAL column, where no typmod is in play. It carries no pin,
 		// which is what proves the pinned entries are about the modifier and

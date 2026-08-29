@@ -320,9 +320,34 @@ func DecimalAvg(sum Int128, count int64, addScale int) (Int128, bool) {
 		}
 		return Int128From(q), true
 	}
+	// Middle path: the scaled dividend fits the CARRIER but not an int64, so
+	// Int128.QuoRem answers it exactly with no allocation at all. This is the
+	// common shape for a wide DECIMAL — a scale-10 column's sum scaled by
+	// 10^4 leaves int64 after a few thousand rows — and it used to fall
+	// straight to the allocating big.Int path below. A windowed AVG divides
+	// once per ROW (each row has its own frame), so the allocations there are
+	// per row rather than per group.
+	if scaled, ok := sum.MulPow10(addScale); ok && count > 0 {
+		den := Int128From(count)
+		q, rem, ok := scaled.QuoRem(den)
+		if ok {
+			if rem.IsNegative() {
+				rem = rem.Neg()
+			}
+			// |rem| < count <= 2^63, so doubling stays inside the carrier.
+			if twice, ok := rem.AddChecked(rem); ok && !twice.Less(den) {
+				if scaled.IsNegative() {
+					q = q.Sub(Int128From(1))
+				} else {
+					q = q.Add(Int128From(1))
+				}
+			}
+			return q, true
+		}
+	}
 	// Wide path: exact big.Int division, then the same half-away-from-zero
-	// rounding. Reached only by DECIMALs past 18 digits, which is where a
-	// float64 quotient would have lost the digits this whole path exists for.
+	// rounding. Reached only when the SCALED dividend has no Int128 at all,
+	// where the exact quotient may still have one.
 	num := sum.BigInt()
 	num.Mul(num, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(addScale)), nil))
 	den := big.NewInt(count)

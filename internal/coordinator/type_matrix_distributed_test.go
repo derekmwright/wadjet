@@ -351,6 +351,13 @@ func tmdTables() []tmdTable {
 		// against a literal that float32 cannot hold, which is the only shape
 		// the two widths disagree on.
 		{rwpTable, rwpSchema(), rwpData()},
+		// The windowed exact-DECIMAL fixture (#586, #475). Rides along for
+		// the same reason as dtpTable: TestDecimalWindowAggregatesTwoPath
+		// uses these two arms, and no type-matrix corpus entry names this
+		// table. The type matrix cannot stand in for it — nothing there runs
+		// a SLIDING frame over a DECIMAL, which is where the accumulator has
+		// to RETRACT a row exactly.
+		{dwpTable, dwpSchema(), dwpData()},
 	}, multikeyTables()...)
 }
 

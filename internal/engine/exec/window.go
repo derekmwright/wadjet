@@ -118,8 +118,11 @@ type WindowColumn struct {
 // column rather than computing one. Those five are the functions whose output
 // type IS the input column's type, and the only ones whose compute path goes
 // through Vector.GetValue/SetValue — every other window function writes its
-// typed backing array directly (Int64Data for the ranks, Float64Data for
-// SUM/AVG), so re-typing one of those would panic instead of correcting it.
+// typed backing array directly (Int64Data for the ranks, Float64Data or
+// DecimalData for SUM/AVG), so re-typing one of those to an arbitrary input
+// type would panic instead of correcting it. SUM/AVG are re-typed too, but
+// only between the two arrays their own accumulator can write
+// (windowAccOutputType).
 //
 // WinMin/WinMax also copy an input value through SetValue, and were the last
 // input-dependent functions left on the planner's float64 declaration —
@@ -211,6 +214,15 @@ func WindowMinMaxType(in parquet.TypeID) (parquet.TypeID, bool) {
 // boxed value round-trip. The `col.Type != wc.OutputType` guard is the same
 // one, and for the same reason — metadata is copied only when it describes
 // the very type being declared.
+//
+// SUM and AVG are the one family whose (p,s) is NOT the input's. They
+// accumulate rather than copy, so a sum genuinely exceeds its column's
+// precision and an average carries digits the column has no room for:
+// WindowDecimalAggMeta gives them DECIMAL(38,s) and DECIMAL(38,min(s+4,38)),
+// which is what the GROUPED SUM/AVG over the same column declare (#586,
+// ADR-0012 item 9). Declaring them at the input's own (p,s) instead would
+// hand the parquet writer a leaf too small for the value, and would make the
+// two spellings of one question disagree about their answer's type.
 func windowOutputColumn(wc WindowColumn, schema []parquet.Column) parquet.Column {
 	out := parquet.Column{Name: wc.OutputCol, Type: wc.OutputType, Nullable: true}
 	if wc.InputCol == "" {
@@ -220,6 +232,12 @@ func windowOutputColumn(wc WindowColumn, schema []parquet.Column) parquet.Column
 		if col.Name != wc.InputCol || col.Type != wc.OutputType {
 			continue
 		}
+		if windowAccumulates(wc.Func) {
+			if col.Type == parquet.TypeDecimal {
+				out.Precision, out.Scale = WindowDecimalAggMeta(wc.Func, col.Scale)
+			}
+			break
+		}
 		out.Precision, out.Scale = col.Precision, col.Scale
 		out.Fields, out.ElementType, out.Dimension = col.Fields, col.ElementType, col.Dimension
 		break
@@ -227,10 +245,16 @@ func windowOutputColumn(wc WindowColumn, schema []parquet.Column) parquet.Column
 	return out
 }
 
-// retypeValueColumns re-declares each value function's output type from the
-// input vector it will actually read, the way exec.Project resolves a
-// projection's type from its input batch instead of trusting the planner's
-// declaration (project.go). It reports whether anything changed.
+// retypeValueColumns re-declares each input-dependent window function's
+// output type from the input vector it will actually read, the way
+// exec.Project resolves a projection's type from its input batch instead of
+// trusting the planner's declaration (project.go). It reports whether
+// anything changed.
+//
+// Three families are input-dependent: the five value functions (their output
+// IS the input's type), MIN/MAX (the same, since #569), and SUM/AVG — whose
+// output is not the input's type but their ACCUMULATOR's, DECIMAL over a
+// DECIMAL column and FLOAT64 over everything else (#586).
 //
 // Defence in depth for #345: the planner now resolves these types from the
 // catalog, but a declaration that arrives wrong — a spec built by a caller
@@ -248,7 +272,8 @@ func (w *Window) retypeValueColumns() bool {
 	for i := range w.Columns {
 		wc := &w.Columns[i]
 		minMax := wc.Func == WinMin || wc.Func == WinMax
-		if (!windowValueFunc(wc.Func) && !minMax) || wc.InputCol == "" {
+		acc := windowAccumulates(wc.Func)
+		if (!windowValueFunc(wc.Func) && !minMax && !acc) || wc.InputCol == "" {
 			continue
 		}
 		for _, col := range w.schema {
@@ -256,6 +281,16 @@ func (w *Window) retypeValueColumns() bool {
 				continue
 			}
 			t := col.Type
+			if acc {
+				// SUM/AVG do not copy an input value, so their type is not
+				// the input's — it is the ACCUMULATOR's: DECIMAL over a
+				// DECIMAL column (exactly, #586), FLOAT64 over everything
+				// else. Corrected here as well as declared by the planner
+				// because a stage spec the coordinator could not type
+				// arrives with the FLOAT64 fallback, and nothing downstream
+				// of the operator can fix a declaration (#345).
+				t = windowAccOutputType(t)
+			}
 			if minMax {
 				// The input type, for every type the engine has (#569).
 				// A type WindowMinMaxType does not name keeps the planner's
@@ -743,7 +778,9 @@ func (w *Window) finalizeColumnar() error {
 
 	numOrigCols := len(w.schema)
 	for i, wc := range w.Columns {
-		computeWindowColumnar(combined, numOrigCols+i, wc)
+		if err := computeWindowColumnar(combined, numOrigCols+i, wc); err != nil {
+			return err
+		}
 	}
 
 	for pos := 0; pos < combined.Len; {
@@ -910,8 +947,11 @@ func (w *Window) nextExternal() (*batch.RecordBatch, error) {
 			e.cleanup()
 			return nil, nil
 		}
-		combined := computeWindowPartition(parts, e.schema, e.group)
+		combined, cerr := computeWindowPartition(parts, e.schema, e.group)
 		e.walker.releasePartition(bytes)
+		if cerr != nil {
+			return nil, cerr
+		}
 		if combined == nil {
 			continue
 		}
@@ -1223,10 +1263,10 @@ func sameColumnar(combined *batch.RecordBatch, a, b int, colIdxs []int) bool {
 // computeWindowColumnar computes a single window function over columnar data.
 // It sorts the combined batch in-place by the window's partition/order keys,
 // then walks partitions and computes values directly on column vectors.
-func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc WindowColumn) {
+func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc WindowColumn) error {
 	n := combined.Len
 	if n == 0 {
-		return
+		return nil
 	}
 
 	// Build sort keys: partition columns first, then order columns
@@ -1309,9 +1349,12 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 		for partEnd < n && sameColumnar(combined, i, partEnd, partIdxs) {
 			partEnd++
 		}
-		computePartitionColumnar(combined, winVec, i, partEnd, wc, inputIdx, orderIdxs)
+		if err := computePartitionColumnar(combined, winVec, i, partEnd, wc, inputIdx, orderIdxs); err != nil {
+			return err
+		}
 		i = partEnd
 	}
+	return nil
 }
 
 // --- Window frames ---
@@ -1571,7 +1614,11 @@ func (d *frameMinMaxDeque) value(lo, hi int) any {
 
 // computePartitionColumnar computes the window function for a single partition.
 // Operates directly on column vectors rather than row maps.
-func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector, start, end int, wc WindowColumn, inputIdx int, orderIdxs []int) {
+//
+// The error return carries ONE condition: a DECIMAL SUM/AVG with no exact
+// 128-bit answer (SQLSTATE 22003). Everything else that can go wrong here is
+// a missing column, which is answered with NULLs rather than a failure.
+func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector, start, end int, wc WindowColumn, inputIdx int, orderIdxs []int) error {
 	n := end - start
 	var inputVec *batch.Vector
 	if inputIdx >= 0 {
@@ -1587,7 +1634,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			// The streaming empty-PARTITION-BY path (window_global.go)
 			// already skips on the same condition; this is the in-memory
 			// and partition-at-a-time path catching up.
-			return
+			return nil
 		}
 	}
 
@@ -1632,24 +1679,28 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	// With the default frame the lower end never moves, so nothing is ever
 	// subtracted and the arithmetic is the same running total, in the same
 	// order, that this branch computed before frames existed.
-	case WinSum:
+	case WinSum, WinAvg:
 		// No numeric reading for this column type (IPV4, MAC, a byte-backed
 		// type, a container): the answer is NULL for every row, which is
 		// what the grouped SUM answers and what winVec already holds.
 		if !vecSummable(inputVec) {
-			return
+			return nil
 		}
-		var sum float64
-		curLo, curHi := 0, 0
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			curLo, curHi = slideFrameSum(inputVec, start, lo, hi, curLo, curHi, &sum)
-			if hi <= lo {
-				continue // empty frame: SUM is NULL, and winVec starts all-null
-			}
-			winVec.Float64Data[start+i] = sum
-			winVec.Nulls.SetValid(start + i)
+		// One dispatch per PARTITION, not per row: a DECIMAL input with a
+		// DECIMAL output takes the exact Int128 accumulator, everything else
+		// the float64 one.
+		if windowExactDecimal(winVec, inputVec) {
+			return windowDecimalFrames(winVec, inputVec, fr, start, n, wc)
 		}
+		if winVec.Type != batch.TypeFloat64 {
+			// A declaration the operator could not reconcile with the input
+			// vector. Writing float sums into any other backing array is the
+			// #361 silent-write class, so the answer is NULL — which is what
+			// winVec already holds. retypeValueColumns makes this
+			// unreachable for every plan the planner builds.
+			return nil
+		}
+		windowFloat64Frames(winVec, inputVec, fr, start, n, wc.Func)
 
 	// COUNT is the one aggregate an empty frame does not make NULL: it
 	// counts the rows it can see, and seeing none is 0.
@@ -1660,22 +1711,6 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 				hi = lo
 			}
 			winVec.Int64Data[start+i] = int64(hi - lo)
-			winVec.Nulls.SetValid(start + i)
-		}
-
-	case WinAvg:
-		if !vecSummable(inputVec) {
-			return // see WinSum
-		}
-		var sum float64
-		curLo, curHi := 0, 0
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			curLo, curHi = slideFrameSum(inputVec, start, lo, hi, curLo, curHi, &sum)
-			if hi <= lo {
-				continue
-			}
-			winVec.Float64Data[start+i] = sum / float64(hi-lo)
 			winVec.Nulls.SetValid(start + i)
 		}
 
@@ -1855,6 +1890,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			}
 		}
 	}
+	return nil
 }
 
 // slideFrameSum advances a running sum from the frame [curLo, curHi) to the
@@ -1862,18 +1898,53 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 // removed so the window never inverts on an empty frame (hi < lo), where the
 // rows added to reach lo are immediately subtracted again and the sum
 // correctly lands on zero.
-func slideFrameSum(inputVec *batch.Vector, start, lo, hi, curLo, curHi int, sum *float64) (int, int) {
+//
+// count tracks the frame's NON-NULL rows. SQL excludes NULLs from an
+// aggregate's input, so AVG divides by this rather than by the frame's width
+// and a frame holding only NULLs answers NULL — the frame width answered a
+// number PostgreSQL does not (see windowFloat64Frames).
+//
+// The FLOAT64 arm is lifted out of the loop rather than read through
+// vecFloat64 per row: vecFloat64 asks numericPromotable and then
+// numericFloat64, two type switches per cell, on the path every windowed SUM
+// over a float column takes. The type is a property of the column, so it is
+// resolved here once per slide and never per row.
+func slideFrameSum(inputVec *batch.Vector, start, lo, hi, curLo, curHi int, sum *float64, count *int64) (int, int) {
 	if hi < lo {
 		hi = lo
 	}
+	if inputVec.Type == batch.TypeFloat64 {
+		data := inputVec.Float64Data
+		for curHi < hi {
+			if r := start + curHi; !inputVec.Nulls.IsNullFast(r) {
+				*sum += data[r]
+				*count++
+			}
+			curHi++
+		}
+		for curLo < lo {
+			if r := start + curLo; !inputVec.Nulls.IsNullFast(r) {
+				*sum -= data[r]
+				*count--
+			}
+			curLo++
+		}
+		return curLo, curHi
+	}
 	for curHi < hi {
-		f, _ := vecFloat64(inputVec, start+curHi)
-		*sum += f
+		if r := start + curHi; !inputVec.Nulls.IsNullFast(r) {
+			f, _ := numericFloat64(inputVec, r)
+			*sum += f
+			*count++
+		}
 		curHi++
 	}
 	for curLo < lo {
-		f, _ := vecFloat64(inputVec, start+curLo)
-		*sum -= f
+		if r := start + curLo; !inputVec.Nulls.IsNullFast(r) {
+			f, _ := numericFloat64(inputVec, r)
+			*sum -= f
+			*count--
+		}
 		curLo++
 	}
 	return curLo, curHi

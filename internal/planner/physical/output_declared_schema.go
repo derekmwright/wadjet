@@ -849,9 +849,10 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// windowSpecOutputType (walkStages/buildWindow's own resolver) keeps
 		// this answer identical to what the operator actually emits: an INT64
 		// passthrough column no longer declares STRING on a zero-row result,
-		// and ROW_NUMBER/RANK/COUNT declare INT64, SUM/AVG declare FLOAT64,
-		// and a value function (LAG/LEAD/FIRST_VALUE/...) or MIN/MAX declares
-		// its argument column's type when that is known.
+		// ROW_NUMBER/RANK/COUNT declare INT64, SUM/AVG declare DECIMAL over a
+		// DECIMAL argument and FLOAT64 otherwise (#586), and a value function
+		// (LAG/LEAD/FIRST_VALUE/...) or MIN/MAX declares its argument
+		// column's type when that is known.
 		if len(n.Children) != 1 {
 			return nil
 		}
@@ -878,12 +879,10 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 // present here and absent (or a different type) there would be a
 // contradiction between the two answers describing the same column.
 //
-// A Window's own expressions never introduce a new DECIMAL (MIN/MAX/value
-// functions over a DECIMAL argument declare DECIMAL via windowSpecOutputType,
-// but this walk does not have a per-expression source-column resolver for
-// window specs the way emittedColTypes does — window output precision/scale
-// stays undecided, same as before #458), so only the input passthrough
-// carries entries there.
+// A Window's own expressions DO introduce DECIMAL entries since ADR-0024:
+// MIN/MAX and the value functions carry their argument's own (p,s), and
+// SUM/AVG carry the accumulator's (38,s) and (38,min(s+4,38)) — see the
+// NodeWindow arm below.
 func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 	if n == nil {
 		return nil
@@ -940,7 +939,9 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		in := emittedColDecimal(n.Children[0])
 		// A window's OWN outputs can be DECIMAL now: MIN/MAX and the value
 		// functions over a DECIMAL column answer that column's type, (p,s)
-		// and all, which is what exec.windowOutputColumn already emits.
+		// and all, and SUM/AVG answer the accumulator's DECIMAL(38,s) /
+		// DECIMAL(38,min(s+4,38)) — which is what exec.windowOutputColumn
+		// already emits (#586).
 		// Before ADR-0024 windowSpecOutputType could not resolve a
 		// parameterized argument at all, so a ZERO-ROW window result — which
 		// is described from the plan alone — went out as float8 where the
