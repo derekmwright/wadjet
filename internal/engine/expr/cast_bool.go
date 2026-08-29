@@ -357,7 +357,11 @@ func castDestType(dest string) (batch.TypeID, bool) {
 		return batch.TypeBool, true
 	case "INTEGER", "INT", "BIGINT", "INT64", "SIGNED":
 		return batch.TypeInt64, true
-	case "REAL", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "FLOAT64":
+	case "REAL", "FLOAT4":
+		// float4 — see physical.inferCastType's arm for why these two
+		// spellings, and only these two, name a narrower type than FLOAT.
+		return batch.TypeFloat32, true
+	case "FLOAT", "DOUBLE", "DOUBLE PRECISION", "FLOAT8", "FLOAT64":
 		return batch.TypeFloat64, true
 	case "NUMERIC", "DECIMAL":
 		return batch.TypeDecimal, true

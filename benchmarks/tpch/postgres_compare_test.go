@@ -874,6 +874,40 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "RealDistinct", sql: `SELECT COUNT(*) AS n FROM (SELECT DISTINCT r_val FROM real_probe) s`},
 		pgCase{name: "RealOrderBy", sql: `SELECT r_key FROM real_probe ORDER BY r_val, r_key`},
 
+		// An explicit CAST TO REAL narrows, where the bare literal widens: the
+		// same number, two answers, decided by whether the cast is written
+		// (EXPLAIN VERBOSE). `CAST(x AS REAL)` used to be a NO-OP in wadjet —
+		// the arm answered ToFloat64 beside "float" and "double" — so all
+		// three of these read as if the cast were absent.
+		//
+		//	r_val = CAST(3.1 AS REAL)  ->  Filter: (r_val = '3.1'::real)
+		//	r_val IN (CAST(3.1 AS REAL), 7.1)
+		//	                           ->  Filter: (r_val = ANY ('{3.1,7.1}'::real[]))
+		//	d_val = CAST(3.1 AS REAL)  ->  Filter: (d_val = '3.1'::real)
+		//
+		// The DOUBLE entry is the proof the narrowing really happened: that
+		// column holds 3.1 exactly and stops matching once the literal has
+		// been through float4.
+		pgCase{name: "RealEqCastReal", sql: `SELECT r_key FROM real_probe WHERE r_val = CAST(3.1 AS REAL) ORDER BY r_key`},
+		pgCase{name: "RealInCastReal", sql: `SELECT r_key FROM real_probe WHERE r_val IN (CAST(3.1 AS REAL), 7.1) ORDER BY r_key`},
+		pgCase{name: "DoubleEqCastReal", sql: `SELECT r_key FROM real_probe WHERE d_val = CAST(3.1 AS REAL) ORDER BY r_key`},
+
+		// An INTEGER literal against a float column keeps PostgreSQL's float
+		// TOTAL order — NaN greatest and equal to itself (ADR-0012 item 8).
+		// The row-at-a-time comparison used Go's IEEE operators for a mixed
+		// int/float pair while the both-float64 path beside it did not, so
+		// `r_val > 1` dropped the NaN row and `r_val > 1.0` kept it: one
+		// predicate, two answers, decided by the literal's spelling. Both
+		// spellings are here so the pair cannot drift apart again, and the
+		// FLOAT64 column is here because it lost the same order the same way.
+		pgCase{name: "RealGtIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE r_val > 1 ORDER BY r_key`},
+		pgCase{name: "RealGtFloatLiteral", sql: `SELECT r_key FROM real_probe WHERE r_val > 1.0 ORDER BY r_key`},
+		pgCase{name: "RealGeIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE r_val >= 1 ORDER BY r_key`},
+		pgCase{name: "RealLtIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE r_val < 1 ORDER BY r_key`},
+		pgCase{name: "RealNeIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE r_val <> 1 ORDER BY r_key`},
+		pgCase{name: "DoubleGtIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE d_val > 1 ORDER BY r_key`},
+		pgCase{name: "DoubleNeIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE d_val <> 1 ORDER BY r_key`},
+
 		// A QUOTED constant is the other half of the width rule and is NOT
 		// fixed (#646). PostgreSQL types an unknown-typed literal FROM the
 		// other operand, so a quoted constant against a real column NARROWS —

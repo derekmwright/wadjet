@@ -5188,24 +5188,22 @@ func compare(a, b any, op CmpOp) bool {
 			}
 		}
 	}
-	// Mixed numeric types
+	// Mixed numeric types — an INT64 literal against a FLOAT column, a
+	// float32 box (CAST(x AS REAL)) against a float64 one, and every other
+	// pair the two fast paths above do not catch.
+	//
+	// cmpFloat64Op, not Go's operators. The both-float64 fast path above
+	// already answers in PostgreSQL's float total order (NaN greatest and
+	// equal to itself, ADR-0012 item 8), and this branch did not — so
+	// `f > 1` DROPPED the NaN rows while `f > 1.0` kept them, one predicate
+	// with two answers decided by whether the literal was spelled with a
+	// decimal point. It is also the ROW path, which is what the stage DAG
+	// compiles every scan-pushed filter to, so the same query answered
+	// differently distributed than in process. #459 closed this order for the
+	// kernels, the keys and the both-float64 box pair; this arm was the one
+	// escape left.
 	if isNumeric(a) && isNumeric(b) {
-		af := ToFloat64(a)
-		bf := ToFloat64(b)
-		switch op {
-		case CmpEq:
-			return af == bf
-		case CmpNe:
-			return af != bf
-		case CmpLt:
-			return af < bf
-		case CmpLe:
-			return af <= bf
-		case CmpGt:
-			return af > bf
-		case CmpGe:
-			return af >= bf
-		}
+		return cmpFloat64Op(ToFloat64(a), ToFloat64(b), op)
 	}
 	// Fall back to string comparison
 	as := toString(a)
@@ -5773,7 +5771,34 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 			return i
 		}
 		return int64(math.Round(ToFloat64(v)))
-	case "float", "double", "real":
+	case "real", "float4":
+		// REAL is float4, a NARROWER type than the float64 every other
+		// numeric box in this engine carries — and this arm used to sit
+		// beside "float"/"double" and answer ToFloat64, so `CAST(x AS REAL)`
+		// was a NO-OP. PostgreSQL types the result float4 and rounds the
+		// value to it, which changes the answer of anything that compares it:
+		//
+		//	r_val = CAST(3.1 AS REAL)  ->  Filter: (r_val = '3.1'::real) -> the row
+		//	CAST(1.0/3 AS REAL)        ->  0.33333334, not 0.3333333333333333
+		//
+		// FLOAT is deliberately NOT here. PostgreSQL's bare `float` is
+		// `double precision` (float(1..24) is real, float(25..53) is double,
+		// and an unqualified FLOAT is the latter) — verified with pg_typeof —
+		// so only the two spellings that really name float4 narrow.
+		f := ToFloat64(v)
+		g := float32(f)
+		// PostgreSQL refuses a float8->float4 conversion that loses the value
+		// outright rather than answering +/-Inf or 0 (float.c's overflow and
+		// underflow checks, both SQLSTATE 22003). A value that is ALREADY
+		// infinite, or already zero, is representable and passes through.
+		if math.IsInf(float64(g), 0) && !math.IsInf(f, 0) {
+			raiseFloatRangeError("overflow")
+		}
+		if g == 0 && f != 0 {
+			raiseFloatRangeError("underflow")
+		}
+		return g
+	case "float", "double", "float8", "double precision", "float64":
 		return ToFloat64(v)
 	case "decimal", "numeric":
 		return ToFloat64(v)

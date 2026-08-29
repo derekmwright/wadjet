@@ -2321,6 +2321,16 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// The first scan caches decoded batches; subsequent scans replay from cache.
 	p.mergeDuplicateScans(node)
 
+	// The same plan-time refusal PlanDistributed makes, so the single-process
+	// engine and the small-query fast path raise it too — and raise it for a
+	// predicate no row ever reaches, which the operator-level check cannot
+	// (#631 follow-up).
+	if err := refuseUnrepresentableRealInList(node); err != nil {
+		p.releaseCTECache()
+		p.releaseScanCache()
+		return nil, err
+	}
+
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
 		p.releaseCTECache()  // free CTE spill scratch on the no-Cleanup path
@@ -2421,6 +2431,13 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// DISTINCT — the raw row set, returned confidently (#466). Refuse it
 	// here for the same reason: loud beats silently different.
 	if err := refuseUnstageableDistinct(node); err != nil {
+		return nil, err
+	}
+	// A `real IN (...)` list holding a literal that is not a real is a
+	// PLAN-time error in PostgreSQL, raised whether or not the predicate is
+	// ever reached (#631 follow-up). Refuse it here so the DAG cannot answer
+	// rows for a query PostgreSQL refuses.
+	if err := refuseUnrepresentableRealInList(node); err != nil {
 		return nil, err
 	}
 	stages := p.generateStages(node)
@@ -9224,7 +9241,18 @@ func inferCastType(typeName string) parquet.TypeID {
 	switch strings.ToUpper(strings.TrimSpace(typeName)) {
 	case "INTEGER", "INT", "BIGINT", "INT64":
 		return parquet.TypeInt64
-	case "REAL", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "FLOAT64", "NUMERIC", "DECIMAL":
+	case "REAL", "FLOAT4":
+		// float4, not float8: expr.Cast now ROUNDS to float32 for these two
+		// spellings, so the projection has to allocate a column that can hold
+		// what the evaluator produces. Declaring FLOAT64 would widen the
+		// rounded value straight back and make `CAST(x AS REAL)` look like the
+		// no-op it used to be — and it is a FLOAT32 column's own comparison
+		// rules the result must then get (#631's width rule).
+		//
+		// Bare FLOAT stays below with DOUBLE: PostgreSQL's unqualified `float`
+		// is double precision, not real (pg_typeof, verified live).
+		return parquet.TypeFloat32
+	case "FLOAT", "DOUBLE", "DOUBLE PRECISION", "FLOAT8", "FLOAT64", "NUMERIC", "DECIMAL":
 		return parquet.TypeFloat64
 	case "BOOLEAN", "BOOL":
 		return parquet.TypeBool

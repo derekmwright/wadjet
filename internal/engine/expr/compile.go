@@ -860,8 +860,8 @@ func isBinaryFloatCast(e Expr) bool {
 	if !ok {
 		return false
 	}
-	switch strings.ToLower(c.DestType) {
-	case "double", "real", "float":
+	switch strings.ToLower(strings.TrimSpace(c.DestType)) {
+	case "double", "double precision", "real", "float", "float4", "float8":
 		return true
 	default:
 		return false

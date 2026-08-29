@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"testing"
@@ -73,6 +74,15 @@ func rwpSchema() parquet.Schema {
 // not in real, so `r_val = 16777217` is empty under PostgreSQL's widening and
 // would match row 20 under narrowing. It is the one value that proves the
 // integer-literal rule without depending on a decimal point.
+//
+// Row 21 holds NaN, which PostgreSQL orders ABOVE every other float and equal
+// to itself (ADR-0012 item 8). It is here because the ROW path lost that order
+// for a comparison against an INTEGER literal — `r_val > 1` dropped it while
+// `r_val > 1.0` kept it — so the integer-literal entries below are also NaN
+// entries. A NaN INGESTS (the parquet writer keeps it out of min/max, so the
+// manifest JSON stats never see it); an infinity does NOT, which is why this
+// fixture has no infinite row and the neighbouring float gates manufacture
+// theirs with CAST.
 func rwpData() []map[string]any {
 	rows := make([]map[string]any, 0, 21)
 	add := func(k int64, v any) {
@@ -91,6 +101,8 @@ func rwpData() []map[string]any {
 	rows[19]["d_val"] = float64(0)
 	add(20, float32(16777216))
 	rows[20]["d_val"] = float64(16777216)
+	add(21, float32(math.NaN()))
+	rows[21]["d_val"] = math.NaN()
 	return rows
 }
 
@@ -133,11 +145,11 @@ func rwpWant() []rwpCase {
 		// narrowing this replaces, row 3 answered `=`, `<=` and `>=` and was
 		// absent from `<` — four of the six operators moved a row.
 		{"EqNonRepresentable", "r_val = 3.1", nil},
-		{"NeNonRepresentable", "r_val <> 3.1", join(seq(0, 17), []int64{19, 20})},
+		{"NeNonRepresentable", "r_val <> 3.1", join(seq(0, 17), []int64{19, 20, 21})},
 		{"LtNonRepresentable", "r_val < 3.1", []int64{0, 1, 2, 3, 16, 17, 19}},
 		{"LeNonRepresentable", "r_val <= 3.1", []int64{0, 1, 2, 3, 16, 17, 19}},
-		{"GtNonRepresentable", "r_val > 3.1", join(seq(4, 15), []int64{20})},
-		{"GeNonRepresentable", "r_val >= 3.1", join(seq(4, 15), []int64{20})},
+		{"GtNonRepresentable", "r_val > 3.1", join(seq(4, 15), []int64{20, 21})},
+		{"GeNonRepresentable", "r_val >= 3.1", join(seq(4, 15), []int64{20, 21})},
 		// The same number spelled with a trailing zero is the same literal:
 		// PostgreSQL plans both as '3.1'::double precision.
 		{"EqTrailingZero", "r_val = 3.10", nil},
@@ -168,7 +180,7 @@ func rwpWant() []rwpCase {
 		// real[], so this narrows and matches.
 		{"InMultiWithNull", "r_val IN (3.1, NULL)", []int64{3}},
 		{"NotInMulti", "r_val NOT IN (3.1, 7.1)",
-			join([]int64{0, 1, 2}, []int64{4, 5, 6}, seq(8, 17), []int64{19, 20})},
+			join([]int64{0, 1, 2}, []int64{4, 5, 6}, seq(8, 17), []int64{19, 20, 21})},
 		// The narrowing and the widening on ONE literal, in one fixture: the
 		// integer 16777217 misses through `=` (widened) and HITS through a
 		// multi-element IN (narrowed onto 2^24). Anything that lowers IN to a
@@ -186,13 +198,55 @@ func rwpWant() []rwpCase {
 		// widening the real (only the rows whose value survives the round
 		// trip). A change that widened the COLUMN pair, or narrowed the
 		// double one, moves one of these.
-		{"EqRealColumn", "r_val = r_other", join(seq(0, 17), []int64{19, 20})},
-		{"EqDoubleColumn", "r_val = d_val", []int64{16, 17, 19, 20}},
+		{"EqRealColumn", "r_val = r_other", join(seq(0, 17), []int64{19, 20, 21})},
+		{"EqDoubleColumn", "r_val = d_val", []int64{16, 17, 19, 20, 21}},
 
 		// A finite literal past real's range is an ordinary double for `=`:
 		// no row equals it, and PostgreSQL raises NO error (the 22003 belongs
 		// to the multi-element IN, which casts to real[] — #549).
 		{"EqOverRange", "r_val = 1e40", nil},
+
+		// --- An explicit CAST TO REAL narrows, and is not a no-op ---
+		//
+		// PostgreSQL types the cast float4 and rounds the value into it, so
+		// the comparison happens at REAL width and the non-representable
+		// literal finds its row — the opposite answer from the same literal
+		// written bare:
+		//
+		//	r_val = 3.1                -> Filter: (r_val = '3.1'::double precision) -> {}
+		//	r_val = CAST(3.1 AS REAL)  -> Filter: (r_val = '3.1'::real)             -> {3}
+		//	r_val IN (CAST(3.1 AS REAL), 7.1)
+		//	                           -> Filter: (r_val = ANY ('{3.1,7.1}'::real[]))
+		//	d_val = CAST(3.1 AS REAL)  -> Filter: (d_val = '3.1'::real)             -> {}
+		//
+		// The last one is the proof the cast really narrowed: the DOUBLE
+		// column holds 3.1 exactly, and it stops matching once the literal has
+		// been through float4. While CAST(x AS REAL) was a no-op all three
+		// answered as if the cast were not written.
+		{"EqCastReal", "r_val = CAST(3.1 AS REAL)", []int64{3}},
+		{"InCastReal", "r_val IN (CAST(3.1 AS REAL), 7.1)", []int64{3, 7}},
+		{"DoubleEqCastReal", "d_val = CAST(3.1 AS REAL)", nil},
+
+		// --- An INTEGER literal keeps PostgreSQL's float order ---
+		//
+		// NaN is the greatest float value and equal to itself, so row 21
+		// answers `>`, `>=` and `<>` against any finite constant and answers
+		// `<` and `<=` against none. The ROW path — which is what the stage
+		// DAG compiles every scan-pushed filter to — used Go's IEEE operators
+		// for a mixed int/float pair, so it dropped the NaN row for `> 1`
+		// while keeping it for `> 1.0`: the same predicate, two answers,
+		// decided by whether the literal was spelled with a decimal point.
+		// #459 closed this order everywhere else; this pair of spellings is
+		// what kept the gap invisible.
+		{"GtIntegerLiteral", "r_val > 1", join(seq(1, 15), []int64{17, 20, 21})},
+		{"GtFloatLiteral", "r_val > 1.0", join(seq(1, 15), []int64{17, 20, 21})},
+		{"GeIntegerLiteral", "r_val >= 1", join(seq(1, 15), []int64{17, 20, 21})},
+		{"LtIntegerLiteral", "r_val < 1", []int64{0, 16, 19}},
+		{"NeIntegerLiteral", "r_val <> 1", join(seq(0, 17), []int64{19, 20, 21})},
+		// The FLOAT64 column has no width question at all, and lost the same
+		// order for the same reason.
+		{"DoubleGtIntegerLiteral", "d_val > 1", join(seq(1, 15), []int64{17, 20, 21})},
+		{"DoubleNeIntegerLiteral", "d_val <> 1", join(seq(0, 17), []int64{19, 20, 21})},
 	}
 }
 
@@ -225,6 +279,18 @@ func TestRealComparisonWidthTwoPath(t *testing.T) {
 		})
 	}
 }
+
+// pgRealOverflowText is the DIGITS PostgreSQL names in the 22003 message for
+// the over-range literal below. It prints the same forty-one digits whatever
+// spelling the query used — 1e40, 1e+40 or the number written out — because
+// the cast that fails is numeric->real and a numeric's text is its digits:
+//
+//	ERROR:  "10000000000000000000000000000000000000000" is out of range for type real
+//
+// Both wadjet paths used to print something else, and something DIFFERENT from
+// each other ("1e+40" through the kernel, "1e40" through the row evaluator), so
+// asserting the text is what keeps the two spellings from drifting apart again.
+const pgRealOverflowText = `"10000000000000000000000000000000000000000" is out of range for type real`
 
 // TestRealInOverRangeLiteralRaisesOnBothPaths is the error half of the arity
 // rule, which only shows up once the row path narrows too (#633).
@@ -264,8 +330,47 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 			t.Errorf("%s: %s returned rows; PostgreSQL raises 22003", arm.name, raises)
 			continue
 		}
-		if !strings.Contains(err.Error(), "out of range for type real") {
-			t.Errorf("%s: %s raised %v, want the 22003 out-of-range refusal", arm.name, raises, err)
+		if !strings.Contains(err.Error(), pgRealOverflowText) {
+			t.Errorf("%s: %s raised %v, want the 22003 refusal naming %q",
+				arm.name, raises, err, pgRealOverflowText)
+		}
+	}
+
+	// The refusal is a PLAN-time one in PostgreSQL: the array is cast to
+	// real[] during parse analysis, so the error does not depend on a row
+	// being examined — or on the predicate being REACHABLE at all. Both
+	// shapes below returned rows on at least one path while the raise lived
+	// in the row loop: the kernel resolves on the first BATCH, so an empty
+	// scan never raised, and the row evaluator raises on the first non-NULL
+	// value, so a predicate that only ever meets NULLs never raised either.
+	for _, sql := range []string{
+		// Reachable, but only ever on rows whose r_val IS NULL — the boxed
+		// path returns on the nil operand before it can raise.
+		fmt.Sprintf("SELECT r_key FROM %s WHERE r_val IS NULL AND r_val IN (1e40, 3.1)", rwpTable),
+		// Not reachable at all: no row survives the first conjunct, so
+		// neither the kernel nor the row evaluator ever sees the list.
+		fmt.Sprintf("SELECT r_key FROM %s WHERE r_key < 0 AND r_val IN (1e40, 3.1)", rwpTable),
+		// The negated form: PostgreSQL raises for `NOT IN` too — the cast
+		// happens whatever the operator does with the result.
+		fmt.Sprintf("SELECT r_key FROM %s WHERE r_key < 0 AND r_val NOT IN (1e40, 3.1)", rwpTable),
+	} {
+		for _, arm := range []struct {
+			name string
+			run  func() error
+		}{
+			{"single", func() error { _, err := tmdRunSingle(ctx, single, sql); return err }},
+			{"dag", func() error { _, err := tmdRunDAG(ctx, coord, sql); return err }},
+		} {
+			err := arm.run()
+			if err == nil {
+				t.Errorf("%s: %s returned rows; PostgreSQL raises 22003 at plan time",
+					arm.name, sql)
+				continue
+			}
+			if !strings.Contains(err.Error(), pgRealOverflowText) {
+				t.Errorf("%s: %s raised %v, want the 22003 refusal naming %q",
+					arm.name, sql, err, pgRealOverflowText)
+			}
 		}
 	}
 
@@ -307,15 +412,18 @@ func TestRealKeyedOperationsAreUnmovedByWidth(t *testing.T) {
 		sql  string
 		want string // the single scalar cell, rendered
 	}{
-		// 21 rows, 20 distinct non-NULL values plus the NULL: PostgreSQL
-		// GROUP BY collects NULL into its own group, so 21.
+		// 22 rows, 21 distinct non-NULL values plus the NULL: PostgreSQL
+		// GROUP BY collects NULL into its own group, and the NaN into one of
+		// its own, so 22.
 		{"GroupByReal", fmt.Sprintf(
-			"SELECT COUNT(*) AS n FROM (SELECT r_val FROM %s GROUP BY r_val) s", rwpTable), "21"},
+			"SELECT COUNT(*) AS n FROM (SELECT r_val FROM %s GROUP BY r_val) s", rwpTable), "22"},
 		{"DistinctReal", fmt.Sprintf(
-			"SELECT COUNT(*) AS n FROM (SELECT DISTINCT r_val FROM %s) s", rwpTable), "21"},
-		// Every non-NULL row joins exactly itself: 20 pairs.
+			"SELECT COUNT(*) AS n FROM (SELECT DISTINCT r_val FROM %s) s", rwpTable), "22"},
+		// Every non-NULL row joins exactly itself: 21 pairs, the NaN row
+		// included — NaN equals itself in PostgreSQL's float order, so it is
+		// a join key like any other.
 		{"SelfJoinOnReal", fmt.Sprintf(
-			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.r_val = b.r_val", rwpTable, rwpTable), "20"},
+			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.r_val = b.r_val", rwpTable, rwpTable), "21"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -335,11 +443,13 @@ func TestRealKeyedOperationsAreUnmovedByWidth(t *testing.T) {
 	}
 
 	// ORDER BY over the real column, ascending with NULLs last (PostgreSQL's
-	// default for ASC). The key order is the float32 one at every position;
+	// default for ASC), the NaN row second-to-last: NaN is the greatest VALUE
+	// and NULL is not a value at all. The key order is the float32 one at
+	// every position;
 	// the literal-width rule never enters it.
 	t.Run("OrderByReal", func(t *testing.T) {
 		sql := fmt.Sprintf("SELECT r_key FROM %s ORDER BY r_val, r_key", rwpTable)
-		want := "19,0,16,1,17,2,3,4,5,6,7,8,9,10,11,12,13,14,15,20,18"
+		want := "19,0,16,1,17,2,3,4,5,6,7,8,9,10,11,12,13,14,15,20,21,18"
 		for _, arm := range []struct {
 			name string
 			dag  bool

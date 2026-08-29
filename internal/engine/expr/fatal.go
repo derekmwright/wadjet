@@ -109,3 +109,14 @@ func IsInvalidLiteral(err error) bool {
 func IsCompileRefusal(err error) bool {
 	return IsUnknownFunc(err) || IsInvalidLiteral(err)
 }
+
+// raiseFloatRangeError aborts the query with SQLSTATE 22003, PostgreSQL's
+// numeric_value_out_of_range, for a binary-float conversion that cannot carry
+// the value: a float8 past float4's range ("overflow"), or a non-zero float8
+// that rounds to zero in float4 ("underflow"). Both texts are PostgreSQL's own
+// (utils/adt/float.c), which spells this conversion's failure differently from
+// a LITERAL that will not fit a type — that one names the digits and the type
+// (kernel.RealOverflowText, raiseNumericOutOfRange).
+func raiseFloatRangeError(kind string) {
+	panic(fatalEval{sqlerr.New("22003", "value out of range: %s", kind)})
+}

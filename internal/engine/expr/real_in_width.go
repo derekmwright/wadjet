@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"strings"
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -92,9 +93,9 @@ func bindRealLitList(col Expr, values []Expr) *realLitSet {
 	}
 	r := &realLitSet{col: c, set: make(map[float32]struct{}, len(values))}
 	for _, v := range values {
-		lit, ok := v.(*Lit)
+		lit, ok := realListMember(v)
 		if !ok {
-			return nil // a non-constant member: PostgreSQL builds no array
+			return nil // see realListMember for the three ways a member declines
 		}
 		if lit.Val == nil {
 			r.sawNull = true
@@ -116,6 +117,45 @@ func bindRealLitList(col Expr, values []Expr) *realLitSet {
 		r.set[f] = struct{}{}
 	}
 	return r
+}
+
+// realListMember unwraps one IN-list member to the literal whose value the
+// narrowed set holds, or declines.
+//
+// PostgreSQL picks the array's element type by resolving it over the members
+// and the probed column, and float8 is the PREFERRED type of the numeric
+// category — so what a member is TYPED as decides the whole list's width
+// (EXPLAIN VERBOSE, postgres:17):
+//
+//	r IN (3.1, 7.1)                    -> '{3.1,7.1}'::real[]              NARROW
+//	r IN (CAST(3.1 AS REAL), 7.1)      -> '{3.1,7.1}'::real[]              NARROW
+//	r IN (CAST(3.1 AS DOUBLE PRECISION), 7.1)
+//	                                   -> '{3.1,7.1}'::double precision[]  WIDEN
+//	r IN (3.1, other_col)              -> (r = 3.1::float8) OR (r = other_col)
+//
+// So an unknown-typed numeric literal and an explicit CAST TO REAL both keep
+// the list at real width, a cast to any wider type takes it to double, and a
+// non-constant member removes the array entirely. Declining is the WIDEN
+// answer, which is what the unbound path already gives — so the three
+// declining shapes above all land where PostgreSQL puts them.
+func realListMember(e Expr) (*Lit, bool) {
+	if lit, ok := e.(*Lit); ok {
+		return lit, true
+	}
+	c, ok := e.(*Cast)
+	if !ok {
+		return nil, false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.DestType)) {
+	case "real", "float4":
+	default:
+		return nil, false
+	}
+	lit, ok := c.Operand.(*Lit)
+	if !ok {
+		return nil, false
+	}
+	return lit, true
 }
 
 // literalFloat64 reads a literal's box as a number, refusing the string box on
@@ -188,5 +228,6 @@ func (r *realLitSet) contains(f float32) bool {
 // type the comparison casts it to. It is the row path's spelling of the
 // refusal exec.floatConstError makes for the vectorized kernel (#549).
 func raiseNumericOutOfRange(destType, input string) {
-	panic(fatalEval{sqlerr.New("22003", "%q is out of range for type %s", input, destType)})
+	panic(fatalEval{sqlerr.New("22003", "%q is out of range for type %s",
+		kernel.RealOverflowText(input), destType)})
 }

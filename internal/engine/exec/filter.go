@@ -815,14 +815,25 @@ func dateConstError(typ batch.TypeID, value any) error {
 // kernel.ResolveInFilterKernel returns a nil kernel for that list, and this
 // turns the same condition into the error PostgreSQL gives. A literal that is
 // itself ±Inf is a legal real value, not an overflow, and does not reach here.
-func floatConstError(typ batch.TypeID, value any) error {
+func floatConstError(typ batch.TypeID, value any, litText string) error {
 	if typ != batch.TypeFloat32 || value == nil {
 		return nil
 	}
-	if kernel.Float32LitOverflow(value) {
-		return sqlerr.New("22003", "%q is out of range for type real", fmt.Sprint(value))
+	if !kernel.Float32LitOverflow(value) {
+		return nil
 	}
-	return nil
+	// The literal's SOURCE TEXT, expanded the way PostgreSQL's numeric output
+	// expands it, not fmt.Sprint of the float64 box: PostgreSQL names the
+	// digits ("10000000000000000000000000000000000000000"), the box prints
+	// "1e+40", and the row-at-a-time twin of this refusal
+	// (expr.raiseNumericOutOfRange) has to give the identical message for the
+	// identical query. Falling back to the box keeps a caller that carried no
+	// text working, at the old spelling.
+	text := litText
+	if text == "" {
+		text = fmt.Sprint(value)
+	}
+	return sqlerr.New("22003", "%q is out of range for type real", kernel.RealOverflowText(text))
 }
 
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
@@ -1018,7 +1029,7 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 	}
 	if f.kern == nil {
 		typ := in.Columns[f.colIdx].Type
-		for _, v := range f.kernelValues(typ) {
+		for i, v := range f.kernelValues(typ) {
 			if err := decimalConstError(typ, v); err != nil {
 				return nil, err
 			}
@@ -1031,7 +1042,15 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 			if err := boolConstError(typ, v); err != nil {
 				return nil, err
 			}
-			if err := floatConstError(typ, v); err != nil {
+			// The float refusal names the literal's DIGITS, so it is the one
+			// check here that needs the member's source text (see
+			// floatConstError). ValueTexts is parallel to Values when the
+			// planner built the list from literals.
+			var text string
+			if i < len(f.ValueTexts) {
+				text = f.ValueTexts[i]
+			}
+			if err := floatConstError(typ, v, text); err != nil {
 				return nil, err
 			}
 		}

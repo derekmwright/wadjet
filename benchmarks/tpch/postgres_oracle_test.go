@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/big"
 	"net/netip"
 	"os"
@@ -959,8 +960,14 @@ func pgDecimalRows() []map[string]any {
 // row 18 is NULL so the NOT-IN entry meets an UNKNOWN.
 //
 // Row 19 holds 0.0 — the value every "read the constant as the type's zero"
-// defect in this family lands on — and row 20 holds 16777216 (2^24), the first
-// integer float32 cannot follow. Row 20 is what makes the INTEGER-literal rule
+// defect in this family lands on — row 20 holds 16777216 (2^24), the first
+// integer float32 cannot follow, and row 21 holds NaN, which PostgreSQL orders
+// above every other float and equal to itself (ADR-0012 item 8). The NaN row
+// is what makes the INTEGER-literal entries non-vacuous: the row-at-a-time
+// comparison lost that order for a mixed int/float pair, so `r_val > 1`
+// dropped it while `r_val > 1.0` kept it. A NaN INGESTS (the parquet writer
+// keeps it out of min/max, so the manifest JSON stats never see it); an
+// infinity does NOT, which is why there is no infinite row here. Row 20 is what makes the INTEGER-literal rule
 // non-vacuous: 16777217 is exact in double and not in real, so PostgreSQL's
 // widened `r_val = 16777217` is empty while its narrowed
 // `r_val IN (16777217, 99)` matches that row — the same literal, two answers,
@@ -992,6 +999,7 @@ func pgRealRows() []map[string]any {
 		row(18, 2, nil),
 		row(19, 3, float32(0)),
 		row(20, 0, float32(16777216)),
+		row(21, 1, float32(math.NaN())),
 	)
 	return rows
 }
