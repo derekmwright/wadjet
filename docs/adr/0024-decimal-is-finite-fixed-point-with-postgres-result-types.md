@@ -83,9 +83,10 @@ is adopted verbatim so the choice is not wadjet's own:
     CAST(x AS DECIMAL)      : the operand's own (p,s); (38, 0) from an integer
 
 When `p > 38`: `intDigits = p − s; s = max(38 − intDigits, min(s, 6)); p = 38`.
-The INTEGER part is never reduced by this rule — only fractional digits are
-given up, and never below 6. This is a **documented divergence in the number
-of digits kept**, the same class ADR-0012 item 9 already accepts for AVG:
+Fractional digits are given up first, but never below `min(s, 6)`; only once
+the fraction is at that floor does the integer part shrink (`(40,4)` →
+`(38,4)`, not `(38,2)`). This is Spark's `adjustPrecisionScale` verbatim.
+It is a **documented divergence in the number of digits kept**, the same class ADR-0012 item 9 already accepts for AVG:
 both engines are exact to the digits they keep and agree to `min(scale)`.
 
 Scale reduction and division round half away from zero, PostgreSQL's numeric
