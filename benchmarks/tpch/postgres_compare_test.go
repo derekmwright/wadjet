@@ -1080,6 +1080,42 @@ func postgresSemanticsCases() []pgCase {
 		// which only a chain reaches) and it is the reason the resolved type
 		// is per key PAIR rather than per query.
 		pgCase{name: "ChainMixedWidthKeys", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_key = b.d_2 JOIN dec_probe c ON b.d_grp = c.d_key`},
+
+		// The same key pair over a side the plan-time type walk has to look
+		// THROUGH. The first #615 commit resolved a BARE column on each side
+		// and answered nothing for a side rooted at an aggregate, a window or
+		// a set operation, and dropped every computed projection — so the
+		// pair fell back to the build column's storage, which is the gate the
+		// fix replaces. These are the shapes that says so.
+		pgCase{name: "JoinNumericAgainstGroupedBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN (SELECT d_key AS k FROM dec_probe GROUP BY d_key) b ON a.d_2 = b.k`},
+		pgCase{name: "JoinNumericAgainstDistinctBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN (SELECT DISTINCT d_key AS k FROM dec_probe) b ON a.d_2 = b.k`},
+		pgCase{name: "JoinNumericAgainstCastBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN (SELECT CAST(d_grp AS BIGINT) AS k FROM dec_probe) b ON a.d_2 = b.k`},
+		pgCase{name: "JoinNumericAgainstUnionBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN (SELECT d_key AS k FROM dec_probe UNION ALL SELECT d_grp FROM dec_probe) b ON a.d_2 = b.k`},
+		pgCase{name: "JoinNumericAgainstWindowedBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN (SELECT d_key AS k, ROW_NUMBER() OVER (ORDER BY d_key) AS rn FROM dec_probe) b ON a.d_2 = b.k`},
+		pgCase{name: "GroupedBigintProbeAgainstNumeric", sql: `SELECT COUNT(*) AS n FROM (SELECT d_key AS k FROM dec_probe GROUP BY d_key) a JOIN dec_probe b ON a.k = b.d_2`},
+		// The row-at-a-time twin: a COMPUTED inner select item does not
+		// decorrelate into a semi join, so the predicate is answered by
+		// expr.InSubquery over a value SET — where a DECIMAL probe boxes as
+		// its text and an integer set as int64, and missed every member.
+		pgCase{name: "SemiNumericInCastBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN (SELECT CAST(d_grp AS BIGINT) FROM dec_probe)`},
+		pgCase{name: "SemiNumericInGroupedBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN (SELECT d_key FROM dec_probe GROUP BY d_key)`},
+		// A REAL probe against a materialized subquery set is a DIFFERENT
+		// defect and is pinned, not fixed here. maxInlinedInSetRows turns an
+		// uncorrelated IN-subquery into a LITERAL list, and PostgreSQL's
+		// multi-element `real IN (…)` NARROWS its literals to real[] (#549)
+		// while `real = ANY(double precision[])` — what a subquery is —
+		// widens the real. So materializing changes the comparison WIDTH and
+		// drops the row whose real value does not survive the round trip:
+		// 6 where PostgreSQL answers 7. inSetLiteral already declines a
+		// float32 SET for this reason; the missing half is declining on the
+		// float32 PROBE, which that function cannot see. Pinned live — the
+		// subtest FAILS when it is fixed, which is what deletes this.
+		pgCase{name: "SemiRealInCastDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val IN (SELECT CAST(d_val AS DOUBLE PRECISION) FROM real_probe)`,
+			knownBug: pgBugWadjet + " an uncorrelated IN-subquery materialized into a LITERAL list " +
+				"is compared under PostgreSQL's list-NARROWING rule (#549) instead of the " +
+				"subquery's widening one, so a REAL probe drops the rows whose value does not " +
+				"survive float32. The join-key half of this family is fixed; this is the " +
+				"materialized-set half.", issue: "#615"},
 	)
 
 	// A literal wider than the 128-bit carrier at the column's scale (#462).

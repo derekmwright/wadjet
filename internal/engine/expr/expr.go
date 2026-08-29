@@ -5566,6 +5566,28 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil {
 		return false, true
 	}
+	// A DECIMAL probe keys by VALUE, and the set it is compared against may
+	// have arrived as INTEGERS — `numeric IN (SELECT bigint ...)`, which
+	// PostgreSQL resolves to numeric and compares exactly (#615's
+	// row-at-a-time twin). The DECIMAL boxes as its TEXT at its own scale, so
+	// it misses an int64 set outright: `w_d2 IN (SELECT CAST(w_i32 AS BIGINT)
+	// ...)` answered 0 where PostgreSQL answers 3, while the same predicate
+	// over a BARE integer column decorrelated into a semi join and answered
+	// correctly — one predicate, two answers, decided by whether the inner
+	// select item was computed.
+	//
+	// Checked BEFORE the typed sets because the set to consult is decSet
+	// while the typed one present is intSet.
+	if e.decSet != nil && e.probe.resolve(b) == boxDecimal {
+		if sv, ok := lv.(string); ok {
+			if key, ok := batch.CanonicalDecimalText(sv); ok {
+				if _, found := e.decSet[key]; found {
+					return !e.Not, false
+				}
+				return e.missAnswer()
+			}
+		}
+	}
 	// Fast path: typed hash lookup
 	if e.intSet != nil {
 		if iv, ok := toInt64Safe(lv); ok {
@@ -5646,12 +5668,21 @@ func (e *InSubquery) resolveSlow() {
 		if len(rawVals) > 0 {
 			if _, ok := toInt64Safe(rawVals[0]); ok {
 				e.intSet = make(map[int64]struct{}, len(rawVals))
+				// ...and the same values as canonical DECIMAL keys, for a
+				// probe declared DECIMAL. An integer IS a numeric to
+				// PostgreSQL, the two only meet here as text, and the set
+				// has to carry both spellings or the DECIMAL probe misses
+				// every member.
+				e.decSet = make(map[string]struct{}, len(rawVals))
 				for _, v := range rawVals {
 					if iv, ok := toInt64Safe(v); ok {
 						e.intSet[iv] = struct{}{}
+						if key, ok := batch.CanonicalDecimalText(strconv.FormatInt(iv, 10)); ok {
+							e.decSet[key] = struct{}{}
+						}
 					} else {
 						e.vals = rawVals
-						e.intSet = nil
+						e.intSet, e.decSet = nil, nil
 						break
 					}
 				}

@@ -578,3 +578,107 @@ func TestNumericWidthShuffleJoinKeysMatchPostgres(t *testing.T) {
 			func(x, y string) int { return nwkShapeWant[x+"/"+y].in })
 	})
 }
+
+// nwkDerivedShapes is the cross-width key over a join side the plan-time type
+// walk has to look THROUGH: an aggregate, a window, a set operation, a
+// DISTINCT, and a computed CAST projection.
+//
+// They are the review finding on the first #615 commit. `joinSideColTypes`
+// answered nothing for a side rooted at one of those nodes and dropped every
+// computed projection, so `resolveJoinKeyTypes` emitted KeyTypeUnresolved and
+// `joinKeyUsesIntPath` fell back to `isIntKeyColumn(own)` — the exact gate the
+// fix replaces. Every one of these was broken BEFORE that commit too; the
+// commit closed the bare-column half of the mechanism and left this half open.
+//
+// Every expectation is PostgreSQL 17.11's over the numwidth fixture, taken
+// live. Two are worth reading twice:
+//
+//   - `SELECT w_i64 AS k … GROUP BY w_i64` declares BIGINT, so the pair with
+//     w_d2 is numeric and the answer is the bare-column answer (3), not 0.
+//   - `SUM(w_i64)` declares NUMERIC in PostgreSQL and INT64 in wadjet
+//     (ADR-0012 item 9's documented divergence in the aggregate's declared
+//     type). Both resolve the PAIR with w_d2 to an exact type — numeric
+//     against numeric there, DECIMAL against INT64 here — so the ROW SET is
+//     the same 3 and the entry is fair to both engines.
+func nwkDerivedShapes() []struct {
+	name string
+	sql  string
+	want int
+} {
+	t := nwkTable
+	return []struct {
+		name string
+		sql  string
+		want int
+	}{
+		{"AggregateDerivedBuild", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a JOIN (SELECT w_i64 AS k FROM %s GROUP BY w_i64) b
+			   ON a.w_d2 = b.k`, t, t), 3},
+		{"AggregateDerivedBuildFloat", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a JOIN (SELECT w_i64 AS k FROM %s GROUP BY w_i64) b
+			   ON a.w_f64 = b.k`, t, t), 5},
+		{"AggregateDerivedProbe", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM (SELECT w_i64 AS k FROM %s GROUP BY w_i64) a
+			   JOIN %s b ON a.k = b.w_d2`, t, t), 3},
+		{"AggregateSumDerivedBuild", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a
+			   JOIN (SELECT w_key AS g, SUM(w_i64) AS k FROM %s GROUP BY w_key) b
+			   ON a.w_d2 = b.k`, t, t), 3},
+		{"CastDerivedBuild", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a JOIN (SELECT CAST(w_i32 AS BIGINT) AS k FROM %s) b
+			   ON a.w_d2 = b.k`, t, t), 3},
+		{"CastDerivedBuildToDouble", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a
+			   JOIN (SELECT CAST(w_i32 AS DOUBLE PRECISION) AS k FROM %s) b
+			   ON a.w_i64 = b.k`, t, t), 7},
+		{"DistinctDerivedBuild", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a JOIN (SELECT DISTINCT w_i64 AS k FROM %s) b
+			   ON a.w_d2 = b.k`, t, t), 3},
+		{"UnionAllDerivedBuild", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a
+			   JOIN (SELECT w_i64 AS k FROM %s UNION ALL SELECT w_i32 FROM %s) b
+			   ON a.w_d2 = b.k`, t, t, t), 6},
+		{"WindowDerivedBuild", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a
+			   JOIN (SELECT w_i64 AS k, ROW_NUMBER() OVER (ORDER BY w_key) AS rn FROM %s) b
+			   ON a.w_d2 = b.k`, t, t), 3},
+		{"InAggregateSubquery", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a
+			   WHERE a.w_d2 IN (SELECT w_i64 FROM %s GROUP BY w_i64)`, t, t), 3},
+		{"InCastSubquery", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s a
+			   WHERE a.w_d2 IN (SELECT CAST(w_i32 AS BIGINT) FROM %s)`, t, t), 3},
+	}
+}
+
+// TestNumericWidthDerivedSideKeysMatchPostgres runs them on both paths.
+func TestNumericWidthDerivedSideKeysMatchPostgres(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, c := range nwkDerivedShapes() {
+		t.Run(c.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				got, err := nwkRunner(t, ctx, single, coord, arm.dag)(c.sql)
+				if err != nil {
+					t.Errorf("%s: %s\n  %v\n  (PostgreSQL 17.11 answers %d)",
+						arm.name, c.sql, err, c.want)
+					continue
+				}
+				if got != c.want {
+					t.Errorf("%s: %s = %d, want %d (PostgreSQL 17.11)",
+						arm.name, c.sql, got, c.want)
+				}
+			}
+		})
+	}
+}

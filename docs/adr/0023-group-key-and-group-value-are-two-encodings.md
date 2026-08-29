@@ -144,6 +144,37 @@ derived from the other.**
      type on it, the replay rebuilds its index at the column's own encoding
      and the join stops matching past the spill only.
 
+   **What the plan-time resolution can see, and what catches the rest.** The
+   resolver reads the SHARED declared-type layer (`emittedColTypes` for an
+   aggregate / window / projection / DISTINCT chain, whose Project arm types a
+   CAST; `setOpDeclaredOutputSchema` for a side that IS a set operation), plus
+   the source names still visible below a rename, because a key may be spelled
+   either way. Its first version was a walk of its own over scans and renames
+   only, and answered NOTHING for a side rooted at an aggregate, a window or a
+   set operation — so `a.d = b.k` over `(SELECT bigint AS k … GROUP BY …)`
+   resolved to nothing and fell back to the very gate this item replaces.
+
+   A side it still cannot type resolves to `KeyTypeUnresolved`, and that is
+   **not** a plan-time refusal: refusing on "cannot type" would refuse every
+   join over a table function, an unannotated scan or a shape the walk does
+   not cover, most of them perfectly well-typed at run time. The refusal lives
+   at RUN TIME instead (`exec.checkProbeKeyTypes`), where both sides' ACTUAL
+   encodings are known at once and a false positive is impossible. It raises
+   on exactly two conditions: the integer fast path over a non-integer probe
+   (the panic), and a numeric-ladder pair whose key ENCODINGS differ with
+   nothing resolving them (the silent miss). `keyEncodingClass` is what makes
+   that decidable — it is coarser than the type, so PORT/PROTOCOL/DATE against
+   INT32 and IPv4/MAC/TIMESTAMP/DURATION against INT64 keep matching, as they
+   always have.
+
+   The row-at-a-time twin of the same question lives in `expr.InSubquery`: a
+   DECIMAL probe boxes as its TEXT and an integer set as int64, so `numeric IN
+   (SELECT bigint …)` missed every member whenever the inner select item was
+   COMPUTED and the predicate did not decorrelate into a semi join. The set
+   carries both spellings now, for the integer rung only — `numeric ⊕ float8`
+   is float8 there as everywhere, and is a separate rung this record does not
+   claim.
+
    The DECIMAL rung needs no `(p,s)`: `AppendDecimalKey` is scale-normalized,
    so an integer keyed at scale 0 lands on the DECIMAL holding the same
    quantity and 12.75 keys alike at scale 2 and scale 4 (#474). The float rung

@@ -63,9 +63,14 @@ type HashJoin struct {
 	arenaNext     []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
 	useIntKey     bool                 // true when single int32/int64 join key detected
 	useDualIntKey bool                 // true when exactly two int32/int64 join keys
-	buildDone     bool
-	buildSchema   []parquet.Column
-	buildRows     int64 // total rows in build side
+	// probeKeyErr is checkProbeKeyTypes' verdict, set once under the same
+	// lock and published by probeResolved (#615). Non-nil means the two
+	// sides' key encodings disagree and nothing resolved them, which is a
+	// query error rather than a wrong answer.
+	probeKeyErr error
+	buildDone   bool
+	buildSchema []parquet.Column
+	buildRows   int64 // total rows in build side
 
 	// Memory tracking (optional). When set, Reserve() is called for each
 	// build-side batch. If the budget is exceeded, Build returns ErrMemoryExceeded.
@@ -2331,6 +2336,13 @@ func (h *HashJoin) resolveProbeKeyIdx(b *batch.RecordBatch) {
 	for i, col := range h.LeftKeys {
 		h.probeKeyIdx[i] = columnIndexFallback(b, col)
 	}
+	// The runtime backstop under the plan-time key resolution (#615). This is
+	// the first moment both sides' ACTUAL encodings are known, so it is where
+	// a pair the planner could not resolve is caught — loudly — instead of
+	// indexing a nil typed slice or matching by byte coincidence. Stored
+	// rather than returned because this resolver has no error channel; every
+	// probe entry point reads it before touching a key.
+	h.probeKeyErr = h.checkProbeKeyTypes(b)
 	h.probeResolved.Store(true)
 }
 
@@ -2683,6 +2695,15 @@ func (p *HashJoinProbe) finishResume() {
 func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if in.HasViews() {
 		p.prepareViewInput(in)
+	}
+	if p.join.JoinType != CrossJoin && len(p.join.LeftKeys) > 0 {
+		// Resolve the probe key indices HERE rather than lazily inside the
+		// first key read, so checkProbeKeyTypes' verdict has an error channel
+		// to come back through (#615).
+		p.join.resolveProbeKeyIdx(in)
+		if err := p.join.probeKeyErr; err != nil {
+			return nil, err
+		}
 	}
 	if p.join.JoinType == CrossJoin {
 		p.beginResume(in)

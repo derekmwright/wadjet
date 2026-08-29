@@ -99,6 +99,14 @@ func dedupeSubsumedScanExchanges(stages []Stage) []Stage {
 			if !keysEqual(a.Exchange.Keys, b.Exchange.Keys) || a.Exchange.Count != b.Exchange.Count {
 				continue
 			}
+			// …and hashed at the same TYPE. Two exchanges over one table with
+			// one key list are only interchangeable when they also agree
+			// about the width they hashed at (#615); serving a consumer from
+			// a sibling that partitioned a cross-width key differently sends
+			// its rows to partitions its join never looks in.
+			if !keyTypesEqual(a.Exchange.KeyTypes, b.Exchange.KeyTypes, len(a.Exchange.Keys)) {
+				continue
+			}
 			if !subsumePayloadCovered(scanA, scanB, cons) {
 				continue
 			}

@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
@@ -198,5 +199,99 @@ func TestKeyTypeUnresolvedSentinelsAgree(t *testing.T) {
 		if parquet.TypeID(i) == keyTypeUnresolved {
 			t.Fatalf("the unresolved sentinel collides with %v", parquet.TypeID(i))
 		}
+	}
+}
+
+// TestJoinSideColTypesSeesThroughRebindingNodes is the review finding on the
+// first #615 commit, at the unit level.
+//
+// joinSideColTypes' first version was a walk of its own — scans and rename
+// projections — so a side rooted at an AGGREGATE, a WINDOW or a SET
+// OPERATION answered nothing and every COMPUTED projection was dropped. The
+// pair then resolved to KeyTypeUnresolved and joinKeyUsesIntPath fell back to
+// the build column's storage, which is exactly the gate #615 replaces.
+//
+// It now reads the shared declared-type layer, so each of these resolves.
+//
+// Only RenameOverGroupBy DISCRIMINATES at this level: the others resolve
+// through the source-name half of the map (the scan columns are still visible
+// below the rebinding node under their own names) and are controls. The
+// discriminating spelling is the one a real derived-table key takes — the
+// ALIAS, `b.k` — which is why the query-level proof is
+// TestNumericWidthDerivedSideKeysMatchPostgres and this is its unit twin.
+func TestJoinSideColTypesSeesThroughRebindingNodes(t *testing.T) {
+	scan := func(cols map[string]parquet.TypeID) *logical.Node {
+		n := &logical.Node{Type: logical.NodeScan, TableName: "t"}
+		n.ScanColTypes = map[string]parquet.TypeID{}
+		for c, tp := range cols {
+			n.ScanColumns = append(n.ScanColumns, c)
+			n.ScanColTypes[c] = tp
+		}
+		sort.Strings(n.ScanColumns)
+		return n
+	}
+	base := func() *logical.Node {
+		return scan(map[string]parquet.TypeID{
+			"i32": parquet.TypeInt32, "i64": parquet.TypeInt64, "d2": parquet.TypeDecimal,
+		})
+	}
+
+	cases := []struct {
+		name string
+		side *logical.Node
+		key  string
+		want parquet.TypeID
+	}{
+		{"BareScan", base(), "i64", parquet.TypeInt64},
+		{"GroupByPassesTheKeyThrough", &logical.Node{
+			Type: logical.NodeAggregate, GroupBy: []string{"i64"},
+			Children: []*logical.Node{base()},
+		}, "i64", parquet.TypeInt64},
+		{"RenameOverGroupBy", &logical.Node{
+			Type:        logical.NodeProject,
+			Projections: []logical.Projection{{Column: "i64", Alias: "k"}},
+			Children: []*logical.Node{{
+				Type: logical.NodeAggregate, GroupBy: []string{"i64"},
+				Children: []*logical.Node{base()},
+			}},
+		}, "k", parquet.TypeInt64},
+		{"DistinctPassesThrough", &logical.Node{
+			Type: logical.NodeDistinct, Children: []*logical.Node{base()},
+		}, "i64", parquet.TypeInt64},
+		{"WindowPassesInputColumnsThrough", &logical.Node{
+			Type: logical.NodeWindow, Children: []*logical.Node{base()},
+		}, "i64", parquet.TypeInt64},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := joinSideColTypes(c.side)
+			if got == nil {
+				t.Fatalf("resolved nothing; a nil map here is the pre-review decline that "+
+					"reinstates isIntKeyColumn(own) — the gate #615 replaces (key %q)", c.key)
+			}
+			if tp, ok := got[c.key]; !ok || tp != c.want {
+				t.Errorf("%q resolved to (%v, %v), want %v", c.key, tp, ok, c.want)
+			}
+		})
+	}
+}
+
+// TestJoinSideColTypesDropsANameTwoScansDisagreeAbout keeps the conservative
+// half: a key resolved against the wrong side's column is a silently
+// different join, so a name two scans carry at two types is deleted and the
+// runtime backstop decides.
+func TestJoinSideColTypesDropsANameTwoScansDisagreeAbout(t *testing.T) {
+	mk := func(name string, tp parquet.TypeID) *logical.Node {
+		return &logical.Node{
+			Type: logical.NodeScan, TableName: "t",
+			ScanColumns:  []string{name},
+			ScanColTypes: map[string]parquet.TypeID{name: tp},
+		}
+	}
+	side := &logical.Node{Type: logical.NodeJoin, JoinType: "inner", Children: []*logical.Node{
+		mk("x", parquet.TypeInt64), mk("x", parquet.TypeFloat32),
+	}}
+	if tp, ok := joinSideColTypes(side)["x"]; ok {
+		t.Errorf("a name two scans disagree about resolved to %v; it must be dropped", tp)
 	}
 }

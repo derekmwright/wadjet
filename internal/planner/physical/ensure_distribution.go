@@ -41,7 +41,11 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 		childID string
 		kind    RequiredKind
 		keys    string
-		count   int
+		// keyTypes is part of the identity: two consumers wanting the same
+		// child clustered on the same NAMES may still need it hashed at two
+		// different types (#615), and one exchange cannot serve both.
+		keyTypes string
+		count    int
 	}
 	cache := make(map[cacheKey]string)
 
@@ -71,10 +75,11 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 				continue
 			}
 			key := cacheKey{
-				childID: childID,
-				kind:    req.Kind,
-				keys:    strings.Join(req.Keys, ","),
-				count:   req.Count,
+				childID:  childID,
+				kind:     req.Kind,
+				keys:     strings.Join(req.Keys, ","),
+				keyTypes: keyTypesCacheKey(req.KeyTypes, len(req.Keys)),
+				count:    req.Count,
 			}
 			if existingID, hit := cache[key]; hit {
 				// Reuse the previously-inserted exchange.
@@ -295,4 +300,23 @@ func exchangeVariantFor(req RequiredDistribution) (Stage, bool) {
 	default:
 		return Stage{}, false
 	}
+}
+
+// keyTypesCacheKey renders a partition-key TYPE list for a map key, reading a
+// missing entry as exec.KeyTypeUnresolved so a nil list and an all-unresolved
+// one produce the same string — which is what keeps every pre-#615 plan's
+// exchange reuse exactly where it was.
+func keyTypesCacheKey(types []parquet.TypeID, n int) string {
+	if n == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		t := keyTypeUnresolved
+		if i < len(types) {
+			t = types[i]
+		}
+		fmt.Fprintf(&b, "%d,", int(t))
+	}
+	return b.String()
 }

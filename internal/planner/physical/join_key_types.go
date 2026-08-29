@@ -134,84 +134,146 @@ func joinKeyLookupName(key string) string {
 }
 
 // joinSideColTypes reports the declared type of every column ONE SIDE of a
-// join can offer a key, keyed by bare lower-cased name.
+// join can offer a key, keyed by the name a key may SPELL it with.
 //
-// It is deliberately not inputColTypes: that walk stops at a Project, and the
-// build side of every semi/anti join is a Project over a Distinct
-// (dedupSemiAntiBuildSide), which is exactly the shape `x IN (SELECT y ...)`
-// takes — the one #615's panic came through. It is deliberately not
-// declaredJoinSchema either: that one dedups by first-seen, and a side whose
-// two scans carry one name at two types would then resolve the pair against
-// whichever scan the walk reached first. Here a conflicting name is DELETED,
-// the same answer inputColTypes gives for the same situation, because a key
-// resolved against the wrong side's column is a silently different join.
+// It is the shared declared-type layer, not a walk of its own. The first
+// version of this function WAS a walk of its own — scans and rename
+// projections only — and it answered nothing for a side rooted at an
+// aggregate, a window or a set operation, and dropped every computed
+// projection. resolveJoinKeyTypes then emitted KeyTypeUnresolved and
+// joinKeyUsesIntPath fell back to isIntKeyColumn(own), which is the exact
+// gate #615 replaces: `a.w_d2 = b.k` over `(SELECT w_i64 AS k … GROUP BY
+// w_i64)` answered 0 where PostgreSQL answers 3, and the CAST spelling of it
+// panicked on the DAG.
 //
-// A computed projection is dropped rather than typed: its declared type comes
-// from the expression layer, and a key over one is left exactly where it was.
+// Two maps, merged, because a key can be spelled either way:
+//
+//  1. What the side EMITS, under the names it emits them: emittedColTypes
+//     for an aggregate / window / projection / DISTINCT chain (its Project
+//     arm types a CAST through declaredProjectionType, which is where
+//     inferCastType lives), and setOpDeclaredOutputSchema for a side that IS
+//     a set operation — the arms reconciled through setOpWiden, the same
+//     ladder the executed schema uses. This is the spelling a derived
+//     table's key actually takes (`b.k`).
+//  2. The SOURCE names still visible below a RENAME, for the spelling
+//     resolveShuffleKey produces when it resolves an alias back to the
+//     column the shuffle reads. A rename carries its source's values, so
+//     both names describe one type; a COMPUTED projection binds only its
+//     alias, and its inputs keep their own types under their own names,
+//     which is correct — a key spelled with the input name is keyed on the
+//     input.
+//
+// A name the two disagree about is DELETED rather than picked between: a key
+// resolved against the wrong column is a silently different join, and
+// declining leaves the runtime backstop (exec.joinKeyEncodingMismatch) to
+// raise if the two sides really do disagree at run time.
 func joinSideColTypes(n *logical.Node) map[string]parquet.TypeID {
+	if n == nil {
+		return nil
+	}
 	out := make(map[string]parquet.TypeID)
 	conflict := make(map[string]bool)
-	put := func(name string, t parquet.TypeID) {
+	put := func(name string, t parquet.TypeID, overwrite bool) {
 		lc := strings.ToLower(strings.TrimSpace(name))
 		if lc == "" || conflict[lc] {
 			return
 		}
-		if prev, dup := out[lc]; dup && prev != t {
-			delete(out, lc)
-			conflict[lc] = true
+		prev, dup := out[lc]
+		if !dup {
+			out[lc] = t
 			return
 		}
-		out[lc] = t
+		if prev == t {
+			return
+		}
+		if !overwrite {
+			// The emitted answer already bound this name; a source name
+			// below it does not get to move it.
+			return
+		}
+		delete(out, lc)
+		conflict[lc] = true
 	}
+	for name, t := range joinSideEmittedTypes(n) {
+		put(name, t, true)
+	}
+	for name, t := range joinSideSourceTypes(n) {
+		put(name, t, false)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// joinSideEmittedTypes is question 1 above: what the side's OUTPUT columns
+// are called and what they carry.
+//
+// The Project arm is spelled out rather than delegated because
+// emittedColTypes' own Project arm asks emittedColTypes for its child, and
+// that one answers nil for a set operation — so `SELECT k FROM (A UNION ALL
+// B)` would type every projection from an empty map. Recursing through THIS
+// function instead closes that hole; everything else defers.
+func joinSideEmittedTypes(n *logical.Node) map[string]parquet.TypeID {
+	if n == nil {
+		return nil
+	}
+	if cols, ok := setOpDeclaredOutputSchema(n); ok {
+		out := make(map[string]parquet.TypeID, len(cols))
+		for _, c := range cols {
+			out[strings.ToLower(c.Name)] = c.Type
+		}
+		return out
+	}
+	if n.Type == logical.NodeProject && len(n.Children) == 1 {
+		in := joinSideEmittedTypes(n.Children[0])
+		if in == nil {
+			return emittedColTypes(n)
+		}
+		decls := colDecls{types: in, dec: emittedColDecimal(n.Children[0])}
+		strictInt := strictIntArithCols(n.Children[0])
+		out := make(map[string]parquet.TypeID, len(n.Projections))
+		for _, proj := range n.Projections {
+			name := declaredProjectionName(proj)
+			if name == "" {
+				continue
+			}
+			out[strings.ToLower(name)] = declaredProjectionType(proj, decls, strictInt)
+		}
+		return out
+	}
+	return emittedColTypes(n)
+}
+
+// joinSideSourceTypes is question 2: the catalog types of the scan columns
+// beneath this side, under their own names. A name two scans carry at two
+// types is dropped, exactly as inputColTypes drops one two join sides
+// disagree about.
+func joinSideSourceTypes(n *logical.Node) map[string]parquet.TypeID {
+	out := make(map[string]parquet.TypeID)
+	conflict := make(map[string]bool)
 	var walk func(*logical.Node)
 	walk = func(cur *logical.Node) {
 		if cur == nil {
 			return
 		}
-		switch cur.Type {
-		case logical.NodeScan:
+		if cur.Type == logical.NodeScan {
 			for _, name := range cur.ScanColumns {
-				if t, ok := cur.ScanColTypes[strings.ToLower(name)]; ok {
-					put(name, t)
+				lc := strings.ToLower(name)
+				t, ok := cur.ScanColTypes[lc]
+				if !ok || conflict[lc] {
+					continue
 				}
+				if prev, dup := out[lc]; dup && prev != t {
+					delete(out, lc)
+					conflict[lc] = true
+					continue
+				}
+				out[lc] = t
 			}
 			return
-		case logical.NodeProject:
-			// A RENAME forwards a column, so the alias declares what the
-			// source declares. Resolving the source needs the child's own
-			// answer, which is this same walk one level down.
-			if len(cur.Children) == 1 {
-				below := joinSideColTypes(cur.Children[0])
-				for _, pr := range cur.Projections {
-					if pr.IsAgg || pr.Column == "" {
-						continue
-					}
-					name := pr.Alias
-					if name == "" {
-						name = pr.Column
-					}
-					if t, ok := below[joinKeyLookupName(cleanExpr(pr.Column))]; ok {
-						put(cleanExpr(name), t)
-					}
-				}
-				// The columns the projection does NOT rebind stay visible to
-				// a key by their own name (a bare `SELECT *` projection, and
-				// the scan columns a partial projection leaves alone).
-				for name, t := range below {
-					put(name, t)
-				}
-			}
-			return
-		case logical.NodeAggregate, logical.NodeWindow,
-			logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-			// These rebind names to values the columns below do not
-			// describe. Declining leaves the key unresolved, which leaves
-			// the encoding where it was.
-			return
-		case logical.NodeJoin:
-			if len(cur.Children) != 2 {
-				return
-			}
+		}
+		if cur.Type == logical.NodeJoin && len(cur.Children) == 2 {
 			walk(cur.Children[0])
 			// A semi/anti join exposes only its probe side, exactly as
 			// declaredJoinSchema reads it.

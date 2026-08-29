@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 
@@ -93,12 +94,16 @@ func appendCoercedKeyValue(buf []byte, v *batch.Vector, row int, target batch.Ty
 			return batch.AppendDecimalKey(buf, batch.Int128From(val), 0)
 		}
 	}
-	// A pair the ladder does not describe reaching this far would be a
-	// planner defect, and answering it with the narrow side's own encoding
-	// is the pre-#615 behaviour — wrong, but not worse than wrong. Falling
-	// back rather than panicking keeps a mis-resolved key a wrong answer in
-	// one query instead of a killed server.
-	return appendColumnValue(buf, v, row, v.Type)
+	// A pair the ladder does not describe cannot reach here: physical
+	// .joinKeyCommonType answers only INT64, FLOAT64 and DECIMAL, and each
+	// arm above accepts every source type that can resolve to it. Arriving
+	// anyway means the plan-time ladder and this encoder have parted company,
+	// and the pre-#615 answer — the narrow side's own encoding — is the
+	// silent wrong answer #615 IS. Raise instead; the query-scoped boundary
+	// (ADR-0019) turns it into a query error on both the local pipeline and
+	// the worker fragment, so it costs a query rather than a server.
+	panic(fmt.Sprintf("join key: no encoding for %s at resolved common type %s "+
+		"(exec.AppendWidenedKeyValue, #615)", v.Type, target))
 }
 
 // widenKeyFloat64 reads v's row as the float64 PostgreSQL would compare at.
@@ -139,7 +144,8 @@ func widenKeyFloat64(v *batch.Vector, row int) float64 {
 		}
 		return f
 	}
-	return 0
+	panic(fmt.Sprintf("join key: %s has no float64 reading at resolved common type FLOAT64 "+
+		"(exec.widenKeyFloat64, #615)", v.Type))
 }
 
 // joinKeyUsesIntPath reports whether the resolved key types permit the
@@ -164,4 +170,127 @@ func joinKeyUsesIntPath(types []batch.TypeID, i int, own batch.TypeID) bool {
 		return false
 	}
 	return isIntKeyColumn(own)
+}
+
+// keyEncodingClass groups the types appendColumnValue encodes IDENTICALLY, so
+// that "these two key columns produce comparable bytes" is a question with one
+// answer rather than a list of pairs.
+//
+// It is deliberately coarser than the type: PORT, PROTOCOL and DATE key as an
+// INT32's four little-endian bytes and IPv4, MAC, TIMESTAMP and DURATION as an
+// INT64's eight, so a join between one of those and its carrier integer has
+// always keyed alike and must keep doing so. STRING, BYTES, IPv6 and UUID
+// share the length-prefixed bytes arm for the same reason.
+func keyEncodingClass(t batch.TypeID) int {
+	switch t {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return 1
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return 2
+	case batch.TypeFloat32:
+		return 3
+	case batch.TypeFloat64:
+		return 4
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
+		return 5
+	case batch.TypeCIDR:
+		return 6
+	case batch.TypeBool:
+		return 7
+	case batch.TypeDecimal:
+		return 8
+	case batch.TypeVector:
+		return 9
+	case batch.TypeArray, batch.TypeMap:
+		return 10
+	case batch.TypeRow:
+		return 11
+	}
+	return 0
+}
+
+// checkProbeKeyTypes is the RUNTIME backstop under the plan-time resolution:
+// the place where both sides' ACTUAL encodings are known at the same time.
+//
+// The planner resolves a key pair from DECLARED types, and a side it cannot
+// type resolves to KeyTypeUnresolved — which is correct for every pair whose
+// two sides agree and silently wrong for one whose sides do not. Rather than
+// refuse at plan time on "cannot type" (which would refuse every join over a
+// table function, an unannotated scan or a shape the declared-type walk does
+// not cover, most of them perfectly well-typed at run time), the refusal
+// lives HERE, where the question is decidable and the answer cannot be a
+// false positive.
+//
+// Two conditions, and only these two:
+//
+//	R1 the integer fast path is on and a PROBE key column is not
+//	   integer-class. This is #615's panic: tryEnableIntKey saw only the
+//	   BUILD column, and inlineIntProbe / executeSemiAntiJoin / the bloom
+//	   then indexed the probe column's nil Int32Data / Int64Data. An error
+//	   here makes that index structurally unreachable.
+//	R2 both key columns are on the numeric ladder, their key ENCODINGS
+//	   differ, and the plan said no widening. This is #615's silent miss:
+//	   eight little-endian bytes on one side and a canonical decimal key on
+//	   the other, matching only where the byte strings coincide by accident.
+//
+// A pair the ladder does not describe (a STRING against an INT64, a DATE
+// against a TIMESTAMP) is left exactly where it was: those are ill-typed
+// joins wadjet has always answered with no matches, and turning them into
+// errors is a separate question with a separate authority.
+func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
+	for i, pi := range h.probeKeyIdx {
+		if pi < 0 || pi >= len(b.Columns) {
+			continue
+		}
+		probeT := b.Columns[pi].Type
+		if (h.useIntKey || h.useDualIntKey) && !isIntKeyColumn(probeT) {
+			return fmt.Errorf("join key %q is %s on the probe side and the build side took the "+
+				"integer key path: the pair's common type was not resolved at plan time "+
+				"(exec.HashJoin.KeyTypes, #615)", h.LeftKeys[i], probeT)
+		}
+		bi := -1
+		if i < len(h.buildKeyIdx) {
+			bi = h.buildKeyIdx[i]
+		}
+		if bi < 0 || bi >= len(h.buildSchema) {
+			continue
+		}
+		buildT := h.buildSchema[bi].Type
+		if keyEncodingClass(probeT) == keyEncodingClass(buildT) {
+			continue
+		}
+		if !joinKeyLadderType(probeT) || !joinKeyLadderType(buildT) {
+			continue
+		}
+		if keyPairResolved(h.KeyTypes, i) {
+			continue // the planner resolved it; the encoders are widening
+		}
+		return fmt.Errorf("join key %q is %s on the probe side and %q is %s on the build side, "+
+			"and the pair's common type was not resolved at plan time: the two sides would be "+
+			"keyed at two different encodings and match only by coincidence "+
+			"(exec.HashJoin.KeyTypes, #615)",
+			h.LeftKeys[i], probeT, h.RightKeys[i], buildT)
+	}
+	return nil
+}
+
+// keyPairResolved reports whether the planner decided a common type for this
+// key pair. It is NOT "the resolved type differs from this side's": the
+// resolved type equals one side's own whenever that side is already the wider
+// one (a DECIMAL probe against an INT64 build resolves to DECIMAL), and
+// reading that as unresolved made the backstop fire on a correctly widened
+// join.
+func keyPairResolved(types []batch.TypeID, i int) bool {
+	return i < len(types) && types[i] != KeyTypeUnresolved
+}
+
+// joinKeyLadderType reports whether a type is on the numeric ladder
+// physical.joinKeyCommonType describes — the only pairs #615 claims.
+func joinKeyLadderType(t batch.TypeID) bool {
+	switch t {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32,
+		batch.TypeFloat64, batch.TypeDecimal:
+		return true
+	}
+	return false
 }

@@ -1,12 +1,12 @@
 package exec
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
-
-	"context"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
@@ -426,4 +426,142 @@ func TestCrossWidthJoinKeySurvivesASpill(t *testing.T) {
 			"rebuilding its index at the column's own encoding instead of the "+
 			"pair's resolved type", spilledRows, wantMatches)
 	}
+}
+
+// TestKeyEncodingClassGroupsWhatEncodesAlike pins the grouping the runtime
+// backstop reads. It is coarser than the type on purpose: PORT, PROTOCOL and
+// DATE key as an INT32's four little-endian bytes and IPv4, MAC, TIMESTAMP
+// and DURATION as an INT64's eight, so a join between one of those and its
+// carrier integer has always keyed alike and must not start erroring.
+func TestKeyEncodingClassGroupsWhatEncodesAlike(t *testing.T) {
+	same := [][]batch.TypeID{
+		{batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate},
+		{batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration},
+		{batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID},
+	}
+	for _, grp := range same {
+		for _, a := range grp {
+			for _, b := range grp {
+				if keyEncodingClass(a) != keyEncodingClass(b) {
+					t.Errorf("%v and %v encode alike but are in different classes", a, b)
+				}
+			}
+		}
+	}
+	// …and the pairs that genuinely differ must NOT collapse.
+	differ := [][2]batch.TypeID{
+		{batch.TypeInt32, batch.TypeInt64},
+		{batch.TypeInt64, batch.TypeFloat64},
+		{batch.TypeFloat32, batch.TypeFloat64},
+		{batch.TypeInt64, batch.TypeDecimal},
+		{batch.TypeDecimal, batch.TypeFloat64},
+		{batch.TypeString, batch.TypeCIDR},
+	}
+	for _, p := range differ {
+		if keyEncodingClass(p[0]) == keyEncodingClass(p[1]) {
+			t.Errorf("%v and %v encode differently but share a class", p[0], p[1])
+		}
+	}
+	// Every one of the 22 types has a class; 0 is the "unknown" hole and
+	// nothing may fall into it.
+	for id := batch.TypeBool; id <= batch.TypeVector; id++ {
+		if keyEncodingClass(id) == 0 {
+			t.Errorf("%v has no key encoding class", id)
+		}
+	}
+}
+
+// TestUnresolvedCrossWidthKeyRaisesInsteadOfMatching is the runtime backstop
+// (#615 review). The planner resolves a key pair from DECLARED types, and a
+// side it cannot type resolves to KeyTypeUnresolved — correct for a pair whose
+// sides agree, silently wrong for one whose sides do not. Here is where that
+// is caught, because here is where both sides' ACTUAL encodings are known.
+//
+// Two conditions and no others: the integer fast path over a non-integer
+// probe (the panic), and a numeric pair whose encodings differ with nothing
+// resolving them (the silent miss). A pair carrying a resolved type, and a
+// pair whose two types encode alike, both go through untouched.
+func TestUnresolvedCrossWidthKeyRaisesInsteadOfMatching(t *testing.T) {
+	buildSchema := []parquet.Column{{Name: "bk", Type: parquet.TypeInt64}}
+	buildRows := []map[string]any{{"bk": int64(2)}, {"bk": int64(7)}}
+
+	newProbe := func(typ parquet.TypeID) *batch.RecordBatch {
+		b := batch.NewRecordBatch([]parquet.Column{
+			{Name: "pk", Type: typ, Precision: 18, Scale: 2}}, 2)
+		b.Len = 2
+		switch typ {
+		case parquet.TypeDecimal:
+			b.Columns[0].DecimalData.Scale = 2
+			b.Columns[0].DecimalData.Data[0] = batch.Int128From(200)
+			b.Columns[0].DecimalData.Data[1] = batch.Int128From(700)
+		case parquet.TypeInt64, parquet.TypeIPv4:
+			b.Columns[0].Int64Data[0], b.Columns[0].Int64Data[1] = 2, 7
+		case parquet.TypeFloat64:
+			b.Columns[0].Float64Data[0], b.Columns[0].Float64Data[1] = 2, 7
+		}
+		return b
+	}
+	run := func(t *testing.T, probeType parquet.TypeID, keyTypes []batch.TypeID) (int, error) {
+		t.Helper()
+		hj := NewHashJoin(InnerJoin, []string{"pk"}, []string{"bk"})
+		hj.KeyTypes = keyTypes
+		if err := hj.Build(context.Background(), NewSliceSource(buildSchema, buildRows)); err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		sink := &CollectSink{}
+		pipe := &Pipeline{
+			Source: NewBatchSource([]*batch.RecordBatch{newProbe(probeType)}),
+			Ops:    []UnaryOperator{hj.Probe()},
+			Sink:   sink,
+		}
+		err := pipe.Run(context.Background())
+		return len(sink.Rows), err
+	}
+
+	t.Run("UnresolvedDecimalAgainstBigintRaises", func(t *testing.T) {
+		_, err := run(t, parquet.TypeDecimal, nil)
+		if err == nil {
+			t.Fatal("an unresolved DECIMAL/INT64 key pair answered instead of raising — " +
+				"that is the silent miss #615 is about, and the integer fast path over " +
+				"it is the panic")
+		}
+		if !strings.Contains(err.Error(), "#615") {
+			t.Errorf("the error does not name the mechanism: %v", err)
+		}
+	})
+	t.Run("UnresolvedFloatAgainstBigintRaises", func(t *testing.T) {
+		if _, err := run(t, parquet.TypeFloat64, nil); err == nil {
+			t.Fatal("an unresolved FLOAT64/INT64 key pair answered instead of raising")
+		}
+	})
+	t.Run("ResolvedPairAnswers", func(t *testing.T) {
+		n, err := run(t, parquet.TypeDecimal, []batch.TypeID{batch.TypeDecimal})
+		if err != nil {
+			t.Fatalf("a RESOLVED pair must answer, not raise: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("resolved DECIMAL/INT64 join matched %d rows, want 2", n)
+		}
+	})
+	t.Run("SameEncodingClassIsUntouched", func(t *testing.T) {
+		// IPv4 stores in Int64Data and keys as an INT64's eight bytes, so a
+		// join against a BIGINT has always matched and must keep matching —
+		// the backstop is about ENCODINGS, not about type names.
+		n, err := run(t, parquet.TypeIPv4, nil)
+		if err != nil {
+			t.Fatalf("IPv4 against BIGINT must not raise: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("IPv4/BIGINT join matched %d rows, want 2", n)
+		}
+	})
+	t.Run("SameTypeIsUntouched", func(t *testing.T) {
+		n, err := run(t, parquet.TypeInt64, nil)
+		if err != nil {
+			t.Fatalf("a same-type join must not raise: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("INT64/INT64 join matched %d rows, want 2", n)
+		}
+	})
 }

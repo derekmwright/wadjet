@@ -74,6 +74,15 @@ type ShuffleLayout struct {
 	ProbePartitionBytes []int64
 }
 
+// orchestrateRepartition has NO non-test caller: the native DAG's
+// dispatchShuffleStage is the live path and calls runShuffleSide directly with
+// stage.Exchange.KeyTypes. That is why the two calls below pass nil key types
+// — RepartitionCandidate carries key NAMES only, and threading a type through
+// it would be inventing a field for a path nothing reaches. If this function
+// is ever revived for a cross-width join, its candidate needs the resolved
+// types alongside its keys or the two sides will hash at their own widths
+// (#615).
+//
 // orchestrateRepartition runs both shuffle stages (build side and probe side)
 // in parallel and returns the resulting shard layout. The caller is responsible
 // for dispatching the downstream probe pipeline tasks built from this layout.
@@ -107,7 +116,7 @@ func (c *Coordinator) orchestrateRepartition(
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, nil, numParts, workerCount, nil, nil, nil, nil, nil, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, nil /* see orchestrateRepartition */, numParts, workerCount, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			return fmt.Errorf("build-side shuffle for %s: %w", cand.BuildAlias, err)
 		}
@@ -116,7 +125,7 @@ func (c *Coordinator) orchestrateRepartition(
 	})
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, nil, numParts, workerCount, nil, nil, nil, nil, nil, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, nil /* see orchestrateRepartition */, numParts, workerCount, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			return fmt.Errorf("probe-side shuffle for %s: %w", cand.ProbeAlias, err)
 		}
