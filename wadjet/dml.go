@@ -744,9 +744,17 @@ func ConvertValue(s string, typ parquet.TypeID) (any, error) {
 //     would either duplicate that logic or race two different validators
 //     over the same literal; TypeCIDR stores its text form directly and
 //     needs no conversion either way.
-//   - TypeDecimal: the writer's decimalUnscaledInt64 already parses a
-//     numeric string at the column's declared scale (float64 branch),
-//     matching batch.Vector.SetValue's own string case.
+//   - TypeDecimal: the literal's TEXT is the exact carrier and is passed
+//     through unchanged. Reading it into a number here would be wrong twice
+//     over: this function is handed the column's TypeID and nothing else, so
+//     it does not know the (p, s) the value has to land at, and an integer
+//     literal converted to an int64 box would then be read as the ALREADY-
+//     UNSCALED value ADR-0018 §4 defines (INSERT 5 into DECIMAL(9,2) would
+//     store 0.05, not 5.00). parquet.DecimalValueFromBox, at the leaf where
+//     the declared (p, s) is known, is the one checked converter — it parses
+//     the text exactly, rounds to the column's scale as PostgreSQL does on
+//     assignment, and raises 22003/22P02 rather than storing a wrapped int64
+//     or a zero (#647).
 //
 // TypePort and TypeProtocol (BUG: INSERT into either always failed) and
 // TypeDuration (BUG: silently wrote 0 — see below) are NOT in that set:

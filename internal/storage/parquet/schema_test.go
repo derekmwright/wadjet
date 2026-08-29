@@ -2,6 +2,8 @@ package parquet
 
 import (
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 func TestTypeIDString(t *testing.T) {
@@ -118,6 +120,8 @@ func TestParseDecimalParams(t *testing.T) {
 		{"DECIMAL(18)", 18, 0},
 		{"NUMERIC(5,3)", 5, 3},
 		{"DECIMAL(38,18)", 38, 18},
+		{"DECIMAL(38,38)", 38, 38},
+		{"DECIMAL(1,0)", 1, 0},
 		// No closing paren
 		{"DECIMAL(10", 38, 0},
 		// Empty params
@@ -125,12 +129,54 @@ func TestParseDecimalParams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			p, s := ParseDecimalParams(tt.input)
+			p, s, err := ParseDecimalParams(tt.input)
+			if err != nil {
+				t.Fatalf("ParseDecimalParams(%q): %v", tt.input, err)
+			}
 			if p != tt.wantPrec {
 				t.Errorf("precision = %d, want %d", p, tt.wantPrec)
 			}
 			if s != tt.wantScale {
 				t.Errorf("scale = %d, want %d", s, tt.wantScale)
+			}
+		})
+	}
+}
+
+// A declaration this carrier cannot honour is REFUSED, at DDL, with 22023.
+//
+// Every one of these used to be accepted: DECIMAL(50,2) produced a column
+// whose 16-byte FIXED_LEN_BYTE_ARRAY leaf was annotated DECIMAL(50,s) — a
+// combination the Apache implementation refuses to open and no value can
+// satisfy — and DECIMAL(0,0) produced the "unconstrained" sentinel from an
+// EXPLICIT declaration (R8/#647).
+//
+// DECIMAL(50,2) is legal PostgreSQL (its numeric goes to 1000 digits), so
+// this is the documented divergence of ADR-0024 item 1. A negative scale and
+// a scale past the precision are legal PostgreSQL too, and have no parquet
+// DECIMAL annotation at all.
+func TestParseDecimalParamsRefusesADeclarationWithNoCarrier(t *testing.T) {
+	for _, input := range []string{
+		"DECIMAL(50,2)",
+		"DECIMAL(39,0)",
+		"NUMERIC(1000,2)",
+		"DECIMAL(0,0)",
+		"DECIMAL(-1,0)",
+		"DECIMAL(9,-2)",
+		"DECIMAL(9,10)",
+		"DECIMAL(abc,2)",
+		"DECIMAL(9,abc)",
+		"DECIMAL(9,2,1)",
+	} {
+		t.Run(input, func(t *testing.T) {
+			if _, _, err := ParseDecimalParams(input); err == nil {
+				t.Fatalf("ParseDecimalParams(%q) was accepted", input)
+			} else if got := sqlerr.StateOf(err); got != "22023" {
+				t.Fatalf("SQLSTATE %q, want 22023 (err: %v)", got, err)
+			}
+			// ResolveColumn is the DDL door and must carry the refusal out.
+			if _, err := ResolveColumn("d", input); err == nil {
+				t.Fatalf("ResolveColumn(%q) was accepted", input)
 			}
 		})
 	}

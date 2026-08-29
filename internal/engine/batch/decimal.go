@@ -2,7 +2,6 @@ package batch
 
 import (
 	"encoding/binary"
-	"errors"
 	"math"
 	"math/big"
 	"math/bits"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Int128 is a 128-bit signed integer used for DECIMAL storage.
@@ -500,88 +500,32 @@ func saturatedDecimal(neg bool) ScaledDecimal {
 // above every finite value, and NaN above Infinity and equal only to itself.
 // So an int comparison of two kinds orders them, and the sign of a non-finite
 // kind says which end of a column's range it sits past.
-type DecimalSpecialKind int8
+//
+// DecimalSpecialKind, DecimalSpecialText and the numeric-text grammar below
+// live in internal/storage/parquet and are read through from here.
+//
+// This package IMPORTS that one (batch.Vector is built from parquet.Column),
+// so the lower package is the only place a SINGLE accept-set can sit — the
+// same reason ParseDateDays lives there. The file writer has to classify the
+// text it is about to store exactly as the comparison path classifies the text
+// it is about to compare, or 'NaN' is 22003 on one path and 22P02 on the other
+// and a client branching on the code cannot see past the difference
+// (ADR-0024 items 4 and 6, #647).
+type DecimalSpecialKind = parquet.DecimalSpecialKind
 
 const (
-	DecimalNegInf DecimalSpecialKind = -1
-	DecimalFinite DecimalSpecialKind = 0
-	DecimalPosInf DecimalSpecialKind = 1
-	DecimalNaN    DecimalSpecialKind = 2
+	DecimalNegInf = parquet.DecimalNegInf
+	DecimalFinite = parquet.DecimalFinite
+	DecimalPosInf = parquet.DecimalPosInf
+	DecimalNaN    = parquet.DecimalNaN
 )
 
-// decimalSpaceCutset is the whitespace PostgreSQL's numeric input function
-// strips around a value: C `isspace` in the C locale, not Unicode's set.
-// Trimming Unicode space here would accept input PostgreSQL refuses — a
-// no-break space before a constant is 22P02 there, which the pg-oracle already
-// pins for the integer types.
-const decimalSpaceCutset = " \t\n\v\f\r"
-
-// DecimalSpecialText reads PostgreSQL's numeric input grammar for the three
-// values above, and returns DecimalFinite for everything else — including text
+// DecimalSpecialText reads PostgreSQL's numeric input grammar for NaN and the
+// infinities, and returns DecimalFinite for everything else — including text
 // that names no number at all, which is DecimalTextAt's question, not this
-// one's.
-//
-// The accept-set is PostgreSQL 17.11's, verified live on postgres:17-alpine:
-// surrounding whitespace is stripped; `NaN` is case-insensitive and takes NO
-// sign (`+NaN` and `-NaN` are both 22P02 there); `Infinity` and its short form
-// `Inf` are case-insensitive and take an optional immediately-adjacent `+` or
-// `-`. Nothing else — a prefix (`Infin`, `infinit`), a sign separated by a
-// space (`- inf`) and any trailing character (`NaN0`) are all refused.
+// one's. See parquet.DecimalSpecialText for the accept-set.
 func DecimalSpecialText(text string) DecimalSpecialKind {
-	// CompareDecimalTexts calls this per ROW on the boxed path, where every
-	// operand is an ordinary number, so the answer for "not one of the three"
-	// has to cost a byte rather than three case-folded comparisons: only 'n',
-	// 'i' and their upper-case forms can begin one, after the whitespace and
-	// the optional sign.
-	if !mayBeDecimalSpecial(text) {
-		return DecimalFinite
-	}
-	s := strings.Trim(text, decimalSpaceCutset)
-	signed, neg := false, false
-	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
-		signed, neg, s = true, s[0] == '-', s[1:]
-	}
-	switch {
-	case strings.EqualFold(s, "nan"):
-		if signed {
-			return DecimalFinite // PostgreSQL refuses '+NaN' and '-NaN' outright
-		}
-		return DecimalNaN
-	case strings.EqualFold(s, "infinity"), strings.EqualFold(s, "inf"):
-		if neg {
-			return DecimalNegInf
-		}
-		return DecimalPosInf
-	}
-	return DecimalFinite
-}
-
-// mayBeDecimalSpecial is DecimalSpecialText's rejection fast path: it walks
-// past leading whitespace and one optional sign and reports whether what
-// follows could begin "nan", "inf" or "infinity" in any case. Every digit, '.'
-// and every ordinary word answers false on one byte.
-func mayBeDecimalSpecial(text string) bool {
-	i := 0
-	for i < len(text) && isDecimalSpace(text[i]) {
-		i++
-	}
-	if i < len(text) && (text[i] == '+' || text[i] == '-') {
-		i++
-	}
-	if i >= len(text) {
-		return false
-	}
-	switch text[i] {
-	case 'n', 'N', 'i', 'I':
-		return true
-	}
-	return false
-}
-
-// isDecimalSpace is decimalSpaceCutset by byte, for the fast path above. The
-// two must name the same set.
-func isDecimalSpace(c byte) bool {
-	return strings.IndexByte(decimalSpaceCutset, c) >= 0
+	return parquet.DecimalSpecialText(text)
 }
 
 // DecimalBoundTextAt is DecimalTextAt widened to the NaN/±Infinity spellings,
@@ -821,64 +765,11 @@ func compareDecimalMagnitudes(aDigits string, aExp int, bDigits string, bExp int
 	return 0
 }
 
-// decimalParts splits numeric text — plain or exponent form — into its sign,
-// its digits with the decimal point removed, and the power of ten those
-// digits must be multiplied by. ok=false for anything that is not a number.
-//
-// The exponent is read as an INTEGER and folded into the power of ten, never
-// expanded through a float64. Expanding through strconv.ParseFloat is what
-// made `1e400` unreadable — ParseFloat reports ErrRange, the old expansion
-// gave up and handed the untouched "1e400" to a parser with no exponent
-// handling, and that returned the value ZERO, which matched every row holding
-// zero (#463). Here 1e400 is simply a number with a large exponent: it
-// resolves, saturates, and orders above everything (#462).
+// decimalParts splits numeric text into (sign, digits, exponent) through
+// parquet.DecimalTextParts — the one grammar the file writer also reads, so
+// the text a comparison accepts and the text a WRITE accepts cannot diverge.
 func decimalParts(s string) (neg bool, digits string, exp int, ok bool) {
-	// decimalSpaceCutset, never strings.TrimSpace: PostgreSQL's numeric input
-	// skips C isspace() only, so a NO-BREAK SPACE (U+00A0) before the digits
-	// is a non-whitespace byte it refuses with 22P02. TrimSpace strips it and
-	// would have answered the row — the same trap kernel.pgIntWhitespace
-	// already documents for the integer types, one family over.
-	s = strings.Trim(s, decimalSpaceCutset)
-	if s == "" {
-		return false, "", 0, false
-	}
-	switch s[0] {
-	case '-':
-		neg, s = true, s[1:]
-	case '+':
-		s = s[1:]
-	}
-	if i := strings.IndexAny(s, "eE"); i >= 0 {
-		e, err := strconv.Atoi(s[i+1:])
-		if err != nil && !errors.Is(err, strconv.ErrRange) {
-			return false, "", 0, false
-		}
-		// ErrRange keeps Atoi's clamped magnitude, which is already far past
-		// anything that changes the answer; clamping again keeps exp+scale
-		// from overflowing an int in the caller.
-		exp = min(max(e, -maxDecimalExponent), maxDecimalExponent)
-		s = s[:i]
-	}
-	intPart, fracPart, _ := strings.Cut(s, ".")
-	if !allDigits(intPart) || !allDigits(fracPart) || intPart+fracPart == "" {
-		return false, "", 0, false
-	}
-	return neg, intPart + fracPart, exp - len(fracPart), true
-}
-
-// maxDecimalExponent bounds the power of ten a literal's exponent contributes.
-// Anything at this magnitude already saturates (or truncates to zero) at every
-// scale a DECIMAL can declare, so clamping changes no answer and keeps the
-// arithmetic below in range.
-const maxDecimalExponent = 1 << 30
-
-func allDigits(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
+	return parquet.DecimalTextParts(s)
 }
 
 // int128FromDigits reads a base-10 MAGNITUDE (no sign, no leading zeros
@@ -995,29 +886,11 @@ func ParseDecimalStringChecked(s string, scale int) (Int128, error) {
 
 // DecimalSpecialValueError is the refusal a NaN/±Infinity spelling earns when
 // it reaches a caller producing a stored VALUE, and nil for every other text.
-//
-// It is a function rather than an inline check at each site because there are
-// two of them — batch.ParseDecimalStringChecked and physical.
-// setOpCheckedDecimalText — and they were answering DIFFERENT SQLSTATEs for
-// the same text, which is exactly the kind of split a client branching on the
-// code cannot see past.
-//
-// The code is 22003 numeric_value_out_of_range, not 22P02: PostgreSQL reads
-// all three as `numeric` VALUES, so the text is not an input-syntax error — it
-// names a value this carrier has no bit pattern for (ADR-0024 item 6).
-// PostgreSQL raises exactly this for the infinities against a constrained
-// column ("a field with precision 18, scale 4 cannot hold an infinite value",
-// verified live on postgres:17-alpine); NaN it stores, and wadjet refusing it
-// is the divergence item 6 records.
+// It reads through to parquet's copy so this package's two value-producing
+// refusal sites and the file writer's cannot answer different SQLSTATEs for
+// the same text (ADR-0024 item 6).
 func DecimalSpecialValueError(s string) error {
-	if DecimalSpecialText(s) == DecimalFinite {
-		return nil
-	}
-	return sqlerr.New("22003",
-		"numeric field overflow: %q has no DECIMAL value — PostgreSQL's numeric has NaN and "+
-			"±Infinity, and wadjet's DECIMAL is a finite 128-bit unscaled integer with no bit "+
-			"pattern for either, so they are COMPARISON literals only and never stored values "+
-			"(ADR-0024 item 6)", s)
+	return parquet.DecimalSpecialValueError(s)
 }
 
 // DecimalPrecisionLimit is 10^precision, the EXCLUSIVE bound on the unscaled

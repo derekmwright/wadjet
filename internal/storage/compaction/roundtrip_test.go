@@ -230,7 +230,14 @@ func TestCompactTable_DecimalIsNotMultiplied(t *testing.T) {
 			{"id": base + 0, "narrow": 3.25, "mid": 3.25, "wide": 3.25},
 			{"id": base + 1, "narrow": -1.5, "mid": -1.5, "wide": -1.5},
 			{"id": base + 2, "narrow": 0.0, "mid": 0.0, "wide": 0.0},
-			{"id": base + 3, "narrow": 9999999.99, "mid": 99999999999999.9999, "wide": 922337203.6854775807},
+			// The two wide values are TEXT, not float64 literals: a float64
+			// carries ~16 significant digits, so 99999999999999.9999 is not
+			// a float64 at all — it rounds to exactly 1e14, whose unscaled
+			// value at scale 4 is 10^18 and violates the column's own
+			// DECIMAL(18,4). The writer refuses that now (#647); before it
+			// stored the violating value and this fixture was silently
+			// testing a different number than it names.
+			{"id": base + 3, "narrow": 9999999.99, "mid": "99999999999999.9999", "wide": "922337203.6854775807"},
 			{"id": base + 4},
 		}
 	}

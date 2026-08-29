@@ -1057,7 +1057,11 @@ func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
 			Nullable: d.Nullable,
 		}
 		if typeID == parquet.TypeDecimal {
-			col.Precision, col.Scale = parquet.ParseDecimalParams(d.Type)
+			p, sc, err := parquet.ParseDecimalParams(d.Type)
+			if err != nil {
+				return parquet.Schema{}, fmt.Errorf("column %q: %w", d.Name, err)
+			}
+			col.Precision, col.Scale = p, sc
 		}
 		columns[i] = col
 	}

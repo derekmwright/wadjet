@@ -9,7 +9,6 @@ import (
 	"math"
 	"net"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -336,7 +335,12 @@ const decimalMaxInt64Precision = 18
 // place where the two disagree. wadjetTypeToPhysical stays as the TypeID-only
 // mapping the reader's compatibility checks ask about.
 func columnPhysical(col Column) PhysicalType {
-	if col.Type == TypeDecimal && col.Precision > decimalMaxInt64Precision {
+	// decimalEffectivePrecision, not col.Precision: the annotation written
+	// below defaults an unset precision to 38, and choosing the physical type
+	// from the raw field instead put a `Precision: 0` column in an INT64 leaf
+	// annotated DECIMAL(38, s) — the exact combination the corollary above
+	// says the Apache implementation refuses to open (R8, #647).
+	if col.Type == TypeDecimal && decimalEffectivePrecision(col.Precision) > decimalMaxInt64Precision {
 		return PhysicalFixedLenByteArray
 	}
 	return wadjetTypeToPhysical(col.Type)
@@ -463,25 +467,42 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		}
 		val = days
 	}
-	// A DECIMAL whose precision fits an INT64 leaf is stored in one, and an
-	// unscaled value past 64 bits then has no encoding at all. The row
-	// reader can hand one back (Decimal128), and the only ways to write it
-	// were a silent truncation or a silent zero. ADR-0018: a value this
-	// package cannot represent fails the WRITE, where the column and the
-	// row are still known, rather than producing a file that reads back as
-	// a different number.
+	// A DECIMAL box is resolved to its UNSCALED value HERE, at the leaf, for
+	// the same reason a DATE text literal is: this is the last place the
+	// column, its declared (p, s) and the row number are all still known, and
+	// below this line the converters cannot report failure and never could.
 	//
-	// A DECIMAL(p > 18) column is FIXED_LEN_BYTE_ARRAY and has no such
-	// bound, so the check is asked of the column's PHYSICAL type rather
-	// than of TypeDecimal.
-	if d, ok := val.(Decimal128); ok && col.Type == TypeDecimal &&
-		columnPhysical(col) == PhysicalInt64 {
-		if _, fits := d.Int64(); !fits {
-			nw.fail(fmt.Errorf("column %q, row %d: DECIMAL unscaled value %s needs more than 64 bits, "+
-				"which this writer's INT64 encoding cannot store", col.Name, nw.rowsSeen, d))
+	// DecimalValueFromBox is the whole conversion — which boxes are already
+	// unscaled (ADR-0018 §4) and which carry a decimal point, the exact
+	// text/float parse, PostgreSQL's assignment rounding, and the declared
+	// precision. Its predecessor ran every string and float through
+	// strconv.ParseFloat and int64(math.Round(t*pow)): a value wider than the
+	// column WRAPPED the int64, unparseable text and every NaN/Infinity stored
+	// 0, and exactness was lost past ~16 significant digits — all silently
+	// (#647). ADR-0018: a value this package cannot represent fails the WRITE
+	// rather than producing a file that reads back as a different number.
+	if col.Type == TypeDecimal {
+		d, err := DecimalValueFromBox(val, col.Precision, col.Scale)
+		if err != nil {
+			nw.fail(fmt.Errorf("column %q, row %d: %w", col.Name, nw.rowsSeen, err))
 			lb.appendEntry(defLevel, repLevel)
 			return
 		}
+		// A DECIMAL whose precision fits an INT64 leaf is stored in one, and
+		// an unscaled value past 64 bits then has no encoding at all. A
+		// DECIMAL(p > 18) column is FIXED_LEN_BYTE_ARRAY and has no such
+		// bound, so the check is asked of the column's PHYSICAL type rather
+		// than of TypeDecimal.
+		if columnPhysical(col) == PhysicalInt64 {
+			if _, fits := d.Int64(); !fits {
+				nw.fail(fmt.Errorf("column %q, row %d: DECIMAL unscaled value %s needs more than 64 bits, "+
+					"which this writer's INT64 encoding cannot store", col.Name, nw.rowsSeen, d))
+				lb.appendEntry(defLevel, repLevel)
+				return
+			}
+		}
+		lb.appendDecimalEntry(lb.maxDefLevel, repLevel, d)
+		return
 	}
 	// Value is present — def level is maxDefLevel.
 	lb.appendEntryWithValue(lb.maxDefLevel, repLevel, val)
@@ -1411,10 +1432,7 @@ func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
 	case TypeDecimal:
 		ct := ConvertedDecimal
 		se.ConvertedType = &ct
-		prec := col.Precision
-		if prec <= 0 {
-			prec = 38
-		}
+		prec := decimalEffectivePrecision(col.Precision)
 		se.Precision = int32(prec)
 		se.Scale = int32(col.Scale)
 		if pt == PhysicalFixedLenByteArray {
@@ -1460,19 +1478,7 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
 		v := toInt32(val, lb.col.Type)
 		lb.appendInt32(v)
 	case PhysicalInt64:
-		var v int64
-		if lb.col.Type == TypeDecimal {
-			// DECIMAL stores the UNSCALED integer (3.25 at scale 2 → 325).
-			// toInt64's float64 branch truncated to the whole part, so
-			// every non-integer decimal value was destroyed on write
-			// (issue #144 suite finding); decimalUnscaledInt64 also decides
-			// which boxes are already unscaled and which carry a decimal
-			// point, which is what makes read → write idempotent (#429).
-			v = decimalUnscaledInt64(val, int(lb.col.Scale))
-		} else {
-			v = toInt64(val, lb.col.Type)
-		}
-		lb.appendInt64(v)
+		lb.appendInt64(toInt64(val, lb.col.Type))
 	case PhysicalFloat:
 		v := toFloat32(val)
 		lb.appendFloat32(v)
@@ -1483,13 +1489,31 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
 		b := toBytes(val, lb.col.Type)
 		lb.appendByteArray(b)
 	case PhysicalFixedLenByteArray:
-		if lb.col.Type == TypeDecimal {
-			lb.data = append(lb.data, decimalFLBABytes(val, int(lb.col.Scale))...)
-			break
-		}
 		b := toBytes(val, lb.col.Type)
 		lb.data = append(lb.data, b...)
 	}
+}
+
+// appendDecimalEntry appends a DECIMAL value entry.
+//
+// It takes a Decimal128 rather than an `any`, which is the point: every other
+// converter in this file answers a box it does not understand with a zero, and
+// for a DECIMAL that zero is a stored number nobody wrote (#647). The box is
+// resolved once, in decomposeLeaf, where a failure can name the column and the
+// row; by the time a value reaches here it has a value.
+func (lb *leafBuffer) appendDecimalEntry(defLevel, repLevel int32, d Decimal128) {
+	lb.defLevels = append(lb.defLevels, defLevel)
+	lb.repLevels = append(lb.repLevels, repLevel)
+	lb.count++
+
+	if lb.physical == PhysicalFixedLenByteArray {
+		lb.data = append(lb.data, decimalFLBABytes(d)...)
+		return
+	}
+	// decomposeLeaf refused the unscaled values an INT64 leaf cannot hold, so
+	// the narrowing here is exact.
+	v, _ := d.Int64()
+	lb.appendInt64(v)
 }
 
 func (lb *leafBuffer) appendBool(v bool) {
@@ -1784,83 +1808,25 @@ func toInt32(v any, colType TypeID) int32 {
 	}
 }
 
-// decimalUnscaledInt64 converts a boxed DECIMAL value to the unscaled
-// integer the column stores physically (INT64).
+// decimalFLBABytes renders an unscaled DECIMAL value as the sixteen-byte
+// big-endian two's-complement integer a FIXED_LEN_BYTE_ARRAY DECIMAL leaf
+// holds — the same layout decimalFromBytesRaw reads back and the one pyarrow
+// writes.
 //
-// The contract is ADR-0018's writer corollary, and it is the whole of this
-// function: an INTEGER box (int, int32, int64, Decimal128) is ALREADY the
-// unscaled value at the column's declared scale; a REAL box (float64,
-// float32) or a numeric STRING carries the decimal point and is scaled here,
-// × 10^scale, rounded half away from zero. Non-finite floats and unparseable
-// strings store 0 (matching toInt64's default for garbage).
-//
-// Integer-means-unscaled is the reader's convention, the format's own, and
-// batch.Vector.SetValue's — 3.25 at scale 2 is the int64 325 in all three.
-// This function used to multiply an integer box by 10^scale, i.e. to read it
-// as the whole number 325.00, which made read → write NOT IDEMPOTENT: every
-// compaction pass over a DECIMAL(p, s>0) column multiplied it by 10^s and
-// wrote the result back over the inputs (#429). At scale 2 that is ×100 per
-// pass, silently.
-func decimalUnscaledInt64(v any, scale int) int64 {
-	switch t := v.(type) {
-	case int:
-		return int64(t)
-	case int32:
-		return int64(t)
-	case int64:
-		return t
-	case Decimal128:
-		// decomposeLeaf has already refused the ones that do not fit, so
-		// this is the narrow value in a wide column, treated exactly as the
-		// int64 above.
-		u, _ := t.Int64()
-		return u
-	case float64:
-		if math.IsNaN(t) || math.IsInf(t, 0) {
-			return 0
-		}
-		pow := 1.0
-		for i := 0; i < scale; i++ {
-			pow *= 10
-		}
-		return int64(math.Round(t * pow))
-	case float32:
-		return decimalUnscaledInt64(float64(t), scale)
-	case string:
-		f, err := strconv.ParseFloat(t, 64)
-		if err != nil {
-			return 0
-		}
-		return decimalUnscaledInt64(f, scale)
-	default:
-		return 0
-	}
-}
-
-// decimalFLBABytes renders a DECIMAL box as the sixteen-byte big-endian
-// two's-complement unscaled value a FIXED_LEN_BYTE_ARRAY DECIMAL leaf holds
-// — the same layout decimalFromBytesRaw reads back and the one pyarrow
-// writes. An integer box is already unscaled (ADR-0018's writer corollary);
-// a real or string box is scaled first, exactly as the INT64 leaf does it.
-func decimalFLBABytes(v any, scale int) []byte {
-	var hi int64
-	var lo uint64
-	if d, ok := v.(Decimal128); ok {
-		hi, lo = d.Hi, d.Lo
-	} else {
-		u := decimalUnscaledInt64(v, scale)
-		lo = uint64(u)
-		if u < 0 {
-			hi = -1
-		}
-	}
+// The box → unscaled step is DecimalValueFromBox, in decomposeLeaf. It used to
+// live here, sharing decimalUnscaledInt64 with the INT64 leaf: an INTEGER box
+// was written verbatim (ADR-0018 §4's contract, correct) but a REAL or STRING
+// box went through strconv.ParseFloat and int64(math.Round(t*pow)), so a value
+// wider than the column wrapped the int64, garbage and NaN stored 0, and every
+// value past ~16 significant digits lost its exactness (#647).
+func decimalFLBABytes(d Decimal128) []byte {
 	// Every byte gets written below regardless of sign — decimalFLBAWidth is
 	// exactly 8 bytes of hi plus 8 bytes of lo — so there is no sign-extended
 	// prefill to seed first.
 	b := make([]byte, decimalFLBAWidth)
 	for i := 0; i < 8; i++ {
-		b[decimalFLBAWidth-1-i] = byte(lo >> (8 * i))
-		b[decimalFLBAWidth-9-i] = byte(uint64(hi) >> (8 * i))
+		b[decimalFLBAWidth-1-i] = byte(d.Lo >> (8 * i))
+		b[decimalFLBAWidth-9-i] = byte(uint64(d.Hi) >> (8 * i))
 	}
 	return b
 }

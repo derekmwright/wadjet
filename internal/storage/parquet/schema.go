@@ -3,7 +3,10 @@ package parquet
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // TypeID identifies the data type of a column.
@@ -145,33 +148,75 @@ func ParseTypeID(s string) (TypeID, error) {
 	}
 }
 
-// ParseDecimalParams extracts precision and scale from a type string like "DECIMAL(10,2)".
-// Returns default (38, 0) if no parameters are specified.
-func ParseDecimalParams(s string) (precision, scale int) {
+// ParseDecimalParams extracts precision and scale from a type string like
+// "DECIMAL(10,2)", and REFUSES a declaration this carrier cannot honour.
+// A bare DECIMAL with no parameters is (38, 0).
+//
+// The bounds are 1 <= precision <= 38 and 0 <= scale <= precision.
+//
+//   - The precision bound is a DOCUMENTED DIVERGENCE from PostgreSQL, which
+//     accepts numeric(p, s) up to p = 1000 because its numeric is unbounded.
+//     Wadjet's DECIMAL is a 128-bit unscaled integer (ADR-0024 item 1) and 38
+//     digits is its whole range, so `DECIMAL(50,2)` is a column no value can
+//     satisfy. It used to be ACCEPTED, and the writer then emitted a 16-byte
+//     FIXED_LEN_BYTE_ARRAY leaf annotated DECIMAL(50, s) — an annotation the
+//     payload cannot hold, in a file the Apache implementation refuses to open
+//     (R8/#647). Refusing the DECLARATION is the only honest answer: the
+//     alternative is a column that lies about itself in every file it writes.
+//   - The scale bound is the PARQUET FORMAT's, not wadjet's: the DECIMAL
+//     logical type requires 0 <= scale <= precision. PostgreSQL accepts scale
+//     from -1000 to 1000, and `numeric(9,10)` (a value below 0.1 with nine
+//     significant digits) is legal there; there is no parquet annotation for
+//     it, so it is refused here too.
+//
+// The SQLSTATE is 22023 invalid_parameter_value, which is what PostgreSQL
+// raises for a precision outside ITS bound ("NUMERIC precision 1001 must be
+// between 1 and 1000", verified live on postgres:17-alpine).
+func ParseDecimalParams(s string) (precision, scale int, err error) {
 	upper := strings.ToUpper(strings.TrimSpace(s))
-	precision, scale = 38, 0 // defaults
+	precision, scale = 38, 0 // a bare DECIMAL
 
 	idx := strings.Index(upper, "(")
-	if idx < 0 {
-		return
-	}
 	end := strings.Index(upper, ")")
-	if end < 0 {
-		return
-	}
-	params := upper[idx+1 : end]
-	parts := strings.Split(params, ",")
-	if len(parts) >= 1 {
+	if idx >= 0 && end > idx {
+		parts := strings.Split(upper[idx+1:end], ",")
+		if len(parts) > 2 {
+			return 0, 0, sqlerr.New("22023",
+				"invalid type %q: DECIMAL takes at most two parameters, a precision and a scale", s)
+		}
 		if p := strings.TrimSpace(parts[0]); p != "" {
-			fmt.Sscanf(p, "%d", &precision)
+			if precision, err = strconv.Atoi(p); err != nil {
+				return 0, 0, sqlerr.New("22023",
+					"invalid type %q: NUMERIC precision %q is not an integer", s, p)
+			}
+		}
+		if len(parts) == 2 {
+			// A scale parameter with no precision beside it is not a
+			// declaration this grammar has; the empty first part above kept
+			// the default 38, which is what `DECIMAL(,2)` would mean.
+			if sc := strings.TrimSpace(parts[1]); sc != "" {
+				if scale, err = strconv.Atoi(sc); err != nil {
+					return 0, 0, sqlerr.New("22023",
+						"invalid type %q: NUMERIC scale %q is not an integer", s, sc)
+				}
+			}
 		}
 	}
-	if len(parts) >= 2 {
-		if s := strings.TrimSpace(parts[1]); s != "" {
-			fmt.Sscanf(s, "%d", &scale)
-		}
+	if precision < 1 || precision > MaxDecimalDigits {
+		return 0, 0, sqlerr.New("22023",
+			"NUMERIC precision %d must be between 1 and %d: wadjet's DECIMAL is a 128-bit "+
+				"unscaled integer and %d digits is its whole range (ADR-0024 item 1), where "+
+				"PostgreSQL's unbounded numeric allows up to 1000",
+			precision, MaxDecimalDigits, MaxDecimalDigits)
 	}
-	return
+	if scale < 0 || scale > precision {
+		return 0, 0, sqlerr.New("22023",
+			"NUMERIC scale %d must be between 0 and the precision %d: the parquet DECIMAL "+
+				"annotation has no form for a negative scale or for a scale past the precision, "+
+				"where PostgreSQL allows -1000 to 1000",
+			scale, precision)
+	}
+	return precision, scale, nil
 }
 
 // ResolveColumn parses a type string into a fully-resolved Column with nested types.
@@ -223,7 +268,10 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 			return Column{Name: name, Type: TypeRow, Nullable: true, Fields: fields}, nil
 
 		case "DECIMAL", "NUMERIC":
-			p, s := ParseDecimalParams(typeStr)
+			p, s, err := ParseDecimalParams(typeStr)
+			if err != nil {
+				return Column{}, err
+			}
 			return Column{Name: name, Type: TypeDecimal, Nullable: true, Precision: p, Scale: s}, nil
 
 		case "VECTOR":
@@ -242,7 +290,11 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 	}
 	col := Column{Name: name, Type: tid, Nullable: true}
 	if tid == TypeDecimal {
-		col.Precision, col.Scale = ParseDecimalParams(typeStr)
+		p, s, err := ParseDecimalParams(typeStr)
+		if err != nil {
+			return Column{}, err
+		}
+		col.Precision, col.Scale = p, s
 	}
 	return col, nil
 }
@@ -306,12 +358,12 @@ func parseRowFields(s string) ([]Column, error) {
 
 // Column defines a column in a Parquet schema.
 type Column struct {
-	Name      string  `json:"name"`
-	Type      TypeID  `json:"type"`
-	Nullable  bool    `json:"nullable"`
-	Precision int     `json:"precision,omitempty"` // for DECIMAL: max digits (1-38)
-	Scale     int     `json:"scale,omitempty"`     // for DECIMAL: digits after decimal point
-	Dimension int     `json:"dimension,omitempty"` // for VECTOR: number of float32 elements
+	Name        string   `json:"name"`
+	Type        TypeID   `json:"type"`
+	Nullable    bool     `json:"nullable"`
+	Precision   int      `json:"precision,omitempty"`    // for DECIMAL: max digits (1-38)
+	Scale       int      `json:"scale,omitempty"`        // for DECIMAL: digits after decimal point
+	Dimension   int      `json:"dimension,omitempty"`    // for VECTOR: number of float32 elements
 	ElementType *Column  `json:"element_type,omitempty"` // for ARRAY: element column definition
 	Fields      []Column `json:"fields,omitempty"`       // for ROW/MAP: child field definitions
 }

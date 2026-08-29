@@ -1228,6 +1228,32 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		// #463 never covered. Both comparison paths now read the integer
 		// input grammar (kernel.Int64FilterConst/Int32FilterConst) and raise
 		// 22P02 for a literal that names no integer, so this AGREES now.
+		// #647: the same accept-set on the INGEST side, where the answer is a
+		// STORED VALUE rather than a row set. A DECIMAL literal wider than the
+		// column used to WRAP the int64 the writer scaled it through
+		// (99999999999999999999.99 into a DECIMAL(9,2) stored
+		// -92233720368547758.08), unparseable text stored 0, and NaN and the
+		// infinities stored 0 as well — all with no error, so the client's
+		// next SELECT read a number nobody wrote.
+		//
+		// Every entry here is a statement PostgreSQL REFUSES, so neither
+		// engine's fixture is mutated by running it. The value/rounding half
+		// of the same rule (' 3.50 ' -> 3.50, 1.239 -> 1.24, 5 -> 5.00) is
+		// gated by wadjet.TestInsertDecimalLiteralFollowsPostgres, because
+		// this corpus has no per-entry setup and cannot compare a statement
+		// that SUCCEEDS on the shared fixture.
+		{name: "DecimalInsertPastDeclaredPrecision",
+			sql: `INSERT INTO dec_probe (d_key, d_grp, d_2) VALUES (900001, 1, 99999999999999999999.99)`},
+		{name: "DecimalInsertExponentPastDeclaredPrecision",
+			sql: `INSERT INTO dec_probe (d_key, d_grp, d_2) VALUES (900002, 1, 1e40)`},
+		{name: "DecimalInsertRoundsIntoOverflow",
+			sql: `INSERT INTO dec_probe (d_key, d_grp, d_2) VALUES (900003, 1, 9999999.999)`},
+		{name: "DecimalInsertNonNumericText",
+			sql: `INSERT INTO dec_probe (d_key, d_grp, d_2) VALUES (900004, 1, 'abc')`},
+		{name: "DecimalInsertInfinity",
+			sql: `INSERT INTO dec_probe (d_key, d_grp, d_2) VALUES (900005, 1, 'Infinity')`},
+		{name: "DecimalInsertWidePastDeclaredPrecision",
+			sql: `INSERT INTO dec_probe (d_key, d_grp, d_wide) VALUES (900006, 1, 123456789012345678901234567890.1234567891)`},
 		{name: "IntegerNonNumericConstant", sql: `SELECT COUNT(*) FROM nation WHERE n_nationkey = 'abc'`},
 		// #536 review: the SQLSTATE for an integer literal that OVERFLOWS the
 		// column type is 22003 (numeric_value_out_of_range), a DIFFERENT code

@@ -744,7 +744,7 @@ func (c *pgConn) handleCopyIn(sql string) {
 				// Batch flush to avoid unbounded memory
 				if len(rows) >= flushBatch {
 					if err := ing.Ingest(ctx, rows); err != nil {
-						c.sendError("ERROR", "XX000", fmt.Sprintf("COPY ingest: %v", err))
+						c.copyIngestError(err)
 						c.drainCopy()
 						return
 					}
@@ -756,7 +756,7 @@ func (c *pgConn) handleCopyIn(sql string) {
 			// Ingest remaining rows
 			if len(rows) > 0 {
 				if err := ing.Ingest(ctx, rows); err != nil {
-					c.sendError("ERROR", "XX000", fmt.Sprintf("COPY ingest: %v", err))
+					c.copyIngestError(err)
 					return
 				}
 			}

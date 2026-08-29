@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // A DECIMAL wider than 64 bits on the ROW path (#419).
@@ -151,7 +153,10 @@ func TestWideDecimalIsBoxedByPrecision(t *testing.T) {
 	for _, tc := range []struct {
 		precision int
 		want128   bool
-	}{{9, false}, {18, false}, {19, true}, {38, true}, {0, false}} {
+		// Precision 0 is the "unconstrained" sentinel and reads as 38 on both
+		// halves of the column's definition — the physical type the writer
+		// picks and the annotation it writes — so it takes the wide box too.
+	}{{9, false}, {18, false}, {19, true}, {38, true}, {0, true}, {50, true}} {
 		if got := decimalNeeds128(Column{Type: TypeDecimal, Precision: tc.precision}); got != tc.want128 {
 			t.Errorf("precision %d: needs Decimal128 = %v, want %v", tc.precision, got, tc.want128)
 		}
@@ -309,6 +314,13 @@ func TestWideDecimalWriteRoundTrip(t *testing.T) {
 // INT64 leaf IS stored in one, and an unscaled value past 64 bits then has no
 // encoding. It must fail the WRITE rather than truncate — the file is the one
 // artifact a writer cannot take back.
+//
+// The refusal it earns is now the DECLARED PRECISION's, which is the stricter
+// and more honest of the two: a DECIMAL(18,0) column bounds its unscaled
+// values below 10^18, well inside the 2^63 the encoding allows, so the value
+// has already violated its own type before the encoding has an opinion
+// (#647). The 64-bit encoding guard behind it is unreachable for that reason
+// and stays as the leaf-write backstop ADR-0018 asks for.
 func TestWriterRefusesADecimalItCannotStore(t *testing.T) {
 	schema := Schema{Columns: []Column{
 		{Name: "d", Type: TypeDecimal, Precision: 18, Scale: 0, Nullable: true},
@@ -326,8 +338,11 @@ func TestWriterRefusesADecimalItCannotStore(t *testing.T) {
 	if err == nil {
 		t.Fatal("writing a 128-bit DECIMAL through the INT64 encoding was accepted")
 	}
-	if !strings.Contains(err.Error(), "more than 64 bits") {
+	if !strings.Contains(err.Error(), "numeric field overflow") {
 		t.Fatalf("error does not name the problem: %v", err)
+	}
+	if got := sqlerr.StateOf(err); got != "22003" {
+		t.Fatalf("SQLSTATE %q, want 22003 numeric_value_out_of_range (err: %v)", got, err)
 	}
 
 	// A value that DOES fit is still written, and still reads back.

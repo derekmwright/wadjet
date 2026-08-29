@@ -2,8 +2,12 @@ package parquet
 
 import (
 	"bytes"
+	"math"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // Regression tests for the DECIMAL write path (issue #144 suite finding):
@@ -36,7 +40,7 @@ func writeDecimalFile(tb testing.TB, scale int, vals []any) []byte {
 	return buf.Bytes()
 }
 
-// TestDecimalUnscaledInt64 pins ADR-0018's writer corollary box by box: an
+// TestDecimalValueFromBox pins ADR-0018 §4's writer corollary box by box: an
 // INTEGER box is already the unscaled value at the column's scale, a REAL or
 // numeric-STRING box carries the decimal point and is scaled here.
 //
@@ -44,7 +48,11 @@ func writeDecimalFile(tb testing.TB, scale int, vals []any) []byte {
 // 700, i.e. "seven point zero zero"). That is the inverse of what the READER
 // hands back for the same column, so read → write multiplied the column by
 // 10^scale every pass (#429).
-func TestDecimalUnscaledInt64(t *testing.T) {
+//
+// The garbage and non-finite rows used to expect the stored value ZERO — a
+// number nobody wrote, indistinguishable from a real one. They are errors now
+// (ADR-0024 item 4, #647); TestDecimalBoxRefusals below is their half.
+func TestDecimalValueFromBox(t *testing.T) {
 	tests := []struct {
 		val   any
 		scale int
@@ -57,12 +65,25 @@ func TestDecimalUnscaledInt64(t *testing.T) {
 		{"12.34", 2, 1234},
 		{"-0.01", 2, -1},
 		{"7", 2, 700},
-		{2.675, 2, 268}, // half rounds away from zero (float repr permitting)
+		{2.675, 2, 268}, // half rounds away from zero (the shortest text is "2.675")
 		{1.005e10, 2, 1005000000000},
 		{99.999, 2, 10000}, // rounds up across the integer boundary
 		{3.25, 0, 3},       // scale 0 keeps integer part, rounded
-		{"garbage", 2, 0},  // unparseable stores 0 (matches toInt64 default)
 		{float32(1.5), 1, 15},
+		// A float32 is spelled at ITS width: 0.1 widened to float64 is
+		// exactly 0.10000000149011612, and reading that spelling at scale 10
+		// would store 1000000015 instead of 1000000000.
+		{float32(0.1), 10, 1000000000},
+		{" 3.50 ", 2, 350},  // PostgreSQL strips C whitespace around numeric input
+		{"-0.005", 2, -1},   // half away from zero, on the negative side
+		{"0.004", 2, 0},     // below half a unit: zero, and no error
+		{"0.0000001", 2, 0}, // more than a place below the scale
+		{"1e3", 2, 100000},  // exponent form
+		{"1.5E-2", 2, 2},    // 0.015 rounds away from zero
+		{"5.", 2, 500},      // one empty part is still a number
+		{".5", 2, 50},       //
+		{"+12.34", 2, 1234}, // leading plus
+		{"-000012.34", 2, -1234},
 		// Integer boxes ARE the unscaled value: stored verbatim.
 		{int64(7), 2, 7},
 		{int(7), 2, 7},
@@ -73,15 +94,62 @@ func TestDecimalUnscaledInt64(t *testing.T) {
 		{int64(7), 0, 7},
 	}
 	for _, tc := range tests {
-		if got := decimalUnscaledInt64(tc.val, tc.scale); got != tc.want {
-			t.Errorf("decimalUnscaledInt64(%v (%T), %d) = %d, want %d", tc.val, tc.val, tc.scale, got, tc.want)
+		got, err := DecimalValueFromBox(tc.val, 18, tc.scale)
+		if err != nil {
+			t.Errorf("DecimalValueFromBox(%v (%T), 18, %d): %v", tc.val, tc.val, tc.scale, err)
+			continue
+		}
+		if got != Decimal128From(tc.want) {
+			t.Errorf("DecimalValueFromBox(%v (%T), 18, %d) = %s, want %d",
+				tc.val, tc.val, tc.scale, got, tc.want)
 		}
 	}
-	// Non-finite floats must not poison the column.
-	if got := decimalUnscaledInt64(nan(), 2); got != 0 {
-		t.Errorf("NaN = %d, want 0", got)
+}
+
+// The boxes that have NO value at the declared type. Every one of them used to
+// be stored as a number: garbage and NaN as 0 through decimalUnscaledInt64's
+// default arms, and anything past 2^63 as the int64 wrap of it (#647).
+func TestDecimalBoxRefusals(t *testing.T) {
+	tests := []struct {
+		name      string
+		val       any
+		precision int
+		scale     int
+		state     string
+	}{
+		{"unparseable text", "garbage", 18, 2, "22P02"},
+		{"empty text", "", 18, 2, "22P02"},
+		{"text with an interior space", "3 .5", 18, 2, "22P02"},
+		{"a no-break space is not C whitespace", " 3.5", 18, 2, "22P02"},
+		{"NaN text", "NaN", 18, 2, "22003"},
+		{"infinity text", "Infinity", 18, 2, "22003"},
+		{"negative infinity text", "-inf", 18, 2, "22003"},
+		{"NaN float", nan(), 18, 2, "22003"},
+		{"+Inf float", inf(1), 18, 2, "22003"},
+		{"-Inf float", inf(-1), 18, 2, "22003"},
+		{"past the declared precision", "99999999999999999999.99", 9, 2, "22003"},
+		{"exponent past the carrier", "1e40", 9, 2, "22003"},
+		{"rounding into the overflow", "9999999.999", 9, 2, "22003"},
+		{"unscaled integer box past the precision", int64(1_000_000_000), 9, 2, "22003"},
+		{"past 38 digits at every precision", "1" + strings.Repeat("0", 38), 38, 0, "22003"},
+		{"a box that is not a number at all", []byte{1}, 18, 2, "22P02"},
+		{"a bool box", true, 18, 2, "22P02"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecimalValueFromBox(tc.val, tc.precision, tc.scale)
+			if err == nil {
+				t.Fatalf("DecimalValueFromBox(%v (%T), %d, %d) = no error, want %s",
+					tc.val, tc.val, tc.precision, tc.scale, tc.state)
+			}
+			if got := sqlerr.StateOf(err); got != tc.state {
+				t.Fatalf("SQLSTATE %q, want %q (err: %v)", got, tc.state, err)
+			}
+		})
 	}
 }
+
+func inf(sign int) float64 { return math.Inf(sign) }
 
 func nan() float64 {
 	f := 0.0

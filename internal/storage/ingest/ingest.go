@@ -212,6 +212,18 @@ func checkType(col parquet.Column, v any) error {
 		default:
 			return fmt.Errorf("column %q: expected duration (time.Duration, int64, or string), got %T", col.Name, v)
 		}
+	case parquet.TypeDecimal:
+		// Refuse a value with no DECIMAL at this column's (p, s) HERE, at the
+		// ingest boundary, rather than at the flush that eventually writes it.
+		// The writer refuses it too — DecimalValueFromBox is the same function
+		// on both sides — but the flush happens per BUFFER, so a single bad
+		// row failing there takes a batch of good ones with it and reports
+		// against a partition rather than against the INSERT that carried it
+		// (#647). Nothing is rewritten: the box the writer receives is the box
+		// this row already holds.
+		if _, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); err != nil {
+			return fmt.Errorf("column %q: %w", col.Name, err)
+		}
 	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap:
 		// Reject an unparseable or nonexistent calendar date NESTED in a
 		// container at the ingest boundary, before the writer's leaf turns

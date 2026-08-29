@@ -1309,7 +1309,16 @@ func decodeDecimalValues(dst []any, data Values, n int, col Column) error {
 			return nil
 		}
 		for i := 0; i < n && i+1 < len(offsets); i++ {
-			hi, lo := decimalFromBytesRaw(rawData[offsets[i]:offsets[i+1]])
+			entry := rawData[offsets[i]:offsets[i+1]]
+			// An entry wider than the carrier is a file wadjet cannot read,
+			// not a value to truncate: decimalFromBytesRaw shifts the leading
+			// bytes out of `hi` and answers a different number (R7/#647).
+			if len(entry) > decimalFLBAMaxWidth {
+				return fmt.Errorf("column %q: DECIMAL entry %d is %d bytes; wadjet's DECIMAL is a "+
+					"%d-byte unscaled integer (at most %d digits, ADR-0024 item 1)",
+					col.Name, i, len(entry), decimalFLBAMaxWidth, MaxDecimalDigits)
+			}
+			hi, lo := decimalFromBytesRaw(entry)
 			d := Decimal128{Hi: hi, Lo: lo}
 			if wide {
 				dst[i] = d
@@ -1333,12 +1342,16 @@ func decodeDecimalValues(dst []any, data Values, n int, col Column) error {
 // an INT64, so this is exactly the set of columns the narrow box cannot
 // carry.
 //
-// A column that declares no precision at all keeps the narrow box: an
-// unannotated DECIMAL is a malformed file rather than a wide one, and the
-// per-value fit check in decodeDecimalValues refuses a value that overflows
-// instead of returning a different number for it.
+// A column that declares no precision at all takes the WIDE box, because that
+// is what the writer gives it: decimalEffectivePrecision reads an unset
+// precision as 38 both when it picks the physical type and when it writes the
+// annotation, so a `Precision: 0` column is a FIXED_LEN_BYTE_ARRAY leaf
+// annotated DECIMAL(38, s) and the narrow box cannot carry every value it may
+// hold. The narrow box here used to disagree with that (#647): it was chosen
+// from the raw field while the annotation defaulted to 38, so the two halves
+// of one column's definition read the same file differently.
 func decimalNeeds128(col Column) bool {
-	return col.Precision > 18
+	return decimalEffectivePrecision(col.Precision) > decimalMaxInt64Precision
 }
 
 // ValidateDictIndices checks that a page's dictionary indices are all
@@ -1565,12 +1578,26 @@ func (r *Reader) RowGroupNumRows(index int) int64 {
 	return r.fr.RowGroupNumRows(index)
 }
 
-// decimalFromBytes converts big-endian two's complement bytes to Int128.
-// Exported for use by the physical planner's decimal page reader.
-func DecimalFromBytes(b []byte) [2]uint64 {
+// DecimalFromBytes converts a big-endian two's-complement DECIMAL entry to the
+// two words of an Int128. Exported for the native scan's decimal page reader.
+//
+// An entry WIDER than sixteen bytes is an error, not a value: the loop below
+// shifts the leading bytes straight out of `hi`, so a 32-byte entry — which is
+// what a foreign file written at a precision past 38 carries — used to come
+// back as its own low 128 bits, a different number, with no error at all
+// (R7/#647). Sixteen bytes is the whole range this carrier has (ADR-0024
+// item 1), and a file that needs more is a file wadjet cannot read.
+func DecimalFromBytes(b []byte) ([2]uint64, error) {
 	n := len(b)
+	if n > decimalFLBAMaxWidth {
+		return [2]uint64{}, fmt.Errorf(
+			"DECIMAL entry is %d bytes; wadjet's DECIMAL is a %d-byte unscaled integer "+
+				"(a precision of at most %d digits, ADR-0024 item 1), and reading the entry "+
+				"would silently drop its leading bytes",
+			n, decimalFLBAMaxWidth, MaxDecimalDigits)
+	}
 	if n == 0 {
-		return [2]uint64{}
+		return [2]uint64{}, nil
 	}
 
 	negative := b[0]&0x80 != 0
@@ -1603,7 +1630,7 @@ func DecimalFromBytes(b []byte) [2]uint64 {
 		}
 	}
 
-	return [2]uint64{hi, lo}
+	return [2]uint64{hi, lo}, nil
 }
 
 // Decimal128 is the row path's box for a DECIMAL column's UNSCALED value,
@@ -1649,7 +1676,11 @@ func (d Decimal128) String() string {
 }
 
 // decimalFromBytesRaw converts big-endian byte array to Int128 (hi, lo).
-// Used internally by readDecimalPage.
+//
+// Its one caller, decodeDecimalValues, refuses an entry wider than
+// decimalFLBAMaxWidth before calling — this loop drops the leading bytes of
+// one silently, which is the whole of R7/#647. DecimalFromBytes is the
+// exported form that carries the check itself, for a caller outside this file.
 func decimalFromBytesRaw(b []byte) (int64, uint64) {
 	n := len(b)
 	if n == 0 {

@@ -180,20 +180,50 @@ the CAST evaluator lands (#555); and the UNCHECKED WRITE PATHS store 0 for all
 three exactly as they do for `'abc'`, which is item 4's residual over the whole
 type rather than anything specific to these values.
 
-There are TWO unchecked write paths and both are named here, because only one
+There were TWO unchecked write paths and both are named here, because only one
 is on the line a user's INSERT actually takes. `batch.ParseDecimalString` via
-`Vector.SetValue` is the row-to-batch adapter. `parquet.decimalUnscaledInt64`
-(and `decimalFLBABytes` beside it) is the FILE WRITER, and it is the one an
-ingested row reaches: its string arm sends every value through
-`strconv.ParseFloat`, so unparseable text stores 0, a NaN or an infinity
-stores 0 through the float arm's own guard, `' 3.50 '` stores 0 because
-ParseFloat refuses the surrounding space, and anything past float64's ~16
-significant digits loses its exactness on the way in. Tracked as #647, not
-closed here. One predicate serves both refusal sites — the plan-time
-one (`physical.refuseLiteralForType` → `expr.IsNumericLiteralText`) and the
-runtime one (`kernel.DecimalLiteral.Numeric`) — so the accept-set cannot
-differ between them; the row-group prune withholds for these literals
+`Vector.SetValue` is the row-to-batch adapter, and it is STILL the unchecked
+one by contract — `Vector.SetValueChecked` is the sibling every value-producing
+caller takes. `parquet.decimalUnscaledInt64` (and `decimalFLBABytes` beside it)
+was the FILE WRITER, and it is the one an ingested row reaches: its string arm
+sent every value through `strconv.ParseFloat`, so unparseable text stored 0, a
+NaN or an infinity stored 0 through the float arm's own guard, `' 3.50 '`
+stored 0 because ParseFloat refuses the surrounding space, a literal wider than
+the column WRAPPED the int64 (`99999999999999999999.99` into a `DECIMAL(9,2)`
+stored `-92233720368547758.08`), and anything past float64's ~16 significant
+digits lost its exactness on the way in. One predicate serves both refusal
+sites — the plan-time one (`physical.refuseLiteralForType` →
+`expr.IsNumericLiteralText`) and the runtime one
+(`kernel.DecimalLiteral.Numeric`) — so the accept-set cannot differ between
+them; the row-group prune withholds for these literals
 (`kernel.StatsDomainValue`), which costs a prune and cannot cost a row.
+
+**The writer half was closed 2026-08-29 (#647).** `parquet.DecimalValueFromBox`
+replaces `decimalUnscaledInt64` as the one door every DECIMAL box takes into a
+leaf, called from `NativeWriter.decomposeLeaf` where the column, its declared
+`(p, s)` and the row number are all still known — the same site and the same
+`nw.fail` channel the DATE literal already used (#560). It parses text exactly
+with no float64 anywhere, rounds a finer-scale literal to the column's scale
+half away from zero as PostgreSQL does ON ASSIGNMENT (`INSERT 1.239` into
+`numeric(9,2)` is `1.24` there, verified live — this is where a value STORE
+parts company with a COMPARISON, which keeps the dropped digits as a residual),
+spells a float box through its shortest round-trip text at the width the box
+arrived in, treats an integer box as the already-unscaled carrier of §4 above,
+and holds every result to the declared precision with PostgreSQL's own message
+("a field with precision 9, scale 2 must round to an absolute value less than
+10^7"). `internal/storage/ingest.checkType` calls the same function at the
+ingest boundary so a bad row fails its INSERT rather than the buffer's later
+flush. Both INSERT executors (`wadjet/dml.go` for the embedded API and pgwire,
+`internal/server/server.go` for the HTTP server) and COPY reach it through
+`ingest`; the stage DAG has no ingest path of its own.
+
+The GRAMMAR moved with it. `batch.DecimalTextAt`, `batch.DecimalSpecialText`
+and `batch.DecimalSpecialValueError` now read through
+`parquet.DecimalTextParts` / `parquet.DecimalSpecialText` /
+`parquet.DecimalSpecialValueError`: `batch` imports `parquet`, so the lower
+package is the only place ONE accept-set can sit — the reason `ParseDateDays`
+lives there too. `batch.TestDecimalGrammarMatchesBatch` is the gate that keeps
+the two sides one function.
 
 The accept-set is PostgreSQL 17.11's numeric input grammar, taken from a live
 transcript: C whitespace trimmed; `nan` case-insensitive and with NO sign
@@ -237,7 +267,25 @@ carrier (item 1's reopen clause). The shape — `DECIMAL(38,0)` beside
 - Deliberate divergences from PostgreSQL, all recorded in ADR-0012 item 12's
   list: digits kept past 38 (item 3); the 38-digit range on stored values
   (item 7); NaN/Infinity not storable (item 6); STDDEV/VARIANCE/CORR/COVAR
-  /MEDIAN/PERCENTILE over DECIMAL stay float64 (ADR-0012 item 9).
+  /MEDIAN/PERCENTILE over DECIMAL stay float64 (ADR-0012 item 9); and the DDL
+  refusal below.
+- **DDL refuses a `(p, s)` PostgreSQL accepts** (added 2026-08-29 with #647).
+  `parquet.ParseDecimalParams` now holds a declaration to `1 <= p <= 38` and
+  `0 <= s <= p`, raising `22023 invalid_parameter_value` in PostgreSQL's own
+  message shape ("NUMERIC precision 50 must be between 1 and 38"). PostgreSQL
+  accepts `numeric(p, s)` to p = 1000 and a scale from -1000 to 1000, `s > p`
+  included, because its numeric is unbounded. Item 1's carrier makes
+  `DECIMAL(50,2)` a column no value can satisfy, and the writer's answer to
+  one was a 16-byte FIXED_LEN_BYTE_ARRAY leaf annotated `DECIMAL(50, s)` — an
+  annotation the payload cannot hold, in a file the Apache implementation
+  refuses to open. The scale half of the bound is the PARQUET FORMAT's, not
+  wadjet's: its DECIMAL logical type has no form for a negative scale or for a
+  scale past the precision. Refusing the DECLARATION is the honest answer; the
+  alternative is a column that lies about itself in every file it writes.
+  `Precision <= 0` — the in-Go "unconstrained" sentinel, which no DDL now
+  produces — reads as 38 on BOTH halves of a column's definition (the physical
+  type the writer picks and the annotation it writes), where it used to be an
+  INT64 leaf annotated `DECIMAL(38, s)`.
 - Refuted premise, recorded: "DECIMAL would be ideal but Wadjet uses float"
   in the TPC-H schema was an engine limitation, not a design choice, and its
   presence meant the type had no benchmark and no 22-query gate for two

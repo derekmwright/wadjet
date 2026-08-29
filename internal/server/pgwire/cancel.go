@@ -207,6 +207,22 @@ func (c *pgConn) sendQueryError(ctx context.Context, code string, err error) {
 	c.sendError("ERROR", code, err.Error())
 }
 
+// copyIngestError reports a COPY row the ingester refused.
+//
+// A value with no DECIMAL at its column's (p, s) is 22003, and text that names
+// no number is 22P02 — the same codes the same value earns through INSERT,
+// because both go through parquet.DecimalValueFromBox (#647). The blanket
+// XX000 this replaced told a client nothing it could branch on, and COPY is
+// the bulk path where a client most needs to tell "this row is bad" from
+// "the server broke".
+func (c *pgConn) copyIngestError(err error) {
+	code := "XX000"
+	if s := sqlerr.StateOf(err); s != "" {
+		code = s
+	}
+	c.sendError("ERROR", code, fmt.Sprintf("COPY ingest: %v", err))
+}
+
 func randInt32() (int32, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
