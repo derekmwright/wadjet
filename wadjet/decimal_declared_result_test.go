@@ -37,6 +37,11 @@ func ddrOpen(t *testing.T) *DB {
 		{Name: "arr", Type: parquet.TypeArray, Nullable: true,
 			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeDecimal,
 				Precision: 9, Scale: 2, Nullable: true}},
+		// A genuine STRING column holding numeric-looking text: the other
+		// half of the pair no BOX can tell apart (#504). A DECIMAL renders
+		// as text and so does this, and only the DECLARATION says which of
+		// them compares as a number and which as bytes.
+		{Name: "s", Type: parquet.TypeString, Nullable: true},
 	}}
 	if err := db.CreateTable(ctx, ddrTable, schema, nil); err != nil {
 		t.Fatal(err)
@@ -58,14 +63,16 @@ func ddrOpen(t *testing.T) *DB {
 		// a = 12.75 (scale 2), b = 12.7500 / 12.7501 / 12.7499 (scale 4):
 		// the ±1-ulp neighbourhood where a rounded comparison and an exact
 		// one disagree.
-		{"id": int64(1), "a": dec(1275), "b": dec(127500), "arr": arr(1275, true)},
-		{"id": int64(2), "a": dec(1275), "b": dec(127501), "arr": arr(1275, true)},
-		{"id": int64(3), "a": dec(1275), "b": dec(127499), "arr": arr(1275, true)},
+		// s carries a's number in a DIFFERENT spelling on most rows, so the
+		// text rule and the numeric one disagree about all but rows 1 and 4.
+		{"id": int64(1), "a": dec(1275), "b": dec(127500), "arr": arr(1275, true), "s": "12.75"},
+		{"id": int64(2), "a": dec(1275), "b": dec(127501), "arr": arr(1275, true), "s": "12.7500"},
+		{"id": int64(3), "a": dec(1275), "b": dec(127499), "arr": arr(1275, true), "s": "abc"},
 		// "2.00" sorts above "10.0000" as TEXT and below it as a number.
-		{"id": int64(4), "a": dec(200), "b": dec(100000), "arr": arr(200, true)},
-		{"id": int64(5), "a": dec(-1), "b": dec(-100), "arr": arr(-1, true)},
-		{"id": int64(6), "b": dec(10000), "arr": arr(0, false)},
-		{"id": int64(7), "a": dec(1275), "arr": arr(1275, true)},
+		{"id": int64(4), "a": dec(200), "b": dec(100000), "arr": arr(200, true), "s": "2.00"},
+		{"id": int64(5), "a": dec(-1), "b": dec(-100), "arr": arr(-1, true), "s": "-0.0100"},
+		{"id": int64(6), "b": dec(10000), "arr": arr(0, false), "s": "1"},
+		{"id": int64(7), "a": dec(1275), "arr": arr(1275, true), "s": "12.750"},
 	}
 	ing := db.NewIngester(ddrTable, schema, nil, ingest.Config{MaxBufferRows: len(rows) + 1})
 	if err := ing.Ingest(ctx, rows); err != nil {
@@ -702,6 +709,42 @@ func TestAggregateOverAChoiceCarriesNoTypmod(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("%s: column %q not in result", tc.sql, tc.col)
+		}
+	}
+}
+
+// TestNullifOverAStringColumnStillComparesAsText is #504's rule at the site
+// the previous fix over-reached into.
+//
+// The numeric fallback evalNullIf gained is for a DECIMAL against an operand
+// this layer CANNOT CLASSIFY — a scalar subquery, a container element. Gated
+// on "either side is DECIMAL" it also fired for a DECIMAL against a genuine
+// TEXT column, and then NULLIF read "12.7500" as a number where `=`,
+// GREATEST, CASE … WHEN and IS DISTINCT FROM all read it as bytes: one
+// commit, five sites, two answers for one question.
+//
+// The assertion is that INTERNAL agreement, not a fixed row set: whatever
+// `s = a` decides, NULLIF must decide the same way, in both argument orders.
+func TestNullifOverAStringColumnStillComparesAsText(t *testing.T) {
+	db := ddrOpen(t)
+	rowsOf := func(sql string) string {
+		return fmt.Sprintf("%v", ddrQuery(t, db, sql).Rows)
+	}
+	eq := rowsOf("SELECT id FROM " + ddrTable + " WHERE s = a ORDER BY id")
+	// s = a matches only where the two RENDERINGS are byte-identical:
+	// "12.75" on row 1 and "2.00" on row 4. Not row 2 ("12.7500"), not row 5
+	// ("-0.0100"), not row 7 ("12.750").
+	if eq != "[map[id:1] map[id:4]]" {
+		t.Fatalf("s = a matched %s — this test's premise is that a STRING column "+
+			"compares AS TEXT (#504); if that changed, every site below changes with it", eq)
+	}
+	for _, sql := range []string{
+		"SELECT id FROM " + ddrTable + " WHERE NULLIF(s, a) IS NULL AND s IS NOT NULL ORDER BY id",
+		"SELECT id FROM " + ddrTable + " WHERE NULLIF(a, s) IS NULL AND a IS NOT NULL ORDER BY id",
+	} {
+		if got := rowsOf(sql); got != eq {
+			t.Errorf("%s\n  got  %s\n  want %s (the rows `s = a` matches — NULLIF must read a "+
+				"STRING column the way every sibling site reads it)", sql, got, eq)
 		}
 	}
 }

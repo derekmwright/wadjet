@@ -159,9 +159,13 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 			Precision: col.Precision,
 			Scale:     col.Scale,
 			// A plan property (FIX 2, #457/#458 fold-in): which DECIMAL
-			// columns are aggregate output, and so must declare typmod -1
-			// on the wire regardless of the real Precision/Scale above.
-			WireUnconstrained: res.WireUnconstrainedDecimal[name],
+			// columns carry no PostgreSQL type modifier, and so must declare
+			// typmod -1 on the wire regardless of the real Precision/Scale
+			// above. The plan's map is not gated on the column being DECIMAL
+			// — it cannot be, since the plan cannot always type an aggregate
+			// output — so the gate is applied here, keeping the field's
+			// documented DECIMAL meaning.
+			WireUnconstrained: col.Type == parquet.TypeDecimal && res.WireUnconstrainedDecimal[name],
 		}
 	}
 	return metas

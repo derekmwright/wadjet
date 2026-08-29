@@ -234,14 +234,25 @@ func elementOperandKind(container Expr, b *batch.RecordBatch) (boxKind, bool) {
 	return boxUnknown, true
 }
 
-// eitherDecimal reports whether either of the first two armed operands is
-// declared DECIMAL. It is the gate a site uses before reading two boxes as the
-// numbers they name rather than as the strings they are.
-func (a *extremumArms) eitherDecimal(b *batch.RecordBatch) bool {
+// decimalVsUnclassifiable reports whether the first two armed operands are a
+// DECIMAL against an operand whose declaration this layer could not read at
+// all — a scalar subquery, a container element. It is the gate a site uses
+// before reading two boxes as the numbers they name rather than as the
+// strings they are.
+//
+// Both halves are load-bearing. "Either side is DECIMAL" alone would read a
+// genuine STRING column numerically the moment a DECIMAL stood beside it, and
+// that is #504's rule inverted: a TEXT column compares AS TEXT whatever its
+// digits look like, which is what `s = a`, GREATEST(s, b), CASE s WHEN b and
+// IS DISTINCT FROM all do. Every pair whose two declarations ARE known —
+// decimal/decimal, decimal/number, decimal/quoted — is already answered by
+// extremumArms.order and never reaches this.
+func (a *extremumArms) decimalVsUnclassifiable(b *batch.RecordBatch) bool {
 	if a == nil || len(a.ops) < 2 {
 		return false
 	}
-	return a.ops[0].resolve(b) == boxDecimal || a.ops[1].resolve(b) == boxDecimal
+	l, r := a.ops[0].resolve(b), a.ops[1].resolve(b)
+	return (l == boxDecimal && r == boxUnknown) || (r == boxDecimal && l == boxUnknown)
 }
 
 // joinOperandKinds is classifyOperand over a set of alternatives that one

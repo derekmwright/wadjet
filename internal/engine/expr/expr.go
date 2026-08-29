@@ -2819,11 +2819,14 @@ func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
 	// element. compare() would then order two DECIMAL renderings by BYTES,
 	// and "12.75" is not "12.7500" bytewise though they are one number:
 	// `NULLIF(d, (SELECT d4 …))` answered the row where PostgreSQL answers
-	// NULL. Whenever EITHER side is declared DECIMAL and both boxes are
-	// numeric text, they are compared as the numbers they name. The gate is
-	// the DECLARATION, so a genuine STRING column holding numeric-looking
-	// text still compares as text (#504).
-	if arms.eitherDecimal(b) {
+	// NULL. A DECIMAL against an UNCLASSIFIABLE operand is therefore
+	// compared as the numbers the two boxes name.
+	//
+	// Against a TEXT operand it is not: a STRING column compares AS TEXT
+	// whatever its digits look like (#504), which is what every sibling site
+	// does for the same pair, and reading it numerically here made NULLIF
+	// disagree with `=`, GREATEST, CASE and IS DISTINCT FROM on one commit.
+	if arms.decimalVsUnclassifiable(b) {
 		if ls, ok := args[0].(string); ok {
 			if rs, ok := args[1].(string); ok {
 				if c, ok := batch.CompareDecimalTexts(ls, rs); ok {
@@ -3481,7 +3484,7 @@ func init() {
 		"coalesce": {fnCoalesce, RetSameAsArg(batch.TypeFloat64)},
 		"nullif":   {fnNullIf, RetSameAsArg(batch.TypeFloat64, 0)},
 		"ifnull":   {fnIfNull, RetSameAsArg(batch.TypeString, 0, 1)},
-		"if":       {fnIf, RetSameAsArg(batch.TypeString, 1, 2)},
+		"if":       {fnIf, RetSameAsArg(batch.TypeString, 1, 2).Control(0)},
 
 		// Type casting
 		"cast_int":    {fnCastInt, RetInt64},

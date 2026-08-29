@@ -93,6 +93,21 @@ type Ret struct {
 	// args lists the candidate argument positions a polymorphic return
 	// mirrors, in preference order. Empty means every argument.
 	args []int
+	// ctrl lists argument positions that STEER the choice without ever
+	// becoming its value — IF's condition, and nothing else today. They are
+	// evaluated, so they are not absent, but they cannot arrive in the
+	// output vector and therefore cannot make a DECIMAL fold unsafe. Every
+	// other non-candidate argument can: NULLIF's argument 1 is compared
+	// rather than returned and still has to be seen, because the pair's
+	// COMPARISON is only correct when both declarations are known.
+	ctrl []int
+}
+
+// Control marks argument positions that steer a polymorphic choice without
+// supplying its value. See Ret.ctrl.
+func (r Ret) Control(args ...int) Ret {
+	r.ctrl = args
+	return r
 }
 
 type retKind uint8
@@ -165,6 +180,17 @@ func (r Ret) SameAsArgs(nargs int) ([]int, bool) {
 	return all, true
 }
 
+// isControl reports whether argument i steers the choice without supplying
+// its value. See Ret.ctrl.
+func (r Ret) isControl(i int) bool {
+	for _, c := range r.ctrl {
+		if c == i {
+			return true
+		}
+	}
+	return false
+}
+
 // RetTypeOf builds a fixed declaration for a type without a named constant
 // above. Kept for callers registering functions over the network-native types.
 func RetTypeOf(t batch.TypeID) Ret { return Ret{kind: retFixed, typ: t} }
@@ -234,6 +260,38 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 		return DeclType{ID: r.typ}, Decided
 	case retSameAsArg:
 		if argType != nil {
+			// ONE pass, and one argType call per argument. argType is a
+			// recursive walk of the argument's whole expression tree on the
+			// planner side, so asking twice — once for the candidate fold
+			// and once for the safety check — cost 2^depth over nested
+			// polymorphic calls: a linear-text COALESCE nested 22 deep took
+			// 2.7 seconds to PLAN, and 30 deep would not have finished
+			// (#555's review, round 4).
+			seen := make([]DeclType, nargs)
+			conf := make([]Confidence, nargs)
+			sawUnknown := false
+			for i := 0; i < nargs; i++ {
+				t, c := argType(i)
+				seen[i], conf[i] = t, c
+				// sawUnknown over EVERY argument that can supply or be
+				// COMPARED against the value — not over the candidate list.
+				// The two are the same for coalesce/greatest/least and
+				// different for nullif, whose candidate list is [0] while
+				// argument 1 is the one it compares against: an operand this
+				// layer cannot type produces a DECIMAL at its own scale
+				// whether or not the result is taken from it, so
+				// `NULLIF(a, (SELECT b …))` declared numeric(9,2) from
+				// argument 0 alone and the runtime then compared "12.75"
+				// against "12.7500" by bytes. A CONTROL argument is exempt:
+				// it steers and never arrives.
+				if c == Undecided && !t.Untyped && !r.isControl(i) {
+					sawUnknown = true
+				}
+			}
+			// The candidate fold runs in the declaration's PREFERENCE order,
+			// which is not always positional: RetSameAsArg names the
+			// positions it mirrors, first one wins, and a guess is kept in
+			// that same order (#331).
 			candidates := r.args
 			if len(candidates) == 0 {
 				candidates = make([]int, nargs)
@@ -247,30 +305,13 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 				if i < 0 || i >= nargs {
 					continue
 				}
-				switch t, c := argType(i); c {
+				switch conf[i] {
 				case Decided:
-					decided = append(decided, t)
+					decided = append(decided, seen[i])
 				case Guessed:
 					if !guessed {
-						guess, guessed = t, true
+						guess, guessed = seen[i], true
 					}
-				}
-			}
-			// sawUnknown is computed over EVERY argument, not over the
-			// candidate list. The two are the same for coalesce/greatest/
-			// least and different for nullif, whose candidate list is [0]
-			// while argument 1 is the one it COMPARES against — and an
-			// operand this layer cannot type produces a DECIMAL at its own
-			// scale whether or not the result is taken from it.
-			// `NULLIF(a, (SELECT b …))` therefore declared numeric(9,2)
-			// from argument 0 alone, no decline fired, and the runtime
-			// compared "12.75" against "12.7500" by bytes and answered 12.75
-			// where PostgreSQL answers NULL.
-			sawUnknown := false
-			for i := 0; i < nargs; i++ {
-				if t, c := argType(i); c == Undecided && !t.Untyped {
-					sawUnknown = true
-					break
 				}
 			}
 			if d, ok := CommonDeclType(decided, sawUnknown); ok {

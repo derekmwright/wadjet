@@ -798,6 +798,19 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeName = "STRING"
 		}
 	}
+	// WireUnconstrained means what its name and its doc say: a DECIMAL whose
+	// wire type modifier must be -1. The PLAN's map answers the typmod
+	// question without a type gate — it cannot have one, because the plan
+	// cannot always type an aggregate output
+	// (physical.declaredWireUnconstrainedDecimal) — so the gate is applied
+	// here, where the resolved type is finally known. pgTypeMod reads the
+	// field only on the DECIMAL arm either way, so this keeps the FIELD's
+	// contract rather than changing the wire's behaviour.
+	for i := range metas {
+		if metas[i].TypeID != parquet.TypeDecimal {
+			metas[i].WireUnconstrained = false
+		}
+	}
 	return metas
 }
 

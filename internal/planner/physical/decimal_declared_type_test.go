@@ -2,6 +2,7 @@ package physical
 
 import (
 	"testing"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -275,5 +276,67 @@ func TestDecimalFoldDeclinesOverAnUnknownProducer(t *testing.T) {
 				t.Errorf("%s\n  declared (%v, %s), want (%v, %s)", tc.sql, got, c, tc.want, tc.wantC)
 			}
 		})
+	}
+}
+
+// TestNestedChoiceDeclarationIsLinearInDepth is a COMPLEXITY gate, not a value
+// one.
+//
+// expr.Ret.Resolve asks its caller for each argument's type through argType,
+// and on the planner side that callback is a full recursive walk of the
+// argument's expression tree. Asking twice per argument — once for the
+// candidate fold, once for the safety check the review added — makes the walk
+// 2^depth over nested polymorphic calls: a linear-text COALESCE nested 22
+// deep took 2.7 seconds to PLAN and 30 deep would not have finished, from 287
+// bytes of SQL. Resolve makes exactly one call per argument now.
+//
+// The bound is deliberately loose (a second for depth 24, which the linear
+// form does in well under a millisecond) so the test fails on a return of the
+// exponential shape and never on a slow machine.
+func TestNestedChoiceDeclarationIsLinearInDepth(t *testing.T) {
+	decls := decDecls()
+	nest := func(fn string, depth int) string {
+		out := "a"
+		for i := 0; i < depth; i++ {
+			out = fn + "(" + out + ", b)"
+		}
+		return out
+	}
+	for _, fn := range []string{"COALESCE", "GREATEST", "LEAST"} {
+		for _, depth := range []int{8, 16, 24} {
+			sql := nest(fn, depth)
+			node, err := plansql.ParseExpression(sql)
+			if err != nil {
+				t.Fatalf("parse %s depth %d: %v", fn, depth, err)
+			}
+			start := time.Now()
+			got, c := nodeDeclaredType(node, decls)
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("%s nested %d deep took %v to declare — the argument walk is "+
+					"exponential in depth again", fn, depth, elapsed)
+			}
+			// And the answer is still the common type of a (9,2) and b (18,4).
+			if want := expr.DeclDecimal(18, 4); got != want || c != expr.Decided {
+				t.Errorf("%s nested %d deep declared (%v, %s), want (%v, DECIDED)",
+					fn, depth, got, c, want)
+			}
+		}
+	}
+	// A CASE nests through its own fold rather than through Ret.Resolve, and
+	// must stay linear for the same reason.
+	sql := "a"
+	for i := 0; i < 24; i++ {
+		sql = "CASE WHEN i64 > 0 THEN " + sql + " ELSE b END"
+	}
+	node, err := plansql.ParseExpression(sql)
+	if err != nil {
+		t.Fatalf("parse nested CASE: %v", err)
+	}
+	start := time.Now()
+	if got, c := nodeDeclaredType(node, decls); got != expr.DeclDecimal(18, 4) || c != expr.Decided {
+		t.Errorf("nested CASE declared (%v, %s), want (DECIMAL(18,4), DECIDED)", got, c)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("a CASE nested 24 deep took %v to declare", elapsed)
 	}
 }
