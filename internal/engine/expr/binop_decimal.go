@@ -249,6 +249,27 @@ func (e *Lit) decimalVec(_ *batch.RecordBatch) (kernel.DecimalOperandVec, bool) 
 	return kernel.DecimalOperandVec{Const: v, Scale: t.Scale}, true
 }
 
+// litIsExactDecimal reports whether a literal is a DECIMAL operand rather than
+// an integer one.
+//
+// The test is the box compileLit built, not the text: it puts an int64 in the
+// box exactly when strconv.ParseInt accepted the digits, which is exactly when
+// integer arithmetic can carry the value. Anything else with a fixed-point
+// spelling — a fraction, an exponent form, or an integer too wide for an
+// int64 — is a DECIMAL here, because the float64 box compileLit fell back to
+// cannot carry it and the exact carrier can.
+//
+// physical.decimalArithOperand makes the same test over the AST, with the same
+// strconv.ParseInt, so the declaration and the runtime cannot disagree.
+func litIsExactDecimal(v *Lit) bool {
+	switch v.Val.(type) {
+	case int64, int32, int:
+		return false
+	}
+	_, _, ok := v.decimalValue()
+	return ok
+}
+
 // decimalValue reads the literal's exact fixed-point form. Only a NUMERIC
 // literal has one: Lit.Text is set by compileLit for exactly that shape and is
 // empty for every other kind, so it is both the carrier and the test.
@@ -301,6 +322,19 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 	if !operandIsDecimalTyped(left, b) && !operandIsDecimalTyped(right, b) {
 		return decMode{}, false
 	}
+	if op == "/" && isConstNumericLit(left) && isConstNumericLit(right) {
+		// A division between two CONSTANTS keeps the float path it has always
+		// had. Item 3's division scale is a policy FLOOR of 6 fraction digits,
+		// chosen for column operands whose own precision drives it past that;
+		// between two narrow literals the floor is all there is, so `1.0 / 3`
+		// would answer 0.333333 where the double it replaces — and PostgreSQL,
+		// which keeps at least 16 significant digits — answer 0.33333333….
+		// Every other operator is exact at a scale derived from the operands'
+		// OWN scales and drops nothing, which is why only this one declines
+		// (TestCompileBinOpDivision has pinned the float answer for this shape
+		// since #369).
+		return decMode{}, false
+	}
 	p, s, ok := batch.DecimalResultType(op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
 	if !ok {
 		return decMode{}, false
@@ -330,11 +364,12 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 		}
 		return v.typ == batch.TypeDecimal
 	case *Lit:
-		// A numeric literal with a FRACTION is a decimal the user wrote:
-		// `i64 * 1.5` is numeric in PostgreSQL, not integer. A whole-number
-		// literal is not, so `i64 * 2` stays integer.
-		t, _, ok := v.decimalValue()
-		return ok && t.Scale > 0
+		// An INTEGER literal is not decimal-typed: integer arithmetic owns it,
+		// and `i64 * 2` must stay integer. Every OTHER numeric literal is a
+		// decimal the user wrote — `i64 * 1.5` is numeric in PostgreSQL — and
+		// so is one too wide for an int64, which compileLit boxes as a float
+		// and which must not be read through one (#555 review, R2).
+		return litIsExactDecimal(v)
 	case *BinOpNumeric:
 		v.resolveMode(b)
 		return v.isDec
@@ -739,6 +774,16 @@ func raiseIntegerOutOfRange(dest string) {
 	panic(fatalEval{sqlerr.New("22003", "%s out of range", name)})
 }
 
+// raiseCannotCastToNumeric is PostgreSQL's refusal for a source type that has
+// no numeric cast at all — `cannot cast type boolean to numeric`, SQLSTATE
+// 42846 cannot_coerce. The TYPE PAIR is what is wrong, not the text, so 22P02
+// invalid_text_representation reports the wrong thing: a client retrying with
+// different DATA would retry forever. Same code and same message shape
+// cast_bool.go raises in the other direction.
+func raiseCannotCastToNumeric(from string) {
+	panic(fatalEval{sqlerr.New("42846", "cannot cast type %s to numeric", from)})
+}
+
 // nonFiniteDecimalError is ADR-0024 item 6's refusal: NaN and the infinities
 // are values PostgreSQL's numeric holds and an Int128 has no bit pattern for,
 // so they are refused as a VALUE with the SQLSTATE that says the range is the
@@ -764,4 +809,48 @@ func numericFieldOverflow(p, s int) error {
 	return sqlerr.New("22003",
 		"numeric field overflow: a field with precision %d, scale %d must round to an "+
 			"absolute value less than 10^%d", p, s, p-s)
+}
+
+// DecimalResultOf reports the EXACT fixed-point type an expression produces
+// against this batch, and whether it produces one at all.
+//
+// It exists for the consumers that materialize a vector from a compiled
+// expression without a plan-time declaration to read — the stage DAG's gather,
+// which re-compiles a wrapped aggregate's expression from its AST and has only
+// the input batch to type it from. Those callers built a FLOAT64 vector and
+// nulled every box they could not put in it, so `SUM(d) * 2` came back NULL on
+// the DAG and answered on the single-process path (#555 review, R1).
+//
+// The answer is a pure function of the input SCHEMA — which operand is a
+// DECIMAL column and at what scale — so it is the same for every batch of one
+// query, and a caller may resolve it per batch without the type flapping.
+func DecimalResultOf(e Expr, b *batch.RecordBatch) (precision, scale int, ok bool) {
+	o, isDec := e.(decimalOperand)
+	if !isDec {
+		return 0, 0, false
+	}
+	t, ok := o.decimalType(b)
+	if !ok || !operandIsDecimalTyped(e, b) {
+		// An INT-mode arithmetic node answers a DecimalType too (an int64 IS
+		// a DECIMAL(19,0)); it is not a DECIMAL RESULT, and materializing one
+		// for it would change an integer column into a decimal one.
+		return 0, 0, false
+	}
+	return t.Precision, t.Scale, true
+}
+
+// EvalDecimalInto writes one row's exact value into a DECIMAL vector, or
+// reports that this expression produced NULL. The caller owns the null bit for
+// the false case, the way every other vector writer here does.
+func EvalDecimalInto(e Expr, b *batch.RecordBatch, row int, dst *batch.Vector, at int) bool {
+	o, isDec := e.(decimalOperand)
+	if !isDec {
+		return false
+	}
+	v, ok := o.evalDecimal(b, row)
+	if !ok {
+		return false
+	}
+	dst.DecimalData.Data[at] = v
+	return true
 }

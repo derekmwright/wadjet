@@ -2,6 +2,7 @@ package expr
 
 import (
 	"math"
+	"math/bits"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
@@ -24,11 +25,15 @@ import (
 // addInt64Checked returns a + b, raising 22003 when the exact sum has no
 // int64.
 //
-// The test is the standard two's-complement one: a signed addition overflows
-// exactly when both operands share a sign and the result takes the other.
+// The test is the branch-free two's-complement one: a signed addition
+// overflows exactly when both operands share a sign and the result takes the
+// other, which `(a^s) & (b^s) < 0` says in three ALU ops. The four-comparison
+// spelling says the same thing and costs enough MORE that the whole function
+// misses the inliner's budget — and a guard that cannot be inlined costs more
+// than the arithmetic it protects.
 func addInt64Checked(a, b int64) int64 {
 	s := a + b
-	if (a < 0) == (b < 0) && (s < 0) != (a < 0) {
+	if (a^s)&(b^s) < 0 {
 		raiseBigintOutOfRange()
 	}
 	return s
@@ -36,10 +41,10 @@ func addInt64Checked(a, b int64) int64 {
 
 // subInt64Checked returns a - b, raising 22003 when the exact difference has
 // no int64. It overflows exactly when the operands' signs DIFFER and the
-// result takes the subtrahend's.
+// result takes the subtrahend's, which is `(a^b) & (a^d) < 0`.
 func subInt64Checked(a, b int64) int64 {
 	d := a - b
-	if (a < 0) != (b < 0) && (d < 0) != (a < 0) {
+	if (a^b)&(a^d) < 0 {
 		raiseBigintOutOfRange()
 	}
 	return d
@@ -48,39 +53,88 @@ func subInt64Checked(a, b int64) int64 {
 // mulInt64Checked returns a * b, raising 22003 when the exact product has no
 // int64.
 //
-// The check divides back rather than widening: a/b in int64 is exact for the
-// quotient, so `p/a != b` catches every overflow. The two special cases are
-// a == 0 (never overflows) and a == -1 with b == MinInt64, whose product is
-// 2^63 and which the division test cannot see because MinInt64 / -1 overflows
-// in its own right.
+// Two paths, and neither divides. The first cut checked with `p/a != b`, which
+// is correct and costs an integer DIVISION on every row — 20-40 cycles, where
+// the multiply itself is 3 — and measured +39% on the typed int arithmetic
+// benchmark (`id*2+10`, the shape ClickBench's `i*k` takes). The check has to
+// be as cheap as the operation it guards or it is not a check, it is a tax.
+//
+//   - Both magnitudes below 2^31: the product is below 2^62 and cannot
+//     overflow, so the bare multiply stands. This is every ordinary row.
+//   - Otherwise the full 128-bit product of the magnitudes, from one
+//     bits.Mul64, and the answer fits exactly when its high word is zero and
+//     the low word is inside the signed range for the product's sign — 2^63-1
+//     positive, 2^63 negative, that one extra value being MinInt64 itself.
 func mulInt64Checked(a, b int64) int64 {
-	if a == 0 || b == 0 {
-		return 0
+	// Both operands inside int32 means the product is inside int62 and
+	// cannot overflow. The round-trip conversion is the cheapest spelling of
+	// that test that still INLINES: a branch-free `uint64(a>>31+1)|…` form
+	// costs the inliner more than the two comparisons do, and a guard that
+	// misses the budget becomes a call — which is what made these cost more
+	// than the arithmetic they protect in the first place.
+	if a == int64(int32(a)) && b == int64(int32(b)) {
+		return a * b
 	}
-	if a == -1 && b == math.MinInt64 {
+	return mulInt64Wide(a, b)
+}
+
+// mulInt64Wide is the multiply for operands the 32-bit test did not clear. It
+// is a function of its own so mulInt64Checked stays inside the inliner's
+// budget: these guards run once per operand per row, and a call that cannot be
+// inlined costs more than the arithmetic it protects.
+//
+//go:noinline
+func mulInt64Wide(a, b int64) int64 {
+	ma, na := int64Magnitude(a)
+	mb, nb := int64Magnitude(b)
+	hi, lo := bits.Mul64(ma, mb)
+	if hi != 0 {
 		raiseBigintOutOfRange()
 	}
-	if b == -1 && a == math.MinInt64 {
+	if na != nb {
+		if lo > 1<<63 {
+			raiseBigintOutOfRange()
+		}
+		// lo == 2^63 converts to MinInt64, whose negation is itself — which
+		// is the value being asked for, so this is right at the edge too.
+		return -int64(lo)
+	}
+	if lo > 1<<63-1 {
 		raiseBigintOutOfRange()
 	}
-	p := a * b
-	if p/a != b {
-		raiseBigintOutOfRange()
+	return int64(lo)
+}
+
+// int64Magnitude returns |v| and whether v was negative. uint64(-v) is exact
+// for MinInt64 as well: -v wraps back to MinInt64 and its unsigned bits ARE
+// 2^63, the magnitude wanted.
+func int64Magnitude(v int64) (uint64, bool) {
+	if v < 0 {
+		return uint64(-v), true
 	}
-	return p
+	return uint64(v), false
 }
 
 // divInt64Checked returns a / b, truncating toward zero. A zero divisor is
 // 22012 and MinInt64 / -1 is 22003 — its quotient is 2^63, the one division
 // with no int64.
 func divInt64Checked(a, b int64) int64 {
+	if b == 0 || (a == math.MinInt64 && b == -1) {
+		divInt64Refuse(b)
+	}
+	return a / b
+}
+
+// divInt64Refuse carries the two refusals out of the hot function so it stays
+// inlinable; b decides which one, since the caller has already established
+// that one of them applies.
+//
+//go:noinline
+func divInt64Refuse(b int64) {
 	if b == 0 {
 		raiseDivisionByZero()
 	}
-	if a == math.MinInt64 && b == -1 {
-		raiseBigintOutOfRange()
-	}
-	return a / b
+	raiseBigintOutOfRange()
 }
 
 // modInt64Checked returns a % b with the dividend's sign, PostgreSQL's rule
@@ -88,7 +142,7 @@ func divInt64Checked(a, b int64) int64 {
 // but Go traps the division it is computed from, so it is answered directly.
 func modInt64Checked(a, b int64) int64 {
 	if b == 0 {
-		raiseDivisionByZero()
+		divInt64Refuse(0)
 	}
 	if b == -1 {
 		return 0
@@ -105,6 +159,8 @@ func modInt64Checked(a, b int64) int64 {
 // actually be left is int8's. An int4 sum that leaves int4's range and stays
 // inside int8's is answered here and refused by PostgreSQL — a SUPERSET, the
 // direction ADR-0012 records as acceptable.
+//
+//go:noinline
 func raiseBigintOutOfRange() {
 	panic(fatalEval{sqlerr.New("22003", "bigint out of range")})
 }

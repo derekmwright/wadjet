@@ -1331,6 +1331,35 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT d_key, COALESCE(d_2 * 2, d_4) AS c, ` +
 				`CASE WHEN d_key < 5 THEN d_2 + d_4 ELSE d_4 END AS w FROM dec_probe ORDER BY d_key`},
 
+		// A numeric LITERAL is an EXACT operand, and the values here are the
+		// ones a float64 cannot represent — which is the whole point. Every
+		// entry above uses the fixture's own values, and those are all
+		// float-exact (12.75, 25.50, 0.0001), so none of them could see the
+		// literal defect: `d_2 * 1.05` answered 13.387500000000001 and
+		// `SELECT 0.1 + 0.2` refused itself with 22003 (#555 review, R2).
+		pgCase{name: "DecimalTimesNonRepresentableLiteral", exactNumeric: true,
+			sql: `SELECT d_key, d_2 * 1.05 AS a, d_4 * 1.1 AS b FROM dec_probe ORDER BY d_key`},
+		// TRAILING ZEROS are part of the spelling and so part of the type:
+		// PostgreSQL renders this with THREE fraction digits because the
+		// literal contributed one.
+		pgCase{name: "DecimalTimesTrailingZeroLiteral", exactNumeric: true,
+			sql: `SELECT d_key, d_2 * 100.0 AS p FROM dec_probe ORDER BY d_key`},
+		// A literal below a double's last place: the sum needs 22 digits.
+		pgCase{name: "DecimalPlusSubUlpLiteral", exactNumeric: true,
+			sql: `SELECT d_key, d_2 + 0.00000000000000000001 AS s FROM dec_probe ORDER BY d_key`},
+		// Literal OP literal, with no column in the query at all — numeric on
+		// both engines, and the canonical float trap as a predicate.
+		pgCase{name: "LiteralArithmeticIsExact", exactNumeric: true,
+			sql: `SELECT 0.1 + 0.2 AS a, 1.1 + 2.2 AS b, 10.0 / 4 AS c, 1.05 * 3 AS d`},
+		pgCase{name: "LiteralFloatTrapPredicate", sql: `SELECT (0.1 + 0.2 = 0.3) AS v`},
+		// MODULO over a DECIMAL and a fraction. `d % 1.5` truncated both
+		// operands to integers and answered 0, and `d % 0.5` divided by the
+		// zero that truncation created and CRASHED the query (#555 review,
+		// N1/N2).
+		pgCase{name: "DecimalModuloFractionalLiteral", exactNumeric: true,
+			sql: `SELECT d_key, d_2 % 0.5 AS a, d_2 % 1.5 AS b, 0.5 % d_2 AS c ` +
+				`FROM dec_probe WHERE d_2 <> 0 ORDER BY d_key`},
+
 		// --- CAST to and from DECIMAL (ADR-0024 item 3, #555) --------------
 		//
 		// A parameterized destination used to match no case label in the
@@ -1359,6 +1388,16 @@ func postgresSemanticsCases() []pgCase {
 				`AND abs(d_wide) < 9000000000000000 ORDER BY d_key`},
 		pgCase{name: "DecimalCastToText",
 			sql: `SELECT d_key, CAST(d_2 AS text) AS t FROM dec_probe ORDER BY d_key`},
+		// SMALLINT was a declared-STRING pass-through: the destination matched
+		// no arm of the evaluator's switch at all (#555 review, N4).
+		pgCase{name: "DecimalCastToSmallint",
+			sql: `SELECT d_key, CAST(d_2 AS smallint) AS s FROM dec_probe ORDER BY d_key`},
+		// A ROUND past the carrier's width: the result type capped the
+		// precision while KEEPING the scale — DECIMAL(38,38), whose bound is
+		// |v| < 10^0, so no value with an integer digit could be declared and
+		// the query failed where PostgreSQL answers (#555 review, S1).
+		pgCase{name: "DecimalRoundPastTheCarrier", exactNumeric: true,
+			sql: `SELECT d_key, round(d_2, 40) AS r FROM dec_probe ORDER BY d_key`},
 
 		// --- Scalar math over DECIMAL (ADR-0024 items 2 and 3, #668) -------
 		//

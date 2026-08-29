@@ -1197,8 +1197,18 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "DecimalCastPastPrecision", sql: `SELECT CAST(d_2 AS numeric(3,2)) FROM dec_probe`},
 		{name: "DecimalCastFromNonNumericText", sql: `SELECT CAST('abc' AS numeric(9,2))`},
 		// PostgreSQL has no boolean-to-numeric cast: the TYPE PAIR is wrong,
-		// not the text, so it is 42846 cannot_coerce and not 22P02.
-		{name: "DecimalCastFromBoolean", sql: `SELECT CAST(TRUE AS numeric(9,2))`},
+		// not the text, so it is 42846 cannot_coerce and not 22P02. The BARE
+		// spelling is the one that answered 1 — a bare destination declines to
+		// name a type before the refusal is reached (#555 review, N3) — so it
+		// is the one gated here, with the parameterized twin beside it.
+		{name: "DecimalCastFromBoolean", sql: `SELECT CAST(TRUE AS numeric)`},
+		{name: "DecimalCastFromBooleanTyped", sql: `SELECT CAST(TRUE AS numeric(9,2))`},
+		// A well-formed number too WIDE for the carrier is a RANGE condition,
+		// 22003 — not the 22P02 that sends a client hunting a typo in a number
+		// it read correctly (#555 review, S1).
+		{name: "DecimalCastFromOverWideText", sql: `SELECT CAST('1e40' AS numeric(38,0))`},
+		// A DECIMAL past SMALLINT's range: `smallint out of range`, 22003.
+		{name: "SmallintOutOfRange", sql: `SELECT CAST('40000' AS numeric(9,0))::smallint`},
 		// An integer result with no int64 (#637). PostgreSQL refuses it as
 		// `bigint out of range`; wadjet WRAPPED, which is a different number
 		// wearing the right type.

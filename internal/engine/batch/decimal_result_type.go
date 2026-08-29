@@ -170,34 +170,61 @@ func DecimalScalarType(op DecimalScalarOp, in DecimalType, digits int) (DecimalT
 		// -1, 0, 1: one digit, no fraction, whatever the argument was.
 		return DecimalType{Precision: 1}, true
 	case DecimalScalarCeil, DecimalScalarFloor:
+		// They drop the fraction and may CARRY — ceil(9.9) is 10 — so the
+		// integer part grows by one.
 		return decScalarType(intDigits+1, 0), true
 	case DecimalScalarRound:
-		return decScalarType(intDigits+1+max(digits, 0), max(digits, 0)), true
+		return decScalarType(intDigits+roundCarry(digits, s), max(digits, 0)), true
 	case DecimalScalarTrunc:
-		// Truncation cannot carry, so the integer part does not grow.
-		return decScalarType(intDigits+max(digits, 0), max(digits, 0)), true
+		// Truncation cannot carry, so the integer part never grows.
+		return decScalarType(intDigits, max(digits, 0)), true
 	}
 	return DecimalType{}, false
 }
 
-// decScalarType caps a scalar result at the carrier's width. The scale is
-// named by the caller (it is the digits the user asked for) and the precision
-// is what is left, so the cap gives up INTEGER digits here rather than
-// fractional ones — the opposite of AdjustDecimalPrecisionScale, and right for
-// the same reason: there the fraction is a computed by-product, here it is the
-// request.
-func decScalarType(p, s int) DecimalType {
+// roundCarry is the extra integer digit a ROUND may need: one when it actually
+// drops fraction digits, because rounding up can carry (9.9 to one fewer digit
+// is 10), and none when the requested scale already keeps everything the value
+// has. A NEGATIVE digits always rounds to a power of ten above the point, so
+// it always can.
+func roundCarry(digits, inScale int) int {
+	if digits >= inScale {
+		return 0
+	}
+	return 1
+}
+
+// decScalarType builds a scalar result's type from its INTEGER digits and the
+// fraction digits asked for, giving up FRACTION digits when the two do not fit
+// the carrier.
+//
+// The direction is the opposite of AdjustDecimalPrecisionScale's and it is
+// deliberate. There the scale is a computed by-product of an arithmetic rule
+// and the integer part is what the value needs, so the rule spends fraction
+// digits down to a floor and only then narrows the range. Here the integer
+// part is what the ARGUMENT already holds — dropping one would change the
+// value outright — and the scale is a REQUEST, so the request is what yields.
+//
+// Applying the arithmetic rule here instead is what `round(d_wide + d_4, 9)`
+// caught: a (38,9) argument has 29 integer digits, the +1 carry makes 30, and
+// the fraction floor of min(9,6) took the scale to 8 — one digit fewer than
+// the caller asked for and than PostgreSQL keeps, on a round that drops
+// nothing at all (#555 review, S1).
+func decScalarType(intDigits, s int) DecimalType {
+	if intDigits < 1 {
+		intDigits = 1
+	}
+	if intDigits > MaxDecimalPrecision {
+		intDigits = MaxDecimalPrecision
+	}
+	if s < 0 {
+		s = 0
+	}
+	if room := MaxDecimalPrecision - intDigits; s > room {
+		s = room
+	}
 	if s > MaxDecimalScale {
 		s = MaxDecimalScale
 	}
-	if p > MaxDecimalPrecision {
-		p = MaxDecimalPrecision
-	}
-	if p < s {
-		p = s
-	}
-	if p < 1 {
-		p = 1
-	}
-	return DecimalType{Precision: p, Scale: s}
+	return DecimalType{Precision: intDigits + s, Scale: s}
 }

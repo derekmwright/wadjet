@@ -3,6 +3,7 @@ package expr
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -249,7 +250,12 @@ func TestCompileBinOpInt64(t *testing.T) {
 }
 
 func TestCompileBinOpFloat64(t *testing.T) {
-	// Two float literals should produce BinOpFloat64
+	// Two numeric literals produce BinOpNumeric, which resolves the EXACT
+	// fixed-point mode for them: a literal's carrier is its spelling, so
+	// `1.5 * 2.5` is 3.75 on the nose, which is what PostgreSQL answers for
+	// two numeric literals (#555 review, R2). BinOpFloat64 is what a genuine
+	// FLOAT operand still gets, and BinOpNumeric's float mode delegates to it
+	// bit-identically for every pair that resolves there.
 	node := &plansql.BinaryOp{
 		Left:  &plansql.Lit{Value: "1.5", Kind: plansql.LitNumber},
 		Op:    "*",
@@ -259,8 +265,11 @@ func TestCompileBinOpFloat64(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := e.(*BinOpFloat64); !ok {
-		t.Fatalf("expected BinOpFloat64, got %T", e)
+	if _, ok := e.(*BinOpNumeric); !ok {
+		t.Fatalf("expected BinOpNumeric, got %T", e)
+	}
+	if got, want := e.Eval(&batch.RecordBatch{Len: 1}, 0), "3.75"; got != any(want) {
+		t.Errorf("1.5 * 2.5 = %#v, want the exact %q", got, want)
 	}
 }
 
@@ -280,7 +289,17 @@ func TestCompileBinOpDivision(t *testing.T) {
 		t.Fatalf("expected BinOpInt64 for int/int division, got %T", e)
 	}
 
-	// A float literal on either side keeps float division.
+	// A DIVISION between two CONSTANTS keeps float division, and the property
+	// that matters is the VALUE, not which node carries it: BinOpNumeric
+	// resolves its float mode for this pair and delegates bit-identically to
+	// BinOpFloat64.
+	//
+	// It stays float because item 3's division scale is a policy FLOOR of six
+	// fraction digits, chosen for column operands whose own precision drives
+	// it past that. Between two narrow literals the floor is all there is, so
+	// an exact `10.0 / 3` would keep 0.333333 where the double — and
+	// PostgreSQL, which keeps at least 16 significant digits — keep far more
+	// (#555 review, R2).
 	nodeF := &plansql.BinaryOp{
 		Left:  &plansql.Lit{Value: "10.0", Kind: plansql.LitNumber},
 		Op:    "/",
@@ -290,8 +309,13 @@ func TestCompileBinOpDivision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := ef.(*BinOpFloat64); !ok {
-		t.Fatalf("expected BinOpFloat64 for float/int division, got %T", ef)
+	got := ef.Eval(&batch.RecordBatch{Len: 1}, 0)
+	f, isFloat := got.(float64)
+	if !isFloat {
+		t.Fatalf("10.0 / 3 = %#v (%T), want the float quotient", got, got)
+	}
+	if f < 3.3333333 || f > 3.3333334 {
+		t.Errorf("10.0 / 3 = %v, want the full-precision float quotient", f)
 	}
 }
 

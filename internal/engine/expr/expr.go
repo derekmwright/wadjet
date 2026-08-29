@@ -759,7 +759,9 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 		if rf == 0 {
 			raiseDivisionByZero()
 		}
-		return float64(int64(lf) % int64(rf))
+		// math.Mod — see BinOpFloat64's arithMod arm for why truncating to
+		// integers first was both wrong and a crash (#555 review, N1).
+		return math.Mod(lf, rf)
 	default:
 		return nil
 	}
@@ -840,7 +842,14 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 		if rf == 0 {
 			raiseDivisionByZero()
 		}
-		return float64(int64(lf) % int64(rf)), true
+		// math.Mod, not `int64(lf) % int64(rf)`: truncating both operands to
+		// integers first answered 1 for `7.9 % 3.0` where every engine with
+		// the operator answers 1.9, and — worse — it PANICKED with an integer
+		// divide by zero for a divisor whose integer part is 0, which is
+		// every `x % 0.5` (#555 review, N1). PostgreSQL has no `%` over
+		// double precision at all, so this pair is a superset either way; a
+		// superset that crashes the query is not one.
+		return math.Mod(lf, rf), true
 	default:
 		return 0, false
 	}
@@ -6079,7 +6088,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		return e.castToDecimal(b, row, v, d)
 	}
 	switch dest {
-	case "int", "integer", "bigint", "signed":
+	case "int", "integer", "int4", "bigint", "int8", "signed", "smallint", "int2":
 		// A string that does not read as a number is refused, not coerced to
 		// 0: PostgreSQL raises 22P02 invalid_text_representation and ADR-0012
 		// makes it the authority on error-versus-not. The per-row error

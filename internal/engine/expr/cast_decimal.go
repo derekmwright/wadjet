@@ -146,6 +146,13 @@ func (e *Cast) castToDecimal(b *batch.RecordBatch, row int, v any, d decimalDest
 				"unscaled integer, so the widest declaration it can hold is %d digits "+
 				"(ADR-0024 item 1)", d.typ.Precision, batch.MaxDecimalPrecision)})
 	}
+	if _, isBool := v.(bool); isBool {
+		// PostgreSQL has no boolean-to-numeric cast in ANY spelling, so the
+		// refusal cannot live inside castDecimalValue: a BARE destination
+		// declines to name a type before it ever gets there, and the float
+		// fallback below then answered 1 (#555 review, N3).
+		raiseCannotCastToNumeric("boolean")
+	}
 	typ, ok := e.castDecimalTarget(b, row, v, d)
 	if !ok {
 		// A bare DECIMAL over an operand whose own (p,s) nothing here can
@@ -178,14 +185,18 @@ func (e *Cast) castDecimalTarget(b *batch.RecordBatch, row int, v any, d decimal
 			return batch.DecimalType{Precision: batch.MaxDecimalPrecision, Scale: t.Scale}, true
 		}
 	}
-	switch tv := v.(type) {
+	switch v.(type) {
 	case int64, int32, int:
 		return batch.DecimalType{Precision: batch.MaxDecimalPrecision}, true
-	case string:
-		if t, ok := batch.DecimalTextType(tv); ok {
-			return batch.DecimalType{Precision: batch.MaxDecimalPrecision, Scale: t.Scale}, true
-		}
 	}
+	// Everything else has no scale this layer can name, and the DECLARATION
+	// says so: physical.castDeclaredDecimal declines a bare destination over a
+	// FLOAT or TEXT operand and the projection allocates a FLOAT64 vector.
+	// Answering a decimal box here anyway is what made `CAST(text AS DECIMAL)`
+	// fail at the store with "cannot store string into FLOAT64 vector" — the
+	// declaration and the value disagreeing, which is the one thing this whole
+	// layer exists to prevent (#555 review, R3). A per-VALUE scale would not
+	// close it either: the vector is built once, from the type.
 	_ = row
 	return batch.DecimalType{}, false
 }
@@ -209,13 +220,11 @@ func castDecimalValue(v any, scale int) (batch.Int128, bool) {
 	case string:
 		return castDecimalFromText(tv, scale), true
 	case bool:
-		// PostgreSQL has no boolean-to-numeric cast at all, and refuses it as
-		// 42846 cannot_coerce — the type pair is wrong, not the text — which
-		// is the same code and the same message cast_bool.go raises in the
-		// other direction. Answering 0/1 instead would invent a cast the
-		// authority does not have.
+		// Unreachable through Cast (castToDecimal refuses a boolean before
+		// naming a type), kept so every caller of this conversion gets the
+		// same refusal rather than a 0/1 nobody asked for.
 		_ = tv
-		panic(fatalEval{sqlerr.New("42846", "cannot cast type boolean to numeric")})
+		raiseCannotCastToNumeric("boolean")
 	}
 	raiseInvalidTextRepresentation("numeric", toString(v))
 	return batch.Int128{}, false
@@ -238,6 +247,14 @@ func castDecimalFromText(text string, scale int) batch.Int128 {
 		// the SQLSTATE that says the range is the problem (ADR-0024 item 6).
 		if isNonFiniteNumericText(text) {
 			panic(fatalEval{nonFiniteDecimalError(text)})
+		}
+		// A well-formed number that is simply TOO WIDE is a range condition,
+		// not a syntax one: PostgreSQL answers `CAST('1e40' AS numeric(38,0))`
+		// with 22003 numeric field overflow, and reporting 22P02 sends a
+		// client hunting a typo in a number it read correctly (#555 review,
+		// S1).
+		if _, isNumber := batch.CanonicalDecimalText(text); isNumber {
+			raiseNumericFieldOverflow(0, scale)
 		}
 		raiseInvalidTextRepresentation("numeric", text)
 	}
@@ -347,10 +364,15 @@ func castDecimalToInt(v any, dest string) (int64, bool) {
 		raiseIntegerOutOfRange(dest)
 	}
 	out := rounded.ToInt64()
-	if dest == "int" || dest == "integer" {
+	switch dest {
+	case "int", "integer", "int4":
 		// PostgreSQL's `integer` is int4 and refuses anything outside it,
 		// with its own message. `bigint`/`signed` keep the int64 range.
 		if out < -(1<<31) || out > (1<<31)-1 {
+			raiseIntegerOutOfRange(dest)
+		}
+	case "smallint", "int2":
+		if out < -(1<<15) || out > (1<<15)-1 {
 			raiseIntegerOutOfRange(dest)
 		}
 	}

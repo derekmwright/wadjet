@@ -67,6 +67,12 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls colDecls) (batch.DecimalType
 	if !lDec && !rDec {
 		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 	}
+	if n.Op == "/" && isConstNumericLitNode(n.Left) && isConstNumericLitNode(n.Right) {
+		// A division between two CONSTANTS keeps the float declaration it has
+		// always had — expr.resolveDecimalMode declines the same pair, for the
+		// reason spelled out there.
+		return batch.DecimalType{}, false, false
+	}
 	p, s, ok := batch.DecimalResultType(n.Op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
 	if !ok {
 		return batch.DecimalType{}, false, false
@@ -152,11 +158,13 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 		if !ok {
 			return batch.DecimalType{}, false, false
 		}
-		// A literal with a FRACTION is a decimal the user wrote — `i * 1.5`
-		// is numeric in PostgreSQL — while a whole number is not, so it
-		// leaves `i * 2` integer. expr.operandIsDecimalTyped draws the line
-		// in the same place.
-		return t, t.Scale > 0, true
+		// An INTEGER literal is not decimal-typed: integer arithmetic owns it
+		// and `i * 2` must stay integer. Every OTHER numeric literal is a
+		// decimal the user wrote — `i * 1.5` is numeric in PostgreSQL — and
+		// so is one too wide for an int64, which no integer path can carry.
+		// expr.litIsExactDecimal draws the line with the same ParseInt.
+		_, err := strconv.ParseInt(strings.TrimSpace(n.Value), 10, 64)
+		return t, err != nil, true
 	}
 	return batch.DecimalType{}, false, false
 }

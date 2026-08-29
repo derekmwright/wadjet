@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
@@ -697,7 +698,8 @@ func compileBinOp(left, right Expr, op string) Expr {
 		// the same place, from the same column types — #340) answering the
 		// same on both settings.
 		if lnOk && rnOk &&
-			possiblyIntAtRuntime(left) && possiblyIntAtRuntime(right) {
+			((possiblyIntAtRuntime(left) && possiblyIntAtRuntime(right)) ||
+				(possiblyDecimalAtRuntime(left) && possiblyDecimalAtRuntime(right))) {
 			return &BinOpNumeric{Left: ln, Right: rn, Op: op}
 		}
 		return &BinOpFloat64{Left: lf, Right: rf, Op: op}
@@ -728,6 +730,40 @@ func possiblyIntAtRuntime(e Expr) bool {
 	default:
 		return isIntNative(e)
 	}
+}
+
+// possiblyDecimalAtRuntime reports whether an operand might turn out to be an
+// EXACT fixed-point value once column types resolve.
+//
+// It is possiblyIntAtRuntime's twin, and compileBinOp needs both for the same
+// reason: the node is chosen at COMPILE time and the mode is resolved at
+// runtime, so an operand pair that could be decimal has to reach BinOpNumeric
+// to find out. Without it a FRACTIONAL LITERAL — which is a float64 box, so
+// isIntNative rejects it — pinned the whole expression to BinOpFloat64 while
+// the planner declared DECIMAL from the same literal's spelling. The float
+// answer then met an exact vector: `d * 1.05` was 13.387500000000001 and
+// failed the checked store with 22003, and `SELECT 0.1 + 0.2` did the same
+// with no DECIMAL column in the query at all (#555 review, R2).
+//
+// A column qualifies because its type is unknown here; a numeric literal
+// qualifies when its spelling names a value a DECIMAL can hold. Everything
+// else is decided at compile time and does not.
+func possiblyDecimalAtRuntime(e Expr) bool {
+	switch v := e.(type) {
+	case *ColRef:
+		return true
+	case *BinOpNumeric:
+		return true
+	case *Lit:
+		if v.Text == "" {
+			return false
+		}
+		_, ok := batch.DecimalTextType(v.Text)
+		return ok
+	case *UnaryOp:
+		return (v.Op == "-" || v.Op == "+") && possiblyDecimalAtRuntime(v.Operand)
+	}
+	return false
 }
 
 // isIntNative returns true if the expression natively produces int64 values

@@ -330,20 +330,36 @@ pins the literal form beside the two-column one.
     answer in their argument's OWN domain (abs/ceil/floor/round/trunc/sign
     /mod) are exact. Pinned by
     `wadjet.TestTranscendentalFunctionsStayFloat64`.
-  - **A bare numeric LITERAL is float8, not numeric.** PostgreSQL types `1.5`
-    as numeric; wadjet declares FLOAT64 for a literal projection, so
-    `ROUND(0.5)` is a float here. Closing it is a change to the LITERAL's own
-    declaration — every projection, comparison and set-operation arm that
-    carries one — not to the functions above, and covering only half of it is
-    worse than covering none: the first cut of this work made `ROUND(-0.5)`
-    decimal while `ROUND(0.5)` stayed float, and the two halves of one query
-    disagreed about their own type. A literal INSIDE an expression is
-    unaffected: `d * 2` and `d + 0.005` take the literal's spelling as its
-    (p,s), which is item 3's rule.
+  - **A numeric literal is an EXACT operand of ARITHMETIC, and float8 as a
+    bare projection.** In an expression the literal's spelling IS its (p,s),
+    trailing zeros included — `d * 100.0` is scale 3 because the literal
+    contributed one, and `0.1 + 0.2` is exactly `0.3`, as PostgreSQL answers.
+    A literal PROJECTED on its own (`SELECT 1.5`) still declares FLOAT64, and
+    so does a scalar function over nothing but constants (`ROUND(0.5)`);
+    closing that is a change to the literal's own declaration at every
+    projection, comparison and set-operation arm, and covering half of it is
+    worse than covering none — the first cut made `ROUND(-0.5)` decimal while
+    `ROUND(0.5)` stayed float, and the two halves of one query disagreed about
+    their own type. An INTEGER literal is not a decimal operand at all:
+    integer arithmetic owns it, and `7 / 2` must stay 3.
   - **`CAST(x AS DECIMAL)` over a FLOAT or TEXT operand stays float8.** A bare
     destination takes the operand's own scale (item 3), and a float has none
-    — any fixed choice would either truncate the value or invent digits. A
-    destination that NAMES its (p,s) is exact from every source.
+    — any fixed choice would either truncate the value or invent digits. The
+    VALUE follows the declaration there, which is the correction the first cut
+    needed: it produced a decimal box for a TEXT operand under a FLOAT64
+    declaration, and the store refused the engine's own value. A destination
+    that NAMES its (p,s) is exact from every source.
+  - **`%` over a FLOAT operand answers `math.Mod` where PostgreSQL has no
+    operator at all** (`double precision % numeric` is 42883). A superset, the
+    class ADR-0012 records as acceptable — but only since it stopped
+    truncating both operands to integers first, which answered 0 for
+    `x % 1.5` and divided by the zero that truncation created for `x % 0.5`.
+  - **Every integer spelling computes and is declared INT64.** `CAST(x AS
+    INTEGER)` and `int / int` reach a client under int8 where PostgreSQL says
+    int4, and `int32 ⊕ int32` answers past 2^31 where PostgreSQL raises
+    `integer out of range`. The RANGE each cast spelling names is still
+    enforced (22003 past int2's and int4's), so the divergence is the OID and
+    the extra values accepted, never a wrapped one.
 - Refuted premise, recorded: "DECIMAL would be ideal but Wadjet uses float"
   in the TPC-H schema was an engine limitation, not a design choice, and its
   presence meant the type had no benchmark and no 22-query gate for two

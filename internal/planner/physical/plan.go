@@ -9527,7 +9527,13 @@ func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, exp
 // `TIME '10:00:00'` keeps its text, and so does expr.Cast.
 func inferCastType(typeName string) parquet.TypeID {
 	switch strings.ToUpper(strings.TrimSpace(typeName)) {
-	case "INTEGER", "INT", "BIGINT", "INT64":
+	case "INTEGER", "INT", "INT4", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2":
+		// Every integer spelling lands on INT64: the engine has no int16
+		// and reads an INT32 column as an int64 everywhere else. The cast
+		// evaluator still enforces each spelling's own RANGE (22003 past
+		// it), which is the half that changes a value; the OID it reaches
+		// a client under is int8 where PostgreSQL says int4/int2, recorded
+		// in ADR-0012 item 12's divergence list.
 		return parquet.TypeInt64
 	case "REAL", "FLOAT4":
 		// float4, not float8: expr.Cast now ROUNDS to float32 for these two

@@ -1160,8 +1160,18 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 			// newBatchRenamer (TypeBool==0, so a zero-value default here would
 			// be wrong — the map entry is always present instead).
 			outType := br.exprType[i]
-			newCols[i] = evalExprColumn(e, b, outType)
-			newSchema[i] = parquet.Column{Name: r.To, Type: outType, Nullable: true}
+			col := evalExprColumn(e, b, outType)
+			newCols[i] = col
+			// The SCHEMA follows the vector, not the other way round: an
+			// EXACT DECIMAL result is typed from the input schema at the first
+			// batch (expr.DecimalResultOf), and a column whose declaration
+			// disagreed with its own vector would be read back at the wrong
+			// power of ten.
+			newSchema[i] = parquet.Column{Name: r.To, Type: col.Type, Nullable: true}
+			if col.Type == parquet.TypeDecimal {
+				newSchema[i].Precision = br.exprDecPrecision(i, e, b)
+				newSchema[i].Scale = col.DecimalData.Scale
+			}
 			continue
 		}
 		si := srcIdx[i]
@@ -1195,6 +1205,16 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 func evalExprColumn(e expr.Expr, b *batch.RecordBatch, outType parquet.TypeID) *batch.Vector {
 	if outType == parquet.TypeBool {
 		return evalBoolColumn(e, b)
+	}
+	// An EXACT DECIMAL result — every wrapped aggregate over a DECIMAL column:
+	// `SUM(d) * 2`, `AVG(d) * 100`, `MIN(d) * 2`, and `SUM(d * 2)`, which the
+	// gather rewrites to `__agg_0 * 2`. A DECIMAL boxes as its rendered TEXT,
+	// which the float64 switch below has no arm for, so every one of them fell
+	// to `default: SetNull` and the DAG returned NULL in every row where the
+	// single-process path answered (#555 review, R1). The type comes from the
+	// input SCHEMA, so it is the same for every batch of one query.
+	if _, scale, ok := expr.DecimalResultOf(e, b); ok {
+		return evalDecimalColumn(e, b, scale)
 	}
 	v := batch.NewVector(parquet.TypeFloat64, b.Len)
 	if cap(v.Float64Data) < b.Len {
@@ -1243,6 +1263,41 @@ func evalExprColumn(e expr.Expr, b *batch.RecordBatch, outType parquet.TypeID) *
 		}
 	}
 	return v
+}
+
+// evalDecimalColumn is evalExprColumn's DECIMAL arm: it materializes an exact
+// fixed-point vector at the scale the expression's own type names, writing
+// unscaled carriers with no box in between.
+func evalDecimalColumn(e expr.Expr, b *batch.RecordBatch, scale int) *batch.Vector {
+	v := batch.NewVectorWithScale(parquet.TypeDecimal, b.Len, scale)
+	emit := func(row, dst int) {
+		if expr.EvalDecimalInto(e, b, row, v, dst) {
+			v.Nulls.SetValid(dst)
+			return
+		}
+		v.Nulls.SetNull(dst)
+	}
+	if b.Sel != nil {
+		for i, src := range b.Sel {
+			emit(int(src), i)
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			emit(i, i)
+		}
+	}
+	return v
+}
+
+// exprDecPrecision is the DECLARED precision of an exact DECIMAL rename, for
+// the gathered schema. The vector carries only the scale (batch.DecimalColumn
+// is Data plus Scale), and the precision is what sizes a parquet leaf and what
+// a client reads as the typmod.
+func (br *batchRenamer) exprDecPrecision(i int, e expr.Expr, b *batch.RecordBatch) int {
+	if p, _, ok := expr.DecimalResultOf(e, b); ok {
+		return p
+	}
+	return 0
 }
 
 // evalBoolColumn is evalExprColumn's TypeBool arm: it materializes a real

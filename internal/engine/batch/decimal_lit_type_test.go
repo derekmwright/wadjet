@@ -27,12 +27,15 @@ func TestDecimalTextTypeIsTheLiteralsSpelling(t *testing.T) {
 		// A value below 1 still needs its scale's worth of fraction digits,
 		// and no more: 0.0015 is numeric(4,4), whose bound is |v| < 1.
 		{"0.0015", DecimalType{Precision: 4, Scale: 4}, true},
-		// Trailing zeros change no value, so they change no type. PostgreSQL
-		// keeps them in its per-value dscale; a wadjet DECIMAL column has one
-		// declared scale and the oracle compares canonical digits, so this is
-		// the same number either way (ADR-0012 item 12's recorded class).
-		{"12.750", DecimalType{Precision: 4, Scale: 2}, true},
-		{"1.00", DecimalType{Precision: 1}, true},
+		// TRAILING ZEROS ARE KEPT: they are fraction digits the user wrote,
+		// and PostgreSQL's numeric carries them in its per-value dscale.
+		// `12.75 * 100.0` renders 1275.000 there — three fraction digits,
+		// because the literal contributed one — and folding them away made the
+		// product's declared scale 2 where PostgreSQL's is 3 (#555 review, R2).
+		{"12.750", DecimalType{Precision: 5, Scale: 3}, true},
+		{"1.00", DecimalType{Precision: 3, Scale: 2}, true},
+		{"100.0", DecimalType{Precision: 4, Scale: 1}, true},
+		{"0.00", DecimalType{Precision: 2, Scale: 2}, true},
 		// The exponent form normalizes first, so the same value written two
 		// ways declares one type.
 		{"1.5e3", DecimalType{Precision: 4}, true},

@@ -80,10 +80,14 @@ func TestIntegerDivisionOverColumns(t *testing.T) {
 		// "a / 0" moved to TestIntegerDivisionByZeroRaises: a genuine zero
 		// divisor raises 22012 (#367), while a NULL operand stays NULL —
 		// the next row pins that half.
-		// Float operand on either side: float division, unchanged.
+		// A genuine FLOAT operand: float division, unchanged.
 		{"f / 2", 0, 3.5},
-		{"a / 2.0", 0, 3.5},
 		{"f / b", 1, -3.5},
+		// A numeric LITERAL is not a float operand — PostgreSQL types
+		// `integer / 2.0` as numeric, and the literal's spelling gives the
+		// division a real scale to work at (#555 review, R2). The VALUE is
+		// the same 3.5; the TYPE is the one PostgreSQL declares.
+		{"a / 2.0", 0, "3.500000"},
 	}
 	for _, c := range cases {
 		t.Run(c.sql, func(t *testing.T) {
