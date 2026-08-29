@@ -996,3 +996,261 @@ func ReplaceAggregate(node Node, aggName string) Node {
 		return node
 	}
 }
+
+// --- Window function lookup / rewrite ---
+
+// FindAllWindowFuncs walks an expression tree and returns every window
+// function call found, in left-to-right order. It is the window analogue of
+// FindAllAggregates and lets the logical builder detect a window call nested
+// inside a larger expression — SUM(x) OVER (...) + 1, COALESCE(LAG(x) OVER
+// (...), 0), a CASE branch — not just the bare top-level form. It does not
+// recurse into a window node's own argument/OVER subtrees: a window over a
+// window is not a shape this handles, and stopping keeps the returned nodes
+// disjoint so each maps to one output column.
+func FindAllWindowFuncs(node Node) []*WindowFuncNode {
+	var result []*WindowFuncNode
+	findAllWindowFuncsHelper(node, &result)
+	return result
+}
+
+func findAllWindowFuncsHelper(node Node, result *[]*WindowFuncNode) {
+	if node == nil {
+		return
+	}
+	switch n := node.(type) {
+	case *WindowFuncNode:
+		*result = append(*result, n)
+		return // don't recurse into the window's own args/OVER subtrees
+	case *FuncCallNode:
+		for _, arg := range n.Args {
+			findAllWindowFuncsHelper(arg, result)
+		}
+	case *BinaryOp:
+		findAllWindowFuncsHelper(n.Left, result)
+		findAllWindowFuncsHelper(n.Right, result)
+	case *UnaryOp:
+		findAllWindowFuncsHelper(n.Inner, result)
+	case *ParenNode:
+		findAllWindowFuncsHelper(n.Inner, result)
+	case *CmpExpr:
+		findAllWindowFuncsHelper(n.Left, result)
+		findAllWindowFuncsHelper(n.Right, result)
+	case *CaseNode:
+		findAllWindowFuncsHelper(n.Subject, result)
+		for _, w := range n.Whens {
+			findAllWindowFuncsHelper(w.Cond, result)
+			findAllWindowFuncsHelper(w.Result, result)
+		}
+		findAllWindowFuncsHelper(n.Else, result)
+	case *CastNode:
+		findAllWindowFuncsHelper(n.Inner, result)
+	case *IsExpr:
+		findAllWindowFuncsHelper(n.Left, result)
+	case *NotNode:
+		findAllWindowFuncsHelper(n.Inner, result)
+	case *AndNode:
+		findAllWindowFuncsHelper(n.Left, result)
+		findAllWindowFuncsHelper(n.Right, result)
+	case *OrNode:
+		findAllWindowFuncsHelper(n.Left, result)
+		findAllWindowFuncsHelper(n.Right, result)
+	case *InExpr:
+		findAllWindowFuncsHelper(n.Left, result)
+		for _, v := range n.Values {
+			findAllWindowFuncsHelper(v, result)
+		}
+	case *BetweenExpr:
+		findAllWindowFuncsHelper(n.Left, result)
+		findAllWindowFuncsHelper(n.Low, result)
+		findAllWindowFuncsHelper(n.High, result)
+	case *LikeExpr:
+		findAllWindowFuncsHelper(n.Left, result)
+		findAllWindowFuncsHelper(n.Pattern, result)
+	case *AnyAllExpr:
+		findAllWindowFuncsHelper(n.Left, result)
+		for _, v := range n.Values {
+			findAllWindowFuncsHelper(v, result)
+		}
+	case *TupleNode:
+		for _, e := range n.Elements {
+			findAllWindowFuncsHelper(e, result)
+		}
+	case *ArrayLitNode:
+		for _, e := range n.Elements {
+			findAllWindowFuncsHelper(e, result)
+		}
+	}
+}
+
+// ReplaceWindowFuncs replaces each window function call named in replacements
+// with a ColRef to its precomputed output column, leaving the surrounding
+// expression intact. Nodes are matched by pointer identity, not by rendered
+// text, because WindowFuncNode.String() collapses the OVER clause and two
+// distinct windows would otherwise collide. It is the window analogue of
+// ReplaceAllAggregates: after the builder has extracted a nested window into a
+// NodeWindow output column, this rewrites SUM(x) OVER (...) + 1 into
+// __win_0 + 1 so the ordinary projection compiler evaluates the outer
+// expression over the window's result.
+func ReplaceWindowFuncs(node Node, replacements map[*WindowFuncNode]string) Node {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *WindowFuncNode:
+		if colName, ok := replacements[n]; ok {
+			return &ColRef{Column: colName}
+		}
+		return node
+	case *FuncCallNode:
+		newArgs, changed := replaceWindowFuncsInList(n.Args, replacements)
+		if !changed {
+			return node
+		}
+		return &FuncCallNode{Name: n.Name, Args: newArgs, Distinct: n.Distinct, Star: n.Star}
+	case *BinaryOp:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		right := ReplaceWindowFuncs(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &BinaryOp{Left: left, Op: n.Op, Right: right}
+	case *UnaryOp:
+		inner := ReplaceWindowFuncs(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &UnaryOp{Inner: inner, Op: n.Op}
+	case *ParenNode:
+		inner := ReplaceWindowFuncs(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &ParenNode{Inner: inner}
+	case *CastNode:
+		inner := ReplaceWindowFuncs(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &CastNode{Inner: inner, TypeName: n.TypeName}
+	case *CmpExpr:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		right := ReplaceWindowFuncs(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &CmpExpr{Left: left, Op: n.Op, Right: right}
+	case *CaseNode:
+		changed := false
+		newWhens := make([]WhenClause, len(n.Whens))
+		for i, w := range n.Whens {
+			cond := ReplaceWindowFuncs(w.Cond, replacements)
+			result := ReplaceWindowFuncs(w.Result, replacements)
+			if cond != w.Cond || result != w.Result {
+				changed = true
+			}
+			newWhens[i] = WhenClause{Cond: cond, Result: result}
+		}
+		var subj Node
+		if n.Subject != nil {
+			subj = ReplaceWindowFuncs(n.Subject, replacements)
+			if subj != n.Subject {
+				changed = true
+			}
+		}
+		var elseNode Node
+		if n.Else != nil {
+			elseNode = ReplaceWindowFuncs(n.Else, replacements)
+			if elseNode != n.Else {
+				changed = true
+			}
+		}
+		if !changed {
+			return node
+		}
+		return &CaseNode{Subject: subj, Whens: newWhens, Else: elseNode}
+	case *IsExpr:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		if left == n.Left {
+			return node
+		}
+		return &IsExpr{Left: left, Not: n.Not, Check: n.Check}
+	case *NotNode:
+		inner := ReplaceWindowFuncs(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &NotNode{Inner: inner}
+	case *AndNode:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		right := ReplaceWindowFuncs(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &AndNode{Left: left, Right: right}
+	case *OrNode:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		right := ReplaceWindowFuncs(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &OrNode{Left: left, Right: right}
+	case *InExpr:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		newVals, changed := replaceWindowFuncsInList(n.Values, replacements)
+		if left == n.Left && !changed {
+			return node
+		}
+		return &InExpr{Left: left, Not: n.Not, Values: newVals}
+	case *BetweenExpr:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		low := ReplaceWindowFuncs(n.Low, replacements)
+		high := ReplaceWindowFuncs(n.High, replacements)
+		if left == n.Left && low == n.Low && high == n.High {
+			return node
+		}
+		return &BetweenExpr{Left: left, Not: n.Not, Low: low, High: high}
+	case *LikeExpr:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		pattern := ReplaceWindowFuncs(n.Pattern, replacements)
+		if left == n.Left && pattern == n.Pattern {
+			return node
+		}
+		return &LikeExpr{Left: left, Not: n.Not, Pattern: pattern}
+	case *AnyAllExpr:
+		left := ReplaceWindowFuncs(n.Left, replacements)
+		newVals, changed := replaceWindowFuncsInList(n.Values, replacements)
+		if left == n.Left && !changed {
+			return node
+		}
+		return &AnyAllExpr{Left: left, Op: n.Op, Modifier: n.Modifier, Values: newVals}
+	case *TupleNode:
+		newEls, changed := replaceWindowFuncsInList(n.Elements, replacements)
+		if !changed {
+			return node
+		}
+		return &TupleNode{Elements: newEls}
+	case *ArrayLitNode:
+		newEls, changed := replaceWindowFuncsInList(n.Elements, replacements)
+		if !changed {
+			return node
+		}
+		return &ArrayLitNode{Elements: newEls}
+	default:
+		return node
+	}
+}
+
+func replaceWindowFuncsInList(nodes []Node, replacements map[*WindowFuncNode]string) ([]Node, bool) {
+	out := make([]Node, len(nodes))
+	changed := false
+	for i, n := range nodes {
+		out[i] = ReplaceWindowFuncs(n, replacements)
+		if out[i] != n {
+			changed = true
+		}
+	}
+	if !changed {
+		return nodes, false
+	}
+	return out, true
+}

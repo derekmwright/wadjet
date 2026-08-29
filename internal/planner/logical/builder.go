@@ -400,8 +400,38 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		}
 	}
 
+	// Nested window functions: a window call wrapped inside a larger
+	// expression — SUM(x) OVER (...) + 1, COALESCE(LAG(x) OVER (...), 0), a
+	// window in a CASE branch. The parser only flags a window column when the
+	// window is the WHOLE select expression (col.IsWindow), so those bare ones
+	// are already in info.Windows. Here we extract windows embedded deeper into
+	// their own NodeWindow output columns and rewrite the surrounding
+	// expression to reference them, so the outer arithmetic/function is
+	// evaluated OVER the window's result instead of being silently dropped
+	// (#610).
+	var nestedWinExprs []WindowExpr
+	nestedWinRewrites := map[int]plansql.Node{}
+	winCounter := 0
+	for i, col := range info.Columns {
+		if col.IsWindow || col.ASTExpr == nil {
+			continue
+		}
+		wfns := plansql.FindAllWindowFuncs(col.ASTExpr)
+		if len(wfns) == 0 {
+			continue
+		}
+		replacements := map[*plansql.WindowFuncNode]string{}
+		for _, wfn := range wfns {
+			syntheticName := fmt.Sprintf("__win_%d", winCounter)
+			winCounter++
+			nestedWinExprs = append(nestedWinExprs, windowExprFromNode(wfn, syntheticName))
+			replacements[wfn] = syntheticName
+		}
+		nestedWinRewrites[i] = plansql.ReplaceWindowFuncs(col.ASTExpr, replacements)
+	}
+
 	// WINDOW functions (after GROUP BY/HAVING, before PROJECT)
-	if len(info.Windows) > 0 {
+	if len(info.Windows) > 0 || len(nestedWinExprs) > 0 {
 		var winExprs []WindowExpr
 		for _, ws := range info.Windows {
 			var orderBy []OrderExpr
@@ -428,6 +458,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 			winExprs = append(winExprs, we)
 		}
+		winExprs = append(winExprs, nestedWinExprs...)
 		plan = NewWindow(plan, winExprs)
 	}
 
@@ -504,6 +535,12 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			if rewritten, ok := nestedAggRewrites[i]; ok {
 				p.ASTExpr = rewritten
 				p.IsAgg = false
+			}
+			// A nested window column (#610): the window has been extracted into
+			// a NodeWindow output column and the projection now evaluates the
+			// surrounding expression over that column's ColRef.
+			if rewritten, ok := nestedWinRewrites[i]; ok {
+				p.ASTExpr = rewritten
 			}
 			if col.ColumnRef != "" {
 				p.Column = col.ColumnRef
@@ -737,6 +774,47 @@ func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 		// Literals, ColRef, etc. — pass through unchanged
 		return node
 	}
+}
+
+// windowExprFromNode builds a logical WindowExpr directly from a parsed
+// WindowFuncNode, for a window function extracted out of a larger expression
+// (#610). It mirrors the WindowSpec→WindowExpr conversion the bare top-level
+// path performs above, reading the func name, argument list, PARTITION BY /
+// ORDER BY keys and frame straight off the AST node.
+func windowExprFromNode(wfn *plansql.WindowFuncNode, outputCol string) WindowExpr {
+	inputCol := ""
+	if wfn.Func.Star {
+		inputCol = "*"
+	} else if len(wfn.Func.Args) > 0 {
+		args := make([]string, len(wfn.Func.Args))
+		for i, a := range wfn.Func.Args {
+			args[i] = a.String()
+		}
+		inputCol = cleanExpr(strings.Join(args, ", "))
+	}
+	partBy := make([]string, len(wfn.PartitionBy))
+	for i, pb := range wfn.PartitionBy {
+		partBy[i] = cleanExpr(pb.String())
+	}
+	var orderBy []OrderExpr
+	for _, ob := range wfn.OrderBy {
+		orderBy = append(orderBy, OrderExpr{
+			Column:     cleanExpr(ob.Expr.String()),
+			Desc:       ob.Desc,
+			NullsFirst: ob.NullsFirst,
+		})
+	}
+	we := WindowExpr{
+		Func:        wfn.Func.Name,
+		InputCol:    inputCol,
+		OutputCol:   outputCol,
+		PartitionBy: partBy,
+		OrderBy:     orderBy,
+	}
+	if wfn.Frame != nil {
+		we.Frame = convertFrame(wfn.Frame)
+	}
+	return we
 }
 
 // convertFrame converts a SQL WindowFrame to a logical WindowFrameSpec.

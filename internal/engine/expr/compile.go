@@ -467,6 +467,14 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		}
 		return &ArrayLitExpr{Elements: elems}, nil
 
+	case *plansql.WindowFuncNode:
+		// A window call must be extracted into a NodeWindow output column by
+		// the logical builder and referenced here as a ColRef. Reaching the
+		// compiler with a live WindowFuncNode means that extraction was
+		// missed; the old default arm compiled it to a Lit of its own SQL
+		// text, which silently produced a wrong answer (#610). Fail loudly.
+		return nil, fmt.Errorf("window function %s reached the expression compiler unextracted", node.String())
+
 	default:
 		return &Lit{Val: node.String()}, nil
 	}

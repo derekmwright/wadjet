@@ -864,6 +864,16 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 type batchRenamer struct {
 	renames  []physical.OutputRename
 	compiled map[int]expr.Expr // index → compiled expr; nil map = compilation failed
+	// exprType is the output column type for each compiled expression, decided
+	// ONCE at construction so it cannot flap between batches (an all-null batch
+	// would otherwise pick a different type than a populated one and corrupt
+	// the gathered result's schema). A boolean wrapper (BETWEEN, AND/OR, IN,
+	// comparison, IS, LIKE, ANY/ALL over a __win_/__agg_ column) materializes a
+	// real Bool column so the DAG returns true/false — matching the
+	// single-process pipeline and the PostgreSQL bool OID — rather than a
+	// float64 0/1 (#610 review). Everything else stays float64, the historical
+	// wrapped-aggregate output.
+	exprType map[int]parquet.TypeID
 	project  bool
 }
 
@@ -875,6 +885,7 @@ type batchRenamer struct {
 func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRenamer {
 	br := &batchRenamer{renames: renames, project: true}
 	br.compiled = make(map[int]expr.Expr, len(renames))
+	br.exprType = make(map[int]parquet.TypeID, len(renames))
 	for i, r := range renames {
 		if r.Expr == nil {
 			continue
@@ -887,6 +898,15 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 			break
 		}
 		br.compiled[i] = e
+		// A boolean-typed compiled expression (every SQL predicate implements
+		// the three-valued protocol) gets a real Bool output column; all other
+		// wrapped expressions keep the historical float64 materialization.
+		br.exprType[i] = parquet.TypeFloat64
+		if _, ok := e.(expr.BoolNullExpr); ok {
+			br.exprType[i] = parquet.TypeBool
+		} else if _, ok := e.(expr.BoolExpr); ok {
+			br.exprType[i] = parquet.TypeBool
+		}
 	}
 	if br.project && len(columns) > 0 {
 		// The decision only: apply() resolves again against each batch it is
@@ -1136,8 +1156,12 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 			// Expression-bearing rename: evaluate per row, build a new
 			// column. Used for wrapped aggregates ("SUM(x)/7.0") whose
 			// post-aggregate divisor needs to be applied at gather time.
-			newCols[i] = evalExprColumn(e, b)
-			newSchema[i] = parquet.Column{Name: r.To, Type: parquet.TypeFloat64, Nullable: true}
+			// exprType is populated for every compiled index in
+			// newBatchRenamer (TypeBool==0, so a zero-value default here would
+			// be wrong — the map entry is always present instead).
+			outType := br.exprType[i]
+			newCols[i] = evalExprColumn(e, b, outType)
+			newSchema[i] = parquet.Column{Name: r.To, Type: outType, Nullable: true}
 			continue
 		}
 		si := srcIdx[i]
@@ -1158,11 +1182,20 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 }
 
 // evalExprColumn builds a new Vector by evaluating e against each row of b.
-// Used by applyOutputRenames to materialize wrapped-aggregate columns at
-// gather time. Output type is float64 (the dominant case for wrapped
-// aggregates: SUM/N, AVG-like ratios). Other types may need extension when
-// new query shapes surface.
-func evalExprColumn(e expr.Expr, b *batch.RecordBatch) *batch.Vector {
+// Used by applyOutputRenames to materialize wrapped-aggregate and
+// wrapped-window columns at gather time. outType is decided once per query by
+// newBatchRenamer so it is stable across batches: TypeBool for a boolean
+// wrapper (BETWEEN/AND/OR/IN/comparison/IS/LIKE/ANY/ALL over a __agg_/__win_
+// column), evaluated on the three-valued protocol so UNKNOWN becomes SQL NULL;
+// TypeFloat64 for everything else, the dominant wrapped-aggregate case
+// (SUM/N, AVG-like ratios). A non-numeric, non-boolean result (e.g. a CASE
+// producing strings) still lands on the float64 path and is nulled — a
+// pre-existing bound, but no longer a LEAK: the wrapper is recognized and
+// projected, never passed through as internal columns.
+func evalExprColumn(e expr.Expr, b *batch.RecordBatch, outType parquet.TypeID) *batch.Vector {
+	if outType == parquet.TypeBool {
+		return evalBoolColumn(e, b)
+	}
 	v := batch.NewVector(parquet.TypeFloat64, b.Len)
 	if cap(v.Float64Data) < b.Len {
 		v.Float64Data = make([]float64, b.Len)
@@ -1199,6 +1232,50 @@ func evalExprColumn(e expr.Expr, b *batch.RecordBatch) *batch.Vector {
 		default:
 			v.Nulls.SetNull(dst)
 		}
+	}
+	if b.Sel != nil {
+		for i, src := range b.Sel {
+			emit(int(src), i)
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			emit(i, i)
+		}
+	}
+	return v
+}
+
+// evalBoolColumn is evalExprColumn's TypeBool arm: it materializes a real
+// boolean vector from a boolean-typed compiled expression, evaluated on the
+// three-valued protocol (UNKNOWN → SQL NULL) when the expression implements
+// it, else through the boxed Eval path. The dst indexing matches
+// evalExprColumn exactly — dense under a selection vector — so the produced
+// column aligns with the batch's other columns.
+func evalBoolColumn(e expr.Expr, b *batch.RecordBatch) *batch.Vector {
+	v := batch.NewVector(parquet.TypeBool, b.Len)
+	bn, hasBN := e.(expr.BoolNullExpr)
+	emit := func(row, dst int) {
+		if hasBN {
+			val, null := bn.EvalBoolNull(b, row)
+			if null {
+				v.Nulls.SetNull(dst)
+				return
+			}
+			v.BoolData[dst] = val
+			v.Nulls.SetValid(dst)
+			return
+		}
+		val := e.Eval(b, row)
+		if val == nil {
+			v.Nulls.SetNull(dst)
+			return
+		}
+		if x, ok := val.(bool); ok {
+			v.BoolData[dst] = x
+			v.Nulls.SetValid(dst)
+			return
+		}
+		v.Nulls.SetNull(dst)
 	}
 	if b.Sel != nil {
 		for i, src := range b.Sel {

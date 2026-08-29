@@ -3067,7 +3067,8 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 				target = strings.ToLower(p.Expr)
 			}
 			src = target
-		case p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) && referencesSyntheticAgg(p.ASTExpr):
+		case p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) &&
+			(referencesSyntheticAgg(p.ASTExpr) || referencesSyntheticWindow(p.ASTExpr)):
 			// Wrapped aggregate — the logical layer replaced aggregate calls
 			// with ColRefs to their __agg_N synthetic columns. Compile+eval
 			// at gather time so the divisor (e.g. "/7.0" in Q17's avg_yearly)
@@ -3077,6 +3078,14 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			// and surface as a column under the expression's lowercased text
 			// — those need a plain rename, not eval (and eval would mistype
 			// SUBSTR's string output as float64).
+			//
+			// A nested WINDOW expression (#610) is the same shape: the window
+			// is extracted into a __win_N column by the window stage and the
+			// surrounding SUM(x) OVER (...) + 1 references it. The Project
+			// above the window is a DAG passthrough, so nothing between the
+			// window stage and the gather ever applies the "+ 1"; evaluating
+			// it here is what keeps the DAG's answer equal to the
+			// single-process pipeline's instead of emitting the bare window.
 			target = p.Alias
 			if target == "" {
 				target = strings.ToLower(p.Expr)
@@ -3138,46 +3147,109 @@ func isSimpleColRefForRename(n plansql.Node) bool {
 	return false
 }
 
-// referencesSyntheticAgg reports whether an AST contains any ColRef whose
-// name starts with "__agg_" — the marker the logical layer's nested-
-// aggregate rewrite uses for synthetic column names. Lets the gather rewrite
-// distinguish "SUM(x)/7.0" (rewritten to "__agg_0/7.0", needs eval) from
-// "SUBSTR(o_orderdate, 1, 4)" (worker-computed, needs rename).
-func referencesSyntheticAgg(n plansql.Node) bool {
+// referencesSynthetic reports whether an AST contains any ColRef whose name
+// starts with prefix — "__agg_" for the nested-aggregate rewrite, "__win_" for
+// the nested-window rewrite (#610). It MUST traverse exactly the node set the
+// logical rewrites do (plansql.ReplaceAllAggregates / ReplaceWindowFuncs):
+// those rewrites can bury a __agg_/__win_ ColRef under a boolean/predicate
+// wrapper (BETWEEN, AND/OR, IN, LIKE, IS, ANY/ALL), and a helper that stopped
+// short there told extractOutputRenames the projection was a plain column
+// rename. The gather then emitted the internal synthetic column (and the raw
+// base columns beside it) to the client instead of evaluating the wrapper —
+// the exact "wrong answer, right shape" leak #610 set out to kill, on the DAG.
+func referencesSynthetic(n plansql.Node, prefix string) bool {
 	if n == nil {
 		return false
 	}
 	switch x := n.(type) {
 	case *plansql.ColRef:
-		return strings.HasPrefix(x.Column, "__agg_")
+		return strings.HasPrefix(x.Column, prefix)
 	case *plansql.BinaryOp:
-		return referencesSyntheticAgg(x.Left) || referencesSyntheticAgg(x.Right)
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
 	case *plansql.UnaryOp:
-		return referencesSyntheticAgg(x.Inner)
+		return referencesSynthetic(x.Inner, prefix)
 	case *plansql.CmpExpr:
-		return referencesSyntheticAgg(x.Left) || referencesSyntheticAgg(x.Right)
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
 	case *plansql.ParenNode:
-		return referencesSyntheticAgg(x.Inner)
+		return referencesSynthetic(x.Inner, prefix)
+	case *plansql.CastNode:
+		return referencesSynthetic(x.Inner, prefix)
 	case *plansql.FuncCallNode:
 		for _, a := range x.Args {
-			if referencesSyntheticAgg(a) {
+			if referencesSynthetic(a, prefix) {
 				return true
 			}
 		}
-	case *plansql.CastNode:
-		return referencesSyntheticAgg(x.Inner)
 	case *plansql.CaseNode:
-		if referencesSyntheticAgg(x.Subject) {
+		if referencesSynthetic(x.Subject, prefix) {
 			return true
 		}
 		for _, w := range x.Whens {
-			if referencesSyntheticAgg(w.Cond) || referencesSyntheticAgg(w.Result) {
+			if referencesSynthetic(w.Cond, prefix) || referencesSynthetic(w.Result, prefix) {
 				return true
 			}
 		}
-		return referencesSyntheticAgg(x.Else)
+		return referencesSynthetic(x.Else, prefix)
+	case *plansql.IsExpr:
+		return referencesSynthetic(x.Left, prefix)
+	case *plansql.NotNode:
+		return referencesSynthetic(x.Inner, prefix)
+	case *plansql.AndNode:
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
+	case *plansql.OrNode:
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Right, prefix)
+	case *plansql.InExpr:
+		if referencesSynthetic(x.Left, prefix) {
+			return true
+		}
+		for _, v := range x.Values {
+			if referencesSynthetic(v, prefix) {
+				return true
+			}
+		}
+	case *plansql.BetweenExpr:
+		return referencesSynthetic(x.Left, prefix) ||
+			referencesSynthetic(x.Low, prefix) || referencesSynthetic(x.High, prefix)
+	case *plansql.LikeExpr:
+		return referencesSynthetic(x.Left, prefix) || referencesSynthetic(x.Pattern, prefix)
+	case *plansql.AnyAllExpr:
+		if referencesSynthetic(x.Left, prefix) {
+			return true
+		}
+		for _, v := range x.Values {
+			if referencesSynthetic(v, prefix) {
+				return true
+			}
+		}
+	case *plansql.TupleNode:
+		for _, e := range x.Elements {
+			if referencesSynthetic(e, prefix) {
+				return true
+			}
+		}
+	case *plansql.ArrayLitNode:
+		for _, e := range x.Elements {
+			if referencesSynthetic(e, prefix) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// referencesSyntheticAgg reports whether an AST references a nested-aggregate
+// synthetic column (__agg_N). Lets the gather rewrite distinguish "SUM(x)/7.0"
+// (rewritten to "__agg_0/7.0", needs eval) from "SUBSTR(o_orderdate, 1, 4)"
+// (worker-computed, needs rename).
+func referencesSyntheticAgg(n plansql.Node) bool {
+	return referencesSynthetic(n, "__agg_")
+}
+
+// referencesSyntheticWindow reports whether an AST references a nested-window
+// synthetic column (__win_N), the marker the logical builder's nested-window
+// rewrite uses for a window extracted out of a larger expression (#610).
+func referencesSyntheticWindow(n plansql.Node) bool {
+	return referencesSynthetic(n, "__win_")
 }
 
 // firstColRefName returns the first column reference name in an AST, used as
