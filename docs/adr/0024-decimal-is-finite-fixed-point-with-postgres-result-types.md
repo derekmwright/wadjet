@@ -176,10 +176,20 @@ NOT, and this record does not claim them: `CAST(x AS DECIMAL(p,s))` is still
 item 1's declared-STRING no-op — `CAST('NaN' AS DECIMAL(9,2))` yields the
 string "NaN", `CAST('Infinity' AS DECIMAL(9,2))` the string "Infinity" (where
 PostgreSQL raises 22003), and `CAST('NaN' AS DECIMAL)` a float64 NaN — until
-the CAST evaluator lands (#555); and the UNCHECKED ingest writer
-(`ParseDecimalString` via `Vector.SetValue`) stores 0 for all three exactly as
-it does for `'abc'`, which is item 4's unchecked-writer residual over the whole
-type rather than anything specific to these values. One predicate serves both refusal sites — the plan-time
+the CAST evaluator lands (#555); and the UNCHECKED WRITE PATHS store 0 for all
+three exactly as they do for `'abc'`, which is item 4's residual over the whole
+type rather than anything specific to these values.
+
+There are TWO unchecked write paths and both are named here, because only one
+is on the line a user's INSERT actually takes. `batch.ParseDecimalString` via
+`Vector.SetValue` is the row-to-batch adapter. `parquet.decimalUnscaledInt64`
+(and `decimalFLBABytes` beside it) is the FILE WRITER, and it is the one an
+ingested row reaches: its string arm sends every value through
+`strconv.ParseFloat`, so unparseable text stores 0, a NaN or an infinity
+stores 0 through the float arm's own guard, `' 3.50 '` stores 0 because
+ParseFloat refuses the surrounding space, and anything past float64's ~16
+significant digits loses its exactness on the way in. Tracked as #647, not
+closed here. One predicate serves both refusal sites — the plan-time
 one (`physical.refuseLiteralForType` → `expr.IsNumericLiteralText`) and the
 runtime one (`kernel.DecimalLiteral.Numeric`) — so the accept-set cannot
 differ between them; the row-group prune withholds for these literals

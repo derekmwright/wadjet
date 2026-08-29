@@ -83,8 +83,18 @@ func rwpSchema() parquet.Schema {
 // manifest JSON stats never see it); an infinity does NOT, which is why this
 // fixture has no infinite row and the neighbouring float gates manufacture
 // theirs with CAST.
+//
+// Rows 22 and 23 are NEGATIVE (-3.5 and -0.25, both exact in float32 so they
+// add no width question of their own). They are here for the SIGN, and they
+// are what makes the `'-Infinity'` entries below able to fail at all: a float
+// compared against one of the specials used to fall through to a LEXICOGRAPHIC
+// text comparison, and every finite value renders starting with a digit or
+// '-', so only a NEGATIVE rendering ("-3.5") sorts below "-Infinity" as text.
+// Over rows 0..21 — every one at or above zero — the correct float answer and
+// the wrong text answer are the same row set (#534 review). They also give the
+// ordinary width entries beside them a negative arm, which none had.
 func rwpData() []map[string]any {
-	rows := make([]map[string]any, 0, 21)
+	rows := make([]map[string]any, 0, 24)
 	add := func(k int64, v any) {
 		rows = append(rows, map[string]any{"r_key": k, "r_val": v, "r_other": v, "d_val": nil})
 	}
@@ -103,6 +113,10 @@ func rwpData() []map[string]any {
 	rows[20]["d_val"] = float64(16777216)
 	add(21, float32(math.NaN()))
 	rows[21]["d_val"] = math.NaN()
+	add(22, float32(-3.5))
+	rows[22]["d_val"] = float64(-3.5)
+	add(23, float32(-0.25))
+	rows[23]["d_val"] = float64(-0.25)
 	return rows
 }
 
@@ -119,7 +133,8 @@ type rwpCase struct {
 //	CREATE TABLE rp (r_key bigint, r_val real, r_other real, d_val double precision);
 //	INSERT INTO rp SELECT i, i+0.1, i+0.1, i+0.1 FROM generate_series(0,15) i;
 //	INSERT INTO rp VALUES (16,0.5,0.5,0.5),(17,1.5,1.5,1.5),(18,NULL,NULL,NULL),
-//	                      (19,0,0,0),(20,16777216,16777216,16777216);
+//	                      (19,0,0,0),(20,16777216,16777216,16777216),
+//	                      (21,'NaN','NaN','NaN'),(22,-3.5,-3.5,-3.5),(23,-0.25,-0.25,-0.25);
 func rwpWant() []rwpCase {
 	seq := func(lo, hi int64) []int64 {
 		out := make([]int64, 0, hi-lo+1)
@@ -145,9 +160,9 @@ func rwpWant() []rwpCase {
 		// narrowing this replaces, row 3 answered `=`, `<=` and `>=` and was
 		// absent from `<` — four of the six operators moved a row.
 		{"EqNonRepresentable", "r_val = 3.1", nil},
-		{"NeNonRepresentable", "r_val <> 3.1", join(seq(0, 17), []int64{19, 20, 21})},
-		{"LtNonRepresentable", "r_val < 3.1", []int64{0, 1, 2, 3, 16, 17, 19}},
-		{"LeNonRepresentable", "r_val <= 3.1", []int64{0, 1, 2, 3, 16, 17, 19}},
+		{"NeNonRepresentable", "r_val <> 3.1", join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
+		{"LtNonRepresentable", "r_val < 3.1", []int64{0, 1, 2, 3, 16, 17, 19, 22, 23}},
+		{"LeNonRepresentable", "r_val <= 3.1", []int64{0, 1, 2, 3, 16, 17, 19, 22, 23}},
 		{"GtNonRepresentable", "r_val > 3.1", join(seq(4, 15), []int64{20, 21})},
 		{"GeNonRepresentable", "r_val >= 3.1", join(seq(4, 15), []int64{20, 21})},
 		// The same number spelled with a trailing zero is the same literal:
@@ -180,7 +195,7 @@ func rwpWant() []rwpCase {
 		// real[], so this narrows and matches.
 		{"InMultiWithNull", "r_val IN (3.1, NULL)", []int64{3}},
 		{"NotInMulti", "r_val NOT IN (3.1, 7.1)",
-			join([]int64{0, 1, 2}, []int64{4, 5, 6}, seq(8, 17), []int64{19, 20, 21})},
+			join([]int64{0, 1, 2}, []int64{4, 5, 6}, seq(8, 17), []int64{19, 20, 21, 22, 23})},
 		// The narrowing and the widening on ONE literal, in one fixture: the
 		// integer 16777217 misses through `=` (widened) and HITS through a
 		// multi-element IN (narrowed onto 2^24). Anything that lowers IN to a
@@ -198,8 +213,8 @@ func rwpWant() []rwpCase {
 		// widening the real (only the rows whose value survives the round
 		// trip). A change that widened the COLUMN pair, or narrowed the
 		// double one, moves one of these.
-		{"EqRealColumn", "r_val = r_other", join(seq(0, 17), []int64{19, 20, 21})},
-		{"EqDoubleColumn", "r_val = d_val", []int64{16, 17, 19, 20, 21}},
+		{"EqRealColumn", "r_val = r_other", join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
+		{"EqDoubleColumn", "r_val = d_val", []int64{16, 17, 19, 20, 21, 22, 23}},
 
 		// A finite literal past real's range is an ordinary double for `=`:
 		// no row equals it, and PostgreSQL raises NO error (the 22003 belongs
@@ -241,12 +256,12 @@ func rwpWant() []rwpCase {
 		{"GtIntegerLiteral", "r_val > 1", join(seq(1, 15), []int64{17, 20, 21})},
 		{"GtFloatLiteral", "r_val > 1.0", join(seq(1, 15), []int64{17, 20, 21})},
 		{"GeIntegerLiteral", "r_val >= 1", join(seq(1, 15), []int64{17, 20, 21})},
-		{"LtIntegerLiteral", "r_val < 1", []int64{0, 16, 19}},
-		{"NeIntegerLiteral", "r_val <> 1", join(seq(0, 17), []int64{19, 20, 21})},
+		{"LtIntegerLiteral", "r_val < 1", []int64{0, 16, 19, 22, 23}},
+		{"NeIntegerLiteral", "r_val <> 1", join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
 		// The FLOAT64 column has no width question at all, and lost the same
 		// order for the same reason.
 		{"DoubleGtIntegerLiteral", "d_val > 1", join(seq(1, 15), []int64{17, 20, 21})},
-		{"DoubleNeIntegerLiteral", "d_val <> 1", join(seq(0, 17), []int64{19, 20, 21})},
+		{"DoubleNeIntegerLiteral", "d_val <> 1", join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
 
 		// --- A NEGATIVE member is still a constant ---
 		//
@@ -280,6 +295,45 @@ func rwpWant() []rwpCase {
 		// A literal at real's smallest DENORMAL is representable and must NOT
 		// be refused — the boundary the underflow refusal has to respect.
 		{"InMultiDenormalBoundary", "r_val IN (1e-45, 3.1)", []int64{3}},
+
+		// --- #534: a FLOAT column against NaN and the infinities ----------
+		//
+		// float4 and float8 HOLD all three, so this is PostgreSQL's ordinary
+		// float order (ADR-0012 item 8) — NaN above every value and equal to
+		// itself, -Infinity below every one — and NOT the bound a DECIMAL
+		// column gets, which exists only because that carrier has no such
+		// value (ADR-0024 item 6). The row path used to fall through to a
+		// LEXICOGRAPHIC text comparison here, which agrees with PostgreSQL on
+		// every non-negative column; rows 22 and 23 are why these can fail.
+		//
+		// The CASE forces the row-at-a-time evaluator, which is what the DAG
+		// compiles every scan-pushed filter to — so this is the arm the fix
+		// has to reach on the distributed path. The BARE spelling is left out
+		// deliberately: the vectorized kernel still reads a quoted constant as
+		// 0.0 (#646, the float arm of #536), pinned in the pg-oracle corpus
+		// and in wadjet.TestFloatColumnsKeepTheirOwnNaNRule rather than here.
+		{"GtNegInfinityInCase", "CASE WHEN r_val > '-Infinity' THEN 1 ELSE 0 END = 1",
+			join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
+		{"LtNegInfinityInCase", "CASE WHEN r_val < '-Infinity' THEN 1 ELSE 0 END = 1", nil},
+		// The NaN ROW is what these turn on: row 21 is NOT below NaN (NaN
+		// equals itself) and IS above Infinity, so a reading that treats the
+		// literal as anything else moves it.
+		{"LtNaNInCase", "CASE WHEN r_val < 'NaN' THEN 1 ELSE 0 END = 1",
+			join(seq(0, 17), []int64{19, 20, 22, 23})},
+		{"EqNaNInCase", "CASE WHEN r_val = 'NaN' THEN 1 ELSE 0 END = 1", []int64{21}},
+		{"LeInfinityInCase", "CASE WHEN r_val <= 'Infinity' THEN 1 ELSE 0 END = 1",
+			join(seq(0, 17), []int64{19, 20, 22, 23})},
+		{"GtInfinityInCase", "CASE WHEN r_val > 'Infinity' THEN 1 ELSE 0 END = 1", []int64{21}},
+		// A SIGNED NaN is where the FLOAT grammar and the NUMERIC one part:
+		// float reads '+NaN' and '-NaN' as NaN, numeric refuses both with
+		// 22P02. So this ANSWERS here and stays refused against a DECIMAL.
+		{"LtNegatedNaNInCase", "CASE WHEN r_val < '-NaN' THEN 1 ELSE 0 END = 1",
+			join(seq(0, 17), []int64{19, 20, 22, 23})},
+		// float8, so the rule is not pinned to the narrow width.
+		{"DoubleGtNegInfinityInCase", "CASE WHEN d_val > '-Infinity' THEN 1 ELSE 0 END = 1",
+			join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
+		{"DoubleLtNaNInCase", "CASE WHEN d_val < 'NaN' THEN 1 ELSE 0 END = 1",
+			join(seq(0, 17), []int64{19, 20, 22, 23})},
 	}
 }
 
@@ -479,18 +533,18 @@ func TestRealKeyedOperationsAreUnmovedByWidth(t *testing.T) {
 		sql  string
 		want string // the single scalar cell, rendered
 	}{
-		// 22 rows, 21 distinct non-NULL values plus the NULL: PostgreSQL
+		// 24 rows, 23 distinct non-NULL values plus the NULL: PostgreSQL
 		// GROUP BY collects NULL into its own group, and the NaN into one of
-		// its own, so 22.
+		// its own, so 24.
 		{"GroupByReal", fmt.Sprintf(
-			"SELECT COUNT(*) AS n FROM (SELECT r_val FROM %s GROUP BY r_val) s", rwpTable), "22"},
+			"SELECT COUNT(*) AS n FROM (SELECT r_val FROM %s GROUP BY r_val) s", rwpTable), "24"},
 		{"DistinctReal", fmt.Sprintf(
-			"SELECT COUNT(*) AS n FROM (SELECT DISTINCT r_val FROM %s) s", rwpTable), "22"},
-		// Every non-NULL row joins exactly itself: 21 pairs, the NaN row
+			"SELECT COUNT(*) AS n FROM (SELECT DISTINCT r_val FROM %s) s", rwpTable), "24"},
+		// Every non-NULL row joins exactly itself: 23 pairs, the NaN row
 		// included — NaN equals itself in PostgreSQL's float order, so it is
 		// a join key like any other.
 		{"SelfJoinOnReal", fmt.Sprintf(
-			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.r_val = b.r_val", rwpTable, rwpTable), "21"},
+			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.r_val = b.r_val", rwpTable, rwpTable), "23"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -510,13 +564,13 @@ func TestRealKeyedOperationsAreUnmovedByWidth(t *testing.T) {
 	}
 
 	// ORDER BY over the real column, ascending with NULLs last (PostgreSQL's
-	// default for ASC), the NaN row second-to-last: NaN is the greatest VALUE
-	// and NULL is not a value at all. The key order is the float32 one at
-	// every position;
-	// the literal-width rule never enters it.
+	// default for ASC), the two NEGATIVE rows first and the NaN row
+	// second-to-last: NaN is the greatest VALUE and NULL is not a value at
+	// all. The key order is the float32 one at every position; the
+	// literal-width rule never enters it.
 	t.Run("OrderByReal", func(t *testing.T) {
 		sql := fmt.Sprintf("SELECT r_key FROM %s ORDER BY r_val, r_key", rwpTable)
-		want := "19,0,16,1,17,2,3,4,5,6,7,8,9,10,11,12,13,14,15,20,21,18"
+		want := "22,23,19,0,16,1,17,2,3,4,5,6,7,8,9,10,11,12,13,14,15,20,21,18"
 		for _, arm := range []struct {
 			name string
 			dag  bool

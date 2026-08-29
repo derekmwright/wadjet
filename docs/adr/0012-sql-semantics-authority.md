@@ -322,10 +322,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      rather than claimed: `CAST(x AS DECIMAL(p,s))` is still ADR-0024 item 1's
      declared-STRING no-op, so `CAST('NaN' AS DECIMAL(9,2))` yields the string
      "NaN" and `CAST('NaN' AS DECIMAL)` a float64 NaN until the CAST evaluator
-     lands (#555); and the UNCHECKED ingest writer (`batch.ParseDecimalString`
-     via `Vector.SetValue`) stores 0 for them exactly as it does for `'abc'` —
-     ADR-0024 item 4's unchecked-writer residual, which is a property of the
-     whole type and not of these three. The accepted spellings are PostgreSQL's own input
+     lands (#555); and the UNCHECKED WRITE PATHS store 0 for them exactly as
+     they do for `'abc'` — ADR-0024 item 4's residual, which is a property of
+     the whole type and not of these three. There are TWO of those paths and
+     both are named because only one of them is on the line a user's INSERT
+     actually takes: `batch.ParseDecimalString` via `Vector.SetValue` (the
+     row-to-batch adapter), and `parquet.decimalUnscaledInt64` /
+     `decimalFLBABytes` in the file writer, whose string arm routes every
+     value through `strconv.ParseFloat` — 0 on error, 0 for a NaN or an
+     infinity, 0 for `' 3.50 '` because ParseFloat refuses the surrounding
+     space, and float64's ~16 significant digits for everything else. That
+     second one is the ingest path a client reaches and it is tracked as
+     #647. The accepted spellings are PostgreSQL's own input
      grammar and nothing wider — case-insensitive `nan` with NO sign,
      case-insensitive `infinity`/`inf` with an optional adjacent sign, C
      whitespace trimmed — so `'+NaN'`, `'Infin'` and `'abc'` all stay 22P02.
