@@ -720,6 +720,13 @@ func oracleTables() map[string]parquet.Schema {
 		{Name: "r_key", Type: parquet.TypeInt64},
 		{Name: "r_grp", Type: parquet.TypeInt32},
 		{Name: "r_val", Type: parquet.TypeFloat32, Nullable: true},
+		// A second REAL column holding the same values, and the same numbers
+		// as DOUBLE (#631). Neither exists to be selected: they are the two
+		// COLUMN-to-column comparisons the literal-width rule must NOT touch —
+		// `real = real` compares at real width, and `real = double` widens the
+		// real, both with no literal anywhere to resolve a type from.
+		{Name: "r_other", Type: parquet.TypeFloat32, Nullable: true},
+		{Name: "d_val", Type: parquet.TypeFloat64, Nullable: true},
 	}}
 	// The multi-key correlated-subquery fixture (#562). It is here rather than
 	// in a second oracle because it needs exactly what this one already has —
@@ -943,24 +950,48 @@ func pgDecimalRows() []map[string]any {
 	return rows
 }
 
-// pgRealRows builds the real_probe fixture (#549). Rows 0..15 hold real(i)+0.1
-// — NON-representable in float32, the values #549 turned up on — so a
-// multi-element `real IN (0.1, 3.1, …)` exercises the narrowing that must
-// match PostgreSQL's `= ANY(real[])`. Rows 16..17 hold exactly-representable
-// values (0.5, 1.5), the case that masked the bug, and row 18 is NULL so the
-// NOT-IN entry meets an UNKNOWN. r_val is boxed as float32 — the column's own
-// width — not float64.
+// pgRealRows builds the real_probe fixture (#549, #631). Rows 0..15 hold
+// real(i)+0.1 — NON-representable in float32, the values #549 turned up on —
+// so a multi-element `real IN (0.1, 3.1, …)` exercises the narrowing that must
+// match PostgreSQL's `= ANY(real[])`, and a scalar `= 3.1` exercises the
+// WIDENING that must match `= '3.1'::double precision`. Rows 16..17 hold
+// exactly-representable values (0.5, 1.5), the case that masked both bugs, and
+// row 18 is NULL so the NOT-IN entry meets an UNKNOWN.
+//
+// Row 19 holds 0.0 — the value every "read the constant as the type's zero"
+// defect in this family lands on — and row 20 holds 16777216 (2^24), the first
+// integer float32 cannot follow. Row 20 is what makes the INTEGER-literal rule
+// non-vacuous: 16777217 is exact in double and not in real, so PostgreSQL's
+// widened `r_val = 16777217` is empty while its narrowed
+// `r_val IN (16777217, 99)` matches that row — the same literal, two answers,
+// which is why the scalar and multi-element kernels must stay separate (#631).
+//
+// r_val and r_other are boxed as float32 — the column's own width — and d_val
+// as float64, so the DOUBLE column really holds the unrounded number.
 func pgRealRows() []map[string]any {
-	rows := make([]map[string]any, 0, 19)
+	row := func(k int64, g int32, v any) map[string]any {
+		out := map[string]any{"r_key": k, "r_grp": g, "r_val": v, "r_other": v, "d_val": nil}
+		if f, ok := v.(float32); ok {
+			out["d_val"] = float64(f)
+		}
+		return out
+	}
+	rows := make([]map[string]any, 0, 21)
 	for i := 0; i < 16; i++ {
-		rows = append(rows, map[string]any{
-			"r_key": int64(i), "r_grp": int32(i % 4), "r_val": float32(i) + 0.1,
-		})
+		r := row(int64(i), int32(i%4), float32(i)+0.1)
+		// The DOUBLE column holds i+0.1 computed IN double, not the float32
+		// value widened: that difference is the whole point of the
+		// `real = double` entry — PostgreSQL widens the real and the two
+		// numbers then differ.
+		r["d_val"] = float64(i) + 0.1
+		rows = append(rows, r)
 	}
 	rows = append(rows,
-		map[string]any{"r_key": int64(16), "r_grp": int32(0), "r_val": float32(0.5)},
-		map[string]any{"r_key": int64(17), "r_grp": int32(1), "r_val": float32(1.5)},
-		map[string]any{"r_key": int64(18), "r_grp": int32(2), "r_val": nil},
+		row(16, 0, float32(0.5)),
+		row(17, 1, float32(1.5)),
+		row(18, 2, nil),
+		row(19, 3, float32(0)),
+		row(20, 0, float32(16777216)),
 	)
 	return rows
 }

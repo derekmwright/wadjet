@@ -179,6 +179,108 @@ func compareFilterFloat[T FloatOrdered](getData func(v *batch.Vector) []T, val T
 	}
 }
 
+// compareFilterFloat32Widen compares a FLOAT32 (`real`) column against a
+// float64 constant AT DOUBLE WIDTH, widening every row's value instead of
+// narrowing the constant — PostgreSQL's rule for `real <op> <numeric literal>`
+// (#631).
+//
+// PostgreSQL has no `real <op> numeric-literal` operator to resolve to: an
+// unsuffixed decimal constant is `numeric`, an integer constant is `integer`,
+// and both resolve the comparison through `float8`, so the COLUMN is the side
+// that moves. Verified with EXPLAIN VERBOSE on postgres:17 for all six
+// operators and for an integer literal:
+//
+//	real = 3.1        ->  Filter: (r_val = '3.1'::double precision)
+//	real > 3.1        ->  Filter: (r_val > '3.1'::double precision)
+//	real = 3          ->  Filter: (r_val = '3'::double precision)
+//	real = 3.1::numeric -> Filter: (r_val = '3.1'::double precision)
+//
+// The narrowing this replaces (`float32(toFloat64(value))`) is a DIFFERENT
+// predicate whenever the literal is not exactly representable in float32,
+// which is most literals: over a column holding real(i)+0.1, PostgreSQL
+// answers `= 3.1` with NO rows (float64(float32(3.1)) != 3.1) where the
+// narrowing answered the row, and `< 3.1` with the row 3.1 INCLUDED where the
+// narrowing excluded it as equal. It is not only an equality question — all
+// six operators move a row across the boundary.
+//
+// Widening also makes the ROW-GROUP PRUNE and the filter read one predicate.
+// scan.CanPruneRowGroup compares a float32 statistics bound against the
+// float64 literal through compareValuesOK, which widens — so under the old
+// narrowing kernel a row group whose max was exactly float32(3.1) was pruned
+// for `= 3.1` while the kernel would have MATCHED its rows (ADR-0018's "a
+// prune must not read the predicate differently from the filter").
+//
+// The loop is compareFilterFloat's, with float64() on the load: the constant's
+// NaN-ness still picks the shape (see that function for why the non-NaN case
+// must keep resolveFloatConstPred2's non-capturing two-argument form), and the
+// widening conversion is one register instruction per row.
+func compareFilterFloat32Widen(val float64, op CompareOp) FilterKernel {
+	if val != val {
+		keep := resolveFloatConstPred(op, val)
+		return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+			data := vec.Float32Data
+			out := outSel[:0]
+			hasNulls := vec.Nulls.HasNulls()
+			if sel != nil {
+				for _, idx := range sel {
+					if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+						continue
+					}
+					if keep(float64(data[idx])) {
+						out = append(out, idx)
+					}
+				}
+				return out
+			}
+			for i := 0; i < vecLen; i++ {
+				if hasNulls && vec.Nulls.IsNullFast(i) {
+					continue
+				}
+				if keep(float64(data[i])) {
+					out = append(out, uint32(i))
+				}
+			}
+			return out
+		}
+	}
+	cmpFn := resolveFloatConstPred2[float64](op)
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		data := vec.Float32Data
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(float64(data[idx]), val) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if cmpFn(float64(data[idx]), val) {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !vec.Nulls.IsNullFast(i) && cmpFn(float64(data[i]), val) {
+						out = append(out, uint32(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if cmpFn(float64(data[i]), val) {
+						out = append(out, uint32(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
 // Data accessor functions for each vector type.
 func getInt64Data(v *batch.Vector) []int64     { return v.Int64Data }
 func getInt32Data(v *batch.Vector) []int32     { return v.Int32Data }
@@ -283,7 +385,17 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// admits a NaN row and `= f` keeps one (#459, ADR-0012 item 8).
 		return compareFilterFloat(getFloat64Data, toFloat64(value), op)
 	case batch.TypeFloat32:
-		return compareFilterFloat(getFloat32Data, float32(toFloat64(value)), op)
+		// WIDENS the column to double rather than narrowing the literal to
+		// real: PostgreSQL resolves `real <op> <numeric literal>` through
+		// float8 for every one of the six operators (#631). See
+		// compareFilterFloat32Widen for the EXPLAIN VERBOSE evidence and for
+		// why this is not only an equality question.
+		//
+		// A multi-element `real IN (...)` is the one shape that goes the
+		// other way — PostgreSQL casts the whole array literal to real[] and
+		// NARROWS there (#549) — which is why the two kernels are separate
+		// and IN is deliberately not lowered to a chain of `=`.
+		return compareFilterFloat32Widen(toFloat64(value), op)
 	case batch.TypeString:
 		return compareFilterString(op, toString(value))
 	case batch.TypeIPv4:
@@ -1002,11 +1114,12 @@ func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syn
 		// error (1e40 is a finite double that widens, misses, and never becomes
 		// the +Inf a real cast would).
 		//
-		// Single-element IN is deliberately NOT folded to the scalar `=`
-		// kernel: `=` NARROWS (float32(toFloat64(value))) and that narrowing is
-		// itself the divergence #631 tracks — PostgreSQL widens `real = <lit>`
-		// too. Folding here would inherit that bug. IN(x) and `= x` therefore
-		// take different kernels on purpose, and this test does NOT assert
+		// Single-element IN and the scalar `=` kernel now AGREE — both widen
+		// (#631 fixed `=`) — but they are still separate kernels, because the
+		// MULTI-element arity does not: `real IN (16777217, 99)` narrows and
+		// matches the row holding 16777216, while `real = 16777217` widens and
+		// matches nothing (both verified on postgres:17). IN is therefore not
+		// lowered to a chain of `=` for this type, and the tests do NOT assert
 		// IN == OR-of-equals for real.
 		if syntacticLen <= 1 {
 			set, hasNaN := floatInSet(values)

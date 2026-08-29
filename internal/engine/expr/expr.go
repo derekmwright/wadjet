@@ -1878,6 +1878,10 @@ type In struct {
 	// dec binds a DECIMAL column against an all-numeric-literal list; see
 	// NewCmp and decimal_literal.go.
 	dec *decimalLitCmp
+	// f32 binds a FLOAT32 column against a multi-element all-numeric-literal
+	// list, which PostgreSQL compares at REAL width and this path compared at
+	// double (#633); see real_in_width.go.
+	f32 *realLitSet
 	// pairs is one declaration-driven binding per LIST MEMBER, for the lists
 	// dec declines: a mixed list, a member that is not a literal, or a column
 	// that is not a DECIMAL. `x IN (v)` is `x = v` chained with OR, so it has
@@ -1893,13 +1897,15 @@ type In struct {
 }
 
 // NewIn builds a set-membership test, binding the DECIMAL-column-against-
-// numeric-literals shape and one boxed pair per member.
+// numeric-literals shape, the FLOAT32-column-against-a-multi-element-list
+// shape, and one boxed pair per member.
 func NewIn(e Expr, values []Expr, not bool) *In {
 	pairs := make([]*boxedPair, len(values))
 	for i, v := range values {
 		pairs[i] = newBoxedPair(e, v)
 	}
-	return &In{Expr: e, Values: values, Not: not, dec: bindDecimalList(e, values), pairs: pairs}
+	return &In{Expr: e, Values: values, Not: not,
+		dec: bindDecimalList(e, values), f32: bindRealLitList(e, values), pairs: pairs}
 }
 
 func (e *In) Eval(b *batch.RecordBatch, row int) any {
@@ -1935,6 +1941,22 @@ func (e *In) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	lv := e.Expr.Eval(b, row)
 	if lv == nil {
 		return false, true
+	}
+	// A FLOAT32 column against a multi-element literal list compares at REAL
+	// width, not at the double width this boxed path would otherwise use
+	// (#633): the box is float64(float32), so narrowing it back recovers the
+	// stored value exactly. The list's own NULL rule is unchanged — a miss
+	// with a NULL member is UNKNOWN, never FALSE.
+	if e.f32.applies(b) {
+		if f, ok := lv.(float64); ok {
+			if e.f32.contains(float32(f)) {
+				return !e.Not, false
+			}
+			if e.f32.sawNull {
+				return false, true
+			}
+			return e.Not, false
+		}
 	}
 	sawNull := false
 	// Once every pair on this node is confirmed disarmed, skip the per-pair

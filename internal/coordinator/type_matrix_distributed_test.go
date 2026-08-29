@@ -343,6 +343,14 @@ func tmdTables() []tmdTable {
 		{sodOvfTable, sodOvfSchema(), sodOvfData()},
 		{sodJoinA, sodJoinSchema(9, 2), sodJoinData(1275)},
 		{sodJoinB, sodJoinSchema(18, 4), sodJoinData(127500)},
+		// The FLOAT32 comparison-width fixture (#631 the scalar operators,
+		// #633 the distributed IN list). Rides along for the same reason as
+		// the fixtures above: TestRealComparisonWidthTwoPath uses these two
+		// arms, and no type-matrix corpus entry names this table. The type
+		// matrix cannot stand in for it — its c_f32 column is never compared
+		// against a literal that float32 cannot hold, which is the only shape
+		// the two widths disagree on.
+		{rwpTable, rwpSchema(), rwpData()},
 	}, multikeyTables()...)
 }
 

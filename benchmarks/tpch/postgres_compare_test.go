@@ -820,16 +820,86 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "RealNotIn", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val NOT IN (0.1, 3.1)`},
 		// Representable, so `=` agrees on both sides (1.5 is exact in float32).
 		pgCase{name: "RealEqRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val = 1.5 ORDER BY r_key`},
-		// The scalar `=` divergence #631 tracks: PostgreSQL WIDENS `real = 3.1`
-		// to double and returns 0 rows; wadjet narrows to float32 and keeps the
-		// row. Pinned live — this subtest FAILS (deleting the pin) when #631
-		// lands. It is the sibling of #549, deliberately not fixed with it
-		// because changing float `=` semantics has a broad blast radius.
-		pgCase{name: "RealEqNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val = 3.1 ORDER BY r_key`,
-			knownBug: pgBugWadjet + " scalar `real = <lit>` narrows the literal to float32 and matches, " +
-				"where PostgreSQL widens the column to double and returns 0 rows (EXPLAIN: " +
-				"`r_val = '3.1'::double precision`). The multi-element IN path narrows correctly (#549); " +
-				"only scalar `=` and single-element IN widen.", issue: "#631"},
+
+		// SCALAR comparison against a numeric literal WIDENS the column to
+		// double — the other half of the arity rule, and the opposite width
+		// from the multi-element IN entries above (#631). PostgreSQL has no
+		// `real <op> numeric` operator to resolve to, so the comparison goes
+		// through float8 and the COLUMN is what moves:
+		//
+		//	real = 3.1  ->  Filter: (r_val = '3.1'::double precision)
+		//
+		// All six operators, because this is not only an equality question:
+		// float32(3)+0.1 widens to 3.0999999046325684, which is BELOW 3.1, so
+		// row 3 leaves `=`, joins `<`/`<=`, and leaves `>=`. Under the
+		// narrowing this replaced, four of the six answered differently.
+		pgCase{name: "RealEqNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val = 3.1 ORDER BY r_key`},
+		pgCase{name: "RealNeNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val <> 3.1 ORDER BY r_key`},
+		pgCase{name: "RealLtNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val < 3.1 ORDER BY r_key`},
+		pgCase{name: "RealLeNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val <= 3.1 ORDER BY r_key`},
+		pgCase{name: "RealGtNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val > 3.1 ORDER BY r_key`},
+		pgCase{name: "RealGeNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val >= 3.1 ORDER BY r_key`},
+		// The same number with a trailing zero is the same literal: both plan
+		// as '3.1'::double precision.
+		pgCase{name: "RealEqTrailingZero", sql: `SELECT r_key FROM real_probe WHERE r_val = 3.10 ORDER BY r_key`},
+		pgCase{name: "RealBetweenNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val BETWEEN 3.1 AND 4.1 ORDER BY r_key`},
+		// An INTEGER literal is widened too — `r_val = 3` plans as
+		// '3'::double precision. 16777217 is exact in double and not in real,
+		// so it matches nothing; narrowing would round it onto row 20 (2^24).
+		// The exact companion proves that row is reachable at all.
+		pgCase{name: "RealEqIntegerPastMantissa", sql: `SELECT r_key FROM real_probe WHERE r_val = 16777217 ORDER BY r_key`},
+		pgCase{name: "RealEqIntegerExact", sql: `SELECT r_key FROM real_probe WHERE r_val = 16777216 ORDER BY r_key`},
+		// The same literal through a MULTI-element IN, which narrows instead
+		// and DOES match row 20. Scalar `=` and multi-element IN disagreeing
+		// on one literal is the property that forbids lowering either to the
+		// other, on any path.
+		pgCase{name: "RealInIntegerPastMantissa", sql: `SELECT r_key FROM real_probe WHERE r_val IN (16777217, 99) ORDER BY r_key`},
+		// A finite literal past real's range is an ordinary double for a
+		// scalar comparison: no row equals it, everything is below it, and
+		// PostgreSQL raises NO error (the 22003 belongs to the multi-element
+		// IN, which casts the array to real[] — RealInOverflow*, #549).
+		pgCase{name: "RealEqOverRange", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val = 1e40`},
+		pgCase{name: "RealLtOverRange", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val < 1e40`},
+		// COLUMN against COLUMN: no literal, so nothing decides a width and
+		// #631 must leave both exactly where they were. PostgreSQL compares
+		// real to real directly, and real to double by widening the real — so
+		// only the rows whose value survives the round trip match the second.
+		pgCase{name: "RealEqRealColumn", sql: `SELECT r_key FROM real_probe WHERE r_val = r_other ORDER BY r_key`},
+		pgCase{name: "RealEqDoubleColumn", sql: `SELECT r_key FROM real_probe WHERE r_val = d_val ORDER BY r_key`},
+		pgCase{name: "RealLtDoubleColumn", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val < d_val`},
+		// Keyed operations over the same column, for the same reason: a group
+		// key, a DISTINCT and an ORDER BY compare stored value to stored value
+		// at real width, with no literal in sight.
+		pgCase{name: "RealGroupBy", sql: `SELECT COUNT(*) AS n FROM (SELECT r_val FROM real_probe GROUP BY r_val) s`},
+		pgCase{name: "RealDistinct", sql: `SELECT COUNT(*) AS n FROM (SELECT DISTINCT r_val FROM real_probe) s`},
+		pgCase{name: "RealOrderBy", sql: `SELECT r_key FROM real_probe ORDER BY r_val, r_key`},
+
+		// A QUOTED constant is the other half of the width rule and is NOT
+		// fixed (#646). PostgreSQL types an unknown-typed literal FROM the
+		// other operand, so a quoted constant against a real column NARROWS —
+		// the opposite direction from the numeric literal above:
+		//
+		//	r_val = 3.1    ->  Filter: (r_val = '3.1'::double precision)
+		//	r_val = '3.1'  ->  Filter: (r_val = '3.1'::real)
+		//
+		// Wadjet's kernel reads a text constant through kernel.toFloat64,
+		// which answers ZERO for any string, so these select the row holding
+		// 0.0 instead. Pinned live: the subtests FAIL when #646 lands, which
+		// is what deletes them. The FLOAT64 entry is here for the same reason
+		// — the defect is the text constant, not the width, and it reaches
+		// both float arms.
+		pgCase{name: "RealEqQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val = '3.1' ORDER BY r_key`,
+			knownBug: pgBugWadjet + " a QUOTED constant against a FLOAT column is read as the type's " +
+				"ZERO (kernel.toFloat64 answers 0 for any string), so this selects the row holding 0.0 " +
+				"where PostgreSQL narrows the literal to real and selects the 3.1 row.", issue: "#646"},
+		pgCase{name: "RealInQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val IN ('3.1', '7.1') ORDER BY r_key`,
+			knownBug: pgBugWadjet + " the same text-constant-as-zero defect through the IN-list kernel " +
+				"(kernel.float32InSet): PostgreSQL casts the array to real[] and matches both rows.",
+			issue: "#646"},
+		pgCase{name: "DoubleEqQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE d_val = '3.1' ORDER BY r_key`,
+			knownBug: pgBugWadjet + " the same text-constant-as-zero defect on the FLOAT64 arm, where " +
+				"no width question arises at all: PostgreSQL reads '3.1' as a double and matches its row.",
+			issue: "#646"},
 
 		// SINGLE-element real IN — the arity split #549's re-review turned up.
 		// PostgreSQL folds `real IN (x)` to `= 'x'::double precision` (WIDEN),
