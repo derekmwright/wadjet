@@ -470,5 +470,5 @@ func setOpDecimalFits(v batch.Int128, precision int) bool {
 	if !ok {
 		return true
 	}
-	return batch.DecimalFitsPrecision(v, limit)
+	return batch.DecimalFitsLimit(v, limit)
 }

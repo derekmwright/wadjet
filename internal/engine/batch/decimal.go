@@ -755,15 +755,16 @@ func DecimalPrecisionLimit(precision int) (Int128, bool) {
 	return Int128From(1).MulPow10(precision)
 }
 
-// DecimalFitsPrecision reports whether an unscaled value's MAGNITUDE is below
+// DecimalFitsLimit reports whether an unscaled value's MAGNITUDE is below
 // the limit DecimalPrecisionLimit returned. A zero limit means the caller had
 // none to give, which admits every value.
 //
-// This is the ONE fits-precision helper: exec.coerceDecimalVector and the
+// With DecimalPrecisionLimit it is the limit-carrying twin of
+// DecimalFitsPrecision(v, p): exec.coerceDecimalVector and the
 // single-process set operation both call it, so the two paths cannot come to
 // different conclusions about the same value (ADR-0024's consequence that the
 // grouped, DAG and local rules become one function).
-func DecimalFitsPrecision(v, limit Int128) bool {
+func DecimalFitsLimit(v, limit Int128) bool {
 	if limit.IsZero() {
 		return true
 	}

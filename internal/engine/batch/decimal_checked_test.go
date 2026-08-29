@@ -239,23 +239,23 @@ func TestDecimalFitsPrecisionIsTheOneHelper(t *testing.T) {
 		if limit != tenPow38 && p >= 38 {
 			t.Errorf("DecimalPrecisionLimit(%d) = %s, want 10^38", p, limit.String())
 		}
-		if DecimalFitsPrecision(tenPow38, limit) {
+		if DecimalFitsLimit(tenPow38, limit) {
 			t.Errorf("precision %d admitted 10^38", p)
 		}
 	}
 	// The negative end, including the value that is its own negation.
 	limit, _ := DecimalPrecisionLimit(38)
-	if DecimalFitsPrecision(Int128Min, limit) {
+	if DecimalFitsLimit(Int128Min, limit) {
 		t.Error("Int128Min has no magnitude an Int128 can hold and fits no declared precision")
 	}
-	if !DecimalFitsPrecision(Int128From(-1), limit) {
+	if !DecimalFitsLimit(Int128From(-1), limit) {
 		t.Error("-1 fits DECIMAL(38)")
 	}
 	// No limit means no bound to apply (#458's unconstrained sentinel).
 	if _, ok := DecimalPrecisionLimit(0); ok {
 		t.Error("precision 0 declares no bound")
 	}
-	if !DecimalFitsPrecision(tenPow38, Int128{}) {
+	if !DecimalFitsLimit(tenPow38, Int128{}) {
 		t.Error("a zero limit admits every value")
 	}
 }

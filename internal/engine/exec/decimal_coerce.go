@@ -224,7 +224,7 @@ func coerceDecimalVector(src *batch.Vector, c *decimalCoercion) (*batch.Vector, 
 		}
 		shifted, ok := unscaled.MulPow10(c.shiftPow1)
 		if ok {
-			ok = batch.DecimalFitsPrecision(shifted, c.limit)
+			ok = batch.DecimalFitsLimit(shifted, c.limit)
 		}
 		if !ok {
 			// 22003 numeric_value_out_of_range: PostgreSQL's SQLSTATE for the
