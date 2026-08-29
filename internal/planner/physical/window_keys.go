@@ -156,8 +156,28 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 			if k.Field != nil {
 				k.Type, k.Precision, k.Scale = k.Field.Type, k.Field.Precision, k.Field.Scale
 			} else {
+				// The declaration is inferred from the expression RESPELLED
+				// through any derived-table or CTE rename between here and
+				// the producer, because that is where the column
+				// declarations live: `SUM(v * 2) OVER ()` over
+				// `SELECT d_4 AS v` types `v` from nothing and falls back to
+				// the float rule, and with exact DECIMAL arithmetic the
+				// evaluator then hands an exact value to a FLOAT64 vector —
+				// `cannot store string into FLOAT64 vector`, on BOTH paths.
+				//
+				// Only the TYPE is taken from the respelled form. The TEXT
+				// keeps the alias, because the single-process pipeline runs
+				// the Project below the window as a real operator and its
+				// output really is called `v`; the DAG respells the text as
+				// well, where that Project emits no stage (#672, #656).
+				typed := k.Expr
+				if node != nil && len(node.Children) == 1 {
+					if r, ok := respellDerivedAliasRefs(k.Expr, node.Children[0]); ok {
+						typed = r
+					}
+				}
 				k.Type, k.Precision, k.Scale = declTypeParts(
-					inferProjectionDeclType(k.Expr, parquet.TypeString, strictInt,
+					inferProjectionDeclType(typed, parquet.TypeString, strictInt,
 						colDecls{types: typeCols, dec: typeDec}))
 			}
 		}
@@ -230,6 +250,16 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 	if t := inputColTypes(child); len(t) > 0 {
 		return t, strictIntArithCols(child)
 	}
+	// A DERIVED TABLE between the window and its producer: inputColTypes
+	// answers nothing for a Project, so a materialized key over one of its
+	// aliases had no declarations at all and fell to the float rule. With
+	// exact DECIMAL arithmetic the evaluator then hands an exact value to a
+	// FLOAT64 vector — `cannot store string into FLOAT64 vector`, on BOTH
+	// paths, for `SUM(v * 2) OVER ()` over `SELECT d_4 AS v`. These are the
+	// declarations the key is respelled against (#672, #656).
+	if t := sourceColTypesThroughRenames(child); len(t) > 0 {
+		return t, strictIntArithColsThroughRenames(child)
+	}
 	agg := aggregateUnderWindow(child)
 	if agg == nil || len(agg.Children) != 1 {
 		return nil, nil
@@ -255,6 +285,12 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 // the aggregate below it when the window reads a GROUP BY's output.
 func windowKeyInputDecimal(child *logical.Node) map[string]logical.DecimalMeta {
 	if d := inputColDecimal(child); len(d) > 0 {
+		return d
+	}
+	// windowKeyInputTypes' derived-table fallback, for the (p,s) half: a
+	// DECIMAL declared without its scale is not a declaration at all
+	// (ADR-0024 item 2), so the two have to come from the same place.
+	if d := sourceColDeclsThroughRenames(child).dec; len(d) > 0 {
 		return d
 	}
 	agg := aggregateUnderWindow(child)

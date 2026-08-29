@@ -1074,7 +1074,8 @@ window's raw input plus the window column. It runs ABOVE the operator and
 narrows the output, which is what distinguishes it from `WindowKeyExprs` —
 those are evaluated BEFORE the operator partitions, and APPEND to the batch.
 
-`WindowKeyExprs` now also carries a window function's **argument** expression.
+`WindowKeyExprs` now also carries a window function's **argument** expression,
+and its DECLARED type is what makes the value exact.
 `resolveWindowKeys` materialized only the PARTITION BY / ORDER BY terms, so
 `WindowColumn.InputCol` named a column the batch did not carry and
 `SUM(d * 2) OVER ()` answered NULL on every row, on BOTH paths, for every
@@ -1083,6 +1084,29 @@ partition key is; `*` and a literal are excluded (COUNT(*) counts rows), and a
 bare or qualified column keeps `exec.Window`'s name lookup. The argument list
 splits on a TOP-LEVEL comma (`logical.firstWindowArg`) — the old
 `SplitN(…, ",", 2)` cut `COALESCE(c, 0) * 2` into `COALESCE(c`.
+
+The materialized column's **declaration** is inferred from the expression
+RESPELLED through any derived-table or CTE rename between the window and its
+producer (`respellDerivedAliasRefs`), and from the source declarations reached
+the same way (`windowKeyInputTypes` / `windowKeyInputDecimal` fall through to
+`sourceColTypesThroughRenames` / `sourceColDeclsThroughRenames`). Only the
+TYPE comes from the respelled form: the single-process pipeline runs the
+Project below the window as a real operator, so its output really is called
+`v`, while the DAG respells the TEXT as well because that Project emits no
+stage. `inputColTypes` answers nothing for a Project, so before this a key
+over a derived alias had NO declarations at all and fell to the float rule —
+and with exact DECIMAL arithmetic (#555) the evaluator then hands an exact
+value to a FLOAT64 vector: `cannot store string into FLOAT64 vector`, on both
+paths, for `SUM(v * 2) OVER ()` over `SELECT d_4 AS v`.
+
+With both halves in place `SUM(d * 2) OVER ()` answers PostgreSQL's exact
+numeric and agrees digit-for-digit with `SUM(d * 2) … GROUP BY` — pinned as
+`WindowSumDecimalExpression*` in the PostgreSQL oracle corpus. What is still
+float is `COALESCE(d, 0) * 2`, because COALESCE's own return-type resolution
+picks the integer literal's type over the DECIMAL column's; `COALESCE(d, 0)`
+alone fails outright on both paths. That is the function's declaration, not
+the window's — the windowed and grouped spellings agree exactly — and it is
+pinned in `stage_filter_carrier_two_path_test.go`.
 
 There is deliberately **no `OpSort`** ahead of the window. A window's ORDER BY
 defines its FRAME, not the stream: `exec.Window` groups its input by

@@ -688,34 +688,83 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		}
 	})
-	t.Run("C/WindowOverADecimalExpressionIsFloat", func(t *testing.T) {
-		// NOT a placement defect, and pinned here so the claim is checkable:
-		// DECIMAL arithmetic itself lands in float64 today (the TODO(#555)
-		// in nodeDeclaredType — expr.BinOpNumeric has no Int128 Mul), so
-		// `SELECT c_dec * 2` is float on both paths and a window over it
-		// declares what the value really is. PostgreSQL answers 20.0020.
-		// When #555 lands this pin fails, which is the signal to re-declare
-		// the materialized window key DECIMAL.
-		for _, sql := range []string{
-			fmt.Sprintf(`SELECT id, c_dec * 2 AS d FROM %s WHERE id < 5 ORDER BY id`, tbl),
-			fmt.Sprintf(`SELECT id, SUM(c_dec * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`, tbl),
+	t.Run("C/WindowOverADecimalExpressionIsExact", func(t *testing.T) {
+		// A window over a DECIMAL EXPRESSION. Two things must hold for this
+		// to answer PostgreSQL's 20.0020: the argument has to be
+		// MATERIALIZED at all (#672 — without it, NULL in every row), and
+		// the materialized column has to be DECLARED DECIMAL, which needs
+		// the exact DECIMAL arithmetic underneath it (#555). With the
+		// declaration missing the evaluator hands an exact value to a
+		// FLOAT64 vector and the query fails outright.
+		//
+		// The GROUPED spelling is the control: the two are the same question
+		// written twice (ADR-0024 item 2) and must agree digit for digit.
+		const want = "20.0020"
+		for _, c := range []struct{ name, sql string }{
+			{"WindowSum", `SELECT id, SUM(c_dec * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`},
+			{"WindowMin", `SELECT id, MIN(c_dec * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`},
+			// The argument one level down, naming a derived table's alias:
+			// the key's declarations live BELOW that rename, and reading
+			// them off the Project answered nothing at all.
+			{"WindowSumOverAnAlias", `SELECT id, SUM(v * 2) OVER () AS s FROM ` +
+				`(SELECT id, c_dec AS v FROM %s WHERE id < 5) x ORDER BY id`},
 		} {
-			for _, arm := range sfcArms(ctx, single, coord) {
-				res := sfcRun(t, arm, sql)
-				for _, r := range res.Rows {
-					for _, col := range []string{"d", "s"} {
-						v, present := r[col]
-						if !present {
-							continue
-						}
-						if _, isFloat := v.(float64); !isFloat {
-							t.Errorf("%s arm returned %T for %q; the #555 pin expected float64. "+
-								"If DECIMAL arithmetic is exact now, re-declare the materialized "+
-								"window key DECIMAL and delete this pin.\n  SQL: %s",
-								arm.name, v, col, sql)
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sql := fmt.Sprintf(c.sql, tbl)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != 5 {
+						t.Fatalf("%s arm returned %d rows, want 5", arm.name, len(res.Rows))
+					}
+					exp := want
+					if c.name == "WindowMin" {
+						exp = "0.0000"
+					}
+					for _, r := range res.Rows {
+						if fmt.Sprint(r["s"]) != exp {
+							t.Errorf("%s arm answered %v (%T), want %s exactly — PostgreSQL's "+
+								"numeric is exact and so is wadjet's\n  SQL: %s",
+								arm.name, r["s"], r["s"], exp, sql)
 						}
 					}
 				}
+			})
+		}
+	})
+	t.Run("C/CoalesceOverADecimalIsNotYetExact", func(t *testing.T) {
+		// The remaining float in this family, and NOT the window's doing:
+		// COALESCE's own return-type resolution picks the INTEGER literal's
+		// type over the DECIMAL column's, so `COALESCE(c_dec, 0)` alone
+		// fails outright on BOTH paths with `cannot store string into INT64
+		// vector`, and every expression derived from it is float. The
+		// windowed spelling agrees with the GROUPED one exactly, which is
+		// the evidence that the window materialization is not the defect.
+		//
+		// Both halves are pinned. The first fails when COALESCE's
+		// declaration is fixed, which is the signal to assert PostgreSQL's
+		// 20.0020 here too.
+		bare := fmt.Sprintf(`SELECT id, COALESCE(c_dec, 0) AS d FROM %s WHERE id < 5 ORDER BY id`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			if _, err := arm.run(bare); err == nil {
+				t.Errorf("%s arm now ANSWERS %q, so COALESCE over a DECIMAL declares its type. "+
+					"Assert PostgreSQL's exact values here and delete this pin.", arm.name, bare)
+			}
+		}
+		win := fmt.Sprintf(
+			`SELECT id, SUM(COALESCE(c_dec, 0) * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`, tbl)
+		grouped := fmt.Sprintf(
+			`SELECT SUM(COALESCE(c_dec, 0) * 2) AS s FROM %s WHERE id < 5`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			w := sfcRun(t, arm, win)
+			g := sfcRun(t, arm, grouped)
+			if len(w.Rows) == 0 || len(g.Rows) == 0 {
+				t.Fatalf("%s arm returned no rows", arm.name)
+			}
+			if fmt.Sprint(w.Rows[0]["s"]) != fmt.Sprint(g.Rows[0]["s"]) {
+				t.Errorf("%s arm: the windowed spelling answered %v and the grouped one %v; "+
+					"they are the same question written twice",
+					arm.name, w.Rows[0]["s"], g.Rows[0]["s"])
 			}
 		}
 	})

@@ -3115,6 +3115,32 @@ func postgresSemanticsCases() []pgCase {
 				ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) AS slide_sum,
 			SUM(d_2) OVER (ORDER BY d_key ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS slide2
 			FROM dec_probe ORDER BY d_key`},
+		// A window over a DECIMAL EXPRESSION rather than a bare column. The
+		// argument is not a name on the batch, so it has to be MATERIALIZED
+		// before the operator can read it — the same pre-projection a
+		// computed PARTITION BY key gets. Until #672 nothing materialized it
+		// and `SUM(d * 2) OVER ()` answered NULL in every row on both paths;
+		// materializing it without carrying the DECIMAL declaration answers a
+		// float, which is the half these entries pin. The GROUPED spelling
+		// rides alongside because the two must agree — they are the same
+		// question written twice (ADR-0024 item 2).
+		pgCase{name: "WindowSumDecimalExpressionArgument", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_4 * 2) OVER () AS all_sum,
+			SUM(d_2 * 2) OVER (PARTITION BY d_grp) AS grp_sum
+			FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowSumDecimalExpressionMatchesGrouped", exactNumeric: true, sql: `SELECT d_grp,
+			SUM(d_2 * 2) AS grouped_sum FROM dec_probe GROUP BY d_grp ORDER BY d_grp`},
+		pgCase{name: "WindowMinMaxDecimalExpressionArgument", exactNumeric: true, sql: `SELECT d_key,
+			MIN(d_4 * 2) OVER () AS lo, MAX(d_4 * 2) OVER () AS hi
+			FROM dec_probe ORDER BY d_key`},
+		// The same argument one level down, where the expression names a
+		// DERIVED TABLE's alias: on the stage DAG the Project below the
+		// window emits no stage, so the materialized key's expression TEXT
+		// named a column the window's input does not carry and the operator
+		// wrote NULL in every row (#656 follow-up, A3).
+		pgCase{name: "WindowSumDecimalExpressionOverAnAlias", exactNumeric: true, sql: `SELECT d_key,
+			SUM(v * 2) OVER () AS all_sum FROM (
+				SELECT d_key, d_4 AS v FROM dec_probe) s ORDER BY d_key`},
 		// An EMPTY frame is NULL, not 0 — the distinction a running total
 		// that starts at zero cannot make on its own.
 		pgCase{name: "WindowSumDecimalEmptyFrame", exactNumeric: true, sql: `SELECT d_key,
