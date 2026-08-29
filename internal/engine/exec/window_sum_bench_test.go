@@ -138,3 +138,71 @@ func BenchmarkWindowSum(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkWindowFrameSlide measures ONLY the accumulator.
+//
+// BenchmarkWindowSum above runs the whole operator, where the concat, the
+// sort and the output copy dominate — a few percent moved in the slide is not
+// resolvable there, and an earlier reading of it claimed a geomean the
+// measurement could not support. This one calls the frame walker directly over
+// a vector that is already laid out, so what it reports is the slide plus the
+// per-row write and nothing else.
+func BenchmarkWindowFrameSlide(b *testing.B) {
+	const n = 32768
+	for _, dec := range []bool{false, true} {
+		typ := "float64"
+		if dec {
+			typ = "decimal"
+		}
+		schema, data := wsbRows(n, 1, dec) // ONE partition: no sort, no concat
+		src := batch.FromRows(schema, data)
+		inputVec := src.Columns[src.ColumnIndex("v")]
+
+		outCol := parquet.Column{Name: "w", Type: parquet.TypeFloat64, Nullable: true}
+		if dec {
+			outCol = parquet.Column{Name: "w", Type: parquet.TypeDecimal,
+				Precision: 38, Scale: 10, Nullable: true}
+		}
+		for _, shape := range []struct {
+			name  string
+			frame *WindowFrameSpec
+		}{
+			{name: "running"}, // the default frame: lower end never moves
+			{name: "sliding_8", frame: &WindowFrameSpec{Mode: "rows",
+				Start: WindowBound{Type: "preceding", Offset: 8},
+				End:   WindowBound{Type: "current_row"}}},
+			// Consecutive frames that do not overlap, which is the shape the
+			// accumulator resets on rather than retracting through.
+			{name: "current_row_only", frame: &WindowFrameSpec{Mode: "rows",
+				Start: WindowBound{Type: "current_row"},
+				End:   WindowBound{Type: "current_row"}}},
+		} {
+			for _, fn := range []struct {
+				name string
+				f    WindowFunc
+			}{{"sum", WinSum}, {"avg", WinAvg}} {
+				wc := WindowColumn{Func: fn.f, InputCol: "v", OutputCol: "w", Frame: shape.frame}
+				fr := resolveFrame(wc, n, false, nil)
+				winVec := batch.NewColumnVector(outCol, n)
+				rd, ok := resolveWindowNumeric(inputVec)
+				if !ok {
+					b.Fatalf("%s has no numeric reading", inputVec.Type)
+				}
+				b.Run(fmt.Sprintf("%s/%s/%s", typ, shape.name, fn.name), func(b *testing.B) {
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						winVec.Nulls = batch.NewBitmapAllNull(n)
+						if dec {
+							if err := windowDecimalFrames(winVec, inputVec, fr, 0, n, wc); err != nil {
+								b.Fatal(err)
+							}
+							continue
+						}
+						windowFloat64Frames(winVec, inputVec, rd, fr, 0, n, fn.f)
+					}
+				})
+			}
+		}
+	}
+}

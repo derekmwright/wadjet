@@ -461,6 +461,360 @@ func TestWindowDecimalOverflowFailsOnEveryPath(t *testing.T) {
 	}
 }
 
+// The slide's TRANSIENT is not the frame (F1).
+//
+// The accumulator carries state from one frame to the next, so the order it
+// applies the two edges in decides what it holds in between. Adding the
+// arriving row before subtracting the departing one makes it transiently hold
+// sum(previous frame + arriving rows) — a value belonging to NEITHER frame —
+// and on an exact carrier that value can leave the range while both frames sit
+// comfortably inside it. Three DECIMAL(38,0) rows of 9x10^37 under
+// `ROWS BETWEEN CURRENT ROW AND CURRENT ROW` are the smallest case: each frame
+// holds 9x10^37, the transient held 1.8x10^38, and the query was refused with
+// 22003 where PostgreSQL and the GROUPED spelling both answer.
+//
+// The discrimination this pins has three sides, and a fix that gets any one of
+// them by giving up on the others is not a fix:
+//
+//	CURRENT ROW AND CURRENT ROW      -> 9x10^37 on every row
+//	1 PRECEDING AND CURRENT ROW      -> 22003 (1.8x10^38 has no Int128, and
+//	                                   `SUM(d) ... GROUP BY` over those same
+//	                                   two rows refuses it too)
+//	an EMPTY frame                   -> NULL, never 22003
+//
+// wdoNine37 is the widest value a DECIMAL(38,0) holds; two of them exceed the
+// carrier's 1.70x10^38 ceiling and three exceed it further.
+const wdoNine37 = "90000000000000000000000000000000000000"
+
+func wdoSchema() []parquet.Column {
+	return []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "ts", Type: parquet.TypeInt64},
+		{Name: "d", Type: parquet.TypeDecimal, Precision: 38, Scale: 0, Nullable: true},
+	}
+}
+
+// wdoRows builds n rows of wdoNine37 spread over groups partitions.
+func wdoRows(n, groups int) []map[string]any {
+	rows := make([]map[string]any, n)
+	for i := range rows {
+		rows[i] = map[string]any{"k": int64(i % groups), "ts": int64(i), "d": wdoNine37}
+	}
+	return rows
+}
+
+// wdoCol builds one windowed SUM spec over d with the given frame.
+func wdoCol(frame *WindowFrameSpec) []WindowColumn {
+	return []WindowColumn{{
+		Func: WinSum, InputCol: "d", OutputCol: "w", OutputType: parquet.TypeFloat64,
+		PartitionBy: []string{"k"},
+		OrderBy:     []SortKey{{Column: "ts", Order: Ascending}},
+		Frame:       frame,
+	}}
+}
+
+// wdoFrames is the three-sided discrimination, shared by the in-memory and the
+// two spilled arms so none of them can drift into testing a different shape.
+type wdoCase struct {
+	name  string
+	frame *WindowFrameSpec
+	// want is the value every row owes; "" means SQL NULL. refuse overrides
+	// it: the query must fail with 22003.
+	want   string
+	refuse bool
+}
+
+func wdoCases() []wdoCase {
+	return []wdoCase{
+		{name: "current_row_only", want: wdoNine37, frame: winDecFrame("rows",
+			WindowBound{Type: "current_row"}, WindowBound{Type: "current_row"})},
+		// Genuinely past the carrier: two rows of 9x10^37 sum to 1.8x10^38,
+		// which no Int128 holds. The GROUPED spelling over the same two rows
+		// refuses it as well, which is the property being kept.
+		{name: "one_preceding_refuses", refuse: true, frame: winDecFrame("rows",
+			WindowBound{Type: "preceding", Offset: 1}, WindowBound{Type: "current_row"})},
+		// An always-empty frame. The old accumulator reached it by adding
+		// every row of the partition and subtracting them again, so the
+		// partition TOTAL became a transient and a frame that holds nothing
+		// could raise 22003.
+		{name: "empty_frame_is_null", want: "", frame: winDecFrame("rows",
+			WindowBound{Type: "unbounded_following"}, WindowBound{Type: "unbounded_preceding"})},
+	}
+}
+
+func TestWindowDecimalSlideTransientIsNotTheFrame(t *testing.T) {
+	for _, tc := range wdoCases() {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			rows := wdoRows(6, 2) // three rows per partition
+			w := NewWindow(wdoCol(tc.frame))
+			if err := w.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Consume(ctx, batch.FromRows(wdoSchema(), rows)); err != nil {
+				t.Fatal(err)
+			}
+			err := w.Finalize(ctx)
+			if tc.refuse {
+				if err == nil {
+					t.Fatal("a frame whose own rows overflow the carrier answered instead of failing")
+				}
+				if code := sqlerr.StateOf(err); code != "22003" {
+					t.Errorf("SQLSTATE = %q, want 22003 (%v)", code, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a frame every row of which is representable was refused: %v", err)
+			}
+			var out []map[string]any
+			for {
+				b, nerr := w.Next(ctx)
+				if nerr != nil {
+					t.Fatalf("Next: %v", nerr)
+				}
+				if b == nil {
+					break
+				}
+				out = append(out, b.ToRows()...)
+			}
+			if len(out) != len(rows) {
+				t.Fatalf("got %d rows, want %d", len(out), len(rows))
+			}
+			for _, r := range out {
+				if tc.want == "" {
+					if r["w"] != nil {
+						t.Errorf("ts=%v: w = %v, want NULL", r["ts"], r["w"])
+					}
+					continue
+				}
+				if r["w"] != tc.want {
+					t.Errorf("ts=%v: w = %v, want %q", r["ts"], r["w"], tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestWindowDecimalSlideTransientOnTheSpilledPaths is the same three-sided
+// discrimination through the two evaluators that do not hold the partition in
+// memory: the partition-at-a-time walker over sorted runs, and — for an empty
+// PARTITION BY — the streaming two-pass evaluator. A transient that refused a
+// representable frame on one path and not another would be the two-path defect
+// class on top of F1.
+func TestWindowDecimalSlideTransientOnTheSpilledPaths(t *testing.T) {
+	for _, tc := range wdoCases() {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			forceTinyRuns(t)
+			ctx := context.Background()
+			rows := wdoRows(240, 80) // three rows per partition, 80 partitions
+			w := newWindowSpillHarness(t, wdoCol(tc.frame), 512)
+			defer w.Close()
+			for i := 0; i < len(rows); i += 16 {
+				if err := w.Consume(ctx, batch.FromRows(wdoSchema(), rows[i:min(i+16, len(rows))])); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(w.runFiles) == 0 {
+				t.Fatal("spill path was never exercised")
+			}
+			// The final spec group streams through Next(), so a walker error
+			// surfaces there rather than at Finalize.
+			err := w.Finalize(ctx)
+			var out []map[string]any
+			for err == nil {
+				b, nerr := w.Next(ctx)
+				if nerr != nil {
+					err = nerr
+					break
+				}
+				if b == nil {
+					break
+				}
+				out = append(out, b.ToRows()...)
+			}
+			if tc.refuse {
+				if err == nil {
+					t.Fatal("a frame whose own rows overflow the carrier answered instead of failing")
+				}
+				if code := sqlerr.StateOf(err); code != "22003" {
+					t.Errorf("SQLSTATE = %q, want 22003 (%v)", code, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a frame every row of which is representable was refused: %v", err)
+			}
+			if len(out) != len(rows) {
+				t.Fatalf("got %d rows, want %d", len(out), len(rows))
+			}
+			for _, r := range out {
+				if tc.want == "" {
+					if r["w"] != nil {
+						t.Errorf("ts=%v: w = %v, want NULL", r["ts"], r["w"])
+					}
+					continue
+				}
+				if r["w"] != tc.want {
+					t.Errorf("ts=%v: w = %v, want %q", r["ts"], r["w"], tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestWindowDecimalRunningTotalStillRefusesWhatItCannotCarry is the other side
+// of the recompute: a frame whose own rows leave the range and come BACK is
+// still refused, because summing them in order is what the grouped SUM does
+// and item 9 says that refusal stands. The recompute exists to drop transients
+// that belong to no frame — not to widen the carrier.
+func TestWindowDecimalRunningTotalStillRefusesWhatItCannotCarry(t *testing.T) {
+	ctx := context.Background()
+	neg := "-" + wdoNine37
+	rows := []map[string]any{
+		{"k": int64(0), "ts": int64(0), "d": wdoNine37},
+		{"k": int64(0), "ts": int64(1), "d": wdoNine37},
+		{"k": int64(0), "ts": int64(2), "d": neg},
+	}
+	// The whole partition: the exact total is 9x10^37 and representable, but
+	// the running total passes through 1.8x10^38 on the way.
+	w := NewWindow([]WindowColumn{{Func: WinSum, InputCol: "d", OutputCol: "w",
+		OutputType: parquet.TypeFloat64, PartitionBy: []string{"k"}}})
+	if err := w.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Consume(ctx, batch.FromRows(wdoSchema(), rows)); err != nil {
+		t.Fatal(err)
+	}
+	err := w.Finalize(ctx)
+	if err == nil {
+		t.Fatal("a running total that left the carrier answered; ADR-0012 item 9 refuses it")
+	}
+	if code := sqlerr.StateOf(err); code != "22003" {
+		t.Errorf("SQLSTATE = %q, want 22003 (%v)", code, err)
+	}
+}
+
+// TestWindowFloat64SlideTransientIsNotTheFrame is F1 on the INEXACT carrier,
+// where the same add-before-retract order is catastrophic cancellation rather
+// than an overflow. `ROWS BETWEEN CURRENT ROW AND CURRENT ROW` over 1e300
+// followed by 1.0 computed row 1 as (1e300 + 1.0) - 1e300 — the 1.0 is below
+// the sum's last bit, so it vanished and the row answered 0.
+func TestWindowFloat64SlideTransientIsNotTheFrame(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "ts", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64, Nullable: true},
+	}
+	rows := []map[string]any{
+		{"k": int64(0), "ts": int64(0), "v": 1e300},
+		{"k": int64(0), "ts": int64(1), "v": 1.0},
+		{"k": int64(0), "ts": int64(2), "v": 2.0},
+	}
+	cols := []WindowColumn{{
+		Func: WinSum, InputCol: "v", OutputCol: "w", OutputType: parquet.TypeFloat64,
+		PartitionBy: []string{"k"},
+		OrderBy:     []SortKey{{Column: "ts", Order: Ascending}},
+		Frame: winDecFrame("rows",
+			WindowBound{Type: "current_row"}, WindowBound{Type: "current_row"}),
+	}}
+	got := byTS(t, mustRows(t, schema, cols, rows))
+	for ts, want := range map[int64]float64{0: 1e300, 1: 1.0, 2: 2.0} {
+		if got[ts]["w"] != want {
+			t.Errorf("ts=%d: w = %v, want %v — a frame of one row is that row",
+				ts, got[ts]["w"], want)
+		}
+	}
+}
+
+// TestWindowSumAvgReadEveryNumericTypeWithoutAPerRowSwitch pins the reader
+// hoist across the whole promotion table, not only FLOAT64.
+//
+// resolveWindowNumeric replaced vecFloat64's two per-row type switches with
+// one resolution per partition, and its switch and numericPromotable's are the
+// same list stated twice — a type in one and not the other answers 0 for every
+// row rather than NULL, which is #412's exact symptom through a new door.
+func TestWindowSumAvgReadEveryNumericTypeWithoutAPerRowSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		typ  parquet.TypeID
+		col  parquet.Column
+		vals []any
+		want float64
+	}{
+		{typ: parquet.TypeFloat64, col: parquet.Column{Name: "v", Type: parquet.TypeFloat64, Nullable: true},
+			vals: []any{1.5, 2.25}, want: 3.75},
+		{typ: parquet.TypeFloat32, col: parquet.Column{Name: "v", Type: parquet.TypeFloat32, Nullable: true},
+			vals: []any{float32(1.5), float32(2.25)}, want: 3.75},
+		{typ: parquet.TypeInt64, col: parquet.Column{Name: "v", Type: parquet.TypeInt64, Nullable: true},
+			vals: []any{int64(7), int64(11)}, want: 18},
+		{typ: parquet.TypeInt32, col: parquet.Column{Name: "v", Type: parquet.TypeInt32, Nullable: true},
+			vals: []any{int32(7), int32(11)}, want: 18},
+		{typ: parquet.TypePort, col: parquet.Column{Name: "v", Type: parquet.TypePort, Nullable: true},
+			vals: []any{int32(80), int32(443)}, want: 523},
+		{typ: parquet.TypeProtocol, col: parquet.Column{Name: "v", Type: parquet.TypeProtocol, Nullable: true},
+			vals: []any{int32(6), int32(17)}, want: 23},
+		{typ: parquet.TypeDuration, col: parquet.Column{Name: "v", Type: parquet.TypeDuration, Nullable: true},
+			vals: []any{int64(1000), int64(2000)}, want: 3000},
+		{typ: parquet.TypeDate, col: parquet.Column{Name: "v", Type: parquet.TypeDate, Nullable: true},
+			vals: []any{int32(10), int32(20)}, want: 30},
+		{typ: parquet.TypeTimestamp, col: parquet.Column{Name: "v", Type: parquet.TypeTimestamp, Nullable: true},
+			vals: []any{int64(1000), int64(2000)}, want: 3000},
+	} {
+		tc := tc
+		t.Run(tc.typ.String(), func(t *testing.T) {
+			schema := []parquet.Column{{Name: "k", Type: parquet.TypeInt64}, tc.col}
+			rows := []map[string]any{
+				{"k": int64(0), "v": tc.vals[0]},
+				{"k": int64(0), "v": tc.vals[1]},
+				{"k": int64(0), "v": nil}, // excluded from the sum AND the count
+			}
+			cols := []WindowColumn{
+				{Func: WinSum, InputCol: "v", OutputCol: "s", OutputType: parquet.TypeFloat64,
+					PartitionBy: []string{"k"}},
+				{Func: WinAvg, InputCol: "v", OutputCol: "a", OutputType: parquet.TypeFloat64,
+					PartitionBy: []string{"k"}},
+			}
+			for _, r := range mustRows(t, schema, cols, rows) {
+				if r["s"] != tc.want {
+					t.Errorf("SUM = %v, want %v", r["s"], tc.want)
+				}
+				if r["a"] != tc.want/2 {
+					t.Errorf("AVG = %v, want %v (two non-NULL rows, not three)", r["a"], tc.want/2)
+				}
+			}
+		})
+	}
+	// The other half of the same list: a column with NO numeric reading
+	// answers NULL, never 0.
+	for _, col := range []parquet.Column{
+		{Name: "v", Type: parquet.TypeIPv4, Nullable: true},
+		{Name: "v", Type: parquet.TypeMAC, Nullable: true},
+		{Name: "v", Type: parquet.TypeString, Nullable: true},
+	} {
+		col := col
+		t.Run("not_summable_"+col.Type.String(), func(t *testing.T) {
+			v := any("1.2.3.4")
+			switch col.Type {
+			case parquet.TypeMAC:
+				v = "aa:bb:cc:dd:ee:ff"
+			case parquet.TypeString:
+				v = "x"
+			}
+			schema := []parquet.Column{{Name: "k", Type: parquet.TypeInt64}, col}
+			rows := []map[string]any{{"k": int64(0), "v": v}, {"k": int64(0), "v": v}}
+			cols := []WindowColumn{{Func: WinSum, InputCol: "v", OutputCol: "s",
+				OutputType: parquet.TypeFloat64, PartitionBy: []string{"k"}}}
+			for _, r := range mustRows(t, schema, cols, rows) {
+				if r["s"] != nil {
+					t.Errorf("SUM over a %s = %v, want NULL", col.Type, r["s"])
+				}
+			}
+		})
+	}
+}
+
 // TestWindowOutputColumnDeclaresAccumulatorScale is the declaration rule on
 // its own: SUM keeps the input's SCALE at the carrier's full precision, AVG
 // adds four digits, and MIN/MAX (which copy a value rather than accumulate

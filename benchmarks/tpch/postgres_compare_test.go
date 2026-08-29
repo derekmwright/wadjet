@@ -412,6 +412,19 @@ const (
 	pgBugUnsupported = "UNIMPLEMENTED IN WADJET:"
 )
 
+// windowCountNullPin is #670, found while fixing #586 and filed rather than
+// fixed there: `COUNT(col) OVER (...)` answers the frame's ROW COUNT instead
+// of the column's non-NULL count, so a NULL in the frame inflates it. The
+// grouped `COUNT(col)` is right, which makes this the same
+// windowed-versus-grouped disagreement #586 closed for SUM/AVG, at the one
+// function #586 deliberately left alone (COUNT(*) must keep counting rows).
+//
+// It is pinned on an entry whose OTHER columns — the exact SUM beside it —
+// stay gated, so the pin cannot hide a regression in what this entry is
+// actually here for.
+const windowCountNullPin = pgBugWadjet + " COUNT(col) OVER counts the frame's rows rather than " +
+	"the column's non-NULL values, so a NULL in the frame inflates it; the grouped COUNT(col) is right"
+
 // postgresCorpus is the 22 TPC-H queries plus the PostgreSQL-semantics shapes
 // they leave dark.
 //
@@ -2506,15 +2519,40 @@ func postgresSemanticsCases() []pgCase {
 			SUM(d_2) OVER (PARTITION BY d_grp ORDER BY d_key
 				ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS back_sum
 			FROM dec_probe ORDER BY d_key`},
-		// A partition whose every value is NULL answers NULL, and a partition
-		// with SOME NULLs excludes them from the sum AND from AVG's
-		// denominator — PostgreSQL's rule, which an AVG dividing by the
-		// frame's WIDTH gets wrong on every frame containing one.
+		// NULLs inside a partition. The partition key and the NULL predicate
+		// are deliberately INDEPENDENT (%3 against %11), so most partitions
+		// are MIXED — some rows NULL, some not. An earlier draft derived both
+		// from `d_key % 11 = 0`, which made every partition either all-NULL
+		// or all-present and left the case that actually matters untested:
+		// PostgreSQL excludes a NULL from the sum AND from AVG's denominator,
+		// so an AVG dividing by the frame's WIDTH is wrong on exactly the
+		// mixed partitions and right on the pure ones.
+		//
+		// The all-NULL partition is still covered — `m = 3` collects
+		// d_key % 3 = 0 rows, and the second entry below pins a partition
+		// whose every row is NULL against PostgreSQL's NULL, not 0.
 		pgCase{name: "WindowSumAvgDecimalNullPartition", exactNumeric: true, sql: `SELECT d_key, m,
+			SUM(v) OVER (PARTITION BY m) AS s, COUNT(v) OVER (PARTITION BY m) AS c FROM (
+				SELECT d_key, d_key % 3 AS m,
+					CASE WHEN d_key % 11 = 0 THEN NULL ELSE d_4 END AS v
+				FROM dec_probe) s ORDER BY d_key`, knownBug: windowCountNullPin, issue: "#670"},
+		pgCase{name: "WindowSumDecimalAllNullPartition", exactNumeric: true, sql: `SELECT d_key, m,
 			SUM(v) OVER (PARTITION BY m) AS s FROM (
 				SELECT d_key, CASE WHEN d_key % 11 = 0 THEN 0 ELSE 1 END AS m,
 					CASE WHEN d_key % 11 = 0 THEN NULL ELSE d_4 END AS v
 				FROM dec_probe) s ORDER BY d_key`},
+		// A frame of exactly ONE row, which is where the accumulator's
+		// SLIDE — not any single frame — used to decide the answer: it added
+		// the arriving row before subtracting the departing one, so it
+		// transiently held two frames' worth. Over a DECIMAL that transient
+		// could leave the 128-bit carrier and refuse a query PostgreSQL
+		// answers; here it is gated on the values, which is what a divergence
+		// would look like on data that does not overflow.
+		pgCase{name: "WindowSumDecimalCurrentRowOnlyFrame", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_wide) OVER (PARTITION BY d_grp ORDER BY d_key
+				ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS one_row,
+			SUM(d_2) OVER (ORDER BY d_key ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS one2
+			FROM dec_probe ORDER BY d_key`},
 		// AVG keeps the FLOAT comparison, and for exactly the reason the
 		// grouped WideDecimalAvg does: both engines divide exactly, but
 		// PostgreSQL picks a result scale giving at least 16 significant
@@ -2532,11 +2570,49 @@ func postgresSemanticsCases() []pgCase {
 			AVG(d_4) OVER (PARTITION BY d_grp ORDER BY d_key
 				ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) AS slide_avg
 			FROM dec_probe ORDER BY d_key`},
+		// Mixed partitions again (see WindowSumAvgDecimalNullPartition), and
+		// this is the entry the AVG denominator turns on: dividing by the
+		// frame's width instead of its non-NULL count moves every average in
+		// a partition that holds one NULL.
 		pgCase{name: "WindowAvgDecimalNullPartition", sql: `SELECT d_key, m,
+			AVG(v) OVER (PARTITION BY m) AS a FROM (
+				SELECT d_key, d_key % 3 AS m,
+					CASE WHEN d_key % 11 = 0 THEN NULL ELSE d_4 END AS v
+				FROM dec_probe) s ORDER BY d_key`},
+		pgCase{name: "WindowAvgDecimalAllNullPartition", sql: `SELECT d_key, m,
 			AVG(v) OVER (PARTITION BY m) AS a FROM (
 				SELECT d_key, CASE WHEN d_key % 11 = 0 THEN 0 ELSE 1 END AS m,
 					CASE WHEN d_key % 11 = 0 THEN NULL ELSE d_4 END AS v
 				FROM dec_probe) s ORDER BY d_key`},
+		// G2: the AVG-denominator and all-NULL-frame rules moved on the
+		// FLOAT/INT accumulator too — they live in the same slide — so they
+		// need their own entries over a NON-DECIMAL column. Nothing else in
+		// this corpus asks PostgreSQL what a windowed AVG over a float or an
+		// integer with NULLs in the frame means, and the DECIMAL entries
+		// above cannot stand in: they exercise a different accumulator.
+		pgCase{name: "WindowAvgFloatWithNullsInFrame", sql: `SELECT o_orderkey, m,
+			AVG(v) OVER (PARTITION BY m) AS a,
+			SUM(v) OVER (PARTITION BY m) AS s,
+			AVG(v) OVER (PARTITION BY m ORDER BY o_orderkey
+				ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS slide_a
+			FROM (SELECT o_orderkey, o_custkey % 3 AS m,
+				CASE WHEN o_orderkey % 7 = 0 THEN NULL ELSE o_totalprice END AS v
+				FROM orders WHERE o_orderkey < 4000) s ORDER BY o_orderkey`},
+		pgCase{name: "WindowAvgIntWithNullsInFrame", sql: `SELECT o_orderkey, m,
+			AVG(v) OVER (PARTITION BY m) AS a,
+			SUM(v) OVER (PARTITION BY m ORDER BY o_orderkey
+				ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS one_row
+			FROM (SELECT o_orderkey, o_orderkey % 4 AS m,
+				CASE WHEN o_orderkey % 5 = 0 THEN NULL ELSE o_custkey END AS v
+				FROM orders WHERE o_orderkey < 4000) s ORDER BY o_orderkey`},
+		// A partition of a non-DECIMAL column whose every row is NULL: SQL
+		// says NULL for both SUM and AVG, and a running total that starts at
+		// zero answers 0 unless something stops it.
+		pgCase{name: "WindowAvgFloatAllNullPartition", sql: `SELECT o_orderkey, m,
+			AVG(v) OVER (PARTITION BY m) AS a, SUM(v) OVER (PARTITION BY m) AS s
+			FROM (SELECT o_orderkey, CASE WHEN o_orderkey % 7 = 0 THEN 0 ELSE 1 END AS m,
+				CASE WHEN o_orderkey % 7 = 0 THEN NULL ELSE o_totalprice END AS v
+				FROM orders WHERE o_orderkey < 4000) s ORDER BY o_orderkey`},
 		// The CONTROL: the windowed and the GROUPED spelling of one question,
 		// in one query, over the same rows. They are the same number, so a
 		// change that moved only one of them shows here even if both look

@@ -1680,15 +1680,19 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	// subtracted and the arithmetic is the same running total, in the same
 	// order, that this branch computed before frames existed.
 	case WinSum, WinAvg:
+		// Everything type-dependent is decided ONCE here, per partition: is
+		// the column summable at all, does it read exactly, and how is a cell
+		// read. Nothing below asks about a type again.
+		//
 		// No numeric reading for this column type (IPV4, MAC, a byte-backed
-		// type, a container): the answer is NULL for every row, which is
-		// what the grouped SUM answers and what winVec already holds.
-		if !vecSummable(inputVec) {
+		// type, a container) means the answer is NULL for every row, which is
+		// what the grouped SUM answers and what winVec already holds (#412).
+		rd, summable := resolveWindowNumeric(inputVec)
+		if !summable {
 			return nil
 		}
-		// One dispatch per PARTITION, not per row: a DECIMAL input with a
-		// DECIMAL output takes the exact Int128 accumulator, everything else
-		// the float64 one.
+		// A DECIMAL input with a DECIMAL output takes the exact Int128
+		// accumulator; everything else takes the float64 one.
 		if windowExactDecimal(winVec, inputVec) {
 			return windowDecimalFrames(winVec, inputVec, fr, start, n, wc)
 		}
@@ -1700,7 +1704,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			// unreachable for every plan the planner builds.
 			return nil
 		}
-		windowFloat64Frames(winVec, inputVec, fr, start, n, wc.Func)
+		windowFloat64Frames(winVec, inputVec, rd, fr, start, n, wc.Func)
 
 	// COUNT is the one aggregate an empty frame does not make NULL: it
 	// counts the rows it can see, and seeing none is 0.
@@ -1893,71 +1897,102 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	return nil
 }
 
-// slideFrameSum advances a running sum from the frame [curLo, curHi) to the
-// frame [lo, hi) and returns the new position. Rows are added before any are
-// removed so the window never inverts on an empty frame (hi < lo), where the
-// rows added to reach lo are immediately subtracted again and the sum
-// correctly lands on zero.
+// windowNumericReader reads one cell of a numeric column as a float64 with
+// the column's TYPE resolved ONCE, not per row.
 //
-// count tracks the frame's NON-NULL rows. SQL excludes NULLs from an
-// aggregate's input, so AVG divides by this rather than by the frame's width
-// and a frame holding only NULLs answers NULL — the frame width answered a
-// number PostgreSQL does not (see windowFloat64Frames).
+// vecFloat64 asks numericPromotable and then numericFloat64 — two type
+// switches per cell — on the path every windowed SUM/AVG over a non-DECIMAL
+// column takes. The type is a property of the column, so it is decided when
+// the partition is entered and never again. FLOAT64 keeps a direct slice
+// rather than a closure because it is the overwhelmingly common case and the
+// indirect call is the only cost the hoist would otherwise add back.
+type windowNumericReader struct {
+	f64  []float64           // non-nil for a FLOAT64 column
+	read func(i int) float64 // every other numeric type
+}
+
+func (r windowNumericReader) at(i int) float64 {
+	if r.f64 != nil {
+		return r.f64[i]
+	}
+	return r.read(i)
+}
+
+// resolveWindowNumeric builds the reader for v, or reports that the column
+// has no numeric reading at all (IPV4, MAC, the byte-backed types, the
+// containers) — in which case a windowed SUM/AVG over it answers NULL, the
+// same as the grouped one (#412).
+func resolveWindowNumeric(v *batch.Vector) (windowNumericReader, bool) {
+	if v == nil || !numericPromotable(v.Type) {
+		return windowNumericReader{}, false
+	}
+	switch v.Type {
+	case batch.TypeFloat64:
+		return windowNumericReader{f64: v.Float64Data}, true
+	case batch.TypeFloat32:
+		d := v.Float32Data
+		return windowNumericReader{read: func(i int) float64 { return float64(d[i]) }}, true
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+		d := v.Int64Data
+		return windowNumericReader{read: func(i int) float64 { return float64(d[i]) }}, true
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		d := v.Int32Data
+		return windowNumericReader{read: func(i int) float64 { return float64(d[i]) }}, true
+	case batch.TypeDecimal:
+		d, sc := v.DecimalData.Data, v.DecimalData.Scale
+		return windowNumericReader{read: func(i int) float64 { return d[i].ToFloat64(sc) }}, true
+	}
+	// numericPromotable and this switch are the same list; a type in one and
+	// not the other would answer 0 for every row rather than NULL.
+	return windowNumericReader{}, false
+}
+
+// float64FrameAcc is decimalFrameAcc's inexact twin: the running float64 sum
+// of a frame's non-NULL rows and how many there were.
 //
-// The FLOAT64 arm is lifted out of the loop rather than read through
-// vecFloat64 per row: vecFloat64 asks numericPromotable and then
-// numericFloat64, two type switches per cell, on the path every windowed SUM
-// over a float column takes. The type is a property of the column, so it is
-// resolved here once per slide and never per row.
-func slideFrameSum(inputVec *batch.Vector, start, lo, hi, curLo, curHi int, sum *float64, count *int64) (int, int) {
+// The COUNT is separate from the frame's WIDTH because SQL excludes NULLs
+// from an aggregate's input: AVG divides by the rows that contributed, and a
+// frame holding only NULLs answers NULL rather than 0.
+type float64FrameAcc struct {
+	sum    float64
+	count  int64
+	lo, hi int
+}
+
+func (a *float64FrameAcc) reset(pos int) {
+	a.sum, a.count = 0, 0
+	a.lo, a.hi = pos, pos
+}
+
+// slide advances the accumulator to [lo, hi), retracting before it adds and
+// resetting outright between disjoint frames — decimalFrameAcc.slide's order,
+// for a reason that survives the change of carrier. Adding first makes the
+// accumulator transiently hold the previous frame plus the arriving rows, a
+// value belonging to neither; on the exact carrier that transient could refuse
+// a representable frame, and on this one it is catastrophic cancellation —
+// `ROWS BETWEEN CURRENT ROW AND CURRENT ROW` over values near 1e300 computed
+// each row as (previous + current) - previous rather than as the row itself.
+func (a *float64FrameAcc) slide(in *batch.Vector, rd windowNumericReader, start, lo, hi int) {
 	if hi < lo {
 		hi = lo
 	}
-	if inputVec.Type == batch.TypeFloat64 {
-		data := inputVec.Float64Data
-		for curHi < hi {
-			if r := start + curHi; !inputVec.Nulls.IsNullFast(r) {
-				*sum += data[r]
-				*count++
-			}
-			curHi++
-		}
-		for curLo < lo {
-			if r := start + curLo; !inputVec.Nulls.IsNullFast(r) {
-				*sum -= data[r]
-				*count--
-			}
-			curLo++
-		}
-		return curLo, curHi
+	if lo >= a.hi {
+		a.reset(lo)
 	}
-	for curHi < hi {
-		if r := start + curHi; !inputVec.Nulls.IsNullFast(r) {
-			f, _ := numericFloat64(inputVec, r)
-			*sum += f
-			*count++
+	for a.lo < lo {
+		if r := start + a.lo; !in.Nulls.IsNullFast(r) {
+			a.sum -= rd.at(r)
+			a.count--
 		}
-		curHi++
+		a.lo++
 	}
-	for curLo < lo {
-		if r := start + curLo; !inputVec.Nulls.IsNullFast(r) {
-			f, _ := numericFloat64(inputVec, r)
-			*sum -= f
-			*count--
+	for a.hi < hi {
+		if r := start + a.hi; !in.Nulls.IsNullFast(r) {
+			a.sum += rd.at(r)
+			a.count++
 		}
-		curLo++
+		a.hi++
 	}
-	return curLo, curHi
-}
-
-// vecSummable reports whether a window SUM or AVG over this column has a
-// numeric reading. The answer is a property of the column TYPE, so it is
-// asked once per partition rather than per row — a per-row check would let a
-// frame that happens to add no rows write a zero for a column that has no
-// number in it at all.
-func vecSummable(v *batch.Vector) bool {
-	_, ok := vecFloat64(v, 0)
-	return ok
 }
 
 // --- Row-oriented window computation (spill path) ---
@@ -2304,7 +2339,12 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn, rc wind
 	}
 }
 
-// slideRowSum is slideFrameSum over row maps.
+// slideRowSum is the row-oriented twin of float64FrameAcc.slide, on the legacy
+// spill path (computePartitionRowOriented). That path is reachable only for a
+// Window with NO spec groups — i.e. no window columns at all, so nothing to
+// compute — and it has not moved with #586: it still adds before it retracts
+// and still divides AVG by the frame's width. Left as it is rather than fixed
+// blind, since no query reaches it and no gate can show the difference.
 func slideRowSum(part []map[string]any, inputCol string, lo, hi, curLo, curHi int, sum *float64) (int, int) {
 	if hi < lo {
 		hi = lo

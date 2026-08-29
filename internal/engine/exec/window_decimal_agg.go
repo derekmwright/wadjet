@@ -60,12 +60,24 @@ func windowAccumulates(f WindowFunc) bool {
 // type, so the query fails instead of answering it (ADR-0012 item 9,
 // ADR-0024 item 4).
 //
-// The refusal is STICKY across a partition's slide, exactly as item 9's
-// grouped one is sticky across a group: a frame whose running total leaves the
-// range and comes back — the sliding frame adds the arriving row before it
-// subtracts the departing one — fails rather than reporting a total it did
-// carry exactly. That is the conservative side of a limit whose other side is
-// a wrapped number nobody can see is wrong.
+// The refusal is scoped to ONE FRAME, and inside that frame it is item 9's
+// rule verbatim: the frame's own rows are added in order, and a running total
+// that leaves the range fails even if later rows would bring it back. That is
+// the same answer `SUM(d) ... GROUP BY` gives for the same set of rows, which
+// is the whole contract this file exists to keep.
+//
+// It is NOT sticky across the SLIDE, and an earlier draft of this comment
+// claiming it was described a defect rather than a rule. A sliding
+// accumulator carries state between frames, and a transient it holds while
+// moving from one frame to the next belongs to NEITHER of them: adding the
+// arriving row before subtracting the departing one made
+// `SUM(d) OVER (ROWS BETWEEN CURRENT ROW AND CURRENT ROW)` over three
+// 9x10^37 values hold 1.8x10^38 between two frames that each hold 9x10^37,
+// and refuse a query PostgreSQL and the grouped spelling both answer.
+// decimalFrameAcc.slide retracts before it adds and resets outright between
+// disjoint frames; windowDecimalFrames RECOMPUTES any frame whose incremental
+// state flagged overflow, and refuses only if the frame's own rows overflow
+// on their own.
 func windowDecimalSumOverflow(col string) error {
 	if col == "" {
 		col = "sum"
@@ -108,17 +120,48 @@ type decimalFrameAcc struct {
 
 // slide advances the accumulator from its current frame to [lo, hi).
 //
-// Rows are added before any are removed, so the window never inverts on an
-// empty frame (hi < lo), where the rows added to reach lo are immediately
-// subtracted again and the sum correctly lands back on zero. Both directions
-// are CHECKED: the retract is a subtraction of a value the accumulator already
-// holds, and an unchecked one would let a wrapped intermediate become a
-// plausible-looking total.
+// The ORDER is the correctness-relevant part, and it is retract-then-add.
+// Adding first means the accumulator transiently holds
+// sum(previous frame + arriving rows) — a value that belongs to NEITHER
+// frame — and for an exact carrier that transient can leave the range and
+// refuse a query both spellings answer: three DECIMAL(38,0) rows of 9x10^37
+// under `ROWS BETWEEN CURRENT ROW AND CURRENT ROW` held 1.8x10^38 between two
+// frames that each hold 9x10^37. Retracting first bounds every intermediate
+// by a PREFIX of the target frame, so the only overflow left is one the
+// frame's own rows produce — which is exactly what the grouped SUM over those
+// rows reports (ADR-0012 item 9).
+//
+// DISJOINT frames reset instead of retracting to empty. When lo has passed
+// the last row this accumulator added, nothing carries over, and walking the
+// subtraction chain down to zero would re-introduce intermediates unrelated to
+// either frame (removing a large negative row from a total near the ceiling
+// overflows on the way out). Resetting is exact, cheaper, and — because every
+// frame bound is non-decreasing in the row index — costs O(sum of frame
+// widths) over the partition, which is bounded by the partition's own length:
+// a frame disjoint from its predecessor advances lo by at least its own width.
+//
+// Both directions stay CHECKED even so. A retract is a subtraction of a value
+// the accumulator already holds, and an unchecked one would let a wrapped
+// intermediate become a plausible-looking total; the flag it raises is not
+// final, since windowDecimalFrames recomputes the frame before refusing.
 func (a *decimalFrameAcc) slide(in *batch.Vector, start, lo, hi int) {
 	if hi < lo {
 		hi = lo
 	}
+	if lo >= a.hi {
+		a.reset(lo)
+	}
 	data := in.DecimalData.Data
+	for a.lo < lo {
+		r := start + a.lo
+		if !in.Nulls.IsNullFast(r) {
+			s, ok := a.sum.SubChecked(data[r])
+			a.sum = s
+			a.overflow = a.overflow || !ok
+			a.count--
+		}
+		a.lo++
+	}
 	for a.hi < hi {
 		r := start + a.hi
 		if !in.Nulls.IsNullFast(r) {
@@ -129,15 +172,38 @@ func (a *decimalFrameAcc) slide(in *batch.Vector, start, lo, hi int) {
 		}
 		a.hi++
 	}
-	for a.lo < lo {
-		r := start + a.lo
+}
+
+// reset empties the accumulator and positions it at an empty frame starting
+// at pos.
+func (a *decimalFrameAcc) reset(pos int) {
+	a.sum, a.count, a.overflow = batch.Int128{}, 0, false
+	a.lo, a.hi = pos, pos
+}
+
+// recompute rebuilds the accumulator from a CLEAN state over [lo, hi) alone.
+//
+// It is the answer to "did this frame really overflow, or was that the
+// incremental state?": summing the frame's own rows in order is precisely
+// what the grouped SUM over those rows does, so whatever this reports is the
+// answer the other spelling of the query gives. Called only when the
+// incremental slide raised the flag, so its O(frame width) cost is paid on
+// the rare overflowing frame and never on the common path.
+func (a *decimalFrameAcc) recompute(in *batch.Vector, start, lo, hi int) {
+	if hi < lo {
+		hi = lo
+	}
+	a.reset(lo)
+	data := in.DecimalData.Data
+	for a.hi < hi {
+		r := start + a.hi
 		if !in.Nulls.IsNullFast(r) {
-			s, ok := a.sum.SubChecked(data[r])
+			s, ok := a.sum.AddChecked(data[r])
 			a.sum = s
 			a.overflow = a.overflow || !ok
-			a.count--
+			a.count++
 		}
-		a.lo++
+		a.hi++
 	}
 }
 
@@ -173,10 +239,18 @@ func windowDecimalFrames(winVec, inputVec *batch.Vector, fr resolvedFrame, start
 		lo, hi := fr.bounds(i)
 		acc.slide(inputVec, start, lo, hi)
 		if acc.overflow {
-			if avg {
-				return windowDecimalAvgUnrepresentable(wc.OutputCol)
+			// The incremental state left the range. That is not yet an
+			// answer: a slide carries state between frames, so the flag may
+			// belong to a transient rather than to THIS frame's rows. Sum
+			// them on their own — the grouped SUM's own arithmetic — and
+			// refuse only if that overflows too.
+			acc.recompute(inputVec, start, lo, hi)
+			if acc.overflow {
+				if avg {
+					return windowDecimalAvgUnrepresentable(wc.OutputCol)
+				}
+				return windowDecimalSumOverflow(wc.OutputCol)
 			}
-			return windowDecimalSumOverflow(wc.OutputCol)
 		}
 		if hi <= lo || acc.count == 0 {
 			// An empty frame, or one holding only NULLs: SQL says NULL for
@@ -210,22 +284,21 @@ func windowDecimalFrames(winVec, inputVec *batch.Vector, fr resolvedFrame, start
 // defects — `AVG(x) OVER (...)` over a frame with a NULL in it answered a
 // number PostgreSQL does not, and a frame of only NULLs answered 0 where
 // PostgreSQL answers NULL.
-func windowFloat64Frames(winVec, inputVec *batch.Vector, fr resolvedFrame, start, n int, fn WindowFunc) {
-	var sum float64
-	var cnt int64
-	curLo, curHi := 0, 0
+func windowFloat64Frames(winVec, inputVec *batch.Vector, rd windowNumericReader,
+	fr resolvedFrame, start, n int, fn WindowFunc) {
+	var acc float64FrameAcc
 	out := winVec.Float64Data
 	avg := fn == WinAvg
 	for i := 0; i < n; i++ {
 		lo, hi := fr.bounds(i)
-		curLo, curHi = slideFrameSum(inputVec, start, lo, hi, curLo, curHi, &sum, &cnt)
-		if hi <= lo || cnt == 0 {
+		acc.slide(inputVec, rd, start, lo, hi)
+		if hi <= lo || acc.count == 0 {
 			continue
 		}
 		if avg {
-			out[start+i] = sum / float64(cnt)
+			out[start+i] = acc.sum / float64(acc.count)
 		} else {
-			out[start+i] = sum
+			out[start+i] = acc.sum
 		}
 		winVec.Nulls.SetValid(start + i)
 	}
