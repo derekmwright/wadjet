@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // #416 through the embedded API. A zero-row result took its schema from the
@@ -176,4 +178,164 @@ func TestColumnMetaWireUnconstrainedDecimal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDecimalTypmodSurvivesAJoinedSubquery is #697.
+//
+// A bare DECIMAL column reference carries its column's typmod on the wire,
+// and PostgreSQL does not take it away because the statement contains a
+// subquery somewhere else — verified live on 17.11's \gdesc for an IN
+// subquery, EXISTS, a scalar subquery, a correlated one, a semi-join to a
+// GROUP BY and a derived-table join, all of which describe numeric(18,4).
+// Wadjet declared every one of them unconstrained.
+//
+// The trigger was never "a subquery": it was a JOIN whose side is a node the
+// declared-type walk had no arm for. emittedColTypes fell through to
+// inputColTypes for a NodeJoin, that function's join arm recurses with
+// ITSELF, and it has no Project/Aggregate/Window arm — so a decorrelated
+// subquery (a Join over an Aggregate) or a derived table (a Join over a
+// Project) made one side nil, its `left == nil || right == nil` rule nilled
+// the WHOLE map, and every column of the query lost its declaration.
+//
+// The zero-row arm is the stronger assertion and the reason this is not only
+// a typmod bug: with no batch to re-type from, the same nil map declared
+// every column STRING, so a zero-row result behind any of these shapes went
+// out under OID 25 — #416's failure mode over the shape #416 did not reach.
+func TestDecimalTypmodSurvivesAJoinedSubquery(t *testing.T) {
+	ctx := context.Background()
+	db := mbOpen(t)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		col  string
+		// want is WireUnconstrained: false for a bare column reference,
+		// true for a value something below the join COMPUTED.
+		want bool
+	}{
+		{"control, no subquery", "SELECT c_dec FROM mbtypes WHERE id < 5", "c_dec", false},
+		{"control, plain join", "SELECT t.c_dec FROM mbtypes t JOIN mbtypes u ON t.id = u.id WHERE t.id < 5",
+			"c_dec", false},
+		{"in subquery", "SELECT c_dec FROM mbtypes WHERE id IN (SELECT id FROM mbtypes WHERE id < 5)",
+			"c_dec", false},
+		{"not in subquery", "SELECT c_dec FROM mbtypes WHERE id NOT IN (SELECT id FROM mbtypes WHERE id > 5)",
+			"c_dec", false},
+		{"exists", "SELECT c_dec FROM mbtypes t WHERE EXISTS (SELECT 1 FROM mbtypes u WHERE u.id = t.id)",
+			"c_dec", false},
+		{"scalar subquery in where", "SELECT c_dec FROM mbtypes WHERE id = (SELECT MIN(id) FROM mbtypes)",
+			"c_dec", false},
+		// The TPC-H Q02 shape: a correlated scalar subquery decorrelates into
+		// a Join over an Aggregate, which is the plan the walk died on.
+		{"correlated scalar subquery",
+			"SELECT c_dec FROM mbtypes t WHERE t.id = (SELECT MIN(u.id) FROM mbtypes u WHERE u.g = t.g)",
+			"c_dec", false},
+		// The TPC-H Q18 shape: IN over a grouped subquery, a semi-join whose
+		// build side is an Aggregate.
+		{"in over a grouped subquery",
+			"SELECT c_dec FROM mbtypes WHERE id IN (SELECT id FROM mbtypes GROUP BY id)",
+			"c_dec", false},
+		// A derived table needs no subquery PREDICATE at all to reach the
+		// same nil: its Project is the join side the walk had no arm for.
+		{"derived-table join",
+			"SELECT t.c_dec FROM mbtypes t JOIN (SELECT id AS x FROM mbtypes) s ON t.id = s.x WHERE t.id < 5",
+			"c_dec", false},
+		{"bare rename through a derived table",
+			"SELECT x.dd FROM (SELECT id, c_dec AS dd FROM mbtypes) x JOIN mbtypes u ON x.id = u.id",
+			"dd", false},
+		{"two-table join with an in subquery",
+			"SELECT t.c_dec FROM mbtypes t JOIN mbtypes u ON t.id = u.id WHERE t.id IN (SELECT id FROM mbtypes)",
+			"c_dec", false},
+
+		// The other direction, and it is not optional: with the type map
+		// resolving through a join, a value something below it COMPUTED must
+		// still lose its modifier. Before the fix all four of these were
+		// "right" only because the map was nil and everything fell through.
+		{"arithmetic below a join",
+			"SELECT x.d FROM (SELECT id, c_dec * 2 AS d FROM mbtypes) x JOIN mbtypes u ON x.id = u.id",
+			"d", true},
+		{"aggregate below a join",
+			"SELECT x.m FROM (SELECT g, MIN(c_dec) AS m FROM mbtypes GROUP BY g) x JOIN mbtypes u ON x.g = u.g",
+			"m", true},
+		{"window below a join",
+			"SELECT x.w FROM (SELECT id, SUM(c_dec) OVER (PARTITION BY g) AS w FROM mbtypes) x " +
+				"JOIN mbtypes u ON x.id = u.id",
+			"w", true},
+		{"aggregate in the same select list",
+			"SELECT SUM(c_dec) AS s FROM mbtypes WHERE id IN (SELECT id FROM mbtypes)", "s", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.sql, err)
+			}
+			m, ok := mbMetaByName(res, tc.col)
+			if !ok {
+				t.Fatalf("column %q not in %v", tc.col, res.Columns)
+			}
+			if m.WireUnconstrained != tc.want {
+				t.Errorf("%s\n  %s: WireUnconstrained = %v, want %v",
+					tc.sql, tc.col, m.WireUnconstrained, tc.want)
+			}
+			if !tc.want && (m.TypeID != parquet.TypeDecimal || m.Precision != 18 || m.Scale != 4) {
+				t.Errorf("%s\n  %s declared %s(%d,%d), want DECIMAL(18,4)",
+					tc.sql, tc.col, m.TypeID, m.Precision, m.Scale)
+			}
+		})
+	}
+}
+
+// TestZeroRowSchemaSurvivesAJoinedSubquery is the same walk with NO batch to
+// fall back on, which is where the nil type map showed as the wrong TYPE
+// rather than the wrong modifier: exec.CollectSink consults the plan-declared
+// schema only when it consumed nothing, and that schema declared STRING for
+// every column it could not resolve.
+func TestZeroRowSchemaSurvivesAJoinedSubquery(t *testing.T) {
+	ctx := context.Background()
+	db := mbOpen(t)
+
+	for _, tc := range []struct{ name, sql string }{
+		{"control, no subquery", "SELECT c_dec FROM mbtypes WHERE id < 0"},
+		{"correlated scalar subquery",
+			"SELECT c_dec FROM mbtypes t WHERE t.id < 0 AND t.id = (SELECT MIN(u.id) FROM mbtypes u WHERE u.g = t.g)"},
+		{"in subquery",
+			"SELECT c_dec FROM mbtypes WHERE id < 0 AND id IN (SELECT id FROM mbtypes)"},
+		{"in over a grouped subquery",
+			"SELECT c_dec FROM mbtypes WHERE id < 0 AND id IN (SELECT id FROM mbtypes GROUP BY id)"},
+		{"derived-table join",
+			"SELECT t.c_dec FROM mbtypes t JOIN (SELECT id AS x FROM mbtypes) s ON t.id = s.x WHERE t.id < 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.sql, err)
+			}
+			if len(res.Rows) != 0 {
+				t.Fatalf("%s returned %d rows; the point of this entry is that it returns none",
+					tc.sql, len(res.Rows))
+			}
+			m, ok := mbMetaByName(res, "c_dec")
+			if !ok {
+				t.Fatalf("column c_dec not in %v", res.Columns)
+			}
+			if m.TypeID != parquet.TypeDecimal || m.Precision != 18 || m.Scale != 4 {
+				t.Errorf("%s\n  c_dec declared %s(%d,%d), want DECIMAL(18,4) — a zero-row result is "+
+					"described from the PLAN, so an unresolved column goes out as text",
+					tc.sql, m.TypeID, m.Precision, m.Scale)
+			}
+			if m.WireUnconstrained {
+				t.Errorf("%s\n  c_dec is wire-unconstrained; a bare column reference keeps its typmod",
+					tc.sql)
+			}
+		})
+	}
+}
+
+// mbMetaByName finds one output column's declaration by name.
+func mbMetaByName(res *QueryResult, name string) (ColumnMeta, bool) {
+	for _, m := range res.ColumnMetas {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return ColumnMeta{}, false
 }

@@ -451,6 +451,35 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 			return nil
 		}
 		return emittedComputedCols(n.Children[0])
+	case logical.NodeJoin:
+		// The UNION of the two sides. This arm is not optional beside the two
+		// above it: without them the whole type map was nil and EVERY column
+		// under a join fell back to "no typmod", which happened to keep the
+		// right answer for the computed ones. With them resolving, a bare
+		// rename below a join keeps its typmod (#697) and a window output, an
+		// aggregate output, arithmetic or a CAST below the same join must
+		// still lose it (#587, #542) — which is what this carries across.
+		//
+		// A semi/anti join emits only its probe side, so merging the build
+		// side's names in is over-broad. It is inert — no SELECT list can
+		// name an inner-subquery column — and it is what inputColTypes
+		// already does for those joins, so the two walks agree rather than
+		// differing by a case this cannot exercise.
+		if len(n.Children) != 2 {
+			return nil
+		}
+		left, right := emittedComputedCols(n.Children[0]), emittedComputedCols(n.Children[1])
+		if left == nil {
+			return right
+		}
+		out := make(map[string]bool, len(left)+len(right))
+		for k := range left {
+			out[k] = true
+		}
+		for k := range right {
+			out[k] = true
+		}
+		return out
 	}
 	return nil
 }
@@ -869,8 +898,59 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			out[name] = windowSpecOutputType(n, we).ID
 		}
 		return out
+	case logical.NodeJoin:
+		// A JOIN emits both sides' columns, and this walk must cross it
+		// ITSELF rather than fall through to inputColTypes: that one's own
+		// join arm recurses with inputColTypes, which has no Project,
+		// Aggregate or Window arm, so a side that is any of those answered
+		// nil and its `left == nil || right == nil` rule then nilled the
+		// WHOLE map. Every column of the query lost its type, and with it its
+		// typmod — which is #697: a decorrelated correlated subquery is a
+		// Join whose right side is an Aggregate, so `SELECT s_acctbal … WHERE
+		// ps_supplycost = (SELECT MIN(…) …)` described a bare numeric(15,2)
+		// column as unconstrained while the same projection without the
+		// subquery kept it. The same nil also declared every column of a
+		// ZERO-ROW result STRING — #416's failure mode, over the shape #416
+		// did not reach.
+		//
+		// A nil SIDE is tolerated rather than fatal, the way inputColFields'
+		// join arm already tolerates one: the names this walk resolved are
+		// still that side's own names, and a name it could not resolve is
+		// absent, which is exactly the "fall back to STRING" answer. The
+		// disagreement rule is inputColTypes' verbatim — a name the two sides
+		// declare at different types is DROPPED rather than picked, because a
+		// self-join is not the only way to reach one.
+		if len(n.Children) != 2 {
+			return nil
+		}
+		return mergeJoinSides(emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1]))
 	}
 	return inputColTypes(n)
+}
+
+// mergeJoinSides merges the two sides of a join's emitted columns: a name only
+// one side carries is kept, and a name both carry at DIFFERENT values is
+// dropped rather than resolved to a side. It is inputColTypes' join rule with
+// a nil side tolerated instead of fatal — see emittedColTypes' NodeJoin arm.
+func mergeJoinSides[V comparable](left, right map[string]V) map[string]V {
+	if left == nil {
+		return right
+	}
+	if right == nil {
+		return left
+	}
+	merged := make(map[string]V, len(left)+len(right))
+	for c, v := range left {
+		merged[c] = v
+	}
+	for c, v := range right {
+		if prev, dup := merged[c]; dup && prev != v {
+			delete(merged, c)
+			continue
+		}
+		merged[c] = v
+	}
+	return merged
 }
 
 // emittedColDecimal is emittedColTypes' companion for DECIMAL precision/
@@ -968,6 +1048,16 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return out
 		}
 		return in
+	case logical.NodeJoin:
+		// The (p,s) half of emittedColTypes' join arm, and it must cross the
+		// join for the same reason and by the same rule — the two answers
+		// describe one column, so a name kept there and dropped here would be
+		// a DECIMAL with no precision, which #458's sentinel then reads as
+		// unconstrained.
+		if len(n.Children) != 2 {
+			return nil
+		}
+		return mergeJoinSides(emittedColDecimal(n.Children[0]), emittedColDecimal(n.Children[1]))
 	}
 	return inputColDecimal(n)
 }

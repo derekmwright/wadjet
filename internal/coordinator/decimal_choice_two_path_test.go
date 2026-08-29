@@ -151,6 +151,29 @@ func TestDecimalComputedWireTypmodTwoPath(t *testing.T) {
 		{"a set operation over a computed arm is unconstrained",
 			"SELECT COALESCE(a, b) AS v FROM " + dbpTable +
 				" UNION ALL SELECT b FROM " + dbpTable, "v", true},
+		// #697 on the DAG. Both entry points read
+		// declaredWireUnconstrainedDecimal off the SAME optimized root, so
+		// one fix covers both — but "same function" is not evidence, and the
+		// shapes below are the ones whose column the walk could not resolve
+		// at all: a JOIN whose side is an Aggregate (a decorrelated
+		// correlated subquery, a semi-join to a GROUP BY) or a Project (a
+		// derived table). Every column of the query lost its declaration
+		// there, so a BARE reference came out unconstrained.
+		{"a bare column behind a correlated subquery keeps its typmod",
+			"SELECT a FROM " + dbpTable + " t WHERE t.id = " +
+				"(SELECT MIN(u.id) FROM " + dbpTable + " u WHERE u.s = t.s)", "a", false},
+		{"a bare column behind a grouped IN subquery keeps its typmod",
+			"SELECT a FROM " + dbpTable + " WHERE id IN (SELECT id FROM " + dbpTable +
+				" GROUP BY id)", "a", false},
+		{"a bare rename through a derived-table join keeps its typmod",
+			"SELECT x.aa AS aa FROM (SELECT id, a AS aa FROM " + dbpTable + ") x JOIN " +
+				dbpTable + " u ON x.id = u.id", "aa", false},
+		// The other direction, which the join arm of emittedComputedCols is
+		// what preserves: with the type map resolving under a join, a value
+		// something below it COMPUTED must still lose its modifier.
+		{"arithmetic below a derived-table join is unconstrained",
+			"SELECT x.d AS d FROM (SELECT id, a * 2 AS d FROM " + dbpTable + ") x JOIN " +
+				dbpTable + " u ON x.id = u.id", "d", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := coord.ExecuteSQL(ctx, tc.sql)

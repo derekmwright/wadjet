@@ -696,6 +696,42 @@ func wireCorpus() []wireCase {
 		// the zero-row plan-declared path was compared (#458): both
 		// entries pass with NO pin, because after FIX 2 wadjet agrees with
 		// PostgreSQL outright rather than needing an exemption.
+		// A BARE DECIMAL column reference with a SUBQUERY elsewhere in the
+		// statement (#697). PostgreSQL keeps the column's typmod for every one
+		// of these — verified live on 17.11's \gdesc — and wadjet declared
+		// them unconstrained: the declared-type walk had no arm for a JOIN, so
+		// a decorrelated correlated subquery (a Join over an Aggregate) or a
+		// derived table (a Join over a Project) nilled the whole type map.
+		// The ZERO-ROW entries are the stronger half: with no batch to re-type
+		// from, that same nil declared the column TEXT (OID 25).
+		{name: "DecimalColumnBehindInSubquery",
+			sql: `SELECT d_2 FROM dec_probe WHERE d_key IN (SELECT d_key FROM dec_probe WHERE d_key < 4)
+				ORDER BY d_key`},
+		{name: "DecimalColumnBehindExists",
+			sql: `SELECT d_2 FROM dec_probe t WHERE EXISTS
+				(SELECT 1 FROM dec_probe u WHERE u.d_key = t.d_key AND u.d_key < 4) ORDER BY t.d_key`},
+		{name: "DecimalColumnBehindScalarSubquery",
+			sql: `SELECT d_2 FROM dec_probe WHERE d_key = (SELECT MIN(d_key) FROM dec_probe WHERE d_key > 0)`},
+		// The TPC-H Q02 shape.
+		{name: "DecimalColumnBehindCorrelatedSubquery",
+			sql: `SELECT d_2 FROM dec_probe t WHERE t.d_key =
+				(SELECT MIN(u.d_key) FROM dec_probe u WHERE u.d_grp = t.d_grp) ORDER BY t.d_key`},
+		// The TPC-H Q18 shape: IN over a GROUPED subquery.
+		{name: "DecimalColumnBehindGroupedInSubquery",
+			sql: `SELECT d_2 FROM dec_probe WHERE d_key IN
+				(SELECT d_key FROM dec_probe WHERE d_key < 4 GROUP BY d_key) ORDER BY d_key`},
+		// No subquery PREDICATE at all — a derived table is enough, because
+		// the Project on the join's other side is what the walk could not
+		// cross.
+		{name: "DecimalColumnBehindDerivedTableJoin",
+			sql: `SELECT t.d_2 FROM dec_probe t JOIN (SELECT d_key AS k FROM dec_probe WHERE d_key < 4) s
+				ON t.d_key = s.k ORDER BY t.d_key`},
+		{name: "DecimalColumnBehindCorrelatedSubqueryZeroRows",
+			sql: `SELECT d_2 FROM dec_probe t WHERE t.d_key < 0 AND t.d_key =
+				(SELECT MIN(u.d_key) FROM dec_probe u WHERE u.d_grp = t.d_grp)`},
+		{name: "DecimalColumnBehindDerivedTableJoinZeroRows",
+			sql: `SELECT t.d_2 FROM dec_probe t JOIN (SELECT d_key AS k FROM dec_probe WHERE d_key < 0) s
+				ON t.d_key = s.k`},
 		// A CHOICE construct over a DECIMAL branch and a numeric LITERAL —
 		// ADR-0024 item 5's select_common_typmod, over the pair #695 made
 		// reachable. The literal is a numeric with typmod -1, so it DISAGREES

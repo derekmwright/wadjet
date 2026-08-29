@@ -197,6 +197,42 @@ directions: it drops the typmod PostgreSQL keeps for a choice over one
 column, and keeps the one PostgreSQL drops for a set operation over a
 computed arm.
 
+**A JOIN is not one of the constructs that drop it, and it was (#697, fixed
+2026-08-29).** A bare DECIMAL column reference in a statement that also
+contains a subquery — `WHERE id IN (SELECT …)`, a correlated scalar
+subquery, a semi-join to a GROUP BY — went out unconstrained where
+PostgreSQL keeps `numeric(15,2)`, TPC-H Q02's `s_acctbal` and Q18's
+`o_totalprice` among them. The trigger was never the subquery: it was a JOIN
+whose SIDE is a node the declared-type walk had no arm for. `emittedColTypes`
+fell through to `inputColTypes` for a `NodeJoin`, that function's join arm
+recurses with ITSELF, and it has no Project / Aggregate / Window arm — so a
+decorrelated subquery (a Join over an Aggregate) or a plain DERIVED TABLE (a
+Join over a Project, no subquery predicate anywhere) made one side nil and
+its `left == nil || right == nil` rule nilled the WHOLE map. Every column of
+the query lost its declaration, and `declaredTypmod` read "could not resolve
+this column" as "this column carries no typmod". A ZERO-ROW result behind any
+of those shapes was the same nil showing as the wrong TYPE rather than the
+wrong modifier: described from the plan alone, every column went out STRING
+(OID 25) — #416's failure mode over the shape #416 did not reach.
+`emittedColTypes`, `emittedColDecimal` and `emittedComputedCols` each cross a
+join now: the first two merge the sides and drop a name they declare
+differently (`inputColTypes`' own rule, with a nil side tolerated rather than
+fatal), and the third unions them, which is what keeps a window output, an
+aggregate output, arithmetic or a CAST below a join unconstrained now that
+the map beneath it resolves at all.
+
+**Correction, recorded rather than left standing: a CAST that NAMES a (p,s)
+KEEPS it.** The sentence above lists a CAST among the constructs that carry
+−1, and postgres 17.11 disagrees — `CAST(a AS numeric(18,4))` and
+`a::numeric(9,2)` both describe with their destination's modifier, and only a
+BARE `CAST(a AS numeric)` drops to plain numeric. This is the cast's own
+typmod being imposed on the result, not `select_common_typmod`. Wadjet sends
+−1 for both spellings: `declaredTypmod` has no CAST arm. It is a divergence
+of the same client-visible kind as #587's — a JDBC client reads
+`getPrecision()` as 0 — and it is NOT covered by #697's fix, which is about
+resolving the columns below a join. Named here so the record does not read as
+a gate that exists.
+
 ### 6. NaN is a comparison literal, not a stored value
 
 PostgreSQL's numeric has NaN (greater than every non-NaN, equal only to
