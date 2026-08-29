@@ -111,3 +111,17 @@ func decLitType(p, s int) (DecimalType, bool) {
 	}
 	return DecimalType{Precision: p, Scale: s}, true
 }
+
+// allDigits reports whether s is entirely ASCII digits. An empty string
+// counts (an absent fraction is not a defect); the caller rejects the case
+// where BOTH halves are empty. The numeric grammar itself lives in
+// parquet.DecimalTextParts since #647; this helper only classifies a
+// literal's SPELLING for its (p,s).
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
