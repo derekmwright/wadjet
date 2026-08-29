@@ -746,7 +746,12 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 				if ri == 0 {
 					return nil
 				}
-				return li / ri
+				// The CHECKED divide, like every other integer arm: this node
+				// is where operands with no typed protocol arrive, so
+				// MinInt64 / -1 reached it too and wrapped back to MinInt64
+				// where PostgreSQL raises `bigint out of range` (#637, #555
+				// review).
+				return divInt64Checked(li, ri)
 			}
 		}
 		if rf == 0 {
@@ -6117,12 +6122,16 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 				}
 				raiseInvalidTextRepresentation(typ, s)
 			}
-			return int64(math.Round(f))
+			return castIntInRange(int64(math.Round(f)), dest)
 		}
+		// EVERY source gets the destination's range, integers included:
+		// `CAST(99999 AS SMALLINT)` answered 99999 because an integer box
+		// returned before the check, and PostgreSQL raises `smallint out of
+		// range` for it (#555 review).
 		if i, ok := toInt64Safe(v); ok {
-			return i
+			return castIntInRange(i, dest)
 		}
-		return int64(math.Round(ToFloat64(v)))
+		return castIntInRange(int64(math.Round(ToFloat64(v))), dest)
 	case "real", "float4":
 		// REAL is float4, a NARROWER type than the float64 every other
 		// numeric box in this engine carries — and this arm used to sit

@@ -55,6 +55,27 @@ func TestWrappedDecimalAggregateTwoPath(t *testing.T) {
 			"SELECT s, SUM(a * 2) AS v FROM " + dbpTable + " GROUP BY s ORDER BY s"},
 		// A scalar math function around an aggregate takes the same route.
 		{"round around a sum", "SELECT ROUND(SUM(a), 1) AS v FROM " + dbpTable},
+
+		// The shapes the FIRST cut of this fix still nulled: every one of
+		// them compiles to a node that does not implement decimalOperand —
+		// the GENERIC BinOp, which compileBinOp emits whenever the pair is
+		// not two Float64Exprs, and the three constructs that CHOOSE one of
+		// their arms. Gating the gather's vector type on that interface alone
+		// left the enumeration one node kind short, which is the recurring
+		// hole (#555 review, R1).
+		{"a scalar function times a literal", "SELECT ROUND(SUM(a), 1) * 2 AS v FROM " + dbpTable},
+		{"a cast times a literal", "SELECT CAST(SUM(a) AS DECIMAL(9,2)) * 2 AS v FROM " + dbpTable},
+		{"unary minus against another aggregate", "SELECT -SUM(a) + SUM(b) AS v FROM " + dbpTable},
+		{"abs around a sum, times a literal", "SELECT ABS(SUM(a)) * 2 AS v FROM " + dbpTable},
+		{"a CASE over aggregates",
+			"SELECT CASE WHEN SUM(a) > 10 THEN SUM(a) * 2 ELSE SUM(b) END AS v FROM " + dbpTable},
+		{"a CASE over aggregates, grouped",
+			"SELECT s, CASE WHEN SUM(a) > 10 THEN SUM(a) * 2 ELSE SUM(b) END AS v FROM " +
+				dbpTable + " GROUP BY s ORDER BY s"},
+		{"coalesce over aggregates", "SELECT COALESCE(SUM(a), SUM(b)) AS v FROM " + dbpTable},
+		{"greatest over aggregates", "SELECT GREATEST(SUM(a), SUM(b)) AS v FROM " + dbpTable},
+		{"least over aggregates", "SELECT LEAST(SUM(a), SUM(b)) AS v FROM " + dbpTable},
+		{"nullif over an aggregate", "SELECT NULLIF(SUM(a), 0) AS v FROM " + dbpTable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			singleRows := dtpRun(t, ctx, single, coord, tc.sql, false)

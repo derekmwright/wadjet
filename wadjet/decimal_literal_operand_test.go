@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -210,6 +211,30 @@ func TestSmallintCastAndWideRound(t *testing.T) {
 		res := ddrQuery(t, db, "SELECT CAST(a AS SMALLINT) AS v FROM decdecl WHERE id = 1")
 		if got := res.Rows[0]["v"]; got != any(int64(13)) {
 			t.Errorf("CAST(12.75 AS SMALLINT) = %#v (%T), want 13", got, got)
+		}
+	})
+	t.Run("smallint refuses an INTEGER source past its range", func(t *testing.T) {
+		// An integer box returned from the cast before any range check at
+		// all, so this answered 99999 where PostgreSQL raises (#555 review).
+		_, err := db.Query(context.Background(), "SELECT CAST(99999 AS SMALLINT) AS v")
+		if err == nil {
+			t.Fatal("CAST(99999 AS SMALLINT) answered; PostgreSQL says smallint out of range")
+		}
+		if got := sqlerr.StateOf(err); got != "22003" {
+			t.Errorf("SQLSTATE %q (%v), want 22003", got, err)
+		}
+		if !strings.Contains(err.Error(), "smallint") {
+			t.Errorf("message %q does not name smallint — it used to say bigint whatever "+
+				"the destination was", err)
+		}
+	})
+	t.Run("integer refuses past its range", func(t *testing.T) {
+		_, err := db.Query(context.Background(), "SELECT CAST(9999999999 AS INTEGER) AS v")
+		if err == nil {
+			t.Fatal("CAST(9999999999 AS INTEGER) answered; PostgreSQL says integer out of range")
+		}
+		if got := sqlerr.StateOf(err); got != "22003" {
+			t.Errorf("SQLSTATE %q (%v), want 22003", got, err)
 		}
 	})
 	t.Run("smallint refuses past its range", func(t *testing.T) {

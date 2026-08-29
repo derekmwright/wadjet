@@ -768,8 +768,10 @@ func raiseNumericFieldOverflow(p, s int) {
 func raiseIntegerOutOfRange(dest string) {
 	name := "bigint"
 	switch dest {
-	case "int", "integer":
+	case "int", "integer", "int4":
 		name = "integer"
+	case "smallint", "int2":
+		name = "smallint"
 	}
 	panic(fatalEval{sqlerr.New("22003", "%s out of range", name)})
 }
@@ -825,6 +827,47 @@ func numericFieldOverflow(p, s int) error {
 // DECIMAL column and at what scale — so it is the same for every batch of one
 // query, and a caller may resolve it per batch without the type flapping.
 func DecimalResultOf(e Expr, b *batch.RecordBatch) (precision, scale int, ok bool) {
+	// The node kinds that produce a DECIMAL without implementing
+	// decimalOperand: the GENERIC BinOp, which is what compileBinOp emits
+	// whenever the pair is not two Float64Exprs (a scalar function or a CAST
+	// against a literal, unary minus against a column), and the three
+	// constructs that CHOOSE one of their arms. The interface alone left all
+	// of them NULL at the gather — `ROUND(SUM(d),1) * 2`, `-SUM(d) + SUM(e)`,
+	// `CASE WHEN … THEN SUM(d)*2 END` — which is the half of R1 the first fix
+	// missed. The enumeration is the same one classifyOperand keeps for the
+	// boxed comparison path, and for the same reason.
+	switch v := e.(type) {
+	case *BinOp:
+		m, on := v.dec.resolve(v.Op, v.Left, v.Right, b)
+		if !on {
+			return 0, 0, false
+		}
+		return m.out.Precision, m.out.Scale, true
+	case *Case:
+		return decimalArmFold(caseResultArms(v), b)
+	case *Coalesce:
+		return decimalArmFold(v.Args, b)
+	case *FuncCall:
+		// A POLYMORPHIC function answers with one of its arguments, and the
+		// registry already names WHICH ones: GREATEST/LEAST/COALESCE mirror
+		// every argument, NULLIF mirrors argument 0 alone, IF mirrors its two
+		// branches. Reading the candidate list off the declaration is what
+		// keeps this from becoming a name list that drifts — NULLIF is
+		// exactly the one a hand-written `case "greatest", "least"` missed.
+		// Every other function declares its own type, and the exact ones
+		// compile to decimalScalarFn rather than to a FuncCall.
+		idx, poly := DefaultRegistry.ReturnType(v.Name).SameAsArgs(len(v.Args))
+		if !poly {
+			return 0, 0, false
+		}
+		arms := make([]Expr, 0, len(idx))
+		for _, i := range idx {
+			if i >= 0 && i < len(v.Args) {
+				arms = append(arms, v.Args[i])
+			}
+		}
+		return decimalArmFold(arms, b)
+	}
 	o, isDec := e.(decimalOperand)
 	if !isDec {
 		return 0, 0, false
@@ -843,14 +886,74 @@ func DecimalResultOf(e Expr, b *batch.RecordBatch) (precision, scale int, ok boo
 // reports that this expression produced NULL. The caller owns the null bit for
 // the false case, the way every other vector writer here does.
 func EvalDecimalInto(e Expr, b *batch.RecordBatch, row int, dst *batch.Vector, at int) bool {
-	o, isDec := e.(decimalOperand)
-	if !isDec {
+	if o, isDec := e.(decimalOperand); isDec {
+		v, ok := o.evalDecimal(b, row)
+		if !ok {
+			return false
+		}
+		dst.DecimalData.Data[at] = v
+		return true
+	}
+	// A node with no exact accessor — the generic BinOp, a CASE, a COALESCE,
+	// GREATEST/LEAST — still BOXES its answer the way a DECIMAL column does,
+	// as the value's rendered text. Reading it back at the vector's scale is
+	// exact, and refuses loudly if the two disagree, which is the property
+	// ParseDecimalStringChecked exists for.
+	boxed := e.Eval(b, row)
+	if boxed == nil {
 		return false
 	}
-	v, ok := o.evalDecimal(b, row)
-	if !ok {
+	text, isText := boxed.(string)
+	if !isText {
 		return false
+	}
+	v, err := batch.ParseDecimalStringChecked(text, dst.DecimalData.Scale)
+	if err != nil {
+		panic(fatalEval{err})
 	}
 	dst.DecimalData.Data[at] = v
 	return true
+}
+
+// caseResultArms is the expressions a CASE can ANSWER with. The operand and
+// the WHEN conditions only steer, so they contribute no type — the same split
+// classifyOperand makes.
+func caseResultArms(v *Case) []Expr {
+	arms := make([]Expr, 0, len(v.Whens)+1)
+	for _, w := range v.Whens {
+		arms = append(arms, w.Result)
+	}
+	if v.Else != nil {
+		arms = append(arms, v.Else)
+	}
+	return arms
+}
+
+// decimalArmFold is the common DECIMAL type of a set of alternatives one value
+// is chosen from — ADR-0024 item 2's rule, applied to a compiled tree.
+//
+// Every arm that can PRODUCE a value must be a DECIMAL whose (p,s) resolved:
+// one that is not either makes the result a different type, or arrives at its
+// own scale and would be read at the fold's. A NULL literal is skipped, for
+// the reason CommonDeclType skips it — it names no type and produces no value.
+func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
+	metas := make([]batch.DecimalType, 0, len(arms))
+	for _, a := range arms {
+		if a == nil {
+			continue
+		}
+		if lit, isLit := a.(*Lit); isLit && lit.Val == nil {
+			continue
+		}
+		p, s, ok := DecimalResultOf(a, b)
+		if !ok {
+			return 0, 0, false
+		}
+		metas = append(metas, batch.DecimalType{Precision: p, Scale: s})
+	}
+	m, ok := batch.DecimalCommon(metas)
+	if !ok {
+		return 0, 0, false
+	}
+	return m.Precision, m.Scale, true
 }

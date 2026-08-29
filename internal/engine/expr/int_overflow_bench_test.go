@@ -3,6 +3,9 @@ package expr
 import (
 	"math"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // The checked integer operators guard every row of every integer arithmetic
@@ -132,4 +135,47 @@ func TestCheckedIntGuardsStayInlinable(t *testing.T) {
 			t.Errorf("%s = %d, want %d", tc.name, tc.got, tc.want)
 		}
 	}
+}
+
+// BenchmarkCompiledFloatArithVec is the shape #555's review measured at +33%:
+// a FLOAT column against FRACTIONAL literals, compiled the way a projection
+// compiles it and run through the VECTORIZED float path.
+//
+// compileBinOp picks the node from compile-time operand shape, where a
+// column's type is unknown, so this pair reaches BinOpNumeric to find out and
+// then resolves plain float mode. What the +33% measured was the loss of the
+// vector path on the way — the projection wires VecFloat64Eval from the
+// VecFloat64Expr interface, which only BinOpFloat64 implemented. TPC-H Q14's
+// `100.00 * SUM(...)` and Q17's `0.2 * AVG(...)` are this shape.
+func BenchmarkCompiledFloatArithVec(bench *testing.B) {
+	bb := benchBatch(2048)
+	// The planner hands the compiler the child's declared column types, so a
+	// FLOAT column against a fractional literal is settled here rather than
+	// deferred to the first batch.
+	e, err := CompileWithColumnTypes(mustParseExpr(bench, "amount * 2.0 + 10.0"), nil,
+		map[string]batch.TypeID{"amount": batch.TypeFloat64})
+	if err != nil {
+		bench.Fatal(err)
+	}
+	ve, ok := e.(VecFloat64Expr)
+	if !ok {
+		bench.Fatalf("%T does not implement VecFloat64Expr — the projection would fall to "+
+			"a per-row evaluator for this expression", e)
+	}
+	dst := make([]float64, 2048)
+	bench.ReportAllocs()
+	bench.ResetTimer()
+	for i := 0; i < bench.N; i++ {
+		ve.EvalFloat64Vec(bb, dst, 2048)
+	}
+}
+
+// mustParseExpr parses one SQL expression for the benchmarks above.
+func mustParseExpr(tb testing.TB, sql string) plansql.Node {
+	tb.Helper()
+	n, err := plansql.ParseExpression(sql)
+	if err != nil {
+		tb.Fatalf("parse %q: %v", sql, err)
+	}
+	return n
 }

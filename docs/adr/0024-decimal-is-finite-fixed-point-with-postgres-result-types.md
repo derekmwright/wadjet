@@ -342,6 +342,25 @@ pins the literal form beside the two-column one.
     `ROUND(0.5)` stayed float, and the two halves of one query disagreed about
     their own type. An INTEGER literal is not a decimal operand at all:
     integer arithmetic owns it, and `7 / 2` must stay 3.
+  - **A DIVISION between two CONSTANTS stays float8.** `10.0 / 3` is
+    3.3333333333333335 here and numeric there. Item 3's division scale is a
+    policy FLOOR of six fraction digits, chosen for column operands whose own
+    precision drives it past that; between two narrow literals the floor is
+    all there is, so an exact answer would keep SIX digits where the double it
+    replaces keeps sixteen. Every other operator is exact at a scale derived
+    from the operands' own scales and drops nothing, which is why only this
+    one declines.
+  - **SUM and AVG over a COMPUTED decimal input clamp the scale to 6.**
+    `SUM(d92 + 0.00000005)` answers 11.550000 where PostgreSQL answers
+    11.55000020; a bare column and MIN/MAX keep their scale. The aggregate
+    takes its input (p,s) from the expression only for the shapes that carry
+    `AggSpec.InputPrecision/InputScale`, and item 3's adjustment floor applies
+    where it does not. OPEN, not settled — the fix is to carry the
+    expression's (p,s) at every aggregate input.
+  - **`CAST(text AS DECIMAL)` over WIDE text answers a double.** The bare
+    destination declines to name a scale (below), so a 20-digit numeric string
+    comes back as 1.2345678901234567e+19 rather than the exact numeric
+    PostgreSQL gives. The parameterized spelling is exact from the same text.
   - **`CAST(x AS DECIMAL)` over a FLOAT or TEXT operand stays float8.** A bare
     destination takes the operand's own scale (item 3), and a float has none
     — any fixed choice would either truncate the value or invent digits. The
@@ -358,8 +377,9 @@ pins the literal form beside the two-column one.
     INTEGER)` and `int / int` reach a client under int8 where PostgreSQL says
     int4, and `int32 ⊕ int32` answers past 2^31 where PostgreSQL raises
     `integer out of range`. The RANGE each cast spelling names is still
-    enforced (22003 past int2's and int4's), so the divergence is the OID and
-    the extra values accepted, never a wrapped one.
+    enforced FROM EVERY SOURCE (22003 past int2's and int4's), so the
+    divergence is the OID and the extra values arithmetic accepts, never a
+    wrapped one.
 - Refuted premise, recorded: "DECIMAL would be ideal but Wadjet uses float"
   in the TPC-H schema was an engine limitation, not a design choice, and its
   presence meant the type had no benchmark and no 22-query gate for two

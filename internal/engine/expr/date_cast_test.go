@@ -242,7 +242,7 @@ func TestDateArithOverColumnPair(t *testing.T) {
 		b.Columns[5].SetValue(i, int64(4))
 	}
 
-	lag := compileBinOp(&ColRef{Name: "recv"}, &ColRef{Name: "ship"}, "-")
+	lag := compileBinOp(&ColRef{Name: "recv"}, &ColRef{Name: "ship"}, "-", nil)
 	want := []int64{9, 8, 2}
 	for i := range want {
 		if got := lag.Eval(b, i); got != want[i] {
@@ -251,7 +251,7 @@ func TestDateArithOverColumnPair(t *testing.T) {
 		}
 	}
 
-	dd := compileBinOp(&ColRef{Name: "d1"}, &ColRef{Name: "d2"}, "-")
+	dd := compileBinOp(&ColRef{Name: "d1"}, &ColRef{Name: "d2"}, "-", nil)
 	for i, w := range []int64{5, 6, 7} {
 		if got := dd.Eval(b, i); got != w {
 			t.Errorf("row %d: d1 - d2 = %v (%T), want int64 %d", i, got, got, w)
@@ -260,7 +260,7 @@ func TestDateArithOverColumnPair(t *testing.T) {
 
 	// The control: integer columns keep integer arithmetic, untouched by
 	// the temporal branch.
-	ii := compileBinOp(&ColRef{Name: "a"}, &ColRef{Name: "c"}, "-")
+	ii := compileBinOp(&ColRef{Name: "a"}, &ColRef{Name: "c"}, "-", nil)
 	for i, w := range []int64{6, 7, 8} {
 		if got := ii.Eval(b, i); got != w {
 			t.Errorf("row %d: a - c = %v (%T), want int64 %d", i, got, got, w)

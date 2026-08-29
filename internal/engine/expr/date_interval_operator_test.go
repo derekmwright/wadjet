@@ -236,7 +236,7 @@ func TestIntervalOperandCompilesGeneric(t *testing.T) {
 		{"literal_minus_interval", &Lit{Val: "1996-03-13"}, iv(), "-"},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
-			got := compileBinOp(tc.left, tc.right, tc.op)
+			got := compileBinOp(tc.left, tc.right, tc.op, nil)
 			if _, ok := got.(*BinOp); !ok {
 				t.Errorf("compiled to %T, want *BinOp — a typed arithmetic node "+
 					"evaluates the interval as 0 and drops it", got)
@@ -244,7 +244,7 @@ func TestIntervalOperandCompilesGeneric(t *testing.T) {
 		})
 	}
 	// The guard must not broaden: ordinary arithmetic keeps its typed node.
-	if got := compileBinOp(&ColRef{Name: "n"}, &Lit{Val: int64(1)}, "+"); func() bool {
+	if got := compileBinOp(&ColRef{Name: "n"}, &Lit{Val: int64(1)}, "+", nil); func() bool {
 		_, isGeneric := got.(*BinOp)
 		return isGeneric
 	}() {
@@ -258,7 +258,7 @@ func TestIntervalOperandCompilesGeneric(t *testing.T) {
 // exactly as before, rather than turning into a date string.
 func TestIntervalOperandNonTemporalUnchanged(t *testing.T) {
 	b := dateArithBatch(t)
-	e := compileBinOp(&ColRef{Name: "n"}, &Lit{Val: IntervalValue{Days: 90}}, "-")
+	e := compileBinOp(&ColRef{Name: "n"}, &Lit{Val: IntervalValue{Days: 90}}, "-", nil)
 	got := e.Eval(b, 0)
 	if _, isText := got.(string); isText {
 		t.Errorf("int_col - INTERVAL '90' DAY = %v (%T), want the numeric answer: "+
@@ -289,7 +289,7 @@ func TestDateIntervalOperatorNullRow(t *testing.T) {
 		{"d", "1996-03-12"},
 		{"ts", "1996-03-12 14:25:36"},
 	} {
-		e := compileBinOp(&ColRef{Name: tc.col}, &Lit{Val: IntervalValue{Days: 1}}, "-")
+		e := compileBinOp(&ColRef{Name: tc.col}, &Lit{Val: IntervalValue{Days: 1}}, "-", nil)
 		if got := e.Eval(b, 0); got != tc.want {
 			t.Errorf("%s - INTERVAL '1' DAY row 0: got %v, want %q", tc.col, got, tc.want)
 		}

@@ -8026,7 +8026,13 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
 				}
 			} else {
-				compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
+				// With the child's DECLARED column types in hand, so a pair
+				// that cannot be exact fixed-point — a FLOAT column against a
+				// fractional literal — keeps the vectorized float node it has
+				// always compiled to instead of deferring the question to the
+				// first batch (#555 review).
+				compiled, compErr = expr.CompileWithColumnTypes(
+					proj.ASTExpr, p.subqueryRunner, childColTypes.types)
 			}
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a

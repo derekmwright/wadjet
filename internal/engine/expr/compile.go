@@ -21,6 +21,18 @@ type compileContext struct {
 	// and every existing CompileWith* entry point below) keeps the
 	// pre-#528 unbudgeted behavior — set via CompileWithBudget.
 	budget MemoryAccountant
+	// colTypes is the DECLARED type of each input column, when the caller
+	// knows it. compileBinOp needs it for one decision and one only: a pair
+	// that COULD be DECIMAL at runtime has to reach BinOpNumeric to find out,
+	// and a column whose type is already known to be FLOAT never could — so
+	// `float_col * 2.0` keeps the BinOpFloat64 it has always compiled to,
+	// with its vectorized path, instead of paying a per-row evaluator for a
+	// question already answered (#555 review).
+	//
+	// nil means "not known", which is every caller that has no schema, and
+	// answers exactly as this layer did before: assume a column might be a
+	// DECIMAL and resolve the mode against the first batch.
+	colTypes map[string]batch.TypeID
 }
 
 // Compile converts our AST Node into an Expr tree.
@@ -158,7 +170,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return compileBinOp(left, right, n.Op), nil
+		return compileBinOp(left, right, n.Op, ctx), nil
 
 	case *plansql.UnaryOp:
 		operand, err := compileWithCtx(n.Inner, ctx)
@@ -657,7 +669,7 @@ func isProvablyFloat64(e Expr) bool {
 
 // compileBinOp creates a typed BinOp when both sides implement typed interfaces,
 // falling back to the generic BinOp otherwise.
-func compileBinOp(left, right Expr, op string) Expr {
+func compileBinOp(left, right Expr, op string, ctx *compileContext) Expr {
 	// `date ± INTERVAL` is not arithmetic, and nothing below can tell: an
 	// interval Lit satisfies Float64Expr like any other literal (ToFloat64 of
 	// an IntervalValue is 0), so the typed nodes took the expression and
@@ -699,7 +711,7 @@ func compileBinOp(left, right Expr, op string) Expr {
 		// same on both settings.
 		if lnOk && rnOk &&
 			((possiblyIntAtRuntime(left) && possiblyIntAtRuntime(right)) ||
-				(possiblyDecimalAtRuntime(left) && possiblyDecimalAtRuntime(right))) {
+				(possiblyDecimalAtRuntime(left, ctx) && possiblyDecimalAtRuntime(right, ctx))) {
 			return &BinOpNumeric{Left: ln, Right: rn, Op: op}
 		}
 		return &BinOpFloat64{Left: lf, Right: rf, Op: op}
@@ -748,9 +760,25 @@ func possiblyIntAtRuntime(e Expr) bool {
 // A column qualifies because its type is unknown here; a numeric literal
 // qualifies when its spelling names a value a DECIMAL can hold. Everything
 // else is decided at compile time and does not.
-func possiblyDecimalAtRuntime(e Expr) bool {
+func possiblyDecimalAtRuntime(e Expr, ctx *compileContext) bool {
 	switch v := e.(type) {
 	case *ColRef:
+		// A column whose DECLARED type the caller handed over answers now:
+		// only a DECIMAL (or an integer, which joins a decimal expression as
+		// DECIMAL(19,0)) can make this pair exact. Without the declaration
+		// the answer is yes, because the type does not exist until a batch
+		// arrives and guessing no would put an exact expression on the float
+		// path — the defect this whole question exists to avoid.
+		if ctx != nil && ctx.colTypes != nil {
+			t, known := ctx.colTypes[strings.ToLower(v.Name)]
+			if known {
+				switch t {
+				case batch.TypeDecimal, batch.TypeInt32, batch.TypeInt64:
+					return true
+				}
+				return false
+			}
+		}
 		return true
 	case *BinOpNumeric:
 		return true
@@ -761,9 +789,18 @@ func possiblyDecimalAtRuntime(e Expr) bool {
 		_, ok := batch.DecimalTextType(v.Text)
 		return ok
 	case *UnaryOp:
-		return (v.Op == "-" || v.Op == "+") && possiblyDecimalAtRuntime(v.Operand)
+		return (v.Op == "-" || v.Op == "+") && possiblyDecimalAtRuntime(v.Operand, ctx)
 	}
 	return false
+}
+
+// CompileWithColumnTypes compiles with the input's DECLARED column types in
+// hand. See compileContext.colTypes: the types answer one compile-time
+// question — whether an operand pair could be exact fixed-point — which
+// without them has to be deferred to the first batch, at the cost of the
+// vectorized float path for every pair that turns out not to be.
+func CompileWithColumnTypes(node plansql.Node, runner SubqueryRunner, colTypes map[string]batch.TypeID) (Expr, error) {
+	return compileWithCtx(node, &compileContext{runner: runner, colTypes: colTypes})
 }
 
 // isIntNative returns true if the expression natively produces int64 values

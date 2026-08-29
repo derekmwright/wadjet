@@ -364,17 +364,27 @@ func castDecimalToInt(v any, dest string) (int64, bool) {
 		raiseIntegerOutOfRange(dest)
 	}
 	out := rounded.ToInt64()
+	// Each spelling names its own range; `bigint` and `signed` keep the int64
+	// one the value already has.
+	return castIntInRange(out, dest), true
+}
+
+// castIntInRange applies an integer destination's own RANGE — PostgreSQL's
+// `smallint out of range` / `integer out of range`, SQLSTATE 22003.
+//
+// It is the one place that bound lives, so every SOURCE reaches the same
+// refusal. An integer box used to return from the cast before any check at
+// all, so `CAST(99999 AS SMALLINT)` answered 99999 where PostgreSQL refuses.
+func castIntInRange(v int64, dest string) int64 {
 	switch dest {
 	case "int", "integer", "int4":
-		// PostgreSQL's `integer` is int4 and refuses anything outside it,
-		// with its own message. `bigint`/`signed` keep the int64 range.
-		if out < -(1<<31) || out > (1<<31)-1 {
+		if v < -(1<<31) || v > (1<<31)-1 {
 			raiseIntegerOutOfRange(dest)
 		}
 	case "smallint", "int2":
-		if out < -(1<<15) || out > (1<<15)-1 {
+		if v < -(1<<15) || v > (1<<15)-1 {
 			raiseIntegerOutOfRange(dest)
 		}
 	}
-	return out, true
+	return v
 }
