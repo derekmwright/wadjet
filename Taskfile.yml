@@ -226,7 +226,7 @@ tasks:
       - tools/sqlancer/build.sh {{.TARGET_DIR}}
 
   sqlancer:run:
-    desc: 'Run one SQLancer invocation from a scratch dir, e.g. task sqlancer:run ARGS="--num-threads 1 --random-seed 1 --num-queries 1000 --username wadjet --password wadjet wadjet --oracle NOREC --test-collations=false --connection-url postgresql://localhost:15432/wadjet"'
+    desc: 'Run one SQLancer invocation from a scratch dir, e.g. task sqlancer:run ARGS="--num-threads 1 --random-seed 1 --num-queries 1000 --username wadjet --password \$PGPASSWORD wadjet --oracle NOREC --test-collations=false --connection-url postgresql://localhost:15432/wadjet"'
     requires:
       vars: [ARGS]
     cmds:
