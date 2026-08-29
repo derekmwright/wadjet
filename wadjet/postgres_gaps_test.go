@@ -215,9 +215,9 @@ func TestPositionFunctionEngine(t *testing.T) {
 		t.Fatalf("query: %v", err)
 	}
 	row := res.Rows[0]
-	wantFloat := map[string]float64{"found": 3, "missing": 0, "at_start": 1}
-	for col, w := range wantFloat {
-		got, ok := row[col].(float64)
+	wantInt := map[string]int32{"found": 3, "missing": 0, "at_start": 1}
+	for col, w := range wantInt {
+		got, ok := row[col].(int32)
 		if !ok || got != w {
 			t.Errorf("%s = %v (%T), want %v", col, row[col], row[col], w)
 		}
@@ -238,7 +238,7 @@ func TestPositionFunctionEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("column query: %v", err)
 	}
-	if got, ok := res2.Rows[0]["p"].(float64); !ok || got != 7 {
+	if got, ok := res2.Rows[0]["p"].(int32); !ok || got != 7 {
 		t.Errorf("POSITION('world' IN s) = %v, want 7", res2.Rows[0]["p"])
 	}
 }
@@ -272,9 +272,9 @@ func TestReplaceFunctionEngine(t *testing.T) {
 	if row["no_match"] != "abcabc" {
 		t.Errorf("no_match = %v, want abcabc (unchanged)", row["no_match"])
 	}
-	wantFloat := map[string]float64{"p": 3, "missing": 0}
-	for col, w := range wantFloat {
-		got, ok := row[col].(float64)
+	wantInt := map[string]int32{"p": 3, "missing": 0}
+	for col, w := range wantInt {
+		got, ok := row[col].(int32)
 		if !ok || got != w {
 			t.Errorf("%s = %v (%T), want %v", col, row[col], row[col], w)
 		}

@@ -196,6 +196,8 @@ func TestLengthFamilyOverStringColumn(t *testing.T) {
 		switch v := row[col].(type) {
 		case int64:
 			got = v
+		case int32:
+			got = int64(v)
 		case float64:
 			got = int64(v)
 		default:

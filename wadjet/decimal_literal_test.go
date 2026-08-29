@@ -718,10 +718,9 @@ func TestDecimalLiteralRefusalIsPlanTime(t *testing.T) {
 			"SELECT COUNT(*) AS n FROM declit WHERE GREATEST(d_2, '0.00') = '0.00'",
 			// Exponent form is a number too (ADR-0012 item 6).
 			"SELECT COUNT(*) AS n FROM declit WHERE d_2 = '1e400'",
-			// A non-numeric literal against a NON-DECIMAL column is an
-			// ordinary comparison, not a refusal.
-			"SELECT COUNT(*) AS n FROM declit WHERE k = 'abc'",
-			// And a literal on its own, with no DECIMAL column in sight.
+			// A literal on its own, with no DECIMAL column in sight.
+			// (A non-numeric literal vs a NON-DECIMAL integer column is now
+			// correctly refused 22P02 by #536 — see filter_int_literal_guard_test.go.)
 			"SELECT COUNT(*) AS n FROM declit WHERE 'abc' = 'def'",
 		} {
 			if _, err := tmRun(ctx, db, sql); err != nil {

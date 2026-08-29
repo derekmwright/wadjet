@@ -28,7 +28,7 @@ func TestGenericStringFuncsRenderNetworkColumnArgumentsAsText(t *testing.T) {
 		want any
 	}{
 		// --- the two types that box as a raw int64 (the reported bug) ---
-		{"length(ipv4)", `SELECT length(c_ipv4) AS v FROM net_matrix WHERE id = 1`, float64(len("10.1.2.3"))},
+		{"length(ipv4)", `SELECT length(c_ipv4) AS v FROM net_matrix WHERE id = 1`, int32(len("10.1.2.3"))},
 		{"concat(ipv4, '!')", `SELECT concat(c_ipv4, '!') AS v FROM net_matrix WHERE id = 1`, "10.1.2.3!"},
 		{"upper(mac)", `SELECT upper(c_mac) AS v FROM net_matrix WHERE id = 1`, "AA:BB:CC:DD:EE:FF"},
 		{"lower(mac)", `SELECT lower(c_mac) AS v FROM net_matrix WHERE id = 1`, "aa:bb:cc:dd:ee:ff"},
@@ -42,10 +42,10 @@ func TestGenericStringFuncsRenderNetworkColumnArgumentsAsText(t *testing.T) {
 		// --- already-correct types, pinned so a future change can't break
 		// them while "fixing" IPv4/MAC (same regression-guard shape as
 		// network_typed_column_args_test.go) ---
-		{"length(ipv6) (guard)", `SELECT length(c_ipv6) AS v FROM net_matrix WHERE id = 1`, float64(len("2001:db8::1"))},
-		{"length(cidr) (guard)", `SELECT length(c_cidr) AS v FROM net_matrix WHERE id = 1`, float64(len("192.168.1.0/24"))},
-		{"length(port) (guard)", `SELECT length(c_port) AS v FROM net_matrix WHERE id = 1`, float64(len("443"))},
-		{"length(proto) (guard)", `SELECT length(c_proto) AS v FROM net_matrix WHERE id = 1`, float64(len("6"))},
+		{"length(ipv6) (guard)", `SELECT length(c_ipv6) AS v FROM net_matrix WHERE id = 1`, int32(len("2001:db8::1"))},
+		{"length(cidr) (guard)", `SELECT length(c_cidr) AS v FROM net_matrix WHERE id = 1`, int32(len("192.168.1.0/24"))},
+		{"length(port) (guard)", `SELECT length(c_port) AS v FROM net_matrix WHERE id = 1`, int32(len("443"))},
+		{"length(proto) (guard)", `SELECT length(c_proto) AS v FROM net_matrix WHERE id = 1`, int32(len("6"))},
 	}
 
 	for _, tc := range cases {
@@ -80,11 +80,11 @@ func TestGenericStringFuncsRenderNetworkColumnArgumentsAsTextVectorized(t *testi
 		t.Fatalf("query failed: %v", err)
 	}
 	want := []struct {
-		l float64
+		l int32
 		u string
 	}{
-		{float64(len("10.1.2.3")), "AA:BB:CC:DD:EE:FF"},
-		{float64(len("192.168.1.1")), "11:22:33:44:55:66"},
+		{int32(len("10.1.2.3")), "AA:BB:CC:DD:EE:FF"},
+		{int32(len("192.168.1.1")), "11:22:33:44:55:66"},
 	}
 	if len(res.Rows) != len(want) {
 		t.Fatalf("got %d rows, want %d", len(res.Rows), len(want))
