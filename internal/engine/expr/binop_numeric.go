@@ -23,8 +23,10 @@ import (
 // BinOpNumeric resolves its mode ONCE against the first batch, using the
 // operands' actual column types: all-plain-integer (Int64/Int32) columns
 // and integer literals → int64 arithmetic; anything else → exactly the
-// old float64 behavior. Int64 overflow wraps (Go semantics), the same
-// values the float path would have corrupted differently past 2^53.
+// old float64 behavior. Int64 overflow is a query ERROR — PostgreSQL's
+// `bigint out of range`, 22003 (#637) — never the wrapped number Go's
+// operators answer: a wrapped total is a different number wearing the right
+// type, and nothing downstream can see that it is wrong.
 //
 // Division over integer operands truncates toward zero — PostgreSQL
 // semantics (#369, ADR-0012; the original float-`/` pin followed DuckDB,
@@ -253,13 +255,16 @@ func (e *BinOpNumeric) intArith(b *batch.RecordBatch, row int) (int64, bool) {
 	if !rok {
 		return 0, false
 	}
+	// Checked: an integer result with no int64 is 22003, PostgreSQL's
+	// `bigint out of range`, and never the wrapped number this node's own
+	// doc comment used to promise (#637 — int_overflow.go).
 	switch e.opCode {
 	case arithAdd:
-		return lv + rv, true
+		return addInt64Checked(lv, rv), true
 	case arithSub:
-		return lv - rv, true
+		return subInt64Checked(lv, rv), true
 	case arithMul:
-		return lv * rv, true
+		return mulInt64Checked(lv, rv), true
 	case arithDiv:
 		// Integer division truncates toward zero (#369, PostgreSQL
 		// semantics per ADR-0012). A GENUINE zero divisor raises 22012 —
@@ -267,15 +272,9 @@ func (e *BinOpNumeric) intArith(b *batch.RecordBatch, row int) (int64, bool) {
 		// FatalEvalPanic channel (#347) carries the error from any depth,
 		// so "this layer has no error channel" stopped being true when
 		// that mechanism landed (#367 uses it for the literal 1/0).
-		if rv == 0 {
-			raiseDivisionByZero()
-		}
-		return lv / rv, true
+		return divInt64Checked(lv, rv), true
 	case arithMod:
-		if rv == 0 {
-			raiseDivisionByZero()
-		}
-		return lv % rv, true
+		return modInt64Checked(lv, rv), true
 	}
 	return 0, false
 }

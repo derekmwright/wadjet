@@ -210,6 +210,22 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 			return classifyOperand(v.Operand, b)
 		}
 		return boxUnknown, true
+	case *decimalScalarFn:
+		// abs/ceil/floor/round/trunc/sign/mod over a DECIMAL answer a DECIMAL
+		// and box as its text (#668). Over anything else they delegate to the
+		// float FuncCall, whose box is a real number.
+		if v.resolve(b) {
+			return boxDecimal, true
+		}
+		return boxUnknown, true
+	case *Cast:
+		// A cast that NAMES a (p,s) produces a DECIMAL and boxes as its text,
+		// so `WHERE CAST(x AS DECIMAL(10,2)) > 10` compares numerically
+		// rather than by the bytes of "12.75".
+		if castIsExactDecimal(v) {
+			return boxDecimal, true
+		}
+		return boxUnknown, true
 	}
 	return boxUnknown, true
 }

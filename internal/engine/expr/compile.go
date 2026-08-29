@@ -745,6 +745,20 @@ func isIntNative(e Expr) bool {
 		return false // column type unknown at compile time; use float64 path for safety
 	case *BinOpInt64:
 		return true
+	case *ColShapeLen:
+		// The offsets-shape length node: an integer by construction, and the
+		// node length()/octet_length()/bit_length() compile to over a bare
+		// column (shape_funcs.go).
+		return true
+	case *numericFuncCall:
+		// A function DECLARED integer makes the arithmetic over it integer
+		// arithmetic — `length(s) / 2` is 2 in PostgreSQL, not 2.5 (#636).
+		// The declaration is the compile-time shape compileBinOp was missing;
+		// only a FIXED one answers, because a polymorphic declaration mirrors
+		// an argument whose type no batch has resolved yet.
+		return DefaultRegistry.ReturnType(v.Name).Integer()
+	case *FuncCall:
+		return DefaultRegistry.ReturnType(v.Name).Integer()
 	default:
 		return false
 	}
@@ -834,6 +848,15 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 		if col, ok := args[0].(*ColRef); ok {
 			return &ColShapeLen{Col: col, Mul: mul, Fallback: fc}, nil
 		}
+	}
+	// The scalar math functions that answer in their argument's OWN domain —
+	// abs/ceil/floor/round/trunc/sign/mod — are exact over a DECIMAL, where
+	// the FuncCall reads the column's rendered TEXT through ToFloat64 and
+	// makes a round trip through a double before any rounding happens (#668).
+	// The node carries fc as its fallback and takes it for every argument
+	// that is not a DECIMAL, so semantics for the other types are unchanged.
+	if ds := newDecimalScalarFn(fc); ds != nil {
+		return ds, nil
 	}
 	// A function that always returns a number is wrapped so it satisfies
 	// Float64Expr/Int64Expr and binary operators over it take the typed path.

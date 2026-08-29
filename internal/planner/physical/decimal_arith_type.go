@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -31,25 +32,46 @@ import (
 // per batch.DecimalResultType. ok=false means this pair has no fixed-point
 // rule and the caller keeps FLOAT64.
 func binOpDecimalType(n *plansql.BinaryOp, decls colDecls) (expr.DeclType, bool) {
+	t, isDec, ok := binOpDecimalOperand(n, decls)
+	if !ok || !isDec {
+		// Not decimal arithmetic: either an operand has no exact form, or
+		// both are integers — PostgreSQL keeps integer arithmetic in
+		// integers, truncating division included (#636), and the int rule
+		// decides that one.
+		return expr.DeclType{}, false
+	}
+	return expr.DeclDecimal(t.Precision, t.Scale), true
+}
+
+// binOpDecimalOperand answers BOTH questions about an arithmetic node in one
+// walk: the fixed-point type it contributes, and whether that type is a
+// genuine DECIMAL.
+//
+// The two are computed together because a nested node is asked both, and
+// asking twice makes the walk quadratic in depth over a chain — the shape
+// TestNestedChoiceDeclarationIsLinearInDepth exists to catch one layer up.
+//
+// An all-integer node still CONTRIBUTES: `d * (i + 1)` is numeric in
+// PostgreSQL, and the integer arithmetic inside it brings the INT64 range at
+// scale 0, exactly as a bare integer column does. expr.BinOpNumeric answers
+// the same for its int mode, which is what keeps the two in step.
+func binOpDecimalOperand(n *plansql.BinaryOp, decls colDecls) (batch.DecimalType, bool, bool) {
 	if _, _, ok := batch.DecimalResultType(n.Op, 1, 0, 1, 0); !ok {
-		return expr.DeclType{}, false // not one of + - * / %
+		return batch.DecimalType{}, false, false // not one of + - * / %
 	}
 	lt, lDec, lok := decimalArithOperand(n.Left, decls)
 	rt, rDec, rok := decimalArithOperand(n.Right, decls)
 	if !lok || !rok {
-		return expr.DeclType{}, false
+		return batch.DecimalType{}, false, false
 	}
 	if !lDec && !rDec {
-		// Two integers. PostgreSQL keeps integer arithmetic in integers,
-		// truncating division included (#636), so this is not a decimal
-		// expression at all and the int rule above decides it.
-		return expr.DeclType{}, false
+		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 	}
 	p, s, ok := batch.DecimalResultType(n.Op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
 	if !ok {
-		return expr.DeclType{}, false
+		return batch.DecimalType{}, false, false
 	}
-	return expr.DeclDecimal(p, s), true
+	return batch.DecimalType{Precision: p, Scale: s}, true, true
 }
 
 // decimalArithOperand reports the fixed-point type an operand contributes, and
@@ -72,19 +94,7 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 		}
 		return decimalArithOperand(n.Inner, decls)
 	case *plansql.BinaryOp:
-		t, ok := binOpDecimalType(n, decls)
-		if ok {
-			return t.Dec(), true, true
-		}
-		// Nested INTEGER arithmetic still contributes: `d * (i + 1)` is
-		// numeric in PostgreSQL. It contributes the integer range at scale 0,
-		// the same as a bare integer column, and only when every leaf of it
-		// really is an integer — which is what expr.operandIsInt decides at
-		// runtime and intArithAllInt mirrors here.
-		if intArithAllInt(n, allIntColumns(decls), decls) {
-			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
-		}
-		return batch.DecimalType{}, false, false
+		return binOpDecimalOperand(n, decls)
 	case *plansql.ColRef:
 		if decls.isFieldPath(n) {
 			// A ROW FIELD PATH contributes its FIELD's declaration: `rw.d + 1`
@@ -114,6 +124,15 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 		}
 		return batch.DecimalType{}, false, false
+	case *plansql.FuncCallNode:
+		// A scalar math function over a DECIMAL answers a DECIMAL, so it can
+		// be an operand of exact arithmetic: `ROUND(d, 1) * 2` is numeric in
+		// PostgreSQL and exact here (#668).
+		t, ok := scalarFnDeclaredDecimal(n, decls)
+		if !ok {
+			return batch.DecimalType{}, false, false
+		}
+		return t.Dec(), true, true
 	case *plansql.CastNode:
 		// A CAST that NAMES a (p,s) produces an exact DECIMAL and can be an
 		// operand of exact arithmetic — `CAST(x AS DECIMAL(10,2)) * 2` is
@@ -140,6 +159,117 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 		return t, t.Scale > 0, true
 	}
 	return batch.DecimalType{}, false, false
+}
+
+// scalarFnDeclaredDecimal is the DECIMAL declaration of a scalar math function
+// that answers in its argument's OWN domain — abs/ceil/floor/round/trunc/sign
+// over a DECIMAL, and mod, which is the `%` operator spelled as a call
+// (ADR-0024 items 2 and 3, #668).
+//
+// PostgreSQL answers all seven in numeric. Wadjet declared every one of them
+// FLOAT64 and computed through ToFloat64 of the column's rendered text, so
+// ROUND over a DECIMAL made a round trip through a double before any rounding
+// happened. The transcendental functions (sqrt/exp/ln/log/power) stay float64
+// — a deliberate divergence of ADR-0012 item 9's class, recorded rather than
+// closed, because closing it means building an exact tower.
+//
+// round(x, n) and trunc(x, n) take their result SCALE from n, so n must be a
+// constant: a scale that changed per row is not a type. A non-constant second
+// argument declines here and the runtime node declines with it.
+func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, bool) {
+	if !expr.IsDecimalScalarFn(n.Name) || len(n.Args) < 1 {
+		return expr.DeclType{}, false
+	}
+	if isConstNumericLitNode(n.Args[0]) {
+		// A CONSTANT argument stays on the float path, mirroring
+		// expr.decimalScalarArg: `SELECT 1.5` declares FLOAT64 here, so
+		// `ROUND(0.5)` answering a DECIMAL would make a constant-folded
+		// expression change type depending on what wrapped it. Unary ± over a
+		// literal is a constant too — `ROUND(-0.5)` parses as a UnaryOp and
+		// `ROUND(0.5)` as a Lit, and covering only one of them made the two
+		// halves of one query disagree about their own type.
+		return expr.DeclType{}, false
+	}
+	in, isDec, ok := decimalArithOperand(n.Args[0], decls)
+	if !ok || !isDec {
+		return expr.DeclType{}, false
+	}
+	if strings.EqualFold(strings.TrimSpace(n.Name), "mod") {
+		if len(n.Args) != 2 {
+			return expr.DeclType{}, false
+		}
+		r, _, ok := decimalArithOperand(n.Args[1], decls)
+		if !ok {
+			return expr.DeclType{}, false
+		}
+		p, s, ok := batch.DecimalResultType("%", in.Precision, in.Scale, r.Precision, r.Scale)
+		if !ok {
+			return expr.DeclType{}, false
+		}
+		return expr.DeclDecimal(p, s), true
+	}
+	op, ok := expr.DecimalScalarFnOp(n.Name)
+	if !ok || len(n.Args) > 2 {
+		return expr.DeclType{}, false
+	}
+	digits := 0
+	if len(n.Args) == 2 {
+		if op != batch.DecimalScalarRound && op != batch.DecimalScalarTrunc {
+			return expr.DeclType{}, false
+		}
+		if digits, ok = constIntArg(n.Args[1]); !ok {
+			return expr.DeclType{}, false
+		}
+	}
+	out, ok := batch.DecimalScalarType(op, in, digits)
+	if !ok {
+		return expr.DeclType{}, false
+	}
+	return expr.DeclDecimal(out.Precision, out.Scale), true
+}
+
+// isConstNumericLitNode reports whether an AST node is a numeric CONSTANT — a
+// literal, or unary ± over one. expr.isConstNumericLit makes the same test one
+// layer down, over the compiled node.
+func isConstNumericLitNode(node plansql.Node) bool {
+	switch n := node.(type) {
+	case *plansql.Lit:
+		return true
+	case *plansql.UnaryOp:
+		return (n.Op == "-" || n.Op == "+") && isConstNumericLitNode(n.Inner)
+	case *plansql.ParenNode:
+		return isConstNumericLitNode(n.Inner)
+	}
+	return false
+}
+
+// constIntArg reads a compile-time integer literal, the only shape a result
+// SCALE may be named by. expr.constIntOperand makes the same test one layer
+// down, over the compiled node.
+func constIntArg(node plansql.Node) (int, bool) {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return constIntArg(n.Inner)
+	case *plansql.UnaryOp:
+		v, ok := constIntArg(n.Inner)
+		if !ok {
+			return 0, false
+		}
+		if n.Op == "-" {
+			return -v, true
+		}
+		return v, n.Op == "+"
+	case *plansql.Lit:
+		if n.Kind != plansql.LitNumber {
+			return 0, false
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(n.Value))
+		if err != nil {
+			return 0, false
+		}
+		return v, true
+	}
+	return 0, false
 }
 
 // castDeclaredDecimal is a CAST's DECIMAL declaration — ADR-0024 item 3's
@@ -187,24 +317,6 @@ func decimalTypeOfColumn(c parquet.Column) (batch.DecimalType, bool, bool) {
 		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 	}
 	return batch.DecimalType{}, false, false
-}
-
-// allIntColumns is the strictly-int column set intArithAllInt asks for, built
-// from the declarations this layer holds. The caller's own strictInt map is
-// derived from a scan's statistics and is not available at every site that
-// needs to type an operand, so the declarations answer instead: a column
-// DECLARED INT32/INT64 is integer whatever its values are.
-func allIntColumns(decls colDecls) map[string]bool {
-	if len(decls.types) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(decls.types))
-	for name, t := range decls.types {
-		if t == parquet.TypeInt32 || t == parquet.TypeInt64 {
-			out[strings.ToLower(name)] = true
-		}
-	}
-	return out
 }
 
 // decimalArithOperandDecided reports whether an operand has an exact

@@ -1251,6 +1251,155 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalColTripleGreatestValue", exactNumeric: true,
 			sql: `SELECT d_key, GREATEST(d_2, d_4, d_wide) AS g, LEAST(d_2, d_4, d_wide) AS l ` +
 				`FROM dec_probe ORDER BY d_key`},
+		// --- Exact DECIMAL ARITHMETIC (ADR-0024 item 3, #555) --------------
+		//
+		// One entry per rule in item 3's table, over each pair of the
+		// fixture's three widths, compared DIGIT FOR DIGIT. Before this the
+		// declaration was FLOAT64 and the execution float64: `d_2 - d_4`
+		// answered -9.999999999976694e-05 for a difference that is exactly 0,
+		// and both sides of a float-rendered comparison agreed about the
+		// first six significant digits — the agreement #455 had while
+		// MAX(numeric(38,10)) was returning 9.777777778877776e+14.
+		//
+		// DIVISION is compared as a value only where the quotient
+		// TERMINATES. PostgreSQL picks a result scale from the magnitude
+		// (at least 16 significant digits) and wadjet from the input types,
+		// so a repeating quotient keeps a different number of digits on each
+		// side — item 3's recorded divergence, and one no exact comparison
+		// can express. The fixture's d_2 values are multiples of 0.25, so
+		// dividing by a power of two terminates in both engines.
+		pgCase{name: "DecimalAddAcrossScales", exactNumeric: true,
+			sql: `SELECT d_key, d_2 + d_4 AS s FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalSubAcrossScales", exactNumeric: true,
+			sql: `SELECT d_key, d_2 - d_4 AS s FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalMulAcrossScales", exactNumeric: true,
+			sql: `SELECT d_key, d_2 * d_4 AS p FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalModAcrossScales", exactNumeric: true,
+			sql: `SELECT d_key, d_4 % d_2 AS m FROM dec_probe WHERE d_2 <> 0 ORDER BY d_key`},
+		pgCase{name: "DecimalDivTerminating", exactNumeric: true,
+			sql: `SELECT d_key, d_2 / 4 AS q FROM dec_probe ORDER BY d_key`},
+		// The WIDE arm, whose values need more than 64 bits: a truncation
+		// cannot hide inside a right answer here.
+		//
+		// Arithmetic over a DECIMAL(38,10) ALWAYS meets item 3's adjustment —
+		// any rule over it wants more than 38 digits — so wadjet keeps fewer
+		// fraction digits than PostgreSQL's unbounded numeric: `d_wide + d_4`
+		// is DECIMAL(38,9) here and scale 10 there. That is the documented
+		// divergence in the NUMBER of digits kept, so both sides are rounded
+		// to a scale they BOTH keep before comparing. What is being asserted
+		// is then the whole point: the digits they do keep are identical, and
+		// the 128-bit carrier did the arithmetic exactly.
+		pgCase{name: "WideDecimalAdd", exactNumeric: true,
+			sql: `SELECT d_key, round(d_wide + d_4, 9) AS s, round(d_wide - d_2, 9) AS d ` +
+				`FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WideDecimalMulNarrow", exactNumeric: true,
+			sql: `SELECT d_key, round(d_wide * d_2, 6) AS p FROM dec_probe ORDER BY d_key`},
+		// (38,10) x (38,10) is item 3's ADJUSTMENT case: p = 77 wants 57
+		// integer digits, so the scale falls to its floor min(20,6) = 6 and
+		// the precision to 38. PostgreSQL's numeric is unbounded and keeps
+		// all 20 fraction digits, so this is compared as a ROW COUNT — the
+		// documented divergence in the number of digits kept.
+		pgCase{name: "WideDecimalSquaredRowCount",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide * d_wide >= 0`},
+		// An INTEGER operand joins as its whole range at scale 0, and a
+		// numeric LITERAL as its spelling — so `d_2 * 2` keeps scale 2 and
+		// `d_2 + 0.005` gains one.
+		pgCase{name: "DecimalTimesIntegerColumn", exactNumeric: true,
+			sql: `SELECT d_key, d_2 * d_key AS p, d_4 + d_grp AS s FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalTimesLiteral", exactNumeric: true,
+			sql: `SELECT d_key, d_2 * 2 AS p, d_2 + 0.005 AS s, 100 - d_2 AS r FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalUnaryMinus", exactNumeric: true,
+			sql: `SELECT d_key, -d_2 AS n, -d_4 + d_2 AS m FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalNestedArithmetic", exactNumeric: true,
+			sql: `SELECT d_key, (d_2 + d_4) * d_2 AS v FROM dec_probe ORDER BY d_key`},
+		// Arithmetic INSIDE an aggregate: the AggSpec's input (p,s) is the
+		// EXPRESSION's, not a bare column's, which is what makes SUM exact
+		// here (ADR-0012 item 9).
+		pgCase{name: "DecimalArithmeticInsideAggregate", exactNumeric: true,
+			sql: `SELECT SUM(d_2 * d_4) AS s, MIN(d_2 - d_4) AS lo, MAX(d_2 + d_4) AS hi FROM dec_probe`},
+		pgCase{name: "DecimalArithmeticGrouped", exactNumeric: true,
+			sql: `SELECT d_grp, SUM(d_2 * 2) AS s FROM dec_probe GROUP BY d_grp ORDER BY d_grp`},
+		// Arithmetic in a GROUP BY key, an ORDER BY and a WHERE: the sites a
+		// computed DECIMAL has to survive a stage boundary as a KEY.
+		pgCase{name: "DecimalArithmeticGroupKey",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 * 2 AS g FROM dec_probe GROUP BY d_2 * 2) t`},
+		pgCase{name: "DecimalArithmeticOrderBy",
+			sql: `SELECT d_key FROM dec_probe ORDER BY d_2 * d_4, d_key`},
+		pgCase{name: "DecimalArithmeticFilter",
+			sql: `SELECT d_key FROM dec_probe WHERE d_2 * 2 > 10 ORDER BY d_key`},
+		pgCase{name: "DecimalArithmeticInChoice", exactNumeric: true,
+			sql: `SELECT d_key, COALESCE(d_2 * 2, d_4) AS c, ` +
+				`CASE WHEN d_key < 5 THEN d_2 + d_4 ELSE d_4 END AS w FROM dec_probe ORDER BY d_key`},
+
+		// --- CAST to and from DECIMAL (ADR-0024 item 3, #555) --------------
+		//
+		// A parameterized destination used to match no case label in the
+		// evaluator's switch and fell to `default: return v`, so the value
+		// passed through with the (p,s) IGNORED — no rounding, no rescale.
+		pgCase{name: "DecimalCastNarrowing", exactNumeric: true,
+			sql: `SELECT d_key, CAST(d_4 AS numeric(9,2)) AS c FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalCastWidening", exactNumeric: true,
+			sql: `SELECT d_key, CAST(d_2 AS numeric(18,6)) AS c FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalCastFromInteger", exactNumeric: true,
+			sql: `SELECT d_key, CAST(d_key AS numeric(10,2)) AS c, CAST(d_grp AS numeric(6,3)) AS g ` +
+				`FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalCastBare", exactNumeric: true,
+			sql: `SELECT d_key, CAST(d_2 AS numeric) AS c, CAST(d_key AS numeric) AS k FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalCastWide", exactNumeric: true,
+			sql: `SELECT d_key, CAST(d_wide AS numeric(38,4)) AS c FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalCastInArithmetic", exactNumeric: true,
+			sql: `SELECT d_key, CAST(d_4 AS numeric(9,2)) * 2 AS c FROM dec_probe ORDER BY d_key`},
+		// numeric -> integer ROUNDS half away from zero (#373), and the wide
+		// column is past a double entirely, so a float-mediated conversion is
+		// visible as a wrong integer.
+		pgCase{name: "DecimalCastToInteger",
+			sql: `SELECT d_key, CAST(d_2 AS bigint) AS b FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WideDecimalCastToInteger",
+			sql: `SELECT d_key, CAST(d_wide AS bigint) AS b FROM dec_probe WHERE d_wide IS NOT NULL ` +
+				`AND abs(d_wide) < 9000000000000000 ORDER BY d_key`},
+		pgCase{name: "DecimalCastToText",
+			sql: `SELECT d_key, CAST(d_2 AS text) AS t FROM dec_probe ORDER BY d_key`},
+
+		// --- Scalar math over DECIMAL (ADR-0024 items 2 and 3, #668) -------
+		//
+		// PostgreSQL answers all of these in numeric. Wadjet declared every
+		// one RetFloat64 and computed through ToFloat64 of the column's
+		// rendered TEXT, so the value made a round trip through a double
+		// before any rounding happened.
+		pgCase{name: "DecimalRound", exactNumeric: true,
+			sql: `SELECT d_key, round(d_2, 1) AS r1, round(d_4, 2) AS r2, round(d_2) AS r0 ` +
+				`FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalRoundNegativeDigits", exactNumeric: true,
+			sql: `SELECT d_key, round(d_2, -1) AS r FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalTrunc", exactNumeric: true,
+			sql: `SELECT d_key, trunc(d_2, 1) AS t1, trunc(d_4) AS t0 FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalAbsCeilFloorSign", exactNumeric: true,
+			sql: `SELECT d_key, abs(d_2) AS a, ceil(d_2) AS c, floor(d_2) AS f, sign(d_2) AS s ` +
+				`FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalMod", exactNumeric: true,
+			sql: `SELECT d_key, mod(d_2, 3) AS m FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WideDecimalRoundAndAbs", exactNumeric: true,
+			sql: `SELECT d_key, round(d_wide, 4) AS r, abs(d_wide) AS a, trunc(d_wide, 2) AS t ` +
+				`FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalScalarFnInArithmetic", exactNumeric: true,
+			sql: `SELECT d_key, round(d_2, 1) * 2 AS v, abs(d_4) + d_2 AS w FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalScalarFnInAggregate", exactNumeric: true,
+			sql: `SELECT SUM(round(d_2, 1)) AS s, MAX(abs(d_4)) AS m FROM dec_probe`},
+
+		// --- Integer division TRUNCATES, function operands included (#636) --
+		//
+		// compileBinOp chose the arithmetic node from the operands'
+		// COMPILE-TIME shape, and a function call had none, so
+		// `length(s) / 2` compiled to float division and answered 2.5 where
+		// PostgreSQL answers 2.
+		pgCase{name: "IntegerDivisionOverFunctionResult",
+			sql: `SELECT n_nationkey, length(n_name) / 2 AS h, octet_length(n_name) / 3 AS t, ` +
+				`length(n_name) % 2 AS m FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "IntegerDivisionNested",
+			sql: `SELECT n_nationkey, (length(n_name) + 1) / 2 AS h FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "IntegerColumnDivision",
+			sql: `SELECT n_nationkey, n_nationkey / 2 AS h, n_nationkey % 3 AS m FROM nation ORDER BY n_nationkey`},
+
 		// One side a DECIMAL and the other an INT64 column, at the same three
 		// sites: the pair #476 fixed for the direct comparison, which these
 		// sites answered by SNIFFING the box until #504 bound it from the

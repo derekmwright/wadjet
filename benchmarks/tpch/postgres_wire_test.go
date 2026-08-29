@@ -1186,6 +1186,20 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "SyntaxError", sql: `SELECT FROM WHERE`},
 		{name: "DivisionByZero", sql: `SELECT 1/0`},
 		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`},
+		// ADR-0024 item 4 at the DECIMAL arithmetic and CAST sites: a value
+		// with no carrier at its declared type is 22003 and a zero divisor is
+		// 22012, and the two must stay APART — a caller that branched on "did
+		// it produce a value" would report a numeric overflow for `x / 0`.
+		// All three used to answer a number: the arithmetic in float64, the
+		// cast by passing its operand through untouched (#555, #668).
+		{name: "DecimalDivisionByZero", sql: `SELECT d_2 / 0 FROM dec_probe`},
+		{name: "DecimalModuloByZero", sql: `SELECT d_2 % 0 FROM dec_probe`},
+		{name: "DecimalCastPastPrecision", sql: `SELECT CAST(d_2 AS numeric(3,2)) FROM dec_probe`},
+		{name: "DecimalCastFromNonNumericText", sql: `SELECT CAST('abc' AS numeric(9,2))`},
+		// An integer result with no int64 (#637). PostgreSQL refuses it as
+		// `bigint out of range`; wadjet WRAPPED, which is a different number
+		// wearing the right type.
+		{name: "BigintOutOfRange", sql: `SELECT 9223372036854775807 + n_nationkey FROM nation`},
 		// A constant that is not a number, reaching a DECIMAL column. Both
 		// engines must REFUSE it: wadjet used to read it as the value zero and
 		// answer the rows holding zero (#463), which is worse than a wrong

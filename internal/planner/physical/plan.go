@@ -8728,6 +8728,13 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls
 			return f.Type == parquet.TypeInt64 || f.Type == parquet.TypeInt32
 		}
 		return false
+	case *plansql.FuncCallNode:
+		// A function DECLARED integer makes the arithmetic over it integer
+		// arithmetic: `length(s) / 2` is 2 in PostgreSQL, not 2.5 (#636).
+		// expr.isIntNative reads the same declaration off the same registry,
+		// which is what keeps this a strict mirror of the runtime rather than
+		// a second hand-maintained name list drifting away from it.
+		return expr.FuncReturnsInteger(n.Name)
 	case *plansql.Lit:
 		if n.Kind != plansql.LitNumber {
 			return false
@@ -9477,6 +9484,12 @@ func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (expr.DeclType, expr.
 // which is the whole of #331, where coalesce took a nested nullif's numeric
 // fallback for fact and never asked the string literal beside it.
 func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, expr.Confidence) {
+	// The scalar math functions that answer in their argument's OWN domain
+	// take their type from that argument, which the registry's fixed
+	// RetFloat64 declaration cannot express (ADR-0024 items 2 and 3, #668).
+	if t, ok := scalarFnDeclaredDecimal(n, decls); ok {
+		return t, expr.Decided
+	}
 	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (expr.DeclType, expr.Confidence) {
 		return nodeDeclaredType(n.Args[i], decls)
 	})

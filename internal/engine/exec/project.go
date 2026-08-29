@@ -129,6 +129,11 @@ type VecFloat64Expression func(b *batch.RecordBatch, dst []float64, n int) bool
 // More general than VecFloat64Expression — handles any output type (string, int, etc.).
 type VecExpression func(b *batch.RecordBatch, out *batch.Vector, n int)
 
+// VecDecimalExpression is VecExpression for an EXACT fixed-point result,
+// reporting whether it wrote the batch. See ProjectColumn.VecDecimalEval for
+// why the report is load-bearing.
+type VecDecimalExpression func(b *batch.RecordBatch, out *batch.Vector, n int) bool
+
 // ProjectColumn defines an output column of a projection.
 type ProjectColumn struct {
 	Name            string
@@ -160,7 +165,15 @@ type ProjectColumn struct {
 	// kernel writes DecimalData. Giving this its own field keeps that ordering
 	// intact for everything else while letting the one kernel that DOES write
 	// DecimalData skip the box.
-	VecDecimalEval VecExpression
+	//
+	// It returns whether it WROTE the batch. False means the exact mode does
+	// not apply to this batch after all — the planner declared DECIMAL from
+	// the AST and the runtime resolved the operands differently — and the
+	// caller must run the boxed checked writer instead. Returning nothing and
+	// writing nothing leaves the output vector's zeros standing, which reads
+	// back as the value 0 on every row: a silent wrong answer of exactly the
+	// class this work exists to close.
+	VecDecimalEval VecDecimalExpression
 	Dimension    int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
 	// Precision and Scale declare a COMPUTED DECIMAL output, the same way
 	// Dimension declares a computed VECTOR one: the output column does not
@@ -434,13 +447,14 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if srcIdx := p.directSrcIdx[j]; srcIdx >= 0 {
 				projectCopyColumn(col, in.Columns[srcIdx], in.Len)
 			} else if col.Type == parquet.TypeDecimal {
-				if proj.VecDecimalEval != nil {
-					// Exact fixed-point arithmetic writes carriers directly:
-					// no box to check, because nothing is converted (ADR-0024
-					// item 3). Its own errors — 22003 past the declared type,
-					// 22012 for a zero divisor — travel the per-row panic
-					// channel every other expression evaluator uses (#347).
-					proj.VecDecimalEval(in, col, in.Len)
+				// Exact fixed-point arithmetic writes carriers directly: no
+				// box to check, because nothing is converted (ADR-0024
+				// item 3). Its own errors — 22003 past the declared type,
+				// 22012 for a zero divisor — travel the per-row panic channel
+				// every other expression evaluator uses (#347). A false
+				// report means the exact mode did not apply to this batch,
+				// and the checked writer below answers instead.
+				if proj.VecDecimalEval != nil && proj.VecDecimalEval(in, col, in.Len) {
 					continue
 				}
 				// The checked writer, for the reason the selection-vector

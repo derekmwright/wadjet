@@ -423,3 +423,31 @@ func (r Ret) String() string {
 	}
 	return "UNDECLARED"
 }
+
+// Integer reports whether the function always returns an INTEGER — declared
+// RetInt32 or RetInt64 — which is what makes arithmetic over its result
+// integer arithmetic.
+//
+// PostgreSQL's `length(s) / 2` is integer division, so it is 2 for a
+// five-character string and not 2.5 (#636). compileBinOp could not see that:
+// it chose the arithmetic node from the operands' COMPILE-TIME shape and a
+// function call had none, so `length(s) / 2` compiled to BinOpFloat64. The
+// declaration is the shape it was missing — and reading it from the registry
+// rather than from a name list is what keeps a function added later from
+// silently answering a fraction.
+//
+// Only a FIXED declaration answers. A polymorphic one (RetSameAsArg) mirrors
+// an argument whose type is not known until a batch arrives, so claiming
+// integer for it at compile time would be a guess — and a WRONG int claim
+// truncates every value it touches.
+func (r Ret) Integer() bool {
+	return r.kind == retFixed && (r.typ == batch.TypeInt32 || r.typ == batch.TypeInt64)
+}
+
+// FuncReturnsInteger reports whether a registered function always returns an
+// integer, for the planner's declared-type layer. It is the AST-side twin of
+// isIntNative's registry lookup, so the DECLARED type of `length(s) / 2` is
+// the INT64 the runtime actually produces (#636).
+func FuncReturnsInteger(name string) bool {
+	return DefaultRegistry.ReturnType(name).Integer()
+}

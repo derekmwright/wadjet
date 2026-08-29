@@ -70,7 +70,13 @@ type decimalOperand interface {
 // interface lets the one kernel that does write it skip the box without
 // changing that ordering for anything else.
 type DecimalVecExpr interface {
-	EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n int)
+	// EvalDecimalVec writes the batch and reports whether it did. FALSE means
+	// the exact mode does not apply to this batch after all — the planner
+	// declared DECIMAL from the AST and the runtime resolved the operands
+	// differently — and the caller must fall back to the boxed checked
+	// writer. Writing nothing and saying nothing would leave the output
+	// vector's zeros standing, which reads back as the value 0 on every row.
+	EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n int) bool
 }
 
 // --- ColRef -----------------------------------------------------------------
@@ -339,6 +345,8 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 		// type is the operand's, resolved per value, so it is not a
 		// declaration this layer can compute an arithmetic result from.
 		return castIsExactDecimal(v)
+	case *decimalScalarFn:
+		return v.resolve(b)
 	}
 	return false
 }
@@ -348,10 +356,19 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 // that, which is the same nesting PostgreSQL's numeric does.
 func (e *BinOpNumeric) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
 	e.resolveMode(b)
-	if !e.isDec {
-		return batch.DecimalType{}, false
+	if e.isDec {
+		return e.dec.out, true
 	}
-	return e.dec.out, true
+	if e.isInt {
+		// An INT-mode node still contributes to a decimal result: `d * (i+1)`
+		// is numeric in PostgreSQL, and the integer arithmetic inside brings
+		// the INT64 range at scale 0, exactly as a bare integer column does
+		// (ADR-0024 item 2). Answering false here instead would have made the
+		// planner declare DECIMAL for that shape while the runtime computed
+		// it in float64 — the mismatch this whole layer exists to prevent.
+		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
+	}
+	return batch.DecimalType{}, false
 }
 
 func (e *BinOpNumeric) decimalVec(_ *batch.RecordBatch) (kernel.DecimalOperandVec, bool) {
@@ -364,6 +381,19 @@ func (e *BinOpNumeric) decimalVec(_ *batch.RecordBatch) (kernel.DecimalOperandVe
 // value has no place in the declared type (ADR-0024 item 4).
 func (e *BinOpNumeric) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
 	e.resolveMode(b)
+	if !e.isDec {
+		// Int mode: the value is an int64, which IS a DECIMAL(19,0) — see
+		// decimalType. Float mode answers nothing exact, and the caller's
+		// resolveDecimalMode has already declined for it.
+		if !e.isInt {
+			return batch.Int128{}, false
+		}
+		v, ok := e.intArith(b, row)
+		if !ok {
+			return batch.Int128{}, false
+		}
+		return batch.Int128From(v), true
+	}
 	lo, _ := e.Left.(decimalOperand)
 	ro, _ := e.Right.(decimalOperand)
 	lv, lok := lo.evalDecimal(b, row)
@@ -432,10 +462,10 @@ func (e *BinOpNumeric) evalDecimalText(b *batch.RecordBatch, row int) any {
 // colRefDecimalType takes — a wider bound can only ADMIT a value, never change
 // one — and the boxed path, which the stage DAG always takes, still applies
 // the declared bound in full.
-func (e *BinOpNumeric) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
+func (e *BinOpNumeric) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n int) bool {
 	e.resolveMode(b)
-	if !e.isDec || out == nil || out.Type != batch.TypeDecimal {
-		return
+	if !e.isDec || !decimalVecWritable(out, n) {
+		return false
 	}
 	outS := out.DecimalData.Scale
 	outP := e.dec.out.Precision
@@ -454,7 +484,7 @@ func (e *BinOpNumeric) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n
 		if !f.Fine() {
 			raiseDecimalStatus(f.Status, outP, outS)
 		}
-		return
+		return true
 	}
 	// One operand has no columnar form — an integer column, or nested
 	// arithmetic. Still unboxed: the values come out of evalDecimal and go
@@ -475,8 +505,17 @@ func (e *BinOpNumeric) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n
 			continue
 		}
 		v, _ := decApplyChecked(m, a, c)
+		out.Nulls.SetValid(i)
 		out.DecimalData.Data[i] = v
 	}
+	return true
+}
+
+// decimalVecWritable reports whether out is a DECIMAL vector this kernel can
+// write n rows into. A vector that is not one — or one whose carrier slice is
+// shorter than the batch — must be left to the boxed writer, which grows it.
+func decimalVecWritable(out *batch.Vector, n int) bool {
+	return out != nil && out.Type == batch.TypeDecimal && len(out.DecimalData.Data) >= n
 }
 
 // markColumnarNulls writes the output's nullity — the union of the operands'

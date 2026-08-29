@@ -1122,26 +1122,21 @@ func (e *BinOpInt64) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 		return 0, false
 	}
 	e.resolveOpCode()
+	// Checked: an integer result with no int64 is 22003, PostgreSQL's
+	// `bigint out of range`, and never the wrapped number Go's operators
+	// answer (#637 — int_overflow.go).
 	switch e.opCode {
 	case arithAdd:
-		return lv + rv, true
+		return addInt64Checked(lv, rv), true
 	case arithSub:
-		return lv - rv, true
+		return subInt64Checked(lv, rv), true
 	case arithMul:
-		return lv * rv, true
+		return mulInt64Checked(lv, rv), true
 	case arithDiv:
-		if rv == 0 {
-			// Operands are non-NULL here, so this is a genuine zero divisor.
-			// (compileBinOp keeps "/" off the integer node today; this raise
-			// is here so #369's integer division inherits it.)
-			raiseDivisionByZero()
-		}
-		return lv / rv, true
+		// Operands are non-NULL here, so a zero divisor is a genuine one.
+		return divInt64Checked(lv, rv), true
 	case arithMod:
-		if rv == 0 {
-			raiseDivisionByZero()
-		}
-		return lv % rv, true
+		return modInt64Checked(lv, rv), true
 	default:
 		return 0, false
 	}
