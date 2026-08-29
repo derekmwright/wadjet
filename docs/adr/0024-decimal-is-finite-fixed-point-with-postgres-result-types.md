@@ -261,6 +261,47 @@ writes rather than a second wide column it joins to, so it is more reachable
 than the shape this item was written for. `TestSetOpDecimalCapIsARangeReduction`
 pins the literal form beside the two-column one.
 
+### 8. A stored declaration with `Precision: 0` is the BARE `DECIMAL`, which is `DECIMAL(38, 0)` — a read-side default, not a refusal
+
+Added 2026-08-29 (#675), for the tables the pre-#647 HTTP and gRPC doors
+created. Those doors read only the TypeID out of the type text, so
+`DECIMAL(9,2)` was persisted into the manifest as `Precision: 0, Scale: 0`.
+#647 fixed the doors; it did not and could not fix the manifests already
+written, and `ALTER TABLE` has no `ALTER COLUMN TYPE` to migrate them with.
+
+**Those columns are read as `DECIMAL(38, 0)`.** That is not a new rule
+invented for the migration — it is the rule already in the code and already in
+the grammar, stated:
+
+- `ParseDecimalParams` defines a bare `DECIMAL` (no parameters) as `(38, 0)`,
+  so `Precision: 0` and "the user wrote `DECIMAL`" are the *same* stored
+  column; there is nothing in a manifest that distinguishes them.
+- `decimalEffectivePrecision` already maps a non-positive precision to 38
+  everywhere the writer annotates a leaf, so this is what those files have
+  always been written as.
+
+The consequence a reader should expect is scale, not range: a value assigned
+to such a column ROUNDS to zero fractional digits, exactly as PostgreSQL's
+`numeric(38,0)` does. `12.34` stores 12. That is correct behaviour for the
+declaration the manifest carries and the wrong behaviour for the declaration
+the operator *typed*, and no read-side rule can recover the second — the
+digits were discarded at write time, by the door, before the value reached
+storage.
+
+**A refusal was considered and rejected.** Making a `Precision: 0` column an
+error at read would take every table created through those doors offline,
+including tables whose columns really were declared bare, and would do it for
+data that is not corrupt: the stored unscaled integers are exactly what
+`DECIMAL(38,0)` means. ADR-0018's principle is that a value the engine cannot
+represent fails the WRITE; there is no such value here.
+
+**The remediation is a rewrite, and it is the operator's call**: create a table
+with the intended declaration and `INSERT INTO … SELECT` into it. Rounded
+fractional digits do not come back — the source table never held them — so this
+recovers the declaration, not the data. `TestLegacyPrecisionZeroDecimalReadsAsBareDecimal`
+(`internal/server`) pins the reading in both directions so it cannot drift into
+an accidental refusal or an accidental different scale.
+
 ## Consequences
 
 - One table of rules replaces five independently-derived ones (grouped

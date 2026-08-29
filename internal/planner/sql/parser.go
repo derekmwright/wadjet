@@ -762,6 +762,49 @@ func lexParseAnalyze(sql string, l *lexer) (*ParsedQuery, error) {
 
 // lexParseCreateTable handles: CREATE TABLE <name> (col1 TYPE [NOT NULL], ...) [PARTITION BY (col, ...)]
 // CREATE TABLE has already been consumed.
+// collectTypeParams consumes one balanced parenthesised type-parameter list
+// and returns its text, parentheses included, in the compact spelling
+// parquet.ResolveColumn reads: `(9,2)`, `(384)`, `(DECIMAL(9,2))`,
+// `(a INT64, d DECIMAL(9,2))`.
+//
+// It does not judge what is inside. Which parameters a type takes, and what
+// they mean, is parquet's grammar (ParseDecimalParams, parseVectorDim,
+// parseRowFields), and duplicating a second opinion here is what let the
+// DECIMAL parameters be read at one door and dropped at two others (#647).
+// The lexer already tokenised the text, so the only structure this needs is
+// the matching ')'.
+func collectTypeParams(l *lexer) (string, error) {
+	var b strings.Builder
+	depth := 0
+	prev := TokenError
+	for {
+		tok := l.nextToken()
+		switch tok.typ {
+		case TokenEOF, TokenError:
+			return "", fmt.Errorf("unterminated type parameters")
+		case TokenLParen:
+			depth++
+		case TokenRParen:
+			depth--
+		}
+		// A space separates two WORDS and nothing else, so `DECIMAL(9,2)`
+		// comes out byte-identical to what the old two-number reader
+		// produced — nothing that reads a ColumnDef.Type sees a change —
+		// while `ROW(a INT64,d DECIMAL(9,2))` keeps each field name apart
+		// from its type. Whitespace around a comma is not significant to any
+		// of parquet's parameter readers; all of them trim.
+		if b.Len() > 0 && tok.typ != TokenRParen && tok.typ != TokenComma &&
+			tok.typ != TokenLParen && prev != TokenLParen && prev != TokenComma {
+			b.WriteByte(' ')
+		}
+		b.WriteString(tok.val)
+		prev = tok.typ
+		if depth == 0 {
+			return b.String(), nil
+		}
+	}
+}
+
 func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 	// Table name
 	nameTok := l.nextToken()
@@ -804,34 +847,32 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 			return nil, fmt.Errorf("CREATE TABLE: expected column name, got %q", colNameTok.val)
 		}
 
-		// Column type
+		// Column type. ROW is a keyword elsewhere in the grammar (window
+		// frames), so it arrives as TokenKWRow rather than TokenIdent and was
+		// rejected outright as a column type.
 		colTypeTok := l.nextToken()
-		if colTypeTok.typ != TokenIdent {
+		if colTypeTok.typ != TokenIdent && colTypeTok.typ != TokenKWRow {
 			return nil, fmt.Errorf("CREATE TABLE: expected type for column %q, got %q", colNameTok.val, colTypeTok.val)
 		}
 
 		typeName := colTypeTok.val
-		// Optional type precision: DECIMAL(10,2), VARCHAR(255)
+		// Optional type parameters: DECIMAL(10,2), VECTOR(384),
+		// ARRAY(DECIMAL(9,2)), ROW(a INT64, d DECIMAL(9,2)),
+		// MAP(STRING, INT64).
+		//
+		// This used to accept ONE number and optionally a second, so DECIMAL
+		// and VECTOR were the only parameterized types a SQL declaration could
+		// spell at all — ARRAY, ROW and MAP were syntax errors here, which is
+		// why the schema-side defect that dropped their parameters (#675) was
+		// invisible from this door. parquet.ResolveColumn owns the type
+		// grammar; this collects the balanced text and hands it over, so the
+		// accept-set is decided in one place rather than two.
 		if l.peekToken().typ == TokenLParen {
-			l.nextToken() // consume (
-			precTok := l.nextToken()
-			if precTok.typ != TokenNumber {
-				return nil, fmt.Errorf("CREATE TABLE: expected precision in %s()", typeName)
+			params, err := collectTypeParams(l)
+			if err != nil {
+				return nil, fmt.Errorf("CREATE TABLE: column %q type %s: %w", colNameTok.val, typeName, err)
 			}
-			typeName += "(" + precTok.val
-			if l.peekToken().typ == TokenComma {
-				l.nextToken() // consume ,
-				scaleTok := l.nextToken()
-				if scaleTok.typ != TokenNumber {
-					return nil, fmt.Errorf("CREATE TABLE: expected scale in %s(n,)", typeName)
-				}
-				typeName += "," + scaleTok.val
-			}
-			rp := l.nextToken()
-			if rp.typ != TokenRParen {
-				return nil, fmt.Errorf("CREATE TABLE: expected ) after type precision")
-			}
-			typeName += ")"
+			typeName += params
 		}
 
 		col := ColumnDef{

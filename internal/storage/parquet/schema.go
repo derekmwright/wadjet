@@ -230,26 +230,30 @@ func ParseDecimalParams(s string) (precision, scale int, err error) {
 // 12, 9999999.999 stored as 10000000 with no error, and DECIMAL(50,2)
 // accepted (#647 review). Copies of a declaration parser drift toward the
 // laziest one; there is now one to drift from.
+// It resolves EVERY parameterized type, not only DECIMAL's (p, s). The first
+// version read the decimal parameters and nothing else, so `VECTOR(384)`
+// created a column with `Dimension: 0` — a table no INSERT could ever write,
+// failing at flush with an internal error and no SQLSTATE — and
+// `ARRAY(DECIMAL(9,2))`, `ROW(a INT64, d DECIMAL(9,2))` and
+// `MAP(STRING, DECIMAL(9,2))` lost their element, field and key/value
+// declarations entirely (#675). ResolveColumn already knew how to read all of
+// them and had no non-test caller; this is that caller.
 func DeclaredColumn(name, typeStr string, nullable bool) (Column, error) {
-	typeID, err := ParseTypeID(typeStr)
+	col, err := ResolveColumn(strings.ToLower(name), typeStr)
 	if err != nil {
 		return Column{}, err
 	}
-	col := Column{Name: strings.ToLower(name), Type: typeID, Nullable: nullable}
-	if typeID == TypeDecimal {
-		p, sc, err := ParseDecimalParams(typeStr)
-		if err != nil {
-			return Column{}, err
-		}
-		col.Precision, col.Scale = p, sc
-	}
+	// ResolveColumn answers for a nested field, where parquet's repetition is
+	// optional by default; only the TOP-level declaration carries a NOT NULL.
+	col.Nullable = nullable
 	return col, nil
 }
 
 // ResolveColumn parses a type string into a fully-resolved Column with nested types.
 // Handles: "INT64", "ARRAY(STRING)", "ROW(name STRING, age INT32)", "MAP(STRING, INT64)".
 func ResolveColumn(name, typeStr string) (Column, error) {
-	upper := strings.ToUpper(strings.TrimSpace(typeStr))
+	trimmed := strings.TrimSpace(typeStr)
+	upper := strings.ToUpper(trimmed)
 
 	// Check for parameterized nested types
 	if idx := strings.Index(upper, "("); idx >= 0 {
@@ -259,7 +263,12 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 		if end < 0 {
 			return Column{}, fmt.Errorf("unmatched parenthesis in type: %s", typeStr)
 		}
-		inner := strings.TrimSpace(upper[idx+1 : end])
+		// The ORIGINAL spelling, not the upper-cased copy: a ROW's inner text
+		// carries FIELD NAMES, and slicing the upper-cased string renamed
+		// every one of them (`ROW(a INT64)` declared a field called "A" while
+		// every other door lower-cases). The base type above is decided from
+		// the upper-cased copy, which is where case does not matter.
+		inner := strings.TrimSpace(trimmed[idx+1 : end])
 
 		switch base {
 		case "ARRAY":
@@ -372,7 +381,11 @@ func parseRowFields(s string) ([]Column, error) {
 		if spaceIdx < 0 {
 			return nil, fmt.Errorf("ROW field must have name and type: %q", part)
 		}
-		fieldName := strings.TrimSpace(part[:spaceIdx])
+		// Lower-cased for the reason every other column name is: the schema
+		// is compared, projected and JSON-round-tripped by name, and a ROW
+		// declared through one door must be byte-identical to the same ROW
+		// declared through another (#675).
+		fieldName := strings.ToLower(strings.TrimSpace(part[:spaceIdx]))
 		fieldType := strings.TrimSpace(part[spaceIdx+1:])
 		col, err := ResolveColumn(fieldName, fieldType)
 		if err != nil {

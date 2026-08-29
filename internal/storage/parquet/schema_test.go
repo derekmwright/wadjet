@@ -278,6 +278,13 @@ func TestResolveColumn_MapWrongArity(t *testing.T) {
 	}
 }
 
+// The field NAMES come back lower-cased, like every other column name in the
+// system. They used to come back upper-cased — ResolveColumn sliced its inner
+// text out of an upper-cased copy of the whole type string — which was
+// invisible while the function had no non-test caller, and became a
+// cross-door schema divergence the moment DeclaredColumn started calling it
+// (#675). The declaration here is deliberately written in CAPITALS so the
+// lower-casing is what is being asserted.
 func TestResolveColumn_Row(t *testing.T) {
 	col, err := ResolveColumn("addr", "ROW(CITY STRING, ZIP STRING)")
 	if err != nil {
@@ -289,11 +296,11 @@ func TestResolveColumn_Row(t *testing.T) {
 	if len(col.Fields) != 2 {
 		t.Fatalf("expected 2 fields, got %d", len(col.Fields))
 	}
-	if col.Fields[0].Name != "CITY" {
-		t.Fatalf("field[0].Name = %q, want %q", col.Fields[0].Name, "CITY")
+	if col.Fields[0].Name != "city" {
+		t.Fatalf("field[0].Name = %q, want %q", col.Fields[0].Name, "city")
 	}
-	if col.Fields[1].Name != "ZIP" {
-		t.Fatalf("field[1].Name = %q, want %q", col.Fields[1].Name, "ZIP")
+	if col.Fields[1].Name != "zip" {
+		t.Fatalf("field[1].Name = %q, want %q", col.Fields[1].Name, "zip")
 	}
 }
 
