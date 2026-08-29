@@ -990,3 +990,256 @@ func TestNullifOverAStringColumnStillComparesAsText(t *testing.T) {
 		}
 	}
 }
+
+// TestDecimalChoiceOverAnIntegerEXPRESSION is #695's review finding, and it is
+// the shape the first cut got wrong: the DECLARED side of the fold
+// (expr.declFixedPoint) takes any arm whose DeclType is INT32/INT64, while the
+// COMPILED side (expr.decimalChoiceArm) classified arms by NODE KIND and knew
+// only a constant, a bare column and exact arithmetic. A CAST to an integer
+// and a nested choice over integers are neither, so the runtime fold declined,
+// the integer box was never rendered as text, and it met the DECIMAL vector the
+// PLAN had already allocated: 22003 "integer value 7 reached a DECIMAL(scale 2)
+// column as a raw unscaled carrier" for a value PostgreSQL answers — on both
+// paths, and on the parent commit these queries answered.
+//
+// Two changes, and the second is the one that makes it stay fixed. The
+// classification learned the missing kinds (a CAST to an integer, a nested
+// choice, a registry function declared integer), and the STORE stopped
+// depending on the classification being complete: an integer box from an
+// EXPRESSION is a value at scale 0, never ADR-0018 §4's encoded carrier, so
+// batch.Vector.SetComputedChecked scales it instead of refusing it. A kind this
+// layer has not learned now costs a narrower declared TYPE, not the query.
+//
+// Values are PostgreSQL 17.11's over the same seven rows.
+func TestDecimalChoiceOverAnIntegerEXPRESSION(t *testing.T) {
+	db := ddrOpen(t)
+	intExpr := "CASE WHEN id = 99 THEN a ELSE CAST(id AS BIGINT) END"
+	for _, tc := range []struct {
+		name string
+		sql  string
+		col  string
+		want []string
+	}{
+		{"projection", "SELECT " + intExpr + " AS v FROM " + ddrTable + " WHERE id = 1",
+			"v", []string{"1.00"}},
+		{"a nested choice of integers",
+			"SELECT COALESCE(a, CASE WHEN id = 1 THEN 1 ELSE 2 END) AS v FROM " + ddrTable + " WHERE id = 6",
+			"v", []string{"2.00"}},
+		{"a CAST beside an empty aggregate",
+			"SELECT COALESCE(MAX(a), CAST(0 AS BIGINT)) AS v FROM " + ddrTable + " WHERE id < 0",
+			"v", []string{"0.00"}},
+		{"a nested choice beside an empty aggregate",
+			"SELECT COALESCE(SUM(a), CASE WHEN 1=1 THEN 0 ELSE 1 END) AS v FROM " + ddrTable + " WHERE id < 0",
+			"v", []string{"0.00"}},
+		{"greatest over a CAST", "SELECT GREATEST(a, CAST(id AS BIGINT)) AS v FROM " + ddrTable + " WHERE id = 1",
+			"v", []string{"12.75"}},
+		{"a GROUP BY key", "SELECT " + intExpr + " AS v FROM " + ddrTable + " GROUP BY 1 ORDER BY 1",
+			"v", []string{"1.00", "2.00", "3.00", "4.00", "5.00", "6.00", "7.00"}},
+		{"an ORDER BY key", "SELECT id FROM " + ddrTable + " ORDER BY " + intExpr + " LIMIT 2",
+			"id", []string{"1", "2"}},
+		{"an aggregate input", "SELECT MAX(" + intExpr + ") AS v FROM " + ddrTable,
+			"v", []string{"7.00"}},
+		{"a DISTINCT key", "SELECT DISTINCT " + intExpr + " AS v FROM " + ddrTable + " ORDER BY 1",
+			"v", []string{"1.00", "2.00", "3.00", "4.00", "5.00", "6.00", "7.00"}},
+		{"a window PARTITION key",
+			"SELECT COUNT(*) OVER (PARTITION BY " + intExpr + ") AS v FROM " + ddrTable + " WHERE id = 1",
+			"v", []string{"1"}},
+		{"a set-operation arm",
+			"SELECT " + intExpr + " AS v FROM " + ddrTable + " WHERE id = 1" +
+				" UNION ALL SELECT a FROM " + ddrTable + " WHERE id = 4",
+			"v", []string{"1.00", "2.00"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			var got []string
+			for _, r := range res.Rows {
+				got = append(got, fmt.Sprintf("%v", r[tc.col]))
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("%s\n  got  %v\n  want %v", tc.sql, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecimalChoiceOverAHighScaleColumn is the other half of the same review
+// finding, and it is why the p>38 ADJUSTMENT of ADR-0024 item 3 is NOT applied
+// to a choice.
+//
+// `GREATEST(numeric(38,30), bigint)` raised 22003 before: the integer arm's box
+// met the DECIMAL vector, exactly as above. The reduction rule would also have
+// "fixed" it — intDigits 19 at scale 30 is 49, and item 3 gives (38,19) — but
+// applying it to a CHOICE is unsound, because a choice's result IS a stored
+// value: over `GREATEST(numeric(38,0), numeric(11,10))` the same rule reduces
+// the scale to 6 and silently truncates the second column's 0.0000000001.
+// Item 7's reasoning governs a choice, not item 3's, so the type keeps its
+// scale and a value with no carrier is a per-value 22003 at the store — which
+// is what lets every value that FITS answer, PostgreSQL's answer included.
+func TestDecimalChoiceOverAHighScaleColumn(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test", SpillDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "w", Type: parquet.TypeDecimal, Precision: 38, Scale: 30, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "wscale", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester("wscale", schema, nil, ingest.Config{MaxBufferRows: 8})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"id": int64(5), "w": "1.5"},
+		{"id": int64(7), "w": "2.25"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A second table whose integer genuinely has NO carrier at scale 30:
+	// 10^9 restated there is 10^39, past the Int128. It is the row that makes
+	// this test able to fail — with item 3's adjustment the type would be
+	// (38,19), the value would fit, and the refusal below would disappear
+	// along with the truncation the adjustment causes elsewhere.
+	if err := db.CreateTable(ctx, "wscale2", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing2 := db.NewIngester("wscale2", schema, nil, ingest.Config{MaxBufferRows: 8})
+	if err := ing2.Ingest(ctx, []map[string]any{{"id": int64(1000000000), "w": "1.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing2.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		sql  string
+		want []string
+	}{
+		// PostgreSQL answers 5 and 7 — the bigint wins both rows.
+		{"SELECT GREATEST(w, id) AS v FROM wscale ORDER BY id",
+			[]string{"5.000000000000000000000000000000", "7.000000000000000000000000000000"}},
+		{"SELECT LEAST(w, id) AS v FROM wscale ORDER BY id",
+			[]string{"1.500000000000000000000000000000", "2.250000000000000000000000000000"}},
+	} {
+		res := ddrQuery(t, db, tc.sql)
+		if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Scale != 30 {
+			t.Errorf("%s declared %s(%d,%d), want DECIMAL scale 30 — the column's own scale, "+
+				"never reduced: a choice returns a STORED value", tc.sql, m.TypeID, m.Precision, m.Scale)
+		}
+		var got []string
+		for _, r := range res.Rows {
+			got = append(got, fmt.Sprintf("%v", r["v"]))
+		}
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%s\n  got  %v\n  want %v", tc.sql, got, tc.want)
+		}
+	}
+
+	// The value with no carrier at the declared scale is a LOUD per-value
+	// 22003, never a silently reduced scale. PostgreSQL answers 1000000000
+	// here; wadjet's 128-bit carrier cannot hold it at scale 30, and item 7's
+	// position is that the error is the honest answer.
+	_, err = db.Query(ctx, "SELECT GREATEST(w, id) AS v FROM wscale2")
+	if err == nil {
+		t.Error("a value with no Int128 at the declared scale was ANSWERED — if the " +
+			"(p,s) rule changed, check that it did not also truncate a stored value " +
+			"(TestDecimalChoiceExpressionRefusesAValueWithNoCarrier is the other half)")
+	} else if got := sqlerr.StateOf(err); got != "22003" {
+		t.Errorf("SQLSTATE = %q, want 22003 numeric_value_out_of_range: %v", got, err)
+	}
+}
+
+// TestNullifTypesOverBothArgumentsWhenOnlyTheSecondIsDecimal is the review's
+// P2: PostgreSQL resolves NULLIF's TYPE with select_common_type over BOTH
+// arguments while the TYPMOD comes from argument 0 alone, and wadjet folded
+// both questions over the typmod list. `NULLIF(0, numeric(9,2))` therefore
+// declared INT64 where PostgreSQL says numeric.
+//
+// The widening is deliberately narrow — it fires only when the candidate list's
+// answer is NOT a DECIMAL and another argument decided one. Folding every
+// argument would widen `NULLIF(a, b)` to (18,4) for a result that is always
+// a's value, which the corpus pins the other way, and would re-open the
+// Guessed/Decided contract of #331/#333.
+func TestNullifTypesOverBothArgumentsWhenOnlyTheSecondIsDecimal(t *testing.T) {
+	db := ddrOpen(t)
+	res := ddrQuery(t, db, "SELECT NULLIF(0, a) AS v FROM "+ddrTable+" WHERE id = 1")
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Precision != 9 || m.Scale != 2 {
+		t.Errorf("NULLIF(0, a) declared %s(%d,%d), want DECIMAL(9,2); PostgreSQL says numeric",
+			m.TypeID, m.Precision, m.Scale)
+	}
+	if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "0.00" {
+		t.Errorf("NULLIF(0, a) = %q, want 0.00", got)
+	}
+	// The control that must NOT move: over two DECIMALs the fold stays on
+	// argument 0 alone, so the output keeps a's own (9,2).
+	res = ddrQuery(t, db, "SELECT NULLIF(a, b) AS v FROM "+ddrTable+" WHERE id = 2")
+	if m := res.ColumnMetas[0]; m.Precision != 9 || m.Scale != 2 {
+		t.Errorf("NULLIF(a, b) declared (%d,%d), want (9,2) — the result is argument 0's value",
+			m.Precision, m.Scale)
+	}
+}
+
+// TestWideNumericLiteralInAChoiceStaysFloat corrects a record. #695's first
+// pass described the wide-literal deferral as "a FLOAT64 declaration and the
+// #361 store refusal", i.e. loud. It is not loud: the whole expression declares
+// FLOAT64 and ANSWERS a rounded double, so
+// `GREATEST(numeric(18,4), 493827160549382.7160549350)` comes back as
+// 4.938271605493827e+14 where PostgreSQL answers the literal exactly.
+//
+// The cause is the box: compileLit puts a float64 in it past a double's ~17
+// significant digits, and a choice hands over whatever box the winning arm
+// produced. Arithmetic is exact for the same literal because it reads Lit.Text
+// (ADR-0012 item 6). Closing it means giving the choice constructs an
+// exact-text path for a constant arm; until then the deferral is a SILENT loss
+// of digits, recorded here rather than described as something safer.
+// TODO(#555): this pin flips when the choice path reads the literal's text.
+func TestWideNumericLiteralInAChoiceStaysFloat(t *testing.T) {
+	db := ddrOpen(t)
+	res := ddrQuery(t, db,
+		"SELECT GREATEST(b, 493827160549382.7160549350) AS v FROM "+ddrTable+" WHERE id = 1")
+	m := res.ColumnMetas[0]
+	if m.TypeID == parquet.TypeDecimal {
+		t.Fatalf("GREATEST over a wide literal declared %s(%d,%d) — the exact-text path has "+
+			"landed, so delete this pin and assert 493827160549382.7160549350",
+			m.TypeID, m.Precision, m.Scale)
+	}
+	if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "4.938271605493827e+14" {
+		t.Errorf("value = %q, want the rounded double 4.938271605493827e+14 "+
+			"(PostgreSQL answers 493827160549382.7160549350)", got)
+	}
+}
+
+// TestCastTypmodIsUnconstrained pins #708, a divergence #695's review found in
+// the RECORD before it found it in the code: ADR-0024 item 5 listed a CAST
+// among the constructs that carry typmod -1, and PostgreSQL 17.11 does not.
+//
+// A cast to a PARAMETERIZED numeric imposes its destination's typmod on the
+// result — `a::numeric(9,2)` and `CAST(a AS numeric(18,4))` both describe with
+// their (p,s), and only a BARE `CAST(a AS numeric)` drops to plain numeric.
+// That is the cast's own modifier, not select_common_typmod over its inputs.
+// physical.declaredTypmod has no CAST arm and sends -1 for every spelling.
+//
+// It is NOT what #695 or #697 are about — neither touches a cast — so it is
+// pinned here rather than fixed in passing. The pin FAILS when the arm lands,
+// which is #708's proof.
+func TestCastTypmodIsUnconstrained(t *testing.T) {
+	db := ddrOpen(t)
+	for _, sql := range []string{
+		"SELECT CAST(a AS DECIMAL(9,2)) AS v FROM " + ddrTable + " WHERE id = 1",
+		"SELECT CAST(b AS DECIMAL(18,4)) AS v FROM " + ddrTable + " WHERE id = 1",
+	} {
+		res := ddrQuery(t, db, sql)
+		m := res.ColumnMetas[0]
+		if m.TypeID != parquet.TypeDecimal {
+			t.Fatalf("%s declared %s, want DECIMAL — the TYPE side already names the "+
+				"destination's (p,s)", sql, m.TypeID)
+		}
+		if !m.WireUnconstrained {
+			t.Errorf("%s now carries its typmod on the wire, which is what PostgreSQL does — "+
+				"#708 has landed, so delete this pin and add a wire-corpus entry", sql)
+		}
+	}
+}

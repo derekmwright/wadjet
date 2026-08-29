@@ -90,16 +90,62 @@ numeric literal declares — the deferral recorded under "a numeric literal is
 an EXACT operand of ARITHMETIC" below, which this record does not reopen. And
 it contributes only when the box `compileLit` built carries its spelling
 exactly, which is what leaves
-`GREATEST(d_wide, 493827160549382.7160549350)` where it was: past a double's
-~17 significant digits the box has already lost digits, and declaring DECIMAL
-for it would store a number nobody wrote on the rows the literal wins.
-Arithmetic is unaffected — it reads a literal through its TEXT, not the box.
+`GREATEST(d_wide, 493827160549382.7160549350)` where it was.
+
+**Where it was is a SILENT float, not a loud refusal, and the first draft of
+this paragraph said otherwise.** That expression declares FLOAT64 and ANSWERS
+`4.938271605493827e+14` where PostgreSQL answers the literal's digits: past a
+double's ~17 significant digits `compileLit`'s box has already lost them, and a
+choice hands over whatever box the winning arm produced. Arithmetic over the
+same literal is exact because it reads `Lit.Text` (ADR-0012 item 6); giving the
+choice constructs the same exact-text path is what would close it. Recorded as
+a silent loss of digits rather than described as something safer, and pinned by
+`wadjet.TestWideNumericLiteralInAChoiceStaysFloat`.
 
 A DECIMAL beside a FLOAT declares double precision, which is right, and still
 FAILS at the #361 store guard on the rows the decimal wins: the box is that
 branch's text and the vector is a float one. That is the float half of the
 same deferral, it is loud rather than wrong, and it is pinned by
 `wadjet.TestDecimalBesideAFloatStaysDoublePrecision` with `TODO(#555)`.
+
+**THE STORE, not the classification, is what makes the box rule hold.** The
+runtime fold classifies arms by NODE KIND, and the declared fold takes any arm
+whose `DeclType` is INT32/INT64 — so the two disagreed the moment an integer
+arm was neither a constant nor a bare column. A `CAST(i AS BIGINT)`, a nested
+choice of integers and a registry function declared integer all made the
+runtime decline while the plan had already allocated a DECIMAL vector, and the
+integer box then raised 22003 for eleven shapes PostgreSQL answers
+(projection, GROUP BY, ORDER BY, aggregate input, DISTINCT, window partition
+key, set-operation arm, and the choice-above-an-aggregate forms). The
+classification learned those kinds, but the rule that keeps it from mattering
+is the second one: `batch.Vector.SetComputedChecked` reads an INTEGER box from
+an EXPRESSION as a value at scale 0 and scales it, where
+`Vector.SetValueChecked` refuses one. The refusal is right for its own callers
+— a row→batch adapter's integer box IS §4's already-scaled carrier — and wrong
+for an expression, which has no such spelling: a DECIMAL column reference boxes
+rendered TEXT and so does exact arithmetic. A node kind this layer has not
+learned now costs a narrower declared TYPE, never the query.
+
+**Item 3's p>38 ADJUSTMENT does NOT apply to a choice**, and the reason is item
+7's. A choice's result IS one of its operands' stored values, so giving up
+fraction digits drops digits a row actually holds: over
+`GREATEST(numeric(38,0), numeric(11,10))` the adjustment reduces the scale from
+10 to 6 and silently truncates the second column's `0.0000000001`. The scale
+therefore stays where `DecimalCommon` puts it and the precision cap alone is
+the rule, with a value that has no carrier raising a per-value 22003 at the
+store rather than refusing the query at plan time — which is what lets
+`GREATEST(numeric(38,30), bigint)` answer for every value that fits, as
+PostgreSQL does. Arithmetic is where the adjustment belongs, because a computed
+scale is derived rather than carried.
+
+**NULLIF resolves its TYPE over both arguments and its TYPMOD over argument 0.**
+PostgreSQL runs `select_common_type` over the pair — they have to be comparable
+— while the result is argument 0's value. Folding both questions over the
+typmod list made `NULLIF(0, numeric(9,2))` an INT64 column. The widening here
+is narrow on purpose: it fires only when the candidate list's answer is not a
+DECIMAL and another argument decided one, because folding every argument would
+widen `NULLIF(a, b)` to the wider column's scale for a result that is always
+a's value, and would re-open the Guessed/Decided contract of #331/#333.
 
 **The AGGREGATE's input needed the same walk the SELECT list got in #529.**
 TPC-H Q08 is `SUM(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END)` over a
@@ -119,11 +165,15 @@ the batch its stage hands it, and that batch carries the SCAN's columns rather
 than the derived table's — so `SUM(CASE … THEN volume ELSE 0 END)` sums only
 its ELSE branch. Over an INTEGER derived column the DAG answers 0 where the
 single-process path answers 2, and a plain rename (`id AS idr`) is enough; no
-DECIMAL is involved and it predates this record. The DECIMAL arm is now LOUD
-rather than silent — the input's declared (p,s) reaches the worker and the
-checked store refuses the integer box with 22003 — and the whole family is
-pinned by `coordinator.TestAggregateOverADerivedColumnTwoPath`, each pin
-failing when the DAG starts agreeing.
+DECIMAL is involved and it predates this record. EVERY arm is a silent wrong
+number, DECIMAL included: the DECIMAL one was briefly loud, because the input's
+declared (p,s) reached the worker while the derived column did not and the
+ELSE branch's integer box met a DECIMAL vector, and that incidental 22003 went
+away once the store learned to read an integer box from an expression as a
+value at scale 0. Nothing about the defect changed; one symptom stopped being
+visible. Filed as #709 and pinned by
+`coordinator.TestAggregateOverADerivedColumnTwoPath`, each pin failing when
+the DAG starts agreeing.
 
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
@@ -230,8 +280,9 @@ typmod being imposed on the result, not `select_common_typmod`. Wadjet sends
 −1 for both spellings: `declaredTypmod` has no CAST arm. It is a divergence
 of the same client-visible kind as #587's — a JDBC client reads
 `getPrecision()` as 0 — and it is NOT covered by #697's fix, which is about
-resolving the columns below a join. Named here so the record does not read as
-a gate that exists.
+resolving the columns below a join. Filed as #708 and pinned by
+`wadjet.TestCastTypmodIsUnconstrained`, so the record does not read as a gate
+that exists.
 
 ### 6. NaN is a comparison literal, not a stored value
 

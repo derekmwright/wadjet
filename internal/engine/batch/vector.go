@@ -1908,3 +1908,53 @@ func (v *Vector) WriteNullAt(di int) {
 		}
 	}
 }
+
+// SetComputedChecked is SetValueChecked for a caller whose value came out of an
+// EXPRESSION rather than off a wire or a file.
+//
+// The two differ over exactly one box: an INTEGER. SetValueChecked refuses one
+// into a DECIMAL column because its callers are row→batch adapters, where an
+// integer box is the ALREADY-SCALED carrier of ADR-0018 §4 and storing it as a
+// value would divide it by 10^scale (#547/#541). An expression has no such
+// spelling: `expr.ColRef` over a DECIMAL column boxes the value's rendered
+// TEXT, exact arithmetic boxes text, and the only way an integer reaches a
+// DECIMAL output vector is as a genuine value at scale 0 — the integer branch
+// of a choice construct PostgreSQL types numeric (#695).
+//
+// So this sibling exists rather than a widening of SetValueChecked: the row
+// adapter keeps its refusal, and the expression sites (exec.Project,
+// physical.aggPreProject and expr.EvalDecimalInto) take this one. It is also
+// what makes the box rule DRIFT-PROOF. expr.decimalChoiceArm classifies arms
+// by node kind to compute the result TYPE, and a kind it has not learned yet
+// makes the fold decline — which used to mean the integer box met the DECIMAL
+// vector the PLAN had already allocated and the query died with a 22003 for a
+// value PostgreSQL answers (`CASE WHEN … THEN d ELSE CAST(i AS BIGINT) END`).
+// The store no longer depends on that classification being complete.
+//
+// The scaling is checked: an integer too large to carry at this scale is
+// 22003, never a wrapped number.
+func (v *Vector) SetComputedChecked(i int, val any) error {
+	if v == nil || v.Type != TypeDecimal || val == nil {
+		return v.SetValueChecked(i, val)
+	}
+	var n int64
+	switch tv := val.(type) {
+	case int64:
+		n = tv
+	case int:
+		n = int64(tv)
+	case int32:
+		n = int64(tv)
+	default:
+		return v.SetValueChecked(i, val)
+	}
+	d, ok := Int128From(n).MulPow10(v.DecimalData.Scale)
+	if !ok {
+		return sqlerr.New("22003",
+			"integer value %d has no exact DECIMAL at scale %d",
+			n, v.DecimalData.Scale)
+	}
+	v.Nulls.SetValid(i)
+	v.DecimalData.Data[i] = d
+	return nil
+}

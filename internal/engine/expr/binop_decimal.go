@@ -903,15 +903,18 @@ func EvalDecimalInto(e Expr, b *batch.RecordBatch, row int, dst *batch.Vector, a
 	if boxed == nil {
 		return false
 	}
-	text, isText := boxed.(string)
-	if !isText {
+	switch boxed.(type) {
+	case string, int64, int32, int:
+		// A string is the DECIMAL rendering every producer here answers with.
+		// An INTEGER is a value at scale 0 — the integer branch of a choice
+		// construct (#695) — and SetComputedChecked is the writer that reads
+		// it as one instead of as ADR-0018 §4's already-scaled carrier.
+	default:
 		return false
 	}
-	v, err := batch.ParseDecimalStringChecked(text, dst.DecimalData.Scale)
-	if err != nil {
+	if err := dst.SetComputedChecked(at, boxed); err != nil {
 		panic(fatalEval{err})
 	}
-	dst.DecimalData.Data[at] = v
 	return true
 }
 

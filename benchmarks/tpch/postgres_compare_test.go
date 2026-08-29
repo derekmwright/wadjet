@@ -1352,6 +1352,33 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalChoiceGroupKey", exactNumeric: true, ordered: true,
 			sql: `SELECT CASE WHEN d_grp < 3 THEN d_2 ELSE 0 END AS k, COUNT(*) AS n ` +
 				`FROM dec_probe GROUP BY 1 ORDER BY 1`},
+		// An INTEGER ARM THAT IS AN EXPRESSION, not a literal or a bare
+		// column (#695's review). The DECLARED fold takes any arm whose type
+		// is INT32/INT64; the COMPILED fold classified by node kind and knew
+		// neither a CAST nor a nested choice, so it declined and the integer
+		// box met the DECIMAL vector — 22003 on both paths for values
+		// PostgreSQL answers. A fixture of literals and bare columns cannot
+		// tell the two folds apart, which is why these are separate entries.
+		pgCase{name: "DecimalChoiceIntegerCastArm", exactNumeric: true,
+			sql: `SELECT d_key, CASE WHEN d_grp < 3 THEN d_2 ELSE CAST(d_grp AS BIGINT) END AS c, ` +
+				`GREATEST(d_2, CAST(d_grp AS BIGINT)) AS g FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalChoiceNestedIntegerChoiceArm", exactNumeric: true,
+			sql: `SELECT d_key, COALESCE(d_2, CASE WHEN d_grp = 0 THEN 1 ELSE 2 END) AS c ` +
+				`FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalChoiceIntegerExpressionGroupKey", exactNumeric: true, ordered: true,
+			sql: `SELECT CASE WHEN d_grp < 3 THEN d_2 ELSE CAST(d_grp AS BIGINT) END AS k, ` +
+				`COUNT(*) AS n FROM dec_probe GROUP BY 1 ORDER BY 1`},
+		// The choice ABOVE an aggregate over an integer EXPRESSION: the DAG's
+		// gather runs the same fold to decide whether to build a DECIMAL
+		// column, and answered NULL when it declined.
+		pgCase{name: "DecimalChoiceOverAnAggregateAndACast", exactNumeric: true,
+			sql: `SELECT GREATEST(SUM(d_2), CAST(0 AS BIGINT)) AS g, ` +
+				`COALESCE(SUM(d_2), CASE WHEN 1=1 THEN 0 ELSE 1 END) AS c FROM dec_probe`},
+		// NULLIF types over BOTH arguments in PostgreSQL while its typmod
+		// comes from argument 0 — `NULLIF(0, numeric)` is numeric there and
+		// was INT64 here.
+		pgCase{name: "DecimalChoiceNullifDecimalSecondArgument", exactNumeric: true,
+			sql: `SELECT d_key, NULLIF(0, d_2) AS n FROM dec_probe ORDER BY d_key`},
 		// The control that must NOT move: int ⊕ int stays integer on both
 		// engines, so nothing here is reading "any number" as a decimal.
 		pgCase{name: "DecimalChoiceIntegerOnlyStaysInteger",

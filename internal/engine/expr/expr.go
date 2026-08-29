@@ -3588,7 +3588,7 @@ func init() {
 
 		// Conditional
 		"coalesce": {fnCoalesce, RetSameAsArg(batch.TypeFloat64)},
-		"nullif":   {fnNullIf, RetSameAsArg(batch.TypeFloat64, 0)},
+		"nullif":   {fnNullIf, RetSameAsArg(batch.TypeFloat64, 0).TypeOverAllArgs()},
 		"ifnull":   {fnIfNull, RetSameAsArg(batch.TypeString, 0, 1)},
 		"if":       {fnIf, RetSameAsArg(batch.TypeString, 1, 2).Control(0)},
 

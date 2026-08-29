@@ -134,6 +134,79 @@ type Ret struct {
 	// rather than returned and still has to be seen, because the pair's
 	// COMPARISON is only correct when both declarations are known.
 	ctrl []int
+	// typeAll widens the TYPE fold to every argument while args keeps the
+	// TYPMOD fold narrow. NULLIF is the only declaration that needs it, and
+	// it needs it because PostgreSQL answers the two questions over different
+	// lists: select_common_type over both arguments (they must be comparable,
+	// so `NULLIF(0, numeric)` is numeric), select_common_typmod over the one
+	// the value comes from (so the pair keeps argument 0's numeric(9,2)).
+	typeAll bool
+}
+
+// TypeOverAllArgs lets the TYPE fold reach an argument the TYPMOD fold does
+// not, when that argument is a DECIMAL the candidate list's answer cannot
+// hold. See Ret.typeAll and widenToDecimalBeyondCandidates.
+func (r Ret) TypeOverAllArgs() Ret {
+	r.typeAll = true
+	return r
+}
+
+// widenToDecimalBeyondCandidates is the NULLIF correction, and it is
+// deliberately the narrowest form of it.
+//
+// PostgreSQL resolves NULLIF's TYPE with select_common_type over BOTH
+// arguments — they have to be comparable — while the RESULT is argument 0's
+// value and the TYPMOD is argument 0's. Wadjet folded the type over the
+// candidate list alone, so `NULLIF(0, numeric(9,2))` declared INT64 where
+// PostgreSQL says numeric, and the integer 0 went out as an integer column.
+//
+// Folding EVERY argument into the type instead would be the general rule and
+// it is not taken here, for two reasons that both cost answers. It would widen
+// `NULLIF(numeric(9,2), numeric(18,4))` to (18,4), where the result is
+// argument 0's value and (9,2) holds it exactly — a rendering of 12.7500 for a
+// column that holds 12.75, which the corpus pins the other way. And it would
+// re-open the Guessed/Decided contract of #331/#333, where a non-candidate
+// argument deciding a type is exactly what must NOT displace the candidate's
+// answer.
+//
+// So the widening fires only when the candidates produced a NON-DECIMAL type
+// and some other evaluated argument DECIDED a DECIMAL: that is the one case
+// where the candidate answer cannot represent the value the pair is compared
+// at, and it is the case PostgreSQL's numeric ladder is about.
+func (r Ret) widenToDecimalBeyondCandidates(d DeclType, seen []DeclType, conf []Confidence, nargs int) (DeclType, bool) {
+	if !r.typeAll || d.ID == batch.TypeDecimal {
+		return DeclType{}, false
+	}
+	widened := []DeclType{d}
+	sawDecimal := false
+	for i := 0; i < nargs && i < len(seen); i++ {
+		if r.isCandidate(i, nargs) || r.isControl(i) || conf[i] != Decided {
+			continue
+		}
+		if seen[i].ID != batch.TypeDecimal || !seen[i].DecKnown {
+			continue
+		}
+		widened = append(widened, seen[i])
+		sawDecimal = true
+	}
+	if !sawDecimal {
+		return DeclType{}, false
+	}
+	return CommonDeclType(widened, false)
+}
+
+// isCandidate reports whether argument i is on the declaration's candidate
+// list — every argument when the list is empty.
+func (r Ret) isCandidate(i, nargs int) bool {
+	if len(r.args) == 0 {
+		return i >= 0 && i < nargs
+	}
+	for _, a := range r.args {
+		if a == i {
+			return true
+		}
+	}
+	return false
 }
 
 // Control marks argument positions that steer a polymorphic choice without
@@ -189,16 +262,19 @@ func RetSameAsArg(fallback batch.TypeID, args ...int) Ret {
 	return Ret{kind: retSameAsArg, typ: fallback, args: args}
 }
 
-// SameAsArgs reports the argument positions a polymorphic declaration mirrors,
-// for a call with nargs arguments, and whether the declaration is polymorphic
-// at all.
+// SameAsArgs reports the argument positions a polymorphic declaration mirrors
+// for the TYPMOD fold, for a call with nargs arguments, and whether the
+// declaration is polymorphic at all.
 //
-// It exists so PostgreSQL's select_common_typmod runs over exactly the
-// arguments select_common_type ran over: NULLIF mirrors argument 0 alone, so
-// NULLIF(numeric(9,2), numeric(18,4)) keeps numeric(9,2) while
-// GREATEST over the same pair drops to unconstrained. Reading the candidate
-// list off the declaration is what keeps those two answers from drifting
-// apart (ADR-0024 item 5).
+// It exists so PostgreSQL's select_common_typmod runs over the arguments the
+// RESULT is resolved from: NULLIF's result is always argument 0's value, so
+// NULLIF(numeric(9,2), numeric(18,4)) keeps numeric(9,2) while GREATEST over
+// the same pair drops to unconstrained (ADR-0024 item 5).
+//
+// It is NOT the TYPE fold's candidate list, and conflating the two was a
+// defect: PostgreSQL runs select_common_TYPE over BOTH of NULLIF's arguments —
+// they have to be comparable — so `NULLIF(0, numeric(9,2))` is numeric there
+// and was INT64 here. typeArgs is that list; see Ret.typeAll.
 func (r Ret) SameAsArgs(nargs int) ([]int, bool) {
 	if r.kind != retSameAsArg {
 		return nil, false
@@ -348,6 +424,9 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 				}
 			}
 			if d, ok := CommonDeclType(decided, sawUnknown); ok {
+				if wider, ok := r.widenToDecimalBeyondCandidates(d, seen, conf, nargs); ok {
+					return wider, Decided
+				}
 				return d, Decided
 			}
 			if guessed {

@@ -104,19 +104,135 @@ func decimalChoiceArm(e Expr, b *batch.RecordBatch) (batch.DecimalType, bool, bo
 	if p, s, ok := DecimalResultOf(e, b); ok {
 		return batch.DecimalType{Precision: p, Scale: s}, true, true
 	}
-	// Not a DECIMAL result. An INTEGER operand still contributes — an integer
-	// is DECIMAL(10,0)/(19,0) in the result-type rule, and a literal its own
-	// spelling — and everything else (a float, a string, an expression with no
-	// exact form) makes the fold decline.
+	// Not a DECIMAL result. An INTEGER arm still contributes — an integer is
+	// DECIMAL(10,0)/(19,0) in the result-type rule — and everything else (a
+	// float, a string, an expression with no exact form) makes the fold
+	// decline.
+	if t, ok := integerArmDecimalType(e, b); ok {
+		return t, false, true
+	}
+	return batch.DecimalType{}, false, false
+}
+
+// integerArmDecimalType is the fixed-point contribution of an arm that
+// produces an INTEGER, and it must accept every shape the DECLARED side does:
+// expr.declFixedPoint takes any arm whose DeclType is INT32/INT64, which is a
+// CAST to an integer, a nested choice over integers, integer arithmetic, an
+// integer aggregate output and a registry function declared integer — not just
+// a bare column or a literal.
+//
+// The two sides disagreeing is what #695's review found: the plan folded
+// `CASE WHEN … THEN d92 ELSE CAST(i32 AS BIGINT) END` to DECIMAL and allocated
+// a DECIMAL vector, this function declined because a *Cast is not a
+// decimalOperand, so the integer box was never rendered as text and the store
+// raised 22003 for a value PostgreSQL answers. Eleven shapes reached it.
+//
+// The classification is still an enumeration and it can still fall behind a
+// new node kind. What it can no longer do is COST A VALUE: the store reads an
+// integer box from an expression as a scale-0 value now
+// (batch.Vector.SetComputedChecked), so a miss here narrows a declared TYPE
+// rather than failing the query.
+func integerArmDecimalType(e Expr, b *batch.RecordBatch) (batch.DecimalType, bool) {
+	switch v := e.(type) {
+	case *UnaryOp:
+		if v.Op != "-" && v.Op != "+" {
+			return batch.DecimalType{}, false
+		}
+		return integerArmDecimalType(v.Operand, b)
+	case *Cast:
+		// A CAST that NAMES an integer type produces one. castIntegerWidth
+		// answers the same question expr.Cast's evaluator does.
+		if w, ok := castIntegerDecimalType(v); ok {
+			return w, true
+		}
+		return batch.DecimalType{}, false
+	case *Case:
+		return allIntegerArms(caseResultArms(v), b)
+	case *Coalesce:
+		return allIntegerArms(v.Args, b)
+	case *FuncCall:
+		idx, poly := DefaultRegistry.ReturnType(v.Name).SameAsArgs(len(v.Args))
+		if poly {
+			arms := make([]Expr, 0, len(idx))
+			for _, i := range idx {
+				if i >= 0 && i < len(v.Args) {
+					arms = append(arms, v.Args[i])
+				}
+			}
+			return allIntegerArms(arms, b)
+		}
+		// A function whose OWN declaration is integer — length(), and the
+		// rest of the registry's fixed INT32/INT64 returns (#636).
+		if r := DefaultRegistry.ReturnType(v.Name); r.Integer() {
+			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
+		}
+		return batch.DecimalType{}, false
+	}
+	// A bare integer column, an integer literal, int-mode arithmetic: they
+	// implement decimalOperand and answer their own range at scale 0.
 	o, isOperand := e.(decimalOperand)
 	if !isOperand {
-		return batch.DecimalType{}, false, false
+		return batch.DecimalType{}, false
 	}
 	t, ok := o.decimalType(b)
 	if !ok {
-		return batch.DecimalType{}, false, false
+		return batch.DecimalType{}, false
 	}
-	return t, false, true
+	return t, true
+}
+
+// allIntegerArms is a nested choice's integer contribution: every arm that can
+// produce a value must be an integer, and the result carries the widest of
+// them. A NULL literal is skipped, exactly as the DECIMAL fold skips it.
+func allIntegerArms(arms []Expr, b *batch.RecordBatch) (batch.DecimalType, bool) {
+	out, any := batch.DecimalType{}, false
+	for _, a := range arms {
+		if a == nil {
+			continue
+		}
+		if lit, isLit := a.(*Lit); isLit && lit.Val == nil {
+			continue
+		}
+		if isConstNumericLit(a) {
+			t, ok := constArmDecimalType(a)
+			if !ok || t.Scale != 0 {
+				// A FRACTIONAL constant is not an integer arm; it makes the
+				// nested choice a decimal one, which decimalChoiceArm's
+				// DecimalResultOf branch above has already been asked about.
+				return batch.DecimalType{}, false
+			}
+			out, any = widerDecimalType(out, t), true
+			continue
+		}
+		t, ok := integerArmDecimalType(a, b)
+		if !ok {
+			return batch.DecimalType{}, false
+		}
+		out, any = widerDecimalType(out, t), true
+	}
+	return out, any
+}
+
+// widerDecimalType keeps the larger integer range of two scale-0 operands.
+func widerDecimalType(a, b batch.DecimalType) batch.DecimalType {
+	if b.Precision > a.Precision {
+		return b
+	}
+	return a
+}
+
+// castIntegerDecimalType is a CAST's integer contribution: the range its
+// DESTINATION names, at scale 0. A cast to a non-integer type answers false and
+// the caller declines, which is what keeps `CAST(x AS TEXT)` out of a numeric
+// fold.
+func castIntegerDecimalType(c *Cast) (batch.DecimalType, bool) {
+	switch strings.ToUpper(strings.TrimSpace(c.DestType)) {
+	case "INT", "INT4", "INTEGER", "SMALLINT", "INT2":
+		return batch.DecimalType{Precision: batch.Int32DecimalDigits}, true
+	case "BIGINT", "INT8", "LONG":
+		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
+	}
+	return batch.DecimalType{}, false
 }
 
 // constArmDecimalType is a constant numeric arm's contribution — the literal's

@@ -174,7 +174,7 @@ type ProjectColumn struct {
 	// back as the value 0 on every row: a silent wrong answer of exactly the
 	// class this work exists to close.
 	VecDecimalEval VecDecimalExpression
-	Dimension    int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
+	Dimension      int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
 	// Precision and Scale declare a COMPUTED DECIMAL output, the same way
 	// Dimension declares a computed VECTOR one: the output column does not
 	// exist in the input, so there is no vector to read (p,s) off, and a
@@ -413,7 +413,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				// UNCHECKED SetValue, which is the saturation this exists to
 				// stop.
 				for outRow, idx := range in.Sel {
-					if err := col.SetValueChecked(outRow, proj.Expr(in, int(idx))); err != nil {
+					if err := col.SetComputedChecked(outRow, proj.Expr(in, int(idx))); err != nil {
 						return nil, err
 					}
 				}
@@ -460,7 +460,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				// The checked writer, for the reason the selection-vector
 				// branch above documents.
 				for i := 0; i < in.Len; i++ {
-					if err := col.SetValueChecked(i, proj.Expr(in, i)); err != nil {
+					if err := col.SetComputedChecked(i, proj.Expr(in, i)); err != nil {
 						return nil, err
 					}
 				}

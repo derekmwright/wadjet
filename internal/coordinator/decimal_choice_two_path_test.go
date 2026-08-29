@@ -426,20 +426,33 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 			"SELECT GREATEST(SUM(a), 0) AS v FROM " + dbpTable, "52.99", ""},
 		{"coalesce over a wrapped sum",
 			"SELECT COALESCE(SUM(a) * 2, 0) AS v FROM " + dbpTable, "105.98", ""},
+		// The review's P1: the gather re-evaluates a WRAPPED aggregate's
+		// expression and decides whether to build a DECIMAL column from
+		// expr.DecimalResultOf — the same arm classification. A CAST to an
+		// integer and a nested choice of integers were not arms it knew, so
+		// the fold declined, the column was built float64, and the decimal
+		// text box was NULLED: the DAG answered NULL where PostgreSQL and the
+		// single-process path answer 52.99.
+		{"greatest over a sum and a CAST",
+			"SELECT GREATEST(SUM(a), CAST(0 AS BIGINT)) AS v FROM " + dbpTable, "52.99", ""},
+		{"coalesce over a sum and a nested choice",
+			"SELECT COALESCE(SUM(a), CASE WHEN 1=1 THEN 0 ELSE 1 END) AS v FROM " + dbpTable,
+			"52.99", ""},
 		// The EMPTY aggregate, where the LITERAL branch is the answer on
 		// every row: SUM over no rows is NULL, so the integer arm is what
 		// the value comes from. PostgreSQL answers 0.
 		//
-		// The two paths RENDER it differently, and the difference is not
-		// this fold's: the DAG's empty aggregate emits its DECIMAL column at
-		// SCALE 0 (there is no row to carry a scale, and the merged batch is
-		// where the gather reads one), so the choice above it resolves scale
-		// 0 and prints "0" where the single-process path prints "0.00".
-		// Same NUMBER on both, and the DAG's empty-aggregate scale is an
-		// open residual of its own — invisible until now, because a bare
-		// `SUM(d)` over no rows is NULL on both paths and renders nothing.
-		// wantDAG is the pin: when the DAG carries the declared scale, this
-		// entry fails and says so.
+		// The DAG prints "0" where the single-process path prints "0.00", and
+		// the cause is NOT a per-value rendering difference — an earlier
+		// draft of this comment said so and was wrong. It is #685: the DAG's
+		// EMPTY PARTIAL aggregate emits its DECIMAL column at scale 0, so
+		// every consumer above it reads the wrong scale. The same defect
+		// makes `SUM(d92) WHERE id = 1` over two files answer 1275.00 on the
+		// DAG, which has nothing to do with a choice construct. It is fixed
+		// on fix/685-on-main (c96c6436), which lands before this branch.
+		// TODO(#685): when that merge arrives the DAG carries the declared
+		// scale, this entry fails, and the fix is to delete wantDAG so both
+		// paths assert "0.00".
 		{"coalesce over an empty sum",
 			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable + " WHERE id < 0", "0.00", "0"},
 	} {
@@ -502,11 +515,18 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 // It is TYPE-INDEPENDENT and predates all of this: over an INTEGER derived
 // column the DAG answers 0 where the single-process path answers 2, and a
 // plain RENAME (`id AS idr`) is enough to trigger it — no expression, no
-// DECIMAL. The DECIMAL arm is now LOUD rather than silent, because the
-// aggregate input's declared (p,s) reaches the worker and the checked store
-// refuses the integer box (22003); the integer arm is still a silent wrong
-// number, which is what makes this worth pinning rather than leaving to be
-// rediscovered.
+// DECIMAL. Every arm is a SILENT wrong number, DECIMAL included.
+//
+// The DECIMAL arm was briefly LOUD, and that was an ACCIDENT worth recording
+// rather than a property to preserve: the aggregate input's declared (p,s)
+// reached the worker while the derived column did not, so the ELSE branch's
+// integer box met a DECIMAL vector and the store refused it (22003). Once the
+// store learned to read an integer box from an expression as a value at scale
+// 0 — which eleven shapes PostgreSQL answers require, see
+// wadjet.TestDecimalChoiceOverAnIntegerEXPRESSION — that incidental refusal
+// went away and the DECIMAL arm joined the others in answering the ELSE
+// branch's total. Nothing about #709 changed; one of its symptoms stopped
+// being visible, which is exactly why it is pinned here.
 //
 // Each pin fails when the DAG starts agreeing. That is the fix's proof.
 func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
@@ -535,13 +555,13 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 			name: "a DECIMAL derived column, computed",
 			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN volume ELSE 0 END) AS v FROM " +
 				"(SELECT s, a * b AS volume FROM " + dbpTable + ") x",
-			want: "162.562500", dagRefuses: true,
+			want: "162.562500", dagWrong: "0.000000",
 		},
 		{
 			name: "a DECIMAL derived column, renamed",
 			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN v ELSE 0 END) AS v FROM " +
 				"(SELECT s, a AS v FROM " + dbpTable + ") x",
-			want: "12.75", dagRefuses: true,
+			want: "12.75", dagWrong: "0.00",
 		},
 		{
 			// No DECIMAL anywhere: this is the entry that says the DAG defect

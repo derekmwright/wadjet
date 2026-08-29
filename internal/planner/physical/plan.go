@@ -10035,7 +10035,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 				// saturating DECIMAL arms would make a wrong one silently
 				// (ADR-0024 item 4).
 				for _, idx := range in.Sel {
-					if err := col.SetValueChecked(int(idx), c.Expr(in, int(idx))); err != nil {
+					if err := col.SetComputedChecked(int(idx), c.Expr(in, int(idx))); err != nil {
 						return nil, err
 					}
 				}
@@ -10065,7 +10065,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		} else {
 			if col.Type == parquet.TypeDecimal {
 				for i := 0; i < in.Len; i++ {
-					if err := col.SetValueChecked(i, c.Expr(in, i)); err != nil {
+					if err := col.SetComputedChecked(i, c.Expr(in, i)); err != nil {
 						return nil, err
 					}
 				}

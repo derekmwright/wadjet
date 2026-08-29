@@ -73,6 +73,18 @@ func DecimalTypeOf(t TypeID, dec DecimalType) (DecimalType, bool) {
 // rather than computing a new number from them: a set operation's arms,
 // CASE's branches, COALESCE/NULLIF/IFNULL/IF/GREATEST/LEAST's arguments.
 //
+// Item 3's p>38 ADJUSTMENT is deliberately NOT applied here, and the reason is
+// item 7's: a choice's result IS one of its operands' stored values, so giving
+// up fraction digits would DROP digits a row actually holds — over
+// `GREATEST(numeric(38,0), numeric(11,10))` the adjustment reduces the scale
+// from 10 to 6 and the second column's 0.0000000001 becomes 0.000000, silently.
+// Arithmetic is where the adjustment belongs (DecimalResultType): a computed
+// scale is derived rather than carried, so there are no stored digits to lose.
+// The precision cap alone is therefore the whole rule here, and a value with no
+// carrier at the resulting type is a per-value 22003 at the store rather than a
+// plan-time refusal of the query — which is what lets
+// `GREATEST(numeric(38,30), bigint)` answer for every value that fits.
+//
 // The result is capped at the carrier's full width — 38 digits is what an
 // Int128 holds. The cap reduces the PRECISION and leaves the scale, so it is
 // a RANGE reduction, which is why a value with no Int128 at the output type
