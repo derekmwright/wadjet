@@ -440,7 +440,7 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 	if s, ok := val.(string); ok && hasNetworkLiteralForm(col.Type) {
 		conv, err := convertNetworkLiteral(col.Type, s)
 		if err != nil {
-			nw.fail(fmt.Errorf("column %q, row %d: %w", col.Name, nw.rowsSeen, err))
+			nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
 			lb.appendEntry(defLevel, repLevel)
 			return
 		}
@@ -461,7 +461,7 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 	if s, ok := val.(string); ok && col.Type == TypeDate {
 		days, err := ParseDateDays(s)
 		if err != nil {
-			nw.fail(fmt.Errorf("column %q, row %d: %w", col.Name, nw.rowsSeen, err))
+			nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
 			lb.appendEntry(defLevel, repLevel)
 			return
 		}
@@ -484,7 +484,7 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 	if col.Type == TypeDecimal {
 		d, err := DecimalValueFromBox(val, col.Precision, col.Scale)
 		if err != nil {
-			nw.fail(fmt.Errorf("column %q, row %d: %w", col.Name, nw.rowsSeen, err))
+			nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
 			lb.appendEntry(defLevel, repLevel)
 			return
 		}
@@ -495,7 +495,7 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		// than of TypeDecimal.
 		if columnPhysical(col) == PhysicalInt64 {
 			if _, fits := d.Int64(); !fits {
-				nw.fail(fmt.Errorf("column %q, row %d: DECIMAL unscaled value %s needs more than 64 bits, "+
+				nw.fail(fmt.Errorf("column %q, row %d of this write: DECIMAL unscaled value %s needs more than 64 bits, "+
 					"which this writer's INT64 encoding cannot store", col.Name, nw.rowsSeen, d))
 				lb.appendEntry(defLevel, repLevel)
 				return

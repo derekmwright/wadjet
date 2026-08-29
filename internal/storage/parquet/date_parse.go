@@ -219,29 +219,34 @@ func atoiN(s string) int {
 	return n
 }
 
-// ValidateNestedDates walks val against col and returns the first invalid DATE
-// string it finds, at any depth of a ROW/ARRAY/MAP. It is the container form
-// of ValidateDateString: the ingest boundary uses it so a DATE nested inside a
-// container is rejected up front, the same as a top-level one, rather than
-// only failing later when the native writer's leaf hits it (#560).
-func ValidateNestedDates(col Column, val any) error {
+// ValidateNestedLeaves walks val against col and returns the first value that
+// no leaf of that declaration can hold, at any depth of a ROW/ARRAY/MAP.
+//
+// It is the container form of the per-leaf checks the native writer applies in
+// decomposeLeaf, and the ingest boundary uses it so a bad value nested inside a
+// container is rejected UP FRONT — the same as a top-level one — rather than
+// only failing at the flush that eventually writes it. The flush is per BUFFER,
+// so a bad row failing there takes a batch of already-accepted rows with it and
+// reports against a partition rather than against the statement that carried it.
+//
+// It covers every leaf type whose conversion can FAIL: DATE, where an
+// unparseable or nonexistent calendar date used to be stored as the epoch
+// (#560), and DECIMAL, where a value with no carrier at the leaf's (p, s) used
+// to be stored as a wrapped int64 or a zero (#647). Adding a third such type
+// means adding it to validateNestedLeaf and nowhere else — the reason this
+// walks leaves rather than dates.
+func ValidateNestedLeaves(col Column, val any) error {
 	if val == nil {
 		return nil
 	}
 	switch col.Type {
-	case TypeDate:
-		if s, ok := val.(string); ok {
-			if _, err := ParseDateDays(s); err != nil {
-				return err
-			}
-		}
 	case TypeArray:
 		if col.ElementType == nil {
 			return nil
 		}
 		if arr, ok := val.([]any); ok {
 			for _, e := range arr {
-				if err := ValidateNestedDates(*col.ElementType, e); err != nil {
+				if err := ValidateNestedLeaves(*col.ElementType, e); err != nil {
 					return err
 				}
 			}
@@ -249,7 +254,7 @@ func ValidateNestedDates(col Column, val any) error {
 	case TypeRow:
 		if m, ok := val.(map[string]any); ok {
 			for _, f := range col.Fields {
-				if err := ValidateNestedDates(f, m[f.Name]); err != nil {
+				if err := ValidateNestedLeaves(f, m[f.Name]); err != nil {
 					return err
 				}
 			}
@@ -264,15 +269,37 @@ func ValidateNestedDates(col Column, val any) error {
 		keyCol, valCol := col.ElementType.Fields[0], col.ElementType.Fields[1]
 		if m, ok := val.(map[string]any); ok {
 			for k, v := range m {
-				if keyCol.Type == TypeDate {
-					if _, err := ParseDateDays(k); err != nil {
-						return err
-					}
+				if err := validateNestedLeaf(keyCol, k); err != nil {
+					return err
 				}
-				if err := ValidateNestedDates(valCol, v); err != nil {
+				if err := ValidateNestedLeaves(valCol, v); err != nil {
 					return err
 				}
 			}
+		}
+	default:
+		return validateNestedLeaf(col, val)
+	}
+	return nil
+}
+
+// validateNestedLeaf is the per-leaf half of ValidateNestedLeaves: one value
+// against one primitive declaration, and nil for every type whose conversion
+// cannot fail.
+func validateNestedLeaf(col Column, val any) error {
+	if val == nil {
+		return nil
+	}
+	switch col.Type {
+	case TypeDate:
+		if s, ok := val.(string); ok {
+			if _, err := ParseDateDays(s); err != nil {
+				return err
+			}
+		}
+	case TypeDecimal:
+		if _, err := DecimalValueFromBox(val, col.Precision, col.Scale); err != nil {
+			return err
 		}
 	}
 	return nil

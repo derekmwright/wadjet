@@ -225,8 +225,12 @@ package is the only place ONE accept-set can sit — the reason `ParseDateDays`
 lives there too. `batch.TestDecimalGrammarMatchesBatch` is the gate that keeps
 the two sides one function.
 
-The accept-set is PostgreSQL 17.11's numeric input grammar, taken from a live
-transcript: C whitespace trimmed; `nan` case-insensitive and with NO sign
+The accept-set is PostgreSQL 17.11's numeric input grammar MINUS digit
+separators and radix prefixes, taken from a live transcript. PostgreSQL 16
+added both to `numeric_in`, so 17.11 accepts `1_000`, `1_0.5`, `0x10`, `0b101`
+and `0o17` where wadjet answers 22P02 — tracked as #634 and deferred. It is a
+refusal of input PostgreSQL takes, never a different value for input both
+accept. What the two agree on: C whitespace trimmed; `nan` case-insensitive and with NO sign
 (`'+NaN'` and `'-NaN'` are 22P02 there); `infinity` and `inf`
 case-insensitive with an optional IMMEDIATELY-adjacent `+`/`-`. Nothing is a
 prefix match, so `'Infin'` and `'infinit'` stay refused. Two deliberate
@@ -269,6 +273,17 @@ carrier (item 1's reopen clause). The shape — `DECIMAL(38,0)` beside
   (item 7); NaN/Infinity not storable (item 6); STDDEV/VARIANCE/CORR/COVAR
   /MEDIAN/PERCENTILE over DECIMAL stay float64 (ADR-0012 item 9); and the DDL
   refusal below.
+- **A float box is spelled shortest-round-trip, PostgreSQL's cast uses
+  `%.15g`** (added 2026-08-29 with #647). `4611686018427387904::float8::numeric`
+  is `4611686018427390000` in PostgreSQL 17.11 and `4611686018427388000` here:
+  wadjet keeps the 17 significant digits that identify the float, PostgreSQL
+  keeps 15. Shortest-round-trip is the only rendering that names the float it
+  came from, and it is what `batch.setCheckedDecimalFloat` already does, so the
+  two conversion paths cannot disagree about one value. No SQL surface reaches
+  this yet — a float box arrives through the embedded or HTTP API, and
+  `CAST(x AS DECIMAL(p,s))` is still item 6's declared-STRING no-op — so the
+  CAST evaluator (#555) decides separately whether the SQL cast follows
+  PostgreSQL's rendering.
 - **DDL refuses a `(p, s)` PostgreSQL accepts** (added 2026-08-29 with #647).
   `parquet.ParseDecimalParams` now holds a declaration to `1 <= p <= 38` and
   `0 <= s <= p`, raising `22023 invalid_parameter_value` in PostgreSQL's own

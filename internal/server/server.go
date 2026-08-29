@@ -619,9 +619,12 @@ func executeDMLInsert(ctx context.Context, cat *catalog.Catalog, info *plansql.I
 		}
 	}
 
-	typeMap := make(map[string]parquet.TypeID, len(tableMeta.Schema.Columns))
+	// The whole COLUMN, not its TypeID: a DECIMAL literal is judged against
+	// the declared (p, s) here, so a value the column cannot hold names the
+	// row that carried it instead of failing a later flush.
+	colByName := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
 	for _, col := range tableMeta.Schema.Columns {
-		typeMap[col.Name] = col.Type
+		colByName[col.Name] = col
 	}
 
 	var rows []map[string]any
@@ -631,7 +634,7 @@ func executeDMLInsert(ctx context.Context, cat *catalog.Catalog, info *plansql.I
 		}
 		row := make(map[string]any, len(columns))
 		for i, colName := range columns {
-			v, err := wadjet.ConvertValue(vals[i], typeMap[colName])
+			v, err := wadjet.ConvertValueForColumn(vals[i], colByName[colName])
 			if err != nil {
 				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
 			}
@@ -742,9 +745,20 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 		}
 	}
 
-	typeMap := make(map[string]parquet.TypeID, len(tableMeta.Schema.Columns))
+	// Resolve every SET clause ONCE, against the column's full declaration,
+	// BEFORE the loop below touches a file — a conversion that can fail must
+	// not run after a delete marker is committed (wadjet.ConvertValueForColumn).
+	colByName := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
 	for _, col := range tableMeta.Schema.Columns {
-		typeMap[col.Name] = col.Type
+		colByName[col.Name] = col
+	}
+	setValues := make(map[string]any, len(info.SetClauses))
+	for _, sc := range info.SetClauses {
+		v, convErr := wadjet.ConvertValueForColumn(sc.Value, colByName[sc.Column])
+		if convErr != nil {
+			return nil, fmt.Errorf("SET %s: %w", sc.Column, convErr)
+		}
+		setValues[sc.Column] = v
 	}
 
 	schema := tableMeta.Schema.Columns
@@ -752,14 +766,17 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 	var ing *ingest.Ingester
 
 	// Per-file streaming: box only the matched rows (the previous ToRows
-	// boxed every row of every file even at zero WHERE selectivity), commit
-	// that file's delete markers, then ingest its updated rows so the
-	// ingester's auto-flush bounds memory — accumulating updatedRows
-	// table-wide held the whole table as boxed maps on a broad UPDATE.
-	// Markers commit before the matching re-ingest, preserving the original
-	// failure direction (a crash loses that file's updated rows; it never
-	// duplicates them). The transactional marker+ingest commit is a known
-	// separate issue.
+	// boxed every row of every file even at zero WHERE selectivity), hand
+	// them to the ingester, then commit that file's delete markers —
+	// accumulating updatedRows table-wide held the whole table as boxed maps
+	// on a broad UPDATE.
+	//
+	// INGEST PRECEDES THE MARKER COMMIT, the opposite of what this loop used
+	// to do, for the reason wadjet/dml.go's twin gives: Ingest validates each
+	// row synchronously, so a row the table cannot hold now fails with the
+	// original still in place, where committing the marker first DELETED the
+	// row it then refused to change (#647 review). The transactional
+	// marker+ingest commit is a known separate issue.
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
 			b, err := readDMLFile(ctx, cat, file.Path, schema)
@@ -781,24 +798,20 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			updatedRows := make([]map[string]any, 0, len(indices))
 			for _, idx := range indices {
 				row := b.RowAt(int(idx))
-				for _, sc := range info.SetClauses {
-					v, convErr := wadjet.ConvertValue(sc.Value, typeMap[sc.Column])
-					if convErr != nil {
-						return nil, fmt.Errorf("SET %s: %w", sc.Column, convErr)
-					}
-					row[sc.Column] = v
+				for col, v := range setValues {
+					row[col] = v
 				}
 				updatedRows = append(updatedRows, row)
-			}
-			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices}
-			if err := cat.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
-				return nil, fmt.Errorf("recording delete markers: %w", err)
 			}
 			if ing == nil {
 				ing = ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
 			}
 			if err := ing.Ingest(ctx, updatedRows); err != nil {
 				return nil, fmt.Errorf("inserting updated rows: %w", err)
+			}
+			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices}
+			if err := cat.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
+				return nil, fmt.Errorf("recording delete markers: %w", err)
 			}
 			totalUpdated += int64(len(indices))
 		}
@@ -1526,15 +1539,15 @@ func (s *Server) handleDeleteTable(w http.ResponseWriter, r *http.Request) {
 func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
 	columns := make([]parquet.Column, len(defs))
 	for i, d := range defs {
-		typeID, err := parquet.ParseTypeID(d.Type)
+		// parquet.DeclaredColumn, not ParseTypeID: a DECIMAL's precision and
+		// scale live in the type text, and reading only the TypeID here gave
+		// every DECIMAL column created over HTTP a Precision 0, Scale 0
+		// declaration (#647 review).
+		col, err := parquet.DeclaredColumn(d.Name, d.Type, d.Nullable)
 		if err != nil {
 			return parquet.Schema{}, fmt.Errorf("column %q: %w", d.Name, err)
 		}
-		columns[i] = parquet.Column{
-			Name:     strings.ToLower(d.Name),
-			Type:     typeID,
-			Nullable: d.Nullable,
-		}
+		columns[i] = col
 	}
 	return parquet.Schema{Columns: columns}, nil
 }

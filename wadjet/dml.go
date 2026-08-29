@@ -73,10 +73,12 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 		}
 	}
 
-	// Build column type map for value conversion
-	typeMap := make(map[string]parquet.TypeID, len(tableMeta.Schema.Columns))
+	// Build a column map for value conversion. The whole COLUMN, not its
+	// TypeID: a DECIMAL literal is judged against the declared (p, s), and
+	// refusing it here rather than at the flush names the row that carried it.
+	colByName := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
 	for _, col := range tableMeta.Schema.Columns {
-		typeMap[col.Name] = col.Type
+		colByName[col.Name] = col
 	}
 
 	// Convert parsed string values to typed rows
@@ -87,7 +89,7 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 		}
 		row := make(map[string]any, len(columns))
 		for i, colName := range columns {
-			v, err := convertValue(vals[i], typeMap[colName])
+			v, err := ConvertValueForColumn(vals[i], colByName[colName])
 			if err != nil {
 				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
 			}
@@ -187,20 +189,41 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 		}
 	}
 
-	// Build column type map for SET clause value conversion
-	typeMap := make(map[string]parquet.TypeID, len(schema))
+	// Resolve every SET clause ONCE, against the column's full declaration,
+	// BEFORE the loop below touches a file. A conversion that can fail must
+	// not run after a delete marker is committed (see ConvertValueForColumn),
+	// and resolving up front also means the per-row work below is a map
+	// assignment that cannot fail at all.
+	colByName := make(map[string]parquet.Column, len(schema))
 	for _, col := range schema {
-		typeMap[col.Name] = col.Type
+		colByName[col.Name] = col
+	}
+	setValues := make(map[string]any, len(info.SetClauses))
+	for _, sc := range info.SetClauses {
+		v, err := ConvertValueForColumn(sc.Value, colByName[sc.Column])
+		if err != nil {
+			return nil, fmt.Errorf("SET %s: %w", sc.Column, err)
+		}
+		setValues[sc.Column] = v
 	}
 
-	// Per-file streaming: box only the matched rows, commit that file's
-	// delete markers, then ingest its updated rows so the ingester's
-	// auto-flush bounds memory. The previous shape boxed every row of
-	// every file (even at zero WHERE selectivity) and accumulated all
-	// updated rows table-wide before one Ingest — a broad UPDATE held the
-	// whole table as boxed maps. Markers commit before the matching
-	// re-ingest, preserving the original failure direction (a crash loses
-	// that file's updated rows; it never duplicates them).
+	// Per-file streaming: box only the matched rows, hand them to the
+	// ingester, then commit that file's delete markers. The previous shape
+	// boxed every row of every file (even at zero WHERE selectivity) and
+	// accumulated all updated rows table-wide before one Ingest — a broad
+	// UPDATE held the whole table as boxed maps.
+	//
+	// INGEST PRECEDES THE MARKER COMMIT, which is the opposite of what this
+	// loop used to do. Ingest validates each row synchronously, so a row the
+	// table cannot hold now fails with the original still in place; committing
+	// the marker first meant a refused UPDATE DELETED the row it refused to
+	// change (#647 review). It is also the better crash direction: Ingest only
+	// BUFFERS, so a crash before FlushAll loses the updated rows either way —
+	// with the marker uncommitted the original survives and the UPDATE simply
+	// did not happen, where before the original was already gone. The
+	// remaining window is an auto-flush that succeeded followed by a failed
+	// marker commit, which duplicates rather than deletes; the transactional
+	// marker+ingest commit is a known separate issue.
 	var totalUpdated int64
 	var ing *ingest.Ingester
 
@@ -223,29 +246,25 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 				continue
 			}
 
-			// Apply SET clauses to matched rows
+			// Apply the already-resolved SET values to the matched rows.
 			updatedRows := make([]map[string]any, 0, len(matchedIndices))
 			for _, idx := range matchedIndices {
 				row := b.RowAt(int(idx))
-				for _, sc := range info.SetClauses {
-					v, err := convertValue(sc.Value, typeMap[sc.Column])
-					if err != nil {
-						return nil, fmt.Errorf("SET %s: %w", sc.Column, err)
-					}
-					row[sc.Column] = v
+				for col, v := range setValues {
+					row[col] = v
 				}
 				updatedRows = append(updatedRows, row)
 			}
 
-			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: matchedIndices}
-			if err := db.catalog.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
-				return nil, fmt.Errorf("recording delete markers: %w", err)
-			}
 			if ing == nil {
 				ing = ingest.New(db.catalog, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
 			}
 			if err := ing.Ingest(ctx, updatedRows); err != nil {
 				return nil, fmt.Errorf("inserting updated rows: %w", err)
+			}
+			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: matchedIndices}
+			if err := db.catalog.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
+				return nil, fmt.Errorf("recording delete markers: %w", err)
 			}
 			totalUpdated += int64(len(matchedIndices))
 		}
@@ -398,14 +417,12 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 			}
 		}
 
-		if len(deleteMarkers) > 0 {
-			if err := db.catalog.AddDeleteMarkers(ctx, info.Target, deleteMarkers); err != nil {
-				return nil, fmt.Errorf("recording delete markers: %w", err)
-			}
-		}
 	}
 
-	// Insert new/updated rows
+	// Insert new/updated rows BEFORE the markers that delete what they
+	// replace, for the reason executeUpdate does: a row the target cannot
+	// hold fails here, and committing the markers first would delete the
+	// matched rows and then refuse to write their replacements (#647 review).
 	allInserts := append(updateRows, insertRows...)
 	if len(allInserts) > 0 {
 		ing := ingest.New(db.catalog, info.Target, targetMeta.Schema, targetMeta.PartitionKeys, ingest.DefaultConfig())
@@ -414,6 +431,12 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 		}
 		if err := ing.FlushAll(ctx); err != nil {
 			return nil, fmt.Errorf("flushing rows: %w", err)
+		}
+	}
+
+	if len(deleteMarkers) > 0 {
+		if err := db.catalog.AddDeleteMarkers(ctx, info.Target, deleteMarkers); err != nil {
+			return nil, fmt.Errorf("recording delete markers: %w", err)
 		}
 	}
 
@@ -726,6 +749,35 @@ func buildWherePredicate(whereSQL string) (func(*batch.RecordBatch, int) bool, e
 // ConvertValue converts a string value to the appropriate Go type for a given Parquet type.
 func ConvertValue(s string, typ parquet.TypeID) (any, error) {
 	return convertValue(s, typ)
+}
+
+// ConvertValueForColumn converts a literal's text against a column's FULL
+// declaration rather than its TypeID alone, so a value the column cannot hold
+// is refused HERE — before the caller commits anything destructive.
+//
+// ConvertValue is handed a TypeID and nothing else, so a DECIMAL literal
+// passes through it as text and is first judged at the parquet leaf, where the
+// declared (p, s) is known. That was harmless while nothing could refuse it,
+// and became DATA LOSS the moment something could: executeUpdate wrote a
+// file's delete markers and ingested afterwards, so
+// `UPDATE u SET d = 99999999999999999999.99` answered 22003 with the matched
+// rows already deleted, and three such failures emptied a three-row table
+// (#647 review). A value conversion that can fail must run before the first
+// irreversible step, and this is where the declaration to check against lives.
+//
+// The value is VALIDATED, not rewritten: the box returned is the box the
+// writer receives, so what is checked here is what is stored. Returning the
+// resolved Decimal128 instead would change the box a DECIMAL partition key is
+// formatted from, and the check costs one parse per literal, not per row.
+func ConvertValueForColumn(s string, col parquet.Column) (any, error) {
+	v, err := convertValue(s, col.Type)
+	if err != nil || v == nil || col.Type != parquet.TypeDecimal {
+		return v, err
+	}
+	if _, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 // convertValue's default case (return the trimmed, unquoted string as-is)

@@ -1047,21 +1047,9 @@ func (db *DB) alterAlertSQL(ctx context.Context, info *plansql.AlterAlertInfo) (
 func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
 	columns := make([]parquet.Column, len(defs))
 	for i, d := range defs {
-		typeID, err := parquet.ParseTypeID(d.Type)
+		col, err := parquet.DeclaredColumn(d.Name, d.Type, d.Nullable)
 		if err != nil {
 			return parquet.Schema{}, fmt.Errorf("column %q: %w", d.Name, err)
-		}
-		col := parquet.Column{
-			Name:     strings.ToLower(d.Name),
-			Type:     typeID,
-			Nullable: d.Nullable,
-		}
-		if typeID == parquet.TypeDecimal {
-			p, sc, err := parquet.ParseDecimalParams(d.Type)
-			if err != nil {
-				return parquet.Schema{}, fmt.Errorf("column %q: %w", d.Name, err)
-			}
-			col.Precision, col.Scale = p, sc
 		}
 		columns[i] = col
 	}

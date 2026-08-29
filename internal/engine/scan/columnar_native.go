@@ -1195,7 +1195,7 @@ func decimalInto(dst []batch.Int128, data pqt.Values, srcStart, n int) error {
 		for i := 0; i < n; i++ {
 			w, err := pqt.DecimalFromBytes(raw[offs[srcStart+i]:offs[srcStart+i+1]])
 			if err != nil {
-				return fmt.Errorf("DECIMAL column, entry %d: %w", srcStart+i, err)
+				return fmt.Errorf("entry %d: %w", srcStart+i, err)
 			}
 			dst[i] = batch.Int128{Hi: int64(w[0]), Lo: w[1]}
 		}

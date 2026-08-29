@@ -225,11 +225,13 @@ func checkType(col parquet.Column, v any) error {
 			return fmt.Errorf("column %q: %w", col.Name, err)
 		}
 	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap:
-		// Reject an unparseable or nonexistent calendar date NESTED in a
-		// container at the ingest boundary, before the writer's leaf turns
-		// it into the epoch -- the same silent corruption as a top-level
-		// DATE, one the top-level checks never saw (#560).
-		if err := parquet.ValidateNestedDates(col, v); err != nil {
+		// Reject a value no leaf of this container's declaration can hold at
+		// the ingest boundary, before the writer's leaf turns it into the
+		// epoch (DATE, #560) or refuses it at the flush (DECIMAL, #647) --
+		// the flush is per BUFFER, so a bad row failing there takes the
+		// already-accepted rows beside it with it. The top-level checks never
+		// saw either one.
+		if err := parquet.ValidateNestedLeaves(col, v); err != nil {
 			return fmt.Errorf("column %q: %w", col.Name, err)
 		}
 	}

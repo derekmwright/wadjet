@@ -406,15 +406,15 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 
 	columns := make([]parquet.Column, len(req.Columns))
 	for i, cd := range req.Columns {
-		typeID, err := parquet.ParseTypeID(cd.Type)
+		// parquet.DeclaredColumn, not ParseTypeID: a DECIMAL's precision and
+		// scale live in the type text, and reading only the TypeID here gave
+		// every DECIMAL column created over gRPC a Precision 0, Scale 0
+		// declaration (#647 review).
+		col, err := parquet.DeclaredColumn(cd.Name, cd.Type, cd.Nullable)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "column %q: %v", cd.Name, err)
 		}
-		columns[i] = parquet.Column{
-			Name:     strings.ToLower(cd.Name),
-			Type:     typeID,
-			Nullable: cd.Nullable,
-		}
+		columns[i] = col
 	}
 
 	schema := parquet.Schema{Columns: columns}

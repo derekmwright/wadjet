@@ -219,6 +219,33 @@ func ParseDecimalParams(s string) (precision, scale int, err error) {
 	return precision, scale, nil
 }
 
+// DeclaredColumn builds a Column from one DDL column declaration: the type
+// exactly as written, plus its nullability.
+//
+// It is the ONE place a declaration becomes a Column, because a DECIMAL's
+// (p, s) lives in the type TEXT and nowhere else. Three copies of "ParseTypeID
+// and fill in the name" existed — the embedded API, the HTTP server and gRPC —
+// and only the first read the parameters, so `CREATE TABLE t (d DECIMAL(9,2))`
+// over HTTP or gRPC produced a Precision 0, Scale 0 column: 12.34 stored as
+// 12, 9999999.999 stored as 10000000 with no error, and DECIMAL(50,2)
+// accepted (#647 review). Copies of a declaration parser drift toward the
+// laziest one; there is now one to drift from.
+func DeclaredColumn(name, typeStr string, nullable bool) (Column, error) {
+	typeID, err := ParseTypeID(typeStr)
+	if err != nil {
+		return Column{}, err
+	}
+	col := Column{Name: strings.ToLower(name), Type: typeID, Nullable: nullable}
+	if typeID == TypeDecimal {
+		p, sc, err := ParseDecimalParams(typeStr)
+		if err != nil {
+			return Column{}, err
+		}
+		col.Precision, col.Scale = p, sc
+	}
+	return col, nil
+}
+
 // ResolveColumn parses a type string into a fully-resolved Column with nested types.
 // Handles: "INT64", "ARRAY(STRING)", "ROW(name STRING, age INT32)", "MAP(STRING, INT64)".
 func ResolveColumn(name, typeStr string) (Column, error) {

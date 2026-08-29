@@ -670,9 +670,12 @@ func (c *pgConn) handleCopyIn(sql string) {
 	}
 
 	// Build type map for value conversion
-	typeMap := make(map[string]parquet.TypeID, len(tableMeta.Schema.Columns))
+	// The whole COLUMN, not its TypeID: a DECIMAL field is judged against the
+	// declared (p, s) as the row is read, so COPY names the row that carried
+	// a value the column cannot hold instead of failing a later flush (#647).
+	colByName := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
 	for _, col := range tableMeta.Schema.Columns {
-		typeMap[col.Name] = col.Type
+		colByName[col.Name] = col
 	}
 
 	numCols := int16(len(columns))
@@ -729,7 +732,7 @@ func (c *pgConn) handleCopyIn(sql string) {
 					}
 					// Unescape backslash sequences
 					val = unescapeCopyText(val)
-					v, err := wadjet.ConvertValue(val, typeMap[colName])
+					v, err := wadjet.ConvertValueForColumn(val, colByName[colName])
 					if err != nil {
 						c.sendError("ERROR", "22P02",
 							fmt.Sprintf("COPY: column %q: %v", colName, err))

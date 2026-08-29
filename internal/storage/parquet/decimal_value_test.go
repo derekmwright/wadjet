@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -250,6 +251,41 @@ func TestDecimalFromBytesRefusesAnEntryPastTheCarrier(t *testing.T) {
 			t.Errorf("a %d-byte DECIMAL entry was decoded", n)
 		}
 	}
+	// A negative value whose excess is 0x00, and a positive one whose excess
+	// is 0xFF: in both the excess is the sign extension of the OTHER sign, so
+	// dropping it would change the number.
+	for _, b := range [][]byte{
+		append(bytes.Repeat([]byte{0x00}, 16), bytes.Repeat([]byte{0xff}, 16)...),
+		append(bytes.Repeat([]byte{0xff}, 16), bytes.Repeat([]byte{0x00}, 16)...),
+	} {
+		if _, err := DecimalFromBytes(b); err == nil {
+			t.Errorf("a %d-byte entry whose excess carries magnitude was decoded", len(b))
+		}
+	}
+
+	// Excess that is PURE SIGN EXTENSION is narrowed and read: an FLBA's
+	// width is fixed per COLUMN, so a foreign DECIMAL(20,4) leaf declared 32
+	// bytes wide carries 32-byte entries whose values all fit sixteen.
+	for _, tc := range []struct {
+		b    []byte
+		want string
+	}{
+		{append(bytes.Repeat([]byte{0x00}, 16), append(bytes.Repeat([]byte{0x00}, 15), 0x2a)...), "42"},
+		{append(bytes.Repeat([]byte{0xff}, 16), append(bytes.Repeat([]byte{0xff}, 15), 0xd6)...), "-42"},
+		{bytes.Repeat([]byte{0x00}, 32), "0"},
+		{bytes.Repeat([]byte{0xff}, 32), "-1"},
+		{append(bytes.Repeat([]byte{0x00}, 4), append([]byte{0x7f}, bytes.Repeat([]byte{0xff}, 15)...)...),
+			"170141183460469231731687303715884105727"},
+	} {
+		w, err := DecimalFromBytes(tc.b)
+		if err != nil {
+			t.Errorf("a %d-byte entry that is sign extension over %s was refused: %v", len(tc.b), tc.want, err)
+			continue
+		}
+		if d := (Decimal128{Hi: int64(w[0]), Lo: w[1]}); d.String() != tc.want {
+			t.Errorf("%d-byte sign-extended entry decoded as %s, want %s", len(tc.b), d, tc.want)
+		}
+	}
 	// Every width the carrier DOES hold still decodes, and a short entry is
 	// sign-extended rather than refused.
 	for _, tc := range []struct {
@@ -317,6 +353,30 @@ func FuzzDecimalValueFromText(f *testing.F) {
 		}
 		if mag2, _ := new(big.Int).SetString(d.String(), 10); mag2.Cmp(want) != 0 {
 			t.Fatalf("%q at DECIMAL(%d,%d) = %s, want %s", text, precision, scale, d, want)
+		}
+	})
+}
+
+// FuzzDecimalValueFromFloat pins the two instantiations of the resolver
+// against each other: the float arm reads a []byte built in a stack buffer,
+// the literal arm reads a string, and they are one generic function whose
+// answers must not depend on which spelling reached it.
+func FuzzDecimalValueFromFloat(f *testing.F) {
+	for _, v := range []float64{0, 1, -1, 0.1, 3.25, 2.675, 1e14, 1e40, -1e40, 1.0 / 3.0} {
+		f.Add(v, 18, 4)
+	}
+	f.Fuzz(func(t *testing.T, v float64, precision, scale int) {
+		precision = 1 + ((precision%MaxDecimalDigits)+MaxDecimalDigits)%MaxDecimalDigits
+		scale = ((scale % (precision + 1)) + precision + 1) % (precision + 1)
+
+		got, gotErr := DecimalValueFromFloat(v, precision, scale)
+		want, wantErr := DecimalValueFromText(strconv.FormatFloat(v, 'g', -1, 64), precision, scale)
+		if (gotErr == nil) != (wantErr == nil) {
+			t.Fatalf("%v at DECIMAL(%d,%d): float arm err=%v, text arm err=%v",
+				v, precision, scale, gotErr, wantErr)
+		}
+		if gotErr == nil && got != want {
+			t.Fatalf("%v at DECIMAL(%d,%d): float arm %s, text arm %s", v, precision, scale, got, want)
 		}
 	})
 }

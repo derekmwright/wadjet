@@ -1309,14 +1309,15 @@ func decodeDecimalValues(dst []any, data Values, n int, col Column) error {
 			return nil
 		}
 		for i := 0; i < n && i+1 < len(offsets); i++ {
-			entry := rawData[offsets[i]:offsets[i+1]]
-			// An entry wider than the carrier is a file wadjet cannot read,
-			// not a value to truncate: decimalFromBytesRaw shifts the leading
-			// bytes out of `hi` and answers a different number (R7/#647).
-			if len(entry) > decimalFLBAMaxWidth {
-				return fmt.Errorf("column %q: DECIMAL entry %d is %d bytes; wadjet's DECIMAL is a "+
-					"%d-byte unscaled integer (at most %d digits, ADR-0024 item 1)",
-					col.Name, i, len(entry), decimalFLBAMaxWidth, MaxDecimalDigits)
+			// An entry whose excess bytes carry MAGNITUDE is a file wadjet
+			// cannot read, not a value to truncate: decimalFromBytesRaw
+			// shifts the leading bytes out of `hi` and answers a different
+			// number (R7/#647). Excess that is only sign extension is
+			// narrowed and read, because those values do fit.
+			entry, ok := DecimalEntryBytes(rawData[offsets[i]:offsets[i+1]])
+			if !ok {
+				return fmt.Errorf("column %q, entry %d: %w",
+					col.Name, i, decimalEntryTooWide(int(offsets[i+1]-offsets[i])))
 			}
 			hi, lo := decimalFromBytesRaw(entry)
 			d := Decimal128{Hi: hi, Lo: lo}
@@ -1581,21 +1582,19 @@ func (r *Reader) RowGroupNumRows(index int) int64 {
 // DecimalFromBytes converts a big-endian two's-complement DECIMAL entry to the
 // two words of an Int128. Exported for the native scan's decimal page reader.
 //
-// An entry WIDER than sixteen bytes is an error, not a value: the loop below
-// shifts the leading bytes straight out of `hi`, so a 32-byte entry — which is
-// what a foreign file written at a precision past 38 carries — used to come
-// back as its own low 128 bits, a different number, with no error at all
-// (R7/#647). Sixteen bytes is the whole range this carrier has (ADR-0024
-// item 1), and a file that needs more is a file wadjet cannot read.
+// An entry whose excess over sixteen bytes carries MAGNITUDE is an error, not
+// a value: the loop below shifts the leading bytes straight out of `hi`, so a
+// 32-byte entry — which is what a foreign file written at a precision past 38
+// carries — used to come back as its own low 128 bits, a different number,
+// with no error at all (R7/#647). Excess that is only SIGN EXTENSION is
+// narrowed and read: the format fixes an FLBA's width per column, so a wider
+// leaf whose values all fit is an ordinary file (DecimalEntryBytes).
 func DecimalFromBytes(b []byte) ([2]uint64, error) {
-	n := len(b)
-	if n > decimalFLBAMaxWidth {
-		return [2]uint64{}, fmt.Errorf(
-			"DECIMAL entry is %d bytes; wadjet's DECIMAL is a %d-byte unscaled integer "+
-				"(a precision of at most %d digits, ADR-0024 item 1), and reading the entry "+
-				"would silently drop its leading bytes",
-			n, decimalFLBAMaxWidth, MaxDecimalDigits)
+	b, ok := DecimalEntryBytes(b)
+	if !ok {
+		return [2]uint64{}, decimalEntryTooWide(len(b))
 	}
+	n := len(b)
 	if n == 0 {
 		return [2]uint64{}, nil
 	}

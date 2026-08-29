@@ -1,6 +1,7 @@
 package parquet
 
 import (
+	"errors"
 	"math"
 	"math/bits"
 	"strconv"
@@ -73,12 +74,13 @@ const (
 // that names no number at all, which is DecimalTextParts's question, not this
 // one's.
 //
-// The accept-set is PostgreSQL 17.11's, verified live on postgres:17-alpine:
-// surrounding whitespace is stripped; `NaN` is case-insensitive and takes NO
-// sign (`+NaN` and `-NaN` are both 22P02 there); `Infinity` and its short form
-// `Inf` are case-insensitive and take an optional immediately-adjacent `+` or
-// `-`. Nothing else — a prefix (`Infin`, `infinit`), a sign separated by a
-// space (`- inf`) and any trailing character (`NaN0`) are all refused.
+// The accept-set is PostgreSQL 17.11's for these three spellings, verified
+// live on postgres:17-alpine: surrounding whitespace is stripped; `NaN` is
+// case-insensitive and takes NO sign (`+NaN` and `-NaN` are both 22P02
+// there); `Infinity` and its short form `Inf` are case-insensitive and take an
+// optional immediately-adjacent `+` or `-`. Nothing else — a prefix (`Infin`,
+// `infinit`), a sign separated by a space (`- inf`) and any trailing character
+// (`NaN0`) are all refused.
 func DecimalSpecialText(text string) DecimalSpecialKind {
 	// batch.CompareDecimalTexts calls this per ROW on the boxed path, where
 	// every operand is an ordinary number, so the answer for "not one of the
@@ -157,6 +159,13 @@ func DecimalSpecialValueError(s string) error {
 			"(ADR-0024 item 6)", s)
 }
 
+// decimalTextBytes is the two spellings of numeric text this file parses: a
+// STRING for a literal a user typed, and a []byte for the shortest round-trip
+// rendering of a float box, which is built into a stack buffer and must not
+// have to become a string to be read (#647 review). The parser is written once
+// over both rather than twice.
+type decimalTextBytes interface{ ~string | ~[]byte }
+
 // DecimalTextParts splits numeric TEXT — plain or exponent form — into its
 // sign, its digits with the decimal point removed, and the power of ten those
 // digits must be multiplied by, exactly and without ever going through a
@@ -174,14 +183,48 @@ func DecimalSpecialValueError(s string) error {
 // the value zero: a constant nobody can read used to compare EQUAL to every
 // stored zero (#463), and on the write path it used to be STORED as zero
 // (#647), which is the same failure one layer down.
+//
+// The grammar is PostgreSQL's numeric input MINUS digit separators and radix
+// prefixes. PostgreSQL 16 added both to numeric_in, so 17.11 accepts `1_000`,
+// `1_0.5`, `0x10`, `0b101` and `0o17` (verified live) where this refuses all
+// five with 22P02. That gap is #634 and is deferred, not decided here; it is a
+// REFUSAL of input PostgreSQL takes, never a different value for input both
+// accept, so nothing silently disagrees while it is open.
+//
+// The digit string is the only allocation in this file's parse, and it happens
+// only when a value HAS both an integer and a fraction part; the value builder
+// below never asks for it at all (decimalTextSplit).
 func DecimalTextParts(s string) (neg bool, digits string, exp int, ok bool) {
-	// decimalSpaceCutset, never strings.TrimSpace: PostgreSQL's numeric input
-	// skips C isspace() only, so a NO-BREAK SPACE (U+00A0) before the digits
-	// is a non-whitespace byte it refuses with 22P02. TrimSpace strips it and
-	// would have answered the row.
-	s = strings.Trim(s, decimalSpaceCutset)
-	if s == "" {
+	neg, ip, fp, exp, ok := decimalTextSplit(s)
+	switch {
+	case !ok:
 		return false, "", 0, false
+	case fp == "":
+		return neg, ip, exp, true
+	case ip == "":
+		return neg, fp, exp, true
+	}
+	return neg, ip + fp, exp, true
+}
+
+// decimalTextSplit is DecimalTextParts with the two digit runs kept apart, so
+// nothing has to be concatenated to read them. The logical digit string is
+// `ip + fp`, and digitAt indexes it without building it.
+func decimalTextSplit[T decimalTextBytes](s T) (neg bool, ip, fp T, exp int, ok bool) {
+	// C isspace() only, never unicode.IsSpace: PostgreSQL's numeric input
+	// skips exactly this set, so a NO-BREAK SPACE (U+00A0) before the digits
+	// is a non-whitespace byte it refuses with 22P02. Trimming the Unicode
+	// set would have answered the row.
+	i, j := 0, len(s)
+	for i < j && isDecimalSpace(s[i]) {
+		i++
+	}
+	for j > i && isDecimalSpace(s[j-1]) {
+		j--
+	}
+	s = s[i:j]
+	if len(s) == 0 {
+		return false, ip, fp, 0, false
 	}
 	switch s[0] {
 	case '-':
@@ -189,43 +232,129 @@ func DecimalTextParts(s string) (neg bool, digits string, exp int, ok bool) {
 	case '+':
 		s = s[1:]
 	}
-	if i := strings.IndexAny(s, "eE"); i >= 0 {
-		e, err := strconv.Atoi(s[i+1:])
-		if err != nil && !isAtoiRangeError(err) {
-			return false, "", 0, false
+	for k := 0; k < len(s); k++ {
+		if s[k] == 'e' || s[k] == 'E' {
+			e, eok := decimalExponent(s[k+1:])
+			if !eok {
+				return false, ip, fp, 0, false
+			}
+			exp, s = e, s[:k]
+			break
 		}
-		// A range error keeps Atoi's clamped magnitude, which is already far
-		// past anything that changes the answer; clamping again keeps
-		// exp+scale from overflowing an int in the caller.
-		exp = min(max(e, -maxDecimalExponent), maxDecimalExponent)
-		s = s[:i]
 	}
-	intPart, fracPart, _ := strings.Cut(s, ".")
-	if !allDecimalDigits(intPart) || !allDecimalDigits(fracPart) || intPart+fracPart == "" {
-		return false, "", 0, false
+	dot := -1
+	for k := 0; k < len(s); k++ {
+		if s[k] == '.' {
+			dot = k
+			break
+		}
 	}
-	return neg, intPart + fracPart, exp - len(fracPart), true
+	if dot < 0 {
+		ip = s
+	} else {
+		ip, fp = s[:dot], s[dot+1:]
+	}
+	if !allDecimalDigits(ip) || !allDecimalDigits(fp) || len(ip)+len(fp) == 0 {
+		return false, ip, fp, 0, false
+	}
+	return neg, ip, fp, exp - len(fp), true
 }
 
-// isAtoiRangeError reports the strconv.ErrRange an exponent past an int can
-// return. It is spelled out rather than compared with errors.Is so this file
-// keeps the same dependency surface as the rest of the package.
-func isAtoiRangeError(err error) bool {
-	ne, ok := err.(*strconv.NumError)
-	return ok && ne.Err == strconv.ErrRange
+// decimalExponent reads the integer after an `e`/`E`, clamped to
+// ±maxDecimalExponent. It replaces strconv.Atoi so the []byte spelling costs no
+// allocation; the accept-set is Atoi's — an optional sign then at least one
+// digit, no underscores — and a magnitude past the clamp keeps the clamp,
+// which is what Atoi's ErrRange arm did.
+func decimalExponent[T decimalTextBytes](s T) (int, bool) {
+	i, neg := 0, false
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		neg, i = s[0] == '-', 1
+	}
+	if i >= len(s) {
+		return 0, false
+	}
+	v := 0
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		if v <= maxDecimalExponent {
+			v = v*10 + int(c-'0')
+		}
+	}
+	if v > maxDecimalExponent {
+		v = maxDecimalExponent
+	}
+	if neg {
+		v = -v
+	}
+	return v, true
 }
 
 // allDecimalDigits reports whether every byte is 0-9. The EMPTY string is all
 // digits — "5." and ".5" are both numbers, and each has one empty part.
 // (date_parse.go's allDigits answers false for the empty string, which is the
 // right answer for a date field and the wrong one here.)
-func allDecimalDigits(s string) bool {
+func allDecimalDigits[T decimalTextBytes](s T) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
 	return true
+}
+
+// digitAt indexes the logical digit string `ip + fp` without building it.
+func digitAt[T decimalTextBytes](ip, fp T, i int) byte {
+	if i < len(ip) {
+		return ip[i]
+	}
+	return fp[i-len(ip)]
+}
+
+// DecimalEntryBytes narrows a big-endian two's-complement DECIMAL entry to the
+// sixteen bytes this carrier holds, and reports false when the excess carries
+// MAGNITUDE rather than sign.
+//
+// A foreign writer is free to store a DECIMAL in a wider fixed-length array
+// than its values need — the format fixes the width per COLUMN, not per value,
+// so a DECIMAL(20,4) leaf declared 32 bytes wide holds 32-byte entries whose
+// top sixteen are nothing but the sign repeated. Refusing those outright would
+// refuse files whose every value fits (#647 review); refusing only the ones
+// that actually need the width is the check the format supports. The excess
+// must be all-0x00 over a positive value or all-0xFF over a negative one, and
+// the kept bytes must carry the SAME sign, or a byte that was dropped is the
+// one expressing it.
+func DecimalEntryBytes(b []byte) ([]byte, bool) {
+	if len(b) <= decimalFLBAMaxWidth {
+		return b, true
+	}
+	excess := len(b) - decimalFLBAMaxWidth
+	pad := byte(0)
+	if b[0]&0x80 != 0 {
+		pad = 0xff
+	}
+	for i := 0; i < excess; i++ {
+		if b[i] != pad {
+			return nil, false
+		}
+	}
+	if (b[excess]&0x80 != 0) != (pad == 0xff) {
+		return nil, false
+	}
+	return b[excess:], true
+}
+
+// decimalEntryTooWide is the read refusal an entry earns when its excess bytes
+// carry magnitude. It names the width and the bound, and leaves the column and
+// the row to the caller that knows them.
+func decimalEntryTooWide(n int) error {
+	return sqlerr.New("22003",
+		"a DECIMAL entry of %d bytes needs more than the %d-byte unscaled integer wadjet's "+
+			"DECIMAL is (at most %d digits, ADR-0024 item 1); its leading bytes are not sign "+
+			"extension, so reading it would silently drop them",
+		n, decimalFLBAMaxWidth, MaxDecimalDigits)
 }
 
 // decimalEffectivePrecision is the bound a DECIMAL column's declared precision
@@ -278,44 +407,71 @@ func DecimalValueFromText(s string, precision, scale int) (Decimal128, error) {
 	if err := DecimalSpecialValueError(s); err != nil {
 		return Decimal128{}, err
 	}
-	neg, digits, exp, ok := DecimalTextParts(s)
-	if !ok {
+	d, err := decimalValueFromText(s, precision, scale)
+	if errors.Is(err, errDecimalSyntax) {
 		return Decimal128{}, sqlerr.New("22P02", "invalid input syntax for type numeric: %q", s)
 	}
+	return d, err
+}
+
+// errDecimalSyntax is the resolver's "this text names no number", turned into
+// PostgreSQL's 22P02 by whichever entry point knows how to SPELL the input.
+//
+// It is a sentinel rather than the finished message because building that
+// message inside the generic resolver puts the input through an `any`, which
+// makes it escape — and the float arm's input is a stack buffer that must not
+// (#647 review). The refusal is the same one either way.
+var errDecimalSyntax = errors.New("numeric input syntax")
+
+// decimalValueFromText is DecimalValueFromText over either spelling, and
+// WITHOUT the NaN/±Infinity check: the float arm has already refused those
+// three by their bit patterns, and a rendering strconv produced can be nothing
+// else. It allocates nothing on the success path.
+func decimalValueFromText[T decimalTextBytes](s T, precision, scale int) (Decimal128, error) {
+	neg, ip, fp, exp, ok := decimalTextSplit(s)
+	if !ok {
+		return Decimal128{}, errDecimalSyntax
+	}
 	p := decimalEffectivePrecision(precision)
-	digits = strings.TrimLeft(digits, "0")
-	if digits == "" {
+
+	// Skip leading zeros across both runs; what is left is the significant
+	// digit string, at index `lead` and `n` digits long.
+	total := len(ip) + len(fp)
+	lead := 0
+	for lead < total && digitAt(ip, fp, lead) == '0' {
+		lead++
+	}
+	n := total - lead
+	if n == 0 {
 		return Decimal128{}, nil // zero, at every scale
 	}
 
-	// The unscaled value at `scale` is digits x 10^(exp+scale), rounded half
-	// away from zero at the point where the digits run out.
+	// The unscaled value at `scale` is those digits x 10^(exp+scale), rounded
+	// half away from zero at the point where they run out.
 	shift := exp + scale
-	var kept string
-	roundUp := false
+	keep, zeros, roundUp := n, 0, false
 	switch {
 	case shift >= 0:
-		if len(digits)+shift > maxDecimal128Digits {
+		if n+shift > maxDecimal128Digits {
 			return Decimal128{}, decimalOverflow(p, scale)
 		}
-		kept = digits + strings.Repeat("0", shift)
+		zeros = shift
 	default:
-		keptLen := len(digits) + shift
+		keep = n + shift
 		switch {
-		case keptLen < 0:
+		case keep < 0:
 			// Below half a unit at this scale however the digits read: the
 			// leading digit is at least one place right of the tenths.
 			return Decimal128{}, nil
-		case keptLen == 0:
+		case keep == 0:
 			// 0.d1d2... of a unit: it rounds to one unit iff d1 >= 5.
-			kept = ""
-			roundUp = digits[0] >= '5'
+			roundUp = digitAt(ip, fp, lead) >= '5'
 		default:
-			kept, roundUp = digits[:keptLen], digits[keptLen] >= '5'
+			roundUp = digitAt(ip, fp, lead+keep) >= '5'
 		}
 	}
 
-	hi, lo, ok := decimalMagFromDigits(kept)
+	hi, lo, ok := decimalMagnitudeOf(ip, fp, lead, keep, zeros)
 	if !ok {
 		return Decimal128{}, decimalOverflow(p, scale)
 	}
@@ -334,11 +490,11 @@ func DecimalValueFromText(s string, precision, scale int) (Decimal128, error) {
 }
 
 // DecimalValueFromFloat converts a REAL box through its SHORTEST round-trip
-// text and then through DecimalValueFromText, so a float and the literal a
-// user typed for it land on the same unscaled integer and are held to the same
-// declared precision. Going through math.Round(f * 10^scale) instead lost the
-// exactness of everything past ~16 significant digits and wrapped the int64
-// past 2^63 with no error at all (#647).
+// text and then through the same resolver a literal takes, so a float and the
+// literal a user typed for it land on the same unscaled integer and are held
+// to the same declared precision. Going through math.Round(f * 10^scale)
+// instead lost the exactness of everything past ~16 significant digits and
+// wrapped the int64 past 2^63 with no error at all (#647).
 //
 // NaN and the infinities are 22003: a DECIMAL column has no bit pattern for
 // them (ADR-0024 item 6). They used to store 0.
@@ -351,6 +507,24 @@ func DecimalValueFromFloat(f float64, precision, scale int) (Decimal128, error) 
 // a REAL holding 0.1 stores as 0.1 and not as the 0.10000000149011612 its
 // widening to float64 makes exact — the same rule batch.setCheckedDecimalFloat
 // follows for the row-to-batch side of the same conversion.
+//
+// A RECORDED DIVERGENCE, verified live on postgres:17-alpine: PostgreSQL's
+// float8 -> numeric cast renders the float with %.15g, so
+// `4611686018427387904::float8::numeric` is 4611686018427390000 there and
+// 4611686018427388000 here — wadjet keeps the 17 significant digits that
+// identify the float, PostgreSQL keeps 15. Shortest-round-trip is chosen
+// deliberately: it is the only rendering that names the float it came from,
+// and it is what the row-to-batch twin already does, so the two paths cannot
+// disagree about one value. Nothing in SQL reaches this today — a float box
+// arrives through the embedded/HTTP API, and `CAST(x AS DECIMAL(p,s))` is
+// still ADR-0024 item 6's declared-STRING no-op — so when the CAST evaluator
+// lands (#555) it has to decide separately whether the SQL cast follows
+// PostgreSQL's %.15g.
+//
+// The rendering goes into a STACK buffer: strconv.FormatFloat would allocate a
+// string per value, and ingest of a float-boxed decimal column is one of these
+// per row. 32 bytes covers every shortest 'g' rendering a float64 has (17
+// significant digits, a sign, a point and a four-character exponent).
 func decimalValueFromFloatBits(f float64, bitSize, precision, scale int) (Decimal128, error) {
 	if math.IsNaN(f) {
 		return Decimal128{}, DecimalSpecialValueError("NaN")
@@ -361,7 +535,15 @@ func decimalValueFromFloatBits(f float64, bitSize, precision, scale int) (Decima
 	if math.IsInf(f, -1) {
 		return Decimal128{}, DecimalSpecialValueError("-Infinity")
 	}
-	return DecimalValueFromText(strconv.FormatFloat(f, 'g', -1, bitSize), precision, scale)
+	var buf [32]byte
+	d, err := decimalValueFromText(strconv.AppendFloat(buf[:0], f, 'g', -1, bitSize), precision, scale)
+	if errors.Is(err, errDecimalSyntax) {
+		// Unreachable: strconv renders every finite float as a number, and
+		// the three that are not finite were refused above. Spelled from the
+		// FLOAT rather than from the buffer so the buffer stays on the stack.
+		return Decimal128{}, sqlerr.New("22P02", "invalid input syntax for type numeric: %v", f)
+	}
+	return d, err
 }
 
 // DecimalValueFromUnscaled holds an ALREADY-UNSCALED box to the column's
@@ -417,14 +599,23 @@ func DecimalValueFromBox(v any, precision, scale int) (Decimal128, error) {
 	}
 }
 
-// decimalMagFromDigits reads a base-10 MAGNITUDE (no sign, leading zeros
-// allowed) into the two words of a 128-bit unsigned value, reporting false
-// when it does not fit the 127 bits a signed carrier leaves for it.
-func decimalMagFromDigits(digits string) (hi, lo uint64, ok bool) {
-	if len(digits) > maxDecimal128Digits {
+// decimalMagnitudeOf accumulates the 128-bit unsigned magnitude of `keep`
+// digits of the logical string `ip + fp`, starting at index `lead`, followed by
+// `zeros` trailing zeros. It reports false when the result leaves the 127 bits
+// a two's-complement magnitude has.
+//
+// It walks the two runs by index rather than taking a digit STRING, because
+// building that string was the one allocation on every text box's way into a
+// leaf (#647 review).
+func decimalMagnitudeOf[T decimalTextBytes](ip, fp T, lead, keep, zeros int) (hi, lo uint64, ok bool) {
+	if keep+zeros > maxDecimal128Digits {
 		return 0, 0, false
 	}
-	for i := 0; i < len(digits); i++ {
+	for i := 0; i < keep+zeros; i++ {
+		d := byte('0')
+		if i < keep {
+			d = digitAt(ip, fp, lead+i)
+		}
 		// (hi:lo) = (hi:lo)*10 + d, refusing anything that leaves the 127
 		// bits a two's-complement magnitude has.
 		carry, low := bits.Mul64(lo, 10)
@@ -436,7 +627,7 @@ func decimalMagFromDigits(digits string) (hi, lo uint64, ok bool) {
 		if c1 != 0 {
 			return 0, 0, false
 		}
-		newLo, c2 := bits.Add64(low, uint64(digits[i]-'0'), 0)
+		newLo, c2 := bits.Add64(low, uint64(d-'0'), 0)
 		newHi, c3 := bits.Add64(newHi, 0, c2)
 		if c3 != 0 || newHi > math.MaxInt64 {
 			return 0, 0, false
