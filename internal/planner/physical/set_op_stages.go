@@ -477,9 +477,18 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			}
 			// A computed column's declared type IS its runtime type: the
 			// worker builds the output vector from it.
-			spec.Type = inferProjectionTypeDecls(ast, parquet.TypeString, strictInt, colTypes)
+			decl := inferProjectionDeclType(ast, parquet.TypeString, strictInt, colTypes)
+			spec.Type, spec.Precision, spec.Scale = declTypeParts(decl)
 			spec.TypeKnown = true
 			ct = setOpColType{typ: spec.Type, known: true}
+			if decl.ID == parquet.TypeDecimal && decl.DecKnown {
+				// A computed DECIMAL arm now knows its own (p,s), so the
+				// arms reconcile through the ordinary rule instead of
+				// leaving every arm as written — the #551 silent channel
+				// (ADR-0024 item 2).
+				ct.dec = logical.DecimalMeta{Precision: decl.Precision, Scale: decl.Scale}
+				ct.decKnown = true
+			}
 		} else if t, ok := setOpRefType(colTypes.types, e, pr); ok {
 			// A bare reference copies its source column, so the source's
 			// type is what the arm emits. spec.Type stays unset: the worker

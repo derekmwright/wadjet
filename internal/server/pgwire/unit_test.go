@@ -86,7 +86,7 @@ func TestIntegerReturningScalarsWireInt4(t *testing.T) {
 			t.Errorf("%s: return type not DECIDED (%v)", name, conf)
 			continue
 		}
-		oid := pgTypeOID(typ.String())
+		oid := pgTypeOID(typ.ID.String())
 		if oid != 23 {
 			t.Errorf("%s: wire OID %d (from type %s), want 23 (int4)", name, oid, typ)
 		}

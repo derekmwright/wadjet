@@ -2955,10 +2955,11 @@ func (c *Coordinator) dispatchComputeStage(
 		if len(stage.ChainedAggSpecs) > 0 || len(stage.ChainedAggGroupBy) > 0 {
 			chainAggs := wireAggSpecs(stage.ChainedAggSpecs)
 			chainedOps = append(chainedOps, distributed.OpSpec{
-				Type:         distributed.OpHashAggregate,
-				GroupByCols:  append([]string(nil), stage.ChainedAggGroupBy...),
-				GroupByTypes: wireGroupByTypes(stage.GroupByTypes),
-				Aggregates:   decomposeCovar(decomposeVar(decomposeAvg(chainAggs))),
+				Type:           distributed.OpHashAggregate,
+				GroupByCols:    append([]string(nil), stage.ChainedAggGroupBy...),
+				GroupByTypes:   wireGroupByTypes(stage.GroupByTypes),
+				GroupByDecimal: wireGroupByDecimal(stage.GroupByDecimal),
+				Aggregates:     decomposeCovar(decomposeVar(decomposeAvg(chainAggs))),
 				// Derived group-bys / agg inputs (SUBSTR(...), price*(1-disc))
 				// need the worker's input projection ahead of the aggregate —
 				// without it the expression column doesn't exist and groups
@@ -3838,12 +3839,13 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 	mergeMode := (stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
 		!stage.RawInputAggregate
 	ops = append(ops, distributed.OpSpec{
-		Type:         distributed.OpHashAggregate,
-		GroupByCols:  append([]string(nil), stage.GroupByCols...),
-		GroupByTypes: wireGroupByTypes(stage.GroupByTypes),
-		Aggregates:   append([]distributed.AggSpec(nil), aggs...),
-		GroupByAll:   stage.GroupByAll,
-		MergeMode:    mergeMode,
+		Type:           distributed.OpHashAggregate,
+		GroupByCols:    append([]string(nil), stage.GroupByCols...),
+		GroupByTypes:   wireGroupByTypes(stage.GroupByTypes),
+		GroupByDecimal: wireGroupByDecimal(stage.GroupByDecimal),
+		Aggregates:     append([]distributed.AggSpec(nil), aggs...),
+		GroupByAll:     stage.GroupByAll,
+		MergeMode:      mergeMode,
 		// GroupByAll (DISTINCT) has no derived-input expressions to project and
 		// no AVG synthetics to fold — keep both off regardless of stage role.
 		FoldAvg:      stage.Type == "final_aggregate" && !stage.GroupByAll,
@@ -4143,6 +4145,9 @@ func projectOpFromSpecs(specs []physical.ProjectExprSpec) (distributed.OpSpec, b
 		if p.TypeKnown || p.Type != 0 {
 			projections[i].Type = distributed.WindowTypePtr(int(p.Type))
 		}
+		// A DECIMAL's (p,s) travels with its TypeID or the worker's output
+		// vector comes out at scale 0 (ADR-0024 item 2).
+		projections[i].Precision, projections[i].Scale = p.Precision, p.Scale
 	}
 	return distributed.OpSpec{Type: distributed.OpProject, Projections: projections}, true
 }
@@ -4208,12 +4213,13 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 		ops = append(ops, op)
 	}
 	ops = append(ops, distributed.OpSpec{
-		Type:         distributed.OpHashAggregate,
-		GroupByCols:  append([]string(nil), stage.FusedAggGroupBy...),
-		GroupByTypes: wireGroupByTypes(stage.GroupByTypes),
-		Aggregates:   append([]distributed.AggSpec(nil), aggs...),
-		MergeMode:    false,
-		BuildProject: true,
+		Type:           distributed.OpHashAggregate,
+		GroupByCols:    append([]string(nil), stage.FusedAggGroupBy...),
+		GroupByTypes:   wireGroupByTypes(stage.GroupByTypes),
+		GroupByDecimal: wireGroupByDecimal(stage.GroupByDecimal),
+		Aggregates:     append([]distributed.AggSpec(nil), aggs...),
+		MergeMode:      false,
+		BuildProject:   true,
 	})
 	ops = append(ops, terminalSink)
 	return ops, nil

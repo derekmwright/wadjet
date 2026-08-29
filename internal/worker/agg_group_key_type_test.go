@@ -3,6 +3,8 @@ package worker
 import (
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -17,9 +19,10 @@ import (
 func TestAggInputProjectionDeclaredGroupKeyType(t *testing.T) {
 	const key = "coalesce(l_extendedprice, 0)"
 
-	keyType := func(t *testing.T, groupByTypes map[string]int) parquet.TypeID {
+	keyCol := func(t *testing.T, groupByTypes map[string]int,
+		groupByDecimal map[string]distributed.DecimalMeta) exec.ProjectColumn {
 		t.Helper()
-		project, _, err := buildAggInputProjection([]string{key}, nil, nil, groupByTypes)
+		project, _, err := buildAggInputProjection([]string{key}, nil, nil, groupByTypes, groupByDecimal)
 		if err != nil {
 			t.Fatalf("buildAggInputProjection: %v", err)
 		}
@@ -28,11 +31,15 @@ func TestAggInputProjectionDeclaredGroupKeyType(t *testing.T) {
 		}
 		for _, pc := range project.Projections {
 			if pc.Name == key {
-				return pc.Type
+				return pc
 			}
 		}
 		t.Fatalf("projection has no column named %q", key)
-		return 0
+		return exec.ProjectColumn{}
+	}
+	keyType := func(t *testing.T, groupByTypes map[string]int) parquet.TypeID {
+		t.Helper()
+		return keyCol(t, groupByTypes, nil).Type
 	}
 
 	// Undeclared (older coordinator): the schema-blind inference stands.
@@ -46,5 +53,17 @@ func TestAggInputProjectionDeclaredGroupKeyType(t *testing.T) {
 	declared := map[string]int{key: int(parquet.TypeFloat64)}
 	if got := keyType(t, declared); got != parquet.TypeFloat64 {
 		t.Errorf("declared key type = %v, want Float64 (OpSpec.GroupByTypes must override the blind inference)", got)
+	}
+
+	// A DECIMAL key carries its (p,s) too (ADR-0024 item 2). Without them
+	// the vector comes out at scale 0 and #379's truncation returns for a
+	// different type: 12.7500 and 12.7501 both become the group 12.
+	decTypes := map[string]int{key: int(parquet.TypeDecimal)}
+	decMeta := map[string]distributed.DecimalMeta{key: {Precision: 18, Scale: 4}}
+	got := keyCol(t, decTypes, decMeta)
+	if got.Type != parquet.TypeDecimal || got.Precision != 18 || got.Scale != 4 {
+		t.Errorf("declared DECIMAL key = %v(%d,%d), want DECIMAL(18,4) — OpSpec.GroupByDecimal "+
+			"must reach the key vector or every value truncates at scale 0",
+			got.Type, got.Precision, got.Scale)
 	}
 }

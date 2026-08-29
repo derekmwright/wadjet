@@ -2321,6 +2321,15 @@ type FuncCall struct {
 	// and the declaration-driven comparison, both keyed by argument index
 	// because the (best-so-far, candidate) pair moves between iterations.
 	extremumArms *extremumArms
+	// nullifArms is the same binding for NULLIF, whose EQUALITY test is the
+	// same question GREATEST/LEAST's ordering is: `NULLIF(d_2, d_4)` over two
+	// DECIMAL columns at different scales boxes them as their rendered TEXT,
+	// and compare() then reads "12.75" and "12.7500" as different strings —
+	// so NULLIF answered 12.75 where PostgreSQL answers NULL. The other boxed
+	// comparison sites over that pair were bound in #506; this one was
+	// missed, and was invisible until a projected NULLIF over a DECIMAL could
+	// run at all (ADR-0024 item 2).
+	nullifArms *extremumArms
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -2724,6 +2733,10 @@ func (e *FuncCall) resolveFnSlow() {
 	case "least":
 		e.extremum, e.extremumOp = true, CmpLt
 		e.extremumArms = armExtremumArms(e.Args)
+	case "nullif":
+		if len(e.Args) >= 2 {
+			e.nullifArms = armExtremumArms(e.Args)
+		}
 	}
 	e.fnReady.Store(true)
 }
@@ -2760,7 +2773,43 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	if e.extremum {
 		return pickExtremum(b, args, e.extremumOp, e.extremumArms)
 	}
+	if e.nullifArms != nil {
+		return evalNullIf(b, args, e.nullifArms)
+	}
 	return e.fn(args)
+}
+
+// evalNullIf is fnNullIf with the argument EXPRESSIONS in hand, so the
+// equality test uses the rule the two DECLARATIONS select instead of
+// compare()'s reading of two boxes.
+//
+// A DECIMAL boxes as its rendered text, so compare() called "12.75" and
+// "12.7500" — the same number at two scales — different, and NULLIF returned
+// its first argument where PostgreSQL returns NULL. extremumArms.order is the
+// binding #506 built for exactly this pair; NULLIF is the site it did not
+// reach, because the equality is inside a registry function rather than in a
+// comparison node. A pair the binding does not apply to (two strings, a text
+// column against a quoted literal) falls through to compare() unchanged.
+func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
+	if len(args) < 2 {
+		return nil
+	}
+	if args[0] == nil || args[1] == nil {
+		return args[0]
+	}
+	if c, ok, unknown := arms.order(b, 0, 1, args[0], args[1]); ok {
+		// unknown is "these two have no comparable relation" (a stored value
+		// naming no address, ADR-0012 item 10). They are not equal, so the
+		// first argument stands — the same answer NULL-vs-value gives.
+		if !unknown && c == 0 {
+			return nil
+		}
+		return args[0]
+	}
+	if compare(args[0], args[1], CmpEq) {
+		return nil
+	}
+	return args[0]
 }
 
 // pickExtremum is fnGreatest/fnLeast with the argument EXPRESSIONS in hand.
@@ -2833,8 +2882,8 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 		// answers with its fallback. That is a guess, and it is used the
 		// same way a decision is: the guard below re-checks it against the
 		// output vector anyway, and a mismatch costs the per-row path.
-		var c Confidence
-		e.vecRet, c = DefaultRegistry.ReturnType(e.Name).Resolve(0, nil)
+		vecDecl, c := DefaultRegistry.ReturnType(e.Name).Resolve(0, nil)
+		e.vecRet = vecDecl.ID
 		e.vecRetOK = c != Undecided
 		lower := strings.ToLower(e.Name)
 		e.vecTextFn = stringInputFuncs[lower]
@@ -10230,7 +10279,7 @@ func staticallyMap(e Expr, b *batch.RecordBatch) bool {
 		return a.typ == batch.TypeMap
 	case *FuncCall:
 		t, c := DefaultRegistry.ReturnType(a.Name).Resolve(len(a.Args), nil)
-		return c != Undecided && t == batch.TypeMap
+		return c != Undecided && t.ID == batch.TypeMap
 	default:
 		return false
 	}

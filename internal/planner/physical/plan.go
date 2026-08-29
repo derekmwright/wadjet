@@ -122,7 +122,12 @@ type Stage struct {
 	// from the literal and truncated every float group key). Bare column
 	// keys are absent — their vectors come from the input schema.
 	GroupByTypes map[string]parquet.TypeID
-	AggSpecs     []AggSpec
+	// GroupByDecimal is GroupByTypes' companion for the (p,s) of its DECIMAL
+	// entries — the part a bare TypeID cannot carry, and without which the
+	// worker's key vector comes out at scale 0 and truncates every value
+	// (ADR-0024 item 2, #379's shape one type over).
+	GroupByDecimal map[string]logical.DecimalMeta
+	AggSpecs       []AggSpec
 	// GroupByAll marks a keys-only hash aggregate over EVERY input column —
 	// the DISTINCT shape. The key set is resolved at runtime from the input
 	// schema (no plan-time column list), matching exec.HashAggregate.GroupByAll
@@ -454,6 +459,13 @@ type ProjectExprSpec struct {
 	// STRING for a column that IS a bool, so a pgwire client asking for the
 	// true OID gets a boxed "true"/"false" string instead (#445).
 	TypeKnown bool
+	// Precision and Scale carry a computed DECIMAL's declaration alongside
+	// Type, for the reason DecimalCoercion carries the same pair: a DECIMAL
+	// is an unscaled integer plus a scale, and a worker that learns only the
+	// TypeID builds the output vector at scale 0 and reads every value back
+	// a hundredfold out (ADR-0024 item 2; #529, #555).
+	Precision int
+	Scale     int
 }
 
 // UnionArm is one arm of a StageUnion: the stage producing it, and the
@@ -587,6 +599,11 @@ type AggSpec struct {
 	// place: MAX(COALESCE(a, b)) over two string columns wrote strings
 	// into a Float64 vector and the aggregate saw zeros.
 	InputType parquet.TypeID
+	// InputPrecision/InputScale carry a DECIMAL InputType's (p,s), for
+	// Stage.GroupByDecimal's reason: the materialized input vector is built
+	// from the declaration alone.
+	InputPrecision int
+	InputScale     int
 	// InputCol2, Separator and Percentile carry the aggregate arguments
 	// past the first one — the second column of CORR/COVAR_*/MIN_BY/MAX_BY,
 	// STRING_AGG's delimiter, PERCENTILE_CONT/DISC's fraction. They are
@@ -633,6 +650,12 @@ type SortKeySpec struct {
 	SourceColumn    string
 	SourceType      parquet.TypeID
 	SourceTypeKnown bool
+	// SourcePrecision/SourceScale carry a materialized DECIMAL key's (p,s),
+	// which SourceType alone cannot: the fragment builds the key's vector
+	// from this declaration and a DECIMAL one with no scale reads every
+	// value back at 10^0 (ADR-0024 item 2).
+	SourcePrecision int
+	SourceScale     int
 
 	// AliasSource is the column the producing stream carries for a key that
 	// names a DERIVED TABLE's SELECT-list alias — the non-synthetic sibling
@@ -2783,6 +2806,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		name := strings.ToLower(expr)
 		var typ parquet.TypeID
 		var typeKnown bool
+		var prec, scale int
 		// A ROW FIELD PATH looks like a simple column reference and is not
 		// one: no stage carries a column by that name, so the fragment has
 		// to COMPUTE it, and its type has to be declared here — nothing
@@ -2793,10 +2817,13 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 				return // wrapped aggregate — evaluated at the gather
 			}
 			hasExpr = true
-			typ = inferProjectionTypeDecls(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			typ = decl.ID
+			prec, scale = decl.Precision, decl.Scale
 			typeKnown = true
 		}
-		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ, TypeKnown: typeKnown})
+		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ,
+			TypeKnown: typeKnown, Precision: prec, Scale: scale})
 	}
 	// #386: a NESTED subquery rename never trips anyRenamed — the outer list
 	// merely forwards the alias (`SELECT k FROM (SELECT r_regionkey AS k FROM
@@ -2833,9 +2860,10 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 				// just below it: the rewritten expression names only SOURCE
 				// columns, so the strict-int set to check it against is the
 				// one visible BELOW the rename chain, same as #445 above.
-				specs[j].Type = inferProjectionTypeDecls(rewritten, parquet.TypeString,
-					strictIntArithColsThroughRenames(renameChild),
-					sourceColDeclsThroughRenames(renameChild))
+				specs[j].Type, specs[j].Precision, specs[j].Scale = declTypeParts(
+					inferProjectionDeclType(rewritten, parquet.TypeString,
+						strictIntArithColsThroughRenames(renameChild),
+						sourceColDeclsThroughRenames(renameChild)))
 				specs[j].TypeKnown = true
 				anyNestedRename = true
 			}
@@ -4729,8 +4757,9 @@ func aggStageGroupKey(key string, child *logical.Node) (string, bool) {
 //
 // The map is keyed by the exact dispatched key text (post-aggStageGroupKey),
 // because that text is what the worker parses and looks up (#379).
-func derivedGroupKeyTypes(groupBy []string, child *logical.Node) map[string]parquet.TypeID {
+func derivedGroupKeyTypes(groupBy []string, child *logical.Node) (map[string]parquet.TypeID, map[string]logical.DecimalMeta) {
 	var out map[string]parquet.TypeID
+	var dec map[string]logical.DecimalMeta
 	var colTypes colDecls
 	var strictInt map[string]bool
 	resolved := false
@@ -4760,9 +4789,19 @@ func derivedGroupKeyTypes(groupBy []string, child *logical.Node) map[string]parq
 		if out == nil {
 			out = make(map[string]parquet.TypeID)
 		}
-		out[key] = inferProjectionTypeDecls(node, parquet.TypeString, strictInt, colTypes)
+		d := inferProjectionDeclType(node, parquet.TypeString, strictInt, colTypes)
+		out[key] = d.ID
+		if d.ID == parquet.TypeDecimal && d.DecKnown {
+			// The (p,s) beside the TypeID: the worker builds the key vector
+			// from this declaration, and a DECIMAL one with no scale
+			// truncates every value into it (ADR-0024 item 2).
+			if dec == nil {
+				dec = make(map[string]logical.DecimalMeta)
+			}
+			dec[key] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
+		}
 	}
-	return out
+	return out, dec
 }
 
 // resolveSortKeyColumn maps an ORDER BY key that names a SELECT-list alias
@@ -5106,7 +5145,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// And the type that expression evaluates into, since
 					// the worker builds the pre-aggregate projection from
 					// the text alone and has no catalog to consult.
-					spec.InputType = inferProjectionTypeDecls(agg.InputExpr, parquet.TypeFloat64, nil, inputColDecls(exprCols))
+					spec.InputType, spec.InputPrecision, spec.InputScale = declTypeParts(
+						inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, inputColDecls(exprCols)))
 				}
 			}
 			aggSpecs = append(aggSpecs, spec)
@@ -5139,7 +5179,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Plan-time types for the derived keys, computed here where the
 		// aggregate's input schema is still known (#379); every stage
 		// shape below carries the same map.
-		groupByTypes := derivedGroupKeyTypes(groupBy, aggChild)
+		groupByTypes, groupByDecimal := derivedGroupKeyTypes(groupBy, aggChild)
 
 		// Optimization: fuse aggregation into scan when the only child
 		// stages are scans (no joins or sorts in between). This eliminates
@@ -5168,6 +5208,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Tasks:             1,
 				GroupByCols:       groupBy,
 				GroupByTypes:      groupByTypes,
+				GroupByDecimal:    groupByDecimal,
 				AggSpecs:          aggSpecs,
 				RawInputAggregate: true,
 				Dependencies:      leafStages(childStages),
@@ -5180,6 +5221,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				if (*stages)[i].Type == "scan" {
 					(*stages)[i].FusedAggGroupBy = groupBy
 					(*stages)[i].GroupByTypes = groupByTypes
+					(*stages)[i].GroupByDecimal = groupByDecimal
 					(*stages)[i].FusedAggSpecs = aggSpecs
 					// The scan's RequiredColumns carry the aggregate OUTPUT
 					// names (e.g. __having_0) because ancestors reference
@@ -5203,25 +5245,27 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Standard two-phase distributed aggregation
 			stageID := fmt.Sprintf("aggregate-%d", len(*stages))
 			stage := Stage{
-				ID:           stageID,
-				Type:         "aggregate",
-				Tasks:        1,
-				GroupByCols:  groupBy,
-				GroupByTypes: groupByTypes,
-				AggSpecs:     aggSpecs,
+				ID:             stageID,
+				Type:           "aggregate",
+				Tasks:          1,
+				GroupByCols:    groupBy,
+				GroupByTypes:   groupByTypes,
+				GroupByDecimal: groupByDecimal,
+				AggSpecs:       aggSpecs,
 			}
 			stage.Dependencies = leafStages(childStages)
 			*stages = append(*stages, stage)
 
 			finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
 			*stages = append(*stages, Stage{
-				ID:           finalStageID,
-				Type:         "final_aggregate",
-				Tasks:        1,
-				GroupByCols:  groupBy,
-				GroupByTypes: groupByTypes,
-				AggSpecs:     aggSpecs,
-				Dependencies: []string{stageID},
+				ID:             finalStageID,
+				Type:           "final_aggregate",
+				Tasks:          1,
+				GroupByCols:    groupBy,
+				GroupByTypes:   groupByTypes,
+				GroupByDecimal: groupByDecimal,
+				AggSpecs:       aggSpecs,
+				Dependencies:   []string{stageID},
 			})
 		}
 
@@ -5883,13 +5927,16 @@ func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
 			continue
 		}
 		var typ parquet.TypeID
+		var prec, scale int
 		if isExpr {
 			// Same integer-preserving-arithmetic hint as
 			// attachScanSelectProjections (#297, #445).
-			typ = inferProjectionTypeDecls(pr.ASTExpr, parquet.TypeString, strictIntArithCols(scan),
-				colDecls{types: scan.ScanColTypes, fields: scan.ScanColFields})
+			typ, prec, scale = declTypeParts(inferProjectionDeclType(pr.ASTExpr, parquet.TypeString,
+				strictIntArithCols(scan),
+				colDecls{types: scan.ScanColTypes, fields: scan.ScanColFields, dec: scan.ScanColDecimal}))
 		}
-		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ, TypeKnown: isExpr})
+		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ,
+			TypeKnown: isExpr, Precision: prec, Scale: scale})
 	}
 	if len(specs) > 0 {
 		target.SecurityProjectExprs = specs
@@ -7970,7 +8017,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// input schema when column names match. For arithmetic expressions that
 		// won't match an input column (e.g., nested aggregate rewrites like
 		// __agg_0 * 0.0001), use TypeFloat64.
-		outType := parquet.TypeString
+		outDecl := expr.Decl(parquet.TypeString)
 		if proj.ASTExpr != nil && !proj.IsAgg {
 			// A select expression mapped to a synthetic group column is a
 			// RENAME of a value computed BELOW the aggregate — type it
@@ -7984,13 +8031,20 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					colTypes = aggInputColTypes
 				}
 			}
-			outType = inferProjectionTypeDecls(proj.ASTExpr, outType, strictInt, colTypes)
+			outDecl = inferProjectionDeclType(proj.ASTExpr, outDecl.ID, strictInt, colTypes)
 		}
+		outType := outDecl.ID
 
 		pc := exec.ProjectColumn{
 			Name: name,
 			Type: outType, // Will be resolved at runtime if input column matches
 			Expr: expression,
+			// A computed DECIMAL's (p,s): the output column exists in no
+			// input schema, so exec.Project has nothing to read the scale
+			// off and a scale-0 vector reads every value back a hundredfold
+			// out (ADR-0024 item 2; #529, #555).
+			Precision: outDecl.Precision,
+			Scale:     outDecl.Scale,
 		}
 		// VECTOR-returning functions (embed()) need their output dimension
 		// carried so the runtime sizes the output vector. Resolve it from the
@@ -8151,6 +8205,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				return nil, nil, nil, compErr
 			}
 			if compErr == nil {
+				aggDecl := inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls)
 				pc := exec.ProjectColumn{
 					Name: synName,
 					// Aggregate inputs are usually numeric, so Float64 is the
@@ -8159,9 +8214,14 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// write into: the same process-killing mismatch as the
 					// projection path (#310). MAX(COALESCE(a, b)) needs the
 					// input's column types on top of that, or the polymorphic
-					// declaration falls back to the same wrong Float64 (#333).
-					Type: inferProjectionTypeDecls(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls),
-					Expr: wrapExpr(compiled),
+					// declaration falls back to the same wrong Float64 (#333),
+					// and a DECIMAL needs its (p,s) with the TypeID or the
+					// materialized vector truncates at scale 0 (ADR-0024
+					// item 2).
+					Type:      aggDecl.ID,
+					Precision: aggDecl.Precision,
+					Scale:     aggDecl.Scale,
+					Expr:      wrapExpr(compiled),
 				}
 				// Use general vectorized evaluation when available.
 				if ve, ok := compiled.(expr.VecExpr); ok {
@@ -8214,7 +8274,8 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// TypeID — so MIN over a DECIMAL field fell back to the
 				// Float64 default and a container field to Float64 outright
 				// (#568).
-				meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true}
+				meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true,
+					Precision: pc.Precision, Scale: pc.Scale}
 				if fc, ok := aggInputDecls.field(fieldPathColRef(agg.InputExpr)); ok {
 					meta = fc
 					meta.Name, meta.Nullable = synName, true
@@ -8340,10 +8401,13 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				if compErr != nil {
 					continue
 				}
+				litDecl := inferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
-					Name: fmt.Sprintf("__gb_expr_%d", i),
-					Type: inferProjectionTypeDecls(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
-					Expr: wrapExpr(compiled),
+					Name:      fmt.Sprintf("__gb_expr_%d", i),
+					Type:      litDecl.ID,
+					Precision: litDecl.Precision,
+					Scale:     litDecl.Scale,
+					Expr:      wrapExpr(compiled),
 				}}})
 				litElided[i] = true
 			}
@@ -8365,13 +8429,21 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					return nil, nil, nil, compErr
 				}
 				if compErr == nil {
+					gbDecl := inferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
 					pc := exec.ProjectColumn{
 						Name: synName,
 						// Numeric expressions (abs(x), x-1, …) must get a
 						// numeric synthetic column: SetValue on a String
 						// vector mangles float group keys.
-						Type: inferProjectionTypeDecls(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
-						Expr: wrapExpr(compiled),
+						Type: gbDecl.ID,
+						// And a DECIMAL key needs its (p,s) with the type:
+						// a scale-0 vector TRUNCATES every value on the way
+						// in, so `GROUP BY COALESCE(a, b)` collapsed 12.75
+						// and 12.7501 into one group holding 12 (ADR-0024
+						// item 2).
+						Precision: gbDecl.Precision,
+						Scale:     gbDecl.Scale,
+						Expr:      wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec
 					// kernels themselves, FuncCall.EvalVec is where the
@@ -8385,7 +8457,8 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// path declares the whole field, and its value is
 					// written through the boxed route so a NULL field stays
 					// NULL (#568).
-					meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true}
+					meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true,
+						Precision: pc.Precision, Scale: pc.Scale}
 					if fc, ok := aggChildColTypes.field(fieldPathColRef(gbExpr)); ok {
 						meta = fc
 						meta.Name, meta.Nullable = synName, true
@@ -8526,6 +8599,16 @@ func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictI
 // than read off a scan (emittedColTypes and friends), where there are no
 // fields to carry.
 func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls colDecls) parquet.TypeID {
+	return inferProjectionDeclType(node, fallback, strictInt, decls).ID
+}
+
+// inferProjectionDeclType is inferProjectionTypeDecls with the parameterized
+// part of the answer kept — a DECIMAL's (precision, scale), which a bare
+// parquet.TypeID cannot carry and which the output vector must have or every
+// value in it reads back at the wrong power of ten (ADR-0024 item 2).
+// Callers that materialize a vector from the answer take this one; callers
+// that only need the TypeID keep the wrapper above.
+func inferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls colDecls) expr.DeclType {
 	if strictInt != nil && expr.IntArithOn() {
 		inner := node
 		for {
@@ -8536,7 +8619,7 @@ func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strict
 			inner = p.Inner
 		}
 		if bo, ok := inner.(*plansql.BinaryOp); ok && intArithAllInt(bo, strictInt, decls) {
-			return parquet.TypeInt64
+			return expr.Decl(parquet.TypeInt64)
 		}
 	}
 	if !isComputedProjection(node) && !astIsFieldPath(node, decls) {
@@ -8561,7 +8644,7 @@ func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strict
 	if t, c := nodeDeclaredType(node, decls); c != expr.Undecided {
 		return t
 	}
-	return fallback
+	return expr.Decl(fallback)
 }
 
 // intArithAllInt mirrors expr.operandIsInt over the AST: int-typed scan
@@ -8796,7 +8879,7 @@ func sameRowFields(a, b []parquet.Column) bool {
 // hold the logical node an expression reads should build the context here
 // rather than passing inputColTypes alone, which cannot type a field path.
 func inputColDecls(n *logical.Node) colDecls {
-	return colDecls{types: inputColTypes(n), fields: inputColFields(n)}
+	return colDecls{types: inputColTypes(n), fields: inputColFields(n), dec: inputColDecimal(n)}
 }
 
 // inputColDecimal is inputColTypes' companion for DECIMAL precision/scale
@@ -8904,6 +8987,12 @@ func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 type colDecls struct {
 	types  map[string]parquet.TypeID
 	fields map[string][]parquet.Column
+	// dec carries the (precision, scale) of the DECIMAL entries in types.
+	// A bare TypeID is not a type for a DECIMAL — a projection declared
+	// DECIMAL without its scale builds an output vector that reads every
+	// value back at the wrong power of ten — which is why colRefDeclaredType
+	// used to decline the type outright (ADR-0024 item 2, #529/#555/#587).
+	dec map[string]logical.DecimalMeta
 }
 
 // colType resolves a column reference to its declared type, mirroring the
@@ -8919,18 +9008,40 @@ type colDecls struct {
 // table alias that happens to match a ROW column must not turn a real column
 // reference into a field path.
 func (d colDecls) colType(n *plansql.ColRef) (parquet.TypeID, bool) {
+	c, ok := d.colDecl(n)
+	if !ok {
+		return 0, false
+	}
+	return c.Type, true
+}
+
+// colDecl is colType with the parameterized part of the declaration kept: a
+// DECIMAL's (precision, scale). It resolves in exactly the order colType
+// documents above, and reads the (p,s) out of the SAME key that answered the
+// type, so the two halves can never describe different columns.
+func (d colDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
+	at := func(key string) (parquet.Column, bool) {
+		t, ok := d.types[key]
+		if !ok {
+			return parquet.Column{}, false
+		}
+		col := parquet.Column{Name: key, Type: t}
+		if t == parquet.TypeDecimal {
+			if m, ok := lookupColDecimal(d.dec, key); ok {
+				col.Precision, col.Scale = m.Precision, m.Scale
+			}
+		}
+		return col, true
+	}
 	if n.Table != "" {
-		if t, ok := d.types[strings.ToLower(n.Table+"."+n.Column)]; ok {
-			return t, true
+		if c, ok := at(strings.ToLower(n.Table + "." + n.Column)); ok {
+			return c, true
 		}
 	}
-	if t, ok := d.types[strings.ToLower(n.Column)]; ok {
-		return t, true
+	if c, ok := at(strings.ToLower(n.Column)); ok {
+		return c, true
 	}
-	if f, ok := d.field(n); ok {
-		return f.Type, true
-	}
-	return 0, false
+	return d.field(n)
 }
 
 // field resolves n as a ROW field path and returns the field's full
@@ -9014,25 +9125,50 @@ func fieldPathRef(node plansql.Node, decls colDecls) (string, bool) {
 // `SELECT rw.n` over an INT64 field returned string("9") and `ORDER BY rw.c`
 // sorted a CIDR field by its stored text while `ORDER BY rw` over the same
 // values sorted by inet.
-func colRefDeclaredType(n *plansql.ColRef, decls colDecls) (parquet.TypeID, expr.Confidence) {
-	t, ok := decls.colType(n)
+func colRefDeclaredType(n *plansql.ColRef, decls colDecls) (expr.DeclType, expr.Confidence) {
+	c, ok := decls.colDecl(n)
 	if !ok {
-		return 0, expr.Undecided
+		return expr.DeclType{}, expr.Undecided
 	}
-	switch t {
-	case parquet.TypeDecimal, parquet.TypeVector, parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
-		// Parameterized types: the catalog map carries the TypeID and
-		// nothing else, and a projection declared DECIMAL without its
-		// scale, VECTOR without its dimension, or ARRAY without its element
-		// type builds an output vector that reads back wrong. funcReturnType
-		// declines the nested types for the same reason.
+	switch c.Type {
+	case parquet.TypeDecimal:
+		// A DECIMAL column reference DECIDES, and it decides its own (p,s)
+		// — the widening ADR-0024 item 2 is built on. It used to decline
+		// with the other parameterized types below, and that single decline
+		// is why GREATEST/LEAST over a DECIMAL could not run at all (#529),
+		// why COALESCE over one declared FLOAT64 (#555), and why a windowed
+		// MIN over one described itself float8 on a zero-row result (#587):
+		// every downstream rule fell to its non-DECIMAL default because
+		// nothing below it ever said "decimal".
+		//
+		// Precision 0 is the "unconstrained" sentinel a computed DECIMAL
+		// carries (#458) and is NOT a declaration: taken at face value it
+		// would build an output vector at scale 0 and read every value back
+		// a hundredfold out. That case still declines.
+		if c.Precision <= 0 {
+			return expr.DeclType{}, expr.Undecided
+		}
+		return expr.DeclDecimal(c.Precision, c.Scale), expr.Decided
+	case parquet.TypeVector, parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+		// The other parameterized types: the catalog map carries the TypeID
+		// and nothing else, and a projection declared VECTOR without its
+		// dimension or ARRAY without its element type builds an output
+		// vector that reads back wrong. funcReturnType declines the nested
+		// types for the same reason.
 		//
 		// A field path of one of these types declines too, and for the same
 		// reason — exec.Project repairs it from the input batch, where the
 		// parent ROW vector's child carries the whole shape.
-		return 0, expr.Undecided
+		return expr.DeclType{}, expr.Undecided
 	}
-	return t, expr.Decided
+	return expr.Decl(c.Type), expr.Decided
+}
+
+// declTypeParts splits a resolved declaration into the three fields the
+// projection specs carry it in. One call site's worth of sugar, so a spec
+// assignment stays one statement.
+func declTypeParts(d expr.DeclType) (parquet.TypeID, int, int) {
+	return d.ID, d.Precision, d.Scale
 }
 
 // inferProjectionType infers the output parquet type from an AST expression
@@ -9060,11 +9196,11 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 // answer Float64 from coalesce's numeric fallback, and a Float64 vector drops
 // every string it is handed — 1 group where there are 25 (#331/#333). The
 // caller's fallback stands in those cases, exactly as before.
-func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
+func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) expr.DeclType {
 	if t, c := nodeDeclaredType(node, colDecls{}); c == expr.Decided {
 		return t
 	}
-	return fallback
+	return expr.Decl(fallback)
 }
 
 // nodeDeclaredType reports the type an expression decides on its own, and how
@@ -9082,7 +9218,7 @@ func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) parquet.Ty
 // The confidence matters only inside a nested call: everything below returns a
 // type it decides outright, but a function call may return one it merely
 // guessed, and its caller must keep looking (see expr.Confidence, #331).
-func nodeDeclaredType(node plansql.Node, decls colDecls) (parquet.TypeID, expr.Confidence) {
+func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Confidence) {
 	switch n := node.(type) {
 	case *plansql.ColRef:
 		return colRefDeclaredType(n, decls)
@@ -9091,13 +9227,21 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (parquet.TypeID, expr.C
 			// String concatenation, not arithmetic. Declaring it Float64
 			// handed the concat kernel an output vector with no BytesData,
 			// so every row came back NULL (#328).
-			return parquet.TypeString, expr.Decided
+			return expr.Decl(parquet.TypeString), expr.Decided
 		}
 		if t, c := binOpTemporalType(n, decls); c != expr.Undecided {
 			return t, c
 		}
 		if !binOpInvolvesInterval(n) {
-			return parquet.TypeFloat64, expr.Decided
+			// TODO(#555): ADR-0024 item 3 says a DECIMAL operand makes this
+			// DECIMAL, with batch.DecimalResultType's (p,s). The rule is
+			// written and tested; the declaration cannot use it yet because
+			// there is no decimal arithmetic to feed it — Int128 has no Mul
+			// and no QuoRem, so expr.BinOpNumeric resolves float mode for a
+			// DECIMAL operand and hands back a float64. Declaring DECIMAL
+			// over that would write a rounded float into an exact vector,
+			// which is worse than the float column a client gets today.
+			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		}
 	case *plansql.UnaryOp:
 		// Unary ± preserves its operand's numeric type (expr.UnaryOp.Eval
@@ -9108,11 +9252,11 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (parquet.TypeID, expr.C
 		if n.Op == "-" || n.Op == "+" {
 			t, c := nodeDeclaredType(n.Inner, decls)
 			if c != expr.Undecided {
-				switch t {
+				switch t.ID {
 				case parquet.TypeInt64, parquet.TypeInt32:
-					return parquet.TypeInt64, c
+					return expr.Decl(parquet.TypeInt64), c
 				case parquet.TypeFloat64, parquet.TypeFloat32:
-					return parquet.TypeFloat64, c
+					return expr.Decl(parquet.TypeFloat64), c
 				}
 			}
 		}
@@ -9131,9 +9275,9 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (parquet.TypeID, expr.C
 		// exec.Project — fell back to Float64, the comparison kernel's
 		// boolean writes were dropped, and BOOL_AND/BOOL_OR read 0 (false)
 		// on every row.
-		return parquet.TypeBool, expr.Decided
+		return expr.Decl(parquet.TypeBool), expr.Decided
 	case *plansql.CastNode:
-		return inferCastType(n.TypeName), expr.Decided
+		return expr.Decl(inferCastType(n.TypeName)), expr.Decided
 	case *plansql.Lit:
 		// Literal projections (e.g., SELECT 13, SELECT 'x') need a typed
 		// output column so the runtime stores the value in the matching
@@ -9143,17 +9287,17 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (parquet.TypeID, expr.C
 		switch n.Kind {
 		case plansql.LitNumber:
 			if _, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
-				return parquet.TypeInt64, expr.Decided
+				return expr.Decl(parquet.TypeInt64), expr.Decided
 			}
-			return parquet.TypeFloat64, expr.Decided
+			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		case plansql.LitBool:
-			return parquet.TypeBool, expr.Decided
+			return expr.Decl(parquet.TypeBool), expr.Decided
 		case plansql.LitString:
-			return parquet.TypeString, expr.Decided
+			return expr.Decl(parquet.TypeString), expr.Decided
 		}
 		// LitNull: type unknown; let the fallback decide.
 	}
-	return 0, expr.Undecided
+	return expr.DeclType{}, expr.Undecided
 }
 
 // caseDeclaredType types a CASE from its result branches: the THEN
@@ -9171,36 +9315,42 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (parquet.TypeID, expr.C
 // write and answered the integer 0 — while the same CASE projected was
 // correct, because exec.Project re-types from its input and the
 // pre-aggregate projection does not.
-func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (parquet.TypeID, expr.Confidence) {
-	var guess parquet.TypeID
+func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (expr.DeclType, expr.Confidence) {
+	var guess expr.DeclType
 	guessed := false
-	consider := func(branch plansql.Node) (parquet.TypeID, bool) {
+	var decided []expr.DeclType
+	consider := func(branch plansql.Node) {
 		if branch == nil {
-			return 0, false
+			return
 		}
 		t, c := nodeDeclaredType(branch, decls)
 		switch c {
 		case expr.Decided:
-			return t, true
+			decided = append(decided, t)
 		case expr.Guessed:
 			if !guessed {
 				guess, guessed = t, true
 			}
 		}
-		return 0, false
 	}
 	for _, w := range n.Whens {
-		if t, ok := consider(w.Result); ok {
-			return t, expr.Decided
-		}
+		consider(w.Result)
 	}
-	if t, ok := consider(n.Else); ok {
-		return t, expr.Decided
+	consider(n.Else)
+	if len(decided) > 0 {
+		// expr.CommonDeclType, not decided[0]: the first decider still wins
+		// for every type but DECIMAL, where the branches have to agree on a
+		// (p,s) that holds all of them or the narrower one truncates the
+		// wider branch's digits into the output vector (ADR-0024 item 2).
+		// COALESCE/GREATEST/LEAST reconcile through the same function, so a
+		// CASE and the COALESCE it rewrites to cannot answer different
+		// types.
+		return expr.CommonDeclType(decided), expr.Decided
 	}
 	if guessed {
 		return guess, expr.Guessed
 	}
-	return 0, expr.Undecided
+	return expr.DeclType{}, expr.Undecided
 }
 
 // funcReturnType types a function call from the return type declared where the
@@ -9223,20 +9373,27 @@ func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (parquet.TypeID, expr
 // CALLING function still holding a candidate of its own must prefer that one —
 // which is the whole of #331, where coalesce took a nested nullif's numeric
 // fallback for fact and never asked the string literal beside it.
-func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (parquet.TypeID, expr.Confidence) {
-	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (parquet.TypeID, expr.Confidence) {
+func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, expr.Confidence) {
+	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (expr.DeclType, expr.Confidence) {
 		return nodeDeclaredType(n.Args[i], decls)
 	})
 	if c == expr.Undecided {
-		return 0, expr.Undecided
+		return expr.DeclType{}, expr.Undecided
 	}
-	switch t {
+	if t.ID == parquet.TypeDecimal && !t.DecKnown {
+		// A DECIMAL the resolution could not put a (p,s) on is not a
+		// declaration a projection can allocate a vector from (#458): the
+		// vector would come out at scale 0. Decline, exactly as this
+		// function did for every DECIMAL before ADR-0024.
+		return expr.DeclType{}, expr.Undecided
+	}
+	switch t.ID {
 	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
 		// map_keys() really does return an ARRAY, and the declaration says
 		// so, but a projection has no element type to size the child vector
 		// with and an ARRAY column built without one reads back empty. Keep
 		// the string fallback until a projection can carry a nested type.
-		return 0, expr.Undecided
+		return expr.DeclType{}, expr.Undecided
 	}
 	return t, c
 }
@@ -9291,21 +9448,21 @@ func inferCastType(typeName string) parquet.TypeID {
 // particular a TIMESTAMP operand declines: SQL calls that difference an
 // INTERVAL and the engine has no interval column, so expr.BinOp.dateArith
 // leaves it on the numeric path and this must agree.
-func binOpTemporalType(n *plansql.BinaryOp, decls colDecls) (parquet.TypeID, expr.Confidence) {
+func binOpTemporalType(n *plansql.BinaryOp, decls colDecls) (expr.DeclType, expr.Confidence) {
 	if n.Op != "+" && n.Op != "-" {
-		return 0, expr.Undecided
+		return expr.DeclType{}, expr.Undecided
 	}
 	lk := nodeTemporalKind(n.Left, decls)
 	rk := nodeTemporalKind(n.Right, decls)
 	switch {
 	case n.Op == "-" && lk == temporalDay && rk == temporalDay:
-		return parquet.TypeInt64, expr.Decided
+		return expr.Decl(parquet.TypeInt64), expr.Decided
 	case lk == temporalDay && nodeIsPlainNumber(n.Right):
-		return parquet.TypeDate, expr.Decided
+		return expr.Decl(parquet.TypeDate), expr.Decided
 	case rk == temporalDay && n.Op == "+" && nodeIsPlainNumber(n.Left):
-		return parquet.TypeDate, expr.Decided
+		return expr.Decl(parquet.TypeDate), expr.Decided
 	}
-	return 0, expr.Undecided
+	return expr.DeclType{}, expr.Undecided
 }
 
 // temporalKind is what an operand of `date ± x` can be.
@@ -9493,6 +9650,13 @@ func (a *aggPreProject) columnMeta(k int, c exec.ProjectColumn) parquet.Column {
 	if c.Type == parquet.TypeVector {
 		col.Dimension = c.Dimension
 	}
+	if c.Type == parquet.TypeDecimal {
+		// A computed DECIMAL's (p,s), for the same reason a computed
+		// VECTOR's dimension rides here: nothing downstream can recover it,
+		// and a DECIMAL vector with no scale reads every value back at 10^0
+		// (ADR-0024 item 2).
+		col.Precision, col.Scale = c.Precision, c.Scale
+	}
 	return col
 }
 
@@ -9620,7 +9784,19 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	for k, c := range a.computed {
 		col := a.computedVectors[k]
 		if hasSel {
-			if c.Float64Eval != nil {
+			if col.Type == parquet.TypeDecimal {
+				// The checked writer for a value-producing DECIMAL store,
+				// the same rule and the same ordering exec.Project applies: a
+				// materialized GROUP BY key or aggregate input over
+				// GREATEST/COALESCE/CASE is a VALUE, and SetValue's
+				// saturating DECIMAL arms would make a wrong one silently
+				// (ADR-0024 item 4).
+				for _, idx := range in.Sel {
+					if err := col.SetValueChecked(int(idx), c.Expr(in, int(idx))); err != nil {
+						return nil, err
+					}
+				}
+			} else if c.Float64Eval != nil {
 				for _, idx := range in.Sel {
 					v, ok := c.Float64Eval(in, int(idx))
 					if ok {
@@ -9644,7 +9820,13 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 				}
 			}
 		} else {
-			if c.VecEval != nil {
+			if col.Type == parquet.TypeDecimal {
+				for i := 0; i < in.Len; i++ {
+					if err := col.SetValueChecked(i, c.Expr(in, i)); err != nil {
+						return nil, err
+					}
+				}
+			} else if c.VecEval != nil {
 				c.VecEval(in, col, in.Len)
 			} else if c.VecFloat64Eval != nil {
 				c.VecFloat64Eval(in, col.Float64Data, in.Len)
@@ -11848,17 +12030,17 @@ func windowValueFunc(fn string) bool {
 // scan below annotates, two scans that disagree, or an input the walk cannot
 // describe at all. A confidently wrong type here is worse than the fallback —
 // nothing downstream corrects a declaration, which is the whole of #345.
-func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.TypeID {
+func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
 	if !windowValueFunc(fn) && !minMax {
-		return windowOutputType(fn)
+		return expr.Decl(windowOutputType(fn))
 	}
 	// The same spelling buildWindow hands exec as the input column, so the
 	// declaration always describes the vector the operator will read.
 	col := cleanExpr(we.InputColumn())
 	if col == "" || len(node.Children) != 1 {
-		return windowOutputType(fn)
+		return expr.Decl(windowOutputType(fn))
 	}
 	// colRefDeclaredType declines every PARAMETERIZED type (DECIMAL without
 	// its scale, VECTOR without its dimension, the nested types), so those
@@ -11879,7 +12061,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.Typ
 	// still declines and rides the same runtime correction as a column.
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColDecls(node.Children[0]))
 	if conf != expr.Decided {
-		return windowOutputType(fn)
+		return expr.Decl(windowOutputType(fn))
 	}
 	if minMax {
 		// MIN/MAX copy an input value through the same GetValue/SetValue
@@ -11888,11 +12070,22 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.Typ
 		// rather than assumed so the planner and the operator cannot come to
 		// different conclusions about a type; !ok keeps the float64
 		// fallback, as an unresolvable input type does above.
-		out, ok := exec.WindowMinMaxType(t)
+		out, ok := exec.WindowMinMaxType(t.ID)
 		if !ok {
-			return windowOutputType(fn)
+			return expr.Decl(windowOutputType(fn))
 		}
-		return out
+		if out == parquet.TypeDecimal {
+			// MIN/MAX of a DECIMAL is that DECIMAL, (p,s) and all — which
+			// is what the operator actually emits (exec.windowOutputColumn
+			// carries the input vector's Precision/Scale). Before ADR-0024
+			// this branch could not be reached, because colRefDeclaredType
+			// declined every DECIMAL argument, so a ZERO-ROW result — which
+			// is described from this declaration alone, with no vector to
+			// re-type from — went out as float8 where the same query over
+			// rows went out as numeric (#587).
+			return t
+		}
+		return expr.Decl(out)
 	}
 	return t
 }
@@ -11944,7 +12137,7 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 		// returned "5" as the input column.
 		InputCol:    cleanExpr(we.InputColumn()),
 		OutputCol:   we.OutputCol,
-		OutputType:  windowSpecOutputType(node, we),
+		OutputType:  windowSpecOutputType(node, we).ID,
 		PartitionBy: partBy,
 		OrderBy:     orderKeys,
 	}

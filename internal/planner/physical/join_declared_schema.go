@@ -88,10 +88,13 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 					haveTypes = true
 				}
 				seen[lc] = true
+				decl := inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
 				out = append(out, parquet.Column{
-					Name:     pr.Alias,
-					Type:     inferProjectionTypeDecls(pr.ASTExpr, parquet.TypeString, strictInt, colTypes),
-					Nullable: true,
+					Name:      pr.Alias,
+					Type:      decl.ID,
+					Precision: decl.Precision,
+					Scale:     decl.Scale,
+					Nullable:  true,
 				})
 			}
 		}

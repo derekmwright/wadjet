@@ -1120,16 +1120,28 @@ func postgresSemanticsCases() []pgCase {
 		// does not, because two wrong picks can cancel.
 		pgCase{name: "DecimalColPairGreatestRows", sql: `SELECT d_key FROM dec_probe WHERE GREATEST(d_2, d_4) = d_4 ORDER BY d_key`},
 		// GREATEST/LEAST's own VALUE, at full precision. A wrong pick that
-		// happens to satisfy the predicates above is visible here — once the
-		// query can run: PROJECTING an extremum over a DECIMAL column fails
-		// outright today, because the registry declares the return type
-		// FLOAT64 and the value arrives as the column's rendered text. That
-		// is the declared-output-type layer, not the comparison rule this
-		// family gates, so it is pinned rather than fixed here.
+		// happens to satisfy the predicates above is visible here, and until
+		// ADR-0024 the query could not run at all: the registry declared the
+		// return type FLOAT64, the value arrived as the column's rendered
+		// text, and the #361 silent-write guard refused it. The declaration
+		// is now the common DECIMAL type of the arguments and the value
+		// materializes into a DECIMAL vector at that scale, so this entry
+		// carries no pin — which is #529's proof.
 		pgCase{name: "DecimalColPairGreatestValue", exactNumeric: true,
-			sql: `SELECT d_key, GREATEST(d_2, d_4) AS g, LEAST(d_2, d_4) AS l FROM dec_probe ORDER BY d_key`,
-			knownBug: pgBugWadjet + ` a projected GREATEST/LEAST over a DECIMAL column cannot run at ` +
-				`all — "cannot store string into FLOAT64 vector"`, issue: "#529"},
+			sql: `SELECT d_key, GREATEST(d_2, d_4) AS g, LEAST(d_2, d_4) AS l FROM dec_probe ORDER BY d_key`},
+		// The same for the other constructs that CHOOSE BETWEEN their
+		// DECIMAL operands (ADR-0024 item 2): COALESCE and CASE were #555's
+		// half of the same defect, and NULLIF mirrors argument 0 alone, so
+		// its output keeps the NARROWER column's scale.
+		pgCase{name: "DecimalColPairCoalesceValue", exactNumeric: true,
+			sql: `SELECT d_key, COALESCE(d_2, d_4) AS c FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalColPairCaseValue", exactNumeric: true,
+			sql: `SELECT d_key, CASE WHEN d_key < 5 THEN d_2 ELSE d_4 END AS c FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalColPairNullifValue", exactNumeric: true,
+			sql: `SELECT d_key, NULLIF(d_2, d_4) AS c FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalColTripleGreatestValue", exactNumeric: true,
+			sql: `SELECT d_key, GREATEST(d_2, d_4, d_wide) AS g, LEAST(d_2, d_4, d_wide) AS l ` +
+				`FROM dec_probe ORDER BY d_key`},
 		// One side a DECIMAL and the other an INT64 column, at the same three
 		// sites: the pair #476 fixed for the direct comparison, which these
 		// sites answered by SNIFFING the box until #504 bound it from the

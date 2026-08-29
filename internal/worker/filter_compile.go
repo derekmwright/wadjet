@@ -53,13 +53,17 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 		// planner's own fallback for an unresolved key is STRING.
 		outType := physical.ProjectionOutputType(node, parquet.TypeString)
 		if spec.Type != nil {
-			outType = parquet.TypeID(*spec.Type)
+			outType = expr.DeclType{ID: parquet.TypeID(*spec.Type),
+				Precision: spec.Precision, Scale: spec.Scale,
+				DecKnown: spec.Precision > 0}
 		}
 		e := compiled
 		pc := exec.ProjectColumn{
-			Name:     spec.Name,
-			Type:     outType,
-			Computed: true,
+			Name:      spec.Name,
+			Type:      outType.ID,
+			Precision: outType.Precision,
+			Scale:     outType.Scale,
+			Computed:  true,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},
@@ -151,7 +155,8 @@ func compileFilterExprs(exprs []string, scanSchema bool) ([]exec.UnaryOperator, 
 // derived expression reads; callers extend the source projection hint
 // with these so parquet readers don't prune them.
 // groupByTypes is the plan-time type of each derived key, keyed by its
-// exact GroupByCols text (OpSpec.GroupByTypes). It overrides the
+// exact GroupByCols text (OpSpec.GroupByTypes), and groupByDecimal carries
+// the (p,s) of its DECIMAL entries. Together they override the
 // schema-blind ProjectionOutputType inference below, which has no catalog
 // and typed COALESCE(l_extendedprice, 0) Int64 from the literal alone —
 // truncating every float group key on write (#379). Absent entries (bare
@@ -161,6 +166,7 @@ func buildAggInputProjection(
 	aggs []distributed.AggSpec,
 	filterCols []string,
 	groupByTypes map[string]int,
+	groupByDecimal map[string]distributed.DecimalMeta,
 ) (*exec.Project, []string, error) {
 	// Detect derived inputs. An aggregate can carry InputExpr explicitly;
 	// a GROUP BY column is "derived" when parsing it yields anything
@@ -240,7 +246,15 @@ func buildAggInputProjection(
 			// and the float keys truncate on write (#379).
 			outType := physical.ProjectionOutputType(node, parquet.TypeString)
 			if t, ok := groupByTypes[c]; ok {
-				outType = parquet.TypeID(t)
+				outType = expr.Decl(parquet.TypeID(t))
+				if m, ok := groupByDecimal[c]; ok && m.Precision > 0 {
+					// A DECIMAL key's (p,s), without which the vector below
+					// comes out at scale 0 and truncates every value written
+					// into it — 12.7500 and 12.7501 collapsing into one group
+					// holding 12 (ADR-0024 item 2, #379's shape one type
+					// over).
+					outType = expr.DeclDecimal(m.Precision, m.Scale)
+				}
 			}
 			projCols = append(projCols, exec.ProjectColumn{
 				Name: c,
@@ -252,7 +266,9 @@ func buildAggInputProjection(
 				// epoch-day number and grouped as the digits of that number
 				// (#340). String stays the fallback for anything the rule
 				// leaves undecided, which is what it was standing in for.
-				Type: outType,
+				Type:      outType.ID,
+				Precision: outType.Precision,
+				Scale:     outType.Scale,
 				Expr: func(b *batch.RecordBatch, row int) any {
 					return e.Eval(b, row)
 				},
@@ -299,12 +315,20 @@ func buildAggInputProjection(
 		// a POINTER because a declared BOOL is TypeID zero (#371), which
 		// the old plain-int convention read as undeclared.
 		inTyp := parquet.TypeFloat64
+		inPrec, inScale := 0, 0
 		if a.InputType != nil {
 			inTyp = parquet.TypeID(*a.InputType)
+			// A DECIMAL input's (p,s) rides with the TypeID for the reason a
+			// DECIMAL group key's does: the materialized vector is built from
+			// the declaration alone, and one at scale 0 truncates every value
+			// — MAX(COALESCE(a, b)) answered 12 for 12.75 (ADR-0024 item 2).
+			inPrec, inScale = a.InputPrecision, a.InputScale
 		}
 		projCols = append(projCols, exec.ProjectColumn{
-			Name: a.InputCol,
-			Type: inTyp,
+			Name:      a.InputCol,
+			Type:      inTyp,
+			Precision: inPrec,
+			Scale:     inScale,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},
@@ -441,8 +465,13 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 			// the input schema, so exec.Project cannot resolve it there —
 			// unless the alias happens to name a DIFFERENT input column,
 			// which is the shadowing case Computed exists to reject (#327).
-			Type:     typ,
-			Computed: true,
+			Type: typ,
+			// And a DECIMAL's (p,s) with it: the vector this fills is built
+			// from the declaration alone, and one without a scale reads
+			// every value back at 10^0 (ADR-0024 item 2).
+			Precision: p.Precision,
+			Scale:     p.Scale,
+			Computed:  true,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},

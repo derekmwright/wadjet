@@ -576,23 +576,6 @@ const networkAsTextOIDPin = "DELIBERATE (network-as-text on the wire, like VECTO
 	"type, not value; the wire arm is the only place it is visible. The pin fails if wadjet ever adopts " +
 	"the inet OID"
 
-// windowDecimalTypmodPin is #587, shared by the two windowed-DECIMAL entries.
-const windowDecimalTypmodPin = "WADJET BUG (#587): PostgreSQL declares typmod -1 for a numeric produced " +
-	"by ANY function call, window functions included — verified live, min(d) OVER () and " +
-	"first_value(d) OVER () both describe as plain `numeric` where the bare column describes as " +
-	"numeric(18,4). declaredWireUnconstrainedDecimal marks a projection unconstrained only when " +
-	"proj.IsAgg, and a window function reaches the output projection as a bare reference to the " +
-	"Window operator's output column. Same gap as #542's set-operation case, one shape over"
-
-// windowDecimalZeroRowPin is #587's second half: the zero-row path declares
-// the wrong TYPE, not merely the wrong modifier.
-const windowDecimalZeroRowPin = "WADJET BUG (#587): a windowed MIN/MAX over a DECIMAL column declares " +
-	"float8 on a ZERO-ROW result and numeric on a non-empty one — the #458 class, one shape over. " +
-	"The zero-row schema comes from the plan, and windowSpecOutputType falls back to " +
-	"windowOutputType's FLOAT64 because colRefDeclaredType declines to resolve a parameterized type " +
-	"for the window argument; the non-empty answer is re-typed from the input vector at runtime, " +
-	"where exec.windowOutputColumn also carries the (p,s)"
-
 func wireCorpus() []wireCase {
 	return []wireCase{
 		// The shape that broke DataGrip: a plain projection of an int, a text
@@ -686,27 +669,24 @@ func wireCorpus() []wireCase {
 		// MIN over a DECIMAL column FAILED the query ("cannot store string
 		// into FLOAT64 vector"), so no RowDescription was ever sent. The OID
 		// and the value are right now; the typmod is #587.
+		// It carries NO pin since ADR-0024: declaredWireUnconstrainedDecimal
+		// gates on "not a bare column reference", so a window function's
+		// DECIMAL output goes out with typmod -1 the way PostgreSQL's does
+		// (#587). Deleting the pin is the fix's proof.
 		{name: "WindowMinOverDecimalColumn",
 			sql: `SELECT d_key, MIN(d_2) OVER (PARTITION BY d_grp) AS lo FROM dec_probe
-				WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{
-				wirePropTypeMods: windowDecimalTypmodPin,
-			}},
-		// The ZERO-ROW form is a DIFFERENT declaration path and a different
-		// divergence, which is why it is pinned on the OID rather than the
-		// modifier. A zero-row result is described from the PLAN
-		// (declaredOutputSchema), and the plan declines to resolve a
-		// parameterized type for a window argument — colRefDeclaredType
-		// returns Undecided for DECIMAL — so the column keeps
-		// windowOutputType's FLOAT64 and goes out as float8 where the
-		// non-empty form of the SAME query goes out as numeric. The typmod
-		// agrees here only because a float8's typmod is -1 anyway.
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		// The ZERO-ROW form is a DIFFERENT declaration path: it is described
+		// from the PLAN (declaredOutputSchema), with no batch to re-type
+		// from, so it used to be pinned on the OID as well as the modifier —
+		// colRefDeclaredType returned Undecided for every DECIMAL, the
+		// column kept windowOutputType's FLOAT64, and the same query went
+		// out as float8 when it matched nothing and numeric when it matched
+		// rows. Since ADR-0024 a DECIMAL column reference decides its own
+		// (p,s) and windowSpecOutputType resolves it, so both halves of #587
+		// agree with PostgreSQL and neither is pinned.
 		{name: "WindowMinOverDecimalColumnZeroRows",
-			sql: `SELECT d_key, MIN(d_2) OVER (PARTITION BY d_grp) AS lo FROM dec_probe WHERE d_key = -1`,
-			pins: map[string]string{
-				wirePropTypeOIDs:  windowDecimalZeroRowPin,
-				wirePropTypeSizes: windowDecimalZeroRowPin + " — the declared SIZE follows the OID",
-			}},
+			sql: `SELECT d_key, MIN(d_2) OVER (PARTITION BY d_grp) AS lo FROM dec_probe WHERE d_key = -1`},
 		// The CONTROL for the two above: MIN/MAX over a window of a
 		// non-DECIMAL column, where no typmod is in play. It carries no pin,
 		// which is what proves the pinned entries are about the modifier and
@@ -764,11 +744,6 @@ func wireCorpus() []wireCase {
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8)
 				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (0, 4, 8) ORDER BY 1`,
 			pins: map[string]string{
-				wirePropTypeMods: "WADJET BUG (#542): PostgreSQL declares a set operation's numeric " +
-					"result unconstrained (typmod -1) unless every arm carries the SAME typmod; " +
-					"wadjet declares a real (p,s). declaredWireUnconstrainedDecimal already does this " +
-					"for the other shape PostgreSQL drops typmod on (an aggregate call) and needs the " +
-					"set-operation case added",
 				wirePropFloatRender: setOpDecimalDigitsPin,
 			}},
 		// The control for the entry above: BOTH arms are the same column, so
@@ -778,6 +753,25 @@ func wireCorpus() []wireCase {
 		{name: "SetOpSameDecimalScale",
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2)
 				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (2, 3) ORDER BY 1`},
+		// #542's two directions on the shapes the entries above do not
+		// reach: a ZERO-ROW set operation, where the answer comes from the
+		// plan alone and no batch can correct it, and the other set-op
+		// flavours. Both must keep the typmod when the arms agree and drop
+		// it when they do not — a rule that answered "always drop" would
+		// pass the disagreeing half and fail here, which is why both
+		// directions are gated.
+		{name: "SetOpAcrossDecimalScalesZeroRows",
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key = -1
+				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key = -1`},
+		{name: "SetOpSameDecimalScaleZeroRows",
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key = -1
+				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key = -1`},
+		{name: "IntersectAcrossDecimalScales",
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8)
+				INTERSECT SELECT d_4 FROM dec_probe WHERE d_key IN (0, 4, 8) ORDER BY 1`},
+		{name: "ExceptSameDecimalScale",
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2)
+				EXCEPT SELECT d_2 FROM dec_probe WHERE d_key IN (2, 3) ORDER BY 1`},
 		// A parameter bound by its DECLARED type rather than as a string —
 		// the shape of the 4a25af0 fix, and the one that exercises
 		// ParameterDescription.

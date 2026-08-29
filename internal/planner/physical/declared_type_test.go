@@ -99,9 +99,9 @@ func TestNodeDeclaredTypeThroughNestedCalls(t *testing.T) {
 			t.Fatalf("%s: parse %q: %v", tc.name, tc.sql, err)
 		}
 		got, c := nodeDeclaredType(node, colDecls{})
-		if got != tc.want || c != tc.wantC {
+		if got.ID != tc.want || c != tc.wantC {
 			t.Errorf("%s\n  %s\n  declared (%s, %s), want (%s, %s)",
-				tc.name, tc.sql, got, c, tc.want, tc.wantC)
+				tc.name, tc.sql, got.ID, c, tc.want, tc.wantC)
 		}
 	}
 }
@@ -291,9 +291,9 @@ func TestNodeDeclaredTypeFromColumnTypes(t *testing.T) {
 			t.Fatalf("%s: parse %q: %v", tc.name, tc.sql, err)
 		}
 		got, c := nodeDeclaredType(node, colDecls{types: nationColTypes})
-		if got != tc.want || c != tc.wantC {
+		if got.ID != tc.want || c != tc.wantC {
 			t.Errorf("%s\n  %s\n  declared (%s, %s), want (%s, %s)",
-				tc.name, tc.sql, got, c, tc.want, tc.wantC)
+				tc.name, tc.sql, got.ID, c, tc.want, tc.wantC)
 		}
 	}
 }
@@ -454,7 +454,12 @@ func TestWindowSpecOutputType(t *testing.T) {
 		{"min over a TIMESTAMP column", win(scan(nation)), "min", "n_seen_at", parquet.TypeTimestamp},
 		// Types compareAny does not order correctly keep the float64
 		// fallback, where the SetValue guard reports rather than drops.
-		{"min over a DECIMAL declines", win(scan(nation)), "min", "n_rate", parquet.TypeFloat64},
+		// A DECIMAL is no longer one of them — since ADR-0024 it declares
+		// its own (p,s) — but only when the annotation CARRIES that (p,s):
+		// this fixture's ScanColDecimal is empty, which is the #458
+		// "unconstrained" case, and it still declines.
+		// TestWindowSpecOutputTypeResolvesDecimal covers the resolved one.
+		{"a DECIMAL with no declared (p,s) declines", win(scan(nation)), "min", "n_rate", parquet.TypeFloat64},
 		{"min over an ARRAY declines", win(scan(nation)), "min", "n_tags", parquet.TypeFloat64},
 		{"min over a computed argument declines", win(scan(nation)), "min", "UPPER(n_name)", parquet.TypeFloat64},
 
@@ -465,13 +470,13 @@ func TestWindowSpecOutputType(t *testing.T) {
 		{"an unannotated scan", win(scan(nil)), "lag", "n_name", parquet.TypeFloat64},
 		{"a project can rebind the name", win(&logical.Node{Type: logical.NodeProject, Children: []*logical.Node{scan(nation)}}),
 			"lag", "n_name", parquet.TypeFloat64},
-		{"DECIMAL carries no scale in the catalog map", win(scan(nation)), "lag", "n_rate", parquet.TypeFloat64},
+		{"a value function over the same unconstrained DECIMAL", win(scan(nation)), "lag", "n_rate", parquet.TypeFloat64},
 		{"ARRAY carries no element type", win(scan(nation)), "lag", "n_tags", parquet.TypeFloat64},
 		{"an empty argument", win(scan(nation)), "lag", "", parquet.TypeFloat64},
 		{"a window with no child", &logical.Node{Type: logical.NodeWindow}, "lag", "n_name", parquet.TypeFloat64},
 	}
 	for _, tc := range tests {
-		got := windowSpecOutputType(tc.node, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})
+		got := windowSpecOutputType(tc.node, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"}).ID
 		if got != tc.want {
 			t.Errorf("%s: %s(%s) declared %s, want %s", tc.name, tc.fn, tc.input, got, tc.want)
 		}

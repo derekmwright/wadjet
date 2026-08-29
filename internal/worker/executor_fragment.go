@@ -2113,7 +2113,8 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		// (e.g. SUM(l_extendedprice*(1-l_discount))). Skipped for merge mode:
 		// the partial stage already computed the derived column under OutputCol.
 		if spec.BuildProject && !spec.MergeMode {
-			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil, spec.GroupByTypes)
+			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil,
+				spec.GroupByTypes, spec.GroupByDecimal)
 			if perr != nil {
 				return nil, fmt.Errorf("agg input project: %w", perr)
 			}

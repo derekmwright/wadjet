@@ -30,7 +30,7 @@ func TestIntegerReturningScalarsDeclareInt4(t *testing.T) {
 			continue
 		}
 		got, conf := ret.Resolve(1, nil)
-		if got != batch.TypeInt32 {
+		if got.ID != batch.TypeInt32 {
 			t.Errorf("%s: declared return type %v, want INT32 (int4)", name, got)
 		}
 		if conf != Decided {

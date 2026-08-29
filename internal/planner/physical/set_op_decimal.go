@@ -10,8 +10,8 @@ import (
 // needs, which is what it contributes to a set operation's common DECIMAL
 // precision. INT32 spans 10 digits, INT64 spans 19.
 const (
-	setOpInt32Digits = 10
-	setOpInt64Digits = 19
+	setOpInt32Digits = batch.Int32DecimalDigits
+	setOpInt64Digits = batch.Int64DecimalDigits
 )
 
 // setOpDecimalTarget is the DECIMAL(p,s) a set operation's arms must all
@@ -48,37 +48,26 @@ func setOpDecimalTarget(arms []setOpColType) (logical.DecimalMeta, bool) {
 	if len(arms) == 0 {
 		return logical.DecimalMeta{}, false
 	}
-	scale, intDigits := 0, 0
+	in := make([]batch.DecimalType, 0, len(arms))
 	for _, a := range arms {
-		var m logical.DecimalMeta
-		switch a.typ {
-		case parquet.TypeDecimal:
-			if !a.decKnown {
-				return logical.DecimalMeta{}, false
-			}
-			m = a.dec
-		case parquet.TypeInt32:
-			m = logical.DecimalMeta{Precision: setOpInt32Digits}
-		case parquet.TypeInt64:
-			m = logical.DecimalMeta{Precision: setOpInt64Digits}
-		default:
+		if a.typ == parquet.TypeDecimal && !a.decKnown {
 			return logical.DecimalMeta{}, false
 		}
-		if m.Scale > scale {
-			scale = m.Scale
+		m, ok := batch.DecimalTypeOf(a.typ, batch.DecimalType{Precision: a.dec.Precision, Scale: a.dec.Scale})
+		if !ok {
+			return logical.DecimalMeta{}, false
 		}
-		if d := m.Precision - m.Scale; d > intDigits {
-			intDigits = d
-		}
+		in = append(in, m)
 	}
-	prec := intDigits + scale
-	if prec > batch.MaxDecimalPrecision {
-		prec = batch.MaxDecimalPrecision
+	// batch.DecimalCommon is ADR-0024 item 2's rule, and it is the SAME
+	// function CASE/COALESCE/GREATEST/LEAST reconcile through: one table of
+	// rules replaces the five that were independently derived. It carries
+	// the 38-digit cap and the integer-part rebuild that used to live here.
+	m, ok := batch.DecimalCommon(in)
+	if !ok {
+		return logical.DecimalMeta{}, false
 	}
-	if prec < 1 {
-		prec = 1
-	}
-	return logical.DecimalMeta{Precision: prec, Scale: scale}, true
+	return logical.DecimalMeta{Precision: m.Precision, Scale: m.Scale}, true
 }
 
 // setOpColDecimalMeta reads a resolved column's DECIMAL declaration out of

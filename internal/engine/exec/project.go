@@ -150,6 +150,15 @@ type ProjectColumn struct {
 	SourceIdx    int
 	SourceIdxSet bool
 	Dimension    int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
+	// Precision and Scale declare a COMPUTED DECIMAL output, the same way
+	// Dimension declares a computed VECTOR one: the output column does not
+	// exist in the input, so there is no vector to read (p,s) off, and a
+	// DECIMAL vector built without them comes out at SCALE 0 — every value
+	// in it read back a hundred- or ten-thousand-fold out. Zero for every
+	// other type, and for a passthrough, where the input column answers
+	// (ADR-0024 item 2; #529, #555).
+	Precision int
+	Scale     int
 	// Computed marks an output whose value comes from Expr rather than from
 	// an input column of the same name. Such an output must NOT be typed by
 	// looking its own name up in the input: when the alias shadows an input
@@ -293,6 +302,13 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if col.Type == parquet.TypeVector && col.Dimension == 0 && proj.Dimension > 0 {
 				col.Dimension = proj.Dimension
 			}
+			// The same repair for a computed DECIMAL: GREATEST/LEAST/
+			// COALESCE/CASE over DECIMAL columns produce a value the input
+			// schema has no column for, so nothing above set the scale and
+			// the pooled vector would read every value at 10^0 (#529, #555).
+			if col.Type == parquet.TypeDecimal && col.Precision <= 0 && proj.Precision > 0 {
+				col.Precision, col.Scale = proj.Precision, proj.Scale
+			}
 			schema[i] = col
 		}
 		p.cachedSchema = schema
@@ -352,6 +368,30 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			col := out.Columns[j]
 			if srcIdx := p.directSrcIdx[j]; srcIdx >= 0 {
 				projectGatherColumn(col, in.Columns[srcIdx], in.Sel)
+			} else if col.Type == parquet.TypeDecimal {
+				// A DECIMAL output takes the CHECKED per-row writer, ahead of
+				// every vectorized and typed path, because it is the only route
+				// with an error channel. SetValue's DECIMAL arms answer a
+				// conversion they cannot make exactly with the nearest thing
+				// they can store — the saturated end of the range for text too
+				// wide at this scale, the raw carrier for an integer box — which
+				// is right for the comparison and ingest callers it was built
+				// for and a silently wrong ROW here. GREATEST/LEAST/COALESCE/
+				// CASE over DECIMAL columns is exactly such a write, and it is
+				// new (#529): before ADR-0024 the declaration was FLOAT64 and
+				// the store was refused outright. Errors carry 22003/22P02
+				// (ADR-0024 item 4).
+				//
+				// Nothing is given up by taking it first: no vec kernel in the
+				// registry writes DecimalData, so expr.FuncCall.EvalVec already
+				// falls back to its own per-row loop for these — through the
+				// UNCHECKED SetValue, which is the saturation this exists to
+				// stop.
+				for outRow, idx := range in.Sel {
+					if err := col.SetValueChecked(outRow, proj.Expr(in, int(idx))); err != nil {
+						return nil, err
+					}
+				}
 			} else if proj.Float64Eval != nil {
 				for outRow, idx := range in.Sel {
 					v, ok := proj.Float64Eval(in, int(idx))
@@ -381,6 +421,14 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			col := out.Columns[j]
 			if srcIdx := p.directSrcIdx[j]; srcIdx >= 0 {
 				projectCopyColumn(col, in.Columns[srcIdx], in.Len)
+			} else if col.Type == parquet.TypeDecimal {
+				// The checked writer, for the reason the selection-vector
+				// branch above documents.
+				for i := 0; i < in.Len; i++ {
+					if err := col.SetValueChecked(i, proj.Expr(in, i)); err != nil {
+						return nil, err
+					}
+				}
 			} else if proj.VecEval != nil {
 				proj.VecEval(in, col, in.Len)
 			} else if proj.VecFloat64Eval != nil {

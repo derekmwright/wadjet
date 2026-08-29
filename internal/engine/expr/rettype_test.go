@@ -124,7 +124,7 @@ func TestVecFuncsSurviveEveryOutputType(t *testing.T) {
 			// that with the output vector it declares, so the two axes stay
 			// separate: an input the kernel cannot read is a different
 			// finding from an output vector it cannot write.
-			if msg := evalPanic(name, args, declared); msg != "" {
+			if msg := evalPanic(name, args, declared.ID); msg != "" {
 				argShape = append(argShape, fmt.Sprintf("%s(shape %d): %s", name, si, msg))
 				continue
 			}
@@ -217,7 +217,7 @@ func TestVecKernelWritesDeclaredType(t *testing.T) {
 				// An argument shape this kernel cannot read is a separate
 				// finding; TestVecFuncsSurviveEveryOutputType reports those.
 				defer func() { _ = recover() }()
-				out := newOutVector(declared, rows)
+				out := newOutVector(declared.ID, rows)
 				DefaultRegistry.LookupVec(name)(args, out, rows)
 				for i := 0; i < rows; i++ {
 					v := out.GetValue(i)
@@ -225,9 +225,9 @@ func TestVecKernelWritesDeclaredType(t *testing.T) {
 						continue
 					}
 					produced = true
-					if !valueFitsType(v, declared) {
+					if !valueFitsType(v, declared.ID) {
 						t.Errorf("%s declares %s but its vec kernel produced %T (%v)",
-							name, declared, v, v)
+							name, declared.ID, v, v)
 					}
 				}
 			}()
@@ -296,12 +296,12 @@ func TestRegisterVecRequiresADeclaration(t *testing.T) {
 
 func TestRetSameAsArgResolution(t *testing.T) {
 	known := map[int]batch.TypeID{1: batch.TypeString}
-	argType := func(i int) (batch.TypeID, Confidence) {
+	argType := func(i int) (DeclType, Confidence) {
 		t, ok := known[i]
 		if !ok {
-			return 0, Undecided
+			return DeclType{}, Undecided
 		}
-		return t, Decided
+		return Decl(t), Decided
 	}
 	tests := []struct {
 		name  string
@@ -322,8 +322,8 @@ func TestRetSameAsArgResolution(t *testing.T) {
 	}
 	for _, tc := range tests {
 		got, c := tc.ret.Resolve(tc.nargs, argType)
-		if got != tc.want || c != tc.wantC {
-			t.Errorf("%s: Resolve = (%s, %s), want (%s, %s)", tc.name, got, c, tc.want, tc.wantC)
+		if got.ID != tc.want || c != tc.wantC {
+			t.Errorf("%s: Resolve = (%s, %s), want (%s, %s)", tc.name, got.ID, c, tc.want, tc.wantC)
 		}
 	}
 }
@@ -342,25 +342,25 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 	coalesce := RetSameAsArg(batch.TypeFloat64)
 	ifnull := RetSameAsArg(batch.TypeString, 0, 1)
 
-	undecided := func(batch.TypeID) func(int) (batch.TypeID, Confidence) {
-		return func(int) (batch.TypeID, Confidence) { return 0, Undecided }
+	undecided := func(batch.TypeID) func(int) (DeclType, Confidence) {
+		return func(int) (DeclType, Confidence) { return DeclType{}, Undecided }
 	}
 	// nested resolves ret over the argument shapes given, exactly as the
 	// planner's nodeDeclaredType does when an argument is itself a call.
-	nested := func(ret Ret, args ...func(int) (batch.TypeID, Confidence)) func(int) (batch.TypeID, Confidence) {
-		return func(int) (batch.TypeID, Confidence) {
-			return ret.Resolve(len(args), func(i int) (batch.TypeID, Confidence) { return args[i](i) })
+	nested := func(ret Ret, args ...func(int) (DeclType, Confidence)) func(int) (DeclType, Confidence) {
+		return func(int) (DeclType, Confidence) {
+			return ret.Resolve(len(args), func(i int) (DeclType, Confidence) { return args[i](i) })
 		}
 	}
-	lit := func(t batch.TypeID) func(int) (batch.TypeID, Confidence) {
-		return func(int) (batch.TypeID, Confidence) { return t, Decided }
+	lit := func(t batch.TypeID) func(int) (DeclType, Confidence) {
+		return func(int) (DeclType, Confidence) { return Decl(t), Decided }
 	}
 	col := undecided(0)
 
 	tests := []struct {
 		name  string
 		ret   Ret
-		args  []func(int) (batch.TypeID, Confidence)
+		args  []func(int) (DeclType, Confidence)
 		want  batch.TypeID
 		wantC Confidence
 	}{
@@ -368,7 +368,7 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 			// The bug. COALESCE(NULLIF(<col>, 'lit'), 'lit')
 			name:  "later argument decides past a nested guess",
 			ret:   coalesce,
-			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col, lit(batch.TypeString)), lit(batch.TypeString)},
+			args:  []func(int) (DeclType, Confidence){nested(nullif, col, lit(batch.TypeString)), lit(batch.TypeString)},
 			want:  batch.TypeString,
 			wantC: Decided,
 		},
@@ -377,7 +377,7 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 			// A guess stays a guess however deep it is made.
 			name: "two levels of nesting, outer argument decides",
 			ret:  coalesce,
-			args: []func(int) (batch.TypeID, Confidence){
+			args: []func(int) (DeclType, Confidence){
 				nested(nullif, nested(nullif, col, lit(batch.TypeString)), lit(batch.TypeString)),
 				lit(batch.TypeString),
 			},
@@ -389,7 +389,7 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 			// today's behaviour at top level is unchanged.
 			name:  "nested guess, nothing else to consult",
 			ret:   coalesce,
-			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col, col)},
+			args:  []func(int) (DeclType, Confidence){nested(nullif, col, col)},
 			want:  batch.TypeFloat64,
 			wantC: Guessed,
 		},
@@ -398,7 +398,7 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 			// declaration's preference order.
 			name: "first guess wins when no candidate decides",
 			ret:  coalesce,
-			args: []func(int) (batch.TypeID, Confidence){
+			args: []func(int) (DeclType, Confidence){
 				nested(RetSameAsArg(batch.TypeBool, 0), col),
 				nested(nullif, col),
 			},
@@ -412,7 +412,7 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 			// and hand its kernel a vector with no Float64Data.
 			name:  "numeric fallback survives at top level",
 			ret:   nullif,
-			args:  []func(int) (batch.TypeID, Confidence){col, lit(batch.TypeInt64)},
+			args:  []func(int) (DeclType, Confidence){col, lit(batch.TypeInt64)},
 			want:  batch.TypeFloat64,
 			wantC: Guessed,
 		},
@@ -421,7 +421,7 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 			// own numeric literal decides, and the answer stays numeric.
 			name:  "numeric stays numeric through a nested guess",
 			ret:   coalesce,
-			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col, lit(batch.TypeInt64)), lit(batch.TypeInt64)},
+			args:  []func(int) (DeclType, Confidence){nested(nullif, col, lit(batch.TypeInt64)), lit(batch.TypeInt64)},
 			want:  batch.TypeInt64,
 			wantC: Decided,
 		},
@@ -430,15 +430,15 @@ func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
 			// cost it the decision in 1 either.
 			name:  "declared candidate list skips a guess too",
 			ret:   ifnull,
-			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col), lit(batch.TypeString)},
+			args:  []func(int) (DeclType, Confidence){nested(nullif, col), lit(batch.TypeString)},
 			want:  batch.TypeString,
 			wantC: Decided,
 		},
 	}
 	for _, tc := range tests {
-		got, c := tc.ret.Resolve(len(tc.args), func(i int) (batch.TypeID, Confidence) { return tc.args[i](i) })
-		if got != tc.want || c != tc.wantC {
-			t.Errorf("%s: Resolve = (%s, %s), want (%s, %s)", tc.name, got, c, tc.want, tc.wantC)
+		got, c := tc.ret.Resolve(len(tc.args), func(i int) (DeclType, Confidence) { return tc.args[i](i) })
+		if got.ID != tc.want || c != tc.wantC {
+			t.Errorf("%s: Resolve = (%s, %s), want (%s, %s)", tc.name, got.ID, c, tc.want, tc.wantC)
 		}
 	}
 }

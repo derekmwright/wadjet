@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -18,6 +19,21 @@ func wireGroupByTypes(m map[string]parquet.TypeID) map[string]int {
 	out := make(map[string]int, len(m))
 	for k, v := range m {
 		out[k] = int(v)
+	}
+	return out
+}
+
+// wireGroupByDecimal is wireGroupByTypes' companion for the (p,s) of the
+// DECIMAL keys. A key vector built from the TypeID alone comes out at scale 0
+// and TRUNCATES every value written into it — #379's defect, one type over
+// (ADR-0024 item 2).
+func wireGroupByDecimal(m map[string]logical.DecimalMeta) map[string]distributed.DecimalMeta {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]distributed.DecimalMeta, len(m))
+	for k, v := range m {
+		out[k] = distributed.DecimalMeta{Precision: v.Precision, Scale: v.Scale}
 	}
 	return out
 }
@@ -68,6 +84,7 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 		// TypeID zero — survive the wire (#371).
 		if a.InputExpr != "" {
 			spec.InputType = distributed.WindowTypePtr(int(a.InputType))
+			spec.InputPrecision, spec.InputScale = a.InputPrecision, a.InputScale
 		}
 		out = append(out, spec)
 	}

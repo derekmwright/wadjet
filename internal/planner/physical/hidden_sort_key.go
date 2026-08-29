@@ -338,6 +338,8 @@ func materializeSortKey(producer *Stage, key SortKeySpec) bool {
 		// wire (#445, #472).
 		Type:      key.SourceType,
 		TypeKnown: key.SourceTypeKnown,
+		Precision: key.SourcePrecision,
+		Scale:     key.SourceScale,
 	})
 	return true
 }
@@ -525,8 +527,9 @@ func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {
 		// table declares FLOAT64 here where the same term at the query's
 		// root gets INT64 through attachScanSelectProjections (#472).
 		strictInt := strictIntArithCols(owner.Children[0])
-		key.SourceType = inferProjectionTypeDecls(proj.ASTExpr, parquet.TypeString,
-			strictInt, inputColDecls(owner.Children[0]))
+		key.SourceType, key.SourcePrecision, key.SourceScale = declTypeParts(
+			inferProjectionDeclType(proj.ASTExpr, parquet.TypeString,
+				strictInt, inputColDecls(owner.Children[0])))
 		key.SourceTypeKnown = true
 	}
 }

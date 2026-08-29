@@ -197,7 +197,7 @@ func TestDateArithScalarVecAgree(t *testing.T) {
 			}
 			// A fresh FuncCall per path: EvalVec and Eval must not share
 			// per-instance state that makes them agree by accident.
-			out := batch.NewVector(declared, 2)
+			out := batch.NewVector(declared.ID, 2)
 			c.build().EvalVec(b, out, 2)
 			for row := 0; row < 2; row++ {
 				scalar := c.build().Eval(b, row)
@@ -208,7 +208,7 @@ func TestDateArithScalarVecAgree(t *testing.T) {
 				// The declared type has to be the type the value is
 				// actually stored as, or the output vector above could
 				// not have held it.
-				switch declared {
+				switch declared.ID {
 				case batch.TypeString:
 					if _, isText := scalar.(string); !isText {
 						t.Errorf("%s declares String but returned %T", c.fn, scalar)

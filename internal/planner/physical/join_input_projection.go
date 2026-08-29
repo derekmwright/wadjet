@@ -128,14 +128,18 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		if expr == "" {
 			expr = pr.ASTExpr.String()
 		}
+		decl := inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
 		computed = append(computed, ProjectExprSpec{
 			Expr: expr,
 			Name: strings.ToLower(pr.Alias),
 			// The computed column exists nowhere in the catalog, so its
 			// declared type IS its runtime type — the worker builds the
-			// output vector from it (#333).
-			Type:      inferProjectionTypeDecls(pr.ASTExpr, parquet.TypeString, strictInt, colTypes),
+			// output vector from it (#333), and a DECIMAL's (p,s) rides
+			// along or the vector comes out at scale 0 (ADR-0024 item 2).
+			Type:      decl.ID,
 			TypeKnown: true,
+			Precision: decl.Precision,
+			Scale:     decl.Scale,
 		})
 		collectASTCols(pr.ASTExpr, needCols)
 	}

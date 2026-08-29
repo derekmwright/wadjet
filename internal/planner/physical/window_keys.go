@@ -84,6 +84,10 @@ type windowKey struct {
 	// Type is the declared type of the materialized column. Only meaningful
 	// when Expr is non-nil.
 	Type parquet.TypeID
+	// Precision/Scale carry a materialized DECIMAL key's (p,s), which Type
+	// alone cannot (ADR-0024 item 2).
+	Precision int
+	Scale     int
 }
 
 // resolveWindowKeys resolves the PARTITION BY / ORDER BY terms of the window
@@ -105,6 +109,10 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 	// aggregate, and a window over a GROUP BY is an ordinary shape whose
 	// keys are the group keys. See windowKeyInputTypes.
 	typeCols, strictInt := windowKeyInputTypes(child)
+	// The (p,s) beside the TypeIDs: a materialized DECIMAL key's vector is
+	// built from this declaration, and one without a scale reads every value
+	// back at 10^0 (ADR-0024 item 2).
+	typeDec := windowKeyInputDecimal(child)
 	colFields := inputColRowFields(child)
 	out := map[string]windowKey{}
 	materialized := 0
@@ -146,9 +154,11 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 			k.Name = fmt.Sprintf("%s%d", windowKeyColPrefix, materialized)
 			materialized++
 			if k.Field != nil {
-				k.Type = k.Field.Type
+				k.Type, k.Precision, k.Scale = k.Field.Type, k.Field.Precision, k.Field.Scale
 			} else {
-				k.Type = inferProjectionTypeCols(k.Expr, parquet.TypeString, strictInt, typeCols)
+				k.Type, k.Precision, k.Scale = declTypeParts(
+					inferProjectionDeclType(k.Expr, parquet.TypeString, strictInt,
+						colDecls{types: typeCols, dec: typeDec}))
 			}
 		}
 		out[term] = k
@@ -220,6 +230,33 @@ func windowKeyInputTypes(child *logical.Node) (map[string]parquet.TypeID, map[st
 		}
 	}
 	return types, strictIntArithCols(agg.Children[0])
+}
+
+// windowKeyInputDecimal is windowKeyInputTypes' companion for DECIMAL
+// precision and scale, over the same two shapes: the window's own input, or
+// the aggregate below it when the window reads a GROUP BY's output.
+func windowKeyInputDecimal(child *logical.Node) map[string]logical.DecimalMeta {
+	if d := inputColDecimal(child); len(d) > 0 {
+		return d
+	}
+	agg := aggregateUnderWindow(child)
+	if agg == nil || len(agg.Children) != 1 {
+		return nil
+	}
+	base := inputColDecimal(agg.Children[0])
+	out := make(map[string]logical.DecimalMeta, len(base)+len(agg.AggExprs))
+	for name, m := range base {
+		out[name] = m
+	}
+	for _, a := range agg.AggExprs {
+		if m, known := aggSpecOutputDecimal(agg, a); known {
+			out[strings.ToLower(a.OutputCol)] = m
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // aggregateUnderWindow finds the Aggregate a window reads from, descending
@@ -369,6 +406,8 @@ func windowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 			// rule, for the same reason (#445, #472).
 			Type:      k.Type,
 			TypeKnown: true,
+			Precision: k.Precision,
+			Scale:     k.Scale,
 		})
 	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
@@ -402,10 +441,12 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.Projec
 			return nil, windowKeyCompileError(k.Text, err)
 		}
 		pc := exec.ProjectColumn{
-			Name:     k.Name,
-			Type:     k.Type,
-			Expr:     wrapExpr(compiled),
-			Computed: true,
+			Name:      k.Name,
+			Type:      k.Type,
+			Precision: k.Precision,
+			Scale:     k.Scale,
+			Expr:      wrapExpr(compiled),
+			Computed:  true,
 		}
 		if ve, ok := compiled.(expr.VecExpr); ok {
 			pc.VecEval = ve.EvalVec

@@ -6,6 +6,54 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
+// DeclType is a resolved declared type: the vector type a value can be stored
+// in, plus — for a DECIMAL — the (precision, scale) a bare TypeID cannot
+// express.
+//
+// It is ONE shape, deliberately, and it is the shape the whole declared-type
+// inference layer speaks: expr.Ret.Resolve here, and physical's
+// nodeDeclaredType / colRefDeclaredType / funcReturnType / caseDeclaredType /
+// windowSpecOutputType / declaredProjectionDecl on the planner side. Before
+// ADR-0024 that layer was (batch.TypeID, Confidence) with no room for (p,s),
+// so colRefDeclaredType answered Undecided for every DECIMAL column and
+// everything downstream fell to its non-DECIMAL default — which is #529
+// (GREATEST/LEAST over DECIMAL), #555 (COALESCE), #586/#587 (window) and
+// #542 (set operations), one defect wearing five hats.
+//
+// DecKnown distinguishes a resolved (p,s) from the zero value, which a
+// COMPUTED decimal legitimately has none of (#458) — the same shape
+// ProjectExprSpec.TypeKnown and AggSpec.OutputTypeKnown carry, and for the
+// same reason: precision 0 is a sentinel a caller must not take at face
+// value.
+type DeclType struct {
+	ID        batch.TypeID
+	Precision int
+	Scale     int
+	DecKnown  bool
+}
+
+// Decl builds a declaration for a type that needs no parameters.
+func Decl(t batch.TypeID) DeclType { return DeclType{ID: t} }
+
+// DeclDecimal builds a DECIMAL declaration with its (precision, scale).
+func DeclDecimal(prec, scale int) DeclType {
+	return DeclType{ID: batch.TypeDecimal, Precision: prec, Scale: scale, DecKnown: true}
+}
+
+// Dec returns the (precision, scale) as the rules in batch take them.
+func (d DeclType) Dec() batch.DecimalType {
+	return batch.DecimalType{Precision: d.Precision, Scale: d.Scale}
+}
+
+// String renders the declaration the way a type is written in SQL: the type
+// name, with a DECIMAL's (p,s) when it has one.
+func (d DeclType) String() string {
+	if d.ID == batch.TypeDecimal && d.DecKnown {
+		return fmt.Sprintf("%s(%d,%d)", d.ID, d.Precision, d.Scale)
+	}
+	return d.ID.String()
+}
+
 // Ret is a scalar function's declared return type: the vector type its results
 // can be stored in. It is declared where the function is registered, and the
 // planner types a projection from the same declaration the kernel writes
@@ -141,10 +189,10 @@ func (r Ret) Declared() bool { return r.kind != retUndeclared }
 // remembered, in preference order, and answered only if no later candidate
 // decides. A guess stays a guess all the way up, so an argument that guessed at
 // any depth never displaces an argument that knows.
-func (r Ret) Resolve(nargs int, argType func(i int) (batch.TypeID, Confidence)) (batch.TypeID, Confidence) {
+func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (DeclType, Confidence) {
 	switch r.kind {
 	case retFixed:
-		return r.typ, Decided
+		return DeclType{ID: r.typ}, Decided
 	case retSameAsArg:
 		if argType != nil {
 			candidates := r.args
@@ -154,27 +202,78 @@ func (r Ret) Resolve(nargs int, argType func(i int) (batch.TypeID, Confidence)) 
 					candidates[i] = i
 				}
 			}
-			guess, guessed := batch.TypeID(0), false
+			var decided []DeclType
+			guess, guessed := DeclType{}, false
 			for _, i := range candidates {
 				if i < 0 || i >= nargs {
 					continue
 				}
 				switch t, c := argType(i); c {
 				case Decided:
-					return t, Decided
+					decided = append(decided, t)
 				case Guessed:
 					if !guessed {
 						guess, guessed = t, true
 					}
 				}
 			}
+			if len(decided) > 0 {
+				return CommonDeclType(decided), Decided
+			}
 			if guessed {
 				return guess, Guessed
 			}
 		}
-		return r.typ, Guessed
+		return DeclType{ID: r.typ}, Guessed
 	}
-	return batch.TypeString, Undecided
+	return DeclType{ID: batch.TypeString}, Undecided
+}
+
+// CommonDeclType answers a polymorphic declaration from the argument types
+// that DECIDED one. It is the shared rule for every construct that CHOOSES
+// BETWEEN operands rather than computing a new value from them —
+// COALESCE/NULLIF/IFNULL/IF/GREATEST/LEAST here, and CASE's branches in the
+// physical planner, which calls this so the two can never disagree.
+//
+// The first decider still wins, which is what it always did — with one
+// exception, and it is the whole reason this function exists rather than a
+// `return decided[0]`. A DECIMAL is not a type on its own: COALESCE over
+// DECIMAL(9,2) and DECIMAL(18,4) has to answer a type that holds BOTH, or the
+// narrower declaration truncates the wider argument's digits on the way into
+// the output vector. So when every decider is a DECIMAL with a known (p,s),
+// they are folded through batch.DecimalCommon — the same rule a set operation
+// reconciles its arms with (ADR-0024 item 2).
+//
+// TODO(#555): a DECIMAL beside an INTEGER or a FLOAT resolves to numeric /
+// float8 in PostgreSQL, and this declines both. The float half needs a
+// decimal→float coercion the extremum arms do not do; the integer half needs
+// a STORE that scales, because an integer box written into a DECIMAL vector
+// is taken as ALREADY SCALED (ADR-0018 §4 — the parquet ingest contract), so
+// declaring DECIMAL for GREATEST(int_col, dec_col) would read 5 back as 0.05.
+// A silent wrong answer is worse than the loud mismatch that stands today, so
+// the first NON-DECIMAL decider answers those — exactly what happened before
+// a DECIMAL column reference could decide anything at all.
+func CommonDeclType(decided []DeclType) DeclType {
+	if len(decided) == 0 {
+		return DeclType{}
+	}
+	metas := make([]batch.DecimalType, 0, len(decided))
+	for _, d := range decided {
+		if d.ID != batch.TypeDecimal || !d.DecKnown {
+			for _, alt := range decided {
+				if alt.ID != batch.TypeDecimal {
+					return alt
+				}
+			}
+			return decided[0]
+		}
+		metas = append(metas, d.Dec())
+	}
+	m, ok := batch.DecimalCommon(metas)
+	if !ok {
+		return decided[0]
+	}
+	return DeclDecimal(m.Precision, m.Scale)
 }
 
 // Numeric reports whether the function always returns a number. It is the

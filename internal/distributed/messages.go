@@ -588,11 +588,19 @@ type OpSpec struct {
 	// DAG only (#379). A key absent from the map (bare column keys, older
 	// coordinators) keeps the worker's own inference and fallback.
 	GroupByTypes map[string]int `json:"group_by_types,omitempty"`
-	Aggregates   []AggSpec      `json:"aggregates,omitempty"`    // per-column aggregations
-	GroupByAll   bool           `json:"group_by_all,omitempty"`  // DISTINCT: group by every input column, key set resolved at runtime
-	MergeMode    bool           `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
-	FoldAvg      bool           `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
-	BuildProject bool           `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
+	// GroupByDecimal carries the (precision, scale) of the DECIMAL entries
+	// in GroupByTypes, keyed the same way. A bare TypeID is not a type for a
+	// DECIMAL: the worker builds the key vector from the declaration alone,
+	// and a DECIMAL vector with no scale TRUNCATES every value written into
+	// it — `GROUP BY COALESCE(a, b)` over DECIMAL(9,2)/DECIMAL(18,4)
+	// collapsed 12.7500 and 12.7501 into one group holding 12, on the DAG
+	// only. Exactly #379's shape, one type over (ADR-0024 item 2).
+	GroupByDecimal map[string]DecimalMeta `json:"group_by_decimal,omitempty"`
+	Aggregates     []AggSpec              `json:"aggregates,omitempty"`    // per-column aggregations
+	GroupByAll     bool                   `json:"group_by_all,omitempty"`  // DISTINCT: group by every input column, key set resolved at runtime
+	MergeMode      bool                   `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
+	FoldAvg        bool                   `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
+	BuildProject   bool                   `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
 	// EmitEmptyIdentity marks THE aggregate whose one row is the query's
 	// answer for these aggregates: the ungrouped final. SQL gives an
 	// ungrouped aggregate exactly one row over any input including none
@@ -730,6 +738,23 @@ type ProjectSpec struct {
 	Expr string `json:"expr"`
 	Name string `json:"name"`
 	Type *int   `json:"type,omitempty"`
+	// Precision and Scale carry a computed DECIMAL's declaration. A bare
+	// TypeID is not a type for a DECIMAL: the worker builds the output
+	// vector from Type alone, and a DECIMAL vector with no scale reads every
+	// value back at 10^0 (ADR-0024 item 2; the same reason ColumnSpec and
+	// DecimalCoercion carry the pair). Zero means "not a DECIMAL, or the
+	// planner could not resolve one" — the #458 unconstrained sentinel.
+	Precision int `json:"precision,omitempty"`
+	Scale     int `json:"scale,omitempty"`
+}
+
+// DecimalMeta is a DECIMAL's declared (precision, scale) on the wire — the
+// two facts a bare TypeID cannot express (ADR-0024 item 2). It is the wire
+// twin of logical.DecimalMeta and of ColumnSpec's own Precision/Scale pair,
+// for the places that carry a TYPE map rather than a column list.
+type DecimalMeta struct {
+	Precision int `json:"precision,omitempty"`
+	Scale     int `json:"scale,omitempty"`
 }
 
 // AggSpec defines an aggregation in a task.
@@ -781,6 +806,13 @@ type AggSpec struct {
 	// declaration — the DAG read it as undeclared, projected the predicate
 	// into a Float64 vector, and the accumulator never saw a true value.
 	InputType *int `json:"input_type,omitempty"`
+	// InputPrecision/InputScale carry a DECIMAL InputType's (p,s), for the
+	// reason OpSpec.GroupByDecimal carries a key's: the materialized input
+	// vector is built from the declaration and one with no scale truncates
+	// every value — MAX(COALESCE(a, b)) over two DECIMAL columns answered
+	// 12 for 12.75 on the DAG (ADR-0024 item 2). Zero for every other type.
+	InputPrecision int `json:"input_precision,omitempty"`
+	InputScale     int `json:"input_scale,omitempty"`
 	// InputCol2 is the second column argument of a two-column aggregate:
 	// CORR(x, y), COVAR_SAMP/POP(x, y) and MIN_BY/MAX_BY(value, ordering).
 	// Empty for every other function.
