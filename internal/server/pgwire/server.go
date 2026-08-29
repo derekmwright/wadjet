@@ -734,7 +734,18 @@ func (c *pgConn) handleCopyIn(sql string) {
 					val = unescapeCopyText(val)
 					v, err := wadjet.ConvertValueForColumn(val, colByName[colName])
 					if err != nil {
-						c.sendError("ERROR", "22P02",
+						// The converter's own SQLSTATE, not a hardcoded
+						// 22P02: a DECIMAL field past the column's declared
+						// precision is 22003 numeric_value_out_of_range and
+						// only text that names no number is 22P02, and a COPY
+						// client branches on which (#647 re-review). 22P02
+						// stays the fallback for the converters that raise a
+						// plain error.
+						state := sqlerr.StateOf(err)
+						if state == "" {
+							state = "22P02"
+						}
+						c.sendError("ERROR", state,
 							fmt.Sprintf("COPY: column %q: %v", colName, err))
 						c.drainCopy()
 						return

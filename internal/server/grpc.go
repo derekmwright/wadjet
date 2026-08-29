@@ -10,8 +10,8 @@ import (
 
 	"golang.org/x/net/netutil"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -21,6 +21,7 @@ import (
 	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	wadjetdb "github.com/derekmwright/wadjet/wadjet"
@@ -412,7 +413,11 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 		// declaration (#647 review).
 		col, err := parquet.DeclaredColumn(cd.Name, cd.Type, cd.Nullable)
 		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "column %q: %v", cd.Name, err)
+			// The SQLSTATE travels in the message: status.Errorf("%v") drops
+			// it, and a client that gets 22023 from the SQL doors and a bare
+			// string from this one cannot treat the two the same
+			// (#647 re-review).
+			return nil, status.Errorf(codes.InvalidArgument, "column %q: %s", cd.Name, sqlErrorText(err))
 		}
 		columns[i] = col
 	}
@@ -423,6 +428,16 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 	}
 
 	return &wadjetv1.CreateTableResponse{Name: req.Name}, nil
+}
+
+// sqlErrorText renders an error with its SQLSTATE when it carries one, so a
+// gRPC message says the same thing the HTTP body and the pgwire ErrorResponse
+// do for the same refusal.
+func sqlErrorText(err error) string {
+	if state := sqlerr.StateOf(err); state != "" {
+		return fmt.Sprintf("%v (SQLSTATE %s)", err, state)
+	}
+	return err.Error()
 }
 
 // DropTable removes a table.

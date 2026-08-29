@@ -213,19 +213,26 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 	// accumulated all updated rows table-wide before one Ingest — a broad
 	// UPDATE held the whole table as boxed maps.
 	//
-	// INGEST PRECEDES THE MARKER COMMIT, which is the opposite of what this
-	// loop used to do. Ingest validates each row synchronously, so a row the
-	// table cannot hold now fails with the original still in place; committing
-	// the marker first meant a refused UPDATE DELETED the row it refused to
-	// change (#647 review). It is also the better crash direction: Ingest only
-	// BUFFERS, so a crash before FlushAll loses the updated rows either way —
-	// with the marker uncommitted the original survives and the UPDATE simply
-	// did not happen, where before the original was already gone. The
-	// remaining window is an auto-flush that succeeded followed by a failed
-	// marker commit, which duplicates rather than deletes; the transactional
-	// marker+ingest commit is a known separate issue.
+	// EVERY REPLACEMENT ROW IS DURABLE BEFORE ANY MARKER IS COMMITTED. The
+	// markers accumulate across the whole statement, one FlushAll follows the
+	// loop, and only then does a single AddDeleteMarkers commit them.
+	//
+	// Committing a file's marker inside the loop is what made this per-FILE
+	// rather than per-STATEMENT. Ingest only BUFFERS, so with the marker for
+	// file 1 already durable and its replacement rows still in RAM, a failure
+	// on file 2 — a legacy value past the column's precision, or an
+	// object-store error inside the auto-flush that bounds memory — returned
+	// without ever flushing, and file 1's matched rows were simply gone
+	// (#647 re-review). Marker-first, the shape before that, lost them on the
+	// FIRST file.
+	//
+	// What remains is duplication, never loss: an auto-flush that already
+	// landed some replacement rows followed by a failure leaves those rows
+	// beside the originals the uncommitted markers would have deleted. The
+	// transactional marker+ingest commit is a known separate issue.
 	var totalUpdated int64
 	var ing *ingest.Ingester
+	var markers []catalog.DeleteMarker
 
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
@@ -262,20 +269,24 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 			if err := ing.Ingest(ctx, updatedRows); err != nil {
 				return nil, fmt.Errorf("inserting updated rows: %w", err)
 			}
-			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: matchedIndices}
-			if err := db.catalog.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
-				return nil, fmt.Errorf("recording delete markers: %w", err)
-			}
+			markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: matchedIndices})
 			totalUpdated += int64(len(matchedIndices))
 		}
 	}
 
 	if ing != nil {
 		if err := ing.FlushAll(ctx); err != nil {
+			// No markers are committed on this path: every row this statement
+			// matched is still where it was.
 			return nil, fmt.Errorf("flushing updated rows: %w", err)
 		}
 	}
 
+	if len(markers) > 0 {
+		if err := db.catalog.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
+			return nil, fmt.Errorf("recording delete markers: %w", err)
+		}
+	}
 	return &ExecResult{
 		RowsAffected: totalUpdated,
 		Command:      "UPDATE",
@@ -306,9 +317,12 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 	}
 
 	// Build type map for value conversion in SET/VALUES clauses
-	typeMap := make(map[string]parquet.TypeID, len(targetMeta.Schema.Columns))
+	// The whole COLUMN, not its TypeID: a MERGE value is judged against the
+	// target's declared (p, s) as it is resolved, before any marker is
+	// written (#647 re-review).
+	colByName := make(map[string]parquet.Column, len(targetMeta.Schema.Columns))
 	for _, col := range targetMeta.Schema.Columns {
-		typeMap[col.Name] = col.Type
+		colByName[col.Name] = col
 	}
 
 	targetAlias := info.TargetAlias
@@ -351,7 +365,7 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 						for k, v := range tgtRow {
 							updatedRow[k] = v
 						}
-						if err := applySetClauses(updatedRow, wc.SQL, merged, typeMap); err != nil {
+						if err := applySetClauses(updatedRow, wc.SQL, merged, colByName); err != nil {
 							return nil, fmt.Errorf("applying SET: %w", err)
 						}
 						updateRows = append(updateRows, updatedRow)
@@ -370,7 +384,7 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 					continue
 				}
 				if strings.ToUpper(wc.Action) == "INSERT" {
-					newRow, err := buildInsertRow(wc.SQL, srcRow, sourceAlias, typeMap)
+					newRow, err := buildInsertRow(wc.SQL, srcRow, sourceAlias, colByName)
 					if err != nil {
 						return nil, fmt.Errorf("building INSERT row: %w", err)
 					}
@@ -540,7 +554,7 @@ func matchByKeys(srcRow, tgtRow map[string]any, keys []onKeyPair) bool {
 
 // applySetClauses applies "SET col = expr, ..." to a row.
 // The merged row provides both source and target column values for expressions.
-func applySetClauses(row map[string]any, setSQL string, merged map[string]any, typeMap map[string]parquet.TypeID) error {
+func applySetClauses(row map[string]any, setSQL string, merged map[string]any, colByName map[string]parquet.Column) error {
 	// Strip SET keyword prefix (parser includes it in the raw SQL)
 	sql := strings.TrimSpace(setSQL)
 	if strings.HasPrefix(strings.ToUpper(sql), "SET ") {
@@ -561,7 +575,10 @@ func applySetClauses(row map[string]any, setSQL string, merged map[string]any, t
 		valExpr := strings.TrimSpace(part[eqIdx+1:])
 
 		// Resolve the value from the merged row
-		val := resolveSetValue(valExpr, merged, typeMap[col])
+		val, err := resolveSetValue(valExpr, merged, colByName[col])
+		if err != nil {
+			return fmt.Errorf("SET %s: %w", col, err)
+		}
 		row[col] = val
 	}
 	return nil
@@ -598,30 +615,57 @@ func splitSetClauses(s string) []string {
 	return parts
 }
 
-// resolveSetValue resolves a SET expression value from the merged row context.
-func resolveSetValue(expr string, merged map[string]any, targetType parquet.TypeID) any {
+// resolveSetValue resolves a SET expression value from the merged row context,
+// against the TARGET COLUMN's full declaration.
+//
+// It used to take a TypeID and SWALLOW every conversion failure — the quoted
+// arm discarded the error outright and the literal arm answered the raw
+// expression TEXT — so a MERGE value the target could not hold was first
+// judged at the parquet leaf, after the statement had decided what to delete
+// (#647 re-review). A column REFERENCE is checked too: its box comes from the
+// source table and may be a DECIMAL at another scale or past the target's
+// precision, which is exactly the shape a MERGE exists to move.
+func resolveSetValue(expr string, merged map[string]any, col parquet.Column) (any, error) {
 	expr = strings.TrimSpace(expr)
 
 	// Try direct column reference (e.g., "s.name")
 	if v, ok := merged[expr]; ok {
-		return v
+		return v, checkValueForColumn(v, col)
 	}
 	// Try without quotes
 	if len(expr) >= 2 && expr[0] == '\'' && expr[len(expr)-1] == '\'' {
-		v, _ := convertValue(expr, targetType)
-		return v
+		return ConvertValueForColumn(expr, col)
 	}
 	// Try as literal
-	v, err := convertValue(expr, targetType)
+	v, err := ConvertValueForColumn(expr, col)
 	if err == nil {
-		return v
+		return v, nil
 	}
-	return expr
+	// Not a column reference and not a literal this converter reads. The raw
+	// text is what this path has always answered for an expression it cannot
+	// evaluate; it stays for the STRING targets where the text IS the value,
+	// and is reported for every typed column, where storing the expression's
+	// source text is a wrong value rather than an unevaluated one.
+	if col.Type == parquet.TypeString {
+		return expr, nil
+	}
+	return nil, err
+}
+
+// checkValueForColumn is ConvertValueForColumn's half for a value that is
+// already a Go box rather than literal text: it validates and returns nothing,
+// because there is nothing to convert.
+func checkValueForColumn(v any, col parquet.Column) error {
+	if v == nil || col.Type != parquet.TypeDecimal {
+		return nil
+	}
+	_, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale)
+	return err
 }
 
 // buildInsertRow builds a new row from the INSERT clause of a WHEN NOT MATCHED.
 // SQL format: "(col1, col2) VALUES (expr1, expr2)"
-func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, typeMap map[string]parquet.TypeID) (map[string]any, error) {
+func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, colByName map[string]parquet.Column) (map[string]any, error) {
 	merged := buildAliasedRow(srcRow, srcAlias)
 	sql := strings.TrimSpace(insertSQL)
 
@@ -657,7 +701,10 @@ func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, ty
 
 	row := make(map[string]any, len(columns))
 	for i, col := range columns {
-		val := resolveSetValue(strings.TrimSpace(values[i]), merged, typeMap[col])
+		val, err := resolveSetValue(strings.TrimSpace(values[i]), merged, colByName[col])
+		if err != nil {
+			return nil, fmt.Errorf("column %q: %w", col, err)
+		}
 		row[col] = val
 	}
 	return row, nil

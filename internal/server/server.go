@@ -31,6 +31,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -578,7 +579,7 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 	}
 
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DML execution error: "+err.Error())
+		writeSQLError(w, http.StatusInternalServerError, "DML execution error: "+err.Error(), err)
 		return
 	}
 
@@ -764,6 +765,7 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 	schema := tableMeta.Schema.Columns
 	var totalUpdated int64
 	var ing *ingest.Ingester
+	var markers []catalog.DeleteMarker
 
 	// Per-file streaming: box only the matched rows (the previous ToRows
 	// boxed every row of every file even at zero WHERE selectivity), hand
@@ -771,12 +773,17 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 	// accumulating updatedRows table-wide held the whole table as boxed maps
 	// on a broad UPDATE.
 	//
-	// INGEST PRECEDES THE MARKER COMMIT, the opposite of what this loop used
-	// to do, for the reason wadjet/dml.go's twin gives: Ingest validates each
-	// row synchronously, so a row the table cannot hold now fails with the
-	// original still in place, where committing the marker first DELETED the
-	// row it then refused to change (#647 review). The transactional
-	// marker+ingest commit is a known separate issue.
+	// EVERY REPLACEMENT ROW IS DURABLE BEFORE ANY MARKER IS COMMITTED, for
+	// the reason wadjet/dml.go's twin gives at length: Ingest only BUFFERS, so
+	// a marker committed per FILE inside this loop is durable while its
+	// replacement rows are still in RAM, and a failure on a later file — a
+	// legacy value past the column's precision, or an object-store error in
+	// the auto-flush that bounds memory — returned without flushing and left
+	// the earlier files' matched rows gone (#647 re-review). Markers
+	// accumulate, one FlushAll follows the loop, one AddDeleteMarkers commits
+	// them, and a flush failure commits none. What remains is duplication,
+	// never loss; the transactional marker+ingest commit is a known separate
+	// issue.
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
 			b, err := readDMLFile(ctx, cat, file.Path, schema)
@@ -809,17 +816,21 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			if err := ing.Ingest(ctx, updatedRows); err != nil {
 				return nil, fmt.Errorf("inserting updated rows: %w", err)
 			}
-			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices}
-			if err := cat.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
-				return nil, fmt.Errorf("recording delete markers: %w", err)
-			}
+			markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices})
 			totalUpdated += int64(len(indices))
 		}
 	}
 
 	if ing != nil {
 		if err := ing.FlushAll(ctx); err != nil {
+			// No markers are committed on this path: every row this statement
+			// matched is still where it was.
 			return nil, fmt.Errorf("flushing updated rows: %w", err)
+		}
+	}
+	if len(markers) > 0 {
+		if err := cat.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
+			return nil, fmt.Errorf("recording delete markers: %w", err)
 		}
 	}
 
@@ -984,6 +995,27 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeSQLError is writeError for a failure that may carry a SQLSTATE.
+//
+// A statement refused for what it CONTAINS is the client's error, not the
+// server's: a DECIMAL literal past the column's precision (22003) or text
+// naming no number (22P02) came back as 500 Internal Server Error with the
+// code nowhere in the body, so an HTTP client could neither see that its own
+// input was wrong nor branch on why (#647 re-review). Any error carrying a
+// SQLSTATE in the 22 (data exception) or 42 (syntax/access) classes is a 400
+// with the code in the payload; everything else keeps the caller's status.
+func writeSQLError(w http.ResponseWriter, status int, msg string, err error) {
+	state := sqlerr.StateOf(err)
+	if state == "" {
+		writeError(w, status, msg)
+		return
+	}
+	if strings.HasPrefix(state, "22") || strings.HasPrefix(state, "42") {
+		status = http.StatusBadRequest
+	}
+	writeJSON(w, status, map[string]string{"error": msg, "sqlstate": state})
 }
 
 // resolveQueryLimits returns the effective query limits for the request identity.

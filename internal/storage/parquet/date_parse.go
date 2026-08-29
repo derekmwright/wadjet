@@ -267,7 +267,18 @@ func ValidateNestedLeaves(col Column, val any) error {
 			return nil
 		}
 		keyCol, valCol := col.ElementType.Fields[0], col.ElementType.Fields[1]
-		if m, ok := val.(map[string]any); ok {
+		m, ok := val.(map[string]any)
+		if !ok {
+			// The MAP's STORAGE shape — the []any of {key,value} entry maps
+			// batch.Vector.GetValue hands back, which every row that passed
+			// through RowAt/ToRows carries (UPDATE's and MERGE's re-ingest of
+			// a boxed row). decomposeMap accepts it, so this must too, or a
+			// bad value in that shape is admitted here and kills the buffer at
+			// the flush instead (#647 re-review). Mirroring the writer's
+			// fallback is the point: the two must accept the same shapes.
+			m, ok = mapFromStorageShapeEntries(val, keyCol.Name, valCol.Name)
+		}
+		if ok {
 			for k, v := range m {
 				if err := validateNestedLeaf(keyCol, k); err != nil {
 					return err

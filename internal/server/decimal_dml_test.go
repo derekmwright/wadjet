@@ -2,9 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
@@ -113,15 +118,31 @@ func TestEveryDDLDoorReadsDecimalParameters(t *testing.T) {
 		}
 	}
 
-	// The gRPC door, through the same declaration.
+	// The gRPC door, THROUGH THE HANDLER — asserting parquet.DeclaredColumn
+	// here would only assert the function this test exists to prove the door
+	// calls.
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test-bucket")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	g := NewGRPCServer(GRPCConfig{Catalog: cat}, slog.Default())
+	cols := make([]*wadjetv1.ColumnDef, len(defs))
 	for i, d := range defs {
-		col, err := parquet.DeclaredColumn(d.Name, d.Type, d.Nullable)
-		if err != nil {
-			t.Fatalf("DeclaredColumn(%q): %v", d.Type, err)
-		}
-		if !sameDeclaredColumn(col, want[i]) {
-			t.Errorf("gRPC CREATE TABLE column %q = %s, want %s", d.Name,
-				declaredColumnString(col), declaredColumnString(want[i]))
+		cols[i] = &wadjetv1.ColumnDef{Name: d.Name, Type: d.Type, Nullable: d.Nullable}
+	}
+	if _, err := g.CreateTable(ctx, &wadjetv1.CreateTableRequest{Name: "doors", Columns: cols}); err != nil {
+		t.Fatalf("gRPC CreateTable: %v", err)
+	}
+	meta, err := cat.GetTable(ctx, "doors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range want {
+		if !sameDeclaredColumn(meta.Schema.Columns[i], w) {
+			t.Errorf("gRPC CREATE TABLE column %q = %s, want %s", w.Name,
+				declaredColumnString(meta.Schema.Columns[i]), declaredColumnString(w))
 		}
 	}
 
@@ -133,8 +154,16 @@ func TestEveryDDLDoorReadsDecimalParameters(t *testing.T) {
 	} else if got := sqlerr.StateOf(err); got != "22023" {
 		t.Errorf("HTTP SQLSTATE %q, want 22023 (err: %v)", got, err)
 	}
-	if _, err := parquet.DeclaredColumn("d", "DECIMAL(50,2)", true); err == nil {
-		t.Error("gRPC CREATE TABLE accepted DECIMAL(50,2)")
+	_, err = g.CreateTable(ctx, &wadjetv1.CreateTableRequest{
+		Name:    "doors_bad",
+		Columns: []*wadjetv1.ColumnDef{{Name: "d", Type: "DECIMAL(50,2)", Nullable: true}},
+	})
+	if err == nil {
+		t.Fatal("gRPC CREATE TABLE accepted DECIMAL(50,2)")
+	}
+	// status.Errorf("%v") erased the code the other two doors report.
+	if !strings.Contains(err.Error(), "22023") {
+		t.Errorf("the gRPC refusal does not carry its SQLSTATE: %v", err)
 	}
 }
 
@@ -176,13 +205,100 @@ func TestGRPCCreateTableCarriesDecimalParameters(t *testing.T) {
 	}
 }
 
-// parquet.Column holds a slice, so the four fields a declaration decides are
-// compared by name.
+// parquet.Column holds slices, so `!=` will not compile and a field-by-field
+// list would silently stop covering whatever is added next. reflect.DeepEqual
+// covers the whole declaration — Dimension, ElementType and Fields included,
+// which a hand-written comparison of the DECIMAL fields did not.
 func sameDeclaredColumn(a, b parquet.Column) bool {
-	return a.Name == b.Name && a.Type == b.Type &&
-		a.Precision == b.Precision && a.Scale == b.Scale && a.Nullable == b.Nullable
+	return reflect.DeepEqual(a, b)
 }
 
 func declaredColumnString(c parquet.Column) string {
-	return fmt.Sprintf("%s %v(%d,%d) nullable=%v", c.Name, c.Type, c.Precision, c.Scale, c.Nullable)
+	return fmt.Sprintf("%s %v(%d,%d) nullable=%v dim=%d elem=%v fields=%d",
+		c.Name, c.Type, c.Precision, c.Scale, c.Nullable, c.Dimension, c.ElementType != nil, len(c.Fields))
+}
+
+// A statement refused for what it CONTAINS is the client's error. The HTTP DML
+// handler returned 500 Internal Server Error with the SQLSTATE nowhere in the
+// body, so a client could not see that its own input was wrong (#647
+// re-review).
+func TestHTTPDMLRefusalIsABadRequestCarryingItsSQLSTATE(t *testing.T) {
+	srv, cat := newTestServer(t)
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "d", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+	}}
+	if err := cat.CreateTable(ctx, "http_dec", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		state string
+	}{
+		{name: "overflow", sql: "INSERT INTO http_dec (id, d) VALUES (1, 99999999999999999999.99)", state: "22003"},
+		{name: "not a number", sql: "INSERT INTO http_dec (id, d) VALUES (1, 'abc')", state: "22P02"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]string{"sql": tc.sql})
+			resp, err := http.Post(ts.URL+"/v1/queries", "application/json", strings.NewReader(string(body)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status %d, want 400 — a refused literal is the client's error", resp.StatusCode)
+			}
+			var payload map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["sqlstate"] != tc.state {
+				t.Errorf("body sqlstate = %v, want %q (body: %v)", payload["sqlstate"], tc.state, payload)
+			}
+		})
+	}
+}
+
+// The server's UPDATE executor, over TWO files: markers must not commit per
+// file while the replacement rows are still buffered (#647 re-review).
+func TestServerFailedUpdateAcrossFilesLeavesEveryFileIntact(t *testing.T) {
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "n", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "d", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+	}}
+	cat, filePath := nestServerDMLSetup(t, "srv_multi", schema, []map[string]any{
+		{"id": int64(1), "n": int64(1), "d": "1.50"},
+	})
+	// A second file holding a legacy value the table's DECIMAL(9,2) cannot
+	// express, written at a wider declared precision.
+	legacy := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "n", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "d", Type: parquet.TypeDecimal, Precision: 18, Scale: 2, Nullable: true},
+	}}
+	writeDMLTestParquetFile(t, ctx, cat.Store(), cat, "srv_multi", legacy, []map[string]any{
+		{"id": int64(2), "n": int64(2), "d": "9999999999999999.99"},
+	}, "chunk_0002.parquet")
+
+	info := parseDMLOrFatal(t, "UPDATE srv_multi SET n = 99").Update
+	if _, err := executeDMLUpdate(ctx, cat, info); err == nil {
+		t.Fatal("UPDATE over a file holding a value the column cannot express succeeded")
+	}
+
+	all := nestServerAllRowsAfterUpdate(t, cat, "srv_multi", filePath, schema)
+	ids := map[int64]bool{}
+	for _, r := range all {
+		ids[r["id"].(int64)] = true
+	}
+	if !ids[1] || !ids[2] {
+		t.Fatalf("rows %v survive a REFUSED multi-file UPDATE, want both 1 and 2 — a file whose "+
+			"marker committed before the statement failed lost its rows", ids)
+	}
 }

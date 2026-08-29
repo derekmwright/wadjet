@@ -1590,11 +1590,16 @@ func (r *Reader) RowGroupNumRows(index int) int64 {
 // narrowed and read: the format fixes an FLBA's width per column, so a wider
 // leaf whose values all fit is an ordinary file (DecimalEntryBytes).
 func DecimalFromBytes(b []byte) ([2]uint64, error) {
+	// The refused WIDTH is read before the narrowing shadows it: reporting
+	// len(b) after `b, ok := DecimalEntryBytes(b)` named the nil the refusal
+	// returns, so the native scan said "a DECIMAL entry of 0 bytes" for a
+	// 17-byte one (#647 re-review).
+	n := len(b)
 	b, ok := DecimalEntryBytes(b)
 	if !ok {
-		return [2]uint64{}, decimalEntryTooWide(len(b))
+		return [2]uint64{}, decimalEntryTooWide(n)
 	}
-	n := len(b)
+	n = len(b)
 	if n == 0 {
 		return [2]uint64{}, nil
 	}

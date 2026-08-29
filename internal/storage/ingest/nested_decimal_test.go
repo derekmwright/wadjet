@@ -60,6 +60,21 @@ func TestIngestRefusesANestedDecimalWithNoValue(t *testing.T) {
 			row: map[string]any{"id": int64(9), "m": map[string]any{"k": "abc"}}},
 		{name: "MAP value is NaN", state: "22003",
 			row: map[string]any{"id": int64(9), "m": map[string]any{"k": "NaN"}}},
+		// The MAP's STORAGE shape — the []any of {key,value} entry maps
+		// batch.Vector.GetValue hands back, which every row that passed
+		// through RowAt/ToRows carries. decomposeMap accepts it, so the
+		// boundary check must read it too: it asserted map[string]any only,
+		// so a bad value in this shape was admitted here and killed the whole
+		// buffer at the flush (#647 re-review).
+		{name: "MAP storage shape names no number", state: "22P02",
+			row: map[string]any{"id": int64(9), "m": []any{
+				map[string]any{"key": "k", "value": "abc"},
+			}}},
+		{name: "MAP storage shape past the precision", state: "22003",
+			row: map[string]any{"id": int64(9), "m": []any{
+				map[string]any{"key": "ok", "value": "1.00"},
+				map[string]any{"key": "k", "value": "99999999999999999999.99"},
+			}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

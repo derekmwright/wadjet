@@ -247,8 +247,17 @@ func TestDecimalFromBytesRefusesAnEntryPastTheCarrier(t *testing.T) {
 		for i := range b {
 			b[i] = 0x7f
 		}
-		if _, err := DecimalFromBytes(b); err == nil {
+		_, err := DecimalFromBytes(b)
+		if err == nil {
 			t.Errorf("a %d-byte DECIMAL entry was decoded", n)
+			continue
+		}
+		// The refusal must name the width it REFUSED. Reading len(b) after
+		// the narrowing shadowed it reported the nil the refusal returns, so
+		// a 17-byte entry came back as "a DECIMAL entry of 0 bytes"
+		// (#647 re-review).
+		if want := fmt.Sprintf("of %d bytes", n); !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal of a %d-byte entry does not say so: %v", n, err)
 		}
 	}
 	// A negative value whose excess is 0x00, and a positive one whose excess
@@ -305,6 +314,27 @@ func TestDecimalFromBytesRefusesAnEntryPastTheCarrier(t *testing.T) {
 		d := Decimal128{Hi: int64(w[0]), Lo: w[1]}
 		if d.String() != tc.want {
 			t.Errorf("%d-byte entry decoded as %s, want %s", len(tc.b), d, tc.want)
+		}
+	}
+}
+
+// The row reader names the same width the exported decoder does, and names
+// the column and the entry with it.
+func TestDecodeDecimalValuesNamesTheRefusedWidth(t *testing.T) {
+	col := Column{Name: "d", Type: TypeDecimal, Precision: 38, Scale: 2}
+	entry := make([]byte, 20)
+	for i := range entry {
+		entry[i] = 0x7f
+	}
+	data := ByteArrayValues(entry, []uint32{0, uint32(len(entry))})
+	dst := make([]any, 1)
+	err := decodeDecimalValues(dst, data, 1, col)
+	if err == nil {
+		t.Fatal("a 20-byte DECIMAL entry was decoded by the row path")
+	}
+	for _, want := range []string{`column "d"`, "entry 0", "of 20 bytes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the row path's refusal does not contain %q: %v", want, err)
 		}
 	}
 }
