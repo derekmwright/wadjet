@@ -3,7 +3,6 @@ package kernel
 import (
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -383,18 +382,42 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// Not compareFilterImpl: FLOAT compares in PostgreSQL's total order,
 		// where NaN is the greatest value and equal to itself, so `> 1e300`
 		// admits a NaN row and `= f` keeps one (#459, ADR-0012 item 8).
-		return compareFilterFloat(getFloat64Data, toFloat64(value), op)
-	case batch.TypeFloat32:
-		// WIDENS the column to double rather than narrowing the literal to
-		// real: PostgreSQL resolves `real <op> <numeric literal>` through
-		// float8 for every one of the six operators (#631). See
-		// compareFilterFloat32Widen for the EXPLAIN VERBOSE evidence and for
-		// why this is not only an equality question.
 		//
-		// A multi-element `real IN (...)` is the one shape that goes the
-		// other way — PostgreSQL casts the whole array literal to real[] and
-		// NARROWS there (#549) — which is why the two kernels are separate
-		// and IN is deliberately not lowered to a chain of `=`.
+		// A text literal is read through the float8 input grammar, not
+		// toFloat64, which has no string arm at all and answered 0.0 for every
+		// one: `d = '3.1'` matched the row holding 0.0 and `d < 'NaN'` asked
+		// `< 0.0` (#646). A literal that names no double returns no kernel;
+		// exec.floatConstError raises 22P02, or 22003 for one out of range.
+		f, st := Float64FilterConst(value)
+		if st != NumConstOK {
+			return nil
+		}
+		return compareFilterFloat(getFloat64Data, f, op)
+	case batch.TypeFloat32:
+		// The two SPELLINGS of a literal take OPPOSITE directions here, and
+		// both are PostgreSQL's (EXPLAIN VERBOSE, postgres:17):
+		//
+		//	real = 3.1    ->  (r = '3.1'::double precision)   WIDEN  (#631)
+		//	real = '3.1'  ->  (r = '3.1'::real)               NARROW (#646)
+		//
+		// An unquoted decimal constant is `numeric` and drags the comparison
+		// up to float8; a QUOTED one is unknown-typed and is coerced straight
+		// to the column's own type. They are two predicates — over a column
+		// holding real(3.1) the first selects nothing and the second selects
+		// that row — so the box's Go type picks the kernel. It used to pick
+		// neither: toFloat64 has no string arm, so every quoted constant read
+		// as 0.0 and `real = '3.1'` matched the row holding 0.0 (#646).
+		//
+		// A multi-element `real IN (...)` narrows for BOTH spellings —
+		// PostgreSQL casts the whole array literal to real[] (#549) — which is
+		// why the IN kernels are separate and IN is deliberately not lowered
+		// to a chain of `=`.
+		if f32, st, quoted := Float32FilterConst(value); quoted {
+			if st != NumConstOK {
+				return nil
+			}
+			return compareFilterFloat(getFloat32Data, f32, op)
+		}
 		return compareFilterFloat32Widen(toFloat64(value), op)
 	case batch.TypeString:
 		return compareFilterString(op, toString(value))
@@ -1037,10 +1060,25 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 // other type compares identically at either width, so they ignore the count.
 func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syntacticLen int) FilterKernel {
 	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp:
+	case batch.TypeTimestamp:
+		// TIMESTAMP keeps its own string grammar (parseTimestampString via
+		// toInt64): a quoted string against a TIMESTAMP column is a timestamp,
+		// not an integer — #493, not #536.
 		set := make(map[int64]struct{}, len(values))
 		for _, v := range values {
 			set[toInt64(v)] = struct{}{}
+		}
+		return inFilterInt64(getInt64Data, set, negate)
+	case batch.TypeInt64:
+		// Each member is read through the integer input grammar, the same way
+		// the scalar `=` arm reads its constant (#536). This arm still used
+		// toInt64, so `k IN ('3','7')` read every member through
+		// parseTimestampString and matched the rows holding ZERO — the IN half
+		// of the defect #536 closed for `=`, named in its own review and
+		// tracked in #634/#646.
+		set, st := int64InSet(values)
+		if st != NumConstOK {
+			return nil
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeDate:
@@ -1054,13 +1092,24 @@ func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syn
 		}
 		return inFilterInt32(getInt32Data, set, negate)
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
-		set := make(map[int32]struct{}, len(values))
-		for _, v := range values {
-			set[int32(toInt64(v))] = struct{}{}
+		// int32InSet, not int32(toInt64(v)): a member outside int32's range
+		// WRAPPED onto a value the column can hold, which is #536's silent-wrong
+		// class through the set rather than through `=`.
+		set, st := int32InSet(values)
+		if st != NumConstOK {
+			return nil
 		}
 		return inFilterInt32(getInt32Data, set, negate)
 	case batch.TypeFloat64:
-		set, hasNaN := floatInSet(values)
+		// Each member is read through the float8 input grammar when it is a
+		// QUOTED literal, not through toFloat64's silent 0.0 (#646): `d IN
+		// ('3.1','7.1')` matched nothing and `d IN ('abc')` matched the row
+		// holding 0.0. A member that names no double declines the kernel;
+		// exec.floatConstError raises for it.
+		set, hasNaN, st := floatInSet(values)
+		if st != NumConstOK {
+			return nil
+		}
 		return inFilterFloat64(set, hasNaN, negate)
 	case batch.TypeString:
 		set := make(map[string]struct{}, len(values))
@@ -1138,9 +1187,9 @@ func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syn
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeDuration:
-		set := make(map[int64]struct{}, len(values))
-		for _, v := range values {
-			set[toInt64(v)] = struct{}{}
+		set, st := int64InSet(values)
+		if st != NumConstOK {
+			return nil
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeFloat32:
@@ -1171,15 +1220,24 @@ func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syn
 		// matches nothing (both verified on postgres:17). IN is therefore not
 		// lowered to a chain of `=` for this type, and the tests do NOT assert
 		// IN == OR-of-equals for real.
-		if syntacticLen <= 1 {
-			set, hasNaN := floatInSet(values)
+		// A QUOTED member narrows at BOTH arities: it is unknown-typed, so
+		// PostgreSQL coerces it straight to real and `r IN ('3.1')` plans as
+		// `r = '3.1'::real` where `r IN (3.1)` plans as `r = '3.1'::double
+		// precision` (both verified with EXPLAIN VERBOSE, #646). The widening
+		// arm below is therefore for a SINGLE UNQUOTED member only.
+		if syntacticLen <= 1 && !listHasQuotedConst(values) {
+			set, hasNaN, st := floatInSet(values)
+			if st != NumConstOK {
+				return nil
+			}
 			return inFilterFloat32Widen(set, hasNaN, negate)
 		}
-		set, hasNaN, ok := float32InSet(values)
-		if !ok {
+		set, hasNaN, st := float32InSet(values)
+		if st != NumConstOK {
 			// An out-of-range-for-real literal in a MULTI-element list: the
 			// array cast to real[] raises 22003 in PostgreSQL, so decline the
-			// kernel and let exec.floatConstError raise it.
+			// kernel and let exec.floatConstError raise it. A quoted member
+			// that names no real at all declines the same way, with 22P02.
 			return nil
 		}
 		return inFilterFloat32(set, hasNaN, negate)
@@ -1202,18 +1260,21 @@ func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syn
 // `f IN ('NaN')` selects the NaN rows). `==` also makes -0.0 and +0.0 the SAME
 // key, which is the answer PostgreSQL gives and is a property of the language
 // rather than of the runtime's hashing, so no fold is needed for that pair.
-func floatInSet(values []any) (map[float64]struct{}, bool) {
+func floatInSet(values []any) (map[float64]struct{}, bool, NumConstStatus) {
 	set := make(map[float64]struct{}, len(values))
 	hasNaN := false
 	for _, v := range values {
-		f := toFloat64(v)
+		f, st := Float64FilterConst(v)
+		if st != NumConstOK {
+			return nil, false, st
+		}
 		if f != f {
 			hasNaN = true
 			continue
 		}
 		set[f] = struct{}{}
 	}
-	return set, hasNaN
+	return set, hasNaN, NumConstOK
 }
 
 // float32InSet builds an IN list's float32 membership set, narrowing each
@@ -1222,17 +1283,36 @@ func floatInSet(values []any) (map[float64]struct{}, bool) {
 // redundant with the map, and why `==` keys give -0.0/+0.0 the same answer
 // PostgreSQL gives).
 //
-// ok is false when a literal does not FIT a real, in either direction —
-// float32(1e40) is +Inf and float32(1e-46) is 0. Inserting either would make
-// the list MATCH rows it must not (a genuine +Inf row, or every row holding
-// 0.0 — the shape `real IN (1e-46, 3.1)` answered with the zero row), where
-// PostgreSQL raises 22003 for the whole predicate rather than silently
-// dropping the offending element. Declining the set lets the caller raise it.
-// A literal that is ITSELF ±Inf (e.g. 'Infinity'::real), or itself zero, is a
-// legal real value and stays in the set — the distinction Float32FitOf draws.
-func float32InSet(values []any) (set map[float32]struct{}, hasNaN, ok bool) {
+// A non-OK status means the list has no real[] at all. NumConstRange is a
+// literal that does not FIT a real, in either direction — float32(1e40) is
+// +Inf and float32(1e-46) is 0. Inserting either would make the list MATCH
+// rows it must not (a genuine +Inf row, or every row holding 0.0 — the shape
+// `real IN (1e-46, 3.1)` answered with the zero row), where PostgreSQL raises
+// 22003 for the whole predicate rather than silently dropping the offending
+// element. NumConstSyntax is a QUOTED member that names no real at all, which
+// PostgreSQL refuses with 22P02 when it coerces the array (#646) and which
+// toFloat64 used to read as 0.0. Declining the set lets the caller raise
+// either. A literal that is ITSELF ±Inf (e.g. 'Infinity'), or itself zero, is
+// a legal real value and stays in the set — the distinction Float32FitOf
+// draws.
+func float32InSet(values []any) (set map[float32]struct{}, hasNaN bool, st NumConstStatus) {
 	set = make(map[float32]struct{}, len(values))
 	for _, v := range values {
+		// A quoted member is read at REAL width by its own grammar, which
+		// reports the out-of-range case itself; an unquoted numeric box has
+		// already been through the compiler's float64 conversion, so its fit
+		// is decided here.
+		if f32, st, quoted := Float32FilterConst(v); quoted {
+			if st != NumConstOK {
+				return nil, false, st
+			}
+			if f32 != f32 {
+				hasNaN = true
+				continue
+			}
+			set[f32] = struct{}{}
+			continue
+		}
 		f64 := toFloat64(v)
 		f := float32(f64)
 		if f != f {
@@ -1240,11 +1320,52 @@ func float32InSet(values []any) (set map[float32]struct{}, hasNaN, ok bool) {
 			continue
 		}
 		if Float32FitOf(f64) != Float32Fits {
-			return nil, false, false
+			return nil, false, NumConstRange
 		}
 		set[f] = struct{}{}
 	}
-	return set, hasNaN, true
+	return set, hasNaN, NumConstOK
+}
+
+// int64InSet and int32InSet build an integer IN list's membership set through
+// the same reader the scalar `=` arm uses (Int64FilterConst/Int32FilterConst),
+// so one predicate gets one answer whichever spelling the query used. A member
+// that names no integer, or one that overflows the column type, declines the
+// whole set; exec.intConstError raises PostgreSQL's 22P02 or 22003 for it.
+func int64InSet(values []any) (map[int64]struct{}, NumConstStatus) {
+	set := make(map[int64]struct{}, len(values))
+	for _, v := range values {
+		n, st := Int64FilterConst(v)
+		if st != NumConstOK {
+			return nil, st
+		}
+		set[n] = struct{}{}
+	}
+	return set, NumConstOK
+}
+
+func int32InSet(values []any) (map[int32]struct{}, NumConstStatus) {
+	set := make(map[int32]struct{}, len(values))
+	for _, v := range values {
+		n, st := Int32FilterConst(v)
+		if st != NumConstOK {
+			return nil, st
+		}
+		set[n] = struct{}{}
+	}
+	return set, NumConstOK
+}
+
+// listHasQuotedConst reports whether any IN-list member is a QUOTED literal.
+// It is the arity rule's second half for a FLOAT32 column: a single quoted
+// member narrows where a single numeric one widens (#646 / #631).
+func listHasQuotedConst(values []any) bool {
+	for _, v := range values {
+		if _, ok := QuotedConstText(v); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Float32Fit says whether a float64 survives the conversion to float32, and
@@ -2010,14 +2131,12 @@ const pgIntWhitespace = " \t\n\v\f\r"
 // panics) refuses the query the way PostgreSQL does, rather than answering the
 // zero rows.
 //
-// Go's base-10 grammar is a SUBSET of PostgreSQL's integer input, not a match
-// for it: PostgreSQL 16+ also accepts 0x/0o/0b radix prefixes, underscore
-// digit separators and leading-zero decimals (`'0x1A'::int` = 26, `'1_000'` =
-// 1000, `'007'` = 7), all of which this rejects. That over-strictness is a
-// separate, tracked gap (#634 — full PostgreSQL integer-input grammar parity);
-// it turns forms that PostgreSQL answers into a 22P02 here, whereas before
-// #536 they read as the silent zero, so this is not a regression from the
-// filed behaviour, and the common decimal case is exact.
+// The grammar is PostgreSQL's own, not Go's: parseIntText reads the 0x/0o/0b
+// radix prefixes, the underscore digit separators and the leading-zero
+// decimals PostgreSQL 16+ accepts (`'0x1A'` = 26, `'1_000'` = 1000, `'007'` =
+// 7), which Go's base-10 reader refused and Go's base-0 reader would have
+// misread ('017' is decimal seven there, not octal fifteen). Refusing input
+// PostgreSQL answers was a PG-superset regression (#634); it is closed.
 //
 // TIMESTAMP is deliberately NOT routed here: its string literal IS a timestamp
 // and must keep reading through parseTimestampString — a quoted numeric string
@@ -2057,23 +2176,6 @@ func Int32FilterConst(v any) (int32, IntConstStatus) {
 		return 0, IntConstRange
 	}
 	return int32(n), IntConstOK
-}
-
-// parseIntText reads PostgreSQL's integer input for the digits it shares with
-// Go's base-10 grammar: PostgreSQL's leading/trailing whitespace (pgIntWhite-
-// space, not Unicode), an optional sign, then base-10 digits. strconv.ParseInt
-// refuses trailing junk, '42.0' and the radix/underscore forms; a value past
-// int64's range comes back as strconv.ErrRange, which is 22003 (IntConstRange)
-// rather than a syntax error.
-func parseIntText(s string) (int64, IntConstStatus) {
-	n, err := strconv.ParseInt(strings.Trim(s, pgIntWhitespace), 10, 64)
-	if err != nil {
-		if errors.Is(err, strconv.ErrRange) {
-			return 0, IntConstRange
-		}
-		return 0, IntConstSyntax
-	}
-	return n, IntConstOK
 }
 
 // errDateDaysOutOfRange is returned by toDateInt32/parseDateToDays for a

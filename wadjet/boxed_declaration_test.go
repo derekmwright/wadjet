@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -83,7 +84,6 @@ func TestNumberColumnAgainstQuotedNumericLiteral(t *testing.T) {
 		// The zero row, which the temporal guard used to hand every
 		// unparseable string.
 		{"k = '0'", 1},
-		{"k = 'abc'", 0},
 		// INT32 and FLOAT64 take the same rule, the float one by float
 		// comparison rather than exact.
 		{"i > '2'", 9},
@@ -98,14 +98,54 @@ func TestNumberColumnAgainstQuotedNumericLiteral(t *testing.T) {
 		{"GREATEST(k, '2') = k", 10},
 	} {
 		t.Run(tc.pred, func(t *testing.T) {
-			// The CASE wrapper forces the row-at-a-time evaluator, which is
-			// the path this rule lives on. The BARE form takes the vectorized
-			// filter, whose integer and float arms still read a quoted
-			// constant as the type's ZERO — #536, pre-existing and pinned in
-			// the pg-oracle corpus rather than asserted here.
+			// BOTH paths, on the same predicate. The CASE wrapper forces the
+			// row-at-a-time evaluator; the BARE form takes the vectorized
+			// filter, whose integer and float arms read the quoted constant
+			// as the type's ZERO until #646 gave every numeric column type
+			// the same literal rule. The bare arm is skipped only for the
+			// shapes a CASE changes the MEANING of — GREATEST here compares
+			// against a column, which the bare form would evaluate the same
+			// way, so nothing is skipped.
 			declitCheck(t, ctx, db,
 				"SELECT COUNT(*) AS n FROM bx WHERE CASE WHEN "+tc.pred+" THEN 1 ELSE 0 END = 1",
 				tc.want)
+			declitCheck(t, ctx, db,
+				"SELECT COUNT(*) AS n FROM bx WHERE "+tc.pred, tc.want)
+		})
+	}
+
+	// A literal the column's type cannot read is a query ERROR, not a row
+	// count — PostgreSQL coerces the unknown-typed literal with the column's
+	// own input function and raises 22P02 (#646). `k = 'abc'` used to be
+	// asserted HERE as answering zero rows, which was wadjet's answer and
+	// never PostgreSQL's: verified live, `WHERE k = 'abc'` over a bigint
+	// column and its CASE-wrapped twin are both `invalid input syntax for
+	// type bigint: "abc"`.
+	for _, tc := range []struct{ pred, want string }{
+		{"k = 'abc'", `invalid input syntax for type bigint: "abc"`},
+		{"k < 'NaN'", `invalid input syntax for type bigint: "NaN"`},
+		{"k = '3.1'", `invalid input syntax for type bigint: "3.1"`},
+		{"i = 'abc'", `invalid input syntax for type integer: "abc"`},
+		{"f = 'abc'", `invalid input syntax for type double precision: "abc"`},
+		{"k IS DISTINCT FROM 'NaN'", `invalid input syntax for type bigint: "NaN"`},
+		{"GREATEST(k, 'NaN') = k", `invalid input syntax for type bigint: "NaN"`},
+		{"NULLIF(k, 'abc') IS NOT NULL", `invalid input syntax for type bigint: "abc"`},
+		{"CASE k WHEN 'abc' THEN 1 ELSE 0 END = 1", `invalid input syntax for type bigint: "abc"`},
+	} {
+		t.Run("refused_"+tc.pred, func(t *testing.T) {
+			for _, sql := range []string{
+				"SELECT COUNT(*) AS n FROM bx WHERE " + tc.pred,
+				"SELECT COUNT(*) AS n FROM bx WHERE CASE WHEN " + tc.pred + " THEN 1 ELSE 0 END = 1",
+			} {
+				_, err := tmRun(ctx, db, sql)
+				if err == nil {
+					t.Errorf("%s returned rows; PostgreSQL raises 22P02", sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("%s raised %v, want a refusal naming %q", sql, err, tc.want)
+				}
+			}
 		})
 	}
 }

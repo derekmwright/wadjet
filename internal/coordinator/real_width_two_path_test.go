@@ -334,6 +334,118 @@ func rwpWant() []rwpCase {
 			join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
 		{"DoubleLtNaNInCase", "CASE WHEN d_val < 'NaN' THEN 1 ELSE 0 END = 1",
 			join(seq(0, 17), []int64{19, 20, 22, 23})},
+
+		// --- #646: a QUOTED literal is coerced to the COLUMN's type -------
+		//
+		// This is the OPPOSITE direction from the widening above, and both are
+		// PostgreSQL's. An unquoted decimal constant is `numeric` and drags
+		// the comparison up to float8; a QUOTED one is unknown-typed and is
+		// coerced straight to real (EXPLAIN VERBOSE, postgres:17):
+		//
+		//	r_val = 3.1    ->  (r_val = '3.1'::double precision)   -> {}
+		//	r_val = '3.1'  ->  (r_val = '3.1'::real)               -> {3}
+		//
+		// The two spellings of one number are two predicates, and the pair
+		// below is the whole gate: an engine that widens both, or narrows
+		// both, fails one of them. Wadjet did NEITHER — kernel.toFloat64 has
+		// no string arm, so every quoted constant read as 0.0 and `r_val =
+		// '3.1'` selected row 19, the zero row.
+		{"EqQuotedNonRepresentable", "r_val = '3.1'", []int64{3}},
+		{"NeQuotedNonRepresentable", "r_val <> '3.1'",
+			join(seq(0, 2), seq(4, 17), []int64{19, 20, 21, 22, 23})},
+		{"LtQuoted", "r_val < '3.1'", []int64{0, 1, 2, 16, 17, 19, 22, 23}},
+		{"LeQuoted", "r_val <= '3.1'", []int64{0, 1, 2, 3, 16, 17, 19, 22, 23}},
+		{"GtQuoted", "r_val > '3.1'", join(seq(4, 15), []int64{20, 21})},
+		{"GeQuoted", "r_val >= '3.1'", join(seq(3, 15), []int64{20, 21})},
+		{"BetweenQuoted", "r_val BETWEEN '3.1' AND '4.1'", []int64{3, 4}},
+		// The ZERO row is the one every "read the constant as the type's
+		// zero" defect lands on, so it is asserted from both sides: '0'
+		// selects it and '3.1' does not.
+		{"EqQuotedZero", "r_val = '0'", []int64{19}},
+		// IN narrows at BOTH arities for a quoted member — `r IN ('3.1')`
+		// plans as `r = '3.1'::real` where `r IN (3.1)` plans as `r =
+		// '3.1'::double precision` — so the single-element form answers the
+		// row the unquoted one misses. Mixed lists narrow too: the array is
+		// real[] whatever the members were spelled as.
+		{"InSingleQuoted", "r_val IN ('3.1')", []int64{3}},
+		{"InMultiQuoted", "r_val IN ('3.1', '7.1')", []int64{3, 7}},
+		{"NotInMultiQuoted", "r_val NOT IN ('3.1', '7.1')",
+			join(seq(0, 2), []int64{4, 5, 6}, seq(8, 17), []int64{19, 20, 21, 22, 23})},
+		{"InMixedQuoted", "r_val IN ('3.1', 7.1)", []int64{3, 7}},
+		// 16777217 is exact in double and not in real, so the QUOTED spelling
+		// rounds onto row 20 (2^24) and matches where the unquoted spelling
+		// (EqIntegerLiteralPastMantissa, above) answers nothing. One value,
+		// two spellings, two answers — the narrowing stated as a row.
+		{"EqQuotedIntegerPastMantissa", "r_val = '16777217'", []int64{20}},
+		// PostgreSQL's float input is strtod, which reads C99 HEX floats —
+		// '0x1p3' is 8. Refusing it would be a PG-superset regression.
+		{"LtQuotedHexFloat", "r_val < '0x1p3'", []int64{0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 19, 22, 23}},
+		{"EqQuotedHexFloat", "r_val = '0x1p3'", nil},
+		// C whitespace is trimmed, so this is the LtQuoted row set.
+		{"LtQuotedSpaced", "r_val < ' 3.1 '", []int64{0, 1, 2, 16, 17, 19, 22, 23}},
+		// A literal at real's smallest DENORMAL is a value, not an underflow.
+		{"EqQuotedDenormal", "r_val = '1e-45'", nil},
+		// The specials, BARE — the shape the vectorized kernel answered as
+		// `> 0.0` and `< 0.0`. The CASE-wrapped twins above gate the row path;
+		// these gate the kernel, and rows 22/23 are what makes them able to
+		// fail (a non-negative column answers the same either way).
+		{"GtQuotedNegInfinity", "r_val > '-Infinity'",
+			join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
+		{"LtQuotedNaN", "r_val < 'NaN'", join(seq(0, 17), []int64{19, 20, 22, 23})},
+		{"EqQuotedNaN", "r_val = 'NaN'", []int64{21}},
+		{"LeQuotedInfinity", "r_val <= 'Infinity'", join(seq(0, 17), []int64{19, 20, 22, 23})},
+		{"GtQuotedInfinity", "r_val > 'Infinity'", []int64{21}},
+		// float8, where no width question arises at all: the defect there was
+		// the silent zero on its own.
+		{"DoubleEqQuoted", "d_val = '3.1'", []int64{3}},
+		{"DoubleLtQuoted", "d_val < '3.1'", []int64{0, 1, 2, 16, 17, 19, 22, 23}},
+		{"DoubleInMultiQuoted", "d_val IN ('3.1', '7.1')", []int64{3, 7}},
+		{"DoubleGtQuotedNegInfinity", "d_val > '-Infinity'",
+			join(seq(0, 17), []int64{19, 20, 21, 22, 23})},
+		{"DoubleLtQuotedNaN", "d_val < 'NaN'", join(seq(0, 17), []int64{19, 20, 22, 23})},
+		// A literal past REAL's range but inside DOUBLE's is a value here and
+		// a 22003 one column over — the range check is the column's, not the
+		// literal's.
+		{"DoubleEqOverReal", "d_val = '1e39'", nil},
+
+		// --- #646 at the BOXED sites, over a real column ------------------
+		//
+		// A simple CASE's WHEN, IS DISTINCT FROM, GREATEST/LEAST and NULLIF
+		// all compare through expr.boxedPair, where the column arrives as a
+		// float32 box and the literal as its text. They read the DECIMAL
+		// grammar before this and answered ok=false for anything it could not
+		// read, falling through to compare().
+		{"CaseWhenQuoted", "CASE WHEN r_val = '3.1' THEN 1 ELSE 0 END = 1", []int64{3}},
+		{"CaseLtQuoted", "CASE WHEN r_val < '3.1' THEN 1 ELSE 0 END = 1",
+			[]int64{0, 1, 2, 16, 17, 19, 22, 23}},
+		{"SimpleCaseQuoted", "CASE r_val WHEN '3.1' THEN 1 ELSE 0 END = 1", []int64{3}},
+		// IS DISTINCT FROM is total over NULL, so row 18 is in the answer.
+		{"IsDistinctQuoted", "r_val IS DISTINCT FROM '3.1'",
+			join(seq(0, 2), seq(4, 23))},
+		// GREATEST/LEAST ignore a NULL argument in PostgreSQL, so row 18
+		// answers `GREATEST(NULL,'3.1') = '3.1'`.
+		{"GreatestQuoted", "GREATEST(r_val, '3.1') = '3.1'",
+			[]int64{0, 1, 2, 3, 16, 17, 18, 19, 22, 23}},
+		{"LeastQuoted", "LEAST(r_val, '3.1') = '3.1'",
+			join(seq(3, 15), []int64{18, 20, 21})},
+		{"NullifQuoted", "NULLIF(r_val, '3.1') IS NULL", []int64{3, 18}},
+		{"DoubleCaseLtQuoted", "CASE WHEN d_val < '3.1' THEN 1 ELSE 0 END = 1",
+			[]int64{0, 1, 2, 16, 17, 19, 22, 23}},
+
+		// --- #646 over the INTEGER column, including the boxed sites ------
+		//
+		// r_key is a BIGINT holding 0..23, so the integer grammar's own
+		// answers are visible here. The radix and underscore forms are #634's
+		// PG-superset gap, closed with the same parser: PostgreSQL reads
+		// '0x0A' and '1_0' as ten.
+		{"KeyEqQuoted", "r_key = '3'", []int64{3}},
+		{"KeyLtQuoted", "r_key < '3'", []int64{0, 1, 2}},
+		{"KeyInQuoted", "r_key IN ('3', '7')", []int64{3, 7}},
+		{"KeyCaseLtQuoted", "CASE WHEN r_key < '3' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2}},
+		{"KeyGreatestQuoted", "GREATEST(r_key, '3') = '3'", []int64{0, 1, 2, 3}},
+		{"KeyNullifQuoted", "NULLIF(r_key, '3') IS NULL", []int64{3}},
+		{"KeyEqUnderscore", "r_key = '1_0'", []int64{10}},
+		{"KeyEqHex", "r_key = '0x0A'", []int64{10}},
 	}
 }
 
@@ -509,6 +621,114 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 					arm.name, sql, len(rows))
 			}
 		}
+	}
+}
+
+// TestQuotedNumericLiteralRefusalIsOnBothPaths is the ERROR half of #646: a
+// quoted literal a numeric column's own input function cannot read is a query
+// error, at every comparison site and on both execution paths.
+//
+// PostgreSQL coerces an unknown-typed literal with the COLUMN's input
+// function, so the refusal is per type and both SQLSTATEs are live: 22P02
+// (invalid_text_representation) for text that names no value, 22003
+// (numeric_value_out_of_range) for a number the type cannot carry. The
+// wording is PostgreSQL's, taken live from postgres:17-alpine over this exact
+// fixture — it names the literal's TEXT VERBATIM here, unlike the numeric->real
+// cast above, which names the numeric's DIGITS.
+//
+// Every one of these ANSWERED before: the float arms read a quoted constant as
+// 0.0 (`r_val = 'abc'` selected the zero row), and the boxed arms fell through
+// to compare(), which finds no reading of a number against "NaN" and reports
+// FALSE — a value answer to a question that has none.
+//
+// The last two shapes are the reason the refusal cannot live in the row loop:
+// a predicate no row reaches, and one that only ever meets NULLs, still error
+// in PostgreSQL because the coercion happens at parse analysis.
+func TestQuotedNumericLiteralRefusalIsOnBothPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, c := range []struct{ name, where, want string }{
+		// --- real: 22P02 -------------------------------------------------
+		{"RealEqGarbage", "r_val = 'abc'", `invalid input syntax for type real: "abc"`},
+		{"RealNeGarbage", "r_val <> 'abc'", `invalid input syntax for type real: "abc"`},
+		{"RealEqEmpty", "r_val = ''", `invalid input syntax for type real: ""`},
+		// PostgreSQL's FLOAT input does NOT take the underscore separators its
+		// integer and numeric inputs take since 16 (verified live).
+		{"RealEqUnderscore", "r_val = '1_000'", `invalid input syntax for type real: "1_000"`},
+		{"RealInGarbage", "r_val IN ('abc', '3.1')", `invalid input syntax for type real: "abc"`},
+		{"RealBetweenGarbage", "r_val BETWEEN 'abc' AND '4.1'",
+			`invalid input syntax for type real: "abc"`},
+		{"RealCaseGarbage", "CASE WHEN r_val < 'abc' THEN 1 ELSE 0 END = 1",
+			`invalid input syntax for type real: "abc"`},
+		{"RealIsDistinctGarbage", "r_val IS DISTINCT FROM 'abc'",
+			`invalid input syntax for type real: "abc"`},
+		{"RealGreatestGarbage", "GREATEST(r_val, 'abc') IS NOT NULL",
+			`invalid input syntax for type real: "abc"`},
+		{"RealNullifGarbage", "NULLIF(r_val, 'abc') IS NOT NULL",
+			`invalid input syntax for type real: "abc"`},
+		// --- real: 22003, the literal's own text ---------------------------
+		{"RealEqPastDouble", "r_val = '1e400'", `"1e400" is out of range for type real`},
+		{"RealEqPastReal", "r_val = '1e39'", `"1e39" is out of range for type real`},
+		// UNDERFLOW is a range failure too, and the boundary is real's
+		// smallest DENORMAL: '1e-45' is a value (EqQuotedDenormal above) and
+		// '7e-46' rounds to zero, which would MATCH the zero row.
+		{"RealEqUnderflow", "r_val = '7e-46'", `"7e-46" is out of range for type real`},
+		// --- double precision ---------------------------------------------
+		{"DoubleEqGarbage", "d_val = 'abc'",
+			`invalid input syntax for type double precision: "abc"`},
+		{"DoubleEqPastDouble", "d_val = '1e400'",
+			`"1e400" is out of range for type double precision`},
+		// --- bigint: the #664 boxed sites ---------------------------------
+		//
+		// These four are the shapes the umbrella filed: every one of them
+		// returned every row, because refuseArm and extremumRefusal tested
+		// batch.TypeDecimal alone.
+		{"KeyEqGarbage", "r_key = 'abc'", `invalid input syntax for type bigint: "abc"`},
+		{"KeyEqFraction", "r_key = '3.1'", `invalid input syntax for type bigint: "3.1"`},
+		{"KeyCaseNaN", "CASE WHEN r_key < 'NaN' THEN 1 ELSE 0 END = 1",
+			`invalid input syntax for type bigint: "NaN"`},
+		{"KeyIsDistinctNaN", "r_key IS DISTINCT FROM 'NaN'",
+			`invalid input syntax for type bigint: "NaN"`},
+		{"KeyGreatestNaN", "GREATEST(r_key, 'NaN') IS NOT NULL",
+			`invalid input syntax for type bigint: "NaN"`},
+		{"KeyNullifGarbage", "NULLIF(r_key, 'abc') IS NOT NULL",
+			`invalid input syntax for type bigint: "abc"`},
+		{"KeySimpleCaseGarbage", "CASE r_key WHEN 'abc' THEN 1 ELSE 0 END = 1",
+			`invalid input syntax for type bigint: "abc"`},
+		{"KeyEqPastBigint", "r_key = '99999999999999999999'",
+			`value "99999999999999999999" is out of range for type bigint`},
+		// --- the refusal is not a property of a row ------------------------
+		{"UnreachablePredicate", "r_key < 0 AND r_val = 'abc'",
+			`invalid input syntax for type real: "abc"`},
+		{"NullOnlyPredicate", "r_val IS NULL AND r_val = 'abc'",
+			`invalid input syntax for type real: "abc"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT r_key FROM %s WHERE %s", rwpTable, c.where)
+			for _, arm := range []struct {
+				name string
+				run  func() error
+			}{
+				{"single", func() error { _, err := tmdRunSingle(ctx, single, sql); return err }},
+				{"dag", func() error { _, err := tmdRunDAG(ctx, coord, sql); return err }},
+			} {
+				err := arm.run()
+				if err == nil {
+					t.Errorf("%s: %s returned rows; PostgreSQL refuses it", arm.name, sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), c.want) {
+					t.Errorf("%s: %s raised %v, want a refusal naming %q", arm.name, sql, err, c.want)
+				}
+			}
+		})
 	}
 }
 

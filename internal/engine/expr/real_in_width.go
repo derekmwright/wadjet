@@ -45,12 +45,18 @@ import (
 // as `(r_val = '3.1'::double precision) OR (r_val = other_col)` — the widened
 // scalar rule, twice — so the fallthrough below is that answer, unchanged.
 //
-// A QUOTED literal is also excluded, and deliberately: PostgreSQL narrows
-// `real IN ('3.1','7.1')` to real[] the same way, but the kernel's
-// float32InSet reads a text constant through kernel.toFloat64, which answers
-// ZERO for any string. Narrowing here alone would make the two paths disagree
-// about a shape they agree (wrongly) about today. The text-constant-as-zero
-// defect is one bug for every float arm and is tracked on its own.
+// A QUOTED literal narrows too (#646). PostgreSQL casts `real IN
+// ('3.1','7.1')` to real[] exactly as it casts the unquoted spelling, and a
+// MIXED list `real IN ('3.1', 7.1)` likewise — the array's element type is
+// resolved once for the whole list. It was excluded while the kernel's
+// float32InSet read a text constant through kernel.toFloat64 (zero for any
+// string): narrowing here alone would have split the two paths on a shape they
+// agreed — wrongly — about. Both read the float input grammar now.
+//
+// The refusal follows the member's SPELLING, because PostgreSQL's message
+// does: a quoted literal names its own TEXT verbatim ("1e40" is out of range
+// for type real) and a numeric one names its DIGITS, since the cast that fails
+// there is numeric->real. Verified live for both.
 
 // realLitSet binds a FLOAT32 column against an all-numeric-literal IN list of
 // arity two or more, and answers membership at REAL width.
@@ -79,6 +85,13 @@ type realLitSet struct {
 	// (exec.floatConstError).
 	overflow    string
 	hasOverflow bool
+	// badQuoted is the same for a QUOTED member the real input function
+	// refuses — 22P02 for text that names no real, 22003 for one out of range
+	// — kept apart from overflow because PostgreSQL names a quoted literal's
+	// TEXT verbatim where it expands a numeric literal's digits (#646).
+	badQuoted    string
+	badStatus    kernel.NumConstStatus
+	hasBadQuoted bool
 	// notReal caches "the probed operand is not REAL-typed", which is a pure
 	// function of declarations and so is settled by the first batch that
 	// resolves them. Same publish decimalLitCmp.notDecimal uses, for the same
@@ -107,9 +120,25 @@ func bindRealLitList(probe Expr, values []Expr) *realLitSet {
 			r.sawNull = true
 			continue
 		}
+		if text, quoted := quotedLitText(lit); quoted {
+			// The COLUMN's own input function, at real width: `r IN ('3.1')` is
+			// `r = '3.1'::real` and `r IN ('abc', …)` is 22P02 (#646).
+			f32, st := kernel.FloatLitText(text, 32)
+			if st != kernel.NumConstOK {
+				r.badQuoted, r.badStatus, r.hasBadQuoted = text, st, true
+				continue
+			}
+			f := float32(f32)
+			if f != f {
+				r.hasNaN = true
+				continue
+			}
+			r.set[f] = struct{}{}
+			continue
+		}
 		f64, ok := literalFloat64(lit.Val)
 		if !ok {
-			return nil // a quoted or non-numeric literal: see the file comment
+			return nil // not a numeric box at all: a bool, a container
 		}
 		if kernel.Float32FitOf(f64) != kernel.Float32Fits {
 			r.overflow, r.hasOverflow = litOverflowText(lit), true
@@ -231,6 +260,9 @@ func (r *realLitSet) applies(b *batch.RecordBatch) bool {
 			r.notReal.Store(true)
 		}
 		return false
+	}
+	if r.hasBadQuoted {
+		raiseQuotedLitRefusal(batch.TypeFloat32, r.badQuoted, r.badStatus)
 	}
 	if r.hasOverflow {
 		raiseNumericOutOfRange("real", r.overflow)

@@ -161,7 +161,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      literal text the row path uses.
 
      **This rule is about a NUMERIC literal meeting a TEXT column, and it does
-     not run backwards.** (Added 2026-08-25, from the #504 review.) A QUOTED
+     not run backwards.** (Added 2026-08-25, from the #504 review; the opposite
+     pair is item 13's whole subject as of #646.) A QUOTED
      literal meeting a NUMBER column is the opposite pair and takes the
      opposite rule: PostgreSQL types an unknown-typed literal FROM the operand
      it meets, so `WHERE k > '2'` over a BIGINT column is the integer
@@ -1383,6 +1384,139 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     genuinely orders above every value the column holds; as a stored VALUE it
     is a lie, and the rule above (a value with no exact carrier is an error)
     is what the value-producing callers owe.
+
+13. **A QUOTED literal meeting a NUMERIC column is coerced with THAT COLUMN'S
+    OWN INPUT FUNCTION — one rule, parameterized by the column's TypeID, at
+    every comparison site and on both execution paths.** (Added 2026-08-29,
+    #646; closes #634 for the integer family.)
+
+    PostgreSQL types an unknown-typed literal FROM the operand it meets and
+    then runs that type's input function over the text. There is no widening
+    anywhere in it. Read off `EXPLAIN VERBOSE` on postgres:17-alpine over a
+    `real` column:
+
+        r = '3.1'                  ->  (r = '3.1'::real)
+        r IN ('3.1')               ->  (r = '3.1'::real)
+        r IN ('3.1','7.1')         ->  (r = ANY ('{3.1,7.1}'::real[]))
+        r BETWEEN '3.1' AND '100'  ->  (r >= '3.1'::real) AND (r <= '100'::real)
+        CASE WHEN r < '3.1'        ->  (r < '3.1'::real)
+        CASE r WHEN '3.1'          ->  CASE r WHEN '3.1'::real
+        GREATEST(r, '3.1')         ->  GREATEST(r, '3.1'::real)
+        NULLIF(r, '3.1')           ->  NULLIF(r, '3.1'::real)
+        r IS DISTINCT FROM '3.1'   ->  (r IS DISTINCT FROM '3.1'::real)
+
+    **That is the OPPOSITE direction from item 8's unquoted literal, and both
+    are PostgreSQL's.** An unsuffixed decimal constant is `numeric`, which has
+    no `real <op> numeric` operator to resolve to, so the comparison goes
+    through float8 and the COLUMN moves (#631). A quoted one is `unknown`,
+    which is coerced directly, so the LITERAL moves. Over a column holding
+    `real(3.1)`, `r = 3.1` selects nothing and `r = '3.1'` selects that row —
+    one number, two spellings, two predicates. Both spellings are in the
+    oracle corpus side by side for exactly that reason, and the two kernels
+    stay separate: `kernel.ResolveFilterKernel` picks between them on the
+    constant's Go box, a `string` for the quoted spelling and a float64/int64
+    for the numeric one. Reading the box is right HERE and nowhere else — item
+    8's caution is about a VALUE's ORDER, where a box cannot tell a DECIMAL
+    from a STRING; "which literal did the user write" is the one thing the box
+    does carry and the declaration does not.
+
+    **What this replaces is a silent zero.** `kernel.toFloat64` has no string
+    arm at all, so every quoted constant against a FLOAT column read as 0.0:
+    `real = '3.1'` matched the row holding 0.0, `real = 'abc'` matched it too,
+    `real IN ('3.1','7.1')` matched nothing, and `f > '-Infinity'` asked
+    `> 0.0` and dropped every negative row. That is #463's failure mode on the
+    type family #536 (integers) and #574 (BOOL) had already closed, and the
+    boxed sites — `NULLIF(int_col,'abc')`, `int_col IS DISTINCT FROM 'NaN'`,
+    `CASE WHEN int_col < 'NaN'`, `GREATEST(int_col,'NaN')` — answered every row
+    for the integer family too, because `expr.refuseArm` and
+    `extremumRefusal` tested `batch.TypeDecimal` alone.
+
+    **The accept-sets, live from postgres:17-alpine.** They differ, and every
+    difference is observable:
+
+        text      bigint            real                numeric
+        '3.1'     22P02             3.1                 3.1
+        '1_000'   1000              22P02               1000  (wadjet 22P02, #634)
+        '0x1A'    26                26                  26    (wadjet 22P02, #634)
+        '0o17'    15                22P02               22P02
+        '0x1p3'   22P02             8                   22P02 (wadjet 22P02)
+        'NaN'     22P02             NaN                 a BOUND (ADR-0024 item 6)
+        '+NaN'    22P02             NaN                 22P02
+        '1e400'   22P02             22003               a very large number
+        '1e39'    22P02             22003               a number
+        '7e-46'   22P02             22003 (underflow)   a number
+        ''        22P02             22P02               22P02
+
+    - **INTEGER** is PostgreSQL 16's `pg_strtoint*`: C whitespace trimmed, an
+      optional sign, `0x`/`0o`/`0b` radix prefixes, underscore separators
+      between digits, and leading-zero DECIMAL (`'007'` is seven, not fifteen).
+      Neither Go base matches it — base 10 refuses the radix forms and base 0
+      reads `'017'` as octal — so `kernel.parseIntText` is a dedicated parser.
+      Its one asymmetry is PostgreSQL's: an underscore may not be first in a
+      decimal (`'_1000'` is 22P02) but MAY be first after a radix prefix
+      (`'0x_1A'` is 26), because PostgreSQL's own source puts the
+      "not first" check in the decimal branch alone. Refusing these was a
+      PG-superset regression (#634); it is closed.
+    - **FLOAT** is `float4in`/`float8in`, which are `strtod` plus PostgreSQL's
+      special spellings. So C99 HEX floats are values (`'0x10'` is 16,
+      `'0x1p3'` is 8, `'0x.8p1'` is 1) and underscores are NOT (`'1_000'` is
+      22P02 there even though the integer and numeric inputs take it).
+      Go's `ParseFloat` disagrees on both and on a third point — it is silent
+      about UNDERFLOW, answering a plain 0 for `'1e-400'` where PostgreSQL
+      raises 22003 — so `kernel.FloatLitText` supplies the binary exponent Go's
+      hex syntax requires, refuses underscores, and decides underflow from the
+      DIGITS. `real`'s range boundary is its smallest DENORMAL, PostgreSQL's
+      own: `'1e-45'` is a value and `'7e-46'` is 22003.
+    - **DECIMAL** keeps its own grammar (ADR-0024 item 6) and is the only one
+      with no RANGE failure: a literal past the Int128 carrier SATURATES into
+      its place in the order rather than erroring (#462).
+
+    **Two SQLSTATEs, and they are different answers.** 22P02 for text that
+    names no value, 22003 for a number the type cannot carry. The wording
+    differs by family too, and it is reproduced rather than tidied: the integer
+    inputs prefix the literal (`value "3000000000" is out of range for type
+    integer`) and the float ones do not (`"1e400" is out of range for type
+    real`). A QUOTED literal's message names its TEXT VERBATIM, where a
+    numeric->real cast names the numeric's DIGITS — so `real IN ('1e40',3.1)`
+    says `"1e40"` and `real IN (1e40,3.1)` says the forty-one digits, both
+    verified live.
+
+    **One predicate serves every site**, which is the property rather than the
+    coverage: `kernel.QuotedLitStatus(typ, text)` is read by the plan-time
+    refusal (`physical.refuseLiteralForType` via `expr.RefuseNumericLiteral`),
+    the vectorized kernel's scalar and IN arms, the row-at-a-time
+    `exec.ColumnCompareLit`, the boxed sites' refusal masks
+    (`expr.litRefusalMask`), and the row-group prune
+    (`kernel.StatsDomainValue`, which now converts a quoted literal at the
+    column's own width instead of handing the prune layer a Go string it
+    declines). A query refused at one site and answered at another is the
+    two-path defect class the refusal exists to close.
+
+    **The refusal is not a property of a row.** PostgreSQL coerces at parse
+    analysis, so an unreachable conjunct (`r_key < 0 AND r_val = 'abc'`) and
+    one that only ever meets NULLs still error. That is why the plan-time
+    binder carries it and the runtime refusals are the backstop for the shapes
+    the binder cannot prove — #517's rule, one type family wider. NULLIF joins
+    GREATEST/LEAST at that binder, because its equality test is the same
+    question their ordering is.
+
+    **The boxed layer resolves the column's WIDTH from its DECLARATION.**
+    `expr.ColRef.Eval` widens on the way out — a FLOAT32 column boxes as
+    float64 and an INT32 one as int64 — so a box-driven rule would compare
+    `r < '3.1'` at double width and skip int4's range check. `boxKind` carries
+    `boxInt32`/`boxInt64`/`boxFloat32`/`boxFloat64` for exactly this, with
+    `boxNumber` kept for an operand whose declaration this layer cannot read;
+    the widening is exact and order-preserving, so narrowing the box back
+    inside the real arm recovers the stored value bit for bit.
+
+    **Residuals, named rather than claimed.** DECIMAL still refuses `'1_000'`,
+    `'0x1A'` and the other PostgreSQL 16 numeric-input forms that this closes
+    for the integer family — that half of #634 needs `parquet.DecimalTextParts`
+    to move, which is ADR-0024 item 6's grammar and its own change. The NETWORK
+    types are still not wired into the plan-time refusal (#627): their parsers
+    are STRICTER than PostgreSQL's, so refusing on them would reject PG-valid
+    input. And TIMESTAMP deliberately keeps its own string grammar — a quoted
+    string against a TIMESTAMP column is a timestamp, not a number (#493).
 
 ## Consequences
 

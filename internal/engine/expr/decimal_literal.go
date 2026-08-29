@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -158,11 +159,16 @@ func bareCol(e Expr) (*ColRef, bool) {
 type refuseArm struct {
 	col  *ColRef
 	text string
+	// mask says which column types refuse this text, computed once from the
+	// literal (quotedLitMask). It is what makes the rule type-parameterized
+	// rather than DECIMAL-only without putting a parse back on the row loop.
+	mask litRefusalMask
 
-	// settled caches "this column is not a DECIMAL", the way
-	// decimalLitCmp.notDecimal does and for the same reason — including why
-	// it is atomic: these nodes are shared across parallel pipeline workers
-	// evaluating one batch, and concurrent writers can only ever agree.
+	// settled caches "this column's type does not refuse this literal", the
+	// way decimalLitCmp.notDecimal does and for the same reason — including
+	// why it is atomic: these nodes are shared across parallel pipeline
+	// workers evaluating one batch, and concurrent writers can only ever
+	// agree.
 	settled atomic.Bool
 }
 
@@ -180,11 +186,15 @@ func armRefusal(left, right Expr) *refuseArm {
 	if !ok {
 		return noRefusal
 	}
-	lit, ok := numericLit(other)
-	if !ok || lit.Numeric() {
+	text, ok := quotedLitText(other)
+	if !ok {
 		return noRefusal
 	}
-	return &refuseArm{col: col, text: lit.Text()}
+	mask := quotedLitMask(text)
+	if mask == 0 {
+		return noRefusal
+	}
+	return &refuseArm{col: col, text: text, mask: mask}
 }
 
 func refusalOperands(left, right Expr) (*ColRef, Expr, bool) {
@@ -197,9 +207,9 @@ func refusalOperands(left, right Expr) (*ColRef, Expr, bool) {
 	return nil, nil, false
 }
 
-// check raises when the armed column is a materialized DECIMAL in THIS batch.
-// Once it has seen the column resolve to anything else the whole call is one
-// atomic load, which is the point.
+// check raises when the armed column's type refuses this literal in THIS
+// batch. Once it has seen the column resolve to a type that accepts it, the
+// whole call is one atomic load, which is the point.
 func (a *refuseArm) check(b *batch.RecordBatch) {
 	if a.col == nil || a.settled.Load() {
 		return
@@ -209,11 +219,10 @@ func (a *refuseArm) check(b *batch.RecordBatch) {
 		// Unresolved says nothing about the next batch, so do not settle.
 		return
 	}
-	if a.col.typ != batch.TypeDecimal {
-		a.settled.Store(true)
-		return
+	if st, refuse := a.mask.refuses(a.col.typ); refuse {
+		raiseQuotedLitRefusal(a.col.typ, a.text, st)
 	}
-	raiseInvalidTextRepresentation("numeric", a.text)
+	a.settled.Store(true)
 }
 
 // caseArms is a simple CASE's per-WHEN binding: the refusal for that WHEN,
@@ -236,9 +245,27 @@ type caseArms struct {
 type extremumRefusal struct {
 	// cols[i] is argument i when it is a bare column reference, else nil.
 	cols []*ColRef
-	// bad[i] is argument i's literal text when that text names no number,
-	// else "". A pair refuses when one side has a col and the other a bad.
-	bad []string
+	// bad[i] is argument i's QUOTED literal text, and mask[i] which column
+	// types refuse it (quotedLitMask). A pair refuses when one side has a col
+	// and the other a non-zero mask that names the column's type.
+	//
+	// The MASK is the sentinel, not the text: `f = ''` is PostgreSQL's 22P02,
+	// so an empty literal is a refusable value rather than "no literal here".
+	bad  []string
+	mask []litRefusalMask
+	// litTyp[i] is a NUMERIC literal argument's own type, which PostgreSQL
+	// folds into the common type alongside the columns: an unsuffixed constant
+	// with a point or an exponent is `numeric`, otherwise it is the narrowest
+	// integer type that holds it (ADR-0012 item 12's rule for a set-operation
+	// literal arm, which is the same select_common_type). Without it,
+	// `GREATEST(bigint_col, '3.1', 2.5)` would fold to bigint and refuse a
+	// query PostgreSQL answers as numeric.
+	litTyp []batch.TypeID
+	// unknownArg records an argument neither a column nor a literal — a
+	// function call, a CAST, a scalar subquery — whose type this layer cannot
+	// read. The fold is then a LOWER BOUND on PostgreSQL's, so a refusal is
+	// only safe for a literal EVERY numeric type refuses; see check.
+	unknownArg bool
 }
 
 // extremumArms is pickExtremum's full arming: the refusal above, plus one
@@ -298,29 +325,52 @@ func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (c in
 }
 
 // armExtremum returns nil — "this call can never refuse" — unless some
-// argument is a literal naming no number. That is the whole-node fast path,
-// and it is the one every ordinary GREATEST/LEAST takes: nothing is resolved,
-// nothing is parsed, and check() below returns on a nil receiver.
+// argument is a QUOTED literal that SOME column type refuses (a non-zero
+// quotedLitMask). That is the whole-node fast path, and it is the one every
+// ordinary GREATEST/LEAST takes: nothing is resolved, nothing is parsed, and
+// check() below returns on a nil receiver.
 //
 // There is deliberately no cached "settled" flag here, unlike refuseArm's.
-// The pairs this checks involve DIFFERENT columns as the best-so-far moves,
-// so one column resolving to a non-DECIMAL says nothing about the next —
-// caching it would disarm a real refusal in `GREATEST(s, 'abc', d)`.
+// check() folds EVERY argument's column type on every call, so a flag would
+// have to record which batch it was settled against; the work it would save is
+// one atomic load per resolved column plus a mask lookup, and this node is
+// only ever armed for a call that already holds a refusable literal.
 func armExtremum(argExprs []Expr) *extremumRefusal {
-	r := &extremumRefusal{cols: make([]*ColRef, len(argExprs)), bad: make([]string, len(argExprs))}
+	r := &extremumRefusal{
+		cols:   make([]*ColRef, len(argExprs)),
+		bad:    make([]string, len(argExprs)),
+		mask:   make([]litRefusalMask, len(argExprs)),
+		litTyp: make([]batch.TypeID, len(argExprs)),
+	}
 	any := false
 	for i, e := range argExprs {
 		if e == nil {
 			continue
 		}
+		r.litTyp[i] = noLitType
 		if col, ok := bareCol(e); ok {
 			r.cols[i] = col
 			continue
 		}
-		if lit, ok := numericLit(e); ok && !lit.Numeric() {
-			r.bad[i] = lit.Text()
-			any = true
+		if text, ok := quotedLitText(e); ok {
+			// Unknown-typed: it contributes nothing to the fold, which is
+			// exactly what makes it the literal being coerced.
+			if m := quotedLitMask(text); m != 0 {
+				r.bad[i], r.mask[i] = text, m
+				any = true
+			}
+			continue
 		}
+		if lit, ok := e.(*Lit); ok {
+			if lit.Val == nil {
+				continue // a NULL argument types nothing
+			}
+			if typ, ok := numericConstType(lit); ok {
+				r.litTyp[i] = typ
+				continue
+			}
+		}
+		r.unknownArg = true
 	}
 	if !any {
 		return nil
@@ -328,27 +378,160 @@ func armExtremum(argExprs []Expr) *extremumRefusal {
 	return r
 }
 
-// check is refuseArm.check for the (best, candidate) pair at indices bi and
-// ci, applying the same left-operand-first rule armRefusal does.
-func (r *extremumRefusal) check(b *batch.RecordBatch, bi, ci int) {
-	// args can outrun argExprs (a vectorized caller evaluates values the
-	// expression list does not name), so both indices are bounds-checked
-	// against the armed table rather than assumed to line up.
-	if r == nil || bi < 0 || bi >= len(r.cols) || ci < 0 || ci >= len(r.cols) {
+// noLitType marks a slot that contributes nothing to the common-type fold.
+// TypeBool is the zero TypeID, so the absence has to be spelled out rather
+// than left to the zero value.
+const noLitType = batch.TypeVector + 1
+
+// numericConstType is the type PostgreSQL gives an UNSUFFIXED numeric
+// constant: `numeric` once it carries a decimal point or an exponent, and
+// otherwise the narrowest integer type that holds it. Same rule as ADR-0012
+// item 12's literal set-operation arm, and the same reason — a constant's type
+// is part of what select_common_type resolves over.
+func numericConstType(lit *Lit) (batch.TypeID, bool) {
+	if lit.Text != "" {
+		if strings.ContainsAny(lit.Text, ".eE") {
+			return batch.TypeDecimal, true
+		}
+		if n, err := strconv.ParseInt(strings.TrimSpace(lit.Text), 10, 64); err == nil {
+			if n >= math.MinInt32 && n <= math.MaxInt32 {
+				return batch.TypeInt32, true
+			}
+			return batch.TypeInt64, true
+		}
+		return batch.TypeDecimal, true
+	}
+	switch lit.Val.(type) {
+	case int32:
+		return batch.TypeInt32, true
+	case int, int64:
+		return batch.TypeInt64, true
+	case float32:
+		return batch.TypeFloat32, true
+	case float64:
+		return batch.TypeFloat64, true
+	}
+	return 0, false
+}
+
+// check is refuseArm.check for the WHOLE call, not for one (best, candidate)
+// pair — because that is what PostgreSQL asks.
+//
+// GREATEST/LEAST resolve ONE common type over EVERY argument
+// (select_common_type) and coerce the unknown-typed literal to THAT, so the
+// type in the message is not a property of whichever pair the values selected.
+// Verified live on postgres:17-alpine over a table with a bigint, a real and a
+// double column:
+//
+//	GREATEST(bigint, 'abc')                -> ... for type bigint
+//	GREATEST(bigint, 'abc', double)        -> ... for type double precision
+//	GREATEST(real,   'abc', bigint)        -> ... for type real
+//
+// Refusing against the pair's column instead named bigint for the second and
+// third, which is a different type in the message for the same query — and it
+// re-introduced #517's own finding one level down: a refusal that depends on
+// which operand won a comparison is not a type rule.
+func (r *extremumRefusal) check(b *batch.RecordBatch) {
+	if r == nil {
 		return
 	}
-	col, text := r.cols[bi], r.bad[ci]
-	if col == nil {
-		col, text = r.cols[ci], r.bad[bi]
-	}
-	if col == nil || text == "" {
+	typ, ok := r.commonType(b)
+	if !ok {
 		return
 	}
-	col.resolve(b)
-	if col.idx < 0 || col.idx >= len(b.Columns) || col.typ != batch.TypeDecimal {
-		return
+	for i, m := range r.mask {
+		if m == 0 {
+			continue
+		}
+		if r.unknownArg {
+			// An argument this layer cannot type could WIDEN the fold past the
+			// type computed here, so only a literal EVERY numeric type refuses
+			// is safe to raise on: `GREATEST(k, 'abc', <a subquery>)` refuses
+			// whatever the subquery turns out to be, while `GREATEST(k, '3.1',
+			// <a subquery>)` must not — PostgreSQL answers it when the
+			// subquery is a float. A missed refusal is the conservative side;
+			// the plan-time binder catches the shapes it can prove.
+			if !m.refusesEveryNumericType() {
+				continue
+			}
+		}
+		if st, refuse := m.refuses(typ); refuse {
+			raiseQuotedLitRefusal(typ, r.bad[i], st)
+		}
 	}
-	raiseInvalidTextRepresentation("numeric", text)
+}
+
+// commonType folds this call's COLUMN arguments to the one type PostgreSQL's
+// select_common_type resolves them to, and reports ok=false when no argument
+// is a column that resolves in this batch (nothing to refuse against yet — an
+// unresolved name says nothing about the next batch).
+func (r *extremumRefusal) commonType(b *batch.RecordBatch) (batch.TypeID, bool) {
+	var out batch.TypeID
+	have := false
+	fold := func(t batch.TypeID) {
+		if !have {
+			out, have = t, true
+			return
+		}
+		out = widerNumericType(out, t)
+	}
+	for i, col := range r.cols {
+		if col != nil {
+			col.resolve(b)
+			if col.idx >= 0 && col.idx < len(b.Columns) {
+				fold(col.typ)
+			}
+			continue
+		}
+		if i < len(r.litTyp) && r.litTyp[i] != noLitType {
+			fold(r.litTyp[i])
+		}
+	}
+	return out, have
+}
+
+// widerNumericType is PostgreSQL's numeric preference order for
+// select_common_type, which ADR-0012 item 12 pins for set operations and which
+// GREATEST/LEAST use too — with float4 inserted where live `pg_typeof` puts
+// it: `GREATEST(bigint, real)` is REAL and `GREATEST(real, double)` is DOUBLE
+// PRECISION, so real outranks numeric and double outranks real.
+//
+//	INT32 < INT64 < DECIMAL < FLOAT32 < FLOAT64
+//
+// The wadjet-native PORT/PROTOCOL rank with INT32 and DURATION with INT64:
+// they ARE those storage types and their literal rule is the integer one.
+// Two types with no rank at all (a STRING and a DATE, say) fold to the FIRST,
+// which refuses nothing — the conservative answer, since a type with no rule
+// contributes no refusal either way.
+func widerNumericType(a, b batch.TypeID) batch.TypeID {
+	ra, oka := numericRank(a)
+	rb, okb := numericRank(b)
+	if !oka || !okb {
+		if oka {
+			return b
+		}
+		return a
+	}
+	if rb > ra {
+		return b
+	}
+	return a
+}
+
+func numericRank(t batch.TypeID) (int, bool) {
+	switch t {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+		return 0, true
+	case batch.TypeInt64, batch.TypeDuration:
+		return 1, true
+	case batch.TypeDecimal:
+		return 2, true
+	case batch.TypeFloat32:
+		return 3, true
+	case batch.TypeFloat64:
+		return 4, true
+	}
+	return 0, false
 }
 
 // newDecimalLitCmp builds a binding and resolves every literal's Numeric()
@@ -646,17 +829,21 @@ func decimalTextOrderInt(v int64, text string) (int, bool) {
 }
 
 func decimalTextOrderFloat(v float64, text string) (int, bool) {
-	// NaN and ±Infinity FIRST, because a FLOAT column holds all three and its
-	// rule for them is the ordinary float one — kernel.CompareFloat64, which
-	// IS PostgreSQL's float order (ADR-0012 item 8). This is the arm a quoted
-	// literal against a FLOAT column takes (boxNumber vs boxQuoted), and
-	// falling through to the shape test below sent it to compare()'s
-	// LEXICOGRAPHIC string comparison, which agrees with PostgreSQL only when
-	// every value happens to be non-negative: over {-5, 0, 5},
-	// `f > '-Infinity'` dropped the two negative rows because "-5" sorts
-	// below "-Infinity" as text. The DECIMAL rule is the DIFFERENT one and is
-	// applied elsewhere (#534/ADR-0024 item 6): there the literal is a BOUND,
-	// because the carrier has no such value to compare against.
+	// NaN and ±Infinity FIRST, because a FLOAT holds all three and its rule for
+	// them is the ordinary float one — kernel.CompareFloat64, which IS
+	// PostgreSQL's float order (ADR-0012 item 8). Falling through to the shape
+	// test below sent them to compare()'s LEXICOGRAPHIC string comparison,
+	// which agrees with PostgreSQL only when every value happens to be
+	// non-negative: over {-5, 0, 5}, `f > '-Infinity'` dropped the two negative
+	// rows because "-5" sorts below "-Infinity" as text. The DECIMAL rule is
+	// the DIFFERENT one and is applied elsewhere (#534/ADR-0024 item 6): there
+	// the literal is a BOUND, because the carrier has no such value.
+	//
+	// This is the DECIMAL-against-a-float-box arm now. A QUOTED literal meeting
+	// a FLOAT column takes quotedNumberOrder instead (#646), which reads the
+	// column's own input grammar at the column's own width and REFUSES what it
+	// cannot read — this function's ok=false, which falls through to compare(),
+	// is a value answer to a question PostgreSQL raises on.
 	//
 	// kernel.FloatSpecialText, not batch.DecimalSpecialText: float8 accepts a
 	// SIGNED NaN and numeric does not, and that difference is PostgreSQL's.
@@ -721,11 +908,15 @@ func isFiniteNumericLitText(s string) bool {
 }
 
 // IsNumericLiteralText reports whether a QUOTED string literal's content names
-// a value a DECIMAL column can be COMPARED against, for the planner: the
-// plan-time refusal of a non-numeric constant against a DECIMAL column (#517)
-// must accept and refuse exactly the strings the runtime refusal does, or a
-// query would be refused at one and answered at the other — the two-path
-// defect class the refusal exists to close.
+// a value a DECIMAL column can be COMPARED against: the plan-time refusal of a
+// non-numeric constant against a DECIMAL column (#517) must accept and refuse
+// exactly the strings the runtime refusal does, or a query would be refused at
+// one and answered at the other — the two-path defect class the refusal exists
+// to close.
+//
+// It is the DECIMAL arm of kernel.QuotedLitStatus, which is what every site
+// calls now that the rule covers the whole numeric family (#646); this stays
+// as the type's own predicate, and as the spelling the DECIMAL gates name.
 //
 // So it is `kernel.DecimalLiteral.Numeric()` itself, the runtime predicate,
 // which since #534 accepts PostgreSQL's NaN and ±Infinity spellings alongside

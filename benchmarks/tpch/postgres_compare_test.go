@@ -996,32 +996,58 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DoubleGtIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE d_val > 1 ORDER BY r_key`},
 		pgCase{name: "DoubleNeIntegerLiteral", sql: `SELECT r_key FROM real_probe WHERE d_val <> 1 ORDER BY r_key`},
 
-		// A QUOTED constant is the other half of the width rule and is NOT
-		// fixed (#646). PostgreSQL types an unknown-typed literal FROM the
-		// other operand, so a quoted constant against a real column NARROWS —
-		// the opposite direction from the numeric literal above:
+		// A QUOTED constant is the other half of the width rule, and it goes
+		// the OTHER way (#646). PostgreSQL types an unknown-typed literal
+		// FROM the other operand and coerces it with THAT type's own input
+		// function, so a quoted constant against a real column NARROWS where
+		// the numeric literal above widens:
 		//
 		//	r_val = 3.1    ->  Filter: (r_val = '3.1'::double precision)
 		//	r_val = '3.1'  ->  Filter: (r_val = '3.1'::real)
 		//
-		// Wadjet's kernel reads a text constant through kernel.toFloat64,
-		// which answers ZERO for any string, so these select the row holding
-		// 0.0 instead. Pinned live: the subtests FAIL when #646 lands, which
-		// is what deletes them. The FLOAT64 entry is here for the same reason
-		// — the defect is the text constant, not the width, and it reaches
-		// both float arms.
-		pgCase{name: "RealEqQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val = '3.1' ORDER BY r_key`,
-			knownBug: pgBugWadjet + " a QUOTED constant against a FLOAT column is read as the type's " +
-				"ZERO (kernel.toFloat64 answers 0 for any string), so this selects the row holding 0.0 " +
-				"where PostgreSQL narrows the literal to real and selects the 3.1 row.", issue: "#646"},
-		pgCase{name: "RealInQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val IN ('3.1', '7.1') ORDER BY r_key`,
-			knownBug: pgBugWadjet + " the same text-constant-as-zero defect through the IN-list kernel " +
-				"(kernel.float32InSet): PostgreSQL casts the array to real[] and matches both rows.",
-			issue: "#646"},
-		pgCase{name: "DoubleEqQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE d_val = '3.1' ORDER BY r_key`,
-			knownBug: pgBugWadjet + " the same text-constant-as-zero defect on the FLOAT64 arm, where " +
-				"no width question arises at all: PostgreSQL reads '3.1' as a double and matches its row.",
-			issue: "#646"},
+		// Both spellings are here, side by side, because they are two
+		// predicates over one number: an engine that widens both, or narrows
+		// both, fails one of them. Wadjet did NEITHER — kernel.toFloat64 has
+		// no string arm, so every quoted constant read as 0.0 and these
+		// selected the row holding 0.0. These three were the pins; they are
+		// deleted, which is the fix's proof.
+		pgCase{name: "RealEqQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val = '3.1' ORDER BY r_key`},
+		pgCase{name: "RealInQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val IN ('3.1', '7.1') ORDER BY r_key`},
+		pgCase{name: "DoubleEqQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE d_val = '3.1' ORDER BY r_key`},
+		// The rest of the shape table, over the same fixture. The SINGLE
+		// element IN narrows for a quoted member and widens for a numeric one
+		// (`r IN ('3.1')` is `r = '3.1'::real`, `r IN (3.1)` is `r =
+		// '3.1'::double precision`), and 16777217 is exact in double and not
+		// in real — so the quoted spelling rounds onto the 2^24 row and the
+		// unquoted one matches nothing.
+		pgCase{name: "RealInSingleQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val IN ('3.1') ORDER BY r_key`},
+		pgCase{name: "RealLtQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val < '3.1' ORDER BY r_key`},
+		pgCase{name: "RealGeQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val >= '3.1' ORDER BY r_key`},
+		pgCase{name: "RealBetweenQuotedNumeric", sql: `SELECT r_key FROM real_probe WHERE r_val BETWEEN '3.1' AND '4.1' ORDER BY r_key`},
+		pgCase{name: "RealEqQuotedIntPastMantissa", sql: `SELECT r_key FROM real_probe WHERE r_val = '16777217' ORDER BY r_key`},
+		pgCase{name: "RealEqQuotedZero", sql: `SELECT r_key FROM real_probe WHERE r_val = '0' ORDER BY r_key`},
+		// PostgreSQL's float input is strtod, so a C99 HEX float is a value
+		// there. Refusing it would be a PG-superset regression.
+		pgCase{name: "RealLtQuotedHexFloat", sql: `SELECT r_key FROM real_probe WHERE r_val < '0x1p3' ORDER BY r_key`},
+		// C whitespace is trimmed at both ends.
+		pgCase{name: "RealLtQuotedSpaced", sql: `SELECT r_key FROM real_probe WHERE r_val < ' 3.1 ' ORDER BY r_key`},
+		// The BOXED sites, where the column arrives as a Go box and the
+		// literal as its text: every one of them answered every row.
+		pgCase{name: "RealSimpleCaseQuoted", sql: `SELECT r_key FROM real_probe WHERE CASE r_val WHEN '3.1' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		pgCase{name: "RealIsDistinctQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val IS DISTINCT FROM '3.1'`},
+		pgCase{name: "RealGreatestQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_val, '3.1') = '3.1'`},
+		pgCase{name: "RealNullifQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE NULLIF(r_val, '3.1') IS NULL`},
+		pgCase{name: "DoubleCaseLtQuoted", sql: `SELECT r_key FROM real_probe WHERE CASE WHEN d_val < '3.1' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		// The INTEGER column, including #634's radix and underscore forms —
+		// PostgreSQL reads '0x0A' and '1_0' as ten, and refusing them was a
+		// PG-superset regression of its own.
+		pgCase{name: "BigintEqQuoted", sql: `SELECT r_key FROM real_probe WHERE r_key = '3' ORDER BY r_key`},
+		pgCase{name: "BigintInQuoted", sql: `SELECT r_key FROM real_probe WHERE r_key IN ('3', '7') ORDER BY r_key`},
+		pgCase{name: "BigintCaseLtQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_key < '3' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "BigintGreatestQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_key, '3') = '3'`},
+		pgCase{name: "BigintNullifQuoted", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE NULLIF(r_key, '3') IS NULL`},
+		pgCase{name: "BigintEqQuotedUnderscore", sql: `SELECT r_key FROM real_probe WHERE r_key = '1_0' ORDER BY r_key`},
+		pgCase{name: "BigintEqQuotedHex", sql: `SELECT r_key FROM real_probe WHERE r_key = '0x0A' ORDER BY r_key`},
 
 		// SINGLE-element real IN — the arity split #549's re-review turned up.
 		// PostgreSQL folds `real IN (x)` to `= 'x'::double precision` (WIDEN),
@@ -1633,17 +1659,13 @@ func postgresSemanticsCases() []pgCase {
 	//
 	// The CASE-wrapped forms are GATED: they take the row-at-a-time path,
 	// which follows that rule. The bare scalar comparisons on d_key (an
-	// integer column) are now GATED too: #536 gave the vectorized filter's
-	// integer arms PostgreSQL's integer input grammar, so `d_key > '2'` asks
-	// "> 2". What STAYS pinned is the pair #536 did not reach: the IN-LIST
-	// arm (kernel.ResolveInFilterKernel still builds its set through toInt64,
-	// so `d_key IN ('2','3')` reads the elements as ZERO) and the FLOAT arm
-	// (l_discount, whose toFloat64 still reads a string as 0.0). Both are the
-	// same silent-zero one predicate/type over; each pin fails when its arm
-	// is fixed.
-	const quotedNumericPin = pgBugWadjet + ` a quoted numeric constant is read as the column type's ZERO ` +
-		`on this arm (the IN-list set builder / the float comparison), so this asks against 0 instead ` +
-		`of the number. The scalar integer comparisons beside this one gate the fixed arm (#536).`
+	// integer column) are GATED too: #536 gave the vectorized filter's integer
+	// arms PostgreSQL's integer input grammar, so `d_key > '2'` asks "> 2".
+	// The last two arms — the IN-LIST set builder (which still read its
+	// elements through toInt64) and the FLOAT comparison (whose toFloat64 has
+	// no string arm at all) — were pinned here and closed by #646, which gave
+	// every numeric column type ONE literal rule keyed on its TypeID. Nothing
+	// in this family is pinned any more.
 	out = append(out,
 		pgCase{name: "IntColumnVsQuotedNumericGtInCase",
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key > '2' THEN 1 ELSE 0 END = 1`},
@@ -1685,17 +1707,25 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key < '2'`},
 		pgCase{name: "IntColumnVsQuotedNumericBetween",
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key BETWEEN '2' AND '4'`},
-		// Still pinned: the IN-list set builder and the float arm read the
-		// quoted numeric as ZERO — the two arms #536 did not reach.
+		// The two arms #536 did not reach — the IN-list set builder and the
+		// FLOAT comparison — closed by #646, which gave every numeric column
+		// type the same literal rule. Their pins are deleted, which is that
+		// fix's proof.
 		pgCase{name: "IntColumnVsQuotedNumericInList",
-			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IN ('2','3')`, knownBug: quotedNumericPin, issue: "#536"},
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IN ('2','3')`},
+		pgCase{name: "IntColumnVsQuotedNumericNotInList",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key NOT IN ('2','3')`},
 		// l_quantity, not l_discount: this entry's subject is a FLOAT column,
 		// and l_discount is DECIMAL(15,2) under TPCH_DECIMAL=1 (ADR-0024),
 		// where the question would silently become the decimal one the
 		// dec_probe entries already ask. l_quantity is FLOAT64 in BOTH
-		// fixtures, so the entry stays gated in both.
+		// fixtures, so these stay gated in both.
 		pgCase{name: "FloatColumnVsQuotedNumericGt",
-			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity > '25'`, knownBug: quotedNumericPin, issue: "#536"},
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity > '25'`},
+		pgCase{name: "FloatColumnVsQuotedNumericEq",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity = '25'`},
+		pgCase{name: "FloatColumnVsQuotedNumericInList",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity IN ('25','26')`},
 	)
 
 	// NaN and the infinities against a DECIMAL column (#534, ADR-0024 item 6).
@@ -1822,27 +1852,26 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN r_val < '+NaN' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
 		pgCase{name: "RealColumnLtNegatedNaNInCase",
 			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN r_val < '-NaN' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
-		// The BARE forms take the vectorized float kernel, which still reads
-		// any quoted constant as 0.0 — the float arm of #536, tracked as #646
-		// and already pinned there for the ordinary-number spelling. #534 is a
-		// DECIMAL rule and neither caused this nor fixes it; the CASE-wrapped
-		// entries above gate the correct answer through the row path.
+		// The BARE forms take the VECTORIZED float kernel, and they answer the
+		// same row sets as the CASE-wrapped entries above now that it reads
+		// the float input grammar instead of kernel.toFloat64's silent 0.0
+		// (#646). These two were the pins; they are deleted, which is the
+		// fix's proof. `> '-Infinity'` is the shape that can tell the float
+		// rule from the lexicographic fallthrough, and it needs real_probe's
+		// NEGATIVE rows to do it.
 		pgCase{name: "RealColumnGtNegInfinity",
-			sql: `SELECT r_key FROM real_probe WHERE r_val > '-Infinity' ORDER BY r_key`,
-			knownBug: pgBugWadjet + ` the vectorized FLOAT kernel reads a quoted constant as 0.0 ` +
-				`(kernel.toFloat64 answers 0 for any string), so this asks '> 0.0' and drops every ` +
-				`negative row where PostgreSQL asks '> -Infinity' and keeps them. The float arm of ` +
-				`#536; the CASE-wrapped entries beside this one gate the row path's correct answer.`,
-			issue: "#646"},
+			sql: `SELECT r_key FROM real_probe WHERE r_val > '-Infinity' ORDER BY r_key`},
+		pgCase{name: "RealColumnLtNaN",
+			sql: `SELECT r_key FROM real_probe WHERE r_val < 'NaN' ORDER BY r_key`},
+		pgCase{name: "RealColumnEqNaN",
+			sql: `SELECT r_key FROM real_probe WHERE r_val = 'NaN' ORDER BY r_key`},
+		pgCase{name: "DoubleColumnGtNegInfinity",
+			sql: `SELECT r_key FROM real_probe WHERE d_val > '-Infinity' ORDER BY r_key`},
 		// l_quantity for the same reason as FloatColumnVsQuotedNumericGt: the
-		// subject must stay FLOAT in both fixtures, or the float arm of #536
-		// stops being asked under TPCH_DECIMAL=1.
+		// subject must stay FLOAT in both fixtures, or under TPCH_DECIMAL=1
+		// this stops asking the float question at all.
 		pgCase{name: "FloatColumnLtNaN",
-			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity < 'NaN'`,
-			knownBug: pgBugWadjet + ` the vectorized FLOAT kernel reads a quoted constant as 0.0, ` +
-				`so this asks '< 0.0' where PostgreSQL asks '< NaN' and admits every row. The float ` +
-				`arm of #536, tracked as #646.`,
-			issue: "#646"},
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity < 'NaN'`},
 	)
 
 	// The other side of #534's boundary — a signed NaN, a partial spelling of

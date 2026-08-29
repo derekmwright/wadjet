@@ -1,6 +1,8 @@
 package physical
 
 import (
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -13,11 +15,12 @@ import (
 //
 // The column's declared parquet.TypeID reaches here through colScope
 // (validate.go), and refuseLiteralForType holds the rule per type that has a
-// "this string names no value of me" test. Today that is DECIMAL alone: a
-// quoted string that is not a number against a DECIMAL column. PostgreSQL
-// resolves an unknown-typed literal's type from the column it meets and
-// refuses at parse/bind time — `SELECT count(*) FROM t WHERE d = 'abc'` is
-// 22P02 there whether or not the table holds a row.
+// "this string names no value of me" test: the whole numeric family — the
+// integer types, the FLOAT types and DECIMAL — each read with its OWN
+// PostgreSQL input grammar. PostgreSQL resolves an unknown-typed literal's
+// type from the column it meets and refuses at parse/bind time — `SELECT
+// count(*) FROM t WHERE d = 'abc'` is 22P02 there whether or not the table
+// holds a row.
 //
 // #579 widened colScope from a bare `isDecimal bool` to the full TypeID so the
 // network types (CIDR/IPv4/IPv6/MAC/UUID) can join this rule, but wiring their
@@ -42,13 +45,13 @@ import (
 // runtime refusals stay: they cover the shapes this binder cannot see — an
 // expression it does not parse, an open scope, a column whose source is a
 // derived table or a CTE — and, being the same predicate
-// (`expr.IsNumericLiteralText`), they cannot disagree with this one about
-// which strings are numbers.
+// (`expr.RefuseNumericLiteral` over `kernel.QuotedLitStatus`), they cannot
+// disagree with this one about which strings name a value of which type.
 //
 // It is as conservative as the rest of the binder (validate.go's contract): it
-// refuses only when the column PROVABLY resolves to a declared DECIMAL in a
-// closed scope. A false positive breaks a working query; a false negative
-// merely leaves the refusal where it already was.
+// refuses only when the column PROVABLY resolves to a declared type with a
+// rule, in a closed scope. A false positive breaks a working query; a false
+// negative merely leaves the refusal where it already was.
 func checkLiteralTypes(node plansql.Node, scope *colScope) error {
 	if node == nil || scope == nil || scope.open {
 		return nil
@@ -104,13 +107,25 @@ func checkLiteralTypes(node plansql.Node, scope *colScope) error {
 		// GREATEST/LEAST compare their arguments PAIRWISE at runtime, and
 		// which pairs get compared depends on the values. Here every argument
 		// is in hand at once, so the question is the type rule it should have
-		// been: does this call put a DECIMAL column and a non-numeric literal
-		// in the same comparison? Both functions answer it the same way, on
-		// the same arguments, whatever the data.
+		// been: does this call put a numeric column and a quoted literal its
+		// type cannot read in the same comparison? Both functions answer it
+		// the same way, on the same arguments, whatever the data.
 		switch strings.ToLower(n.Name) {
 		case "greatest", "least":
 			if err := refuseLiteralAmong(scope, n.Args); err != nil {
 				return err
+			}
+		case "nullif":
+			// NULLIF(x, y) is an EQUALITY test between its two arguments, so
+			// the pair takes the same rule `=` does: PostgreSQL plans
+			// `NULLIF(r, '3.1')` as `NULLIF(r, '3.1'::real)` and raises 22P02
+			// for `NULLIF(int_col, 'abc')` (both verified live). It compares
+			// exactly one pair, unlike GREATEST/LEAST, so it names that pair
+			// rather than every ordered pair of arguments.
+			if len(n.Args) == 2 {
+				if err := refuseLiteralPair(scope, n.Args[0], n.Args[1]); err != nil {
+					return err
+				}
 			}
 		}
 		return checkLiteralList(n.Args, scope)
@@ -166,32 +181,123 @@ func refuseLiteralPair(scope *colScope, a, b plansql.Node) error {
 	return refuseLiteralAgainstColumn(scope, b, a)
 }
 
-// refuseLiteralAmong refuses a call whose arguments put a column with a
-// literal rule (see refuseLiteralForType — today DECIMAL) and a literal that
-// names no value of its type in the same comparison, whichever pair the
-// values end up selecting.
+// refuseLiteralAmong refuses a GREATEST/LEAST whose arguments put a quoted
+// literal in the same call as numeric operands that cannot read it.
+//
+// It folds ONE common type over EVERY argument first, because that is what
+// PostgreSQL does: select_common_type resolves the call's type and the
+// unknown-typed literal is coerced to THAT, not to whichever argument it
+// happens to be compared against. Verified live on postgres:17-alpine —
+// `GREATEST(bigint, 'abc')` names bigint, `GREATEST(bigint, 'abc', numeric)`
+// names numeric, `GREATEST(real, 'abc', bigint)` names real. Refusing
+// pairwise named the first column instead, which is a different type in the
+// message for the same query, and for a literal only SOME types refuse
+// ('3.1' is a numeric and not a bigint) it would refuse a query PostgreSQL
+// ANSWERS: `GREATEST(k, '3.1', d)` folds to numeric there.
+//
+// Any argument whose type this scope cannot prove takes the whole refusal
+// away, for that reason — the fold would be a lower bound, and a lower bound
+// is exactly what produces a false positive. That is the binder's standing
+// contract (validate.go): a false positive breaks a working query, a false
+// negative leaves the refusal where the runtime already has it.
 func refuseLiteralAmong(scope *colScope, args []plansql.Node) error {
+	var common parquet.TypeID
+	have := false
 	for _, a := range args {
-		for _, b := range args {
-			if err := refuseLiteralAgainstColumn(scope, a, b); err != nil {
-				return err
-			}
+		typ, kind := argDeclaredType(scope, a)
+		switch kind {
+		case argUntyped:
+			return nil
+		case argUnknownLiteral:
+			continue // the literal being coerced contributes no type
+		}
+		if !have {
+			common, have = typ, true
+			continue
+		}
+		w, ok := setOpWiden(common, typ)
+		if !ok {
+			return nil
+		}
+		common = w
+	}
+	if !have {
+		return nil
+	}
+	for _, b := range args {
+		lit, ok := unwrapParens(b).(*plansql.Lit)
+		if !ok || lit.Kind != plansql.LitString {
+			continue
+		}
+		if err := refuseLiteralForType(common, lit.Value); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// refuseLiteralAgainstColumn raises when colSide is a column this scope can
-// prove has a type with a "this string names no value of me" rule (today
-// DECIMAL — see refuseLiteralForType) and litSide is a quoted string the
-// type's own test rejects.
+// argKind classifies one call argument for the common-type fold.
+type argKind int
+
+const (
+	// argTyped: the type came back and is usable.
+	argTyped argKind = iota
+	// argUnknownLiteral: a QUOTED string literal, which PostgreSQL types FROM
+	// the fold rather than contributing to it — and a NULL, which is
+	// unknown-typed the same way.
+	argUnknownLiteral
+	// argUntyped: this scope cannot say what the argument is.
+	argUntyped
+)
+
+// argDeclaredType is one argument's contribution to select_common_type: a
+// provable column's declared type, a NUMERIC constant's own type, or nothing.
 //
-// A NUMERIC literal is never refused against a DECIMAL, however large: `1e400`
-// IS a number and is read as one at the column's scale, saturating past the
-// carrier (ADR-0012 item 6). A NULL or a boolean is a different rule and is
-// left to the comparison. The DECIMAL text test is `expr.IsNumericLiteralText`,
-// the SAME predicate the runtime refusal uses, so the two paths cannot
-// disagree about which strings name a value.
+// PostgreSQL types an unsuffixed constant `numeric` once it carries a decimal
+// point or an exponent, and otherwise as the narrowest integer type that holds
+// it — ADR-0012 item 12's rule for a set-operation literal arm, which is the
+// same select_common_type this folds through.
+func argDeclaredType(scope *colScope, n plansql.Node) (parquet.TypeID, argKind) {
+	switch v := unwrapParens(n).(type) {
+	case *plansql.ColRef:
+		typ, ok := scope.provableColType(v)
+		if !ok {
+			return 0, argUntyped
+		}
+		return typ, argTyped
+	case *plansql.Lit:
+		switch v.Kind {
+		case plansql.LitString, plansql.LitNull:
+			return 0, argUnknownLiteral
+		case plansql.LitNumber:
+			if strings.ContainsAny(v.Value, ".eE") {
+				return parquet.TypeDecimal, argTyped
+			}
+			if i, err := strconv.ParseInt(strings.TrimSpace(v.Value), 10, 64); err == nil {
+				if i >= math.MinInt32 && i <= math.MaxInt32 {
+					return parquet.TypeInt32, argTyped
+				}
+				return parquet.TypeInt64, argTyped
+			}
+			return parquet.TypeDecimal, argTyped
+		}
+	}
+	return 0, argUntyped
+}
+
+// refuseLiteralAgainstColumn raises when colSide is a column this scope can
+// prove has a type with a "this string names no value of me" rule (the
+// numeric family — see refuseLiteralForType) and litSide is a quoted string
+// that type's own input grammar rejects.
+//
+// Only a QUOTED literal is examined. An UNQUOTED numeric constant is not
+// unknown-typed — PostgreSQL resolves `real = 1e40` as a double comparison
+// that answers no rows, and `d = 1e400` as a numeric read at the column's
+// scale, saturating past the carrier (ADR-0012 item 6) — so neither is ever
+// refused here. A NULL or a boolean is a different rule and is left to the
+// comparison. The text test is `expr.RefuseNumericLiteral`, the SAME predicate
+// the runtime refusals use, so the two paths cannot disagree about which
+// strings name a value of which type.
 func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) error {
 	ref, ok := unwrapParens(colSide).(*plansql.ColRef)
 	if !ok {
@@ -211,38 +317,46 @@ func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) 
 // refuseLiteralForType raises when text names no value of a column type that
 // has a plan-time literal rule.
 //
-// Today that is DECIMAL alone → expr.InvalidLiteralError (22P02, "type
-// numeric"), the site #517 closed, kept byte-for-byte.
+// It is the WHOLE numeric family now — DECIMAL (#517), the integer types
+// (#536) and the FLOAT types (#646) — through the one predicate
+// expr.RefuseNumericLiteral, which is kernel.QuotedLitStatus, which is what
+// the vectorized kernel, the row-at-a-time evaluator and the boxed sites all
+// read. The plan-time refusal and the runtime one CANNOT disagree about which
+// strings name a value, because they are the same function; that identity is
+// the property, not the coverage.
 //
-// The switch is deliberately extensible per TypeID because #579 widened
-// colScope to carry the column's parquet.TypeID (not a bare bool), but the
-// NETWORK types (CIDR/IPv4/IPv6/MAC/UUID) are NOT wired here yet: wadjet's
-// network literal parsers (net.ParseCIDR, net.ParseMAC, the brace-unaware
-// UUID parser) are STRICTER than PostgreSQL's input grammar — they reject
-// abbreviated cidr/inet ('192.168', '10/8'), several macaddr notations
-// ('08002b:010203', '0800-2b01-0203') and the brace/no-dash/uppercase UUID
-// forms that PostgreSQL ACCEPTS. Refusing on those parsers here would raise
-// 22P02 for input PostgreSQL answers — a PG-superset regression the binder
-// must never make (ADR-0012 item 1: never refuse what PostgreSQL accepts),
-// net-new at the boxed sites (GREATEST/LEAST, simple CASE, IN, IS DISTINCT
-// FROM) that had no refusal before. That over-strictness is a latent RUNTIME
-// bug too (exec.networkConstError refuses the same PG-valid forms
-// data-dependently), and both halves are deferred to #627: widen the parsers
-// to a SUPERSET of PostgreSQL's grammar first, then a network arm can be
-// added here using that same predicate without ever refusing a PG-valid
-// literal.
+// The rule is per type because PostgreSQL's input functions are:
 //
-// Types with no rule (every other TypeID, PORT/PROTOCOL included — they have
-// no PostgreSQL analog) return nil: a legal comparison must still work, and
-// the binder refuses only what PostgreSQL refuses.
+//	'3.1'    bigint 22P02   real 3.1     numeric 3.1
+//	'1_000'  bigint 1000    real 22P02   numeric 1000 (wadjet: 22P02, #634)
+//	'0x1p3'  bigint 22P02   real 8       numeric 16   (wadjet: 22P02, #634)
+//	'NaN'    bigint 22P02   real NaN     numeric NaN-as-a-bound (ADR-0024 item 6)
+//	'1e400'  bigint 22P02   real 22003   numeric a very large number
+//
+// all verified live on postgres:17-alpine. A range failure is 22003, a
+// different SQLSTATE with different wording, so the error type carries the
+// distinction rather than collapsing it.
+//
+// The NETWORK types (CIDR/IPv4/IPv6/MAC/UUID) are NOT wired here yet:
+// wadjet's network literal parsers (net.ParseCIDR, net.ParseMAC, the
+// brace-unaware UUID parser) are STRICTER than PostgreSQL's input grammar —
+// they reject abbreviated cidr/inet ('192.168', '10/8'), several macaddr
+// notations ('08002b:010203', '0800-2b01-0203') and the brace/no-dash/
+// uppercase UUID forms that PostgreSQL ACCEPTS. Refusing on those parsers
+// here would raise 22P02 for input PostgreSQL answers — a PG-superset
+// regression the binder must never make (ADR-0012 item 1: never refuse what
+// PostgreSQL accepts), net-new at the boxed sites (GREATEST/LEAST, simple
+// CASE, IN, IS DISTINCT FROM) that had no refusal before. That
+// over-strictness is a latent RUNTIME bug too (exec.networkConstError refuses
+// the same PG-valid forms data-dependently), and both halves are deferred to
+// #627: widen the parsers to a SUPERSET of PostgreSQL's grammar first, then a
+// network arm can be added here using that same predicate without ever
+// refusing a PG-valid literal.
+//
+// Types with no rule return nil: a legal comparison must still work, and the
+// binder refuses only what PostgreSQL refuses.
 func refuseLiteralForType(typ parquet.TypeID, text string) error {
-	switch typ {
-	case parquet.TypeDecimal:
-		if !expr.IsNumericLiteralText(text) {
-			return &expr.InvalidLiteralError{Input: text, DestType: "numeric"}
-		}
-	}
-	return nil
+	return expr.RefuseNumericLiteral(typ, text)
 }
 
 // unwrapParens strips redundant parentheses from an operand.

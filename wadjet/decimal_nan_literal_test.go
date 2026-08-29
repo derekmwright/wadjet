@@ -348,23 +348,38 @@ func TestFloatColumnsKeepTheirOwnNaNRule(t *testing.T) {
 		})
 	}
 
-	// The BARE float forms take the vectorized float kernel, which still
-	// reads ANY quoted constant as 0.0 — the float arm of #536, tracked as
-	// #646 and pinned in the pg-oracle corpus (RealColumnGtNegInfinity).
-	// They are asserted at the values they answer TODAY, because the point of
-	// this block is that neither #534 nor the row-path fix above reached
-	// them. When #646 lands these become the row sets above and this block
-	// fails — the same ratchet the corpus pin uses, and deleting it is that
-	// fix's proof.
+	// The BARE float forms take the VECTORIZED kernel, and they now answer
+	// the same row sets as the CASE-wrapped ones above — which is #646's
+	// close, and the whole of it: kernel.toFloat64 has no string arm, so
+	// every quoted constant read as 0.0 there. `f > '-Infinity'` asked
+	// `> 0.0` and answered {3, 4}, `f < 'NaN'` asked `< 0.0` and answered
+	// {0, 1}. The pins are DELETED rather than adjusted, here and in the
+	// pg-oracle corpus, because deleting them is the fix's proof.
+	//
+	// The prune is exercised on both settings by fnegRows, which matters
+	// here: kernel.StatsDomainValue now reads the same quoted literal with
+	// the same grammar, so a row group cannot be dropped on a bound the
+	// filter would have kept.
 	for _, tc := range []struct {
 		pred string
 		want []int64
 	}{
-		{"f > '-Infinity'", []int64{3, 4}}, // asks '> 0.0'
-		{"f < 'NaN'", []int64{0, 1}},       // asks '< 0.0'
-		{"r > '-Infinity'", []int64{3, 4}},
+		{"f > '-Infinity'", []int64{0, 1, 2, 3, 4}},
+		{"f >= '-Infinity'", []int64{0, 1, 2, 3, 4}},
+		{"f < '-Infinity'", nil},
+		{"f < 'NaN'", []int64{0, 1, 2, 3, 4}},
+		{"f = 'NaN'", nil},
+		{"f <= 'Infinity'", []int64{0, 1, 2, 3, 4}},
+		{"f > 'Infinity'", nil},
+		{"r > '-Infinity'", []int64{0, 1, 2, 3, 4}},
+		{"r < 'NaN'", []int64{0, 1, 2, 3, 4}},
+		// A SIGNED NaN answers on a FLOAT column and stays refused against a
+		// DECIMAL one — the one place the two grammars part (#534).
+		{"f < '+NaN'", []int64{0, 1, 2, 3, 4}},
+		{"f < '-NaN'", []int64{0, 1, 2, 3, 4}},
+		{"f < ' nan '", []int64{0, 1, 2, 3, 4}},
 	} {
-		t.Run("pinned_646_"+tc.pred, func(t *testing.T) {
+		t.Run("kernel_"+tc.pred, func(t *testing.T) {
 			fnegRows(t, ctx, db, tc.pred, tc.want)
 		})
 	}
@@ -384,6 +399,45 @@ func TestFloatColumnsKeepTheirOwnNaNRule(t *testing.T) {
 	t.Run("arithmetic_over_decimal_keeps_the_negatives", func(t *testing.T) {
 		fnegRows(t, ctx, db, "d + 0 > '-Infinity'", []int64{0, 1, 2, 3, 4})
 	})
+}
+
+// TestBoxedRefusalReachesTheRowsThePlannerCannotProve is the RUNTIME half of
+// #646's refusal, isolated so that it can actually fail.
+//
+// Every ordinary shape is caught by the plan-time binder, which proves the
+// column's declared type in a closed scope — so a test written against a bare
+// table asserts the binder and never the runtime. These three go through a
+// DERIVED TABLE, which the binder does not prove, AND over rows that are all
+// NULL, which is where the comparison itself never runs: NULLIF returns its
+// first argument on a nil operand, GREATEST skips a NULL argument, and IS
+// DISTINCT FROM answers from the NULL alone. The only thing left that can
+// raise is the arms' refusal mask (expr.litRefusalMask), which is exactly why
+// it is armed from the operand SHAPES rather than derived from a comparison.
+//
+// PostgreSQL raises here because it coerces the unknown-typed literal at parse
+// analysis, whatever the rows hold — verified live: `NULLIF(f, 'abc')` and
+// `GREATEST(f, 'abc')` over a double column, and `f IS DISTINCT FROM 'abc'`,
+// are all `invalid input syntax for type double precision: "abc"`.
+func TestBoxedRefusalReachesTheRowsThePlannerCannotProve(t *testing.T) {
+	ctx := context.Background()
+	db := fnegOpen(t)
+
+	const want = `invalid input syntax for type double precision: "abc"`
+	for _, sql := range []string{
+		"SELECT COUNT(*) AS n FROM (SELECT f FROM fneg WHERE f IS NULL) s WHERE NULLIF(s.f, 'abc') IS NULL",
+		"SELECT COUNT(*) AS n FROM (SELECT f FROM fneg WHERE f IS NULL) s WHERE GREATEST(s.f, 'abc') IS NULL",
+		"SELECT COUNT(*) AS n FROM (SELECT f FROM fneg WHERE f IS NULL) s WHERE s.f IS DISTINCT FROM 'abc'",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			_, err := tmRun(ctx, db, sql)
+			if err == nil {
+				t.Fatalf("%s answered; PostgreSQL raises 22P02", sql)
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s raised %v, want a refusal naming %q", sql, err, want)
+			}
+		})
+	}
 }
 
 // fnegRows asserts the exact k values a predicate selects over fneg, with the

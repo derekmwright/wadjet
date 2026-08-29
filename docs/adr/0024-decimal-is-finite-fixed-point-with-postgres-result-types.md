@@ -385,7 +385,14 @@ the two sides one function.
 The accept-set is PostgreSQL 17.11's numeric input grammar MINUS digit
 separators and radix prefixes, taken from a live transcript. PostgreSQL 16
 added both to `numeric_in`, so 17.11 accepts `1_000`, `1_0.5`, `0x10`, `0b101`
-and `0o17` where wadjet answers 22P02 — tracked as #634 and deferred. It is a
+and `0o17` where wadjet answers 22P02 — tracked as #634 and deferred.
+(Amended 2026-08-29, #646: #634 is CLOSED for the INTEGER family, whose
+`kernel.parseIntText` now reads PostgreSQL's whole `pg_strtoint*` grammar, and
+it stays open HERE. The two are separate parsers on purpose — the accept-sets
+genuinely differ, `'0x1p3'` being a float and neither an integer nor a numeric
+— and closing this half means moving `parquet.DecimalTextParts`, the one
+function `batch` and the writer share, which is a change to the STORED grammar
+and not only to a comparison. ADR-0012 item 13 carries the per-type table.) It is a
 refusal of input PostgreSQL takes, never a different value for input both
 accept. What the two agree on: C whitespace trimmed; `nan` case-insensitive and with NO sign
 (`'+NaN'` and `'-NaN'` are 22P02 there); `infinity` and `inf`

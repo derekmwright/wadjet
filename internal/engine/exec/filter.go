@@ -202,7 +202,15 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	// #493's territory, not this fix's.
 	int64Val, int64Status := kernel.Int64FilterConst(value)
 	int32Val, int32Status := kernel.Int32FilterConst(value)
-	floatVal := toFloat64(value)
+	// A FLOAT column's literal is read through the float input grammar when it
+	// is QUOTED, exactly as the vectorized kernel does (#646). toFloat64 has no
+	// string arm, so every quoted constant used to read as 0.0 — `f = '3.1'`
+	// matched the row holding zero and `f > '-Infinity'` asked `> 0.0`. The
+	// float64 and float32 constants are resolved separately because PostgreSQL
+	// coerces the literal to the COLUMN's type: real NARROWS ('3.1'::real) where
+	// an unquoted numeric literal widens the column to double (#631).
+	floatVal, float64Status := kernel.Float64FilterConst(value)
+	real32Val, real32Status, real32Quoted := kernel.Float32FilterConst(value)
 	ipv4Val := parseIPv4FilterVal(value)
 	macVal := parseMACFilterVal(value)
 	ipv6Val := parseIPv6FilterVal(value)
@@ -268,8 +276,21 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			}
 			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), op)
 		case batch.TypeFloat64:
+			if float64Status != kernel.NumConstOK {
+				panic(fatalEvalError{floatConstError(v.Type, value, litText)})
+			}
 			return compareFloat64(v.Float64Data[row], floatVal, op)
 		case batch.TypeFloat32:
+			// A QUOTED literal is a real, so the comparison happens at REAL
+			// width; an unquoted numeric one widens the column to double
+			// (#631). Two spellings, two predicates — see
+			// kernel.ResolveFilterKernel's TypeFloat32 arm.
+			if real32Quoted {
+				if real32Status != kernel.NumConstOK {
+					panic(fatalEvalError{floatConstError(v.Type, value, litText)})
+				}
+				return compareFloat32(v.Float32Data[row], real32Val, op)
+			}
 			return compareFloat64(float64(v.Float32Data[row]), floatVal, op)
 		case batch.TypeString:
 			if emptyTest {
@@ -501,6 +522,15 @@ func compareInt64(a, b int64, op CompareOp) bool {
 // predicate, which is the two-path divergence ADR-0012's consequence note
 // records for DECIMAL.
 func compareFloat64(a, b float64, op CompareOp) bool {
+	return kernel.FloatCompareOp(a, b, toKernelOp(op))
+}
+
+// compareFloat32 is compareFloat64 at REAL width, for the one pair PostgreSQL
+// compares there: a `real` column against a QUOTED literal, which is
+// unknown-typed and coerced straight to real (#646). Narrowing the column
+// instead would be a different predicate — see kernel.compareFilterFloat32Widen
+// for the pair that must NOT take this path.
+func compareFloat32(a, b float32, op CompareOp) bool {
 	return kernel.FloatCompareOp(a, b, toKernelOp(op))
 }
 
@@ -839,26 +869,53 @@ func dateConstError(typ batch.TypeID, value any) error {
 	return sqlerr.New("22008", "date/time field value out of range: %q", fmt.Sprint(value))
 }
 
-// floatConstError is decimalConstError's counterpart for a FLOAT32 (real)
-// column whose IN-list arm declines a literal that overflows real's range.
-// PostgreSQL raises 22003 (numeric_value_out_of_range) for `real IN (1e40)`
-// — the whole predicate, not a silently dropped element (verified on
-// postgres:17) — and ADR-0012 makes PostgreSQL the authority on
-// error-versus-not, so this is its SQLSTATE.
+// floatConstError is decimalConstError's counterpart for the FLOAT columns
+// whose kernel arm declines a constant, and it covers the two spellings
+// separately because PostgreSQL reads them as two different literals.
 //
-// It exists because the #549 fix narrows each IN literal to float32, and a
-// literal that does not FIT a real narrows onto a value that does: one past
-// FLT_MAX becomes +Inf and would MATCH a genuine +Inf row, one below real's
-// smallest denormal becomes 0.0 and would match every zero row (`real IN
-// (1e-46, 3.1)` answered with the zero row before the underflow arm existed).
-// kernel.ResolveInFilterKernel returns a nil kernel for that list, and this
-// turns the same condition into the error PostgreSQL gives. A literal that is
+// A QUOTED constant is unknown-typed and is coerced with the COLUMN's own
+// input function (#646): `real = 'abc'` is 22P02 "invalid input syntax for
+// type real", `real = '1e400'` is 22003 "\"1e400\" is out of range for type
+// real", and the message names the literal's TEXT VERBATIM — the cast that
+// fails is text->real, so there is nothing to expand. Both verified live on
+// postgres:17-alpine. Before this, kernel.toFloat64 had no string arm at all
+// and answered 0.0 for every such constant, so the predicate silently became a
+// comparison against zero.
+//
+// An UNQUOTED numeric constant is `numeric`, and the only way it fails is
+// FLOAT32's range: the #549 fix narrows each multi-element IN literal to
+// float32, and a literal that does not FIT a real narrows onto a value that
+// does — one past FLT_MAX becomes +Inf and would MATCH a genuine +Inf row, one
+// below real's smallest denormal becomes 0.0 and would match every zero row
+// (`real IN (1e-46, 3.1)` answered with the zero row before the underflow arm
+// existed). PostgreSQL raises 22003 for the whole predicate rather than
+// dropping the element, and it names the DIGITS there, because the cast that
+// fails is numeric->real and a numeric's text is its digits. A literal that is
 // itself ±Inf is a legal real value, not an overflow, and does not reach here.
 func floatConstError(typ batch.TypeID, value any, litText string) error {
-	if typ != batch.TypeFloat32 || value == nil {
+	if value == nil {
 		return nil
 	}
-	if !kernel.Float32LitUnrepresentable(value) {
+	var name string
+	bits := 64
+	switch typ {
+	case batch.TypeFloat32:
+		name, bits = "real", 32
+	case batch.TypeFloat64:
+		name = "double precision"
+	default:
+		return nil
+	}
+	if text, quoted := kernel.QuotedConstText(value); quoted {
+		switch _, st := kernel.FloatLitText(text, bits); st {
+		case kernel.NumConstSyntax:
+			return sqlerr.New("22P02", "invalid input syntax for type %s: %q", name, text)
+		case kernel.NumConstRange:
+			return sqlerr.New("22003", "%q is out of range for type %s", text, name)
+		}
+		return nil
+	}
+	if typ != batch.TypeFloat32 || !kernel.Float32LitUnrepresentable(value) {
 		return nil
 	}
 	// The literal's SOURCE TEXT, expanded the way PostgreSQL's numeric output
@@ -910,6 +967,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 						if err := intConstError(ft, f.Value); err != nil {
 							return nil, err
 						}
+						if err := floatConstError(ft, f.Value, f.LitText); err != nil {
+							return nil, err
+						}
 					}
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
@@ -949,6 +1009,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 			return nil, err
 		}
 		if err := intConstError(typ, f.Value); err != nil {
+			return nil, err
+		}
+		if err := floatConstError(typ, f.Value, f.LitText); err != nil {
 			return nil, err
 		}
 		// The column resolved; the TYPE has no comparison kernel. Reporting
@@ -1079,6 +1142,9 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 				return nil, err
 			}
 			if err := boolConstError(typ, v); err != nil {
+				return nil, err
+			}
+			if err := intConstError(typ, v); err != nil {
 				return nil, err
 			}
 			// The float refusal names the literal's DIGITS, so it is the one

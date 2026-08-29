@@ -150,11 +150,19 @@ func (p *Planner) materializeInSubquery(ctx context.Context, in *plansql.InExpr,
 	}
 
 	start := time.Now()
-	rows, err := p.executeSubquery(ctx, subq.SQL)
+	rows, setSchema, err := p.executeSubquerySchema(ctx, subq.SQL)
 	if err != nil {
 		p.refuseInSubquery(fmt.Errorf("%w: executing the subquery as a set producer failed: %v",
 			ErrInSubqueryDistributed, err))
 		return nil, false
+	}
+	// The set's own declared type, for the one box that cannot say what it is
+	// — see inSetLiteral. A schema with anything but one column is refused
+	// below on the rows themselves.
+	var setType parquet.TypeID
+	setTyped := len(setSchema) == 1
+	if setTyped {
+		setType = setSchema[0].Type
 	}
 	slog.Info("plan-time IN subquery materialized on coordinator",
 		"duration", time.Since(start).Round(time.Millisecond), "rows", len(rows))
@@ -176,7 +184,7 @@ func (p *Planner) materializeInSubquery(ctx context.Context, in *plansql.InExpr,
 			return nil, false
 		}
 		for _, v := range row {
-			lit, ok := inSetLiteral(v)
+			lit, ok := inSetLiteral(v, setType, setTyped)
 			if !ok {
 				p.refuseInSubquery(fmt.Errorf("%w: a %T value has no literal spelling this can inline",
 					ErrInSubqueryDistributed, v))
@@ -207,7 +215,23 @@ func emptyInSetPredicate(not bool) plansql.Node {
 // ok=false when the value has no spelling that survives the round trip through
 // the filter's TEXT. Refusing beats approximating: an inlined value that
 // re-parses as something else is a wrong answer with no error attached.
-func inSetLiteral(v any) (plansql.Node, bool) {
+//
+// setType is the subquery's own declared output type, and it is here for the
+// one box that cannot say what it is: a DECIMAL value arrives as its RENDERED
+// TEXT, indistinguishable from a STRING column's value, and spelling it as a
+// quoted literal makes it look like something a user WROTE. That matters
+// because an unknown-typed literal is coerced with the probe column's own
+// input function (ADR-0012 item 13): `bigint IN (SELECT numeric)` is a numeric
+// comparison in PostgreSQL, and inlining "2.00" as a quoted string asked the
+// bigint input function to read it instead — 22P02 for a query PostgreSQL
+// answers. A DECIMAL set value is spelled as the NUMBER it is, carrying its
+// exact digits (ADR-0012 item 6's carrier rule); every other string-boxed type
+// (STRING, CIDR, IPv6, UUID) keeps the quoted spelling, which is its own
+// value's spelling.
+func inSetLiteral(v any, setType parquet.TypeID, typed bool) (plansql.Node, bool) {
+	if s, ok := v.(string); ok && typed && setType == parquet.TypeDecimal {
+		return &plansql.Lit{Value: s, Kind: plansql.LitNumber}, true
+	}
 	switch val := v.(type) {
 	case nil:
 		return &plansql.Lit{Value: "null", Kind: plansql.LitNull}, true

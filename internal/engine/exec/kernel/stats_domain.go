@@ -48,12 +48,55 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 	// the literal already arrives as one. (TIMESTAMP's bounds are rescaled to
 	// engine milliseconds by the reader, at the one place that still holds the
 	// leaf's unit — see parquet.RowGroupStats.)
-	case batch.TypeInt32, batch.TypeInt64,
-		batch.TypeFloat32, batch.TypeFloat64,
-		batch.TypeString,
-		batch.TypePort, batch.TypeProtocol,
-		batch.TypeDuration, batch.TypeTimestamp:
+	case batch.TypeString, batch.TypeTimestamp:
 		return v, true
+
+	// The numeric families take one more step for a QUOTED literal, which is
+	// TEXT here and a number to the filter: PostgreSQL coerces an unknown-typed
+	// literal to the column's own type, so the prune must read it with the same
+	// grammar and at the same width the kernel does (#646, and ADR-0018's "a
+	// prune must not read the predicate differently from the filter"). A real
+	// column's literal is NARROWED before it is widened back for the bound
+	// comparison, so the prune keeps the filter's answer bit for bit; a literal
+	// the type refuses withholds, which costs a prune and cannot cost a row —
+	// and the kernel raises 22P02/22003 for that same literal, which is what
+	// lets the refusal actually run.
+	//
+	// Before this, a quoted literal reached scan.compareValuesOK as a Go string
+	// against a numeric bound, which that function declines: safe, but no prune
+	// at all for `WHERE f > '3.1'`.
+	case batch.TypeInt32, batch.TypeInt64,
+		batch.TypePort, batch.TypeProtocol, batch.TypeDuration:
+		text, quoted := QuotedConstText(v)
+		if !quoted {
+			return v, true
+		}
+		n, st := parseIntText(text)
+		if st != NumConstOK {
+			return nil, false
+		}
+		if typ != batch.TypeInt64 && typ != batch.TypeDuration &&
+			(n < math.MinInt32 || n > math.MaxInt32) {
+			return nil, false
+		}
+		return n, true
+	case batch.TypeFloat32, batch.TypeFloat64:
+		text, quoted := QuotedConstText(v)
+		if !quoted {
+			return v, true
+		}
+		bits := 64
+		if typ == batch.TypeFloat32 {
+			bits = 32
+		}
+		f, st := FloatLitText(text, bits)
+		if st != NumConstOK {
+			return nil, false
+		}
+		if bits == 32 {
+			return float64(float32(f)), true
+		}
+		return f, true
 
 	// BOOL stats bounds are Go bools; a SQL text literal has to be read
 	// through PostgreSQL's boolean input grammar before it can be compared

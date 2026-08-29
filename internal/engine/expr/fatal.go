@@ -97,18 +97,63 @@ func IsInvalidLiteral(err error) bool {
 	return errors.As(err, &ile)
 }
 
+// NumericRangeError is InvalidLiteralError's sibling for the OTHER way a
+// literal can fail its column's type: it names a real number the type cannot
+// carry. PostgreSQL raises SQLSTATE 22003 (numeric_value_out_of_range) with
+// its own wording for that, not 22P02 — `'1e400'::real` is "out of range" and
+// `'abc'::real` is "invalid input syntax", and the WireProtocol oracle checks
+// which one the wire says (#646).
+//
+// It is a distinct type for InvalidLiteralError's reason: the planner's
+// compile sites fall back around an ordinary compile failure, and a refused
+// literal has no column to fall back to, so IsCompileRefusal must name this
+// class too.
+type NumericRangeError struct {
+	Input    string // the literal's source text
+	DestType string // the type it was being read as, e.g. "real"
+}
+
+// Error is PostgreSQL's wording, and the two families word it differently —
+// verified live on postgres:17-alpine:
+//
+//	'3000000000'::integer  ->  value "3000000000" is out of range for type integer
+//	'1e400'::real          ->  "1e400" is out of range for type real
+//
+// The integer input functions prefix the literal with `value ` and the float
+// ones do not. The message is part of the answer (ADR-0012 item 1), so the
+// distinction is reproduced rather than tidied away; exec.intStatusError gives
+// the identical text for the vectorized path's copy of the same refusal.
+func (e *NumericRangeError) Error() string {
+	switch e.DestType {
+	case "bigint", "integer", "smallint", "port", "protocol", "duration":
+		return fmt.Sprintf("value %q is out of range for type %s", e.Input, e.DestType)
+	}
+	return fmt.Sprintf("%q is out of range for type %s", e.Input, e.DestType)
+}
+
+// SQLState returns PostgreSQL's numeric_value_out_of_range code, the same one
+// exec.floatConstError raises for the per-row version of this refusal.
+func (e *NumericRangeError) SQLState() string { return "22003" }
+
+// IsNumericRange reports whether err is, or wraps, a NumericRangeError.
+func IsNumericRange(err error) bool {
+	var nre *NumericRangeError
+	return errors.As(err, &nre)
+}
+
 // IsCompileRefusal reports whether err is a compile failure that the caller
 // must PROPAGATE rather than fall back around.
 //
 // The physical planner has six sites that compile an AST and quietly keep
 // going when it will not compile, because a failed compile usually means "this
-// expression is really a reference to an aggregate's output column". Two
-// classes of failure are never that, and both are the answer to the query:
-// a name nothing implements (#341) and a literal that names no value of its
-// type (#505). Naming them together here keeps the six sites from drifting
-// apart as a third class arrives.
+// expression is really a reference to an aggregate's output column". Three
+// classes of failure are never that, and all three are the answer to the
+// query: a name nothing implements (#341), a literal that names no value of
+// its type (#505), and a literal that names a value out of its type's range
+// (#646). Naming them together here keeps the six sites from drifting apart as
+// a fourth class arrives.
 func IsCompileRefusal(err error) bool {
-	return IsUnknownFunc(err) || IsInvalidLiteral(err)
+	return IsUnknownFunc(err) || IsInvalidLiteral(err) || IsNumericRange(err)
 }
 
 // raiseRealConversionError aborts a CAST to REAL that cannot carry its value,

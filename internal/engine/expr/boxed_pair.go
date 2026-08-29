@@ -52,7 +52,10 @@ const (
 	// rendered text, so a string box from this operand is decimal text — the
 	// distinction the sniff could not make.
 	boxDecimal
-	// boxNumber: a non-DECIMAL number, which never boxes as a string.
+	// boxNumber: a non-DECIMAL number whose DECLARED type this layer could not
+	// read — a numeric literal, or a computed numeric expression. It never
+	// boxes as a string, so its box alone identifies its width where that
+	// matters.
 	boxNumber
 	// boxText: a genuine text value, which compares AS TEXT — bytewise,
 	// wadjet's collation (ADR-0012 item 5) — whatever its digits look like.
@@ -91,7 +94,59 @@ const (
 	// could not tell the two apart — both produce a Go bool and a Go string —
 	// which is why the declaration decides, ADR-0012 item 8.
 	boxBool
+	// boxInt32/boxInt64/boxFloat32/boxFloat64: a non-DECIMAL number whose
+	// DECLARED type IS known. They are separate kinds rather than one boxNumber
+	// because the rule for a QUOTED literal meeting them is the COLUMN'S OWN
+	// INPUT FUNCTION, and the four differ in what they accept and at what width
+	// they compare (#646): '3.1' is a bigint's 22P02 and a real's 3.1; '1_000'
+	// is a bigint's 1000 and a real's 22P02; '0x1p3' is a real's 8 and a
+	// bigint's 22P02; and `r < '3.1'` compares at REAL width where `d < '3.1'`
+	// compares at double.
+	boxInt32
+	boxInt64
+	boxFloat32
+	boxFloat64
 )
+
+// isNumberKind reports whether a kind is a non-DECIMAL number — the four
+// declared ones plus the undeclared boxNumber. Every rule that applied to
+// boxNumber applies to all five; only the QUOTED-literal rule below cares
+// which.
+func isNumberKind(k boxKind) bool {
+	switch k {
+	case boxNumber, boxInt32, boxInt64, boxFloat32, boxFloat64:
+		return true
+	}
+	return false
+}
+
+// numberKindType is a number-kind operand's effective type: the DECLARATION
+// where the kind carries one, and the box otherwise. A numeric literal and a
+// computed expression have no declaration this layer can read, and for these
+// four types the box is exact — none of them shares a Go box with another,
+// which is the whole reason DECIMAL and STRING need a declaration and these
+// do not (ADR-0012 item 8).
+func numberKindType(k boxKind, v any) batch.TypeID {
+	switch k {
+	case boxInt32:
+		return batch.TypeInt32
+	case boxInt64:
+		return batch.TypeInt64
+	case boxFloat32:
+		return batch.TypeFloat32
+	case boxFloat64:
+		return batch.TypeFloat64
+	}
+	switch v.(type) {
+	case int32:
+		return batch.TypeInt32
+	case float32:
+		return batch.TypeFloat32
+	case float64:
+		return batch.TypeFloat64
+	}
+	return batch.TypeInt64
+}
 
 // classifyOperand reports an operand's declared kind and whether that answer
 // is SETTLED — safe to cache for the rest of the query.
@@ -121,8 +176,14 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		switch declared {
 		case batch.TypeDecimal:
 			return boxDecimal, true
-		case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32, batch.TypeFloat64:
-			return boxNumber, true
+		case batch.TypeInt32:
+			return boxInt32, true
+		case batch.TypeInt64:
+			return boxInt64, true
+		case batch.TypeFloat32:
+			return boxFloat32, true
+		case batch.TypeFloat64:
+			return boxFloat64, true
 		case batch.TypeString:
 			return boxText, true
 		case batch.TypeCIDR:
@@ -328,8 +389,17 @@ func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 		}
 		switch {
 		case k == kind:
-		case (k == boxDecimal && kind == boxNumber) || (k == boxNumber && kind == boxDecimal):
+		case k == boxDecimal && isNumberKind(kind), kind == boxDecimal && isNumberKind(k):
 			kind = boxDecimal
+		case isNumberKind(k) && isNumberKind(kind):
+			// Two numbers that are not the SAME number: an int column beside a
+			// float one, or either beside a numeric literal. The join keeps
+			// "a value from here is a real number" — which is all boxNumber
+			// claims and all the rules below need — and drops the declared
+			// width, because there is no single one. Collapsing to boxUnknown
+			// instead would take the QUOTED-literal rule away from
+			// `GREATEST(i, f) = '3'`, which had it before the kinds split.
+			kind = boxNumber
 		default:
 			return boxUnknown, settled
 		}
@@ -430,15 +500,23 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	case lk == boxDecimal || rk == boxDecimal:
 		return true
 	// A TEXT column against a NUMERIC literal: the text comparison (#504).
-	case lk == boxText && rk == boxNumber && rText != "":
+	case lk == boxText && isNumberKind(rk) && rText != "":
 		return true
-	case rk == boxText && lk == boxNumber && lText != "":
+	case rk == boxText && isNumberKind(lk) && lText != "":
 		return true
 	// A NUMBER column against a QUOTED literal: the numeric comparison,
-	// because PostgreSQL types the unknown literal from the column (B1).
-	case lk == boxNumber && rk == boxQuoted && rText != "":
+	// because PostgreSQL types the unknown literal from the column (B1) — and
+	// with the column's OWN input function, which is why the four declared
+	// number kinds are separate (#646).
+	//
+	// The EMPTY quoted literal reaches here too, and must: `f = ''` is
+	// PostgreSQL's 22P02, and requiring a non-empty text would send it to
+	// compare() to answer silently. A numeric LITERAL's text is never empty
+	// (compileLit sets it from the digits), so the boxText arms above keep
+	// their guard.
+	case isNumberKind(lk) && rk == boxQuoted:
 		return true
-	case rk == boxNumber && lk == boxQuoted && lText != "":
+	case isNumberKind(rk) && lk == boxQuoted:
 		return true
 	// A network column whose ORDER is the address's, against another column
 	// of its own type or against a quoted literal. Two of them, or one and a
@@ -599,17 +677,22 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, u
 		c, ok, unknown := netOrder(netKeyFor(rk, false), netKeyFor(rk, true), rv, lText)
 		return -c, ok, unknown
 	// A NUMBER column against a QUOTED literal. PostgreSQL types an
-	// unknown-typed literal from the operand it meets, so `k > '2'` over a
-	// BIGINT column is the integer comparison `k > 2` — exact against an
-	// integer, float64 against a float, which is what decimalTextOrder
-	// already states. A literal that names no number answers ok=false here
-	// and falls through; refusing it is #536's rule, not this one's.
-	case lk == boxNumber && rk == boxQuoted:
-		if c, ok := decimalTextOrder(lv, rText); ok {
+	// unknown-typed literal from the operand it meets AND coerces it with that
+	// type's own input function, so `k > '2'` over a BIGINT column is the
+	// integer comparison `k > 2`, `r < '3.1'` over a REAL one compares at REAL
+	// width, and `k > 'abc'` is 22P02 rather than an answer (#646).
+	//
+	// This used to be decimalTextOrder, which read the pair through the DECIMAL
+	// grammar and answered ok=false for text it could not read — so every
+	// unreadable literal fell through to compare() and got a value: `CASE WHEN
+	// int_col < 'NaN'` returned every row, and `f < '3.1'` over a real column
+	// compared at double width.
+	case isNumberKind(lk) && rk == boxQuoted:
+		if c, ok := quotedNumberOrder(numberKindType(lk, lv), lv, rText); ok {
 			return c, true, false
 		}
-	case rk == boxNumber && lk == boxQuoted:
-		if c, ok := decimalTextOrder(rv, lText); ok {
+	case isNumberKind(rk) && lk == boxQuoted:
+		if c, ok := quotedNumberOrder(numberKindType(rk, rv), rv, lText); ok {
 			return -c, true, false
 		}
 	// A BOOL column against a QUOTED literal, in boolean order (FALSE <

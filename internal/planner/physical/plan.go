@@ -1219,9 +1219,22 @@ func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.S
 
 // executeSubquery parses and executes a SQL subquery, returning result rows.
 func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string]any, error) {
+	rows, _, err := p.executeSubquerySchema(ctx, sql)
+	return rows, err
+}
+
+// executeSubquerySchema is executeSubquery with the result's DECLARED SCHEMA
+// alongside the rows.
+//
+// A boxed row value cannot always say what it is — a DECIMAL and a STRING both
+// arrive as a Go string — so a caller that has to re-spell those values (the
+// IN-set materializer, which inlines them into filter TEXT) needs the
+// declaration to tell them apart. That is ADR-0012 item 8's rule applied to
+// the one place the boxing happens on the PLANNER's side of the wire.
+func (p *Planner) executeSubquerySchema(ctx context.Context, sql string) ([]map[string]any, []parquet.Column, error) {
 	source, ops, sink, err := p.buildSubqueryPipeline(ctx, sql)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Ensure a CollectSink — buildPipeline may return nil sink for
@@ -1235,10 +1248,13 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	// Execute
 	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
 	if err := pipeline.Run(ctx); err != nil {
-		return nil, fmt.Errorf("subquery execution error: %w", err)
+		return nil, nil, fmt.Errorf("subquery execution error: %w", err)
 	}
 
-	return collectSink.ToRows(), nil
+	// Schema BEFORE ToRows: the sink keeps its captured schema across that
+	// call, but reading it first keeps the order a local fact.
+	schema := collectSink.Schema()
+	return collectSink.ToRows(), schema, nil
 }
 
 // scalarDeferAll gates deferring ALL uncorrelated scalar filter subqueries
@@ -1361,7 +1377,7 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 			return &plansql.LiteralPlaceholder{Name: name}
 		}
 		start := time.Now()
-		rows, err := p.executeSubquery(ctx, n.SQL)
+		rows, schema, err := p.executeSubquerySchema(ctx, n.SQL)
 		slog.Info("plan-time scalar subquery executed on coordinator",
 			"duration", time.Since(start).Round(time.Millisecond),
 			"rows", len(rows), "error", err != nil)
@@ -1370,7 +1386,8 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		}
 		// Extract scalar value from first row, first column
 		for _, v := range rows[0] {
-			return scalarToLiteral(v)
+			typ, typed := scalarColType(schema)
+			return scalarToLiteral(v, typ, typed)
 		}
 		return node
 
@@ -1492,7 +1509,20 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 }
 
 // scalarToLiteral converts a Go value to an AST literal node.
-func scalarToLiteral(v any) plansql.Node {
+//
+// typ is the value's DECLARED type, for the one box that cannot say what it
+// is: a DECIMAL arrives as its RENDERED TEXT, indistinguishable from a STRING
+// column's value. Spelling it as a QUOTED literal makes it look like something
+// a user wrote, and an unknown-typed literal is coerced with the OTHER
+// operand's input function (ADR-0012 item 13) — so `HAVING COUNT(*) > (SELECT
+// COUNT(*) * 0.3 …)` substituted `'0.0'` and asked bigint's input function to
+// read it, which is 22P02 for a query PostgreSQL answers as numeric. A DECIMAL
+// is spelled as the NUMBER it is, carrying its exact digits (item 6's carrier
+// rule); every other string-boxed type keeps the quoted spelling.
+func scalarToLiteral(v any, typ parquet.TypeID, typed bool) plansql.Node {
+	if s, ok := v.(string); ok && typed && typ == parquet.TypeDecimal {
+		return &plansql.Lit{Value: s, Kind: plansql.LitNumber}
+	}
 	switch val := v.(type) {
 	case float64:
 		return &plansql.Lit{Value: strconv.FormatFloat(val, 'f', -1, 64), Kind: plansql.LitNumber}
@@ -1507,6 +1537,16 @@ func scalarToLiteral(v any) plansql.Node {
 	default:
 		return &plansql.Lit{Value: fmt.Sprint(v), Kind: plansql.LitNumber}
 	}
+}
+
+// scalarColType is a single-column result schema's declared type, and
+// typed=false when the schema does not name exactly one column (nothing to
+// disambiguate a box with).
+func scalarColType(schema []parquet.Column) (parquet.TypeID, bool) {
+	if len(schema) != 1 {
+		return 0, false
+	}
+	return schema[0].Type, true
 }
 
 // AnnotateScanColumns walks the logical plan tree and populates ScanColumns
@@ -5834,14 +5874,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 						// correctness for CTE-drift cases but keeps the query
 						// running rather than failing outright.
 						start := time.Now()
-						rows, sErr := p.executeSubquery(p.planCtx, d.SubquerySQL)
+						rows, schema, sErr := p.executeSubquerySchema(p.planCtx, d.SubquerySQL)
 						slog.Warn("scalar producer emission failed; executed subquery on coordinator",
 							"duration", time.Since(start).Round(time.Millisecond),
 							"emit_error", err, "exec_error", sErr)
 						spliced := false
 						if sErr == nil && len(rows) > 0 {
+							typ, typed := scalarColType(schema)
 							for _, v := range rows[0] {
-								lit := scalarToLiteral(v).String()
+								lit := scalarToLiteral(v, typ, typed).String()
 								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, lit)
 								spliced = true
 								break

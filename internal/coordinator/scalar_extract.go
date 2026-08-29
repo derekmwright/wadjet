@@ -106,6 +106,16 @@ func scalarFromBatches(batches []*batch.RecordBatch, projection []physical.Outpu
 				row = int(b.Sel[0])
 			}
 			v := compiled.Eval(b, row)
+			// A DECIMAL result boxes as its TEXT, which formatGoValue would
+			// QUOTE — and a quoted literal is coerced with the OTHER operand's
+			// input function when the worker re-parses this filter (ADR-0012
+			// item 13). `HAVING COUNT(*) > (SELECT COUNT(*) * 0.3 …)` therefore
+			// substituted `'0.0'` and asked bigint to read it, which is 22P02
+			// for a query PostgreSQL answers as numeric. The DECLARATION says
+			// which it is; the box cannot (item 8).
+			if s, ok := v.(string); ok && expr.ResultIsDecimalText(compiled, b) {
+				return s, true
+			}
 			return formatGoValue(v), true
 		}
 	}

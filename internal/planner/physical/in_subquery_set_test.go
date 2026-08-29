@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // A materialized IN-set rides the filter as TEXT, so every value has to
@@ -49,7 +50,9 @@ func TestInSetLiteralsSurviveTheRoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			lit, ok := inSetLiteral(tc.in)
+			// An UNTYPED set: every case above renders from its box alone.
+			// The DECIMAL cases below are the ones that need the declaration.
+			lit, ok := inSetLiteral(tc.in, 0, false)
 			if !ok {
 				t.Fatalf("inSetLiteral(%#v) declined a value it should render", tc.in)
 			}
@@ -60,6 +63,57 @@ func TestInSetLiteralsSurviveTheRoundTrip(t *testing.T) {
 			}
 			// The round trip: what the worker will parse must be the same
 			// expression, not merely a parseable one.
+			reparsed, err := plansql.ParseExpression(got)
+			if err != nil {
+				t.Fatalf("the rendered predicate does not re-parse: %v\n  text: %s", err, got)
+			}
+			if back := reparsed.String(); back != tc.want {
+				t.Errorf("re-parsed to %q, want %q — the value changed meaning in the text", back, tc.want)
+			}
+		})
+	}
+}
+
+// A DECIMAL set value is spelled as the NUMBER it is, not as a quoted string
+// (#646). It boxes as its RENDERED TEXT, indistinguishable from a STRING
+// column's value, and a quoted literal is coerced with the PROBE column's own
+// input function when the worker re-parses this filter — so `bigint IN (SELECT
+// numeric)` inlined "2.00" as a quoted string and asked bigint's input
+// function to read it, which is 22P02 for a query PostgreSQL answers as a
+// numeric comparison. The declaration decides (ADR-0012 item 8); the box
+// cannot.
+//
+// The exact digits travel, which is item 6's carrier rule: a set value the
+// column's scale renders with trailing zeros must re-parse as the same number.
+func TestInSetLiteralSpellsADecimalAsANumber(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   any
+		typ  parquet.TypeID
+		want string
+	}{
+		{"decimal", "2.00", parquet.TypeDecimal, "x in (2.00)"},
+		{"decimal negative", "-12.7500", parquet.TypeDecimal, "x in (-12.7500)"},
+		{"decimal wide", "493827160549382.7160549350", parquet.TypeDecimal,
+			"x in (493827160549382.7160549350)"},
+		// Every other string-boxed type keeps the QUOTED spelling, which is
+		// its own value's spelling: a STRING that happens to look numeric is
+		// still a string, and an address is still an address.
+		{"string that looks numeric", "2.00", parquet.TypeString, "x in ('2.00')"},
+		{"cidr", "10.0.0.0/8", parquet.TypeCIDR, "x in ('10.0.0.0/8')"},
+		{"uuid", "0b7b2b2e-0000-0000-0000-000000000000", parquet.TypeUUID,
+			"x in ('0b7b2b2e-0000-0000-0000-000000000000')"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lit, ok := inSetLiteral(tc.in, tc.typ, true)
+			if !ok {
+				t.Fatalf("inSetLiteral(%#v, %v) declined", tc.in, tc.typ)
+			}
+			e := &plansql.InExpr{Left: &plansql.ColRef{Column: "x"}, Values: []plansql.Node{lit}}
+			got := e.String()
+			if got != tc.want {
+				t.Fatalf("rendered %q, want %q", got, tc.want)
+			}
 			reparsed, err := plansql.ParseExpression(got)
 			if err != nil {
 				t.Fatalf("the rendered predicate does not re-parse: %v\n  text: %s", err, got)
@@ -92,7 +146,7 @@ func TestInSetLiteralRefusesWhatItCannotSpell(t *testing.T) {
 		float32(1.5),
 		float32(0.1),
 	} {
-		if lit, ok := inSetLiteral(v); ok {
+		if lit, ok := inSetLiteral(v, 0, false); ok {
 			t.Errorf("inSetLiteral(%T) rendered %q instead of refusing", v, lit.String())
 		}
 	}

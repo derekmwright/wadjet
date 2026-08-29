@@ -1654,6 +1654,14 @@ func (e *IsDistinctFrom) EvalBool(b *batch.RecordBatch, row int) bool {
 func (e *IsDistinctFrom) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	lv := e.Left.Eval(b, row)
 	rv := e.Right.Eval(b, row)
+	a := e.armed()
+	// The refusal runs BEFORE the NULL cases, for the reason evalNullIf runs
+	// it first: it is a property of the operand pair's DECLARATIONS, not of
+	// this row's values. PostgreSQL coerces the unknown-typed literal at parse
+	// analysis, so `NULL IS DISTINCT FROM 'abc'` over a double column is 22P02
+	// there — and leaving it in the default arm meant a column whose rows are
+	// all NULL answered instead (#646).
+	a.refuse.check(b)
 	var distinct bool
 	switch {
 	case lv == nil && rv == nil:
@@ -1674,8 +1682,6 @@ func (e *IsDistinctFrom) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 		// `d_2 IS DISTINCT FROM d_4` compared them LEXICOGRAPHICALLY and
 		// called two spellings of one number distinct (#506). The pair is
 		// bound from the operands' declarations instead.
-		a := e.armed()
-		a.refuse.check(b)
 		distinct = !a.pair.compare(b, lv, rv, CmpEq)
 	}
 	if e.Not {
@@ -2907,7 +2913,7 @@ func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
 	// BEFORE the NULL short-circuit for the reason the other sites run it
 	// first: the refusal is a property of the operand PAIR's DECLARATIONS,
 	// not of the row's values (ADR-0012 item 6's neighbourhood).
-	arms.refuse.check(b, 0, 1)
+	arms.refuse.check(b)
 	if args[0] == nil || args[1] == nil {
 		return args[0]
 	}
@@ -2971,6 +2977,15 @@ func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
 // DECIMAL/number pair — from the arguments' declarations; anything it declines
 // falls through to the literal-side carry-through, exactly as before.
 func pickExtremum(b *batch.RecordBatch, args []any, op CmpOp, arms *extremumArms) any {
+	// The refusal runs BEFORE the loop, because it is a property of the call's
+	// arguments and not of the pairs the values happen to select. Firing it
+	// inside the loop is what made `GREATEST(k, 'abc', d)` raise and
+	// `LEAST(k, 'abc', d)` answer on the same three arguments (#517), and it
+	// also skipped a call with fewer than two non-NULL arguments entirely,
+	// where PostgreSQL still raises.
+	if arms != nil {
+		arms.refuse.check(b)
+	}
 	var best any
 	bestIdx := -1
 	for i, a := range args {
@@ -2983,7 +2998,6 @@ func pickExtremum(b *batch.RecordBatch, args []any, op CmpOp, arms *extremumArms
 		}
 		better := false
 		if arms != nil {
-			arms.refuse.check(b, bestIdx, i)
 			c, ok, unknown := arms.order(b, i, bestIdx, a, best)
 			switch {
 			case unknown:
