@@ -404,6 +404,15 @@ func setOpCheckedDecimalText(v any, name string, precision, scale int) (any, err
 	if !ok {
 		return v, nil
 	}
+	// NaN and the infinities are a value with no carrier, not unreadable text,
+	// and they take 22003 here for the same reason and with the same wording
+	// batch.ParseDecimalStringChecked gives them (#534, ADR-0024 item 6). One
+	// classification for the two value-producing readers: routing them
+	// through the 22P02 below would answer a different SQLSTATE than the
+	// checked writer does for the identical text.
+	if err := batch.DecimalSpecialValueError(s); err != nil {
+		return nil, err
+	}
 	sd, textOK := batch.DecimalTextAt(s, scale)
 	if !textOK {
 		return nil, sqlerr.New("22P02", "invalid input syntax for type numeric: %q", s)

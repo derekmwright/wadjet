@@ -152,6 +152,10 @@ holds no NaN (0 rows, all rows, all rows); `ORDER BY` needs nothing.
 message naming this record. Same for the infinities. A documented divergence:
 wadjet can compare against a NaN it cannot store.
 
+The value half of that rule reaches only the CHECKED reader so far — see the
+implementation note below for which sites it covers today and which two do
+not.
+
 **Implemented 2026-08-29 (#534).** The mechanism is the one the carrier
 already had: `ScaledDecimal.Sat`, the flag a finite literal wider than Int128
 sets so it orders past every value the column can hold (#462). NaN and
@@ -161,7 +165,21 @@ order puts them relative to anything a DECIMAL column can hold, so its
 the comparison reader (specials, then `DecimalTextAt`) and the ONLY one that
 accepts them: `DecimalTextAt` still refuses, so nothing value-producing can
 reach a bound by accident, and `ParseDecimalStringChecked` turns the three
-into the `22003` above. One predicate serves both refusal sites — the plan-time
+into the `22003` above.
+
+**What the 22003 covers today, and what it does not.** It covers every site
+that produces a value through the checked reader: `ParseDecimalStringChecked`,
+`Vector.SetValueChecked`, `FromRowsChecked`, and through them the
+single-process set-operation adapter. `physical.setOpCheckedDecimalText`
+classifies through the same function, so the DAG's arm agrees. Two sites do
+NOT, and this record does not claim them: `CAST(x AS DECIMAL(p,s))` is still
+item 1's declared-STRING no-op — `CAST('NaN' AS DECIMAL(9,2))` yields the
+string "NaN", `CAST('Infinity' AS DECIMAL(9,2))` the string "Infinity" (where
+PostgreSQL raises 22003), and `CAST('NaN' AS DECIMAL)` a float64 NaN — until
+the CAST evaluator lands (#555); and the UNCHECKED ingest writer
+(`ParseDecimalString` via `Vector.SetValue`) stores 0 for all three exactly as
+it does for `'abc'`, which is item 4's unchecked-writer residual over the whole
+type rather than anything specific to these values. One predicate serves both refusal sites — the plan-time
 one (`physical.refuseLiteralForType` → `expr.IsNumericLiteralText`) and the
 runtime one (`kernel.DecimalLiteral.Numeric`) — so the accept-set cannot
 differ between them; the row-group prune withholds for these literals

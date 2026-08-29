@@ -2,10 +2,15 @@ package wadjet
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // #534 / ADR-0024 item 6: a DECIMAL column compared against 'NaN',
@@ -237,79 +242,171 @@ func TestUnaryMinusOverANaNLiteralIsStillRefused(t *testing.T) {
 		"SELECT COUNT(*) AS n FROM declit WHERE k = 99 AND d_2 = -'43219.87'", 1)
 }
 
-// TestFloatColumnsKeepTheirOwnNaNRule is the parity control for #534. FLOAT32
-// and FLOAT64 DO hold NaN and the infinities, so their comparison against
-// these literals is PostgreSQL's FLOAT order (ADR-0012 item 8) — NaN equal to
-// itself and above every other value, -Infinity below every one — which is a
-// different rule from the DECIMAL bound above, reached through different code
-// (`kernel.CompareFloat64`, never `batch.DecimalBoundTextAt`). Nothing here
-// may move when the DECIMAL accept-set widens.
+// fnegOpen is a float fixture with NEGATIVE values in it, which the type
+// matrix does not have: c_f64 is float64(i)/3 and c_f32 is float32(i)/7, both
+// non-negative on every row.
 //
-// The type matrix holds no NaN in either float column, so PostgreSQL's answers
-// over it are the same SHAPE as the decimal ones: `= 'NaN'` finds nothing and
-// `< 'NaN'` finds every non-NULL row.
+// The sign is what makes the test below able to fail. Every finite float
+// renders starting with a digit or '-', and only a NEGATIVE rendering ("-5")
+// sorts BELOW the "-Infinity" of a LEXICOGRAPHIC comparison — so over a
+// non-negative column the correct float answer and the wrong text answer are
+// the SAME row set for `> '-Infinity'`, and a gate written on one would gate
+// nothing. It carries a DECIMAL column at the same values so the two rules can
+// be asked side by side on identical numbers.
+func fnegOpen(t *testing.T) *DB {
+	t.Helper()
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "f", Type: parquet.TypeFloat64, Nullable: true},
+		{Name: "r", Type: parquet.TypeFloat32, Nullable: true},
+		{Name: "d", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "fneg", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	dec := func(v int64) parquet.Decimal128 {
+		hi := int64(0)
+		if v < 0 {
+			hi = -1
+		}
+		return parquet.Decimal128{Hi: hi, Lo: uint64(v)}
+	}
+	rows := []map[string]any{
+		{"k": int64(0), "f": float64(-5), "r": float32(-5), "d": dec(-500)},
+		{"k": int64(1), "f": float64(-0.5), "r": float32(-0.5), "d": dec(-50)},
+		{"k": int64(2), "f": float64(0), "r": float32(0), "d": dec(0)},
+		{"k": int64(3), "f": float64(0.5), "r": float32(0.5), "d": dec(50)},
+		{"k": int64(4), "f": float64(5), "r": float32(5), "d": dec(500)},
+		{"k": int64(5)},
+	}
+	ing := db.NewIngester("fneg", schema, nil, ingest.Config{MaxBufferRows: 16})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+// TestFloatColumnsKeepTheirOwnNaNRule is the parity control for #534, and it
+// is a DIFFERENT rule from the DECIMAL one. FLOAT32 and FLOAT64 HOLD NaN and
+// the infinities, so a comparison against one of them is an ordinary float
+// comparison in PostgreSQL's float order (ADR-0012 item 8) — not the bound a
+// DECIMAL column gets, which exists only because that carrier has no such
+// value.
+//
+// The row-at-a-time path applies it through kernel.FloatSpecialText and
+// kernel.CompareFloat64. It did NOT before this change: expr.
+// decimalTextOrderFloat gated on batch.DecimalTextAt, which refuses all three,
+// so boxedPair.order fell through to compare()'s LEXICOGRAPHIC string
+// comparison — right on every non-negative column and wrong on this one.
+//
+// Every row set is live postgres:17-alpine (17.11) on the identical six rows.
 func TestFloatColumnsKeepTheirOwnNaNRule(t *testing.T) {
 	ctx := context.Background()
-	db := tmOpen(t)
+	db := fnegOpen(t)
 
-	// c_f64 is NULL every 41st row of 5000 and c_f32 every 37th.
-	const (
-		f64NonNull = 4879
-		f32NonNull = 4865
-	)
-
-	// The ROW-AT-A-TIME path, which a CASE forces. It reads the quoted
-	// literal as a float64 and orders it by PostgreSQL's float rule, so these
-	// are PostgreSQL's own answers.
+	// The row-at-a-time path, which a CASE forces. -Infinity is the shape
+	// that discriminates: rows 0 and 1 are negative and a text comparison
+	// drops them.
 	for _, tc := range []struct {
 		pred string
-		want int64
+		want []int64
 	}{
-		{"CASE WHEN c_f64 = 'NaN' THEN 1 ELSE 0 END = 1", 0},
-		{"CASE WHEN c_f64 < 'NaN' THEN 1 ELSE 0 END = 1", f64NonNull},
-		{"CASE WHEN c_f64 > 'NaN' THEN 1 ELSE 0 END = 1", 0},
-		{"CASE WHEN c_f64 > '-Infinity' THEN 1 ELSE 0 END = 1", f64NonNull},
-		{"CASE WHEN c_f64 <= 'Infinity' THEN 1 ELSE 0 END = 1", f64NonNull},
-		{"CASE WHEN c_f32 = 'NaN' THEN 1 ELSE 0 END = 1", 0},
-		{"CASE WHEN c_f32 < 'NaN' THEN 1 ELSE 0 END = 1", f32NonNull},
+		{"CASE WHEN f > '-Infinity' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN f < '-Infinity' THEN 1 ELSE 0 END = 1", nil},
+		{"CASE WHEN f >= '-Infinity' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN f < 'NaN' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN f = 'NaN' THEN 1 ELSE 0 END = 1", nil},
+		{"CASE WHEN f <= 'Infinity' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN f > 'Infinity' THEN 1 ELSE 0 END = 1", nil},
+		// float4, the same shapes.
+		{"CASE WHEN r > '-Infinity' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN r < 'NaN' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		// A SIGNED NaN is where the FLOAT grammar and the NUMERIC one part:
+		// float8 reads '+NaN' and '-NaN' as NaN, numeric refuses both with
+		// 22P02. So these ANSWER here and stay refused against a DECIMAL.
+		{"CASE WHEN f < '+NaN' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN f < '-NaN' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN f < ' nan ' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		// The DECIMAL column at the SAME values takes the bound rule and
+		// answers the same row set — the two rules agree over a column
+		// holding no special, which is the whole of ADR-0024 item 6.
+		{"d > '-Infinity'", []int64{0, 1, 2, 3, 4}},
+		{"CASE WHEN d > '-Infinity' THEN 1 ELSE 0 END = 1", []int64{0, 1, 2, 3, 4}},
+		{"d < 'NaN'", []int64{0, 1, 2, 3, 4}},
 	} {
 		t.Run(tc.pred, func(t *testing.T) {
-			res, err := tmRun(ctx, db, "SELECT COUNT(*) AS n FROM typemx WHERE "+tc.pred)
-			if err != nil {
-				t.Fatalf("%s: %v", tc.pred, err)
-			}
-			if got, _ := tmAsInt64(res.Rows[0][res.Columns[0]]); got != tc.want {
-				t.Errorf("%s = %d, want %d (live PostgreSQL 17's float rule)", tc.pred, got, tc.want)
-			}
+			fnegRows(t, ctx, db, tc.pred, tc.want)
 		})
 	}
 
-	// The BARE forms take the vectorized float kernel, whose constant
-	// coercion still reads ANY string as 0.0 — the float arm of #536, tracked
-	// as #646 and pinned in the pg-oracle corpus. They are asserted here at
-	// the values they answered BEFORE #534, because the point of this test is
-	// that the DECIMAL widening did not reach them. When #646 lands these
-	// become PostgreSQL's answers above and this block fails — the same
-	// ratchet the corpus pin uses, and deleting it is that fix's proof.
+	// The BARE float forms take the vectorized float kernel, which still
+	// reads ANY quoted constant as 0.0 — the float arm of #536, tracked as
+	// #646 and pinned in the pg-oracle corpus (RealColumnGtNegInfinity).
+	// They are asserted at the values they answer TODAY, because the point of
+	// this block is that neither #534 nor the row-path fix above reached
+	// them. When #646 lands these become the row sets above and this block
+	// fails — the same ratchet the corpus pin uses, and deleting it is that
+	// fix's proof.
 	for _, tc := range []struct {
 		pred string
-		want int64
+		want []int64
 	}{
-		{"c_f64 = 'NaN'", 1},          // the row holding 0.0, matched against 0.0
-		{"c_f64 < 'NaN'", 0},          // asks `< 0.0` over a non-negative column
-		{"c_f64 > '-Infinity'", 4878}, // asks `> 0.0`, so the 0.0 row drops out
-		{"c_f32 < 'NaN'", 0},
+		{"f > '-Infinity'", []int64{3, 4}}, // asks '> 0.0'
+		{"f < 'NaN'", []int64{0, 1}},       // asks '< 0.0'
+		{"r > '-Infinity'", []int64{3, 4}},
 	} {
-		t.Run("pinned_"+tc.pred, func(t *testing.T) {
-			res, err := tmRun(ctx, db, "SELECT COUNT(*) AS n FROM typemx WHERE "+tc.pred)
-			if err != nil {
-				t.Fatalf("%s: %v", tc.pred, err)
-			}
-			if got, _ := tmAsInt64(res.Rows[0][res.Columns[0]]); got != tc.want {
-				t.Errorf("%s = %d, want %d — this arm is #536's, and #534 must not have moved it",
-					tc.pred, got, tc.want)
-			}
+		t.Run("pinned_646_"+tc.pred, func(t *testing.T) {
+			fnegRows(t, ctx, db, tc.pred, tc.want)
 		})
+	}
+
+	// ARITHMETIC over a DECIMAL leaves the exact carrier for a float64 and
+	// the result carries no declaration, so boxedPair can select no rule and
+	// the comparison falls to compare()'s text rendering: `d + 0 >
+	// '-Infinity'` drops the negative rows where PostgreSQL keeps them. That
+	// is ADR-0012 item 6's recorded limit ("arithmetic over DECIMAL goes
+	// through float64 before any comparison sees it") meeting #555's untyped
+	// computed DECIMAL, not a rule this change decides; pinned here so it is
+	// visible rather than assumed.
+	t.Run("pinned_555_arithmetic_over_decimal", func(t *testing.T) {
+		fnegRows(t, ctx, db, "d + 0 > '-Infinity'", []int64{2, 3, 4}) // PostgreSQL: 0 1 2 3 4
+	})
+}
+
+// fnegRows asserts the exact k values a predicate selects over fneg, with the
+// row-group prune both on and off.
+func fnegRows(t *testing.T, ctx context.Context, db *DB, pred string, want []int64) {
+	t.Helper()
+	sql := "SELECT k FROM fneg WHERE " + pred + " ORDER BY k"
+	for _, prune := range []bool{true, false} {
+		prevStats := scan.StatsPrune.Set(prune)
+		prevDict := scan.DictPrune.Set(prune)
+		res, err := tmRun(ctx, db, sql)
+		scan.StatsPrune.Set(prevStats)
+		scan.DictPrune.Set(prevDict)
+		if err != nil {
+			t.Fatalf("prune=%v: %s: %v", prune, sql, err)
+		}
+		got := make([]int64, 0, len(res.Rows))
+		for _, r := range res.Rows {
+			v, ok := tmAsInt64(r["k"])
+			if !ok {
+				t.Fatalf("prune=%v: k came back as %#v", prune, r["k"])
+			}
+			got = append(got, v)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("prune=%v: %s\n  got %v, want %v", prune, sql, got, want)
+		}
 	}
 }
 

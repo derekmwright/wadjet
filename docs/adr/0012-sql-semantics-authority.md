@@ -309,11 +309,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      PostgreSQL's order over a column that holds none of them (0 rows, every
      non-NULL row, every non-NULL row, every non-NULL row), resolved through
      the same `ScaledDecimal.Sat` bound item 6 gives a finite literal wider
-     than the carrier; and `CAST('NaN' AS DECIMAL)` as a VALUE, or ingesting
-     one, is 22003 with a message naming ADR-0024. PostgreSQL raises that same
-     22003 for the infinities against a constrained `numeric(p,s)` ("cannot
-     hold an infinite value", verified live); NaN it stores, and refusing that
-     is the divergence. The accepted spellings are PostgreSQL's own input
+     than the carrier.
+
+     As a VALUE the three are refused with 22003 and a message naming
+     ADR-0024, at the sites that produce one through the CHECKED reader:
+     `batch.ParseDecimalStringChecked` and everything above it —
+     `Vector.SetValueChecked`, `FromRowsChecked`, and through them the
+     single-process set-operation adapter. PostgreSQL raises that same 22003
+     for the infinities against a constrained `numeric(p,s)` ("cannot hold an
+     infinite value", verified live); NaN it stores, and refusing that is the
+     divergence. Two sites do NOT reach that reader yet and are recorded
+     rather than claimed: `CAST(x AS DECIMAL(p,s))` is still ADR-0024 item 1's
+     declared-STRING no-op, so `CAST('NaN' AS DECIMAL(9,2))` yields the string
+     "NaN" and `CAST('NaN' AS DECIMAL)` a float64 NaN until the CAST evaluator
+     lands (#555); and the UNCHECKED ingest writer (`batch.ParseDecimalString`
+     via `Vector.SetValue`) stores 0 for them exactly as it does for `'abc'` —
+     ADR-0024 item 4's unchecked-writer residual, which is a property of the
+     whole type and not of these three. The accepted spellings are PostgreSQL's own input
      grammar and nothing wider — case-insensitive `nan` with NO sign,
      case-insensitive `infinity`/`inf` with an optional adjacent sign, C
      whitespace trimmed — so `'+NaN'`, `'Infin'` and `'abc'` all stay 22P02.

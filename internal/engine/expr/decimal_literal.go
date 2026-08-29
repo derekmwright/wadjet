@@ -646,12 +646,33 @@ func decimalTextOrderInt(v int64, text string) (int, bool) {
 }
 
 func decimalTextOrderFloat(v float64, text string) (int, bool) {
+	// NaN and ±Infinity FIRST, because a FLOAT column holds all three and its
+	// rule for them is the ordinary float one — kernel.CompareFloat64, which
+	// IS PostgreSQL's float order (ADR-0012 item 8). This is the arm a quoted
+	// literal against a FLOAT column takes (boxNumber vs boxQuoted), and
+	// falling through to the shape test below sent it to compare()'s
+	// LEXICOGRAPHIC string comparison, which agrees with PostgreSQL only when
+	// every value happens to be non-negative: over {-5, 0, 5},
+	// `f > '-Infinity'` dropped the two negative rows because "-5" sorts
+	// below "-Infinity" as text. The DECIMAL rule is the DIFFERENT one and is
+	// applied elsewhere (#534/ADR-0024 item 6): there the literal is a BOUND,
+	// because the carrier has no such value to compare against.
+	//
+	// kernel.FloatSpecialText, not batch.DecimalSpecialText: float8 accepts a
+	// SIGNED NaN and numeric does not, and that difference is PostgreSQL's.
+	if f, ok := kernel.FloatSpecialText(text); ok {
+		return kernel.CompareFloat64(v, f), true
+	}
 	// The numeric SHAPE is settled by the same parser the exact arm uses, so
 	// the two agree about which strings are numbers at all: strconv.ParseFloat
-	// alone would accept "NaN" and "Inf", which no DECIMAL column renders.
+	// alone would accept "NaN" and "Inf", which no DECIMAL column renders —
+	// and which the arm above has already answered for.
 	if _, ok := batch.DecimalTextAt(text, 0); !ok {
 		return 0, false
 	}
+	// TrimSpace is safe here only because the gate above already refused
+	// anything whose surrounding space is not PostgreSQL's C set: everything
+	// that reaches this line trims identically under both rules.
 	f, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
 	if err != nil {
 		return 0, false

@@ -252,3 +252,46 @@ func TestParseDecimalStringCheckedRefusesTheSpecialsAs22003(t *testing.T) {
 		t.Errorf(`ParseDecimalStringChecked("12.75", 2) = %v, %v`, got, err)
 	}
 }
+
+// TestDecimalReadersTrimPostgresWhitespaceOnly is #534's review finding R1.
+//
+// PostgreSQL's numeric input skips C isspace() — space, tab, newline, vertical
+// tab, form feed, carriage return — and nothing else, so a NO-BREAK SPACE
+// (U+00A0) before the digits is a non-whitespace byte it refuses with 22P02
+// (verified live on postgres:17-alpine, and already pinned for the integer
+// types by the wire oracle's IntegerNBSPConstant). decimalParts used
+// strings.TrimSpace, which strips the Unicode set: `d = '<NBSP>43219.87'`
+// resolved to the number and ANSWERED the row PostgreSQL refuses the query
+// for. The three readers built on decimalParts move together.
+func TestDecimalReadersTrimPostgresWhitespaceOnly(t *testing.T) {
+	const nbsp = "\u00a0"
+	for _, text := range []string{
+		nbsp + "12.75",
+		"12.75" + nbsp,
+		"\u2007" + "12.75", // FIGURE SPACE, another Unicode-only space
+		"\u3000" + "12.75", // IDEOGRAPHIC SPACE
+	} {
+		if _, ok := DecimalTextAt(text, 2); ok {
+			t.Errorf("DecimalTextAt(%q) accepted a Unicode-only space PostgreSQL refuses", text)
+		}
+		if _, ok := DecimalBoundTextAt(text, 2); ok {
+			t.Errorf("DecimalBoundTextAt(%q) accepted a Unicode-only space PostgreSQL refuses", text)
+		}
+		if _, ok := CompareDecimalTexts(text, "1.5"); ok {
+			t.Errorf("CompareDecimalTexts(%q, ...) accepted a Unicode-only space", text)
+		}
+	}
+	// PostgreSQL's own six bytes are still stripped, at both ends and mixed.
+	for _, text := range []string{" 12.75", "12.75 ", "\t12.75\n", "\v\f\r12.75 "} {
+		if _, ok := DecimalTextAt(text, 2); !ok {
+			t.Errorf("DecimalTextAt(%q) refused PostgreSQL's own whitespace", text)
+		}
+	}
+	// And on the specials, whose reader shares the cutset.
+	if DecimalSpecialText(nbsp+"NaN") != DecimalFinite {
+		t.Error("DecimalSpecialText accepted a NBSP-prefixed NaN PostgreSQL refuses")
+	}
+	if DecimalSpecialText(" NaN\t") != DecimalNaN {
+		t.Error("DecimalSpecialText refused PostgreSQL's own whitespace around NaN")
+	}
+}

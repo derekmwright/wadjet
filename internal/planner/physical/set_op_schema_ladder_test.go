@@ -337,3 +337,67 @@ func TestSetOpDecimalFitsPrecisionChecksThe38DigitBound(t *testing.T) {
 		t.Error("an unconstrained declaration has no bound to check")
 	}
 }
+
+// TestSetOpDecimalTextRefusesTheSpecialsWithOneSQLSTATE is #534's review
+// finding R4: two value-producing readers, one classification.
+//
+// batch.ParseDecimalStringChecked answers 22003 for a NaN/±Infinity spelling —
+// PostgreSQL reads all three as `numeric` VALUES, so the text is not an
+// input-syntax error but a value this carrier has no bit pattern for
+// (ADR-0024 item 6). This site read the same text through DecimalTextAt, which
+// does not know them, and fell into its 22P02 arm: the identical box reaching
+// the identical column answered a different SQLSTATE depending on which of the
+// two readers saw it, which a client branching on the code cannot see past.
+// Both now classify through batch.DecimalSpecialValueError.
+func TestSetOpDecimalTextRefusesTheSpecialsWithOneSQLSTATE(t *testing.T) {
+	dst := decCol("v", 38, 10)
+	for _, text := range []string{"NaN", "nan", " NaN ", "Infinity", "inf", "+Infinity", "-Infinity", "-inf"} {
+		t.Run(text, func(t *testing.T) {
+			_, err := setOpCheckedDecimalText(text, "v", dst.Precision, dst.Scale)
+			if err == nil {
+				t.Fatalf("%q was accepted as a stored value; the carrier has no bit pattern for it", text)
+			}
+			if got := sqlerr.StateOf(err); got != "22003" {
+				t.Errorf("SQLSTATE = %q, want 22003 — batch.ParseDecimalStringChecked answers 22003 "+
+					"for this same text; err = %v", got, err)
+			}
+			if !strings.Contains(err.Error(), "ADR-0024 item 6") {
+				t.Errorf("error does not name the record that decided it: %v", err)
+			}
+
+			// The two readers must agree, which is the actual invariant: the
+			// same text through the checked writer's reader.
+			_, cerr := batch.ParseDecimalStringChecked(text, dst.Scale)
+			if cerr == nil || sqlerr.StateOf(cerr) != sqlerr.StateOf(err) {
+				t.Errorf("the two value readers disagree on %q: set-op %v / checked %v", text, err, cerr)
+			}
+
+			// And through the adapter, which is how a real query reaches it.
+			rows := []map[string]any{{"v": text}}
+			_, aerr := coerceSetOpArmRows(rows, []parquet.Column{decCol("v", 38, 0)}, []parquet.Column{dst})
+			if aerr == nil {
+				t.Errorf("coerceSetOpArmRows accepted %q as a stored value", text)
+			} else if got := sqlerr.StateOf(aerr); got != "22003" {
+				t.Errorf("adapter SQLSTATE = %q, want 22003; err = %v", got, aerr)
+			}
+		})
+	}
+
+	// The boundary: text that names no number at all stays 22P02 on both, and
+	// a spelling PostgreSQL's numeric refuses is that case, not a special.
+	for _, text := range []string{"abc", "+NaN", "-NaN", "Infin", "infinit"} {
+		_, err := setOpCheckedDecimalText(text, "v", dst.Precision, dst.Scale)
+		if err == nil {
+			t.Errorf("%q was accepted as a stored value", text)
+			continue
+		}
+		if got := sqlerr.StateOf(err); got != "22P02" {
+			t.Errorf("%q: SQLSTATE = %q, want 22P02; err = %v", text, got, err)
+		}
+	}
+
+	// An ordinary in-range value is untouched.
+	if got, err := setOpCheckedDecimalText("12.75", "v", dst.Precision, dst.Scale); err != nil || got != "12.75" {
+		t.Errorf(`setOpCheckedDecimalText("12.75") = %v, %v`, got, err)
+	}
+}

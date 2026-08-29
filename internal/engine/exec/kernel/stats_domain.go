@@ -252,7 +252,11 @@ func decimalStatsValue(v any, scale int) (any, bool) {
 		}
 		text = strconv.FormatFloat(float64(tv), 'f', -1, 32)
 	case string:
-		text = strings.TrimSpace(tv)
+		// pgIntWhitespace, not strings.TrimSpace: the prune and the filter
+		// must read one predicate the same way (ADR-0012 item 6), and the
+		// filter's reader (batch.decimalParts) strips PostgreSQL's C
+		// whitespace only — a NBSP-prefixed constant is 22P02 there.
+		text = strings.Trim(tv, pgIntWhitespace)
 	default:
 		return nil, false
 	}

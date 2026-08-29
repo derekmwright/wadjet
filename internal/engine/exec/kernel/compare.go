@@ -522,9 +522,20 @@ func toBytesString(v any) string {
 // must still exclude the row holding exactly 2499.5074, which comparing
 // against the truncated constant alone would admit.
 //
-// The literal is resolved per CALL, not per row and not once at resolve time:
-// the vector carries the scale, and a kernel resolved from one batch can be
-// handed the next one.
+// The literal cannot be resolved once at RESOLVE time — the scale comes off
+// the vector, and a kernel resolved from one batch can be handed the next one
+// — so it is memoized BY SCALE inside the closure, the way inFilterDecimal
+// memoizes its set for the same reason. A column's scale does not change
+// across the batches of one query, so the parse runs once and every later
+// batch reads two fields.
+//
+// Unsynchronized deliberately, on inFilterDecimal's own argument and for the
+// same reason: the single caller is KernelFilter.Execute, and
+// KernelFilter.Clone returns a fresh KernelFilter with `kern` nil, so every
+// parallel worker resolves its own closure. That is already required by the
+// operator's other per-instance scratch (`outSel`); this adds no new
+// constraint. It is NOT ColumnCompare's predicate, which Filter.Clone DOES
+// share and which is why that one carries no mutable state at all.
 func compareFilterDecimal(op CompareOp, value any) FilterKernel {
 	text, ok := DecimalConstText(value)
 	if !ok {
@@ -532,8 +543,14 @@ func compareFilterDecimal(op CompareOp, value any) FilterKernel {
 		// nil kernel into the query error PostgreSQL raises (#463).
 		return nil
 	}
+	var memoLit batch.ScaledDecimal
+	memoScale := -1
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
-		lit := decimalLiteralAt(text, vec.DecimalData.Scale)
+		scale := vec.DecimalData.Scale
+		if memoScale != scale {
+			memoLit, memoScale = decimalLiteralAt(text, scale), scale
+		}
+		lit := memoLit
 		data := vec.DecimalData.Data
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()

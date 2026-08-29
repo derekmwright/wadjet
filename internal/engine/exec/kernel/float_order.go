@@ -317,3 +317,79 @@ func KeyFloat64Bits(f float64) uint64 { return math.Float64bits(CanonicalFloat64
 
 // KeyFloat32Bits is KeyFloat64Bits for float32.
 func KeyFloat32Bits(f float32) uint32 { return math.Float32bits(CanonicalFloat32(f)) }
+
+// FloatSpecialText reads the NaN/±Infinity spellings PostgreSQL's FLOAT input
+// accepts, and reports ok=false for everything else — including ordinary
+// numbers, which are the caller's own business.
+//
+// It is deliberately a second reader beside batch.DecimalSpecialText, because
+// the two grammars differ in one place and that place is observable: float8
+// accepts a SIGNED NaN (`'+NaN'::float8` and `'-NaN'::float8` are both NaN)
+// where numeric refuses it with 22P02. Verified live on postgres:17-alpine
+// (17.11) for both float8 and float4; everything else matches — case
+// insensitive, C whitespace stripped, `inf` and `infinity` with an optional
+// adjacent sign, and no prefix matching (`Infin`, `infinit`, `infinityy` and
+// `- inf` are all refused).
+//
+// The VALUE returned is the ordinary IEEE one, so the caller compares it with
+// CompareFloat64 and gets PostgreSQL's float order for free: a FLOAT column
+// HOLDS all three, so its comparison against one of them is a plain float
+// comparison — unlike DECIMAL, where the same literal is a BOUND because the
+// carrier has no such value at all (ADR-0024 item 6, #534).
+func FloatSpecialText(text string) (float64, bool) {
+	s := trimFloatSpace(text)
+	neg := false
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		neg, s = s[0] == '-', s[1:]
+	}
+	switch {
+	case equalFoldASCII(s, "nan"):
+		return math.NaN(), true
+	case equalFoldASCII(s, "inf"), equalFoldASCII(s, "infinity"):
+		if neg {
+			return math.Inf(-1), true
+		}
+		return math.Inf(1), true
+	}
+	return 0, false
+}
+
+// trimFloatSpace strips the whitespace PostgreSQL's input functions strip: C
+// `isspace` in the C locale, never Unicode's set. strings.TrimSpace would
+// accept a no-break space that PostgreSQL refuses with 22P02.
+func trimFloatSpace(s string) string {
+	for len(s) > 0 && isASCIISpace(s[0]) {
+		s = s[1:]
+	}
+	for len(s) > 0 && isASCIISpace(s[len(s)-1]) {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+func isASCIISpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	}
+	return false
+}
+
+// equalFoldASCII is strings.EqualFold restricted to ASCII, which is all these
+// keywords are. It bails on the first differing byte, so an ordinary number
+// costs one comparison.
+func equalFoldASCII(s, lower string) bool {
+	if len(s) != len(lower) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lower[i] {
+			return false
+		}
+	}
+	return true
+}

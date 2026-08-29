@@ -1346,26 +1346,66 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 < 'NaN' THEN 1 ELSE 0 END = 1`},
 		pgCase{name: "DecimalGtNegInfinityInCase",
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 > '-Infinity' THEN 1 ELSE 0 END = 1`},
-		// A FLOAT column against the same literals is the PARITY control:
-		// float8 and float4 DO hold all three, so their rule is PostgreSQL's
-		// float order (ADR-0012 item 8) and not the DECIMAL bound. The
-		// row-at-a-time path follows it, so these are GATED; the bare
-		// vectorized float arm is #536's silent zero and is pinned below.
-		pgCase{name: "FloatColumnVsNaNInCase",
-			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount = 'NaN' THEN 1 ELSE 0 END = 1`},
-		pgCase{name: "FloatColumnLtNaNInCase",
-			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount < 'NaN' THEN 1 ELSE 0 END = 1`},
-		pgCase{name: "FloatColumnGtNegInfinityInCase",
-			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount > '-Infinity' THEN 1 ELSE 0 END = 1`},
+		// A FLOAT column against the same literals is the PARITY control, and
+		// it is a DIFFERENT rule: float8 and float4 HOLD all three, so the
+		// comparison is PostgreSQL's ordinary float order (ADR-0012 item 8),
+		// not the DECIMAL bound above. The row-at-a-time path applies it
+		// (expr.decimalTextOrderFloat -> kernel.FloatSpecialText ->
+		// kernel.CompareFloat64), so these are GATED.
+		//
+		// They run on real_probe rather than on lineitem BECAUSE OF THE SIGN.
+		// `> '-Infinity'` is the only shape that can tell the float rule from
+		// the LEXICOGRAPHIC fallthrough it used to take: every finite value
+		// renders starting with a digit or '-', and only a NEGATIVE rendering
+		// ("-3.5") sorts below "-Infinity" as text, so a non-negative column
+		// (l_discount, l_quantity, every TPC-H float) answers these
+		// identically under both readings and could never fail. real_probe
+		// rows 22-23 are negative for exactly this, and it also carries a NaN
+		// row and a NULL, so the order and the three-valued logic are both
+		// exercised. `r_val` is float4 and `d_val` float8, so both widths are
+		// covered.
+		pgCase{name: "RealColumnGtNegInfinityInCase",
+			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN r_val > '-Infinity' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		pgCase{name: "RealColumnLtNegInfinityInCase",
+			sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_val < '-Infinity' THEN 1 ELSE 0 END = 1`},
 		pgCase{name: "RealColumnLtNaNInCase",
-			sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_val < 'NaN' THEN 1 ELSE 0 END = 1`},
+			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN r_val < 'NaN' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		pgCase{name: "RealColumnEqNaNInCase",
+			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN r_val = 'NaN' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		pgCase{name: "RealColumnLeInfinityInCase",
+			sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_val <= 'Infinity' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "RealColumnGtInfinityInCase",
+			sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_val > 'Infinity' THEN 1 ELSE 0 END = 1`},
+		// float8, same shapes.
+		pgCase{name: "DoubleColumnGtNegInfinityInCase",
+			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN d_val > '-Infinity' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		pgCase{name: "DoubleColumnLtNaNInCase",
+			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN d_val < 'NaN' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		// A SIGNED NaN is where the float grammar and the numeric one part:
+		// float8 reads '+NaN' and '-NaN' as NaN, numeric refuses both with
+		// 22P02 (verified live). So this shape must ANSWER on the float
+		// column while the DECIMAL entries above keep refusing it.
+		pgCase{name: "RealColumnLtSignedNaNInCase",
+			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN r_val < '+NaN' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		pgCase{name: "RealColumnLtNegatedNaNInCase",
+			sql: `SELECT r_key FROM real_probe WHERE CASE WHEN r_val < '-NaN' THEN 1 ELSE 0 END = 1 ORDER BY r_key`},
+		// The BARE forms take the vectorized float kernel, which still reads
+		// any quoted constant as 0.0 — the float arm of #536, tracked as #646
+		// and already pinned there for the ordinary-number spelling. #534 is a
+		// DECIMAL rule and neither caused this nor fixes it; the CASE-wrapped
+		// entries above gate the correct answer through the row path.
+		pgCase{name: "RealColumnGtNegInfinity",
+			sql: `SELECT r_key FROM real_probe WHERE r_val > '-Infinity' ORDER BY r_key`,
+			knownBug: pgBugWadjet + ` the vectorized FLOAT kernel reads a quoted constant as 0.0 ` +
+				`(kernel.toFloat64 answers 0 for any string), so this asks '> 0.0' and drops every ` +
+				`negative row where PostgreSQL asks '> -Infinity' and keeps them. The float arm of ` +
+				`#536; the CASE-wrapped entries beside this one gate the row path's correct answer.`,
+			issue: "#646"},
 		pgCase{name: "FloatColumnLtNaN",
 			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_discount < 'NaN'`,
-			knownBug: pgBugWadjet + ` the vectorized FLOAT kernel reads a quoted constant as 0.0 ` +
-				`(kernel.toFloat64 answers 0 for any string), so this asks '< 0.0' where PostgreSQL ` +
-				`asks '< NaN' and admits every row. The float arm of #536, tracked as #646; the ` +
-				`CASE-wrapped entries above take the row path and GATE the correct answer. #534 is a ` +
-				`DECIMAL rule and neither caused this nor fixes it.`,
+			knownBug: pgBugWadjet + ` the vectorized FLOAT kernel reads a quoted constant as 0.0, ` +
+				`so this asks '< 0.0' where PostgreSQL asks '< NaN' and admits every row. The float ` +
+				`arm of #536, tracked as #646.`,
 			issue: "#646"},
 	)
 

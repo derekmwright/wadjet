@@ -983,7 +983,7 @@ func pgRealRows() []map[string]any {
 		}
 		return out
 	}
-	rows := make([]map[string]any, 0, 21)
+	rows := make([]map[string]any, 0, 24)
 	for i := 0; i < 16; i++ {
 		r := row(int64(i), int32(i%4), float32(i)+0.1)
 		// The DOUBLE column holds i+0.1 computed IN double, not the float32
@@ -1000,6 +1000,16 @@ func pgRealRows() []map[string]any {
 		row(19, 3, float32(0)),
 		row(20, 0, float32(16777216)),
 		row(21, 1, float32(math.NaN())),
+		// Rows 22-23 are NEGATIVE (#534 review). Every other value here is at
+		// or above zero, and a non-negative column cannot tell a numeric
+		// comparison from a LEXICOGRAPHIC one against the infinities: every
+		// finite rendering starts with a digit, which sorts above '-', so
+		// `r_val > '-Infinity'` is true under both readings. A negative value
+		// renders as "-3.5", where '3' sorts BELOW the 'I' of "-Infinity" and
+		// the text answer flips to false — so these two rows are what make
+		// the float-against-a-special entries able to FAIL at all.
+		row(22, 2, float32(-3.5)),
+		row(23, 3, float32(-0.25)),
 	)
 	return rows
 }

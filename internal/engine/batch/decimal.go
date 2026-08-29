@@ -808,7 +808,12 @@ func compareDecimalMagnitudes(aDigits string, aExp int, bDigits string, bExp int
 // zero (#463). Here 1e400 is simply a number with a large exponent: it
 // resolves, saturates, and orders above everything (#462).
 func decimalParts(s string) (neg bool, digits string, exp int, ok bool) {
-	s = strings.TrimSpace(s)
+	// decimalSpaceCutset, never strings.TrimSpace: PostgreSQL's numeric input
+	// skips C isspace() only, so a NO-BREAK SPACE (U+00A0) before the digits
+	// is a non-whitespace byte it refuses with 22P02. TrimSpace strips it and
+	// would have answered the row — the same trap kernel.pgIntWhitespace
+	// already documents for the integer types, one family over.
+	s = strings.Trim(s, decimalSpaceCutset)
 	if s == "" {
 		return false, "", 0, false
 	}
@@ -927,12 +932,8 @@ func ParseDecimalString(s string, scale int) Int128 {
 // cannot hold an infinite value", 22003, verified live); NaN it stores, and
 // wadjet refusing it is the divergence item 6 records.
 func ParseDecimalStringChecked(s string, scale int) (Int128, error) {
-	if DecimalSpecialText(s) != DecimalFinite {
-		return Int128{}, sqlerr.New("22003",
-			"numeric field overflow: %q has no DECIMAL value — PostgreSQL's numeric has NaN and "+
-				"±Infinity, and wadjet's DECIMAL is a finite 128-bit unscaled integer with no bit "+
-				"pattern for either, so they are COMPARISON literals only and never stored values "+
-				"(ADR-0024 item 6)", s)
+	if err := DecimalSpecialValueError(s); err != nil {
+		return Int128{}, err
 	}
 	d, ok := DecimalTextAt(s, scale)
 	if !ok {
@@ -965,6 +966,33 @@ func ParseDecimalStringChecked(s string, scale int) (Int128, error) {
 			s, scale)
 	}
 	return d.Unscaled, nil
+}
+
+// DecimalSpecialValueError is the refusal a NaN/±Infinity spelling earns when
+// it reaches a caller producing a stored VALUE, and nil for every other text.
+//
+// It is a function rather than an inline check at each site because there are
+// two of them — batch.ParseDecimalStringChecked and physical.
+// setOpCheckedDecimalText — and they were answering DIFFERENT SQLSTATEs for
+// the same text, which is exactly the kind of split a client branching on the
+// code cannot see past.
+//
+// The code is 22003 numeric_value_out_of_range, not 22P02: PostgreSQL reads
+// all three as `numeric` VALUES, so the text is not an input-syntax error — it
+// names a value this carrier has no bit pattern for (ADR-0024 item 6).
+// PostgreSQL raises exactly this for the infinities against a constrained
+// column ("a field with precision 18, scale 4 cannot hold an infinite value",
+// verified live on postgres:17-alpine); NaN it stores, and wadjet refusing it
+// is the divergence item 6 records.
+func DecimalSpecialValueError(s string) error {
+	if DecimalSpecialText(s) == DecimalFinite {
+		return nil
+	}
+	return sqlerr.New("22003",
+		"numeric field overflow: %q has no DECIMAL value — PostgreSQL's numeric has NaN and "+
+			"±Infinity, and wadjet's DECIMAL is a finite 128-bit unscaled integer with no bit "+
+			"pattern for either, so they are COMPARISON literals only and never stored values "+
+			"(ADR-0024 item 6)", s)
 }
 
 // DecimalPrecisionLimit is 10^precision, the EXCLUSIVE bound on the unscaled

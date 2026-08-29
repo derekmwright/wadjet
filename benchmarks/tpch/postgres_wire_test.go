@@ -1193,6 +1193,16 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		// non-whitespace byte PostgreSQL rejects with 22P02. strings.TrimSpace
 		// would have stripped it and accepted the value.
 		{name: "IntegerNBSPConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_key = ' 42'`},
+		// The DECIMAL twin of the entry above (#534 review, R1). The numeric
+		// reader trimmed the UNICODE space set (strings.TrimSpace), so a
+		// NBSP-prefixed constant resolved to the number and ANSWERED the row
+		// PostgreSQL refuses the query for — the integer types had this pinned
+		// and `numeric` did not. PostgreSQL's numeric input skips C isspace()
+		// and nothing else, exactly as pg_strtoint* does. The literals here are
+		// U+00A0 followed by a value dec_probe actually holds, and by a NaN, so
+		// a reader that strips it answers rows rather than raising.
+		{name: "DecimalNBSPConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = ' 12.75'`},
+		{name: "DecimalNBSPNaNConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 < ' NaN'`},
 		// The same rule for a DATE column: an unparseable or nonexistent
 		// calendar date reaching a DATE comparison must be REFUSED, not read
 		// as the epoch (1970-01-01) and answered as the rows holding it.
