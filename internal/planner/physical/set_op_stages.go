@@ -690,21 +690,34 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 			}
 			for i := range plans {
 				ct := plans[i].types[col]
-				// The arm's DECLARED spec follows the reconciliation whether
-				// or not this arm needs a coercion, because it is what the
-				// worker builds the output vector from: a spec left at the
-				// zero value declares TypeBool with no (p,s), and a DECIMAL
-				// vector built from that comes out at scale 0 with every
-				// value in it read back a hundredfold out (ADR-0024 item 2).
-				// The non-DECIMAL ladder below has always done this on its
-				// cast arm; the DECIMAL branch did not, which only became
-				// reachable once an INTEGER arm could meet a DECIMAL one
-				// (#555 — `i + 1.5` is numeric in PostgreSQL, so the pair
-				// resolves DECIMAL rather than FLOAT64).
-				plans[i].specs[col].Type = want.typ
-				plans[i].specs[col].TypeKnown = true
-				plans[i].specs[col].Precision = want.dec.Precision
-				plans[i].specs[col].Scale = want.dec.Scale
+				// The arm's DECLARED spec is the arm's OWN type, not the
+				// reconciled one, because it is what the worker builds this
+				// arm's output vector from and the coercion below runs AFTER
+				// that vector exists. DecimalCoerce rewrites an unscaled
+				// carrier — an INT32/INT64 arm included, since an integer box
+				// is a value at scale 0 — so the value has to ARRIVE as what
+				// the arm produces.
+				//
+				// Declaring the TARGET here instead is what broke the seam
+				// with #551's landing: a COMPUTED integer arm
+				// (`n_regionkey + 100`) built a DECIMAL vector and the checked
+				// writer refused the int box before the coercion could touch
+				// it — "integer value 100 reached a DECIMAL(scale 1) column as
+				// a raw unscaled carrier" (ADR-0018 §4, ADR-0024 item 4). A
+				// BARE column arm never showed it: that one is a DirectCopy,
+				// which types itself from the input and ignores the spec.
+				//
+				// Stamping the arm's own type is still needed, and is what
+				// this clause is for: a spec left at the ZERO value declares
+				// TypeBool with no (p,s), and a DECIMAL vector built from that
+				// comes out at scale 0 with every value read back a
+				// hundredfold out (ADR-0024 item 2).
+				if ct.known {
+					plans[i].specs[col].Type = ct.typ
+					plans[i].specs[col].TypeKnown = true
+					plans[i].specs[col].Precision = ct.dec.Precision
+					plans[i].specs[col].Scale = ct.dec.Scale
+				}
 				if ct.typ == want.typ && ct.decKnown && ct.dec == want.dec {
 					continue
 				}

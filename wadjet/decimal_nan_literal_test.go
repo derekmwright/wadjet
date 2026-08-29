@@ -369,16 +369,20 @@ func TestFloatColumnsKeepTheirOwnNaNRule(t *testing.T) {
 		})
 	}
 
-	// ARITHMETIC over a DECIMAL leaves the exact carrier for a float64 and
-	// the result carries no declaration, so boxedPair can select no rule and
-	// the comparison falls to compare()'s text rendering: `d + 0 >
-	// '-Infinity'` drops the negative rows where PostgreSQL keeps them. That
-	// is ADR-0012 item 6's recorded limit ("arithmetic over DECIMAL goes
-	// through float64 before any comparison sees it") meeting #555's untyped
-	// computed DECIMAL, not a rule this change decides; pinned here so it is
-	// visible rather than assumed.
-	t.Run("pinned_555_arithmetic_over_decimal", func(t *testing.T) {
-		fnegRows(t, ctx, db, "d + 0 > '-Infinity'", []int64{2, 3, 4}) // PostgreSQL: 0 1 2 3 4
+	// ARITHMETIC over a DECIMAL is now EXACT and carries its own declaration,
+	// so boxedPair classifies the result boxDecimal and the comparison is
+	// answered in the decimal domain — `d + 0 > '-Infinity'` keeps every row,
+	// which is what PostgreSQL answers.
+	//
+	// This was pinned at {2, 3, 4}: arithmetic left the exact carrier for a
+	// float64, the result carried no declaration, boxedPair could select no
+	// rule, and the comparison fell to compare()'s TEXT rendering, which
+	// dropped the negative rows. ADR-0012 item 6's recorded limit — "arithmetic
+	// over DECIMAL goes through float64 before any comparison sees it" — was
+	// the premise, and #555's exact arithmetic removed it. The pin is deleted
+	// rather than adjusted, because deleting it is the fix's proof.
+	t.Run("arithmetic_over_decimal_keeps_the_negatives", func(t *testing.T) {
+		fnegRows(t, ctx, db, "d + 0 > '-Infinity'", []int64{0, 1, 2, 3, 4})
 	})
 }
 

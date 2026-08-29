@@ -307,15 +307,26 @@ func TestSetOpDecimalRungReconcilesAnIntegerArm(t *testing.T) {
 	// is DECIMAL(10,0). Their common type keeps the widest integer part (11)
 	// at the widest scale (1).
 	want := logical.DecimalMeta{Precision: 12, Scale: 1}
-	for i, arm := range union.UnionArms {
-		p := arm.Projections[0]
-		if p.Type != parquet.TypeDecimal || !p.TypeKnown {
-			t.Errorf("arm %d declares %s (known=%v); both arms must emit DECIMAL", i, p.Type, p.TypeKnown)
-		}
-		if p.Precision != want.Precision || p.Scale != want.Scale {
-			t.Errorf("arm %d declares DECIMAL(%d,%d), want DECIMAL(%d,%d)",
-				i, p.Precision, p.Scale, want.Precision, want.Scale)
-		}
+	// Each arm declares its OWN type, not the reconciled one: the declaration
+	// is what the worker builds THAT arm's output vector from, and the
+	// coercion runs after that vector exists. Declaring the target on the
+	// integer arm made its projection build a DECIMAL vector and the checked
+	// writer refuse the int box — "integer value 100 reached a DECIMAL(scale
+	// 1) column as a raw unscaled carrier" — before DecimalCoerce could
+	// convert it. A BARE column arm never showed it (a DirectCopy types
+	// itself from the input and ignores the spec); a COMPUTED one does.
+	computed := union.UnionArms[0].Projections[0]
+	if computed.Type != parquet.TypeDecimal || !computed.TypeKnown {
+		t.Errorf("the computed arm declares %s (known=%v), want DECIMAL",
+			computed.Type, computed.TypeKnown)
+	}
+	if computed.Precision != want.Precision || computed.Scale != want.Scale {
+		t.Errorf("the computed arm declares DECIMAL(%d,%d), want DECIMAL(%d,%d)",
+			computed.Precision, computed.Scale, want.Precision, want.Scale)
+	}
+	if intArm := union.UnionArms[1].Projections[0]; intArm.Type != parquet.TypeInt32 {
+		t.Errorf("the integer arm declares %s, want INT32 — it must ARRIVE as an integer "+
+			"for the coercion below to have anything to convert", intArm.Type)
 	}
 	// The INTEGER arm has no carrier at the result scale and must be moved.
 	if got := union.UnionArms[1].DecimalCoercions; len(got) != 1 ||

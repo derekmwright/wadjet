@@ -1332,8 +1332,9 @@ func TestSetOpNumericLiteralArmTwoPath(t *testing.T) {
 
 	// e2 and f8 over the rows the filter keeps, and the row count the literal
 	// arm therefore produces.
-	var e2, f8 []*big.Rat
+	var e2, f8, i8Plus1, e2PlusHalf []*big.Rat
 	e2Nulls, f8Nulls, kept := 0, 0, 0
+	i8Nulls := 0
 	for _, r := range sodRows() {
 		if r.id == 3 {
 			continue
@@ -1348,6 +1349,19 @@ func TestSetOpNumericLiteralArmTwoPath(t *testing.T) {
 			f8Nulls++
 		} else {
 			f8 = append(f8, new(big.Rat).SetFloat64(r.f8))
+		}
+		// The two COMPUTED arms below, as exact rationals: an integer
+		// expression and a decimal one, neither of which is a passthrough the
+		// worker can type from its input.
+		if r.i8Nil {
+			i8Nulls++
+		} else {
+			i8Plus1 = append(i8Plus1, new(big.Rat).Add(new(big.Rat).SetInt64(r.i8), big.NewRat(1, 1)))
+		}
+		if !r.e2Nil {
+			e2PlusHalf = append(e2PlusHalf,
+				new(big.Rat).Add(new(big.Rat).Mul(new(big.Rat).SetInt64(r.e2), big.NewRat(1, 100)),
+					big.NewRat(1, 2)))
 		}
 	}
 	lit := func(num, den int64) []*big.Rat {
@@ -1419,6 +1433,20 @@ func TestSetOpNumericLiteralArmTwoPath(t *testing.T) {
 		{"an_integer_literal_too_wide_for_bigint",
 			"SELECT e2 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT 18446744073709551616 FROM %[1]s WHERE id <> 3",
 			cat(e2, sodRepeatRat(t, "18446744073709551616", kept)), e2Nulls, true},
+		// A COMPUTED INTEGER arm against a COMPUTED DECIMAL one — the seam
+		// #555's exact literal arms opened with the set-operation landing.
+		// Both arms are expressions, so neither is a DirectCopy the worker
+		// types from its input: the integer arm's DECLARED spec is what
+		// builds its vector, and declaring the reconciled DECIMAL there made
+		// the checked writer refuse the int box ("integer value 2 reached a
+		// DECIMAL(scale 4) column as a raw unscaled carrier") before
+		// DecimalCoerce could convert it. PostgreSQL:
+		// `SELECT 1::bigint + 1 UNION ALL SELECT 12.75::numeric(9,2) + 0.5`
+		// is numeric and moves no value (verified on 17.11).
+		{"a_computed_integer_arm_against_a_computed_decimal_arm",
+			"SELECT i8 + 1 AS v FROM %[1]s WHERE id <> 3 UNION ALL " +
+				"SELECT e2 + 0.5 FROM %[1]s WHERE id <> 3",
+			cat(i8Plus1, e2PlusHalf), i8Nulls + e2Nulls, true},
 		// A FLOAT column arm beats the literal.
 		{"a_float_column_arm_beats_the_literal",
 			"SELECT f8 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT 1.5 FROM %[1]s WHERE id <> 3",

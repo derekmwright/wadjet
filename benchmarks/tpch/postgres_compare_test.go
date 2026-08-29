@@ -1360,6 +1360,20 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT d_key, d_2 % 0.5 AS a, d_2 % 1.5 AS b, 0.5 % d_2 AS c ` +
 				`FROM dec_probe WHERE d_2 <> 0 ORDER BY d_key`},
 
+		// A COMPUTED INTEGER arm meeting a COMPUTED DECIMAL one, in both set
+		// operations. Neither arm is a bare column, so neither is a
+		// DirectCopy the worker types from its input — the integer arm's
+		// DECLARED spec is what builds its vector, and declaring the
+		// reconciled DECIMAL there made the checked writer refuse the int box
+		// before the coercion could convert it. PostgreSQL resolves both to
+		// numeric and moves no value.
+		pgCase{name: "SetOpComputedIntegerArmAgainstComputedDecimal", exactNumeric: true,
+			sql: `SELECT d_key + 1 AS v FROM dec_probe UNION ALL ` +
+				`SELECT d_2 + 0.5 FROM dec_probe ORDER BY v`},
+		pgCase{name: "SetOpComputedIntegerArmIntersectComputedDecimal",
+			sql: `SELECT d_grp + 100 AS v FROM dec_probe INTERSECT ` +
+				`SELECT d_grp + 100.0 FROM dec_probe ORDER BY v`},
+
 		// --- CAST to and from DECIMAL (ADR-0024 item 3, #555) --------------
 		//
 		// A parameterized destination used to match no case label in the
