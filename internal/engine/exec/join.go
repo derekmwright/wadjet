@@ -44,6 +44,17 @@ type HashJoin struct {
 	LeftKeys  []string // join key columns from left (probe) side
 	RightKeys []string // join key columns from right (build) side
 
+	// KeyTypes[i] is the resolved COMMON type of the pair
+	// (LeftKeys[i], RightKeys[i]) — PostgreSQL's operator resolution over
+	// the two sides' declared types, computed at plan time by
+	// physical.resolveJoinKeyTypes. Both sides' key bytes are built at it,
+	// and the integer / bloom fast paths are gated on it rather than on
+	// either column's storage. Nil, short, or KeyTypeUnresolved means "no
+	// widening for this pair", which is every same-type join and the whole
+	// of TPC-H: the encoder then takes exactly the path it took before.
+	// See join_key_width.go.
+	KeyTypes []batch.TypeID
+
 	mu            sync.Mutex
 	buildBatches  []*batch.RecordBatch // columnar storage of build side
 	strIndex      *strHashTable        // arena-based hash table for string keys (general path)
@@ -295,6 +306,12 @@ func (h *HashJoin) BloomPushdownOp() *BloomFilterOp {
 		leftKeys:      h.LeftKeys,
 		useIntKey:     h.useIntKey,
 		useDualIntKey: h.useDualIntKey,
+		// The bloom was filled from the build index, whose keys are at the
+		// PAIR's resolved type. A probe-side key computed at the probe
+		// column's own width would hash to different bits and the filter
+		// would reject rows that match — a bloom's one forbidden error
+		// (#615).
+		keyTypes: h.KeyTypes,
 	}
 }
 
@@ -571,7 +588,7 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	}
 	if len(h.buildKeyIdx) == 1 && h.buildKeyIdx[0] >= 0 {
 		col := b.Columns[h.buildKeyIdx[0]]
-		if isIntKeyColumn(col.Type) {
+		if joinKeyUsesIntPath(h.KeyTypes, 0, col.Type) {
 			h.useIntKey = true
 			h.intIndex = newIntHashTable(hint)
 			h.strIndex = nil
@@ -584,7 +601,7 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	if len(h.buildKeyIdx) == 2 && h.buildKeyIdx[0] >= 0 && h.buildKeyIdx[1] >= 0 {
 		col0 := b.Columns[h.buildKeyIdx[0]]
 		col1 := b.Columns[h.buildKeyIdx[1]]
-		if isIntKeyColumn(col0.Type) && isIntKeyColumn(col1.Type) {
+		if joinKeyUsesIntPath(h.KeyTypes, 0, col0.Type) && joinKeyUsesIntPath(h.KeyTypes, 1, col1.Type) {
 			h.useDualIntKey = true
 			h.intIndex = newIntHashTable(hint)
 			h.strIndex = nil
@@ -1564,7 +1581,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 		if b.Sel != nil {
 			for _, si := range b.Sel {
 				lk.keyBuf = lk.keyBuf[:0]
-				for _, idx := range h.buildKeyIdx {
+				for i, idx := range h.buildKeyIdx {
 					if idx < 0 {
 						lk.keyBuf = append(lk.keyBuf, 1)
 						continue
@@ -1575,7 +1592,11 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 						lk.hasNullKey = true
 					} else {
 						lk.keyBuf = append(lk.keyBuf, 0)
-						lk.keyBuf = appendColumnValue(lk.keyBuf, v, int(si), v.Type)
+						if t := KeyTypeAt(h.KeyTypes, i, v.Type); t != v.Type {
+							lk.keyBuf = appendCoercedKeyValue(lk.keyBuf, v, int(si), t)
+						} else {
+							lk.keyBuf = appendColumnValue(lk.keyBuf, v, int(si), v.Type)
+						}
 					}
 				}
 				lk.strIndex.GetOrInsertNoGrow(lk.keyBuf, 0)
@@ -1583,7 +1604,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				lk.keyBuf = lk.keyBuf[:0]
-				for _, idx := range h.buildKeyIdx {
+				for i, idx := range h.buildKeyIdx {
 					if idx < 0 {
 						lk.keyBuf = append(lk.keyBuf, 1)
 						continue
@@ -1594,7 +1615,11 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 						lk.hasNullKey = true
 					} else {
 						lk.keyBuf = append(lk.keyBuf, 0)
-						lk.keyBuf = appendColumnValue(lk.keyBuf, v, rowIdx, v.Type)
+						if t := KeyTypeAt(h.KeyTypes, i, v.Type); t != v.Type {
+							lk.keyBuf = appendCoercedKeyValue(lk.keyBuf, v, rowIdx, t)
+						} else {
+							lk.keyBuf = appendColumnValue(lk.keyBuf, v, rowIdx, v.Type)
+						}
 					}
 				}
 				lk.strIndex.GetOrInsertNoGrow(lk.keyBuf, 0)
@@ -2263,7 +2288,7 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) bool {
 	h.keyBuf = h.keyBuf[:0]
 	matchable := true
-	for _, idx := range h.buildKeyIdx {
+	for i, idx := range h.buildKeyIdx {
 		if idx < 0 {
 			h.keyBuf = append(h.keyBuf, 1) // null flag
 			continue
@@ -2274,7 +2299,16 @@ func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) bool {
 			matchable = false
 		} else {
 			h.keyBuf = append(h.keyBuf, 0) // not-null flag
-			h.keyBuf = appendColumnValue(h.keyBuf, v, rowIdx, v.Type)
+			// The same-type arm calls appendColumnValue DIRECTLY, exactly as
+			// it did before #615: AppendWidenedKeyValue is past the inliner's
+			// budget (it holds two calls), so routing every row through it
+			// cost a measured +8-14% on the string-key probe for a branch
+			// nothing but a cross-width join takes.
+			if t := KeyTypeAt(h.KeyTypes, i, v.Type); t != v.Type {
+				h.keyBuf = appendCoercedKeyValue(h.keyBuf, v, rowIdx, t)
+			} else {
+				h.keyBuf = appendColumnValue(h.keyBuf, v, rowIdx, v.Type)
+			}
 		}
 	}
 	return matchable
@@ -2327,7 +2361,7 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) bool {
 	h.resolveProbeKeyIdx(b)
 	p.keyBuf = p.keyBuf[:0]
 	matchable := true
-	for _, idx := range h.probeKeyIdx {
+	for i, idx := range h.probeKeyIdx {
 		if idx < 0 {
 			p.keyBuf = append(p.keyBuf, 1) // null flag
 			continue
@@ -2338,7 +2372,12 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) bool {
 			matchable = false
 		} else {
 			p.keyBuf = append(p.keyBuf, 0) // not-null flag
-			p.keyBuf = appendColumnValue(p.keyBuf, v, row, v.Type)
+			// Same-type direct, as in buildKeyFromBatch — see there.
+			if t := KeyTypeAt(h.KeyTypes, i, v.Type); t != v.Type {
+				p.keyBuf = appendCoercedKeyValue(p.keyBuf, v, row, t)
+			} else {
+				p.keyBuf = appendColumnValue(p.keyBuf, v, row, v.Type)
+			}
 		}
 	}
 	return matchable

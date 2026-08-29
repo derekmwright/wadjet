@@ -965,9 +965,15 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		return nil, nil
 	}
 	tmpJoin := &HashJoin{
-		JoinType:        h.JoinType,
-		LeftKeys:        h.LeftKeys,
-		RightKeys:       h.RightKeys,
+		JoinType:  h.JoinType,
+		LeftKeys:  h.LeftKeys,
+		RightKeys: h.RightKeys,
+		// The pair's resolved COMMON type travels with the keys (#615).
+		// Without it a spilled partition rebuilds its index at each
+		// column's own encoding and the cross-width join stops matching
+		// PAST THE SPILL BOUNDARY only — the hardest class of wrong answer
+		// to see, and the one ADR-0023 exists to keep out of this path.
+		KeyTypes:        h.KeyTypes,
 		SemiAntiFilter:  h.SemiAntiFilter,
 		Residual:        h.Residual,
 		SemiAntiKeyOnly: h.SemiAntiKeyOnly,

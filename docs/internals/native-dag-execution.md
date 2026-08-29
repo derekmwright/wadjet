@@ -169,6 +169,7 @@ resolves the alias back through the logical plan.
 | consumer | resolver | file |
 |---|---|---|
 | join key / shuffle partition key | `resolveShuffleKey` | `plan.go` |
+| a join key's TYPE (both sides + the partition hash) | `resolveJoinKeyTypes` | `join_key_types.go` |
 | which SIDE of a join a key belongs to | `subtreeNaming.ownsKey` → `assignJoinKeySides` | `subtree_naming.go` |
 | aggregate argument, GROUP BY key | `resolveAggInputName` / `aggStageGroupKey` | `plan.go` |
 | ORDER BY term over an AGGREGATE producer | `resolveSortKeyColumn` | `plan.go` |
@@ -660,9 +661,10 @@ it, with the inequality riding as the stage's post-filter.
 
 ## Shuffle internals
 
-- Stage type `StageExchangeRepartition = "exchange-repartition"` (`planner/physical/exchange.go:19`), `ExchangeStage{Keys, Count}` (`:33`). Sender op `OpExchangeSender{ShuffleKeys, NumPartitions}` (`distributed/messages.go:134,287`).
+- Stage type `StageExchangeRepartition = "exchange-repartition"` (`planner/physical/exchange.go:19`), `ExchangeStage{Keys, KeyTypes, Count}`. Sender op `OpExchangeSender{ShuffleKeys, ShuffleKeyTypes, NumPartitions}` (`distributed/messages.go`).
 - `partitionedShuffleSink.Consume` (`worker/partitioned_shuffle_sink.go:103`) resolves `keyIdxs` from key names on the first batch, then `hashRowsIntoPartitions` (`:611`) computes `fnv(col1||col2||…) % numParts`.
-- **Type coverage of the hash:** Int32/Port/Protocol/Date, Int64/Timestamp/IPv4/MAC/Duration, Float32, Float64, String/Bytes/IPv6/CIDR/UUID. **NOT covered** (hashed as a constant via the `default` arm): Bool, Decimal, Vector, Array, Row, Map. The planner only ever picks scalar key types for joins, so this is fine there.
+- **Type coverage of the hash:** Int32/Port/Protocol/Date, Int64/Timestamp/IPv4/MAC/Duration, Float32 and Float64 (canonical bits, #459), String/Bytes/IPv6/UUID, CIDR (`kernel.CidrOrderKey`, #492/#520), Bool, Decimal (`batch.AppendDecimalKey`, scale-normalized so a DECIMAL(9,2) and a DECIMAL(18,4) holding one quantity co-partition, #474) and Vector. **NOT covered** (hashed as a constant via the `default` arm): Array, Row, Map. The planner never picks a container column as a partition key, so this is fine there.
+- **The hash runs at the key pair's RESOLVED type, not the column's** (#615). Both sides of a shuffle join repartition on their OWN key column, so a cross-width pair (`a.i = b.d`) hashed at each column's own width sends equal values to different partitions and the join downstream matches none of them — no error, just fewer rows. `ExchangeStage.KeyTypes` carries `physical.resolveJoinKeyTypes`' answer for the pair; a key whose resolved type differs from its column's is mixed as `exec.AppendWidenedKeyValue`'s canonical bytes, the SAME producer the join's own key uses (ADR-0023 item 5). Nil, or `exec.KeyTypeUnresolved` in a slot, means "the column's own type" — every same-type shuffle, unchanged. `Distribution.KeyTypes` carries it into the property algebra so `Satisfies` does not call two differently-hashed exchanges interchangeable.
 - **Collision-safety property:** because the hash is a deterministic function of the row bytes, *identical rows always hash identically* → same partition. Uncovered types therefore cause only **skew**, never incorrect partitioning — which is why an all-columns hash (for a future sharded DISTINCT) is correct even on tables with nested/decimal columns: the final per-partition dedup compares actual values.
 
 ## Where dedup / aggregate / distinct happen

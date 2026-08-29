@@ -43,10 +43,17 @@ type BloomFilterOp struct {
 	leftKeys      []string // probe-side key column names
 	useIntKey     bool     // single-column integer fast path
 	useDualIntKey bool     // two-column integer fast path
-	keyIdx        []int    // resolved column indices (lazy)
-	resolved      bool
-	selBuf        []uint32 // scratch for selection vector
-	keyBuf        []byte   // scratch for multi-column key serialization
+	// keyTypes[i] is the resolved COMMON type of the i'th join key pair
+	// (exec.HashJoin.KeyTypes, join_key_width.go), set by BloomPushdownOp.
+	// The bloom's BITS came from the build index, whose keys are at that
+	// type; a probe key encoded at the probe column's own width would hash
+	// elsewhere and the filter would reject rows that MATCH — the one error
+	// a bloom is not allowed (#615).
+	keyTypes []batch.TypeID
+	keyIdx   []int // resolved column indices (lazy)
+	resolved bool
+	selBuf   []uint32 // scratch for selection vector
+	keyBuf   []byte   // scratch for multi-column key serialization
 
 	// Adaptive disabling: if the bloom filter isn't filtering enough rows,
 	// the hash computation + random memory accesses cost more than they save.
@@ -417,7 +424,7 @@ func (op *BloomFilterOp) SelfCheck() error {
 // probeKeyHash builds the key buffer for a row and checks the bloom filter.
 func (op *BloomFilterOp) probeKeyHash(in *batch.RecordBatch, row int) bool {
 	op.keyBuf = op.keyBuf[:0]
-	for _, idx := range op.keyIdx {
+	for i, idx := range op.keyIdx {
 		if idx < 0 {
 			op.keyBuf = append(op.keyBuf, 1) // null flag
 			continue
@@ -426,7 +433,13 @@ func (op *BloomFilterOp) probeKeyHash(in *batch.RecordBatch, row int) bool {
 		if v.Nulls.IsNullFast(row) {
 			return false // null key → no match
 		}
-		op.keyBuf = appendBloomKey(op.keyBuf, v, row)
+		op.keyBuf = append(op.keyBuf, 0) // not-null flag
+		// Same-type direct — see HashJoin.buildKeyFromBatch.
+		if t := KeyTypeAt(op.keyTypes, i, v.Type); t != v.Type {
+			op.keyBuf = appendCoercedKeyValue(op.keyBuf, v, row, t)
+		} else {
+			op.keyBuf = appendColumnValue(op.keyBuf, v, row, v.Type)
+		}
 	}
 	return bloomContains(op.bloom, op.bloomMask, bloomHashBytes(op.keyBuf))
 }
@@ -444,6 +457,7 @@ func (op *BloomFilterOp) Clone() UnaryOperator {
 		leftKeys:      op.leftKeys,
 		useIntKey:     op.useIntKey,
 		useDualIntKey: op.useDualIntKey,
+		keyTypes:      op.keyTypes,
 		keyType:       op.keyType,
 		keyTypeSet:    op.keyTypeSet,
 		selfCheck:     op.selfCheck,
@@ -572,8 +586,15 @@ func bloomIntKey(t batch.TypeID) bool {
 // every other non-integer type indexed a BytesColumn its vector does not have
 // (#543).
 func appendBloomKey(buf []byte, v *batch.Vector, row int) []byte {
+	return appendBloomKeyAt(buf, v, row, v.Type)
+}
+
+// appendBloomKeyAt is appendBloomKey at a RESOLVED key type — the pair's
+// common type for a cross-width join key (join_key_width.go). `target` equal
+// to v.Type is the same bytes appendBloomKey always produced.
+func appendBloomKeyAt(buf []byte, v *batch.Vector, row int, target batch.TypeID) []byte {
 	buf = append(buf, 0) // not-null flag
-	return appendColumnValue(buf, v, row, v.Type)
+	return AppendWidenedKeyValue(buf, v, row, target)
 }
 
 // bloomSet marks both of a hash's bits.

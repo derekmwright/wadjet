@@ -160,9 +160,17 @@ type Task struct {
 	MergePartials  bool          `json:"merge_partials,omitempty"`   // true for final_aggregate: re-aggregate partial results
 
 	// Join-specific
-	JoinType        string   `json:"join_type,omitempty"`         // inner, left, right, full, cross
-	JoinLeftKeys    []string `json:"join_left_keys,omitempty"`    // probe side key columns
-	JoinRightKeys   []string `json:"join_right_keys,omitempty"`   // build side key columns
+	JoinType      string   `json:"join_type,omitempty"`       // inner, left, right, full, cross
+	JoinLeftKeys  []string `json:"join_left_keys,omitempty"`  // probe side key columns
+	JoinRightKeys []string `json:"join_right_keys,omitempty"` // build side key columns
+	// JoinKeyTypes[i] is the resolved COMMON type (parquet.TypeID as int) of
+	// the pair (JoinLeftKeys[i], JoinRightKeys[i]) — PostgreSQL's operator
+	// resolution over the two sides' declared types. Both sides' key bytes
+	// are built at it and the integer / bloom fast paths are gated on it,
+	// which is what makes `a.i = b.d` a join rather than a panic (#615,
+	// ADR-0023). -1 or absent means "no widening", the answer for every
+	// same-type join and for an older coordinator.
+	JoinKeyTypes    []int    `json:"join_key_types,omitempty"`
 	BuildFiles      []string `json:"build_files,omitempty"`       // build (right) side input files
 	BuildTableAlias string   `json:"build_table_alias,omitempty"` // build-side alias for column disambiguation
 	// QualifyAllBuildCols, when true, forces the join executor to emit
@@ -192,6 +200,13 @@ type Task struct {
 	// Shuffle-specific
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`   // columns to hash-partition on
 	NumPartitions int      `json:"num_partitions,omitempty"` // number of output partitions
+	// ShuffleKeyTypes[i] is the type ShuffleKeys[i] must be HASHED at
+	// (parquet.TypeID as int), which for a join's exchange-repartition is
+	// the key pair's resolved common type. Hashing at each side's own width
+	// sends equal values to different partitions and the shuffle join then
+	// matches none of them — the same defect as an unwidened key, one layer
+	// down (#615). -1 or absent means "hash at the column's own type".
+	ShuffleKeyTypes []int `json:"shuffle_key_types,omitempty"`
 	// ComputedCols are expression columns appended to the shuffle payload
 	// after the projected scan columns (exchange subsumption dedup: a
 	// dropped filtered sibling's filter ships as a computed flag).
@@ -532,9 +547,11 @@ type OpSpec struct {
 	Coercions []ColumnSpec `json:"coercions,omitempty"`
 
 	// OpHashJoinProbe / OpBroadcastProbe.
-	JoinType    string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
-	LeftKeys    []string `json:"left_keys,omitempty"`  // probe-side keys
-	RightKeys   []string `json:"right_keys,omitempty"` // build-side keys
+	JoinType  string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
+	LeftKeys  []string `json:"left_keys,omitempty"`  // probe-side keys
+	RightKeys []string `json:"right_keys,omitempty"` // build-side keys
+	// KeyTypes is Task.JoinKeyTypes for this op — see there.
+	KeyTypes    []int    `json:"key_types,omitempty"`
 	BuildAlias  string   `json:"build_alias,omitempty"`
 	BuildFiles  []string `json:"build_files,omitempty"`  // build-side input files
 	BuildBucket string   `json:"build_bucket,omitempty"` // bucket override for build files
@@ -571,6 +588,8 @@ type OpSpec struct {
 	// OpExchangeSender (sink).
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`
 	NumPartitions int      `json:"num_partitions,omitempty"`
+	// ShuffleKeyTypes is Task.ShuffleKeyTypes for this op — see there.
+	ShuffleKeyTypes []int `json:"shuffle_key_types,omitempty"`
 
 	// OpGatherSink (sink).
 	ReplySubject string `json:"reply_subject,omitempty"`
@@ -958,10 +977,12 @@ type WindowBoundSpec struct {
 // The worker builds the hash table from BuildFiles, then probes each batch
 // through this join before passing it to the next fused join (or output).
 type FusedJoinSpec struct {
-	JoinType        string            `json:"join_type"`
-	JoinLeftKeys    []string          `json:"join_left_keys"`  // keys from the probe stream
-	JoinRightKeys   []string          `json:"join_right_keys"` // keys in build files
-	BuildFiles      []string          `json:"build_files"`     // build-side files (broadcast)
+	JoinType      string   `json:"join_type"`
+	JoinLeftKeys  []string `json:"join_left_keys"`  // keys from the probe stream
+	JoinRightKeys []string `json:"join_right_keys"` // keys in build files
+	// JoinKeyTypes is Task.JoinKeyTypes for this fused join — see there.
+	JoinKeyTypes    []int             `json:"join_key_types,omitempty"`
+	BuildFiles      []string          `json:"build_files"` // build-side files (broadcast)
 	BuildTableAlias string            `json:"build_table_alias,omitempty"`
 	BuildColOrigins map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string            `json:"join_filter,omitempty"`

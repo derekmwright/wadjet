@@ -2249,6 +2249,19 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 	if jt := mapJoinTypeString(spec.JoinType); jt != exec.InnerJoin {
 		return nil, fmt.Errorf("sort_merge_join: join type %q not supported (v1 is inner-only)", spec.JoinType)
 	}
+	// A key pair that needs WIDENING has no sort-merge lowering: the operator
+	// resolves ONE comparison kernel per key from the declared schema and has
+	// no equivalent of the hash path's per-side widened key encoder (#615).
+	// physical.shouldSortMergeJoin declines such a pair, so reaching here
+	// means the plan and this executor disagree — refuse rather than answer
+	// a join whose two sides are compared at two different widths.
+	for i, t := range spec.KeyTypes {
+		if parquet.TypeID(t) != exec.KeyTypeUnresolved {
+			return nil, fmt.Errorf("sort_merge_join: key pair %d (%s/%s) resolves to %s and "+
+				"needs widening; only the hash join can build a key at a resolved type",
+				i, spec.LeftKeys[i], spec.RightKeys[i], parquet.TypeID(t))
+		}
+	}
 
 	j := exec.NewSortMergeJoin(spec.LeftKeys, spec.RightKeys)
 	j.BuildTableAlias = spec.BuildAlias
@@ -2864,6 +2877,11 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		}
 
 		hj := exec.NewHashJoin(joinType, spec.LeftKeys, spec.RightKeys)
+		// The key pair's resolved COMMON type: both sides' key bytes are
+		// built at it and the integer / bloom fast paths are gated on it
+		// (#615, ADR-0023). The coordinator resolved it from the two sides'
+		// declared types; the worker has no catalog to re-derive it from.
+		hj.KeyTypes = execKeyTypes(spec.KeyTypes)
 		hj.BuildTableAlias = spec.BuildAlias
 		hj.QualifyAllBuildCols = spec.QualifyAllBuildCols
 		hj.BuildColOrigins = spec.BuildColOrigins
@@ -2982,10 +3000,11 @@ func (e *Executor) openFragmentSink(task distributed.Task, spec distributed.OpSp
 			return nil, fmt.Errorf("creating spill dir: %w", err)
 		}
 		return &fragmentExchangeSink{
-			executor:    e,
-			spillDir:    spillDir,
-			shuffleKeys: spec.ShuffleKeys,
-			numParts:    spec.NumPartitions,
+			executor:        e,
+			spillDir:        spillDir,
+			shuffleKeys:     spec.ShuffleKeys,
+			shuffleKeyTypes: execKeyTypes(spec.ShuffleKeyTypes),
+			numParts:        spec.NumPartitions,
 		}, nil
 
 	case distributed.OpUnpartitionedSink:
@@ -3033,7 +3052,10 @@ type fragmentExchangeSink struct {
 	executor    *Executor
 	spillDir    string
 	shuffleKeys []string
-	numParts    int
+	// shuffleKeyTypes is the type each key is HASHED at — the join key
+	// pair's resolved common type where one applies (#615).
+	shuffleKeyTypes []parquet.TypeID
+	numParts        int
 
 	initMu sync.Mutex
 	sink   *partitionedShuffleSink
@@ -3042,7 +3064,8 @@ type fragmentExchangeSink struct {
 func (s *fragmentExchangeSink) consume(ctx context.Context, b *batch.RecordBatch) error {
 	s.initMu.Lock()
 	if s.sink == nil {
-		sink := newPartitionedShuffleSink(s.spillDir, s.shuffleKeys, s.numParts, b.Schema)
+		sink := newPartitionedShuffleSink(s.spillDir, s.shuffleKeys, s.numParts, b.Schema).
+			withKeyTypes(s.shuffleKeyTypes)
 		if err := sink.Init(ctx); err != nil {
 			s.initMu.Unlock()
 			return fmt.Errorf("exchange sink init: %w", err)
@@ -3234,3 +3257,19 @@ func (e *declaredSchemaRefusal) Error() string {
 // path is already reading a file the catalog disagrees with.
 var DeclaredSchemaStrict = optswitch.Register("declared-schema-strict", "WADJET_DECLARED_SCHEMA_STRICT",
 	"refuse a base-table parquet read that arrives with no declared schema instead of typing it from the file")
+
+// execKeyTypes reads a spec's resolved join / shuffle key types off the wire
+// (#615). The wire carries parquet.TypeID as a plain int so a worker built
+// against a different revision reads a number rather than a type it may not
+// have; an absent list means "no widening", which is every same-type join and
+// every pre-#615 coordinator.
+func execKeyTypes(types []int) []parquet.TypeID {
+	if len(types) == 0 {
+		return nil
+	}
+	out := make([]parquet.TypeID, len(types))
+	for i, t := range types {
+		out[i] = parquet.TypeID(t)
+	}
+	return out
+}

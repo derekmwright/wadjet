@@ -1404,7 +1404,7 @@ func (c *Coordinator) dispatchShuffleStage(
 			})
 		}
 	}
-	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters, computedCols, stage.Exchange.ExtraReadCols, partialAggKeys, partialAggSpecs, c.eagerFeedHandle(queryID, stage.ID))
+	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, stage.Exchange.KeyTypes, numParts, workerCount, upstream.DynamicFilters, computedCols, stage.Exchange.ExtraReadCols, partialAggKeys, partialAggSpecs, c.eagerFeedHandle(queryID, stage.ID))
 	if err != nil {
 		return StageOutput{}, err
 	}
@@ -2096,9 +2096,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		var sinkOp distributed.OpSpec
 		if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
 			sinkOp = distributed.OpSpec{
-				Type:          distributed.OpExchangeSender,
-				ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
-				NumPartitions: stage.Exchange.Count,
+				Type:            distributed.OpExchangeSender,
+				ShuffleKeys:     append([]string(nil), stage.Exchange.Keys...),
+				ShuffleKeyTypes: wireKeyTypes(stage.Exchange.KeyTypes),
+				NumPartitions:   stage.Exchange.Count,
 			}
 		} else {
 			sinkOp = distributed.OpSpec{Type: distributed.OpUnpartitionedSink}
@@ -2461,6 +2462,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 			t.Operators = append(t.Operators, distributed.OpSpec{
 				Type:               distributed.OpExchangeSender,
 				ShuffleKeys:        append([]string(nil), stage.Exchange.Keys...),
+				ShuffleKeyTypes:    wireKeyTypes(stage.Exchange.KeyTypes),
 				NumPartitions:      stage.Exchange.Count,
 				DynamicFilterEmits: outputEmits,
 			})
@@ -2892,6 +2894,7 @@ func (c *Coordinator) dispatchComputeStage(
 				JoinType:        fj.JoinType,
 				JoinLeftKeys:    append([]string(nil), fj.JoinLeftKeys...),
 				JoinRightKeys:   append([]string(nil), fj.JoinRightKeys...),
+				JoinKeyTypes:    wireKeyTypes(fj.JoinKeyTypes),
 				BuildFiles:      flattenStageFiles(buildOut),
 				BuildTableAlias: fj.BuildTableAlias,
 				BuildColOrigins: fj.BuildColOrigins,
@@ -2929,6 +2932,7 @@ func (c *Coordinator) dispatchComputeStage(
 				JoinType:            cj.JoinType,
 				LeftKeys:            append([]string(nil), cj.JoinLeftKeys...),
 				RightKeys:           append([]string(nil), cj.JoinRightKeys...),
+				KeyTypes:            wireKeyTypes(cj.JoinKeyTypes),
 				BuildAlias:          cj.BuildTableAlias,
 				BuildFiles:          chainBuildFiles,
 				BuildBucket:         c.config.ResultBucket,
@@ -2976,6 +2980,7 @@ func (c *Coordinator) dispatchComputeStage(
 			JoinType:            stage.JoinType,
 			JoinLeftKeys:        stage.JoinLeftKeys,
 			JoinRightKeys:       stage.JoinRightKeys,
+			JoinKeyTypes:        wireKeyTypes(stage.JoinKeyTypes),
 			BuildTableAlias:     stage.BuildTableAlias,
 			QualifyAllBuildCols: stage.QualifyAllBuildCols,
 			BuildColOrigins:     stage.BuildColOrigins,
@@ -3069,9 +3074,10 @@ func (c *Coordinator) dispatchComputeStage(
 			var sinkOp distributed.OpSpec
 			if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
 				sinkOp = distributed.OpSpec{
-					Type:          distributed.OpExchangeSender,
-					ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
-					NumPartitions: stage.Exchange.Count,
+					Type:            distributed.OpExchangeSender,
+					ShuffleKeys:     append([]string(nil), stage.Exchange.Keys...),
+					ShuffleKeyTypes: wireKeyTypes(stage.Exchange.KeyTypes),
+					NumPartitions:   stage.Exchange.Count,
 				}
 			} else {
 				sinkOp = distributed.OpSpec{Type: distributed.OpUnpartitionedSink}
@@ -3614,6 +3620,7 @@ func buildJoinFragment(
 			JoinType:        fj.JoinType,
 			LeftKeys:        fj.JoinLeftKeys,
 			RightKeys:       fj.JoinRightKeys,
+			KeyTypes:        fj.JoinKeyTypes,
 			BuildAlias:      fj.BuildTableAlias,
 			BuildColOrigins: fj.BuildColOrigins,
 			BuildFiles:      fj.BuildFiles,
@@ -3647,6 +3654,7 @@ func buildJoinFragment(
 		JoinType:            t.JoinType,
 		LeftKeys:            t.JoinLeftKeys,
 		RightKeys:           t.JoinRightKeys,
+		KeyTypes:            t.JoinKeyTypes,
 		BuildAlias:          t.BuildTableAlias,
 		BuildFiles:          buildFiles,
 		BuildBucket:         t.DataBucket,
@@ -3746,6 +3754,7 @@ func buildSortMergeJoinFragment(
 		JoinType:            t.JoinType,
 		LeftKeys:            t.JoinLeftKeys,
 		RightKeys:           t.JoinRightKeys,
+		KeyTypes:            t.JoinKeyTypes,
 		BuildAlias:          t.BuildTableAlias,
 		BuildFiles:          buildFiles,
 		BuildBucket:         t.DataBucket,

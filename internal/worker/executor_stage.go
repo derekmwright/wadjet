@@ -396,7 +396,8 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 	}
 	defer os.RemoveAll(spillDir)
 
-	sink := newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, schema)
+	sink := newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, schema).
+		withKeyTypes(execKeyTypes(task.ShuffleKeyTypes))
 	if err := sink.Init(ctx); err != nil {
 		return fmt.Errorf("stage task %s: partitioned sink init: %w", task.ID, err)
 	}

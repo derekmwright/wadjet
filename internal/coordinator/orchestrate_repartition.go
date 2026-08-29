@@ -9,6 +9,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
@@ -106,7 +107,7 @@ func (c *Coordinator) orchestrateRepartition(
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil, nil, nil, nil, nil, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, nil, numParts, workerCount, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			return fmt.Errorf("build-side shuffle for %s: %w", cand.BuildAlias, err)
 		}
@@ -115,7 +116,7 @@ func (c *Coordinator) orchestrateRepartition(
 	})
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil, nil, nil, nil, nil, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, nil, numParts, workerCount, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			return fmt.Errorf("probe-side shuffle for %s: %w", cand.ProbeAlias, err)
 		}
@@ -188,6 +189,7 @@ func (c *Coordinator) runShuffleSide(
 	sideName string, // "build" or "probe" — used in stage IDs and S3 prefix
 	sourceStage physical.Stage,
 	keys []string,
+	keyTypes []parquet.TypeID, // resolved common type per key (#615); nil = each column's own
 	numParts int,
 	workerCount int,
 	dynamicFilters []distributed.DynamicFilterSpec, // resolved bloom/range pushdowns from upstream build stat
@@ -277,6 +279,7 @@ func (c *Coordinator) runShuffleSide(
 			// would re-encode an IPv4 as the INT64 it is stored in (#423).
 			ColumnTypes:     wireColumnSpecs(sourceStage.ScanSchema),
 			ShuffleKeys:     keys,
+			ShuffleKeyTypes: wireKeyTypes(keyTypes),
 			NumPartitions:   numParts,
 			DataBucket:      c.config.ResultBucket,
 			ResultBucket:    c.config.ResultBucket,

@@ -188,6 +188,22 @@ func partitionRangeForWorker(numPartitions, w, workerCount int) (start, end int)
 // wireColumnSpecs converts a plan-declared schema to its wire form. Nil in,
 // nil out — an absent declaration is the normal case for every join whose
 // sides the planner could not type.
+// wireKeyTypes renders a join / shuffle key's resolved COMMON types for the
+// wire (#615). parquet.TypeID is an int, and the wire carries it as one so a
+// worker built against a different revision reads a number rather than a
+// type it may not have. A nil list stays nil: "no pair needs widening", which
+// is every same-type join and every pre-#615 plan.
+func wireKeyTypes(types []parquet.TypeID) []int {
+	if len(types) == 0 {
+		return nil
+	}
+	out := make([]int, len(types))
+	for i, t := range types {
+		out[i] = int(t)
+	}
+	return out
+}
+
 func wireColumnSpecs(cols []parquet.Column) []distributed.ColumnSpec {
 	if len(cols) == 0 {
 		return nil

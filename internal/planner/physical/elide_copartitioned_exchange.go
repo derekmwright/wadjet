@@ -82,6 +82,15 @@ func elideCoPartitionedExchanges(stages []Stage) []Stage {
 		if !match {
 			continue
 		}
+		// …and at the same TYPE. A key pair that needed WIDENING is hashed at
+		// the pair's resolved common type, not the column's (#615), so two
+		// exchanges over the same column NAME are only interchangeable when
+		// they also agree about the width they hashed at — otherwise eliding
+		// one leaves its consumer reading rows partitioned for a different
+		// join, which matches nothing and says nothing.
+		if !keyTypesEqual(d.Distribution.KeyTypes, e.Exchange.KeyTypes, len(e.Exchange.Keys)) {
+			continue
+		}
 		elided[e.ID] = d.ID
 		ElidedCoPartitionedExchanges.Add(1)
 	}
@@ -109,4 +118,3 @@ func elideCoPartitionedExchanges(stages []Stage) []Stage {
 	}
 	return out
 }
-

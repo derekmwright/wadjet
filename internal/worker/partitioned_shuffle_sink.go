@@ -54,8 +54,10 @@ import (
 // copied once (source→wire) instead of twice (source→accumulator→wire).
 // WADJET_SINK_DIRECT_CHUNK=0 is the kill switch.
 type partitionedShuffleSink struct {
-	spillDir   string
-	keys       []string // partition key column names
+	spillDir string
+	keys     []string // partition key column names
+	// keyTypes[i] is the type keys[i] must be HASHED at — see withKeyTypes.
+	keyTypes   []parquet.TypeID
 	numParts   int
 	schema     []parquet.Column
 	flushBytes int // per-partition row buffer flush threshold
@@ -159,6 +161,20 @@ func newPartitionedShuffleSink(spillDir string, keys []string, numParts int, sch
 		flushBytes: flushPartitionBytes,
 		parts:      make([]*partitionWriter, numParts),
 	}
+}
+
+// withKeyTypes declares the type each partition key must be HASHED at — a
+// join key pair's resolved common type (#615, exec.HashJoin.KeyTypes).
+//
+// The two sides of a shuffle join repartition on their OWN key columns, so a
+// cross-width pair routed at each column's own width sends equal values to
+// different partitions and the join downstream matches none of them. That is
+// the same defect as an unwidened key one layer down, and it is invisible: no
+// error, just fewer rows. nil (the default, and every same-type shuffle)
+// keeps the per-column arms below exactly as they were.
+func (s *partitionedShuffleSink) withKeyTypes(types []parquet.TypeID) *partitionedShuffleSink {
+	s.keyTypes = types
+	return s
 }
 
 // AcceptsViews: Consume normalizes view columns itself (key and own-null
@@ -267,7 +283,7 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		sc.hashScratch = make([]uint64, n)
 	}
 	parts := sc.partScratch[:n]
-	hashRowsIntoPartitions(b, s.keyIdxs, s.numParts, sc.hashScratch[:n], parts)
+	hashRowsIntoPartitions(b, s.keyIdxs, s.keyTypes, s.numParts, sc.hashScratch[:n], parts)
 
 	// Group rows by partition so each partition's columns are appended in
 	// one bulk pass with the type switch hoisted outside the row loop. The
@@ -1104,7 +1120,15 @@ const (
 // Caller-supplied scratch slice for the per-row uint64 accumulator. If the
 // scratch is too small the function returns false; caller should grow it
 // and retry. This avoids re-allocating a uint64 buffer per Consume.
-func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, hashScratch []uint64, out []int) bool {
+// keyTypes[i] is the RESOLVED type keys[i] must be hashed at (#615), nil or
+// exec.KeyTypeUnresolved meaning the column's own. A key whose resolved type
+// differs from its column's is mixed as exec.AppendWidenedKeyValue's canonical
+// bytes — the SAME producer the join's own key uses (ADR-0023 item 5: a key
+// producer is shared, not re-implemented) — so the two sides of a cross-width
+// shuffle join agree about which partition a value belongs to. Every other key
+// takes the typed arms below unchanged.
+func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, keyTypes []parquet.TypeID,
+	numParts int, hashScratch []uint64, out []int) bool {
 	n := b.ActiveLen()
 	if cap(hashScratch) < n || len(out) < n {
 		return false
@@ -1120,8 +1144,28 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 		hashes[i] = fnvOffset64
 	}
 	useSel := b.Sel != nil
-	for _, idx := range keyIdxs {
+	var widenBuf []byte
+	for ki, idx := range keyIdxs {
 		col := b.Columns[idx]
+		if target := exec.KeyTypeAt(keyTypes, ki, col.Type); target != col.Type {
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					widenBuf = exec.AppendWidenedKeyValue(widenBuf[:0], col, row, target)
+					for _, c := range widenBuf {
+						h = (h ^ uint64(c)) * fnvPrime64
+					}
+				}
+				hashes[i] = h
+			}
+			continue
+		}
 		switch col.Type {
 		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
 			data := col.Int32Data
@@ -1356,7 +1400,19 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 // are now the ONLY types that do: FLOAT32/FLOAT64 fell into that default too
 // until #543's review, which made this function disagree with the sink it
 // exists to verify for every float partition key.
-func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vector, row int, scratch []byte) {
+// target is the RESOLVED key type (#615); pass col.Type where no widening
+// applies. The widened arm goes through the same shared producer the sink's
+// own widened arm does.
+func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vector, row int,
+	target parquet.TypeID, scratch []byte) {
+	if target != col.Type {
+		if col.Nulls.IsNullFast(row) {
+			_, _ = h.Write([]byte{0xff})
+			return
+		}
+		_, _ = h.Write(exec.AppendWidenedKeyValue(nil, col, row, target))
+		return
+	}
 	if col.Nulls.IsNullFast(row) {
 		// Null contributes a distinct marker so that null rows are consistently
 		// routed (all nulls land in the same partition).

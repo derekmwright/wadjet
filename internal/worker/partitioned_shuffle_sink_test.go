@@ -63,7 +63,7 @@ func TestPartitionedShuffleSink_RoundTrip(t *testing.T) {
 			keyBatch.Columns[0].Int64Data[0] = k
 			keyBatch.Columns[0].Nulls.SetValid(0)
 			h := fnv.New64a()
-			hashVectorValue(h, keyBatch.Columns[0], 0, scratch[:])
+			hashVectorValue(h, keyBatch.Columns[0], 0, keyBatch.Columns[0].Type, scratch[:])
 			got := int(h.Sum64() % uint64(numParts))
 			if got != p {
 				t.Errorf("row k=%d ended up in partition %d, hash maps to %d", k, p, got)
@@ -408,7 +408,7 @@ func TestCIDRShuffleRoutingUsesInetEquality(t *testing.T) {
 	const numParts = 16
 	hashScratch := make([]uint64, 2)
 	out := make([]int, 2)
-	if ok := hashRowsIntoPartitions(b, []int{0}, numParts, hashScratch, out); !ok {
+	if ok := hashRowsIntoPartitions(b, []int{0}, nil, numParts, hashScratch, out); !ok {
 		t.Fatal("hashRowsIntoPartitions returned false")
 	}
 	if out[0] != out[1] {
@@ -422,8 +422,8 @@ func TestCIDRShuffleRoutingUsesInetEquality(t *testing.T) {
 	// RoundTrip) verifies routing BY RECOMPUTING it independently.
 	var scratch [8]byte
 	h0, h1 := fnv.New64a(), fnv.New64a()
-	hashVectorValue(h0, b.Columns[0], 0, scratch[:])
-	hashVectorValue(h1, b.Columns[0], 1, scratch[:])
+	hashVectorValue(h0, b.Columns[0], 0, b.Columns[0].Type, scratch[:])
+	hashVectorValue(h1, b.Columns[0], 1, b.Columns[0].Type, scratch[:])
 	if h0.Sum64() != h1.Sum64() {
 		t.Errorf("hashVectorValue disagrees for equivalent CIDR values: %d vs %d", h0.Sum64(), h1.Sum64())
 	}

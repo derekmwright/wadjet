@@ -22,9 +22,20 @@ var SortMergeJoinsPlanned atomic.Int64
 // unknown estimate (no scan root — e.g. a join-on-join input — or a missing
 // manifest) keeps the hash path: SMJ is an opt-in for provably-big sides,
 // never a default for uncertainty.
-func (p *Planner) shouldSortMergeJoin(node *logical.Node) bool {
+func (p *Planner) shouldSortMergeJoin(node *logical.Node, leftKeys, rightKeys []string) bool {
 	if p.SortMergeJoinBytes <= 0 || len(node.Children) < 2 {
 		return false
+	}
+	// A key pair that needs WIDENING declines (#615). The sort-merge join
+	// resolves ONE comparison kernel per key from the declared schema and
+	// errors outright when the two sides disagree
+	// (exec.SortMergeJoin.resolveCompareKernels); it has no equivalent of the
+	// hash path's per-side widened key encoder. Declining routes the query to
+	// the hash join, which answers it — a plan choice, not a refusal.
+	for _, t := range resolveJoinKeyTypes(node, leftKeys, rightKeys) {
+		if t != exec.KeyTypeUnresolved {
+			return false
+		}
 	}
 	buildBytes, ok := p.estimateSubtreeBytes(node.Children[1])
 	if !ok || buildBytes < p.SortMergeJoinBytes {

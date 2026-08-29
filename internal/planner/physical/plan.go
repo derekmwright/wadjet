@@ -182,9 +182,14 @@ type Stage struct {
 	SortShardLocal bool
 
 	// Join metadata
-	JoinType        string // inner, left, right, full, cross
-	JoinLeftKeys    []string
-	JoinRightKeys   []string
+	JoinType      string // inner, left, right, full, cross
+	JoinLeftKeys  []string
+	JoinRightKeys []string
+	// JoinKeyTypes[i] is the resolved COMMON type of the pair
+	// (JoinLeftKeys[i], JoinRightKeys[i]) — resolveJoinKeyTypes, #615. Both
+	// sides' key bytes and the exchange's partition hash are built at it.
+	// Nil means no pair needs widening, which is every same-type join.
+	JoinKeyTypes    []parquet.TypeID
 	LeftDepStage    string // stage providing probe (left) side
 	RightDepStage   string // stage providing build (right) side
 	BuildTableAlias string // build-side table alias for column disambiguation in self-joins
@@ -528,7 +533,8 @@ type FusedJoinSpec struct {
 	JoinType        string
 	JoinLeftKeys    []string
 	JoinRightKeys   []string
-	BuildDepStage   string // stage providing build-side data
+	JoinKeyTypes    []parquet.TypeID // see Stage.JoinKeyTypes (#615)
+	BuildDepStage   string           // stage providing build-side data
 	BuildTableAlias string
 	BuildColOrigins map[string]string // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string
@@ -546,7 +552,8 @@ type ChainedJoinSpec struct {
 	JoinType        string
 	JoinLeftKeys    []string
 	JoinRightKeys   []string
-	BuildDepStage   string // stage providing build-side data
+	JoinKeyTypes    []parquet.TypeID // see Stage.JoinKeyTypes (#615)
+	BuildDepStage   string           // stage providing build-side data
 	BuildTableAlias string
 	BuildColOrigins map[string]string
 	JoinFilter      string
@@ -4461,6 +4468,7 @@ func fuseJoinStages(stages []Stage) []Stage {
 			JoinType:        s.JoinType,
 			JoinLeftKeys:    s.JoinLeftKeys,
 			JoinRightKeys:   s.JoinRightKeys,
+			JoinKeyTypes:    s.JoinKeyTypes,
 			BuildDepStage:   s.RightDepStage,
 			BuildTableAlias: s.BuildTableAlias,
 			BuildColOrigins: s.BuildColOrigins,
@@ -5563,10 +5571,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// type changes. Broadcast candidates keep the strictly-better
 		// broadcast path.
 		if joinType == StageHashJoin && jt == "inner" && node.JoinFilter == "" &&
-			len(leftKeys) > 0 && p.shouldSortMergeJoin(node) {
+			len(leftKeys) > 0 && p.shouldSortMergeJoin(node, leftKeys, rightKeys) {
 			joinType = StageSortMergeJoin
 			SortMergeJoinsPlanned.Add(1)
 		}
+
+		// The key pair's resolved common type (#615), shared by the join
+		// stage below and by the two exchange-repartition stages that feed
+		// it — the SAME list, so the partition hash and the join key cannot
+		// be built at two different types.
+		stageKeyTypes := resolveJoinKeyTypes(node, leftKeys, rightKeys)
 
 		// Insert shuffle stages for non-broadcast joins when distributed
 		numPartitions := 0
@@ -5615,8 +5629,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Tasks:   1,
 				Columns: shuffleCols,
 				Exchange: &ExchangeStage{
-					Keys:  append([]string(nil), leftKeys...),
-					Count: numPartitions,
+					Keys: append([]string(nil), leftKeys...),
+					// Hash at the PAIR's resolved type, so the two sides'
+					// equal values land in one partition (#615).
+					KeyTypes: append([]parquet.TypeID(nil), stageKeyTypes...),
+					Count:    numPartitions,
 				},
 				Dependencies: []string{leftDep},
 			})
@@ -5629,8 +5646,9 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Tasks:   1,
 				Columns: shuffleCols,
 				Exchange: &ExchangeStage{
-					Keys:  append([]string(nil), rightKeys...),
-					Count: numPartitions,
+					Keys:     append([]string(nil), rightKeys...),
+					KeyTypes: append([]parquet.TypeID(nil), stageKeyTypes...),
+					Count:    numPartitions,
 				},
 				Dependencies: []string{rightDep},
 			})
@@ -5656,6 +5674,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			JoinType:           jt,
 			JoinLeftKeys:       leftKeys,
 			JoinRightKeys:      rightKeys,
+			JoinKeyTypes:       stageKeyTypes,
 			LeftDepStage:       leftDep,
 			RightDepStage:      rightDep,
 			JoinPartitionCount: numPartitions,
@@ -6323,11 +6342,16 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// default — this branch is dormant unless the deploy opts in). Small
 	// builds keep the strictly-better hash path below, unchanged.
 	if joinType == exec.InnerJoin && node.JoinFilter == "" && len(leftKeys) > 0 &&
-		p.shouldSortMergeJoin(node) {
+		p.shouldSortMergeJoin(node, leftKeys, rightKeys) {
 		return p.buildSortMergeJoin(ctx, node, leftKeys, rightKeys)
 	}
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)
+	// The pair's COMMON type, which both sides' key bytes are built at and
+	// which the integer / bloom fast paths are gated on (#615, ADR-0023).
+	// Nil for every join whose key types already agree — every TPC-H join —
+	// and the operator then behaves exactly as it did.
+	hj.KeyTypes = resolveJoinKeyTypes(node, leftKeys, rightKeys)
 
 	// Set build-side table alias for column disambiguation in self-joins
 	if alias := findScanAlias(node.Children[1]); alias != "" {

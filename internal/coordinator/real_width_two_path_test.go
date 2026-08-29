@@ -518,6 +518,16 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 // #631 must leave them exactly where they were. Asserting it is cheaper than
 // arguing it — a widening that leaked into the key encoders would split one
 // group in two or drop a join pair here.
+//
+// It carries the CROSS-width keys too (#615). A key pair is resolved to
+// PostgreSQL's common type now, and `real` is the type that makes the two
+// resolution ladders disagree: a JOIN widens `real = double` to float8, while
+// `real ∪ double` NARROWS nothing and resolves to double precision, and
+// `real ∪ integer` resolves to real. Holding all three over one fixture is
+// what stops a fix to either ladder from being applied to the other.
+//
+// Every expectation is PostgreSQL 17.11's, taken live over a table loaded
+// with rwpData's exact float bits.
 func TestRealKeyedOperationsAreUnmovedByWidth(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -542,9 +552,42 @@ func TestRealKeyedOperationsAreUnmovedByWidth(t *testing.T) {
 			"SELECT COUNT(*) AS n FROM (SELECT DISTINCT r_val FROM %s) s", rwpTable), "24"},
 		// Every non-NULL row joins exactly itself: 23 pairs, the NaN row
 		// included — NaN equals itself in PostgreSQL's float order, so it is
-		// a join key like any other.
-		{"SelfJoinOnReal", fmt.Sprintf(
-			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.r_val = b.r_val", rwpTable, rwpTable), "23"},
+		// a join key like any other. r_other holds the same values as r_val,
+		// so this is a real COLUMN-to-column key (float4 = float4, compared
+		// at real width) rather than the self-join on ONE column that used to
+		// stand here — that one could not fail: widening both sides of
+		// `a.r_val = b.r_val` to float8 keeps every pair it had, so it passed
+		// whichever width the key was built at (#615).
+		{"JoinRealAgainstReal", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.r_val = b.r_other", rwpTable, rwpTable), "23"},
+		// The CROSS-width shapes, which is what the entry above cannot see.
+		// PostgreSQL compares `real = double precision` as float8 (float48eq,
+		// no cast printed on either side), so the pairs that survive are
+		// exactly the ones whose real value round-trips: 7 of the 24 rows,
+		// both argument orders. Before #615 the key was built at each side's
+		// own width — four bytes against eight — and both answered 0.
+		{"JoinRealAgainstDouble", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.r_val = b.d_val", rwpTable, rwpTable), "7"},
+		{"JoinDoubleAgainstReal", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.d_val = b.r_val", rwpTable, rwpTable), "7"},
+		// The same predicate as a semi join, which reaches a different
+		// operator (the key-only build and the semi/anti probe).
+		{"RealInDouble", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s a WHERE a.r_val IN (SELECT b.d_val FROM %s b)",
+			rwpTable, rwpTable), "7"},
+		{"DoubleInReal", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM %s a WHERE a.d_val IN (SELECT b.r_val FROM %s b)",
+			rwpTable, rwpTable), "7"},
+		// And as a SET operation, which resolves by a DIFFERENT ladder:
+		// `real ∪ double precision` is double precision (select_common_type),
+		// so both arms are read at float8 and NULL is a value equal to
+		// itself. 24 distinct widened reals meet 24 distinct doubles in 8.
+		{"IntersectRealDouble", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT r_val AS v FROM %s INTERSECT SELECT d_val FROM %s) s",
+			rwpTable, rwpTable), "8"},
+		{"ExceptRealDouble", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT r_val AS v FROM %s EXCEPT SELECT d_val FROM %s) s",
+			rwpTable, rwpTable), "16"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

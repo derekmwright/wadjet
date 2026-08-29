@@ -3,6 +3,8 @@ package physical
 import (
 	"fmt"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // requiredChildDistributionForTest lets tests override
@@ -90,6 +92,20 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 					req, actual, out[i].ID, slot.idx,
 				)
 			}
+			// TODO(#615 follow-up): the SLOT is not part of this identity, so
+			// a parent whose TWO inputs both need an exchange mints the same
+			// ID twice — byID keeps the second and both slots resolve to it,
+			// i.e. one exchange feeding a join from a single side. It is
+			// reachable the moment a requirement grows a field the producer
+			// does not carry, which is exactly what happened while the join
+			// key pair's resolved type was being added (the fix was to give
+			// the producer the field, not to change this ID).
+			// AssertExchangeConsistency REFUSES the resulting plan rather
+			// than answering it, so the failure mode is a loud one. Adding
+			// the slot index here is the repair and it moves every inserted
+			// exchange's ID, which TestTPCH_EnsureDistribution_Snapshot
+			// pins for 14 TPC-H queries — a separate change with its own
+			// snapshot update.
 			exch.ID = fmt.Sprintf("%s-%s-%d", exch.Type, out[i].ID, i)
 			exch.Dependencies = []string{childID}
 			exch.Distribution = distributionFromRequired(req, workerCount)
@@ -210,7 +226,12 @@ func distributionFromRequired(req RequiredDistribution, workerCount int) Distrib
 		if n == 0 {
 			n = HashPartitionCount(workerCount)
 		}
-		return Distribution{Kind: DistHashPartitioned, Keys: append([]string(nil), req.Keys...), Count: n}
+		return Distribution{
+			Kind:     DistHashPartitioned,
+			Keys:     append([]string(nil), req.Keys...),
+			KeyTypes: append([]parquet.TypeID(nil), req.KeyTypes...),
+			Count:    n,
+		}
 	default:
 		return Distribution{Kind: DistSingleton}
 	}
@@ -266,8 +287,9 @@ func exchangeVariantFor(req RequiredDistribution) (Stage, bool) {
 		return Stage{
 			Type: StageExchangeRepartition,
 			Exchange: &ExchangeStage{
-				Keys:  append([]string(nil), req.Keys...),
-				Count: req.Count,
+				Keys:     append([]string(nil), req.Keys...),
+				KeyTypes: append([]parquet.TypeID(nil), req.KeyTypes...),
+				Count:    req.Count,
 			},
 		}, true
 	default:

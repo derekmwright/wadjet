@@ -4,6 +4,8 @@
 // required input.
 package physical
 
+import "github.com/derekmwright/wadjet/internal/storage/parquet"
+
 const (
 	StageScan          = "scan"
 	StageAggregate     = "aggregate"
@@ -58,7 +60,14 @@ const (
 // the coordinator lowering pass can synthesize ShuffleCandidate without
 // calling PickShuffleCandidate.
 type ExchangeStage struct {
-	Keys       []string      // Repartition only
+	Keys []string // Repartition only
+	// KeyTypes[i] is the type Keys[i] must be HASHED at — the join key
+	// pair's resolved common type where one applies (#615,
+	// Stage.JoinKeyTypes). nil means "each column's own type", which is
+	// every shuffle whose two sides already agree. Hashing a cross-width
+	// join's two sides at their own widths sends equal values to different
+	// partitions, and the shuffle join then matches none of them.
+	KeyTypes   []parquet.TypeID
 	Count      int           // Repartition only
 	Ordering   []SortKeySpec // Gather only (optional sort-merge gather)
 	BuildAlias string        // Repartition, Replicate

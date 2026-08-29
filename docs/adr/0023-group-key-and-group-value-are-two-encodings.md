@@ -93,6 +93,65 @@ derived from the other.**
    encoder's cap, which both lost injectivity and produced bytes that failed
    to decode.
 
+7. **A key across two TYPES is built at the pair's COMMON type, and the
+   common type is PostgreSQL's OPERATOR resolution.** (Added 2026-08-29 with
+   the #615/#650/#663 fix.) Item 1 says a key may fold whatever the
+   comparator folds; it did not say what happens when the two sides of one
+   comparison are not the same type. They were keyed at each side's own
+   storage encoding while the comparator resolved the pair first, so `a.i =
+   b.d` was right spelled as a WHERE and matched almost nothing spelled as an
+   ON — `numeric IN (SELECT bigint)` panicked in the integer fast path,
+   `bigint IN (SELECT numeric)` answered 0, and `int = float` inside a
+   three-relation join panicked `inlineIntProbe`.
+
+   The resolution is the one PostgreSQL uses for an OPERATOR, read off
+   `EXPLAIN VERBOSE` on 17.11 (`physical.joinKeyCommonType`):
+
+       int4 ⊕ int8       -> int8
+       int  ⊕ float4     -> float8      (there is no float4 = int4 operator)
+       int  ⊕ numeric    -> numeric
+       float4 ⊕ float8   -> float8
+       numeric ⊕ float4  -> float8
+       numeric ⊕ float8  -> float8
+       numeric ⊕ numeric -> numeric, exact, at either declared scale
+
+   It is **not** `select_common_type`, the ladder a SET OPERATION uses
+   (`physical.setOpWiden`, ADR-0024 item 2): there `real ∪ numeric` and
+   `real ∪ integer` are REAL, because real is a PREFERRED type of the numeric
+   category for that resolution and merely a resolvable one for an operator.
+   The two ladders are separate functions with separate pins for that reason,
+   and a fix applied to one is not a fix to the other.
+
+   Three corollaries, each a place the invariant is enforced rather than
+   assumed:
+
+   - The **fast paths are gated on the RESOLVED type**, never on either
+     column's storage. The integer hash path was enabled from the BUILD side's
+     type alone, and the probe loops then indexed the PROBE column's
+     `Int32Data`/`Int64Data` — nil for a DECIMAL or a FLOAT. Resolved on the
+     pair the question answers itself: the int path is legal exactly when the
+     pair's common type is an integer, and then both sides are integer-class
+     columns by construction.
+   - The **partition hash uses it too**. The two sides of a shuffle join
+     repartition on their own key columns, so a pair hashed at each column's
+     own width sends equal values to different partitions and the join
+     downstream matches none of them — the same defect one layer down, and
+     silent. `ExchangeStage.KeyTypes` carries the same list the join carries,
+     and `Distribution.KeyTypes` carries it into the property algebra so two
+     differently-hashed exchanges are not called interchangeable.
+   - It travels **past the spill boundary**. A grace-partitioned build replays
+     each spilled partition through a temporary `HashJoin`; without the pair's
+     type on it, the replay rebuilds its index at the column's own encoding
+     and the join stops matching past the spill only.
+
+   The DECIMAL rung needs no `(p,s)`: `AppendDecimalKey` is scale-normalized,
+   so an integer keyed at scale 0 lands on the DECIMAL holding the same
+   quantity and 12.75 keys alike at scale 2 and scale 4 (#474). The float rung
+   reads a DECIMAL through the correctly-rounded nearest double, exactly as
+   `numeric::float8` does, which is also why `bigint = double precision` says
+   9007199254740993 and 9007199254740992.0 are EQUAL — PostgreSQL's answer,
+   pinned so nobody "fixes" it into an exact integer comparison.
+
 ## Consequences
 
 - Adding a type to the group-key path means answering both questions

@@ -117,18 +117,6 @@ const (
 	// outlive the bug.
 	bugOuterOnResidual = "outer-join-on-residual-dropped"
 	bugHiddenSortKey   = "hidden-sort-key-with-filter"
-	// A join whose key equates an INTEGER column to a FLOAT/DECIMAL column,
-	// in a FROM of three or more relations, panics the executor:
-	// HashJoinProbe.inlineIntProbe takes the int-key fast path on one side
-	// while the other side's build is empty for that key type, and indexes a
-	// zero-length slice ("index out of range [0] with length 0", join.go).
-	// A two-relation int=float join does NOT hit it — the reordered
-	// multi-join is what exposes it. Pre-existing and independent of the
-	// comma-join work (it reproduces on an all-explicit-JOIN equivalent on
-	// main); #593/#594's fix merely lets the comma spelling REACH it by
-	// correctly lifting the equality into a key. Filed as #615; delete this
-	// matcher when it is fixed.
-	bugCrossTypeNumericJoinKey = "cross-type-numeric-join-key-panic"
 )
 
 // fuzzKnownDivergence reports which filed defect a query is guaranteed to hit,
@@ -175,67 +163,14 @@ func fuzzKnownDivergence(s *shapegen.Schema, q *shapegen.Query) string {
 	// 11/81/84/94 are pinned in fuzzRegressionSeeds), and the CommaJoin corpus
 	// in duckdb_compare_test.go covers it on both paths.
 
-	// A cross-type numeric equi-join key (int column = float/decimal column)
-	// in a 3+-relation FROM panics the executor's int-key probe. This is
-	// reached through both an explicit JOIN ... ON and a comma-join whose
-	// equality is lifted into a key (the latter is why removing the broad
-	// comma-mixed skip above surfaced it), so it is matched by the key
-	// relation, not the FROM syntax. See bugCrossTypeNumericJoinKey.
-	if len(q.From) >= 3 && crossTypeNumericEquiKey(s, q) {
-		return bugCrossTypeNumericJoinKey
-	}
+	// #615 — a cross-type numeric equi-join key (int column = float/decimal
+	// column) in a 3+-relation FROM — USED to be matched and skipped here:
+	// it panicked the executor's int-key probe, because the fast path was
+	// enabled from the BUILD column's storage while the probe loop indexed
+	// the PROBE column's nil typed slice. The key is now built at the pair's
+	// resolved common type and the fast paths are gated on it, so the shape
+	// is generated and compared like any other.
 	return ""
-}
-
-// crossTypeNumericEquiKey reports whether any join condition equates an
-// integer column to a float/decimal column. It reads the ON clauses and the
-// WHERE equalities (a comma-join's key lives in WHERE), resolving each side's
-// storage class from the schema by column name — TPC-H column names are unique
-// across tables, so the qualifier is not needed to find the kind.
-func crossTypeNumericEquiKey(s *shapegen.Schema, q *shapegen.Query) bool {
-	kind := make(map[string]shapegen.Kind, 64)
-	for _, t := range s.Tables {
-		for _, c := range t.Cols {
-			kind[strings.ToLower(c.Name)] = c.Kind
-		}
-	}
-	numeric := func(k shapegen.Kind) bool {
-		return k == shapegen.KindInt || k == shapegen.KindFloat || k == shapegen.KindDecimal
-	}
-	isInt := func(k shapegen.Kind) bool { return k == shapegen.KindInt }
-	colKind := func(tok string) (shapegen.Kind, bool) {
-		tok = strings.TrimSpace(tok)
-		if i := strings.LastIndexByte(tok, '.'); i >= 0 {
-			tok = tok[i+1:]
-		}
-		tok = strings.Trim(tok, "\"() ")
-		k, ok := kind[strings.ToLower(tok)]
-		return k, ok
-	}
-	conds := make([]string, 0, len(q.From)+len(q.Where))
-	for _, f := range q.From {
-		if f.On != "" {
-			conds = append(conds, f.On)
-		}
-	}
-	conds = append(conds, q.Where...)
-	for _, cond := range conds {
-		for _, part := range strings.Split(cond, " AND ") {
-			l, r, ok := strings.Cut(part, " = ")
-			if !ok {
-				continue
-			}
-			lk, lok := colKind(l)
-			rk, rok := colKind(r)
-			if !lok || !rok || !numeric(lk) || !numeric(rk) {
-				continue
-			}
-			if isInt(lk) != isInt(rk) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func fuzzEnvInt(name string, def int) int {

@@ -359,6 +359,13 @@ func tmdTables() []tmdTable {
 		// a SLIDING frame over a DECIMAL, which is where the accumulator has
 		// to RETRACT a row exactly.
 		{dwpTable, dwpSchema(), dwpData()},
+		// The cross-WIDTH KEY fixture (#615, #650, #663). Rides along for the
+		// same reason as the fixtures above: TestNumericWidthJoinKeysMatchPostgres
+		// uses these two arms, and no type-matrix corpus entry names this
+		// table. The type matrix cannot stand in for it — it has one column
+		// per numeric width but no VALUES chosen to differ at the wider one,
+		// so every cross-width key pair over it is vacuous.
+		{nwkTable, nwkSchema(), nwkData()},
 	}, multikeyTables()...)
 }
 

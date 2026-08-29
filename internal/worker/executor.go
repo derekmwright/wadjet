@@ -1465,7 +1465,8 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	}()
 	consumeToSink := func(b *batch.RecordBatch) error {
 		if sink == nil {
-			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, b.Schema)
+			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, b.Schema).
+				withKeyTypes(execKeyTypes(task.ShuffleKeyTypes))
 			if err := sink.Init(ctx); err != nil {
 				return fmt.Errorf("shuffle task %s: init sink: %w", task.ID, err)
 			}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // DistKind is the kind of partitioning a stage's output has.
@@ -25,9 +27,18 @@ const (
 
 // Distribution describes how a stage's output is partitioned across workers.
 type Distribution struct {
-	Kind  DistKind
-	Keys  []string // for DistHashPartitioned
-	Count int      // for DistHashPartitioned
+	Kind DistKind
+	Keys []string // for DistHashPartitioned
+	// KeyTypes[i] is the type Keys[i] was HASHED at — the join key pair's
+	// resolved common type where one applies (#615, Stage.JoinKeyTypes).
+	// nil, or exec.KeyTypeUnresolved in a slot, means "the column's own
+	// type", which is what every same-type shuffle carries. Two shuffles
+	// of the same column at two different types are NOT interchangeable:
+	// the whole point of the resolved type is that it sends equal values to
+	// one partition, and a reuse across the boundary would silently unmatch
+	// them.
+	KeyTypes []parquet.TypeID
+	Count    int // for DistHashPartitioned
 }
 
 // Equals reports whether two Distributions are identical.
@@ -46,8 +57,32 @@ func (d Distribution) Equals(other Distribution) bool {
 			return false
 		}
 	}
+	return keyTypesEqual(d.KeyTypes, other.KeyTypes, len(d.Keys))
+}
+
+// keyTypesEqual compares two partition-key TYPE lists over n keys, reading a
+// missing entry as exec.KeyTypeUnresolved ("the column's own type"). A nil
+// list and an all-unresolved list are therefore the same partitioning, which
+// is what keeps every pre-#615 plan's exchange reuse exactly where it was.
+func keyTypesEqual(a, b []parquet.TypeID, n int) bool {
+	at := func(xs []parquet.TypeID, i int) parquet.TypeID {
+		if i < len(xs) {
+			return xs[i]
+		}
+		return keyTypeUnresolved
+	}
+	for i := 0; i < n; i++ {
+		if at(a, i) != at(b, i) {
+			return false
+		}
+	}
 	return true
 }
+
+// keyTypeUnresolved mirrors exec.KeyTypeUnresolved. It is spelled here so the
+// distribution algebra does not import the execution package for one
+// constant; join_key_types.go asserts the two agree.
+const keyTypeUnresolved = parquet.TypeID(-1)
 
 // SatisfiesJoinKeys reports whether this distribution allows a co-located
 // join on the given keys without re-shuffling. Preserved as a thin wrapper
@@ -93,9 +128,12 @@ func (r RequiredKind) String() string {
 // Derived from existing stage fields (JoinLeftKeys, JoinRightKeys, GroupByCols,
 // ShuffleKeys) by RequiredChildDistribution; never stored on Stage.
 type RequiredDistribution struct {
-	Kind  RequiredKind
-	Keys  []string
-	Count int
+	Kind RequiredKind
+	Keys []string
+	// KeyTypes is the resolved common type each key must be HASHED at — see
+	// Distribution.KeyTypes (#615). nil means "the columns' own types".
+	KeyTypes []parquet.TypeID
+	Count    int
 }
 
 // Satisfies reports whether this distribution meets a consumer's required
@@ -124,7 +162,8 @@ func (d Distribution) Satisfies(req RequiredDistribution) bool {
 		case DistBroadcast, DistSingleton:
 			return true
 		case DistHashPartitioned:
-			return keysEqual(d.Keys, req.Keys)
+			return keysEqual(d.Keys, req.Keys) &&
+				keyTypesEqual(d.KeyTypes, req.KeyTypes, len(req.Keys))
 		default:
 			return false
 		}
@@ -135,7 +174,8 @@ func (d Distribution) Satisfies(req RequiredDistribution) bool {
 		if d.Count != req.Count {
 			return false
 		}
-		return keysEqual(d.Keys, req.Keys)
+		return keysEqual(d.Keys, req.Keys) &&
+			keyTypesEqual(d.KeyTypes, req.KeyTypes, len(req.Keys))
 	default:
 		return false
 	}
@@ -178,9 +218,11 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 	case StageHashJoin, StageSortMergeJoin:
 		switch slot {
 		case 0:
-			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.JoinLeftKeys}
+			return RequiredDistribution{Kind: RequiredClusteredOn,
+				Keys: stage.JoinLeftKeys, KeyTypes: stage.JoinKeyTypes}
 		case 1:
-			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.JoinRightKeys}
+			return RequiredDistribution{Kind: RequiredClusteredOn,
+				Keys: stage.JoinRightKeys, KeyTypes: stage.JoinKeyTypes}
 		default:
 			return RequiredDistribution{Kind: RequiredAny}
 		}
@@ -296,9 +338,15 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 			return Distribution{Kind: DistHashPartitioned}
 		}
 		return Distribution{
-			Kind:  DistHashPartitioned,
-			Keys:  stage.Exchange.Keys,
-			Count: stage.Exchange.Count,
+			Kind: DistHashPartitioned,
+			Keys: stage.Exchange.Keys,
+			// The TYPE each key was hashed at (#615). Without it a
+			// consumer whose key pair needed widening would not recognize
+			// its own producer as satisfying it, and EnsureDistribution
+			// would splice a second exchange in front of one that already
+			// partitions correctly.
+			KeyTypes: stage.Exchange.KeyTypes,
+			Count:    stage.Exchange.Count,
 		}
 	case StageExchangeReplicate:
 		return Distribution{Kind: DistBroadcast}

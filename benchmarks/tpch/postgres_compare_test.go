@@ -1017,6 +1017,69 @@ func postgresSemanticsCases() []pgCase {
 		// common BI shape (a NULL in an IN list); before the syntactic-arity
 		// fix wadjet decided WIDEN from the post-strip count and returned 0 rows.
 		pgCase{name: "RealInNonRepresentableWithNull", sql: `SELECT r_key FROM real_probe WHERE r_val IN (0.1, NULL) ORDER BY r_key`},
+
+		// --- CROSS-WIDTH KEYS (#615, #650, #663) ------------------------
+		//
+		// The comparison entries above ask what `real = double` MEANS. These
+		// ask the same question of a KEY: a join, a semi/anti join and a
+		// set-operation dedup all match by hashing each side, and the hash
+		// was built from each side's OWN storage encoding while the
+		// comparator resolved the pair to a common type first. So the WHERE
+		// spelling of a predicate was right and the ON spelling of the same
+		// predicate matched almost nothing — ADR-0023's "a key and the
+		// comparator name one relation", violated across widths.
+		//
+		// PostgreSQL uses TWO ladders here and both are pinned. A JOIN key is
+		// OPERATOR resolution: `real = double` is float8 (float48eq), `int =
+		// numeric` is numeric, `numeric = real` is float8. A SET OPERATION is
+		// `select_common_type`: `real ∪ double` is double precision but
+		// `real ∪ numeric` and `real ∪ int` are REAL. They disagree exactly
+		// where float4 meets an exact type, which is why the two rungs sit
+		// side by side below.
+		pgCase{name: "JoinRealAgainstDoubleKey", sql: `SELECT COUNT(*) AS n FROM real_probe a JOIN real_probe b ON a.r_val = b.d_val`},
+		pgCase{name: "JoinDoubleAgainstRealKey", sql: `SELECT COUNT(*) AS n FROM real_probe a JOIN real_probe b ON a.d_val = b.r_val`},
+		pgCase{name: "JoinBigintAgainstRealKey", sql: `SELECT COUNT(*) AS n FROM real_probe a JOIN real_probe b ON a.r_key = b.r_val`},
+		pgCase{name: "JoinIntAgainstDoubleKey", sql: `SELECT COUNT(*) AS n FROM real_probe a JOIN real_probe b ON a.r_grp = b.d_val`},
+		pgCase{name: "LeftJoinRealAgainstDoubleKey", sql: `SELECT COUNT(*) AS n FROM real_probe a LEFT JOIN real_probe b ON a.r_val = b.d_val`},
+		pgCase{name: "SemiRealInDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val IN (SELECT d_val FROM real_probe)`},
+		pgCase{name: "SemiDoubleInReal", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE d_val IN (SELECT r_val FROM real_probe)`},
+		// NOT IN over a NULL-free subquery: with the NULLs left in,
+		// PostgreSQL's three-valued rule answers 0 for every pair and the
+		// entry cannot tell a right key from a wrong one.
+		pgCase{name: "AntiRealNotInDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val NOT IN (SELECT d_val FROM real_probe WHERE d_val IS NOT NULL)`},
+		pgCase{name: "ExistsRealEqDouble", sql: `SELECT COUNT(*) AS n FROM real_probe a WHERE EXISTS (SELECT 1 FROM real_probe b WHERE a.r_val = b.d_val)`},
+		// The SET-OPERATION rung over the same pair: `real ∪ double` is
+		// double precision, so both arms are read at float8 and NULL is a
+		// value equal to itself.
+		pgCase{name: "IntersectRealDoubleKey", sql: `SELECT COUNT(*) AS n FROM (SELECT r_val AS v FROM real_probe INTERSECT SELECT d_val FROM real_probe) s`},
+		pgCase{name: "ExceptRealDoubleKey", sql: `SELECT COUNT(*) AS n FROM (SELECT r_val AS v FROM real_probe EXCEPT SELECT d_val FROM real_probe) s`},
+
+		// The EXACT half of the same question, over dec_probe. `numeric IN
+		// (SELECT bigint)` is the shape that PANICKED — the bloom and the
+		// semi/anti probe took the integer fast path over a DECIMAL column
+		// with no integer storage — and `bigint IN (SELECT numeric)` is the
+		// one that answered 0.
+		pgCase{name: "JoinBigintAgainstNumericKey", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_key = b.d_2`},
+		pgCase{name: "JoinNumericAgainstBigintKey", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_2 = b.d_key`},
+		pgCase{name: "JoinIntAgainstNumericKey", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_grp = b.d_2`},
+		// Two DECIMALs at different SCALES. The key has normalized scale
+		// since #474, so this one was already right — it is here as the
+		// control that says so.
+		pgCase{name: "JoinNumericScalesKey", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_2 = b.d_4`},
+		pgCase{name: "LeftJoinNumericAgainstBigintKey", sql: `SELECT COUNT(*) AS n FROM dec_probe a LEFT JOIN dec_probe b ON a.d_2 = b.d_key`},
+		pgCase{name: "SemiNumericInBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN (SELECT d_key FROM dec_probe)`},
+		pgCase{name: "SemiBigintInNumeric", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IN (SELECT d_2 FROM dec_probe)`},
+		pgCase{name: "AntiNumericNotInBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 NOT IN (SELECT d_key FROM dec_probe WHERE d_key IS NOT NULL)`},
+		pgCase{name: "ExistsNumericEqBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe a WHERE EXISTS (SELECT 1 FROM dec_probe b WHERE a.d_2 = b.d_key)`},
+		pgCase{name: "IntersectNumericBigintKey", sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 AS v FROM dec_probe INTERSECT SELECT d_key FROM dec_probe) s`},
+		pgCase{name: "ExceptNumericBigintKey", sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 AS v FROM dec_probe EXCEPT SELECT d_key FROM dec_probe) s`},
+		pgCase{name: "IntersectNumericScalesKey", sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 AS v FROM dec_probe INTERSECT SELECT d_4 FROM dec_probe) s`},
+		// A three-relation chain whose two links resolve to DIFFERENT common
+		// types — numeric for the first, float8 for the second. It is the
+		// shape #615 was filed with (the panic came out of inlineIntProbe,
+		// which only a chain reaches) and it is the reason the resolved type
+		// is per key PAIR rather than per query.
+		pgCase{name: "ChainMixedWidthKeys", sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_key = b.d_2 JOIN dec_probe c ON b.d_grp = c.d_key`},
 	)
 
 	// A literal wider than the 128-bit carrier at the column's scale (#462).

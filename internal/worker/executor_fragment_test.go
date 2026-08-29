@@ -242,7 +242,7 @@ func TestExecuteFragment_ScanExchangeSender(t *testing.T) {
 			keyBatch.Columns[0].Int64Data[0] = id
 			keyBatch.Columns[0].Nulls.SetValid(0)
 			h := fnv.New64a()
-			hashVectorValue(h, keyBatch.Columns[0], 0, scratch[:])
+			hashVectorValue(h, keyBatch.Columns[0], 0, keyBatch.Columns[0].Type, scratch[:])
 			got := int(h.Sum64() % uint64(numParts))
 			if got != partition {
 				t.Errorf("id=%d landed in partition=%d, hashes to %d", id, partition, got)

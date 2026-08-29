@@ -39,7 +39,7 @@ func TestHashVectorValueMatchesBulkHashForFloats(t *testing.T) {
 
 			want := make([]int, len(tc.vals))
 			scratchU := make([]uint64, len(tc.vals))
-			if !hashRowsIntoPartitions(b, []int{0}, numParts, scratchU, want) {
+			if !hashRowsIntoPartitions(b, []int{0}, nil, numParts, scratchU, want) {
 				t.Fatal("hashRowsIntoPartitions declined the batch")
 			}
 
@@ -47,7 +47,7 @@ func TestHashVectorValueMatchesBulkHashForFloats(t *testing.T) {
 			distinct := map[int]bool{}
 			for i := range tc.vals {
 				h := fnv.New64a()
-				hashVectorValue(h, b.Columns[0], i, scratch[:])
+				hashVectorValue(h, b.Columns[0], i, b.Columns[0].Type, scratch[:])
 				got := int(h.Sum64() % uint64(numParts))
 				if got != want[i] {
 					t.Errorf("row %d (%v): hashVectorValue routes to %d, the sink routes to %d",
@@ -79,7 +79,7 @@ func TestHashVectorValueFoldsFloatKeyCanonicalForms(t *testing.T) {
 	var scratch [8]byte
 	sum := func(row int) uint64 {
 		h := fnv.New64a()
-		hashVectorValue(h, b.Columns[0], row, scratch[:])
+		hashVectorValue(h, b.Columns[0], row, b.Columns[0].Type, scratch[:])
 		return h.Sum64()
 	}
 	if sum(0) != sum(1) {

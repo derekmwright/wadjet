@@ -68,13 +68,15 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		"RowLimit": notFile, "SortKeys": notFile, "Limit": notFile,
 		"MergePreSorted": notFile, "MergePartials": notFile,
 		"JoinType": notFile, "JoinLeftKeys": notFile, "JoinRightKeys": notFile,
+		// The key pair's resolved common type (#615): parquet TypeIDs as ints.
+		"JoinKeyTypes":    notFile,
 		"BuildTableAlias": notFile, "QualifyAllBuildCols": notFile,
 		// BuildColOrigins maps a bare column name to its owning scan
 		// ALIAS, not to a file.
 		"BuildColOrigins": notFile,
 		"JoinFilter":      notFile, "BuildFilterExprs": notFile,
 		"JoinBuildSchema": notFile, "JoinProbeSchema": notFile,
-		"ShuffleKeys": notFile, "NumPartitions": notFile,
+		"ShuffleKeys": notFile, "ShuffleKeyTypes": notFile, "NumPartitions": notFile,
 		"ComputedCols": notFile, "DropCols": notFile,
 		"PartialAggKeys": notFile, "PartialAggSpecs": notFile, "PartitionID": notFile,
 		// DynamicFilterSpec.BloomBucket/BloomKey DO name an S3 object, but

@@ -406,6 +406,11 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"RowLimit":       "hashed",
 		"SortShardLocal": "hashed", "JoinType": "hashed",
 		"JoinLeftKeys": "hashed", "JoinRightKeys": "hashed",
+		// The key pair's RESOLVED common type (#615) decides what bytes the
+		// key is built from, so two joins over the same columns that resolve
+		// to different types compute different row sets and are never
+		// interchangeable. Hashed for the same reason JoinLeftKeys is.
+		"JoinKeyTypes":    "hashed",
 		"BuildTableAlias": "hashed", "BuildColOrigins": "hashed",
 		"JoinFilter": "hashed", "BuildFilterExprs": "hashed",
 		// NOT IN's three-valued rule changes which rows the stage EMITS
