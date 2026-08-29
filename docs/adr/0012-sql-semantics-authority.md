@@ -1284,17 +1284,41 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     TEXT and needs its own fix (#499); the two paths are held to one answer by
     `internal/coordinator/setop_decimal_scale_two_path_test.go`.
 
-    **Where an arm's `(p,s)` cannot be resolved, nothing is coerced and the
-    answer is WRONG — not refused.** An earlier draft of this item said
-    `shuffleWriter.writeChunk`'s scale check turns that residual into a failed
-    task. It does not: that check sees a SINGLE writer handed two scales, and
-    in a union stage each arm writes its own consistent file while the
-    reinterpretation happens in the downstream stage that reads several of
-    them (ADR-0010 carries the corrected statement). The open resolution holes
-    are a JOIN arm — `inputColTypes`/`inputColDecimal` merge a join's two sides
-    and delete any name they disagree about, which is the fact being
-    reconciled (#551) — and a computed DECIMAL expression, which carries no
-    `(p,s)` (#458, #555). Both are pinned, not claimed covered.
+    **Where an arm's `(p,s)` cannot be resolved, the query is REFUSED at plan
+    time, naming the column.** (Amended 2026-08-29, #551.) Leaving every arm as
+    written was the earlier answer and it is a SILENT WRONG ANSWER: an earlier
+    draft said `shuffleWriter.writeChunk`'s scale check turns that residual
+    into a failed task, and it does not — that check sees a SINGLE writer
+    handed two scales, while in a union stage each arm writes its own
+    consistent file and the reinterpretation happens in the downstream stage
+    that reads several of them (ADR-0010 carries the corrected statement).
+    Refusing is what this record already called the honest interim, and it is
+    now what happens.
+
+    Most of the shapes that used to reach it are resolved instead.
+    `physical.setOpArmDecls` is the set operation's own view of an arm's
+    columns: a JOIN keeps a PER-SIDE answer, because `inputColTypes` /
+    `inputColDecimal` merge the two sides and delete any name they disagree
+    about — right for a TypeID and exactly wrong here, since that disagreement
+    IS the fact being reconciled — so each side's columns are also keyed under
+    its own relation names and the QUALIFIED spelling the projection carries
+    resolves against the right one (#551); and a PROJECT is descended INTO, so
+    a DERIVED-TABLE arm resolves through the names its subplan emits (#554),
+    with `setOpArmComputedSource` rewriting a forwarded COMPUTED column into
+    the expression that builds it. A numeric LITERAL arm takes its spelling's
+    `(p,s)` — PostgreSQL types `1.23456` as `numeric(6,5)` and the union
+    `numeric`, where the declared-type layer answers float8 for any literal
+    with a decimal point (#665); `litDeclType` is scoped to the arm, because
+    the type of a literal inside an ARITHMETIC expression is decided with
+    ADR-0024 item 3's decimal arithmetic and declaring DECIMAL over a float
+    evaluator would write a rounded value into an exact vector. The
+    single-process path builds the literal arm's vector from the declared-type
+    layer and so still resolves float8 there — the values agree, the wire OID
+    does not, and closing that half is the literal `(p,s)` work in `expr`.
+
+    The remaining resolution hole is a computed DECIMAL expression, which
+    carries no `(p,s)` (#458, #555). It reaches the refusal rather than a
+    silent reinterpretation.
 
     **Two carrier properties are deliberate divergences, not defects.** A
     wadjet DECIMAL column has ONE declared scale, so the narrow arm's rows

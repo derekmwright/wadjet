@@ -40,10 +40,12 @@ const (
 //
 // ok=false means an arm's (p,s) could not be resolved — a computed DECIMAL
 // expression carries none, and declaredProjectionDecimal declines on those
-// for the same reason. The caller then leaves every arm as written, which is
-// the pre-#533 behaviour, and the shuffle writer's own scale check
-// (internal/worker/shuffle_format.go) is what keeps the residual from being
-// silent.
+// for the same reason. The caller REFUSES the query then, naming the column
+// (#551): leaving every arm as written was the pre-#533 behaviour and it is a
+// silently wrong answer, because each arm writes its own .wshf at its own
+// scale and the stage that reads several of them takes the first header's.
+// The shuffle writer's own scale check (internal/worker/shuffle_format.go)
+// sees only a SINGLE writer handed two scales and cannot catch that shape.
 func setOpDecimalTarget(arms []setOpColType) (logical.DecimalMeta, bool) {
 	if len(arms) == 0 {
 		return logical.DecimalMeta{}, false

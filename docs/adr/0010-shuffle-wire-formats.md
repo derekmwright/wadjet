@@ -91,9 +91,12 @@ consumer can sniff and decode, including mid-stream.
   where each arm is its own task writing its own internally-consistent file
   and the DOWNSTREAM stage reads several of them and takes the first header's
   scale: there is no writer at the point of reinterpretation. That is the
-  ordinary union-stage shape, and a residual of it survives in
-  `reconcileSetOpArmTypes` today (#551, a join arm whose `(p,s)` the type walk
-  drops).
+  ordinary union-stage shape, and the residual that survived in
+  `reconcileSetOpArmTypes` — a join arm whose `(p,s)` the type walk dropped —
+  was #551. It is closed two ways: the arm walk resolves a join's sides
+  separately (`physical.setOpArmDecls`), and an arm whose `(p,s)` STILL cannot
+  be resolved is now REFUSED at plan time naming the column, rather than left
+  as written for this reader to misread.
 
   The planner is where this is FIXED — `physical.reconcileSetOpArmTypes`
   coerces every arm to the set operation's output `(p,s)` before its rows enter

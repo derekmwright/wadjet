@@ -728,19 +728,36 @@ concatenation well-formed:
   rather than wrapping. An integer arm (`numeric UNION ALL bigint` is numeric
   in PostgreSQL) is coerced by the same operator, from scale 0. A CAST cannot
   serve here — the cast evaluator's DECIMAL destination produces a float64.
-  Where an arm's `(p,s)` cannot be resolved at plan time **nothing is coerced
-  and the arms keep their own scales** — a wrong answer, not a failed task.
-  `shuffleWriter.writeChunk` refuses a chunk whose DECIMAL scale disagrees with
-  its file header, but that guard only sees a SINGLE writer handed two scales;
-  in a union stage each arm writes its own consistent file and the
+  Where an arm's `(p,s)` cannot be resolved at plan time the query is
+  **REFUSED, naming the column** — it used to leave every arm as written, which
+  is a wrong answer rather than a failed task, because
+  `shuffleWriter.writeChunk`'s scale check only sees a SINGLE writer handed two
+  scales: in a union stage each arm writes its own consistent file and the
   reinterpretation happens in the downstream stage that reads several of them,
-  upstream of any writer (ADR-0010). Two resolution holes are open today:
-  a **join arm**, because `inputColTypes`/`inputColDecimal` merge a
-  `NodeJoin`'s two sides and DELETE any name they disagree about — which is
-  precisely the fact being reconciled (#551, pinned in
-  `internal/coordinator/setop_decimal_scale_two_path_test.go`) — and a
+  upstream of any writer (ADR-0010, ADR-0012 item 12).
+- **What the arm walk resolves.** `setOpArmDecls`
+  (`internal/planner/physical/set_op_arm_decls.go`) is the set operation's own
+  view of an arm's columns, and it differs from `inputColDecls` in the two ways
+  the arm needs. A **JOIN** keeps a PER-SIDE answer: `inputColTypes` /
+  `inputColDecimal` merge the two sides and DELETE any name they disagree
+  about, which is right for a TypeID and throws away precisely the fact a set
+  operation reconciles, so each side's columns are also keyed under its own
+  relation names and the QUALIFIED spelling the projection carries (`a.dx`)
+  answers about the right side (#551). A **PROJECT** is descended INTO rather
+  than stopped at, so a DERIVED-TABLE arm resolves through the names its
+  subplan emits (#554); `setOpArmComputedSource` rewrites a reference that
+  forwards a derived table's COMPUTED column into the expression that builds
+  it, because no column of that name reaches the union stage. A **nested set
+  operation** behind such a Project reads its own reconciled result types
+  (`setOpNodeDecls`), the same answer `setOpArmProjection` takes when the
+  nested operation IS the arm. A numeric **LITERAL** arm takes its spelling's
+  `(p,s)` (`litDeclType`, #665). The walk
+  claims NOTHING it cannot resolve — `declaredProjectionDecl`'s STRING
+  fallback is right for advisory wire metadata and wrong here, where a
+  confident wrong type casts the arm's values. The remaining hole is a
   **computed DECIMAL expression**, which carries no `(p,s)` at all (#458, and
-  #555 for the typing gap underneath it).
+  #555 for the typing gap underneath it); it now reaches the refusal above
+  instead of a silent reinterpretation.
 - **Nested arms.** `a UNION ALL b UNION ALL c` parses LEFT-DEEP, so the outer
   union's first arm is itself a union. Its reconciled output type comes from
   `setOpNodeResultTypes`, which recurses. Before that it was reported as

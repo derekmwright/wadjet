@@ -419,16 +419,19 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 	// Types for computed outputs have to be decided here: the output column
 	// does not exist in the arm's schema, so the worker cannot resolve it
 	// (same reason attachScanSelectProjections carries Type — #333).
+	//
+	// setOpArmDecls rather than inputColDecls: this is the set operation's own
+	// view of the arm, with a JOIN's two sides kept apart under their
+	// qualified names (#551) and a derived table's Project descended into
+	// (#554). Its DECIMAL (p,s) rides in the same colDecls as the TypeID, so
+	// the type and the scale are read out of ONE resolved key and cannot come
+	// to describe different columns.
 	var colTypes colDecls
-	var colDecimal map[string]logical.DecimalMeta
 	var strictInt map[string]bool
 	var below *logical.Node
 	if len(projNode.Children) == 1 {
 		below = projNode.Children[0]
-		colTypes = inputColDecls(below)
-		// The DECIMAL half of the same walk (#458): a set operation has to
-		// reconcile SCALES, which colTypes cannot carry (#533).
-		colDecimal = inputColDecimal(below)
+		colTypes = setOpArmDecls(below)
 		// Same integer-preserving-arithmetic hint as
 		// attachScanSelectProjections (#297, #445).
 		strictInt = strictIntArithCols(below)
@@ -459,14 +462,35 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 		// s_suppkey and the task failed loud with `column "k" does not exist
 		// in the input schema` (#490).
 		ast := pr.ASTExpr
+		// forwardedComputed marks a bare reference that turned OUT to name a
+		// derived table's COMPUTED column: the spec now carries an
+		// expression, so the worker builds the output vector from the
+		// declared type instead of copying a column (#554).
+		forwardedComputed := false
 		if below != nil {
 			if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
 				if sub, ok := substituteNestedRenameRefs(pr.ASTExpr, below); ok && sub != nil {
 					ast = sub
 					e = sub.String()
 				}
-			} else if src := resolveOutputRenameSource(strings.ToLower(e), below); src != "" {
-				e = src
+			} else {
+				// A reference that forwards a derived table's COMPUTED column
+				// names nothing the arm's stream carries, so it has to become
+				// the expression that builds it — but ONLY when the arm walk
+				// can also TYPE that column. The union stage EVALUATES the
+				// rewritten expression and builds the output vector from the
+				// declared type, and a wrong declaration there is a silently
+				// wrong column, where the un-rewritten name is a loud task
+				// failure (#554).
+				sub, rewritable := setOpArmComputedSource(e, below)
+				_, typed := setOpRefDecl(colTypes, e, pr)
+				if rewritable && typed && sub != nil {
+					ast = sub
+					e = sub.String()
+					forwardedComputed = true
+				} else if src := resolveOutputRenameSource(strings.ToLower(e), below); src != "" {
+					e = src
+				}
 			}
 		}
 		spec := ProjectExprSpec{Expr: e, Name: outNames[i]}
@@ -478,6 +502,17 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			// A computed column's declared type IS its runtime type: the
 			// worker builds the output vector from it.
 			decl := inferProjectionDeclType(ast, parquet.TypeString, strictInt, colTypes)
+			// A numeric LITERAL arm carries the (p,s) of its SPELLING, which
+			// PostgreSQL reads as numeric and this walk otherwise read as
+			// float8 — so `SELECT d FROM t UNION ALL SELECT 1.23456`
+			// resolved double precision where PostgreSQL resolves numeric
+			// (#665). litDeclType is scoped to this site on purpose; see its
+			// own comment.
+			if lit, ok := litOf(ast); ok {
+				if d, ok := litDeclType(lit); ok {
+					decl = d
+				}
+			}
 			spec.Type, spec.Precision, spec.Scale = declTypeParts(decl)
 			spec.TypeKnown = true
 			ct = setOpColType{typ: spec.Type, known: true}
@@ -489,24 +524,20 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 				ct.dec = logical.DecimalMeta{Precision: decl.Precision, Scale: decl.Scale}
 				ct.decKnown = true
 			}
-		} else if t, ok := setOpRefType(colTypes.types, e, pr); ok {
+		} else if c, ok := setOpRefDecl(colTypes, e, pr); ok {
 			// A bare reference copies its source column, so the source's
 			// type is what the arm emits. spec.Type stays unset: the worker
-			// resolves a plain ColRef by DirectCopy and ignores it.
-			//
-			// setOpRefType resolves each candidate spelling through
-			// lookupColType rather than a direct map read, so a QUALIFIED
-			// reference resolves too: an arm that ends in a join names its
-			// columns `a.u4`, and the maps are keyed by the bare name. Left
-			// unresolved, the whole column went unreconciled — which for two
-			// DECIMAL arms is #533 again, and for a join arm was reachable
-			// from any `SELECT t.col FROM a JOIN b` arm. The fallback is safe
-			// by construction: inputColTypes DELETES a bare name the two
-			// sides of a join disagree on, so a name that survives means one
-			// type.
-			ct = setOpColType{typ: t, known: true}
-			if t == parquet.TypeDecimal {
-				ct.dec, ct.decKnown = setOpColDecimalMeta(colDecimal, e)
+			// resolves a plain ColRef by DirectCopy and ignores it — unless
+			// the reference was rewritten into the derived table's computed
+			// EXPRESSION above, which the worker has to evaluate and
+			// therefore has to be told the type of.
+			ct = c
+			if forwardedComputed {
+				spec.Type = ct.typ
+				spec.TypeKnown = true
+				if ct.decKnown {
+					spec.Precision, spec.Scale = ct.dec.Precision, ct.dec.Scale
+				}
 			}
 		}
 		plan.specs = append(plan.specs, spec)
@@ -515,28 +546,46 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 	return plan, nil
 }
 
-// setOpRefType types a bare column reference an arm forwards, under either
-// spelling: the SOURCE name the stream carries (what the projection was just
-// resolved to) or the OUTPUT name the SELECT list wrote. inputColTypes answers
-// for whichever of the two its walk reached, and a miss on both leaves the
-// column untyped, which is what it was before either spelling was tried.
+// setOpRefDecl types a bare column reference an arm forwards, under either
+// spelling: the OUTPUT name the SELECT list wrote, or the SOURCE name the
+// stream carries (what the projection was just resolved to). A miss on both
+// leaves the column untyped, which is what it was before any spelling was
+// tried.
 //
-// Each candidate goes through lookupColType rather than a direct map read, so
-// a QUALIFIED spelling resolves too: an arm that ends in a join names its
-// columns "a.u4", and the maps are keyed by the bare name (#533).
-func setOpRefType(colTypes map[string]parquet.TypeID, resolved string, pr logical.Projection) (parquet.TypeID, bool) {
-	if t, ok := lookupColType(colTypes, resolved); ok {
-		return t, true
-	}
-	for _, alt := range []string{pr.Expr, pr.Column, pr.Alias} {
-		if alt == "" {
+// The SELECT list's own spelling is tried FIRST, because setOpArmDecls now
+// answers for a derived table's EMITTED names and those are the ones the
+// SELECT list wrote (#554). Trying the resolved source name first would let a
+// derived table that binds one source name to another output name
+// (`SELECT e4 AS e2, e2 AS e4 …`) answer about the wrong column of the two.
+//
+// Each candidate goes through the qualifier-stripping lookup, so a QUALIFIED
+// spelling resolves too: an arm that ends in a join names its columns "a.u4"
+// (#533), and after #551 the qualified key is the one that says WHICH side's
+// column that is.
+//
+// The TypeID and the DECIMAL (p,s) come out of the SAME resolved key. Reading
+// them from two lookups is how a declaration comes to describe two different
+// columns — the mistake ADR-0024 removed from declaredProjectionDecl, and the
+// one this function used to make by resolving the type through any of four
+// spellings while reading the scale through one.
+func setOpRefDecl(decls colDecls, resolved string, pr logical.Projection) (setOpColType, bool) {
+	for _, cand := range []string{pr.Expr, pr.Column, resolved, pr.Alias} {
+		if cand == "" {
 			continue
 		}
-		if t, ok := lookupColType(colTypes, alt); ok {
-			return t, true
+		key, ok := lookupColKey(decls.types, cand)
+		if !ok {
+			continue
 		}
+		d := declFromKey(decls, key)
+		ct := setOpColType{typ: d.ID, known: true}
+		if d.ID == parquet.TypeDecimal && d.DecKnown && d.Precision > 0 {
+			ct.dec = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
+			ct.decKnown = true
+		}
+		return ct, true
 	}
-	return 0, false
+	return setOpColType{}, false
 }
 
 // reconcileSetOpArmTypes makes every arm emit the same TYPE per column, not
@@ -579,11 +628,23 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 		if want.typ == parquet.TypeDecimal {
 			if !want.decKnown {
 				// An arm whose (p,s) nothing resolved. Leaving every arm as
-				// written is the pre-#533 behaviour and the only honest one:
-				// a scale guessed here would move values by a power of ten.
-				// The shuffle writer's scale check is what keeps a residual
-				// of this shape from being silent.
-				continue
+				// written was the pre-#533 behaviour, and it is a SILENT
+				// WRONG ANSWER: each arm's task writes its own .wshf file at
+				// its own scale, and the downstream stage that reads several
+				// of them takes the FIRST header's — so the wider arm's
+				// unscaled integer comes back a power of ten out, with
+				// nothing upstream of the reader able to see it (#551, and
+				// ADR-0012 item 12's "the answer is WRONG — not refused").
+				//
+				// So it is refused, naming the column. A guessed scale moves
+				// values; a refusal is a loud failure where this was a quiet
+				// wrong number, and ADR-0012 item 12 already calls that "the
+				// honest interim".
+				return fmt.Errorf("result column %q is DECIMAL in %s, and its precision and scale "+
+					"cannot be resolved from the query — a set operation moves every arm into one "+
+					"DECIMAL(precision, scale) and there is no scale to move them to; give the arm "+
+					"an explicit CAST to a DECIMAL(p,s), or select the column directly",
+					outNames[col], setOpUnresolvedArmsDesc(plans, col))
 			}
 			for i := range plans {
 				ct := plans[i].types[col]
@@ -615,6 +676,24 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 		}
 	}
 	return nil
+}
+
+// setOpUnresolvedArmsDesc names the arms whose DECIMAL (p,s) the walk could
+// not resolve, with the expression each one selects — the localization the
+// refusal above owes its reader, since the column NAME is the same in every
+// arm by construction.
+func setOpUnresolvedArmsDesc(plans []setOpArmPlan, col int) string {
+	var arms []string
+	for i := range plans {
+		ct := plans[i].types[col]
+		if ct.typ == parquet.TypeDecimal && !ct.decKnown {
+			arms = append(arms, fmt.Sprintf("arm %d (%s)", i+1, plans[i].specs[col].Expr))
+		}
+	}
+	if len(arms) == 0 {
+		return "one of its arms"
+	}
+	return strings.Join(arms, " and ")
 }
 
 // setOpTargetType folds one result column's arms into the type they must all

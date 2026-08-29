@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // The cross-scale set-operation fixture (#533).
@@ -753,25 +754,28 @@ func sodJoinData(unscaled int64) []map[string]any {
 	return rows
 }
 
-// TestSetOpDecimalJoinArmScaleResidual pins the case fa907d44 did NOT fix
-// (#551), in the shape the fix's own backstop cannot see.
+// TestSetOpDecimalJoinArmsTwoPath is the gate that replaced #551's pin.
 //
-// An arm that ends in a JOIN reaches the type walk through inputColTypes /
-// inputColDecimal, which merge the two sides and DELETE any name they disagree
-// about. For a TypeID that is right — two tables genuinely have two `dx`
-// columns. For a set operation it throws away the one fact being reconciled,
-// so `dx` resolves to DECIMAL with no (p,s), setOpDecimalTarget declines, and
-// both arms keep their own scale.
+// An arm that ends in a JOIN used to reach the type walk through
+// inputColTypes / inputColDecimal, which merge the two sides and DELETE any
+// name they disagree about. For a TypeID that is right — two tables genuinely
+// have two `dx` columns, and picking a side would answer about the wrong one.
+// For a set operation it threw away the one fact being reconciled, so `dx`
+// resolved to DECIMAL with no (p,s), setOpDecimalTarget declined, and both
+// arms kept their own scale: the wider arm's unscaled integer read at the
+// narrower arm's scale, 100x out, silently.
 //
-// The writer's scale check does not catch it: each arm's task writes its OWN
+// The writer's scale check never caught it: each arm's task writes its OWN
 // file, internally consistent, and the reinterpretation happens in the
 // downstream stage that reads several files and takes the first header's
-// scale — upstream of any writer. That is why the guard is a SINGLE-WRITER
-// shape only, and why this is pinned rather than claimed fixed.
+// scale — upstream of any writer.
 //
-// The pin asserts the arms DISAGREE. It fails the day they agree, which is
-// the fix's proof.
-func TestSetOpDecimalJoinArmScaleResidual(t *testing.T) {
+// setOpArmDecls keeps a PER-SIDE view instead: the projection names the column
+// qualified (`a.dx`), so each side's columns are keyed under its own relation
+// names and the two are told apart. The gate is the ARMS-AGREE comparison,
+// which is the fix's proof, plus both arms held to the fixture generator so
+// they cannot agree by being wrong together.
+func TestSetOpDecimalJoinArmsTwoPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
@@ -781,33 +785,108 @@ func TestSetOpDecimalJoinArmScaleResidual(t *testing.T) {
 	coord := tmdCluster(t, ctx)
 	single := tmdStandalone(t, ctx)
 
-	// Eight rows of 12.75, four through the join arm and four direct.
-	sql := fmt.Sprintf(
-		"SELECT v FROM (SELECT a.dx AS v FROM %[1]s a JOIN %[2]s b ON a.id = b.id "+
-			"UNION ALL SELECT dx FROM %[2]s) t ORDER BY v", sodJoinA, sodJoinB)
-	want := make([]*big.Rat, 0, 8)
-	for i := 0; i < 8; i++ {
-		want = append(want, big.NewRat(1275, 100))
+	// Both join tables hold the SAME NUMBER — 12.75 at scale 2 in A and
+	// 12.7500 at scale 4 in B — over ids 1..4, so any difference in the
+	// answer is the scale being misread and nothing else.
+	dx := big.NewRat(1275, 100)
+	rep := func(n int) []*big.Rat {
+		out := make([]*big.Rat, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, dx)
+		}
+		return out
+	}
+	e2, e2Nulls := sodExpect("e2")
+	e4, e4Nulls := sodExpect("e4")
+
+	for _, tc := range []struct {
+		name      string
+		sql       string
+		wantVals  []*big.Rat
+		wantNulls int
+	}{
+		// The issue's own query: four rows through the join arm at (9,2),
+		// four direct at (18,4). The DAG answered 12.75 four times then
+		// 1275.00 four times; SUM(v) was 51.51 against PostgreSQL's 102.00.
+		{"join_arm_then_direct",
+			"SELECT v FROM (SELECT a.dx AS v FROM %[1]s a JOIN %[2]s b ON a.id = b.id " +
+				"UNION ALL SELECT dx FROM %[2]s) t ORDER BY v",
+			rep(8), 0},
+		// The same two arms the other way round, where the misreading runs
+		// the other direction.
+		{"direct_then_join_arm",
+			"SELECT v FROM (SELECT dx AS v FROM %[2]s " +
+				"UNION ALL SELECT a.dx FROM %[1]s a JOIN %[2]s b ON a.id = b.id) t ORDER BY v",
+			rep(8), 0},
+		// The join arm names the WIDE side, so the coercion lands on the
+		// other arm instead. Both directions have to work, or the fix is an
+		// accident of which side the merge happened to keep.
+		{"join_arm_names_the_wide_side",
+			"SELECT b.dx AS v FROM %[1]s a JOIN %[2]s b ON a.id = b.id UNION ALL SELECT dx FROM %[1]s",
+			rep(8), 0},
+		// A three-way join: the qualified name has to survive a nested join,
+		// where the inner join's own merged view is one of the two sides.
+		{"three_way_join",
+			"SELECT c.dx AS v FROM %[1]s a JOIN %[2]s b ON a.id = b.id JOIN %[2]s c ON a.id = c.id " +
+				"UNION ALL SELECT dx FROM %[1]s",
+			rep(8), 0},
+		// The join sits inside a DERIVED TABLE inside the arm, so the walk
+		// has to descend the arm's Project and find the join under it.
+		{"join_inside_a_derived_table",
+			"SELECT v FROM (SELECT a.dx AS v FROM %[1]s a JOIN %[2]s b ON a.id = b.id) s " +
+				"UNION ALL SELECT dx FROM %[2]s",
+			rep(8), 0},
+		// A LEFT JOIN with the DECIMAL on the NULLABLE side: `a.id = b.id + 2`
+		// matches only a.id 3 and 4, so two rows carry b.dx and two carry the
+		// null padding — through the coercion, which must move a value and
+		// leave a NULL alone.
+		{"left_join_with_the_decimal_on_the_nullable_side",
+			"SELECT b.dx AS v FROM %[1]s a LEFT JOIN %[2]s b ON a.id = b.id + 2 " +
+				"UNION ALL SELECT dx FROM %[1]s",
+			rep(6), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf(tc.sql, sodJoinA, sodJoinB)
+			sodAssertBothPaths(t, ctx, single, coord, sql, tc.wantVals, tc.wantNulls)
+		})
 	}
 
-	sv, _ := sodRats(t, "single", dtpRun(t, ctx, single, coord, sql, false), "v")
-	dv, _ := sodRats(t, "dag", dtpRun(t, ctx, single, coord, sql, true), "v")
+	// A SELF-join of one table under two aliases, where both sides carry
+	// EVERY name: the qualified keys must name the right side's column and
+	// the bare merge must still be the answer for an unqualified reference.
+	t.Run("self_join_of_one_table_under_two_aliases", func(t *testing.T) {
+		sql := fmt.Sprintf(
+			"SELECT a.e2 AS v FROM %[1]s a JOIN %[1]s b ON a.id = b.id UNION ALL SELECT e4 FROM %[1]s",
+			sodTable)
+		sodAssertBothPaths(t, ctx, single, coord, sql,
+			append(append([]*big.Rat(nil), e2...), e4...), e2Nulls+e4Nulls)
+	})
+}
 
-	// The single-process arm is the one that is RIGHT here, and it is asserted
-	// so the pin cannot be satisfied by both arms becoming wrong together.
-	if !sodRatsEqual(sv, want) {
-		t.Errorf("the single-process arm is the control and must answer 12.75 eight times\ngot %s",
-			sodShow(sv, 0))
+// sodAssertBothPaths runs one query on both execution paths, holds each to the
+// fixture generator, and then holds the two to EACH OTHER. The arms-agree
+// comparison is the part that proves a fix; the generator comparison is what
+// stops the two arms from agreeing by being wrong together.
+func sodAssertBothPaths(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coordinator,
+	sql string, wantVals []*big.Rat, wantNulls int) {
+	t.Helper()
+	var got [2][]*big.Rat
+	var gotNulls [2]int
+	for i, arm := range []struct {
+		name string
+		dag  bool
+	}{{"single", false}, {"dag", true}} {
+		rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+		got[i], gotNulls[i] = sodRats(t, arm.name, rows, "v")
+		if !sodRatsEqual(got[i], wantVals) || gotNulls[i] != wantNulls {
+			t.Errorf("%s: %s\n  got  %s\n  want %s", arm.name, sql,
+				sodShow(got[i], gotNulls[i]), sodShow(wantVals, wantNulls))
+		}
 	}
-	if sodRatsEqual(dv, want) {
-		t.Errorf("the stage DAG now answers the join arm correctly, so #551 is FIXED:\n  %s\n"+
-			"Delete this pin, move the query into TestSetOpDecimalScaleTwoPath, and correct "+
-			"ADR-0010 / ADR-0012 item 12 / the internals doc, which all say the writer's scale "+
-			"check leaves this shape uncovered.", sodShow(dv, 0))
-		return
+	if !sodRatsEqual(got[0], got[1]) || gotNulls[0] != gotNulls[1] {
+		t.Errorf("the two paths disagree on %s\n  single-process %s\n  stage DAG      %s",
+			sql, sodShow(got[0], gotNulls[0]), sodShow(got[1], gotNulls[1]))
 	}
-	t.Logf("known divergence, NOT gated (#551): a join arm keeps its own DECIMAL scale.\n"+
-		"  single-process: %s\n  stage DAG:      %s", sodShow(sv, 0), sodShow(dv, 0))
 }
 
 // TestSetOpDecimalCapIsARangeReduction pins what the 38-digit cap costs
@@ -864,18 +943,21 @@ func TestSetOpDecimalCapIsARangeReduction(t *testing.T) {
 	}
 }
 
-// TestSetOpDerivedTableArmsOnTheDAG pins #554, which is pre-existing and
-// unrelated to DECIMAL: a set operation whose arms are DERIVED TABLES cannot
-// execute on the stage DAG at all. setOpArmProjection takes each arm's source
-// expression from its SELECT list as written, and for a derived table that is
-// the name the SUBQUERY exposes, which the arm's materialized output does not
-// carry.
+// TestSetOpDerivedTableArmsTwoPath is the gate that replaced #554's pin.
 //
-// It is pinned here because this file is where the set-operation arm walk is
-// gated, and because the failure is LOUD — exec.Project refuses a DirectCopy
-// that resolves to nothing (#147) — so it cannot become a silent wrong answer
-// while it waits.
-func TestSetOpDerivedTableArmsOnTheDAG(t *testing.T) {
+// setOpArmProjection took each arm's source expression from its SELECT list as
+// written, and for a derived-table arm that is the name the SUBQUERY exposes —
+// which the arm's MATERIALIZED output does not carry, because walkStages emits
+// no stage for a Project. A rename resolved through resolveOutputRenameSource
+// (#490); a COMPUTED alias had nothing to resolve to and the task failed loud
+// with `column "x" does not exist in the input schema`, and even the rename
+// case reached the union with no DECIMAL (p,s) — inputColDecls stops AT the
+// derived table's Project — so its two arms wrote two scales into one file.
+//
+// setOpArmDecls descends INTO the Project, which is what the nested
+// set-operation arm already did one level up, and setOpArmComputedSource
+// rewrites a forwarded computed alias into the expression that builds it.
+func TestSetOpDerivedTableArmsTwoPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
@@ -885,21 +967,280 @@ func TestSetOpDerivedTableArmsOnTheDAG(t *testing.T) {
 	coord := tmdCluster(t, ctx)
 	single := tmdStandalone(t, ctx)
 
-	sql := fmt.Sprintf(
-		"SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s) a UNION ALL SELECT y FROM (SELECT e4 AS y FROM %[1]s) b",
-		sodTable)
+	e2, e2Nulls := sodExpect("e2")
+	e4, e4Nulls := sodExpect("e4")
+	ew, ewNulls := sodExpect("ew")
+	i8, i8Nulls := sodExpect("i8")
+	cat := func(parts ...[]*big.Rat) []*big.Rat {
+		var out []*big.Rat
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	// i8 + 1, the computed derived-table arm's values.
+	i8Plus1 := make([]*big.Rat, 0, len(i8))
+	for _, v := range i8 {
+		i8Plus1 = append(i8Plus1, new(big.Rat).Add(v, big.NewRat(1, 1)))
+	}
+	// The rows the id filters keep, restated from the generator.
+	pick := func(col string, keep func(id int64) bool) (vals []*big.Rat, nulls int) {
+		for _, r := range sodRows() {
+			if !keep(r.id) {
+				continue
+			}
+			var v int64
+			var isNil bool
+			switch col {
+			case "e2":
+				v, isNil = r.e2, r.e2Nil
+			case "e4":
+				v, isNil = r.e4, r.e4Nil
+			}
+			if isNil {
+				nulls++
+				continue
+			}
+			vals = append(vals, new(big.Rat).Mul(new(big.Rat).SetInt64(v), big.NewRat(1, 100)))
+		}
+		return vals, nulls
+	}
+	lo5, lo5Nulls := pick("e2", func(id int64) bool { return id < 5 })
+	le3, le3Nulls := pick("e4", func(id int64) bool { return id <= 3 })
 
-	// The control: the single-process engine answers, so the query is legal
-	// and the pin is about the DAG and nothing else.
-	if rows := dtpRun(t, ctx, single, coord, sql, false); len(rows) != 18 {
-		t.Errorf("the single-process arm is the control and must answer 18 rows, got %d", len(rows))
+	for _, tc := range []struct {
+		name      string
+		sql       string
+		wantVals  []*big.Rat
+		wantNulls int
+	}{
+		// The issue's own query: a bare rename in each arm.
+		{"a_rename_in_each_arm",
+			"SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s) a UNION ALL " +
+				"SELECT y FROM (SELECT e4 AS y FROM %[1]s) b",
+			cat(e2, e4), e2Nulls + e4Nulls},
+		// The same two arms the other way round: the wide arm first, so the
+		// coercion lands on the other one.
+		{"the_reverse_arm_order",
+			"SELECT y AS v FROM (SELECT e4 AS y FROM %[1]s) b UNION ALL " +
+				"SELECT x FROM (SELECT e2 AS x FROM %[1]s) a",
+			cat(e4, e2), e2Nulls + e4Nulls},
+		// A COMPUTED derived column, which is the shape #554 filed: `x` names
+		// no column of the arm's stream at all, so the reference has to be
+		// rewritten into `i8 + 1`.
+		{"a_computed_derived_column",
+			"SELECT x AS v FROM (SELECT i8 + 1 AS x FROM %[1]s) a UNION ALL " +
+				"SELECT y FROM (SELECT e4 AS y FROM %[1]s) b",
+			cat(i8Plus1, e4), i8Nulls + e4Nulls},
+		// A derived table inside a derived table: the rename chain resolves
+		// level by level, and the walk has to descend both Projects.
+		{"a_nested_derived_table",
+			"SELECT x AS v FROM (SELECT z AS x FROM (SELECT e2 AS z FROM %[1]s) i) a UNION ALL " +
+				"SELECT y FROM (SELECT e4 AS y FROM %[1]s) b",
+			cat(e2, e4), e2Nulls + e4Nulls},
+		// A FILTER and a LIMIT inside the derived tables. The LIMIT is wider
+		// than its input on purpose: `LIMIT 3` with no ORDER BY does not say
+		// WHICH three rows, and a gate must not depend on that.
+		{"a_filter_and_a_limit_inside_the_derived_table",
+			"SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s WHERE id < 5) a UNION ALL " +
+				"SELECT y FROM (SELECT e4 AS y FROM %[1]s WHERE id <= 3 LIMIT 9) b",
+			cat(lo5, le3), lo5Nulls + le3Nulls},
+		// A CTE arm, referenced ONCE. A CTE reaches the arm walk as a derived
+		// table with a named scope, so it is the same resolution — but it is
+		// asserted separately because the scope name is what
+		// derivedScopeBareName has to strip.
+		{"a_cte_arm_referenced_once",
+			"WITH c AS (SELECT e2 AS x FROM %[1]s) SELECT x AS v FROM c UNION ALL SELECT e4 FROM %[1]s",
+			cat(e2, e4), e2Nulls + e4Nulls},
+		// A nested SET OPERATION behind a derived table. setOpArmProjection
+		// reads a nested operation through its own result names when the
+		// operation IS the arm; a derived table around it put a Project in
+		// between, the walk answered nothing, all three files kept their own
+		// scales and the shuffle writer refused the query.
+		{"a_nested_set_operation_behind_a_derived_table",
+			"SELECT v FROM (SELECT e2 AS v FROM %[1]s UNION ALL SELECT e4 FROM %[1]s) t " +
+				"UNION ALL SELECT ew FROM %[1]s",
+			cat(e2, e4, ew), e2Nulls + e4Nulls + ewNulls},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf(tc.sql, sodTable)
+			sodAssertBothPaths(t, ctx, single, coord, sql, tc.wantVals, tc.wantNulls)
+		})
 	}
 
-	if _, err := tmdRunDAG(ctx, coord, sql); err == nil {
-		t.Errorf("the stage DAG now executes a derived-table set operation, so #554 is FIXED. " +
-			"Delete this pin and assert the values on both arms instead.")
-		return
-	} else {
-		t.Logf("known divergence, NOT gated (#554): %v", err)
+	// The residuals, pinned rather than claimed covered. Both are the STAGE
+	// WIRING between an arm and the stage that produces it — the union arm
+	// names one producer and the stage's Dependencies name another — not the
+	// arm projection this test is about, and each fails the day it starts
+	// working.
+	for _, tc := range []struct{ name, issue, sql string }{
+		// #660: the same CTE feeding BOTH arms.
+		{"a_cte_referenced_by_both_arms", "#660",
+			"WITH c AS (SELECT e2 AS x FROM %[1]s) SELECT x AS v FROM c UNION ALL SELECT x FROM c"},
+		// #656's family: an ORDER BY inside a derived-table arm makes the arm
+		// a merge_sort producer, which the union stage's dependency list does
+		// not name.
+		{"an_order_by_inside_a_derived_table_arm", "#656",
+			"SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s) a UNION ALL " +
+				"SELECT y FROM (SELECT e4 AS y FROM %[1]s ORDER BY id LIMIT 3) b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf(tc.sql, sodTable)
+			if _, err := tmdRunSingle(ctx, single, sql); err != nil {
+				t.Fatalf("the single-process arm is the control and must answer %q: %v", sql, err)
+			}
+			if _, err := tmdRunDAG(ctx, coord, sql); err == nil {
+				t.Errorf("the stage DAG now executes %q, so %s is FIXED. Delete this pin and "+
+					"assert the values on both arms instead.", sql, tc.issue)
+				return
+			} else {
+				t.Logf("known divergence, NOT gated (%s): %v", tc.issue, err)
+			}
+		})
 	}
+}
+
+// TestSetOpNumericLiteralArmTwoPath holds a numeric LITERAL arm to the type
+// PostgreSQL gives it (#665).
+//
+// PostgreSQL types `1.23456` as numeric(6,5) and `numeric UNION ALL numeric`
+// as numeric; wadjet's declared-type layer answers float8 for any literal
+// with a decimal point, so `SELECT d FROM t UNION ALL SELECT 1.23456 FROM t`
+// resolved double precision and every value in the union went through a
+// float. litDeclType reads the literal's SPELLING at the set-operation arm,
+// which is the one site where the literal's own type IS the whole answer.
+//
+// The fixture rows are restricted to id <> 3 so every value in play is a
+// BINARY FRACTION (12.75, 2, 1, 3, 0 and the literals). The single-process
+// path still resolves this union to float8 — its arm schema is the one the
+// pipeline actually built, and the literal's vector is float8 until the
+// declared-type layer's literal case lands — so a value that is not a binary
+// fraction would report the float's expansion rather than a disagreement
+// about the number. -0.01, the one such value in the fixture, is id 3.
+//
+// The DAG-only assertions below are the ones a value comparison cannot make:
+// that the union's result column IS numeric, and that a literal no float64
+// holds exactly comes back exact.
+func TestSetOpNumericLiteralArmTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	// e2 and f8 over the rows the filter keeps, and the row count the literal
+	// arm therefore produces.
+	var e2, f8 []*big.Rat
+	e2Nulls, f8Nulls, kept := 0, 0, 0
+	for _, r := range sodRows() {
+		if r.id == 3 {
+			continue
+		}
+		kept++
+		if r.e2Nil {
+			e2Nulls++
+		} else {
+			e2 = append(e2, new(big.Rat).Mul(new(big.Rat).SetInt64(r.e2), big.NewRat(1, 100)))
+		}
+		if r.f8Nil {
+			f8Nulls++
+		} else {
+			f8 = append(f8, new(big.Rat).SetFloat64(r.f8))
+		}
+	}
+	lit := func(num, den int64) []*big.Rat {
+		out := make([]*big.Rat, 0, kept)
+		for i := 0; i < kept; i++ {
+			out = append(out, big.NewRat(num, den))
+		}
+		return out
+	}
+	cat := func(parts ...[]*big.Rat) []*big.Rat {
+		var out []*big.Rat
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+
+	for _, tc := range []struct {
+		name      string
+		sql       string
+		wantVals  []*big.Rat
+		wantNulls int
+		// wantDecimalOnTheDAG is false for the arms PostgreSQL resolves to a
+		// FLOAT: a float8 column arm beats numeric, and an exponent literal
+		// IS float8.
+		wantDecimalOnTheDAG bool
+	}{
+		{"a_fractional_literal_arm",
+			"SELECT e2 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT 1.5 FROM %[1]s WHERE id <> 3",
+			cat(e2, lit(3, 2)), e2Nulls, true},
+		{"the_literal_arm_first",
+			"SELECT 1.5 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT e2 FROM %[1]s WHERE id <> 3",
+			cat(lit(3, 2), e2), e2Nulls, true},
+		// A NEGATIVE literal is numeric too: the parser makes the sign a
+		// unary operator, and reading only the unsigned spelling would let
+		// the sign decide the column's type.
+		{"a_negative_literal_arm",
+			"SELECT e2 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT -1.5000 FROM %[1]s WHERE id <> 3",
+			cat(e2, lit(-3, 2)), e2Nulls, true},
+		// An INTEGER literal is on the integer rung, unchanged: `numeric
+		// UNION ALL integer` is numeric, and the integer's value is at
+		// scale 0.
+		{"an_integer_literal_arm",
+			"SELECT e2 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT 7 FROM %[1]s WHERE id <> 3",
+			cat(e2, lit(7, 1)), e2Nulls, true},
+		// An EXPONENT literal is float8 to PostgreSQL, so the union is
+		// float8 and the DECIMAL arm widens INTO it.
+		{"an_exponent_literal_arm_stays_float",
+			"SELECT e2 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT 1.5e1 FROM %[1]s WHERE id <> 3",
+			cat(e2, lit(15, 1)), e2Nulls, false},
+		// A FLOAT column arm beats the literal: float8 is the preferred type
+		// of PostgreSQL's numeric category.
+		{"a_float_column_arm_beats_the_literal",
+			"SELECT f8 AS v FROM %[1]s WHERE id <> 3 UNION ALL SELECT 1.5 FROM %[1]s WHERE id <> 3",
+			cat(f8, lit(3, 2)), f8Nulls, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf(tc.sql, sodTable)
+			sodAssertBothPaths(t, ctx, single, coord, sql, tc.wantVals, tc.wantNulls)
+
+			dagRows := dtpRun(t, ctx, single, coord, sql, true)
+			isDecimal := false
+			for _, r := range dagRows {
+				if v, ok := r["v"]; ok && v != nil {
+					_, isDecimal = v.(string)
+					break
+				}
+			}
+			if isDecimal != tc.wantDecimalOnTheDAG {
+				t.Errorf("the stage DAG's result column is decimal=%v, want %v — %s\n"+
+					"a DECIMAL boxes as its rendered text and a float8 as a float64, so this is "+
+					"the union's resolved TYPE and not only its values",
+					isDecimal, tc.wantDecimalOnTheDAG, sql)
+			}
+		})
+	}
+
+	// The value #665 is really about: 1.23456 has no exact float64, so a
+	// union that resolves float8 answers with the float's expansion. On the
+	// DAG the arms now resolve numeric(12,5) and the literal is exact.
+	//
+	// The single-process path is NOT held to this: it builds the literal
+	// arm's vector from the declared-type layer, which still answers float8
+	// for a fractional literal everywhere outside a set-operation arm.
+	t.Run("a_literal_no_float64_holds_is_exact_on_the_dag", func(t *testing.T) {
+		sql := fmt.Sprintf(
+			"SELECT e2 AS v FROM %[1]s WHERE id = 1 UNION ALL SELECT 1.23456 FROM %[1]s WHERE id = 1",
+			sodTable)
+		got, _ := sodRats(t, "dag", dtpRun(t, ctx, single, coord, sql, true), "v")
+		want := []*big.Rat{big.NewRat(1275, 100), big.NewRat(123456, 100000)}
+		if !sodRatsEqual(got, want) {
+			t.Errorf("%s\n  got  %s\n  want %s", sql, sodShow(got, 0), sodShow(want, 0))
+		}
+	})
 }

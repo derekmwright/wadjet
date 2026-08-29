@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -106,8 +107,8 @@ func TestSetOpDecimalTarget(t *testing.T) {
 		{"with_int32", []setOpColType{dec(9, 2), intArm(parquet.TypeInt32)}, 12, 2, true},
 		{"with_int64", []setOpColType{dec(9, 2), intArm(parquet.TypeInt64)}, 21, 2, true},
 		{"only_ints", []setOpColType{intArm(parquet.TypeInt32), intArm(parquet.TypeInt64)}, 19, 0, true},
-		// An arm whose (p,s) nothing resolved: no target, so no arm is moved
-		// and the shuffle writer's scale check is the remaining net.
+		// An arm whose (p,s) nothing resolved: no target, which
+		// reconcileSetOpArmTypes turns into a plan-time refusal (#551).
 		{"unresolved_arm", []setOpColType{dec(9, 2),
 			{typ: parquet.TypeDecimal, known: true}}, 0, 0, false},
 		{"non_numeric_arm", []setOpColType{dec(9, 2),
@@ -252,18 +253,39 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 		}
 	})
 
-	// An arm whose (p,s) nothing resolved leaves EVERY arm alone: a scale
-	// guessed here would move values by a power of ten (#533's own failure
-	// mode), and the residual is tracked as #551.
-	t.Run("an_unresolved_arm_moves_nothing", func(t *testing.T) {
+	// An arm whose (p,s) nothing resolved is REFUSED, naming the column.
+	//
+	// Leaving every arm alone was the answer until #551: a scale guessed here
+	// would move values by a power of ten (#533's own failure mode), but so
+	// does leaving them — each arm writes its own .wshf at its own scale and
+	// the reader of both takes the first header's. ADR-0012 item 12 records
+	// that as "the answer is WRONG — not refused"; this is the refusal it
+	// calls the honest interim.
+	t.Run("an_unresolved_arm_is_refused", func(t *testing.T) {
 		plans := []setOpArmPlan{arm(dec(9, 2)), arm(setOpColType{typ: parquet.TypeDecimal, known: true})}
-		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err != nil {
-			t.Fatalf("reconcile: %v", err)
+		err := reconcileSetOpArmTypes(plans, []string{"v"})
+		if err == nil {
+			t.Fatalf("an unresolvable DECIMAL target was accepted; the arms then keep their own scales, "+
+				"which is a silently wrong answer (#551). coercions: %+v / %+v",
+				plans[0].coerce, plans[1].coerce)
 		}
-		for i, p := range plans {
-			if len(p.coerce) != 0 {
-				t.Errorf("arm %d got %d coercions from an unresolvable target: %+v", i, len(p.coerce), p.coerce)
-			}
+		if !strings.Contains(err.Error(), `"v"`) {
+			t.Errorf("the refusal must name the column it is about, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "arm 2") {
+			t.Errorf("the refusal must localize the arm whose (p,s) is unresolved, got: %v", err)
+		}
+	})
+
+	// The control: BOTH arms unresolved is refused too. Two arms that cannot
+	// state a scale are not evidence that they share one — the values arrive
+	// at whatever scale their own files declare, and the reader takes the
+	// first.
+	t.Run("every_arm_unresolved_is_refused_too", func(t *testing.T) {
+		unres := setOpColType{typ: parquet.TypeDecimal, known: true}
+		plans := []setOpArmPlan{arm(unres), arm(unres)}
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err == nil {
+			t.Fatal("two unresolvable DECIMAL arms were accepted")
 		}
 	})
 }
