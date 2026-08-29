@@ -2600,60 +2600,86 @@ func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.Order
 			}
 		}
 
-		va := extractFloat64(col, a, schema[ci].Type)
-		vb := extractFloat64(col, bIdx, schema[ci].Type)
-
 		var cmp int
-		switch {
-		case va < vb:
-			cmp = -1
-		case va > vb:
-			cmp = 1
+		switch schema[ci].Type {
+		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+			// #642: these types are backed by an exact int64 carrier — plain
+			// bigint, nanosecond timestamps and durations, and the 32-bit IPv4
+			// / 48-bit MAC integers. Routing them through extractFloat64 ->
+			// float64(Int64Data) loses precision above float64's 2^53
+			// exact-integer range: a plain bigint (snowflake IDs, hashes,
+			// large counters) or a nanosecond timestamp (~1.7e18) can exceed
+			// it, so two distinct keys 1 apart collapse to the SAME float64
+			// and TIE in the numeric arms below — and slices.SortFunc (not
+			// stable) then returns an ARBITRARY order, a silent wrong answer,
+			// while the single-process sortCompareInt64NoNulls orders them
+			// exactly. Compare the exact int64 carrier, matching that
+			// single-process order (two-path agreement). #548 fixed this same
+			// comparator for the non-numeric types; this closes the whole
+			// int64-carrier remainder. (Int32/Port/Protocol/Date are 32-bit,
+			// IPv4/MAC 32/48-bit, and float32->float64 is lossless, so those
+			// stay on the extractFloat64 path safely — all below 2^53.)
+			ia, ib := col.Int64Data[a], col.Int64Data[bIdx]
+			switch {
+			case ia < ib:
+				cmp = -1
+			case ia > ib:
+				cmp = 1
+			}
 		default:
-			// extractFloat64 has no numeric reading for a text- or
-			// carrier-backed column, so va and vb are both 0 here regardless
-			// of the row's actual value — this default arm is the ONLY place
-			// those columns are compared at all.
-			switch schema[ci].Type {
-			case parquet.TypeString:
-				sa := extractStringValue(col, a)
-				sb := extractStringValue(col, bIdx)
-				cmp = strings.Compare(sa, sb)
-			case parquet.TypeCIDR:
-				// PostgreSQL's inet order (#492), not the stored text's byte
-				// order: without this arm a probe-split gather's `ORDER BY
-				// c_cidr` fell through to a no-op tie on every row (va==vb==0
-				// above), which is not even the OLD text-order answer — it is
-				// an ARBITRARY order, since slices.SortFunc is not guaranteed
-				// stable. kernel.CidrOrderKey is the same re-key ORDER BY,
-				// GROUP BY and MIN/MAX already use (#520).
-				sa := kernel.CidrOrderKey(extractStringValue(col, a))
-				sb := kernel.CidrOrderKey(extractStringValue(col, bIdx))
-				cmp = strings.Compare(sa, sb)
-			case parquet.TypeBytes, parquet.TypeUUID, parquet.TypeIPv6:
-				// #548: byte order. These types' on-wire form is stored as
-				// canonical bytes (BYTES raw, UUID 16-byte, IPv6 16-byte),
-				// which compare bytewise the same way the single-process
-				// sortCompareStringNoNulls kernel orders them.
-				sa := extractStringValue(col, a)
-				sb := extractStringValue(col, bIdx)
-				cmp = strings.Compare(sa, sb)
-			case parquet.TypeBool:
-				// #548: false < true.
-				ba, bb := col.BoolData[a], col.BoolData[bIdx]
-				switch {
-				case !ba && bb:
-					cmp = -1
-				case ba && !bb:
-					cmp = 1
+			va := extractFloat64(col, a, schema[ci].Type)
+			vb := extractFloat64(col, bIdx, schema[ci].Type)
+			switch {
+			case va < vb:
+				cmp = -1
+			case va > vb:
+				cmp = 1
+			default:
+				// extractFloat64 has no numeric reading for a text- or
+				// carrier-backed column, so va and vb are both 0 here
+				// regardless of the row's actual value — this default arm is
+				// the ONLY place those columns are compared at all.
+				switch schema[ci].Type {
+				case parquet.TypeString:
+					sa := extractStringValue(col, a)
+					sb := extractStringValue(col, bIdx)
+					cmp = strings.Compare(sa, sb)
+				case parquet.TypeCIDR:
+					// PostgreSQL's inet order (#492), not the stored text's byte
+					// order: without this arm a probe-split gather's `ORDER BY
+					// c_cidr` fell through to a no-op tie on every row (va==vb==0
+					// above), which is not even the OLD text-order answer — it is
+					// an ARBITRARY order, since slices.SortFunc is not guaranteed
+					// stable. kernel.CidrOrderKey is the same re-key ORDER BY,
+					// GROUP BY and MIN/MAX already use (#520).
+					sa := kernel.CidrOrderKey(extractStringValue(col, a))
+					sb := kernel.CidrOrderKey(extractStringValue(col, bIdx))
+					cmp = strings.Compare(sa, sb)
+				case parquet.TypeBytes, parquet.TypeUUID, parquet.TypeIPv6:
+					// #548: byte order. These types' on-wire form is stored as
+					// canonical bytes (BYTES raw, UUID 16-byte, IPv6 16-byte),
+					// which compare bytewise the same way the single-process
+					// sortCompareStringNoNulls kernel orders them.
+					sa := extractStringValue(col, a)
+					sb := extractStringValue(col, bIdx)
+					cmp = strings.Compare(sa, sb)
+				case parquet.TypeBool:
+					// #548: false < true.
+					ba, bb := col.BoolData[a], col.BoolData[bIdx]
+					switch {
+					case !ba && bb:
+						cmp = -1
+					case ba && !bb:
+						cmp = 1
+					}
+				case parquet.TypeDecimal:
+					// #548: numeric order via the Int128 carrier, respecting
+					// scale. A DECIMAL column's scale is constant across its rows,
+					// so a direct Int128 compare IS the exact decimal order — no
+					// float rounding, no text render (the engine's own decimal
+					// comparison, per the task's Int128 mandate).
+					cmp = col.DecimalData.Data[a].Cmp(col.DecimalData.Data[bIdx])
 				}
-			case parquet.TypeDecimal:
-				// #548: numeric order via the Int128 carrier, respecting
-				// scale. A DECIMAL column's scale is constant across its rows,
-				// so a direct Int128 compare IS the exact decimal order — no
-				// float rounding, no text render (the engine's own decimal
-				// comparison, per the task's Int128 mandate).
-				cmp = col.DecimalData.Data[a].Cmp(col.DecimalData.Data[bIdx])
 			}
 		}
 		if ob.Desc {
