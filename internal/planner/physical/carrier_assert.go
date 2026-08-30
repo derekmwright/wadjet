@@ -67,7 +67,118 @@ func assertCarrierSchemaResolves(stages []Stage) error {
 			}
 		}
 	}
+	return assertAggregateInputsResolve(stages, idx)
+}
+
+// assertAggregateInputsResolve refuses a plan whose aggregate reads an
+// ARGUMENT expression its own input cannot supply.
+//
+// The same question assertCarrierSchemaResolves asks of a carried Filter or
+// Project, asked of the third field that travels as TEXT and is compiled at the
+// worker: AggSpec.InputExpr, which buildAggInputProjection materializes ahead
+// of HashAggregate. It is silent for exactly the same reason — `expr.ColRef`
+// answers nil for a name it cannot resolve, so the pre-projection writes NULL
+// into every row and the aggregate returns a number that is wrong rather than
+// missing. `SUM(CASE WHEN s = 'x' THEN twice ELSE 0 END)` over a derived table
+// computing `twice` came back as the total of its ELSE branch (#702).
+//
+// respellAggInputExpr is what makes those names resolve; this is the backstop
+// for the shapes it does not reach — a reference inside a node kind the
+// rewriter does not descend into, or a rename below a producer the alias walk
+// stops at. Refusing loses the DAG's parallelism for such a query; answering it
+// with the wrong number loses the query.
+//
+// Its INPUT is the aggregate's dependency, not the aggregate's own output, so
+// it needs a different schema from carrierInputColumns'. Only the PARTIAL
+// aggregate is checked: a final or merge aggregate reads its partials'
+// OUTPUTS, where an InputExpr is already materialized under InputCol and
+// re-resolving the text would be asking the wrong question. Join, union and
+// exchange-fed inputs are skipped by emittedThroughPassThrough / the
+// modelled check, the same exclusions the ADR names.
+func assertAggregateInputsResolve(stages []Stage, idx map[string]int) error {
+	for i := range stages {
+		s := &stages[i]
+		specs, emitted, ok := aggregateStageInputs(stages, idx, s)
+		if !ok {
+			continue
+		}
+		for _, a := range specs {
+			if a.InputExpr == "" {
+				continue
+			}
+			if missing := unresolvableColumnRefs(a.InputExpr, emitted); len(missing) > 0 {
+				return fmt.Errorf("native-DAG: stage %s (%s) aggregates %s(%s) and its input "+
+					"carries no %v — the pre-projection would write NULL into every row and "+
+					"the aggregate would answer a WRONG NUMBER rather than fail (#702); "+
+					"input: %v", s.ID, s.Type, a.Func, a.InputExpr, missing,
+					sortedEmittedNames(emitted))
+			}
+		}
+	}
 	return nil
+}
+
+// aggregateStageInputs pairs a stage's PARTIAL aggregate specs with the
+// columns their pre-projection is compiled against, for the two stage shapes
+// that run one: a standalone aggregate stage, whose input is its dependency's
+// stream, and a FUSED scan-aggregate, whose input is the scan's own read set
+// in the same fragment.
+//
+// ok=false for everything else, which includes the shapes a name check cannot
+// judge: a final or merge aggregate (its InputExpr is already materialized
+// upstream) and an aggregate over a join or a union (its input is the
+// qualified union of two sides).
+func aggregateStageInputs(stages []Stage, idx map[string]int, s *Stage) ([]AggSpec, map[string]string, bool) {
+	if s.Type == StageScan && len(s.FusedAggSpecs) > 0 {
+		emitted := stageScanReadSet(s)
+		if len(emitted) == 0 {
+			return nil, nil, false
+		}
+		return s.FusedAggSpecs, emitted, true
+	}
+	if s.Type != StageAggregate || len(s.AggSpecs) == 0 || len(s.Dependencies) != 1 {
+		return nil, nil, false
+	}
+	depIdx, ok := idx[s.Dependencies[0]]
+	if !ok {
+		return nil, nil, false
+	}
+	dep := &stages[depIdx]
+	if !aggregateInputIsModelled(dep.Type) {
+		return nil, nil, false
+	}
+	emitted := emittedThroughPassThrough(stages, idx, dep)
+	if len(emitted) == 0 {
+		return nil, nil, false
+	}
+	return s.AggSpecs, emitted, true
+}
+
+// stageScanReadSet is the column set a fused scan-aggregate's pre-projection
+// sees: the SCAN's read set, before its own aggregate narrows anything. It is
+// deliberately not stageEmittedColumns, which answers the fused stage's
+// OUTPUT — the group keys and aggregate outputs, which is what a consumer
+// above reads and not what the pre-projection is compiled against.
+func stageScanReadSet(s *Stage) map[string]string {
+	out := make(map[string]string, len(s.Columns))
+	for _, c := range s.Columns {
+		if c == "" {
+			continue
+		}
+		out[strings.ToLower(c)] = c
+	}
+	return out
+}
+
+// aggregateInputIsModelled reports whether a stage's output columns can be
+// enumerated well enough to judge what an aggregate above it can read.
+func aggregateInputIsModelled(typ string) bool {
+	switch typ {
+	case StageScan, StageSort, StageMergeSort, StageLimit, StageWindow, StageProject,
+		StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
+		return true
+	}
+	return false
 }
 
 // assertGatherOutputIsReachable refuses a plan whose gather renames a source

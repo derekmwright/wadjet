@@ -1,6 +1,8 @@
 package physical
 
 import (
+	"strings"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
@@ -36,62 +38,72 @@ func respellWindowKeyExprs(specs []ProjectExprSpec, child *logical.Node) []Proje
 }
 
 // respellDerivedAliasRefs replaces every column reference naming a derived
-// table's or CTE's SELECT-list alias with the source column the DAG's streams
-// carry. Copy-on-write over the node kinds an expression key can hold; an
-// unrecognized kind is left alone, which keeps today's behaviour rather than
-// inventing a different expression.
+// table's or CTE's SELECT-list RENAME with the source column the DAG's streams
+// carry. Copy-on-write; a reference the alias walk does not resolve comes back
+// exactly as it was.
+//
+// It resolves a rename only. A COMPUTED alias has no source column to point at
+// — `derivedAliasSourceColumn` answers "" for one — and the expression that
+// defines it is what respellAggInputExpr substitutes instead.
 func respellDerivedAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
-	switch e := n.(type) {
-	case nil:
-		return nil, false
-	case *plansql.ColRef:
-		src := derivedAliasSourceColumn(e.String(), child)
-		if src == "" && e.Table == "" {
-			src = derivedAliasSourceColumn(e.Column, child)
+	out, changed, _ := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+		src := derivedAliasSourceColumn(ref.String(), child)
+		if src == "" && ref.Table == "" {
+			src = derivedAliasSourceColumn(ref.Column, child)
 		}
 		if src == "" {
-			return n, false
+			return nil, false
 		}
 		return &plansql.ColRef{Column: cleanExpr(src)}, true
-	case *plansql.BinaryOp:
-		l, lc := respellDerivedAliasRefs(e.Left, child)
-		r, rc := respellDerivedAliasRefs(e.Right, child)
-		if !lc && !rc {
-			return n, false
-		}
-		return &plansql.BinaryOp{Left: l, Op: e.Op, Right: r}, true
-	case *plansql.UnaryOp:
-		in, c := respellDerivedAliasRefs(e.Inner, child)
-		if !c {
-			return n, false
-		}
-		return &plansql.UnaryOp{Op: e.Op, Inner: in}, true
-	case *plansql.ParenNode:
-		in, c := respellDerivedAliasRefs(e.Inner, child)
-		if !c {
-			return n, false
-		}
-		return &plansql.ParenNode{Inner: in}, true
-	case *plansql.CastNode:
-		in, c := respellDerivedAliasRefs(e.Inner, child)
-		if !c {
-			return n, false
-		}
-		return &plansql.CastNode{Inner: in, TypeName: e.TypeName}, true
-	case *plansql.FuncCallNode:
-		args := make([]plansql.Node, len(e.Args))
-		changed := false
-		for i, a := range e.Args {
-			na, c := respellDerivedAliasRefs(a, child)
-			args[i] = na
-			changed = changed || c
-		}
-		if !changed {
-			return n, false
-		}
-		out := *e
-		out.Args = args
-		return &out, true
+	})
+	return out, changed
+}
+
+// respellAggInputExpr rewrites an aggregate's ARGUMENT expression so that every
+// column reference in it names what the stage BELOW the aggregate really
+// emits.
+//
+// walkStages emits no stage for an ordinary Project, so a derived table's
+// SELECT list never happens on the DAG (ADR-0025). The aggregate's argument is
+// shipped to the worker as TEXT and compiled there against the batch the stage
+// hands it — which carries the SCAN's columns, not the derived table's names.
+// `SUM(CASE WHEN s = 'x' THEN twice ELSE 0 END)` over
+// `(SELECT s, id * 2 AS twice FROM t)` therefore read `twice` off a batch that
+// has no such column, `expr.ColRef.Eval` answered nil for every row, and the
+// SUM came back as the total of the CASE's ELSE branch — 0 where PostgreSQL
+// answers 2. It is TPC-H Q08's exact shape and it is type-independent: a plain
+// rename triggers it too, and a rename that SHADOWS a base column answered a
+// different wrong number rather than a zero (#702).
+//
+// resolveAggInputName already does this for an argument that IS a name; this
+// is the same resolution applied one level down, to each reference inside an
+// argument that is an EXPRESSION. Both outcomes it can report are used:
+//
+//	a RENAME       — the reference becomes the source column;
+//	a COMPUTED     — the reference becomes the expression that defines it,
+//	  alias          PARENTHESIZED, because the definition is substituted into
+//	                 a larger expression and `id * 2` spliced bare into `x * 3`
+//	                 would re-associate.
+//
+// The single-process pipeline runs that Project as a real operator, so it is
+// already right and this rewrite is DAG-only: it is applied to the stage spec's
+// text, never to the logical node the local engine executes.
+func respellAggInputExpr(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
+	if n == nil || child == nil {
+		return n, false
 	}
-	return n, false
+	out, changed, _ := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+		resolved, expr, _, renamed := resolveAggInputName(ref.String(), child)
+		if !renamed {
+			return nil, false
+		}
+		if expr != nil {
+			return &plansql.ParenNode{Inner: expr}, true
+		}
+		if strings.EqualFold(resolved, ref.String()) {
+			return nil, false
+		}
+		return &plansql.ColRef{Column: cleanExpr(resolved)}, true
+	})
+	return out, changed
 }

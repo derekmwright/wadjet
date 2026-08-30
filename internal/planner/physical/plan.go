@@ -5503,7 +5503,19 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// pre-projected exactly like a computed argument (#568).
 				_, bare := agg.InputExpr.(*plansql.ColRef)
 				if !bare || astIsFieldPath(agg.InputExpr, inputColDecls(exprCols)) {
-					spec.InputExpr = agg.InputExpr.String()
+					// Every reference INSIDE the expression gets the same
+					// resolution resolveAggInputName gave the argument as a
+					// whole. Without it the worker compiles the text against a
+					// batch carrying the SCAN's columns and a derived name
+					// reads NULL on every row — TPC-H Q08's shape, silently 0
+					// (#702). DAG-only: this rewrites the spec's TEXT, not the
+					// logical node the single-process pipeline runs, where the
+					// Project below is a real operator and the alias is real.
+					stageExpr := agg.InputExpr
+					if respelled, ok := respellAggInputExpr(stageExpr, exprCols); ok {
+						stageExpr = respelled
+					}
+					spec.InputExpr = stageExpr.String()
 					// And the type that expression evaluates into, since
 					// the worker builds the pre-aggregate projection from
 					// the text alone and has no catalog to consult.
