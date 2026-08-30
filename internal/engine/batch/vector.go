@@ -1933,6 +1933,23 @@ func (v *Vector) WriteNullAt(di int) {
 //
 // The scaling is checked: an integer too large to carry at this scale is
 // 22003, never a wrapped number.
+//
+// Two limits it shares with SetValueChecked, both recorded rather than fixed
+// because no SQL surface reaches either today:
+//
+//   - A box of a type a DECIMAL column cannot take at all — a bool, a []byte —
+//     falls through to SetValue, whose mismatch() PANICS. The query boundary
+//     recovers it, so a client sees an internal error rather than PostgreSQL's
+//     42804 datatype_mismatch. Nothing in the SQL layer produces such a box for
+//     a DECIMAL output: the type fold declines for every non-numeric arm, so
+//     the vector would not be a DECIMAL one.
+//   - Neither writer enforces the DECLARED PRECISION, only the scale, because
+//     batch.DecimalColumn carries Scale and no precision. So a value inside the
+//     Int128 but past the type's own 10^p band is stored:
+//     `GREATEST(numeric(38,30), 100000000::bigint)` writes 39 digits under a
+//     type capped at 38. ADR-0024 item 4 makes the declared precision the bound
+//     that matters, and the set-operation coercion is the only door that
+//     currently enforces it (physical.setOpCheckedDecimalText).
 func (v *Vector) SetComputedChecked(i int, val any) error {
 	if v == nil || v.Type != TypeDecimal || val == nil {
 		return v.SetValueChecked(i, val)

@@ -759,6 +759,21 @@ func wireCorpus() []wireCase {
 			sql: `SELECT NULLIF(d_2, 0) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "DecimalChoiceNullifIntegerLiteralZeroRows",
 			sql: `SELECT NULLIF(d_2, 0) AS v FROM dec_probe WHERE d_key = -1`},
+		// The INT-FIRST direction, which the three entries above cannot see:
+		// they all put the DECIMAL in argument 0, where NULLIF's typmod comes
+		// from. With the DECIMAL in argument 1 the TYPE folds to numeric while
+		// argument 0 carries no numeric modifier, so PostgreSQL sends -1 —
+		// and wadjet sent the folded (p,s) until the modifier was checked
+		// against the column's own declaration. Invisible before #695, when
+		// the column declared int8 and had no numeric modifier at all.
+		{name: "DecimalChoiceNullifIntegerColumnFirst",
+			sql:  `SELECT NULLIF(d_key, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+		{name: "DecimalChoiceNullifIntegerLiteralFirst",
+			sql:  `SELECT NULLIF(0, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+		{name: "DecimalChoiceNullifIntegerColumnFirstZeroRows",
+			sql: `SELECT NULLIF(d_key, d_2) AS v FROM dec_probe WHERE d_key = -1`},
 		{name: "MinOverDecimalColumn", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key IN (1, 2, 3)`},
 		{name: "MinOverDecimalColumnZeroRows", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key = -1`},
 		{name: "SumOverDecimalColumn", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key IN (1, 2, 3)`},

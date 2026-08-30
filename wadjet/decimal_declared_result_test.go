@@ -1243,3 +1243,54 @@ func TestCastTypmodIsUnconstrained(t *testing.T) {
 		}
 	}
 }
+
+// TestNullifTypmodFollowsArgumentZeroNotTheFoldedType is the wire-only defect
+// #695's re-review found, and it exists only because the TYPE fold learned to
+// widen: `NULLIF(i64, d92)` now DECLARES DECIMAL(21,2) (PostgreSQL types it
+// numeric), and its TYPMOD folds over argument 0 alone — a bare INT64 column,
+// which carries no numeric modifier. Those two answers disagree, PostgreSQL
+// sends typmod -1, and wadjet sent numeric(21,2). On the parent the column
+// declared INT64, so there was no numeric modifier to get wrong.
+//
+// The guard is general rather than NULLIF-shaped: pgTypeMod sends the DECLARED
+// (p,s) whenever the fold says "keeps", so a fold answering a modifier the
+// column does not declare puts a number on the wire that came from nowhere.
+// projectionKeepsTypmod compares the two and declares unconstrained when they
+// differ.
+//
+// Every row verified live against PostgreSQL 17.11 with \gdesc.
+func TestNullifTypmodFollowsArgumentZeroNotTheFoldedType(t *testing.T) {
+	db := ddrOpen(t)
+	for _, tc := range []struct {
+		sql string
+		// wantUnconstrained is PostgreSQL's answer: true where \gdesc says
+		// plain `numeric`, false where it names (p,s).
+		wantUnconstrained   bool
+		wantPrec, wantScale int
+	}{
+		// INT-FIRST: argument 0 carries no numeric modifier, so the result
+		// carries none — whatever the TYPE fold resolved.
+		{"SELECT NULLIF(id, a) AS v FROM " + ddrTable + " WHERE id = 1", true, 21, 2},
+		{"SELECT NULLIF(0, a) AS v FROM " + ddrTable + " WHERE id = 1", true, 9, 2},
+		// DECIMAL-FIRST: argument 0 carries its own, and NULLIF is the one
+		// construct that keeps it (GREATEST/COALESCE over the same pair drop
+		// to -1 because they fold every argument).
+		{"SELECT NULLIF(a, id) AS v FROM " + ddrTable + " WHERE id = 1", false, 9, 2},
+		{"SELECT NULLIF(a, b) AS v FROM " + ddrTable + " WHERE id = 2", false, 9, 2},
+		// The controls: these fold every argument, so a non-DECIMAL one makes
+		// them disagree and drop the modifier on both engines.
+		{"SELECT COALESCE(id, a) AS v FROM " + ddrTable + " WHERE id = 1", true, 21, 2},
+		{"SELECT GREATEST(id, a) AS v FROM " + ddrTable + " WHERE id = 1", true, 21, 2},
+	} {
+		res := ddrQuery(t, db, tc.sql)
+		m := res.ColumnMetas[0]
+		if m.TypeID != parquet.TypeDecimal || m.Precision != tc.wantPrec || m.Scale != tc.wantScale {
+			t.Errorf("%s declared %s(%d,%d), want DECIMAL(%d,%d)",
+				tc.sql, m.TypeID, m.Precision, m.Scale, tc.wantPrec, tc.wantScale)
+		}
+		if m.WireUnconstrained != tc.wantUnconstrained {
+			t.Errorf("%s: WireUnconstrained = %v, want %v — the modifier a column carries "+
+				"must be the one it declares", tc.sql, m.WireUnconstrained, tc.wantUnconstrained)
+		}
+	}
+}

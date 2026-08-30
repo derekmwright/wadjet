@@ -310,6 +310,20 @@ accepts them: `DecimalTextAt` still refuses, so nothing value-producing can
 reach a bound by accident, and `ParseDecimalStringChecked` turns the three
 into the `22003` above.
 
+**Two limits of the CHECKED WRITERS, recorded 2026-08-29 with #695's review.**
+Neither is reachable from SQL today and neither is claimed closed. A box of a
+type a DECIMAL column cannot take at all — a bool, a `[]byte` — falls through
+to `SetValue`, whose `mismatch()` PANICS, so the query boundary reports an
+internal error where PostgreSQL raises `42804 datatype_mismatch`; the type fold
+declines for every non-numeric arm, so no such box reaches a DECIMAL vector
+through a query. And neither writer enforces the DECLARED PRECISION, only the
+scale, because `batch.DecimalColumn` carries `Scale` and no precision: a value
+inside the Int128 but past the type's own `10^p` band is stored, so
+`GREATEST(numeric(38,30), 100000000::bigint)` writes 39 digits under a type
+capped at 38. Item 4 makes the declared precision the bound that matters and
+the set-operation coercion (`physical.setOpCheckedDecimalText`) is the only
+door enforcing it today.
+
 **What the 22003 covers today, and what it does not.** It covers every site
 that produces a value through the checked reader: `ParseDecimalStringChecked`,
 `Vector.SetValueChecked`, `FromRowsChecked`, and through them the

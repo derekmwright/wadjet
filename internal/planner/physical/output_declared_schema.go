@@ -222,7 +222,7 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 	if out := setOpWireUnconstrainedDecimal(root); out != nil {
 		return out
 	}
-	projs, childTypes, _, ok := declaredProjectionInputs(root)
+	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
 	if !ok {
 		return nil
 	}
@@ -244,7 +244,7 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 		// aggregate call. An entry for a column that turns out not to be
 		// DECIMAL is vacuous: pgTypeMod consults this only on the DECIMAL
 		// arm, and every other type's modifier is -1 already.
-		if projectionKeepsTypmod(proj, childTypes, computed) {
+		if projectionKeepsTypmod(proj, childTypes, computed, strictInt) {
 			continue
 		}
 		if out == nil {
@@ -258,7 +258,18 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 // projectionKeepsTypmod reports whether one output projection carries a real
 // PostgreSQL type modifier — select_common_typmod over what it is resolved
 // from.
-func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map[string]bool) bool {
+//
+// The fold's ANSWER is checked against the column's own DECLARATION, and that
+// check is not decoration: pgTypeMod sends the DECLARED (p,s) whenever this
+// says "keeps", so a fold that answers a modifier the column does not declare
+// puts a number on the wire that came from nowhere. `NULLIF(i64, d92)` is that
+// shape. Its TYPE folds over both arguments and resolves DECIMAL(21,2)
+// (ADR-0024 item 2, #695); its TYPMOD folds over argument 0 alone, which is a
+// bare INT64 column and carries the "no numeric modifier" answer (0,0). Those
+// two disagree, PostgreSQL sends -1, and wadjet sent numeric(21,2). It was
+// invisible until the type fold learned to widen, because the column used to
+// declare INT64 and there was no numeric modifier to get wrong.
+func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map[string]bool, strictInt map[string]bool) bool {
 	if proj.IsAgg {
 		// An aggregate call. PostgreSQL never carries its argument's typmod
 		// through one.
@@ -270,8 +281,17 @@ func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map
 		// computed it.
 		return !computed[strings.ToLower(sourceRefName(proj))]
 	}
-	_, _, ok := declaredTypmod(proj.ASTExpr, decls, computed)
-	return ok
+	p, sc, ok := declaredTypmod(proj.ASTExpr, decls, computed)
+	if !ok {
+		return false
+	}
+	d := declaredProjectionDecl(proj, decls, strictInt)
+	if d.ID != parquet.TypeDecimal || !d.DecKnown {
+		// Not a DECIMAL column. pgTypeMod answers -1 for every other type
+		// whatever this says, so there is nothing to disagree about.
+		return true
+	}
+	return p == d.Precision && sc == d.Scale
 }
 
 // declaredTypmod is PostgreSQL's select_common_typmod over an expression
