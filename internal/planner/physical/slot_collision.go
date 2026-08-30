@@ -8,7 +8,8 @@ import (
 )
 
 // renameCollidingSlots renumbers the planner's own hidden slots past any
-// STORED column of the same name.
+// STORED column of the same name, and past a slot ANOTHER BLOCK of the same
+// query already minted.
 //
 // A table written before the namespace was reserved — or by any binary that
 // did not enforce it — may carry a column called `__win_0`. Such a table stays
@@ -25,15 +26,38 @@ import (
 // the planner on the other side of it. Renumbering the SLOT is the repair,
 // because the stored column is the one the user can see and name.
 //
+// The SECOND collision is between two blocks of one query (#747). The window
+// slot counter lives in `logical.BuildFromSelectWithCTEs`, which recurses per
+// SELECT BLOCK, so every block starts at zero and two sibling subqueries mint
+// the SAME `__win_0`:
+//
+//	SELECT p.w AS pw, q.w AS qw
+//	  FROM (SELECT id, SUM(b) OVER () AS w FROM t) p
+//	  JOIN (SELECT id, SUM(a) OVER () AS w FROM t) q ON p.id = q.id
+//	-- PostgreSQL pw=49.2400 qw=52.9900; the DAG answered p's window TWICE
+//
+// Both arms carry a column called `__win_0` into the join, the projection
+// above it resolves each reference to that one name, and one window's value
+// is published under both output columns. Three siblings collapsed on EVERY
+// path, single-process included, because the third arm's slot won.
+//
+// ADR-0025 recorded the opposite — "the blocks' slots are already distinct,
+// the allocator is per query" — and no fixture attempted it, which is method
+// 10 of the correctness protocol exactly. The allocator is per BLOCK; this is
+// the pass that makes the claim true, at the first point where the whole
+// query's slots are visible in one tree.
+//
 // It runs after AnnotateScanColumns, which is what puts a table's real column
 // list on the Scan node; before that pass there is no schema to collide with.
+// It is idempotent: a second run sees slots that are already distinct and
+// renames nothing.
 func renameCollidingSlots(root *logical.Node) {
 	stored := map[string]bool{}
 	collectStoredNames(root, stored)
-	if len(stored) == 0 {
-		return
-	}
-	// Only a stored name INSIDE a reserved family can collide with a slot.
+	// Two windows minting one name is the sibling collision; a stored name
+	// inside a reserved family is the #694 one. Either makes the pass hot.
+	uses := map[string]int{}
+	countWindowSlotNames(root, uses)
 	hot := false
 	for name := range stored {
 		if plansql.ReservedSlotFamily(name) != "" {
@@ -42,7 +66,15 @@ func renameCollidingSlots(root *logical.Node) {
 		}
 	}
 	if !hot {
-		return // the overwhelmingly common case, one map walk
+		for _, n := range uses {
+			if n > 1 {
+				hot = true
+				break
+			}
+		}
+	}
+	if !hot {
+		return // the overwhelmingly common case, two map walks
 	}
 	// taken is every window-slot name this QUERY already uses — the ones the
 	// builder minted, renamed or not — as well as the stored ones. Searching
@@ -78,6 +110,13 @@ func renameCollidingSlots(root *logical.Node) {
 	// sees it — and a node with TWO OR MORE children is the BOUNDARY: it
 	// applies each child's map to that child alone and returns nothing, so a
 	// sibling's map can never reach across.
+	//
+	// claimed is the FIRST block to mint each slot, in walk order. It keeps
+	// one occurrence where it is and moves every later one, so a query with
+	// no collision is untouched and a query with two is renumbered by the
+	// minimum: the first arm's plan, its stage names and its snapshots do not
+	// move because a sibling appeared.
+	claimed := map[string]bool{}
 	var walk func(n *logical.Node) map[string]string
 	walk = func(n *logical.Node) map[string]string {
 		if n == nil {
@@ -89,11 +128,11 @@ func renameCollidingSlots(root *logical.Node) {
 			if len(m) == 0 {
 				continue
 			}
-			applySlotRename(c, m)
+			applySlotRename(c, m, stored)
 			if len(n.Children) > 1 {
 				// A join, a set operation: consume the arm's map here rather
 				// than letting it escape into a sibling.
-				applySlotRenameNodeOnly(n, m)
+				applySlotRenameNodeOnly(n, m, stored)
 				continue
 			}
 			for k, v := range m {
@@ -103,24 +142,46 @@ func renameCollidingSlots(root *logical.Node) {
 		if n.Type == logical.NodeWindow {
 			for i := range n.WindowExprs {
 				out := strings.ToLower(n.WindowExprs[i].OutputCol)
-				if out == "" || !stored[out] {
+				if out == "" {
+					continue
+				}
+				if !stored[out] && !claimed[out] {
+					claimed[out] = true
 					continue
 				}
 				fresh, ok := alloc.Next(plansql.SlotWindowOutput)
 				if !ok {
 					continue // the family is exhausted; leave the plan as it was
 				}
+				claimed[strings.ToLower(fresh)] = true
 				pending[out] = fresh
 				n.WindowExprs[i].OutputCol = fresh
 			}
 		}
 		if len(pending) > 0 {
-			applySlotRenameNodeOnly(n, pending)
+			applySlotRenameNodeOnly(n, pending, stored)
 		}
 		return pending
 	}
 	if m := walk(root); len(m) > 0 {
-		applySlotRename(root, m)
+		applySlotRename(root, m, stored)
+	}
+}
+
+// countWindowSlotNames tallies how many window nodes mint each output slot.
+// A name minted twice is the sibling collision; the count is what tells it
+// from the ordinary case without renaming anything.
+func countWindowSlotNames(n *logical.Node, out map[string]int) {
+	if n == nil {
+		return
+	}
+	for _, w := range n.WindowExprs {
+		if w.OutputCol != "" {
+			out[strings.ToLower(w.OutputCol)]++
+		}
+	}
+	for _, c := range n.Children {
+		countWindowSlotNames(c, out)
 	}
 }
 
@@ -142,20 +203,20 @@ func collectStoredNames(n *logical.Node, out map[string]bool) {
 // applySlotRename repoints every reference to a renamed slot: the SELECT-list
 // projection that publishes it, and the nested-window rewrite's ColRef inside
 // a larger expression.
-func applySlotRename(n *logical.Node, rename map[string]string) {
+func applySlotRename(n *logical.Node, rename map[string]string, stored map[string]bool) {
 	if n == nil {
 		return
 	}
-	applySlotRenameNodeOnly(n, rename)
+	applySlotRenameNodeOnly(n, rename, stored)
 	for _, c := range n.Children {
-		applySlotRename(c, rename)
+		applySlotRename(c, rename, stored)
 	}
 }
 
 // applySlotRenameNodeOnly repoints this node's own references and does not
 // descend. It is what lets a rename be applied along the ancestor chain up to
 // its consumer without crossing into a sibling subtree.
-func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string) {
+func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string, stored map[string]bool) {
 	if n == nil {
 		return
 	}
@@ -168,6 +229,36 @@ func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string) {
 		// handed the user's column the window's value and left the window's
 		// output reading a name nothing emitted.
 		if p.SlotSource == "" {
+			// A window WRAPPED in a larger expression (`SUM(a) OVER () + 0`)
+			// has no SlotSource — the builder's nested-window rewrite leaves
+			// only a ColRef to the slot inside ASTExpr — so the loop above
+			// cannot see it, and a sibling collision left that expression
+			// reading the OTHER block's window (#610's spelling of #747).
+			//
+			// Rewriting a bare reference is safe exactly when the old name is
+			// stored NOWHERE in this query: then no source provides it and
+			// the planner's window is its only writer. When it IS stored the
+			// reference may be the user's own column, and moving it is the
+			// #694 defect this pass exists to avoid — so it is left alone,
+			// and the SlotSource branch above still moves the slot.
+			if p.ASTExpr == nil {
+				continue
+			}
+			unstored := map[string]string{}
+			for from, to := range rename {
+				if !stored[strings.ToLower(from)] {
+					unstored[from] = to
+				}
+			}
+			if len(unstored) == 0 {
+				continue
+			}
+			if rewritten, changed := renameColRefs(p.ASTExpr, unstored); changed {
+				p.ASTExpr = rewritten
+				if to, ok := unstored[strings.ToLower(p.Expr)]; ok {
+					p.Expr = to
+				}
+			}
 			continue
 		}
 		to, ok := rename[strings.ToLower(p.SlotSource)]
