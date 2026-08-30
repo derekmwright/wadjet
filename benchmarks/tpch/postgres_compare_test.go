@@ -4683,6 +4683,29 @@ func groupKeySpellingCases() []pgCase {
 		`SELECT l_partkey AS "Pk", COUNT(*) AS n FROM lineitem `+where+
 			` GROUP BY l_partkey ORDER BY 1`)
 
+	// GROUPING COVERAGE under a DELIMITED term, the half this arm can carry.
+	// `GROUP BY "l_partkey + 1"` groups by one COLUMN, so the query written
+	// against THAT column answers and is compared here.
+	//
+	// Its mirror — an expression over the ungrouped `l_partkey` beside the
+	// same term, which PostgreSQL refuses with 42803 — is deliberately NOT
+	// here: this harness bails when the oracle refuses ("the ORACLE refused
+	// this query, so it cannot be ground truth for anything"), which is the
+	// right rule for a VALUE oracle. Refusals are asserted where a refusal
+	// can be, in coordinator §GroupingCoverageUnderADelimitedTerm, on both
+	// execution paths.
+	cov := `(SELECT l_partkey, l_suppkey, l_orderkey AS "l_partkey + 1", ` +
+		`l_linenumber AS "l_partkey plus 1" FROM lineitem ` + where + `) s`
+	add("GroupingCoverageTheDelimitedColumnItselfAnswers",
+		`SELECT "l_partkey + 1" AS k, COUNT(*) AS n FROM `+cov+
+			` GROUP BY "l_partkey + 1" ORDER BY k`)
+	add("GroupingCoverageTheOtherDelimitedColumnAnswers",
+		`SELECT "l_partkey plus 1" AS k, COUNT(*) AS n FROM `+cov+
+			` GROUP BY "l_partkey plus 1" ORDER BY k`)
+	add("GroupingCoverageDelimitedTermBesideItsOwnColumnAndAnAggregate",
+		`SELECT "l_partkey + 1" AS k, SUM(l_suppkey) AS s, COUNT(*) AS n FROM `+cov+
+			` GROUP BY "l_partkey + 1" ORDER BY k`)
+
 	// DISTINCT and an outer aggregate over a derived key: two aggregates
 	// keyed alike, where the outer one reads the inner one's OUTPUT.
 	add("GroupKeyDistinctOverTheKey",

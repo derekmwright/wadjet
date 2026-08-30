@@ -25,6 +25,11 @@ import "github.com/derekmwright/wadjet/internal/storage/parquet"
 const (
 	collSlotTable = "collslot"
 	collSlotCol   = "__gb_expr_0"
+	// The SECOND slot name, stored as well. With only the first taken the
+	// allocator advances exactly ONE step, so the loop body runs once and a
+	// bounded scan is never exercised; with both taken the first key must
+	// reach `__gb_expr_2` and the second `__gb_expr_3`.
+	collSlotCol2 = "__gb_expr_1"
 )
 
 func collSlotSchema() parquet.Schema {
@@ -36,6 +41,7 @@ func collSlotSchema() parquet.Schema {
 		// far from any group key's, so a binding that reads it where it meant
 		// the key (or the other way) is a wrong number, not a coincidence.
 		{Name: collSlotCol, Type: parquet.TypeInt64, Nullable: true},
+		{Name: collSlotCol2, Type: parquet.TypeInt64, Nullable: true},
 	}}
 }
 
@@ -45,10 +51,11 @@ func collSlotData() []map[string]any {
 	rows := make([]map[string]any, 0, 240)
 	for i := 0; i < 240; i++ {
 		rows = append(rows, map[string]any{
-			"id":        int64(i),
-			"g":         int32(i % 3),
-			"h":         int32(i % 4),
-			collSlotCol: int64(1000 + i),
+			"id":         int64(i),
+			"g":          int32(i % 3),
+			"h":          int32(i % 4),
+			collSlotCol:  int64(1000 + i),
+			collSlotCol2: int64(2000 + i),
 		})
 	}
 	return rows

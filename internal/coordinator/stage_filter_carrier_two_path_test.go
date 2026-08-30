@@ -2010,6 +2010,190 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 
+		// GROUPING COVERAGE when the GROUP BY term is a DELIMITED
+		// IDENTIFIER. `GROUP BY "g + 1"` groups by ONE COLUMN and says
+		// nothing about `g`, so `SELECT g + 1` beside it reads an ungrouped
+		// column and PostgreSQL 17 refuses it with 42803. Reading the term's
+		// recorded TEXT as an expression made the walk mark `g` grouped, so
+		// the query answered — 60 rows with a NULL key on the single-process
+		// path and 3 rows on the DAG, one engine disagreeing with the other
+		// about a query neither should answer.
+		//
+		// Both directions are asserted, because a fix that simply refuses
+		// more would pass the first half and break the second.
+		t.Run("GroupingCoverageUnderADelimitedTerm", func(t *testing.T) {
+			gt := gcovTable
+			// (i) the delimited term does NOT group `g`, so an expression
+			// over `g` is 42803 — with COUNT, with SUM of a third column,
+			// with HAVING, and beside a reference to the column itself.
+			t.Run("ExpressionOverAnUngroupedColumnIsRefused", func(t *testing.T) {
+				for _, sql := range []string{
+					`SELECT g + 1 AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" ORDER BY k`,
+					`SELECT g + 1 AS k, SUM(h) AS s FROM %[1]s GROUP BY "g + 1" ORDER BY k`,
+					`SELECT g + 1 AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" HAVING g + 1 > 1 ORDER BY k`,
+					`SELECT "g + 1" AS a, g + 1 AS b, COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" ORDER BY a`,
+					// (iv) the same trap with no arithmetic in the name at
+					// all, so a fix that special-cases operators is visibly
+					// not enough.
+					`SELECT g + 1 AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g plus 1" ORDER BY k`,
+					`SELECT g + 1 AS k, SUM(h) AS s FROM %[1]s GROUP BY "g plus 1" ORDER BY k`,
+				} {
+					q := fmt.Sprintf(sql, gt)
+					for _, arm := range sfcArms(ctx, single, coord) {
+						if _, err := arm.run(q); err == nil {
+							t.Errorf("%s arm ANSWERED a query PostgreSQL refuses with 42803 - "+
+								"a delimited group term does not group the columns its NAME "+
+								"happens to spell\n  SQL: %s", arm.name, q)
+						}
+					}
+				}
+			})
+			// (ii) the delimited term DOES group its own column, so the same
+			// query written against that column answers: 60 distinct values,
+			// one row each.
+			t.Run("TheDelimitedColumnItselfAnswers", func(t *testing.T) {
+				for _, sql := range []string{
+					`SELECT "g + 1" AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" ORDER BY k`,
+					`SELECT "g + 1", COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" ORDER BY 1`,
+					`SELECT "g plus 1" AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g plus 1" ORDER BY k`,
+				} {
+					q := fmt.Sprintf(sql, gt)
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, q)
+						if len(res.Rows) != 60 {
+							t.Errorf("%s arm returned %d rows, want 60\n  SQL: %s",
+								arm.name, len(res.Rows), q)
+						}
+					}
+				}
+			})
+			// (iii) the mirror: an ARITHMETIC term does not group the column
+			// spelled like it, so selecting that column is 42803.
+			t.Run("TheDelimitedColumnUnderAnArithmeticTermIsRefused", func(t *testing.T) {
+				q := fmt.Sprintf(`SELECT "g + 1" AS k, COUNT(*) AS n FROM %s `+
+					`GROUP BY g + 1 ORDER BY k`, gt)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					if _, err := arm.run(q); err == nil {
+						t.Errorf("%s arm ANSWERED a query PostgreSQL refuses with 42803 - the "+
+							"arithmetic term does not group the COLUMN spelled like it"+
+							"\n  SQL: %s", arm.name, q)
+					}
+				}
+			})
+			// The controls. Three that must keep refusing - they were right
+			// before and a coarser fix could leave them right by accident -
+			// and one that must keep ANSWERING, which is what a fix that
+			// simply refused more would break.
+			t.Run("ctl/OtherUngroupedColumnsStillRefuse", func(t *testing.T) {
+				for _, sql := range []string{
+					`SELECT g AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" ORDER BY k`,
+					`SELECT h * 2 AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" ORDER BY k`,
+					`SELECT j AS k, COUNT(*) AS n FROM %[1]s GROUP BY "g + 1" ORDER BY k`,
+				} {
+					q := fmt.Sprintf(sql, gt)
+					for _, arm := range sfcArms(ctx, single, coord) {
+						if _, err := arm.run(q); err == nil {
+							t.Errorf("%s arm ANSWERED an ungrouped reference PostgreSQL "+
+								"refuses\n  SQL: %s", arm.name, q)
+						}
+					}
+				}
+			})
+			t.Run("ctl/TheArithmeticKeyStillAnswers", func(t *testing.T) {
+				q := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n FROM %s `+
+					`GROUP BY g + 1 ORDER BY k`, gt)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, q)
+					if len(res.Rows) != 3 {
+						t.Errorf("%s arm returned %d rows, want 3 - the ordinary shape must "+
+							"not be refused by a coverage rule aimed at delimited terms"+
+							"\n  SQL: %s", arm.name, len(res.Rows), q)
+					}
+				}
+			})
+		})
+
+		// DECIMAL keys, and the two residuals the arc's own typing fix
+		// EXPOSED rather than caused. Both are louder than they were — they
+		// used to answer NULL or collapse — and both are still wrong.
+		t.Run("DecimalKeyOnTheDAG", func(t *testing.T) {
+			// The control first: an INTEGER literal in a key over a renamed
+			// DECIMAL answers on both paths, which is what says the key's
+			// leaves are resolved and typed correctly now.
+			t.Run("ctl/IntegerLiteralAnswersOnBothPaths", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT r1 + 1 AS k, COUNT(*) AS n FROM `+
+					`(SELECT a AS r1 FROM %s) s GROUP BY r1 + 1 ORDER BY k`, dbpTable)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != 5 {
+						t.Errorf("%s arm returned %d rows, want 5\n  SQL: %s",
+							arm.name, len(res.Rows), sql)
+					}
+				}
+			})
+			// #729's family: the DAG declares FLOAT64 for arithmetic whose
+			// value is an exact DECIMAL. A FRACTIONAL literal in the key, and
+			// an outer aggregate over the key, both fail at dispatch where
+			// the single-process path answers PostgreSQL's rows.
+			//
+			// TODO(#729): delete this pin when the DAG declares the DECIMAL.
+			for _, c := range []struct {
+				name, sql  string
+				wantSingle int
+			}{
+				{"FractionalLiteralInTheKey", fmt.Sprintf(
+					`SELECT r1 + 0.5 AS k, COUNT(*) AS n FROM (SELECT a AS r1 FROM %s) s `+
+						`GROUP BY r1 + 0.5 ORDER BY k`, dbpTable), 5},
+				{"OuterAggregateOverTheKey", fmt.Sprintf(
+					`SELECT SUM(k) AS s FROM (SELECT r1 + 1 AS k, COUNT(*) AS c FROM `+
+						`(SELECT a AS r1 FROM %s) s GROUP BY r1 + 1) t`, dbpTable), 1},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					arms := sfcArms(ctx, single, coord)
+					res := sfcRun(t, arms[0], c.sql)
+					if len(res.Rows) != c.wantSingle {
+						t.Errorf("single arm returned %d rows, want %d\n  SQL: %s",
+							len(res.Rows), c.wantSingle, c.sql)
+					}
+					if _, err := arms[1].run(c.sql); err == nil {
+						t.Fatalf("the DAG arm now ANSWERS this; PostgreSQL answers it too and "+
+							"the single-process path already does. #729 is fixed for this "+
+							"shape - assert it and delete the pin\n  SQL: %s", c.sql)
+					}
+				})
+			}
+			// #749: arithmetic over a DECIMAL(38,10) keeps too few decimal
+			// places. The group key REACHES this now (it used to fail to type
+			// at all), so the family inherits it. PostgreSQL keeps scale 10
+			// through `+ 1`; we come back at scale 9, correctly rounded,
+			// which is the hardest kind of wrong to notice.
+			//
+			// TODO(#749): delete this pin when the scale survives.
+			t.Run("WideDecimalKeyLosesScale", func(t *testing.T) {
+				sql := `SELECT dw + 1 AS k, COUNT(*) AS n FROM decagg WHERE dw IS NOT NULL ` +
+					`GROUP BY dw + 1 ORDER BY k LIMIT 1`
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != 1 {
+						t.Fatalf("%s arm returned %d rows, want 1\n  SQL: %s",
+							arm.name, len(res.Rows), sql)
+					}
+					got := fmt.Sprintf("%v", res.Rows[0]["k"])
+					dot := strings.IndexByte(got, '.')
+					if dot < 0 {
+						t.Fatalf("%s arm answered %q with no decimal point\n  SQL: %s",
+							arm.name, got, sql)
+					}
+					if scale := len(got) - dot - 1; scale == 10 {
+						t.Fatalf("%s arm now answers %q at scale 10, which is PostgreSQL's. "+
+							"#749 is fixed - assert the digits and delete this pin\n  SQL: %s",
+							arm.name, got, sql)
+					}
+				}
+			})
+		})
+
 		// The DAG residuals of this family, pinned. Each is pre-existing on
 		// ff7c3f19 and each is the SAME mechanism one layer out: on the
 		// stage DAG a computed key is resolved against the SCAN's schema,

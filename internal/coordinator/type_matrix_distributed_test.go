@@ -408,6 +408,11 @@ func tmdTables() []tmdTable {
 		// cannot stand in for it: none of its columns is in the reserved
 		// namespace, which is the whole shape.
 		{collSlotTable, collSlotSchema(), collSlotData()},
+		// The GROUPING-COVERAGE fixture: delimited columns whose names read
+		// back as something other than a name. Rides along for the same
+		// reason as the fixtures above; only the two-path group-key gate
+		// names it.
+		{gcovTable, gcovSchema(), gcovData()},
 	}, multikeyTables()...)
 }
 
