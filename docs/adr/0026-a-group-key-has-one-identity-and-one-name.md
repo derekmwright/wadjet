@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725)
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended the same day after review — one identity, one SLOT, one published name)
 
 ## Context
 
@@ -78,7 +78,63 @@ is wrong in the more dangerous direction than the defect being fixed.
 keys, as PostgreSQL has them. A node kind the canonicaliser does not know
 keeps its own `String()` — the behaviour every caller had before.
 
-### 2. `plansql.GroupKeyName` is the published name, and both engines use it
+### 2. `plansql.GroupKeyName` is the published name; the SLOT is where the value lives
+
+A derived key is not a column of the aggregate's input, so one of the two
+engines has to materialize it. **It is materialized into a hidden slot —
+`SlotName(SlotGroupKey, N)`, i.e. `__gb_expr_N` — and PUBLISHED under its
+canonical text by a rename at the aggregate's output.** The name a consumer
+uses and the name the value is stored under are two different names on
+purpose.
+
+The first version of this ADR materialized the key under its own canonical
+text and called the resulting collision "possible and accepted". That was
+wrong twice over. It is not rare — any relation carrying a column spelled
+like the key produces it, including one a query mints itself with
+`SELECT c AS "g + 1"` — and the two engines do not even fail the same way,
+so "both behave the same" was false. Measured against PostgreSQL 17 over a
+derived table that renames a column to `"g + 1"`:
+
+| | PG 17 | single-process | stage DAG |
+|---|---|---|---|
+| `SELECT g + 1 AS k, COUNT(*) … GROUP BY g + 1` | 8 rows | **4829 rows**, grouped by the COLUMN | **4829 rows** |
+| `… MAX("g + 1")` | 8 rows | wrong | **loud** |
+| `COUNT(*) AS "G + 1"` beside a `g + 1` key | 8 rows | correct | **wrong** |
+
+The pre-aggregate projection APPENDS on the single-process path and
+`batch.RecordBatch.ColumnIndex` answers with the FIRST exact match, so the
+input column won and the query grouped by it; the worker's projection
+NARROWS, so the key won and shadowed the column an aggregate needed. One
+name, two operators, two different wrong answers.
+
+`__gb_expr_` is in the RESERVED namespace (`planner/physical/reserved_slots.go`):
+a user column, derived-table output or SELECT alias spelled inside it is
+refused with 42601 naming the family, so no query can put a value there and
+the collision is **impossible**, not accepted. That reservation is a
+deliberate divergence from PostgreSQL, which has no reserved column
+namespace — recorded in ADR-0025 — and it is the right trade, because the
+alternative to refusing those queries is not answering them but answering
+them wrongly.
+
+Two keys are NOT materialized, and both matter:
+
+- a key whose expression is a bare column of the input — it is already
+  there, which is every ordinary `GROUP BY c`;
+- a key an aggregate DIRECTLY BELOW already publishes under the same name
+  and identity. `SELECT DISTINCT g + 1 AS k … GROUP BY g + 1` lowers to two
+  aggregates keyed alike, and the outer one reads the inner one's OUTPUT:
+  its recorded expression still says `g + 1` over a `g` that is no longer
+  in scope, so materializing it would evaluate that `g` against a schema
+  without one and collapse the table into a single NULL group. Only an
+  aggregate below counts — a derived table that merely has a column SPELLED
+  like the key carries a different value under that name, which is the
+  collision above.
+
+`groupKeyByIdentity` therefore indexes a key whenever a consumer cannot
+simply NAME it: derived, elided-literal, or published under a text no column
+reference can spell.
+
+### 2b. `plansql.GroupKeyName` is the published name, and both engines use it
 
 A bare column reference is published under its own name with any delimiters
 stripped: `GROUP BY "g + 1"` names the column `g + 1`, not the four tokens
@@ -130,11 +186,19 @@ that works.
   is pinned by `TestExprIdentityIsStable` and its idempotence by
   `TestExprIdentityIsIdempotent`. Changing the rendering is changing what
   two planners agree on.
-- A COLLISION is possible and accepted: a table with a column literally
-  named `g + 1` in a query that also groups by the arithmetic `g + 1`
-  publishes both under one name, and the first wins. Both engines behave
-  the same way, which is the property that matters; the DAG has had this
-  ambiguity since it began naming keys by their text.
+- A COLLISION is IMPOSSIBLE, not accepted. The materialized value lives in
+  the reserved namespace, which no query can spell, so nothing the user
+  writes can be mistaken for it or hidden by it. The earlier draft of this
+  ADR accepted the collision; the review refuted that with a 5-arm matrix
+  (single-process, single-process spilled, DAG, DAG broadcast, DAG spilled)
+  and the position is corrected above.
+- A key a rename Project defines is re-spelled into SOURCE columns for
+  DISPATCH only (`aggStageDispatchKey`): the DAG flattens a rename Project,
+  so `a_b + 1` over `(SELECT c_i32 AS a_b …)` reached the worker spelled
+  over a column the scan does not emit and collapsed the table into ONE
+  NULL group. `aggregateOutputName` deliberately does NOT take that path —
+  it answers what a SORT KEY names, and a sort key is resolved on both
+  engines, of which only one has a dispatch spelling.
 - Not decided here, and filed instead:
   - **#731** — an unquoted identifier is never folded to lower case
     anywhere in the engine, so `GROUP BY G + 1` still computes a key from a
