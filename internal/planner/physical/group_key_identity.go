@@ -107,14 +107,20 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			}
 		}
 	}
-	// ONE allocator for the whole aggregate. A per-key namer is what let two
-	// derived keys land in the same slot: each started at its own index,
-	// stepped past the names in SCOPE, and neither knew what the other had
-	// already taken — so over a table carrying a stored `__gb_expr_0`, key 0
-	// stepped to `__gb_expr_1` and key 1 started there and took it. The
-	// second key then silently carried the first one's value, and a
-	// twelve-group query answered three (ADR-0026).
-	alloc := newGroupKeySlotAllocator(decls, emitted)
+	// ONE allocator for the whole aggregate, from the shared reserved-slot
+	// API. A per-key NAMER is what let two derived keys land in the same
+	// slot: each started at its own index, stepped past the names in SCOPE,
+	// and neither knew what the other had already taken (ADR-0026).
+	//
+	// Seeded from BOTH scope views, because they answer different questions
+	// and a slot has to clear both. inputColDecls says what a bare reference
+	// can name and STOPS at a rename Project; emittedColDecls says what the
+	// input really publishes, which is where a derived table's renames live.
+	// A name visible to only one of them is still a name the slot must not
+	// take.
+	alloc := plansql.NewSlotAllocator()
+	alloc.Seed(declNames(decls)...)
+	alloc.Seed(declNames(emitted)...)
 	out := make([]groupKeyOut, len(agg.GroupBy))
 	for i, gb := range agg.GroupBy {
 		k := groupKeyOut{Name: plansql.NormalizeIdentRef(strings.TrimSpace(gb))}
@@ -139,7 +145,10 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 		k.Identity = plansql.ExprIdentity(e)
 		if _, isLit := e.(*plansql.Lit); isLit && nonLit > 0 {
 			k.Literal = true
-			k.Name = syntheticGroupKeyName(i)
+			// From the SAME allocator as a derived key. A literal's
+			// re-attached column is a hidden slot too, and minting it
+			// outside the allocator is how it would collide with one.
+			k.Name = allocGroupKeySlot(alloc)
 			k.Slot = k.Name
 		} else if !isPlainGroupKey(e, decls) && below[k.Identity] != k.Name {
 			k.Derived = true
@@ -165,22 +174,37 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			// derived table's renames, so "is this name contested" cannot be
 			// answered where the decision is made — and a slot used only
 			// sometimes is a slot that protects only sometimes.
-			k.Slot = alloc(i)
+			k.Slot = allocGroupKeySlot(alloc)
 		}
 		out[i] = k
 	}
 	return out
 }
 
-// syntheticGroupKeyName is the hidden slot a computed GROUP BY key is
-// materialized into, and the name a LITERAL key is re-attached under after
-// being elided from the key set.
+// allocGroupKeySlot takes the next group-key slot from a scope's allocator.
 //
-// It is the RESERVED namespace's group-key family (reserved_slots.go), not a
-// name of this file's invention: a slot is only safe if no query can spell
-// it, and the check that makes that true lives with the family list.
-func syntheticGroupKeyName(i int) string {
-	return SlotName(SlotGroupKey, i)
+// An exhausted family (a scope holding a million `__gb_expr_N` names, which
+// has no known SQL) returns the family's zeroth name rather than an empty
+// string: every caller here is naming a column it is about to create, and a
+// nameless column is a worse failure than a collision that cannot occur.
+func allocGroupKeySlot(a *plansql.SlotAllocator) string {
+	if name, ok := a.Next(plansql.SlotGroupKey); ok {
+		return name
+	}
+	return plansql.SlotName(plansql.SlotGroupKey, 0)
+}
+
+// declNames lists the column names a colDecls describes, for seeding an
+// allocator with the scope it must not collide with.
+func declNames(d colDecls) []string {
+	if len(d.types) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(d.types))
+	for name := range d.types {
+		out = append(out, name)
+	}
+	return out
 }
 
 // groupKeysByIdentity indexes a STAGE's published output names by the
@@ -342,45 +366,4 @@ func groupKeysPublishedBelow(n *logical.Node) map[string]string {
 		n = n.Children[0]
 	}
 	return nil
-}
-
-// newGroupKeySlotAllocator returns the allocator one aggregate mints all of
-// its hidden group-key slots from.
-//
-// A slot is safe only when NOTHING else answers to its name, and there are
-// two ways for something to:
-//
-//   - a name already IN SCOPE. A table may legitimately store a column called
-//     `__gb_expr_0`; the reservation binds where a user MINTS a name, not
-//     where one is read back, so such a column is never refused and the slot
-//     must step around it.
-//   - a slot this same aggregate has ALREADY ISSUED. Skipping only the first
-//     is the bug that made two derived keys share one column: each key
-//     started at its own index and stepped past the stored name, and the
-//     second landed on what the first had just taken.
-//
-// Termination: each call scans upward from its start and returns the first
-// free name. The excluded set is finite — the input schema is finite and at
-// most one slot is issued per key — so a scan bounded by (names in scope +
-// keys + 1) candidates cannot exhaust them, and the bound is asserted rather
-// than assumed. The fallback is unreachable and returns the family's Nth
-// name, which is what a namer with no exclusion would have given.
-//
-// This is deliberately ONE function: the shared reserved-slot API is growing
-// an allocator with these exact semantics, and swapping to it is meant to be
-// a change of this body and nothing else.
-func newGroupKeySlotAllocator(decls, emitted colDecls) func(i int) string {
-	issued := map[string]bool{}
-	return func(i int) string {
-		limit := i + len(decls.types) + len(emitted.types) + len(issued) + 2
-		for n := i; n <= limit; n++ {
-			name := SlotName(SlotGroupKey, n)
-			if decls.has(name) || emitted.has(name) || issued[name] {
-				continue
-			}
-			issued[name] = true
-			return name
-		}
-		return SlotName(SlotGroupKey, i)
-	}
 }

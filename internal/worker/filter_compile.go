@@ -500,47 +500,35 @@ func derivedGroupKeys(groupBy []string, aggs []distributed.AggSpec, filterCols [
 	groupByTypes map[string]int) (map[string]plansql.Node, []string) {
 	derived := make(map[string]plansql.Node)
 	slots := make([]string, len(groupBy))
-	// Every name this fragment BINDS, so a slot can be minted clear of all of
-	// them. A slot is hidden only when nothing else answers to it, and there
-	// are three ways for something to:
+	// The shared allocator, seeded with every name this fragment BINDS. A
+	// slot is hidden only when nothing else answers to it, and there are
+	// three ways for something to:
 	//
 	//   - a group key's own name;
 	//   - an AGGREGATE'S ARGUMENT or output. A stored column may legitimately
 	//     be called `__gb_expr_0` — the reservation binds where a user MINTS
 	//     a name, not where one is read back, so such a column is never
 	//     refused. `SUM(__gb_expr_0)` beside `GROUP BY g + 1` was answered
-	//     from the KEY's slot, because this projection narrows and the key
+	//     from the KEY's slot, because this projection NARROWS and the key
 	//     had already claimed the name: right keys, right row count, and the
 	//     sum of a group key where the query asked for the sum of a column.
 	//   - a filter column, for the same reason.
 	//
-	// And each slot excludes the ones already ISSUED, which is what stops two
-	// derived keys landing in one column.
-	taken := make(map[string]bool, len(groupBy)+len(aggs)+len(filterCols))
-	for _, g := range groupBy {
-		taken[g] = true
-	}
+	// Seeding is finished before the first Next, and the allocator excludes
+	// what it has already issued, which is what stops two derived keys
+	// landing in one column.
+	alloc := plansql.NewSlotAllocator(groupBy...)
 	for _, a := range aggs {
-		taken[a.InputCol] = true
-		taken[a.InputCol2] = true
-		taken[a.OutputCol] = true
+		alloc.Seed(a.InputCol, a.InputCol2, a.OutputCol)
 	}
-	for _, c := range filterCols {
-		taken[c] = true
-	}
-	// Termination: the excluded set is finite and fixed before the first
-	// call, plus at most one name per key, so a scan bounded by its size
-	// cannot exhaust the family.
-	limit := len(taken) + len(groupBy) + 2
-	mint := func(i int) string {
-		for n := i; n <= i+limit; n++ {
-			name := physical.SlotName(physical.SlotGroupKey, n)
-			if !taken[name] {
-				taken[name] = true
-				return name
-			}
+	alloc.Seed(filterCols...)
+	mint := func() string {
+		if name, ok := alloc.Next(plansql.SlotGroupKey); ok {
+			return name
 		}
-		return physical.SlotName(physical.SlotGroupKey, i)
+		// An exhausted family has no known SQL; naming the column something
+		// is still better than naming it nothing.
+		return plansql.SlotName(plansql.SlotGroupKey, 0)
 	}
 	for i, g := range groupBy {
 		slots[i] = g
@@ -557,7 +545,7 @@ func derivedGroupKeys(groupBy []string, aggs []distributed.AggSpec, filterCols [
 			}
 		}
 		derived[g] = node
-		slots[i] = mint(i)
+		slots[i] = mint()
 	}
 	return derived, slots
 }
