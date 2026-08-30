@@ -141,7 +141,11 @@ func TestWindowKeySpellingsAgree(t *testing.T) {
 func wpkQuery(proj, over string) string {
 	// 301 rows, so the three partitions are 101/100/100: an EQUAL split would
 	// make COUNT(*) OVER constant for a correct engine too, and the
-	// one-partition check below could not tell the two apart.
+	// one-partition check below could not tell the two apart. 301 also keeps
+	// the input inside the fixture's FIRST row group, so the no-ORDER-BY
+	// windows see one batch and one arrival order — widen it and the
+	// unordered ROW_NUMBER/LAG/LEAD/FIRST_VALUE spellings stop being
+	// comparable row for row (#687, ADR-0013 §10).
 	return fmt.Sprintf("SELECT p.id, %s AS w FROM mbtypes p WHERE p.id < 301 ORDER BY p.id",
 		fmt.Sprintf(proj, over))
 }
@@ -283,6 +287,12 @@ func TestWindowUnresolvableKeyIsRefused(t *testing.T) {
 // the key AGAIN, off the merged run's schema — a third resolution site, and
 // the one whose old guard tested only the upper bound, so an unresolved key
 // indexed Columns[-1] and panicked the task.
+//
+// Both spellings here order the window on the unique `id`, which orders every
+// partition TOTALLY, so ROW_NUMBER is a determined value and the two arms owe
+// each other the same one in every row. The UNORDERED spelling of the same
+// window is gated by the test below instead, where the answer is a
+// permutation and not a value (#687).
 func TestWindowKeySpellingsAgreeUnderSpill(t *testing.T) {
 	ctx := context.Background()
 	plain := wpkOpen(t, 0)
@@ -291,7 +301,6 @@ func TestWindowKeySpellingsAgreeUnderSpill(t *testing.T) {
 	for _, over := range []string{
 		"PARTITION BY p.g ORDER BY p.id",
 		"PARTITION BY id % 3 ORDER BY id",
-		"PARTITION BY id % 3",
 	} {
 		over := over
 		t.Run(over, func(t *testing.T) {
@@ -303,6 +312,128 @@ func TestWindowKeySpellingsAgreeUnderSpill(t *testing.T) {
 			wpkAssertSame(t, "spilled "+over, got, want)
 		})
 	}
+}
+
+// TestWindowUnorderedRowNumberIsAPermutation is the third spelling the test
+// above used to carry — `ROW_NUMBER() OVER (PARTITION BY id % 3)`, with no
+// ORDER BY inside the window — compared by the property it actually has.
+//
+// #687: that subtest compared the two arms POSITIONALLY and failed under
+// -race with a different value each run (id=0 answered w=234, 701, 1101,
+// where the spilled arm answers 1). No race: an unordered ROW_NUMBER numbers
+// rows in ARRIVAL order, and the Window sink's arrival order is the order
+// several scan workers hand it their batches. Reconstructing that order from
+// the answer (sort a partition's rows by w, read the ids) decomposes every
+// run into whole ROW GROUPS in internal order — 1101 is exactly "row group 0
+// arrived last", the other five holding 1100 of partition 0's rows. The
+// values are unspecified; the arrival order is legal (ADR-0013 §10).
+//
+// What is NOT unspecified, and is what this asserts:
+//   - every partition's numbers are a permutation of 1..n, so no number is
+//     repeated, none is skipped, and none exceeds the partition's size;
+//   - each row is numbered within the partition its OWN key selects — the
+//     partition is derived here from the row's id, not read back from the
+//     engine, so a row numbered from a neighbouring partition's counter
+//     breaks the permutation rather than hiding inside it;
+//   - the partitions are the ones `id % 3` names, at their full sizes, on
+//     both arms.
+//
+// The scan is forced wide because the reordering only appears with several
+// row groups in flight: at WADJET_SCAN_WORKERS=1 this window's arrival order
+// is the fixture's own, and the property would hold vacuously.
+func TestWindowUnorderedRowNumberIsAPermutation(t *testing.T) {
+	t.Setenv("WADJET_SCAN_WORKERS", "8")
+	ctx := context.Background()
+	plain := wpkOpen(t, 0)
+	spilled := wpkOpen(t, 1024)
+
+	// No LIMIT: the permutation is a property of the WHOLE partition, and a
+	// truncated answer cannot show one.
+	const sql = `SELECT p.id, ROW_NUMBER() OVER (PARTITION BY id % 3) AS w FROM mbtypes p ORDER BY p.id`
+	want := map[int64]int{}
+	for i := 0; i < wpkRows; i++ {
+		want[int64(i%3)]++
+	}
+
+	for _, arm := range []struct {
+		name string
+		db   *DB
+	}{{"plain", plain}, {"spilled", spilled}} {
+		arm := arm
+		t.Run(arm.name, func(t *testing.T) {
+			// Repeated, because one run of an unordered window proves nothing
+			// about the next one: the failure this replaces appeared on some
+			// runs and not others.
+			for i := 0; i < 3; i++ {
+				what := fmt.Sprintf("%s run %d", arm.name, i)
+				rows := wpkRun(t, ctx, arm.db, sql)
+				if len(rows) != wpkRows {
+					t.Fatalf("%s: %d rows, want %d", what, len(rows), wpkRows)
+				}
+				for j, r := range rows {
+					if wpkInt(t, r["id"]) != int64(j) {
+						t.Fatalf("%s: row %d carries id=%v, want %d — the answer is ordered by "+
+							"id, so a row is missing or duplicated", what, j, r["id"], j)
+					}
+				}
+				got := wpkAssertRowNumberPermutation(t, what, rows, func(id int64) int64 { return id % 3 })
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s: partition sizes %v, want %v — `PARTITION BY id %% 3` names three "+
+						"partitions of the whole fixture", what, got, want)
+				}
+			}
+		})
+	}
+}
+
+// wpkAssertRowNumberPermutation checks the property an unordered
+// ROW_NUMBER() OVER (PARTITION BY k) does have. The per-row value is one the
+// engine may assign in any order (ADR-0013 §10), but within each partition
+// the values must be a permutation of 1..n: each of them once, none missing,
+// none out of range. A counter shared between two workers, a row numbered
+// against another partition's counter, and a row filed under a key that is
+// not its own all break it.
+//
+// key derives the partition from the row's id rather than reading it back
+// from the engine — a key the engine computed wrongly cannot then agree with
+// itself. The partition sizes are returned so the caller can pin those too:
+// one degenerate partition holding every row is ALSO a permutation of 1..n.
+func wpkAssertRowNumberPermutation(t *testing.T, what string, rows []map[string]any,
+	key func(id int64) int64) map[int64]int {
+	t.Helper()
+	byKey := map[int64][]int64{}
+	for _, r := range rows {
+		k := key(wpkInt(t, r["id"]))
+		byKey[k] = append(byKey[k], wpkInt(t, r["w"]))
+	}
+	sizes := make(map[int64]int, len(byKey))
+	for k, ws := range byKey {
+		sizes[k] = len(ws)
+		sorted := append([]int64(nil), ws...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+		for i, w := range sorted {
+			if w == int64(i+1) {
+				continue
+			}
+			dups, outOfRange := 0, 0
+			seen := map[int64]bool{}
+			for _, v := range sorted {
+				if seen[v] {
+					dups++
+				}
+				seen[v] = true
+				if v < 1 || v > int64(len(sorted)) {
+					outOfRange++
+				}
+			}
+			t.Fatalf("%s: partition %d holds %d rows, but its ROW_NUMBERs are not a permutation of "+
+				"1..%d — sorted position %d holds %d, %d value(s) repeat and %d fall outside the "+
+				"partition. An unordered ROW_NUMBER may number the rows in any order; it may not "+
+				"skip, repeat, or borrow another partition's counter",
+				what, k, len(sorted), len(sorted), i+1, w, dups, outOfRange)
+		}
+	}
+	return sizes
 }
 
 func wpkRun(t *testing.T, ctx context.Context, db *DB, sql string) []map[string]any {

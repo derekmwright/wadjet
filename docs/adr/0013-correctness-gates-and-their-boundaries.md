@@ -1,7 +1,8 @@
 # ADR-0013: The correctness gates, and what they deliberately do not gate
 
-Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22; type-matrix
-gates and the per-issue ratchet amendment added 2026-08-23)
+Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22;
+type-matrix gates and the per-issue ratchet amendment added 2026-08-23;
+nondeterminism class 10 added 2026-08-29)
 
 ## Context
 
@@ -85,6 +86,30 @@ named mechanism.
    value in all four runs, which is what rules out a code-level change). The
    dual-precision fingerprint digest (6 or 4 significant digits) is unaffected.
    Investigate only if the divergence reaches the digest.
+10. **A window function with no ORDER BY inside the OVER assigns each row an
+    unspecified value.** `ROW_NUMBER() OVER (PARTITION BY k)` numbers rows in
+    ARRIVAL order, and arrival order at the Window sink is the order several
+    scan workers hand it their batches — so the same query, the same binary
+    and the same data answer differently between runs, and the in-memory and
+    the spilled paths answer differently from each other (the external path
+    numbers the merged sorted runs). LAG, LEAD, FIRST_VALUE, LAST_VALUE and
+    NTH_VALUE are unspecified the same way; SUM, COUNT, MIN, MAX and the
+    other whole-partition aggregates are not, and neither is any window whose
+    OVER carries a TOTAL order. What such a window still owes is a PROPERTY,
+    and that is what a gate asserts: within every partition the numbers are a
+    permutation of 1..n — none repeated, none skipped, none out of range —
+    over the partitions the key really names, at their real sizes. #687 is
+    the worked example: `TestWindowKeySpellingsAgreeUnderSpill` compared the
+    two arms row for row and failed under `-race` with a different value each
+    run (id=0 read 234, 701, 1101 against the spilled arm's 1), which looks
+    exactly like a race on a shared counter. Reconstructing the arrival order
+    from the answer — sort one partition's rows by the assigned number and
+    read out the ids — decomposed every run into whole ROW GROUPS in internal
+    order, 1101 being precisely "row group 0 arrived last". The permutation
+    held on every run of both arms. A positional comparison of an unordered
+    window is the defect; `wadjet.TestWindowUnorderedRowNumberIsAPermutation`
+    is the replacement, run with the scan forced wide so the reordering
+    actually happens rather than holding vacuously.
 
 ### Pins
 
