@@ -99,15 +99,19 @@ func TestDuplicateOutputNamesOnBothCoordinatorPaths(t *testing.T) {
 			dup: `SELECT DISTINCT n_regionkey AS u, n_regionkey AS u FROM nation ORDER BY 1`,
 			ref: `SELECT DISTINCT n_regionkey AS u1, n_regionkey AS u2 FROM nation ORDER BY 1`},
 
-		// --- pinned residuals, each tracked and each still diverging -------
+		// A hidden ORDER BY term above a WINDOW: `ORDER BY n_regionkey` names
+		// a column the SELECT list drops, so it has to be materialized on
+		// the producing fragment — and a window stage was not one that could
+		// carry an OpProject, so the DAG failed loud (#558). Fixed by
+		// resolveHiddenSortKeys learning the window stage, and gated here
+		// rather than pinned.
 		{name: "window beside duplicates",
 			dup: `SELECT UPPER(n_name), UPPER(n_comment), ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
 			      FROM nation ORDER BY n_regionkey, n_name`,
 			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
-			      FROM nation ORDER BY n_regionkey, n_name`,
-			pins: map[string]string{armDAG: "#558: a hidden ORDER BY term above a WINDOW has nowhere to be " +
-				"materialized on the DAG — materializeSortKey needs a fragment that carries an OpProject " +
-				"and a window stage is not one. Fails loud, no duplicates required"}},
+			      FROM nation ORDER BY n_regionkey, n_name`},
+
+		// --- pinned residuals, each tracked and each still diverging -------
 		{name: "union all over duplicates",
 			dup:       `SELECT n_name AS u, n_comment AS u FROM nation UNION ALL SELECT r_name, r_comment FROM region`,
 			ref:       `SELECT n_name AS u1, n_comment AS u2 FROM nation UNION ALL SELECT r_name, r_comment FROM region`,
