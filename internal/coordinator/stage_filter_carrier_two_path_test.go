@@ -1508,6 +1508,39 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 				`GROUP BY g + 1 ORDER BY gk`, tbl), self)
 		})
 
+		// An expression over a DECIMAL key, asserted DIGIT FOR DIGIT. The
+		// key's own (p,s) has to reach the term written above it: without it
+		// the term falls to the float rule and renders exact fixed point
+		// through a float64, so `2.0000` comes back as `2` — the right value
+		// with the wrong number of digits, which a float comparison cannot
+		// see (ADR-0024 item 2). PostgreSQL 17 answers 2.0000, 4.0002,
+		// 6.0004 … 40.0038.
+		t.Run("DecimalExpressionOverTheKey", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT (c_dec + 1) * 2 AS x, COUNT(*) AS n FROM %s `+
+				`WHERE id < 20 GROUP BY c_dec + 1 ORDER BY x`, tbl)
+			want := make([]string, 0, 20)
+			for i := 0; i < 20; i++ {
+				// c_dec = i + 0.0001*(i%9973), so (c_dec + 1) * 2 has scale 4.
+				want = append(want, fmt.Sprintf("%d.%04d", 2*(i+1), 2*i))
+			}
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != len(want) {
+					t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), len(want), sql)
+					continue
+				}
+				for i, r := range res.Rows {
+					got := fmt.Sprintf("%v", r["x"])
+					if got != want[i] {
+						t.Errorf("%s arm answered %q at row %d, want %q — an exact DECIMAL "+
+							"rendered through a float declaration\n  SQL: %s",
+							arm.name, got, i, want[i], sql)
+					}
+				}
+			}
+		})
+
 		// TWO computed keys, and the two SELECT items spelled differently
 		// from both of them.
 		t.Run("TwoComputedKeys", func(t *testing.T) {

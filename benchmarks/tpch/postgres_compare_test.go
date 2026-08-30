@@ -4527,7 +4527,17 @@ func groupKeySpellingCases() []pgCase {
 	// digit for digit.
 	out = append(out, pgCase{name: "GroupKeyOverDecimal", ordered: true, exactNumeric: true,
 		sql: `SELECT (l_extendedprice + 1) AS gk, COUNT(*) AS n FROM lineitem ` + where +
-			` GROUP BY l_extendedprice + 1 ORDER BY gk`})
+			` GROUP BY l_extendedprice + 1 ORDER BY gk`},
+		// An expression OVER a DECIMAL key. The key's own (p,s) has to reach
+		// the term written above it, or the whole term falls to the float
+		// rule and renders exact fixed point through a float64 — right
+		// digits, wrong number of them.
+		pgCase{name: "GroupKeyDecimalExpressionOverTheKey", ordered: true, exactNumeric: true,
+			sql: `SELECT (l_extendedprice + 1) * 2 AS gk, COUNT(*) AS n FROM lineitem ` + where +
+				` GROUP BY l_extendedprice + 1 ORDER BY gk`},
+		pgCase{name: "GroupKeyDecimalHavingOverTheKey", ordered: true, exactNumeric: true,
+			sql: `SELECT (l_extendedprice + 1) AS gk, COUNT(*) AS n FROM lineitem ` + where +
+				` GROUP BY l_extendedprice + 1 HAVING (l_extendedprice + 1) * 2 > 40000 ORDER BY gk`})
 	// l_shipdate is a TEXT column in this fixture, so the DATE key is the
 	// CAST — which is also the shape that types the key from something other
 	// than its input column.

@@ -8675,13 +8675,26 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// coerces the pre-projected int64 keys on the copy (#297).
 			strictInt := strictIntArithCols(child)
 			colTypes := childColTypes
+			// The RESPELLED expression is the one that gets evaluated, so it
+			// is the one to type. `(c_dec + 1) * 2` over `GROUP BY c_dec + 1`
+			// names `c_dec` — a column the aggregate's output does not carry
+			// — so typing the original left the DECIMAL key unresolved and
+			// the whole term fell to the float rule, which is a scale-0
+			// vector over exact fixed point (ADR-0024 item 2). Typing the
+			// respelled form reads the key's own declared type instead.
+			typeExpr := astExpr
 			if isOverAggregate {
 				if _, ok := gbExprToSyn[plansql.ExprIdentity(proj.ASTExpr)]; ok {
+					// The WHOLE item is a key: a rename of a value computed
+					// BELOW the aggregate, so it types against the
+					// aggregate's input or the declared Float64 coerces the
+					// pre-projected int64 keys on the copy (#297).
 					strictInt = strictIntArithCols(aggNode.Children[0])
 					colTypes = aggInputColTypes
+					typeExpr = proj.ASTExpr
 				}
 			}
-			outDecl = inferProjectionDeclType(proj.ASTExpr, outDecl.ID, strictInt, colTypes)
+			outDecl = inferProjectionDeclType(typeExpr, outDecl.ID, strictInt, colTypes)
 		}
 		outType := outDecl.ID
 

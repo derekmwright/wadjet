@@ -1007,8 +1007,20 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		}
 		in := emittedColDecimal(n.Children[0])
 		out := make(map[string]logical.DecimalMeta, len(n.GroupBy)+len(n.AggExprs))
+		// The DERIVED keys' (p,s), the companion emittedColTypes already
+		// takes from the same place. A derived key is emitted under its
+		// expression TEXT, which the input does not carry, so the bare
+		// lookup finds no scale and the key reads as a DECIMAL with none —
+		// and an expression written OVER it above the aggregate then falls
+		// to the float rule, which renders exact fixed point through a
+		// float64 (ADR-0024 item 2, ADR-0026).
+		_, derivedDec := derivedGroupKeyTypes(n.GroupBy, n.Children[0])
 		for _, g := range n.GroupBy {
 			if m, ok := lookupColDecimal(in, g); ok {
+				out[strings.ToLower(g)] = m
+				continue
+			}
+			if m, ok := derivedDec[g]; ok {
 				out[strings.ToLower(g)] = m
 			}
 		}
