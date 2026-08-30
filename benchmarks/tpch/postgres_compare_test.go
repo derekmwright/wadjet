@@ -4625,6 +4625,64 @@ func groupKeySpellingCases() []pgCase {
 		`SELECT "p k" + 1 AS k, COUNT(*) AS n FROM (SELECT l_partkey AS "p k" FROM lineitem `+
 			where+`) s GROUP BY "p k" + 1 ORDER BY k`)
 
+	// The SLOT the planner materializes a derived key into, over a relation
+	// that already carries a column of that name. A stored or aliased name in
+	// the reserved namespace is never refused at read, so the slot moves —
+	// and the allocator must exclude the slots it has ALREADY ISSUED as well
+	// as the names in scope, or two derived keys land in one column and the
+	// second silently carries the first one's value.
+	slotColl := `(SELECT l_partkey, l_suppkey, 1 AS "__gb_expr_0" FROM lineitem ` + where + `) s`
+	add("GroupKeySlotCollidesTwoDerivedKeys",
+		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM `+slotColl+
+			` GROUP BY l_partkey + 1, l_suppkey * 2 ORDER BY a, b`)
+	add("GroupKeySlotCollidesReversedOrder",
+		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM `+slotColl+
+			` GROUP BY l_suppkey * 2, l_partkey + 1 ORDER BY a, b`)
+	add("GroupKeySlotCollidesThreeDerivedKeys",
+		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, l_linenumber + 3 AS c, COUNT(*) AS n `+
+			`FROM (SELECT l_partkey, l_suppkey, l_linenumber, 1 AS "__gb_expr_0" FROM lineitem `+
+			where+`) s GROUP BY l_partkey + 1, l_suppkey * 2, l_linenumber + 3 ORDER BY a, b, c`)
+	add("GroupKeySlotCollidesWithHaving",
+		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM `+slotColl+
+			` GROUP BY l_partkey + 1, l_suppkey * 2 HAVING l_partkey + 1 > 100 ORDER BY a, b`)
+	add("GroupKeySlotCollidesAggregateOverTheColumn",
+		`SELECT l_partkey + 1 AS a, SUM("__gb_expr_0") AS s FROM `+slotColl+
+			` GROUP BY l_partkey + 1 ORDER BY a`)
+
+	// An ARITHMETIC key beside a DELIMITED COLUMN spelled the same way. The
+	// recorded key text cannot tell them apart, so the arithmetic key was
+	// resolved as a NAME and bound to the column. The two must answer
+	// DIFFERENTLY.
+	arith := `(SELECT l_quantity AS q, l_partkey AS "q + 1" FROM lineitem ` + where + `) s`
+	add("GroupKeyArithmeticBesideADelimitedColumnOfThatText",
+		`SELECT q + 1 AS k, COUNT(*) AS n FROM `+arith+` GROUP BY q + 1 ORDER BY k`)
+	add("GroupKeyDelimitedColumnBesideThatArithmetic",
+		`SELECT "q + 1" AS k, COUNT(*) AS n FROM `+arith+` GROUP BY "q + 1" ORDER BY k`)
+	add("GroupKeyArithmeticBesideADelimitedColumnHaving",
+		`SELECT q + 1 AS k, COUNT(*) AS n FROM `+arith+
+			` GROUP BY q + 1 HAVING q + 1 > 20 ORDER BY k`)
+
+	// A DELIMITED ALIAS under a POSITIONAL ORDER BY: the alias's case is part
+	// of its name, and `ORDER BY 1` must resolve to the item and not to the
+	// alias's TEXT re-parsed as an expression.
+	add("OrderByOrdinalOverAnArithmeticLookingAlias",
+		`SELECT l_partkey AS "L + 1" FROM lineitem `+where+` ORDER BY 1`)
+	add("OrderByOrdinalOverAMixedCaseAlias",
+		`SELECT l_partkey AS "Pk" FROM lineitem `+where+` ORDER BY 1`)
+	add("OrderByOrdinalOverASpacedAlias",
+		`SELECT l_partkey AS "P k" FROM lineitem `+where+` ORDER BY 1`)
+	add("OrderByOrdinalOverAKeywordAlias",
+		`SELECT l_partkey AS "select" FROM lineitem `+where+` ORDER BY 1`)
+	add("OrderByOrdinalDescendingOverAMixedCaseAlias",
+		`SELECT l_partkey AS "Pk" FROM lineitem `+where+` ORDER BY 1 DESC`)
+	add("OrderBySecondOrdinalOverAMixedCaseAlias",
+		`SELECT l_partkey AS "Pk", l_suppkey FROM lineitem `+where+` ORDER BY 2, 1`)
+	add("OrderByTheDelimitedAliasItself",
+		`SELECT l_partkey AS "Pk" FROM lineitem `+where+` ORDER BY "Pk"`)
+	add("OrderByOrdinalOverAGroupedMixedCaseAlias",
+		`SELECT l_partkey AS "Pk", COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey ORDER BY 1`)
+
 	// DISTINCT and an outer aggregate over a derived key: two aggregates
 	// keyed alike, where the outer one reads the inner one's OUTPUT.
 	add("GroupKeyDistinctOverTheKey",

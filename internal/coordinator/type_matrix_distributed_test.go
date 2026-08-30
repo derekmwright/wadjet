@@ -400,6 +400,14 @@ func tmdTables() []tmdTable {
 		// one, which is what makes the guard's cheap-exit and its slow path
 		// both exercised in CI.
 		{rsWinTab, rsWinSchema(), rsWinRows()},
+		// The SLOT-COLLISION fixture (ADR-0026): a stored column named
+		// exactly like the slot a derived GROUP BY key is materialized into.
+		// Rides along here for the same reason as the fixtures above —
+		// TestStageCarriesFilterAndProjectionTwoPath is the only test that
+		// names it, and no type-matrix corpus entry does. The type matrix
+		// cannot stand in for it: none of its columns is in the reserved
+		// namespace, which is the whole shape.
+		{collSlotTable, collSlotSchema(), collSlotData()},
 	}, multikeyTables()...)
 }
 

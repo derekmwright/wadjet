@@ -1743,22 +1743,27 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					if c.name == "Having" {
 						want = wantKeys - 2
 					}
-					// Only the single-process arms are asserted. The DAG
-					// resolves these names against a scan whose rename
-					// Project it flattened, so it groups by the COLUMN — a
-					// pre-existing defect of a different mechanism, filed
-					// as #736 and pinned below.
-					res := sfcRun(t, sfcArms(ctx, single, coord)[0], c.sql)
-					if len(res.Rows) != want {
-						t.Errorf("single arm returned %d rows, want %d — the key was resolved "+
-							"to the input COLUMN spelled like it\n  SQL: %s",
-							len(res.Rows), want, c.sql)
+					// BOTH arms now. The DAG used to resolve these names
+					// against a scan whose rename Project it flattened and
+					// group by the COLUMN; gating the name resolution on the
+					// key being a column REFERENCE closed that half too.
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, c.sql)
+						if len(res.Rows) != want {
+							t.Errorf("%s arm returned %d rows, want %d — the key was resolved "+
+								"to the input COLUMN spelled like it\n  SQL: %s",
+								arm.name, len(res.Rows), want, c.sql)
+						}
 					}
 				})
 			}
 			// The other direction: an AGGREGATE whose alias is spelled like
 			// the key. PostgreSQL answers the counts; reading the key
 			// instead is the same collision one column over.
+			//
+			// Single-process only: on the DAG a group key and an aggregate
+			// output that share a NAME are one column, and the gather answers
+			// with the first — pinned as #736 below.
 			for _, alias := range []string{`"g + 1"`, `"G + 1"`} {
 				sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS %s FROM %s `+
 					`GROUP BY g + 1 ORDER BY k`, alias, tbl)
@@ -1829,6 +1834,182 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 
+		// The SLOT itself, over a table that STORES a column of that name.
+		// A stored name in the reserved namespace is never refused at read,
+		// so the planner's slot has to move past it — and the allocator has
+		// to exclude the slots it has ALREADY ISSUED as well as the names in
+		// scope. Skipping only the second put two derived keys in one
+		// column: key 0 stepped off the stored `__gb_expr_0` onto
+		// `__gb_expr_1`, key 1 started there and took it, and a twelve-group
+		// query answered three with the second key carrying the first one's
+		// value.
+		//
+		// g and h partition the rows DIFFERENTLY (three values against four,
+		// twelve non-empty pairs), so a key that lands in the wrong slot is a
+		// wrong ROW COUNT and not a coincidence. Every expectation is
+		// PostgreSQL 17's.
+		t.Run("SlotCollidesWithAStoredColumn", func(t *testing.T) {
+			ct := collSlotTable
+			for _, c := range []struct {
+				name, sql string
+				wantRows  int
+			}{
+				{"TwoDerivedKeys", `SELECT g + 1 AS a, h * 2 AS b, COUNT(*) AS n FROM %[1]s ` +
+					`GROUP BY g + 1, h * 2 ORDER BY a, b`, 12},
+				{"ReversedKeyOrder", `SELECT g + 1 AS a, h * 2 AS b, COUNT(*) AS n FROM %[1]s ` +
+					`GROUP BY h * 2, g + 1 ORDER BY a, b`, 12},
+				{"ThreeDerivedKeys", `SELECT g + 1 AS a, h * 2 AS b, id %% 5 AS c, COUNT(*) AS n ` +
+					`FROM %[1]s GROUP BY g + 1, h * 2, id %% 5 ORDER BY a, b, c`, 60},
+				{"WithHaving", `SELECT g + 1 AS a, h * 2 AS b, COUNT(*) AS n FROM %[1]s ` +
+					`GROUP BY g + 1, h * 2 HAVING g + 1 > 1 ORDER BY a, b`, 8},
+				// The same collision minted by a DERIVED ALIAS, with no
+				// stored column anywhere: the name enters scope from the
+				// query itself.
+				{"MintedByADerivedAlias", `SELECT g + 1 AS a, h * 2 AS b, COUNT(*) AS n FROM ` +
+					`(SELECT g, h, 1 AS "__gb_expr_0" FROM %[1]s) s GROUP BY g + 1, h * 2 ` +
+					`ORDER BY a, b`, 12},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					sql := fmt.Sprintf(c.sql, ct)
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, sql)
+						if len(res.Rows) != c.wantRows {
+							t.Errorf("%s arm returned %d rows, want %d — two derived keys "+
+								"share one slot\n  SQL: %s", arm.name, len(res.Rows), c.wantRows, sql)
+						}
+					}
+				})
+			}
+			// The other binding: an AGGREGATE over the STORED column. Keys
+			// and row count can be right while the argument is bound to the
+			// planner's slot, so the VALUE is what this asserts —
+			// SUM(__gb_expr_0) over 20 rows of ~1000 is five figures, and
+			// SUM of a group key is one or two.
+			t.Run("AggregateOverTheStoredColumn", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT g + 1 AS a, h * 2 AS b, SUM(%s) AS s FROM %s `+
+					`GROUP BY g + 1, h * 2 ORDER BY a, b`, collSlotCol, ct)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != 12 {
+						t.Fatalf("%s arm returned %d rows, want 12\n  SQL: %s",
+							arm.name, len(res.Rows), sql)
+					}
+					for _, r := range res.Rows {
+						v, ok := numAsInt(r["s"])
+						if !ok || v < 20000 {
+							t.Errorf("%s arm answered s=%v; SUM over the stored column is five "+
+								"figures, so this is the group key's sum\n  SQL: %s",
+								arm.name, r["s"], sql)
+							break
+						}
+					}
+				}
+				// MAX, where the two are furthest apart: the stored column's
+				// maximum is four digits and a group key's is one.
+				mx := fmt.Sprintf(`SELECT g + 1 AS a, MAX(%s) AS m FROM %s GROUP BY g + 1 ORDER BY a`,
+					collSlotCol, ct)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, mx)
+					for _, r := range res.Rows {
+						if v, ok := numAsInt(r["m"]); !ok || v < 1000 {
+							t.Errorf("%s arm answered m=%v, want the stored column's maximum"+
+								"\n  SQL: %s", arm.name, r["m"], mx)
+							break
+						}
+					}
+				}
+			})
+			// The control: the stored column as a PLAIN group key of its own
+			// still answers, because a stored name in the reserved namespace
+			// is read like any other column.
+			t.Run("ctl/TheStoredColumnIsStillGroupable", func(t *testing.T) {
+				sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+					`SELECT COUNT(*) AS n FROM (SELECT %s AS k, COUNT(*) AS c FROM %s `+
+						`WHERE id < 4 GROUP BY %s) s`, collSlotCol, ct, collSlotCol), "n", 4)
+			})
+		})
+
+		// An ARITHMETIC key beside a DELIMITED COLUMN spelled the same way.
+		// The recorded key text cannot tell them apart — a delimited
+		// identifier's quotes are not part of its name — so the arithmetic
+		// key was resolved as a NAME and bound to the column: PostgreSQL
+		// answers five groups of the sum and both DAG arms answered nine
+		// groups of the column, silently. The two must answer DIFFERENTLY
+		// and each must match PostgreSQL.
+		t.Run("ArithmeticKeyBesideADelimitedColumnOfThatText", func(t *testing.T) {
+			inner := fmt.Sprintf(`(SELECT a AS g, id AS "g + 1" FROM %s) s`, dbpTable)
+			for _, c := range []struct {
+				name, sql string
+				wantRows  int
+			}{
+				// The ARITHMETIC: five distinct values of a + 1 over nine
+				// rows, one of them the NULL group.
+				{"Arithmetic", `SELECT g + 1 AS k, COUNT(*) AS n FROM ` + inner +
+					` GROUP BY g + 1 ORDER BY k`, 5},
+				{"ArithmeticHaving", `SELECT g + 1 AS k, COUNT(*) AS n FROM ` + inner +
+					` GROUP BY g + 1 HAVING g + 1 > 1 ORDER BY k`, 2},
+				{"ArithmeticBesideAnAggregateOfTheColumn", `SELECT g + 1 AS k, MAX("g + 1") AS m ` +
+					`FROM ` + inner + ` GROUP BY g + 1 ORDER BY k`, 5},
+				// The DELIMITED NAME: nine distinct ids, one per row.
+				{"DelimitedName", `SELECT "g + 1" AS k, COUNT(*) AS n FROM ` + inner +
+					` GROUP BY "g + 1" ORDER BY k`, 9},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, c.sql)
+						if len(res.Rows) != c.wantRows {
+							t.Errorf("%s arm returned %d rows, want %d — the two spellings must "+
+								"answer differently\n  SQL: %s",
+								arm.name, len(res.Rows), c.wantRows, c.sql)
+						}
+					}
+				})
+			}
+		})
+
+		// A DELIMITED ALIAS whose case or spacing survives to the client,
+		// under a positional ORDER BY. Two causes met in one message: the
+		// alias was lower-cased where the projection emits it while every
+		// consumer still asked for the written spelling, and `ORDER BY 1`
+		// was rewritten to the alias's TEXT and re-parsed — so `AS "G + 1"`
+		// came back as arithmetic over a column `G` that does not exist.
+		t.Run("DelimitedAliasUnderPositionalOrderBy", func(t *testing.T) {
+			for _, c := range []struct{ name, sql, col string }{
+				{"ArithmeticLooking", `SELECT id AS "G + 1" FROM %[1]s ORDER BY 1`, "G + 1"},
+				{"MixedCase", `SELECT id AS "Kk" FROM %[1]s ORDER BY 1`, "Kk"},
+				{"WithASpace", `SELECT id AS "A B" FROM %[1]s ORDER BY 1`, "A B"},
+				{"AKeyword", `SELECT id AS "select" FROM %[1]s ORDER BY 1`, "select"},
+				{"Descending", `SELECT id AS "Kk" FROM %[1]s ORDER BY 1 DESC`, "Kk"},
+				{"SecondOrdinal", `SELECT id AS "Kk", a FROM %[1]s ORDER BY 2, 1`, "Kk"},
+				{"NoOrderBy", `SELECT id AS "G + 1" FROM %[1]s`, "G + 1"},
+				{"ByTheAliasItself", `SELECT id AS "Kk" FROM %[1]s ORDER BY "Kk"`, "Kk"},
+				{"BesideAGroupBy", `SELECT a AS "Kk", COUNT(*) AS n FROM %[1]s GROUP BY a ORDER BY 1`, "Kk"},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					sql := fmt.Sprintf(c.sql, dbpTable)
+					want := 9
+					if c.name == "BesideAGroupBy" {
+						want = 5
+					}
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, sql)
+						if len(res.Rows) != want {
+							t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+								arm.name, len(res.Rows), want, sql)
+						}
+						if res.Columns[0] != c.col {
+							t.Errorf("%s arm named the column %q, want %q — a delimited alias "+
+								"keeps the case it was written in\n  SQL: %s",
+								arm.name, res.Columns[0], c.col, sql)
+						}
+					}
+				})
+			}
+		})
+
 		// The DAG residuals of this family, pinned. Each is pre-existing on
 		// ff7c3f19 and each is the SAME mechanism one layer out: on the
 		// stage DAG a computed key is resolved against the SCAN's schema,
@@ -1844,9 +2025,6 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 				wantRows  int // today's DAG answer; PostgreSQL's is in `pg`
 				pg        int
 			}{
-				{"CollidingInputColumn", fmt.Sprintf(
-					`SELECT g + 1 AS k, COUNT(*) AS n FROM (SELECT g, c_i32 AS "g + 1" `+
-						`FROM %s) s GROUP BY g + 1 ORDER BY k`, tbl), 4829, wantKeys + 1},
 				{"DistinctOverTheKey", fmt.Sprintf(
 					`SELECT DISTINCT g + 1 AS k FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
 					1, wantKeys + 1},
@@ -1865,6 +2043,44 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				})
 			}
+			// An aggregate whose ARGUMENT is spelled like the key: the
+			// worker's projection narrows and the key claimed the name, so
+			// the argument resolves to nothing and the fragment fails LOUD.
+			t.Run("AggregateArgumentSpelledLikeTheKey", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT g + 1 AS k, MAX("g + 1") AS m FROM `+
+					`(SELECT g, c_i32 AS "g + 1" FROM %s) s GROUP BY g + 1 ORDER BY k`, tbl)
+				if _, err := dag.run(sql); err == nil {
+					t.Fatalf("the DAG arm now ANSWERS this; PostgreSQL answers %d rows. #736 "+
+						"is fixed for this shape — assert it and delete the pin\n  SQL: %s",
+						wantKeys+1, sql)
+				}
+			})
+			// An aggregate ALIASED like the key: one name, two columns, and
+			// the gather answers with the first.
+			t.Run("AggregateAliasedLikeTheKey", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS "g + 1" FROM %s `+
+					`GROUP BY g + 1 ORDER BY k`, tbl)
+				res := sfcRun(t, dag, sql)
+				same, seen := true, 0
+				for _, r := range res.Rows {
+					kv, kok := numAsInt(r["k"])
+					av, aok := numAsInt(r["g + 1"])
+					if !kok || !aok {
+						continue // the NULL group, which says nothing either way
+					}
+					seen++
+					if kv != av {
+						same = false
+						break
+					}
+				}
+				same = same && seen > 0
+				if !same {
+					t.Fatalf("the DAG arm no longer answers the KEY under the aggregate's "+
+						"alias; PostgreSQL answers the counts. #736 is fixed for this shape "+
+						"— assert it and delete the pin\n  SQL: %s", sql)
+				}
+			})
 		})
 
 		// A WINDOW above the aggregate NULLs the key on BOTH paths: the walk
