@@ -100,6 +100,23 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 	}
 	groupKeys, aggOuts := aggregateStageOutputs(stage)
 	decls := aggregateStageDecls(stage)
+	// The identity indexes, built once. Each re-parses every published name,
+	// and the walk below asks them at every node of every SELECT item.
+	//
+	// Two of them, for the reason aggregateProjectionSource keeps the two
+	// NAME maps apart: a query may give a group key and an aggregate the same
+	// output name, and a whole SELECT item must resolve against the class it
+	// belongs to. The union is only for the sub-term walk, whose question is
+	// membership rather than which of two same-named columns is meant (#575).
+	keyIdentity := groupKeysByIdentity(groupKeys)
+	emittedAll := make(map[string]string, len(groupKeys)+len(aggOuts))
+	for k, v := range groupKeys {
+		emittedAll[k] = v
+	}
+	for k, v := range aggOuts {
+		emittedAll[k] = v
+	}
+	emittedIdentity := groupKeysByIdentity(emittedAll)
 	specs := make([]ProjectExprSpec, 0, len(project.Projections)+len(groupKeys)+len(aggOuts))
 	renamed := map[string]string{}
 	needed := false
@@ -109,7 +126,7 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 		if alias == "" {
 			return nil
 		}
-		src, computed, ok := aggregateProjectionSource(p, alias, groupKeys, aggOuts)
+		src, computed, ok := aggregateProjectionSource(p, alias, groupKeys, aggOuts, keyIdentity, emittedAll, emittedIdentity)
 		if !ok {
 			return nil
 		}
@@ -226,7 +243,8 @@ func nameIsPlainColumn(s string) bool {
 // The two maps are kept apart on purpose: a query may give a group key and an
 // aggregate the SAME output name (`SELECT g, COUNT(*) AS g … GROUP BY g`), and
 // looking an item up in the union would sometimes answer with the other one.
-func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, aggOuts map[string]string) (src string, computed bool, ok bool) {
+func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, aggOuts,
+	keyIdentity, emitted, emittedIdentity map[string]string) (src string, computed bool, ok bool) {
 	// An AGGREGATE item resolves against the aggregate outputs only. Its
 	// AggSpec.OutputCol is normally the item's own output name.
 	if p.IsAgg {
@@ -262,20 +280,13 @@ func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, ag
 	// made the spelling decide whether this projection resolved at all, and
 	// an unresolved one is rebuilt as arithmetic over columns the aggregate
 	// does not emit — NULL on every row (#723).
-	if real, hit := groupKeysByIdentity(groupKeys)[plansql.ExprIdentity(p.ASTExpr)]; hit {
+	if real, hit := keyIdentity[plansql.ExprIdentity(p.ASTExpr)]; hit {
 		return real, false, true
 	}
 	// An expression over the aggregate's outputs (`COUNT(*) + 1`): the
 	// logical planner rewrote its aggregate calls into refs to their
 	// synthetic OutputCol, so every leaf must now be a name the stage emits.
-	emitted := make(map[string]string, len(groupKeys)+len(aggOuts))
-	for k, v := range groupKeys {
-		emitted[k] = v
-	}
-	for k, v := range aggOuts {
-		emitted[k] = v
-	}
-	rewritten, ok := requoteAggOutputRefs(p.ASTExpr, emitted)
+	rewritten, ok := requoteAggOutputRefsIdx(p.ASTExpr, emitted, emittedIdentity)
 	if !ok {
 		return "", false, false
 	}
@@ -291,6 +302,13 @@ func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, ag
 // It reuses substituteNestedRenameRefs' copy-on-write shape without its
 // resolver: here the question is membership, not renaming.
 func requoteAggOutputRefs(n plansql.Node, emitted map[string]string) (plansql.Node, bool) {
+	return requoteAggOutputRefsIdx(n, emitted, groupKeysByIdentity(emitted))
+}
+
+// requoteAggOutputRefsIdx is requoteAggOutputRefs with the identity index
+// hoisted out of the recursion. Building it re-parses every emitted name, and
+// the walk visits every node of every SELECT item — ClickBench Q30 has ninety.
+func requoteAggOutputRefsIdx(n plansql.Node, emitted, byIdentity map[string]string) (plansql.Node, bool) {
 	// A WHOLE TERM can be the column. An aggregate emits its group key under
 	// the key's own expression TEXT, so above such a stage `n_regionkey + 1`
 	// is not arithmetic at all — it is the NAME of one column, and rebuilding
@@ -305,7 +323,7 @@ func requoteAggOutputRefs(n plansql.Node, emitted map[string]string) (plansql.No
 			if real, hit := emitted[strings.ToLower(n.String())]; hit {
 				return &plansql.ColRef{Column: real}, true
 			}
-			if real, hit := groupKeysByIdentity(emitted)[plansql.ExprIdentity(n)]; hit {
+			if real, hit := byIdentity[plansql.ExprIdentity(n)]; hit {
 				return &plansql.ColRef{Column: real}, true
 			}
 		}
@@ -327,26 +345,26 @@ func requoteAggOutputRefs(n plansql.Node, emitted map[string]string) (plansql.No
 	case *plansql.Lit, *plansql.IntervalLit:
 		return n, true
 	case *plansql.BinaryOp:
-		l, lok := requoteAggOutputRefs(e.Left, emitted)
-		r, rok := requoteAggOutputRefs(e.Right, emitted)
+		l, lok := requoteAggOutputRefsIdx(e.Left, emitted, byIdentity)
+		r, rok := requoteAggOutputRefsIdx(e.Right, emitted, byIdentity)
 		if !lok || !rok {
 			return nil, false
 		}
 		return &plansql.BinaryOp{Left: l, Op: e.Op, Right: r}, true
 	case *plansql.UnaryOp:
-		in, ok := requoteAggOutputRefs(e.Inner, emitted)
+		in, ok := requoteAggOutputRefsIdx(e.Inner, emitted, byIdentity)
 		if !ok {
 			return nil, false
 		}
 		return &plansql.UnaryOp{Op: e.Op, Inner: in}, true
 	case *plansql.ParenNode:
-		in, ok := requoteAggOutputRefs(e.Inner, emitted)
+		in, ok := requoteAggOutputRefsIdx(e.Inner, emitted, byIdentity)
 		if !ok {
 			return nil, false
 		}
 		return &plansql.ParenNode{Inner: in}, true
 	case *plansql.CastNode:
-		in, ok := requoteAggOutputRefs(e.Inner, emitted)
+		in, ok := requoteAggOutputRefsIdx(e.Inner, emitted, byIdentity)
 		if !ok {
 			return nil, false
 		}
