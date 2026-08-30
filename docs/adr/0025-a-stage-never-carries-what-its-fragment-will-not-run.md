@@ -342,10 +342,33 @@ came back with the table's `s` on BOTH paths (#694).
 
 The rule, in both directions:
 
-**A value a stage computes lives in a slot no input can be spelled like, and
-consumers reference the SLOT. A name a stage will evaluate is resolved through
-the producer before the stage carries it — every name in it, not the outermost
-one.**
+**A value a stage computes lives in a RESERVED slot, and consumers reference
+the slot. A name a stage will evaluate is resolved through the producer before
+the stage carries it — every name in it, not the outermost one.**
+
+The first statement of this said "a slot no input can be spelled like", and
+that was FALSE as written. `__win_N` is an ordinary identifier and the SQL
+grammar can produce any string as a delimited one, so a user can spell it:
+
+```sql
+SELECT id, SUM(a) OVER () AS w FROM (SELECT id, a, b AS __win_0 FROM t) x
+-- PostgreSQL 52.99 on every row; wadjet answered t.b, on every execution path
+```
+
+That is #694 re-created under the slot's own name, and it is not the window's
+doing — `s AS __winkey_0` made a window over an expression answer NULL before
+#694 existed, and every other slot family has the same shape. There is no
+unspellable name to retreat to, so the namespace is RESERVED instead: a query
+that spells one of the eighteen families is refused, 42601, naming the family
+(`planner/physical/reserved_slots.go`, checked where a name ENTERS the query's
+namespace — a base table's columns, a derived table's or CTE's outputs, a
+SELECT alias; a bare reference to a slot needs no check of its own, because no
+source provides it and it is already 42703).
+
+Refusing a query PostgreSQL answers is a real cost and is taken deliberately.
+The alternative is not answering it either — it is answering it WRONGLY, which
+is what the engine did. The refusal names the collision so a user with such a
+column knows to alias it.
 
 `__win_N` and `__winkey_N` are that slot for the window's output and its
 argument; `respellAggInputExpr` is that resolution for the aggregate's
@@ -395,9 +418,47 @@ sides' `a` and the bare name resolves to neither.
 
 So the question is never "does this name exist below" but "is this name
 MATERIALIZED here" — which is what `resolveDerivedAliasSortKeys` decides for a
-sort key and what `aggInputJoinBelow` now decides for an aggregate argument.
-Two controls hold the boundary, and they are controls rather than assertions of
-the fix: both shapes were right before this work and have to stay right.
+sort key and what `aggInputRespellable` now decides for an aggregate argument.
+
+**And it is answered POSITIVELY, per producer, not by enumerating the
+materializing kinds.** That enumeration was tried and was wrong twice, once per
+kind nobody had thought of: after the JOIN came the DISTINCT, which
+`rewriteDistinctAsGroupBy` lowers to an aggregate whose OUTPUT is the
+projection's names, so `SUM(CASE WHEN v > 0 THEN v ELSE 0 END)` over
+`(SELECT DISTINCT a * 2 AS v FROM t)` went from a LOUD failure to a silent 0.
+The rule is now the other way round — respell only where the walk reaches a
+SCAN through Project and Filter alone, which is exactly where `walkStages`
+provably emits no stage for the Project — and every other producer keeps
+today's behaviour. Controls hold the boundary per kind (join, distinct, sort +
+limit, window, aggregate); they are controls rather than assertions of the fix,
+because all of them were right before this work and have to stay right.
+
+**What the backstop can and cannot see.** `assertAggregateInputsResolve` is a
+NAME check, so it catches a reference that resolves to NOTHING and never one
+that resolves to the WRONG THING. With the respell removed, the shadowing arm
+(`SUM(CASE WHEN s = '9' THEN a ELSE 0 END)` over `SELECT b AS a`) answers
+2.0000 instead of 10.0000 and the check is silent, because the base table
+really does have an `a`. Its reach is every feeding stage kind
+`stageEmittedColumns` can enumerate — scan, sort, limit, window, project,
+exchange, aggregate, union — with JOIN excluded and named as excluded; the
+aggregate kinds were missing at first, which is exactly how the DISTINCT-fed
+shape was waved through. Its refusal wraps `ErrUnreachableGatherOutput`, so the
+coordinator routes the query to its local engine and ANSWERS it rather than
+failing the client.
+
+**A stage's Columns list is a FILTER, not a promise.** A join's `Stage.Columns`
+is an OutputFilter and an exchange's is a payload manifest: both NARROW what
+arrives and neither can invent a column. Reading them as "emitted" made
+`assertGatherOutputIsReachable` believe in a name nothing computes — a window
+inside a derived table under a join reached the gather as
+`OutputRename{__win_0 -> w}` while the shuffle preserved `w` and the window
+emitted `__win_0`, and the client got `[id, y.id]` for a query that asked for
+`[id, w]`. Three repairs, each at the layer that was lying: the pruner stops
+pushing a window's OUTPUT name down past the window that computes it; the join
+shuffle's payload is `resolveJoinNeededColumns`, the same resolved spelling the
+join stage's own Columns have carried since #385; and the reachability check
+walks PAST the movers to the stage that really produces columns
+(`providedColumns`) before believing a name.
 
 ## Consequences
 
