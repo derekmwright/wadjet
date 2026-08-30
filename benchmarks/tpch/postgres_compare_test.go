@@ -4422,6 +4422,155 @@ func postgresSemanticsCases() []pgCase {
 				WHERE c.c_name IS NULL OR c.c_name IS NOT NULL`},
 	)
 
+	out = append(out, groupKeySpellingCases()...)
+
+	return out
+}
+
+// groupKeySpellingCases is the #720/#723/#725 family: ONE computed GROUP BY
+// key, said every way SQL allows, and every consumer that has to recognise it.
+//
+// PostgreSQL is the authority here for a reason the DuckDB arm cannot supply.
+// The engine used to match a SELECT item to its group key by the rendered TEXT
+// of the two spellings, so which parentheses the query carried decided whether
+// the key column came back with values or with NULL on every row, and a HAVING
+// over a computed key answered no rows at all. PostgreSQL matches by expression
+// equivalence, which is what makes every entry below one question with one
+// answer.
+//
+// Every entry aliases its computed item. An UNALIASED one would additionally
+// pin the output column's NAME, which diverges for a reason of its own (#732),
+// and this family is about which VALUE the item carries.
+func groupKeySpellingCases() []pgCase {
+	// The key is `l_partkey + 1` over a narrow slice of lineitem — small
+	// enough to compare row for row, wide enough to have many groups.
+	const where = `WHERE l_orderkey < 200`
+	sel := func(item, groupBy string) string {
+		return `SELECT ` + item + ` AS gk, COUNT(*) AS n, SUM(l_quantity) AS q FROM lineitem ` +
+			where + ` GROUP BY ` + groupBy + ` ORDER BY gk`
+	}
+	var out []pgCase
+	add := func(name, sql string) { out = append(out, pgCase{name: name, sql: sql, ordered: true}) }
+
+	// The SELECT item against the GROUP BY term: parentheses on either side,
+	// on both, nested, and identifier case in the item.
+	add("GroupKeyPlain", sel(`l_partkey + 1`, `l_partkey + 1`))
+	add("GroupKeyWhitespace", sel(`l_partkey+1`, `l_partkey + 1`))
+	add("GroupKeyParenOnTheSelect", sel(`(l_partkey + 1)`, `l_partkey + 1`))
+	add("GroupKeyParenOnTheGroupBy", sel(`l_partkey + 1`, `(l_partkey + 1)`))
+	add("GroupKeyParenOnBoth", sel(`(l_partkey + 1)`, `(l_partkey + 1)`))
+	add("GroupKeyParenNested", sel(`((l_partkey) + 1)`, `l_partkey + 1`))
+	add("GroupKeyIdentifierCase", sel(`L_PARTKEY + 1`, `l_partkey + 1`))
+
+	// Associativity is NOT spelling: these are two expressions, two keys, and
+	// an identity that erased parentheses by printing without them would make
+	// them one.
+	add("GroupKeyLeftAssociative", sel(`l_partkey - 1 - 2`, `l_partkey - 1 - 2`))
+	add("GroupKeyRightAssociative", sel(`l_partkey - (1 - 2)`, `l_partkey - (1 - 2)`))
+
+	// ORDER BY the grouping expression rather than the alias, spelled both
+	// ways. `ORDER BY (l_partkey + 1)` was refused outright.
+	add("GroupKeyOrderByTheExpression",
+		`SELECT l_partkey + 1 AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY l_partkey + 1`)
+	add("GroupKeyOrderByTheParenthesisedExpression",
+		`SELECT l_partkey + 1 AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY (l_partkey + 1)`)
+
+	// HAVING over the computed key — #720, which answered ZERO rows on both
+	// execution paths — in every spelling, alone and beside an aggregate
+	// predicate, and with the key inside an aggregate where it must NOT be
+	// re-pointed at the grouped column.
+	having := func(name, pred string) {
+		add(name, `SELECT l_partkey + 1 AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 HAVING `+pred+` ORDER BY gk`)
+	}
+	having("GroupKeyHaving", `l_partkey + 1 > 100`)
+	having("GroupKeyHavingParenthesised", `(l_partkey + 1) > 100`)
+	having("GroupKeyHavingIdentifierCase", `L_PARTKEY + 1 > 100`)
+	having("GroupKeyHavingNegated", `NOT (l_partkey + 1 > 100)`)
+	having("GroupKeyHavingConjunction", `l_partkey + 1 > 100 AND COUNT(*) > 1`)
+	having("GroupKeyHavingIsNotNull", `l_partkey + 1 IS NOT NULL`)
+	having("GroupKeyHavingCast", `CAST(l_partkey + 1 AS BIGINT) > 100`)
+	having("GroupKeyHavingOverAnAggregateOfTheKey", `SUM(l_partkey + 1) > 100`)
+	having("GroupKeyHavingAggregateOnly", `COUNT(*) > 1`)
+
+	// An expression OVER the key rather than the key itself, and one that
+	// mixes the key with an aggregate — the shape the gather EVALUATES.
+	add("GroupKeyExpressionOverTheKey",
+		`SELECT (l_partkey + 1) * 2 AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY gk`)
+	add("GroupKeyFunctionOverTheKey",
+		`SELECT ABS(l_partkey + 1) AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY gk`)
+	add("GroupKeyPlusAnAggregate",
+		`SELECT (l_partkey + 1) + COUNT(*) AS x FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY x`)
+	add("GroupKeyCaseOverTheKey",
+		`SELECT CASE WHEN l_partkey + 1 > 100 THEN 'hi' ELSE 'lo' END AS b, COUNT(*) AS n
+			FROM lineitem `+where+` GROUP BY l_partkey + 1 ORDER BY b, n`)
+
+	// TWO computed keys, in either order, with the items spelled differently
+	// from both.
+	add("GroupKeyTwoComputed",
+		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1, l_suppkey * 2 ORDER BY a, b`)
+	add("GroupKeyTwoComputedParenthesised",
+		`SELECT (l_partkey + 1) AS a, (l_suppkey * 2) AS b, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1, l_suppkey * 2 ORDER BY a, b`)
+	add("GroupKeyTwoComputedReordered",
+		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_suppkey * 2, l_partkey + 1 ORDER BY a, b`)
+
+	// A key over a DECIMAL, a DATE and a STRING expression. Under the DECIMAL
+	// fixture the first is exact fixed-point arithmetic and the comparison is
+	// digit for digit.
+	out = append(out, pgCase{name: "GroupKeyOverDecimal", ordered: true, exactNumeric: true,
+		sql: `SELECT (l_extendedprice + 1) AS gk, COUNT(*) AS n FROM lineitem ` + where +
+			` GROUP BY l_extendedprice + 1 ORDER BY gk`})
+	// l_shipdate is a TEXT column in this fixture, so the DATE key is the
+	// CAST — which is also the shape that types the key from something other
+	// than its input column.
+	add("GroupKeyOverDateCast",
+		`SELECT (CAST(l_shipdate AS DATE)) AS d, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY CAST(l_shipdate AS DATE) ORDER BY d`)
+	add("GroupKeyOverSubstr",
+		`SELECT (SUBSTR(l_shipinstruct, 1, 6)) AS p, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY SUBSTR(l_shipinstruct, 1, 6) ORDER BY p`)
+	add("GroupKeyOverConcat",
+		`SELECT (l_returnflag || l_linestatus) AS k, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_returnflag || l_linestatus ORDER BY k`)
+
+	// An outer reference to the key through a derived table and through a CTE,
+	// with the two spellings deliberately different.
+	add("GroupKeyDerivedTableOuterReference",
+		`SELECT s.gk, s.n FROM (SELECT (l_partkey + 1) AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1) s WHERE s.gk > 100 ORDER BY s.gk`)
+	add("GroupKeyCTEOuterReference",
+		`WITH a AS (SELECT l_partkey + 1 AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY (l_partkey + 1)) SELECT gk, n FROM a WHERE gk > 100 ORDER BY gk`)
+	add("GroupKeyCTEHavingThenOuterFilter",
+		`WITH a AS (SELECT l_partkey + 1 AS gk, COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 HAVING l_partkey + 1 > 100) SELECT gk, n FROM a `+
+			`WHERE gk > 150 ORDER BY gk`)
+
+	// #725: a DELIMITED identifier that is itself valid arithmetic. The key
+	// is a NAME, and the DAG shipped it to the worker with its quotes.
+	add("GroupKeyDelimitedIdentifier",
+		`SELECT "l_partkey + 1" AS gk, COUNT(*) AS n FROM `+
+			`(SELECT l_partkey + 1 AS "l_partkey + 1" FROM lineitem `+where+`) s `+
+			`GROUP BY "l_partkey + 1" ORDER BY gk`)
+	add("GroupKeyDelimitedIdentifierHaving",
+		`SELECT "l_partkey + 1" AS gk, COUNT(*) AS n FROM `+
+			`(SELECT l_partkey + 1 AS "l_partkey + 1" FROM lineitem `+where+`) s `+
+			`GROUP BY "l_partkey + 1" HAVING "l_partkey + 1" > 100 ORDER BY gk`)
+	// The same delimited name over a column of a DIFFERENT type, resolved as
+	// a SELECT-list ALIAS: PostgreSQL prefers an output name over an input
+	// one in GROUP BY, and the alias is what this names.
+	add("GroupKeyDelimitedAliasOverAnotherType",
+		`SELECT l_returnflag AS "l_partkey + 1", COUNT(*) AS n FROM lineitem `+where+
+			` GROUP BY "l_partkey + 1" ORDER BY 1`)
+
 	return out
 }
 
