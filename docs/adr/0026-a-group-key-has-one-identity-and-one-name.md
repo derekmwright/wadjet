@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended the same day after review — one identity, one SLOT, one published name)
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended twice the same day after review — one identity, one SLOT, one published name, and one ALLOCATOR per aggregate)
 
 ## Context
 
@@ -107,6 +107,33 @@ input column won and the query grouped by it; the worker's projection
 NARROWS, so the key won and shadowed the column an aggregate needed. One
 name, two operators, two different wrong answers.
 
+### 2a. A slot is ALLOCATED, never merely named
+
+`SlotName(family, n)` is a namer. Naming is not enough, because a slot is
+safe only when NOTHING else answers to it, and three different things can:
+
+- a name already **in scope** — a table may legitimately store a column
+  called `__gb_expr_0`, and it is never refused at read;
+- a name the query **binds** elsewhere — another group key, an aggregate's
+  argument or output, a filter column;
+- a slot the same query has **already issued**.
+
+A per-key namer sees only the first, and that is a wrong answer, not a
+missed optimisation. Over a table carrying `__gb_expr_0`, two derived keys
+landed in one column: key 0 stepped off the stored name onto `__gb_expr_1`,
+key 1 started at its own index, found `__gb_expr_1` free, and took it — so
+the second key silently carried the first's value and a twelve-group query
+answered three. The DAG had the mirror image: `SUM(__gb_expr_0)` beside
+`GROUP BY g + 1` was answered from the key's slot, because the worker's
+projection narrows and the key had claimed the name first — right keys,
+right row count, the sum of a group key.
+
+**A slot is therefore ALLOCATED from a per-aggregate (planner) or
+per-fragment (worker) allocator that excludes all three sets, and
+termination is bounded by their size rather than assumed.** Two authors hit
+this same bug independently, which is the evidence that the shared API
+needs an allocator and not only a namer.
+
 `__gb_expr_` is in the RESERVED namespace (`planner/physical/reserved_slots.go`):
 a user column, derived-table output or SELECT alias spelled inside it is
 refused with 42601 naming the family, so no query can put a value there and
@@ -159,6 +186,30 @@ and `1` or `'x'` makes a poor column name.
 `aggregateOutputNames`, the pre-aggregate projection, the projection above
 the aggregate and the gather's rename all read it from there.
 
+### 2c. Only a column REFERENCE is resolved as a column name
+
+A key's recorded TEXT cannot say whether the query wrote a name or an
+expression: a delimited identifier's quotes are not part of its name, so
+`GROUP BY "g + 1"` and `GROUP BY g + 1` are both recorded as `g + 1`.
+Asking the text whether some column answers to it bound the ARITHMETIC key
+to a delimited column of that spelling — PostgreSQL answers five groups of
+the sum, both DAG arms answered nine groups of the column, silently.
+
+**The parsed form decides.** A term that is not a `*ColRef` is never
+resolved as a name; only its LEAVES are. PostgreSQL's rule is that unquoted
+`g + 1` is arithmetic, full stop.
+
+The same rule settles what a NAME may travel through. A key defined by a
+rename Project is re-spelled into SOURCE columns for DISPATCH only
+(`aggStageDispatchKey`), because the DAG flattens that Project;
+`aggregateOutputName` does not take that path, since it answers what a SORT
+KEY names and a sort key is resolved on both engines.
+
+And a key so re-spelled is TYPED below the rename chain, which is #387's
+own rule: `inputColDecls` stops at a Project, so a derived key over a
+renamed DECIMAL column had no declared type, fell to the float rule, and
+handed exact fixed point to a FLOAT64 vector.
+
 ### 3. HAVING is spelled against what the aggregate publishes
 
 The predicate is rewritten in the LOGICAL plan
@@ -208,9 +259,27 @@ that works.
   - **#732** — an unaliased expression is named after its own text where
     PostgreSQL names it `?column?`. Both paths agree with each other; the
     rule is about naming a select ITEM, not resolving a KEY.
+  - **#736** — what remains of the DAG half after the reference rule above
+    closed the collision shapes: an aggregate whose ARGUMENT is spelled
+    like the key (loud), an aggregate ALIASED like the key, and DISTINCT
+    over a derived key.
+
+A related naming rule, settled here because two of the four review findings
+turned on it: **an ALIAS is a name, and its case is part of it.** A
+delimited alias is published as written on every path, and a positional
+`ORDER BY` resolves to the select ITEM, never to the alias's text re-parsed
+as an expression.
 
 ## Gates
 
+- `coordinator.TestStageCarriesFilterAndProjectionTwoPath` §
+  `R4/…/SlotCollidesWithAStoredColumn` — the allocator, over a fixture that
+  STORES a column named like the slot: two and three derived keys, either
+  order, with HAVING, minted by a derived alias with no stored column at
+  all, and an aggregate over the stored column asserted on its VALUE.
+- `coordinator.TestStageCarriesFilterAndProjectionTwoPath` §
+  `R4/…/ArithmeticKeyBesideADelimitedColumnOfThatText` and
+  `R4/…/DelimitedAliasUnderPositionalOrderBy`.
 - `coordinator.TestStageCarriesFilterAndProjectionTwoPath` §
   `R4/AGroupKeyIsResolvedByIdentityNotBySpelling` — the whole spelling
   matrix on both arms, asserted as ordered rows with per-key counts
