@@ -3116,13 +3116,16 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		// puts the projection above the sort, where nothing needs the
 		// dropped columns.
 		if projectionNeedsItsOwnStage(s, aliasedSpecsFor(proj, specs)) &&
+			orderingSurvivesAProjectStage(stages, i, aliasedSpecsFor(proj, specs)) &&
 			(viaSort == nil || projectionCoversSortKeys(aliasedSpecsFor(proj, specs), viaSort.SortKeys)) {
 			// Written against what the producer EMITS, not what the query
 			// wrote: above an aggregate a computed group key is a column
 			// NAME, and rebuilding it as arithmetic answers NULL.
 			aliased, ok := respellSpecsOverProducerOutput(stages, i, aliasedSpecsFor(proj, specs))
 			if ok && specsResolveAgainstStageOutput(stages, i, aliased) {
+				keys := stages[i].SortKeys
 				stages = insertProjectStageAbove(stages, i, aliased)
+				carryOrderingOntoProjectStage(stages, len(stages)-1, keys)
 				repointGatherRenames(gather, aliased)
 				return stages
 			}
@@ -3293,7 +3296,16 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 			if viaSort != nil && !projectionCoversSortKeys(aliased, viaSort.SortKeys) {
 				return stages
 			}
+			// And never above a producer whose OWN ordering the inserted
+			// stage would hide: the consumer reads the ordering off its
+			// direct dependency. The rows stay right and the SEQUENCE stops
+			// being the one the query asked for.
+			if !orderingSurvivesAProjectStage(stages, i, aliased) {
+				return stages
+			}
+			keys := stages[i].SortKeys
 			stages = insertProjectStageAbove(stages, i, aliased)
+			carryOrderingOntoProjectStage(stages, len(stages)-1, keys)
 			repointGatherRenames(gather, aliased)
 			return stages
 		}

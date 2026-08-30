@@ -323,3 +323,58 @@ func respellSpecsOverProducerOutput(stages []Stage, producerIdx int, specs []Pro
 	}
 	return out, true
 }
+
+// orderingSurvivesAProjectStage reports whether inserting a StageProject
+// between the producer at producerIdx and its consumers keeps the producer's
+// ORDERING visible to them.
+//
+// A stage's ordering is read off the DIRECT dependency: the coordinator asks
+// what its gather's dependency is and whether that stage is ordered, and the
+// worker's merge does the same one level down. A projection inserted between
+// the two hides it — the new stage is a `project`, it declares no SortKeys,
+// and a Tasks=1 fragment concatenating several ordered input files could not
+// truthfully declare any, because concatenation is not a merge.
+//
+// So a producer that carries its own fused ordering keeps its consumers. The
+// symptom otherwise is the sharpest kind of silent: the right rows in the
+// wrong sequence. `SELECT a.s_suppkey AS lo, b.s_suppkey AS hi FROM supplier
+// a JOIN supplier b ON … ORDER BY lo, hi` came back as a correct 9-row
+// multiset with the ORDER BY ignored, because the projection renaming
+// `a.s_suppkey` to `lo` moved in between the join's fused sort and the gather.
+//
+// A producer with NO ordering of its own has nothing to lose, and that is the
+// case the insertion exists for: an aggregate, a union or a DISTINCT that
+// collapses its input and cannot evaluate the SELECT list itself.
+func orderingSurvivesAProjectStage(stages []Stage, producerIdx int, specs []ProjectExprSpec) bool {
+	if producerIdx < 0 || producerIdx >= len(stages) {
+		return true
+	}
+	s := &stages[producerIdx]
+	if len(s.SortKeys) == 0 {
+		return true // nothing to lose
+	}
+	// The ordering can ride ONTO the inserted stage, but only if both halves
+	// hold. The keys must still be named the same above the projection —
+	// otherwise nothing downstream can say what the stream is ordered BY —
+	// and the producer must emit a single ordered stream, because the
+	// inserted fragment CONCATENATES its inputs and concatenation of two
+	// ordered files is not ordered. A union (Tasks = len(arms)) and a
+	// probe-split join fail the second half.
+	if s.Tasks > 1 {
+		return false
+	}
+	return projectionCoversSortKeys(specs, s.SortKeys)
+}
+
+// carryOrderingOntoProjectStage copies a producer's ordering onto the stage
+// inserted above it, so the consumer that reads the ordering off its direct
+// dependency still finds one.
+//
+// Only called where orderingSurvivesAProjectStage said yes, which is what
+// makes the declaration true rather than hopeful.
+func carryOrderingOntoProjectStage(stages []Stage, insertedIdx int, keys []SortKeySpec) {
+	if insertedIdx < 0 || insertedIdx >= len(stages) || len(keys) == 0 {
+		return
+	}
+	stages[insertedIdx].SortKeys = append([]SortKeySpec(nil), keys...)
+}

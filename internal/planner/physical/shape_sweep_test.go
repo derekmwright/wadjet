@@ -174,5 +174,14 @@ func sweepCTEShapes() map[string]string {
 		"union_mixed/arms_swapped": `SELECT n_regionkey AS gk FROM nation WHERE n_nationkey < 3 ` +
 			`UNION ALL SELECT gk FROM (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n FROM nation ` +
 			`GROUP BY n_regionkey + 1) a ORDER BY gk`,
+		// A SELF-JOIN ordered on ALIASES of qualified columns. The ordering
+		// fuses into the join; a projection between it and the gather hides
+		// it, and the ORDER BY silently stops running (#656 R5).
+		"selfjoin/ordered_on_aliases": `SELECT a.n_nationkey AS lo, b.n_nationkey AS hi ` +
+			`FROM nation a JOIN nation b ON a.n_regionkey = b.n_regionkey ` +
+			`AND a.n_nationkey < b.n_nationkey ORDER BY lo, hi`,
+		"selfjoin/ordered_on_a_computed_alias": `SELECT a.n_nationkey * 10 AS lo, ` +
+			`b.n_nationkey AS hi FROM nation a JOIN nation b ON a.n_regionkey = b.n_regionkey ` +
+			`AND a.n_nationkey < b.n_nationkey ORDER BY lo, hi`,
 	}
 }

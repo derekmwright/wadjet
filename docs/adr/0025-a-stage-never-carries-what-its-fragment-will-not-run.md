@@ -235,6 +235,44 @@ sees a reference to `g` that the aggregate genuinely does not emit. Reading
 that as unresolvable refused a HAVING the fragment computes correctly, so the
 walk stops at any subterm whose TEXT is an emitted column name.
 
+## An inserted stage is a stage, and ordering is read off the direct dependency
+
+`StageProject` is the escape hatch for a producer that cannot carry the SELECT
+list. It is also a stage, and putting one anywhere costs whatever its position
+carried.
+
+The coordinator asks its gather what its DEPENDENCY is and whether that stage
+is ordered; the worker's merge asks the same one level down. A producer with a
+FUSED ordering — a join or an aggregate whose sort was folded into it — answers
+yes. A `project` between the two answers no unless it is told otherwise, and
+whether it MAY be told rests on two conditions, both of which have to hold:
+
+- the ordering's keys survive the projection under their own names, because a
+  stream nothing can name the ordering OF is not an ordered stream. The
+  self-join renames both keys (`a.s_suppkey` to `lo`, `b.s_suppkey` to `hi`)
+  and fails this;
+- the producer emits a SINGLE ordered stream. The inserted fragment
+  CONCATENATES its inputs, and the concatenation of two ordered files is not
+  ordered — declaring the keys anyway would be a lie in the other direction. A
+  union (`Tasks = len(arms)`) and a probe-split join fail this.
+
+When both hold the ordering rides onto the inserted stage and the consumer
+still finds one. When either fails the insertion is refused and the pass falls
+back to declining, which leaves the gather renaming from the producer's own
+column names — the shape that already worked.
+
+Keeping the two conditions rather than banning the insertion outright is what
+keeps an ordered AGGREGATE on the DAG: it is one stream, its key survives, and
+it is the producer the insertion exists for.
+
+The symptom this cost is worth naming, because it is the one a multiset gate
+cannot see: `SELECT a.s_suppkey AS lo, b.s_suppkey AS hi FROM supplier a JOIN
+supplier b ON … ORDER BY lo, hi` came back as the CORRECT nine rows in the
+WRONG sequence. Every value gate in this ADR's corpus passed it. The DuckDB
+comparison caught it because that gate compares an ORDERED digest when the
+query has a top-level ORDER BY, and the two-path corpus now asserts this shape
+as a sequence for the same reason.
+
 ## A declaration is read as truth, so it may not disagree with the bytes
 
 The respell above made a union arm COPY a column where it used to compute one,

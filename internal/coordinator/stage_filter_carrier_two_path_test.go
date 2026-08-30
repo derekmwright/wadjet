@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1399,6 +1400,181 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		}
 	})
 
+	// --- the fifth adversarial round ---------------------------------------
+
+	t.Run("R5/SelfJoinOrderedOnAliasesOfQualifiedColumns", func(t *testing.T) {
+		// The sharpest kind of silent: the right ROWS in the wrong SEQUENCE.
+		//
+		// `SELECT a.k AS lo, b.k AS hi FROM t a JOIN t b ON … ORDER BY lo, hi`
+		// fuses its ordering into the JOIN stage. Round 3's StageProject was
+		// then inserted between that join and the gather to compute the
+		// SELECT list — and a stage's ordering is read off the DIRECT
+		// dependency, so the gather saw a `project` stage that declares no
+		// SortKeys and merged the join's ordered files in arrival order. The
+		// multiset stayed correct and the ORDER BY silently did nothing.
+		//
+		// Asserted as a SEQUENCE, computed in Go from the fixture generator:
+		// a multiset assertion is exactly the one that cannot see this.
+		type pair struct{ lo, hi int64 }
+		build := func(limit int64, desc bool) []pair {
+			byGroup := map[int32][]int64{}
+			for _, r := range rows {
+				if g, ok := r.g.(int32); ok {
+					byGroup[g] = append(byGroup[g], r.id)
+				}
+			}
+			var out []pair
+			for _, ids := range byGroup {
+				for _, a := range ids {
+					if a >= limit {
+						continue
+					}
+					for _, b := range ids {
+						if a < b {
+							out = append(out, pair{a, b})
+						}
+					}
+				}
+			}
+			sort.Slice(out, func(i, j int) bool {
+				if out[i].lo != out[j].lo {
+					if desc {
+						return out[i].lo > out[j].lo
+					}
+					return out[i].lo < out[j].lo
+				}
+				if desc {
+					return out[i].hi > out[j].hi
+				}
+				return out[i].hi < out[j].hi
+			})
+			return out
+		}
+		join := fmt.Sprintf(`FROM %[1]s a JOIN %[1]s b ON a.g = b.g AND a.id < b.id `+
+			`WHERE a.id < 30`, tbl)
+		assertSeq := func(t *testing.T, sql string, want []pair) {
+			t.Helper()
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != len(want) {
+					t.Fatalf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), len(want), sql)
+				}
+				for i, r := range res.Rows {
+					lo, _ := numAsInt(r["lo"])
+					hi, _ := numAsInt(r["hi"])
+					if lo != want[i].lo || hi != want[i].hi {
+						t.Fatalf("%s arm: row %d is (%d,%d), want (%d,%d) — the ORDER BY did "+
+							"not run\n  SQL: %s", arm.name, i, lo, hi, want[i].lo, want[i].hi, sql)
+					}
+				}
+			}
+		}
+		asc, desc := build(30, false), build(30, true)
+		t.Run("OnAliases", func(t *testing.T) {
+			assertSeq(t, `SELECT a.id AS lo, b.id AS hi `+join+` ORDER BY lo, hi`, asc)
+		})
+		t.Run("OnTheQualifiedColumns", func(t *testing.T) {
+			assertSeq(t, `SELECT a.id AS lo, b.id AS hi `+join+` ORDER BY a.id, b.id`, asc)
+		})
+		t.Run("OneAliasAndOneQualifiedColumn", func(t *testing.T) {
+			assertSeq(t, `SELECT a.id AS lo, b.id AS hi `+join+` ORDER BY lo, b.id`, asc)
+		})
+		t.Run("Descending", func(t *testing.T) {
+			assertSeq(t, `SELECT a.id AS lo, b.id AS hi `+join+` ORDER BY lo DESC, hi DESC`, desc)
+		})
+		t.Run("WithALimit", func(t *testing.T) {
+			assertSeq(t, `SELECT a.id AS lo, b.id AS hi `+join+` ORDER BY lo, hi LIMIT 7`, asc[:7])
+		})
+		t.Run("AComputedSelectItem", func(t *testing.T) {
+			// `a.id * 10` cannot be a passthrough, so this is the spelling
+			// that genuinely needs the projection — and it must still not
+			// cost the join's ordering.
+			sql := `SELECT a.id * 10 AS lo, b.id AS hi ` + join + ` ORDER BY lo, hi`
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != len(asc) {
+					t.Fatalf("%s arm returned %d rows, want %d", arm.name, len(res.Rows), len(asc))
+				}
+				for i, r := range res.Rows {
+					lo, _ := numAsInt(r["lo"])
+					hi, _ := numAsInt(r["hi"])
+					if lo != asc[i].lo*10 || hi != asc[i].hi {
+						t.Fatalf("%s arm: row %d is (%d,%d), want (%d,%d)\n  SQL: %s",
+							arm.name, i, lo, hi, asc[i].lo*10, asc[i].hi, sql)
+					}
+				}
+			}
+		})
+		t.Run("AnOrderedAggregateThatDoesTakeTheProjectStage", func(t *testing.T) {
+			// The other side of the same rule, and the one that keeps it
+			// from being a blanket ban. An aggregate is a SINGLE ordered
+			// stream, so a projection above it can carry the ordering with
+			// it — the keys survive the projection under their own names and
+			// concatenating one file is still that file. The stage IS
+			// inserted here, and the ORDER BY must still run.
+			var keys []int64
+			seen := map[int32]bool{}
+			for _, r := range rows {
+				if g, ok := r.g.(int32); ok && !seen[g] {
+					seen[g] = true
+					keys = append(keys, int64(g))
+				}
+			}
+			sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+			sql := fmt.Sprintf(`SELECT k FROM (SELECT g AS k, COUNT(*) AS c FROM %s `+
+				`GROUP BY g) t WHERE k >= 0 ORDER BY k`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != len(keys) {
+					t.Fatalf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), len(keys), sql)
+				}
+				if !sameNames(res.Columns, []string{"k"}) {
+					t.Errorf("%s arm returned columns %v, want [k]", arm.name, res.Columns)
+				}
+				for i, r := range res.Rows {
+					got, _ := numAsInt(r["k"])
+					if got != keys[i] {
+						t.Fatalf("%s arm: row %d is %d, want %d — the ORDER BY did not survive "+
+							"the inserted projection\n  SQL: %s", arm.name, i, got, keys[i], sql)
+					}
+				}
+			}
+		})
+		t.Run("AThreeWaySelfJoin", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT a.id AS lo, b.id AS mid, c.id AS hi FROM %[1]s a `+
+				`JOIN %[1]s b ON a.g = b.g AND a.id < b.id `+
+				`JOIN %[1]s c ON b.g = c.g AND b.id < c.id `+
+				`WHERE a.id < 8 AND c.id < 40 ORDER BY lo, mid, hi`, tbl)
+			var last [3]int64
+			first := true
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) == 0 {
+					t.Fatalf("%s arm returned no rows", arm.name)
+				}
+				var prev [3]int64
+				for i, r := range res.Rows {
+					lo, _ := numAsInt(r["lo"])
+					mid, _ := numAsInt(r["mid"])
+					hi, _ := numAsInt(r["hi"])
+					cur := [3]int64{lo, mid, hi}
+					if i > 0 && !tripleLess(prev, cur) {
+						t.Fatalf("%s arm: row %d %v does not follow %v\n  SQL: %s",
+							arm.name, i, cur, prev, sql)
+					}
+					prev = cur
+				}
+				if first {
+					last, first = prev, false
+				} else if last != prev {
+					t.Errorf("the two arms end on different rows: %v vs %v", last, prev)
+				}
+			}
+		})
+	})
+
 	// --- controls: shapes that were already right --------------------------
 
 	t.Run("ctl/HavingStillRunsBelowTheSelectList", func(t *testing.T) {
@@ -1478,4 +1654,14 @@ func sfcScalar(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coor
 			t.Errorf("%s arm answered %d, want %d\n  SQL: %s", arm.name, got, want, sql)
 		}
 	}
+}
+
+// tripleLess is strict lexicographic order over three sort keys.
+func tripleLess(a, b [3]int64) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }
