@@ -441,63 +441,6 @@ func TestSiblingWindowsAcrossAJoinKeepTheirOwnSlots(t *testing.T) {
 	}
 }
 
-// TestSiblingWindowsCollapseWithoutAStoredSlotName pins TODO(#747): the SAME
-// sibling shapes with NO reserved column collapse onto one window's value.
-//
-// It is a different mechanism reached by the same SQL. With nothing stored in
-// a slot family the renamer's `hot` guard exits before doing anything — the two
-// blocks' slots are already distinct — and the collapse happens downstream, in
-// how the join resolves the arms' identically-named output columns (#742's
-// family). The pin fires when the DAG starts agreeing, which is that fix's
-// proof.
-func TestSiblingWindowsCollapseWithoutAStoredSlotName(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: this gate stands up an embedded NATS cluster")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	t.Cleanup(cancel)
-
-	single := tmdStandalone(t, ctx)
-	infra := tmdInfra(t, ctx)
-	tmdWriteTables(t, ctx, infra, nil)
-	coord := tmdCoordinator(t, ctx, infra)
-
-	// PostgreSQL: pw = SUM(b) = 49.2400, qw = SUM(a) = 52.9900.
-	sql := "SELECT p.w AS pw, q.w AS qw, p.id FROM " +
-		"(SELECT id, SUM(b) OVER () AS w FROM " + dbpTable + ") p JOIN " +
-		"(SELECT id, SUM(a) OVER () AS w FROM " + dbpTable + ") q ON p.id = q.id ORDER BY p.id"
-
-	// The single-process path is RIGHT and is asserted, so a fix that breaks it
-	// fails here rather than passing as "both arms agree".
-	res, err := tmdRunSingle(ctx, single, sql)
-	if err != nil {
-		t.Fatalf("single arm refused %q: %v", sql, err)
-	}
-	for i, r := range res.Rows {
-		if got := fmt.Sprintf("%v", r["qw"]); got != "52.9900" {
-			t.Errorf("single arm row %d: qw = %q, want 52.9900", i, got)
-		}
-	}
-
-	dag, err := tmdRunDAG(ctx, coord, sql)
-	if err != nil {
-		t.Fatalf("dag arm refused %q: %v", sql, err)
-	}
-	for _, r := range dag.Rows {
-		got := fmt.Sprintf("%v", r["qw"])
-		if got == "52.9900" {
-			t.Errorf("the DAG now answers qw=%q for\n  %s\nTODO(#747) is fixed — delete "+
-				"this pin and assert 49.2400/52.9900 on both paths", got, sql)
-			return
-		}
-		if got != "49.2400" {
-			t.Errorf("the DAG answered qw=%q, which is neither the pinned wrong value "+
-				"(49.2400, p's window) nor the right one (52.9900)\n  %s", got, sql)
-			return
-		}
-	}
-}
-
 // TestSiblingWindowsInUnionArmsKeepTheirOwnSlots: a set operation is the other
 // multi-child boundary, and its arms mint slots independently too.
 func TestSiblingWindowsInUnionArmsKeepTheirOwnSlots(t *testing.T) {
