@@ -1034,9 +1034,21 @@ func resolvePositionalRefs(info *SelectInfo) error {
 			// which no sort key can resolve.
 			info.OrderBy[i].Column = WindowOutputName(col)
 		} else if col.Alias != "" {
-			info.OrderBy[i].Column = col.Alias
+			// A REFERENCE to the alias, not its text. Every consumer of a
+			// sort term re-parses Column, and an alias is an arbitrary
+			// string: `SELECT id AS "G + 1" … ORDER BY 1` came back as the
+			// four tokens `G + 1` and was read as arithmetic over a column
+			// `G` that does not exist, and `"Kk"` / `"A B"` reached the DAG's
+			// sort as names no stage emits. QuoteIdent renders whatever
+			// re-parses to this one identifier, and Expr carries the tree so
+			// nothing has to re-parse at all.
+			info.OrderBy[i].Column = QuoteIdent(col.Alias)
+			info.OrderBy[i].Expr = &ColRef{Column: col.Alias}
 		} else {
 			info.OrderBy[i].Column = col.Expr
+			if col.ASTExpr != nil {
+				info.OrderBy[i].Expr = col.ASTExpr
+			}
 		}
 	}
 

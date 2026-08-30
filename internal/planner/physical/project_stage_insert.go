@@ -143,7 +143,16 @@ func aliasedSpecsFor(proj []logical.Projection, specs []ProjectExprSpec) []Proje
 	for j, sp := range specs {
 		out[j] = sp
 		if j < len(proj) && proj[j].Alias != "" {
-			out[j].Name = strings.ToLower(proj[j].Alias)
+			// VERBATIM. An alias's case is part of the name a delimited
+			// identifier gives — PostgreSQL publishes `Kk` for `AS "Kk"` and
+			// so does the gather — and lower-casing it here made the stage
+			// emit `kk` while every consumer still asked for `Kk`: the DAG's
+			// sort failed with `key column "Kk" does not exist in the input
+			// schema` on a query the single-process path answers. Consumers
+			// that match by name already fold case on both sides (the
+			// `emitted` index below is built lower-cased), so nothing needed
+			// the stored name to be folded.
+			out[j].Name = proj[j].Alias
 		}
 	}
 	return out
