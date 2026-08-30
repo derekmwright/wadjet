@@ -212,23 +212,72 @@ func aggInputRespellable(n *logical.Node) bool {
 	return false
 }
 
-// aggInputAliasIsAggregateOutput reports whether the derived alias between the
-// aggregate and its producer is materialized by an AGGREGATE — which is what a
-// DISTINCT lowers to, and which emits a computed key under the TEXT of its
-// expression rather than under the alias.
+// aggInputAliasIsAggregateGroupKey reports whether the derived alias's DEFINING
+// EXPRESSION is a GROUP BY key of the aggregate below — the one case in which
+// the producer emits a column under that expression's TEXT, and so the one case
+// in which the aggregate's argument is a bare NAME spelled that way.
 //
 // It is the third answer to "is this name materialized here", and the three
-// differ in WHAT the producer calls it: nothing materializes it (respell to
-// the expression), a join or an ordering materializes it under the ALIAS, an
-// aggregate materializes it under the expression's TEXT. Reading the wrong one
-// of the three is a NULL column: `SUM(v)` over
-// `(SELECT DISTINCT a * 2 AS v FROM t)` recomputed `a * 2` over a stage whose
-// output has no `a`, and `SUM(x.twice * 1)` under a join read `id * 2` from a
-// stream that emits `twice`.
-func aggInputAliasIsAggregateOutput(n *logical.Node) bool {
+// differ in WHAT the producer calls the value: nothing materializes it
+// (substitute the expression), a join or an ordering materializes it under the
+// ALIAS, an aggregate materializes a GROUP BY key under its expression's TEXT.
+//
+// The first draft asked only "is there an aggregate below", and that was far
+// too wide. `SELECT SUM(v) FROM (SELECT SUM(a) * 2 AS v FROM t GROUP BY s) x`
+// has an aggregate below, but `SUM(a) * 2` is not a group key — the aggregate
+// emits `s` and `__agg_0`, and the alias is arithmetic OVER an aggregate
+// output. Spelling the argument `__agg_0 * 2` handed the operator a name it
+// cannot look up, and both DAG arms hard-failed after three attempts with
+// `aggregate input "__agg_0 * 2" is not a column of its input (input has: s,
+// __agg_0)` — a query PostgreSQL answers 105.98 and ff7c3f19 answered on every
+// arm. The expression has to be COMPUTED there, which is the first answer.
+//
+// Matching on the GROUP BY list is what separates the two: the DISTINCT rewrite
+// puts the whole projected expression in it (`SELECT DISTINCT a * 2 AS v`
+// groups by `a * 2`), and arithmetic over an aggregate output never appears
+// there.
+func aggInputAliasIsAggregateGroupKey(n *logical.Node, exprText string) bool {
+	exprText = strings.TrimSpace(exprText)
+	if exprText == "" {
+		return false
+	}
 	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
 		switch n.Type {
 		case logical.NodeAggregate:
+			for _, g := range n.GroupBy {
+				if strings.EqualFold(strings.TrimSpace(g), exprText) {
+					return true
+				}
+			}
+			return false
+		case logical.NodeProject, logical.NodeFilter:
+			if len(n.Children) != 1 {
+				return false
+			}
+			n = n.Children[0]
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// aggInputAliasIsMaterializedUnderItsName reports whether the producer between
+// the aggregate and its source materializes the derived alias under the ALIAS
+// — which is what attachScanSelectProjections' alias-naming OpProject does on a
+// join arm's fragment, and on a sort, a LIMIT, a window or a union.
+//
+// An AGGREGATE is deliberately not in the list. It may publish the alias
+// (absorbAggregateOutputProjection puts the SELECT list on a collapsing
+// producer) or it may not, and where it does not the alias names nothing;
+// computing the expression works in both cases, because the aggregate's own
+// outputs are what the expression reads. So an aggregate below falls through to
+// the compute answer, which is what ff7c3f19 did for every one of these shapes.
+func aggInputAliasIsMaterializedUnderItsName(n *logical.Node) bool {
+	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
+		switch n.Type {
+		case logical.NodeJoin, logical.NodeSort, logical.NodeLimit,
+			logical.NodeWindow, logical.NodeDistinct:
 			return true
 		case logical.NodeProject, logical.NodeFilter:
 			if len(n.Children) != 1 {

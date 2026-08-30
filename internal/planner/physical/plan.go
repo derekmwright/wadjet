@@ -5477,19 +5477,27 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					switch {
 					case aggInputRespellable(aggChild):
 						inputExpr, exprCols = expr, exprInput
-					case aggInputAliasIsAggregateOutput(aggChild):
-						// An AGGREGATE below (which is what DISTINCT lowers
-						// to) emits a computed key under the TEXT of its
-						// expression, so the argument is a bare NAME spelled
-						// that way — the same convention aggStageGroupKey
-						// applies to a computed GROUP BY key.
+					case aggInputAliasIsAggregateGroupKey(aggChild, expr.String()):
+						// The aggregate below emits this expression as a GROUP
+						// BY key, under the key's own TEXT (which is what the
+						// DISTINCT rewrite produces), so the argument is a bare
+						// NAME spelled that way — the same convention
+						// aggStageGroupKey applies to a computed group key.
 						agg.InputCol = expr.String()
 						inputExpr = &plansql.ColRef{Column: expr.String()}
-					default:
+					case aggInputAliasIsMaterializedUnderItsName(aggChild):
 						// A JOIN, a sort, a LIMIT, a window: the alias-naming
 						// OpProject on the producing fragment materializes it
 						// under the ALIAS, so the alias is what to read.
 						inputExpr = &plansql.ColRef{Column: agg.InputCol}
+					default:
+						// Anything else — arithmetic over an aggregate's
+						// OUTPUT is the shape that lands here — keeps the
+						// pre-#702 behaviour: hand the worker the expression
+						// and let its pre-projection compute the value. The
+						// references inside it are written against the
+						// Project's INPUT, which is where the type resolves.
+						inputExpr, exprCols = expr, exprInput
 					}
 				} else {
 					agg.InputCol = resolved
