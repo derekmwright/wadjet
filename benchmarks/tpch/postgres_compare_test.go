@@ -4625,29 +4625,34 @@ func groupKeySpellingCases() []pgCase {
 		`SELECT "p k" + 1 AS k, COUNT(*) AS n FROM (SELECT l_partkey AS "p k" FROM lineitem `+
 			where+`) s GROUP BY "p k" + 1 ORDER BY k`)
 
-	// The SLOT the planner materializes a derived key into, over a relation
-	// that already carries a column of that name. A stored or aliased name in
-	// the reserved namespace is never refused at read, so the slot moves —
-	// and the allocator must exclude the slots it has ALREADY ISSUED as well
-	// as the names in scope, or two derived keys land in one column and the
-	// second silently carries the first one's value.
-	slotColl := `(SELECT l_partkey, l_suppkey, 1 AS "__gb_expr_0" FROM lineitem ` + where + `) s`
-	add("GroupKeySlotCollidesTwoDerivedKeys",
-		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM `+slotColl+
-			` GROUP BY l_partkey + 1, l_suppkey * 2 ORDER BY a, b`)
-	add("GroupKeySlotCollidesReversedOrder",
-		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM `+slotColl+
-			` GROUP BY l_suppkey * 2, l_partkey + 1 ORDER BY a, b`)
-	add("GroupKeySlotCollidesThreeDerivedKeys",
-		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, l_linenumber + 3 AS c, COUNT(*) AS n `+
-			`FROM (SELECT l_partkey, l_suppkey, l_linenumber, 1 AS "__gb_expr_0" FROM lineitem `+
-			where+`) s GROUP BY l_partkey + 1, l_suppkey * 2, l_linenumber + 3 ORDER BY a, b, c`)
-	add("GroupKeySlotCollidesWithHaving",
-		`SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM `+slotColl+
-			` GROUP BY l_partkey + 1, l_suppkey * 2 HAVING l_partkey + 1 > 100 ORDER BY a, b`)
-	add("GroupKeySlotCollidesAggregateOverTheColumn",
-		`SELECT l_partkey + 1 AS a, SUM("__gb_expr_0") AS s FROM `+slotColl+
-			` GROUP BY l_partkey + 1 ORDER BY a`)
+	// The SLOT the planner materializes a derived key into, against a query
+	// that MINTS a name in the reserved namespace.
+	//
+	// Only one entry, and it is a PIN. A query cannot create a slot collision
+	// any more: `1 AS "__gb_expr_0"` is refused at the alias door, which is
+	// the reservation working (ADR-0025). PostgreSQL has no reserved column
+	// namespace and answers this; we refuse it, and that difference is worth
+	// having in the differential record where a reader will meet it.
+	//
+	// The collision BEHAVIOUR — a slot allocated clear of a name already in
+	// scope — is gated where it can still be reached: over `collslot`, whose
+	// stored `__gb_expr_0`/`__gb_expr_1` columns are admitted through the
+	// catalog because a table holding one can only predate the reservation
+	// (coordinator §SlotCollidesWithAStoredColumn). This fixture has no such
+	// column and no way to acquire one, so the four sibling shapes that used
+	// to sit here proved the same single fact and were dropped.
+	out = append(out, pgCase{
+		name: "GroupKeySlotNameMintedByAnAliasIsRefused", ordered: true,
+		sql: `SELECT l_partkey + 1 AS a, l_suppkey * 2 AS b, COUNT(*) AS n FROM ` +
+			`(SELECT l_partkey, l_suppkey, 1 AS "__gb_expr_0" FROM lineitem ` + where + `) s ` +
+			`GROUP BY l_partkey + 1, l_suppkey * 2 ORDER BY a, b`,
+		knownBug: pgBugUnsupported + " the alias `\"__gb_expr_0\"` is in the planner's reserved " +
+			"hidden-slot namespace, so wadjet refuses the query with 42601 where PostgreSQL " +
+			"answers it. DELIBERATE, and the refusal is the feature: a query that spells a slot " +
+			"cannot be answered correctly, so it is refused rather than answered wrongly " +
+			"(ADR-0025). This pin fails if the reservation is ever narrowed to let it through",
+		issue: "#694",
+	})
 
 	// An ARITHMETIC key beside a DELIMITED COLUMN spelled the same way. The
 	// recorded key text cannot tell them apart, so the arithmetic key was
