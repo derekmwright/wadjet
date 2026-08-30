@@ -3227,7 +3227,17 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		for j, sp := range specs {
 			aliased[j] = sp
 			if a := proj[j].Alias; a != "" {
-				aliased[j].Name = strings.ToLower(a)
+				// VERBATIM, which is the whole point of the paragraph above:
+				// the sort keys on the ALIAS, so the projection has to emit
+				// the alias the query wrote. An alias's case is part of the
+				// name a delimited identifier gives — PostgreSQL publishes
+				// `Kk` for `AS "Kk"`, and so does our own gather — so
+				// lower-casing it here emitted `kk` while the sort key still
+				// said `Kk`, and the DAG failed with `sort: key column "Kk"
+				// does not exist in the input schema` on a query the
+				// single-process path answers. Consumers that match by name
+				// fold case on both sides already.
+				aliased[j].Name = a
 			}
 		}
 		// Every sort key — the fused sort's on a join, and the standalone
@@ -5104,7 +5114,21 @@ func resolveAggInputName(name string, child *logical.Node) (resolved string, exp
 // compiles and emits (buildAggInputProjection treats a group-by entry that
 // does not parse as a bare column reference as derived). Both walkStages and
 // the sort's aggregateOutputName have to agree on it, so both call this.
-func aggStageGroupKey(key string, child *logical.Node) (string, bool) {
+func aggStageGroupKey(key string, e plansql.Node, child *logical.Node) (string, bool) {
+	// Only a term that IS a column reference may be resolved as one. The
+	// recorded key text cannot say which: `GROUP BY "g + 1"` names a column
+	// and `GROUP BY g + 1` is arithmetic, and both are recorded as `g + 1`
+	// because a delimited identifier's quotes are not part of its name
+	// (#725). Asked of the TEXT, the arithmetic key found a delimited column
+	// spelled the same way and bound to it — PostgreSQL answered five groups
+	// of the sum and both DAG arms answered nine groups of the column,
+	// silently. PostgreSQL's rule is that unquoted `g + 1` is arithmetic,
+	// full stop.
+	if e != nil {
+		if _, bare := e.(*plansql.ColRef); !bare {
+			return key, false
+		}
+	}
 	resolved, expr, _, renamed := resolveAggInputName(key, child)
 	if !renamed {
 		return key, false
@@ -5129,11 +5153,50 @@ func aggStageGroupKey(key string, child *logical.Node) (string, bool) {
 // SORT KEY should name, and a sort key is resolved on both engines — the
 // single-process aggregate publishes the key under its own canonical text and
 // knows nothing of the DAG's source re-spelling.
-func aggStageDispatchKey(key string, child *logical.Node) (string, bool) {
-	if resolved, renamed := aggStageGroupKey(key, child); renamed {
+func aggStageDispatchKey(key string, e plansql.Node, child *logical.Node) (string, bool) {
+	if resolved, renamed := aggStageGroupKey(key, e, child); renamed {
 		return resolved, true
 	}
 	return aggStageDerivedKey(key, child)
+}
+
+// derivedGroupKeyDecl is the declared type of a computed GROUP BY key.
+//
+// A key's leaves may be bound by a rename Project, and inputColDecls STOPS at
+// one — a rename can bind a name to a different value, so the walk refuses to
+// look through it. For a PLAIN rename that caution costs the declaration:
+// `GROUP BY g + 1` over `(SELECT a AS g …)` with `a` DECIMAL(9,2) could type
+// neither `g` nor the sum, fell to the float rule, and the pre-aggregate
+// projection then handed a DECIMAL's rendered text to a FLOAT64 vector — a
+// hard failure on a query PostgreSQL answers (five groups).
+//
+// The repair is #387's own: an expression re-spelled into SOURCE columns is
+// typed against the decls BELOW the rename chain, because a plain rename
+// rebinds names and not values. aggStageDerivedKey performs exactly that
+// re-spelling, and the key the DAG dispatches has already had it done, so the
+// second arm catches that case too.
+func derivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) expr.DeclType {
+	below := func(n plansql.Node) expr.DeclType {
+		return inferProjectionDeclType(n, parquet.TypeString,
+			strictIntArithColsThroughRenames(child), sourceColDeclsThroughRenames(child))
+	}
+	if respelled, changed := aggStageDerivedKey(key, child); changed {
+		if n, err := plansql.ParseExpression(respelled); err == nil {
+			return below(n)
+		}
+	}
+	if _, c := nodeDeclaredType(node, inputColDecls(child)); c == expr.Decided {
+		return inferProjectionDeclType(node, parquet.TypeString,
+			strictIntArithCols(child), inputColDecls(child))
+	}
+	// Nothing decided here. The key may already name source columns — the
+	// DAG dispatches it re-spelled — so ask below the renames before falling
+	// back to the undecided answer, which is what the caller had before.
+	if d := below(node); d.ID != parquet.TypeString {
+		return d
+	}
+	return inferProjectionDeclType(node, parquet.TypeString,
+		strictIntArithCols(child), inputColDecls(child))
 }
 
 // aggStageDerivedKey re-spells a computed GROUP BY key's column references
@@ -5225,7 +5288,8 @@ func derivedGroupKeyTypes(groupBy []string, child *logical.Node) (map[string]par
 		if out == nil {
 			out = make(map[string]parquet.TypeID)
 		}
-		d := inferProjectionDeclType(node, parquet.TypeString, strictInt, colTypes)
+		d := derivedGroupKeyDecl(key, node, child)
+		_, _ = strictInt, colTypes
 		out[key] = d.ID
 		if d.ID == parquet.TypeDecimal && d.DecKnown {
 			// The (p,s) beside the TypeID: the worker builds the key vector
@@ -5329,17 +5393,22 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 	if len(n.Children) == 1 {
 		child = n.Children[0]
 	}
-	emit := func(g string) (string, bool) {
+	haveExprs := len(n.GroupByExprs) == len(n.GroupBy)
+	emit := func(i int, g string) (string, bool) {
 		if child != nil {
-			if resolved, renamed := aggStageGroupKey(g, child); renamed {
+			var e plansql.Node
+			if haveExprs && i >= 0 {
+				e = n.GroupByExprs[i]
+			}
+			if resolved, renamed := aggStageGroupKey(g, e, child); renamed {
 				return resolved, true
 			}
 		}
 		return g, true
 	}
-	for _, g := range n.GroupBy {
+	for i, g := range n.GroupBy {
 		if strings.EqualFold(g, col) {
-			return emit(g)
+			return emit(i, g)
 		}
 	}
 	// The two spellings of one key: `GROUP BY u.k` names the same output as
@@ -5357,14 +5426,14 @@ func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 		return name
 	}
 	cb := bare(col)
-	match, count := "", 0
-	for _, g := range n.GroupBy {
+	match, matchIdx, count := "", -1, 0
+	for i, g := range n.GroupBy {
 		if strings.EqualFold(bare(g), cb) {
-			match, count = g, count+1
+			match, matchIdx, count = g, i, count+1
 		}
 	}
 	if count == 1 {
-		return emit(match)
+		return emit(matchIdx, match)
 	}
 	for _, a := range n.AggExprs {
 		if strings.EqualFold(a.OutputCol, col) {
@@ -5695,8 +5764,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// it: an unresolvable key serializes as NULL rather than failing, so
 		// `GROUP BY k` over `SELECT o_orderstatus AS k` collapsed 3 groups
 		// into one NULL group of every row.
+		haveGBExprs := len(node.GroupByExprs) == len(node.GroupBy)
 		for i, key := range groupBy {
-			if resolved, renamed := aggStageDispatchKey(key, aggChild); renamed {
+			var keyExpr plansql.Node
+			if haveGBExprs {
+				keyExpr = node.GroupByExprs[i]
+			}
+			if resolved, renamed := aggStageDispatchKey(key, keyExpr, aggChild); renamed {
 				groupBy[i] = resolved
 				if p.aggStageRenames == nil {
 					p.aggStageRenames = make(map[string]string)
@@ -9231,7 +9305,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					return nil, nil, nil, compErr
 				}
 				if compErr == nil {
-					gbDecl := inferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
+					gbDecl := derivedGroupKeyDecl(node.GroupBy[i], gbExpr, node.Children[0])
 					pc := exec.ProjectColumn{
 						Name: synName,
 						// Numeric expressions (abs(x), x-1, …) must get a
