@@ -2505,7 +2505,8 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 	// so the two are the same list (ADR-0026).
 	groupCols, outNames := spec.GroupByCols, []string(nil)
 	if spec.BuildProject && !spec.MergeMode {
-		if _, slots := derivedGroupKeys(spec.GroupByCols, spec.GroupByTypes); !equalStringSlices(slots, spec.GroupByCols) {
+		if _, slots := derivedGroupKeys(spec.GroupByCols, spec.Aggregates, nil,
+			spec.GroupByTypes); !equalStringSlices(slots, spec.GroupByCols) {
 			groupCols = slots
 			outNames = append([]string(nil), spec.GroupByCols...)
 		}

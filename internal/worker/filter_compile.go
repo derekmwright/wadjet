@@ -180,7 +180,7 @@ func buildAggInputProjection(
 			hasDerived = true
 		}
 	}
-	derivedGroupBy, slots := derivedGroupKeys(groupBy, groupByTypes)
+	derivedGroupBy, slots := derivedGroupKeys(groupBy, aggs, filterCols, groupByTypes)
 	if len(derivedGroupBy) > 0 {
 		hasDerived = true
 	}
@@ -496,19 +496,44 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 // instead put it in the user's namespace, where it shadowed — or was shadowed
 // by — an input column of the same spelling, differently on each engine
 // (ADR-0026).
-func derivedGroupKeys(groupBy []string, groupByTypes map[string]int) (map[string]plansql.Node, []string) {
+func derivedGroupKeys(groupBy []string, aggs []distributed.AggSpec, filterCols []string,
+	groupByTypes map[string]int) (map[string]plansql.Node, []string) {
 	derived := make(map[string]plansql.Node)
 	slots := make([]string, len(groupBy))
-	// Names already spoken for in this fragment. A slot is only hidden if
-	// nothing else answers to it, and a stored column may legitimately be
-	// called `__gb_expr_0` — such a column is never refused at read, so the
-	// slot steps around it instead of assuming the name is free.
-	taken := make(map[string]bool, len(groupBy))
+	// Every name this fragment BINDS, so a slot can be minted clear of all of
+	// them. A slot is hidden only when nothing else answers to it, and there
+	// are three ways for something to:
+	//
+	//   - a group key's own name;
+	//   - an AGGREGATE'S ARGUMENT or output. A stored column may legitimately
+	//     be called `__gb_expr_0` — the reservation binds where a user MINTS
+	//     a name, not where one is read back, so such a column is never
+	//     refused. `SUM(__gb_expr_0)` beside `GROUP BY g + 1` was answered
+	//     from the KEY's slot, because this projection narrows and the key
+	//     had already claimed the name: right keys, right row count, and the
+	//     sum of a group key where the query asked for the sum of a column.
+	//   - a filter column, for the same reason.
+	//
+	// And each slot excludes the ones already ISSUED, which is what stops two
+	// derived keys landing in one column.
+	taken := make(map[string]bool, len(groupBy)+len(aggs)+len(filterCols))
 	for _, g := range groupBy {
 		taken[g] = true
 	}
+	for _, a := range aggs {
+		taken[a.InputCol] = true
+		taken[a.InputCol2] = true
+		taken[a.OutputCol] = true
+	}
+	for _, c := range filterCols {
+		taken[c] = true
+	}
+	// Termination: the excluded set is finite and fixed before the first
+	// call, plus at most one name per key, so a scan bounded by its size
+	// cannot exhaust the family.
+	limit := len(taken) + len(groupBy) + 2
 	mint := func(i int) string {
-		for n := i; n < i+1024; n++ {
+		for n := i; n <= i+limit; n++ {
 			name := physical.SlotName(physical.SlotGroupKey, n)
 			if !taken[name] {
 				taken[name] = true
