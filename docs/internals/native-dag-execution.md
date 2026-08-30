@@ -286,6 +286,18 @@ resolves the alias back through the logical plan.
 | a UNION/INTERSECT/EXCEPT arm's projection | `setOpArmProjection` | `set_op_stages.go` |
 | the gather's result schema | `resolveOutputRenameSource` | `output_rename_resolve.go` |
 | a WHERE above the Project | `logical.ResolveFilterThroughProjects` | `logical/filter_project_pushdown.go` |
+| WHICH GROUP KEY a SELECT item / HAVING term / sort key IS | `plansql.ExprIdentity` → `groupKeyOutputs` / `groupKeyByIdentity` | `group_key_identity.go` |
+
+The last one is the answer to a question every resolver above an aggregate
+has to ask first, and until #720/#723/#725 each of them answered it on its
+own by comparing rendered TEXT — one case-insensitively, one stripping only
+outer parentheses, one neither. A GROUP BY key now has ONE identity
+(`plansql.ExprIdentity`, which erases parentheses, identifier case and
+whitespace and nothing else) and ONE published name (`plansql.GroupKeyName`),
+and BOTH engines publish a derived key under that name: the single-process
+pre-aggregate projection no longer uses a synthetic `__gb_expr_N`, so the two
+aggregate output schemas are identical and one logical rewrite — the HAVING
+respelling — is evaluable on both. See ADR-0026.
 
 The filter is the eighth and was added last (#653), because for a DERIVED
 table it is normally not needed: `pushdownPredicates` swaps Filter-Project and
@@ -1247,10 +1259,13 @@ takes a different repair, chosen once here for both execution paths:
   exact spelling wins. This has to happen at plan time and not only in the
   operator, because the key name is also the DAG's clustering key;
 - an **expression** (`PARTITION BY id % 3`) is MATERIALIZED as a synthetic
-  `__winkey_N` column, the `__gb_expr_N` convention one operator over. Named
-  synthetically rather than by the expression's text because that text is
-  already a key elsewhere — `exec.Project` types a projection by looking its
-  source spelling up in the input batch;
+  `__winkey_N` column. Named synthetically rather than by the expression's
+  text because that text is already a key elsewhere — `exec.Project` types a
+  projection by looking its source spelling up in the input batch. (A GROUP
+  BY key goes the other way now: it is published under its CANONICAL text on
+  both engines so the two aggregate output schemas match, and `__gb_expr_N`
+  survives only for a LITERAL key, which no consumer resolves by expression.
+  See ADR-0026.);
 - a **ROW field path** (`PARTITION BY rw.f`, `SUM(rw.f) OVER ()`) is
   materialized too, at the FIELD's declared type (#603, #568's rule): it
   parses as a qualified reference, so dropping the qualifier keys on a column
