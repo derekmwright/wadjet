@@ -540,6 +540,28 @@ at no other.
    only provenance separates them, which is the same lesson `__win_N` exists
    for one level up.
 
+### The reservation is a PREFIX rule, and that is wider than what SlotName mints
+
+A name is reserved when it BEGINS with a family's prefix, not when it matches
+`__<family>_<digits>`. So `__win_`, `__win_x`, `__win_00` and `__win_1x` are all
+refused at a mint site, though `SlotName` can never produce them.
+
+That is deliberate and it is the rule, not an approximation of a narrower one:
+the families are a namespace, and reserving a namespace means reserving its
+shape rather than the finite set of names one constructor happens to emit
+today. Five families are minted with a DISCRIMINATOR rather than a bare index
+(`__precomp_agg_<n>`, `__subsume_f<n>`, `__row_loc`, `__rowcount_only__`,
+`__default__`), and a narrower rule would have to enumerate each of those
+spellings and be re-narrowed every time a family grows one. The prefix rule
+covers them without knowing about them.
+
+The cost is that the refusal is wider than strictly necessary, which is the
+right side to err on: a name inside a reserved namespace is refused at CREATION
+only, and rule 1 guarantees a table that already holds one stays readable.
+
+Longest match wins, so the message names the most specific family: `__agg_expr_`
+reports as `__agg_expr_` and not as `__agg_`, which it also begins with.
+
 ### The PostgreSQL divergence, stated
 
 PostgreSQL has no reserved column namespace and answers every query in rule 2.
@@ -589,6 +611,44 @@ A table half the minting sites cannot reach is a table that drifts, and it had:
 called the constructor. `plansql` is imported by logical and physical alike, so
 that is where the mechanism belongs; `planner/physical/reserved_slots.go`
 remains as aliases for the code already written against it.
+
+### A slot is ALLOCATED, not named
+
+`SlotName(family, n)` renders the nth name of a family. It does not allocate
+one, and the gap between those two things produced the same defect twice within
+a day, written by two authors who never saw each other's code:
+
+- the window renamer, moving a slot past a stored `__win_0`, took the first
+  name not in the STORED set — `__win_1`, which the query's SECOND window
+  already held. Both wrote it and the projection handed window #2 window #1's
+  value;
+- the group-key minting, materializing two computed GROUP BY keys, skipped
+  names in scope but not slots issued to earlier keys of the same aggregate.
+  Two keys landed in one column and twelve groups collapsed to three.
+
+Both are the same omission — a search that excludes the names already in scope
+but not the names it has itself just handed out — and both are silent. Two
+independent authors reaching for the same wrong shape is a statement about the
+API, not about the authors: it offered a namer where the callers needed an
+allocator, so each of them wrote their own search and each got it wrong the
+same way.
+
+`plansql.SlotAllocator` is that allocator, and it is now the only way a slot is
+obtained. It is created for a query SCOPE, seeded with the names in that scope
+(a table's stored columns, an input schema, the SELECT list's outputs), and
+`Next(family)` hands out one fresh name at a time, excluding BOTH the seeded
+names and every slot it has already issued. Its cursor is per family, so
+allocating a group key does not renumber a window. It terminates by
+construction — the cursor advances monotonically and the loop is bounded — and
+when a family is exhausted it returns `ok == false`, which callers must treat as
+a reason to leave the plan as it was rather than to reuse a name.
+
+The gate proves both halves and the second one by MUTATION: a stub allocator
+that records its seeds but not its issues is driven through the same contract,
+and the test asserts that it repeats a name. Without that, the contract test
+could pass against an implementation whose issued-set was dead code.
+
+### The coverage gate runs in both directions
 
 `internal/planner/sql/reserved_slots_test.go` asserts the table in BOTH
 directions, the way the ANALYZE coverage gate does — every family constant
