@@ -2859,6 +2859,10 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// #656 F2: a SELECT list that became nobody's job. Refused HERE rather
 	// than at dispatch so the coordinator can route the query local and
 	// ANSWER it, instead of handing the client the producer's raw columns.
+	// Late, after flattenCTEAliases has repointed every deduped reference:
+	// an arm's projection has to be written against what its producer really
+	// emits.
+	respellUnionArmProjections(stages)
 	if err := assertGatherOutputIsReachable(stages); err != nil {
 		return nil, err
 	}
@@ -3108,10 +3112,15 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		// dropped columns.
 		if projectionNeedsItsOwnStage(s, aliasedSpecsFor(proj, specs)) &&
 			(viaSort == nil || projectionCoversSortKeys(aliasedSpecsFor(proj, specs), viaSort.SortKeys)) {
-			aliased := aliasedSpecsFor(proj, specs)
-			stages = insertProjectStageAbove(stages, i, aliased)
-			repointGatherRenames(gather, aliased)
-			return stages
+			// Written against what the producer EMITS, not what the query
+			// wrote: above an aggregate a computed group key is a column
+			// NAME, and rebuilding it as arithmetic answers NULL.
+			aliased, ok := respellSpecsOverProducerOutput(stages, i, aliasedSpecsFor(proj, specs))
+			if ok && specsResolveAgainstStageOutput(stages, i, aliased) {
+				stages = insertProjectStageAbove(stages, i, aliased)
+				repointGatherRenames(gather, aliased)
+				return stages
+			}
 		}
 		// A scan already carrying a projection (a computed subquery column
 		// materialized by absorbComputedSubqueryProjection, #383) keeps it:
@@ -3223,6 +3232,26 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		// every row. `SELECT k FROM (SELECT id AS k, g AS v FROM t ORDER BY
 		// id) s WHERE s.v > 0` answered 0 rows where PostgreSQL answers 3956
 		// (#656 F2).
+		// Nothing may be attached that the carrier's input cannot EVALUATE.
+		// Every branch below picks a carrier, and a spec naming a derived
+		// alias whose definition lives in a synthetic column (`__win_0`) is
+		// resolvable on none of them — attaching it anyway builds a plan
+		// assertCarrierSchemaResolves then refuses, which reaches the client
+		// as a hard error on a query the gather's own rename can compute.
+		viaSortIdx := -1
+		if viaSort != nil {
+			for j := range stages {
+				if stages[j].ID == viaSort.ID {
+					viaSortIdx = j
+					break
+				}
+			}
+		}
+		if !specsResolveAgainstStageInput(stages, i, aliased) &&
+			!specsResolveAgainstStageInput(stages, viaSortIdx, aliased) &&
+			!specsResolveAgainstStageOutput(stages, i, aliased) {
+			return stages
+		}
 		filterCols := append(append([]string(nil), s.FilterExprs...), viaSortFilters(viaSort)...)
 		if !projectionCoversSortKeys(aliased, sortKeys) ||
 			!projectionCoversFilters(aliased, filterCols) {

@@ -272,6 +272,18 @@ func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, ag
 // It reuses substituteNestedRenameRefs' copy-on-write shape without its
 // resolver: here the question is membership, not renaming.
 func requoteAggOutputRefs(n plansql.Node, emitted map[string]string) (plansql.Node, bool) {
+	// A WHOLE TERM can be the column. An aggregate emits its group key under
+	// the key's own expression TEXT, so above such a stage `n_regionkey + 1`
+	// is not arithmetic at all — it is the NAME of one column, and rebuilding
+	// it as arithmetic reads `n_regionkey`, which the aggregate's output does
+	// not carry, and answers NULL for every row.
+	if n != nil {
+		if _, isRef := n.(*plansql.ColRef); !isRef {
+			if real, hit := emitted[strings.ToLower(n.String())]; hit {
+				return &plansql.ColRef{Column: real}, true
+			}
+		}
+	}
 	switch e := n.(type) {
 	case nil:
 		return nil, true

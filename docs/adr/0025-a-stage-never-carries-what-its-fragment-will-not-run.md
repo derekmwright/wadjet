@@ -126,8 +126,10 @@ local):
   … ORDER BY d) x` is the shape — the outer aggregate needs no columns, so
   the projection is pruned and the sort keys on a name nothing emits.
   Refusing at plan time routes it local, which answers it. Materializing
-  the key on the DAG instead is the open residual; the refusal is what
-  makes the shape ANSWER in the meantime.
+  the key on the DAG instead is the open residual (#716); the refusal is
+  what makes the shape ANSWER in the meantime. The locally-routed class as
+  a whole is #717, and a union over two identical sorted producers is
+  refused by a DIFFERENT check that does not route local (#715).
 
 ## Alternatives rejected
 
@@ -163,6 +165,66 @@ local):
   over a stream that no longer carries `x` answers nothing. The
   aggregate's route is `absorbAggregateOutputProjection`, which spells
   against the output names.
+
+## The marker decides ownership, in both directions
+
+A shared producer may carry a filter or a projection perfectly safely, when it
+belongs to the RELATION every consumer reads rather than to one of them: a
+scan's own pushed-down predicate, and the aggregate-output projection
+`absorbAggregateOutputProjection` puts on a CTE body whose group key is
+computed.
+
+A rule that refused any Filter or Project on a stage with two consumers looked
+structural and was wrong. `WITH a AS (SELECT g+1 AS gk, COUNT(*) AS n FROM t
+GROUP BY g+1) SELECT gk FROM a UNION ALL SELECT gk FROM a` has no filter
+anywhere and PostgreSQL answers 16 rows; the rule refused the query outright,
+and refused the self-join and the filter-on-each-reference spellings with it.
+
+Ownership is knowable only where the attachment happens. Stage emission
+distinguishes a predicate attached INSIDE a CTE body from one attached ABOVE a
+reference and records the second as `ConsumerScoped`; `filterCarrierIndex`
+already REFUSES to attach a consumer's filter to a stage it knows is shared,
+giving that consumer its own `StageProject` instead. The assert's remaining job
+is the case emission could not see — a stage that was single-consumer when the
+filter landed and acquired a second consumer afterwards — and that is exactly
+when the marker is set. Deriving ownership structurally instead means asking
+whether every consumer's LOGICAL ancestry carries the same predicate, and the
+pass is handed only `[]Stage`.
+
+## A computed group key is a column NAME above its aggregate
+
+An aggregate emits its group key under the TEXT of the GROUP BY expression, so
+above that stage `g + 1` is the name of ONE column and not arithmetic.
+Rebuilding it as arithmetic reads `g`, which the aggregate's output does not
+carry, and answers NULL for every row.
+
+`absorbAggregateOutputProjection` already knew this and requotes such a term as
+a delimited identifier. Three other sites did not, and each answered NULL
+silently once the shapes above stopped being refused: the `StageProject`
+inserted above a collapsing producer, a union ARM's projection, and — still
+open, on both execution paths — a HAVING predicate (#720).
+
+`respellSpecsOverProducerOutput` is the shared repair, and
+`respellUnionArmProjections` runs it over union arms LATE in `PlanDistributed`,
+after `flattenCTEAliases`: a deduped CTE reference names a `cte-alias` phantom
+until that pass repoints it, so an arm respelled at emission time sees no
+producer at all — which is why the SECOND arm of a twice-referenced CTE stayed
+NULL when the repair ran beside the arm construction.
+
+The same asymmetry governs the CHECK. `unresolvableColumnRefs` walks an
+expression for column references, and a walk that descends into `g + 1 > 2`
+sees a reference to `g` that the aggregate genuinely does not emit. Reading
+that as unresolvable refused a HAVING the fragment computes correctly, so the
+walk stops at any subterm whose TEXT is an emitted column name.
+
+## A carrier is never handed what it cannot evaluate
+
+The attach pass now asks, before choosing a carrier, whether that carrier's
+input can resolve every spec — the same question `assertCarrierSchemaResolves`
+asks of the finished plan. Building a plan its own validator rejects reached
+the client as a hard error on `SELECT k, s FROM (SELECT id AS k, SUM(c) OVER ()
++ 1 AS s FROM t) x WHERE k > 0`, whose no-rename spelling the gather's own
+`OutputRename` already computes correctly.
 
 ## Consequences
 

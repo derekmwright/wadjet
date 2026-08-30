@@ -933,3 +933,49 @@ func setOpCastExpr(e string, to parquet.TypeID) (string, bool) {
 	}
 	return "", false
 }
+
+// respellUnionArmProjections rewrites every union arm's projection against the
+// columns its producer really emits.
+//
+// An arm's projection is written in the QUERY's spelling, and a producer may
+// name a column something else: above an aggregate a computed group key is
+// emitted under the TEXT of its GROUP BY expression, so an arm projecting
+// `n_regionkey + 1 AS gk` rebuilds ARITHMETIC over `n_regionkey`, which that
+// stage does not emit, and every row of the union answers NULL.
+// `WITH a AS (SELECT g+1 AS gk, COUNT(*) AS n FROM t GROUP BY g+1) SELECT gk
+// FROM a UNION ALL SELECT gk FROM a ORDER BY gk` returned sixteen NULLs where
+// PostgreSQL returns 1..7 and one NULL.
+//
+// It runs LATE in PlanDistributed, after flattenCTEAliases: a deduped CTE
+// reference names a `cte-alias` phantom until that pass repoints it at the
+// body's terminal, so an arm respelled at emission time would see no producer
+// at all — which is why the SECOND arm of the query above stayed NULL when
+// this ran beside the arm construction.
+//
+// An arm whose term has no spelling over the producer's output is left exactly
+// as written; assertCarrierSchemaResolves is what reports that.
+func respellUnionArmProjections(stages []Stage) {
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	for i := range stages {
+		s := &stages[i]
+		if s.Type != StageUnion {
+			continue
+		}
+		for a := range s.UnionArms {
+			dep := s.UnionArms[a].DepStage
+			if _, ok := idx[dep]; !ok && a < len(s.Dependencies) {
+				dep = s.Dependencies[a]
+			}
+			j, ok := idx[dep]
+			if !ok {
+				continue
+			}
+			if re, ok := respellSpecsOverProducerOutput(stages, j, s.UnionArms[a].Projections); ok {
+				s.UnionArms[a].Projections = re
+			}
+		}
+	}
+}

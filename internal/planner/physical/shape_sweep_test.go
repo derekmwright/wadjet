@@ -133,6 +133,30 @@ func TestStageShapePlacementSweep(t *testing.T) {
 		"win/wrapped_one_level_down": `SELECT x FROM (SELECT SUM(n_nationkey) OVER () + 1 AS x FROM nation) s`,
 		"win/derived_alias_forwarded": `SELECT s FROM (SELECT n_name AS s, ` +
 			`ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn FROM nation) t`,
+		// A CTE body that AGGREGATES on a computed key, referenced twice,
+		// with nothing consumer-scoped anywhere: the projection on the
+		// shared terminal is the BODY's, and refusing it refused the query.
+		"cte_agg2/union_all": `WITH a AS (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n ` +
+			`FROM nation GROUP BY n_regionkey + 1) SELECT gk FROM a UNION ALL SELECT gk FROM a`,
+		"cte_agg2/filter_on_each_ref": `WITH a AS (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n ` +
+			`FROM nation GROUP BY n_regionkey + 1) SELECT COUNT(*) AS n FROM ` +
+			`(SELECT gk FROM a WHERE gk > 3 UNION ALL SELECT gk FROM a WHERE gk < 3) u`,
+		"cte_agg2/self_join": `WITH a AS (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n ` +
+			`FROM nation GROUP BY n_regionkey + 1) SELECT COUNT(*) AS n FROM a ` +
+			`JOIN a b ON a.gk = b.gk`,
+		// A HAVING written on the group-key EXPRESSION, which the aggregate
+		// emits as a column NAME.
+		"cte_agg/having_on_the_key": `WITH a AS (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n ` +
+			`FROM nation GROUP BY n_regionkey + 1 HAVING n_regionkey + 1 > 2) ` +
+			`SELECT gk, n FROM a WHERE gk > 3 ORDER BY gk`,
+		// A derived-table alias forwarded past a window whose value lives in
+		// a synthetic column, with a RENAME beside it.
+		"win/alias_beside_a_rename": `SELECT k, s FROM (SELECT n_nationkey AS k, ` +
+			`SUM(n_regionkey) OVER () + 1 AS s FROM nation) x WHERE k > 0 ORDER BY k`,
+		// A computed group key read straight out, with no CTE and no
+		// derived table: the aggregate emits it under its expression TEXT.
+		"agg/computed_key_selected": `SELECT n_regionkey + 1 AS gk FROM nation ` +
+			`GROUP BY n_regionkey + 1 ORDER BY gk`,
 	} {
 		name, sql := name, sql
 		t.Run(name, func(t *testing.T) { check(t, name, sql) })

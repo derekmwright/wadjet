@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // Inserting a StageProject above a producer that cannot carry the SELECT list.
@@ -203,4 +204,122 @@ func sortKeysSurviveWithout(stages []Stage, targetIdx int, keys []SortKeySpec) b
 		return false
 	}
 	return true
+}
+
+// specsResolveAgainstStageInput reports whether every spec's expression can be
+// evaluated by the stage at targetIdx — the same question
+// assertCarrierSchemaResolves asks of a finished plan, asked BEFORE the attach
+// so the pass can decline instead of building a plan its own validator
+// rejects.
+//
+// `SELECT k, s FROM (SELECT id AS k, SUM(c_i64) OVER () + 1 AS s FROM t
+// WHERE id < 3) x WHERE k > 0 ORDER BY k` is the shape: the outer list is two
+// bare forwards, one of them a DERIVED alias whose definition lives in the
+// window's own output (`__win_0`). Attaching `s AS s` to the sort above the
+// window gives it a projection naming a column nothing in its input carries,
+// and the column would come back NULL. Declining leaves the gather's
+// OutputRename to compute it, which is what the same query without the `id AS
+// k` rename already does correctly.
+//
+// Unmodelled inputs (joins, unions, exchanges) answer true: a check that
+// cannot see the schema must not veto the attach.
+func specsResolveAgainstStageInput(stages []Stage, targetIdx int, specs []ProjectExprSpec) bool {
+	if targetIdx < 0 || targetIdx >= len(stages) {
+		return true
+	}
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	emitted, modelled := carrierInputColumns(stages, idx, targetIdx)
+	if !modelled {
+		return true
+	}
+	return specsResolveAgainst(emitted, specs)
+}
+
+// specsResolveAgainstStageOutput is the same question for a projection that
+// will sit in a stage of its OWN directly above the producer: its input is
+// what the producer emits, not what the producer reads.
+func specsResolveAgainstStageOutput(stages []Stage, producerIdx int, specs []ProjectExprSpec) bool {
+	if producerIdx < 0 || producerIdx >= len(stages) {
+		return true
+	}
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	emitted := emittedThroughPassThrough(stages, idx, &stages[producerIdx])
+	if len(emitted) == 0 {
+		return true
+	}
+	return specsResolveAgainst(emitted, specs)
+}
+
+func specsResolveAgainst(emitted map[string]string, specs []ProjectExprSpec) bool {
+	for _, sp := range specs {
+		if sp.Expr == "" {
+			continue
+		}
+		if len(unresolvableColumnRefs(sp.Expr, emitted)) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// respellSpecsOverProducerOutput rewrites every spec so it is written against
+// the columns the producer at producerIdx EMITS, and reports false when one of
+// them cannot be.
+//
+// A projection in a stage of its own reads the producer's OUTPUT, and an
+// aggregate names its group key by the TEXT of the GROUP BY expression. A spec
+// carrying the query's own `n_regionkey + 1` is then arithmetic over a column
+// the aggregate does not emit — `SELECT n_regionkey + 1 AS gk FROM nation
+// GROUP BY n_regionkey + 1 ORDER BY gk` answered NULL for every row. The same
+// requote absorbAggregateOutputProjection performs on the stage itself is what
+// makes the term name the column instead.
+func respellSpecsOverProducerOutput(stages []Stage, producerIdx int, specs []ProjectExprSpec) ([]ProjectExprSpec, bool) {
+	if producerIdx < 0 || producerIdx >= len(stages) {
+		return specs, true
+	}
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	emitted := emittedThroughPassThrough(stages, idx, &stages[producerIdx])
+	if len(emitted) == 0 {
+		return specs, true
+	}
+	out := make([]ProjectExprSpec, len(specs))
+	for i, sp := range specs {
+		out[i] = sp
+		if sp.Expr == "" {
+			continue
+		}
+		ast, err := plansql.ParseExpression(sp.Expr)
+		if err != nil {
+			return nil, false
+		}
+		if re, ok := requoteAggOutputRefs(ast, emitted); ok {
+			out[i].Expr = re.String()
+			continue
+		}
+		// requoteAggOutputRefs declines a node kind it does not rebuild — a
+		// function call, a CASE — rather than guessing. That is the right
+		// policy for the absorb, and too strict here: `UPPER(CAST(k AS
+		// VARCHAR)) AS d` over an aggregate needs no respelling at all, and
+		// declining it costs the whole shape its distributed plan.
+		//
+		// Keep the spec exactly as written when every bare reference in it
+		// already resolves against the producer's output, and decline only
+		// when one does not — that is the case where leaving it alone would
+		// answer NULL for the column.
+		for _, ref := range collectColRefs(ast) {
+			if !columnResolves(ref, emitted) {
+				return nil, false
+			}
+		}
+	}
+	return out, true
 }

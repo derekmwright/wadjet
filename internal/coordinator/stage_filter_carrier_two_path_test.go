@@ -1025,6 +1025,227 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		}
 	})
 
+	// --- the third adversarial round ---------------------------------------
+
+	t.Run("N1/SharedCTEAggregateWithAComputedGroupAlias", func(t *testing.T) {
+		// The structural shared-producer rule refused any Filter or Project
+		// on a stage with two consumers, which is wrong in one direction:
+		// absorbAggregateOutputProjection's projection belongs to the CTE
+		// BODY, and every reference reads it equally. Three shapes with no
+		// consumer-scoped anything reached the client as a hard error.
+		//
+		// The values are PostgreSQL 17's over the same fixture, and the
+		// NULL group's key is NULL, which every comparison rejects.
+		groups := map[int32]int64{}
+		var nullGroup bool
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok {
+				groups[g]++
+			} else {
+				nullGroup = true
+			}
+		}
+		nGroups := int64(len(groups))
+		if nullGroup {
+			nGroups++
+		}
+		var above3, below3 int64
+		for g := range groups {
+			if int64(g)+1 > 3 {
+				above3++
+			}
+			if int64(g)+1 < 3 {
+				below3++
+			}
+		}
+		body := fmt.Sprintf(`WITH a AS (SELECT g + 1 AS gk, COUNT(*) AS n FROM %s `+
+			`GROUP BY g + 1) `, tbl)
+		t.Run("UnionAllNoFilter", func(t *testing.T) {
+			sql := body + `SELECT gk FROM a UNION ALL SELECT gk FROM a ORDER BY gk`
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if int64(len(res.Rows)) != 2*nGroups {
+					t.Fatalf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), 2*nGroups, sql)
+				}
+				// PostgreSQL orders ASC with NULLs LAST, so the last two
+				// rows are the NULL group and no earlier row is NULL.
+				for i, r := range res.Rows {
+					isNull := r["gk"] == nil
+					if want := i >= len(res.Rows)-2; isNull != want {
+						t.Fatalf("%s arm: row %d gk=%v; ASC orders NULLs LAST\n  SQL: %s",
+							arm.name, i, r["gk"], sql)
+					}
+				}
+			}
+		})
+		t.Run("UnionAllWithAFilterOnEachRef", func(t *testing.T) {
+			sfcScalar(t, ctx, single, coord, body+
+				`SELECT COUNT(*) AS n FROM (SELECT gk FROM a WHERE gk > 3 `+
+				`UNION ALL SELECT gk FROM a WHERE gk < 3) u`, "n", above3+below3)
+		})
+		t.Run("SelfJoinOnTheAlias", func(t *testing.T) {
+			// The NULL key joins to nothing, so the count is the non-NULL
+			// group count.
+			sfcScalar(t, ctx, single, coord, body+
+				`SELECT COUNT(*) AS n FROM a JOIN a b ON a.gk = b.gk`, "n", int64(len(groups)))
+		})
+		t.Run("ctl/APlainGroupKeyStillAnswers", func(t *testing.T) {
+			sql := fmt.Sprintf(`WITH a AS (SELECT g AS gk, COUNT(*) AS n FROM %s GROUP BY g) `+
+				`SELECT gk FROM a UNION ALL SELECT gk FROM a ORDER BY gk`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if int64(len(res.Rows)) != 2*nGroups {
+					t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), 2*nGroups, sql)
+				}
+			}
+		})
+	})
+	t.Run("N1/AComputedGroupKeyIsAColumnNameAboveItsAggregate", func(t *testing.T) {
+		// The silent half of the same finding, and a wrong VALUE rather than
+		// a refusal: an aggregate emits its group key under the TEXT of the
+		// GROUP BY expression, so above that stage `g + 1` names ONE column.
+		// A projection that rebuilds it as arithmetic reads `g`, which the
+		// aggregate does not emit, and every row answers NULL. Both the
+		// inserted StageProject and a union arm's projection did that.
+		var wantKeys []int64
+		seen := map[int32]bool{}
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok && !seen[g] {
+				seen[g] = true
+				wantKeys = append(wantKeys, int64(g)+1)
+			}
+		}
+		for _, c := range []struct{ name, sql string }{
+			{"bare", `SELECT g + 1 AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`},
+			{"cte", `WITH a AS (SELECT g + 1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1) ` +
+				`SELECT gk FROM a ORDER BY gk`},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sql := fmt.Sprintf(c.sql, tbl)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					var got int
+					for _, r := range res.Rows {
+						if r["gk"] != nil {
+							got++
+						}
+					}
+					if got != len(wantKeys) {
+						t.Errorf("%s arm returned %d non-NULL keys, want %d — a computed group "+
+							"key rebuilt as arithmetic answers NULL\n  SQL: %s",
+							arm.name, got, len(wantKeys), sql)
+					}
+				}
+			})
+		}
+	})
+	t.Run("N2/CarrierSchemaRefusalsThatWereNotDefects", func(t *testing.T) {
+		// assertCarrierSchemaResolves ran live and returned a plain error, so
+		// nothing routed it local and it reached the client. Both shapes are
+		// answerable, and both are fixed at the CARRIER rather than by
+		// routing: the HAVING resolves because `g + 1` is the emitted column
+		// NAME, and the window projection is no longer attached to a stage
+		// that cannot compute it.
+		t.Run("HavingOnAComputedGroupKeyReachesTheClient", func(t *testing.T) {
+			// The refusal is gone. The ANSWER is still wrong, on BOTH paths,
+			// and that is #720's pin below — this subtest owns only the
+			// no-hard-error half.
+			sql := fmt.Sprintf(`WITH a AS (SELECT g + 1 AS gk, COUNT(*) AS n FROM %s `+
+				`GROUP BY g + 1 HAVING g + 1 > 2) SELECT gk, n FROM a WHERE gk > 3 ORDER BY gk`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				if _, err := arm.run(sql); err != nil {
+					t.Errorf("%s arm refused a query PostgreSQL answers: %v\n  SQL: %s",
+						arm.name, err, sql)
+				}
+			}
+		})
+		t.Run("WindowAliasForwardedThroughARename", func(t *testing.T) {
+			// `id AS k` is what fires it: the outer list is two bare
+			// forwards, one of them a derived alias whose definition lives
+			// in `__win_0`. PostgreSQL answers 2 rows.
+			sql := fmt.Sprintf(`SELECT k, s FROM (SELECT id AS k, SUM(c_i64) OVER () + 1 AS s `+
+				`FROM %s WHERE id < 3) x WHERE k > 0 ORDER BY k`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if !sameNames(res.Columns, []string{"k", "s"}) {
+					t.Errorf("%s arm returned columns %v, want [k s]", arm.name, res.Columns)
+				}
+				if len(res.Rows) != 2 {
+					t.Errorf("%s arm returned %d rows, want 2\n  SQL: %s",
+						arm.name, len(res.Rows), sql)
+				}
+				for _, r := range res.Rows {
+					if r["s"] == nil {
+						t.Errorf("%s arm answered s=NULL; the projection named a column its "+
+							"carrier does not emit\n  SQL: %s", arm.name, sql)
+					}
+				}
+			}
+		})
+	})
+	t.Run("N3/HavingOnAComputedGroupKeyIsWrongOnBothPaths", func(t *testing.T) {
+		// #720, pinned. PostgreSQL 17 answers 5 rows for the first and
+		// REFUSES the second (a SELECT alias is not visible in HAVING); we
+		// answer 0 for the first on both paths, and the two paths disagree
+		// on the second. Pre-existing and byte-identical on the parent
+		// commit — outside this class's mechanism, since it reproduces
+		// single-process.
+		//
+		// TODO(#720): both halves flip when the HAVING predicate is spelled
+		// against the aggregate's OUTPUT.
+		expr := fmt.Sprintf(`SELECT g + 1 AS gk, COUNT(*) AS n FROM %s GROUP BY g + 1 `+
+			`HAVING g + 1 > 2 ORDER BY gk`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			res := sfcRun(t, arm, expr)
+			if len(res.Rows) != 0 {
+				t.Fatalf("%s arm now returns %d rows for a HAVING on a computed group key; "+
+					"PostgreSQL answers 5. #720 is fixed — assert the five rows and delete "+
+					"this pin\n  SQL: %s", arm.name, len(res.Rows), expr)
+			}
+		}
+		// The control that must stay right.
+		var want int64
+		counts := map[int64]int64{}
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok {
+				counts[int64(g)]++
+			}
+		}
+		for g := range counts {
+			if g > 2 {
+				want++
+			}
+		}
+		sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM (SELECT g AS gk, COUNT(*) AS c FROM %s GROUP BY g `+
+				`HAVING g > 2) s`, tbl), "n", want)
+	})
+	t.Run("N3/UnionOverTwoIdenticalSortedProducersIsRefused", func(t *testing.T) {
+		// #715, pinned. Both arms lower to the same sorted producer and
+		// UnionArm.DepStage names the merge_sort while Dependencies[0] names
+		// the sort; the shape check refuses with a PLAIN error, so nothing
+		// routes it local. Pre-existing and byte-identical on the parent
+		// commit.
+		//
+		// TODO(#715): delete this pin when the two records agree.
+		sql := fmt.Sprintf(`SELECT k FROM (SELECT id AS k FROM %[1]s WHERE id < 5 `+
+			`ORDER BY id) a UNION ALL SELECT k FROM (SELECT id AS k FROM %[1]s WHERE id < 5 `+
+			`ORDER BY id) b`, tbl)
+		arms := sfcArms(ctx, single, coord)
+		if res := sfcRun(t, arms[0], sql); len(res.Rows) != 10 {
+			t.Errorf("the single-process arm returned %d rows, want 10", len(res.Rows))
+		}
+		if _, err := arms[1].run(sql); err == nil {
+			t.Fatalf("the DAG now plans a union over two identical sorted producers — #715 " +
+				"is fixed, assert the ten rows and delete this pin")
+		} else if !strings.Contains(err.Error(), "names producer") {
+			t.Errorf("the DAG failed for a different reason than #715: %v", err)
+		}
+	})
+
 	// --- controls: shapes that were already right --------------------------
 
 	t.Run("ctl/HavingStillRunsBelowTheSelectList", func(t *testing.T) {

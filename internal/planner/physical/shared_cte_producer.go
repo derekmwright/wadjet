@@ -69,29 +69,35 @@ func assertNoConsumerScopedFilterOnSharedStage(stages []Stage) error {
 		if consumers[s.ID] < 2 {
 			continue
 		}
-		// STRUCTURAL, not marker-driven. ConsumerScoped records what stage
-		// emission KNEW, and a guard that trusts it passes any plan built
-		// another way — a hand-built one, or a future pass that merges two
-		// stages into a shared one. What actually makes a filter unsafe here
-		// is that the stage has two consumers and carries something that
-		// narrows or drops rows: whatever the marker says, the second
-		// consumer reads the filtered stream.
+		// The question is OWNERSHIP, not presence, and the marker is the
+		// only thing that knows it — in BOTH directions.
 		//
-		// A scan's OWN pushed-down predicate is the exception and the reason
-		// this cannot simply forbid FilterExprs on a shared stage: it is
-		// part of the relation every consumer reads (`WITH c AS (SELECT …
-		// WHERE id < 100)` referenced twice), not one consumer's WHERE. Stage
-		// emission distinguishes them by WHEN it attached — inside the CTE
-		// body, or above a reference — which is exactly what ConsumerScoped
-		// records, so the marker still selects among filters on a scan. On
-		// every other stage type a filter or projection is consumer-scoped by
-		// construction: nothing attaches one to an aggregate, a sort or a
-		// window as part of the relation's own definition.
-		scoped := s.ConsumerScoped
-		if !scoped && s.Type != StageScan {
-			scoped = len(s.FilterExprs) > 0 || len(s.ProjectExprs) > 0
-		}
-		if !scoped {
+		// A shared stage may perfectly well carry a filter or a projection
+		// that belongs to the RELATION every consumer reads: a scan's own
+		// pushed-down predicate (`WITH c AS (SELECT … WHERE id < 100)`
+		// referenced twice), and — the case that made this concrete — the
+		// aggregate-output projection absorbAggregateOutputProjection puts
+		// on a CTE body whose group key is computed. `WITH a AS (SELECT g+1
+		// AS gk, COUNT(*) AS n FROM t GROUP BY g+1) SELECT gk FROM a UNION
+		// ALL SELECT gk FROM a` has no filter anywhere and PostgreSQL
+		// answers 16 rows; a rule that refused any projection on a shared
+		// stage refused the query outright.
+		//
+		// What makes an attachment unsafe is that it belongs to ONE
+		// consumer, and stage emission is where that is knowable: it
+		// distinguishes a predicate attached INSIDE a CTE body from one
+		// attached ABOVE a reference, and records the second as
+		// ConsumerScoped. filterCarrierIndex already REFUSES to attach a
+		// consumer's filter to a stage it knows is shared — it gives the
+		// consumer its own StageProject instead — so this assert's job is
+		// the case emission could not see: a stage that was single-consumer
+		// when the filter landed and acquired a second consumer afterwards,
+		// which is exactly when the marker is set and the count is not yet 2.
+		//
+		// Deriving ownership structurally instead would mean asking whether
+		// every consumer's LOGICAL ancestry carries the same predicate, and
+		// this pass is handed only []Stage.
+		if !s.ConsumerScoped {
 			continue
 		}
 		return &sharedProducerError{stage: s.ID, consumers: consumers[s.ID]}

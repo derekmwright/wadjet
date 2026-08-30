@@ -138,6 +138,8 @@ it did not:
 | a COLLAPSING producer (aggregate, union, fused scan-agg) | its output is a NEW column set, so the SELECT list can neither fuse into it nor be evaluated below it — nothing computed it | F2 |
 | an absorbed aggregate rename | the aggregate stopped emitting the group key's old spelling while the gather, the sort keys and the shuffle keys still named it | F1 |
 | an ORDER BY under an outer AGGREGATE | the outer `COUNT(*)` needs no columns, so the projection that computes the sort key is pruned and the sort keys on a name nothing emits (loud, at dispatch) | F2 |
+| a computed GROUP BY key read above its aggregate | the stage emits the key under its expression TEXT; a projection or a union arm that rebuilds the arithmetic reads a column the aggregate does not emit and answers NULL for every row | N1 |
+| a shared CTE body that AGGREGATES on a computed key | the body's own projection on the shared terminal was read as one consumer's and the query refused | N1 |
 | `sort` / `limit` | nothing ever populated `ProjectExprs` on one, so a SELECT list above an `ORDER BY … LIMIT` was never applied and the client got the producer's raw column | B2/D |
 
 Every one answered WITHOUT the predicate or the projection, silently, because
@@ -215,7 +217,8 @@ The five parts are:
    aggregate at the root and declines, and the sort keys on a name nothing
    emits. Loud at dispatch, on a query the fast path answers. Refused at plan
    time now, so the coordinator routes it local; materializing the key on the
-   DAG is the open residual.
+   DAG is the open residual (#716), and #717 tracks the locally-routed class
+   as a whole.
 
 ## Synthetic sort keys: the column a Project would have computed
 
