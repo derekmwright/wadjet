@@ -236,30 +236,37 @@ func aggInputRespellable(n *logical.Node) bool {
 // puts the whole projected expression in it (`SELECT DISTINCT a * 2 AS v`
 // groups by `a * 2`), and arithmetic over an aggregate output never appears
 // there.
-func aggInputAliasIsAggregateGroupKey(n *logical.Node, exprText string) bool {
+func aggInputAliasIsAggregateGroupKey(n *logical.Node, exprText string) (string, bool) {
 	exprText = strings.TrimSpace(exprText)
 	if exprText == "" {
-		return false
+		return "", false
 	}
 	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
 		switch n.Type {
 		case logical.NodeAggregate:
 			for _, g := range n.GroupBy {
+				// The match is case-INSENSITIVE, because column resolution is,
+				// but the name returned is the PRODUCER'S — the group key as
+				// the aggregate emits it, not the SELECT item's case-preserved
+				// text. `SELECT SUM(v) FROM (SELECT A * 2 AS v … GROUP BY
+				// a * 2)` matched on `A * 2` and shipped that spelling, and the
+				// operator looks its input up by name: `aggregate input
+				// "A * 2" is not a column of its input (input has: v, a * 2)`.
 				if strings.EqualFold(strings.TrimSpace(g), exprText) {
-					return true
+					return strings.TrimSpace(g), true
 				}
 			}
-			return false
+			return "", false
 		case logical.NodeProject, logical.NodeFilter:
 			if len(n.Children) != 1 {
-				return false
+				return "", false
 			}
 			n = n.Children[0]
 		default:
-			return false
+			return "", false
 		}
 	}
-	return false
+	return "", false
 }
 
 // aggInputAliasIsMaterializedUnderItsName reports whether the producer between

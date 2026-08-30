@@ -5474,17 +5474,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// emitted name IS the expression's text, so the argument is
 					// a bare NAME there, exactly as aggStageGroupKey spells a
 					// computed GROUP BY key.
+					emitted, _ := aggInputAliasIsAggregateGroupKey(aggChild, expr.String())
 					switch {
 					case aggInputRespellable(aggChild):
 						inputExpr, exprCols = expr, exprInput
-					case aggInputAliasIsAggregateGroupKey(aggChild, expr.String()):
+					case emitted != "":
 						// The aggregate below emits this expression as a GROUP
 						// BY key, under the key's own TEXT (which is what the
 						// DISTINCT rewrite produces), so the argument is a bare
 						// NAME spelled that way — the same convention
 						// aggStageGroupKey applies to a computed group key.
-						agg.InputCol = expr.String()
-						inputExpr = &plansql.ColRef{Column: expr.String()}
+						agg.InputCol = emitted
+						inputExpr = &plansql.ColRef{Column: emitted}
 					case aggInputAliasIsMaterializedUnderItsName(aggChild):
 						// A JOIN, a sort, a LIMIT, a window: the alias-naming
 						// OpProject on the producing fragment materializes it

@@ -278,6 +278,27 @@ func tmdStandalone(t *testing.T, ctx context.Context) *wadjet.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	for _, tbl := range tmdTables() {
+		// The reserved-name fixture goes in through the CATALOG, because the
+		// wadjet API's DDL and ingest doors REFUSE its schema — which is the
+		// point of it. A table holding a hidden-slot name can only have been
+		// written by a binary that predates the reservation, and that is
+		// exactly the shape this fixture has to present (#694, rule 1: reading
+		// such a table is never refused).
+		if tbl.name == rsWinTab {
+			if err := db.Catalog().CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
+				t.Fatalf("create %s: %v", tbl.name, err)
+			}
+			raw := ingest.New(db.Catalog(), tbl.name, tbl.schema, nil, ingest.Config{
+				MaxBufferRows: len(tbl.rows) + 1, RowGroupSize: typematrix.RowGroup,
+			})
+			if err := raw.Ingest(ctx, tbl.rows); err != nil {
+				t.Fatalf("ingest %s: %v", tbl.name, err)
+			}
+			if err := raw.FlushAll(ctx); err != nil {
+				t.Fatalf("flush %s: %v", tbl.name, err)
+			}
+			continue
+		}
 		if err := db.CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
 			t.Fatalf("create %s: %v", tbl.name, err)
 		}
@@ -366,6 +387,19 @@ func tmdTables() []tmdTable {
 		// per numeric width but no VALUES chosen to differ at the wider one,
 		// so every cross-width key pair over it is vacuous.
 		{nwkTable, nwkSchema(), nwkData()},
+		// The RESERVED-NAME fixture (#694). A table that already stores a
+		// column in a hidden-slot family, as one written before the namespace
+		// was reserved does.
+		//
+		// It rides in the SHARED corpus rather than in one gate's own setup
+		// for the reason the correctness protocol's method 10 gives: the
+		// planner's collision handling is guarded by a `hot` test that fires
+		// only when such a column is in scope, so with no fixture carrying one
+		// that guard's whole path is untested code on the default path. Every
+		// suite built on tmdTables now plans against a catalog that contains
+		// one, which is what makes the guard's cheap-exit and its slow path
+		// both exercised in CI.
+		{rsWinTab, rsWinSchema(), rsWinRows()},
 	}, multikeyTables()...)
 }
 

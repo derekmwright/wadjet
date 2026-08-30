@@ -59,11 +59,46 @@ func renameCollidingSlots(root *logical.Node) {
 	}
 	seedWindowSlotNames(root, alloc)
 
-	rename := map[string]string{}
-	var walk func(n *logical.Node)
-	walk = func(n *logical.Node) {
+	// The rename is SCOPED to the subtree that minted the slot.
+	//
+	// One global map keyed by the old name cannot express two siblings, and
+	// two siblings are ordinary SQL: `(SELECT SUM(plain) OVER () AS w FROM t) p
+	// JOIN (SELECT SUM(id) OVER () AS w FROM t) q` mints `__win_0` in BOTH
+	// blocks. A map holding `__win_0 -> …` has room for one of them, and
+	// applying it across the whole tree rewrote the OTHER block's projection to
+	// a slot its own window never wrote: the single-process path failed with
+	// `column "__win_2" does not exist in the input schema` and the DAG handed
+	// both outputs one window's value.
+	//
+	// SlotAllocator fixed the collision WITHIN one scope; this is the same
+	// defect one level out, and the fix is the same idea applied to the map.
+	// walk returns the renames minted at or below a node that no ancestor has
+	// consumed yet. Each is applied to the node's own fields on the way up, so
+	// the Project above a Window (however many pass-throughs are between them)
+	// sees it — and a node with TWO OR MORE children is the BOUNDARY: it
+	// applies each child's map to that child alone and returns nothing, so a
+	// sibling's map can never reach across.
+	var walk func(n *logical.Node) map[string]string
+	walk = func(n *logical.Node) map[string]string {
 		if n == nil {
-			return
+			return nil
+		}
+		pending := map[string]string{}
+		for _, c := range n.Children {
+			m := walk(c)
+			if len(m) == 0 {
+				continue
+			}
+			applySlotRename(c, m)
+			if len(n.Children) > 1 {
+				// A join, a set operation: consume the arm's map here rather
+				// than letting it escape into a sibling.
+				applySlotRenameNodeOnly(n, m)
+				continue
+			}
+			for k, v := range m {
+				pending[k] = v
+			}
 		}
 		if n.Type == logical.NodeWindow {
 			for i := range n.WindowExprs {
@@ -75,19 +110,18 @@ func renameCollidingSlots(root *logical.Node) {
 				if !ok {
 					continue // the family is exhausted; leave the plan as it was
 				}
-				rename[out] = fresh
+				pending[out] = fresh
 				n.WindowExprs[i].OutputCol = fresh
 			}
 		}
-		for _, c := range n.Children {
-			walk(c)
+		if len(pending) > 0 {
+			applySlotRenameNodeOnly(n, pending)
 		}
+		return pending
 	}
-	walk(root)
-	if len(rename) == 0 {
-		return
+	if m := walk(root); len(m) > 0 {
+		applySlotRename(root, m)
 	}
-	applySlotRename(root, rename)
 }
 
 // collectStoredNames gathers every column name a base table in the plan really
@@ -109,6 +143,19 @@ func collectStoredNames(n *logical.Node, out map[string]bool) {
 // projection that publishes it, and the nested-window rewrite's ColRef inside
 // a larger expression.
 func applySlotRename(n *logical.Node, rename map[string]string) {
+	if n == nil {
+		return
+	}
+	applySlotRenameNodeOnly(n, rename)
+	for _, c := range n.Children {
+		applySlotRename(c, rename)
+	}
+}
+
+// applySlotRenameNodeOnly repoints this node's own references and does not
+// descend. It is what lets a rename be applied along the ancestor chain up to
+// its consumer without crossing into a sibling subtree.
+func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string) {
 	if n == nil {
 		return
 	}
@@ -144,9 +191,6 @@ func applySlotRename(n *logical.Node, rename map[string]string) {
 	// the PUBLISHED name (`w`, `sum`), never on the slot, and a term that
 	// really does spell `__win_0` is the user ordering by their own stored
 	// column — renaming it would sort by the window instead.
-	for _, c := range n.Children {
-		applySlotRename(c, rename)
-	}
 }
 
 // renameColRefs is rewriteColRefs with a name map, for the nested-window
