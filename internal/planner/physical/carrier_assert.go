@@ -67,7 +67,7 @@ func assertCarrierSchemaResolves(stages []Stage) error {
 			}
 		}
 	}
-	return assertAggregateInputsResolve(stages, idx)
+	return nil
 }
 
 // assertAggregateInputsResolve refuses a plan whose aggregate reads an
@@ -95,7 +95,11 @@ func assertCarrierSchemaResolves(stages []Stage) error {
 // re-resolving the text would be asking the wrong question. Join, union and
 // exchange-fed inputs are skipped by emittedThroughPassThrough / the
 // modelled check, the same exclusions the ADR names.
-func assertAggregateInputsResolve(stages []Stage, idx map[string]int) error {
+func assertAggregateInputsResolve(stages []Stage) error {
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
 	for i := range stages {
 		s := &stages[i]
 		specs, emitted, ok := aggregateStageInputs(stages, idx, s)
@@ -107,11 +111,11 @@ func assertAggregateInputsResolve(stages []Stage, idx map[string]int) error {
 				continue
 			}
 			if missing := unresolvableColumnRefs(a.InputExpr, emitted); len(missing) > 0 {
-				return fmt.Errorf("native-DAG: stage %s (%s) aggregates %s(%s) and its input "+
+				return fmt.Errorf("%w: stage %s (%s) aggregates %s(%s) and its input "+
 					"carries no %v — the pre-projection would write NULL into every row and "+
 					"the aggregate would answer a WRONG NUMBER rather than fail (#702); "+
-					"input: %v", s.ID, s.Type, a.Func, a.InputExpr, missing,
-					sortedEmittedNames(emitted))
+					"input: %v", ErrUnreachableGatherOutput, s.ID, s.Type, a.Func,
+					a.InputExpr, missing, sortedEmittedNames(emitted))
 			}
 		}
 	}
@@ -172,10 +176,21 @@ func stageScanReadSet(s *Stage) map[string]string {
 
 // aggregateInputIsModelled reports whether a stage's output columns can be
 // enumerated well enough to judge what an aggregate above it can read.
+//
+// Every kind stageEmittedColumns can answer for is here, and the list is the
+// check's REACH: a kind left out is a feeding stage the backstop is blind to,
+// which is how a DISTINCT-fed aggregate answered a silent 0 while the check
+// waved it through — the DISTINCT rewrite lowers to an AGGREGATE stage, and
+// the aggregate kinds were the ones missing.
+//
+// Only JOIN is deliberately excluded, and named as excluded for the reason
+// ADR-0025 gives: a join's output is the qualified union of two sides, and
+// asserting over it produces false refusals.
 func aggregateInputIsModelled(typ string) bool {
 	switch typ {
 	case StageScan, StageSort, StageMergeSort, StageLimit, StageWindow, StageProject,
-		StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
+		StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather,
+		StageAggregate, StageFinalAggregate, StageMergeAggregate, StageUnion:
 		return true
 	}
 	return false

@@ -667,6 +667,28 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 				dbpTable + ") x JOIN " + dbpTable + " y ON x.id = y.id",
 			want: "90",
 		},
+		{
+			// The boundary asked of a SORT + LIMIT producer, which emit stages
+			// of their own and may carry an alias-naming projection.
+			name: "control, a derived alias below a sort and a limit",
+			sql: "SELECT SUM(CASE WHEN id < 5 THEN v ELSE 0 END) AS v FROM " +
+				"(SELECT id, a AS v FROM " + dbpTable + " ORDER BY id LIMIT 8) x",
+			want: "38.24",
+		},
+		{
+			// And of a WINDOW producer, whose output is a new column set.
+			name: "control, a derived alias below a window",
+			sql: "SELECT SUM(CASE WHEN id < 5 THEN w ELSE 0 END) AS v FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + dbpTable + ") x",
+			want: "211.96",
+		},
+		{
+			// And of an AGGREGATE producer.
+			name: "control, a derived alias below an aggregate",
+			sql: "SELECT SUM(CASE WHEN n > 0 THEN n ELSE 0 END) AS v FROM " +
+				"(SELECT s, COUNT(*) AS n FROM " + dbpTable + " GROUP BY s) x",
+			want: "9",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := dtpRun(t, ctx, single, coord, tc.sql, false)
@@ -789,6 +811,48 @@ func TestAggregateOverADerivedColumnGroupedTwoPath(t *testing.T) {
 				t.Errorf("%s arm answered %q for s=%q, want %q — the grouped lowering "+
 					"reads the same derived name (#702)", arm.name, got, k, want[k])
 			}
+		}
+	}
+}
+
+// TestAggregateArgumentRespellDeclinesUnderADistinct is the BOUNDARY of #702's
+// fix, asked of the producer kind that proved the first statement of it wrong.
+//
+// The question is never "does this name exist below" but "is this name
+// MATERIALIZED HERE". A JOIN materializes the derived SELECT list on the arm's
+// fragment (the controls above); a DISTINCT lowers to an aggregate whose
+// OUTPUT is the projection's names, so `v` is emitted and `a` is gone.
+// Respelling under either takes a name that resolves to one that does not, and
+// under the DISTINCT it turned a LOUD failure into a silent 0:
+//
+//	SELECT SUM(CASE WHEN v > 0 THEN v ELSE 0 END)
+//	FROM (SELECT DISTINCT a * 2 AS v FROM decpair) x
+//	-- PostgreSQL 29.50 · before #702 loud on every arm · after it 0 on the DAG
+//
+// Enumerating the materializing kinds was the first repair and it was wrong
+// twice, once per kind nobody had thought of; the rule is stated positively
+// now — respell only where the walk reaches a SCAN through Project and Filter
+// alone. Both engines still refuse this shape for an unrelated DECIMAL
+// declaration reason (#729's family), and AGREEING TO REFUSE is what this
+// asserts: the silent number is the outcome the boundary exists to prevent.
+func TestAggregateArgumentRespellDeclinesUnderADistinct(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	sql := "SELECT SUM(CASE WHEN v > 0 THEN v ELSE 0 END) AS v FROM " +
+		"(SELECT DISTINCT a * 2 AS v FROM " + dbpTable + ") x"
+	for _, arm := range sfcArms(ctx, single, coord) {
+		res, err := arm.run(sql)
+		if err == nil {
+			t.Errorf("%s arm ANSWERED %v where both engines refuse; a respell under a "+
+				"producer that MATERIALIZES the name turns a loud failure into a silent "+
+				"number (#702)\n  SQL: %s", arm.name, res.Rows, sql)
 		}
 	}
 }

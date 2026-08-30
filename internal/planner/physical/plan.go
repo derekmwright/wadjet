@@ -2871,6 +2871,15 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := assertSortKeysResolve(stages); err != nil {
 		return nil, err
 	}
+	// And for an aggregate ARGUMENT its own input cannot supply, which is
+	// SILENT rather than loud — the pre-projection writes NULL into every row
+	// and the aggregate answers a wrong number (#702). It refuses HERE, with
+	// the sentinel, so the coordinator routes the query to its local engine
+	// and ANSWERS it, rather than failing the client for a shape PostgreSQL
+	// has no trouble with.
+	if err := assertAggregateInputsResolve(stages); err != nil {
+		return nil, err
+	}
 	// And for set-operation arms that disagree about a column's type, which
 	// is a PANIC inside the consumer's fragment rather than a loud failure.
 	if err := assertUnionArmsAgreeOnTypes(stages); err != nil {

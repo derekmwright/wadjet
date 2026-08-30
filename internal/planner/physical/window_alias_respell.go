@@ -46,7 +46,7 @@ func respellWindowKeyExprs(specs []ProjectExprSpec, child *logical.Node) []Proje
 // — `derivedAliasSourceColumn` answers "" for one — and the expression that
 // defines it is what respellAggInputExpr substitutes instead.
 func respellDerivedAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
-	out, changed, _ := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+	out, changed, complete := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		src := derivedAliasSourceColumn(ref.String(), child)
 		if src == "" && ref.Table == "" {
 			src = derivedAliasSourceColumn(ref.Column, child)
@@ -56,6 +56,14 @@ func respellDerivedAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node,
 		}
 		return &plansql.ColRef{Column: cleanExpr(src)}, true
 	})
+	if !complete {
+		// The walk met a node it does not rewrite — a subquery, an EXISTS, a
+		// window call, a kind added since — so some references in this
+		// expression were NOT considered. A PARTIAL respell is the worst of
+		// the three outcomes: it looks resolved and is not. Decline the whole
+		// rewrite and leave the expression exactly as written.
+		return n, false
+	}
 	return out, changed
 }
 
@@ -100,24 +108,10 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 	if n == nil || child == nil || depth >= aggRespellDepth {
 		return n, false
 	}
-	// A JOIN below the aggregate already MATERIALIZES the derived table's
-	// SELECT list: attachScanSelectProjections puts an alias-naming OpProject
-	// on the join arm's fragment, so `x.v` really is a column of the join's
-	// output and the source spelling is the one that is not. Respelling there
-	// turned a CORRECT answer into a wrong one — `SUM(CASE WHEN x.s = '1.50'
-	// THEN x.v ELSE 0 END)` over `(SELECT s, a * 2 AS v FROM t) x JOIN t y`
-	// went from 25.50 to 0.00, because a self-join qualifies both sides' `a`
-	// and the bare name resolves to neither.
-	//
-	// This is the distinction resolveDerivedAliasSortKeys draws for a sort
-	// key, and it is settled the same way: whether the name is MATERIALIZED,
-	// not whether it exists. Declining below a join keeps the shape that
-	// already worked and costs nothing #702 names — every one of its shapes is
-	// a Project over a scan.
-	if aggInputJoinBelow(child) {
+	if !aggInputRespellable(child) {
 		return n, false
 	}
-	out, changed, _ := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
+	out, changed, complete := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		if resolved, expr, below, renamed := resolveAggInputName(ref.String(), child); renamed {
 			if expr != nil {
 				// The definition may name aliases of its OWN input:
@@ -158,20 +152,55 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 		}
 		return &plansql.ColRef{Table: cleanExpr(qual), Column: ref.Column}, true
 	})
+	if !complete {
+		// Same rule as above, and here it has teeth: an argument carrying a
+		// subquery or an EXISTS has references this walk never saw, so a
+		// partial rewrite would ship a spelling that resolves for some of them
+		// and not others. Declining leaves the original text, which
+		// assertAggregateInputsResolve then judges — and refuses, with the
+		// sentinel, if it names something no stage emits.
+		return n, false
+	}
 	return out, changed
 }
 
-// aggInputJoinBelow reports whether a JOIN sits between the aggregate and its
-// producer, descending only through the nodes that pass their input's columns
-// along. It stops at an Aggregate, a scan or anything else it cannot reason
-// about; the depth cap is there so a malformed plan cannot spin.
-func aggInputJoinBelow(n *logical.Node) bool {
+// aggInputRespellable reports whether the derived names between the aggregate
+// and its producer are ones NO stage materializes — the only condition under
+// which respelling them to their sources is right.
+//
+// The question is never "does this name exist below" but "is this name
+// MATERIALIZED HERE", and it has a different answer per producer:
+//
+//   - A JOIN materializes it. attachScanSelectProjections puts an alias-naming
+//     OpProject on the arm's fragment, so `x.v` really IS a column of the
+//     join's output and the source spelling is the one that is not.
+//     Respelling took a CORRECT 25.50 to 0.00 on `SUM(CASE WHEN x.s = '1.50'
+//     THEN x.v ELSE 0 END)` over `(SELECT s, a * 2 AS v FROM t) x JOIN t y`,
+//     because a self-join qualifies both sides' `a`.
+//   - A DISTINCT materializes it. rewriteDistinctAsGroupBy lowers it to an
+//     aggregate whose OUTPUT is the projection's names, so `v` is emitted and
+//     `a` is gone: respelling turned a LOUD failure into a silent 0 on
+//     `SUM(CASE WHEN v > 0 THEN v ELSE 0 END)` over
+//     `(SELECT DISTINCT a * 2 AS v FROM t)`, where PostgreSQL answers 29.50.
+//   - An AGGREGATE, a SET OPERATION and a WINDOW each emit a new column set of
+//     their own, for the same reason.
+//   - A SORT and a LIMIT are pass-throughs, but ADR-0025 gave both an
+//     OpProject slot, so whether the alias is materialized on them is decided
+//     by a LATER pass and is not knowable here.
+//
+// Enumerating the materializing kinds was the first attempt and it was wrong
+// twice — once per kind nobody had thought of. The rule is stated POSITIVELY
+// instead: respell only where the walk reaches a SCAN through Project and
+// Filter alone, which is exactly the shapes #702 names and exactly the ones
+// where walkStages provably emits no stage for the Project. Everything else
+// keeps today's behaviour, and assertAggregateInputsResolve is what makes a
+// residual there loud rather than silent.
+func aggInputRespellable(n *logical.Node) bool {
 	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
 		switch n.Type {
-		case logical.NodeJoin:
+		case logical.NodeScan:
 			return true
-		case logical.NodeProject, logical.NodeFilter, logical.NodeSort,
-			logical.NodeLimit, logical.NodeDistinct:
+		case logical.NodeProject, logical.NodeFilter:
 			if len(n.Children) != 1 {
 				return false
 			}
