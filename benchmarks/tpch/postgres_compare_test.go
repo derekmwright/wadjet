@@ -477,6 +477,7 @@ func postgresCorpus() []pgCase {
 	out = append(out, postgresRowFieldCases()...)
 	out = append(out, postgresSemanticsCases()...)
 	out = append(out, postgresConstArgAggCases()...)
+	out = append(out, postgresJoinArmCases()...)
 
 	for i := range out {
 		if !out[i].countOnly {
