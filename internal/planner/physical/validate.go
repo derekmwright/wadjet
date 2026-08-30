@@ -801,20 +801,21 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 			}
 		}
 	}
-	for _, gb := range info.GroupBy {
-		// The recorded term text, keyed by the same identity the checked
-		// expressions are: a key stored under its raw spelling would match
-		// nothing, since check() asks by identity.
-		if parsed, err := plansql.ParseExpression(gb); err == nil {
-			if k := groupTermKey(parsed); k != "" {
-				g.keys[k] = true
-			}
-			continue
-		}
-		if k := strings.ToLower(strings.TrimSpace(gb)); k != "" {
-			g.keys[k] = true
-		}
-	}
+	// The grouped terms are read from their PARSED forms and from nothing
+	// else. A loop that also recorded each term's recorded TEXT, re-parsed as
+	// an expression, used to stand here, and it is what stopped
+	// `GROUP BY "g + 1"` from refusing `SELECT g + 1`: since #725 that text
+	// is the key's published NAME with the delimiters stripped, so re-parsing
+	// it read a COLUMN as ARITHMETIC and marked `g` grouped. PostgreSQL
+	// answers 42803; we answered 60 NULL-keyed rows on one path and 3 rows on
+	// the other. `"g plus 1"` did the same with no operator in it — it parsed
+	// to just `g` and marked THAT grouped — which is why the repair is to
+	// stop reading text as structure, not to special-case operators.
+	//
+	// The non-parallel case (an ordinal or an alias, where GroupByExprs is
+	// not populated) is answered by the fallback loop below, which parses
+	// terms that have no AST of their own and is guarded on the lengths
+	// differing.
 	for i := range info.GroupByExprs {
 		gbExpr := info.GroupByExprs[i]
 		if gbExpr == nil {
