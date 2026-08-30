@@ -1390,65 +1390,312 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					`SELECT g FROM %[1]s WHERE id < 3) u`, tbl), "n", want)
 		})
 	})
-	t.Run("R4/GroupKeyTextMatchingIsSpellingSensitive", func(t *testing.T) {
-		// #723, pinned on BOTH arms. A SELECT item is matched to its GROUP BY
-		// key by the TEXT of the expression, and the normalisation differs by
-		// path and by site: whitespace is normalised, parentheses and
-		// identifier case are not, and which side carries the parenthesis
-		// decides which path gets it wrong. PostgreSQL answers every spelling
-		// identically because it matches by expression EQUIVALENCE.
+	t.Run("R4/AGroupKeyIsResolvedByIdentityNotBySpelling", func(t *testing.T) {
+		// #723 and #725, fixed. A SELECT item used to be matched to its
+		// GROUP BY key by the TEXT of the expression, and the normalisation
+		// differed by path and by site: whitespace was normalised,
+		// parentheses and identifier case were not, and which side carried
+		// the parenthesis decided which path came back with a key column
+		// that was NULL on every row.
 		//
-		// TODO(#723): every "0" below becomes 7 when the comparison goes
-		// through the AST. Delete this pin then and assert PostgreSQL's
-		// answer for all six.
-		var wantKeys int
-		seen := map[int32]bool{}
+		// Every expectation below is computed from the fixture generator and
+		// equals what PostgreSQL 17 answers for the same SQL: eight rows,
+		// keys 1..7 and one NULL group.
+		wantN := map[int64]int64{}
+		var nullRows int64
 		for _, r := range rows {
-			if g, ok := r.g.(int32); ok && !seen[g] {
-				seen[g] = true
-				wantKeys++
+			g, ok := r.g.(int32)
+			if !ok {
+				nullRows++
+				continue
+			}
+			wantN[int64(g)+1]++
+		}
+		wantKeys := len(wantN)
+
+		// assertKeyed checks the FULL answer of a `gk, n` query: the row
+		// count, the ascending key sequence, the per-key counts, and that
+		// the NULL group is present exactly once and last. A count of
+		// non-NULL keys alone cannot see a key column that carries the
+		// wrong VALUE, only one that carries none.
+		assertKeyed := func(t *testing.T, sql string, keyOf func(int64) int64) {
+			t.Helper()
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != wantKeys+1 {
+					t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), wantKeys+1, sql)
+					continue
+				}
+				seenNull := 0
+				var last int64
+				for i, r := range res.Rows {
+					n, _ := numAsInt(r["n"])
+					if r["gk"] == nil {
+						seenNull++
+						if i != len(res.Rows)-1 {
+							t.Errorf("%s arm put the NULL key at row %d of %d; PostgreSQL sorts "+
+								"NULLS LAST for ASC\n  SQL: %s", arm.name, i, len(res.Rows), sql)
+						}
+						if n != nullRows {
+							t.Errorf("%s arm answered n=%d for the NULL key, want %d\n  SQL: %s",
+								arm.name, n, nullRows, sql)
+						}
+						continue
+					}
+					gk, ok := numAsInt(r["gk"])
+					if !ok {
+						t.Errorf("%s arm returned %T for gk\n  SQL: %s", arm.name, r["gk"], sql)
+						continue
+					}
+					if i > 0 && gk <= last {
+						t.Errorf("%s arm returned gk out of order at row %d: %d after %d\n  SQL: %s",
+							arm.name, i, gk, last, sql)
+					}
+					last = gk
+					want, known := wantN[keyOf(gk)]
+					if !known {
+						t.Errorf("%s arm answered an unknown key %d\n  SQL: %s", arm.name, gk, sql)
+						continue
+					}
+					if n != want {
+						t.Errorf("%s arm answered n=%d for gk=%d, want %d\n  SQL: %s",
+							arm.name, n, gk, want, sql)
+					}
+				}
+				if seenNull != 1 {
+					t.Errorf("%s arm returned %d NULL-key rows, want exactly 1\n  SQL: %s",
+						arm.name, seenNull, sql)
+				}
 			}
 		}
-		for _, c := range []struct {
-			name            string
-			sql             string
-			singleNN, dagNN int
-		}{
-			{"Plain", `SELECT g + 1 AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, wantKeys, wantKeys},
-			{"Whitespace", `SELECT g+1 AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, wantKeys, wantKeys},
-			{"ParenOnBoth", `SELECT (g + 1) AS gk FROM %[1]s GROUP BY (g + 1) ORDER BY gk`, wantKeys, wantKeys},
-			{"ParenOnTheSelect", `SELECT (g + 1) AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, 0, wantKeys},
-			{"IdentifierCase", `SELECT G + 1 AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, 0, wantKeys},
-			{"ParenOnTheGroupBy", `SELECT g + 1 AS gk FROM %[1]s GROUP BY (g + 1) ORDER BY gk`, 0, 0},
+		self := func(k int64) int64 { return k }
+
+		// The SELECT item, spelled every way SQL allows for one expression.
+		for _, c := range []struct{ name, sql string }{
+			{"Plain", `SELECT g + 1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY gk`},
+			{"Whitespace", `SELECT g+1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY gk`},
+			{"ParenOnBoth", `SELECT (g + 1) AS gk, COUNT(*) AS n FROM %[1]s GROUP BY (g + 1) ORDER BY gk`},
+			{"ParenOnTheSelect", `SELECT (g + 1) AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY gk`},
+			{"ParenOnTheGroupBy", `SELECT g + 1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY (g + 1) ORDER BY gk`},
+			{"ParenNested", `SELECT ((g) + 1) AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY gk`},
+			{"IdentifierCase", `SELECT G + 1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY gk`},
+			{"OrderByTheExpression", `SELECT g + 1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY g + 1`},
+			{"OrderByTheParenthesisedExpression", `SELECT g + 1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY (g + 1)`},
+			{"OrderByOrdinal", `SELECT g + 1 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g + 1 ORDER BY 1`},
+			{"KeyAlsoInsideAnAggregate", `SELECT g + 1 AS gk, COUNT(*) AS n, SUM(g + 1) AS s ` +
+				`FROM %[1]s GROUP BY g + 1 ORDER BY gk`},
+			{"DerivedTableOuterReference", `SELECT s.gk, s.n FROM (SELECT (g + 1) AS gk, ` +
+				`COUNT(*) AS n FROM %[1]s GROUP BY g + 1) s ORDER BY s.gk`},
+			{"CTEOuterReference", `WITH a AS (SELECT (g + 1) AS gk, COUNT(*) AS n FROM %[1]s ` +
+				`GROUP BY g + 1) SELECT gk, n FROM a ORDER BY gk`},
 		} {
 			c := c
 			t.Run(c.name, func(t *testing.T) {
-				sql := fmt.Sprintf(c.sql, tbl)
-				for i, arm := range sfcArms(ctx, single, coord) {
-					want := c.singleNN
-					if i == 1 {
-						want = c.dagNN
-					}
-					res := sfcRun(t, arm, sql)
-					var nonNull int
-					for _, r := range res.Rows {
-						if r["gk"] != nil {
-							nonNull++
-						}
-					}
-					if nonNull == want {
-						continue
-					}
-					if want == 0 {
-						t.Fatalf("%s arm now answers %d non-NULL keys where this pin records 0; "+
-							"PostgreSQL answers %d. #723 is fixed for this spelling — assert it "+
-							"and delete the pin\n  SQL: %s", arm.name, nonNull, wantKeys, sql)
-					}
-					t.Errorf("%s arm answered %d non-NULL keys, want %d\n  SQL: %s",
-						arm.name, nonNull, want, sql)
-				}
+				assertKeyed(t, fmt.Sprintf(c.sql, tbl), self)
 			})
 		}
+
+		// An EXPRESSION OVER the key rather than the key itself: not the key,
+		// so nothing resolved it as one, and the aggregate's output has no
+		// `g` to rebuild it from.
+		t.Run("ExpressionOverTheKey", func(t *testing.T) {
+			assertKeyed(t, fmt.Sprintf(`SELECT (g + 1) * 2 AS gk, COUNT(*) AS n FROM %s `+
+				`GROUP BY g + 1 ORDER BY gk`, tbl), func(k int64) int64 { return k / 2 })
+		})
+		t.Run("FunctionOverTheKey", func(t *testing.T) {
+			assertKeyed(t, fmt.Sprintf(`SELECT ABS(g + 1) AS gk, COUNT(*) AS n FROM %s `+
+				`GROUP BY g + 1 ORDER BY gk`, tbl), self)
+		})
+
+		// TWO computed keys, and the two SELECT items spelled differently
+		// from both of them.
+		t.Run("TwoComputedKeys", func(t *testing.T) {
+			type ab struct{ a, b int64 }
+			want := map[ab]int64{}
+			var nulls int64
+			for _, r := range rows {
+				g, ok := r.g.(int32)
+				if !ok {
+					nulls++
+					continue
+				}
+				want[ab{int64(g) + 1, int64(g) * 2}]++
+			}
+			for _, sql := range []string{
+				`SELECT g + 1 AS a, g * 2 AS b, COUNT(*) AS n FROM %[1]s GROUP BY g + 1, g * 2 ORDER BY a, b`,
+				`SELECT (g + 1) AS a, (g * 2) AS b, COUNT(*) AS n FROM %[1]s GROUP BY g + 1, g * 2 ORDER BY a, b`,
+				`SELECT g + 1 AS a, g * 2 AS b, COUNT(*) AS n FROM %[1]s GROUP BY g * 2, g + 1 ORDER BY a, b`,
+			} {
+				q := fmt.Sprintf(sql, tbl)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, q)
+					if len(res.Rows) != len(want)+1 {
+						t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+							arm.name, len(res.Rows), len(want)+1, q)
+						continue
+					}
+					for _, r := range res.Rows {
+						if r["a"] == nil && r["b"] == nil {
+							if n, _ := numAsInt(r["n"]); n != nulls {
+								t.Errorf("%s arm answered n=%d for the NULL group, want %d\n  SQL: %s",
+									arm.name, n, nulls, q)
+							}
+							continue
+						}
+						a, aok := numAsInt(r["a"])
+						b, bok := numAsInt(r["b"])
+						n, _ := numAsInt(r["n"])
+						if !aok || !bok {
+							t.Errorf("%s arm returned a NULL half of a non-NULL group\n  SQL: %s",
+								arm.name, q)
+							continue
+						}
+						if n != want[ab{a, b}] {
+							t.Errorf("%s arm answered n=%d for (a=%d, b=%d), want %d\n  SQL: %s",
+								arm.name, n, a, b, want[ab{a, b}], q)
+						}
+					}
+				}
+			}
+		})
+
+		// Associativity is NOT a spelling difference: `g - 1 - 2` and
+		// `g - (1 - 2)` are two expressions and must stay two group keys.
+		// An identity that erased parentheses by printing without them
+		// would collapse these, which is the wrong answer in the more
+		// dangerous direction.
+		t.Run("ctl/AssociativityIsNotSpelling", func(t *testing.T) {
+			for _, c := range []struct {
+				sql   string
+				keyOf func(int64) int64
+			}{
+				{`SELECT g - 1 - 2 AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g - 1 - 2 ORDER BY gk`,
+					func(k int64) int64 { return k + 4 }},
+				{`SELECT g - (1 - 2) AS gk, COUNT(*) AS n FROM %[1]s GROUP BY g - (1 - 2) ORDER BY gk`,
+					func(k int64) int64 { return k }},
+			} {
+				assertKeyed(t, fmt.Sprintf(c.sql, tbl), c.keyOf)
+			}
+		})
+
+		// A key over a DECIMAL, a DATE and a STRING expression: the identity
+		// is type-blind, and the value it publishes must not be.
+		t.Run("KeyOverOtherTypes", func(t *testing.T) {
+			for _, c := range []struct {
+				name, sql, col        string
+				wantRows, wantNonNull int
+			}{
+				// c_dec nulls every 101st row and c_str every 43rd, so
+				// neither has a NULL inside these id windows; the SUBSTR
+				// entry spans the whole fixture and PostgreSQL answers two
+				// rows, one of them the NULL group.
+				{"Decimal", `SELECT (c_dec + 1) AS dk, COUNT(*) AS n FROM %[1]s WHERE id < 20 ` +
+					`GROUP BY c_dec + 1 ORDER BY dk`, "dk", 20, 20},
+				{"String", `SELECT (c_str || 'x') AS sk, COUNT(*) AS n FROM %[1]s WHERE id < 4 ` +
+					`GROUP BY c_str || 'x' ORDER BY sk`, "sk", 4, 4},
+				{"Substr", `SELECT (SUBSTR(c_str, 1, 4)) AS p, COUNT(*) AS n FROM %[1]s ` +
+					`GROUP BY SUBSTR(c_str, 1, 4) ORDER BY p`, "p", 2, 1},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					sql := fmt.Sprintf(c.sql, tbl)
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, sql)
+						if len(res.Rows) != c.wantRows {
+							t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+								arm.name, len(res.Rows), c.wantRows, sql)
+						}
+						nonNull := 0
+						for _, r := range res.Rows {
+							if r[c.col] != nil {
+								nonNull++
+							}
+						}
+						if nonNull != c.wantNonNull {
+							t.Errorf("%s arm answered %d non-NULL keys, want %d — the item was "+
+								"rebuilt as an expression over columns the aggregate does not "+
+								"emit\n  SQL: %s", arm.name, nonNull, c.wantNonNull, sql)
+						}
+					}
+				})
+			}
+		})
+
+		// #725: a DELIMITED identifier is a NAME, not the expression its
+		// characters spell. The DAG shipped it to the worker WITH its quotes
+		// (`hash aggregate: GROUP BY key "\"g + 1\"" is not a column of its
+		// input`) and named the result column with them too.
+		t.Run("DelimitedIdentifierKey", func(t *testing.T) {
+			for _, c := range []struct {
+				name, sql, col string
+				wantRows       int
+			}{
+				{"Bare", `SELECT "g + 1", COUNT(*) AS n FROM (SELECT g + 1 AS "g + 1", g FROM %[1]s) s ` +
+					`GROUP BY "g + 1" ORDER BY 1`, "g + 1", wantKeys + 1},
+				{"NoSpaces", `SELECT "g+1", COUNT(*) AS n FROM (SELECT g + 1 AS "g+1", g FROM %[1]s) s ` +
+					`GROUP BY "g+1" ORDER BY 1`, "g+1", wantKeys + 1},
+				{"Aliased", `SELECT "g + 1" AS gk, COUNT(*) AS n FROM (SELECT g + 1 AS "g + 1", g ` +
+					`FROM %[1]s) s GROUP BY "g + 1" ORDER BY gk`, "gk", wantKeys + 1},
+				{"Having", `SELECT "g + 1", COUNT(*) AS n FROM (SELECT g + 1 AS "g + 1", g FROM %[1]s) s ` +
+					`GROUP BY "g + 1" HAVING "g + 1" > 2 ORDER BY 1`, "g + 1", wantKeys - 2},
+				{"OverAnotherTypesColumn", `SELECT c_str AS "g + 1", COUNT(*) AS n FROM %[1]s ` +
+					`WHERE id < 5 GROUP BY "g + 1" ORDER BY 1`, "g + 1", 5},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					sql := fmt.Sprintf(c.sql, tbl)
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, sql)
+						if len(res.Rows) != c.wantRows {
+							t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+								arm.name, len(res.Rows), c.wantRows, sql)
+						}
+						if !sameNames(res.Columns[:1], []string{c.col}) {
+							t.Errorf("%s arm named the first column %q, want %q — a delimited "+
+								"identifier is a name and its quotes are not part of it\n  SQL: %s",
+								arm.name, res.Columns[0], c.col, sql)
+						}
+					}
+				})
+			}
+			// The wire-visible half: a set operation takes its result column
+			// names from the first arm, and the DAG published `"g + 1"` with
+			// the quotes where PostgreSQL says `g + 1`.
+			sql := fmt.Sprintf(`WITH a AS (SELECT g + 1 AS "g + 1", COUNT(*) AS n FROM %s `+
+				`GROUP BY g + 1) SELECT "g + 1" FROM a UNION ALL SELECT "g + 1" FROM a ORDER BY 1`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if !sameNames(res.Columns, []string{"g + 1"}) {
+					t.Errorf("%s arm returned columns %v, want [g + 1]\n  SQL: %s",
+						arm.name, res.Columns, sql)
+				}
+				if len(res.Rows) != 2*(wantKeys+1) {
+					t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), 2*(wantKeys+1), sql)
+				}
+			}
+		})
+
+		// The residual, pinned. An unquoted identifier is never folded to
+		// lower case anywhere in the engine, so a GROUP BY term written in a
+		// different case from the column computes over a name nothing
+		// resolves and the whole table collapses into one NULL group.
+		// PostgreSQL answers 8 rows. This is NOT the identity mechanism:
+		// `SELECT G FROM t` with no GROUP BY at all is wrong the same way.
+		//
+		// TODO(#731): delete this pin when identifiers fold.
+		t.Run("IdentifierCaseInTheGroupByTerm", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT g + 1 AS gk, COUNT(*) AS n FROM %s GROUP BY G + 1 ORDER BY gk`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != 1 {
+					t.Fatalf("%s arm now returns %d rows where this pin records 1; PostgreSQL "+
+						"answers %d. #731 is fixed — assert PostgreSQL's answer and delete this "+
+						"pin\n  SQL: %s", arm.name, len(res.Rows), wantKeys+1, sql)
+				}
+			}
+		})
 	})
 
 	// --- the fifth adversarial round ---------------------------------------
