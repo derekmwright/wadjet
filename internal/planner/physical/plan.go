@@ -6014,10 +6014,23 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// columns needed downstream (from the join's NeededColumns).
 			// Both sides get the full set — the Parquet reader ignores
 			// columns that don't exist in the file.
+			//
+			// resolveJoinNeededColumns, not NeededColumns: the shuffle carries
+			// what the STREAMS carry, which is source names, and the join
+			// stage's own Columns have been resolved that way since #385. The
+			// two disagreeing is a column DROPPED in the shuffle — a derived
+			// table's `SUM(a) OVER () AS w` reaches the exchange as `w` while
+			// the window stage emits `__win_0`, so the payload preserved a
+			// name nothing carries, the join's input lost the real one, and
+			// the gather's `OutputRename{__win_0 -> w}` fell back to the
+			// producer's raw columns: `[id, y.id]` for a query that asked for
+			// `[id, w]`. It bit only the SHUFFLED lowering, because the
+			// broadcast one has no payload list to get wrong (#694 round 2).
+			needed := resolveJoinNeededColumns(node)
 			var shuffleCols []string
-			if len(node.NeededColumns) > 0 {
-				seen := make(map[string]bool, len(node.NeededColumns)+len(leftKeys)+len(rightKeys))
-				for _, col := range node.NeededColumns {
+			if len(needed) > 0 {
+				seen := make(map[string]bool, len(needed)+len(leftKeys)+len(rightKeys))
+				for _, col := range needed {
 					if !seen[col] {
 						shuffleCols = append(shuffleCols, col)
 						seen[col] = true

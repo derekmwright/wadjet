@@ -109,10 +109,39 @@ func TestWindowOutputAliasTwoPath(t *testing.T) {
 		{
 			// A window with NO alias. Nothing named the output: the
 			// projection asked for "" and the single-process path answered
-			// NULL while the DAG dropped the column.
+			// NULL while the DAG dropped the column. The name is
+			// PostgreSQL's — `sum`, not the window call's text — and the
+			// first repair's text spelling was wrong twice over: no client
+			// recognises `sum(a) OVER (...)`, and `ORDER BY 1` rewrites to it
+			// and then cannot resolve a key with parentheses in it.
 			name: "an unaliased window",
 			sql:  "SELECT id, SUM(a) OVER () FROM " + dbpTable + " ORDER BY id",
-			col:  "sum(a) OVER (...)", want: rep(sumA, 9),
+			col:  "sum", want: rep(sumA, 9),
+		},
+		{
+			name: "an unaliased ranking function",
+			sql:  "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM " + dbpTable + " ORDER BY id",
+			col:  "row_number", want: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"},
+		},
+		{
+			// ORDER BY a POSITION over an unaliased window: the positional
+			// resolver rewrites `1` to the select item's NAME, so it has to
+			// make the same choice the projection does.
+			name: "ORDER BY a position over an unaliased window",
+			sql:  "SELECT SUM(a) OVER () FROM " + dbpTable + " ORDER BY 1",
+			col:  "sum", want: rep(sumA, 9),
+		},
+		{
+			// Two unaliased windows of DIFFERENT functions, so a namer that
+			// collapsed them would be visible.
+			name: "two unaliased windows of different functions",
+			sql:  "SELECT id, MIN(a) OVER (), MAX(a) OVER () FROM " + dbpTable + " ORDER BY id",
+			col:  "min", want: rep("-0.01", 9),
+		},
+		{
+			name: "the second of two unaliased windows",
+			sql:  "SELECT id, MIN(a) OVER (), MAX(a) OVER () FROM " + dbpTable + " ORDER BY id",
+			col:  "max", want: rep("12.75", 9),
 		},
 		{
 			// Through a DERIVED TABLE, consumed above: the collision is
@@ -225,6 +254,43 @@ func TestWindowOutputAliasShuffledTwoPath(t *testing.T) {
 			sql: "SELECT x.id, SUM(x.a) OVER () AS s FROM " + dbpTable + " x JOIN " + dbpTable +
 				" y ON x.id = y.id ORDER BY x.id",
 			col: "s", want: rep("52.99", 9),
+		},
+		{
+			// The window INSIDE the derived table, under the join — the shape
+			// the shuffled lowering lost entirely. The exchange's payload
+			// list carried the ALIAS while the window stage emitted the slot,
+			// so the column never reached the join, and the gather's rename
+			// fell back to the producer's raw columns: `[id, y.id]` for a
+			// query that asked for `[id, w]`.
+			name: "a window inside a derived table under a shuffled join",
+			sql: "SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () AS w FROM " + dbpTable +
+				") x JOIN " + dbpTable + " y ON x.id = y.id ORDER BY x.id",
+			col: "w", want: rep("52.99", 9),
+		},
+		{
+			// The ONE-column form, where the column asked for is the one that
+			// disappeared: the result came back with two columns, neither of
+			// them `w`.
+			name: "only the window column, through a shuffled join",
+			sql: "SELECT x.w FROM (SELECT id, SUM(a) OVER () AS w FROM " + dbpTable +
+				") x JOIN " + dbpTable + " y ON x.id = y.id",
+			col: "w", want: rep("52.99", 9),
+		},
+		{
+			name: "a ranking function inside a derived table under a shuffled join",
+			sql: "SELECT x.id, x.w FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS w FROM " +
+				dbpTable + ") x JOIN " + dbpTable + " y ON x.id = y.id ORDER BY x.id",
+			col: "w", want: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"},
+		},
+		{
+			// The NESTED spelling, which reached the same hole by the route
+			// that has always used a `__win_N` slot — so it was broken on
+			// both DAG arms before this work and is the proof the hole is
+			// about the SLOT, not about #694's change.
+			name: "a nested window inside a derived table under a shuffled join",
+			sql: "SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM " + dbpTable +
+				") x JOIN " + dbpTable + " y ON x.id = y.id ORDER BY x.id",
+			col: "w", want: rep("52.99", 9),
 		},
 		{
 			// An aggregate over a derived column, over the same join: #702's

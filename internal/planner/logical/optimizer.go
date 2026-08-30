@@ -481,6 +481,36 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 	}
 	collectNodeColumnRefs(n, needs)
 
+	// A WINDOW PRODUCES its output columns; nothing below it stores them. The
+	// SELECT list above references `__win_0`, so without this the name is
+	// pushed down as a required column and lands in the SCAN's read set —
+	// `scan-0 cols=[__win_0 a id]` for a table that has no such column. The
+	// join above then partitions its needs over a name neither side provides,
+	// the stream that reaches the gather does not carry it, and the gather's
+	// `OutputRename{__win_0 -> w}` silently falls back to the producer's raw
+	// columns: `SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () AS w FROM t) x
+	// JOIN t y ON …` came back as `[id, y.id]` (#694 round 2, R1).
+	//
+	// This is the rule the NodeSort arm of collectNodeColumnRefs already
+	// applies to `__sortkey_N` and for the same reason. It is stated here
+	// rather than there because a window's output is not skipped when it is
+	// COLLECTED — the Project above genuinely reads it — only when it is
+	// PUSHED PAST the node that computes it.
+	if n.Type == NodeWindow {
+		for _, w := range n.WindowExprs {
+			if w.OutputCol != "" {
+				delete(needs, strings.ToLower(w.OutputCol))
+			}
+		}
+		if len(needs) == 0 {
+			// Everything above wanted only the window's own outputs. The
+			// window still has to see the rows it computes them from, and an
+			// empty set means "read nothing", so fall back to the row-count
+			// sentinel the Project/Aggregate arm uses for the same situation.
+			needs[RowCountOnlyColumn] = true
+		}
+	}
+
 	// A Filter directly over a Scan: record which columns the filter alone
 	// requires (referenced by the filter, not by anything above it). When
 	// the physical planner pushes a conjunct into the scan's row filter,

@@ -284,7 +284,116 @@ func gatherOutputSources(stages []Stage) (*Stage, map[string]string, bool) {
 		if len(emitted) == 0 {
 			return nil, nil, false
 		}
+		dropUnbackedJoinColumns(stages, idx, &stages[depIdx], emitted)
+		if len(emitted) == 0 {
+			return nil, nil, false
+		}
 		return &stages[i], emitted, true
 	}
 	return nil, nil, false
+}
+
+// dropUnbackedJoinColumns removes from emitted the names a JOIN's output
+// filter lists but neither of its inputs provides.
+//
+// A join's Stage.Columns is an OutputFilter: it NARROWS what arrives, and it
+// cannot invent a column. Reading it as "emitted" made the reachability check
+// believe a name that nothing computes. `SELECT x.id, x.w FROM
+// (SELECT id, SUM(a) OVER () + 0 AS w FROM t) x JOIN t y ON …` puts `w` in the
+// filter because the SELECT list needs it, while the window stage below emits
+// `__win_0` and the derived table's `__win_0 + 0 AS w` was attached to no
+// fragment at all. The check passed, the gather's rename found nothing at run
+// time, and the client got the producer's raw columns — the exact failure
+// assertGatherOutputIsReachable exists to refuse (#656 F2, reached through a
+// join).
+//
+// A name is dropped only when NEITHER input provides it under ANY spelling the
+// runtime lookup would accept — exact, bare after dropping a qualifier, or
+// qualified where the stream spells it bare. That tolerance is deliberate and
+// is the same one columnResolves applies: a join QUALIFIES a colliding column,
+// so a stricter test would drop names that are really there and turn a working
+// query into a refusal.
+func dropUnbackedJoinColumns(stages []Stage, idx map[string]int, s *Stage, emitted map[string]string) {
+	for depth := 0; s != nil && depth < passThroughDepth; depth++ {
+		if !forwardsInputColumns(s.Type) {
+			break
+		}
+		if len(s.Dependencies) != 1 {
+			return
+		}
+		depIdx, ok := idx[s.Dependencies[0]]
+		if !ok {
+			return
+		}
+		s = &stages[depIdx]
+	}
+	if s == nil || !isJoinStage(s.Type) || len(s.Dependencies) < 2 {
+		return
+	}
+	inputs := map[string]string{}
+	for _, dep := range s.Dependencies {
+		depIdx, ok := idx[dep]
+		if !ok {
+			return // an input this walk cannot see: judge nothing
+		}
+		provided, ok := providedColumns(stages, idx, &stages[depIdx])
+		if !ok {
+			return
+		}
+		for k, v := range provided {
+			inputs[k] = v
+		}
+	}
+	if len(inputs) == 0 {
+		return
+	}
+	for lower := range emitted {
+		if !columnResolves(&plansql.ColRef{Column: emitted[lower]}, inputs) {
+			delete(emitted, lower)
+		}
+	}
+}
+
+// isJoinStage reports whether typ is one of the join lowerings.
+func isJoinStage(typ string) bool {
+	switch typ {
+	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
+		return true
+	}
+	return false
+}
+
+// providedColumns is the column set a stage really PRODUCES, as distinct from
+// the one its payload list names.
+//
+// An EXCHANGE moves rows; it computes nothing. Its Stage.Columns is the
+// payload the planner asked it to carry, and a name in there that its own
+// input does not emit is carried by nobody — which is how the shuffled
+// lowering of a window inside a derived table kept believing in `w` while the
+// window stage emitted `__win_0`. Walking past the exchanges to the stage that
+// actually produces columns is what makes the difference visible.
+//
+// ok=false when the walk cannot see through (a missing dependency, a mover
+// with none), so callers judge nothing rather than judge wrongly.
+func providedColumns(stages []Stage, idx map[string]int, s *Stage) (map[string]string, bool) {
+	for depth := 0; s != nil && depth < passThroughDepth; depth++ {
+		switch s.Type {
+		case StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
+			if len(s.Dependencies) != 1 {
+				return nil, false
+			}
+			depIdx, ok := idx[s.Dependencies[0]]
+			if !ok {
+				return nil, false
+			}
+			s = &stages[depIdx]
+		default:
+			emitted := emittedThroughPassThrough(stages, idx, s)
+			if len(emitted) == 0 {
+				return nil, false
+			}
+			return emitted, true
+		}
+	}
+	return nil, false
 }
