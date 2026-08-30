@@ -40,6 +40,21 @@ func setupAliasDMLServer(t *testing.T) *Server {
 	if err := ing.FlushAll(ctx); err != nil {
 		t.Fatal(err)
 	}
+
+	// A MERGE source: one row that matches pr686 and one that does not.
+	if err := db.CreateTable(ctx, "src686", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	sing := db.NewIngester("src686", schema, nil, ingest.Config{MaxBufferRows: 10, RowGroupSize: 10})
+	if err := sing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "n": int64(100)},
+		{"id": int64(4), "n": int64(400)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
 	return srv
 }
 
@@ -59,6 +74,23 @@ func TestAliasedDMLCommandTagOnTheWire(t *testing.T) {
 		{name: "DELETE aliased, table-qualified WHERE", sql: "DELETE FROM pr686 AS a WHERE pr686.id = 1",
 			wantIDs: []int64{1, 2, 3}},
 		{name: "DELETE with an empty WHERE", sql: "DELETE FROM pr686 AS a WHERE",
+			wantIDs: []int64{1, 2, 3}},
+
+		// RETURNING is a legal clause this server has not implemented. On the
+		// wire it used to answer three different ways depending on where the
+		// clause landed in the statement text, and the INSERT spelling
+		// answered `INSERT 0 1` with the clause dropped in silence — a client
+		// waiting for the generated key got a success and no rows
+		// (#686 R2-4).
+		{name: "DELETE bare RETURNING", sql: "DELETE FROM pr686 RETURNING *",
+			wantIDs: []int64{1, 2, 3}},
+		{name: "DELETE WHERE RETURNING", sql: "DELETE FROM pr686 WHERE id = 1 RETURNING *",
+			wantIDs: []int64{1, 2, 3}},
+		{name: "UPDATE RETURNING", sql: "UPDATE pr686 SET n = 9 RETURNING id",
+			wantIDs: []int64{1, 2, 3}},
+		{name: "UPDATE WHERE RETURNING", sql: "UPDATE pr686 SET n = 9 WHERE id = 1 RETURNING id",
+			wantIDs: []int64{1, 2, 3}},
+		{name: "INSERT RETURNING", sql: "INSERT INTO pr686 (id, n) VALUES (9, 90) RETURNING id",
 			wantIDs: []int64{1, 2, 3}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +116,66 @@ func TestAliasedDMLCommandTagOnTheWire(t *testing.T) {
 				if got := tag.String(); got != tc.wantTag {
 					t.Errorf("%s: command tag %q, want %q", tc.sql, got, tc.wantTag)
 				}
+			}
+
+			rows, err := conn.Query(ctx, "SELECT id FROM pr686 ORDER BY id", pgx.QueryExecModeSimpleProtocol)
+			if err != nil {
+				t.Fatalf("reading pr686 back: %v", err)
+			}
+			got, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+			if err != nil {
+				t.Fatalf("collecting rows: %v", err)
+			}
+			if len(got) != len(tc.wantIDs) {
+				t.Fatalf("%s left ids %v, want %v", tc.sql, got, tc.wantIDs)
+			}
+			for i := range got {
+				if got[i] != tc.wantIDs[i] {
+					t.Fatalf("%s left ids %v, want %v", tc.sql, got, tc.wantIDs)
+				}
+			}
+		})
+	}
+}
+
+// A MERGE's command tag on the WIRE.
+//
+// pgwire matched only INSERT/UPDATE/DELETE prefixes, so every MERGE fell
+// through to the QUERY path and reported `SELECT 1` — a tag naming the wrong
+// statement and the wrong count. For a client the tag IS the statement's whole
+// answer, so `SELECT 1` for a merge that changed nothing is a wrong answer
+// delivered as a success. PostgreSQL 17.11 reports `MERGE <n>` (#686 R2-5).
+func TestMergeCommandTagOnTheWire(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sql     string
+		wantTag string
+		wantIDs []int64
+	}{
+		{name: "fires nothing", wantTag: "MERGE 0", wantIDs: []int64{1, 2, 3},
+			sql: "MERGE INTO pr686 AS t USING src686 AS s ON t.id = s.id " +
+				"WHEN MATCHED AND s.n > 1000 THEN DELETE"},
+		{name: "deletes one", wantTag: "MERGE 1", wantIDs: []int64{2, 3},
+			sql: "MERGE INTO pr686 AS t USING src686 AS s ON t.id = s.id WHEN MATCHED THEN DELETE"},
+		{name: "updates one", wantTag: "MERGE 1", wantIDs: []int64{1, 2, 3},
+			sql: "MERGE INTO pr686 AS t USING src686 AS s ON t.id = s.id " +
+				"WHEN MATCHED THEN UPDATE SET n = s.n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := setupAliasDMLServer(t)
+			ctx := context.Background()
+			conn, err := pgx.Connect(ctx, pgxConnStr(srv.Addr()))
+			if err != nil {
+				t.Fatalf("pgx connect: %v", err)
+			}
+			defer conn.Close(ctx)
+
+			tag, execErr := conn.Exec(ctx, tc.sql, pgx.QueryExecModeSimpleProtocol)
+			if execErr != nil {
+				t.Fatalf("%s: %v", tc.sql, execErr)
+			}
+			if got := tag.String(); got != tc.wantTag {
+				t.Errorf("%s: command tag %q, want %q", tc.sql, got, tc.wantTag)
 			}
 
 			rows, err := conn.Query(ctx, "SELECT id FROM pr686 ORDER BY id", pgx.QueryExecModeSimpleProtocol)

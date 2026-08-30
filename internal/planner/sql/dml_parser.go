@@ -212,6 +212,41 @@ func parseDelete(sql string, l *lexer) (*ParsedQuery, error) {
 	}, nil
 }
 
+// HasTopLevelReturning reports whether a DML statement writes a RETURNING
+// clause outside any parentheses.
+//
+// RETURNING is not a lexer keyword, so every clause that collects raw text
+// swallowed it and then answered differently: bare `DELETE FROM t RETURNING *`
+// took it as the table's ALIAS, `DELETE ... WHERE id = 1 RETURNING *` fed it
+// to the WHERE's complete-parse and called legal SQL a syntax error, and
+// `INSERT ... RETURNING id` dropped it in silence and reported INSERT 1. One
+// check over the whole statement gives all four doors the same answer: it is
+// a legal statement whose feature this server has not implemented, so 0A000
+// (#686 R2-4).
+//
+// An unquoted RETURNING is always the clause — PostgreSQL reserves the word,
+// so a column of that name must be double-quoted, and a quoted identifier is
+// not matched here.
+func HasTopLevelReturning(sql string) bool {
+	l := newLexer(sql)
+	depth := 0
+	for {
+		tok := l.nextToken()
+		switch tok.typ {
+		case TokenEOF, TokenError:
+			return false
+		case TokenLParen:
+			depth++
+		case TokenRParen:
+			depth--
+		case TokenIdent:
+			if depth == 0 && !tok.quoted && strings.EqualFold(tok.val, "RETURNING") {
+				return true
+			}
+		}
+	}
+}
+
 // HasTopLevelWhereToken reports whether sql spells a WHERE keyword outside
 // any parentheses.
 //

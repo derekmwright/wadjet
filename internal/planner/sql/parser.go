@@ -301,17 +301,24 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 	case TokenKWDrop:
 		l.nextToken() // consume DROP
 		return lexParseDrop(trimmed, l)
-	case TokenKWUpdate:
-		return parseUpdate(trimmed, l)
-	case TokenKWDelete:
-		return parseDelete(trimmed, l)
-	case TokenKWInsert:
-		return parseInsert(trimmed, l)
+	case TokenKWUpdate, TokenKWDelete, TokenKWInsert, TokenKWMerge:
+		// RETURNING is checked for the whole statement, before any clause
+		// parser can swallow it into the raw text it collects (#686 R2-4).
+		if HasTopLevelReturning(trimmed) {
+			return nil, sqlerr.New("0A000", "RETURNING is not supported")
+		}
+		switch first.typ {
+		case TokenKWUpdate:
+			return parseUpdate(trimmed, l)
+		case TokenKWDelete:
+			return parseDelete(trimmed, l)
+		case TokenKWInsert:
+			return parseInsert(trimmed, l)
+		}
+		return parseMerge(trimmed, l)
 	case TokenKWAlter:
 		l.nextToken() // consume ALTER
 		return parseAlterTable(trimmed, l)
-	case TokenKWMerge:
-		return parseMerge(trimmed, l)
 	case TokenKWAnalyze:
 		l.nextToken() // consume ANALYZE
 		return lexParseAnalyze(trimmed, l)
@@ -1460,6 +1467,21 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 			return nil, fmt.Errorf("MERGE: expected MATCHED after WHEN [NOT]")
 		}
 		l.nextToken()
+
+		// PostgreSQL 17's WHEN NOT MATCHED BY SOURCE / BY TARGET. Both are
+		// real clause kinds with different meanings (BY SOURCE walks the
+		// TARGET rows no source row matched), so reading past the BY and
+		// treating the clause as an ordinary NOT MATCHED would act on the
+		// wrong rows. It is an unimplemented FEATURE, not bad SQL, so it is
+		// 0A000 and it refuses (#686 R2-3, wadjet#718).
+		if l.peekToken().typ == TokenKWBy {
+			l.nextToken()
+			side := l.nextToken()
+			return nil, sqlerr.New("0A000",
+				"MERGE: WHEN %sMATCHED BY %s is not supported",
+				map[bool]string{true: "", false: "NOT "}[clause.Matched],
+				strings.ToUpper(side.val))
+		}
 
 		// Optional AND condition
 		if l.peekToken().typ == TokenKWAnd {

@@ -257,3 +257,219 @@ func TestMergeTargetMayBeSchemaQualified(t *testing.T) {
 		})
 	}
 }
+
+// A WHEN condition must be BOOLEAN, and the refusal comes before any row is
+// touched.
+//
+// A non-boolean condition was read as FALSE — `compiled.Eval(...).(bool)`
+// discarded the failed assertion — so the clause did not fire and the NEXT
+// one did:
+//
+//	WHEN MATCHED AND s.n THEN DELETE WHEN MATCHED THEN UPDATE SET n = 5
+//
+// rewrote the row and reported MERGE 1, where PostgreSQL 17.11 raises 42804
+// and writes nothing (#686 R2-1). The clause that fired was not the clause
+// the statement named, which is worse than a wrong count.
+//
+// PostgreSQL's answers, all read off 17.11: a non-boolean TYPED expression is
+// 42804, while an untyped STRING literal is cast to boolean instead — so
+// `AND 'true'` fires, `AND 'false'` does not, and `AND 'x'` is 22P02.
+func TestMergeWhenConditionMustBeBoolean(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		state string
+		tag   string
+		rows  []string
+	}{
+		{name: "an integer column, with a second clause behind it",
+			sql:   mergeOn + " WHEN MATCHED AND s.n THEN DELETE WHEN MATCHED THEN UPDATE SET n = 5",
+			state: "42804", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "an integer column", sql: mergeOn + " WHEN MATCHED AND s.n THEN DELETE",
+			state: "42804", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "a text column", sql: mergeOn + " WHEN MATCHED AND s.name THEN DELETE",
+			state: "42804", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "a target column", sql: mergeOn + " WHEN MATCHED AND t.n THEN DELETE",
+			state: "42804", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "a numeric literal", sql: mergeOn + " WHEN MATCHED AND 1 THEN DELETE",
+			state: "42804", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "arithmetic", sql: mergeOn + " WHEN MATCHED AND s.n + 1 THEN DELETE",
+			state: "42804", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "a NOT MATCHED clause has the same rule",
+			sql:   mergeOn + " WHEN NOT MATCHED AND s.n THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)",
+			state: "42804", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "a string that does not spell a boolean",
+			sql:   mergeOn + " WHEN MATCHED AND 'x' THEN DELETE",
+			state: "22P02", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+
+		// The literal CAST PostgreSQL performs on an untyped string.
+		{name: "the string 'true' fires", sql: mergeOn + " WHEN MATCHED AND 'true' THEN DELETE",
+			tag: "MERGE 1", rows: []string{"2:20:b", "3:30:c"}},
+		{name: "the string 'false' does not", sql: mergeOn + " WHEN MATCHED AND 'false' THEN DELETE",
+			tag: "MERGE 0", rows: []string{"1:10:a", "2:20:b", "3:30:c"}},
+		{name: "a boolean literal still fires", sql: mergeOn + " WHEN MATCHED AND true THEN DELETE",
+			tag: "MERGE 1", rows: []string{"2:20:b", "3:30:c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := aliasDB686(t)
+			res, err := db.Execute(context.Background(), tc.sql)
+			if tc.state != "" {
+				if err == nil {
+					t.Fatalf("%s answered %s %d; PostgreSQL refuses it with %s",
+						tc.sql, res.Command, res.RowsAffected, tc.state)
+				}
+				if got := sqlerr.StateOf(err); got != tc.state {
+					t.Errorf("%s: SQLSTATE %q, want %q (err: %v)", tc.sql, got, tc.state, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("%s: %v", tc.sql, err)
+				}
+				if got := fmt.Sprintf("%s %d", res.Command, res.RowsAffected); got != tc.tag {
+					t.Errorf("%s: command tag %q, want %q", tc.sql, got, tc.tag)
+				}
+			}
+			if got := aliasRows686(t, db); strings.Join(got, " ") != strings.Join(tc.rows, " ") {
+				t.Errorf("%s left pr as %v, want %v", tc.sql, got, tc.rows)
+			}
+		})
+	}
+}
+
+// A WHEN NOT MATCHED clause has no target row, so naming the target is 42P01.
+//
+// Both halves resolved against the MERGED namespace, so `t.n` resolved and
+// then evaluated to NULL against a source-only row: the condition came out
+// false and the clause silently did not fire, and an INSERT value read NULL
+// (#686 R2-2). PostgreSQL raises "invalid reference to FROM-clause entry for
+// table t" for both.
+func TestMergeNotMatchedClauseCannotNameTheTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{"in the condition",
+			mergeOn + " WHEN NOT MATCHED AND t.n > 1 THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)"},
+		{"in an INSERT value",
+			mergeOn + " WHEN NOT MATCHED THEN INSERT (id, n, name) VALUES (s.id, t.n, s.name)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := aliasDB686(t)
+			before := aliasRows686(t, db)
+			res, err := db.Execute(context.Background(), tc.sql)
+			if err == nil {
+				t.Fatalf("%s answered %s %d; PostgreSQL refuses it with 42P01",
+					tc.sql, res.Command, res.RowsAffected)
+			}
+			if got := sqlerr.StateOf(err); got != "42P01" {
+				t.Errorf("%s: SQLSTATE %q, want 42P01 (err: %v)", tc.sql, got, err)
+			}
+			if after := aliasRows686(t, db); strings.Join(after, " ") != strings.Join(before, " ") {
+				t.Errorf("the refused MERGE changed pr: %v -> %v", before, after)
+			}
+		})
+	}
+}
+
+// The SOURCE is still reachable from a NOT MATCHED clause, which is the whole
+// point of one — so the guard above must not have closed the ordinary case.
+func TestMergeNotMatchedClauseStillReadsTheSource(t *testing.T) {
+	db := aliasDB686(t)
+	sql := mergeOn + " WHEN NOT MATCHED AND s.n > 1 THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)"
+	res, err := db.Execute(context.Background(), sql)
+	if err != nil {
+		t.Fatalf("%s: %v", sql, err)
+	}
+	if got := fmt.Sprintf("%s %d", res.Command, res.RowsAffected); got != "MERGE 1" {
+		t.Errorf("command tag %q, want MERGE 1", got)
+	}
+	want := []string{"1:10:a", "2:20:b", "3:30:c", "4:400:y"}
+	if got := aliasRows686(t, db); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("left pr as %v, want %v", got, want)
+	}
+}
+
+// PostgreSQL 15+ WHEN NOT MATCHED BY SOURCE / BY TARGET. They walk DIFFERENT
+// row sets, so reading past the BY and treating the clause as an ordinary NOT
+// MATCHED would act on the wrong rows. An unimplemented FEATURE is 0A000 and
+// a refusal — not the 42601 "expected THEN" it used to give, which named the
+// wrong problem (#686 R2-3, wadjet#718).
+func TestMergeNotMatchedBySourceIsReportedAsUnsupported(t *testing.T) {
+	for _, sql := range []string{
+		mergeOn + " WHEN NOT MATCHED BY SOURCE THEN DELETE",
+		mergeOn + " WHEN NOT MATCHED BY TARGET THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			db := aliasDB686(t)
+			before := aliasRows686(t, db)
+			if _, err := db.Execute(context.Background(), sql); err == nil {
+				t.Fatalf("%s ran; it is not implemented and must be refused", sql)
+			} else if got := sqlerr.StateOf(err); got != "0A000" {
+				t.Errorf("SQLSTATE %q, want 0A000 (err: %v)", got, err)
+			}
+			if after := aliasRows686(t, db); strings.Join(after, " ") != strings.Join(before, " ") {
+				t.Errorf("the refused MERGE changed pr: %v -> %v", before, after)
+			}
+		})
+	}
+}
+
+// RETURNING is a legal clause this server has not implemented, on every DML
+// statement that accepts one — so it is 0A000 everywhere and it REFUSES.
+//
+// It used to answer three different ways depending on where the clause landed
+// in the statement text (#686 R2-4): bare `DELETE FROM pr RETURNING *` took it
+// as the table's ALIAS and deleted every row; `DELETE ... WHERE id = 1
+// RETURNING *` fed it to the WHERE's complete-parse and called legal SQL a
+// 42601 syntax error; and `INSERT ... RETURNING id` dropped it in SILENCE and
+// reported INSERT 1, so a client waiting for the inserted key got a success
+// and no rows.
+func TestReturningIsReportedAsUnsupportedOnEveryStatement(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{"DELETE, bare", "DELETE FROM pr RETURNING *"},
+		{"DELETE, aliased", "DELETE FROM pr AS a RETURNING *"},
+		{"DELETE, after a WHERE", "DELETE FROM pr WHERE id = 1 RETURNING *"},
+		{"UPDATE, no WHERE", "UPDATE pr SET n = 9 RETURNING id"},
+		{"UPDATE, after a WHERE", "UPDATE pr SET n = 9 WHERE id = 1 RETURNING id"},
+		{"INSERT", "INSERT INTO pr (id, n, name) VALUES (9, 90, 'z') RETURNING id"},
+		{"MERGE", mergeOn + " WHEN MATCHED THEN DELETE RETURNING t.id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := aliasDB686(t)
+			before := aliasRows686(t, db)
+			res, err := db.Execute(context.Background(), tc.sql)
+			if err == nil {
+				t.Fatalf("%s answered %s %d; RETURNING is not implemented and must be refused",
+					tc.sql, res.Command, res.RowsAffected)
+			}
+			if got := sqlerr.StateOf(err); got != "0A000" {
+				t.Errorf("%s: SQLSTATE %q, want 0A000 (err: %v)", tc.sql, got, err)
+			}
+			if after := aliasRows686(t, db); strings.Join(after, " ") != strings.Join(before, " ") {
+				t.Errorf("the refused statement changed pr: %v -> %v", before, after)
+			}
+		})
+	}
+}
+
+// A DOUBLE-QUOTED "returning" is a NAME, not the clause — PostgreSQL reserves
+// the word, so that is the only way to spell a column or alias called it, and
+// the statement-wide check must not swallow it.
+func TestQuotedReturningIsStillAName(t *testing.T) {
+	db := aliasDB686(t)
+	sql := `DELETE FROM pr AS "returning" WHERE "returning".id = 1`
+	res, err := db.Execute(context.Background(), sql)
+	if err != nil {
+		t.Fatalf("%s: %v", sql, err)
+	}
+	if got := fmt.Sprintf("%s %d", res.Command, res.RowsAffected); got != "DELETE 1" {
+		t.Errorf("command tag %q, want DELETE 1", got)
+	}
+	want := []string{"2:20:b", "3:30:c"}
+	if got := aliasRows686(t, db); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("left pr as %v, want %v", got, want)
+	}
+}

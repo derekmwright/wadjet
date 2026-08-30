@@ -903,10 +903,16 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 
-	// Handle DML (INSERT/UPDATE/DELETE) via Execute path
+	// Handle DML (INSERT/UPDATE/DELETE/MERGE) via Execute path.
+	//
+	// MERGE was missing here, so it fell through to the QUERY path and every
+	// merge reported `SELECT 1` — a command tag naming the wrong statement
+	// and the wrong count, which for a client is the statement's whole
+	// answer. PostgreSQL reports `MERGE <n>` (#686 R2-5).
 	if strings.HasPrefix(upper, "INSERT ") ||
 		strings.HasPrefix(upper, "UPDATE ") ||
-		strings.HasPrefix(upper, "DELETE ") {
+		strings.HasPrefix(upper, "DELETE ") ||
+		strings.HasPrefix(upper, "MERGE ") {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {

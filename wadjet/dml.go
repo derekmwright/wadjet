@@ -680,7 +680,7 @@ func applySetClauses(row map[string]any, setSQL string, merged map[string]any, e
 		if err != nil {
 			return err
 		}
-		val, err := ev.value(valExpr, merged, target)
+		val, err := ev.value(valExpr, merged, target, true)
 		if err != nil {
 			return fmt.Errorf("SET %s: %w", col, err)
 		}
@@ -882,11 +882,31 @@ var errMergeRefIsFieldPath = errors.New("row field path")
 // checkMergeColumns resolves every column an expression names, before the
 // statement writes anything.
 func (ev *mergeEvaluator) checkMergeColumns(node plansql.Node) error {
+	return ev.checkClauseColumns(node, true)
+}
+
+// checkClauseColumns resolves an expression's columns against the namespace
+// the CLAUSE actually has.
+//
+// A WHEN NOT MATCHED clause has no target row — that is what "not matched"
+// means — so it may name the SOURCE only, and PostgreSQL raises 42P01
+// ("invalid reference to FROM-clause entry for table t") for a target
+// reference in its condition or in its INSERT values. Resolving both clause
+// kinds against the merged namespace instead let `t.n` resolve and then
+// evaluate to NULL against the source-only row, so the condition quietly came
+// out false and the clause did not fire: a silent skip on a statement
+// PostgreSQL refuses (#686 R2-2).
+func (ev *mergeEvaluator) checkClauseColumns(node plansql.Node, matched bool) error {
 	refs, err := plansql.ColumnRefs(node)
 	if err != nil {
 		return sqlerr.Wrap("0A000", err)
 	}
 	for _, ref := range refs {
+		if !matched && strings.EqualFold(ref.Table, ev.targetAlias) {
+			return sqlerr.New("42P01",
+				"invalid reference to FROM-clause entry for table %q: a WHEN NOT MATCHED clause has no target row",
+				ref.Table)
+		}
 		if _, _, err := ev.resolveRef(ref); err != nil && err != errMergeRefIsFieldPath {
 			return err
 		}
@@ -909,7 +929,7 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 // A column REFERENCE is checked as well as converted: its box comes from the
 // source table and may be a DECIMAL at another scale or past the target's
 // precision, which is exactly the shape a MERGE exists to move (#647).
-func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.Column) (any, error) {
+func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.Column, matched bool) (any, error) {
 	text = strings.TrimSpace(text)
 
 	// COMPLETE, for the reason BuildDMLPredicate gives: `SET n = s.n garbage`
@@ -928,6 +948,11 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	// then ASSIGNED, so an integer box reaching a DECIMAL column is the value
 	// and not the unscaled carrier (R1).
 	if ref, ok := unwrapDMLParens(node).(*plansql.ColRef); ok {
+		if !matched && strings.EqualFold(ref.Table, ev.targetAlias) {
+			return nil, sqlerr.New("42P01",
+				"invalid reference to FROM-clause entry for table %q: a WHEN NOT MATCHED clause has no target row",
+				ref.Table)
+		}
 		_, spelling, rerr := ev.resolveRef(ref)
 		if rerr == nil {
 			v := merged[spelling]
@@ -952,7 +977,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 			return nil, rerr
 		}
 	}
-	if err := ev.checkMergeColumns(node); err != nil {
+	if err := ev.checkClauseColumns(node, matched); err != nil {
 		return nil, err
 	}
 
@@ -991,7 +1016,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 // An empty condition is an unconditional clause and always holds. Anything
 // that is not TRUE — false, and NULL, which PostgreSQL also declines to fire
 // on — does not.
-func (ev *mergeEvaluator) condition(text string, row map[string]any) (bool, error) {
+func (ev *mergeEvaluator) condition(text string, row map[string]any, matched bool) (bool, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return true, nil
@@ -1000,8 +1025,27 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any) (bool, erro
 	if err != nil {
 		return false, sqlerr.Wrap("42601", fmt.Errorf("parsing WHEN condition %q: %w", text, err))
 	}
-	if err := ev.checkMergeColumns(node); err != nil {
+	// A NOT MATCHED clause has no target row, so its condition may name the
+	// SOURCE only. Resolving it against the merged namespace let `t.n > 1`
+	// resolve and then evaluate to NULL against a source-only row, so the
+	// clause silently did not fire; PostgreSQL raises 42P01 (#686 R2-2).
+	if err := ev.checkClauseColumns(node, matched); err != nil {
 		return false, err
+	}
+	// The TYPE is checked before any row is touched: a non-boolean condition
+	// used to be read as FALSE, so the clause did not fire and the NEXT one
+	// did — `WHEN MATCHED AND s.n THEN DELETE WHEN MATCHED THEN UPDATE ...`
+	// rewrote the row where PostgreSQL raises 42804 and writes nothing
+	// (#686 R2-1).
+	if err := ev.checkConditionType(node); err != nil {
+		return false, err
+	}
+	// An untyped string literal is CAST to boolean rather than evaluated:
+	// PostgreSQL fires on `AND 'true'` and not on `AND 'false'`, and the
+	// expression engine would hand back the string itself.
+	if lit, ok := unwrapDMLParens(node).(*plansql.Lit); ok && lit.Kind == plansql.LitString {
+		v, _ := parseSQLBoolText(lit.Value)
+		return v, nil
 	}
 	if !ev.sourceKnown {
 		// Same rule ev.value applies: evaluating needs the source's DECLARED
@@ -1016,8 +1060,94 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any) (bool, erro
 		return false, fmt.Errorf("compiling WHEN condition %q: %w", text, err)
 	}
 	b := batch.FromRows(ev.mergedCols, []map[string]any{lowercaseKeys(row)})
-	v, ok := compiled.Eval(b, 0).(bool)
-	return ok && v, nil
+	raw := compiled.Eval(b, 0)
+	if raw == nil {
+		// NULL is not TRUE, and PostgreSQL does not fire on it.
+		return false, nil
+	}
+	v, ok := raw.(bool)
+	if !ok {
+		// checkConditionType could not infer this shape statically (a
+		// function call, say). MERGE stages every write until after the row
+		// loop, so failing here still writes nothing.
+		return false, sqlerr.New("42804",
+			"argument of WHEN must be type boolean, not type %T, in %q", raw, text)
+	}
+	return v, nil
+}
+
+// checkConditionType refuses a WHEN condition that is not BOOLEAN, at PLAN
+// time — before the row loop, so nothing is written on the way to the error.
+//
+// PostgreSQL's answers, read off 17.11: a non-boolean typed expression is
+// 42804 ("argument of WHEN must be type boolean, not type bigint"), while an
+// untyped STRING literal is cast to boolean instead, so `AND 'true'` fires,
+// `AND 'false'` does not, and `AND 'x'` is 22P02.
+//
+// A shape whose type cannot be decided from the AST (a function call) returns
+// nil here and is caught by the runtime check in condition.
+func (ev *mergeEvaluator) checkConditionType(node plansql.Node) error {
+	switch n := unwrapDMLParens(node).(type) {
+	case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
+		*plansql.IsExpr, *plansql.InExpr, *plansql.BetweenExpr, *plansql.LikeExpr,
+		*plansql.ExistsNode, *plansql.AnyAllExpr:
+		return nil
+	case *plansql.Lit:
+		switch n.Kind {
+		case plansql.LitBool, plansql.LitNull:
+			return nil
+		case plansql.LitString:
+			if _, ok := parseSQLBoolText(n.Value); !ok {
+				return sqlerr.New("22P02", "invalid input syntax for type boolean: %q", n.Value)
+			}
+			return nil
+		default:
+			return sqlerr.New("42804", "argument of WHEN must be type boolean, not type numeric")
+		}
+	case *plansql.ColRef:
+		col, _, err := ev.resolveRef(n)
+		if err != nil {
+			// A field path or an unresolved name is not this check's business;
+			// checkClauseColumns already ruled on it.
+			return nil
+		}
+		if col.Type != parquet.TypeBool {
+			return sqlerr.New("42804", "argument of WHEN must be type boolean, not type %s", col.Type)
+		}
+		return nil
+	case *plansql.BinaryOp:
+		// Arithmetic and concatenation are never boolean.
+		return sqlerr.New("42804", "argument of WHEN must be type boolean, not type %s",
+			binaryOpResultName(n.Op))
+	case *plansql.CastNode:
+		if strings.EqualFold(strings.TrimSpace(n.TypeName), "BOOL") ||
+			strings.EqualFold(strings.TrimSpace(n.TypeName), "BOOLEAN") {
+			return nil
+		}
+		return sqlerr.New("42804", "argument of WHEN must be type boolean, not type %s", n.TypeName)
+	}
+	return nil
+}
+
+// parseSQLBoolText reads the spellings PostgreSQL accepts when it casts an
+// untyped literal to boolean.
+func parseSQLBoolText(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "t", "true", "y", "yes", "on", "1":
+		return true, true
+	case "f", "false", "n", "no", "off", "0":
+		return false, true
+	}
+	return false, false
+}
+
+// binaryOpResultName names the type an arithmetic operator produces, for the
+// 42804 message only.
+func binaryOpResultName(op string) string {
+	if op == "||" {
+		return "text"
+	}
+	return "numeric"
 }
 
 // firstFiringClause is PostgreSQL's clause-selection rule: the WHEN clauses of
@@ -1033,7 +1163,7 @@ func firstFiringClause(clauses []plansql.MergeWhenClause, matched bool,
 		if wc.Matched != matched {
 			continue
 		}
-		ok, err := ev.condition(wc.Condition, row)
+		ok, err := ev.condition(wc.Condition, row, matched)
 		if err != nil {
 			return -1, err
 		}
@@ -1364,7 +1494,7 @@ func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, ev
 		if err != nil {
 			return nil, err
 		}
-		val, err := ev.value(strings.TrimSpace(values[i]), merged, target)
+		val, err := ev.value(strings.TrimSpace(values[i]), merged, target, false)
 		if err != nil {
 			return nil, fmt.Errorf("column %q: %w", col, err)
 		}
