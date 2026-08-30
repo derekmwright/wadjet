@@ -597,6 +597,27 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 			want: "2",
 		},
 		{
+			// A COMPUTED alias over a COMPUTED alias, which needs a FIXPOINT
+			// rather than one substitution: resolveAggInputName stops at the
+			// first computed alias it meets, so substituting `t` yields
+			// `twice * 3`, which still names `twice`. Found by the schema
+			// assert (`its input carries no [twice]`) on the first round of
+			// this fix, which had answered the ELSE branch before it.
+			name: "a COMPUTED alias over a COMPUTED alias",
+			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN t ELSE 0 END) AS v FROM " +
+				"(SELECT s, twice * 3 AS t FROM (SELECT s, id * 2 AS twice FROM " +
+				dbpTable + ") d1) d2",
+			want: "6",
+		},
+		{
+			// Three deep, so a one-step fixpoint is not enough either.
+			name: "computed over computed over computed",
+			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN u ELSE 0 END) AS v FROM " +
+				"(SELECT s, t * 7 AS u FROM (SELECT s, twice * 3 AS t FROM " +
+				"(SELECT s, id * 2 AS twice FROM " + dbpTable + ") d1) d2) d3",
+			want: "42",
+		},
+		{
 			// A computed alias substituted into ARITHMETIC. The definition is
 			// `id * 2` and it lands inside `… * 3`, so it has to arrive
 			// parenthesized — spliced bare it re-associates.

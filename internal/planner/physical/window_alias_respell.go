@@ -89,13 +89,31 @@ func respellDerivedAliasRefs(n plansql.Node, child *logical.Node) (plansql.Node,
 // already right and this rewrite is DAG-only: it is applied to the stage spec's
 // text, never to the logical node the local engine executes.
 func respellAggInputExpr(n plansql.Node, child *logical.Node) (plansql.Node, bool) {
-	if n == nil || child == nil {
+	return respellAggInputExprAt(n, child, 0)
+}
+
+// aggRespellDepth bounds the recursion below. Derived-table chains are one or
+// two deep in practice; the bound is there so a malformed plan cannot spin.
+const aggRespellDepth = 8
+
+func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plansql.Node, bool) {
+	if n == nil || child == nil || depth >= aggRespellDepth {
 		return n, false
 	}
 	out, changed, _ := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
-		if resolved, expr, _, renamed := resolveAggInputName(ref.String(), child); renamed {
+		if resolved, expr, below, renamed := resolveAggInputName(ref.String(), child); renamed {
 			if expr != nil {
-				return &plansql.ParenNode{Inner: expr}, true
+				// The definition may name aliases of its OWN input:
+				// `SELECT twice * 3 AS t FROM (SELECT id * 2 AS twice …)`
+				// substitutes `twice * 3`, which still names `twice`.
+				// resolveAggInputName returns at the first computed alias it
+				// meets and cannot continue past it, so the substituted
+				// subtree is respelled against the node that Project reads.
+				inner := expr
+				if r, ok := respellAggInputExprAt(expr, below, depth+1); ok {
+					inner = r
+				}
+				return &plansql.ParenNode{Inner: inner}, true
 			}
 			if !strings.EqualFold(resolved, ref.String()) {
 				return &plansql.ColRef{Column: cleanExpr(resolved)}, true
