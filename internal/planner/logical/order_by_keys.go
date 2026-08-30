@@ -37,7 +37,7 @@ import (
 // derived, the same convention as __having_N and __gb_expr_N, and makes the
 // column recognizable to every pass that has to leave it out of the user's
 // result schema.
-const hiddenSortColPrefix = "__sortkey_"
+const hiddenSortColPrefix = string(plansql.SlotSortKey)
 
 // IsHiddenSortColumn reports whether name is a materialized ORDER BY term.
 func IsHiddenSortColumn(name string) bool {
@@ -94,7 +94,7 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 			continue
 		}
 
-		name := fmt.Sprintf("%s%d", hiddenSortColPrefix, len(hidden))
+		name := plansql.SlotName(plansql.SlotSortKey, len(hidden))
 		proj, err := hiddenSortProjection(ob, child, project, name, starOnly)
 		if err != nil {
 			return nil, nil, err

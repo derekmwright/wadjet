@@ -1601,6 +1601,16 @@ func scalarColType(schema []parquet.Column) (parquet.TypeID, bool) {
 // on Scan nodes from the catalog. This enables the logical optimizer to resolve
 // unqualified column references for filter pushdown through joins.
 func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
+	p.annotateScanColumns(ctx, node)
+	// With the catalog's real column lists now on the Scan nodes, move any of
+	// the planner's own hidden slots that a STORED column already occupies.
+	// It has to run here: before annotation there is no schema to collide
+	// with, and a stored `__win_0` beside a window is a #694 collision with
+	// the planner on the other side of it (slot_collision.go).
+	renameCollidingSlots(node)
+}
+
+func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 	if node == nil {
 		return
 	}
@@ -1682,7 +1692,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 		}
 	}
 	for _, child := range node.Children {
-		p.AnnotateScanColumns(ctx, child)
+		p.annotateScanColumns(ctx, child)
 	}
 }
 
@@ -8412,7 +8422,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 		for i, gbExpr := range aggNode.GroupByExprs {
 			if gbExpr != nil && !isPlainGroupKey(gbExpr, gbDecls) {
-				gbExprToSyn[gbExpr.String()] = fmt.Sprintf("__gb_expr_%d", i)
+				gbExprToSyn[gbExpr.String()] = SlotName(SlotGroupKey, i)
 			}
 		}
 	}
@@ -8816,7 +8826,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				syntheticNames[i] = existing
 				continue
 			}
-			synName := fmt.Sprintf("__agg_expr_%d", i)
+			synName := SlotName(SlotAggInput, i)
 			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner)
 			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
@@ -9043,7 +9053,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				litDecl := inferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
-					Name:      fmt.Sprintf("__gb_expr_%d", i),
+					Name:      SlotName(SlotGroupKey, i),
 					Type:      litDecl.ID,
 					Precision: litDecl.Precision,
 					Scale:     litDecl.Scale,
@@ -9063,7 +9073,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				continue
 			}
 			if gbExpr != nil && !isPlainGroupKey(gbExpr, aggChildColTypes) {
-				synName := fmt.Sprintf("__gb_expr_%d", i)
+				synName := SlotName(SlotGroupKey, i)
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
@@ -13386,11 +13396,11 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 			name := plansql.NormalizeIdentRef(strings.TrimSpace(gb))
 			if haveExprs && node.GroupByExprs[i] != nil {
 				if _, isLit := node.GroupByExprs[i].(*plansql.Lit); isLit && nonLit > 0 {
-					elidedLits = append(elidedLits, fmt.Sprintf("__gb_expr_%d", i))
+					elidedLits = append(elidedLits, SlotName(SlotGroupKey, i))
 					continue
 				}
 				if !isPlainGroupKey(node.GroupByExprs[i], gbDecls) {
-					name = fmt.Sprintf("__gb_expr_%d", i)
+					name = SlotName(SlotGroupKey, i)
 				}
 			}
 			names = append(names, name)

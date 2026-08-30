@@ -64,7 +64,7 @@ import (
 
 // windowKeyColPrefix names a materialized window key. The "__" marks it
 // derived, the same convention as __sortkey_N and __gb_expr_N.
-const windowKeyColPrefix = "__winkey_"
+const windowKeyColPrefix = string(SlotWindowKey)
 
 // windowKey is one resolved PARTITION BY or window ORDER BY term.
 type windowKey struct {
@@ -151,7 +151,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 			}
 		}
 		if k.Expr != nil {
-			k.Name = fmt.Sprintf("%s%d", windowKeyColPrefix, materialized)
+			k.Name = SlotName(SlotWindowKey, materialized)
 			materialized++
 			if k.Field != nil {
 				k.Type, k.Precision, k.Scale = k.Field.Type, k.Field.Precision, k.Field.Scale

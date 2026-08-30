@@ -1,7 +1,6 @@
 package logical
 
 import (
-	"fmt"
 	"log/slog"
 	"math"
 	"math/bits"
@@ -1112,7 +1111,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	}
 
 	// Build aggregate expression
-	aggOutputCol := fmt.Sprintf("__scalar_%d", idx)
+	aggOutputCol := plansql.SlotName(plansql.SlotScalar, idx)
 	aggInputCol := ""
 	if len(aggFunc.Args) > 0 {
 		stripped := stripTableQualifiers(aggFunc.Args[0])
@@ -1705,7 +1704,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 			replacements := map[string]string{}
 
 			for _, agg := range havingAggs {
-				synName := fmt.Sprintf("__having_%d", aggCounter)
+				synName := plansql.SlotName(plansql.SlotHaving, aggCounter)
 				aggCounter++
 
 				aggInputCol := ""

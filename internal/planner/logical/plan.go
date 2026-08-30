@@ -316,6 +316,14 @@ type Projection struct {
 	Expr    string // raw expression
 	IsAgg   bool
 	ASTExpr plansql.Node // compiled AST expression node (nil for aggregates)
+	// SlotSource names the planner's HIDDEN SLOT this projection reads, and
+	// is empty for every projection that reads a real column. It exists
+	// because the two are otherwise indistinguishable: a query over a table
+	// that already stores a `__win_0` column has a projection reading THAT and
+	// a projection reading the window's slot of the same name, and the pass
+	// that renumbers the slot past the stored column (physical.
+	// renameCollidingSlots) must move exactly one of them.
+	SlotSource string
 	// Hidden marks a projection the planner added for its own use rather
 	// than one the user selected: the materialized value of an ORDER BY term
 	// the SELECT list does not carry (#320). It computes and sorts like any

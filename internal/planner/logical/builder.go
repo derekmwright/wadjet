@@ -250,7 +250,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 							replacements[aggKey] = existing
 							continue
 						}
-						syntheticName := fmt.Sprintf("__agg_%d", aggCounter)
+						syntheticName := plansql.SlotName(plansql.SlotNestedAgg, aggCounter)
 						aggCounter++
 
 						aggInputCol := ""
@@ -349,7 +349,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					}
 				}
 				if !found {
-					synName := fmt.Sprintf("__having_%d", aggCounter)
+					synName := plansql.SlotName(plansql.SlotHaving, aggCounter)
 					aggCounter++
 					ae := AggExpr{
 						Func:      funcName,
@@ -422,7 +422,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		}
 		replacements := map[*plansql.WindowFuncNode]string{}
 		for _, wfn := range wfns {
-			syntheticName := fmt.Sprintf("__win_%d", winCounter)
+			syntheticName := plansql.SlotName(plansql.SlotWindowOutput, winCounter)
 			winCounter++
 			nestedWinExprs = append(nestedWinExprs, windowExprFromNode(wfn, syntheticName))
 			replacements[wfn] = syntheticName
@@ -467,7 +467,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			for j, p := range ws.PartitionBy {
 				partBy[j] = cleanExpr(p)
 			}
-			syntheticName := fmt.Sprintf("__win_%d", winCounter)
+			syntheticName := plansql.SlotName(plansql.SlotWindowOutput, winCounter)
 			winCounter++
 			bareWinOutput[i] = syntheticName
 			we := WindowExpr{
@@ -551,9 +551,10 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					src = name
 				}
 				projections = append(projections, Projection{
-					Expr:   src,
-					Alias:  name,
-					Column: src,
+					Expr:       src,
+					Alias:      name,
+					Column:     src,
+					SlotSource: src,
 				})
 				continue
 			}

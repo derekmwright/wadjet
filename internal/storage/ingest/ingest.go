@@ -44,6 +44,13 @@ type Ingester struct {
 	config    Config
 	logger    *slog.Logger
 
+	// refusal, when non-nil, is returned by every Ingest and FlushAll call.
+	// New() cannot report an error, so a caller that constructs an Ingester
+	// over an inadmissible schema — a column in the planner's reserved slot
+	// namespace, which this Ingester would CREATE the table with — is told at
+	// the first call that does something. See wadjet.NewIngester.
+	refusal error
+
 	mu      sync.Mutex
 	buffers map[string]*partitionBuffer // partition path -> buffer
 	done    chan struct{}
@@ -240,7 +247,14 @@ func checkType(col parquet.Column, v any) error {
 
 // Ingest adds rows to the buffer. Rows are partitioned based on partition key values.
 // Each row is validated against the table schema before buffering.
+// RefuseWith arms this Ingester to reject every Ingest and FlushAll with err.
+// Used by the constructor's caller for a schema the ingest door refuses.
+func (ing *Ingester) RefuseWith(err error) { ing.refusal = err }
+
 func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
+	if ing.refusal != nil {
+		return ing.refusal
+	}
 	ing.mu.Lock()
 	defer ing.mu.Unlock()
 
@@ -287,6 +301,9 @@ func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
 
 // FlushAll flushes all buffered data to storage unconditionally.
 func (ing *Ingester) FlushAll(ctx context.Context) error {
+	if ing.refusal != nil {
+		return ing.refusal
+	}
 	ing.mu.Lock()
 	defer ing.mu.Unlock()
 

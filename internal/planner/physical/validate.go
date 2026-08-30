@@ -352,13 +352,20 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		}
 	}
 
-	// This block's own SELECT-list output names. The two hooks below cover a
-	// name arriving through a derived table, a CTE or a base table's schema;
-	// this covers the top-level list, where none of those is in play
+	// The names this block MINTS: an explicit `AS <alias>`, and nothing else.
+	//
+	// A bare `SELECT __win_0 FROM oldtab` is not minting anything — it is
+	// READING a stored column, and refusing it makes a table that
+	// `SELECT *` returns unreachable by name, which is the trap the
+	// stored-column refusal was. `SELECT x AS __win_0` IS a mint: the user is
+	// creating a name in the planner's namespace, and the projection that
+	// resolves it cannot tell it from the planner's own slot
 	// (reserved_slots.go).
-	if names, star := blockOutputs(info); !star {
-		if err := refuseReservedSlotNames(names, "output column"); err != nil {
-			return err
+	for i := range info.Columns {
+		if a := info.Columns[i].Alias; a != "" {
+			if err := refuseReservedSlotName(a, "output column alias"); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -531,12 +538,6 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 			into.open = true
 			return nil
 		}
-		// A derived table's OUTPUT names enter this query's namespace, so a
-		// hidden slot's name arriving here is the collision #694 was, spelled
-		// by the user instead of by the planner (reserved_slots.go).
-		if err := refuseReservedSlotNames(names, "derived table column"); err != nil {
-			return err
-		}
 		for _, n := range names {
 			into.addQualified(qual, n)
 		}
@@ -575,9 +576,14 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 		return nil
 	}
 	for _, c := range meta.Schema.Columns {
-		if err := refuseReservedSlotName(c.Name, "column of table "+tr.Name); err != nil {
-			return err
-		}
+		// A STORED column is NEVER refused here. Reading a table is not
+		// minting a name: the column already exists, some binary wrote it, and
+		// refusing it makes the table unreadable by every query including the
+		// `SELECT *` that would show the user what is in it. The reservation
+		// is enforced at the DDL and ingest DOORS instead (wadjet.CreateTable,
+		// CREATE TABLE, NewIngester), where the name is being CREATED, and the
+		// planner renumbers its own slot past a stored collision
+		// (renameCollidingSlots) so the two can coexist in one query.
 		into.addQualifiedTyped(qual, c.Name, c.Type)
 		into.addRowColumn(c)
 	}
@@ -629,9 +635,6 @@ func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
 	} else if names, star := blockOutputs(body); star {
 		b.ctes[name] = cteEntry{open: true}
 	} else {
-		if err := refuseReservedSlotNames(names, "CTE column"); err != nil {
-			return err
-		}
 		b.ctes[name] = cteEntry{cols: names}
 	}
 	return b.validateBlock(ctx, body, nil)

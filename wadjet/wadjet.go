@@ -176,8 +176,28 @@ func (db *DB) newPlanner() *physical.Planner {
 }
 
 // CreateTable creates a new table with the given schema and partition keys.
+//
+// This is one of the RESERVED-NAMESPACE doors. A column whose name is in a
+// hidden-slot family (`__win_N`, `__sortkey_N`, …) is refused here, 42939,
+// because this is where the name is being CREATED. Reading such a column is
+// never refused — a table that already has one stays readable, and the planner
+// renumbers its own slot instead (physical.renameCollidingSlots).
 func (db *DB) CreateTable(ctx context.Context, name string, schema parquet.Schema, partitionKeys []string) error {
+	if err := refuseReservedSchemaNames(schema, "column of new table "+name); err != nil {
+		return err
+	}
 	return db.catalog.CreateTable(ctx, name, schema, partitionKeys)
+}
+
+// refuseReservedSchemaNames is the reserved-namespace door check for a schema
+// a caller is creating. Shared by CreateTable, CREATE TABLE and NewIngester so
+// the three doors cannot disagree about what is admissible.
+func refuseReservedSchemaNames(schema parquet.Schema, where string) error {
+	names := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		names = append(names, c.Name)
+	}
+	return physical.RefuseReservedSlotNames(names, where)
 }
 
 // DropTable removes a table from the catalog.
@@ -191,8 +211,17 @@ func (db *DB) ListTables(ctx context.Context) ([]string, error) {
 }
 
 // NewIngester creates a micro-batch ingester for the given table.
+//
+// The ingest door of the reserved namespace: an Ingester's schema CREATES the
+// table when it does not exist, so a slot-family column name is refused here
+// the way CreateTable refuses it. The error is deferred to the first Ingest
+// call because this constructor returns no error — see Ingester.Ingest.
 func (db *DB) NewIngester(tableName string, schema parquet.Schema, partitionKeys []string, cfg ingest.Config) *ingest.Ingester {
-	return ingest.New(db.catalog, tableName, schema, partitionKeys, cfg)
+	ing := ingest.New(db.catalog, tableName, schema, partitionKeys, cfg)
+	if err := refuseReservedSchemaNames(schema, "column of ingested table "+tableName); err != nil {
+		ing.RefuseWith(err)
+	}
+	return ing
 }
 
 // ColumnMeta describes a result column's type information.
@@ -892,6 +921,10 @@ func (db *DB) showFunctions() (*QueryResult, error) {
 func (db *DB) createTableSQL(ctx context.Context, ct *plansql.CreateTableInfo) (*QueryResult, error) {
 	schema, err := columnDefsToSchema(ct.Columns)
 	if err != nil {
+		return nil, err
+	}
+	// The SQL door of the reserved namespace (see CreateTable).
+	if err := refuseReservedSchemaNames(schema, "column of new table "+ct.Name); err != nil {
 		return nil, err
 	}
 	if err := db.catalog.CreateTable(ctx, ct.Name, schema, ct.PartitionKeys); err != nil {
