@@ -634,7 +634,7 @@ allocator, so each of them wrote their own search and each got it wrong the
 same way.
 
 `plansql.SlotAllocator` is that allocator, and it is now the only way a slot is
-obtained. It is created for a query SCOPE, seeded with the names in that scope
+obtained. It is created for ONE SCOPE, seeded with the names in that scope
 (a table's stored columns, an input schema, the SELECT list's outputs), and
 `Next(family)` hands out one fresh name at a time, excluding BOTH the seeded
 names and every slot it has already issued. Its cursor is per family, so
@@ -642,6 +642,9 @@ allocating a group key does not renumber a window. It terminates by
 construction — the cursor advances monotonically and the loop is bounded — and
 when a family is exhausted it returns `ok == false`, which callers must treat as
 a reason to leave the plan as it was rather than to reuse a name.
+
+Which scope that is, is not the allocator's choice and was wrong for `__win_N`
+until #747 — see "A scope is the QUERY, not the block" below.
 
 The gate proves both halves and the second one by MUTATION: a stub allocator
 that records its seeds but not its issues is driven through the same contract,
@@ -656,6 +659,105 @@ mints a name the reservation claims, and every reservation is one some family
 or a named suffix-minted slot produces. A one-directional test would not have
 seen the covar drift, because the PREFIX was reserved and it was the CONSTANT
 that was wrong. It also refuses to pass vacuously.
+
+### A scope is the QUERY, not the block (2026-08-30, #747)
+
+The section above says a slot allocator "is created for a query SCOPE". The
+allocator that hands out `__win_N` is created in
+`logical.BuildFromSelectWithCTEs`, which RECURSES per SELECT BLOCK — so the
+scope was the block, every derived table started its counter at zero, and two
+sibling subqueries minted the same `__win_0`:
+
+```sql
+SELECT p.w AS pw, q.w AS qw
+  FROM (SELECT id, SUM(b) OVER () AS w FROM t) p
+  JOIN (SELECT id, SUM(a) OVER () AS w FROM t) q ON p.id = q.id
+-- PostgreSQL pw=49.2400 qw=52.99; both DAG arms answered 49.2400 TWICE
+```
+
+Both arms carried a column of that one name into the join and one window's
+value was published under both output columns. At THREE siblings the last
+arm's slot won and every path answered it, single-process included. The
+collapse is provenance, not spelling: it happened just as completely when the
+two blocks published `w` and `w2`.
+
+The ADR asserted the opposite in writing — "the blocks' slots are already
+distinct, the allocator is per query" — and #747 was filed against that
+sentence. It is method 10 of the correctness protocol in its purest form: the
+design named an impossibility, no fixture attempted it, and the class was
+invisible to every gate.
+
+**`renameCollidingSlots` is where the scope becomes the query.** It already
+had the machinery — an allocator seeded with the plan's slots, and a walk
+whose multi-child node is a rename BOUNDARY — and only the trigger was too
+narrow: it fired solely when a TABLE stored a reserved-family column
+(`hot`), which is the rarest shape in the family and the only one the #694
+work had in mind. It now also fires when two window nodes mint one name, and
+renumbers every occurrence after the first. The first block keeps its slot, so
+a query with no collision is untouched and TPC-H's stage snapshot does not
+move.
+
+Two things this needed:
+
+- **A window WRAPPED in an expression has no `SlotSource`.** The builder's
+  nested-window rewrite leaves only a `ColRef` inside `ASTExpr`, so the
+  provenance field the #694 renamer keys on is empty and the rename could not
+  reach it. Rewriting a bare reference is sound exactly when the old name is
+  stored NOWHERE in the query — then no source provides it and the planner's
+  window is its only writer. When it IS stored the reference may be the user's
+  own column, and moving it is the #694 defect this pass exists to avoid.
+- **The pass runs on both entry paths and twice per query.** It is idempotent
+  by construction: the second run sees distinct slots and renames nothing.
+
+### A join carries what it will EVALUATE, and what its gather will READ (#700, #726)
+
+Making the slots distinct immediately exposed the other half. A join stage's
+`Columns` is an OutputFilter and its input exchanges' `Columns` are payload
+manifests; both are built from the join node's `NeededColumns` at stage
+EMISSION — before `attachScanSelectProjections` decides that this join is
+where the outer SELECT list is computed, and before `resolveFilterAliasSpelling`
+decides how a WHERE above it is spelled. A name only those late passes
+introduce is absent from every list the payload is built from, so the shuffle
+drops the column the fragment is about to read: `column "__win_0" does not
+exist in the input schema`, on a query PostgreSQL answers.
+
+That is the same gap #700 and #726 were filed for, with the loud face instead
+of the silent one — there the exchange carried the CTE's ALIAS while the
+predicate had been re-spelled to the base column, so the filter was UNKNOWN on
+every row and the query answered zero rows on the shuffled arm alone. Both
+issues are closed by the two passes below plus the #694-round-2 payload
+repair that had already landed; the class is now closed structurally rather
+than per shape.
+
+**`ensureJoinCarriesEvaluatedColumns`** unions the column references in a join
+stage's own `FilterExprs` and `ProjectExprs` back into that stage's
+OutputFilter and into its input exchanges' manifests, after the late passes
+have settled what it evaluates. **`ensureJoinCarriesGatherOutputs`** does the
+same for the one consumer that reads a join's output without evaluating
+anything: the gather, whose `OutputRename.From` named a column the
+OutputFilter had narrowed away.
+
+Neither can invent a column. A payload naming something an arm does not have
+is ignored — the manifest is applied per side and both sides already receive
+the union of the two — and a name NO stage produces is removed again by
+`dropUnbackedJoinColumns` before `assertGatherOutputIsReachable` reads the
+set, so a genuinely unreachable SELECT list is still refused and still routed
+local. Widening here can only rescue a name something really computes. A stage
+carrying neither field is untouched, and an already-empty list stays empty,
+because for both kinds of list empty means "carry everything".
+
+**What is NOT closed, and is filed rather than described as fixed.** The
+single-process path has its own version of the same question and it is a
+different mechanism: a derived table whose SELECT list COMPUTES a column,
+read above a join whose probe side is itself a join, answers NULL or another
+arm's value there while both DAG arms are correct (#753 — it reproduces with
+no window anywhere and a distinct alias per arm, so it is not a name
+collision). A qualified reference satisfied by another arm's identically-named
+column is still wrong on every path (#742), a sibling nested inside a sibling
+is wrong on the single path alone (#751), a DECIMAL read through a join takes
+the other arm's SCALE there (#754), and a three-way join over derived arms
+fails loudly on the shuffled lowering (#755). Each has a pinned fixture whose
+failure is that fix's proof.
 
 ## Consequences
 
