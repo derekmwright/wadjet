@@ -457,8 +457,145 @@ emitted `__win_0`, and the client got `[id, y.id]` for a query that asked for
 pushing a window's OUTPUT name down past the window that computes it; the join
 shuffle's payload is `resolveJoinNeededColumns`, the same resolved spelling the
 join stage's own Columns have carried since #385; and the reachability check
-walks PAST the movers to the stage that really produces columns
-(`providedColumns`) before believing a name.
+asks whether ANY producing stage in the plan computes the name before believing
+it (`dropUnbackedJoinColumns`), with movers and joins excluded from the
+producing set because their column lists are the thing under suspicion.
+
+That last one is deliberately the WEAKER question. Intersecting with the join's
+own inputs was tried first and refused TPC-H Q02 plus ten other tests: a
+producer's emitted set is modelled per stage type, and a subtree the model
+narrows differently makes a real column look absent — a false refusal breaks a
+working query, which is the trade this check exists to avoid making in the
+other direction. The price of the weaker question is that a name another ARM
+produces can back a phantom qualified to this one (#742), and scoping it to the
+join's own dependency subtree per side is that issue's job, with Q02 as its
+first regression test.
+
+## A hidden slot is a RESERVED name, and reading is not minting (2026-08-30, #694)
+
+The section above gives a value a stage computes "a slot no input can be
+spelled like". `__win_N` is an ordinary identifier and the SQL grammar produces
+any string as a delimited one, so a user can spell it, and the first repair for
+that was **wrong in a way worth recording in full**: it refused a table's
+STORED columns at READ time.
+
+A table carrying `__winkey_1` — written by any binary that predates this, or by
+the Go API, which had no such check — became unreadable by every query:
+
+    oldtab(id, __winkey_1, __win_0, plain)   -- 4 rows
+    SELECT *                     -- 42601
+    SELECT id, plain             -- 42601
+    SELECT COUNT(*)              -- 42601
+    SELECT id FROM oldtab AS t2  -- 42601
+
+while `CREATE TABLE`, `wadjet.CreateTable`, an Ingester and `INSERT` all still
+SUCCEEDED. So the trap closed behind the user: the engine accepted the data,
+then refused to show it, and the refusal advised aliasing a column that could
+not be selected. `DROP TABLE` was the only exit. It also inverts ADR-0018's
+direction — a table written by an older binary must stay readable — and the
+site had ZERO tests, which is how it got that far.
+
+**Reading is not minting.** The column already exists; nothing is being
+created; there is no ambiguity to resolve, because the planner has not put
+anything there yet. The reservation binds at the moment a NAME IS CREATED and
+at no other.
+
+### The three rules
+
+1. **A stored column is never refused at read.** No hook in the binder's
+   `resolveSource`, and none anywhere else on the read path. A `SELECT` naming
+   the column bare is a read too: `SELECT __win_0 FROM oldtab` is admitted, and
+   the check is on an explicit `AS <alias>` rather than on the block's output
+   names, because `blockOutputs` cannot tell a passed-through column from a
+   minted one.
+
+2. **The reservation binds where a user MINTS a name**, at SQLSTATE **42939**
+   (`reserved_name`) — not 42601 (`syntax_error`), because the query is not
+   malformed:
+
+   - an explicit `AS <alias>` in a SELECT list;
+   - an explicit CTE column list (a CTE body's own aliases are covered by the
+     body's own validation);
+   - the three DOORS: `wadjet.CreateTable`, `CREATE TABLE`, and
+     `NewIngester` — whose refusal is deferred to the first `Ingest` or
+     `FlushAll`, since the constructor returns no error.
+
+   Each door has its own test (`wadjet.TestReservedSlotNamespaceDoors`),
+   because the read hook that had none is what produced the trap.
+
+3. **The planner's slot moves, not the user's column.**
+   `renameCollidingSlots` (`planner/physical/slot_collision.go`) runs after
+   `AnnotateScanColumns` — the pass that puts a table's real column list on the
+   Scan node, and therefore the first point at which a collision is visible —
+   and renumbers a window slot past any stored name. The user's column keeps
+   its name and its values, because it is the one they can see and address:
+
+       SELECT id, __win_0, SUM(id) OVER () AS w FROM oldtab
+       -- __win_0 = 100,200,300,400 (stored)   w = 10 (the window)
+
+   The rename is keyed on `logical.Projection.SlotSource`, a field the builder
+   sets for a window column. Renaming by NAME moved BOTH projections — the
+   user's and the planner's — and handed the stored column the window's value.
+   The two are otherwise indistinguishable: same Project, same spelling, and
+   only provenance separates them, which is the same lesson `__win_N` exists
+   for one level up.
+
+### The PostgreSQL divergence, stated
+
+PostgreSQL has no reserved column namespace and answers every query in rule 2.
+Wadjet refuses them. This is a deliberate divergence from ADR-0012's "PostgreSQL
+decides semantics", taken because the alternative is not answering them either
+— it is answering them WRONGLY, which is what the engine did before the
+namespace existed. The refusal names the family it collided with so a user with
+such a column knows to alias it, and rule 1 guarantees that data already in such
+a table is never stranded by the choice.
+
+The divergence is bounded to CREATION. Nothing a user can already read stops
+being readable, and nothing about the shape of the reservation grows without a
+row being added to `reservedSlotPrefixes`.
+
+### No kill switch, and why
+
+A kill switch is for an OPTIMIZATION whose only risk is a wrong row set
+(#287's convention: `WADJET_<NAME>=0`, and the invariance oracle then runs the
+corpus with it off). This is not one. Turning it off does not restore a slower
+correct answer; it restores the silent wrong answer the reservation exists to
+prevent — `SELECT id, SUM(a) OVER () AS w FROM (SELECT id, a, b AS __win_0 FROM
+t) x` answering `t.b` on every path. A switch here would be a second behaviour
+to test and a second thing for a user to be wrong about, with nothing on the
+other side of the trade.
+
+Rule 1 is what makes that acceptable. A reservation with no escape hatch is
+only safe because it cannot strand data: the escape hatch it would otherwise
+need is exactly "let me read my table", and that is unconditional.
+
+### Why the slot API lives in `internal/planner/sql`
+
+The reservation table and the name constructor are in the PARSER package, not
+in `physical` where they started, and the import direction is the whole reason.
+
+Slots are minted in three packages: the logical builder (`__win_N`,
+`__having_N`, `__agg_N`), the logical optimizer (`__scalar_N`, `__tl_N`), and
+the physical planner (`__winkey_N`, `__sortkey_N`, `__gb_expr_N`,
+`__agg_expr_N`). `internal/planner/logical` cannot import
+`internal/planner/physical` — the dependency runs the other way — so a table
+living in `physical` was unreachable from more than half the sites that mint
+into it, and every one of those sites built its names with a local
+`fmt.Sprintf`.
+
+A table half the minting sites cannot reach is a table that drifts, and it had:
+`SlotCovarState` read `"__covar_stat"` while the reservation and
+`worker/var_fold.go` used `"__covar_state"`. It was latent only because nothing
+called the constructor. `plansql` is imported by logical and physical alike, so
+that is where the mechanism belongs; `planner/physical/reserved_slots.go`
+remains as aliases for the code already written against it.
+
+`internal/planner/sql/reserved_slots_test.go` asserts the table in BOTH
+directions, the way the ANALYZE coverage gate does — every family constant
+mints a name the reservation claims, and every reservation is one some family
+or a named suffix-minted slot produces. A one-directional test would not have
+seen the covar drift, because the PREFIX was reserved and it was the CONSTANT
+that was wrong. It also refuses to pass vacuously.
 
 ## Consequences
 
