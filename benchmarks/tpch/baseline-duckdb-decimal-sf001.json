@@ -27,17 +27,26 @@
       "row_count": 4,
       "compare": "count",
       "ordered": true,
-      "tolerance": 4,
       "limit": 100,
       "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
     },
     "Q02_nolimit": {
       "source": "duckdb",
       "row_count": 4,
-      "compare": "count",
+      "compare": "rows",
       "ordered": true,
-      "tolerance": 4,
-      "why": "row membership turns on an aggregate threshold; borderline rows shift with accumulation order"
+      "columns": [
+        "s_acctbal",
+        "s_name",
+        "n_name",
+        "p_partkey",
+        "p_mfgr",
+        "s_address",
+        "s_phone",
+        "s_comment"
+      ],
+      "fine": "c0839d5b82ef5775",
+      "coarse": "c0839d5b82ef5775"
     },
     "Q03": {
       "source": "duckdb",
@@ -329,10 +338,15 @@
     "Q22": {
       "source": "duckdb",
       "row_count": 7,
-      "compare": "count",
+      "compare": "rows",
       "ordered": true,
-      "tolerance": 4,
-      "why": "row membership turns on an aggregate threshold; borderline rows shift with accumulation order"
+      "columns": [
+        "cntrycode",
+        "numcust",
+        "totacctbal"
+      ],
+      "fine": "e5057af66332a1bb",
+      "coarse": "e5057af66332a1bb"
     }
   }
 }

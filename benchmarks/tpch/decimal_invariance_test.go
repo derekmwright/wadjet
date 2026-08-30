@@ -66,15 +66,11 @@ func TestTPCHOptimizationInvarianceDecimal(t *testing.T) {
 
 	queries := make([]oracle.Query, 0, len(nums))
 	for _, n := range nums {
-		q := oracle.Query{Name: fmt.Sprintf("Q%02d", n), SQL: TPCHQueries[n].SQL}
-		// Q02/Q22 select rows by comparing against an aggregate threshold,
-		// so membership at the boundary shifts with accumulation order —
-		// the same relaxation the FLOAT64 arm applies.
-		if n == 2 || n == 22 {
-			q.CountOnly = true
-			q.Tolerance = 4
-		}
-		queries = append(queries, q)
+		// No count-only relaxation for Q02/Q22, unlike the FLOAT64 arm: its
+		// reason there is that membership at a float threshold shifts with
+		// accumulation order, and on exact fixed-point the threshold is one
+		// exact value. See decimalCorpus.
+		queries = append(queries, oracle.Query{Name: fmt.Sprintf("Q%02d", n), SQL: TPCHQueries[n].SQL})
 	}
 
 	// Shapes the 22 leave dark on this carrier specifically: a DECIMAL
@@ -105,13 +101,22 @@ func TestTPCHOptimizationInvarianceDecimal(t *testing.T) {
 // TestTPCHQueriesDecimal already holds both arms against DuckDB; this holds
 // them against EACH OTHER, which is what catches a divergence the two arms
 // would otherwise have to be wrong about in the same direction to hide.
+//
+// Arm A is the EMBEDDED engine, not the coordinator with its fast path
+// enabled. That is not a shortcut, it is the point: for Q15 and Q22 the
+// fast-path coordinator DECLINES the plan and answers from the stage DAG, so
+// using it as "the single-process arm" compares the DAG against itself. This
+// suite reported both queries as agreeing that way while the single-process
+// engine disagreed with both of them (#696) — a blind spot the arms' names
+// hid. The embedded DB is the same pipeline the fast path would run, and it
+// is unambiguously not the DAG.
 func TestTwoPathInvarianceDecimal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("stands up a three-worker cluster")
 	}
 	ctx := context.Background()
 	data := decimalFixtureRows(t)
-	fast, dag := setupClusterFixture(t, ctx, DecimalFixture, data)
+	_, dag := setupClusterFixture(t, ctx, DecimalFixture, data)
 	embedded := openFixtureDB(t, ctx, DecimalFixture, data)
 
 	for _, n := range decimalCorpusQueries(t) {
@@ -122,36 +127,91 @@ func TestTwoPathInvarianceDecimal(t *testing.T) {
 			if hasTopLevelOrderBy(sql) {
 				q.cmp = cmpOrdered
 			}
-			if n == 2 || n == 22 {
-				q.cmp, q.tolerance = cmpCount, 4
-			}
+			// No count-only relaxation for Q02/Q22 — see decimalCorpus. The
+			// only count-only entries are the ones a trailing LIMIT creates,
+			// where rows tied at the cut are genuinely interchangeable
+			// between two correct paths.
 			if trailingLimit(sql) > 0 {
-				// Rows tied at the cut are interchangeable between two
-				// correct paths; the count is not.
 				q.cmp, q.limit = cmpCount, trailingLimit(sql)
 			}
-			if why, arm, pinned := decimalPin(n); pinned && arm == armDAG {
-				t.Skipf("PINNED, stage DAG: %s", why)
-			}
 
-			aRows, aCols, err := runArm(t, ctx, fast, sql)
-			if err != nil {
-				// The fast path declines to route some subquery plans; the
-				// embedded engine is the same single-process pipeline.
-				res, eerr := embedded.Query(ctx, sql)
-				if eerr != nil {
-					if why, _, pinned := decimalPin(n); pinned {
-						t.Skipf("PINNED, the DECIMAL carrier cannot run this: %v\n  %s", eerr, why)
-					}
-					t.Fatalf("arm A: coordinator %v; embedded %v", err, eerr)
+			var aRows []map[string]any
+			var aCols []string
+			aRes, aErr := embedded.Query(ctx, sql)
+			if aErr == nil {
+				aRows, aCols = aRes.Rows, aRes.Columns
+			}
+			bRows, bCols, bErr := runArm(t, ctx, dag, sql)
+
+			why, pinned := twoPathDecimalPin(n)
+			if !pinned {
+				if aErr != nil {
+					t.Fatalf("arm A (single-process): %v", aErr)
 				}
-				aRows, aCols = res.Rows, res.Columns
+				if bErr != nil {
+					t.Fatalf("arm B (stage DAG): %v", bErr)
+				}
+				compareArms(t, q, aRows, aCols, bRows, bCols)
+				return
 			}
-			bRows, bCols, err := runArm(t, ctx, dag, sql)
-			if err != nil {
-				t.Fatalf("arm B (stage DAG): %v", err)
+			// A pin here is a RATCHET, not a skip (ADR-0013): the query
+			// still runs, and the subtest FAILS the day the two paths start
+			// agreeing, because that is when the pin has outlived the bug.
+			if aErr != nil || bErr != nil {
+				t.Logf("PINNED (an arm still cannot run, as recorded): A=%v B=%v\n  %s", aErr, bErr, why)
+				return
 			}
-			compareArms(t, q, aRows, aCols, bRows, bCols)
+			diff := twoPathDisagreement(q, aRows, aCols, bRows, bCols)
+			if diff == "" {
+				t.Fatalf("the two paths now AGREE on %s, but it is still pinned as %q — delete its "+
+					"entry from twoPathDecimalPin so the query is gated again", name, why)
+			}
+			t.Logf("PINNED (the paths still disagree, as recorded): %s\n  %s", diff, why)
 		})
 	}
+}
+
+// twoPathDecimalPin names the queries whose two execution paths do NOT agree
+// with each other today under the DECIMAL fixture, with the issue each is
+// filed as. It is deliberately NOT decimalPin: that one records divergence
+// from DUCKDB, which is a different question. Q08 diverges from DuckDB on
+// both arms (#695's wrong carrier) and the two arms agree with EACH OTHER, so
+// it belongs there and not here.
+func twoPathDecimalPin(n int) (why string, ok bool) {
+	switch n {
+	case 14:
+		return "#695 — a CASE over a DECIMAL column and a numeric literal declares the literal's type, " +
+			"so neither path can run this query at all.", true
+	case 15:
+		return scalarSubqueryBug + " Arm A is right here and arm B answers 0 rows.", true
+	case 22:
+		return scalarSubqueryBug + " Both arms are wrong and differently: arm B answers 0 rows, arm A " +
+			"the right number of groups with inflated membership.", true
+	}
+	return "", false
+}
+
+// twoPathDisagreement returns a description of the first difference between
+// the two arms, or "" when they agree. It is compareArms's comparison without
+// the reporting, so a pin can assert that a divergence is STILL there.
+func twoPathDisagreement(q twoPathQuery, aRows []map[string]any, aCols []string, bRows []map[string]any, bCols []string) string {
+	if q.cmp == cmpCount {
+		if diff := len(bRows) - len(aRows); diff < -q.tolerance || diff > q.tolerance {
+			return fmt.Sprintf("row count A=%d B=%d (±%d allowed)", len(aRows), len(bRows), q.tolerance)
+		}
+		return ""
+	}
+	aligned, missing := realign(bRows, aCols)
+	if missing != "" {
+		return fmt.Sprintf("arm B has no column %q (A: %v, B: %v)", missing, aCols, bCols)
+	}
+	a := &oracle.Result{Columns: aCols, Rows: aRows}
+	b := &oracle.Result{Columns: aCols, Rows: aligned}
+	var canonA, canonB *oracle.Canon
+	if q.cmp == cmpOrdered {
+		canonA, canonB = oracle.CanonicalizeOrdered(a), oracle.CanonicalizeOrdered(b)
+	} else {
+		canonA, canonB = oracle.Canonicalize(a), oracle.Canonicalize(b)
+	}
+	return canonA.Diff(canonB, oracle.Query{Name: q.name})
 }

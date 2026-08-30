@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/oracle"
+	"github.com/derekmwright/wadjet/internal/server/pgwire"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -28,9 +29,9 @@ import (
 // What it adds is EXACTNESS. The float gate compares through a digest that
 // quantizes to six significant digits, because two correct engines summing
 // float64 in different orders legitimately disagree past that. Nothing about
-// a DECIMAL answer is approximate: `SUM(l_extendedprice)` is 3027140810.74
-// and no accumulation order makes it anything else. So a column whose answer
-// is decimal on both sides is compared DIGIT FOR DIGIT, at the scale
+// a DECIMAL answer is approximate: `SUM(l_extendedprice)` over this fixture
+// is 2152189760.47 and no accumulation order makes it anything else. So a
+// column whose answer is decimal on both sides is compared DIGIT FOR DIGIT, at the scale
 // decimalOutputTypes records — which is min(wadjet's scale, DuckDB's scale)
 // where the two engines' type rules keep a different number of them
 // (ADR-0012 item 9, ADR-0024 item 3).
@@ -94,6 +95,20 @@ const pgNumericDivision = "PostgreSQL keeps numeric (ADR-0012 rule 1); DuckDB's 
 // queries under the DECIMAL(15,2) fixture. Columns not listed here are
 // integer, string or float on both sides and are compared as the float gate
 // compares them.
+//
+// `scale` is not free: TestDecimalOutputTypesTableIsSelfConsistent DERIVES it
+// from the two declarations and requires the row to match, so it cannot drift
+// into a hand-tuned tolerance.
+//
+// RESIDUAL, recorded rather than fixed. Where DuckDB's side is DOUBLE, the
+// comparison rounds its rendering to wadjet's scale. At SF0.01 the values
+// involved carry about 11 significant digits against a float64's ~15.9, so
+// the sixth fraction digit is well inside what the double actually holds and
+// the rounding is sound. At a larger magnitude — an AVG over SF100, say —
+// the digit being compared could fall past the float's precision, and the two
+// engines would differ over a digit neither is wrong about. If this fixture
+// is ever raised past SF1, those rows need the comparison narrowed to the
+// digits the double genuinely carries.
 var decimalOutputTypes = []decimalCol{
 	// Q01 — the rule's showcase. sum_base_price is SUM over the bare
 	// column; sum_disc_price adds one multiplication; sum_charge adds a
@@ -171,6 +186,72 @@ func decimalTierPastSF001() bool {
 	}
 	f, err := strconv.ParseFloat(raw, 64)
 	return err == nil && ScaleFactor(f) > SF001
+}
+
+// TestDecimalOutputTypesTableIsSelfConsistent derives every `scale` from the
+// two DECLARATIONS beside it and requires the row to agree, and requires a
+// row whose declarations differ to say WHY. Without this the scale is a hand
+// constant, and a hand constant in a comparison is a tolerance nobody
+// reviewed: lowering it by one digit would silently weaken the gate on that
+// column while every test stayed green.
+func TestDecimalOutputTypesTableIsSelfConsistent(t *testing.T) {
+	seen := map[string]bool{}
+	for _, d := range decimalOutputTypes {
+		key := d.query + "." + d.column
+		if seen[key] {
+			t.Errorf("%s is listed twice", key)
+		}
+		seen[key] = true
+
+		sw, wIsDec := declaredScale(d.wadjet)
+		sd, dIsDec := declaredScale(d.duckdb)
+		if !wIsDec && !dIsDec {
+			t.Errorf("%s is DECIMAL on neither side (%s / %s) — it does not belong in this table",
+				key, d.wadjet, d.duckdb)
+			continue
+		}
+		want := sw
+		switch {
+		case wIsDec && dIsDec:
+			want = min(sw, sd)
+		case !wIsDec:
+			// Only one side is fixed-point, so its scale is the shorter
+			// rendering and the comparison runs there.
+			want = sd
+		}
+		if d.scale != want {
+			t.Errorf("%s compares at scale %d, but min over the declarations (%s, %s) is %d",
+				key, d.scale, d.wadjet, d.duckdb, want)
+		}
+		if d.wadjet != d.duckdb && d.why == "" {
+			t.Errorf("%s declares %s in wadjet and %s in DuckDB with no `why` — a divergence this "+
+				"table records without a reason is one nobody decided", key, d.wadjet, d.duckdb)
+		}
+		if d.wadjet == d.duckdb && d.why != "" {
+			t.Errorf("%s carries a `why` but both engines declare %s", key, d.wadjet)
+		}
+		if d.wireTypmod != typmodBare && d.wireTypmod != typmodUnconstrd {
+			t.Errorf("%s has wireTypmod %q, want %q or %q", key, d.wireTypmod, typmodBare, typmodUnconstrd)
+		}
+	}
+}
+
+// declaredScale reads the scale out of a declared type. ok is false for a
+// type that has none — DOUBLE, whose rendering is not fixed-point at all.
+func declaredScale(typ string) (int, bool) {
+	if !strings.HasPrefix(typ, "DECIMAL(") || !strings.HasSuffix(typ, ")") {
+		return 0, false
+	}
+	body := typ[len("DECIMAL(") : len(typ)-1]
+	comma := strings.IndexByte(body, ',')
+	if comma < 0 {
+		return 0, false
+	}
+	s, err := strconv.Atoi(strings.TrimSpace(body[comma+1:]))
+	if err != nil {
+		return 0, false
+	}
+	return s, true
 }
 
 // decimalScales indexes decimalOutputTypes by the query's BASE name (Q01),
@@ -449,10 +530,14 @@ func decimalCorpus() []duckdbCase {
 		name := fmt.Sprintf("Q%02d", n)
 		sql := TPCHQueries[n].SQL
 		c := duckdbCase{name: name, sql: sql, ordered: hasTopLevelOrderBy(sql)}
-		if n == 2 || n == 22 {
-			c.countOnly, c.tolerance = true, 4
-			c.why = "row membership turns on an aggregate threshold; borderline rows shift with accumulation order"
-		}
+		// NO count-only relaxation for Q02/Q22 here, unlike the float gate.
+		// Its reason there — "borderline rows shift with accumulation order"
+		// — is FALSE on exact fixed-point: the threshold is one exact value
+		// and every row is definitively on one side of it. Carrying the
+		// relaxation over reported Q22's single-process arm green on an
+		// answer with five of seven groups wrong (#696). The only count-only
+		// entries below are the ones a trailing LIMIT creates, where rows
+		// tied at the cut genuinely are interchangeable.
 		if pin, arm, ok := decimalPin(n); ok {
 			c.knownBug, c.knownBugArm = pin, arm
 		}
@@ -494,17 +579,31 @@ func decimalPin(n int) (why, arm string, ok bool) {
 			"written to the mistyped vector and the query ANSWERS — with brazil_revenue carried as " +
 			"float64 where both other engines say numeric. Every VALUE agrees; the carrier does not, " +
 			"which is this defect's silent face.", armBoth, true
-	case 15, 22:
-		return "#696 — on the stage DAG a DECIMAL column compared against a SCALAR SUBQUERY's value is " +
-			"compared against that value's UNSCALED Int128 carrier, so the threshold is off by 10^scale. " +
-			"`c_acctbal > (SELECT AVG(c_acctbal) …)` answers 0 rows where the truth is 796, and " +
-			"`c_acctbal > (SELECT MIN(c_acctbal) …)` answers ALL 1500 where the truth is 1361 — it moves " +
-			"in both directions, so a row count says nothing. The subquery itself computes the right " +
-			"value; the substitution into the outer comparison is what drops the scale. Silent, and " +
-			"DAG-only: the single-process arm stays gated.", armDAG, true
+	case 15:
+		return scalarSubqueryBug + " Q15 compares `total_revenue = (SELECT MAX(total_revenue) …)`. " +
+			"Equality against a scalar of the column's OWN scale is right on the single-process path, " +
+			"so that arm stays fully gated; the DAG answers 0 rows where the truth is 1.", armDAG, true
+	case 22:
+		return scalarSubqueryBug + " Q22 compares `c_acctbal > (SELECT AVG(c_acctbal) …)`, an ORDERING " +
+			"comparison against a scalar of a DIFFERENT scale, and BOTH arms are wrong. The DAG answers " +
+			"0 rows. The single-process arm answers the right NUMBER of groups with the wrong " +
+			"membership — cntrycode 17 is 10 customers totalling 63418.94 where PostgreSQL and DuckDB " +
+			"both say 8 and 62288.98, and five of the seven groups are inflated. That is why this " +
+			"corpus does not carry the float gate's count-only relaxation for Q22: it made this exact " +
+			"wrong answer report green.", armBoth, true
 	}
 	return "", "", false
 }
+
+// scalarSubqueryBug is #696, whose two arms fail differently and whose
+// numbers are DuckDB's over the committed fixture, not either wadjet path's.
+const scalarSubqueryBug = "#696 — substituting a scalar subquery's DECIMAL value into an outer " +
+	"comparison loses the value. The stage DAG compares against the value's UNSCALED Int128 carrier " +
+	"(off by 10^scale, so `> AVG` selects nothing and `> MIN` selects every row); the single-process " +
+	"path is right for equality at the column's own scale and wrong for an ordering comparison across " +
+	"scales (`c_acctbal > (SELECT AVG(c_acctbal) FROM customer)` returns 796 where the truth is 726, " +
+	"admitting balances down to 6.34 against a 4454.58 threshold). The subquery COMPUTES the right " +
+	"value; the substitution is what loses it."
 
 // decimalFixtureRows reads the committed DECIMAL(15,2) parquet through
 // Wadjet's reader, so both arms answer over the same bytes the stored
@@ -730,7 +829,7 @@ func TestTPCHDecimalDeclaredTypes(t *testing.T) {
 
 	for n := 1; n <= 22; n++ {
 		name := fmt.Sprintf("Q%02d", n)
-		res, err := db.Query(ctx, GetQuery(n, SF001).SQL)
+		res, err := db.Query(ctx, TPCHQueries[n].SQL)
 		if err != nil {
 			if why, _, pinned := decimalPin(n); pinned {
 				t.Logf("%s PINNED, no declaration to check: %v\n  %s", name, err, why)
@@ -782,10 +881,15 @@ func TestTPCHDecimalDeclaredTypes(t *testing.T) {
 // the declared (p,s) for a constrained numeric, "-1" for an unconstrained
 // one. It is pgTypeMod's decision, spelled the way the table records it.
 func wireTypmodString(m wadjet.ColumnMeta) string {
-	if m.TypeID.String() != "DECIMAL" || m.Precision <= 0 || m.WireUnconstrained {
+	// pgwire.TypeMod, not a copy of its rule: a copy would agree with itself
+	// while the wire carried something else, which is the class of defect
+	// this table exists to catch.
+	mod := pgwire.TypeMod(m)
+	if mod < 0 {
 		return typmodUnconstrd
 	}
-	return fmt.Sprintf("(%d,%d)", m.Precision, m.Scale)
+	packed := mod - 4 // PostgreSQL's VARHDRSZ
+	return fmt.Sprintf("(%d,%d)", packed>>16, packed&0xFFFF)
 }
 
 func declaredTypeString(m wadjet.ColumnMeta) string {
@@ -847,27 +951,41 @@ func declaredColumn(typ string, p, s int) string {
 
 // TestDecimalGateRejectsOneCent is the gate's proof of work. The float gate
 // digests at six significant figures because float summation order moves the
-// seventh; on a sum like 3027140810.74 that quantum would accept an error of
-// about a thousand. This gate must reject a wrong PENNY, and this is the
-// assertion that says it does — the exact analogue of
-// TestGateCatchesHistoricalBugs for the decimal arm.
+// seventh; on a nine-figure sum that quantum accepts an error of about a
+// thousand. This gate must reject a wrong PENNY, and this is the assertion
+// that says it does — the exact analogue of TestGateCatchesHistoricalBugs for
+// the decimal arm.
+//
+// The value it works on is READ OUT of the committed fixture rather than
+// written down here, because a hard-coded constant is a claim about data it
+// cannot check: the number that first stood here was the wadjet GENERATOR's
+// lineitem total, not this fixture's, and nothing failed.
 func TestDecimalGateRejectsOneCent(t *testing.T) {
-	// Q01's sum_base_price over the committed fixture, and the same answer
-	// one penny out. Nothing else differs.
-	const truth, offByOne = "3027140810.74", "3027140810.75"
+	ctx := context.Background()
+	db := ingestDecimalFixture(t, ctx, decimalFixtureRows(t))
+	res, err := db.Query(ctx, TPCHQueries[1].SQL)
+	if err != nil {
+		t.Fatalf("Q01: %v", err)
+	}
+	if len(res.Rows) == 0 {
+		t.Fatalf("Q01 returned no rows")
+	}
 	const col, scale = "sum_base_price", 2
+	truth, isText := res.Rows[0][col].(string)
+	if !isText {
+		t.Fatalf("Q01.%s is %T, want the exact text a DECIMAL column boxes as", col, res.Rows[0][col])
+	}
+	offByOne := addOneUnit(t, truth, scale)
+	t.Logf("Q01.%s over the committed fixture is %s; the wrong answer is %s", col, truth, offByOne)
+
 	c := duckdbCase{name: "Q01", ordered: true}
 	cols := []string{col}
-
-	digest := func(cell any) oracle.Fingerprint {
-		res := &oracle.Result{Columns: cols, Rows: []map[string]any{{col: cell}}}
-		quantizeDecimalColumns(res, map[string]int{col: scale})
-		return oracle.FingerprintOf(res, true)
-	}
 	want := duckdbBaselineEntry{
 		Source: "duckdb", RowCount: 1, Compare: "rows", Ordered: true, Columns: cols,
 	}
-	fp := digest(truth)
+	fpRes := &oracle.Result{Columns: cols, Rows: []map[string]any{{col: truth}}}
+	quantizeDecimalColumns(fpRes, map[string]int{col: scale})
+	fp := oracle.FingerprintOf(fpRes, true)
 	want.Fine, want.Coarse = fp.Fine, fp.Coarse
 
 	if ok, detail := compareToDuckDBDecimal(c, want, []map[string]any{{col: truth}}, cols); !ok {
@@ -898,6 +1016,28 @@ func TestDecimalGateRejectsOneCent(t *testing.T) {
 	}
 }
 
+// addOneUnit returns s with one unit of its last kept digit added.
+func addOneUnit(t *testing.T, s string, scale int) string {
+	t.Helper()
+	rounded, ok := roundDecimalText(s, scale)
+	if !ok {
+		t.Fatalf("%q is not a plain decimal", s)
+	}
+	digits := strings.Replace(rounded, ".", "", 1)
+	n, ok := new(big.Int).SetString(digits, 10)
+	if !ok {
+		t.Fatalf("%q has no integer form", rounded)
+	}
+	out := n.Add(n, big.NewInt(1)).String()
+	for len(out) <= scale {
+		out = "0" + out
+	}
+	if scale == 0 {
+		return out
+	}
+	return out[:len(out)-scale] + "." + out[len(out)-scale:]
+}
+
 func TestRoundDecimalText(t *testing.T) {
 	cases := []struct {
 		in    string
@@ -913,7 +1053,7 @@ func TestRoundDecimalText(t *testing.T) {
 		{"12.5", 2, "12.50", true}, // widening pads
 		{"0.001", 2, "0.00", true}, // a rounded-away sign is not kept
 		{"-0.001", 2, "0.00", true},
-		{"3027140810.74", 2, "3027140810.74", true},
+		{"2152189760.47", 2, "2152189760.47", true},
 		{"50452.346845549556", 6, "50452.346846", true}, // the AVG min(scale) case
 		{"493827160549382.7160549350", 10, "493827160549382.7160549350", true},
 		{"1996-01-02", 2, "", false}, // a date is not a decimal

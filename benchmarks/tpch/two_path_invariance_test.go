@@ -5503,6 +5503,18 @@ func setupClusterFixture(tb testing.TB, ctx context.Context, f Fixture, data map
 // several parquet files apiece and registers them in the catalog. Multiple
 // files per table so the DAG really fans scans out across tasks — a
 // single-file table could hide a per-task bug by accident.
+//
+// It writes through parquet.NewWriter DIRECTLY, so it does NOT pass
+// internal/storage/ingest — and therefore not ingest.checkType, the boundary
+// an INSERT crosses. That is deliberate for what this loader is for (it
+// places FILES where the catalog says, which ingest does not let a caller
+// do), and it is a REAL gap worth naming under the DECIMAL fixture
+// (ADR-0024): the values still reach the writer's own
+// parquet.DecimalValueFromBox, which is the door that parses decimal text
+// exactly, but the ingest-boundary refusal that turns a bad row into a failed
+// INSERT is not exercised on this arm. The single-process arm goes through
+// ingest, so the ingest boundary IS covered for the same rows — by the other
+// arm, not by this one.
 func loadTPCHIntoCatalog(tb testing.TB, ctx context.Context, cat *catalog.Catalog, store objstore.Store, data map[string][]map[string]any) {
 	tb.Helper()
 	loadTPCHIntoCatalogFixture(tb, ctx, FloatFixture, cat, store, data)

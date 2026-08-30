@@ -33,6 +33,9 @@ import (
 //   - Queries are INTERLEAVED — float, decimal, float, decimal — inside one
 //     repetition, so a thermal or scheduler drift over the run lands on both
 //     arms alike. A/B across windows is not a comparison (ADR-0011).
+//   - The pair's ORDER SWAPS on odd repetitions, so neither arm always pays
+//     the first-run cost of a pair. With an even repetition count each arm
+//     leads exactly half the time.
 //   - Four metrics per query: WALL (mean and max over the repetitions), CPU
 //     (user+system, getrusage delta), ALLOC (bytes and object count), and
 //     BYTES, which at this scale is what each fixture WROTE — a single
@@ -47,7 +50,9 @@ import (
 
 const (
 	decimalPerfRepsEnv = "TPCH_DECIMAL_REPS"
-	decimalPerfReps    = 3 // plus one discarded warm-up
+	// Four, not three: the arms swap order on odd repetitions, so an even
+	// count gives each arm the lead exactly half the time.
+	decimalPerfReps = 4 // plus one discarded warm-up
 )
 
 type perfSample struct {
@@ -120,9 +125,28 @@ func TestTPCHDecimalPerformanceBaseline(t *testing.T) {
 
 	for rep := 0; rep <= reps; rep++ { // rep 0 is the discarded warm-up
 		for _, n := range nums {
-			sql := GetQuery(n, sf).SQL
-			fs, ferr := timeQuery(fdb, ctx, sql)
-			ds, derr := timeQuery(ddb, ctx, sql)
+			// TPCHQueries[n].SQL, not GetQuery(n, sf): every decimal suite
+			// runs the corpus spelling, and the two differ for Q11 (whose
+			// FRACTION GetQuery rewrites per scale factor, changing the
+			// answer from 1 row to 359 at SF0.01). One spelling everywhere
+			// keeps the correctness gates and this measurement on the same
+			// query. At SF1 the two coincide.
+			sql := TPCHQueries[n].SQL
+			// ORDER SWAP (ADR-0011): whichever arm runs FIRST in a pair
+			// pays for whatever the other one leaves warm — the page cache,
+			// the allocator's spans, the branch predictors. Running float
+			// first every time would fold that asymmetry into the ratio as
+			// a constant. Odd repetitions run the decimal arm first, so
+			// across the repetitions each arm leads half the time.
+			var fs, ds perfSample
+			var ferr, derr error
+			if rep%2 == 1 {
+				ds, derr = timeQuery(ddb, ctx, sql)
+				fs, ferr = timeQuery(fdb, ctx, sql)
+			} else {
+				fs, ferr = timeQuery(fdb, ctx, sql)
+				ds, derr = timeQuery(ddb, ctx, sql)
+			}
 			if ferr != nil {
 				t.Fatalf("Q%02d on the FLOAT64 fixture: %v", n, ferr)
 			}

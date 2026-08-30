@@ -42,7 +42,7 @@ func TestPgTypeModPacksNumericPrecisionAndScale(t *testing.T) {
 		// aggregate function call never carries its argument's typmod
 		// through, only a bare column reference does. WireUnconstrained is
 		// how declaredWireUnconstrainedDecimal (physical package) tells
-		// pgTypeMod that, independent of what Precision/Scale answer.
+		// TypeMod that, independent of what Precision/Scale answer.
 		{"decimal_aggregate_output_wire_unconstrained", wadjet.ColumnMeta{
 			Name: "d", TypeName: "DECIMAL", TypeID: parquet.TypeDecimal,
 			Precision: 9, Scale: 2, WireUnconstrained: true,
@@ -54,15 +54,15 @@ func TestPgTypeModPacksNumericPrecisionAndScale(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := pgTypeMod(tc.meta); got != tc.want {
-				t.Errorf("pgTypeMod = %d, want %d", got, tc.want)
+			if got := TypeMod(tc.meta); got != tc.want {
+				t.Errorf("TypeMod = %d, want %d", got, tc.want)
 			}
 		})
 	}
 }
 
 // TestRowDescriptionCarriesTheTypeModifier reads the modifier back off the
-// WIRE, because that is the thing the client sees: a correct pgTypeMod that
+// WIRE, because that is the thing the client sees: a correct TypeMod that
 // the writer never calls would leave the defect exactly where it was.
 func TestRowDescriptionCarriesTheTypeModifier(t *testing.T) {
 	rc := &recordConn{}

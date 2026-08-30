@@ -699,6 +699,27 @@ func postgresRowFieldCases() []pgCase {
 
 // postgresSemanticsCases is the half of the corpus DuckDB cannot answer for.
 // Grouped by the rule each family pins.
+// polymorphicOverDecimalCase is PolymorphicOverFloatColumns asked of the
+// column the DECIMAL variant retypes. Under the FLOAT64 fixture it is the
+// same question over a float and gated normally; under TPCH_DECIMAL=1 it is
+// the CHOICE family over a DECIMAL column beside an integer — #695's shape —
+// and pinned, so the pin flips to a failure the day that lands.
+func polymorphicOverDecimalCase() pgCase {
+	c := pgCase{name: "PolymorphicOverSupplycost", sql: `SELECT ps_partkey, ps_suppkey,
+			COALESCE(ps_supplycost, 0) AS coalesce_num,
+			GREATEST(ps_supplycost, ps_availqty) AS greatest_mixed,
+			LEAST(ps_supplycost, ps_availqty) AS least_mixed
+			FROM partsupp WHERE ps_partkey <= 20 ORDER BY ps_partkey, ps_suppkey`}
+	if FixtureFromEnv() == DecimalFixture {
+		c.knownBug = pgBugWadjet + " a CHOICE construct over a DECIMAL column and a numeric literal or " +
+			"an integer column declares the OTHER branch's type, so COALESCE/GREATEST/LEAST over " +
+			"ps_supplycost either raise the #361 silent-write guard or answer under the wrong type. " +
+			"ADR-0024 item 2: a CHOICE construct over any DECIMAL branch is DECIMAL"
+		c.issue = "#695"
+	}
+	return c
+}
+
 func postgresSemanticsCases() []pgCase {
 	var out []pgCase
 
@@ -2998,16 +3019,19 @@ func postgresSemanticsCases() []pgCase {
 			GREATEST(n_nationkey, n_regionkey) AS greatest_int,
 			LEAST(n_nationkey, n_regionkey) AS least_int
 			FROM nation ORDER BY n_nationkey`},
-		// l_quantity/l_linenumber rather than ps_supplycost/ps_availqty: this
-		// entry's subject is the CHOICE family over a FLOAT column, and
-		// ps_supplycost is DECIMAL(15,2) under TPCH_DECIMAL=1 (ADR-0024),
-		// where the same SQL asks the decimal question #695 is filed on.
-		// l_quantity is FLOAT64 in both fixtures.
+		// The CHOICE family over a numeric column, asked TWICE — once of a
+		// column that is FLOAT64 in both fixtures and once of one the
+		// DECIMAL variant retypes. Moving the original from ps_supplycost to
+		// l_quantity would have kept this entry green under TPCH_DECIMAL=1
+		// at the cost of leaving the decimal shape — which is exactly what
+		// #695 is — with no corpus entry at all. Both spellings stay, and
+		// the decimal one is a pinned ratchet that flips when #695 lands.
 		pgCase{name: "PolymorphicOverFloatColumns", sql: `SELECT l_orderkey, l_linenumber,
 			COALESCE(l_quantity, 0) AS coalesce_float,
 			GREATEST(l_quantity, l_linenumber) AS greatest_mixed,
 			LEAST(l_quantity, l_linenumber) AS least_mixed
 			FROM lineitem WHERE l_orderkey <= 20 ORDER BY l_orderkey, l_linenumber`},
+		polymorphicOverDecimalCase(),
 		pgCase{name: "CaseWhenTypeResolution", sql: `SELECT n_nationkey,
 			CASE WHEN n_regionkey = 0 THEN 'zero' WHEN n_regionkey = 1 THEN 'one' ELSE 'many' END AS s,
 			CASE WHEN n_regionkey = 0 THEN 1 ELSE 2 END AS i,

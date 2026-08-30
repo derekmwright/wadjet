@@ -2913,7 +2913,7 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []i
 		// Data type size
 		c.buf = appendInt16(c.buf, pgTypeSize(oid))
 		// Type modifier: the DECLARATION a bare OID cannot carry
-		c.buf = appendInt32(c.buf, pgTypeMod(m))
+		c.buf = appendInt32(c.buf, TypeMod(m))
 		// Format code (int16): what the Bind chose for this column
 		c.buf = appendInt16(c.buf, fmtCodeAt(fmtCodes, i))
 	}
@@ -2921,8 +2921,10 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []i
 	c.sendMsg('T', c.buf)
 }
 
-// pgTypeMod returns the PostgreSQL type modifier (atttypmod) for a result
-// column, or -1 for a type that has none.
+// TypeMod returns the PostgreSQL type modifier (atttypmod) for a result
+// column, or -1 for a type that has none. It is exported so the differential
+// oracle asserts the typmod a client is HANDED rather than a copy of this
+// rule (benchmarks/tpch, ADR-0024 item 5).
 //
 // The modifier is where PostgreSQL keeps the part of a declaration the OID
 // does not carry: numeric's (precision, scale), varchar/bpchar's length,
@@ -2943,7 +2945,7 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []i
 // The switch is keyed on the wadjet TypeID rather than the OID so that a type
 // which later gains a parameter (a VARCHAR(n), a TIME(n)) is added here and
 // not in the wire writer.
-func pgTypeMod(m wadjet.ColumnMeta) int32 {
+func TypeMod(m wadjet.ColumnMeta) int32 {
 	switch m.TypeID {
 	case parquet.TypeDecimal:
 		// m.WireUnconstrained: an aggregate function's DECIMAL result (MIN/
