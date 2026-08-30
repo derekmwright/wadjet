@@ -12,6 +12,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // The cross-scale DECIMAL pair fixture (#506, #499).
@@ -38,6 +39,17 @@ func dbpSchema() parquet.Schema {
 		// text and so does this, and only the DECLARATION says which rule
 		// each one takes.
 		{Name: "s", Type: parquet.TypeString, Nullable: true},
+		// A FLOAT column beside the two DECIMALs (#646 round-3): no fixture
+		// paired the two inside ONE composite, and that is exactly where the
+		// fold lands on the FLOAT rung while the VALUE arriving on half the
+		// rows is still a DECIMAL's rendered text. The values are chosen so
+		// the byte order of those renderings disagrees with the numeric one —
+		// "100" sorts below "9" as bytes — and so that each of COALESCE and
+		// GREATEST takes its value from the DECIMAL arm on some rows and the
+		// FLOAT arm on others, which is what makes a row-dependent reading
+		// visible as a wrong COUNT rather than an occasional one.
+		{Name: "f", Type: parquet.TypeFloat64, Nullable: true},
+		{Name: "r", Type: parquet.TypeFloat32, Nullable: true},
 	}}
 }
 
@@ -62,16 +74,18 @@ func dbpData() []map[string]any {
 		a, b       int64
 		aNil, bNil bool
 		s          string
+		f          float64
+		fNil       bool
 	}{
-		{id: 1, a: 1275, b: 127500, s: "1.50"},
-		{id: 2, a: 1275, b: 127501, s: "1.5"},
-		{id: 3, a: 1275, b: 127499, s: "abc"},
-		{id: 4, a: -1, b: -100, s: "10"},
-		{id: 5, a: 200, b: 100000, s: "9"},
-		{id: 6, a: 0, b: 0, s: "1.500"},
-		{id: 7, aNil: true, b: 10000, s: "0"},
-		{id: 8, a: 1275, bNil: true, s: "-1"},
-		{id: 9, aNil: true, bNil: true, s: "1.5"},
+		{id: 1, a: 1275, b: 127500, s: "1.50", f: 1.5},
+		{id: 2, a: 1275, b: 127501, s: "1.5", f: 100},
+		{id: 3, a: 1275, b: 127499, s: "abc", f: -3.5},
+		{id: 4, a: -1, b: -100, s: "10", f: 0.5},
+		{id: 5, a: 200, b: 100000, s: "9", f: 9.5},
+		{id: 6, a: 0, b: 0, s: "1.500", f: 20},
+		{id: 7, aNil: true, b: 10000, s: "0", f: 7.25},
+		{id: 8, a: 1275, bNil: true, s: "-1", fNil: true},
+		{id: 9, aNil: true, bNil: true, s: "1.5", f: 3.5},
 	}
 	rows := make([]map[string]any, 0, len(src))
 	for _, r := range src {
@@ -83,6 +97,10 @@ func dbpData() []map[string]any {
 			m["b"] = dbpDec(r.b)
 		}
 		m["s"] = r.s
+		if !r.fNil {
+			m["f"] = r.f
+			m["r"] = float32(r.f)
+		}
 		rows = append(rows, m)
 	}
 	return rows
@@ -456,16 +474,7 @@ func TestSetOpDecimalKeyTwoPath(t *testing.T) {
 // values. `pg_typeof` for the three composites here is numeric in all three
 // cases (bigint ∪ numeric, numeric ∪ numeric-constant), which is what the
 // ladder now answers.
-func TestDecimalInACompositeTwoPath(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: this gate stands up an embedded NATS cluster")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	t.Cleanup(cancel)
-
-	coord := tmdCluster(t, ctx)
-	single := tmdStandalone(t, ctx)
-
+func runDecimalInACompositeTwoPath(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coordinator) {
 	for _, c := range []struct {
 		name  string
 		where string
@@ -490,6 +499,46 @@ func TestDecimalInACompositeTwoPath(t *testing.T) {
 		// PostgreSQL names and this layer used to drop.
 		{"CoalesceIntNumericConst", "COALESCE(id, 0.0) > '9'", 0},
 		{"CoalesceDecNumericConst", "COALESCE(a, 0.0) > '9'", 4},
+
+		// --- a DECIMAL column beside a FLOAT one, in ONE composite --------
+		//
+		// The fold lands on the FLOAT rung — PostgreSQL's numeric ∪ float8 is
+		// float8, and numeric ∪ real is REAL — while the VALUE arriving on the
+		// rows where the decimal arm won is still that decimal's rendered
+		// TEXT. Declining that box sent the comparison to the generic
+		// byte order, which is #504's defect one composite up: over a larger
+		// fixture `COALESCE(c_dec, c_f64) > '9'` answered 134 of 2491 rows.
+		//
+		// The UNQUOTED spelling is here beside the quoted one because it broke
+		// too — this is not a literal-coercion question, it is the operand's
+		// own reading — and the float32 pair is here because its fold is REAL,
+		// a different rung with the same hazard.
+		{"CoalesceDecFloatGtQuoted", "COALESCE(a, f) > '9'", 4},
+		{"CoalesceDecRealGtQuoted", "COALESCE(a, r) > '9'", 4},
+		{"CoalesceDecFloatGtUnquoted", "COALESCE(a, f) > 9", 4},
+		{"GreatestDecFloatGtQuoted", "GREATEST(a, f) > '9'", 6},
+		{"LeastDecFloatGtQuoted", "LEAST(a, f) > '9'", 2},
+		{"CaseDecFloatGtQuoted", "CASE WHEN id > 4 THEN a ELSE f END > '9'", 2},
+		{"GreatestDecRealBetweenQuoted", "GREATEST(a, r) BETWEEN '1' AND '9'", 2},
+		{"CoalesceFloatDecGtQuoted", "COALESCE(f, a) > '9'", 4},
+		{"GreatestDecFloatEqQuoted", "GREATEST(a, f) = '12.75'", 3},
+		{"CoalesceDecFloatInQuoted", "COALESCE(a, f) IN ('12.75','20')", 4},
+		{"GreatestDecFloatIsDistinctQuoted", "GREATEST(a, f) IS DISTINCT FROM '12.75'", 6},
+		// A row range that holds ONLY rows where the decimal arm wins: the
+		// wrong reading was row-dependent, so a gate that spans the whole
+		// table can pass on the rows the float arm happens to supply.
+		{"CoalesceDecFloatNarrowRange", "id < 3 AND COALESCE(a, f) > '9'", 2},
+
+		// --- two QUOTED literals inside one call --------------------------
+		//
+		// Neither operand of that pair is typed, so neither was retyped to the
+		// call's fold and the two literals were ordered by BYTES: '12.75'
+		// sorts below '3.1' there and above it as a number. PostgreSQL coerces
+		// EVERY unknown literal in the call to the resolved type.
+		{"TwoQuotedLiteralsDecimalFold", "GREATEST('3.1','12.75',a) = '12.75'", 9},
+		{"TwoQuotedLiteralsDecimalFoldLeast", "LEAST('3.1','12.75',b) = '3.1'", 6},
+		{"TwoQuotedLiteralsFloatFold", "GREATEST('9','10',f) = '10'", 7},
+		{"TwoQuotedLiteralsFloatFoldLeast", "LEAST('9','10',f) = '9'", 4},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", dbpTable, c.where)
@@ -512,26 +561,43 @@ func TestDecimalInACompositeTwoPath(t *testing.T) {
 	// A literal no numeric type can read is still refused, and the message
 	// names the CALL's folded type — numeric, as PostgreSQL says, not the
 	// bigint of whichever argument the pair held.
-	t.Run("GarbageNamesTheFoldedType", func(t *testing.T) {
-		sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE GREATEST(id, 'abc', a) > 0", dbpTable)
-		const want = `invalid input syntax for type numeric: "abc"`
-		for _, arm := range []struct {
-			name string
-			run  func() error
-		}{
-			{"single", func() error { _, err := tmdRunSingle(ctx, single, sql); return err }},
-			{"dag", func() error { _, err := tmdRunDAG(ctx, coord, sql); return err }},
-		} {
-			err := arm.run()
-			if err == nil {
-				t.Errorf("%s: %s answered; PostgreSQL raises 22P02", arm.name, sql)
-				continue
+	for _, c := range []struct{ name, where, want string }{
+		{"GarbageNamesTheFoldedType", "GREATEST(id, 'abc', a) > 0",
+			`invalid input syntax for type numeric: "abc"`},
+		// The refusal must not depend on HOW MANY ROWS the query reads. It
+		// did: the literal was only parsed after the operand's box had been
+		// read, so a row where the FLOAT arm won raised and a row where the
+		// DECIMAL arm won answered FALSE — the same query, two answers,
+		// decided by the data. PostgreSQL coerces at parse analysis and
+		// raises for every row. Both row ranges are asserted for that reason.
+		{"GarbageDecFloatFold", "GREATEST(a, f) = 'abc'",
+			`invalid input syntax for type double precision: "abc"`},
+		{"GarbageDecFloatFoldNarrowRange", "id < 5 AND GREATEST(a, f) = 'abc'",
+			`invalid input syntax for type double precision: "abc"`},
+		// Two quoted literals whose fold is an INTEGER: '3.1' names no bigint.
+		{"TwoQuotedLiteralsIntFoldRefuses", "GREATEST('3.1','12.75',id) = '12.75'",
+			`invalid input syntax for type bigint: "3.1"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", dbpTable, c.where)
+			for _, arm := range []struct {
+				name string
+				run  func() error
+			}{
+				{"single", func() error { _, err := tmdRunSingle(ctx, single, sql); return err }},
+				{"dag", func() error { _, err := tmdRunDAG(ctx, coord, sql); return err }},
+			} {
+				err := arm.run()
+				if err == nil {
+					t.Errorf("%s: %s answered; PostgreSQL raises 22P02", arm.name, sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), c.want) {
+					t.Errorf("%s: %s raised %v, want a refusal naming %q", arm.name, sql, err, c.want)
+				}
 			}
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("%s: %s raised %v, want a refusal naming %q", arm.name, sql, err, want)
-			}
-		}
-	})
+		})
+	}
 }
 
 func TestDecimalLiteralRefusalTwoPath(t *testing.T) {
@@ -543,6 +609,13 @@ func TestDecimalLiteralRefusalTwoPath(t *testing.T) {
 
 	coord := tmdCluster(t, ctx)
 	single := tmdStandalone(t, ctx)
+
+	// The composite gate rides this cluster rather than standing a seventh in
+	// this file: the package convention, and what keeps internal/coordinator
+	// inside CI's default 10-minute package timeout.
+	t.Run("DecimalInAComposite", func(t *testing.T) {
+		runDecimalInACompositeTwoPath(t, ctx, single, coord)
+	})
 
 	for _, tc := range []struct {
 		name string

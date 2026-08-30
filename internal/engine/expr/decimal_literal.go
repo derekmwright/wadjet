@@ -434,10 +434,24 @@ func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (c in
 	// winner with compare()'s byte order instead.
 	if lk == boxQuoted || rk == boxQuoted {
 		if ck := a.commonKind(b); isNumericFoldKind(ck) {
-			if rk == boxQuoted && isNumericFoldKind(lk) {
+			switch {
+			case lk == boxQuoted && rk == boxQuoted:
+				// BOTH operands unknown-typed. PostgreSQL coerces every
+				// unknown literal in the call to the resolved type, so this
+				// pair is a comparison at ck too — and neither side being
+				// retyped is how `GREATEST('3.1','12.75',a)` ordered its two
+				// literals by BYTES and answered '3.1' where PostgreSQL
+				// answers '12.75'.
+				//
+				// Only the LEFT is retyped: the arm below reads a TYPED
+				// operand against a still-QUOTED one, so retyping both would
+				// match no arm at all and fall back to the byte order this is
+				// removing. The left operand's VALUE is its own text, which
+				// every rung can read.
 				lk = ck
-			}
-			if lk == boxQuoted && isNumericFoldKind(rk) {
+			case rk == boxQuoted && isNumericFoldKind(lk):
+				lk = ck
+			case lk == boxQuoted && isNumericFoldKind(rk):
 				rk = ck
 			}
 		}
@@ -445,7 +459,12 @@ func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (c in
 	if !pairApplies(lk, rk, a.texts[li], a.texts[ri]) {
 		return 0, false, false
 	}
-	return orderByKinds(lk, rk, lv, rv, a.texts[li], a.texts[ri])
+	// The CALL's fold is the type for BOTH sides here, not each argument's
+	// own: PostgreSQL resolves GREATEST/LEAST once and coerces every unknown
+	// literal in it to that one type. Passing each operand's own fold put the
+	// bare column's type back and re-refused `GREATEST(bigint,'3.1',numeric)`.
+	ck := a.commonKind(b)
+	return orderByKindsFold(lk, rk, ck, ck, lv, rv, a.texts[li], a.texts[ri])
 }
 
 // armExtremum returns nil — "this call can never refuse" — unless some

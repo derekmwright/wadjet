@@ -2,6 +2,8 @@ package expr
 
 import (
 	"math"
+	"strconv"
+	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
@@ -198,32 +200,48 @@ func quotedNumberOrder(typ batch.TypeID, num any, text string) (int, bool) {
 		if st != kernel.NumConstOK {
 			raiseQuotedLitRefusal(batch.TypeDecimal, text, st)
 		}
-		if s, ok := num.(string); ok {
-			c, ok := batch.CompareDecimalTexts(s, text)
-			return c, ok
-		}
-		return decimalTextOrder(num, text)
-	case batch.TypeFloat32:
-		v, ok := numberAsFloat64(num)
+		// Both sides as TEXT, always. A number reaching this rung is an
+		// INTEGER box (a float box would have made the fold a float rung), so
+		// rendering it loses nothing, and batch.CompareDecimalTexts is the one
+		// reader that also orders the literal's NaN and ±Infinity spellings by
+		// PostgreSQL's rank (ADR-0024 item 6) — decimalTextOrder declines them,
+		// which left `GREATEST(int, 'NaN', numeric)` with no reading at all.
+		ls, ok := decimalOperandText(num)
 		if !ok {
 			return 0, false
 		}
+		return batch.CompareDecimalTexts(ls, text)
+	case batch.TypeFloat32:
+		// The LITERAL is read FIRST, before the box is looked at. Reading the
+		// box first made the refusal depend on the DATA: `GREATEST(c_dec,
+		// c_f64) = 'abc'` raised 22P02 on a row where the float arm won and
+		// answered FALSE on a row where the decimal arm won, because only the
+		// first had a box this could read. PostgreSQL coerces the literal at
+		// parse analysis and raises for every row (#517's rule, which
+		// ADR-0012 item 13 records as closed).
 		f, st := kernel.FloatLitText(text, 32)
 		if st != kernel.NumConstOK {
 			raiseQuotedLitRefusal(typ, text, st)
 		}
-		return kernel.CompareFloat32(float32(v), float32(f)), true
-	case batch.TypeFloat64:
 		v, ok := numberAsFloat64(num)
 		if !ok {
 			return 0, false
 		}
+		return kernel.CompareFloat32(float32(v), float32(f)), true
+	case batch.TypeFloat64:
 		f, st := kernel.FloatLitText(text, 64)
 		if st != kernel.NumConstOK {
 			raiseQuotedLitRefusal(typ, text, st)
 		}
+		v, ok := numberAsFloat64(num)
+		if !ok {
+			return 0, false
+		}
 		return kernel.CompareFloat64(v, f), true
 	case batch.TypeInt32, batch.TypeInt64, batch.TypePort, batch.TypeProtocol, batch.TypeDuration:
+		if _, st := kernel.IntLitText(text); st != kernel.NumConstOK {
+			raiseQuotedLitRefusal(typ, text, st)
+		}
 		v, ok := numberAsInt64(num)
 		if !ok {
 			return 0, false
@@ -265,6 +283,15 @@ func int32Family(typ batch.TypeID) bool {
 // numberAsFloat64 and numberAsInt64 read a boxed number in the domain its
 // COLUMN declared, whatever width ColRef.Eval boxed it at. ok=false for a box
 // that is not a number at all, which sends the caller back to compare().
+//
+// A DECIMAL's rendered TEXT counts as a number here, and it has to. A
+// composite mixing a DECIMAL column with a FLOAT one folds to the FLOAT rung —
+// PostgreSQL's `numeric` ∪ `float8` is float8 — but the VALUE that arrives on
+// the rows where the decimal arm won is still that decimal's text. Declining
+// it sent `COALESCE(c_dec, c_f64) > '9'` to compare()'s BYTE order, which
+// answered 134 of 2491 rows: a byte ordering of a rendered decimal, which is
+// #504's defect one composite up. Reading it as a float64 IS PostgreSQL's own
+// numeric→float8 conversion for that fold.
 func numberAsFloat64(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:
@@ -277,6 +304,8 @@ func numberAsFloat64(v any) (float64, bool) {
 		return float64(n), true
 	case int:
 		return float64(n), true
+	case string:
+		return decimalTextAsFloat64(n)
 	}
 	return 0, false
 }
@@ -291,6 +320,103 @@ func numberAsInt64(v any) (int64, bool) {
 		return int64(n), true
 	}
 	return 0, false
+}
+
+// decimalOperandText renders an operand at the DECIMAL rung as the text
+// batch.CompareDecimalTexts reads. A DECIMAL already IS its text; an integer
+// renders exactly; a float renders through its shortest round-trip spelling,
+// with the three specials spelled the way that reader recognises them.
+func decimalOperandText(v any) (string, bool) {
+	switch n := v.(type) {
+	case string:
+		return n, true
+	case int64:
+		return strconv.FormatInt(n, 10), true
+	case int32:
+		return strconv.FormatInt(int64(n), 10), true
+	case int:
+		return strconv.FormatInt(int64(n), 10), true
+	case float64:
+		return floatOperandText(n, 64)
+	case float32:
+		return floatOperandText(float64(n), 32)
+	}
+	return "", false
+}
+
+func floatOperandText(f float64, bits int) (string, bool) {
+	switch {
+	case f != f:
+		return "NaN", true
+	case math.IsInf(f, 1):
+		return "Infinity", true
+	case math.IsInf(f, -1):
+		return "-Infinity", true
+	}
+	return strconv.FormatFloat(f, 'f', -1, bits), true
+}
+
+// numericBoxRepair orders a pair whose KINDS say numeric but whose BOXES no arm
+// above could read together — in practice a DECIMAL's rendered TEXT meeting a
+// Go number, which is what a composite mixing a DECIMAL column with a FLOAT or
+// an INTEGER one produces on the rows where the decimal arm won.
+//
+// It exists because the alternative is compare()'s BYTE order over a rendered
+// decimal: `COALESCE(dec, float) > '9'` answered 134 of 2491 rows that way, and
+// the unquoted `> 9` spelling answered the same. The rule it applies is
+// decimalTextOrder's, which is PostgreSQL's — exact against an integer, float64
+// against a float, because `numeric <op> double precision` casts the numeric.
+//
+// ok=false leaves every pair it does not recognise exactly where it was: a
+// genuine STRING column keeps #504's text rule, and an operand with no
+// declaration keeps compare()'s own judgement.
+func numericBoxRepair(lk, rk boxKind, lv, rv any) (int, bool) {
+	if !numericPairKinds(lk, rk) {
+		return 0, false
+	}
+	ls, lIsStr := lv.(string)
+	rs, rIsStr := rv.(string)
+	switch {
+	case lIsStr && rIsStr:
+		return batch.CompareDecimalTexts(ls, rs)
+	case lIsStr:
+		c, ok := decimalTextOrder(rv, ls)
+		return -c, ok
+	case rIsStr:
+		return decimalTextOrder(lv, rs)
+	}
+	// Two Go numbers: compare at the wider domain, which is what every rung
+	// above already did before one of them arrived as text.
+	lf, lok := numberAsFloat64(lv)
+	rf, rok := numberAsFloat64(rv)
+	if !lok || !rok {
+		return 0, false
+	}
+	return kernel.CompareFloat64(lf, rf), true
+}
+
+// numericPairKinds reports whether both operands' kinds say "a number", which
+// is what makes a byte ordering of them wrong rather than merely unusual. A
+// boxText operand is excluded by name: a genuine STRING column compares AS
+// TEXT whatever its digits look like (ADR-0012 item 5).
+func numericPairKinds(lk, rk boxKind) bool {
+	ok := func(k boxKind) bool { return isNumericFoldKind(k) || k == boxQuoted }
+	return ok(lk) && ok(rk)
+}
+
+// decimalTextAsFloat64 converts a DECIMAL's rendered text to the float64 the
+// fold's rung compares at. It uses the DECIMAL grammar as the gate — the same
+// accept-set every other DECIMAL site reads — so a genuine STRING column's
+// value that is not a number still declines and keeps #504's text rule.
+func decimalTextAsFloat64(s string) (float64, bool) {
+	if !kernel.NewDecimalLiteral(s).Numeric() {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
 }
 
 // refusesEveryNumericType reports whether this text is refused by EVERY column

@@ -914,6 +914,10 @@ func runExtremumWinnerMaterialization(t *testing.T, ctx context.Context, single 
 	// that literal `unknown` and resolves the call from the other arguments:
 	// `GREATEST(bigint, real, double, '1e39')` is double precision there.
 	//
+	// TODO(#724): type a quoted string literal `unknown` at nodeDeclaredType,
+	// or teach CommonDeclType to ignore an untyped-literal decider when the
+	// rest are numeric — then these pins fail and get deleted.
+	//
 	// The last two rows are the WORST form of it and are pinned LOUDLY rather
 	// than quietly: the deferral does not merely narrow, it WRAPS. A double
 	// 1e39 stored into an INT64 vector is int64's MINIMUM, and a NaN is too —

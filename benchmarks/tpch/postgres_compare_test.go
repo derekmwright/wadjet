@@ -1103,6 +1103,27 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "GreatestIntQuotedNaNDecimal", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, 'NaN', d_2) > 0`},
 		pgCase{name: "GreatestIntDecimalEqQuoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, d_2) = '12.75'`},
 		pgCase{name: "CoalesceDecimalNumericConst", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, 0.0) > '9'`},
+		// A DECIMAL column and a FLOAT one inside ONE composite. The fold is
+		// the FLOAT rung — `numeric ∪ double precision` is double precision —
+		// while the VALUE on the rows where the decimal arm wins is that
+		// decimal's rendered TEXT. Reading the two questions as one left that
+		// text with no reading and ordered it by BYTES. l_quantity is the
+		// float column here because it is FLOAT64 in BOTH fixtures, where
+		// l_discount becomes DECIMAL(15,2) under TPCH_DECIMAL=1 and the
+		// question would quietly stop being asked.
+		pgCase{name: "CoalesceDecimalFloatGtQuoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, 9.5) > '9'`},
+		pgCase{name: "GreatestDecimalFloatGtQuoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, CAST(d_key AS DOUBLE PRECISION)) > '9'`},
+		pgCase{name: "GreatestDecimalFloatGtUnquoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, CAST(d_key AS DOUBLE PRECISION)) > 9`},
+		pgCase{name: "LeastDecimalFloatGtQuoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_2, CAST(d_key AS DOUBLE PRECISION)) > '9'`},
+		pgCase{name: "CaseDecimalFloatGtQuoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key > 4 THEN d_2 ELSE CAST(d_key AS DOUBLE PRECISION) END > '9'`},
+		pgCase{name: "GreatestDecimalRealGtQuoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, CAST(d_key AS REAL)) > '9'`},
+		// TWO quoted literals in one call: neither operand of that pair is
+		// typed, so neither was retyped to the fold and the two were ordered
+		// by BYTES — '12.75' sorts below '3.1' there and above it as a number.
+		pgCase{name: "TwoQuotedLiteralsDecimalFold", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST('3.1','12.75',d_2) = '12.75'`},
+		pgCase{name: "TwoQuotedLiteralsDecimalFoldLeast", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST('3.1','12.75',d_4) = '3.1'`},
+		pgCase{name: "TwoQuotedLiteralsRealFold", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST('9','10',r_val) = '10'`},
+		pgCase{name: "TwoQuotedLiteralsRealFoldLeast", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE LEAST('9','10',r_val) = '9'`},
 
 		// SINGLE-element real IN — the arity split #549's re-review turned up.
 		// PostgreSQL folds `real IN (x)` to `= 'x'::double precision` (WIDEN),

@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"fmt"
 	"strings"
 	"sync/atomic"
 
@@ -218,6 +219,66 @@ func numericFoldOf(kind, k boxKind) (boxKind, bool) {
 		return boxUnknown, false
 	}
 	return widerNumberKind(k, kind)
+}
+
+// classifyOperandFold is classifyOperand's TYPE answer: for a composite that
+// CHOOSES between arms it is PostgreSQL's select_common_type fold over them
+// (`numeric ∪ float8` is float8), and for every other operand it is simply the
+// kind. The two differ only where a DECIMAL arm meets a wider one — see
+// boxOperand.fold for why both answers are needed at once.
+func classifyOperandFold(e Expr, b *batch.RecordBatch) (boxKind, bool) {
+	switch v := e.(type) {
+	case *FuncCall:
+		switch strings.ToLower(v.Name) {
+		case "greatest", "least":
+			return joinFoldKinds(v.Args, b)
+		}
+	case *Case:
+		arms := make([]Expr, 0, len(v.Whens)+1)
+		for _, w := range v.Whens {
+			arms = append(arms, w.Result)
+		}
+		if v.Else != nil {
+			arms = append(arms, v.Else)
+		}
+		return joinFoldKinds(arms, b)
+	case *Coalesce:
+		return joinFoldKinds(v.Args, b)
+	}
+	return classifyOperand(e, b)
+}
+
+// joinFoldKinds is joinOperandKinds with the pure ladder — no DECIMAL
+// precedence — which is the TYPE PostgreSQL resolves for the call.
+func joinFoldKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
+	kind, have, settled := boxUnknown, false, true
+	for _, a := range args {
+		if a == nil {
+			continue
+		}
+		if lit, ok := a.(*Lit); ok && lit.Val == nil {
+			continue
+		}
+		k, s := classifyOperandFold(a, b)
+		settled = settled && s
+		if k == boxQuoted {
+			continue
+		}
+		k = foldKind(a, k)
+		if !have {
+			kind, have = k, true
+			continue
+		}
+		w, ok := numericFoldOf(kind, k)
+		if !ok {
+			return boxUnknown, settled
+		}
+		kind = w
+	}
+	if !have {
+		return boxUnknown, true
+	}
+	return kind, settled
 }
 
 // classifyOperand reports an operand's declared kind and whether that answer
@@ -452,14 +513,13 @@ func foldKind(e Expr, k boxKind) boxKind {
 // joinOperandKinds is classifyOperand over a set of alternatives that one
 // value is chosen from.
 //
-// The join folds the alternatives through PostgreSQL's own numeric ladder,
-// DECIMAL included: `COALESCE(numeric, bigint)` is numeric there and
-// `COALESCE(real, numeric)` is REAL, so DECIMAL no longer simply wins. It used
-// to, on the argument that a string box from such an expression is always
-// decimal text — true, but it made the literal beside it coerce as numeric
-// where PostgreSQL coerces as real. A decimal-text box reaching a float rung
-// now finds no reading and falls through to compare(), which is the same
-// no-rule answer an unclassifiable operand already gets. A QUOTED literal
+// The join folds the alternatives through PostgreSQL's own numeric ladder for
+// every pair EXCEPT one: a DECIMAL arm keeps the kind decimal, because the
+// kind's claim is about the BOX ("a string from here is decimal text") and
+// that stays true however wide the fold's TYPE is. The TYPE question — which
+// PostgreSQL answers float8 for `numeric ∪ float8` — is
+// extremumArms.commonKind's, and it is what the LITERAL is coerced to; the two
+// are deliberately separate answers to separate questions. A QUOTED literal
 // alternative contributes
 // nothing and takes the others' type, the way PostgreSQL resolves an
 // unknown-typed literal from its context — `COALESCE(d, 'text')` is a numeric
@@ -492,6 +552,24 @@ func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 		}
 		switch {
 		case k == kind:
+		case k == boxDecimal || kind == boxDecimal:
+			// A DECIMAL arm keeps the composite's KIND decimal even when the
+			// fold's TYPE is wider. The two are different questions and
+			// collapsing them was #646 round-3's blocker: PostgreSQL's
+			// `numeric ∪ float8` is float8, so the literal beside such a
+			// composite is coerced at the FLOAT rung (extremumArms.commonKind
+			// answers that, through the ladder) — but the VALUE this operand
+			// produces is still the DECIMAL's rendered TEXT on every row the
+			// decimal arm wins, and a kind that says "float" leaves that text
+			// with no reading at all. `COALESCE(dec, float) > '9'` then fell
+			// to compare()'s BYTE order and answered 134 of 2491 rows, and the
+			// UNQUOTED `> 9` spelling — which never reaches a literal rule at
+			// all — answered the same way.
+			//
+			// The kind's only claim is "a string from here is decimal text",
+			// and that claim is TRUE for this fold. Keeping it is what puts
+			// the pair on a numeric arm at all.
+			kind = boxDecimal
 		case isNumericFoldKind(k) && isNumericFoldKind(kind):
 			// Two numbers that are not the SAME number: an int column beside a
 			// float one, or either beside a numeric literal. PostgreSQL resolves
@@ -530,6 +608,15 @@ type boxOperand struct {
 	expr Expr
 	// kind holds int32(k)+1 once settled; 0 means "not settled yet".
 	kind atomic.Int32
+	// fold holds the operand's TYPE answer the same way, which differs from
+	// kind for exactly one shape: a composite mixing a DECIMAL arm with a
+	// FLOAT one. Its KIND stays decimal, because a string from it is decimal
+	// text; its TYPE is PostgreSQL's fold, float8 — and the type is what a
+	// QUOTED literal beside it is coerced to. Reading the kind for both made
+	// `GREATEST(numeric, float8) = 'abc'` say "type numeric" where PostgreSQL
+	// says "double precision", and would have REFUSED `= '0x1p3'`, which the
+	// float input function reads as 8 and the numeric one does not.
+	fold atomic.Int32
 }
 
 func (o *boxOperand) resolve(b *batch.RecordBatch) boxKind {
@@ -539,6 +626,18 @@ func (o *boxOperand) resolve(b *batch.RecordBatch) boxKind {
 	k, settled := classifyOperand(o.expr, b)
 	if settled {
 		o.kind.Store(int32(k) + 1)
+	}
+	return k
+}
+
+// resolveFold is resolve for the operand's TYPE answer. See boxOperand.fold.
+func (o *boxOperand) resolveFold(b *batch.RecordBatch) boxKind {
+	if v := o.fold.Load(); v != 0 {
+		return boxKind(v - 1)
+	}
+	k, settled := classifyOperandFold(o.expr, b)
+	if settled {
+		o.fold.Store(int32(k) + 1)
 	}
 	return k
 }
@@ -737,7 +836,8 @@ func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (c int, ok, unknown 
 		}
 		return 0, false, false
 	}
-	return orderByKinds(lk, rk, lv, rv, p.lText, p.rText)
+	return orderByKindsFold(lk, rk, p.left.resolveFold(b), p.right.resolveFold(b),
+		lv, rv, p.lText, p.rText)
 }
 
 // orderByKinds is order's rule table, with the kinds already resolved. It is
@@ -746,6 +846,17 @@ func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (c int, ok, unknown 
 // ARGUMENT and assemble the pair per comparison, instead of holding a
 // boxedPair for every ordered pair of arguments.
 func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, unknown bool) {
+	return orderByKindsFold(lk, rk, lk, rk, lv, rv, lText, rText)
+}
+
+// orderByKindsFold is orderByKinds with the operands' TYPE answers alongside
+// their kinds. They differ only for a composite mixing a DECIMAL arm with a
+// wider one: the KIND says "a string from here is decimal text" and picks the
+// arm, the FOLD says float8 and is what the QUOTED literal is coerced to —
+// PostgreSQL's own answer for `numeric ∪ float8`. Passing the kind for both is
+// what named "type numeric" in a message PostgreSQL writes "double precision",
+// and would have refused a literal only the float grammar reads.
+func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText string) (c int, ok, unknown bool) {
 	ls, lIsStr := lv.(string)
 	rs, rIsStr := rv.(string)
 	switch {
@@ -798,13 +909,13 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, u
 	// int_col < 'NaN'` returned every row, and `f < '3.1'` over a real column
 	// compared at double width.
 	case isNumericFoldKind(lk) && rk == boxQuoted:
-		if typ, ok := numberKindType(lk); ok {
+		if typ, ok := numberKindType(literalCoercionKind(lk, lFold)); ok {
 			if c, ok := quotedNumberOrder(typ, lv, rText); ok {
 				return c, true, false
 			}
 		}
 	case isNumericFoldKind(rk) && lk == boxQuoted:
-		if typ, ok := numberKindType(rk); ok {
+		if typ, ok := numberKindType(literalCoercionKind(rk, rFold)); ok {
 			if c, ok := quotedNumberOrder(typ, rv, lText); ok {
 				return -c, true, false
 			}
@@ -823,7 +934,66 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, u
 			return -boolOrder(rb, boolFromText(lText)), true, false
 		}
 	}
+	// Nothing above could read this pair. If both KINDS say numeric, the boxes
+	// are still orderable — a composite mixing a DECIMAL column with a FLOAT or
+	// an INTEGER one folds to the wider rung and then hands that rung a
+	// DECIMAL's rendered TEXT on the rows where the decimal arm won — and
+	// ordering them by BYTES instead is the defect this whole layer exists to
+	// remove (#504, #506).
+	if c, ok := numericBoxRepair(lk, rk, lv, rv); ok {
+		return c, true, false
+	}
+	// And if even that could not read a DECIMAL operand, say so loudly rather
+	// than let compare() answer with byte order. Falling through is legitimate
+	// for the pairs that have a TEXT rule — a genuine STRING column, or an
+	// operand with no declaration at all — so those are excluded by name.
+	raiseIfUnreadDecimal(lk, rk, lv, rv)
 	return 0, false, false
+}
+
+// raiseIfUnreadDecimal is orderByKinds' backstop: it fires only when a
+// boxDecimal operand meets another NUMERIC kind (or a quoted literal) and no
+// arm above produced a reading.
+//
+// It should never fire. It exists because the alternative when it would have
+// is a silent wrong ORDER over data — the failure mode that shipped three
+// times in this file's history — and because the condition is cheap and only
+// reachable on a path that is already returning "no rule".
+func raiseIfUnreadDecimal(lk, rk boxKind, lv, rv any) {
+	var other boxKind
+	var dec any
+	switch {
+	case lk == boxDecimal:
+		other, dec = rk, lv
+	case rk == boxDecimal:
+		other, dec = lk, rv
+	default:
+		return
+	}
+	if !isNumericFoldKind(other) && other != boxQuoted {
+		return
+	}
+	// A DECIMAL column can hold text that is not a number at all: the column
+	// is unvalidated (internal/storage/ingest), and ADR-0012 item 10 gives
+	// that shape UNKNOWN rather than an error one type over. Only a value the
+	// DECIMAL grammar accepts should have had a reading.
+	if s, ok := dec.(string); ok && !kernel.NewDecimalLiteral(s).Numeric() {
+		return
+	}
+	panic(fatalEval{fmt.Errorf(
+		"internal: a DECIMAL operand reached the generic comparison with no numeric reading "+
+			"(kinds %d/%d, values %T/%T) — ordering it by bytes would be a wrong answer", lk, rk, lv, rv)})
+}
+
+// literalCoercionKind is the kind a QUOTED literal beside this operand is
+// coerced to: the operand's TYPE fold where it has a wider one, and its own
+// kind otherwise. A fold that resolved nothing falls back to the kind, which
+// is the conservative answer — the same one this had before the fold existed.
+func literalCoercionKind(kind, fold boxKind) boxKind {
+	if isNumericFoldKind(fold) {
+		return fold
+	}
+	return kind
 }
 
 // boolOrder orders two booleans in PostgreSQL's boolean order, FALSE < TRUE,

@@ -1569,8 +1569,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     answers a different predicate than PostgreSQL's — so the six shapes are
     pinned LOUDLY in
     `coordinator.TestExtremumWinnerIsMaterializedAtTheCallsType`, with
-    PostgreSQL's answer recorded beside each. Deleting those pins is the
-    declaration fix's proof.
+    PostgreSQL's answer recorded beside each, and filed as #724. Deleting
+    those pins is the declaration fix's proof.
 
     **The boxed layer resolves the column's WIDTH from its DECLARATION.**
     `expr.ColRef.Eval` widens on the way out — a FLOAT32 column boxes as

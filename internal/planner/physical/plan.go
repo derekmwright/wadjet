@@ -9551,6 +9551,14 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		case plansql.LitBool:
 			return expr.Decl(parquet.TypeBool), expr.Decided
 		case plansql.LitString:
+			// TODO(#724): PostgreSQL types a quoted literal `unknown` and
+			// resolves the expression from the other operands. Calling it a
+			// DECIDED string puts a non-numeric decider in every polymorphic
+			// call that holds one, so expr.CommonDeclType cannot fold and
+			// falls back to decided[0] — and the output vector then WRAPS the
+			// value the call actually produces (int64's minimum for a folded
+			// 1e39). The pins are in
+			// coordinator.TestExtremumWinnerIsMaterializedAtTheCallsType.
 			return expr.Decl(parquet.TypeString), expr.Decided
 		}
 		// LitNull is SQL's `unknown`: it names no type AND produces no
