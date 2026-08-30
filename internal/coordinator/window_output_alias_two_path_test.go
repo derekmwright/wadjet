@@ -190,6 +190,71 @@ func TestWindowOutputAliasTwoPath(t *testing.T) {
 	}
 }
 
+// TestWindowOutputAliasShuffledTwoPath is the same question asked of the DAG's
+// OTHER join lowering.
+//
+// `BroadcastBytesOverride = 1` puts every build side through an
+// exchange-repartition instead of replicating it, so the window's input arrives
+// as a shuffled stream rather than as one task's scan — a different fragment,
+// a different schema to resolve `__win_N` against, and the arm ADR-0018 §3
+// means by "two engines". The value matrix answered identically under both
+// thresholds when this was measured; this keeps that a property rather than a
+// measurement.
+func TestWindowOutputAliasShuffledTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	coord.config.BroadcastBytesOverride = 1
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		col  string
+		want []string
+	}{
+		{
+			// The window's alias spells a base column, over a JOIN whose
+			// build side now shuffles.
+			name: "the colliding alias over a shuffled join",
+			sql: "SELECT x.id, SUM(x.a) OVER () AS s FROM " + dbpTable + " x JOIN " + dbpTable +
+				" y ON x.id = y.id ORDER BY x.id",
+			col: "s", want: rep("52.99", 9),
+		},
+		{
+			// An aggregate over a derived column, over the same join: #702's
+			// shape on the shuffle lowering.
+			name: "an aggregate over a derived column, over a shuffled join",
+			sql: "SELECT SUM(CASE WHEN x.s = '1.50' THEN twice ELSE 0 END) AS v FROM " +
+				"(SELECT id, s, id * 2 AS twice FROM " + dbpTable + ") x JOIN " + dbpTable +
+				" y ON x.id = y.id",
+			col: "v", want: []string{"2"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := tmdRunDAG(ctx, coord, tc.sql)
+			if err != nil {
+				t.Fatalf("shuffled DAG refused %q: %v", tc.sql, err)
+			}
+			if len(res.Rows) != len(tc.want) {
+				t.Fatalf("shuffled DAG returned %d rows, want %d\n  SQL: %s",
+					len(res.Rows), len(tc.want), tc.sql)
+			}
+			for i, r := range res.Rows {
+				if got := fmt.Sprintf("%v", r[tc.col]); got != tc.want[i] {
+					t.Errorf("shuffled DAG row %d: %s = %q, want %q — PostgreSQL 17 answers "+
+						"%q\n  SQL: %s", i, tc.col, got, tc.want[i], tc.want[i], tc.sql)
+				}
+			}
+		})
+	}
+}
+
 func rep(v string, n int) []string {
 	out := make([]string, n)
 	for i := range out {
