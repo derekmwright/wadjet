@@ -394,25 +394,21 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 		name string
 		sql  string
 		want string
-		// wantDAG pins a DAG answer that differs from the single-process one
-		// for a reason OUTSIDE this fold. Empty means the two must agree,
-		// which is every entry but the last.
-		wantDAG string
 	}{
 		// Q14's numerator, exactly: SUM over a CASE whose ELSE is the
 		// integer 0. SUM(DECIMAL(28,6)) is DECIMAL(38,6).
 		{"sum over the Q14 shape",
 			"SELECT SUM(CASE WHEN id < 5 THEN a * b ELSE 0 END) AS v FROM " + dbpTable,
-			"487.687600", ""},
+			"487.687600"},
 		// Q08's shape: the branch is a bare DECIMAL column and the ELSE an
 		// integer literal, so the whole answer used to be declared FLOAT64
 		// and was right only while no row took the decimal branch.
 		{"sum over the Q08 shape",
 			"SELECT SUM(CASE WHEN id < 5 THEN a ELSE 0 END) AS v FROM " + dbpTable,
-			"38.24", ""},
+			"38.24"},
 		{"sum over a coalesced column",
 			"SELECT SUM(COALESCE(a, 0)) AS v FROM " + dbpTable,
-			"52.99", ""},
+			"52.99"},
 		// The choice ABOVE the aggregate rather than below it, which is a
 		// different site on the DAG: the gather re-evaluates a WRAPPED
 		// aggregate's expression against the merged batch
@@ -421,11 +417,11 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 		// #695 the pair `__agg_0` ⊕ `0` was not a DECIMAL result there, so
 		// the column was built float64.
 		{"coalesce over a sum",
-			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable, "52.99", ""},
+			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable, "52.99"},
 		{"greatest over a sum",
-			"SELECT GREATEST(SUM(a), 0) AS v FROM " + dbpTable, "52.99", ""},
+			"SELECT GREATEST(SUM(a), 0) AS v FROM " + dbpTable, "52.99"},
 		{"coalesce over a wrapped sum",
-			"SELECT COALESCE(SUM(a) * 2, 0) AS v FROM " + dbpTable, "105.98", ""},
+			"SELECT COALESCE(SUM(a) * 2, 0) AS v FROM " + dbpTable, "105.98"},
 		// The review's P1: the gather re-evaluates a WRAPPED aggregate's
 		// expression and decides whether to build a DECIMAL column from
 		// expr.DecimalResultOf — the same arm classification. A CAST to an
@@ -434,42 +430,35 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 		// text box was NULLED: the DAG answered NULL where PostgreSQL and the
 		// single-process path answer 52.99.
 		{"greatest over a sum and a CAST",
-			"SELECT GREATEST(SUM(a), CAST(0 AS BIGINT)) AS v FROM " + dbpTable, "52.99", ""},
+			"SELECT GREATEST(SUM(a), CAST(0 AS BIGINT)) AS v FROM " + dbpTable, "52.99"},
 		{"coalesce over a sum and a nested choice",
 			"SELECT COALESCE(SUM(a), CASE WHEN 1=1 THEN 0 ELSE 1 END) AS v FROM " + dbpTable,
-			"52.99", ""},
+			"52.99"},
 		// The EMPTY aggregate, where the LITERAL branch is the answer on
 		// every row: SUM over no rows is NULL, so the integer arm is what
 		// the value comes from. PostgreSQL answers 0.
 		//
-		// The DAG prints "0" where the single-process path prints "0.00", and
-		// the cause is NOT a per-value rendering difference — an earlier
-		// draft of this comment said so and was wrong. It is #685: the DAG's
-		// EMPTY PARTIAL aggregate emits its DECIMAL column at scale 0, so
-		// every consumer above it reads the wrong scale. The same defect
-		// makes `SUM(d92) WHERE id = 1` over two files answer 1275.00 on the
-		// DAG, which has nothing to do with a choice construct. It is fixed
-		// on fix/685-on-main (c96c6436), which lands before this branch.
-		// TODO(#685): when that merge arrives the DAG carries the declared
-		// scale, this entry fails, and the fix is to delete wantDAG so both
-		// paths assert "0.00".
+		// This entry carried a wantDAG pin while the DAG printed "0" and the
+		// single-process path printed "0.00". The cause was never this fold:
+		// it was #685's EMPTY PARTIAL aggregate emitting its DECIMAL column at
+		// scale 0, so every consumer above it read the wrong scale — the same
+		// defect that made `SUM(d92) WHERE id = 1` over two files answer
+		// 1275.00. #685 is beneath this branch now (7d9d7d79, c77a8a16) and
+		// the pin is gone: both paths assert one value, which is what deleting
+		// it proves.
 		{"coalesce over an empty sum",
-			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable + " WHERE id < 0", "0.00", "0"},
+			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable + " WHERE id < 0", "0.00"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range []struct {
 				name string
 				dag  bool
 			}{{"single", false}, {"dag", true}} {
-				want := tc.want
-				if arm.dag && tc.wantDAG != "" {
-					want = tc.wantDAG
-				}
 				rows := dtpRun(t, ctx, single, coord, tc.sql, arm.dag)
 				if len(rows) != 1 {
 					t.Fatalf("%s: %d rows, want 1", arm.name, len(rows))
 				}
-				dtpCell(t, arm.name+" "+tc.sql, rows[0]["v"], want)
+				dtpCell(t, arm.name+" "+tc.sql, rows[0]["v"], tc.want)
 			}
 		})
 	}
