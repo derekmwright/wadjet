@@ -107,15 +107,26 @@ func assertAggregateInputsResolve(stages []Stage) error {
 			continue
 		}
 		for _, a := range specs {
-			if a.InputExpr == "" {
-				continue
+			// InputExpr for an argument that is an EXPRESSION, InputCol for one
+			// that is a bare COLUMN — a bare reference travels as the NAME and
+			// leaves InputExpr empty, so checking only the expression left the
+			// commoner half unguarded: `SUM(v)` over
+			// `(SELECT DISTINCT a * 2 AS v FROM t)` answered NULL on both DAG
+			// arms, silently, where PostgreSQL answers 29.48. Same question,
+			// both spellings.
+			read := a.InputExpr
+			if read == "" {
+				read = a.InputCol
 			}
-			if missing := unresolvableColumnRefs(a.InputExpr, emitted); len(missing) > 0 {
+			if read == "" || read == "*" {
+				continue // COUNT(*) reads no column
+			}
+			if missing := unresolvableColumnRefs(read, emitted); len(missing) > 0 {
 				return fmt.Errorf("%w: stage %s (%s) aggregates %s(%s) and its input "+
 					"carries no %v — the pre-projection would write NULL into every row and "+
 					"the aggregate would answer a WRONG NUMBER rather than fail (#702); "+
 					"input: %v", ErrUnreachableGatherOutput, s.ID, s.Type, a.Func,
-					a.InputExpr, missing, sortedEmittedNames(emitted))
+					read, missing, sortedEmittedNames(emitted))
 			}
 		}
 	}

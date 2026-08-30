@@ -5452,16 +5452,45 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			exprCols := aggChild
 			if resolved, expr, exprInput, renamed := resolveAggInputName(agg.InputCol, aggChild); renamed {
 				if expr != nil {
-					// The alias named an EXPRESSION, not a column. There is
-					// nothing to read; hand the worker the expression and let
-					// it project the value under the alias before
-					// aggregating — the same route a derived aggregate
-					// argument (`SUM(a * (1 - b))`) already takes, and it
-					// names its projected column InputCol, so the alias has
-					// to stay. Its column references are written against the
-					// Project's INPUT, which is where the type has to be
-					// resolved.
-					inputExpr, exprCols = expr, exprInput
+					// The alias named an EXPRESSION, not a column.
+					//
+					// Where nothing between here and the scan MATERIALIZES it,
+					// there is nothing to read: hand the worker the expression
+					// and let it project the value under the alias before
+					// aggregating — the same route a derived aggregate argument
+					// (`SUM(a * (1 - b))`) already takes, and it names its
+					// projected column InputCol, so the alias has to stay. Its
+					// column references are written against the Project's
+					// INPUT, which is where the type has to be resolved.
+					//
+					// Where a producer DOES materialize it, computing it again
+					// is the defect: `SUM(v)` over
+					// `(SELECT DISTINCT a * 2 AS v FROM t)` shipped
+					// InputCol="v" with InputExpr="a * 2", and the worker
+					// recomputed `a * 2` over a distinct stage's output — which
+					// emits the group key under that TEXT and carries no `a` at
+					// all. Every row read NULL and the SUM came back NULL,
+					// silently, where PostgreSQL answers 29.48. The producer's
+					// emitted name IS the expression's text, so the argument is
+					// a bare NAME there, exactly as aggStageGroupKey spells a
+					// computed GROUP BY key.
+					switch {
+					case aggInputRespellable(aggChild):
+						inputExpr, exprCols = expr, exprInput
+					case aggInputAliasIsAggregateOutput(aggChild):
+						// An AGGREGATE below (which is what DISTINCT lowers
+						// to) emits a computed key under the TEXT of its
+						// expression, so the argument is a bare NAME spelled
+						// that way — the same convention aggStageGroupKey
+						// applies to a computed GROUP BY key.
+						agg.InputCol = expr.String()
+						inputExpr = &plansql.ColRef{Column: expr.String()}
+					default:
+						// A JOIN, a sort, a LIMIT, a window: the alias-naming
+						// OpProject on the producing fragment materializes it
+						// under the ALIAS, so the alias is what to read.
+						inputExpr = &plansql.ColRef{Column: agg.InputCol}
+					}
 				} else {
 					agg.InputCol = resolved
 					if _, bare := inputExpr.(*plansql.ColRef); bare || inputExpr == nil {

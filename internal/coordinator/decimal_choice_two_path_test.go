@@ -689,6 +689,47 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 				"(SELECT s, COUNT(*) AS n FROM " + dbpTable + " GROUP BY s) x",
 			want: "9",
 		},
+		{
+			// A BARE column argument over a DISTINCT. It travels as InputCol
+			// with InputExpr empty, which is the half the backstop did not
+			// check and the half resolveAggInputName mis-spelled: it shipped
+			// InputCol="v" WITH InputExpr="a * 2", so the worker recomputed
+			// `a * 2` over a distinct stage that emits the key under that TEXT
+			// and carries no `a`. Every row read NULL and the SUM came back
+			// NULL, silently, on both DAG arms.
+			name: "a bare column argument over a DISTINCT",
+			sql: "SELECT SUM(v) AS v FROM (SELECT DISTINCT a * 2 AS v FROM " +
+				dbpTable + ") x",
+			want: "29.48",
+		},
+		{
+			name: "a bare column argument over a DISTINCT, MAX",
+			sql: "SELECT MAX(v) AS v FROM (SELECT DISTINCT a * 2 AS v FROM " +
+				dbpTable + ") x",
+			want: "25.50",
+		},
+		{
+			// The same bare argument over the other producer kinds, which
+			// materialize the alias under the ALIAS rather than under the
+			// expression's text — the third answer to "what does the producer
+			// call it".
+			name: "a bare column argument over a sort and a limit",
+			sql: "SELECT SUM(v) AS v FROM (SELECT id, a AS v FROM " + dbpTable +
+				" ORDER BY id LIMIT 8) x",
+			want: "52.99",
+		},
+		{
+			name: "a bare column argument over a window",
+			sql: "SELECT SUM(w) AS v FROM (SELECT id, SUM(a) OVER () AS w FROM " +
+				dbpTable + ") x",
+			want: "476.91",
+		},
+		{
+			name: "a bare column argument over a union",
+			sql: "SELECT SUM(v) AS v FROM (SELECT a AS v FROM " + dbpTable +
+				" UNION ALL SELECT a FROM " + dbpTable + ") x",
+			want: "105.98",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := dtpRun(t, ctx, single, coord, tc.sql, false)

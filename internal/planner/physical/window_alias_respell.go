@@ -211,3 +211,33 @@ func aggInputRespellable(n *logical.Node) bool {
 	}
 	return false
 }
+
+// aggInputAliasIsAggregateOutput reports whether the derived alias between the
+// aggregate and its producer is materialized by an AGGREGATE — which is what a
+// DISTINCT lowers to, and which emits a computed key under the TEXT of its
+// expression rather than under the alias.
+//
+// It is the third answer to "is this name materialized here", and the three
+// differ in WHAT the producer calls it: nothing materializes it (respell to
+// the expression), a join or an ordering materializes it under the ALIAS, an
+// aggregate materializes it under the expression's TEXT. Reading the wrong one
+// of the three is a NULL column: `SUM(v)` over
+// `(SELECT DISTINCT a * 2 AS v FROM t)` recomputed `a * 2` over a stage whose
+// output has no `a`, and `SUM(x.twice * 1)` under a join read `id * 2` from a
+// stream that emits `twice`.
+func aggInputAliasIsAggregateOutput(n *logical.Node) bool {
+	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
+		switch n.Type {
+		case logical.NodeAggregate:
+			return true
+		case logical.NodeProject, logical.NodeFilter:
+			if len(n.Children) != 1 {
+				return false
+			}
+			n = n.Children[0]
+		default:
+			return false
+		}
+	}
+	return false
+}
