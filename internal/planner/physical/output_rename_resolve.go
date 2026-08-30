@@ -57,10 +57,16 @@ func aggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) 
 	if agg == nil {
 		return "", false
 	}
+	// By identity: the SELECT item and the GROUP BY term are two spellings
+	// of one expression and the rendering does not have to match, which is
+	// what made `SELECT (g + 1) AS gk … GROUP BY g + 1` miss here (#723).
 	want := strings.ToLower(strings.TrimSpace(proj.Expr))
-	for _, k := range agg.GroupBy {
-		if strings.ToLower(strings.TrimSpace(k)) == want {
-			return strings.ToLower(k), true
+	if proj.ASTExpr != nil {
+		want = plansql.ExprIdentity(proj.ASTExpr)
+	}
+	for _, k := range groupKeyOutputs(agg) {
+		if k.Identity == want {
+			return strings.ToLower(k.Name), true
 		}
 	}
 	return "", false
