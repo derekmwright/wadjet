@@ -201,3 +201,106 @@ func isInfixNode(n Node) bool {
 	}
 	return false
 }
+
+// ReplaceGroupKeyRefs rewrites every subexpression that IS one of an
+// aggregate's GROUP BY keys into a reference to the column the aggregate
+// publishes that key under. keys maps ExprIdentity to published name.
+//
+// This is what makes a HAVING over a computed group key mean anything. Above
+// the aggregate the input columns are gone and only the key's own output
+// column carries the value, so `HAVING g + 1 > 2` written as arithmetic over
+// `g` evaluated to UNKNOWN on every row — and a filter admits only TRUE, so
+// the query returned no rows at all where PostgreSQL returns five (#720).
+//
+// The walk is TOP-DOWN and stops at the first whole-term match, so the
+// LARGEST expression that is a key is the one replaced: over
+// `GROUP BY g + 1`, the predicate `g + 1 > 2` becomes `"g + 1" > 2` rather
+// than descending to a `g` the aggregate does not emit.
+//
+// It never enters an aggregate call. Inside one, `SUM(g + 1)`, the expression
+// is evaluated over the aggregate's INPUT rows, where `g` is exactly the
+// column that does exist; replacing it with the grouped output would compute
+// something else entirely.
+func ReplaceGroupKeyRefs(node Node, keys map[string]string) Node {
+	if node == nil || len(keys) == 0 {
+		return node
+	}
+	// A bare column reference is never re-pointed: a plain group key is
+	// already published under its own name, and a ROW field path resolves
+	// through the same dotted spelling on both engines.
+	if _, isRef := node.(*ColRef); !isRef {
+		if name, ok := keys[ExprIdentity(node)]; ok {
+			return &ColRef{Column: name}
+		}
+	}
+	switch n := node.(type) {
+	case *ParenNode:
+		return &ParenNode{Inner: ReplaceGroupKeyRefs(n.Inner, keys)}
+	case *BinaryOp:
+		return &BinaryOp{Left: ReplaceGroupKeyRefs(n.Left, keys), Op: n.Op,
+			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+	case *UnaryOp:
+		return &UnaryOp{Op: n.Op, Inner: ReplaceGroupKeyRefs(n.Inner, keys)}
+	case *CmpExpr:
+		return &CmpExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Op: n.Op,
+			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+	case *AndNode:
+		return &AndNode{Left: ReplaceGroupKeyRefs(n.Left, keys),
+			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+	case *OrNode:
+		return &OrNode{Left: ReplaceGroupKeyRefs(n.Left, keys),
+			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+	case *NotNode:
+		return &NotNode{Inner: ReplaceGroupKeyRefs(n.Inner, keys)}
+	case *IsExpr:
+		return &IsExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not, Check: n.Check}
+	case *LikeExpr:
+		return &LikeExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not,
+			Pattern: ReplaceGroupKeyRefs(n.Pattern, keys)}
+	case *BetweenExpr:
+		return &BetweenExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not,
+			Low: ReplaceGroupKeyRefs(n.Low, keys), High: ReplaceGroupKeyRefs(n.High, keys)}
+	case *InExpr:
+		out := &InExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not,
+			Values: make([]Node, len(n.Values))}
+		for i, v := range n.Values {
+			out.Values[i] = ReplaceGroupKeyRefs(v, keys)
+		}
+		return out
+	case *CastNode:
+		return &CastNode{Inner: ReplaceGroupKeyRefs(n.Inner, keys), TypeName: n.TypeName}
+	case *FuncCallNode:
+		if IsAggregate(n.Name) {
+			return node
+		}
+		out := &FuncCallNode{Name: n.Name, Distinct: n.Distinct, Star: n.Star,
+			Args: make([]Node, len(n.Args))}
+		for i, a := range n.Args {
+			out.Args[i] = ReplaceGroupKeyRefs(a, keys)
+		}
+		return out
+	case *CaseNode:
+		out := &CaseNode{Subject: ReplaceGroupKeyRefs(n.Subject, keys),
+			Else: ReplaceGroupKeyRefs(n.Else, keys), Whens: make([]WhenClause, len(n.Whens))}
+		for i, w := range n.Whens {
+			out.Whens[i] = WhenClause{Cond: ReplaceGroupKeyRefs(w.Cond, keys),
+				Result: ReplaceGroupKeyRefs(w.Result, keys)}
+		}
+		return out
+	case *ArrayLitNode:
+		out := &ArrayLitNode{Elements: make([]Node, len(n.Elements))}
+		for i, e := range n.Elements {
+			out.Elements[i] = ReplaceGroupKeyRefs(e, keys)
+		}
+		return out
+	case *TupleNode:
+		out := &TupleNode{Elements: make([]Node, len(n.Elements))}
+		for i, e := range n.Elements {
+			out.Elements[i] = ReplaceGroupKeyRefs(e, keys)
+		}
+		return out
+	}
+	// Anything else — a subquery, an EXISTS, a window call — has its own
+	// scope and is left exactly as it stands.
+	return node
+}

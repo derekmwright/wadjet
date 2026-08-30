@@ -367,6 +367,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 		}
 
+		var groupKeyRefs map[string]string
 		if len(info.GroupingSets) > 0 {
 			// GROUPING SETS / CUBE / ROLLUP: build multiple aggregate passes
 			// connected by UNION ALL.
@@ -385,6 +386,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			aggNode := NewAggregate(plan, groupBy, aggs)
 			aggNode.GroupByExprs = info.GroupByExprs
 			plan = aggNode
+			groupKeyRefs = computedGroupKeyRefs(aggNode)
 		}
 
 		// HAVING clause (must come after Aggregate)
@@ -395,6 +397,14 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			} else {
 				rewritten = rewriteHavingExpr(info.HavingExpr, info.Columns)
 			}
+			// Spell the predicate against what the aggregate PUBLISHES.
+			// Below the aggregate `g + 1` is arithmetic over `g`; above it,
+			// it is the NAME of the one column carrying that value, and `g`
+			// is gone. A predicate left as arithmetic evaluated UNKNOWN on
+			// every row, and a filter admits only TRUE, so the query
+			// answered with no rows at all where PostgreSQL answers five —
+			// on BOTH execution paths, silently (#720).
+			rewritten = plansql.ReplaceGroupKeyRefs(rewritten, groupKeyRefs)
 			preds := []Predicate{{Raw: rewritten.String(), ASTExpr: rewritten}}
 			plan = NewFilter(plan, preds)
 		}
@@ -1598,4 +1608,42 @@ func condQualifiers(join plansql.JoinInfo) map[string]bool {
 		}
 	}
 	return out
+}
+
+// computedGroupKeyRefs maps the identity of each COMPUTED group key to the
+// column name the aggregate publishes it under, for rewriting an expression
+// written above the aggregate into one it can evaluate.
+//
+// Bare column keys are left out on purpose. Their value is published under
+// the input column's own name, so a reference to one already resolves; a ROW
+// FIELD PATH is a *ColRef too and resolves through the same dotted spelling
+// on both engines. Rewriting those would only re-point a resolution that
+// works.
+func computedGroupKeyRefs(agg *Node) map[string]string {
+	if agg == nil || len(agg.GroupByExprs) != len(agg.GroupBy) {
+		return nil
+	}
+	var refs map[string]string
+	for i, e := range agg.GroupByExprs {
+		if e == nil {
+			continue
+		}
+		if _, isRef := e.(*plansql.ColRef); isRef {
+			continue
+		}
+		if _, isLit := e.(*plansql.Lit); isLit {
+			continue
+		}
+		id := plansql.ExprIdentity(e)
+		if id == "" {
+			continue
+		}
+		if refs == nil {
+			refs = make(map[string]string, len(agg.GroupByExprs))
+		}
+		if _, taken := refs[id]; !taken {
+			refs[id] = agg.GroupBy[i]
+		}
+	}
+	return refs
 }
