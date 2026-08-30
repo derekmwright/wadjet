@@ -111,6 +111,41 @@ func TestDuplicateOutputNamesOnBothCoordinatorPaths(t *testing.T) {
 			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
 			      FROM nation ORDER BY n_regionkey, n_name`},
 
+		// A WINDOW OUTPUT as one of the DUPLICATES, rather than beside them.
+		// The entry above duplicates two plain columns and puts a window next
+		// to them; here the window itself carries the shared name, so the
+		// positional read has to keep a window's value and a plain column's
+		// value apart under one name.
+		//
+		// Both spellings answer correctly with or without #694's fix — the
+		// collision is between two OUTPUT names, and #694 needs the alias to
+		// collide with an INPUT column, which the third entry below is. They
+		// are here as duplicate-name coverage the suite did not have, not as
+		// a gate on that fix.
+		{name: "a window output duplicating a plain column's name",
+			dup: `SELECT n_name AS u, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS u
+			      FROM nation ORDER BY n_nationkey`,
+			ref: `SELECT n_name AS u1, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS u2
+			      FROM nation ORDER BY n_nationkey`},
+		// The reverse order, so a resolver that happens to take the LAST
+		// column of the name cannot pass by accident.
+		{name: "a window output duplicating a plain column's name, reversed",
+			dup: `SELECT ROW_NUMBER() OVER (ORDER BY n_nationkey) AS u, n_name AS u
+			      FROM nation ORDER BY n_nationkey`,
+			ref: `SELECT ROW_NUMBER() OVER (ORDER BY n_nationkey) AS u1, n_name AS u2
+			      FROM nation ORDER BY n_nationkey`},
+		// The window's alias spelling a BASE column that is not selected at
+		// all: nothing is duplicated in the OUTPUT, and the collision is
+		// entirely inside the fragment. This is the one that fails without
+		// #694's fix — the projection resolved `n_name` by name and got
+		// nation.n_name, so a query asking for a row number came back with
+		// country names on both paths. Verified by reverting the fix.
+		{name: "a window output aliased as an unselected base column",
+			dup: `SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS n_name
+			      FROM nation ORDER BY n_nationkey`,
+			ref: `SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
+			      FROM nation ORDER BY n_nationkey`},
+
 		// --- pinned residuals, each tracked and each still diverging -------
 		{name: "union all over duplicates",
 			dup:       `SELECT n_name AS u, n_comment AS u FROM nation UNION ALL SELECT r_name, r_comment FROM region`,

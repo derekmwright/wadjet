@@ -3141,6 +3141,82 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "WindowSumDecimalExpressionOverAnAlias", exactNumeric: true, sql: `SELECT d_key,
 			SUM(v * 2) OVER () AS all_sum FROM (
 				SELECT d_key, d_4 AS v FROM dec_probe) s ORDER BY d_key`},
+
+		// --- the window's OUTPUT NAME (#694) ---------------------------------
+		//
+		// exec.Window APPENDS its result to the input batch and a bare window
+		// used to write under the user's ALIAS, so an alias spelling an input
+		// column's name gave the projection two columns of that name and it
+		// took the first — the INPUT column, silently, on both paths. The
+		// window now writes a `__win_N` slot of its own and the projection
+		// publishes that under the requested name.
+		//
+		// Every entry below is a query PostgreSQL answers with the WINDOW's
+		// value; wadjet used to answer the shadowed column's.
+		pgCase{name: "WindowAliasShadowsAnotherColumn", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER () AS d_grp FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowAliasShadowsItsOwnArgument", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER () AS d_2 FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowAliasShadowsThePartitionKey", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER (PARTITION BY d_grp) AS d_grp FROM dec_probe ORDER BY d_key`},
+		// The shadowed column BESIDE the window that shadows it: both have to
+		// survive, which a "let the window replace the input column" repair
+		// would have broken in the other direction.
+		pgCase{name: "WindowAliasShadowsAColumnSelectedBeside", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER () AS d_grp, d_grp AS orig FROM dec_probe ORDER BY d_key`},
+		// A ranking function takes no argument at all, so this is the output
+		// name and nothing else.
+		pgCase{name: "WindowRowNumberAliasShadowsAColumn", sql: `SELECT d_key,
+			ROW_NUMBER() OVER (ORDER BY d_key) AS d_grp FROM dec_probe ORDER BY d_key`},
+		// Consumed one level up, where the outer reference has to find the
+		// window's value and not the base column that reached the same name.
+		pgCase{name: "WindowAliasShadowsAColumnThroughADerivedTable", exactNumeric: true, sql: `SELECT d_key,
+			d_grp FROM (SELECT d_key, SUM(d_2) OVER () AS d_grp FROM dec_probe) s
+			ORDER BY d_key`},
+		// ORDER BY the shadowing alias: the sort used to key on the base
+		// column, so the ROWS came back in the wrong sequence as well.
+		pgCase{name: "WindowAliasShadowsAColumnOrderedByIt", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER () AS d_grp FROM dec_probe ORDER BY d_grp, d_key`},
+
+		// --- an aggregate's INPUT expression over a derived column (#702) ----
+		//
+		// TPC-H Q08's shape. The derived table's Project emits no stage on the
+		// DAG, so the aggregate's argument TEXT named a column the batch does
+		// not carry: `volume` read NULL on every row and the SUM came back as
+		// the total of its ELSE branch.
+		//
+		// This oracle reaches only the SINGLE-PROCESS engine, which runs that
+		// Project as a real operator and was already right, so these entries
+		// do NOT fail on the unfixed tree — verified by reverting the fix and
+		// re-running. They are here for what they DO give: PostgreSQL's own
+		// answer for every shape, which is the number
+		// coordinator.TestAggregateOverADerivedColumnTwoPath asserts on both
+		// paths, and a ratchet on the half of the pair that was right, since
+		// a repair aimed at the DAG could as easily have moved this one.
+		pgCase{name: "AggregateCaseOverAComputedDerivedColumn", exactNumeric: true, sql: `SELECT
+			SUM(CASE WHEN d_grp = 1 THEN volume ELSE 0 END) AS v FROM (
+				SELECT d_grp, d_2 * d_4 AS volume FROM dec_probe) s`},
+		pgCase{name: "AggregateCaseOverARenamedDerivedColumn", exactNumeric: true, sql: `SELECT
+			SUM(CASE WHEN d_grp = 1 THEN v ELSE 0 END) AS v FROM (
+				SELECT d_grp, d_4 AS v FROM dec_probe) s`},
+		// The SHADOWING arm, and the one that answered a plausible different
+		// number rather than a zero: the derived alias `d_2` names d_4, and
+		// the base table has a column called `d_2`.
+		pgCase{name: "AggregateCaseOverAShadowingDerivedAlias", exactNumeric: true, sql: `SELECT
+			SUM(CASE WHEN d_grp = 1 THEN d_2 ELSE 0 END) AS v FROM (
+				SELECT d_grp, d_4 AS d_2 FROM dec_probe) s`},
+		pgCase{name: "AggregateCastOverADerivedColumn", sql: `SELECT
+			SUM(CAST(v AS BIGINT)) AS v FROM (SELECT d_2 AS v FROM dec_probe) s`},
+		pgCase{name: "AggregateCoalesceOverADerivedColumn", exactNumeric: true, sql: `SELECT
+			SUM(COALESCE(v, 0)) AS v FROM (SELECT d_4 AS v FROM dec_probe) s`},
+		pgCase{name: "AggregateCaseOverADerivedColumnGrouped", exactNumeric: true, sql: `SELECT d_grp,
+			SUM(CASE WHEN d_grp = 1 THEN v ELSE 0 END) AS v FROM (
+				SELECT d_grp, d_4 AS v FROM dec_probe) s GROUP BY d_grp ORDER BY d_grp`},
+		// Two derived tables, so the walk has to resolve level by level.
+		pgCase{name: "AggregateCaseOverTwoDerivedTables", exactNumeric: true, sql: `SELECT
+			SUM(CASE WHEN d_grp = 1 THEN w ELSE 0 END) AS v FROM (
+				SELECT d_grp, v AS w FROM (
+					SELECT d_grp, d_4 AS v FROM dec_probe) s1) s2`},
 		// An EMPTY frame is NULL, not 0 — the distinction a running total
 		// that starts at zero cannot make on its own.
 		pgCase{name: "WindowSumDecimalEmptyFrame", exactNumeric: true, sql: `SELECT d_key,

@@ -835,6 +835,45 @@ func wireCorpus() []wireCase {
 			pins: map[string]string{wirePropFloatRender: avgDecimalDigitsPin}},
 		{name: "WindowAvgOverDecimalColumnZeroRows",
 			sql: `SELECT d_key, AVG(d_2) OVER (PARTITION BY d_grp) AS a FROM dec_probe WHERE d_key = -1`},
+		// The window's OUTPUT NAME spelled like an input column (#694). This
+		// is the arm only the WIRE can judge: the value oracle sees a number
+		// under the name it asked for and cannot say whether the DECLARATION
+		// came from the window or from the column the alias shadows.
+		//
+		// Live PostgreSQL 17 \gdesc declares all of these `numeric` with
+		// typmod -1: a window function is a function call, so no column's
+		// modifier survives into it (ADR-0024 item 5).
+		//
+		// `AS d_wide` shadows numeric(38,10) and `AS d_key` shadows a BIGINT,
+		// and both FAIL on the unfixed tree — the first on the modifier, the
+		// second on the OID and the binary width. `AS d_2` shadows
+		// numeric(9,2) and the zero-row form pass either way, because the
+		// shadowed reading and the window's own declaration happen to agree
+		// there; they are kept as the controls that say so.
+		{name: "WindowSumAliasShadowsAWideDecimalColumn",
+			sql: `SELECT d_key, SUM(d_2) OVER (PARTITION BY d_grp) AS d_wide FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "WindowSumAliasShadowsItsOwnArgument",
+			sql: `SELECT d_key, SUM(d_2) OVER (PARTITION BY d_grp) AS d_2 FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "WindowSumAliasShadowsABigintColumn",
+			sql: `SELECT d_grp, SUM(d_2) OVER (PARTITION BY d_grp) AS d_key FROM dec_probe
+				WHERE d_grp IN (0, 1) ORDER BY d_grp LIMIT 4`},
+		// The ZERO-ROW form of the shadowing alias, described from the PLAN
+		// with no batch to re-type from — the path #587 lived in, asked of the
+		// name collision.
+		{name: "WindowSumAliasShadowsAWideDecimalColumnZeroRows",
+			sql: `SELECT d_key, SUM(d_2) OVER (PARTITION BY d_grp) AS d_wide FROM dec_probe
+				WHERE d_key = -1`},
+		// ROW_NUMBER shadowing an INTEGER column, which is the sharpest of
+		// the set: live PostgreSQL declares `bigint` for row_number() and
+		// d_grp is `integer`, so a declaration taken from the shadowed column
+		// goes out under OID 23 with a 4-byte binary form where PostgreSQL
+		// sends OID 20 and eight bytes. Nothing about the printed digits
+		// differs.
+		{name: "WindowRowNumberAliasShadowsAnIntColumn",
+			sql: `SELECT d_key, ROW_NUMBER() OVER (ORDER BY d_key) AS d_grp FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		// The CONTROL for the two above: MIN/MAX over a window of a
 		// non-DECIMAL column, where no typmod is in play. It carries no pin,
 		// which is what proves the pinned entries are about the modifier and
