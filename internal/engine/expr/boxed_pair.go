@@ -109,6 +109,24 @@ const (
 	boxFloat64
 )
 
+// castNumericKind is the kind a CAST to a non-DECIMAL numeric type produces.
+// boxUnknown for every other destination, including the ones whose spelling
+// this layer does not recognise — a wrong kind is worse than no kind, which is
+// the whole premise of ADR-0012 item 8.
+func castNumericKind(c *Cast) boxKind {
+	switch strings.ToLower(strings.TrimSpace(c.DestType)) {
+	case "real", "float4":
+		return boxFloat32
+	case "double precision", "float8", "double", "float":
+		return boxFloat64
+	case "bigint", "int8":
+		return boxInt64
+	case "int", "integer", "int4", "smallint", "int2":
+		return boxInt32
+	}
+	return boxUnknown
+}
+
 // isNumberKind reports whether a kind is a non-DECIMAL number — the four
 // declared ones plus the undeclared boxNumber. Every rule that applied to
 // boxNumber applies to all five; only the QUOTED-literal rule below cares
@@ -418,6 +436,15 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		// rather than by the bytes of "12.75".
 		if castIsExactDecimal(v) {
 			return boxDecimal, true
+		}
+		// A cast to any other NUMERIC type is a typed operand too, and saying
+		// otherwise cost a fold: `COALESCE(numeric_col, CAST(k AS DOUBLE
+		// PRECISION))` could not resolve its second arm, so the composite fell
+		// back to the DECIMAL rung and read the literal with the numeric
+		// grammar — 22P02 for `= '0x1.9p3'`, which PostgreSQL's float input
+		// reads as 12.5.
+		if k := castNumericKind(v); k != boxUnknown {
+			return k, true
 		}
 		return boxUnknown, true
 	}
@@ -859,13 +886,53 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, u
 func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText string) (c int, ok, unknown bool) {
 	ls, lIsStr := lv.(string)
 	rs, rIsStr := rv.(string)
+	// The kind picks which BOX shapes can appear; the FOLD picks the rung the
+	// pair is compared at. lCo/rCo are the second answer, and every arm below
+	// that reads a number consults them rather than the kind.
+	lCo := literalCoercionKind(lk, lFold)
+	rCo := literalCoercionKind(rk, rFold)
 	switch {
-	case lk == boxDecimal && rk == boxDecimal:
+	// A QUOTED literal against ANY numeric-kinded operand comes FIRST, before
+	// the DECIMAL arms below.
+	//
+	// It used to come after them, and the ordering was the whole of #646's
+	// round-4 blocker. A composite mixing a DECIMAL column with a FLOAT one
+	// has kind boxDecimal and fold float8, so on every row the decimal arm won
+	// the pair took the DECIMAL arm and was read with the DECIMAL grammar at
+	// DECIMAL width — three wrong answers at once. `COALESCE(numeric, float8)
+	// = '0xC.C'` answered 0 where PostgreSQL answers 4, because the float
+	// input function reads that hex float as 12.75 and the numeric one refuses
+	// it. `= '12.750000000000000001'` answered 0 where PostgreSQL answers 4,
+	// because float8 rounds the literal onto the value and an exact decimal
+	// comparison does not. And `= 'abc'` refused only on the rows the FLOAT
+	// arm supplied, which is the row-dependent refusal ADR-0012 item 13 says
+	// is closed — the DECIMAL arm compared before the literal was parsed at
+	// all, so a row it could read never reached the refusal.
+	//
+	// quotedNumberOrder parses the literal first and reads a DECIMAL's
+	// rendered text at whatever rung it is handed, so routing every quoted
+	// pair through it settles the grammar, the width and the refusal together.
+	case isNumericFoldKind(lk) && rk == boxQuoted:
+		if typ, ok := numberKindType(lCo); ok {
+			if c, ok := quotedNumberOrder(typ, lv, rText); ok {
+				return c, true, false
+			}
+		}
+	case isNumericFoldKind(rk) && lk == boxQuoted:
+		if typ, ok := numberKindType(rCo); ok {
+			if c, ok := quotedNumberOrder(typ, rv, lText); ok {
+				return -c, true, false
+			}
+		}
+	// The DECIMAL arms own a pair only when the FOLD is itself DECIMAL. A
+	// decimal-kinded operand whose fold is wider is a number at that wider
+	// rung, and numericBoxRepair below reads its text there.
+	case lk == boxDecimal && rk == boxDecimal && lCo == boxDecimal && rCo == boxDecimal:
 		if lIsStr && rIsStr {
 			c, ok := batch.CompareDecimalTexts(ls, rs)
 			return c, ok, false
 		}
-	case lk == boxDecimal && lIsStr:
+	case lk == boxDecimal && lIsStr && lCo == boxDecimal:
 		if rText != "" {
 			c, ok := batch.CompareDecimalTexts(ls, rText)
 			return c, ok, false
@@ -873,7 +940,7 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 		if c, ok := decimalTextOrder(rv, ls); ok {
 			return -c, true, false
 		}
-	case rk == boxDecimal && rIsStr:
+	case rk == boxDecimal && rIsStr && rCo == boxDecimal:
 		if lText != "" {
 			c, ok := batch.CompareDecimalTexts(lText, rs)
 			return c, ok, false
@@ -897,29 +964,6 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 	case (rk == boxCidr || rk == boxIPv6) && lk == boxQuoted:
 		c, ok, unknown := netOrder(netKeyFor(rk, false), netKeyFor(rk, true), rv, lText)
 		return -c, ok, unknown
-	// A NUMBER column against a QUOTED literal. PostgreSQL types an
-	// unknown-typed literal from the operand it meets AND coerces it with that
-	// type's own input function, so `k > '2'` over a BIGINT column is the
-	// integer comparison `k > 2`, `r < '3.1'` over a REAL one compares at REAL
-	// width, and `k > 'abc'` is 22P02 rather than an answer (#646).
-	//
-	// This used to be decimalTextOrder, which read the pair through the DECIMAL
-	// grammar and answered ok=false for text it could not read — so every
-	// unreadable literal fell through to compare() and got a value: `CASE WHEN
-	// int_col < 'NaN'` returned every row, and `f < '3.1'` over a real column
-	// compared at double width.
-	case isNumericFoldKind(lk) && rk == boxQuoted:
-		if typ, ok := numberKindType(literalCoercionKind(lk, lFold)); ok {
-			if c, ok := quotedNumberOrder(typ, lv, rText); ok {
-				return c, true, false
-			}
-		}
-	case isNumericFoldKind(rk) && lk == boxQuoted:
-		if typ, ok := numberKindType(literalCoercionKind(rk, rFold)); ok {
-			if c, ok := quotedNumberOrder(typ, rv, lText); ok {
-				return -c, true, false
-			}
-		}
 	// A BOOL column against a QUOTED literal, in boolean order (FALSE <
 	// TRUE), the literal read through PostgreSQL's input grammar (#574). A
 	// literal that names no boolean is 22P02, raised by boolFromText — never

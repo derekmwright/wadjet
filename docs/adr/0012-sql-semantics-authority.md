@@ -1551,6 +1551,43 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     needs two strings — so it declined and the extremum picked its winner by
     byte order instead.
 
+    **The fold decides the READING, not only the literal's grammar.** (Added
+    2026-08-30 from this item's fourth review.) The kind and the type are two
+    answers, and applying the second to the literal alone left the comparison
+    on the first. A composite whose kind is DECIMAL and whose fold is float8
+    took the DECIMAL arm on every row the decimal arm supplied — read with the
+    DECIMAL grammar, at DECIMAL width, before the literal was parsed at all —
+    and that is three wrong answers wearing one cause:
+
+    - a literal only the fold's grammar reads. `COALESCE(numeric, float8) =
+      '0xC.C'` answered none where PostgreSQL answers 4: the float input
+      function reads that hex float as 12.75 and the numeric one refuses it.
+    - the wrong WIDTH. `= '12.750000000000000001'` answered none where
+      PostgreSQL answers 4, because float8 rounds the literal onto the value
+      and an exact decimal comparison does not.
+    - a ROW-DEPENDENT refusal, which this item says is closed. `= 'abc'`
+      raised only on the rows the FLOAT arm supplied.
+
+    So every QUOTED pair is routed through the fold's rung first, and the
+    DECIMAL arms own a pair only when the fold is itself DECIMAL. A CAST to a
+    numeric type is a typed operand for the same fold (`castNumericKind`);
+    saying otherwise made `COALESCE(numeric, CAST(k AS DOUBLE PRECISION))`
+    unresolvable and sent it back to the DECIMAL rung.
+
+    **And the refusal is decided at PLAN time.** A composite is typed there by
+    the fold over its arms (`physical.foldArgTypes`), so the literal is parsed
+    once against the fold's grammar before any row exists — which is the only
+    way `WHERE id > 100 AND COALESCE(numeric, float8) = 'abc'` raises, as
+    PostgreSQL does, over a range holding no rows at all. The binder recurses
+    CHILDREN FIRST so the innermost failing coercion is the one reported, which
+    is the order PostgreSQL analyses in.
+
+    A gate can pass for a reason that does not generalise, and one here did:
+    the row-independence test used GREATEST, which evaluates its float operand
+    as a candidate on every row, so it refused whatever the range. COALESCE and
+    CASE take their value from ONE arm and did not. Both, and an empty range,
+    are gated now.
+
     **The DECLARED type of such a call is still `decided[0]`, not the fold**
     (`expr.CommonDeclType`), so a projection of `GREATEST(real, …, double)`
     narrows the double answer back into a real vector. The cause is one line

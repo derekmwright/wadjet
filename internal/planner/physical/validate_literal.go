@@ -61,28 +61,38 @@ func checkLiteralTypes(node plansql.Node, scope *colScope) error {
 		// Every comparison operator, and IS [NOT] DISTINCT FROM, which the
 		// parser lowers to a CmpExpr with its own Op rather than to a node of
 		// its own — so the boxed site gets this for free.
-		if err := refuseLiteralPair(scope, n.Left, n.Right); err != nil {
+		//
+		// CHILDREN FIRST, here and at every node below that can hold a nested
+		// call. PostgreSQL analyses inside-out and reports the innermost
+		// coercion that fails, so `GREATEST('3.1','12.75',bigint) = '12.75'`
+		// names '3.1' there; refusing this node's own pair first named
+		// '12.75'. Same SQLSTATE and same type either way, but the message is
+		// part of the answer (ADR-0012 item 1).
+		if err := checkLiteralChildren(n.Left, n.Right, scope); err != nil {
 			return err
 		}
-		return checkLiteralChildren(n.Left, n.Right, scope)
+		return refuseLiteralPair(scope, n.Left, n.Right)
 	case *plansql.InExpr:
+		if err := checkLiteralTypes(n.Left, scope); err != nil {
+			return err
+		}
+		if err := checkLiteralList(n.Values, scope); err != nil {
+			return err
+		}
 		for _, v := range n.Values {
 			if err := refuseLiteralPair(scope, n.Left, v); err != nil {
 				return err
 			}
 		}
-		if err := checkLiteralTypes(n.Left, scope); err != nil {
+		return nil
+	case *plansql.BetweenExpr:
+		if err := checkLiteralList([]plansql.Node{n.Left, n.Low, n.High}, scope); err != nil {
 			return err
 		}
-		return checkLiteralList(n.Values, scope)
-	case *plansql.BetweenExpr:
 		if err := refuseLiteralPair(scope, n.Left, n.Low); err != nil {
 			return err
 		}
-		if err := refuseLiteralPair(scope, n.Left, n.High); err != nil {
-			return err
-		}
-		return checkLiteralList([]plansql.Node{n.Left, n.Low, n.High}, scope)
+		return refuseLiteralPair(scope, n.Left, n.High)
 	case *plansql.CaseNode:
 		// A SIMPLE CASE compares its subject against each WHEN value; a
 		// searched CASE's WHENs are conditions and are covered by the
@@ -110,6 +120,9 @@ func checkLiteralTypes(node plansql.Node, scope *colScope) error {
 		// been: does this call put a numeric column and a quoted literal its
 		// type cannot read in the same comparison? Both functions answer it
 		// the same way, on the same arguments, whatever the data.
+		if err := checkLiteralList(n.Args, scope); err != nil {
+			return err
+		}
 		switch strings.ToLower(n.Name) {
 		case "greatest", "least":
 			if err := refuseLiteralAmong(scope, n.Args); err != nil {
@@ -128,7 +141,7 @@ func checkLiteralTypes(node plansql.Node, scope *colScope) error {
 				}
 			}
 		}
-		return checkLiteralList(n.Args, scope)
+		return nil
 	case *plansql.BinaryOp:
 		return checkLiteralChildren(n.Left, n.Right, scope)
 	case *plansql.UnaryOp:
@@ -201,27 +214,8 @@ func refuseLiteralPair(scope *colScope, a, b plansql.Node) error {
 // contract (validate.go): a false positive breaks a working query, a false
 // negative leaves the refusal where the runtime already has it.
 func refuseLiteralAmong(scope *colScope, args []plansql.Node) error {
-	var common parquet.TypeID
-	have := false
-	for _, a := range args {
-		typ, kind := argDeclaredType(scope, a)
-		switch kind {
-		case argUntyped:
-			return nil
-		case argUnknownLiteral:
-			continue // the literal being coerced contributes no type
-		}
-		if !have {
-			common, have = typ, true
-			continue
-		}
-		w, ok := setOpWiden(common, typ)
-		if !ok {
-			return nil
-		}
-		common = w
-	}
-	if !have {
+	common, kind := foldArgTypes(scope, args)
+	if kind != argTyped {
 		return nil
 	}
 	for _, b := range args {
@@ -234,6 +228,37 @@ func refuseLiteralAmong(scope *colScope, args []plansql.Node) error {
 		}
 	}
 	return nil
+}
+
+// foldArgTypes folds a composite's arms to the one type select_common_type
+// resolves for it, and reports argUntyped when any arm's type this scope
+// cannot prove — a partial fold is a LOWER BOUND on PostgreSQL's, and a lower
+// bound is what refuses a literal PostgreSQL reads.
+func foldArgTypes(scope *colScope, args []plansql.Node) (parquet.TypeID, argKind) {
+	var common parquet.TypeID
+	have := false
+	for _, a := range args {
+		typ, kind := argDeclaredType(scope, a)
+		switch kind {
+		case argUntyped:
+			return 0, argUntyped
+		case argUnknownLiteral:
+			continue
+		}
+		if !have {
+			common, have = typ, true
+			continue
+		}
+		w, ok := setOpWiden(common, typ)
+		if !ok {
+			return 0, argUntyped
+		}
+		common = w
+	}
+	if !have {
+		return 0, argUntyped
+	}
+	return common, argTyped
 }
 
 // argKind classifies one call argument for the common-type fold.
@@ -259,6 +284,35 @@ const (
 // same select_common_type this folds through.
 func argDeclaredType(scope *colScope, n plansql.Node) (parquet.TypeID, argKind) {
 	switch v := unwrapParens(n).(type) {
+	case *plansql.FuncCallNode:
+		// A COMPOSITE is typed by the fold over its arms, which is what the
+		// literal beside it is coerced to. Without this the refusal needed a
+		// BARE COLUMN on one side, so `COALESCE(numeric, float8) = 'abc'` had
+		// no plan-time refusal at all and fell to the runtime — where it
+		// depended on which arm each row supplied, and on there BEING a row:
+		// `WHERE id > 100 AND COALESCE(a, f) = 'abc'` answered zero rows where
+		// PostgreSQL raises 22P02, because the coercion happens at parse
+		// analysis and does not wait for data.
+		switch strings.ToLower(v.Name) {
+		case "greatest", "least", "coalesce", "ifnull":
+			return foldArgTypes(scope, v.Args)
+		case "nullif":
+			// NULLIF's result mirrors argument 0, and its comparison resolves
+			// over both — the same fold either way for a two-argument call.
+			return foldArgTypes(scope, v.Args)
+		}
+		return 0, argUntyped
+	case *plansql.CaseNode:
+		// A CASE answers with one of its RESULTS; the WHEN conditions and a
+		// simple CASE's subject only steer.
+		arms := make([]plansql.Node, 0, len(v.Whens)+1)
+		for _, w := range v.Whens {
+			arms = append(arms, w.Result)
+		}
+		if v.Else != nil {
+			arms = append(arms, v.Else)
+		}
+		return foldArgTypes(scope, arms)
 	case *plansql.ColRef:
 		typ, ok := scope.provableColType(v)
 		if !ok {
@@ -299,16 +353,12 @@ func argDeclaredType(scope *colScope, n plansql.Node) (parquet.TypeID, argKind) 
 // the runtime refusals use, so the two paths cannot disagree about which
 // strings name a value of which type.
 func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) error {
-	ref, ok := unwrapParens(colSide).(*plansql.ColRef)
-	if !ok {
-		return nil
-	}
-	typ, ok := scope.provableColType(ref)
-	if !ok {
-		return nil
-	}
 	lit, ok := unwrapParens(litSide).(*plansql.Lit)
 	if !ok || lit.Kind != plansql.LitString {
+		return nil
+	}
+	typ, kind := argDeclaredType(scope, colSide)
+	if kind != argTyped {
 		return nil
 	}
 	return refuseLiteralForType(typ, lit.Value)

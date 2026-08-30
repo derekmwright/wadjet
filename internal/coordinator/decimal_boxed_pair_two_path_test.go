@@ -529,6 +529,30 @@ func runDecimalInACompositeTwoPath(t *testing.T, ctx context.Context, single *wa
 		// table can pass on the rows the float arm happens to supply.
 		{"CoalesceDecFloatNarrowRange", "id < 3 AND COALESCE(a, f) > '9'", 2},
 
+		// --- the FOLD decides the READING, not only the grammar ----------
+		//
+		// A composite mixing a DECIMAL column with a FLOAT one has kind
+		// decimal and fold float8, and the DECIMAL arm used to own the pair on
+		// every row the decimal arm supplied — so the literal was read with
+		// the DECIMAL grammar at DECIMAL width instead of the fold's.
+		//
+		// '0xC.C' is 12.75 to the FLOAT input function and 22P02 to the
+		// numeric one, so it separates the two grammars with a VALUE rather
+		// than an error; the '12.75' control beside it answers the same under
+		// either reading, which is what makes the pair a discriminator.
+		{"CoalesceDecFloatHexLiteral", "COALESCE(a, f) = '0xC.C'", 4},
+		{"CoalesceDecFloatHexLiteralGt", "COALESCE(a, f) > '0xC.C'", 0},
+		{"CoalesceDecRealHexLiteral", "COALESCE(a, r) = '0xC.C'", 4},
+		{"CoalesceDecFloatHexControl", "COALESCE(a, f) = '12.75'", 4},
+		{"GreatestDecFloatHexLiteralGt", "GREATEST(a, f) > '0xC.C'", 2},
+		// WIDTH: float8 ROUNDS a literal past its precision onto the value,
+		// and an exact decimal comparison does not. The third row is the
+		// control — a fold that really is DECIMAL still compares exactly, and
+		// answers none.
+		{"CoalesceDecFloatRoundsLiteral", "COALESCE(b, f) = '12.75000000000000001'", 1},
+		{"CoalesceDecFloatRoundsLiteralWide", "COALESCE(a, f) = '12.750000000000000001'", 4},
+		{"CoalesceDecDecKeepsExactness", "COALESCE(a, b) = '12.750000000000000001'", 0},
+
 		// --- two QUOTED literals inside one call --------------------------
 		//
 		// Neither operand of that pair is typed, so neither was retyped to the
@@ -572,8 +596,35 @@ func runDecimalInACompositeTwoPath(t *testing.T, ctx context.Context, single *wa
 		// raises for every row. Both row ranges are asserted for that reason.
 		{"GarbageDecFloatFold", "GREATEST(a, f) = 'abc'",
 			`invalid input syntax for type double precision: "abc"`},
+		// GREATEST alone is NOT enough to gate row-independence, and the
+		// earlier version of this test passed for a reason that does not
+		// generalise: GREATEST evaluates its float operand as a candidate on
+		// every row, so the refusal fired whatever the range. COALESCE and
+		// CASE take their value from ONE arm, so a range holding only
+		// decimal-arm rows never reached a float operand at all — and an
+		// EMPTY range reached no operand at all. PostgreSQL coerces the
+		// literal at parse analysis and raises for all four.
 		{"GarbageDecFloatFoldNarrowRange", "id < 5 AND GREATEST(a, f) = 'abc'",
 			`invalid input syntax for type double precision: "abc"`},
+		{"GarbageCoalesceDecFloat", "COALESCE(a, f) = 'abc'",
+			`invalid input syntax for type double precision: "abc"`},
+		{"GarbageCoalesceDecFloatDecimalArmOnly", "id < 4 AND COALESCE(a, f) = 'abc'",
+			`invalid input syntax for type double precision: "abc"`},
+		{"GarbageCaseDecFloat", "CASE WHEN id > 0 THEN a ELSE f END = 'abc'",
+			`invalid input syntax for type double precision: "abc"`},
+		{"GarbageCoalesceDecFloatEmptyRange", "id > 100 AND COALESCE(a, f) = 'abc'",
+			`invalid input syntax for type double precision: "abc"`},
+		// The NUMERIC rung's own refusal, which round 3 had right and the
+		// arm-ordering regression made silent again. The empty-range form is
+		// here for the same reason.
+		{"GarbageCoalesceDecInt", "COALESCE(a, id) = 'abc'",
+			`invalid input syntax for type numeric: "abc"`},
+		{"GarbageGreatestIntDec", "GREATEST(id, a) = 'abc'",
+			`invalid input syntax for type numeric: "abc"`},
+		{"GarbageCoalesceIntDec", "COALESCE(id, a) = 'abc'",
+			`invalid input syntax for type numeric: "abc"`},
+		{"GarbageCoalesceIntDecEmptyRange", "id > 100 AND COALESCE(id, a) = 'abc'",
+			`invalid input syntax for type numeric: "abc"`},
 		// Two quoted literals whose fold is an INTEGER: '3.1' names no bigint.
 		{"TwoQuotedLiteralsIntFoldRefuses", "GREATEST('3.1','12.75',id) = '12.75'",
 			`invalid input syntax for type bigint: "3.1"`},

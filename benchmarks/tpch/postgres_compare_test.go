@@ -1124,6 +1124,25 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "TwoQuotedLiteralsDecimalFoldLeast", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST('3.1','12.75',d_4) = '3.1'`},
 		pgCase{name: "TwoQuotedLiteralsRealFold", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST('9','10',r_val) = '10'`},
 		pgCase{name: "TwoQuotedLiteralsRealFoldLeast", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE LEAST('9','10',r_val) = '9'`},
+		// The fold decides the READING, not only the literal's grammar. A
+		// composite whose kind is DECIMAL and whose fold is float8 must be
+		// compared at the FLOAT rung on every row, including the rows where
+		// the decimal arm supplied the value — otherwise the literal is read
+		// with the DECIMAL grammar at DECIMAL width.
+		//
+		// '0x1.9p3' is 12.5 to the float input function and 22P02 to the
+		// numeric one, so it separates the two grammars with a VALUE; the
+		// decimal spelling beside it answers the same under either reading and
+		// is the control.
+		pgCase{name: "DecimalFloatFoldReadsHexLiteral", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, CAST(d_key AS DOUBLE PRECISION)) = '0x1.9p3'`},
+		pgCase{name: "DecimalFloatFoldReadsHexLiteralGt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, CAST(d_key AS DOUBLE PRECISION)) > '0x1.9p3'`},
+		pgCase{name: "DecimalFloatFoldHexControl", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, CAST(d_key AS DOUBLE PRECISION)) = '12.5'`},
+		pgCase{name: "DecimalRealFoldReadsHexLiteral", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, CAST(d_key AS REAL)) = '0x1.9p3'`},
+		// WIDTH: float8 rounds a literal past its precision onto the value,
+		// and an exact decimal comparison does not. The all-DECIMAL control
+		// keeps its exactness and answers none.
+		pgCase{name: "DecimalFloatFoldRoundsLiteral", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, CAST(d_key AS DOUBLE PRECISION)) = '12.750000000000000001'`},
+		pgCase{name: "DecimalDecimalFoldKeepsExactness", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, d_4) = '12.750000000000000001'`},
 
 		// SINGLE-element real IN — the arity split #549's re-review turned up.
 		// PostgreSQL folds `real IN (x)` to `= 'x'::double precision` (WIDEN),
