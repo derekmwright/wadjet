@@ -74,6 +74,25 @@ not what the semantics are (ADR-0012 decides that).
    first pass wrote "CAST … is 22003" into two ADRs while CAST was still a
    no-op). Records name the sites covered and the sites not covered.
 
+10. **Every "cannot happen" needs a fixture where it is attempted.** A
+    design claim of the form *X is impossible* — a hidden slot no input can
+    be spelled like, a reserved name no table can store, a scope no sibling
+    can reach — is the exact place the review finds the regression, and it
+    is invisible to every gate because no fixture contains X. In the naming
+    arc this happened three times in one day, with the same shape each time:
+    `__win_0` was "unspellable" until a user aliased it; a reserved-family
+    column was "never stored" until a table stored one and became unreadable
+    behind a `DROP`; a slot allocator was "collision-free" within one scope
+    until two sibling subqueries under a join each minted `__win_0`. Two
+    authors, working independently, wrote the same allocator bug because the
+    API offered a namer and no allocator — and both branches' own new
+    corpora passed. The rule: for each impossibility the design asserts,
+    the corpus carries a fixture that attempts it (a table storing the
+    reserved name, a query aliasing the slot, the sibling scopes), and the
+    author lists those fixtures beside the claim in the commit body. A
+    guard that only fires on a shape no fixture produces (`hot` on a stored
+    reserved column) is untested code on the default path.
+
 ## What the reviewer then does
 
 Refute, concretely. The review's only currency is a failing input: SQL, the
@@ -85,10 +104,25 @@ than a regression.
 ## Landing
 
 Fixes are cherry-picked onto `main` serially, one branch at a time, with the
-full battery (`./internal/...`, `./wadjet/`, TPC-H correctness and
-optimization invariance, `task pg-oracle:test`) run on the *combined* tree.
-The pre-push hook tests the working tree, not the pushed ref: nothing may
-touch the tree until a background push has exited.
+full battery run on the *combined* tree: `./internal/...`, `./wadjet/`, the
+**whole** `./benchmarks/tpch/` package on the default fixture *and* with
+`TPCH_DECIMAL=1` (not only `TestTPCHQueries` — `TestDuckDBCompare` and the
+duplicate-name suite live there, and the ordered DuckDB digest is what
+caught #656's DAG `ORDER BY` regression after a clean review), `task
+pg-oracle:test` and `pg-oracle:test-decimal`, and ClickBench correctness +
+invariance with `WADJET_HITS_PART` set. That variable matters: without it
+the ClickBench package reports `ok 0.010s` with no subtests, and a review
+once cited that line as a pass. A gate that skips quietly is not a gate —
+run it with `-v` and count the `PASS` lines when in doubt. The pre-push
+hook tests the working tree, not the pushed ref: nothing may touch the tree
+until a background push has exited, and a push that dies with SIGPIPE
+(exit 141) after the hook has passed must be re-run and confirmed with
+`git log origin/main` before any issue is closed.
+
+A review runs against the *base it names*: a control measured on a
+cherry-picked tip that was later reset exonerates only the author's own
+diff, not the tree. Reviewers state the base SHA; authors do not call a
+failure pre-existing unless it reproduces on `origin/main`.
 
 Issues are filed at the mechanism, not the symptom. Several symptoms of one
 producer-emits-no-stage gap are one umbrella issue with a shape table (#656),
