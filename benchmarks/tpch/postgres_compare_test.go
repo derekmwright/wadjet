@@ -4581,6 +4581,63 @@ func groupKeySpellingCases() []pgCase {
 		`SELECT l_returnflag AS "l_partkey + 1", COUNT(*) AS n FROM lineitem `+where+
 			` GROUP BY "l_partkey + 1" ORDER BY 1`)
 
+	// The COLLISION family: a relation carrying a column SPELLED like the
+	// group key. The key is materialized into a reserved slot and published
+	// by a rename, so the two cannot see each other; naming the materialized
+	// column after the key made the INPUT column win on one engine and the
+	// KEY win on the other (ADR-0026).
+	coll := `(SELECT l_partkey, l_quantity AS "l_partkey + 1" FROM lineitem ` + where + `) s`
+	add("GroupKeyCollidesWithAnInputColumn",
+		`SELECT l_partkey + 1 AS k, COUNT(*) AS n FROM `+coll+` GROUP BY l_partkey + 1 ORDER BY k`)
+	add("GroupKeyCollidesWithAnInputColumnKeyOnly",
+		`SELECT l_partkey + 1 AS k FROM `+coll+` GROUP BY l_partkey + 1 ORDER BY k`)
+	add("GroupKeyCollidesWithAnInputColumnHaving",
+		`SELECT l_partkey + 1 AS k, COUNT(*) AS n FROM `+coll+
+			` GROUP BY l_partkey + 1 HAVING l_partkey + 1 > 100 ORDER BY k`)
+	add("GroupKeyCollidesWithAnInputColumnAggregated",
+		`SELECT l_partkey + 1 AS k, MAX("l_partkey + 1") AS m FROM `+coll+
+			` GROUP BY l_partkey + 1 ORDER BY k`)
+	add("GroupKeyCollidesWithAnInputColumnCTE",
+		`WITH a AS (SELECT l_partkey, l_quantity AS "l_partkey + 1" FROM lineitem `+where+`) `+
+			`SELECT l_partkey + 1 AS k, COUNT(*) AS n FROM a GROUP BY l_partkey + 1 ORDER BY k`)
+	add("GroupKeyCollidesOverAString",
+		`SELECT l_returnflag || 'x' AS k, COUNT(*) AS n FROM `+
+			`(SELECT l_returnflag, l_comment AS "l_returnflag || 'x'" FROM lineitem `+where+`) s `+
+			`GROUP BY l_returnflag || 'x' ORDER BY k`)
+	// The other direction: an AGGREGATE whose alias is spelled like the key.
+	add("GroupKeyCollidesWithAnAggregateAlias",
+		`SELECT l_partkey + 1 AS k, COUNT(*) AS "l_partkey + 1" FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY k`)
+	add("GroupKeyCollidesWithAnAggregateAliasOtherCase",
+		`SELECT l_partkey + 1 AS k, COUNT(*) AS "L_PARTKEY + 1" FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY k`)
+
+	// A derived key over a RENAMED column: the DAG emits no stage for a
+	// rename Project, so the key reached the worker spelled over a name the
+	// scan does not emit and every row landed in ONE NULL group.
+	add("GroupKeyOverARenamedColumn",
+		`SELECT pk + 1 AS k, COUNT(*) AS n FROM (SELECT l_partkey AS pk FROM lineitem `+where+
+			`) s GROUP BY pk + 1 ORDER BY k`)
+	add("GroupKeyOverARenamedColumnCTE",
+		`WITH s AS (SELECT l_partkey AS pk FROM lineitem `+where+`) `+
+			`SELECT pk + 1 AS k, COUNT(*) AS n FROM s GROUP BY pk + 1 ORDER BY k`)
+	add("GroupKeyOverARenamedDelimitedColumn",
+		`SELECT "p k" + 1 AS k, COUNT(*) AS n FROM (SELECT l_partkey AS "p k" FROM lineitem `+
+			where+`) s GROUP BY "p k" + 1 ORDER BY k`)
+
+	// DISTINCT and an outer aggregate over a derived key: two aggregates
+	// keyed alike, where the outer one reads the inner one's OUTPUT.
+	add("GroupKeyDistinctOverTheKey",
+		`SELECT DISTINCT l_partkey + 1 AS k FROM lineitem `+where+
+			` GROUP BY l_partkey + 1 ORDER BY k`)
+	out = append(out,
+		pgCase{name: "GroupKeyOuterSumOverTheKey",
+			sql: `SELECT SUM(k) AS s, COUNT(*) AS n FROM (SELECT l_partkey + 1 AS k, ` +
+				`COUNT(*) AS c FROM lineitem ` + where + ` GROUP BY l_partkey + 1) s`},
+		pgCase{name: "GroupKeyOuterMaxOverTheKey",
+			sql: `SELECT MAX(k) AS m FROM (SELECT l_partkey + 1 AS k, COUNT(*) AS c ` +
+				`FROM lineitem ` + where + ` GROUP BY l_partkey + 1) s`})
+
 	return out
 }
 

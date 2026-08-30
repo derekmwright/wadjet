@@ -1710,6 +1710,250 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 
+		// The COLLISION matrix. A relation that carries a column SPELLED
+		// like the group key is two values wanting one name, and the answer
+		// used to depend on which operator resolved it: the single-process
+		// pre-aggregate projection APPENDS and resolves by first exact
+		// match, so the INPUT column won and the query grouped by it; the
+		// worker's projection NARROWS, so the KEY won and shadowed a column
+		// an aggregate needed. The key is materialized into a reserved slot
+		// now and published by a rename, so neither can see the other
+		// (ADR-0026).
+		//
+		// PostgreSQL 17 answers the same eight rows for every entry as the
+		// plain shape — the extra column is not the key and never was.
+		t.Run("KeyNameCollidesWithAnInputColumn", func(t *testing.T) {
+			// `c_i32 = i*3` with a NULL every 29th row, renamed to a name
+			// that reads back as the key's own arithmetic.
+			inner := fmt.Sprintf(`(SELECT g, c_i32 AS "g + 1" FROM %s) s`, tbl)
+			for _, c := range []struct{ name, sql string }{
+				{"Bare", `SELECT g + 1 AS k, COUNT(*) AS n FROM ` + inner +
+					` GROUP BY g + 1 ORDER BY k`},
+				{"NoSpaces", fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n FROM `+
+					`(SELECT g, c_i32 AS "g+1" FROM %s) s GROUP BY g+1 ORDER BY k`, tbl)},
+				{"KeyOnly", `SELECT g + 1 AS k FROM ` + inner + ` GROUP BY g + 1 ORDER BY k`},
+				{"Having", `SELECT g + 1 AS k, COUNT(*) AS n FROM ` + inner +
+					` GROUP BY g + 1 HAVING g + 1 > 2 ORDER BY k`},
+				{"CTE", fmt.Sprintf(`WITH a AS (SELECT g, c_i32 AS "g + 1" FROM %s) `+
+					`SELECT g + 1 AS k, COUNT(*) AS n FROM a GROUP BY g + 1 ORDER BY k`, tbl)},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					want := wantKeys + 1
+					if c.name == "Having" {
+						want = wantKeys - 2
+					}
+					// Only the single-process arms are asserted. The DAG
+					// resolves these names against a scan whose rename
+					// Project it flattened, so it groups by the COLUMN — a
+					// pre-existing defect of a different mechanism, filed
+					// as #736 and pinned below.
+					res := sfcRun(t, sfcArms(ctx, single, coord)[0], c.sql)
+					if len(res.Rows) != want {
+						t.Errorf("single arm returned %d rows, want %d — the key was resolved "+
+							"to the input COLUMN spelled like it\n  SQL: %s",
+							len(res.Rows), want, c.sql)
+					}
+				})
+			}
+			// The other direction: an AGGREGATE whose alias is spelled like
+			// the key. PostgreSQL answers the counts; reading the key
+			// instead is the same collision one column over.
+			for _, alias := range []string{`"g + 1"`, `"G + 1"`} {
+				sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS %s FROM %s `+
+					`GROUP BY g + 1 ORDER BY k`, alias, tbl)
+				res := sfcRun(t, sfcArms(ctx, single, coord)[0], sql)
+				if len(res.Rows) != wantKeys+1 {
+					t.Errorf("single arm returned %d rows, want %d\n  SQL: %s",
+						len(res.Rows), wantKeys+1, sql)
+					continue
+				}
+				col := res.Columns[1]
+				for _, r := range res.Rows {
+					k, kok := numAsInt(r["k"])
+					v, vok := numAsInt(r[col])
+					if kok && vok && k == v {
+						t.Errorf("single arm answered the KEY under the aggregate's alias %s "+
+							"(k=%d, %s=%d)\n  SQL: %s", alias, k, col, v, sql)
+						break
+					}
+				}
+			}
+		})
+
+		// A derived key over a RENAMED column. The DAG emits no stage for a
+		// rename Project, so the key reached the worker spelled over a name
+		// the scan does not emit and every row landed in ONE NULL group;
+		// aggStageDispatchKey re-spells it into source columns for dispatch.
+		t.Run("KeyOverARenamedColumn", func(t *testing.T) {
+			for _, c := range []struct{ name, sql string }{
+				{"DerivedTable", `SELECT a_b + 1 AS k, COUNT(*) AS n FROM ` +
+					`(SELECT c_i32 AS a_b, g FROM %[1]s) s WHERE g = 1 GROUP BY a_b + 1 ORDER BY k`},
+				{"CTE", `WITH s AS (SELECT c_i32 AS a_b, g FROM %[1]s) ` +
+					`SELECT a_b + 1 AS k, COUNT(*) AS n FROM s WHERE g = 1 GROUP BY a_b + 1 ORDER BY k`},
+				{"Delimited", `SELECT "a_b" + 1 AS k, COUNT(*) AS n FROM ` +
+					`(SELECT c_i32 AS "a_b", g FROM %[1]s) s WHERE g = 1 GROUP BY "a_b" + 1 ORDER BY k`},
+				{"DelimitedWithSpace", `SELECT "a b" + 1 AS k, COUNT(*) AS n FROM ` +
+					`(SELECT c_i32 AS "a b", g FROM %[1]s) s WHERE g = 1 GROUP BY "a b" + 1 ORDER BY k`},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					sql := fmt.Sprintf(c.sql, tbl)
+					// Computed from the generator: c_i32 = id*3, NULL every
+					// 29th row, restricted to g = 1 (id % 7 == 1, and g is
+					// NULL every 13th row).
+					want, nulls := 0, 0
+					for _, r := range rows {
+						if g, ok := r.g.(int32); !ok || g != 1 {
+							continue
+						}
+						if r.id%29 == 28 {
+							nulls++
+							continue
+						}
+						want++
+					}
+					total := want
+					if nulls > 0 {
+						total++
+					}
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, sql)
+						if len(res.Rows) != total {
+							t.Errorf("%s arm returned %d rows, want %d — the key was computed "+
+								"from a name the scan does not emit\n  SQL: %s",
+								arm.name, len(res.Rows), total, sql)
+						}
+					}
+				})
+			}
+		})
+
+		// The DAG residuals of this family, pinned. Each is pre-existing on
+		// ff7c3f19 and each is the SAME mechanism one layer out: on the
+		// stage DAG a computed key is resolved against the SCAN's schema,
+		// because the rename Project between the aggregate and its scan
+		// emits no stage. The single-process arm answers every one of them.
+		//
+		// TODO(#736): delete this pin when the DAG carries the key's
+		// source-spelled expression beside its published name.
+		t.Run("DAGResolvesAComputedKeyAgainstTheScan", func(t *testing.T) {
+			dag := sfcArms(ctx, single, coord)[1]
+			for _, c := range []struct {
+				name, sql string
+				wantRows  int // today's DAG answer; PostgreSQL's is in `pg`
+				pg        int
+			}{
+				{"CollidingInputColumn", fmt.Sprintf(
+					`SELECT g + 1 AS k, COUNT(*) AS n FROM (SELECT g, c_i32 AS "g + 1" `+
+						`FROM %s) s GROUP BY g + 1 ORDER BY k`, tbl), 4829, wantKeys + 1},
+				{"DistinctOverTheKey", fmt.Sprintf(
+					`SELECT DISTINCT g + 1 AS k FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+					1, wantKeys + 1},
+				{"CountOverDistinctOverTheKey", fmt.Sprintf(
+					`SELECT COUNT(*) AS n FROM (SELECT DISTINCT g + 1 AS k FROM %s `+
+						`GROUP BY g + 1) s`, tbl), 1, 1},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					res := sfcRun(t, dag, c.sql)
+					if len(res.Rows) != c.wantRows {
+						t.Fatalf("the DAG arm now returns %d rows where this pin records %d; "+
+							"PostgreSQL answers %d. #736 is fixed for this shape — assert "+
+							"PostgreSQL's answer and delete the pin\n  SQL: %s",
+							len(res.Rows), c.wantRows, c.pg, c.sql)
+					}
+				})
+			}
+		})
+
+		// A WINDOW above the aggregate NULLs the key on BOTH paths: the walk
+		// that re-points a SELECT item at its key's column stops at a
+		// NodeWindow. PostgreSQL answers 1..7 plus NULL.
+		//
+		// TODO(#737): delete this pin when a window passes the key through.
+		t.Run("WindowAboveTheAggregate", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT g + 1 AS k, ROW_NUMBER() OVER (ORDER BY g + 1) AS rn `+
+				`FROM %s GROUP BY g + 1 ORDER BY k`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				for _, r := range res.Rows {
+					if r["k"] != nil {
+						t.Fatalf("%s arm now answers a non-NULL key above a window; "+
+							"PostgreSQL answers 1..%d plus NULL. #737 is fixed — assert it "+
+							"and delete this pin\n  SQL: %s", arm.name, wantKeys, sql)
+					}
+				}
+			}
+		})
+
+		// Two spellings PostgreSQL accepts and we refuse with 42803: a table
+		// QUALIFIER on the select item, and a CAST type SYNONYM. Loud, and
+		// identical on every arm, so these are false refusals rather than
+		// wrong answers.
+		//
+		// TODO(#738): delete this pin when the identity erases both.
+		t.Run("OverRefusedSpellings", func(t *testing.T) {
+			for _, sql := range []string{
+				fmt.Sprintf(`SELECT %[1]s.g + 1 AS k, COUNT(*) AS n FROM %[1]s `+
+					`GROUP BY g + 1 ORDER BY k`, tbl),
+				fmt.Sprintf(`SELECT CAST(g AS INT) AS k, COUNT(*) AS n FROM %s `+
+					`GROUP BY CAST(g AS INTEGER) ORDER BY k`, tbl),
+			} {
+				for _, arm := range sfcArms(ctx, single, coord) {
+					if _, err := arm.run(sql); err == nil {
+						t.Fatalf("%s arm now ANSWERS a spelling this pin records as 42803; "+
+							"PostgreSQL answers it too. #738 is fixed — assert the answer "+
+							"and delete this pin\n  SQL: %s", arm.name, sql)
+					}
+				}
+			}
+		})
+
+		// GROUP BY a name that is BOTH a select alias and an input column.
+		// PostgreSQL resolves it to the input COLUMN and then refuses the
+		// query, because the select list's own `c_i32` is then ungrouped; we
+		// resolve it to the alias and answer.
+		//
+		// TODO(#739): delete this pin when the input column wins.
+		t.Run("GroupByAliasShadowsAnInputColumn", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT c_i32 AS g, COUNT(*) AS n FROM %s WHERE id < 20 `+
+				`GROUP BY g ORDER BY g`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res, err := arm.run(sql)
+				if err != nil {
+					t.Fatalf("%s arm now REFUSES this, which is PostgreSQL's answer. #739 is "+
+						"fixed — assert the refusal and delete this pin\n  SQL: %s", arm.name, sql)
+				}
+				if len(res.Rows) != 20 {
+					t.Errorf("%s arm returned %d rows, want the pinned 20\n  SQL: %s",
+						arm.name, len(res.Rows), sql)
+				}
+			}
+		})
+
+		// A delimited key containing a DOT is published under its part after
+		// the dot. The VALUES agree with PostgreSQL on every arm; the column
+		// NAME does not (`b` where PostgreSQL says `a.b`).
+		//
+		// TODO(#740): delete this pin when the whole name survives.
+		t.Run("DelimitedKeyWithADotLosesItsQualifier", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT "a.b", COUNT(*) AS n FROM `+
+				`(SELECT c_i32 AS "a.b" FROM %s WHERE id < 5) s GROUP BY "a.b" ORDER BY 1`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != 5 {
+					t.Errorf("%s arm returned %d rows, want 5\n  SQL: %s",
+						arm.name, len(res.Rows), sql)
+				}
+				if res.Columns[0] == "a.b" {
+					t.Fatalf("%s arm now publishes the whole delimited name, which is "+
+						"PostgreSQL's answer. #740 is fixed — assert it and delete this "+
+						"pin\n  SQL: %s", arm.name, sql)
+				}
+			}
+		})
+
 		// The residual, pinned. An unquoted identifier is never folded to
 		// lower case anywhere in the engine, so a GROUP BY term written in a
 		// different case from the column computes over a name nothing
