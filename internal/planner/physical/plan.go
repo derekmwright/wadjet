@@ -5115,6 +5115,75 @@ func aggStageGroupKey(key string, child *logical.Node) (string, bool) {
 	return resolved, true
 }
 
+// aggStageDispatchKey is aggStageGroupKey for the DISPATCHED spelling: the
+// text the worker parses and computes the key from.
+//
+// It answers for a DERIVED key too, which aggStageGroupKey deliberately does
+// not. `a_b + 1` is not a name, so resolveAggInputName declines it — but its
+// LEAVES are names, and a rename Project between the aggregate and its scan
+// emits no stage of its own, so the key reached the worker spelled over `a_b`,
+// which the scan does not emit: the key computed NULL for every row and the
+// whole table collapsed into ONE group.
+//
+// aggregateOutputName deliberately does NOT take this path. It answers what a
+// SORT KEY should name, and a sort key is resolved on both engines — the
+// single-process aggregate publishes the key under its own canonical text and
+// knows nothing of the DAG's source re-spelling.
+func aggStageDispatchKey(key string, child *logical.Node) (string, bool) {
+	if resolved, renamed := aggStageGroupKey(key, child); renamed {
+		return resolved, true
+	}
+	return aggStageDerivedKey(key, child)
+}
+
+// aggStageDerivedKey re-spells a computed GROUP BY key's column references
+// into the columns the aggregate's input really emits, the way
+// aggStageGroupKey does for a bare one. ok=false leaves the key exactly as it
+// was — which is every key whose leaves are already source columns, and every
+// shape this walk does not recognize.
+func aggStageDerivedKey(key string, child *logical.Node) (string, bool) {
+	node, err := plansql.ParseExpression(key)
+	if err != nil {
+		return key, false
+	}
+	if _, bare := node.(*plansql.ColRef); bare {
+		return key, false // aggStageGroupKey's own case, already answered
+	}
+	changed := false
+	out := plansql.RewriteExpr(node, func(n plansql.Node) (plansql.Node, bool) {
+		ref, isRef := n.(*plansql.ColRef)
+		if !isRef {
+			return nil, false
+		}
+		resolved, expr, _, renamed := resolveAggInputName(qualifiedColumn(ref), child)
+		if !renamed {
+			return nil, false
+		}
+		changed = true
+		if expr != nil {
+			// The rename's own DEFINITION is an expression, so the key is
+			// that expression substituted in: `k + 1` over `SELECT a * 2 AS
+			// k` is `(a * 2) + 1`, parenthesised so the substitution cannot
+			// change what binds to what.
+			return &plansql.ParenNode{Inner: expr}, true
+		}
+		return &plansql.ColRef{Column: resolved}, true
+	})
+	if !changed {
+		return key, false
+	}
+	return out.String(), true
+}
+
+// qualifiedColumn renders a column reference the way resolveAggInputName
+// expects to receive it.
+func qualifiedColumn(ref *plansql.ColRef) string {
+	if ref.Table != "" {
+		return ref.Table + "." + ref.Column
+	}
+	return ref.Column
+}
+
 // derivedGroupKeyTypes types every DERIVED (non-bare) GROUP BY key for the
 // wire (Stage.GroupByTypes): the same inferProjectionTypeCols call, over the
 // same input column types, that the single-process pre-aggregate projection
@@ -5627,7 +5696,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// `GROUP BY k` over `SELECT o_orderstatus AS k` collapsed 3 groups
 		// into one NULL group of every row.
 		for i, key := range groupBy {
-			if resolved, renamed := aggStageGroupKey(key, aggChild); renamed {
+			if resolved, renamed := aggStageDispatchKey(key, aggChild); renamed {
 				groupBy[i] = resolved
 				if p.aggStageRenames == nil {
 					p.aggStageRenames = make(map[string]string)
@@ -9142,14 +9211,21 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if litElided[i] {
 				continue
 			}
-			if gbExpr != nil && !isPlainGroupKey(gbExpr, aggChildColTypes) {
-				// The name the DAG's worker publishes this key under too:
-				// the key's own canonical text. A synthetic `__gb_expr_N`
-				// here made the two engines' aggregate output schemas
-				// DIFFER, so a HAVING predicate or a sort key spelled
-				// against the key could only ever resolve on one of them
-				// (#720).
-				synName := keyOuts[i].Name
+			// keyOuts is the single answer to "is this key derived", shared
+			// with aggregateOutputNames and with the projection above, so
+			// the schema this materialization produces and the schema they
+			// describe cannot disagree (ADR-0026).
+			if gbExpr != nil && i < len(keyOuts) && keyOuts[i].Derived {
+				// The HIDDEN SLOT, not the key's own text. The
+				// pre-aggregate projection APPENDS this column to the input
+				// batch and every consumer resolves by name, so a slot
+				// spelled like an input column the query already carries is
+				// shadowed BY it — `GROUP BY g + 1` over a table that also
+				// has a column called "g + 1" grouped by the column. The
+				// key is PUBLISHED under its canonical text by
+				// GroupByOutNames below, which is what keeps the two
+				// engines' output schemas equal (#720, ADR-0026).
+				synName := keyOuts[i].Slot
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
@@ -9219,6 +9295,16 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	}
 
 	hashAgg := exec.NewHashAggregate(groupByCols, aggCols)
+	// A DERIVED key resolves by its hidden slot and publishes under its own
+	// canonical text. Only then do the two engines' aggregate output schemas
+	// match, which is what lets one HAVING predicate — rewritten once, in the
+	// logical plan — be evaluable on both (ADR-0026). Set only when a key
+	// really is derived, so every other shape keeps exec's own naming rule
+	// (the qualifier strip, and the ambiguity exception for `GROUP BY
+	// n1.n_name, n2.n_name`).
+	if outNames, derived := publishedGroupKeyNames(keyOuts, litElided); derived {
+		hashAgg.GroupByOutNames = outNames
+	}
 	if est := findScanRowEstimate(node.Children[0]); est > 0 {
 		hashAgg.InputRowHint = est
 	}

@@ -225,50 +225,72 @@ func ReplaceGroupKeyRefs(node Node, keys map[string]string) Node {
 	if node == nil || len(keys) == 0 {
 		return node
 	}
-	// A bare column reference is never re-pointed: a plain group key is
-	// already published under its own name, and a ROW field path resolves
-	// through the same dotted spelling on both engines.
-	if _, isRef := node.(*ColRef); !isRef {
-		if name, ok := keys[ExprIdentity(node)]; ok {
-			return &ColRef{Column: name}
+	return RewriteExpr(node, func(n Node) (Node, bool) {
+		// A bare column reference is never re-pointed: a plain group key is
+		// already published under its own name, and a ROW field path
+		// resolves through the same dotted spelling on both engines.
+		if _, isRef := n.(*ColRef); isRef {
+			return nil, false
 		}
+		if name, ok := keys[ExprIdentity(n)]; ok {
+			return &ColRef{Column: name}, true
+		}
+		return nil, false
+	})
+}
+
+// RewriteExpr rebuilds an expression, offering every node to fn TOP-DOWN. fn
+// returns (replacement, true) to substitute a node and stop descending into
+// it, or (nil, false) to leave it and have its children visited.
+//
+// It never enters an aggregate call: inside one the expression is evaluated
+// over the aggregate's INPUT rows, which is a different namespace from the
+// grouped output every caller of this is rewriting for.
+//
+// A node kind it does not know is returned as it stands rather than guessed
+// at — the conservative answer, and the one every caller relied on before
+// this walk was shared.
+func RewriteExpr(node Node, fn func(Node) (Node, bool)) Node {
+	if node == nil {
+		return nil
+	}
+	if repl, done := fn(node); done {
+		return repl
 	}
 	switch n := node.(type) {
 	case *ParenNode:
-		return &ParenNode{Inner: ReplaceGroupKeyRefs(n.Inner, keys)}
+		return &ParenNode{Inner: RewriteExpr(n.Inner, fn)}
 	case *BinaryOp:
-		return &BinaryOp{Left: ReplaceGroupKeyRefs(n.Left, keys), Op: n.Op,
-			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+		return &BinaryOp{Left: RewriteExpr(n.Left, fn), Op: n.Op,
+			Right: RewriteExpr(n.Right, fn)}
 	case *UnaryOp:
-		return &UnaryOp{Op: n.Op, Inner: ReplaceGroupKeyRefs(n.Inner, keys)}
+		return &UnaryOp{Op: n.Op, Inner: RewriteExpr(n.Inner, fn)}
 	case *CmpExpr:
-		return &CmpExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Op: n.Op,
-			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+		return &CmpExpr{Left: RewriteExpr(n.Left, fn), Op: n.Op,
+			Right: RewriteExpr(n.Right, fn)}
 	case *AndNode:
-		return &AndNode{Left: ReplaceGroupKeyRefs(n.Left, keys),
-			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+		return &AndNode{Left: RewriteExpr(n.Left, fn), Right: RewriteExpr(n.Right, fn)}
 	case *OrNode:
-		return &OrNode{Left: ReplaceGroupKeyRefs(n.Left, keys),
-			Right: ReplaceGroupKeyRefs(n.Right, keys)}
+		return &OrNode{Left: RewriteExpr(n.Left, fn), Right: RewriteExpr(n.Right, fn)}
 	case *NotNode:
-		return &NotNode{Inner: ReplaceGroupKeyRefs(n.Inner, keys)}
+		return &NotNode{Inner: RewriteExpr(n.Inner, fn)}
 	case *IsExpr:
-		return &IsExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not, Check: n.Check}
+		return &IsExpr{Left: RewriteExpr(n.Left, fn), Not: n.Not, Check: n.Check}
 	case *LikeExpr:
-		return &LikeExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not,
-			Pattern: ReplaceGroupKeyRefs(n.Pattern, keys)}
+		return &LikeExpr{Left: RewriteExpr(n.Left, fn), Not: n.Not,
+			Pattern: RewriteExpr(n.Pattern, fn)}
 	case *BetweenExpr:
-		return &BetweenExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not,
-			Low: ReplaceGroupKeyRefs(n.Low, keys), High: ReplaceGroupKeyRefs(n.High, keys)}
+		return &BetweenExpr{Left: RewriteExpr(n.Left, fn), Not: n.Not,
+			Low: RewriteExpr(n.Low, fn), High: RewriteExpr(n.High, fn)}
 	case *InExpr:
-		out := &InExpr{Left: ReplaceGroupKeyRefs(n.Left, keys), Not: n.Not,
+		out := &InExpr{Left: RewriteExpr(n.Left, fn), Not: n.Not,
 			Values: make([]Node, len(n.Values))}
 		for i, v := range n.Values {
-			out.Values[i] = ReplaceGroupKeyRefs(v, keys)
+			out.Values[i] = RewriteExpr(v, fn)
 		}
 		return out
 	case *CastNode:
-		return &CastNode{Inner: ReplaceGroupKeyRefs(n.Inner, keys), TypeName: n.TypeName}
+		return &CastNode{Inner: RewriteExpr(n.Inner, fn), TypeName: n.TypeName}
 	case *FuncCallNode:
 		if IsAggregate(n.Name) {
 			return node
@@ -276,27 +298,27 @@ func ReplaceGroupKeyRefs(node Node, keys map[string]string) Node {
 		out := &FuncCallNode{Name: n.Name, Distinct: n.Distinct, Star: n.Star,
 			Args: make([]Node, len(n.Args))}
 		for i, a := range n.Args {
-			out.Args[i] = ReplaceGroupKeyRefs(a, keys)
+			out.Args[i] = RewriteExpr(a, fn)
 		}
 		return out
 	case *CaseNode:
-		out := &CaseNode{Subject: ReplaceGroupKeyRefs(n.Subject, keys),
-			Else: ReplaceGroupKeyRefs(n.Else, keys), Whens: make([]WhenClause, len(n.Whens))}
+		out := &CaseNode{Subject: RewriteExpr(n.Subject, fn),
+			Else: RewriteExpr(n.Else, fn), Whens: make([]WhenClause, len(n.Whens))}
 		for i, w := range n.Whens {
-			out.Whens[i] = WhenClause{Cond: ReplaceGroupKeyRefs(w.Cond, keys),
-				Result: ReplaceGroupKeyRefs(w.Result, keys)}
+			out.Whens[i] = WhenClause{Cond: RewriteExpr(w.Cond, fn),
+				Result: RewriteExpr(w.Result, fn)}
 		}
 		return out
 	case *ArrayLitNode:
 		out := &ArrayLitNode{Elements: make([]Node, len(n.Elements))}
 		for i, e := range n.Elements {
-			out.Elements[i] = ReplaceGroupKeyRefs(e, keys)
+			out.Elements[i] = RewriteExpr(e, fn)
 		}
 		return out
 	case *TupleNode:
 		out := &TupleNode{Elements: make([]Node, len(n.Elements))}
 		for i, e := range n.Elements {
-			out.Elements[i] = ReplaceGroupKeyRefs(e, keys)
+			out.Elements[i] = RewriteExpr(e, fn)
 		}
 		return out
 	}
