@@ -2873,6 +2873,13 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// an arm's projection has to be written against what its producer really
 	// emits.
 	respellUnionArmProjections(stages)
+	// And the payload the two passes above just made a join stage read. Its
+	// OutputFilter and its exchanges' manifests were built from the join
+	// node's NeededColumns, before either pass existed to add a name, so a
+	// column the fragment is about to evaluate could be missing from the
+	// shuffle entirely (join_carried_columns.go).
+	ensureJoinCarriesEvaluatedColumns(stages)
+	ensureJoinCarriesGatherOutputs(stages)
 	if err := assertGatherOutputIsReachable(stages); err != nil {
 		return nil, err
 	}
