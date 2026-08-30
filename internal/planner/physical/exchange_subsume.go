@@ -111,7 +111,7 @@ func dedupeSubsumedScanExchanges(stages []Stage) []Stage {
 				continue
 			}
 			// Rewrite: flag col on A, consumer build reads A + filter.
-			flag := fmt.Sprintf("__subsume_f%d", flagSeq)
+			flag := fmt.Sprintf("%s%d", SlotSubsumeFlag, flagSeq)
 			flagSeq++
 			residual := conjoin(scanB.FilterExprs)
 			a.Exchange.ComputedCols = append(a.Exchange.ComputedCols, ComputedCol{

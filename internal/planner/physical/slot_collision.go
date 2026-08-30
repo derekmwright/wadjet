@@ -44,8 +44,22 @@ func renameCollidingSlots(root *logical.Node) {
 	if !hot {
 		return // the overwhelmingly common case, one map walk
 	}
+	// taken is every window-slot name this QUERY already uses — the ones the
+	// builder minted, renamed or not — as well as the stored ones. Searching
+	// only the stored set renumbered one window onto ANOTHER window's slot:
+	// with `__win_0` stored, window #1 moved to the first non-stored name,
+	// `__win_1`, which window #2 already held; #2 was not renamed because
+	// `__win_1` is not stored, both wrote `__win_1`, and the by-name projection
+	// handed the second window the first one's value. Silently, and on the
+	// single-process path only, so it was a two-path divergence as well as a
+	// wrong number.
+	alloc := plansql.NewSlotAllocator()
+	for k := range stored {
+		alloc.Seed(k)
+	}
+	seedWindowSlotNames(root, alloc)
+
 	rename := map[string]string{}
-	next := 0
 	var walk func(n *logical.Node)
 	walk = func(n *logical.Node) {
 		if n == nil {
@@ -57,13 +71,9 @@ func renameCollidingSlots(root *logical.Node) {
 				if out == "" || !stored[out] {
 					continue
 				}
-				fresh := ""
-				for {
-					fresh = plansql.SlotName(plansql.SlotWindowOutput, next)
-					next++
-					if !stored[strings.ToLower(fresh)] {
-						break
-					}
+				fresh, ok := alloc.Next(plansql.SlotWindowOutput)
+				if !ok {
+					continue // the family is exhausted; leave the plan as it was
 				}
 				rename[out] = fresh
 				n.WindowExprs[i].OutputCol = fresh
@@ -150,4 +160,22 @@ func renameColRefs(node plansql.Node, rename map[string]string) (plansql.Node, b
 		return &plansql.ColRef{Column: to}, true
 	})
 	return out, changed
+}
+
+// seedWindowSlotNames tells the allocator about every window OUTPUT slot the
+// plan already uses. A renumbering that ignores them moves one window onto
+// another's name — which is exactly what happened before the allocator
+// existed, and what its issued-set now prevents for the slots it hands out.
+func seedWindowSlotNames(n *logical.Node, alloc *plansql.SlotAllocator) {
+	if n == nil {
+		return
+	}
+	for _, w := range n.WindowExprs {
+		if w.OutputCol != "" {
+			alloc.Seed(w.OutputCol)
+		}
+	}
+	for _, c := range n.Children {
+		seedWindowSlotNames(c, alloc)
+	}
 }

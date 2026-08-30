@@ -148,8 +148,8 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 			continue
 		}
 		if strings.EqualFold(a.Func, "avg") {
-			sumP := fmt.Sprintf("__tl_avgsum_%d", i)
-			cntP := fmt.Sprintf("__tl_avgcnt_%d", i)
+			sumP := fmt.Sprintf("%savgsum_%d", plansql.SlotTwoLevel, i)
+			cntP := fmt.Sprintf("%savgcnt_%d", plansql.SlotTwoLevel, i)
 			innerSum, innerCnt := a, a
 			innerSum.Func, innerSum.OutputCol = "sum", sumP
 			innerCnt.Func, innerCnt.OutputCol = "count", cntP
@@ -160,7 +160,7 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 			avgDivs = append(avgDivs, avgDiv{out: a.OutputCol, sum: sumP, cnt: cntP})
 			continue
 		}
-		partial := fmt.Sprintf("__tl_%s_%d", strings.ToLower(a.Func), i)
+		partial := fmt.Sprintf("%s%s_%d", plansql.SlotTwoLevel, strings.ToLower(a.Func), i)
 		inner := a
 		inner.OutputCol = partial
 		innerAggs = append(innerAggs, inner)

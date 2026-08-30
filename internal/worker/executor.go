@@ -1013,7 +1013,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if len(task.PreComputedAggregates) > 0 {
 		sigs := make([]logical.PreComputedAggregate, 0, len(task.PreComputedAggregates))
 		for i, pa := range task.PreComputedAggregates {
-			alias := fmt.Sprintf("__precomp_agg_%d", i)
+			alias := fmt.Sprintf("%s%d", plansql.SlotPreComputedAgg, i)
 			aggOut := make([]string, len(pa.AggSpecs))
 			for j, spec := range pa.AggSpecs {
 				aggOut[j] = spec.OutputCol

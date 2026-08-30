@@ -115,7 +115,14 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 	typeDec := windowKeyInputDecimal(child)
 	colFields := inputColRowFields(child)
 	out := map[string]windowKey{}
-	materialized := 0
+	// One allocator for this window stage's keys, seeded with the names its
+	// INPUT already carries — a stored `__winkey_N` column among them — so a
+	// materialized key can never land on a name the batch already has, and two
+	// keys can never land on each other's (reserved_slots.go, SlotAllocator).
+	keyAlloc := plansql.NewSlotAllocator()
+	for name := range colTypes {
+		keyAlloc.Seed(name)
+	}
 	add := func(term string) {
 		term = strings.TrimSpace(term)
 		if term == "" {
@@ -151,8 +158,11 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 			}
 		}
 		if k.Expr != nil {
-			k.Name = SlotName(SlotWindowKey, materialized)
-			materialized++
+			fresh, ok := keyAlloc.Next(SlotWindowKey)
+			if !ok {
+				return // the family is exhausted; leave this key as written
+			}
+			k.Name = fresh
 			if k.Field != nil {
 				k.Type, k.Precision, k.Scale = k.Field.Type, k.Field.Precision, k.Field.Scale
 			} else {

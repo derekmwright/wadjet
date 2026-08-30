@@ -67,6 +67,14 @@ const (
 	SlotAvgCount     SlotFamily = "__avg_count"   // AVG's decomposed COUNT leg
 	SlotVarState     SlotFamily = "__var_state"   // STDDEV/VARIANCE partial state
 	SlotCovarState   SlotFamily = "__covar_state" // CORR/COVAR partial state
+	// The SUFFIX-minted families: their names carry a discriminator rather than
+	// a bare index, so they are rendered with fmt.Sprintf against the constant
+	// rather than through SlotName. They are reserved on the same grounds.
+	SlotPreComputedAgg SlotFamily = "__precomp_agg_" // pre-computed aggregate substitution
+	SlotSubsumeFlag    SlotFamily = "__subsume_f"    // subsumed-filter marker
+	SlotRowLocator     SlotFamily = "__row_loc"      // row-locator sentinel
+	SlotRowCountOnly   SlotFamily = "__rowcount_only__"
+	SlotDefaultPart    SlotFamily = "__default__"
 )
 
 // SlotName is the Nth slot of a family: `SlotName(SlotWindowOutput, 0)` is
@@ -81,6 +89,14 @@ func SlotName(family SlotFamily, n int) string {
 
 // allSlotFamilies is every family constant above, so the coverage gate can
 // walk them. A family added without a row here fails that gate.
+// suffixMintedFamilies are the families whose names carry a discriminator
+// rather than a bare index, so SlotName is not their producer. They are named
+// here so "no SlotName producer" cannot quietly mean "forgotten".
+var suffixMintedFamilies = []SlotFamily{
+	SlotPreComputedAgg, SlotSubsumeFlag, SlotRowLocator,
+	SlotRowCountOnly, SlotDefaultPart,
+}
+
 var allSlotFamilies = []SlotFamily{
 	SlotWindowOutput, SlotWindowKey, SlotSortKey, SlotGroupKey, SlotAggInput,
 	SlotNestedAgg, SlotScalar, SlotHaving, SlotTwoLevel, SlotSetOpCount,
@@ -176,4 +192,99 @@ func RefuseReservedSlotNames(names []string, where string) error {
 		}
 	}
 	return nil
+}
+
+// SlotAllocator hands out fresh hidden-slot names for ONE query scope.
+//
+// It exists because `SlotName` is a pure namer and nothing ALLOCATED. Two
+// independent authors then wrote the same bug against it within a day: a slot
+// search that excluded the names already in scope but not the slots it had
+// itself already issued.
+//
+//   - The window renamer, moving a slot past a stored `__win_0` column, took
+//     the first name not in the STORED set — `__win_1`, which the query's
+//     SECOND window already held. Both wrote `__win_1` and the by-name
+//     projection handed window #2 window #1's value. Silent, single-process
+//     path only, so a two-path divergence as well as a wrong number.
+//   - The group-key minting, materializing two computed GROUP BY keys, skipped
+//     names in scope but not slots issued to earlier keys of the same
+//     aggregate. Two keys landed in one column and twelve groups collapsed to
+//     three. Silent.
+//
+// One shape, two authors, because the shared API let each of them write their
+// own search. This is the only way a slot may be obtained; `SlotName` remains
+// for rendering a known index and for tests.
+//
+// Not safe for concurrent use: an allocator belongs to one query scope, which
+// is planned on one goroutine.
+type SlotAllocator struct {
+	// taken holds the SEEDED names (a table's stored columns, an input
+	// schema, the names already emitted in scope) and every slot this
+	// allocator has ISSUED. Both halves matter, and forgetting the second is
+	// the bug above.
+	taken map[string]bool
+	// next is the search cursor per family, so allocating in one family does
+	// not renumber another.
+	next map[SlotFamily]int
+	// issued is what this allocator handed out, in order, for callers that
+	// need to report or assert on it.
+	issued []string
+}
+
+// NewSlotAllocator returns an allocator for a query scope, seeded with the
+// names that already exist in it. Seeding is case-insensitive, because column
+// resolution is.
+func NewSlotAllocator(inScope ...string) *SlotAllocator {
+	a := &SlotAllocator{taken: make(map[string]bool, len(inScope)+8), next: map[SlotFamily]int{}}
+	a.Seed(inScope...)
+	return a
+}
+
+// Seed adds more names to the scope. Safe to call after allocation has begun —
+// a name seeded late is excluded from every LATER allocation, and the names
+// already issued stay issued.
+func (a *SlotAllocator) Seed(names ...string) {
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" {
+			a.taken[strings.ToLower(n)] = true
+		}
+	}
+}
+
+// slotSearchBound is the most candidates one Next call will try. By the
+// pigeonhole principle a free index exists within len(taken)+1 distinct
+// candidates, since at most len(taken) of them can be taken; the constant is a
+// generous ceiling and a guard against a corrupted map.
+const slotSearchBound = 1 << 20
+
+// Next returns the next unused slot of a family and records it as used.
+//
+// It excludes BOTH the seeded names and every slot this allocator has already
+// issued, which is the whole of its contract.
+//
+// ok is false only when the family is EXHAUSTED — no free index below the
+// search bound — which needs a scope holding a million names of one family and
+// has no known SQL. A caller that gets false must leave the plan as it was
+// rather than invent a name: an allocator that cannot allocate is a reason to
+// decline an optimization, never a reason to reuse a slot.
+//
+// Terminates: the family's cursor advances by one per candidate and never
+// rewinds, `taken` grows by at most one per successful call, and the loop is
+// bounded.
+func (a *SlotAllocator) Next(family SlotFamily) (string, bool) {
+	for tried := 0; tried < slotSearchBound; tried++ {
+		name := SlotName(family, a.next[family])
+		a.next[family]++
+		if !a.taken[strings.ToLower(name)] {
+			a.taken[strings.ToLower(name)] = true
+			a.issued = append(a.issued, name)
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// Issued lists the slots this allocator handed out, in order.
+func (a *SlotAllocator) Issued() []string {
+	return append([]string(nil), a.issued...)
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -214,6 +215,172 @@ func rsIngestOldTable(t *testing.T, ctx context.Context, db *wadjet.DB) {
 		t.Fatalf("single create: %v", err)
 	}
 	ing := ingest.New(db.Catalog(), rsOldTab, schema, nil,
+		ingest.Config{MaxBufferRows: len(rows) + 1, RowGroupSize: 128})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatalf("single ingest: %v", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatalf("single flush: %v", err)
+	}
+}
+
+// TestStoredReservedColumnWithSeveralWindows is Blocker 2's gate: renumbering
+// one window's slot past a stored column must not land it on ANOTHER window's
+// slot.
+//
+// With `__win_0` stored, the first repair took the first name not in the
+// STORED set — `__win_1` — which the query's SECOND window already held. The
+// second was not renamed, because `__win_1` is not stored, so both wrote it and
+// the by-name projection handed w2 the value of w1. Silent, and on the
+// single-process path only, so it was a two-path divergence as well as a wrong
+// number. The free-name search now runs through plansql.SlotAllocator, which
+// excludes the names in scope AND every slot it has itself issued.
+func TestStoredReservedColumnWithSeveralWindows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	single := tmdStandalone(t, ctx)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	infraB := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraB, nil)
+	coordB := tmdCoordinator(t, ctx, infraB)
+	coordB.config.BroadcastBytesOverride = 1
+
+	rsWriteWinTable(t, ctx, infra, infraB)
+	rsIngestWinTable(t, ctx, single)
+
+	arms := []struct {
+		name string
+		run  func(string) (*oracle.Result, error)
+	}{
+		{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }},
+		{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }},
+		{"dag-shuffled", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }},
+	}
+
+	// PostgreSQL 17 over the four rows: SUM(id) = 10, SUM(plain) = 10000,
+	// MIN(id) = 1, SUM(__win_0) = 1000. The two window values are deliberately
+	// DIFFERENT — with equal values a slot collision is invisible.
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		check map[string]string
+	}{
+		{
+			name: "two windows beside a stored slot name",
+			sql: "SELECT __win_0, SUM(id) OVER () AS w1, SUM(plain) OVER () AS w2 FROM " +
+				rsWinTab + " ORDER BY __win_0",
+			check: map[string]string{"w1": "10", "w2": "10000"},
+		},
+		{
+			name: "three windows beside a stored slot name",
+			sql: "SELECT __win_0, SUM(id) OVER () AS w1, SUM(plain) OVER () AS w2, " +
+				"MIN(id) OVER () AS w3 FROM " + rsWinTab + " ORDER BY __win_0",
+			check: map[string]string{"w1": "10", "w2": "10000", "w3": "1"},
+		},
+		{
+			// The stored slot column as a window ARGUMENT as well.
+			name: "a window OVER the stored slot column, beside another window",
+			sql: "SELECT __win_0, SUM(__win_0) OVER () AS w1, SUM(plain) OVER () AS w2 FROM " +
+				rsWinTab + " ORDER BY __win_0",
+			check: map[string]string{"w1": "1000", "w2": "10000"},
+		},
+		{
+			// The control: the same two windows with NO stored collision, so
+			// no renumbering happens at all.
+			name: "control, two windows with no stored collision",
+			sql: "SELECT id, SUM(id) OVER () AS w1, SUM(plain) OVER () AS w2 FROM " +
+				rsWinTab + " ORDER BY id",
+			check: map[string]string{"w1": "10", "w2": "10000"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused %q: %v", arm.name, tc.sql, err)
+				}
+				if len(res.Rows) != 4 {
+					t.Fatalf("%s arm returned %d rows, want 4", arm.name, len(res.Rows))
+				}
+				for col, want := range tc.check {
+					for i, r := range res.Rows {
+						if got := fmt.Sprintf("%v", r[col]); got != want {
+							t.Errorf("%s arm row %d: %s = %q, want %q — two windows sharing a "+
+								"slot hand the second one the first's value\n  SQL: %s",
+								arm.name, i, col, got, want, tc.sql)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+const rsWinTab = "wintab0"
+
+func rsWinSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "__win_0", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "plain", Type: parquet.TypeInt64, Nullable: true},
+	}}
+}
+
+func rsWinRows() []map[string]any {
+	out := make([]map[string]any, 4)
+	for i := range out {
+		out[i] = map[string]any{
+			"id": int64(i + 1), "__win_0": int64((i + 1) * 100), "plain": int64((i + 1) * 1000),
+		}
+	}
+	return out
+}
+
+func rsWriteWinTable(t *testing.T, ctx context.Context, infras ...tmdInfraT) {
+	t.Helper()
+	schema, rows := rsWinSchema(), rsWinRows()
+	for _, infra := range infras {
+		if err := infra.cat.CreateTable(ctx, rsWinTab, schema, nil); err != nil {
+			t.Fatalf("create %s: %v", rsWinTab, err)
+		}
+		var buf bytes.Buffer
+		pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+		if err != nil {
+			t.Fatalf("parquet writer: %v", err)
+		}
+		if err := pw.WriteRows(rows); err != nil {
+			t.Fatalf("write rows: %v", err)
+		}
+		if err := pw.Close(); err != nil {
+			t.Fatalf("close writer: %v", err)
+		}
+		path := fmt.Sprintf("tables/%s/chunk_0000.parquet", rsWinTab)
+		payload := buf.Bytes()
+		if _, err := infra.store.Put(ctx, "test", path, bytes.NewReader(payload),
+			int64(len(payload)), "application/octet-stream"); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		if err := infra.cat.AddFiles(ctx, rsWinTab, map[string]string{}, "tables/"+rsWinTab+"/",
+			[]catalog.FileEntry{{Path: path, SizeBytes: int64(len(payload)),
+				NumRows: int64(len(rows)), CreatedAt: time.Now()}}); err != nil {
+			t.Fatalf("add files: %v", err)
+		}
+	}
+}
+
+func rsIngestWinTable(t *testing.T, ctx context.Context, db *wadjet.DB) {
+	t.Helper()
+	schema, rows := rsWinSchema(), rsWinRows()
+	if err := db.Catalog().CreateTable(ctx, rsWinTab, schema, nil); err != nil {
+		t.Fatalf("single create: %v", err)
+	}
+	ing := ingest.New(db.Catalog(), rsWinTab, schema, nil,
 		ingest.Config{MaxBufferRows: len(rows) + 1, RowGroupSize: 128})
 	if err := ing.Ingest(ctx, rows); err != nil {
 		t.Fatalf("single ingest: %v", err)

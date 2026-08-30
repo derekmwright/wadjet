@@ -36,6 +36,12 @@ const (
 	SlotAvgCount     = plansql.SlotAvgCount
 	SlotVarState     = plansql.SlotVarState
 	SlotCovarState   = plansql.SlotCovarState
+
+	SlotPreComputedAgg = plansql.SlotPreComputedAgg
+	SlotSubsumeFlag    = plansql.SlotSubsumeFlag
+	SlotRowLocator     = plansql.SlotRowLocator
+	SlotRowCountOnly   = plansql.SlotRowCountOnly
+	SlotDefaultPart    = plansql.SlotDefaultPart
 )
 
 // SlotName mints the Nth slot of a family.

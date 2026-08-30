@@ -87,6 +87,12 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 	keys := make([]OrderExpr, 0, len(info.OrderBy))
 	var hidden []Projection
 
+	// One allocator for this query's materialized ORDER BY terms, seeded with
+	// the SELECT list's output names so a hidden key can never collide with a
+	// column the user selected, and never with another hidden key
+	// (plansql.SlotAllocator).
+	sortAlloc := plansql.NewSlotAllocator(outputs...)
+
 	for _, ob := range info.OrderBy {
 		key := resolveOrderByColumn(cleanExpr(ob.Column), info.Columns)
 		if sortKeyCarried(key, items, outputs, starOnly, ob.Expr) {
@@ -94,7 +100,10 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 			continue
 		}
 
-		name := plansql.SlotName(plansql.SlotSortKey, len(hidden))
+		name, ok := sortAlloc.Next(plansql.SlotSortKey)
+		if !ok {
+			continue // the family is exhausted; leave the term as written
+		}
 		proj, err := hiddenSortProjection(ob, child, project, name, starOnly)
 		if err != nil {
 			return nil, nil, err
