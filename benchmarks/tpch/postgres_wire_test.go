@@ -874,6 +874,20 @@ func wireCorpus() []wireCase {
 		{name: "WindowRowNumberAliasShadowsAnIntColumn",
 			sql: `SELECT d_key, ROW_NUMBER() OVER (ORDER BY d_key) AS d_grp FROM dec_probe
 				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		// UNALIASED windows, where the NAME is on the wire in
+		// RowDescription. PostgreSQL sends `sum` / `row_number` / `min`;
+		// wadjet sent the window call's own text, `sum(d_2) OVER (...)`,
+		// which a client binds by name and would never find. The corpus had
+		// no unaliased window on either arm before this.
+		{name: "WindowUnaliasedSum",
+			sql: `SELECT d_key, SUM(d_2) OVER () FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "WindowUnaliasedRowNumber",
+			sql: `SELECT d_key, ROW_NUMBER() OVER (ORDER BY d_key) FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "WindowUnaliasedMinMax",
+			sql: `SELECT d_key, MIN(d_2) OVER (), MAX(d_2) OVER () FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		// The CONTROL for the two above: MIN/MAX over a window of a
 		// non-DECIMAL column, where no typmod is in play. It carries no pin,
 		// which is what proves the pinned entries are about the modifier and

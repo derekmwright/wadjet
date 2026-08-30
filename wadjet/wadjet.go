@@ -638,11 +638,20 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any, schema []par
 			for _, col := range info.Columns {
 				name := col.Alias
 				if name == "" {
-					if col.IsAgg {
+					switch {
+					case col.IsWindow:
+						// The name the logical builder's projection really
+						// publishes. PostgreSQL calls an unaliased
+						// `SUM(a) OVER ()` "sum"; naming it from the
+						// expression TEXT here asked the result schema for a
+						// column the projection does not emit, and every row
+						// came back NULL.
+						name = plansql.WindowOutputName(col)
+					case col.IsAgg:
 						name = col.Expr
-					} else if col.ColumnRef != "" {
+					case col.ColumnRef != "":
 						name = col.ColumnRef
-					} else {
+					default:
 						name = col.Expr
 					}
 				}

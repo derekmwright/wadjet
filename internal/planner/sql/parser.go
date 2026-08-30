@@ -1028,7 +1028,12 @@ func resolvePositionalRefs(info *SelectInfo) error {
 			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(info.Columns))
 		}
 		col := info.Columns[pos-1]
-		if col.Alias != "" {
+		if col.IsWindow {
+			// The name the projection really publishes. Naming it from the
+			// expression TEXT rewrote `ORDER BY 1` to `sum(a) OVER (...)`,
+			// which no sort key can resolve.
+			info.OrderBy[i].Column = WindowOutputName(col)
+		} else if col.Alias != "" {
 			info.OrderBy[i].Column = col.Alias
 		} else {
 			info.OrderBy[i].Column = col.Expr
@@ -1060,7 +1065,9 @@ func resolveSetOpOrderBy(info *SelectInfo) error {
 			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(cols.Columns))
 		}
 		col := cols.Columns[pos-1]
-		if col.Alias != "" {
+		if col.IsWindow {
+			info.OrderBy[i].Column = WindowOutputName(col)
+		} else if col.Alias != "" {
 			info.OrderBy[i].Column = col.Alias
 		} else {
 			info.OrderBy[i].Column = col.Expr

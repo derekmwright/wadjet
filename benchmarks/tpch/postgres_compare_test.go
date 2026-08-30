@@ -3177,6 +3177,25 @@ func postgresSemanticsCases() []pgCase {
 		// column, so the ROWS came back in the wrong sequence as well.
 		pgCase{name: "WindowAliasShadowsAColumnOrderedByIt", exactNumeric: true, sql: `SELECT d_key,
 			SUM(d_2) OVER () AS d_grp FROM dec_probe ORDER BY d_grp, d_key`},
+		// An UNALIASED window. PostgreSQL names the column after the FUNCTION
+		// — `sum`, `row_number`, `min` — and wadjet named it after the window
+		// call's TEXT, `sum(d_2) OVER (...)`, which no client recognises. The
+		// value arm sees the name because it compares by column name, and it
+		// is the arm that can: nothing else in the corpus has an unaliased
+		// window at all.
+		pgCase{name: "WindowUnaliasedSum", exactNumeric: true, sql: `SELECT d_key,
+			SUM(d_2) OVER () FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowUnaliasedRowNumber", sql: `SELECT d_key,
+			ROW_NUMBER() OVER (ORDER BY d_key) FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowUnaliasedMinMax", exactNumeric: true, sql: `SELECT d_key,
+			MIN(d_2) OVER (), MAX(d_2) OVER () FROM dec_probe ORDER BY d_key`},
+		// ORDER BY a POSITION over an unaliased window: the positional
+		// resolver rewrites the ordinal to the select item's NAME, so it has
+		// to make the same choice the projection does — under the text
+		// spelling it produced a key with parentheses in it, which the sort
+		// could not resolve and the DAG failed at dispatch for.
+		pgCase{name: "WindowUnaliasedOrderedByPosition", exactNumeric: true, sql: `SELECT
+			SUM(d_2) OVER () FROM dec_probe ORDER BY 1, 1`},
 
 		// --- an aggregate's INPUT expression over a derived column (#702) ----
 		//

@@ -623,22 +623,11 @@ func isStarOnly(cols []plansql.SelectColumn) bool {
 	return len(cols) == 1 && cols[0].Star
 }
 
-// windowOutputName is the name a bare window column is published under: the
-// alias where the query gave one, and the window call's own text where it did
-// not.
-//
-// Two places have to agree on it — the projection the builder emits and
-// selectOutputNames, which the ORDER BY resolver reads — and both used to take
-// it from WindowSpec.Alias, which for an unaliased window is the empty string.
-// The projection then asked for "" and the sort resolver compared against "".
+// windowOutputName is plansql.WindowOutputName. The rule lives there because
+// the parser's positional-ORDER-BY resolvers need it too and cannot import the
+// planner; see that function for the five namers it keeps in agreement.
 func windowOutputName(col plansql.SelectColumn) string {
-	if col.Alias != "" {
-		return col.Alias
-	}
-	if col.WindowSpec != nil && col.WindowSpec.Alias != "" {
-		return col.WindowSpec.Alias
-	}
-	return cleanExpr(col.Expr)
+	return plansql.WindowOutputName(col)
 }
 
 func cleanExpr(s string) string {
