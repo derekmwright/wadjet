@@ -449,6 +449,20 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			{"Max", `SELECT id, MAX(c_i64 * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`, max},
 			{"FirstValue", `SELECT id, FIRST_VALUE(c_i64 * 2) OVER (ORDER BY id) AS s FROM %s WHERE id < 5 ORDER BY id`, first},
 			{"Coalesce", `SELECT id, SUM(COALESCE(c_i64, 0) * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`, sum},
+			// TWO windows over DIFFERENT expressions of ONE column, read
+			// through the SECOND one. resolveWindowKeys keys its map by the
+			// term's TEXT so that two clauses sharing a term compute it once;
+			// the mirror risk is two clauses that do NOT share one collapsing
+			// into a single slot, which would give both the same value.
+			{"TwoExpressionsOfOneColumn",
+				`SELECT id, SUM(c_i64 * 3) OVER () AS other, SUM(c_i64 * 2) OVER () AS s ` +
+					`FROM %s WHERE id < 5 ORDER BY id`, sum},
+			// A window over an expression INSIDE a derived table, consumed
+			// above it: the outer reference reads a stage the window produced,
+			// not the scan the argument was written against.
+			{"ThroughADerivedTable",
+				`SELECT id, s FROM (SELECT id, SUM(c_i64 * 2) OVER () AS s FROM %s WHERE id < 5) x ` +
+					`ORDER BY id`, sum},
 		} {
 			c := c
 			t.Run(c.name, func(t *testing.T) {
