@@ -93,17 +93,35 @@ func respellAggInputExpr(n plansql.Node, child *logical.Node) (plansql.Node, boo
 		return n, false
 	}
 	out, changed, _ := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
-		resolved, expr, _, renamed := resolveAggInputName(ref.String(), child)
-		if !renamed {
+		if resolved, expr, _, renamed := resolveAggInputName(ref.String(), child); renamed {
+			if expr != nil {
+				return &plansql.ParenNode{Inner: expr}, true
+			}
+			if !strings.EqualFold(resolved, ref.String()) {
+				return &plansql.ColRef{Column: cleanExpr(resolved)}, true
+			}
 			return nil, false
 		}
-		if expr != nil {
-			return &plansql.ParenNode{Inner: expr}, true
-		}
-		if strings.EqualFold(resolved, ref.String()) {
+		// A ROW FIELD PATH whose CONTAINER is the rename: `rw.b` over
+		// `SELECT c_row AS rw`. The whole spelling names no column, and the
+		// field `b` is not a column either — only the QUALIFIER is a name to
+		// resolve, and resolving it gives the path the stage's stream really
+		// carries. Without this the reference reached the worker as `rw.b`,
+		// which nothing there can look up.
+		//
+		// It runs only AFTER the whole spelling has failed, which is
+		// ADR-0022 §1's order: a derived table that emits a column named
+		// `rw.b`, or whose own alias is `rw`, is resolved above and never
+		// reaches here. A qualifier that is a FROM alias rather than a
+		// rename resolves to nothing and is left exactly as written.
+		if ref.Table == "" {
 			return nil, false
 		}
-		return &plansql.ColRef{Column: cleanExpr(resolved)}, true
+		qual, qexpr, _, qrenamed := resolveAggInputName(ref.Table, child)
+		if !qrenamed || qexpr != nil || strings.EqualFold(qual, ref.Table) {
+			return nil, false
+		}
+		return &plansql.ColRef{Table: cleanExpr(qual), Column: ref.Column}, true
 	})
 	return out, changed
 }

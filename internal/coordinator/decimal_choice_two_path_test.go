@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -646,6 +647,65 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 				t.Errorf("dag %s = %q, want %q — PostgreSQL 17 answers %q and the "+
 					"single-process path agrees, so the derived name resolved to "+
 					"nothing or to the wrong column (#702)", tc.sql, got, tc.want, tc.want)
+			}
+		})
+	}
+}
+
+// TestAggregateOverADerivedRowFieldPathTwoPath is the arm the schema assert
+// found, and the reason it exists.
+//
+// `rw.b` over `SELECT c_row AS rw` is a ROW FIELD PATH whose CONTAINER is the
+// rename. The whole spelling names no column and neither does the field, so
+// the reference reached the worker as `rw.b`, which nothing in the batch can be
+// looked up under: the DAG answered 0 where PostgreSQL and the single-process
+// path answer 55. It survived the first round of #702's fix — the reference
+// resolution asked only about the whole spelling — and
+// assertAggregateInputsResolve is what turned it from a silent 0 into
+// `its input carries no [rw.b]`, which is how it was found at all.
+//
+// The qualifier is now resolved when the whole spelling is not, in ADR-0022
+// §1's order, and the shape answers on both paths.
+func TestAggregateOverADerivedRowFieldPathTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct{ name, sql, want string }{
+		{
+			name: "a ROW field path whose container is a derived rename",
+			sql: "SELECT SUM(CASE WHEN id < 5 THEN rw.b ELSE 0 END) AS v FROM " +
+				"(SELECT id, c_row AS rw FROM " + typematrix.Nested + ") x",
+			want: "55",
+		},
+		{
+			// The control: the same field path with no rename between the
+			// aggregate and the scan, which never needed resolving.
+			name: "control, the same field path with no rename",
+			sql: "SELECT SUM(CASE WHEN id < 5 THEN c_row.b ELSE 0 END) AS v FROM " +
+				typematrix.Nested,
+			want: "55",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused %q: %v", arm.name, tc.sql, err)
+				}
+				if len(res.Rows) != 1 {
+					t.Fatalf("%s arm returned %d rows, want 1", arm.name, len(res.Rows))
+				}
+				if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != tc.want {
+					t.Errorf("%s arm answered %q, want %q — a ROW field path through a "+
+						"derived rename names nothing the stage carries (#702)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
 			}
 		})
 	}
