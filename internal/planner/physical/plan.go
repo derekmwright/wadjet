@@ -5182,6 +5182,20 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// the text alone and has no catalog to consult.
 					spec.InputType, spec.InputPrecision, spec.InputScale = declTypeParts(
 						inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, inputColDecls(exprCols)))
+					// And the OUTPUT declaration from that same triple. The
+					// worker materializes this projection from it, so the
+					// vector every partial that sees a row observes IS this
+					// declaration — reading the output off it is what makes the
+					// identity row of a partial whose filter matched nothing
+					// declare what its siblings will write, instead of
+					// aggSpecOutputType's float64 default for anything that is
+					// not a bare column (#685: SUM(a * (1 - b)) and its whole
+					// class). See aggOutputFromInputDecl.
+					if t, p, sc, known := aggOutputFromInputDecl(
+						agg.Func, agg.Distinct, spec.InputType, spec.InputPrecision, spec.InputScale); known {
+						spec.OutputType, spec.OutputTypeKnown = t, true
+						spec.OutputPrecision, spec.OutputScale = p, sc
+					}
 				}
 			}
 			aggSpecs = append(aggSpecs, spec)
@@ -8253,6 +8267,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	var preProjectMeta []parquet.Column
 	syntheticNames := make(map[int]string) // agg index → synthetic column name
 	exprDedup := make(map[string]string)   // expr string → synthetic column name
+	// synDecl is the DECLARATION each synthetic column is materialized under —
+	// the same triple the stage DAG carries as AggSpec.InputType/Precision/
+	// Scale. The aggregate's OUTPUT declaration is read off it below, so this
+	// path and the DAG declare the same thing for the same query, identity row
+	// included (#685; see aggOutputFromInputDecl).
+	synDecl := make(map[string]parquet.Column)
 
 	// The declarations of what feeds the aggregate, resolved once: they are
 	// what tells a ROW FIELD PATH apart from a table-qualified column, and a
@@ -8367,6 +8387,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				preProjectMeta = append(preProjectMeta, meta)
 				syntheticNames[i] = synName
 				exprDedup[exprStr] = synName
+				synDecl[synName] = meta
 			}
 		}
 	}
@@ -8427,6 +8448,19 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// both read this function.
 		if m, known := aggSpecOutputDecimal(node, agg); known {
 			ac.OutputPrecision, ac.OutputScale = m.Precision, m.Scale
+		}
+		// A COMPUTED argument is declared from the projection this path
+		// materializes it under, which is the DAG's rule read off the local
+		// equivalent of AggSpec.InputType/Precision/Scale. Without it a
+		// zero-row SUM(a * (1 - b)) declared float64 here and DECIMAL there.
+		if synName, ok := syntheticNames[i]; ok {
+			if d, ok := synDecl[synName]; ok {
+				if t, prec, sc, known := aggOutputFromInputDecl(
+					agg.Func, agg.Distinct, d.Type, d.Precision, d.Scale); known {
+					ac.OutputType = t
+					ac.OutputPrecision, ac.OutputScale = prec, sc
+				}
+			}
 		}
 		aggCols = append(aggCols, ac)
 	}
@@ -12521,6 +12555,63 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 		return logical.DecimalMeta{Precision: batch.MaxDecimalPrecision, Scale: batch.AvgScale(in.Scale)}, true
 	default:
 		return in, true
+	}
+}
+
+// aggOutputFromInputDecl is aggSpecOutputType/aggSpecOutputDecimal's rule for a
+// COMPUTED argument: the aggregate's declared output, derived from the
+// declaration its INPUT PROJECTION is built from.
+//
+// It exists because an aggregate over a computed argument had no declared
+// output at all — aggSpecOutputType declines a non-bare ColRef and falls to
+// aggOutputType's float64 — while the partials that saw a row emitted whatever
+// the projected vector actually was. On the stage DAG those are the same file
+// set: a partial whose filter matched nothing writes the identity row under the
+// float64 default, its siblings write DECIMAL, and one stage's files then
+// describe two different relations. Before #685's reader guard that was a
+// silent 10^scale on SUM(a * (1 - b)) — the TPC-H revenue shape — and after it,
+// a refused read. Neither is an answer.
+//
+// The derivation is BY CONSTRUCTION rather than by inference, which is what
+// makes it total: the worker builds the pre-aggregate projection from
+// AggSpec.InputType/InputPrecision/InputScale (worker.buildAggInputProjection),
+// so the vector every non-empty partial observes IS this declaration. Reading
+// the output off the same triple means the identity row and its siblings agree
+// whatever the triple says — including when it is the float64 fallback for an
+// expression nothing could type.
+//
+// ok=false only for a function whose output does not follow its input at all;
+// those keep aggOutputType's answer, which is already input-independent.
+func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precision, scale int) (
+	out parquet.TypeID, outPrecision, outScale int, ok bool,
+) {
+	name := strings.ToLower(strings.TrimSpace(fn))
+	switch name {
+	case "min", "max", "min_by", "max_by", "sum", "avg":
+	default:
+		return aggOutputType(fn, distinct), 0, 0, true
+	}
+	if in == parquet.TypeDecimal && precision > 0 {
+		switch name {
+		case "sum":
+			return parquet.TypeDecimal, batch.MaxDecimalPrecision, scale, true
+		case "avg":
+			return parquet.TypeDecimal, batch.MaxDecimalPrecision, batch.AvgScale(scale), true
+		default:
+			// MIN/MAX/MIN_BY/MAX_BY hand back a value the input HELD, so they
+			// keep its (p,s) — the same rule aggSpecOutputDecimal applies to a
+			// bare column.
+			return parquet.TypeDecimal, precision, scale, true
+		}
+	}
+	switch name {
+	case "sum", "avg":
+		// Every non-DECIMAL input: float64, exactly as before.
+		return aggOutputType(fn, distinct), 0, 0, true
+	case "min_by", "max_by":
+		return in, 0, 0, true
+	default:
+		return minMaxDeclaredType(in), 0, 0, true
 	}
 }
 

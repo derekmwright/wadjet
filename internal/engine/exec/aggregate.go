@@ -179,17 +179,23 @@ type HashAggregate struct {
 	// genKeyNext (chained-hash pattern). strGroupIndex is NOT maintained on
 	// this path; ensureStrGroupIndexForMerge rebuilds it for the slow
 	// merge fallback.
-	genKeyIdx         *intHashTable
-	genKeyNext        []int32
-	keySerCols        []keySerCol // per-batch resolved key accessors (scratch)
-	groupColIdx       []int
-	aggColIdx         []int
-	aggColIdx2        []int // second column indices for two-column aggregates
-	groupColTypes     []batch.TypeID
-	groupColMeta      []parquet.Column        // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
-	aggInputTypes     []batch.TypeID          // observed input column type per aggregate (0 = unresolved)
-	aggInputMeta      []parquet.Column        // full input column metadata per aggregate (MIN/MAX over a container and MIN_BY/MAX_BY re-emit their input's Scale/Fields/ElementType/Dimension)
-	aggInputDecScale  []int                   // DECIMAL input scale per aggregate, read from the VECTOR (not the schema column) so the declared output scale is the one the Int128 accumulator actually counts in (#455)
+	genKeyIdx        *intHashTable
+	genKeyNext       []int32
+	keySerCols       []keySerCol // per-batch resolved key accessors (scratch)
+	groupColIdx      []int
+	aggColIdx        []int
+	aggColIdx2       []int // second column indices for two-column aggregates
+	groupColTypes    []batch.TypeID
+	groupColMeta     []parquet.Column // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
+	aggInputTypes    []batch.TypeID   // observed input column type per aggregate (0 = unresolved)
+	aggInputMeta     []parquet.Column // full input column metadata per aggregate (MIN/MAX over a container and MIN_BY/MAX_BY re-emit their input's Scale/Fields/ElementType/Dimension)
+	aggInputDecScale []int            // DECIMAL input scale per aggregate, read from the VECTOR (not the schema column) so the declared output scale is the one the Int128 accumulator actually counts in (#455)
+	// decScaleConflict is the operator-wide twin of
+	// kernel.Accumulator.DecScaleConflict, for the GROUPED paths whose state
+	// lives in the flat SoA arrays: those hold one scale per aggregate and no
+	// per-group accumulator to carry a flag on, so the latch is here and
+	// decAggErr reads it for every group. See Consume, where it is set.
+	decScaleConflict  bool
 	hasDecAggInput    bool                    // any aggregate reads a DECIMAL column — gates the per-batch scale reconciliation in Consume
 	aggBoxedMinMax    []bool                  // per aggregate: MIN/MAX over ARRAY/ROW/MAP/VECTOR, which retains a value instead of filling an Accumulator slot (#426)
 	hasBoxedMinMax    bool                    // any aggBoxedMinMax entry is set — one bool so the row and finalize loops pay a single load when none is
@@ -1278,12 +1284,27 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// disagree (#455).
 	if h.hasDecAggInput {
 		for i, ci := range h.aggColIdx {
-			if i >= len(h.aggInputDecScale) || h.aggInputDecScale[i] != 0 ||
-				ci < 0 || ci >= len(b.Columns) {
+			if ci < 0 || ci >= len(b.Columns) || i >= len(h.aggInputDecScale) {
 				continue
 			}
 			c := b.Columns[ci]
-			if c.Type != batch.TypeDecimal || c.DecimalData.Scale == 0 {
+			if c.Type != batch.TypeDecimal {
+				continue
+			}
+			// The GROUPED half of kernel.Accumulator.DecScaleConflict. The
+			// flat SoA arrays hold ONE scale per aggregate (fa.decScale, set
+			// from the first batch's column) and the scatter adds raw
+			// unscaled integers into them, so a second batch at a DIFFERENT
+			// nonzero scale is summed as if the two were counted the same:
+			// 12.75 (1275 at scale 2) plus 0.1275 (1275 at scale 4) came back
+			// 25.50, silently, where the UNGROUPED form raises 22003. Latched
+			// here rather than in the scatter because this is the one place
+			// that sees the batch's vector beside the aggregate's established
+			// scale, and it is off the per-row path (#685 review, item A).
+			if got := c.DecimalData.Scale; got != 0 && h.aggInputDecScale[i] != 0 && got != h.aggInputDecScale[i] {
+				h.decScaleConflict = true
+			}
+			if h.aggInputDecScale[i] != 0 || c.DecimalData.Scale == 0 {
 				continue
 			}
 			h.aggInputDecScale[i] = c.DecimalData.Scale
@@ -5217,6 +5238,12 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 			h.aggColIdx = o.aggColIdx
 		}
 	}
+	// A clone that latched a cross-scale batch hands the finding to the
+	// primary: the flag is a property of the INPUT the operator saw, and the
+	// primary saw none of it.
+	if o.decScaleConflict {
+		h.decScaleConflict = true
+	}
 	// The DECIMAL scale upgrades on EVERY merge, not only the first one.
 	//
 	// It is the one piece of that metadata a clone can report WRONG rather
@@ -5548,9 +5575,17 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.aggColIdx2 = o.aggColIdx2
 	h.aggInputTypes = o.aggInputTypes
 	h.aggInputMeta = o.aggInputMeta
-	h.aggInputDecScale = o.aggInputDecScale
+	// COPIED, not aliased, for mergeSinkState's reason: the scale upgrade
+	// there writes into h.aggInputDecScale on every later merge, and sharing
+	// the slice with the clone it was adopted from would write back into a
+	// state o still owns until its Close.
+	h.aggInputDecScale = append([]int(nil), o.aggInputDecScale...)
 	h.aggBoxedMinMax = o.aggBoxedMinMax
 	h.hasBoxedMinMax = o.hasBoxedMinMax
+	// The operator-wide cross-scale latch travels with the state it describes.
+	if o.decScaleConflict {
+		h.decScaleConflict = true
+	}
 	h.groupColTypes = o.groupColTypes
 	h.groupColMeta = o.groupColMeta
 	h.aggUpdaters = o.aggUpdaters
@@ -6402,7 +6437,7 @@ func (h *HashAggregate) decAggErr(acc *kernel.Accumulator, j int, fn AggFunc) er
 	if acc.DecOverflow {
 		return decimalSumOverflow(name())
 	}
-	if acc.DecScaleConflict {
+	if acc.DecScaleConflict || h.decScaleConflict {
 		return decimalScaleConflict(name())
 	}
 	if fn == AggAvg && acc.IsDecimal && acc.Count > 0 {

@@ -119,8 +119,23 @@ consumer can sniff and decode, including mid-stream.
   class from a wrong answer into a failed task, and it is a second line behind
   the producers, not the fix.
 
-  **And the producer that made this reachable from an ordinary query was the
-  IDENTITY ROW** (#685). An ungrouped aggregate that consumed no rows still owes
+  **The identity row is a producer of BOTH halves** (#685). Its DECIMAL
+  parameters are the first, below; its TYPE is the second, and the broader one:
+  an aggregate over a COMPUTED argument had no declared output at all
+  (`aggSpecOutputType` declines anything that is not a bare column reference and
+  falls to a float64 default), so a partial whose filter matched nothing wrote
+  FLOAT64 where its siblings wrote DECIMAL. That class is every CAST, every
+  column-to-column operator, unary minus, ABS/ROUND/GREATEST, division, CASE —
+  and `SUM(l_extendedprice * (1 - l_discount))`, TPC-H Q1 and Q6's revenue
+  expression. `physical.aggOutputFromInputDecl` closes it BY CONSTRUCTION rather
+  than by inference: the worker materializes the pre-aggregate projection from
+  `AggSpec.InputType/InputPrecision/InputScale`, so the vector every non-empty
+  partial observes IS that declaration, and reading the aggregate's output off
+  the same triple makes the identity row agree with its siblings whatever the
+  triple says — including the float64 fallback for an expression nothing can
+  type.
+
+  **And the DECIMAL-parameter half of the same producer** (#685). An ungrouped aggregate that consumed no rows still owes
   one row, and on the stage DAG a selective filter makes some partial tasks
   exactly that: a task whose files matched nothing. That row has no input vector
   to read a DECIMAL scale from, so it shipped `DECIMAL(0,0)` for a column every
@@ -141,6 +156,21 @@ consumer can sniff and decode, including mid-stream.
   `coordinator.TestFilteredDecimalAggregateTwoPath` (the answer, on both paths)
   and `kernel.TestDecimalBatchKernelsKeepTheContributingScale` (the
   accumulator, isolated).
+
+  **What none of these doors covers: the SCAN.** The guard above holds one
+  STAGE's files to one relation, and the writer holds one task's chunks to its
+  own header; the accumulator refuses a cross-scale pair that reaches it anyway
+  (`kernel.Accumulator.DecScaleConflict` for the ungrouped form,
+  `exec.HashAggregate.decScaleConflict` for the grouped one, both raising 22003
+  through `decAggErr`). NOTHING checks two BASE-TABLE parquet files whose
+  footers declare one column at two scales: they are read, mixed and answered,
+  on every path including the in-process fast one, which sits behind none of the
+  six shuffle readers. `SUM(a)` over such a pair comes back 25.50 for a pair
+  whose values are 12.75 and 0.1275. That is a scan-level schema-drift check —
+  the same class `applyDeclaredScanSchema` makes for TYPE drift (#503), one
+  parameter over — and it is a PRE-EXISTING residual, recorded here rather than
+  fixed with #685 because its fix belongs at the scan's declared-schema
+  admission and not at the exchange.
 
   Only DECIMAL is exposed this way: it is the one type whose parameters live in
   the HEADER. A VECTOR's dimension and an ARRAY's element declaration are not

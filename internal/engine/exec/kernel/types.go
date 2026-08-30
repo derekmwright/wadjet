@@ -53,12 +53,20 @@ type Accumulator struct {
 	// emit-time channel (exec.decAggErr), because there is no other way for a
 	// kernel with no error return to refuse.
 	//
-	// Nothing in the tree should be able to reach it: the planner reconciles a
-	// set operation's arms (#533), the shuffle writer refuses a cross-scale
-	// chunk, and the shuffle reader refuses a cross-scale stage input (#685).
-	// This is the last of those doors, and it is the only one that closes the
-	// path a future in-memory producer could open — a loud failure where the
-	// alternative is a wrong number nobody can see.
+	// It is one door of several, not the last one, and the difference matters
+	// because the first draft of this comment claimed otherwise. The planner
+	// reconciles a set operation's arms (#533), the shuffle writer refuses a
+	// cross-scale chunk, and the shuffle reader refuses a cross-scale stage
+	// input (#685) — those cover the producers that exist. This covers the
+	// UNGROUPED accumulator; the GROUPED paths keep their state in the flat
+	// SoA arrays, which hold one scale per aggregate and no per-group
+	// accumulator to carry a flag on, so their latch is
+	// exec.HashAggregate.decScaleConflict instead and reaches the same
+	// decAggErr. What NEITHER covers is the SCAN: two base-table files whose
+	// footers declare one column at two scales are read, mixed and answered
+	// with no check anywhere, on every path including the fast one. That is a
+	// scan-level schema-drift check and a pre-existing residual — recorded in
+	// ADR-0010 rather than fixed here.
 	DecScaleConflict bool
 	// StrType is the SOURCE column type behind MinStr/MaxStr. The five
 	// byte-backed types share one accumulator slot but not one boxed shape:
