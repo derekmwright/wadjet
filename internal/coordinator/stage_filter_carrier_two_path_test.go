@@ -1862,12 +1862,6 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					`FROM %[1]s GROUP BY g + 1, h * 2, id %% 5 ORDER BY a, b, c`, 60},
 				{"WithHaving", `SELECT g + 1 AS a, h * 2 AS b, COUNT(*) AS n FROM %[1]s ` +
 					`GROUP BY g + 1, h * 2 HAVING g + 1 > 1 ORDER BY a, b`, 8},
-				// The same collision minted by a DERIVED ALIAS, with no
-				// stored column anywhere: the name enters scope from the
-				// query itself.
-				{"MintedByADerivedAlias", `SELECT g + 1 AS a, h * 2 AS b, COUNT(*) AS n FROM ` +
-					`(SELECT g, h, 1 AS "__gb_expr_0" FROM %[1]s) s GROUP BY g + 1, h * 2 ` +
-					`ORDER BY a, b`, 12},
 			} {
 				c := c
 				t.Run(c.name, func(t *testing.T) {
@@ -1881,6 +1875,23 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				})
 			}
+			// The same collision MINTED by the query itself is not allocated
+			// around at all — it is refused at the door, which is the
+			// stronger guarantee and the one #694's reservation exists to
+			// give. A stored column of that name is still admitted and still
+			// read (the entries above), because a table holding one can only
+			// have been written before the namespace was reserved.
+			t.Run("MintedByADerivedAliasIsRefused", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT g + 1 AS a, h * 2 AS b, COUNT(*) AS n FROM `+
+					`(SELECT g, h, 1 AS "__gb_expr_0" FROM %s) s GROUP BY g + 1, h * 2 `+
+					`ORDER BY a, b`, ct)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					if _, err := arm.run(sql); err == nil {
+						t.Errorf("%s arm ANSWERED a query that mints a reserved slot name; "+
+							"the alias door must refuse it\n  SQL: %s", arm.name, sql)
+					}
+				}
+			})
 			// The other binding: an AGGREGATE over the STORED column. Keys
 			// and row count can be right while the argument is bound to the
 			// planner's slot, so the VALUE is what this asserts —
@@ -2144,9 +2155,6 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 				{"FractionalLiteralInTheKey", fmt.Sprintf(
 					`SELECT r1 + 0.5 AS k, COUNT(*) AS n FROM (SELECT a AS r1 FROM %s) s `+
 						`GROUP BY r1 + 0.5 ORDER BY k`, dbpTable), 5},
-				{"OuterAggregateOverTheKey", fmt.Sprintf(
-					`SELECT SUM(k) AS s FROM (SELECT r1 + 1 AS k, COUNT(*) AS c FROM `+
-						`(SELECT a AS r1 FROM %s) s GROUP BY r1 + 1) t`, dbpTable), 1},
 			} {
 				c := c
 				t.Run(c.name, func(t *testing.T) {
@@ -2163,6 +2171,25 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				})
 			}
+			// An outer aggregate over a renamed-DECIMAL key: pinned as #729
+			// before the reserved-slot work landed, and answering on BOTH
+			// paths now. Asserted rather than re-pinned — PostgreSQL says
+			// 18.74 and both arms say 18.74.
+			t.Run("ctl/OuterAggregateOverTheKeyAnswersOnBothPaths", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT SUM(k) AS s FROM (SELECT r1 + 1 AS k, `+
+					`COUNT(*) AS c FROM (SELECT a AS r1 FROM %s) s GROUP BY r1 + 1) t`, dbpTable)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != 1 {
+						t.Fatalf("%s arm returned %d rows, want 1\n  SQL: %s",
+							arm.name, len(res.Rows), sql)
+					}
+					if got := fmt.Sprintf("%v", res.Rows[0]["s"]); got != "18.74" {
+						t.Errorf("%s arm answered s=%q, want \"18.74\"\n  SQL: %s",
+							arm.name, got, sql)
+					}
+				}
+			})
 			// #749: arithmetic over a DECIMAL(38,10) keeps too few decimal
 			// places. The group key REACHES this now (it used to fail to type
 			// at all), so the family inherits it. PostgreSQL keeps scale 10
@@ -2171,24 +2198,41 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			//
 			// TODO(#749): delete this pin when the scale survives.
 			t.Run("WideDecimalKeyLosesScale", func(t *testing.T) {
-				sql := `SELECT dw + 1 AS k, COUNT(*) AS n FROM decagg WHERE dw IS NOT NULL ` +
-					`GROUP BY dw + 1 ORDER BY k LIMIT 1`
-				for _, arm := range sfcArms(ctx, single, coord) {
-					res := sfcRun(t, arm, sql)
-					if len(res.Rows) != 1 {
-						t.Fatalf("%s arm returned %d rows, want 1\n  SQL: %s",
-							arm.name, len(res.Rows), sql)
-					}
-					got := fmt.Sprintf("%v", res.Rows[0]["k"])
-					dot := strings.IndexByte(got, '.')
-					if dot < 0 {
-						t.Fatalf("%s arm answered %q with no decimal point\n  SQL: %s",
-							arm.name, got, sql)
-					}
-					if scale := len(got) - dot - 1; scale == 10 {
-						t.Fatalf("%s arm now answers %q at scale 10, which is PostgreSQL's. "+
-							"#749 is fixed - assert the digits and delete this pin\n  SQL: %s",
-							arm.name, got, sql)
+				// The EXACT strings, not a scale test. Asserting only that
+				// the scale is not 10 would pass just as happily if a change
+				// moved it to 8 or 11, and the value here is exact
+				// fixed-point: every digit is part of the answer.
+				//
+				// dw = -1339555555706255.5281706149 (scale 10), so
+				// PostgreSQL's numeric rule (max of the operand scales) gives
+				// -1339555555706254.5281706149 for `+ 1` and
+				// -2679111111412511.0563412298 for `* 2`. We keep nine and
+				// eight places respectively, correctly ROUNDED — a right
+				// value of the wrong type, which no float comparison can see.
+				for _, c := range []struct{ expr, got, pg string }{
+					{"dw + 1", "-1339555555706254.528170615", "-1339555555706254.5281706149"},
+					{"dw * 2", "-2679111111412511.05634123", "-2679111111412511.0563412298"},
+				} {
+					sql := fmt.Sprintf(`SELECT %[1]s AS k, COUNT(*) AS n FROM decagg `+
+						`WHERE dw IS NOT NULL GROUP BY %[1]s ORDER BY k LIMIT 1`, c.expr)
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, sql)
+						if len(res.Rows) != 1 {
+							t.Fatalf("%s arm returned %d rows, want 1\n  SQL: %s",
+								arm.name, len(res.Rows), sql)
+						}
+						got := fmt.Sprintf("%v", res.Rows[0]["k"])
+						if got == c.pg {
+							t.Fatalf("%s arm now answers %q, which is PostgreSQL's. #749 is "+
+								"fixed for this shape — assert it and delete the pin\n  SQL: %s",
+								arm.name, got, sql)
+						}
+						if got != c.got {
+							t.Errorf("%s arm answered %q; this pin records %q and PostgreSQL "+
+								"says %q. The answer MOVED without becoming right, which is a "+
+								"change #749 has to account for\n  SQL: %s",
+								arm.name, got, c.got, c.pg, sql)
+						}
 					}
 				}
 			})

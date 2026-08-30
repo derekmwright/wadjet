@@ -17,6 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/multikey"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -278,13 +279,13 @@ func tmdStandalone(t *testing.T, ctx context.Context) *wadjet.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	for _, tbl := range tmdTables() {
-		// The reserved-name fixture goes in through the CATALOG, because the
+		// A reserved-name fixture goes in through the CATALOG, because the
 		// wadjet API's DDL and ingest doors REFUSE its schema — which is the
 		// point of it. A table holding a hidden-slot name can only have been
 		// written by a binary that predates the reservation, and that is
-		// exactly the shape this fixture has to present (#694, rule 1: reading
-		// such a table is never refused).
-		if tbl.name == rsWinTab {
+		// exactly the shape these fixtures have to present (#694, rule 1:
+		// reading such a table is never refused).
+		if tmdStoresAReservedName(tbl) {
 			if err := db.Catalog().CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
 				t.Fatalf("create %s: %v", tbl.name, err)
 			}
@@ -414,6 +415,22 @@ func tmdTables() []tmdTable {
 		// names it.
 		{gcovTable, gcovSchema(), gcovData()},
 	}, multikeyTables()...)
+}
+
+// tmdStoresAReservedName reports whether a fixture's schema declares a column
+// in the reserved hidden-slot namespace, and therefore has to be written
+// through the catalog rather than through the DDL door that refuses it.
+//
+// Asked of the SCHEMA rather than of the table's name: `wintab0` stores a
+// `__win_0` and `collslot` stores `__gb_expr_0`/`__gb_expr_1`, and a third
+// such fixture should not need this function edited to be admitted.
+func tmdStoresAReservedName(tbl tmdTable) bool {
+	for _, c := range tbl.schema.Columns {
+		if plansql.ReservedSlotFamily(c.Name) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // multikeyTables is the multi-key correlated-subquery fixture (#562), adapted

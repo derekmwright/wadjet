@@ -239,8 +239,8 @@ the fixture that tries it.
 
 | claim | fixture that attempts it |
 |---|---|
-| a slot is a name no query can spell | `collslot` STORES `__gb_expr_0` and `__gb_expr_1`; `ctl/TheStoredColumnIsStillGroupable` reads and groups by one |
-| …including one the query itself mints | `SlotCollidesWithAStoredColumn/MintedByADerivedAlias` — `1 AS "__gb_expr_0"`, no DDL |
+| a slot is a name no query can spell | `collslot` STORES `__gb_expr_0` and `__gb_expr_1` — admitted through the catalog, because the DDL door refuses them; `ctl/TheStoredColumnIsStillGroupable` reads and groups by one |
+| …including one the query itself mints | `SlotCollidesWithAStoredColumn/MintedByADerivedAliasIsRefused` — `1 AS "__gb_expr_0"` is REFUSED at the alias door (#694's reservation), which is stronger than allocating around it; a STORED column of that name is still admitted and read, and the rows above are that case |
 | the slot never shadows an aggregate's argument | `AggregateOverTheStoredColumn` — `SUM`/`MAX` of the stored column, asserted on the VALUE |
 | two keys never share a slot | `TwoDerivedKeys`, `ReversedKeyOrder`, `ThreeDerivedKeys`, `WithHaving`, all with the stored slot present |
 | an arithmetic key and a delimited column of that text are different things | `ArithmeticKeyBesideADelimitedColumnOfThatText` — both directions, 5 rows against 9 |
