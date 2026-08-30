@@ -2496,7 +2496,22 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			aggCols[i].InputColIdxSet = true
 		}
 	}
-	hashAgg := exec.NewHashAggregate(spec.GroupByCols, aggCols)
+	// A fragment that BUILDS its own input projection computes each derived
+	// key into a hidden slot, so the aggregate RESOLVES by the slot and
+	// PUBLISHES under the key's own canonical text — the same pair the
+	// single-process planner sets, which is what keeps the two engines'
+	// aggregate output schemas equal. In MERGE mode no projection is built
+	// (the partial stage already emitted the key under its published name),
+	// so the two are the same list (ADR-0026).
+	groupCols, outNames := spec.GroupByCols, []string(nil)
+	if spec.BuildProject && !spec.MergeMode {
+		if _, slots := derivedGroupKeys(spec.GroupByCols, spec.GroupByTypes); !equalStringSlices(slots, spec.GroupByCols) {
+			groupCols = slots
+			outNames = append([]string(nil), spec.GroupByCols...)
+		}
+	}
+	hashAgg := exec.NewHashAggregate(groupCols, aggCols)
+	hashAgg.GroupByOutNames = outNames
 	hashAgg.GroupByAll = spec.GroupByAll
 	// The coordinator's exact per-partition row accounting, when it had one:
 	// the group-index layout is decided from it before the first batch (a

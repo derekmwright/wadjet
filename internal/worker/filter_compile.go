@@ -175,32 +175,13 @@ func buildAggInputProjection(
 	// expression string as a column name, misses, and buckets every row
 	// into a nil group.
 	hasDerived := false
-	derivedGroupBy := make(map[string]plansql.Node)
 	for _, a := range aggs {
 		if a.InputExpr != "" {
 			hasDerived = true
 		}
 	}
-	for _, g := range groupBy {
-		if g == "" {
-			continue
-		}
-		node, err := plansql.ParseExpression(g)
-		if err != nil {
-			continue
-		}
-		if _, bare := node.(*plansql.ColRef); bare {
-			// Bare by SHAPE is not bare by resolution: a ROW FIELD PATH
-			// (`c_row.b`) parses to a ColRef and names no column any stage
-			// emits, so HashAggregate cannot look it up and the key
-			// serialized as NULL. groupByTypes is the planner's answer —
-			// derivedGroupKeyTypes records an entry for exactly the keys
-			// that must be COMPUTED here, and a bare column has none (#568).
-			if _, derived := groupByTypes[g]; !derived {
-				continue
-			}
-		}
-		derivedGroupBy[g] = node
+	derivedGroupBy, slots := derivedGroupKeys(groupBy, groupByTypes)
+	if len(derivedGroupBy) > 0 {
 		hasDerived = true
 	}
 	if !hasDerived {
@@ -226,7 +207,7 @@ func buildAggInputProjection(
 			Expr: exec.ColumnRef(name),
 		})
 	}
-	for _, c := range groupBy {
+	for gi, c := range groupBy {
 		if node, ok := derivedGroupBy[c]; ok {
 			// Compile the expression once and emit a projection under
 			// the same name HashAggregate expects.
@@ -235,10 +216,19 @@ func buildAggInputProjection(
 			if err != nil {
 				return nil, nil, fmt.Errorf("compile group-by %q: %w", c, err)
 			}
-			if seen[c] {
+			// The HIDDEN SLOT, not the key's own text: this projection
+			// NARROWS to its outputs, so a derived key named after its own
+			// canonical text SHADOWS an input column the query spells the
+			// same way — and the single-process pre-aggregate projection,
+			// which APPENDS, was shadowed BY it. One name, two engines, two
+			// different wrong answers. The key is published under its
+			// canonical text by GroupByOutNames on the aggregate itself
+			// (ADR-0026).
+			slot := slots[gi]
+			if seen[slot] {
 				continue
 			}
-			seen[c] = true
+			seen[slot] = true
 			e := compiled
 			// The planner's declared type wins over the schema-blind
 			// inference: with no catalog here, a polymorphic key like
@@ -257,7 +247,7 @@ func buildAggInputProjection(
 				}
 			}
 			projCols = append(projCols, exec.ProjectColumn{
-				Name: c,
+				Name: slot,
 				// The planner's rule for the same expression. Nothing
 				// resolves this at the first batch — exec.Project types a
 				// COMPUTED output from the declaration and never from the
@@ -487,4 +477,75 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 		})
 	}
 	return exec.NewProject(projCols), nil
+}
+
+// derivedGroupKeys splits a fragment's GROUP BY key list into the keys this
+// fragment must COMPUTE and the column each key is RESOLVED by.
+//
+// A key is derived when parsing it yields anything but a bare column
+// reference, and also when it IS a bare reference the planner marked derived:
+// a ROW FIELD PATH (`c_row.b`) parses to a ColRef and names no column any
+// stage emits, so HashAggregate could not look it up and the key serialized
+// as NULL. groupByTypes is the planner's answer — derivedGroupKeyTypes
+// records an entry for exactly the keys that must be computed here, and a
+// bare column has none (#568).
+//
+// slots is parallel to groupBy: a bare key resolves by its own name, and a
+// derived key by a hidden `__gb_expr_N` that no query can spell (the planner's
+// reserved namespace). Naming the computed column after the key's own text
+// instead put it in the user's namespace, where it shadowed — or was shadowed
+// by — an input column of the same spelling, differently on each engine
+// (ADR-0026).
+func derivedGroupKeys(groupBy []string, groupByTypes map[string]int) (map[string]plansql.Node, []string) {
+	derived := make(map[string]plansql.Node)
+	slots := make([]string, len(groupBy))
+	// Names already spoken for in this fragment. A slot is only hidden if
+	// nothing else answers to it, and a stored column may legitimately be
+	// called `__gb_expr_0` — such a column is never refused at read, so the
+	// slot steps around it instead of assuming the name is free.
+	taken := make(map[string]bool, len(groupBy))
+	for _, g := range groupBy {
+		taken[g] = true
+	}
+	mint := func(i int) string {
+		for n := i; n < i+1024; n++ {
+			name := physical.SlotName(physical.SlotGroupKey, n)
+			if !taken[name] {
+				taken[name] = true
+				return name
+			}
+		}
+		return physical.SlotName(physical.SlotGroupKey, i)
+	}
+	for i, g := range groupBy {
+		slots[i] = g
+		if g == "" {
+			continue
+		}
+		node, err := plansql.ParseExpression(g)
+		if err != nil {
+			continue
+		}
+		if _, bare := node.(*plansql.ColRef); bare {
+			if _, isDerived := groupByTypes[g]; !isDerived {
+				continue
+			}
+		}
+		derived[g] = node
+		slots[i] = mint(i)
+	}
+	return derived, slots
+}
+
+// equalStringSlices reports whether two name lists are identical.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

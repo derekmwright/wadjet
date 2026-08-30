@@ -118,6 +118,21 @@ func isAggIntType(t batch.TypeID) bool {
 // pressure and re-processed during Finalize.
 type HashAggregate struct {
 	GroupByCols []string
+	// GroupByOutNames, when set, is the name each group key is PUBLISHED
+	// under, parallel to GroupByCols. GroupByCols stays the name the key is
+	// RESOLVED by against the input batch, and the two differ for a key the
+	// planner had to materialize: that value is computed into a hidden slot
+	// (`__gb_expr_N`) so it cannot be shadowed by — or shadow — an input
+	// column the query happens to spell the same way, and the slot is renamed
+	// to the key's own canonical text on the way out.
+	//
+	// Naming the slot after the key's text instead is what made
+	// `SELECT g + 1 … GROUP BY g + 1` over a table that also has a column
+	// called "g + 1" group by the COLUMN: the pre-aggregate projection
+	// APPENDS, and batch.RecordBatch.ColumnIndex answers with the first exact
+	// match (ADR-0026). Empty means "publish under GroupByCols", which is
+	// every bare-column key and every caller that predates the slot.
+	GroupByOutNames []string
 	// GroupByAll makes the aggregate group by every input column, resolved
 	// from the first batch's schema (GroupByCols must be empty). This is how
 	// DISTINCT is planned: a keys-only hash aggregate inherits the spill
@@ -4891,6 +4906,15 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 			}
 		}
 	}
+	// A key the planner NAMED overrides whatever the rule above produced: it
+	// resolves by a hidden slot and publishes under its own canonical text,
+	// and neither the qualifier strip nor the ambiguity rule applies to a
+	// name the planner already decided (ADR-0026).
+	for i := range outNames {
+		if i < len(h.GroupByOutNames) && h.GroupByOutNames[i] != "" {
+			outNames[i] = h.GroupByOutNames[i]
+		}
+	}
 
 	for i, name := range outNames {
 		typ := parquet.TypeString // default fallback
@@ -5121,11 +5145,16 @@ func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
 // Used by parallel pipeline execution: each worker gets its own cloned sink.
 func (h *HashAggregate) CloneSink() SinkSource {
 	clone := &HashAggregate{
-		GroupByCols:   h.GroupByCols,
-		GroupByAll:    h.GroupByAll, // clones must resolve the same key set, not fall into the scalar path
-		Aggs:          h.Aggs,
-		NullGroupCols: h.NullGroupCols,
-		GroupingSets:  h.GroupingSets,
+		GroupByCols: h.GroupByCols,
+		// A clone EMITS: the morsel-parallel path finalizes each one and the
+		// primary merges their state, so a clone that did not carry the
+		// published names would publish its keys under their hidden slots
+		// and every consumer above would read NULL.
+		GroupByOutNames: h.GroupByOutNames,
+		GroupByAll:      h.GroupByAll, // clones must resolve the same key set, not fall into the scalar path
+		Aggs:            h.Aggs,
+		NullGroupCols:   h.NullGroupCols,
+		GroupingSets:    h.GroupingSets,
 		// No spill manager — partial aggregates are small enough
 		strNullGroupIdx: -1, // defensive: Init sets it, but the zero value is a VALID slot
 	}

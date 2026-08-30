@@ -5,6 +5,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -29,12 +30,19 @@ func TestAggInputProjectionDeclaredGroupKeyType(t *testing.T) {
 		if project == nil {
 			t.Fatalf("no projection built — %q must count as a derived key", key)
 		}
+		// The derived key is materialized into its HIDDEN SLOT, not under
+		// its own text: a column named after the key would shadow, or be
+		// shadowed by, an input column the query spells the same way, and
+		// which one won differed between the two engines (ADR-0026). The
+		// key is published under its own text by the aggregate's
+		// GroupByOutNames, one operator later.
+		slot := physical.SlotName(physical.SlotGroupKey, 0)
 		for _, pc := range project.Projections {
-			if pc.Name == key {
+			if pc.Name == slot {
 				return pc
 			}
 		}
-		t.Fatalf("projection has no column named %q", key)
+		t.Fatalf("projection has no column named %q (for key %q)", slot, key)
 		return exec.ProjectColumn{}
 	}
 	keyType := func(t *testing.T, groupByTypes map[string]int) parquet.TypeID {
