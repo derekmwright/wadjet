@@ -280,6 +280,7 @@ resolves the alias back through the logical plan.
 | a join key's TYPE (both sides + the partition hash) | `resolveJoinKeyTypes` → `joinSideColTypes` → `emittedColTypes` / `setOpDeclaredOutputSchema` | `join_key_types.go` |
 | which SIDE of a join a key belongs to | `subtreeNaming.ownsKey` → `assignJoinKeySides` | `subtree_naming.go` |
 | aggregate argument, GROUP BY key | `resolveAggInputName` / `aggStageGroupKey` | `plan.go` |
+| a column reference INSIDE an aggregate argument expression | `respellAggInputExpr` | `window_alias_respell.go` |
 | ORDER BY term over an AGGREGATE producer | `resolveSortKeyColumn` | `plan.go` |
 | ORDER BY term over a SCAN/JOIN/WINDOW producer | `annotateDerivedAliasSortKey` → `resolveDerivedAliasSortKeys` | `hidden_sort_key.go` |
 | a UNION/INTERSECT/EXCEPT arm's projection | `setOpArmProjection` | `set_op_stages.go` |
@@ -392,6 +393,29 @@ exact; the sort resolvers do not recurse into a join at all, which is why
 `ORDER BY x.col` at the query ROOT (where `x` is a base-table alias and a
 SELECT alias shadows `col`) is settled in the logical builder instead —
 `sortKeyCarried`, #488 — rather than here.
+
+A resolver that answers for a NAME does not answer for a name INSIDE an
+expression, and that is the ninth entry above. `resolveAggInputName` resolved
+an aggregate argument that IS an alias; an argument that is an EXPRESSION over
+one was shipped as TEXT and compiled at the worker against the scan's columns,
+so `SUM(CASE WHEN s = 'x' THEN twice ELSE 0 END)` over
+`(SELECT s, id * 2 AS twice FROM t)` read `twice` off a batch that has no such
+column and summed only the ELSE branch — TPC-H Q08's shape, silently 0, and
+where the derived alias SHADOWS a base column, silently a different number
+(#702). `respellAggInputExpr` applies the same resolution per reference: a
+rename becomes its source column, a computed alias becomes its defining
+expression PARENTHESIZED (spliced bare, `id * 2` inside `x * 3`
+re-associates). It rewrites the STAGE SPEC's text only — the single-process
+pipeline runs that Project as a real operator, so its alias is real there.
+
+Both this and `respellDerivedAliasRefs` walk the expression through
+`rewriteColRefs` (`colref_rewrite.go`), which covers every AST node kind and
+REPORTS when it meets one it does not. Three respell sites had grown their own
+walk, each covering the kinds its own defect needed, and a walk that does not
+descend into a node kind is not a no-op — it leaves the references inside it
+naming nothing. `assertAggregateInputsResolve` is the backstop: an
+`AggSpec.InputExpr` whose references the stage's input cannot supply is a
+PLAN-TIME refusal naming the column, not a wrong number.
 
 One cause, five failure modes before the fixes: the sort loud (`sort: key
 column "k" does not exist in the input schema`), the aggregate loud (`hash
@@ -1143,6 +1167,28 @@ picks the integer literal's type over the DECIMAL column's; `COALESCE(d, 0)`
 alone fails outright on both paths. That is the function's declaration, not
 the window's — the windowed and grouped spellings agree exactly — and it is
 pinned in `stage_filter_carrier_two_path_test.go`.
+
+A window function's **output** lives in a slot of its own,
+`__win_N` — the same synthetic the nested-window rewrite has used since #610,
+now taken by the BARE spelling too (`logical/builder.go`, `bareWinOutput`).
+`exec.Window` APPENDS its result to the input batch, so a window that wrote
+under the user's ALIAS handed the SELECT-list projection two columns of that
+name; the projection resolves by name and took the input one. `SELECT id,
+SUM(a) OVER () AS s FROM decpair` came back with `decpair.s`, the TEXT column,
+on BOTH paths and in silence, and `AS a` came back with the window's own
+argument column (#694). A window with no alias at all named nothing: the
+projection asked for `""`, which the single-process path answered NULL and the
+DAG dropped from the result. The projection now reads the slot and publishes it
+under `windowOutputName(col)` — the alias, or the window call's own text when
+there is none — and `selectOutputNames` makes the same choice so an ORDER BY
+over an unaliased window resolves against the name the projection really emits.
+
+Nothing else changes: `__win_N` is the gather's `OutputRename.From`, the
+carrier-schema check reads it off `Stage.WindowCols`, and the wire declares the
+output from the window rather than from whatever column the alias shadowed
+(`WindowSumAliasShadows*` in the wire corpus, where PostgreSQL's `\gdesc` says
+`numeric` and the shadowed reading would have said `numeric(38,10)` or
+`integer`).
 
 There is deliberately **no `OpSort`** ahead of the window. A window's ORDER BY
 defines its FRAME, not the stream: `exec.Window` groups its input by

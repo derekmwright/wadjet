@@ -311,6 +311,71 @@ the client as a hard error on `SELECT k, s FROM (SELECT id AS k, SUM(c) OVER ()
 + 1 AS s FROM t) x WHERE k > 0`, whose no-rename spelling the gather's own
 `OutputRename` already computes correctly.
 
+## A name inside an EXPRESSION is a name (2026-08-30, #702, #694, #672)
+
+The convention above — every stream carries source column names and each
+consumer resolves the alias back through the logical plan — has been read as a
+rule about NAMES. A consumer resolves the name it is handed, and the resolvers
+are catalogued per consumer (docs/internals §Derived-table aliases). Three
+faces of one gap show that the unit is not the name the consumer is handed but
+every name the consumer will EVALUATE.
+
+**An aggregate's argument.** `resolveAggInputName` resolves an argument that IS
+an alias. An argument that is an EXPRESSION over one — `SUM(CASE WHEN s = 'x'
+THEN twice ELSE 0 END)` over `(SELECT s, id * 2 AS twice FROM t)`, which is
+TPC-H Q08's shape — travelled to the worker as TEXT and was compiled against
+the scan's columns, where `twice` names nothing. The aggregate summed the
+CASE's ELSE branch: 0 where PostgreSQL answers 2, silently, on every type. Where
+the derived alias SHADOWS a base column the worker read the BASE column and
+answered a plausible DIFFERENT number, which is the arm no eyeball catches
+(#702).
+
+**A window's argument** was the same gap one operator over, and #672 closed it
+by materializing the argument into `__winkey_N` — the rule this section
+generalizes rather than a separate one.
+
+**A window's OUTPUT name** is the mirror image: not a name that resolves to
+nothing, but a name that resolves to the WRONG THING. `exec.Window` APPENDS its
+result, so a bare window writing under the user's ALIAS gave the projection two
+columns of that name and it took the input one. `SELECT id, SUM(a) OVER () AS s`
+came back with the table's `s` on BOTH paths (#694).
+
+The rule, in both directions:
+
+**A value a stage computes lives in a slot no input can be spelled like, and
+consumers reference the SLOT. A name a stage will evaluate is resolved through
+the producer before the stage carries it — every name in it, not the outermost
+one.**
+
+`__win_N` and `__winkey_N` are that slot for the window's output and its
+argument; `respellAggInputExpr` is that resolution for the aggregate's
+argument, and it applies `resolveAggInputName` per reference — a rename becomes
+its source column, a computed alias becomes its defining expression
+parenthesized.
+
+Two things this needed that the per-consumer patches did not:
+
+- **One walk, and it says what it did not understand.** Three respell sites had
+  grown their own AST walk, each covering the node kinds its own defect
+  happened to need — `respellDerivedAliasRefs` handled arithmetic, a paren, a
+  cast and a function call, so `SUM(v * 2) OVER ()` over a derived alias was
+  respelled and `SUM(CASE … v … END)` was not. A walk that does not descend
+  into a node kind is not a no-op; it leaves the references inside it naming
+  nothing. `rewriteColRefs` covers every kind and returns a `complete` flag for
+  the ones it deliberately will not rewrite (a subquery, an EXISTS, a window
+  call, anything added since), so a caller cannot read silence as coverage.
+
+- **The backstop refuses rather than answers.** `assertAggregateInputsResolve`
+  extends the name-resolvability check to `AggSpec.InputExpr`, over the two
+  stage shapes that run a pre-projection: a standalone aggregate, whose input
+  is its dependency's stream, and a fused scan-aggregate, whose input is the
+  scan's read set. Final and merge aggregates are excluded — their InputExpr is
+  already materialized upstream — as are join- and union-fed inputs, the same
+  exclusion the checks above name. Removing the respell and re-running the
+  gate turns Q08's shape from `0.000000` into `stage scan-0 (scan) aggregates
+  sum(case when s = '1.50' then volume else 0 end) and its input carries no
+  [volume]`, which is the difference this ADR exists for.
+
 ## Consequences
 
 - `StageProject` is Singleton with `Tasks: 1`, so it SERIALIZES its
