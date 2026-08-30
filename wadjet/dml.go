@@ -826,7 +826,47 @@ func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
 // (#678 review R2). An unqualified name must exist somewhere in the merged
 // namespace, or it is 42703 rather than the NULL it used to evaluate to.
 func (ev *mergeEvaluator) resolveRef(ref *plansql.ColRef) (parquet.Column, string, error) {
+	return ev.resolveRefIn(ref, true)
+}
+
+// resolveRefIn resolves a reference in the scope the CLAUSE has.
+//
+// A WHEN NOT MATCHED clause has no target row, and PostgreSQL does not merely
+// forbid naming the target there — it removes the target from SCOPE
+// altogether. That is observable on the BARE names, which is the half the
+// first implementation missed: it rejected `t.n` and then still resolved
+// against the merged namespace, so a bare `n` that both tables spell came
+// back 42702 "ambiguous" where PostgreSQL resolves it to the SOURCE and runs
+// the statement (#686 R3-1).
+//
+//	MERGE INTO pr USING src ON pr.id = src.id
+//	  WHEN NOT MATCHED AND n > 1 THEN INSERT (id, n) VALUES (src.id, src.n)
+//
+// is MERGE 1 in PostgreSQL 17.11. Under a MATCHED clause the same bare `n` IS
+// ambiguous (42702), because there both relations are in scope — so the rule
+// is per clause kind, not per statement.
+func (ev *mergeEvaluator) resolveRefIn(ref *plansql.ColRef, matched bool) (parquet.Column, string, error) {
 	col := strings.ToLower(ref.Column)
+	if !matched {
+		// Source-only scope.
+		if ref.Table != "" && strings.EqualFold(ref.Table, ev.targetAlias) {
+			return parquet.Column{}, "", sqlerr.New("42P01",
+				"invalid reference to FROM-clause entry for table %q: a WHEN NOT MATCHED clause has no target row",
+				ref.Table)
+		}
+		if ref.Table == "" {
+			if !ev.sourceKnown {
+				return parquet.Column{}, col, nil
+			}
+			c, ok := ev.srcByName[col]
+			if !ok {
+				return parquet.Column{}, "", sqlerr.New("42703", "column %q does not exist", ref.Column)
+			}
+			return c, col, nil
+		}
+		// A qualified name that is not the target falls through to the shared
+		// path below, which handles the source alias and a ROW field path.
+	}
 	if ref.Table == "" {
 		// A name BOTH relations spell is AMBIGUOUS, and silently picking one
 		// is the worst of the three possible answers. mergedByName is filled
@@ -902,12 +942,7 @@ func (ev *mergeEvaluator) checkClauseColumns(node plansql.Node, matched bool) er
 		return sqlerr.Wrap("0A000", err)
 	}
 	for _, ref := range refs {
-		if !matched && strings.EqualFold(ref.Table, ev.targetAlias) {
-			return sqlerr.New("42P01",
-				"invalid reference to FROM-clause entry for table %q: a WHEN NOT MATCHED clause has no target row",
-				ref.Table)
-		}
-		if _, _, err := ev.resolveRef(ref); err != nil && err != errMergeRefIsFieldPath {
+		if _, _, err := ev.resolveRefIn(ref, matched); err != nil && err != errMergeRefIsFieldPath {
 			return err
 		}
 	}
@@ -948,12 +983,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	// then ASSIGNED, so an integer box reaching a DECIMAL column is the value
 	// and not the unscaled carrier (R1).
 	if ref, ok := unwrapDMLParens(node).(*plansql.ColRef); ok {
-		if !matched && strings.EqualFold(ref.Table, ev.targetAlias) {
-			return nil, sqlerr.New("42P01",
-				"invalid reference to FROM-clause entry for table %q: a WHEN NOT MATCHED clause has no target row",
-				ref.Table)
-		}
-		_, spelling, rerr := ev.resolveRef(ref)
+		_, spelling, rerr := ev.resolveRefIn(ref, matched)
 		if rerr == nil {
 			v := merged[spelling]
 			if v == nil {
@@ -1037,7 +1067,7 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any, matched boo
 	// did — `WHEN MATCHED AND s.n THEN DELETE WHEN MATCHED THEN UPDATE ...`
 	// rewrote the row where PostgreSQL raises 42804 and writes nothing
 	// (#686 R2-1).
-	if err := ev.checkConditionType(node); err != nil {
+	if err := ev.checkConditionType(node, matched); err != nil {
 		return false, err
 	}
 	// An untyped string literal is CAST to boolean rather than evaluated:
@@ -1086,7 +1116,7 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any, matched boo
 //
 // A shape whose type cannot be decided from the AST (a function call) returns
 // nil here and is caught by the runtime check in condition.
-func (ev *mergeEvaluator) checkConditionType(node plansql.Node) error {
+func (ev *mergeEvaluator) checkConditionType(node plansql.Node, matched bool) error {
 	switch n := unwrapDMLParens(node).(type) {
 	case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
 		*plansql.IsExpr, *plansql.InExpr, *plansql.BetweenExpr, *plansql.LikeExpr,
@@ -1105,7 +1135,7 @@ func (ev *mergeEvaluator) checkConditionType(node plansql.Node) error {
 			return sqlerr.New("42804", "argument of WHEN must be type boolean, not type numeric")
 		}
 	case *plansql.ColRef:
-		col, _, err := ev.resolveRef(n)
+		col, _, err := ev.resolveRefIn(n, matched)
 		if err != nil {
 			// A field path or an unresolved name is not this check's business;
 			// checkClauseColumns already ruled on it.

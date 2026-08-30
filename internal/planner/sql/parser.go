@@ -1477,13 +1477,26 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		if l.peekToken().typ == TokenKWBy {
 			l.nextToken()
 			side := l.nextToken()
+			// Only the NOT MATCHED forms exist. `WHEN MATCHED BY SOURCE` is
+			// not an unimplemented feature, it is not SQL at all, and
+			// PostgreSQL answers it with a syntax error at the BY.
+			if clause.Matched {
+				return nil, fmt.Errorf("MERGE: unexpected BY after WHEN MATCHED")
+			}
 			return nil, sqlerr.New("0A000",
-				"MERGE: WHEN %sMATCHED BY %s is not supported",
-				map[bool]string{true: "", false: "NOT "}[clause.Matched],
-				strings.ToUpper(side.val))
+				"MERGE: WHEN NOT MATCHED BY %s is not supported", strings.ToUpper(side.val))
 		}
 
-		// Optional AND condition
+		// Optional AND condition.
+		//
+		// The scan ends at the FIRST THEN with no nesting state, so a CASE
+		// expression in the condition is cut at the CASE's own THEN and the
+		// rest is read as the clause's action: `AND CASE WHEN s.n > 1 THEN
+		// true ELSE false END THEN DELETE` fails with "expected UPDATE,
+		// DELETE, or INSERT after THEN", naming the action rather than the
+		// condition. PostgreSQL runs it. Fixing it needs CASE/END depth here
+		// and in the action scan below (wadjet#722); it is pre-existing and
+		// deliberately left alone by #686.
 		if l.peekToken().typ == TokenKWAnd {
 			l.nextToken()
 			andStart := l.pos

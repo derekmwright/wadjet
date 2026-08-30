@@ -3,10 +3,12 @@ package wadjet
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // mergeOn is the header every case below shares: pr aliased t, src aliased s,
@@ -471,5 +473,164 @@ func TestQuotedReturningIsStillAName(t *testing.T) {
 	want := []string{"2:20:b", "3:30:c"}
 	if got := aliasRows686(t, db); strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("left pr as %v, want %v", got, want)
+	}
+}
+
+// mergeR3DB adds a fourth column and gives BOTH tables the same column names,
+// so a BARE name in a clause is a name both relations spell — the shape the
+// scope rule is observable on.
+func mergeR3DB(t *testing.T) *DB {
+	t.Helper()
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, q := range []string{
+		"CREATE TABLE pr (id INT64, n INT64, name STRING, flag BOOL)",
+		"CREATE TABLE src (id INT64, n INT64, name STRING, flag BOOL)",
+	} {
+		if _, err := db.Query(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []string{
+		"INSERT INTO pr VALUES (1, 10, 'a', true)",
+		"INSERT INTO pr VALUES (2, 20, 'b', true)",
+		"INSERT INTO pr VALUES (3, 30, 'c', true)",
+		"INSERT INTO src VALUES (1, 100, 'x', true)",
+		"INSERT INTO src VALUES (4, 400, 'y', true)",
+	} {
+		if _, err := db.Execute(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db
+}
+
+func mergeR3Rows(t *testing.T, db *DB) []string {
+	t.Helper()
+	res, err := db.Query(context.Background(), "SELECT id, n FROM pr")
+	if err != nil {
+		t.Fatalf("reading pr back: %v", err)
+	}
+	out := make([]string, 0, len(res.Rows))
+	for _, r := range res.Rows {
+		out = append(out, fmt.Sprintf("%v:%v", r["id"], r["n"]))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// A WHEN NOT MATCHED clause resolves names against the SOURCE ALONE, because
+// PostgreSQL removes the target from SCOPE there rather than merely forbidding
+// it by name.
+//
+// The first implementation of the rule rejected a QUALIFIED target reference
+// and then still resolved against the merged namespace — so a BARE name that
+// both tables spell came back 42702 "ambiguous", where PostgreSQL resolves it
+// to the source and runs the statement (#686 R3-1). The bare names are the
+// half that matters in practice: an unaliased MERGE between two tables with
+// the same column names is the ordinary upsert shape.
+//
+// Under a MATCHED clause the same bare name IS ambiguous, because there both
+// relations are in scope — so the rule is per clause KIND, and both halves are
+// asserted here. Every expectation read off postgres:17-alpine.
+func TestMergeNotMatchedResolvesBareNamesAgainstTheSource(t *testing.T) {
+	unaliased := "MERGE INTO pr USING src ON pr.id = src.id"
+	aliased := "MERGE INTO pr AS t USING src AS s ON t.id = s.id"
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		tag   string
+		state string
+		rows  []string
+	}{
+		{name: "bare name in the condition",
+			sql: unaliased + " WHEN NOT MATCHED AND n > 1 THEN INSERT (id, n) VALUES (src.id, src.n)",
+			tag: "MERGE 1", rows: []string{"1:10", "2:20", "3:30", "4:400"}},
+		{name: "bare boolean column as the whole condition",
+			sql: unaliased + " WHEN NOT MATCHED AND flag THEN INSERT (id, n) VALUES (src.id, src.n)",
+			tag: "MERGE 1", rows: []string{"1:10", "2:20", "3:30", "4:400"}},
+		{name: "bare names in the INSERT values",
+			sql: unaliased + " WHEN NOT MATCHED THEN INSERT (id, n) VALUES (id, n)",
+			tag: "MERGE 1", rows: []string{"1:10", "2:20", "3:30", "4:400"}},
+		{name: "bare name in the condition, aliased relations",
+			sql: aliased + " WHEN NOT MATCHED AND n > 1 THEN INSERT (id, n) VALUES (s.id, s.n)",
+			tag: "MERGE 1", rows: []string{"1:10", "2:20", "3:30", "4:400"}},
+
+		// The other half of the rule: under MATCHED both relations are in
+		// scope, so the same bare name is ambiguous.
+		{name: "the same bare name under MATCHED is ambiguous",
+			sql:   unaliased + " WHEN MATCHED AND n > 1 THEN DELETE",
+			state: "42702", rows: []string{"1:10", "2:20", "3:30"}},
+		// A name the SOURCE does not have is 42703, not a silent NULL.
+		{name: "a bare name the source does not have",
+			sql:   aliased + " WHEN NOT MATCHED AND nosuch > 1 THEN INSERT (id, n) VALUES (s.id, s.n)",
+			state: "42703", rows: []string{"1:10", "2:20", "3:30"}},
+		// The qualified half still holds.
+		{name: "a qualified target reference in the condition",
+			sql:   aliased + " WHEN NOT MATCHED AND t.n > 1 THEN INSERT (id, n) VALUES (s.id, s.n)",
+			state: "42P01", rows: []string{"1:10", "2:20", "3:30"}},
+		{name: "a qualified target reference in the values",
+			sql:   aliased + " WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, t.n)",
+			state: "42P01", rows: []string{"1:10", "2:20", "3:30"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := mergeR3DB(t)
+			res, err := db.Execute(context.Background(), tc.sql)
+			if tc.state != "" {
+				if err == nil {
+					t.Fatalf("%s answered %s %d; PostgreSQL refuses it with %s",
+						tc.sql, res.Command, res.RowsAffected, tc.state)
+				}
+				if got := sqlerr.StateOf(err); got != tc.state {
+					t.Errorf("%s: SQLSTATE %q, want %q (err: %v)", tc.sql, got, tc.state, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("%s: %v", tc.sql, err)
+				}
+				if got := fmt.Sprintf("%s %d", res.Command, res.RowsAffected); got != tc.tag {
+					t.Errorf("%s: command tag %q, want %q", tc.sql, got, tc.tag)
+				}
+			}
+			if got := mergeR3Rows(t, db); strings.Join(got, " ") != strings.Join(tc.rows, " ") {
+				t.Errorf("%s left pr as %v, want %v", tc.sql, got, tc.rows)
+			}
+		})
+	}
+}
+
+// Only the NOT MATCHED forms of BY SOURCE / BY TARGET exist. `WHEN MATCHED BY
+// SOURCE` is not an unimplemented feature, it is not SQL — PostgreSQL answers
+// it with a syntax error at the BY, and reporting 0A000 would have told a user
+// to wait for a feature that is never coming (#686 R3 small item).
+func TestMergeMatchedByIsASyntaxError(t *testing.T) {
+	unaliased := "MERGE INTO pr USING src ON pr.id = src.id"
+	for _, tc := range []struct {
+		sql   string
+		state string
+	}{
+		{unaliased + " WHEN MATCHED BY SOURCE THEN DELETE", "42601"},
+		{unaliased + " WHEN MATCHED BY TARGET THEN DELETE", "42601"},
+		// The NOT MATCHED forms stay 0A000: those are real clause kinds this
+		// server has not implemented (wadjet#718).
+		{unaliased + " WHEN NOT MATCHED BY SOURCE THEN DELETE", "0A000"},
+		{unaliased + " WHEN NOT MATCHED BY TARGET THEN INSERT (id, n) VALUES (src.id, src.n)", "0A000"},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			db := mergeR3DB(t)
+			before := mergeR3Rows(t, db)
+			if _, err := db.Execute(context.Background(), tc.sql); err == nil {
+				t.Fatalf("%s ran; it must be refused", tc.sql)
+			} else if got := sqlerr.StateOf(err); got != tc.state {
+				t.Errorf("%s: SQLSTATE %q, want %q (err: %v)", tc.sql, got, tc.state, err)
+			}
+			if after := mergeR3Rows(t, db); strings.Join(after, " ") != strings.Join(before, " ") {
+				t.Errorf("the refused MERGE changed pr: %v -> %v", before, after)
+			}
+		})
 	}
 }
