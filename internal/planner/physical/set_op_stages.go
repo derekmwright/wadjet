@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -304,7 +305,14 @@ func setOpOutputNames(arm *logical.Node) []string {
 		if name == "" {
 			return nil
 		}
-		names = append(names, strings.ToLower(name))
+		// Delimiters are not part of the name. A projection with no alias
+		// falls back to its rendered EXPRESSION, and for a delimited
+		// identifier that rendering re-quotes — so a set operation over
+		// `SELECT "g + 1"` published a result column literally called
+		// `"g + 1"`, quotes included, where PostgreSQL and the
+		// single-process path both say `g + 1` (#725).
+		names = append(names, strings.ToLower(
+			plansql.NormalizeIdentRef(strings.TrimSpace(name))))
 	}
 	return names
 }

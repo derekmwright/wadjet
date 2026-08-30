@@ -165,3 +165,26 @@ func groupKeyByIdentity(agg *logical.Node) map[string]string {
 	}
 	return m
 }
+
+// aggregateUnderOutput finds the Aggregate the output projection reads, or nil
+// when the plan's top is not a grouped query. Only the nodes that leave the
+// aggregate's own columns visible are walked through: a Project, a HAVING
+// Filter, a Sort and a LIMIT. A join, a window or a set operation below the
+// top means the SELECT list is written over something else, and the walk
+// declines rather than guessing.
+func aggregateUnderOutput(root *logical.Node) *logical.Node {
+	for n := root; n != nil; {
+		switch n.Type {
+		case logical.NodeAggregate:
+			return n
+		case logical.NodeProject, logical.NodeFilter, logical.NodeSort, logical.NodeLimit:
+		default:
+			return nil
+		}
+		if len(n.Children) != 1 {
+			return nil
+		}
+		n = n.Children[0]
+	}
+	return nil
+}

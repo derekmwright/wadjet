@@ -3435,6 +3435,13 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	if len(proj) == 0 {
 		return nil
 	}
+	// An expression the gather EVALUATES is evaluated over the producer's
+	// output, where a derived GROUP BY key is one column and the input
+	// columns it was computed from are gone. `(g + 1) + COUNT(*)` reached
+	// here spelled over `g`, so the gather read a column the aggregate does
+	// not emit and answered NULL for every row while the single-process path
+	// answered correctly — the same identity gap as #723, one stage later.
+	keyRefs := groupKeyByIdentity(aggregateUnderOutput(root))
 	renames := make([]OutputRename, 0, len(proj))
 	for _, p := range proj {
 		var src, target string
@@ -3471,8 +3478,8 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			if target == "" {
 				target = strings.ToLower(p.Expr)
 			}
-			astExpr = p.ASTExpr
-			src = firstColRefName(p.ASTExpr)
+			astExpr = plansql.ReplaceGroupKeyRefs(p.ASTExpr, keyRefs)
+			src = firstColRefName(astExpr)
 		case p.Column != "" && p.Alias != "":
 			// Bare column reference. Worker may emit qualified ("n1.n_name")
 			// or unqualified ("n_name") depending on the upstream join chain.
@@ -8594,7 +8601,18 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			}
 		}
 
-		if expression == nil && proj.ASTExpr != nil && !proj.IsAgg {
+		// An expression OVER a group key — `(g + 1) * 2` — is not the key, so
+		// nothing above resolves it as one, and the aggregate's output does
+		// not carry `g` to rebuild it from. Re-point its group-key SUBTERMS
+		// at the columns the aggregate publishes, which is what the DAG's
+		// requoteAggOutputRefs does for the same shape; without it the whole
+		// item evaluated to NULL for every row (#723).
+		astExpr := proj.ASTExpr
+		if isOverAggregate && astExpr != nil && !proj.IsAgg {
+			astExpr = plansql.ReplaceGroupKeyRefs(astExpr, gbExprToSyn)
+		}
+
+		if expression == nil && astExpr != nil && !proj.IsAgg {
 			// CSE within a single Project operator is unsafe: prevCol below
 			// is the OUTPUT column name of an earlier projection, but at
 			// runtime each ColumnRef is resolved against the INPUT batch's
@@ -8616,9 +8634,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithScopeResolver(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns())
+					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns())
 				} else {
-					compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
+					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables)
 				}
 			} else {
 				// With the child's DECLARED column types in hand, so a pair
@@ -8627,7 +8645,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				// always compiled to instead of deferring the question to the
 				// first batch (#555 review).
 				compiled, compErr = expr.CompileWithColumnTypes(
-					proj.ASTExpr, p.subqueryRunner, childColTypes.types)
+					astExpr, p.subqueryRunner, childColTypes.types)
 			}
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a
