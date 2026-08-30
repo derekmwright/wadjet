@@ -307,10 +307,7 @@ func (a *extremumArms) commonKind(b *batch.RecordBatch) boxKind {
 			kind, have = k, true
 			continue
 		}
-		if k == kind {
-			continue
-		}
-		w, ok := widerNumberKind(k, kind)
+		w, ok := numericFoldOf(kind, k)
 		if !ok {
 			kind, have = boxUnknown, true
 			break
@@ -346,6 +343,19 @@ func (a *extremumArms) materialize(b *batch.RecordBatch, idx int, v any) any {
 		return v
 	}
 	text := a.texts[idx]
+	// The value is materialized at the FOLD's type, never at the DECLARED one.
+	// It feeds the COMPARISON above it as often as it feeds a store —
+	// `GREATEST(r_val,'1e39',d_val) > 0` never projects anything — so narrowing
+	// or refusing here would answer a different predicate than PostgreSQL's.
+	// Making the STORE right is the declaration's business, and
+	// expr.CommonDeclType folds a non-DECIMAL numeric list through this same
+	// ladder now, so for those two the declaration and the fold agree and
+	// nothing narrows at all.
+	if typ == batch.TypeDecimal {
+		// A DECIMAL's value IS its rendered text, which is the box it carries
+		// everywhere else in the engine.
+		return text
+	}
 	switch typ {
 	case batch.TypeFloat64:
 		f, st := kernel.FloatLitText(text, 64)
@@ -416,12 +426,20 @@ func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (c in
 	// refuse with "for type bigint" on the (r_key, '3.1') pair, where
 	// PostgreSQL folds to double precision and answers — the same finding #517
 	// made about the refusal, one level down in the comparison.
-	if ck := a.commonKind(b); isNumberKind(ck) {
-		if isNumberKind(lk) {
-			lk = ck
-		}
-		if isNumberKind(rk) {
-			rk = ck
+	// Only the operand facing a QUOTED literal is retyped, and only then: the
+	// fold exists to say what the unknown-typed literal is coerced to. A pair
+	// of TYPED operands already has each side's own rule — retyping both to
+	// the fold sent (an int64 box, a DECIMAL's text) to the two-DECIMALs arm,
+	// which needs two strings, so it declined and pickExtremum picked the
+	// winner with compare()'s byte order instead.
+	if lk == boxQuoted || rk == boxQuoted {
+		if ck := a.commonKind(b); isNumericFoldKind(ck) {
+			if rk == boxQuoted && isNumericFoldKind(lk) {
+				lk = ck
+			}
+			if lk == boxQuoted && isNumericFoldKind(rk) {
+				rk = ck
+			}
 		}
 	}
 	if !pairApplies(lk, rk, a.texts[li], a.texts[ri]) {

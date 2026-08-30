@@ -1079,6 +1079,30 @@ func postgresSemanticsCases() []pgCase {
 		// two-argument form folds to real, where it rounds onto 2^24.
 		pgCase{name: "GreatestRealQuotedIntDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_val, '16777217', d_val) <= 16777216.5`},
 		pgCase{name: "GreatestRealOnlyQuotedInt", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE GREATEST(r_val, '16777217') <= 16777216.5`},
+		// A NUMERIC-typed CONSTANT arm. PostgreSQL types an unsuffixed
+		// constant `numeric` as soon as it carries a decimal point or an
+		// exponent, so `COALESCE(real, 0.0)` is real ∪ numeric — REAL — and
+		// `COALESCE(bigint, 0.0)` is numeric. DECIMAL had no rung on the
+		// engine's fold ladder, so both folds failed and the comparison went
+		// BYTEWISE against the literal.
+		pgCase{name: "CoalesceRealNumericConstGt", sql: `SELECT r_key FROM real_probe WHERE COALESCE(r_val, 0.0) > '9' ORDER BY r_key`},
+		pgCase{name: "CoalesceRealNumericConstExp", sql: `SELECT r_key FROM real_probe WHERE COALESCE(r_val, 1e0) > '9' ORDER BY r_key`},
+		pgCase{name: "GreatestRealNumericConst", sql: `SELECT r_key FROM real_probe WHERE GREATEST(r_val, 0.0) > '9' ORDER BY r_key`},
+		pgCase{name: "CaseRealNumericConst", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_key > 0 THEN r_val ELSE 0.0 END > '9'`},
+		pgCase{name: "CoalesceIntNumericConst", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE COALESCE(r_key, 0.0) > '9'`},
+		pgCase{name: "CoalesceRealNumericConstEq", sql: `SELECT r_key FROM real_probe WHERE COALESCE(r_val, 0.0) = '3.1' ORDER BY r_key`},
+		// A DECIMAL COLUMN inside a composite — the same rung, reached from
+		// the other side. No corpus entry mixed one into a composite before.
+		pgCase{name: "GreatestIntQuotedDecimal", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, '3.1', d_2) > 0`},
+		pgCase{name: "LeastIntQuotedDecimal", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_key, '3.1', d_2) > 0`},
+		pgCase{name: "GreatestDecimalQuotedInt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, '3.1', d_key) > 0`},
+		// A literal past every FLOAT range, and a NaN, are VALUES against a
+		// numeric fold: the carrier saturates them into their place in the
+		// order (ADR-0024 item 6) rather than refusing them.
+		pgCase{name: "GreatestIntQuotedOverCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, '1e39', d_2) > 0`},
+		pgCase{name: "GreatestIntQuotedNaNDecimal", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, 'NaN', d_2) > 0`},
+		pgCase{name: "GreatestIntDecimalEqQuoted", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, d_2) = '12.75'`},
+		pgCase{name: "CoalesceDecimalNumericConst", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, 0.0) > '9'`},
 
 		// SINGLE-element real IN — the arity split #549's re-review turned up.
 		// PostgreSQL folds `real IN (x)` to `= 'x'::double precision` (WIDEN),

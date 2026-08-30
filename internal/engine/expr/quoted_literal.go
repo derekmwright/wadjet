@@ -187,6 +187,22 @@ func raiseQuotedLitRefusal(typ batch.TypeID, text string, st kernel.NumConstStat
 // value answer to a question that has none.
 func quotedNumberOrder(typ batch.TypeID, num any, text string) (int, bool) {
 	switch typ {
+	case batch.TypeDecimal:
+		// The DECIMAL rung of the fold, which a COMPOSITE reaches: `GREATEST(
+		// bigint, '3.1', numeric)` is a numeric comparison in PostgreSQL, and
+		// the value that arrives can be either a DECIMAL's rendered TEXT or the
+		// integer/float box of whichever arm won. Both are ordered against the
+		// literal's exact digits — the same rule a bare DECIMAL column gets
+		// (ADR-0012 item 6), reached through the same accept-set.
+		st, _ := kernel.QuotedLitStatus(batch.TypeDecimal, text)
+		if st != kernel.NumConstOK {
+			raiseQuotedLitRefusal(batch.TypeDecimal, text, st)
+		}
+		if s, ok := num.(string); ok {
+			c, ok := batch.CompareDecimalTexts(s, text)
+			return c, ok
+		}
+		return decimalTextOrder(num, text)
 	case batch.TypeFloat32:
 		v, ok := numberAsFloat64(num)
 		if !ok {

@@ -438,6 +438,102 @@ func TestSetOpDecimalKeyTwoPath(t *testing.T) {
 // one path and answered on the other. It is the binder's now, before either
 // path exists, which is what makes the two agree by construction rather than
 // by both happening to evaluate the same pair.
+// TestDecimalInACompositeTwoPath is the DECIMAL rung of the composite rule
+// (#646 review, B4/B5). It rides on TestDecimalLiteralRefusalTwoPath's cluster
+// rather than standing its own — the package convention, and what keeps
+// internal/coordinator inside CI's default 10-minute package timeout.
+//
+// DECIMAL had no rung in the kind ladder, and that was one bug with two faces.
+// A COMPOSITE holding a DECIMAL column could not fold at all, so each (best,
+// candidate) pair kept its OWN type and `GREATEST(id, '3.1', a)` asked
+// BIGINT's input function for '3.1' — 22P02 for a query PostgreSQL folds to
+// numeric and answers. And a NUMERIC-typed constant arm (an unsuffixed literal
+// with a point or an exponent, which PostgreSQL types `numeric`) made the join
+// answer boxUnknown, so `COALESCE(a, 0.0) > '9'` fell through to compare() and
+// ordered the rendered number against the literal BYTEWISE.
+//
+// Every want is PostgreSQL 17.11's over a table loaded with dbpData's exact
+// values. `pg_typeof` for the three composites here is numeric in all three
+// cases (bigint ∪ numeric, numeric ∪ numeric-constant), which is what the
+// ladder now answers.
+func TestDecimalInACompositeTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, c := range []struct {
+		name  string
+		where string
+		want  int64
+	}{
+		// B5: a DECIMAL column inside the composite, with a quoted literal.
+		{"GreatestIntQuotedDec", "GREATEST(id, '3.1', a) > 0", 9},
+		{"LeastIntQuotedDec", "LEAST(id, '3.1', a) > 0", 7},
+		{"GreatestDecQuotedInt", "GREATEST(a, '3.1', id) > 0", 9},
+		{"LeastDecQuotedDec", "LEAST(a, '3.1', b) > 0", 7},
+		// A literal past every FLOAT range and a NaN are both VALUES against a
+		// numeric fold: the carrier saturates them into their place in the
+		// order (ADR-0024 item 6), it does not refuse them.
+		{"GreatestIntQuotedOverCarrier", "GREATEST(id, '1e39', a) > 0", 9},
+		{"GreatestIntQuotedNaN", "GREATEST(id, 'NaN', a) > 0", 9},
+		// No literal inside: the composite's own folded type is what the
+		// OUTER quoted literal is coerced to.
+		{"GreatestIntDecEqQuoted", "GREATEST(id, a) = '12.75'", 4},
+		{"CaseIntDecGtQuoted", "CASE WHEN id > 4 THEN id ELSE a END > '9'", 3},
+		{"CoalesceDecDecGtQuoted", "COALESCE(a, b) > '10'", 4},
+		// B4: a NUMERIC-typed constant arm. It is the arm that has a type
+		// PostgreSQL names and this layer used to drop.
+		{"CoalesceIntNumericConst", "COALESCE(id, 0.0) > '9'", 0},
+		{"CoalesceDecNumericConst", "COALESCE(a, 0.0) > '9'", 4},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", dbpTable, c.where)
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+				if len(rows) != 1 {
+					t.Fatalf("%s: %s returned %d rows", arm.name, sql, len(rows))
+				}
+				got, _ := rows[0]["n"].(int64)
+				if got != c.want {
+					t.Errorf("%s: %s = %d, want %d (PostgreSQL 17)", arm.name, sql, got, c.want)
+				}
+			}
+		})
+	}
+
+	// A literal no numeric type can read is still refused, and the message
+	// names the CALL's folded type — numeric, as PostgreSQL says, not the
+	// bigint of whichever argument the pair held.
+	t.Run("GarbageNamesTheFoldedType", func(t *testing.T) {
+		sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE GREATEST(id, 'abc', a) > 0", dbpTable)
+		const want = `invalid input syntax for type numeric: "abc"`
+		for _, arm := range []struct {
+			name string
+			run  func() error
+		}{
+			{"single", func() error { _, err := tmdRunSingle(ctx, single, sql); return err }},
+			{"dag", func() error { _, err := tmdRunDAG(ctx, coord, sql); return err }},
+		} {
+			err := arm.run()
+			if err == nil {
+				t.Errorf("%s: %s answered; PostgreSQL raises 22P02", arm.name, sql)
+				continue
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: %s raised %v, want a refusal naming %q", arm.name, sql, err, want)
+			}
+		}
+	})
+}
+
 func TestDecimalLiteralRefusalTwoPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")

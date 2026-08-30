@@ -1527,13 +1527,50 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     refuses may raise, because a partial fold is a LOWER BOUND and a lower
     bound is what refuses at the wrong width.
 
+    **DECIMAL is a rung of that fold, and a NUMERIC CONSTANT arm carries its
+    own type into it.** (Added 2026-08-29 from this item's second review.) The
+    ladder is `select_common_type`'s, the same one item 12 pins for set
+    operations, with `float4` where live `pg_typeof` puts it:
+
+        INT32 < INT64 < DECIMAL < FLOAT32 < FLOAT64
+
+    Leaving DECIMAL off it was one defect with two faces. A composite holding a
+    DECIMAL column could not fold at all, so each pair kept its own type and
+    `GREATEST(bigint, '3.1', numeric)` asked BIGINT's input function for a
+    literal PostgreSQL reads as numeric — a refusal where PostgreSQL answers.
+    And a NUMERIC-typed CONSTANT arm — an unsuffixed literal with a point or an
+    exponent, which PostgreSQL types `numeric` — made the join answer "no kind
+    at all", so `COALESCE(real_col, 0.0) > '9'` fell through to the generic
+    comparison and ordered the rendered number against the literal BYTEWISE.
+    The two predicates the fold has to keep apart are visible in one pair:
+    `COALESCE(real, 0.0)` is REAL and `COALESCE(bigint, 0.0)` is NUMERIC.
+
+    Only the operand FACING the quoted literal is retyped to the fold. A pair
+    of typed operands already has each side's own rule, and retyping both sent
+    an integer box and a DECIMAL's text to the two-DECIMALs comparison, which
+    needs two strings — so it declined and the extremum picked its winner by
+    byte order instead.
+
     **The DECLARED type of such a call is still `decided[0]`, not the fold**
     (`expr.CommonDeclType`), so a projection of `GREATEST(real, …, double)`
-    narrows the double answer back into a real vector. That is the deferred
-    numeric fold its own `TODO(#555)` names, not this rule's; it is pinned in
-    `coordinator.TestExtremumWinnerIsMaterializedAtTheCallsType` with
-    PostgreSQL's answer recorded, so lifting the deferral shows up as those
-    pins failing.
+    narrows the double answer back into a real vector. The cause is one line
+    further up: `physical.nodeDeclaredType` types a QUOTED string literal as
+    `Decl(TypeString), Decided`, so a call holding one has a NON-NUMERIC
+    decider and `CommonDeclType` falls back to `decided[0]` instead of folding.
+    PostgreSQL types that literal `unknown` and resolves the call from the
+    other arguments.
+
+    That deferral does not merely narrow — it WRAPS. A folded double `1e39`
+    stored into an INT64 vector is int64's MINIMUM, and so is a NaN: #462's
+    failure mode, which item 6 forbids and ADR-0024 item 4 makes a 22003, and
+    it reaches GROUP BY keys built from the same projection. It cannot be
+    fixed from the comparison layer — the materialized value feeds the
+    COMPARISON as often as it feeds a store, so narrowing or refusing there
+    answers a different predicate than PostgreSQL's — so the six shapes are
+    pinned LOUDLY in
+    `coordinator.TestExtremumWinnerIsMaterializedAtTheCallsType`, with
+    PostgreSQL's answer recorded beside each. Deleting those pins is the
+    declaration fix's proof.
 
     **The boxed layer resolves the column's WIDTH from its DECLARATION.**
     `expr.ColRef.Eval` widens on the way out — a FLOAT32 column boxes as

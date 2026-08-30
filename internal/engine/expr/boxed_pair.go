@@ -147,6 +147,15 @@ func numberKindType(k boxKind) (batch.TypeID, bool) {
 		return batch.TypeFloat32, true
 	case boxFloat64:
 		return batch.TypeFloat64, true
+	case boxDecimal:
+		// DECIMAL is a rung of the fold like any other. Leaving it out was one
+		// bug wearing two faces: `COALESCE(r_val, 0.0)` folded real with a
+		// NUMERIC constant, found no rung, fell all the way to compare() and
+		// ordered the rendered number against the literal BYTEWISE (`> '9'`
+		// answered 2 of 9 rows); and `GREATEST(c_i64, '3.1', c_dec)` could not
+		// fold bigint with numeric, so the pair kept bigint's own type and
+		// refused a literal PostgreSQL reads as numeric.
+		return batch.TypeDecimal, true
 	}
 	return 0, false
 }
@@ -163,8 +172,23 @@ func numberKindOf(t batch.TypeID) boxKind {
 		return boxFloat32
 	case batch.TypeFloat64:
 		return boxFloat64
+	case batch.TypeDecimal:
+		return boxDecimal
 	}
 	return boxNumber
+}
+
+// isNumericFoldKind is isNumberKind plus DECIMAL: the kinds that have a rung
+// on PostgreSQL's select_common_type ladder.
+//
+// It is a SECOND predicate rather than a widening of isNumberKind because the
+// two answer different questions. isNumberKind asks "does a value from here
+// arrive as a Go number", which decides whether the box can be read as one and
+// which DECIMAL answers no to — it renders as text. This asks "does this kind
+// have a place in the numeric fold", which DECIMAL answers yes to. Collapsing
+// them would send a DECIMAL column's text box into the float arms.
+func isNumericFoldKind(k boxKind) bool {
+	return isNumberKind(k) || k == boxDecimal
 }
 
 // widerNumberKind folds two number kinds the way PostgreSQL's
@@ -180,6 +204,20 @@ func widerNumberKind(a, b boxKind) (boxKind, bool) {
 		return boxNumber, false
 	}
 	return numberKindOf(widerNumericType(ta, tb)), true
+}
+
+// numericFoldOf folds one operand into a running common kind, and reports
+// ok=false when the pair has no rung — the caller must then decline rather
+// than guess, because a fold that skipped an operand is a LOWER BOUND on
+// PostgreSQL's.
+func numericFoldOf(kind, k boxKind) (boxKind, bool) {
+	if k == kind {
+		return kind, true
+	}
+	if !isNumericFoldKind(k) || !isNumericFoldKind(kind) {
+		return boxUnknown, false
+	}
+	return widerNumberKind(k, kind)
 }
 
 // classifyOperand reports an operand's declared kind and whether that answer
@@ -414,10 +452,15 @@ func foldKind(e Expr, k boxKind) boxKind {
 // joinOperandKinds is classifyOperand over a set of alternatives that one
 // value is chosen from.
 //
-// The join keeps DECIMAL over a plain number: an expression that answers
-// either a DECIMAL or an integer still only ever produces a STRING box when
-// the DECIMAL wins, so "a string from here is decimal text" stays true, which
-// is the only claim the kind makes. A QUOTED literal alternative contributes
+// The join folds the alternatives through PostgreSQL's own numeric ladder,
+// DECIMAL included: `COALESCE(numeric, bigint)` is numeric there and
+// `COALESCE(real, numeric)` is REAL, so DECIMAL no longer simply wins. It used
+// to, on the argument that a string box from such an expression is always
+// decimal text — true, but it made the literal beside it coerce as numeric
+// where PostgreSQL coerces as real. A decimal-text box reaching a float rung
+// now finds no reading and falls through to compare(), which is the same
+// no-rule answer an unclassifiable operand already gets. A QUOTED literal
+// alternative contributes
 // nothing and takes the others' type, the way PostgreSQL resolves an
 // unknown-typed literal from its context — `COALESCE(d, 'text')` is a numeric
 // expression there, not an ambiguous one. Any other disagreement leaves the
@@ -449,9 +492,7 @@ func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 		}
 		switch {
 		case k == kind:
-		case k == boxDecimal && isNumberKind(kind), kind == boxDecimal && isNumberKind(k):
-			kind = boxDecimal
-		case isNumberKind(k) && isNumberKind(kind):
+		case isNumericFoldKind(k) && isNumericFoldKind(kind):
 			// Two numbers that are not the SAME number: an int column beside a
 			// float one, or either beside a numeric literal. PostgreSQL resolves
 			// ONE type for the whole expression (select_common_type) and the
@@ -756,13 +797,13 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, u
 	// unreadable literal fell through to compare() and got a value: `CASE WHEN
 	// int_col < 'NaN'` returned every row, and `f < '3.1'` over a real column
 	// compared at double width.
-	case isNumberKind(lk) && rk == boxQuoted:
+	case isNumericFoldKind(lk) && rk == boxQuoted:
 		if typ, ok := numberKindType(lk); ok {
 			if c, ok := quotedNumberOrder(typ, lv, rText); ok {
 				return c, true, false
 			}
 		}
-	case isNumberKind(rk) && lk == boxQuoted:
+	case isNumericFoldKind(rk) && lk == boxQuoted:
 		if typ, ok := numberKindType(rk); ok {
 			if c, ok := quotedNumberOrder(typ, rv, lText); ok {
 				return -c, true, false

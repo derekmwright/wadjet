@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // The FLOAT32 (`real`) comparison-WIDTH fixture (#631, #633).
@@ -502,6 +503,37 @@ func rwpWant() []rwpCase {
 		{"GreatestIntQuotedIntDouble", "GREATEST(r_key, '3', d_val) > 0", seq(0, 23)},
 		// A composite inside another boxed site.
 		{"NullifGreatestIntRealQuoted", "NULLIF(GREATEST(r_key, r_val), '3.1') IS NULL", []int64{3}},
+
+		// --- a NUMERIC-typed CONSTANT arm (#646 review, B4) ---------------
+		//
+		// PostgreSQL types an unsuffixed constant `numeric` as soon as it
+		// carries a decimal point or an exponent, so `COALESCE(real, 0.0)` is
+		// real ∪ numeric — which resolves to REAL — and `COALESCE(bigint,
+		// 0.0)` is numeric. DECIMAL had no rung on this layer's ladder, so
+		// both folds failed, the pair declined, and compare() ordered the
+		// rendered number against the literal BYTEWISE: `> '9'` kept the two
+		// rows whose text sorts above "9" instead of the nine whose VALUE
+		// does.
+		//
+		// The three spellings of the constant are all here because they are
+		// all `numeric` to PostgreSQL and it is the SPELLING that decides —
+		// `0` would be an integer constant and a different fold.
+		{"CoalesceRealNumericConstGt", "COALESCE(r_val, 0.0) > '9'",
+			join(seq(9, 15), []int64{20, 21})},
+		{"CoalesceRealNumericConstHalf", "COALESCE(r_val, 0.5) > '9'",
+			join(seq(9, 15), []int64{20, 21})},
+		{"CoalesceRealNumericConstExp", "COALESCE(r_val, 1e0) > '9'",
+			join(seq(9, 15), []int64{20, 21})},
+		{"GreatestRealNumericConst", "GREATEST(r_val, 0.0) > '9'",
+			join(seq(9, 15), []int64{20, 21})},
+		{"CaseRealNumericConst", "CASE WHEN r_key > 0 THEN r_val ELSE 0.0 END > '9'",
+			join(seq(9, 15), []int64{20, 21})},
+		// The INTEGER column's fold lands on numeric rather than real, and
+		// the NULL row is in the answer because COALESCE supplies 0.0 there.
+		{"CoalesceIntNumericConst", "COALESCE(r_key, 0.0) > '9'", seq(10, 23)},
+		// The literal that only a REAL fold can match, through a composite:
+		// real ∪ numeric is real, so '3.1' narrows and finds row 3.
+		{"CoalesceRealNumericConstEq", "COALESCE(r_val, 0.0) = '3.1'", []int64{3}},
 	}
 }
 
@@ -533,6 +565,13 @@ func TestRealComparisonWidthTwoPath(t *testing.T) {
 			}
 		})
 	}
+
+	// The VALUE half rides this cluster rather than standing its own: the
+	// package convention, and what keeps internal/coordinator inside CI's
+	// default 10-minute package timeout.
+	t.Run("ExtremumWinnerMaterialization", func(t *testing.T) {
+		runExtremumWinnerMaterialization(t, ctx, single, coord)
+	})
 }
 
 // pgRealOverflowText is the DIGITS PostgreSQL names in the 22003 message for
@@ -678,6 +717,11 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 			}
 		}
 	}
+
+	// The QUOTED-literal refusals ride this cluster for the same reason.
+	t.Run("QuotedNumericLiteralRefusal", func(t *testing.T) {
+		runQuotedNumericLiteralRefusals(t, ctx, single, coord)
+	})
 }
 
 // TestQuotedNumericLiteralRefusalIsOnBothPaths is the ERROR half of #646: a
@@ -700,15 +744,7 @@ func TestRealInOverRangeLiteralRaisesOnBothPaths(t *testing.T) {
 // The last two shapes are the reason the refusal cannot live in the row loop:
 // a predicate no row reaches, and one that only ever meets NULLs, still error
 // in PostgreSQL because the coercion happens at parse analysis.
-func TestQuotedNumericLiteralRefusalIsOnBothPaths(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: this gate stands up an embedded NATS cluster")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	t.Cleanup(cancel)
-
-	coord := tmdCluster(t, ctx)
-	single := tmdStandalone(t, ctx)
+func runQuotedNumericLiteralRefusals(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coordinator) {
 
 	for _, c := range []struct{ name, where, want string }{
 		// --- real: 22P02 -------------------------------------------------
@@ -829,15 +865,7 @@ func TestQuotedNumericLiteralRefusalIsOnBothPaths(t *testing.T) {
 // fold and the materialized value survives into the output vector. The
 // permutations where it does not are pinned below, with PostgreSQL's answer
 // recorded, so lifting that deferral shows up as those pins failing.
-func TestExtremumWinnerIsMaterializedAtTheCallsType(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: this gate stands up an embedded NATS cluster")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	t.Cleanup(cancel)
-
-	coord := tmdCluster(t, ctx)
-	single := tmdStandalone(t, ctx)
+func runExtremumWinnerMaterialization(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coordinator) {
 
 	for _, c := range []struct {
 		name string
@@ -873,30 +901,53 @@ func TestExtremumWinnerIsMaterializedAtTheCallsType(t *testing.T) {
 	}
 
 	// PINNED: the same value through a call whose FIRST decided argument is
-	// narrower than the fold. The comparison and the materialization are the
+	// narrower than the fold. The COMPARISON and the MATERIALIZATION are the
 	// fold's — that is what this commit fixed, and the row-set entries above
-	// prove it — but the projection's DECLARED type is expr.CommonDeclType's
-	// decided[0], so the output vector narrows the answer on the way in:
-	// real for GREATEST(real, …, double) and bigint for GREATEST(bigint, …,
-	// double). PostgreSQL declares double precision for both.
+	// prove it — but the PROJECTION's declared type is not, so the output
+	// vector narrows the answer on the way in.
 	//
-	// These are asserted at what wadjet ANSWERS today, with PostgreSQL's
-	// answer named, because the gap is expr.CommonDeclType's deferred
-	// numeric fold (its own TODO(#555)) and not this rule's: widening it
-	// changes the declared type of every mixed-numeric COALESCE, GREATEST,
-	// LEAST, NULLIF and CASE in the engine, which is #555's arc and needs
+	// The cause is one line up the stack and it is NOT expr.CommonDeclType's
+	// documented DECIMAL deferral: physical.nodeDeclaredType types a QUOTED
+	// string literal as `Decl(TypeString), Decided`, so a call holding one has
+	// a NON-NUMERIC decider in its list and CommonDeclType falls back to
+	// decided[0] — the first argument — instead of folding. PostgreSQL types
+	// that literal `unknown` and resolves the call from the other arguments:
+	// `GREATEST(bigint, real, double, '1e39')` is double precision there.
+	//
+	// The last two rows are the WORST form of it and are pinned LOUDLY rather
+	// than quietly: the deferral does not merely narrow, it WRAPS. A double
+	// 1e39 stored into an INT64 vector is int64's MINIMUM, and a NaN is too —
+	// #462's failure mode, which ADR-0012 item 6 forbids and ADR-0024 item 4
+	// makes a 22003. They reach GROUP BY keys built from the same projection.
+	//
+	// This cannot be fixed from the comparison layer: the value materialized
+	// here feeds the COMPARISON as often as it feeds a store
+	// (`GREATEST(r_val,'1e39',d_val) > 0` projects nothing), so narrowing or
+	// refusing at materialization would answer a different predicate than
+	// PostgreSQL's — which is exactly the PG-superset regression the round-1
+	// review caught. The fix belongs in nodeDeclaredType/CommonDeclType, with
 	// #555's gates. Deleting these pins is that fix's proof.
 	for _, c := range []struct {
 		name   string
 		expr   string
 		key    int
-		want   any     // what wadjet answers, through the narrower declaration
-		pgWant float64 // what PostgreSQL answers
+		want   any    // what wadjet answers, through the narrower declaration
+		pgWant string // what PostgreSQL answers
 	}{
 		{"PinnedRealFirstNarrowsTheFold", "GREATEST(r_val, '16777217', d_val)", 19,
-			float32(16777216), 16777217},
+			float32(16777216), "16777217"},
 		{"PinnedBigintFirstTruncatesTheFold", "GREATEST(r_key, '3.5', d_val)", 0,
-			int64(3), 3.5},
+			int64(3), "3.5"},
+		// WRAPS, which is the part that is not merely a narrowing.
+		{"PinnedBigintFirstWrapsPastRange", "GREATEST(r_key, r_val, d_val, '1e39')", 0,
+			int64(-9223372036854775808), "1e+39"},
+		{"PinnedBigintFirstWrapsNaN", "GREATEST(r_key, r_val, d_val, 'NaN')", 0,
+			int64(-9223372036854775808), "NaN"},
+		{"PinnedRealFirstSaturatesPastRange", "GREATEST(r_val, d_val, r_key, '1e39')", 0,
+			float32(math.Inf(1)), "1e+39"},
+		{"PinnedGroupKeyCarriesTheWrap",
+			"GREATEST(r_key, r_val, d_val, '1e39')", 19,
+			int64(-9223372036854775808), "1e+39"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sql := fmt.Sprintf("SELECT %s AS v FROM %s WHERE r_key = %d", c.expr, rwpTable, c.key)
@@ -909,7 +960,7 @@ func TestExtremumWinnerIsMaterializedAtTheCallsType(t *testing.T) {
 					t.Fatalf("%s: %s returned %d rows, want 1", arm.name, sql, len(rows))
 				}
 				if got := rows[0]["v"]; got != c.want {
-					t.Errorf("%s: %s = %#v (%T), pinned at %#v; PostgreSQL answers %v "+
+					t.Errorf("%s: %s = %#v (%T), pinned at %#v; PostgreSQL answers %s "+
 						"— if this now agrees with PostgreSQL, DELETE the pin",
 						arm.name, sql, got, got, c.want, c.pgWant)
 				}
