@@ -130,8 +130,31 @@ func TestBuildFromSelectWindowFunction(t *testing.T) {
 	if we.Func != "row_number" {
 		t.Errorf("window func: got %q, want 'row_number'", we.Func)
 	}
-	if we.OutputCol != "rn" {
-		t.Errorf("output col: got %q, want 'rn'", we.OutputCol)
+	// The window writes a SLOT of its own, never the user's alias: an alias
+	// that spells an input column's name gave the projection two columns of
+	// that name and it took the input one (#694). The alias is published by
+	// the projection above, which is asserted below.
+	if we.OutputCol != "__win_0" {
+		t.Errorf("output col: got %q, want '__win_0'", we.OutputCol)
+	}
+	proj := findNodeType(plan, NodeProject)
+	if proj == nil {
+		t.Fatal("expected a Project node above the window")
+	}
+	var found bool
+	for _, p := range proj.Projections {
+		if p.Alias == "rn" {
+			found = true
+			if p.Column != we.OutputCol {
+				t.Errorf("projection for rn reads %q, want the window's slot %q — reading it "+
+					"by ALIAS is what let an input column of the same name win (#694)",
+					p.Column, we.OutputCol)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no projection publishes the window under its alias 'rn'; projections: %+v",
+			proj.Projections)
 	}
 	if len(we.PartitionBy) != 1 || we.PartitionBy[0] != "dept" {
 		t.Errorf("partition by: got %v, want [dept]", we.PartitionBy)

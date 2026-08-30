@@ -345,8 +345,12 @@ func selectOutputNames(info *plansql.SelectInfo) ([]string, []plansql.SelectColu
 			continue
 		}
 		switch {
-		case col.IsWindow && col.WindowSpec != nil && col.Alias == "":
-			out = append(out, col.WindowSpec.Alias)
+		case col.IsWindow:
+			// The same choice buildProject makes for a window column, and it
+			// has to be the SAME choice: an unaliased window used to be read
+			// off WindowSpec.Alias, which is "" exactly when the column has
+			// no alias, so the sort compared its key against "" (#694).
+			out = append(out, windowOutputName(col))
 		case col.Alias != "":
 			out = append(out, col.Alias)
 		case col.ColumnRef != "":

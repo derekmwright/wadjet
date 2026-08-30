@@ -430,10 +430,31 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		nestedWinRewrites[i] = plansql.ReplaceWindowFuncs(col.ASTExpr, replacements)
 	}
 
-	// WINDOW functions (after GROUP BY/HAVING, before PROJECT)
+	// A BARE window column — one whose whole SELECT expression is the window
+	// call — writes its result into a slot of its own, exactly as the nested
+	// case above does, and the SELECT list reads THAT slot.
+	//
+	// It used to write under the user's ALIAS, and exec.Window APPENDS its
+	// output to the input batch, so a query whose alias happened to spell an
+	// input column's name handed the projection two columns called `s`. The
+	// projection resolves by NAME and took the first: `SELECT id, SUM(a) OVER
+	// () AS s FROM decpair` came back with decpair.s — the TEXT column — on
+	// BOTH execution paths, silently, and `AS a` came back with the window's
+	// own ARGUMENT column (#694). Provenance is the only thing that
+	// distinguishes them, and the synthetic name IS the provenance.
+	//
+	// A window with no alias at all was the same defect one step further
+	// along: nothing named the output, the projection asked for "", and the
+	// single-process path answered NULL while the DAG dropped the column from
+	// the result entirely.
+	bareWinOutput := map[int]string{}
 	if len(info.Windows) > 0 || len(nestedWinExprs) > 0 {
 		var winExprs []WindowExpr
-		for _, ws := range info.Windows {
+		for i, col := range info.Columns {
+			if !col.IsWindow || col.WindowSpec == nil {
+				continue
+			}
+			ws := *col.WindowSpec
 			var orderBy []OrderExpr
 			for _, ob := range ws.OrderBy {
 				orderBy = append(orderBy, OrderExpr{
@@ -443,13 +464,16 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				})
 			}
 			partBy := make([]string, len(ws.PartitionBy))
-			for i, p := range ws.PartitionBy {
-				partBy[i] = cleanExpr(p)
+			for j, p := range ws.PartitionBy {
+				partBy[j] = cleanExpr(p)
 			}
+			syntheticName := fmt.Sprintf("__win_%d", winCounter)
+			winCounter++
+			bareWinOutput[i] = syntheticName
 			we := WindowExpr{
 				Func:        ws.FuncName,
 				InputCol:    cleanExpr(ws.Args),
-				OutputCol:   ws.Alias,
+				OutputCol:   syntheticName,
 				PartitionBy: partBy,
 				OrderBy:     orderBy,
 			}
@@ -514,11 +538,22 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		var projections []Projection
 		for i, col := range info.Columns {
 			if col.IsWindow {
-				// Window column: reference the window output by alias
+				// Window column: read the window's own output SLOT and
+				// publish it under the name the SELECT list asked for. The
+				// slot, not the alias, because an input column may be spelled
+				// like the alias and the projection resolves by name (#694).
+				src := bareWinOutput[i]
+				name := windowOutputName(col)
+				if src == "" {
+					// No window node was built for this column, which means
+					// the parse said IsWindow and the builder disagreed. Keep
+					// the old spelling rather than projecting nothing.
+					src = name
+				}
 				projections = append(projections, Projection{
-					Expr:   col.WindowSpec.Alias,
-					Alias:  col.WindowSpec.Alias,
-					Column: col.WindowSpec.Alias,
+					Expr:   src,
+					Alias:  name,
+					Column: src,
 				})
 				continue
 			}
@@ -586,6 +621,24 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 
 func isStarOnly(cols []plansql.SelectColumn) bool {
 	return len(cols) == 1 && cols[0].Star
+}
+
+// windowOutputName is the name a bare window column is published under: the
+// alias where the query gave one, and the window call's own text where it did
+// not.
+//
+// Two places have to agree on it — the projection the builder emits and
+// selectOutputNames, which the ORDER BY resolver reads — and both used to take
+// it from WindowSpec.Alias, which for an unaliased window is the empty string.
+// The projection then asked for "" and the sort resolver compared against "".
+func windowOutputName(col plansql.SelectColumn) string {
+	if col.Alias != "" {
+		return col.Alias
+	}
+	if col.WindowSpec != nil && col.WindowSpec.Alias != "" {
+		return col.WindowSpec.Alias
+	}
+	return cleanExpr(col.Expr)
 }
 
 func cleanExpr(s string) string {
