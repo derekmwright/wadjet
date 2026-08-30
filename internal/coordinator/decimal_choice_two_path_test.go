@@ -487,37 +487,33 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 	})
 }
 
-// TestAggregateOverADerivedColumnTwoPath is TPC-H Q08's exact shape, and it
-// records a defect the DECIMAL work only made visible: the two paths DISAGREE,
-// and the DAG's disagreement is not about DECIMAL at all.
+// TestAggregateOverADerivedColumnTwoPath is TPC-H Q08's exact shape: an
+// aggregate whose ARGUMENT is an EXPRESSION over a column a DERIVED TABLE
+// names.
 //
-// Q08 aggregates a CASE whose branch is a bare reference to a column a DERIVED
-// TABLE computes. On the single-process path that now answers exactly (#695:
-// the aggregate's pre-projection resolves its input types through the derived
-// table, the same walk the SELECT list has used since #529). On the DAG the
-// worker builds the pre-aggregate projection from the expression TEXT against
-// the batch the stage hands it — and that batch carries the SCAN's columns, not
-// the derived table's, so `volume` resolves to nothing and reads NULL on every
-// row. `SUM(CASE … THEN volume ELSE 0 END)` therefore sums only its ELSE
-// branch.
+// walkStages emits no stage for an ordinary Project (ADR-0025), so the derived
+// table's SELECT list never happens on the DAG. The aggregate's argument
+// travels to the worker as TEXT and is compiled there against the batch the
+// stage hands it — which carries the SCAN's columns, not the derived table's —
+// so `volume` resolved to nothing, `expr.ColRef.Eval` answered nil on every
+// row, and `SUM(CASE … THEN volume ELSE 0 END)` came back as the total of its
+// ELSE branch alone: 0 where PostgreSQL 17 answers 162.562500.
 //
-// It is TYPE-INDEPENDENT and predates all of this: over an INTEGER derived
-// column the DAG answers 0 where the single-process path answers 2, and a
-// plain RENAME (`id AS idr`) is enough to trigger it — no expression, no
-// DECIMAL. Every arm is a SILENT wrong number, DECIMAL included.
+// It was TYPE-INDEPENDENT — a plain rename triggered it, no expression and no
+// DECIMAL — and every arm was a SILENT wrong number. The worst of them is the
+// SHADOWING pair below: where the derived alias spells a base column's name,
+// the worker read the BASE column and answered a plausible different number
+// rather than a zero, which no "is it suspiciously round" eyeball catches.
 //
-// The DECIMAL arm was briefly LOUD, and that was an ACCIDENT worth recording
-// rather than a property to preserve: the aggregate input's declared (p,s)
-// reached the worker while the derived column did not, so the ELSE branch's
-// integer box met a DECIMAL vector and the store refused it (22003). Once the
-// store learned to read an integer box from an expression as a value at scale
-// 0 — which eleven shapes PostgreSQL answers require, see
-// wadjet.TestDecimalChoiceOverAnIntegerEXPRESSION — that incidental refusal
-// went away and the DECIMAL arm joined the others in answering the ELSE
-// branch's total. Nothing about #709 changed; one of its symptoms stopped
-// being visible, which is exactly why it is pinned here.
+// respellAggInputExpr closes it by giving every reference INSIDE the argument
+// the resolution resolveAggInputName already gave an argument that IS a name:
+// a rename becomes its source column, a computed alias becomes its defining
+// expression in parentheses. The single-process path runs that Project as a
+// real operator and was already right, which is why both arms are asserted —
+// a gate comparing only the two arms would pass on the day this regresses in
+// the other direction.
 //
-// Each pin fails when the DAG starts agreeing. That is the fix's proof.
+// Every `want` below is PostgreSQL 17's answer over the same nine rows.
 func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -531,45 +527,85 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sql  string
-		// want is the answer PostgreSQL gives and the single-process path
-		// now gives.
+		// want is PostgreSQL 17's answer, and both paths must give it.
 		want string
-		// dagRefuses: the DAG fails loudly instead of answering. dagWrong is
-		// the wrong number it answers when it does not fail. Exactly one is
-		// set, and both are pins on the SAME defect.
-		dagRefuses bool
-		dagWrong   string
 	}{
 		{
 			name: "a DECIMAL derived column, computed",
 			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN volume ELSE 0 END) AS v FROM " +
 				"(SELECT s, a * b AS volume FROM " + dbpTable + ") x",
-			want: "162.562500", dagWrong: "0.000000",
+			want: "162.562500",
 		},
 		{
 			name: "a DECIMAL derived column, renamed",
 			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN v ELSE 0 END) AS v FROM " +
 				"(SELECT s, a AS v FROM " + dbpTable + ") x",
-			want: "12.75", dagWrong: "0.00",
+			want: "12.75",
 		},
 		{
-			// No DECIMAL anywhere: this is the entry that says the DAG defect
-			// is about the derived NAME, not about the type.
+			// No DECIMAL anywhere: this is the entry that says the defect is
+			// about the derived NAME, not about the type.
 			name: "an INTEGER derived column, computed",
 			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN twice ELSE 0 END) AS v FROM " +
 				"(SELECT s, id * 2 AS twice FROM " + dbpTable + ") x",
-			want: "2", dagWrong: "0",
+			want: "2",
 		},
 		{
 			name: "an INTEGER derived column, renamed",
 			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN idr ELSE 0 END) AS v FROM " +
 				"(SELECT s, id AS idr FROM " + dbpTable + ") x",
-			want: "1", dagWrong: "0",
+			want: "1",
 		},
 		{
-			// The CONTROL: a bare aggregate over the same derived column
-			// agrees on both paths, so the defect is specific to an aggregate
-			// whose INPUT is an EXPRESSION over a derived name.
+			// The SHADOWING arm, and the reason its values were chosen: the
+			// derived alias `a` names decpair.b, and the base table HAS a
+			// column called `a`. Reading the base column answered 2.0000
+			// where the right answer is 10.0000 — a different number, not a
+			// zero. Row 5 is the only one where a and b differ (2.00 against
+			// 10.0000), so the two readings are distinguishable at all.
+			name: "a derived alias SHADOWING a base column",
+			sql: "SELECT SUM(CASE WHEN s = '9' THEN a ELSE 0 END) AS v FROM " +
+				"(SELECT s, b AS a FROM " + dbpTable + ") x",
+			want: "10.0000",
+		},
+		{
+			// Every reference in the CASE is a rename, including the one in
+			// the CONDITION: a walk that respelled only the branches would
+			// answer the ELSE total here.
+			name: "a CASE whose condition and both branches are renames",
+			sql: "SELECT SUM(CASE WHEN t = 'x' THEN p ELSE q END) AS v FROM " +
+				"(SELECT s AS t, a AS p, b AS q FROM " + dbpTable + ") x",
+			want: "49.2400",
+		},
+		{
+			name: "a CAST of a derived column",
+			sql:  "SELECT SUM(CAST(v AS BIGINT)) AS v FROM (SELECT a AS v FROM " + dbpTable + ") x",
+			want: "54",
+		},
+		{
+			name: "a COALESCE over a derived column",
+			sql:  "SELECT SUM(COALESCE(v, 0)) AS v FROM (SELECT a AS v FROM " + dbpTable + ") x",
+			want: "52.99",
+		},
+		{
+			// Two derived tables: the walk has to resolve level by level,
+			// `w` to `twice` to `id * 2`.
+			name: "a derived alias through TWO derived tables",
+			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN w ELSE 0 END) AS v FROM " +
+				"(SELECT s, twice AS w FROM (SELECT s, id * 2 AS twice FROM " + dbpTable + ") d1) d2",
+			want: "2",
+		},
+		{
+			// A computed alias substituted into ARITHMETIC. The definition is
+			// `id * 2` and it lands inside `… * 3`, so it has to arrive
+			// parenthesized — spliced bare it re-associates.
+			name: "arithmetic over a computed derived alias",
+			sql:  "SELECT SUM(twice * 3) AS v FROM (SELECT s, id * 2 AS twice FROM " + dbpTable + ") x",
+			want: "270",
+		},
+		{
+			// The CONTROL: a bare aggregate over the same derived column,
+			// which resolveAggInputName has handled since #355.
 			name: "control, a bare aggregate over the derived column",
 			sql:  "SELECT SUM(volume) AS v FROM (SELECT a * b AS volume FROM " + dbpTable + ") x",
 			want: "507.687600",
@@ -579,6 +615,15 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 			name: "control, the same CASE over the base table",
 			sql:  "SELECT SUM(CASE WHEN s = '1.50' THEN a ELSE 0 END) AS v FROM " + dbpTable,
 			want: "12.75",
+		},
+		{
+			// And the shadowing control: the same alias with no CASE around
+			// it, which took resolveAggInputName's name route and was right
+			// all along. It is here so a failure localizes to the EXPRESSION
+			// walk rather than to the alias resolution under it.
+			name: "control, a bare aggregate over the shadowing alias",
+			sql:  "SELECT SUM(a) AS v FROM (SELECT s, b AS a FROM " + dbpTable + ") x",
+			want: "49.2400",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,33 +636,58 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 			}
 
 			res, err := tmdRunDAG(ctx, coord, tc.sql)
-			if tc.dagRefuses {
-				if err == nil {
-					t.Errorf("the DAG ANSWERED %v for\n  %s\nThe derived-column "+
-						"reference resolves there now, so delete this pin and assert %q on both paths",
-						res.Rows, tc.sql, tc.want)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("stage DAG refused %q: %v", tc.sql, err)
 			}
 			if len(res.Rows) != 1 {
 				t.Fatalf("dag: %d rows, want 1", len(res.Rows))
 			}
-			got := fmt.Sprintf("%v", res.Rows[0]["v"])
-			if tc.dagWrong != "" {
-				if got == tc.want {
-					t.Errorf("the DAG now agrees (%q) for\n  %s\nDelete this pin", got, tc.sql)
-				} else if got != tc.dagWrong {
-					t.Errorf("dag %s = %q, want the pinned wrong answer %q or the right one %q",
-						tc.sql, got, tc.dagWrong, tc.want)
-				}
-				return
-			}
-			if got != tc.want {
-				t.Errorf("dag %s = %q, want %q", tc.sql, got, tc.want)
+			if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != tc.want {
+				t.Errorf("dag %s = %q, want %q — PostgreSQL 17 answers %q and the "+
+					"single-process path agrees, so the derived name resolved to "+
+					"nothing or to the wrong column (#702)", tc.sql, got, tc.want, tc.want)
 			}
 		})
+	}
+}
+
+// TestAggregateOverADerivedColumnGroupedTwoPath is the same defect under a
+// GROUP BY, where the aggregate stage is a partial/final pair rather than a
+// single collapsing stage — a different lowering, and the one TPC-H Q08
+// actually takes.
+func TestAggregateOverADerivedColumnGroupedTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	// PostgreSQL 17 over the nine decpair rows: only s='1.50' matches, and
+	// its `twice` is 2. Every other group totals its ELSE branch, 0.
+	want := map[string]string{
+		"-1": "0", "0": "0", "1.5": "0", "1.50": "2",
+		"1.500": "0", "10": "0", "9": "0", "abc": "0",
+	}
+	sql := "SELECT s, SUM(CASE WHEN s = '1.50' THEN twice ELSE 0 END) AS v FROM " +
+		"(SELECT s, id * 2 AS twice FROM " + dbpTable + ") x GROUP BY s ORDER BY s"
+
+	for _, arm := range sfcArms(ctx, single, coord) {
+		res, err := arm.run(sql)
+		if err != nil {
+			t.Fatalf("%s arm refused %q: %v", arm.name, sql, err)
+		}
+		if len(res.Rows) != len(want) {
+			t.Fatalf("%s arm returned %d rows, want %d", arm.name, len(res.Rows), len(want))
+		}
+		for _, r := range res.Rows {
+			k := fmt.Sprintf("%v", r["s"])
+			if got := fmt.Sprintf("%v", r["v"]); got != want[k] {
+				t.Errorf("%s arm answered %q for s=%q, want %q — the grouped lowering "+
+					"reads the same derived name (#702)", arm.name, got, k, want[k])
+			}
+		}
 	}
 }
