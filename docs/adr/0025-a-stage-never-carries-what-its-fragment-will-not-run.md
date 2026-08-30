@@ -376,6 +376,29 @@ Two things this needed that the per-consumer patches did not:
   sum(case when s = '1.50' then volume else 0 end) and its input carries no
   [volume]`, which is the difference this ADR exists for.
 
+  It earned its place immediately: it found TWO residuals of the fix that
+  introduced it, both of which had been silent 0s. A ROW field path whose
+  CONTAINER is the rename (`rw.b` over `SELECT c_row AS rw`) resolves neither
+  as a whole nor as a field, so only the qualifier is a name to resolve; and a
+  COMPUTED alias over a COMPUTED alias needs a FIXPOINT, because
+  `resolveAggInputName` stops at the first computed alias it meets and
+  substituting once leaves `twice * 3` naming `twice`.
+
+**And the rule has a boundary, which is the same one the sort keys have.**
+Below a JOIN the derived table's SELECT list really IS materialized —
+`attachScanSelectProjections` puts an alias-naming `OpProject` on the arm's
+fragment — so `x.v` is a column of the join's output and the SOURCE spelling is
+the one that is not. Respelling there took a CORRECT 25.50 to 0.00 on
+`SUM(CASE WHEN x.s = '1.50' THEN x.v ELSE 0 END)` over
+`(SELECT s, a * 2 AS v FROM t) x JOIN t y`, because a self-join qualifies both
+sides' `a` and the bare name resolves to neither.
+
+So the question is never "does this name exist below" but "is this name
+MATERIALIZED here" — which is what `resolveDerivedAliasSortKeys` decides for a
+sort key and what `aggInputJoinBelow` now decides for an aggregate argument.
+Two controls hold the boundary, and they are controls rather than assertions of
+the fix: both shapes were right before this work and have to stay right.
+
 ## Consequences
 
 - `StageProject` is Singleton with `Tasks: 1`, so it SERIALIZES its
