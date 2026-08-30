@@ -297,7 +297,14 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 				if err != nil {
 					return nil, fmt.Errorf("parsing GROUP BY: %w", err)
 				}
-				info.GroupBy = append(info.GroupBy, gbExpr.String())
+				// The term is recorded in its CANONICAL form: outer
+				// parentheses are not part of the expression, and a
+				// delimited identifier is a name rather than the four
+				// tokens its quoted spelling lexes into. Everything above
+				// the aggregate resolves a SELECT item, a HAVING term and a
+				// sort key to this one name (#723, #725).
+				gbExpr = Unparen(gbExpr)
+				info.GroupBy = append(info.GroupBy, GroupKeyName(gbExpr))
 				info.GroupByExprs = append(info.GroupByExprs, gbExpr)
 				if p.peek() != TokenComma {
 					break

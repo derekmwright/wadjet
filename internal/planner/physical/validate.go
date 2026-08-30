@@ -802,6 +802,15 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 		}
 	}
 	for _, gb := range info.GroupBy {
+		// The recorded term text, keyed by the same identity the checked
+		// expressions are: a key stored under its raw spelling would match
+		// nothing, since check() asks by identity.
+		if parsed, err := plansql.ParseExpression(gb); err == nil {
+			if k := groupTermKey(parsed); k != "" {
+				g.keys[k] = true
+			}
+			continue
+		}
 		if k := strings.ToLower(strings.TrimSpace(gb)); k != "" {
 			g.keys[k] = true
 		}
@@ -907,13 +916,20 @@ func (g *groupCheck) check(node plansql.Node) error {
 	return nil
 }
 
-// groupTermKey renders an expression for comparison against the grouped terms.
-// Parentheses are not part of the expression, so `(a+1)` and `a+1` are one key.
+// groupTermKey renders an expression for comparison against the grouped
+// terms. It is plansql.ExprIdentity: parentheses and identifier case are not
+// part of an expression, so `(a+1)`, `((a) + 1)` and `A+1` are one key, while
+// `a - 1 - 2` and `a - (1 - 2)` stay two.
+//
+// Stripping only the OUTER parentheses — which is what this did — left
+// `SELECT ((g) + 1) … GROUP BY g + 1` rendering as `(g) + 1`, matching no
+// grouped term, so the walk descended into it and reported 42803 on `g` for a
+// query PostgreSQL answers (#723).
 func groupTermKey(node plansql.Node) string {
 	if node == nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(unparen(node).String()))
+	return plansql.ExprIdentity(node)
 }
 
 func unparen(node plansql.Node) plansql.Node {

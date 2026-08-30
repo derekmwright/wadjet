@@ -256,6 +256,15 @@ func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, ag
 	if p.ASTExpr == nil {
 		return "", false, false
 	}
+	// The same reference said differently. A computed group key is published
+	// under one canonical name and the SELECT item may spell it with other
+	// parentheses or other identifier case; comparing the two RENDERINGS
+	// made the spelling decide whether this projection resolved at all, and
+	// an unresolved one is rebuilt as arithmetic over columns the aggregate
+	// does not emit — NULL on every row (#723).
+	if real, hit := groupKeysByIdentity(groupKeys)[plansql.ExprIdentity(p.ASTExpr)]; hit {
+		return real, false, true
+	}
 	// An expression over the aggregate's outputs (`COUNT(*) + 1`): the
 	// logical planner rewrote its aggregate calls into refs to their
 	// synthetic OutputCol, so every leaf must now be a name the stage emits.
@@ -287,9 +296,16 @@ func requoteAggOutputRefs(n plansql.Node, emitted map[string]string) (plansql.No
 	// is not arithmetic at all — it is the NAME of one column, and rebuilding
 	// it as arithmetic reads `n_regionkey`, which the aggregate's output does
 	// not carry, and answers NULL for every row.
+	//
+	// Matched by identity, so the term resolves however it is spelled: the
+	// stage publishes ONE name per key and `(n_regionkey + 1)` names the
+	// same key as `n_regionkey + 1` (#723).
 	if n != nil {
 		if _, isRef := n.(*plansql.ColRef); !isRef {
 			if real, hit := emitted[strings.ToLower(n.String())]; hit {
+				return &plansql.ColRef{Column: real}, true
+			}
+			if real, hit := groupKeysByIdentity(emitted)[plansql.ExprIdentity(n)]; hit {
 				return &plansql.ColRef{Column: real}, true
 			}
 		}

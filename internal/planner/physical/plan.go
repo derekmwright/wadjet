@@ -8448,22 +8448,17 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	aggNode := findAggregateAncestor(child)
 	isOverAggregate := aggNode != nil
 
-	// Build a map from GROUP BY expression string → synthetic column name.
-	// When a SELECT expression matches a GROUP BY expression (e.g.,
-	// SUBSTR(c_phone, 1, 2)), the original columns may not exist in the
-	// aggregate output — use the synthetic column instead.
-	gbExprToSyn := map[string]string{}
-	if isOverAggregate && len(aggNode.GroupByExprs) == len(aggNode.GroupBy) {
-		var gbDecls colDecls
-		if len(aggNode.Children) == 1 {
-			gbDecls = inputColDecls(aggNode.Children[0])
-		}
-		for i, gbExpr := range aggNode.GroupByExprs {
-			if gbExpr != nil && !isPlainGroupKey(gbExpr, gbDecls) {
-				gbExprToSyn[gbExpr.String()] = SlotName(SlotGroupKey, i)
-			}
-		}
-	}
+	// Which column a SELECT item that IS a derived GROUP BY key reads.
+	// `SUBSTR(c_phone, 1, 2)` is computed below the aggregate and published
+	// under one name; above the aggregate its source columns are gone, so
+	// re-evaluating the expression there answers NULL for every row.
+	//
+	// The lookup is by plansql.ExprIdentity, not by rendered text. The two
+	// spellings of one key differ in ways SQL does not distinguish —
+	// `(g + 1)` against `g + 1`, `G + 1` against `g + 1` — and comparing the
+	// renderings made which spelling was used decide whether the query
+	// answered or came back with a NULL key column (#723).
+	gbExprToSyn := groupKeyByIdentity(aggNode)
 
 	// Catalog types of what feeds these projections, resolved once for the
 	// whole list: a bare column reference inside a projection expression
@@ -8554,7 +8549,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// re-evaluating the expression (the original columns are gone).
 		var synSource string
 		if isOverAggregate && proj.ASTExpr != nil && !proj.IsAgg {
-			if synName, ok := gbExprToSyn[proj.ASTExpr.String()]; ok {
+			if synName, ok := gbExprToSyn[plansql.ExprIdentity(proj.ASTExpr)]; ok {
 				expression = exec.ColumnRef(synName)
 				synSource = synName
 			}
@@ -8663,7 +8658,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			strictInt := strictIntArithCols(child)
 			colTypes := childColTypes
 			if isOverAggregate {
-				if _, ok := gbExprToSyn[proj.ASTExpr.String()]; ok {
+				if _, ok := gbExprToSyn[plansql.ExprIdentity(proj.ASTExpr)]; ok {
 					strictInt = strictIntArithCols(aggNode.Children[0])
 					colTypes = aggInputColTypes
 				}
@@ -9063,6 +9058,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// preserves.
 	var litPostOps []exec.UnaryOperator
 	litElided := map[int]bool{}
+	// The names this aggregate publishes its keys under, resolved once. The
+	// literal elision below, the derived-key materialization further down,
+	// aggregateOutputNames and the projection above all read them from here —
+	// one rule, so the two engines' aggregate output schemas cannot drift
+	// apart (#723).
+	keyOuts := groupKeyOutputs(node)
 	if len(node.GroupByExprs) == len(node.GroupBy) && len(node.GroupingSets) == 0 {
 		nonLit := 0
 		for _, gbExpr := range node.GroupByExprs {
@@ -9091,7 +9092,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				litDecl := inferProjectionDeclType(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes)
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
-					Name:      SlotName(SlotGroupKey, i),
+					Name:      keyOuts[i].Name,
 					Type:      litDecl.ID,
 					Precision: litDecl.Precision,
 					Scale:     litDecl.Scale,
@@ -9111,7 +9112,13 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				continue
 			}
 			if gbExpr != nil && !isPlainGroupKey(gbExpr, aggChildColTypes) {
-				synName := SlotName(SlotGroupKey, i)
+				// The name the DAG's worker publishes this key under too:
+				// the key's own canonical text. A synthetic `__gb_expr_N`
+				// here made the two engines' aggregate output schemas
+				// DIFFER, so a HAVING predicate or a sort key spelled
+				// against the key could only ever resolve on one of them
+				// (#720).
+				synName := keyOuts[i].Name
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
@@ -13405,43 +13412,20 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 		if len(node.GroupingSets) > 0 || len(node.GroupingSetNulls) > 0 {
 			return nil, false
 		}
-		haveExprs := len(node.GroupByExprs) == len(node.GroupBy)
-		nonLit := 0
-		if haveExprs {
-			for _, gbExpr := range node.GroupByExprs {
-				if gbExpr == nil {
-					nonLit++
-					continue
-				}
-				if _, isLit := gbExpr.(*plansql.Lit); !isLit {
-					nonLit++
-				}
-			}
-		}
-		// The SAME decls buildAggregate classifies its group keys against
-		// (aggChildColTypes = inputColDecls(node.Children[0])): a key is
-		// "plain" only if it is a bare column of the aggregate's input, and a
-		// ROW FIELD PATH is not — it is materialized as __gb_expr_%d there,
-		// so this name list must agree or the projection-elision shapes
-		// diverge (#568, #590's aggregateOutputNames).
-		var gbDecls colDecls
-		if len(node.Children) == 1 {
-			gbDecls = inputColDecls(node.Children[0])
-		}
+		// groupKeyOutputs states buildAggregate's own naming rule — which
+		// keys the input already carries, which one of the paths has to
+		// materialize, and which literal is elided and re-attached. Read
+		// from there rather than restated here: when this list and the
+		// aggregate's real output disagree, the projection-elision decision
+		// publishes the wrong columns (#568, #590).
 		names := make([]string, 0, len(node.GroupBy)+len(node.AggExprs))
 		var elidedLits []string
-		for i, gb := range node.GroupBy {
-			name := plansql.NormalizeIdentRef(strings.TrimSpace(gb))
-			if haveExprs && node.GroupByExprs[i] != nil {
-				if _, isLit := node.GroupByExprs[i].(*plansql.Lit); isLit && nonLit > 0 {
-					elidedLits = append(elidedLits, SlotName(SlotGroupKey, i))
-					continue
-				}
-				if !isPlainGroupKey(node.GroupByExprs[i], gbDecls) {
-					name = SlotName(SlotGroupKey, i)
-				}
+		for _, k := range groupKeyOutputs(node) {
+			if k.Literal {
+				elidedLits = append(elidedLits, k.Name)
+				continue
 			}
-			names = append(names, name)
+			names = append(names, k.Name)
 		}
 		for i := range node.AggExprs {
 			names = append(names, node.AggExprs[i].OutputCol)

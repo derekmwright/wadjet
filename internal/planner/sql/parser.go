@@ -1081,9 +1081,24 @@ func resolveSetOpOrderBy(info *SelectInfo) error {
 // renamed ones) are left alone — the aggregate resolves those by name, and
 // a table column with the same name keeps precedence over the alias.
 func resolveGroupByAliasRef(info *SelectInfo, i int, gb string) {
-	name := strings.TrimSpace(gb)
-	if strings.ContainsAny(name, ". ()") {
-		return // qualified or expression-shaped — not a bare alias
+	// Asked of the parsed term, not of its spelling. A bare name is a
+	// *ColRef with no qualifier however it was written, so a DELIMITED one —
+	// `GROUP BY "g + 1"` naming `SELECT c_str AS "g + 1"` — resolves to its
+	// select item like any other, where the old string test ("contains a
+	// space, so it must be an expression") refused it and the aggregate then
+	// looked for a column no input carries (#725).
+	var name string
+	if i < len(info.GroupByExprs) && info.GroupByExprs[i] != nil {
+		ref, ok := Unparen(info.GroupByExprs[i]).(*ColRef)
+		if !ok || ref.Table != "" {
+			return // qualified or expression-shaped — not a bare alias
+		}
+		name = ref.Column
+	} else {
+		name = strings.TrimSpace(gb)
+		if strings.ContainsAny(name, ". ()") {
+			return
+		}
 	}
 	for _, col := range info.Columns {
 		if col.Alias != "" && strings.EqualFold(col.Alias, name) && !col.IsAgg && !col.IsWindow {
@@ -1103,8 +1118,12 @@ func substituteGroupByExpr(info *SelectInfo, i int, col SelectColumn) {
 	if col.ASTExpr == nil || i >= len(info.GroupByExprs) {
 		return
 	}
-	info.GroupByExprs[i] = col.ASTExpr
-	info.GroupBy[i] = col.ASTExpr.String()
+	// Canonical, for the same reason the GROUP BY clause itself is: this is
+	// the name every consumer above the aggregate resolves against, and
+	// `SELECT (g + 1) AS k … GROUP BY k` must reach the same one as
+	// `GROUP BY g + 1` (#723).
+	info.GroupByExprs[i] = Unparen(col.ASTExpr)
+	info.GroupBy[i] = GroupKeyName(info.GroupByExprs[i])
 }
 
 // lexParseCTEs parses CTE definitions from a lexer.

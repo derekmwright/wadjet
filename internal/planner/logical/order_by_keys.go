@@ -422,14 +422,23 @@ func sortTermResolvesOverAggregate(ast plansql.Node, agg *Node) bool {
 		}
 		return false
 	}
-	text := ast.String()
+	// By identity, not by rendered text: `ORDER BY (g + 1)` over
+	// `GROUP BY g + 1` is the grouping expression said differently, and
+	// comparing the renderings refused it with "only a grouped column, a
+	// grouping expression, or a select-list alias can be sorted on" for a
+	// query PostgreSQL answers (#723).
+	id := plansql.ExprIdentity(ast)
 	for _, gb := range agg.GroupBy {
-		if strings.EqualFold(gb, text) {
+		if strings.EqualFold(gb, id) {
+			return true
+		}
+		if parsed, err := plansql.ParseExpression(gb); err == nil &&
+			plansql.ExprIdentity(parsed) == id {
 			return true
 		}
 	}
 	for _, gbe := range agg.GroupByExprs {
-		if gbe != nil && strings.EqualFold(gbe.String(), text) {
+		if gbe != nil && plansql.ExprIdentity(gbe) == id {
 			return true
 		}
 	}
