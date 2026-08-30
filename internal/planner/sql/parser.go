@@ -47,9 +47,9 @@ type ParsedQuery struct {
 	DropAlert      *DropAlertInfo
 	AlterAlert     *AlterAlertInfo
 	CreateSnapshot *CreateSnapshotInfo
-	Windows        []WindowSpec   // extracted window function specs
-	CTEs           []CTEDef       // extracted CTE definitions
-	SelectInfo     *SelectInfo    // parsed SELECT info (replaces AST)
+	Windows        []WindowSpec // extracted window function specs
+	CTEs           []CTEDef     // extracted CTE definitions
+	SelectInfo     *SelectInfo  // parsed SELECT info (replaces AST)
 }
 
 // CreateViewInfo holds details for a CREATE VIEW statement.
@@ -67,12 +67,13 @@ type DropViewInfo struct {
 
 // MergeInfo holds details for a MERGE statement.
 type MergeInfo struct {
-	Target      string // target table name
-	TargetAlias string
-	Source      string // source table/subquery
-	SourceAlias string
-	OnCondition string           // MERGE ON condition
-	WhenClauses []MergeWhenClause // WHEN MATCHED / NOT MATCHED clauses
+	Target          string // target table name
+	TargetQualifier string // schema/catalog qualifier, "" when unqualified
+	TargetAlias     string
+	Source          string // source table/subquery
+	SourceAlias     string
+	OnCondition     string            // MERGE ON condition
+	WhenClauses     []MergeWhenClause // WHEN MATCHED / NOT MATCHED clauses
 }
 
 // MergeWhenClause represents a WHEN clause in a MERGE statement.
@@ -204,11 +205,11 @@ type InsertInfo struct {
 // CreateAlertInfo holds details for a CREATE ALERT statement.
 type CreateAlertInfo struct {
 	Name       string
-	QueryText  string            // raw SELECT text, re-parsed at eval time
-	Interval   time.Duration     // validated >= 10s at parse time
-	WebhookURL string            // "" if no webhook sink
+	QueryText  string        // raw SELECT text, re-parsed at eval time
+	Interval   time.Duration // validated >= 10s at parse time
+	WebhookURL string        // "" if no webhook sink
 	Headers    map[string]string
-	InsertInto string            // "" if no table sink; at least one sink required
+	InsertInto string // "" if no table sink; at least one sink required
 }
 
 // DropAlertInfo holds details for a DROP ALERT statement.
@@ -263,6 +264,14 @@ func Parse(sql string) (*ParsedQuery, error) {
 		// server's point of view, and 42601 is what a client branches on to
 		// show "your SQL is broken" rather than a connection problem. The
 		// original error chain is preserved (sqlerr.Wrap unwraps to it).
+		//
+		// An error that already carries its own SQLSTATE keeps it: StateOf
+		// returns the OUTERMOST code, so wrapping unconditionally relabelled
+		// a refusal that knew better. `DELETE ... RETURNING` is a legal
+		// statement with an unimplemented feature (0A000), not broken SQL.
+		if sqlerr.StateOf(err) != "" {
+			return nil, err
+		}
 		return nil, sqlerr.Wrap("42601", err)
 	}
 	return q, nil
@@ -396,7 +405,7 @@ type SelectInfo struct {
 	Where        string
 	WhereExpr    Node
 	GroupBy      []string
-	GroupByExprs []Node // AST for GROUP BY expressions (parallel to GroupBy)
+	GroupByExprs []Node     // AST for GROUP BY expressions (parallel to GroupBy)
 	GroupingSets [][]string // GROUPING SETS / CUBE / ROLLUP (nil = simple GROUP BY)
 	Having       string
 	HavingExpr   Node
@@ -413,16 +422,16 @@ type SelectInfo struct {
 
 // TableRef is a reference to a table or table-producing function.
 type TableRef struct {
-	Name            string
-	Qualifier       string // schema or catalog.schema written before the name
-	Alias           string
-	IsFunction      bool              // true for table functions like read_json(...)
-	FuncArgs        []string          // positional arguments
-	FuncNamedArgs   map[string]string // named arguments (key=value)
-	WithOrdinality  bool              // UNNEST(...) WITH ORDINALITY
-	ColumnAliases   []string          // AS alias(col1, col2, ...)
-	SampleMethod    string            // TABLESAMPLE method: BERNOULLI, SYSTEM
-	SamplePercent   string            // percentage for TABLESAMPLE
+	Name           string
+	Qualifier      string // schema or catalog.schema written before the name
+	Alias          string
+	IsFunction     bool              // true for table functions like read_json(...)
+	FuncArgs       []string          // positional arguments
+	FuncNamedArgs  map[string]string // named arguments (key=value)
+	WithOrdinality bool              // UNNEST(...) WITH ORDINALITY
+	ColumnAliases  []string          // AS alias(col1, col2, ...)
+	SampleMethod   string            // TABLESAMPLE method: BERNOULLI, SYSTEM
+	SamplePercent  string            // percentage for TABLESAMPLE
 }
 
 // SelectColumn describes a column in a SELECT clause.
@@ -1332,12 +1341,30 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		l.nextToken()
 	}
 
-	// Target table
+	// Target table, optionally schema-qualified. Reading only the first
+	// identifier made `MERGE INTO public.pr ...` a merge into a table named
+	// "public" and then failed on the DOT with "MERGE: expected USING", which
+	// named the wrong token entirely (#686 review).
 	targetTok := l.nextToken()
 	if targetTok.typ != TokenIdent {
 		return nil, fmt.Errorf("MERGE: expected target table name")
 	}
-	info := &MergeInfo{Target: strings.ToLower(targetTok.val)}
+	targetName := targetTok.val
+	targetQualifier := ""
+	for l.peekToken().typ == TokenDot {
+		l.nextToken() // consume .
+		partTok := l.nextToken()
+		if partTok.typ != TokenIdent {
+			return nil, fmt.Errorf("MERGE: expected name after %q. in the target, got %q", targetName, partTok.val)
+		}
+		if targetQualifier == "" {
+			targetQualifier = targetName
+		} else {
+			targetQualifier += "." + targetName
+		}
+		targetName = partTok.val
+	}
+	info := &MergeInfo{Target: strings.ToLower(targetName), TargetQualifier: targetQualifier}
 
 	// Optional alias. AS must be followed by a NAME: taking whatever came
 	// next made `MERGE INTO t AS USING s ...` an alias of "USING" and then
@@ -1845,4 +1872,3 @@ func lexParseAlterAlert(sql string, l *lexer) (*ParsedQuery, error) {
 		AlterAlert: &AlterAlertInfo{Name: nameTok.val, Enable: enable},
 	}, nil
 }
-

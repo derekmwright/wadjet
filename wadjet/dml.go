@@ -296,6 +296,12 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 // It reads both target and source tables, joins on the ON condition, then applies
 // WHEN MATCHED (UPDATE/DELETE) and WHEN NOT MATCHED (INSERT) clauses.
 func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecResult, error) {
+	if err := CheckDMLQualifier(plansql.DMLTarget{
+		Table:     info.Target,
+		Qualifier: info.TargetQualifier,
+	}); err != nil {
+		return nil, err
+	}
 	targetMeta, err := db.catalog.GetTable(ctx, info.Target)
 	if err != nil {
 		return nil, fmt.Errorf("target table %q: %w", info.Target, err)
@@ -370,11 +376,14 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 			if matchByKeys(srcRow, tgtRow, onKeys) {
 				matched = true
 				merged := buildMergedRow(srcRow, sourceAlias, tgtRow, targetAlias)
-				// Apply first matching WHEN MATCHED clause
-				for _, wc := range info.WhenClauses {
-					if !wc.Matched {
-						continue
-					}
+				// The first WHEN MATCHED clause whose AND condition HOLDS —
+				// not simply the first one written (#686 review F2).
+				ci, cerr := firstFiringClause(info.WhenClauses, true, ev, merged)
+				if cerr != nil {
+					return nil, cerr
+				}
+				if ci >= 0 {
+					wc := info.WhenClauses[ci]
 					switch strings.ToUpper(wc.Action) {
 					case "UPDATE":
 						matchedTargetIndices[tIdx] = true
@@ -391,15 +400,19 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 						matchedTargetIndices[tIdx] = true
 						rowsAffected++
 					}
-					break
 				}
 			}
 		}
 		if !matched {
-			for _, wc := range info.WhenClauses {
-				if wc.Matched {
-					continue
-				}
+			// A NOT MATCHED condition sees the SOURCE row only — there is no
+			// target row for it to reference, which is also PostgreSQL's rule.
+			srcOnly := buildAliasedRow(srcRow, sourceAlias)
+			ci, cerr := firstFiringClause(info.WhenClauses, false, ev, srcOnly)
+			if cerr != nil {
+				return nil, cerr
+			}
+			if ci >= 0 {
+				wc := info.WhenClauses[ci]
 				if strings.ToUpper(wc.Action) == "INSERT" {
 					newRow, err := buildInsertRow(wc.SQL, srcRow, sourceAlias, ev)
 					if err != nil {
@@ -408,7 +421,6 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 					insertRows = append(insertRows, newRow)
 					rowsAffected++
 				}
-				break
 			}
 		}
 	}
@@ -542,56 +554,80 @@ type onKeyPair struct {
 	SourceCol string
 }
 
-// parseOnKeys parses the ON condition into equality key pairs.
-// Handles "t.id = s.id" and "t.id = s.id AND t.name = s.name".
+// parseOnKeys extracts the equi-join keys a MERGE matches rows on from the ON
+// condition's PARSE, not from its text.
+//
+// It used to split the raw string on the literal " AND " and then on the first
+// "=", which is #336's mechanism one clause over: `ON t.id <= s.id` split at
+// the "=" inside "<=" and produced a column named `t.id <`, reported as
+// 42703 "column t.id < does not exist"; `ON t.id = s.id garbage` produced
+// `s.id garbage`. Both messages named a column nobody wrote (#686 review F3b).
+// A string literal containing " AND " or "=" would have split too.
+//
+// The ON condition must parse IN FULL (PostgreSQL answers a trailing token
+// with 42601) and must be a conjunction of equalities between the two
+// relations. PostgreSQL ACCEPTS any boolean ON — `ON t.id <= s.id` is legal
+// there and fails only if it matches a target row twice — so a non-equi
+// condition is 0A000 (this server has not implemented it), never a syntax
+// error.
 func parseOnKeys(onCond, targetAlias, sourceAlias string) ([]onKeyPair, error) {
-	cond := strings.TrimSpace(onCond)
-	// Split on top-level AND
-	var parts []string
-	upper := strings.ToUpper(cond)
-	for {
-		idx := strings.Index(upper, " AND ")
-		if idx < 0 {
-			parts = append(parts, strings.TrimSpace(cond))
-			break
-		}
-		parts = append(parts, strings.TrimSpace(cond[:idx]))
-		cond = cond[idx+5:]
-		upper = upper[idx+5:]
+	text := strings.TrimSpace(onCond)
+	if text == "" {
+		return nil, sqlerr.New("42601", "MERGE: ON requires a condition")
+	}
+	node, err := plansql.ParseExpressionComplete(text)
+	if err != nil {
+		return nil, sqlerr.Wrap("42601", fmt.Errorf("MERGE: parsing ON %q: %w", text, err))
 	}
 
 	var keys []onKeyPair
-	for _, part := range parts {
-		eqIdx := strings.Index(part, "=")
-		if eqIdx < 0 {
-			return nil, fmt.Errorf("unsupported ON condition (expected equality): %s", part)
-		}
-		left := strings.TrimSpace(part[:eqIdx])
-		right := strings.TrimSpace(part[eqIdx+1:])
-
-		lAlias, lCol := splitQualifiedCol(left)
-		rAlias, rCol := splitQualifiedCol(right)
-
-		var pair onKeyPair
-		if lAlias == targetAlias && rAlias == sourceAlias {
-			pair = onKeyPair{TargetCol: lCol, SourceCol: rCol}
-		} else if lAlias == sourceAlias && rAlias == targetAlias {
-			pair = onKeyPair{TargetCol: rCol, SourceCol: lCol}
-		} else {
-			// A qualifier naming neither relation is 42P01 — the same code the
-			// SET half raises for it. This failed with no SQLSTATE at all, and
-			// it fails HERE, before checkOnKeys ever runs, so the code has to
-			// be carried at this site (#678 re-review N2).
-			for _, a := range []string{lAlias, rAlias} {
-				if a != "" && a != targetAlias && a != sourceAlias {
-					return nil, sqlerr.New("42P01", "missing FROM-clause entry for table %q", a)
-				}
+	var walk func(plansql.Node) error
+	walk = func(n plansql.Node) error {
+		n = unwrapDMLParens(n)
+		// A conjunction is AndNode and a comparison is CmpExpr; BinaryOp is
+		// arithmetic only (ast.go). Matching the wrong node type here refused
+		// every MERGE, which is how this rewrite was caught.
+		if and, ok := n.(*plansql.AndNode); ok {
+			if err := walk(and.Left); err != nil {
+				return err
 			}
-			return nil, sqlerr.New("42601",
-				"ON condition columns must reference target (%s) and source (%s): %s",
-				targetAlias, sourceAlias, part)
+			return walk(and.Right)
 		}
-		keys = append(keys, pair)
+		cmp, ok := n.(*plansql.CmpExpr)
+		if !ok || cmp.Op != "=" {
+			return sqlerr.New("0A000",
+				"MERGE ON supports only equality between the target and the source, not %q", n.String())
+		}
+
+		left, lok := unwrapDMLParens(cmp.Left).(*plansql.ColRef)
+		right, rok := unwrapDMLParens(cmp.Right).(*plansql.ColRef)
+		if !lok || !rok {
+			return sqlerr.New("0A000",
+				"MERGE ON supports only equality between two columns, not %q", n.String())
+		}
+		lAlias, rAlias := strings.ToLower(left.Table), strings.ToLower(right.Table)
+		// A qualifier naming neither relation is 42P01 — the same code the SET
+		// half raises for it, and it is decided HERE, before checkOnKeys runs
+		// (#678 re-review N2).
+		for _, a := range []string{lAlias, rAlias} {
+			if a != "" && a != strings.ToLower(targetAlias) && a != strings.ToLower(sourceAlias) {
+				return sqlerr.New("42P01", "missing FROM-clause entry for table %q", a)
+			}
+		}
+		switch {
+		case lAlias == strings.ToLower(targetAlias) && rAlias == strings.ToLower(sourceAlias):
+			keys = append(keys, onKeyPair{TargetCol: left.Column, SourceCol: right.Column})
+		case lAlias == strings.ToLower(sourceAlias) && rAlias == strings.ToLower(targetAlias):
+			keys = append(keys, onKeyPair{TargetCol: right.Column, SourceCol: left.Column})
+		default:
+			return sqlerr.New("42601",
+				"ON condition columns must reference target (%s) and source (%s): %s",
+				targetAlias, sourceAlias, n.String())
+		}
+		return nil
+	}
+	if err := walk(node); err != nil {
+		return nil, err
 	}
 	return keys, nil
 }
@@ -876,9 +912,12 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.Column) (any, error) {
 	text = strings.TrimSpace(text)
 
-	node, err := plansql.ParseExpression(text)
+	// COMPLETE, for the reason BuildDMLPredicate gives: `SET n = s.n garbage`
+	// parsed to `s.n`, stored it and reported MERGE 1 where PostgreSQL raises
+	// 42601 (#686 review F3a).
+	node, err := plansql.ParseExpressionComplete(text)
 	if err != nil {
-		return nil, fmt.Errorf("parsing %q: %w", text, err)
+		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", text, err))
 	}
 	if lit, isLit := dmlLiteralText(node); isLit {
 		return assignLiteralToColumn(lit, col)
@@ -939,6 +978,70 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 		return nil, err
 	}
 	return v, nil
+}
+
+// condition answers whether a WHEN clause's `AND <cond>` holds for one row.
+//
+// The condition was PARSED and then never read: parseMerge stored it on the
+// clause and executeMerge fired the first clause of the right kind whatever it
+// said. `WHEN MATCHED AND s.n > 1000 THEN DELETE` deleted the row for a
+// condition that is false, reporting MERGE 1 where PostgreSQL reports MERGE 0
+// (#686 review F2) — a silent wrong answer on ordinary MERGE syntax.
+//
+// An empty condition is an unconditional clause and always holds. Anything
+// that is not TRUE — false, and NULL, which PostgreSQL also declines to fire
+// on — does not.
+func (ev *mergeEvaluator) condition(text string, row map[string]any) (bool, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return true, nil
+	}
+	node, err := plansql.ParseExpressionComplete(text)
+	if err != nil {
+		return false, sqlerr.Wrap("42601", fmt.Errorf("parsing WHEN condition %q: %w", text, err))
+	}
+	if err := ev.checkMergeColumns(node); err != nil {
+		return false, err
+	}
+	if !ev.sourceKnown {
+		// Same rule ev.value applies: evaluating needs the source's DECLARED
+		// types, and inferring them from boxed values silently mistypes a
+		// DECIMAL or a DATE. Refusing beats firing a clause on a guess.
+		return false, sqlerr.New("0A000",
+			"MERGE cannot evaluate the WHEN condition %q: the source %q has no declared schema to resolve it against",
+			text, ev.source)
+	}
+	compiled, err := expr.Compile(node)
+	if err != nil {
+		return false, fmt.Errorf("compiling WHEN condition %q: %w", text, err)
+	}
+	b := batch.FromRows(ev.mergedCols, []map[string]any{lowercaseKeys(row)})
+	v, ok := compiled.Eval(b, 0).(bool)
+	return ok && v, nil
+}
+
+// firstFiringClause is PostgreSQL's clause-selection rule: the WHEN clauses of
+// the right kind are tried IN ORDER and the first whose condition holds fires.
+// None firing is not an error — the row is simply left alone.
+//
+// Returning the index rather than the clause keeps "nothing fired" distinct
+// from "the zero clause fired".
+func firstFiringClause(clauses []plansql.MergeWhenClause, matched bool,
+	ev *mergeEvaluator, row map[string]any) (int, error) {
+
+	for i, wc := range clauses {
+		if wc.Matched != matched {
+			continue
+		}
+		ok, err := ev.condition(wc.Condition, row)
+		if err != nil {
+			return -1, err
+		}
+		if ok {
+			return i, nil
+		}
+	}
+	return -1, nil
 }
 
 // lowercaseKeys re-spells a merged row's keys the way the merged batch schema

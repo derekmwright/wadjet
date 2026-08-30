@@ -3,6 +3,8 @@ package sql
 import (
 	"fmt"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // parseDMLRelation reads the relation a DELETE or an UPDATE targets:
@@ -22,6 +24,14 @@ import (
 // it does not know, and running it unconditionally is the worst available
 // answer.
 func parseDMLRelation(l *lexer, after string) (DMLTarget, error) {
+	// PostgreSQL's `ONLY t` says "do not descend into inheritance children".
+	// This server has no table inheritance, so every table IS only itself and
+	// the keyword is accepted and ignored — which is what it MEANS here. It
+	// used to be read as the table name, so `DELETE FROM ONLY pr` failed with
+	// `table "ONLY" not found` and no SQLSTATE at all (#686 review).
+	if peek := l.peekToken(); peek.typ == TokenIdent && !peek.quoted && strings.EqualFold(peek.val, "ONLY") {
+		l.nextToken()
+	}
 	tableTok := l.nextToken()
 	if tableTok.typ != TokenIdent {
 		return DMLTarget{}, fmt.Errorf("expected table name after %s, got %q", after, tableTok.val)
@@ -59,11 +69,22 @@ func parseDMLRelation(l *lexer, after string) (DMLTarget, error) {
 			return DMLTarget{}, fmt.Errorf("expected alias after AS in %s, got %q", after, aliasTok.val)
 		}
 		t.Alias = aliasTok.val
-	} else if peek := l.peekToken(); peek.typ == TokenIdent {
+	} else if peek := l.peekToken(); peek.typ == TokenIdent && !isDMLTailKeyword(peek) {
 		l.nextToken()
 		t.Alias = peek.val
 	}
 	return t, nil
+}
+
+// isDMLTailKeyword reports whether an unquoted identifier after the relation
+// begins a CLAUSE this parser knows by name rather than an alias.
+//
+// RETURNING is not a lexer keyword, so it was taken as the table's alias and
+// the refusal then named the token AFTER it ("unexpected \"*\"") instead of
+// the feature that is missing. A DOUBLE-QUOTED "returning" is a name and
+// stays one.
+func isDMLTailKeyword(t token) bool {
+	return !t.quoted && strings.EqualFold(t.val, "RETURNING")
 }
 
 // parseDMLWhere reads the optional trailing `WHERE <condition>` of a DELETE
@@ -86,6 +107,13 @@ func parseDMLWhere(l *lexer, t *DMLTarget, stmt string) error {
 	case TokenEOF, TokenSemicolon:
 		// No WHERE: the statement is unconditional, and says so.
 	default:
+		// RETURNING is a legal statement this server has not implemented, so
+		// it is 0A000 and not a syntax error — and it must still REFUSE,
+		// because dropping the clause silently ran the DELETE and handed the
+		// client back no rows where PostgreSQL returns the deleted ones.
+		if next.typ == TokenIdent && !next.quoted && strings.EqualFold(next.val, "RETURNING") {
+			return sqlerr.New("0A000", "%s: RETURNING is not supported", stmt)
+		}
 		return fmt.Errorf("%s: unexpected %q; expected WHERE or the end of the statement", stmt, next.val)
 	}
 	return nil
