@@ -352,6 +352,16 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		}
 	}
 
+	// This block's own SELECT-list output names. The two hooks below cover a
+	// name arriving through a derived table, a CTE or a base table's schema;
+	// this covers the top-level list, where none of those is in play
+	// (reserved_slots.go).
+	if names, star := blockOutputs(info); !star {
+		if err := refuseReservedSlotNames(names, "output column"); err != nil {
+			return err
+		}
+	}
+
 	// UNION / INTERSECT / EXCEPT: each branch is its own block.
 	if info.Union != nil {
 		if err := b.validateBlock(ctx, info.Union.Left, outer); err != nil {
@@ -521,6 +531,12 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 			into.open = true
 			return nil
 		}
+		// A derived table's OUTPUT names enter this query's namespace, so a
+		// hidden slot's name arriving here is the collision #694 was, spelled
+		// by the user instead of by the planner (reserved_slots.go).
+		if err := refuseReservedSlotNames(names, "derived table column"); err != nil {
+			return err
+		}
 		for _, n := range names {
 			into.addQualified(qual, n)
 		}
@@ -559,6 +575,9 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 		return nil
 	}
 	for _, c := range meta.Schema.Columns {
+		if err := refuseReservedSlotName(c.Name, "column of table "+tr.Name); err != nil {
+			return err
+		}
 		into.addQualifiedTyped(qual, c.Name, c.Type)
 		into.addRowColumn(c)
 	}
@@ -603,10 +622,16 @@ func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
 	// Register before validating the body so a body parse/validation issue can't
 	// leave the name unregistered.
 	if len(cte.Columns) > 0 {
+		if err := refuseReservedSlotNames(cte.Columns, "CTE column"); err != nil {
+			return err
+		}
 		b.ctes[name] = cteEntry{cols: cte.Columns}
 	} else if names, star := blockOutputs(body); star {
 		b.ctes[name] = cteEntry{open: true}
 	} else {
+		if err := refuseReservedSlotNames(names, "CTE column"); err != nil {
+			return err
+		}
 		b.ctes[name] = cteEntry{cols: names}
 	}
 	return b.validateBlock(ctx, body, nil)
@@ -985,8 +1010,10 @@ func blockOutputs(info *plansql.SelectInfo) ([]string, bool) {
 		if name == "" {
 			name = strings.TrimSpace(c.Expr)
 		}
-		if c.IsWindow && c.WindowSpec != nil && c.WindowSpec.Alias != "" {
-			name = c.WindowSpec.Alias
+		if c.IsWindow {
+			// The same choice the logical builder's projection makes, so the
+			// namespace this enumerates is the one the query really produces.
+			name = plansql.WindowOutputName(c)
 		}
 		if name != "" {
 			names = append(names, strings.ToLower(name))
