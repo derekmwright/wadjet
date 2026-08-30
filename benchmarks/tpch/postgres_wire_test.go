@@ -1264,10 +1264,6 @@ func decimalWirePins(n int) map[string]string {
 	const digitsKept = "DELIBERATE: PostgreSQL's numeric is unbounded, so AVG and `/` keep every digit; " +
 		"wadjet's finite carrier keeps the (p,s) ADR-0024 item 3 computes — DECIMAL(38,6) here. Both are " +
 		"exact to the digits they keep and agree to min(scale). ADR-0012 item 9's accepted divergence."
-	const typmodDropped = "#697 — a subquery anywhere in the statement drops the typmod of every BARE " +
-		"DECIMAL output column. PostgreSQL sends numeric(15,2); wadjet sends -1. The VALUES agree."
-	const caseLiteral = "#695 — a CASE over a DECIMAL column and a numeric literal declares the literal's " +
-		"type, so this column reaches the wire as float8 (OID 701) where PostgreSQL sends numeric."
 	const scalarSubquery = "#696 — a DECIMAL column compared against a SCALAR SUBQUERY's value selects " +
 		"the wrong rows, so this group's count is inflated. The VALUE of the subquery is right; the " +
 		"substitution into the comparison is not."
@@ -1301,30 +1297,22 @@ func decimalWirePins(n int) map[string]string {
 		// carried this shape before. The SIZE agrees (float8 and int8 are
 		// both 8 bytes), so only the OID is pinned.
 		return map[string]string{wirePropTypeOIDs: noExactNumericPin}
-	case 2, 18:
-		return map[string]string{wirePropTypeMods: typmodDropped}
+	// Q02 and Q18 were pinned for #697 — a subquery anywhere in the statement
+	// dropped the typmod of every BARE DECIMAL output column, so PostgreSQL
+	// sent numeric(15,2) and wadjet -1. Q08 and Q14 were pinned for #695, whose
+	// face depended on the tier: at SF0.01 Q08 answered under a FLOAT64
+	// declaration, and Q14's decimal branch fired so the statement could not be
+	// described at all. Every OID, size, modifier and field count agrees now
+	// and all four are gated again.
 	case 8:
-		// Which face #695 shows here depends on the tier — see
-		// decimalTierPastSF001. At SF0.01 the query answers under a
-		// FLOAT64 declaration; past it the guard raises and there is no
-		// RowDescription to compare.
-		if decimalTierPastSF001() {
-			return map[string]string{
-				wirePropFieldCount: caseLiteral + " At this tier Q08's decimal branch fires, so the " +
-					"statement cannot be described and wadjet answers with no fields.",
-				wirePropValuesText: caseLiteral,
-			}
-		}
-		return map[string]string{
-			wirePropTypeOIDs:  caseLiteral,
-			wirePropTypeSizes: caseLiteral + " The declared SIZE follows the OID: 8 for float8, -1 for numeric.",
-		}
-	case 14:
-		return map[string]string{
-			wirePropFieldCount: caseLiteral + " Q14's decimal branch DOES fire, so the statement cannot " +
-				"be described at all and wadjet answers with no fields.",
-			wirePropValuesText: caseLiteral,
-		}
+		// What is left on Q08 is the standing one-scale-per-column RENDERING,
+		// and it became visible only because brazil_revenue is finally a
+		// numeric column instead of a float8 one: its CASE takes no
+		// decimal-branch row at SF0.01, so PostgreSQL's per-VALUE dscale
+		// prints the sum as "0" while a DECIMAL(38,4) column prints every row
+		// at its own scale. Same number, and the OID and modifier beside it
+		// are compared and agree.
+		return map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}
 	case 22:
 		return map[string]string{
 			wirePropValuesText:   scalarSubquery,

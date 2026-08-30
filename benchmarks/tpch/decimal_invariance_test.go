@@ -178,10 +178,10 @@ func TestTwoPathInvarianceDecimal(t *testing.T) {
 // both arms (#695's wrong carrier) and the two arms agree with EACH OTHER, so
 // it belongs there and not here.
 func twoPathDecimalPin(n int) (why string, ok bool) {
+	// Q14 was here for #695 — a CASE over a DECIMAL column and a numeric
+	// literal declared the literal's type, so neither path could run it. Both
+	// paths run it and agree now, so the query is gated again.
 	switch n {
-	case 14:
-		return "#695 — a CASE over a DECIMAL column and a numeric literal declares the literal's type, " +
-			"so neither path can run this query at all.", true
 	case 15:
 		return scalarSubqueryBug + " Arm A is right here and arm B answers 0 rows.", true
 	case 22:

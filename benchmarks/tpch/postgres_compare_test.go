@@ -454,24 +454,11 @@ func postgresCorpus() []pgCase {
 			c.countOnly, c.tolerance = true, 4
 			c.why = "row membership turns on a float threshold; borderline rows shift with accumulation order"
 		}
-		// Under TPCH_DECIMAL=1 (ADR-0024) some of the 22 reach defects the
-		// FLOAT64 carrier never does. Each pin names its issue and still
-		// RUNS, so it fails the day the query starts agreeing.
-		if FixtureFromEnv() == DecimalFixture {
-			caseLiteralBug := pgBugWadjet + " a CASE over a DECIMAL column and a numeric literal declares " +
-				"the LITERAL's type, so the decimal evaluator writes its text into an integer vector " +
-				"and the #361 silent-write guard raises"
-			switch {
-			case n == 14:
-				c.knownBug, c.issue = caseLiteralBug, "#695"
-			case n == 8 && decimalTierPastSF001():
-				// Q08 is the same defect, and which face it shows depends on
-				// the tier: at SF0.01 its decimal branch takes no row, so
-				// every VALUE agrees and only the declared type is wrong —
-				// which this arm does not look at, and the wire arm gates.
-				c.knownBug, c.issue = caseLiteralBug, "#695"
-			}
-		}
+		// Q08 and Q14 were pinned here under TPCH_DECIMAL=1 for #695 — a CASE
+		// over a DECIMAL column and a numeric literal declared the LITERAL's
+		// type, so the decimal evaluator wrote its text into an integer vector
+		// and the #361 store guard raised. Both agree with PostgreSQL now and
+		// are gated again at every tier.
 		if lim := trailingLimit(sql); lim > 0 {
 			stripped := strings.TrimRight(trailingLimitRe.ReplaceAllString(sql, ""), " \t\n")
 			full := c
@@ -710,13 +697,10 @@ func polymorphicOverDecimalCase() pgCase {
 			GREATEST(ps_supplycost, ps_availqty) AS greatest_mixed,
 			LEAST(ps_supplycost, ps_availqty) AS least_mixed
 			FROM partsupp WHERE ps_partkey <= 20 ORDER BY ps_partkey, ps_suppkey`}
-	if FixtureFromEnv() == DecimalFixture {
-		c.knownBug = pgBugWadjet + " a CHOICE construct over a DECIMAL column and a numeric literal or " +
-			"an integer column declares the OTHER branch's type, so COALESCE/GREATEST/LEAST over " +
-			"ps_supplycost either raise the #361 silent-write guard or answer under the wrong type. " +
-			"ADR-0024 item 2: a CHOICE construct over any DECIMAL branch is DECIMAL"
-		c.issue = "#695"
-	}
+	// Pinned to #695 under TPCH_DECIMAL=1 until the choice constructs folded to
+	// their branches' common DECIMAL type: COALESCE/GREATEST/LEAST over
+	// ps_supplycost declared the OTHER branch's type and either raised the #361
+	// store guard or answered under the wrong one. Gated on both fixtures now.
 	return c
 }
 

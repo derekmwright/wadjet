@@ -124,22 +124,19 @@ var decimalOutputTypes = []decimalCol{
 	// and a correlated scalar subquery. The declaration must survive all of
 	// it: (15,2) as a type AND on the wire, because PostgreSQL keeps a bare
 	// column's typmod (ADR-0024 item 5).
-	{query: "Q02", column: "s_acctbal", wadjet: "DECIMAL(15,2)", duckdb: "DECIMAL(15,2)", scale: 2, wireTypmod: typmodBare,
-		typePin: "#697 — a subquery anywhere in the statement drops the typmod of every BARE DECIMAL " +
-			"output column. Q10's c_acctbal, the same kind of column with no subquery in the statement, " +
-			"keeps it. Values are right; a JDBC client reading getPrecision()/getScale() gets 0."},
+	{query: "Q02", column: "s_acctbal", wadjet: "DECIMAL(15,2)", duckdb: "DECIMAL(15,2)", scale: 2, wireTypmod: typmodBare},
 	// Q03..Q19 — SUM(l_extendedprice * (1 - l_discount)), the TPC-H revenue
 	// expression, is DECIMAL(38,4) in both engines everywhere it appears.
 	{query: "Q03", column: "revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
 	{query: "Q05", column: "revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
 	{query: "Q06", column: "revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
 	{query: "Q07", column: "revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
-	// Q08 — the silent half of #695. No row takes the CASE's decimal branch
-	// at SF0.01, so nothing is ever written to the mistyped vector and the
-	// query ANSWERS — under FLOAT64, where both other engines say numeric.
-	{query: "Q08", column: "brazil_revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd,
-		typePin: "#695 — the CASE's numeric-literal ELSE branch wins the type fold, so this SUM is " +
-			"declared FLOAT64. Q14 is the same defect where the decimal branch fires and it errors."},
+	// Q08 — #695's silent half, closed. Its CASE takes no decimal-branch row
+	// at SF0.01, so nothing was ever written to the mistyped vector and the
+	// query ANSWERED under FLOAT64 where both other engines say numeric. The
+	// choice now folds to the branches' common DECIMAL type whatever the data
+	// does, so the carrier no longer depends on which branch fires.
+	{query: "Q08", column: "brazil_revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
 	{query: "Q08", column: "total_revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
 	{query: "Q10", column: "revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
 	// Q10's c_acctbal is the control for #697: a bare DECIMAL column in a
@@ -154,9 +151,7 @@ var decimalOutputTypes = []decimalCol{
 	// Q17 — SUM(l_extendedprice) / 7.0. Division's scale rule is
 	// max(6, s1+p2+1) = 6, and the precision reduction pins it at (38,6).
 	{query: "Q17", column: "avg_yearly", wadjet: "DECIMAL(38,6)", duckdb: "DOUBLE", scale: 6, why: pgNumericDivision, wireTypmod: typmodUnconstrd},
-	{query: "Q18", column: "o_totalprice", wadjet: "DECIMAL(15,2)", duckdb: "DECIMAL(15,2)", scale: 2, wireTypmod: typmodBare,
-		typePin: "#697 — same as Q02, reached through `IN (SELECT … HAVING …)` instead of a correlated " +
-			"scalar subquery."},
+	{query: "Q18", column: "o_totalprice", wadjet: "DECIMAL(15,2)", duckdb: "DECIMAL(15,2)", scale: 2, wireTypmod: typmodBare},
 	{query: "Q19", column: "revenue", wadjet: "DECIMAL(38,4)", duckdb: "DECIMAL(38,4)", scale: 4, wireTypmod: typmodUnconstrd},
 	{query: "Q22", column: "totacctbal", wadjet: "DECIMAL(38,2)", duckdb: "DECIMAL(38,2)", scale: 2, wireTypmod: typmodUnconstrd},
 }
@@ -565,20 +560,11 @@ func decimalCorpus() []duckdbCase {
 // entry is the fix's proof, and the assertion FAILS if a pinned arm starts
 // agreeing.
 func decimalPin(n int) (why, arm string, ok bool) {
-	const caseOverLiteral = "#695 — a CASE/COALESCE/GREATEST/LEAST whose branches are a DECIMAL column " +
-		"and a NUMERIC LITERAL declares the LITERAL's type (INT64 for `0`, FLOAT64 for `0.00`) instead " +
-		"of DECIMAL. ADR-0024 item 2: a CHOICE construct over any DECIMAL branch is DECIMAL. Both " +
-		"queries wrap the TPC-H revenue expression in `CASE WHEN … THEN … ELSE 0 END`."
+	// Q08 and Q14 were #695's two faces — a CASE over a DECIMAL column and a
+	// numeric literal declaring the LITERAL's type — and both are gated again:
+	// Q14's decimal branch fires and used to raise the #361 store guard, Q08's
+	// takes no row at SF0.01 and used to answer under a float carrier.
 	switch n {
-	case 14:
-		return caseOverLiteral + " Q14's decimal branch FIRES, so the evaluator writes its rendered " +
-			"text into an integer vector and the #361 silent-write guard raises `cannot store string " +
-			"into INT64 vector`.", armBoth, true
-	case 8:
-		return caseOverLiteral + " Q08's decimal branch takes NO row at SF0.01, so nothing is ever " +
-			"written to the mistyped vector and the query ANSWERS — with brazil_revenue carried as " +
-			"float64 where both other engines say numeric. Every VALUE agrees; the carrier does not, " +
-			"which is this defect's silent face.", armBoth, true
 	case 15:
 		return scalarSubqueryBug + " Q15 compares `total_revenue = (SELECT MAX(total_revenue) …)`. " +
 			"Equality against a scalar of the column's OWN scale is right on the single-process path, " +
