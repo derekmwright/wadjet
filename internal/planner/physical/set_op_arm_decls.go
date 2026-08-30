@@ -256,7 +256,32 @@ func projectArmDecls(n *logical.Node, in colDecls) colDecls {
 		if name == "" {
 			continue
 		}
-		if d, ok := projectionArmDecl(proj, in, strictInt); ok {
+		// The whole TERM first, because the alternative is not "no answer"
+		// but a CONFIDENT WRONG one: projectionArmDecl reads
+		// `n_regionkey + 1` as arithmetic, cannot resolve `n_regionkey`
+		// above the aggregate that groups by it, and falls to the float
+		// rule. FLOAT64 then reconciles the set operation to double where
+		// PostgreSQL resolves bigint.
+		d, ok := wholeTermArmDecl(proj, in)
+		if !ok {
+			// Below an aggregate a
+			// computed GROUP BY key is emitted under the key's own
+			// expression text, so `n_regionkey + 1 AS gk` is a projection
+			// whose source is ONE column named `n_regionkey + 1` — and a
+			// walk that reads it as arithmetic looks for `n_regionkey`,
+			// which the aggregate's output does not carry, and gives up.
+			//
+			// Giving up is not neutral here. An untyped arm sends
+			// reconcileSetOpArmTypes to FLOAT64 and makes it CAST the other
+			// arm, so `WITH a AS (SELECT g+1 AS gk, COUNT(*) AS n FROM t
+			// GROUP BY g+1) SELECT gk FROM a UNION ALL SELECT g FROM t`
+			// resolved double where PostgreSQL resolves bigint — and once
+			// the aggregate arm stopped answering NULL, the two arms
+			// disagreed about what `gk` IS and the sort above indexed an
+			// empty column (#656 R4).
+			d, ok = projectionArmDecl(proj, in, strictInt)
+		}
+		if ok {
 			put(name, d)
 			for _, q := range quals {
 				put(q+"."+strings.ToLower(strings.TrimSpace(name)), d)
@@ -622,4 +647,35 @@ func allDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// wholeTermArmDecl resolves a projection whose ENTIRE expression is the name
+// of one input column — the shape a computed GROUP BY key takes above its
+// aggregate, where the stage emits the key under the expression's own text.
+//
+// It runs only after projectionArmDecl declines, so an expression that really
+// is arithmetic over resolvable columns keeps its inferred type.
+func wholeTermArmDecl(proj logical.Projection, in colDecls) (expr.DeclType, bool) {
+	term := strings.TrimSpace(proj.Expr)
+	if term == "" || proj.ASTExpr == nil {
+		return expr.DeclType{}, false
+	}
+	if _, isRef := proj.ASTExpr.(*plansql.ColRef); isRef {
+		return expr.DeclType{}, false // an ordinary reference is projectionArmDecl's job
+	}
+	lc := strings.ToLower(term)
+	t, ok := in.types[lc]
+	if !ok {
+		return expr.DeclType{}, false
+	}
+	d := expr.DeclType{ID: t}
+	if t == parquet.TypeDecimal {
+		m, has := in.dec[lc]
+		if !has || m.Precision <= 0 {
+			// A DECIMAL with no (p,s) is not a type (ADR-0024 item 2).
+			return expr.DeclType{}, false
+		}
+		d.Precision, d.Scale, d.DecKnown = m.Precision, m.Scale, true
+	}
+	return d, true
 }

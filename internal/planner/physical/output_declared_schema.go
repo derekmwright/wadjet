@@ -855,8 +855,21 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		}
 		in := emittedColTypes(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(n.GroupBy)+len(n.AggExprs))
+		// A DERIVED key is emitted under its expression TEXT, which is not a
+		// name the input carries, so the bare lookup finds nothing and the
+		// key came back UNTYPED. Above the aggregate that is not a missing
+		// answer but a wrong one waiting to happen: the next walk up reads
+		// `n_regionkey + 1` as ARITHMETIC, cannot resolve `n_regionkey`, and
+		// falls to the float rule — which reconciled a set operation to
+		// double where PostgreSQL resolves bigint (#656 R4). It is the same
+		// inference derivedGroupKeyTypes already puts on the wire.
+		derivedTypes, _ := derivedGroupKeyTypes(n.GroupBy, n.Children[0])
 		for _, g := range n.GroupBy {
 			if t, ok := lookupColType(in, g); ok {
+				out[strings.ToLower(g)] = t
+				continue
+			}
+			if t, ok := derivedTypes[g]; ok {
 				out[strings.ToLower(g)] = t
 			}
 		}

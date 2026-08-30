@@ -140,6 +140,7 @@ it did not:
 | an ORDER BY under an outer AGGREGATE | the outer `COUNT(*)` needs no columns, so the projection that computes the sort key is pruned and the sort keys on a name nothing emits (loud, at dispatch) | F2 |
 | a computed GROUP BY key read above its aggregate | the stage emits the key under its expression TEXT; a projection or a union arm that rebuilds the arithmetic reads a column the aggregate does not emit and answers NULL for every row | N1 |
 | a shared CTE body that AGGREGATES on a computed key | the body's own projection on the shared terminal was read as one consumer's and the query refused | N1 |
+| a set operation over an aggregate on a computed key | the aggregate arm could not be TYPED, so the union reconciled to FLOAT64 and cast the other arm; the arms then wrote different bytes under one declaration and the sort above indexed an empty column (a recovered panic) | R4 |
 | `sort` / `limit` | nothing ever populated `ProjectExprs` on one, so a SELECT list above an `ORDER BY … LIMIT` was never applied and the client got the producer's raw column | B2/D |
 
 Every one answered WITHOUT the predicate or the projection, silently, because
@@ -181,7 +182,7 @@ has two.
 
 `ValidateNativeDAGShape` refuses any plan that still attaches either field to
 a stage that ignores it — a loud refusal in place of a silently different
-answer — and it runs ALL FIVE checks below on every distributed plan, not
+answer — and it runs ALL SIX checks below on every distributed plan, not
 only in tests: they cost microseconds on a plan of tens of stages, and a check
 that runs only over a corpus closes the class for the corpus and leaves it
 open everywhere else.
@@ -196,7 +197,7 @@ Two gates cover them: `TestStageDAGCarriesEveryFilterAndProjection`
 `TestStageShapePlacementSweep` (`shape_sweep_test.go`) over the CROSS of every
 producer class with every consumer shape — the breadth gate, whose assertion
 is that every shape ends in an ANSWER: planned, or refused and routed local.
-The five parts are:
+The six parts are:
 
 1. **placement by type** — `ValidateNativeDAGShape` itself;
 2. **placement by SCHEMA** — every expression on a carrier resolves against
@@ -218,7 +219,13 @@ The five parts are:
    emits. Loud at dispatch, on a query the fast path answers. Refused at plan
    time now, so the coordinator routes it local; materializing the key on the
    DAG is the open residual (#716), and #717 tracks the locally-routed class
-   as a whole.
+   as a whole;
+6. **set-operation arm agreement** — every arm of a union declares the same
+   type for each output column, AND an arm that COPIES a column declares what
+   its producer says that column is. The worker DirectCopies a bare reference
+   with the declaration unread, so two arms can agree on paper and still write
+   different bytes; the consumer then reads one arm's data at the other arm's
+   type, which is a runtime index panic rather than a wrong value.
 
 ## Synthetic sort keys: the column a Project would have computed
 

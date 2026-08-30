@@ -188,6 +188,9 @@ func ValidateNativeDAGShape(stages []Stage) error {
 	if err := assertCarrierSchemaResolves(stages); err != nil {
 		return err
 	}
+	if err := assertUnionArmsAgreeOnTypes(stages); err != nil {
+		return err
+	}
 	if err := assertSortKeysResolve(stages); err != nil {
 		return err
 	}

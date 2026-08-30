@@ -119,10 +119,18 @@ func TestStageShapePlacementSweep(t *testing.T) {
 			t.Run(name, func(t *testing.T) { check(t, name, sql) })
 		}
 	}
-	// The CTE shapes, which have no derived-table spelling: a body
-	// referenced twice is where a consumer-scoped filter lands on a stage
-	// every reference reads.
-	for name, sql := range map[string]string{
+	for name, sql := range sweepCTEShapes() {
+		name, sql := name, sql
+		t.Run(name, func(t *testing.T) { check(t, name, sql) })
+	}
+}
+
+// sweepCTEShapes are the shapes that have no derived-table spelling: a CTE
+// body referenced twice is where a consumer-scoped filter lands on a stage
+// every reference reads, and where the aggregate-output projection the BODY
+// owns lands on the same stage for an entirely legitimate reason.
+func sweepCTEShapes() map[string]string {
+	return map[string]string{
 		"cte2/where_on_the_first_ref": `WITH c AS (SELECT n_nationkey AS k, n_regionkey AS v FROM nation ` +
 			`WHERE n_nationkey < 100) SELECT COUNT(*) AS n FROM (SELECT k FROM c WHERE v > 2 ` +
 			`UNION ALL SELECT k FROM c) u`,
@@ -157,8 +165,14 @@ func TestStageShapePlacementSweep(t *testing.T) {
 		// derived table: the aggregate emits it under its expression TEXT.
 		"agg/computed_key_selected": `SELECT n_regionkey + 1 AS gk FROM nation ` +
 			`GROUP BY n_regionkey + 1 ORDER BY gk`,
-	} {
-		name, sql := name, sql
-		t.Run(name, func(t *testing.T) { check(t, name, sql) })
+		// A union whose arms are an AGGREGATE on a computed key and a plain
+		// BASE TABLE: the arms disagreed about the key's type and the sort
+		// above panicked inside the fragment (#656 R4).
+		"union_mixed/agg_and_base": `WITH a AS (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n ` +
+			`FROM nation GROUP BY n_regionkey + 1) SELECT gk FROM a UNION ALL ` +
+			`SELECT n_regionkey FROM nation WHERE n_nationkey < 3 ORDER BY gk`,
+		"union_mixed/arms_swapped": `SELECT n_regionkey AS gk FROM nation WHERE n_nationkey < 3 ` +
+			`UNION ALL SELECT gk FROM (SELECT n_regionkey + 1 AS gk, COUNT(*) AS n FROM nation ` +
+			`GROUP BY n_regionkey + 1) a ORDER BY gk`,
 	}
 }

@@ -191,6 +191,24 @@ when the marker is set. Deriving ownership structurally instead means asking
 whether every consumer's LOGICAL ancestry carries the same predicate, and the
 pass is handed only `[]Stage`.
 
+### The marker is set at one site, and that is a checked fact
+
+`ConsumerScoped` is written in exactly one place — `filterCarrierIndex`, when a
+consumer's predicate lands on a single-reference CTE body's terminal. The
+assert trusts it, which is sound for the route the marker covers and says
+NOTHING about any other route to a second consumer: shared-subplan dedup, a
+join fusion that folds two stages into one, an exchange dedup. A stage that
+gained its second consumer that way would carry no marker and be waved through.
+
+No SQL reaching that state is known. `TestSharedProducerAttachmentsAreProducer-
+Owned` is what keeps it a checked fact rather than a belief: it walks every
+plan the shape sweep emits and asserts that a shared stage carrying a Filter or
+a Project is one of the two shapes the ownership rule permits — a scan's own
+pushed-down predicate, or a projection over the stage's OWN outputs — or that
+the plan was refused. It also fails if the corpus stops producing a shared
+stage at all, so it cannot pass vacuously. A future dedup route trips it
+without anyone having to remember the rule.
+
 ## A computed group key is a column NAME above its aggregate
 
 An aggregate emits its group key under the TEXT of the GROUP BY expression, so
@@ -216,6 +234,35 @@ expression for column references, and a walk that descends into `g + 1 > 2`
 sees a reference to `g` that the aggregate genuinely does not emit. Reading
 that as unresolvable refused a HAVING the fragment computes correctly, so the
 walk stops at any subterm whose TEXT is an emitted column name.
+
+## A declaration is read as truth, so it may not disagree with the bytes
+
+The respell above made a union arm COPY a column where it used to compute one,
+and that exposed a second asymmetry in the same place. `reconcileSetOpArmTypes`
+makes the arms agree by their DECLARED types, and it can only type an arm it
+can resolve; above an aggregate the walk read the computed key `g + 1` as
+arithmetic, could not resolve `g`, and fell to the float rule. One untyped arm
+sent the whole set operation to FLOAT64 and CAST the other arm — and once the
+aggregate arm stopped answering NULL, the two arms agreed on paper and wrote
+different bytes, because the worker DirectCopies a bare reference and never
+reads the declaration. The sort above read an INT64 key as float, got an empty
+typed slice and indexed it: a recovered PANIC, on a query PostgreSQL answers.
+
+The repair is the same rule one layer down — a computed group key is a column
+NAME, so its type is the key's declared type and not the float fallback — and
+it is applied wherever the question is asked: `emittedColTypes` types a derived
+key from `derivedGroupKeyTypes` rather than a bare map lookup, `setOpArmDecls`
+tries the whole TERM before reading it as arithmetic, and
+`emitMergeAggregateTree` carries `GroupByTypes` onto the stages it emits, which
+it had been dropping.
+
+The backstop is `assertUnionArmsAgreeOnTypes`, and it checks the half arm
+agreement cannot see: a spec that is a bare REFERENCE is copied off the
+producer's stream with its declaration unread, so the declaration must match
+what the producer says it emits. Two arms declaring the same wrong thing is
+still wrong. It refuses with the sentinel, so the coordinator answers the query
+locally instead of panicking — verified by disabling the type repair and
+watching the same SQL answer correctly through the refusal.
 
 ## A carrier is never handed what it cannot evaluate
 

@@ -142,9 +142,18 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 		case !nameIsPlainColumn(src):
 			// The stage emits it under an expression TEXT, which no
 			// consumer can name. The alias is the only usable spelling.
+			//
+			// It carries the key's DECLARED type. Leaving it unknown is not
+			// neutral: a set operation reconciles its arms by their declared
+			// types, so an untyped arm made the union pick FLOAT64 and CAST
+			// the OTHER arm, and the two arms then disagreed about what `gk`
+			// IS. The sort above read the key as float over an int vector
+			// and indexed an empty slice — a runtime panic, on a query
+			// PostgreSQL answers (#656 R4).
 			specs = append(specs, ProjectExprSpec{
 				Expr: plansql.QuoteIdent(src), Name: strings.ToLower(alias),
 			})
+			declareGroupKeySpec(&specs[len(specs)-1], src, decls)
 			renamed[strings.ToLower(src)] = strings.ToLower(alias)
 			needed = true
 		default:
@@ -186,6 +195,7 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 			// sort keyed on it stops finding it the moment the projection
 			// renames it to `array[n_regionkey]`.
 			specs = append(specs, ProjectExprSpec{Expr: expr, Name: real})
+			declareGroupKeySpec(&specs[len(specs)-1], real, decls)
 		}
 	}
 	stage.ProjectExprs = specs
@@ -390,4 +400,23 @@ func referencesDecimalAggregate(n plansql.Node, stage *Stage) bool {
 		}
 	}
 	return false
+}
+
+// declareGroupKeySpec puts the aggregate's DECLARED type for one of its own
+// outputs onto a pass-through spec.
+//
+// A projection NARROWS to its outputs and the fragment builds each output's
+// vector from the spec's declaration, so an undeclared pass-through is a
+// column whose type the plan does not state. Downstream that is not merely
+// missing information: reconcileSetOpArmTypes reads exactly this to decide a
+// set operation's output type, and an untyped arm sends it to FLOAT64.
+func declareGroupKeySpec(sp *ProjectExprSpec, name string, decls colDecls) {
+	t, ok := decls.types[strings.ToLower(name)]
+	if !ok {
+		return
+	}
+	sp.Type, sp.TypeKnown = t, true
+	if d, ok := decls.dec[strings.ToLower(name)]; ok {
+		sp.Precision, sp.Scale = d.Precision, d.Scale
+	}
 }

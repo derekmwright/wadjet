@@ -732,25 +732,41 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 		}
 	})
-	t.Run("C/CoalesceOverADecimalIsNotYetExact", func(t *testing.T) {
-		// The remaining float in this family, and NOT the window's doing:
-		// COALESCE's own return-type resolution picks the INTEGER literal's
-		// type over the DECIMAL column's, so `COALESCE(c_dec, 0)` alone
-		// fails outright on BOTH paths with `cannot store string into INT64
-		// vector`, and every expression derived from it is float. The
-		// windowed spelling agrees with the GROUPED one exactly, which is
-		// the evidence that the window materialization is not the defect.
-		//
-		// Both halves are pinned. The first fails when COALESCE's
-		// declaration is fixed, which is the signal to assert PostgreSQL's
-		// 20.0020 here too.
+	t.Run("C/CoalesceOverADecimal", func(t *testing.T) {
+		// COALESCE's return-type resolution used to pick the INTEGER
+		// literal's type over the DECIMAL column's, so `COALESCE(c_dec, 0)`
+		// failed outright on BOTH paths with `cannot store string into INT64
+		// vector`. #695 decided it, and this half of the pin is now the
+		// ASSERTION it asked for: PostgreSQL's numeric, digit for digit.
 		bare := fmt.Sprintf(`SELECT id, COALESCE(c_dec, 0) AS d FROM %s WHERE id < 5 ORDER BY id`, tbl)
+		wantBare := []string{"0.0000", "1.0001", "2.0002", "3.0003", "4.0004"}
 		for _, arm := range sfcArms(ctx, single, coord) {
-			if _, err := arm.run(bare); err == nil {
-				t.Errorf("%s arm now ANSWERS %q, so COALESCE over a DECIMAL declares its type. "+
-					"Assert PostgreSQL's exact values here and delete this pin.", arm.name, bare)
+			res := sfcRun(t, arm, bare)
+			if len(res.Rows) != len(wantBare) {
+				t.Fatalf("%s arm returned %d rows, want %d\n  SQL: %s",
+					arm.name, len(res.Rows), len(wantBare), bare)
+			}
+			for i, r := range res.Rows {
+				if got := fmt.Sprint(r["d"]); got != wantBare[i] {
+					t.Errorf("%s arm answered %q for id=%v, want %q exactly — PostgreSQL's "+
+						"numeric is exact and so is wadjet's\n  SQL: %s",
+						arm.name, got, r["id"], wantBare[i], bare)
+				}
 			}
 		}
+		// The half that is still open, and NOT the window's doing:
+		// ARITHMETIC over COALESCE's output is float on both paths, so
+		// `SUM(COALESCE(c_dec, 0) * 2)` answers 20.002000000000002 where
+		// PostgreSQL answers 20.0020. The windowed spelling agrees with the
+		// GROUPED one exactly, which is the evidence that the window
+		// materialization is not the defect — the same argument the sibling
+		// entry above makes for the plain `SUM(c_dec * 2) OVER ()`, which IS
+		// exact.
+		//
+		// TODO(#555): both spellings become 20.0020 when the choice
+		// constructs carry their DECLARED type into the arithmetic. Assert
+		// it here and delete this pin.
+		const wantExact = "20.0020"
 		win := fmt.Sprintf(
 			`SELECT id, SUM(COALESCE(c_dec, 0) * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`, tbl)
 		grouped := fmt.Sprintf(
@@ -758,6 +774,11 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		for _, arm := range sfcArms(ctx, single, coord) {
 			w := sfcRun(t, arm, win)
 			g := sfcRun(t, arm, grouped)
+			if len(g.Rows) > 0 && fmt.Sprint(g.Rows[0]["s"]) == wantExact {
+				t.Fatalf("%s arm now answers %s exactly for %q — the arithmetic over COALESCE "+
+					"carries its declared type. Assert it on both spellings and delete this pin.",
+					arm.name, wantExact, grouped)
+			}
 			if len(w.Rows) == 0 || len(g.Rows) == 0 {
 				t.Fatalf("%s arm returned no rows", arm.name)
 			}
@@ -1243,6 +1264,138 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 				"is fixed, assert the ten rows and delete this pin")
 		} else if !strings.Contains(err.Error(), "names producer") {
 			t.Errorf("the DAG failed for a different reason than #715: %v", err)
+		}
+	})
+
+	// --- the fourth adversarial round --------------------------------------
+
+	t.Run("R4/MixedArmUnionOverAComputedGroupKey", func(t *testing.T) {
+		// A union whose arms are an AGGREGATE on a computed key and a plain
+		// BASE TABLE. The aggregate arm was untyped — a walk above the
+		// aggregate read `g + 1` as arithmetic over a column it does not
+		// emit and fell to the float rule — so the set operation reconciled
+		// to double and CAST the other arm. Once the aggregate arm stopped
+		// answering NULL, the two arms disagreed about what `gk` IS: the
+		// worker copies a bare reference and ignores the declaration, so the
+		// sort above read an INT64 column as float, got an empty typed slice
+		// and INDEXED it. A recovered panic, reported as an internal error,
+		// on a query PostgreSQL answers.
+		//
+		// PostgreSQL 17: 0 1 1 2 2 3 4 5 6 7 NULL — eleven rows, and the
+		// union of bigint and int resolves BIGINT, not double.
+		wantKeys := map[int64]bool{}
+		var nullKey bool
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok {
+				wantKeys[int64(g)+1] = true
+			} else {
+				nullKey = true
+			}
+		}
+		want := int64(len(wantKeys))
+		if nullKey {
+			want++
+		}
+		want += 3 // the base-table arm's id < 3
+		agg := fmt.Sprintf(`SELECT g + 1 AS gk, COUNT(*) AS n FROM %s GROUP BY g + 1`, tbl)
+		for _, c := range []struct{ name, sql string }{
+			{"Ordered", `WITH a AS (` + agg + `) SELECT gk FROM a UNION ALL ` +
+				`SELECT g FROM %[1]s WHERE id < 3 ORDER BY gk`},
+			{"Unordered", `WITH a AS (` + agg + `) SELECT gk FROM a UNION ALL ` +
+				`SELECT g FROM %[1]s WHERE id < 3`},
+			{"ArmsSwapped", `SELECT g AS gk FROM %[1]s WHERE id < 3 UNION ALL ` +
+				`SELECT gk FROM (` + agg + `) a ORDER BY gk`},
+			{"ExplicitCast", `WITH a AS (` + agg + `) SELECT gk FROM a UNION ALL ` +
+				`SELECT CAST(g AS BIGINT) FROM %[1]s WHERE id < 3 ORDER BY gk`},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sql := fmt.Sprintf(c.sql, tbl)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if int64(len(res.Rows)) != want {
+						t.Errorf("%s arm returned %d rows, want %d — the base-table arm's rows "+
+							"vanish when the arms disagree\n  SQL: %s",
+							arm.name, len(res.Rows), want, sql)
+					}
+					var nonNull int
+					for _, r := range res.Rows {
+						if r["gk"] != nil {
+							nonNull++
+						}
+					}
+					if int64(nonNull) != want-1 {
+						t.Errorf("%s arm returned %d non-NULL keys, want %d\n  SQL: %s",
+							arm.name, nonNull, want-1, sql)
+					}
+				}
+			})
+		}
+		t.Run("ctl/APlainGroupKeyStillAnswers", func(t *testing.T) {
+			sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+				`WITH a AS (SELECT g AS gk, COUNT(*) AS c FROM %[1]s GROUP BY g) `+
+					`SELECT COUNT(*) AS n FROM (SELECT gk FROM a UNION ALL `+
+					`SELECT g FROM %[1]s WHERE id < 3) u`, tbl), "n", want)
+		})
+	})
+	t.Run("R4/GroupKeyTextMatchingIsSpellingSensitive", func(t *testing.T) {
+		// #723, pinned on BOTH arms. A SELECT item is matched to its GROUP BY
+		// key by the TEXT of the expression, and the normalisation differs by
+		// path and by site: whitespace is normalised, parentheses and
+		// identifier case are not, and which side carries the parenthesis
+		// decides which path gets it wrong. PostgreSQL answers every spelling
+		// identically because it matches by expression EQUIVALENCE.
+		//
+		// TODO(#723): every "0" below becomes 7 when the comparison goes
+		// through the AST. Delete this pin then and assert PostgreSQL's
+		// answer for all six.
+		var wantKeys int
+		seen := map[int32]bool{}
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok && !seen[g] {
+				seen[g] = true
+				wantKeys++
+			}
+		}
+		for _, c := range []struct {
+			name            string
+			sql             string
+			singleNN, dagNN int
+		}{
+			{"Plain", `SELECT g + 1 AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, wantKeys, wantKeys},
+			{"Whitespace", `SELECT g+1 AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, wantKeys, wantKeys},
+			{"ParenOnBoth", `SELECT (g + 1) AS gk FROM %[1]s GROUP BY (g + 1) ORDER BY gk`, wantKeys, wantKeys},
+			{"ParenOnTheSelect", `SELECT (g + 1) AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, 0, wantKeys},
+			{"IdentifierCase", `SELECT G + 1 AS gk FROM %[1]s GROUP BY g + 1 ORDER BY gk`, 0, wantKeys},
+			{"ParenOnTheGroupBy", `SELECT g + 1 AS gk FROM %[1]s GROUP BY (g + 1) ORDER BY gk`, 0, 0},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sql := fmt.Sprintf(c.sql, tbl)
+				for i, arm := range sfcArms(ctx, single, coord) {
+					want := c.singleNN
+					if i == 1 {
+						want = c.dagNN
+					}
+					res := sfcRun(t, arm, sql)
+					var nonNull int
+					for _, r := range res.Rows {
+						if r["gk"] != nil {
+							nonNull++
+						}
+					}
+					if nonNull == want {
+						continue
+					}
+					if want == 0 {
+						t.Fatalf("%s arm now answers %d non-NULL keys where this pin records 0; "+
+							"PostgreSQL answers %d. #723 is fixed for this spelling — assert it "+
+							"and delete the pin\n  SQL: %s", arm.name, nonNull, wantKeys, sql)
+					}
+					t.Errorf("%s arm answered %d non-NULL keys, want %d\n  SQL: %s",
+						arm.name, nonNull, want, sql)
+				}
+			})
 		}
 	})
 

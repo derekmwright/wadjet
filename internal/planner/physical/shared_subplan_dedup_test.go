@@ -402,7 +402,7 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// exactly how a consumer-scoped filter acquires a second consumer
 		// — the defect assertNoConsumerScopedFilterOnSharedStage refuses.
 		"ConsumerScoped": "hashed",
-		"GroupByAll": "hashed", "SortKeys": "hashed", "Limit": "hashed",
+		"GroupByAll":     "hashed", "SortKeys": "hashed", "Limit": "hashed",
 		// HasLimit rides with Limit: without it, two subtrees with a
 		// genuine LIMIT 0 vs. no LIMIT at all would hash identically and
 		// dedup into one (#481).

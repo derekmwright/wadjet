@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ErrUnreachableGatherOutput marks a plan whose gather renames a source no
@@ -151,4 +154,166 @@ func assertSortKeysResolve(stages []Stage) error {
 		}
 	}
 	return nil
+}
+
+// assertUnionArmsAgreeOnTypes refuses a plan whose set-operation arms declare
+// DIFFERENT types for the same output column.
+//
+// A union writes one .wshf stream per arm and every consumer reads them as one
+// relation, so the arms' declarations are not advice — they decide how the
+// bytes are read back. Two arms that disagree hand the consumer a column whose
+// declared type does not match its data: the sort above reads a FLOAT64 key
+// off an INT64 vector, gets an empty typed slice, and indexes it. That is a
+// runtime PANIC inside the fragment (`index out of range [0] with length 0`),
+// recovered by the query boundary and reported as an internal error, for a
+// query PostgreSQL answers (#656 R4).
+//
+// reconcileSetOpArmTypes is what makes the arms agree, and it can only do that
+// for arms it can TYPE; an arm it cannot type leaves the disagreement in the
+// plan. Refusing here is the backstop, and it uses the sentinel so the
+// coordinator routes the query local and ANSWERS it rather than panicking.
+//
+// An arm that declares nothing is not a disagreement: the worker copies the
+// source column and the type is whatever the producer emits — which is also
+// why a bare REFERENCE that declares a type is checked against its producer
+// rather than against the other arms. The worker DirectCopies such a spec and
+// ignores the declaration, so two arms can agree on paper and still write
+// different bytes.
+func assertUnionArmsAgreeOnTypes(stages []Stage) error {
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	for i := range stages {
+		s := &stages[i]
+		if s.Type != StageUnion || len(s.UnionArms) == 0 {
+			continue
+		}
+		if err := armDeclarationsMatchTheirProducers(stages, idx, s); err != nil {
+			return err
+		}
+		if len(s.UnionArms) < 2 {
+			continue
+		}
+		type decl struct {
+			t          parquet.TypeID
+			prec, scal int
+			arm        int
+		}
+		// A column any arm COERCES is reconciled after its vector exists, not
+		// by the declaration: the DECIMAL rung deliberately leaves the
+		// integer arm declaring INT32 and MOVES its carrier, because
+		// declaring the target would make the projection build a DECIMAL
+		// vector and the checked writer refuse the int box before
+		// DecimalCoerce could convert it (ADR-0012 item 12). Those columns
+		// are outside this check.
+		coerced := map[string]bool{}
+		for a := range s.UnionArms {
+			for _, c := range s.UnionArms[a].DecimalCoercions {
+				coerced[strings.ToLower(c.Name)] = true
+			}
+		}
+		seen := map[string]decl{}
+		for a := range s.UnionArms {
+			for _, sp := range s.UnionArms[a].Projections {
+				if sp.Name == "" || !sp.TypeKnown || coerced[strings.ToLower(sp.Name)] {
+					continue
+				}
+				key := strings.ToLower(sp.Name)
+				have, ok := seen[key]
+				if !ok {
+					seen[key] = decl{sp.Type, sp.Precision, sp.Scale, a}
+					continue
+				}
+				if have.t == sp.Type && have.prec == sp.Precision && have.scal == sp.Scale {
+					continue
+				}
+				return fmt.Errorf("%w: union stage %s declares %q as %s(%d,%d) in arm %d and "+
+					"%s(%d,%d) in arm %d — the consumer would read one arm's bytes at the "+
+					"other arm's type (#656)", ErrUnreachableGatherOutput, s.ID, sp.Name,
+					have.t, have.prec, have.scal, have.arm, sp.Type, sp.Precision, sp.Scale, a)
+			}
+		}
+	}
+	return nil
+}
+
+// armDeclarationsMatchTheirProducers checks the half two arms agreeing with
+// each other cannot see.
+//
+// A spec whose expression is a bare column REFERENCE is copied by the worker
+// straight off the producer's stream — DirectCopy, the declared type unread —
+// so a declaration that disagrees with the producer is a lie the plan tells
+// its consumers. Both arms declaring FLOAT64 while one of them copies an INT64
+// column is exactly that, and the sort above read the key as float over int
+// bytes and indexed an empty slice (#656 R4).
+func armDeclarationsMatchTheirProducers(stages []Stage, idx map[string]int, s *Stage) error {
+	for a := range s.UnionArms {
+		dep := s.UnionArms[a].DepStage
+		if _, ok := idx[dep]; !ok && a < len(s.Dependencies) {
+			dep = s.Dependencies[a]
+		}
+		j, ok := idx[dep]
+		if !ok {
+			continue
+		}
+		decls := stageDeclaredOutputTypes(&stages[j])
+		if len(decls) == 0 {
+			continue
+		}
+		for _, sp := range s.UnionArms[a].Projections {
+			if sp.Name == "" || !sp.TypeKnown || sp.Expr == "" {
+				continue
+			}
+			src, ok := bareColumnRefName(sp.Expr)
+			if !ok {
+				continue // a computed arm builds its own vector from the declaration
+			}
+			have, ok := decls[strings.ToLower(src)]
+			if !ok || have == sp.Type {
+				continue
+			}
+			return fmt.Errorf("%w: union stage %s arm %d copies %q from %s, which emits it as "+
+				"%s, and declares it %s — the worker copies the column and the consumer reads "+
+				"the bytes at the declared type (#656)", ErrUnreachableGatherOutput,
+				s.ID, a, src, stages[j].ID, have, sp.Type)
+		}
+	}
+	return nil
+}
+
+// bareColumnRefName returns the column a spec expression names, when the
+// expression is nothing but a reference (delimited or not).
+func bareColumnRefName(exprText string) (string, bool) {
+	ast, err := plansql.ParseExpression(exprText)
+	if err != nil {
+		return "", false
+	}
+	ref, ok := ast.(*plansql.ColRef)
+	if !ok || ref.Table != "" {
+		return "", false
+	}
+	return ref.Column, true
+}
+
+// stageDeclaredOutputTypes is what a stage says its own output columns are.
+func stageDeclaredOutputTypes(s *Stage) map[string]parquet.TypeID {
+	out := map[string]parquet.TypeID{}
+	for _, sp := range s.ProjectExprs {
+		if sp.Name != "" && sp.TypeKnown {
+			out[strings.ToLower(sp.Name)] = sp.Type
+		}
+	}
+	if len(s.ProjectExprs) > 0 {
+		return out // a projection NARROWS to exactly its outputs
+	}
+	for k, t := range s.GroupByTypes {
+		out[strings.ToLower(k)] = t
+	}
+	for _, ag := range s.AggSpecs {
+		if ag.OutputCol != "" && ag.OutputTypeKnown {
+			out[strings.ToLower(ag.OutputCol)] = ag.OutputType
+		}
+	}
+	return out
 }

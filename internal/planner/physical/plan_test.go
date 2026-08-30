@@ -1208,7 +1208,7 @@ func TestMultiLevelMergeAggregateTree(t *testing.T) {
 	groupBy := []string{"region"}
 	aggSpecs := []AggSpec{{Func: "count_star", OutputCol: "cnt"}}
 
-	emitMergeAggregateTree(&stages, leafIDs, groupBy, aggSpecs, stages[:20])
+	emitMergeAggregateTree(&stages, leafIDs, groupBy, nil, nil, aggSpecs, stages[:20])
 
 	// Should have 20 scans + intermediate merge stages + 1 final merge
 	var intermediates, finals []Stage
@@ -1261,7 +1261,7 @@ func TestMultiLevelMergeNotTriggered(t *testing.T) {
 		stages = append(stages, Stage{ID: id, Type: "scan", Tasks: 1})
 	}
 
-	emitMergeAggregateTree(&stages, leafIDs, []string{"g"}, []AggSpec{{Func: "sum", InputCol: "x", OutputCol: "sx"}}, stages[:8])
+	emitMergeAggregateTree(&stages, leafIDs, []string{"g"}, nil, nil, []AggSpec{{Func: "sum", InputCol: "x", OutputCol: "sx"}}, stages[:8])
 
 	// Should have 8 scans + 1 final_aggregate (no intermediates)
 	mergeStages := stages[8:]

@@ -2871,6 +2871,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := assertSortKeysResolve(stages); err != nil {
 		return nil, err
 	}
+	// And for set-operation arms that disagree about a column's type, which
+	// is a PANIC inside the consumer's fragment rather than a loud failure.
+	if err := assertUnionArmsAgreeOnTypes(stages); err != nil {
+		return nil, err
+	}
 	// #423: the worker's scan reads column TYPES from the FILE, and a
 	// parquet file cannot express nine of ours. Declare the catalog's
 	// schema for every table this plan scans so a file written before the
@@ -5616,7 +5621,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Skip the separate aggregate stage — scans produce partial aggs.
 			// Final aggregate merges partial results from all scan tasks.
 			leafIDs := leafStages(childStages)
-			emitMergeAggregateTree(stages, leafIDs, groupBy, aggSpecs, childStages)
+			emitMergeAggregateTree(stages, leafIDs, groupBy, groupByTypes, groupByDecimal, aggSpecs, childStages)
 		} else {
 			// Standard two-phase distributed aggregation
 			stageID := fmt.Sprintf("aggregate-%d", len(*stages))
@@ -13455,18 +13460,22 @@ func estimateUpstreamTasks(childStages []Stage, leafIDs []string) int {
 
 // emitMergeAggregateTree emits a final_aggregate stage, or a two-level merge
 // tree when upstream tasks exceed mergeFanout for parallel merging.
-func emitMergeAggregateTree(stages *[]Stage, leafIDs []string, groupBy []string, aggSpecs []AggSpec, childStages []Stage) {
+func emitMergeAggregateTree(stages *[]Stage, leafIDs []string, groupBy []string,
+	groupByTypes map[string]parquet.TypeID, groupByDecimal map[string]logical.DecimalMeta,
+	aggSpecs []AggSpec, childStages []Stage) {
 	upstream := estimateUpstreamTasks(childStages, leafIDs)
 	if upstream <= mergeFanout {
 		// Single-level: one final_aggregate merges all results
 		finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
 		*stages = append(*stages, Stage{
-			ID:           finalStageID,
-			Type:         "final_aggregate",
-			Tasks:        1,
-			GroupByCols:  groupBy,
-			AggSpecs:     aggSpecs,
-			Dependencies: leafIDs,
+			ID:             finalStageID,
+			Type:           "final_aggregate",
+			Tasks:          1,
+			GroupByCols:    groupBy,
+			GroupByTypes:   groupByTypes,
+			GroupByDecimal: groupByDecimal,
+			AggSpecs:       aggSpecs,
+			Dependencies:   leafIDs,
 		})
 		return
 	}
@@ -13482,6 +13491,8 @@ func emitMergeAggregateTree(stages *[]Stage, leafIDs []string, groupBy []string,
 			Type:            "final_aggregate",
 			Tasks:           1,
 			GroupByCols:     groupBy,
+			GroupByTypes:    groupByTypes,
+			GroupByDecimal:  groupByDecimal,
 			AggSpecs:        aggSpecs,
 			Dependencies:    leafIDs,
 			MergeGroup:      g,
@@ -13491,12 +13502,14 @@ func emitMergeAggregateTree(stages *[]Stage, leafIDs []string, groupBy []string,
 	// Final merge of intermediate results
 	finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
 	*stages = append(*stages, Stage{
-		ID:           finalStageID,
-		Type:         "final_aggregate",
-		Tasks:        1,
-		GroupByCols:  groupBy,
-		AggSpecs:     aggSpecs,
-		Dependencies: intermIDs,
+		ID:             finalStageID,
+		Type:           "final_aggregate",
+		Tasks:          1,
+		GroupByCols:    groupBy,
+		GroupByTypes:   groupByTypes,
+		GroupByDecimal: groupByDecimal,
+		AggSpecs:       aggSpecs,
+		Dependencies:   intermIDs,
 	})
 }
 

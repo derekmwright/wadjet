@@ -61,6 +61,25 @@ func carrierInputColumns(stages []Stage, idx map[string]int, i int) (map[string]
 			return nil, false
 		}
 		return out, true
+	case StageUnion:
+		// A union emits exactly what its ARMS project, under the result
+		// names every arm was normalized onto. Modelling it is what lets a
+		// sort ABOVE a union be checked at all: without it the ordering over
+		// `a UNION ALL b` was unmodelled, and a key the arms disagreed about
+		// reached the fragment and panicked (#656 R4).
+		if len(s.UnionArms) == 0 {
+			return nil, false
+		}
+		out := map[string]string{}
+		for _, sp := range s.UnionArms[0].Projections {
+			if sp.Name != "" {
+				out[strings.ToLower(sp.Name)] = sp.Name
+			}
+		}
+		if len(out) == 0 {
+			return nil, false
+		}
+		return out, true
 	case StageSort, StageMergeSort, StageLimit, StageWindow, StageProject:
 		if len(s.Dependencies) != 1 {
 			return nil, false
