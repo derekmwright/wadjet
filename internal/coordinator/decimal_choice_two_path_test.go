@@ -647,6 +647,26 @@ func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
 			sql:  "SELECT SUM(a) AS v FROM (SELECT s, b AS a FROM " + dbpTable + ") x",
 			want: "49.2400",
 		},
+		{
+			// The control that says the fix DECLINES where it must. Below a
+			// JOIN the derived table's SELECT list really is materialized on
+			// the arm's fragment, so `x.v` is a column of the join's output
+			// and the source spelling is not — a self-join qualifies both
+			// sides' `a`, and respelling here took a CORRECT 25.50 to 0.00
+			// before aggInputJoinBelow declined it.
+			name: "control, an expression over a derived alias BELOW A JOIN",
+			sql: "SELECT SUM(CASE WHEN x.s = '1.50' THEN x.v ELSE 0 END) AS v FROM " +
+				"(SELECT s, a * 2 AS v FROM " + dbpTable + ") x JOIN " + dbpTable + " y ON x.s = y.s",
+			want: "25.50",
+		},
+		{
+			// The same decline over a plain computed alias with no CASE, and
+			// the shape TPC-H's own joins take.
+			name: "control, arithmetic over a derived alias below a join",
+			sql: "SELECT SUM(x.twice * 1) AS v FROM (SELECT id, id * 2 AS twice FROM " +
+				dbpTable + ") x JOIN " + dbpTable + " y ON x.id = y.id",
+			want: "90",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := dtpRun(t, ctx, single, coord, tc.sql, false)

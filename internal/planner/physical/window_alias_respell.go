@@ -100,6 +100,23 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 	if n == nil || child == nil || depth >= aggRespellDepth {
 		return n, false
 	}
+	// A JOIN below the aggregate already MATERIALIZES the derived table's
+	// SELECT list: attachScanSelectProjections puts an alias-naming OpProject
+	// on the join arm's fragment, so `x.v` really is a column of the join's
+	// output and the source spelling is the one that is not. Respelling there
+	// turned a CORRECT answer into a wrong one — `SUM(CASE WHEN x.s = '1.50'
+	// THEN x.v ELSE 0 END)` over `(SELECT s, a * 2 AS v FROM t) x JOIN t y`
+	// went from 25.50 to 0.00, because a self-join qualifies both sides' `a`
+	// and the bare name resolves to neither.
+	//
+	// This is the distinction resolveDerivedAliasSortKeys draws for a sort
+	// key, and it is settled the same way: whether the name is MATERIALIZED,
+	// not whether it exists. Declining below a join keeps the shape that
+	// already worked and costs nothing #702 names — every one of its shapes is
+	// a Project over a scan.
+	if aggInputJoinBelow(child) {
+		return n, false
+	}
 	out, changed, _ := rewriteColRefs(n, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		if resolved, expr, below, renamed := resolveAggInputName(ref.String(), child); renamed {
 			if expr != nil {
@@ -142,4 +159,26 @@ func respellAggInputExprAt(n plansql.Node, child *logical.Node, depth int) (plan
 		return &plansql.ColRef{Table: cleanExpr(qual), Column: ref.Column}, true
 	})
 	return out, changed
+}
+
+// aggInputJoinBelow reports whether a JOIN sits between the aggregate and its
+// producer, descending only through the nodes that pass their input's columns
+// along. It stops at an Aggregate, a scan or anything else it cannot reason
+// about; the depth cap is there so a malformed plan cannot spin.
+func aggInputJoinBelow(n *logical.Node) bool {
+	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
+		switch n.Type {
+		case logical.NodeJoin:
+			return true
+		case logical.NodeProject, logical.NodeFilter, logical.NodeSort,
+			logical.NodeLimit, logical.NodeDistinct:
+			if len(n.Children) != 1 {
+				return false
+			}
+			n = n.Children[0]
+		default:
+			return false
+		}
+	}
+	return false
 }
