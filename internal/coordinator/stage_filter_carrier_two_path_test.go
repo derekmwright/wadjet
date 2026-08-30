@@ -1222,24 +1222,61 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 	})
-	t.Run("N3/HavingOnAComputedGroupKeyIsWrongOnBothPaths", func(t *testing.T) {
-		// #720, pinned. PostgreSQL 17 answers 5 rows for the first and
-		// REFUSES the second (a SELECT alias is not visible in HAVING); we
-		// answer 0 for the first on both paths, and the two paths disagree
-		// on the second. Pre-existing and byte-identical on the parent
-		// commit — outside this class's mechanism, since it reproduces
-		// single-process.
+	t.Run("N3/HavingOnAComputedGroupKey", func(t *testing.T) {
+		// #720, fixed. A HAVING over a computed group key returned ZERO rows
+		// on both paths: above the aggregate `g + 1` is the NAME of one
+		// column and `g` is gone, so a predicate left as arithmetic answered
+		// UNKNOWN on every row and the filter admitted nothing.
 		//
-		// TODO(#720): both halves flip when the HAVING predicate is spelled
-		// against the aggregate's OUTPUT.
+		// The expectation is computed from the fixture generator and equals
+		// the five rows PostgreSQL 17 answers: (3,659) (4,659) (5,659)
+		// (6,659) (7,660).
+		wantHaving := map[int64]int64{}
+		for _, r := range rows {
+			g, ok := r.g.(int32)
+			if !ok {
+				continue
+			}
+			if gk := int64(g) + 1; gk > 2 {
+				wantHaving[gk]++
+			}
+		}
 		expr := fmt.Sprintf(`SELECT g + 1 AS gk, COUNT(*) AS n FROM %s GROUP BY g + 1 `+
 			`HAVING g + 1 > 2 ORDER BY gk`, tbl)
 		for _, arm := range sfcArms(ctx, single, coord) {
 			res := sfcRun(t, arm, expr)
-			if len(res.Rows) != 0 {
-				t.Fatalf("%s arm now returns %d rows for a HAVING on a computed group key; "+
-					"PostgreSQL answers 5. #720 is fixed — assert the five rows and delete "+
-					"this pin\n  SQL: %s", arm.name, len(res.Rows), expr)
+			if len(res.Rows) != len(wantHaving) {
+				t.Fatalf("%s arm returned %d rows, want %d\n  SQL: %s",
+					arm.name, len(res.Rows), len(wantHaving), expr)
+			}
+			var last int64
+			for i, r := range res.Rows {
+				gk, ok := numAsInt(r["gk"])
+				if !ok {
+					t.Fatalf("%s arm returned %T for gk\n  SQL: %s", arm.name, r["gk"], expr)
+				}
+				if i > 0 && gk <= last {
+					t.Errorf("%s arm returned gk out of order at row %d: %d after %d\n  SQL: %s",
+						arm.name, i, gk, last, expr)
+				}
+				last = gk
+				n, _ := numAsInt(r["n"])
+				if n != wantHaving[gk] {
+					t.Errorf("%s arm answered n=%d for gk=%d, want %d\n  SQL: %s",
+						arm.name, n, gk, wantHaving[gk], expr)
+				}
+			}
+		}
+		// A select-list ALIAS is not visible in HAVING. PostgreSQL refuses
+		// this with `column "gk" does not exist`; both paths must refuse it
+		// too, and the DAG answering it with zero rows was the other half of
+		// #720.
+		aliasSQL := fmt.Sprintf(`SELECT g + 1 AS gk, COUNT(*) AS n FROM %s GROUP BY g + 1 `+
+			`HAVING gk > 2 ORDER BY gk`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			if _, err := arm.run(aliasSQL); err == nil {
+				t.Errorf("%s arm ANSWERED a HAVING on a select-list alias; PostgreSQL refuses it "+
+					"with 42703\n  SQL: %s", arm.name, aliasSQL)
 			}
 		}
 		// The control that must stay right.
