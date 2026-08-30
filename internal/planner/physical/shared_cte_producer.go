@@ -66,7 +66,32 @@ func assertNoConsumerScopedFilterOnSharedStage(stages []Stage) error {
 	}
 	for i := range stages {
 		s := &stages[i]
-		if consumers[s.ID] < 2 || !s.ConsumerScoped {
+		if consumers[s.ID] < 2 {
+			continue
+		}
+		// STRUCTURAL, not marker-driven. ConsumerScoped records what stage
+		// emission KNEW, and a guard that trusts it passes any plan built
+		// another way — a hand-built one, or a future pass that merges two
+		// stages into a shared one. What actually makes a filter unsafe here
+		// is that the stage has two consumers and carries something that
+		// narrows or drops rows: whatever the marker says, the second
+		// consumer reads the filtered stream.
+		//
+		// A scan's OWN pushed-down predicate is the exception and the reason
+		// this cannot simply forbid FilterExprs on a shared stage: it is
+		// part of the relation every consumer reads (`WITH c AS (SELECT …
+		// WHERE id < 100)` referenced twice), not one consumer's WHERE. Stage
+		// emission distinguishes them by WHEN it attached — inside the CTE
+		// body, or above a reference — which is exactly what ConsumerScoped
+		// records, so the marker still selects among filters on a scan. On
+		// every other stage type a filter or projection is consumer-scoped by
+		// construction: nothing attaches one to an aggregate, a sort or a
+		// window as part of the relation's own definition.
+		scoped := s.ConsumerScoped
+		if !scoped && s.Type != StageScan {
+			scoped = len(s.FilterExprs) > 0 || len(s.ProjectExprs) > 0
+		}
+		if !scoped {
 			continue
 		}
 		return &sharedProducerError{stage: s.ID, consumers: consumers[s.ID]}

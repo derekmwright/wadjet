@@ -170,7 +170,13 @@ func TestPlanDistributed_NestedRenameResolvesGatherSource(t *testing.T) {
 		{name: "rename above an aggregate subquery",
 			sql: `SELECT k FROM (SELECT n_regionkey AS k, COUNT(*) AS c FROM nation
 				GROUP BY n_regionkey) t ORDER BY k`,
-			want: map[string]string{"n_regionkey": "k"}},
+			// The producing fragment now MATERIALIZES `k` —
+			// attachScanSelectProjections attaches the outer SELECT list to
+			// it — so the gather's source is the name the stream really
+			// carries rather than the column it was renamed from. Both
+			// spellings narrow correctly; this one does not depend on the
+			// rename resolving at all (#656 F1).
+			want: map[string]string{"k": "k"}},
 		{name: "rename under a join build side",
 			sql: `SELECT n_name, k FROM nation JOIN (SELECT r_regionkey AS k FROM region) t
 				ON n_regionkey = k ORDER BY n_name`,

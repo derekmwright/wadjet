@@ -769,6 +769,262 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		}
 	})
 
+	// --- the second adversarial round --------------------------------------
+
+	t.Run("F1/NarrowedSelectOverAnAggregateAlias", func(t *testing.T) {
+		// A round-1 regression, and a silent wrong COLUMN SET rather than a
+		// wrong value: absorbAggregateOutputProjection renamed the group key
+		// on the aggregate stage while the gather's rename still named the
+		// OLD spelling, so the gather could not narrow and the client got
+		// the stage's full output.
+		sql := fmt.Sprintf(
+			`SELECT s.id FROM (SELECT g + 1 AS id, COUNT(*) AS v FROM %s GROUP BY g + 1) s `+
+				`WHERE s.v > 0 ORDER BY s.id`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			res := sfcRun(t, arm, sql)
+			if !sameNames(res.Columns, []string{"id"}) {
+				t.Errorf("%s arm returned columns %v, want [id] — the gather could not narrow\n  SQL: %s",
+					arm.name, res.Columns, sql)
+			}
+		}
+	})
+	t.Run("F2/FilterAboveANarrowedSortProducer", func(t *testing.T) {
+		// The SELECT list was attached to the scan BELOW the sort, narrowing
+		// away the column the filter above the sort names. 3956 rows became
+		// 0, silently.
+		var want int64
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok && g > 0 {
+				want++
+			}
+		}
+		sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM (SELECT id AS k, g AS v FROM %s ORDER BY id) s WHERE s.v > 0`,
+			tbl), "n", want)
+	})
+	t.Run("F2/SelectListOverACollapsingProducer", func(t *testing.T) {
+		// An aggregate, a DISTINCT and a union all COLLAPSE their input, so
+		// the SELECT list can neither fuse into them nor be evaluated below.
+		// Each failed loud with `sort: key column "d" does not exist`, or
+		// silently returned the producer's raw columns.
+		groups := map[any]bool{}
+		for _, r := range rows {
+			groups[r.g] = true
+		}
+		for _, c := range []struct {
+			name string
+			sql  string
+			want int
+		}{
+			{"Aggregate", `SELECT k * 2 AS d FROM (SELECT g + 1 AS k, COUNT(*) AS v FROM %[1]s ` +
+				`GROUP BY g + 1) s ORDER BY d`, len(groups)},
+			{"Distinct", `SELECT k * 2 AS d FROM (SELECT DISTINCT id AS k, g AS v FROM %[1]s ` +
+				`WHERE id < 5) s ORDER BY d`, 5},
+			{"Union", `SELECT k * 2 AS d FROM (SELECT id AS k FROM %[1]s WHERE id < 3 UNION ALL ` +
+				`SELECT id FROM %[1]s WHERE id < 2) s ORDER BY d`, 5},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				sql := fmt.Sprintf(c.sql, tbl)
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if !sameNames(res.Columns, []string{"d"}) {
+						t.Errorf("%s arm returned columns %v, want [d]\n  SQL: %s",
+							arm.name, res.Columns, sql)
+					}
+					if len(res.Rows) != c.want {
+						t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+							arm.name, len(res.Rows), c.want, sql)
+					}
+				}
+			})
+		}
+	})
+	t.Run("F2/WindowOverAnAggregateAlias", func(t *testing.T) {
+		// The sort above the window keyed on the alias, which nothing
+		// between the aggregate and the gather emitted: loud. Its filter
+		// sibling was silent — `t.k` named a column the window's input does
+		// not carry, so every row was UNKNOWN and the answer was zero rows.
+		groups := map[any]int64{}
+		for _, r := range rows {
+			groups[r.g]++
+		}
+		var total int64
+		for _, c := range groups {
+			total += c
+		}
+		sql := fmt.Sprintf(
+			`SELECT k, SUM(v) OVER () AS w FROM (SELECT g + 1 AS k, COUNT(*) AS v FROM %s `+
+				`GROUP BY g + 1) s ORDER BY k`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			res := sfcRun(t, arm, sql)
+			if len(res.Rows) != len(groups) {
+				t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+					arm.name, len(res.Rows), len(groups), sql)
+			}
+			for _, r := range res.Rows {
+				if w, _ := numAsInt(r["w"]); w != total {
+					t.Errorf("%s arm answered w=%v, want %d\n  SQL: %s", arm.name, r["w"], total, sql)
+				}
+			}
+		}
+		var wantFiltered int64
+		for g := range groups {
+			if g != nil {
+				wantFiltered++ // the NULL group's key is NULL, which `>= 0` rejects
+			}
+		}
+		sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM (SELECT k, SUM(v) OVER () AS w FROM `+
+				`(SELECT g + 1 AS k, COUNT(*) AS v FROM %s GROUP BY g + 1) s) t WHERE t.k >= 0`,
+			tbl), "n", wantFiltered)
+	})
+	t.Run("F2/ProjThenFilterOverEveryProducer", func(t *testing.T) {
+		// The consumer shape the live checks flagged most often, run against
+		// every producer class as a VALUE gate: a projection AND a filter
+		// above a producer that emits no stage of its own. Every count is
+		// computed from the fixture generator.
+		groups := map[int32]int64{}
+		var nullGroup bool
+		for _, r := range rows {
+			if g, ok := r.g.(int32); ok {
+				groups[g]++
+			} else {
+				nullGroup = true
+			}
+		}
+		countIf := func(pred func(sfcRow) bool) int64 {
+			var n int64
+			for _, r := range rows {
+				if pred(r) {
+					n++
+				}
+			}
+			return n
+		}
+		posUnder := func(limit int64) int64 {
+			return countIf(func(r sfcRow) bool {
+				g, ok := r.g.(int32)
+				return ok && g > 0 && r.id < limit
+			})
+		}
+		// The ids the ORDER-BY-LIMIT producers keep, which is what makes
+		// them assertable at all: id is unique, so the first n by id are
+		// ids 0..n-1.
+		var idRange = func(lo, hi int64) int64 {
+			return countIf(func(r sfcRow) bool {
+				g, ok := r.g.(int32)
+				return ok && g > 0 && r.id >= lo && r.id < hi
+			})
+		}
+		nGroups := int64(len(groups))
+		if nullGroup {
+			nGroups++ // g+1 over a NULL g is a NULL key, still a group
+		}
+		var bigGroups int64
+		for _, c := range groups {
+			if c > 500 {
+				bigGroups++
+			}
+		}
+		for _, c := range []struct {
+			name string
+			body string
+			want int64
+		}{
+			{"scan", `SELECT id AS k, g AS v FROM %[1]s WHERE id < 200`, posUnder(200)},
+			{"sort", `SELECT id AS k, g AS v FROM %[1]s WHERE id < 200 ORDER BY id`, posUnder(200)},
+			{"sortlimit", `SELECT id AS k, g AS v FROM %[1]s ORDER BY id LIMIT 50`, idRange(0, 50)},
+			{"offset", `SELECT id AS k, g AS v FROM %[1]s ORDER BY id LIMIT 50 OFFSET 10`, idRange(10, 60)},
+			{"window", `SELECT id AS k, ROW_NUMBER() OVER (ORDER BY id) AS v FROM %[1]s WHERE id < 200`, 200},
+			{"winpart", `SELECT id AS k, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS v ` +
+				`FROM %[1]s WHERE id < 200`, 200},
+			{"sortwin", `SELECT id AS k, ROW_NUMBER() OVER (ORDER BY id) AS v FROM %[1]s ` +
+				`WHERE id < 200 ORDER BY id`, 200},
+			{"agg", `SELECT g + 1 AS k, COUNT(*) AS v FROM %[1]s GROUP BY g + 1`, nGroups},
+			{"agghaving", `SELECT g + 1 AS k, COUNT(*) AS v FROM %[1]s GROUP BY g + 1 ` +
+				`HAVING COUNT(*) > 500`, bigGroups},
+			{"distinct", `SELECT DISTINCT id AS k, g AS v FROM %[1]s WHERE id < 200`, posUnder(200)},
+			{"union", `SELECT id AS k, g AS v FROM %[1]s WHERE id < 3 UNION ALL ` +
+				`SELECT id, g FROM %[1]s WHERE id < 2`, posUnder(3) + posUnder(2)},
+			{"cte", `WITH_CTE`, posUnder(200)},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				var sql string
+				if c.body == "WITH_CTE" {
+					sql = fmt.Sprintf(`WITH c AS (SELECT id AS k, g AS v FROM %[1]s WHERE id < 200) `+
+						`SELECT k * 2 AS d FROM c WHERE v > 0 ORDER BY d`, tbl)
+				} else {
+					sql = fmt.Sprintf(`SELECT k * 2 AS d FROM (`+c.body+`) s WHERE s.v > 0 ORDER BY d`, tbl)
+				}
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if !sameNames(res.Columns, []string{"d"}) {
+						t.Errorf("%s arm returned columns %v, want [d]\n  SQL: %s",
+							arm.name, res.Columns, sql)
+					}
+					if int64(len(res.Rows)) != c.want {
+						t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+							arm.name, len(res.Rows), c.want, sql)
+					}
+				}
+			})
+		}
+	})
+	t.Run("F2/OrderedProjectionUnderAnOuterAggregate", func(t *testing.T) {
+		// An ORDER BY on an alias INSIDE a derived table whose consumer is
+		// an aggregate. The outer COUNT(*) needs no columns, so the
+		// projection that computes the key is pruned and the sort keys on a
+		// name nothing emits: `sort: key column "d" does not exist in the
+		// input schema` at DISPATCH, for a query PostgreSQL answers. Loud
+		// rather than silent, and pre-existing — the sort-key half of the
+		// same placement question. Refused at plan time now, which routes it
+		// local and answers it.
+		for _, c := range []struct {
+			name string
+			body string
+		}{
+			{"scan", `SELECT id * 2 AS d FROM %[1]s WHERE id < 5 ORDER BY d`},
+			{"aggregate", `SELECT k * 2 AS d FROM (SELECT g + 1 AS k, COUNT(*) AS v FROM %[1]s ` +
+				`GROUP BY g + 1) s ORDER BY d`},
+			{"distinct", `SELECT k * 2 AS d FROM (SELECT DISTINCT id AS k, g AS v FROM %[1]s ` +
+				`WHERE id < 5) s ORDER BY d`},
+			{"union", `SELECT k * 2 AS d FROM (SELECT id AS k, g AS v FROM %[1]s WHERE id < 3 ` +
+				`UNION ALL SELECT id, g FROM %[1]s WHERE id < 2) s ORDER BY d`},
+		} {
+			c := c
+			t.Run(c.name, func(t *testing.T) {
+				inner := fmt.Sprintf(c.body, tbl)
+				// The bare spelling must still plan on the DAG and answer.
+				bare := sfcRun(t, sfcArms(ctx, single, coord)[1], inner)
+				sfcScalar(t, ctx, single, coord,
+					`SELECT count(*) AS n FROM (`+inner+`) x`, "n", int64(len(bare.Rows)))
+			})
+		}
+	})
+	t.Run("F2/NestedWrappedWindowIsRoutedLocal", func(t *testing.T) {
+		// The DAG cannot compute this SELECT list — a window wrapped in an
+		// expression one level down, whose defining AST extractOutputRenames
+		// never sees. It used to answer with the window stage's raw output,
+		// `__win_0` included; it is refused at plan time now and answered on
+		// the local engine, so the client gets its one column.
+		before := coord.UnreachableOutputLocalRoutes()
+		sql := fmt.Sprintf(
+			`SELECT x FROM (SELECT SUM(id) OVER () + 1 AS x FROM %s WHERE id < 5) s`, tbl)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			res := sfcRun(t, arm, sql)
+			if !sameNames(res.Columns, []string{"x"}) {
+				t.Errorf("%s arm returned columns %v, want [x]\n  SQL: %s",
+					arm.name, res.Columns, sql)
+			}
+		}
+		if got := coord.UnreachableOutputLocalRoutes(); got <= before {
+			t.Errorf("the coordinator answered without taking the reachability route (%d → %d)",
+				before, got)
+		}
+	})
+
 	// --- controls: shapes that were already right --------------------------
 
 	t.Run("ctl/HavingStillRunsBelowTheSelectList", func(t *testing.T) {
@@ -780,13 +1036,13 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		}
 		for _, c := range counts {
-			if c > 700 {
+			if c > 500 {
 				want++
 			}
 		}
 		sfcScalar(t, ctx, single, coord, fmt.Sprintf(
 			`SELECT COUNT(*) AS n FROM (SELECT g, COUNT(*) AS c FROM %s GROUP BY g `+
-				`HAVING COUNT(*) > 700) s`, tbl), "n", want)
+				`HAVING COUNT(*) > 500) s`, tbl), "n", want)
 	})
 	t.Run("ctl/QualifyStillRunsAboveTheWindow", func(t *testing.T) {
 		sfcScalar(t, ctx, single, coord, fmt.Sprintf(

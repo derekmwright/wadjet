@@ -179,6 +179,12 @@ func forwardsInputColumns(typ string) bool {
 	switch typ {
 	case StageWindow, StageSort, StageMergeSort, StageLimit, StageProject:
 		return true
+	case StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
+		// An exchange MOVES rows; it does not compute. Its Columns list is
+		// the shipped payload when set, and stageEmittedColumns reads that
+		// first — but an exchange with no list forwards everything, and
+		// stopping there reported the stage below it as emitting nothing.
+		return true
 	}
 	return false
 }
@@ -270,6 +276,28 @@ func stageEmittedColumns(s *Stage) map[string]string {
 		add(s.OutputColumns)
 	default:
 		add(s.Columns)
+	}
+	// An aggregate's output IS its group keys and its aggregates, and a
+	// fused scan-aggregate's is the same — none of which appears in any
+	// column list. Without them emittedThroughPassThrough reported an
+	// aggregate under a window as emitting NOTHING, and the reachability
+	// check refused plans that were correct (#656 F2).
+	// A union's output is its arms' projection names — the set operation's
+	// result columns — which appear in no column list either.
+	for _, arm := range s.UnionArms {
+		for _, pe := range arm.Projections {
+			add([]string{pe.Name})
+		}
+	}
+	if len(s.ProjectExprs) == 0 {
+		add(s.GroupByCols)
+		add(s.FusedAggGroupBy)
+		for _, a := range s.AggSpecs {
+			add([]string{a.OutputCol})
+		}
+		for _, a := range s.FusedAggSpecs {
+			add([]string{a.OutputCol})
+		}
 	}
 	return out
 }
@@ -413,7 +441,16 @@ func derivedAliasSourceColumn(name string, child *logical.Node) string {
 				break
 			}
 			if proj.IsAgg || proj.Column == "" {
-				return "" // aggregate output or computed alias — not ours
+				// One computed alias DOES have a source spelling: a GROUP
+				// BY key, which the aggregate stage emits under the exact
+				// text of its expression. Without it a sort above a window
+				// above `SELECT g + 1 AS k … GROUP BY g + 1` keyed on `k`,
+				// which nothing between the aggregate and the gather emits,
+				// and the task failed loud (#656 F2).
+				if src, hit := aggregateGroupKeyName(proj, n); hit {
+					return src
+				}
+				return "" // aggregate output or genuinely computed alias
 			}
 			next := proj.Column
 			if proj.Expr != "" {

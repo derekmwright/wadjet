@@ -68,6 +68,27 @@ func (c *Coordinator) runScalarProjectionLocal(ctx context.Context, queryID stri
 		"SELECT-list subquery with no distributed stage", &c.localScalarProjection)
 }
 
+// runUnreachableOutputLocal executes a query the stage DAG refused
+// (physical.ErrUnreachableGatherOutput) on the coordinator-local
+// single-process pipeline, where every Project is a real operator.
+//
+// The refusal covers the shapes no stage can compute the SELECT list for and
+// the gather cannot either — today, a window wrapped in an expression ONE
+// LEVEL DOWN, whose defining AST extractOutputRenames never sees. The DAG
+// answered those with the producer's raw columns under their source names,
+// which is a wrong RESULT SET rather than a wrong value; routing here is what
+// turns it into the right one (#656 F2).
+func (c *Coordinator) runUnreachableOutputLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"SELECT list no stage computes", &c.localUnreachableOutput)
+}
+
+// UnreachableOutputLocalRoutes reports how many plans refused for an
+// uncomputed SELECT list were routed to the coordinator-local pipeline.
+func (c *Coordinator) UnreachableOutputLocalRoutes() int64 {
+	return c.localUnreachableOutput.Load()
+}
+
 // ScalarProjectionLocalRoutes reports how many plans refused for a SELECT-list
 // subquery were routed to the coordinator-local pipeline (#659).
 func (c *Coordinator) ScalarProjectionLocalRoutes() int64 {

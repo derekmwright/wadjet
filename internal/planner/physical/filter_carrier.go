@@ -318,6 +318,28 @@ func producerMaterializesName(stages []Stage, name string) bool {
 	return materializedThroughPassThrough(stages, idx, &stages[len(stages)-1], name)
 }
 
+// producerEmitsName reports whether the stage emitted last — or the
+// pass-through chain below it — ships a column of this name.
+//
+// producerMaterializesName's companion, and the difference matters: that one
+// asks whether a projection COMPUTES the name, this one whether the stream
+// carries it at all. A sort key that already resolved to a name the producer
+// emits must be left alone even when the alias is ALSO materialized, or an
+// absorbed projection would silently move Q09's ORDER BY off the group key's
+// own spelling.
+func producerEmitsName(stages []Stage, name string) bool {
+	if len(stages) == 0 || name == "" {
+		return false
+	}
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	emitted := emittedThroughPassThrough(stages, idx, &stages[len(stages)-1])
+	_, ok := lookupEmittedColumn(emitted, name)
+	return ok
+}
+
 // pruneEmptyProjectStages drops StageProject stages that ended up carrying
 // neither a projection nor a filter, rewiring their dependents onto their own
 // dependency. filterCarrierIndex reserves the stage before it knows the

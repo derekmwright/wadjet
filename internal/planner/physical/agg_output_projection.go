@@ -89,31 +89,49 @@ func aggregateProjectionTarget(project *logical.Node, stages []Stage, from int) 
 // aggregate's outputs (`COUNT(*) + 1`) that nothing computes at all. Those
 // get the alias; everything else keeps the name the stage already emits, and
 // when nothing needed one the whole projection is declined.
-func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) bool {
+// The returned map is the RENAMES it performed, lowercased old name to new.
+// Every downstream reference to an old name has to travel through it: the
+// stage stops emitting that name the moment the projection lands, and the
+// gather, the sort keys and the filters above it were all written against the
+// old spelling (#656 follow-up, F1).
+func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[string]string {
 	if len(project.Projections) == 0 || len(stage.ProjectExprs) > 0 {
-		return false
+		return nil
 	}
 	groupKeys, aggOuts := aggregateStageOutputs(stage)
 	decls := aggregateStageDecls(stage)
 	specs := make([]ProjectExprSpec, 0, len(project.Projections)+len(groupKeys)+len(aggOuts))
+	renamed := map[string]string{}
 	needed := false
 	for i := range project.Projections {
 		p := &project.Projections[i]
 		alias := projectionOutputName(*p)
 		if alias == "" {
-			return false
+			return nil
 		}
 		src, computed, ok := aggregateProjectionSource(p, alias, groupKeys, aggOuts)
 		if !ok {
-			return false
+			return nil
 		}
 		switch {
 		case computed:
+			// Nothing on the stage carried this value under any name, so
+			// there is no old spelling to retarget.
 			// Nothing on the stage carries this value. The expression is
 			// written over the aggregate's OUTPUT columns (the logical
 			// planner already replaced its nested aggregates with refs to
 			// their synthetic OutputCol), so its declared type has to come
 			// from those outputs — there is no catalog column to read it off.
+			// AggSpec carries an OutputType but no (p,s) for a DECIMAL one,
+			// so an expression over a DECIMAL aggregate cannot be DECLARED
+			// here at all: the inference falls to the float rule, and with
+			// exact DECIMAL arithmetic the evaluator then hands an exact
+			// value to a FLOAT64 vector. Decline the whole projection and
+			// leave `SUM(a) * 2` on the route it already had — a wrong
+			// declaration is worse than no projection (ADR-0024 item 2).
+			if referencesDecimalAggregate(p.ASTExpr, stage) {
+				return nil
+			}
 			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, nil, decls)
 			typ, prec, scale := declTypeParts(decl)
 			specs = append(specs, ProjectExprSpec{
@@ -127,13 +145,14 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) bool {
 			specs = append(specs, ProjectExprSpec{
 				Expr: plansql.QuoteIdent(src), Name: strings.ToLower(alias),
 			})
+			renamed[strings.ToLower(src)] = strings.ToLower(alias)
 			needed = true
 		default:
 			specs = append(specs, ProjectExprSpec{Expr: src, Name: strings.ToLower(src)})
 		}
 	}
 	if !needed {
-		return false
+		return nil
 	}
 	// An OpProject NARROWS the batch to exactly its outputs, so every other
 	// column the stage emits has to ride along as a pass-through — a
@@ -144,15 +163,33 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) bool {
 	}
 	for _, m := range []map[string]string{groupKeys, aggOuts} {
 		for low, real := range m {
-			if have[low] || !nameIsPlainColumn(real) {
+			if have[low] {
 				continue
 			}
 			have[low] = true
-			specs = append(specs, ProjectExprSpec{Expr: real, Name: low})
+			// A computed group key rides along under its OWN spelling too,
+			// delimited. The alias is what a consumer can NAME, but every
+			// resolver that ran before this projection existed — the sort
+			// key that chased `o_year` down to `substr(o_orderdate, 1, 4)`,
+			// the gather rename written against the same text — points at
+			// the old one, and narrowing it away would break them. Emitting
+			// both costs one column and keeps this projection purely
+			// ADDITIVE (#656 F1/F2).
+			expr := real
+			if !nameIsPlainColumn(real) {
+				expr = plansql.QuoteIdent(real)
+			}
+			// The EXACT spelling, not the lowercased key: this is a
+			// pass-through, and every consumer that already resolved to this
+			// column named it as the stage spells it. `GROUP BY
+			// ARRAY[n_regionkey]` is emitted under that text, and a fused
+			// sort keyed on it stops finding it the moment the projection
+			// renames it to `array[n_regionkey]`.
+			specs = append(specs, ProjectExprSpec{Expr: expr, Name: real})
 		}
 	}
 	stage.ProjectExprs = specs
-	return true
+	return renamed
 }
 
 // nameIsPlainColumn reports whether a stage output's name is one an ordinary
@@ -320,4 +357,25 @@ func aggregateStageDecls(s *Stage) colDecls {
 		}
 	}
 	return colDecls{types: types, dec: dec}
+}
+
+// referencesDecimalAggregate reports whether an expression names an aggregate
+// output this stage declares DECIMAL. Stage.AggSpec has no (p,s) for one, so
+// such an expression has no declarable type here.
+func referencesDecimalAggregate(n plansql.Node, stage *Stage) bool {
+	dec := map[string]bool{}
+	for _, a := range stage.AggSpecs {
+		if a.OutputCol != "" && a.OutputTypeKnown && a.OutputType == parquet.TypeDecimal {
+			dec[strings.ToLower(a.OutputCol)] = true
+		}
+	}
+	if len(dec) == 0 {
+		return false
+	}
+	for _, ref := range collectColRefs(n) {
+		if dec[strings.ToLower(ref.Column)] {
+			return true
+		}
+	}
+	return false
 }

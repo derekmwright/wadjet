@@ -50,11 +50,11 @@ import (
 // computes it under. ok=false for anything else, including an aggregate
 // output (whose AggSpec.OutputCol already IS the alias).
 func aggregateGroupKeyName(proj *logical.Projection, projectNode *logical.Node) (string, bool) {
-	if proj.IsAgg || proj.Expr == "" || len(projectNode.Children) != 1 {
+	if proj.IsAgg || proj.Expr == "" {
 		return "", false
 	}
-	agg := projectNode.Children[0]
-	if agg == nil || agg.Type != logical.NodeAggregate {
+	agg := logical.AggregateBelowProject(projectNode)
+	if agg == nil {
 		return "", false
 	}
 	want := strings.ToLower(strings.TrimSpace(proj.Expr))

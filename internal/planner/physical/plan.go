@@ -988,6 +988,11 @@ type Planner struct {
 	// stage during the last PlanDistributed. AttachedFilterExprs exposes it
 	// for the conservation gate; see filter_carrier.go.
 	attachedFilterExprs []string
+	// aggProjectionRenames is every rename absorbAggregateOutputProjection
+	// performed on an aggregate stage, lowercased old name to new. The stage
+	// stops emitting the old name, so every downstream reference written
+	// against it has to be retargeted (retargetAbsorbedAggregateRenames).
+	aggProjectionRenames []aggRenameSite
 	// attachedProjectionOutputs records the projection OUTPUT names that
 	// were on a stage the moment stage emission finished. A pass that
 	// deletes the carrying stage drops the projection exactly as it drops a
@@ -2827,7 +2832,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// reads a bare leaf scan, the expressions would never be computed —
 	// applyOutputRenames can rename/drop but not evaluate. Attach the
 	// SELECT list to the scan so its fragment projects it worker-side.
-	attachScanSelectProjections(node, stages)
+	stages = attachScanSelectProjections(node, stages)
 	// #424: a synthetic ORDER BY key (__sortkey_N) that the pass above did
 	// not materialize — every sort but the outermost query's — still names
 	// no column on the DAG. Point it at one. Runs last because the repair
@@ -2839,11 +2844,29 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// and names the wrong column (a shadowing alias) or none at all
 	// everywhere else.
 	resolveDerivedAliasSortKeys(stages)
+	// #656 F1: an absorbed aggregate projection retired the group key's old
+	// spelling, and the gather's rename, the sort keys and the shuffle keys
+	// were all written against it while the plan was still being built.
+	// Retarget them at what the stage emits now. Runs here, after every pass
+	// that can add or move a reference, and before the filter-spelling pass
+	// reads them.
+	retargetAbsorbedAggregateRenames(stages, p.aggProjectionRenames)
 	// #656: and the same repair for a PREDICATE that names a derived table's
 	// SELECT-list alias. Runs after attachScanSelectProjections for the same
 	// reason the two sort-key passes do — the alias is real exactly where
 	// that pass materialized it.
 	resolveFilterAliasSpelling(stages)
+	// #656 F2: a SELECT list that became nobody's job. Refused HERE rather
+	// than at dispatch so the coordinator can route the query local and
+	// ANSWER it, instead of handing the client the producer's raw columns.
+	if err := assertGatherOutputIsReachable(stages); err != nil {
+		return nil, err
+	}
+	// The same refusal for a sort key nothing supplies: loud at dispatch,
+	// answerable on the local engine.
+	if err := assertSortKeysResolve(stages); err != nil {
+		return nil, err
+	}
 	// #423: the worker's scan reads column TYPES from the FILE, and a
 	// parquet file cannot express nine of ours. Declare the catalog's
 	// schema for every table this plan scans so a file written before the
@@ -2906,14 +2929,14 @@ func GatherOutputWireUnconstrainedDecimal(stages []Stage) map[string]bool {
 // naming is decided here rather than in resolveSortKeyColumn precisely because
 // this pass owns it: it runs last, and only it knows whether the producing
 // fragment will carry an alias-naming OpProject.
-func attachScanSelectProjections(root *logical.Node, stages []Stage) {
+func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 	projNode := findOutputProjectionNode(root)
 	if projNode == nil {
-		return
+		return stages
 	}
 	proj := projNode.Projections
 	if len(proj) == 0 {
-		return
+		return stages
 	}
 	// The types these specs carry are the DAG's only answer for a computed
 	// output column — the worker's buildSelectProjection copies them straight
@@ -2935,14 +2958,14 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 	specs := make([]ProjectExprSpec, 0, len(proj))
 	for _, p := range proj {
 		if p.IsAgg {
-			return // aggregates compute in their own fragments
+			return stages // aggregates compute in their own fragments
 		}
 		expr := p.Expr
 		if expr == "" {
 			expr = p.Column
 		}
 		if expr == "" {
-			return
+			return stages
 		}
 		name := strings.ToLower(expr)
 		var typ parquet.TypeID
@@ -2963,7 +2986,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 				// this returned by the stage-type check instead, and
 				// attaching it made every task fail to compile it (#610's
 				// shapes, caught by the #656 window branch).
-				return
+				return stages
 			}
 			hasExpr = true
 			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
@@ -3036,7 +3059,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 	// The other trigger is a sort key naming an alias, which needs the target
 	// stage's keys — decided below, once the target is known.
 	if !hasExpr && !anyRenamed(proj, specs) && !anyNestedRename {
-		return
+		return stages
 	}
 	var gather *Stage
 	for i := range stages {
@@ -3046,7 +3069,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		}
 	}
 	if gather == nil || len(gather.Dependencies) != 1 {
-		return
+		return stages
 	}
 	// Resolve the compute target through at most one standalone sort hop:
 	// scan→sort→gather (ORDER BY over a bare expression SELECT, #288 seeds
@@ -3068,13 +3091,35 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		if s.ID != targetID {
 			continue
 		}
+		// A producer that COLLAPSES its input — an aggregate family stage, a
+		// union, a fused scan-aggregate — can neither evaluate the SELECT
+		// list nor hand it down: its output is a NEW column set. Give the
+		// projection a StageProject of its own, directly above the producer
+		// so a sort between the two can key on what it computes (#656 F2).
+		//
+		// Checked BEFORE the already-carries-a-projection bail below,
+		// because absorbAggregateOutputProjection has usually put one there
+		// — that projection names the aggregate's outputs, and this one
+		// computes over them.
+		// A standalone sort ABOVE this producer keys on names the projection
+		// may drop, and a StageProject inserted here would sit BELOW it. Let
+		// the coverage decision downstream handle that case instead — it
+		// puts the projection above the sort, where nothing needs the
+		// dropped columns.
+		if projectionNeedsItsOwnStage(s, aliasedSpecsFor(proj, specs)) &&
+			(viaSort == nil || projectionCoversSortKeys(aliasedSpecsFor(proj, specs), viaSort.SortKeys)) {
+			aliased := aliasedSpecsFor(proj, specs)
+			stages = insertProjectStageAbove(stages, i, aliased)
+			repointGatherRenames(gather, aliased)
+			return stages
+		}
 		// A scan already carrying a projection (a computed subquery column
 		// materialized by absorbComputedSubqueryProjection, #383) keeps it:
 		// overwriting would drop the computed column the sort keys on, and
 		// these SELECT-list specs are written against the subquery's
 		// OUTPUT, not the scan's schema.
 		if len(s.ProjectExprs) > 0 {
-			return
+			return stages
 		}
 		isPlainScan := s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0
 		isJoin := (s.Type == StageHashJoin || s.Type == StageBroadcastJoin || s.Type == StageSortMergeJoin) &&
@@ -3100,7 +3145,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		if !isPlainScan && !isJoin && !isWindow && !forwardsInputColumns(s.Type) {
 			// Something else computes between here and the gather (fused
 			// scan-aggregates project via their aggregate machinery).
-			return
+			return stages
 		}
 		// Direct scan→gather keeps the original #169 convention: outputs
 		// named by lowercased expression text, which the gather's
@@ -3108,7 +3153,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// so a rename alone is no reason to project: the gather does it.
 		if isPlainScan && viaSort == nil {
 			if !hasExpr {
-				return
+				return stages
 			}
 			s.ProjectExprs = specs
 			// #387: with a nested rename substituted into the specs, the
@@ -3125,7 +3170,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 					}
 				}
 			}
-			return
+			return stages
 		}
 		// Join feeding the gather (the #169 class on the join path), or a
 		// scan/join under a standalone sort (ORDER BY over a bare
@@ -3170,9 +3215,17 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// name — otherwise the gather's rename already covers the query and
 		// narrowing the schema here would be pure cost (#316).
 		if !hasExpr && !sortKeysNeedAlias(sortKeys, specs, aliased) {
-			return
+			return stages
 		}
-		if !projectionCoversSortKeys(aliased, sortKeys) {
+		// A predicate ABOVE the projection has to keep its columns too: an
+		// OpProject narrows, so a filter on this stage or on the sort above
+		// it that names a column the projection drops becomes UNKNOWN on
+		// every row. `SELECT k FROM (SELECT id AS k, g AS v FROM t ORDER BY
+		// id) s WHERE s.v > 0` answered 0 rows where PostgreSQL answers 3956
+		// (#656 F2).
+		filterCols := append(append([]string(nil), s.FilterExprs...), viaSortFilters(viaSort)...)
+		if !projectionCoversSortKeys(aliased, sortKeys) ||
+			!projectionCoversFilters(aliased, filterCols) {
 			// The projection cannot go BELOW this ordering: OpProject
 			// narrows the batch to its outputs, so a sort key it does not
 			// emit would be gone by the time the sort ran. Put it ABOVE the
@@ -3181,12 +3234,34 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 			// id LIMIT 5) s` orders by `id` and returns `d`, and declining
 			// here is what returned the raw `id` column instead (#656
 			// follow-up).
-			if viaSort == nil || len(viaSort.ProjectExprs) > 0 {
-				return
+			// Above the standalone sort, when there is one, it is free, and
+			// its own keys survive without this projection: its ordering and
+			// its filter have both already run, so nothing above needs a
+			// column the projection drops. A sort that keys on something
+			// only the projection COMPUTES needs the opposite — the
+			// projection below it — and takes the inserted stage instead.
+			if viaSort != nil && len(viaSort.ProjectExprs) == 0 &&
+				sortKeysSurviveWithout(stages, i, viaSort.SortKeys) {
+				viaSort.ProjectExprs = aliased
+				repointGatherRenames(gather, aliased)
+				return stages
 			}
-			viaSort.ProjectExprs = aliased
+			// Otherwise a StageProject directly above the producer: the
+			// producer's own filter runs below it, and a sort above it keys
+			// on what it computes. Declining instead left nothing computing
+			// the SELECT list at all.
+			//
+			// Only when the sort above CAN key on the projection's outputs.
+			// When it needs both a column the projection drops and one only
+			// the projection provides, neither side of the sort works, and
+			// declining is right: the gather's rename and
+			// resolveDerivedAliasSortKeys settle the shape between them.
+			if viaSort != nil && !projectionCoversSortKeys(aliased, viaSort.SortKeys) {
+				return stages
+			}
+			stages = insertProjectStageAbove(stages, i, aliased)
 			repointGatherRenames(gather, aliased)
-			return
+			return stages
 		}
 		s.ProjectExprs = aliased
 		// This fragment now emits the SELECT list under its FINAL names, so
@@ -3204,8 +3279,9 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// leading indices still line up — and leaving them unnamed here is
 		// what drops them: the gather projects to exactly the names it lists.
 		repointGatherRenames(gather, aliased)
-		return
+		return stages
 	}
+	return stages
 }
 
 // repointGatherRenames points each of the gather's source names at the name
@@ -4301,6 +4377,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.aggStageRenames = nil
 	p.attachedFilterExprs = nil
 	p.attachedProjectionOutputs = nil
+	p.aggProjectionRenames = nil
 	p.walkStages(node, &stages, nil)
 	for i := range stages {
 		p.attachedProjectionOutputs = append(p.attachedProjectionOutputs,
@@ -5568,6 +5645,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// the key to — a group key's expression text — no longer reaches
 			// this sort. Key on the alias the producer emits.
 			if !strings.EqualFold(key.Column, ob.Column) &&
+				!producerEmitsName((*stages)[preCount:], key.Column) &&
 				producerMaterializesName((*stages)[preCount:], ob.Column) {
 				key.Column = cleanExpr(ob.Column)
 			}
@@ -5726,7 +5804,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// stage does not emit, and the shuffle refused the plan (#681).
 			if idx, ok := aggregateProjectionTarget(child, *stages, childStart); ok &&
 				!p.cteTerminals[(*stages)[idx].ID] {
-				absorbAggregateOutputProjection(child, &(*stages)[idx])
+				p.recordAggProjectionRenames((*stages)[idx].ID,
+					absorbAggregateOutputProjection(child, &(*stages)[idx]))
 			}
 			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
 		}
@@ -6019,7 +6098,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// Never onto a CTE body's terminal: an OpProject NARROWS,
 				// and every other reference of that CTE reads the same
 				// stage (#656 follow-up).
-				absorbAggregateOutputProjection(node.Children[0], &(*stages)[idx])
+				p.recordAggProjectionRenames((*stages)[idx].ID,
+					absorbAggregateOutputProjection(node.Children[0], &(*stages)[idx]))
 			}
 		}
 		if len(node.Predicates) > 0 && len(*stages) > 0 {
@@ -6253,8 +6333,30 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// HasDistinct); anywhere else refuseUnstageableDistinct has already
 		// refused the query. A planner-inserted BuildSideDedup Distinct
 		// carries no user-visible semantics and passes through as before.
+		preDefaultCount := len(*stages)
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
+		}
+		// A SELECT list directly above an AGGREGATE names outputs the stage
+		// emits under the GROUP BY expression's own TEXT, which no consumer
+		// can spell. Carry it here — not only where a Filter or a JOIN
+		// forced it — because a SORT, an outer projection or the gather
+		// needs the alias just as much: `SELECT k * 2 AS d FROM (SELECT
+		// g + 1 AS k … GROUP BY g + 1) s ORDER BY d` failed loud with
+		// `sort: key column "d" does not exist`, and a window over the same
+		// producer the same way (#656 F2).
+		//
+		// absorbAggregateOutputProjection declines every projection that
+		// already names what the stage emits, so this is a no-op for the
+		// ordinary shapes — and it renames ONLY what has no usable name, so
+		// the resolvers that map an alias back to its source column are
+		// untouched.
+		if node.Type == logical.NodeProject {
+			if idx, ok := aggregateProjectionTarget(node, *stages, preDefaultCount); ok &&
+				!p.cteTerminals[(*stages)[idx].ID] {
+				p.recordAggProjectionRenames((*stages)[idx].ID,
+					absorbAggregateOutputProjection(node, &(*stages)[idx]))
+			}
 		}
 		// ABAC security barrier (InjectColumnPolicies wraps the scan in a
 		// Project of masked/visible columns). An ordinary Project can pass

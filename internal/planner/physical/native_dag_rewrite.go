@@ -180,6 +180,20 @@ func ValidateNativeDAGShape(stages []Stage) error {
 	if err := assertNoConsumerScopedFilterOnSharedStage(stages); err != nil {
 		return err
 	}
+	// The two checks a stage-TYPE check cannot make. Both were gates only,
+	// which left the class closed for the corpus and open for every query
+	// outside it; they cost microseconds on a plan of tens of stages, so
+	// they run on every distributed query and REFUSE rather than answer
+	// (#656 F2).
+	if err := assertCarrierSchemaResolves(stages); err != nil {
+		return err
+	}
+	if err := assertSortKeysResolve(stages); err != nil {
+		return err
+	}
+	if err := assertGatherOutputIsReachable(stages); err != nil {
+		return err
+	}
 	return nil
 }
 

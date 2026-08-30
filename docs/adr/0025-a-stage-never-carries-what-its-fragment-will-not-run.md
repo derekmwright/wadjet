@@ -63,20 +63,44 @@ Three parts:
 3. **A mismatch is a plan-time refusal, not a wrong answer.**
    `ValidateNativeDAGShape` rejects any plan that populates either field
    on a stage that ignores it. This is the #349 precedent: fail where
-   the shape is visible.
+   the shape is visible. All FIVE checks below run on every distributed
+   plan, not only in tests — they cost microseconds on a plan of tens of
+   stages, and a check that runs only over a corpus closes the class for
+   the corpus and leaves it open everywhere else. A 155-shape sweep found
+   twelve live flags outside the corpus the day they were promoted,
+   three of them silent wrong answers.
+
+   The reachability check refuses at PLAN time rather than at dispatch,
+   so the coordinator can route the query to its local engine and ANSWER
+   it (`ErrUnreachableGatherOutput`), the way it already does for a
+   correlated subquery and a SELECT-list subquery. A shape whose SELECT
+   list the DAG cannot compute gets the right answer instead of the
+   producer's raw columns.
 
 4. **A SHARED producer carries nothing consumer-specific.** A CTE
    referenced more than once is planned ONCE — that dedup is what keeps
    Q15's two chains from drifting — so its terminal stage belongs to
    every reference equally. A WHERE above one reference is not a
-   property of the CTE. `filterCarrierIndex` refuses such a stage as a
+   property of the CTE, in EITHER direction: the first reference walked
+   emits the body's real producer, so its WHERE landed on the stage every
+   other reference reads. `filterCarrierIndex` refuses such a stage as a
    carrier (the reference gets a `StageProject` of its own), and
-   `Stage.ConsumerScoped` + `assertNoConsumerScopedFilterOnSharedStage`
-   catch a later pass that gives a scoped carrier a second consumer.
+   `assertNoConsumerScopedFilterOnSharedStage` then refuses ANY stage
+   with more than one consumer that carries a filter or a projection —
+   derived from the PLAN, not from a marker, because a guard that trusts
+   `Stage.ConsumerScoped` passes any plan built another way. The one
+   exception is a scan's own pushed-down predicate, which is part of the
+   relation every consumer reads; there the marker still selects, because
+   only stage emission knows whether the filter was attached inside the
+   CTE body or above a reference.
 
-Three things a per-stage check cannot see are gates instead
-(`TestStageDAGCarriesEveryFilterAndProjection`, over TPC-H plus the shape
-corpus):
+Four things a per-stage check cannot see run alongside it, on every
+plan, and are gated over TPC-H plus the shape corpus
+(`TestStageDAGCarriesEveryFilterAndProjection`) and over the CROSS of
+every producer class with every consumer shape
+(`TestStageShapePlacementSweep` — the breadth gate, whose assertion is
+that every shape ends in an ANSWER: planned, or refused and routed
+local):
 
 - **conservation** — every predicate and every projection output stage
   emission attached is still readable off some stage after every
@@ -92,7 +116,18 @@ corpus):
   column some stage really emits. This is the only one that sees a
   projection that was NEVER ATTACHED: nothing was deleted and nothing is
   misplaced, the SELECT list simply became nobody's job, and the client
-  gets the producer's raw columns.
+  gets the producer's raw columns;
+- **sort-key resolvability** — the same name question asked of the one
+  field the schema check does not cover. A sort key is not silent (`sort:
+  key column "d" does not exist in the input schema` is a loud dispatch
+  failure), but it is a loud failure for a query PostgreSQL ANSWERS, and it
+  is reached by exactly this route: the projection that would have computed
+  the key was never attached. `SELECT COUNT(*) FROM (SELECT k * 2 AS d FROM
+  … ORDER BY d) x` is the shape — the outer aggregate needs no columns, so
+  the projection is pruned and the sort keys on a name nothing emits.
+  Refusing at plan time routes it local, which answers it. Materializing
+  the key on the DAG instead is the open residual; the refusal is what
+  makes the shape ANSWER in the meantime.
 
 ## Alternatives rejected
 
@@ -111,6 +146,15 @@ corpus):
   projection therefore carries a name only where the stage has none a
   consumer can use — a computed group key, or an expression over the
   aggregate's outputs.
+- **Fuse the outer SELECT list into every producer.** A producer that
+  COLLAPSES its input — an aggregate, a union, a fused scan-aggregate —
+  has an output that is a NEW column set, so the SELECT list can neither
+  fuse into it nor be evaluated below it. Those get a `StageProject`
+  inserted directly above them, positioned so a sort between the two can
+  key on what it computes. When the sort above needs BOTH a column the
+  projection drops and one only the projection provides, neither side
+  works and the pass declines: the reachability refusal then routes the
+  query local, which answers it.
 - **Let any projection-capable stage carry the outer SELECT list.**
   Tried, and it broke `SELECT DISTINCT COALESCE(x, 0)`: the list is
   written against the producer's OUTPUT, which for a scan, join, window,

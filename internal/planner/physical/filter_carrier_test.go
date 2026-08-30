@@ -109,6 +109,38 @@ func fcpCorpus() []struct{ name, sql string } {
 		{"ctl/DistinctComputedGroupKeyOverAJoin",
 			`SELECT DISTINCT COALESCE(n2.n_regionkey, 0) AS c1 FROM nation n1 ` +
 				`LEFT JOIN nation n2 ON n1.n_nationkey = n2.n_regionkey`},
+		// The second adversarial round. F1 is a round-1 regression (silent
+		// wrong COLUMN SET); the rest are the shapes a 155-shape sweep found
+		// once the SCHEMA and REACHABILITY checks ran live rather than only
+		// over the corpus.
+		{"F1/NarrowedSelectOverAnAggregateAlias",
+			`SELECT s.k FROM (SELECT n_regionkey + 1 AS k, COUNT(*) AS v FROM nation ` +
+				`GROUP BY n_regionkey + 1) s WHERE s.v > 0 ORDER BY s.k`},
+		{"F2/FilterAboveANarrowedSortProducer",
+			`SELECT k FROM (SELECT n_nationkey AS k, n_regionkey AS v FROM nation ORDER BY n_nationkey) s WHERE s.v > 0`},
+		{"F2/FilterAboveANarrowedSortLimitProducer",
+			`SELECT k FROM (SELECT n_nationkey AS k, n_regionkey AS v FROM nation ORDER BY n_nationkey LIMIT 5) s WHERE s.v > 0`},
+		{"F2/SelectListOverAnAggregate",
+			`SELECT k * 2 AS d FROM (SELECT n_regionkey + 1 AS k, COUNT(*) AS v FROM nation ` +
+				`GROUP BY n_regionkey + 1) s ORDER BY d`},
+		{"F2/SelectListOverAnAggregateWithHaving",
+			`SELECT k * 2 AS d FROM (SELECT n_regionkey + 1 AS k, COUNT(*) AS v FROM nation ` +
+				`GROUP BY n_regionkey + 1 HAVING COUNT(*) > 1) s ORDER BY d`},
+		{"F2/SelectListOverAUnion",
+			`SELECT k * 2 AS d FROM (SELECT n_nationkey AS k FROM nation UNION ALL ` +
+				`SELECT r_regionkey FROM region) s ORDER BY d`},
+		{"F2/SelectListOverALimit",
+			`SELECT k * 2 AS d FROM (SELECT n_nationkey AS k, n_regionkey AS v FROM nation LIMIT 5) s WHERE s.v > 0`},
+		{"F2/WindowOverAnAggregateAlias",
+			`SELECT k, SUM(v) OVER () AS w FROM (SELECT n_regionkey + 1 AS k, COUNT(*) AS v ` +
+				`FROM nation GROUP BY n_regionkey + 1) s ORDER BY k`},
+		{"F2/FilterAboveAWindowOverAnAggregateAlias",
+			`SELECT k, w FROM (SELECT k, SUM(v) OVER () AS w FROM (SELECT n_regionkey + 1 AS k, ` +
+				`COUNT(*) AS v FROM nation GROUP BY n_regionkey + 1) s) t WHERE t.k >= 0`},
+		{"F2/Q09ShapeKeepsItsGroupKeySpelling",
+			`SELECT nation, o_year, c FROM (SELECT n_name AS nation, SUBSTR(o_orderdate, 1, 4) AS o_year, ` +
+				`COUNT(*) AS c FROM orders JOIN nation ON o_custkey = n_nationkey ` +
+				`GROUP BY n_name, SUBSTR(o_orderdate, 1, 4)) x ORDER BY nation, o_year DESC`},
 		// Controls: shapes that were already right, so a fix that broke them
 		// would show up here rather than only in the two-path gates.
 		{"ctl/HavingBelowTheSelectList",

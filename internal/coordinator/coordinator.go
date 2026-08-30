@@ -235,6 +235,10 @@ type Coordinator struct {
 	// for a subquery in the SELECT list, and which ran on the
 	// coordinator-local pipeline instead (#659).
 	localScalarProjection atomic.Int64
+	// localUnreachableOutput counts queries whose plan the stage DAG refused
+	// because no stage computed the SELECT list, and which ran on the
+	// coordinator-local pipeline instead (#656 F2).
+	localUnreachableOutput atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -980,6 +984,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// against a real runner.
 		if errors.Is(err, physical.ErrScalarSubqueryProjectionDistributed) {
 			return c.runScalarProjectionLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a SELECT list no stage computed. The DAG would hand the client
+		// the producer's raw columns under their source names; the
+		// single-process pipeline runs the Project as a real operator
+		// (#656 F2).
+		if errors.Is(err, physical.ErrUnreachableGatherOutput) {
+			return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}

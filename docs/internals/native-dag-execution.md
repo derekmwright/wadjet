@@ -135,6 +135,9 @@ it did not:
 | aggregate output alias | the predicate was re-spelled into the group key's INPUT expression (`gk>3` → `(g+1)>3`), which the aggregate's OUTPUT — a column literally named `g + 1` — cannot evaluate | f |
 | `window` | `attachScanSelectProjections` accepted only a scan or a join, so the SELECT list above a window was never computed | g |
 | a SHARED CTE body's terminal | the FIRST reference walked emits the real producer, so its WHERE landed on the stage every OTHER reference reads | A1/B3 |
+| a COLLAPSING producer (aggregate, union, fused scan-agg) | its output is a NEW column set, so the SELECT list can neither fuse into it nor be evaluated below it — nothing computed it | F2 |
+| an absorbed aggregate rename | the aggregate stopped emitting the group key's old spelling while the gather, the sort keys and the shuffle keys still named it | F1 |
+| an ORDER BY under an outer AGGREGATE | the outer `COUNT(*)` needs no columns, so the projection that computes the sort key is pruned and the sort keys on a name nothing emits (loud, at dispatch) | F2 |
 | `sort` / `limit` | nothing ever populated `ProjectExprs` on one, so a SELECT list above an `ORDER BY … LIMIT` was never applied and the client got the producer's raw column | B2/D |
 
 Every one answered WITHOUT the predicate or the projection, silently, because
@@ -176,9 +179,22 @@ has two.
 
 `ValidateNativeDAGShape` refuses any plan that still attaches either field to
 a stage that ignores it — a loud refusal in place of a silently different
-answer — and `TestStageDAGCarriesEveryFilterAndProjection`
-(`filter_carrier_test.go`) is the structural gate, in four parts over TPC-H
-and the shape corpus:
+answer — and it runs ALL FIVE checks below on every distributed plan, not
+only in tests: they cost microseconds on a plan of tens of stages, and a check
+that runs only over a corpus closes the class for the corpus and leaves it
+open everywhere else.
+
+The reachability check refuses at PLAN time instead, so the coordinator can
+route the query local and ANSWER it (`ErrUnreachableGatherOutput`,
+`runUnreachableOutputLocal`) rather than hand the client the producer's raw
+columns.
+
+Two gates cover them: `TestStageDAGCarriesEveryFilterAndProjection`
+(`filter_carrier_test.go`) over TPC-H and the shape corpus, and
+`TestStageShapePlacementSweep` (`shape_sweep_test.go`) over the CROSS of every
+producer class with every consumer shape — the breadth gate, whose assertion
+is that every shape ends in an ANSWER: planned, or refused and routed local.
+The five parts are:
 
 1. **placement by type** — `ValidateNativeDAGShape` itself;
 2. **placement by SCHEMA** — every expression on a carrier resolves against
@@ -190,7 +206,16 @@ and the shape corpus:
    emission attached is still readable off some stage afterwards;
 4. **output reachability** — every `OutputRename.From` on the gather names a
    column some stage emits. This is the only part that sees a projection that
-   was NEVER attached, which is what B2 was.
+   was NEVER attached, which is what B2 was;
+5. **sort-key resolvability** — the same name question asked of the one field
+   part 2 does not cover. `resolveHiddenSortKeys` below settles a SYNTHETIC
+   key; an ORDER BY on a real SELECT-list ALIAS inside a derived table whose
+   consumer is an AGGREGATE is the sibling it does not reach — the outer
+   `COUNT(*)` needs no columns, `attachScanSelectProjections` sees an
+   aggregate at the root and declines, and the sort keys on a name nothing
+   emits. Loud at dispatch, on a query the fast path answers. Refused at plan
+   time now, so the coordinator routes it local; materializing the key on the
+   DAG is the open residual.
 
 ## Synthetic sort keys: the column a Project would have computed
 
