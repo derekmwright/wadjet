@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended twice the same day after review — one identity, one SLOT, one published name, and one ALLOCATOR per aggregate)
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure)
 
 ## Context
 
@@ -210,6 +210,42 @@ own rule: `inputColDecls` stops at a Project, so a derived key over a
 renamed DECIMAL column had no declared type, fell to the float rule, and
 handed exact fixed point to a FLOAT64 vector.
 
+### 2d. A name is never re-read as structure — in EITHER direction
+
+§2c settles which way a key BINDS. The same confusion runs the other way, in
+the rule that decides whether a query is legal at all.
+
+`GROUP BY "g + 1"` groups by one COLUMN and says nothing about `g`, so
+`SELECT g + 1` beside it reads an ungrouped column and PostgreSQL refuses it
+with 42803. The grouping-coverage walk recorded each term's *recorded text*
+as well as its parsed form — and since #725 that text is the key's published
+NAME with the delimiters stripped, so re-parsing it read a column as
+arithmetic and marked `g` grouped. The query then answered: 60 rows with a
+NULL key on the single-process path, 3 rows on the DAG. Two engines
+disagreeing about a query neither should answer.
+
+`"g plus 1"` did the same with no operator in it at all — it parsed to just
+`g` and marked THAT grouped — which is why the repair is to stop reading text
+as structure rather than to special-case operators.
+
+**The grouped terms are read from their PARSED forms and from nothing else.**
+
+## The impossibilities, and the fixtures that attempt them
+
+Method 10 of the correctness-fix protocol: a claim of the form *X cannot
+happen* is exactly where the next regression lives, and it is invisible to
+every gate until a fixture contains X. Each claim above is listed here with
+the fixture that tries it.
+
+| claim | fixture that attempts it |
+|---|---|
+| a slot is a name no query can spell | `collslot` STORES `__gb_expr_0` and `__gb_expr_1`; `ctl/TheStoredColumnIsStillGroupable` reads and groups by one |
+| …including one the query itself mints | `SlotCollidesWithAStoredColumn/MintedByADerivedAlias` — `1 AS "__gb_expr_0"`, no DDL |
+| the slot never shadows an aggregate's argument | `AggregateOverTheStoredColumn` — `SUM`/`MAX` of the stored column, asserted on the VALUE |
+| two keys never share a slot | `TwoDerivedKeys`, `ReversedKeyOrder`, `ThreeDerivedKeys`, `WithHaving`, all with the stored slot present |
+| an arithmetic key and a delimited column of that text are different things | `ArithmeticKeyBesideADelimitedColumnOfThatText` — both directions, 5 rows against 9 |
+| a delimited term does not group what its name spells | `gcov` carries `"g + 1"` and `"g plus 1"`; `GroupingCoverageUnderADelimitedTerm` asserts the 42803 AND the answering direction, plus three controls that must keep refusing and one that must keep answering |
+
 ### 3. HAVING is spelled against what the aggregate publishes
 
 The predicate is rewritten in the LOGICAL plan
@@ -259,6 +295,15 @@ that works.
   - **#732** — an unaliased expression is named after its own text where
     PostgreSQL names it `?column?`. Both paths agree with each other; the
     rule is about naming a select ITEM, not resolving a KEY.
+  - **#729** — the DAG declares FLOAT64 for arithmetic whose value is an
+    exact DECIMAL. The derived-key typing above makes exact DECIMAL
+    arithmetic REACH that path where it used to fail to type at all, so a
+    fractional literal in a key, and an outer aggregate over one, now fail
+    loudly on the DAG where the single-process path answers.
+  - **#749** — `DECIMAL(38,10)` arithmetic keeps too few decimal places
+    (`d + 1` is `201.000000013` where PostgreSQL says `201.0000000125`), on
+    every arm of every tree. Inherited by the group-key family for the same
+    reason: the key reaches the arithmetic now.
   - **#736** — what remains of the DAG half after the reference rule above
     closed the collision shapes: an aggregate whose ARGUMENT is spelled
     like the key (loud), an aggregate ALIASED like the key, and DISTINCT
