@@ -5257,9 +5257,30 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	//
 	// The inherit above copies rather than aliases so this loop cannot write
 	// through into the clone it inherited from.
+	//
+	// And the clone seam is where the GROUPED cross-scale pair is DETECTED, not
+	// only where the flag travels. Consume's latch compares a batch against the
+	// scale its own operator established, so two clones each fed one scale each
+	// see one scale and neither latches anything; without the second arm below
+	// this loop then took the primary's and DISCARDED the disagreement, and
+	// `p.Consume@2 + c.Consume@4 + MergeSink` answered 25.50 where the
+	// ungrouped form raises 22003 (#685 review, item A, second pass).
+	//
+	// A known inconsistency, recorded rather than fixed because no producer in
+	// the tree reaches it: a genuinely scale-0 batch followed by a scale-2 one
+	// is an UPGRADE on this path (5 at scale 0 summed with 1.00 gives 1.05)
+	// where the ungrouped adoptDecScale calls the same pair a conflict. The
+	// "first NONZERO" rule is what #455 needs for the identity row, and it
+	// cannot tell that row's absent scale from a real DECIMAL(p,0).
 	for i := range h.aggInputDecScale {
-		if h.aggInputDecScale[i] == 0 && i < len(o.aggInputDecScale) {
+		if i >= len(o.aggInputDecScale) {
+			continue
+		}
+		switch {
+		case h.aggInputDecScale[i] == 0:
 			h.aggInputDecScale[i] = o.aggInputDecScale[i]
+		case o.aggInputDecScale[i] != 0 && o.aggInputDecScale[i] != h.aggInputDecScale[i]:
+			h.decScaleConflict = true
 		}
 	}
 
@@ -5579,6 +5600,17 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	// there writes into h.aggInputDecScale on every later merge, and sharing
 	// the slice with the clone it was adopted from would write back into a
 	// state o still owns until its Close.
+	//
+	// The comparison happens BEFORE the overwrite, and for mergeSinkState's
+	// reason one seam over: an empty primary reaches the adopt path instead of
+	// the upgrade loop, so without this the same two clones at two scales came
+	// back 25.50 through here.
+	for i, have := range h.aggInputDecScale {
+		if i < len(o.aggInputDecScale) && have != 0 &&
+			o.aggInputDecScale[i] != 0 && have != o.aggInputDecScale[i] {
+			h.decScaleConflict = true
+		}
+	}
 	h.aggInputDecScale = append([]int(nil), o.aggInputDecScale...)
 	h.aggBoxedMinMax = o.aggBoxedMinMax
 	h.hasBoxedMinMax = o.hasBoxedMinMax
