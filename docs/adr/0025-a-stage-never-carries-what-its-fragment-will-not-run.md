@@ -1276,6 +1276,16 @@ column the filter did not name exactly costs bytes and never an answer, which
 is why the mirror is unconditional; the stage-dump golden is unchanged,
 because this is the RUNTIME application of a list the plan already had.
 
+It also closed a divergence pinned SEPARATELY, which is the evidence that the
+missing mirror was the mechanism and not a patch: `TestFilterQualifiedToOne-
+JoinArmTwoPath`'s `AliasCollidesWithBuildColumn` rows, and the
+`TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect` test written to
+isolate them, pinned `d.k > 3 OR c.g > 100` answering 0 on the DAG whenever the
+PROBE arm published an alias equal to the build column's name. Attributed by
+reverting each candidate on its own: the mirror alone makes that shape answer,
+and the resolver's ROW-guard repair alone does not. Both pins are deleted and
+the isolating test with them.
+
 **What is NOT closed, measured rather than assumed.** Three residuals survive
 the sweep, each identical on `376b2cac` and on this tip, and none of them this
 mechanism:

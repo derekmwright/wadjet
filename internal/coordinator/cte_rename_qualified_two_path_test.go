@@ -87,20 +87,28 @@ func TestFilterQualifiedToOneJoinArmTwoPath(t *testing.T) {
 
 	for _, sel := range []struct {
 		name, item string
-		// pin marks the select-item spelling whose ALIAS collides with the
-		// build side's real column name.
-		pin string
 	}{
 		{name: "NoAliasCollision", item: "id AS kk"},
 		// The literal spelling from the issue: the CTE aliases `id` to `k`,
 		// which is also typemx_dim's own column name. The FAILING reference
-		// is `d.k`, which this resolver leaves exactly as written (it does
-		// rewrite `c.gg` to `g` in the same predicate) — and it stops
-		// resolving on the join stage, which
-		// TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect isolates
-		// on a predicate the resolver does not touch AT ALL.
-		{name: "AliasCollidesWithBuildColumn", item: "id AS k",
-			pin: "a probe-side SELECT alias equal to the build column's name"},
+		// was `d.k`, which this resolver leaves exactly as written (it does
+		// rewrite `c.gg` to `g` in the same predicate).
+		//
+		// It was pinned as a separate defect and it was one: the collision
+		// bit in the JOIN's OutputFilter. The probe arm publishes an alias
+		// `k`, so the join's output carries the dim's own `k` and the
+		// filter — which names `d.k` — matched neither the bare column nor
+		// any qualified spelling, dropped it, and left the predicate
+		// UNKNOWN. `joinOutputSchemaWithMapping` now keeps a BARE column a
+		// QUALIFIED filter entry names, which is the mirror of the rule it
+		// already had, and that closed this shape.
+		//
+		// Attributed by reverting each candidate separately: with the
+		// OutputFilter mirror alone the shape answers; with only the
+		// resolver's ROW-guard repair it does not.
+		// TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect existed
+		// only to isolate this and is deleted with the pin.
+		{name: "AliasCollidesWithBuildColumn", item: "id AS k"},
 	} {
 		for _, shape := range []struct{ name, tmpl string }{
 			{"CTE", cteFrom},
@@ -110,11 +118,7 @@ func TestFilterQualifiedToOneJoinArmTwoPath(t *testing.T) {
 				c, shape, sel := c, shape, sel
 				t.Run(sel.name+"/"+shape.name+"/"+c.name, func(t *testing.T) {
 					sql := fmt.Sprintf(shape.tmpl, typematrix.Table, typematrix.Dim, sel.item, c.where)
-					// The collision only bites a predicate that has to read
-					// the build column ON THE JOIN STAGE; the conjunct alone
-					// is pushed to the dim scan and is unaffected.
-					pinned := sel.pin != "" && strings.Contains(c.where, "OR")
-					ctrCheckCountPinned(t, ctx, single, coord, sql, c.want, pinned, sel.pin)
+					ctrCheckCount(t, ctx, single, coord, sql, c.want)
 				})
 			}
 		}
@@ -200,59 +204,6 @@ func TestFilterQualifiedToOneJoinArmTwoPath(t *testing.T) {
 			}
 		}
 		ctrCheckCount(t, ctx, single, coord, sql, want)
-	})
-}
-
-// TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect isolates the
-// remaining divergence the pinned rows above carry, and proves it is not this
-// resolver's.
-//
-// The predicate here needs NO rewriting AT ALL — `c.g` is a passthrough and
-// `d.k` names the sibling arm — so ResolveFilterThroughProjects reports no
-// change and walkStages ships the text exactly as the pre-#653 planner did.
-// (In the pinned rows next door the resolver DOES rewrite, `c.gg` to `g`; it
-// is only the failing reference, `d.k`, that it leaves alone. This query
-// removes even that.) It still answers 0 on the DAG, and
-// renaming the probe-side alias away from the build column's name is the only
-// change that fixes it. So the cause is the alias/column COLLISION somewhere
-// in the join stage's schema, not the filter's spelling.
-func TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: this gate stands up an embedded NATS cluster")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	t.Cleanup(cancel)
-
-	coord := tmdCluster(t, ctx)
-	single := tmdStandalone(t, ctx)
-	_, gGt3 := ctrJoinedRows(t)
-
-	tmpl := `SELECT COUNT(*) AS n FROM (SELECT id AS %[3]s, g FROM %[1]s) c ` +
-		`JOIN %[2]s d ON c.g = d.k WHERE d.k > 3 OR c.g > 100`
-
-	// The control: an alias that collides with nothing.
-	t.Run("NoCollision", func(t *testing.T) {
-		ctrCheckCount(t, ctx, single, coord,
-			fmt.Sprintf(tmpl, typematrix.Table, typematrix.Dim, "kk"), gGt3)
-	})
-
-	// The pin: same query, alias renamed onto the build column's name.
-	t.Run("Collision", func(t *testing.T) {
-		sql := fmt.Sprintf(tmpl, typematrix.Table, typematrix.Dim, "k")
-		res, err := tmdRunDAG(ctx, coord, sql)
-		if err != nil {
-			t.Fatalf("dag arm failed: %v\n  SQL: %s", err, sql)
-		}
-		got := ctrCounts(t, res)
-		if len(got) == 1 && got[0] == gGt3 {
-			t.Fatalf("the stage DAG now answers this shape, so the separate defect this test "+
-				"pins is FIXED. Un-pin the OR rows of "+
-				"TestFilterQualifiedToOneJoinArmTwoPath and delete this test.\n  SQL: %s", sql)
-		}
-		t.Logf("tracked separate defect, NOT gated: a build-side qualified reference stops "+
-			"resolving on the join stage when the PROBE subtree carries a SELECT alias of the "+
-			"same bare name — the DAG answers %v where the single-process engine and "+
-			"PostgreSQL answer %d, for a predicate this resolver reports no change on", got, gGt3)
 	})
 }
 
