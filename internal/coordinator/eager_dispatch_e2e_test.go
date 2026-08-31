@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -48,6 +50,13 @@ func setupEagerE2E(t *testing.T, tables []string) (context.Context, func(eager b
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(func() { nc.Close() })
+	// nats.Connect can return before the connection is usable, and everything
+	// wired below (the coordinator's heartbeat subscription, the workers' task
+	// subscriptions) is silently inert on a connection that is not up yet:
+	// what the test then measures is a run where nothing engaged, reported as
+	// a mechanism failure (#752). Wait for the connection itself and name it
+	// as harness state if it never arrives.
+	waitNATSConnected(t, nc)
 	js, err := distributed.NewJetStream(nc)
 	if err != nil {
 		t.Fatalf("js: %v", err)
@@ -111,6 +120,7 @@ func setupEagerE2E(t *testing.T, tables []string) (context.Context, func(eager b
 	}
 
 	newCoord := func(eager bool) *Coordinator {
+		t.Helper()
 		coord := New(Config{
 			NATSUrl:           embeddedNATS.ClientURL(),
 			ResultBucket:      "test",
@@ -122,6 +132,16 @@ func setupEagerE2E(t *testing.T, tables []string) (context.Context, func(eager b
 			// eager producer) ever exists. 1 byte forces the shuffle path.
 			BroadcastBytesOverride: 1,
 		}, cat, nc, js, logger)
+		// NewWorkerRegistry LOGS a failed heartbeat subscription and returns a
+		// registry with no subscription, so a coordinator that never sees a
+		// worker still runs — and then reports whatever engagement it managed,
+		// which is a mechanism verdict drawn from a broken harness (#752, where
+		// "producer wiring did not engage" sat beside "failed to subscribe to
+		// heartbeats"). Refuse to measure anything on such a coordinator.
+		if coord.workers.sub == nil {
+			t.Fatalf("harness: the coordinator's heartbeat subscription failed (NATS status %v, last error %v)",
+				nc.Status(), nc.LastError())
+		}
 		// The planner needs workerCount > 1 to insert exchanges at all
 		// (everything collapses to Singleton otherwise).
 		for i := 0; i < 3; i++ {
@@ -130,6 +150,24 @@ func setupEagerE2E(t *testing.T, tables []string) (context.Context, func(eager b
 		return coord
 	}
 	return ctx, newCoord
+}
+
+// waitNATSConnected blocks until nc reports CONNECTED, or fails the test with
+// the connection's own status and last error. A harness precondition, so the
+// bound is generous: a machine too loaded to finish the in-process handshake
+// must say so rather than have its late connection read as a dispatch defect.
+func waitNATSConnected(t *testing.T, nc *nats.Conn) {
+	t.Helper()
+	const connectBound = 30 * time.Second
+	deadline := time.Now().Add(connectBound)
+	for time.Now().Before(deadline) {
+		if nc.IsConnected() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("harness: NATS connection never established within %s (status %v, last error %v)",
+		connectBound, nc.Status(), nc.LastError())
 }
 
 // runEagerE2EQuery executes sql and returns a full-row multiset (row
@@ -223,6 +261,17 @@ func TestEagerDispatchE2E(t *testing.T) {
 	// the fact) and leaves every other stage -- including the ones the
 	// consumer's loop visits first -- at full speed, so only the specific
 	// race this test cares about gets pushed, not the whole DAG's timing.
+	//
+	// The hold stays a BOUNDED wall-clock one rather than a wait on the
+	// clearance actually happening, which #752 might suggest. Measured
+	// here: this hook runs while the stage still holds its dispatch slot,
+	// Q02 dispatches with 6 slots (2 x workerCount), and 6 eager-feed
+	// producers reach the hook — so a hold that waits for clearance
+	// occupies every slot, the exchange stages whose feeds the consumer
+	// would clear on can never dispatch, and the wait deadlocks against
+	// the thing it is waiting for (33s per run against ~4s, with the
+	// clearance itself pushed past 10s). Bounding it is what keeps that
+	// window from becoming a stall.
 	eagerDispatchStageCompletionHook = func(c *Coordinator, queryID, stageID string) {
 		f := c.eagerFeedHandle(queryID, stageID)
 		if f == nil {
@@ -236,14 +285,20 @@ func TestEagerDispatchE2E(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Cleanup(func() { eagerDispatchStageCompletionHook = nil })
-	treatment := runEagerE2EQuery(ctx, t, newCoord(true), sql, "eager")
+	eagerCoord := newCoord(true)
+	treatment := runEagerE2EQuery(ctx, t, eagerCoord, sql, "eager")
 
 	assertEagerArmsIdentical(t, control, treatment)
+	// Both markers are published over the coordinator's NATS connection, so a
+	// connection that went away mid-run reads exactly like a mechanism that
+	// did not engage (#752). Report the connection with the verdict so the two
+	// are never confused again.
+	natsState := fmt.Sprintf("NATS status %v, last error %v", eagerCoord.nc.Status(), eagerCoord.nc.LastError())
 	if got := EagerManifestsPublished.Load() - manifestsBefore; got == 0 {
-		t.Error("eager run published no manifests — producer wiring did not engage")
+		t.Errorf("eager run published no manifests — producer wiring did not engage (%s)", natsState)
 	}
 	if got := EagerEdgesPlanned.Load() - edgesBefore; got == 0 {
-		t.Error("eager run cleared no consumer early — clearance did not engage")
+		t.Errorf("eager run cleared no consumer early — clearance did not engage (%s)", natsState)
 	}
 	t.Logf("C1 eager engaged: edges=%d manifests=%d, %d distinct rows identical",
 		EagerEdgesPlanned.Load()-edgesBefore, EagerManifestsPublished.Load()-manifestsBefore, len(control))
