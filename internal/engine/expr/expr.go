@@ -127,8 +127,30 @@ type ColRef struct {
 // part is a ROW column of the batch.
 func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField string) {
 	idx = b.ColumnIndex(name)
-	if idx >= 0 || !strings.Contains(name, ".") {
+	if idx >= 0 {
 		return idx, ""
+	}
+	if !strings.Contains(name, ".") {
+		// A BARE reference the stream spells QUALIFIED. A join qualifies a
+		// build column whose bare name the probe side also has, and
+		// QualifyAllBuildCols qualifies every one of them for a self-join —
+		// so `WITH c AS (SELECT id, a AS v FROM t) SELECT COUNT(*) FROM t x
+		// JOIN c ON c.id = x.id JOIN t y ON c.id = y.id WHERE c.v > 1` hands
+		// the filter above the second join the re-spelled `a`, while the
+		// stream carries `t.a` and nothing called `a`. The predicate was
+		// UNKNOWN on every row and the shuffled DAG answered ZERO (#700,
+		// #726).
+		//
+		// The planner's own schema check has assumed this resolution since
+		// #656 — physical.columnResolves matches a reference against a
+		// qualified column by its bare part, in exactly this direction — so
+		// implementing it here removes a disagreement between the checker and
+		// the evaluator rather than adding a special case.
+		//
+		// Last resort and unambiguous only: an exact match already returned
+		// above, and two columns whose bare names collide (`x.a` and `y.a`)
+		// decline, keeping today's loud failure instead of guessing an arm.
+		return uniqueQualifiedColumn(b, name), ""
 	}
 	parts := strings.SplitN(name, ".", 2)
 	// Try unqualified (strip table prefix)
@@ -141,6 +163,25 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 		return parentIdx, parts[1]
 	}
 	return -1, ""
+}
+
+// uniqueQualifiedColumn returns the index of the ONE column of b spelled
+// `<qualifier>.<bare>`, or -1 when none or more than one matches. See the
+// bare-reference branch of ResolveColumnRef for why this direction exists.
+func uniqueQualifiedColumn(b *batch.RecordBatch, bare string) int {
+	found := -1
+	for i := range b.Schema {
+		n := b.Schema[i].Name
+		dot := strings.IndexByte(n, '.')
+		if dot < 0 || !strings.EqualFold(n[dot+1:], bare) {
+			continue
+		}
+		if found >= 0 {
+			return -1 // two arms spell it; the reference is ambiguous here
+		}
+		found = i
+	}
+	return found
 }
 
 // resolve performs first-time column lookup. Idempotent.
