@@ -724,10 +724,11 @@ exist in the input schema`, on a query PostgreSQL answers.
 That is the same gap #700 and #726 were filed for, with the loud face instead
 of the silent one — there the exchange carried the CTE's ALIAS while the
 predicate had been re-spelled to the base column, so the filter was UNKNOWN on
-every row and the query answered zero rows on the shuffled arm alone. Both
-issues are closed by the two passes below plus the #694-round-2 payload
-repair that had already landed; the class is now closed structurally rather
-than per shape.
+every row and the query answered zero rows on the shuffled arm alone. The two
+passes below, plus the #694-round-2 payload repair that had already landed,
+close the ONE-JOIN face of both issues. They do not close the two-join face:
+both were reopened against this paragraph, and "A subtree publishes what it
+MINTS" below is what actually closes them.
 
 **`ensureJoinCarriesEvaluatedColumns`** unions the column references in a join
 stage's own `FilterExprs` and `ProjectExprs` back into that stage's
@@ -746,18 +747,97 @@ local. Widening here can only rescue a name something really computes. A stage
 carrying neither field is untouched, and an already-empty list stays empty,
 because for both kinds of list empty means "carry everything".
 
-**What is NOT closed, and is filed rather than described as fixed.** The
-single-process path has its own version of the same question and it is a
-different mechanism: a derived table whose SELECT list COMPUTES a column,
-read above a join whose probe side is itself a join, answers NULL or another
-arm's value there while both DAG arms are correct (#753 — it reproduces with
-no window anywhere and a distinct alias per arm, so it is not a name
-collision). A qualified reference satisfied by another arm's identically-named
-column is still wrong on every path (#742), a sibling nested inside a sibling
-is wrong on the single path alone (#751), a DECIMAL read through a join takes
-the other arm's SCALE there (#754), and a three-way join over derived arms
-fails loudly on the shuffled lowering (#755). Each has a pinned fixture whose
+**What is NOT closed, and is filed rather than described as fixed.** Two
+residuals belong to the join-output resolution and one to each of two other
+mechanisms. A qualified reference satisfied by another arm's identically-named
+column is still wrong on BOTH stage-DAG arms (#742 — the single-process path
+answers PostgreSQL's value since the pruner repair below). A sibling nested
+inside a sibling, and the CTE spelling of two sibling window blocks, are wrong
+on the single path alone (#751, #753). Where two join arms publish the SAME
+output alias the single path renders one of them at the other arm's DECIMAL
+scale — right digits, wrong typmod, and it is the duplicate ALIAS that
+triggers it and not the DECIMAL (#754). A three-way join over derived arms
+fails loudly on the shuffled lowering (#755). A stored slot column beside a
+WRAPPED window answers the stored value on the single path and fails loudly on
+both DAG arms (#750), and that one is a deliberate decline: moving the slot
+there would move the USER's column instead. Each has a pinned fixture whose
 failure is that fix's proof.
+
+### A subtree publishes what it MINTS, not what its scans store (2026-08-30, #700, #726)
+
+The section above closed #700 and #726 on a nineteen-shape sweep that stopped
+at ONE join, and both were reopened: with a SECOND join the same filter is
+dropped again, unchanged.
+
+Column pruning partitions a join's needed columns between its two sides by
+asking which side can supply each name, and `collectSubtreeColumns` answered
+that from the subtree's SCAN columns alone. A name a Project MINTS is supplied
+by no scan, so it was in NEITHER available set, went into neither `probeNeeds`
+nor `buildNeeds`, and disappeared — and a join's `NeededColumns` IS its
+OutputFilter, so the INNER join stopped emitting the column the filter above
+the OUTER join was about to read:
+
+```sql
+WITH c AS (SELECT id, a AS v FROM t)
+SELECT COUNT(*) FROM c JOIN t x ON c.id = x.id JOIN t y ON c.id = y.id
+WHERE c.v > 1
+-- PostgreSQL 5
+-- single         ERROR  filter column "c.v" does not exist in the input schema
+-- DAG broadcast  5
+-- DAG shuffled   0      silently
+```
+
+Three arms, three symptoms, one cause — and the broadcast arm being RIGHT is
+what kept it out of the default gate for so long.
+
+**One join hid it, and so did the derived-table spelling.** With a single join
+the partitioned join is the one the Project feeds directly, so the alias never
+has to survive a second partition. And `pushdownPredicates` swaps a filter
+below a Project and substitutes the alias away — except above a CTE's Project,
+which is a materialization fence and declines the swap. So the shape needs a
+CTE *and* a second join, which is exactly the pair neither issue's original
+repro nor its first fix carried.
+
+The repair answers the question the caller is really asking: a subtree
+publishes its Projects' output names, its aggregate's group keys and outputs,
+and its windows' output slots, as well as its scans' columns. Adding a minted
+name can only make a subtree claim MORE, so it can only push down a need that
+used to be dropped and never withhold one. A name pushed to a side that cannot
+supply it is already tolerated — dropped again at the scan by
+`sanitizeScanNeeds`, and deleted at the window that mints it by
+`pushColumnNeeds`' `NodeWindow` arm.
+
+**It closed three other filings' single-process halves**, which is the evidence
+that it is the mechanism and not a patch: #753's join-of-joins shapes (a
+derived computed column answering NULL or the last arm's value, with no window
+anywhere and a distinct alias per arm) and #742's qualified reference across
+two arms both answer PostgreSQL's value on the single path now. #742's two
+stage-DAG arms remain wrong and remain pinned.
+
+### The executor resolves the direction its own checker assumes
+
+A second, smaller disagreement surfaced in the same sweep, on the spelling
+where the CTE is the BUILD side of the first join. `QualifyAllBuildCols`
+renames every build column for a self-join, so the stream publishes `t.a` and
+nothing called `a`, while the re-spelled filter names `a`.
+
+`ResolveColumnRef` tried the exact spelling, then — for a QUALIFIED reference
+— the bare name, then the qualifier as a ROW container. A BARE reference that
+matched nothing returned immediately, so the one remaining direction was never
+tried. `physical.columnResolves` has matched a reference against a qualified
+column by its bare part since #656, so the planner's check believed in a
+resolution the evaluator did not implement; that gap is the defect, and
+closing it is not a special case but the removal of a disagreement. It is a
+last resort and unambiguous only — two columns whose bare names collide
+decline, keeping the loud failure rather than guessing an arm.
+
+**What the gates carry.** `TestCTEFilterAboveAJoinChainThreeArms` is chain
+LENGTH x the CTE's POSITION x CTE versus derived x the filter's spelling x
+join kind, on three arms against PostgreSQL; the one-join sweep beside it is
+now the control that says the chain is the trigger. Reverting the pruner fails
+eleven of its subtests and reverting the resolver fails three, so neither is
+gated by the other. `postgresJoinArmCases` asks the same questions of a live
+server.
 
 ## Consequences
 
