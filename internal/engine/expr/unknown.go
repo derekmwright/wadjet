@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
@@ -98,6 +99,18 @@ func checkKnown(name string) error {
 	}
 	return &UnknownFuncError{Name: name, Aggregate: unimplementedAggregates[name]}
 }
+
+// ResolveFuncName reports whether a call's name is one this engine implements,
+// answering with the same UnknownFuncError (42883) the compiler raises for it.
+//
+// It exists so a check that runs BEFORE compilation can reach the same verdict
+// rather than form a second one: PostgreSQL resolves a function during parse
+// analysis and only then checks grouping coverage, so a validator that walks a
+// grouped query's expressions has to know that an unresolvable name is already
+// settled. Routing that through this one function is what keeps the two
+// decisions a single decision — the WADJET_STRICT_FUNCTIONS hatch and the
+// unimplemented-aggregate wording included.
+func ResolveFuncName(name string) error { return checkKnown(strings.ToLower(name)) }
 
 // UnknownFuncError names a function the registry cannot resolve.
 //

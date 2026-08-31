@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -904,6 +905,24 @@ func (g *groupCheck) check(node plansql.Node) error {
 		// arguments are consumed, not published.
 		if plansql.IsAggregate(n.Name) {
 			return nil
+		}
+		// A name nothing implements is settled BEFORE grouping coverage is.
+		// PostgreSQL resolves the function in parse analysis
+		// (transformFuncCall → 42883) and runs parseCheckAggregates only
+		// afterwards, so `SELECT no_such_agg(price) FROM t GROUP BY name`
+		// is `function no_such_agg(double precision) does not exist` there,
+		// not a complaint about `price`. Reporting 42803 on the ARGUMENT of
+		// a call that will not resolve names the wrong problem, and it
+		// masked the sharper wording for an unimplemented aggregate
+		// (`array_agg` under a GROUP BY) that this engine already had.
+		//
+		// The verdict is expr's, not a second name list, so the two cannot
+		// drift and WADJET_STRICT_FUNCTIONS still disables both. Returning
+		// it rather than skipping the node matters: a bare skip leaves
+		// `… GROUP BY k ORDER BY no_such_agg(x)` to the logical builder's
+		// own refusal, which carries no SQLSTATE.
+		if err := expr.ResolveFuncName(n.Name); err != nil {
+			return err
 		}
 	case *plansql.SubqueryNode, *plansql.ExistsNode, *plansql.WindowFuncNode:
 		// Their own scope, validated on their own terms.

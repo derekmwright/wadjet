@@ -71,6 +71,41 @@ func TestValidateGroupedQueryRefusesUngroupedReferences(t *testing.T) {
 		{"having without group by, ungrouped having column",
 			"SELECT count(*) FROM events HAVING amount > 1", "42803", `"amount"`},
 
+		// --- An unresolvable NAME is settled before grouping coverage -----
+		//
+		// PostgreSQL 17 resolves the function during parse analysis
+		// (transformFuncCall → 42883) and runs parseCheckAggregates only
+		// afterwards, so every one of these is "function … does not exist"
+		// there, verbatim, and never a complaint about the argument. This
+		// walk reached the argument first and reported 42803 on it, which
+		// names the wrong problem and hides the only actionable half of the
+		// message. Each of these reads an UNGROUPED column, so the 42803 arm
+		// is genuinely reachable and the order is what decides.
+		{"unknown name in aggregate position",
+			"SELECT no_such_agg(amount) FROM events GROUP BY region", "42883", "no_such_agg"},
+		// Inside an aggregate there is no conflict to resolve: the aggregate
+		// licenses its arguments, so the 42803 arm never fires and the walk
+		// stops at the aggregate name. The compiler answers this one, with
+		// the same 42883 — `TestUnknownFunctionErrors` in ./test pins that
+		// end to end. Recorded here so the division of labour is deliberate
+		// rather than an oversight.
+		{"unknown scalar inside an aggregate is left to the compiler",
+			"SELECT sum(no_such_fn(amount)) FROM events GROUP BY region", "", ""},
+		{"unknown scalar beside a grouped column",
+			"SELECT region, no_such_fn(amount) FROM events GROUP BY region", "42883", "no_such_fn"},
+		{"unknown name in having",
+			"SELECT region FROM events GROUP BY region HAVING no_such_agg(amount) > 1", "42883", "no_such_agg"},
+		{"unknown name in order by",
+			"SELECT region FROM events GROUP BY region ORDER BY no_such_agg(amount)", "42883", "no_such_agg"},
+		{"unimplemented aggregate under a group by",
+			"SELECT array_agg(amount) FROM events GROUP BY region", "42883",
+			"aggregate function that Wadjet does not implement"},
+		// A name that DOES resolve must still be judged on its arguments —
+		// the deference above is to the unresolvable name only, and this is
+		// the entry that fails if it becomes a blanket skip.
+		{"known scalar over an ungrouped column still refuses",
+			"SELECT region, UPPER(flag) FROM events GROUP BY region", "42803", `"flag"`},
+
 		// --- The legal shapes: these must keep validating -----------------
 		{"grouped column selected", "SELECT region, count(*) FROM events GROUP BY region", "", ""},
 		{"expression over the grouped column", "SELECT region || 'x', count(*) FROM events GROUP BY region", "", ""},

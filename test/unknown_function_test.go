@@ -88,6 +88,38 @@ func TestUnknownFunctionErrors(t *testing.T) {
 			sql:    `SELECT no_such_agg(p_retailprice) FROM nation GROUP BY n_name`,
 			wantIn: "no_such_agg",
 		},
+		// A GROUPED query resolves its functions BEFORE it checks grouping
+		// coverage, exactly as PostgreSQL 17 does (transformFuncCall's 42883
+		// precedes parseCheckAggregates' 42803). Each of these reads an
+		// ungrouped column too, so the grouping walk reaches the call first
+		// and has to defer to the name.
+		{
+			name:   "unknown scalar inside an aggregate under GROUP BY",
+			sql:    `SELECT SUM(no_such_fn(p_retailprice)) FROM nation GROUP BY n_name`,
+			wantIn: "no_such_fn",
+		},
+		{
+			name:   "unknown scalar beside a grouped column",
+			sql:    `SELECT n_name, no_such_fn(p_retailprice) FROM nation GROUP BY n_name`,
+			wantIn: "no_such_fn",
+		},
+		{
+			name:   "unknown name in HAVING under GROUP BY",
+			sql:    `SELECT n_name FROM nation GROUP BY n_name HAVING no_such_agg(p_retailprice) > 1`,
+			wantIn: "no_such_agg",
+		},
+		{
+			name:   "unknown name in ORDER BY under GROUP BY",
+			sql:    `SELECT n_name FROM nation GROUP BY n_name ORDER BY no_such_agg(p_retailprice)`,
+			wantIn: "no_such_agg",
+		},
+		// The sharper unimplemented-aggregate wording must survive a GROUP
+		// BY: this spelling reported 42803 on the argument instead.
+		{
+			name:   "unimplemented aggregate under GROUP BY",
+			sql:    `SELECT array_agg(p_retailprice) FROM nation GROUP BY n_name`,
+			wantIn: "aggregate function that Wadjet does not implement",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
