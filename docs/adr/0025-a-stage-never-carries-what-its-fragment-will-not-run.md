@@ -911,6 +911,74 @@ and the DERIVED spelling of the same shape is refused LOUDLY, because
 `assertCarrierSchemaResolves` runs at dispatch and its error does not wrap the
 routing sentinel, so nothing routes it local (#763).
 
+### Carrying a column is not free, and "the snapshot is green" does not mean the plan is (2026-08-31, #700, #726)
+
+The section above fixed the chain by pushing a referenced column down every
+narrowing stage between producer and consumer. That is correct and it is also
+a SECOND CARRY: on a query that was already right, the consumer already had a
+path to the value, and the extra entry is bytes on the wire on every row of
+every task. Six TPC-H queries paid it — 21 stage lines, including `n1.n_name`
+and `n2.n_name` added to three Q07 exchange MANIFESTS, two STRING columns
+crossing the network twice more.
+
+**The claim that it did not was made, and no gate could have caught it.**
+`TestTPCH_EnsureDistribution_Snapshot` records a stage's ID, TYPE and
+DISTRIBUTION; it records nothing about COLUMNS. "22/22 green, so the plans are
+identical" was a conclusion the evidence did not support, and the honest
+reading is that a widening of every shuffle manifest in the suite was
+invisible to the entire tree.
+
+`TestTPCHStageDumpGolden` is the gate that closes it: id, type, scan-file
+count, sorted Columns, sorted Dependencies and per-stage operator counts for
+all 22 queries, against a committed golden, with a refusal recorded as a line
+of its own so a query that starts or stops routing local also shows. Bytes on
+the wire is a co-equal metric with wall time (CLAUDE.md), and until this test
+existed the planner had no gate on it at all.
+
+**Five narrowings, each answering a specific line of that diff.** None of them
+is a threshold; each is a thing the pass was getting wrong:
+
+- **A `Columns` list is not evidence of production.** It is a filter or a
+  manifest and can never invent a column — the rule this ADR already states
+  for `dropUnbackedJoinColumns` — so the subtree-supply test reads only what a
+  stage COMPUTES. Reading `Columns` made `s_nationkey` look available under a
+  lineitem-only branch of Q05, because the two sides of one shuffle share a
+  single manifest.
+- **A join CONDITION is not payload.** It is resolved by the join's key
+  machinery from both sides and never read off the narrowed probe stream.
+- **`BuildFilterExprs` filters the BUILD input**, before that hash table is
+  built, so its columns come from the build dependency. That was Q21's
+  `__subsume_f0`.
+- **A chained link's residual filter reads both sides**, and only the
+  PROBE-side columns can be dropped by this stage's OutputFilter. Which side a
+  name comes from is decided by the build dep's declared MANIFEST and not by
+  its table — a self-join makes those disagree completely, since the chained
+  build of `c JOIN t x JOIN t y` is the same relation as the probe. An empty
+  manifest is the one case that really does mean "everything", and only then
+  is the subtree the right question; that is how Q07 reaches its nation names
+  through a replicated build.
+- **The push-down only enters a subtree that can supply the name.**
+
+**What stays unconditional is what was load-bearing.** A join stage's own
+residual filter and projection, and a chained link's probe-side filter, are
+evaluated against a view this same `Columns` list narrows, so they belong in
+it whatever the input carries. `join-4 FILTER=[(a * 2) > 1]` over `COLS=[dv id
+…]` with no `a` is the broadcast half of the shape, on a probe that plainly
+has one.
+
+An input-reachability gate — "push only what the input cannot already supply"
+— was the obvious narrowing and is NOT in the code. With the five above in
+place it changed no TPC-H line, and it cost the three-sibling window shape its
+`__win_1`, because a join's own filter is evaluated after its own narrowing
+rather than on its input. Recorded because it is the first thing the next
+reader will reach for.
+
+**What is still open here.** The FILTER forms of the chain shapes are correct
+on three arms; the PROJECTING forms of two of them hard-fail on the shuffled
+lowering at dispatch (#766), which is #763's routing class rather than a wrong
+answer — whatever carries the column for the predicate is not carrying it for
+the SELECT list.
+
 ## Consequences
 
 - `StageProject` is Singleton with `Tasks: 1`, so it SERIALIZES its
