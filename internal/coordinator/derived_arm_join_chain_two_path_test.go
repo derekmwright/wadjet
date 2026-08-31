@@ -581,6 +581,22 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
 		},
 		{
+			// AMBIGUOUS on purpose: a self-join puts a `c_row` on BOTH sides.
+			// PostgreSQL rejects the query (no FROM-clause entry for c_row);
+			// wadjet answers the FIRST arm's container, deterministically,
+			// because the resolver's exact-name lookup wins before the
+			// qualified fallback is reached. That is the same rule a bare
+			// column reference follows and it is recorded here rather than
+			// described as a refusal — an earlier commit body claimed "two
+			// ROW columns spelled alike decline rather than pick one", which
+			// is true only when NEITHER is spelled bare.
+			name: "ambiguous-container-picks-the-probe-side",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " + nested +
+				" y ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+		{
 			name: "join-with-a-dimension",
 			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " +
 				typematrix.Dim + " d ON x.id = d.k WHERE x.id < 5 ORDER BY x.id",
@@ -704,6 +720,106 @@ func TestUnionArmBehindAnAbsorbedExchange(t *testing.T) {
 				if len(got) != 1 || got[0] != tc.want {
 					t.Errorf("%s arm answered %v, PostgreSQL 17 answers %d\n  SQL: %s",
 						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+}
+
+// A qualified reference whose QUALIFIER collides with a COLUMN name, on three
+// arms.
+//
+// `expr.ResolveColumnRef`'s last-resort suffix scan — the one that lets `c.dv`
+// find `decpair.dv` after QualifyAllBuildCols renamed the build side (#762) —
+// sat behind a guard that was INVERTED. The ROW-field-path arm above it has
+// already returned for a ROW container, so the guard was reached only when the
+// qualifier named a column that is NOT a ROW: an ordinary scalar an arm
+// happens to have called `c`. Every qualified reference whose qualifier
+// collided with such a name was then refused, the predicate was UNKNOWN on
+// every row, and the shuffled arm answered 0:
+//
+//	WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+//	SELECT COUNT(*) FROM decpair t
+//	JOIN (SELECT id, b AS c FROM decpair) z ON z.id = t.id
+//	JOIN c ON c.id = t.id WHERE c.dv > 1
+//	-- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG shuffled 0
+//
+// `rowColumnNamed` is the whole of the refusal the guard was meant to be: it
+// finds a ROW spelled `c` or `<qualifier>.c`, which is the only case a field
+// path must not fall through. The controls are the same queries with the
+// colliding arm publishing `zz` instead, and the BARE predicate spelling —
+// both answered 5 throughout, which is what says the collision was the whole
+// of it.
+func TestQualifierCollidingWithAColumnNameResolves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	const tbl = dbpTable
+	for _, tc := range []struct {
+		name, sql string
+		want      int64
+	}{
+		{"cte/qualifier-collides", "WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") " +
+			"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN (SELECT id, b AS c FROM " + tbl +
+			") z ON z.id = t.id JOIN c ON c.id = t.id WHERE c.dv > 1", 5},
+		{"control/cte/no-collision", "WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") " +
+			"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN (SELECT id, b AS zz FROM " + tbl +
+			") z ON z.id = t.id JOIN c ON c.id = t.id WHERE c.dv > 1", 5},
+		{"control/cte/bare-predicate", "WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") " +
+			"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN (SELECT id, b AS c FROM " + tbl +
+			") z ON z.id = t.id JOIN c ON c.id = t.id WHERE dv > 1", 5},
+		{"derived/qualifier-collides", "SELECT COUNT(*) AS n FROM " + tbl + " t " +
+			"JOIN (SELECT id, b AS x FROM " + tbl + ") z ON z.id = t.id " +
+			"JOIN (SELECT id, a * 2 AS dv FROM " + tbl + ") x ON x.id = t.id WHERE x.dv > 1", 5},
+		{"control/derived/no-collision", "SELECT COUNT(*) AS n FROM " + tbl + " t " +
+			"JOIN (SELECT id, b AS zz FROM " + tbl + ") z ON z.id = t.id " +
+			"JOIN (SELECT id, a * 2 AS dv FROM " + tbl + ") x ON x.id = t.id WHERE x.dv > 1", 5},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL answers %d: %v\n  SQL: %s",
+						arm.name, tc.want, err, tc.sql)
+				}
+				got := ctrCounts(t, res)
+				if len(got) != 1 || got[0] != tc.want {
+					t.Errorf("%s arm answered %v, PostgreSQL 17 answers %d — a qualified "+
+						"reference was refused because its qualifier collided with a column "+
+						"name\n  SQL: %s", arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+
+	// The PROJECTING forms of the same two shapes, which read the value
+	// rather than counting rows.
+	for _, tc := range []struct{ name, sql string }{
+		{"cte/qualifier-collides/projecting",
+			"WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") " +
+				"SELECT c.id AS cid, c.dv AS dv FROM " + tbl + " t JOIN (SELECT id, b AS c FROM " +
+				tbl + ") z ON z.id = t.id JOIN c ON c.id = t.id WHERE c.dv > 1 ORDER BY c.id"},
+		{"derived/qualifier-collides/projecting",
+			"SELECT x.id AS cid, x.dv AS dv FROM " + tbl + " t JOIN (SELECT id, b AS x FROM " +
+				tbl + ") z ON z.id = t.id JOIN (SELECT id, a * 2 AS dv FROM " + tbl +
+				") x ON x.id = t.id WHERE x.dv > 1 ORDER BY x.id"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			const want = "5 rows: 1|25.50;2|25.50;3|25.50;5|4.00;8|25.50;"
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
+				}
+				if got := dajDigest(res, []string{"cid", "dv"}); got != want {
+					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+						arm.name, got, want, tc.sql)
 				}
 			}
 		})

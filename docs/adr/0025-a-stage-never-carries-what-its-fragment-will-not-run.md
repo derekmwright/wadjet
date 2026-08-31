@@ -1009,6 +1009,7 @@ after; the rest are named at the end of this section.
   of second reference, and `ValidateNativeDAGShape` asserts that it equals the
   corresponding `Dependencies` entry — so a pass that rewires one and not the
   other builds a plan its own validator rejects. Both passes rewire it now.
+
   Nothing in the corpus had ever put a union arm's producer behind an absorbed
   or elided exchange, which is METHOD 10's shape exactly: the claim that the
   rewiring is complete needed a fixture that attempts it, and
@@ -1127,11 +1128,12 @@ projected at once, and the single-arm control; the two chain gates lose the
 `shuffledRefuses` (#755), `refusesLoudly` (#763) and `pinDAG` (#762) pins and
 assert PostgreSQL's values instead; `postgresJoinArmCases` asks the same
 questions of a live server on the single-process arm. Reverting the source
-changes and re-running fails 37 LEAF subtests across those six tests, which is
-the "every gate must be able to fail" check made rather than assumed. (An
-earlier count of 22 for a smaller gate set was wrong twice over: the leaf
-figure was 20 and the two extra lines were the parent `--- FAIL`s of two
-table-driven tests. Counted with `grep -c '^    --- FAIL'`.)
+changes and re-running fails 42 LEAF subtests across seven of those tests,
+which is the "every gate must be able to fail" check made rather than assumed.
+(Earlier counts of 22 and 37 were for smaller gate sets; the 22 was also wrong
+twice over — the leaf figure was 20 and the two extra lines were the parent
+`--- FAIL`s of two table-driven tests. Counted with
+`grep -c '^    --- FAIL'`.)
 
 **What a same-alias fixture must not also be about.** Every same-alias pair in
 these gates publishes at DECIMAL scale 2 on purpose. A cross-SCALE pair
@@ -1216,6 +1218,44 @@ a ROW column resolves as a FIELD PATH or as NOTHING — never as some other
 column that happens to share the field's name. That guard is what the new
 last-resort suffix scan needed: without it a field path whose container had
 been pruned could bind to a scalar, which is ADR-0022's violation exactly.
+
+**The guard is on the ROW-ness, not on the lookup succeeding, and getting that
+backwards cost a wrong answer.** Written as "the qualifier resolved to
+something, so refuse", it was reached only where the qualifier named a column
+that is NOT a ROW — the ROW arm returns above it — so every qualified
+reference whose qualifier collided with an ordinary scalar column name was
+refused instead:
+
+    WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+    SELECT COUNT(*) FROM decpair t
+    JOIN (SELECT id, b AS c FROM decpair) z ON z.id = t.id
+    JOIN c ON c.id = t.id WHERE c.dv > 1
+    -- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG shuffled 0
+
+`rowColumnNamed` is the whole of the refusal: it finds a ROW spelled
+`<name>` or `<qualifier>.<name>`, which is the only case a field path must not
+fall through to the suffix scan. `TestQualifierCollidingWithAColumnName-
+Resolves` carries the shape with the non-colliding arm and the bare predicate
+spelling as its controls.
+
+Repairing it also closed a divergence pinned SEPARATELY, which is the evidence
+that the guard was the mechanism and not a patch: `TestFilterQualifiedToOne-
+JoinArmTwoPath`'s `AliasCollidesWithBuildColumn` rows, and the
+`TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect` test written to
+isolate them, pinned `d.k > 3 OR c.g > 100` answering 0 on the DAG whenever the
+PROBE arm published an alias equal to the build column's name. That collision
+is this guard: the container lookup found a non-ROW `k`, the refusal fired, and
+`d.k` resolved to nothing. Both pins are deleted and the isolating test with
+them.
+
+**And two ROW columns spelled alike do NOT decline — they pick the exactly-
+spelled one.** An earlier statement of this said otherwise. `x JOIN x` puts a
+`c_row` on both sides; the resolver's exact-name lookup wins before the
+qualified fallback is reached, so `c_row.b` reads the probe side's container,
+deterministically. PostgreSQL rejects that query outright (no FROM-clause entry
+for `c_row`), so this is superset territory and the pick is recorded as a
+fixture rather than described as a refusal. Only when NEITHER container is
+spelled bare does the ambiguity actually decline.
 
 Wadjet answers these queries where PostgreSQL rejects them (`c_row` is not a
 FROM-clause entry). That is the deliberate superset ADR-0012 records, and it is
