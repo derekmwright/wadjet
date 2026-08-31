@@ -414,6 +414,13 @@ func tmdTables() []tmdTable {
 		// reason as the fixtures above; only the two-path group-key gate
 		// names it.
 		{gcovTable, gcovSchema(), gcovData()},
+		// The NUMERIC-FOLD fixture (#724): all six numeric widths in one
+		// table. Rides along for the same reason as the fixtures above —
+		// TestNumericFoldTwoPath uses these two arms and no type-matrix
+		// corpus entry names it. The type matrix cannot stand in for it: it
+		// carries ONE decimal column, so no fold over two decimals at
+		// different scales is expressible over it.
+		{nfTable, nfSchema(), nfData()},
 	}, multikeyTables()...)
 }
 
