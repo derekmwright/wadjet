@@ -623,6 +623,58 @@ func collectSubtreeColumnsRec(n *Node, result map[string]bool) {
 			result[strings.ToLower(col)] = true
 		}
 	}
+	// A subtree also publishes the names its own operators MINT, and reading
+	// only the scans made the partition at a join silently lose them.
+	//
+	// `WITH c AS (SELECT id, a AS v FROM t) SELECT COUNT(*) FROM c JOIN t x ON
+	// c.id = x.id JOIN t y ON c.id = y.id WHERE c.v > 1` needs `v` above BOTH
+	// joins. No scan stores `v`, so it was in neither side's available set,
+	// the partition put it in neither probeNeeds nor buildNeeds, and the INNER
+	// join's NeededColumns — which becomes its OutputFilter — dropped the
+	// column the filter above the OUTER join was about to read. The
+	// single-process path failed with `filter column "c.v" does not exist in
+	// the input schema`, the SHUFFLED DAG answered ZERO rows in silence, and
+	// the broadcast DAG answered correctly, because only the first two narrow
+	// to that list (#700, #726).
+	//
+	// One join hid it for two years of this code: there the join whose needs
+	// are partitioned is the one the Project feeds directly, so the alias
+	// never had to survive a SECOND partition. The DERIVED-table spelling
+	// hides it too, because pushdownPredicates swaps the filter below the
+	// Project and substitutes the alias away — a CTE's Project is a
+	// materialization fence and declines that swap, which is why the CTE
+	// spelling is the one that breaks.
+	//
+	// Adding a minted name can only make a subtree claim MORE, so it can only
+	// push down a need that used to be dropped and never withhold one. A name
+	// pushed to a side that cannot supply it is already tolerated: it is
+	// dropped again at the scan by sanitizeScanNeeds, and deleted at the
+	// window that mints it by pushColumnNeeds' NodeWindow arm (#694 R1).
+	switch n.Type {
+	case NodeProject:
+		for _, pr := range n.Projections {
+			if name := projectionPublishedName(pr); name != "" {
+				result[name] = true
+			}
+		}
+	case NodeAggregate:
+		for _, k := range n.GroupBy {
+			if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
+				result[k] = true
+			}
+		}
+		for _, a := range n.AggExprs {
+			if a.OutputCol != "" {
+				result[strings.ToLower(a.OutputCol)] = true
+			}
+		}
+	case NodeWindow:
+		for _, w := range n.WindowExprs {
+			if w.OutputCol != "" {
+				result[strings.ToLower(w.OutputCol)] = true
+			}
+		}
+	}
 	// Semi/anti joins only output probe-side (child[0]) columns.
 	// Skip the build side (child[1]) so downstream column partitioning
 	// doesn't treat build-side columns as available from this subtree.
@@ -635,6 +687,21 @@ func collectSubtreeColumnsRec(n *Node, result map[string]bool) {
 	}
 	for _, child := range n.Children {
 		collectSubtreeColumnsRec(child, result)
+	}
+}
+
+// projectionPublishedName is the name a Projection publishes to the operators
+// above it, lowercased: its alias when it has one, else the column it names,
+// else the expression's own text — the same order every DAG resolver reads it
+// in. Empty when the projection names nothing.
+func projectionPublishedName(p Projection) string {
+	switch {
+	case p.Alias != "":
+		return strings.ToLower(p.Alias)
+	case p.Column != "":
+		return strings.ToLower(p.Column)
+	default:
+		return strings.ToLower(strings.TrimSpace(p.Expr))
 	}
 }
 
