@@ -2265,13 +2265,13 @@ type Case struct {
 	dch decimalChoice
 }
 
-// decimalBoxed reports whether this CASE's chosen box must be rendered as
-// DECIMAL text. The arms slice is built only on the resolution path — Go
-// evaluates a call's arguments when the call is reached, and the fast path
-// returns first — so the row loop allocates nothing.
-func (e *Case) decimalBoxed(b *batch.RecordBatch) bool {
+// boxMode reports what this CASE's chosen box must be rewritten to so it
+// survives the vector the plan declared. The arms slice is built only on the
+// resolution path — Go evaluates a call's arguments when the call is reached,
+// and the fast path returns first — so the row loop allocates nothing.
+func (e *Case) boxMode(b *batch.RecordBatch) choiceBoxMode {
 	if e.dch.ready.Load() {
-		return e.dch.on
+		return e.dch.mode
 	}
 	return e.dch.resolveSlow(b, caseResultArms(e))
 }
@@ -2300,10 +2300,10 @@ type CaseWhen struct {
 
 func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 	v := e.eval(b, row)
-	if v == nil || !e.decimalBoxed(b) {
+	if v == nil {
 		return v
 	}
-	return decimalChoiceBox(v)
+	return choiceBox(e.boxMode(b), v)
 }
 
 func (e *Case) eval(b *batch.RecordBatch, row int) any {
@@ -2359,17 +2359,14 @@ func (e *Coalesce) Eval(b *batch.RecordBatch, row int) any {
 		if v == nil {
 			continue
 		}
-		if e.decimalBoxed(b) {
-			return decimalChoiceBox(v)
-		}
-		return v
+		return choiceBox(e.boxMode(b), v)
 	}
 	return nil
 }
 
-func (e *Coalesce) decimalBoxed(b *batch.RecordBatch) bool {
+func (e *Coalesce) boxMode(b *batch.RecordBatch) choiceBoxMode {
 	if e.dch.ready.Load() {
-		return e.dch.on
+		return e.dch.mode
 	}
 	return e.dch.resolveSlow(b, e.Args)
 }
@@ -2917,17 +2914,14 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		// DECIMAL answered through an integer box (#695).
 		return out
 	}
-	if !e.decimalBoxed(b) {
-		return out
-	}
-	return decimalChoiceBox(out)
+	return choiceBox(e.boxMode(b), out)
 }
 
-// decimalBoxed reports whether this call's chosen box must be rendered as
-// DECIMAL text — see Case.decimalBoxed (#695).
-func (e *FuncCall) decimalBoxed(b *batch.RecordBatch) bool {
+// boxMode reports what this call's chosen box must be rewritten to — see
+// Case.boxMode (#695, #555).
+func (e *FuncCall) boxMode(b *batch.RecordBatch) choiceBoxMode {
 	if e.dch.ready.Load() {
-		return e.dch.on
+		return e.dch.mode
 	}
 	return e.dch.resolveSlow(b, e.choiceArms)
 }
@@ -2943,7 +2937,23 @@ func (e *FuncCall) decimalBoxed(b *batch.RecordBatch) bool {
 // reach, because the equality is inside a registry function rather than in a
 // comparison node. A pair the binding does not apply to (two strings, a text
 // column against a quoted literal) falls through to compare() unchanged.
+// evalNullIf answers NULLIF's value AT THE CALL'S TYPE.
+//
+// The materialization is the same one GREATEST/LEAST have had since #646 and
+// NULLIF never did: argument 0 can be a QUOTED literal, which arrives as a Go
+// string, and PostgreSQL resolves NULLIF's type from the operator its two
+// arguments select — `NULLIF('0xC.C', real_col)` is 12.75 there, and the four
+// characters had nowhere to go here (#724). It is a no-op for every argument
+// that is not a quoted literal, which is every shape the pre-#724 corpus held.
 func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
+	v := evalNullIfChosen(b, args, arms)
+	if v == nil {
+		return nil
+	}
+	return arms.materialize(b, 0, v)
+}
+
+func evalNullIfChosen(b *batch.RecordBatch, args []any, arms *extremumArms) any {
 	if len(args) < 2 {
 		return nil
 	}

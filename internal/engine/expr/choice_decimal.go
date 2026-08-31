@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
 // The DECIMAL mode of the constructs that CHOOSE BETWEEN their operands —
@@ -31,27 +32,151 @@ import (
 // BinOpNumeric's and for the same reason: an operand's type does not exist
 // until a batch arrives.
 
-// decimalChoice is one node's resolved answer to "do my arms fold to a
-// DECIMAL". ready publishes on: set last under mu, read first and alone by the
+// choiceBoxMode is what a choice construct must do to the box its winning arm
+// produced so the value survives the vector the PLAN declared for it.
+//
+// The two directions are the two halves of one rule, and each exists because a
+// box means something else to the other type's vector:
+//
+//   - choiceBoxDecimal: the arms fold to a DECIMAL, so an INTEGER box becomes
+//     the value's TEXT. An integer written into a DECIMAL vector is the
+//     already-scaled carrier of ADR-0018 §4 — 100 would read back as 1.00 —
+//     and SetValueChecked refuses it outright (#695).
+//   - choiceBoxInt64/choiceBoxFloat32/choiceBoxFloat64: the arms fold to a
+//     non-DECIMAL number, so a STRING box becomes that number. Two arms can
+//     produce one: a DECIMAL column, whose value IS its rendered text, and a
+//     QUOTED literal, which arrives as the characters the query spelled.
+//     `COALESCE(numeric, float8)` is double precision in PostgreSQL and
+//     declares double precision here, and on the rows the DECIMAL wins the box
+//     was its text — which the #361 store guard refused, loudly, for as long as
+//     nothing converted it (#555's float half); `COALESCE(bigint, '16777217')`
+//     is bigint there and the literal's four characters had nowhere to go
+//     (#724). GREATEST/LEAST already answered both, through
+//     extremumArms.materialize, which is why the defect was invisible to every
+//     gate written over those two.
+type choiceBoxMode uint8
+
+const (
+	choiceBoxNone choiceBoxMode = iota
+	choiceBoxDecimal
+	choiceBoxInt64
+	choiceBoxFloat32
+	choiceBoxFloat64
+)
+
+// decimalChoice is one node's resolved answer to "what must I do to my chosen
+// box". ready publishes on: set last under mu, read first and alone by the
 // evaluators.
 type decimalChoice struct {
 	ready atomic.Bool
 	mu    sync.Mutex
-	on    bool
+	mode  choiceBoxMode
 }
 
 // resolveSlow runs at most once per node. The arms are built by the CALLER and
 // only on this path, so the fast path above it allocates nothing.
-func (c *decimalChoice) resolveSlow(b *batch.RecordBatch, arms []Expr) bool {
+func (c *decimalChoice) resolveSlow(b *batch.RecordBatch, arms []Expr) choiceBoxMode {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ready.Load() {
-		return c.on
+		return c.mode
 	}
-	_, _, ok := decimalArmFold(arms, b)
-	c.on = ok
+	mode, settled := choiceArmsBoxMode(arms, b)
+	if !settled {
+		// An arm whose kind this batch could not settle answers for THIS
+		// batch only. Latching it would freeze the node's mode on whichever
+		// batch happened to arrive first, and the batches of one query do not
+		// all carry the same columns: `GREATEST(real, '3.5', integer)`
+		// answered 16777216 or 16777217 for the same row between two runs of
+		// the same binary before this clause, which is a wrong answer that no
+		// gate can reproduce on demand. boxOperand.resolve and
+		// extremumArms.commonKind hold the same line, for the same reason.
+		return mode
+	}
+	c.mode = mode
 	c.ready.Store(true)
-	return c.on
+	return mode
+}
+
+// choiceArmsBoxMode is that answer, computed from the arms alone.
+//
+// The DECIMAL mode is gated on decimalArmFold and nothing else, deliberately:
+// it is the mode that REWRITES an integer into text, and turning it on for a
+// composite the PLAN did not declare DECIMAL would put that text in front of
+// an integer vector. joinFoldKinds says numeric for `COALESCE(i32, 1.5)` and
+// the plan declares INT32 there (ADR-0024's literal deferral), which is exactly
+// that shape.
+//
+// The non-DECIMAL numeric modes are read off joinFoldKinds — select_common_type
+// over the compiled arms, the same fold expr.CommonDeclType runs over the
+// DECLARED ones — so the vector the plan builds and the box the runtime hands
+// it are decided by one rule.
+func choiceArmsBoxMode(arms []Expr, b *batch.RecordBatch) (choiceBoxMode, bool) {
+	if _, _, ok := decimalArmFold(arms, b); ok {
+		return choiceBoxDecimal, true
+	}
+	f, settled := joinFoldKinds(arms, b)
+	switch f {
+	case boxInt32, boxInt64:
+		return choiceBoxInt64, settled
+	case boxFloat32:
+		return choiceBoxFloat32, settled
+	case boxFloat64:
+		return choiceBoxFloat64, settled
+	}
+	return choiceBoxNone, settled
+}
+
+// choiceBox applies the resolved mode to one chosen box.
+func choiceBox(mode choiceBoxMode, v any) any {
+	switch mode {
+	case choiceBoxDecimal:
+		return decimalChoiceBox(v)
+	case choiceBoxInt64, choiceBoxFloat32, choiceBoxFloat64:
+		return choiceNumberBox(mode, v)
+	}
+	return v
+}
+
+// choiceNumberBox reads a string box as the number the call's folded type
+// names.
+//
+// Only a STRING box is touched, and under a numeric fold a string can only be
+// numeric text: a DECIMAL arm's rendering, or a quoted literal's own
+// characters. A box that does not parse is left exactly as it arrived — the
+// store's #361 guard is what reports it, and replacing a loud refusal with a
+// plausible number is the regression in kind the correctness protocol's method
+// 8 is about.
+//
+// FLOAT32 narrows through float32 and hands back a float64, which is how
+// ColRef.Eval boxes a real column — so a real-typed choice and a real column
+// agree on the box as well as on the value. Both readings are
+// extremumArms.materialize's, which has answered them for GREATEST/LEAST since
+// #646; this is the same rule for the constructs that never had it.
+func choiceNumberBox(mode choiceBoxMode, v any) any {
+	s, ok := v.(string)
+	if !ok {
+		return v
+	}
+	if mode == choiceBoxInt64 {
+		n, st := kernel.IntLitText(s)
+		if st != kernel.NumConstOK {
+			return v
+		}
+		return n
+	}
+	bits := 64
+	if mode == choiceBoxFloat32 {
+		bits = 32
+	}
+	f, st := kernel.FloatLitText(s, bits)
+	if st != kernel.NumConstOK {
+		return v
+	}
+	if mode == choiceBoxFloat32 {
+		return float64(float32(f))
+	}
+	return f
 }
 
 // decimalChoiceBox rewrites a chosen box into the DECIMAL spelling.
