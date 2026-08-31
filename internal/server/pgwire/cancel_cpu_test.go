@@ -1,8 +1,10 @@
 package pgwire
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,9 +56,15 @@ func setupSelfJoinDB(t *testing.T, n int) *wadjet.DB {
 
 // waitStatementRunning polls until the session identified by pid has a
 // registered statement, and returns without cancelling anything.
+//
+// The deadline is generous on purpose: this is a HARNESS precondition, not the
+// property under test, so a machine too loaded to schedule the backend
+// goroutine must report itself as a harness timeout rather than as a
+// cancellation defect (#756).
 func waitStatementRunning(t *testing.T, srv *Server, pid int32) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	const registerBound = 30 * time.Second
+	deadline := time.Now().Add(registerBound)
 	for time.Now().Before(deadline) {
 		srv.sessionsMu.Lock()
 		c := srv.sessions[pid]
@@ -71,7 +79,47 @@ func waitStatementRunning(t *testing.T, srv *Server, pid int32) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatal("timed out waiting for the statement to register")
+	t.Fatalf("harness: statement never registered on session %d within %s", pid, registerBound)
+}
+
+// fanOutFrame is the frame a goroutine carries while it is driving batches
+// through the operator chain — the join's fan-out resume loop included. It is
+// the site #368 was about (exec.ChainDriver.push), so a stack carrying it is
+// the statement doing the CPU-bound work this test cancels.
+const fanOutFrame = "(*ChainDriver).push"
+
+// waitExecutorInFanOut polls the process's goroutine stacks until one is in
+// fanOutFrame.
+//
+// Why this and not a sleep, and not the cheaper "is the statement registered"
+// or "has the scan opened the file": everything BEFORE the operator chain has
+// its own, coarser cancellation points — scanner.Next tests ctx once per file
+// and this fixture has exactly one — so a cancel that lands ahead of the
+// fan-out is observed by those whether or not the fan-out ever looks at its
+// context. That is #368 exactly. Measured on this tree: with the per-batch ctx
+// checks in exec disabled, landing the cancel at registration passed 10/10 and
+// landing it here fails. The poll is what keeps the gate able to fail.
+//
+// A rename of push would make this time out as a HARNESS failure naming the
+// frame, which is the loud outcome; it cannot turn into a quiet pass.
+func waitExecutorInFanOut(t *testing.T) {
+	t.Helper()
+	const fanOutBound = 60 * time.Second
+	deadline := time.Now().Add(fanOutBound)
+	buf := make([]byte, 1<<20)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		for n == len(buf) { // truncated: the frame may lie past the end
+			buf = make([]byte, 2*len(buf))
+			n = runtime.Stack(buf, true)
+		}
+		if bytes.Contains(buf[:n], []byte(fanOutFrame)) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("harness: no goroutine reached %s within %s — the statement never got as far as the operator chain",
+		fanOutFrame, fanOutBound)
 }
 
 // TestCancelRequestStopsCPUBoundQuery is issue #368. The existing cancel tests
@@ -99,21 +147,40 @@ func TestCancelRequestStopsCPUBoundQuery(t *testing.T) {
 		WHERE a.o_orderkey < b.o_orderkey AND LENGTH(a.o_comment || b.o_comment) > 0`
 
 	out := a.asyncSimpleQuery(slow)
+	// Two preconditions, each polled on the thing itself rather than waited out
+	// on a clock (#756 — the fixed 500 ms sleep this replaces):
+	//
+	//   1. the statement is REGISTERED, so the CancelRequest's (pid, secret)
+	//      lookup has something to find;
+	//   2. the statement is IN THE OPERATOR CHAIN, so the cancel lands on the
+	//      quadratic fan-out rather than ahead of it, where coarser checks
+	//      would observe it for free (see waitExecutorInFanOut).
+	//
+	// Uncancelled, this statement runs ~70s on this fixture, so both polls
+	// resolve while there is nearly all of it left to stop.
 	waitStatementRunning(t, srv, a.pid)
-	// Land the cancel mid-execution, past parse/plan. The query runs for tens
-	// of seconds; 500ms is safely inside it and safely past planning.
-	time.Sleep(500 * time.Millisecond)
+	waitExecutorInFanOut(t)
 
 	// The real second-connection CancelRequest, exactly as psql ^C sends it.
 	sendCancelRequest(t, srv.Addr(), a.pid, a.secret)
-	// The registry must still hold the (now cancelled) statement: a false here
-	// would mean the lookup missed — hypothesis (1) of #368 — rather than the
-	// executor ignoring its context. Cancelling twice is what a nervous client
-	// does anyway, and must be harmless.
-	if !srv.cancelSession(a.pid, a.secret) {
-		t.Fatal("cancelSession found no statement: the CancelRequest lookup missed a running query")
-	}
 	cancelledAt := time.Now()
+
+	// Cancelling twice is what a nervous client does anyway, and must be
+	// harmless. The lookup is also the observation that distinguishes the two
+	// #368 hypotheses — a miss means the (pid, secret) lookup did not find a
+	// running statement (delivery) rather than the executor ignoring its
+	// context (observation) — but it CANNOT be asserted on its own here:
+	// sendCancelRequest waits for the server to close the cancel socket, a
+	// full round trip, and a statement that observes its cancelled context
+	// unwinds in milliseconds and unregisters itself on the way out
+	// (beginStatement's CancelFunc). A healthy server therefore reports "no
+	// statement" whenever that unwind wins the race — reproduced 1-in-20 with
+	// `go test -count=20` while ./internal/coordinator/ ran beside it, which
+	// is #756. A miss is the delivery hypothesis only when the statement ALSO
+	// never reports the cancellation, so the verdict is deferred to the
+	// outcome below.
+	lookupHit := srv.cancelSession(a.pid, a.secret)
+	const lookupMiss = "cancelSession found no statement: the CancelRequest lookup missed a running query"
 
 	const unwindBound = 2 * time.Second
 	select {
@@ -123,6 +190,10 @@ func TestCancelRequestStopsCPUBoundQuery(t *testing.T) {
 			t.Fatalf("reading query response: %v", res.err)
 		}
 		if res.code != sqlstateQueryCanceled {
+			if !lookupHit {
+				t.Fatalf("%s — and the statement answered %q (%q) instead of %s",
+					lookupMiss, res.code, res.msg, sqlstateQueryCanceled)
+			}
 			t.Fatalf("SQLSTATE = %q (%q) after %s, want %s", res.code, res.msg, unwind, sqlstateQueryCanceled)
 		}
 		if res.msg != errCanceledByRequest.Error() {
@@ -132,6 +203,9 @@ func TestCancelRequestStopsCPUBoundQuery(t *testing.T) {
 			t.Errorf("statement took %s to unwind after the cancel; a query that polls its context between batches unwinds in milliseconds", unwind)
 		}
 	case <-time.After(60 * time.Second):
+		if !lookupHit {
+			t.Fatalf("%s — and the statement never answered at all", lookupMiss)
+		}
 		t.Fatal("query never returned after cancellation")
 	}
 
