@@ -657,6 +657,200 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 	}
 }
 
+// A CTE's QUALIFIED column beside a SIBLING arm's BARE column of the same
+// name, on three arms.
+//
+// The join qualifies the build's duplicate columns with the alias the arm
+// answers to, and for a CTE reference that alias came from the SCAN below it
+// — the CTE's underlying TABLE — because a CTE records its name on the
+// subtree ROOT instead (`Node.CTEName`, deliberately: see
+// `subtreeNamesRelation`). So `c.dv` matched neither the bare `dv` a sibling
+// derived arm shipped nor the `decpair.dv` the join had renamed c's column to,
+// fell through to the resolver's qualifier strip, and bound the SIBLING's
+// column — the same value under both output names, on every arm:
+//
+//	WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+//	SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv
+//	FROM (SELECT id, b - 100 AS dv FROM decpair) p
+//	JOIN decpair x ON p.id = x.id JOIN c ON c.id = p.id
+//	JOIN decpair y ON c.id = y.id ORDER BY x.id
+//	-- PostgreSQL 17  cdv 25.50, pdv -87.2500
+//	-- 376b2cac: single and DAG cdv == pdv; the shuffled arm refused at
+//	--   dispatch, so the chain rewiring turned a loud refusal into this
+//	--   silent capture until the arm was named `c`.
+//
+// The two arms publish `dv` at DIFFERENT DECIMAL scales on purpose — that is
+// what makes the values distinguishable at all — so the single-process path
+// renders one of them at the other's typmod, which is #754 and is pinned per
+// entry rather than asserted. `distinct-names` is the control that says so:
+// no alias collision, right values at the right scale everywhere.
+func TestACTEsQualifiedColumnKeepsItsOwnArmThreeArms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	const tbl = dbpTable
+	const (
+		cteC = "WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") "
+		armP = "(SELECT id, b - 100 AS dv FROM " + tbl + ") p"
+		// PostgreSQL 17. cdv is c's `a * 2`; pdv is p's `b - 100`.
+		pgBoth = "9 rows: 1|25.50|-87.2500;2|25.50|-87.2499;3|25.50|-87.2501;" +
+			"4|-0.02|-100.0100;5|4.00|-90.0000;6|0.00|-100.0000;7||-99.0000;8|25.50|;9||;"
+		// The same values with cdv rendered at p's scale — TODO(#754).
+		scale4Both = "9 rows: 1|25.5000|-87.2500;2|25.5000|-87.2499;3|25.5000|-87.2501;" +
+			"4|-0.0200|-100.0100;5|4.0000|-90.0000;6|0.0000|-100.0000;7||-99.0000;8|25.5000|;9||;"
+	)
+	for _, tc := range []struct {
+		name, sql string
+		cols      []string
+		want      string // PostgreSQL 17, whole result
+		// singlePinned, when non-empty, is what the single-process arm
+		// answers instead: right digits at #754's scale. It FAILS the day
+		// that arm agrees with PostgreSQL, which is how the pin gets deleted.
+		singlePinned string
+	}{
+		{
+			name: "cte-last/4-join",
+			sql: cteC + "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
+				" JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id " +
+				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+		},
+		{
+			name: "cte-last/3-join",
+			sql: cteC + "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
+				" JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id ORDER BY x.id",
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+		},
+		{
+			name: "cte-last/2-join",
+			sql: cteC + "SELECT p.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
+				" JOIN c ON c.id = p.id ORDER BY p.id",
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+		},
+		{
+			// c as a DERIVED table: its alias IS stamped on the scan, so this
+			// spelling names the arm correctly by the old route. The control
+			// that says the CTE's root-stamped name was the whole of it.
+			name: "derived-c-control",
+			sql: "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
+				" JOIN " + tbl + " x ON p.id = x.id " +
+				"JOIN (SELECT id, a * 2 AS dv FROM " + tbl + ") c ON c.id = p.id " +
+				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+		},
+		{
+			// Each column projected ALONE, so a capture cannot hide behind
+			// the pair agreeing.
+			name: "sibling-arm-alone",
+			sql: cteC + "SELECT x.id AS xid, p.dv AS pdv FROM " + armP +
+				" JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id " +
+				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "pdv"},
+			want: "9 rows: 1|-87.2500;2|-87.2499;3|-87.2501;4|-100.0100;5|-90.0000;" +
+				"6|-100.0000;7|-99.0000;8|;9|;",
+		},
+		{
+			name: "cte-arm-alone",
+			sql: cteC + "SELECT x.id AS xid, c.dv AS cdv FROM " + armP +
+				" JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id " +
+				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "cdv"},
+			want: "9 rows: 1|25.50;2|25.50;3|25.50;4|-0.02;5|4.00;6|0.00;7|;8|25.50;9|;",
+			singlePinned: "9 rows: 1|25.5000;2|25.5000;3|25.5000;4|-0.0200;5|4.0000;" +
+				"6|0.0000;7|;8|25.5000;9|;",
+		},
+		{
+			// A FILTER on the captured column: a wrong binding changes the
+			// row SET here, not only a value.
+			name: "filtered-on-the-cte-column",
+			sql: cteC + "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
+				" JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id " +
+				"JOIN " + tbl + " y ON c.id = y.id WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "cdv", "pdv"},
+			want: "5 rows: 1|25.50|-87.2500;2|25.50|-87.2499;3|25.50|-87.2501;" +
+				"5|4.00|-90.0000;8|25.50|;",
+			singlePinned: "5 rows: 1|25.5000|-87.2500;2|25.5000|-87.2499;3|25.5000|-87.2501;" +
+				"5|4.0000|-90.0000;8|25.5000|;",
+		},
+		{
+			// NO collision: p publishes `pv`. Right values at the right scale
+			// on every arm, which is what makes the #754 pins above about the
+			// duplicate alias and not about this gate's mechanism.
+			name: "distinct-names",
+			sql: cteC + "SELECT x.id AS xid, c.dv AS cdv, p.pv AS ppv FROM " +
+				"(SELECT id, b - 100 AS pv FROM " + tbl + ") p " +
+				"JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id " +
+				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "cdv", "ppv"}, want: pgBoth,
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
+						arm.name, err, tc.sql)
+				}
+				got := dajDigest(res, tc.cols)
+				exp := tc.want
+				if arm.name == "single" && tc.singlePinned != "" {
+					exp = tc.singlePinned
+				}
+				if got == exp {
+					continue
+				}
+				if arm.name == "single" && tc.singlePinned != "" && got == tc.want {
+					t.Errorf("the single arm now renders the CTE's column at its OWN scale — "+
+						"#754 is fixed, delete this entry's singlePinned and assert "+
+						"PostgreSQL's values on every arm\n  SQL: %s", tc.sql)
+					continue
+				}
+				t.Errorf("%s arm answered\n  %s\nwant\n  %s\n — a CTE's qualified column bound "+
+					"a SIBLING arm's bare one\n  SQL: %s", arm.name, got, exp, tc.sql)
+			}
+		})
+	}
+
+	// The CTE FIRST in the FROM list. Its values are right on both DAG arms;
+	// the single-process path refuses the query outright, because the two
+	// arms' one alias makes it store p's scale-4 value into c's scale-2
+	// declaration. That is ADR-0024 item 4 doing its job over #754's typing,
+	// and it is pinned so the refusal cannot quietly become a wrong number.
+	t.Run("cte-first", func(t *testing.T) {
+		sql := cteC + "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM c JOIN " + armP +
+			" ON c.id = p.id JOIN " + tbl + " x ON p.id = x.id " +
+			"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id"
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if arm.name == "single" {
+				if err == nil {
+					t.Errorf("the single arm now ANSWERS the CTE-first spelling (%s) — #754 is "+
+						"fixed, delete this pin and assert PostgreSQL's values on every arm"+
+						"\n  SQL: %s", dajDigest(res, []string{"xid", "cdv", "pdv"}), sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), "numeric field overflow") {
+					t.Errorf("the single arm refused for a NEW reason: %v\n  SQL: %s", err, sql)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
+					arm.name, err, sql)
+			}
+			if got := dajDigest(res, []string{"xid", "cdv", "pdv"}); got != pgBoth {
+				t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+					arm.name, got, pgBoth, sql)
+			}
+		}
+	})
+}
+
 // A UNION of two joins on the forced-shuffle lowering.
 //
 // This is NOT the fixture for the `UnionArm.DepStage` rewiring in

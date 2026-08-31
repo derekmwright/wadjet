@@ -176,17 +176,16 @@ func postgresJoinArmCases() []pgCase {
 			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p JOIN `+
 			`(SELECT n_nationkey AS k, MIN(n_regionkey) OVER () AS w2 FROM nation) q `+
 			`ON p.k = q.k ORDER BY p.k`)
-	// The CTE spelling of the two blocks just above. The DERIVED spelling
-	// agrees on this path and this one does not, which is the tell that what
-	// is left is the CTE reference's materialization and not the slot.
-	pin("JoinArmSiblingWindowsInCTEs",
+	// The CTE spelling of the two blocks just above. It was pinned (#753):
+	// the single-process path published p's window under BOTH output columns
+	// while the DERIVED spelling agreed, because the join qualified the build
+	// arm's duplicate column with the alias of the SCAN below the CTE rather
+	// than with the CTE's own name, and `q.w` matched neither spelling. The
+	// arm is named `q` now (`joinArmAlias`) and the pin is gone.
+	add("JoinArmSiblingWindowsInCTEs",
 		`WITH p AS (SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation), `+
 			`q AS (SELECT n_nationkey AS k, MIN(n_regionkey) OVER () AS w FROM nation) `+
-			`SELECT p.w AS pw, q.w AS qw, p.k AS k FROM p JOIN q ON p.k = q.k ORDER BY p.k`,
-		pgBugWadjet+" two sibling CTEs whose bodies each hold a window: the single-process path "+
-			"publishes p's window under BOTH output columns, while the identical DERIVED-table "+
-			"spelling agrees and both stage-DAG arms agree",
-		"#753")
+			`SELECT p.w AS pw, q.w AS qw, p.k AS k FROM p JOIN q ON p.k = q.k ORDER BY p.k`)
 	// The control: two sibling blocks with NO window resolve correctly today
 	// and must keep doing so, which is what says the repair moved the SLOT
 	// and not the name resolution.

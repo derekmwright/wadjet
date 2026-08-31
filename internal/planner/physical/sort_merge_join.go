@@ -59,7 +59,7 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 	j := exec.NewSortMergeJoin(leftKeys, rightKeys)
 
 	// Set build-side table alias for column disambiguation in self-joins
-	if alias := findScanAlias(node.Children[1]); alias != "" {
+	if alias := joinArmAlias(node.Children[1]); alias != "" {
 		j.BuildTableAlias = alias
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each

@@ -162,40 +162,20 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 			map[string]string{"qw": "52.9900", "rw": "-0.0100"})
 	})
 
-	// The CTE spelling of the two blocks. Both DAG arms are right and the
-	// single path publishes p's window under BOTH columns, which is the last
-	// face of #753 — a CTE reference is materialized differently from the
-	// identical derived table, whose spelling agrees two entries up.
-	// TODO(#753): the pin FAILS the day the single arm agrees.
+	// The CTE spelling of the two blocks. It was TODO(#753): the single path
+	// published p's window under BOTH columns while the identical
+	// DERIVED-table spelling two entries up agreed. The cause was the name
+	// the join qualifies a build arm's duplicate column with — `findScanAlias`
+	// read the SCAN below the CTE, so q's `w` shipped as `decpair.w` and
+	// `q.w` matched neither it nor p's bare `w`. `joinArmAlias` names the arm
+	// `q`, and the entry asserts PostgreSQL's value on every arm now. Only
+	// #754's scale rendering is left on the single path, which is the same
+	// escape every other entry in this block carries.
 	t.Run("two sibling CTEs", func(t *testing.T) {
-		sql := "WITH p AS (SELECT id, SUM(b) OVER () AS w FROM " + dbpTable + "), " +
-			"q AS (SELECT id, SUM(a) OVER () AS w FROM " + dbpTable + ") " +
-			"SELECT p.w AS pw, q.w AS qw, p.id FROM p JOIN q ON p.id = q.id ORDER BY p.id"
-		for _, arm := range arms {
-			res, err := arm.run(sql)
-			if err != nil {
-				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
-			}
-			want := "52.99"
-			pinned := false
-			if arm.name == "single" {
-				want, pinned = "49.2400", true // TODO(#753)
-			}
-			for i, r := range res.Rows {
-				got := fmt.Sprintf("%v", r["qw"])
-				if got == want {
-					continue
-				}
-				if pinned {
-					t.Errorf("the single arm now answers qw=%q — TODO(#753) is fixed, delete "+
-						"this pin and assert 52.99 on every arm\n  SQL: %s", got, sql)
-					break
-				}
-				t.Errorf("%s arm row %d: qw = %q, PostgreSQL 17 answers 52.99\n  SQL: %s",
-					arm.name, i, got, sql)
-				break
-			}
-		}
+		check(t, "WITH p AS (SELECT id, SUM(b) OVER () AS w FROM "+dbpTable+"), "+
+			"q AS (SELECT id, SUM(a) OVER () AS w FROM "+dbpTable+") "+
+			"SELECT p.w AS pw, q.w AS qw, p.id FROM p JOIN q ON p.id = q.id ORDER BY p.id", 9,
+			map[string]string{"pw": "49.2400", "qw": "52.99"}, scaleQW)
 	})
 
 	// A sibling NESTED inside a sibling (#751). Both DAG arms are right and

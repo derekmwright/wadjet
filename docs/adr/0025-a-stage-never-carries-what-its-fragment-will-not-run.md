@@ -1335,17 +1335,61 @@ schema alone, so the walk descends through them; `Project`, `Aggregate`,
 plan the fix shows as `join-4 PROJ=[… {a yw}]` becoming `PROJ=[… {y.w yw}]`,
 which is the derived spelling's plan exactly.
 
+### A join arm answers to the name the QUERY calls it (2026-08-31, #742 round 4, #753)
+
+`findScanAlias` walks to the scan under a join arm and returns its alias — the
+name a base table and a DERIVED table both answer to, because
+`BuildFromTable`'s `setSubtreeAlias` stamps a derived alias onto every scan
+below it. A CTE reference records its name on the SUBTREE ROOT instead
+(`Node.CTEName`, `Node.CTERefAlias`), deliberately, so two relations comma-
+joined inside a CTE body keep separate identities. Reading only the scan
+returned the CTE's underlying TABLE, and the join then qualified that arm's
+duplicate columns with a name no reference in the query is written against:
+
+    WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+    SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv
+    FROM (SELECT id, b - 100 AS dv FROM decpair) p
+    JOIN decpair x ON p.id = x.id JOIN c ON c.id = p.id
+    JOIN decpair y ON c.id = y.id ORDER BY x.id
+    -- PostgreSQL 17  cdv 25.50, pdv -87.2500 — two different columns
+    -- 376b2cac  single and DAG: cdv == pdv; shuffled REFUSED at dispatch
+    -- round 3   shuffled answered cdv == pdv too
+
+The stream carried `dv` (p's, bare) and `decpair.dv` (c's, renamed by
+`QualifyAllBuildCols`). `c.dv` matched neither exactly, fell through to
+`ResolveColumnRef`'s qualifier strip, and bound the SIBLING arm's bare column.
+No runtime rule can decide that one: `p.dv` reaches the same bare column by the
+same route and is CORRECT, so the two are indistinguishable from the batch
+schema alone. The information is the plan's, and `joinArmAlias` is where the
+plan says it — the arm is named `c`, the exact match wins, and `p.dv` keeps the
+bare-strip path it already took.
+
+It closes the first residual this section used to list. Two sibling CTEs
+publishing one alias collapsed to the first arm's value on the SINGLE-process
+path (#753, pinned in `coordinator.TestSiblingWindowSubqueriesUnderAJoinKeep-
+TheirOwnValues` and in the PostgreSQL oracle's `JoinArmSiblingWindowsInCTEs`)
+for exactly this reason: `q.w` matched neither p's bare `w` nor the
+`decpair.w` the join had renamed q's to. Both pins are deleted, and the oracle
+pin's own failure — *"Wadjet now agrees with PostgreSQL, so this known
+divergence is FIXED"* — is what says so rather than a claim here.
+
+The alias reaches four places (`Stage.BuildTableAlias`, `HashJoin.BuildTable-
+Alias` on the single-process and the semi/anti-swapped paths, the sort-merge
+join's, and the compile-check of an outer join's ON residual), and all four
+take it from `joinArmAlias` so the two paths cannot disagree about what an arm
+is called. `TestTPCHStageDumpGolden` is byte-identical: no TPC-H stage's shape
+moves, and Q15 — the one TPC-H query with a CTE, joined on its build side —
+answers as it did.
+
 **What is NOT closed, measured rather than assumed.** Three residuals survive
 the sweep, each identical on `376b2cac` and on this tip, and none of them this
 mechanism:
 
-- a CTE reference stamps its name on the subtree ROOT and not on the scans
-  below it (deliberately — see `subtreeNamesRelation`), so a join has no
-  per-arm alias to qualify duplicate columns with, and two sibling CTEs
-  publishing one alias collapse to the first arm's value on EVERY path. The
-  derived-table spelling of the identical query is correct, which is the tell.
-  That is #751's and #753's CTE face and it lives in the aliasing of scopes,
-  not in what a stage carries;
+- a SIBLING nested inside a sibling answers the OUTER sibling's window on the
+  single-process path (#751). Both DAG arms are right, so the wrong side is the
+  local engine's slot allocation and not the aliasing of scopes — which is why
+  `joinArmAlias` above closed #753's CTE face and left this one. Pinned in
+  `TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues`;
 - two arms publishing one alias make the single-process path render one at the
   other's DECIMAL scale, and a DECIMAL/FLOAT pair under one alias refuses
   outright (#754);

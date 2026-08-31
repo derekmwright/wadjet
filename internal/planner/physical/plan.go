@@ -6179,7 +6179,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			if node.JoinFilter != "" && (jt == "left" || jt == "right" || jt == "full") {
 				alias := ""
 				if len(node.Children) >= 2 {
-					alias = findScanAlias(node.Children[1])
+					alias = joinArmAlias(node.Children[1])
 				}
 				if BuildJoinResidualFilter(node.JoinFilter, alias) == nil {
 					p.refuseJoin(fmt.Errorf("join ON residual %q on a %s join: "+
@@ -6342,7 +6342,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Propagate build-side table alias for column disambiguation in self-joins
 		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).
 		if len(node.Children) >= 2 {
-			if alias := findScanAlias(node.Children[1]); alias != "" {
+			if alias := joinArmAlias(node.Children[1]); alias != "" {
 				stage.BuildTableAlias = alias
 			}
 			// Multi-table build subtrees additionally carry per-column origin
@@ -7133,7 +7133,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	hj.KeyTypes = resolveJoinKeyTypes(node, leftKeys, rightKeys)
 
 	// Set build-side table alias for column disambiguation in self-joins
-	if alias := findScanAlias(node.Children[1]); alias != "" {
+	if alias := joinArmAlias(node.Children[1]); alias != "" {
 		hj.BuildTableAlias = alias
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each
@@ -7195,7 +7195,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		assignJoinKeySides(leftKeys, rightKeys,
 			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 		// Update build-side alias + origins after swap
-		if alias := findScanAlias(node.Children[1]); alias != "" {
+		if alias := joinArmAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
 		}
 		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
@@ -12716,6 +12716,45 @@ func isColumnRef(tok string) bool {
 		return false
 	}
 	return true
+}
+
+// joinArmAlias is the name the ENCLOSING QUERY calls a join arm — which is
+// what a qualified reference above the join is written against, and therefore
+// the only alias a join may qualify that arm's duplicate columns with.
+//
+// For a base table and for a derived table it is `findScanAlias`, because
+// `BuildFromTable`'s `setSubtreeAlias` stamps a derived alias onto every scan
+// below it. A CTE reference records its name on the SUBTREE ROOT instead
+// (`Node.CTEName`, plus `Node.CTERefAlias` for the name one reference gives it
+// in `FROM c AS x`) — deliberately, so two relations comma-joined inside the
+// CTE body keep separate identities (see subtreeNamesRelation) — and reading
+// only the scan below it returned the CTE's underlying TABLE:
+//
+//	WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+//	SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv
+//	FROM (SELECT id, b - 100 AS dv FROM decpair) p
+//	JOIN decpair x ON p.id = x.id JOIN c ON c.id = p.id
+//	JOIN decpair y ON c.id = y.id ORDER BY x.id
+//	-- PostgreSQL cdv 25.50, pdv -87.2500 (two different columns)
+//	-- before: `c.dv` answered p's -87.2500 on every arm
+//
+// The join qualified c's column as `decpair.dv` while p's stayed bare, so
+// `c.dv` matched neither spelling exactly, fell through to the resolver's
+// qualifier strip, and bound the SIBLING arm's bare `dv`. Naming the arm `c`
+// makes the exact match the one that wins, and leaves p's `p.dv` on the
+// bare-strip path it already took.
+func joinArmAlias(node *logical.Node) string {
+	if node == nil {
+		return ""
+	}
+	// CTERefAlias first: `FROM c AS x` is written `x.dv` above the join.
+	if node.CTERefAlias != "" {
+		return node.CTERefAlias
+	}
+	if node.CTEName != "" {
+		return node.CTEName
+	}
+	return findScanAlias(node)
 }
 
 // findScanAlias returns the table alias of the scan node in a subtree.
