@@ -640,3 +640,72 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 		})
 	}
 }
+
+// A UNION arm whose producer sits behind an exchange that a fusion or an
+// elision DELETES (METHOD 10).
+//
+// `fuseScanShuffle` and `elideCoPartitionedExchanges` both remove a stage and
+// rewire every reference to it. A union arm names its producer in
+// `UnionArm.DepStage`, which is the same kind of second reference a chained
+// join's `BuildDepStage` is, and `ValidateNativeDAGShape` asserts that it
+// equals the corresponding `Dependencies` entry — so a pass that rewires one
+// and not the other produces a plan that fails validation at dispatch. Both
+// passes now rewire it; nothing in the corpus put a union arm in that position
+// before, which is the impossibility this fixture attempts.
+func TestUnionArmBehindAnAbsorbedExchange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	const tbl = dbpTable
+	for _, tc := range []struct {
+		name, sql string
+		want      int64
+	}{
+		{
+			// Each arm is a JOIN whose sides go through an
+			// exchange-repartition on the forced-shuffle lowering, and each
+			// arm's probe scan carries a pushed filter — the shape
+			// fuseScanShuffle absorbs.
+			name: "union-all-of-two-joins",
+			sql: "SELECT COUNT(*) AS n FROM (" +
+				"SELECT t.id AS k FROM " + tbl + " t JOIN " + tbl + " u ON t.id = u.id WHERE t.a > 1 " +
+				"UNION ALL " +
+				"SELECT t.id AS k FROM " + tbl + " t JOIN " + tbl + " u ON t.id = u.id WHERE t.a < 1" +
+				") z",
+			want: 7,
+		},
+		{
+			// The same with a DERIVED arm on each side, so the absorbed scan
+			// carries a PROJECTION as well as a filter.
+			name: "union-all-of-two-derived-joins",
+			sql: "SELECT COUNT(*) AS n FROM (" +
+				"SELECT c.dv AS k FROM (SELECT id, a * 2 AS dv FROM " + tbl + ") c " +
+				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1 " +
+				"UNION ALL " +
+				"SELECT c.dv AS k FROM (SELECT id, a * 3 AS dv FROM " + tbl + ") c " +
+				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv < 1" +
+				") z",
+			want: 7,
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL answers %d: %v\n  SQL: %s",
+						arm.name, tc.want, err, tc.sql)
+				}
+				got := ctrCounts(t, res)
+				if len(got) != 1 || got[0] != tc.want {
+					t.Errorf("%s arm answered %v, PostgreSQL 17 answers %d\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+}

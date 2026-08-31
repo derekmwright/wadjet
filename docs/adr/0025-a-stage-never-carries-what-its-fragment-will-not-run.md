@@ -1005,6 +1005,14 @@ after; the rest are named at the end of this section.
   fuses. `elideCoPartitionedExchanges` deletes stages the same way and had the
   same hole; it is repaired beside it rather than left as the next filing.
 
+  A UNION ARM names its producer in `UnionArm.DepStage`, which is the same kind
+  of second reference, and `ValidateNativeDAGShape` asserts that it equals the
+  corresponding `Dependencies` entry — so a pass that rewires one and not the
+  other builds a plan its own validator rejects. Both passes rewire it now.
+  Nothing in the corpus had ever put a union arm's producer behind an absorbed
+  or elided exchange, which is METHOD 10's shape exactly: the claim that the
+  rewiring is complete needed a fixture that attempts it, and
+  `TestUnionArmBehindAnAbsorbedExchange` is it.
 
 - **A QUALIFIED reference resolves against a column under a DIFFERENT
   qualifier.** `QualifyAllBuildCols` renames EVERY build column to the build's
