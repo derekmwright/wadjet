@@ -47,11 +47,10 @@ func TestCTEFilterAboveJoinThreeArms(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
 	// The arm both issues are filed against: nothing may broadcast, so every
 	// join reads its sides through an exchange-repartition whose payload is a
 	// manifest that can drop the column the filter names.
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	arms := []struct {
 		name string
@@ -238,8 +237,7 @@ func TestCTEFilterAboveAJoinChainThreeArms(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	arms := []struct {
 		name string
@@ -441,8 +439,7 @@ func TestCTEComputedColumnAboveAJoinChainThreeArms(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	arms := []struct {
 		name string

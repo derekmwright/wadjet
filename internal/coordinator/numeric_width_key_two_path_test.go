@@ -514,11 +514,10 @@ func TestNumericWidthShuffleJoinKeysMatchPostgres(t *testing.T) {
 
 	infra := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infra, nil)
-	coord := tmdCoordinator(t, ctx, infra)
 	// A ten-row build side is broadcast by every byte-based rule, so the
 	// threshold is pinned at one byte rather than the fixture being grown:
 	// what this gate needs is the exchange, not the size.
-	coord.config.BroadcastBytesOverride = 1
+	coord := tmdCoordinator(t, ctx, infra, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	run := nwkRunner(t, ctx, nil, coord, true)
 

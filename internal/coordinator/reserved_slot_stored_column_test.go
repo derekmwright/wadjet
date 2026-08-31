@@ -44,8 +44,7 @@ func TestStoredReservedColumnStaysReadable(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	rsWriteOldTable(t, ctx, infra, infraB)
 	rsIngestOldTable(t, ctx, single)
@@ -248,8 +247,7 @@ func TestStoredReservedColumnWithSeveralWindows(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	// wintab0 rides in the SHARED corpus (tmdTables) now, so both cluster arms
 	// and the standalone arm already carry it — which is also what puts the
@@ -372,8 +370,7 @@ func TestSiblingWindowsAcrossAJoinKeepTheirOwnSlots(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	arms := []struct {
 		name string
@@ -516,8 +513,7 @@ func TestStoredSlotBesideAWrappedWindow(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	arms := []struct {
 		name string

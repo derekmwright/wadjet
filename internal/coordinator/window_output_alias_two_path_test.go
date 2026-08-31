@@ -238,8 +238,7 @@ func TestWindowOutputAliasShuffledTwoPath(t *testing.T) {
 
 	infra := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infra, nil)
-	coord := tmdCoordinator(t, ctx, infra)
-	coord.config.BroadcastBytesOverride = 1
+	coord := tmdCoordinator(t, ctx, infra, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	for _, tc := range []struct {
 		name string
