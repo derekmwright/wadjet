@@ -486,3 +486,111 @@ func TestSiblingWindowsInUnionArmsKeepTheirOwnSlots(t *testing.T) {
 		}
 	}
 }
+
+// TestStoredSlotBesideAWrappedWindow pins TODO(#750), and it exists because
+// the fixture had no assertion of its own.
+//
+// wintab0 STORES a `__win_0` column, which is the whole reason it is in
+// tmdTables — and nothing was asserting what a query that reads it beside a
+// window actually answers. The BARE window is right on every arm (the slot
+// renumbering of #694 moves the planner's slot past the stored name). The
+// WRAPPED one is not, and the rule that renumbers it deliberately declines
+// here: a wrapped window's projection carries no SlotSource, only a ColRef
+// inside its ASTExpr, and rewriting that reference when the old name IS
+// stored would move the USER's column instead — the #694 defect in the other
+// direction. So the decline is correct and the answer is still wrong, which
+// is what a pin is for.
+//
+// PostgreSQL 17 answers the stored column AND the window: `__win_0` =
+// 100,200,300,400 and `w` = 10000 on every row.
+func TestStoredSlotBesideAWrappedWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	single := tmdStandalone(t, ctx)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	infraB := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraB, nil)
+	coordB := tmdCoordinator(t, ctx, infraB)
+	coordB.config.BroadcastBytesOverride = 1
+
+	arms := []struct {
+		name string
+		run  func(string) (*oracle.Result, error)
+	}{
+		{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }},
+		{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }},
+		{"dag-shuffled", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }},
+	}
+
+	// The control, which is RIGHT on every arm and must stay right: a BARE
+	// window beside the stored column of the slot's own name.
+	t.Run("bare window beside the stored slot", func(t *testing.T) {
+		sql := "SELECT __win_0, SUM(plain) OVER () AS w FROM " + rsWinTab + " ORDER BY id"
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			if len(res.Rows) != 4 {
+				t.Fatalf("%s arm returned %d rows, want 4", arm.name, len(res.Rows))
+			}
+			for i, r := range res.Rows {
+				if got := fmt.Sprintf("%v", r["w"]); got != "10000" {
+					t.Errorf("%s arm row %d: w = %q, want the WINDOW's 10000 — the stored "+
+						"column took the window's place\n  SQL: %s", arm.name, i, got, sql)
+				}
+				if got := fmt.Sprintf("%v", r["__win_0"]); got != fmt.Sprint((i+1)*100) {
+					t.Errorf("%s arm row %d: __win_0 = %q, want the STORED %d\n  SQL: %s",
+						arm.name, i, got, (i+1)*100, sql)
+				}
+			}
+		}
+	})
+
+	// The pin: the same window WRAPPED in an expression. The single path
+	// answers the stored column's value for `w`, and both DAG arms fail
+	// loudly on a sort key nothing emits — three arms, two symptoms, one
+	// cause. TODO(#750).
+	t.Run("wrapped window beside the stored slot", func(t *testing.T) {
+		sql := "SELECT __win_0, SUM(plain) OVER () + 0 AS w FROM " + rsWinTab + " ORDER BY id"
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				if arm.name == "single" {
+					t.Errorf("the single arm now REFUSES this shape (%v); it used to answer the "+
+						"stored column. TODO(#750) moved — re-read the pin.\n  SQL: %s", err, sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), "__sortkey_0") {
+					t.Errorf("%s arm failed for some other reason than the pinned one: %v\n  SQL: %s",
+						arm.name, err, sql)
+				}
+				continue
+			}
+			if arm.name != "single" {
+				t.Errorf("the %s arm now ANSWERS this shape, so TODO(#750) is fixed — delete "+
+					"this pin and assert w=10000 on every arm\n  SQL: %s", arm.name, sql)
+				continue
+			}
+			for i, r := range res.Rows {
+				got := fmt.Sprintf("%v", r["w"])
+				if got == "10000" {
+					t.Errorf("the single arm now answers w=%q — TODO(#750) is fixed, delete "+
+						"this pin\n  SQL: %s", got, sql)
+					break
+				}
+				if got != fmt.Sprint((i+1)*100) {
+					t.Errorf("the single arm answered w=%q, which is neither the pinned stored "+
+						"value (%d) nor PostgreSQL's 10000\n  SQL: %s", got, (i+1)*100, sql)
+					break
+				}
+			}
+		}
+	})
+}
