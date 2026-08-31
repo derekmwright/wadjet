@@ -30,6 +30,9 @@ func postgresJoinArmCases() []pgCase {
 	// the range, so an engine that dropped the predicate and one that made it
 	// UNKNOWN on every row give visibly different answers.
 	const cte = `WITH c AS (SELECT n_nationkey AS k, n_regionkey AS rk, n_name AS nm FROM nation) `
+	// The same CTE with a COMPUTED published column beside the renames.
+	const cte2 = `WITH c AS (SELECT n_nationkey AS k, n_regionkey AS rk, ` +
+		`n_regionkey * 2 AS dv FROM nation) `
 	add("JoinArmCTEFilterInner", cte+
 		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey WHERE c.rk > 2`)
 	add("JoinArmCTEFilterInnerSwapped", cte+
@@ -109,6 +112,51 @@ func postgresJoinArmCases() []pgCase {
 	add("JoinArmCTEBodyAggregate",
 		`WITH c AS (SELECT n_regionkey AS gk, COUNT(*) AS cnt FROM nation GROUP BY n_regionkey) `+
 			`SELECT COUNT(*) AS n FROM c JOIN region r ON c.gk = r.r_regionkey WHERE c.cnt > 4`)
+
+	// --- A CTE publishing a COMPUTED column above a join CHAIN.
+	//
+	// Every chain entry above publishes a plain RENAME, and a rename resolves
+	// back to a source column through every DAG resolver. A COMPUTED output
+	// has to be MATERIALIZED by some fragment or it exists nowhere, and that
+	// is a different question — the one the chain entries above were blind to
+	// while the class was still open (#700/#726 round 2).
+	add("JoinArmComputedChainArith", cte2+
+		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.dv > 4`)
+	add("JoinArmComputedChainThreeJoin", cte2+
+		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey JOIN nation n3 ON c.k = n3.n_nationkey `+
+		`WHERE c.dv > 4`)
+	add("JoinArmComputedChainBare", cte2+
+		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey WHERE dv > 4`)
+	add("JoinArmComputedChainProjecting", cte2+
+		`SELECT c.k AS ck, c.dv AS dv FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.dv > 4 ORDER BY c.k`)
+	add("JoinArmComputedChainCase",
+		`WITH c AS (SELECT n_nationkey AS k, n_regionkey AS rk, `+
+			`CASE WHEN n_regionkey > 2 THEN n_regionkey ELSE 0 END AS dv FROM nation) `+
+			`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+			`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.dv > 0`)
+	add("JoinArmComputedChainNestedProject",
+		`WITH c AS (SELECT k, rk, v * 2 AS dv FROM `+
+			`(SELECT n_nationkey AS k, n_regionkey AS rk, n_regionkey AS v FROM nation) z) `+
+			`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+			`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.dv > 4`)
+	add("JoinArmComputedChainDerived",
+		`SELECT COUNT(*) AS n FROM (SELECT n_nationkey AS k, n_regionkey AS rk, `+
+			`n_regionkey * 2 AS dv FROM nation) c JOIN region r ON c.rk = r.r_regionkey `+
+			`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.dv > 4`)
+	add("JoinArmComputedChainOverWindow",
+		`WITH c AS (SELECT n_nationkey AS k, n_regionkey AS rk, `+
+			`SUM(n_regionkey) OVER () + 0 AS dv FROM nation) `+
+			`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+			`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.dv > 4`)
+	add("JoinArmComputedChainOverAggregate",
+		`WITH c AS (SELECT n_regionkey AS rk, SUM(n_nationkey) * 2 AS dv FROM nation `+
+			`GROUP BY n_regionkey) SELECT COUNT(*) AS n FROM c `+
+			`JOIN region r ON c.rk = r.r_regionkey JOIN region r2 ON c.rk = r2.r_regionkey `+
+			`WHERE c.dv > 4`)
 
 	// --- Two arms publishing ONE name, and a qualified reference to each.
 	//

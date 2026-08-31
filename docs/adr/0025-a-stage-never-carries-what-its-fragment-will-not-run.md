@@ -839,6 +839,78 @@ eleven of its subtests and reverting the resolver fails three, so neither is
 gated by the other. `postgresJoinArmCases` asks the same questions of a live
 server.
 
+Every shape in it publishes a plain RENAME, which left the whole COMPUTED half
+of the class open — see "A MINTED name is not a RENAMED one" below.
+
+### A MINTED name is not a RENAMED one, and the corpus has to attempt both (2026-08-31, #700, #726)
+
+The section above closed #700/#726 on a chain sweep of twenty shapes. Every
+one of them published a plain RENAME (`c_i64 AS v`), and a CTE publishing an
+EXPRESSION was still dropped. `grep '\* 2'` over the gate returned nothing:
+the claim "a subtree publishes what it MINTS" was written down and no fixture
+attempted the minting. That is METHOD 10 with the claim and the hole in the
+same file, and it is the third time in this arc the same shape has repeated.
+
+The two travel differently and that is the whole point. A rename resolves back
+to a source column through every DAG resolver, so it survives anywhere. A
+computed output has to be MATERIALIZED by some fragment or it exists nowhere,
+and two mechanisms were dropping it:
+
+**The chained join's own filter.** `fuseStageChains` moves a downstream join's
+`FilterExprs` onto the `ChainedJoinSpec`, and `ensureJoinCarriesEvaluated-
+Columns` read only the stage's own field — so the re-spelled predicate
+`(a * 2) > 1` was invisible to the pass whose whole job is carrying its
+columns. Reading the chained specs is necessary and not sufficient: the column
+must survive EVERY narrowing stage between the filter and its producer, and
+with the CTE on the build side the FIRST join had already dropped it before the
+second one's filter ran. The refs are now pushed down the dependency graph
+through joins and exchanges — the two kinds whose `Columns` is a filter or a
+payload manifest and can only narrow — stopping at producers, whose list is a
+read set and must not be widened.
+
+**A decline with nowhere to land.** `absorbAggregateOutputProjection` refuses a
+computed output over a DECIMAL aggregate on purpose (ADR-0024 item 2: `AggSpec`
+has an OutputType but no (p,s), and a wrong DECIMAL declaration is worse than
+no projection). The decline is right. What was wrong is that nothing then
+computes the column and the query answers WITHOUT the predicate — silently,
+and only when a JOIN is present, because `assertCarrierSchemaResolves` models
+an aggregate stage's input and excludes JOIN stages by design. The join-free
+spelling of the same query already refused and was routed local.
+
+`assertJoinFiltersAreBacked` asks the WEAKER question on a join stage's filter
+— does ANY producing stage in the plan compute this name — which is the
+question `dropUnbackedJoinColumns` already asks and which is known not to
+refuse Q02. It refuses with `ErrUnreachableGatherOutput`, so the coordinator
+answers the query locally, matching what its join-free twin already did. It
+cannot see a name that resolves to the WRONG column, and that limit is real:
+#762 is exactly such a shape and is pinned rather than caught.
+
+**Controls are what identified the trigger.** The same computed-over-aggregate
+shape over a FLOAT or a BIGINT aggregate was never declined and was always
+correct on every arm; a plain rename of the aggregate output was always
+correct. The TYPE is the trigger and the join is only what hid it — which is
+also why the fix belongs at the refusal and not at the column pruner, where
+the round-2 review first pointed. The pruner already published computed
+aliases: `projectionPublishedName` keys on the ALIAS, so `a * 2 AS dv`
+publishes `dv`, and the stage dump shows `dv` in the inner join's needed set.
+
+**What the gate carries now.** `TestCTEComputedColumnAboveAJoinChainThreeArms`
+crosses arithmetic over a column, over an aggregate and over a window, with
+CASE, CAST, COALESCE, DECIMAL arithmetic and Project-over-Project, against 2-
+and 3-join chains, the qualified and bare filter spellings, the derived twin,
+and the projecting and HAVING forms — on three arms, against values taken from
+a live PostgreSQL 17 rather than computed by hand (three of the first
+expectations were wrong and the server corrected them). Reverting the two
+fixes fails 24 of its subtests.
+
+Two residuals are pinned there rather than described as fixed: a computed
+output over an aggregate with the CTE on the BUILD side of a chain still
+answers zero on both DAG arms, because the two shuffle sides share one payload
+manifest and the name resolves to the wrong side (#762, verified pre-existing);
+and the DERIVED spelling of the same shape is refused LOUDLY, because
+`assertCarrierSchemaResolves` runs at dispatch and its error does not wrap the
+routing sentinel, so nothing routes it local (#763).
+
 ## Consequences
 
 - `StageProject` is Singleton with `Tasks: 1`, so it SERIALIZES its
