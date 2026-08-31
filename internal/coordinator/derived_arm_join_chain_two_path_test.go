@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/oracle"
+	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 )
 
 // dajArms stands up the three arms this file's gates run on: the embedded
@@ -530,4 +531,112 @@ func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A ROW FIELD PATH read across a JOIN, on three arms.
+//
+// ADR-0022: `c_row.b` is not a column reference — the qualifier IS the column
+// and the expression compiler resolves the field out of the ROW. Three lists
+// spelled it as if it were a column and dropped the container with it: the
+// logical pruner's join partition (neither side publishes the dotted name, so
+// the need went to NEITHER side and no scan read `c_row`), the join stage's
+// OutputFilter on the DAG, and the single-process probe's OutputFilter. Every
+// field came back NULL, or the reference bound to whatever scalar column
+// happened to end in `.b`:
+//
+//	SELECT x.id, c_row.b FROM typemx_nested x JOIN typemx_nested y ON x.id = y.id
+//	-- PostgreSQL 17 rejects it (no FROM-clause entry for c_row); wadjet
+//	--   answers the field, which is the deliberate superset
+//	-- 376b2cac: single all-NULL, both DAG arms `column "c_row.b" does not
+//	--   exist in the input schema`
+//
+// The same query with NO join answers correctly on 376b2cac, because nothing
+// narrows there — which is what says the join's lists are the site.
+func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	nested := typematrix.Nested
+	for _, tc := range []struct {
+		name, sql string
+		cols      []string
+		want      string
+	}{
+		{
+			// The CONTROL that bounds it: no join, correct on 376b2cac.
+			name: "no-join",
+			sql:  "SELECT id AS xid, c_row.b AS fb FROM " + nested + " WHERE id < 5 ORDER BY id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+		{
+			name: "self-join",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " + nested +
+				" y ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+		{
+			name: "join-with-a-dimension",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " +
+				typematrix.Dim + " d ON x.id = d.k WHERE x.id < 5 ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
+				}
+				if got := dajDigest(res, tc.cols); got != tc.want {
+					t.Errorf("%s arm answered\n  %s\nwant\n  %s\n — a ROW field path lost its "+
+						"CONTAINER across a join (ADR-0022)\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+
+	// The FILTER spelling, which fails LOUDLY rather than silently when the
+	// container is dropped — `filter column "c_row.b" does not exist in the
+	// input schema` on the single-process path of 376b2cac.
+	//
+	// The self-join entry is the one that cannot pass for the wrong reason:
+	// its answer must equal the SAME query with no join at all, which is the
+	// spelling nothing narrows and which was already right. 3537 of the
+	// fixture's 5000 rows have `c_row.b > 20`, so a dropped container (every
+	// row UNKNOWN, 0) and a bound-to-something-else reference are both
+	// visible.
+	for _, tc := range []struct {
+		name, sql string
+		want      int64
+	}{
+		{"filter/no-join", "SELECT COUNT(*) AS n FROM " + nested + " WHERE c_row.b > 20", 3537},
+		{"filter/self-join", "SELECT COUNT(*) AS n FROM " + nested + " x JOIN " + nested +
+			" y ON x.id = y.id WHERE c_row.b > 20", 3537},
+		{"filter/dimension-join", "SELECT COUNT(*) AS n FROM " + nested + " x JOIN " +
+			typematrix.Dim + " d ON x.id = d.k WHERE c_row.b > 20", 4},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
+				}
+				got := ctrCounts(t, res)
+				if len(got) != 1 || got[0] != tc.want {
+					t.Errorf("%s arm answered %v, want %d\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
 }

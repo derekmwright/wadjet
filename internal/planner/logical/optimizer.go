@@ -593,6 +593,39 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 					if rightAvail[col] {
 						buildNeeds[col] = true
 					}
+					if leftAvail[col] || rightAvail[col] {
+						continue
+					}
+					// A ROW FIELD PATH is supplied by the side that publishes
+					// its CONTAINER, and it is the container that side has to
+					// read (ADR-0022: `c_row.b` is not a column of anything —
+					// the expression compiler resolves the field OUT of the
+					// ROW). Neither side publishes the dotted spelling, so
+					// without this the need went to NEITHER side, the join
+					// read no `c_row` at all, and every field came back NULL:
+					//
+					//	SELECT x.id, c_row.b FROM typemx_nested x
+					//	JOIN typemx_nested y ON x.id = y.id WHERE x.id < 5
+					//	-- PostgreSQL 0, 11, NULL, NULL, 44
+					//	-- single all-NULL · both DAG arms `column "c_row.b"
+					//	--   does not exist in the input schema`
+					//
+					// The same repair the SCAN's own sanitizer already makes
+					// one level down ("what the scan must read is the BASE
+					// column"), asked at the join's partition. It fires only
+					// where the dotted spelling is supplied by neither side
+					// AND the qualifier is: an ordinary `x.id` matches
+					// leftAvail directly and never reaches here.
+					qual, _, dotted := strings.Cut(col, ".")
+					if !dotted || qual == "" {
+						continue
+					}
+					if leftAvail[qual] {
+						probeNeeds[qual] = true
+					}
+					if rightAvail[qual] {
+						buildNeeds[qual] = true
+					}
 				}
 				pushColumnNeeds(n.Children[0], probeNeeds)
 				pushColumnNeeds(n.Children[1], buildNeeds)

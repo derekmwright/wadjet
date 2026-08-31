@@ -157,10 +157,32 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 	if idx = b.ColumnIndex(parts[1]); idx >= 0 {
 		return idx, ""
 	}
-	// Try as struct field access: parts[0] is a ROW column, parts[1] is field name
+	// Try as struct field access: parts[0] is a ROW column, parts[1] is field
+	// name. The container is looked up with the same qualified fallback the
+	// scalar branches use, because a JOIN qualifies a colliding column and
+	// `c_row.b` then has to find `x.c_row` — asking only for the exact
+	// spelling left the path unresolved and the branch below bound the FIELD
+	// name to whatever scalar column happened to end in `.b`, which is
+	// ADR-0022's violation exactly.
 	parentIdx := b.ColumnIndex(parts[0])
+	if parentIdx < 0 {
+		parentIdx = uniqueQualifiedColumn(b, parts[0])
+	}
 	if parentIdx >= 0 && b.Columns[parentIdx].Type == batch.TypeRow {
 		return parentIdx, parts[1]
+	}
+	// A reference whose QUALIFIER names a ROW column of this batch is a FIELD
+	// PATH and nothing else (ADR-0022): if the field is not one of that
+	// container's children the answer is "no such thing", never some other
+	// column that happens to share the field's name.
+	if parentIdx >= 0 {
+		return -1, ""
+	}
+	// …and the same refusal when the qualifier names a ROW column the batch
+	// carries under a DIFFERENT relation than the one asked for. Two ROW
+	// columns spelled alike decline rather than pick one.
+	if rowColumnNamed(b, parts[0]) {
+		return -1, ""
 	}
 	// A QUALIFIED reference the stream spells under a DIFFERENT qualifier.
 	//
@@ -194,6 +216,27 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 		return idx, ""
 	}
 	return -1, ""
+}
+
+// rowColumnNamed reports whether any column of b is a ROW spelled `parts[0]`
+// or `<qualifier>.parts[0]`. It is the ambiguous case uniqueQualifiedColumn
+// declines: two arms carrying a ROW of the same name give a field path no
+// single container, and binding the FIELD name to a scalar instead is worse
+// than answering nothing.
+func rowColumnNamed(b *batch.RecordBatch, name string) bool {
+	for i := range b.Schema {
+		if b.Columns[i].Type != batch.TypeRow {
+			continue
+		}
+		n := b.Schema[i].Name
+		if strings.EqualFold(n, name) {
+			return true
+		}
+		if dot := strings.IndexByte(n, '.'); dot >= 0 && strings.EqualFold(n[dot+1:], name) {
+			return true
+		}
+	}
+	return false
 }
 
 // uniqueQualifiedColumn returns the index of the ONE column of b spelled

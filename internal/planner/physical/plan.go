@@ -7356,12 +7356,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// signal the build goroutine to start with the filtered scan.
 		probe := hj.Probe()
 		p.applyLateMaterialization(probe)
-		if len(node.NeededColumns) > 0 {
-			filter := make(map[string]bool, len(node.NeededColumns))
-			for _, col := range node.NeededColumns {
-				filter[col] = true
-			}
-			probe.OutputFilter = filter
+		if f := joinProbeOutputFilter(node); f != nil {
+			probe.OutputFilter = f
 		}
 
 		bridge := &reverseBloomBridge{
@@ -7387,12 +7383,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// through the deferred probe operators.
 		probe := hj.Probe()
 		p.applyLateMaterialization(probe)
-		if len(node.NeededColumns) > 0 {
-			filter := make(map[string]bool, len(node.NeededColumns))
-			for _, col := range node.NeededColumns {
-				filter[col] = true
-			}
-			probe.OutputFilter = filter
+		if f := joinProbeOutputFilter(node); f != nil {
+			probe.OutputFilter = f
 		}
 
 		bridge := &deferredJoinBridge{
@@ -7466,12 +7458,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// columns not needed by upstream operators. In multi-way joins, this
 	// eliminates allocation and gather work for columns that would otherwise
 	// be built then immediately dropped.
-	if len(node.NeededColumns) > 0 {
-		filter := make(map[string]bool, len(node.NeededColumns))
-		for _, col := range node.NeededColumns {
-			filter[col] = true
-		}
-		probe.OutputFilter = filter
+	if f := joinProbeOutputFilter(node); f != nil {
+		probe.OutputFilter = f
 	}
 	leftOps = append(leftOps, probe)
 
@@ -14993,4 +14981,34 @@ func limitPushdownSafe(node *logical.Node) bool {
 		return false
 	}
 	return sawScan
+}
+
+// joinProbeOutputFilter is the single-process join's OutputFilter, built from
+// the join node's NeededColumns with ROW FIELD PATHS expanded to their
+// CONTAINER.
+//
+// A field path names no column (ADR-0022): `c_row.b` is resolved OUT of the
+// ROW column `c_row` by the expression compiler, so an OutputFilter carrying
+// the dotted spelling and not the container drops the only thing the
+// projection can read, and every field comes back NULL —
+//
+//	SELECT x.id, c_row.b FROM typemx_nested x JOIN typemx_dim d ON x.id = d.k
+//	-- PostgreSQL 0, 11, NULL, NULL, 44 · single-process all-NULL
+//
+// — while the same query with no join answers correctly, because nothing
+// narrows there. An OutputFilter can only NARROW, so adding a qualifier that
+// names no column costs nothing; the expansion is unconditional for that
+// reason rather than guessing which qualifiers are ROW columns.
+func joinProbeOutputFilter(node *logical.Node) map[string]bool {
+	if len(node.NeededColumns) == 0 {
+		return nil
+	}
+	filter := make(map[string]bool, len(node.NeededColumns)+2)
+	for _, col := range node.NeededColumns {
+		filter[col] = true
+		if dot := strings.IndexByte(col, '.'); dot > 0 && dot < len(col)-1 {
+			filter[col[:dot]] = true
+		}
+	}
+	return filter
 }

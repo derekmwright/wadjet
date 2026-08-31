@@ -54,6 +54,13 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 	for i := range stages {
 		idx[stages[i].ID] = i
 	}
+	// What the plan really COMPUTES, movers and joins excluded — the same
+	// set assertJoinFiltersAreBacked reads, for the same reason: a join's
+	// Columns is an OutputFilter and an exchange's is a payload manifest, so
+	// a dotted name appearing in one is no evidence that anything produces
+	// it. Reading them made `c_row.b` look produced and the container
+	// expansion below decline.
+	computed := producedColumnsInPlan(stages)
 	for i := range stages {
 		s := &stages[i]
 		if !isJoinStage(s.Type) {
@@ -91,6 +98,8 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		// already at hand, and only when the subtree really produces the
 		// qualifier — an ordinary `x.id` has no column called `x` and never
 		// reaches this.
+		ownRefs = withRowContainers(ownRefs, computed)
+		chainRefs = withRowContainers(chainRefs, computed)
 		// A join stage's OWN residual filter and projection are evaluated
 		// against its OUTPUT view, which this same Columns list narrows — so
 		// they belong in it whatever the input carries. That is the broadcast
@@ -549,6 +558,39 @@ func chainedFilterTexts(s *Stage) []string {
 	return out
 }
 
+// withRowContainers appends, for every dotted reference the produced set does
+// NOT have under its dotted spelling but DOES have under its qualifier, that
+// qualifier — the ROW column a field path actually reads. See ADR-0022 and
+// the scan sanitizer's own arm ("what the scan must read is the BASE
+// column"), which makes the same substitution one level down.
+func withRowContainers(refs []string, avail map[string]string) []string {
+	if len(refs) == 0 || len(avail) == 0 {
+		return refs
+	}
+	out := refs
+	seen := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		seen[strings.ToLower(r)] = true
+	}
+	for _, r := range refs {
+		dot := strings.IndexByte(r, '.')
+		if dot <= 0 || dot == len(r)-1 {
+			continue
+		}
+		if _, ok := avail[strings.ToLower(r)]; ok {
+			continue
+		}
+		qual := r[:dot]
+		name, ok := avail[strings.ToLower(qual)]
+		if !ok || seen[strings.ToLower(qual)] {
+			continue
+		}
+		seen[strings.ToLower(qual)] = true
+		out = append(append([]string(nil), out...), name)
+	}
+	return out
+}
+
 // unionColumnNames appends the entries of add that base does not already
 // carry, case-insensitively, preserving base's order so an untouched plan
 // keeps its column order exactly.
@@ -607,7 +649,12 @@ func unionColumnNames(base, add []string) []string {
 // The refusal wraps ErrUnreachableGatherOutput, so the coordinator routes the
 // query to its local engine and ANSWERS it — the same disposition its
 // join-free spelling already had.
-func assertJoinFiltersAreBacked(stages []Stage) error {
+// producedColumnsInPlan is every column name a PRODUCING stage of the plan
+// computes. Movers and joins are excluded because their column lists are a
+// payload manifest and an OutputFilter — neither can invent a column, and
+// reading them as production is the mistake dropUnbackedJoinColumns exists to
+// undo.
+func producedColumnsInPlan(stages []Stage) map[string]string {
 	produced := map[string]string{}
 	for i := range stages {
 		switch stages[i].Type {
@@ -618,12 +665,28 @@ func assertJoinFiltersAreBacked(stages []Stage) error {
 		for k, v := range stageEmittedColumns(&stages[i]) {
 			produced[k] = v
 		}
+		// A scan's READ SET is production too: pruneScanOutputColumns may
+		// have narrowed what it SHIPS, and widenNarrowingStagesBelow can put
+		// such a column back.
+		if stages[i].Type == StageScan && len(stages[i].OutputColumns) > 0 {
+			for _, c := range stages[i].Columns {
+				if c == "" || strings.EqualFold(c, logical.RowCountOnlyColumn) {
+					continue
+				}
+				produced[strings.ToLower(c)] = c
+			}
+		}
 		for _, w := range stages[i].WindowCols {
 			if w.OutputCol != "" {
 				produced[strings.ToLower(w.OutputCol)] = w.OutputCol
 			}
 		}
 	}
+	return produced
+}
+
+func assertJoinFiltersAreBacked(stages []Stage) error {
+	produced := producedColumnsInPlan(stages)
 	if len(produced) == 0 {
 		return nil
 	}

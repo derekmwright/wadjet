@@ -1178,6 +1178,43 @@ three numeric bodies of the fixture, and a probe table — `IS NULL`,
 `COUNT`, a projection, `GROUP BY` — because a COUNT alone cannot tell a
 DROPPED predicate from one that is UNKNOWN, and those seven do.
 
+### A ROW FIELD PATH is not a column, in the three lists that narrow (2026-08-31)
+
+ADR-0022 says `c_row.b` is not a column reference: the QUALIFIER is the column
+and the expression compiler resolves the field out of the ROW. Three narrowing
+lists spelled it as if it were a column and dropped the container with it —
+the logical pruner's join partition (neither side publishes the dotted name, so
+the need went to NEITHER side and no scan read `c_row` at all), the join
+stage's `Columns` on the DAG, and the single-process probe's `OutputFilter`.
+
+    SELECT x.id, c_row.b FROM typemx_nested x JOIN typemx_nested y ON x.id = y.id
+    -- the true field values are 0, 11, NULL, NULL, 44
+    -- 376b2cac: single all-NULL, both DAG arms `column "c_row.b" does not
+    --   exist in the input schema`
+
+The same query with NO join is correct on `376b2cac`, because nothing narrows
+there — which is what says the lists are the site. Each is repaired where it
+narrows: the pruner pushes the CONTAINER to whichever side publishes it, the
+join's evaluated-column pass expands a dotted reference the plan does not
+PRODUCE into its qualifier (asked of producers only — an exchange manifest
+listing `c_row.b` is not evidence that anything computes it), and the
+single-process probe's OutputFilter carries the qualifier of every dotted
+entry, which is free because an OutputFilter can only narrow.
+
+`expr.ResolveColumnRef` gets the matching half: a container is looked up with
+the same qualified fallback the scalar branches use, so `c_row.b` finds
+`x.c_row` after a join has qualified it, and a reference whose qualifier names
+a ROW column resolves as a FIELD PATH or as NOTHING — never as some other
+column that happens to share the field's name. That guard is what the new
+last-resort suffix scan needed: without it a field path whose container had
+been pruned could bind to a scalar, which is ADR-0022's violation exactly.
+
+Wadjet answers these queries where PostgreSQL rejects them (`c_row` is not a
+FROM-clause entry). That is the deliberate superset ADR-0012 records, and it is
+gated as such: `TestRowFieldPathSurvivesAJoinThreeArms` asserts the field's own
+values, with the join-free spelling beside it as the control the join must
+agree with.
+
 **What is NOT closed, measured rather than assumed.** Three residuals survive
 the sweep, each identical on `376b2cac` and on this tip, and none of them this
 mechanism:
