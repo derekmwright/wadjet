@@ -581,20 +581,46 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
 		},
 		{
-			// AMBIGUOUS on purpose: a self-join puts a `c_row` on BOTH sides.
-			// PostgreSQL rejects the query (no FROM-clause entry for c_row);
-			// wadjet answers the FIRST arm's container, deterministically,
-			// because the resolver's exact-name lookup wins before the
-			// qualified fallback is reached. That is the same rule a bare
-			// column reference follows and it is recorded here rather than
-			// described as a refusal — an earlier commit body claimed "two
-			// ROW columns spelled alike decline rather than pick one", which
-			// is true only when NEITHER is spelled bare.
-			name: "ambiguous-container-picks-the-probe-side",
-			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " + nested +
-				" y ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
+			// The CONTROL for the two ambiguous entries below: the same rows
+			// they return, read WITHOUT a join, so their answer can be told
+			// apart from x's own. x's `c_row.b` at ids 1-4 is 11, NULL, NULL,
+			// 44 — and the ambiguous entries answer 0, 11, NULL, NULL.
+			name: "no-join/ids-1-to-4",
+			sql:  "SELECT id AS xid, c_row.b AS fb FROM " + nested + " WHERE id > 0 AND id < 5 ORDER BY id",
 			cols: []string{"xid", "fb"},
-			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+			want: "4 rows: 1|11;2|;3|;4|44;",
+		},
+		{
+			// AMBIGUOUS on purpose, and DISCRIMINATING: both arms carry a
+			// `c_row`, and the second arm's rows are SHIFTED by one id, so
+			// the two containers hold different values at every row and the
+			// entry cannot pass whichever one it picks. It picks the derived
+			// arm's — 0, 11, NULL, NULL against x's own 11, NULL, NULL, 44.
+			//
+			// PostgreSQL rejects the query outright (no FROM-clause entry for
+			// `c_row`), so this is the deliberate superset ADR-0012 records
+			// and the pick is written down as a FIXTURE rather than described
+			// as a refusal. An earlier commit body claimed "two ROW columns
+			// spelled alike decline rather than pick one"; the earlier fixture
+			// for the claim was byte-identical SQL to the self-join entry
+			// above, with the same values in both containers, and passed
+			// whichever way the resolver went.
+			name: "ambiguous-container/shifted-arm-is-the-build",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " +
+				"(SELECT id + 1 AS id, c_row FROM " + nested + ") y ON x.id = y.id " +
+				"WHERE x.id < 5 ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "4 rows: 1|0;2|11;3|;4|;",
+		},
+		{
+			// The same query with the FROM order swapped, so the shifted arm
+			// is the PROBE. Same answer: the pick does not follow probe/build.
+			name: "ambiguous-container/shifted-arm-is-the-probe",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " +
+				"(SELECT id + 1 AS id, c_row FROM " + nested + ") y JOIN " + nested +
+				" x ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "4 rows: 1|0;2|11;3|;4|;",
 		},
 		{
 			name: "join-with-a-dimension",

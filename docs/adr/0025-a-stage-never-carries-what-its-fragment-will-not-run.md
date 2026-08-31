@@ -1257,11 +1257,34 @@ spelling as its controls.
 **And two ROW columns spelled alike do NOT decline — they pick the exactly-
 spelled one.** An earlier statement of this said otherwise. `x JOIN x` puts a
 `c_row` on both sides; the resolver's exact-name lookup wins before the
-qualified fallback is reached, so `c_row.b` reads the probe side's container,
+qualified fallback is reached, so `c_row.b` reads ONE of the containers,
 deterministically. PostgreSQL rejects that query outright (no FROM-clause entry
 for `c_row`), so this is superset territory and the pick is recorded as a
 fixture rather than described as a refusal. Only when NEITHER container is
 spelled bare does the ambiguity actually decline.
+
+**Which one it picks was written down without a fixture that could tell.** An
+earlier cut of this ADR said "the probe side", and the fixture for the claim
+was byte-identical SQL to the self-join entry beside it — the same table on
+both sides, the same values in both containers, so it passed whichever way the
+resolver went. That is the third can't-fail fixture this arc produced and the
+second in this section. The discriminating shape SHIFTS the second arm's rows,
+so the two containers differ at every row:
+
+    SELECT x.id AS xid, c_row.b AS fb FROM typemx_nested x
+    JOIN (SELECT id + 1 AS id, c_row FROM typemx_nested) y ON x.id = y.id
+    WHERE x.id < 5 ORDER BY x.id
+    -- x's own c_row.b at ids 1-4 is 11, NULL, NULL, 44
+    -- answered:                      0,  11,   NULL, NULL   — the DERIVED arm's
+
+It answers the DERIVED arm's container, and it answers the SAME with the FROM
+order swapped. `SELECT *` over either spelling shows why: both produce one
+stream carrying `c_row` (the derived arm's, left BARE) and `x.c_row` (the base
+table's, qualified by the join), so what the exact-name lookup takes is the
+container nothing qualified — not "the probe side", which is a property the
+fixture could not have observed and which the planner's own side assignment
+does not preserve. Both orders are fixtures now, with the join-free reading of
+the same ids beside them as the control that tells the two containers apart.
 
 Wadjet answers these queries where PostgreSQL rejects them (`c_row` is not a
 FROM-clause entry). That is the deliberate superset ADR-0012 records, and it is
