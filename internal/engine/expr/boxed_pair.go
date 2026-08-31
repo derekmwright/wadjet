@@ -250,6 +250,19 @@ func classifyOperandFold(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		switch strings.ToLower(v.Name) {
 		case "greatest", "least":
 			return joinFoldKinds(v.Args, b)
+		case "nullif":
+			// NULLIF's VALUE is argument 0's and nothing else — its argument
+			// 1 is compared and discarded — so the fold that types it is over
+			// that one argument. Leaving it out was #761: the DECLARATION
+			// folded `COALESCE(NULLIF(numeric, '…'), real)` to real, which is
+			// PostgreSQL's answer, and this function classified the inner call
+			// boxUnknown, so the outer choice found no fold, produced no box
+			// mode, and handed the NULLIF's DECIMAL text to a FLOAT32 vector.
+			// physical.argDeclaredType has had the same arm since #646; the
+			// two recursion lists disagreeing is the whole defect.
+			if len(v.Args) > 0 {
+				return joinFoldKinds(v.Args[:1], b)
+			}
 		}
 	case *Case:
 		arms := make([]Expr, 0, len(v.Whens)+1)
@@ -369,11 +382,27 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		return boxUnknown, true
 	case *FuncCall:
 		// GREATEST/LEAST answer with ONE OF THEIR ARGUMENTS, so their kind is
-		// the join of the arguments' kinds. No other function is transparent
-		// this way; the rest declare their own result type.
+		// the join of the arguments' kinds. NULLIF answers with argument 0 or
+		// with NULL — argument 1 is compared and discarded — so its kind is
+		// that one argument's. No other function is transparent this way; the
+		// rest declare their own result type.
+		//
+		// NULLIF's arm is the KIND half of #761 and it is not optional beside
+		// the TYPE half in classifyOperandFold. The type half alone makes the
+		// outer choice produce a float box, so the query stops failing at the
+		// store — and `GREATEST(NULLIF(numeric, '…'), real)` then answers
+		// -3.50 where PostgreSQL answers -0.5, because the PAIR is still
+		// unclassifiable and compare() orders two rendered numbers by BYTES
+		// ("-3.50" sorts below "-0.5"). Trading a loud refusal for a silent
+		// wrong value is the regression in kind the correctness protocol's
+		// method 8 is about, so both arms land together.
 		switch strings.ToLower(v.Name) {
 		case "greatest", "least":
 			return joinOperandKinds(v.Args, b)
+		case "nullif":
+			if len(v.Args) > 0 {
+				return joinOperandKinds(v.Args[:1], b)
+			}
 		}
 		return boxUnknown, true
 	case *elementAtExpr:
