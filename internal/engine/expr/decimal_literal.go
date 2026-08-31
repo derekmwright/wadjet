@@ -532,16 +532,7 @@ const noLitType = batch.TypeVector + 1
 // is part of what select_common_type resolves over.
 func numericConstType(lit *Lit) (batch.TypeID, bool) {
 	if lit.Text != "" {
-		if strings.ContainsAny(lit.Text, ".eE") {
-			return batch.TypeDecimal, true
-		}
-		if n, err := strconv.ParseInt(strings.TrimSpace(lit.Text), 10, 64); err == nil {
-			if n >= math.MinInt32 && n <= math.MaxInt32 {
-				return batch.TypeInt32, true
-			}
-			return batch.TypeInt64, true
-		}
-		return batch.TypeDecimal, true
+		return NumericConstTypeOfText(lit.Text)
 	}
 	switch lit.Val.(type) {
 	case int32:
@@ -554,6 +545,54 @@ func numericConstType(lit *Lit) (batch.TypeID, bool) {
 		return batch.TypeFloat64, true
 	}
 	return 0, false
+}
+
+// NumericConstTypeOfText is numericConstType over a constant's SPELLING alone,
+// which is what the PLANNER has: physical.nodeDeclaredType types a literal from
+// its AST text, long before a compiled *Lit with a box exists.
+//
+// It is exported so the declared-type fold (expr.CommonDeclType) and the boxed
+// comparison layer resolve a constant's rung through ONE function. They fold
+// the same composite and must not disagree about it: the comparison decides
+// which argument wins and the declaration decides the vector the winner is
+// stored in, and a disagreement between them is a value narrowed or wrapped on
+// the way out (#724).
+func NumericConstTypeOfText(text string) (batch.TypeID, bool) {
+	if strings.ContainsAny(text, ".eE") {
+		return batch.TypeDecimal, true
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64); err == nil {
+		if n >= math.MinInt32 && n <= math.MaxInt32 {
+			return batch.TypeInt32, true
+		}
+		return batch.TypeInt64, true
+	}
+	return batch.TypeDecimal, true
+}
+
+// QuotedLitDecimalType is the fixed-point (p,s) a QUOTED literal contributes to
+// a DECIMAL fold: its spelling's, exactly.
+//
+// It is deliberately NOT LiteralChoiceDecimalType, which is the same question
+// for an UNSUFFIXED numeric constant and carries one extra qualification — that
+// the box compileLit built round-trips the spelling. That qualification is
+// about the box: a choice construct hands over whatever box the winning arm
+// produced, and past a double's ~17 significant digits a numeric literal's box
+// has already lost digits.
+//
+// A quoted literal has no such box. It arrives as its own TEXT, and the
+// constructs that choose between arms hand that text on unchanged — a DECIMAL
+// value IS its rendered text everywhere in this engine — so the spelling
+// reaches the store intact and the fold may declare a (p,s) wide enough for it.
+// `GREATEST(numeric(15,2), '12.750000000000000001')` therefore keeps every
+// digit, which is what PostgreSQL answers.
+//
+// ok=false for a spelling the carrier cannot hold at all ('1e39' needs 40
+// digits): the fold then declares the DECIMAL its typed operands agree on and
+// the store raises 22003 rather than wrapping (ADR-0024 items 1 and 4).
+func QuotedLitDecimalType(text string) (batch.DecimalType, bool) {
+	t, _, ok := litDecimal(text)
+	return t, ok
 }
 
 // check is refuseArm.check for the WHOLE call, not for one (best, candidate)

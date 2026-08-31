@@ -61,6 +61,37 @@ type DeclType struct {
 	// at scale 0, a function of the TypeID alone (batch.DecimalTypeOf).
 	Exact    batch.DecimalType
 	ExactSet bool
+
+	// Lit marks a declaration that came from a CONSTANT rather than from a
+	// column, a cast or a computed expression, and FoldID is the type
+	// PostgreSQL resolves that constant to inside select_common_type — which
+	// is NOT the type it declares on its own here (a bare numeric literal
+	// declares INT64 or FLOAT64, ADR-0024's recorded deferral, while
+	// PostgreSQL calls `0` an integer and `1.5` a numeric).
+	//
+	// The two are separate because only the FOLD needs PostgreSQL's rung.
+	// `CASE … THEN i32_col ELSE 0 END` is `integer` there, and reading the
+	// literal at its own INT64 declaration would widen the call to bigint —
+	// a divergence in the OID for a shape TPC-H is full of. FoldID is zero
+	// when this layer cannot name the constant's rung, and the ID then
+	// stands: that is the wide-literal deferral #555 records.
+	Lit    bool
+	FoldID batch.TypeID
+	// Quoted marks SQL's `unknown`: a QUOTED string literal.
+	//
+	// PostgreSQL types one `unknown` and resolves it FROM the other operands,
+	// so it contributes NO rung to a polymorphic call's fold and is coerced
+	// to whatever that fold resolves. Typing it a DECIDED string put a
+	// non-numeric decider in every call that held one, CommonDeclType could
+	// not fold, and the call fell back to its FIRST argument — a declaration
+	// NARROWER than the value the call produces, which the output vector then
+	// wrapped rather than narrowed: `GREATEST(bigint, real, double, '1e39')`
+	// is double precision in PostgreSQL and was int64's MINIMUM here (#724).
+	//
+	// The ID stays TypeString, because that IS the answer when nothing else
+	// decides: PostgreSQL resolves a composite whose every argument is a
+	// quoted literal to `text`, and `SELECT 'x'` is a text column.
+	Quoted bool
 }
 
 // DeclNumericLit builds the declaration of a numeric LITERAL: the type it
@@ -68,8 +99,39 @@ type DeclType struct {
 // recorded deferral) plus the exact fixed-point (p,s) of its spelling, which is
 // what a DECIMAL fold over it resolves against.
 func DeclNumericLit(id batch.TypeID, text string) DeclType {
-	d := DeclType{ID: id}
+	d := DeclType{ID: id, Lit: true}
 	if t, ok := LiteralChoiceDecimalType(text); ok {
+		d.Exact, d.ExactSet = t, true
+		// FoldID rides on the SAME qualification as Exact, deliberately: it
+		// can put the fold on the DECIMAL rung, and a spelling whose box
+		// already lost digits must not do that. `GREATEST(numeric(18,4),
+		// 493827160549382.7160549350)` would then declare DECIMAL(18,4) and
+		// store the ROUNDED double as if it were exact — a plausible wrong
+		// number in place of a recorded one, which the deferral pinned by
+		// TestWideNumericLiteralInAChoiceStaysFloat exists to keep visible.
+		// Without a rung the literal folds at its own FLOAT64 declaration,
+		// which is where that shape was.
+		if t, ok := NumericConstTypeOfText(text); ok {
+			d.FoldID = t
+		}
+	}
+	return d
+}
+
+// DeclQuotedLit is a QUOTED string literal's declaration: SQL's `unknown`.
+//
+// It names TypeString — which is what the literal is when nothing else in the
+// expression names a type, and what `SELECT 'x'` must allocate — and marks
+// itself Quoted so a polymorphic fold resolves it FROM its neighbours the way
+// PostgreSQL does, instead of letting it decide the whole call's type (#724).
+//
+// It carries the spelling's fixed-point (p,s) for the same reason a numeric
+// literal does: a fold that lands on DECIMAL has to declare a width that holds
+// the literal too, or the value the call produces on the rows the literal wins
+// does not survive the store.
+func DeclQuotedLit(text string) DeclType {
+	d := DeclType{ID: batch.TypeString, Lit: true, Quoted: true}
+	if t, ok := QuotedLitDecimalType(text); ok {
 		d.Exact, d.ExactSet = t, true
 	}
 	return d
@@ -149,6 +211,49 @@ type Ret struct {
 func (r Ret) TypeOverAllArgs() Ret {
 	r.typeAll = true
 	return r
+}
+
+// typeFromNonCandidates is the other half of the NULLIF correction, and it is
+// as narrow as its sibling below: it fires ONLY when every candidate is a
+// quoted literal, so the candidate list named `unknown` and nothing else.
+//
+// `NULLIF('0xC.C', real_col)` is real in PostgreSQL — the type comes from the
+// operator the two arguments select, and an unknown-typed literal selects
+// nothing — and it answers 12.75, the hex-float grammar's reading of that
+// spelling. Wadjet folded over the candidate list alone, so argument 0's
+// `unknown` answered for the call, the projection allocated a text vector and
+// the literal's own characters went out unread. GREATEST and LEAST never had
+// the gap: their candidate list is every argument, so the column is in it.
+//
+// It is not a general "fold every argument" rule, for the same two reasons the
+// DECIMAL widening below is not: that would widen `NULLIF(numeric(9,2),
+// numeric(18,4))` to (18,4) for a result that is always argument 0's value,
+// and it would re-open the Guessed/Decided contract of #331/#333.
+func (r Ret) typeFromNonCandidates(d DeclType, seen []DeclType, conf []Confidence, nargs int) (DeclType, bool) {
+	if !r.typeAll || !d.Quoted {
+		return DeclType{}, false
+	}
+	// The quoted literal rides along. It still names no rung — CommonDeclType
+	// skips it for that — but a fold that lands on DECIMAL has to declare a
+	// (p,s) wide enough for the literal's own spelling, or the value the call
+	// returns is the one digit-shortened on the way into the vector:
+	// `NULLIF('12.750000000000000001', numeric(15,2))` answers the literal on
+	// every row and PostgreSQL keeps all twenty digits.
+	others := []DeclType{d}
+	for i := 0; i < nargs && i < len(seen); i++ {
+		if r.isCandidate(i, nargs) || r.isControl(i) || conf[i] != Decided {
+			continue
+		}
+		others = append(others, seen[i])
+	}
+	if len(others) == 1 {
+		return DeclType{}, false
+	}
+	out, ok := CommonDeclType(others, false)
+	if !ok || out.Quoted {
+		return DeclType{}, false
+	}
+	return out, true
 }
 
 // widenToDecimalBeyondCandidates is the NULLIF correction, and it is
@@ -424,6 +529,9 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 				}
 			}
 			if d, ok := CommonDeclType(decided, sawUnknown); ok {
+				if other, ok := r.typeFromNonCandidates(d, seen, conf, nargs); ok {
+					return other, Decided
+				}
 				if wider, ok := r.widenToDecimalBeyondCandidates(d, seen, conf, nargs); ok {
 					return wider, Decided
 				}
@@ -447,14 +555,28 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 // ok=false means DECLINE: the caller must answer as if nothing had decided,
 // which is what it did before a DECIMAL operand could decide anything.
 //
-// The first decider still wins, which is what it always did — with one
-// exception, and it is the whole reason this function exists rather than a
-// `return decided[0]`. A DECIMAL is not a type on its own: COALESCE over
-// DECIMAL(9,2) and DECIMAL(18,4) has to answer a type that holds BOTH, or the
-// narrower declaration truncates the wider argument's digits on the way into
-// the output vector. So when every decider is a DECIMAL with a known (p,s),
-// they are folded through batch.DecimalCommon — the same rule a set operation
-// reconciles its arms with (ADR-0024 item 2).
+// The NUMERIC deciders fold through PostgreSQL's select_common_type ladder —
+// INT32 → INT64 → DECIMAL → FLOAT32 → FLOAT64 — and not through "the first
+// decider wins", which is what this did until #724. The difference is a VALUE,
+// not an OID: `GREATEST(bigint, real, double)` is double precision in
+// PostgreSQL, and declaring it bigint from argument 0 does not narrow the
+// double the call produces, it WRAPS it — 1e39 stored into an int64 vector is
+// int64's MINIMUM, #462's failure mode. The ladder is verified live on
+// postgres:17-alpine for every ordered pair of the six numeric widths and is
+// the same one setOpWiden pins for set operations and joinFoldKinds runs over
+// the compiled tree.
+//
+// A DECIMAL is not a type on its own: COALESCE over DECIMAL(9,2) and
+// DECIMAL(18,4) has to answer a type that holds BOTH, or the narrower
+// declaration truncates the wider argument's digits on the way into the output
+// vector. So when the ladder lands on DECIMAL, every decider's fixed-point
+// contribution is folded through batch.DecimalCommon — the same rule a set
+// operation reconciles its arms with (ADR-0024 item 2).
+//
+// A QUOTED literal contributes NO rung. PostgreSQL types one `unknown` and
+// resolves it from the other operands, which is exactly what DeclType.Quoted
+// says here; a composite whose every argument is quoted is `text` there and
+// answers TypeString here.
 //
 // sawUnknown is the safety clause and it is not optional. A branch that
 // decided nothing still PRODUCES a value at runtime — a scalar subquery, a
@@ -481,47 +603,154 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 // integer won, and failed at the #361 store guard on the first row the decimal
 // won — data-dependent, which is why it could not stand.
 //
-// A DECIMAL beside a FLOAT stays float8, which is PostgreSQL's rule (float8 is
-// the preferred type of the numeric category) and is what the first non-DECIMAL
-// decider already answered.
+// A DECIMAL beside a FLOAT is the float, which is PostgreSQL's rule (both
+// float types are preferred in the numeric category, and only float8 beats
+// float4) — in EITHER argument order now. `COALESCE(numeric, real)` answered
+// real before #724 and `COALESCE(real, numeric)` answered real too, but
+// `GREATEST(numeric(15,2), c_i64, real)` answered bigint, because the first
+// non-DECIMAL decider was the bigint. The rows the DECIMAL arm wins hand over
+// that branch's TEXT, which the float vector then has to read: choice_decimal.go
+// does that at the box, so the declaration and the value agree (#555's float
+// half).
 func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 	if len(decided) == 0 {
 		return DeclType{}, false
+	}
+	// A QUOTED literal is SQL's `unknown` and names no rung: PostgreSQL
+	// resolves it FROM the others and coerces it to what they agree on. With
+	// every argument quoted there is nothing to resolve from and the answer is
+	// `text`, which is what decided[0] already is (DeclQuotedLit).
+	typed := make([]DeclType, 0, len(decided))
+	for _, d := range decided {
+		if !d.Quoted {
+			typed = append(typed, d)
+		}
+	}
+	if len(typed) == 0 {
+		return decided[0], true
+	}
+	if allLiterals(typed) {
+		// Nothing but CONSTANTS. A constant's OWN declaration is ADR-0024's
+		// recorded deferral — `SELECT 1` is a bigint here and an integer in
+		// PostgreSQL — and with no typed operand there is nothing for the
+		// fold to resolve it FROM, so the deferral stands exactly where it
+		// was: `GREATEST(0.5, 1.5)` keeps the FLOAT64 a bare numeric literal
+		// declares, along with the spelling an OUTER fold reads off it.
+		return typed[0], true
+	}
+	rung, numeric := numericRungFold(typed)
+	if !numeric {
+		// Not a fold this rule can make: a string, a date, a bool, a mixture
+		// of categories PostgreSQL would refuse outright. The first
+		// non-DECIMAL decider answers, exactly as it did before a DECIMAL
+		// column reference could decide anything at all.
+		for _, alt := range typed {
+			if alt.ID != batch.TypeDecimal {
+				return alt, true
+			}
+		}
+		return typed[0], true
+	}
+	if rung != batch.TypeDecimal {
+		// INT32/INT64/FLOAT32/FLOAT64: the rung IS the declaration, and it
+		// holds every operand's values by construction.
+		return Decl(rung), true
 	}
 	metas := make([]batch.DecimalType, 0, len(decided))
 	sawDecimal := false
 	for _, d := range decided {
 		m, isDec, ok := declFixedPoint(d)
 		if !ok {
-			// Not a fold this rule can make: a float, a string, a date. The
-			// first non-DECIMAL decider answers, exactly as it did before a
-			// DECIMAL column reference could decide anything at all.
-			for _, alt := range decided {
-				if alt.ID != batch.TypeDecimal {
-					return alt, true
-				}
-			}
-			return decided[0], true
+			continue
 		}
 		sawDecimal = sawDecimal || isDec
 		metas = append(metas, m)
 	}
 	if !sawDecimal {
-		// Every decider is an integer or a numeric literal and none is a
-		// DECIMAL: `COALESCE(i, 0)` is integer in PostgreSQL and stays INT64
-		// here, and `COALESCE(0.5, 1.5)` keeps the FLOAT64 a bare numeric
-		// literal declares (ADR-0024's deferral — a literal's OWN declaration
-		// is not this change's business).
-		return decided[0], true
+		// The rung is DECIMAL because a numeric LITERAL put it there and no
+		// operand is a genuine DECIMAL — `COALESCE(i32, 1.5)`, which
+		// PostgreSQL types numeric. The runtime's choice fold declines for a
+		// constant arm on purpose (ADR-0024: a constant CONTRIBUTES to the
+		// fold and never TRIGGERS it), so declaring DECIMAL here would build a
+		// vector for a value the evaluator never renders. Keep what this
+		// answered before — ADR-0024's recorded literal deferral, pinned by
+		// TestFractionalLiteralBesideAnIntegerColumnStaysInteger.
+		return typed[0], true
 	}
 	if sawUnknown {
 		return DeclType{}, false
 	}
 	m, ok := batch.DecimalCommon(metas)
 	if !ok {
-		return decided[0], true
+		return typed[0], true
 	}
 	return DeclDecimal(m.Precision, m.Scale), true
+}
+
+// numericRungFold folds the deciders through PostgreSQL's select_common_type
+// ladder over the numeric category — INT32 → INT64 → DECIMAL → FLOAT32 →
+// FLOAT64 — and reports numeric=false when any decider is outside it.
+//
+// It is the DECLARED-type twin of expr.joinFoldKinds, which resolves the same
+// composite over the COMPILED tree, and of physical.foldArgTypes, which
+// resolves it over the AST for the literal refusal. All three run
+// widerNumericType and must give one answer per composite: the comparison
+// decides which argument wins, the refusal decides whether a literal beside
+// them can be read at all, and the declaration decides the vector the winner is
+// stored into. A declaration NARROWER than the fold does not narrow the value,
+// it WRAPS it (#724).
+//
+// A CONSTANT is folded at PostgreSQL's rung for its spelling (DeclType.FoldID),
+// not at the type it declares alone: `CASE … THEN i32 ELSE 0 END` is `integer`
+// there, and reading the 0 at the INT64 a bare numeric literal declares here
+// would widen the call to bigint. With no typed operand beside it a constant
+// keeps its own declaration — `SELECT CASE WHEN … THEN 1 ELSE 2 END` is a
+// bigint here and an integer in PostgreSQL, which is ADR-0024's literal
+// deferral and not this function's business to reopen.
+func numericRungFold(typed []DeclType) (batch.TypeID, bool) {
+	out, have := batch.TypeBool, false
+	for _, d := range typed {
+		t, ok := declFoldRung(d)
+		if !ok {
+			return batch.TypeBool, false
+		}
+		if !have {
+			out, have = t, true
+			continue
+		}
+		out = widerNumericType(out, t)
+	}
+	return out, have
+}
+
+// declFoldRung is one decider's rung on that ladder.
+func declFoldRung(d DeclType) (batch.TypeID, bool) {
+	if d.ID == batch.TypeDecimal {
+		// #458's unconstrained sentinel: a DECIMAL nobody could put a (p,s)
+		// on is not a declaration to fold against.
+		if !d.DecKnown {
+			return batch.TypeBool, false
+		}
+		return batch.TypeDecimal, true
+	}
+	if d.Lit && d.FoldID != 0 {
+		return d.FoldID, true
+	}
+	switch d.ID {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32, batch.TypeFloat64:
+		return d.ID, true
+	}
+	return batch.TypeBool, false
+}
+
+// allLiterals reports whether every decider came from a constant.
+func allLiterals(typed []DeclType) bool {
+	for _, d := range typed {
+		if !d.Lit {
+			return false
+		}
+	}
+	return true
 }
 
 // declFixedPoint is one decider's contribution to a DECIMAL fold: the (p,s) it

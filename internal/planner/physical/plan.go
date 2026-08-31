@@ -10260,15 +10260,18 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		case plansql.LitBool:
 			return expr.Decl(parquet.TypeBool), expr.Decided
 		case plansql.LitString:
-			// TODO(#724): PostgreSQL types a quoted literal `unknown` and
-			// resolves the expression from the other operands. Calling it a
-			// DECIDED string puts a non-numeric decider in every polymorphic
-			// call that holds one, so expr.CommonDeclType cannot fold and
-			// falls back to decided[0] — and the output vector then WRAPS the
-			// value the call actually produces (int64's minimum for a folded
-			// 1e39). The pins are in
-			// coordinator.TestExtremumWinnerIsMaterializedAtTheCallsType.
-			return expr.Decl(parquet.TypeString), expr.Decided
+			// SQL's `unknown` (#724). PostgreSQL types a quoted literal from
+			// the OTHER operands and coerces it to what they resolve to, so
+			// it is DECIDED — `SELECT 'x'` is a text column, and so is a
+			// composite whose every argument is quoted — while contributing
+			// no rung of its own to a polymorphic fold. Calling it a plain
+			// DECIDED string put a non-numeric decider in every call that
+			// held one, expr.CommonDeclType could not fold, and the call fell
+			// back to its FIRST argument: `GREATEST(bigint, real, double,
+			// '1e39')` is double precision in PostgreSQL and was int64's
+			// MINIMUM here, because the output vector does not narrow a value
+			// past its range, it wraps it.
+			return expr.DeclQuotedLit(n.Value), expr.Decided
 		}
 		// LitNull is SQL's `unknown`: it names no type AND produces no
 		// value, which is a different fact from "this branch decided
