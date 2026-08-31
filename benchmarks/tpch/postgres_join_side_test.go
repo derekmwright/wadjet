@@ -60,6 +60,47 @@ func postgresJoinArmCases() []pgCase {
 		`SELECT c.k AS ck, c.rk AS crk, c.nm AS cnm FROM c JOIN region r ON c.rk = r.r_regionkey `+
 		`WHERE c.rk > 2 ORDER BY c.k`)
 
+	// --- The same filter above a CHAIN of joins, which is where #700/#726
+	// actually live. The one-join sweep above passes everywhere and the
+	// two-join one did not: the column pruner partitions a join's needs using
+	// the names the subtree's SCANS store, and a CTE's alias is stored by no
+	// scan, so it went to neither side and the INNER join's OutputFilter
+	// dropped it. The single path raised `filter column "c.rk" does not exist
+	// in the input schema`; the shuffled DAG answered zero in silence.
+	add("JoinArmCTEFilterTwoJoinChain", cte+
+		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.rk > 2`)
+	add("JoinArmCTEFilterTwoJoinChainCTESecond", cte+
+		`SELECT COUNT(*) AS n FROM region r JOIN c ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.rk > 2`)
+	add("JoinArmCTEFilterThreeJoinChain", cte+
+		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey JOIN nation n3 ON c.k = n3.n_nationkey `+
+		`WHERE c.rk > 2`)
+	add("JoinArmCTEFilterTwoJoinChainBare", cte+
+		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey WHERE rk > 2`)
+	add("JoinArmCTEFilterTwoJoinChainConjoined", cte+
+		`SELECT COUNT(*) AS n FROM c JOIN region r ON c.rk = r.r_regionkey `+
+		`JOIN nation n2 ON c.k = n2.n_nationkey WHERE c.rk > 2 AND n2.n_nationkey < 20`)
+	add("JoinArmDerivedFilterTwoJoinChain",
+		`SELECT COUNT(*) AS n FROM (SELECT n_nationkey AS k, n_regionkey AS rk FROM nation) c `+
+			`JOIN region r ON c.rk = r.r_regionkey JOIN nation n2 ON c.k = n2.n_nationkey `+
+			`WHERE c.rk > 2`)
+	// The ROW spelling through the chain, so the values are compared and not
+	// only a count.
+	add("JoinArmCTEFilterTwoJoinChainRows", cte+
+		`SELECT c.k AS ck, c.rk AS crk, c.nm AS cnm FROM c `+
+		`JOIN region r ON c.rk = r.r_regionkey JOIN nation n2 ON c.k = n2.n_nationkey `+
+		`WHERE c.rk > 2 ORDER BY c.k`)
+	// The CTE on the BUILD side of the first join of a chain, which is the
+	// spelling where the join qualifies its columns and the re-spelled filter
+	// names the bare one.
+	add("JoinArmCTEFilterChainCTEOnBuild",
+		`WITH c AS (SELECT n_nationkey AS k, n_name AS v FROM nation) `+
+			`SELECT COUNT(*) AS n FROM nation t JOIN c ON c.k = t.n_nationkey `+
+			`JOIN nation u ON c.k = u.n_nationkey WHERE c.v > 'M'`)
+
 	// The CTE BODY is a window, then an aggregate: the filter names an output
 	// that lives in a hidden slot, and one that is an aggregate's output.
 	add("JoinArmCTEBodyWindow",
@@ -107,26 +148,37 @@ func postgresJoinArmCases() []pgCase {
 			`(SELECT n_nationkey AS k, n_regionkey * 3 AS w FROM nation) q `+
 			`ON p.k = q.k ORDER BY p.k`)
 
-	// --- The residuals, pinned so the day they agree this file FAILS.
-	pin("JoinArmSiblingWindowsThree",
+	// --- The join-OF-JOINS shapes. Every one of these diverged until the
+	// column pruner learned that a subtree also publishes the names its own
+	// Projects MINT: a derived alias is stored by no scan, so it belonged to
+	// neither side of the partition and the INNER join's OutputFilter dropped
+	// it. They are GATED now, and they are the entries that keep that closed.
+	add("JoinArmSiblingWindowsThree",
 		`SELECT p.w AS pw, q.w AS qw, s.w AS sw, p.k AS k FROM `+
 			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p JOIN `+
 			`(SELECT n_nationkey AS k, MIN(n_regionkey) OVER () AS w FROM nation) q ON p.k = q.k JOIN `+
 			`(SELECT n_nationkey AS k, MAX(n_regionkey) OVER () AS w FROM nation) s ON p.k = s.k `+
-			`ORDER BY p.k`,
-		pgBugWadjet+" a derived table's computed column read above a JOIN OF JOINS takes the "+
-			"last arm's value on the single-process path; both stage-DAG arms answer it correctly",
-		"#753")
-	pin("JoinArmDerivedComputedUnderJoinOfJoins",
+			`ORDER BY p.k`)
+	// The same shape with NO window anywhere and a distinct alias per arm,
+	// which is what says the collapse was never a name collision. It answered
+	// NULL for the first two columns.
+	add("JoinArmDerivedComputedUnderJoinOfJoins",
 		`SELECT p.w1 AS pw, q.w2 AS qw, s.w3 AS sw, p.k AS k FROM `+
 			`(SELECT n_nationkey AS k, n_regionkey + 1 AS w1 FROM nation) p JOIN `+
 			`(SELECT n_nationkey AS k, n_regionkey * 3 AS w2 FROM nation) q ON p.k = q.k JOIN `+
 			`(SELECT n_nationkey AS k, n_regionkey * 5 AS w3 FROM nation) s ON p.k = s.k `+
-			`ORDER BY p.k`,
-		pgBugWadjet+" the same shape with no window anywhere and a DISTINCT alias per arm, so the "+
-			"collapse is not a name collision: the single-process path answers NULL for the "+
-			"first two columns",
-		"#753")
+			`ORDER BY p.k`)
+	// #742's shape on THIS path. The single-process engine answers PostgreSQL's
+	// value now; both stage-DAG arms still answer the other arm's column, which
+	// the two-path gate pins — an entry that agrees here is no evidence about
+	// them.
+	add("JoinArmQualifiedRefAcrossArms",
+		`SELECT x.k AS k, x.w AS xw FROM `+
+			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () + 0 AS w FROM nation) x JOIN `+
+			`nation y ON x.k = y.n_nationkey JOIN `+
+			`(SELECT n_nationkey AS k, n_regionkey * 3 AS w FROM nation) z ON x.k = z.k ORDER BY x.k`)
+
+	// --- The residuals, pinned so the day they agree this file FAILS.
 	pin("JoinArmSiblingNestedInSibling",
 		`SELECT p.w AS pw, q.w AS qw, p.k AS k FROM `+
 			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p JOIN `+
@@ -135,14 +187,5 @@ func postgresJoinArmCases() []pgCase {
 		pgBugWadjet+" a sibling nested inside a sibling: the single-process path answers the OUTER "+
 			"sibling's window for the inner one; both stage-DAG arms are right",
 		"#751")
-	pin("JoinArmQualifiedRefAcrossArms",
-		`SELECT x.k AS k, x.w AS xw FROM `+
-			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () + 0 AS w FROM nation) x JOIN `+
-			`nation y ON x.k = y.n_nationkey JOIN `+
-			`(SELECT n_nationkey AS k, n_regionkey * 3 AS w FROM nation) z ON x.k = z.k ORDER BY x.k`,
-		pgBugWadjet+" a QUALIFIED reference resolves through the other arm's identically-named "+
-			"column: `x.w` answers z's `n_regionkey * 3` on every execution path",
-		"#742")
-
 	return out
 }
