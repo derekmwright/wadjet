@@ -1896,6 +1896,30 @@ func runWireCancellation(t *testing.T, ctx context.Context, wadjetDSN, pgDSN str
 		WHERE a.o_orderkey <= 15000 AND b.o_orderkey <= 15000 AND a.o_orderkey < b.o_orderkey
 		  AND LENGTH(a.o_comment || b.o_comment) > 0`
 
+	// The CONTROL arm runs that statement behind a sleep floor, and only the
+	// control arm does.
+	//
+	// Wadjet walks the cross product for over a minute; PostgreSQL finishes the
+	// same 15,000-row nested loop in a few seconds (3.66s measured at SF0.01),
+	// and a few seconds is not a safe margin over a cancel sent at 300ms. Under
+	// a loaded machine the backend reached the end of the join before its next
+	// CHECK_FOR_INTERRUPTS, and the probe reported the REFERENCE as having
+	// accepted a CancelRequest and ignored it (#748) — a timing property of the
+	// control, asserted as if it were a property of cancellation.
+	//
+	// Enlarging the shared statement is not the fix: the o_orderkey bound
+	// exists to keep the work identical at every tier, and the smallest tier
+	// has only 15,000 orders to bound, so there is nothing to enlarge it with.
+	// The floor makes early completion impossible instead of unlikely. The
+	// uncorrelated subquery plans as an InitPlan under a One-Time Filter ABOVE
+	// the nested loop (EXPLAIN, postgres 17.11), so PostgreSQL runs it before
+	// the join can produce anything and the cancel always lands inside the
+	// sleep — an interruptible wait that answers 57014 in milliseconds.
+	// Uncancelled the statement still ends on its own in well under a minute,
+	// which the abandoned-statement handling below depends on.
+	const pgSleepFloorSeconds = 30
+	pgSlow := fmt.Sprintf("%s\n\t\t  AND (SELECT COUNT(*) FROM (SELECT pg_sleep(%d)) z) = 1", slow, pgSleepFloorSeconds)
+
 	// The cancel is sent this long after the statement starts. A statement that
 	// finishes sooner says nothing either way and is skipped.
 	const cancelAfter = 300 * time.Millisecond
@@ -1913,7 +1937,10 @@ func runWireCancellation(t *testing.T, ctx context.Context, wadjetDSN, pgDSN str
 	// probe had stopped measuring cancellation at all.
 	pins := map[string]string{}
 
-	for _, s := range []struct{ name, dsn string }{{"PostgreSQL", pgDSN}, {"Wadjet", wadjetDSN}} {
+	for _, s := range []struct{ name, dsn, sql string }{
+		{"PostgreSQL", pgDSN, pgSlow},
+		{"Wadjet", wadjetDSN, slow},
+	} {
 		t.Run(s.name, func(t *testing.T) {
 			runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
@@ -1943,7 +1970,7 @@ func runWireCancellation(t *testing.T, ctx context.Context, wadjetDSN, pgDSN str
 			done := make(chan outcome, 1)
 			start := time.Now()
 			go func() {
-				state, err := execSQLState(runCtx, conn, slow)
+				state, err := execSQLState(runCtx, conn, s.sql)
 				done <- outcome{state, err, time.Since(start)}
 			}()
 
@@ -1959,7 +1986,7 @@ func runWireCancellation(t *testing.T, ctx context.Context, wadjetDSN, pgDSN str
 					t.Logf("known divergence, NOT gated [%s]: %s\n  %s", wirePropSQLState, detail, pin)
 					return
 				}
-				t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropSQLState, detail, slow)
+				t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropSQLState, detail, s.sql)
 			}
 
 			var got outcome
