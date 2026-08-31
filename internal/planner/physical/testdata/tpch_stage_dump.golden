@@ -1,0 +1,234 @@
+Q01	scan-0	scan	scanfiles=600	cols=[l_discount l_extendedprice l_linestatus l_quantity l_returnflag l_shipdate l_tax]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q01	final_aggregate-39	final_aggregate	scanfiles=0	cols=[]	deps=[scan-0]	ops=f0/p0/a8/w0/fj0/cj0/sk2
+Q01	exchange-gather-final_aggregate-39	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-39]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-0	scan	scanfiles=1	cols=[s_acctbal s_address s_comment s_name s_nationkey s_phone s_suppkey]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-1	scan	scanfiles=1	cols=[n_name n_nationkey n_regionkey]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-3	scan	scanfiles=1	cols=[r_name r_regionkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q02	join-4	broadcast_join	scanfiles=0	cols=[n_name n_regionkey ps_suppkey r_regionkey s_acctbal s_address s_comment s_name s_phone s_suppkey]	deps=[exchange-replicate-join-4-3 scan-0 scan-1]	ops=f0/p0/a0/w0/fj1/cj0/sk0
+Q02	scan-5	scan	scanfiles=80	cols=[ps_partkey ps_suppkey ps_supplycost]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	exchange-repartition-6	exchange-repartition	scanfiles=0	cols=[n_name p_partkey ps_partkey ps_suppkey ps_supplycost s_acctbal s_address s_comment s_name s_phone s_suppkey]	deps=[join-4]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	exchange-repartition-7	exchange-repartition	scanfiles=0	cols=[n_name p_partkey ps_partkey ps_suppkey ps_supplycost s_acctbal s_address s_comment s_name s_phone s_suppkey]	deps=[scan-5]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	join-8	hash_join	scanfiles=0	cols=[n_name p_partkey ps_partkey ps_suppkey ps_supplycost s_acctbal s_address s_comment s_name s_phone s_suppkey]	deps=[exchange-repartition-6 exchange-repartition-7 exchange-replicate-join-10-9]	ops=f0/p0/a0/w0/fj0/cj1/sk0
+Q02	scan-9	scan	scanfiles=20	cols=[p_mfgr p_partkey p_size p_type]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-11	scan	scanfiles=80	cols=[ps_partkey ps_suppkey ps_supplycost]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-12	scan	scanfiles=1	cols=[s_acctbal s_address s_comment s_name s_nationkey s_phone s_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-14	scan	scanfiles=1	cols=[n_name n_nationkey n_regionkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-16	scan	scanfiles=1	cols=[r_name r_regionkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	scan-18	scan	scanfiles=20	cols=[p_partkey p_size p_type]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q02	join-19	broadcast_join	scanfiles=0	cols=[n_name p_partkey ps_partkey ps_supplycost r_name s_acctbal s_address s_comment s_name s_phone]	deps=[exchange-replicate-join-19-15 scan-11 scan-12 scan-14 scan-16]	ops=f1/p0/a0/w0/fj3/cj0/sk0
+Q02	aggregate-20	aggregate	scanfiles=0	cols=[]	deps=[join-19]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q02	final_aggregate-21	final_aggregate	scanfiles=0	cols=[]	deps=[exchange-repartition-final_aggregate-21-17]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q02	join-24	hash_join	scanfiles=0	cols=[__scalar_0 n_name p_mfgr p_partkey ps_partkey ps_supplycost s_acctbal s_address s_comment s_name s_phone]	deps=[final_aggregate-21 join-8]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q02	sort-25	sort	scanfiles=0	cols=[]	deps=[join-24]	ops=f0/p0/a0/w0/fj0/cj0/sk4
+Q02	exchange-replicate-join-4-3	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	exchange-replicate-join-10-9	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	exchange-replicate-join-19-15	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-18]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	exchange-repartition-final_aggregate-21-17	exchange-repartition	scanfiles=0	cols=[]	deps=[aggregate-20]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q02	exchange-gather-sort-25	exchange-gather	scanfiles=0	cols=[]	deps=[sort-25]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q03	scan-0	scan	scanfiles=150	cols=[o_custkey o_orderdate o_orderkey o_shippriority]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q03	scan-1	scan	scanfiles=15	cols=[c_custkey c_mktsegment]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q03	join-2	broadcast_join	scanfiles=0	cols=[c_custkey l_orderkey o_custkey o_orderdate o_orderkey o_shippriority]	deps=[exchange-replicate-join-2-2 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q03	scan-3	scan	scanfiles=600	cols=[l_discount l_extendedprice l_orderkey l_shipdate]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q03	exchange-repartition-4	exchange-repartition	scanfiles=0	cols=[l_discount l_extendedprice l_extendedprice * (1 - l_discount) l_orderkey o_orderdate o_orderkey o_shippriority]	deps=[join-2]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q03	join-6	hash_join	scanfiles=0	cols=[l_discount l_extendedprice l_extendedprice * (1 - l_discount) l_orderkey o_orderdate o_orderkey o_shippriority]	deps=[exchange-repartition-4 scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q03	final_aggregate-8	final_aggregate	scanfiles=0	cols=[]	deps=[join-6]	ops=f0/p0/a1/w0/fj0/cj0/sk2
+Q03	sort-9	sort	scanfiles=0	cols=[]	deps=[final_aggregate-8]	ops=f0/p0/a0/w0/fj0/cj0/sk2
+Q03	exchange-replicate-join-2-2	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q03	exchange-gather-sort-9	exchange-gather	scanfiles=0	cols=[]	deps=[sort-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q04	scan-0	scan	scanfiles=150	cols=[o_orderdate o_orderkey o_orderpriority]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q04	scan-1	scan	scanfiles=600	cols=[l_commitdate l_orderkey l_receiptdate]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q04	join-4	hash_join	scanfiles=0	cols=[l_orderkey o_orderkey o_orderpriority]	deps=[scan-0 scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q04	final_aggregate-6	final_aggregate	scanfiles=0	cols=[]	deps=[join-4]	ops=f0/p0/a1/w0/fj0/cj0/sk1
+Q04	exchange-gather-final_aggregate-6	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-6]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	scan-0	scan	scanfiles=150	cols=[o_custkey o_orderdate o_orderkey]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q05	scan-1	scan	scanfiles=15	cols=[c_custkey c_nationkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	exchange-repartition-3	exchange-repartition	scanfiles=0	cols=[c_custkey c_nationkey l_orderkey o_custkey o_orderkey]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	join-4	hash_join	scanfiles=0	cols=[c_custkey c_nationkey l_orderkey o_custkey o_orderkey]	deps=[exchange-repartition-3 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	scan-5	scan	scanfiles=600	cols=[l_discount l_extendedprice l_orderkey l_suppkey]	deps=[scan-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	exchange-repartition-7	exchange-repartition	scanfiles=0	cols=[c_nationkey l_discount l_extendedprice l_orderkey l_suppkey o_orderkey s_suppkey]	deps=[scan-5]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	join-8	hash_join	scanfiles=0	cols=[c_nationkey l_discount l_extendedprice l_orderkey l_suppkey o_orderkey s_suppkey]	deps=[exchange-repartition-7 exchange-replicate-join-14-12 join-4 scan-11 scan-9]	ops=f0/p0/a0/w0/fj0/cj3/sk0
+Q05	scan-9	scan	scanfiles=1	cols=[s_nationkey s_suppkey]	deps=[scan-11]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	scan-11	scan	scanfiles=1	cols=[n_name n_nationkey n_regionkey]	deps=[scan-13]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	scan-13	scan	scanfiles=1	cols=[r_name r_regionkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q05	final_aggregate-16	final_aggregate	scanfiles=0	cols=[]	deps=[join-8]	ops=f0/p0/a1/w0/fj0/cj0/sk1
+Q05	exchange-replicate-join-14-12	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-13]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q05	exchange-gather-final_aggregate-16	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-16]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q06	scan-0	scan	scanfiles=600	cols=[l_discount l_extendedprice l_quantity l_shipdate]	deps=[]	ops=f5/p0/a0/w0/fj0/cj0/sk0
+Q06	final_aggregate-39	final_aggregate	scanfiles=0	cols=[]	deps=[scan-0]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q06	exchange-gather-final_aggregate-39	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-39]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	scan-0	scan	scanfiles=600	cols=[l_discount l_extendedprice l_orderkey l_shipdate l_suppkey]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q07	scan-1	scan	scanfiles=1	cols=[s_nationkey s_suppkey]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	scan-3	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q07	join-4	broadcast_join	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_shipdate n1.n_nationkey n_name n_nationkey o_orderkey s_nationkey]	deps=[exchange-replicate-join-4-3 scan-0 scan-1]	ops=f0/p0/a0/w0/fj1/cj0/sk0
+Q07	scan-5	scan	scanfiles=150	cols=[o_custkey o_orderkey]	deps=[scan-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	exchange-repartition-6	exchange-repartition	scanfiles=0	cols=[c_custkey l_discount l_extendedprice l_orderkey l_shipdate n_name n_nationkey o_custkey o_orderkey]	deps=[join-4]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	exchange-repartition-7	exchange-repartition	scanfiles=0	cols=[c_custkey l_discount l_extendedprice l_orderkey l_shipdate n_name n_nationkey o_custkey o_orderkey]	deps=[scan-5]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	join-8	hash_join	scanfiles=0	cols=[c_custkey l_discount l_extendedprice l_orderkey l_shipdate n_name n_nationkey o_custkey o_orderkey]	deps=[exchange-repartition-6 exchange-repartition-7]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	scan-9	scan	scanfiles=15	cols=[c_custkey c_nationkey]	deps=[scan-13]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	exchange-repartition-11	exchange-repartition	scanfiles=0	cols=[c_custkey c_nationkey l_discount l_extendedprice l_shipdate n2.n_nationkey n_name n_nationkey o_custkey]	deps=[scan-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	join-12	hash_join	scanfiles=0	cols=[c_custkey c_nationkey l_discount l_extendedprice l_shipdate n2.n_nationkey n_name n_nationkey o_custkey]	deps=[exchange-repartition-11 exchange-replicate-join-14-13 join-8]	ops=f0/p0/a0/w0/fj0/cj1/sk0
+Q07	scan-13	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q07	final_aggregate-16	final_aggregate	scanfiles=0	cols=[]	deps=[join-12]	ops=f0/p7/a1/w0/fj0/cj0/sk3
+Q07	exchange-replicate-join-4-3	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	exchange-replicate-join-14-13	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-13]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q07	exchange-gather-final_aggregate-16	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-16]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	scan-0	scan	scanfiles=15	cols=[c_custkey c_nationkey]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	scan-1	scan	scanfiles=1	cols=[n_name n_nationkey n_regionkey]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	scan-3	scan	scanfiles=1	cols=[r_name r_regionkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q08	join-4	broadcast_join	scanfiles=0	cols=[c_custkey n1.n_regionkey n_name n_nationkey n_regionkey o_custkey r_regionkey]	deps=[exchange-replicate-join-4-3 scan-0 scan-1]	ops=f0/p0/a0/w0/fj1/cj0/sk0
+Q08	scan-5	scan	scanfiles=150	cols=[o_custkey o_orderdate o_orderkey]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q08	exchange-repartition-6	exchange-repartition	scanfiles=0	cols=[c_custkey l_orderkey n_name n_nationkey o_custkey o_orderdate o_orderkey]	deps=[join-4]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	join-8	hash_join	scanfiles=0	cols=[c_custkey l_orderkey n_name n_nationkey o_custkey o_orderdate o_orderkey]	deps=[exchange-repartition-6 scan-5]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	scan-9	scan	scanfiles=600	cols=[l_discount l_extendedprice l_orderkey l_partkey l_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	exchange-repartition-11	exchange-repartition	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_partkey l_suppkey n_name n_nationkey o_orderdate o_orderkey p_partkey]	deps=[scan-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	join-12	hash_join	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_partkey l_suppkey n_name n_nationkey o_orderdate o_orderkey p_partkey]	deps=[exchange-repartition-11 exchange-replicate-join-18-15 join-8 scan-13 scan-15]	ops=f0/p0/a0/w0/fj0/cj3/sk0
+Q08	scan-13	scan	scanfiles=20	cols=[p_partkey p_type]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q08	scan-15	scan	scanfiles=1	cols=[s_nationkey s_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	scan-17	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	final_aggregate-20	final_aggregate	scanfiles=0	cols=[]	deps=[join-12]	ops=f0/p4/a2/w0/fj0/cj0/sk1
+Q08	exchange-replicate-join-4-3	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	exchange-replicate-join-18-15	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-17]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q08	exchange-gather-final_aggregate-20	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-20]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	scan-0	scan	scanfiles=600	cols=[l_discount l_extendedprice l_orderkey l_partkey l_quantity l_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	scan-1	scan	scanfiles=20	cols=[p_name p_partkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q09	scan-3	scan	scanfiles=1	cols=[s_nationkey s_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	join-4	broadcast_join	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_partkey l_quantity l_suppkey ps_partkey ps_suppkey s_nationkey s_suppkey]	deps=[exchange-replicate-join-4-3 scan-0 scan-1]	ops=f0/p0/a0/w0/fj1/cj0/sk0
+Q09	scan-5	scan	scanfiles=80	cols=[ps_partkey ps_suppkey ps_supplycost]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	exchange-repartition-6	exchange-repartition	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_partkey l_quantity l_suppkey o_orderkey ps_partkey ps_suppkey ps_supplycost s_nationkey]	deps=[join-4]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	exchange-repartition-7	exchange-repartition	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_partkey l_quantity l_suppkey o_orderkey ps_partkey ps_suppkey ps_supplycost s_nationkey]	deps=[scan-5]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	join-8	hash_join	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_partkey l_quantity l_suppkey o_orderkey ps_partkey ps_suppkey ps_supplycost s_nationkey]	deps=[exchange-repartition-6 exchange-repartition-7]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	scan-9	scan	scanfiles=150	cols=[o_orderdate o_orderkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	exchange-repartition-11	exchange-repartition	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_quantity n_nationkey o_orderdate o_orderkey ps_supplycost s_nationkey]	deps=[scan-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	join-12	hash_join	scanfiles=0	cols=[l_discount l_extendedprice l_orderkey l_quantity n_nationkey o_orderdate o_orderkey ps_supplycost s_nationkey]	deps=[exchange-repartition-11 exchange-replicate-join-14-13 join-8]	ops=f0/p0/a0/w0/fj0/cj1/sk0
+Q09	scan-13	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	final_aggregate-16	final_aggregate	scanfiles=0	cols=[]	deps=[join-12]	ops=f0/p4/a1/w0/fj0/cj0/sk2
+Q09	exchange-replicate-join-4-3	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	exchange-replicate-join-14-13	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-13]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q09	exchange-gather-final_aggregate-16	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-16]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q10	scan-0	scan	scanfiles=150	cols=[o_custkey o_orderdate o_orderkey]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q10	scan-1	scan	scanfiles=15	cols=[c_acctbal c_address c_comment c_custkey c_name c_nationkey c_phone]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q10	exchange-repartition-3	exchange-repartition	scanfiles=0	cols=[c_acctbal c_address c_comment c_custkey c_name c_nationkey c_phone n_nationkey o_custkey o_orderkey]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q10	join-4	hash_join	scanfiles=0	cols=[c_acctbal c_address c_comment c_custkey c_name c_nationkey c_phone n_nationkey o_custkey o_orderkey]	deps=[exchange-repartition-3 exchange-replicate-join-6-6 scan-0]	ops=f0/p0/a0/w0/fj0/cj1/sk0
+Q10	scan-5	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q10	scan-7	scan	scanfiles=600	cols=[l_discount l_extendedprice l_orderkey l_returnflag]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q10	join-10	hash_join	scanfiles=0	cols=[c_acctbal c_address c_comment c_custkey c_name c_phone l_discount l_extendedprice l_extendedprice * (1 - l_discount) l_orderkey n_name o_orderkey]	deps=[join-4 scan-7]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q10	final_aggregate-12	final_aggregate	scanfiles=0	cols=[]	deps=[join-10]	ops=f0/p0/a1/w0/fj0/cj0/sk1
+Q10	sort-13	sort	scanfiles=0	cols=[]	deps=[final_aggregate-12]	ops=f0/p0/a0/w0/fj0/cj0/sk1
+Q10	exchange-replicate-join-6-6	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-5]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q10	exchange-gather-sort-13	exchange-gather	scanfiles=0	cols=[]	deps=[sort-13]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q11	scan-0	scan	scanfiles=80	cols=[ps_availqty ps_partkey ps_suppkey ps_supplycost]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q11	scan-1	scan	scanfiles=1	cols=[s_nationkey s_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q11	scan-3	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q11	join-4	broadcast_join	scanfiles=0	cols=[n_name n_nationkey ps_availqty ps_partkey ps_supplycost ps_supplycost * ps_availqty s_nationkey value]	deps=[exchange-replicate-join-4-3 scan-0 scan-1]	ops=f0/p0/a0/w0/fj1/cj0/sk0
+Q11	aggregate-5	aggregate	scanfiles=0	cols=[]	deps=[join-4]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q11	final_aggregate-6	final_aggregate	scanfiles=0	cols=[]	deps=[aggregate-5]	ops=f1/p0/a1/w0/fj0/cj0/sk1
+Q11	aggregate-12	aggregate	scanfiles=0	cols=[]	deps=[join-4]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q11	final_aggregate-13	final_aggregate	scanfiles=0	cols=[]	deps=[aggregate-12]	ops=f0/p2/a1/w0/fj0/cj0/sk0
+Q11	exchange-replicate-join-4-3	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q11	exchange-gather-final_aggregate-6	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-6]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q12	scan-0	scan	scanfiles=150	cols=[o_orderkey o_orderpriority]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q12	scan-1	scan	scanfiles=600	cols=[l_commitdate l_orderkey l_receiptdate l_shipdate l_shipmode]	deps=[]	ops=f5/p0/a0/w0/fj0/cj0/sk0
+Q12	join-2	broadcast_join	scanfiles=0	cols=[case when o_orderpriority != '1-urgent' and o_orderpriority != '2-high' then 1 else 0 end case when o_orderpriority = '1-urgent' or o_orderpriority = '2-high' then 1 else 0 end l_orderkey l_shipmode o_orderkey o_orderpriority]	deps=[exchange-replicate-join-2-2 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q12	aggregate-3	aggregate	scanfiles=0	cols=[]	deps=[join-2]	ops=f0/p0/a2/w0/fj0/cj0/sk0
+Q12	final_aggregate-4	final_aggregate	scanfiles=0	cols=[]	deps=[aggregate-3]	ops=f0/p0/a2/w0/fj0/cj0/sk1
+Q12	exchange-replicate-join-2-2	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q12	exchange-gather-final_aggregate-4	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-4]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q13	scan-0	scan	scanfiles=15	cols=[c_custkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q13	scan-1	scan	scanfiles=150	cols=[o_comment o_custkey o_orderkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q13	exchange-repartition-2	exchange-repartition	scanfiles=0	cols=[c_custkey o_custkey o_orderkey]	deps=[scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q13	join-4	hash_join	scanfiles=0	cols=[c_custkey o_custkey o_orderkey]	deps=[exchange-repartition-2 scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q13	final_aggregate-6	final_aggregate	scanfiles=0	cols=[]	deps=[join-4]	ops=f0/p0/a1/w0/fj0/cj0/sk2
+Q13	sort-7	sort	scanfiles=0	cols=[]	deps=[final_aggregate-6]	ops=f0/p0/a0/w0/fj0/cj0/sk2
+Q13	exchange-gather-sort-7	exchange-gather	scanfiles=0	cols=[]	deps=[sort-7]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q14	scan-0	scan	scanfiles=600	cols=[l_discount l_extendedprice l_partkey l_shipdate]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q14	scan-1	scan	scanfiles=20	cols=[p_partkey p_type]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q14	exchange-repartition-3	exchange-repartition	scanfiles=0	cols=[case when p_type like 'promo%%' then l_extendedprice * (1 - l_discount) else 0 end l_discount l_extendedprice l_extendedprice * (1 - l_discount) l_partkey p_partkey p_type]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q14	join-4	hash_join	scanfiles=0	cols=[case when p_type like 'promo%%' then l_extendedprice * (1 - l_discount) else 0 end l_discount l_extendedprice l_extendedprice * (1 - l_discount) l_partkey p_partkey p_type]	deps=[exchange-repartition-3 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q14	final_aggregate-6	final_aggregate	scanfiles=0	cols=[]	deps=[join-4]	ops=f0/p0/a2/w0/fj0/cj0/sk0
+Q14	exchange-gather-final_aggregate-6	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-6]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q15	scan-0	scan	scanfiles=1	cols=[s_address s_name s_phone s_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q15	scan-1	scan	scanfiles=600	cols=[l_discount l_extendedprice l_shipdate l_suppkey]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q15	final_aggregate-40	final_aggregate	scanfiles=0	cols=[]	deps=[scan-1]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q15	exchange-repartition-41	exchange-repartition	scanfiles=0	cols=[l_suppkey s_address s_name s_phone s_suppkey total_revenue]	deps=[scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q15	join-43	hash_join	scanfiles=0	cols=[l_suppkey s_address s_name s_phone s_suppkey total_revenue]	deps=[exchange-repartition-41 final_aggregate-40]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q15	aggregate-45	aggregate	scanfiles=0	cols=[]	deps=[final_aggregate-40]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q15	final_aggregate-46	final_aggregate	scanfiles=0	cols=[]	deps=[aggregate-45]	ops=f0/p1/a1/w0/fj0/cj0/sk0
+Q15	sort-47	sort	scanfiles=0	cols=[]	deps=[join-43]	ops=f0/p0/a0/w0/fj0/cj0/sk1
+Q15	exchange-gather-sort-47	exchange-gather	scanfiles=0	cols=[]	deps=[sort-47]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q16	scan-0	scan	scanfiles=80	cols=[ps_partkey ps_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q16	scan-1	scan	scanfiles=20	cols=[p_brand p_partkey p_size p_type]	deps=[]	ops=f3/p0/a0/w0/fj0/cj0/sk0
+Q16	join-2	broadcast_join	scanfiles=0	cols=[p_brand p_partkey p_size p_type ps_partkey ps_suppkey]	deps=[exchange-replicate-join-2-2 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q16	final_aggregate-3	final_aggregate	scanfiles=0	cols=[]	deps=[join-2]	ops=f0/p0/a1/w0/fj0/cj0/sk4
+Q16	exchange-replicate-join-2-2	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q16	exchange-gather-final_aggregate-3	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q17	scan-0	scan	scanfiles=600	cols=[l_extendedprice l_partkey l_quantity]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q17	scan-1	scan	scanfiles=20	cols=[p_brand p_container p_partkey]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q17	join-2	broadcast_join	scanfiles=0	cols=[l_extendedprice l_partkey l_quantity p_partkey]	deps=[exchange-replicate-join-2-2 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q17	aggregate-6	aggregate	scanfiles=0	cols=[]	deps=[join-2]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q17	final_aggregate-7	final_aggregate	scanfiles=0	cols=[]	deps=[exchange-repartition-final_aggregate-7-7]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q17	exchange-repartition-8	exchange-repartition	scanfiles=0	cols=[__agg_0 __scalar_0 l_extendedprice l_partkey l_quantity p_partkey]	deps=[join-2]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q17	join-10	hash_join	scanfiles=0	cols=[__agg_0 __scalar_0 l_extendedprice l_partkey l_quantity p_partkey]	deps=[exchange-repartition-8 final_aggregate-7]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q17	final_aggregate-12	final_aggregate	scanfiles=0	cols=[]	deps=[join-10]	ops=f0/p2/a1/w0/fj0/cj0/sk0
+Q17	exchange-replicate-join-2-2	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q17	exchange-repartition-final_aggregate-7-7	exchange-repartition	scanfiles=0	cols=[]	deps=[aggregate-6]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q17	exchange-gather-final_aggregate-12	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-12]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	scan-0	scan	scanfiles=15	cols=[c_custkey c_name]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	scan-1	scan	scanfiles=150	cols=[o_custkey o_orderdate o_orderkey o_totalprice]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	final_aggregate-41	final_aggregate	scanfiles=0	cols=[]	deps=[exchange-repartition-50]	ops=f1/p0/a1/w0/fj0/cj0/sk0
+Q18	exchange-repartition-42	exchange-repartition	scanfiles=0	cols=[c_custkey l_orderkey o_custkey o_orderdate o_orderkey o_totalprice]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	join-44	hash_join	scanfiles=0	cols=[c_custkey l_orderkey o_custkey o_orderdate o_orderkey o_totalprice]	deps=[exchange-repartition-42 final_aggregate-41]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	exchange-repartition-45	exchange-repartition	scanfiles=0	cols=[c_custkey c_name l_orderkey o_custkey o_orderdate o_orderkey o_totalprice]	deps=[scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	join-47	hash_join	scanfiles=0	cols=[c_custkey c_name l_orderkey o_custkey o_orderdate o_orderkey o_totalprice]	deps=[exchange-repartition-45 join-44]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	scan-48	scan	scanfiles=600	cols=[l_orderkey l_quantity]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	exchange-repartition-50	exchange-repartition	scanfiles=0	cols=[c_custkey c_name l_orderkey l_quantity o_orderdate o_orderkey o_totalprice]	deps=[scan-48]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	join-51	hash_join	scanfiles=0	cols=[c_custkey c_name l_orderkey l_quantity o_orderdate o_orderkey o_totalprice]	deps=[exchange-repartition-50 join-47]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q18	final_aggregate-53	final_aggregate	scanfiles=0	cols=[]	deps=[join-51]	ops=f0/p0/a1/w0/fj0/cj0/sk2
+Q18	sort-54	sort	scanfiles=0	cols=[]	deps=[final_aggregate-53]	ops=f0/p0/a0/w0/fj0/cj0/sk2
+Q18	exchange-gather-sort-54	exchange-gather	scanfiles=0	cols=[]	deps=[sort-54]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q19	scan-0	scan	scanfiles=600	cols=[l_discount l_extendedprice l_partkey l_quantity l_shipinstruct l_shipmode]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q19	scan-1	scan	scanfiles=20	cols=[p_brand p_container p_partkey p_size]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q19	join-2	broadcast_join	scanfiles=0	cols=[l_discount l_extendedprice l_extendedprice * (1 - l_discount) l_partkey l_quantity p_brand p_container p_partkey p_size]	deps=[exchange-replicate-join-2-2 scan-0]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q19	aggregate-3	aggregate	scanfiles=0	cols=[]	deps=[join-2]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q19	final_aggregate-4	final_aggregate	scanfiles=0	cols=[]	deps=[aggregate-3]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q19	exchange-replicate-join-2-2	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q19	exchange-gather-final_aggregate-4	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-4]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	scan-0	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q20	scan-1	scan	scanfiles=1	cols=[s_address s_name s_nationkey s_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	scan-2	scan	scanfiles=80	cols=[ps_availqty ps_partkey ps_suppkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	scan-3	scan	scanfiles=20	cols=[p_name p_partkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q20	join-4	broadcast_join	scanfiles=0	cols=[l_partkey l_suppkey p_partkey ps_availqty ps_partkey ps_suppkey]	deps=[exchange-replicate-join-4-4 scan-2]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	scan-5	scan	scanfiles=600	cols=[l_partkey l_quantity l_shipdate l_suppkey]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q20	final_aggregate-44	final_aggregate	scanfiles=0	cols=[]	deps=[scan-5]	ops=f0/p0/a1/w0/fj0/cj0/sk0
+Q20	exchange-repartition-45	exchange-repartition	scanfiles=0	cols=[__scalar_0 l_partkey l_suppkey ps_availqty ps_partkey ps_suppkey s_suppkey]	deps=[join-4]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	join-47	hash_join	scanfiles=0	cols=[__scalar_0 l_partkey l_suppkey ps_availqty ps_partkey ps_suppkey s_suppkey]	deps=[exchange-repartition-45 final_aggregate-44]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q20	join-48	broadcast_join	scanfiles=0	cols=[n_nationkey ps_suppkey s_address s_name s_nationkey s_suppkey]	deps=[exchange-replicate-join-48-10 scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	exchange-repartition-50	exchange-repartition	scanfiles=0	cols=[n_nationkey s_address s_name s_nationkey]	deps=[join-48]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	join-51	hash_join	scanfiles=0	cols=[n_nationkey s_address s_name s_nationkey]	deps=[exchange-repartition-50 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	sort-52	sort	scanfiles=0	cols=[]	deps=[join-51]	ops=f0/p0/a0/w0/fj0/cj0/sk1
+Q20	exchange-replicate-join-4-4	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-3]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	exchange-replicate-join-48-10	exchange-replicate	scanfiles=0	cols=[]	deps=[join-47]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q20	exchange-gather-sort-52	exchange-gather	scanfiles=0	cols=[]	deps=[sort-52]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	scan-0	scan	scanfiles=600	cols=[l_commitdate l_orderkey l_receiptdate l_suppkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q21	scan-1	scan	scanfiles=1	cols=[s_name s_nationkey s_suppkey]	deps=[scan-7]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	join-2	broadcast_join	scanfiles=0	cols=[l1.l_orderkey l1.l_suppkey l_orderkey l_suppkey o_orderkey s_name s_nationkey s_suppkey]	deps=[exchange-replicate-join-2-2 scan-0]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	scan-3	scan	scanfiles=150	cols=[o_orderkey o_orderstatus]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q21	exchange-repartition-4	exchange-repartition	scanfiles=0	cols=[l1.l_orderkey l_orderkey l_suppkey n_nationkey o_orderkey s_name s_nationkey]	deps=[join-2]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	join-6	hash_join	scanfiles=0	cols=[l1.l_orderkey l_orderkey l_suppkey n_nationkey o_orderkey s_name s_nationkey]	deps=[exchange-repartition-4 exchange-replicate-join-8-8 scan-3]	ops=f0/p0/a0/w0/fj0/cj1/sk0
+Q21	scan-7	scan	scanfiles=1	cols=[n_name n_nationkey]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q21	scan-9	scan	scanfiles=600	cols=[l_orderkey l_suppkey]	deps=[join-6]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	exchange-repartition-11	exchange-repartition	scanfiles=0	cols=[l_orderkey l_suppkey s_name]	deps=[scan-9]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	join-12	hash_join	scanfiles=0	cols=[l_orderkey l_suppkey s_name]	deps=[exchange-repartition-11 exchange-repartition-11 join-6]	ops=f0/p0/a0/w0/fj0/cj1/sk0
+Q21	final_aggregate-18	final_aggregate	scanfiles=0	cols=[]	deps=[join-12]	ops=f0/p0/a1/w0/fj0/cj0/sk2
+Q21	sort-19	sort	scanfiles=0	cols=[]	deps=[final_aggregate-18]	ops=f0/p0/a0/w0/fj0/cj0/sk2
+Q21	exchange-replicate-join-2-2	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	exchange-replicate-join-8-8	exchange-replicate	scanfiles=0	cols=[]	deps=[scan-7]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q21	exchange-gather-sort-19	exchange-gather	scanfiles=0	cols=[]	deps=[sort-19]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q22	scan-0	scan	scanfiles=15	cols=[c_acctbal c_custkey c_phone]	deps=[]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q22	scan-1	scan	scanfiles=150	cols=[o_custkey]	deps=[]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q22	exchange-repartition-3	exchange-repartition	scanfiles=0	cols=[c_acctbal c_custkey c_phone o_custkey substr(c_phone, 1, 2)]	deps=[scan-1]	ops=f0/p0/a0/w0/fj0/cj0/sk0
+Q22	join-4	hash_join	scanfiles=0	cols=[c_acctbal c_custkey c_phone o_custkey substr(c_phone, 1, 2)]	deps=[exchange-repartition-3 scan-0]	ops=f1/p0/a0/w0/fj0/cj0/sk0
+Q22	scan-5	scan	scanfiles=15	cols=[c_acctbal c_phone]	deps=[]	ops=f2/p0/a0/w0/fj0/cj0/sk0
+Q22	final_aggregate-6	final_aggregate	scanfiles=0	cols=[]	deps=[scan-5]	ops=f0/p1/a1/w0/fj0/cj0/sk0
+Q22	aggregate-7	aggregate	scanfiles=0	cols=[]	deps=[join-4]	ops=f0/p0/a2/w0/fj0/cj0/sk0
+Q22	final_aggregate-8	final_aggregate	scanfiles=0	cols=[]	deps=[aggregate-7]	ops=f0/p4/a2/w0/fj0/cj0/sk1
+Q22	exchange-gather-final_aggregate-8	exchange-gather	scanfiles=0	cols=[]	deps=[final_aggregate-8]	ops=f0/p0/a0/w0/fj0/cj0/sk0
