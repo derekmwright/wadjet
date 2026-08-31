@@ -993,17 +993,29 @@ PostgreSQL 17) found 430 divergent (shape, arm) rows on `376b2cac`.
 That sweep's harness is not in the tree, and its residual figure was restated
 from memory each round — 52, then 48 — while the corpus behind the number did
 not move with it. So the figure this ADR carries is the one measured LAST, on
-a corpus that IS on disk and reproducible: 219 shapes on three arms (657
-arm-rows), being the six review corpora plus the round-4 families, 189 of them
-over `decpair` with a live PostgreSQL 17 answer. Against `376b2cac`: **0
-regressions, 182 arm-rows fixed, 36 still divergent** — 27 of those byte-
-identical to `376b2cac` and 9 loud on both trees — and exactly ONE arm-row goes
-from a loud refusal to a wrong answer, which is the GROUP-BY residual named at
-the end of this section. The other 30 shapes (90 arm-rows) read
-`typemx_nested`, which the `--locale=C` PostgreSQL fixture cannot hold, so
-they are compared base→tip instead: 44 cells changed and every one of them
-base-wrong or base-loud → tip-right, against the field values the join-free
-spelling of the same query returns.
+a corpus that IS on disk and reproducible: 273 shapes on three arms (819
+arm-rows), being the review corpora of every round plus the families each fix
+added, 243 of them over `decpair` with a live PostgreSQL 17 answer. Against
+`376b2cac`: **0 regressions, 261 arm-rows fixed, 61 still divergent** — 45 of
+those byte-identical to `376b2cac` and 16 loud on both trees under different
+messages — and exactly ONE arm-row goes from a loud refusal to a wrong answer,
+which is the GROUP-BY residual named at the end of this section. The other 30
+shapes (90 arm-rows) read `typemx_nested`, which the `--locale=C` PostgreSQL
+fixture cannot hold, so they are compared base→tip instead: 43 cells changed
+and every one of them base-wrong or base-loud → tip-right, against the field
+values the join-free spelling of the same query returns.
+
+**The census is the gate this arc did not have, and it earned that twice.** It
+is not a summary of the fixes; it is the only thing that measures the one way
+this work could leave a deployment WORSE than `376b2cac` — a refusal turning
+into a wrong answer, on the shuffled lowering the chain rewiring made runnable.
+Round 3 reported that number as 1 without measuring it and it was 18. Round 4
+fixed those two mechanisms, re-measured 1, and the number was 1 for the corpus
+it was measured on: the next review's corpus put a WINDOW between the SELECT
+list and the join and found ten more. Both times the finding came from
+widening the corpus, not from a gate — so the standing obligation is that a
+round which claims this number states the corpus it measured, and a round that
+adds a node kind between a SELECT list and a join adds it to that corpus.
 
 **Five sites, each a specific thing a pass was getting wrong.**
 
@@ -1512,10 +1524,30 @@ is called. `TestTPCHStageDumpGolden` is byte-identical: no TPC-H stage's shape
 moves, and Q15 — the one TPC-H query with a CTE, joined on its build side —
 answers as it did.
 
-**What is NOT closed, measured rather than assumed.** Six residuals survive the
-sweep, and none of them is this mechanism. Each is stated with where it
+**What is NOT closed, measured rather than assumed.** Eight residuals survive
+the sweep, and none of them is this mechanism. Each is stated with where it
 reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
 
+- a CTE whose BODY holds two relations is still captured on both DAG arms, and
+  it is the shape the arm-naming section above cites as the REASON a CTE stamps
+  its name on the subtree root. Both halves are true and they do not meet:
+
+      WITH c AS (SELECT m.id AS id, m.a * 2 AS dv
+                 FROM decpair m, decpair n WHERE m.id = n.id)
+      SELECT p.id, p.dv, c.dv
+      FROM (SELECT id, b - 100 AS dv FROM decpair) p JOIN c ON c.id = p.id
+      -- PostgreSQL  c.dv 25.50 · p.dv -87.2500
+      -- single      right (this arc) · both DAG arms  c.dv == p.dv
+
+  The one-relation body is correct on all three arms and the explicit-JOIN
+  spelling of the two-relation body fails identically, so it is the CTE arm
+  being a JOIN and not the comma. Naming the arm `c` is what fixed the single
+  path here and is not sufficient on the DAG, where that arm lowers to stages of
+  its own;
+- a CTE that SHADOWS a base table's name cannot reference the table in its own
+  body — `WITH decpair AS (SELECT … FROM decpair)` resolves the inner `FROM` to
+  the CTE itself. Loud on every arm, pre-existing on `376b2cac`, and filed as
+  #771;
 - a SIBLING nested inside a sibling answers the OUTER sibling's window on the
   single-process path (#751). Both DAG arms are right, so the wrong side is the
   local engine's slot allocation and not the aliasing of scopes — which is why
@@ -1554,14 +1586,18 @@ reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
   localization starts.
 
 **The loud→silent census on this tip is ONE arm-row, and it is the GROUP-BY
-residual above.** That is the number this section has to carry, because a
-refusal turning into a wrong answer is the one way this arc could make a
-deployment worse than `376b2cac` — and the round-3 tip's was EIGHTEEN, which no
-gate in the tree measured and the round-3 review found by measuring it: fifteen
-of the CTE-arm capture, two of the sibling-arm binding, and this one. The
-remaining cell is `WITH c AS (…) SELECT c.dv, COUNT(*) … GROUP BY c.dv` over a
-three-join chain, whose shuffled lowering `376b2cac` refused at dispatch and
-which now collapses to the same one NULL group the broadcast lowering has
+residual above.** That is the number this section has to carry, and it has been
+wrong twice, both times because the corpus it was measured on was narrower than
+the mechanism. Round 3 claimed 1 without measuring; the review measured 18 —
+fifteen of the CTE-arm capture, two of the sibling-arm binding, and this one.
+Round 4 fixed those two and re-measured 1; the next review put a WINDOW between
+the SELECT list and the join and measured 11, ten of them that family. Both
+mechanisms are fixed above and the corpus now carries the shapes that found
+them, which is what the number is worth.
+
+The remaining cell is `WITH c AS (…) SELECT c.dv, COUNT(*) … GROUP BY c.dv`
+over a three-join chain, whose shuffled lowering `376b2cac` refused at dispatch
+and which now collapses to the same one NULL group the broadcast lowering has
 always answered. It is the qualified group KEY, it is pinned, and both DAG arms
 now agree about it rather than one of them being loud by accident of a
 different defect.
