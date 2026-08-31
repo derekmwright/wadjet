@@ -3,7 +3,6 @@ package coordinator
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -463,34 +462,21 @@ func TestCTEComputedColumnAboveAJoinChainThreeArms(t *testing.T) {
 			{"derived/2join", "SELECT COUNT(*) AS n FROM " + der + c2 + "WHERE c.dv > 1"},
 		} {
 			sh := sh
-			// The DERIVED spelling of a computed output over an AGGREGATE is
-			// refused LOUDLY on both DAG arms: assertCarrierSchemaResolves
-			// catches it correctly (the filter lands on the aggregate stage,
-			// which the check DOES model) but its error does not wrap
-			// ErrUnreachableGatherOutput and it runs at dispatch, so nothing
-			// routes the query local and it reaches the client. The CTE
-			// spelling of the same query is answered — assertJoinFiltersAreBacked
-			// refuses it at PLAN time, where the coordinator does route local.
-			// A loud failure on a query PostgreSQL answers is a defect, not a
-			// wrong answer, and it is filed rather than fixed here.
-			refusesLoudly := body.name == "arith-over-aggregate" && sh.name == "derived/2join"
+			// The DERIVED spelling of a computed output over an AGGREGATE
+			// used to reach the client as a hard error: assertCarrierSchemaResolves
+			// caught it correctly (the filter lands on the aggregate stage,
+			// which the check DOES model) and refused at DISPATCH with an
+			// error that did not wrap ErrUnreachableGatherOutput, so nothing
+			// routed the query local — while the CTE spelling of the same
+			// query was ANSWERED, because assertJoinFiltersAreBacked refuses
+			// it inside PlanDistributed where the coordinator does route
+			// (#763). Both spellings answer now, on all three arms.
 			t.Run(body.name+"/"+sh.name, func(t *testing.T) {
 				for _, arm := range arms {
 					res, err := arm.run(sh.sql)
 					if err != nil {
-						if refusesLoudly && arm.name != "single" &&
-							strings.Contains(err.Error(), "carries no") {
-							t.Logf("tracked separately, NOT gated here: %v", err)
-							continue
-						}
 						t.Fatalf("%s arm refused a query PostgreSQL answers %d: %v\n  SQL: %s",
 							arm.name, body.want, err, sh.sql)
-					}
-					if refusesLoudly && arm.name != "single" {
-						t.Errorf("the %s arm now ANSWERS this shape, so the dispatch-time refusal "+
-							"is routed or repaired — delete refusesLoudly\n  SQL: %s",
-							arm.name, sh.sql)
-						continue
 					}
 					got := ctrCounts(t, res)
 					if len(got) != 1 || got[0] != body.want {
