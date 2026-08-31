@@ -1302,6 +1302,39 @@ reverting each candidate on its own: the mirror alone makes that shape answer,
 and the resolver's ROW-guard repair alone does not. Both pins are deleted and
 the isolating test with them.
 
+### A scope walk descends through the wrappers a join wears (2026-08-31, #742 round 4)
+
+`attachScanSelectProjections` resolves a qualified SELECT-list item inside the
+subtree its qualifier names — that is `resolveRenameSourceInScope`, and it is
+what stopped `y.w` resolving through x's Project. `relationScopeSubtree` finds
+that subtree by descending the JOIN tree, and it descended NOTHING else: the
+first node that was not a two-arm join ended the walk, because a Project there
+is the scope's own SELECT list and must not be walked past. A FILTER is not,
+and a filter is exactly what a CTE arm puts there:
+
+    WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+    SELECT x.id AS xid, x.w AS xw, y.w AS yw
+    FROM (SELECT id, a AS w FROM decpair) x
+    JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
+    JOIN c ON c.id = x.id WHERE c.dv > 1 ORDER BY x.id
+    -- PostgreSQL 5 rows of 12.75 | 1275.00
+    -- 376b2cac  shuffled REFUSED at dispatch (chained join build dep)
+    -- round 3   shuffled answered 12.75 | 12.75 — x's w under BOTH names
+
+The DERIVED spelling of the identical query is right, and that pair is the
+whole diagnosis: a CTE's Project is a materialization fence, so the predicate
+cannot be pushed into the arm and stays as a `Filter` between the outer Project
+and the join, where the derived spelling pushes it into the arm's own scan and
+leaves the join directly below. With the Filter there the walk returned the
+WHOLE join subtree as `y`'s "scope" and the caller's bare lookup took the first
+arm that answered — the OTHER arm's column, which is #742 restated one node up.
+
+`Filter`, `Sort`, `Limit` and `Distinct` leave both the arm set and the output
+schema alone, so the walk descends through them; `Project`, `Aggregate`,
+`Window` and the set operations do not, and it still stops at those. In the
+plan the fix shows as `join-4 PROJ=[… {a yw}]` becoming `PROJ=[… {y.w yw}]`,
+which is the derived spelling's plan exactly.
+
 **What is NOT closed, measured rather than assumed.** Three residuals survive
 the sweep, each identical on `376b2cac` and on this tip, and none of them this
 mechanism:

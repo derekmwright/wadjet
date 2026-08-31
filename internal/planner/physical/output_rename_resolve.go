@@ -225,25 +225,69 @@ func resolveRenameSourceInScope(name string, child *logical.Node) (string, bool)
 }
 
 // relationScopeSubtree descends through JOINs to the arm that answers to
-// name, and stops at the first node that is not a two-arm join — a Project
-// there is the scope's own SELECT list and must not be walked past.
+// name, and stops at the first node that neither is a two-arm join nor
+// preserves the scope — a Project there is the scope's own SELECT list and
+// must not be walked past.
+//
+// It also descends through the ROW-narrowing wrappers a join can wear, which
+// it did not and which cost a wrong answer (#742). A residual WHERE above the
+// join puts a Filter between the outer Project and the join — that is what a
+// CTE arm's predicate produces, because a CTE's Project is a materialization
+// fence the predicate cannot be pushed through, where the derived-table
+// spelling of the same query pushes it into the arm's own scan and leaves the
+// join directly below. With the Filter there the walk stopped at it, returned
+// the WHOLE join subtree as the "scope", and the caller's bare lookup then
+// took the first arm that answered — the other arm's column, silently:
+//
+//	WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+//	SELECT x.id AS xid, x.w AS xw, y.w AS yw
+//	FROM (SELECT id, a AS w FROM decpair) x
+//	JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
+//	JOIN c ON c.id = x.id WHERE c.dv > 1
+//	-- `y.w` resolved to `a`, which is X's w, on the shuffled lowering
+//
+// Filter, Sort, Limit and Distinct all leave both the arm set and the output
+// schema alone, so descending through them asks the same question one level
+// down. Project, Aggregate, Window and the set operations do not, and the
+// walk still stops at those.
 func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 	if n == nil || name == "" || !subtreeNamesRelation(n, name) {
 		return nil
 	}
-	for n.Type == logical.NodeJoin && len(n.Children) == 2 {
-		left := subtreeNamesRelation(n.Children[0], name)
-		right := subtreeNamesRelation(n.Children[1], name)
-		if left == right {
-			return n
+	for {
+		if n.Type == logical.NodeJoin && len(n.Children) == 2 {
+			left := subtreeNamesRelation(n.Children[0], name)
+			right := subtreeNamesRelation(n.Children[1], name)
+			if left == right {
+				return n
+			}
+			if left {
+				n = n.Children[0]
+			} else {
+				n = n.Children[1]
+			}
+			continue
 		}
-		if left {
+		if scopePreservingWrapper(n) {
 			n = n.Children[0]
 			continue
 		}
-		n = n.Children[1]
+		return n
 	}
-	return n
+}
+
+// scopePreservingWrapper reports whether n is a single-child node that leaves
+// the relations below it and their output columns exactly as they are, so a
+// scope walk may descend through it.
+func scopePreservingWrapper(n *logical.Node) bool {
+	if len(n.Children) != 1 {
+		return false
+	}
+	switch n.Type {
+	case logical.NodeFilter, logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
+		return true
+	}
+	return false
 }
 
 // substituteNestedRenameRefs returns expr with every column reference that

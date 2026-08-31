@@ -851,6 +851,19 @@ func TestQualifierCollidingWithAColumnNameResolves(t *testing.T) {
 // filter naming `n_name`); this is the mirror, and it is the third list in
 // which only one half of that asymmetry was implemented.
 //
+// The `cte-arm-filter/…` entries are the SECOND face of the same capture,
+// found by the round-3 review: move the residual filter off the probe arm and
+// onto a CTE arm and it came back on the shuffled lowering, silently, while
+// the derived-table spelling of the identical query stayed right. That pair
+// is the whole diagnosis — a CTE's Project is a materialization fence, so its
+// predicate stays as a Filter ABOVE the join, and the scope walk that picks
+// the arm a qualified reference belongs to stopped at that Filter instead of
+// descending through it. The entries cross the qualified and bare predicate
+// spellings, the CTE first/middle/last, a computed and a plain-rename CTE
+// body, chain lengths 3 and 4, the build-arm-only projection, a LIMIT wrapper,
+// and the two controls that bound it (the derived-table spelling, and one
+// where the arms publish different aliases so there is no collision at all).
+//
 // The two arms publish at the SAME DECIMAL scale in the asserted entries, so
 // the gate cannot fail for #754's reason; the issue's own cross-scale spelling
 // is carried separately with the single arm pinned.
@@ -863,6 +876,11 @@ func TestBothArmsPublishOneAliasProjectBothThreeArms(t *testing.T) {
 	arms := dajArms(t, ctx)
 
 	const tbl = dbpTable
+	const (
+		armX = "(SELECT id, a AS w FROM " + tbl + ") x"
+		armY = "(SELECT id, a * 100 AS w FROM " + tbl + ") y"
+		cteC = "WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") "
+	)
 	for _, tc := range []struct {
 		name, sql string
 		cols      []string
@@ -896,6 +914,126 @@ func TestBothArmsPublishOneAliasProjectBothThreeArms(t *testing.T) {
 				"WHERE x.w > 1 ORDER BY x.id",
 			cols: []string{"xid", "xw", "yw"},
 			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+
+		// --- The same shape with the residual filter moved OFF the probe arm
+		// and onto a CTE arm. That one move is what put the capture back:
+		// a CTE's Project is a materialization fence the predicate cannot be
+		// pushed through, so the WHERE stays as a Filter ABOVE the join,
+		// where the derived-table spelling of the same query pushes it into
+		// the arm's own scan and leaves the join directly below the outer
+		// Project. `relationScopeSubtree` stopped at that Filter, handed the
+		// caller the WHOLE join subtree as `y`'s "scope", and the bare lookup
+		// inside it took the first arm that answered — x's `w`, under BOTH
+		// output columns. The derived spelling three entries down is the
+		// control that says the CTE is the trigger and not the filter.
+		{
+			name: "cte-arm-filter/qualified/cte-last",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			name: "cte-arm-filter/bare/cte-last",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			name: "cte-arm-filter/qualified/cte-middle",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN c ON c.id = x.id JOIN " + armY + " ON x.id = y.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			name: "cte-arm-filter/qualified/cte-first",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM c JOIN " + armX +
+				" ON c.id = x.id JOIN " + armY + " ON x.id = y.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			name: "cte-arm-filter/qualified/4-join",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN " + tbl + " u ON x.id = u.id " +
+				"JOIN c ON c.id = x.id WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			// A PLAIN-RENAME CTE body. The two bodies reach the filter by
+			// different routes (the pruner resolves a rename back to its
+			// source column; a computed alias is materialized under the
+			// alias itself), so both spellings belong here.
+			name: "cte-arm-filter/rename-body/cte-last",
+			sql: "WITH c AS (SELECT id, a AS dv FROM " + tbl + ") " +
+				"SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			// Only the BUILD arm's column projected, under the CTE filter —
+			// the capture and the OutputFilter drop at once.
+			name: "cte-arm-filter/build-arm-only",
+			sql: cteC + "SELECT x.id AS xid, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "yw"},
+			want: "5 rows: 1|1275.00;2|1275.00;3|1275.00;5|200.00;8|1275.00;",
+		},
+		{
+			// The CTE arm with NO filter above it: the Filter node is what
+			// the walk stopped at, so its absence is the control that says so.
+			name: "cte-arm/no-filter",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
+				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+		},
+		{
+			// THE TELL: the same query with c a DERIVED TABLE. Its predicate
+			// pushes into the arm's own scan, no Filter sits above the join,
+			// and this spelling was correct throughout — which is what makes
+			// the CTE fence the mechanism rather than the collision.
+			name: "cte-arm-filter/derived-c-control",
+			sql: "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id " +
+				"JOIN (SELECT id, a * 2 AS dv FROM " + tbl + ") c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			// And the NO-COLLISION control: one CTE named `k`, the two arms
+			// publishing DIFFERENT aliases. Correct on every tree, so a
+			// failure here is not this mechanism.
+			name: "cte-arm-filter/no-collision-control",
+			sql: "WITH k AS (SELECT id, a * 2 AS dv FROM " + tbl + ") " +
+				"SELECT x.id AS xid, x.w AS xw, y.v AS yv FROM " + armX +
+				" JOIN (SELECT id, a * 100 AS v FROM " + tbl + ") y ON x.id = y.id " +
+				"JOIN k ON k.id = x.id WHERE k.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yv"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			// A LIMIT above the ORDER BY, so the wrapper between the outer
+			// SELECT list and the join is two nodes deep rather than one.
+			name: "cte-arm-filter/limit-wrapper",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id LIMIT 3",
+			cols: []string{"xid", "xw", "yw"},
+			want: "3 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;",
 		},
 	} {
 		tc := tc
