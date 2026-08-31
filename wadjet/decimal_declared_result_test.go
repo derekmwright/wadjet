@@ -800,16 +800,36 @@ func TestDecimalBesideAFloatStaysDoublePrecision(t *testing.T) {
 		}
 	}
 
-	// TODO(#555): the FLOAT half of the same deferral is still open, and it
-	// is loud rather than wrong. A row where the DECIMAL arm wins boxes its
-	// rendered TEXT into a FLOAT64 vector and the #361 guard refuses the
-	// store — the failure ADR-0012 item 12 records for `COALESCE` over two
-	// DECIMALs, over a pair whose declared type is right. Closing it means a
-	// decimal→float coercion at the box, which is the mirror of what #695
-	// built for the integer half; this pin fails when that lands.
-	if _, err := db.Query(ctx, "SELECT COALESCE(a, f) AS v FROM ddrfloat"); err == nil {
-		t.Error("COALESCE(a, f) answered on the row the DECIMAL wins — " +
-			"the float half of the deferral has landed, so delete this pin")
+	// The FLOAT half, which was TODO(#555) until #724: a row where the
+	// DECIMAL arm wins boxes its rendered TEXT, and a FLOAT64 vector could
+	// not take it — the #361 guard refused the store, loudly, for a pair
+	// whose declared type was already right.
+	//
+	// choice_decimal.go reads that text as the float the call's type names
+	// now, the mirror of what #695 built for the integer half, so the row
+	// answers. Row 2 holds numeric(9,2) 12.75 beside double 20.5.
+	for _, tc := range []struct {
+		sql  string
+		want string
+	}{
+		{"SELECT COALESCE(a, f) AS v FROM ddrfloat WHERE id = 2", "12.75"},
+		{"SELECT GREATEST(a, f) AS v FROM ddrfloat WHERE id = 2", "20.5"},
+		{"SELECT LEAST(a, f) AS v FROM ddrfloat WHERE id = 2", "12.75"},
+		{"SELECT CASE WHEN id = 2 THEN a ELSE f END AS v FROM ddrfloat WHERE id = 2", "12.75"},
+	} {
+		res := ddrQuery(t, db, tc.sql)
+		if m := res.ColumnMetas[0]; m.TypeID == parquet.TypeDecimal {
+			t.Errorf("%s declared %s(%d,%d); PostgreSQL says double precision",
+				tc.sql, m.TypeID, m.Precision, m.Scale)
+		}
+		got, ok := res.Rows[0]["v"].(float64)
+		if !ok {
+			t.Fatalf("%s answered %#v (%T), want a float64 — the DECIMAL arm's text has to be "+
+				"read as the double the call declares", tc.sql, res.Rows[0]["v"], res.Rows[0]["v"])
+		}
+		if fmt.Sprintf("%v", got) != tc.want {
+			t.Errorf("%s = %v, want %s (PostgreSQL 17)", tc.sql, got, tc.want)
+		}
 	}
 }
 
