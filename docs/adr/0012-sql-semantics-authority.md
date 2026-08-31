@@ -1264,17 +1264,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     rather than hidden; `TestSetOpDecimalCapIsARangeReduction` pins all three
     shapes so a future widening shows up as that test failing.
 
-    **A computed DECIMAL expression is not typed DECIMAL, and the new
-    DECIMAL↔FLOAT64 rung makes that visible** (#555). `inferProjectionTypeCols`
-    resolves `d + d`, `COALESCE(d, d)` and even `CAST(d AS DECIMAL)` to
-    something other than DECIMAL. Before this item's ladder those arms were
-    REFUSED at plan time when they met a real DECIMAL arm; now the pair
-    resolves to FLOAT64 and the query answers with float-rounded values where
-    PostgreSQL answers `numeric`. Trading a loud refusal for a quiet
-    approximation is the wrong direction, and it is the underlying typing gap
-    that has to close, not the rung — the rung is what PostgreSQL resolves for
-    a genuine float arm. `COALESCE` over two DECIMALs fails at runtime on both
-    paths (#361's guard catches the store), which is at least loud.
+    **A computed DECIMAL expression is typed DECIMAL** (#555, closed across
+    ADR-0024 and #695/#724). `d + d`, `COALESCE(d, d)`, `CAST(d AS DECIMAL)`
+    and now arithmetic OVER a choice (`COALESCE(d, 0) * 2`) all declare and
+    execute as exact fixed-point. The paragraph that stood here recorded the
+    opposite and was right when it was written: those expressions resolved to
+    FLOAT64 and answered float-rounded values where PostgreSQL answers
+    `numeric`, and `COALESCE` over two DECIMALs failed outright at #361's
+    store guard.
+
+    **What is left is the CARRIER, and it is a recorded divergence rather
+    than a gap** (ADR-0024 item 1). PostgreSQL's `numeric` is unbounded and
+    has `NaN`/`±Infinity`; wadjet's is 38 digits of Int128 with neither. So a
+    fold that lands on DECIMAL and meets a value outside it —
+    `GREATEST(numeric(15,2), '1e39')`, or the same with `'NaN'` or
+    `'Infinity'` — raises 22003 where PostgreSQL answers. 84 such composites
+    are LISTED, with PostgreSQL's answer beside each, in
+    `coordinator.nfCarrierRefusals`, and the gate asserts each still refuses,
+    so the list fails if the carrier ever grows. Most of them appeared to
+    agree with PostgreSQL before #724 for the wrong reason: the quoted
+    literal made the whole call declare `text`, so its own characters went out
+    unread.
 
     **The dedup key is the columnar one.** UNION, INTERSECT and EXCEPT decide
     membership by EQUALITY, so their key must agree with the comparator. On

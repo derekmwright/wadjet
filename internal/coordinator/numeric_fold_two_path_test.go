@@ -218,7 +218,7 @@ var nfCarrierRefusals = map[string]string{
 // `float8 = float8`, so the result is double precision — while wadjet takes it
 // from argument 0, whose value the call actually returns. It is orthogonal to
 // #724 (no quoted literal is involved and the fold is not consulted), it moved
-// neither way with it, and it is filed as #733.
+// neither way with it, and it is filed as #757.
 //
 // A pin that starts agreeing FAILS, which is how the fix will announce itself.
 var nfBoxPins = map[string]string{
@@ -1388,7 +1388,7 @@ var nfPosRefusals = map[string]string{
 // operand or (on the DAG) a set-operation arm is the winning arm's own box, at
 // its own width. `GREATEST(real, integer)` on the row where the integer wins
 // hands over an int64 that real cannot hold exactly, and nothing between there
-// and those consumers narrows it. Filed as #734.
+// and those consumers narrows it. Filed as #758.
 //
 // The CastOfTheComposite rows carry a SECOND divergence, PostgreSQL's own: its
 // float4 -> numeric cast renders the real with six significant digits first,
@@ -1397,7 +1397,7 @@ var nfPosRefusals = map[string]string{
 //
 // SetOpArm is pinned on the DAG ONLY: the single-process arm narrows the arm's
 // value to real before the union widens it, as PostgreSQL does, and the DAG's
-// arm reconciliation does not. That asymmetry is part of #734.
+// arm reconciliation does not. That asymmetry is part of #758.
 var nfPosPins = map[string]string{
 	"RealBesideDecimal|CastOfTheComposite|dag":        "1,0.100000;2,<NULL>;3,16777216.000000;4,-0.500000",
 	"RealBesideDecimal|CastOfTheComposite|single":     "1,0.100000;2,<NULL>;3,16777216.000000;4,-0.500000",

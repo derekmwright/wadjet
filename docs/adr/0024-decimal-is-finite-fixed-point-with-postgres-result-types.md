@@ -102,11 +102,52 @@ choice constructs the same exact-text path is what would close it. Recorded as
 a silent loss of digits rather than described as something safer, and pinned by
 `wadjet.TestWideNumericLiteralInAChoiceStaysFloat`.
 
-A DECIMAL beside a FLOAT declares double precision, which is right, and still
-FAILS at the #361 store guard on the rows the decimal wins: the box is that
-branch's text and the vector is a float one. That is the float half of the
-same deferral, it is loud rather than wrong, and it is pinned by
-`wadjet.TestDecimalBesideAFloatStaysDoublePrecision` with `TODO(#555)`.
+A DECIMAL beside a FLOAT declares double precision, which is right, and used to
+FAIL at the #361 store guard on the rows the decimal wins: the box was that
+branch's text and the vector a float one. **That half closed with #724**
+(2026-08-30): a choice whose arms fold to a non-DECIMAL number reads a string
+box as the number that type names, which is the mirror of the integer rule
+above and is `expr.choiceNumberBox`. Two arms can produce such a box — a
+DECIMAL column, whose value IS its rendered text, and a QUOTED literal, which
+arrives as the characters the query spelled — and GREATEST/LEAST had answered
+the second since #646 through `extremumArms.materialize`, which is why nothing
+in the corpus saw that COALESCE and CASE had not.
+`wadjet.TestDecimalBesideAFloatStaysDoublePrecision` asserts the values now.
+
+**A QUOTED string literal is `unknown` in the fold, and the fold is a LADDER,
+not the first argument** (#724, 2026-08-30). PostgreSQL types a quoted literal
+`unknown` and resolves it from the other operands; wadjet typed it
+`Decl(TypeString), Decided`, so every polymorphic call holding one had a
+non-numeric decider, `expr.CommonDeclType` declined the fold, and the call was
+declared from `decided[0]` — its FIRST argument. A declaration narrower than
+the value the call produces does not narrow that value into the output vector,
+it WRAPS it: `GREATEST(bigint, real, double, '1e39')` is double precision in
+PostgreSQL and was int64's MINIMUM here, a number from nowhere that ADR-0012
+item 6 forbids and item 4 below makes a 22003, and it reached GROUP BY keys
+built from the same projection.
+
+So `expr.DeclType` carries `Quoted` (SQL's `unknown`), and the numeric deciders
+fold through PostgreSQL's `select_common_type` ladder — INT32 → INT64 → DECIMAL
+→ FLOAT32 → FLOAT64, the ladder item 2 already names, with FLOAT32 its own rung
+per `setOpWiden` — rather than through "the first decider wins". Three layers
+now run one ladder over one composite: `physical.foldArgTypes` for the
+plan-time literal refusal (#646), `expr.joinFoldKinds` for the boxed
+comparison, and `expr.CommonDeclType` for the declaration. They answer
+different questions — can this literal be read at all, which argument wins,
+what vector the winner is stored in — and a disagreement between them is a
+value narrowed or wrapped on the way out, which is why
+`physical.TestDeclaredFoldAgreesWithTheComparisonFold` asserts the first and
+third agree over every ordered pair of the six widths.
+
+Three limits, all deliberate. A quoted literal contributes its SPELLING's (p,s)
+to a DECIMAL fold, the way a numeric literal does, so
+`GREATEST(numeric(15,2), '12.750000000000000001')` declares a width that holds
+every digit PostgreSQL keeps. A composite whose every argument is quoted stays
+`text`, as PostgreSQL resolves it. And a CONSTANT is folded at PostgreSQL's
+rung for its spelling only when there is a TYPED operand to resolve it against:
+`CASE … THEN int4_col ELSE 0 END` is `integer` on both engines, while
+`GREATEST(0.5, 1.5)` keeps the FLOAT64 a bare numeric literal declares — the
+literal deferral recorded above, which #724 does not reopen.
 
 **THE STORE, not the classification, is what makes the box rule hold.** The
 runtime fold classifies arms by NODE KIND, and the declared fold takes any arm
