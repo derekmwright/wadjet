@@ -2880,6 +2880,9 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// shuffle entirely (join_carried_columns.go).
 	ensureJoinCarriesEvaluatedColumns(stages)
 	ensureJoinCarriesGatherOutputs(stages)
+	if err := assertJoinFiltersAreBacked(stages); err != nil {
+		return nil, err
+	}
 	if err := assertGatherOutputIsReachable(stages); err != nil {
 		return nil, err
 	}

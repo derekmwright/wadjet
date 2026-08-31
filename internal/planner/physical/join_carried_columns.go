@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"fmt"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -57,31 +58,71 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		if !isJoinStage(s.Type) {
 			continue
 		}
-		if len(s.FilterExprs) == 0 && len(s.ProjectExprs) == 0 {
-			continue
-		}
 		refs := joinEvaluatedColumnRefs(s)
 		if len(refs) == 0 {
 			continue
 		}
+		// The column has to survive EVERY narrowing stage between this one
+		// and whatever produces it, not just this one's own list. A join
+		// below this one is an OutputFilter too, and it drops the column
+		// just as effectively:
+		//
+		//	WITH c AS (SELECT id, a * 2 AS dv FROM t)
+		//	SELECT COUNT(*) FROM t x JOIN c ON c.id = x.id JOIN t y ON c.id = y.id
+		//	WHERE c.dv > 1
+		//	-- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
+		//
+		// Here the re-spelled predicate `(a * 2) > 1` lands on the SECOND
+		// join, and adding `a` to that stage and its own exchange is not
+		// enough — the FIRST join, which is its probe, had already narrowed
+		// `a` away. So the refs are pushed down the dependency graph through
+		// every stage whose column list only NARROWS (joins and exchanges),
+		// stopping at the producers, which is where the column comes from.
+		widenNarrowingStagesBelow(stages, idx, i, refs)
+	}
+}
+
+// widenNarrowingStagesBelow unions refs into the OutputFilter of the stage at
+// root and of every join or exchange reachable from it, so a name the root
+// will evaluate is not dropped by a narrowing stage underneath.
+//
+// Only joins and exchanges are widened: their Columns is a FILTER or a payload
+// manifest, and neither can invent a column (ADR-0025). A producer's list is
+// its read set and is left alone — widening THAT would change what is scanned.
+// An empty list already means "carry everything" and stays empty.
+func widenNarrowingStagesBelow(stages []Stage, idx map[string]int, root int, refs []string) {
+	seen := make(map[int]bool, 8)
+	queue := []int{root}
+	for len(queue) > 0 {
+		i := queue[0]
+		queue = queue[1:]
+		if seen[i] {
+			continue
+		}
+		seen[i] = true
+		s := &stages[i]
+		widens := isJoinStage(s.Type)
+		switch s.Type {
+		case StageExchangeRepartition, StageExchangeReplicate:
+			widens = true
+		}
+		if !widens {
+			continue // a producer: its list is a read set, not a filter
+		}
 		if len(s.Columns) > 0 {
 			s.Columns = unionColumnNames(s.Columns, refs)
 		}
+		// A chained join's OutputFilter is its own list, applied inside the
+		// same fragment to the stream the chained probe then reads.
+		for k := range s.ChainedJoins {
+			if len(s.ChainedJoins[k].Columns) > 0 {
+				s.ChainedJoins[k].Columns = unionColumnNames(s.ChainedJoins[k].Columns, refs)
+			}
+		}
 		for _, dep := range s.Dependencies {
-			j, ok := idx[dep]
-			if !ok {
-				continue
+			if j, ok := idx[dep]; ok {
+				queue = append(queue, j)
 			}
-			d := &stages[j]
-			switch d.Type {
-			case StageExchangeRepartition, StageExchangeReplicate:
-			default:
-				continue
-			}
-			if len(d.Columns) == 0 {
-				continue // already carries everything
-			}
-			d.Columns = unionColumnNames(d.Columns, refs)
 		}
 	}
 }
@@ -201,6 +242,37 @@ func joinEvaluatedColumnRefs(s *Stage) []string {
 	for _, p := range s.ProjectExprs {
 		add(p.Expr)
 	}
+	// A join absorbed into this stage evaluates its own residual filter
+	// inside this fragment, so its references are this stage's payload too.
+	// `fuseStageChains` moves a downstream join's FilterExprs onto the
+	// ChainedJoinSpec rather than onto the stage, so reading only
+	// s.FilterExprs misses them entirely — and the absorbed filter is often
+	// the RE-SPELLED one, naming a source column (`(a * 2) > 1`) that the
+	// OutputFilter narrowed away two links earlier:
+	//
+	//	WITH c AS (SELECT id, a * 2 AS dv FROM t)
+	//	SELECT COUNT(*) FROM c JOIN t x ON c.id = x.id JOIN t y ON c.id = y.id
+	//	WHERE c.dv > 1
+	//	-- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
+	//
+	// The shuffled lowering is the one that chains, which is why only that
+	// arm answered zero, and it is type-independent — the same shape over a
+	// BIGINT column answers 0 the same way.
+	for _, cj := range s.ChainedJoins {
+		for _, f := range cj.FilterExprs {
+			add(f)
+		}
+		for _, f := range cj.BuildFilterExprs {
+			add(f)
+		}
+		add(cj.JoinFilter)
+	}
+	for _, fj := range s.FusedJoins {
+		for _, f := range fj.FilterExprs {
+			add(f)
+		}
+		add(fj.JoinFilter)
+	}
 	return out
 }
 
@@ -222,4 +294,100 @@ func unionColumnNames(base, add []string) []string {
 		out = append(append([]string(nil), out...), c)
 	}
 	return out
+}
+
+// assertJoinFiltersAreBacked refuses a plan whose JOIN stage carries a
+// predicate naming a column NOTHING in the plan computes.
+//
+// `assertCarrierSchemaResolves` deliberately excludes join stages: a join's
+// input is the qualified union of two sides with per-column origin rules only
+// the executor resolves, and asserting over it produces false refusals. That
+// exclusion is right, and it is also why one silent zero survives every gate
+// in this file — the identical query without the join REFUSES, loudly and
+// correctly:
+//
+//	WITH c AS (SELECT id, SUM(a) * 2 AS dv FROM t GROUP BY id)
+//	SELECT COUNT(*) FROM c WHERE c.dv > 1
+//	-- native-DAG: stage final_aggregate-1 filters on "c.dv > 1" and its
+//	--   input carries no [c.dv]; input: [__agg_0 id]   -> routed local, ANSWERS 5
+//
+//	… the same CTE with `JOIN t x ON c.id = x.id` added
+//	-- PostgreSQL 5 · single 5 · both DAG arms 0, in silence
+//
+// The cause is upstream and is not this check's to repair: `SUM(a) * 2 AS dv`
+// over a DECIMAL aggregate is DECLINED by absorbAggregateOutputProjection,
+// because AggSpec carries an OutputType but no (p,s) and a wrong DECIMAL
+// declaration is worse than no projection (ADR-0024 item 2). The decline is
+// correct; what is not correct is that nothing then computes `dv` and the
+// query answers WITHOUT the predicate. The same shape over a FLOAT or BIGINT
+// aggregate is not declined and answers correctly on every arm, which is what
+// says the type is the trigger and the join is only what hides it.
+//
+// So this asks the WEAKER question — does ANY producing stage in the plan
+// compute this name — which is the one `dropUnbackedJoinColumns` already asks
+// and which is known not to refuse TPC-H Q02. It cannot see a name that
+// resolves to the WRONG column, only one that resolves to nothing, and that is
+// exactly the class that answers zero in silence. Movers and joins are
+// excluded from the producing set for the same reason they are there: their
+// column lists are the thing under suspicion.
+//
+// The refusal wraps ErrUnreachableGatherOutput, so the coordinator routes the
+// query to its local engine and ANSWERS it — the same disposition its
+// join-free spelling already had.
+func assertJoinFiltersAreBacked(stages []Stage) error {
+	produced := map[string]string{}
+	for i := range stages {
+		switch stages[i].Type {
+		case StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather,
+			StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
+			continue
+		}
+		for k, v := range stageEmittedColumns(&stages[i]) {
+			produced[k] = v
+		}
+		for _, w := range stages[i].WindowCols {
+			if w.OutputCol != "" {
+				produced[strings.ToLower(w.OutputCol)] = w.OutputCol
+			}
+		}
+	}
+	if len(produced) == 0 {
+		return nil
+	}
+	for i := range stages {
+		s := &stages[i]
+		if !isJoinStage(s.Type) {
+			continue
+		}
+		exprs := append([]string(nil), s.FilterExprs...)
+		for _, cj := range s.ChainedJoins {
+			exprs = append(exprs, cj.FilterExprs...)
+		}
+		for _, fj := range s.FusedJoins {
+			exprs = append(exprs, fj.FilterExprs...)
+		}
+		for _, e := range exprs {
+			if strings.TrimSpace(e) == "" {
+				continue
+			}
+			ast, err := plansql.ParseExpression(e)
+			if err != nil {
+				continue
+			}
+			for _, ref := range collectColRefs(ast) {
+				if strings.HasPrefix(ref.Column, windowKeyColPrefix) ||
+					strings.HasPrefix(ref.Column, ":") {
+					continue
+				}
+				if columnResolves(ref, produced) {
+					continue
+				}
+				return fmt.Errorf("%w: stage %s (%s) filters on %q and NO stage in the plan "+
+					"computes %q — the predicate would be UNKNOWN on every row and the query "+
+					"would answer WITHOUT it (#700)",
+					ErrUnreachableGatherOutput, s.ID, s.Type, e, ref.String())
+			}
+		}
+	}
+	return nil
 }
