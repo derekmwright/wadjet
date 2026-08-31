@@ -200,19 +200,19 @@ tasks:
   pg-oracle:test:
     desc: Run the PostgreSQL differential oracle (SF0.01; starts its own container if none is given)
     cmds:
-      - go test -v -run 'TestPostgresOracle$' -timeout 30m ./benchmarks/tpch/
+      - go test -count=1 -v -run 'TestPostgresOracle$' -timeout 30m ./benchmarks/tpch/
 
   pg-oracle:test-decimal:
     desc: Run the oracle over the spec-conformant TPC-H DECIMAL(15,2) fixture (ADR-0024)
     cmds:
-      - TPCH_DECIMAL=1 go test -v -run 'TestPostgresOracle$' -timeout 30m ./benchmarks/tpch/
+      - TPCH_DECIMAL=1 go test -count=1 -v -run 'TestPostgresOracle$' -timeout 30m ./benchmarks/tpch/
 
   pg-oracle:test-large:
     desc: 'Run the oracle at a larger tier, e.g. task pg-oracle:test-large SCALE=1 (SF1 loads ~7.7M rows)'
     vars:
       SCALE: '{{.SCALE | default "0.1"}}'
     cmds:
-      - WADJET_PG_SCALE={{.SCALE}} go test -v -run 'TestPostgresOracle$' -timeout 120m ./benchmarks/tpch/
+      - WADJET_PG_SCALE={{.SCALE}} go test -count=1 -v -run 'TestPostgresOracle$' -timeout 120m ./benchmarks/tpch/
 
   # --- SQLancer adversarial harness (tools/sqlancer/) ---
   #
