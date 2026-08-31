@@ -858,13 +858,13 @@ func runQuotedNumericLiteralRefusals(t *testing.T, ctx context.Context, single *
 // asserted as a row set by GreatestRealOnlyQuotedInt above. Both wants are
 // PostgreSQL 17.11's over this fixture.
 //
-// The DECLARED type of the call is a SEPARATE layer and it is still the first
-// decided argument's, not the fold's — expr.CommonDeclType returns decided[0]
-// for a mixed numeric list, which its own TODO(#555) defers. So these two
-// cases put the DOUBLE column first, where the declaration agrees with the
-// fold and the materialized value survives into the output vector. The
-// permutations where it does not are pinned below, with PostgreSQL's answer
-// recorded, so lifting that deferral shows up as those pins failing.
+// The DECLARED type of the call is a SEPARATE layer, and until #724 it was
+// the first decided argument's rather than the fold's — a QUOTED literal was
+// typed a DECIDED string, so expr.CommonDeclType could not fold a list holding
+// one and answered decided[0]. These two cases put the DOUBLE column first,
+// where the declaration agreed with the fold whatever that layer did; the
+// permutations where it did not were pinned below at wadjet's wrong answers
+// and are asserted at PostgreSQL's now.
 func runExtremumWinnerMaterialization(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coordinator) {
 
 	for _, c := range []struct {
@@ -900,58 +900,39 @@ func runExtremumWinnerMaterialization(t *testing.T, ctx context.Context, single 
 		})
 	}
 
-	// PINNED: the same value through a call whose FIRST decided argument is
-	// narrower than the fold. The COMPARISON and the MATERIALIZATION are the
-	// fold's — that is what this commit fixed, and the row-set entries above
-	// prove it — but the PROJECTION's declared type is not, so the output
-	// vector narrows the answer on the way in.
+	// The same value through a call whose FIRST decided argument is NARROWER
+	// than the fold. These were pinned at wadjet's wrong answers with
+	// PostgreSQL's beside each until #724: physical.nodeDeclaredType typed a
+	// QUOTED string literal `Decl(TypeString), Decided`, so a call holding one
+	// had a non-numeric decider, expr.CommonDeclType could not fold, and the
+	// PROJECTION was declared from the first argument while the COMPARISON and
+	// the MATERIALIZATION were already the fold's.
 	//
-	// The cause is one line up the stack and it is NOT expr.CommonDeclType's
-	// documented DECIMAL deferral: physical.nodeDeclaredType types a QUOTED
-	// string literal as `Decl(TypeString), Decided`, so a call holding one has
-	// a NON-NUMERIC decider in its list and CommonDeclType falls back to
-	// decided[0] — the first argument — instead of folding. PostgreSQL types
-	// that literal `unknown` and resolves the call from the other arguments:
-	// `GREATEST(bigint, real, double, '1e39')` is double precision there.
-	//
-	// TODO(#724): type a quoted string literal `unknown` at nodeDeclaredType,
-	// or teach CommonDeclType to ignore an untyped-literal decider when the
-	// rest are numeric — then these pins fail and get deleted.
-	//
-	// The last two rows are the WORST form of it and are pinned LOUDLY rather
-	// than quietly: the deferral does not merely narrow, it WRAPS. A double
+	// The last four are the part that was not merely a narrowing. A double
 	// 1e39 stored into an INT64 vector is int64's MINIMUM, and a NaN is too —
 	// #462's failure mode, which ADR-0012 item 6 forbids and ADR-0024 item 4
-	// makes a 22003. They reach GROUP BY keys built from the same projection.
+	// makes a 22003 — and it reached the GROUP BY key the last entry builds
+	// from the same projection.
 	//
-	// This cannot be fixed from the comparison layer: the value materialized
-	// here feeds the COMPARISON as often as it feeds a store
+	// It could not be fixed from the comparison layer: the value materialized
+	// there feeds the COMPARISON as often as it feeds a store
 	// (`GREATEST(r_val,'1e39',d_val) > 0` projects nothing), so narrowing or
 	// refusing at materialization would answer a different predicate than
-	// PostgreSQL's — which is exactly the PG-superset regression the round-1
-	// review caught. The fix belongs in nodeDeclaredType/CommonDeclType, with
-	// #555's gates. Deleting these pins is that fix's proof.
+	// PostgreSQL's. The declaration is what had to move.
+	//
+	// Every want is PostgreSQL 17.11's own text for the row.
 	for _, c := range []struct {
-		name   string
-		expr   string
-		key    int
-		want   any    // what wadjet answers, through the narrower declaration
-		pgWant string // what PostgreSQL answers
+		name string
+		expr string
+		key  int
+		want string
 	}{
-		{"PinnedRealFirstNarrowsTheFold", "GREATEST(r_val, '16777217', d_val)", 19,
-			float32(16777216), "16777217"},
-		{"PinnedBigintFirstTruncatesTheFold", "GREATEST(r_key, '3.5', d_val)", 0,
-			int64(3), "3.5"},
-		// WRAPS, which is the part that is not merely a narrowing.
-		{"PinnedBigintFirstWrapsPastRange", "GREATEST(r_key, r_val, d_val, '1e39')", 0,
-			int64(-9223372036854775808), "1e+39"},
-		{"PinnedBigintFirstWrapsNaN", "GREATEST(r_key, r_val, d_val, 'NaN')", 0,
-			int64(-9223372036854775808), "NaN"},
-		{"PinnedRealFirstSaturatesPastRange", "GREATEST(r_val, d_val, r_key, '1e39')", 0,
-			float32(math.Inf(1)), "1e+39"},
-		{"PinnedGroupKeyCarriesTheWrap",
-			"GREATEST(r_key, r_val, d_val, '1e39')", 19,
-			int64(-9223372036854775808), "1e+39"},
+		{"RealFirstFoldsToDouble", "GREATEST(r_val, '16777217', d_val)", 19, "16777217"},
+		{"BigintFirstFoldsToDouble", "GREATEST(r_key, '3.5', d_val)", 0, "3.5"},
+		{"BigintFirstPastInt64Range", "GREATEST(r_key, r_val, d_val, '1e39')", 0, "1e+39"},
+		{"BigintFirstNaN", "GREATEST(r_key, r_val, d_val, 'NaN')", 0, "NaN"},
+		{"RealFirstPastRealRange", "GREATEST(r_val, d_val, r_key, '1e39')", 0, "1e+39"},
+		{"GroupKeyCarriesTheFold", "GREATEST(r_key, r_val, d_val, '1e39')", 19, "1e+39"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sql := fmt.Sprintf("SELECT %s AS v FROM %s WHERE r_key = %d", c.expr, rwpTable, c.key)
@@ -963,10 +944,9 @@ func runExtremumWinnerMaterialization(t *testing.T, ctx context.Context, single 
 				if len(rows) != 1 {
 					t.Fatalf("%s: %s returned %d rows, want 1", arm.name, sql, len(rows))
 				}
-				if got := rows[0]["v"]; got != c.want {
-					t.Errorf("%s: %s = %#v (%T), pinned at %#v; PostgreSQL answers %s "+
-						"— if this now agrees with PostgreSQL, DELETE the pin",
-						arm.name, sql, got, got, c.want, c.pgWant)
+				if got := nfCell(rows[0]["v"]); got != c.want {
+					t.Errorf("%s: %s = %s (%T); PostgreSQL 17.11 answers %s",
+						arm.name, sql, got, rows[0]["v"], c.want)
 				}
 			}
 		})
