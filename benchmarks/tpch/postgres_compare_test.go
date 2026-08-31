@@ -2210,6 +2210,34 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "FloatDivisionControl", sql: `SELECT 7.0/2 AS a, 7/2.0 AS b`},
 	)
 
+	// --- Integer arithmetic NESTED in a polymorphic composite ------------
+	//
+	// The integer rule above reached only the OUTERMOST node of a
+	// projection, so the same expression was integer as `SELECT k + 100`
+	// and float8 as a CASE branch, a COALESCE argument or an aggregate's
+	// input. PostgreSQL types it from the operands wherever it sits:
+	// `bigint + 100` is bigint in every position, and MIN over it is bigint.
+	//
+	// The last entry is the one that carries a wrong NUMBER rather than a
+	// wrong OID. 2^53+1 has no float64, so an arm declared float8 answers
+	// 9007199254740992 — off by one, silently, in a column a client reads as
+	// an integer.
+	out = append(out,
+		pgCase{name: "IntegerArithmeticInACaseArm", ordered: true,
+			sql: `SELECT n_nationkey, CASE WHEN n_nationkey = 0 THEN n_nationkey ELSE n_nationkey + 100 END AS x FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "MinOverACaseWithIntegerArithmetic",
+			sql: `SELECT MIN(CASE WHEN n_nationkey = 0 THEN n_nationkey ELSE n_nationkey + 100 END) AS x FROM nation`},
+		pgCase{name: "IntegerDivisionInACaseArm", ordered: true,
+			sql: `SELECT n_nationkey, CASE WHEN n_nationkey < 0 THEN 0 ELSE n_nationkey / 4 END AS q FROM nation ORDER BY n_nationkey`},
+		// A float operand in either arm keeps the whole composite float8 in
+		// both engines — the control that says the rule is the OPERANDS' and
+		// not "a CASE over a column is integer".
+		pgCase{name: "FloatArithmeticInACaseArmControl", ordered: true,
+			sql: `SELECT n_nationkey, CASE WHEN n_nationkey = 0 THEN n_nationkey ELSE n_nationkey + 0.5 END AS x FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "IntegerArithmeticInACaseArmIsExact", ordered: true, limit: 3,
+			sql: `SELECT n_nationkey, CASE WHEN n_nationkey = 0 THEN 9007199254740993 ELSE 9007199254740993 + 0 END AS x FROM nation ORDER BY n_nationkey LIMIT 3`},
+	)
+
 	// --- Rounding at a tie ----------------------------------------------
 	//
 	// PostgreSQL rounds NUMERIC half away from zero and DOUBLE PRECISION

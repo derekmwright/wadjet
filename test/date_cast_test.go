@@ -331,7 +331,13 @@ func TestDateCastLeavesNonTemporalArithmeticAlone(t *testing.T) {
 		// A time-of-day literal has no column type to become, so it keeps
 		// its text.
 		{"SELECT TIME '10:00:00' AS x", "10:00:00"},
-		{"SELECT 5 - 2 AS x", float64(3)},
+		// Integer arithmetic, so an integer: `SELECT pg_typeof(5 - 2)` is
+		// `integer` on PostgreSQL 17. The width still differs — this engine
+		// computes integer arithmetic in int64 and declares it INT64, which
+		// is what `SELECT 5 - 2 FROM t` has answered since #369 — but the
+		// DOMAIN is no longer float, and it no longer depends on whether the
+		// expression sits at the top of a projection.
+		{"SELECT 5 - 2 AS x", int64(3)},
 	}
 	for _, c := range cases {
 		rows := dateCastRows(t, ctx, db, c.sql)

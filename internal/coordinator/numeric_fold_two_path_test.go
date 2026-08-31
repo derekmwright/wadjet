@@ -242,6 +242,59 @@ var nfBoxPins = map[string]string{
 	"NULLIF|n_d152|n_f64":  "string", // PostgreSQL declares double precision
 	"NULLIF|n_d3810|n_f32": "string", // PostgreSQL declares double precision
 	"NULLIF|n_d3810|n_f64": "string", // PostgreSQL declares double precision
+
+	// --- The arm-kind rows, none of them the fold's own doing ------------
+	//
+	// INT32 arithmetic is computed and declared in int64: expr.BinOpNumeric's
+	// integer mode has one integer width, so `SELECT n_i32 + 1` has boxed
+	// int64 since #369 and these fold to the same INT64. The DOMAIN is right
+	// and the width is the standing int4/int8 divergence, not a value.
+	"CASE|n_i32|ARITH":  "int64", // PostgreSQL declares integer
+	"CASE|n_i32|NESTED": "int64", // PostgreSQL declares integer
+	// A scalar math function declared RetFloat64 loses the integer domain
+	// its argument had: PostgreSQL's abs() preserves it (bigint in, bigint
+	// out; real in, real out). Same failure mode as the arithmetic arm, a
+	// different site — expr.DefaultRegistry's return declarations, not
+	// nodeDeclaredType — so the fix above does not reach it.
+	"CASE|n_i32|FUNCABS": "float64", // PostgreSQL declares integer
+	"CASE|n_i64|FUNCABS": "float64", // PostgreSQL declares bigint
+	"CASE|n_f32|FUNCABS": "float64", // PostgreSQL declares real
+	// A bare numeric LITERAL arm decides nothing here, so the column's own
+	// type answers and the literal is read at that type. ADR-0024 records
+	// the deferral for a fold of literals ALONE; against a typed integer
+	// operand PostgreSQL resolves the pair to numeric instead, and the
+	// difference is a truncated value, pinned below as well as here.
+	"CASE|n_i32|LITNUM": "int32", // PostgreSQL declares numeric
+	"CASE|n_i64|LITNUM": "int64", // PostgreSQL declares numeric
+}
+
+// nfValuePins are entries whose VALUES this engine answers differently from
+// PostgreSQL, with PostgreSQL's answer recorded in the corpus entry beside
+// each. Every one is a defect OUTSIDE the numeric fold — the fold picks the
+// rung correctly and another layer then produces a different number on it —
+// and every one reproduces with the fold's integer-arithmetic rule reverted,
+// which is how they were classified rather than assumed.
+//
+// They are PINNED rather than dropped for the reason nfCarrierRefusals is: a
+// pin is a claim that can fail. The gate asserts each still diverges, so the
+// day the underlying defect is fixed these entries fail and the recorded
+// PostgreSQL answer is already there to assert instead (ADR-0013).
+var nfValuePins = map[string]string{
+	// The numeric-literal arm above, as a VALUE: declared at the integer
+	// column's type, 100.5 is stored as 100. PostgreSQL folds the pair to
+	// numeric and keeps the half.
+	"CASE|n_i32|LITNUM": "3|100|100|100",
+	"CASE|n_i64|LITNUM": "4|100|100|100",
+	// float -> integer CAST rounding. PostgreSQL's float8-to-int8 cast is
+	// rint(), which rounds halves to EVEN, so -0.5 casts to 0; this engine
+	// rounds the half away from zero and answers -1. A cast rule, reached
+	// here only because a CAST is one of the arm kinds.
+	"CASE|n_f32|CASTI64": "0.1|<NULL>|1.6777216e+07|-1",
+	// abs() declared float8 (see the box pin above) widens the real column
+	// to double, so 0.1 prints with the digits a float32 never held. This is
+	// the value half of that defect, and the row that shows a wrong return
+	// declaration is a wrong NUMBER and not only a wrong OID.
+	"CASE|n_f32|FUNCABS": "0.10000000149011612|<NULL>|16777216|0.5",
 }
 
 // nfBox is the Go box a value of PostgreSQL's declared type arrives in when
@@ -317,6 +370,11 @@ func TestNumericFoldTwoPath(t *testing.T) {
 			t.Errorf("box pin %q matches no corpus entry — delete it or fix the name.", name)
 		}
 	}
+	for name := range nfValuePins {
+		if !seen[name] {
+			t.Errorf("value pin %q matches no corpus entry — delete it or fix the name.", name)
+		}
+	}
 
 	for _, c := range corpus {
 		t.Run(c.name, func(t *testing.T) {
@@ -357,7 +415,18 @@ func TestNumericFoldTwoPath(t *testing.T) {
 				if _, pinned := nfBoxPins[c.name]; pinned {
 					mode = "numeric"
 				}
-				if got := nfValues(res); !nfSameValues(mode, c.want, got) {
+				got := nfValues(res)
+				if pin, pinned := nfValuePins[c.name]; pinned {
+					if nfSameValues(mode, c.want, got) {
+						t.Errorf("%s: %s now answers %s, which is PostgreSQL's answer — "+
+							"the value pin AGREES, so delete this nfValuePins entry and "+
+							"let the corpus assert it (ADR-0013)", arm.name, sql, got)
+					} else if got != pin {
+						t.Errorf("%s: %s\n  got  %s\n  pin  %s\n  want %s (PostgreSQL 17.11, declared %s)"+
+							"\n  the divergence moved: neither PostgreSQL's answer nor the pinned one",
+							arm.name, sql, got, pin, c.want, c.pg)
+					}
+				} else if !nfSameValues(mode, c.want, got) {
 					t.Errorf("%s: %s\n  got  %s\n  want %s (PostgreSQL 17.11, declared %s)",
 						arm.name, sql, got, c.want, c.pg)
 				}
@@ -1361,6 +1430,65 @@ func nfCorpus() []nfEntry {
 		{"MIX|i64_lit_f64", "GREATEST(n_i64, '3.5', n_f64)", "double precision", "4|3.5|16777217|3.5"},
 		{"MIX|dec152_dec3810", "COALESCE(n_d152, n_d3810)", "numeric", "12.75|<NULL>|1.00|-3.50"},
 		{"MIX|dec152_dec3810_lit", "COALESCE(n_d152, n_d3810, '12.750000000000000001')", "numeric", "12.75|12.750000000000000001|1.00|-3.50"},
+
+		// --- The ARM KINDS a CASE can hold, over each numeric width -------
+		//
+		// Every entry above folds over BARE COLUMNS and quoted literals. That
+		// left the fold's INPUT untested: `nodeDeclaredType` answers per arm,
+		// and an arm that is not a bare column went through a different arm of
+		// that switch. Arithmetic was the one that lost its type — `n_i64 +
+		// 100` declared FLOAT64, so `CASE WHEN … THEN n_i64 ELSE n_i64 + 100
+		// END` folded {INT64, FLOAT64} and answered double precision where
+		// PostgreSQL answers bigint. It read as correct for as long as
+		// CommonDeclType answered from the FIRST decider rather than the
+		// ladder, which is why the #724 stack exposed it rather than caused it.
+		//
+		// Eight arm kinds x five widths, every answer read off PostgreSQL 17
+		// (format_type over a view, so the typmod is carried). The controls
+		// matter as much as the subject: LITINT/LITNUM/LITQ pin ADR-0024's
+		// literal rules, and the float rows pin that arithmetic must NOT be
+		// declared integer — `real + 100` is double precision on PostgreSQL,
+		// and both the NESTED and ARITH rows for n_f32 say so.
+		{"CASE|n_i32|SELF", "CASE WHEN id=1 THEN n_i32 ELSE n_i32 END", "integer", "3|<NULL>|16777217|-5"},
+		{"CASE|n_i32|ARITH", "CASE WHEN id=1 THEN n_i32 ELSE n_i32 + 100 END", "integer", "3|<NULL>|16777317|95"},
+		{"CASE|n_i32|CASTI64", "CASE WHEN id=1 THEN n_i32 ELSE CAST(n_i32 AS BIGINT) END", "bigint", "3|<NULL>|16777217|-5"},
+		{"CASE|n_i32|LITINT", "CASE WHEN id=1 THEN n_i32 ELSE 100 END", "integer", "3|100|100|100"},
+		{"CASE|n_i32|LITNUM", "CASE WHEN id=1 THEN n_i32 ELSE 100.5 END", "numeric", "3|100.5|100.5|100.5"},
+		{"CASE|n_i32|LITQ", "CASE WHEN id=1 THEN n_i32 ELSE 100 END", "integer", "3|100|100|100"},
+		{"CASE|n_i32|NESTED", "CASE WHEN id=1 THEN n_i32 ELSE CASE WHEN id = 3 THEN n_i32 ELSE n_i32 + 1 END END", "integer", "3|<NULL>|16777217|-4"},
+		{"CASE|n_i32|FUNCABS", "CASE WHEN id=1 THEN n_i32 ELSE ABS(n_i32) END", "integer", "3|<NULL>|16777217|5"},
+		{"CASE|n_i64|SELF", "CASE WHEN id=1 THEN n_i64 ELSE n_i64 END", "bigint", "4|<NULL>|16777217|-6"},
+		{"CASE|n_i64|ARITH", "CASE WHEN id=1 THEN n_i64 ELSE n_i64 + 100 END", "bigint", "4|<NULL>|16777317|94"},
+		{"CASE|n_i64|CASTI64", "CASE WHEN id=1 THEN n_i64 ELSE CAST(n_i64 AS BIGINT) END", "bigint", "4|<NULL>|16777217|-6"},
+		{"CASE|n_i64|LITINT", "CASE WHEN id=1 THEN n_i64 ELSE 100 END", "bigint", "4|100|100|100"},
+		{"CASE|n_i64|LITNUM", "CASE WHEN id=1 THEN n_i64 ELSE 100.5 END", "numeric", "4|100.5|100.5|100.5"},
+		{"CASE|n_i64|LITQ", "CASE WHEN id=1 THEN n_i64 ELSE 100 END", "bigint", "4|100|100|100"},
+		{"CASE|n_i64|NESTED", "CASE WHEN id=1 THEN n_i64 ELSE CASE WHEN id = 3 THEN n_i64 ELSE n_i64 + 1 END END", "bigint", "4|<NULL>|16777217|-5"},
+		{"CASE|n_i64|FUNCABS", "CASE WHEN id=1 THEN n_i64 ELSE ABS(n_i64) END", "bigint", "4|<NULL>|16777217|6"},
+		{"CASE|n_f32|SELF", "CASE WHEN id=1 THEN n_f32 ELSE n_f32 END", "real", "0.1|<NULL>|1.6777216e+07|-0.5"},
+		{"CASE|n_f32|ARITH", "CASE WHEN id=1 THEN n_f32 ELSE n_f32 + 100 END", "double precision", "0.10000000149011612|<NULL>|16777316|99.5"},
+		{"CASE|n_f32|CASTI64", "CASE WHEN id=1 THEN n_f32 ELSE CAST(n_f32 AS BIGINT) END", "real", "0.1|<NULL>|1.6777216e+07|0"},
+		{"CASE|n_f32|LITINT", "CASE WHEN id=1 THEN n_f32 ELSE 100 END", "real", "0.1|100|100|100"},
+		{"CASE|n_f32|LITNUM", "CASE WHEN id=1 THEN n_f32 ELSE 100.5 END", "real", "0.1|100.5|100.5|100.5"},
+		{"CASE|n_f32|LITQ", "CASE WHEN id=1 THEN n_f32 ELSE 100 END", "real", "0.1|100|100|100"},
+		{"CASE|n_f32|NESTED", "CASE WHEN id=1 THEN n_f32 ELSE CASE WHEN id = 3 THEN n_f32 ELSE n_f32 + 1 END END", "double precision", "0.10000000149011612|<NULL>|16777216|0.5"},
+		{"CASE|n_f32|FUNCABS", "CASE WHEN id=1 THEN n_f32 ELSE ABS(n_f32) END", "real", "0.1|<NULL>|1.6777216e+07|0.5"},
+		{"CASE|n_f64|SELF", "CASE WHEN id=1 THEN n_f64 ELSE n_f64 END", "double precision", "0.2|<NULL>|16777217|-0.25"},
+		{"CASE|n_f64|ARITH", "CASE WHEN id=1 THEN n_f64 ELSE n_f64 + 100 END", "double precision", "0.2|<NULL>|16777317|99.75"},
+		{"CASE|n_f64|CASTI64", "CASE WHEN id=1 THEN n_f64 ELSE CAST(n_f64 AS BIGINT) END", "double precision", "0.2|<NULL>|16777217|0"},
+		{"CASE|n_f64|LITINT", "CASE WHEN id=1 THEN n_f64 ELSE 100 END", "double precision", "0.2|100|100|100"},
+		{"CASE|n_f64|LITNUM", "CASE WHEN id=1 THEN n_f64 ELSE 100.5 END", "double precision", "0.2|100.5|100.5|100.5"},
+		{"CASE|n_f64|LITQ", "CASE WHEN id=1 THEN n_f64 ELSE 100 END", "double precision", "0.2|100|100|100"},
+		{"CASE|n_f64|NESTED", "CASE WHEN id=1 THEN n_f64 ELSE CASE WHEN id = 3 THEN n_f64 ELSE n_f64 + 1 END END", "double precision", "0.2|<NULL>|16777217|0.75"},
+		{"CASE|n_f64|FUNCABS", "CASE WHEN id=1 THEN n_f64 ELSE ABS(n_f64) END", "double precision", "0.2|<NULL>|16777217|0.25"},
+		{"CASE|n_d152|SELF", "CASE WHEN id=1 THEN n_d152 ELSE n_d152 END", "numeric(15,2)", "12.75|<NULL>|1.00|-3.50"},
+		{"CASE|n_d152|ARITH", "CASE WHEN id=1 THEN n_d152 ELSE n_d152 + 100 END", "numeric", "12.75|<NULL>|101.00|96.50"},
+		{"CASE|n_d152|CASTI64", "CASE WHEN id=1 THEN n_d152 ELSE CAST(n_d152 AS BIGINT) END", "numeric", "12.75|<NULL>|1|-4"},
+		{"CASE|n_d152|LITINT", "CASE WHEN id=1 THEN n_d152 ELSE 100 END", "numeric", "12.75|100|100|100"},
+		{"CASE|n_d152|LITNUM", "CASE WHEN id=1 THEN n_d152 ELSE 100.5 END", "numeric", "12.75|100.5|100.5|100.5"},
+		{"CASE|n_d152|LITQ", "CASE WHEN id=1 THEN n_d152 ELSE 100 END", "numeric", "12.75|100|100|100"},
+		{"CASE|n_d152|NESTED", "CASE WHEN id=1 THEN n_d152 ELSE CASE WHEN id = 3 THEN n_d152 ELSE n_d152 + 1 END END", "numeric", "12.75|<NULL>|1.00|-2.50"},
+		{"CASE|n_d152|FUNCABS", "CASE WHEN id=1 THEN n_d152 ELSE ABS(n_d152) END", "numeric", "12.75|<NULL>|1.00|3.50"},
 	}
 }
 

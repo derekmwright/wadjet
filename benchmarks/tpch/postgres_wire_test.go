@@ -631,6 +631,39 @@ func wireCorpus() []wireCase {
 					"full scale (\"2.0000000000000000\") and Wadjet renders a float64 (\"2\"). Same number, " +
 					"and any client that parses it gets the same value; a client that string-compares does not",
 			}},
+		// Integer arithmetic inside a CASE arm, at the wire. Both engines
+		// answer the same digits here and the OID underneath them said
+		// float8 (701) where PostgreSQL says an integer — a driver handing
+		// the application a Double for a column that is an integer
+		// everywhere else in the query. The integer rule reached only the
+		// outermost node of a projection, so `SELECT k + 100` already had an
+		// integer OID while the identical expression as a CASE arm did not.
+		//
+		// The OID is PINNED below for the standing int4/int8 width
+		// divergence, so this entry does NOT gate the domain — a pin is a
+		// reason, and it absorbs 701 as readily as 20. What gates it is
+		// coordinator.TestNumericFoldTwoPath, whose CASE|n_i64|ARITH row
+		// asserts the box exactly, unpinned, on both execution paths. These
+		// two entries carry the field names, cell bytes, formats and command
+		// tag of the shape, and record what a client actually reads.
+		{name: "IntegerArithmeticInACaseArm",
+			sql: `SELECT n_nationkey, CASE WHEN n_nationkey = 0 THEN n_nationkey ELSE n_nationkey + 100 END AS x
+				FROM nation ORDER BY n_nationkey LIMIT 3`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "DELIBERATE, and the same widening LiteralTypes records: integer " +
+					"arithmetic is computed in int64 and declared INT64 (OID 20) where PostgreSQL keeps " +
+					"the int4 column's width (23). The DOMAIN agrees; it was float8 (701) until the " +
+					"declared fold learned this shape",
+				wirePropTypeSizes: "same cause — the declared SIZE follows the OID: 8 for int8, 4 for int4",
+			}},
+		// The aggregate spelling, which is where it was found: MIN over the
+		// same CASE described itself float8 on a column of integers.
+		{name: "MinOverACaseWithIntegerArithmetic",
+			sql: `SELECT MIN(CASE WHEN n_nationkey = 0 THEN n_nationkey ELSE n_nationkey + 100 END) AS x FROM nation`,
+			pins: map[string]string{
+				wirePropTypeOIDs:  "same int4/int8 widening as IntegerArithmeticInACaseArm above",
+				wirePropTypeSizes: "same cause — the declared SIZE follows the OID",
+			}},
 		// A literal of each basic type, which is how a client probes a server.
 		{name: "LiteralTypes", sql: `SELECT 1 AS i, 'x' AS t, TRUE AS b, 1.5 AS f`,
 			pins: map[string]string{

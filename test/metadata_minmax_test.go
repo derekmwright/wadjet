@@ -226,8 +226,13 @@ func TestMetadataMinMax(t *testing.T) {
 			// the physical planner sees it, so the aggregate IS a bare
 			// column by then and the metadata path is legitimately eligible.
 			name: "constant arithmetic is lifted out of the aggregate", wantFire: true,
+			// bigint on PostgreSQL 17: `SELECT pg_typeof(MIN(v + 1)) FROM t`
+			// with v bigint answers bigint. This wanted float64 while the
+			// integer rule reached only the outermost node of a projection,
+			// so the identical expression declared INT64 as `SELECT i64 + 1`
+			// and FLOAT64 as this aggregate's input.
 			sql:      "SELECT MIN(i64 + 1) AS lo FROM events",
-			wantRows: []map[string]any{{"lo": float64(2)}},
+			wantRows: []map[string]any{{"lo": int64(2)}},
 		},
 		{
 			name: "COUNT(col) alongside MIN", wantFire: false,

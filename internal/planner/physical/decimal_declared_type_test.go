@@ -224,9 +224,14 @@ func TestDecimalArithmeticDeclaresTheResultType(t *testing.T) {
 		// category (ADR-0024 item 2).
 		{"a + f64", expr.Decl(parquet.TypeFloat64)},
 		// Two integers stay integer arithmetic — PostgreSQL's rule, and the
-		// truncating division of #636. The declaration is the caller's, not
-		// this one's, so it still answers FLOAT64 here.
-		{"i64 + i32", expr.Decl(parquet.TypeFloat64)},
+		// truncating division of #636. This used to answer FLOAT64 with the
+		// note that the declaration was "the caller's, not this one's": only
+		// inferProjectionDeclType held the integer rule, and only for the
+		// outermost node of a projection. That split is what made the same
+		// expression declare INT64 as `SELECT i64 + i32` and FLOAT64 as a
+		// CASE branch or an aggregate's input. PostgreSQL 17 gives
+		// `bigint + integer` bigint in every position.
+		{"i64 + i32", expr.Decl(parquet.TypeInt64)},
 		// An unconstrained DECIMAL has no (p,s) to compute from (#458).
 		{"nops + a", expr.Decl(parquet.TypeFloat64)},
 		// A string operand is not arithmetic this rule can type.

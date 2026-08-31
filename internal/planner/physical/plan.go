@@ -9571,8 +9571,20 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls
 	case *plansql.ParenNode:
 		return intArithAllInt(n.Inner, strictInt, decls)
 	case *plansql.ColRef:
-		if strictInt[strings.ToLower(n.Column)] {
-			return true
+		if strictInt != nil {
+			if strictInt[strings.ToLower(n.Column)] {
+				return true
+			}
+		} else if c, ok := decls.colDecl(n); ok && !decls.isFieldPath(n) {
+			// A nil strictInt means the caller is the DECLARED-type walk
+			// (nodeDeclaredType), which runs at every nested site — a CASE
+			// branch, a COALESCE argument, an aggregate's input — and has no
+			// scan-level column set to consult. The catalog types in decls
+			// are the same authority colRefDeclaredType already trusts to
+			// type a bare column reference at those very sites, so reading
+			// them here claims nothing new; it only stops the claim from
+			// evaporating the moment the reference sits under a `+`.
+			return c.Type == parquet.TypeInt64 || c.Type == parquet.TypeInt32
 		}
 		// A ROW FIELD PATH of a strictly-int type is one too. strictInt is
 		// keyed by COLUMN name and a field is not a column, so `rw.n + 1`
@@ -10173,6 +10185,38 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			// strict subset of it — see decimal_arith_type.go.
 			if t, ok := binOpDecimalType(n, decls); ok {
 				return t, expr.Decided
+			}
+			// Integer arithmetic over integer operands is INTEGER, and this
+			// is where that survived being nested. `inferProjectionDeclType`
+			// has held the rule since #369, but only for the OUTERMOST node
+			// of a projection, so `SELECT v + 100` declared INT64 while the
+			// same expression as a CASE branch, a COALESCE argument or an
+			// aggregate's input declared FLOAT64 — one expression, two
+			// answers, decided by where it sat.
+			//
+			// It only surfaced as a wrong TYPE once the fold stopped being
+			// order-dependent. `CommonDeclType` used to answer from the
+			// first non-DECIMAL decider, so {INT64, FLOAT64} returned INT64
+			// by argument order and `MIN(CASE WHEN g=0 THEN v ELSE v+100 END)`
+			// came back bigint for the reason a coin comes up heads —
+			// writing the arms the other way round already answered float8.
+			// e61f0a4e replaced that with PostgreSQL's select_common_type
+			// ladder, which folds {INT64, FLOAT64} to FLOAT64 correctly and
+			// so exposed the FLOAT64 this arm had been contributing all
+			// along (#724's stack; ADR-0024 item 2).
+			//
+			// PostgreSQL 17 on the same shapes: bigint for MIN over
+			// `bigint + 100`, integer for the int4 column, and double
+			// precision the moment a float or a numeric-spelled literal
+			// joins — which is why intArithAllInt, not a local rule, decides
+			// here. It is the same predicate the projection uses and a
+			// strict subset of expr.BinOpNumeric's runtime integer mode, so
+			// the declaration cannot promise an integer the kernel will not
+			// produce. It must ride IntArithOn for that reason: with
+			// WADJET_INT_ARITH=0 the kernel takes its float delegate, and
+			// declaring INT64 then would be the corrupting direction.
+			if expr.IntArithOn() && intArithAllInt(n, nil, decls) {
+				return expr.Decl(parquet.TypeInt64), expr.Decided
 			}
 			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		}
