@@ -221,7 +221,12 @@ func TestLateralJoin_WithAggregation(t *testing.T) {
 		t.Fatalf("query failed: %v", err)
 	}
 
-	// Alice and Bob have line items; Carol (no items) excluded by INNER JOIN
+	// Alice and Bob have line items; Carol (no items) excluded by INNER JOIN.
+	//
+	// PostgreSQL 17 answers 3 rows here, Carol included at item_count=0 —
+	// see the note in TestLateralJoin_LeftJoinWithAggregation. The 2 below
+	// is this engine's decorrelation, not PostgreSQL's answer; it is kept
+	// as the gate for the join key the rewrite depends on.
 	if len(r.Rows) != 2 {
 		t.Fatalf("expected 2 rows, got %d: %v", len(r.Rows), r.Rows)
 	}
@@ -233,4 +238,51 @@ func TestLateralJoin_WithAggregation(t *testing.T) {
 			t.Errorf("expected item_count=2 for %v, got %v", row["customer"], row["item_count"])
 		}
 	}
+}
+
+// The aggregated LATERAL is decorrelated into GROUP BY + join, which is what
+// the join key must survive. This shape answered every aggregate NULL — a
+// silently wrong answer rather than an empty one — for the same missing-key
+// reason TestLateralJoin_WithAggregation answered zero rows.
+func TestLateralJoin_LeftJoinWithAggregation(t *testing.T) {
+	db := setupOrdersDB(t)
+	ctx := context.Background()
+
+	r, err := db.Query(ctx, `
+		SELECT o.customer, s.item_count
+		FROM orders o
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) as item_count
+			FROM line_items
+			WHERE order_id = o.id
+		) s ON true
+		ORDER BY o.customer
+	`)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if len(r.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d: %v", len(r.Rows), r.Rows)
+	}
+	got := map[string]any{}
+	for _, row := range r.Rows {
+		cust, _ := row["customer"].(string)
+		got[cust] = row["item_count"]
+	}
+	for _, cust := range []string{"Alice", "Bob"} {
+		if cnt, _ := got[cust].(int64); cnt != 2 {
+			t.Errorf("%s: expected item_count=2, got %v", cust, got[cust])
+		}
+	}
+	if _, ok := got["Carol"]; !ok {
+		t.Error("Carol must survive the LEFT JOIN")
+	}
+	// Carol's cell is deliberately not asserted: PostgreSQL 17 answers 0
+	// there, because it evaluates the subquery per outer row and an
+	// unGROUPed aggregate over an empty input still produces one row. This
+	// engine rewrites the correlation into GROUP BY + join, which produces
+	// no group for an outer key with no matches, so the LEFT JOIN pads it
+	// NULL. Same cause makes the INNER JOIN above answer 2 rows where
+	// PostgreSQL answers 3. That gap is older than this test and is not
+	// what this test gates.
 }

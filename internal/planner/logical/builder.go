@@ -1260,22 +1260,47 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		}
 	}
 	if hasAgg && len(correlatedParts) > 0 {
+		// The key must be SELECTED as well as grouped. The rewrite above
+		// promotes the correlated equality into the join condition, so the
+		// join keys on the inner column — and a column the subquery's select
+		// list does not publish is not there to key on. It used to be there
+		// by accident: buildProject elided every projection over an
+		// aggregate, so the aggregate's raw output (keys first, then
+		// aggregates) reached the join and the key leaked through. Once that
+		// elision became conditional on the shapes matching (c55492d1, #591)
+		// the projection was kept, the key was genuinely gone, and
+		// exec.HashJoin resolved its build key to index -1 — which it treats
+		// as an unresolvable-but-matchable null key, so every build row
+		// serialized the same degenerate key, nothing equalled the probe's
+		// real value, and the query answered zero rows (a LEFT JOIN LATERAL
+		// answered every aggregate NULL, which is worse).
+		var injected []plansql.SelectColumn
 		for _, cp := range correlatedParts {
 			innerCol := extractInnerColumn(cp, leftAliases)
-			if innerCol != "" {
-				// Add to GROUP BY if not already present
-				found := false
-				for _, g := range subInfo.GroupBy {
-					if strings.EqualFold(g, innerCol) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
+			if innerCol == "" {
+				continue
+			}
+			// Add to GROUP BY if not already present
+			found := false
+			for _, g := range subInfo.GroupBy {
+				if strings.EqualFold(g, innerCol) {
+					found = true
+					break
 				}
 			}
+			if !found {
+				subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
+			}
+			if lateralSelectsColumn(subInfo.Columns, innerCol) || lateralSelectsColumn(injected, innerCol) {
+				continue
+			}
+			if col, ok := lateralKeySelectItem(innerCol); ok {
+				injected = append(injected, col)
+			}
 		}
+		// Keys first, mirroring the order buildAggregate emits them in, so
+		// the projection above stays elidable in the ordinary shape.
+		subInfo.Columns = append(injected, subInfo.Columns...)
 	}
 
 	right, err := BuildFromSelectWithCTEs(subInfo, ctes)
@@ -1397,6 +1422,51 @@ func referencesAliases(expr string, aliases map[string]bool) bool {
 // isIdentChar returns true if the byte is a valid identifier character.
 func isIdentChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+// lateralKeySelectItem builds the select item that publishes a correlation key
+// injected into an aggregated LATERAL subquery's GROUP BY. The expression is
+// parsed rather than assembled so the item carries the same AST a written
+// `SELECT order_id` would, which is what the projection and the join key
+// resolution below it both read.
+func lateralKeySelectItem(innerCol string) (plansql.SelectColumn, bool) {
+	node, err := plansql.ParseExpression(innerCol)
+	if err != nil || node == nil {
+		return plansql.SelectColumn{}, false
+	}
+	col := plansql.SelectColumn{Expr: node.String(), ASTExpr: node}
+	if ref, ok := node.(*plansql.ColRef); ok {
+		col.ColumnRef = ref.Column
+		col.TableRef = ref.Table
+	}
+	return col, true
+}
+
+// lateralSelectsColumn reports whether a subquery's select list already
+// publishes innerCol, so an injected key is never selected twice. A star
+// publishes everything the subquery can see, the key included.
+func lateralSelectsColumn(cols []plansql.SelectColumn, innerCol string) bool {
+	bare := strings.TrimSpace(innerCol)
+	if node, err := plansql.ParseExpression(innerCol); err == nil {
+		if ref, ok := node.(*plansql.ColRef); ok {
+			bare = ref.Column
+		}
+	}
+	for _, c := range cols {
+		if c.Star {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(c.Expr), strings.TrimSpace(innerCol)) {
+			return true
+		}
+		if c.Alias != "" && strings.EqualFold(c.Alias, bare) {
+			return true
+		}
+		if !c.IsAgg && c.ColumnRef != "" && strings.EqualFold(c.ColumnRef, bare) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractInnerColumn extracts the inner (non-outer) column from a correlated
