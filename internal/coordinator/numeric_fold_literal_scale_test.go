@@ -280,21 +280,26 @@ func TestNumericFoldRefusalIsPerRow(t *testing.T) {
 //
 // Three answers are resolved over a composite: the DECLARATION
 // (physical.nodeDeclaredType), the plan-time literal REFUSAL
-// (physical.foldArgTypes) and the runtime BOX MODE (expr.classifyOperandFold
-// -> joinFoldKinds). The first two are held together by
-// physical.TestDeclaredFoldAgreesWithTheComparisonFold, over nested forms
-// included. The third has its own recursion list, and it is NOT the same list:
-// it reaches greatest/least, CASE and Coalesce, and not nullif.
+// (physical.foldArgTypes) and the runtime BOX MODE, which is two questions of
+// its own — expr.classifyOperandFold for the TYPE the arms fold to and
+// expr.classifyOperand for the KIND a box from them can be. The first two are
+// held together by physical.TestDeclaredFoldAgreesWithTheComparisonFold, over
+// nested forms included. The last two had their own recursion lists, and
+// neither reached NULLIF (#761).
 //
-// So a NULLIF nested inside a COALESCE over a float declares `real` correctly
-// and then refuses to produce one — the inner call's DECIMAL text meets the
-// outer FLOAT32 vector and #361's guard stops the query. Pinned rather than
-// fixed: it is present on eea0f9d5, #724 moved it in neither direction, and
-// the fix belongs with the registry-driven recursion #761 describes.
+// Both halves were needed and neither alone was safe. Without the TYPE arm,
+// `COALESCE(NULLIF(numeric, '…'), real)` declared real — PostgreSQL's answer —
+// and then refused to produce one, because the inner call's DECIMAL text met a
+// FLOAT32 vector and #361's guard stopped the query. Adding only that arm made
+// the query answer and made `GREATEST(NULLIF(numeric, '…'), real)` answer
+// -3.50 where PostgreSQL answers -0.5: the PAIR was still unclassifiable, so
+// compare() ordered two rendered numbers by BYTES, and "-3.50" sorts below
+// "-0.5". A loud refusal traded for a silent wrong value is the regression in
+// kind method 8 is about, so the KIND arm landed with it.
 //
-// The passing siblings are the control that localises it: change the inner
-// call to one the runtime's list DOES reach and the same shape answers
-// PostgreSQL's value on every arm.
+// Every want below is PostgreSQL 17.11's over this fixture, on both arms. The
+// entries whose inner call is a CASE, a COALESCE or a GREATEST are the control
+// that localises the fix: they were already right, and they must stay right.
 func TestNestedCompositeBoxMode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -337,15 +342,28 @@ func TestNestedCompositeBoxMode(t *testing.T) {
 		})
 	}
 
-	// TODO(#761): the inner call is NULLIF, which the runtime's recursion does
-	// not reach, so the composite declares `real` and cannot produce one.
-	// PostgreSQL answers the values recorded beside each. These pins fail when
-	// the recursion becomes registry-driven.
-	for _, tc := range []struct{ name, expr, pgWant string }{
+	// The inner call is NULLIF, which neither recursion reached until #761.
+	// The last two are the shapes that a TYPE-only fix answered WRONGLY, so
+	// they are the ones worth keeping closest: on the negative row the
+	// extremum has to be chosen by value and not by the bytes of two
+	// renderings.
+	for _, tc := range []struct{ name, expr, want string }{
 		{"NullifInsideCoalesceOverReal", "COALESCE(NULLIF(n_d152, '12.75'), n_f32)",
 			"0.1;<NULL>;1;-3.5"},
-		{"NullifKeepsItsValue", "COALESCE(NULLIF(n_d152, '99'), n_f32)",
+		{"NullifInsideCoalesceKeepsItsValue", "COALESCE(NULLIF(n_d152, '99'), n_f32)",
 			"12.75;<NULL>;1;-3.5"},
+		{"NullifInsideCoalesceUnquoted", "COALESCE(NULLIF(n_d152, 12.75), n_f32)",
+			"0.1;<NULL>;1;-3.5"},
+		{"NullifOverAWideDecimal", "COALESCE(NULLIF(n_d3810, '12.7500000001'), n_f64)",
+			"0.2;<NULL>;1;-3.5"},
+		{"NullifInsideCase", "CASE WHEN id < 9 THEN NULLIF(n_d152, '12.75') ELSE n_f32 END",
+			"<NULL>;<NULL>;1;-3.5"},
+		{"NullifNestedTwice", "COALESCE(NULLIF(NULLIF(n_d152, '1.00'), '12.75'), n_f32)",
+			"0.1;<NULL>;1.6777216e+07;-3.5"},
+		{"NullifInsideGreatest", "GREATEST(NULLIF(n_d152, '12.75'), n_f32)",
+			"0.1;<NULL>;1.6777216e+07;-0.5"},
+		{"NullifInsideLeast", "LEAST(NULLIF(n_d152, '12.75'), n_f64)",
+			"0.2;<NULL>;1;-3.5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sql := fmt.Sprintf("SELECT (%s) AS v FROM %s ORDER BY id", tc.expr, nfTable)
@@ -354,10 +372,13 @@ func TestNestedCompositeBoxMode(t *testing.T) {
 				dag  bool
 			}{{"single", false}, {"dag", true}} {
 				res, err := nfRun(ctx, single, coord, sql, arm.dag)
-				if err == nil {
-					t.Errorf("%s: %s answered %s — the runtime box mode reaches a nested "+
-						"NULLIF now, so delete this pin and assert PostgreSQL's %s",
-						arm.name, sql, nfRows(res), tc.pgWant)
+				if err != nil {
+					t.Fatalf("%s: %s refused: %v\n  PostgreSQL 17.11 answers %s",
+						arm.name, sql, err, tc.want)
+				}
+				if got := nfRows(res); !nfSameRows(tc.want, got) {
+					t.Errorf("%s: %s\n  got  %s\n  want %s (PostgreSQL 17.11)",
+						arm.name, sql, got, tc.want)
 				}
 			}
 		})
