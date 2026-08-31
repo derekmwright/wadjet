@@ -104,8 +104,9 @@ than a regression.
 ## Landing
 
 Fixes are cherry-picked onto `main` serially, one branch at a time, with the
-full battery run on the *combined* tree: `./internal/...`, `./wadjet/`, the
-**whole** `./benchmarks/tpch/` package on the default fixture *and* with
+full battery run on the *combined* tree: `./internal/...`, `./wadjet/`,
+`./test/` (CI runs it; it was red for six days while every local battery
+skipped it), the **whole** `./benchmarks/tpch/` package on the default fixture *and* with
 `TPCH_DECIMAL=1` (not only `TestTPCHQueries` — `TestDuckDBCompare` and the
 duplicate-name suite live there, and the ordered DuckDB digest is what
 caught #656's DAG `ORDER BY` regression after a clean review), `task

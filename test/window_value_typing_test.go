@@ -185,16 +185,15 @@ func TestWindowValueFunctionsOverUnresolvableArguments(t *testing.T) {
 			want: []any{nil, int32(10), int32(20), int32(30)},
 		},
 		{
-			// A COMPUTED argument is not a column at all, and nothing below
-			// the window materializes it — so the operator finds no input
-			// vector and the column comes back NULL. That is a separate,
-			// pre-existing gap (window arguments must be column references);
-			// it is pinned here because the shape used to nil-dereference and
-			// take the process down with it, and NULL is the floor this must
-			// not fall below again.
-			name: "a computed argument is unsupported, and must not panic",
+			// A COMPUTED argument is materialized below the window since
+			// #672 (v0.18.6): FIRST_VALUE over ORDER BY k is the first row's
+			// UPPER(s) on every row, which is what PostgreSQL answers. This
+			// shape once nil-dereferenced and took the process down, then was
+			// pinned at NULL; the pin fired when #672 landed, so it now
+			// asserts the answer.
+			name: "a computed argument is materialized",
 			sql:  `SELECT FIRST_VALUE(UPPER(s)) OVER (ORDER BY k) AS x FROM w ORDER BY k`,
-			want: []any{nil, nil, nil, nil},
+			want: []any{"ALPHA", "ALPHA", "ALPHA", "ALPHA"},
 		},
 	}
 	for _, tc := range tests {
