@@ -565,38 +565,108 @@ func TestCTEComputedColumnAboveAJoinChainThreeArms(t *testing.T) {
 		}
 	})
 
-	// TODO(#NNN): the CTE on the BUILD side of a chain, over an AGGREGATE
-	// whose output is computed, answers ZERO on both DAG arms. It is a
+	// TODO(#762): an AGGREGATE-bodied CTE read from the BUILD side of a JOIN
+	// CHAIN and filtered above answers ZERO on both DAG arms. It is a
 	// different site from everything above — the two shuffle sides share ONE
 	// payload manifest, so the probe nominally carries the build's `dv` too
-	// and the name resolves to the wrong side. Every neighbouring combination
-	// is correct and asserted above; this pin fails the day it agrees.
-	t.Run("aggregate-computed/cte-on-build/2join", func(t *testing.T) {
-		sql := "WITH c AS (SELECT id, SUM(f) * 2 AS dv FROM " + tbl + " GROUP BY id) " +
-			"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN c ON c.id = t.id " +
-			"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1"
-		for _, arm := range arms {
-			res, err := arm.run(sql)
-			if err != nil {
-				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
-			}
-			got := ctrCounts(t, res)
-			if arm.name == "single" {
-				if len(got) != 1 || got[0] != 6 {
-					t.Errorf("the single arm answered %v, PostgreSQL 17 answers 6\n  SQL: %s",
-						got, sql)
+	// and the name resolves to the wrong side, which is the "resolves to the
+	// WRONG thing" class ADR-0025 says the weak reachability question cannot
+	// see. Verified pre-existing when it was filed.
+	//
+	// The trigger is NOT what the issue reports. #762 names three conditions —
+	// an aggregate body, a COMPUTED published column, and the chain — and the
+	// computed column is not one of them. Measured over this fixture on all
+	// three arms (single is PostgreSQL 17's 6 everywhere):
+	//
+	//   body        published   position   joins   dag / dag-shuffled
+	//   aggregate   computed    build      1       6  6
+	//   aggregate   computed    build      2       0  0   <- pinned below
+	//   aggregate   computed    build      3       0  0
+	//   aggregate   computed    first      2       6  6
+	//   aggregate   computed    last       2       0  0
+	//   aggregate   RENAME      build      1       6  6
+	//   aggregate   RENAME      build      2       0  0   <- pinned below
+	//   aggregate   RENAME      first      2       6  6
+	//   aggregate   RENAME      last       2       0  0
+	//   plain       computed    build      2       6  6
+	//   plain       RENAME      build      2       6  6
+	//
+	// So the aggregate body and a CHAIN with the CTE anywhere but first are
+	// what matter; the expression is incidental. The issue's control row for
+	// the rename spelling must have been taken at ONE join, where it is
+	// correct. Both spellings are pinned below, and a fix that repairs only
+	// the computed one will be caught by the other pin rather than passing.
+	//
+	// The three controls carry the rows that bound the trigger: one join, the
+	// CTE first, and a non-aggregate body. Every value here is PostgreSQL 17's
+	// over this fixture in a --locale=C database, not either engine's.
+	for _, tc := range []struct {
+		name, sql string
+		pinDAG    bool // pinned at 0 on both DAG arms rather than asserted at 6
+	}{
+		{
+			name: "aggregate-computed/cte-on-build/2join",
+			sql: "WITH c AS (SELECT id, SUM(f) * 2 AS dv FROM " + tbl + " GROUP BY id) " +
+				"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN c ON c.id = t.id " +
+				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1",
+			pinDAG: true,
+		},
+		{
+			name: "aggregate-renamed/cte-on-build/2join",
+			sql: "WITH c AS (SELECT id, SUM(f) AS dv FROM " + tbl + " GROUP BY id) " +
+				"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN c ON c.id = t.id " +
+				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1",
+			pinDAG: true,
+		},
+		{
+			name: "aggregate-computed/cte-on-build/1join",
+			sql: "WITH c AS (SELECT id, SUM(f) * 2 AS dv FROM " + tbl + " GROUP BY id) " +
+				"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN c ON c.id = t.id WHERE c.dv > 1",
+		},
+		{
+			name: "aggregate-computed/cte-first/2join",
+			sql: "WITH c AS (SELECT id, SUM(f) * 2 AS dv FROM " + tbl + " GROUP BY id) " +
+				"SELECT COUNT(*) AS n FROM c JOIN " + tbl + " t ON c.id = t.id " +
+				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1",
+		},
+		{
+			name: "plain-computed/cte-on-build/2join",
+			sql: "WITH c AS (SELECT id, f * 2 AS dv FROM " + tbl + ") " +
+				"SELECT COUNT(*) AS n FROM " + tbl + " t JOIN c ON c.id = t.id " +
+				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			const want = 6 // PostgreSQL 17
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL answers %d: %v\n  SQL: %s",
+						arm.name, want, err, tc.sql)
 				}
-				continue
+				got := ctrCounts(t, res)
+				if arm.name == "single" || !tc.pinDAG {
+					if len(got) != 1 || got[0] != want {
+						t.Errorf("%s arm answered %v, PostgreSQL 17 answers %d\n  SQL: %s",
+							arm.name, got, want, tc.sql)
+					}
+					continue
+				}
+				switch {
+				case len(got) == 1 && got[0] == want:
+					t.Errorf("the %s arm now agrees — delete this pin (#762): it answered "+
+						"PostgreSQL's %d where the pin records 0, so assert %d on every arm "+
+						"and drop the TODO\n  SQL: %s", arm.name, want, want, tc.sql)
+				case len(got) == 1 && got[0] == 0:
+					t.Logf("known defect, NOT gated [#762]: the %s arm answers 0 where "+
+						"PostgreSQL 17 answers %d", arm.name, want)
+				default:
+					t.Errorf("the %s arm answered %v, which is neither the pinned 0 nor "+
+						"PostgreSQL's %d — #762 changed shape\n  SQL: %s",
+						arm.name, got, want, tc.sql)
+				}
 			}
-			if len(got) == 1 && got[0] == 6 {
-				t.Errorf("the %s arm now answers 6 — the pin is fixed, delete it and assert 6 "+
-					"on every arm\n  SQL: %s", arm.name, sql)
-				continue
-			}
-			if len(got) != 1 || got[0] != 0 {
-				t.Errorf("the %s arm answered %v, which is neither the pinned 0 nor "+
-					"PostgreSQL's 6\n  SQL: %s", arm.name, got, sql)
-			}
-		}
-	})
+		})
+	}
 }
