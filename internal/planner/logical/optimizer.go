@@ -569,8 +569,8 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		jt := strings.ToLower(n.JoinType)
 		if jt == "" || jt == "join" || jt == "inner" || jt == "inner join" ||
 			jt == "left" || jt == "right" || jt == "cross" {
-			leftAvail := collectSubtreeColumns(n.Children[0])
-			rightAvail := collectSubtreeColumns(n.Children[1])
+			leftAvail := subtreePublishedColumns(n.Children[0])
+			rightAvail := subtreePublishedColumns(n.Children[1])
 			if len(leftAvail) > 0 && len(rightAvail) > 0 {
 				joinRefs := make(map[string]bool, 8)
 				if n.JoinCond != "" {
@@ -623,58 +623,6 @@ func collectSubtreeColumnsRec(n *Node, result map[string]bool) {
 			result[strings.ToLower(col)] = true
 		}
 	}
-	// A subtree also publishes the names its own operators MINT, and reading
-	// only the scans made the partition at a join silently lose them.
-	//
-	// `WITH c AS (SELECT id, a AS v FROM t) SELECT COUNT(*) FROM c JOIN t x ON
-	// c.id = x.id JOIN t y ON c.id = y.id WHERE c.v > 1` needs `v` above BOTH
-	// joins. No scan stores `v`, so it was in neither side's available set,
-	// the partition put it in neither probeNeeds nor buildNeeds, and the INNER
-	// join's NeededColumns — which becomes its OutputFilter — dropped the
-	// column the filter above the OUTER join was about to read. The
-	// single-process path failed with `filter column "c.v" does not exist in
-	// the input schema`, the SHUFFLED DAG answered ZERO rows in silence, and
-	// the broadcast DAG answered correctly, because only the first two narrow
-	// to that list (#700, #726).
-	//
-	// One join hid it for two years of this code: there the join whose needs
-	// are partitioned is the one the Project feeds directly, so the alias
-	// never had to survive a SECOND partition. The DERIVED-table spelling
-	// hides it too, because pushdownPredicates swaps the filter below the
-	// Project and substitutes the alias away — a CTE's Project is a
-	// materialization fence and declines that swap, which is why the CTE
-	// spelling is the one that breaks.
-	//
-	// Adding a minted name can only make a subtree claim MORE, so it can only
-	// push down a need that used to be dropped and never withhold one. A name
-	// pushed to a side that cannot supply it is already tolerated: it is
-	// dropped again at the scan by sanitizeScanNeeds, and deleted at the
-	// window that mints it by pushColumnNeeds' NodeWindow arm (#694 R1).
-	switch n.Type {
-	case NodeProject:
-		for _, pr := range n.Projections {
-			if name := projectionPublishedName(pr); name != "" {
-				result[name] = true
-			}
-		}
-	case NodeAggregate:
-		for _, k := range n.GroupBy {
-			if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
-				result[k] = true
-			}
-		}
-		for _, a := range n.AggExprs {
-			if a.OutputCol != "" {
-				result[strings.ToLower(a.OutputCol)] = true
-			}
-		}
-	case NodeWindow:
-		for _, w := range n.WindowExprs {
-			if w.OutputCol != "" {
-				result[strings.ToLower(w.OutputCol)] = true
-			}
-		}
-	}
 	// Semi/anti joins only output probe-side (child[0]) columns.
 	// Skip the build side (child[1]) so downstream column partitioning
 	// doesn't treat build-side columns as available from this subtree.
@@ -687,6 +635,86 @@ func collectSubtreeColumnsRec(n *Node, result map[string]bool) {
 	}
 	for _, child := range n.Children {
 		collectSubtreeColumnsRec(child, result)
+	}
+}
+
+// subtreePublishedColumns is collectSubtreeColumns plus the output names the
+// subtree's own Projects MINT — a renamed or computed column, which no scan
+// stores.
+//
+// It answers a DIFFERENT question from collectSubtreeColumns, which is why it
+// is a different function rather than a widening of it. That one asks "which
+// BASE columns does this relation carry", and its other callers — semi/anti
+// dedup, join reordering, comma-join lifting — attribute a predicate to a
+// relation with it; widening it there made Q17's semi leg read wider columns
+// than its inner sibling and cost the shared-subplan dedup a whole lineitem
+// scan. This one asks "which names can this side SUPPLY to an operator above
+// the join", and a renamed or computed output is one of them.
+//
+// The gap it closes: `WITH c AS (SELECT id, a AS v FROM t) SELECT COUNT(*)
+// FROM c JOIN t x ON c.id = x.id JOIN t y ON c.id = y.id WHERE c.v > 1` needs
+// `v` above BOTH joins. No scan stores `v`, so it was in neither side's
+// available set, the partition below put it in neither probeNeeds nor
+// buildNeeds, and the INNER join's NeededColumns — which becomes its
+// OutputFilter — dropped the column the filter above the OUTER join was about
+// to read. The single-process path failed with `filter column "c.v" does not
+// exist in the input schema`, the SHUFFLED DAG answered ZERO rows in silence,
+// and the broadcast DAG answered correctly, because only the first two narrow
+// to that list (#700, #726).
+//
+// One join hid it: there the join whose needs are partitioned is the one the
+// Project feeds directly, so the alias never had to survive a SECOND
+// partition. The DERIVED-table spelling hides it too, because
+// pushdownPredicates swaps the filter below the Project and substitutes the
+// alias away — a CTE's Project is a materialization fence and declines that
+// swap, which is why the CTE spelling is the one that breaks.
+//
+// Claiming a minted name can only make a side claim MORE, so it can only push
+// down a need that used to be dropped and never withhold one. A name pushed to
+// a side that cannot supply it is already tolerated: it is dropped again at the
+// scan by sanitizeScanNeeds, and deleted at the window that mints it by
+// pushColumnNeeds' NodeWindow arm (#694 R1).
+func subtreePublishedColumns(n *Node) map[string]bool {
+	result := collectSubtreeColumns(n)
+	collectMintedNames(n, result)
+	return result
+}
+
+// collectMintedNames adds the names a subtree's Projects publish.
+//
+// Only Projects: an aggregate's outputs and a window's slot were tried and
+// neither is reachable by any fixture. A window's output is DELETED again on
+// the way past the node that computes it (pushColumnNeeds' NodeWindow arm),
+// and a CTE body's Project republishes it, so the Project arm already covers
+// `SELECT ... SUM(x) OVER () AS v ...` above a join chain. An aggregate's
+// outputs cost real plan quality for nothing: claiming them made Q17's semi
+// leg read wider columns than its inner sibling, the shared-subplan dedup
+// declined, and the plan grew a second lineitem scan
+// (TestSharedSubplanDedup_Q17SemiRidesInner, TestTPCH_EnsureDistribution_
+// Snapshot/Q17). A widening with no fixture behind it is untested code on the
+// default path, so it is not here.
+func collectMintedNames(n *Node, result map[string]bool) {
+	if n == nil {
+		return
+	}
+	if n.Type == NodeProject {
+		for _, pr := range n.Projections {
+			if name := projectionPublishedName(pr); name != "" {
+				result[name] = true
+			}
+		}
+	}
+	// Semi/anti joins publish only their probe side's columns, the same
+	// asymmetry collectSubtreeColumnsRec observes.
+	if n.Type == NodeJoin && len(n.Children) == 2 {
+		jt := strings.ToLower(n.JoinType)
+		if jt == "semi" || jt == "anti" {
+			collectMintedNames(n.Children[0], result)
+			return
+		}
+	}
+	for _, child := range n.Children {
+		collectMintedNames(child, result)
 	}
 }
 
