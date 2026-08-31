@@ -130,15 +130,23 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 		}
 		return batch.DecimalType{}, false, false
+	case *plansql.CaseNode:
+		return choiceDecimalArithOperand(n, decls)
 	case *plansql.FuncCallNode:
 		// A scalar math function over a DECIMAL answers a DECIMAL, so it can
 		// be an operand of exact arithmetic: `ROUND(d, 1) * 2` is numeric in
 		// PostgreSQL and exact here (#668).
-		t, ok := scalarFnDeclaredDecimal(n, decls)
-		if !ok {
-			return batch.DecimalType{}, false, false
+		if t, ok := scalarFnDeclaredDecimal(n, decls); ok {
+			return t.Dec(), true, true
 		}
-		return t.Dec(), true, true
+		// So does a construct that CHOOSES between DECIMAL arms, and the
+		// registry already names which functions those are (Ret.SameAsArgs):
+		// GREATEST/LEAST/COALESCE/IFNULL mirror every argument, NULLIF
+		// argument 0, IF its two branches.
+		if _, poly := expr.DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args)); poly {
+			return choiceDecimalArithOperand(n, decls)
+		}
+		return batch.DecimalType{}, false, false
 	case *plansql.CastNode:
 		// A CAST that NAMES a (p,s) produces an exact DECIMAL and can be an
 		// operand of exact arithmetic — `CAST(x AS DECIMAL(10,2)) * 2` is
@@ -167,6 +175,32 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 		return t, err != nil, true
 	}
 	return batch.DecimalType{}, false, false
+}
+
+// choiceDecimalArithOperand is a CASE/COALESCE/GREATEST/LEAST/NULLIF/IF as an
+// operand of EXACT arithmetic: the DECIMAL its arms fold to, when they fold to
+// one at a (p,s) this layer can name.
+//
+// It is the AST mirror of expr.DecimalResultOf's Case/Coalesce/FuncCall arms,
+// which have answered the same question over the COMPILED tree since #555's
+// review, and it must stay a strict subset of them — the rule this file's
+// header states. Until it existed the two disagreed in the direction that
+// costs digits rather than the one that fails loudly: the runtime knew
+// `COALESCE(d, 0)` produces a DECIMAL and the plan did not, so
+// `SUM(COALESCE(d, 0) * 2)` declared FLOAT64, the multiplication ran in
+// float64, and the answer was 20.000000000000004 where PostgreSQL answers
+// 20.0020 (TODO(#555), pinned in coordinator's stage-filter carrier gate).
+//
+// The gate is a KNOWN (p,s): a fold that declined, or one that landed on
+// INT64/FLOAT64, is not an exact operand — expr.decimalArmFold declines for
+// exactly those and the runtime would then run the float path the plan had
+// stopped declaring.
+func choiceDecimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, bool, bool) {
+	t, c := nodeDeclaredType(node, decls)
+	if c != expr.Decided || t.ID != parquet.TypeDecimal || !t.DecKnown {
+		return batch.DecimalType{}, false, false
+	}
+	return t.Dec(), true, true
 }
 
 // scalarFnDeclaredDecimal is the DECIMAL declaration of a scalar math function
