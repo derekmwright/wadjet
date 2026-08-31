@@ -31,6 +31,28 @@ import (
 // The golden is regenerated with `WADJET_WRITE_STAGE_GOLDEN=1 go test -run
 // TestTPCHStageDumpGolden ./internal/planner/physical/`, and a regeneration
 // is a reviewable diff in the same commit as whatever caused it.
+//
+// FOUR fields beyond `Columns`, each because a pass writes it and nothing
+// gated it:
+//
+//   - `out=` is Stage.OutputColumns, the SHIPPED set pruneScanOutputColumns
+//     narrows. It is a different list from Columns — a scan READS its pushed
+//     filter's columns and does not ship them — so a widening that puts one
+//     back was invisible here while the commit citing this gate claimed no
+//     stage had gained a column. The claim was true and the citation did not
+//     support it; now it does.
+//   - `builds=` is the build side a chained or fused join and a union arm
+//     NAME. It is the fourth place a stage names another stage, dispatch
+//     resolves it through its own `inputs` map, and a rewiring pass that
+//     misses it produces a plan that validates and then fails at dispatch
+//     (#755).
+//   - `chaincols=` is each chained link's OWN OutputFilter, a SECOND
+//     narrowing inside one fragment: the primary probe applies Stage.Columns
+//     and each link then applies its own to the joined stream its residual
+//     filter reads. A column dropped there is a predicate that answers
+//     UNKNOWN on every row.
+//   - `ops=` already counted ProjectExprs, so a producer that gains an
+//     absorbed projection shows even when every column list is unchanged.
 func TestTPCHStageDumpGolden(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
@@ -70,9 +92,10 @@ func TestTPCHStageDumpGolden(t *testing.T) {
 			continue
 		}
 		for _, s := range stages {
-			fmt.Fprintf(&dump, "Q%02d\t%s\t%s\tscanfiles=%d\tcols=%s\tdeps=%s\tops=%s\n",
+			fmt.Fprintf(&dump, "Q%02d\t%s\t%s\tscanfiles=%d\tcols=%s\tout=%s\tdeps=%s\tbuilds=%s\tchaincols=%s\tops=%s\n",
 				qNum, s.ID, s.Type, len(s.ScanFiles),
-				sortedList(s.Columns), sortedList(s.Dependencies), stageOpCounts(s))
+				sortedList(s.Columns), sortedList(s.OutputColumns), sortedList(s.Dependencies),
+				stageBuildDeps(s), stageChainColumns(s), stageOpCounts(s))
 		}
 	}
 	got := dump.String()
@@ -132,6 +155,44 @@ func sortedList(in []string) string {
 	cp := append([]string(nil), in...)
 	sort.Strings(cp)
 	return "[" + strings.Join(cp, " ") + "]"
+}
+
+// stageBuildDeps renders the build side a chained or fused join names, which
+// is the FOURTH place a stage names another stage and the one a rewiring pass
+// can leave dangling (#755). Dependencies alone cannot show it: dispatch
+// resolves BuildDepStage through its own `inputs` map, so a pass that rewires
+// the dependency list and not this field produces a plan that validates and
+// then fails at dispatch.
+func stageBuildDeps(s Stage) string {
+	out := make([]string, 0, len(s.ChainedJoins)+len(s.FusedJoins))
+	for _, cj := range s.ChainedJoins {
+		out = append(out, "cj:"+cj.BuildDepStage)
+	}
+	for _, fj := range s.FusedJoins {
+		out = append(out, "fj:"+fj.BuildDepStage)
+	}
+	for _, ua := range s.UnionArms {
+		out = append(out, "ua:"+ua.DepStage)
+	}
+	return sortedList(out)
+}
+
+// stageChainColumns renders each chained link's own OutputFilter. It is a
+// SECOND narrowing inside one fragment — the primary probe applies
+// Stage.Columns and each link then applies its own — and it is what
+// ensureJoinCarriesEvaluatedColumns widens for a link whose residual filter
+// reads the build side. Bytes crossing a link are not bytes on the wire, but
+// a column dropped here is a predicate that answers UNKNOWN, so the list is
+// gated for the same reason the others are.
+func stageChainColumns(s Stage) string {
+	if len(s.ChainedJoins) == 0 {
+		return "[]"
+	}
+	out := make([]string, 0, len(s.ChainedJoins))
+	for i, cj := range s.ChainedJoins {
+		out = append(out, fmt.Sprintf("%d:%s", i, sortedList(cj.Columns)))
+	}
+	return "[" + strings.Join(out, " ") + "]"
 }
 
 // stageOpCounts summarises the operator-bearing fields, so a stage that gains
