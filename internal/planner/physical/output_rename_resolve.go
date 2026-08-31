@@ -139,10 +139,28 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 		case n.Type == logical.NodeAggregate:
 			return resolved
 		case n.Type == logical.NodeJoin && len(n.Children) == 2:
+			jt := strings.ToLower(n.JoinType)
+			// A QUALIFIED reference names ONE relation, so it resolves
+			// through the arm that owns the qualifier and nowhere else. The
+			// first-substitution-wins walk below is right for a BARE name and
+			// is #742 for a qualified one: two derived tables publishing `w`
+			// from different expressions, and `q.w` resolved through p's
+			// Project to p's window slot — the client got p's value under
+			// BOTH output columns, silently, on every execution path.
+			//
+			// Only when exactly one arm answers to the qualifier. Neither
+			// (an alias this walk cannot see) or both (two spellings of one
+			// name) keep the old behaviour, which is the conservative side:
+			// the walk then resolves nothing new.
+			if own := ownedJoinArm(n, resolved); own != nil {
+				if (jt == "semi" || jt == "anti") && own == n.Children[1] {
+					return resolved // the build side is not output-visible
+				}
+				return resolveRenameSource(resolved, own, forGather)
+			}
 			if r := resolveRenameSource(resolved, n.Children[0], forGather); !strings.EqualFold(r, resolved) {
 				return r
 			}
-			jt := strings.ToLower(n.JoinType)
 			if jt == "semi" || jt == "anti" {
 				return resolved
 			}
@@ -155,6 +173,77 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 		break
 	}
 	return resolved
+}
+
+// ownedJoinArm returns the join arm whose subtree answers to a QUALIFIED
+// name's qualifier, or nil when the qualifier is not exactly one arm's.
+//
+// `subtreeNamesRelation` is the same scope test derivedScopeBareName uses: a
+// derived table's alias is stamped on every scan below it and a CTE's name
+// sits on the subtree root, so both spellings of a named scope are covered.
+func ownedJoinArm(n *logical.Node, name string) *logical.Node {
+	dot := strings.LastIndexByte(name, '.')
+	if dot <= 0 || dot == len(name)-1 || len(n.Children) != 2 {
+		return nil
+	}
+	qual := name[:dot]
+	left := subtreeNamesRelation(n.Children[0], qual)
+	right := subtreeNamesRelation(n.Children[1], qual)
+	if left == right {
+		return nil
+	}
+	if left {
+		return n.Children[0]
+	}
+	return n.Children[1]
+}
+
+// resolveRenameSourceInScope resolves the BARE part of a qualified name
+// inside the subtree its qualifier names, and reports whether that subtree
+// was found at all.
+//
+// attachScanSelectProjections' fallback for a qualified spec — the nested
+// Project's alias is bare, so `q.w` has to be looked up as `w` — dropped the
+// qualifier and ran the ordinary walk, which takes the first arm that
+// answers. With two arms publishing `w` that is the other arm's column
+// (#742). Scoping the lookup asks the same question of the right relation.
+func resolveRenameSourceInScope(name string, child *logical.Node) (string, bool) {
+	dot := strings.LastIndexByte(name, '.')
+	if dot <= 0 || dot == len(name)-1 || child == nil {
+		return "", false
+	}
+	qual, bare := name[:dot], name[dot+1:]
+	scope := relationScopeSubtree(child, qual)
+	if scope == nil {
+		return "", false
+	}
+	src := resolveOutputRenameSource(bare, scope)
+	if strings.EqualFold(src, bare) {
+		return "", true // the scope exists and renames nothing: not a miss
+	}
+	return src, true
+}
+
+// relationScopeSubtree descends through JOINs to the arm that answers to
+// name, and stops at the first node that is not a two-arm join — a Project
+// there is the scope's own SELECT list and must not be walked past.
+func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
+	if n == nil || name == "" || !subtreeNamesRelation(n, name) {
+		return nil
+	}
+	for n.Type == logical.NodeJoin && len(n.Children) == 2 {
+		left := subtreeNamesRelation(n.Children[0], name)
+		right := subtreeNamesRelation(n.Children[1], name)
+		if left == right {
+			return n
+		}
+		if left {
+			n = n.Children[0]
+			continue
+		}
+		n = n.Children[1]
+	}
+	return n
 }
 
 // substituteNestedRenameRefs returns expr with every column reference that

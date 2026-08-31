@@ -3083,7 +3083,19 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		if strings.EqualFold(src, specs[j].Name) && strings.Contains(specs[j].Name, ".") {
 			// Qualified spelling: the nested Project's alias is bare — the
 			// same qualified↔bare fallback the gather applies.
-			if bare := specs[j].Name[strings.LastIndexByte(specs[j].Name, '.')+1:]; bare != "" {
+			//
+			// SCOPED to the relation the qualifier names when the plan says
+			// which one that is. The unscoped walk takes the first arm that
+			// answers, and with two derived tables publishing `w` that is
+			// the OTHER arm's column: `SELECT p.w, q.w FROM (…SUM(b) OVER ()
+			// AS w) p JOIN t y … JOIN (…a * 3 AS w) q` projected p's window
+			// slot under both names (#742). A qualifier the scope test
+			// cannot place keeps the unscoped fallback.
+			if r, scoped := resolveRenameSourceInScope(specs[j].Name, renameChild); scoped {
+				if r != "" {
+					src = r
+				}
+			} else if bare := specs[j].Name[strings.LastIndexByte(specs[j].Name, '.')+1:]; bare != "" {
 				if r := resolveOutputRenameSource(bare, renameChild); !strings.EqualFold(r, bare) {
 					src = r
 				}

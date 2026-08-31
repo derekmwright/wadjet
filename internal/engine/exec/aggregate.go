@@ -1418,25 +1418,46 @@ func ColumnIndexFallback(b *batch.RecordBatch, name string) int {
 // table-qualified names. Lookup order:
 //  1. Exact match.
 //  2. If the name is qualified ("table.col"), try the bare column ("col").
-//  3. If the name is unqualified ("col"), try every schema column whose
-//     suffix matches ".col". Returns -1 when there are 2+ matches (ambiguous,
-//     refuses to guess).
+//  3. Try every schema column whose suffix matches ".col" — for a bare name
+//     and for a qualified one whose own qualifier missed. Returns -1 when
+//     there are 2+ matches (ambiguous, refuses to guess).
 //
 // Step 3 is required after the self-join planner pass (Q07's
 // QualifyAllBuildCols) leaves the schema with "n1.n_name" but
 // parseJoinKeys feeds the worker an unqualified "n_name" key — without
 // the unqualified→qualified fallback the join would never find the column.
+//
+// That step reaches the QUALIFIED spelling too, and it did not until #762.
+// `QualifyAllBuildCols` renames EVERY build column to the build's TABLE
+// alias, so a CTE or derived table on the build side of a self-join publishes
+// `decpair.dv` while every consumer above the join spells it `c.dv` — and the
+// resolver returned -1 at step 2 without ever trying step 3. Each consumer
+// then failed its own way: a filter answered UNKNOWN on every row (a silent
+// zero), a projection and a sort key failed loudly, an aggregate refused its
+// input. The BARE spelling of the same predicate already answered, through
+// step 3, which is what says the qualifier is the whole of it.
+//
+// physical.columnResolves has compared a reference against a qualified column
+// by its bare part since #656, so the planner's checker believed in this
+// resolution and waved the plan through; implementing it removes a
+// disagreement rather than adding a special case. Ambiguity still declines —
+// two arms that both spell `.w` keep the loud failure instead of the engine
+// guessing an arm (#742).
 func columnIndexFallback(b *batch.RecordBatch, name string) int {
 	if idx := b.ColumnIndex(name); idx >= 0 {
 		return idx
 	}
+	bare := name
 	if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
-		return b.ColumnIndex(name[dotIdx+1:])
+		bare = name[dotIdx+1:]
+		if idx := b.ColumnIndex(bare); idx >= 0 {
+			return idx
+		}
 	}
-	// Unqualified name with no exact match: scan for a single qualified
-	// match ".name". Reject ambiguity (>1 match) so we never silently
+	// No exact match under this spelling: scan for a single qualified
+	// match ".bare". Reject ambiguity (>1 match) so we never silently
 	// pick the wrong column.
-	suffix := "." + name
+	suffix := "." + bare
 	match := -1
 	for i, c := range b.Schema {
 		if strings.HasSuffix(c.Name, suffix) {

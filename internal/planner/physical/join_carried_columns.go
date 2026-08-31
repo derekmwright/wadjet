@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -168,6 +169,42 @@ func widenNarrowingStagesBelow(stages []Stage, idx map[string]int, root int, ref
 			widens = true
 		}
 		if !widens {
+			// A scan's SHIPPED set is a narrowing too, and it is the one
+			// narrowing below a join that this walk used to stop at.
+			// `pruneScanOutputColumns` sets OutputColumns to the columns a
+			// consumer DECLARED it wanted, and it runs before
+			// attachScanSelectProjections resolves the outer SELECT list
+			// back to a SOURCE column — so a column the scan reads for its
+			// own pushed filter and does not ship is exactly what the
+			// projection above the join then asks for:
+			//
+			//	SELECT x.w AS xw FROM (SELECT id, a AS w FROM t) x
+			//	JOIN (SELECT id, b AS w FROM t) z ON x.id = z.id
+			//	JOIN t u ON x.id = u.id WHERE x.w > 1
+			//	-- scan-1 reads [a id] for `a > 1` and ships OUT=[id];
+			//	--   join-8 projects `a AS xw`
+			//	-- PostgreSQL 5 rows · single 5 · DAG broadcast 5
+			//	-- DAG shuffled  ERROR column "a" does not exist (#766)
+			//
+			// The READ set is untouched — widening THAT would change what is
+			// scanned — so only a name the scan already reads is added back
+			// to what it ships. An empty OutputColumns already means "ship
+			// everything" and stays empty.
+			if s.Type == StageScan && len(s.OutputColumns) > 0 {
+				readable := make(map[string]string, len(s.Columns))
+				for _, c := range s.Columns {
+					readable[strings.ToLower(c)] = c
+				}
+				var back []string
+				for _, r := range refs {
+					if name, ok := readable[strings.ToLower(stripQualifier(r))]; ok {
+						back = append(back, name)
+					}
+				}
+				if len(back) > 0 {
+					s.OutputColumns = unionColumnNames(s.OutputColumns, back)
+				}
+			}
 			continue // a producer: its list is a read set, not a filter
 		}
 		keep := refsSubtreeCanSupply(stages, idx, i, refs, produced)
@@ -234,6 +271,21 @@ func subtreeProducedColumns(stages []Stage, idx map[string]int, i int,
 		// Q05, because the two sides of one shuffle share a single manifest.
 		for k, v := range stageEmittedColumns(s) {
 			out[k] = v
+		}
+		// A SCAN's own read set is the one column list that IS evidence of
+		// production: it names columns the fragment really reads off the
+		// table. `pruneScanOutputColumns` may have narrowed what it SHIPS
+		// (OutputColumns), and this walk's caller can put such a column back
+		// — so "can this subtree supply the name" has to be asked of what the
+		// scan reads, not of what the prune left. Without it the pass declines
+		// at the join above and then widens a scan nothing downstream carries.
+		if s.Type == StageScan && len(s.OutputColumns) > 0 {
+			for _, c := range s.Columns {
+				if c == "" || strings.EqualFold(c, logical.RowCountOnlyColumn) {
+					continue
+				}
+				out[strings.ToLower(c)] = c
+			}
 		}
 		for _, w := range s.WindowCols {
 			if w.OutputCol != "" {
@@ -543,7 +595,28 @@ func assertJoinFiltersAreBacked(stages []Stage) error {
 		for _, fj := range s.FusedJoins {
 			exprs = append(exprs, fj.FilterExprs...)
 		}
-		for _, e := range exprs {
+		kind := "filters on"
+		// A join's PROJECTION is the same question one field over, and the
+		// one #766 is: `attachScanSelectProjections` puts the outer SELECT
+		// list on the join, spelled with the arm's alias, and no fragment
+		// computes that alias when the arm is an AGGREGATE two Projects down.
+		// The BROADCAST lowering of the identical query is already refused
+		// here — its gather still renames from the alias, so
+		// assertGatherOutputIsReachable sees it — and the coordinator answers
+		// it locally. The shuffled lowering attaches the projection instead,
+		// which satisfies that check and then fails inside the fragment:
+		// `column "c.dv" does not exist in the input schema`, at DISPATCH, on
+		// a query PostgreSQL answers. Asking the weak question of the
+		// projection too makes the two lowerings agree, and agree on the
+		// disposition that ANSWERS.
+		projStart := len(exprs)
+		for _, pe := range s.ProjectExprs {
+			exprs = append(exprs, pe.Expr)
+		}
+		for k, e := range exprs {
+			if k == projStart {
+				kind = "projects"
+			}
 			if strings.TrimSpace(e) == "" {
 				continue
 			}
@@ -559,10 +632,10 @@ func assertJoinFiltersAreBacked(stages []Stage) error {
 				if columnResolves(ref, produced) {
 					continue
 				}
-				return fmt.Errorf("%w: stage %s (%s) filters on %q and NO stage in the plan "+
+				return fmt.Errorf("%w: stage %s (%s) %s %q and NO stage in the plan "+
 					"computes %q — the predicate would be UNKNOWN on every row and the query "+
 					"would answer WITHOUT it (#700)",
-					ErrUnreachableGatherOutput, s.ID, s.Type, e, ref.String())
+					ErrUnreachableGatherOutput, s.ID, s.Type, kind, e, ref.String())
 			}
 		}
 	}

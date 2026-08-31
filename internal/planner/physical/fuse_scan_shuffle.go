@@ -177,6 +177,32 @@ func fuseScanShuffle(stages []Stage) []Stage {
 		if newDep, replaced := absorbed[s.RightDepStage]; replaced {
 			s.RightDepStage = newDep
 		}
+		// A CHAINED or FUSED join names its build side in a THIRD place, and
+		// it is not a Dependencies entry: dispatch looks
+		// `ChainedJoinSpec.BuildDepStage` up in the `inputs` map by ID. The
+		// two fields above were rewired and these were not, so a chained
+		// join whose build came through an absorbed exchange pointed at a
+		// stage this pass had just deleted — `stage join-4 chained join 0:
+		// build dep "exchange-repartition-7" output not found`, at DISPATCH,
+		// on a query PostgreSQL and the broadcast lowering both answer
+		// (#755). Only a scan with a PROJECTION or a pushed filter is
+		// absorbed, which is why the shape needs a DERIVED arm: a plain
+		// base-table arm's scan is pass-through and never fuses.
+		for k := range s.FusedJoins {
+			if newDep, replaced := absorbed[s.FusedJoins[k].BuildDepStage]; replaced {
+				s.FusedJoins[k].BuildDepStage = newDep
+			}
+		}
+		for k := range s.ChainedJoins {
+			if newDep, replaced := absorbed[s.ChainedJoins[k].BuildDepStage]; replaced {
+				s.ChainedJoins[k].BuildDepStage = newDep
+			}
+		}
+		for k := range s.UnionArms {
+			if newDep, replaced := absorbed[s.UnionArms[k].DepStage]; replaced {
+				s.UnionArms[k].DepStage = newDep
+			}
+		}
 	}
 
 	// Drop the absorbed exchange stages.

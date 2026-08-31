@@ -1004,6 +1004,29 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		defer c.streamingDisabled.Delete(queryID)
 	}
 
+	// The shape checks that live at DISPATCH, asked once HERE, where routing
+	// is still possible (#763).
+	//
+	// `assertCarrierSchemaResolves` and its siblings run from
+	// `physical.ValidateNativeDAGShape` inside executeStageDAG, and the
+	// routing block above reads the PLANNING error — so a refusal from them
+	// reached the client as a hard error even though it names exactly the
+	// class the local engine answers. Two spellings of one query disagreed
+	// about it: the CTE form was refused inside PlanDistributed by
+	// assertJoinFiltersAreBacked and ANSWERED, while its derived-table twin
+	// was refused here and FAILED. Wrapping the sentinel alone changes only
+	// the message, which is the dead end the issue records.
+	//
+	// Only the SENTINEL routes. A validation error that is not one — a plan
+	// shape the dispatchers genuinely cannot consume — keeps today's path
+	// and surfaces from executeStageDAG, which still runs the same check.
+	// The duplicate run costs microseconds on a plan of tens of stages,
+	// which is the same accounting that put these checks on every plan.
+	if verr := physical.ValidateNativeDAGShape(physStages); verr != nil &&
+		errors.Is(verr, physical.ErrUnreachableGatherOutput) {
+		return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, verr)
+	}
+
 	c.logger.Info("routing to native DAG executor",
 		"query", queryID, "stages", len(physStages))
 	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())

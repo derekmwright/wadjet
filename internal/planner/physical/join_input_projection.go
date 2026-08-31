@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -87,20 +88,40 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 	if proj == nil {
 		return
 	}
-	// Below it: a scan-rooted chain only. A further Project bails — its
-	// aliases are what the computing expressions reference, and this pass
-	// does not chase rename chains.
+	// Below it: a chain of stage-less nodes ending at a SCAN or at a WINDOW.
+	//
+	// A WINDOW is the second producer this pass materializes onto, and it is
+	// what #742 is: `(SELECT id, SUM(a) OVER () + 0 AS w FROM t)` publishes a
+	// value the window stage does not compute — the window emits its slot
+	// `__win_0` and nothing named `w` — so when the OTHER arm of the join
+	// publishes a `w` of its own, the qualified reference `p.w` resolved to
+	// IT. Silently, and with the arms' aliases spelled DIFFERENTLY the same
+	// shape fails loudly instead (`column "p.w1" does not exist`). A window
+	// stage forwards its input's columns and runs its OpProject ABOVE the
+	// operator (ADR-0025, #656 shape g), so the alias can be computed there
+	// over the slot.
+	//
+	// A rename-only Project below the computing one is walked through rather
+	// than refused: `(SELECT id, v * 2 AS dv FROM (SELECT id, a AS v FROM t) z)`
+	// names `v`, which no stage emits, and the substitution below rewrites it
+	// to `a`. Whether the rewrite SUCCEEDED is checked against the target's
+	// own stream before anything is attached, so a chain this walk cannot
+	// resolve keeps today's behaviour rather than computing the wrong value.
+	renameChild := proj.Children[0]
 	below := proj.Children[0]
-	for below != nil && below.Type == logical.NodeFilter && len(below.Children) == 1 {
+	for below != nil && len(below.Children) == 1 &&
+		(below.Type == logical.NodeFilter ||
+			(below.Type == logical.NodeProject && !below.SecurityBarrier)) {
 		below = below.Children[0]
 	}
-	if below == nil || below.Type != logical.NodeScan {
+	if below == nil || (below.Type != logical.NodeScan && below.Type != logical.NodeWindow) {
 		return
 	}
 
 	// Collect the COMPUTED projections. Renames and bare passthroughs are
 	// none of this pass's business; an aggregate projection means the
 	// SELECT list is not a row-wise computation at all.
+	windowArm := below.Type == logical.NodeWindow
 	var computed []ProjectExprSpec
 	needCols := map[string]bool{}
 	var colTypes colDecls
@@ -128,22 +149,85 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		if expr == "" {
 			expr = pr.ASTExpr.String()
 		}
-		decl := inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
-		computed = append(computed, ProjectExprSpec{
-			Expr: expr,
-			Name: strings.ToLower(pr.Alias),
-			// The computed column exists nowhere in the catalog, so its
-			// declared type IS its runtime type — the worker builds the
-			// output vector from it (#333), and a DECIMAL's (p,s) rides
-			// along or the vector comes out at scale 0 (ADR-0024 item 2).
-			Type:      decl.ID,
-			TypeKnown: true,
-			Precision: decl.Precision,
-			Scale:     decl.Scale,
-		})
-		collectASTCols(pr.ASTExpr, needCols)
+		// A reference to a rename the walk above stepped through names a
+		// column no stage emits, so it is rewritten to its SOURCE — the same
+		// substitution attachScanSelectProjections applies for #387's shape
+		// one level up. A rewrite the walker declines leaves the spec alone;
+		// the resolvability check below is what refuses to attach it.
+		ast := pr.ASTExpr
+		respelled := false
+		if rewritten, ok := substituteNestedRenameRefs(pr.ASTExpr, renameChild); ok && rewritten != nil {
+			if rewritten != pr.ASTExpr {
+				expr = rewritten.String()
+				respelled = true
+			}
+			ast = rewritten
+		}
+		if windowArm {
+			// The builder's nested-window rewrite leaves the SLOT reference
+			// in ASTExpr and the ABBREVIATED source text in Expr —
+			// `sum(a) OVER (...) + 0`, which no parser accepts (ADR-0025).
+			// The AST is the spelling the fragment can compile.
+			if !referencesSyntheticWindow(ast) {
+				return
+			}
+			expr = ast.String()
+		}
+		spec := ProjectExprSpec{Expr: expr, Name: strings.ToLower(pr.Alias)}
+		// The computed column exists nowhere in the catalog, so its declared
+		// type IS its runtime type — the worker builds the output vector
+		// from it (#333), and a DECIMAL's (p,s) rides along or the vector
+		// comes out at scale 0 (ADR-0024 item 2).
+		//
+		// Over a WINDOW SLOT there is no declaration to read: the slot is
+		// not a catalog column and WindowColSpec carries a bare TypeID with
+		// no (p,s), so inferring here answers the FLOAT fallback and would
+		// render a DECIMAL sum at the wrong scale. Leave it unknown and let
+		// exec.Project take the type from the vector it computes, the same
+		// treatment a passthrough gets.
+		// The declaration is read against the schema the expression NOW
+		// names. A respelled reference reads the SOURCE column, which the
+		// rename's own output schema does not declare — inferring against
+		// that answered the FLOAT fallback and the fragment then tried to
+		// store a DECIMAL's rendering into a float vector. Same repair as
+		// attachScanSelectProjections' #387 branch, and the same helpers,
+		// with the FILTER nodes between the Projects stripped: neither emits
+		// a stage and the substitution walked through both.
+		//
+		// Over a WINDOW SLOT there is no catalog column to read at all, and
+		// leaving the declaration unknown is not an option either — a
+		// projection whose type the plan does not state answers NULL to the
+		// AGGREGATE above it (`SUM(c.dv)` came back NULL and its HAVING
+		// admitted no row) even where the same column PROJECTS correctly.
+		// windowSpecOutputType is the stage's own answer for the slot,
+		// DECIMAL (p,s) included, so the slot is declared here exactly as the
+		// window stage declares it.
+		declTypes, declStrict := colTypes, strictInt
+		switch {
+		case windowArm:
+			declTypes = windowArmColDecls(below)
+			declStrict = strictIntArithCols(below.Children[0])
+		case respelled:
+			declTypes = armSourceDecls(renameChild)
+			declStrict = strictIntArithColsThroughRenames(stripArmFilters(renameChild))
+		}
+		decl := inferProjectionDeclType(ast, parquet.TypeString, declStrict, declTypes)
+		spec.Type, spec.TypeKnown = decl.ID, true
+		spec.Precision, spec.Scale = decl.Precision, decl.Scale
+		computed = append(computed, spec)
+		collectASTCols(ast, needCols)
 	}
 	if len(computed) == 0 {
+		return
+	}
+
+	alias := make(map[string]bool, len(computed))
+	for _, c := range computed {
+		alias[c.Name] = true
+	}
+
+	if windowArm {
+		absorbWindowArmProjection(childStages, computed, needCols, alias)
 		return
 	}
 
@@ -167,11 +251,15 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 	if len(target.ProjectExprs) > 0 || len(target.FusedAggSpecs) > 0 || len(target.FusedAggGroupBy) > 0 {
 		return
 	}
-
-	alias := make(map[string]bool, len(computed))
-	for _, c := range computed {
-		alias[c.Name] = true
+	// Every column the (possibly rewritten) expressions read has to be one
+	// the SCAN can supply. A rename chain the substitution could not resolve
+	// leaves a name the table does not have, and attaching it would compute
+	// NULL where the query means a value — decline instead, which keeps the
+	// behaviour this pass had before it walked through Projects at all.
+	if !armExprColumnsAvailable(needCols, alias, scanReadableColumns(target)) {
+		return
 	}
+
 	// The read set carries the computed alias as a phantom column (needed-
 	// column propagation lists it): strip it — the parquet projection
 	// guard reverts to full width on any unknown name — and add the real
@@ -204,4 +292,166 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 	}
 	specs = append(specs, computed...)
 	target.ProjectExprs = specs
+}
+
+// scanReadableColumns is what a scan stage's fragment can put on its output:
+// the columns it reads off the table. `Columns` is the read set — the alias
+// this pass is about to compute rides in it as a phantom and is stripped by
+// the caller — so it is the right question here, unlike a join's or an
+// exchange's list.
+func scanReadableColumns(target *Stage) map[string]string {
+	out := make(map[string]string, len(target.Columns)+len(target.ScanSchema))
+	for _, c := range target.Columns {
+		out[strings.ToLower(c)] = c
+	}
+	for _, c := range target.ScanSchema {
+		out[strings.ToLower(c.Name)] = c.Name
+	}
+	return out
+}
+
+// armExprColumnsAvailable reports whether every column the arm's computed
+// expressions read is one the target's stream carries. The aliases this pass
+// is about to MINT are excluded — they are the outputs, not the inputs.
+func armExprColumnsAvailable(needCols map[string]bool, alias map[string]bool,
+	available map[string]string) bool {
+	for c := range needCols {
+		if alias[c] {
+			continue
+		}
+		if _, ok := available[strings.ToLower(c)]; ok {
+			continue
+		}
+		if _, ok := available[strings.ToLower(stripQualifier(c))]; ok {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// absorbWindowArmProjection materializes a derived arm's computed SELECT list
+// onto the WINDOW stage that produces its rows.
+//
+// The scan branch above cannot reach this shape: the value is computed OVER
+// the window's output slot (`__win_0 + 0`), which the scan does not have, and
+// the window stage emits the slot and nothing named by the user's alias. A
+// window stage's OpProject runs ABOVE the operator (ADR-0025, #656 shape g),
+// so the alias is computable exactly there, and only there.
+//
+// Same additive contract as the scan branch: the arm's own stream is passed
+// through under its source names — every DAG resolver reads them — and only
+// the computed aliases are appended. A stage that already carries a
+// projection, a subtree with two window stages, or an expression naming
+// something the window's stream does not carry, all decline and keep today's
+// behaviour.
+func absorbWindowArmProjection(childStages []Stage, computed []ProjectExprSpec,
+	needCols map[string]bool, alias map[string]bool) {
+	var target *Stage
+	for i := range childStages {
+		s := &childStages[i]
+		if s.Type != StageWindow {
+			continue
+		}
+		if target != nil {
+			return // two windows: not the shape this pass models
+		}
+		target = s
+	}
+	if target == nil || len(target.ProjectExprs) > 0 {
+		return
+	}
+	idx := make(map[string]int, len(childStages))
+	for i := range childStages {
+		idx[childStages[i].ID] = i
+	}
+	stream := emittedThroughPassThrough(childStages, idx, target)
+	for _, w := range target.WindowCols {
+		if w.OutputCol != "" {
+			stream[strings.ToLower(w.OutputCol)] = w.OutputCol
+		}
+	}
+	// The alias rides in the arm's needed-column propagation as a phantom;
+	// it is an OUTPUT of the projection, never an input to it.
+	for a := range alias {
+		delete(stream, strings.ToLower(a))
+	}
+	if len(stream) == 0 || !armExprColumnsAvailable(needCols, alias, stream) {
+		return
+	}
+	names := make([]string, 0, len(stream))
+	for _, n := range stream {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	specs := make([]ProjectExprSpec, 0, len(names)+len(computed))
+	for _, n := range names {
+		specs = append(specs, ProjectExprSpec{Expr: n, Name: n})
+	}
+	specs = append(specs, computed...)
+	target.ProjectExprs = specs
+}
+
+// stripArmFilters descends past the FILTER nodes an arm's rename chain may be
+// interleaved with. walkStages emits no stage for a Filter and
+// substituteNestedRenameRefs walks through one, so the declarations that type
+// a respelled expression are the ones visible below them — reading them at
+// the Filter answered the FLOAT fallback for `a * 2` over `a AS v`, and the
+// fragment then tried to store a DECIMAL's rendering into a float vector.
+func stripArmFilters(n *logical.Node) *logical.Node {
+	for n != nil && n.Type == logical.NodeFilter && len(n.Children) == 1 {
+		n = n.Children[0]
+	}
+	return n
+}
+
+// armSourceDecls is sourceColDeclsThroughRenames with those Filters stripped,
+// at every level of the chain rather than only the first.
+func armSourceDecls(n *logical.Node) colDecls {
+	for {
+		n = stripArmFilters(n)
+		if n == nil || n.Type != logical.NodeProject || len(n.Children) != 1 {
+			break
+		}
+		for _, pr := range n.Projections {
+			if pr.IsAgg || pr.Column == "" {
+				return colDecls{}
+			}
+		}
+		n = n.Children[0]
+	}
+	return inputColDecls(n)
+}
+
+// windowArmColDecls declares the columns visible ABOVE a window node: its
+// input's, plus each window OUTPUT SLOT typed the way the window stage types
+// it. The slot is not a catalog column, so inputColDecls answers nothing for
+// it and every expression over one fell to the float rule — which for a
+// DECIMAL sum is a declaration that disagrees with the bytes.
+func windowArmColDecls(win *logical.Node) colDecls {
+	if win == nil || len(win.Children) != 1 {
+		return colDecls{}
+	}
+	base := inputColDecls(win.Children[0])
+	types := make(map[string]parquet.TypeID, len(base.types)+len(win.WindowExprs))
+	for k, v := range base.types {
+		types[k] = v
+	}
+	dec := make(map[string]logical.DecimalMeta, len(base.dec)+len(win.WindowExprs))
+	for k, v := range base.dec {
+		dec[k] = v
+	}
+	for _, we := range win.WindowExprs {
+		if we.OutputCol == "" {
+			continue
+		}
+		d := windowSpecOutputType(win, we)
+		name := strings.ToLower(we.OutputCol)
+		types[name] = d.ID
+		delete(dec, name)
+		if d.ID == parquet.TypeDecimal && d.DecKnown {
+			dec[name] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
+		}
+	}
+	return colDecls{types: types, fields: base.fields, dec: dec}
 }

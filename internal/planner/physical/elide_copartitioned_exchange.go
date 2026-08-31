@@ -114,6 +114,30 @@ func elideCoPartitionedExchanges(stages []Stage) []Stage {
 		if repl, ok := elided[s.RightDepStage]; ok {
 			s.RightDepStage = repl
 		}
+		// A CHAINED or FUSED join names its build side in a THIRD place, and
+		// that one is not a Dependencies entry: `ChainedJoinSpec.BuildDepStage`
+		// is looked up in the dispatcher's `inputs` map by ID. Rewiring the
+		// two fields above and not these left a chained join pointing at a
+		// stage this pass had just deleted — `stage join-4 chained join 0:
+		// build dep "exchange-repartition-7" output not found`, at DISPATCH,
+		// on a query PostgreSQL and the broadcast lowering both answer
+		// (#755). The elision is sound for them for the same reason it is
+		// sound for a dependency: E's output was byte-identical to D's.
+		for k := range s.FusedJoins {
+			if repl, ok := elided[s.FusedJoins[k].BuildDepStage]; ok {
+				s.FusedJoins[k].BuildDepStage = repl
+			}
+		}
+		for k := range s.ChainedJoins {
+			if repl, ok := elided[s.ChainedJoins[k].BuildDepStage]; ok {
+				s.ChainedJoins[k].BuildDepStage = repl
+			}
+		}
+		for k := range s.UnionArms {
+			if repl, ok := elided[s.UnionArms[k].DepStage]; ok {
+				s.UnionArms[k].DepStage = repl
+			}
+		}
 		out = append(out, s)
 	}
 	return out

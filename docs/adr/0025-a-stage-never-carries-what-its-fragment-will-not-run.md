@@ -979,6 +979,164 @@ lowering at dispatch (#766), which is #763's routing class rather than a wrong
 answer — whatever carries the column for the predicate is not carrying it for
 the SELECT list.
 
+### A name is resolved through the RELATION it names, and a value is materialized where it is computable (2026-08-31, #742, #753, #755, #762, #763, #766)
+
+Six filings, one family: the join's output stream carries SOURCE column names
+and every consumer above it resolves back through the plan (§Derived-table
+aliases). Where that resolution has a hole, the DAG either fails loudly on a
+query PostgreSQL answers, or — when ANOTHER arm happens to publish the same
+name — resolves to it and answers silently. An 811-shape sweep over the
+`decpair` fixture (join kind × CTE vs derived × arm position × chain length
+1–3 × consumer × body kind × broadcast/shuffle, every value taken from a live
+PostgreSQL 17) found 430 divergent (shape, arm) rows on `376b2cac` and 52
+after; the rest are named at the end of this section.
+
+**Five sites, each a specific thing a pass was getting wrong.**
+
+- **A deleted stage keeps its name in a FOURTH place.** `fuseScanShuffle`
+  absorbs an `exchange-repartition` into the scan that feeds it and rewires
+  `Dependencies`, `LeftDepStage` and `RightDepStage`. A chained or fused join
+  names its build side in `ChainedJoinSpec.BuildDepStage`, which dispatch looks
+  up in the `inputs` map by ID and which the rewire did not touch — `stage
+  join-4 chained join 0: build dep "exchange-repartition-7" output not found`,
+  at dispatch, on a query the broadcast lowering answers (#755). Only a scan
+  with a projection or a pushed filter is absorbed, which is why the shape
+  needs a DERIVED arm: a plain base-table arm's scan is pass-through and never
+  fuses. `elideCoPartitionedExchanges` deletes stages the same way and had the
+  same hole; it is repaired beside it rather than left as the next filing.
+
+- **A QUALIFIED reference resolves against a column under a DIFFERENT
+  qualifier.** `QualifyAllBuildCols` renames EVERY build column to the build's
+  TABLE alias, so a CTE or derived table on the build side of a self-join
+  publishes `decpair.dv` while every consumer above the join spells it `c.dv`.
+  `exec.columnIndexFallback` and `expr.ResolveColumnRef` tried the exact
+  spelling, then the bare one, and returned — never reaching the suffix scan
+  that the BARE spelling of the same reference already used. Each consumer then
+  failed its own way: a filter was UNKNOWN on every row (`WHERE c.dv > 1` above
+  a two-join chain answered 0 where PostgreSQL answers 6, silently, #762), a
+  projection and a sort key failed loudly, an aggregate refused its input.
+  `physical.columnResolves` has compared a reference against a qualified column
+  by its bare part since #656, so the planner's checker believed in a
+  resolution the evaluator did not implement; closing it removes a
+  disagreement rather than adding a special case. It stays a LAST RESORT and
+  UNAMBIGUOUS ONLY — two arms that both spell `.w` decline and keep the loud
+  failure instead of guessing an arm.
+
+- **A derived arm's COMPUTED column has to be materialized wherever it is
+  computable, not only on a scan.** `absorbComputedSubqueryProjection` handled
+  exactly `Project → Filter* → Scan`. Above a WINDOW the value is computed over
+  the window's output SLOT (`__win_0 + 0`), which no scan has, and the window
+  stage emits the slot and nothing named by the user's alias — so the name was
+  free for the other arm of the join to satisfy, which is #742's silent face
+  (`x.w` answered `z`'s `a * 3`) and, with the arms' aliases spelled
+  differently, its loud one (`column "p.w1" does not exist`). A window stage's
+  `OpProject` runs ABOVE the operator (#656 shape g), so the alias is
+  computable exactly there. A rename-only Project BELOW the computing one is
+  now walked through and substituted away, which is `A/nestedproj`'s whole
+  class.
+
+  Two things this needed, and both were wrong in the first cut:
+
+  - **The declaration is read against the schema the expression NOW names.**
+    A respelled reference reads the SOURCE column, which the rename's own
+    output schema does not declare, so the type fell to the float rule and the
+    fragment tried to store a DECIMAL's rendering into a float vector. Same
+    repair and same helpers as `attachScanSelectProjections`' #387 branch, with
+    the FILTER nodes between the Projects stripped — neither emits a stage and
+    the substitution walks through both.
+  - **A window SLOT has no catalog column to read, and leaving the type
+    unknown is not the safe side.** A projection whose type the plan does not
+    state answers NULL to the AGGREGATE above it (`SUM(c.dv)` came back NULL
+    and its HAVING admitted no row) even where the same column PROJECTS
+    correctly. `windowSpecOutputType` is the stage's own answer for the slot,
+    DECIMAL (p,s) included, so the slot is declared here exactly as the window
+    stage declares it.
+
+  And it declines rather than guesses: an expression naming something the
+  target's stream does not carry, a subtree with two window stages, a stage
+  that already carries a projection — all keep today's behaviour.
+
+- **A scan's SHIPPED set is a narrowing too.** `pruneScanOutputColumns` sets
+  `OutputColumns` from what a consumer DECLARED it wanted, and it runs before
+  `attachScanSelectProjections` resolves the outer SELECT list back to a
+  SOURCE column — so a column the scan reads for its own pushed filter and does
+  not ship is exactly what the projection above the join then asks for
+  (`column "a" does not exist in the input schema`, #766). `widenNarrowing-
+  StagesBelow` now puts such a name back into what the scan SHIPS. The READ set
+  is untouched, because widening THAT would change what is scanned; only a name
+  the scan already reads is restored. `subtreeProducedColumns` reads a scan's
+  read set for the same reason — a scan's `Columns` is the one column list that
+  IS evidence of production — without which the pass declines at the join above
+  and then widens a scan nothing downstream carries.
+
+- **A qualified reference resolves through the arm that owns the qualifier.**
+  `resolveRenameSource`'s join case recursed into both arms and took the first
+  substitution, and `attachScanSelectProjections`' qualified→bare fallback
+  dropped the qualifier entirely. With two arms publishing `w` that is the
+  OTHER arm's column: `SELECT p.w, q.w FROM (…SUM(a) OVER () AS w) p JOIN t y …
+  JOIN (…a * 3 AS w) q` projected p's window slot under BOTH names, on every
+  execution path. `subtreeNamesRelation` — the scope test `derivedScopeBareName`
+  already uses, which reads a derived table's stamped scan alias and a CTE's
+  subtree-root name — picks the arm, and only when exactly ONE arm answers to
+  the qualifier. Neither or both keep the old walk, which resolves nothing new.
+
+**A refusal is the answer where a value is not.** `assertCarrierSchemaResolves`
+now wraps `ErrUnreachableGatherOutput` like every other check in
+`carrier_assert.go`, and `ExecuteSQL` asks `ValidateNativeDAGShape` once
+directly after planning — where routing is still possible — so its refusals
+reach the coordinator's local engine instead of the client (#763). The dead
+end #763 records is real and is why the wrap alone was not enough: the check
+runs at DISPATCH and the routing block reads the PLANNING error. Only the
+SENTINEL routes; a validation error that is not one keeps today's path and
+still surfaces from `executeStageDAG`, which runs the same check.
+
+`assertJoinFiltersAreBacked` asks its weak question of a join's PROJECTION as
+well as its filter, which is what makes the two lowerings of #766's first shape
+AGREE: the broadcast plan was already refused (its gather still renamed from
+the alias, so `assertGatherOutputIsReachable` saw it) and answered locally,
+while the shuffled plan attached the projection to the join instead, satisfied
+that check, and failed inside the fragment.
+
+**What the gates carry.** `coordinator.TestDerivedArmsAboveAJoinChainThree-
+Arms` is #755's four shapes, #753's join-of-joins shapes and #766's projecting
+shapes with their COUNT twins as controls, on three arms against live
+PostgreSQL 17 values; `TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues`
+gains #742's shape, its MIRROR (`z.w` asked for while `x.w` is present, which
+is what says the repair is scoped and not merely reordered), both arms
+projected at once, and the single-arm control; the two chain gates lose the
+`shuffledRefuses` (#755), `refusesLoudly` (#763) and `pinDAG` (#762) pins and
+assert PostgreSQL's values instead; `postgresJoinArmCases` asks the same
+questions of a live server on the single-process arm. Reverting the source
+changes and re-running fails 22 subtests across those four tests, which is the
+"every gate must be able to fail" check made rather than assumed.
+
+**What a same-alias fixture must not also be about.** Every same-alias pair in
+these gates publishes at DECIMAL scale 2 on purpose. A cross-SCALE pair
+(`SUM(b) OVER ()` beside `a * 3`) renders one arm at the OTHER arm's typmod on
+the single-process path — right digits, wrong scale — and that is #754, which
+would otherwise fail these entries for a reason that has nothing to do with
+join-output resolution. One entry carries #766's literal cross-scale spelling
+with the single arm PINNED at the wrong rendering, so #754's fix is what
+deletes it.
+
+**What is NOT closed, measured rather than assumed.** Three residuals survive
+the sweep, each pre-existing and none of them this mechanism:
+
+- a CTE reference stamps its name on the subtree ROOT and not on the scans
+  below it (deliberately — see `subtreeNamesRelation`), so a join has no
+  per-arm alias to qualify duplicate columns with, and two sibling CTEs
+  publishing one alias collapse to the first arm's value on EVERY path. The
+  derived-table spelling of the identical query is correct, which is the tell.
+  That is #751's and #753's CTE face and it lives in the aliasing of scopes,
+  not in what a stage carries;
+- two arms publishing one alias make the single-process path render one at the
+  other's DECIMAL scale or refuse a DECIMAL/FLOAT pair outright (#754);
+- an OUTER join whose COUNT(*) reads `__rowcount_only__` above a derived arm
+  with a computed column fails at the scan, and a CTE in the LAST position of a
+  chain still answers zero on the shuffled arm. Both are pre-existing on
+  `376b2cac` and belong to the row-count sentinel and the chain's last-position
+  lowering rather than to name resolution.
+
 ## Consequences
 
 - `StageProject` is Singleton with `Tasks: 1`, so it SERIALIZES its

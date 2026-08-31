@@ -226,6 +226,60 @@ func postgresJoinArmCases() []pgCase {
 			`nation y ON x.k = y.n_nationkey JOIN `+
 			`(SELECT n_nationkey AS k, n_regionkey * 3 AS w FROM nation) z ON x.k = z.k ORDER BY x.k`)
 
+	// --- A join CHAIN over DERIVED arms (#755, #766, #753).
+	//
+	// This arm is the SINGLE-process half; the shuffled lowering is where all
+	// three were filed, and `coordinator.TestDerivedArmsAboveAJoinChainThreeArms`
+	// runs the same shapes on the two DAG lowerings. Both are needed and
+	// neither says anything about the other.
+	add("JoinArmDerivedArmsChainBaseBetween",
+		`SELECT p.w AS pw, q.w AS qw FROM `+
+			`(SELECT n_nationkey AS k, n_regionkey + 1 AS w FROM nation) p `+
+			`JOIN nation y ON p.k = y.n_nationkey `+
+			`JOIN (SELECT n_nationkey AS k, n_regionkey * 3 AS w FROM nation) q ON p.k = q.k `+
+			`ORDER BY p.k`)
+	add("JoinArmDerivedArmsChainThreeDistinct",
+		`SELECT p.w1 AS pw, q.w2 AS qw, s.w3 AS sw FROM `+
+			`(SELECT n_nationkey AS k, n_regionkey + 1 AS w1 FROM nation) p `+
+			`JOIN (SELECT n_nationkey AS k, n_regionkey * 3 AS w2 FROM nation) q ON p.k = q.k `+
+			`JOIN (SELECT n_nationkey AS k, n_regionkey * 5 AS w3 FROM nation) s ON p.k = s.k `+
+			`ORDER BY p.k`)
+	// A BARE window arm beside a computed one, both publishing `w`: the
+	// qualified reference has to reach the arm it names and not the first arm
+	// that answers to the bare spelling.
+	add("JoinArmWindowArmBesideComputedArmProbe",
+		`SELECT p.k AS k, p.w AS pw FROM `+
+			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p `+
+			`JOIN nation y ON p.k = y.n_nationkey `+
+			`JOIN (SELECT n_nationkey AS k, n_regionkey * 3 AS w FROM nation) q ON p.k = q.k `+
+			`ORDER BY p.k`)
+	add("JoinArmWindowArmBesideComputedArmBuild",
+		`SELECT p.k AS k, q.w AS qw FROM `+
+			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p `+
+			`JOIN nation y ON p.k = y.n_nationkey `+
+			`JOIN (SELECT n_nationkey AS k, n_regionkey * 3 AS w FROM nation) q ON p.k = q.k `+
+			`ORDER BY p.k`)
+	// PROJECTING the computed column through the chain, whose COUNT twin was
+	// already right — the asymmetry #766 is about.
+	add("JoinArmComputedChainNestedAggProjecting",
+		`WITH c AS (SELECT k, sv * 2 AS dv FROM `+
+			`(SELECT n_regionkey AS k, SUM(n_nationkey) AS sv FROM nation GROUP BY n_regionkey) z) `+
+			`SELECT c.dv AS d FROM c JOIN region r ON c.k = r.r_regionkey `+
+			`JOIN region r2 ON c.k = r2.r_regionkey WHERE c.dv > 4 ORDER BY c.k`)
+	add("JoinArmComputedChainNestedAggCount",
+		`WITH c AS (SELECT k, sv * 2 AS dv FROM `+
+			`(SELECT n_regionkey AS k, SUM(n_nationkey) AS sv FROM nation GROUP BY n_regionkey) z) `+
+			`SELECT COUNT(*) AS n FROM c JOIN region r ON c.k = r.r_regionkey `+
+			`JOIN region r2 ON c.k = r2.r_regionkey WHERE c.dv > 4`)
+	add("JoinArmTwoArmsOneAliasProjecting",
+		`SELECT x.w AS xw FROM (SELECT n_nationkey AS k, n_regionkey AS w FROM nation) x `+
+			`JOIN (SELECT n_nationkey AS k, n_nationkey * 3 AS w FROM nation) z ON x.k = z.k `+
+			`JOIN nation u ON x.k = u.n_nationkey WHERE x.w > 2 ORDER BY x.k`)
+	add("JoinArmComputedChainOverWindowProjecting",
+		`WITH c AS (SELECT n_nationkey AS k, SUM(n_regionkey) OVER () + 0 AS dv FROM nation) `+
+			`SELECT c.dv AS d FROM c JOIN nation t ON c.k = t.n_nationkey `+
+			`JOIN nation u ON c.k = u.n_nationkey WHERE c.dv > 4 ORDER BY c.k`)
+
 	// --- The residuals, pinned so the day they agree this file FAILS.
 	pin("JoinArmSiblingNestedInSibling",
 		`SELECT p.w AS pw, q.w AS qw, p.k AS k FROM `+

@@ -40,6 +40,16 @@ var ErrUnreachableGatherOutput = errors.New(
 // This is the silent half by construction: expr.ColRef.Eval returns nil for a
 // name it cannot resolve, so the predicate is UNKNOWN on every row and a
 // WHERE admits only TRUE.
+//
+// It refuses with ErrUnreachableGatherOutput, like every other check in this
+// file, so the coordinator ROUTES the query to its local engine and answers
+// it. It did not, and the sentinel alone was not enough: the checks here run
+// from ValidateNativeDAGShape at DISPATCH, while the routing block reads the
+// PLANNING error, so a query PostgreSQL answers reached the client as a hard
+// error while its CTE twin — refused inside PlanDistributed by
+// assertJoinFiltersAreBacked — was answered (#763). ExecuteSQL now asks this
+// same question once more right after planning, where routing is still
+// possible; the wrap is what that ask reads.
 func assertCarrierSchemaResolves(stages []Stage) error {
 	idx := make(map[string]int, len(stages))
 	for i := range stages {
@@ -52,16 +62,18 @@ func assertCarrierSchemaResolves(stages []Stage) error {
 		}
 		for _, e := range stages[i].FilterExprs {
 			if missing := unresolvableColumnRefs(e, emitted); len(missing) > 0 {
-				return fmt.Errorf("native-DAG: stage %s (%s) filters on %q and its input carries "+
+				return fmt.Errorf("%w: stage %s (%s) filters on %q and its input carries "+
 					"no %v — the predicate would be UNKNOWN on every row and the query would "+
 					"answer WITHOUT it (#656); input: %v",
+					ErrUnreachableGatherOutput,
 					stages[i].ID, stages[i].Type, e, missing, sortedEmittedNames(emitted))
 			}
 		}
 		for _, pe := range stages[i].ProjectExprs {
 			if missing := unresolvableColumnRefs(pe.Expr, emitted); len(missing) > 0 {
-				return fmt.Errorf("native-DAG: stage %s (%s) projects %q AS %q and its input "+
+				return fmt.Errorf("%w: stage %s (%s) projects %q AS %q and its input "+
 					"carries no %v — the column would come back NULL (#656); input: %v",
+					ErrUnreachableGatherOutput,
 					stages[i].ID, stages[i].Type, pe.Expr, pe.Name, missing,
 					sortedEmittedNames(emitted))
 			}
