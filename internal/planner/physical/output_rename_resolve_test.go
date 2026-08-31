@@ -234,3 +234,125 @@ func TestPlanDistributed_JoinColumnsResolveNestedRename(t *testing.T) {
 		t.Errorf("join Columns %v missing the resolved source r_regionkey", join.Columns)
 	}
 }
+
+// The two walks in this file are one question asked twice, and they must not
+// disagree about what a SCOPE is.
+//
+// `resolveRenameSource` maps a name to the column the streams carry, and
+// `relationScopeSubtree` finds the subtree a QUALIFIER names so that map can be
+// asked of the right arm. Both descend a logical tree. Where one descends
+// through a node and the other stops at it, a qualified reference is resolved
+// in a scope wider than the one it named — and a bare lookup in a scope that
+// spans a join takes the first arm that answers, which is #742's silent
+// capture. That is exactly how WINDOW was missed: `resolveRenameSource` has no
+// case for it and descended, `scopePreservingWrapper` did not list it and
+// stopped, and `SUM(y.w) OVER ()` in the SELECT list put one between the outer
+// Project and the join.
+//
+// So the agreement is asserted rather than argued, over EVERY logical node
+// type — a new node kind fails the completeness check below rather than
+// silently resolving one way in one walk and the other way in the other.
+//
+// Two node types are stops in `relationScopeSubtree` and NOT in
+// `resolveRenameSource`, deliberately and for stated reasons, so they are
+// listed as such instead of being cross-checked:
+//
+//   - Project IS the scope boundary — its projection list is the scope's own
+//     SELECT list, and the caller looks a name up INSIDE the scope, not
+//     through it;
+//   - Aggregate replaces its child's schema with its GROUP BY keys and
+//     aggregate outputs, so a bare name resolved below it answers from a
+//     schema the stream does not carry. `resolveRenameSource` stops there too;
+//     it is listed here only because the probe below cannot distinguish "stops
+//     at the aggregate" from "descends and finds nothing".
+func TestScopePreservingWrapperMatchesTheRenameWalk(t *testing.T) {
+	// A rename-only Project over a scan: `w` resolves to `a` below it, and
+	// stays `w` above anything that does not descend.
+	inner := func() *logical.Node {
+		return &logical.Node{Type: logical.NodeProject,
+			Projections: []logical.Projection{{Column: "a", Expr: "a", Alias: "w"}},
+			Children: []*logical.Node{{Type: logical.NodeScan,
+				TableName: "region", TableAlias: "x"}}}
+	}
+
+	type expectation struct {
+		wrapper bool   // what scopePreservingWrapper must answer
+		crossed bool   // whether the rename-walk probe is meaningful here
+		why     string // why, in one line, for the failure message
+	}
+	table := map[logical.NodeType]expectation{
+		logical.NodeFilter: {true, true, "narrows rows; renames nothing"},
+		logical.NodeSort:   {true, true, "reorders rows; renames nothing"},
+		logical.NodeLimit:  {true, true, "drops rows; renames nothing"},
+		logical.NodeDistinct: {true, true,
+			"dedups rows; renames nothing"},
+		logical.NodeWindow: {true, true,
+			"APPENDS its output columns; renames no existing one"},
+		logical.NodeProject: {false, false,
+			"IS the scope boundary — the caller looks up inside it"},
+		logical.NodeAggregate: {false, false,
+			"replaces the child's schema with its keys and outputs"},
+		logical.NodeJoin: {false, false,
+			"the walk SPLITS here rather than descending, so the probe cannot " +
+				"tell the two apart"},
+		logical.NodeUnion: {false, true,
+			"two arms, and the output naming is re-rooted onto the first"},
+		logical.NodeIntersect: {false, true, "as Union"},
+		logical.NodeExcept:    {false, true, "as Union"},
+		logical.NodeScan:      {false, true, "a leaf: nothing below it"},
+		logical.NodeDual:      {false, true, "a leaf: nothing below it"},
+	}
+	// The arity a node really has. A one-child probe under a Join or a set
+	// operation is not that node at all: `resolveRenameSource`'s generic
+	// single-child descent fires and the probe reports a descent no real plan
+	// ever performs. The first cut of this test did exactly that and said the
+	// two walks disagreed about four node types when they do not.
+	twoArmed := map[logical.NodeType]bool{
+		logical.NodeJoin: true, logical.NodeUnion: true,
+		logical.NodeIntersect: true, logical.NodeExcept: true,
+	}
+
+	// Completeness: every NodeType the logical package declares is in the
+	// table, so adding one without deciding this question fails here. The
+	// upper bound is found by walking until String() stops recognising the
+	// value, which is what a new constant extends.
+	for id := logical.NodeType(0); ; id++ {
+		if strings.HasPrefix(id.String(), "Unknown(") {
+			break
+		}
+		if _, ok := table[id]; !ok {
+			t.Fatalf("logical node type %s (%d) is not in this table — decide whether a "+
+				"scope walk may descend through it and say why", id, int(id))
+		}
+	}
+
+	for id, want := range table {
+		id, want := id, want
+		t.Run(id.String(), func(t *testing.T) {
+			n := &logical.Node{Type: id, Children: []*logical.Node{inner()}}
+			switch {
+			case id == logical.NodeScan || id == logical.NodeDual:
+				n.Children = nil // leaves carry no child
+			case twoArmed[id]:
+				n.Children = append(n.Children, inner())
+			}
+			if got := scopePreservingWrapper(n); got != want.wrapper {
+				t.Errorf("scopePreservingWrapper(%s) = %v, want %v — %s",
+					id, got, want.wrapper, want.why)
+			}
+			if !want.crossed {
+				return
+			}
+			// The rename walk descends iff it resolves `w` to the source
+			// column the Project below renames.
+			descends := resolveOutputRenameSource("w", n) == "a"
+			if descends != want.wrapper {
+				t.Errorf("resolveRenameSource descends through %s = %v while "+
+					"scopePreservingWrapper says %v — the two walks disagree about "+
+					"what a scope is, which resolves a qualified reference in the "+
+					"wrong arm (#742). %s",
+					id, descends, want.wrapper, want.why)
+			}
+		})
+	}
+}

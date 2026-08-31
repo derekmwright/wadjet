@@ -683,6 +683,283 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 	}
 }
 
+// A WINDOW between the outer SELECT list and its join, on three arms.
+//
+// Two sites, both "resolve through the relation the reference names", and both
+// reached only when a window sits in the SELECT list over a join whose two arms
+// publish one alias.
+//
+//  1. The PROJECTION. `relationScopeSubtree` — the walk that finds the arm a
+//     qualified SELECT-list item belongs to — descended Filter, Sort, Limit and
+//     Distinct and stopped at Window, so a window in the SELECT list put a node
+//     between the outer Project and the join that ended the walk. The whole
+//     join subtree came back as the "scope" and the bare lookup inside it took
+//     the first arm that answered:
+//
+//     SELECT x.id, x.w, y.w, SUM(y.w) OVER () AS s
+//     FROM (SELECT id, a AS w FROM decpair) x
+//     JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
+//     -- PostgreSQL yw = 1275.00 · both DAG arms answered yw = 12.75
+//
+//  2. The window's ARGUMENT, which the projection fix does NOT reach.
+//     `cleanExpr` drops a window argument's table qualifier unconditionally, so
+//     `SUM(y.w)` reached the operator as `SUM(w)` and bound whichever arm's copy
+//     the stream spells bare. The two execution paths spell it differently —
+//     the single-process join keeps the PROBE's `w` bare, the DAG's keeps the
+//     BUILD's — so the same strip was wrong on opposite arms: `SUM(y.w)`
+//     answered 52.99 (Σ x.w) on the single path and `SUM(x.w)` answered 5300.00
+//     (Σ y.w) on the DAG.
+//
+// So both directions are entries here: the window over the BUILD arm's column
+// and over the PROBE arm's, projected beside each other so a capture cannot
+// hide behind the pair agreeing, plus MIN/MAX (a value function, which reads
+// the argument through a different branch), a PARTITION BY on the colliding
+// alias, ROW_NUMBER (no argument at all), the CTE-arm spellings, and a BASE
+// self-join whose arms are SHIFTED by one id so `SUM(u.a)` and `SUM(t.a)` are
+// different numbers rather than the same one twice.
+//
+// Every expected value is PostgreSQL 17's over the decpair fixture.
+func TestAWindowBetweenTheSelectListAndItsJoinThreeArms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	const tbl = dbpTable
+	const (
+		armX = "(SELECT id, a AS w FROM " + tbl + ") x"
+		armY = "(SELECT id, a * 100 AS w FROM " + tbl + ") y"
+		cteC = "WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") "
+	)
+	for _, tc := range []struct {
+		name, sql string
+		cols      []string
+		want      string // PostgreSQL 17, whole result
+	}{
+		{
+			name: "projection/both-arms-and-a-window",
+			sql: "SELECT x.id AS xid, x.w AS xw, y.w AS yw, SUM(y.w) OVER () AS s FROM " +
+				armX + " JOIN " + armY + " ON x.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "9 rows: 1|12.75|1275.00|5299.00;2|12.75|1275.00|5299.00;3|12.75|1275.00|5299.00;" +
+				"4|-0.01|-1.00|5299.00;5|2.00|200.00|5299.00;6|0.00|0.00|5299.00;7|||5299.00;" +
+				"8|12.75|1275.00|5299.00;9|||5299.00;",
+		},
+		{
+			// A CTE arm's filter and a window at once: the Filter and the
+			// Window are BOTH between the outer Project and the join.
+			name: "projection/window-above-a-cte-arm-filter",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw, SUM(y.w) OVER () AS s FROM " +
+				armX + " JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "5 rows: 1|12.75|1275.00|5300.00;2|12.75|1275.00|5300.00;3|12.75|1275.00|5300.00;" +
+				"5|2.00|200.00|5300.00;8|12.75|1275.00|5300.00;",
+		},
+		{
+			name: "projection/window-over-a-base-table-filter",
+			sql: "SELECT x.id AS xid, x.w AS xw, y.w AS yw, SUM(y.w) OVER () AS s FROM " +
+				armX + " JOIN " + armY + " ON x.id = y.id JOIN " + tbl + " u ON u.id = x.id " +
+				"WHERE u.a > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "5 rows: 1|12.75|1275.00|5300.00;2|12.75|1275.00|5300.00;3|12.75|1275.00|5300.00;" +
+				"5|2.00|200.00|5300.00;8|12.75|1275.00|5300.00;",
+		},
+		{
+			name: "projection/both-arms-are-ctes",
+			sql: "WITH p AS (SELECT id, a AS w FROM " + tbl + "), " +
+				"q AS (SELECT id, a * 100 AS w FROM " + tbl + ") " +
+				"SELECT p.id AS xid, p.w AS xw, q.w AS yw, SUM(q.w) OVER () AS s " +
+				"FROM p JOIN q ON p.id = q.id ORDER BY p.id",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "9 rows: 1|12.75|1275.00|5299.00;2|12.75|1275.00|5299.00;3|12.75|1275.00|5299.00;" +
+				"4|-0.01|-1.00|5299.00;5|2.00|200.00|5299.00;6|0.00|0.00|5299.00;7|||5299.00;" +
+				"8|12.75|1275.00|5299.00;9|||5299.00;",
+		},
+		{
+			// The ARGUMENT over the PROBE arm's column — the direction the
+			// DAG got wrong while the single path got it right.
+			name: "argument/window-over-the-probe-arms-column",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw, SUM(x.w) OVER () AS s FROM " +
+				armX + " JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "5 rows: 1|12.75|1275.00|53.00;2|12.75|1275.00|53.00;3|12.75|1275.00|53.00;" +
+				"5|2.00|200.00|53.00;8|12.75|1275.00|53.00;",
+		},
+		{
+			// MIN/MAX read the argument through the VALUE-function branch,
+			// and both arms are named at once so neither can borrow the
+			// other's answer.
+			name: "argument/min-over-one-arm-max-over-the-other",
+			sql: "SELECT x.id AS xid, MIN(y.w) OVER () AS mn, MAX(x.w) OVER () AS mx FROM " +
+				armX + " JOIN " + armY + " ON x.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "mn", "mx"},
+			want: "9 rows: 1|-1.00|12.75;2|-1.00|12.75;3|-1.00|12.75;4|-1.00|12.75;5|-1.00|12.75;" +
+				"6|-1.00|12.75;7|-1.00|12.75;8|-1.00|12.75;9|-1.00|12.75;",
+		},
+		{
+			// PARTITION BY on the colliding alias: a key resolved to the
+			// wrong arm changes the partitioning, not only a value.
+			name: "argument/partition-by-the-other-arms-alias",
+			sql: "SELECT x.id AS xid, x.w AS xw, y.w AS yw, SUM(y.w) OVER (PARTITION BY x.w) AS s FROM " +
+				armX + " JOIN " + armY + " ON x.id = y.id ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "9 rows: 1|12.75|1275.00|5100.00;2|12.75|1275.00|5100.00;3|12.75|1275.00|5100.00;" +
+				"4|-0.01|-1.00|-1.00;5|2.00|200.00|200.00;6|0.00|0.00|0.00;7|||;" +
+				"8|12.75|1275.00|5100.00;9|||;",
+		},
+		{
+			// No argument at all, so only the projection half can be wrong.
+			name: "argument/row-number-has-none",
+			sql: cteC + "SELECT x.id AS xid, y.w AS yw, ROW_NUMBER() OVER (ORDER BY x.id) AS rn FROM " +
+				armX + " JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "yw", "rn"},
+			want: "5 rows: 1|1275.00|1;2|1275.00|2;3|1275.00|3;5|200.00|4;8|1275.00|5;",
+		},
+		{
+			// A BASE self-join, whose arms carry the same COLUMN name rather
+			// than the same derived alias — and SHIFTED by one id, so the two
+			// windows are different numbers. An unshifted self-join is a
+			// fixture that passes whichever arm the argument binds, which is
+			// what the first cut of this entry was.
+			name: "argument/base-self-join-shifted-both-windows",
+			sql: "SELECT t.id AS tid, SUM(u.a) OVER () AS su, SUM(t.a) OVER () AS st FROM " +
+				tbl + " t JOIN " + tbl + " u ON t.id = u.id + 1 WHERE t.id < 5 ORDER BY t.id",
+			cols: []string{"tid", "su", "st"},
+			want: "3 rows: 2|38.25|25.49;3|38.25|25.49;4|38.25|25.49;",
+		},
+		{
+			name: "argument/base-self-join-shifted-build-arm-alone",
+			sql: "SELECT t.id AS tid, SUM(u.a) OVER () AS su FROM " +
+				tbl + " t JOIN " + tbl + " u ON t.id = u.id + 1 WHERE t.id < 5 ORDER BY t.id",
+			cols: []string{"tid", "su"},
+			want: "3 rows: 2|38.25;3|38.25;4|38.25;",
+		},
+		{
+			name: "argument/base-self-join-shifted-probe-arm-alone",
+			sql: "SELECT t.id AS tid, SUM(t.a) OVER () AS st FROM " +
+				tbl + " t JOIN " + tbl + " u ON t.id = u.id + 1 WHERE t.id < 5 ORDER BY t.id",
+			cols: []string{"tid", "st"},
+			want: "3 rows: 2|25.49;3|25.49;4|25.49;",
+		},
+
+		// --- The three controls that bound the family.
+		{
+			// The window REMOVED: if this one moves, the finding is not the
+			// window.
+			name: "control/no-window",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;" +
+				"8|12.75|1275.00;",
+		},
+		{
+			// DISTINCT aliases, so there is no collision to resolve: correct
+			// on every tree, and a failure here is not this mechanism.
+			name: "control/arms-publish-different-aliases",
+			sql: cteC + "SELECT x.id AS xid, x.w AS xw, y.w2 AS yw, SUM(y.w2) OVER () AS s FROM " +
+				armX + " JOIN (SELECT id, a * 100 AS w2 FROM " + tbl + ") y ON x.id = y.id " +
+				"JOIN c ON c.id = x.id WHERE c.dv > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "5 rows: 1|12.75|1275.00|5300.00;2|12.75|1275.00|5300.00;3|12.75|1275.00|5300.00;" +
+				"5|2.00|200.00|5300.00;8|12.75|1275.00|5300.00;",
+		},
+		{
+			// The window in the OUTER query over a subquery that does the
+			// join: no window sits between a SELECT list and a join at all,
+			// and the collision is resolved one level down.
+			name: "control/window-outside-the-joining-subquery",
+			sql: "SELECT q.xid AS xid, q.xw AS xw, q.yw AS yw, SUM(q.yw) OVER () AS s FROM " +
+				"(SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " + armX + " JOIN " + armY +
+				" ON x.id = y.id) q ORDER BY q.xid",
+			cols: []string{"xid", "xw", "yw", "s"},
+			want: "9 rows: 1|12.75|1275.00|5299.00;2|12.75|1275.00|5299.00;3|12.75|1275.00|5299.00;" +
+				"4|-0.01|-1.00|5299.00;5|2.00|200.00|5299.00;6|0.00|0.00|5299.00;7|||5299.00;" +
+				"8|12.75|1275.00|5299.00;9|||5299.00;",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
+						arm.name, err, tc.sql)
+				}
+				if got := dajDigest(res, tc.cols); got != tc.want {
+					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n"+
+						" — a window between the SELECT list and its join resolved a "+
+						"qualified reference in the WRONG arm\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+
+	// METHOD 10: the impossibility this fix asserts, with a fixture that
+	// ATTEMPTS it.
+	//
+	// `scopePreservingWrapper` admits Window and deliberately does NOT admit
+	// Aggregate — an aggregate replaces its child's schema with its GROUP BY
+	// keys and aggregate outputs, so a bare name resolved below it answers
+	// from a schema the stream does not carry. The claim that leaving it out
+	// costs no wrong answer is only worth what a fixture that tries it is
+	// worth, so here are the two aggregate-between-the-SELECT-list-and-the-
+	// join shapes: today they are CORRECT or LOUD on every arm, never
+	// silently wrong, and this pins that. When one of them starts ANSWERING
+	// on an arm that refused, the answer must be PostgreSQL's — which is what
+	// makes admitting Aggregate a change that has to come with its values.
+	for _, tc := range []struct {
+		name, sql string
+		cols      []string
+		want      string
+	}{
+		{
+			name: "aggregate-side/group-by-both-arms",
+			sql: cteC + "SELECT x.w AS xw, y.w AS yw, COUNT(*) AS n FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id " +
+				"WHERE c.dv > 1 GROUP BY x.w, y.w ORDER BY xw, yw",
+			cols: []string{"xw", "yw", "n"},
+			want: "2 rows: 2.00|200.00|1;12.75|1275.00|4;",
+		},
+		{
+			name: "aggregate-side/sum-of-each-arm",
+			sql: cteC + "SELECT SUM(x.w) AS sxw, SUM(y.w) AS syw FROM " + armX +
+				" JOIN " + armY + " ON x.id = y.id JOIN c ON c.id = x.id WHERE c.dv > 1",
+			cols: []string{"sxw", "syw"},
+			want: "1 rows: 53.00|5300.00;",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					// Loud is an acceptable outcome here and a wrong number is
+					// not. The error is not asserted verbatim — it belongs to
+					// the aggregate's own carrying, which this gate is not
+					// about — but the disposition is.
+					t.Logf("%s arm refuses (acceptable, not silent): %v", arm.name, err)
+					continue
+				}
+				if got := dajDigest(res, tc.cols); got != tc.want {
+					t.Errorf("%s arm ANSWERED\n  %s\nPostgreSQL 17 answers\n  %s\n"+
+						" — an aggregate between the SELECT list and its join is a "+
+						"scope boundary the walk stops at, and this shape may refuse "+
+						"but must never answer something else\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+}
+
 // A CTE's QUALIFIED column beside a SIBLING arm's BARE column of the same
 // name, on three arms.
 //

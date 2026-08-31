@@ -1395,6 +1395,77 @@ schema alone, so the walk descends through them; `Project`, `Aggregate`,
 plan the fix shows as `join-4 PROJ=[… {a yw}]` becoming `PROJ=[… {y.w yw}]`,
 which is the derived spelling's plan exactly.
 
+### A WINDOW is scope-preserving, and its ARGUMENT is not scope-free (2026-08-31, #742 round 4)
+
+The walk above lists the nodes it may descend through, and the list was one
+short. `resolveRenameSource` — the other walk in the same file, over the same
+tree, answering the other half of the same question — descends through every
+single-child node it has no case for, and that includes a Window. So the two
+disagreed about what a scope is for exactly one node kind, and a window in the
+SELECT list is what puts that node between the outer Project and the join:
+
+    SELECT x.id, x.w, y.w, SUM(y.w) OVER () AS s
+    FROM (SELECT id, a AS w FROM decpair) x
+    JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
+    -- PostgreSQL  yw = 1275.00 · both DAG arms answered yw = 12.75
+
+A Window APPENDS its output columns to its child's schema: it renames nothing
+and every relation below it keeps the name the enclosing query calls it, which
+is the whole of the test. An AGGREGATE fails that test — its output schema is
+its own GROUP BY keys and aggregate outputs, so a bare name resolved below it
+answers from a schema the stream does not carry — and it stays a stop, in both
+walks. A set operation is never a candidate: two arms, and the output naming is
+re-rooted onto the first.
+
+The agreement is asserted now instead of argued.
+`physical.TestScopePreservingWrapperMatchesTheRenameWalk` runs the two walks
+over EVERY logical node type, with a completeness check that fails when the
+logical package gains one — because this omission was invisible to every gate
+in the tree and was found by a review widening its corpus, and the same
+omission is available to the next node kind. Removing `NodeWindow` from the
+list fails it; and its own first cut was wrong in the way METHOD 10 predicts —
+it built a one-child Join and a one-child Union, which no plan contains, and
+reported a disagreement about four node types that does not exist.
+
+**The window's ARGUMENT is a second site, and the whitelist does not reach it.**
+`cleanExpr` strips a window argument's table qualifier unconditionally, so
+`SUM(y.w) OVER ()` reaches the operator as `SUM(w)` and binds whichever arm's
+copy the stream spells BARE. That is right almost everywhere and a coin toss
+where two arms of a join publish one alias — and the two execution paths land
+on opposite sides of it, because they name a join's duplicate columns
+differently:
+
+    -- single-process join output: `w` (probe x's) and `y.w`
+    -- DAG join output:            `w` (build y's) and `a`  (x's source column)
+    SUM(y.w) OVER ()   single 52.99 (Σ x.w)      · DAG correct
+    SUM(x.w) OVER ()   single correct            · DAG 5300.00 (Σ y.w)
+
+So the qualifier is kept exactly where it is load-bearing —
+`windowArgKeepsItsQualifier`: the qualifier names a relation of the window's
+input AND more than one arm publishes the bare name — and is dropped as before
+everywhere else, which leaves every existing plan untouched. Keeping it is
+enough on the single-process path and for the DAG's build arm, because
+`exec.Window` already runs `columnIndexFallback` over `InputCol`. It is not
+enough for the DAG's PROBE arm, whose column the streams carry under its SOURCE
+name: `walkStages` re-spells it, and `derivedAliasSourceColumn` stops at a Join
+so it answered nothing for a qualified argument. `windowArgSourceInScope`
+scopes it first — the same composition `resolveRenameSourceInScope` performs for
+a projection — and the argument reaches the worker as `a`.
+
+`coordinator.TestAWindowBetweenTheSelectListAndItsJoinThreeArms` is both sites
+on three arms: the window over each arm's column in turn and both projected
+beside it, MIN/MAX (the value-function branch reads the argument separately),
+`PARTITION BY` on the colliding alias, `ROW_NUMBER` with no argument at all, the
+CTE-arm and base-self-join spellings — the self-join SHIFTED by one id, because
+an unshifted one gives both arms the same number and passes whichever way the
+argument binds — and three controls: the window removed, the arms publishing
+different aliases, and the window in an OUTER query over a subquery that does
+the join. It also carries the aggregate-side fixture METHOD 10 asks for beside
+the "Aggregate is deliberately not in the list" claim: two
+aggregate-between-the-SELECT-list-and-the-join shapes, which today are correct
+or LOUD on every arm and never silently wrong, pinned so that the day one of
+them starts answering, it has to answer PostgreSQL's values.
+
 ### A join arm answers to the name the QUERY calls it (2026-08-31, #742 round 4, #753)
 
 `findScanAlias` walks to the scan under a join arm and returns its alias — the

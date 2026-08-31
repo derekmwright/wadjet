@@ -224,6 +224,82 @@ func resolveRenameSourceInScope(name string, child *logical.Node) (string, bool)
 	return src, true
 }
 
+// windowArgKeepsItsQualifier reports whether a window function's ARGUMENT has
+// to keep the table qualifier the query wrote, because dropping it would leave
+// a name MORE THAN ONE arm of the window's input publishes.
+//
+// `cleanExpr` strips the qualifier unconditionally, which is right almost
+// everywhere — the streams carry the column bare and `exec.Window`'s
+// `columnIndexFallback` finds it — and is a coin toss where two arms of a join
+// publish one alias. It landed on opposite sides of that toss on the two
+// execution paths, because they name a join's duplicate columns differently:
+//
+//	SELECT x.id, x.w, y.w, SUM(y.w) OVER () AS s
+//	FROM (SELECT id, a AS w FROM decpair) x
+//	JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
+//	-- PostgreSQL s = 5299.00 (Σ y.w)
+//	-- single    s =   52.99  (Σ x.w) — its stream spells x's copy `w`
+//	-- and the mirror, SUM(x.w) OVER (), is wrong on the DAG instead,
+//	--    whose stream spells Y's copy `w` and x's under its source name
+//
+// So the qualifier is kept exactly where it is load-bearing, and the answer is
+// today's bare name everywhere else. Two arms publishing one name is the whole
+// of the trigger, and it is the same question `ownedJoinArm` asks one resolver
+// over: which relation does this reference name, and does anything else answer
+// to the same bare column.
+func windowArgKeepsItsQualifier(arg string, child *logical.Node) bool {
+	dot := strings.LastIndexByte(arg, '.')
+	if dot <= 0 || dot == len(arg)-1 || child == nil {
+		return false
+	}
+	qual, bare := arg[:dot], arg[dot+1:]
+	if relationScopeSubtree(child, qual) == nil {
+		return false // the qualifier names no relation of this input
+	}
+	return armsPublishingBareName(child, bare) > 1
+}
+
+// armsPublishingBareName counts the join arms below n whose subtree publishes
+// bare — a scan column of theirs, or a name one of their Projects mints.
+func armsPublishingBareName(n *logical.Node, bare string) int {
+	for n != nil && scopePreservingWrapper(n) {
+		n = n.Children[0]
+	}
+	if n == nil {
+		return 0
+	}
+	if n.Type == logical.NodeJoin && len(n.Children) == 2 {
+		return armsPublishingBareName(n.Children[0], bare) +
+			armsPublishingBareName(n.Children[1], bare)
+	}
+	if subtreeNamingOf(n).ownsBareName(strings.ToLower(bare)) {
+		return 1
+	}
+	return 0
+}
+
+// windowArgSourceInScope resolves a QUALIFIED window argument to the source
+// column the DAG's streams carry, inside the arm its qualifier names.
+//
+// `derivedAliasSourceColumn` stops at a Join — it has no way to choose an arm
+// — so asked of a join it answers nothing and the argument reached the worker
+// under the derived ALIAS, which on the DAG no stream carries. Scoping it
+// first is the same composition `resolveRenameSourceInScope` performs for a
+// projection. ok=false means the qualifier names no relation here and the
+// caller keeps the unscoped walk.
+func windowArgSourceInScope(name string, child *logical.Node) (string, bool) {
+	dot := strings.LastIndexByte(name, '.')
+	if dot <= 0 || dot == len(name)-1 || child == nil {
+		return "", false
+	}
+	qual, bare := name[:dot], name[dot+1:]
+	scope := relationScopeSubtree(child, qual)
+	if scope == nil {
+		return "", false
+	}
+	return derivedAliasSourceColumn(bare, scope), true
+}
+
 // relationScopeSubtree descends through JOINs to the arm that answers to
 // name, and stops at the first node that neither is a two-arm join nor
 // preserves the scope — a Project there is the scope's own SELECT list and
@@ -246,10 +322,29 @@ func resolveRenameSourceInScope(name string, child *logical.Node) (string, bool)
 //	JOIN c ON c.id = x.id WHERE c.dv > 1
 //	-- `y.w` resolved to `a`, which is X's w, on the shuffled lowering
 //
-// Filter, Sort, Limit and Distinct all leave both the arm set and the output
-// schema alone, so descending through them asks the same question one level
-// down. Project, Aggregate, Window and the set operations do not, and the
-// walk still stops at those.
+// The test for descending is the one `resolveRenameSource` above already
+// applies, because these are two walks over one tree asking one question, and
+// where they disagree about what a scope is, one of them is wrong.
+// `resolveRenameSource` consumes a Project (it IS the rename), stops at an
+// Aggregate (its outputs are its own GroupBy/OutputCol names, so a bare lookup
+// below it resolves against the wrong schema), splits at a Join, and descends
+// through every other single-child node. `scopePreservingWrapper` is that same
+// set written out: Filter, Sort, Limit, Distinct and Window all narrow rows or
+// APPEND columns without renaming an existing one and without changing which
+// relations are below them, so descending asks the same question one level
+// down. A set operation is never a candidate — it has two or more children, and
+// it re-roots the output naming onto its first arm — and Project and Aggregate
+// stay stops for the reasons above.
+//
+// WINDOW was the omission, and it cost the same wrong answer one node over
+// (round 4 of #742): a window in the SELECT list puts a Window between the
+// outer Project and the join, the walk stopped there, and the qualified
+// duplicate alias captured on both DAG arms:
+//
+//	SELECT x.id AS xid, x.w AS xw, y.w AS yw, SUM(y.w) OVER () AS s
+//	FROM (SELECT id, a AS w FROM decpair) x
+//	JOIN (SELECT id, a * 100 AS w FROM decpair) y ON x.id = y.id
+//	-- PostgreSQL 12.75 | 1275.00 · both DAG arms answered yw = 12.75
 func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 	if n == nil || name == "" || !subtreeNamesRelation(n, name) {
 		return nil
@@ -277,14 +372,31 @@ func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 }
 
 // scopePreservingWrapper reports whether n is a single-child node that leaves
-// the relations below it and their output columns exactly as they are, so a
-// scope walk may descend through it.
+// the relations below it addressable by the same names and renames none of
+// their columns, so a scope walk may descend through it.
+//
+// It is `resolveRenameSource`'s own descent rule written as a list rather than
+// as a default, because this walk's default must be to STOP: returning a node
+// too HIGH hands the caller a whole join subtree and a bare lookup inside it
+// takes the first arm that answers, which is the silent capture. Keeping the
+// two in step is therefore a standing obligation and not a one-time argument —
+// `TestScopePreservingWrapperMatchesTheRenameWalk` asserts it over every
+// logical node type, so a new node kind fails there rather than resolving one
+// way in one walk and the other way in the other.
+//
+// Window is in the list because it APPENDS its output columns to its child's
+// schema: it renames nothing, and every relation below it keeps the name the
+// enclosing query calls it. Aggregate is deliberately NOT, and that is not a
+// gap — its output schema is its own GROUP BY keys and aggregate output names,
+// so the child's columns are no longer addressable and resolving a bare name
+// below it would answer from a schema the stream does not carry.
 func scopePreservingWrapper(n *logical.Node) bool {
 	if len(n.Children) != 1 {
 		return false
 	}
 	switch n.Type {
-	case logical.NodeFilter, logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
+	case logical.NodeFilter, logical.NodeSort, logical.NodeLimit,
+		logical.NodeDistinct, logical.NodeWindow:
 		return true
 	}
 	return false

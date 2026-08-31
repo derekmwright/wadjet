@@ -6583,8 +6583,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// silent half of the same defect. A materialized argument is
 			// already a __winkey_N the fragment computes, and
 			// derivedAliasSourceColumn leaves those (and `*`) alone.
+			// …and a QUALIFIED argument resolves inside the arm its
+			// qualifier names, because derivedAliasSourceColumn stops at a
+			// Join and answered nothing for it (round 4 of #742). Without
+			// the scoping `SUM(x.w) OVER ()` over two arms both publishing
+			// `w` reached the worker as the bare `w` and summed the OTHER
+			// arm's column.
 			inputCol := ec.InputCol
-			if src := derivedAliasSourceColumn(inputCol, winChild); src != "" {
+			if src, scoped := windowArgSourceInScope(inputCol, winChild); scoped {
+				if src != "" {
+					inputCol = cleanExpr(src)
+				}
+			} else if src := derivedAliasSourceColumn(inputCol, winChild); src != "" {
 				inputCol = cleanExpr(src)
 			}
 			winCols = append(winCols, WindowColSpec{
@@ -13216,6 +13226,20 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 // no catalog and no logical plan, so a second implementation there would be a
 // second answer; the arguments are parsed once, here, where the types resolve
 // (#345's shape, and #329/#333's).
+// windowInputCol is the name a window function's ARGUMENT reaches the operator
+// under. It is `cleanExpr`'s bare spelling everywhere except where dropping the
+// qualifier would leave a name more than one arm of the window's input
+// publishes, and there it is the qualified spelling the query wrote — see
+// windowArgKeepsItsQualifier for why the strip is a coin toss in exactly that
+// case and for the two paths it landed on opposite sides of.
+func windowInputCol(node *logical.Node, we logical.WindowExpr) string {
+	arg := strings.TrimSpace(we.InputColumn())
+	if len(node.Children) == 1 && windowArgKeepsItsQualifier(arg, node.Children[0]) {
+		return arg
+	}
+	return cleanExpr(arg)
+}
+
 func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
 	// resolveWindowKeys binds a qualified reference to the input column and
 	// renames an expression to the column the pre-window projection computes
@@ -13250,7 +13274,7 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 		// nothing else. Applied the other way round, a float default
 		// (LAG(x, 1, 1.5)) looked like a qualified name and cleanExpr
 		// returned "5" as the input column.
-		InputCol:    cleanExpr(we.InputColumn()),
+		InputCol:    windowInputCol(node, we),
 		OutputCol:   we.OutputCol,
 		OutputType:  windowSpecOutputType(node, we).ID,
 		PartitionBy: partBy,
