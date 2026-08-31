@@ -657,18 +657,22 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 	}
 }
 
-// A UNION arm whose producer sits behind an exchange that a fusion or an
-// elision DELETES (METHOD 10).
+// A UNION of two joins on the forced-shuffle lowering.
 //
-// `fuseScanShuffle` and `elideCoPartitionedExchanges` both remove a stage and
-// rewire every reference to it. A union arm names its producer in
-// `UnionArm.DepStage`, which is the same kind of second reference a chained
-// join's `BuildDepStage` is, and `ValidateNativeDAGShape` asserts that it
-// equals the corresponding `Dependencies` entry — so a pass that rewires one
-// and not the other produces a plan that fails validation at dispatch. Both
-// passes now rewire it; nothing in the corpus put a union arm in that position
-// before, which is the impossibility this fixture attempts.
-func TestUnionArmBehindAnAbsorbedExchange(t *testing.T) {
+// This is NOT the fixture for the `UnionArm.DepStage` rewiring in
+// `fuseScanShuffle` / `elideCoPartitionedExchanges`, and an earlier version of
+// this comment claimed it was. Neither of these shapes reaches either loop:
+// verified by panicking inside both and watching them pass, alongside six more
+// union shapes (grouped aggregates, UNION and UNION ALL, with and without a
+// join above). `physical.TestFuseScanShuffleDeclinesAUnionArmsExchange` and
+// `physical.TestElideCoPartitionedExchangeRewiresAUnionArm` drive the two
+// passes directly and are where that claim is actually gated.
+//
+// What these two DO gate is that a union whose arms are joins answers
+// correctly on all three arms, which is the shape a wrong rewiring would break
+// loudly at dispatch (ValidateNativeDAGShape refuses a plan whose arm and
+// dependency disagree).
+func TestUnionOfJoinsOnTheShuffledLowering(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up two embedded NATS clusters")
 	}

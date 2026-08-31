@@ -1010,10 +1010,25 @@ after; the rest are named at the end of this section.
   corresponding `Dependencies` entry — so a pass that rewires one and not the
   other builds a plan its own validator rejects. Both passes rewire it now.
 
-  Nothing in the corpus had ever put a union arm's producer behind an absorbed
-  or elided exchange, which is METHOD 10's shape exactly: the claim that the
-  rewiring is complete needed a fixture that attempts it, and
-  `TestUnionArmBehindAnAbsorbedExchange` is it.
+  **No SQL shape reaches either loop, and one of them cannot.** A corpus of
+  eight union shapes — unions of joins, of grouped aggregates, of derived
+  arms, UNION and UNION ALL, with and without a join above — reaches neither,
+  verified by panicking inside both loops and watching every shape pass. For
+  `fuseScanShuffle` that is provable rather than incidental: a union stage
+  lists its arms' producers in `Dependencies` (the invariant above), so it is
+  one of the exchange's consumers, and condition 4 admits only `hash_join`,
+  `sort_merge_join` and `final_aggregate` — the fusion always declines. For
+  `elideCoPartitionedExchanges`, which has no consumer-type condition, the
+  loop is reachable and no SQL shape was found that reaches it.
+
+  So the fixtures are WHITE-BOX and drive the passes directly:
+  `physical.TestFuseScanShuffleDeclinesAUnionArmsExchange` pins the decline and
+  its reason, so a future widening of condition 4 that admits a union fails
+  there rather than relying on a rewire nothing ever ran; and
+  `physical.TestElideCoPartitionedExchangeRewiresAUnionArm` constructs the
+  reachable shape and asserts the arm moved with its dependency — removing the
+  rewiring fails it. An SQL test that attempts nothing is worse than no test,
+  and the first version of this fixture was one.
 
 - **A QUALIFIED reference resolves against a column under a DIFFERENT
   qualifier.** `QualifyAllBuildCols` renames EVERY build column to the build's
@@ -1128,7 +1143,8 @@ projected at once, and the single-arm control; the two chain gates lose the
 `shuffledRefuses` (#755), `refusesLoudly` (#763) and `pinDAG` (#762) pins and
 assert PostgreSQL's values instead; `postgresJoinArmCases` asks the same
 questions of a live server on the single-process arm. Reverting the source
-changes and re-running fails 46 LEAF subtests across eight of those tests,
+changes and re-running fails 47 LEAF subtests across eight coordinator tests
+plus `physical.TestElideCoPartitionedExchangeRewiresAUnionArm`,
 which is the "every gate must be able to fail" check made rather than assumed.
 (Earlier counts of 22 and 37 were for smaller gate sets; the 22 was also wrong
 twice over — the leaf figure was 20 and the two extra lines were the parent
