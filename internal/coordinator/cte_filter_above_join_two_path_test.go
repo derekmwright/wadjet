@@ -262,12 +262,6 @@ func TestCTEFilterAboveAJoinChainThreeArms(t *testing.T) {
 			name string
 			sql  string
 			want int64
-			// shuffledRefuses pins a shape whose SHUFFLED arm fails LOUDLY
-			// for a mechanism that is not this one — the chained-join
-			// fusion's missing build output, which hits the CTE and the
-			// DERIVED spelling identically and so cannot be about the alias.
-			// TODO(#755): delete when that lands.
-			shuffledRefuses string
 		}{
 			{name: "2join/cte-first", want: 9, sql: sp.head + sp.c +
 				fmt.Sprintf(` JOIN %[1]s t ON c.id = t.id JOIN %[1]s u ON c.id = u.id `+
@@ -275,7 +269,7 @@ func TestCTEFilterAboveAJoinChainThreeArms(t *testing.T) {
 			{name: "2join/cte-second", want: 9, sql: sp.head +
 				fmt.Sprintf(`%s t JOIN `, tbl) + sp.c +
 				fmt.Sprintf(` ON c.id = t.id JOIN %s u ON c.id = u.id WHERE c.v > 90000000`, tbl)},
-			{name: "2join/cte-last", want: 9, shuffledRefuses: "output not found", sql: sp.head +
+			{name: "2join/cte-last", want: 9, sql: sp.head +
 				fmt.Sprintf(`%[1]s t JOIN %[1]s u ON t.id = u.id JOIN `, tbl) + sp.c +
 				` ON c.id = t.id WHERE c.v > 90000000`},
 			{name: "3join/cte-first", want: 9, sql: sp.head + sp.c +
@@ -299,18 +293,8 @@ func TestCTEFilterAboveAJoinChainThreeArms(t *testing.T) {
 				for _, arm := range arms {
 					res, err := arm.run(tc.sql)
 					if err != nil {
-						if tc.shuffledRefuses != "" && arm.name == "dag-shuffled" &&
-							strings.Contains(err.Error(), tc.shuffledRefuses) {
-							t.Logf("tracked separately (#755), NOT gated here: %v", err)
-							continue
-						}
 						t.Fatalf("%s arm refused a query PostgreSQL answers %d: %v\n  SQL: %s",
 							arm.name, tc.want, err, tc.sql)
-					}
-					if tc.shuffledRefuses != "" && arm.name == "dag-shuffled" {
-						t.Errorf("the shuffled arm now ANSWERS this shape, so TODO(#755) is "+
-							"fixed — delete shuffledRefuses\n  SQL: %s", tc.sql)
-						continue
 					}
 					got := ctrCounts(t, res)
 					if len(got) != 1 {
