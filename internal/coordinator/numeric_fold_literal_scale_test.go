@@ -81,8 +81,9 @@ func TestLiteralScaleInADecimalFold(t *testing.T) {
 	coord := tmdCoordinator(t, ctx, infra)
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB)
-	coordB.config.BroadcastBytesOverride = 1
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) {
+		c.BroadcastBytesOverride = 1
+	})
 
 	arms := []struct {
 		name string

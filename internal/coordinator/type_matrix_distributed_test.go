@@ -583,16 +583,26 @@ func tmdWriteTables(t *testing.T, ctx context.Context, infra tmdInfraT, rewrite 
 
 // tmdCoordinator stands the three-worker cluster up over infra and returns
 // the DAG-only coordinator that drives it.
-func tmdCoordinator(t *testing.T, ctx context.Context, infra tmdInfraT) *Coordinator {
+// opts, when given, adjust the Config BEFORE the coordinator is constructed.
+// A gate that wants a second arm with a different dispatch shape — every build
+// side through a hash join and an exchange, say — must set it here: writing
+// coord.config after New has already registered the object is a write to a
+// live coordinator that queries are reading, and the race detector is entitled
+// to say so.
+func tmdCoordinator(t *testing.T, ctx context.Context, infra tmdInfraT, opts ...func(*Config)) *Coordinator {
 	t.Helper()
 	store, cat, nc, js, logger := infra.store, infra.cat, infra.nc, infra.js, infra.logger
 
-	coord := New(Config{
+	cfg := Config{
 		NATSUrl: infra.clientURL, ResultBucket: "test",
 		// 0 disables the small-query fast path outright, which is what forces
 		// every query onto the stage DAG regardless of how small the scan is.
 		LocalFastPathBytes: 0,
-	}, cat, nc, js, logger)
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	coord := New(cfg, cat, nc, js, logger)
 
 	const workers = 3
 	ids := make([]string, workers)
