@@ -3,7 +3,6 @@ package coordinator
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -246,51 +245,101 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 
 	// #742's shape: a qualified reference satisfied by ANOTHER arm's
 	// identically-named column, with a base table between the two derived
-	// ones. The pruner fix moved the SINGLE path onto PostgreSQL's answer —
-	// `x.w` is a window, so 52.99 on every row — and left both DAG arms
-	// answering z's `a * 3`, which VARIES per row. A per-row value where the
-	// query asks for a whole-partition window is the tell, so the pin reads
-	// two rows rather than one. TODO(#742).
-	t.Run("qualified reference across two arms publishing one name", func(t *testing.T) {
-		sql := "SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM " + dbpTable + ") x " +
-			"JOIN " + dbpTable + " y ON x.id = y.id " +
-			"JOIN (SELECT id, a * 3 AS w FROM " + dbpTable + ") z ON x.id = z.id ORDER BY x.id"
-		for _, arm := range arms {
-			res, err := arm.run(sql)
-			if err != nil {
-				// The shuffled arm has its own loud failure on a chained join
-				// over derived arms (#755); it is not this shape's defect.
-				if arm.name == "dag-shuffled" && strings.Contains(err.Error(), "output not found") {
-					t.Logf("tracked separately (#755), NOT gated here: %v", err)
-					continue
+	// ones. Both DAG arms answered z's `a * 3`, which VARIES per row, where
+	// the query asks for x's whole-partition window — a per-row value under a
+	// window's name is the tell, so every entry reads two rows rather than
+	// one.
+	//
+	// Two mechanisms met here and the shape needed both closed. x's `w` is an
+	// expression OVER a window slot, and nothing on the DAG materialized it:
+	// the window stage emits `__win_0` and no column called `w`, so the name
+	// was free for the other arm to satisfy. And the SELECT-list resolver's
+	// qualified→bare fallback dropped the qualifier, so even where both arms
+	// publish `w` it took the first arm that answered.
+	//
+	// The MIRROR is the entry that says the repair is scoped and not merely
+	// reordered: `z.w` asked for while `x.w` is present has to answer
+	// `a * 3`, which is the value the defect used to hand to `x.w`.
+	for _, tc := range []struct {
+		name, sql, col string
+		row0, row3     string
+	}{
+		{
+			name: "qualified reference across two arms publishing one name",
+			sql: "SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM " + dbpTable + ") x " +
+				"JOIN " + dbpTable + " y ON x.id = y.id " +
+				"JOIN (SELECT id, a * 3 AS w FROM " + dbpTable + ") z ON x.id = z.id ORDER BY x.id",
+			col: "w", row0: "52.99", row3: "52.99",
+		},
+		{
+			name: "the mirror: z.w asked for while x.w is present",
+			sql: "SELECT x.id, z.w FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM " + dbpTable + ") x " +
+				"JOIN " + dbpTable + " y ON x.id = y.id " +
+				"JOIN (SELECT id, a * 3 AS w FROM " + dbpTable + ") z ON x.id = z.id ORDER BY x.id",
+			col: "w", row0: "38.25", row3: "-0.03",
+		},
+		{
+			// BOTH arms projected at once, which is the shape a per-column
+			// repair passes and a per-arm one has to get right twice.
+			name: "both arms projected",
+			sql: "SELECT x.id, x.w AS xw, z.w AS zw FROM " +
+				"(SELECT id, SUM(a) OVER () + 0 AS w FROM " + dbpTable + ") x " +
+				"JOIN " + dbpTable + " y ON x.id = y.id " +
+				"JOIN (SELECT id, a * 3 AS w FROM " + dbpTable + ") z ON x.id = z.id ORDER BY x.id",
+			col: "xw", row0: "52.99", row3: "52.99",
+		},
+		{
+			// A BARE window output beside a computed arm — the same collapse
+			// with no wrapping expression anywhere, which is the spelling
+			// #755's third repro carries and which answered p's window under
+			// BOTH names on every DAG arm. Both arms publish at DECIMAL scale
+			// 2 on purpose: a cross-SCALE pair renders one arm at the other's
+			// typmod on the single path, which is #754 and not this.
+			name: "bare window arm beside a computed arm",
+			sql: "SELECT p.id, q.w AS w FROM (SELECT id, SUM(a) OVER () AS w FROM " + dbpTable + ") p " +
+				"JOIN " + dbpTable + " y ON p.id = y.id " +
+				"JOIN (SELECT id, a * 3 AS w FROM " + dbpTable + ") q ON p.id = q.id ORDER BY p.id",
+			col: "w", row0: "38.25", row3: "-0.03",
+		},
+		{
+			name: "bare window arm beside a computed arm, the window asked for",
+			sql: "SELECT p.id, p.w AS w FROM (SELECT id, SUM(a) OVER () AS w FROM " + dbpTable + ") p " +
+				"JOIN " + dbpTable + " y ON p.id = y.id " +
+				"JOIN (SELECT id, a * 3 AS w FROM " + dbpTable + ") q ON p.id = q.id ORDER BY p.id",
+			col: "w", row0: "52.99", row3: "52.99",
+		},
+		{
+			// The CONTROL: one derived arm, no name to collide with. It was
+			// right before any of this and says the repair did not move the
+			// single-arm resolution.
+			name: "control: one arm publishing w",
+			sql: "SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM " + dbpTable + ") x " +
+				"JOIN " + dbpTable + " y ON x.id = y.id ORDER BY x.id",
+			col: "w", row0: "52.99", row3: "52.99",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
 				}
-				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
-			}
-			if len(res.Rows) != 9 {
-				t.Fatalf("%s arm returned %d rows, want 9\n  SQL: %s", arm.name, len(res.Rows), sql)
-			}
-			first := fmt.Sprintf("%v", res.Rows[0]["w"])
-			fourth := fmt.Sprintf("%v", res.Rows[3]["w"])
-			if arm.name == "single" {
-				// GATED: the single path answers the window on every row.
-				if first != "52.99" || fourth != "52.99" {
-					t.Errorf("the single arm answered x.w=%q/%q, PostgreSQL 17 answers 52.99 on "+
-						"every row\n  SQL: %s", first, fourth, sql)
+				if len(res.Rows) != 9 {
+					t.Fatalf("%s arm returned %d rows, want 9\n  SQL: %s",
+						arm.name, len(res.Rows), tc.sql)
 				}
-				continue
+				first := fmt.Sprintf("%v", res.Rows[0][tc.col])
+				fourth := fmt.Sprintf("%v", res.Rows[3][tc.col])
+				if first != tc.row0 || fourth != tc.row3 {
+					t.Errorf("%s arm answered %s=%q/%q, PostgreSQL 17 answers %q/%q — a "+
+						"qualified reference took another arm's identically-named column "+
+						"(#742)\n  SQL: %s", arm.name, tc.col, first, fourth,
+						tc.row0, tc.row3, tc.sql)
+				}
 			}
-			if first == "52.99" && fourth == "52.99" {
-				t.Errorf("the %s arm now answers x.w=52.99 on every row — TODO(#742) is fixed, "+
-					"delete this pin and assert it on all three arms\n  SQL: %s", arm.name, sql)
-				continue
-			}
-			if first != "38.25" || fourth != "-0.03" {
-				t.Errorf("the %s arm answered x.w=%q/%q, which is neither the pinned wrong values "+
-					"(38.25 and -0.03, z's `a * 3`) nor PostgreSQL's constant 52.99\n  SQL: %s",
-					arm.name, first, fourth, sql)
-			}
-		}
-	})
+		})
+	}
 
 	// The control the whole family needs: two sibling blocks with NO window,
 	// which resolved correctly before any of this and must keep doing so. It
