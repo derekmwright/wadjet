@@ -657,6 +657,15 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 		return Decl(rung), true
 	}
 	metas := make([]batch.DecimalType, 0, len(decided))
+	// The same list without the CONSTANTS. A literal's SCALE belongs in the
+	// fold — ADR-0012 item 12's "scale = max over the arms" is the only choice
+	// that moves no value, and `CASE … THEN numeric(9,2) ELSE 0.125 END` needs
+	// scale 3 or the 0.125 has nowhere to go — but a literal that pushes the
+	// fold PAST the carrier must not cost the query the rows it never
+	// supplies. When the full fold does not fit, the constants drop out and
+	// the DECLARED operands decide alone (expr.foldDecimalMetas, which the
+	// runtime's decimalArmFold shares).
+	declared := make([]batch.DecimalType, 0, len(decided))
 	sawDecimal := false
 	for _, d := range decided {
 		m, isDec, ok := declFixedPoint(d)
@@ -665,6 +674,9 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 		}
 		sawDecimal = sawDecimal || isDec
 		metas = append(metas, m)
+		if !d.Lit {
+			declared = append(declared, m)
+		}
 	}
 	if !sawDecimal {
 		// The rung is DECIMAL because a numeric LITERAL put it there and no
@@ -680,7 +692,7 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 	if sawUnknown {
 		return DeclType{}, false
 	}
-	m, ok := batch.DecimalCommon(metas)
+	m, ok := foldDecimalMetas(metas, declared)
 	if !ok {
 		return typed[0], true
 	}
@@ -772,7 +784,7 @@ func declFixedPoint(d DeclType) (batch.DecimalType, bool, bool) {
 		return d.Dec(), true, true
 	}
 	if d.ExactSet {
-		// A numeric LITERAL at its own spelling.
+		// A LITERAL, quoted or not, at its own spelling.
 		return d.Exact, false, true
 	}
 	m, ok := batch.DecimalTypeOf(d.ID, batch.DecimalType{})

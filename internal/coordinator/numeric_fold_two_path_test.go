@@ -107,10 +107,22 @@ type nfEntry struct {
 // Every one is ADR-0024 item 1's finite carrier meeting a value PostgreSQL's
 // unbounded `numeric` holds: the fold lands on DECIMAL and the literal is
 // '1e39' (forty digits, past the 38 an Int128 at scale 0 can spell), 'NaN' or
-// 'Infinity' (no bit pattern in a fixed-point integer at all). The answer is a
-// 22003 at the store, which is loud rather than wrong — the position ADR-0024
-// took when it chose the carrier, and the one ADR-0012 item 12 records as a
-// divergence rather than a defect.
+// 'Infinity' (no bit pattern in a fixed-point integer at all).
+//
+// A literal that is merely FINER than the columns is NOT here: the fold's
+// scale is max over the arms, the literal's included (ADR-0012 item 12), so
+// `GREATEST(numeric(15,2), '12.750000000000000001')` answers all twenty
+// digits. What that costs is the COLUMNS' rendering, which
+// TestLiteralScaleInADecimalFold pins.
+//
+// The refusal is AT THE STORE, per row, never at plan time: the same
+// composite over a range that excludes the literal's row ANSWERS, and so does
+// a WHERE over it, which projects nothing. TestNumericFoldRefusalIsPerRow
+// holds that line.
+//
+// The answer is loud rather than wrong — the position ADR-0024 took when it
+// chose the carrier, and the one ADR-0012 item 12 records as a divergence
+// rather than a defect.
 //
 // They are LISTED rather than skipped because the list is a claim that can
 // fail: the gate asserts each still refuses, so if the carrier ever grows —

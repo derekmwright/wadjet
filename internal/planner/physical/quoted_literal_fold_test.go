@@ -101,15 +101,25 @@ func TestQuotedLiteralIsUnknownInTheFold(t *testing.T) {
 		{"a quoted literal beside a real and a decimal", "COALESCE(f32, '3.5', d152)",
 			expr.Decl(parquet.TypeFloat32), expr.Decided, "real"},
 
-		// The literal contributes its SPELLING to a DECIMAL fold, so the
-		// declaration is wide enough for the value it produces. Without it
-		// `GREATEST(numeric(15,2), '12.750000000000000001')` would declare
-		// (15,2) and lose the digits PostgreSQL keeps.
+		// A quoted literal contributes its SPELLING to a DECIMAL fold, scale
+		// included, which is the same contribution the unquoted spelling
+		// makes and the rule ADR-0012 item 12 states for every arm. The two
+		// spellings agreeing is the point: PostgreSQL resolves both to
+		// unconstrained numeric and answers the literal's digits, and a fold
+		// that took only the declared operands' scale would refuse them.
 		{"a quoted literal widens a decimal fold's scale",
 			"GREATEST(d152, '12.750000000000000001')",
 			expr.DeclDecimal(31, 18), expr.Decided, "numeric"},
 		{"a quoted integer literal inside a decimal fold", "GREATEST(d152, '16777217')",
 			expr.DeclDecimal(15, 2), expr.Decided, "numeric"},
+		// It DOES widen the precision, which moves no rendered digit and is
+		// what lets a large-magnitude literal be the answer at all.
+		{"a quoted literal widens a decimal fold's integer part",
+			"GREATEST(d152, '1234567890123')",
+			expr.DeclDecimal(15, 2), expr.Decided, "numeric"},
+		{"a quoted literal past the column's integer part widens it",
+			"GREATEST(d152, '123456789012345678')",
+			expr.DeclDecimal(20, 2), expr.Decided, "numeric"},
 
 		// A quoted literal beside a TEXT column keeps text, which is the case
 		// the fix had to not break.
@@ -218,6 +228,20 @@ func TestDeclaredFoldAgreesWithTheComparisonFold(t *testing.T) {
 				"GREATEST('3.5', %s, %s)",
 				"COALESCE(%s, %s)",
 				"LEAST(%s, '16777217', %s)",
+				// NESTED forms. A composite is an ARGUMENT of a composite,
+				// which is a call shape neither layer's enumeration reaches
+				// by walking the flat argument list — physical.argDeclaredType
+				// recurses into greatest/least/coalesce/ifnull/nullif and a
+				// CASE, and expr's classifyOperandFold into greatest/least,
+				// CASE and Coalesce, and the two lists are not the same list.
+				// The #724 review found the gap by hand
+				// (`COALESCE(NULLIF(numeric, '…'), real)`), so it is enumerated
+				// here rather than left to the next reviewer.
+				"COALESCE(NULLIF(%s, '1.5'), %s)",
+				"COALESCE(GREATEST(%s, '1.5'), %s)",
+				"GREATEST(COALESCE(%s, '1.5'), %s)",
+				"GREATEST(%s, LEAST(%s, '1.5'))",
+				"COALESCE(CASE WHEN i32 > 0 THEN %s ELSE '1.5' END, %s)",
 			} {
 				sql := fmt.Sprintf(form, a.name, b.name)
 				t.Run(sql, func(t *testing.T) {

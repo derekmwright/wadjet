@@ -950,6 +950,11 @@ func caseResultArms(v *Case) []Expr {
 // runtime boxes as an integer hands the store a carrier instead of a value.
 func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 	metas := make([]batch.DecimalType, 0, len(arms))
+	// The same list without the CONSTANTS, which is what the fold falls back
+	// to when the full one does not fit the carrier. See foldDecimalMetas —
+	// expr.CommonDeclType keeps the identical fallback over declared types and
+	// the two must not drift.
+	declared := make([]batch.DecimalType, 0, len(arms))
 	sawDecimal := false
 	for _, a := range arms {
 		if a == nil {
@@ -964,13 +969,16 @@ func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 		}
 		sawDecimal = sawDecimal || isDec
 		metas = append(metas, t)
+		if !isConstNumericLit(a) {
+			declared = append(declared, t)
+		}
 	}
 	if !sawDecimal {
 		// All-integer alternatives are an INTEGER expression, not a decimal
 		// one: `COALESCE(i, 0)` is integer in PostgreSQL too.
 		return 0, 0, false
 	}
-	m, ok := batch.DecimalCommon(metas)
+	m, ok := foldDecimalMetas(metas, declared)
 	if !ok {
 		return 0, 0, false
 	}

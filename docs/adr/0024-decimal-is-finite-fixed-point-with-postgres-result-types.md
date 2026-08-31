@@ -139,15 +139,50 @@ value narrowed or wrapped on the way out, which is why
 `physical.TestDeclaredFoldAgreesWithTheComparisonFold` asserts the first and
 third agree over every ordered pair of the six widths.
 
-Three limits, all deliberate. A quoted literal contributes its SPELLING's (p,s)
-to a DECIMAL fold, the way a numeric literal does, so
-`GREATEST(numeric(15,2), '12.750000000000000001')` declares a width that holds
-every digit PostgreSQL keeps. A composite whose every argument is quoted stays
-`text`, as PostgreSQL resolves it. And a CONSTANT is folded at PostgreSQL's
-rung for its spelling only when there is a TYPED operand to resolve it against:
-`CASE … THEN int4_col ELSE 0 END` is `integer` on both engines, while
-`GREATEST(0.5, 1.5)` keeps the FLOAT64 a bare numeric literal declares — the
-literal deferral recorded above, which #724 does not reopen.
+**A LITERAL contributes its SPELLING to a DECIMAL fold, scale included, and
+the QUOTED spelling contributes the same thing** (#724). The scale is max over
+the arms — item 12 of ADR-0012's rule for a set operation, and for the same
+reason: it is the only choice that moves no value, since a narrower one drops
+digits a wider arm holds. `CASE … THEN numeric(9,2) ELSE 0.125 END` needs
+scale 3 or the 0.125 has nowhere to go, and PostgreSQL answers 0.125 there.
+
+**What that costs is the RENDERING, and it is recorded** (#764). PostgreSQL
+gives a numeric CONSTANT typmod −1, so `select_common_typmod` over a column and
+a constant answers −1: the fold is unconstrained numeric and every value prints
+at ITS OWN scale — 12.75 for the column's rows, 12.3456789012345 for the
+literal's, in one column. A wadjet vector has one scale for the whole column
+(§4) and cannot print two, so the columns' rows come back
+`12.7500000000000`: the same number, with trailing zeros that track the
+literal's fractional length.
+
+The alternative was implemented during #724's review round 1 and reverted with
+evidence. Taking the scale from the DECLARED operands alone keeps the columns'
+rows byte-identical to PostgreSQL and leaves a SELECTED literal finer than that
+scale with nowhere to go, so `CASE WHEN g < 3 THEN numeric(9,2) ELSE 0.125 END`
+— 200 rows on PostgreSQL, and answered by this engine since #695 — became a
+22003. It failed the pg-oracle corpus and #695's own gate. **A trailing zero is
+the same number; a refused query is no answer at all.** Closing the rendering
+gap for real needs a DECIMAL projection that prints each value at its own scale,
+which is a vector-level change and not a typing one (#764).
+
+One refusal remains and it is the CARRIER, not the scale: a literal past 38
+digits has no exact value at any scale an Int128 can hold, so the row that
+SELECTS it is a 22003 by item 4. It is a STORE check, per row — the same
+composite over a range that excludes that row answers, and so does a WHERE over
+it, which projects nothing — so an arm no row selects never costs a query its
+answer. When such a literal would push the fold past the carrier the constants
+are dropped from it and the DECLARED operands decide alone
+(`expr.foldDecimalMetas`), which is what keeps
+`COALESCE(numeric(15,2), numeric(38,10), '<forty digits>')` answering on the
+rows its two columns supply. `coordinator.TestLiteralScaleInADecimalFold` and
+`TestNumericFoldRefusalIsPerRow` hold both halves.
+
+Two more limits, both deliberate. A composite whose every argument is quoted
+stays `text`, as PostgreSQL resolves it. And a CONSTANT is folded at
+PostgreSQL's rung for its spelling only when there is a TYPED operand to
+resolve it against: `CASE … THEN int4_col ELSE 0 END` is `integer` on both
+engines, while `GREATEST(0.5, 1.5)` keeps the FLOAT64 a bare numeric literal
+declares — the literal deferral recorded above, which #724 does not reopen.
 
 **THE STORE, not the classification, is what makes the box rule hold.** The
 runtime fold classifies arms by NODE KIND, and the declared fold takes any arm

@@ -119,6 +119,12 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 			expr.DeclDecimal(9, 2), expr.Decided},
 		{"a DECIMAL beside a fractional literal", "CASE WHEN i64 > 0 THEN a ELSE 1.5 END",
 			expr.DeclDecimal(9, 2), expr.Decided},
+		// A literal finer than the column WIDENS THE SCALE, which is
+		// ADR-0012 item 12's rule for every arm — scale = max, the only
+		// choice that moves no value. Taking the column's scale instead would
+		// leave 0.12345 with nowhere to go and refuse a query PostgreSQL
+		// answers; expr.foldDecimalMetas records why the answer wins over the
+		// rendering (#724's review round 1 weighed the two).
 		{"a literal finer than the column widens the scale",
 			"CASE WHEN i64 > 0 THEN a ELSE 0.12345 END",
 			expr.DeclDecimal(12, 5), expr.Decided},
