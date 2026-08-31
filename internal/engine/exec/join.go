@@ -4501,6 +4501,17 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 	// This avoids allocating and gathering unneeded intermediate columns
 	// in multi-way join pipelines, reducing both CPU and memory pressure.
 	if len(outputFilter) > 0 {
+		// The filter's entries by their BARE part, for the mirror direction
+		// below. Built once: the filter is small and the loop is per column.
+		var bareWanted map[string]bool
+		for name := range outputFilter {
+			if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
+				if bareWanted == nil {
+					bareWanted = make(map[string]bool, len(outputFilter))
+				}
+				bareWanted[strings.ToLower(name[dot+1:])] = true
+			}
+		}
 		var filteredSchema []parquet.Column
 		var filteredMapping []outColSource
 		for i, col := range out {
@@ -4512,6 +4523,20 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 				if dot := strings.IndexByte(col.Name, '.'); dot >= 0 {
 					keep = outputFilter[col.Name[dot+1:]]
 				}
+			}
+			// …and the MIRROR: the filter names a column QUALIFIED while this
+			// side ships it BARE. A derived arm publishes `w` unqualified when
+			// it is the PROBE, and the consumer above spells it `y.w` because
+			// that is how the query wrote it — the filter then matched
+			// nothing, the column was dropped, and the projection above failed
+			// with `column "y.w" does not exist in the input schema` on a
+			// query PostgreSQL answers. It is the same qualified/bare
+			// asymmetry expr.ResolveColumnRef and exec.columnIndexFallback
+			// resolve; this is the third list that carried only one half of
+			// it. Keeping a column the filter did not name exactly costs
+			// bytes, never an answer.
+			if !keep && bareWanted != nil && strings.IndexByte(col.Name, '.') < 0 {
+				keep = bareWanted[strings.ToLower(col.Name)]
 			}
 			if keep {
 				filteredSchema = append(filteredSchema, col)

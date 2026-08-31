@@ -1128,7 +1128,7 @@ projected at once, and the single-arm control; the two chain gates lose the
 `shuffledRefuses` (#755), `refusesLoudly` (#763) and `pinDAG` (#762) pins and
 assert PostgreSQL's values instead; `postgresJoinArmCases` asks the same
 questions of a live server on the single-process arm. Reverting the source
-changes and re-running fails 42 LEAF subtests across seven of those tests,
+changes and re-running fails 46 LEAF subtests across eight of those tests,
 which is the "every gate must be able to fail" check made rather than assumed.
 (Earlier counts of 22 and 37 were for smaller gate sets; the 22 was also wrong
 twice over — the leaf figure was 20 and the two extra lines were the parent
@@ -1238,16 +1238,6 @@ fall through to the suffix scan. `TestQualifierCollidingWithAColumnName-
 Resolves` carries the shape with the non-colliding arm and the bare predicate
 spelling as its controls.
 
-Repairing it also closed a divergence pinned SEPARATELY, which is the evidence
-that the guard was the mechanism and not a patch: `TestFilterQualifiedToOne-
-JoinArmTwoPath`'s `AliasCollidesWithBuildColumn` rows, and the
-`TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect` test written to
-isolate them, pinned `d.k > 3 OR c.g > 100` answering 0 on the DAG whenever the
-PROBE arm published an alias equal to the build column's name. That collision
-is this guard: the container lookup found a non-ROW `k`, the refusal fired, and
-`d.k` resolved to nothing. Both pins are deleted and the isolating test with
-them.
-
 **And two ROW columns spelled alike do NOT decline — they pick the exactly-
 spelled one.** An earlier statement of this said otherwise. `x JOIN x` puts a
 `c_row` on both sides; the resolver's exact-name lookup wins before the
@@ -1262,6 +1252,29 @@ FROM-clause entry). That is the deliberate superset ADR-0012 records, and it is
 gated as such: `TestRowFieldPathSurvivesAJoinThreeArms` asserts the field's own
 values, with the join-free spelling beside it as the control the join must
 agree with.
+
+### A join's OutputFilter needs BOTH directions of the same fallback (2026-08-31, #742)
+
+The third list with only one half of the qualified/bare asymmetry is the
+join's own OutputFilter. `joinOutputSchemaWithMapping` kept a QUALIFIED stream
+column when the filter named it bare — that is Q07's `n2.n_name` under a
+filter asking for `n_name` — and had no mirror. A derived arm that is the
+PROBE ships its column BARE, because nothing qualified it, while the consumer
+above spells it the way the query wrote it:
+
+    SELECT x.id, x.w, y.w FROM (SELECT id, a AS w FROM decpair) x
+    JOIN (SELECT id, b * 100 AS w FROM decpair) y ON x.id = y.id
+    JOIN decpair u ON x.id = u.id WHERE x.w > 1
+    -- PostgreSQL 5 rows · single 5 · DAG broadcast 5
+    -- DAG shuffled  ERROR  column "y.w" does not exist in the input schema
+
+The filter matched neither spelling, the column was dropped, and the
+projection above failed at dispatch. On `376b2cac` the same query answered x's
+`w` under BOTH names — #742's capture — so the carrier work turned a silent
+capture into a loud failure and this turns it into the answer. Keeping a
+column the filter did not name exactly costs bytes and never an answer, which
+is why the mirror is unconditional; the stage-dump golden is unchanged,
+because this is the RUNTIME application of a list the plan already had.
 
 **What is NOT closed, measured rather than assumed.** Three residuals survive
 the sweep, each identical on `376b2cac` and on this tip, and none of them this

@@ -825,3 +825,123 @@ func TestQualifierCollidingWithAColumnNameResolves(t *testing.T) {
 		})
 	}
 }
+
+// BOTH arms of a join publishing one alias, with BOTH projected, on three
+// arms.
+//
+// A join's OutputFilter is spelled the way the query wrote the reference —
+// `y.w` — while the arm that is the PROBE ships the column BARE, because
+// nothing qualified it. The filter matched neither spelling, the column was
+// dropped, and the projection above failed at dispatch:
+//
+//	SELECT x.id, x.w, y.w FROM (SELECT id, a AS w FROM decpair) x
+//	JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id
+//	JOIN decpair u ON x.id = u.id WHERE x.w > 1
+//	-- PostgreSQL 5 rows · single 5 · DAG broadcast 5
+//	-- DAG shuffled  ERROR  column "y.w" does not exist in the input schema
+//
+// On 376b2cac both DAG arms answered x's `w` under BOTH names instead, which
+// is #742's capture; the round-1 fix made the broadcast arm right and left the
+// shuffled one loud. `joinOutputSchemaWithMapping` already carried the
+// qualified→bare direction of this test (a self-join's `n2.n_name` kept by a
+// filter naming `n_name`); this is the mirror, and it is the third list in
+// which only one half of that asymmetry was implemented.
+//
+// The two arms publish at the SAME DECIMAL scale in the asserted entries, so
+// the gate cannot fail for #754's reason; the issue's own cross-scale spelling
+// is carried separately with the single arm pinned.
+func TestBothArmsPublishOneAliasProjectBothThreeArms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	const tbl = dbpTable
+	for _, tc := range []struct {
+		name, sql string
+		cols      []string
+		want      string
+	}{
+		{
+			name: "both-projected/3-join",
+			sql: "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " +
+				"(SELECT id, a AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a * 100 AS w FROM " + tbl + ") y ON x.id = y.id " +
+				"JOIN " + tbl + " u ON x.id = u.id WHERE x.w > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+		{
+			// Only the BUILD arm's column projected, which is the direction
+			// the OutputFilter used to drop.
+			name: "build-arm-only/3-join",
+			sql: "SELECT x.id AS xid, y.w AS yw FROM (SELECT id, a AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a * 100 AS w FROM " + tbl + ") y ON x.id = y.id " +
+				"JOIN " + tbl + " u ON x.id = u.id WHERE x.w > 1 ORDER BY x.id",
+			cols: []string{"xid", "yw"},
+			want: "5 rows: 1|1275.00;2|1275.00;3|1275.00;5|200.00;8|1275.00;",
+		},
+		{
+			name: "both-projected/4-join",
+			sql: "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " +
+				"(SELECT id, a AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a * 100 AS w FROM " + tbl + ") y ON x.id = y.id " +
+				"JOIN " + tbl + " u ON x.id = u.id JOIN " + tbl + " v ON x.id = v.id " +
+				"WHERE x.w > 1 ORDER BY x.id",
+			cols: []string{"xid", "xw", "yw"},
+			want: "5 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;5|2.00|200.00;8|12.75|1275.00;",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
+						arm.name, err, tc.sql)
+				}
+				if got := dajDigest(res, tc.cols); got != tc.want {
+					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+
+	// The issue's own CROSS-SCALE spelling. The values are what this gate is
+	// about; the single arm renders x's scale-2 column at y's scale 4, which
+	// is #754 and is pinned so its fix deletes the pin.
+	t.Run("both-projected/cross-decimal-scales", func(t *testing.T) {
+		sql := "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " +
+			"(SELECT id, a AS w FROM " + tbl + ") x " +
+			"JOIN (SELECT id, b * 100 AS w FROM " + tbl + ") y ON x.id = y.id " +
+			"JOIN " + tbl + " u ON x.id = u.id WHERE x.w > 1 ORDER BY x.id"
+		const want = "5 rows: 1|12.75|1275.0000;2|12.75|1275.0100;3|12.75|1274.9900;" +
+			"5|2.00|1000.0000;8|12.75|;" // PostgreSQL 17
+		const pinned = "5 rows: 1|12.7500|1275.0000;2|12.7500|1275.0100;3|12.7500|1274.9900;" +
+			"5|2.0000|1000.0000;8|12.7500|;" // TODO(#754)
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
+					arm.name, err, sql)
+			}
+			got := dajDigest(res, []string{"xid", "xw", "yw"})
+			exp := want
+			if arm.name == "single" {
+				exp = pinned
+			}
+			if got == exp {
+				continue
+			}
+			if arm.name == "single" && got == want {
+				t.Errorf("the single arm now renders xw at its OWN scale — #754 is fixed, "+
+					"delete this pin and assert PostgreSQL's values on every arm\n  SQL: %s", sql)
+				continue
+			}
+			t.Errorf("%s arm answered\n  %s\nwant\n  %s\n  SQL: %s", arm.name, got, exp, sql)
+		}
+	})
+}
