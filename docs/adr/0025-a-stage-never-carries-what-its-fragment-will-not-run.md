@@ -1005,6 +1005,7 @@ after; the rest are named at the end of this section.
   fuses. `elideCoPartitionedExchanges` deletes stages the same way and had the
   same hole; it is repaired beside it rather than left as the next filing.
 
+
 - **A QUALIFIED reference resolves against a column under a DIFFERENT
   qualifier.** `QualifyAllBuildCols` renames EVERY build column to the build's
   TABLE alias, so a CTE or derived table on the build side of a self-join
@@ -1097,6 +1098,17 @@ the alias, so `assertGatherOutputIsReachable` saw it) and answered locally,
 while the shuffled plan attached the projection to the join instead, satisfied
 that check, and failed inside the fragment.
 
+**The plan-identity claim, and the gate that can now support it.**
+`TestTPCHStageDumpGolden` recorded `Stage.Columns` and nothing else, so the
+field this work widens — `Stage.OutputColumns` — was invisible to it, as were
+a chained link's own `Columns` and the build dependency a rewiring pass can
+leave dangling. It now records all four. Regenerating the golden on `376b2cac`
+and on this tip produces BYTE-IDENTICAL files for all 22 queries: no TPC-H
+stage gains a column, a shipped column, a chained-link column or a different
+build dep, and none gains a projection (the `ops=` counter already carried
+that). The claim was true before and the citation did not support it; now it
+does.
+
 **What the gates carry.** `coordinator.TestDerivedArmsAboveAJoinChainThree-
 Arms` is #755's four shapes, #753's join-of-joins shapes and #766's projecting
 shapes with their COUNT twins as controls, on three arms against live
@@ -1107,8 +1119,11 @@ projected at once, and the single-arm control; the two chain gates lose the
 `shuffledRefuses` (#755), `refusesLoudly` (#763) and `pinDAG` (#762) pins and
 assert PostgreSQL's values instead; `postgresJoinArmCases` asks the same
 questions of a live server on the single-process arm. Reverting the source
-changes and re-running fails 22 subtests across those four tests, which is the
-"every gate must be able to fail" check made rather than assumed.
+changes and re-running fails 37 LEAF subtests across those six tests, which is
+the "every gate must be able to fail" check made rather than assumed. (An
+earlier count of 22 for a smaller gate set was wrong twice over: the leaf
+figure was 20 and the two extra lines were the parent `--- FAIL`s of two
+table-driven tests. Counted with `grep -c '^    --- FAIL'`.)
 
 **What a same-alias fixture must not also be about.** Every same-alias pair in
 these gates publishes at DECIMAL scale 2 on purpose. A cross-SCALE pair
@@ -1119,8 +1134,53 @@ join-output resolution. One entry carries #766's literal cross-scale spelling
 with the single arm PINNED at the wrong rendering, so #754's fix is what
 deletes it.
 
+### A chained LINK'S list narrows the joined stream, not the probe's (2026-08-31, #755 round 2, #762)
+
+The rewiring above makes a chain over derived arms RUNNABLE where it used to
+be refused at dispatch, and what those plans then ran was #762's silent zero.
+That has to be said plainly, because the first draft of this section said the
+shape was "pre-existing" and answered zero on `376b2cac`: it does not. On
+`376b2cac` the SHUFFLED arm REFUSES it (`chained join 0: build dep
+"exchange-repartition-7" output not found`) and the client gets an error. The
+rewiring turned a loud refusal into a silent wrong answer, and the repair
+below is what makes it an ANSWER.
+
+    WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+    SELECT COUNT(*) FROM decpair t JOIN decpair u ON t.id = u.id
+    JOIN c ON c.id = t.id WHERE c.dv > 1
+    -- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG shuffled 0
+
+`probeSideChainRefs` classifies a chained link's residual-filter references and
+drops the ones the link's own BUILD input supplies. That is right for
+`Stage.Columns` — the primary probe's OutputFilter, applied before the build
+enters — and wrong for `ChainedJoinSpec.Columns`, which narrows the JOINED
+stream that the link's `OpFilter` then reads. The fragment runs
+
+    primary probe (OutputFilter = Stage.Columns)
+      → link 0 (OutputFilter = ChainedJoins[0].Columns) → OpFilter(link 0)
+      → link 1 → … → PostFilter(Stage.FilterExprs)
+
+so everything evaluated AT OR AFTER link k has to survive `ChainedJoins[k].
+Columns`, wherever its value came from. Each link now takes its own filter's
+refs, every later link's, and the stage's own PostFilter and projection.
+
+**Three spellings of one query disagreed, and the two that were right say what
+the trigger is.** A RENAME body is correct because the pruner resolves `dv`
+back to `a` and the link's list — the absorbed join's `NeededColumns` — already
+carried it; a COMPUTED body publishes `dv` and the re-spelled predicate reads
+`a`, which nothing put there. The DERIVED spelling is correct because the
+predicate is pushed INTO the arm's scan, which a CTE's Project declines as a
+materialization fence. So the cell is CTE × computed × any position but first ×
+shuffled, and `TestCTEChainPositionCarriesItsFilterThreeArms` is that cell
+crossed with 2/3/4-join chains, the qualified and bare predicate spellings, the
+three numeric bodies of the fixture, and a probe table — `IS NULL`,
+`IS NOT NULL`, a range, a disjunct with a base-table term, `MIN` beside
+`COUNT`, a projection, `GROUP BY` — because a COUNT alone cannot tell a
+DROPPED predicate from one that is UNKNOWN, and those seven do.
+
 **What is NOT closed, measured rather than assumed.** Three residuals survive
-the sweep, each pre-existing and none of them this mechanism:
+the sweep, each identical on `376b2cac` and on this tip, and none of them this
+mechanism:
 
 - a CTE reference stamps its name on the subtree ROOT and not on the scans
   below it (deliberately — see `subtreeNamesRelation`), so a join has no
@@ -1130,12 +1190,24 @@ the sweep, each pre-existing and none of them this mechanism:
   That is #751's and #753's CTE face and it lives in the aliasing of scopes,
   not in what a stage carries;
 - two arms publishing one alias make the single-process path render one at the
-  other's DECIMAL scale or refuse a DECIMAL/FLOAT pair outright (#754);
-- an OUTER join whose COUNT(*) reads `__rowcount_only__` above a derived arm
-  with a computed column fails at the scan, and a CTE in the LAST position of a
-  chain still answers zero on the shuffled arm. Both are pre-existing on
-  `376b2cac` and belong to the row-count sentinel and the chain's last-position
-  lowering rather than to name resolution.
+  other's DECIMAL scale, and a DECIMAL/FLOAT pair under one alias refuses
+  outright (#754);
+- `GROUP BY` on a QUALIFIED derived alias collapses to one NULL group on both
+  DAG arms — at ONE join, in the DERIVED spelling, and on `376b2cac`; the BARE
+  spelling is correct everywhere, so it is the qualified group KEY's own
+  resolution. Pinned in `TestCTEChainPositionCarriesItsFilterThreeArms` so the
+  day it agrees the gate fails;
+- `MIN`/`SUM` of a derived DECIMAL alias on the shuffled arm refuses the
+  shuffle read — `column "m" is DECIMAL … but FLOAT64 in an earlier file of the
+  same stage` — because a task whose partition is empty declares the aggregate
+  from `AggSpec.OutputType`'s float fallback and a task with rows declares it
+  from the vector. It reproduces on `376b2cac` for the CTE-FIRST and the
+  ONE-JOIN spellings, which nothing here touches; the chain shapes newly REACH
+  it because their filter stopped emptying every task. The gate carries the
+  FLOAT body for that probe and names the DECIMAL one here;
+- an OUTER join whose `COUNT(*)` reads `__rowcount_only__` above a derived arm
+  with a computed column fails at the scan. Pre-existing on `376b2cac` and
+  belonging to the row-count sentinel rather than to name resolution.
 
 ## Consequences
 

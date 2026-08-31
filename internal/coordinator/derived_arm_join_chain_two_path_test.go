@@ -3,11 +3,62 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/oracle"
 )
+
+// dajArms stands up the three arms this file's gates run on: the embedded
+// single-process engine, the stage DAG at its cluster-derived broadcast
+// threshold, and the stage DAG with every build forced through an
+// exchange-repartition.
+type dajArm struct {
+	name string
+	run  func(string) (*oracle.Result, error)
+}
+
+func dajArms(t *testing.T, ctx context.Context) []dajArm {
+	t.Helper()
+	single := tmdStandalone(t, ctx)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	infraB := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraB, nil)
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
+	return []dajArm{
+		{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }},
+		{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }},
+		{"dag-shuffled", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }},
+	}
+}
+
+// dajDigest renders a whole result the way the PostgreSQL side of these gates
+// records it: every row, in order, `|`-joined per column and `;`-terminated,
+// NULL as the empty string.
+//
+// The WHOLE result and not a prefix. An earlier cut of this file asserted the
+// first six of PostgreSQL's nine rows and stopped short of the NULL-bearing
+// tail, so an extra row, a duplicated row and a wrong NULL all passed. A
+// digest cannot do that: it is the row COUNT and every value at once.
+func dajDigest(res *oracle.Result, cols []string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d rows: ", len(res.Rows))
+	for _, r := range res.Rows {
+		for j, c := range cols {
+			if j > 0 {
+				sb.WriteByte('|')
+			}
+			if v, ok := r[c]; ok && v != nil {
+				fmt.Fprintf(&sb, "%v", v)
+			}
+		}
+		sb.WriteByte(';')
+	}
+	return sb.String()
+}
 
 // A join CHAIN over DERIVED arms, on three arms against PostgreSQL 17
 // (#755, #766, #753).
@@ -50,32 +101,13 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	t.Cleanup(cancel)
-
-	single := tmdStandalone(t, ctx)
-	infra := tmdInfra(t, ctx)
-	tmdWriteTables(t, ctx, infra, nil)
-	coord := tmdCoordinator(t, ctx, infra)
-	infraB := tmdInfra(t, ctx)
-	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
-
-	arms := []struct {
-		name string
-		run  func(string) (*oracle.Result, error)
-	}{
-		{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }},
-		{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }},
-		{"dag-shuffled", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }},
-	}
+	arms := dajArms(t, ctx)
 
 	const tbl = dbpTable
-	// row is one expected output row rendered as `col=value` pairs.
-	type row map[string]string
-
 	for _, tc := range []struct {
-		name string
-		sql  string
-		want []row
+		name, sql string
+		cols      []string
+		want      string // PostgreSQL 17, whole result
 	}{
 		// --- #755: a chained join over DERIVED arms on the shuffled arm.
 		{
@@ -83,9 +115,8 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 			sql: "SELECT p.w AS pw, q.w AS qw FROM (SELECT id, a + 1 AS w FROM " + tbl + ") p " +
 				"JOIN " + tbl + " y ON p.id = y.id " +
 				"JOIN (SELECT id, a * 3 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
-			want: []row{{"pw": "13.75", "qw": "38.25"}, {"pw": "13.75", "qw": "38.25"},
-				{"pw": "13.75", "qw": "38.25"}, {"pw": "0.99", "qw": "-0.03"},
-				{"pw": "3.00", "qw": "6.00"}, {"pw": "1.00", "qw": "0.00"}},
+			cols: []string{"pw", "qw"},
+			want: "9 rows: 13.75|38.25;13.75|38.25;13.75|38.25;0.99|-0.03;3.00|6.00;1.00|0.00;|;13.75|38.25;|;",
 		},
 		{
 			name: "755/three-derived-arms-distinct-aliases",
@@ -93,21 +124,18 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 				"(SELECT id, a + 1 AS w1 FROM " + tbl + ") p " +
 				"JOIN (SELECT id, a * 3 AS w2 FROM " + tbl + ") q ON p.id = q.id " +
 				"JOIN (SELECT id, a * 5 AS w3 FROM " + tbl + ") r ON p.id = r.id ORDER BY p.id",
-			want: []row{{"pw": "13.75", "qw": "38.25", "rw": "63.75"},
-				{"pw": "13.75", "qw": "38.25", "rw": "63.75"},
-				{"pw": "13.75", "qw": "38.25", "rw": "63.75"},
-				{"pw": "0.99", "qw": "-0.03", "rw": "-0.05"},
-				{"pw": "3.00", "qw": "6.00", "rw": "10.00"},
-				{"pw": "1.00", "qw": "0.00", "rw": "0.00"}},
+			cols: []string{"pw", "qw", "rw"},
+			want: "9 rows: 13.75|38.25|63.75;13.75|38.25|63.75;13.75|38.25|63.75;0.99|-0.03|-0.05;" +
+				"3.00|6.00|10.00;1.00|0.00|0.00;||;13.75|38.25|63.75;||;",
 		},
 		{
 			name: "755/window-arm-base-between-computed-arm",
 			sql: "SELECT p.w AS pw, q.w AS qw FROM (SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p " +
 				"JOIN " + tbl + " y ON p.id = y.id " +
 				"JOIN (SELECT id, a * 3 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
-			want: []row{{"pw": "52.99", "qw": "38.25"}, {"pw": "52.99", "qw": "38.25"},
-				{"pw": "52.99", "qw": "38.25"}, {"pw": "52.99", "qw": "-0.03"},
-				{"pw": "52.99", "qw": "6.00"}, {"pw": "52.99", "qw": "0.00"}},
+			cols: []string{"pw", "qw"},
+			want: "9 rows: 52.99|38.25;52.99|38.25;52.99|38.25;52.99|-0.03;52.99|6.00;52.99|0.00;" +
+				"52.99|;52.99|38.25;52.99|;",
 		},
 		{
 			name: "755/wrapped-window-arm-base-between-computed-arm",
@@ -115,9 +143,9 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 				"(SELECT id, SUM(a) OVER () + 0 AS w FROM " + tbl + ") x " +
 				"JOIN " + tbl + " y ON x.id = y.id " +
 				"JOIN (SELECT id, a * 3 AS w FROM " + tbl + ") z ON x.id = z.id ORDER BY x.id",
-			want: []row{{"xw": "52.99", "zw": "38.25"}, {"xw": "52.99", "zw": "38.25"},
-				{"xw": "52.99", "zw": "38.25"}, {"xw": "52.99", "zw": "-0.03"},
-				{"xw": "52.99", "zw": "6.00"}, {"xw": "52.99", "zw": "0.00"}},
+			cols: []string{"xw", "zw"},
+			want: "9 rows: 52.99|38.25;52.99|38.25;52.99|38.25;52.99|-0.03;52.99|6.00;52.99|0.00;" +
+				"52.99|;52.99|38.25;52.99|;",
 		},
 		{
 			// The CONTROLS #755 names: the TWO-way spelling of the same
@@ -127,20 +155,16 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 			name: "755/control/two-way-derived",
 			sql: "SELECT p.w AS pw, q.w AS qw FROM (SELECT id, a + 1 AS w FROM " + tbl + ") p " +
 				"JOIN (SELECT id, a * 3 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
-			want: []row{{"pw": "13.75", "qw": "38.25"}, {"pw": "13.75", "qw": "38.25"},
-				{"pw": "13.75", "qw": "38.25"}, {"pw": "0.99", "qw": "-0.03"},
-				{"pw": "3.00", "qw": "6.00"}, {"pw": "1.00", "qw": "0.00"}},
+			cols: []string{"pw", "qw"},
+			want: "9 rows: 13.75|38.25;13.75|38.25;13.75|38.25;0.99|-0.03;3.00|6.00;1.00|0.00;|;13.75|38.25;|;",
 		},
 		{
 			name: "755/control/three-way-base-tables",
 			sql: "SELECT x.a AS xa, y.a AS ya, z.a AS za FROM " + tbl + " x " +
 				"JOIN " + tbl + " y ON x.id = y.id JOIN " + tbl + " z ON x.id = z.id ORDER BY x.id",
-			want: []row{{"xa": "12.75", "ya": "12.75", "za": "12.75"},
-				{"xa": "12.75", "ya": "12.75", "za": "12.75"},
-				{"xa": "12.75", "ya": "12.75", "za": "12.75"},
-				{"xa": "-0.01", "ya": "-0.01", "za": "-0.01"},
-				{"xa": "2.00", "ya": "2.00", "za": "2.00"},
-				{"xa": "0.00", "ya": "0.00", "za": "0.00"}},
+			cols: []string{"xa", "ya", "za"},
+			want: "9 rows: 12.75|12.75|12.75;12.75|12.75|12.75;12.75|12.75|12.75;-0.01|-0.01|-0.01;" +
+				"2.00|2.00|2.00;0.00|0.00|0.00;||;12.75|12.75|12.75;||;",
 		},
 
 		// --- #753: a COMPUTED column above a join OF JOINS.
@@ -149,9 +173,8 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 			sql: "SELECT p.w AS pw, q.w AS qw FROM (SELECT id, a + 1 AS w FROM " + tbl + ") p " +
 				"JOIN (SELECT id, a * 3 AS w FROM " + tbl + ") q ON p.id = q.id " +
 				"JOIN " + tbl + " y ON p.id = y.id ORDER BY p.id",
-			want: []row{{"pw": "13.75", "qw": "38.25"}, {"pw": "13.75", "qw": "38.25"},
-				{"pw": "13.75", "qw": "38.25"}, {"pw": "0.99", "qw": "-0.03"},
-				{"pw": "3.00", "qw": "6.00"}, {"pw": "1.00", "qw": "0.00"}},
+			cols: []string{"pw", "qw"},
+			want: "9 rows: 13.75|38.25;13.75|38.25;13.75|38.25;0.99|-0.03;3.00|6.00;1.00|0.00;|;13.75|38.25;|;",
 		},
 		{
 			name: "753/three-derived-arms-one-alias",
@@ -159,12 +182,9 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 				"(SELECT id, a + 1 AS w FROM " + tbl + ") p " +
 				"JOIN (SELECT id, a * 3 AS w FROM " + tbl + ") q ON p.id = q.id " +
 				"JOIN (SELECT id, a * 5 AS w FROM " + tbl + ") r ON p.id = r.id ORDER BY p.id",
-			want: []row{{"pw": "13.75", "qw": "38.25", "rw": "63.75"},
-				{"pw": "13.75", "qw": "38.25", "rw": "63.75"},
-				{"pw": "13.75", "qw": "38.25", "rw": "63.75"},
-				{"pw": "0.99", "qw": "-0.03", "rw": "-0.05"},
-				{"pw": "3.00", "qw": "6.00", "rw": "10.00"},
-				{"pw": "1.00", "qw": "0.00", "rw": "0.00"}},
+			cols: []string{"pw", "qw", "rw"},
+			want: "9 rows: 13.75|38.25|63.75;13.75|38.25|63.75;13.75|38.25|63.75;0.99|-0.03|-0.05;" +
+				"3.00|6.00|10.00;1.00|0.00|0.00;||;13.75|38.25|63.75;||;",
 		},
 		{
 			// Three WINDOW arms, which is how #753 was found. Three DISTINCT
@@ -175,12 +195,9 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p " +
 				"JOIN (SELECT id, MIN(a) OVER () AS w FROM " + tbl + ") q ON p.id = q.id " +
 				"JOIN (SELECT id, MAX(a) OVER () AS w FROM " + tbl + ") r ON p.id = r.id ORDER BY p.id",
-			want: []row{{"pw": "52.99", "qw": "-0.01", "rw": "12.75"},
-				{"pw": "52.99", "qw": "-0.01", "rw": "12.75"},
-				{"pw": "52.99", "qw": "-0.01", "rw": "12.75"},
-				{"pw": "52.99", "qw": "-0.01", "rw": "12.75"},
-				{"pw": "52.99", "qw": "-0.01", "rw": "12.75"},
-				{"pw": "52.99", "qw": "-0.01", "rw": "12.75"}},
+			cols: []string{"pw", "qw", "rw"},
+			want: "9 rows: 52.99|-0.01|12.75;52.99|-0.01|12.75;52.99|-0.01|12.75;52.99|-0.01|12.75;" +
+				"52.99|-0.01|12.75;52.99|-0.01|12.75;52.99|-0.01|12.75;52.99|-0.01|12.75;52.99|-0.01|12.75;",
 		},
 		{
 			// The control #753 names: three arms selecting a BASE column with
@@ -189,12 +206,9 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 			sql: "SELECT p.a AS pw, q.a AS qw, r.a AS rw FROM " +
 				"(SELECT id, a FROM " + tbl + ") p JOIN (SELECT id, a FROM " + tbl + ") q " +
 				"ON p.id = q.id JOIN (SELECT id, a FROM " + tbl + ") r ON p.id = r.id ORDER BY p.id",
-			want: []row{{"pw": "12.75", "qw": "12.75", "rw": "12.75"},
-				{"pw": "12.75", "qw": "12.75", "rw": "12.75"},
-				{"pw": "12.75", "qw": "12.75", "rw": "12.75"},
-				{"pw": "-0.01", "qw": "-0.01", "rw": "-0.01"},
-				{"pw": "2.00", "qw": "2.00", "rw": "2.00"},
-				{"pw": "0.00", "qw": "0.00", "rw": "0.00"}},
+			cols: []string{"pw", "qw", "rw"},
+			want: "9 rows: 12.75|12.75|12.75;12.75|12.75|12.75;12.75|12.75|12.75;-0.01|-0.01|-0.01;" +
+				"2.00|2.00|2.00;0.00|0.00|0.00;||;12.75|12.75|12.75;||;",
 		},
 
 		// --- #766: PROJECTING the column, whose COUNT twin was already right.
@@ -204,23 +218,24 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 				"(SELECT id, SUM(a) AS sv FROM " + tbl + " GROUP BY id) z) " +
 				"SELECT c.dv AS d FROM c JOIN " + tbl + " t ON c.id = t.id " +
 				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1 ORDER BY c.id",
-			want: []row{{"d": "25.50"}, {"d": "25.50"}, {"d": "25.50"}, {"d": "4.00"}, {"d": "25.50"}},
+			cols: []string{"d"},
+			want: "5 rows: 25.50;25.50;25.50;4.00;25.50;",
 		},
 		{
 			name: "766/two-arms-one-alias/projecting",
 			sql: "SELECT x.w AS xw FROM (SELECT id, a AS w FROM " + tbl + ") x " +
 				"JOIN (SELECT id, a * 3 AS w FROM " + tbl + ") z ON x.id = z.id " +
 				"JOIN " + tbl + " u ON x.id = u.id WHERE x.w > 1 ORDER BY x.id",
-			want: []row{{"xw": "12.75"}, {"xw": "12.75"}, {"xw": "12.75"},
-				{"xw": "2.00"}, {"xw": "12.75"}},
+			cols: []string{"xw"},
+			want: "5 rows: 12.75;12.75;12.75;2.00;12.75;",
 		},
 		{
 			name: "766/computed-over-window/projecting",
 			sql: "WITH c AS (SELECT id, SUM(f) OVER () + 0 AS dv FROM " + tbl + ") " +
 				"SELECT c.dv AS d FROM c JOIN " + tbl + " t ON c.id = t.id " +
 				"JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1 ORDER BY c.id",
-			want: []row{{"d": "138.75"}, {"d": "138.75"}, {"d": "138.75"},
-				{"d": "138.75"}, {"d": "138.75"}, {"d": "138.75"}},
+			cols: []string{"d"},
+			want: "9 rows: 138.75;138.75;138.75;138.75;138.75;138.75;138.75;138.75;138.75;",
 		},
 	} {
 		tc := tc
@@ -231,19 +246,9 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 					t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
 						arm.name, err, tc.sql)
 				}
-				if len(res.Rows) < len(tc.want) {
-					t.Fatalf("%s arm returned %d rows, PostgreSQL 17 returns at least %d\n  SQL: %s",
-						arm.name, len(res.Rows), len(tc.want), tc.sql)
-				}
-				for i, want := range tc.want {
-					for col, v := range want {
-						got := fmt.Sprintf("%v", res.Rows[i][col])
-						if got != v {
-							t.Errorf("%s arm row %d: %s = %q, PostgreSQL 17 answers %q — a "+
-								"derived arm's column was lost or took another arm's value "+
-								"above a join chain\n  SQL: %s", arm.name, i, col, got, v, tc.sql)
-						}
-					}
+				if got := dajDigest(res, tc.cols); got != tc.want {
+					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
 				}
 			}
 		})
@@ -265,36 +270,28 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 		sql := "SELECT x.w AS xw FROM (SELECT id, a AS w FROM " + tbl + ") x " +
 			"JOIN (SELECT id, b AS w FROM " + tbl + ") z ON x.id = z.id " +
 			"JOIN " + tbl + " u ON x.id = u.id WHERE x.w > 1 ORDER BY x.id"
-		// PostgreSQL 17: five rows, 12.75 12.75 12.75 2.00 12.75.
-		want := []string{"12.75", "12.75", "12.75", "2.00", "12.75"}
-		pinned := []string{"12.7500", "12.7500", "12.7500", "2.0000", "12.7500"}
+		const want = "5 rows: 12.75;12.75;12.75;2.00;12.75;"             // PostgreSQL 17
+		const pinned = "5 rows: 12.7500;12.7500;12.7500;2.0000;12.7500;" // TODO(#754)
 		for _, arm := range arms {
 			res, err := arm.run(sql)
 			if err != nil {
 				t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
 					arm.name, err, sql)
 			}
-			if len(res.Rows) != len(want) {
-				t.Fatalf("%s arm returned %d rows, PostgreSQL 17 returns %d\n  SQL: %s",
-					arm.name, len(res.Rows), len(want), sql)
-			}
+			got := dajDigest(res, []string{"xw"})
 			exp := want
 			if arm.name == "single" {
-				exp = pinned // TODO(#754)
+				exp = pinned
 			}
-			for i := range exp {
-				got := fmt.Sprintf("%v", res.Rows[i]["xw"])
-				if got == exp[i] {
-					continue
-				}
-				if arm.name == "single" && got == want[i] {
-					t.Errorf("the single arm now renders xw at its OWN scale (%q) — #754 is "+
-						"fixed, delete this pin and assert PostgreSQL's values on every arm"+
-						"\n  SQL: %s", got, sql)
-					break
-				}
-				t.Errorf("%s arm row %d: xw = %q, want %q\n  SQL: %s", arm.name, i, got, exp[i], sql)
+			if got == exp {
+				continue
 			}
+			if arm.name == "single" && got == want {
+				t.Errorf("the single arm now renders xw at its OWN scale — #754 is fixed, "+
+					"delete this pin and assert PostgreSQL's values on every arm\n  SQL: %s", sql)
+				continue
+			}
+			t.Errorf("%s arm answered\n  %s\nwant\n  %s\n  SQL: %s", arm.name, got, exp, sql)
 		}
 	})
 
@@ -337,4 +334,200 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A CTE with a COMPUTED body read from the LAST position of a join chain, on
+// three arms (#755 round 2, #762).
+//
+// This is the cell three spellings of one query disagreed about. A chained
+// link's own `Columns` narrows the JOINED stream, and the residual filter the
+// link carries runs AFTER it — so the build-side half of that filter has to be
+// in the list, and `probeSideChainRefs` deliberately drops it. For a COMPUTED
+// alias the pruner publishes `dv`, the re-spelled predicate reads `a`, the
+// link dropped `a`, and the filter was UNKNOWN on every row:
+//
+//	WITH c AS (SELECT id, a * 2 AS dv FROM decpair)
+//	SELECT COUNT(*) FROM decpair t JOIN decpair u ON t.id = u.id
+//	JOIN c ON c.id = t.id WHERE c.dv > 1
+//	-- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
+//
+// The RENAME body is correct because the pruner resolves `dv` back to `a` and
+// the list already had it; the DERIVED spelling is correct because the
+// predicate is pushed INTO the arm's scan, which a CTE's Project — a
+// materialization fence — declines. Both are carried below as controls.
+//
+// On 376b2cac the shuffled arm REFUSED these plans outright (`chained join 0:
+// build dep "exchange-repartition-7" output not found`, #755); the rewiring
+// that made them runnable is what exposed the carrier. That is why the probe
+// table below is a table: a COUNT cannot tell a dropped predicate from one
+// that is UNKNOWN, and IS NULL / IS NOT NULL / a disjunct with a base-table
+// term each answer differently under the two readings.
+func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	const tbl = dbpTable
+	// decpair: `a` is DECIMAL(9,2), NULL on ids 7 and 9. `a * 2 > 1` selects
+	// five of the nine rows and `IS NULL` selects the two NULL ones, so a
+	// predicate that is UNKNOWN on every row (0 and 9 respectively) is
+	// distinguishable from a dropped one.
+	cte := "WITH c AS (SELECT id, a * 2 AS dv FROM " + tbl + ") "
+	chain2 := tbl + " t JOIN " + tbl + " u ON t.id = u.id JOIN c ON c.id = t.id "
+	chain3 := tbl + " t JOIN " + tbl + " u ON t.id = u.id JOIN " + tbl +
+		" w2 ON t.id = w2.id JOIN c ON c.id = t.id "
+	chain4 := tbl + " t JOIN " + tbl + " u ON t.id = u.id JOIN " + tbl +
+		" w2 ON t.id = w2.id JOIN " + tbl + " w3 ON t.id = w3.id JOIN c ON c.id = t.id "
+
+	for _, tc := range []struct {
+		name, sql string
+		want      int64
+	}{
+		{"2join/qualified", cte + "SELECT COUNT(*) AS n FROM " + chain2 + "WHERE c.dv > 1", 5},
+		{"2join/bare", cte + "SELECT COUNT(*) AS n FROM " + chain2 + "WHERE dv > 1", 5},
+		{"3join/qualified", cte + "SELECT COUNT(*) AS n FROM " + chain3 + "WHERE c.dv > 1", 5},
+		{"4join/qualified", cte + "SELECT COUNT(*) AS n FROM " + chain4 + "WHERE c.dv > 1", 5},
+		// The reviewer's probe table: each of these answers a different
+		// number under "predicate applied" and "predicate UNKNOWN".
+		{"2join/is-null", cte + "SELECT COUNT(*) AS n FROM " + chain2 + "WHERE c.dv IS NULL", 2},
+		{"2join/is-not-null", cte + "SELECT COUNT(*) AS n FROM " + chain2 + "WHERE c.dv IS NOT NULL", 7},
+		{"2join/range", cte + "SELECT COUNT(*) AS n FROM " + chain2 + "WHERE c.dv < 1000000", 7},
+		// A disjunct with a BASE-TABLE term: under UNKNOWN only the
+		// base-table half survives and the answer is 1, not 6.
+		{"2join/or-disjunct", cte + "SELECT COUNT(*) AS n FROM " + chain2 +
+			"WHERE c.dv > 1 OR t.id = 4", 6},
+		// The BODY over each of the fixture's three numeric columns, because
+		// the re-spelled predicate names whichever source column the body
+		// reads and the carrier has to find it whatever its type.
+		{"2join/body-b", "WITH c AS (SELECT id, b * 2 AS dv FROM " + tbl + ") " +
+			"SELECT COUNT(*) AS n FROM " + chain2 + "WHERE c.dv > 1", 5},
+		{"2join/body-f", "WITH c AS (SELECT id, f * 2 AS dv FROM " + tbl + ") " +
+			"SELECT COUNT(*) AS n FROM " + chain2 + "WHERE c.dv > 1", 6},
+		// CONTROLS: the two spellings that were right throughout, which is
+		// what localised the cell to CTE x computed x last x shuffled.
+		{"control/2join/rename-body", "WITH c AS (SELECT id, a AS dv FROM " + tbl + ") " +
+			"SELECT COUNT(*) AS n FROM " + chain2 + "WHERE c.dv > 1", 5},
+		{"control/2join/derived-spelling", "SELECT COUNT(*) AS n FROM " + tbl + " t JOIN " +
+			tbl + " u ON t.id = u.id JOIN (SELECT id, a * 2 AS dv FROM " + tbl + ") c " +
+			"ON c.id = t.id WHERE c.dv > 1", 5},
+		{"control/2join/cte-first", cte + "SELECT COUNT(*) AS n FROM c JOIN " + tbl +
+			" t ON c.id = t.id JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1", 5},
+		{"control/2join/cte-build", cte + "SELECT COUNT(*) AS n FROM " + tbl +
+			" t JOIN c ON c.id = t.id JOIN " + tbl + " u ON c.id = u.id WHERE c.dv > 1", 5},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL answers %d: %v\n  SQL: %s",
+						arm.name, tc.want, err, tc.sql)
+				}
+				got := ctrCounts(t, res)
+				if len(got) != 1 || got[0] != tc.want {
+					t.Errorf("%s arm answered %v, PostgreSQL 17 answers %d — a chained link "+
+						"dropped the column its own residual filter reads\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+
+	// The PROJECTING form, which was correct throughout because the
+	// projection forces the value to be carried, and the AGGREGATE form,
+	// which reads it a third way.
+	t.Run("2join/projecting", func(t *testing.T) {
+		sql := cte + "SELECT c.id AS cid, c.dv AS dv FROM " + chain2 +
+			"WHERE c.dv > 1 ORDER BY c.id"
+		const want = "5 rows: 1|25.50;2|25.50;3|25.50;5|4.00;8|25.50;"
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			if got := dajDigest(res, []string{"cid", "dv"}); got != want {
+				t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+					arm.name, got, want, sql)
+			}
+		}
+	})
+	t.Run("2join/min-and-count", func(t *testing.T) {
+		// The FLOAT body on purpose. Over the DECIMAL one, MIN/SUM of a
+		// derived alias declares FLOAT64 for a task whose partition is empty
+		// and DECIMAL for one that is not, and the shuffle read refuses the
+		// two files — `column "m" is DECIMAL … but FLOAT64 in an earlier file
+		// of the same stage`. That reproduces on 376b2cac for the CTE-FIRST
+		// and the ONE-JOIN spellings, which this change does not touch; it is
+		// an aggregate-output typing residual and not this carrier.
+		sql := "WITH c AS (SELECT id, f * 2 AS dv FROM " + tbl + ") " +
+			"SELECT MIN(c.dv) AS m, COUNT(*) AS n FROM " + chain2 + "WHERE c.dv > 1"
+		const want = "1 rows: 3|6;"
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			if got := dajDigest(res, []string{"m", "n"}); got != want {
+				t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+					arm.name, got, want, sql)
+			}
+		}
+	})
+
+	// GROUP BY on the QUALIFIED derived alias, which both DAG arms collapse
+	// into ONE NULL group. Identical on 376b2cac, identical at ONE join and
+	// in the DERIVED spelling, and correct in the BARE spelling — so it is
+	// the qualified GROUP-BY key's own resolution and not the chain. Pinned
+	// rather than described, so the day it agrees this gate FAILS.
+	t.Run("2join/group-by-qualified-alias", func(t *testing.T) {
+		sql := cte + "SELECT c.dv AS dv, COUNT(*) AS n FROM " + chain2 + "GROUP BY c.dv ORDER BY c.dv"
+		const want = "5 rows: -0.02|1;0.00|1;4.00|1;25.50|4;|2;" // PostgreSQL 17
+		const pinned = "1 rows: |9;"                             // TODO: unfiled residual
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			got := dajDigest(res, []string{"dv", "n"})
+			if arm.name == "single" {
+				if got != want {
+					t.Errorf("the single arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+						got, want, sql)
+				}
+				continue
+			}
+			switch got {
+			case want:
+				t.Errorf("the %s arm now groups by the qualified derived alias — the residual "+
+					"is fixed, delete this pin and assert PostgreSQL's rows on every arm"+
+					"\n  SQL: %s", arm.name, sql)
+			case pinned:
+				t.Logf("known residual, NOT gated: the %s arm collapses GROUP BY c.dv into one "+
+					"NULL group (identical on 376b2cac, at one join, and in the derived "+
+					"spelling; the BARE spelling is correct on every arm)", arm.name)
+			default:
+				t.Errorf("the %s arm answered\n  %s\nwhich is neither the pinned\n  %s\n"+
+					"nor PostgreSQL's\n  %s\n  SQL: %s", arm.name, got, pinned, want, sql)
+			}
+		}
+	})
+	// …and the BARE spelling beside it, which is correct on every arm and is
+	// what says the qualifier is the whole of that residual.
+	t.Run("2join/group-by-bare-alias", func(t *testing.T) {
+		sql := cte + "SELECT dv, COUNT(*) AS n FROM " + chain2 + "GROUP BY dv ORDER BY dv"
+		const want = "5 rows: -0.02|1;0.00|1;4.00|1;25.50|4;|2;"
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			if got := dajDigest(res, []string{"dv", "n"}); got != want {
+				t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+					arm.name, got, want, sql)
+			}
+		}
+	})
 }

@@ -82,6 +82,15 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		// to three Q07 manifests.
 		ownRefs := exprColumnRefs(s.FilterExprs, projectExprTexts(s.ProjectExprs))
 		chainRefs := probeSideChainRefs(stages, idx, s)
+		// A ROW FIELD PATH names no column, so carrying `c_row.b` carries
+		// nothing: what the fragment reads is the CONTAINER, and the
+		// expression compiler resolves the field out of it (ADR-0022). The
+		// join's OutputFilter is built from NeededColumns, which spells the
+		// dotted form, so the container was narrowed away and every field
+		// came back NULL. Expanded here, where the subtree's produced set is
+		// already at hand, and only when the subtree really produces the
+		// qualifier — an ordinary `x.id` has no column called `x` and never
+		// reaches this.
 		// A join stage's OWN residual filter and projection are evaluated
 		// against its OUTPUT view, which this same Columns list narrows — so
 		// they belong in it whatever the input carries. That is the broadcast
@@ -90,15 +99,50 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		if len(ownRefs) > 0 && len(s.Columns) > 0 {
 			s.Columns = unionColumnNames(s.Columns, ownRefs)
 		}
-		if len(chainRefs) > 0 {
-			if len(s.Columns) > 0 {
-				s.Columns = unionColumnNames(s.Columns, chainRefs)
+		if len(chainRefs) > 0 && len(s.Columns) > 0 {
+			s.Columns = unionColumnNames(s.Columns, chainRefs)
+		}
+		// A CHAINED LINK'S OWN `Columns` narrows the JOINED stream, which
+		// carries BOTH sides — so the build-side half of its residual filter
+		// belongs in it too, and that is the half `probeSideChainRefs`
+		// deliberately drops.
+		//
+		// The fragment runs primary probe (OutputFilter = s.Columns) → link 0
+		// (OutputFilter = cj[0].Columns) → OpFilter(cj[0].FilterExprs) →
+		// link 1 → … → PostFilter(s.FilterExprs). So everything evaluated AT
+		// OR AFTER link k has to survive cj[k].Columns, wherever its value
+		// came from. Excluding the build side was right for `s.Columns` — the
+		// build enters below it and is unaffected by what that list drops —
+		// and wrong here:
+		//
+		//	WITH c AS (SELECT id, a * 2 AS dv FROM t)
+		//	SELECT COUNT(*) FROM t x JOIN t y ON x.id = y.id JOIN c ON c.id = x.id
+		//	WHERE c.dv > 1
+		//	-- PG 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
+		//
+		// `cj[0].Columns` is the absorbed join's NeededColumns, which for a
+		// COMPUTED alias publishes `dv` and not the `a` the re-spelled
+		// predicate reads; the link dropped `a` and then filtered on it,
+		// UNKNOWN on every row. The RENAME spelling of the same query is
+		// correct because the pruner resolves `dv` back to `a` and the list
+		// already had it, and the DERIVED spelling is correct because the
+		// predicate is pushed INTO the arm's scan — a CTE's Project is a
+		// materialization fence and declines that push. Three spellings of
+		// one query, one of them silently wrong: #755's un-pinned cte-last
+		// entry and #762's "the CTE anywhere but first".
+		for k := range s.ChainedJoins {
+			if len(s.ChainedJoins[k].Columns) == 0 {
+				continue // empty already means "carry everything"
 			}
-			for k := range s.ChainedJoins {
-				if len(s.ChainedJoins[k].Columns) > 0 {
-					s.ChainedJoins[k].Columns =
-						unionColumnNames(s.ChainedJoins[k].Columns, chainRefs)
-				}
+			later := append([]string(nil), chainRefs...)
+			for j := k; j < len(s.ChainedJoins); j++ {
+				later = append(later, exprColumnRefs(s.ChainedJoins[j].FilterExprs)...)
+			}
+			// …and the stage's own PostFilter and projection, which run after
+			// every link and read the stream each link's list has narrowed.
+			later = append(later, ownRefs...)
+			if len(later) > 0 {
+				s.ChainedJoins[k].Columns = unionColumnNames(s.ChainedJoins[k].Columns, later)
 			}
 		}
 		refs := append(append([]string(nil), ownRefs...), chainRefs...)
