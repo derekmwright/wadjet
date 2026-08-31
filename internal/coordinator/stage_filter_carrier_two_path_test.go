@@ -769,18 +769,17 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 				}
 			}
 		}
-		// The half that is still open, and NOT the window's doing:
-		// ARITHMETIC over COALESCE's output is float on both paths, so
-		// `SUM(COALESCE(c_dec, 0) * 2)` answers 20.002000000000002 where
-		// PostgreSQL answers 20.0020. The windowed spelling agrees with the
-		// GROUPED one exactly, which is the evidence that the window
-		// materialization is not the defect — the same argument the sibling
-		// entry above makes for the plain `SUM(c_dec * 2) OVER ()`, which IS
-		// exact.
+		// ARITHMETIC over COALESCE's output was float on both paths until
+		// #724's sibling commit, so `SUM(COALESCE(c_dec, 0) * 2)` answered
+		// 20.002000000000002 where PostgreSQL answers 20.0020. The runtime
+		// knew the COALESCE produced a DECIMAL (expr.DecimalResultOf) and the
+		// PLAN did not (physical.decimalArithOperand had no arm for a choice),
+		// so the multiplication was declared and run in float64.
 		//
-		// TODO(#555): both spellings become 20.0020 when the choice
-		// constructs carry their DECLARED type into the arithmetic. Assert
-		// it here and delete this pin.
+		// Both spellings are exact now. Asserting the WINDOWED one beside the
+		// GROUPED one is what keeps the two questions one question: they were
+		// equal while both were wrong, which is how the window
+		// materialization was exonerated in the first place.
 		const wantExact = "20.0020"
 		win := fmt.Sprintf(
 			`SELECT id, SUM(COALESCE(c_dec, 0) * 2) OVER () AS s FROM %s WHERE id < 5 ORDER BY id`, tbl)
@@ -789,13 +788,12 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		for _, arm := range sfcArms(ctx, single, coord) {
 			w := sfcRun(t, arm, win)
 			g := sfcRun(t, arm, grouped)
-			if len(g.Rows) > 0 && fmt.Sprint(g.Rows[0]["s"]) == wantExact {
-				t.Fatalf("%s arm now answers %s exactly for %q — the arithmetic over COALESCE "+
-					"carries its declared type. Assert it on both spellings and delete this pin.",
-					arm.name, wantExact, grouped)
-			}
 			if len(w.Rows) == 0 || len(g.Rows) == 0 {
 				t.Fatalf("%s arm returned no rows", arm.name)
+			}
+			if got := fmt.Sprint(g.Rows[0]["s"]); got != wantExact {
+				t.Errorf("%s arm answered %q for %q, want %s exactly — PostgreSQL's numeric "+
+					"is exact and so is wadjet's", arm.name, got, grouped, wantExact)
 			}
 			if fmt.Sprint(w.Rows[0]["s"]) != fmt.Sprint(g.Rows[0]["s"]) {
 				t.Errorf("%s arm: the windowed spelling answered %v and the grouped one %v; "+
