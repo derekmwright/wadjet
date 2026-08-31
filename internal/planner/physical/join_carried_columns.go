@@ -58,7 +58,49 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		if !isJoinStage(s.Type) {
 			continue
 		}
-		refs := joinEvaluatedColumnRefs(s)
+		// Two classes, evaluated in two different places.
+		//
+		// A stage's OWN FilterExprs/ProjectExprs run against its INPUT, so a
+		// name the input already supplies needs nothing done.
+		//
+		// A CHAINED join's residual filter runs INSIDE this fragment, after
+		// the primary probe, against a stream this stage's own OutputFilter
+		// has already narrowed. So its columns have to be in that list
+		// whatever the input carries — which is the whole of the shape that
+		// answered zero:
+		//
+		//	WITH c AS (SELECT id, a * 2 AS dv FROM t)
+		//	SELECT COUNT(*) FROM c JOIN t x ON c.id = x.id JOIN t y ON c.id = y.id
+		//	WHERE c.dv > 1
+		//	-- PG 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
+		//
+		// A join CONDITION is deliberately NOT in either set: it is resolved
+		// by the join's key machinery from both sides, never read off the
+		// narrowed probe stream, and treating it as payload is what added
+		// `s_nationkey` to Q05's customer/orders exchange and `n1.n_name`
+		// to three Q07 manifests.
+		ownRefs := exprColumnRefs(s.FilterExprs, projectExprTexts(s.ProjectExprs))
+		chainRefs := probeSideChainRefs(stages, idx, s)
+		// A join stage's OWN residual filter and projection are evaluated
+		// against its OUTPUT view, which this same Columns list narrows — so
+		// they belong in it whatever the input carries. That is the broadcast
+		// half of the shape below: `join-4 FILTER=[(a * 2) > 1]` over
+		// `COLS=[dv id ...]` with no `a`, on a probe that plainly has one.
+		if len(ownRefs) > 0 && len(s.Columns) > 0 {
+			s.Columns = unionColumnNames(s.Columns, ownRefs)
+		}
+		if len(chainRefs) > 0 {
+			if len(s.Columns) > 0 {
+				s.Columns = unionColumnNames(s.Columns, chainRefs)
+			}
+			for k := range s.ChainedJoins {
+				if len(s.ChainedJoins[k].Columns) > 0 {
+					s.ChainedJoins[k].Columns =
+						unionColumnNames(s.ChainedJoins[k].Columns, chainRefs)
+				}
+			}
+		}
+		refs := append(append([]string(nil), ownRefs...), chainRefs...)
 		if len(refs) == 0 {
 			continue
 		}
@@ -90,7 +132,26 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 // manifest, and neither can invent a column (ADR-0025). A producer's list is
 // its read set and is left alone — widening THAT would change what is scanned.
 // An empty list already means "carry everything" and stays empty.
+//
+// And a ref is pushed into a subtree ONLY IF THAT SUBTREE CAN SUPPLY IT.
+// Without that test the walk adds every referenced name to every intermediate
+// stage, which is a real cost paid on every row of every task: the first cut
+// of this pass widened 21 TPC-H stage lines across six queries — `s_nationkey`
+// onto Q05's customer/orders branch, which has no supplier scan under it;
+// `n1.n_name` and `n2.n_name` onto three Q07 exchanges, two STRING columns
+// crossing the network twice more; `__scalar_0` onto four Q02 stages, a
+// scalar-subquery placeholder no stage produces at all. None of those queries
+// was ever wrong — the consumer already had a path to the value — so every one
+// of those columns was a second carry of something already carried.
+//
+// Asking whether the subtree PRODUCES the name is the narrow question that
+// keeps the chain shapes working and leaves TPC-H alone: the CTE's `a` really
+// is produced by the scan under that branch, and `s_nationkey` really is not
+// produced under Q05's join-4. It is the same weak "does anything here compute
+// this" test dropUnbackedJoinColumns and assertJoinFiltersAreBacked already
+// use, asked per subtree instead of per plan.
 func widenNarrowingStagesBelow(stages []Stage, idx map[string]int, root int, refs []string) {
+	produced := make(map[int]map[string]string, len(stages))
 	seen := make(map[int]bool, 8)
 	queue := []int{root}
 	for len(queue) > 0 {
@@ -109,14 +170,18 @@ func widenNarrowingStagesBelow(stages []Stage, idx map[string]int, root int, ref
 		if !widens {
 			continue // a producer: its list is a read set, not a filter
 		}
+		keep := refsSubtreeCanSupply(stages, idx, i, refs, produced)
+		if len(keep) == 0 {
+			continue // nothing below here supplies any of them
+		}
 		if len(s.Columns) > 0 {
-			s.Columns = unionColumnNames(s.Columns, refs)
+			s.Columns = unionColumnNames(s.Columns, keep)
 		}
 		// A chained join's OutputFilter is its own list, applied inside the
 		// same fragment to the stream the chained probe then reads.
 		for k := range s.ChainedJoins {
 			if len(s.ChainedJoins[k].Columns) > 0 {
-				s.ChainedJoins[k].Columns = unionColumnNames(s.ChainedJoins[k].Columns, refs)
+				s.ChainedJoins[k].Columns = unionColumnNames(s.ChainedJoins[k].Columns, keep)
 			}
 		}
 		for _, dep := range s.Dependencies {
@@ -125,6 +190,70 @@ func widenNarrowingStagesBelow(stages []Stage, idx map[string]int, root int, ref
 			}
 		}
 	}
+}
+
+// refsSubtreeCanSupply filters refs to the ones some stage at or below i
+// really computes.
+func refsSubtreeCanSupply(stages []Stage, idx map[string]int, i int, refs []string,
+	memo map[int]map[string]string) []string {
+	avail := subtreeProducedColumns(stages, idx, i, memo)
+	if len(avail) == 0 {
+		return nil
+	}
+	var keep []string
+	for _, r := range refs {
+		if columnResolves(&plansql.ColRef{Column: r}, avail) {
+			keep = append(keep, r)
+		}
+	}
+	return keep
+}
+
+// subtreeProducedColumns is every column name any stage at or below i emits,
+// memoized per root. Movers and joins are included here — unlike in
+// dropUnbackedJoinColumns, the question is not "is this name trustworthy" but
+// "could a value by this name reach the top of this subtree at all".
+func subtreeProducedColumns(stages []Stage, idx map[string]int, i int,
+	memo map[int]map[string]string) map[string]string {
+	if m, ok := memo[i]; ok {
+		return m
+	}
+	out := map[string]string{}
+	memo[i] = out // break cycles; a shared subplan can be reached twice
+	var walk func(int, int)
+	walk = func(j, depth int) {
+		if depth > passThroughDepth*4 {
+			return
+		}
+		s := &stages[j]
+		// stageEmittedColumns and the computed fields only. A stage's
+		// Columns is a FILTER or a payload manifest and can NEVER invent a
+		// column (ADR-0025) — reading it as evidence of production is the
+		// very mistake dropUnbackedJoinColumns exists to undo, and here it
+		// let `s_nationkey` look available under a lineitem-only branch of
+		// Q05, because the two sides of one shuffle share a single manifest.
+		for k, v := range stageEmittedColumns(s) {
+			out[k] = v
+		}
+		for _, w := range s.WindowCols {
+			if w.OutputCol != "" {
+				out[strings.ToLower(w.OutputCol)] = w.OutputCol
+			}
+		}
+		for _, p := range s.ProjectExprs {
+			if p.Name != "" {
+				out[strings.ToLower(p.Name)] = p.Name
+			}
+		}
+		for _, dep := range s.Dependencies {
+			if k, ok := idx[dep]; ok {
+				walk(k, depth+1)
+			}
+		}
+	}
+	walk(i, 0)
+	memo[i] = out
+	return out
 }
 
 // ensureJoinCarriesGatherOutputs is the same rule for the one consumer that
@@ -207,71 +336,119 @@ func ensureJoinCarriesGatherOutputs(stages []Stage) {
 	}
 }
 
-// joinEvaluatedColumnRefs lists the column names a join stage's own
-// FilterExprs and ProjectExprs read.
+// probeSideChainRefs is the columns a chained join's residual filter reads
+// FROM THE PROBE STREAM — the ones this stage's own OutputFilter can drop
+// before the chained probe ever runs.
+//
+// A chained link joins a new build side in, and its filter usually reads
+// columns from BOTH. The build side's arrive with that link's own input and
+// are unaffected by anything this stage narrows; only the probe side's have to
+// survive `s.Columns`. Treating all of them as probe-side put `s_nationkey`
+// on Q05's join and `n1.n_name` on Q07's, on queries that were already right.
+func probeSideChainRefs(stages []Stage, idx map[string]int, s *Stage) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, cj := range s.ChainedJoins {
+		refs := exprColumnRefs(cj.FilterExprs)
+		if len(refs) == 0 {
+			continue
+		}
+		// The build dep is usually an EXCHANGE, whose own emitted set is not
+		// modelled — so the question has to be asked of its subtree, or a
+		// mover reads as supplying nothing and every build-side reference
+		// looks probe-side. That is what kept Q07's two qualified nation
+		// names on join-12.
+		// What the build STREAM carries, which is its declared manifest when
+		// it has one — not what its TABLE has. A self-join makes the two
+		// disagree completely: the chained build of `c JOIN t x JOIN t y` is
+		// the same relation as the probe, so every column resolves in its
+		// subtree while its payload list carries only the join key. An empty
+		// manifest is the one case that really does mean "everything", and
+		// only then is the subtree the right question (a replicated build,
+		// which is how Q07 reaches its nation names).
+		build := map[string]string{}
+		if j, ok := idx[cj.BuildDepStage]; ok {
+			d := &stages[j]
+			if len(d.Columns) > 0 {
+				for _, c := range d.Columns {
+					build[strings.ToLower(c)] = c
+				}
+			} else {
+				memo := map[int]map[string]string{}
+				build = subtreeProducedColumns(stages, idx, j, memo)
+			}
+		}
+		for _, r := range refs {
+			if len(build) > 0 && columnResolves(&plansql.ColRef{Column: r}, build) {
+				continue // arrives with the chained link's own build input
+			}
+			if lc := strings.ToLower(r); !seen[lc] {
+				seen[lc] = true
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// exprColumnRefs lists the column names a set of expression TEXTS reads.
 //
 // A name the FRAGMENT computes for itself is not one the payload owes: a
 // materialized window key is written by the window stage below, and a scalar
 // placeholder is substituted at dispatch. Both are skipped for the same
 // reason columnResolves skips them.
-func joinEvaluatedColumnRefs(s *Stage) []string {
+func exprColumnRefs(groups ...[]string) []string {
 	var out []string
 	seen := map[string]bool{}
-	add := func(text string) {
-		if strings.TrimSpace(text) == "" {
-			return
-		}
-		ast, err := plansql.ParseExpression(text)
-		if err != nil {
-			return
-		}
-		for _, ref := range collectColRefs(ast) {
-			if strings.HasPrefix(ref.Column, windowKeyColPrefix) || strings.HasPrefix(ref.Column, ":") {
+	for _, g := range groups {
+		for _, text := range g {
+			if strings.TrimSpace(text) == "" {
 				continue
 			}
-			name := ref.String()
-			if lc := strings.ToLower(name); !seen[lc] {
-				seen[lc] = true
-				out = append(out, name)
+			ast, err := plansql.ParseExpression(text)
+			if err != nil {
+				continue
+			}
+			for _, ref := range collectColRefs(ast) {
+				if strings.HasPrefix(ref.Column, windowKeyColPrefix) ||
+					strings.HasPrefix(ref.Column, ":") {
+					continue
+				}
+				name := ref.String()
+				if lc := strings.ToLower(name); !seen[lc] {
+					seen[lc] = true
+					out = append(out, name)
+				}
 			}
 		}
 	}
-	for _, f := range s.FilterExprs {
-		add(f)
+	return out
+}
+
+// projectExprTexts is the expression half of a stage's ProjectExprs.
+func projectExprTexts(specs []ProjectExprSpec) []string {
+	out := make([]string, 0, len(specs))
+	for _, p := range specs {
+		out = append(out, p.Expr)
 	}
-	for _, p := range s.ProjectExprs {
-		add(p.Expr)
-	}
-	// A join absorbed into this stage evaluates its own residual filter
-	// inside this fragment, so its references are this stage's payload too.
-	// `fuseStageChains` moves a downstream join's FilterExprs onto the
-	// ChainedJoinSpec rather than onto the stage, so reading only
-	// s.FilterExprs misses them entirely — and the absorbed filter is often
-	// the RE-SPELLED one, naming a source column (`(a * 2) > 1`) that the
-	// OutputFilter narrowed away two links earlier:
-	//
-	//	WITH c AS (SELECT id, a * 2 AS dv FROM t)
-	//	SELECT COUNT(*) FROM c JOIN t x ON c.id = x.id JOIN t y ON c.id = y.id
-	//	WHERE c.dv > 1
-	//	-- PostgreSQL 5 · single 5 · DAG broadcast 5 · DAG SHUFFLED 0
-	//
-	// The shuffled lowering is the one that chains, which is why only that
-	// arm answered zero, and it is type-independent — the same shape over a
-	// BIGINT column answers 0 the same way.
+	return out
+}
+
+// chainedFilterTexts is every RESIDUAL filter a chained or fused join runs
+// inside this stage's fragment. Join CONDITIONS are excluded — see the note in
+// ensureJoinCarriesEvaluatedColumns.
+func chainedFilterTexts(s *Stage) []string {
+	var out []string
 	for _, cj := range s.ChainedJoins {
-		for _, f := range cj.FilterExprs {
-			add(f)
-		}
-		for _, f := range cj.BuildFilterExprs {
-			add(f)
-		}
-		add(cj.JoinFilter)
+		out = append(out, cj.FilterExprs...)
+		// NOT BuildFilterExprs: those filter the chained join's BUILD input
+		// before its hash table is built, so their columns come from the
+		// build dependency and never from this stage's narrowed probe
+		// output. Treating them as probe payload put `__subsume_f0` on
+		// Q21's join and `s_nationkey` on Q05's.
 	}
 	for _, fj := range s.FusedJoins {
-		for _, f := range fj.FilterExprs {
-			add(f)
-		}
-		add(fj.JoinFilter)
+		out = append(out, fj.FilterExprs...)
 	}
 	return out
 }
