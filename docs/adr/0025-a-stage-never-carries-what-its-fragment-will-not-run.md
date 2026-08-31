@@ -988,8 +988,22 @@ query PostgreSQL answers, or — when ANOTHER arm happens to publish the same
 name — resolves to it and answers silently. An 811-shape sweep over the
 `decpair` fixture (join kind × CTE vs derived × arm position × chain length
 1–3 × consumer × body kind × broadcast/shuffle, every value taken from a live
-PostgreSQL 17) found 430 divergent (shape, arm) rows on `376b2cac` and 52
-after; the rest are named at the end of this section.
+PostgreSQL 17) found 430 divergent (shape, arm) rows on `376b2cac`.
+
+That sweep's harness is not in the tree, and its residual figure was restated
+from memory each round — 52, then 48 — while the corpus behind the number did
+not move with it. So the figure this ADR carries is the one measured LAST, on
+a corpus that IS on disk and reproducible: 219 shapes on three arms (657
+arm-rows), being the six review corpora plus the round-4 families, 189 of them
+over `decpair` with a live PostgreSQL 17 answer. Against `376b2cac`: **0
+regressions, 182 arm-rows fixed, 36 still divergent** — 27 of those byte-
+identical to `376b2cac` and 9 loud on both trees — and exactly ONE arm-row goes
+from a loud refusal to a wrong answer, which is the GROUP-BY residual named at
+the end of this section. The other 30 shapes (90 arm-rows) read
+`typemx_nested`, which the `--locale=C` PostgreSQL fixture cannot hold, so
+they are compared base→tip instead: 44 cells changed and every one of them
+base-wrong or base-loud → tip-right, against the field values the join-free
+spelling of the same query returns.
 
 **Five sites, each a specific thing a pass was getting wrong.**
 
@@ -1142,14 +1156,37 @@ is what says the repair is scoped and not merely reordered), both arms
 projected at once, and the single-arm control; the two chain gates lose the
 `shuffledRefuses` (#755), `refusesLoudly` (#763) and `pinDAG` (#762) pins and
 assert PostgreSQL's values instead; `postgresJoinArmCases` asks the same
-questions of a live server on the single-process arm. Reverting the source
-changes and re-running fails 47 LEAF subtests across eight coordinator tests
-plus `physical.TestElideCoPartitionedExchangeRewiresAUnionArm`,
-which is the "every gate must be able to fail" check made rather than assumed.
-(Earlier counts of 22 and 37 were for smaller gate sets; the 22 was also wrong
-twice over — the leaf figure was 20 and the two extra lines were the parent
-`--- FAIL`s of two table-driven tests. Counted with
-`grep -c '^    --- FAIL'`.)
+questions of a live server on the single-process arm.
+`TestBothArmsPublishOneAliasProjectBothThreeArms` gains the CTE-arm-filter
+family (the qualified and bare predicate spellings × the CTE first/middle/last
+× a computed and a plain-rename body × chains of 3 and 4 × the build-arm-only
+projection × a LIMIT wrapper, with the derived-table spelling and a
+no-collision `WITH k` beside them as the controls that bound it); and
+`TestACTEsQualifiedColumnKeepsItsOwnArmThreeArms` is the sibling-binding cell
+with each column projected alone and a `distinct-names` control.
+
+**The mutation count, re-derived rather than restated.** Every source file the
+arc touches — thirteen of them, `internal/coordinator/coordinator.go`,
+`internal/engine/exec/{aggregate,join}.go`, `internal/engine/expr/expr.go`,
+`internal/planner/logical/optimizer.go` and eight under
+`internal/planner/physical/` — reverted to its `376b2cac` content with this
+tip's TESTS in place: **70 leaf subtests fail, across ten coordinator tests
+plus `physical.TestElideCoPartitionedExchangeRewiresAUnionArm`** (which fails
+at its top level and has no subtests). Zero fail on the tip. Counted with
+`grep -c '^    --- FAIL'` on `go test -v`; per test:
+`BothArmsPublishOneAlias…` 15, `CTEChainPositionCarriesItsFilter…` 13,
+`DerivedArmsAboveAJoinChain…` 8, `ACTEsQualifiedColumnKeepsItsOwnArm…` 8,
+`SiblingWindowSubqueriesUnderAJoin…` 6, `RowFieldPathSurvivesAJoin…` 6,
+`QualifierCollidingWithAColumnNameResolves` 5,
+`CTEComputedColumnAboveAJoinChain…` 5, `FilterQualifiedToOneJoinArmTwoPath` 2,
+`CTEFilterAboveAJoinChain…` 2. `TestTPCHStageDumpGolden` PASSES in that tree,
+which is the byte-identical claim above checked from the other direction.
+(Earlier figures in this ADR — 22, 37, 42, 46, 47 — were each true of the gate
+set of their own round and were restated as if they were the current one; 47
+was also short by two, the review's re-derivation being 49 across nine because
+the `OrAcrossArms` pin entries belong in the count. Each fix ROUND adds gates,
+so the number is only meaningful with the tree and the gate set it was measured
+on, both of which this paragraph names.)
 
 **What a same-alias fixture must not also be about.** Every same-alias pair in
 these gates publishes at DECIMAL scale 2 on purpose. A cross-SCALE pair
@@ -1404,9 +1441,9 @@ is called. `TestTPCHStageDumpGolden` is byte-identical: no TPC-H stage's shape
 moves, and Q15 — the one TPC-H query with a CTE, joined on its build side —
 answers as it did.
 
-**What is NOT closed, measured rather than assumed.** Three residuals survive
-the sweep, each identical on `376b2cac` and on this tip, and none of them this
-mechanism:
+**What is NOT closed, measured rather than assumed.** Six residuals survive the
+sweep, and none of them is this mechanism. Each is stated with where it
+reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
 
 - a SIBLING nested inside a sibling answers the OUTER sibling's window on the
   single-process path (#751). Both DAG arms are right, so the wrong side is the
@@ -1414,12 +1451,18 @@ mechanism:
   `joinArmAlias` above closed #753's CTE face and left this one. Pinned in
   `TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues`;
 - two arms publishing one alias make the single-process path render one at the
-  other's DECIMAL scale, and a DECIMAL/FLOAT pair under one alias refuses
-  outright (#754);
-- `GROUP BY` on a QUALIFIED derived alias collapses to one NULL group on both
-  DAG arms — at ONE join, in the DERIVED spelling, and on `376b2cac`; the BARE
-  spelling is correct everywhere, so it is the qualified group KEY's own
-  resolution. Pinned in `TestCTEChainPositionCarriesItsFilterThreeArms` so the
+  other's DECIMAL scale (#754). Right digits, wrong typmod: `x.w` at scale 2
+  beside `y.w` at scale 4 prints `12.7500`. A DECIMAL/FLOAT pair under one
+  alias does NOT refuse — an earlier statement of this said it did, measured
+  against a shape that no longer reaches the refusal — it renders the FLOAT at
+  the DECIMAL's scale on the single arm (`1.50` for `1.5`) and is right on both
+  DAG arms. Pinned per entry in the two `…OneAlias…` gates;
+- `GROUP BY` on a QUALIFIED derived or CTE alias collapses to one NULL group on
+  both DAG arms. The scope is WIDER than an earlier statement of it: not only
+  ONE join in the DERIVED spelling, but also the CTE spelling over a three-join
+  chain, and identically on `376b2cac` on the arms where that shape runs. The
+  BARE spelling is correct everywhere, so it is the qualified group KEY's own
+  resolution. Pinned in `TestCTEChainPositionCarriesItsFilterThreeArms`, so the
   day it agrees the gate fails;
 - `MIN`/`SUM` of a derived DECIMAL alias on the shuffled arm refuses the
   shuffle read — `column "m" is DECIMAL … but FLOAT64 in an earlier file of the
@@ -1430,8 +1473,27 @@ mechanism:
   it because their filter stopped emptying every task. The gate carries the
   FLOAT body for that probe and names the DECIMAL one here;
 - an OUTER join whose `COUNT(*)` reads `__rowcount_only__` above a derived arm
-  with a computed column fails at the scan. Pre-existing on `376b2cac` and
-  belonging to the row-count sentinel rather than to name resolution.
+  with a computed column fails at the scan, on both DAG arms, identically on
+  `376b2cac`. It belongs to the row-count sentinel rather than to name
+  resolution;
+- `DISTINCT` over a join whose two arms publish one alias drops the BUILD arm's
+  column on both DAG arms — two rows with a NULL where PostgreSQL and the
+  single-process path have five (#770). Identical on `376b2cac` and here; the
+  UNION spelling of the same dedup takes a different path, which is where the
+  localization starts.
+
+**The loud→silent census on this tip is ONE arm-row, and it is the GROUP-BY
+residual above.** That is the number this section has to carry, because a
+refusal turning into a wrong answer is the one way this arc could make a
+deployment worse than `376b2cac` — and the round-3 tip's was EIGHTEEN, which no
+gate in the tree measured and the round-3 review found by measuring it: fifteen
+of the CTE-arm capture, two of the sibling-arm binding, and this one. The
+remaining cell is `WITH c AS (…) SELECT c.dv, COUNT(*) … GROUP BY c.dv` over a
+three-join chain, whose shuffled lowering `376b2cac` refused at dispatch and
+which now collapses to the same one NULL group the broadcast lowering has
+always answered. It is the qualified group KEY, it is pinned, and both DAG arms
+now agree about it rather than one of them being loud by accident of a
+different defect.
 
 ## Consequences
 
