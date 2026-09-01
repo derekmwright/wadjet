@@ -2613,25 +2613,95 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 				}
 				return less + 1
 			}
-			sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n, `+
-				`RANK() OVER (ORDER BY COUNT(*)) AS rk FROM %s GROUP BY g + 1 ORDER BY k`, tbl)
-			for _, arm := range sfcArms(ctx, single, coord) {
-				res := sfcRun(t, arm, sql)
-				if len(res.Rows) != wantKeys+1 {
-					t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
-						arm.name, len(res.Rows), wantKeys+1, sql)
-					continue
-				}
-				for i, r := range res.Rows {
-					n, _ := numAsInt(r["n"])
-					got, ok := numAsInt(r["rk"])
-					if want := rankOf(n); !ok || got != want {
-						t.Errorf("%s arm row %d: rk = %v for a group of %d, PostgreSQL 17 "+
-							"answers %d — the window ordered by a name the aggregate does "+
-							"not publish\n  SQL: %s", arm.name, i, r["rk"], n, want, sql)
-						break
+			// The second entry wraps the aggregate in a larger term, which is
+			// the shape the RENDERING has to survive: the respell replaces one
+			// SUBTERM and the rest of the expression is re-rendered around it.
+			for _, sql := range []string{
+				fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n, `+
+					`RANK() OVER (ORDER BY COUNT(*)) AS rk FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+				fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n, `+
+					`RANK() OVER (ORDER BY COUNT(*) + 1) AS rk FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+			} {
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != wantKeys+1 {
+						t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+							arm.name, len(res.Rows), wantKeys+1, sql)
+						continue
+					}
+					for i, r := range res.Rows {
+						n, _ := numAsInt(r["n"])
+						got, ok := numAsInt(r["rk"])
+						if want := rankOf(n); !ok || got != want {
+							t.Errorf("%s arm row %d: rk = %v for a group of %d, PostgreSQL 17 "+
+								"answers %d — the window ordered by a name the aggregate does "+
+								"not publish\n  SQL: %s", arm.name, i, r["rk"], n, want, sql)
+							break
+						}
 					}
 				}
+			}
+		})
+
+		// The KEY nested inside a larger window term. The respell renders the
+		// key as a DELIMITED identifier, and here it has to survive being one
+		// operand of an expression the operator then MATERIALIZES — `"g + 1" *
+		// 2` — rather than being the whole term, which is the only shape the
+		// entries above exercise.
+		t.Run("WindowTermWrappingTheKey", func(t *testing.T) {
+			for _, c := range []struct {
+				name, sql string
+				rk        func(i int) int64
+			}{
+				{
+					// RANK over `(g + 1) * 2` is the key's own order: 1..7
+					// then the NULL group last.
+					name: "order-by-an-expression-over-the-key",
+					sql: fmt.Sprintf(`SELECT g + 1 AS k, RANK() OVER (ORDER BY (g + 1) * 2) AS rk `+
+						`FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+					rk: func(i int) int64 { return int64(i + 1) },
+				},
+				{
+					// PARTITION BY an expression over the key: the keys split
+					// by parity, so the rank restarts. 1,3,5,7 are odd →
+					// ranks 1..4; 2,4,6 even → 1..3; and the NULL key is a
+					// partition of its own → 1. A key resolving to nothing
+					// puts every row in ONE partition and ranks them 1..8,
+					// which is what this entry can see and the ORDER BY one
+					// cannot.
+					name: "partition-by-an-expression-over-the-key",
+					sql: fmt.Sprintf(`SELECT g + 1 AS k, `+
+						`RANK() OVER (PARTITION BY (g + 1) %% 2 ORDER BY g + 1) AS rk `+
+						`FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+					rk: func(i int) int64 {
+						if i == wantKeys {
+							return 1 // the NULL key, alone in its partition
+						}
+						return int64(i/2 + 1)
+					},
+				},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, c.sql)
+						if len(res.Rows) != wantKeys+1 {
+							t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+								arm.name, len(res.Rows), wantKeys+1, c.sql)
+							continue
+						}
+						for i, r := range res.Rows {
+							got, ok := numAsInt(r["rk"])
+							if want := c.rk(i); !ok || got != want {
+								t.Errorf("%s arm row %d: rk = %v, PostgreSQL 17 answers %d — "+
+									"the key's delimited spelling did not survive being one "+
+									"operand of a larger term\n  SQL: %s",
+									arm.name, i, r["rk"], want, c.sql)
+								break
+							}
+						}
+					}
+				})
 			}
 		})
 
