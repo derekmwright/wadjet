@@ -20,9 +20,9 @@ func postgresJoinArmCases() []pgCase {
 	add := func(name, sql string) {
 		out = append(out, pgCase{name: name, sql: sql})
 	}
-	pin := func(name, sql, bug, issue string) {
-		out = append(out, pgCase{name: name, sql: sql, knownBug: bug, issue: issue})
-	}
+	// There is no `pin` helper here any more: every entry in this file is
+	// GATED. The last pinned one was #751, deleted when its fix landed — a
+	// pin whose issue stops diverging FAILS, which is how it left.
 
 	// --- A WHERE above a JOIN naming a CTE's RENAMED column (#653, #700, #726).
 	//
@@ -279,14 +279,43 @@ func postgresJoinArmCases() []pgCase {
 			`SELECT c.dv AS d FROM c JOIN nation t ON c.k = t.n_nationkey `+
 			`JOIN nation u ON c.k = u.n_nationkey WHERE c.dv > 4 ORDER BY c.k`)
 
-	// --- The residuals, pinned so the day they agree this file FAILS.
-	pin("JoinArmSiblingNestedInSibling",
+	// A sibling NESTED inside a sibling (#751), gated rather than pinned since
+	// 2026-09-01: `joinArmAlias` reads a DERIVED table's own alias off the
+	// arm's subtree root now, so the join no longer qualifies that arm's
+	// duplicate column by a name the query never wrote.
+	add("JoinArmSiblingNestedInSibling",
 		`SELECT p.w AS pw, q.w AS qw, p.k AS k FROM `+
 			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p JOIN `+
 			`(SELECT x.k, x.w FROM (SELECT n_nationkey AS k, MIN(n_regionkey) OVER () AS w FROM nation) x) q `+
-			`ON p.k = q.k ORDER BY p.k`,
-		pgBugWadjet+" a sibling nested inside a sibling: the single-process path answers the OUTER "+
-			"sibling's window for the inner one; both stage-DAG arms are right",
-		"#751")
+			`ON p.k = q.k ORDER BY p.k`)
+	// The composition the same arc closed: a window in the SELECT LIST above a
+	// join one of whose ARMS is itself a window (#772). The two mint one
+	// `__win_0` — the builder's counter is per SELECT block — and the outer
+	// one's renumbering used to be applied DOWNWARD into the arm.
+	add("JoinArmWindowAboveAWindowArm",
+		`SELECT p.k AS k, p.w AS pw, q.w AS qw, SUM(q.w) OVER () AS s FROM `+
+			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p JOIN `+
+			`(SELECT n_nationkey AS k, n_regionkey * 100 AS w FROM nation) q `+
+			`ON p.k = q.k ORDER BY p.k`)
+	add("JoinArmWindowAboveAWindowArmOverItsOwnArm",
+		`SELECT p.k AS k, p.w AS pw, q.w AS qw, SUM(p.w) OVER () AS s FROM `+
+			`(SELECT n_nationkey AS k, SUM(n_regionkey) OVER () AS w FROM nation) p JOIN `+
+			`(SELECT n_nationkey AS k, n_regionkey * 100 AS w FROM nation) q `+
+			`ON p.k = q.k ORDER BY p.k`)
+	// An arm that is ITSELF A JOIN, in the DERIVED spelling (#773).
+	add("JoinArmIsItselfAJoin",
+		`SELECT t.k AS k, t.w AS tw, m.w AS mw FROM `+
+			`(SELECT n_nationkey AS k, n_regionkey AS w FROM nation) t JOIN `+
+			`(SELECT g.k AS k, g.w AS w FROM `+
+			`(SELECT n_nationkey AS k, n_regionkey * 100 AS w FROM nation) g `+
+			`JOIN nation h ON g.k = h.n_nationkey) m ON t.k = m.k ORDER BY t.k`)
+	// A WINDOW above a GROUP BY (#737): the computed key is a NAME there, and
+	// so is an aggregate inside the window's own spec.
+	add("JoinArmWindowAboveAGroupBy",
+		`SELECT n_regionkey + 1 AS gk, ROW_NUMBER() OVER (ORDER BY n_regionkey + 1) AS rn `+
+			`FROM nation GROUP BY n_regionkey + 1 ORDER BY gk`)
+	add("JoinArmWindowOverAnAggregateOutput",
+		`SELECT n_regionkey + 1 AS gk, COUNT(*) AS n, SUM(COUNT(*)) OVER () AS s `+
+			`FROM nation GROUP BY n_regionkey + 1 ORDER BY gk`)
 	return out
 }
