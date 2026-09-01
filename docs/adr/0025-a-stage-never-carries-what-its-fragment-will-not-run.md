@@ -1478,6 +1478,18 @@ aggregate-between-the-SELECT-list-and-the-join shapes, which today are correct
 or LOUD on every arm and never silently wrong, pinned so that the day one of
 them starts answering, it has to answer PostgreSQL's values.
 
+**The two sites ship in ONE commit, and the per-site reverts are the substitute
+for two.** They cannot be separated in a green tree: the projection entries
+assert the window's own value, so a fixture that gates one site alone has to
+stop asserting the other's column, and a weaker fixture is the wrong price for
+a tidier history. What a split commit would have bought — each mechanism
+attributed to its own gate rows — is bought instead by reverting each site on
+its own: the whitelist entry alone fails 8 leaf subtests (7 of the gate plus
+the walk-agreement test's `Window` case) and the argument scoping alone fails 9,
+including the base-self-join and MIN/MAX entries the whitelist does not touch.
+No control fails under either. A future reader asking "which of these two did
+what" should run those two reverts, not read the diff.
+
 ### A join arm answers to the name the QUERY calls it (2026-08-31, #742 round 4, #753)
 
 `findScanAlias` walks to the scan under a join arm and returns its alias — the
@@ -1524,26 +1536,52 @@ is called. `TestTPCHStageDumpGolden` is byte-identical: no TPC-H stage's shape
 moves, and Q15 — the one TPC-H query with a CTE, joined on its build side —
 answers as it did.
 
-**What is NOT closed, measured rather than assumed.** Eight residuals survive
+**What is NOT closed, measured rather than assumed.** Nine residuals survive
 the sweep, and none of them is this mechanism. Each is stated with where it
 reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
 
-- a CTE whose BODY holds two relations is still captured on both DAG arms, and
-  it is the shape the arm-naming section above cites as the REASON a CTE stamps
-  its name on the subtree root. Both halves are true and they do not meet:
+- **an arm that is ITSELF A JOIN is still captured, in both spellings and on
+  both paths** — and the CTE half of it is the shape the arm-naming section
+  above cites as the REASON a CTE stamps its name on the subtree root. Both
+  halves of that citation are true and they do not meet. The two faces are one
+  mechanism seen from opposite sides:
 
+      -- the CTE spelling, wrong on both DAG arms, right on single
       WITH c AS (SELECT m.id AS id, m.a * 2 AS dv
                  FROM decpair m, decpair n WHERE m.id = n.id)
       SELECT p.id, p.dv, c.dv
       FROM (SELECT id, b - 100 AS dv FROM decpair) p JOIN c ON c.id = p.id
-      -- PostgreSQL  c.dv 25.50 · p.dv -87.2500
-      -- single      right (this arc) · both DAG arms  c.dv == p.dv
+      -- PostgreSQL  c.dv 25.50 · p.dv -87.2500 · both DAG arms c.dv == p.dv
 
-  The one-relation body is correct on all three arms and the explicit-JOIN
-  spelling of the two-relation body fails identically, so it is the CTE arm
-  being a JOIN and not the comma. Naming the arm `c` is what fixed the single
-  path here and is not sufficient on the DAG, where that arm lowers to stages of
-  its own;
+      -- the DERIVED spelling, wrong on SINGLE, right on both DAG arms (#773)
+      SELECT t.id, t.w, m.w
+      FROM (SELECT id, a AS w FROM decpair) t
+      JOIN (SELECT g.id AS id, g.w AS w
+            FROM (SELECT id, a * 100 AS w FROM decpair) g
+            JOIN decpair h ON g.id = h.id) m ON t.id = m.id
+      -- PostgreSQL and both DAG arms  m.w 1275.00 · single  m.w 12.75 (t's)
+
+  A one-relation body is correct on all three arms in both spellings, and the
+  comma-join and explicit-JOIN bodies fail identically, so it is the arm being
+  a JOIN and nothing about the comma or the CTE keyword. Naming the arm `c`
+  fixed the single path for the CTE spelling and is not sufficient where that
+  arm lowers to stages of its own; the derived spelling is the mirror, and the
+  distinct-alias control is clean in both. Base-identical, filed as #773;
+- **the two window sites COMPOSING** — a window in the SELECT list above a join
+  one of whose ARMS is itself a window (#772). Each site is fixed alone and the
+  nesting is not:
+
+      SELECT p.id, p.w, q.w, SUM(q.w) OVER () AS s
+      FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) p
+      JOIN (SELECT id, a * 100 AS w FROM decpair) q ON p.id = q.id
+      -- PostgreSQL  p.w 52.99 · s 5299.00
+      -- both DAG arms  p.w 5299.00 (q's window under p's name)
+      -- the SUM(p.w) spelling  p.w and s both NULL on both DAG arms
+
+  The identical query WITHOUT the outer window is correct on all three arms
+  after this arc — it was wrong on both DAG arms before — and the distinct-alias
+  spelling is clean, which is what places the residual at the composition and
+  not at either site. Base-identical;
 - a CTE that SHADOWS a base table's name cannot reference the table in its own
   body — `WITH decpair AS (SELECT … FROM decpair)` resolves the inner `FROM` to
   the CTE itself. Loud on every arm, pre-existing on `376b2cac`, and filed as

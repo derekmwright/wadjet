@@ -1,6 +1,10 @@
 package physical
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -312,17 +316,27 @@ func TestScopePreservingWrapperMatchesTheRenameWalk(t *testing.T) {
 		logical.NodeIntersect: true, logical.NodeExcept: true,
 	}
 
-	// Completeness: every NodeType the logical package declares is in the
-	// table, so adding one without deciding this question fails here. The
-	// upper bound is found by walking until String() stops recognising the
-	// value, which is what a new constant extends.
-	for id := logical.NodeType(0); ; id++ {
-		if strings.HasPrefix(id.String(), "Unknown(") {
-			break
-		}
+	// Completeness, read from the logical package's SOURCE rather than from
+	// its String() method.
+	//
+	// The first cut of this check walked ids upward until String() stopped
+	// recognising one, which is a completeness test that the incomplete case
+	// can slip past: a new `NodeFoo` added to the iota block WITHOUT a
+	// String() arm makes String() answer "Unknown(13)" at the very id the
+	// walk was supposed to reach, the scan ends there, and the table passes
+	// with the new type undecided. That is the same shape as the fixtures
+	// this arc kept finding — a check that cannot fail for the reason it
+	// names — so the bound comes from the declaration itself.
+	names := nodeTypeConstNames(t)
+	if len(table) != len(names) {
+		t.Fatalf("the logical package declares %d node types (%s) and this table has %d — "+
+			"a new node type must decide whether a scope walk may descend through it, and "+
+			"say why", len(names), strings.Join(names, ", "), len(table))
+	}
+	for id := logical.NodeType(0); int(id) < len(names); id++ {
 		if _, ok := table[id]; !ok {
-			t.Fatalf("logical node type %s (%d) is not in this table — decide whether a "+
-				"scope walk may descend through it and say why", id, int(id))
+			t.Fatalf("logical node type %s (%s, %d) is not in this table — decide whether a "+
+				"scope walk may descend through it and say why", names[id], id, int(id))
 		}
 	}
 
@@ -355,4 +369,72 @@ func TestScopePreservingWrapperMatchesTheRenameWalk(t *testing.T) {
 			}
 		})
 	}
+}
+
+// nodeTypeConstNames returns the constants of the logical package's NodeType
+// iota block, in declaration order, read from the SOURCE.
+//
+// The declaration is the only place that knows a node type exists. Reflection
+// cannot enumerate the constants of an integer type, and String() cannot
+// either — a constant with no arm in its switch is exactly the one a
+// String()-driven scan misses. So the test parses the package it is asserting
+// about, which also makes the check fail LOUDLY (rather than passing) if the
+// block is moved, renamed, or given values that are not a plain iota run.
+func nodeTypeConstNames(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("..", "logical", "*.go"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("globbing ../logical/*.go: %v (%d files) — this test reads the NodeType "+
+			"declaration to know when a node type is added", err, len(files))
+	}
+	fset := token.NewFileSet()
+	for _, path := range files {
+		af, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			continue // a file this test cannot parse is not where the block lives
+		}
+		for _, decl := range af.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST || len(gd.Specs) == 0 {
+				continue
+			}
+			first, ok := gd.Specs[0].(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if id, ok := first.Type.(*ast.Ident); !ok || id.Name != "NodeType" {
+				continue
+			}
+			// The table is indexed by the constants' VALUES, so the block has
+			// to be a plain iota run starting at zero for that indexing to
+			// mean anything. Anything else fails here rather than being
+			// silently mis-indexed.
+			if len(first.Values) != 1 {
+				t.Fatalf("%s: the NodeType const block's first spec assigns %d values, want "+
+					"exactly `= iota`", path, len(first.Values))
+			}
+			if id, ok := first.Values[0].(*ast.Ident); !ok || id.Name != "iota" {
+				t.Fatalf("%s: the NodeType const block does not start at `iota`, so a table "+
+					"indexed by its values cannot be checked against it", path)
+			}
+			var names []string
+			for _, sp := range gd.Specs {
+				vs, ok := sp.(*ast.ValueSpec)
+				if !ok {
+					t.Fatalf("%s: unexpected spec kind in the NodeType const block", path)
+				}
+				for _, n := range vs.Names {
+					if n.Name == "_" {
+						t.Fatalf("%s: the NodeType const block skips a value with `_`, which "+
+							"breaks the value→name indexing this check relies on", path)
+					}
+					names = append(names, n.Name)
+				}
+			}
+			return names
+		}
+	}
+	t.Fatal("no `NodeType` iota const block found under ../logical — this test reads it to " +
+		"know when a node type is added; if the declaration moved, point this helper at it")
+	return nil
 }
