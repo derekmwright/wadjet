@@ -1576,11 +1576,33 @@ mechanism was:
   distinct-alias control is clean in both. Base-identical, filed as #773.
   **The DERIVED spelling (#773) is CLOSED on the SINGLE-process path**, which
   is where it was wrong — `Node.DerivedAlias` is the name `joinArmAlias` was
-  missing. Two things stay open beside it and are not that mechanism: the CTE
-  spelling on the DAG arms (this bullet's own first repro), and a WRAPPED
-  WINDOW in BOTH arms of the same shape, which still answers the other arm's
-  window on both DAG arms. Both are the DAG's un-materialized Project, which
-  the doctrine section below names;
+  missing. What stays open beside it is ONE residual, restated after the
+  round-2 review measured its edges rather than assuming them:
+
+  > **A CTE arm whose published column shares its bare name with the probe
+  > arm's answers the PROBE arm's column on both DAG arms, whenever the
+  > contested column is COMPUTED or WRAPPED** — independent of whether the arm
+  > is a join, and independent of whether a window is present anywhere.
+
+  The shapes are a CTE arm that IS a join with no window in the query at all,
+  and a SINGLE-RELATION CTE arm with a wrapped window; the control is the same
+  pair of arms publishing BARE unwrapped windows, which is right on every arm.
+  Two earlier statements of this bullet were wrong in opposite directions: it
+  is not "the arm being a JOIN" (the single-relation CTE arm fails too), and
+  the WRAPPED-WINDOW-IN-BOTH-ARMS claim was STALE — the derived spelling of it
+  is right on all three arms on this tip, closed by the two-stream doctrine
+  below.
+
+  The DERIVED arm has its own residual, filed as **#780** and pinned rather
+  than described: an arm of BARE SCANS publishing a COMPUTED column whose bare
+  name the probe carries answers the probe's column on both DAG arms, with the
+  rename body and the distinct alias both clean. It is base-identical, its
+  single-process half is closed here, and it is the doctrine's real edge —
+  `joinArmSoleName` finds no inner derived alias to decline on, so the arm's
+  name is the only one there is and the DAG has nothing that IS it.
+
+  All three are the DAG's un-materialized Project, which the doctrine section
+  below names;
 - **the two window sites COMPOSING** — a window in the SELECT list above a join
   one of whose ARMS is itself a window (#772). Each site is fixed alone and the
   nesting is not:
@@ -1751,11 +1773,19 @@ mixed pair described one output two ways and cost 22003 on a query PostgreSQL
 answers (`(SELECT p.id, j.d92 AS d92 FROM zzp p JOIN zzj j …) m` published its
 `d92` as `p.d92` while the declared schema said `m.d92`).
 
-**What it does NOT close, and why.** A CTE arm that is itself a join, and a
-wrapped WINDOW in both arms of one, are still wrong on the DAG arms. Both are
-the same limit seen from the other side: the arm's Project would have to be
-MATERIALIZED for the arm's name to describe anything there, and nothing in this
-change materializes it.
+**What it does NOT close, and why — measured, after a first statement of this
+paragraph named the wrong two shapes.** The wrapped WINDOW in both arms is
+CLOSED by this change (right on all three arms on this tip); what is still
+wrong on the DAG arms is the CTE residual restated in the list above, and
+**#780**: a DERIVED arm of BARE SCANS publishing a COMPUTED column whose bare
+name the probe carries. Both are the same limit seen from two sides — the arm's
+Project would have to be MATERIALIZED for the arm's name to describe anything
+on the DAG, and nothing here materializes it. #780 is the doctrine's own edge
+rather than a shape it missed: with no inner derived table there is no inner
+alias to decline on, so `joinArmSoleName` answers with the arm's name on both
+engines and only one of them has a column that is it. Pinned per entry beside
+the arm-is-a-join family, with the rename body and the distinct alias as the
+controls that place the cell at COMPUTED × SHARED BARE NAME.
 
 ### A qualified reference is DECLARED by its own side (2026-09-01, #706, #754)
 

@@ -241,6 +241,96 @@ func TestQualifiedReferenceResolvesThroughItsOwnSideThreeArms(t *testing.T) {
 			cols: []string{"md"},
 			want: "3 rows: 1.1111;12345678.1234;3.3333;",
 		},
+		// --- The impossibility `materializedBuildColOrigins` asserts, with the
+		// fixtures that attempt it (METHOD 10).
+		//
+		// The doctrine says a NAMED arm's columns all answer to the arm's ONE
+		// name once its Project has run, so the per-scan origins are dropped
+		// there. The obvious objection is an arm that publishes BOTH of its
+		// relations' `d92` — then one name is not enough and dropping the
+		// origins should lose one of them. It does not: the arm's Project has
+		// already given them SEPARATE OUTPUT NAMES (`d92` and `e92`), which is
+		// what "its Project has run" means, and the origins were never what
+		// told them apart. These entries are that claim attempted, written by
+		// the round-2 review; all of them agree with PostgreSQL 17 on all
+		// three arms.
+		{
+			name: "arm-joins-both/both-relations-published-narrow-first",
+			sql: "SELECT t.d92 AS td, m.d92 AS md, m.e92 AS me FROM zzp t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92, j.d92 AS e92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"td", "md", "me"},
+			want: "3 rows: -3.50|-3.50|1.1111;0.00|0.00|12345678.1234;12.75|12.75|3.3333;",
+		},
+		{
+			// The two output names SWAPPED, so an answer that reads them
+			// positionally rather than by name is a different result.
+			name: "arm-joins-both/both-relations-published-wide-first",
+			sql: "SELECT t.d92 AS td, m.d92 AS md, m.e92 AS me FROM zzp t JOIN " +
+				"(SELECT p.id AS id, j.d92 AS d92, p.d92 AS e92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"td", "md", "me"},
+			want: "3 rows: -3.50|1.1111|-3.50;0.00|12345678.1234|0.00;12.75|3.3333|12.75;",
+		},
+		{
+			// The probe is the WIDE table, so the contested bare name belongs
+			// to the other side of the outer join.
+			name: "arm-joins-both/both-relations-under-a-wide-probe",
+			sql: "SELECT t.d92 AS td, m.d92 AS md, m.dj AS mj FROM zzj t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92, j.d92 AS dj FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"td", "md", "mj"},
+			want: "3 rows: 1.1111|-3.50|1.1111;12345678.1234|0.00|12345678.1234;" +
+				"3.3333|12.75|3.3333;",
+		},
+		{
+			// The probe's own column NOT projected, so nothing but the arm's
+			// two can be confused with each other.
+			name: "arm-joins-both/both-relations-probe-not-projected",
+			sql: "SELECT m.d92 AS md, m.e92 AS me FROM zzp t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92, j.d92 AS e92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) m ON t.id = m.id ORDER BY m.id",
+			cols: []string{"md", "me"},
+			want: "3 rows: -3.50|1.1111;0.00|12345678.1234;12.75|3.3333;",
+		},
+		{
+			// Both read by an AGGREGATE, which resolves its input by a
+			// different route than the projection.
+			name: "arm-joins-both/both-relations-aggregated",
+			sql: "SELECT SUM(m.d92) AS sd, SUM(m.e92) AS se FROM zzp t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92, j.d92 AS e92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) m ON t.id = m.id",
+			cols: []string{"sd", "se"},
+			want: "1 rows: 9.25|12345682.5678;",
+		},
+		{
+			name: "arm-joins-both/both-relations-with-a-third-join",
+			sql: "SELECT t.d92 AS td, m.d92 AS md, m.e92 AS me FROM zzp t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92, j.d92 AS e92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) m ON t.id = m.id JOIN " + dbpTable +
+				" u ON u.id = t.id ORDER BY t.id",
+			cols: []string{"td", "md", "me"},
+			want: "3 rows: -3.50|-3.50|1.1111;0.00|0.00|12345678.1234;12.75|12.75|3.3333;",
+		},
+		{
+			name: "arm-joins-both/both-relations-cte-spelling",
+			sql: "WITH cc AS (SELECT p.id AS id, p.d92 AS d92, j.d92 AS e92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) SELECT t.d92 AS td, cc.d92 AS md, cc.e92 AS me " +
+				"FROM zzp t JOIN cc ON t.id = cc.id ORDER BY t.id",
+			cols: []string{"td", "md", "me"},
+			want: "3 rows: -3.50|-3.50|1.1111;0.00|0.00|12345678.1234;12.75|12.75|3.3333;",
+		},
+		{
+			// The ZERO-ROW variant of the same shape, described from the plan
+			// alone — where a dropped origin would show as a missing column
+			// rather than a wrong value.
+			name: "arm-joins-both/both-relations-zero-rows",
+			sql: "SELECT t.d92 AS td, m.d92 AS md, m.e92 AS me FROM zzp t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92, j.d92 AS e92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) m ON t.id = m.id WHERE t.id < 0 ORDER BY t.id",
+			cols: []string{"td", "md", "me"},
+			want: "0 rows: ",
+		},
 		{
 			// The three-relation join with NO derived arm at all: the origins
 			// doctrine this leaves alone, and it must keep answering.

@@ -25,9 +25,26 @@ import (
 // outer one did not see the inner's key, materialized it again over a schema
 // with no `g`, and collapsed the table into one NULL group.
 //
-// So the invariant this test carries is not "the list is right" — it is "there
-// are exactly three readers and every one of them reads it", plus a
-// completeness check that fails when the logical package gains a node type.
+// So the invariant this test carries is: **these three NAMED readers agree
+// with the list, and the list covers every node type the logical package
+// declares.**
+//
+// It does NOT — and cannot — discover a FOURTH reader. It drives the three by
+// name, so a new walk that grows its own hardcoded Filter/Sort/Limit list
+// passes here in silence; the round-2 review proved that by adding one and
+// watching this test go green. The commit that introduced it said "a fourth
+// reader with its own list fails here", and that was an overclaim.
+//
+// A source-level guard was considered and is NOT here on purpose. Twelve
+// functions in this package carry a `case logical.NodeFilter, logical.NodeSort,
+// logical.NodeLimit` clause and exactly ONE of them is asking this question;
+// the rest ask what a node EMITS, what its input TYPES are, what a set-op arm
+// declares, or whether a stage forwards its columns, and requiring them to read
+// `aggScopePreservingWrapper` would be wrong. A grep guard therefore needs an
+// eleven-entry allowlist that drifts with every new walk — the
+// enumerate-the-kinds shape ADR-0025 records as having been wrong twice. What
+// finds a fourth reader is a review counting them, which is how this one was
+// found.
 func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 	// The list, stated once here so a change to it is a change to a test.
 	want := map[logical.NodeType]bool{

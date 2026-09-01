@@ -317,8 +317,19 @@ where it is a NAME:
   and there were three: the third kept its own hardcoded Filter/Sort/Limit
   list, so `SELECT DISTINCT g + 1 … GROUP BY g + 1` with a window between its
   two aggregates re-materialized a key the inner one had already published and
-  collapsed the table into ONE NULL group on the single-process path. Counting
-  the walks is the check the claim needed and did not have.
+  collapsed the table into ONE NULL group on the single-process path.
+
+  `TestAggScopePreservingWrapperIsReadByEveryWalk` states exactly what is
+  checked: **these three NAMED readers agree with the list, and the list covers
+  every node type the logical package declares.** It cannot discover a FOURTH
+  reader — it drives the three by name, and a review proved the point by adding
+  a walk with its own list and watching the test pass. A source-level guard was
+  considered and rejected: twelve functions in the package carry a
+  `NodeFilter, NodeSort, NodeLimit` case and exactly one is asking this
+  question, so the guard needs an eleven-entry allowlist that drifts — the
+  enumerate-the-kinds shape this repository has already been wrong with twice.
+  What finds a fourth reader is a review counting them, which is how the third
+  was found.
   On the DAG the SELECT list is attached to the WINDOW stage's fragment
   (ADR-0025 shape g), and that projection is respelled over the producer's
   emitted columns by the same `respellSpecsOverProducerOutput` the
