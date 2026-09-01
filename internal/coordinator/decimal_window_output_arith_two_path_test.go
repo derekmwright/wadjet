@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -142,5 +143,82 @@ func TestArithmeticOverADecimalWindowOutputThreeArms(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A WINDOW inside a derived table under EVERY join kind, on three arms
+// against PostgreSQL 17 (#741).
+//
+// #741 reports the NESTED spelling losing its column on both DAG arms under
+// OUTER and SEMI joins — `[id, y.id]` where the query asked for `[id, w]` —
+// with the BARE spelling correct beside it. Re-measured on `de95b3b5` over
+// four arms (single, single spilled at 512 KiB, DAG, DAG
+// `BroadcastBytesOverride=1`) against a live PostgreSQL 17, every one of the
+// fourteen shapes below already ANSWERS: the repair landed with the three
+// carrier fixes ADR-0025 records (the pruner stopping at a window's output,
+// the shuffle payload's resolved spelling, and the reachability check walking
+// past the movers), and the issue's own "gate when fixed" was never written.
+//
+// This is that gate. It asserts nothing new about today's engine and it is
+// what makes the class stay closed: the pass that would reopen it is one that
+// pushes a projection's published alias down past the Project computing it,
+// which is a change a reviewer would otherwise have to reason about.
+func TestAWindowInsideADerivedArmUnderEveryJoinKindThreeArms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up two embedded NATS clusters")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	arms := dajArms(t, ctx)
+
+	const tbl = dbpTable
+	// SUM(a) OVER () is 52.99 over the nine decpair rows, and every join kind
+	// below keeps all nine, so the whole answer is one number per row — which
+	// is what makes a DROPPED column visible as a missing column rather than
+	// as a different value.
+	const want = "9 rows: 1|52.99;2|52.99;3|52.99;4|52.99;5|52.99;6|52.99;7|52.99;8|52.99;9|52.99;"
+	for _, spell := range []struct{ name, w string }{
+		// The NESTED spelling mints a `__win_N` and computes over it, which
+		// is the half the issue is about; the BARE one publishes the slot
+		// directly and is the control that was correct throughout.
+		{"nested", "SUM(a) OVER () + 0"},
+		{"bare", "SUM(a) OVER ()"},
+	} {
+		spell := spell
+		for _, jk := range []struct{ name, sql string }{
+			{"inner", "SELECT x.id AS id, x.w AS w FROM (SELECT id, %s AS w FROM %[2]s) x " +
+				"JOIN %[2]s y ON x.id = y.id ORDER BY x.id"},
+			{"left", "SELECT x.id AS id, x.w AS w FROM (SELECT id, %s AS w FROM %[2]s) x " +
+				"LEFT JOIN %[2]s y ON x.id = y.id ORDER BY x.id"},
+			{"right", "SELECT x.id AS id, x.w AS w FROM (SELECT id, %s AS w FROM %[2]s) x " +
+				"RIGHT JOIN %[2]s y ON x.id = y.id ORDER BY x.id"},
+			{"full", "SELECT x.id AS id, x.w AS w FROM (SELECT id, %s AS w FROM %[2]s) x " +
+				"FULL JOIN %[2]s y ON x.id = y.id ORDER BY x.id"},
+			{"semi", "SELECT x.id AS id, x.w AS w FROM (SELECT id, %s AS w FROM %[2]s) x " +
+				"WHERE x.id IN (SELECT id FROM %[2]s) ORDER BY x.id"},
+			{"anti", "SELECT x.id AS id, x.w AS w FROM (SELECT id, %s AS w FROM %[2]s) x " +
+				"WHERE x.id NOT IN (SELECT id FROM %[2]s WHERE id > 90) ORDER BY x.id"},
+			// The window arm on the OTHER side of the join, which reaches the
+			// build/probe assignment the other way round.
+			{"left-with-the-window-arm-second", "SELECT y.id AS id, x.w AS w FROM %[2]s y " +
+				"LEFT JOIN (SELECT id, %[1]s AS w FROM %[2]s) x ON x.id = y.id ORDER BY y.id"},
+		} {
+			jk := jk
+			t.Run(spell.name+"/"+jk.name, func(t *testing.T) {
+				sql := fmt.Sprintf(jk.sql, spell.w, tbl)
+				for _, arm := range arms {
+					res, err := arm.run(sql)
+					if err != nil {
+						t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
+							arm.name, err, sql)
+					}
+					if got := dajDigest(res, []string{"id", "w"}); got != want {
+						t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n"+
+							" — a window inside a derived arm lost its column under this "+
+							"join kind\n  SQL: %s", arm.name, got, want, sql)
+					}
+				}
+			})
+		}
 	}
 }
