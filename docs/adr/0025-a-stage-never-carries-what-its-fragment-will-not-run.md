@@ -1574,9 +1574,13 @@ mechanism was:
   fixed the single path for the CTE spelling and is not sufficient where that
   arm lowers to stages of its own; the derived spelling is the mirror, and the
   distinct-alias control is clean in both. Base-identical, filed as #773.
-  **The DERIVED spelling (#773) is CLOSED** — `Node.DerivedAlias` is the name
-  `joinArmAlias` was missing; the CTE spelling on the DAG arms is not, and
-  stays here;
+  **The DERIVED spelling (#773) is CLOSED on the SINGLE-process path**, which
+  is where it was wrong — `Node.DerivedAlias` is the name `joinArmAlias` was
+  missing. Two things stay open beside it and are not that mechanism: the CTE
+  spelling on the DAG arms (this bullet's own first repro), and a WRAPPED
+  WINDOW in BOTH arms of the same shape, which still answers the other arm's
+  window on both DAG arms. Both are the DAG's un-materialized Project, which
+  the doctrine section below names;
 - **the two window sites COMPOSING** — a window in the SELECT list above a join
   one of whose ARMS is itself a window (#772). Each site is fixed alone and the
   nesting is not:
@@ -1712,6 +1716,47 @@ and the bare-name fallback bound the SIBLING arm's column. `Node.DerivedAlias`
 is the derived spelling of `CTEName`, and `joinArmAlias` walks down single-child
 nodes to find whichever of the three the arm carries.
 
+### …and the answer is DIFFERENT on the two engines, because the streams are (2026-09-01, #773 round 2, #706 round 2)
+
+Giving both engines the arm's name looked like the obvious repair and was a
+silent wrong answer on the DAG, on a shape with no window in it at all:
+
+    SELECT t.w, m.w
+    FROM (SELECT id, a * 2 AS w FROM decpair) t
+    JOIN (SELECT g.id AS id, g.w AS w
+          FROM (SELECT id, b * 3 AS w FROM decpair) g JOIN decpair h ON g.id = h.id) m
+      ON t.id = m.id
+    -- PostgreSQL and both DAG arms on 376b2cac: m.w = 38.25…
+    -- with the arm named `m` on the DAG: m.w = t's column, silently
+
+**A name describes a STREAM, and the two engines hand the join different
+streams.** On the single-process pipeline the arm's own Project is a real
+OPERATOR: the build side IS `id, w`, the arm's output, and no inner relation's
+columns are in it — so the ONE name the enclosing query writes is the only name
+those columns can answer to. On the stage DAG a Project emits NO STAGE, which
+is this ADR's first sentence: the build side is the arm's RAW inner columns,
+one per relation inside it, and the arm's name describes none of them. Which of
+them the arm publishes is exactly what the un-materialized Project knows and
+the stage does not, so `m.w` there lands on whichever column happened to be the
+duplicate — the one the arm did NOT select — and the planner's own `PROJ "g.w"`
+then matched nothing, fell back to the bare name, and read the other arm.
+
+So `joinArmAlias` is the MATERIALIZED answer, used by the three single-process
+join builders, and `stageBuildTableAlias` is the raw one, used by stage
+emission; `subtreeNaming.materializedBuildColOrigins` is the same split for the
+per-column origins, which name the scans INSIDE the arm and are therefore true
+of the DAG's stream and false of the single-process one. Each engine's
+declaration and value then come from one rule, which is the whole point: the
+mixed pair described one output two ways and cost 22003 on a query PostgreSQL
+answers (`(SELECT p.id, j.d92 AS d92 FROM zzp p JOIN zzj j …) m` published its
+`d92` as `p.d92` while the declared schema said `m.d92`).
+
+**What it does NOT close, and why.** A CTE arm that is itself a join, and a
+wrapped WINDOW in both arms of one, are still wrong on the DAG arms. Both are
+the same limit seen from the other side: the arm's Project would have to be
+MATERIALIZED for the arm's name to describe anything there, and nothing in this
+change materializes it.
+
 ### A qualified reference is DECLARED by its own side (2026-09-01, #706, #754)
 
 `mergeJoinSides` drops a name the two sides declare differently, which is the
@@ -1726,6 +1771,15 @@ carries the qualified spelling now, and `withJoinArmQualifiers` adds
 name with ONE relation name. An arm holding several relations under no shared
 name qualifies nothing — an entry under a name that does not own the column
 would be this defect pointing the other way.
+
+That declaration is path-independent and the VALUE was not, which is the
+round-2 finding in the section above: a NAMED arm holding TWO relations was
+declared `m.d92` while the single-process join published that very column as
+`p.d92` — the alias of a scan inside the arm — so the two described one output
+differently and the store guard raised 22003 on a query PostgreSQL answers.
+`materializedBuildColOrigins` is what makes the value agree with the
+declaration there, and the DAG keeps the raw origins because on the DAG they
+are true.
 
 ## Consequences
 

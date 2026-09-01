@@ -63,8 +63,11 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 		j.BuildTableAlias = alias
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each
-	// duplicate qualifies under its OWNING scan (nil for single-scan builds).
-	j.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
+	// duplicate qualifies under its OWNING scan (nil for single-scan builds,
+	// and nil for a NAMED ARM, whose Project has already run here — see
+	// materializedBuildColOrigins). This is a single-process operator, so it
+	// takes the same answer buildJoin does.
+	j.BuildColOrigins = subtreeNamingOf(node.Children[1]).materializedBuildColOrigins()
 	if sm := p.getSpillManager(); sm != nil {
 		j.Spill = sm
 	}

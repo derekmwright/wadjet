@@ -171,6 +171,29 @@ func (s *subtreeNaming) buildColOrigins() map[string]string {
 	return s.origins
 }
 
+// materializedBuildColOrigins is buildColOrigins for a build stream that is the
+// arm's OWN OUTPUT rather than its raw inner columns — the single-process
+// pipeline, where the arm's Project is a real operator.
+//
+// The origins are the aliases of the scans INSIDE the subtree, and once the
+// arm's Project has run those columns are not in the stream at all: what is
+// there is what the arm publishes, under the ONE name the enclosing query
+// writes. Qualifying them by an inner scan named them something no reference
+// asks for and something that is not even true — `(SELECT p.id, j.d92 AS d92
+// FROM zzp p JOIN zzj j ON …) m` published its `d92` as `p.d92` while the value
+// was j's, so the declared schema (`m.d92`, numeric(18,4)) and the value the
+// projection found (p's, numeric(9,2)) described one output two ways: 22003 on
+// a query PostgreSQL answers, and a silent wrong number in the mirror.
+//
+// The DAG keeps the raw answer, because there the Project emits no stage and
+// the inner names are exactly what the stream carries (joinArmAlias).
+func (s *subtreeNaming) materializedBuildColOrigins() map[string]string {
+	if namedArmScope(s.root) != "" {
+		return nil
+	}
+	return s.buildColOrigins()
+}
+
 // assignJoinKeySides ensures leftKeys reference the probe (left) child and
 // rightKeys the build (right) child, deciding by column OWNERSHIP in each
 // child subtree rather than textual position in the join condition.

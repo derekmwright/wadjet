@@ -165,6 +165,91 @@ func TestQualifiedReferenceResolvesThroughItsOwnSideThreeArms(t *testing.T) {
 			cols: []string{"d"},
 			want: "0 rows: ",
 		},
+
+		// --- The arm that is ITSELF A JOIN of the two, where the DECLARATION
+		// and the VALUE have to name one column (#706 round 2).
+		//
+		// `(SELECT p.id AS id, j.d92 AS d92 FROM zzp p JOIN zzj j ON …) m`
+		// publishes ONE `d92`, and which of its two relations it came from is
+		// the arm's Project's decision. On the single-process pipeline that
+		// Project is a real operator, so the join's build side IS `id, d92`
+		// and the arm's name is the only name those columns can answer to —
+		// but `subtreeNaming` qualified them by the SCAN inside the arm, so
+		// the value arrived as `p.d92` (p's, numeric(9,2)) while the declared
+		// schema said `m.d92` (j's, numeric(18,4)): one output described two
+		// ways, which is 22003 in this direction and a silent wrong number in
+		// its mirror.
+		//
+		// The DAG was right throughout and is asserted: there the arm's
+		// Project emits no stage, the stream carries the raw `d92`/`j.d92`,
+		// and the resolvers name them accordingly.
+		{
+			name: "arm-joins-both/publishes-the-wide-side",
+			sql: "SELECT m.d92 AS md FROM zzp t JOIN " +
+				"(SELECT p.id AS id, j.d92 AS d92 FROM zzp p JOIN zzj j ON p.id = j.id) m " +
+				"ON t.id = m.id ORDER BY m.id",
+			cols: []string{"md"},
+			want: "3 rows: 1.1111;12345678.1234;3.3333;",
+		},
+		{
+			// The MIRROR: the arm publishes the NARROW side, so a resolution
+			// that took the other one would render 1.1111 at scale 2 rather
+			// than -3.50 at scale 4. An entry that only ever publishes the
+			// wide side cannot tell the two apart.
+			name: "arm-joins-both/publishes-the-narrow-side",
+			sql: "SELECT m.d92 AS md FROM zzp t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92 FROM zzp p JOIN zzj j ON p.id = j.id) m " +
+				"ON t.id = m.id ORDER BY m.id",
+			cols: []string{"md"},
+			want: "3 rows: -3.50;0.00;12.75;",
+		},
+		{
+			// The narrow side published by an arm joined to the WIDE table,
+			// so the outer join's own duplicate is the other one.
+			name: "arm-joins-both/narrow-side-under-a-wide-probe",
+			sql: "SELECT m.d92 AS md FROM zzj t JOIN " +
+				"(SELECT p.id AS id, p.d92 AS d92 FROM zzp p JOIN zzj j ON p.id = j.id) m " +
+				"ON t.id = m.id ORDER BY m.id",
+			cols: []string{"md"},
+			want: "3 rows: -3.50;0.00;12.75;",
+		},
+		{
+			// BOTH the probe's and the arm's column projected, so neither can
+			// borrow the other's declaration silently.
+			name: "arm-joins-both/probe-and-arm-together",
+			sql: "SELECT t.d92 AS td, m.d92 AS md FROM zzp t JOIN " +
+				"(SELECT p.id AS id, j.d92 AS d92 FROM zzp p JOIN zzj j ON p.id = j.id) m " +
+				"ON t.id = m.id ORDER BY t.id",
+			cols: []string{"td", "md"},
+			want: "3 rows: -3.50|1.1111;0.00|12345678.1234;12.75|3.3333;",
+		},
+		{
+			// The CTE spelling of the same arm.
+			name: "arm-joins-both/cte-spelling",
+			sql: "WITH cc AS (SELECT p.id AS id, j.d92 AS d92 FROM zzp p JOIN zzj j ON p.id = j.id) " +
+				"SELECT t.d92 AS td, cc.d92 AS md FROM zzp t JOIN cc ON t.id = cc.id ORDER BY t.id",
+			cols: []string{"td", "md"},
+			want: "3 rows: -3.50|1.1111;0.00|12345678.1234;12.75|3.3333;",
+		},
+		{
+			// A derived table WRAPPING the joining one, so the name has to
+			// survive two scopes.
+			name: "arm-joins-both/wrapped-in-another-derived-table",
+			sql: "SELECT m.d92 AS md FROM zzp t JOIN " +
+				"(SELECT id, d92 FROM (SELECT p.id AS id, j.d92 AS d92 FROM zzp p " +
+				"JOIN zzj j ON p.id = j.id) q) m ON t.id = m.id ORDER BY m.id",
+			cols: []string{"md"},
+			want: "3 rows: 1.1111;12345678.1234;3.3333;",
+		},
+		{
+			// The three-relation join with NO derived arm at all: the origins
+			// doctrine this leaves alone, and it must keep answering.
+			name: "arm-joins-both/control-three-base-relations",
+			sql: "SELECT a.d92 AS td, b.d92 AS md FROM zzp a JOIN zzj b ON a.id = b.id " +
+				"JOIN zzp c ON a.id = c.id ORDER BY a.id",
+			cols: []string{"td", "md"},
+			want: "3 rows: -3.50|1.1111;0.00|12345678.1234;12.75|3.3333;",
+		},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

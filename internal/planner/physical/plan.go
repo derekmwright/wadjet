@@ -6359,7 +6359,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Propagate build-side table alias for column disambiguation in self-joins
 		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).
 		if len(node.Children) >= 2 {
-			if alias := joinArmAlias(node.Children[1]); alias != "" {
+			// stageBuildTableAlias, not joinArmAlias: the DAG's build stream is
+			// the arm's RAW columns, because a Project emits no stage. See
+			// joinArmAlias' comment for the two answers and why they differ.
+			if alias := stageBuildTableAlias(node.Children[1]); alias != "" {
 				stage.BuildTableAlias = alias
 			}
 			// Multi-table build subtrees additionally carry per-column origin
@@ -7165,7 +7168,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 	// Multi-table build subtrees carry per-column origin aliases so each
 	// duplicate qualifies under its OWNING scan (nil for single-scan builds).
-	hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
+	hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).materializedBuildColOrigins()
 
 	// Grace Hash Join spill-to-disk: prevents OOM on large build sides (e.g.
 	// SF100 orders table at 150M rows). The shared MemTracker means multi-join
@@ -7225,7 +7228,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if alias := joinArmAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
 		}
-		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
+		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).materializedBuildColOrigins()
 	}
 
 	// Plan-declared schemas for the two sides, read only when a side delivers
@@ -12871,29 +12874,55 @@ func isColumnRef(tok string) bool {
 // qualifier strip, and bound the SIBLING arm's bare `dv`. Naming the arm `c`
 // makes the exact match the one that wins, and leaves p's `p.dv` on the
 // bare-strip path it already took.
+// It has TWO answers, because the two engines hand the join two different
+// STREAMS and a name describes a stream.
+//
+// On the single-process pipeline the arm's own Project is a real operator: the
+// build side the join receives is the arm's OUTPUT — `id`, `w` — and no inner
+// relation's columns are in it at all, so the ONE name the enclosing query
+// writes is the only name those columns can answer to.
+//
+// On the stage DAG a Project emits NO STAGE (ADR-0025), so the stream the join
+// receives is the arm's RAW inner columns — `d92` and `j.d92`, one per
+// relation inside it — and the arm's name describes none of them: which of the
+// two the arm publishes is exactly what the un-materialized Project knows and
+// the stage does not. Qualifying them by the arm there put `m.d92` on the
+// column the arm did NOT select, and every consumer read the wrong one.
+//
+// So `joinArmAlias` is the MATERIALIZED answer and `stageBuildTableAlias` is
+// the raw one, and each engine's resolvers use its own — which is what makes
+// the declaration and the value agree on each path (#773, #706 round 2).
 func joinArmAlias(node *logical.Node) string {
 	// The name is on the arm's SUBTREE ROOT — CTERefAlias for `FROM c AS x`,
 	// CTEName for `FROM c`, DerivedAlias for `FROM (SELECT …) q` — and a pass
 	// that wraps the arm (a pushed-down Filter, a Sort) leaves it one or more
-	// single-child nodes down, so the walk descends to find it. It stops at a
-	// node with more than one child: below a join the aliases belong to that
-	// join's own arms and not to this one.
-	for n := node; n != nil; {
-		if n.CTERefAlias != "" {
-			return n.CTERefAlias
-		}
-		if n.CTEName != "" {
-			return n.CTEName
-		}
-		if n.DerivedAlias != "" {
-			return n.DerivedAlias
-		}
-		if len(n.Children) != 1 {
-			break
-		}
-		n = n.Children[0]
+	// single-child nodes down, so `namedArmScope` descends to find it.
+	if name := namedArmScope(node); name != "" {
+		return name
 	}
 	// A base-table arm answers to its own alias, which the scan carries.
+	return findScanAlias(node)
+}
+
+// stageBuildTableAlias is joinArmAlias for the STAGE DAG, whose build stream
+// is the arm's raw inner columns rather than its Project's output.
+//
+// A CTE reference still answers by name — `flattenCTEAliases` repoints the
+// reference at the body's own producer, and a CTE's scope name is what every
+// DAG resolver has spelled its columns by since #653 — and a DERIVED arm
+// answers by the scan below it, because that is the name the inner join
+// already qualified its duplicates with and therefore the name the stream
+// really carries.
+func stageBuildTableAlias(node *logical.Node) string {
+	if node == nil {
+		return ""
+	}
+	if node.CTERefAlias != "" {
+		return node.CTERefAlias
+	}
+	if node.CTEName != "" {
+		return node.CTEName
+	}
 	return findScanAlias(node)
 }
 

@@ -938,73 +938,164 @@ func TestAWindowBetweenTheSelectListAndItsJoinThreeArms(t *testing.T) {
 				"5|52.99|200.00;6|52.99|0.00;7|52.99|;8|52.99|1275.00;9|52.99|;",
 		},
 
-		// --- An arm that is ITSELF A JOIN, in the DERIVED spelling (#773).
+		// --- An arm that is ITSELF A JOIN (#773), and the naming DOCTRINE the
+		// two engines need for one (#773 round 2).
 		//
-		// ADR-0025's residual list named the CTE spelling on the DAG arms and
-		// this is its mirror: the SINGLE path answered `t`'s `w` under `m`'s
-		// name. `joinArmAlias` read the alias off the SCAN below the arm, and
-		// an arm holding two scans has no single one to read — `setSubtreeAlias`
-		// declines to overwrite an inner derived table's stamp, so the scan
-		// answered to `g` while the query calls the arm `m`. The alias is on
-		// the arm's SUBTREE ROOT now, which is where a CTE has always kept it.
+		// The arm's own Project is a real OPERATOR on the single-process
+		// pipeline and emits NO STAGE on the DAG (ADR-0025), so the join is
+		// handed two different streams and a name describes a stream:
+		//
+		//   single   the build side IS the arm's output — `id`, `w` — and no
+		//            inner relation's columns are in it, so the ONE name the
+		//            enclosing query writes is the only name they answer to;
+		//   DAG      the build side is the arm's RAW inner columns, one per
+		//            relation inside it, and the arm's name describes NONE of
+		//            them: which one the arm publishes is exactly what the
+		//            un-materialized Project knows and the stage does not.
+		//
+		// Giving the DAG the arm's name put `m.w` on the column the arm did
+		// NOT select: `PROJ "g.w"` matched nothing, fell back to the bare
+		// name, and took the OTHER arm's column — silently, on both DAG arms,
+		// with no window anywhere. `joinArmAlias` is the materialized answer
+		// and `stageBuildTableAlias` the raw one.
+		//
+		// EVERY entry below spells BOTH arms COMPUTED. The first cut of this
+		// family spelled the probe arm `a AS w`, a plain RENAME, and a rename
+		// resolves back to a source column through every resolver — so the
+		// entries passed whichever name the join used and could not see the
+		// defect at all. One rename control is kept, deliberately marked.
 		{
-			name: "arm-is-a-join/derived-explicit-join",
+			name: "arm-is-a-join/computed-both-arms",
 			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
-				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
-				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
+				"(SELECT id, a * 2 AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, b * 3 AS w FROM " + tbl +
 				") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
 			cols: []string{"tid", "tw", "mw"},
-			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
-				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+			want: "9 rows: 1|25.50|38.2500;2|25.50|38.2503;3|25.50|38.2497;4|-0.02|-0.0300;" +
+				"5|4.00|30.0000;6|0.00|0.0000;7||3.0000;8|25.50|;9||;",
+		},
+		{
+			// Both arms WINDOWED and wrapped, so the arm's column is a slot's
+			// value and the probe's is another slot's.
+			name: "arm-is-a-join/wrapped-window-in-both-arms",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, SUM(a) OVER () + 0 AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () + 0 AS w FROM " +
+				tbl + ") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|52.99|49.2400;2|52.99|49.2400;3|52.99|49.2400;4|52.99|49.2400;" +
+				"5|52.99|49.2400;6|52.99|49.2400;7|52.99|49.2400;8|52.99|49.2400;9|52.99|49.2400;",
 		},
 		{
 			// The COMMA spelling of the same body: it is the arm being a JOIN
 			// and nothing about the keyword.
-			name: "arm-is-a-join/derived-comma-join",
+			name: "arm-is-a-join/comma-join",
 			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
-				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
-				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
-				") g, " + tbl + " h WHERE g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+				"(SELECT id, SUM(a) OVER () + 0 AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () + 0 AS w FROM " +
+				tbl + ") g, " + tbl + " h WHERE g.id = h.id) m ON t.id = m.id ORDER BY t.id",
 			cols: []string{"tid", "tw", "mw"},
-			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
-				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+			want: "9 rows: 1|52.99|49.2400;2|52.99|49.2400;3|52.99|49.2400;4|52.99|49.2400;" +
+				"5|52.99|49.2400;6|52.99|49.2400;7|52.99|49.2400;8|52.99|49.2400;9|52.99|49.2400;",
 		},
 		{
-			// BOTH relations inside the arm are derived, so neither scan
-			// carries a name the enclosing query wrote.
+			// BOTH relations inside the arm derived, so no scan below it
+			// answers to a name the enclosing query wrote.
 			name: "arm-is-a-join/both-relations-derived",
 			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
-				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
-				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
-				") g JOIN (SELECT id, b AS w2 FROM " + tbl + ") h ON g.id = h.id) m " +
+				"(SELECT id, SUM(a) OVER () + 0 AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () + 0 AS w FROM " +
+				tbl + ") g JOIN (SELECT id, f FROM " + tbl + ") h ON g.id = h.id) m " +
 				"ON t.id = m.id ORDER BY t.id",
 			cols: []string{"tid", "tw", "mw"},
-			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
-				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+			want: "9 rows: 1|52.99|49.2400;2|52.99|49.2400;3|52.99|49.2400;4|52.99|49.2400;" +
+				"5|52.99|49.2400;6|52.99|49.2400;7|52.99|49.2400;8|52.99|49.2400;9|52.99|49.2400;",
 		},
 		{
-			// The joining arm FIRST, which was already correct: the capture is
-			// directional, and this says the repair did not merely reorder it.
+			// The probe arm computed WITHOUT a window while the arm has one:
+			// the two sides reach the resolver by different routes.
+			name: "arm-is-a-join/probe-computed-arm-windowed",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, a * 2 AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () + 0 AS w FROM " +
+				tbl + ") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|25.50|49.2400;2|25.50|49.2400;3|25.50|49.2400;4|-0.02|49.2400;" +
+				"5|4.00|49.2400;6|0.00|49.2400;7||49.2400;8|25.50|49.2400;9||49.2400;",
+		},
+		{
+			// The BARE window spelling of the arm, which mints no `__win_N`
+			// reference inside a larger expression.
+			name: "arm-is-a-join/bare-window-in-the-arm",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, a * 2 AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () AS w FROM " +
+				tbl + ") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|25.50|49.2400;2|25.50|49.2400;3|25.50|49.2400;4|-0.02|49.2400;" +
+				"5|4.00|49.2400;6|0.00|49.2400;7||49.2400;8|25.50|49.2400;9||49.2400;",
+		},
+		{
+			// A LEFT join, so the arm's columns are null-padded as well as
+			// renamed.
+			name: "arm-is-a-join/left-join",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, SUM(a) OVER () + 0 AS w FROM " + tbl + ") t LEFT JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () + 0 AS w FROM " +
+				tbl + ") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|52.99|49.2400;2|52.99|49.2400;3|52.99|49.2400;4|52.99|49.2400;" +
+				"5|52.99|49.2400;6|52.99|49.2400;7|52.99|49.2400;8|52.99|49.2400;9|52.99|49.2400;",
+		},
+		{
+			// The joining arm FIRST, which was already correct on every arm:
+			// the capture is directional, and this says the repair is not a
+			// reorder.
 			name: "arm-is-a-join/joining-arm-first",
 			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
-				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
-				") g JOIN " + tbl + " h ON g.id = h.id) m JOIN " +
-				"(SELECT id, a AS w FROM " + tbl + ") t ON t.id = m.id ORDER BY t.id",
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () + 0 AS w FROM " +
+				tbl + ") g JOIN " + tbl + " h ON g.id = h.id) m JOIN " +
+				"(SELECT id, SUM(a) OVER () + 0 AS w FROM " + tbl + ") t " +
+				"ON t.id = m.id ORDER BY t.id",
 			cols: []string{"tid", "tw", "mw"},
-			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
-				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+			want: "9 rows: 1|52.99|49.2400;2|52.99|49.2400;3|52.99|49.2400;4|52.99|49.2400;" +
+				"5|52.99|49.2400;6|52.99|49.2400;7|52.99|49.2400;8|52.99|49.2400;9|52.99|49.2400;",
 		},
 		{
-			// The distinct-alias control: nothing is contested, and it was
-			// right before.
+			// DISTINCT aliases: nothing is contested and it was right before.
 			name: "arm-is-a-join/control-distinct-aliases",
-			sql: "SELECT t.id AS tid, t.w AS tw, m.w2 AS mw FROM " +
-				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
-				"(SELECT g.id AS id, g.w2 AS w2 FROM (SELECT id, a * 100 AS w2 FROM " + tbl +
+			sql: "SELECT t.id AS tid, t.w2 AS tw, m.w AS mw FROM " +
+				"(SELECT id, SUM(a) OVER () + 0 AS w2 FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () + 0 AS w FROM " +
+				tbl + ") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|52.99|49.2400;2|52.99|49.2400;3|52.99|49.2400;4|52.99|49.2400;" +
+				"5|52.99|49.2400;6|52.99|49.2400;7|52.99|49.2400;8|52.99|49.2400;9|52.99|49.2400;",
+		},
+		{
+			// The arm holding ONE relation, which needs no doctrine at all:
+			// the arm's name and its scan's alias describe the same stream.
+			name: "arm-is-a-join/control-single-relation-arm",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, SUM(b) OVER () AS w FROM " +
+				tbl + ") g) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|52.99|49.2400;2|52.99|49.2400;3|52.99|49.2400;4|52.99|49.2400;" +
+				"5|52.99|49.2400;6|52.99|49.2400;7|52.99|49.2400;8|52.99|49.2400;9|52.99|49.2400;",
+		},
+		{
+			// The RENAME spelling, kept as the deliberate control: it is
+			// correct on every tree whatever the join calls the arm, which is
+			// exactly why a family spelled this way could not fail.
+			name: "arm-is-a-join/control-rename-body",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, b AS w FROM " + tbl +
 				") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
 			cols: []string{"tid", "tw", "mw"},
-			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
-				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+			want: "9 rows: 1|52.99|12.7500;2|52.99|12.7501;3|52.99|12.7499;4|52.99|-0.0100;" +
+				"5|52.99|10.0000;6|52.99|0.0000;7|52.99|1.0000;8|52.99|;9|52.99|;",
 		},
 
 		// --- The three controls that bound the family.

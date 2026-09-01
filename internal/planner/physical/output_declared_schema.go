@@ -1009,16 +1009,19 @@ func withJoinArmQualifiers[V comparable](n *logical.Node, left, right, merged ma
 	return merged
 }
 
-// joinArmSoleName is the ONE name the enclosing query can write this join arm
-// under, or "" when it has none or more than one.
+// namedArmScope is the name a CTE reference or a DERIVED table gives its whole
+// subtree, or "" for a subtree the enclosing query names relation by relation.
 //
-// A CTE reference and a derived table name the whole subtree, however many
-// relations it holds. A bare subtree names each of its scans separately, so it
-// qualifies nothing unless it holds exactly one.
-func joinArmSoleName(n *logical.Node) string {
-	if n == nil {
-		return ""
-	}
+// It is the boundary the arc's doctrine rests on: inside such an arm the
+// relation aliases are the ARM's own business and no reference in the
+// enclosing query can write them, so every column the arm publishes answers to
+// this one name — the join qualifies its duplicates by it (`joinArmAlias`),
+// `subtreeNaming.buildColOrigins` does NOT override it with an inner scan's
+// alias, and the planner's rename walk does not resolve past it into an inner
+// spelling. Those three have to agree: the executor publishing `m.w` while the
+// planner asks for `g.w` is one output described two ways, which is the defect
+// this arc exists to remove, pointing inward.
+func namedArmScope(n *logical.Node) string {
 	for cur := n; cur != nil; {
 		if cur.CTERefAlias != "" {
 			return cur.CTERefAlias
@@ -1030,9 +1033,25 @@ func joinArmSoleName(n *logical.Node) string {
 			return cur.DerivedAlias
 		}
 		if len(cur.Children) != 1 {
-			break
+			return ""
 		}
 		cur = cur.Children[0]
+	}
+	return ""
+}
+
+// joinArmSoleName is the ONE name the enclosing query can write this join arm
+// under, or "" when it has none or more than one.
+//
+// A CTE reference and a derived table name the whole subtree, however many
+// relations it holds. A bare subtree names each of its scans separately, so it
+// qualifies nothing unless it holds exactly one.
+func joinArmSoleName(n *logical.Node) string {
+	if n == nil {
+		return ""
+	}
+	if name := namedArmScope(n); name != "" {
+		return name
 	}
 	var scans []*logical.Node
 	var walk func(*logical.Node)
