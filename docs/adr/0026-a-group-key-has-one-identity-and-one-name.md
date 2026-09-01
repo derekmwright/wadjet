@@ -373,7 +373,7 @@ the aggregate's own output, is REUSED when the SELECT list already computes it
 and hoisted into the nested-aggregate slot family otherwise, which is what
 HAVING has done since it grew `__having_N`.
 
-### 4a. A key that NAMES a window's output is spelled the way the producer publishes it (2026-09-01, #777)
+### 4a. A key that NAMES a window's output is REFUSED, because the question is about a stage (2026-09-01, #777)
 
 The other direction of §4: not a key read above a window, but a WINDOW OUTPUT
 read as a key. `SELECT x.id, x.w, COUNT(*) FROM (SELECT id, SUM(a) OVER () + 0
@@ -385,25 +385,60 @@ DAG arms.
 with the alias's DEFINING EXPRESSION, and for a wrapped window that expression
 is `__win_0 + 0` — a SLOT the join does not carry, because the window arm's own
 projection (`absorbWindowArmProjection`, ADR-0025 shape g) already renamed it
-away to `w`. The worker's pre-aggregate projection compiled that text against a
-batch with no `__win_0`, `expr.ColRef.Eval` answered nil, and the whole table
-keyed NULL.
+away to `w`.
 
-The aggregate's ARGUMENT path has asked the right question since #742 —
-`aggInputAliasIsMaterializedUnderItsName`: where a join, a window, a sort, a
-LIMIT or a DISTINCT stands below the defining Project, the producing fragment
-materializes the alias under its own NAME and the expression is what does not
-resolve. `aggKeyAliasMaterializedByProducer` asks it for the KEY.
+The obvious repair is to answer the ALIAS instead, and it is **not available at
+that point in the plan**. `walkStages` emits `GroupByCols` BEFORE
+`attachScanSelectProjections` and `absorbWindowArmProjection` run, and those are
+the passes that decide whether any fragment publishes the alias at all —
+`absorbWindowArmProjection` fires only from the join-input-projection pass, for
+a join arm's child with exactly one window stage, empty ProjectExprs and its
+expression columns available. Both candidate spellings are therefore right on
+some plan shapes and wrong on others, and nothing at stage-emission time knows
+which.
 
-It asks the NARROW form — the producer DIRECTLY below the Project that defines
-the alias — and that boundary is measured rather than assumed. The wide form,
-"does any such producer stand anywhere between the aggregate and the source",
-is what the argument path asks; asking it here turned two CORRECT DAG answers
-into `stage scan-0: column "w" does not exist in the input schema` over a
-derived table carrying an ORDER BY or a LIMIT, and repaired none of the shapes
-it was supposed to. So an ordinary computed alias over a bare scan, used as a
-key through a join or a DISTINCT, is still the #736 family and is filed as
-**#781** with pins that fail if it starts agreeing.
+Three attempts to infer it from NODE KINDS were each wrong in a different
+direction, and this ADR records them because the shape of the mistake is more
+useful than the fix:
+
+- the whole subtree below the aggregate ("any join, sort, LIMIT, window or
+  DISTINCT") turned two CORRECT DAG answers into `stage scan-0: column "w" does
+  not exist`, over a derived table with an ORDER BY or a LIMIT in it;
+- the producer DIRECTLY below the defining Project turned another correct
+  answer loud for `id % 7 AS k` beside a window — arithmetic over a scan column
+  that nothing materializes (`TestWindowPartitionKeyTwoPath` caught it);
+- that plus `referencesSyntheticWindow` still over-fired with NO join above:
+  nothing attaches the arm projection there, so the key dispatched as the bare
+  alias and `hash_aggregate` bound whatever the batch carried. LOUD where the
+  alias names nothing — and SILENT where it SHADOWS a base column.
+  `(SELECT id, SUM(id) OVER () + 0 AS g FROM collslot) x GROUP BY g` answered
+  three groups keyed by the SCAN's `g` where PostgreSQL answers one group of
+  240, on both DAG arms, turning a right answer into a wrong one. No fixture in
+  the tree contained a window alias that shadows a base column, which is
+  method 10 turned against the predicate itself.
+
+So the cell is REFUSED — `refuseUnstageableGroupKey` condition (3) — and routed
+to the coordinator-local pipeline, where the derived table's Project is a real
+operator and the alias is a real column. That answers PostgreSQL's rows for
+every shape in the cell INCLUDING the ones the DAG previously got right by
+luck, which is the only disposition that is base-or-better everywhere.
+
+The refusal is a placeholder for a stage-level answer, not a settled position.
+The real fix re-spells `GroupByCols` over the producing fragment's
+actually-emitted columns — the `emittedThroughPassThrough` /
+`respellSpecsOverProducerOutput` machinery `absorbWindowArmProjection` itself
+uses — as a pass that runs AFTER the projection passes. When that exists,
+condition (3) is deleted and `TestWindowOutputAsAGroupKeyMatchesPostgres`'s
+`routed` flags flip to false; every entry there asserts BOTH the rows and
+whether the refusal fired, so neither half can move in silence.
+
+The same one-field problem in a shape with no window in it — a computed alias
+over a BARE SCAN, and its aggregate-wrapped spelling — is **#781**, pinned in
+that gate. The discarded wide predicate would not have fixed the
+aggregate-wrapped spelling either: `COUNT(*) + 0 AS w` references no `__win_N`
+slot, so no window-shaped condition can see it. That is the clearest evidence
+that the question is about what a STAGE emits and not about what kind of node
+produced it.
 
 Both halves were needed. With only the walks widened, `SELECT g + 1, COUNT(*),
 SUM(COUNT(*)) OVER ()` stopped failing loudly and started answering NULL, and

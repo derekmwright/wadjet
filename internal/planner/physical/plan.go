@@ -5184,17 +5184,18 @@ func aggStageGroupKey(key string, e plansql.Node, child *logical.Node) (string, 
 		return key, false
 	}
 	if expr != nil {
-		// The alias names an EXPRESSION, and there are two answers to "what is
-		// this value called on the DAG" — the same two the aggregate ARGUMENT
-		// path has distinguished since #742. Where a JOIN, a window, a sort, a
-		// LIMIT or a DISTINCT stands between the aggregate and the source, the
-		// producing fragment MATERIALIZES the alias under its own name, so the
-		// key is a bare NAME there and the expression is what does not resolve.
-		// Shipping the expression regardless dispatched `__win_0 + 0` against a
-		// join that carries `w`, and every row landed in one NULL key (#777).
-		if name, ok := aggKeyAliasMaterializedByProducer(key, child); ok {
-			return name, true
-		}
+		// The alias names an EXPRESSION. There are two answers to "what is this
+		// value called on the DAG" — the expression, or the name the producing
+		// fragment materialized it under — and which one is right is a question
+		// about a STAGE, not about the logical plan. It cannot be answered here:
+		// walkStages runs BEFORE attachScanSelectProjections and
+		// absorbWindowArmProjection, the passes that decide whether any fragment
+		// materializes the alias at all.
+		//
+		// Round 1 of this arc inferred the answer from NODE KINDS and got it
+		// wrong three times in three different directions (#777's history is in
+		// ADR-0026 §4a). A key whose value no stage can name is REFUSED and
+		// routed instead — refuseUnstageableGroupKey condition (3).
 		return expr.String(), true
 	}
 	return resolved, true
@@ -13913,14 +13914,27 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 	if node == nil {
 		return nil, false
 	}
-	switch node.Type {
-	case logical.NodeFilter:
-		// A HAVING filter passes its input's schema through unchanged.
+	switch {
+	case node.Type == logical.NodeFilter:
+		// A HAVING filter, a Sort, a LIMIT and a WINDOW all leave the
+		// aggregate's own output columns visible under their own names —
+		// ADR-0026 §4's list, read from `logical.AggScopePreservingWrapper`
+		// rather than restated, because restating it is what this function was.
+		//
+		// It descended NodeFilter ALONE while its own guard at the #575 call
+		// site is `findAggregateAncestor`, which reads the full list. With a
+		// WINDOW between the aggregate and the SELECT list the guard said "yes,
+		// an aggregate is below" and this said "I cannot model that", so the
+		// duplicate-name slot pinning was skipped and two same-named outputs
+		// collapsed onto the FIRST: `SELECT COUNT(*) AS g, g AS x, ROW_NUMBER()
+		// OVER (ORDER BY g) FROM collslot GROUP BY g` answered the KEY's value
+		// under the aggregate's alias on the single-process path, where
+		// PostgreSQL 17 answers the counts (the DAG was right).
 		if len(node.Children) == 0 {
 			return nil, false
 		}
 		return aggregateOutputNames(node.Children[0])
-	case logical.NodeProject:
+	case node.Type == logical.NodeProject:
 		// Only the synthetic finalization projections findAggregateAncestor
 		// walks through; a real one is the pipeline's output already.
 		if !node.PreservesAggOutputs {
@@ -13931,7 +13945,7 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 			names = append(names, projectionOutputName(node.Projections[i]))
 		}
 		return names, true
-	case logical.NodeAggregate:
+	case node.Type == logical.NodeAggregate:
 		// Grouping sets renumber the key columns and add null-group
 		// bookkeeping; not modeled here.
 		if len(node.GroupingSets) > 0 || len(node.GroupingSetNulls) > 0 {

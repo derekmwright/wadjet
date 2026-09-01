@@ -112,5 +112,69 @@ func unstageableGroupKey(agg *logical.Node) error {
 				ErrGroupKeyDistributed, k.Name)
 		}
 	}
+	// (3) A key that names a derived table's COMPUTED alias whose definition
+	// WRAPS a window output. See windowWrappedGroupKey.
+	if len(agg.Children) == 1 {
+		if name, def, ok := windowWrappedGroupKey(agg); ok {
+			return fmt.Errorf("%w: the key %q is a window output wrapped in an expression"+
+				" (%s), and whether any fragment materializes it under that name is decided"+
+				" AFTER stage emission — the stage would carry a spelling that resolves on"+
+				" some plan shapes and silently binds another column on others",
+				ErrGroupKeyDistributed, name, def)
+		}
+	}
 	return nil
+}
+
+// windowWrappedGroupKey reports a GROUP BY key that names a derived table's
+// COMPUTED alias whose defining expression references a synthetic `__win_N`
+// slot — `SUM(a) OVER () + 0 AS w`, `ABS(SUM(a) OVER ())`, a CASE over one —
+// used as a key from outside that derived table.
+//
+// This is #777's cell, and it is refused rather than resolved because the
+// question it asks cannot be answered where the key is spelled. `walkStages`
+// emits the aggregate stage's `GroupByCols` BEFORE
+// `attachScanSelectProjections` and `absorbWindowArmProjection` run, and those
+// passes are what decide whether any fragment publishes the alias:
+// `absorbWindowArmProjection` fires only from the join-input-projection pass,
+// for a join arm's child with exactly one window stage, empty ProjectExprs and
+// its expression columns available. So the two candidate spellings — the
+// alias, and the defining expression over `__win_N` — are each right on some
+// plan shapes and wrong on others, and NOTHING at this point knows which.
+//
+// Round 1 of this arc tried to infer it from node kinds and was wrong three
+// times, in three directions, each caught by a different gate:
+//
+//   - the whole subtree ("any join/sort/LIMIT/window/DISTINCT below the
+//     aggregate") turned two CORRECT answers loud, over a derived table with
+//     an ORDER BY or a LIMIT in it;
+//   - the producer directly below the defining Project turned a CORRECT answer
+//     loud for `id % 7 AS k` beside a window, which nothing materializes
+//     (TestWindowPartitionKeyTwoPath);
+//   - that plus `referencesSyntheticWindow` still over-fired with NO join
+//     above: nothing attaches the arm projection there, so the key dispatched
+//     as the bare alias and `hash_aggregate` bound whatever the batch happened
+//     to carry. LOUD when the alias names nothing, and SILENT when it SHADOWS
+//     a base column — `(SELECT id, SUM(id) OVER () + 0 AS g FROM collslot) x
+//     GROUP BY g` answered three groups keyed by the SCAN's `g` where
+//     PostgreSQL answers one group of 240. No fixture in the tree contained a
+//     window alias that shadows a base column, which is method 10 turned
+//     against the predicate itself.
+//
+// Refusing routes the query to the coordinator-local single-process pipeline,
+// where the derived table's Project is a real operator and the alias is a real
+// column. Every shape in the cell is then PostgreSQL's answer, including the
+// ones the DAG used to get right by luck.
+func windowWrappedGroupKey(agg *logical.Node) (name, def string, ok bool) {
+	child := agg.Children[0]
+	for _, gb := range agg.GroupBy {
+		_, e, _, renamed := resolveAggInputName(gb, child)
+		if !renamed || e == nil {
+			continue
+		}
+		if referencesSyntheticWindow(e) {
+			return gb, e.String(), true
+		}
+	}
+	return "", "", false
 }

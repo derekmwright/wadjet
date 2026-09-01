@@ -18,24 +18,27 @@ import (
 //	  FROM decpair) x LEFT JOIN decpair z ON x.id = z.id GROUP BY x.id, x.w
 //
 // PostgreSQL 17 and the single-process path answer `w = 52.99` on all nine
-// rows. Both DAG arms answered NULL on all nine, silently.
+// rows. Both DAG arms answered NULL on all nine, silently: `aggStageGroupKey`
+// dispatches a computed alias as its DEFINING EXPRESSION, which for a wrapped
+// window is `__win_0 + 0` — a slot the join does not carry, because the window
+// arm's own projection already renamed it away to `w`.
 //
-// `aggStageGroupKey` answers a key that names a derived table's COMPUTED alias
-// with the alias's DEFINING EXPRESSION, unconditionally — so the key was
-// dispatched as `__win_0 + 0`, a window SLOT the join does not carry because the
-// window arm's own projection already renamed it away to `w`. The worker's
-// pre-aggregate projection compiled that text against a batch with no `__win_0`,
-// `expr.ColRef.Eval` answered nil, and every row landed in ONE NULL key.
+// THE ANSWER IS A REFUSAL, and the history is why. The alternative — dispatch
+// the ALIAS instead — needs to know whether any fragment actually publishes it,
+// and that is decided AFTER stage emission by `attachScanSelectProjections` and
+// `absorbWindowArmProjection`. Three successive attempts to infer it from NODE
+// KINDS were each wrong in a different direction (ADR-0026 §4a; the last one
+// answered three groups keyed by the SCAN's `g` where PostgreSQL answers one
+// group of 240, silently, for a window alias that SHADOWS a base column).
+// `refuseUnstageableGroupKey` condition (3) refuses the whole cell instead and
+// routes it to the coordinator-local pipeline, where the derived table's
+// Project is a real operator and the alias is a real column.
 //
-// The aggregate's ARGUMENT path has asked the right question since #742 —
-// `aggInputAliasIsMaterializedUnderItsName`: where a JOIN, a window, a sort, a
-// LIMIT or a DISTINCT stands between the aggregate and the source, the producing
-// fragment materializes the alias under its own NAME and the expression is what
-// does not resolve. `aggKeyAliasMaterializedByProducer` asks it for the KEY.
-//
-// Every entry asserts the KEY's value per row and not a row count: the failure
-// this replaces returned exactly PostgreSQL's nine rows with a NULL in one
-// column, which no count and no key-set assertion can see.
+// So every entry here asserts TWO things: PostgreSQL's whole ordered result,
+// and WHICH mechanism produced it. A gate that checked only the rows would pass
+// just as happily if the DAG started answering these by luck — which is exactly
+// what the shapes below the "answered right for the wrong reason" heading did
+// before this arc.
 func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up two embedded NATS clusters")
@@ -52,19 +55,23 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	arms := []struct {
-		name string
-		run  func(string) (*oracle.Result, error)
+		name  string
+		run   func(string) (*oracle.Result, error)
+		coord *Coordinator
 	}{
-		{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }},
-		{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }},
-		{"dag-shuffled", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }},
+		{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }, nil},
+		{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }, coord},
+		{"dag-shuffled", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }, coordB},
 	}
 
 	const tbl = dbpTable // decpair, nine rows; SUM(a) OVER () is 52.99
+
+	// routed marks an entry whose DAG answer must come from the refusal.
 	for _, tc := range []struct {
 		name, sql string
 		cols      []string
 		want      string // PostgreSQL 17, whole result, ordered
+		routed    bool
 	}{
 		{
 			name: "the-repro/left-join",
@@ -74,6 +81,7 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"id", "w", "n"},
 			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
+			routed: true,
 		},
 		{
 			// The INNER join twin. #777 named the LEFT join; the mechanism is
@@ -87,6 +95,7 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"id", "w", "n"},
 			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
+			routed: true,
 		},
 		{
 			// The window output as the ONLY key: nine rows collapse to one, so a
@@ -96,8 +105,9 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			name: "the-window-output-as-the-only-key",
 			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM " +
 				tbl + ") x LEFT JOIN " + tbl + " z ON x.id = z.id GROUP BY x.w ORDER BY w",
-			cols: []string{"w", "n"},
-			want: "1 rows: 52.99|9;",
+			cols:   []string{"w", "n"},
+			want:   "1 rows: 52.99|9;",
+			routed: true,
 		},
 		{
 			// The window arm on the NULL-SUPPLYING side, so the join type is
@@ -106,8 +116,9 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			sql: "SELECT x.w AS w, COUNT(*) AS n FROM " + tbl + " z LEFT JOIN (SELECT id, " +
 				"SUM(a) OVER () + 0 AS w FROM " + tbl + ") x ON x.id = z.id " +
 				"GROUP BY x.w ORDER BY w",
-			cols: []string{"w", "n"},
-			want: "1 rows: 52.99|9;",
+			cols:   []string{"w", "n"},
+			want:   "1 rows: 52.99|9;",
+			routed: true,
 		},
 		{
 			name: "beside-a-having",
@@ -117,6 +128,7 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"id", "w", "n"},
 			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
+			routed: true,
 		},
 		{
 			// A PARTITIONED window, whose per-row values DIFFER — so a key that
@@ -129,6 +141,7 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"id", "w", "n"},
 			want: "9 rows: 1|12.75|1;2|12.75|1;3|12.75|1;4|-0.01|1;5|2.00|1;6|0.00|1;" +
 				"7||1;8|12.75|1;9||1;",
+			routed: true,
 		},
 		{
 			// A RANKING function, and an aggregate over the OTHER arm beside it,
@@ -140,6 +153,7 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"id", "w", "s"},
 			want: "9 rows: 1|1|12.75;2|2|12.75;3|3|12.75;4|4|-0.01;5|5|2.00;6|6|0.00;" +
 				"7|7|;8|8|12.75;9|9|;",
+			routed: true,
 		},
 		{
 			// Over typemx, grouping by a column of the OTHER arm beside the
@@ -152,9 +166,128 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"g", "w", "n"},
 			want: "8 rows: 0|2256|6;1|2256|6;2|2256|6;3|2256|5;4|2256|5;5|2256|4;6|2256|5;" +
 				"|2256|3;",
+			routed: true,
 		},
-		// --- controls, all correct at base and all breakable by a fix that
-		// answers the ALIAS where nothing materializes it.
+		// --- the WRAPPER's shape does not matter, only that it wraps a window.
+		{
+			name: "wrapped-by-multiplication",
+			sql: "SELECT x.id AS i, x.w AS w, COUNT(*) AS n FROM (SELECT id, " +
+				"SUM(a) OVER () * 2 AS w FROM " + tbl + ") x LEFT JOIN " + tbl +
+				" z ON x.id = z.id GROUP BY x.id, x.w ORDER BY x.id",
+			cols: []string{"i", "w", "n"},
+			want: "9 rows: 1|105.98|1;2|105.98|1;3|105.98|1;4|105.98|1;5|105.98|1;6|105.98|1;" +
+				"7|105.98|1;8|105.98|1;9|105.98|1;",
+			routed: true,
+		},
+		{
+			name: "wrapped-by-a-case",
+			sql: "SELECT x.id AS i, x.w AS w, COUNT(*) AS n FROM (SELECT id, " +
+				"CASE WHEN SUM(a) OVER () > 0 THEN 1 ELSE 0 END AS w FROM " + tbl +
+				") x LEFT JOIN " + tbl + " z ON x.id = z.id GROUP BY x.id, x.w ORDER BY x.id",
+			cols:   []string{"i", "w", "n"},
+			want:   "9 rows: 1|1|1;2|1|1;3|1|1;4|1|1;5|1|1;6|1|1;7|1|1;8|1|1;9|1|1;",
+			routed: true,
+		},
+		// --- an intervening SORT or DISTINCT inside the arm. Both are shapes
+		// `absorbWindowArmProjection` DECLINES, so a join above is not
+		// sufficient either: the first was wrong-NULL on the DAG and the second
+		// failed hard, and both are answered by the route.
+		{
+			name: "an-inner-order-by-between-the-window-and-the-alias",
+			sql: "SELECT x.id AS i, x.w AS w, COUNT(*) AS n FROM (SELECT id, " +
+				"SUM(a) OVER () + 0 AS w FROM " + tbl + " ORDER BY id) x LEFT JOIN " + tbl +
+				" z ON x.id = z.id GROUP BY x.id, x.w ORDER BY x.id",
+			cols: []string{"i", "w", "n"},
+			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
+				"7|52.99|1;8|52.99|1;9|52.99|1;",
+			routed: true,
+		},
+		{
+			name: "a-distinct-between-the-window-and-the-alias",
+			sql: "SELECT x.id AS i, x.w AS w, COUNT(*) AS n FROM (SELECT DISTINCT id, " +
+				"SUM(a) OVER () + 0 AS w FROM " + tbl + ") x LEFT JOIN " + tbl +
+				" z ON x.id = z.id GROUP BY x.id, x.w ORDER BY x.id",
+			cols: []string{"i", "w", "n"},
+			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
+				"7|52.99|1;8|52.99|1;9|52.99|1;",
+			routed: true,
+		},
+		// --- ANSWERED RIGHT FOR THE WRONG REASON, and the whole reason the
+		// refusal is unconditional.
+		//
+		// With NO join above the derived table, nothing attaches the window
+		// arm's projection, so the DAG used to dispatch the DEFINING EXPRESSION
+		// over `__win_N` — which the window stage really does emit — and got the
+		// right answer. Dispatching the ALIAS instead, as round 1 of this arc
+		// did, made `hash_aggregate` bind whatever the batch carried: LOUD where
+		// the alias names nothing, and SILENTLY the SCAN's column where the
+		// alias SHADOWS one. `g` here is both the window alias and a real
+		// collslot column, which is the fixture the whole class was missing.
+		{
+			name: "shadowing/no-join-sum-over-id-aliased-g",
+			sql: "SELECT g AS k, COUNT(*) AS n FROM (SELECT id, SUM(id) OVER () + 0 AS g " +
+				"FROM collslot) x GROUP BY g ORDER BY k",
+			cols: []string{"k", "n"}, want: "1 rows: 28680|240;", routed: true,
+		},
+		{
+			name: "shadowing/no-join-count-over-aliased-g",
+			sql: "SELECT g AS k, COUNT(*) AS n FROM (SELECT id, COUNT(*) OVER () + 0 AS g " +
+				"FROM collslot) x GROUP BY g ORDER BY k",
+			cols: []string{"k", "n"}, want: "1 rows: 240|240;", routed: true,
+		},
+		{
+			// An aggregate over the shadowed column, so the answer moves if the
+			// key binds the wrong one AND the aggregate reads the wrong one.
+			name: "shadowing/no-join-with-an-aggregate-over-id",
+			sql: "SELECT g AS k, SUM(id) AS s FROM (SELECT id, SUM(id) OVER () + 0 AS g " +
+				"FROM collslot) x GROUP BY g ORDER BY k",
+			cols: []string{"k", "s"}, want: "1 rows: 28680|28680;", routed: true,
+		},
+		{
+			name: "shadowing/no-join-with-an-inner-filter",
+			sql: "SELECT g AS k, COUNT(*) AS n FROM (SELECT id, SUM(id) OVER () + 0 AS g " +
+				"FROM collslot WHERE id < 100) x GROUP BY g ORDER BY k",
+			cols: []string{"k", "n"}, want: "1 rows: 4950|100;", routed: true,
+		},
+		{
+			name: "shadowing/no-join-through-a-cte",
+			sql: "WITH x AS (SELECT id, SUM(id) OVER () + 0 AS g FROM collslot) " +
+				"SELECT g AS k, COUNT(*) AS n FROM x GROUP BY g ORDER BY k",
+			cols: []string{"k", "n"}, want: "1 rows: 28680|240;", routed: true,
+		},
+		{
+			name: "shadowing/no-join-with-an-outer-filter",
+			sql: "SELECT g AS k, COUNT(*) AS n FROM (SELECT id, SUM(id) OVER () + 0 AS g " +
+				"FROM collslot) x WHERE x.id >= 0 GROUP BY g ORDER BY k",
+			cols: []string{"k", "n"}, want: "1 rows: 28680|240;", routed: true,
+		},
+		{
+			// The alias does NOT shadow anything, but the base column it could
+			// have shadowed is in scope beside it — the near-miss control for
+			// the two above.
+			name: "shadowing/no-join-alias-does-not-shadow",
+			sql: "SELECT h AS k, COUNT(*) AS n FROM (SELECT id, g, SUM(id) OVER () + 0 AS h " +
+				"FROM collslot) x GROUP BY h ORDER BY k",
+			cols: []string{"k", "n"}, want: "1 rows: 28680|240;", routed: true,
+		},
+		{
+			name: "shadowing/with-a-join",
+			sql: "SELECT x.g AS k, COUNT(*) AS n FROM (SELECT id, SUM(id) OVER () + 0 AS g " +
+				"FROM collslot) x LEFT JOIN collslot z ON x.id = z.id GROUP BY x.g ORDER BY k",
+			cols: []string{"k", "n"}, want: "1 rows: 28680|240;", routed: true,
+		},
+		{
+			// The window output is the ONLY column of the derived table, so the
+			// alias names nothing at all below it — the LOUD face of the same
+			// over-fire.
+			name: "the-window-output-is-the-only-column",
+			sql: "SELECT w, COUNT(*) AS n FROM (SELECT SUM(a) OVER () + 0 AS w FROM " + tbl +
+				") x GROUP BY w ORDER BY w",
+			cols: []string{"w", "n"}, want: "1 rows: 52.99|9;", routed: true,
+		},
+		// --- controls: shapes that must keep running ON THE DAG. Without these
+		// a refusal widened by accident — every grouped query routed local —
+		// would pass every assertion above.
 		{
 			name: "ctl/no-group-by",
 			sql: "SELECT x.id AS id, x.w AS w FROM (SELECT id, SUM(a) OVER () + 0 AS w FROM " +
@@ -164,7 +297,8 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 		},
 		{
 			// The UNWRAPPED window, which is a plain rename of the slot and
-			// therefore takes resolveAggInputName's rename arm, not this one.
+			// therefore takes resolveAggInputName's rename arm, not the computed
+			// one — so it is not in the cell and must stay distributed.
 			name: "ctl/unwrapped-window-output",
 			sql: "SELECT x.id AS id, x.w AS w, COUNT(*) AS n FROM (SELECT id, " +
 				"SUM(a) OVER () AS w FROM " + tbl + ") x LEFT JOIN " + tbl +
@@ -173,10 +307,26 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
 		},
+		{
+			// A computed alias BESIDE a window that has nothing to do with it.
+			// `id % 7 AS k` is ordinary arithmetic over a scan column; round 1's
+			// second predicate answered the alias here and turned a correct DAG
+			// answer into `GROUP BY key "k" is not a column of its input`.
+			name: "ctl/a-non-window-alias-beside-a-window",
+			sql: "SELECT k, COUNT(*) AS n FROM (SELECT id % 7 AS k, " +
+				"COUNT(*) OVER (PARTITION BY id % 7) AS w FROM typemx) u " +
+				"GROUP BY k, w ORDER BY k",
+			cols: []string{"k", "n"},
+			want: "7 rows: 0|715;1|715;2|714;3|714;4|714;5|714;6|714;",
+		},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
+				before := int64(0)
+				if arm.coord != nil {
+					before = arm.coord.GroupKeyLocalRoutes()
+				}
 				res, err := arm.run(tc.sql)
 				if err != nil {
 					t.Fatalf("%s arm refused the query: %v\n  SQL: %s", arm.name, err, tc.sql)
@@ -185,32 +335,43 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
 						arm.name, got, tc.want, tc.sql)
 				}
+				if arm.coord == nil {
+					continue
+				}
+				routed := arm.coord.GroupKeyLocalRoutes() != before
+				if routed != tc.routed {
+					if tc.routed {
+						t.Errorf("%s arm answered WITHOUT the group-key refusal firing. Either "+
+							"walkStages grew a real lowering for a window-wrapped key — in which "+
+							"case delete condition (3) and gate the lowering — or the refusal's "+
+							"predicate narrowed and this shape is now answered by luck\n  SQL: %s",
+							arm.name, tc.sql)
+					} else {
+						t.Errorf("%s arm ROUTED a shape the DAG executes correctly — "+
+							"refuseUnstageableGroupKey condition (3) has widened\n  SQL: %s",
+							arm.name, tc.sql)
+					}
+				}
 			}
 		})
 	}
 
-	// THE BOUNDARY of the answer above, pinned rather than described.
+	// THE #781 BOUNDARY, pinned rather than described.
 	//
-	// `aggKeyAliasMaterializedByProducer` asks whether the producer DIRECTLY
-	// below the Project that defines the alias materializes it. It deliberately
-	// does not ask the wider question the ARGUMENT path asks — whether ANY
-	// join, sort, LIMIT, window or DISTINCT stands between the aggregate and the
-	// source — because widening it was measured and it turned two CORRECT DAG
-	// answers into `stage scan-0: column "w" does not exist` while fixing none
-	// of the shapes below.
-	//
-	// So an ordinary computed alias over a BARE SCAN, used as a group key
-	// through a join or a DISTINCT, is still wrong on the DAG: one NULL group
-	// over the whole table. It is not #777's mechanism — it has no window in it,
-	// and it is byte-identical with this file's change reverted AND with the
-	// whole arc reverted. It is the #736 family's one-field problem
+	// A computed alias over a BARE SCAN — no window in it — used as a group key
+	// through a join or a DISTINCT is still wrong on the DAG: one NULL group
+	// over the whole table. It is the #736 family's one-field problem
 	// (`Stage.GroupByCols` is both the RESOLUTION name and the PUBLISHED name)
-	// in a shape that arc's refusal deliberately does not cover: the key IS a
-	// column of the aggregate's input by every logical-plan test, and only the
-	// STAGE spelling is wrong. It is filed as #781.
+	// in a shape neither of that arc's two refusal conditions covers: the key IS
+	// a column of the aggregate's input by every logical-plan test, and only the
+	// STAGE spelling is wrong. Byte-identical with the whole arc reverted.
 	//
-	// Pinned here rather than elsewhere because these are the queries a fix to
-	// the WIDER question would move, and a pin that starts agreeing FAILS.
+	// The AGGREGATE-wrapped spelling is here too, and it matters: it has the
+	// identical NULL-key symptom and the #777 predicate that was discarded would
+	// NOT have fixed it either — `COUNT(*) + 0 AS w` references no `__win_N`
+	// slot, so no window-shaped condition can see it. It is the same site, and a
+	// fix has to be about what a STAGE emits rather than about what kind of node
+	// produced it.
 	//
 	// TODO(#781): delete these when a computed alias over a bare scan resolves.
 	for _, c := range []struct {
@@ -240,19 +401,40 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			// because the key is DECIMAL: `derivedGroupKeyDecl` cannot type it
 			// through the rename, so the slot is FLOAT64 and the #361 store
 			// guard fires. Same site, a different symptom, and it is here so a
-			// change that moves either one is visible.
+			// change that moves either one is visible (#786).
 			name:      "pin781/a-computed-decimal-alias-over-a-bare-scan-is-loud",
 			sql:       "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl + ") x GROUP BY x.w ORDER BY w",
 			cols:      []string{"w", "n"},
 			pg:        "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
 			dagPinned: "",
 		},
+		{
+			// The AGGREGATE-wrapped spelling: `COUNT(*) + 0 AS w` over a grouped
+			// derived table, read as a key through a join. Same NULL key, and no
+			// window anywhere in it.
+			name: "pin781/an-aggregate-wrapped-alias-under-a-join",
+			sql: "SELECT x.g AS g, x.w AS w FROM (SELECT g, COUNT(*) + 0 AS w FROM typemx " +
+				"GROUP BY g) x LEFT JOIN typemx z ON x.g = z.g GROUP BY x.g, x.w ORDER BY x.g",
+			cols:      []string{"g", "w"},
+			pg:        "8 rows: 0|660;1|660;2|659;3|659;4|659;5|659;6|660;|384;",
+			dagPinned: "8 rows: 0|;1|;2|;3|;4|;5|;6|;|;",
+		},
+		{
+			// And through a DISTINCT rather than a join, so the pin covers both
+			// producers the plain-arithmetic entries above cover.
+			name: "pin781/an-aggregate-wrapped-alias-under-a-distinct",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT DISTINCT g, COUNT(*) + 0 AS w " +
+				"FROM typemx GROUP BY g) x GROUP BY x.w ORDER BY w",
+			cols:      []string{"w", "n"},
+			pg:        "3 rows: 384|1;659|4;660|3;",
+			dagPinned: "1 rows: |8;",
+		},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			for _, arm := range arms {
 				res, err := arm.run(c.sql)
-				if arm.name == "single" {
+				if arm.coord == nil {
 					if err != nil {
 						t.Fatalf("single arm refused the query: %v\n  SQL: %s", err, c.sql)
 					}
