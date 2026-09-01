@@ -12754,16 +12754,28 @@ func isColumnRef(tok string) bool {
 // makes the exact match the one that wins, and leaves p's `p.dv` on the
 // bare-strip path it already took.
 func joinArmAlias(node *logical.Node) string {
-	if node == nil {
-		return ""
+	// The name is on the arm's SUBTREE ROOT — CTERefAlias for `FROM c AS x`,
+	// CTEName for `FROM c`, DerivedAlias for `FROM (SELECT …) q` — and a pass
+	// that wraps the arm (a pushed-down Filter, a Sort) leaves it one or more
+	// single-child nodes down, so the walk descends to find it. It stops at a
+	// node with more than one child: below a join the aliases belong to that
+	// join's own arms and not to this one.
+	for n := node; n != nil; {
+		if n.CTERefAlias != "" {
+			return n.CTERefAlias
+		}
+		if n.CTEName != "" {
+			return n.CTEName
+		}
+		if n.DerivedAlias != "" {
+			return n.DerivedAlias
+		}
+		if len(n.Children) != 1 {
+			break
+		}
+		n = n.Children[0]
 	}
-	// CTERefAlias first: `FROM c AS x` is written `x.dv` above the join.
-	if node.CTERefAlias != "" {
-		return node.CTERefAlias
-	}
-	if node.CTEName != "" {
-		return node.CTEName
-	}
+	// A base-table arm answers to its own alias, which the scan carries.
 	return findScanAlias(node)
 }
 

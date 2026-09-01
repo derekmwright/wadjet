@@ -1117,6 +1117,12 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		// Apply alias as table alias on the root scan if available
 		if table.Alias != "" {
 			setSubtreeAlias(plan, table.Alias)
+			// And on the subtree ROOT, the way a CTE records CTEName. The
+			// stamp above reaches the scans, which is what a bare reference
+			// resolves through; it cannot say what the ENCLOSING query calls
+			// this arm when the subtree holds two scans or an inner derived
+			// table of its own (#751, #773).
+			plan.DerivedAlias = table.Alias
 		}
 		return plan, nil
 	}

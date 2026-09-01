@@ -264,6 +264,18 @@ type Node struct {
 	// shares it.
 	CTERefAlias string
 
+	// DerivedAlias is a DERIVED table's own name, on the root of its
+	// sub-plan: `q` in `FROM (SELECT …) q`. It is the derived spelling of
+	// CTEName, and it is recorded on the SUBTREE ROOT for the same reason —
+	// setSubtreeAlias stamps the alias onto the SCANS below, so a subtree
+	// with more than one scan (an arm that is itself a JOIN) and a subtree
+	// with a derived table INSIDE it (which stamps its own alias first, and
+	// setSubtreeAlias then declines to overwrite) both leave the scans
+	// answering to a name the enclosing query never wrote. `joinArmAlias`
+	// reads it so a join qualifies an arm's duplicate columns by the name
+	// the QUERY calls that arm (#751, #773).
+	DerivedAlias string
+
 	// ScalarDecorrelated marks a LEFT join produced by
 	// decorrelateScalarSubqueries (children[1] is the grouped aggregate
 	// materializing the subquery result). reduceDecorrelatedScalarAggs

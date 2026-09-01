@@ -178,50 +178,103 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 			map[string]string{"pw": "49.2400", "qw": "52.99"}, scaleQW)
 	})
 
-	// A sibling NESTED inside a sibling (#751). Both DAG arms are right and
-	// the single path answers the OUTER sibling's window for the inner one, so
-	// the wrong side is the local engine. The DAG arms are ASSERTED, not
-	// skipped, so a fix that breaks them fails here rather than passing as
-	// "both arms agree".
-	t.Run("sibling nested in a sibling", func(t *testing.T) {
-		sql := "SELECT p.w AS pw, q.w AS qw, p.id FROM " +
-			"(SELECT id, SUM(plain) OVER () AS w FROM " + rsWinTab + ") p JOIN " +
-			"(SELECT x.id, x.w FROM (SELECT id, SUM(id) OVER () AS w FROM " + rsWinTab + ") x) q " +
-			"ON p.id = q.id ORDER BY p.id"
-		for _, arm := range arms {
-			res, err := arm.run(sql)
-			if err != nil {
-				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
-			}
-			if len(res.Rows) != 4 {
-				t.Fatalf("%s arm returned %d rows, want 4\n  SQL: %s", arm.name, len(res.Rows), sql)
-			}
-			// PostgreSQL: pw = SUM(plain) = 10000, qw = SUM(id) = 10.
-			want, pinned := "10", false
-			if arm.name == "single" {
-				want, pinned = "10000", true // TODO(#751)
-			}
-			for i, r := range res.Rows {
-				got := fmt.Sprintf("%v", r["qw"])
-				if got == want {
-					continue
+	// A sibling NESTED inside a sibling (#751). The single path answered the
+	// OUTER sibling's window for the inner one — both DAG arms were right, so
+	// the wrong side was the local engine's, and they are ASSERTED here rather
+	// than skipped so a fix that breaks them fails.
+	//
+	// The cause is the one `joinArmAlias` already fixed for a CTE arm, in the
+	// DERIVED spelling: the join qualifies a build arm's duplicate columns by
+	// the arm's name, and that name came from the SCAN below it.
+	// `setSubtreeAlias` declines to overwrite a stamp an INNER derived table
+	// already made, so the scan answered to `x` while the query calls the arm
+	// `q`, and `q.w` matched neither that nor p's bare `w`. A derived table
+	// records its own alias on its SUBTREE ROOT now, exactly as a CTE does.
+	//
+	// PostgreSQL 17: pw = SUM(plain) = 10000, qw = SUM(id) = 10. The two are
+	// deliberately different numbers — equal ones make a capture invisible.
+	for _, tc := range []struct {
+		name, sql string
+		pw, qw    string
+	}{
+		{
+			name: "sibling nested in a sibling",
+			sql: "SELECT p.w AS pw, q.w AS qw, p.id FROM " +
+				"(SELECT id, SUM(plain) OVER () AS w FROM " + rsWinTab + ") p JOIN " +
+				"(SELECT x.id, x.w FROM (SELECT id, SUM(id) OVER () AS w FROM " + rsWinTab + ") x) q " +
+				"ON p.id = q.id ORDER BY p.id",
+			pw: "10000", qw: "10",
+		},
+		{
+			// The nested one FIRST, which was already right: the capture is
+			// directional, and this says the repair is not merely a reorder.
+			name: "the nested sibling is the first arm",
+			sql: "SELECT p.w AS pw, q.w AS qw FROM " +
+				"(SELECT x.id, x.w FROM (SELECT id, SUM(id) OVER () AS w FROM " + rsWinTab + ") x) q " +
+				"JOIN (SELECT id, SUM(plain) OVER () AS w FROM " + rsWinTab + ") p " +
+				"ON p.id = q.id ORDER BY p.id",
+			pw: "10000", qw: "10",
+		},
+		{
+			// BOTH siblings nested, so neither arm's scan answers to the name
+			// the enclosing query wrote.
+			name: "both siblings nested",
+			sql: "SELECT p.w AS pw, q.w AS qw FROM " +
+				"(SELECT y.id, y.w FROM (SELECT id, SUM(plain) OVER () AS w FROM " + rsWinTab + ") y) p " +
+				"JOIN (SELECT x.id, x.w FROM (SELECT id, SUM(id) OVER () AS w FROM " + rsWinTab + ") x) q " +
+				"ON p.id = q.id ORDER BY p.id",
+			pw: "10000", qw: "10",
+		},
+		{
+			// THREE derived levels on one arm: the alias the query wrote is
+			// the outermost of three stamps.
+			name: "three derived levels on the nested arm",
+			sql: "SELECT p.w AS pw, q.w AS qw FROM " +
+				"(SELECT z.id, z.w FROM (SELECT y.id, y.w FROM " +
+				"(SELECT id, SUM(id) OVER () AS w FROM " + rsWinTab + ") y) z) q " +
+				"JOIN (SELECT id, SUM(plain) OVER () AS w FROM " + rsWinTab + ") p " +
+				"ON p.id = q.id ORDER BY p.id",
+			pw: "10000", qw: "10",
+		},
+		{
+			// The control: DISTINCT aliases, nothing contested, right before.
+			name: "control, the nested sibling publishes its own alias",
+			sql: "SELECT p.w1 AS pw, q.w2 AS qw FROM " +
+				"(SELECT id, SUM(plain) OVER () AS w1 FROM " + rsWinTab + ") p JOIN " +
+				"(SELECT x.id, x.w2 FROM (SELECT id, SUM(id) OVER () AS w2 FROM " + rsWinTab + ") x) q " +
+				"ON p.id = q.id ORDER BY p.id",
+			pw: "10000", qw: "10",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
 				}
-				if pinned {
-					t.Errorf("the single arm now answers qw=%q — TODO(#751) is fixed, delete "+
-						"this pin and assert 10 on every arm\n  SQL: %s", got, sql)
-					break
+				if len(res.Rows) != 4 {
+					t.Fatalf("%s arm returned %d rows, want 4\n  SQL: %s",
+						arm.name, len(res.Rows), tc.sql)
 				}
-				t.Errorf("%s arm row %d: qw = %q, PostgreSQL 17 answers 10\n  SQL: %s",
-					arm.name, i, got, sql)
-				break
-			}
-			for i, r := range res.Rows {
-				if got := fmt.Sprintf("%v", r["pw"]); got != "10000" {
-					t.Errorf("%s arm row %d: pw = %q, want 10000\n  SQL: %s", arm.name, i, got, sql)
+				for i, r := range res.Rows {
+					if got := fmt.Sprintf("%v", r["qw"]); got != tc.qw {
+						t.Errorf("%s arm row %d: qw = %q, PostgreSQL 17 answers %q — a sibling "+
+							"nested in a sibling answered the OUTER one's window\n  SQL: %s",
+							arm.name, i, got, tc.qw, tc.sql)
+						break
+					}
+				}
+				for i, r := range res.Rows {
+					if got := fmt.Sprintf("%v", r["pw"]); got != tc.pw {
+						t.Errorf("%s arm row %d: pw = %q, want %q\n  SQL: %s",
+							arm.name, i, got, tc.pw, tc.sql)
+						break
+					}
 				}
 			}
-		}
-	})
+		})
+	}
 
 	// #742's shape: a qualified reference satisfied by ANOTHER arm's
 	// identically-named column, with a base table between the two derived

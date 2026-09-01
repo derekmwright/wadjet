@@ -948,6 +948,75 @@ func TestAWindowBetweenTheSelectListAndItsJoinThreeArms(t *testing.T) {
 				"5|52.99|200.00;6|52.99|0.00;7|52.99|;8|52.99|1275.00;9|52.99|;",
 		},
 
+		// --- An arm that is ITSELF A JOIN, in the DERIVED spelling (#773).
+		//
+		// ADR-0025's residual list named the CTE spelling on the DAG arms and
+		// this is its mirror: the SINGLE path answered `t`'s `w` under `m`'s
+		// name. `joinArmAlias` read the alias off the SCAN below the arm, and
+		// an arm holding two scans has no single one to read — `setSubtreeAlias`
+		// declines to overwrite an inner derived table's stamp, so the scan
+		// answered to `g` while the query calls the arm `m`. The alias is on
+		// the arm's SUBTREE ROOT now, which is where a CTE has always kept it.
+		{
+			name: "arm-is-a-join/derived-explicit-join",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
+				") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
+				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+		},
+		{
+			// The COMMA spelling of the same body: it is the arm being a JOIN
+			// and nothing about the keyword.
+			name: "arm-is-a-join/derived-comma-join",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
+				") g, " + tbl + " h WHERE g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
+				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+		},
+		{
+			// BOTH relations inside the arm are derived, so neither scan
+			// carries a name the enclosing query wrote.
+			name: "arm-is-a-join/both-relations-derived",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
+				") g JOIN (SELECT id, b AS w2 FROM " + tbl + ") h ON g.id = h.id) m " +
+				"ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
+				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+		},
+		{
+			// The joining arm FIRST, which was already correct: the capture is
+			// directional, and this says the repair did not merely reorder it.
+			name: "arm-is-a-join/joining-arm-first",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w AS mw FROM " +
+				"(SELECT g.id AS id, g.w AS w FROM (SELECT id, a * 100 AS w FROM " + tbl +
+				") g JOIN " + tbl + " h ON g.id = h.id) m JOIN " +
+				"(SELECT id, a AS w FROM " + tbl + ") t ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
+				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+		},
+		{
+			// The distinct-alias control: nothing is contested, and it was
+			// right before.
+			name: "arm-is-a-join/control-distinct-aliases",
+			sql: "SELECT t.id AS tid, t.w AS tw, m.w2 AS mw FROM " +
+				"(SELECT id, a AS w FROM " + tbl + ") t JOIN " +
+				"(SELECT g.id AS id, g.w2 AS w2 FROM (SELECT id, a * 100 AS w2 FROM " + tbl +
+				") g JOIN " + tbl + " h ON g.id = h.id) m ON t.id = m.id ORDER BY t.id",
+			cols: []string{"tid", "tw", "mw"},
+			want: "9 rows: 1|12.75|1275.00;2|12.75|1275.00;3|12.75|1275.00;4|-0.01|-1.00;" +
+				"5|2.00|200.00;6|0.00|0.00;7||;8|12.75|1275.00;9||;",
+		},
+
 		// --- The three controls that bound the family.
 		{
 			// The window REMOVED: if this one moves, the finding is not the
