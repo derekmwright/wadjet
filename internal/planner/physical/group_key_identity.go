@@ -273,16 +273,16 @@ func groupKeyByIdentity(agg *logical.Node) map[string]string {
 
 // aggregateUnderOutput finds the Aggregate the output projection reads, or nil
 // when the plan's top is not a grouped query. Only the nodes that leave the
-// aggregate's own columns visible are walked through: a Project, a HAVING
-// Filter, a Sort and a LIMIT. A join, a window or a set operation below the
-// top means the SELECT list is written over something else, and the walk
+// aggregate's own columns visible are walked through: a Project, and the
+// wrappers aggScopePreservingWrapper names. A join or a set operation below
+// the top means the SELECT list is written over something else, and the walk
 // declines rather than guessing.
 func aggregateUnderOutput(root *logical.Node) *logical.Node {
 	for n := root; n != nil; {
-		switch n.Type {
-		case logical.NodeAggregate:
+		switch {
+		case n.Type == logical.NodeAggregate:
 			return n
-		case logical.NodeProject, logical.NodeFilter, logical.NodeSort, logical.NodeLimit:
+		case n.Type == logical.NodeProject, aggScopePreservingWrapper(n.Type):
 		default:
 			return nil
 		}
@@ -292,6 +292,41 @@ func aggregateUnderOutput(root *logical.Node) *logical.Node {
 		n = n.Children[0]
 	}
 	return nil
+}
+
+// aggScopePreservingWrapper reports whether a node standing between an
+// aggregate and the SELECT list above it leaves the aggregate's OWN output
+// columns visible, under their own names.
+//
+// It is the same question `scopePreservingWrapper` (output_rename_resolve.go)
+// asks about a relation's scope, asked about an aggregate's output schema, and
+// the two walks that ask it — `aggregateUnderOutput` for the DAG's gather and
+// `findAggregateAncestor` for the single-process projection — read it from
+// here so they cannot answer differently.
+//
+// A WINDOW is on the list, and its omission is #737: `exec.Window` APPENDS its
+// output to its input, so every column the aggregate published is still there
+// under its own name. With the window stopping both walks, a SELECT item that
+// IS a computed group key was compiled as ARITHMETIC over an input column the
+// aggregate does not emit, and `SELECT g + 1 AS k, ROW_NUMBER() OVER (…) FROM
+// t GROUP BY g + 1` answered the right eight rows with a NULL key on all five
+// arms.
+//
+// A Filter (HAVING), a Sort and a LIMIT are on it for the same reason: they
+// drop or reorder ROWS and rename no column. An Aggregate is not — it replaces
+// its child's schema with its own keys and outputs, which is why it is the
+// walk's TARGET rather than a wrapper. Neither is a Project: what a Project
+// does to the schema is the caller's own question, so each walk keeps its own
+// rule for it. NodeDistinct is deliberately absent: `rewriteDistinctAsGroupBy`
+// lowers a DISTINCT above a grouped query into a second Aggregate, so the node
+// does not stand there, and admitting a kind no fixture produces would put an
+// untested path on the default route (METHOD 10).
+func aggScopePreservingWrapper(t logical.NodeType) bool {
+	switch t {
+	case logical.NodeFilter, logical.NodeSort, logical.NodeLimit, logical.NodeWindow:
+		return true
+	}
+	return false
 }
 
 // publishedGroupKeyNames is the name list exec.HashAggregate publishes its

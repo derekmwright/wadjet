@@ -191,6 +191,20 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// Map aggregate expression string → synthetic name (for ORDER BY resolution)
 	aggSyntheticNames := map[string]string{}
 
+	// What an aggregate below PUBLISHES, for the WINDOW above it to be spelled
+	// against (#737). Both are empty when the query has no aggregate, and the
+	// respell is then a no-op.
+	//
+	// groupKeyRefs maps a computed GROUP BY key's identity to the column the
+	// aggregate publishes its value under; winAggRefs maps an aggregate CALL
+	// inside a window's own spec to the aggregate output that computes it.
+	// A window evaluates its argument, its PARTITION BY and its ORDER BY over
+	// the aggregate's OUTPUT rows, where both of those are NAMES — `g` and the
+	// aggregate's input columns are gone — which is the same rule ADR-0026 §3
+	// states for HAVING, one operator over.
+	var groupKeyRefs map[string]string
+	winAggRefs := map[string]string{}
+
 	// GROUP BY / aggregation
 	if hasAgg || len(info.GroupBy) > 0 {
 		var aggs []AggExpr
@@ -367,7 +381,41 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 		}
 
-		var groupKeyRefs map[string]string
+		// The same hoist for an aggregate inside a WINDOW's own spec.
+		//
+		// `SUM(COUNT(*)) OVER ()` and `ROW_NUMBER() OVER (ORDER BY COUNT(*))`
+		// run the window over the aggregate's OUTPUT rows, so the call inside
+		// the spec names a column the aggregate publishes and is not something
+		// the window can compute. Left as text it named nothing: the ORDER BY
+		// key was NULL on every row and the window answered in an arbitrary
+		// order, and the argument answered NULL — both silently, and both on
+		// every arm (#737).
+		//
+		// An identical aggregate the SELECT list already computes is REUSED,
+		// exactly as HAVING reuses one; anything else is hoisted into the
+		// nested-aggregate slot family, which is where an aggregate inside an
+		// expression has lived since #610.
+		for _, col := range info.Columns {
+			for _, term := range windowSpecTerms(col) {
+				for _, wAgg := range plansql.FindAllAggregates(term) {
+					wKey := strings.ToLower(wAgg.String())
+					if _, done := winAggRefs[wKey]; done {
+						continue
+					}
+					if existing, ok := aggSyntheticNames[wKey]; ok {
+						winAggRefs[wKey] = existing
+						continue
+					}
+					name, err := reuseOrAddAggregate(wAgg, &aggs, &aggCounter)
+					if err != nil {
+						return nil, err
+					}
+					winAggRefs[wKey] = name
+					aggSyntheticNames[wKey] = name
+				}
+			}
+		}
+
 		if len(info.GroupingSets) > 0 {
 			// GROUPING SETS / CUBE / ROLLUP: build multiple aggregate passes
 			// connected by UNION ALL.
@@ -493,6 +541,22 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			winExprs = append(winExprs, we)
 		}
 		winExprs = append(winExprs, nestedWinExprs...)
+		// Spell every term the window will EVALUATE against what the producer
+		// below it PUBLISHES. Above an aggregate `g + 1` is the NAME of one
+		// column and `COUNT(*)` is the name of another; rebuilding either as an
+		// expression reads input columns the aggregate does not emit (#737).
+		// With no aggregate below, both maps are empty and this is a no-op.
+		for i := range winExprs {
+			winExprs[i].InputCol = respellOverAggregate(winExprs[i].InputCol, winAggRefs, groupKeyRefs)
+			for j := range winExprs[i].PartitionBy {
+				winExprs[i].PartitionBy[j] = respellOverAggregate(
+					winExprs[i].PartitionBy[j], winAggRefs, groupKeyRefs)
+			}
+			for j := range winExprs[i].OrderBy {
+				winExprs[i].OrderBy[j].Column = respellOverAggregate(
+					winExprs[i].OrderBy[j].Column, winAggRefs, groupKeyRefs)
+			}
+		}
 		plan = NewWindow(plan, winExprs)
 	}
 
@@ -834,6 +898,132 @@ func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 // (#610). It mirrors the WindowSpec→WindowExpr conversion the bare top-level
 // path performs above, reading the func name, argument list, PARTITION BY /
 // ORDER BY keys and frame straight off the AST node.
+// windowSpecTerms returns the parsed terms a SELECT-list item's WINDOWS will
+// EVALUATE — the function's arguments, the PARTITION BY keys and the ORDER BY
+// keys — for both spellings: a BARE window column, whose spec the parser keeps
+// as text, and a window NESTED inside a larger expression, whose spec is
+// already an AST.
+//
+// The window's own OUTPUT is deliberately not a term: it is what the operator
+// computes, not what it reads.
+func windowSpecTerms(col plansql.SelectColumn) []plansql.Node {
+	var out []plansql.Node
+	add := func(text string) {
+		text = strings.TrimSpace(text)
+		if text == "" || text == "*" {
+			return
+		}
+		if parsed, err := plansql.ParseExpression(text); err == nil && parsed != nil {
+			out = append(out, parsed)
+		}
+	}
+	if col.IsWindow && col.WindowSpec != nil {
+		add(col.WindowSpec.Args)
+		for _, p := range col.WindowSpec.PartitionBy {
+			add(p)
+		}
+		for _, ob := range col.WindowSpec.OrderBy {
+			add(ob.Column)
+		}
+		return out
+	}
+	if col.ASTExpr == nil {
+		return nil
+	}
+	for _, wfn := range plansql.FindAllWindowFuncs(col.ASTExpr) {
+		if wfn.Func != nil {
+			out = append(out, wfn.Func.Args...)
+		}
+		out = append(out, wfn.PartitionBy...)
+		for _, ob := range wfn.OrderBy {
+			if ob.Expr != nil {
+				out = append(out, ob.Expr)
+			}
+		}
+	}
+	return out
+}
+
+// reuseOrAddAggregate returns the column an aggregate CALL is published under,
+// reusing an identical aggregate the SELECT list already computes and adding a
+// hidden one when there is none.
+//
+// The match is on the NORMALIZED fields — function, input column, DISTINCT —
+// and never on rendered text: an AggExpr's InputCol has had `count(*)`'s star
+// emptied by the time it is stored, while the AST still renders `count(*)`, so
+// a text key made `HAVING COUNT(*) > 1` beside `COUNT(*) AS c` count twice.
+func reuseOrAddAggregate(call *plansql.FuncCallNode, aggs *[]AggExpr, counter *int) (string, error) {
+	inputCol := ""
+	var inputExpr plansql.Node
+	if len(call.Args) > 0 {
+		inputCol = cleanExpr(call.Args[0].String())
+		inputExpr = call.Args[0]
+	}
+	funcName := strings.ToLower(call.Name)
+	if funcName == "count" && (inputCol == "*" || inputCol == "") {
+		inputCol = ""
+	}
+	if len(call.Args) <= 1 {
+		for _, existing := range *aggs {
+			if existing.InputCol2 != "" || existing.Separator != "" || existing.Percentile != 0 {
+				continue
+			}
+			if strings.EqualFold(existing.Func, funcName) &&
+				strings.EqualFold(existing.InputCol, inputCol) &&
+				existing.Distinct == call.Distinct {
+				return existing.OutputCol, nil
+			}
+		}
+	}
+	name := plansql.SlotName(plansql.SlotNestedAgg, *counter)
+	*counter++
+	ae := AggExpr{
+		Func:      funcName,
+		InputCol:  inputCol,
+		OutputCol: name,
+		Distinct:  call.Distinct,
+		InputExpr: inputExpr,
+	}
+	if err := parseAggExtraArgs(&ae, call.Args); err != nil {
+		return "", err
+	}
+	*aggs = append(*aggs, ae)
+	return name, nil
+}
+
+// respellOverAggregate rewrites one window-spec term so it names what the
+// aggregate below PUBLISHES: an aggregate call becomes the output column that
+// computes it, and a computed GROUP BY key becomes the column the key's value
+// is published under.
+//
+// The result is RENDERED, which for a published key means a DELIMITED
+// identifier: a computed key is published under its own canonical text, so
+// `g + 1` names one column and re-parsing it bare would read it back as
+// arithmetic over a `g` the aggregate does not emit — ADR-0026 §2c's rule in
+// the direction a window's key resolver reads. `physical.resolveWindowKeys`
+// strips the delimiters and binds the name; without them it materialized the
+// key by EVALUATING it and ordered by NULL on every row.
+func respellOverAggregate(term string, aggRefs, keyRefs map[string]string) string {
+	if term == "" || term == "*" || (len(aggRefs) == 0 && len(keyRefs) == 0) {
+		return term
+	}
+	parsed, err := plansql.ParseExpression(term)
+	if err != nil || parsed == nil {
+		return term
+	}
+	out := parsed
+	if len(aggRefs) > 0 {
+		out = plansql.ReplaceAllAggregates(out, aggRefs)
+	}
+	if len(keyRefs) > 0 {
+		out = plansql.ReplaceGroupKeyRefs(out, keyRefs)
+	}
+	if out == nil || out == parsed {
+		return term
+	}
+	return out.String()
+}
+
 func windowExprFromNode(wfn *plansql.WindowFuncNode, outputCol string) WindowExpr {
 	inputCol := ""
 	if wfn.Func.Star {

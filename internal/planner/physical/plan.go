@@ -3262,6 +3262,23 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 				aliased[j].Name = a
 			}
 		}
+		// A WINDOW forwards its input, and that input may be an AGGREGATE's
+		// output — where a computed GROUP BY key is the NAME of one column and
+		// not arithmetic over one. Spell the specs against what the producer
+		// chain EMITS, which is what the StageProject branch above already does
+		// for a collapsing producer. Without it the window fragment rebuilt
+		// `g + 1` over a `g` the aggregate does not emit and both DAG arms
+		// answered the right eight rows with a NULL key (#737).
+		//
+		// Only for a window: a scan or a join is its own input's columns, so
+		// there is nothing to re-spell, and running the respell there would
+		// make its DECLINE — which is a plan-wide bail — reachable for shapes
+		// that are correct today.
+		if isWindow {
+			if respelled, ok := respellSpecsOverProducerOutput(stages, i, aliased); ok {
+				aliased = respelled
+			}
+		}
 		// Every sort key — the fused sort's on a join, and the standalone
 		// sort stage's — must resolve among the projection's outputs:
 		// OpProject narrows the schema to exactly its projections. Bail
@@ -13789,12 +13806,19 @@ func namesMatchProjections(names []string, projections []logical.Projection) boo
 }
 
 // findAggregateAncestor returns the Aggregate node if the given node is one,
-// or traverses through passthrough nodes (Filter/HAVING) to find it.
+// or traverses through the nodes that leave the aggregate's own output columns
+// visible to find it: a HAVING Filter, a Sort, a LIMIT, a WINDOW
+// (aggScopePreservingWrapper), and a synthetic finalization Project.
+//
+// It is the single-process half of the walk `aggregateUnderOutput` performs
+// for the gather, and the two read one list so they cannot disagree about a
+// node kind — which is exactly how a window between the SELECT list and the
+// aggregate made a computed group key NULL on BOTH paths (#737).
 func findAggregateAncestor(node *logical.Node) *logical.Node {
 	if node.Type == logical.NodeAggregate {
 		return node
 	}
-	if node.Type == logical.NodeFilter && len(node.Children) > 0 {
+	if aggScopePreservingWrapper(node.Type) && len(node.Children) == 1 {
 		return findAggregateAncestor(node.Children[0])
 	}
 	// Synthetic finalization projections (two-level AVG) pass every

@@ -2309,21 +2309,152 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 		})
 
-		// A WINDOW above the aggregate NULLs the key on BOTH paths: the walk
-		// that re-points a SELECT item at its key's column stops at a
-		// NodeWindow. PostgreSQL answers 1..7 plus NULL.
+		// A WINDOW above the aggregate (#737).
 		//
-		// TODO(#737): delete this pin when a window passes the key through.
-		t.Run("WindowAboveTheAggregate", func(t *testing.T) {
-			sql := fmt.Sprintf(`SELECT g + 1 AS k, ROW_NUMBER() OVER (ORDER BY g + 1) AS rn `+
-				`FROM %s GROUP BY g + 1 ORDER BY k`, tbl)
-			for _, arm := range sfcArms(ctx, single, coord) {
-				res := sfcRun(t, arm, sql)
-				for _, r := range res.Rows {
-					if r["k"] != nil {
-						t.Fatalf("%s arm now answers a non-NULL key above a window; "+
-							"PostgreSQL answers 1..%d plus NULL. #737 is fixed — assert it "+
-							"and delete this pin\n  SQL: %s", arm.name, wantKeys, sql)
+		// A window APPENDS its outputs to its input and renames nothing, so
+		// every column the aggregate published is still there under its own
+		// name — and the two walks that re-point a SELECT item at its key's
+		// column both stopped at a NodeWindow anyway, so `g + 1` was compiled
+		// as ARITHMETIC over a `g` the aggregate does not emit and the key was
+		// NULL on every row, on all five arms.
+		//
+		// The window's OWN spec is the second half and needs the same rule:
+		// its ORDER BY / PARTITION BY key and its argument are evaluated over
+		// the aggregate's OUTPUT, where a computed key is a NAME and an
+		// aggregate call is the name of the column that computes it. Left as
+		// text they named nothing and the window ordered by NULL — the right
+		// rows in an arbitrary sequence, which is why every entry here asserts
+		// the SEQUENCE and not only the key set.
+		//
+		// PostgreSQL 17 answers keys 1..7 then the NULL group, with
+		// ROW_NUMBER 1..8 in that order.
+		for _, tc := range []struct {
+			name, sql string
+			// rn is the window column's value for the i-th row (0-based) of
+			// PostgreSQL's ordering; nil means "not asserted".
+			rn func(i int) int64
+			// bare marks the entry whose key is `g` itself rather than
+			// `g + 1`, so its published values are 0..6.
+			bare bool
+		}{
+			{
+				name: "WindowAboveTheAggregate",
+				sql: fmt.Sprintf(`SELECT g + 1 AS k, ROW_NUMBER() OVER (ORDER BY g + 1) AS rn `+
+					`FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+				rn: func(i int) int64 { return int64(i + 1) },
+			},
+			{
+				// ORDER BY the window's own output, so a key that orders
+				// wrongly reorders the whole answer rather than one column.
+				name: "WindowAboveTheAggregateOrderedByTheWindow",
+				sql: fmt.Sprintf(`SELECT g + 1 AS k, ROW_NUMBER() OVER (ORDER BY g + 1) AS rn `+
+					`FROM %s GROUP BY g + 1 ORDER BY rn`, tbl),
+				rn: func(i int) int64 { return int64(i + 1) },
+			},
+			{
+				// PARTITION BY the key: a key resolved to nothing puts every
+				// row in ONE partition, so each row's ROW_NUMBER is 1 here
+				// and 1..8 there.
+				name: "WindowPartitionedByTheKey",
+				sql: fmt.Sprintf(`SELECT g + 1 AS k, ROW_NUMBER() OVER (PARTITION BY g + 1) AS rn `+
+					`FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+				rn: func(int) int64 { return 1 },
+			},
+			{
+				// An expression OVER the key beside the window.
+				name: "WindowBesideAnExpressionOverTheKey",
+				sql: fmt.Sprintf(`SELECT g + 1 AS k, ROW_NUMBER() OVER (ORDER BY g + 1) AS rn `+
+					`FROM %s GROUP BY g + 1 HAVING COUNT(*) > 0 ORDER BY k`, tbl),
+				rn: func(i int) int64 { return int64(i + 1) },
+			},
+			{
+				// A BARE column key, which needs no materialization at all
+				// and must keep answering.
+				name: "WindowAboveABareKey",
+				sql: fmt.Sprintf(`SELECT g AS k, ROW_NUMBER() OVER (ORDER BY g) AS rn `+
+					`FROM %s GROUP BY g ORDER BY k`, tbl),
+				rn:   func(i int) int64 { return int64(i + 1) },
+				bare: true,
+			},
+		} {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				// A bare key publishes g itself, so its values are 0..6; the
+				// derived key publishes g + 1.
+				bare := tc.bare
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, tc.sql)
+					if len(res.Rows) != wantKeys+1 {
+						t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+							arm.name, len(res.Rows), wantKeys+1, tc.sql)
+						continue
+					}
+					for i, r := range res.Rows {
+						if i == len(res.Rows)-1 {
+							if r["k"] != nil {
+								t.Errorf("%s arm put %v where PostgreSQL has the NULL group\n  SQL: %s",
+									arm.name, r["k"], tc.sql)
+							}
+						} else {
+							want := int64(i + 1)
+							if bare {
+								want = int64(i)
+							}
+							got, ok := numAsInt(r["k"])
+							if !ok || got != want {
+								t.Errorf("%s arm row %d: k = %v, PostgreSQL 17 answers %d — a "+
+									"window above the aggregate lost the computed key\n  SQL: %s",
+									arm.name, i, r["k"], want, tc.sql)
+								break
+							}
+						}
+						if tc.rn == nil {
+							continue
+						}
+						got, ok := numAsInt(r["rn"])
+						if !ok || got != tc.rn(i) {
+							t.Errorf("%s arm row %d: rn = %v, PostgreSQL 17 answers %d — the "+
+								"window's own key was evaluated over a schema the aggregate "+
+								"does not emit\n  SQL: %s", arm.name, i, r["rn"], tc.rn(i), tc.sql)
+							break
+						}
+					}
+				}
+			})
+		}
+
+		// The window's ARGUMENT is an AGGREGATE, which the aggregate below
+		// publishes under its own output name. It used to reach the operator
+		// as the text `count(*)`, which names nothing there.
+		t.Run("WindowOverAnAggregateOutput", func(t *testing.T) {
+			var total int64
+			for _, n := range wantN {
+				total += n
+			}
+			total += nullRows
+			for _, sql := range []string{
+				fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n, SUM(COUNT(*)) OVER () AS s `+
+					`FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+				// The same with the aggregate NOT in the SELECT list, so it
+				// has to be hoisted rather than reused.
+				fmt.Sprintf(`SELECT g + 1 AS k, SUM(COUNT(*)) OVER () AS s `+
+					`FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
+			} {
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != wantKeys+1 {
+						t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+							arm.name, len(res.Rows), wantKeys+1, sql)
+						continue
+					}
+					for i, r := range res.Rows {
+						got, ok := numAsInt(r["s"])
+						if !ok || got != total {
+							t.Errorf("%s arm row %d: s = %v, PostgreSQL 17 answers %d — a window "+
+								"over an aggregate's output read a name the aggregate does not "+
+								"publish\n  SQL: %s", arm.name, i, r["s"], total, sql)
+							break
+						}
 					}
 				}
 			}
