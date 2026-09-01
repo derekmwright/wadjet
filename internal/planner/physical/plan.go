@@ -9696,6 +9696,23 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 			return nil
 		}
 		return inputColTypes(n.Children[0])
+	case logical.NodeWindow:
+		// A window APPENDS its outputs to its input and renames nothing, so
+		// its input's names survive and the SLOTS join them. Their type is
+		// the stage's own answer, `windowSpecOutputType` — the same one
+		// emittedColDecimal reads, and the reason the two agree is that a
+		// name typed in one and not in the other is a contradiction about one
+		// column.
+		//
+		// A slot has no catalog column to read, and leaving it untyped is not
+		// the safe side: an expression over a DECIMAL window output fell to
+		// the float rule and the DAG's fragment refused to store the exact
+		// value into a FLOAT64 vector, on a query the single-process path
+		// answers (#729, ADR-0024 item 2).
+		if len(n.Children) != 1 {
+			return nil
+		}
+		return windowOutputColTypes(n, inputColTypes(n.Children[0]))
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil
@@ -9834,6 +9851,58 @@ func inputColDecls(n *logical.Node) colDecls {
 	return colDecls{types: inputColTypes(n), fields: inputColFields(n), dec: inputColDecimal(n)}
 }
 
+// windowOutputColTypes adds a Window node's own output SLOTS to the types its
+// input carries. Shared by the two walks so the flat type and its (p,s) can
+// never come from different rules.
+func windowOutputColTypes(n *logical.Node, in map[string]parquet.TypeID) map[string]parquet.TypeID {
+	var out map[string]parquet.TypeID
+	for _, we := range n.WindowExprs {
+		name := strings.ToLower(strings.TrimSpace(we.OutputCol))
+		if name == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]parquet.TypeID, len(in)+len(n.WindowExprs))
+			for k, v := range in {
+				out[k] = v
+			}
+		}
+		out[name] = windowSpecOutputType(n, we).ID
+	}
+	if out == nil {
+		return in
+	}
+	return out
+}
+
+// windowOutputColDecimal is windowOutputColTypes' (p,s) companion: a slot whose
+// declaration is a DECIMAL with a KNOWN scale carries it, and every other slot
+// contributes nothing, exactly as emittedColDecimal has it.
+func windowOutputColDecimal(n *logical.Node, in map[string]logical.DecimalMeta) map[string]logical.DecimalMeta {
+	var out map[string]logical.DecimalMeta
+	for _, we := range n.WindowExprs {
+		name := strings.ToLower(strings.TrimSpace(we.OutputCol))
+		if name == "" {
+			continue
+		}
+		d := windowSpecOutputType(n, we)
+		if d.ID != parquet.TypeDecimal || !d.DecKnown {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]logical.DecimalMeta, len(in)+len(n.WindowExprs))
+			for k, v := range in {
+				out[k] = v
+			}
+		}
+		out[name] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
+	}
+	if out == nil {
+		return in
+	}
+	return out
+}
+
 // inputColDecimal is inputColTypes' companion for DECIMAL precision/scale
 // (#458): the same walk, sourced from ScanColDecimal instead of
 // ScanColTypes, and holding only entries a DECIMAL column has. A name two
@@ -9851,6 +9920,16 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return nil
 		}
 		return inputColDecimal(n.Children[0])
+	case logical.NodeWindow:
+		// The (p,s) half of the window arm in inputColTypes, and it has to
+		// move with it: a slot typed DECIMAL there and carrying no scale here
+		// declares a DECIMAL with no scale, which reads every value back at
+		// 10^0 (ADR-0024 item 2). See emittedColDecimal's NodeWindow arm,
+		// which answers the same question for the emitted schema.
+		if len(n.Children) != 1 {
+			return nil
+		}
+		return windowOutputColDecimal(n, inputColDecimal(n.Children[0]))
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil

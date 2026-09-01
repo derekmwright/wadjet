@@ -354,6 +354,10 @@ func TestInputColTypesStopsAtRebindingNodes(t *testing.T) {
 	join := func(l, r *logical.Node) *logical.Node {
 		return &logical.Node{Type: logical.NodeJoin, Children: []*logical.Node{l, r}}
 	}
+	windowOver := func(child *logical.Node, we ...logical.WindowExpr) *logical.Node {
+		return &logical.Node{Type: logical.NodeWindow, Children: []*logical.Node{child},
+			WindowExprs: we}
+	}
 
 	tests := []struct {
 		name string
@@ -367,7 +371,20 @@ func TestInputColTypesStopsAtRebindingNodes(t *testing.T) {
 		{"a distinct is shape-preserving", wrap(logical.NodeDistinct, scan(nation)), nation},
 		{"a project can rebind a name", wrap(logical.NodeProject, scan(nation)), nil},
 		{"an aggregate replaces the schema", wrap(logical.NodeAggregate, scan(nation)), nil},
-		{"a window adds columns of its own", wrap(logical.NodeWindow, scan(nation)), nil},
+		// A WINDOW appends and rebinds nothing, so its input's names survive
+		// it — the same answer scopePreservingWrapper gives, and the reason
+		// the two agree. It used to stop the walk, and its OUTPUT SLOT then
+		// had no declared type at all: an expression over a DECIMAL window
+		// output fell to the float rule and the DAG refused to store the
+		// exact value into a FLOAT64 vector (#729).
+		{"a window forwards its input's names", wrap(logical.NodeWindow, scan(nation)), nation},
+		{"a window's own slot is typed by the stage's rule",
+			windowOver(scan(nation), logical.WindowExpr{
+				Func: "row_number", OutputCol: "__win_0"}),
+			map[string]parquet.TypeID{
+				"n_name": parquet.TypeString, "n_nationkey": parquet.TypeInt64,
+				"__win_0": parquet.TypeInt64,
+			}},
 		{"a join merges both sides", join(scan(nation), scan(region)), map[string]parquet.TypeID{
 			"n_name": parquet.TypeString, "n_nationkey": parquet.TypeInt64,
 			"r_name": parquet.TypeString, "r_regionkey": parquet.TypeInt64,
