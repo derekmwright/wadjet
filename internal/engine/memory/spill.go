@@ -31,8 +31,15 @@ const (
 	spillTagString    byte = 5
 	spillTagInt32     byte = 6
 	spillTagFloat32   byte = 7
-	spillRowMarker    byte = 0x01
-	spillEndMarker    byte = 0x00
+	// spillTagBytes carries a BYTES value as itself. Before it existed a
+	// []byte fell to the writer's default arm and was stored as the DISPLAY
+	// text fmt renders — "[104 105]" — which the reader handed back as a
+	// string and BYTES SetValue accepted as a value, so a spilled group came
+	// back keyed by nine ASCII bytes instead of by its two (#632). The value
+	// is 8 to match exec's partialTag* set, which was numbered for it.
+	spillTagBytes  byte = 8
+	spillRowMarker byte = 0x01
+	spillEndMarker byte = 0x00
 )
 
 // spillFileSeq is a global atomic counter for unique spill file names.
@@ -784,6 +791,14 @@ func (sm *SpillManager) SpillRows(rows []map[string]any) (string, error) {
 				binary.LittleEndian.PutUint32(buf[:4], uint32(len(val)))
 				w.Write(buf[:4])
 				w.WriteString(val)
+			case []byte:
+				// Its own tag, not the string one: the reader has to hand
+				// back a []byte, because a string carrier is what BYTES
+				// SetValue silently accepts as a VALUE (#632).
+				w.WriteByte(spillTagBytes)
+				binary.LittleEndian.PutUint32(buf[:4], uint32(len(val)))
+				w.Write(buf[:4])
+				w.Write(val)
 			default:
 				// Fallback: encode as string via fmt
 				s := fmt.Sprintf("%v", val)
@@ -891,6 +906,16 @@ func ReadSpilledRows(path string) ([]map[string]any, error) {
 					return nil, err
 				}
 				row[col] = string(strBuf)
+			case spillTagBytes:
+				if _, err := io.ReadFull(r, buf[:4]); err != nil {
+					return nil, err
+				}
+				byteLen := int(binary.LittleEndian.Uint32(buf[:4]))
+				valBuf := make([]byte, byteLen)
+				if _, err := io.ReadFull(r, valBuf); err != nil {
+					return nil, err
+				}
+				row[col] = valBuf
 			default:
 				return nil, fmt.Errorf("unknown spill type tag %d", tag)
 			}
