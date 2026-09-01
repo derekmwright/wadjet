@@ -173,5 +173,15 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 			t.Errorf("aggregateOutputNames through %v ok=%v, want %v — the FIFTH walk stopped "+
 				"reading aggScopePreservingWrapper (#575 under a window)", typ, ok, w)
 		}
+		// And `wrapsAWindow`, which is not a sixth reader but a REFINEMENT of
+		// the same question — "is one of these wrappers specifically a Window"
+		// — asked so the projection-elision decision does not look through a
+		// node that ADDS a column. It is asserted here because it walks the
+		// same list: if the list grows a kind, this says whether the refinement
+		// still means what its name says.
+		if got := wrapsAWindow(wrapped); got != (typ == logical.NodeWindow) {
+			t.Errorf("wrapsAWindow through %v = %v, want %v — the elision guard and the walk it "+
+				"refines have drifted", typ, got, typ == logical.NodeWindow)
+		}
 	}
 }

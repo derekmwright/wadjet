@@ -462,6 +462,18 @@ operator and the alias is a real column. That answers PostgreSQL's rows for
 every shape in the cell INCLUDING the ones the DAG previously got right by
 luck, which is the only disposition that is base-or-better everywhere.
 
+The refusal's worst case is NOT "a slow correct answer", and saying so was too
+comfortable. `runRefusedLocal` runs under a budget of 8× `localFastPathBytes`,
+so a routed query carrying a JOIN under a small `--local-fastpath-bytes` can
+fail LOUDLY where the DAG would have completed — and the join's build check
+fires before the aggregate ever reaches its spill path, so the failure is a
+budget refusal rather than a degraded run. Every case observed while measuring
+this was base-WRONG → loud, which is still an improvement in kind; the residual
+risk is a shape that is base-RIGHT and routes into that budget, which nothing
+in the corpus produces but nothing rules out either. It lives with #782: while
+the spilled aggregate answers nondeterministically, "spill instead of refuse"
+is not the safer branch to widen the budget towards.
+
 The refusal is a placeholder for a stage-level answer, not a settled position.
 The real fix re-spells `GroupByCols` over the producing fragment's
 actually-emitted columns — the `emittedThroughPassThrough` /

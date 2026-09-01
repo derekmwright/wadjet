@@ -198,9 +198,14 @@ func TestGroupingSetsMatchPostgresOnEveryArm(t *testing.T) {
 			want: "7 rows: 1|80;1|80;2|80;2|80;3|80;3|80;|240;",
 		},
 		{
-			// A repeat ACROSS two sets rather than inside one, which is the
-			// GROUPING SETS spelling of the same question.
-			name: "grouping-sets/a-term-repeated-inside-one-set",
+			// CONTROL, not a ratchet. `parseGroupingSets` has collected its
+			// union through `groupTermSet` since the grouping-sets work landed,
+			// so this spelling never had the duplicate-term defect and cannot
+			// fail for it — measured: with both halves of the fix reverted, the
+			// three ROLLUP/CUBE entries above fail and this one passes. It is
+			// here to say that the two parse paths now AGREE, which is the
+			// property the fix restored.
+			name: "ctl/grouping-sets-a-term-repeated-inside-one-set",
 			sql: "SELECT g AS k, h AS j, COUNT(*) AS n FROM collslot " +
 				"GROUP BY GROUPING SETS ((g, h), (g, g)) ORDER BY k, j, n",
 			cols: []string{"k", "j", "n"},
