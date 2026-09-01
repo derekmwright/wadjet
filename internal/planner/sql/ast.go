@@ -19,6 +19,19 @@ type Node interface {
 type ColRef struct {
 	Table  string
 	Column string
+	// Slot marks a reference the PLANNER planted at a hidden slot, as
+	// opposed to one the user wrote. Nothing a query can contain sets it:
+	// the parser never does, and re-parsing a rendered expression loses it,
+	// because it is provenance and not spelling.
+	//
+	// It exists because the two are otherwise indistinguishable. A table may
+	// legitimately store a column called `__win_0` (ADR-0025 rule 1: reading
+	// such a table is never refused), and then `SUM(plain) OVER () + 0` has
+	// a `__win_0` reference the nested-window rewrite planted BESIDE a
+	// `__win_0` the scan really emits. Moving the planner's slot past the
+	// stored column has to move the first and must not touch the second
+	// (#750, #694).
+	Slot bool
 }
 
 func (*ColRef) nodeTag() {}
@@ -1098,7 +1111,10 @@ func ReplaceWindowFuncs(node Node, replacements map[*WindowFuncNode]string) Node
 	switch n := node.(type) {
 	case *WindowFuncNode:
 		if colName, ok := replacements[n]; ok {
-			return &ColRef{Column: colName}
+			// Slot: the reference is the PLANNER's, planted at the window's
+			// own hidden output. A stored column of that name is a different
+			// thing and must not move with it (#750).
+			return &ColRef{Column: colName, Slot: true}
 		}
 		return node
 	case *FuncCallNode:

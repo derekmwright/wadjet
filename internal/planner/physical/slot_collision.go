@@ -128,7 +128,19 @@ func renameCollidingSlots(root *logical.Node) {
 			if len(m) == 0 {
 				continue
 			}
-			applySlotRename(c, m, stored)
+			// c has already applied m to ITSELF, on the way out of its own
+			// walk. Applying it again to c's SUBTREE is what made a rename
+			// travel DOWNWARD into the block that did not mint the slot: a
+			// window in the SELECT list above a join renumbers to `__win_1`,
+			// and the descent rewrote the ARM's projection to read `__win_1`
+			// too, while the arm's own window still wrote `__win_0`. The
+			// single-process path then failed with `column "__win_1" does not
+			// exist in the input schema`, and on the DAG — where the outer
+			// window really does emit `__win_1` — the arm's column silently
+			// answered the OUTER window's value (#772).
+			//
+			// A slot travels UP from the node that mints it to the consumer
+			// that reads it, and nowhere else.
 			if len(n.Children) > 1 {
 				// A join, a set operation: consume the arm's map here rather
 				// than letting it escape into a sibling.
@@ -163,9 +175,10 @@ func renameCollidingSlots(root *logical.Node) {
 		}
 		return pending
 	}
-	if m := walk(root); len(m) > 0 {
-		applySlotRename(root, m, stored)
-	}
+	// root applies its own map on the way out of walk, so there is nothing
+	// left to do here: a rename that reached the root with no consumer above
+	// it has none.
+	walk(root)
 }
 
 // countWindowSlotNames tallies how many window nodes mint each output slot.
@@ -200,19 +213,6 @@ func collectStoredNames(n *logical.Node, out map[string]bool) {
 	}
 }
 
-// applySlotRename repoints every reference to a renamed slot: the SELECT-list
-// projection that publishes it, and the nested-window rewrite's ColRef inside
-// a larger expression.
-func applySlotRename(n *logical.Node, rename map[string]string, stored map[string]bool) {
-	if n == nil {
-		return
-	}
-	applySlotRenameNodeOnly(n, rename, stored)
-	for _, c := range n.Children {
-		applySlotRename(c, rename, stored)
-	}
-}
-
 // applySlotRenameNodeOnly repoints this node's own references and does not
 // descend. It is what lets a rename be applied along the ancestor chain up to
 // its consumer without crossing into a sibling subtree.
@@ -235,27 +235,26 @@ func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string, stored m
 			// cannot see it, and a sibling collision left that expression
 			// reading the OTHER block's window (#610's spelling of #747).
 			//
-			// Rewriting a bare reference is safe exactly when the old name is
-			// stored NOWHERE in this query: then no source provides it and
-			// the planner's window is its only writer. When it IS stored the
-			// reference may be the user's own column, and moving it is the
-			// #694 defect this pass exists to avoid — so it is left alone,
-			// and the SlotSource branch above still moves the slot.
+			// The reference the rewrite plants carries its PROVENANCE
+			// (plansql.ColRef.Slot), so it is moved wherever the slot moves,
+			// a stored column of that name included. It has to be: over a
+			// table that really stores `__win_0` the window's slot steps to
+			// `__win_1` and the expression stayed on `__win_0`, so
+			// `SUM(plain) OVER () + 0` answered the STORED column's values on
+			// every arm (#750). Declining there was the old rule, and it read
+			// the planner's own reference as if it might be the user's.
+			//
+			// An UNMARKED reference is still moved only when the name is
+			// stored NOWHERE in the query — that is a reference whose
+			// provenance is not recorded (an expression re-parsed from text),
+			// and moving the user's own column is the #694 defect this pass
+			// exists to avoid.
 			if p.ASTExpr == nil {
 				continue
 			}
-			unstored := map[string]string{}
-			for from, to := range rename {
-				if !stored[strings.ToLower(from)] {
-					unstored[from] = to
-				}
-			}
-			if len(unstored) == 0 {
-				continue
-			}
-			if rewritten, changed := renameColRefs(p.ASTExpr, unstored); changed {
+			if rewritten, changed := renameSlotColRefs(p.ASTExpr, rename, stored); changed {
 				p.ASTExpr = rewritten
-				if to, ok := unstored[strings.ToLower(p.Expr)]; ok {
+				if to, ok := rename[strings.ToLower(p.Expr)]; ok && !stored[strings.ToLower(p.Expr)] {
 					p.Expr = to
 				}
 			}
@@ -284,15 +283,40 @@ func applySlotRenameNodeOnly(n *logical.Node, rename map[string]string, stored m
 	// column — renaming it would sort by the window instead.
 }
 
-// renameColRefs is rewriteColRefs with a name map, for the nested-window
-// rewrite's `__win_0 + 1`.
+// renameColRefs is rewriteColRefs with a name map, for a projection whose
+// slot the SlotSource branch has already identified.
 func renameColRefs(node plansql.Node, rename map[string]string) (plansql.Node, bool) {
 	out, changed, _ := rewriteColRefs(node, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		to, ok := rename[strings.ToLower(ref.Column)]
 		if !ok || ref.Table != "" {
 			return nil, false
 		}
-		return &plansql.ColRef{Column: to}, true
+		return &plansql.ColRef{Column: to, Slot: ref.Slot}, true
+	})
+	return out, changed
+}
+
+// renameSlotColRefs is renameColRefs for the nested-window rewrite's
+// `__win_0 + 1`, where the expression may hold BOTH the planner's reference to
+// a slot and the user's reference to a stored column of that very name.
+//
+// A reference the planner planted (ColRef.Slot) moves with the slot; one whose
+// provenance is not recorded moves only if the name is stored nowhere, which is
+// the rule this branch had for every reference before provenance existed.
+func renameSlotColRefs(node plansql.Node, rename map[string]string, stored map[string]bool) (plansql.Node, bool) {
+	out, changed, _ := rewriteColRefs(node, func(ref *plansql.ColRef) (plansql.Node, bool) {
+		if ref.Table != "" {
+			return nil, false
+		}
+		name := strings.ToLower(ref.Column)
+		to, ok := rename[name]
+		if !ok {
+			return nil, false
+		}
+		if !ref.Slot && stored[name] {
+			return nil, false
+		}
+		return &plansql.ColRef{Column: to, Slot: ref.Slot}, true
 	})
 	return out, changed
 }

@@ -62,27 +62,46 @@ func resolveHiddenSortKeys(stages []Stage) {
 		if !hasHiddenSortKey(stages[i].SortKeys) {
 			continue
 		}
-		producer := sortKeyProducer(stages, idx, i)
-		if producer == nil {
-			continue
+		// Two questions, two answers — the split sortInputStage's comment
+		// states and which this pass was asking with one answer.
+		//
+		// REWRITING a key that names a real column needs only the columns the
+		// sorted STREAM carries, and a pass-through stage forwards those from
+		// below it. MATERIALIZING a computed key needs a fragment that runs an
+		// OpProject, which is the narrow `projectableProducer` list.
+		//
+		// Asking the narrow question for both left a hidden key above a WINDOW
+		// producer failing loudly on a query the single-process path answers:
+		// `SELECT id, SUM(plain) OVER () + 0 AS w FROM t ORDER BY plain` is a
+		// NESTED window, so `attachScanSelectProjections` declines it (its
+		// spec references a synthetic window column), nothing materialized
+		// `__sortkey_0`, and the sort stage's dependency is the window — not a
+		// projectable producer — so this pass declined too (#490's rule, one
+		// producer kind over).
+		var stream map[string]string
+		if in := sortInputStage(stages, idx, i); in != nil {
+			stream = emittedThroughPassThrough(stages, idx, in)
 		}
-		emitted := stageEmittedColumns(producer)
+		producer := sortKeyProducer(stages, idx, i)
 		for k := range stages[i].SortKeys {
 			key := &stages[i].SortKeys[k]
 			if !logical.IsHiddenSortColumn(key.Column) || key.SourceExpr == "" {
 				continue
 			}
-			if _, ok := emitted[strings.ToLower(key.Column)]; ok {
+			if _, ok := stream[strings.ToLower(key.Column)]; ok {
 				continue // already materialized (attachScanSelectProjections)
 			}
 			if key.SourceColumn != "" {
-				if name, ok := lookupEmittedColumn(emitted, key.SourceColumn); ok {
+				if name, ok := lookupEmittedColumn(stream, key.SourceColumn); ok {
 					key.Column = name
 					continue
 				}
 			}
+			if producer == nil {
+				continue // a shape this pass cannot make emit the term
+			}
 			if materializeSortKey(producer, *key) {
-				emitted = stageEmittedColumns(producer)
+				stream = emittedThroughPassThrough(stages, idx, sortInputStage(stages, idx, i))
 			}
 		}
 	}

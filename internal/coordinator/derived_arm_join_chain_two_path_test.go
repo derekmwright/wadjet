@@ -847,6 +847,107 @@ func TestAWindowBetweenTheSelectListAndItsJoinThreeArms(t *testing.T) {
 			want: "3 rows: 2|25.49;3|25.49;4|25.49;",
 		},
 
+		// --- The two sites COMPOSING: a window in the SELECT list above a
+		// join one of whose ARMS is itself a window (#772).
+		//
+		// Each site alone was closed by a7535925 and the NESTING was not. The
+		// slot the arm's window mints and the slot the SELECT list's window
+		// mints are the same `__win_0` — the builder's counter is per SELECT
+		// BLOCK — and `renameCollidingSlots` renumbered the outer one and then
+		// applied that rename DOWNWARD into the arm that had not minted it. So
+		// the arm's projection read `__win_1` while its own window still wrote
+		// `__win_0`: the single path failed with `column "__win_1" does not
+		// exist in the input schema`, and both DAG arms — where the outer
+		// window really does emit `__win_1` — answered the OUTER window's
+		// value under the arm's name, silently.
+		//
+		// Every entry names p's window value (52.99) AND the outer window's
+		// (5299.00), which are different numbers on purpose: an entry that
+		// asserted only one of them passes whichever way the capture goes.
+		{
+			name: "compose/window-above-a-join-whose-arm-is-a-window",
+			sql: "SELECT p.id AS pid, p.w AS pw, q.w AS qw, SUM(q.w) OVER () AS s FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p JOIN " +
+				"(SELECT id, a * 100 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
+			cols: []string{"pid", "pw", "qw", "s"},
+			want: "9 rows: 1|52.99|1275.00|5299.00;2|52.99|1275.00|5299.00;3|52.99|1275.00|5299.00;" +
+				"4|52.99|-1.00|5299.00;5|52.99|200.00|5299.00;6|52.99|0.00|5299.00;7|52.99||5299.00;" +
+				"8|52.99|1275.00|5299.00;9|52.99||5299.00;",
+		},
+		{
+			// The SUM(p.w) spelling — the outer window over the arm that is
+			// ITSELF a window, which answered NULL for both columns.
+			name: "compose/outer-window-over-the-window-arm",
+			sql: "SELECT p.id AS pid, p.w AS pw, q.w AS qw, SUM(p.w) OVER () AS s FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p JOIN " +
+				"(SELECT id, a * 100 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
+			cols: []string{"pid", "pw", "qw", "s"},
+			want: "9 rows: 1|52.99|1275.00|476.91;2|52.99|1275.00|476.91;3|52.99|1275.00|476.91;" +
+				"4|52.99|-1.00|476.91;5|52.99|200.00|476.91;6|52.99|0.00|476.91;7|52.99||476.91;" +
+				"8|52.99|1275.00|476.91;9|52.99||476.91;",
+		},
+		{
+			// The window arm SECOND, so the rename walk meets the two blocks
+			// in the other order.
+			name: "compose/window-arm-is-the-second-one",
+			sql: "SELECT p.id AS pid, p.w AS pw, q.w AS qw, SUM(q.w) OVER () AS s FROM " +
+				"(SELECT id, a * 100 AS w FROM " + tbl + ") q JOIN " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p ON p.id = q.id ORDER BY p.id",
+			cols: []string{"pid", "pw", "qw", "s"},
+			want: "9 rows: 1|52.99|1275.00|5299.00;2|52.99|1275.00|5299.00;3|52.99|1275.00|5299.00;" +
+				"4|52.99|-1.00|5299.00;5|52.99|200.00|5299.00;6|52.99|0.00|5299.00;7|52.99||5299.00;" +
+				"8|52.99|1275.00|5299.00;9|52.99||5299.00;",
+		},
+		{
+			// MIN reads the argument through the value-function branch.
+			name: "compose/min-over-the-other-arm",
+			sql: "SELECT p.id AS pid, p.w AS pw, q.w AS qw, MIN(q.w) OVER () AS s FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p JOIN " +
+				"(SELECT id, a * 100 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
+			cols: []string{"pid", "pw", "qw", "s"},
+			want: "9 rows: 1|52.99|1275.00|-1.00;2|52.99|1275.00|-1.00;3|52.99|1275.00|-1.00;" +
+				"4|52.99|-1.00|-1.00;5|52.99|200.00|-1.00;6|52.99|0.00|-1.00;7|52.99||-1.00;" +
+				"8|52.99|1275.00|-1.00;9|52.99||-1.00;",
+		},
+		{
+			// No argument at all: only the arm's own column can be captured,
+			// and it was — by the ROW_NUMBER.
+			name: "compose/row-number-above-a-window-arm",
+			sql: "SELECT p.id AS pid, p.w AS pw, q.w AS qw, ROW_NUMBER() OVER (ORDER BY p.id) AS s FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p JOIN " +
+				"(SELECT id, a * 100 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
+			cols: []string{"pid", "pw", "qw", "s"},
+			want: "9 rows: 1|52.99|1275.00|1;2|52.99|1275.00|2;3|52.99|1275.00|3;" +
+				"4|52.99|-1.00|4;5|52.99|200.00|5;6|52.99|0.00|6;7|52.99||7;" +
+				"8|52.99|1275.00|8;9|52.99||9;",
+		},
+		{
+			// The control that says the residual is the COMPOSITION: distinct
+			// aliases, so no name is contested, and the shape was already
+			// right on the DAG arms and LOUD on the single one — because the
+			// downward rename is about PROVENANCE and not about the alias.
+			name: "compose/control-distinct-aliases",
+			sql: "SELECT p.id AS pid, p.w1 AS pw, q.w2 AS qw, SUM(q.w2) OVER () AS s FROM " +
+				"(SELECT id, SUM(a) OVER () AS w1 FROM " + tbl + ") p JOIN " +
+				"(SELECT id, a * 100 AS w2 FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
+			cols: []string{"pid", "pw", "qw", "s"},
+			want: "9 rows: 1|52.99|1275.00|5299.00;2|52.99|1275.00|5299.00;3|52.99|1275.00|5299.00;" +
+				"4|52.99|-1.00|5299.00;5|52.99|200.00|5299.00;6|52.99|0.00|5299.00;7|52.99||5299.00;" +
+				"8|52.99|1275.00|5299.00;9|52.99||5299.00;",
+		},
+		{
+			// The control WITHOUT the outer window, which was already correct
+			// on all three arms after a7535925: a failure here is the arm's
+			// own window, not the composition.
+			name: "compose/control-no-outer-window",
+			sql: "SELECT p.id AS pid, p.w AS pw, q.w AS qw FROM " +
+				"(SELECT id, SUM(a) OVER () AS w FROM " + tbl + ") p JOIN " +
+				"(SELECT id, a * 100 AS w FROM " + tbl + ") q ON p.id = q.id ORDER BY p.id",
+			cols: []string{"pid", "pw", "qw"},
+			want: "9 rows: 1|52.99|1275.00;2|52.99|1275.00;3|52.99|1275.00;4|52.99|-1.00;" +
+				"5|52.99|200.00;6|52.99|0.00;7|52.99|;8|52.99|1275.00;9|52.99|;",
+		},
+
 		// --- The three controls that bound the family.
 		{
 			// The window REMOVED: if this one moves, the finding is not the

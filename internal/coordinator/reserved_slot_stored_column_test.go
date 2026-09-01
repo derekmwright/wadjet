@@ -484,19 +484,24 @@ func TestSiblingWindowsInUnionArmsKeepTheirOwnSlots(t *testing.T) {
 	}
 }
 
-// TestStoredSlotBesideAWrappedWindow pins TODO(#750), and it exists because
-// the fixture had no assertion of its own.
+// TestStoredSlotBesideAWrappedWindow is #750, and it exists because the
+// fixture had no assertion of its own.
 //
 // wintab0 STORES a `__win_0` column, which is the whole reason it is in
 // tmdTables — and nothing was asserting what a query that reads it beside a
-// window actually answers. The BARE window is right on every arm (the slot
-// renumbering of #694 moves the planner's slot past the stored name). The
-// WRAPPED one is not, and the rule that renumbers it deliberately declines
-// here: a wrapped window's projection carries no SlotSource, only a ColRef
-// inside its ASTExpr, and rewriting that reference when the old name IS
-// stored would move the USER's column instead — the #694 defect in the other
-// direction. So the decline is correct and the answer is still wrong, which
-// is what a pin is for.
+// window actually answers. The BARE window was right on every arm (the slot
+// renumbering of #694 moves the planner's slot past the stored name) and the
+// WRAPPED one was not, on every arm: `SUM(plain) OVER () + 0` answered the
+// STORED column's values.
+//
+// The rule that renumbers a slot used to decline for the wrapped spelling on
+// purpose, and the decline was reasoning about SPELLING where only PROVENANCE
+// can decide: a wrapped window's projection carries no SlotSource, only a
+// ColRef inside its ASTExpr, and moving a reference whose name is also STORED
+// might move the user's own column — which is #694 in the other direction. The
+// reference the nested-window rewrite plants now carries its provenance
+// (`plansql.ColRef.Slot`), so the planner's reference moves with the slot and a
+// user's reference of the same spelling does not.
 //
 // PostgreSQL 17 answers the stored column AND the window: `__win_0` =
 // 100,200,300,400 and `w` = 10000 on every row.
@@ -549,44 +554,113 @@ func TestStoredSlotBesideAWrappedWindow(t *testing.T) {
 		}
 	})
 
-	// The pin: the same window WRAPPED in an expression. The single path
-	// answers the stored column's value for `w`, and both DAG arms fail
-	// loudly on a sort key nothing emits — three arms, two symptoms, one
-	// cause. TODO(#750).
-	t.Run("wrapped window beside the stored slot", func(t *testing.T) {
-		sql := "SELECT __win_0, SUM(plain) OVER () + 0 AS w FROM " + rsWinTab + " ORDER BY id"
-		for _, arm := range arms {
-			res, err := arm.run(sql)
-			if err != nil {
-				if arm.name == "single" {
-					t.Errorf("the single arm now REFUSES this shape (%v); it used to answer the "+
-						"stored column. TODO(#750) moved — re-read the pin.\n  SQL: %s", err, sql)
-					continue
+	// The WRAPPED spellings, which used to answer the STORED column on every
+	// arm — and, where the ORDER BY term is not in the SELECT list, to fail
+	// loudly on both DAG arms with `sort: key column "__sortkey_0" does not
+	// exist in the input schema`.
+	//
+	// Every entry names BOTH columns: the window's 10000 and the stored
+	// 100/200/300/400 under their own names. An entry asserting only the
+	// window would pass while the stored column carried the window's value,
+	// which is the #694 direction this repair must not reintroduce.
+	for _, tc := range []struct {
+		name, sql string
+		// w is the window column's value on every row; stored says whether
+		// the query also selects the table's own `__win_0`.
+		w      string
+		stored bool
+	}{
+		{
+			name:   "wrapped window beside the stored slot",
+			sql:    "SELECT __win_0, SUM(plain) OVER () + 0 AS w FROM " + rsWinTab + " ORDER BY id",
+			w:      "10000",
+			stored: true,
+		},
+		{
+			name: "wrapped window, no stored column selected",
+			sql:  "SELECT id, SUM(plain) OVER () + 0 AS w FROM " + rsWinTab + " ORDER BY id",
+			w:    "10000",
+		},
+		{
+			name: "the wrapping is a multiplication",
+			sql:  "SELECT id, SUM(plain) OVER () * 2 AS w FROM " + rsWinTab + " ORDER BY id",
+			w:    "20000",
+		},
+		{
+			name: "the wrapping is a function call",
+			sql:  "SELECT id, COALESCE(SUM(plain) OVER (), 0) AS w FROM " + rsWinTab + " ORDER BY id",
+			w:    "10000",
+		},
+		{
+			// A window with no argument at all, so nothing but the OUTPUT
+			// slot can be captured.
+			name: "row_number wrapped in arithmetic",
+			sql:  "SELECT id, ROW_NUMBER() OVER (ORDER BY id) + 0 AS w FROM " + rsWinTab + " ORDER BY id",
+			w:    "", // per-row; checked as 1..4 below
+		},
+		{
+			// TWO wrapped windows, so the second one's slot has to move past
+			// the stored name AND past the first one's.
+			name:   "two wrapped windows beside the stored slot",
+			sql:    "SELECT __win_0, SUM(plain) OVER () + 0 AS w, SUM(id) OVER () + 0 AS w2 FROM " + rsWinTab + " ORDER BY id",
+			w:      "10000",
+			stored: true,
+		},
+		{
+			// The ORDER BY term is NOT in the SELECT list, so the sort keys
+			// on a hidden `__sortkey_0` — the shape both DAG arms refused.
+			name:   "wrapped window with a hidden sort key",
+			sql:    "SELECT __win_0, SUM(plain) OVER () + 0 AS w FROM " + rsWinTab + " ORDER BY id",
+			w:      "10000",
+			stored: true,
+		},
+		{
+			name: "wrapped window ordered by a column it does not select",
+			sql:  "SELECT id, SUM(plain) OVER () + 0 AS w FROM " + rsWinTab + " ORDER BY plain",
+			w:    "10000",
+		},
+		{
+			// Through a derived table that publishes neither the stored
+			// column nor the slot: the single path answered NULL here and the
+			// DAG answered the stored column — one defect, two symptoms.
+			name: "wrapped window over a derived table",
+			sql: "SELECT id, SUM(plain) OVER () + 0 AS w FROM " +
+				"(SELECT id, plain FROM " + rsWinTab + ") t ORDER BY id",
+			w: "10000",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
+						arm.name, err, tc.sql)
 				}
-				if !strings.Contains(err.Error(), "__sortkey_0") {
-					t.Errorf("%s arm failed for some other reason than the pinned one: %v\n  SQL: %s",
-						arm.name, err, sql)
+				if len(res.Rows) != 4 {
+					t.Fatalf("%s arm returned %d rows, want 4\n  SQL: %s",
+						arm.name, len(res.Rows), tc.sql)
 				}
-				continue
+				for i, r := range res.Rows {
+					want := tc.w
+					if want == "" {
+						want = fmt.Sprint(i + 1) // the ROW_NUMBER entry
+					}
+					if got := fmt.Sprintf("%v", r["w"]); got != want {
+						t.Errorf("%s arm row %d: w = %q, PostgreSQL 17 answers %q — the "+
+							"wrapped window read the STORED column of its slot's name\n  SQL: %s",
+							arm.name, i, got, want, tc.sql)
+					}
+					if !tc.stored {
+						continue
+					}
+					if got := fmt.Sprintf("%v", r["__win_0"]); got != fmt.Sprint((i+1)*100) {
+						t.Errorf("%s arm row %d: __win_0 = %q, want the STORED %d — the "+
+							"planner's slot moved the USER's column\n  SQL: %s",
+							arm.name, i, got, (i+1)*100, tc.sql)
+					}
+				}
 			}
-			if arm.name != "single" {
-				t.Errorf("the %s arm now ANSWERS this shape, so TODO(#750) is fixed — delete "+
-					"this pin and assert w=10000 on every arm\n  SQL: %s", arm.name, sql)
-				continue
-			}
-			for i, r := range res.Rows {
-				got := fmt.Sprintf("%v", r["w"])
-				if got == "10000" {
-					t.Errorf("the single arm now answers w=%q — TODO(#750) is fixed, delete "+
-						"this pin\n  SQL: %s", got, sql)
-					break
-				}
-				if got != fmt.Sprint((i+1)*100) {
-					t.Errorf("the single arm answered w=%q, which is neither the pinned stored "+
-						"value (%d) nor PostgreSQL's 10000\n  SQL: %s", got, (i+1)*100, sql)
-					break
-				}
-			}
-		}
-	})
+		})
+	}
 }
