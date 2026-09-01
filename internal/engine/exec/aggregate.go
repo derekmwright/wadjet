@@ -1392,7 +1392,32 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			// through to spillFullState — semantically identical to before.
 			return h.drainAndAccount(h.selfSpillReliefTarget())
 		}
-		// Legacy raw-row spill (extra-state aggs, grouping sets, scalar):
+		// An UNGROUPED aggregate never buffers input rows (#779). Its state
+		// is one row of accumulators — plus, for the non-simple aggregates,
+		// whatever extra state they keep — and buffering the input builds
+		// exactly that same state one Finalize later, out of rows that had to
+		// be written to disk and read back first. There is no memory the
+		// detour saves, and it is wrong twice over here:
+		//
+		//   - ToRows reads every column's VALUES, and the planner ships a
+		//     column whose every use is a SHAPE use (COUNT(col), LENGTH(col),
+		//     IS NULL) with its lengths and no bytes. `SELECT COUNT(c_str)`
+		//     under a budget therefore failed with the shape-only guard's
+		//     "some consumer of this column is not a shape consumer" — a
+		//     correct query that answers only while it has memory to spare.
+		//   - Rows that go through memory.SpillManager.SpillRows are rendered
+		//     by a value tagger, which is a second, narrower encoder than the
+		//     columnar one (#632 is its BYTES arm).
+		//
+		// Grouped shapes still take the row buffer: their state grows with the
+		// key set, so moving input to disk is a real trade. GROUPING SETS and
+		// GroupByAll (DISTINCT) are grouped shapes.
+		if len(h.GroupByCols) == 0 && !h.GroupByAll && len(h.GroupingSets) == 0 {
+			h.consumeBatch(b)
+			h.reconcileGroupMemory()
+			return nil
+		}
+		// Legacy raw-row spill (extra-state aggs, grouping sets):
 		// buffer rows on disk and re-aggregate in Finalize.
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
