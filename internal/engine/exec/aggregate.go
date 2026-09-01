@@ -363,6 +363,10 @@ type HashAggregate struct {
 	drainNanos         int64
 	drainFreedBytes    int64
 	firstDrainAt       time.Time
+	// forcedDrainSeq counts Consume calls for the TEST-ONLY deterministic
+	// drain knob (aggregate_force_drain.go). Zero and unread on every
+	// production path.
+	forcedDrainSeq int64
 	// AccountedOperator (Phase 2) state. accInstanceID is the process-unique
 	// id; accState is the lifecycle (memory.OpState) read/written atomically so
 	// Inspect (called off the pipeline goroutine) sees a consistent state.
@@ -1338,7 +1342,12 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// forced spill-every-batch once inputBytes crossed the budget — even
 	// when the actual group state was a handful of rows (e.g. Q12 with 7
 	// shipmode groups). That inflated 250ms Q12 work to 37s of spill I/O.
-	if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) {
+	// forcedDrain is the TEST-ONLY deterministic drain knob
+	// (aggregate_force_drain.go): it puts a drain on a CHOSEN batch, which is
+	// what makes a spill gate reproduce a condition-triggered defect every run
+	// instead of some runs.
+	forcedDrain := h.forcedDrainDue()
+	if h.Spill != nil && (forcedDrain || h.Spill.ShouldSpillFor(memory.SpillCheap)) {
 		// External-merge path: when the aggregate uses simple kernel
 		// accumulators on an SoA fast path, drain the current hash table
 		// to a sorted partial-state file and reset state. Finalize will
@@ -1356,8 +1365,13 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			// run file, frees nothing, and leaves the signal set — the
 			// livelock in #325. Require a floor of new state of our own
 			// before spending another drain; see aggregate_drain_gate.go.
-			if !h.drainIsProductive() {
+			// The productivity gate measures relief against real pressure;
+			// a forced drain has none to measure, so it is exempt.
+			if !forcedDrain && !h.drainIsProductive() {
 				return nil
+			}
+			if forcedDrain {
+				ForcedAggDrains.Add(1)
 			}
 			// Self-triggered spill: drain enough to recover headroom below the
 			// SpillCheap threshold (60% of budget), leaving a 5% hysteresis
@@ -4183,6 +4197,7 @@ func (h *HashAggregate) flushSpillBuffer() error {
 		return err
 	}
 	h.spillFiles = append(h.spillFiles, path)
+	RawRowSpillFiles.Add(1)
 	// The rows are now on disk — release the tracker bytes charged for them
 	// so ShouldSpill can flip back to false and subsequent batches can be
 	// consumed directly into the hash table again.

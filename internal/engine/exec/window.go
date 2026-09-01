@@ -560,6 +560,7 @@ func (w *Window) flushSpillLocked() (int64, error) {
 		}
 		if path != "" {
 			w.runFiles = append(w.runFiles, path)
+			WindowRunsWritten.Add(1)
 		}
 	} else {
 		var rows []map[string]any
@@ -571,6 +572,7 @@ func (w *Window) flushSpillLocked() (int64, error) {
 			return 0, err
 		}
 		w.spillFiles = append(w.spillFiles, path)
+		WindowRunsWritten.Add(1)
 	}
 	w.batches = w.batches[:0]
 	w.totalRows = 0

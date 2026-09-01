@@ -1511,6 +1511,10 @@ func (h *HashAggregate) drainStateToRuns(dir string) ([]string, error) {
 		cursor.Close()
 		return nil, err
 	}
+	// Engagement: every caller of this funnel — self-spill, the clone's
+	// PartialDrainBytes bound, MergeSink's drain-to-runs — writes its run
+	// through here, so one counter answers "did the external-merge path run".
+	AggregatePartialDrains.Add(1)
 	for {
 		g := cursor.Peek()
 		if g == nil {
@@ -1638,6 +1642,7 @@ func (h *HashAggregate) spillPartialPartitions(target int64) error {
 	}
 	cursor.Close()
 	h.partialSpillFiles = append(h.partialSpillFiles, path)
+	AggregatePartialDrains.Add(1)
 
 	// Reclaim drained slots. Delete from the hash table (back-shift keeps
 	// probe chains correct), zero the SoA accumulator slots, and push the

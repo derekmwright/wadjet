@@ -188,6 +188,7 @@ func (s *Sort) flushSpillLocked() (int64, error) {
 	}
 	if path != "" {
 		s.runFiles = append(s.runFiles, path)
+		SortRunsWritten.Add(1)
 	}
 	s.batches = s.batches[:0]
 	s.totalRows = 0
