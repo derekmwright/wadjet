@@ -303,18 +303,32 @@ func newProjRefs(n *Node) projRefs {
 // readsAnAggregate reports whether this Project's input is an Aggregate's
 // OUTPUT — one row per group, columns named by the group keys and the
 // aggregates.
+//
+// AggregateOverGroupRows, not AggregateBelowProject: this asks about the ROWS,
+// and every wrapper AggScopePreservingWrapper names leaves them one per group.
+// AggregateBelowProject asks which aggregate STAGE a Project sits on, which is
+// a narrower question — see AggregateOverGroupRows' comment and #774.
 func readsAnAggregate(n *Node) bool {
-	return AggregateBelowProject(n) != nil
+	return AggregateOverGroupRows(n) != nil
 }
 
 // AggregateBelowProject returns the Aggregate whose OUTPUT rows this Project
-// reads, or nil when it reads something else.
+// reads AND whose stage it sits directly on, or nil when it reads something
+// else.
 //
 // A HAVING is a Filter between the two, and it changes nothing about the
 // rows: it drops whole groups, it does not restore the aggregate's input
 // columns. Stopping at it is what made a CTE with both a HAVING and an outer
 // WHERE on a computed group key answer zero rows (#656 shape f with a
 // HAVING), so the walk descends through it.
+//
+// It descends through a HAVING and NOTHING ELSE, which is deliberate and is
+// why it is not AggScopePreservingWrapper's fourth reader. Both callers —
+// physical.aggregateProjectionTarget and physical.aggregateGroupKeyName — go
+// on to map this Project's SELECT list onto the aggregate's own STAGE, and a
+// Sort, a LIMIT or a WINDOW between the two emits a stage of ITS own that the
+// projection would then be carried past. The question "are these rows one per
+// group", which has no such constraint, is AggregateOverGroupRows'.
 func AggregateBelowProject(n *Node) *Node {
 	if n == nil || n.Type != NodeProject {
 		return nil
@@ -337,7 +351,7 @@ func AggregateBelowProject(n *Node) *Node {
 // aggregateGroupKeys is the GROUP BY key list of the Aggregate this Project
 // reads, lowercased and trimmed; nil when it reads something else.
 func aggregateGroupKeys(n *Node) map[string]bool {
-	agg := AggregateBelowProject(n)
+	agg := AggregateOverGroupRows(n)
 	if agg == nil {
 		return nil
 	}

@@ -2624,44 +2624,104 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 
-		// A WHERE on the key, ABOVE the window (#774). Pinned: it admits no
-		// row at all where PostgreSQL answers four, on every arm and
-		// identically on de95b3b5 — the outer predicate is pushed below the
-		// derived table's Project, `k` is substituted away to `g + 1`, and
-		// above the aggregate that is the NAME of one column rather than
-		// arithmetic, so the filter is UNKNOWN on every row.
+		// A WHERE on the key, ABOVE the window (#774).
 		//
-		// Its four CONTROLS are gated rather than pinned, and they are what
-		// makes the cell exactly this one: the same filter with no window, the
-		// same query with no filter, a BARE key instead of a computed one, and
-		// the filter on the WINDOW's output instead of the key.
+		// It used to admit no row at all where PostgreSQL answers four, on
+		// every arm: the outer predicate is pushed below the derived table's
+		// Project and `k` substituted away to `(g + 1)`, which above the
+		// aggregate is the NAME of one column rather than arithmetic, so the
+		// filter was UNKNOWN on every row and a filter admits only TRUE.
+		//
+		// The site was a FOURTH walk asking ADR-0026 §4's question with its own
+		// Filter-only list — `readsAnAggregate` through
+		// `logical.AggregateBelowProject`. It now reads
+		// `logical.AggScopePreservingWrapper`, which has the WINDOW on it, so
+		// the substitution is declined and the predicate stays where the query
+		// wrote it. `TestAggScopePreservingWrapperIsReadByEveryWalk` drives it
+		// as the fourth named reader.
+		//
+		// Every entry asserts the ORDERED keys, not a row count: the failure
+		// mode this replaces produced the empty set, which a count sees, but
+		// the neighbouring one (#737) produced the right count with NULL keys,
+		// which it does not.
 		t.Run("WhereOnTheKeyAboveAWindow", func(t *testing.T) {
 			const win = `ROW_NUMBER() OVER (ORDER BY g + 1) AS rn`
-			pinned := fmt.Sprintf(`SELECT k, rn FROM (SELECT g + 1 AS k, %s `+
-				`FROM %s GROUP BY g + 1) s WHERE k > 3 ORDER BY k`, win, tbl)
-			for _, arm := range sfcArms(ctx, single, coord) {
-				res := sfcRun(t, arm, pinned)
-				if len(res.Rows) != 0 {
-					t.Errorf("the %s arm now answers %d rows for a filter on the key above a "+
-						"window; PostgreSQL answers 4 (keys 4..7). #774 is fixed — assert it "+
-						"and delete this pin\n  SQL: %s", arm.name, len(res.Rows), pinned)
-				}
+			// PostgreSQL 17 over typemx: keys 4..7 with ROW_NUMBER 4..7.
+			for _, c := range []struct {
+				name, sql string
+				keys      []int64
+			}{
+				{"the-repro", fmt.Sprintf(`SELECT k, rn FROM (SELECT g + 1 AS k, %s `+
+					`FROM %s GROUP BY g + 1) s WHERE k > 3 ORDER BY k`, win, tbl),
+					[]int64{4, 5, 6, 7}},
+				{"two-keys", fmt.Sprintf(`SELECT k, k2, rn FROM (SELECT g + 1 AS k, `+
+					`g + 2 AS k2, %s FROM %s GROUP BY g + 1, g + 2) s WHERE k > 3 ORDER BY k`,
+					win, tbl), []int64{4, 5, 6, 7}},
+				{"filter-on-the-key-AND-the-window", fmt.Sprintf(`SELECT k, rn FROM `+
+					`(SELECT g + 1 AS k, %s FROM %s GROUP BY g + 1) s WHERE k > 3 AND rn > 2 `+
+					`ORDER BY k`, win, tbl), []int64{4, 5, 6, 7}},
+				{"beside-a-having", fmt.Sprintf(`SELECT k, rn FROM (SELECT g + 1 AS k, %s `+
+					`FROM %s GROUP BY g + 1 HAVING COUNT(*) > 100) s WHERE k > 3 ORDER BY k DESC`,
+					win, tbl), []int64{7, 6, 5, 4}},
+				{"an-expression-over-the-key", fmt.Sprintf(`SELECT k, rn FROM `+
+					`(SELECT g + 1 AS k, %s FROM %s GROUP BY g + 1) s WHERE k * 2 > 6 ORDER BY k`,
+					win, tbl), []int64{4, 5, 6, 7}},
+				{"is-not-null-drops-only-the-null-group", fmt.Sprintf(`SELECT k, rn FROM `+
+					`(SELECT g + 1 AS k, %s FROM %s GROUP BY g + 1) s WHERE k IS NOT NULL `+
+					`ORDER BY k`, win, tbl), []int64{1, 2, 3, 4, 5, 6, 7}},
+				{"partitioned-window", fmt.Sprintf(`SELECT k FROM (SELECT g + 1 AS k, `+
+					`ROW_NUMBER() OVER (PARTITION BY g + 1) AS rn FROM %s GROUP BY g + 1) s `+
+					`WHERE k > 3 ORDER BY k`, tbl), []int64{4, 5, 6, 7}},
+				{"through-a-cte", fmt.Sprintf(`WITH s AS (SELECT g + 1 AS k, %s FROM %s `+
+					`GROUP BY g + 1) SELECT k, rn FROM s WHERE k > 3 ORDER BY k`, win, tbl),
+					[]int64{4, 5, 6, 7}},
+				{"through-two-derived-levels", fmt.Sprintf(`SELECT k, rn FROM (SELECT k, rn `+
+					`FROM (SELECT g + 1 AS k, %s FROM %s GROUP BY g + 1) t) s WHERE k > 3 `+
+					`ORDER BY k`, win, tbl), []int64{4, 5, 6, 7}},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, c.sql)
+						if len(res.Rows) != len(c.keys) {
+							t.Errorf("%s arm returned %d rows, PostgreSQL 17 answers %d — a "+
+								"filter on a computed key above a WINDOW was substituted into "+
+								"arithmetic over a column the aggregate does not emit\n  SQL: %s",
+								arm.name, len(res.Rows), len(c.keys), c.sql)
+							continue
+						}
+						for i, want := range c.keys {
+							got, ok := numAsInt(res.Rows[i]["k"])
+							if !ok || got != want {
+								t.Errorf("%s arm row %d: k = %v, PostgreSQL 17 answers %d\n  SQL: %s",
+									arm.name, i, res.Rows[i]["k"], want, c.sql)
+								break
+							}
+						}
+					}
+				})
 			}
-			// The AGGREGATE face of the same cell: no row survives the filter,
-			// so SUM over it is NULL where PostgreSQL answers 22 (4+5+6+7).
-			// A row COUNT cannot see this one — it is one row either way —
-			// which is why it is asserted on the VALUE.
-			aggPinned := fmt.Sprintf(`SELECT SUM(k) AS s FROM (SELECT g + 1 AS k, %s `+
-				`FROM %s GROUP BY g + 1) s WHERE k > 3`, win, tbl)
-			for _, arm := range sfcArms(ctx, single, coord) {
-				res := sfcRun(t, arm, aggPinned)
-				if len(res.Rows) == 1 && res.Rows[0]["s"] == nil {
-					continue // the pinned answer
-				}
-				t.Errorf("the %s arm now answers %v for SUM over a filter on the key above a "+
-					"window; PostgreSQL answers 22. #774 is fixed — assert it and delete this "+
-					"pin\n  SQL: %s", arm.name, res.Rows, aggPinned)
-			}
+			// The AGGREGATE face of the same cell. No row COUNT can see this
+			// one — it is one row either way — so it is asserted on the VALUE:
+			// SUM used to be NULL over the empty set where PostgreSQL answers
+			// 22 (4+5+6+7).
+			t.Run("sum-over-the-filtered-key", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT SUM(k) AS s FROM (SELECT g + 1 AS k, %s `+
+					`FROM %s GROUP BY g + 1) s WHERE k > 3`, win, tbl)
+				sfcScalar(t, ctx, single, coord, sql, "s", 22)
+			})
+			t.Run("count-over-the-filtered-key", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT COUNT(*) AS n FROM (SELECT g + 1 AS k, %s `+
+					`FROM %s GROUP BY g + 1) s WHERE k > 3`, win, tbl)
+				sfcScalar(t, ctx, single, coord, sql, "n", 4)
+			})
+			// The four CONTROLS that made the cell exactly this one, and that
+			// have to keep answering: the same filter with no window, the same
+			// query with no filter, a BARE key instead of a computed one, and
+			// the filter on the WINDOW's output instead of the key. The last
+			// two are the ones a too-wide decline would break — the predicate
+			// stays above the Project there, and that must not become "the
+			// predicate is never pushed".
 			for _, c := range []struct {
 				name, sql string
 				rows      int

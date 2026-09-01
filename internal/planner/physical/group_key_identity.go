@@ -299,10 +299,16 @@ func aggregateUnderOutput(root *logical.Node) *logical.Node {
 // columns visible, under their own names.
 //
 // It is the same question `scopePreservingWrapper` (output_rename_resolve.go)
-// asks about a relation's scope, asked about an aggregate's output schema, and
-// the two walks that ask it — `aggregateUnderOutput` for the DAG's gather and
-// `findAggregateAncestor` for the single-process projection — read it from
-// here so they cannot answer differently.
+// asks about a relation's scope, asked about an aggregate's output schema.
+//
+// The list itself is `logical.AggScopePreservingWrapper`, and this is a
+// delegation rather than a copy because the FOURTH reader —
+// `logical.aggregateOverGroupRows`, which decides whether a predicate above a
+// Project may be substituted below it — is in that package, and `physical`
+// imports `logical` and not the other way round. #774 is what a copy costs:
+// that reader stopped at a WINDOW with its own Filter-only list while ADR-0026
+// §4 named three walks reading one, and a `WHERE` on a computed key above a
+// window admitted no row at all on every arm.
 //
 // A WINDOW is on the list, and its omission is #737: `exec.Window` APPENDS its
 // output to its input, so every column the aggregate published is still there
@@ -311,22 +317,8 @@ func aggregateUnderOutput(root *logical.Node) *logical.Node {
 // aggregate does not emit, and `SELECT g + 1 AS k, ROW_NUMBER() OVER (…) FROM
 // t GROUP BY g + 1` answered the right eight rows with a NULL key on all five
 // arms.
-//
-// A Filter (HAVING), a Sort and a LIMIT are on it for the same reason: they
-// drop or reorder ROWS and rename no column. An Aggregate is not — it replaces
-// its child's schema with its own keys and outputs, which is why it is the
-// walk's TARGET rather than a wrapper. Neither is a Project: what a Project
-// does to the schema is the caller's own question, so each walk keeps its own
-// rule for it. NodeDistinct is deliberately absent: `rewriteDistinctAsGroupBy`
-// lowers a DISTINCT above a grouped query into a second Aggregate, so the node
-// does not stand there, and admitting a kind no fixture produces would put an
-// untested path on the default route (METHOD 10).
 func aggScopePreservingWrapper(t logical.NodeType) bool {
-	switch t {
-	case logical.NodeFilter, logical.NodeSort, logical.NodeLimit, logical.NodeWindow:
-		return true
-	}
-	return false
+	return logical.AggScopePreservingWrapper(t)
 }
 
 // publishedGroupKeyNames is the name list exec.HashAggregate publishes its

@@ -6,7 +6,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// aggScopePreservingWrapper is read by THREE walks, and this is what keeps
+// aggScopePreservingWrapper is read by FOUR walks, and this is what keeps
 // that a checked fact rather than a sentence in an ADR.
 //
 // Each of them answers a consumer's version of one question — "does this node
@@ -17,6 +17,9 @@ import (
 //   - `findAggregateAncestor`, for the single-process projection;
 //   - `groupKeysPublishedBelow`, for whether an aggregate DIRECTLY BELOW
 //     already publishes a key, so the one above must not re-materialize it.
+//   - `logical.AggregateOverGroupRows`, for whether a Project's INPUT rows are
+//     one per GROUP — which is what decides whether a predicate above the
+//     Project may be substituted below it.
 //
 // ADR-0026 §4's first statement said "both walks read one list, so they cannot
 // disagree" while the THIRD still had its own — and the shape that finds it is
@@ -25,15 +28,29 @@ import (
 // outer one did not see the inner's key, materialized it again over a schema
 // with no `g`, and collapsed the table into one NULL group.
 //
-// So the invariant this test carries is: **these three NAMED readers agree
+// The FOURTH was found the same way, by a review counting them, and it was in
+// the OTHER package: `readsAnAggregate` asked its question through
+// `AggregateBelowProject`, whose list is Filter-only. With a WINDOW between the
+// aggregate and the Project, `WHERE k > 3` over `SELECT g + 1 AS k, ROW_NUMBER()
+// OVER (…) … GROUP BY g + 1` substituted `k` away to `(g + 1)` and pushed it
+// below the Project, where it met a schema with no `g`: UNKNOWN on every row,
+// zero rows on all four arms where PostgreSQL answers four (#774). The list
+// therefore moved to `logical` — `physical` imports `logical`, so a shared list
+// can only live there — and `aggScopePreservingWrapper` is now a delegation.
+// `AggregateBelowProject` keeps its narrower list ON PURPOSE and says so: its
+// two callers map a SELECT list onto the aggregate's own STAGE, and a Sort or a
+// window between them emits a stage of its own.
+//
+// So the invariant this test carries is: **these four NAMED readers agree
 // with the list, and the list covers every node type the logical package
 // declares.**
 //
-// It does NOT — and cannot — discover a FOURTH reader. It drives the three by
+// It does NOT — and cannot — discover a FIFTH reader. It drives the four by
 // name, so a new walk that grows its own hardcoded Filter/Sort/Limit list
 // passes here in silence; the round-2 review proved that by adding one and
 // watching this test go green. The commit that introduced it said "a fourth
-// reader with its own list fails here", and that was an overclaim.
+// reader with its own list fails here", and that was an overclaim — the fourth
+// existed already and a review, not this test, is what found it.
 //
 // A source-level guard was considered and is NOT here on purpose. Twelve
 // functions in this package carry a `case logical.NodeFilter, logical.NodeSort,
@@ -70,12 +87,18 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 	names := nodeTypeConstNames(t)
 	if len(want) != len(names) {
 		t.Fatalf("the logical package declares %d node types (%v) and this table has %d — "+
-			"a new node type has to be decided here, because all three walks read this list",
+			"a new node type has to be decided here, because all four walks read this list",
 			len(names), names, len(want))
 	}
 	for typ, w := range want {
 		if got := aggScopePreservingWrapper(typ); got != w {
 			t.Errorf("aggScopePreservingWrapper(%v) = %v, want %v", typ, got, w)
+		}
+		// The physical predicate is a DELEGATION to the logical one, which is
+		// where the list lives so both packages can read it. Asserted rather
+		// than assumed: a copy is exactly what #774 was.
+		if got := logical.AggScopePreservingWrapper(typ); got != w {
+			t.Errorf("logical.AggScopePreservingWrapper(%v) = %v, want %v", typ, got, w)
 		}
 	}
 
@@ -116,6 +139,14 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 		if reached := groupKeysPublishedBelow(wrapped) != nil; reached != w {
 			t.Errorf("groupKeysPublishedBelow through %v reached=%v, want %v — the THIRD walk "+
 				"stopped reading aggScopePreservingWrapper", typ, reached, w)
+		}
+		// The fourth reader starts at a PROJECT and asks about its input, so
+		// the probe puts one on top of the wrapper.
+		overProject := &logical.Node{Type: logical.NodeProject,
+			Children: []*logical.Node{wrapped}}
+		if found := logical.AggregateOverGroupRows(overProject); (found != nil) != w {
+			t.Errorf("logical.AggregateOverGroupRows through %v found=%v, want %v — the FOURTH "+
+				"walk stopped reading AggScopePreservingWrapper (#774)", typ, found != nil, w)
 		}
 	}
 }

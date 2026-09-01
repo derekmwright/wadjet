@@ -309,27 +309,49 @@ where it is a NAME:
   visible, and a `NodeWindow` was on none of their lists. It belongs there —
   `exec.Window` APPENDS its output and renames nothing, which is the same
   answer `scopePreservingWrapper` gives for the relation-scope question.
-  `aggScopePreservingWrapper` states the list once and **all THREE** walks read
-  it — `aggregateUnderOutput` for the gather, `findAggregateAncestor` for the
-  single-process projection, and `groupKeysPublishedBelow`, which decides
-  whether an aggregate DIRECTLY BELOW already publishes the key. The first
-  statement of this said "both walks read one list, so they cannot disagree"
-  and there were three: the third kept its own hardcoded Filter/Sort/Limit
-  list, so `SELECT DISTINCT g + 1 … GROUP BY g + 1` with a window between its
-  two aggregates re-materialized a key the inner one had already published and
-  collapsed the table into ONE NULL group on the single-process path.
+  `logical.AggScopePreservingWrapper` states the list once and **all FOUR**
+  walks read it — `physical.aggregateUnderOutput` for the gather,
+  `physical.findAggregateAncestor` for the single-process projection,
+  `physical.groupKeysPublishedBelow`, which decides whether an aggregate
+  DIRECTLY BELOW already publishes the key, and
+  `logical.AggregateOverGroupRows`, which decides whether a Project's INPUT
+  rows are one per GROUP and therefore whether a predicate above it may be
+  substituted below. The first statement of this said "both walks read one
+  list, so they cannot disagree" and there were three; the corrected statement
+  said three, and there were four. Each miss cost the same kind of answer: the
+  third kept its own hardcoded Filter/Sort/Limit list, so `SELECT DISTINCT
+  g + 1 … GROUP BY g + 1` with a window between its two aggregates
+  re-materialized a key the inner one had already published and collapsed the
+  table into ONE NULL group; the fourth asked its question through
+  `logical.AggregateBelowProject`, whose list is Filter-ONLY, so a WHERE on the
+  key applied above a window substituted `k` away to `(g + 1)`, met a schema
+  with no `g`, and admitted no row at all on any arm (#774).
+
+  The list therefore lives in `logical` and not in `physical`: the fourth
+  reader is in that package, `physical` imports it and not the reverse, and a
+  COPY is exactly what let the two disagree. `physical.aggScopePreservingWrapper`
+  is now a delegation.
+
+  `logical.AggregateBelowProject` keeps a narrower, Filter-only list ON PURPOSE,
+  and says so at its definition. Its two callers —
+  `physical.aggregateProjectionTarget` and `physical.aggregateGroupKeyName` —
+  map a Project's SELECT list onto the aggregate's own STAGE, and a Sort, a
+  LIMIT or a WINDOW between the two emits a stage of ITS own that the projection
+  would be carried past. "Are these rows one per group" and "which stage does
+  this Project sit on" are two questions, and conflating them is how #774 was
+  written.
 
   `TestAggScopePreservingWrapperIsReadByEveryWalk` states exactly what is
-  checked: **these three NAMED readers agree with the list, and the list covers
-  every node type the logical package declares.** It cannot discover a FOURTH
-  reader — it drives the three by name, and a review proved the point by adding
+  checked: **these four NAMED readers agree with the list, and the list covers
+  every node type the logical package declares.** It cannot discover a FIFTH
+  reader — it drives the four by name, and a review proved the point by adding
   a walk with its own list and watching the test pass. A source-level guard was
   considered and rejected: twelve functions in the package carry a
   `NodeFilter, NodeSort, NodeLimit` case and exactly one is asking this
   question, so the guard needs an eleven-entry allowlist that drifts — the
   enumerate-the-kinds shape this repository has already been wrong with twice.
-  What finds a fourth reader is a review counting them, which is how the third
-  was found.
+  What finds the next reader is a review counting them, which is how the third
+  and the fourth were both found.
   On the DAG the SELECT list is attached to the WINDOW stage's fragment
   (ADR-0025 shape g), and that projection is respelled over the producer's
   emitted columns by the same `respellSpecsOverProducerOutput` the
@@ -400,14 +422,20 @@ loud failure was itself an accident of a different column's projection.
     at `final_aggregate` on both DAG arms, byte-identical to `de95b3b5`,
     because `AggSpec` has an OutputType and no (p,s) (ADR-0024 item 2). Filed
     as **#775**.
-  - **#774** — a WHERE on the key applied ABOVE the window admits no row at
-    all: the outer predicate is pushed below the derived table's Project and
-    `k` substituted away to `g + 1`, which above the aggregate is a NAME and
-    not arithmetic, so the filter is UNKNOWN on every row and a filter admits
-    only TRUE. §4 repairs the SELECT item and the window's own spec; the
-    pushed-down outer WHERE is a third consumer and does not go through
-    `plansql.ReplaceGroupKeyRefs`. Pinned with its four controls in
-    `R4/…/WhereOnTheKeyAboveAWindow`, all four arms, base-identical.
+  - **#774** — CLOSED 2026-09-01, and it was §4's own defect one reader over
+    rather than a third consumer of the HAVING respelling. A WHERE on the key
+    applied ABOVE the window admitted no row at all, on every arm: the outer
+    predicate is pushed below the derived table's Project and `k` substituted
+    away to `(g + 1)`, which above the aggregate is a NAME and not arithmetic,
+    so the filter was UNKNOWN on every row and a filter admits only TRUE. The
+    substitution is DECLINED for a definition that is not evaluable over group
+    rows — `projRefs.overAgg` — and that flag was read off
+    `AggregateBelowProject`, the Filter-only walk. It now reads
+    `AggregateOverGroupRows`, the fourth reader of §4's list. Nothing about the
+    predicate's spelling changed; what changed is that it stays where the query
+    wrote it. Gated on nine spellings plus the SUM and COUNT faces in
+    `R4/…/WhereOnTheKeyAboveAWindow`, with the four controls that make the cell
+    exactly this one.
   - **#749** — `DECIMAL(38,10)` arithmetic keeps too few decimal places
     (`d + 1` is `201.000000013` where PostgreSQL says `201.0000000125`), on
     every arm of every tree. Inherited by the group-key family for the same
