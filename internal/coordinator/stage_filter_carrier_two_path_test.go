@@ -1890,6 +1890,121 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				}
 			})
+			// TWO SIBLING AGGREGATES in one query, each minting a derived
+			// key's slot (#759).
+			//
+			// The allocator is created PER AGGREGATE — seeded with that
+			// aggregate's own input and emitted names — so two sibling
+			// aggregates each mint `__gb_expr_0` (here `__gb_expr_2`, past
+			// the fixture's two stored ones). That is structurally what #747
+			// was for WINDOW slots, and it is METHOD 10's shape exactly: the
+			// design claims slots are unique within a query and no fixture
+			// attempted it.
+			//
+			// These entries are the attempt, and they PASS on every arm —
+			// the claim holds here for a reason the window family does not
+			// have. A group-key slot is a column of its aggregate's OWN
+			// INPUT, materialized by the pre-aggregate projection and
+			// consumed by that operator; the aggregate publishes under
+			// `plansql.GroupKeyName` and the slot never leaves. Two sibling
+			// aggregates have disjoint input streams, so one name in both is
+			// two different columns that never meet. `__win_N` is the
+			// opposite — an OUTPUT column that travels up into the join,
+			// which is why the SAME shape collapses there.
+			//
+			// Every entry names BOTH siblings' aggregate values as well as
+			// their keys, and the two are far apart (a count of 80 beside a
+			// sum in the thousands), because equal values make a collapse
+			// invisible. The day the boundary above stops holding, these
+			// fail rather than the class being rediscovered.
+			t.Run("SiblingAggregatesEachMintingASlot", func(t *testing.T) {
+				const p = `(SELECT g + 1 AS a, COUNT(*) AS n FROM %[1]s GROUP BY g + 1) p`
+				const q = `(SELECT h + 1 AS a, SUM(id) AS m FROM %[1]s GROUP BY h + 1) q`
+				for _, c := range []struct {
+					name, sql string
+					rows      int
+					// want is the per-row (key, p's count, q's sum) triple,
+					// PostgreSQL 17's over the 240 collslot rows.
+					want [][3]int64
+				}{
+					{
+						name: "joined",
+						sql: `SELECT p.a AS pa, p.n AS pn, q.m AS qm FROM ` + p + ` JOIN ` + q +
+							` ON p.a = q.a ORDER BY p.a`,
+						rows: 3,
+						want: [][3]int64{{1, 80, 7080}, {2, 80, 7140}, {3, 80, 7200}},
+					},
+					{
+						// A sibling NESTED in a sibling, the shape that broke
+						// the window family on the single path.
+						name: "nested",
+						sql: `SELECT p.a AS pa, p.n AS pn, x.m AS qm FROM ` + p +
+							` JOIN (SELECT q.a AS a, q.m AS m FROM ` + q + `) x ` +
+							`ON p.a = x.a ORDER BY p.a`,
+						rows: 3,
+						want: [][3]int64{{1, 80, 7080}, {2, 80, 7140}, {3, 80, 7200}},
+					},
+					{
+						// Each sibling minting TWO slots, so the second key
+						// of one must not land on the first key of the other.
+						name: "two-keys-each",
+						sql: `SELECT p.a AS pa, p.n AS pn, q.m AS qm FROM ` +
+							`(SELECT g + 1 AS a, h + 2 AS b, COUNT(*) AS n FROM %[1]s ` +
+							`GROUP BY g + 1, h + 2) p JOIN ` +
+							`(SELECT h + 1 AS a, g + 2 AS b, SUM(id) AS m FROM %[1]s ` +
+							`GROUP BY h + 1, g + 2) q ON p.a = q.a AND p.b = q.b ` +
+							`ORDER BY p.a, p.b`,
+						rows: 9,
+						want: nil, // asserted as a row count and a key sequence below
+					},
+					{
+						// The STORED slot columns read as AGGREGATE ARGUMENTS
+						// on either side at once: the allocator has to step
+						// past both, in both aggregates.
+						name: "over-the-stored-slots",
+						sql: `SELECT p.a AS pa, p.n AS pn, q.m AS qm FROM ` +
+							`(SELECT g + 1 AS a, MAX("__gb_expr_0") AS n FROM %[1]s GROUP BY g + 1) p ` +
+							`JOIN (SELECT h + 1 AS a, MAX("__gb_expr_1") AS m FROM %[1]s ` +
+							`GROUP BY h + 1) q ON p.a = q.a ORDER BY p.a`,
+						rows: 3,
+						want: [][3]int64{{1, 1237, 2236}, {2, 1238, 2237}, {3, 1239, 2238}},
+					},
+					{
+						// UNION ALL rather than a join: the two aggregates
+						// meet in a set operation instead.
+						name: "union-all",
+						sql: `SELECT a, n FROM ` + p + ` UNION ALL SELECT a, m FROM ` + q +
+							` ORDER BY a, n`,
+						rows: 7,
+						want: nil,
+					},
+				} {
+					c := c
+					t.Run(c.name, func(t *testing.T) {
+						sql := fmt.Sprintf(c.sql, ct)
+						for _, arm := range sfcArms(ctx, single, coord) {
+							res := sfcRun(t, arm, sql)
+							if len(res.Rows) != c.rows {
+								t.Errorf("%s arm returned %d rows, want %d — two sibling "+
+									"aggregates shared a slot\n  SQL: %s",
+									arm.name, len(res.Rows), c.rows, sql)
+								continue
+							}
+							for i, w := range c.want {
+								r := res.Rows[i]
+								ka, _ := numAsInt(r["pa"])
+								pn, _ := numAsInt(r["pn"])
+								qm, _ := numAsInt(r["qm"])
+								if ka != w[0] || pn != w[1] || qm != w[2] {
+									t.Errorf("%s arm row %d: (%d, %d, %d), PostgreSQL 17 "+
+										"answers (%d, %d, %d)\n  SQL: %s",
+										arm.name, i, ka, pn, qm, w[0], w[1], w[2], sql)
+								}
+							}
+						}
+					})
+				}
+			})
 			// The other binding: an AGGREGATE over the STORED column. Keys
 			// and row count can be right while the argument is bound to the
 			// planner's slot, so the VALUE is what this asserts —

@@ -1536,9 +1536,16 @@ is called. `TestTPCHStageDumpGolden` is byte-identical: no TPC-H stage's shape
 moves, and Q15 — the one TPC-H query with a CTE, joined on its build side —
 answers as it did.
 
-**What is NOT closed, measured rather than assumed.** Nine residuals survive
+**What is NOT closed, measured rather than assumed.** Nine residuals survived
 the sweep, and none of them is this mechanism. Each is stated with where it
-reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
+reproduces, re-measured on that tip against `376b2cac` and a live PostgreSQL 17.
+
+**Four of the nine are CLOSED as of 2026-09-01** — see "A hidden slot moves
+with its provenance", "A join arm answers to the name the QUERY calls it" and
+"A qualified reference is declared by its own side" below, which are the
+window/group-key naming arc's sections. The bullets are kept as written, each
+marked with what closed it, because the shapes are the record of what the
+mechanism was:
 
 - **an arm that is ITSELF A JOIN is still captured, in both spellings and on
   both paths** — and the CTE half of it is the shape the arm-naming section
@@ -1566,7 +1573,10 @@ reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
   a JOIN and nothing about the comma or the CTE keyword. Naming the arm `c`
   fixed the single path for the CTE spelling and is not sufficient where that
   arm lowers to stages of its own; the derived spelling is the mirror, and the
-  distinct-alias control is clean in both. Base-identical, filed as #773;
+  distinct-alias control is clean in both. Base-identical, filed as #773.
+  **The DERIVED spelling (#773) is CLOSED** — `Node.DerivedAlias` is the name
+  `joinArmAlias` was missing; the CTE spelling on the DAG arms is not, and
+  stays here;
 - **the two window sites COMPOSING** — a window in the SELECT list above a join
   one of whose ARMS is itself a window (#772). Each site is fixed alone and the
   nesting is not:
@@ -1581,7 +1591,13 @@ reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
   The identical query WITHOUT the outer window is correct on all three arms
   after this arc — it was wrong on both DAG arms before — and the distinct-alias
   spelling is clean, which is what places the residual at the composition and
-  not at either site. Base-identical;
+  not at either site. Base-identical. **CLOSED** — and the localization above
+  was wrong about where: neither a7535925 site is involved. The two windows
+  mint one `__win_0` (the builder's counter is per SELECT BLOCK) and
+  `renameCollidingSlots` applied the OUTER one's renumbering DOWNWARD into the
+  arm that had not minted it. The distinct-alias spelling was NOT clean either
+  — it failed loudly on the single path — which is the evidence that the
+  defect is provenance and not the shared alias;
 - a CTE that SHADOWS a base table's name cannot reference the table in its own
   body — `WITH decpair AS (SELECT … FROM decpair)` resolves the inner `FROM` to
   the CTE itself. Loud on every arm, pre-existing on `376b2cac`, and filed as
@@ -1590,14 +1606,21 @@ reproduces, re-measured on this tip against `376b2cac` and a live PostgreSQL 17:
   single-process path (#751). Both DAG arms are right, so the wrong side is the
   local engine's slot allocation and not the aliasing of scopes — which is why
   `joinArmAlias` above closed #753's CTE face and left this one. Pinned in
-  `TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues`;
+  `TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues`. **CLOSED**, and
+  the attribution here was wrong: it IS the aliasing of scopes, in the DERIVED
+  spelling. `setSubtreeAlias` declines to overwrite an inner derived table's
+  stamp, so the arm's scan answered to `x` where the query calls the arm `q`;
+  the alias is recorded on the arm's SUBTREE ROOT now, exactly as a CTE's is;
 - two arms publishing one alias make the single-process path render one at the
   other's DECIMAL scale (#754). Right digits, wrong typmod: `x.w` at scale 2
   beside `y.w` at scale 4 prints `12.7500`. A DECIMAL/FLOAT pair under one
   alias does NOT refuse — an earlier statement of this said it did, measured
   against a shape that no longer reaches the refusal — it renders the FLOAT at
   the DECIMAL's scale on the single arm (`1.50` for `1.5`) and is right on both
-  DAG arms. Pinned per entry in the two `…OneAlias…` gates;
+  DAG arms. Pinned per entry in the two `…OneAlias…` gates. **CLOSED** by the
+  same repair as #706: the VALUE was resolved through the qualified spelling
+  and the DECLARATION through the bare one, so one output was described by two
+  sides. Both pin families are deleted;
 - `GROUP BY` on a QUALIFIED derived or CTE alias collapses to one NULL group on
   both DAG arms. The scope is WIDER than an earlier statement of it: not only
   ONE join in the DERIVED spelling, but also the CTE spelling over a three-join
@@ -1639,6 +1662,70 @@ and which now collapses to the same one NULL group the broadcast lowering has
 always answered. It is the qualified group KEY, it is pinned, and both DAG arms
 now agree about it rather than one of them being loud by accident of a
 different defect.
+
+### A hidden slot moves with its PROVENANCE, and only to its own consumer (2026-09-01, #772, #750)
+
+`renameCollidingSlots` renumbers a window slot past a stored column of that
+name and past a slot another BLOCK of the query already minted. Two of its
+three faces were reaching the wrong reference.
+
+**A rename travels UP to its consumer.** The walk applied a child's map to that
+child's whole SUBTREE, which for the node that MINTED the slot means every node
+below it — the block that did not mint it. A window in the SELECT list above a
+join renumbered to `__win_1` and the join ARM's projection was rewritten to
+read `__win_1` while the arm's own window still wrote `__win_0`: the single
+path failed with `column "__win_1" does not exist in the input schema` and both
+DAG arms — where the outer window really does emit `__win_1` — answered the
+OUTER window's value under the arm's name, silently. The descent was redundant
+as well as wrong, because a node applies its own map on the way out of its
+walk; deleting it is the whole repair.
+
+**A nested window's reference carries its provenance.** `SUM(a) OVER () + 0`
+leaves only a `ColRef` to the slot inside the projection's AST, so the renamer
+could not tell the planner's reference from a user's column of the same
+spelling and DECLINED whenever the name was stored — recorded above as a
+deliberate decline, and wrong: over a table storing `__win_0` the slot stepped
+to `__win_1` and the expression stayed on `__win_0`, so every wrapped spelling
+answered the STORED column's values on every arm. `plansql.ColRef.Slot` marks
+the reference the rewrite plants. Nothing a query contains can set it — the
+parser never does, and re-parsing a rendered expression loses it — which is
+what makes it provenance rather than spelling.
+
+**A hidden sort key is rewritten from the stream it sorts.**
+`attachScanSelectProjections` declines a spec that references a synthetic
+window, so a NESTED window's `__sortkey_N` was materialized by nobody, and
+`resolveHiddenSortKeys` asked its NARROW question — which stages run an
+`OpProject` — for the REWRITE half too. Rewriting a key that names a real
+column needs only the columns the stream carries, which a pass-through stage
+forwards from below it. That split is what `sortInputStage`'s comment states
+and what `resolveDerivedAliasSortKeys` already does (#490).
+
+### A join arm answers to the name the QUERY calls it, in the DERIVED spelling too (2026-09-01, #751, #773)
+
+The arm-naming section above records that a CTE stamps its name on the SUBTREE
+ROOT while a derived table stamps its alias onto the SCANS, and reads only the
+scan. Two ordinary shapes have no single scan to read it from: a derived table
+INSIDE the arm stamps first and `setSubtreeAlias` declines to overwrite it, and
+an arm that is itself a JOIN has two scans. Either way the join qualified that
+arm's duplicate columns by a name no reference in the query is written against,
+and the bare-name fallback bound the SIBLING arm's column. `Node.DerivedAlias`
+is the derived spelling of `CTEName`, and `joinArmAlias` walks down single-child
+nodes to find whichever of the three the arm carries.
+
+### A qualified reference is DECLARED by its own side (2026-09-01, #706, #754)
+
+`mergeJoinSides` drops a name the two sides declare differently, which is the
+honest answer to a BARE reference and no answer at all to a QUALIFIED one. The
+VALUE went through the qualified spelling — the compiled expression keeps the
+qualifier — and the DECLARATION through `proj.Column`, which is the bare name
+the parser records, so one output was described by TWO sides: right digits at
+the wrong scale where the value fits, 22003 where it does not, and typmod -1 on
+the wire where PostgreSQL sends `numeric(9,2)`. `exec.ProjectColumn.SourceCol`
+carries the qualified spelling now, and `withJoinArmQualifiers` adds
+`<arm>.<column>` entries beside the merged bare ones for each side the plan can
+name with ONE relation name. An arm holding several relations under no shared
+name qualifies nothing — an entry under a name that does not own the column
+would be this defect pointing the other way.
 
 ## Consequences
 
