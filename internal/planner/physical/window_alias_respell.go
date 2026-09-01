@@ -297,3 +297,87 @@ func aggInputAliasIsMaterializedUnderItsName(n *logical.Node) bool {
 	}
 	return false
 }
+
+// aggKeyAliasMaterializedByProducer answers, for a GROUP BY key that names a
+// derived table's COMPUTED alias, the name the producing fragment PUBLISHES
+// that value under — or ok=false when nothing materializes it and the key must
+// travel as its defining expression instead.
+//
+// It is the GROUP BY key's counterpart of
+// aggInputAliasIsMaterializedUnderItsName, which the aggregate ARGUMENT path has
+// asked since #742 and the KEY path never did. `aggStageGroupKey` answered a
+// computed alias with `expr.String()` unconditionally, so
+//
+//	SELECT x.id, x.w, COUNT(*) FROM (SELECT id, SUM(a) OVER () + 0 AS w
+//	  FROM decpair) x LEFT JOIN decpair z ON x.id = z.id GROUP BY x.id, x.w
+//
+// dispatched the key as `__win_0 + 0` — a window SLOT the join does not carry,
+// because the window arm's projection already renamed it away to `w`. The
+// worker's pre-aggregate projection compiled that text against a batch with no
+// `__win_0`, `expr.ColRef.Eval` answered nil, and every row landed in ONE NULL
+// key: PostgreSQL 17 answers 52.99 on all nine rows and both DAG arms answered
+// NULL on all nine, silently (#777). The single-process path is correct
+// throughout — there the Project is a real operator and `w` is a real column.
+//
+// The same shape WITHOUT the GROUP BY is correct, and so is the unwrapped
+// `SUM(a) OVER () AS w`: the latter is a plain rename, which
+// `resolveAggInputName` answers on its rename arm, and the former never asks
+// this question at all. The broken cell is exactly a WRAPPED window output used
+// as a key.
+//
+// The published name is the projection's ALIAS, because that is what
+// `attachScanSelectProjections` and `absorbWindowArmProjection` put on the
+// producing fragment. A projection that is a plain rename, an aggregate output,
+// or has no AST is not this case and is declined — the caller's other arms
+// answer those, and answering here would re-route a resolution that works.
+func aggKeyAliasMaterializedByProducer(name string, child *logical.Node) (string, bool) {
+	for n := child; n != nil; {
+		switch {
+		case n.Type == logical.NodeProject:
+			bare := derivedScopeBareName(name, n)
+			if proj := projectionForName(n.Projections, name, bare); proj != nil {
+				if proj.Column != "" || proj.IsAgg || proj.ASTExpr == nil {
+					return "", false
+				}
+				// The producer DIRECTLY below the Project that defines the
+				// alias, and no wider. The argument path asks
+				// aggInputAliasIsMaterializedUnderItsName of the whole subtree
+				// from the aggregate down, which also answers yes for a JOIN
+				// standing ABOVE this Project — and answering the alias there
+				// turned two CORRECT DAG answers loud (`stage scan-0: column
+				// "w" does not exist`) over a derived table with an ORDER BY or
+				// a LIMIT in it, while fixing nothing. The narrow question is
+				// the one #777 needs and the one that is measured; the wider
+				// shape is left exactly as it was and filed.
+				if len(n.Children) != 1 ||
+					!aggInputAliasIsMaterializedUnderItsName(n.Children[0]) {
+					return "", false
+				}
+				if proj.Alias != "" {
+					return proj.Alias, true
+				}
+				return "", false
+			}
+		case n.Type == logical.NodeAggregate:
+			// Its outputs are its own key and aggregate names; a rename below
+			// it says nothing about what the parent reads.
+			return "", false
+		case n.Type == logical.NodeJoin && len(n.Children) == 2:
+			// Mirror resolveAggInputName: the alias can be defined under either
+			// arm, and a semi/anti join's right side emits nothing.
+			if s, ok := aggKeyAliasMaterializedByProducer(name, n.Children[0]); ok {
+				return s, true
+			}
+			if jt := strings.ToLower(n.JoinType); jt == "semi" || jt == "anti" {
+				return "", false
+			}
+			return aggKeyAliasMaterializedByProducer(name, n.Children[1])
+		}
+		if len(n.Children) == 1 {
+			n = n.Children[0]
+			continue
+		}
+		break
+	}
+	return "", false
+}

@@ -5179,6 +5179,17 @@ func aggStageGroupKey(key string, e plansql.Node, child *logical.Node) (string, 
 		return key, false
 	}
 	if expr != nil {
+		// The alias names an EXPRESSION, and there are two answers to "what is
+		// this value called on the DAG" — the same two the aggregate ARGUMENT
+		// path has distinguished since #742. Where a JOIN, a window, a sort, a
+		// LIMIT or a DISTINCT stands between the aggregate and the source, the
+		// producing fragment MATERIALIZES the alias under its own name, so the
+		// key is a bare NAME there and the expression is what does not resolve.
+		// Shipping the expression regardless dispatched `__win_0 + 0` against a
+		// join that carries `w`, and every row landed in one NULL key (#777).
+		if name, ok := aggKeyAliasMaterializedByProducer(key, child); ok {
+			return name, true
+		}
 		return expr.String(), true
 	}
 	return resolved, true

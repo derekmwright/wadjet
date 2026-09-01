@@ -373,6 +373,38 @@ the aggregate's own output, is REUSED when the SELECT list already computes it
 and hoisted into the nested-aggregate slot family otherwise, which is what
 HAVING has done since it grew `__having_N`.
 
+### 4a. A key that NAMES a window's output is spelled the way the producer publishes it (2026-09-01, #777)
+
+The other direction of §4: not a key read above a window, but a WINDOW OUTPUT
+read as a key. `SELECT x.id, x.w, COUNT(*) FROM (SELECT id, SUM(a) OVER () + 0
+AS w FROM decpair) x LEFT JOIN decpair z ON x.id = z.id GROUP BY x.id, x.w`
+answered `w = 52.99` on the single-process path and NULL on every row on both
+DAG arms.
+
+`aggStageGroupKey` answers a key that names a derived table's COMPUTED alias
+with the alias's DEFINING EXPRESSION, and for a wrapped window that expression
+is `__win_0 + 0` — a SLOT the join does not carry, because the window arm's own
+projection (`absorbWindowArmProjection`, ADR-0025 shape g) already renamed it
+away to `w`. The worker's pre-aggregate projection compiled that text against a
+batch with no `__win_0`, `expr.ColRef.Eval` answered nil, and the whole table
+keyed NULL.
+
+The aggregate's ARGUMENT path has asked the right question since #742 —
+`aggInputAliasIsMaterializedUnderItsName`: where a join, a window, a sort, a
+LIMIT or a DISTINCT stands below the defining Project, the producing fragment
+materializes the alias under its own NAME and the expression is what does not
+resolve. `aggKeyAliasMaterializedByProducer` asks it for the KEY.
+
+It asks the NARROW form — the producer DIRECTLY below the Project that defines
+the alias — and that boundary is measured rather than assumed. The wide form,
+"does any such producer stand anywhere between the aggregate and the source",
+is what the argument path asks; asking it here turned two CORRECT DAG answers
+into `stage scan-0: column "w" does not exist in the input schema` over a
+derived table carrying an ORDER BY or a LIMIT, and repaired none of the shapes
+it was supposed to. So an ordinary computed alias over a bare scan, used as a
+key through a join or a DISTINCT, is still the #736 family and is filed as
+**#781** with pins that fail if it starts agreeing.
+
 Both halves were needed. With only the walks widened, `SELECT g + 1, COUNT(*),
 SUM(COUNT(*)) OVER ()` stopped failing loudly and started answering NULL, and
 `ORDER BY COUNT(*)` started answering in an arbitrary order — a LOUD failure
