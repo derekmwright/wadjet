@@ -227,6 +227,11 @@ type Coordinator struct {
 	// DISTINCT it has no stage for (#466) and that were routed to the
 	// coordinator-local single-process pipeline instead.
 	localDistinct atomic.Int64
+	// localGroupingSets counts queries whose plan the stage DAG refused for
+	// GROUPING SETS / ROLLUP / CUBE, which it has no representation for at all
+	// (#778), and that were routed to the coordinator-local single-process
+	// pipeline instead.
+	localGroupingSets atomic.Int64
 	// localInSubquery counts queries whose plan the stage DAG refused for an
 	// IN-subquery the planner could not materialize into a literal set, and
 	// which ran on the coordinator-local pipeline instead (#524).
@@ -969,6 +974,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// wherever it sits, so route it there rather than erroring.
 		if errors.Is(err, physical.ErrDistinctDistributed) {
 			return c.runDistinctLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And once more for GROUPING SETS / ROLLUP / CUBE, which the DAG has no
+		// Stage field, no wire tag and no worker read for — so it answered
+		// their union as a plain GROUP BY and dropped every super-aggregate
+		// row, silently (#778). The single-process HashAggregate is the only
+		// operator in the process that knows what a grouping set is.
+		if errors.Is(err, physical.ErrGroupingSetsDistributed) {
+			return c.runGroupingSetsLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And once more for an IN-subquery the planner could not materialize
 		// into a literal set — too many rows, or a value with no literal

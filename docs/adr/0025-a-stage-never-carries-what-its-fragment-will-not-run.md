@@ -57,8 +57,23 @@ Three parts:
    refusing the shape at plan time and routing it to the local engine —
    is reserved for constructs the DAG has no lowering for at all
    (correlated subqueries, unstageable DISTINCT, unmaterializable IN
-   sets, and now SELECT-list subqueries, #659); a filter is not one of
-   those.
+   sets, SELECT-list subqueries (#659), and GROUPING SETS / ROLLUP / CUBE
+   (#778)); a filter is not one of those.
+
+   GROUPING SETS is the clearest member of that list and was the last one
+   to be recognised as one. `logical.buildGroupingSets` emits ONE Aggregate
+   whose `GroupBy` is the UNION of every set's terms, with the sets as node
+   metadata; the single-process builder reads that metadata into
+   `exec.HashAggregate.GroupingSets` and `walkStages` reads it nowhere.
+   `Stage` had no field for it, `distributed.OpSpec` no wire tag, no worker
+   any assignment — so the DAG ran the union as a PLAIN GROUP BY and
+   returned the cross product where PostgreSQL returns the sets, and no
+   grand total where PostgreSQL has one. Silently, and for plain column
+   keys as much as computed ones. The refusal is deliberately
+   unconditional: a single-set GROUPING SETS is a plain GROUP BY and would
+   be safe to run distributed, but a predicate that has to be exactly right
+   about which shapes are equivalent is the kind that drifts, and no such
+   query is written by hand.
 
 3. **A mismatch is a plan-time refusal, not a wrong answer.**
    `ValidateNativeDAGShape` rejects any plan that populates either field

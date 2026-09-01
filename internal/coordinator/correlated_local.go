@@ -37,6 +37,23 @@ func (c *Coordinator) runDistinctLocal(ctx context.Context, queryID string, logi
 		"DISTINCT with no distributed stage", &c.localDistinct)
 }
 
+// runGroupingSetsLocal executes a query the stage DAG refused
+// (physical.ErrGroupingSetsDistributed) on the coordinator-local
+// single-process pipeline, whose HashAggregate is the only operator in the
+// process that knows what a grouping set is.
+//
+// The DAG carries no representation for GROUPING SETS / ROLLUP / CUBE at all —
+// no Stage field, no wire tag, no worker read — so it ran the UNION of the
+// sets' terms as a plain GROUP BY and answered the cross product where
+// PostgreSQL answers the sets, and no grand total where PostgreSQL has one.
+// Silently, and for plain column keys as much as computed ones. Refusing beat
+// that (#778); routing beats handing the client an error, exactly as #359 does
+// for correlated subqueries and #466 for DISTINCT.
+func (c *Coordinator) runGroupingSetsLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"GROUPING SETS with no distributed stage", &c.localGroupingSets)
+}
+
 // runInSubqueryLocal executes a query the stage DAG refused
 // (physical.ErrInSubqueryDistributed) on the coordinator-local single-process
 // pipeline, where expr.InSubquery resolves the set once under resolveMu and
@@ -115,4 +132,13 @@ func (c *Coordinator) CorrelatedLocalRoutes() int64 {
 // CorrelatedLocalRoutes so a suite can assert which refusal fired.
 func (c *Coordinator) DistinctLocalRoutes() int64 {
 	return c.localDistinct.Load()
+}
+
+// GroupingSetsLocalRoutes reports how many plans refused for GROUPING SETS /
+// ROLLUP / CUBE were routed to the coordinator-local pipeline. Separate from
+// the others so a suite can assert WHICH refusal fired — a gate that only
+// checked the rows would pass just as happily if the DAG had started answering
+// them by accident (#778).
+func (c *Coordinator) GroupingSetsLocalRoutes() int64 {
+	return c.localGroupingSets.Load()
 }

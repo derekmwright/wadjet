@@ -2583,6 +2583,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseUnstageableDistinct(node); err != nil {
 		return nil, err
 	}
+	// GROUPING SETS / ROLLUP / CUBE is the same shape one construct over: the
+	// DAG has no field to carry the sets, so it ran their UNION as a plain
+	// GROUP BY and silently dropped every super-aggregate row (#778).
+	if err := refuseGroupingSets(node); err != nil {
+		return nil, err
+	}
 	// A `real IN (...)` list holding a literal that is not a real is a
 	// PLAN-time error in PostgreSQL, raised whether or not the predicate is
 	// ever reached (#631 follow-up). Refuse it here so the DAG cannot answer
@@ -9451,18 +9457,33 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		hashAgg.Spill = sm
 	}
 
-	// For GROUPING SETS: single-pass mode — convert column names to indices
+	// For GROUPING SETS: single-pass mode — convert the sets' terms to key
+	// POSITIONS.
+	//
+	// A term is looked up against `node.GroupBy`, the key list as the query
+	// wrote it, and NOT against `groupByCols`, which is what the aggregate
+	// actually groups on: a DERIVED key's entry there is its hidden
+	// `__gb_expr_N` slot (ADR-0026 §2), which no grouping set can be spelled
+	// with. Keyed on the materialized name, `ROLLUP (g + 1)` found nothing,
+	// produced an EMPTY set, and every set collapsed to the grand total.
 	var postOps []exec.UnaryOperator
 	if len(node.GroupingSets) > 0 {
-		colIndex := make(map[string]int, len(groupByCols))
+		keyIndex := make(map[string]int, len(node.GroupBy))
+		for i, c := range node.GroupBy {
+			keyIndex[strings.ToLower(strings.TrimSpace(c))] = i
+		}
 		for i, c := range groupByCols {
-			colIndex[c] = i
+			// The materialized spelling too, so a set written against a name
+			// the pre-projection did not move still resolves.
+			if _, taken := keyIndex[strings.ToLower(c)]; !taken {
+				keyIndex[strings.ToLower(c)] = i
+			}
 		}
 		sets := make([][]int, len(node.GroupingSets))
 		for i, set := range node.GroupingSets {
 			indices := make([]int, 0, len(set))
 			for _, col := range set {
-				if idx, ok := colIndex[col]; ok {
+				if idx, ok := keyIndex[strings.ToLower(strings.TrimSpace(col))]; ok {
 					indices = append(indices, idx)
 				}
 			}

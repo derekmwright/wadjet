@@ -417,14 +417,24 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		}
 
 		if len(info.GroupingSets) > 0 {
-			// GROUPING SETS / CUBE / ROLLUP: build multiple aggregate passes
-			// connected by UNION ALL.
+			// GROUPING SETS / CUBE / ROLLUP: one aggregate pass over the union
+			// of every set's terms, with the sets as metadata.
 			allGroupCols := make([]string, len(info.GroupBy))
 			for i, gb := range info.GroupBy {
 				allGroupCols[i] = cleanExpr(gb)
 			}
 
-			plan = buildGroupingSets(plan, allGroupCols, aggs, info.GroupingSets)
+			aggNode := buildGroupingSets(plan, allGroupCols, aggs, info.GroupingSets)
+			// The keys' PARSED forms travel with them here too. A grouping-set
+			// term is a GROUP BY term and nothing about the construct changes
+			// what `g + 1` means: it is arithmetic one of the engines has to
+			// materialize, and every consumer above resolves it by identity
+			// (ADR-0026). Left off, `buildAggregate` saw only the text, could
+			// not tell a derived key from an input column, and refused the
+			// query — while the DAG answered a plain GROUP BY (#778).
+			aggNode.GroupByExprs = info.GroupByExprs
+			plan = aggNode
+			groupKeyRefs = computedGroupKeyRefs(aggNode)
 		} else {
 			// Simple GROUP BY
 			var groupBy []string

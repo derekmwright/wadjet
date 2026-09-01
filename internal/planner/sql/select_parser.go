@@ -266,30 +266,38 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 			if _, err := p.expect(TokenKWSets); err != nil {
 				return nil, fmt.Errorf("expected SETS after GROUPING")
 			}
-			sets, allCols, err := p.parseGroupingSets()
+			sets, allCols, allExprs, err := p.parseGroupingSets()
 			if err != nil {
 				return nil, err
 			}
 			info.GroupingSets = sets
 			info.GroupBy = allCols
+			// The PARSED form, aligned with GroupBy, exactly as the simple
+			// GROUP BY branch below records it. Without it buildAggregate
+			// cannot tell a derived key from a column of the input and refuses
+			// `GROUP BY ROLLUP (g + 1)` outright, while the stage DAG answered
+			// it as a plain GROUP BY (#778).
+			info.GroupByExprs = allExprs
 		case p.isKeyword(TokenKWCube):
 			// CUBE(a, b, c) → all 2^n subsets
 			p.advance()
-			cols, err := p.parseGroupingColList()
+			cols, exprs, err := p.parseGroupingColList()
 			if err != nil {
 				return nil, fmt.Errorf("parsing CUBE: %w", err)
 			}
 			info.GroupingSets = expandCube(cols)
 			info.GroupBy = cols
+			info.GroupByExprs = exprs
 		case p.isKeyword(TokenKWRollup):
 			// ROLLUP(a, b, c) → (a,b,c), (a,b), (a), ()
 			p.advance()
-			cols, err := p.parseGroupingColList()
+			cols, exprs, err := p.parseGroupingColList()
 			if err != nil {
 				return nil, fmt.Errorf("parsing ROLLUP: %w", err)
 			}
 			info.GroupingSets = expandRollup(cols)
 			info.GroupBy = cols
+			info.GroupByExprs = exprs
 		default:
 			// Simple GROUP BY
 			for {
@@ -2679,14 +2687,48 @@ func ParseExpressionComplete(sql string) (Node, error) {
 
 // --- GROUPING SETS / CUBE / ROLLUP helpers ---
 
+// groupTermSet collects the GROUP BY terms a GROUPING SETS list mentions, in
+// FIRST-APPEARANCE order, with each term's parsed form beside its name.
+//
+// Order, because `info.GroupBy` decides the key POSITIONS every grouping set
+// then indexes into, and the first cut of this collected the union in a Go MAP
+// — so the same query planned two different key orders on two runs. Nothing
+// asserted it, because the values are read back by name.
+//
+// The parsed form, because a term is only ever resolved from it: `g + 1` is
+// arithmetic that one of the engines has to MATERIALIZE, and without the AST
+// beside the text `buildAggregate` could not tell a derived key from a column
+// and refused the query outright (ADR-0026 §2c, #778).
+type groupTermSet struct {
+	names []string
+	exprs []Node
+	seen  map[string]int
+}
+
+// add records one term and returns the canonical name it was recorded under.
+func (g *groupTermSet) add(e Node) string {
+	e = Unparen(e)
+	name := GroupKeyName(e)
+	if g.seen == nil {
+		g.seen = map[string]int{}
+	}
+	if _, dup := g.seen[strings.ToLower(name)]; !dup {
+		g.seen[strings.ToLower(name)] = len(g.names)
+		g.names = append(g.names, name)
+		g.exprs = append(g.exprs, e)
+	}
+	return name
+}
+
 // parseGroupingSets parses GROUPING SETS ((...), (...), ...).
-// Returns the list of grouping sets and the union of all columns referenced.
-func (p *selectParser) parseGroupingSets() ([][]string, []string, error) {
+// Returns the list of grouping sets and the union of all terms referenced,
+// each with its parsed form.
+func (p *selectParser) parseGroupingSets() ([][]string, []string, []Node, error) {
 	if _, err := p.expect(TokenLParen); err != nil {
-		return nil, nil, fmt.Errorf("expected ( after GROUPING SETS")
+		return nil, nil, nil, fmt.Errorf("expected ( after GROUPING SETS")
 	}
 
-	allCols := make(map[string]bool)
+	var all groupTermSet
 	var sets [][]string
 
 	for {
@@ -2698,11 +2740,9 @@ func (p *selectParser) parseGroupingSets() ([][]string, []string, error) {
 				for {
 					expr, err := p.parseExpr()
 					if err != nil {
-						return nil, nil, fmt.Errorf("parsing grouping set: %w", err)
+						return nil, nil, nil, fmt.Errorf("parsing grouping set: %w", err)
 					}
-					col := expr.String()
-					cols = append(cols, col)
-					allCols[col] = true
+					cols = append(cols, all.add(expr))
 					if p.peek() != TokenComma {
 						break
 					}
@@ -2710,18 +2750,16 @@ func (p *selectParser) parseGroupingSets() ([][]string, []string, error) {
 				}
 			}
 			if _, err := p.expect(TokenRParen); err != nil {
-				return nil, nil, fmt.Errorf("expected ) in grouping set")
+				return nil, nil, nil, fmt.Errorf("expected ) in grouping set")
 			}
 			sets = append(sets, cols)
 		} else {
 			// Single column without parens (e.g., GROUPING SETS (a, (a,b)))
 			expr, err := p.parseExpr()
 			if err != nil {
-				return nil, nil, fmt.Errorf("parsing grouping set column: %w", err)
+				return nil, nil, nil, fmt.Errorf("parsing grouping set column: %w", err)
 			}
-			col := expr.String()
-			sets = append(sets, []string{col})
-			allCols[col] = true
+			sets = append(sets, []string{all.add(expr)})
 		}
 
 		if p.peek() != TokenComma {
@@ -2731,37 +2769,37 @@ func (p *selectParser) parseGroupingSets() ([][]string, []string, error) {
 	}
 
 	if _, err := p.expect(TokenRParen); err != nil {
-		return nil, nil, fmt.Errorf("expected ) after GROUPING SETS")
+		return nil, nil, nil, fmt.Errorf("expected ) after GROUPING SETS")
 	}
 
-	var all []string
-	for col := range allCols {
-		all = append(all, col)
-	}
-	return sets, all, nil
+	return sets, all.names, all.exprs, nil
 }
 
-// parseGroupingColList parses a parenthesized column list: (a, b, c).
-func (p *selectParser) parseGroupingColList() ([]string, error) {
+// parseGroupingColList parses a parenthesized term list: (a, b, c), keeping
+// each term's parsed form beside its canonical name.
+func (p *selectParser) parseGroupingColList() ([]string, []Node, error) {
 	if _, err := p.expect(TokenLParen); err != nil {
-		return nil, fmt.Errorf("expected ( after CUBE/ROLLUP")
+		return nil, nil, fmt.Errorf("expected ( after CUBE/ROLLUP")
 	}
 	var cols []string
+	var exprs []Node
 	for {
-		expr, err := p.parseExpr()
+		e, err := p.parseExpr()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		cols = append(cols, expr.String())
+		e = Unparen(e)
+		cols = append(cols, GroupKeyName(e))
+		exprs = append(exprs, e)
 		if p.peek() != TokenComma {
 			break
 		}
 		p.advance()
 	}
 	if _, err := p.expect(TokenRParen); err != nil {
-		return nil, fmt.Errorf("expected ) after column list")
+		return nil, nil, fmt.Errorf("expected ) after column list")
 	}
-	return cols, nil
+	return cols, exprs, nil
 }
 
 // expandCube expands CUBE(a, b, c) into all 2^n subsets.
