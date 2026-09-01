@@ -200,12 +200,17 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 	// of the shapes below.
 	//
 	// So an ordinary computed alias over a BARE SCAN, used as a group key
-	// through a join or a DISTINCT, is still wrong on the DAG. It is not #777's
-	// mechanism — it has no window in it, it is byte-identical with this
-	// commit's change reverted AND with the whole arc reverted, and it is the
-	// #736 family's `GroupByCols` is both the resolution and the published name.
-	// It is pinned here because these are the queries a fix to the wider
-	// question would move, and a pin that starts agreeing FAILS.
+	// through a join or a DISTINCT, is still wrong on the DAG: one NULL group
+	// over the whole table. It is not #777's mechanism — it has no window in it,
+	// and it is byte-identical with this file's change reverted AND with the
+	// whole arc reverted. It is the #736 family's one-field problem
+	// (`Stage.GroupByCols` is both the RESOLUTION name and the PUBLISHED name)
+	// in a shape that arc's refusal deliberately does not cover: the key IS a
+	// column of the aggregate's input by every logical-plan test, and only the
+	// STAGE spelling is wrong. It is filed as #781.
+	//
+	// Pinned here rather than elsewhere because these are the queries a fix to
+	// the WIDER question would move, and a pin that starts agreeing FAILS.
 	//
 	// TODO(#781): delete these when a computed alias over a bare scan resolves.
 	for _, c := range []struct {
@@ -230,6 +235,18 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			pg:        "8 rows: 0|1;3|1;6|1;9|1;12|1;15|1;18|1;|1;",
 			dagPinned: "1 rows: |8;",
 		},
+		{
+			// The no-join spelling, which fails LOUDLY instead — and only
+			// because the key is DECIMAL: `derivedGroupKeyDecl` cannot type it
+			// through the rename, so the slot is FLOAT64 and the #361 store
+			// guard fires. Same site, a different symptom, and it is here so a
+			// change that moves either one is visible.
+			name:      "pin781/a-computed-decimal-alias-over-a-bare-scan-is-loud",
+			sql:       "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl + ") x GROUP BY x.w ORDER BY w",
+			cols:      []string{"w", "n"},
+			pg:        "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+			dagPinned: "",
+		},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -242,6 +259,14 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 					if got := dajDigest(res, c.cols); got != c.pg {
 						t.Errorf("single arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
 							got, c.pg, c.sql)
+					}
+					continue
+				}
+				if c.dagPinned == "" {
+					if err == nil {
+						t.Fatalf("the %s arm now ANSWERS this, where this pin records a hard "+
+							"failure and PostgreSQL answers %q. Re-measure #781 and assert or "+
+							"update the pin\n  SQL: %s", arm.name, c.pg, c.sql)
 					}
 					continue
 				}

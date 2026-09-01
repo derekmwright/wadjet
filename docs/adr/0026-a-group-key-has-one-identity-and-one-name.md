@@ -472,26 +472,82 @@ loud failure was itself an accident of a different column's projection.
     (`d + 1` is `201.000000013` where PostgreSQL says `201.0000000125`), on
     every arm of every tree. Inherited by the group-key family for the same
     reason: the key reaches the arithmetic now.
-  - **#736** — what remains of the DAG half after the reference rule above
-    closed the collision shapes. Re-measured on 2026-09-01 over `typemx`,
-    on four arms (single, single spilled at 512 KiB, DAG, DAG
-    `BroadcastBytesOverride=1`) against a live PostgreSQL 17: the eleven
-    shapes the issue tabulates are now EIGHT correct on every arm — the
-    collision shapes, the CTE spelling, the string-key spelling, the outer
-    aggregate over the key and the renamed-leaf key all agree. Three do not,
-    and all three are byte-identical to `de95b3b5`: an aggregate whose
-    ARGUMENT is spelled like the key (loud, `column "\"g + 1\"" does not
-    exist`), an aggregate ALIASED like the key (the KEY's value under the
-    alias), and DISTINCT over a derived key (one NULL group). They are three
-    different DAG mechanisms and none of them is the reference rule.
+  - **#736** — CLOSED 2026-09-01. What remained of the DAG half after the
+    reference rule above closed the collision shapes was re-measured over
+    `typemx` on four arms (single, single spilled at 512 KiB, DAG, DAG
+    `BroadcastBytesOverride=1`) against a live PostgreSQL 17: eight of the
+    eleven shapes the issue tabulates already agreed everywhere, and the
+    remaining three were three DIFFERENT DAG mechanisms, none of them the
+    reference rule.
+
+    One was a naming asymmetry and is fixed outright. An aggregate whose
+    ARGUMENT is spelled like the key failed LOUDLY —
+    `column "\"g + 1\"" does not exist` — because the parser records a
+    delimited argument WITH its quotes (`ColRef.String()` re-delimits), the
+    single-process path strips them with `NormalizeIdentRef` and the DAG
+    carried the spelling verbatim, so the alias lookup missed and the argument
+    was never re-spelled to its source column. A delimited identifier's quotes
+    are not part of its NAME (§2b), and that is as true of an aggregate's
+    argument as of a key.
+
+    The other two need the SEPARATION §2 is about, and a `Stage` has one field
+    where the single-process path has two. `Stage.GroupByCols` is
+    simultaneously what the worker computes the key FROM and what it publishes
+    it AS; the worker re-derives "is this key derived?" by PARSING that text
+    and mints its own slot. So a key an aggregate DIRECTLY BELOW already
+    publishes was recomputed against a schema that no longer has its leaves
+    (the DISTINCT lowering — ONE NULL group), and a derived key sharing its
+    published name with one of the aggregate's own outputs won every by-name
+    lookup above it, because a batch resolves a name to its FIRST column and
+    the aggregate emits keys before outputs (the KEY's value under the
+    aggregate's alias).
+
+    Both are REFUSED and ROUTED (`ErrGroupKeyDistributed` →
+    `runGroupKeyLocal`) rather than fixed on the DAG, and that is a
+    deliberate, narrow choice rather than the end of the story. The fix this
+    ADR sketches — the source-spelled expression on the stage beside the
+    published name — is a wire change through `distributed.OpSpec` and the
+    worker's aggregate builder, and the v0.18.8 author probed one shape of it
+    (a `groupKeysPublishedBelow` consultation at stage emission) and reverted
+    it when it never fired. The refusal makes the two shapes ANSWER
+    PostgreSQL's rows on every arm today, and its predicate is exactly the
+    condition `groupKeyOutputs` already computes, so the day a Stage carries
+    two names the refusal is deleted with the same one-line test.
+
+    The narrowness is asserted, not asserted-to:
+    `ctl/an-ordinary-computed-key-still-runs-on-the-dag` fails if the refusal
+    starts swallowing plain `GROUP BY g + 1`.
 
     "All on the DAG arms alone" was written here and is FALSE with a WINDOW
     present: `SELECT DISTINCT g + 1 AS k, ROW_NUMBER() OVER (…) … GROUP BY
     g + 1` was one NULL group on the SINGLE-process path too, for §4's third
-    walk rather than for #736. That half is fixed and the DAG's is pinned
-    beside it (`R4/…/DistinctOverAComputedKeyUnderAWindow`), so the sentence
-    now says what is true: the DISTINCT residual is the DAG's alone once the
-    walks agree, and it was not before.
+    walk rather than for #736. Both halves now answer.
+
+    The refusal's own boundary is measured, and it is where the next finding
+    lives. Its first cut asked `!Derived && !nameIsPlainColumn(Name)`, which is
+    true of `GROUP BY n1.n_name` — a key that is not derived because it IS a
+    column, whose qualified name is not "plain" by that predicate. TPC-H Q07
+    was refused and routed local, and `TestTPCHStageDumpGolden` is what said
+    so. `groupKeyOutputs` now records `PublishedBelow` — WOULD be derived, but
+    an aggregate below already publishes it — and the refusal reads that, so
+    the two reasons a key needs no materializing cannot be confused again.
+
+    That narrowing also decided **#781**, filed from the same matrix while
+    gating #777: a computed alias over a BARE SCAN used as a key through a
+    join or a DISTINCT. The wide predicate answered it, the narrow one does
+    not, and the wide one is not available — so #781 stays open and pinned.
+    Its key IS a column of the aggregate's input by every logical-plan test;
+    only the STAGE spelling is wrong (`aggStageGroupKey` dispatches the
+    defining expression), so the site is `assertGroupKeysResolve` — the
+    GROUP-BY twin of `assertAggregateInputsResolve`, which does not exist. One
+    was written and discarded here: its input modelling excludes a JOIN, which
+    is the producer under every #781 shape, so it fired on no fixture at all,
+    and a guard no fixture reaches is untested code on the default path
+    (method 10).
+
+    Also still open in the family: **#785**, an aggregate aliased like the key
+    BESIDE a HAVING on it, which answers zero rows on every arm and is
+    therefore not the DAG's.
 
 A related naming rule, settled here because two of the four review findings
 turned on it: **an ALIAS is a name, and its case is part of it.** A

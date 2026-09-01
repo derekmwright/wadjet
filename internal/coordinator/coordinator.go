@@ -232,6 +232,11 @@ type Coordinator struct {
 	// (#778), and that were routed to the coordinator-local single-process
 	// pipeline instead.
 	localGroupingSets atomic.Int64
+	// localGroupKey counts queries whose plan the stage DAG refused because a
+	// GROUP BY key's resolution name and published name have to differ and
+	// `Stage.GroupByCols` is one field for both (#736), and that were routed to
+	// the coordinator-local single-process pipeline instead.
+	localGroupKey atomic.Int64
 	// localInSubquery counts queries whose plan the stage DAG refused for an
 	// IN-subquery the planner could not materialize into a literal set, and
 	// which ran on the coordinator-local pipeline instead (#524).
@@ -982,6 +987,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// operator in the process that knows what a grouping set is.
 		if errors.Is(err, physical.ErrGroupingSetsDistributed) {
 			return c.runGroupingSetsLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a GROUP BY key that needs its resolution name and its published
+		// name to be two different things, which one `Stage.GroupByCols` entry
+		// cannot be. The single-process pipeline carries them separately —
+		// a hidden slot and exec.HashAggregate.GroupByOutNames (ADR-0026 §2) —
+		// so the query has an answer here (#736).
+		if errors.Is(err, physical.ErrGroupKeyDistributed) {
+			return c.runGroupKeyLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And once more for an IN-subquery the planner could not materialize
 		// into a literal set — too many rows, or a value with no literal

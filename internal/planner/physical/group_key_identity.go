@@ -53,6 +53,18 @@ type groupKeyOut struct {
 	// Derived marks a key the aggregate's input does not already carry, so
 	// one of the two paths has to materialize it.
 	Derived bool
+	// PublishedBelow marks a key that WOULD be derived — its expression is not
+	// a column of the aggregate's input — except that an aggregate DIRECTLY
+	// BELOW already publishes it, under this same Name. It is therefore not
+	// materialized, and it is published under a text no column reference can
+	// spell.
+	//
+	// The distinction matters to a consumer that has to know WHY a key is not
+	// derived: `GROUP BY n1.n_name` is not derived because it IS a column, and
+	// `SELECT DISTINCT g + 1 … GROUP BY g + 1` is not derived because the
+	// aggregate below computed it. Only the second needs a published name a
+	// stage cannot carry (#736).
+	PublishedBelow bool
 	// Literal marks a constant key the single-process path elides from the
 	// key set and re-attaches afterwards; its Name is the synthetic one.
 	Literal bool
@@ -150,7 +162,14 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			// outside the allocator is how it would collide with one.
 			k.Name = allocGroupKeySlot(alloc)
 			k.Slot = k.Name
-		} else if !isPlainGroupKey(e, decls) && below[k.Identity] != k.Name {
+		} else if plain := isPlainGroupKey(e, decls); !plain && below[k.Identity] == k.Name {
+			// Not materialized, and not because it is a column: the aggregate
+			// DIRECTLY BELOW already computed it and publishes it under this
+			// name. Recorded so a consumer can tell the two reasons apart —
+			// the DAG's stage carries ONE name and cannot express this one
+			// (#736).
+			k.PublishedBelow = true
+		} else if !plain {
 			k.Derived = true
 			// The key is MATERIALIZED, so it needs a column of its own in
 			// the aggregate's input — and the input may already carry one

@@ -2589,6 +2589,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseGroupingSets(node); err != nil {
 		return nil, err
 	}
+	// And a GROUP BY key whose RESOLUTION name and PUBLISHED name have to
+	// differ, which `Stage.GroupByCols` cannot express (#736 mechanism 3).
+	if err := refuseUnstageableGroupKey(node); err != nil {
+		return nil, err
+	}
 	// A `real IN (...)` list holding a literal that is not a real is a
 	// PLAN-time error in PostgreSQL, raised whether or not the predicate is
 	// ever reached (#631 follow-up). Refuse it here so the DAG cannot answer
@@ -5649,6 +5654,24 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// derived-expression branch below both see the real column: the
 			// type lookup misses on an alias too, and an undeclared type
 			// makes MAX come back float64 where the column is INT64.
+			// A DELIMITED argument arrives with its quotes: the parser records
+			// `MAX("g + 1")` as the six characters plus two quote bytes, because
+			// `ColRef.String()` re-delimits anything that needs it. The
+			// single-process path strips them (`NormalizeIdentRef`, below at the
+			// aggCols loop) and the DAG carried the spelling verbatim — so the
+			// alias lookup missed, the argument was never re-spelled to its
+			// source column, and the worker's projection asked for a column
+			// literally named `"g + 1"`: `column "\"g + 1\"" does not exist in
+			// the input schema`, three attempts, a hard query failure for a
+			// query PostgreSQL answers (#736).
+			//
+			// A delimited identifier's quotes are not part of its NAME (#725),
+			// and the same rule applies to an aggregate's argument as to a GROUP
+			// BY key. The table qualifier is preserved for the reason the
+			// single-process loop gives: `cleanExpr` would drop it and a bare
+			// name binds to the FIRST column of that name (#622).
+			agg.InputCol = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol))
+			agg.InputCol2 = plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol2))
 			inputExpr := agg.InputExpr
 			exprCols := aggChild
 			if resolved, expr, exprInput, renamed := resolveAggInputName(agg.InputCol, aggChild); renamed {

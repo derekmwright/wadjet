@@ -2351,75 +2351,163 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 		})
 
-		// The DAG residuals of this family, pinned. Each is pre-existing on
-		// ff7c3f19 and each is the SAME mechanism one layer out: on the
-		// stage DAG a computed key is resolved against the SCAN's schema,
-		// because the rename Project between the aggregate and its scan
-		// emits no stage. The single-process arm answers every one of them.
+		// The DAG residuals of this family, which were pinned and are now
+		// answered. Each was pre-existing on ff7c3f19 and each is #736's
+		// mechanism 3: on the stage DAG a computed key's RESOLUTION name and
+		// its PUBLISHED name are one `Stage.GroupByCols` entry, and these
+		// shapes need them to differ.
 		//
-		// TODO(#736): delete this pin when the DAG carries the key's
-		// source-spelled expression beside its published name.
+		// Two get their answer from a REFUSAL that routes the query onto the
+		// coordinator-local single-process pipeline — the engine that carries
+		// the two names separately (a hidden `__gb_expr_N` slot and
+		// `exec.HashAggregate.GroupByOutNames`, ADR-0026 §2). The third is
+		// fixed outright: the argument's delimiters are stripped the way the
+		// single-process path has always stripped them.
 		t.Run("DAGResolvesAComputedKeyAgainstTheScan", func(t *testing.T) {
 			dag := sfcArms(ctx, single, coord)[1]
-			for _, c := range []struct {
-				name, sql string
-				wantRows  int // today's DAG answer; PostgreSQL's is in `pg`
-				pg        int
-			}{
-				{"DistinctOverTheKey", fmt.Sprintf(
-					`SELECT DISTINCT g + 1 AS k FROM %s GROUP BY g + 1 ORDER BY k`, tbl),
-					1, wantKeys + 1},
-				{"CountOverDistinctOverTheKey", fmt.Sprintf(
-					`SELECT COUNT(*) AS n FROM (SELECT DISTINCT g + 1 AS k FROM %s `+
-						`GROUP BY g + 1) s`, tbl), 1, 1},
-			} {
-				c := c
-				t.Run(c.name, func(t *testing.T) {
-					res := sfcRun(t, dag, c.sql)
-					if len(res.Rows) != c.wantRows {
-						t.Fatalf("the DAG arm now returns %d rows where this pin records %d; "+
-							"PostgreSQL answers %d. #736 is fixed for this shape — assert "+
-							"PostgreSQL's answer and delete the pin\n  SQL: %s",
-							len(res.Rows), c.wantRows, c.pg, c.sql)
+			// A key an aggregate DIRECTLY BELOW already publishes — the
+			// DISTINCT lowering. It used to be ONE NULL group on the DAG.
+			// Asserted on the KEYS and not the row count: the COUNT twin
+			// answered 1 either way, which is why it is the second entry.
+			t.Run("DistinctOverTheKey", func(t *testing.T) {
+				sql := fmt.Sprintf(
+					`SELECT DISTINCT g + 1 AS k FROM %s GROUP BY g + 1 ORDER BY k`, tbl)
+				before := coord.GroupKeyLocalRoutes()
+				res := sfcRun(t, dag, sql)
+				if len(res.Rows) != wantKeys+1 {
+					t.Fatalf("the DAG arm returned %d rows, PostgreSQL 17 answers %d\n  SQL: %s",
+						len(res.Rows), wantKeys+1, sql)
+				}
+				for i := 0; i < wantKeys; i++ {
+					got, ok := numAsInt(res.Rows[i]["k"])
+					if !ok || got != int64(i+1) {
+						t.Fatalf("the DAG arm row %d: k = %v, PostgreSQL 17 answers %d\n  SQL: %s",
+							i, res.Rows[i]["k"], i+1, sql)
 					}
-				})
-			}
-			// An aggregate whose ARGUMENT is spelled like the key: the
-			// worker's projection narrows and the key claimed the name, so
-			// the argument resolves to nothing and the fragment fails LOUD.
-			t.Run("AggregateArgumentSpelledLikeTheKey", func(t *testing.T) {
-				sql := fmt.Sprintf(`SELECT g + 1 AS k, MAX("g + 1") AS m FROM `+
-					`(SELECT g, c_i32 AS "g + 1" FROM %s) s GROUP BY g + 1 ORDER BY k`, tbl)
-				if _, err := dag.run(sql); err == nil {
-					t.Fatalf("the DAG arm now ANSWERS this; PostgreSQL answers %d rows. #736 "+
-						"is fixed for this shape — assert it and delete the pin\n  SQL: %s",
-						wantKeys+1, sql)
+				}
+				if res.Rows[wantKeys]["k"] != nil {
+					t.Errorf("the DAG arm put %v where PostgreSQL has the NULL group\n  SQL: %s",
+						res.Rows[wantKeys]["k"], sql)
+				}
+				if coord.GroupKeyLocalRoutes() == before {
+					t.Errorf("the DAG arm answered without the group-key refusal firing — "+
+						"either walkStages grew a real lowering (delete refuseUnstageableGroupKey "+
+						"and gate it) or the query never reached PlanDistributed\n  SQL: %s", sql)
 				}
 			})
-			// An aggregate ALIASED like the key: one name, two columns, and
-			// the gather answers with the first.
+			t.Run("CountOverDistinctOverTheKey", func(t *testing.T) {
+				sfcScalar(t, ctx, single, coord, fmt.Sprintf(
+					`SELECT COUNT(*) AS n FROM (SELECT DISTINCT g + 1 AS k FROM %s `+
+						`GROUP BY g + 1) s`, tbl), "n", int64(wantKeys+1))
+			})
+			// An aggregate whose ARGUMENT is spelled like the key. This one is
+			// FIXED rather than routed: the DAG carried `agg.InputCol` with its
+			// delimiters (`"g + 1"`, quotes included), the alias lookup missed,
+			// and the worker asked for a column literally named `"g + 1"` —
+			// `column "\"g + 1\"" does not exist`, three attempts, a hard
+			// failure for a query PostgreSQL answers.
+			t.Run("AggregateArgumentSpelledLikeTheKey", func(t *testing.T) {
+				// MAX, whose answer is an exact INT64 on both engines. SUM over
+				// the same column is #784 (an integer SUM declares FLOAT64 on
+				// every arm), which would make this entry about a different
+				// defect.
+				sql := fmt.Sprintf(`SELECT g + 1 AS k, MAX("g + 1") AS m FROM `+
+					`(SELECT g, c_i32 AS "g + 1" FROM %s) s GROUP BY g + 1 ORDER BY k`, tbl)
+				// PostgreSQL 17: the largest c_i32 (= id * 3) in each g + 1
+				// group, computed from the fixture rather than transcribed.
+				wantMax := map[int64]int64{}
+				var nullMax int64
+				var haveNull bool
+				for _, r := range typematrix.Data(typematrix.Rows) {
+					v, ok := r["c_i32"].(int32)
+					if !ok {
+						continue // c_i32 is NULL every 29th row; MAX skips it
+					}
+					g, gok := r["g"].(int32)
+					if !gok {
+						if !haveNull || int64(v) > nullMax {
+							nullMax, haveNull = int64(v), true
+						}
+						continue
+					}
+					k := int64(g) + 1
+					if cur, seen := wantMax[k]; !seen || int64(v) > cur {
+						wantMax[k] = int64(v)
+					}
+				}
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != wantKeys+1 {
+						t.Fatalf("%s arm returned %d rows, PostgreSQL 17 answers %d\n  SQL: %s",
+							arm.name, len(res.Rows), wantKeys+1, sql)
+					}
+					for i, r := range res.Rows {
+						want, wantK := nullMax, int64(0)
+						if i < wantKeys {
+							wantK = int64(i + 1)
+							want = wantMax[wantK]
+							got, ok := numAsInt(r["k"])
+							if !ok || got != wantK {
+								t.Errorf("%s arm row %d: k = %v, PostgreSQL 17 answers %d\n  SQL: %s",
+									arm.name, i, r["k"], wantK, sql)
+								continue
+							}
+						} else if r["k"] != nil {
+							t.Errorf("%s arm put %v where PostgreSQL has the NULL group\n  SQL: %s",
+								arm.name, r["k"], sql)
+						}
+						got, ok := numAsInt(r["m"])
+						if !ok || got != want {
+							t.Errorf("%s arm row %d: m = %v, PostgreSQL 17 answers %d — the "+
+								"aggregate's DELIMITED argument did not resolve to its source "+
+								"column\n  SQL: %s", arm.name, i, r["m"], want, sql)
+						}
+					}
+				}
+			})
+			// An aggregate ALIASED like the key: one published name, two
+			// columns of the batch, and every by-name lookup answers with the
+			// FIRST — the key's. Routed local, like the DISTINCT above.
 			t.Run("AggregateAliasedLikeTheKey", func(t *testing.T) {
 				sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS "g + 1" FROM %s `+
 					`GROUP BY g + 1 ORDER BY k`, tbl)
-				res := sfcRun(t, dag, sql)
-				same, seen := true, 0
-				for _, r := range res.Rows {
-					kv, kok := numAsInt(r["k"])
-					av, aok := numAsInt(r["g + 1"])
-					if !kok || !aok {
-						continue // the NULL group, which says nothing either way
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != wantKeys+1 {
+						t.Fatalf("%s arm returned %d rows, PostgreSQL 17 answers %d\n  SQL: %s",
+							arm.name, len(res.Rows), wantKeys+1, sql)
 					}
-					seen++
-					if kv != av {
-						same = false
-						break
+					for i, r := range res.Rows {
+						want := nullRows
+						if i < wantKeys {
+							want = wantN[int64(i+1)]
+						}
+						got, ok := numAsInt(r["g + 1"])
+						if !ok || got != want {
+							t.Errorf("%s arm row %d: the aggregate's column = %v, PostgreSQL 17 "+
+								"answers the COUNT %d — the KEY's value is under the aggregate's "+
+								"alias\n  SQL: %s", arm.name, i, r["g + 1"], want, sql)
+						}
 					}
 				}
-				same = same && seen > 0
-				if !same {
-					t.Fatalf("the DAG arm no longer answers the KEY under the aggregate's "+
-						"alias; PostgreSQL answers the counts. #736 is fixed for this shape "+
-						"— assert it and delete the pin\n  SQL: %s", sql)
+			})
+			// The CONTROL the refusal must not swallow: an ordinary computed
+			// key needs no second name and stays on the DAG. Without this, a
+			// refusal widened by accident — every grouped query routed local —
+			// would pass every assertion above.
+			t.Run("ctl/an-ordinary-computed-key-still-runs-on-the-dag", func(t *testing.T) {
+				sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n FROM %s `+
+					`GROUP BY g + 1 ORDER BY k`, tbl)
+				before := coord.GroupKeyLocalRoutes()
+				res := sfcRun(t, dag, sql)
+				if len(res.Rows) != wantKeys+1 {
+					t.Errorf("the DAG arm returned %d rows, PostgreSQL 17 answers %d\n  SQL: %s",
+						len(res.Rows), wantKeys+1, sql)
+				}
+				if coord.GroupKeyLocalRoutes() != before {
+					t.Errorf("the DAG arm routed an ordinary computed key to the local "+
+						"pipeline — refuseUnstageableGroupKey is firing on shapes the DAG "+
+						"executes correctly\n  SQL: %s", sql)
 				}
 			})
 		})
@@ -2550,30 +2638,29 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		// outer one did not see the inner's key, materialized it again over a
 		// schema with no `g`, and collapsed the table into ONE NULL group.
 		//
-		// The DAG arms are PINNED, not fixed: they answer the same NULL group
-		// for #736's own mechanism (`Stage.GroupByCols` is both the
-		// resolution and the published name), which is a different site and
-		// byte-identical on de95b3b5. The window is what this entry adds — the
-		// window-free spelling below it is #736's and is pinned there too.
+		// The DAG arms were PINNED at one NULL group for #736's own mechanism
+		// (`Stage.GroupByCols` is both the resolution and the published name),
+		// which is a different site from the walk. They now answer, through the
+		// refusal that routes the shape onto the coordinator-local pipeline —
+		// so the pins are gone and every arm is asserted on the KEYS.
 		t.Run("DistinctOverAComputedKeyUnderAWindow", func(t *testing.T) {
 			for _, c := range []struct {
 				name, sql string
-				rows      int  // PostgreSQL 17
-				dagPinned bool // TODO(#736): the DAG answers one NULL group
+				rows      int // PostgreSQL 17
 			}{
 				{
 					name: "distinct-with-a-window",
 					sql: fmt.Sprintf(`SELECT DISTINCT g + 1 AS k, `+
 						`ROW_NUMBER() OVER (ORDER BY g + 1) AS rn FROM %s GROUP BY g + 1 `+
 						`ORDER BY k`, tbl),
-					rows: wantKeys + 1, dagPinned: true,
+					rows: wantKeys + 1,
 				},
 				{
 					name: "the-key-alone-through-a-derived-table",
 					sql: fmt.Sprintf(`SELECT k FROM (SELECT DISTINCT g + 1 AS k, `+
 						`ROW_NUMBER() OVER (ORDER BY g + 1) AS rn FROM %s GROUP BY g + 1) s `+
 						`ORDER BY k`, tbl),
-					rows: wantKeys + 1, dagPinned: true,
+					rows: wantKeys + 1,
 				},
 				{
 					// The COUNT twin, which was already right on every arm —
@@ -2589,7 +2676,6 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 				t.Run(c.name, func(t *testing.T) {
 					for _, arm := range sfcArms(ctx, single, coord) {
 						res := sfcRun(t, arm, c.sql)
-						pinned := c.dagPinned && arm.name != "single"
 						if len(res.Rows) != c.rows {
 							t.Errorf("%s arm returned %d rows, PostgreSQL 17 answers %d\n  SQL: %s",
 								arm.name, len(res.Rows), c.rows, c.sql)
@@ -2603,15 +2689,6 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 							if r["k"] != nil {
 								nonNull++
 							}
-						}
-						if pinned {
-							if nonNull > 0 {
-								t.Errorf("the %s arm now answers %d non-NULL keys under a "+
-									"DISTINCT; #736's DAG half is fixed for this shape — "+
-									"assert it and delete this pin\n  SQL: %s",
-									arm.name, nonNull, c.sql)
-							}
-							continue
 						}
 						if nonNull != wantKeys {
 							t.Errorf("%s arm answered %d non-NULL keys, PostgreSQL 17 answers "+

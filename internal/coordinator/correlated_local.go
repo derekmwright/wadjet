@@ -54,6 +54,24 @@ func (c *Coordinator) runGroupingSetsLocal(ctx context.Context, queryID string, 
 		"GROUPING SETS with no distributed stage", &c.localGroupingSets)
 }
 
+// runGroupKeyLocal executes a query the stage DAG refused
+// (physical.ErrGroupKeyDistributed) on the coordinator-local single-process
+// pipeline, which is the engine that keeps a derived GROUP BY key's RESOLUTION
+// name and its PUBLISHED name apart — a hidden `__gb_expr_N` slot and
+// `exec.HashAggregate.GroupByOutNames` (ADR-0026 §2).
+//
+// `Stage.GroupByCols` is one field for both, and the worker re-derives "is this
+// key derived?" by parsing the text, so two shapes answered wrongly and in
+// silence: a key an aggregate DIRECTLY BELOW already publishes (the DISTINCT
+// lowering, one NULL group), and a derived key sharing its published name with
+// one of the aggregate's own outputs (the KEY's value under the aggregate's
+// alias). Refusing beat both (#736); routing beats handing the client an error,
+// exactly as #359 does for correlated subqueries.
+func (c *Coordinator) runGroupKeyLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"GROUP BY key with no distributed published name", &c.localGroupKey)
+}
+
 // runInSubqueryLocal executes a query the stage DAG refused
 // (physical.ErrInSubqueryDistributed) on the coordinator-local single-process
 // pipeline, where expr.InSubquery resolves the set once under resolveMu and
@@ -141,4 +159,13 @@ func (c *Coordinator) DistinctLocalRoutes() int64 {
 // them by accident (#778).
 func (c *Coordinator) GroupingSetsLocalRoutes() int64 {
 	return c.localGroupingSets.Load()
+}
+
+// GroupKeyLocalRoutes reports how many plans refused for a GROUP BY key whose
+// published name a stage cannot carry were routed to the coordinator-local
+// pipeline (#736). Separate from the others so a suite can assert WHICH refusal
+// fired — and, just as importantly, that an ordinary computed key did NOT fire
+// it and stayed distributed.
+func (c *Coordinator) GroupKeyLocalRoutes() int64 {
+	return c.localGroupKey.Load()
 }
