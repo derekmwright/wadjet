@@ -956,9 +956,103 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 2 {
 			return nil
 		}
-		return mergeJoinSides(emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1]))
+		return withJoinArmQualifiers(n,
+			emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1]),
+			mergeJoinSides(emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1])))
 	}
 	return inputColTypes(n)
+}
+
+// withJoinArmQualifiers adds `<arm>.<column>` entries beside the merged bare
+// ones, for each side the plan can name with ONE relation name.
+//
+// The bare merge DROPS a name the two sides declare differently, which is the
+// honest answer to a BARE reference and the wrong one to a QUALIFIED one: the
+// qualifier is unambiguous and names a side. Two tables carrying `d92` at
+// (9,2) and (18,4) left `SELECT t.d92` with no declared (p,s) at all, so the
+// wire declared numeric with typmod -1 where PostgreSQL declares numeric(9,2)
+// — and a zero-row result, which is described from the plan alone, went out as
+// DECIMAL(0,0) (#706).
+//
+// Only where the arm has ONE name. `joinArmAlias` answers with a CTE's or a
+// derived table's own name, which the enclosing query uses for every column of
+// that arm however many relations are inside it; for a bare arm it answers the
+// first scan's alias, which is that arm's only name when the arm holds one
+// scan and is NOT a name for the others when it holds several. Adding an entry
+// under a name that does not own the column would be the defect this fixes,
+// pointing the other way.
+func withJoinArmQualifiers[V comparable](n *logical.Node, left, right, merged map[string]V) map[string]V {
+	add := func(side *logical.Node, cols map[string]V) {
+		if len(cols) == 0 {
+			return
+		}
+		alias := joinArmSoleName(side)
+		if alias == "" {
+			return
+		}
+		for c, v := range cols {
+			if strings.IndexByte(c, '.') >= 0 {
+				continue // already qualified by a join inside the arm
+			}
+			key := strings.ToLower(alias) + "." + c
+			if _, taken := merged[key]; taken {
+				continue
+			}
+			if merged == nil {
+				merged = make(map[string]V, len(left)+len(right))
+			}
+			merged[key] = v
+		}
+	}
+	add(n.Children[0], left)
+	add(n.Children[1], right)
+	return merged
+}
+
+// joinArmSoleName is the ONE name the enclosing query can write this join arm
+// under, or "" when it has none or more than one.
+//
+// A CTE reference and a derived table name the whole subtree, however many
+// relations it holds. A bare subtree names each of its scans separately, so it
+// qualifies nothing unless it holds exactly one.
+func joinArmSoleName(n *logical.Node) string {
+	if n == nil {
+		return ""
+	}
+	for cur := n; cur != nil; {
+		if cur.CTERefAlias != "" {
+			return cur.CTERefAlias
+		}
+		if cur.CTEName != "" {
+			return cur.CTEName
+		}
+		if cur.DerivedAlias != "" {
+			return cur.DerivedAlias
+		}
+		if len(cur.Children) != 1 {
+			break
+		}
+		cur = cur.Children[0]
+	}
+	var scans []*logical.Node
+	var walk func(*logical.Node)
+	walk = func(cur *logical.Node) {
+		if cur == nil || len(scans) > 1 {
+			return
+		}
+		if cur.Type == logical.NodeScan {
+			scans = append(scans, cur)
+			return
+		}
+		for _, c := range cur.Children {
+			walk(c)
+		}
+	}
+	walk(n)
+	if len(scans) != 1 {
+		return ""
+	}
+	return findScanAlias(scans[0])
 }
 
 // mergeJoinSides merges the two sides of a join's emitted columns: a name only
@@ -1102,7 +1196,8 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		if len(n.Children) != 2 {
 			return nil
 		}
-		return mergeJoinSides(emittedColDecimal(n.Children[0]), emittedColDecimal(n.Children[1]))
+		left, right := emittedColDecimal(n.Children[0]), emittedColDecimal(n.Children[1])
+		return withJoinArmQualifiers(n, left, right, mergeJoinSides(left, right))
 	}
 	return inputColDecimal(n)
 }

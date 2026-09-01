@@ -765,6 +765,43 @@ func wireCorpus() []wireCase {
 		{name: "DecimalColumnBehindDerivedTableJoinZeroRows",
 			sql: `SELECT t.d_2 FROM dec_probe t JOIN (SELECT d_key AS k FROM dec_probe WHERE d_key < 0) s
 				ON t.d_key = s.k`},
+		// A QUALIFIED reference to a name BOTH join arms carry, at two
+		// different scales (#706). The declaration has to come from the arm
+		// the qualifier names: PostgreSQL sends numeric(p,2) for `t.d_2` and
+		// numeric(p,4) for `u.d_2`, and wadjet sent typmod -1 for both —
+		// `mergeJoinSides` DROPS a name the two sides declare differently,
+		// which is the honest answer to a BARE reference and the wrong one to
+		// a qualified one. This is the arm no value oracle can provide: the
+		// digits were right on the DAG the whole time and the OID's modifier
+		// was not.
+		{name: "DecimalQualifiedAcrossArmsProbeSide",
+			sql: `SELECT t.d_2 FROM dec_probe t JOIN (SELECT d_key, d_4 AS d_2 FROM dec_probe) u
+				ON t.d_key = u.d_key WHERE t.d_key IN (1, 2, 3) ORDER BY t.d_key`},
+		{name: "DecimalQualifiedAcrossArmsBuildSide",
+			sql: `SELECT u.d_2 FROM dec_probe t JOIN (SELECT d_key, d_4 AS d_2 FROM dec_probe) u
+				ON t.d_key = u.d_key WHERE t.d_key IN (1, 2, 3) ORDER BY t.d_key`},
+		{name: "DecimalQualifiedAcrossArmsBothProjected",
+			sql: `SELECT t.d_2 AS a, u.d_2 AS b FROM dec_probe t
+				JOIN (SELECT d_key, d_4 AS d_2 FROM dec_probe) u
+				ON t.d_key = u.d_key WHERE t.d_key IN (1, 2, 3) ORDER BY t.d_key`},
+		// The ZERO-ROW variant, which is described from the PLAN alone: with
+		// the (p,s) dropped it went out as an unconstrained numeric where a
+		// row-bearing result of the same query was right.
+		{name: "DecimalQualifiedAcrossArmsZeroRows",
+			sql: `SELECT t.d_2 FROM dec_probe t JOIN (SELECT d_key, d_4 AS d_2 FROM dec_probe) u
+				ON t.d_key = u.d_key WHERE t.d_key < 0`},
+		// Arithmetic OVER a DECIMAL WINDOW output (#729): the window's own
+		// output type is DECIMAL(38,s), and a consumer above the window has to
+		// read it or the expression falls to the float rule. Both the value
+		// and the declared modifier are the question here.
+		{name: "DecimalArithmeticOverAWindowOutput",
+			sql: `SELECT id, w * 2 AS w2 FROM
+				(SELECT d_key AS id, SUM(d_2) OVER () AS w FROM dec_probe WHERE d_key IN (1, 2, 3)) x
+				ORDER BY id`},
+		{name: "DecimalArithmeticOverAWindowOutputZeroRows",
+			sql: `SELECT id, w * 2 AS w2 FROM
+				(SELECT d_key AS id, SUM(d_2) OVER () AS w FROM dec_probe WHERE d_key < 0) x
+				ORDER BY id`},
 		// A CHOICE construct over a DECIMAL branch and a numeric LITERAL —
 		// ADR-0024 item 5's select_common_typmod, over the pair #695 made
 		// reachable. The literal is a numeric with typmod -1, so it DISAGREES

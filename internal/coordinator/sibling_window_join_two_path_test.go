@@ -64,15 +64,16 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 	const qw = "(SELECT id, SUM(a) OVER () AS w FROM " + dbpTable + ") q"
 	const rw = "(SELECT id, MIN(a) OVER () AS w FROM " + dbpTable + ") r"
 
-	// check holds every arm to PostgreSQL's value, with two named escapes.
+	// check holds every arm to PostgreSQL's value.
 	//
-	// singleScale is TODO(#754): where two join arms publish the SAME output
-	// alias, the single-process path renders one of them at the OTHER arm's
-	// DECIMAL scale. Right digits, wrong typmod, single arm only — and it is
-	// the duplicate ALIAS that triggers it, not the DECIMAL: the `w`/`w2`
-	// entry below carries identical values and agrees exactly. The escape
-	// FAILS the day the single arm renders PostgreSQL's spelling.
-	check := func(t *testing.T, sql string, rows int, want, singleScale map[string]string) {
+	// It used to carry a singleScale escape for TODO(#754) — where two join
+	// arms publish the SAME output alias, the single-process path rendered one
+	// of them at the OTHER arm's DECIMAL scale. That is the same
+	// qualified-reference disagreement as #706: the VALUE came through `q.w`
+	// and the DECLARATION through the first bare `w`, which is the other arm's
+	// column. The projection reads both from the qualified spelling now, and
+	// every arm renders PostgreSQL's.
+	check := func(t *testing.T, sql string, rows int, want map[string]string) {
 		t.Helper()
 		for _, arm := range arms {
 			res, err := arm.run(sql)
@@ -85,22 +86,10 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 					arm.name, len(res.Rows), rows, sql)
 			}
 			for col, wantVal := range want {
-				pinned := false
-				if arm.name == "single" {
-					if s, ok := singleScale[col]; ok {
-						wantVal, pinned = s, true
-					}
-				}
 				for i, r := range res.Rows {
 					got := fmt.Sprintf("%v", r[col])
 					if got == wantVal {
 						continue
-					}
-					if pinned {
-						t.Errorf("the single arm now renders %s=%q where it rendered %q — "+
-							"TODO(#754) is fixed, delete the singleScale entry\n  SQL: %s",
-							col, got, wantVal, sql)
-						break
 					}
 					t.Errorf("%s arm row %d: %s = %q, PostgreSQL 17 answers %q — two sibling "+
 						"blocks handed one of them the other's window\n  SQL: %s",
@@ -111,17 +100,15 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 		}
 	}
 
-	scaleQW := map[string]string{"qw": "52.9900"}
-
 	t.Run("two siblings under an INNER join", func(t *testing.T) {
 		check(t, "SELECT p.w AS pw, q.w AS qw, p.id FROM "+pw+" JOIN "+qw+
 			" ON p.id = q.id ORDER BY p.id", 9,
-			map[string]string{"pw": "49.2400", "qw": "52.99"}, scaleQW)
+			map[string]string{"pw": "49.2400", "qw": "52.99"})
 	})
 	t.Run("two siblings under a LEFT join", func(t *testing.T) {
 		check(t, "SELECT p.w AS pw, q.w AS qw, p.id FROM "+pw+" LEFT JOIN "+qw+
 			" ON p.id = q.id ORDER BY p.id", 9,
-			map[string]string{"pw": "49.2400", "qw": "52.99"}, scaleQW)
+			map[string]string{"pw": "49.2400", "qw": "52.99"})
 	})
 	// The arms publish DIFFERENT output names, so nothing about this shape is
 	// a name collision — only the hidden slot was shared. It is the entry that
@@ -132,14 +119,14 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 	t.Run("two siblings publishing different names", func(t *testing.T) {
 		check(t, "SELECT p.w AS pw, q.w2 AS qw, p.id FROM "+pw+" JOIN "+
 			"(SELECT id, SUM(a) OVER () AS w2 FROM "+dbpTable+") q ON p.id = q.id ORDER BY p.id", 9,
-			map[string]string{"pw": "49.2400", "qw": "52.99"}, nil)
+			map[string]string{"pw": "49.2400", "qw": "52.99"})
 	})
 	// Selection order swapped: which reference is written first must not
 	// decide which window each one gets.
 	t.Run("two siblings, the later arm selected first", func(t *testing.T) {
 		check(t, "SELECT q.w AS qw, p.w AS pw, p.id FROM "+pw+" JOIN "+qw+
 			" ON p.id = q.id ORDER BY p.id", 9,
-			map[string]string{"pw": "49.2400", "qw": "52.99"}, scaleQW)
+			map[string]string{"pw": "49.2400", "qw": "52.99"})
 	})
 
 	// THREE siblings, which is the shape that collapsed on EVERY path: the
@@ -152,14 +139,12 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 	t.Run("three siblings", func(t *testing.T) {
 		check(t, "SELECT p.w AS pw, q.w AS qw, r.w AS rw, p.id FROM "+pw+" JOIN "+qw+
 			" ON p.id = q.id JOIN "+rw+" ON p.id = r.id ORDER BY p.id", 9,
-			map[string]string{"pw": "49.2400", "qw": "52.99", "rw": "-0.01"},
-			map[string]string{"qw": "52.9900", "rw": "-0.0100"})
+			map[string]string{"pw": "49.2400", "qw": "52.99", "rw": "-0.01"})
 	})
 	t.Run("three siblings, no passthrough column", func(t *testing.T) {
 		check(t, "SELECT p.w AS pw, q.w AS qw, r.w AS rw FROM "+pw+" JOIN "+qw+
 			" ON p.id = q.id JOIN "+rw+" ON p.id = r.id ORDER BY p.id", 9,
-			map[string]string{"pw": "49.2400", "qw": "52.99", "rw": "-0.01"},
-			map[string]string{"qw": "52.9900", "rw": "-0.0100"})
+			map[string]string{"pw": "49.2400", "qw": "52.99", "rw": "-0.01"})
 	})
 
 	// The CTE spelling of the two blocks. It was TODO(#753): the single path
@@ -168,14 +153,12 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 	// the join qualifies a build arm's duplicate column with — `findScanAlias`
 	// read the SCAN below the CTE, so q's `w` shipped as `decpair.w` and
 	// `q.w` matched neither it nor p's bare `w`. `joinArmAlias` names the arm
-	// `q`, and the entry asserts PostgreSQL's value on every arm now. Only
-	// #754's scale rendering is left on the single path, which is the same
-	// escape every other entry in this block carries.
+	// `q`, and the entry asserts PostgreSQL's value on every arm now.
 	t.Run("two sibling CTEs", func(t *testing.T) {
 		check(t, "WITH p AS (SELECT id, SUM(b) OVER () AS w FROM "+dbpTable+"), "+
 			"q AS (SELECT id, SUM(a) OVER () AS w FROM "+dbpTable+") "+
 			"SELECT p.w AS pw, q.w AS qw, p.id FROM p JOIN q ON p.id = q.id ORDER BY p.id", 9,
-			map[string]string{"pw": "49.2400", "qw": "52.99"}, scaleQW)
+			map[string]string{"pw": "49.2400", "qw": "52.99"})
 	})
 
 	// A sibling NESTED inside a sibling (#751). The single path answered the
@@ -405,6 +388,6 @@ func TestSiblingWindowSubqueriesUnderAJoinKeepTheirOwnValues(t *testing.T) {
 	t.Run("control: two windows in one block", func(t *testing.T) {
 		check(t, "SELECT SUM(b) OVER () AS w1, SUM(a) OVER () AS w2, id FROM "+dbpTable+
 			" ORDER BY id", 9,
-			map[string]string{"w1": "49.2400", "w2": "52.99"}, nil)
+			map[string]string{"w1": "49.2400", "w2": "52.99"})
 	})
 }

@@ -8904,6 +8904,28 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		if name != colRef {
 			pc.SourceCol = colRef
 		}
+		// A QUALIFIED reference names ONE SIDE, and the DECLARATION has to be
+		// read off the column the VALUE comes from.
+		//
+		// `proj.Column` is the BARE name — the parser records `z.d92` as the
+		// column `d92` — so where both join sides carry that name the value
+		// was resolved through `z.d92` (the compiled expression keeps the
+		// qualifier) and the type through the first bare `d92`, which is the
+		// OTHER arm's. Over two tables holding `d92` at (9,2) and (18,4) that
+		// rendered one arm's digits at the other arm's scale, silently, and
+		// raised 22003 in the direction where the value does not fit —
+		// `numeric field overflow: 1.1111 does not fit a DECIMAL at scale 2`
+		// on a query PostgreSQL answers (#706).
+		//
+		// This is strictly more precise rather than a different rule:
+		// `columnIndexFallback` resolves a qualified name with the same
+		// ladder the value path uses — exact, then bare, then the
+		// unambiguous suffix — so a stream that carries only the bare name
+		// still resolves. Per-side resolution is what #551 gave set-op arms
+		// and #653 gave filters; this is the projection's half of it.
+		if cr, isRef := bareColRefOf(proj.ASTExpr); isRef && cr.Table != "" && !proj.IsAgg {
+			pc.SourceCol = cr.Table + "." + cr.Column
+		}
 		// A ROW FIELD PATH records the WHOLE path, qualifier included, even
 		// when the output name matches the field name. It is the only
 		// spelling exec.Project can resolve the field's declaration from —

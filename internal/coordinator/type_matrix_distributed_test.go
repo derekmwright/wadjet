@@ -421,6 +421,14 @@ func tmdTables() []tmdTable {
 		// carries ONE decimal column, so no fold over two decimals at
 		// different scales is expressible over it.
 		{nfTable, nfSchema(), nfData()},
+		// The QUALIFIED-SIDE fixture (#706): one column name in two tables at
+		// two (p,s), with values that DIFFER per row and one that does not fit
+		// the narrower declaration. Rides along for the same reason as the
+		// fixtures above. The cross-scale pair already here cannot stand in for
+		// it — its rows are the same number at both scales, so a reference
+		// resolved against the wrong side renders identically.
+		{zzpTable, zzpSchema(), zzpData()},
+		{zzjTable, zzjSchema(), zzjData()},
 	}, multikeyTables()...)
 }
 

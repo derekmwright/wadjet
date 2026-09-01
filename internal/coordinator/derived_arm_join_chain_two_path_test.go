@@ -1719,9 +1719,13 @@ func TestBothArmsPublishOneAliasProjectBothThreeArms(t *testing.T) {
 		})
 	}
 
-	// The issue's own CROSS-SCALE spelling. The values are what this gate is
-	// about; the single arm renders x's scale-2 column at y's scale 4, which
-	// is #754 and is pinned so its fix deletes the pin.
+	// The issue's own CROSS-SCALE spelling. It used to carry a #754 pin: the
+	// single arm rendered x's scale-2 column at y's scale 4 — right digits,
+	// wrong typmod. That is the same disagreement #706 is: the VALUE came
+	// through `x.w` and the DECLARATION through the first bare `w`, which is
+	// the other arm's column, so the two arms of one join described one
+	// output. The projection reads both from the qualified spelling now and
+	// every arm renders PostgreSQL's.
 	t.Run("both-projected/cross-decimal-scales", func(t *testing.T) {
 		sql := "SELECT x.id AS xid, x.w AS xw, y.w AS yw FROM " +
 			"(SELECT id, a AS w FROM " + tbl + ") x " +
@@ -1729,28 +1733,17 @@ func TestBothArmsPublishOneAliasProjectBothThreeArms(t *testing.T) {
 			"JOIN " + tbl + " u ON x.id = u.id WHERE x.w > 1 ORDER BY x.id"
 		const want = "5 rows: 1|12.75|1275.0000;2|12.75|1275.0100;3|12.75|1274.9900;" +
 			"5|2.00|1000.0000;8|12.75|;" // PostgreSQL 17
-		const pinned = "5 rows: 1|12.7500|1275.0000;2|12.7500|1275.0100;3|12.7500|1274.9900;" +
-			"5|2.0000|1000.0000;8|12.7500|;" // TODO(#754)
 		for _, arm := range arms {
 			res, err := arm.run(sql)
 			if err != nil {
 				t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
 					arm.name, err, sql)
 			}
-			got := dajDigest(res, []string{"xid", "xw", "yw"})
-			exp := want
-			if arm.name == "single" {
-				exp = pinned
+			if got := dajDigest(res, []string{"xid", "xw", "yw"}); got != want {
+				t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n"+
+					" — two arms publishing one alias described one output\n  SQL: %s",
+					arm.name, got, want, sql)
 			}
-			if got == exp {
-				continue
-			}
-			if arm.name == "single" && got == want {
-				t.Errorf("the single arm now renders xw at its OWN scale — #754 is fixed, "+
-					"delete this pin and assert PostgreSQL's values on every arm\n  SQL: %s", sql)
-				continue
-			}
-			t.Errorf("%s arm answered\n  %s\nwant\n  %s\n  SQL: %s", arm.name, got, exp, sql)
 		}
 	})
 }
