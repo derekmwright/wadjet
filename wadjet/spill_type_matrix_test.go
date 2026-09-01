@@ -157,6 +157,29 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 				t.Logf("no %s in %d runs (see the family assertion at the end of this test)",
 					cell.engagementName(), answered)
 			}
+			// The FORCED-DRAIN arm, for the plain GROUP BY shapes. Under a
+			// budget the drain lands where tracker timing puts it; here it
+			// lands on every batch, which is what exposed #790 (a clone's
+			// SpillSome runs orphaned at the merge: 5000 rows in, 1100 out).
+			// Two runs, because the knob makes it deterministic. The
+			// reference is the same disarmed one — a knob armed on BOTH sides
+			// lets a shared defect cancel out, which is how #790 first read as
+			// a regression rather than as a pre-existing bug.
+			if cell.forcedDrainArm {
+				restore := exec.ForceAggDrainEvery(1)
+				for run := 0; run < 2; run++ {
+					got, err := tmRun(ctx, arm, cell.sql)
+					if err != nil {
+						exec.ForceAggDrainEvery(restore)
+						t.Fatalf("drain-every-batch run %d: %v\n  SQL: %s", run, err, cell.sql)
+					}
+					if diff := spillMxDiff(spillMxRender(got.Columns, got.Rows, cell.ordered), w); diff != "" {
+						exec.ForceAggDrainEvery(restore)
+						t.Fatalf("drain-every-batch run %d: %s\n  SQL: %s", run, diff, cell.sql)
+					}
+				}
+				exec.ForceAggDrainEvery(restore)
+			}
 			if cell.knownBug != "" && agreed == answered && spillMxPinConditionHolds() {
 				t.Fatalf("pinned as %s, but all %d budgeted runs agreed — delete the pin, that agreement is the fix's proof\n  SQL: %s",
 					cell.knownBug, answered, cell.sql)
@@ -231,6 +254,9 @@ type spillMxCell struct {
 	// forcing knobs armed, for the handful where that is CORRECT rather than a
 	// coverage hole. Empty means the family's counter MUST move.
 	noSpill string
+	// forcedDrainArm adds a second pass with exec.ForceAggDrainEvery(1), so
+	// the drain lands on every batch instead of where tracker timing puts it.
+	forcedDrainArm bool
 	// knownError pins a shape whose KNOWN state is a loud failure: every
 	// budgeted run must fail with this substring, and a run that ANSWERS fails
 	// the cell. The ratchet in the direction a loud bug needs it — the pin
@@ -304,7 +330,7 @@ func spillMxCells() []spillMxCell {
 		// HashAggregate, partial-state external merge. The int / packed /
 		// compact / string / generic key modes all arrive through this shape,
 		// picked by the key column's type.
-		add(spillMxCell{name: "group_by_" + n, sql: fmt.Sprintf(
+		add(spillMxCell{name: "group_by_" + n, forcedDrainArm: true, sql: fmt.Sprintf(
 			`SELECT %[1]s AS k, COUNT(*) AS n, COUNT(%[1]s) AS nn, SUM(id) AS s FROM %[2]s GROUP BY %[1]s`, n, tbl)})
 		// The LEGACY raw-row path: COUNT(DISTINCT) is a non-simple aggregate,
 		// so canUseExternalMerge is false and group keys go to disk as boxed
