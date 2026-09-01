@@ -2491,6 +2491,93 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				}
 			})
+			// #785's PLAIN-COLUMN twin, pinned. An aggregate ALIASED like the
+			// key is #736's condition (2) — but that condition fires only for a
+			// DERIVED key, and here the key is a plain column, so nothing
+			// refuses and BOTH engines are wrong the same way.
+			//
+			// `SELECT COUNT(*) AS g, g AS x … GROUP BY g HAVING COUNT(*) > 0`
+			// drops the group `g = 0`: the HAVING's `COUNT(*)` is respelled
+			// against what the aggregate publishes and binds the KEY's column
+			// (0, 1, 2) instead of the count, so `0 > 0` is false. Every count
+			// is 80, so no surviving row looks wrong — only the missing one
+			// does, which is why this asserts the whole ordered result.
+			//
+			// NOT the fifth reader: `aggregateOutputNames` reading
+			// `AggScopePreservingWrapper` is what fixed the same collision
+			// under a WINDOW, and this shape is unchanged by it. Measured.
+			//
+			// TODO(#785): delete when the HAVING binds the aggregate.
+			t.Run("pin785-AnAggregateAliasedLikeAPlainKeyBesideAHaving", func(t *testing.T) {
+				const pinned = `SELECT COUNT(*) AS g, g AS x FROM collslot ` +
+					`GROUP BY g HAVING COUNT(*) > 0 ORDER BY x`
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, pinned)
+					if len(res.Rows) == 3 {
+						t.Fatalf("the %s arm now answers three groups — PostgreSQL's. #785 is "+
+							"fixed for this shape; assert it and delete this pin\n  SQL: %s",
+							arm.name, pinned)
+					}
+					if len(res.Rows) != 2 {
+						t.Errorf("the %s arm answered %d rows; this pin records 2 and PostgreSQL "+
+							"answers 3. The answer MOVED without becoming right, which is a "+
+							"change #785 has to account for\n  SQL: %s",
+							arm.name, len(res.Rows), pinned)
+						continue
+					}
+					// The two that survive are x = 1 and x = 2; the DROPPED one
+					// is x = 0, and naming it is what makes the pin readable.
+					for i, want := range []int64{1, 2} {
+						if got, ok := numAsInt(res.Rows[i]["x"]); !ok || got != want {
+							t.Errorf("the %s arm row %d: x = %v, this pin records %d\n  SQL: %s",
+								arm.name, i, res.Rows[i]["x"], want, pinned)
+						}
+					}
+				}
+				// The three controls that make the cell exactly this one. Each
+				// is correct on both arms and must stay so.
+				for _, c := range []struct{ name, sql string }{
+					{"ctl/no-having", `SELECT COUNT(*) AS g, g AS x FROM collslot ` +
+						`GROUP BY g ORDER BY x`},
+					{"ctl/no-alias-collision", `SELECT COUNT(*) AS c, g AS x FROM collslot ` +
+						`GROUP BY g HAVING COUNT(*) > 0 ORDER BY x`},
+					{"ctl/collision-without-having-under-a-window",
+						`SELECT COUNT(*) AS g, g AS x, ROW_NUMBER() OVER (ORDER BY g) AS rn ` +
+							`FROM collslot GROUP BY g ORDER BY x`},
+				} {
+					c := c
+					t.Run(c.name, func(t *testing.T) {
+						for _, arm := range sfcArms(ctx, single, coord) {
+							res := sfcRun(t, arm, c.sql)
+							if len(res.Rows) != 3 {
+								t.Errorf("%s arm returned %d rows, PostgreSQL 17 answers 3\n  SQL: %s",
+									arm.name, len(res.Rows), c.sql)
+								continue
+							}
+							for i, want := range []int64{0, 1, 2} {
+								if got, ok := numAsInt(res.Rows[i]["x"]); !ok || got != want {
+									t.Errorf("%s arm row %d: x = %v, PostgreSQL 17 answers %d\n  SQL: %s",
+										arm.name, i, res.Rows[i]["x"], want, c.sql)
+								}
+							}
+							// And the aggregate's own column, which is the one
+							// the collision moves: every group has 80 rows.
+							for i := range res.Rows {
+								col := "g"
+								if _, ok := res.Rows[i]["c"]; ok {
+									col = "c"
+								}
+								if got, ok := numAsInt(res.Rows[i][col]); !ok || got != 80 {
+									t.Errorf("%s arm row %d: %s = %v, PostgreSQL 17 answers 80 — "+
+										"the KEY's value is under the aggregate's alias\n  SQL: %s",
+										arm.name, i, col, res.Rows[i][col], c.sql)
+								}
+							}
+						}
+					})
+				}
+			})
+
 			// The CONTROL the refusal must not swallow: an ordinary computed
 			// key needs no second name and stays on the DAG. Without this, a
 			// refusal widened by accident — every grouped query routed local —
