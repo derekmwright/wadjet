@@ -264,12 +264,12 @@ type HashAggregate struct {
 	// SoA (Struct of Arrays) accumulators for intGroupKey fast path.
 	// Stores accumulator fields in contiguous arrays instead of per-group
 	// heap objects, reducing working set from ~192MB to ~32MB for 2M groups.
-	intFlatAccs   []flatAccumArrays // one per aggregate (nil = use AoS path)
+	intFlatAccs []flatAccumArrays // one per aggregate (nil = use AoS path)
 	// aggEncodings latches each aggregate's spill-format encoding (IsFloat /
 	// IsDecimal / DecScale) so a drain can still write the right one after
 	// intFlatAccs has been cleared. See latchAggEncodings.
-	aggEncodings []partialAggSpec
-	groupIndexBuf []int32           // reused per-batch for two-phase scatter
+	aggEncodings  []partialAggSpec
+	groupIndexBuf []int32 // reused per-batch for two-phase scatter
 
 	// Packed composite-key GROUP BY fast path (packed_hash.go): 2-4 fixed-width
 	// int-class columns whose widths sum to <= 16 bytes are packed into one
