@@ -314,29 +314,38 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 
 	// Flush spilled partition data from Grace Hash Join operators.
 	// Results are pushed through the remaining operator chain and into the sink.
-	if err := p.flushSpilledOps(ctx, p.Ops); err != nil {
+	if err := p.flushSpilledOps(ctx, p.Ops, p.consumeIntoSink); err != nil {
 		return err
 	}
 
 	return p.Sink.Finalize(ctx)
 }
 
+// consumeIntoSink is the ordinary flush consumer: one sink, every batch.
+func (p *Pipeline) consumeIntoSink(ctx context.Context, b *batch.RecordBatch) error {
+	FlattenForConsumer(b, p.Sink)
+	if err := p.Sink.Consume(ctx, b); err != nil {
+		return fmt.Errorf("sink consume (flush): %w", err)
+	}
+	b.Release()
+	return nil
+}
+
 // flushSpilledOps checks each operator for pending spilled data and pushes
-// results through the remaining operators into the sink.
-func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator) error {
+// results through the remaining operators into consume.
+//
+// consume is a parameter because WHERE a flushed batch belongs is not the same
+// question on both runners: runSerial has one sink, but under partitioned
+// aggregation the flushed rows carry group keys that belong to whichever sink
+// OWNS them (runParallel's flushIntoOwners). Sending them all to the primary
+// puts a key in two sinks and emits it twice (#782).
+func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator, consume func(context.Context, *batch.RecordBatch) error) error {
 	for opIdx, op := range ops {
 		fo, ok := op.(FlushableOperator)
 		if !ok || !fo.HasPendingFlush() {
 			continue
 		}
-		driver := NewChainDriver(ops[opIdx+1:], func(ctx context.Context, b *batch.RecordBatch) error {
-			FlattenForConsumer(b, p.Sink)
-			if err := p.Sink.Consume(ctx, b); err != nil {
-				return fmt.Errorf("sink consume (flush): %w", err)
-			}
-			b.Release()
-			return nil
-		}).ReleaseInputs()
+		driver := NewChainDriver(ops[opIdx+1:], consume).ReleaseInputs()
 		for {
 			b, err := fo.NextFlush(ctx)
 			if err != nil {
@@ -674,6 +683,29 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		return fmt.Errorf("pipeline cancelled: %w", err)
 	}
 
+	// Flush spilled partition data (use original op chain — worker 0). This
+	// runs BEFORE the demotion check and BEFORE the merge, and in partitioned
+	// mode it ROUTES: a grace-partitioned join replays its spilled probe rows
+	// here, and those rows carry group keys whose owner is some clone's sink.
+	// Consuming them into the primary instead — which is what happened until
+	// #782 — creates a second copy of every one of those keys beside the
+	// clones' own, and adoption then emits both: 15 rows for PostgreSQL's 8,
+	// split at a point that moves with probe-spill timing. Ordering matters
+	// as much as routing: after adoption the clones' state is no longer a
+	// place a row can be added to, and the routeFallback demotion below only
+	// covers batches the WORKERS could not route.
+	if usePartitioned {
+		var flushScratch partitionScratch
+		if err := p.flushSpilledOps(ctx, p.Ops, func(ctx context.Context, b *batch.RecordBatch) error {
+			FlattenForConsumer(b, p.Sink)
+			return partitionAndConsumeOwned(ctx, primaryAgg, workerSinks, b, &flushScratch)
+		}); err != nil {
+			return err
+		}
+	} else if err := p.flushSpilledOps(ctx, p.Ops, p.consumeIntoSink); err != nil {
+		return err
+	}
+
 	// A batch the router could not hash was consumed whole by the worker
 	// that pulled it, so several sinks may now hold the same group key and
 	// adoption would emit that group once per sink (#338: GROUP BY over a
@@ -707,11 +739,6 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		for _, op := range opChains[i] {
 			op.Close()
 		}
-	}
-
-	// Flush spilled partition data (use original op chain — worker 0).
-	if err := p.flushSpilledOps(ctx, p.Ops); err != nil {
-		return err
 	}
 
 	return p.Sink.Finalize(ctx)

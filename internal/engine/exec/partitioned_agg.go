@@ -715,6 +715,56 @@ func partitionAndDeliver(ctx context.Context, hasher *HashAggregate, sink Sink, 
 	return nil
 }
 
+// partitionAndConsumeOwned routes b to the sink that OWNS each group key and
+// consumes every partition inline. It is partitionAndDeliver without the
+// queues, for the phase after the workers have stopped: a grace-partitioned
+// join replays its spilled probe rows there (Pipeline.flushSpilledOps, on
+// worker 0's chain, single-threaded), and those rows are ordinary input rows
+// that happen to arrive late — they belong to the owning sink exactly as the
+// ones the workers routed did.
+//
+// Consuming them into the primary instead is #782: the primary then holds a
+// second copy of every key in the flush, beside the copy its owner already
+// has, and partitioned adoption emits both.
+//
+// Queue-free because there is nobody left to deadlock against, which also
+// means no refcounting: each view is consumed and finished before the next
+// one starts, so the batch and the routing buffer are released once, here.
+func partitionAndConsumeOwned(ctx context.Context, hasher *HashAggregate, sinks []Sink, b *batch.RecordBatch, sc *partitionScratch) error {
+	rt := hasher.PartitionSelectors(b, len(sinks), sc)
+	if rt == nil {
+		partitionFallbacks.Add(1)
+		// Same contract as partitionAndDeliver's fallback: an unroutable
+		// batch breaks disjointness, and the caller's demotion — which runs
+		// after this flush, for exactly this reason — turns adoption back
+		// into a merge by key.
+		hasher.routeFallback.Store(true)
+		if err := sinks[0].Consume(ctx, b); err != nil {
+			return fmt.Errorf("sink consume: %w", err)
+		}
+		b.Release()
+		return nil
+	}
+	// Pre-warm the lazily-cached null state single-threaded, as the worker
+	// router does: every owner below reads it, and the first read writes.
+	for _, col := range b.Columns {
+		col.Nulls.HasNulls()
+	}
+	for j := range sinks {
+		if len(rt.sels[j]) == 0 {
+			continue
+		}
+		if err := consumeRouted(ctx, sinks[j], selView(b, rt.sels[j]), rt.hashes[j], rt.plan); err != nil {
+			routedBufPool.Put(rt.buf)
+			b.Release()
+			return fmt.Errorf("sink consume: %w", err)
+		}
+	}
+	routedBufPool.Put(rt.buf)
+	b.Release()
+	return nil
+}
+
 // consumeRouted hands a routed partition view to its owner, passing the
 // pre-computed key hashes when the sink can use them. Every sink in
 // partitioned mode is a *HashAggregate; the type assertion is what keeps the
