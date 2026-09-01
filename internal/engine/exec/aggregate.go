@@ -265,6 +265,10 @@ type HashAggregate struct {
 	// Stores accumulator fields in contiguous arrays instead of per-group
 	// heap objects, reducing working set from ~192MB to ~32MB for 2M groups.
 	intFlatAccs   []flatAccumArrays // one per aggregate (nil = use AoS path)
+	// aggEncodings latches each aggregate's spill-format encoding (IsFloat /
+	// IsDecimal / DecScale) so a drain can still write the right one after
+	// intFlatAccs has been cleared. See latchAggEncodings.
+	aggEncodings []partialAggSpec
 	groupIndexBuf []int32           // reused per-batch for two-phase scatter
 
 	// Packed composite-key GROUP BY fast path (packed_hash.go): 2-4 fixed-width
@@ -1329,6 +1333,9 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			h.aggInputDecScale[i] = c.DecimalData.Scale
 			if i < len(h.intFlatAccs) && h.intFlatAccs[i].isDecimal && h.intFlatAccs[i].decScale == 0 {
 				h.intFlatAccs[i].decScale = c.DecimalData.Scale
+				// A scale learned late is still a scale the spill format has
+				// to carry; re-latch so a later drain writes it.
+				h.latchAggEncodings()
 			}
 		}
 	}
@@ -7012,6 +7019,11 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	}
 
 	h.groupIndexBuf = make([]int32, batch.DefaultBatchSize)
+
+	// The flags were just resolved from this batch's column types; latch them
+	// now, because the drain that needs them may run after the arrays holding
+	// them have been cleared (latchAggEncodings).
+	h.latchAggEncodings()
 }
 
 // loadAccFromFlat fills dst from a flatAccumArrays row at index gi. countArr
@@ -7073,6 +7085,11 @@ func (h *HashAggregate) materializeFlatAccums() {
 	if h.intFlatAccs == nil {
 		return
 	}
+	// This is the one funnel that CLEARS the flat arrays, so it is where the
+	// spill format's encoding flags have to be preserved: a drain landing
+	// after it (the migrating batch's, MergeSink's normalization) reads the
+	// latch instead of the nil arrays.
+	h.latchAggEncodings()
 	nAggs := len(h.Aggs)
 	// String GROUP BY and generic SoA use strGroupStates with SoA flat accumulators.
 	if h.useStrGroupKey || h.useGenericSoA {

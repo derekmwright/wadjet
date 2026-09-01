@@ -1267,21 +1267,49 @@ func (h *HashAggregate) canUseExternalMerge() bool {
 		h.useStrGroupKey || h.useGenericSoA
 }
 
-// buildPartialAggSpecs derives the on-disk aggregate metadata from the
-// current intFlatAccs. Called immediately before draining so the IsFloat /
-// IsDecimal / DecScale flags reflect the actual scatter layout.
-func (h *HashAggregate) buildPartialAggSpecs() []partialAggSpec {
-	specs := make([]partialAggSpec, len(h.Aggs))
-	for i, agg := range h.Aggs {
-		spec := partialAggSpec{Func: agg.Func}
-		if i < len(h.intFlatAccs) {
-			fa := &h.intFlatAccs[i]
-			spec.IsFloat = fa.isFloat
-			spec.IsDecimal = fa.isDecimal
+// latchAggEncodings records each aggregate's IsFloat / IsDecimal / DecScale
+// into h.aggEncodings, which SURVIVES the flat arrays being cleared.
+//
+// The flags describe the aggregate's resolved INPUT TYPE, so for one query
+// they are decided once (initFlatAccums, from the first batch's column) and
+// never legitimately go back to false — which is why this merges instead of
+// overwriting, and why a caller may run it as often as it likes.
+//
+// It must be called wherever the flags are known, because everything that
+// reads them afterwards may run with h.intFlatAccs already nil: a NULL group
+// key migrates the int-keyed path to the generic map on the batch that carries
+// it, migrateToGenericMap -> materializeFlatAccums clears the arrays on the
+// way, and Consume decided to take the external-merge drain BEFORE consuming
+// that batch. Caller holds h.mu.
+func (h *HashAggregate) latchAggEncodings() {
+	if len(h.aggEncodings) != len(h.Aggs) {
+		h.aggEncodings = make([]partialAggSpec, len(h.Aggs))
+	}
+	for i := range h.Aggs {
+		spec := &h.aggEncodings[i]
+		spec.Func = h.Aggs[i].Func
+		if i >= len(h.intFlatAccs) {
+			continue
+		}
+		fa := &h.intFlatAccs[i]
+		spec.IsFloat = spec.IsFloat || fa.isFloat
+		spec.IsDecimal = spec.IsDecimal || fa.isDecimal
+		if fa.decScale != 0 {
 			spec.DecScale = int32(fa.decScale)
 		}
-		specs[i] = spec
 	}
+}
+
+// buildPartialAggSpecs returns the on-disk aggregate metadata for a run
+// header. It reads the latch, not h.intFlatAccs: a drain can land on a batch
+// that just cleared those arrays, and specs built from a cleared array come
+// back IsDecimal=false / IsFloat=false, at which point emitAcc writes the
+// never-populated SumI64 in place of the Int128 or the float64 and the run's
+// whole contribution reads back as zero (#782, the DECIMAL/FLOAT symptom).
+func (h *HashAggregate) buildPartialAggSpecs() []partialAggSpec {
+	h.latchAggEncodings()
+	specs := make([]partialAggSpec, len(h.Aggs))
+	copy(specs, h.aggEncodings)
 	return specs
 }
 
