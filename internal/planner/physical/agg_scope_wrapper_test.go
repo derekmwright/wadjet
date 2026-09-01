@@ -6,7 +6,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// aggScopePreservingWrapper is read by FOUR walks, and this is what keeps
+// aggScopePreservingWrapper is read by FIVE walks, and this is what keeps
 // that a checked fact rather than a sentence in an ADR.
 //
 // Each of them answers a consumer's version of one question — "does this node
@@ -20,6 +20,9 @@ import (
 //   - `logical.AggregateOverGroupRows`, for whether a Project's INPUT rows are
 //     one per GROUP — which is what decides whether a predicate above the
 //     Project may be substituted below it.
+//   - `aggregateOutputNames`, for the names the aggregate below publishes —
+//     which is what pins each projection to the physical SLOT its provenance
+//     names when two outputs share one name (#575).
 //
 // ADR-0026 §4's first statement said "both walks read one list, so they cannot
 // disagree" while the THIRD still had its own — and the shape that finds it is
@@ -41,16 +44,33 @@ import (
 // two callers map a SELECT list onto the aggregate's own STAGE, and a Sort or a
 // window between them emits a stage of its own.
 //
-// So the invariant this test carries is: **these four NAMED readers agree
+// The FIFTH was found by the next review, one round later, and it was inside
+// this package all along: `aggregateOutputNames` descended NodeFilter ALONE
+// while the call site that guards it (`isOverAggregate`, i.e.
+// `findAggregateAncestor`) reads the full list. With a WINDOW between, the two
+// disagreed — the guard said an aggregate is below, the walk said it could not
+// model that — so #575's duplicate-name slot pinning was silently skipped and
+// `SELECT COUNT(*) AS g, g AS x, ROW_NUMBER() OVER (ORDER BY g) ... GROUP BY g`
+// published the KEY's value under the aggregate's alias on the SINGLE-process
+// path.
+//
+// So the invariant this test carries is: **these five NAMED readers agree
 // with the list, and the list covers every node type the logical package
 // declares.**
 //
-// It does NOT — and cannot — discover a FIFTH reader. It drives the four by
+// It does NOT — and cannot — discover a SIXTH reader. It drives the five by
 // name, so a new walk that grows its own hardcoded Filter/Sort/Limit list
-// passes here in silence; the round-2 review proved that by adding one and
-// watching this test go green. The commit that introduced it said "a fourth
-// reader with its own list fails here", and that was an overclaim — the fourth
-// existed already and a review, not this test, is what found it.
+// passes here in silence; a review proved that by adding one and watching this
+// test go green. The commit that introduced it said "a fourth reader with its
+// own list fails here", and that was an overclaim twice over — the fourth
+// existed already, the fifth did too, and a review counting them is what found
+// each one. The CENSUS of candidates — every function in this package that is
+// even arguably asking this question, with a recorded decision for each,
+// including the two that were MEASURED and deliberately left alone
+// (`resolveSortKeyColumn`, `aggregateUnderWindow`) — is in ADR-0026 §4. It is a
+// record and not a test on purpose: the honest count is 29 functions in this
+// package carrying a Filter/Sort/Limit case, so a source-level allowlist would
+// have thirty entries and would drift.
 //
 // A source-level guard was considered and is NOT here on purpose. Twelve
 // functions in this package carry a `case logical.NodeFilter, logical.NodeSort,
@@ -147,6 +167,11 @@ func TestAggScopePreservingWrapperIsReadByEveryWalk(t *testing.T) {
 		if found := logical.AggregateOverGroupRows(overProject); (found != nil) != w {
 			t.Errorf("logical.AggregateOverGroupRows through %v found=%v, want %v — the FOURTH "+
 				"walk stopped reading AggScopePreservingWrapper (#774)", typ, found != nil, w)
+		}
+		// The fifth answers the aggregate's OUTPUT NAMES through the wrapper.
+		if _, ok := aggregateOutputNames(wrapped); ok != w {
+			t.Errorf("aggregateOutputNames through %v ok=%v, want %v — the FIFTH walk stopped "+
+				"reading aggScopePreservingWrapper (#575 under a window)", typ, ok, w)
 		}
 	}
 }

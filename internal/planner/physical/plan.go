@@ -8665,7 +8665,15 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// cannot determine (grouping sets, an unrecognized node below)
 			// keeps the projection, which is always sound and merely costs
 			// a copy.
-			if names, ok := aggregateOutputNames(child); ok && namesMatchProjections(names, node.Projections) {
+			// …and not across a node that ADDS a column. aggregateOutputNames
+			// answers what the AGGREGATE publishes, which is what the #575 slot
+			// pinning needs; a WINDOW below this Project appends `__win_N` to
+			// that, so a projection whose list happens to equal the aggregate's
+			// outputs is NOT the node's whole output and eliding it would put
+			// the window's slot on the wire. Sort and LIMIT add nothing and are
+			// safe to look through.
+			if names, ok := aggregateOutputNames(child); ok &&
+				!wrapsAWindow(child) && namesMatchProjections(names, node.Projections) {
 				return p.buildPipeline(ctx, child)
 			}
 		}
@@ -13915,7 +13923,8 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 		return nil, false
 	}
 	switch {
-	case node.Type == logical.NodeFilter:
+	case node.Type != logical.NodeProject && node.Type != logical.NodeAggregate &&
+		logical.AggScopePreservingWrapper(node.Type):
 		// A HAVING filter, a Sort, a LIMIT and a WINDOW all leave the
 		// aggregate's own output columns visible under their own names —
 		// ADR-0026 §4's list, read from `logical.AggScopePreservingWrapper`
@@ -13972,6 +13981,25 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 		return append(names, elidedLits...), true
 	}
 	return nil, false
+}
+
+// wrapsAWindow reports whether a WINDOW stands between this node and the
+// aggregate below it, walking the same list aggregateOutputNames does.
+//
+// A window APPENDS its output, so "the aggregate's output names" and "this
+// node's output names" are two different lists there. Only the second answers
+// whether a projection may be ELIDED.
+func wrapsAWindow(n *logical.Node) bool {
+	for ; n != nil; n = n.Children[0] {
+		if n.Type == logical.NodeWindow {
+			return true
+		}
+		if n.Type == logical.NodeAggregate || !logical.AggScopePreservingWrapper(n.Type) ||
+			len(n.Children) != 1 {
+			return false
+		}
+	}
+	return false
 }
 
 // projectionOutputName is the column name a projection publishes, resolved the

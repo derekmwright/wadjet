@@ -309,23 +309,32 @@ where it is a NAME:
   visible, and a `NodeWindow` was on none of their lists. It belongs there —
   `exec.Window` APPENDS its output and renames nothing, which is the same
   answer `scopePreservingWrapper` gives for the relation-scope question.
-  `logical.AggScopePreservingWrapper` states the list once and **all FOUR**
+  `logical.AggScopePreservingWrapper` states the list once and **all FIVE**
   walks read it — `physical.aggregateUnderOutput` for the gather,
   `physical.findAggregateAncestor` for the single-process projection,
   `physical.groupKeysPublishedBelow`, which decides whether an aggregate
-  DIRECTLY BELOW already publishes the key, and
-  `logical.AggregateOverGroupRows`, which decides whether a Project's INPUT
-  rows are one per GROUP and therefore whether a predicate above it may be
-  substituted below. The first statement of this said "both walks read one
-  list, so they cannot disagree" and there were three; the corrected statement
-  said three, and there were four. Each miss cost the same kind of answer: the
-  third kept its own hardcoded Filter/Sort/Limit list, so `SELECT DISTINCT
-  g + 1 … GROUP BY g + 1` with a window between its two aggregates
-  re-materialized a key the inner one had already published and collapsed the
-  table into ONE NULL group; the fourth asked its question through
-  `logical.AggregateBelowProject`, whose list is Filter-ONLY, so a WHERE on the
-  key applied above a window substituted `k` away to `(g + 1)`, met a schema
-  with no `g`, and admitted no row at all on any arm (#774).
+  DIRECTLY BELOW already publishes the key, `logical.AggregateOverGroupRows`,
+  which decides whether a Project's INPUT rows are one per GROUP and therefore
+  whether a predicate above it may be substituted below, and
+  `physical.aggregateOutputNames`, which answers what the aggregate below
+  PUBLISHES so each projection can be pinned to the physical slot its
+  provenance names.
+
+  The count in this section has been wrong four times, and the sequence is the
+  point: "both walks read one list" (two), then three, then four, then five.
+  Each miss cost the same kind of answer. The third kept its own hardcoded
+  Filter/Sort/Limit list, so `SELECT DISTINCT g + 1 … GROUP BY g + 1` with a
+  window between its two aggregates re-materialized a key the inner one had
+  already published and collapsed the table into ONE NULL group. The fourth
+  asked its question through `logical.AggregateBelowProject`, whose list is
+  Filter-ONLY, so a WHERE on the key applied above a window substituted `k`
+  away to `(g + 1)`, met a schema with no `g`, and admitted no row at all on any
+  arm (#774). The fifth descended NodeFilter alone while the call site that
+  guards it (`findAggregateAncestor`) read the full list, so with a WINDOW
+  between them #575's duplicate-name slot pinning was skipped and
+  `SELECT COUNT(*) AS g, g AS x, ROW_NUMBER() OVER (ORDER BY g) … GROUP BY g`
+  published the KEY's value under the aggregate's alias on the single-process
+  path.
 
   The list therefore lives in `logical` and not in `physical`: the fourth
   reader is in that package, `physical` imports it and not the reverse, and a
@@ -342,16 +351,46 @@ where it is a NAME:
   written.
 
   `TestAggScopePreservingWrapperIsReadByEveryWalk` states exactly what is
-  checked: **these four NAMED readers agree with the list, and the list covers
-  every node type the logical package declares.** It cannot discover a FIFTH
-  reader — it drives the four by name, and a review proved the point by adding
-  a walk with its own list and watching the test pass. A source-level guard was
-  considered and rejected: twelve functions in the package carry a
-  `NodeFilter, NodeSort, NodeLimit` case and exactly one is asking this
-  question, so the guard needs an eleven-entry allowlist that drifts — the
-  enumerate-the-kinds shape this repository has already been wrong with twice.
-  What finds the next reader is a review counting them, which is how the third
-  and the fourth were both found.
+  checked: **these five NAMED readers agree with the list, and the list covers
+  every node type the logical package declares.** It cannot discover a SIXTH —
+  it drives the five by name, and a review proved the point by adding a walk
+  with its own list and watching the test pass. Saying otherwise is an
+  overclaim this ADR has now made twice.
+
+  A source-level guard was considered and rejected, and the number that
+  justified the rejection was wrong. This ADR said "twelve functions in the
+  package carry a `NodeFilter, NodeSort, NodeLimit` case". The census is:
+  **29 functions in `internal/planner/physical` carry a literal case naming at
+  least one of the three** (17 on the strictest reading, a clause containing all
+  three), plus **6 more** that walk the same kinds through the shared predicate,
+  and **15** in `internal/planner/logical`. So an allowlist would be closer to
+  thirty entries than to eleven, and the argument against it is stronger than
+  the one originally made — but it is an argument against a GUARD, not against
+  a RECORD, so here is the record. Every candidate that is even arguably asking
+  this section's question, with its decision:
+
+  | function | list | decision |
+  |---|---|---|
+  | `physical.aggregateUnderOutput` | shared | reader 1 |
+  | `physical.findAggregateAncestor` | shared | reader 2 |
+  | `physical.groupKeysPublishedBelow` | shared | reader 3 |
+  | `logical.AggregateOverGroupRows` | shared | reader 4 (#774) |
+  | `physical.aggregateOutputNames` | shared | reader 5 (#575 under a window) |
+  | `physical.wrapsAWindow` | shared | a REFINEMENT of the question — "is one of the wrappers specifically a Window" — used to keep the projection-elision decision from looking through one, because a window ADDS a column and elision needs the node's WHOLE output |
+  | `logical.AggregateBelowProject` | Filter only | deliberately narrower; its callers map a SELECT list onto the aggregate's own STAGE and a Sort/LIMIT/window emits a stage of its own. Documented at its definition |
+  | `physical.scopePreservingWrapper` | Filter/Sort/Limit/Distinct/**Window** | the RELATION-scope twin of this question, already has Window |
+  | `physical.resolveSortKeyColumn` | Filter/Limit/Sort/Distinct, no Window | MEASURED, left alone. `SELECT g AS k, ROW_NUMBER() OVER (…) … GROUP BY g ORDER BY k DESC` and six siblings answer PostgreSQL's order on all four arms — the call site's `producerMaterializesName` reset already covers it, and its mirror walk `derivedAliasSourceColumn` also excludes Window, so changing one alone is the ADR-0025 out-of-step shape |
+  | `physical.aggregateUnderWindow` | Filter/Project/Sort/Limit/Distinct, no Window | MEASURED, left alone. Five stacked-window-over-aggregate shapes over a DECIMAL(18,4) column — the type question it exists for — answer PostgreSQL's values on single and on both DAG arms. Adding Window would also need `windowSpecOutputType` layered for the skipped window, so it is a change with its own gap and no defect to justify it |
+  | `logical.aggregateBelow` | Filter/Project/Window/Sort/Limit — its own, WIDER | a sixth de-facto reader, filed as **#787**; wider than the shared list by `NodeProject`, so it is a different question or a bug, and either way not settled here |
+
+  The schema walks (`inputColTypes`, `emittedColTypes`, `emittedColDecimal`,
+  `inputColDecimal`, `strictIntArithCols`, …) are NOT candidates: they ask what
+  a node EMITS, and most already carry their own `NodeWindow` arm that ADDS the
+  window's outputs, which is the correct answer to a different question. The
+  set-operation walks and the locator walks are likewise their own questions.
+
+  What finds the next reader is a review counting them, which is how the third,
+  the fourth and the fifth were each found.
   On the DAG the SELECT list is attached to the WINDOW stage's fragment
   (ADR-0025 shape g), and that projection is respelled over the producer's
   emitted columns by the same `respellSpecsOverProducerOutput` the
