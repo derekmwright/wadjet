@@ -5278,11 +5278,32 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 }
 
 func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
-	// Runs the clone drained under its PartialDrainBytes bound belong to the
-	// primary now, whatever merge path the remaining in-memory state takes.
+	// EVERY run the clone wrote belongs to the primary now, whatever merge
+	// path the remaining in-memory state takes — and there are two lists,
+	// because there are two ways a clone drains.
+	//
+	// drainedRuns is the PartialDrainBytes bound, the one a clone is designed
+	// to take. partialSpillFiles is what spillPartialState appends to, and a
+	// clone reaches THAT through SpillSome: a clone registers as an accounted
+	// operator like any other aggregate (Consume does it whenever Spill is
+	// non-nil and canUseExternalMerge holds — a tracking-only view is still
+	// non-nil), so SpillManager.RequestRelief can ask it for bytes on a peer's
+	// behalf and it drains a whole run in answer.
+	//
+	// Only the first list was transferred. The clone's own Close then dropped
+	// the second, and every group in those runs vanished from the answer with
+	// no error anywhere — 5000 rows in, 1100 out, on a shape whose totals a
+	// COUNT(*) makes obvious and a SUM does not (#790). The partitioned
+	// adoption branch above does not have the bug: it keeps the clone and
+	// finalizes it, which is why it moves drainedRuns INTO partialSpillFiles
+	// rather than away from them.
 	if len(o.drainedRuns) > 0 {
 		h.partialSpillFiles = append(h.partialSpillFiles, o.drainedRuns...)
 		o.drainedRuns = nil
+	}
+	if len(o.partialSpillFiles) > 0 {
+		h.partialSpillFiles = append(h.partialSpillFiles, o.partialSpillFiles...)
+		o.partialSpillFiles = nil
 	}
 
 	// When the parent (h) was never fed a batch — runParallel's warmup batch
