@@ -391,9 +391,20 @@ func groupKeysPublishedBelow(n *logical.Node) map[string]string {
 			if !n.PreservesAggOutputs {
 				return nil
 			}
-		case logical.NodeFilter, logical.NodeSort, logical.NodeLimit:
 		default:
-			return nil
+			// The THIRD walk asking the same question, and it read its own
+			// hardcoded list until 2026-09-01 while §4's invariant said "both
+			// walks read one list, so they cannot disagree" — there were
+			// three. A WINDOW was the entry it was missing, and the shape is
+			// #737's under a DISTINCT: `SELECT DISTINCT g + 1 AS k, ROW_NUMBER()
+			// OVER (…) FROM t GROUP BY g + 1` lowers to two aggregates keyed
+			// alike with the window between them, the outer one did not see
+			// that the inner already publishes the key, materialized it again
+			// over a schema with no `g`, and collapsed the table into one NULL
+			// group on the single-process path.
+			if !aggScopePreservingWrapper(n.Type) {
+				return nil
+			}
 		}
 		if len(n.Children) != 1 {
 			return nil

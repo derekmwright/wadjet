@@ -2538,6 +2538,92 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 		}
 
+		// DISTINCT above a computed key with a WINDOW between them, which is
+		// the THIRD walk asking §4's question (#737 round 2).
+		//
+		// `groupKeysPublishedBelow` decides whether an aggregate's key is
+		// already published by an aggregate DIRECTLY BELOW it — the
+		// `SELECT DISTINCT g + 1 … GROUP BY g + 1` lowering, two aggregates
+		// keyed alike — and it read its own hardcoded Filter/Sort/Limit list
+		// while §4 said "both walks read one list, so they cannot disagree".
+		// There were THREE. With a window between the two aggregates the
+		// outer one did not see the inner's key, materialized it again over a
+		// schema with no `g`, and collapsed the table into ONE NULL group.
+		//
+		// The DAG arms are PINNED, not fixed: they answer the same NULL group
+		// for #736's own mechanism (`Stage.GroupByCols` is both the
+		// resolution and the published name), which is a different site and
+		// byte-identical on de95b3b5. The window is what this entry adds — the
+		// window-free spelling below it is #736's and is pinned there too.
+		t.Run("DistinctOverAComputedKeyUnderAWindow", func(t *testing.T) {
+			for _, c := range []struct {
+				name, sql string
+				rows      int  // PostgreSQL 17
+				dagPinned bool // TODO(#736): the DAG answers one NULL group
+			}{
+				{
+					name: "distinct-with-a-window",
+					sql: fmt.Sprintf(`SELECT DISTINCT g + 1 AS k, `+
+						`ROW_NUMBER() OVER (ORDER BY g + 1) AS rn FROM %s GROUP BY g + 1 `+
+						`ORDER BY k`, tbl),
+					rows: wantKeys + 1, dagPinned: true,
+				},
+				{
+					name: "the-key-alone-through-a-derived-table",
+					sql: fmt.Sprintf(`SELECT k FROM (SELECT DISTINCT g + 1 AS k, `+
+						`ROW_NUMBER() OVER (ORDER BY g + 1) AS rn FROM %s GROUP BY g + 1) s `+
+						`ORDER BY k`, tbl),
+					rows: wantKeys + 1, dagPinned: true,
+				},
+				{
+					// The COUNT twin, which was already right on every arm —
+					// a row count cannot see a NULL key, and that is exactly
+					// why the two entries above assert the KEYS.
+					name: "ctl/count-over-the-same-shape",
+					sql: fmt.Sprintf(`SELECT COUNT(*) AS n FROM (SELECT DISTINCT g + 1 AS k, `+
+						`ROW_NUMBER() OVER (ORDER BY g + 1) AS rn FROM %s GROUP BY g + 1) s`, tbl),
+					rows: 1,
+				},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, c.sql)
+						pinned := c.dagPinned && arm.name != "single"
+						if len(res.Rows) != c.rows {
+							t.Errorf("%s arm returned %d rows, PostgreSQL 17 answers %d\n  SQL: %s",
+								arm.name, len(res.Rows), c.rows, c.sql)
+							continue
+						}
+						if _, isKeyed := res.Rows[0]["k"]; !isKeyed {
+							continue // the COUNT control
+						}
+						nonNull := 0
+						for _, r := range res.Rows {
+							if r["k"] != nil {
+								nonNull++
+							}
+						}
+						if pinned {
+							if nonNull > 0 {
+								t.Errorf("the %s arm now answers %d non-NULL keys under a "+
+									"DISTINCT; #736's DAG half is fixed for this shape — "+
+									"assert it and delete this pin\n  SQL: %s",
+									arm.name, nonNull, c.sql)
+							}
+							continue
+						}
+						if nonNull != wantKeys {
+							t.Errorf("%s arm answered %d non-NULL keys, PostgreSQL 17 answers "+
+								"%d — a DISTINCT over a computed key re-materialized it above "+
+								"the aggregate that already published it\n  SQL: %s",
+								arm.name, nonNull, wantKeys, c.sql)
+						}
+					}
+				})
+			}
+		})
+
 		// A WHERE on the key, ABOVE the window (#774). Pinned: it admits no
 		// row at all where PostgreSQL answers four, on every arm and
 		// identically on de95b3b5 — the outer predicate is pushed below the
@@ -2560,6 +2646,21 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 						"window; PostgreSQL answers 4 (keys 4..7). #774 is fixed — assert it "+
 						"and delete this pin\n  SQL: %s", arm.name, len(res.Rows), pinned)
 				}
+			}
+			// The AGGREGATE face of the same cell: no row survives the filter,
+			// so SUM over it is NULL where PostgreSQL answers 22 (4+5+6+7).
+			// A row COUNT cannot see this one — it is one row either way —
+			// which is why it is asserted on the VALUE.
+			aggPinned := fmt.Sprintf(`SELECT SUM(k) AS s FROM (SELECT g + 1 AS k, %s `+
+				`FROM %s GROUP BY g + 1) s WHERE k > 3`, win, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, aggPinned)
+				if len(res.Rows) == 1 && res.Rows[0]["s"] == nil {
+					continue // the pinned answer
+				}
+				t.Errorf("the %s arm now answers %v for SUM over a filter on the key above a "+
+					"window; PostgreSQL answers 22. #774 is fixed — assert it and delete this "+
+					"pin\n  SQL: %s", arm.name, res.Rows, aggPinned)
 			}
 			for _, c := range []struct {
 				name, sql string

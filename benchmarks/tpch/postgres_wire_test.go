@@ -790,10 +790,15 @@ func wireCorpus() []wireCase {
 		{name: "DecimalQualifiedAcrossArmsZeroRows",
 			sql: `SELECT t.d_2 FROM dec_probe t JOIN (SELECT d_key, d_4 AS d_2 FROM dec_probe) u
 				ON t.d_key = u.d_key WHERE t.d_key < 0`},
-		// Arithmetic OVER a DECIMAL WINDOW output (#729): the window's own
-		// output type is DECIMAL(38,s), and a consumer above the window has to
-		// read it or the expression falls to the float rule. Both the value
-		// and the declared modifier are the question here.
+		// Arithmetic OVER a DECIMAL WINDOW output (#729). These two are
+		// CONTROLS, not ratchets: the wire server answers through the
+		// SINGLE-process path, which typed this shape correctly before the
+		// fix, so both PASS on de95b3b5. #729's failing arms were the DAG's
+		// and no wire arm reaches them; the value gate that ratchets is
+		// `coordinator.TestArithmeticOverADecimalWindowOutputThreeArms`. They
+		// earn their place by pinning the declared MODIFIER, which that gate
+		// cannot see — a right value under `numeric` with typmod -1 is a
+		// divergence a value oracle reports as agreement.
 		{name: "DecimalArithmeticOverAWindowOutput",
 			sql: `SELECT id, w * 2 AS w2 FROM
 				(SELECT d_key AS id, SUM(d_2) OVER () AS w FROM dec_probe WHERE d_key IN (1, 2, 3)) x

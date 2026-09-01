@@ -306,16 +306,23 @@ where it is a NAME:
 
 - **the SELECT item.** The walk that re-points a select item at its key's
   column stops at any node that does not leave the aggregate's own columns
-  visible, and a `NodeWindow` was on neither walk's list. It belongs there —
+  visible, and a `NodeWindow` was on none of their lists. It belongs there —
   `exec.Window` APPENDS its output and renames nothing, which is the same
   answer `scopePreservingWrapper` gives for the relation-scope question.
-  `aggScopePreservingWrapper` states the list once and both walks read it
-  (`aggregateUnderOutput` for the gather, `findAggregateAncestor` for the
-  single-process projection), so they cannot disagree about a node kind —
-  which is how one omission lost the key on BOTH paths at once. On the DAG the
-  SELECT list is attached to the WINDOW stage's fragment (ADR-0025 shape g),
-  and that projection is respelled over the producer's emitted columns by the
-  same `respellSpecsOverProducerOutput` the `StageProject` branch uses.
+  `aggScopePreservingWrapper` states the list once and **all THREE** walks read
+  it — `aggregateUnderOutput` for the gather, `findAggregateAncestor` for the
+  single-process projection, and `groupKeysPublishedBelow`, which decides
+  whether an aggregate DIRECTLY BELOW already publishes the key. The first
+  statement of this said "both walks read one list, so they cannot disagree"
+  and there were three: the third kept its own hardcoded Filter/Sort/Limit
+  list, so `SELECT DISTINCT g + 1 … GROUP BY g + 1` with a window between its
+  two aggregates re-materialized a key the inner one had already published and
+  collapsed the table into ONE NULL group on the single-process path. Counting
+  the walks is the check the claim needed and did not have.
+  On the DAG the SELECT list is attached to the WINDOW stage's fragment
+  (ADR-0025 shape g), and that projection is respelled over the producer's
+  emitted columns by the same `respellSpecsOverProducerOutput` the
+  `StageProject` branch uses.
 
 - **the window's OWN spec.** Its argument, its PARTITION BY and its ORDER BY
   keys are evaluated over the aggregate's OUTPUT too. `ORDER BY g + 1` reached
@@ -401,12 +408,19 @@ loud failure was itself an accident of a different column's projection.
     shapes the issue tabulates are now EIGHT correct on every arm — the
     collision shapes, the CTE spelling, the string-key spelling, the outer
     aggregate over the key and the renamed-leaf key all agree. Three do not,
-    all on the DAG arms alone and all byte-identical to `de95b3b5`: an
-    aggregate whose ARGUMENT is spelled like the key (loud, `column "\"g +
-    1\"" does not exist`), an aggregate ALIASED like the key (the KEY's value
-    under the alias), and DISTINCT over a derived key (one NULL group). They
-    are three different DAG mechanisms and none of them is the reference
-    rule.
+    and all three are byte-identical to `de95b3b5`: an aggregate whose
+    ARGUMENT is spelled like the key (loud, `column "\"g + 1\"" does not
+    exist`), an aggregate ALIASED like the key (the KEY's value under the
+    alias), and DISTINCT over a derived key (one NULL group). They are three
+    different DAG mechanisms and none of them is the reference rule.
+
+    "All on the DAG arms alone" was written here and is FALSE with a WINDOW
+    present: `SELECT DISTINCT g + 1 AS k, ROW_NUMBER() OVER (…) … GROUP BY
+    g + 1` was one NULL group on the SINGLE-process path too, for §4's third
+    walk rather than for #736. That half is fixed and the DAG's is pinned
+    beside it (`R4/…/DistinctOverAComputedKeyUnderAWindow`), so the sentence
+    now says what is true: the DISTINCT residual is the DAG's alone once the
+    walks agree, and it was not before.
 
 A related naming rule, settled here because two of the four review findings
 turned on it: **an ALIAS is a name, and its case is part of it.** A
