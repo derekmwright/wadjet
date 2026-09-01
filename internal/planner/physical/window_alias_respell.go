@@ -339,8 +339,23 @@ func aggKeyAliasMaterializedByProducer(name string, child *logical.Node) (string
 				if proj.Column != "" || proj.IsAgg || proj.ASTExpr == nil {
 					return "", false
 				}
-				// The producer DIRECTLY below the Project that defines the
-				// alias, and no wider. The argument path asks
+				// The alias must be one a producer really DOES materialize, and
+				// the answer is the same condition the pass that materializes
+				// it applies: `absorbWindowArmProjection` puts
+				// `__win_0 + 0 AS w` onto a window stage only for an expression
+				// that WRAPS a synthetic window slot
+				// (absorbComputedSubqueryProjection's window branch). An alias
+				// that is ordinary arithmetic over a scan column —
+				// `id % 7 AS k` beside a window — is materialized by nobody, and
+				// answering the alias for it turned a CORRECT DAG answer into
+				// `GROUP BY key "k" is not a column of its input (input has: id,
+				// __winkey_0, __win_0)`. TestWindowPartitionKeyTwoPath caught
+				// that; this condition is what it bought.
+				if !referencesSyntheticWindow(proj.ASTExpr) {
+					return "", false
+				}
+				// And the producer DIRECTLY below the Project that defines the
+				// alias, no wider. The argument path asks
 				// aggInputAliasIsMaterializedUnderItsName of the whole subtree
 				// from the aggregate down, which also answers yes for a JOIN
 				// standing ABOVE this Project — and answering the alias there
@@ -348,7 +363,7 @@ func aggKeyAliasMaterializedByProducer(name string, child *logical.Node) (string
 				// "w" does not exist`) over a derived table with an ORDER BY or
 				// a LIMIT in it, while fixing nothing. The narrow question is
 				// the one #777 needs and the one that is measured; the wider
-				// shape is left exactly as it was and filed.
+				// shape is left exactly as it was and filed (#781).
 				if len(n.Children) != 1 ||
 					!aggInputAliasIsMaterializedUnderItsName(n.Children[0]) {
 					return "", false
