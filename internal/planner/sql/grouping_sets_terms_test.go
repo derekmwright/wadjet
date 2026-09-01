@@ -29,6 +29,23 @@ func TestGroupingConstructsCarryTheirParsedTerms(t *testing.T) {
 			[]string{"a", "b"}},
 		{"a-delimited-identifier-is-a-NAME", `SELECT "g + 1", COUNT(*) FROM t ` +
 			`GROUP BY ROLLUP ("g + 1")`, []string{"g + 1"}},
+		// A DUPLICATED term. `info.GroupBy` is a KEY LIST that the sets index
+		// into, so it holds one entry per distinct term — the repetition lives
+		// in the SETS, where it has meaning (`ROLLUP (g, g)` is `(g,g)`, `(g)`,
+		// `()`, and PostgreSQL emits the first two as separate groupings). One
+		// list for both put `g` in GroupBy twice, the physical term→position
+		// map was last-wins, and position 0 was grouped on nothing: seven rows
+		// with an all-NULL key column.
+		{"rollup-over-a-duplicated-term",
+			"SELECT g, COUNT(*) FROM t GROUP BY ROLLUP (g, g)", []string{"g"}},
+		{"cube-over-a-duplicated-term",
+			"SELECT g, COUNT(*) FROM t GROUP BY CUBE (g, g)", []string{"g"}},
+		{"rollup-over-a-duplicated-computed-term",
+			"SELECT g + 1, COUNT(*) FROM t GROUP BY ROLLUP (g + 1, g + 1)",
+			[]string{"g + 1"}},
+		{"rollup-with-one-repeat-among-three",
+			"SELECT g, h, COUNT(*) FROM t GROUP BY ROLLUP (g, h, g)",
+			[]string{"g", "h"}},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -55,6 +72,27 @@ func TestGroupingConstructsCarryTheirParsedTerms(t *testing.T) {
 			}
 		})
 	}
+
+	// The sets keep the repetition the key list drops, and they index INTO that
+	// key list — so `ROLLUP (g, g)` is three sets over ONE key.
+	t.Run("the-sets-keep-what-the-key-list-dedupes", func(t *testing.T) {
+		info := groupingInfo(t, "SELECT g, COUNT(*) FROM t GROUP BY ROLLUP (g, g)")
+		if len(info.GroupBy) != 1 {
+			t.Fatalf("GroupBy = %v, want one entry — the key list is the DISTINCT terms",
+				info.GroupBy)
+		}
+		want := [][]string{{"g", "g"}, {"g"}, {}}
+		if len(info.GroupingSets) != len(want) {
+			t.Fatalf("got %d grouping sets %v, want %d %v",
+				len(info.GroupingSets), info.GroupingSets, len(want), want)
+		}
+		for i, set := range want {
+			if len(info.GroupingSets[i]) != len(set) {
+				t.Errorf("set %d = %v, want %v — PostgreSQL emits (g,g) and (g) as SEPARATE "+
+					"groupings, so collapsing them loses rows", i, info.GroupingSets[i], set)
+			}
+		}
+	})
 
 	// The delimited spelling binds as a NAME, not as arithmetic — ADR-0026 §2c,
 	// asserted here because a grouping-set term goes through a different parse

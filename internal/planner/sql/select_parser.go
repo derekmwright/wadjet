@@ -281,23 +281,24 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 		case p.isKeyword(TokenKWCube):
 			// CUBE(a, b, c) → all 2^n subsets
 			p.advance()
-			cols, exprs, err := p.parseGroupingColList()
+			cols, all, err := p.parseGroupingColList()
 			if err != nil {
 				return nil, fmt.Errorf("parsing CUBE: %w", err)
 			}
+			// The SETS from the positions, the KEY LIST from the deduped union.
 			info.GroupingSets = expandCube(cols)
-			info.GroupBy = cols
-			info.GroupByExprs = exprs
+			info.GroupBy = all.names
+			info.GroupByExprs = all.exprs
 		case p.isKeyword(TokenKWRollup):
 			// ROLLUP(a, b, c) → (a,b,c), (a,b), (a), ()
 			p.advance()
-			cols, exprs, err := p.parseGroupingColList()
+			cols, all, err := p.parseGroupingColList()
 			if err != nil {
 				return nil, fmt.Errorf("parsing ROLLUP: %w", err)
 			}
 			info.GroupingSets = expandRollup(cols)
-			info.GroupBy = cols
-			info.GroupByExprs = exprs
+			info.GroupBy = all.names
+			info.GroupByExprs = all.exprs
 		default:
 			// Simple GROUP BY
 			for {
@@ -2775,31 +2776,44 @@ func (p *selectParser) parseGroupingSets() ([][]string, []string, []Node, error)
 	return sets, all.names, all.exprs, nil
 }
 
-// parseGroupingColList parses a parenthesized term list: (a, b, c), keeping
-// each term's parsed form beside its canonical name.
-func (p *selectParser) parseGroupingColList() ([]string, []Node, error) {
+// parseGroupingColList parses a parenthesized term list: (a, b, c).
+//
+// It returns TWO views of the list, and the difference is the whole of
+// `ROLLUP (g, g)`:
+//
+//   - `cols` is per POSITION, duplicates kept, because the grouping sets are
+//     built from the positions — `ROLLUP (g, g)` is the three sets `(g, g)`,
+//     `(g)` and `()`, and PostgreSQL emits the first two as SEPARATE groupings
+//     even though they group identically, so every value appears twice beside
+//     the grand total (7 rows over collslot, not 4);
+//   - `all` is the deduped UNION, which is what `info.GroupBy` is: a key list,
+//     one entry per distinct term, that the sets index INTO.
+//
+// Returning one list for both is what made `GROUP BY ROLLUP (g, g)` answer
+// seven rows with an all-NULL key column. `info.GroupBy` held `g` twice, the
+// physical planner's term→position map was last-wins so both sets' `g` pointed
+// at position 1, and position 0 was never grouped on — a key with no value.
+// The GROUPING SETS spelling never had it, because it has collected its union
+// through `groupTermSet` from the start; this makes CUBE and ROLLUP agree.
+func (p *selectParser) parseGroupingColList() (cols []string, all groupTermSet, err error) {
 	if _, err := p.expect(TokenLParen); err != nil {
-		return nil, nil, fmt.Errorf("expected ( after CUBE/ROLLUP")
+		return nil, all, fmt.Errorf("expected ( after CUBE/ROLLUP")
 	}
-	var cols []string
-	var exprs []Node
 	for {
-		e, err := p.parseExpr()
-		if err != nil {
-			return nil, nil, err
+		e, perr := p.parseExpr()
+		if perr != nil {
+			return nil, all, perr
 		}
-		e = Unparen(e)
-		cols = append(cols, GroupKeyName(e))
-		exprs = append(exprs, e)
+		cols = append(cols, all.add(e))
 		if p.peek() != TokenComma {
 			break
 		}
 		p.advance()
 	}
 	if _, err := p.expect(TokenRParen); err != nil {
-		return nil, nil, fmt.Errorf("expected ) after column list")
+		return nil, all, fmt.Errorf("expected ) after column list")
 	}
-	return cols, exprs, nil
+	return cols, all, nil
 }
 
 // expandCube expands CUBE(a, b, c) into all 2^n subsets.

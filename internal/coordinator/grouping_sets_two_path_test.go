@@ -170,6 +170,44 @@ func TestGroupingSetsMatchPostgresOnEveryArm(t *testing.T) {
 				"2|0|20;2|1|20;2|2|20;2|3|20;2||80;|0|60;|1|60;|2|60;|3|60;||240;",
 		},
 		{
+			// A DUPLICATED term. `ROLLUP (g, g)` is the sets `(g,g)`, `(g)` and
+			// `()`; the first two group identically, and PostgreSQL emits BOTH,
+			// so every value appears twice beside the grand total. Asserted on
+			// the whole ordered result because the row COUNT is what a
+			// collapsed pair loses and the KEY is what a mis-indexed set loses
+			// — this shape used to answer seven rows with an all-NULL key,
+			// which has the right count and no right value in it.
+			name: "rollup/a-duplicated-term",
+			sql: "SELECT g AS k, COUNT(*) AS n FROM collslot " +
+				"GROUP BY ROLLUP (g, g) ORDER BY k, n",
+			cols: []string{"k", "n"},
+			want: "7 rows: 0|80;0|80;1|80;1|80;2|80;2|80;|240;",
+		},
+		{
+			name: "cube/a-duplicated-term",
+			sql: "SELECT g AS k, g AS j, COUNT(*) AS n FROM collslot " +
+				"GROUP BY CUBE (g, g) ORDER BY k, j, n",
+			cols: []string{"k", "j", "n"},
+			want: "10 rows: 0|0|80;0|0|80;0|0|80;1|1|80;1|1|80;1|1|80;2|2|80;2|2|80;2|2|80;||240;",
+		},
+		{
+			name: "rollup/a-duplicated-COMPUTED-term",
+			sql: "SELECT g + 1 AS k, COUNT(*) AS n FROM collslot " +
+				"GROUP BY ROLLUP (g + 1, g + 1) ORDER BY k, n",
+			cols: []string{"k", "n"},
+			want: "7 rows: 1|80;1|80;2|80;2|80;3|80;3|80;|240;",
+		},
+		{
+			// A repeat ACROSS two sets rather than inside one, which is the
+			// GROUPING SETS spelling of the same question.
+			name: "grouping-sets/a-term-repeated-inside-one-set",
+			sql: "SELECT g AS k, h AS j, COUNT(*) AS n FROM collslot " +
+				"GROUP BY GROUPING SETS ((g, h), (g, g)) ORDER BY k, j, n",
+			cols: []string{"k", "j", "n"},
+			want: "15 rows: 0|0|20;0|1|20;0|2|20;0|3|20;0||80;1|0|20;1|1|20;1|2|20;1|3|20;1||80;" +
+				"2|0|20;2|1|20;2|2|20;2|3|20;2||80;",
+		},
+		{
 			name: "grouping-sets/plain-keys-explicit-empty-set",
 			sql: "SELECT g AS k, h AS j, COUNT(*) AS n FROM collslot " +
 				"GROUP BY GROUPING SETS ((g, h), (g), ()) ORDER BY k, j, n",

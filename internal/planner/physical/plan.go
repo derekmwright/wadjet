@@ -9513,7 +9513,13 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	if len(node.GroupingSets) > 0 {
 		keyIndex := make(map[string]int, len(node.GroupBy))
 		for i, c := range node.GroupBy {
-			keyIndex[strings.ToLower(strings.TrimSpace(c))] = i
+			// FIRST wins. The key list is deduped upstream, so a repeat should
+			// not arrive — but last-wins is the wrong reading if one ever does,
+			// and it is what pointed both sets of `ROLLUP (g, g)` at position 1
+			// and left position 0 grouped on nothing.
+			if _, taken := keyIndex[strings.ToLower(strings.TrimSpace(c))]; !taken {
+				keyIndex[strings.ToLower(strings.TrimSpace(c))] = i
+			}
 		}
 		for i, c := range groupByCols {
 			// The materialized spelling too, so a set written against a name
