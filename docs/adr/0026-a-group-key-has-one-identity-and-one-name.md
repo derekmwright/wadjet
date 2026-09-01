@@ -380,7 +380,16 @@ loud failure was itself an accident of a different column's projection.
     since #586. What remains is the AGGREGATE's output declaration —
     `SUM(w * 2)` over a DECIMAL window output still fails the #361 store guard
     at `final_aggregate` on both DAG arms, byte-identical to `de95b3b5`,
-    because `AggSpec` has an OutputType and no (p,s) (ADR-0024 item 2).
+    because `AggSpec` has an OutputType and no (p,s) (ADR-0024 item 2). Filed
+    as **#775**.
+  - **#774** — a WHERE on the key applied ABOVE the window admits no row at
+    all: the outer predicate is pushed below the derived table's Project and
+    `k` substituted away to `g + 1`, which above the aggregate is a NAME and
+    not arithmetic, so the filter is UNKNOWN on every row and a filter admits
+    only TRUE. §4 repairs the SELECT item and the window's own spec; the
+    pushed-down outer WHERE is a third consumer and does not go through
+    `plansql.ReplaceGroupKeyRefs`. Pinned with its four controls in
+    `R4/…/WhereOnTheKeyAboveAWindow`, all four arms, base-identical.
   - **#749** — `DECIMAL(38,10)` arithmetic keeps too few decimal places
     (`d + 1` is `201.000000013` where PostgreSQL says `201.0000000125`), on
     every arm of every tree. Inherited by the group-key family for the same

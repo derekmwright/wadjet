@@ -2538,6 +2538,57 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 		}
 
+		// A WHERE on the key, ABOVE the window (#774). Pinned: it admits no
+		// row at all where PostgreSQL answers four, on every arm and
+		// identically on de95b3b5 — the outer predicate is pushed below the
+		// derived table's Project, `k` is substituted away to `g + 1`, and
+		// above the aggregate that is the NAME of one column rather than
+		// arithmetic, so the filter is UNKNOWN on every row.
+		//
+		// Its four CONTROLS are gated rather than pinned, and they are what
+		// makes the cell exactly this one: the same filter with no window, the
+		// same query with no filter, a BARE key instead of a computed one, and
+		// the filter on the WINDOW's output instead of the key.
+		t.Run("WhereOnTheKeyAboveAWindow", func(t *testing.T) {
+			const win = `ROW_NUMBER() OVER (ORDER BY g + 1) AS rn`
+			pinned := fmt.Sprintf(`SELECT k, rn FROM (SELECT g + 1 AS k, %s `+
+				`FROM %s GROUP BY g + 1) s WHERE k > 3 ORDER BY k`, win, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, pinned)
+				if len(res.Rows) != 0 {
+					t.Errorf("the %s arm now answers %d rows for a filter on the key above a "+
+						"window; PostgreSQL answers 4 (keys 4..7). #774 is fixed — assert it "+
+						"and delete this pin\n  SQL: %s", arm.name, len(res.Rows), pinned)
+				}
+			}
+			for _, c := range []struct {
+				name, sql string
+				rows      int
+			}{
+				{"ctl/no-window", fmt.Sprintf(`SELECT k FROM (SELECT g + 1 AS k, `+
+					`COUNT(*) AS c FROM %s GROUP BY g + 1) s WHERE k > 3 ORDER BY k`, tbl), 4},
+				{"ctl/no-filter", fmt.Sprintf(`SELECT k, rn FROM (SELECT g + 1 AS k, %s `+
+					`FROM %s GROUP BY g + 1) s ORDER BY k`, win, tbl), wantKeys + 1},
+				{"ctl/bare-key", fmt.Sprintf(`SELECT k, rn FROM (SELECT g AS k, `+
+					`ROW_NUMBER() OVER (ORDER BY g) AS rn FROM %s GROUP BY g) s `+
+					`WHERE k > 3 ORDER BY k`, tbl), 3},
+				{"ctl/filter-on-the-window", fmt.Sprintf(`SELECT s.k, s.rn FROM `+
+					`(SELECT g + 1 AS k, %s FROM %s GROUP BY g + 1) s WHERE s.rn > 3 `+
+					`ORDER BY s.k`, win, tbl), 5},
+			} {
+				c := c
+				t.Run(c.name, func(t *testing.T) {
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, c.sql)
+						if len(res.Rows) != c.rows {
+							t.Errorf("%s arm returned %d rows, PostgreSQL 17 answers %d\n  SQL: %s",
+								arm.name, len(res.Rows), c.rows, c.sql)
+						}
+					}
+				})
+			}
+		})
+
 		// The window's ORDER BY is an AGGREGATE. RANK rather than ROW_NUMBER
 		// on purpose: the counts TIE — six groups share 659 or 660 — and
 		// PostgreSQL does not specify which peer a ROW_NUMBER gives which
