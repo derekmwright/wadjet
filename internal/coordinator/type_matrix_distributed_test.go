@@ -599,6 +599,16 @@ func tmdWriteTables(t *testing.T, ctx context.Context, infra tmdInfraT, rewrite 
 // to say so.
 func tmdCoordinator(t *testing.T, ctx context.Context, infra tmdInfraT, opts ...func(*Config)) *Coordinator {
 	t.Helper()
+	return tmdCoordinatorWithWorkers(t, ctx, infra, nil, opts...)
+}
+
+// tmdCoordinatorWithWorkers is tmdCoordinator with the WORKERS configurable
+// too. A gate about spill behaviour needs it: the default workers get a 64 MiB
+// cache and no memory budget, so nothing on the DAG arm ever drains, and a
+// "spilled arm" built on them compares two in-memory runs. wcfg, when non-nil,
+// adjusts each worker's Config before that worker is started.
+func tmdCoordinatorWithWorkers(t *testing.T, ctx context.Context, infra tmdInfraT, wcfg func(*worker.Config), opts ...func(*Config)) *Coordinator {
+	t.Helper()
 	store, cat, nc, js, logger := infra.store, infra.cat, infra.nc, infra.js, infra.logger
 
 	cfg := Config{
@@ -616,10 +626,14 @@ func tmdCoordinator(t *testing.T, ctx context.Context, infra tmdInfraT, opts ...
 	ids := make([]string, workers)
 	for i := range ids {
 		ids[i] = fmt.Sprintf("typematrix-worker-%d", i)
-		w := worker.New(worker.Config{
+		wc := worker.Config{
 			WorkerID: ids[i], NATSUrl: infra.clientURL,
 			MaxConcurrent: 4, CacheBytes: 64 << 20, SpillDir: t.TempDir(),
-		}, store, nc, js, logger)
+		}
+		if wcfg != nil {
+			wcfg(&wc)
+		}
+		w := worker.New(wc, store, nc, js, logger)
 		wctx, wcancel := context.WithCancel(context.Background())
 		t.Cleanup(wcancel)
 		if err := w.Start(wctx); err != nil {
