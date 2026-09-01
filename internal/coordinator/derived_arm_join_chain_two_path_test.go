@@ -262,37 +262,27 @@ func TestDerivedArmsAboveAJoinChainThreeArms(t *testing.T) {
 	// resolved back to `a` — `column "a" does not exist in the input schema`,
 	// at dispatch, on the shuffled arm.
 	//
-	// It is kept apart from the entries above because it also carries #754: on
-	// the SINGLE path, two arms publishing one alias make x's scale-2 column
-	// render at z's scale 4. The VALUES are right there and the typmod is not,
-	// so that arm is PINNED at the wrong rendering and this gate FAILS the day
-	// it agrees — which is that fix's proof, not this one's.
+	// It used to be kept apart from the entries above because it also carried
+	// #754: on the SINGLE path, two arms publishing one alias made x's scale-2
+	// column render at z's scale 4 — right values, wrong typmod, and that arm
+	// was pinned at the wrong rendering. It is the same disagreement as #706
+	// and it is closed: the VALUE came through `x.w` and the DECLARATION
+	// through the first bare `w`, which is z's column.
 	t.Run("766/two-arms-at-different-decimal-scales/projecting", func(t *testing.T) {
 		sql := "SELECT x.w AS xw FROM (SELECT id, a AS w FROM " + tbl + ") x " +
 			"JOIN (SELECT id, b AS w FROM " + tbl + ") z ON x.id = z.id " +
 			"JOIN " + tbl + " u ON x.id = u.id WHERE x.w > 1 ORDER BY x.id"
-		const want = "5 rows: 12.75;12.75;12.75;2.00;12.75;"             // PostgreSQL 17
-		const pinned = "5 rows: 12.7500;12.7500;12.7500;2.0000;12.7500;" // TODO(#754)
+		const want = "5 rows: 12.75;12.75;12.75;2.00;12.75;" // PostgreSQL 17
 		for _, arm := range arms {
 			res, err := arm.run(sql)
 			if err != nil {
 				t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
 					arm.name, err, sql)
 			}
-			got := dajDigest(res, []string{"xw"})
-			exp := want
-			if arm.name == "single" {
-				exp = pinned
+			if got := dajDigest(res, []string{"xw"}); got != want {
+				t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+					arm.name, got, want, sql)
 			}
-			if got == exp {
-				continue
-			}
-			if arm.name == "single" && got == want {
-				t.Errorf("the single arm now renders xw at its OWN scale — #754 is fixed, "+
-					"delete this pin and assert PostgreSQL's values on every arm\n  SQL: %s", sql)
-				continue
-			}
-			t.Errorf("%s arm answered\n  %s\nwant\n  %s\n  SQL: %s", arm.name, got, exp, sql)
 		}
 	})
 
@@ -1172,37 +1162,35 @@ func TestACTEsQualifiedColumnKeepsItsOwnArmThreeArms(t *testing.T) {
 		// PostgreSQL 17. cdv is c's `a * 2`; pdv is p's `b - 100`.
 		pgBoth = "9 rows: 1|25.50|-87.2500;2|25.50|-87.2499;3|25.50|-87.2501;" +
 			"4|-0.02|-100.0100;5|4.00|-90.0000;6|0.00|-100.0000;7||-99.0000;8|25.50|;9||;"
-		// The same values with cdv rendered at p's scale — TODO(#754).
-		scale4Both = "9 rows: 1|25.5000|-87.2500;2|25.5000|-87.2499;3|25.5000|-87.2501;" +
-			"4|-0.0200|-100.0100;5|4.0000|-90.0000;6|0.0000|-100.0000;7||-99.0000;8|25.5000|;9||;"
 	)
+	// Every entry used to carry a `singlePinned` rendering — the same digits
+	// at the OTHER arm's DECIMAL scale, which was #754 on the single-process
+	// path. It is closed: the VALUE was resolved through `c.dv` and the
+	// DECLARATION through the first bare `dv`, so one output was described by
+	// two arms (#706's mechanism, reached through a derived alias).
 	for _, tc := range []struct {
 		name, sql string
 		cols      []string
 		want      string // PostgreSQL 17, whole result
-		// singlePinned, when non-empty, is what the single-process arm
-		// answers instead: right digits at #754's scale. It FAILS the day
-		// that arm agrees with PostgreSQL, which is how the pin gets deleted.
-		singlePinned string
 	}{
 		{
 			name: "cte-last/4-join",
 			sql: cteC + "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
 				" JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id " +
 				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
-			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth,
 		},
 		{
 			name: "cte-last/3-join",
 			sql: cteC + "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
 				" JOIN " + tbl + " x ON p.id = x.id JOIN c ON c.id = p.id ORDER BY x.id",
-			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth,
 		},
 		{
 			name: "cte-last/2-join",
 			sql: cteC + "SELECT p.id AS xid, c.dv AS cdv, p.dv AS pdv FROM " + armP +
 				" JOIN c ON c.id = p.id ORDER BY p.id",
-			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth,
 		},
 		{
 			// c as a DERIVED table: its alias IS stamped on the scan, so this
@@ -1213,7 +1201,7 @@ func TestACTEsQualifiedColumnKeepsItsOwnArmThreeArms(t *testing.T) {
 				" JOIN " + tbl + " x ON p.id = x.id " +
 				"JOIN (SELECT id, a * 2 AS dv FROM " + tbl + ") c ON c.id = p.id " +
 				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
-			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth, singlePinned: scale4Both,
+			cols: []string{"xid", "cdv", "pdv"}, want: pgBoth,
 		},
 		{
 			// Each column projected ALONE, so a capture cannot hide behind
@@ -1233,8 +1221,6 @@ func TestACTEsQualifiedColumnKeepsItsOwnArmThreeArms(t *testing.T) {
 				"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id",
 			cols: []string{"xid", "cdv"},
 			want: "9 rows: 1|25.50;2|25.50;3|25.50;4|-0.02;5|4.00;6|0.00;7|;8|25.50;9|;",
-			singlePinned: "9 rows: 1|25.5000;2|25.5000;3|25.5000;4|-0.0200;5|4.0000;" +
-				"6|0.0000;7|;8|25.5000;9|;",
 		},
 		{
 			// A FILTER on the captured column: a wrong binding changes the
@@ -1246,8 +1232,6 @@ func TestACTEsQualifiedColumnKeepsItsOwnArmThreeArms(t *testing.T) {
 			cols: []string{"xid", "cdv", "pdv"},
 			want: "5 rows: 1|25.50|-87.2500;2|25.50|-87.2499;3|25.50|-87.2501;" +
 				"5|4.00|-90.0000;8|25.50|;",
-			singlePinned: "5 rows: 1|25.5000|-87.2500;2|25.5000|-87.2499;3|25.5000|-87.2501;" +
-				"5|4.0000|-90.0000;8|25.5000|;",
 		},
 		{
 			// NO collision: p publishes `pv`. Right values at the right scale
@@ -1269,49 +1253,27 @@ func TestACTEsQualifiedColumnKeepsItsOwnArmThreeArms(t *testing.T) {
 					t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
 						arm.name, err, tc.sql)
 				}
-				got := dajDigest(res, tc.cols)
-				exp := tc.want
-				if arm.name == "single" && tc.singlePinned != "" {
-					exp = tc.singlePinned
+				if got := dajDigest(res, tc.cols); got != tc.want {
+					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n — a CTE's "+
+						"qualified column bound a SIBLING arm's bare one\n  SQL: %s",
+						arm.name, got, tc.want, tc.sql)
 				}
-				if got == exp {
-					continue
-				}
-				if arm.name == "single" && tc.singlePinned != "" && got == tc.want {
-					t.Errorf("the single arm now renders the CTE's column at its OWN scale — "+
-						"#754 is fixed, delete this entry's singlePinned and assert "+
-						"PostgreSQL's values on every arm\n  SQL: %s", tc.sql)
-					continue
-				}
-				t.Errorf("%s arm answered\n  %s\nwant\n  %s\n — a CTE's qualified column bound "+
-					"a SIBLING arm's bare one\n  SQL: %s", arm.name, got, exp, tc.sql)
 			}
 		})
 	}
 
-	// The CTE FIRST in the FROM list. Its values are right on both DAG arms;
-	// the single-process path refuses the query outright, because the two
-	// arms' one alias makes it store p's scale-4 value into c's scale-2
-	// declaration. That is ADR-0024 item 4 doing its job over #754's typing,
-	// and it is pinned so the refusal cannot quietly become a wrong number.
+	// The CTE FIRST in the FROM list. The single-process path used to REFUSE
+	// this outright — the two arms' one alias made it store p's scale-4 value
+	// into c's scale-2 declaration, and ADR-0024 item 4 reported rather than
+	// rounding. It was the loud face of #754 and it is closed with the silent
+	// one: a qualified reference is declared by its own side, so neither arm
+	// describes the other's column and every arm answers PostgreSQL's values.
 	t.Run("cte-first", func(t *testing.T) {
 		sql := cteC + "SELECT x.id AS xid, c.dv AS cdv, p.dv AS pdv FROM c JOIN " + armP +
 			" ON c.id = p.id JOIN " + tbl + " x ON p.id = x.id " +
 			"JOIN " + tbl + " y ON c.id = y.id ORDER BY x.id"
 		for _, arm := range arms {
 			res, err := arm.run(sql)
-			if arm.name == "single" {
-				if err == nil {
-					t.Errorf("the single arm now ANSWERS the CTE-first spelling (%s) — #754 is "+
-						"fixed, delete this pin and assert PostgreSQL's values on every arm"+
-						"\n  SQL: %s", dajDigest(res, []string{"xid", "cdv", "pdv"}), sql)
-					continue
-				}
-				if !strings.Contains(err.Error(), "numeric field overflow") {
-					t.Errorf("the single arm refused for a NEW reason: %v\n  SQL: %s", err, sql)
-				}
-				continue
-			}
 			if err != nil {
 				t.Fatalf("%s arm refused a query PostgreSQL 17 answers: %v\n  SQL: %s",
 					arm.name, err, sql)
