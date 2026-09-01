@@ -2538,6 +2538,52 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 		}
 
+		// The window's ORDER BY is an AGGREGATE. RANK rather than ROW_NUMBER
+		// on purpose: the counts TIE — six groups share 659 or 660 — and
+		// PostgreSQL does not specify which peer a ROW_NUMBER gives which
+		// number to, so a ROW_NUMBER entry here would assert an answer the
+		// server is free to change (ADR-0013's legal nondeterminism). RANK is
+		// tie-immune and still sees the whole defect: with the key naming
+		// nothing the ordering was NULL on every row and every rank was 1.
+		t.Run("WindowOrderedByAnAggregate", func(t *testing.T) {
+			// PostgreSQL's rank: one more than the number of groups whose
+			// count is strictly smaller, computed from the fixture.
+			counts := make([]int64, 0, len(wantN)+1)
+			for _, n := range wantN {
+				counts = append(counts, n)
+			}
+			counts = append(counts, nullRows)
+			rankOf := func(n int64) int64 {
+				var less int64
+				for _, c := range counts {
+					if c < n {
+						less++
+					}
+				}
+				return less + 1
+			}
+			sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS n, `+
+				`RANK() OVER (ORDER BY COUNT(*)) AS rk FROM %s GROUP BY g + 1 ORDER BY k`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != wantKeys+1 {
+					t.Errorf("%s arm returned %d rows, want %d\n  SQL: %s",
+						arm.name, len(res.Rows), wantKeys+1, sql)
+					continue
+				}
+				for i, r := range res.Rows {
+					n, _ := numAsInt(r["n"])
+					got, ok := numAsInt(r["rk"])
+					if want := rankOf(n); !ok || got != want {
+						t.Errorf("%s arm row %d: rk = %v for a group of %d, PostgreSQL 17 "+
+							"answers %d — the window ordered by a name the aggregate does "+
+							"not publish\n  SQL: %s", arm.name, i, r["rk"], n, want, sql)
+						break
+					}
+				}
+			}
+		})
+
 		// The window's ARGUMENT is an AGGREGATE, which the aggregate below
 		// publishes under its own output name. It used to reach the operator
 		// as the text `count(*)`, which names nothing there.
