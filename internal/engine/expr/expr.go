@@ -5682,6 +5682,20 @@ type SubqueryRunner func(sql string) ([]map[string]any, error)
 type ScalarSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
+	// Decl is the DECLARED type of the subquery's single output column, and
+	// DeclKnown says whether anything resolved it (#696). It carries no value
+	// and changes no evaluation: it exists so the boxed comparison can read
+	// this operand as the number it IS.
+	//
+	// A DECIMAL boxes as its rendered TEXT, so without a declaration the pair
+	// `a > (SELECT AVG(a) FROM decpair)` had a proven DECIMAL on one side and
+	// an unclassifiable box on the other, fell through to compare()'s
+	// LEXICOGRAPHIC rule, and answered 0 rows for PostgreSQL's 4 because
+	// "12.75" sorts below "7.570000". DecPrecision/DecScale go with a DECIMAL
+	// Decl for the same reason every other declaration carries them.
+	Decl                   batch.TypeID
+	DeclKnown              bool
+	DecPrecision, DecScale int
 	// resolved publishes val: stored last under resolveMu, and the only
 	// thing an evaluating goroutine reads before using val.
 	resolved  atomic.Bool

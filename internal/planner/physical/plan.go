@@ -1231,6 +1231,70 @@ func (p *Planner) forSubquery() *Planner {
 // physical pipeline for a SQL subquery, merging the enclosing WITH clause's
 // CTEs so the subquery can reference them. Shared by executeSubquery (boxed
 // results) and materializeCTEColumnar (columnar collection).
+// subqueryDeclOption is the expr.CompileOption that lets a compiled scalar
+// subquery carry its OUTPUT DECLARATION, so a comparison against it is made at
+// the type the subquery answers rather than by the bytes of the box (#696).
+//
+// It plans the subquery's SQL — parse, logical build, annotate — and reads
+// declaredOutputSchema, the same walk the top-level statement's own output
+// schema comes from. No execution: the question is the TYPE, and the value is
+// resolved once at evaluation as it always was. A subquery that does not
+// resolve to exactly one column answers ok=false and the comparison keeps the
+// boxed rules it had.
+//
+// The cost is one logical build per compiled scalar subquery, at plan time.
+func (p *Planner) subqueryDeclOption() expr.CompileOption {
+	return expr.WithSubqueryDeclTypes(func(sql string) (parquet.TypeID, int, int, bool) {
+		cols, ok := p.subqueryOutputColumn(sql)
+		if !ok {
+			return 0, 0, 0, false
+		}
+		return cols.Type, cols.Precision, cols.Scale, true
+	})
+}
+
+// subqueryOutputColumn resolves a scalar subquery's single declared output
+// column. It recovers from a panic for the reason every plan-time helper on
+// this path does: an unplannable subquery must cost the comparison its
+// declaration, never the query.
+func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			col, ok = parquet.Column{}, false
+		}
+	}()
+	ctx := p.planCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pq, err := plansql.Parse(sql)
+	if err != nil {
+		return parquet.Column{}, false
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		return parquet.Column{}, false
+	}
+	var plan *logical.Node
+	if len(p.ctes) > 0 {
+		plan, err = logical.BuildFromSelectWithCTEs(info, append(append([]plansql.CTEDef(nil), p.ctes...), info.CTEs...))
+	} else {
+		plan, err = logical.BuildFromSelect(info)
+	}
+	if err != nil || plan == nil {
+		return parquet.Column{}, false
+	}
+	p.AnnotateScanColumns(ctx, plan)
+	schema := declaredOutputSchema(plan)
+	if len(schema) != 1 {
+		// Not a scalar subquery's shape. Declining is the honest answer: a
+		// wrong declaration here would pick a comparison RULE, which is worse
+		// than picking none (ADR-0012 item 8).
+		return parquet.Column{}, false
+	}
+	return schema[0], true
+}
+
 func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// Parse using our SQL parser
 	pq, err := plansql.Parse(sql)
@@ -8824,9 +8888,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns())
+					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption())
 				} else {
-					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables)
+					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption())
 				}
 			} else {
 				// With the child's DECLARED column types in hand, so a pair
@@ -11983,12 +12047,12 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		var err error
 		if len(outerTables) > 0 {
 			if len(outerCols) > 0 {
-				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns())
+				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption())
 			} else {
-				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables)
+				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption())
 			}
 		} else {
-			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
+			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption())
 		}
 		if expr.IsCompileRefusal(err) {
 			return nil, err

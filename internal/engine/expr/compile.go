@@ -33,6 +33,48 @@ type compileContext struct {
 	// answers exactly as this layer did before: assume a column might be a
 	// DECIMAL and resolve the mode against the first batch.
 	colTypes map[string]batch.TypeID
+	// subqueryDecl answers the DECLARED type of a scalar subquery's single
+	// output column, so `WHERE a > (SELECT AVG(a) FROM t)` compares as the
+	// numbers the two sides ARE rather than as the strings they box to.
+	//
+	// A DECIMAL boxes as its rendered TEXT, and an operand this layer cannot
+	// classify is boxUnknown — so the pair fell through to compare()'s
+	// LEXICOGRAPHIC comparison and `"12.75" > "7.570000"` was FALSE. Over
+	// decpair that made `a > (SELECT AVG(a))` select nothing where PostgreSQL
+	// selects four rows (#696). The declaration is what fixes it: reading the
+	// subquery's VALUE to decide the rule would be the same value-re-read-as-
+	// type defect #727 was.
+	//
+	// nil means "not known", which is every caller that cannot plan a
+	// subquery — the compile then classifies as it always did.
+	subqueryDecl SubqueryDeclFunc
+}
+
+// SubqueryDeclFunc resolves a scalar subquery's SQL to the declared type of
+// its single output column. ok=false for a subquery whose output type the
+// caller cannot resolve; the comparison then falls back to the boxed rules it
+// had before.
+type SubqueryDeclFunc func(sql string) (typ batch.TypeID, precision, scale int, ok bool)
+
+// A CompileOption is an optional input to the Compile* entry points. It is
+// variadic so that adding one costs no caller a signature change — the
+// entry-point set is already six wide and each new question would otherwise
+// double it.
+type CompileOption func(*compileContext)
+
+// WithSubqueryDeclTypes supplies the resolver described on
+// compileContext.subqueryDecl (#696).
+func WithSubqueryDeclTypes(f SubqueryDeclFunc) CompileOption {
+	return func(c *compileContext) { c.subqueryDecl = f }
+}
+
+func applyCompileOptions(c *compileContext, opts []CompileOption) *compileContext {
+	for _, o := range opts {
+		if o != nil {
+			o(c)
+		}
+	}
+	return c
 }
 
 // Compile converts our AST Node into an Expr tree.
@@ -42,15 +84,15 @@ func Compile(node plansql.Node) (Expr, error) {
 
 // CompileWithRunner converts our AST Node into an Expr tree,
 // with support for subquery expressions (scalar subqueries, IN subquery, EXISTS).
-func CompileWithRunner(node plansql.Node, runner SubqueryRunner) (Expr, error) {
-	return compileWithCtx(node, &compileContext{runner: runner})
+func CompileWithRunner(node plansql.Node, runner SubqueryRunner, opts ...CompileOption) (Expr, error) {
+	return compileWithCtx(node, applyCompileOptions(&compileContext{runner: runner}, opts))
 }
 
 // CompileWithScope converts our AST Node into an Expr tree with full scope
 // information, enabling correlated subquery detection and per-row execution.
 // outerTables contains the table names and aliases from the outer query.
-func CompileWithScope(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool) (Expr, error) {
-	return compileWithCtx(node, &compileContext{runner: runner, outerTables: outerTables})
+func CompileWithScope(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, opts ...CompileOption) (Expr, error) {
+	return compileWithCtx(node, applyCompileOptions(&compileContext{runner: runner, outerTables: outerTables}, opts))
 }
 
 // CompileWithFullScope is like CompileWithScope but also accepts a column-to-table
@@ -65,13 +107,13 @@ func CompileWithFullScope(node plansql.Node, runner SubqueryRunner, outerTables 
 // that merely also exists in the outer query does not turn an uncorrelated
 // subquery into a per-row correlated one (issue #334). A nil resolver keeps
 // the weaker table-identifier heuristic.
-func CompileWithScopeResolver(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string, innerCols plansql.TableColumns) (Expr, error) {
-	return compileWithCtx(node, &compileContext{
+func CompileWithScopeResolver(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string, innerCols plansql.TableColumns, opts ...CompileOption) (Expr, error) {
+	return compileWithCtx(node, applyCompileOptions(&compileContext{
 		runner:      runner,
 		outerTables: outerTables,
 		outerCols:   outerCols,
 		innerCols:   innerCols,
-	})
+	}, opts))
 }
 
 // CompileWithBudget is CompileWithScopeResolver plus a memory budget that an
@@ -438,7 +480,18 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				}
 			}
 		}
-		return &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner}, nil
+		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner}
+		// The subquery's OUTPUT declaration, so the boxed comparison can read
+		// this operand as the number it is rather than as the text it boxes
+		// to (#696). Resolved once, at compile time, from the plan — never
+		// from the value, which would be #727's defect pointed at a scalar.
+		if ctx.subqueryDecl != nil {
+			if t, p, s, ok := ctx.subqueryDecl(n.SQL); ok {
+				sq.Decl, sq.DeclKnown = t, true
+				sq.DecPrecision, sq.DecScale = p, s
+			}
+		}
+		return sq, nil
 
 	case *plansql.ExistsNode:
 		if ctx.runner == nil {

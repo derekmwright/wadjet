@@ -319,8 +319,58 @@ func joinFoldKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 // no batch yet says nothing about the next one, so the caller must ask again.
 // Every settled answer is a pure function of a declared type, which does not
 // change across the batches of one query.
+// declaredBoxKind maps a DECLARED column type to the kind that says how its
+// box must be read. ok=false for every type whose box carries its own order
+// already (see classifyOperand's fallthrough).
+//
+// It is shared by the column arm and the scalar-subquery arm so a value of one
+// type cannot be classified two ways depending on where it came from — which
+// is the whole premise of ADR-0012 item 8.
+func declaredBoxKind(t batch.TypeID) (boxKind, bool) {
+	switch t {
+	case batch.TypeDecimal:
+		return boxDecimal, true
+	case batch.TypeInt32:
+		return boxInt32, true
+	case batch.TypeInt64:
+		return boxInt64, true
+	case batch.TypeFloat32:
+		return boxFloat32, true
+	case batch.TypeFloat64:
+		return boxFloat64, true
+	case batch.TypeString:
+		return boxText, true
+	case batch.TypeCIDR:
+		return boxCidr, true
+	case batch.TypeIPv6:
+		return boxIPv6, true
+	case batch.TypeBool:
+		return boxBool, true
+	}
+	return boxUnknown, false
+}
+
 func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 	switch v := e.(type) {
+	case *ScalarSubquery:
+		// The subquery's DECLARED output type, resolved at compile time from
+		// the plan (#696). Without it this operand was boxUnknown, so a
+		// DECIMAL column on the other side compared as its RENDERED TEXT:
+		// `a > (SELECT AVG(a) FROM decpair)` selected nothing because
+		// "12.75" sorts below "7.570000" as bytes, where PostgreSQL selects
+		// four rows. Equality survived only when the two scales happened to
+		// render identically, which is why `= MAX` was right and every
+		// ordering was not.
+		//
+		// A subquery nothing could type stays boxUnknown and SETTLED: the
+		// answer does not depend on the batch, so re-asking on the next one
+		// would only repeat it.
+		if v.DeclKnown {
+			if k, ok := declaredBoxKind(v.Decl); ok {
+				return k, true
+			}
+		}
+		return boxUnknown, true
 	case *ColRef:
 		v.resolve(b)
 		if v.idx < 0 || v.idx >= len(b.Columns) {
@@ -337,26 +387,10 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 			// and every field path fell through to compare()'s guess.
 			declared = v.fieldTyp
 		}
-		switch declared {
-		case batch.TypeDecimal:
-			return boxDecimal, true
-		case batch.TypeInt32:
-			return boxInt32, true
-		case batch.TypeInt64:
-			return boxInt64, true
-		case batch.TypeFloat32:
-			return boxFloat32, true
-		case batch.TypeFloat64:
-			return boxFloat64, true
-		case batch.TypeString:
-			return boxText, true
-		case batch.TypeCIDR:
-			return boxCidr, true
-		case batch.TypeIPv6:
-			return boxIPv6, true
-		case batch.TypeBool:
-			return boxBool, true
-		default:
+		if k, ok := declaredBoxKind(declared); ok {
+			return k, true
+		}
+		{
 			// Every other type either boxes as a number of its own (PORT,
 			// DURATION, and IPv4/MAC, whose box is the raw encoded int64 that
 			// already sorts as the address does), as a formatted string whose
