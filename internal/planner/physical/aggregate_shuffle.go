@@ -45,14 +45,14 @@ type AggregateShuffleCandidate struct {
 type AggregateShuffleRejectReason int
 
 const (
-	AggShuffleRejectNone               AggregateShuffleRejectReason = iota
-	AggShuffleRejectNoJoin                                          // no hash_join/broadcast_join stages at all
-	AggShuffleRejectBuildNotAggregate                               // join's right dep chain doesn't terminate in an aggregate
-	AggShuffleRejectAggNotScanRooted                                // aggregate isn't rooted in a single base scan
-	AggShuffleRejectBelowThreshold                                  // input scan bytes ≤ threshold
-	AggShuffleRejectScanHasFilters                                  // input scan has pushed predicates (Phase 2 scope)
-	AggShuffleRejectKeysNotCovered                                  // aggregate GROUP BY keys don't cover join build keys
-	AggShuffleRejectKeyNameIsNotItsSpelling                         // a key's PUBLISHED name is not the spelling the scan can evaluate
+	AggShuffleRejectNone                    AggregateShuffleRejectReason = iota
+	AggShuffleRejectNoJoin                                               // no hash_join/broadcast_join stages at all
+	AggShuffleRejectBuildNotAggregate                                    // join's right dep chain doesn't terminate in an aggregate
+	AggShuffleRejectAggNotScanRooted                                     // aggregate isn't rooted in a single base scan
+	AggShuffleRejectBelowThreshold                                       // input scan bytes ≤ threshold
+	AggShuffleRejectScanHasFilters                                       // input scan has pushed predicates (Phase 2 scope)
+	AggShuffleRejectKeysNotCovered                                       // aggregate GROUP BY keys don't cover join build keys
+	AggShuffleRejectKeyNameIsNotItsSpelling                              // a key's PUBLISHED name is not the spelling the scan can evaluate
 )
 
 // AggregateShuffleDiag records the best observed rejection for telemetry.
@@ -159,7 +159,7 @@ func PickAggregateShuffleCandidateDiag(stages []Stage, thresholdBytes int64) Agg
 		// `a * 3`: the synthesized SQL would name a column the table does not
 		// have. Decline rather than synthesize it — this is an optimization,
 		// and the query runs the ordinary way.
-		if !keyNamesAreTheirSpelling(aggStage) {
+		if !keyNamesAreTheirSpelling(byID, aggStage) {
 			setBest(AggShuffleRejectKeyNameIsNotItsSpelling, AggregateShuffleDiag{
 				JoinStageID:       j.ID,
 				InputScanAlias:    scan.ScanAlias,
@@ -208,23 +208,67 @@ func (r AggregateShuffleRejectReason) String() string {
 	}
 }
 
-// keyNamesAreTheirSpelling reports whether every GROUP BY key of this stage is
-// published under the same text the fragment resolves it by — the condition
-// under which one list can serve as both a projection and a GROUP BY clause.
-func keyNamesAreTheirSpelling(s Stage) bool {
-	if len(s.GroupByResolve) == 0 {
-		return true
-	}
-	keys := stageGroupKeyList(&s)
-	if len(keys) != len(s.GroupByResolve) {
+// keyNamesAreTheirSpelling reports whether every GROUP BY key of this
+// aggregate is published under the same text the fragment resolves it by — the
+// condition under which one list can serve as both a projection and a GROUP BY
+// clause over the base table.
+//
+// It asks the stage that COMPUTES the keys, which is never the one
+// `followToAggregate` hands it: that walk stops at the first aggregate-typed
+// stage carrying `GroupByCols`, and on the canonical chain
+// (scan-aggregate → merge → shuffle → join) that is the MERGE — which by
+// design carries no resolution list at all. Asking the merge answered "the two
+// names are the same" for every plan, so the guard could not fire on the chain
+// it guards (#794 round 2, B3).
+//
+// A chain with no key-computing stage under it is one this pass does not
+// model, and the answer there is NO: the pre-compute SQL below writes the key
+// list twice, once as a select item and once as a GROUP BY term over the base
+// table, and a list it cannot vouch for is not one to build SQL from.
+func keyNamesAreTheirSpelling(byID map[string]Stage, agg Stage) bool {
+	c, ok := followToKeyComputingStage(byID, agg)
+	if !ok {
 		return false
 	}
-	for i, r := range s.GroupByResolve {
+	keys := stageGroupKeyList(&c)
+	if len(keys) == 0 || len(keys) != len(c.GroupByResolve) {
+		return false
+	}
+	for i, r := range c.GroupByResolve {
 		if r.Expr != keys[i] {
 			return false
 		}
 	}
 	return true
+}
+
+// followToKeyComputingStage walks down from a merge-mode aggregate to the
+// fragment that RESOLVES the group keys against raw rows — the fused
+// scan-aggregate or the partial. Merges and exchanges are transparent;
+// anything else ends the walk.
+func followToKeyComputingStage(byID map[string]Stage, agg Stage) (Stage, bool) {
+	seen := make(map[string]bool, 8)
+	current := agg.ID
+	for current != "" && !seen[current] {
+		seen[current] = true
+		s, ok := byID[current]
+		if !ok {
+			return Stage{}, false
+		}
+		if stageComputesGroupKeys(&s) && len(s.GroupByResolve) > 0 {
+			return s, true
+		}
+		switch s.Type {
+		case StageExchangeRepartition, StageFinalAggregate, StageMergeAggregate:
+			if len(s.Dependencies) == 0 {
+				return Stage{}, false
+			}
+			current = s.Dependencies[0]
+		default:
+			return Stage{}, false
+		}
+	}
+	return Stage{}, false
 }
 
 // followToAggregate walks the dependency chain from startID through transparent
@@ -234,7 +278,9 @@ func keyNamesAreTheirSpelling(s Stage) bool {
 // doesn't resolve to a single aggregate producer.
 //
 // For Q17 the chain is:
-//   hash_join.RightDep → shuffle → final_aggregate (defines GROUP BY) → merge_aggregates → scan
+//
+//	hash_join.RightDep → shuffle → final_aggregate (defines GROUP BY) → merge_aggregates → scan
+//
 // We follow until we hit the stage that carries GroupByCols; that's the
 // aggregate's identity for detection purposes.
 func followToAggregate(byID map[string]Stage, startID string) (Stage, bool) {
