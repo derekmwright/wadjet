@@ -470,13 +470,25 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				parsed, _ := plansql.Parse(n.SQL)
 				info, _ := plansql.ExtractSelect(parsed)
 				if info != nil {
-					return &CorrelatedScalarSubquery{
+					cs := &CorrelatedScalarSubquery{
 						Runner:          ctx.runner,
 						OuterRefs:       refs,
 						OuterTables:     ctx.outerTables,
 						ParsedInfo:      info,
 						UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
-					}, nil
+					}
+					// The same declaration the uncorrelated form carries
+					// (#696, #666). The resolver plans the subquery's SQL,
+					// which for a correlated one still names its outer
+					// references — a resolver that cannot plan it answers
+					// not-known and the comparison keeps the boxed rules.
+					if ctx.subqueryDecl != nil {
+						if dt, dp, ds, ok := ctx.subqueryDecl(n.SQL); ok {
+							cs.Decl, cs.DeclKnown = dt, true
+							cs.DecPrecision, cs.DecScale = dp, ds
+						}
+					}
+					return cs, nil
 				}
 			}
 		}

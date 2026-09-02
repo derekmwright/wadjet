@@ -9167,7 +9167,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				continue
 			}
 			synName := SlotName(SlotAggInput, i)
-			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner)
+			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner, p.subqueryDeclOption())
 			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
 			}
@@ -9396,7 +9396,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				if _, isLit := gbExpr.(*plansql.Lit); !isLit {
 					continue
 				}
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption())
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}
@@ -9439,7 +9439,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// GroupByOutNames below, which is what keeps the two
 				// engines' output schemas equal (#720, ADR-0026).
 				synName := keyOuts[i].Slot
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption())
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}

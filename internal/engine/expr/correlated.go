@@ -17,6 +17,19 @@ type CorrelatedScalarSubquery struct {
 	OuterTables     map[string]bool    // outer table aliases
 	ParsedInfo      *plansql.SelectInfo
 	UnqualOuterCols map[string]string // unqualified column → table mapping for outer refs
+	// Decl is the DECLARED type of the subquery's single output column, and
+	// DeclKnown says whether anything resolved it — ScalarSubquery's fields,
+	// for the same reason and read by the same classifyOperand arm (#696,
+	// #666). A correlated subquery re-runs per row and its declared TYPE does
+	// not change with the row, so it is resolved once at compile time exactly
+	// as the uncorrelated one is.
+	//
+	// Without it `d.a > (SELECT AVG(x.a) FROM decpair x WHERE x.id <> d.id)`
+	// compared a DECIMAL column against a boxUnknown operand — that is, by the
+	// BYTES of its rendered text — and answered 0 rows for PostgreSQL's 4.
+	Decl                   batch.TypeID
+	DeclKnown              bool
+	DecPrecision, DecScale int
 }
 
 func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {

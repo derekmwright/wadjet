@@ -371,6 +371,15 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 			}
 		}
 		return boxUnknown, true
+	case *CorrelatedScalarSubquery:
+		// Its declared TYPE does not change with the row it re-runs for, so
+		// it is classified exactly as the uncorrelated form is (#666).
+		if v.DeclKnown {
+			if k, ok := declaredBoxKind(v.Decl); ok {
+				return k, true
+			}
+		}
+		return boxUnknown, true
 	case *ColRef:
 		v.resolve(b)
 		if v.idx < 0 || v.idx >= len(b.Columns) {
