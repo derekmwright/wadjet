@@ -198,7 +198,7 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#703", "distinct_min_alone_is_ungrouped",
 			`SELECT MIN(DISTINCT a) AS md FROM decpair`, []string{"md=-0.01"}},
 		{"#703", "distinct_sum_over_integers_alone",
-			`SELECT SUM(DISTINCT c_i32) AS s FROM typemx`, []string{"s=float:3.61986e+07"}},
+			`SELECT SUM(DISTINCT c_i32) AS s FROM typemx`, []string{"s=int64:36198630"}},
 		// The DUPLICATES-ACROSS-CLONES cells. Every cell above is single-batch
 		// or duplicate-free, so none of them can reach the morsel-parallel
 		// clone merge: `Pipeline.runParallel` returns serially when the source
@@ -231,14 +231,14 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 				`FROM typemx WHERE id < 40 GROUP BY g ORDER BY k`,
 			// Sorted as TEXT by na2Run, so the NULL key leads.
 			[]string{
-				"k=NULL|s=float:225|c=int64:3",
-				"k=int32:0|s=float:231|c=int64:5",
-				"k=int32:1|s=float:333|c=int64:6",
-				"k=int32:2|s=float:351|c=int64:6",
-				"k=int32:3|s=float:255|c=int64:5",
-				"k=int32:4|s=float:312|c=int64:5",
-				"k=int32:5|s=float:249|c=int64:4",
-				"k=int32:6|s=float:300|c=int64:5",
+				"k=NULL|s=int64:225|c=int64:3",
+				"k=int32:0|s=int64:231|c=int64:5",
+				"k=int32:1|s=int64:333|c=int64:6",
+				"k=int32:2|s=int64:351|c=int64:6",
+				"k=int32:3|s=int64:255|c=int64:5",
+				"k=int32:4|s=int64:312|c=int64:5",
+				"k=int32:5|s=int64:249|c=int64:4",
+				"k=int32:6|s=int64:300|c=int64:5",
 			}},
 		{"#703", "distinct_over_a_float_column",
 			`SELECT SUM(DISTINCT f) AS sf, AVG(DISTINCT f) AS af FROM decpair`,
@@ -262,13 +262,38 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		// fixture is what makes the rules distinguishable — every value is
 		// past 2^53, so a float64 accumulator drops integer digits, and the
 		// total is EXACTLY 2^64, so an int64 one wraps to zero.
+		{"#784", "sum_of_int32_is_bigint",
+			`SELECT SUM(c_i32) AS s FROM typemx`, []string{"s=int64:36198630"}},
+		{"#784", "sum_of_int64_is_numeric",
+			`SELECT SUM(c_i64) AS s FROM typemx`, []string{"s=12093426280170"}},
 		// AVG's SCALE is batch.AvgScale(0) = 4 where PostgreSQL's own
 		// division scale renders 16 digits here and 8 for the wider column —
 		// magnitude-dependent, which ADR-0024 declined to adopt. Both are
 		// exact to the digits they keep and agree to min(scale): ADR-0012
 		// item 9's class.
+		{"#784", "avg_of_int32_is_numeric",
+			`SELECT AVG(c_i32) AS a FROM typemx`, []string{"a=7497.6450"}},
+		{"#784", "avg_of_int64_is_numeric",
+			`SELECT AVG(c_i64) AS a FROM typemx`, []string{"a=2499158148.4129"}},
+		{"#784", "sum_past_int64_is_exact",
+			`SELECT SUM(b) AS s, COUNT(b) AS c FROM bigsum`,
+			[]string{"s=18446744073709551616|c=int64:7"}},
+		{"#784", "avg_past_2_53_is_exact",
+			`SELECT AVG(b) AS a FROM bigsum`, []string{"a=2635249153387078802.2857"}},
+		{"#784", "sum_and_avg_grouped_past_int64",
+			`SELECT g AS k, SUM(b) AS s, AVG(b) AS a, COUNT(b) AS c FROM bigsum GROUP BY g ORDER BY k`,
+			[]string{
+				"k=int32:0|s=9232379236109516801|a=3077459745369838933.6667|c=int64:3",
+				"k=int32:1|s=9214364837600034815|a=2303591209400008703.7500|c=int64:4",
+			}},
 		// The rules #784 does NOT change, on the same fixture: SUM over the
 		// int32 class is bigint, and MIN/MAX keep the input's own type.
+		{"#784", "sum_of_int32_beside_min_max",
+			`SELECT SUM(g) AS sg, MIN(b) AS mn, MAX(b) AS mx FROM bigsum`,
+			[]string{"sg=int64:4|mn=int64:-9007199254740993|mx=int64:9223372036854775807"}},
+		{"#784", "sum_over_no_non_null_rows_is_null",
+			`SELECT SUM(b) AS s, AVG(b) AS a FROM bigsum WHERE b IS NULL`,
+			[]string{"s=NULL|a=NULL"}},
 
 		// ------------------------------------------------------------------
 		// #696 — a scalar subquery's value in an outer comparison, and it was
@@ -278,6 +303,18 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		// stage DAG substituted the value's UNSCALED Int128 (7570000 for
 		// 7.570000), so the threshold was 10^scale out. Equality survived on
 		// the first only where the two scales rendered identically.
+		{"#696", "decimal_column_gt_scalar_avg",
+			`SELECT COUNT(*) AS n FROM decpair WHERE a > (SELECT AVG(a) FROM decpair)`,
+			[]string{"n=int64:4"}},
+		{"#696", "decimal_column_gt_scalar_min",
+			`SELECT COUNT(*) AS n FROM decpair WHERE a > (SELECT MIN(a) FROM decpair)`,
+			[]string{"n=int64:6"}},
+		{"#696", "decimal_column_eq_scalar_max",
+			`SELECT COUNT(*) AS n FROM decpair WHERE a = (SELECT MAX(a) FROM decpair)`,
+			[]string{"n=int64:4"}},
+		{"#696", "decimal_column_lt_scalar_avg",
+			`SELECT COUNT(*) AS n FROM decpair WHERE a < (SELECT AVG(a) FROM decpair)`,
+			[]string{"n=int64:3"}},
 		// BETWEEN two scalar subqueries and `> (SELECT 9.56)` are NOT here,
 		// and the reason is recorded rather than left as a gap: both are
 		// PRE-EXISTING stage-DAG refusals unrelated to #696 — the worker's
@@ -285,13 +322,23 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		// SubqueryRunner") and a FROM-less scalar produces a `dual` stage with
 		// no dependencies and no ScanFiles. Both reproduce on 74705d11. The
 		// single-process arm answers 3 and 4, which is PostgreSQL's.
+		{"#696", "wider_decimal_column_gt_its_own_avg",
+			`SELECT COUNT(*) AS n FROM decpair WHERE b > (SELECT AVG(b) FROM decpair)`,
+			[]string{"n=int64:4"}},
 		// The value itself, projected. PostgreSQL renders 7.5700000000000000
 		// at its own division scale; wadjet's AVG scale is s+4, so this is the
 		// same number to the digits both keep (ADR-0012 item 9).
+		{"#696", "scalar_subquery_projected",
+			`SELECT (SELECT AVG(a) FROM decpair) AS av FROM decpair WHERE id = 1`,
+			[]string{"av=7.570000"}},
 		// The regression #784 would otherwise have introduced: SUM over an
 		// INT64 column is numeric now, so a HAVING comparing it against a
 		// scalar takes the same boxed path a DECIMAL column does. On the base
 		// commit this answered 8 for PostgreSQL's 0.
+		{"#696", "integer_sum_in_having_against_a_scalar",
+			`SELECT COUNT(*) AS n FROM (SELECT g, SUM(id) AS s FROM typemx WHERE id < 100 ` +
+				`GROUP BY g HAVING SUM(id) > (SELECT SUM(id) * 0.4 FROM typemx WHERE id < 100)) x`,
+			[]string{"n=int64:0"}},
 
 		// ------------------------------------------------------------------
 		// #704 — an integer column against a NON-INTEGRAL numeric literal.
