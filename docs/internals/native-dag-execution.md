@@ -506,8 +506,20 @@ publishes the alias is what `attachScanSelectProjections` and
 SHIPS that mirrors `joinOutputSchemaWithMapping` line for line, including the
 duplicate-name qualification that makes a join stream carry `w` and `y.w` at
 once, and a chained link's own `Columns` as that link's output filter (#795).
-A key the plan carries nowhere is refused there with the stream's column list
-in the message, and the coordinator answers it on its local pipeline.
+
+Every column in that model carries its ORIGIN ARM (the build subtree's alias,
+"" for the probe side), and every rule asks it: a key names ONE arm of the
+join, and a column of the same name on another arm is a different value. The
+DEFINITION is re-spelled into the arm's own stream spellings (`a * 3` becomes
+`z.a * 3`) before the fragment sees it, because an ordinary lookup would give
+the probe's copy whichever arm the key meant.
+
+The resolution is decided against what the arms can SUPPLY, and
+`ensureJoinCarriesEvaluatedColumns` then reads the resolutions and widens the
+join's OutputFilter and its input manifests to carry them —
+`groupKeyResolutionRefs`. A key whose ARM carries the value nowhere is refused
+with the arm named and the stream's column list in the message, and the
+coordinator answers it on its local pipeline.
 
 ### A base table reaches the worker THREE ways, and all three must declare its types
 

@@ -155,6 +155,7 @@ only safe if each of them reads the name it means. The census, classified:
 | **AUTHOR** — writes both names | `walkStages`' aggregate arm and `stageGroupKeyNames`, `set_op_stages.emitSetOpCountingStage`, `fuse_stage_chains` (carries the pair onto the absorbing join), `agg_over_exchange.rewireAggOverRawExchange` (takes over the dropped scan's list when a merge becomes a raw aggregate), `resolveStageGroupKeys` (settles a derived alias) | both |
 | **RESOLUTION** — the fragment that COMPUTES the key | `worker.buildFragmentHashAggregate` and `worker.buildAggInputProjection` via `fragmentGroupKeyPlan`; the three dispatch sites that build a non-merge `OpHashAggregate` (`buildAggregateFragment`, `buildScanAggregateFragment`, the chain-terminal partial); `pruneFusedAggOutputCols`' read-set argument; `agg_over_exchange`'s `aggInputsCovered` | RESOLUTION |
 | **PUBLISHED** — everything above the aggregate | `aggregateOutputName` (sort keys), `agg_output_projection`'s `aggregateStageOutputs`/`aggregateStageDecls`, `agg_rename_retarget`, `stageEmittedColumns` and `stageStreamColumns`, `distribution.go`'s `RequiredChildDistribution`/`OutputDistribution`, `exchange_partial_agg`'s payload split and `Exchange.PartialAggGroupBy`, `dispatchFinalAggregateFanout`'s `-interm` stage, `aggregate_shuffle`'s key-coverage test, `shared_subplan_dedup`'s probe-key coverage, `coordinator.aggregate_shuffle`'s pre-computed signature, the worker's merge-mode aggregate and its `mergeByPosition` ordinal | PUBLISHED |
+| **PUBLISHED, transitively** — `logical.AggregateSignature.GroupByCols` is not a `Stage` field, but the value it carries IS `Stage.GroupByCols`, through `physical/aggregate_shuffle.go` → `coordinator/aggregate_shuffle.go` → `coordinator.go`'s `PreComputedAggregate` → `worker/executor.go`. Its byte-exact `stringsEqual(node.GroupBy, sig.GroupByCols)` changed meaning with the field, which is why `keyNamesAreTheirSpelling` declines a candidate whose two names differ | the published name |
 | **PRESENCE** — asks only whether there IS an aggregate | `native_dag_rewrite`, `fuse_stage_chains`' eligibility tests, `fuse_scan_aggregate_shuffle`, `fuse_scan_shuffle`, `dynamic_filter_attach`, `join_input_projection`, `project_stage_insert`, `filter_carrier`, `carrier_schema`, `eager_feed`, `execute_stage_dag`'s fragment-shape guards | neither |
 
 Two of those moved when the names separated, and both are recorded rather than
@@ -166,12 +167,41 @@ pre-compute synthesis writes each key twice — once as a select item and once
 in the `GROUP BY` — from one list, which is sound only while a key's published
 name is also a spelling the base table can evaluate; it now DECLINES a
 candidate whose two names differ (`AggShuffleRejectKeyNameIsNotItsSpelling`)
-rather than synthesizing SQL over a column the table does not have.
+rather than synthesizing SQL over a column the table does not have — and it
+asks the stage that COMPUTES the keys, which is never the one
+`followToAggregate` hands it. That walk stops at the first aggregate-typed
+stage carrying `GroupByCols`, and on the canonical chain (scan-aggregate →
+merge → shuffle → join) that is the MERGE, which by this design carries no
+resolution list at all: asking IT answered "the two names are the same" for
+every plan, so the guard could not fire on the chain it guards.
+`followToKeyComputingStage` walks past it, a chain with no key-computing stage
+under it answers NO, and
+`TestAggregateShuffleDeclinesAKeyWhoseNameIsNotItsSpelling` is the fixture that
+reaches the reject — a guard no fixture reaches is untested code on the default
+path (method 10, #794 round 2).
 
 The type system carries part of this: `GroupByResolve` is a `[]GroupKeyResolution`
 and not a second `[]string`, so a reader that wants a list of NAMES cannot pick
 it up by accident, and `resolveExprs` is the one place that turns it back into
 text.
+
+#### A RawInputAggregate's input is clustered on the RESOLUTION
+
+`RequiredChildDistribution` demands `ClusteredOn(GroupByCols)` for a grouped
+final, and for a MERGE that is right: its input is a partial's output, where
+every key is already a column under its published name. A `RawInputAggregate`
+final's input is RAW rows, which carry the RESOLUTION spelling — so the demand
+is spelled from the resolution list there (`clusteringKeysForAggregate`), and
+where the keys are MATERIALIZED by the fragment itself there is no input column
+to cluster on at all and the demand is `RequiredAny`. `OutputDistribution`'s
+mirror-the-input branch compares against the same list, or it would call an
+input that IS mirrored un-mirrored.
+
+No corpus shape reached the mismatch — the exchange's key lookup applies the
+runtime's qualified↔bare fallback, and the fixture is too small to splice a
+repartition above a raw final — so this is a latent trap closed rather than a
+defect fixed, and the shapes that would reach it are in the corpus
+(`arm/distinct-aggregate-*`).
 
 #### #794 dissolves by construction
 
@@ -197,22 +227,54 @@ fragment carries is decided by `attachScanSelectProjections` and
 where `resolveFilterAliasSpelling` settles a predicate's spelling and
 `resolveDerivedAliasSortKeys` a sort key's (ADR-0025). Its rules, in order:
 
-1. the stream carries the alias under its QUALIFIED spelling (`y.w`), because
-   the join qualified a duplicate — resolve by that name;
-2. the stream carries exactly ONE column of the alias's bare name, some
-   fragment COMPUTED it, and no arm's column of that name was dropped —
+Every rule asks WHICH ARM first. The key names a derived table, that table is
+one arm of the join, and a column of the same name on another arm is a
+different value:
+
+1. the stream spells the alias EXACTLY (`y.w`), because the join qualified that
+   arm's duplicate column — resolve by that name;
+2. the stream carries exactly ONE BARE column of the alias's bare name FROM
+   THE KEY'S ARM, some fragment COMPUTED it, and no copy of it was dropped —
    resolve by the bare name;
-3. the stream carries every column the DEFINITION reads — resolve by the
-   definition, materialized into a slot;
-4. none of the above — REFUSED, and the coordinator answers the query on its
-   local pipeline.
+3. no bare one, and exactly ONE QUALIFIED column of that name from that arm
+   whose qualifier is the alias's own (or the key was written bare) — resolve
+   by the qualified name;
+4. the KEY'S ARM carries every column the DEFINITION reads — resolve by the
+   definition RE-SPELLED into the names the stream gives that arm's columns
+   (`a * 3` becomes `z.a * 3` where the join qualified z's copy), materialized
+   into a slot;
+5. none of the above — REFUSED with the ARM named, and the coordinator answers
+   the query on its local pipeline.
+
+Skipping the arm is a silent wrong answer and not a missed optimisation, which
+is how round 1 shipped it: with the key naming an arm whose own inner ORDER BY
+or LIMIT stopped `attachScanSelectProjections`, the only bare column of that
+name in the stream is the PROBE's, and the definition's columns are on both
+arms. `SELECT z.w, SUM(x.a) FROM decpair x JOIN (SELECT id, a*3 AS w FROM
+decpair ORDER BY id) z ON x.id = z.id + 1 GROUP BY z.w` answered `x.a * 3`
+where the key is `z.a * 3` — five plausible rows of a different table's value,
+`routed=false`, on both DAG arms (#794 round 2).
+
+The RE-SPELLING in rule 4 is half of that fix and not decoration: handing the
+fragment the definition's own text lets an ordinary lookup resolve it, and
+where two arms carry a column of that name the PROBE's copy wins whichever arm
+the key meant. Checking that the arm HAS the column is not enough.
 
 Rule 2's MATERIALIZED test is what keeps it off the shape that killed the
 previous attempt. `(SELECT id, SUM(id) OVER () + 0 AS g FROM collslot) x GROUP
 BY g` puts a window alias over a table that has its own `g`; the stream carries
 that base column under the same name, nothing computed it, so rule 2 declines
-and rule 3 answers `__win_0 + 0` — which is what the DAG has always evaluated
+and rule 4 answers `__win_0 + 0` — which is what the DAG has always evaluated
 there, correctly.
+
+The resolution is decided against what the join's ARMS can SUPPLY, not against
+what its `Columns` ships today, and `ensureJoinCarriesEvaluatedColumns` reads
+the resolutions and widens the payload to match. The loop has to be closed
+rather than either half guessed: resolving against the shipped list refused a
+shape the DAG evaluated correctly at base, because the payload used to follow
+the key through the GATHER's rename — `aggStageRenames` recorded the DISPATCH
+spelling, and the published name IS the query's own alias now, so there is no
+rename left to carry it.
 
 #### The model the rules read
 
@@ -225,9 +287,23 @@ guessing:
   own rule — so a stream really does carry `w` and `y.w` at once. §4a's claim
   that "a join stream carries `w`, never `y.w`" was a fact about the old MODEL
   and not about the engine (#795);
+- every column carries its ORIGIN ARM — the `BuildTableAlias` (or
+  `BuildColOrigins` entry) of the build subtree that produced it, "" for the
+  probe side — and EVERY rule asks it first. Setting it only where the join
+  QUALIFIED a duplicate was the round-1 defect: with the arm unknown for every
+  uncontested column, no rule could ask which arm a bare `w` came from, and a
+  key naming an arm whose own inner ORDER BY / LIMIT stopped
+  `attachScanSelectProjections` bound the OTHER arm's column of that name —
+  five plausible rows of a different table's value, `routed=false`, on both DAG
+  arms (#794 round 2);
 - a duplicate the join cannot qualify is DROPPED, and the model records it as
   dropped so a key naming that arm is refused rather than bound to the other
   arm's column of the same name;
+- the PRIMARY build is `RightDepStage` (else `Dependencies[1]`), which is
+  `buildTaskInputsForStage`'s own rule. Taking "every dependency that is not
+  the probe" gave a CHAINED link's build the primary join's alias as well as
+  its own, so one arm's columns appeared twice under two aliases and a bare key
+  of that name looked ambiguous where the stream has exactly one;
 - a CHAINED link carries its OWN `Columns` as that link's output filter, so a
   fused chain's real output is the LAST link's list — reading the stage's list
   is what refused a CTE shape the DAG was executing correctly (#795);
@@ -238,10 +314,17 @@ guessing:
   merely present when a scan reads it. Only the first can be a derived alias.
 
 `Stage.Columns` on a scan is a READ SET and not an output schema — it carries
-names ancestors asked for, including ones no file has — so the model
-intersects it with the catalog's declared schema where one is known. That is
-`dropUnbackedJoinColumns`' correction one stage type over, and it is the reason
-a phantom name cannot make rule 3 accept something the fragment cannot read.
+names ancestors asked for, including ones no file has — so the model intersects
+it with the catalog's declared schema WHERE ONE IS KNOWN. That qualifier is
+load-bearing and the earlier draft of this paragraph hid it:
+`annotateScanSchemas` runs at the END of `PlanDistributed`, AFTER
+`resolveStageGroupKeys`, so `ScanSchema` is empty at the moment the model runs
+and the intersection is INERT today. What actually keeps a phantom name from
+mattering is the MATERIALIZED test — a read-set entry is never materialized, so
+rules 2 and 3 cannot take it, and the worst a phantom can do is let rule 4
+accept the DEFINITION, which is the pre-arc behaviour. The intersection is
+there for the day the schemas are annotated earlier, and it is written down as
+inert rather than described as protection (rule 9).
 
 #### Compatibility is a decision
 
@@ -250,13 +333,36 @@ falls back to `derivedGroupKeys` — the text parse this field replaces, which i
 exactly the behaviour that worker had before. That is the precedent
 `buildAggInputProjection` already set for `GroupByTypes`, and it is asserted
 (`TestFragmentFallsBackWhenTheCoordinatorSendsNoResolution`) rather than
-described. The other direction is stated and NOT supported: a NEW coordinator
-talking to an OLD worker sends published names in `GroupByCols`, and for the
-shapes whose two names differ that worker will compute the key from the
-published name — which is the wrong answer those shapes already give today.
-Mixed-version clusters are a deployment ordering (workers first), not a
-compatibility contract; nothing in the wire format detects the skew, and a
-version that could is out of scope here.
+described.
+
+An `OpSpec` whose resolution list is PRESENT but not index-aligned with the
+published one, or whose Computed entry does not parse, is NOT a version: a
+coordinator that sends the field sends it aligned, and
+`TestStageCarriesOneGroupKeyList` asserts that at plan time. Falling back there
+would answer the query by the pre-arc rule with no signal, so the task FAILS
+instead (`TestFragmentRefusesAMisalignedResolutionList`). The fallback is for
+the ABSENT list and nothing else.
+
+The other direction is NOT supported, and the measurement is worse than the
+first draft of this paragraph claimed. A NEW coordinator against an OLD worker
+sends published names in `GroupByCols`, and that worker computes every key from
+them. Stubbing `fragmentGroupKeyPlan` to decline — exactly that pairing — turns
+**46 assertions in `internal/coordinator` and 4 in `internal/worker` red**, and
+the red list includes shapes that are RIGHT on base:
+`781/a-computed-decimal-alias-over-a-bare-scan`,
+`792/a-decimal-expression-alias-as-a-key`,
+`ctl/a-derived-table-with-an-order-by-inside`,
+`ctl/a-derived-table-with-a-limit-inside`,
+`ctl/a-derived-alias-that-shadows-a-base-column`,
+`ctl/unwrapped-window-output`, `ctl/a-non-window-alias-beside-a-window`. So the
+skew is not "degrades the same way and no further": the published name a new
+coordinator sends is not the spelling the old worker's parse computed from, and
+shapes that were right become wrong. Workers upgrade FIRST, that ordering is
+the whole of the protection, and nothing on the wire detects a violation of it.
+A version marker on `OpSpec` would — it is not in this arc, and the reason it
+is not is that a marker only turns a silent wrong answer into a loud one for a
+deployment the project does not otherwise support; the honest record is this
+paragraph.
 
 ### 2a. A slot is ALLOCATED, never merely named
 
