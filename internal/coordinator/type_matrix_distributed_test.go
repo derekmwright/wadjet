@@ -381,6 +381,19 @@ func tmdTables() []tmdTable {
 		// a SLIDING frame over a DECIMAL, which is where the accumulator has
 		// to RETRACT a row exactly.
 		{dwpTable, dwpSchema(), dwpData()},
+		// The WIDE-INTEGER fixture (#784). Rides along for the same reason as
+		// the fixtures above: only TestNumericArc2ShapesMatchPostgres names
+		// it, and no type-matrix corpus entry does. The type matrix cannot
+		// stand in for it — its c_i64 tops out near 5e9, so every integer SUM
+		// over it fits a float64 exactly and a float64 accumulator answers
+		// correctly by luck.
+		{bsumTable, bsumSchema(), bsumData()},
+		// The DUPLICATE-SPREAD fixture (#703 review F1). It has to be big
+		// enough to CLONE: Pipeline.runParallel returns serially when the
+		// source is exhausted after one warm-up batch, so every 9-row and
+		// 40-row fixture in this file is single-threaded by construction and
+		// no distinct aggregate over one can see a clone merge.
+		{rvdTable, rvdSchema(), rvdData()},
 		// The cross-WIDTH KEY fixture (#615, #650, #663). Rides along for the
 		// same reason as the fixtures above: TestNumericWidthJoinKeysMatchPostgres
 		// uses these two arms, and no type-matrix corpus entry names this
