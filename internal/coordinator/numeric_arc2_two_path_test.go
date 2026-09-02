@@ -346,6 +346,42 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#784", "sum_of_int32_beside_min_max",
 			`SELECT SUM(g) AS sg, MIN(b) AS mn, MAX(b) AS mx FROM bigsum`,
 			[]string{"sg=int64:4|mn=int64:-9007199254740993|mx=int64:9223372036854775807"}},
+		// SUM over an INT32 column that leaves INT32 — the other half of the
+		// same rule, and the half the batch kernel got wrong (review round 3,
+		// F1). `sumSlice` was generic over the COLUMN's width, so the INT32
+		// arm summed each batch in int32 and widened afterwards: four rows of
+		// 2 000 000 000 answered -589934592 for PostgreSQL's 8000000000. The
+		// GROUPED form was right the whole time (the flat scatter has always
+		// used an int64 array) and so was the row path, so the same query had
+		// two answers depending on the shape it took.
+		{"#784", "sum_of_int32_past_int32_is_bigint",
+			`SELECT SUM(w) AS s FROM i32wide`, []string{"s=int64:6000000000"}},
+		{"#784", "sum_of_int32_past_int32_filtered",
+			`SELECT SUM(w) AS s FROM i32wide WHERE g < 2`, []string{"s=int64:8000000000"}},
+		{"#784", "sum_of_int32_past_int32_grouped",
+			`SELECT g AS k, SUM(w) AS s, COUNT(w) AS c FROM i32wide GROUP BY g ORDER BY k`,
+			[]string{
+				"k=int32:0|s=int64:4000000000|c=int64:2",
+				"k=int32:1|s=int64:4000000000|c=int64:2",
+				"k=int32:2|s=int64:-2000000000|c=int64:1",
+			}},
+		{"#784", "avg_of_int32_past_int32_is_numeric",
+			`SELECT AVG(w) AS a, COUNT(w) AS c FROM i32wide`,
+			[]string{"a=1200000000.0000|c=int64:5"}},
+		{"#784", "sum_of_a_negated_int32_past_int32",
+			`SELECT SUM(-w) AS s FROM i32wide`, []string{"s=int64:-6000000000"}},
+		{"#784", "sum_of_an_int32_case_arm_past_int32",
+			`SELECT SUM(CASE WHEN w IS NULL THEN 0 ELSE w END) AS s FROM i32wide`,
+			[]string{"s=int64:6000000000"}},
+		// MIN/MAX keep the VALUE PostgreSQL gives; the BOX is int64 where
+		// PostgreSQL keeps int4, on all five arms alike. That is ADR-0024's
+		// recorded widening — wadjet declares every integer INT64 — and not a
+		// two-path defect, which is why it is asserted here rather than left
+		// unstated: the cell fails the day one arm disagrees with the others.
+		{"#784", "min_max_of_int32_keep_their_value_in_the_wider_box",
+			`SELECT MIN(w) AS mn, MAX(w) AS mx FROM i32wide`,
+			[]string{"mn=int64:-2000000000|mx=int64:2000000000"}},
+
 		// EMPTY SCAN TASKS. typemx is written as four chunks, so a selective
 		// predicate leaves some scan task with no rows — and a task that saw no
 		// batch declares its partial from the SPEC while its siblings declare

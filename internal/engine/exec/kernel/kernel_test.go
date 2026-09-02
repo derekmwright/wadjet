@@ -323,6 +323,27 @@ func BenchmarkBatchSumInt64(b *testing.B) {
 	}
 }
 
+// BenchmarkBatchSumInt32 covers the arm ClickBench's integer sums actually
+// take — `SUM(int4)` over a column, which is bigint and no longer summed at the
+// column's width (review round 3, F1). It exists because the int64 benchmark
+// beside it could not see that arm at all, and the widening fix had to be shown
+// to cost nothing.
+func BenchmarkBatchSumInt32(b *testing.B) {
+	bb := batch.NewRecordBatch([]parquet.Column{{Name: "w", Type: parquet.TypeInt32}}, 2048)
+	for i := 0; i < 2048; i++ {
+		bb.Columns[0].Int32Data[i] = int32(i)
+		bb.Columns[0].Nulls.SetValid(i)
+	}
+	vec := bb.Columns[0]
+	k := ResolveBatchSum(batch.TypeInt32)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var acc Accumulator
+		k(&acc, vec, nil, 2048)
+	}
+}
+
 func BenchmarkBatchSumFloat64(b *testing.B) {
 	bb := benchVec(2048)
 	vec := bb.Columns[1]

@@ -84,13 +84,11 @@ func sumRowInt64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 
 func sumRowInt32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
-		acc.SumI64 += int64(vec.Int32Data[row])
-		acc.Count++
+		addInt64Checked(acc, int64(vec.Int32Data[row]))
 	}
 }
 func sumRowInt32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
-	acc.SumI64 += int64(vec.Int32Data[row])
-	acc.Count++
+	addInt64Checked(acc, int64(vec.Int32Data[row]))
 }
 
 func sumRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
@@ -631,7 +629,7 @@ func ResolveRowCount(countStar bool) RowAggUpdater {
 // index, branch), so any exactness at all costs roughly a cycle per row. What
 // is left is a bounded cost on a kernel that, since #784, serves computed
 // integer arguments and TIMESTAMP/DURATION sums — a bare SUM over an integer
-// COLUMN takes the Int128 carrier instead.
+// COLUMN takes the Int128 carrier or the widened int32 loop below.
 //
 // It is also the more correct reading. The per-row form was STICKY — a running
 // total that left the int64 range and came back failed a query whose answer was
@@ -696,6 +694,65 @@ func sumSliceExactInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLen 
 	return sum, count
 }
 
+// sumSliceInt32Widened sums an INT32 vector into an INT64, which is the whole
+// fix: sumSlice is generic over the column's own width, so the INT32 arm summed
+// each batch in INT32 and `SUM(int4)` over four rows of 2 000 000 000 answered
+// -589934592 for PostgreSQL's 8000000000 (review round 3, F1). The row path
+// never had this — sumRowInt32 widens per row — so the two paths disagreed on
+// the same query.
+//
+// No check inside the loop, and that is a bound rather than an omission: a
+// batch holds at most batch.DefaultBatchSize rows, and 2^32 rows at 2^31 would
+// be needed before a widened int32 sum could leave int64. The CROSS-BATCH fold
+// is checked by the caller, which is where an int4 sum can genuinely overflow.
+//
+// The dense loop is unrolled four ways because the widening is what costs: an
+// int32-width sum folds the load into ADDL, and a widened one cannot, so the
+// extra sign-extending load needs the instruction-level parallelism to hide.
+// BenchmarkBatchSumInt32, medians of 7 runs at -benchtime=3000x: summing at the
+// column's width (wrong) 523 ns, the plain widened loop 887 ns, this 658 ns.
+// Eight lanes measured no better than four.
+func sumSliceInt32Widened(data []int32, nulls *batch.Bitmap, sel []uint32, vecLen int) (int64, int64) {
+	var sum, count int64
+	switch {
+	case sel != nil && nulls.HasNulls():
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				sum += int64(data[idx])
+				count++
+			}
+		}
+	case sel != nil:
+		for _, idx := range sel {
+			sum += int64(data[idx])
+		}
+		count = int64(len(sel))
+	case nulls.HasNulls():
+		for i := 0; i < vecLen; i++ {
+			if !nulls.IsNullFast(i) {
+				sum += int64(data[i])
+				count++
+			}
+		}
+	default:
+		d := data[:vecLen]
+		var s0, s1, s2, s3 int64
+		i := 0
+		for ; i+4 <= len(d); i += 4 {
+			s0 += int64(d[i])
+			s1 += int64(d[i+1])
+			s2 += int64(d[i+2])
+			s3 += int64(d[i+3])
+		}
+		sum += s0 + s1 + s2 + s3
+		for ; i < len(d); i++ {
+			sum += int64(d[i])
+		}
+		count = int64(vecLen)
+	}
+	return sum, count
+}
+
 // foldInt64Checked adds a batch's sum into the accumulator's running total and
 // latches a wrap. One check per BATCH, not per row.
 func foldInt64Checked(acc *Accumulator, s, c int64) {
@@ -721,9 +778,12 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
-			s, c := sumSlice(vec.Int32Data, &vec.Nulls, sel, vecLen)
-			acc.SumI64 += int64(s)
-			acc.Count += c
+			// WIDENED to int64 before the addition, and folded through the same
+			// checked add the int64 arm uses: `SUM(int4)` is bigint, so the
+			// batch may not be summed at the column's width (review round 3,
+			// F1).
+			s, c := sumSliceInt32Widened(vec.Int32Data, &vec.Nulls, sel, vecLen)
+			foldInt64Checked(acc, s, c)
 		}
 	case batch.TypeFloat64:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {

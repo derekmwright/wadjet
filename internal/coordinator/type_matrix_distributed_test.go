@@ -388,6 +388,7 @@ func tmdTables() []tmdTable {
 		// over it fits a float64 exactly and a float64 accumulator answers
 		// correctly by luck.
 		{bsumTable, bsumSchema(), bsumData()},
+		{i32wideTable, i32wideSchema(), i32wideData()},
 		// The DUPLICATE-SPREAD fixture (#703 review F1). It has to be big
 		// enough to CLONE: Pipeline.runParallel returns serially when the
 		// source is exhausted after one warm-up batch, so every 9-row and
