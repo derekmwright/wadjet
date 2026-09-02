@@ -637,7 +637,7 @@ func setupCatalogWithLargeTables(t *testing.T) (*catalog.Catalog, context.Contex
 	orderFiles := make([]catalog.FileEntry, 20)
 	for i := range orderFiles {
 		orderFiles[i] = catalog.FileEntry{
-			Path: fmt.Sprintf("tables/orders/chunk_%03d.parquet", i),
+			Path:      fmt.Sprintf("tables/orders/chunk_%03d.parquet", i),
 			SizeBytes: 10 * 1024 * 1024,
 			NumRows:   100000,
 		}
@@ -658,7 +658,7 @@ func setupCatalogWithLargeTables(t *testing.T) (*catalog.Catalog, context.Contex
 	liFiles := make([]catalog.FileEntry, 100)
 	for i := range liFiles {
 		liFiles[i] = catalog.FileEntry{
-			Path: fmt.Sprintf("tables/lineitem/chunk_%03d.parquet", i),
+			Path:      fmt.Sprintf("tables/lineitem/chunk_%03d.parquet", i),
 			SizeBytes: 10 * 1024 * 1024,
 			NumRows:   500000,
 		}
@@ -1037,7 +1037,6 @@ func TestPlanDistributed_ColumnPruning(t *testing.T) {
 	}
 }
 
-
 func TestCanProbeSplit(t *testing.T) {
 	makeFiles := func(n int) []string {
 		files := make([]string, n)
@@ -1139,7 +1138,6 @@ func TestCanProbeSplit(t *testing.T) {
 		})
 	}
 }
-
 
 func TestLargeBuildScans(t *testing.T) {
 	const gb = 1024 * 1024 * 1024
@@ -1377,7 +1375,6 @@ func TestDeferredJoinBridgeBuildError(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
-
 
 // TestBuildTopN_WiresSpillManager: ORDER BY ... LIMIT plans must attach the
 // spill manager like plain ORDER BY does — without it the pre-sort input
