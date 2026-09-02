@@ -40,9 +40,21 @@ func TestCloneSinkCallersConsultTheCloneFence(t *testing.T) {
 	var seen []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() && (info.Name() == ".git" || info.Name() == "_arc" ||
-				info.Name() == "node_modules" || info.Name() == "dist") {
-				return filepath.SkipDir
+			// Skip what the Go toolchain itself skips: a directory whose name
+			// begins with "." or "_" holds no package of this module. That is
+			// not a tidiness rule here, it is the gate's correctness. A git
+			// WORKTREE lives at .claude/worktrees/<name>/ and is a full second
+			// copy of this source tree, so without this the walk reported the
+			// call sites of every checked-out branch beside its own — and the
+			// gate's verdict depended on whether somebody happened to have a
+			// worktree open. It passed in the two agent worktrees that wrote
+			// and reviewed it (neither contains one) and failed on main, which
+			// does. Nested worktrees under other projects reached it too.
+			if info != nil && info.IsDir() && path != root {
+				if n := info.Name(); strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_") ||
+					n == "node_modules" || n == "dist" {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
