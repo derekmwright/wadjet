@@ -203,6 +203,13 @@ refactor(scan): extract predicate pushdown into separate module
   go test -run 'TestSpillArcShapesAgreeOnBothDistributionArms' ./internal/coordinator/   # DAG arms, forced drain
   ```
   Condition-triggered defects are gated with the test-only knobs `exec.ForceAggDrainEvery(N)` / `WADJET_TEST_FORCE_AGG_DRAIN_EVERY=N` and `exec.ForceSmallSpillRuns` — take the reference arm DISARMED (arming both sides cancels the defect, #790). A single passing spilled run proves nothing: replicate.
+- **Numeric typing gate**: a number means the same thing in every spelling and on every path, and the WIRE declares what PostgreSQL declares (ADR-0024 item 2, ADR-0012). After any change to numeric typing, DECIMAL arithmetic, aggregate result types, integer accumulators or the comparison kernels, run the five-arm census and BOTH oracle arms — the wire arm is the only one that sees a right value under a wrong OID:
+  ```bash
+  go test -run 'TestNumericArc2' ./internal/coordinator/     # single / spilled / DAG / DAG-shuffled / DAG-morsel
+  task pg-oracle:test && task pg-oracle:test-decimal
+  ```
+  Integer SUM/AVG are EXACT types (bigint / numeric), not float64, and a sum that would wrap is an error, never a wrapped number. A DECIMAL result that does not fit the 128-bit carrier at PostgreSQL's scale is 22003, never a silently narrower scale. Deliberate divergences live in ADR-0012's list; a pin that starts agreeing FAILS.
+
 - **Test patterns**: Table-driven tests preferred. Use `tb.Helper()` in test helpers. Use `objstore.NewMemStore()` for storage in tests (no real S3).
 
 ### Code Style
