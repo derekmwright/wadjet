@@ -13689,28 +13689,59 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 // (`SELECT dw AS other, k AS dw`), and the scan walk would answer for the
 // column the query is NOT reading.
 func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
+	// The SCANS first; the emitted walk only for a name they do not carry.
+	//
+	// The ORDER is load-bearing, and it is ADR-0026's own rule: a name the DAG
+	// has RE-SPELLED for dispatch is typed BELOW the rename chain, because that
+	// is where the worker reads it. This function is asked TWICE for a derived
+	// table that SHADOWS — once for the query's name and once for the dispatch
+	// spelling — and over `(SELECT c_dec AS v, c_i32 AS c_dec FROM typemx) x`
+	// the second question is "what is c_dec": the derived table answers INT32
+	// and the SCAN answers DECIMAL(18,4). The worker reads the scan's.
+	//
+	// Preferring the emitted walk therefore declared INT32; one partial emitted
+	// its SUM as INT64 while its siblings emitted DECIMAL, and ADR-0010's
+	// shuffle type-consistency guard refused the read — eight shapes that
+	// answered PostgreSQL's digits on the DAG became hard failures, on a branch
+	// whose single-process half was fixing them.
+	//
+	// #728's rename case is untouched by the order: over
+	// `(SELECT dw AS v FROM decwin) x` no scan below carries `v` at all, the
+	// scan walk declines, and the emitted walk answers DECIMAL(38,10).
+	if t, ok := scanColumnType(node, col); ok {
+		return t, true
+	}
 	if node != nil && len(node.Children) == 1 {
 		if t, c := colRefDeclaredType(&plansql.ColRef{Column: col},
 			emittedColDecls(node.Children[0])); c == expr.Decided {
 			return t.ID, true
 		}
 	}
-	return scanColumnType(node, col)
+	return 0, false
 }
 
 func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
+	// The same order as aggInputColumnType, for the same reason: the two answer
+	// one question about one column and a disagreement between them is a
+	// DECIMAL declared with someone else's scale.
+	if m, ok := scanColumnDecimal(node, col); ok {
+		return m, true
+	}
+	if _, ok := scanColumnType(node, col); ok {
+		// The scan carries the name and it is not a DECIMAL. Saying so is the
+		// answer: falling through would let a derived table's SHADOW attach a
+		// (p,s) to a column the worker reads as an integer.
+		return logical.DecimalMeta{}, false
+	}
 	if node != nil && len(node.Children) == 1 {
 		if t, c := colRefDeclaredType(&plansql.ColRef{Column: col},
 			emittedColDecls(node.Children[0])); c == expr.Decided {
-			if t.ID != parquet.TypeDecimal {
-				return logical.DecimalMeta{}, false
-			}
-			if t.DecKnown {
+			if t.ID == parquet.TypeDecimal && t.DecKnown {
 				return logical.DecimalMeta{Precision: t.Precision, Scale: t.Scale}, true
 			}
 		}
 	}
-	return scanColumnDecimal(node, col)
+	return logical.DecimalMeta{}, false
 }
 
 // aggOutputFromInputDecl is aggSpecOutputType/aggSpecOutputDecimal's rule for a
