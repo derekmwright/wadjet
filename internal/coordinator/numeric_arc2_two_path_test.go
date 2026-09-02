@@ -31,8 +31,13 @@ import (
 //	                            CONDITION, not a shape, and a budget that does
 //	                            not bite proves nothing (§5)
 //	dag                         the stage DAG over an embedded NATS cluster
-//	dag+broadcast               the DAG with BroadcastBytesOverride = 1, which
-//	                            forces the shuffle rather than the broadcast join
+//	dag-shuffled                the DAG with BroadcastBytesOverride = 1, which
+//	                            forces the SHUFFLE rather than the broadcast
+//	                            join. The name says what the arm IS: every
+//	                            other file in this package calls that config
+//	                            dag-shuffled, and `dag+broadcast` read
+//	                            backwards — an override of one byte means
+//	                            nothing broadcasts
 //	dag+morsel4                 the DAG with worker.MorselWorkers = 4, so each
 //	                            fragment's breaker runs morsel-parallel and
 //	                            CloneSink's SECOND call site is exercised
@@ -614,7 +619,7 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 				{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
 				{"single+budget+forced-drain", drained},
 				{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
-				{"dag+broadcast", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+				{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
 				{"dag+morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
 			} {
 				got, err := arm.run(tc.sql)
