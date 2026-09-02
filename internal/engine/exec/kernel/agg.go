@@ -325,6 +325,110 @@ func maxRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
 	}
 }
 
+// --- Integer-into-Int128 updaters (#784) ---
+//
+// PostgreSQL answers SUM(int8) and AVG(int2/int4/int8) in numeric, so those
+// accumulate exactly in the Int128 carrier at scale 0. The int64 sum they used
+// to take WRAPS past 2^63 and the float64 AVG loses integer digits past 2^53,
+// and both are silent — a different number wearing the right type, which
+// ADR-0024 item 4 makes a 22003 rather than an answer. exec.aggIntExact is the
+// single predicate that decides which aggregates take these; the scale is
+// always 0, so adoptDecScale can never report a conflict against another
+// integer batch of the same column.
+
+func sumRowInt64Decimal(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		sumRowInt64DecimalNoNulls(acc, vec, row)
+	}
+}
+
+func sumRowInt64DecimalNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	sum, ok := acc.SumDec.AddChecked(batch.Int128From(vec.Int64Data[row]))
+	acc.SumDec = sum
+	if !ok {
+		acc.DecOverflow = true
+	}
+	acc.Count++
+	acc.adoptDecScale(0)
+}
+
+func sumRowInt32Decimal(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		sumRowInt32DecimalNoNulls(acc, vec, row)
+	}
+}
+
+func sumRowInt32DecimalNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	sum, ok := acc.SumDec.AddChecked(batch.Int128From(int64(vec.Int32Data[row])))
+	acc.SumDec = sum
+	if !ok {
+		acc.DecOverflow = true
+	}
+	acc.Count++
+	acc.adoptDecScale(0)
+}
+
+// ResolveRowSumIntExact returns the Int128 row updater for an INTEGER column,
+// or nil for a type that has none — the caller then keeps its ordinary
+// resolver, which is what makes this additive rather than a second dispatch
+// nothing keeps in step with the first.
+func ResolveRowSumIntExact(typ batch.TypeID, noNulls bool) RowAggUpdater {
+	switch typ {
+	case batch.TypeInt64:
+		if noNulls {
+			return sumRowInt64DecimalNoNulls
+		}
+		return sumRowInt64Decimal
+	case batch.TypeInt32:
+		if noNulls {
+			return sumRowInt32DecimalNoNulls
+		}
+		return sumRowInt32Decimal
+	}
+	return nil
+}
+
+// ResolveBatchSumIntExact is ResolveRowSumIntExact's whole-vector form, for
+// the ungrouped scalar fast path.
+func ResolveBatchSumIntExact(typ batch.TypeID) BatchAggKernel {
+	switch typ {
+	case batch.TypeInt64:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
+			batchSumIntExact(acc, &vec.Nulls, sel, vecLen, func(row int) int64 { return vec.Int64Data[row] })
+		}
+	case batch.TypeInt32:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
+			batchSumIntExact(acc, &vec.Nulls, sel, vecLen, func(row int) int64 { return int64(vec.Int32Data[row]) })
+		}
+	}
+	return nil
+}
+
+func batchSumIntExact(acc *Accumulator, nulls *batch.Bitmap, sel []uint32, vecLen int, at func(int) int64) {
+	acc.adoptDecScale(0)
+	add := func(row int) {
+		sum, ok := acc.SumDec.AddChecked(batch.Int128From(at(row)))
+		acc.SumDec = sum
+		if !ok {
+			acc.DecOverflow = true
+		}
+		acc.Count++
+	}
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				add(int(idx))
+			}
+		}
+		return
+	}
+	for row := 0; row < vecLen; row++ {
+		if !nulls.IsNullFast(row) {
+			add(row)
+		}
+	}
+}
+
 // --- Resolve functions (called once at query init) ---
 
 // ResolveRowSum returns a row-level sum updater for the given column type.

@@ -251,6 +251,15 @@ func tmAsInt64(v any) (int64, bool) {
 		return int64(tv), true
 	case float64:
 		return int64(tv), true
+	case string:
+		// A DECIMAL boxes as its rendered TEXT, and SUM/AVG over an integer is
+		// PostgreSQL's `numeric` since #784 — so an integer answer can arrive
+		// here as digits. Only an exact integer spelling answers; a fractional
+		// one is a different question and stays ok=false rather than being
+		// truncated into agreement.
+		if n, err := strconv.ParseInt(tv, 10, 64); err == nil {
+			return n, true
+		}
 	}
 	return 0, false
 }

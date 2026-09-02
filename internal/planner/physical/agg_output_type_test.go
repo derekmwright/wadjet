@@ -61,10 +61,16 @@ func TestAggSpecOutputType(t *testing.T) {
 	}{
 		{"sum is float64 whatever it summed", aggNodeOver(orders),
 			logical.AggExpr{Func: "sum", InputCol: "o_totalprice"}, parquet.TypeFloat64, false},
-		{"sum over an int column is still float64", aggNodeOver(orders),
-			logical.AggExpr{Func: "sum", InputCol: "o_orderkey"}, parquet.TypeFloat64, false},
+		// PostgreSQL's own types for an integer input (#784), from the live
+		// server: `pg_typeof(sum(int8))` is numeric — an int64 sum WRAPS past
+		// 2^63 — and `pg_typeof(sum(int4))` is bigint, which has a wider
+		// integer type to grow into. o_orderkey is INT64.
+		{"sum over a bigint column is numeric", aggNodeOver(orders),
+			logical.AggExpr{Func: "sum", InputCol: "o_orderkey"}, parquet.TypeDecimal, false},
 		{"avg is float64", aggNodeOver(orders),
 			logical.AggExpr{Func: "avg", InputCol: "o_totalprice"}, parquet.TypeFloat64, false},
+		{"avg over a bigint column is numeric", aggNodeOver(orders),
+			logical.AggExpr{Func: "avg", InputCol: "o_orderkey"}, parquet.TypeDecimal, false},
 		{"count is int64", aggNodeOver(orders),
 			logical.AggExpr{Func: "count"}, parquet.TypeInt64, false},
 		{"count distinct is int64 too", aggNodeOver(orders),

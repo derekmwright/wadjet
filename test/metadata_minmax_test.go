@@ -247,7 +247,12 @@ func TestMetadataMinMax(t *testing.T) {
 		{
 			name: "SUM is not a statistics aggregate", wantFire: false,
 			sql:      "SELECT SUM(i64) AS s, MIN(i64) AS lo FROM events",
-			wantRows: []map[string]any{{"s": float64(102), "lo": int64(1)}},
+			// SUM over an INT64 column is PostgreSQL's `numeric` since #784, so
+			// it boxes as the DECIMAL text "102". What this entry asserts is
+			// that the metadata path does NOT answer a SUM from statistics;
+			// which carrier the scan's answer arrives in is a different gate's
+			// question.
+			wantRows: []map[string]any{{"s": "102", "lo": int64(1)}},
 		},
 	}
 

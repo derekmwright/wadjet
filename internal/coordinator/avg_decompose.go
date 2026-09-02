@@ -122,6 +122,13 @@ func decomposeAvgPhysical(specs []physical.AggSpec) []physical.AggSpec {
 		countSpec.Func = "count"
 		countSpec.OutputCol = avgCountPrefix + a.OutputCol
 		countSpec.OutputType = parquet.TypeInt64
+		countSpec.OutputTypeKnown = true
+		// And the (p,s) goes with the type it described — the same rule the
+		// wire twin states. `countSpec := a` copies AVG's own declaration, so
+		// before #784 gave AVG over an INTEGER a DECIMAL(38,4) output this
+		// pair was always (0,0) and the omission could not show; after it the
+		// count leg went out as an int64 column claiming four fraction digits.
+		countSpec.OutputPrecision, countSpec.OutputScale = 0, 0
 		out = append(out, sumSpec, countSpec)
 	}
 	return out
@@ -147,7 +154,14 @@ func avgSumDecimalDecl(a distributed.AggSpec) (precision, scale int, ok bool) {
 		return 0, 0, false
 	}
 	if a.InputPrecision <= 0 {
-		return 0, 0, false
+		// An INTEGER input: AVG(int*) is PostgreSQL's numeric and its SUM leg
+		// is numeric at SCALE 0, because the sum of integers has no fraction
+		// digits — AVG's own +4 belongs to the division, not to the sum
+		// (#784). The input type is carried only for a DERIVED argument, so
+		// this is recognised by AVG declaring DECIMAL with no input (p,s):
+		// the only other producer of that pair is a computed DECIMAL argument
+		// nothing could type, which had no usable declaration here either.
+		return batch.MaxDecimalPrecision, 0, true
 	}
 	return batch.MaxDecimalPrecision, a.InputScale, true
 }

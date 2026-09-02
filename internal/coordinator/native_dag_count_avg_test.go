@@ -3,6 +3,7 @@ package coordinator
 import (
 	"bytes"
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -190,6 +191,14 @@ func TestNativeDAG_AvgMultiFile_FallbackOrCorrect(t *testing.T) {
 			got[toInt64(r["k"])] = x
 		case int64:
 			got[toInt64(r["k"])] = float64(x)
+		case string:
+			// AVG over an INT64 column is PostgreSQL's `numeric` since #784,
+			// so it boxes as DECIMAL text. What this test is about is the
+			// fold combining (sum, count) partials rather than averaging
+			// averages, which the carrier does not change.
+			if f, err := strconv.ParseFloat(x, 64); err == nil {
+				got[toInt64(r["k"])] = f
+			}
 		}
 	}
 	want := map[int64]float64{1: 25, 2: 200}

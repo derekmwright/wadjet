@@ -13604,6 +13604,9 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 			// agree between the two paths at plan time.
 			return parquet.TypeDecimal, true
 		}
+		if t, ok := aggIntegerOutputType(fn, in); ok {
+			return t, true
+		}
 		return aggOutputType(agg.Func, agg.Distinct), true
 	}
 	if fn == "min_by" || fn == "max_by" {
@@ -13650,6 +13653,15 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 			return logical.DecimalMeta{}, false
 		}
 	}
+	// An INTEGER input whose result PostgreSQL answers in numeric declares the
+	// carrier's full precision at scale 0 (SUM) or batch.AvgScale(0) (AVG) —
+	// #784. It is asked BEFORE the DECIMAL lookup because the input is not a
+	// DECIMAL column at all and aggInputColumnDecimal would decline it.
+	if t, ok := aggInputColumnType(node, agg.InputCol); ok {
+		if m, ok := aggIntegerOutputDecimal(fn, t); ok {
+			return m, true
+		}
+	}
 	in, ok := aggInputColumnDecimal(node, agg.InputCol)
 	if !ok {
 		return logical.DecimalMeta{}, false
@@ -13662,6 +13674,60 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	default:
 		return in, true
 	}
+}
+
+// aggIntegerOutputType and aggIntegerOutputDecimal are PostgreSQL's result
+// types for SUM/AVG over an INTEGER column, taken from the live server (#784):
+//
+//	pg_typeof(sum(int4)) -> bigint     pg_typeof(sum(int8)) -> numeric
+//	pg_typeof(avg(int4)) -> numeric    pg_typeof(avg(int8)) -> numeric
+//
+// The two SUM rules differ because int4's sum has a wider integer type to grow
+// into and int8's does not; a wadjet SUM(int8) in int64 WRAPS past 2^63, which
+// ADR-0024 item 4 makes a 22003 rather than an answer. They mirror
+// exec.aggIntExact, which decides the CARRIER the accumulator uses, and the
+// two must agree: a plan that declares numeric over an int64 accumulator is
+// the #685 shape (a partial's identity row contradicting its siblings).
+//
+// AVG's SCALE is batch.AvgScale(0) = 4, the same +4 rule a DECIMAL input takes.
+// PostgreSQL's own numeric division picks a MAGNITUDE-DEPENDENT scale —
+// measured on the server, avg(c_i32) renders 16 fraction digits and
+// avg(c_i64) renders 8, both targeting about 16-20 significant digits — which
+// ADR-0024 rejected as a rule precisely because the same query over more rows
+// would change the scale of its own output column. Both engines are exact to
+// the digits they keep and agree to min(scale): ADR-0012 item 9's class.
+//
+// ok=false for every type these rules do not name, which is every non-integer
+// input and wadjet's own int-backed types (DATE/TIMESTAMP/DURATION/PORT/
+// PROTOCOL) — they have no PostgreSQL integer to follow.
+func aggIntegerOutputType(fn string, in parquet.TypeID) (parquet.TypeID, bool) {
+	switch strings.ToLower(strings.TrimSpace(fn)) {
+	case "sum":
+		switch in {
+		case parquet.TypeInt32:
+			return parquet.TypeInt64, true
+		case parquet.TypeInt64:
+			return parquet.TypeDecimal, true
+		}
+	case "avg":
+		switch in {
+		case parquet.TypeInt32, parquet.TypeInt64:
+			return parquet.TypeDecimal, true
+		}
+	}
+	return 0, false
+}
+
+func aggIntegerOutputDecimal(fn string, in parquet.TypeID) (logical.DecimalMeta, bool) {
+	t, ok := aggIntegerOutputType(fn, in)
+	if !ok || t != parquet.TypeDecimal {
+		return logical.DecimalMeta{}, false
+	}
+	scale := 0
+	if strings.EqualFold(strings.TrimSpace(fn), "avg") {
+		scale = batch.AvgScale(0)
+	}
+	return logical.DecimalMeta{Precision: batch.MaxDecimalPrecision, Scale: scale}, true
 }
 
 // aggInputColumnType and aggInputColumnDecimal answer "what does this
@@ -13792,7 +13858,30 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 	}
 	switch name {
 	case "sum", "avg":
-		// Every non-DECIMAL input: float64, exactly as before.
+		// An INTEGER input follows PostgreSQL's own types (#784), with ONE
+		// narrowing for a COMPUTED argument: SUM is bigint whatever the
+		// integer width, and only AVG becomes numeric.
+		//
+		// PostgreSQL's SUM rule is by INPUT WIDTH — int4 grows into bigint,
+		// int8 has nothing wider and becomes numeric — and wadjet declares
+		// EVERY integer expression INT64 (ADR-0024's recorded divergence), so
+		// a computed argument cannot tell the two apart. Reading them all as
+		// int8 would make `SUM(CASE WHEN … THEN 1 ELSE 0 END)` — TPC-H Q12's
+		// shape and a BI staple — numeric where PostgreSQL says bigint, on a
+		// sum of ones that cannot overflow anything. Reading them as int4
+		// keeps PostgreSQL's OID for that shape; the residual is a computed
+		// int8 sum past 2^63, which is the pre-existing "every integer
+		// spelling is INT64" divergence and not a new one.
+		//
+		// A BARE COLUMN is not affected: aggSpecOutputType answers it from the
+		// column's real width, where int8 is int8.
+		if _, ok := aggIntegerOutputType(name, in); ok {
+			if name == "avg" {
+				m, _ := aggIntegerOutputDecimal("avg", parquet.TypeInt32)
+				return parquet.TypeDecimal, m.Precision, m.Scale, true
+			}
+			return parquet.TypeInt64, 0, 0, true
+		}
 		return aggOutputType(fn, distinct), 0, 0, true
 	case "min_by", "max_by":
 		return in, 0, 0, true

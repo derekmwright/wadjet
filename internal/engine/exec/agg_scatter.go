@@ -337,6 +337,89 @@ func scatterSumFloatNoCount[T ~float32 | ~float64 | ~int64](sumArr []float64, da
 // scatterSumDecimal returns whether any group's sum left the Int128 range —
 // the caller ORs it into flatAccumArrays.sumDecOverflow, and the emit path
 // turns that into a query error rather than writing the wrapped value (#455).
+// scatterFlatIntDecimal routes an INT32- or INT64-backed column into the
+// Int128 sum array, with or without the count increment. It is the one place
+// that names which int-backed vector slot each type reads, so the counted and
+// count-sharing paths cannot drift apart.
+//
+// A type with no arm here writes nothing and reports no overflow, which is the
+// same "this dispatch has no case" behaviour the by-type switches have; only
+// aggIntExact's two types can reach it, and both have one.
+func scatterFlatIntDecimal(fa *flatAccumArrays, gi []int32, col *batch.Vector, sel []uint32, n int, withCount bool) bool {
+	switch col.Type {
+	case batch.TypeInt64:
+		if withCount {
+			return scatterSumIntDecimal(fa.sumDec, fa.count, col.Int64Data, gi, &col.Nulls, sel, n)
+		}
+		return scatterSumIntDecimalNoCount(fa.sumDec, col.Int64Data, gi, &col.Nulls, sel, n)
+	case batch.TypeInt32:
+		if withCount {
+			return scatterSumIntDecimal(fa.sumDec, fa.count, col.Int32Data, gi, &col.Nulls, sel, n)
+		}
+		return scatterSumIntDecimalNoCount(fa.sumDec, col.Int32Data, gi, &col.Nulls, sel, n)
+	}
+	return false
+}
+
+// scatterSumIntDecimal is scatterSumInt into the Int128 carrier: the exact
+// accumulation PostgreSQL's numeric SUM(int8) / AVG(int*) needs (#784). The
+// int64 array it replaces WRAPS silently past 2^63, and a wrapped sum is a
+// different number wearing the right type — ADR-0024 item 4's own case.
+//
+// Reported overflow is the query's error (22003), never a value, exactly as
+// for the DECIMAL column arm below.
+func scatterSumIntDecimal[T ~int32 | ~int64](sumArr []batch.Int128, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) bool {
+	hasNulls := nulls.HasNulls()
+	overflow := false
+	if sel != nil {
+		for si := range sel {
+			row := int(sel[si])
+			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				sum, ok := sumArr[idx].AddChecked(batch.Int128From(int64(data[row])))
+				sumArr[idx] = sum
+				overflow = overflow || !ok
+				countArr[idx]++
+			}
+		}
+	} else {
+		for row := 0; row < n; row++ {
+			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				sum, ok := sumArr[idx].AddChecked(batch.Int128From(int64(data[row])))
+				sumArr[idx] = sum
+				overflow = overflow || !ok
+				countArr[idx]++
+			}
+		}
+	}
+	return overflow
+}
+
+// scatterSumIntDecimalNoCount is scatterSumIntDecimal for an aggregate that
+// shares another's count array.
+func scatterSumIntDecimalNoCount[T ~int32 | ~int64](sumArr []batch.Int128, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) bool {
+	hasNulls := nulls.HasNulls()
+	overflow := false
+	if sel != nil {
+		for si := range sel {
+			row := int(sel[si])
+			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				sum, ok := sumArr[idx].AddChecked(batch.Int128From(int64(data[row])))
+				sumArr[idx] = sum
+				overflow = overflow || !ok
+			}
+		}
+	} else {
+		for row := 0; row < n; row++ {
+			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				sum, ok := sumArr[idx].AddChecked(batch.Int128From(int64(data[row])))
+				sumArr[idx] = sum
+				overflow = overflow || !ok
+			}
+		}
+	}
+	return overflow
+}
+
 func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) bool {
 	hasNulls := nulls.HasNulls()
 	overflow := false
@@ -607,6 +690,18 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 		scatterFlatAggUpdateNoCount(fa, gi, fn, col, sel, n)
 		return
 	}
+	// The INTEGER-into-Int128 arm, for both SUM and AVG, before the by-type
+	// dispatch below: initFlatAccums allocated sumDec for these and left
+	// sumI64/sumF64 nil, so the arms below would write into a nil slice — and
+	// which carrier this aggregate uses is aggIntExact's answer, not the
+	// column type's alone (#784). fa.isDecimal over a non-DECIMAL column IS
+	// that answer, latched into the spill run's header by the same field.
+	if fa.isDecimal && col.Type != batch.TypeDecimal && (fn == AggSum || fn == AggAvg) {
+		if scatterFlatIntDecimal(fa, gi, col, sel, n, true) {
+			fa.sumDecOverflow = true
+		}
+		return
+	}
 	switch fn {
 	case AggAvg:
 		// AVG over int64-class accumulates float64 (overflow-safe; the
@@ -684,6 +779,14 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 // shares another aggregate's count array. Same layout rules as
 // scatterFlatAggUpdate — only the count increment is dropped.
 func scatterFlatAggUpdateNoCount(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batch.Vector, sel []uint32, n int) {
+	// See scatterFlatAggUpdate: the carrier is aggIntExact's answer, not the
+	// column type's, and sumI64/sumF64 are nil for these (#784).
+	if fa.isDecimal && col.Type != batch.TypeDecimal {
+		if scatterFlatIntDecimal(fa, gi, col, sel, n, false) {
+			fa.sumDecOverflow = true
+		}
+		return
+	}
 	if fn == AggAvg {
 		switch col.Type {
 		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:

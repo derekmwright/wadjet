@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -166,6 +167,14 @@ func toInt64(v any) int64 {
 		return int64(x)
 	case float64:
 		return int64(x)
+	case string:
+		// A DECIMAL boxes as its rendered TEXT, and SUM over an INT64 column
+		// is PostgreSQL's `numeric` since #784 — so the integer these tests
+		// are about arrives here as digits. Anything that is not an integer
+		// answers 0, exactly as every other unhandled box does.
+		if n, err := strconv.ParseInt(x, 10, 64); err == nil {
+			return n
+		}
 	}
 	return 0
 }
@@ -238,9 +247,17 @@ func TestNativeDAG_AvgFallback(t *testing.T) {
 	}
 	avgs := map[int64]float64{}
 	for _, r := range mustRows(t, res) {
+		// AVG over an INT64 column is PostgreSQL's `numeric` since #784, so
+		// it boxes as DECIMAL text at batch.AvgScale(0). This test is about
+		// the FOLD reaching the right value, not about which carrier it
+		// arrives in, so both boxes are read.
 		switch x := r["a"].(type) {
 		case float64:
 			avgs[toInt64(r["k"])] = x
+		case string:
+			if f, err := strconv.ParseFloat(x, 64); err == nil {
+				avgs[toInt64(r["k"])] = f
+			}
 		}
 	}
 	if avgs[1] != 20 || avgs[2] != 50 {

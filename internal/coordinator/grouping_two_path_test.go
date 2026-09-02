@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -285,6 +286,14 @@ func numAsInt(v any) (int64, bool) {
 		return int64(x), true
 	case float64:
 		return int64(x), true
+	case string:
+		// A DECIMAL boxes as its rendered text, and SUM/AVG over an integer
+		// column is PostgreSQL's `numeric` since #784. Only an exact integer
+		// spelling answers: a fractional one is a different question and
+		// stays ok=false rather than being truncated into agreement.
+		if n, err := strconv.ParseInt(x, 10, 64); err == nil {
+			return n, true
+		}
 	}
 	return 0, false
 }

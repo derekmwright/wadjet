@@ -1666,8 +1666,8 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 				// reads the one that is load-bearing.
 				h.aggInputDecScale[i] = b.Columns[idx].DecimalData.Scale
 			}
-			h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
-			h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
+			h.aggUpdaters[i] = resolveAggUpdater(agg, b.Columns[idx].Type)
+			h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg, b.Columns[idx].Type)
 			if isContainerMinMax(agg.Func, b.Columns[idx].Type) {
 				h.aggBoxedMinMax[i] = true
 				h.hasBoxedMinMax = true
@@ -2095,7 +2095,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 		h.batchAggKernels = make([]kernel.BatchAggKernel, len(h.Aggs))
 		allBatchable := true
 		for i, agg := range h.Aggs {
-			h.batchAggKernels[i] = resolveBatchAggKernel(agg.Func, h.aggColIdx[i], b)
+			h.batchAggKernels[i] = resolveBatchAggKernel(agg, h.aggColIdx[i], b)
 			if h.batchAggKernels[i] == nil {
 				allBatchable = false
 			}
@@ -5187,6 +5187,26 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 				}
 				out.Precision, out.Scale = batch.MaxDecimalPrecision, scale
 			}
+			// PostgreSQL's types for an INTEGER input (#784), from
+			// `pg_typeof` on the live server: SUM(int2/int4) is bigint,
+			// SUM(int8) and AVG(int*) are numeric. The accumulator for the
+			// numeric ones is already an Int128 at scale 0 (aggIntExact); the
+			// bigint one was always an exact int64 array and only the
+			// declaration said float64, which is where the digits went past
+			// 2^53.
+			if resolved {
+				switch {
+				case aggIntExact(agg, h.aggInputTypes[i]):
+					out.Type = parquet.TypeDecimal
+					out.Precision = batch.MaxDecimalPrecision
+					out.Scale = 0
+					if agg.Func == AggAvg {
+						out.Scale = batch.AvgScale(0)
+					}
+				case agg.Func == AggSum && h.aggInputTypes[i] == batch.TypeInt32:
+					out.Type = parquet.TypeInt64
+				}
+			}
 		}
 		cols = append(cols, out)
 	}
@@ -6593,7 +6613,16 @@ func appendIntKeyRowFormat(buf []byte, key int64, typ batch.TypeID) []byte {
 
 // resolveBatchAggKernel returns a batch-level aggregate kernel for scalar aggregates.
 // Returns nil if the aggregate function is not batch-able (e.g., COUNT(DISTINCT), STRING_AGG).
-func resolveBatchAggKernel(fn AggFunc, colIdx int, b *batch.RecordBatch) kernel.BatchAggKernel {
+func resolveBatchAggKernel(agg AggColumn, colIdx int, b *batch.RecordBatch) kernel.BatchAggKernel {
+	fn := agg.Func
+	if colIdx >= 0 && aggIntExact(agg, b.Columns[colIdx].Type) {
+		// See resolveAggUpdater (#784): the ungrouped scalar path needs the
+		// same carrier the grouped ones use, or the same query answers two
+		// different numbers depending on whether it has a GROUP BY.
+		if k := kernel.ResolveBatchSumIntExact(b.Columns[colIdx].Type); k != nil {
+			return k
+		}
+	}
 	switch fn {
 	case AggSum:
 		if colIdx < 0 {
@@ -6633,7 +6662,18 @@ func resolveBatchAggKernel(fn AggFunc, colIdx int, b *batch.RecordBatch) kernel.
 	}
 }
 
-func resolveAggUpdater(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
+func resolveAggUpdater(agg AggColumn, typ batch.TypeID) kernel.RowAggUpdater {
+	fn := agg.Func
+	// The Int128 arm first, for both SUM and AVG (#784): the carrier is
+	// aggIntExact's answer and the by-type resolvers below cannot see the
+	// function, so an INT64 SUM would otherwise land in SumI64 while the flat
+	// path put it in SumDec — the two-carrier disagreement ADR-0027 decision 3
+	// records.
+	if aggIntExact(agg, typ) {
+		if u := kernel.ResolveRowSumIntExact(typ, false); u != nil {
+			return u
+		}
+	}
 	switch fn {
 	case AggSum:
 		return kernel.ResolveRowSum(typ)
@@ -6652,7 +6692,13 @@ func resolveAggUpdater(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
 
 // resolveAggUpdaterNoNull returns a row-level updater that skips null checks.
 // Used when the aggregate column's vector has no nulls in the current batch.
-func resolveAggUpdaterNoNull(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
+func resolveAggUpdaterNoNull(agg AggColumn, typ batch.TypeID) kernel.RowAggUpdater {
+	fn := agg.Func
+	if aggIntExact(agg, typ) { // see resolveAggUpdater (#784)
+		if u := kernel.ResolveRowSumIntExact(typ, true); u != nil {
+			return u
+		}
+	}
 	switch fn {
 	case AggSum:
 		return kernel.ResolveRowSumNoNulls(typ)
@@ -7120,6 +7166,48 @@ func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
 	return plan
 }
 
+// aggIntExact reports whether an aggregate over an INTEGER column accumulates
+// in the Int128 carrier because PostgreSQL answers it in numeric (#784).
+//
+//	SUM(int2/int4) -> bigint    already exact in int64; NOT here
+//	SUM(int8)      -> numeric   an int64 sum WRAPS past 2^63
+//	AVG(int*)      -> numeric   the float64 mean loses integer digits past 2^53
+//
+// Taken from the live server (`pg_typeof(sum(c_i32))` = bigint,
+// `pg_typeof(sum(c_i64))` = numeric, `pg_typeof(avg(c_i32))` = numeric): the
+// two SUM rules differ because int4's sum has a wider integer type to grow
+// into and int8's does not. Only TypeInt32 and TypeInt64 are here —
+// TypeDate/Timestamp/Duration/Port/Protocol are wadjet's own int-backed types
+// with no PostgreSQL integer to follow, and they keep the rules they had.
+//
+// It is the ONE predicate every accumulation path consults, so the flat
+// scatter arrays, the row updaters, the batch kernels, the spill run's latched
+// encodings and the output schema cannot disagree about which carrier a value
+// is in — the disagreement class ADR-0027 decision 3 exists for.
+// The DECLARATION is the second half of the test, and it is what keeps this
+// off the plumbing. A MERGE stage re-aggregates a partial COUNT as a SUM over
+// an int64 column (buildFragmentAggregate) and declares int64 for it: that
+// column is the fold's row count, not a user's SUM(int8), and giving it the
+// numeric carrier would put the total in SumDec while the emit reads SumI64 —
+// the two-carrier disagreement in its purest form. So the carrier follows the
+// declared output type, and a planner that could not resolve the input at all
+// keeps the float64 it always had, with the accumulator agreeing.
+func aggIntExact(agg AggColumn, typ batch.TypeID) bool {
+	switch agg.Func {
+	case AggSum:
+		if typ != batch.TypeInt64 {
+			return false
+		}
+	case AggAvg:
+		if typ != batch.TypeInt32 && typ != batch.TypeInt64 {
+			return false
+		}
+	default:
+		return false
+	}
+	return agg.OutputType == parquet.TypeDecimal
+}
+
 // isFlatSumType reports whether scatterFlatAggUpdate's SUM/AVG dispatch has a
 // case for this column type (and therefore increments count for it).
 func isFlatSumType(t batch.TypeID) bool {
@@ -7171,18 +7259,34 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 
 		switch agg.Func {
 		case AggSum, AggAvg:
-			switch typ {
-			case batch.TypeFloat64, batch.TypeFloat32:
+			switch {
+			// PostgreSQL answers SUM(int8) and AVG(int2/int4/int8) in
+			// numeric, so those accumulate in the Int128 carrier at scale 0
+			// (#784). The int64 sum they used to take WRAPS past 2^63 and the
+			// float64 AVG loses integer digits past 2^53 — both silent. SUM
+			// over the int32 class keeps its exact int64 array: it declares
+			// bigint, which is what PostgreSQL declares, and no realistic row
+			// count can overflow it.
+			case aggIntExact(agg, typ):
+				fa.sumDec = memory.Offheap[batch.Int128](reg, initCap)
+				fa.isDecimal = true
+				fa.decScale = 0
+			case typ == batch.TypeFloat64 || typ == batch.TypeFloat32:
 				fa.sumF64 = memory.Offheap[float64](reg, initCap)
 				fa.isFloat = true
-			case batch.TypeDecimal:
+			case typ == batch.TypeDecimal:
 				fa.sumDec = memory.Offheap[batch.Int128](reg, initCap)
 				fa.isDecimal = true
 				fa.decScale = b.Columns[ci].DecimalData.Scale
-			case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+			case typ == batch.TypeInt64 || typ == batch.TypeTimestamp || typ == batch.TypeDuration:
 				if agg.Func == AggAvg {
 					// Overflow-safe AVG: float64 accumulation, matching
 					// scatterFlatAggUpdate's AggAvg case and the row kernels.
+					// Reached now only where #784's rule does NOT apply —
+					// TIMESTAMP and DURATION, which are wadjet's own
+					// int-backed types with no PostgreSQL integer to follow,
+					// and an INT64 whose declared output is not numeric
+					// (a MERGE stage's re-aggregated partial count).
 					fa.sumF64 = memory.Offheap[float64](reg, initCap)
 					fa.isFloat = true
 				} else {

@@ -584,14 +584,15 @@ const (
 		"scale — the common type of the branches — and renders every row at it. Same number, same rows"
 
 	// noExactNumericPin is a DELIBERATE difference, documented rather than
-	// fixed: the engine has one numeric tower and it is float64.
-	noExactNumericPin = "DELIBERATE: Wadjet has no exact numeric type. PostgreSQL promotes SUM(int4) to " +
-		"int8 and AVG(int4) to numeric so neither can lose a digit; Wadjet computes both in float64 and " +
-		"declares OID 701. benchmarks/tpch/schema.go states the position for the fixture itself " +
-		"(\"monetary values use FLOAT64\"), and the engine has no DECIMAL kernel to promote into. Pinned, " +
-		"not exempted: the day a NUMERIC type lands, this entry fails and says so. The client-visible " +
-		"cost is real — a JDBC client reads a BigDecimal column as a Double, and a SUM past 2^53 loses " +
-		"low digits"
+	// fixed. It USED to say "Wadjet has no exact numeric type … computes both
+	// in float64 and declares OID 701"; #784 made SUM/AVG over a COLUMN follow
+	// PostgreSQL exactly, and the pin on that shape is gone. What remains is
+	// one step narrower and is the integer WIDTH, not the tower.
+	noExactNumericPin = "DELIBERATE: wadjet declares every integer EXPRESSION int8 (ADR-0024's recorded " +
+		"divergence, \"every integer spelling computes and is declared INT64\"), so PostgreSQL's " +
+		"SUM(int4) -> bigint becomes wadjet's SUM(int8) -> numeric here. Both are EXACT and the values " +
+		"agree digit for digit; the client is told a different width. Pinned, not exempted: the day the " +
+		"integer widths follow PostgreSQL's, this entry fails and says so"
 )
 
 // wireCorpus is the statement set the protocol arm compares. Each entry is
@@ -622,14 +623,20 @@ func wireCorpus() []wireCase {
 		// truncates silently past 2^31. Wadjet agrees on the OID here.
 		{name: "CountStar", sql: `SELECT COUNT(*) AS c FROM nation`},
 		// SUM over an int4 column is int8 in PostgreSQL and AVG is numeric.
+		// The OID and SIZE pins are GONE since #784: `pg_typeof(sum(int4))` is
+		// bigint and `pg_typeof(avg(int4))` is numeric on the live server, and
+		// wadjet declares OID 20 and 1700 for them now instead of 701. This is
+		// the wire arm's own proof of that fix — a value oracle cannot see a
+		// right number under a wrong OID.
 		{name: "SumAvgOverInteger", sql: `SELECT SUM(n_regionkey) AS s, AVG(n_regionkey) AS a FROM nation`,
 			pins: map[string]string{
-				wirePropTypeOIDs: noExactNumericPin,
-				wirePropTypeSizes: noExactNumericPin + " — the declared SIZE follows the OID: 8 for float8, " +
-					"-1 for a variable-length numeric",
-				wirePropFloatRender: "DELIBERATE, same cause: PostgreSQL renders a NUMERIC average with its " +
-					"full scale (\"2.0000000000000000\") and Wadjet renders a float64 (\"2\"). Same number, " +
-					"and any client that parses it gets the same value; a client that string-compares does not",
+				wirePropFloatRender: "DELIBERATE: the AVG SCALE. PostgreSQL's numeric division picks a " +
+					"MAGNITUDE-DEPENDENT scale (\"2.0000000000000000\" — sixteen digits here and eight " +
+					"over a wider column) and wadjet answers at the fixed batch.AvgScale(0) = 4 " +
+					"(\"2.0000\"), because a scale that depends on the values makes the same query over " +
+					"more rows change the type of its own output column — ADR-0024's explicitly rejected " +
+					"alternative. Same number, exact on both sides to the digits each keeps, agreeing to " +
+					"min(scale): ADR-0012 item 9's class",
 			}},
 		// Integer arithmetic inside a CASE arm, at the wire. Both engines
 		// answer the same digits here and the OID underneath them said
@@ -1392,9 +1399,6 @@ func decimalWirePins(n int) map[string]string {
 	const digitsKept = "DELIBERATE: PostgreSQL's numeric is unbounded, so AVG and `/` keep every digit; " +
 		"wadjet's finite carrier keeps the (p,s) ADR-0024 item 3 computes — DECIMAL(38,6) here. Both are " +
 		"exact to the digits they keep and agree to min(scale). ADR-0012 item 9's accepted divergence."
-	const scalarSubquery = "#696 — a DECIMAL column compared against a SCALAR SUBQUERY's value selects " +
-		"the wrong rows, so this group's count is inflated. The VALUE of the subquery is right; the " +
-		"substitution into the comparison is not."
 	switch n {
 	case 1:
 		// avg_price and avg_disc only: the three SUMs agree digit for digit.
@@ -1424,7 +1428,12 @@ func decimalWirePins(n int) map[string]string {
 		// standing SUM(int4) divergence, surfaced here because no wire case
 		// carried this shape before. The SIZE agrees (float8 and int8 are
 		// both 8 bytes), so only the OID is pinned.
-		return map[string]string{wirePropTypeOIDs: noExactNumericPin}
+		// Q12 sums a CASE, not a column, and it is GATED again since #784:
+		// PostgreSQL types the CASE `integer` and its SUM `bigint` (OID 20),
+		// and a computed integer argument declares bigint here too — the one
+		// narrowing aggOutputFromInputDecl makes, precisely so this shape
+		// keeps PostgreSQL's width.
+		return nil
 	// Q02 and Q18 were pinned for #697 — a subquery anywhere in the statement
 	// dropped the typmod of every BARE DECIMAL output column, so PostgreSQL
 	// sent numeric(15,2) and wadjet -1. Q08 and Q14 were pinned for #695, whose
@@ -1441,11 +1450,10 @@ func decimalWirePins(n int) map[string]string {
 		// at its own scale. Same number, and the OID and modifier beside it
 		// are compared and agree.
 		return map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}
-	case 22:
-		return map[string]string{
-			wirePropValuesText:   scalarSubquery,
-			wirePropBinaryDecode: scalarSubquery,
-		}
+		// Q22 was pinned for #696 — `c_acctbal > (SELECT AVG(c_acctbal) …)` selected
+		// the wrong rows, so the group's values and their binary decodings both
+		// diverged. Both halves of the substitution are fixed and every wire
+		// property agrees, so the query is gated again.
 	}
 	return nil
 }

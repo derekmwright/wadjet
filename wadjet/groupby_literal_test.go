@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -61,6 +62,15 @@ func TestGroupByLiteralKeyElision(t *testing.T) {
 			s = v
 		case float64:
 			s = int64(v)
+		case string:
+			// SUM over an INT64 column is PostgreSQL's `numeric` since #784,
+			// so it boxes as DECIMAL text. This test is about the literal key
+			// elision, not the carrier.
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				t.Fatalf("k=%v: SUM did not render as an integer: %v", r["k"], err)
+			}
+			s = n
 		}
 		if s != wantS[k] {
 			t.Fatalf("k=%s sum=%d want %d (row %v)", k, s, wantS[k], r)

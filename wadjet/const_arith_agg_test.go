@@ -3,6 +3,7 @@ package wadjet
 import (
 	"context"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -89,6 +90,15 @@ func toF(v any) (float64, bool) {
 		return float64(x), true
 	case int32:
 		return float64(x), true
+	case string:
+		// A DECIMAL boxes as its rendered TEXT, and SUM/AVG over an INT64
+		// column is PostgreSQL's `numeric` since #784 — `SUM(v + 10)` over an
+		// int8 column is numeric there too. These tests are about the VALUE
+		// the const-arith rewrite produces, so the carrier it arrives in is
+		// read rather than asserted.
+		if f, err := strconv.ParseFloat(x, 64); err == nil {
+			return f, true
+		}
 	}
 	return 0, false
 }
