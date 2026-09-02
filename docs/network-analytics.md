@@ -95,7 +95,7 @@ pipeline:
         root.app = $parsed.app_name
         root.severity = $parsed.severity
         root.raw_message = $parsed.message
-        root.date = $parsed.timestamp.format_timestamp("2006-01-02")
+        root.day = $parsed.timestamp.format_timestamp("2006-01-02")
 
     # Extract firewall-specific fields from the message body
     # Example: "SRC=10.0.1.5 DST=192.168.1.100 PROTO=TCP SPT=54321 DPT=443 ACTION=ALLOW"
@@ -124,7 +124,7 @@ pipeline:
 output:
   aws_s3:
     bucket: wadjet
-    path: 'data/firewall_logs/date=${! this.date }/device=${! this.device }/part-${! uuid_v4() }.parquet'
+    path: 'tables/firewall_logs/day=${! this.day }/device=${! this.device }/part-${! uuid_v4() }.parquet'
     batching:
       count: 100000
       period: 30s
@@ -154,7 +154,7 @@ output:
           type: UTF8
         - name: raw_message
           type: UTF8
-        - name: date
+        - name: day
           type: UTF8
     region: us-east-1
     endpoint: http://localhost:9000
@@ -180,7 +180,7 @@ pipeline:
   processors:
     - mapping: |
         root.timestamp = this.TimeReceived
-        root.date = (this.TimeReceived / 1000).format_timestamp("2006-01-02")
+        root.day = (this.TimeReceived / 1000).format_timestamp("2006-01-02")
         root.src_ip = this.SrcAddr
         root.dst_ip = this.DstAddr
         root.src_port = this.SrcPort
@@ -202,7 +202,7 @@ pipeline:
 output:
   aws_s3:
     bucket: wadjet
-    path: 'data/netflow/date=${! this.date }/exporter=${! this.exporter }/part-${! uuid_v4() }.parquet'
+    path: 'tables/netflow/day=${! this.day }/exporter=${! this.exporter }/part-${! uuid_v4() }.parquet'
     batching:
       count: 250000
       period: 30s
@@ -242,7 +242,7 @@ output:
           type: INT64
         - name: dst_as
           type: INT64
-        - name: date
+        - name: day
           type: UTF8
     region: us-east-1
     endpoint: http://localhost:9000
@@ -288,7 +288,7 @@ pipeline:
 output:
   aws_s3:
     bucket: wadjet
-    path: 'data/device_inventory/snapshot-${! now().format_timestamp("2006-01-02T15-04-05") }.parquet'
+    path: 'tables/device_inventory/snapshot-${! now().format_timestamp("2006-01-02T15-04-05") }.parquet'
     codec: parquet
     parquet_encoding:
       schema:
@@ -325,6 +325,23 @@ output:
 
 After Bento starts writing data, register the tables so Wadjet can query them.
 
+> **Registration is not a supported out-of-tree workflow at this commit.**
+> Three constraints apply, and all three are load-bearing:
+>
+> 1. `wadjet.Config.Store` is `objstore.Store` and `CreateTable` takes
+>    `parquet.Schema`, both from `internal/...` packages. Go forbids importing
+>    those from outside `github.com/derekmwright/wadjet` — the program below
+>    fails to build with `use of internal package ... not allowed`.
+>    Registration code must live inside this repository (`cmd/`) today.
+> 2. `wadjet.Open` with no `MetaKV` gets an in-memory catalog. Anything it
+>    registers dies with the process and is invisible to `wadjet serve`, whose
+>    catalog is NATS-backed. Pass `Config.MetaKV` built from the same NATS
+>    JetStream the server uses.
+> 3. `CreateTable` writes an EMPTY manifest. Queries resolve data files from
+>    the manifest only — there is no prefix discovery — so Bento-written
+>    objects must additionally be registered with `catalog.AddFiles`.
+>    Registered paths must sit under `tables/<name>/`.
+
 ```go
 // register_tables.go
 package main
@@ -341,7 +358,7 @@ import (
 func main() {
     ctx := context.Background()
 
-    store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+    store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
         Endpoint:  "localhost:9000",
         AccessKey: "minioadmin",
         SecretKey: "minioadmin",
@@ -373,7 +390,7 @@ func main() {
             {Name: "traffic_class", Type: parquet.TypeString},
             {Name: "raw_message", Type: parquet.TypeString},
         },
-    }, []string{"date", "device"})
+    }, []string{"day", "device"})
 
     // NetFlow
     db.CreateTable(ctx, "netflow", parquet.Schema{
@@ -395,7 +412,7 @@ func main() {
             {Name: "src_as", Type: parquet.TypeInt64},
             {Name: "dst_as", Type: parquet.TypeInt64},
         },
-    }, []string{"date", "exporter"})
+    }, []string{"day", "exporter"})
 
     // Device inventory
     db.CreateTable(ctx, "device_inventory", parquet.Schema{
@@ -429,7 +446,7 @@ func main() {
 -- Top denied connections by source
 wadjet> SELECT src_ip, COUNT(*) AS denied
         FROM firewall_logs
-        WHERE date = '2026-03-15' AND action = 'DENY'
+        WHERE day = '2026-03-15' AND action = 'DENY'
         GROUP BY src_ip
         ORDER BY denied DESC
         LIMIT 20;
@@ -437,7 +454,7 @@ wadjet> SELECT src_ip, COUNT(*) AS denied
 -- Bandwidth by AS path
 wadjet> SELECT src_as, dst_as, SUM(bytes) AS total_bytes, SUM(packets) AS total_pkts
         FROM netflow
-        WHERE date = '2026-03-15'
+        WHERE day = '2026-03-15'
         GROUP BY src_as, dst_as
         ORDER BY total_bytes DESC
         LIMIT 25;
@@ -448,7 +465,7 @@ wadjet> SELECT d.hostname, d.location, d.role,
                COUNT(*) AS flow_count
         FROM netflow n
         JOIN device_inventory d ON n.exporter = d.ip_address
-        WHERE n.date = '2026-03-15'
+        WHERE n.day = '2026-03-15'
         GROUP BY d.hostname, d.location, d.role
         ORDER BY total_bytes DESC;
 ```
@@ -460,7 +477,7 @@ wadjet> SELECT d.hostname, d.location, d.role,
 curl -s -X POST http://localhost:8080/v1/queries \
   -H "Content-Type: application/json" \
   -d '{
-    "sql": "SELECT CAST(timestamp / 3600000 * 3600000 AS Timestamp) AS hour, COUNT(*) AS denies FROM firewall_logs WHERE date = '\''2026-03-15'\'' AND action = '\''DENY'\'' GROUP BY CAST(timestamp / 3600000 * 3600000 AS Timestamp) ORDER BY hour"
+    "sql": "SELECT date_trunc('\''hour'\'', timestamp) AS hour, COUNT(*) AS denies FROM firewall_logs WHERE day = '\''2026-03-15'\'' AND action = '\''DENY'\'' GROUP BY date_trunc('\''hour'\'', timestamp) ORDER BY hour"
   }' | jq .
 ```
 
@@ -488,26 +505,26 @@ def dashboard_overview():
     # Run multiple queries for the dashboard
     top_talkers = wadjet_query(f"""
         SELECT src_ip, SUM(bytes) AS total_bytes, COUNT(*) AS flows
-        FROM netflow WHERE date = '{today}'
+        FROM netflow WHERE day = '{today}'
         GROUP BY src_ip ORDER BY total_bytes DESC LIMIT 10
     """)
 
     denied_connections = wadjet_query(f"""
         SELECT src_ip, dst_ip, dst_port, COUNT(*) AS attempts
         FROM firewall_logs
-        WHERE date = '{today}' AND action = 'DENY'
+        WHERE day = '{today}' AND action = 'DENY'
         GROUP BY src_ip, dst_ip, dst_port
         ORDER BY attempts DESC LIMIT 10
     """)
 
     traffic_by_protocol = wadjet_query(f"""
         SELECT protocol, SUM(bytes) AS total_bytes, COUNT(*) AS flows
-        FROM netflow WHERE date = '{today}'
+        FROM netflow WHERE day = '{today}'
         GROUP BY protocol ORDER BY total_bytes DESC
     """)
 
     return jsonify({
-        "date": today,
+        "day": today,
         "top_talkers": top_talkers,
         "denied_connections": denied_connections,
         "traffic_by_protocol": traffic_by_protocol,
@@ -527,7 +544,7 @@ def device_detail(hostname):
             SUM(n.bytes) AS total_bytes, COUNT(*) AS flows
         FROM netflow n
         JOIN device_inventory d ON n.exporter = d.ip_address
-        WHERE d.hostname = '{hostname}' AND n.date = '{today}'
+        WHERE d.hostname = '{hostname}' AND n.day = '{today}'
         GROUP BY n.dst_ip, n.dst_port, n.protocol
         ORDER BY total_bytes DESC LIMIT 50
     """)
@@ -566,7 +583,7 @@ type Alert struct {
 
 func main() {
     ctx := context.Background()
-    store, _ := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+    store, _ := objstore.NewMinIOStore(objstore.MinIOConfig{
         Endpoint:  "localhost:9000",
         AccessKey: "minioadmin",
         SecretKey: "minioadmin",
@@ -593,7 +610,7 @@ func runChecks(ctx context.Context, db *wadjet.DB) []Alert {
     result, _ := db.Query(ctx, fmt.Sprintf(`
         SELECT src_ip, COUNT(DISTINCT dst_port) AS ports, COUNT(*) AS flows
         FROM firewall_logs
-        WHERE date = '%s' AND action = 'DENY'
+        WHERE day = '%s' AND action = 'DENY'
         GROUP BY src_ip
         HAVING COUNT(DISTINCT dst_port) > 100
     `, today))
@@ -610,7 +627,7 @@ func runChecks(ctx context.Context, db *wadjet.DB) []Alert {
     result, _ = db.Query(ctx, fmt.Sprintf(`
         SELECT src_ip, SUM(bytes) AS total_bytes
         FROM netflow
-        WHERE date = '%s'
+        WHERE day = '%s'
         GROUP BY src_ip
         HAVING SUM(bytes) > 10737418240
     `, today)) // > 10 GB
@@ -627,7 +644,7 @@ func runChecks(ctx context.Context, db *wadjet.DB) []Alert {
     result, _ = db.Query(ctx, fmt.Sprintf(`
         SELECT COUNT(*) AS deny_count
         FROM firewall_logs
-        WHERE date = '%s' AND action = 'DENY'
+        WHERE day = '%s' AND action = 'DENY'
     `, today))
     if len(result.Rows) > 0 {
         if count, ok := result.Rows[0]["deny_count"].(int64); ok && count > 100000 {
@@ -662,7 +679,7 @@ Wadjet's HTTP API can be used as a JSON data source in Grafana via the [JSON API
 ```
 POST /v1/queries
 {
-  "sql": "SELECT CAST(timestamp / 3600000 * 3600000 AS Timestamp) AS time, SUM(bytes) AS bytes FROM netflow WHERE date = '${__from:date:YYYY-MM-DD}' GROUP BY CAST(timestamp / 3600000 * 3600000 AS Timestamp) ORDER BY time"
+  "sql": "SELECT date_trunc('hour', timestamp) AS time, SUM(bytes) AS bytes FROM netflow WHERE day = '${__from:date:YYYY-MM-DD}' GROUP BY date_trunc('hour', timestamp) ORDER BY time"
 }
 ```
 
@@ -680,7 +697,7 @@ POST /v1/queries
 - [ ] Syslog collection configured on all network devices
 - [ ] NetFlow/IPFIX export enabled on core routers and switches
 - [ ] Bento batching tuned for 64–256 MB Parquet files
-- [ ] Partition keys chosen (typically `date` + one device/region dimension)
+- [ ] Partition keys chosen (a prunable time key — `year`/`month`/`day`/`hour` — plus at most one device/region dimension, which organizes storage but does not prune)
 - [ ] All tables registered in the Wadjet catalog
 
 ### Security

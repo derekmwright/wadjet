@@ -51,7 +51,7 @@ Variable-length types use an **offset/data** columnar layout: a contiguous data 
 | `Port` | `uint16` (in `Int32Data`) | 2 bytes | Integer 0–65535 | Transport-layer ports |
 | `Protocol` | `uint8` (in `Int32Data`) | 1 byte | IANA protocol number | IP protocol (6=TCP, 17=UDP) |
 
-Network types are stored in their compact binary representations (not as strings), enabling efficient comparison and aggregation while maintaining human-readable input/output formats.
+IPv4, IPv6, MAC, Port and Protocol are stored in compact binary representations rather than as text, enabling efficient comparison and aggregation while keeping human-readable input/output formats. CIDR is the exception: it stores its text form directly.
 
 ### Temporal Types
 
@@ -102,7 +102,7 @@ FROM http_logs
 
 **JSON extraction:** `json_extract`, `json_extract_scalar`, `json_array_length`, `json_valid`
 
-Nested types are fully supported in Parquet read (LIST/MAP/STRUCT pattern detection) and display output.
+Nested types round-trip through Parquet in both directions — written as the standard LIST/MAP/STRUCT shapes and detected by the same patterns on read — and render in display output. Containers may nest inside containers.
 
 ### Vector Type
 
@@ -120,7 +120,7 @@ CREATE TABLE doc_embeddings (
     embedding VECTOR(1536)
 )
 
--- Generate embeddings from text (requires WADJET_OPENAI_API_KEY)
+-- Generate embeddings from text (requires a configured embedding provider)
 SELECT embed('lateral movement detected') AS vec
 
 -- Semantic similarity search
@@ -136,8 +136,12 @@ ORDER BY score DESC LIMIT 10
 
 Configure the embedding provider via environment variables:
 ```bash
-export WADJET_OPENAI_API_KEY=sk-...
-export WADJET_EMBED_MODEL=text-embedding-3-small  # default
+export WADJET_EMBED_PROVIDER=openai              # openai (default) | voyage | ollama
+export WADJET_OPENAI_API_KEY=sk-...              # openai
+export WADJET_VOYAGE_API_KEY=pa-...              # voyage
+export WADJET_OLLAMA_URL=http://localhost:11434  # ollama (keyless)
+export WADJET_EMBED_MODEL=text-embedding-3-small # default for openai
+export WADJET_EMBED_DIM=1536                     # when the model's width is not in the built-in table
 ```
 
 Supported models: `text-embedding-3-small` (1536-dim), `text-embedding-3-large` (3072-dim). Embeddings are cached in an LRU cache (50K entries) to avoid repeat API calls.
@@ -180,6 +184,12 @@ schema := parquet.Schema{
 
 Column types are referenced as `parquet.TypeXxx` constants (e.g., `parquet.TypeIPv4`, `parquet.TypeTimestamp`). The `Nullable` field on `Column` defaults to `false`; set it to `true` to allow nulls.
 
+`parquet.Schema` lives in an internal package, so this constructor form is
+available only to code inside the Wadjet module. Everything else creates tables
+with the `CREATE TABLE` DDL through `db.Query(...)`, which resolves the same
+declarations — including parameterized `DECIMAL(p,s)`, `ARRAY(T)`, `ROW(...)`,
+`MAP(K,V)` and `VECTOR(N)` — through the one checked converter.
+
 ### In Parquet (Automatic Mapping)
 
 When reading Parquet files written by external tools (e.g., Bento), Wadjet automatically infers types from the Parquet schema:
@@ -193,8 +203,14 @@ When reading Parquet files written by external tools (e.g., Bento), Wadjet autom
 | DOUBLE | none | Float64 |
 | BOOLEAN | none | Bool |
 | BYTE_ARRAY | UTF8 | String |
-| BYTE_ARRAY | none | Bytes |
-| INT64 | DECIMAL | Decimal |
+| BYTE_ARRAY | none | String |
+| INT32 | DATE | Date |
+| INT64 | TIMESTAMP_MICROS / TIMESTAMP_NANOS | Timestamp (rescaled to milliseconds) |
+| FIXED_LEN_BYTE_ARRAY / INT32 / BYTE_ARRAY | DECIMAL | Decimal |
+| FIXED_LEN_BYTE_ARRAY | UUID | UUID |
+| BYTE_ARRAY | JSON, ENUM | String |
+| INT32 / INT64 | INTEGER | Int32 when bit width <= 32, otherwise Int64 |
+| INT32 / INT64 | TIME_MILLIS / TIME_MICROS | Int32 / Int64 (raw, in the file's own unit — there is no time-of-day type) |
 
 Network types (`IPv4`, `IPv6`, `CIDR`, `MAC`) require explicit schema registration since Parquet has no native representation for these. When creating a table via the API, specify the schema with the correct network types, and the ingester will handle conversion.
 
@@ -208,6 +224,15 @@ The expression compiler handles implicit type promotion in arithmetic and compar
 | Int32 | Float64 | Float64 |
 | Int64 | Float64 | Float64 |
 | Float32 | Float64 | Float64 |
+| Int32 | Int32 | Int64 (integer arithmetic stays exact; a result outside int64 is SQLSTATE 22003, never a wrapped number) |
+| Int32 / Int64 | Decimal(p,s) | Decimal — the integer contributes its whole range at scale 0 (10 digits for Int32, 19 for Int64) |
+| Decimal(p1,s1) | Decimal(p2,s2) | Decimal(min(38, max(p-s) + max(s)), max(s1,s2)); a value with no 128-bit carrier at that type is SQLSTATE 22003 |
+
+Integer division truncates toward zero, following PostgreSQL. Aggregates over
+integers are exact types, not float64: `SUM(int4)` is `bigint`, `SUM(int8)` is
+`numeric(38,0)`, and `AVG` over any integer is `numeric(38,4)`. `SUM` over a
+`DECIMAL(p,s)` is `DECIMAL(38,s)` and `AVG` is `DECIMAL(38,s+4)`. An overflow is
+SQLSTATE 22003, never a wrapped or saturated number.
 
 Explicit casting is available via `CAST(column AS type)`:
 

@@ -30,8 +30,8 @@ The coordinator is the single entry point for queries:
 
 1. Receives SQL via HTTP or gRPC API
 2. Parses and plans the query
-3. Routes to probe-split pipeline (preferred) or single-worker pipeline (fallback)
-4. For probe-split: partitions the largest table's files across workers, publishes pipeline tasks
+3. Routes the query: under `--local-fastpath-bytes` of post-pruning scan bytes (64 MiB default) it executes in-process on the coordinator; otherwise it dispatches a multi-stage DAG
+4. For the DAG: emits stages whose outputs materialize to object storage, choosing broadcast, probe-split or hash-shuffle per join
 5. For federated queries, expands scan stages per-cluster via `ExpandFederatedScans`
 6. Waits for result notifications from workers (request/reply with ACK)
 7. Merges partial results: re-aggregation, sort/limit, DISTINCT dedup
@@ -47,7 +47,7 @@ Workers are stateless compute nodes that:
 3. Check if query is still active before executing (prevents stale task waste)
 4. Execute pipeline tasks: full SQL on the worker, with optional probe-split file filter
 5. Read data from S3 (checking LRU cache first)
-6. Publish result notifications with request/reply ACK (results < 64 KB are inlined)
+6. Publish result notifications with request/reply ACK (results under 512 KB are inlined)
 7. Send heartbeats every 10 seconds (with cluster ID and active task IDs for liveness tracking)
 
 ### NATS JetStream
@@ -97,6 +97,10 @@ On each worker node:
 Workers automatically register with the coordinator and begin pulling tasks. The `--cluster-id` determines which tasks a worker pulls — it only processes tasks targeted at its cluster. See [Performance Tuning](tuning.md) for guidance on `--memory-budget`, `--spill-dir`, and `--result-store` sizing.
 
 ### Docker Compose Example
+
+> The repository ships no Dockerfile and publishes no container image. Build
+> and push your own from `./cmd/wadjet`, then replace `build: .` and the
+> `image:` values below with your registry path.
 
 ```yaml
 version: "3.8"
@@ -328,8 +332,9 @@ graph TD
 | `join` | Hash join between two datasets | Per-partition of probe side |
 | `sort` | Sort intermediate results | Single task (pipeline breaker) |
 | `window` | Window functions (ROW_NUMBER, RANK, etc.) | Per-partition |
+| `shuffle` | Hash-partition rows into N `.wshf` exchange files | Per input file slice |
 
-All task types respect per-task memory budgets. Sort, aggregate, and window tasks spill to disk when their memory budget is exceeded.
+All task types respect per-task memory budgets. Every pipeline breaker — hash join, hash aggregate, sort and window — spills to disk when its memory budget is exceeded.
 
 ## Worker Tuning
 
@@ -339,7 +344,7 @@ Each worker defaults to processing 4 tasks concurrently. For CPU-heavy workloads
 
 ### Memory Budget and Spill-to-Disk
 
-Workers can be configured with a per-task memory budget (`--memory-budget`). When operators (Sort, HashAggregate, Window) exceed the budget, they spill intermediate state to disk instead of growing memory unboundedly. This makes workers viable at 512 MB - 2 GB RAM.
+Workers can be configured with a per-task memory budget (`--memory-budget`). When a pipeline breaker (HashJoin, HashAggregate, Sort, Window) exceeds the budget, it spills intermediate state to disk instead of growing memory unboundedly. This makes workers viable at 512 MB - 2 GB RAM.
 
 Set `--spill-dir` to a fast local disk (SSD/NVMe preferred) for best spill performance. Spill files are cleaned up automatically after each task completes.
 
@@ -347,11 +352,11 @@ Set `--spill-dir` to a fast local disk (SSD/NVMe preferred) for best spill perfo
 
 Enable `--result-store` to cache intermediate stage results in memory, avoiding S3 round-trips between stages that execute on the same worker. This is the single biggest optimization for multi-stage query latency.
 
-Results below 64 KB are always passed inline via NATS messages regardless of result store configuration.
+Results below 512 KB are always passed inline via NATS messages regardless of result store configuration.
 
 ### LRU Cache
 
-Workers cache recently-read Parquet file data in an LRU cache (256 MB default). This benefits:
+Workers cache recently-read Parquet file data in an LRU cache (`--cache-bytes`; the default of `0` auto-sizes it to 20% of detected memory). This benefits:
 
 - Repeated queries against the same time range
 - Join probes that reference the same build-side data

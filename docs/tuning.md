@@ -6,13 +6,13 @@ This guide covers how to configure Wadjet for different hardware profiles — fr
 
 | Parameter | CLI Flag | YAML Key | Default | What It Controls |
 |-----------|----------|----------|---------|------------------|
-| Worker concurrency | — | `worker.max_concurrent` | 4 | Parallel tasks per worker |
-| LRU cache size | — | `worker.cache_bytes` | 256 MB | Parquet data cache |
-| Memory budget | `--memory-budget` | `worker.memory_budget` | 0 (unlimited) | Per-task memory limit before spilling to disk |
+| Worker concurrency | `--max-concurrent` | `worker.max_concurrent` | 4 | Parallel tasks per worker |
+| LRU cache size | `--cache-bytes` | `worker.cache_bytes` | 0 = auto (20% of memory) | Parquet data cache |
+| Memory budget | `--memory-budget` | `worker.memory_budget` | 0 (auto-detect from cgroup, else unlimited) | Per-task memory limit before spilling to disk |
 | Spill directory | `--spill-dir` | `worker.spill_dir` | OS temp dir | Where spill files are written |
-| Result store | `--result-store` | `worker.result_store_bytes` | 0 (disabled) | In-memory cache for intermediate stage results |
+| Result store | `--result-store` | `worker.result_store_bytes` | 512 MiB | In-memory cache for intermediate stage results (0 = disabled) |
 | Parquet compression | — | `parquet.compression` | snappy | Codec for written Parquet files |
-| Row group size | — | `parquet.row_group_size` | 128,000 rows | Rows per row group |
+| Row group size | — | `parquet.row_group_size` | 131,072 rows (128 K) | Rows per row group |
 | Page buffer size | — | `parquet.page_buffer_size` | 256 KB | Parquet page buffer |
 | Ingestion flush size | — | (compile-time) | 128 MB | Buffer size before flush |
 | Ingestion flush rows | — | (compile-time) | 1,000,000 | Row count before flush |
@@ -288,10 +288,10 @@ rate(wadjet_cache_hits_total[5m]) / (rate(wadjet_cache_hits_total[5m]) + rate(wa
 
 ## Deep Dive: Memory Budget vs Disk Spill
 
-The `memory_budget` parameter controls the per-task threshold where operators (Sort, HashAggregate, Window) spill intermediate state to disk instead of growing memory.
+The `memory_budget` parameter controls the per-task threshold where pipeline breakers (HashJoin, HashAggregate, Sort, Window) spill intermediate state to disk instead of growing memory.
 
 ```
-memory_budget = 0   → unlimited memory, no spill (risk OOM on large datasets)
+memory_budget = 0   → auto-detect a cgroup limit; unlimited only on an uncapped host
 memory_budget = 64M → spill after 64 MB per task (conservative, many spills)
 memory_budget = 1G  → spill after 1 GB per task (aggressive, rare spills)
 ```

@@ -31,8 +31,9 @@ psql -h localhost -p 5432 -U wadjet -d wadjet
 ```
 
 Everything in one process: embedded NATS (`--nats-port`, default 4222),
-pgwire, HTTP (`:8080`), gRPC (`:9090`), Prometheus (`--metrics-addr`,
-default `:9100`).
+pgwire, HTTP (`:8080`), gRPC (`:9090`). Prometheus `/metrics` is served on the
+HTTP API port here — `--metrics-addr` (default `:9100`) binds a listener only
+in **worker** mode.
 
 ### 1.3 Standalone against S3-compatible storage
 
@@ -221,7 +222,7 @@ what a SET-style facility could expose cheaply vs never.
 | `--log-level` | info | slog level | **feasible** (slog LevelVar pattern) |
 | `--otel-endpoint`, `--otel-insecure` | — | tracing exporter | boot-only |
 | `--geoip-city`, `--geoip-asn` | — | GeoIP databases | feasible-with-work (reload) |
-| `--config` | — | YAML file mirroring these flags | n/a |
+| `--config` | — | YAML file; **only the `auth:` and `geoip:` sections are applied at runtime**. The `storage:`/`nats:`/`http:`/`grpc:`/`worker:`/`parquet:`/`query_limits:` sections parse but never reach the running process — use the flags above. See `configuration.md`. **Known breakage at this commit: passing `--config` panics the HTTP server at startup** (auth middleware is installed after the routes are registered). | n/a |
 
 ## 3. Runtime switches: current state and the path there
 

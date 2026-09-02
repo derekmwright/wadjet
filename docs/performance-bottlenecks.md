@@ -2,6 +2,13 @@
 
 > Deep analysis of Wadjet's execution engine, scan layer, join/sort/aggregate operators, memory management, and distributed execution. Findings prioritized by estimated impact on TPC-H SF1+ workloads.
 
+> **Last verified against `9786ed72` (2026-09-02).** Sections 1, 2, 3, 10, 12
+> and 15 are **CLOSED** — resolved after the original analysis — and are marked
+> as such below; 6, 7 and 5 are largely closed. Sections 8 and 13 still hold.
+> Section 9's evidence no longer exists in the code and needs re-deriving.
+> Most `file:line` anchors below predate several refactors; treat them as
+> approximate and grep for the symbol instead.
+
 ## Executive Summary
 
 Wadjet's execution engine is well-optimized with typed kernels, SoA accumulators, Fibonacci hashing, bloom filter pre-filtering, and arena-based allocation. The codebase shows evidence of careful performance tuning (inline probing saves ~2.5GB allocations at SF1, SoA reduces aggregate working set from ~192MB to ~16MB for 2M groups).
@@ -15,7 +22,9 @@ The remaining bottlenecks fall into three categories:
 
 ## P0: High-Impact Bottlenecks
 
-### 1. Distinct Operator: Per-Row String Allocation
+### 1. ~~Distinct Operator: Per-Row String Allocation~~ — CLOSED
+
+> **CLOSED since this analysis was written.** The dedicated `Distinct` operator was removed and `internal/engine/exec/distinct.go` no longer exists. DISTINCT is planned as a keys-only hash aggregate (`HashAggregate.GroupByAll`), which inherits the aggregate's spill machinery. COUNT(DISTINCT)/APPROX_DISTINCT state already uses the open-addressing sets this section proposed (`internal/engine/exec/distinct_set.go`). The original analysis follows.
 
 **Location:** `internal/engine/exec/distinct.go:61-71`
 
@@ -35,7 +44,9 @@ The `string(d.keyBuf)` conversion allocates a new string for every row to use as
 
 ---
 
-### 2. Spill Sort Falls Back to Row-Oriented Format
+### 2. ~~Spill Sort Falls Back to Row-Oriented Format~~ — CLOSED
+
+> **CLOSED since this analysis was written.** Sort and Window no longer spill boxed rows. Each spill sorts the buffered batches with the typed kernels and writes a **sorted columnar run** (`internal/engine/exec/sort.go`, `sortBatchesToRun`); Finalize streams a k-way merge over the runs holding one batch per run (`finalizeExternalMerge`). See `internal/engine/exec/sort_external.go` and ADR-0027. The original analysis follows.
 
 **Location:** `internal/engine/exec/sort.go:102-145`
 
@@ -57,7 +68,9 @@ The in-memory columnar path (lines 171-305) resolves typed kernels once and uses
 
 ---
 
-### 3. Aggregate Spill Uses ToRows() — Massive GC Pressure
+### 3. ~~Aggregate Spill Uses ToRows()~~ — CLOSED for the grouped path
+
+> **CLOSED since this analysis was written.** HashAggregate spills **already-aggregated partial group state** in a columnar binary format and k-way merges the runs, combining accumulators on equal keys (`internal/engine/exec/aggregate_partial_spill.go`). An ungrouped aggregate never buffers input at all. `ToRows` survives only on the legacy raw-row path for extra-state aggregates and GROUPING SETS. The original analysis follows.
 
 **Location:** `internal/engine/exec/aggregate.go:323-331`
 
@@ -76,6 +89,8 @@ When aggregation spills, `ToRows()` converts columnar batches to row-oriented ma
 
 ### 4. No Page-Level Predicate Pruning in Parquet
 
+> **Still open, but two finer prunes landed meanwhile** and narrow it: dictionary-probe row-group pruning for equality predicates on pure-dictionary chunks (`internal/engine/scan/dict_prune.go`, kill switch `WADJET_DICT_PRUNE`) and RLE-run predicate evaluation (`internal/engine/scan/row_filter.go`). `RowGroupStats` now lives in `internal/storage/parquet/file_reader.go` and reads row-group-level statistics only.
+
 **Location:** `internal/storage/parquet/reader.go:86-120`
 
 Row-group statistics are aggregated from page-level data, but page-level predicates are never evaluated at read time. Entire pages are deserialized even when their min/max statistics prove all rows would be filtered.
@@ -88,7 +103,9 @@ The data is already available — `RowGroupStats()` reads `ci.MinValue(p)` and `
 
 ---
 
-### 5. Full-File S3 Download Strategy
+### 5. Full-File S3 Download Strategy — half closed, half deliberate
+
+> **Partly closed.** Local-fd stores skip the whole-file read entirely and pread each projected column chunk; the worker uses `GetReaderAt` range reads whenever column projection is active (Q07 reading 3 of 16 lineitem columns: 1 GB vs 3.5 GB). **What remains is deliberate:** non-local stores keep the whole-file GET because one object GET beats per-chunk ranged GETs for the narrow TPC-H tables it serves — see `docs/design/scan-pread-reads.md`. Reopening this needs a measurement on a wide table, not a heuristic.
 
 **Location:** `internal/planner/physical/util.go:454-461`
 
@@ -109,7 +126,9 @@ For `SELECT src_ip, dst_ip FROM flows WHERE timestamp > X` projecting 2 of 30 co
 
 ## P1: Medium-Impact Bottlenecks
 
-### 6. Per-Row Type Dispatch in ColumnCompare Filter
+### 6. Per-Row Type Dispatch in ColumnCompare Filter — largely closed
+
+> **Mostly closed.** `ColumnCompare` has no callers; the only production entry to the row-at-a-time family is `ColumnCompareLit`, the declared fallback for what the vectorized kernel refuses. Every literal conversion is hoisted out of the row loop, and vectorized filtering goes through `KernelFilter`, which resolves the type once per batch.
 
 **Location:** `internal/engine/exec/filter.go:109-155`
 
@@ -131,7 +150,9 @@ The `KernelFilter` (lines 354-366) resolves the type once per batch and dispatch
 
 ---
 
-### 7. LIKE Pattern Matching: Exponential Backtracking
+### 7. LIKE Pattern Matching: Exponential Backtracking — largely closed
+
+> **Mostly closed.** `LikeFilter` resolves a kernel whose `compileLikePattern` specializes equality, prefix, suffix and contains before falling back to the general matcher, and LIKE is pushed into the scan and evaluated once per dictionary entry on dict pages (`internal/engine/scan/like_filter.go`). **Residual:** `matchLikeRecur` is still an unmemoized recursive backtracker, reachable only from the row-predicate fallback.
 
 **Location:** `internal/engine/exec/filter.go:223-251`
 
@@ -169,7 +190,9 @@ The Filter operator reuses a `selBuf` scratch buffer. Limit doesn't.
 
 ---
 
-### 9. No Column-Level I/O Parallelism
+### 9. Column-Level I/O Parallelism — needs re-measurement
+
+> **The evidence below no longer exists in the code.** The cited location is now a row-group pruning loop, and the quoted page-read code is gone. Decode-side parallelism has since landed — see `internal/engine/scan/decode_ahead.go`, `docs/design/scan-decompress-parallelism.md` and `docs/design/scan-decode-pipelining.md`. Re-profile a wide-table scan before restating this as a bottleneck; no banked measurement supports the estimate below.
 
 **Location:** `internal/planner/physical/util.go:141-165`
 
@@ -190,7 +213,9 @@ For wide tables with many columns, parallelizing column reads within a row group
 
 ---
 
-### 10. Worker Shuffle Uses ToRows()
+### 10. ~~Worker Shuffle Uses ToRows()~~ — CLOSED
+
+> **CLOSED since this analysis was written.** Shuffle writes the columnar WSHF format directly from record batches, with no row boxing (`internal/worker/partitioned_shuffle_sink.go`, `appendBatchRowsBulk`). The wire format is specified in `internal/wshf/wshf.go` and pinned by ADR-0010; it exists precisely to avoid per-row value allocation. The original analysis follows.
 
 **Location:** `internal/worker/executor.go:672`
 
@@ -211,6 +236,8 @@ Shuffle (redistributing data across partitions) converts columnar batches to row
 
 ### 11. Batch Pool Single-Mutex Contention
 
+> **Half stale.** The mutex still exists (`internal/engine/batch/pool.go`), but the "16 per class" premise below is wrong: the cap is `runtime.NumCPU() * 4`, clamped to 32-256, so the cache-miss half of this is already handled. Only lock contention remains.
+
 **Location:** `internal/engine/batch/pool.go:30`
 
 All `Get()`/`Put()` operations on a pool contend on a single `sync.Mutex`. With 4+ concurrent pipeline workers, this becomes a serialization point.
@@ -221,7 +248,9 @@ All `Get()`/`Put()` operations on a pool contend on a single `sync.Mutex`. With 
 
 ---
 
-### 12. Source.Next() Mutex in Parallel Pipelines
+### 12. ~~Source.Next() Mutex in Parallel Pipelines~~ — CLOSED
+
+> **CLOSED since this analysis was written.** Parallel pipeline workers call `p.Source.Next(workerCtx)` without serialization; there is no `sourceMu` in `internal/engine/exec/pipeline.go`. The remaining `sourceMu` in the tree guards the hash-join parallel build, a different site with its own panic-safety contract. The original analysis follows.
 
 **Location:** `internal/engine/exec/pipeline.go:287-289`
 
@@ -260,6 +289,8 @@ The schema is static for the entire scan.
 
 ### 14. Row-Group Statistics Re-Aggregated Per Query
 
+> **Partly addressed.** The Thrift **footer** decode is now cached process-wide (`internal/storage/parquet/footer_cache.go`); the per-row-group statistics conversion is not. `RowGroupStats` lives in `internal/storage/parquet/file_reader.go`.
+
 **Location:** `internal/storage/parquet/reader.go:66-126`
 
 `RowGroupStats()` re-reads page-level statistics every time it's called. For queries with multiple predicates, the same row group's stats may be parsed multiple times.
@@ -270,7 +301,9 @@ The schema is static for the entire scan.
 
 ---
 
-### 15. Aggregate Hash Table Pre-Sizing Without Cardinality Hints
+### 15. ~~Aggregate Hash Table Pre-Sizing Without Cardinality Hints~~ — CLOSED
+
+> **CLOSED since this analysis was written.** `HashAggregate.GroupNDVHint` carries the planner's HLL-based estimate of GROUP-KEY cardinality and is used when sizing the table; the physical planner sets it from ANALYZE HLL sketches. The 4096 floor remains for plans with no statistics. The original analysis follows.
 
 **Location:** `internal/engine/exec/aggregate.go:450-461`
 
@@ -290,7 +323,9 @@ The comment acknowledges this. The physical planner should provide cardinality e
 
 ---
 
-### 16. Context Check Overhead in Parallel Execution
+### 16. Context Check Overhead in Parallel Execution — not a real asymmetry
+
+> **Corrected.** Neither path samples every 64 batches. The serial chain driver checks `ctx.Err()` once per OUTPUT batch by deliberate choice — a keyless join's fan-out for one input batch is quadratic work, and polling only per source batch let a cancelled statement run 11 more seconds to a normal completion (#368). Parallel workers check once per source pull. One atomic load per <=2048-row batch is noise on both.
 
 **Location:** `internal/engine/exec/pipeline.go:278-285`
 
@@ -319,7 +354,9 @@ Parallel workers check `ctx.Err()` and all `DoneSignaler`s on every batch iterat
 | Semi/anti join | Key-only mode: 2-4x less memory | `join.go:85-89` |
 | Null handling | NoNulls kernel variants skip bitmap checks | `kernel/agg.go:68-71` |
 
-### Recurring Anti-Pattern: Row-Oriented Fallbacks
+### Resolved: Row-Oriented Fallbacks
+
+> **All three converted to columnar formats:** sort/window spill writes sorted columnar runs, aggregate spill writes partial group state, and worker shuffle writes WSHF. The one residual `ToRows` on a spill path is the legacy raw-row buffer for extra-state aggregates and GROUPING SETS. The original analysis follows.
 
 Three separate paths fall back to `map[string]any` row format:
 1. **Sort spill** (`sort.go:102-145`)
@@ -332,6 +369,8 @@ All three could use the columnar serialization from `join_spill.go:347-541`. Uni
 - Reduce spill file sizes (columnar compresses better)
 
 ### Recommended Priority Order
+
+> **Rows 1, 4, 6, 7 and 9 of the table below are done**; row 2 is done for the local-fd and worker paths and deliberately declined for S3; row 8 is largely done. Only rows 3, 5 and 10 survive.
 
 | # | Bottleneck | Effort | Impact |
 |---|-----------|--------|--------|

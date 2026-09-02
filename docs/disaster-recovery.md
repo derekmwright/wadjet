@@ -4,42 +4,48 @@ This runbook documents how to back up, verify, and restore Wadjet catalog metada
 
 ## How Snapshots Work
 
-Wadjet automatically snapshots all catalog metadata (table schemas, partition maps, file entries, column stats) to object storage every 5 minutes. Snapshots are JSON files stored under `_catalog/snapshots/` in the data bucket.
+Catalog snapshots are **opt-in**. Start the coordinator (or standalone) with
+`--catalog-snapshot-s3-prefix=s3://<bucket>/<path>/` and it writes every
+`<cluster>.*` NATS KV key to object storage on a timer. Unset, nothing is
+written.
 
-- **Interval**: 5 minutes (configurable via `catalog_snapshot.interval` or `WADJET_CATALOG_SNAPSHOT_INTERVAL`)
-- **Retention**: 48 snapshots (~4 hours of history, configurable)
-- **Storage**: Same S3 bucket as table data, under `_catalog/snapshots/`
-- **Format**: JSON containing all NATS KV entries for the cluster
+- **Enabled by**: `--catalog-snapshot-s3-prefix` (or `WADJET_CATALOG_SNAPSHOT_PREFIX`)
+- **Interval**: `--catalog-snapshot-interval`, default 5m (or `WADJET_CATALOG_SNAPSHOT_INTERVAL`). `0` disables the timer; explicit `CREATE SNAPSHOT` still works
+- **Retention**: the GC after each tick keeps the 10 newest snapshots plus every snapshot younger than 24h. Not configurable
+- **Layout**: one directory per snapshot, not one file — `<prefix>snapshots/<ts>/manifest.json` is the index, `<prefix>snapshots/<ts>/<kind>/<name>.json` is one file per KV key, and `<prefix>latest` holds the newest `<ts>`
+- **Timestamp format**: `20060102T150405Z` (e.g. `20260327T063000Z`), UTC
 - **Leader-only**: In distributed mode, only the elected leader takes snapshots (prevents duplicates)
 
 ## Verifying Snapshots
 
 ### List Available Snapshots
 
-```bash
-# Via CLI
-wadjet catalog list-snapshots --bucket wadjet --endpoint s3.us-east-2.amazonaws.com --ssl --region us-east-2
+There is no `wadjet catalog list-snapshots` command. List the prefix directly:
 
-# Via S3 directly
-aws s3 ls s3://wadjet/_catalog/snapshots/
+```bash
+aws s3 ls s3://wadjet/catalog/snapshots/
+aws s3 cp s3://wadjet/catalog/latest -   # newest timestamp
 ```
 
-Each snapshot file is named with a timestamp: `_catalog/snapshots/2026-03-27T06:30:00Z.json`
+Each snapshot is a directory named with a UTC timestamp:
+`catalog/snapshots/20260327T063000Z/`
 
 ### Verify Snapshot Contents
 
-Download and inspect a snapshot:
+Download and inspect a snapshot manifest:
 
 ```bash
-aws s3 cp s3://wadjet/_catalog/snapshots/2026-03-27T06:30:00Z.json /tmp/snap.json
-cat /tmp/snap.json | jq '.entries | length'  # number of catalog entries
-cat /tmp/snap.json | jq '.entries[].key' | head  # list entry keys
+aws s3 cp s3://wadjet/catalog/snapshots/20260327T063000Z/manifest.json /tmp/snap.json
+jq '.key_count' /tmp/snap.json          # number of catalog keys
+jq -r '.keys[].kv_key' /tmp/snap.json   # list KV keys
+jq -r '.keys[].s3_path' /tmp/snap.json  # list the per-key object paths
 ```
 
-A healthy snapshot contains entries for:
-- Table schemas (`<cluster>.tables.<name>.schema`)
-- Partition metadata (`<cluster>.tables.<name>.partitions.<partition>`)
-- File entries within each partition
+A healthy snapshot contains keys for:
+- Cluster metadata (`<cluster>.meta` -> `meta.json`)
+- Table schemas (`<cluster>.table.<name>` -> `table/<name>.json`)
+- File manifests (`<cluster>.manifest.<name>` -> `manifest_data/<name>.json`)
+- Alerts, if configured (`<cluster>.alert.<name>` -> `alert/<name>.json`)
 
 ## Restore Procedures
 
@@ -52,30 +58,35 @@ If the NATS KV store is corrupted or lost but S3 data files are intact:
 # 2. Delete the NATS store directory
 rm -rf ~/.wadjet/nats
 
-# 3. Restart the coordinator (empty KV)
-wadjet serve --mode=coordinator ...
-
-# 4. Restore from latest snapshot
-wadjet catalog restore --bucket wadjet --endpoint s3.us-east-2.amazonaws.com --ssl --region us-east-2
+# 3. Restart the coordinator with the restore flag — it restores the newest
+#    snapshot before serving.
+wadjet serve --mode=coordinator \
+  --catalog-snapshot-s3-prefix=s3://wadjet/catalog/ \
+  --force-restore-catalog=latest ...
 ```
+
+Without `--force-restore-catalog`, the coordinator restores automatically only
+when its catalog holds no tables.
 
 ### Scenario 2: Restore to a Specific Point in Time
 
 ```bash
-# 1. List available snapshots
-wadjet catalog list-snapshots ...
+# 1. List snapshot timestamps
+aws s3 ls s3://wadjet/catalog/snapshots/
 
-# 2. Restore from a specific snapshot
-wadjet catalog restore --snapshot-key "_catalog/snapshots/2026-03-27T06:00:00Z.json" --bucket wadjet ...
+# 2. Restore that timestamp
+wadjet serve --mode=coordinator \
+  --catalog-snapshot-s3-prefix=s3://wadjet/catalog/ \
+  --force-restore-catalog=20260327T060000Z ...
 ```
 
 ### Scenario 3: Full Cluster Recovery (New Infrastructure)
 
 1. Deploy new coordinator + workers with the same S3 bucket configuration
-2. Start the coordinator (it will create an empty NATS KV)
-3. Restore the catalog:
+2. Start the coordinator with `--catalog-snapshot-s3-prefix=... --force-restore-catalog=latest`
+3. To take a snapshot on demand against a running coordinator:
    ```bash
-   wadjet catalog restore --bucket wadjet --endpoint s3.us-east-2.amazonaws.com --ssl --region us-east-2
+   wadjet catalog snapshot --coord-addr=<coord-host>:5433
    ```
 4. Verify tables are accessible:
    ```bash
@@ -94,41 +105,43 @@ If S3 data files are lost, snapshots alone cannot recover the data — they only
 
 ## Monitoring Snapshot Health
 
-### Prometheus Metrics
+### Logs and S3
 
-Wadjet exposes snapshot metrics at `/metrics`:
+Wadjet exposes **no** snapshot-specific Prometheus metric. Monitor via logs and S3:
 
-- Check the snapshot timestamp in the coordinator logs for recency
-- Monitor the `_catalog/snapshots/` prefix in S3 for expected file count
+- The coordinator logs a warning on every failed tick (`catalog snapshot tick error`, `catalog snapshot GC error`)
+- Watch the `latest` pointer and the snapshot prefix for recency
 
 ### Manual Health Check
 
 ```bash
-# Verify snapshots are being created (should see files within last 10 minutes)
-aws s3 ls s3://wadjet/_catalog/snapshots/ | tail -5
+# Newest snapshot timestamp
+aws s3 cp s3://wadjet/catalog/latest -
 
-# Verify snapshot is parseable
-aws s3 cp s3://wadjet/_catalog/snapshots/$(aws s3 ls s3://wadjet/_catalog/snapshots/ | tail -1 | awk '{print $4}') - | jq '.entries | length'
+# Verify its manifest is parseable and non-empty
+TS=$(aws s3 cp s3://wadjet/catalog/latest - | tr -d '\n')
+aws s3 cp s3://wadjet/catalog/snapshots/$TS/manifest.json - | jq '.key_count'
 ```
 
 ## Configuration Reference
 
-```yaml
-catalog_snapshot:
-  enabled: true           # default: true
-  interval: "5m"          # snapshot frequency
-  retention: 48           # max snapshots to keep
-  prefix: "_catalog/snapshots"  # S3 key prefix
-  debounce: "30s"         # min time between mutation-triggered snapshots
-  leader_only: true       # only leader snapshots in distributed mode
-```
+Catalog snapshots have **no config-file section**. They are configured by flag
+or environment variable only:
 
-Environment variables: `WADJET_CATALOG_SNAPSHOT_ENABLED`, `WADJET_CATALOG_SNAPSHOT_INTERVAL`, `WADJET_CATALOG_SNAPSHOT_RETENTION`, `WADJET_CATALOG_SNAPSHOT_PREFIX`, `WADJET_CATALOG_SNAPSHOT_DEBOUNCE`, `WADJET_CATALOG_SNAPSHOT_LEADER_ONLY`
+| Flag | Env | Default | Meaning |
+|---|---|---|---|
+| `--catalog-snapshot-s3-prefix` | `WADJET_CATALOG_SNAPSHOT_PREFIX` | unset (disabled) | `s3://bucket/path/` target |
+| `--catalog-snapshot-interval` | `WADJET_CATALOG_SNAPSHOT_INTERVAL` | `5m` | periodic cadence; `0` = explicit-only |
+| `--force-restore-catalog` | — | unset | `latest`, or a specific `20060102T150405Z` timestamp |
+
+Retention (10 newest plus everything under 24h) is fixed in code and has no
+knob. There is no mutation-triggered snapshot: the only triggers are the
+interval ticker and an explicit `CREATE SNAPSHOT`.
 
 ## Recovery Time Objectives
 
 | Scenario | RTO | RPO |
 |----------|-----|-----|
-| NATS KV corruption | ~2 min (restore + restart) | ≤5 min (snapshot interval) |
+| NATS KV corruption | ~2 min (restore + restart) | ≤5 min (snapshot interval, once `--catalog-snapshot-s3-prefix` is set) |
 | Full cluster rebuild | ~10 min (deploy + restore) | ≤5 min |
 | S3 data loss | Depends on re-ingestion | Data since last S3 backup |

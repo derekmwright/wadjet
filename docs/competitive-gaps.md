@@ -13,14 +13,14 @@ Wadjet competes at two levels:
 
 | Strength | Competitor Comparison |
 |----------|----------------------|
-| 21 native types including IPv4, IPv6, CIDR, MAC, Port, Protocol | No competitor has first-class network types; all require string parsing |
+| 22 native types including IPv4, IPv6, CIDR, MAC, Port, Protocol, and VECTOR(N) | No competitor has first-class network types; all require string parsing |
 | 80+ network functions (JA3, DNS, TLS, HTTP, TCP flags, GeoIP) | Splunk has similar via SPL; no SQL engine matches this |
 | Single Go binary, 512 MB viable | DuckDB is single-binary but C++; ClickHouse needs 4+ GB |
 | Distributed over NATS + S3 with zero-coordinator-bottleneck | DuckDB is single-node; ClickHouse needs ZooKeeper/Keeper |
 | PostgreSQL wire protocol (psql, JDBC, Superset, DBeaver) | ClickHouse has its own protocol; DuckDB has no server mode |
 | RBAC + ABAC with row filtering and column masking | Rare in embedded engines; common only in enterprise SIEM |
 | MCP server for AI agent integration | No competitor offers this |
-| Merge-on-read DML (INSERT, UPDATE, DELETE) | DuckDB has DML; ClickHouse UPDATE/DELETE are async mutations |
+| Merge-on-read DML (INSERT, UPDATE, DELETE, MERGE) | DuckDB has DML; ClickHouse UPDATE/DELETE are async mutations |
 
 ---
 
@@ -43,7 +43,21 @@ Wadjet competes at two levels:
 
 ---
 
-### Gap 2: No Built-in Alerting or Detection Rules Engine
+### ~~Gap 2: No Built-in Alerting or Detection Rules Engine~~ — SHIPPED
+
+Wadjet has a `CREATE ALERT` DDL runtime: `CREATE ALERT` / `DROP ALERT` /
+`ALTER ALERT ... ENABLE|DISABLE`, a scheduler that runs alerts on the leader
+coordinator (10 s minimum interval), webhook and table sinks, Prometheus
+metrics, and alert state persisted to a day-partitioned `alert_history` system
+table recording fire time, match snapshot and per-sink delivery status.
+
+**Residual gaps vs. SIEM competitors**:
+- Sigma rule import / MITRE ATT&CK mapping
+- Notification targets beyond webhook and table (email, Slack, PagerDuty — reachable today through a webhook relay)
+- Anomaly-based (as opposed to threshold-based) conditions
+- Acknowledgement workflow (`alert_history` records fires, not triage state)
+
+The original gap analysis follows, for the competitor comparison.
 
 **Impact**: Critical for security analytics. Every SIEM competitor has this.
 
@@ -162,7 +176,7 @@ Wadjet competes at two levels:
 
 ---
 
-### Gap 8: No Full-Text Search
+### Gap 8: No Inverted Index for Full-Text Search — PARTIALLY CLOSED
 
 **Impact**: Medium-high for security analytics (log search is a core SIEM use case).
 
@@ -172,28 +186,36 @@ Wadjet competes at two levels:
 - CrowdStrike LogScale: Regex search across raw events
 - Gravwell: Full raw data search
 
-**Current state**: Wadjet has `LIKE`, `ILIKE`, and regex via scalar functions. No inverted index, no full-text search optimization.
+**Current state**: string predicate pushdown landed. `LIKE`/`NOT LIKE` is
+evaluated inside the scan — once per dictionary entry on dictionary-encoded
+pages — so non-matching strings are never materialized. Dictionary-probe
+row-group pruning answers point filters on high-cardinality string columns from
+the dictionary alone. `contains()` has a vectorized kernel, and `regexp_like` /
+`regexp_matches` have a prepared-regexp fast path.
 
-**What's needed**:
-- At minimum: optimized regex search with Parquet predicate pushdown on string columns
-- Ideally: optional inverted index for high-cardinality string columns (log messages, URLs, user agents)
+**What's still needed**:
+- An optional inverted index for high-cardinality string columns (log messages, URLs, user agents)
+- Parquet bloom-filter reads on the scan side
 
-**Recommendation**: For security analytics, most "search" is structured (filter by IP, port, protocol, time range) where Wadjet excels. Unstructured log search is the gap. A pragmatic approach: optimize string predicate pushdown in the scan layer and add a `CONTAINS` function that can leverage Parquet bloom filters. Full inverted indexing is a large effort with unclear ROI given Wadjet's columnar strengths.
+**Recommendation**: For security analytics, most "search" is structured (filter by IP, port, protocol, time range) where Wadjet excels. The scan-layer half of this gap is done; full inverted indexing remains a large effort with unclear ROI given Wadjet's columnar strengths. Reassess on customer demand.
 
 ---
 
-### Gap 9: No Backup/Restore or Point-in-Time Recovery
+### Gap 9: No Data Backup or Point-in-Time Recovery — PARTIALLY CLOSED
 
 **Impact**: Medium. Required for compliance (SOC 2, HIPAA).
 
-**Current state**: Data lives on S3 (inherently durable). Catalog metadata is in NATS KV (can be reconstructed from S3 manifests). No explicit backup/restore commands.
+**Current state**: Data lives on S3 (inherently durable). Catalog metadata is
+snapshotted to object storage on a timer once `--catalog-snapshot-s3-prefix` is
+set, retaining the 10 newest snapshots plus everything under 24h, taken by the
+elected leader only. `CREATE SNAPSHOT` forces one on demand, and the restore
+procedure is documented in [Disaster Recovery](disaster-recovery.md).
 
-**What's needed**:
-- `BACKUP DATABASE TO 's3://backup-bucket/'`
-- `RESTORE DATABASE FROM 's3://backup-bucket/' AS OF '2024-01-15T00:00:00Z'`
-- Or at minimum: documentation for S3 bucket replication + NATS KV snapshot
+**What's still needed**:
+- `BACKUP DATABASE TO 's3://backup-bucket/'` / `RESTORE DATABASE FROM ... AS OF '...'` as first-class statements
+- Backup of the **data** files, not just catalog metadata (today: rely on S3 cross-region replication)
 
-**Recommendation**: Low engine priority since S3 provides durability. Document the manual backup procedure (S3 cross-region replication + NATS KV export). Add explicit backup/restore commands as a convenience feature later.
+**Recommendation**: Low engine priority — S3 provides data durability and the catalog snapshot path already covers the metadata half. Document the S3 replication story alongside the recovery runbook.
 
 ---
 
@@ -206,7 +228,7 @@ Wadjet competes at two levels:
 - Elasticsearch: Request cache, shard-level cache
 - Superset: Built-in query result cache
 
-**Current state**: Every query re-scans from S3/object store. The worker LRU cache helps with repeated file reads, but query results are not cached.
+**Current state**: Every query re-scans from S3/object store. Query *results* are not cached, but three read caches reduce re-read cost: the worker LRU file cache (`--cache-bytes`), an opt-in worker-lifetime cache of decoded Parquet column chunks (`--decoded-cache-bytes`, default 0), and an opt-in cross-query base-table disk cache that survives restarts (`--base-table-cache-bytes`, default 0).
 
 **Recommendation**: For dashboard workloads, materialized views (Gap 3) solve this better than result caching. If implemented, a simple TTL-based query result cache at the coordinator level would be straightforward. Medium priority.
 
@@ -216,19 +238,26 @@ Wadjet competes at two levels:
 
 ### Gap 11: No ACID Transactions
 
-Wadjet uses merge-on-read for DML. No multi-statement transactions, no isolation levels. This is acceptable for an analytics engine — ClickHouse and DuckDB (in server mode) have similar limitations. Not a competitive gap for the security analytics use case.
+Wadjet uses merge-on-read for DML. No multi-statement transactions, no isolation levels — `BEGIN`/`COMMIT`/`END` are accepted and no-op'd on the wire so BI clients that open a transaction per statement keep working. This is acceptable for an analytics engine — ClickHouse and DuckDB (in server mode) have similar limitations. Not a competitive gap for the security analytics use case.
 
-### Gap 12: No Lateral Joins or Recursive CTEs
+### ~~Gap 12: No Lateral Joins or Recursive CTEs~~ — SHIPPED
 
-Niche SQL features. Lateral joins would help with "top-N per group" patterns common in security analytics (e.g., top 5 destination IPs per source). Recursive CTEs are rarely needed. Low priority but lateral joins would be a quality-of-life improvement.
+`LATERAL` joins parse in both the comma and `JOIN` forms and are decorrelated
+in the logical builder, which covers the "top-N per group" patterns common in
+security analytics. `WITH RECURSIVE` parses and is executed by fixed-point
+iteration in the physical planner.
 
-### Gap 13: No Schema Evolution / ALTER TABLE
+### ~~Gap 13: No Schema Evolution / ALTER TABLE~~ — SHIPPED
 
-Currently requires DROP + CREATE. Would be useful for adding columns to long-lived tables (e.g., adding a new enrichment field). Medium-long term improvement.
+`ALTER TABLE ... ADD | DROP | RENAME COLUMN` is implemented. DROP + CREATE is
+no longer required to add an enrichment field to a long-lived table.
 
-### Gap 14: No OpenTelemetry / Distributed Tracing
+### ~~Gap 14: No OpenTelemetry / Distributed Tracing~~ — SHIPPED
 
-Prometheus metrics exist but no trace context propagation. Useful for debugging slow queries in distributed mode. Low priority for SMB.
+Wadjet generates W3C-compatible TraceID/SpanID and propagates them through NATS
+tasks; `internal/telemetry` bridges those into the OTel SDK and exports over
+OTLP gRPC to Jaeger, Tempo or any OTLP backend, with configurable endpoint, TLS
+and sample rate. Prometheus metrics remain available alongside.
 
 ---
 

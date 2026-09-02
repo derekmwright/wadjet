@@ -13,8 +13,10 @@ Default listen address: `:9090` (configurable via `--grpc-addr` or `grpc.addr` i
 When auth is enabled, gRPC requests must include a bearer token in the `authorization` metadata header. The token can be an API key or JWT.
 
 ```bash
-# grpcurl with bearer token
-grpcurl -H "authorization: Bearer wadjet-key-abc123" \
+# grpcurl with bearer token. The server does not register gRPC reflection,
+# so point grpcurl at the proto file; run from the repo root.
+grpcurl -plaintext -import-path proto -proto wadjet/v1/wadjet.proto \
+  -H "authorization: Bearer wadjet-key-abc123" \
   -d '{"sql": "SELECT * FROM flow_logs LIMIT 10"}' \
   localhost:9090 wadjet.v1.WadjetService/Query
 ```
@@ -83,7 +85,7 @@ The first batch includes `columns`. The last batch includes `stats` and `is_last
 
 ---
 
-### SubmitQuery (async, distributed mode only)
+### SubmitQuery (async)
 
 Submit a query for asynchronous execution. Returns immediately with a query ID.
 
@@ -91,7 +93,7 @@ Submit a query for asynchronous execution. Returns immediately with a query ID.
 rpc SubmitQuery(QueryRequest) returns (SubmitQueryResponse);
 ```
 
-Returns `UNAVAILABLE` in standalone mode.
+Every `wadjet serve` mode has a coordinator — standalone embeds one alongside a worker and NATS — so this works in standalone too. It returns `UNAVAILABLE` only when the gRPC server was constructed without a coordinator, i.e. the embedded library path.
 
 ---
 
@@ -147,7 +149,13 @@ Create a new table with a schema and optional partition keys.
 rpc CreateTable(CreateTableRequest) returns (CreateTableResponse);
 ```
 
-Column types: `BIGINT`, `INT`, `DOUBLE`, `FLOAT`, `VARCHAR`, `BOOLEAN`, `TIMESTAMP`, `IPV4`, `IPV6`, `CIDR`, `MAC`, `PORT`, `PROTOCOL`.
+Column types are resolved by the same declaration parser the SQL DDL uses, which accepts:
+
+- **Scalars and aliases**: `BOOL`/`BOOLEAN`, `INT32`/`INT`/`INTEGER`, `INT64`/`BIGINT`/`LONG`, `FLOAT32`/`FLOAT`, `FLOAT64`/`DOUBLE`, `STRING`/`VARCHAR`/`TEXT`, `BYTES`/`BINARY`/`VARBINARY`, `TIMESTAMP`/`DATETIME`, `IPV4`/`IP`, `IPV6`, `CIDR`, `MAC`/`MACADDR`, `PORT`, `PROTOCOL`/`PROTO`, `DURATION`/`INTERVAL`, `UUID`/`GUID`, `DATE`
+- **Parameterized**: `DECIMAL(p,s)` / `NUMERIC(p,s)` (1 <= p <= 38, 0 <= s <= p), `VECTOR(N)`
+- **Nested**: `ARRAY(T)`, `ROW(name T, ...)` / `STRUCT(...)`, `MAP(K, V)`
+
+An unparseable declaration is refused with `INVALID_ARGUMENT`, carrying the SQLSTATE in the message. Every partition key must also be a column of the schema.
 
 ---
 
@@ -166,7 +174,11 @@ rpc DropTable(DropTableRequest) returns (DropTableResponse);
 The server registers the standard [gRPC health checking protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md):
 
 ```bash
-grpcurl -plaintext localhost:9090 grpc.health.v1.Health/Check
+# grpc.health.v1 is not in this repo's protos; fetch health.proto from grpc-go
+# (grpc/health/v1/health.proto) or vendor it, then point grpcurl at it — the
+# server does not register gRPC reflection.
+grpcurl -plaintext -import-path <dir-containing-grpc> -proto grpc/health/v1/health.proto \
+  localhost:9090 grpc.health.v1.Health/Check
 ```
 
 Service names:
@@ -197,7 +209,7 @@ python -m grpc_tools.protoc \
   -Iproto \
   --python_out=./gen \
   --grpc_python_out=./gen \
-  proto/wadjet/v1/wadjet.proto
+  wadjet/v1/wadjet.proto
 ```
 
 ```python
@@ -240,8 +252,8 @@ client.Query({ sql: "SELECT COUNT(*) AS n FROM flow_logs" }, (err, resp) => {
 Use the [protobuf-gradle-plugin](https://github.com/google/protobuf-gradle-plugin) or `protoc` directly:
 
 ```bash
-protoc --java_out=src/main/java --grpc-java_out=src/main/java \
-  -Iproto proto/wadjet/v1/wadjet.proto
+protoc -Iproto --java_out=src/main/java --grpc-java_out=src/main/java \
+  wadjet/v1/wadjet.proto
 ```
 
 ### Rust
@@ -259,9 +271,10 @@ tonic_build::compile_protos("proto/wadjet/v1/wadjet.proto")?;
 task proto
 
 # Or manually
-protoc --go_out=. --go_opt=paths=source_relative \
-  --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-  proto/wadjet/v1/wadjet.proto
+# This is exactly what `task proto` runs.
+protoc -I=proto --go_out=gen --go_opt=paths=source_relative \
+  --go-grpc_out=gen --go-grpc_opt=paths=source_relative \
+  wadjet/v1/wadjet.proto
 ```
 
 Requires `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc`.
@@ -272,6 +285,6 @@ Requires `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc`.
 |-----------|------|
 | `UNAUTHENTICATED` | Missing or invalid bearer token (when auth enabled) |
 | `INVALID_ARGUMENT` | Empty SQL, missing table name, invalid column type |
-| `NOT_FOUND` | Table does not exist, query ID not found |
+| `NOT_FOUND` (note: `CancelQuery` maps an unknown query ID to `INTERNAL`) | Table does not exist, query ID not found |
 | `UNAVAILABLE` | No query engine configured, async RPCs in standalone mode |
 | `INTERNAL` | Query execution error, storage error |

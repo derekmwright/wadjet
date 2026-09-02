@@ -53,7 +53,7 @@ Execute a SQL query and return results.
 
 | Header | Required | Description |
 |--------|----------|-------------|
-| `Content-Type` | Yes | `application/json` |
+| `Content-Type` | Recommended | `application/json` (the server does not check it — the body is decoded as JSON regardless) |
 | `Authorization` | If auth configured | Bearer token |
 
 **Response (200 OK):**
@@ -83,7 +83,7 @@ Execute a SQL query and return results.
 | `columns` | []string | Ordered list of result column names |
 | `rows` | []object | Array of row objects (column name → value) |
 | `stats.elapsed` | string | Wall-clock execution time |
-| `stats.rows_scanned` | int | Total rows read from storage |
+| `stats.rows_scanned` | int | Rows read from storage on the embedded (no-coordinator) path. On the coordinator path — every `wadjet serve` mode — this carries the **result** row count instead. |
 | `stats.plan` | string | Human-readable execution plan |
 
 **Error Response (400/401/403/500):**
@@ -201,7 +201,7 @@ POST /v1/queries/async
 
 Submit a query for asynchronous execution. Returns immediately with a query ID that can be polled for results.
 
-> **Note:** Async query endpoints (`POST /v1/queries/async`, `GET /v1/queries/{queryID}`, `GET /v1/queries/{queryID}/results`, `DELETE /v1/queries/{queryID}`) require distributed mode (coordinator + workers). In standalone mode, these endpoints return `503 Service Unavailable`.
+> **Note:** The async endpoints (`POST /v1/queries/async`, `GET /v1/queries`, `GET /v1/queries/{queryID}`, `GET /v1/queries/{queryID}/results`, `DELETE /v1/queries/{queryID}`) need a coordinator. Every `wadjet serve` mode has one — standalone embeds a coordinator, a worker and NATS in one process — so these work there too. They return `503 Service Unavailable` only when the HTTP server is constructed without a coordinator, which is the embedded-library path.
 
 **Request:**
 
@@ -309,9 +309,9 @@ Returns Prometheus-formatted metrics. See [Operations](operations.md) for detail
 # HELP wadjet_queries_total Total number of queries executed
 # TYPE wadjet_queries_total counter
 wadjet_queries_total 1523
-# HELP wadjet_rows_scanned_total Total rows scanned across all queries
-# TYPE wadjet_rows_scanned_total counter
-wadjet_rows_scanned_total 45000000
+# HELP wadjet_query_rows_scanned_total Total rows scanned across all queries
+# TYPE wadjet_query_rows_scanned_total counter
+wadjet_query_rows_scanned_total{table="flow_logs"} 45000000
 # HELP wadjet_query_duration_seconds Query execution time
 # TYPE wadjet_query_duration_seconds histogram
 wadjet_query_duration_seconds_bucket{le="0.01"} 892

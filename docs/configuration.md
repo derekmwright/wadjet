@@ -18,12 +18,22 @@ Wadjet is configured through CLI flags, environment variables, and an optional Y
 | `--secret-key` | S3 secret key | required for S3 |
 | `--bucket` | S3 bucket name | `wadjet` |
 | `--nats-port` | Embedded NATS port (standalone/coordinator mode) | `4222` |
-| `--nats-url` | NATS server URL (worker mode) | `nats://localhost:4222` |
+| `--nats-url` | NATS server URL (worker mode) | none |
 | `--cluster-id` | Unique cluster identifier for federated routing | `local` |
 | `--leaf-remote` | Remote NATS URLs for leaf node federation (repeatable) | none |
-| `--memory-budget` | Per-task memory budget in bytes (0 = unlimited, no spill) | `0` |
+| `--memory-budget` | Per-task memory budget in bytes (0 = auto-detect from cgroup, else unlimited) | `0` |
 | `--spill-dir` | Directory for spill-to-disk files | OS temp dir |
-| `--result-store` | In-memory result store capacity in bytes (0 = disabled) | `0` |
+| `--result-store` | In-memory result store capacity in bytes (0 = disabled) | `512 MiB` |
+| `--pg-addr` | PostgreSQL wire protocol listen address | `:5433` |
+| `--metrics-addr` | Prometheus metrics listen address (worker mode only) | `:9100` |
+| `--max-concurrent` | Maximum concurrent tasks per worker | `4` |
+| `--cache-bytes` | LRU file cache size in bytes (0 = auto: 20% of memory) | `0` |
+| `--query-timeout` | Default query timeout (`30s`, `5m`, `0` = unlimited) | `0` |
+| `--morsel-workers` | Intra-fragment parallel consumers (0 = auto, 1 = serial) | `0` |
+| `--local-fastpath-bytes` | Queries under this post-pruning scan size run in-process on the coordinator (0 = disabled) | `64 MiB` |
+| `--shuffle-durability` | Stage-output durability: `eager`, `lazy`, `off` | `eager` |
+| `--skew-split` | Adaptive skew-aware shuffle layout | `true` |
+| `--drain-timeout` | Bound on graceful worker drain (0 = unbounded) | `0` |
 | `--config` | Path to YAML config file | none |
 
 ### `query` Command
@@ -142,7 +152,7 @@ auth:
     - table: flow_logs
       role: reader
       columns:
-        src_ip: "***MASKED***"           # Column masking: column -> mask value
+        src_ip: mask                     # action: allow | mask | deny
       row_filter: "src_ip LIKE '10.%' OR src_ip LIKE '172.16.%'"
 
   # ABAC policies (attribute-based access control)
@@ -207,7 +217,7 @@ These constants are compiled into the binary and represent the default ingestion
 | Flush size threshold | 128 MB | Flush partition buffer when accumulated data exceeds this |
 | Flush row threshold | 1,000,000 | Flush partition buffer when row count exceeds this |
 | Flush interval | 60 seconds | Maximum time before a non-empty buffer is flushed |
-| Parquet row group size | 128,000 rows | Rows per row group in written Parquet files |
+| Parquet row group size | 131,072 rows (128 K) | Rows per row group in written Parquet files |
 | Parquet page buffer | 256 KB | Page buffer size for Parquet writer |
 | Default compression | Snappy | Compression codec for Parquet files |
 
@@ -218,12 +228,12 @@ These constants are compiled into the binary and represent the default ingestion
 | Batch size | 2,048 rows | Rows per record batch during execution |
 | Worker concurrency | 4 tasks | Max concurrent tasks per worker |
 | Worker cache size | 256 MB | LRU cache for recently-read Parquet data |
-| Memory budget | 0 (unlimited) | Per-task memory limit before spilling to disk |
-| Spill directory | OS temp dir | Where Sort/Aggregate/Window spill files are written |
-| Result store | 0 (disabled) | In-memory result cache for intermediate stage results |
-| Inline result threshold | 64 KB | Results below this are embedded in NATS messages |
+| Memory budget | 0 (auto-detect from cgroup, else unlimited) | Per-task memory limit before spilling to disk |
+| Spill directory | OS temp dir | Where HashJoin/Aggregate/Sort/Window spill files are written |
+| Result store | 512 MiB | In-memory result cache for intermediate stage results (0 = disabled) |
+| Inline result threshold | 512 KB | Results below this are embedded in NATS messages |
 | Heartbeat interval | 10 seconds | Worker heartbeat frequency |
-| Batch pool max per class | 16 | Maximum pooled RecordBatches per schema/size class |
+| Batch pool max per class | `NumCPU() * 4`, clamped to 32-256 | Maximum pooled RecordBatches per schema/size class |
 
 For detailed tuning guidance by hardware profile, see [Performance Tuning](tuning.md).
 
@@ -273,7 +283,7 @@ Per-role limits fully override global limits when defined. See [Security](securi
 
 ## Environment Variables
 
-All configuration can be overridden via `WADJET_*` environment variables. This is useful for container and cloud deployments where config files may not be practical.
+A subset of the configuration can be overridden via `WADJET_*` environment variables — the ones listed below, and no others (`internal/config/config.go`, `applyEnvOverrides`). This is useful for container and cloud deployments where config files may not be practical.
 
 ### S3/Storage
 
@@ -281,8 +291,13 @@ All configuration can be overridden via `WADJET_*` environment variables. This i
 |----------|---------|-------------|
 | `AWS_ACCESS_KEY_ID` | `--access-key` | S3 access key |
 | `AWS_SECRET_ACCESS_KEY` | `--secret-key` | S3 secret key |
-| `AWS_ENDPOINT_URL_S3` | `--endpoint` | S3 endpoint |
-| `WADJET_BUCKET` | `--bucket` | S3 bucket name |
+| `WADJET_STORAGE_ENDPOINT` | `--endpoint` | S3 endpoint |
+| `WADJET_STORAGE_BUCKET` | `--bucket` | S3 bucket name |
+| `WADJET_STORAGE_TYPE` | `--storage-type` | `s3` or `file` |
+| `WADJET_STORAGE_ACCESS_KEY` | `--access-key` | S3 access key |
+| `WADJET_STORAGE_SECRET_KEY` | `--secret-key` | S3 secret key |
+| `WADJET_STORAGE_REGION` | `--region` | S3 region |
+| `WADJET_STORAGE_USE_SSL` | `--ssl` | TLS for S3 connections |
 
 ### Server
 
@@ -291,9 +306,8 @@ All configuration can be overridden via `WADJET_*` environment variables. This i
 | `WADJET_HTTP_ADDR` | HTTP listen address |
 | `WADJET_GRPC_ADDR` | gRPC listen address |
 | `WADJET_MODE` | Deployment mode (`standalone`, `coordinator`, `worker`) |
-| `WADJET_MAX_CONNECTIONS` | Maximum concurrent connections |
-| `WADJET_SLOW_QUERY_THRESHOLD` | Slow query log threshold (e.g., `5s`) |
-| `WADJET_SHUTDOWN_TIMEOUT` | Graceful shutdown drain timeout (e.g., `30s`) |
+
+There is no environment variable for the connection cap, the slow-query threshold or the shutdown timeout; use `--drain-timeout` for the drain bound.
 
 ### NATS
 
@@ -301,16 +315,19 @@ All configuration can be overridden via `WADJET_*` environment variables. This i
 |----------|-------------|
 | `WADJET_NATS_PORT` | Embedded NATS port |
 | `WADJET_NATS_URL` | NATS server URL (worker mode) |
-| `WADJET_CLUSTER_ID` | Cluster identifier for federation |
+| `WADJET_NATS_CLUSTER_ID` | Cluster identifier for federation |
+| `WADJET_NATS_LEAF_REMOTES` | Comma-separated remote NATS URLs for leaf nodes |
+| `WADJET_NATS_TLS_CERT` / `_KEY` / `_CA` | NATS mTLS material |
 
 ### Worker
 
 | Variable | Description |
 |----------|-------------|
 | `WADJET_WORKER_MAX_CONCURRENT` | Max concurrent tasks per worker |
-| `WADJET_WORKER_CACHE_BYTES` | LRU cache size in bytes |
-| `WADJET_MEMORY_BUDGET` | Per-task memory budget |
-| `WADJET_RESULT_STORE_BYTES` | In-memory result store capacity |
+| `WADJET_WORKER_MEMORY_BUDGET` | Per-task memory budget |
+| `WADJET_WORKER_SPILL_DIR` | Spill directory |
+
+The LRU cache size and the result-store capacity have no environment variable; use `--cache-bytes` and `--result-store`.
 
 ### Query Limits
 
@@ -320,9 +337,15 @@ All configuration can be overridden via `WADJET_*` environment variables. This i
 | `WADJET_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
 | `WADJET_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
 
-### Rate Limiting
+### Telemetry and GeoIP
 
 | Variable | Description |
 |----------|-------------|
-| `WADJET_RATE_LIMIT_RPS` | Requests per second per identity |
-| `WADJET_RATE_LIMIT_BURST` | Burst allowance per identity |
+| `WADJET_OTEL_ENDPOINT` | OTLP gRPC endpoint for trace export |
+| `WADJET_OTEL_INSECURE` | Plaintext gRPC for the OTLP exporter |
+| `WADJET_OTEL_SAMPLE_RATE` | Trace sampling rate (0.0-1.0) |
+| `WADJET_GEOIP_CITY_DB` | Path to GeoLite2-City.mmdb |
+| `WADJET_GEOIP_ASN_DB` | Path to GeoLite2-ASN.mmdb |
+
+Wadjet has no built-in rate limiter; place a reverse proxy in front of it to
+enforce per-client limits.

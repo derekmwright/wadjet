@@ -31,13 +31,19 @@ github.com/derekmwright/wadjet/
 │   │   ├── objstore/       # S3-compatible object store abstraction
 │   │   ├── catalog/        # Schema + partition metadata (NATS KV)
 │   │   ├── parquet/        # Parquet reader/writer wrappers
-│   │   └── ingest/         # Micro-batch accumulator + partitioner
+│   │   ├── ingest/         # Micro-batch accumulator + partitioner
+│   │   ├── compaction/     # Partition compaction (replaces its inputs)
+│   │   ├── partition/      # Partition key derivation + Hive-style paths
+│   │   ├── csv/            # read_csv reader
+│   │   ├── json/           # read_json reader
+│   │   └── dbscan/         # postgres_scan / mysql_scan
 │   ├── iceberg/            # Apache Iceberg table metadata reader + catalog integration
 │   ├── engine/
 │   │   ├── batch/          # Record batches, vectors, selection vectors, BatchPool
 │   │   ├── exec/           # Push-based pipeline executor
 │   │   ├── expr/           # Expression compiler (SQL AST → functions)
 │   │   ├── memory/         # MemoryTracker, SpillManager, spill-to-disk
+│   │   ├── diskio/         # Spill-file I/O
 │   │   └── scan/           # Scanner with 3-level pushdown
 │   ├── planner/
 │   │   ├── sql/            # Recursive descent SQL parser → SelectInfo
@@ -48,8 +54,18 @@ github.com/derekmwright/wadjet/
 │   ├── distributed/        # NATS messaging layer + cluster-scoped subjects
 │   ├── auth/               # Authentication + authorization
 │   ├── config/             # YAML config with hot-reload
-│   ├── server/             # HTTP API (net/http) + gRPC API + PostgreSQL wire protocol (pgwire)
-│   └── metrics/            # Prometheus metrics
+│   ├── server/             # HTTP API (net/http) + gRPC API + pgwire + MCP
+│   ├── metrics/            # Prometheus metrics
+│   ├── optswitch/          # Kill-switch registry (38 toggles, WADJET_<NAME>=0)
+│   ├── alerts/             # CREATE ALERT runtime: scheduler, webhook + table sinks
+│   ├── telemetry/          # OpenTelemetry OTLP trace export
+│   ├── embedding/          # embed() providers (OpenAI, Voyage AI, Ollama)
+│   ├── geoip/              # MaxMind lookup for the GeoIP functions
+│   ├── dataplane/          # gRPC task dispatch (control/data plane split)
+│   ├── wshf/               # WSHF columnar shuffle wire format
+│   ├── sqlerr/             # SQLSTATE-carrying error wrapper
+│   ├── oracle/             # Differential-oracle shape generator
+│   └── format/             # table / json / csv output rendering
 └── test/                   # Integration tests
 ```
 
@@ -86,19 +102,20 @@ The in-memory unit of data is the **record batch**: a fixed set of columns (`Vec
 
 ```
 RecordBatch
-├── Vectors[]
-│   ├── Vector{Name: "src_ip", Type: IPv4, Data: []uint32, Nulls: bitmap}
-│   ├── Vector{Name: "bytes_in", Type: Int64, Data: []int64, Nulls: bitmap}
+├── Columns[]
+│   ├── Vector{Name: "src_ip", Type: IPv4, Int64Data/BytesData/..., Nulls: bitmap}
+│   ├── Vector{Name: "bytes_in", Type: Int64, Int64Data: []int64, Nulls: bitmap}
 │   └── ...
-├── RowCount: 2048
-└── SelectionVector: []uint16  (optional: indices of "active" rows)
+├── Schema:  []parquet.Column
+├── Len:     2048
+└── Sel:     []uint32  (optional selection vector: indices of "active" rows)
 ```
 
 **Selection vectors** avoid copying data during filtering — instead, only the indices of matching rows are tracked.
 
 ### Batch Pool
 
-Record batches are reused via `BatchPool` — a thread-safe, per-schema object pool that avoids allocation on the hot path. Batches are pooled by schema and row count, with up to 16 batches cached per size class.
+Record batches are reused via `BatchPool` — a thread-safe, per-schema object pool that avoids allocation on the hot path. Batches are pooled by schema and row count; the per-size-class cap scales with CPU count (`runtime.NumCPU() * 4`, clamped to 32-256) so parallel pipeline workers each keep 2-3 batches in flight without churn.
 
 `GlobalPool` provides cross-operator batch sharing: multiple operators with the same schema share a single pool, improving reuse in multi-operator pipelines.
 
@@ -160,7 +177,7 @@ graph TD
     C -- accumulates final result --> QR["QueryResult"]
 ```
 
-**Pipeline breakers** (aggregates, sorts) consume all input before producing output. Non-breaking operators (filter, project, limit) operate in streaming fashion.
+**Pipeline breakers** (aggregate, sort, window, and a hash join's build side) consume all input before producing output. Non-breaking operators (filter, project, limit) operate in streaming fashion. Every breaker spills to disk past its memory budget — see ADR-0027.
 
 ### Vectorized Execution
 
@@ -204,9 +221,14 @@ type Store interface {
 
 All methods take an explicit `bucket` parameter. `Put` returns the resulting ETag for subsequent optimistic concurrency checks.
 
-Two implementations:
+Implementations:
 - **MemStore** — In-memory map for testing
+- **FileStore** — Local filesystem, for development and single-node deployments
 - **MinIOStore** — Production S3-compatible client (MinIO, AWS S3, R2, etc.)
+- **HTTPStore** — Read-only HTTP/HTTPS objects with range reads
+
+Two decorators wrap any of the above: the worker's LRU `CachedStore` and the
+cross-query base-table disk cache.
 
 ### Apache Iceberg Integration
 
@@ -246,7 +268,7 @@ The ingester is a micro-batch accumulator that:
 
 ### Per-Task Memory Budget
 
-Each task can be assigned a memory budget via `worker.memory_budget`. When an operator (Sort, HashAggregate, Window) exceeds the budget, it spills intermediate state to disk rather than growing memory unboundedly.
+Each task can be assigned a memory budget via `worker.memory_budget`. Every pipeline breaker — HashJoin, HashAggregate, Sort and Window — spills intermediate state to disk past the budget rather than growing memory unboundedly (ADR-0027). HashJoin uses grace partition-on-arrival, HashAggregate spills partial group state and k-way merges it, and Sort and Window write sorted columnar runs and stream a k-way merge over them.
 
 ```
 Task starts → MemoryTracker created with budget
@@ -256,7 +278,7 @@ Task starts → MemoryTracker created with budget
   → Task completes → SpillManager.Cleanup() removes temp files
 ```
 
-This makes workers viable at 512 MB - 2 GB RAM. Without budgets, a large sort or aggregation could OOM the worker.
+Budgets are what make small workers viable: without them, a large sort or aggregation could OOM the worker. See [Performance Tuning](tuning.md) for sizing guidance.
 
 ### Result Store
 
@@ -270,7 +292,7 @@ Stage 1 → write to S3 → Stage 2        Stage 1 → memory → Stage 2
 
 The result store is keyed by S3 path (what the result *would* be stored as), bounded by a configurable capacity (`worker.result_store_bytes`). When full, new results fall back to S3 transparently. Per-query cleanup removes entries after a query completes.
 
-Results smaller than 64 KB bypass both the result store and S3 — they are embedded directly in the NATS result notification message (inline fast path).
+Results smaller than 512 KB bypass both the result store and S3 — they are embedded directly in the NATS result notification message (inline fast path).
 
 ### Spill Metrics
 
@@ -299,9 +321,9 @@ graph TD
 ```
 
 - **Coordinator**: Receives queries, builds plans, dispatches task messages to NATS, collects results, merges final output. For federated queries, splits scan stages per cluster.
-- **Workers**: Pull tasks from a JetStream consumer, execute locally (scan, aggregate, join, sort, window), write intermediate results to result store or S3, publish completion notifications. Cluster-scoped: workers only pull tasks for their cluster.
+- **Workers**: Pull tasks from a JetStream consumer, execute a plan fragment locally, write intermediate results to result store or S3, publish completion notifications. Cluster-scoped: workers only pull tasks for their cluster.
 - **Heartbeats**: Workers send heartbeats (with cluster ID) every 10 seconds; coordinator reaps workers that miss heartbeats
-- **Task types**: `scan`, `aggregate`, `join`, `sort`, `window`
+- **Task types**: `pipeline` (whole query on one worker), `stage` (one DAG stage fragment), `shuffle` (hash-partition rows into N `.wshf` files), `gather` (stream pipeline output to a reply subject). A `stage` task's operator kind is carried separately in its `StageType`.
 - **Task routing**: Tasks are published to cluster-scoped NATS subjects (`wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`). Workers subscribe to their cluster's filter (`wadjet.tasks.<cluster-id>.>`)
 - **Worker concurrency**: 4 concurrent tasks per worker (default)
 - **Worker cache**: 256 MB LRU cache for recently-read Parquet data

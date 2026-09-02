@@ -1,6 +1,17 @@
 # Embedding Wadjet
 
-Wadjet can be embedded directly in Go applications via the `wadjet` package, giving you a programmatic analytical query engine without running a separate server.
+Wadjet's `wadjet` package is the in-process query engine used by `cmd/wadjet`
+and by the test suites in this repository, giving a programmatic analytical
+query engine without running a separate server.
+
+> **Not consumable from an out-of-tree Go module today.** `wadjet.Config.Store`
+> is `objstore.Store`, `CreateTable` takes `parquet.Schema` and `NewIngester`
+> takes `ingest.Config` — all three from
+> `github.com/derekmwright/wadjet/internal/...`, which Go forbids external
+> modules from importing (`use of internal package ... not allowed`). The
+> examples below therefore describe code that lives INSIDE this repository
+> (`cmd/<yourtool>/`, for example). Embedding from your own module needs those
+> three types re-exported from the `wadjet` package first.
 
 ## Installation
 
@@ -19,7 +30,7 @@ import (
 )
 
 // First create an object store client
-store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
     Endpoint:  "localhost:9000",
     AccessKey: "minioadmin",
     SecretKey: "minioadmin",
@@ -36,15 +47,23 @@ db, err := wadjet.Open(ctx, wadjet.Config{
 ```
 
 The `Config` struct accepts:
-- `Store` — An `objstore.Store` implementation (MinIOStore for production, MemStore for testing)
+- `Store` — An `objstore.Store` implementation (MinIOStore for production, FileStore for local dev, MemStore for testing)
 - `Bucket` — S3 bucket name
+- `MetaKV` — catalog KV. **nil means an in-memory catalog**: every table you create is process-local and gone at exit, and a `wadjet serve` process cannot see it. Pass `catalog.NewNATSKV(js)` to share the catalog with a server.
 - `Logger` — Optional `*slog.Logger` (defaults to slog.Default)
+- `MemoryBudget` — per-query memory budget in bytes (0 = unlimited); pipeline breakers spill past it
+- `SpillDir` — directory for spill-to-disk files (empty = OS temp dir)
+- `AuthProvider` — optional `*auth.Provider`, enables ABAC enforcement at query level
+- `SortMergeJoinBytes`, `LateMaterialization`, `BushyJoinReorder` — planner knobs (0/false = off)
+- `EnableAlerts` — turns on the CREATE ALERT scheduler; call `db.Close()` to stop it
 
 ### Table Management
 
 ```go
 // Create a table (schema uses parquet.Schema from internal/storage/parquet)
-err := db.CreateTable(ctx, "flow_logs", schema, []string{"date"})
+// A partition key must ALSO appear in schema.Columns to be referenceable in
+// SQL, and only the names year/month/day/hour are pruned by the planner.
+err := db.CreateTable(ctx, "flow_logs", schema, []string{"day"})
 
 // Drop a table (removes metadata only — Parquet files remain on S3)
 err := db.DropTable(ctx, "flow_logs")
@@ -64,7 +83,7 @@ store := db.Store()
 import "github.com/derekmwright/wadjet/internal/storage/ingest"
 
 // NewIngester returns *ingest.Ingester (no error return)
-ingester := db.NewIngester("flow_logs", schema, []string{"date"}, ingest.Config{
+ingester := db.NewIngester("flow_logs", schema, []string{"day"}, ingest.Config{
     FlushInterval: 30 * time.Second,
     MaxBufferRows: 500000,
 })
@@ -73,9 +92,13 @@ ingester := db.NewIngester("flow_logs", schema, []string{"date"}, ingest.Config{
 ingester.Start()
 
 // Ingest rows as a batch (takes a slice of row maps)
+// EVERY partition key must be present in EVERY row, or Ingest returns
+// `missing partition key "day" in row`.
+now := time.Now()
 err = ingester.Ingest(ctx, []map[string]any{
     {
-        "timestamp": time.Now(),
+        "timestamp": now,
+        "day":       now.Format("2006-01-02"),
         "src_ip":    "10.0.1.50",
         "dst_ip":    "10.0.2.100",
         "src_port":  int32(54321),
@@ -97,7 +120,7 @@ The ingester automatically:
 - Partitions rows based on partition keys
 - Buffers rows in per-partition accumulators
 - Flushes to Parquet on S3 when thresholds are hit (size, rows, or time)
-- Updates the catalog manifest atomically via NATS KV revisions
+- Updates the catalog manifest atomically via revision-based CAS on `Config.MetaKV` (NATS KV in production; an in-process map when `MetaKV` is nil)
 
 ### Querying
 
@@ -111,11 +134,14 @@ if err != nil {
 fmt.Println("Columns:", result.Columns)
 fmt.Println("Rows returned:", len(result.Rows))
 
-// Iterate rows
+// Iterate rows. Mind the box: an aggregate's Go type follows its DECLARED
+// output type, not its input's. SUM over an INT64 column declares DECIMAL, and
+// a DECIMAL is boxed as its formatted STRING. COUNT is int64; SUM over INT32
+// is int64.
 for _, row := range result.Rows {
     srcIP := row["src_ip"].(string)
-    total := row["total"].(int64)
-    fmt.Printf("%s: %d bytes\n", srcIP, total)
+    total := row["total"].(string) // SUM(bytes_in) over an INT64 column
+    fmt.Printf("%s: %s bytes\n", srcIP, total)
 }
 ```
 
@@ -144,7 +170,7 @@ var db *wadjet.DB
 func main() {
     ctx := context.Background()
 
-    store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+    store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
         Endpoint:  "minio.internal:9000",
         AccessKey: "prod-access-key",
         SecretKey: "prod-secret-key",
@@ -195,15 +221,16 @@ func ensureTables(ctx context.Context) {
                 {Name: "protocol", Type: parquet.TypeString},
                 {Name: "bytes_in", Type: parquet.TypeInt64},
                 {Name: "bytes_out", Type: parquet.TypeInt64},
+                {Name: "day", Type: parquet.TypeString},
             },
-        }, []string{"date"})
+        }, []string{"day"})
     }
 }
 
 func handleTopTalkers(w http.ResponseWriter, r *http.Request) {
-    date := r.URL.Query().Get("date")
-    if date == "" {
-        date = time.Now().Format("2006-01-02")
+    day := r.URL.Query().Get("day")
+    if day == "" {
+        day = time.Now().Format("2006-01-02")
     }
     limit := r.URL.Query().Get("limit")
     if limit == "" {
@@ -218,11 +245,11 @@ func handleTopTalkers(w http.ResponseWriter, r *http.Request) {
             SUM(bytes_in + bytes_out) AS total,
             COUNT(*) AS flows
         FROM flow_logs
-        WHERE date = '%s'
+        WHERE day = '%s'
         GROUP BY src_ip
         ORDER BY total DESC
         LIMIT %s
-    `, date, limit))
+    `, day, limit))
     if err != nil {
         http.Error(w, err.Error(), 500)
         return
@@ -233,9 +260,9 @@ func handleTopTalkers(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePortDistribution(w http.ResponseWriter, r *http.Request) {
-    date := r.URL.Query().Get("date")
-    if date == "" {
-        date = time.Now().Format("2006-01-02")
+    day := r.URL.Query().Get("day")
+    if day == "" {
+        day = time.Now().Format("2006-01-02")
     }
 
     result, err := db.Query(r.Context(), fmt.Sprintf(`
@@ -245,11 +272,11 @@ func handlePortDistribution(w http.ResponseWriter, r *http.Request) {
             COUNT(*) AS connections,
             SUM(bytes_in) AS total_bytes
         FROM flow_logs
-        WHERE date = '%s'
+        WHERE day = '%s'
         GROUP BY dst_port, protocol
         ORDER BY connections DESC
         LIMIT 50
-    `, date))
+    `, day))
     if err != nil {
         http.Error(w, err.Error(), 500)
         return
@@ -260,9 +287,9 @@ func handlePortDistribution(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAnomalies(w http.ResponseWriter, r *http.Request) {
-    date := r.URL.Query().Get("date")
-    if date == "" {
-        date = time.Now().Format("2006-01-02")
+    day := r.URL.Query().Get("day")
+    if day == "" {
+        day = time.Now().Format("2006-01-02")
     }
 
     // Find IPs hitting an unusual number of unique ports (potential scan)
@@ -273,11 +300,11 @@ func handleAnomalies(w http.ResponseWriter, r *http.Request) {
             COUNT(*) AS total_flows,
             SUM(bytes_in) AS bytes
         FROM flow_logs
-        WHERE date = '%s' AND protocol = 'TCP'
+        WHERE day = '%s' AND protocol = 'TCP'
         GROUP BY src_ip
         HAVING COUNT(DISTINCT dst_port) > 50
         ORDER BY unique_ports DESC
-    `, date))
+    `, day))
     if err != nil {
         http.Error(w, err.Error(), 500)
         return
@@ -330,6 +357,6 @@ func ingestFromQueue(ctx context.Context) {
 ## Thread Safety
 
 - `DB.Query()` is safe to call concurrently from multiple goroutines
-- `DB.CreateTable()` and `DB.DropTable()` use NATS KV revision-based optimistic concurrency on the catalog
+- `DB.CreateTable()` and `DB.DropTable()` use revision-based optimistic concurrency (CAS) on the configured `MetaKV` — NATS KV in production, an in-process map when `Config.MetaKV` is nil
 - `Ingester.Ingest()` is safe for concurrent calls from multiple goroutines within the same ingester
 - Do not share an `Ingester` across multiple processes writing to the same table — use separate ingesters (catalog revision concurrency will prevent corruption but may cause flush retries)

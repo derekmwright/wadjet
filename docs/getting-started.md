@@ -142,7 +142,7 @@ func main() {
     ctx := context.Background()
 
     // Create an S3-compatible object store client
-    store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+    store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
         Endpoint:  "localhost:9000",
         AccessKey: "minioadmin",
         SecretKey: "minioadmin",
@@ -171,6 +171,7 @@ func main() {
             {Name: "protocol",  Type: parquet.TypeString},
             {Name: "bytes_in",  Type: parquet.TypeInt64},
             {Name: "bytes_out", Type: parquet.TypeInt64},
+            {Name: "date",      Type: parquet.TypeDate},
         },
     }
 
@@ -187,10 +188,13 @@ func main() {
     })
     ingester.Start() // start background flush goroutine
 
-    // Ingest rows as a batch (takes a slice of row maps)
+    // Ingest rows as a batch (takes a slice of row maps). Every partition key
+    // must be present in every row, or Ingest returns
+    // `missing partition key "date" in row`.
+    now := time.Now()
     err = ingester.Ingest(ctx, []map[string]any{
         {
-            "timestamp": time.Now(),
+            "timestamp": now,
             "src_ip":    "10.0.1.50",
             "dst_ip":    "10.0.2.100",
             "src_port":  int32(54321),
@@ -198,6 +202,7 @@ func main() {
             "protocol":  "TCP",
             "bytes_in":  int64(2048),
             "bytes_out": int64(512),
+            "date":      now,
         },
     })
     if err != nil {
@@ -242,7 +247,7 @@ Response:
   ],
   "stats": {
     "elapsed": "12ms",
-    "rows_scanned": 50000,
+    "rows_scanned": 1,
     "plan": "Scan(flow_logs) → Aggregate(src_ip, dst_port) → Sort(total_bytes DESC) → Limit(10)"
   }
 }
@@ -252,14 +257,16 @@ Response:
 
 Wadjet also exposes a gRPC API on `:9090` (default). Clients can be generated for any language from the proto definition at `proto/wadjet/v1/wadjet.proto`.
 
-**Using grpcurl:**
+**Using grpcurl** — the server does not register gRPC reflection, so point
+grpcurl at the proto file. Run these from the repo root:
 
 ```bash
 # List tables
-grpcurl -plaintext localhost:9090 wadjet.v1.WadjetService/ListTables
+grpcurl -plaintext -import-path proto -proto wadjet/v1/wadjet.proto localhost:9090 wadjet.v1.WadjetService/ListTables
 
 # Execute a query
-grpcurl -plaintext -d '{"sql": "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip LIMIT 5"}' \
+grpcurl -plaintext -import-path proto -proto wadjet/v1/wadjet.proto \
+  -d '{"sql": "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip LIMIT 5"}' \
   localhost:9090 wadjet.v1.WadjetService/Query
 ```
 
@@ -267,7 +274,7 @@ grpcurl -plaintext -d '{"sql": "SELECT src_ip, SUM(bytes_in) AS total FROM flow_
 
 ```bash
 pip install grpcio-tools
-python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/wadjet/v1/wadjet.proto
+python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. wadjet/v1/wadjet.proto
 ```
 
 See [gRPC API](grpc-api.md) for the full service reference.

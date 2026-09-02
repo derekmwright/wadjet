@@ -13,21 +13,21 @@ Wadjet exposes Prometheus metrics at `GET /metrics`.
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `wadjet_queries_total` | Counter | `status` | Total queries executed, by status |
-| `wadjet_query_duration_seconds` | Histogram | — | Query duration (buckets: 10ms–120s) |
-| `wadjet_query_rows_scanned` | Counter | `table` | Rows scanned, by table |
-| `wadjet_query_bytes_read` | Counter | — | Total bytes read from S3 |
+| `wadjet_query_duration_seconds` | Histogram | `type` | Query duration (buckets: 10ms–120s) |
+| `wadjet_query_rows_scanned_total` | Counter | `table` | Rows scanned, by table |
+| `wadjet_query_bytes_read_total` | Counter | — | Total bytes read from S3 |
 | `wadjet_active_queries` | Gauge | — | Currently executing queries |
 
 **Scanner metrics:**
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `wadjet_files_scanned` | Counter | Parquet files read |
-| `wadjet_files_pruned` | Counter | Parquet files skipped (pruning) |
-| `wadjet_row_groups_scanned` | Counter | Row groups read |
-| `wadjet_row_groups_pruned` | Counter | Row groups skipped |
-| `wadjet_partitions_scanned` | Counter | Partitions read |
-| `wadjet_partitions_pruned` | Counter | Partitions skipped (partition pruning) |
+| `wadjet_scan_files_scanned_total` | Counter | Parquet files read |
+| `wadjet_scan_files_pruned_total` | Counter | Parquet files skipped (pruning) |
+| `wadjet_scan_row_groups_scanned_total` | Counter | Row groups read |
+| `wadjet_scan_row_groups_pruned_total` | Counter | Row groups skipped |
+| `wadjet_scan_partitions_scanned_total` | Counter | Partitions read |
+| `wadjet_scan_partitions_pruned_total` | Counter | Partitions skipped (partition pruning) |
 
 **Worker metrics:**
 
@@ -46,22 +46,34 @@ Wadjet exposes Prometheus metrics at `GET /metrics`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `wadjet_registered_workers` | Gauge | Workers with recent heartbeats |
+| `wadjet_coordinator_registered_workers` | Gauge | Workers with recent heartbeats |
 
 **Pipeline metrics:**
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `wadjet_batches_processed` | Counter | Record batches processed through pipeline |
-| `wadjet_rows_output` | Counter | Total rows returned to clients |
+| `wadjet_pipeline_batches_processed_total` | Counter | Record batches processed through pipeline |
+| `wadjet_pipeline_rows_output_total` | Counter | Total rows returned to clients |
 
 **Cache metrics:**
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `wadjet_cache_hits` | Counter | LRU cache hits |
-| `wadjet_cache_misses` | Counter | LRU cache misses |
+| `wadjet_cache_hits_total` | Counter | LRU cache hits |
+| `wadjet_cache_misses_total` | Counter | LRU cache misses |
 | `wadjet_cache_bytes` | Gauge | Current cache size in bytes |
+
+### Alert Metrics
+
+Registered when the alert scheduler runs (`--enable-alerts`):
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `wadjet_alert_evaluations_total` | Counter | Alert evaluations, by alert and outcome |
+| `wadjet_alert_evaluation_duration_seconds` | Histogram | Alert evaluation duration |
+| `wadjet_alert_rows_matched` | Histogram | Rows matched per evaluation |
+| `wadjet_alert_scheduler_list_errors_total` | Counter | Scheduler failures listing alert definitions |
+| `wadjet_alert_webhook_retries_total` | Counter | Webhook delivery retries |
 
 ### Prometheus Scrape Config
 
@@ -70,7 +82,7 @@ Wadjet exposes Prometheus metrics at `GET /metrics`.
 scrape_configs:
   - job_name: wadjet
     scrape_interval: 15s
-    static_targets:
+    static_configs:
       - targets:
           - wadjet.internal:8080
     metrics_path: /metrics
@@ -167,7 +179,7 @@ readinessProbe:
 
 3. **Check partitions have data:** Verify Parquet files exist on S3 for the partition you're querying:
    ```bash
-   mc ls local/wadjet/data/flow_logs/date=2026-03-15/
+   mc ls local/wadjet/tables/flow_logs/date=2026-03-15/
    ```
 
 4. **Check your WHERE clause:** Partition pruning requires exact matches on partition keys. If you're filtering by `date = '2026-03-15'`, ensure data exists for that date.
@@ -181,16 +193,18 @@ readinessProbe:
 
 2. **Check for excessive spilling:** If `wadjet_worker_spill_events_total` is growing rapidly, the memory budget is too tight. Increase `--memory-budget` or reduce `--max-concurrent` to give each task more headroom.
 
-3. **Check result store usage:** If multi-stage queries are slow, enable the in-memory result store with `--result-store` to avoid S3 round-trips between stages. See [Performance Tuning](tuning.md) for sizing guidance.
+3. **Check result store usage:** The in-memory result store is on by default (`--result-store`, 512 MiB) and keeps small stage results out of S3. Raise it for multi-stage queries whose intermediates still spill to S3; `--result-store=0` disables it. See [Performance Tuning](tuning.md) for sizing guidance.
 
 4. **Check file sizes:** Many small files (< 1 MB) cause high S3 LIST/GET overhead. Re-tune Bento's batch size to produce larger files (64–256 MB target).
 
-5. **Check cache hit ratio:** A low cache hit ratio means workers are re-reading data from S3. Increase `worker.cache_bytes` to hold more of the working set.
+5. **Check cache hit ratio:** A low cache hit ratio means workers are re-reading data from S3. Increase `--cache-bytes` to hold more of the working set (`0` = auto: 20% of detected memory).
 
 6. **Check worker count:** In distributed mode, add more workers for parallelism:
    ```bash
    # Check worker count
-   curl http://localhost:8080/v1/health | jq .
+   curl http://localhost:8080/v1/workers | jq .
+   # or, as a readiness signal that includes the count
+   curl http://localhost:8080/v1/ready | jq .
    ```
 
 7. **Check join order:** For JOINs, place the smaller table on the right side (it becomes the hash table build side).
@@ -204,7 +218,7 @@ readinessProbe:
 3. **Schema mismatch:** If the Parquet schema doesn't match the registered table schema, reads may fail silently. Verify schemas match:
    ```bash
    # Check what Bento writes
-   mc cat local/wadjet/data/flow_logs/date=2026-03-15/part-xyz.parquet | parquet-tools schema
+   mc cat local/wadjet/tables/flow_logs/date=2026-03-15/part-xyz.parquet | parquet-tools schema
    ```
 
 ### Worker Not Connecting
@@ -233,7 +247,7 @@ The catalog uses NATS KV with revision-based optimistic concurrency, so corrupti
 
 ## Data Retention
 
-Wadjet is append-only — there's no built-in DELETE or UPDATE. Manage data lifecycle through S3 policies:
+Wadjet supports `UPDATE` and `DELETE` (merge-on-read), but they rewrite whole Parquet files and are not a retention mechanism. Manage bulk data lifecycle through S3 policies:
 
 ### MinIO Lifecycle Policy
 
@@ -244,7 +258,7 @@ Wadjet is append-only — there's no built-in DELETE or UPDATE. Manage data life
       "ID": "expire-old-data",
       "Status": "Enabled",
       "Filter": {
-        "Prefix": "data/"
+        "Prefix": "tables/"
       },
       "Expiration": {
         "Days": 90
@@ -268,7 +282,7 @@ mc ilm import local/wadjet < lifecycle.json
     {
       "ID": "archive-old-data",
       "Status": "Enabled",
-      "Filter": {"Prefix": "data/"},
+      "Filter": {"Prefix": "tables/"},
       "Transitions": [
         {"Days": 30, "StorageClass": "STANDARD_IA"},
         {"Days": 90, "StorageClass": "GLACIER"}
@@ -288,7 +302,7 @@ After S3 deletes old Parquet files, remove stale catalog entries by re-running t
 | Component | Location | Criticality |
 |-----------|----------|-------------|
 | Catalog (NATS KV) | NATS JetStream storage dir | High — needed to query data |
-| Parquet data | `s3://wadjet/data/` | High — the actual data |
+| Parquet data | `s3://wadjet/tables/` | High — the actual data |
 | Config YAML | `wadjet.yaml` | Medium — security/auth settings |
 | Bento configs | `bento-*.yaml` | Medium — pipeline definitions |
 

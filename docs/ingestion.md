@@ -24,13 +24,19 @@ graph LR
     S --> C["Update catalog<br/>manifest (NATS KV)"]
 ```
 
-The ingester flushes automatically when any threshold is exceeded:
+The ingester flushes a partition's buffer automatically when that PARTITION's
+buffer crosses a threshold — the limits are per-partition, not totals across
+the table:
 
 | Trigger | Default | Description |
 |---------|---------|-------------|
-| Size | 128 MB | Total buffer size across all partitions |
-| Row count | 1,000,000 | Total buffered row count |
-| Time | 60 seconds | Wall-clock time since last flush |
+| Size | 128 MB | One partition's estimated buffered bytes (`MaxBufferSize`) |
+| Row count | 1,000,000 | One partition's buffered row count (`MaxBufferRows`) |
+| Time | 60 seconds | Background ticker (`FlushInterval`). It flushes only partitions holding at least `MinFlushRows` rows — default 100 — so a trickling partition is not flushed into tiny files. |
+
+Two further `ingest.Config` fields carry defaults: `RowGroupSize` (128 K rows
+per Parquet row group) and `MinFlushRows` (100). `FlushAll` ignores the
+size/row thresholds and `MinFlushRows` and writes everything buffered.
 
 ### Usage (Go API)
 
@@ -51,7 +57,7 @@ schema := parquet.Schema{
 }
 
 // NewIngester returns *ingest.Ingester (no error)
-ingester := db.NewIngester("syslog", schema, []string{"date", "device"}, ingest.Config{
+ingester := db.NewIngester("syslog", schema, []string{"day", "device"}, ingest.Config{
     FlushInterval: 30 * time.Second,
     MaxBufferRows: 500000,
 })
@@ -59,11 +65,14 @@ ingester := db.NewIngester("syslog", schema, []string{"date", "device"}, ingest.
 // Start background flush goroutine
 ingester.Start()
 
-// Ingest rows as batches — ingester handles partitioning and buffering
+// Ingest rows as batches — ingester handles partitioning and buffering.
+// Every partition key must be present in EVERY row, or Ingest returns
+// `missing partition key "day" in row`.
 batch := make([]map[string]any, 0, len(events))
 for _, event := range events {
     batch = append(batch, map[string]any{
         "timestamp": event.Time,
+        "day":       event.Time.Format("2006-01-02"),
         "device":    event.Hostname,
         "severity":  event.Severity,
         "message":   event.Message,
@@ -84,21 +93,34 @@ ingester.Stop(ctx)
 Partition keys determine how data is organized on storage:
 
 ```
-s3://wadjet/data/syslog/date=2026-03-15/device=fw-01/part-0001.parquet
-s3://wadjet/data/syslog/date=2026-03-15/device=sw-02/part-0002.parquet
-s3://wadjet/data/syslog/date=2026-03-14/device=fw-01/part-0003.parquet
+s3://wadjet/tables/syslog/day=2026-03-15/device=fw-01/chunk_0198f2c1-....parquet
+s3://wadjet/tables/syslog/day=2026-03-15/device=sw-02/chunk_0198f2c2-....parquet
+s3://wadjet/tables/syslog/day=2026-03-14/device=fw-01/chunk_0198f2c3-....parquet
 ```
 
-Good partitioning enables **partition pruning** — the query engine skips entire partitions that don't match the WHERE clause.
+Data files always live under `tables/<table>/`, in Hive-style `key=value`
+directories, named `chunk_<uuidv7>.parquet` by the ingester.
+
+Partitioning enables **partition pruning** — the planner drops whole partitions
+before the scan — but only for the four Hive-standard key names `year`,
+`month`, `day` and `hour`. A key with any other name still organizes the files
+on storage, and still requires an equality filter to be evaluated row by row,
+but prunes nothing. A partition key must also be declared in the table's schema
+`Columns` to be referenceable in SQL at all; otherwise a `WHERE` on it is
+rejected with SQLSTATE 42703.
 
 **Recommendations:**
 
 | Workload | Partition Keys | Why |
 |----------|---------------|-----|
-| Time-series logs | `date` | Most queries filter by time range |
-| Multi-tenant | `tenant_id`, `date` | Isolate tenant data, time-range scans |
-| Network monitoring | `date`, `device` | Filter by device and time |
-| Per-region analytics | `region`, `date` | Region-scoped queries |
+| Time-series logs | `day` | Most queries filter by time range, and `day` is one of the four prunable names |
+| Multi-tenant | `tenant_id`, `day` | Isolates tenant data on storage; only `day` prunes |
+| Network monitoring | `day`, `device` | Filter by device and time; only `day` prunes |
+| Per-region analytics | `region`, `day` | Region-scoped queries; only `day` prunes |
+
+Only `year`, `month`, `day` and `hour` are pruned. A second key such as
+`device`, `tenant_id` or `region` buys storage layout and smaller files, not a
+skipped scan — budget for that.
 
 Avoid over-partitioning (too many small files) or under-partitioning (single giant partitions). A good target is partition files between 64 MB and 256 MB.
 
@@ -138,7 +160,7 @@ pipeline:
         root.severity = $parsed.severity
         root.facility = $parsed.facility
         root.message = $parsed.message
-        root.date = $parsed.timestamp.format_timestamp("2006-01-02")
+        root.day = $parsed.timestamp.format_timestamp("2006-01-02")
 
     # Extract source IP from message if present
     - mapping: |
@@ -149,7 +171,7 @@ pipeline:
 output:
   aws_s3:
     bucket: wadjet
-    path: 'data/syslog/date=${! this.date }/part-${! uuid_v4() }.parquet'
+    path: 'tables/syslog/day=${! this.day }/part-${! uuid_v4() }.parquet'
     batching:
       count: 100000
       period: 30s
@@ -171,7 +193,7 @@ output:
           type: UTF8
         - name: src_ip
           type: UTF8
-        - name: date
+        - name: day
           type: UTF8
     region: us-east-1
     endpoint: http://localhost:9000
@@ -201,7 +223,7 @@ pipeline:
   processors:
     - mapping: |
         root.timestamp = now()
-        root.date = now().format_timestamp("2006-01-02")
+        root.day = now().format_timestamp("2006-01-02")
         let fields = this.split(" ")
         root.device = $fields.index(0)
         root.oid = $fields.index(1)
@@ -216,7 +238,7 @@ pipeline:
 output:
   aws_s3:
     bucket: wadjet
-    path: 'data/snmp_traps/date=${! this.date }/part-${! uuid_v4() }.parquet'
+    path: 'tables/snmp_traps/day=${! this.day }/part-${! uuid_v4() }.parquet'
     batching:
       count: 50000
       period: 60s
@@ -234,7 +256,7 @@ output:
           type: UTF8
         - name: trap_type
           type: UTF8
-        - name: date
+        - name: day
           type: UTF8
     region: us-east-1
     endpoint: http://localhost:9000
@@ -262,7 +284,7 @@ pipeline:
   processors:
     - mapping: |
         root.timestamp = this.TimeReceived
-        root.date = (this.TimeReceived / 1000).format_timestamp("2006-01-02")
+        root.day = (this.TimeReceived / 1000).format_timestamp("2006-01-02")
         root.src_ip = this.SrcAddr
         root.dst_ip = this.DstAddr
         root.src_port = this.SrcPort
@@ -281,7 +303,7 @@ pipeline:
 output:
   aws_s3:
     bucket: wadjet
-    path: 'data/netflow/date=${! this.date }/part-${! uuid_v4() }.parquet'
+    path: 'tables/netflow/day=${! this.day }/part-${! uuid_v4() }.parquet'
     batching:
       count: 250000
       period: 30s
@@ -309,7 +331,7 @@ output:
           type: INT32
         - name: exporter
           type: UTF8
-        - name: date
+        - name: day
           type: UTF8
     region: us-east-1
     endpoint: http://localhost:9000
@@ -330,7 +352,7 @@ import (
     "github.com/derekmwright/wadjet/wadjet"
 )
 
-store, _ := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+store, _ := objstore.NewMinIOStore(objstore.MinIOConfig{
     Endpoint: "localhost:9000", AccessKey: "minioadmin", SecretKey: "minioadmin",
 })
 db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "wadjet"})
@@ -346,7 +368,7 @@ db.CreateTable(ctx, "syslog", parquet.Schema{
         {Name: "message",   Type: parquet.TypeString},
         {Name: "src_ip",    Type: parquet.TypeString},  // String since Bento writes UTF8
     },
-}, []string{"date"})
+}, []string{"day"})
 
 // Register the netflow table
 db.CreateTable(ctx, "netflow", parquet.Schema{
@@ -362,7 +384,7 @@ db.CreateTable(ctx, "netflow", parquet.Schema{
         {Name: "tcp_flags", Type: parquet.TypeInt32},
         {Name: "exporter",  Type: parquet.TypeString},
     },
-}, []string{"date"})
+}, []string{"day"})
 ```
 
 Or via the HTTP API, create tables, then start querying.
@@ -389,10 +411,11 @@ Tune Bento's `batching.count` and `batching.period` to hit the sweet spot.
 
 ### Partition Key Selection
 
-- Always include a time dimension (`date`, `hour`) — it's the most common filter
-- Add a second key only if queries consistently filter on it (e.g., `device`, `region`)
+- Always include a time dimension, and name it `year`, `month`, `day` or `hour` — those four names are the only ones the planner prunes on. A key called `date` or `ts` organizes storage but skips nothing.
+- Declare every partition key in the table's schema `Columns` as well; an undeclared key cannot be referenced in SQL (SQLSTATE 42703).
+- Add a second key only if queries consistently filter on it (e.g., `device`, `region`) — it buys file layout, not pruning
 - Avoid high-cardinality partition keys (e.g., `user_id` with millions of users) — creates millions of tiny partitions
 
 ### Exactly-Once Considerations
 
-Wadjet's catalog uses NATS KV with revision-based optimistic concurrency, so concurrent writers won't corrupt the catalog. However, if an ingestion process crashes mid-flush, a Parquet file may exist on S3 without a corresponding catalog entry. On restart, the file becomes orphaned but doesn't affect queries. Periodic cleanup of orphaned files is recommended for production deployments.
+Wadjet's catalog uses revision-based optimistic concurrency (CAS) on its metadata KV — NATS JetStream KV under `wadjet serve`, an in-process map when an embedded `wadjet.Config` leaves `MetaKV` nil — so concurrent writers won't corrupt the catalog. However, `flushBuffer` uploads the Parquet object before it updates the manifest, so if an ingestion process crashes in that window a Parquet file may exist on S3 without a corresponding catalog entry. The file becomes orphaned; it does not affect queries, since the scan resolves files from the manifest. Wadjet ships no orphan-Parquet reaper (the coordinator's sweeper only cleans the `queries/` prefix), so periodic cleanup is your job in production deployments.

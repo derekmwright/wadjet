@@ -21,6 +21,10 @@ Wadjet is an analytical query engine written in Go, inspired by systems like Duc
 | [Performance Tuning](tuning.md) | Environment profiles, memory/spill tuning, methodology |
 | [Network Analytics Workflow](network-analytics.md) | End-to-end: device logs -> Bento -> Wadjet -> app |
 | [Operations](operations.md) | Monitoring, Prometheus metrics, troubleshooting |
+| [Runbook](runbook.md) | Run scenarios, the full flag surface, Kubernetes lifecycle |
+| [Disaster Recovery](disaster-recovery.md) | Catalog snapshots, recovery scenarios, RTO/RPO |
+| [Performance Bottlenecks](performance-bottlenecks.md) | Known engine bottlenecks and their status |
+| [Competitive Gaps](competitive-gaps.md) | What Wadjet does not do yet, and against whom |
 
 ## Typical Workflow
 

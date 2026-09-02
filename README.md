@@ -6,11 +6,11 @@ A lightweight analytical query engine in pure Go. Columnar storage on Parquet, v
 
 ## Why Wadjet
 
-- **No coordinator bottleneck** — the coordinator plans queries and schedules tasks but never touches data bytes. Workers read from and write results to object storage directly.
+- **No coordinator bottleneck** — the coordinator plans queries and schedules tasks; workers read from and write results to object storage directly. The one exception is the small-query fast path, which executes queries under `--local-fastpath-bytes` in-process on the coordinator.
 - **Lightweight workers** — viable at 512 MB RAM with spill-to-disk. Scale to zero, start in under 2 seconds.
 - **Single binary** — run standalone for development or split into coordinator + workers for production.
 - **Pure Go** — no JVM, no CGo, no external query engine dependencies. Custom recursive descent SQL parser, vectorized batch execution, typed kernel dispatch.
-- **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 80+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
+- **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 100+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
 - **Nested types** — ARRAY, ROW/STRUCT, and MAP column types with dot-notation field access, array functions, and full Parquet round-trip.
 - **Table functions** — `read_json()`, `read_csv()`, `read_parquet()` query local files and HTTP URLs directly from SQL, with glob patterns and named parameters.
 - **GeoIP enrichment** — optional MaxMind GeoLite2/GeoIP2 integration with 11 functions for IP geolocation (country, city, subdivision, coordinates, timezone, continent) and ASN lookup (AS number, organization).
@@ -169,7 +169,7 @@ analytics engine.
 | Vector & embeddings | 5 + `embed()` | cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims, embed()/embed_model()/embed_dim() |
 | Date/time | 30+ | truncation, extraction, ISO 8601, Unix time, timezone conversion |
 | String | 45+ | regex, padding, encoding, distance (Levenshtein/Soundex/Hamming) |
-| Aggregate | 23 | approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by |
+| Aggregate | 28 | approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by |
 
 Full signatures for every function: [SQL Reference § Built-in Functions](docs/sql-reference.md#built-in-functions).
 
@@ -179,7 +179,8 @@ Full signatures for every function: [SQL Reference § Built-in Functions](docs/s
 
 Full analytical SQL via a custom recursive descent parser:
 
-- SELECT, EXPLAIN, DESCRIBE, CREATE TABLE, DROP TABLE
+- SELECT, INSERT, UPDATE, DELETE, MERGE, EXPLAIN, DESCRIBE, SHOW, ANALYZE
+- CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE VIEW, CREATE/ALTER/DROP ALERT, ALTER TABLE
 - CTEs (`WITH ... AS`), UNION / INTERSECT / EXCEPT (with ALL variants)
 - INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs
 - Subqueries: scalar, IN, EXISTS, correlated subqueries
@@ -191,8 +192,8 @@ Full analytical SQL via a custom recursive descent parser:
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
 - VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
 - `embed()` SQL function — OpenAI, Voyage AI, and Ollama embedding providers with batched API calls (one call per record batch) and LRU cache
-- 280+ built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
-- 23 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
+- 358 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
+- 28 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
 - User-defined functions (CREATE FUNCTION)
 
 ```sql
@@ -237,7 +238,7 @@ CREATE TABLE doc_embeddings (doc_id INT64, embedding VECTOR(1536))
 - **3-level pushdown** — partition pruning → row-group stats pruning → row-level filtering
 - **Cost-based optimization** — DP join reordering with Selinger-style costing over column statistics (`ANALYZE TABLE`: HLL distinct counts, histograms)
 - **Spill-to-disk everywhere** — hash join (grace partition-on-arrival), hash aggregate (partial-state k-way merge), sort and window (external sorted-run merge) all degrade gracefully past memory, governed by a byte-true memory ledger
-- **Morsel-driven parallelism** (`--morsel-workers=0`) — intra-task parallel pipeline consumers with bounded, self-draining aggregate partials; opt-in, validated at SF100
+- **Morsel-driven parallelism** (`--morsel-workers=0`) — intra-task parallel pipeline consumers with bounded, self-draining aggregate partials; on by default (`0` = auto-width), `--morsel-workers=1` is the serial kill switch
 
 ### Table Functions
 
@@ -251,7 +252,7 @@ SELECT * FROM read_csv('data.csv', delimiter='|', header=false)   -- named param
 SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet files
 ```
 
-- **read_json** — JSONL and JSON array auto-detection, schema inference (IPv4, timestamp, bool, numeric), custom direct-to-columnar byte scanner (8x faster than `encoding/json`)
+- **read_json** — JSONL and JSON array auto-detection, schema inference (IPv4, timestamp, bool, numeric), custom direct-to-columnar byte scanner that avoids `encoding/json`'s per-token boxing
 - **read_csv** — configurable delimiter, header detection, type inference
 - **read_parquet** — column-at-a-time page reading with row-group stats pruning
 - **HTTP filesystem** — connection pooling, Range requests, configurable auth headers
@@ -260,7 +261,7 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 ### Storage
 
 - **Apache Parquet** on any S3-compatible store (MinIO, AWS S3, R2, SeaweedFS)
-- **Apache Iceberg** metadata reading — register external Iceberg tables and query them via the catalog
+- **Apache Iceberg** metadata reading — v1/v2 table metadata and manifest parsing. Registration is a Go API (`internal/iceberg`) with no SQL or CLI surface yet; writes are not supported
 - **Hive-style partitioning** with automatic time-based partition keys
 - **NATS KV catalog** with revision-based optimistic concurrency
 - **Micro-batch ingestion** with configurable flush thresholds (size, row count, time)
@@ -297,7 +298,7 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 ### Operations
 
 - Prometheus metrics for queries, scans, workers, cache, and spill
-- Kubernetes-compatible probes on every process (`/healthz`, `/readyz`) and graceful worker drain (`SIGTERM` / `POST /drain`)
+- Kubernetes-compatible probes and graceful drain on workers (`/healthz`, `/readyz`, `POST /drain` on `--metrics-addr`); coordinator and standalone expose `/v1/health` and `/v1/ready` on the HTTP API
 - Catalog snapshot / restore for fast cluster recovery
 - Output in table, JSON, or CSV format
 
@@ -497,7 +498,7 @@ Configure in Claude Desktop (`claude_desktop_config.json`):
 }
 ```
 
-The MCP server exposes 5 tools:
+The MCP server exposes 7 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -506,6 +507,8 @@ The MCP server exposes 5 tools:
 | `query` | Execute SQL with token-efficient compact JSON output (array-of-arrays, not array-of-objects) |
 | `explain` | Show query execution plan without running |
 | `list_functions` | List user-defined functions |
+| `list_alerts` | List every `CREATE ALERT` definition in the cluster |
+| `describe_alert` | Full alert definition plus its 10 most recent fires |
 
 AI agents automatically understand network-typed columns (IPv4, CIDR, MAC, Port, Protocol) and receive hints about available network analysis functions.
 
@@ -514,16 +517,29 @@ AI agents automatically understand network-typed columns (IPv4, CIDR, MAC, Port,
 Use Wadjet as a Go library:
 
 ```go
-import "github.com/derekmwright/wadjet/wadjet"
+import (
+    "github.com/derekmwright/wadjet/internal/storage/objstore"
+    "github.com/derekmwright/wadjet/wadjet"
+)
 
+store, _ := objstore.NewMinIOStore(objstore.MinIOConfig{
+    Endpoint:  "localhost:9000",
+    AccessKey: "minioadmin",
+    SecretKey: "minioadmin",
+})
 db, _ := wadjet.Open(ctx, wadjet.Config{
-    StorageEndpoint: "localhost:9000",
-    Bucket:          "analytics",
+    Store:  store,
+    Bucket: "analytics",
 })
 defer db.Close()
 
 result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_ip LIMIT 10")
 ```
+
+`wadjet.Config` is typed in terms of `internal/` packages (`objstore.Store`,
+`parquet.Schema`, `ingest.Config`), which Go forbids an out-of-tree module from
+importing. Embedding code therefore lives inside this repository today — see
+[Embedding](docs/embedding.md).
 
 ## Documentation
 
@@ -545,6 +561,8 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [Operations](docs/operations.md) | Monitoring, Prometheus metrics, troubleshooting |
 | [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Wadjet → app |
 | [Disaster Recovery](docs/disaster-recovery.md) | Recovery scenarios, verification procedures, RTO/RPO |
+| [Performance Bottlenecks](docs/performance-bottlenecks.md) | Known engine bottlenecks and their status |
+| [Competitive Gaps](docs/competitive-gaps.md) | What Wadjet does not do yet, and against whom |
 
 ## TPC-H Benchmark Queries
 

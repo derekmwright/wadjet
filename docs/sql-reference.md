@@ -16,6 +16,12 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `DROP TABLE [IF EXISTS]` | Remove a table |
 | `CREATE [OR REPLACE] FUNCTION` | Register a user-defined function |
 | `DROP FUNCTION [IF EXISTS]` | Remove a user-defined function |
+| `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
+| `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
+| `ANALYZE [TABLE] table_name` | Collect column statistics for the cost-based planner |
+| `ALTER TABLE ... ADD \| DROP \| RENAME COLUMN` | Schema evolution |
+| `CREATE SNAPSHOT` | Capture a point-in-time snapshot of the catalog |
+| `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions (coordinator mode) |
 
 ## SELECT Statement
 
@@ -79,20 +85,20 @@ SELECT * FROM read_csv('export/part_*.csv')
 
 ### read_parquet
 
-Reads Parquet files with column-at-a-time page reading and row-group stats pruning.
+Reads Parquet files with column-at-a-time page reading. Column projection and row-group statistics pruning apply to catalog tables, not to the `read_parquet()` table function, which decodes every column of every row group.
 
 ```sql
 SELECT * FROM read_parquet('warehouse/sales.parquet')
 SELECT * FROM read_parquet('https://storage.example.com/data.parquet')
 ```
 
-All table functions support local file paths and HTTP/HTTPS URLs with connection pooling and configurable auth headers.
+All table functions support local file paths and HTTP/HTTPS URLs, fetched through a pooled HTTP client. Custom auth headers are not configurable from SQL.
 
 ### Streaming I/O
 
-Local CSV files are read in streaming mode — only the current batch of rows is held in memory at a time, making it possible to query files larger than available RAM. Schema is inferred from the first 100 rows.
+CSV and JSON files are read in streaming mode from every source — local paths, glob patterns (expanded lazily, one file open at a time) and HTTP/HTTPS URLs — so only the current batch of rows is held in memory and files larger than available RAM are queryable. Schema is inferred from the first 100 rows.
 
-Local Parquet files are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. HTTP sources and glob patterns still require a full download.
+Local Parquet files are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. For `read_parquet()` only, HTTP sources and glob patterns are still buffered in full, because Parquet needs random access.
 
 ### postgres_scan / postgres_query
 
@@ -102,7 +108,7 @@ Query external PostgreSQL databases directly from SQL. Uses `database/sql` with 
 -- Scan an entire table
 SELECT * FROM postgres_scan('host=pghost dbname=mydb user=readonly', 'customers')
 
--- Run an arbitrary query with pushdown
+-- Run an arbitrary query on the remote server (the outer WHERE is applied locally, not pushed down)
 SELECT name, total
 FROM postgres_query('host=pghost dbname=mydb sslmode=require', 'SELECT name, SUM(amount) AS total FROM orders GROUP BY name')
 WHERE total > 1000
@@ -357,7 +363,7 @@ WHERE src_ip IN (SELECT ip_address FROM device_inventory WHERE role = 'server')
 
 ### Correlated Subqueries
 
-Subqueries that reference columns from the outer query. Re-executed per outer row:
+Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row:
 
 ```sql
 -- EXISTS with correlation
@@ -420,6 +426,11 @@ WHERE t.total > 1000000
 | `MEDIAN(column)` | Median value (= percentile_cont(0.5)) | Skips nulls |
 | `MIN_BY(return_col, sort_col)` | Value at row where sort_col is minimum | Skips nulls |
 | `MAX_BY(return_col, sort_col)` | Value at row where sort_col is maximum | Skips nulls |
+
+`DISTINCT` is accepted by every aggregate in this table, not only `COUNT`:
+`SUM(DISTINCT x)`, `AVG(DISTINCT x)` and `STRING_AGG(DISTINCT x, ',')` each
+de-duplicate their input at the value's exact type before aggregating.
+`MIN`/`MAX` are unaffected by de-duplication and answer the same either way.
 
 ### Examples
 
@@ -576,7 +587,7 @@ FROM flow_logs f
 CROSS JOIN protocols p
 ```
 
-The join implementation uses a **hash join** strategy: the right side is loaded into a hash table (build phase), then the left side is probed against it (probe phase). Place the smaller table on the right side of the JOIN for best performance.
+The join implementation uses a **hash join** strategy: the right side is loaded into a hash table (build phase), then the left side is probed against it (probe phase). For inner joins the optimizer picks the build side itself from cardinality estimates — the smaller relation builds, the larger probes — and cost-reorders chains of three or more relations. Only outer joins keep the order you wrote, because their order is semantically significant.
 
 ## Arithmetic Expressions
 
@@ -739,9 +750,9 @@ FROM flow_logs
 | Bound | Description |
 |-------|-------------|
 | `UNBOUNDED PRECEDING` | From the first row of the partition |
-| `N PRECEDING` | N rows/values before current row |
+| `N PRECEDING` | N rows before the current row (`ROWS` mode only) |
 | `CURRENT ROW` | The current row |
-| `N FOLLOWING` | N rows/values after current row |
+| `N FOLLOWING` | N rows after the current row (`ROWS` mode only) |
 | `UNBOUNDED FOLLOWING` | To the last row of the partition |
 
 #### Frame Modes
@@ -749,11 +760,11 @@ FROM flow_logs
 | Mode | Description |
 |------|-------------|
 | `ROWS` | Physical row-based window boundaries |
-| `RANGE` | Logical value-based window boundaries |
+| `RANGE` | Peer-group boundaries over the ORDER BY key. Only `UNBOUNDED PRECEDING`, `CURRENT ROW` and `UNBOUNDED FOLLOWING` are accepted — a value offset (`RANGE BETWEEN 5 PRECEDING ...`) is rejected rather than silently evaluated as a row count. The `GROUPS` frame mode is not supported. |
 
 ## Built-in Functions
 
-Wadjet includes 273 built-in scalar functions across several categories.
+Wadjet includes 358 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -762,7 +773,7 @@ Wadjet includes 273 built-in scalar functions across several categories.
 | `UPPER(s)` | Uppercase | `UPPER(protocol)` |
 | `LOWER(s)` | Lowercase | `LOWER(hostname)` |
 | `CONCAT(a, b, ...)` | Concatenate strings | `CONCAT(src_ip, ':', src_port)` |
-| `LENGTH(s)` / `LEN(s)` | String length | `LENGTH(message)` |
+| `LENGTH(s)` / `LEN(s)` | String length in **bytes** (use `CHAR_LENGTH` for characters) | `LENGTH(message)` |
 | `SUBSTR(s, start, len)` | Extract substring | `SUBSTR(message, 1, 50)` |
 | `TRIM(s)` | Remove leading/trailing whitespace | `TRIM(hostname)` |
 | `LTRIM(s)` | Remove leading whitespace | `LTRIM(message)` |
@@ -797,8 +808,8 @@ Wadjet includes 273 built-in scalar functions across several categories.
 | `NORMALIZE(s)` | Unicode NFC normalization | `NORMALIZE(text)` |
 | `FORMAT(fmt, args...)` | Go-style sprintf formatting | `FORMAT('%s:%d', host, port)` |
 | `LCASE(s)` / `UCASE(s)` | Aliases for LOWER/UPPER | `LCASE(name)` |
-| `TO_UTF8(s)` | String to UTF-8 byte representation (hex) | `TO_UTF8('hello')` |
-| `FROM_UTF8(bytes)` | UTF-8 bytes (hex) to string | `FROM_UTF8(data)` |
+| `TO_UTF8(s)` | String to its raw UTF-8 bytes (BYTES) | `TO_UTF8('hello')` |
+| `FROM_UTF8(b)` | BYTES back to a string; NULL when the bytes are not valid UTF-8 | `FROM_UTF8(data)` |
 
 ### Math Functions
 
@@ -1120,8 +1131,8 @@ LIMIT 10
 | `SECOND(ts)` | Extract second | `SECOND(timestamp)` |
 | `EXTRACT(part FROM ts)` | Extract date part | `EXTRACT(hour FROM timestamp)` |
 | `DATE_TRUNC(part, ts)` | Truncate to precision | `DATE_TRUNC('hour', timestamp)` |
-| `DATE_DIFF(unit, a, b)` | Difference between timestamps | `DATE_DIFF('second', start_ts, end_ts)` |
-| `DATE_ADD(ts, interval)` | Add interval to timestamp | `DATE_ADD(timestamp, 3600000)` |
+| `DATE_DIFF(a, b)` | Whole days between two instants (a - b), truncated toward the past | `DATE_DIFF(end_ts, start_ts)` |
+| `DATE_ADD(ts, n)` / `DATE_ADD(ts, INTERVAL)` | Add n **days**, or an INTERVAL in its own unit, preserving time-of-day | `DATE_ADD(ts, 7)` |
 | `TO_DATE(s)` | Parse string to date | `TO_DATE('2026-03-15')` |
 | `FROM_UNIXTIME(epoch)` | Convert unix timestamp to datetime string | `FROM_UNIXTIME(1700000000)` |
 | `TO_UNIXTIME(ts)` | Convert datetime to unix epoch | `TO_UNIXTIME(timestamp)` |
@@ -1265,7 +1276,7 @@ Array literal syntax: `ARRAY[1, 2, 3]`
 
 ### Embedding Functions
 
-Requires `WADJET_OPENAI_API_KEY` environment variable.
+Requires an embedding provider. `WADJET_EMBED_PROVIDER` selects `openai` (default, needs `WADJET_OPENAI_API_KEY`), `voyage` (needs `WADJET_VOYAGE_API_KEY`) or `ollama` (local, keyless, `WADJET_OLLAMA_URL`). With no provider configured, `embed()` is not registered at all.
 
 | Function | Description | Example |
 |----------|-------------|---------|
@@ -1488,8 +1499,23 @@ Values in INSERT/UPDATE are automatically coerced to the target column type:
 | STRING | Quoted: `'hello'` |
 | TIMESTAMP | `'2026-03-17T10:00:00Z'`, `'2026-03-17 10:00:00'` |
 | DATE | `'2026-03-17'` |
+| DECIMAL(p,s) | Numeric literals: `123.45` (parsed exactly and rounded to the column's scale; a value with no 128-bit carrier is SQLSTATE 22003) |
+| PORT | Integer 0-65535 |
+| PROTOCOL | Integer 0-255 |
+| DURATION | Integer nanoseconds |
+| BYTES | Quoted: `'raw'` |
+| IPV4, IPV6, MAC, CIDR, UUID | Quoted literal in the type's text form: `'10.0.0.1'`, `'aa:bb:cc:dd:ee:ff'` |
+
+ARRAY, ROW, MAP and VECTOR columns cannot be written with `INSERT ... VALUES`:
+the value parser accepts a single literal token per value, not a composite
+expression.
 
 ## Limitations
 
-- No lateral joins
-- No recursive CTEs
+- `NATURAL JOIN` — rejected; write the join condition with `ON`
+- `JOIN ... USING (col)` — not parsed; write `ON a.col = b.col`
+- `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
+- `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
+- `RANGE` window frames with a value offset, and the `GROUPS` frame mode
+- `SELECT DISTINCT ON (...)`
+- No time-of-day type: a Parquet `TIME` column is read as its raw integer in the file's own unit

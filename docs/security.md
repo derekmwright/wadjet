@@ -1,6 +1,11 @@
 # Security
 
-Wadjet provides layered security: authentication, authorization (RBAC and ABAC), and cell-level access policies. All security configuration is hot-reloadable.
+Wadjet provides layered security: authentication, authorization (RBAC and ABAC), and cell-level access policies. Authentication, role and policy configuration is hot-reloadable; the mTLS listener's certificates and CA are read once at startup and require a restart to rotate.
+
+> **Known breakage at this commit:** starting the server with `--config` panics
+> before it serves — the auth middleware is installed after the routes are
+> registered, which chi v5 rejects. Every YAML configuration in this document
+> is therefore currently unusable through `wadjet serve --config=...`.
 
 ## Authentication
 
@@ -23,9 +28,6 @@ auth:
     - key: "wadjet-admin-key-000000"
       name: "admin-operator"
       role: admin
-      attributes:               # optional ABAC attributes
-        clearance: "TOP_SECRET"
-        department: "noc"
 ```
 
 Usage:
@@ -104,14 +106,14 @@ The server validates client certificates against the configured CA. The certific
 Usage:
 
 ```bash
-curl --cert client.pem --key client-key.pem --cacert ca.pem https://wadjet.internal:8443/v1/queries ...
+curl --cert client.pem --key client-key.pem --cacert ca.pem https://wadjet.internal:8080/v1/queries ...
 ```
 
 ### Identity Enrichment
 
 All authentication methods enrich the `Identity` with attributes for ABAC policy evaluation:
 
-- **API keys**: Custom `attributes` from config (e.g., `clearance`, `department`)
+- **API keys**: none beyond the automatic `role`, `name` and `method`. An api_keys entry carries only `key`, `name` and `role`; there is no `attributes` field.
 - **JWT**: All non-standard claims from the token payload (e.g., `department`, `clearance`, `team`)
 - **mTLS**: Certificate fields — `cn`, `org`, `ou`, `san_dns`, `san_email`, `issuer`
 
@@ -240,7 +242,7 @@ auth:
           obligations:
             - type: mask_column
               target: ssn
-              value: "***REDACTED***"
+              value: "'***REDACTED***'"   # a SQL expression — quote string literals
             - type: deny_column
               target: raw_payload
 
@@ -281,7 +283,7 @@ Obligations are side-effects attached to **allow** rules. They constrain how dat
 | `row_filter` | table name | SQL predicate | Injected as WHERE clause before execution |
 | `mask_column` | column name | replacement string | Column values replaced with mask value |
 | `deny_column` | column name | — | Column excluded from results entirely |
-| `query_limit` | — | row count | Maximum rows returned |
+| `query_limit` | — | row count | **Not enforced** — the policy evaluator skips this obligation. |
 
 #### Deny-Overrides Combining
 
@@ -310,7 +312,10 @@ This means existing RBAC configurations work unchanged — they get ABAC evaluat
 
 Cell-level policies provide fine-grained data access control. Row filters are injected into the query plan **before** execution (pushed down to scan operators for distributed enforcement). Column masking is applied **after** execution but **before** results are returned.
 
-Policies combine column masking and row filtering in a single definition per table/role pair:
+Each policy names a table/role pair. **`columns` maps a column name to an
+ACTION — `allow`, `mask` or `deny` — not to a replacement string.** Any other
+value is treated as `allow`, so a policy written with a replacement string
+silently grants full access to that column.
 
 ```yaml
 auth:
@@ -319,14 +324,14 @@ auth:
     - table: flow_logs
       role: reader
       columns:
-        src_ip: "***REDACTED***"      # Column name -> mask replacement value
+        src_ip: mask                  # action: allow | mask | deny
       row_filter: "src_ip LIKE '10.%' OR src_ip LIKE '172.16.%' OR src_ip LIKE '192.168.%'"
 
     # Mask raw messages for readers viewing syslog
     - table: syslog
       role: reader
       columns:
-        message: "[MASKED]"
+        message: mask
 
     # NetOps can only see production devices
     - table: device_inventory
@@ -334,7 +339,13 @@ auth:
       row_filter: "environment = 'production'"
 ```
 
-**Column masking** (`columns`): A map of column name to replacement value. When the specified role queries this table, the column values are replaced with the mask string in the response.
+**Column masking** (`columns: {<column>: mask}`): the value is replaced by a
+type-appropriate placeholder — `"***"` for strings, `0` for numbers, `false`
+for booleans. The replacement is **not configurable** through this section; use
+an ABAC `mask_column` obligation with a quoted SQL expression
+(`value: "'REDACTED'"`) when you need a specific value.
+
+**Column denial** (`columns: {<column>: deny}`): the column is dropped from results.
 
 **Row filtering** (`row_filter`): A SQL predicate automatically injected into the query. Only rows matching the filter are returned to the role.
 
@@ -403,7 +414,7 @@ auth:
     - table: flow_logs
       role: soc-analyst
       columns:
-        src_ip: "EXTERNAL"
+        src_ip: mask
 
     # Network engineers can only see their region's devices
     - table: device_inventory
@@ -447,7 +458,7 @@ Wadjet logs security-relevant events as structured slog entries with the `compon
 
 ```
 level=INFO component=audit msg=row_filter_applied identity=analyst@corp.com role=soc-analyst table=flow_logs filter="src_ip LIKE '10.%'"
-level=INFO component=audit msg=column_policy_applied identity=analyst@corp.com role=soc-analyst table=flow_logs masked_columns=[src_ip] denied_columns=[]
+level=INFO component=audit msg=column_policy_applied identity=analyst@corp.com role=soc-analyst table=flow_logs masked_columns=[src_ip]
 level=INFO component=audit msg=query_executed identity=analyst@corp.com role=soc-analyst sql="SELECT * FROM flow_logs" tables=[flow_logs] elapsed=1.23s
 ```
 
@@ -463,6 +474,14 @@ journalctl -u wadjet | grep 'component=audit'
 ```
 
 ## Query Cost Estimation and Guards
+
+> **NOT WIRED at this commit.** The cost guard itself is implemented and tested
+> in the physical planner, and the config and environment-variable surfaces
+> parse, but nothing assigns the server's `QueryLimits`/`RoleLimits` outside
+> tests. `query_limits:` in the YAML, per-role `query_limits:`, and
+> `WADJET_QUERY_MAX_SCAN_BYTES` / `_ROWS` / `_FILES` currently have **no effect
+> on any query**, on any protocol. Do not rely on them as a control. The rest of
+> this section is the design record.
 
 Wadjet estimates query cost at plan time using manifest metadata (file sizes, row counts) before any I/O occurs. Cost-based guards can reject expensive queries before they execute.
 
@@ -540,4 +559,4 @@ Global query limits can also be set via environment variables (useful for contai
 7. **Use column masking for PII** — comply with data handling policies without separate data copies
 8. **Use deny rules for hard boundaries** — deny-overrides ensure narrow denials always win over broad allows
 9. **Rotate credentials regularly** — hot reload makes this zero-downtime
-10. **Audit access** — use Prometheus metrics and server logs to track who queries what
+10. **Audit access** — filter server logs on `component=audit` (no Prometheus metric carries identity) and server logs to track who queries what
