@@ -593,8 +593,20 @@ REPLACES its input's scope with keys and aggregate outputs.
 |---|---|
 | the descent never types a name from past its rebinding | `ctl/a-derived-alias-that-shadows-a-base-column` — `typemx.g` is `i % 7`, eight groups against the derived three, so binding or typing the wrong `g` is a visible wrong answer |
 | a value-preserving wrapper between the Project and the scan is looked through | `ctl/a-derived-table-with-an-order-by-inside` and `…-with-a-limit-inside`, both DECIMAL so the type is what is gated |
-| the emitted scope still wins where it names the columns | TPC-H Q07/Q08/Q09's `GROUP BY SUBSTR(l_shipdate, 1, 4)` in `TestTPCHStageDumpGolden`, and `ctl/an-ordinary-computed-key-still-runs-on-the-dag` |
+| the emitted scope still wins where it names the columns | TPC-H Q07/Q08/Q09's `GROUP BY SUBSTR(l_shipdate, 1, 4)` in `physical.TestTPCHStageDumpGolden` (it lives in `internal/planner/physical/`, NOT in `benchmarks/tpch/` — a `-run` against the wrong package reports ok and runs nothing), and `ctl/an-ordinary-computed-key-still-runs-on-the-dag` |
 | an aggregate's argument and a key get ONE answer | `TestNumericArc2ShapesMatchPostgres`'s six `#775` entries beside their FLOAT and bare-argument controls |
+
+The walk answers a window over a SCAN. It does NOT answer a window over a
+DERIVED TABLE: put one level of nesting between them and `SUM(w*2)` over
+`SUM(a) OVER ()` is still LOUD on both DAG arms, at the same site and with the
+same `cannot store string into FLOAT64 vector`, base-identical — and the SINGLE
+path keeps the right value under a FLOAT box where PostgreSQL says numeric, so
+the nesting loses the declaration on every arm and the DAG is only where losing
+it is loud. That is the
+rule's BOUNDARY rather than a regression, and rule 11 of the correctness-fix
+protocol is why it carries a fixture instead of a sentence: **#796**, pinned in
+`TestNumericArc2ShapesMatchPostgres` beside the six shapes it is one nesting
+level away from.
 
 ## Consequences
 

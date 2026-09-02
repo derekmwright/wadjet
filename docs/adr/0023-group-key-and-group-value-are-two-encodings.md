@@ -247,6 +247,22 @@ derived from the other.**
    `wadjet.TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget`, whose
    `group_by_distinct_c_date` cell was the #788 pin.
 
+   **The encoder is single-valued on the type's DOMAIN, and the domain is an
+   unstated invariant.** `batch.KeyStorageInt` inverts `GetValue`'s formatting
+   by re-parsing it, so the two producers agree exactly while an IPv4 column's
+   storage is a uint32, a MAC's is 48 bits and a DATE's year is 1..9999.
+   `SetValue`'s TEXT door guarantees that — it stores NULL for an unparseable
+   date and declines an unparseable address — but `SetValue` also accepts a RAW
+   INTEGER verbatim with no domain check, and for one outside the domain the
+   failure is NOT the guarded `ok=false` text fallback: `formatIPv4`/`formatMAC`
+   truncate to 32/48 bits, the parse re-widens, and `KeyStorageInt` answers
+   ok=true with a DIFFERENT integer than the int drain writes. No wadjet writer
+   produces such storage — every path goes through the text door — so this is
+   not reachable from SQL, and `TestAnUnstorableBoxKeysApartFromEveryRealValue`
+   covers the other side of the invariant (a box that does not parse) and not
+   this one. A foreign parquet file is the one producer that bypasses the door,
+   which is where the invariant would have to be checked if it ever needs to be.
+
    The VALUE a group emits is untouched by all of this: it stays the boxed
    round trip of items 2–3, and nothing decodes a value out of a key.
 
