@@ -38,7 +38,7 @@ import (
 // these issues is a value that is right to six digits and wrong after them.
 //
 // Issues: #727 (a CTE's TEXT column re-typed from its first row's VALUE),
-// #728 (an aggregate's output declared FLOAT64 through a rename), #786/#781
+// #728 (an aggregate's output declared FLOAT64 through a rename), #786
 // (a derived GROUP BY key typed against a scope that stops at a Project),
 // #749 (an exact operator's scale reduced to buy integer digits), #703
 // (DISTINCT dropped for every aggregate but COUNT, and then double-counted
@@ -142,13 +142,18 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			[]string{"s=28.0028"}},
 
 		// ------------------------------------------------------------------
-		// #786/#781 — a derived GROUP BY key was typed against inputColDecls,
+		// #786 — a derived GROUP BY key was typed against inputColDecls,
 		// which stops at a Project, and the arithmetic above the unresolved
 		// column still answered expr.Decided FLOAT64. The key therefore
 		// declared FLOAT64 over a derived table and died at the #361 store
 		// guard. The delimited sibling column in #786's own spelling is not
 		// the trigger: a parsed BinaryOp asks for `c_dec`, never for the name
 		// "c_dec + 1" (ADR-0026 §2c).
+		//
+		// #781 is NOT here and was never fixed by this work, though an
+		// earlier version of this header claimed it: #781 is a stage-SPELLING
+		// problem, `window_key_group_two_path_test.go`'s `pin781/*` entries
+		// still stand, and their ratchet agrees they still diverge.
 		{"#786", "derived_decimal_key_over_a_derived_table",
 			`SELECT c_dec + 1 AS k FROM (SELECT c_dec FROM typemx WHERE id < 4) s GROUP BY c_dec + 1 ORDER BY k`,
 			[]string{"k=1.0000", "k=2.0001", "k=3.0002", "k=4.0003"}},
