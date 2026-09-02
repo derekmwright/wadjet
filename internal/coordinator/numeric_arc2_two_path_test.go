@@ -119,6 +119,21 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			`SELECT c_dec + 1 AS k, MAX("c_dec + 1") AS m FROM ` +
 				`(SELECT c_dec, c_i32 AS "c_dec + 1" FROM typemx WHERE id < 4) s GROUP BY c_dec + 1 ORDER BY k`,
 			[]string{"k=1.0000|m=int64:0", "k=2.0001|m=int64:3", "k=3.0002|m=int64:6", "k=4.0003|m=int64:9"}},
+
+		// ------------------------------------------------------------------
+		// #749 — item 3's p>38 reduction spent an EXACT operator's fraction
+		// digits to buy integer digits: over DECIMAL(38,10), `dw + 1` came
+		// back at scale 9 and `dw * 2` at scale 8, correctly rounded and so
+		// indistinguishable from exact. PostgreSQL keeps all ten.
+		{"#749", "wide_decimal_plus_one_keeps_its_scale",
+			`SELECT dw + 1 AS p FROM decwin WHERE id = 199`,
+			[]string{"p=997333333445534.3129445454"}},
+		{"#749", "wide_decimal_times_two_keeps_its_scale",
+			`SELECT dw * 2 AS t FROM decwin WHERE id = 199`,
+			[]string{"t=1994666666891066.6258890908"}},
+		{"#749", "wide_decimal_minus_a_fraction_keeps_the_wider_scale",
+			`SELECT dw - 0.5 AS d FROM decwin WHERE id = 199`,
+			[]string{"d=997333333445532.8129445454"}},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			for _, arm := range []struct {

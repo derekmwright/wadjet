@@ -214,10 +214,21 @@ func TestDecimalArithmeticDeclaresTheResultType(t *testing.T) {
 		{"(a + b) * a", expr.DeclDecimal(29, 6)},
 		// Unary minus moves no digit and keeps the column's own type.
 		{"-a", expr.DeclDecimal(9, 2)},
-		// The full carrier width, and the adjustment past 38: (38,10) x
-		// (38,10) wants p=77, s=20 — intDigits 57 already exceeds 38, so the
-		// scale falls to its floor min(20,6) = 6 and the precision to 38.
-		{"wide * wide", expr.DeclDecimal(38, 6)},
+		// The full carrier width past 38: (38,10) x (38,10) wants p=77, s=20.
+		// The PRECISION is capped and the SCALE is kept, because a product's
+		// scale is EXACT — it is the scale at which the answer has no
+		// rounding — and spending it buys integer digits the value may not
+		// need at the price of digits it has (#749). It used to fall to
+		// min(20,6) = 6, so `dw * 2` over a DECIMAL(38,10) came back at scale
+		// 8 and `dw + 1` at scale 9: correctly ROUNDED values of the wrong
+		// type, indistinguishable from exact ones. A product that does not
+		// fit 38 digits at scale 20 is now a 22003 (ADR-0024 item 4) rather
+		// than a silently narrower answer.
+		{"wide * wide", expr.DeclDecimal(38, 20)},
+		// Division keeps item 3's reduction: its scale is a policy floor
+		// (max(6, s1+p2+1)), not a fact about the operands, so reducing it
+		// drops no digit the answer had.
+		{"wide / wide", expr.DeclDecimal(38, 6)},
 
 		// A FLOAT operand makes the whole expression float8, which is what
 		// PostgreSQL answers: float8 is the preferred type of the numeric

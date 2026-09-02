@@ -753,6 +753,11 @@ func DecimalResultType(op string, p1, s1, p2, s2 int) (int, int, bool) {
 	p1, s1 = normalizeDecimalPS(p1, s1)
 	p2, s2 = normalizeDecimalPS(p2, s2)
 	var p, s int
+	// exactScale marks an operator whose scale is not a policy but a FACT: at
+	// s the result has no rounding at all, so giving digits up there is giving
+	// up digits the answer has. Only division's scale is chosen (its floor of
+	// six is a policy), and only division keeps item 3's fractional reduction.
+	exactScale := true
 	switch strings.ToLower(strings.TrimSpace(op)) {
 	case "+", "-":
 		s = max(s1, s2)
@@ -763,11 +768,33 @@ func DecimalResultType(op string, p1, s1, p2, s2 int) (int, int, bool) {
 	case "/":
 		s = max(6, s1+p2+1)
 		p = p1 - s1 + s2 + s
+		exactScale = false
 	case "%", "mod":
 		s = max(s1, s2)
 		p = min(p1-s1, p2-s2) + s
 	default:
 		return 0, 0, false
+	}
+	if exactScale && p > MaxDecimalPrecision && s <= MaxDecimalScale {
+		// The PRECISION is capped and the SCALE is kept (#749). ADR-0024 item
+		// 3's fractional reduction spends fraction digits to buy integer ones,
+		// which for an exact operator is a value of the WRONG TYPE dressed as
+		// a right one: over DECIMAL(38,10), `dw + 1` came back at scale 9 and
+		// `dw * 2` at scale 8 — correctly ROUNDED, and so indistinguishable
+		// from an exact answer, where PostgreSQL keeps all ten digits. Item 4
+		// is the rule that replaces it: a value with no carrier at the
+		// declared type is a loud 22003, never a silently narrower one, and
+		// rule 8 of the correctness-fix protocol says loud beats plausible.
+		//
+		// The bound this trades away is RANGE, and it is the carrier's own:
+		// at scale s an Int128 holds 38-s integer digits, so a sum that needs
+		// more raises rather than rounding. That is item 1's recorded
+		// divergence (the 38-digit carrier), not a new one.
+		//
+		// Division keeps the reduction because its scale was never exact:
+		// `max(6, s1+p2+1)` is a floor this project chose, and reducing a
+		// chosen scale drops no digit the answer had.
+		return MaxDecimalPrecision, s, true
 	}
 	p, s = AdjustDecimalPrecisionScale(p, s)
 	return p, s, true

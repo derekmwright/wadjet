@@ -848,7 +848,25 @@ func TestDecimalResultTypeFollowsADR0024(t *testing.T) {
 		{name: "sub uses the same rule as add", op: "-", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 19, wantS: 4, wantOK: true},
 		{name: "add of a decimal and an integer", op: "+", p1: 10, s1: 2, p2: 19, s2: 0, wantP: 22, wantS: 2, wantOK: true},
 		{name: "mul of two money columns", op: "*", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 31, wantS: 4, wantOK: true},
-		{name: "mul past 38 gives up fraction digits, never integer digits", op: "*", p1: 30, s1: 10, p2: 30, s2: 10, wantP: 38, wantS: 6, wantOK: true},
+		// An EXACT operator past 38 caps the PRECISION and keeps the SCALE
+		// (#749). Item 3's fractional reduction bought integer digits with
+		// fraction digits the answer actually had: over DECIMAL(38,10) it
+		// made `dw + 1` scale 9 and `dw * 2` scale 8 — correctly ROUNDED
+		// values of the wrong type, which is the shape rule 8 of the
+		// correctness-fix protocol calls worse than an error. A value with
+		// no carrier at the kept scale is now item 4's 22003.
+		{name: "mul past 38 keeps its exact scale", op: "*", p1: 30, s1: 10, p2: 30, s2: 10, wantP: 38, wantS: 20, wantOK: true},
+		{name: "add past 38 keeps the wider operand's scale", op: "+", p1: 38, s1: 10, p2: 1, s2: 0, wantP: 38, wantS: 10, wantOK: true},
+		{name: "mul by a one-digit integer keeps the scale", op: "*", p1: 38, s1: 10, p2: 1, s2: 0, wantP: 38, wantS: 10, wantOK: true},
+		{name: "sub past 38 keeps the wider operand's scale", op: "-", p1: 38, s1: 10, p2: 2, s2: 1, wantP: 38, wantS: 10, wantOK: true},
+		{name: "mod past 38 keeps the wider operand's scale", op: "%", p1: 38, s1: 30, p2: 38, s2: 30, wantP: 38, wantS: 30, wantOK: true},
+		// DIVISION keeps item 3's reduction: its scale is a policy floor
+		// (max(6, s1+p2+1)) rather than a fact about the operands, so
+		// reducing it drops no digit the answer had.
+		{name: "div past 38 still gives up fraction digits", op: "/", p1: 30, s1: 10, p2: 30, s2: 10, wantP: 38, wantS: 8, wantOK: true},
+		// A scale the CARRIER cannot declare still falls to the old rule:
+		// there is no exact type to keep.
+		{name: "mul whose exact scale exceeds the carrier still reduces", op: "*", p1: 38, s1: 25, p2: 38, s2: 25, wantP: 38, wantS: 11, wantOK: true},
 		{name: "div of two money columns", op: "/", p1: 15, s1: 2, p2: 15, s2: 2, wantP: 33, wantS: 18, wantOK: true},
 		{name: "div keeps at least six fraction digits", op: "/", p1: 10, s1: 0, p2: 4, s2: 0, wantP: 16, wantS: 6, wantOK: true},
 		{name: "mod takes the narrower integer part", op: "%", p1: 18, s1: 4, p2: 9, s2: 2, wantP: 11, wantS: 4, wantOK: true},
