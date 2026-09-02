@@ -498,8 +498,45 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		// aggregate INPUT, not the slot and not the multiplication. The bare
 		// argument (`SUM(w)`) always answered and is kept here as the control
 		// that says which half moved.
+		// CLOSED 2026-09-02, and the site was the INPUT declaration rather than
+		// the output one. `SUM(w * 2)` hoists its constant out of the
+		// aggregate, so the stage carries `SUM(__win_0)` plus a POST-BREAKER
+		// projection `__agg_0 * 2` — and `aggInputColumnType` looked that
+		// re-spelled name up in the scope of the Project directly below the
+		// aggregate, which had renamed `__win_0` to `w`. FLOAT64 with the (p,s)
+		// dropped, inherited by `aggOutputFromInputDecl`, met an exact DECIMAL
+		// at the store guard. ADR-0026 §5's `namingScopeDecls` answers it.
+		//
+		// These four were `window_fed_aggregate_pin_test.go`, which asserted
+		// that the DAG still FAILED; they belong here now, beside the controls
+		// that make them a statement about the (p,s).
+		{"#775", "sum_times_two_over_a_sum_window",
+			`SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x`,
+			[]string{"s=953.82"}},
+		{"#775", "sum_plus_one_over_a_sum_window",
+			`SELECT SUM(w+1) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x`,
+			[]string{"s=485.91"}},
+		{"#775", "sum_times_two_over_an_avg_window",
+			`SELECT SUM(w*2) AS s FROM (SELECT id, AVG(a) OVER () AS w FROM decpair) x`,
+			[]string{"s=136.260000"}},
+		{"#775", "sum_times_two_over_a_max_window",
+			`SELECT SUM(w*2) AS s FROM (SELECT id, MAX(a) OVER () AS w FROM decpair) x`,
+			[]string{"s=229.50"}},
+		// The two shapes that were `TestKnownBoxDivergencesBetweenPaths`'s
+		// window-slot pair: the same mechanism one operator earlier, where it
+		// showed as a float BOX over a right number rather than as a hard
+		// failure. PostgreSQL 17 says numeric — row_number is bigint and
+		// sum(bigint) is numeric (ADR-0024 item 2) — and both paths say it now.
+		{"#775", "sum_over_a_row_number_window_slot",
+			`SELECT SUM(w) AS s FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS w ` +
+				`FROM typemx WHERE id < 10) x`,
+			[]string{"s=55"}},
+		{"#775", "sum_times_two_over_a_row_number_window_slot",
+			`SELECT SUM(w*2) AS s FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS w ` +
+				`FROM typemx WHERE id < 10) x`,
+			[]string{"s=110"}},
 		// The FLOAT twin, which passed throughout: it is the control that makes
-		// the three above a statement about the (p,s) and not about windows.
+		// the four above a statement about the (p,s) and not about windows.
 		{"#775", "sum_over_a_float_window_output",
 			`SELECT SUM(w*2) AS s FROM (SELECT id, SUM(f) OVER () AS w FROM decpair) x`,
 			[]string{"s=float:2497.5"}},

@@ -308,6 +308,33 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
 		},
 		{
+			// #781's no-join spelling, which used to fail LOUDLY — `cannot store
+			// string into FLOAT64 vector` — and only because the key is DECIMAL:
+			// the key is dispatched correctly as `a * 3` over a fused scan that
+			// carries `a`, and ONLY the declared type was wrong.
+			// `derivedGroupKeyDecl` types it in the scope that can NAME its
+			// columns now (ADR-0026 §5): the emitted scope carries `id` and `w`
+			// and no `a`, so its FLOAT64 was the float RULE and not an
+			// observation, and `sourceColDeclsThroughRenames` stopped at the
+			// computed projection item and answered nothing at all.
+			name: "781/a-computed-decimal-alias-over-a-bare-scan",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl +
+				") x GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+		},
+		{
+			// #792: a bare-NAME key whose DEFINITION is DECIMAL arithmetic in
+			// the derived Project. Dispatched as `c_dec + 1`, which the fused
+			// scan can evaluate, and declared FLOAT64 with the (p,s) dropped —
+			// the same site, digit for digit here.
+			name: "792/a-decimal-expression-alias-as-a-key",
+			sql: "SELECT k, COUNT(*) AS n FROM (SELECT c_dec + 1 AS k FROM typemx " +
+				"WHERE id < 4) s GROUP BY k ORDER BY k",
+			cols: []string{"k", "n"},
+			want: "4 rows: 1.0000|1;2.0001|1;3.0002|1;4.0003|1;",
+		},
+		{
 			// A computed alias BESIDE a window that has nothing to do with it.
 			// `id % 7 AS k` is ordinary arithmetic over a scan column; round 1's
 			// second predicate answered the alias here and turned a correct DAG
@@ -395,18 +422,6 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols:      []string{"w", "n"},
 			pg:        "8 rows: 0|1;3|1;6|1;9|1;12|1;15|1;18|1;|1;",
 			dagPinned: "1 rows: |8;",
-		},
-		{
-			// The no-join spelling, which fails LOUDLY instead — and only
-			// because the key is DECIMAL: `derivedGroupKeyDecl` cannot type it
-			// through the rename, so the slot is FLOAT64 and the #361 store
-			// guard fires. Same site, a different symptom, and it is here so a
-			// change that moves either one is visible (#786).
-			name:      "pin781/a-computed-decimal-alias-over-a-bare-scan-is-loud",
-			sql:       "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl + ") x GROUP BY x.w ORDER BY w",
-			cols:      []string{"w", "n"},
-			pg:        "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
-			dagPinned: "",
 		},
 		{
 			// The AGGREGATE-wrapped spelling: `COUNT(*) + 0 AS w` over a grouped

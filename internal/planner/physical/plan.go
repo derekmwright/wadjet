@@ -5240,41 +5240,123 @@ func aggStageDispatchKey(key string, e plansql.Node, child *logical.Node) (strin
 // re-spelling, and the key the DAG dispatches has already had it done, so the
 // second arm catches that case too.
 func derivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) expr.DeclType {
-	below := func(n plansql.Node) expr.DeclType {
-		return inferProjectionDeclType(n, parquet.TypeString,
-			strictIntArithColsThroughRenames(child), sourceColDeclsThroughRenames(child))
-	}
+	// The form the WORKER computes. A key whose leaves a rename Project binds
+	// is dispatched re-spelled into source columns (aggStageDerivedKey), and
+	// typing the spelling the query wrote instead types an expression nothing
+	// evaluates.
+	typed := node
 	if respelled, changed := aggStageDerivedKey(key, child); changed {
 		if n, err := plansql.ParseExpression(respelled); err == nil {
-			return below(n)
+			typed = n
 		}
 	}
-	// emittedColDecls, not inputColDecls: the scope the GROUP BY expression is
-	// written against is what the aggregate's input EMITS, and inputColTypes
-	// stops at a Project. Over a derived table or a CTE `c_dec` therefore
-	// decided nothing — and the arithmetic above it still answered
-	// expr.Decided FLOAT64, which is the confidence this branch gates on. So
-	// the FLOAT64 was taken as an answer, the `below` walk that resolves
-	// DECIMAL(19,4) was never consulted, and `GROUP BY c_dec + 1` over
-	// `(SELECT c_dec FROM typemx) s` died at the #361 store guard —
-	// `cannot store string into FLOAT64 vector` — on a query the same SQL
-	// over the base table answers (#786/#781). The delimited sibling column
-	// in #786's own spelling is NOT the trigger and never was: a parsed
-	// BinaryOp asks for `c_dec`, never for the name "c_dec + 1"
-	// (ADR-0026 §2c), and the shape fails identically with no such column
-	// present.
-	if _, c := nodeDeclaredType(node, emittedColDecls(child)); c == expr.Decided {
-		return inferProjectionDeclType(node, parquet.TypeString,
-			strictIntArithCols(child), emittedColDecls(child))
+	// The scope that can NAME the key's columns is the one that types it.
+	if decls, scope, ok := namingScopeDecls(typed, child); ok {
+		return inferProjectionDeclType(typed, parquet.TypeString,
+			strictIntArithCols(scope), decls)
 	}
-	// Nothing decided here. The key may already name source columns — the
-	// DAG dispatches it re-spelled — so ask below the renames before falling
-	// back to the undecided answer, which is what the caller had before.
-	if d := below(node); d.ID != parquet.TypeString {
-		return d
-	}
+	// No level of the chain names them: keep the answer this had before, which
+	// is the float rule over the aggregate's input decls.
 	return inferProjectionDeclType(node, parquet.TypeString,
 		strictIntArithCols(child), inputColDecls(child))
+}
+
+// namingScopeDecls answers WHICH declaration scope types a dispatched
+// expression, by descending the chain below the aggregate until it finds the
+// level whose emitted columns can name every column the expression references.
+//
+// Two consumers, one question. A GROUP BY key and an aggregate's ARGUMENT are
+// both re-spelled for dispatch — the key into its defining expression, the
+// argument into the column a rename Project binds — and ADR-0026 §2c's rule
+// applies to both: a name so re-spelled is TYPED where it was re-spelled TO,
+// not where the query wrote it. Asking the question in one place is what keeps
+// the two from answering it differently (ADR-0023 item 5).
+//
+// A Project emits no stage of its own on the DAG, so a key spelled against a
+// Project's OUTPUT and a key spelled against its INPUT are both evaluated in
+// the same fragment and only one of them resolves — and which one depends on
+// whether the key was re-spelled. Both scopes were consulted before, in fixed
+// order and each with its own gate, and neither gate asked the one question
+// that decides it:
+//
+//   - the emitted scope was accepted whenever `nodeDeclaredType` answered
+//     Decided, which arithmetic always does. The FLOAT rule is a rule, not an
+//     observation, so `GROUP BY k` over `(SELECT c_dec + 1 AS k FROM typemx) s`
+//     — dispatched as `c_dec + 1` into a scope carrying `k` and no `c_dec` —
+//     was answered FLOAT64 with confidence, and died at the #361 store guard:
+//     `cannot store string into FLOAT64 vector`, on a query the same SQL over
+//     the base table answers (#792).
+//   - the source scope (`sourceColDeclsThroughRenames`) stops at a COMPUTED
+//     projection item and returns NOTHING, because a rename may rebind a name
+//     to a different value. True of a name; not true of the DEFINING
+//     EXPRESSION that Project item was hoisted out of, which is spelled in the
+//     Project's own input scope. So `a * 3` over `(SELECT id, a * 3 AS w FROM
+//     decpair) x` had no scope at all and fell to the same float rule (#781's
+//     loud cell, #786).
+//
+// Descending is gated on coverage in both directions, which is what makes it
+// safe: a key the Project's OUTPUT can name stops at the OUTPUT, so a rebound
+// name is never read past its rebinding; a key it cannot name is looked for
+// one level down, where it either resolves or the walk gives up.
+func namingScopeDecls(node plansql.Node, child *logical.Node) (colDecls, *logical.Node, bool) {
+	for n := child; n != nil; {
+		d := emittedColDecls(n)
+		if declsCoverEveryColRef(node, d) {
+			return d, n, true
+		}
+		if !groupKeyScopeDescends(n.Type) || len(n.Children) != 1 {
+			return colDecls{}, nil, false
+		}
+		n = n.Children[0]
+	}
+	return colDecls{}, nil, false
+}
+
+// groupKeyScopeDescends lists the nodes namingScopeDecls looks THROUGH.
+//
+// The question is narrower than logical.AggScopePreservingWrapper's and is
+// deliberately its own list rather than a copy of one, for the reason
+// ADR-0026 §4 gives about the fifth reader: "are this node's input columns
+// still values of the same rows" is not "do this node's rows carry one row per
+// group", and a shared list that answers both is a list answering neither.
+//
+// Here: a node belongs when a name it does not emit may still be a name its
+// INPUT emits, for the same rows. A Project renames and computes, and the
+// coverage test above is what keeps a rebound name from being read past its
+// rebinding; Filter/Sort/Limit/Distinct forward every column untouched; a
+// Window only ADDS columns, so a name it does not carry is its input's.
+//
+// NodeAggregate is excluded, and that is the boundary: an aggregate REPLACES
+// its input's scope with keys and aggregate outputs, so a key naming one of
+// its outputs must be typed there and a key naming a column it consumed is
+// not a key this plan can evaluate at all.
+func groupKeyScopeDescends(t logical.NodeType) bool {
+	switch t {
+	case logical.NodeProject, logical.NodeFilter, logical.NodeSort,
+		logical.NodeLimit, logical.NodeDistinct, logical.NodeWindow:
+		return true
+	}
+	return false
+}
+
+// declsCoverEveryColRef reports whether decls can name every column the
+// expression references.
+//
+// It is the gate on reading a decl set's answer at all. `nodeDeclaredType`
+// answers Decided for arithmetic whose operands it cannot type — the float
+// rule is a rule, not an observation — so "Decided" says nothing about whether
+// the set was looking at this expression's columns. A set that cannot name a
+// leaf has not typed the expression; it has guessed at it.
+//
+// A term with no column references at all (a literal, `now()`) is covered
+// vacuously, which is correct: there is nothing for a decl set to know.
+func declsCoverEveryColRef(node plansql.Node, decls colDecls) bool {
+	for _, ref := range collectColRefs(node) {
+		if _, ok := decls.colDecl(ref); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // aggStageDerivedKey re-spells a computed GROUP BY key's column references
@@ -13841,10 +13923,22 @@ func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	if t, ok := scanColumnType(node, col); ok {
 		return t, true
 	}
+	// namingScopeDecls, not emittedColDecls of the immediate child: the name
+	// asked about here has ALREADY been re-spelled for dispatch, and a rename
+	// Project directly above its scope answers for the ALIAS and not for it.
+	// `SUM(w)` over `(SELECT id, SUM(a) OVER () AS w FROM decpair) x` arrives
+	// as `SUM(__win_0)`, the Project below the aggregate emits `id` and `w`,
+	// and the walk that stopped there found no `__win_0` — so the aggregate
+	// declared FLOAT64 over a DECIMAL window slot, its output declared FLOAT64,
+	// and the post-aggregate projection `__agg_0 * 2` met an exact DECIMAL at
+	// the #361 store guard on both DAG arms (#775). Descending is gated on
+	// coverage, so a name the Project DOES answer for still stops there and no
+	// rebinding is read past.
 	if node != nil && len(node.Children) == 1 {
-		if t, c := colRefDeclaredType(&plansql.ColRef{Column: col},
-			emittedColDecls(node.Children[0])); c == expr.Decided {
-			return t.ID, true
+		if decls, _, ok := namingScopeDecls(&plansql.ColRef{Column: col}, node.Children[0]); ok {
+			if t, c := colRefDeclaredType(&plansql.ColRef{Column: col}, decls); c == expr.Decided {
+				return t.ID, true
+			}
 		}
 	}
 	return 0, false
@@ -13863,11 +13957,15 @@ func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta,
 		// (p,s) to a column the worker reads as an integer.
 		return logical.DecimalMeta{}, false
 	}
+	// The same descent aggInputColumnType makes, for the same reason and in the
+	// same order: the two answer one question about one column, and a
+	// disagreement between them is a DECIMAL declared with someone else's scale.
 	if node != nil && len(node.Children) == 1 {
-		if t, c := colRefDeclaredType(&plansql.ColRef{Column: col},
-			emittedColDecls(node.Children[0])); c == expr.Decided {
-			if t.ID == parquet.TypeDecimal && t.DecKnown {
-				return logical.DecimalMeta{Precision: t.Precision, Scale: t.Scale}, true
+		if decls, _, ok := namingScopeDecls(&plansql.ColRef{Column: col}, node.Children[0]); ok {
+			if t, c := colRefDeclaredType(&plansql.ColRef{Column: col}, decls); c == expr.Decided {
+				if t.ID == parquet.TypeDecimal && t.DecKnown {
+					return logical.DecimalMeta{Precision: t.Precision, Scale: t.Scale}, true
+				}
 			}
 		}
 	}
@@ -13973,7 +14071,14 @@ func aggSpecInputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Decim
 			return logical.DecimalMeta{}, false
 		}
 	}
-	return scanColumnDecimal(node, agg.InputCol)
+	// aggInputColumnDecimal, not scanColumnDecimal: the same walk, in the same
+	// order, that aggSpecOutputType asks for the input's TYPE. Two functions
+	// answering one question about one column with two different walks is
+	// ADR-0023 item 5 one layer over, and the disagreement is a DECIMAL
+	// declared with nobody's scale — for a WINDOW SLOT (`SUM(__win_0)`), whose
+	// declaration lives in the emitted walk and in no scan at all, the scan-only
+	// walk answered (0,0) (#775).
+	return aggInputColumnDecimal(node, agg.InputCol)
 }
 
 // minMaxDeclaredType maps a MIN/MAX input column type to the output type

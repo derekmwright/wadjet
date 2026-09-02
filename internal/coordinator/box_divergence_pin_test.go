@@ -22,17 +22,18 @@ import (
 //     reads (ADR-0010's type guard). The order is right for the DAG and wrong
 //     for exactly this shadow; the comment on that function says so.
 //
-//  2. A WINDOW SLOT. `SUM(w)` over `ROW_NUMBER() OVER (ORDER BY id)` is
-//     NUMERIC in PostgreSQL — row_number is bigint and sum(bigint) is numeric —
-//     and the single-process path agrees. The DAG boxes float64, because the
-//     worker rebuilds the aggregate's input from a declaration a window output
-//     does not carry. That is the same mechanism as #775's pinned DAG half
-//     (TestWindowFedAggregateArgumentIsPinnedOnTheDAG), one operator earlier:
-//     there it is a hard failure, here it is a float box over a right number.
+// The WINDOW SLOT pair that used to sit here — `SUM(w)` and `SUM(w*2)` over
+// `ROW_NUMBER() OVER (ORDER BY id)`, boxed float64 on the DAG where PostgreSQL
+// and the single-process path say numeric — is GONE, and its going is what
+// this file's ratchet is for. It was #775's mechanism one operator earlier:
+// the worker rebuilt the aggregate's input from a declaration a window output
+// did not carry. ADR-0026 §5's `namingScopeDecls` carries it, both paths now
+// box numeric, and the shapes are asserted in
+// `TestNumericArc2ShapesMatchPostgres` beside #775's own.
 //
-// So each path is the correct one on one shape. The test asserts BOTH boxes as
-// they are and FAILS when either converges — at which point the shape belongs
-// in the census with PostgreSQL's box and this entry goes away.
+// The test asserts BOTH boxes as they are and FAILS when either converges — at
+// which point the shape belongs in the census with PostgreSQL's box and its
+// entry goes away, exactly as those two did.
 func TestKnownBoxDivergencesBetweenPaths(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this pin stands up an embedded NATS cluster")
@@ -57,22 +58,6 @@ func TestKnownBoxDivergencesBetweenPaths(t *testing.T) {
 			wantSingle: "s=84", wantDAG: "s=int64:84",
 			postgres:    "bigint 84",
 			whoDiverges: "the single-process path",
-		},
-		{
-			name: "window_slot_boxes_float_on_the_dag",
-			sql: `SELECT SUM(w*2) AS s FROM ` +
-				`(SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS w FROM typemx WHERE id < 10) x`,
-			wantSingle: "s=110", wantDAG: "s=float:110",
-			postgres:    "numeric 110",
-			whoDiverges: "the DAG",
-		},
-		{
-			name: "window_slot_bare_argument_boxes_float_on_the_dag",
-			sql: `SELECT SUM(w) AS s FROM ` +
-				`(SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS w FROM typemx WHERE id < 10) x`,
-			wantSingle: "s=55", wantDAG: "s=float:55",
-			postgres:    "numeric 55",
-			whoDiverges: "the DAG",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

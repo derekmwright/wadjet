@@ -2255,35 +2255,40 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				}
 			})
-			// #729's family: the DAG declares FLOAT64 for arithmetic whose
-			// value is an exact DECIMAL. A FRACTIONAL literal in the key, and
-			// an outer aggregate over the key, both fail at dispatch where
-			// the single-process path answers PostgreSQL's rows.
+			// #729's last DAG residual, CLOSED 2026-09-02: the DAG declared
+			// FLOAT64 for arithmetic whose value is an exact DECIMAL, so a
+			// FRACTIONAL literal in a key over a renamed DECIMAL failed at
+			// dispatch where the single-process path answered PostgreSQL's
+			// rows. `derivedGroupKeyDecl` types the key in the scope that can
+			// NAME its columns now (ADR-0026 §5): `sourceColDeclsThroughRenames`
+			// stopped at a computed projection item and answered NOTHING, and
+			// the emitted scope's FLOAT rule was accepted because
+			// `nodeDeclaredType` answers Decided for arithmetic it cannot type.
 			//
-			// TODO(#729): delete this pin when the DAG declares the DECIMAL.
-			for _, c := range []struct {
-				name, sql  string
-				wantSingle int
-			}{
-				{"FractionalLiteralInTheKey", fmt.Sprintf(
+			// Asserted digit for digit rather than by row count, because the
+			// row count was right while the values were the thing at risk.
+			t.Run("FractionalLiteralInTheKey", func(t *testing.T) {
+				sql := fmt.Sprintf(
 					`SELECT r1 + 0.5 AS k, COUNT(*) AS n FROM (SELECT a AS r1 FROM %s) s `+
-						`GROUP BY r1 + 0.5 ORDER BY k`, dbpTable), 5},
-			} {
-				c := c
-				t.Run(c.name, func(t *testing.T) {
-					arms := sfcArms(ctx, single, coord)
-					res := sfcRun(t, arms[0], c.sql)
-					if len(res.Rows) != c.wantSingle {
-						t.Errorf("single arm returned %d rows, want %d\n  SQL: %s",
-							len(res.Rows), c.wantSingle, c.sql)
+						`GROUP BY r1 + 0.5 ORDER BY k`, dbpTable)
+				// PostgreSQL 17 over decpair.
+				want := []string{"0.49|1", "0.50|1", "2.50|1", "13.25|4", "|2"}
+				for _, arm := range sfcArms(ctx, single, coord) {
+					res := sfcRun(t, arm, sql)
+					if len(res.Rows) != len(want) {
+						t.Fatalf("%s arm returned %d rows, want %d\n  SQL: %s",
+							arm.name, len(res.Rows), len(want), sql)
 					}
-					if _, err := arms[1].run(c.sql); err == nil {
-						t.Fatalf("the DAG arm now ANSWERS this; PostgreSQL answers it too and "+
-							"the single-process path already does. #729 is fixed for this "+
-							"shape - assert it and delete the pin\n  SQL: %s", c.sql)
+					for i, w := range want {
+						k, n := res.Rows[i]["k"], res.Rows[i]["n"]
+						got := fmt.Sprintf("%v|%v", nz(k), nz(n))
+						if got != w {
+							t.Errorf("%s arm row %d = %s, PostgreSQL 17 says %s\n  SQL: %s",
+								arm.name, i, got, w, sql)
+						}
 					}
-				})
-			}
+				}
+			})
 			// An outer aggregate over a renamed-DECIMAL key: pinned as #729
 			// before the reserved-slot work landed, and answering on BOTH
 			// paths now. Asserted rather than re-pinned — PostgreSQL says
@@ -3414,4 +3419,14 @@ func tripleLess(a, b [3]int64) bool {
 		}
 	}
 	return false
+}
+
+// nz renders a result value the way this file's assertions read it: a NULL is
+// the empty string, so a row whose key is NULL is distinguishable from one
+// whose key is the text "<nil>".
+func nz(v any) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
 }
