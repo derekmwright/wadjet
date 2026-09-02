@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,13 +15,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/worker"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// The numeric/decimal arc-2 census: every shape on FOUR arms, each answer
+// The numeric/decimal arc-2 census: every shape on FIVE arms, each answer
 // anchored to live PostgreSQL 17 rather than to the other arm.
 //
-// The arms are the four an answer can differ between (ADR-0018 §3, ADR-0027):
+// The arms are the five an answer can differ between (ADR-0018 §3, ADR-0027):
 //
 //	single                      the embedded engine, no memory budget
 //	single+budget+forced-drain  the same engine at 512 KiB with
@@ -31,6 +33,9 @@ import (
 //	dag                         the stage DAG over an embedded NATS cluster
 //	dag+broadcast               the DAG with BroadcastBytesOverride = 1, which
 //	                            forces the shuffle rather than the broadcast join
+//	dag+morsel4                 the DAG with worker.MorselWorkers = 4, so each
+//	                            fragment's breaker runs morsel-parallel and
+//	                            CloneSink's SECOND call site is exercised
 //
 // `want` is what `psql` printed on the oracle container (127.0.0.1:55432,
 // --locale=C, PostgreSQL 17) for the SAME rows, recorded before any of these
@@ -61,6 +66,17 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 	infraB := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infraB, nil)
 	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
+	// A DAG whose workers run their breakers MORSEL-PARALLEL. It is a fifth
+	// arm, not a variant of the fourth: CloneSink has two call sites and the
+	// worker's is the one only this width reaches. With it unguarded,
+	// `SUM(DISTINCT a)` answered 64.96 for 16.24 — four clones, four times the
+	// value — deterministically at a fixed width and nondeterministically
+	// under the auto one (#703, review round 2 B1). Four workers because the
+	// multiplier IS the clone count, so a wrong answer is unmistakable.
+	infraM := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraM, nil)
+	coordM := tmdCoordinatorWithWorkers(t, ctx, infraM,
+		func(w *worker.Config) { w.MorselWorkers = 4 })
 
 	for _, tc := range []struct {
 		issue, name, sql string
@@ -291,11 +307,85 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 				"k=int32:0|s=9232379236109516801|a=3077459745369838933.6667|c=int64:3",
 				"k=int32:1|s=9214364837600034815|a=2303591209400008703.7500|c=int64:4",
 			}},
+		// EVERY SPELLING of the same sum, because the carrier is not the same
+		// for all of them and the divergence was SILENT (review round 2 F4).
+		//
+		// `SUM(b)` reads a BARE int8 column, which #784 sums into Int128 and
+		// answers exactly as PostgreSQL's numeric. `SUM(b + 0)` and
+		// `SUM(b * 1)` are constant-folded back to that bare column before the
+		// aggregate is built, so they are the same question and the same
+		// answer — they are here as the CONTROL that the two below are not
+		// about arithmetic in the argument.
+		//
+		// `SUM(-b)` and the CASE spelling stay COMPUTED, and a computed
+		// integer argument is declared bigint on purpose so that
+		// `SUM(CASE WHEN … THEN 1 ELSE 0 END)` — TPC-H Q12's shape — keeps
+		// PostgreSQL's int8 OID (physical.aggOutputFromInputDecl). PostgreSQL
+		// answers -18446744073709551616 for both; wadjet's int64 carrier
+		// cannot hold it. It used to answer 0, which is the same digits'
+		// worth of wrong as any other wrong number: three spellings of one
+		// question were right and two were zero. Now the carrier is CHECKED
+		// and the query fails at 22003 (ADR-0012 item 9 — a wrapped sum is a
+		// different number wearing the right type).
+		//
+		// This is a REFUSAL, not an answer, and it is deliberately not
+		// symmetric with the three above: the alternative — routing every
+		// computed integer argument through the exact carrier — makes Q12's
+		// sum of ones numeric where PostgreSQL says bigint, trading a loud
+		// failure on a shape no data reaches for a wrong OID on the shape
+		// every BI tool sends.
+		{"#784", "sum_of_a_folded_zero_add_is_the_bare_column",
+			`SELECT SUM(b + 0) AS s FROM bigsum`, []string{"s=18446744073709551616"}},
+		{"#784", "sum_of_a_folded_one_multiply_is_the_bare_column",
+			`SELECT SUM(b * 1) AS s FROM bigsum`, []string{"s=18446744073709551616"}},
+		{"#784", "sum_of_a_bare_column_through_a_projection",
+			`SELECT SUM(b) + 0 AS s FROM bigsum`, []string{"s=18446744073709551616"}},
+
 		// The rules #784 does NOT change, on the same fixture: SUM over the
 		// int32 class is bigint, and MIN/MAX keep the input's own type.
 		{"#784", "sum_of_int32_beside_min_max",
 			`SELECT SUM(g) AS sg, MIN(b) AS mn, MAX(b) AS mx FROM bigsum`,
 			[]string{"sg=int64:4|mn=int64:-9007199254740993|mx=int64:9223372036854775807"}},
+		// EMPTY SCAN TASKS. typemx is written as four chunks, so a selective
+		// predicate leaves some scan task with no rows — and a task that saw no
+		// batch declares its partial from the SPEC while its siblings declare
+		// from the vector they observed. When those two disagree, ADR-0010's
+		// shuffle type guard refuses the read, which is what `AVG(c_i32) WHERE
+		// id < 3` did on both DAG arms while the single-process path answered
+		// (review round 2 B2). The carrier is decided at plan time from the
+		// declaration now, so both agree.
+		{"#784", "avg_int32_with_empty_scan_tasks",
+			`SELECT AVG(c_i32) AS a FROM typemx WHERE id < 3`, []string{"a=3.0000"}},
+		{"#784", "avg_int32_with_empty_scan_tasks_wider",
+			`SELECT AVG(c_i32) AS a FROM typemx WHERE id < 100`, []string{"a=147.8041"}},
+		{"#784", "avg_int32_beside_count_with_empty_scan_tasks",
+			`SELECT AVG(c_i32) AS a, COUNT(*) AS n FROM typemx WHERE id < 3`,
+			[]string{"a=3.0000|n=int64:3"}},
+		{"#784", "avg_int64_with_empty_scan_tasks",
+			`SELECT AVG(c_i64) AS a FROM typemx WHERE id < 3`, []string{"a=1000003.0000"}},
+		{"#784", "sum_int32_with_empty_scan_tasks",
+			`SELECT SUM(c_i32) AS s FROM typemx WHERE id < 3`, []string{"s=int64:9"}},
+		{"#784", "avg_int32_grouped_with_empty_scan_tasks",
+			`SELECT g AS k, AVG(c_i32) AS a FROM typemx WHERE id < 3 GROUP BY g ORDER BY k`,
+			[]string{"k=int32:0|a=0.0000", "k=int32:1|a=3.0000", "k=int32:2|a=6.0000"}},
+		// The same family reached through a RENAME, with and without a shadow.
+		{"#784", "avg_int32_through_a_rename",
+			`SELECT AVG(v) AS a FROM (SELECT c_i32 AS v, c_dec AS other FROM typemx WHERE id < 8) x`,
+			[]string{"a=10.5000"}},
+		{"#784", "avg_int32_through_a_shadowing_rename",
+			`SELECT AVG(c_dec) AS a FROM (SELECT c_i32 AS c_dec, c_dec AS other FROM typemx WHERE id < 8) x`,
+			[]string{"a=10.5000"}},
+		{"#784", "avg_int32_through_an_int64_shadow",
+			`SELECT AVG(c_i64) AS a FROM (SELECT c_i32 AS c_i64, c_i64 AS other FROM typemx WHERE id < 8) x`,
+			[]string{"a=10.5000"}},
+		// A COMPUTED and a RENAMED argument carry the declaration to the DAG
+		// too: the VALUE was right on both paths and the Go BOX — the wire OID a
+		// client reads — was int64 on one and float on the other (F3).
+		{"#784", "sum_of_a_computed_int32_is_bigint",
+			`SELECT SUM(c_i32 * 2) AS s FROM typemx`, []string{"s=int64:72397260"}},
+		{"#784", "sum_of_a_computed_int32_through_a_rename",
+			`SELECT SUM(v*2) AS s FROM (SELECT c_i32 AS v FROM typemx WHERE id < 8) x`,
+			[]string{"s=int64:168"}},
 		{"#784", "sum_over_no_non_null_rows_is_null",
 			`SELECT SUM(b) AS s, AVG(b) AS a FROM bigsum WHERE b IS NULL`,
 			[]string{"s=NULL|a=NULL"}},
@@ -340,10 +430,46 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		// INT64 column is numeric now, so a HAVING comparing it against a
 		// scalar takes the same boxed path a DECIMAL column does. On the base
 		// commit this answered 8 for PostgreSQL's 0.
+		// The same question in a PROJECTION rather than in a WHERE. The
+		// declaration seam reached the filter compile and not the aggregate
+		// ARGUMENT compile, so `SUM(CASE WHEN a > (SELECT AVG(a)) …)` answered 0
+		// on every arm while the WHERE spelling answered 4 — two spellings of one
+		// question, two numbers, which is the defect shape this arc is about
+		// (review round 2 F6). Both spellings take the option now.
+		{"#696", "scalar_subquery_in_an_aggregate_argument",
+			`SELECT SUM(CASE WHEN a > (SELECT AVG(a) FROM decpair) THEN 1 ELSE 0 END) AS n FROM decpair`,
+			[]string{"n=int64:4"}},
+		// The CORRELATED twin (#666): the subquery re-runs per row and its
+		// declared TYPE does not change with the row, so it takes the same
+		// declaration. It answered 0 for PostgreSQL's 4 on every arm, on base and
+		// through round 2, for the same lexicographic reason.
+		{"#696", "correlated_scalar_subquery_against_a_decimal_column",
+			`SELECT COUNT(*) AS n FROM decpair d WHERE d.a > ` +
+				`(SELECT AVG(x.a) FROM decpair x WHERE x.id <> d.id)`,
+			[]string{"n=int64:4"}},
 		{"#696", "integer_sum_in_having_against_a_scalar",
 			`SELECT COUNT(*) AS n FROM (SELECT g, SUM(id) AS s FROM typemx WHERE id < 100 ` +
 				`GROUP BY g HAVING SUM(id) > (SELECT SUM(id) * 0.4 FROM typemx WHERE id < 100)) x`,
 			[]string{"n=int64:0"}},
+
+		// ------------------------------------------------------------------
+		// #775 — a COMPUTED aggregate argument over a DECIMAL WINDOW output.
+		// The single-process half closed with #728; the DAG half was a hard
+		// failure at the #361 store guard on both arms, and the review round-2
+		// measurement narrowed it to exactly this: any arithmetic (`w*2`, `w+1`)
+		// over any DECIMAL window aggregate (SUM/AVG/MAX OVER), with the FLOAT
+		// twin passing — so it is the (p,s) of a window output used as an
+		// aggregate INPUT, not the slot and not the multiplication. The bare
+		// argument (`SUM(w)`) always answered and is kept here as the control
+		// that says which half moved.
+		// The FLOAT twin, which passed throughout: it is the control that makes
+		// the three above a statement about the (p,s) and not about windows.
+		{"#775", "sum_over_a_float_window_output",
+			`SELECT SUM(w*2) AS s FROM (SELECT id, SUM(f) OVER () AS w FROM decpair) x`,
+			[]string{"s=float:2497.5"}},
+		{"#775", "sum_of_a_bare_decimal_window_output",
+			`SELECT SUM(w) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x`,
+			[]string{"s=476.91"}},
 
 		// ------------------------------------------------------------------
 		// #704 — an integer column against a NON-INTEGRAL numeric literal.
@@ -389,9 +515,11 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 				restore := exec.ForceAggDrainEvery(1)
 				out, err := na2Run(tmdRunSingle(ctx, spilled, sql))
 				exec.ForceAggDrainEvery(restore)
-				if exec.ForcedAggDrains.Load() > before {
+				fired := exec.ForcedAggDrains.Load() > before
+				if fired {
 					na2Drains.Add(1)
 				}
+				na2Engaged.Store(tc.name, na2Cell{sql: tc.sql, drained: fired})
 				return out, err
 			}
 			for _, arm := range []struct {
@@ -402,6 +530,7 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 				{"single+budget+forced-drain", drained},
 				{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
 				{"dag+broadcast", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+				{"dag+morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
 			} {
 				got, err := arm.run(tc.sql)
 				if err != nil {
@@ -423,12 +552,89 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			}
 		})
 	}
+	na2CheckEngagement(t)
+}
+
+// na2Engaged is the PER-CELL spill ledger: cell name → the cell's SQL and
+// whether the forced aggregate drain fired on its pressured arm.
+//
+// ADR-0027 §5 asks for more than a non-zero count — "cells that cannot spill
+// are named with their reason" — and the count was hiding a real number here.
+// The forced drain fires on FIVE of this census's cells; the rest compared two
+// in-memory runs, which is worth knowing and was invisible behind "the forced
+// drain fired on 5 cells" (review round 2 F8).
+var na2Engaged sync.Map
+
+type na2Cell struct {
+	sql     string
+	drained bool
+}
+
+// na2NoDrainReason says why a shape cannot engage the forced aggregate drain,
+// or "" when it must engage. Two structural classes cover every quiet cell in
+// this census, and naming the CLASS rather than listing seventy-odd cell names
+// is what keeps the ledger a ratchet: a cell in neither class that stops
+// draining is an unnamed silent in-memory comparison and fails.
+//
+//   - UNGROUPED. An ungrouped aggregate's whole state is one row of
+//     accumulators plus extra state, so there is nothing to drain and no
+//     partial-state run to write — ADR-0027 decision 4, which removed the
+//     input buffer these shapes used to keep. Most of this census is scalar
+//     aggregates and COUNT(*) filters, so most of it is here.
+//   - GROUPED with a DISTINCT aggregate. The per-group value sets are extra
+//     state the partial-state run format does not carry, so
+//     exec.canUseExternalMerge declines and the operator takes the LEGACY
+//     raw-row spill instead. That path does spill — it is simply not the drain
+//     exec.ForcedAggDrains counts, so this knob cannot make it fire.
+//
+// A cell that is grouped, carries no DISTINCT, and still does not drain has
+// lost its pipeline breaker, and naming that is the point of returning "".
+func na2NoDrainReason(sql string) string {
+	u := strings.ToUpper(sql)
+	if !strings.Contains(u, "GROUP BY") {
+		return "ungrouped: one row of accumulators, nothing to drain (ADR-0027 decision 4)"
+	}
+	if strings.Contains(u, "(DISTINCT ") {
+		return "grouped DISTINCT: extra state the partial-state run cannot carry, so the " +
+			"operator takes the legacy raw-row spill, which this knob does not reach"
+	}
+	return ""
+}
+
+func na2CheckEngagement(t *testing.T) {
+	t.Helper()
 	if na2Drains.Load() == 0 {
 		t.Error("the pressured arm drained on NO cell, so it compared in-memory runs and " +
 			"proves nothing (ADR-0027 §5). Either the forcing knob stopped reaching the " +
 			"aggregate or every shape lost its pipeline breaker.")
+		return
 	}
-	t.Logf("pressured arm: the forced drain fired on %d cells", na2Drains.Load())
+	var unnamed []string
+	total, named := 0, 0
+	na2Engaged.Range(func(k, v any) bool {
+		name, cell := k.(string), v.(na2Cell)
+		total++
+		why := na2NoDrainReason(cell.sql)
+		switch {
+		case cell.drained && why != "":
+			t.Errorf("cell %q DID drain and na2NoDrainReason says it cannot (%s). "+
+				"The classification is stale (ADR-0027 §5).", name, why)
+		case !cell.drained && why == "":
+			unnamed = append(unnamed, name)
+		case !cell.drained:
+			named++
+		}
+		return true
+	})
+	if len(unnamed) > 0 {
+		sort.Strings(unnamed)
+		t.Errorf("the pressured arm did NOT drain on %d cells and nothing says why: %v\n"+
+			"A grouped shape with no DISTINCT that does not drain has lost its pipeline "+
+			"breaker, and that arm then compared two in-memory runs (ADR-0027 §5).",
+			len(unnamed), unnamed)
+	}
+	t.Logf("pressured arm: the forced drain fired on %d of %d cells; %d cannot drain, by class",
+		na2Drains.Load(), total, named)
 }
 
 // na2Drains counts the census cells whose pressured arm actually drained. The
