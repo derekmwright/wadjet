@@ -84,6 +84,25 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#727", "cte_text_type_does_not_depend_on_the_first_row",
 			`WITH c AS (SELECT s, id FROM decpair WHERE id = 3) SELECT s AS v FROM c`,
 			[]string{"v=abc"}},
+
+		// ------------------------------------------------------------------
+		// #728 — SUM/AVG/MIN/MAX resolved a bare column argument by searching
+		// the SCANS below for that NAME, which cannot see a rename. Over
+		// `(SELECT dw AS v FROM decwin) x` nothing carries `v`, so the
+		// aggregate's OUTPUT declared FLOAT64 and the projection above it
+		// computed in float: two spellings of one question, two numbers.
+		{"#728", "sum_times_two_over_a_rename",
+			`SELECT SUM(v*2) AS s FROM (SELECT dw AS v FROM decwin) x`,
+			[]string{"s=7489777778620377.6246619782"}},
+		{"#728", "sum_times_two_over_the_base_column",
+			`SELECT SUM(dw*2) AS s FROM decwin`,
+			[]string{"s=7489777778620377.6246619782"}},
+		{"#728", "sum_times_two_through_a_cte",
+			`WITH c AS (SELECT dw AS v FROM decwin) SELECT SUM(v*2) AS s FROM c`,
+			[]string{"s=7489777778620377.6246619782"}},
+		{"#728", "max_times_two_over_a_rename",
+			`SELECT MAX(v*2) AS m FROM (SELECT dw AS v FROM decwin) x`,
+			[]string{"m=1994666666891066.6258890908"}},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			for _, arm := range []struct {
