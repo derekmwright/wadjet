@@ -88,6 +88,17 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		// `s_nationkey` to Q05's customer/orders exchange and `n1.n_name`
 		// to three Q07 manifests.
 		ownRefs := exprColumnRefs(s.FilterExprs, projectExprTexts(s.ProjectExprs))
+		// …and what the GROUP BY key the aggregate above this join is about to
+		// COMPUTE reads. `resolveStageGroupKeys` settles that spelling against
+		// what the join's ARMS can supply — deliberately not against what its
+		// OutputFilter ships today, because this pass is what makes them the
+		// same list. Leaving it out is how a shape the DAG evaluated correctly
+		// started refusing: the key used to reach the payload through the
+		// gather's rename (`aggStageRenames` recorded the dispatch spelling,
+		// so `ensureJoinCarriesGatherOutputs` widened with the definition's
+		// columns), and since the published name IS the query's own alias
+		// there is no rename to carry it (ADR-0026 §2, #794 round 2).
+		ownRefs = append(ownRefs, groupKeyResolutionRefs(stages, idx, s)...)
 		chainRefs := probeSideChainRefs(stages, idx, s)
 		// A ROW FIELD PATH names no column, so carrying `c_row.b` carries
 		// nothing: what the fragment reads is the CONTAINER, and the
@@ -176,6 +187,40 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		// stopping at the producers, which is where the column comes from.
 		widenNarrowingStagesBelow(stages, idx, i, refs)
 	}
+}
+
+// groupKeyResolutionRefs lists the columns the GROUP BY keys computed over
+// this join's output are RESOLVED by — the chain-terminal aggregate on the
+// stage itself, and any aggregate stage that reads it.
+//
+// Only a COMPUTED resolution contributes references: a resolution that is a
+// NAME is a column of the stream in its own right and is already in the
+// payload for the reason the key is (§2c — a name is not re-read as structure,
+// here as well as in the fragment).
+func groupKeyResolutionRefs(stages []Stage, idx map[string]int, s *Stage) []string {
+	var texts []string
+	add := func(c *Stage) {
+		if len(c.GroupByResolve) == 0 || !stageComputesGroupKeys(c) {
+			return
+		}
+		for _, r := range c.GroupByResolve {
+			if r.Computed && r.Expr != "" {
+				texts = append(texts, r.Expr)
+			}
+		}
+	}
+	add(s)
+	for i := range stages {
+		c := &stages[i]
+		if len(c.Dependencies) != 1 || c.Dependencies[0] != s.ID {
+			continue
+		}
+		add(c)
+	}
+	if len(texts) == 0 {
+		return nil
+	}
+	return exprColumnRefs(texts)
 }
 
 // widenNarrowingStagesBelow unions refs into the OutputFilter of the stage at

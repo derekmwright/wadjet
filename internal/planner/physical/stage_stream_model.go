@@ -34,10 +34,19 @@ import (
 type streamCol struct {
 	// Name is the exact spelling the batch carries.
 	Name string
-	// Arm is the alias that QUALIFIED this column — a join qualifies a build
-	// column whose bare name the probe side already carries. Empty means the
-	// stream carries the column bare, which is every probe-side column and
-	// every uncontested build column.
+	// Arm is the JOIN ARM this column came from: the `BuildTableAlias` (or
+	// `BuildColOrigins` entry) of the build subtree that produced it, and ""
+	// for a column the PROBE subtree produced. It is set for EVERY build
+	// column, contested or not — the arm is a fact about where the value came
+	// from, and the join's duplicate-name qualification only decides how the
+	// stream SPELLS it.
+	//
+	// Setting it only where the name was qualified is what let a GROUP BY key
+	// written against one arm bind another arm's column of the same name: with
+	// the arm unknown for every uncontested column, no rule could ask the
+	// question (#781's R6/R8 cell). The innermost arm wins — a nested join
+	// inside a build subtree already named its own arm, and that is the
+	// derived table the key can spell.
 	Arm string
 	// Materialized marks a column some fragment COMPUTES under this exact
 	// name: a projection's output, a window's output, an aggregate's key or
@@ -62,6 +71,22 @@ type streamCol struct {
 // stage graphs are acyclic and these chains are short, and the bound is what
 // keeps a malformed graph from spinning.
 func stageStreamColumns(stages []Stage, idx map[string]int, s *Stage, depth int) []streamCol {
+	return stageStreamColumnsFiltered(stages, idx, s, depth, true)
+}
+
+// stageStreamColumnsFiltered is stageStreamColumns with the option to ignore
+// every list that only NARROWS and that a later pass can widen back: an
+// exchange's payload manifest, a join's OutputFilter, and a scan's shipped set.
+//
+// That view answers "what can this subtree SUPPLY", which is the question a
+// GROUP BY key's resolution asks. The filtered view answers "what does it ship
+// today", which is a different and — at the point `resolveStageGroupKeys` runs
+// — premature question: `ensureJoinCarriesEvaluatedColumns` runs AFTER it and
+// adds back exactly the columns the resolution turns out to need, which is why
+// that pass reads the resolutions. A scan's READ SET is the real bound and is
+// always honoured, because widening never changes what is scanned.
+func stageStreamColumnsFiltered(stages []Stage, idx map[string]int, s *Stage, depth int,
+	applyFilters bool) []streamCol {
 	if s == nil || depth <= 0 {
 		return nil
 	}
@@ -70,7 +95,7 @@ func stageStreamColumns(stages []Stage, idx map[string]int, s *Stage, depth int)
 		if !ok {
 			return nil
 		}
-		return stageStreamColumns(stages, idx, &stages[i], depth-1)
+		return stageStreamColumnsFiltered(stages, idx, &stages[i], depth-1, applyFilters)
 	}
 	// An OpProject runs LAST in every fragment that carries one and NARROWS
 	// the output to exactly its own list, whatever produced the rows. It is
@@ -89,9 +114,10 @@ func stageStreamColumns(stages []Stage, idx map[string]int, s *Stage, depth int)
 	}
 	switch {
 	case isJoinStage(s.Type):
-		return joinStreamColumns(stages, idx, s, depth)
+		cols, _ := joinStreamColumnsArms(stages, idx, s, depth, applyFilters)
+		return cols
 	case s.Type == StageScan:
-		return scanStreamColumns(s)
+		return scanStreamColumnsFiltered(s, applyFilters)
 	case s.Type == StageAggregate || s.Type == StageFinalAggregate || s.Type == StageMergeAggregate:
 		if s.GroupByAll {
 			// A keys-only aggregate over EVERY input column is
@@ -131,7 +157,7 @@ func stageStreamColumns(stages []Stage, idx map[string]int, s *Stage, depth int)
 				out = append(out, streamCol{Name: w.OutputCol, Materialized: true})
 			}
 		}
-		if isExchangeStage(s.Type) && len(s.Columns) > 0 {
+		if applyFilters && isExchangeStage(s.Type) && len(s.Columns) > 0 {
 			out = filterStreamColumns(out, s.Columns)
 		}
 		return out
@@ -150,6 +176,10 @@ func stageStreamColumns(stages []Stage, idx map[string]int, s *Stage, depth int)
 // stream instead of about the request (`dropUnbackedJoinColumns` is the same
 // correction one stage type over).
 func scanStreamColumns(s *Stage) []streamCol {
+	return scanStreamColumnsFiltered(s, true)
+}
+
+func scanStreamColumnsFiltered(s *Stage, applyFilters bool) []streamCol {
 	if len(s.FusedAggGroupBy) > 0 || len(s.FusedAggSpecs) > 0 {
 		out := make([]streamCol, 0, len(s.FusedAggGroupBy)+len(s.FusedAggSpecs))
 		for _, n := range aggregateEmittedKeyNames(s) {
@@ -174,7 +204,7 @@ func scanStreamColumns(s *Stage) []streamCol {
 		return out
 	}
 	read := s.Columns
-	if len(s.OutputColumns) > 0 {
+	if applyFilters && len(s.OutputColumns) > 0 {
 		read = s.OutputColumns
 	}
 	declared := map[string]bool{}
@@ -199,46 +229,100 @@ func scanStreamColumns(s *Stage) []streamCol {
 // by their owning alias, each stage of the chain narrowed by its own output
 // filter.
 func joinStreamColumns(stages []Stage, idx map[string]int, s *Stage, depth int) []streamCol {
+	out, _ := joinStreamColumnsArms(stages, idx, s, depth, true)
+	return out
+}
+
+// joinStreamColumnsArms is joinStreamColumns with the arm aliases the join
+// declares, and with the option to skip the output FILTERS.
+//
+// The unfiltered view is what a GROUP BY key is resolved against, and the
+// difference is deliberate. `Stage.Columns` on a join is an OutputFilter built
+// from the join node's NeededColumns at stage-emission time; a column the key
+// turns out to need is added back by `ensureJoinCarriesEvaluatedColumns`,
+// which runs AFTER `resolveStageGroupKeys` for exactly the reason the filter
+// passes do. Resolving against the FILTERED view would refuse a key whose arm
+// can supply the value and whose payload is about to be widened to carry it —
+// which is the `right → routed` transition the review found (#794 round 2).
+func joinStreamColumnsArms(stages []Stage, idx map[string]int, s *Stage, depth int,
+	applyFilters bool) ([]streamCol, map[string]bool) {
+	arms := map[string]bool{}
+	note := func(alias string, origins map[string]string) {
+		if alias != "" {
+			arms[strings.ToLower(alias)] = true
+		}
+		for _, o := range origins {
+			if o != "" {
+				arms[strings.ToLower(o)] = true
+			}
+		}
+	}
 	dep := func(id string) []streamCol {
 		i, ok := idx[id]
 		if !ok {
 			return nil
 		}
-		return stageStreamColumns(stages, idx, &stages[i], depth-1)
+		cols := stageStreamColumnsFiltered(stages, idx, &stages[i], depth-1, applyFilters)
+		for _, c := range cols {
+			if c.Arm != "" {
+				arms[strings.ToLower(c.Arm)] = true
+			}
+		}
+		return cols
+	}
+	filter := func(cols []streamCol, list []string) []streamCol {
+		if !applyFilters || len(list) == 0 {
+			return cols
+		}
+		return filterStreamColumns(cols, list)
 	}
 	probeID := s.LeftDepStage
 	if probeID == "" {
 		probeID = firstDep(s)
 	}
 	out := dep(probeID)
-	// The primary build, then every broadcast join fused onto this stage, in
+	// The PRIMARY build, then every broadcast join fused onto this stage, in
 	// the order the fragment probes them.
+	//
+	// The primary build is `RightDepStage`, falling back to `Dependencies[1]`
+	// — `buildTaskInputsForStage`'s own rule. Taking "every dependency that is
+	// not the probe" instead gave a CHAINED link's build the PRIMARY join's
+	// alias as well as its own, so the model reported one arm's columns twice
+	// under two aliases and a bare key of that name looked ambiguous when the
+	// stream has exactly one.
 	fusedBuilds := map[string]bool{}
 	for _, fj := range s.FusedJoins {
 		fusedBuilds[fj.BuildDepStage] = true
 	}
-	for _, d := range s.Dependencies {
-		if d == probeID || fusedBuilds[d] {
-			continue
+	buildID := s.RightDepStage
+	if buildID == "" {
+		for _, d := range s.Dependencies {
+			if d == probeID || fusedBuilds[d] || chainedBuildDep(s, d) {
+				continue
+			}
+			buildID = d
+			break
 		}
-		out = appendBuildColumns(out, dep(d), s.BuildTableAlias, s.BuildColOrigins, s.QualifyAllBuildCols)
+	}
+	if buildID != "" {
+		note(s.BuildTableAlias, s.BuildColOrigins)
+		out = appendBuildColumns(out, dep(buildID), s.BuildTableAlias, s.BuildColOrigins,
+			s.QualifyAllBuildCols)
 	}
 	for _, fj := range s.FusedJoins {
+		note(fj.BuildTableAlias, fj.BuildColOrigins)
 		out = appendBuildColumns(out, dep(fj.BuildDepStage), fj.BuildTableAlias,
 			fj.BuildColOrigins, false)
 	}
-	if len(s.Columns) > 0 {
-		out = filterStreamColumns(out, s.Columns)
-	}
+	out = filter(out, s.Columns)
 	// A chained link's OWN Columns is that link's output filter, and the LAST
 	// one is what the fused stage emits. Reading the stage's list instead
 	// under-reports every fused chain (#795).
 	for _, cj := range s.ChainedJoins {
+		note(cj.BuildTableAlias, cj.BuildColOrigins)
 		out = appendBuildColumns(out, dep(cj.BuildDepStage), cj.BuildTableAlias,
 			cj.BuildColOrigins, cj.QualifyAllBuildCols)
-		if len(cj.Columns) > 0 {
-			out = filterStreamColumns(out, cj.Columns)
-		}
+		out = filter(out, cj.Columns)
 	}
 	if len(s.ChainedAggGroupBy) > 0 || len(s.ChainedAggSpecs) > 0 {
 		// A chain-terminal partial aggregate REPLACES the join's stream with
@@ -256,9 +340,20 @@ func joinStreamColumns(stages []Stage, idx map[string]int, s *Stage, depth int) 
 				agg = append(agg, streamCol{Name: a.OutputCol, Materialized: true})
 			}
 		}
-		return agg
+		return agg, arms
 	}
-	return out
+	return out, arms
+}
+
+// chainedBuildDep reports whether id is the build input of a chained link,
+// which the chain loop appends under its OWN alias.
+func chainedBuildDep(s *Stage, id string) bool {
+	for _, cj := range s.ChainedJoins {
+		if cj.BuildDepStage == id {
+			return true
+		}
+	}
+	return false
 }
 
 // appendBuildColumns applies `joinOutputSchemaWithMapping`'s naming rule: a
@@ -273,10 +368,23 @@ func appendBuildColumns(probe, build []streamCol, buildAlias string,
 			seen[c.Name] = true
 		}
 	}
+	// The arm a build column belongs to: the one a nested join inside the
+	// build subtree already named, else this join's build alias.
+	armOf := func(c streamCol) string {
+		if c.Arm != "" {
+			return c.Arm
+		}
+		if o := origins[strings.ToLower(c.Name)]; o != "" {
+			return o
+		}
+		return buildAlias
+	}
 	out := append([]streamCol(nil), probe...)
 	for _, c := range build {
+		arm := armOf(c)
 		if strings.IndexByte(c.Name, '.') >= 0 {
 			// Named by a nested join INSIDE the build subtree; already unique.
+			c.Arm = arm
 			out = append(out, c)
 			seen[c.Name] = true
 			continue
@@ -293,13 +401,15 @@ func appendBuildColumns(probe, build []streamCol, buildAlias string,
 				continue // the same build column reached this stream twice
 			}
 			seen[q] = true
-			out = append(out, streamCol{Name: q, Arm: alias, Materialized: c.Materialized})
+			out = append(out, streamCol{Name: q, Arm: arm, Materialized: c.Materialized})
 		case isDup:
 			// No alias to disambiguate by — the executor drops it. Recorded
 			// so a key naming this arm's column is refused rather than bound
 			// to the OTHER arm's column of the same name.
-			out = append(out, streamCol{Name: c.Name, Materialized: c.Materialized, Dropped: true})
+			out = append(out, streamCol{Name: c.Name, Arm: arm,
+				Materialized: c.Materialized, Dropped: true})
 		default:
+			c.Arm = arm
 			out = append(out, c)
 			seen[c.Name] = true
 		}
@@ -356,22 +466,32 @@ func filterStreamColumns(cols []streamCol, filter []string) []streamCol {
 // that input — a fused scan-aggregate reads the table, a chain-terminal
 // partial reads the join's rows — and for those the input is the stage's own
 // pre-aggregate stream rather than its dependency's.
-func aggregateInputStreamColumns(stages []Stage, idx map[string]int, s *Stage) []streamCol {
+func aggregateInputStreamColumns(stages []Stage, idx map[string]int, s *Stage) ([]streamCol, map[string]bool) {
 	switch {
 	case s.Type == StageScan:
 		raw := *s
 		raw.FusedAggGroupBy, raw.FusedAggSpecs = nil, nil
-		return scanStreamColumns(&raw)
+		return scanStreamColumns(&raw), nil
 	case isJoinStage(s.Type):
 		bare := *s
 		bare.ChainedAggGroupBy, bare.ChainedAggSpecs = nil, nil
-		return joinStreamColumns(stages, idx, &bare, passThroughDepth)
+		return joinStreamColumnsArms(stages, idx, &bare, passThroughDepth, false)
+	case s.Type == StageAggregate, s.Type == StageFinalAggregate, s.Type == StageMergeAggregate:
+	default:
+		return nil, nil
 	}
 	i, ok := idx[firstDep(s)]
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	return stageStreamColumns(stages, idx, &stages[i], passThroughDepth)
+	dep := &stages[i]
+	if isJoinStage(dep.Type) {
+		// The aggregate reads this join's output, and it is resolved against
+		// what the join's ARMS produce rather than what its OutputFilter
+		// currently ships — see joinStreamColumnsArms.
+		return joinStreamColumnsArms(stages, idx, dep, passThroughDepth, false)
+	}
+	return stageStreamColumnsFiltered(stages, idx, dep, passThroughDepth, false), nil
 }
 
 // computesName reports whether a projection spec COMPUTES its output rather

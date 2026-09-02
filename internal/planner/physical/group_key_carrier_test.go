@@ -159,7 +159,7 @@ func TestEveryComputedKeyResolvesAgainstItsProducer(t *testing.T) {
 			if len(s.GroupByResolve) == 0 || !stageComputesGroupKeys(s) {
 				continue
 			}
-			in := aggregateInputStreamColumns(stages, idx, s)
+			in, _ := aggregateInputStreamColumns(stages, idx, s)
 			names := make([]string, 0, len(in))
 			for _, c := range in {
 				if !c.Dropped {

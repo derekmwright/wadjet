@@ -73,15 +73,12 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 	const tbl = dbpTable // decpair, nine rows; SUM(a) OVER () is 52.99
 
 	// routed marks an entry the DAG REFUSES, so its answer comes from the
-	// coordinator-local pipeline. Since ADR-0026 §2's two names, that is two
-	// entries, and each carries its own mechanism at its own case:
+	// coordinator-local pipeline. Since ADR-0026 §2's two names it is ONE
+	// entry, and it carries its own mechanism at its own case:
 	//
-	//   - the derived arm with an inner ORDER BY, which no fragment
-	//     materializes the alias for and whose exchange ships neither the
-	//     alias nor the window slot — a PLAN fact;
 	//   - the DISTINCT between the window and the alias, whose lowering made
 	//     a WINDOW CALL a group-key expression that no projection can
-	//     evaluate — the DISTINCT rewrite's defect.
+	//     evaluate — the DISTINCT rewrite's defect, not this carrier's.
 	//
 	// Every other cell RUNS on the DAG, and asserting routed=false is what
 	// says so — the rows alone cannot tell "the DAG answered this" from "the
@@ -212,20 +209,20 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 		// sufficient either: the first was wrong-NULL on the DAG and the second
 		// failed hard, and both are answered by the route.
 		{
-			// STILL ROUTED, and for a reason the model states rather than
-			// guesses. An ORDER BY inside the derived table stops
+			// An ORDER BY inside the derived table stops
 			// `absorbWindowArmProjection` from putting `__win_0 + 0 AS w` on
-			// the arm's fragment, so nothing in the plan materializes `w` —
-			// and the exchange manifest between the sort and the join ships
-			// neither `w` nor `__win_0`, so the definition has nothing to
-			// evaluate over either. `resolveStageGroupKeys` refuses with the
-			// stream's column list in the message and the local pipeline
-			// answers. Its LIMIT twin is in the #781 block below.
+			// the arm's fragment, so nothing in the plan materializes `w` and
+			// the key is resolved by its DEFINITION instead — over the ARM's
+			// own `__win_0`, re-spelled into the spelling the join gives it.
+			// The payload that carries it is widened by
+			// `ensureJoinCarriesEvaluatedColumns`, which reads the resolution
+			// for exactly this reason: the manifest between the sort and the
+			// join was built before the key had a spelling.
 			//
-			// This is a PLAN fact, not a carrier one: the two names are both
-			// available, and there is no fragment to give either to. Making
-			// the projection pass materialize the alias through an inner
-			// ORDER BY is ADR-0025's territory.
+			// It ROUTED in round 1, and the round-2 review's R1 is why that
+			// was wrong: the same shape without the window ran on the DAG at
+			// base, and refusing it was a right-to-routed regression the
+			// widening closes for both.
 			name: "an-inner-order-by-between-the-window-and-the-alias",
 			sql: "SELECT x.id AS i, x.w AS w, COUNT(*) AS n FROM (SELECT id, " +
 				"SUM(a) OVER () + 0 AS w FROM " + tbl + " ORDER BY id) x LEFT JOIN " + tbl +
@@ -233,7 +230,6 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"i", "w", "n"},
 			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
-			routed: true,
 		},
 		{
 			// STILL ROUTED, and by the DISTINCT lowering's own defect rather
@@ -565,28 +561,25 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 				"projection can evaluate one",
 		},
 		{
-			// THE ONE SHAPE THAT STILL ROUTES, and it is a plan fact rather
-			// than a carrier one. A LIMIT inside the derived table stops
+			// A LIMIT inside the derived table stops
 			// `attachScanSelectProjections` from materializing `w` on the
-			// arm's fragment, and the exchange manifest between the sort and
-			// the join ships neither `w` nor `a` — so NOTHING in this plan
-			// carries the value under either name. `resolveStageGroupKeys`
-			// says exactly that, with the stream's column list in the error,
-			// and the local pipeline answers PostgreSQL's rows.
+			// arm's fragment, so the key resolves by its DEFINITION over ARM
+			// x's own `a` — and the payload that carries it is widened by
+			// `ensureJoinCarriesEvaluatedColumns`, which reads the resolution.
 			//
-			// Its no-join twin (`ctl/a-derived-table-with-a-limit-inside`,
-			// asserted above) runs on the DAG, which is what says the LIMIT is
-			// not the trigger — the exchange between the two is. Making that
-			// projection reach through an inner ORDER BY … LIMIT is ADR-0025's
-			// territory, not this key's.
+			// This ROUTED in round 1, when the resolution was decided against
+			// what the join's OutputFilter SHIPPED rather than what its arms
+			// could SUPPLY. The review's R1 is the same shape with a second
+			// arm that also has an `a`, and it ran on the DAG at base — so
+			// refusing was a right-to-routed regression, and the two are
+			// closed by one change.
 			name: "781/a-derived-table-with-a-limit-inside-under-a-join",
 			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl +
 				" ORDER BY id LIMIT 5) x JOIN " + tbl + " z ON x.id = z.id GROUP BY x.w ORDER BY w",
-			cols:   []string{"w", "n"},
-			want:   "3 rows: -0.03|1;6.00|1;38.25|3;",
-			routed: true,
-			why: "no fragment in the plan emits the alias, and the exchange ships none of " +
-				"the columns its definition reads",
+			cols: []string{"w", "n"},
+			want: "3 rows: -0.03|1;6.00|1;38.25|3;",
+			why: "the key resolves by its definition over arm x's own `a`, and the join's " +
+				"payload is widened to carry it",
 		},
 	} {
 		c := c
@@ -622,6 +615,208 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 					"is right either way, which is why the disposition is asserted: the DAG "+
 					"resolves this key (%s), and a group-key refusal that starts firing on it "+
 					"is a right-to-routed regression in kind\n  SQL: %s", arm.name, c.why, c.sql)
+			}
+		})
+	}
+
+	// THE ARM CELL (#794 round 2). A key names ONE arm of a join, and a column
+	// of the same name on another arm is a different value. Nothing in the
+	// first round's rules asked WHICH ARM: rule 2 took the only bare column of
+	// the alias's name and rule 4 took the definition's columns from wherever
+	// the stream had them, so with the key's own arm unable to supply the
+	// value — its inner ORDER BY / LIMIT stops
+	// `attachScanSelectProjections` — both bound the OTHER arm's column and
+	// the fragment grouped by a different table's value under the key's name.
+	//
+	// `R6a` answered `38.25|38.25|3`, which is `x.a * 3` where the key is
+	// `z.a * 3`: five plausible rows of the wrong column, `routed=false`, on
+	// both DAG arms, and identical on base.
+	//
+	// Every entry here asserts PostgreSQL's rows AND the disposition, and the
+	// three CONTROLS (`no-order-by`) are what say the trigger is "the key's
+	// arm did not materialise its alias" rather than the join or the join key.
+	for _, c := range []struct {
+		name, sql string
+		cols      []string
+		want      string // PostgreSQL 17
+		why       string
+	}{
+		{
+			// The key names the BUILD arm's alias; that arm's inner ORDER BY
+			// blocks materialisation; the PROBE carries a bare column of the
+			// DEFINITION's name.
+			name: "arm/def-binds-the-key's-arm-not-the-probe's-order-by",
+			sql: "SELECT z.w AS w, SUM(x.a) AS s, COUNT(*) AS n FROM " + tbl + " x JOIN " +
+				"(SELECT id, a*3 AS w FROM " + tbl + " ORDER BY id) z ON x.id = z.id + 1 " +
+				"GROUP BY z.w ORDER BY w",
+			cols: []string{"w", "s", "n"},
+			want: "5 rows: -0.03|2.00|1;0.00||1;6.00|0.00|1;38.25|25.49|4;|12.75|1;",
+			why:  "the definition is re-spelled into arm z's own `z.a`",
+		},
+		{
+			name: "arm/def-binds-the-key's-arm-not-the-probe's-limit",
+			sql: "SELECT z.w AS w, SUM(x.a) AS s, COUNT(*) AS n FROM " + tbl + " x JOIN " +
+				"(SELECT id, a*3 AS w FROM " + tbl + " ORDER BY id LIMIT 8) z ON x.id = z.id + 1 " +
+				"GROUP BY z.w ORDER BY w",
+			cols: []string{"w", "s", "n"},
+			want: "5 rows: -0.03|2.00|1;0.00||1;6.00|0.00|1;38.25|25.49|4;|12.75|1;",
+			why:  "the same, with the LIMIT spelling of the block",
+		},
+		{
+			name: "ctl/arm/def-with-nothing-blocking-the-arm's-projection",
+			sql: "SELECT z.w AS w, SUM(x.a) AS s, COUNT(*) AS n FROM " + tbl + " x JOIN " +
+				"(SELECT id, a*3 AS w FROM " + tbl + ") z ON x.id = z.id + 1 " +
+				"GROUP BY z.w ORDER BY w",
+			cols: []string{"w", "s", "n"},
+			want: "5 rows: -0.03|2.00|1;0.00||1;6.00|0.00|1;38.25|25.49|4;|12.75|1;",
+			why:  "arm z materialises `w`, so the key reads the column and never the definition",
+		},
+		{
+			// Rule 2's half: the only BARE materialised column of the alias's
+			// name in the stream belongs to the PROBE arm, and the key names
+			// the build's.
+			name: "arm/bare-hit-is-the-other-arm's-order-by",
+			sql: "SELECT y.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a*100 AS w FROM " + tbl + " ORDER BY id) y ON x.id = y.id + 1 " +
+				"GROUP BY y.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -1.00|1;0.00|1;200.00|1;1275.00|4;|1;",
+			why:  "the bare `w` is x's; the key's arm supplies `y.a` and the definition is re-spelled",
+		},
+		{
+			name: "arm/bare-hit-is-the-other-arm's-limit",
+			sql: "SELECT y.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a*100 AS w FROM " + tbl + " ORDER BY id LIMIT 8) y " +
+				"ON x.id = y.id + 1 GROUP BY y.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -1.00|1;0.00|1;200.00|1;1275.00|4;|1;",
+			why:  "the same, with the LIMIT spelling",
+		},
+		{
+			name: "ctl/arm/bare-hit-with-nothing-blocking-the-arm's-projection",
+			sql: "SELECT y.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a*100 AS w FROM " + tbl + ") y ON x.id = y.id + 1 " +
+				"GROUP BY y.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -1.00|1;0.00|1;200.00|1;1275.00|4;|1;",
+			why:  "both arms materialise `w`, so the join qualifies y's and rule 1 names it",
+		},
+		{
+			// THREE arms all publishing one alias, keyed by each in turn. Two
+			// arms cannot tell "picks the right arm" from "picks the second".
+			name: "arm/three-arms-key-names-the-middle",
+			sql: "SELECT y.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a*100 AS w FROM " + tbl + ") y ON x.id=y.id " +
+				"JOIN (SELECT id, a*7 AS w FROM " + tbl + ") v ON x.id=v.id GROUP BY y.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -1.00|1;0.00|1;200.00|1;1275.00|4;|2;",
+			why:  "the join qualifies each contested arm with its own alias",
+		},
+		{
+			name: "arm/three-arms-key-names-the-last",
+			sql: "SELECT v.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a*100 AS w FROM " + tbl + ") y ON x.id=y.id " +
+				"JOIN (SELECT id, a*7 AS w FROM " + tbl + ") v ON x.id=v.id GROUP BY v.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -0.07|1;0.00|1;14.00|1;89.25|4;|2;",
+			why:  "the CHAINED link's own alias, which the model reads off that link",
+		},
+		{
+			name: "arm/three-arms-key-names-the-probe",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl + ") x " +
+				"JOIN (SELECT id, a*100 AS w FROM " + tbl + ") y ON x.id=y.id " +
+				"JOIN (SELECT id, a*7 AS w FROM " + tbl + ") v ON x.id=v.id GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+			why:  "the probe arm's copy is the bare one, and the key names no build alias",
+		},
+		{
+			// A derived alias SHADOWING a base column of a DIFFERENT TYPE
+			// (`decpair.s` is TEXT), on each side of the join: binding the
+			// wrong one is a type error as well as a wrong value.
+			name: "arm/alias-shadows-a-base-column-probe-side",
+			sql: "SELECT x.s AS s, COUNT(*) AS n FROM (SELECT id, a*3 AS s FROM " + tbl + ") x " +
+				"JOIN " + tbl + " z ON x.id=z.id GROUP BY x.s ORDER BY s",
+			cols: []string{"s", "n"},
+			want: "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+			why:  "the arm's `s` is MATERIALIZED and the table's is not",
+		},
+		{
+			name: "arm/alias-shadows-a-base-column-build-side",
+			sql: "SELECT y.s AS s, COUNT(*) AS n FROM " + tbl + " z JOIN (SELECT id, a*3 AS s " +
+				"FROM " + tbl + ") y ON y.id=z.id GROUP BY y.s ORDER BY s",
+			cols: []string{"s", "n"},
+			want: "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+			why:  "the join qualified the contested build column to `y.s`",
+		},
+		{
+			// The DEFINITION's column exists on BOTH arms and the key's arm
+			// cannot materialise its alias — the shape whose payload
+			// `ensureJoinCarriesEvaluatedColumns` widens from the resolution.
+			// It ran on the DAG at base through the gather's rename, and
+			// refusing it in round 1 was a right-to-routed regression.
+			name: "arm/def-column-on-both-arms-limit",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl +
+				" ORDER BY id LIMIT 5) x JOIN (SELECT id + 1 AS id, a FROM " + tbl + ") z " +
+				"ON x.id = z.id GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "3 rows: -0.03|1;6.00|1;38.25|2;",
+			why:  "the payload is widened with `x.a`, and the definition is re-spelled to it",
+		},
+		{
+			name: "arm/def-column-on-both-arms-limit-with-a-sum-over-the-other",
+			sql: "SELECT x.w AS w, SUM(z.a) AS s, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " +
+				tbl + " ORDER BY id LIMIT 5) x JOIN (SELECT id + 1 AS id, a FROM " + tbl + ") z " +
+				"ON x.id = z.id GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "s", "n"},
+			want: "3 rows: -0.03|12.75|1;6.00|-0.01|1;38.25|25.50|2;",
+			why:  "the aggregate over the OTHER arm's `a` is what makes the two visibly different",
+		},
+		{
+			// A RawInputAggregate final: COUNT(DISTINCT) makes the grouped
+			// final read RAW rows, so the clustering its input is asked for
+			// has to be spelled in the RESOLUTION and not in the published
+			// name (`clusteringKeysForAggregate`).
+			name: "arm/distinct-aggregate-beside-a-derived-alias-key",
+			sql: "SELECT x.w AS w, COUNT(DISTINCT z.id) AS n FROM (SELECT id, a*3 AS w FROM " +
+				tbl + ") x JOIN " + tbl + " z ON x.id = z.id GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+			why:  "a raw-input final's child carries the resolution spelling",
+		},
+		{
+			name: "arm/distinct-aggregate-with-the-arm's-projection-blocked",
+			sql: "SELECT x.w AS w, COUNT(DISTINCT z.id) AS n FROM (SELECT id, a*3 AS w FROM " +
+				tbl + " ORDER BY id LIMIT 8) x JOIN " + tbl + " z ON x.id = z.id " +
+				"GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|1;",
+			why:  "the key is MATERIALIZED, so its input has no column to be clustered on at all",
+		},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			for _, arm := range arms {
+				before := int64(0)
+				if arm.coord != nil {
+					before = arm.coord.GroupKeyLocalRoutes()
+				}
+				res, err := arm.run(c.sql)
+				if err != nil {
+					t.Fatalf("%s arm refused the query: %v\n  SQL: %s", arm.name, err, c.sql)
+				}
+				if got := dajDigest(res, c.cols); got != c.want {
+					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  (%s)\n"+
+						"  SQL: %s", arm.name, got, c.want, c.why, c.sql)
+				}
+				if arm.coord == nil {
+					continue
+				}
+				if arm.coord.GroupKeyLocalRoutes() != before {
+					t.Errorf("the %s arm ROUTED this to the coordinator-local pipeline. The "+
+						"answer is right either way, which is why the disposition is asserted: "+
+						"the DAG resolves this key (%s)\n  SQL: %s", arm.name, c.why, c.sql)
+				}
 			}
 		})
 	}

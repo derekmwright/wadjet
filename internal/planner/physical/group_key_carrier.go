@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -63,6 +64,12 @@ type GroupKeyResolution struct {
 	// Def is that alias's defining expression, re-spelled into the columns
 	// the derived table's own input carries. Planner-only.
 	Def string
+	// Decl is that definition's declared type, resolved in the scope the
+	// definition is SPELLED IN — the derived table's own input — rather than
+	// in the aggregate's, which cannot name its columns. Planner-only, and
+	// read by stageGroupKeyDecls in place of the walk that scope defeats
+	// (ADR-0026 §5).
+	Decl expr.DeclType
 }
 
 // deferred reports whether this key's resolution is still a choice between two
@@ -167,7 +174,7 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 			// stage for a Project, so the fragment sees the source column.
 			published[i] = k.Name
 			resolve[i] = GroupKeyResolution{Expr: k.Name}
-			resolved, def, _, renamed := resolveAggInputName(gb, child)
+			resolved, def, defScope, renamed := resolveAggInputName(gb, child)
 			if !renamed {
 				break
 			}
@@ -185,6 +192,13 @@ func stageGroupKeyNames(agg, child *logical.Node) (published []string, resolve [
 				Computed: true,
 				Alias:    k.Name,
 				Def:      def.String(),
+				// TYPED where the expression was re-spelled TO (ADR-0026 §5),
+				// which for a derived table's alias is the node its Project
+				// reads — the only scope that can NAME the definition's
+				// columns. Typing it against the aggregate's own child leaves
+				// a DECIMAL key on the FLOAT rule, and the exact value then
+				// meets the #361 store guard on both DAG arms.
+				Decl: derivedGroupKeyDecl(def.String(), def, defScope),
 			}
 		}
 	}
@@ -279,7 +293,10 @@ func stageGroupKeyDecls(published []string, resolve []GroupKeyResolution,
 		if out == nil {
 			out = make(map[string]parquet.TypeID)
 		}
-		d := derivedGroupKeyDecl(r.Expr, node, child)
+		d := r.Decl
+		if d.ID == 0 && !d.DecKnown {
+			d = derivedGroupKeyDecl(r.Expr, node, child)
+		}
 		out[published[i]] = d.ID
 		if d.ID == parquet.TypeDecimal && d.DecKnown {
 			// The (p,s) beside the TypeID: the worker builds the key vector
