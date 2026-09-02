@@ -2,7 +2,8 @@
 
 Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22;
 type-matrix gates and the per-issue ratchet amendment added 2026-08-23;
-nondeterminism class 10 added 2026-08-29)
+nondeterminism class 10 added 2026-08-29;
+replication-floor amendment added 2026-09-02)
 
 ## Context
 
@@ -201,6 +202,39 @@ before it reaches 1.
 - SF100 correctness is a **committed fingerprint file**, so the gate has no
   EC2 dependency. Only the one-time truth generation runs in-region, because
   the bucket is ~280 GiB.
+
+### Amendment 2026-09-02: a ratchet fires only on a sample that could have seen the bug
+
+The 2026-08-23 amendment settled this for the type-matrix gates — a
+nondeterministic pin must not be retired by a lucky run — and named two
+mechanisms: `Pin.GatedBy`, which points at another gate that forces the
+divergence deterministically, and bounded retries
+(`tmFuzzIntermittentOptRetries`) where nothing can force it.
+
+The spill sweep (`wadjet.TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget`,
+ADR-0027) is the third gate in this family and did not apply the rule to its
+own pins. Its ratchet fired whenever every budgeted run of a pinned cell
+agreed, on however many runs the sweep happened to make — and under `-short`
+that is ONE. Its pinned defects are nondeterministic by construction: #788 is
+wrong on 9 to 12 runs out of 12, so roughly one CI run in four saw the single
+run agree and failed the gate on a tree where nothing about #788 had changed.
+The file's own doctrine is that one passing run of a spilled arm proves
+nothing; the ratchet was the one place it did not hold.
+
+The mechanism here is a third of the same kind: a **replication floor**
+(`spillMxRatchetMinRuns`). The ratchet fires only when the cell ran the full
+replication count; below it the agreement is logged with its reason and the
+full-replication arm — CI's Type-Matrix step runs this file without `-short` —
+is the one that decides. The pin is still compared on every run and still
+cannot outlive its bug.
+
+The general rule, which the next gate should apply without being told:
+**a ratchet is an assertion about EVIDENCE, so it may only fire on a sample
+large enough for agreement to be evidence.** Forcing the divergence
+(`GatedBy`), retrying to find it (bounded retries) and requiring enough
+samples to have found it (a replication floor) are three answers to one
+question. A gate that runs at reduced replication in some arm — `-short`,
+`-race`, a smoke lane — has to decide which arm owns its ratchet, and say so.
 
 ## Consequences
 
