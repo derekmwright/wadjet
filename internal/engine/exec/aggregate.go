@@ -768,6 +768,26 @@ type stringAggState struct {
 	// sep first keeps the two pointer prefixes adjacent (scan region 24 B, not 32).
 	sep   string
 	parts []string
+	// sorted marks a DISTINCT aggregation, whose output PostgreSQL ORDERS.
+	// `string_agg(DISTINCT s, ',')` there yields the distinct values sorted —
+	// it has to, because the dedup is a sort — while a plain string_agg keeps
+	// arrival order, which is unspecified and is ADR-0013 nondeterminism
+	// class 1. Reporting first-seen order for the DISTINCT form was a value
+	// divergence with a definite PostgreSQL answer (#703 review, F5).
+	sorted bool
+}
+
+// render is stringAggState's finalized value: the parts joined, sorted first
+// when the aggregation was DISTINCT. Sorting a COPY, because a merged clone's
+// state can be read more than once and the arrival order is the only record of
+// which part came from where.
+func (s *stringAggState) render() string {
+	if !s.sorted || len(s.parts) < 2 {
+		return strings.Join(s.parts, s.sep)
+	}
+	out := append([]string(nil), s.parts...)
+	sort.Strings(out)
+	return strings.Join(out, s.sep)
 }
 
 // varianceState tracks running variance using Welford's online algorithm:
@@ -3966,7 +3986,7 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 			if sep == "" {
 				sep = ","
 			}
-			ext.extraState[i] = &stringAggState{sep: sep}
+			ext.extraState[i] = &stringAggState{sep: sep, sorted: agg.Distinct}
 		case AggStddev, AggVariance, AggStddevPop, AggVarPop,
 			AggVarState, AggVarStateMerge:
 			ext.extraState[i] = &varianceState{}
@@ -4826,7 +4846,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 				if len(state.parts) == 0 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
-					out.Columns[colIdx].SetValue(i, strings.Join(state.parts, state.sep))
+					out.Columns[colIdx].SetValue(i, state.render())
 				}
 			case AggBoolAnd, AggBoolOr:
 				// nil state = the group never saw a non-NULL input → NULL.
