@@ -654,8 +654,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      prune — that is a pruning-input question, not an ordering one, and is
      recorded in ADR-0018's territory instead (its §5).
 
-9. **Exact numeric aggregates: what MIN/MAX/SUM/AVG over a DECIMAL answer.**
-   (Added 2026-08-23, #455.) PostgreSQL's `min`/`max`/`sum`/`avg` over
+9. **Exact numeric aggregates: what MIN/MAX/SUM/AVG over a DECIMAL — and
+   over an INTEGER — answer.** (Added 2026-08-23, #455; the integer half added
+   2026-09-02, #784.) PostgreSQL's `min`/`max`/`sum`/`avg` over
    `numeric` are exact and answer in `numeric`. Wadjet's were answering in
    `float64`: the accumulators were already exact Int128 at the column's
    scale, but the declared OUTPUT type was a double, so everything past ~16
@@ -695,6 +696,46 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      answer, so the same query over more rows cannot silently change the
      scale of its own output column. An average with no exact 128-bit value
      is an error, for SUM overflow's reason.
+   - **INTEGER inputs answer PostgreSQL's own result types, with one
+     narrowing and one carrier limit.** (#784.) Taken from the live server:
+     `pg_typeof(sum(int4))` is `bigint`, `pg_typeof(sum(int8))` is `numeric`,
+     and `pg_typeof(avg(int2|int4|int8))` is `numeric`. Wadjet answered
+     `double precision` for all of them, so `SUM` over a BIGINT column past
+     2^53 lost integer digits before any client saw them. The rules now:
+
+     - `SUM(int4-class) → BIGINT`; `SUM(int8) → DECIMAL(38,0)`, accumulated in
+       the same exact Int128 carrier a DECIMAL sum uses; `AVG(any integer) →
+       DECIMAL(38, AvgScale(0))`.
+     - **The AVG scale is the DECIMAL rule's, not PostgreSQL's**, and for the
+       DECIMAL rule's reason: PostgreSQL's numeric division picks a
+       magnitude-dependent scale — sixteen fractional digits over
+       `nation.n_regionkey`, none at all over a quotient already carrying
+       nineteen integer digits — and a scale that depends on the values makes
+       the same query over more rows change the type of its own output
+       column. Wadjet answers at the fixed `batch.AvgScale(0) = 4`. Both are
+       exact to the digits they keep and agree to `min(both scales)`: the
+       same class as the DECIMAL AVG bullet above, and what the wire oracle's
+       `SumAvgOverInteger` float-render pin cites.
+     - **A COMPUTED integer argument is declared BIGINT**, not numeric. Wadjet
+       declares every integer expression INT64 (ADR-0024's recorded
+       divergence), so a computed argument cannot tell int4 from int8; reading
+       them all as int8 would make `SUM(CASE WHEN … THEN 1 ELSE 0 END)` —
+       TPC-H Q12's shape and a BI staple — `numeric` where PostgreSQL says
+       `bigint`, on a sum of ones that cannot overflow anything. A bare column
+       is unaffected: it is typed from the column's real width.
+     - **The narrowing's residual is an ERROR, not a wrapped total**, by the
+       SUM-overflow rule three bullets up and for its exact reason. A computed
+       integer sum past 2^63 has no int64 to land in; PostgreSQL's numeric
+       answers it and wadjet's declared BIGINT cannot, so the query fails with
+       SQLSTATE 22003 naming the aggregate. It was silent until 2026-09-02:
+       over a column whose total is exactly 2^64, `SUM(b)` answered
+       18446744073709551616 and `SUM(-b)` answered 0 — one question, two
+       spellings, and no way to see which one was lying. Gated on all five
+       execution arms by
+       `coordinator.TestIntegerSumOverflowIsLoudOnEveryArm`, which asserts
+       both halves: the wrapping spellings refuse AND the exact ones still
+       answer.
+
    - **STDDEV / VARIANCE / CORR / COVAR / MEDIAN / PERCENTILE over a DECIMAL
      stay float64.** PostgreSQL answers those in `numeric` too. This is a
      KNOWN, deliberate deviation, recorded rather than hidden: they need
