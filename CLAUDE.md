@@ -197,6 +197,12 @@ refactor(scan): extract predicate pushdown into separate module
   task pg-oracle:test-decimal        # both oracle arms over the decimal fixture
   ```
   The FLOAT64 schema stays the default and the published-number benchmark; the variant is opt-in (`TPCH_DECIMAL=1`, or an explicit `Fixture`). Baseline numbers: `docs/benchmarks/tpch-decimal-baseline-2026-08-29.md`.
+- **Spill gate**: the spilled path is a fifth execution arm no shape corpus reaches on purpose — a spill is a condition, not a query shape (ADR-0027). After any change to a pipeline breaker's spill, drain, merge or clone path (`exec/aggregate*.go`, `pipeline.go`, `partitioned_agg.go`, `sort_external.go`, `window_external.go`, `join_spill.go`, `memory/spill.go`) run the type-matrix spill sweep, which asserts per family that the operator actually spilled and replicates every budgeted cell five times:
+  ```bash
+  go test -run 'TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget' ./wadjet/
+  go test -run 'TestSpillArcShapesAgreeOnBothDistributionArms' ./internal/coordinator/   # DAG arms, forced drain
+  ```
+  Condition-triggered defects are gated with the test-only knobs `exec.ForceAggDrainEvery(N)` / `WADJET_TEST_FORCE_AGG_DRAIN_EVERY=N` and `exec.ForceSmallSpillRuns` — take the reference arm DISARMED (arming both sides cancels the defect, #790). A single passing spilled run proves nothing: replicate.
 - **Test patterns**: Table-driven tests preferred. Use `tb.Helper()` in test helpers. Use `objstore.NewMemStore()` for storage in tests (no real S3).
 
 ### Code Style

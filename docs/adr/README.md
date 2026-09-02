@@ -44,3 +44,4 @@ Conventions:
 | [0024](0024-decimal-is-finite-fixed-point-with-postgres-result-types.md) | DECIMAL is a finite 128-bit fixed-point type that follows PostgreSQL's result-TYPE rules | Accepted |
 | [0025](0025-a-stage-never-carries-what-its-fragment-will-not-run.md) | A stage never carries a predicate or a projection its fragment will not run | Accepted |
 | [0026](0026-a-group-key-has-one-identity-and-one-name.md) | A GROUP BY key has one identity and one published name | Accepted |
+| [0027](0027-a-spill-gate-proves-it-spilled.md) | A spill gate proves it spilled, and a clone's spill artifacts belong to the primary | Accepted |
