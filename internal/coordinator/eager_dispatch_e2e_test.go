@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -211,6 +212,49 @@ func assertEagerArmsIdentical(t *testing.T, control, treatment map[string]int) {
 	}
 }
 
+// eagerEngagementAttempts bounds how many times an eager arm is re-run to
+// find the interleaving it asserts. Every engagement assertion in this file
+// is a claim about a RACE — the consumer's per-dependency loop against the
+// producer's real completion (see TestEagerDispatchE2E's hook) — and a race
+// lost on one sample under a loaded runner says nothing about the mechanism.
+// ADR-0013 (2026-09-02): an assertion about an interleaving may only fire on
+// a sample that could have seen it, and bounded retries are one of its three
+// mechanisms. #298 closed on the 500 ms hold alone; CI run 33673621189 on
+// b69d855a lost the race through it (`edges=0 manifests=0, 5 distinct rows
+// identical`) on an unrelated change.
+const eagerEngagementAttempts = 5
+
+// runEagerUntilEngaged runs the eager arm up to eagerEngagementAttempts
+// times. CORRECTNESS is asserted on every attempt and fails immediately: each
+// run must be row-identical to control. Only the ENGAGEMENT question is
+// retried — the per-attempt deltas of counters are handed to engaged, and the
+// run stops at the first attempt it accepts. It returns the last deltas, the
+// attempt number, and whether any attempt engaged; the caller states the
+// verdict so each test's message still names its own mechanism.
+func runEagerUntilEngaged(ctx context.Context, t *testing.T, coord *Coordinator, sql, label string,
+	control map[string]int, counters []*atomic.Int64, engaged func(delta []int64) bool) ([]int64, int, bool) {
+	t.Helper()
+	var delta []int64
+	for attempt := 1; attempt <= eagerEngagementAttempts; attempt++ {
+		before := make([]int64, len(counters))
+		for i, c := range counters {
+			before[i] = c.Load()
+		}
+		treatment := runEagerE2EQuery(ctx, t, coord, sql, label)
+		assertEagerArmsIdentical(t, control, treatment)
+		delta = make([]int64, len(counters))
+		for i, c := range counters {
+			delta[i] = c.Load() - before[i]
+		}
+		if engaged(delta) {
+			return delta, attempt, true
+		}
+		t.Logf("%s: attempt %d of %d answered identically but did not engage (%v); the race was lost, retrying",
+			label, attempt, eagerEngagementAttempts, delta)
+	}
+	return delta, eagerEngagementAttempts, false
+}
+
 // TestEagerDispatchE2E runs the Phase C1 eager path end-to-end (real NATS,
 // 3 in-process workers): TPC-H Q02 is the one TPC-H plan carrying the C1
 // edge — the decorrelated MIN(ps_supplycost) subquery's final_aggregate
@@ -235,9 +279,6 @@ func TestEagerDispatchE2E(t *testing.T) {
 	if len(control) == 0 {
 		t.Fatal("control returned no rows")
 	}
-	edgesBefore := EagerEdgesPlanned.Load()
-	manifestsBefore := EagerManifestsPublished.Load()
-
 	// execute_stage_dag.go races each eager-capable dependency's real
 	// completion (done[depID]) against its task dispatch (f.dispatched) --
 	// real work, so dispatch almost always wins. SF001 producers finish in
@@ -286,22 +327,30 @@ func TestEagerDispatchE2E(t *testing.T) {
 	}
 	t.Cleanup(func() { eagerDispatchStageCompletionHook = nil })
 	eagerCoord := newCoord(true)
-	treatment := runEagerE2EQuery(ctx, t, eagerCoord, sql, "eager")
-
-	assertEagerArmsIdentical(t, control, treatment)
+	// The hold above pushes the race; it does not decide it. The arm is
+	// re-run (bounded) until a sample that could have seen the engagement
+	// exists, and every sample is asserted row-identical to control.
+	delta, attempt, ok := runEagerUntilEngaged(ctx, t, eagerCoord, sql, "eager", control,
+		[]*atomic.Int64{&EagerManifestsPublished, &EagerEdgesPlanned},
+		func(d []int64) bool { return d[0] > 0 && d[1] > 0 })
+	manifests, edges := delta[0], delta[1]
 	// Both markers are published over the coordinator's NATS connection, so a
 	// connection that went away mid-run reads exactly like a mechanism that
 	// did not engage (#752). Report the connection with the verdict so the two
 	// are never confused again.
 	natsState := fmt.Sprintf("NATS status %v, last error %v", eagerCoord.nc.Status(), eagerCoord.nc.LastError())
-	if got := EagerManifestsPublished.Load() - manifestsBefore; got == 0 {
-		t.Errorf("eager run published no manifests — producer wiring did not engage (%s)", natsState)
+	if !ok {
+		if manifests == 0 {
+			t.Errorf("eager run published no manifests in %d attempts — producer wiring did not engage (%s)",
+				eagerEngagementAttempts, natsState)
+		}
+		if edges == 0 {
+			t.Errorf("eager run cleared no consumer early in %d attempts — clearance did not engage (%s)",
+				eagerEngagementAttempts, natsState)
+		}
 	}
-	if got := EagerEdgesPlanned.Load() - edgesBefore; got == 0 {
-		t.Errorf("eager run cleared no consumer early — clearance did not engage (%s)", natsState)
-	}
-	t.Logf("C1 eager engaged: edges=%d manifests=%d, %d distinct rows identical",
-		EagerEdgesPlanned.Load()-edgesBefore, EagerManifestsPublished.Load()-manifestsBefore, len(control))
+	t.Logf("C1 eager engaged on attempt %d: edges=%d manifests=%d, %d distinct rows identical",
+		attempt, edges, manifests, len(control))
 }
 
 // TestEagerJoinDispatchE2E runs the Phase C2 slice-1 join path: a shuffled
@@ -330,15 +379,15 @@ func TestEagerJoinDispatchE2E(t *testing.T) {
 	if len(control) == 0 {
 		t.Fatal("control returned no rows")
 	}
-	edgesBefore := EagerEdgesPlanned.Load()
-	treatment := runEagerE2EQuery(ctx, t, newCoord(true), sql, "eager")
-
-	assertEagerArmsIdentical(t, control, treatment)
-	if got := EagerEdgesPlanned.Load() - edgesBefore; got == 0 {
-		t.Error("eager join run cleared no consumer early — C2 clearance did not engage")
+	delta, attempt, ok := runEagerUntilEngaged(ctx, t, newCoord(true), sql, "eager", control,
+		[]*atomic.Int64{&EagerEdgesPlanned},
+		func(d []int64) bool { return d[0] > 0 })
+	if !ok {
+		t.Errorf("eager join run cleared no consumer early in %d attempts — C2 clearance did not engage",
+			eagerEngagementAttempts)
 	}
-	t.Logf("C2 join eager engaged: edges=%d, %d groups identical",
-		EagerEdgesPlanned.Load()-edgesBefore, len(control))
+	t.Logf("C2 join eager engaged on attempt %d: edges=%d, %d groups identical",
+		attempt, delta[0], len(control))
 }
 
 // TestEagerChainedJoinDispatchE2E runs the A2 fused-chain path: a
@@ -372,17 +421,15 @@ func TestEagerChainedJoinDispatchE2E(t *testing.T) {
 	if len(control) == 0 {
 		t.Fatal("control returned no rows")
 	}
-	edgesBefore := EagerEdgesPlanned.Load()
-	chainedBefore := EagerChainedEdgesPlanned.Load()
-	treatment := runEagerE2EQuery(ctx, t, newCoord(true), sql, "eager-chained")
-
-	assertEagerArmsIdentical(t, control, treatment)
-	if got := EagerChainedEdgesPlanned.Load() - chainedBefore; got == 0 {
-		t.Error("eager chained run cleared no fused-chain consumer — A2 clearance did not engage")
+	delta, attempt, ok := runEagerUntilEngaged(ctx, t, newCoord(true), sql, "eager-chained", control,
+		[]*atomic.Int64{&EagerEdgesPlanned, &EagerChainedEdgesPlanned},
+		func(d []int64) bool { return d[1] > 0 })
+	if !ok {
+		t.Errorf("eager chained run cleared no fused-chain consumer in %d attempts — A2 clearance did not engage",
+			eagerEngagementAttempts)
 	}
-	t.Logf("chained eager engaged: edges=%d chained=%d, %d groups identical",
-		EagerEdgesPlanned.Load()-edgesBefore,
-		EagerChainedEdgesPlanned.Load()-chainedBefore, len(control))
+	t.Logf("chained eager engaged on attempt %d: edges=%d chained=%d, %d groups identical",
+		attempt, delta[0], delta[1], len(control))
 }
 
 // TestEagerComputeProducerE2E runs the A3 path: with stage-chain fusion
@@ -415,20 +462,20 @@ func TestEagerComputeProducerE2E(t *testing.T) {
 	if len(control) == 0 {
 		t.Fatal("control returned no rows")
 	}
-	edgesBefore := EagerEdgesPlanned.Load()
 	eagerCoord := newCoord(true)
 	eagerCoord.eagerStageSlot = make(chan struct{}, 2)
-	treatment := runEagerE2EQuery(ctx, t, eagerCoord, sql, "eager-compute")
-
-	assertEagerArmsIdentical(t, control, treatment)
 	// join-4 (C2 over two repartitions) AND join-9 (A3 over two compute
 	// producers) must both clear — join-9 clearing proves manifest-fed
 	// consumption of plain compute outputs end-to-end.
-	if got := EagerEdgesPlanned.Load() - edgesBefore; got < 2 {
-		t.Errorf("expected >=2 eager clearances (C2 join-4 + A3 join-9), got %d", got)
+	delta, attempt, ok := runEagerUntilEngaged(ctx, t, eagerCoord, sql, "eager-compute", control,
+		[]*atomic.Int64{&EagerEdgesPlanned},
+		func(d []int64) bool { return d[0] >= 2 })
+	if !ok {
+		t.Errorf("expected >=2 eager clearances (C2 join-4 + A3 join-9) in %d attempts, got %d",
+			eagerEngagementAttempts, delta[0])
 	}
-	t.Logf("compute-producer eager engaged: edges=%d, %d groups identical",
-		EagerEdgesPlanned.Load()-edgesBefore, len(control))
+	t.Logf("compute-producer eager engaged on attempt %d: edges=%d, %d groups identical",
+		attempt, delta[0], len(control))
 }
 
 // TestEagerTailGate: with the projected-tail floor in force (set high so
