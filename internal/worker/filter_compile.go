@@ -538,15 +538,32 @@ type fragmentGroupKeys struct {
 
 // fragmentGroupKeyPlan reads the planner's two names off the spec.
 //
-// ok=false means this spec carries no resolution list — an older coordinator —
-// and the caller falls back to derivedGroupKeys, which recovers the second name
-// by PARSING the first. That parse is what this field replaces: a text cannot
-// say whether the query wrote a name or an expression, so a key whose two names
-// differ was computed from its published name and collapsed the whole table
-// into one NULL group (ADR-0026 §2c, #736, #781, #794).
-func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, bool) {
-	if len(spec.GroupByResolve) != len(spec.GroupByCols) || len(spec.GroupByCols) == 0 {
-		return nil, false
+// Three outcomes, and the difference between the last two is the point:
+//
+//	plan, nil  — the spec carries both names; use them.
+//	nil,  nil  — the spec carries NO resolution list. That is an older
+//	             coordinator, and the caller falls back to derivedGroupKeys,
+//	             which recovers the second name by PARSING the first. That
+//	             parse is what this field replaces: a text cannot say whether
+//	             the query wrote a name or an expression, so a key whose two
+//	             names differ was computed from its published name and
+//	             collapsed the whole table into one NULL group (ADR-0026 §2c).
+//	nil,  err  — the spec carries a resolution list that does not line up with
+//	             the published one, or a Computed entry this worker cannot
+//	             parse. Neither is a version: a coordinator that sends the
+//	             field sends it index-aligned, and `TestStageCarriesOneGroupKeyList`
+//	             asserts that at plan time. Degrading to the text re-parse
+//	             there would answer the query by the pre-arc rule with no
+//	             signal at all, which is the silent branch this arc exists to
+//	             remove — so the task FAILS instead (#794 round 2, P4).
+func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, error) {
+	if len(spec.GroupByResolve) == 0 {
+		return nil, nil // an older coordinator; the caller falls back
+	}
+	if len(spec.GroupByResolve) != len(spec.GroupByCols) {
+		return nil, fmt.Errorf("hash_aggregate: %d group-key resolutions against %d published"+
+			" names — the two lists are index-aligned or they are nothing (ADR-0026 §2)",
+			len(spec.GroupByResolve), len(spec.GroupByCols))
 	}
 	// The shared allocator, seeded exactly as derivedGroupKeys seeds it: a
 	// slot is hidden only when nothing else in this fragment answers to it,
@@ -575,14 +592,22 @@ func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, bool) {
 		}
 		node, err := plansql.ParseExpression(r.Expr)
 		if err != nil {
-			// A resolution this worker cannot parse is not something to
-			// guess at: fall back whole, so the fragment behaves the way an
-			// older worker would rather than half one way and half the other.
-			return nil, false
+			// A resolution this worker cannot parse is a coordinator that
+			// sent something this one cannot evaluate. Falling back to the
+			// text re-parse would compute the key from its PUBLISHED name
+			// and answer a wrong number quietly.
+			return nil, fmt.Errorf("hash_aggregate: group key %q resolves by %q, which does not"+
+				" parse: %w", pub, r.Expr, err)
 		}
 		slot, okSlot := alloc.Next(plansql.SlotGroupKey)
 		if !okSlot {
-			slot = plansql.SlotName(plansql.SlotGroupKey, 0)
+			// An exhausted family has no known SQL — but handing two computed
+			// keys ONE slot is a silent wrong answer (the projection's `seen`
+			// set drops the second and both keys then read the first's
+			// value), and an error here is free.
+			return nil, fmt.Errorf("hash_aggregate: the %s slot family is exhausted in this"+
+				" fragment's scope, so group key %q has nowhere to be materialized",
+				plansql.SlotName(plansql.SlotGroupKey, 0), pub)
 		}
 		p.resolve[i], byRule[i], overrides[i] = slot, slot, pub
 		p.computed[slot] = node
@@ -594,17 +619,17 @@ func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, bool) {
 		}
 	}
 	p.published = exec.PublishedGroupKeyNames(byRule, overrides, false)
-	return p, true
+	return p, nil
 }
 
 // fragmentGroupKeyNames is fragmentGroupKeyPlan's answer for the aggregate
 // builder: what to resolve each key by, and what to publish it as.
-func fragmentGroupKeyNames(spec distributed.OpSpec) (resolve, published []string, ok bool) {
-	p, ok := fragmentGroupKeyPlan(spec)
-	if !ok {
-		return nil, nil, false
+func fragmentGroupKeyNames(spec distributed.OpSpec) (resolve, published []string, ok bool, err error) {
+	p, err := fragmentGroupKeyPlan(spec)
+	if err != nil || p == nil {
+		return nil, nil, false, err
 	}
-	return p.resolve, p.published, true
+	return p.resolve, p.published, true, nil
 }
 
 // derivedGroupKeys splits a fragment's GROUP BY key list into the keys this

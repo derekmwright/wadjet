@@ -2123,7 +2123,10 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		// (e.g. SUM(l_extendedprice*(1-l_discount))). Skipped for merge mode:
 		// the partial stage already computed the derived column under OutputCol.
 		if spec.BuildProject && !spec.MergeMode {
-			keyPlan, _ := fragmentGroupKeyPlan(spec)
+			keyPlan, kerr := fragmentGroupKeyPlan(spec)
+			if kerr != nil {
+				return nil, kerr
+			}
 			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil,
 				spec.GroupByTypes, spec.GroupByDecimal, keyPlan)
 			if perr != nil {
@@ -2522,7 +2525,11 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 	// partial below already emitted every key under its published name.
 	groupCols, outNames := spec.GroupByCols, []string(nil)
 	if spec.BuildProject && !spec.MergeMode {
-		if slots, published, ok := fragmentGroupKeyNames(spec); ok {
+		slots, published, ok, err := fragmentGroupKeyNames(spec)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			groupCols, outNames = slots, published
 		} else if _, slots := derivedGroupKeys(spec.GroupByCols, spec.Aggregates, nil,
 			spec.GroupByTypes); !equalStringSlices(slots, spec.GroupByCols) {
