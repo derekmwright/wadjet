@@ -5177,9 +5177,23 @@ func derivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) exp
 			return below(n)
 		}
 	}
-	if _, c := nodeDeclaredType(node, inputColDecls(child)); c == expr.Decided {
+	// emittedColDecls, not inputColDecls: the scope the GROUP BY expression is
+	// written against is what the aggregate's input EMITS, and inputColTypes
+	// stops at a Project. Over a derived table or a CTE `c_dec` therefore
+	// decided nothing — and the arithmetic above it still answered
+	// expr.Decided FLOAT64, which is the confidence this branch gates on. So
+	// the FLOAT64 was taken as an answer, the `below` walk that resolves
+	// DECIMAL(19,4) was never consulted, and `GROUP BY c_dec + 1` over
+	// `(SELECT c_dec FROM typemx) s` died at the #361 store guard —
+	// `cannot store string into FLOAT64 vector` — on a query the same SQL
+	// over the base table answers (#786/#781). The delimited sibling column
+	// in #786's own spelling is NOT the trigger and never was: a parsed
+	// BinaryOp asks for `c_dec`, never for the name "c_dec + 1"
+	// (ADR-0026 §2c), and the shape fails identically with no such column
+	// present.
+	if _, c := nodeDeclaredType(node, emittedColDecls(child)); c == expr.Decided {
 		return inferProjectionDeclType(node, parquet.TypeString,
-			strictIntArithCols(child), inputColDecls(child))
+			strictIntArithCols(child), emittedColDecls(child))
 	}
 	// Nothing decided here. The key may already name source columns — the
 	// DAG dispatches it re-spelled — so ask below the renames before falling

@@ -103,6 +103,22 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#728", "max_times_two_over_a_rename",
 			`SELECT MAX(v*2) AS m FROM (SELECT dw AS v FROM decwin) x`,
 			[]string{"m=1994666666891066.6258890908"}},
+
+		// ------------------------------------------------------------------
+		// #786/#781 — a derived GROUP BY key was typed against inputColDecls,
+		// which stops at a Project, and the arithmetic above the unresolved
+		// column still answered expr.Decided FLOAT64. The key therefore
+		// declared FLOAT64 over a derived table and died at the #361 store
+		// guard. The delimited sibling column in #786's own spelling is not
+		// the trigger: a parsed BinaryOp asks for `c_dec`, never for the name
+		// "c_dec + 1" (ADR-0026 §2c).
+		{"#786", "derived_decimal_key_over_a_derived_table",
+			`SELECT c_dec + 1 AS k FROM (SELECT c_dec FROM typemx WHERE id < 4) s GROUP BY c_dec + 1 ORDER BY k`,
+			[]string{"k=1.0000", "k=2.0001", "k=3.0002", "k=4.0003"}},
+		{"#786", "derived_decimal_key_beside_a_delimited_column_of_that_text",
+			`SELECT c_dec + 1 AS k, MAX("c_dec + 1") AS m FROM ` +
+				`(SELECT c_dec, c_i32 AS "c_dec + 1" FROM typemx WHERE id < 4) s GROUP BY c_dec + 1 ORDER BY k`,
+			[]string{"k=1.0000|m=int64:0", "k=2.0001|m=int64:3", "k=3.0002|m=int64:6", "k=4.0003|m=int64:9"}},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			for _, arm := range []struct {
