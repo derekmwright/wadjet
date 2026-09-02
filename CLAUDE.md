@@ -235,6 +235,10 @@ The `internal/storage/parquet/` package is **critical infrastructure** — any d
 - **Compaction gate**: `TestCompactionIsIdempotentOverTheTypeMatrix` (`internal/storage/compaction`) — all 22 types plus DECIMAL(9,2)/(18,4)/(38,10) and containers nested in containers, ingest → compact ×3, asserted on both read paths (row reader and native scan) with a PyArrow cross-check. Compaction REPLACES its inputs, so every read→write asymmetry there is silent data loss; run it after any change to the reader, the writer, or the compactor. It asserts VALUES and the declared SCHEMA, deliberately NOT the footer's statistics — a statistics defect is a wrong answer through the row-group prune, which `wadjet.TestTypeMatrixPruningNeverChangesTheAnswer` gates instead (ADR-0018).
 - **ANALYZE gate**: `TestAnalyzeCoversEveryTypeMatrixColumn` (same package) — every type the sampler supports must produce a sketch, and the ones it does not are an explicit list asserted in both directions, so coverage cannot be lost by accident.
 
+### Documentation Is Part of Done
+
+- **User-facing docs move with the code.** An arc that changes a flag, a default, a config key, a type rule, a refusal, a supported-SQL statement or a benchmark number updates `docs/*.md` and the README in the same branch — the way ADRs already ship with the code. The 2026-09-02 drift audit (`docs/testing/docs-drift-audit-2026-09-02.md`) found 130 drifted and 29 unsupported claims across 20 docs after twelve releases that kept only CLAUDE.md and the ADRs current; it is the baseline the next audit diffs against.
+
 ### What NOT to Do
 
 - Don't add SIMD intrinsics — the Go compiler handles vectorization.
