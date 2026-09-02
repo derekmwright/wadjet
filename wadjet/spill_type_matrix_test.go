@@ -28,8 +28,9 @@ import (
 //
 // REPLICATION IS THE POINT. One passing spilled run proves nothing here: the
 // budgeted arm of #782's DECIMAL twin answered correctly on three runs out of
-// five, and the pinned #788 below is wrong on nine runs out of twelve. Each
-// cell runs spillMxRuns times (5, or 1 under -short) and every run is
+// five, and #788 — a DATE group key that keyed as digits from one producer and
+// as its display text from another — was wrong on nine runs out of twelve.
+// Each cell runs spillMxRuns times (5, or 1 under -short) and every run is
 // compared, so a cell that is wrong one time in five fails.
 //
 // Coverage: every one of the 18 flat types as a GROUP BY key (on the
@@ -185,15 +186,15 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 			// the divergence, which is the same rule the rest of this file
 			// applies to the spilled arm — one passing run proves nothing.
 			//
-			// The pinned defects here are nondeterministic (#788 is wrong on 9
-			// to 12 runs out of 12), so under the reduced replication of
+			// A pinned defect here may be nondeterministic (#788 was wrong on
+			// 9 to 12 runs out of 12), so under the reduced replication of
 			// `-short` a single lucky run reads exactly like a fix and turned
-			// this gate red at random on CI, on a tree where nothing about
-			// #788 had changed. Agreement is a fix's proof at the full run
-			// count and a coin toss at one; below the threshold it is logged,
-			// and the full-replication arm (CI's Type-Matrix step runs this
-			// file without -short) keeps the ratchet honest.
-			if cell.knownBug != "" && agreed == answered && spillMxPinConditionHolds() {
+			// this gate red at random on CI, on a tree where nothing about the
+			// pinned bug had changed. Agreement is a fix's proof at the full
+			// run count and a coin toss at one; below the threshold it is
+			// logged, and the full-replication arm (CI's Type-Matrix step runs
+			// this file without -short) keeps the ratchet honest.
+			if cell.knownBug != "" && agreed == answered {
 				if answered < spillMxRatchetMinRuns {
 					t.Logf("pinned as %s and all %d budgeted run(s) agreed — too few runs to tell a fix "+
 						"from a lucky sample of a nondeterministic defect, so the ratchet is not fired here; "+
@@ -228,15 +229,6 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 				fam, cellsByFamily[fam])
 		}
 	}
-}
-
-// spillMxPinConditionHolds reports whether the conditions #788 needs are in
-// force. It needs BOTH partitioned parallel aggregation and the hash-once
-// routing plan; under either kill switch the pinned cell AGREES, and that
-// agreement is the switch working rather than the bug being fixed. Without this
-// scoping the ratchet turns an invariance sweep into a false failure.
-func spillMxPinConditionHolds() bool {
-	return os.Getenv("WADJET_PARTITIONED_AGG") != "0" && os.Getenv("WADJET_HASH_ONCE") != "0"
 }
 
 // The two budgets. spillMxBudget is where the arc's four defects live. The
@@ -355,8 +347,7 @@ func spillMxCells() []spillMxCell {
 		// so canUseExternalMerge is false and group keys go to disk as boxed
 		// values (#632's path).
 		add(spillMxCell{name: "group_by_distinct_" + n, sql: fmt.Sprintf(
-			`SELECT %[1]s AS k, COUNT(DISTINCT id) AS n FROM %[2]s GROUP BY %[1]s`, n, tbl),
-			knownBug: spillMxRawRowPin(n)})
+			`SELECT %[1]s AS k, COUNT(DISTINCT id) AS n FROM %[2]s GROUP BY %[1]s`, n, tbl)})
 		// A NULL key on a two-column shape, which is what migrates the int and
 		// packed key paths to the generic map mid-consume (#782's twin).
 		add(spillMxCell{name: "group_by_pair_" + n, sql: fmt.Sprintf(
@@ -438,18 +429,6 @@ func spillMxCells() []spillMxCell {
 // the OTHER cells of the family force — and the answer, which is what caught
 // M2 on e96640c6.
 const spillMxTinyKey = "GROUP BY g is eight groups: too little state for any budget to drain"
-
-// spillMxRawRowPin names the issue for a raw-row-path cell that is known to
-// diverge. #788: a DATE group key on the legacy raw-row path splits every
-// group in two under partitioned parallel aggregation — same display value,
-// two rows, totals still correct. Pre-existing on e96640c6; disabling either
-// WADJET_PARTITIONED_AGG or WADJET_HASH_ONCE makes it disappear.
-func spillMxRawRowPin(col string) string {
-	if col == "c_date" {
-		return "#788"
-	}
-	return ""
-}
 
 // spillMxRuns is the replication count per spilled cell. One passing spilled
 // run proves nothing: which batch drains follows tracker timing, and the

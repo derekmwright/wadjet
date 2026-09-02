@@ -1618,6 +1618,104 @@ func parseDateString(s string) (int32, bool) {
 	return d, true
 }
 
+// IntStorageType reports whether a column of type t stores its values in an
+// integer slice (Int32Data or Int64Data), so that a boxed value of that
+// column has an exact int64 STORAGE form.
+//
+// It is the type set writeIntKeyToColumn and appendTypedIntKey already
+// enumerate in exec, stated once here beside the two boxings it reconciles.
+func IntStorageType(t TypeID) bool {
+	switch t {
+	case TypeBool,
+		TypeInt32, TypePort, TypeProtocol, TypeDate,
+		TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		return true
+	}
+	return false
+}
+
+// KeyStorageInt is the inverse of GetValue's boxing for the types
+// IntStorageType names: it answers the int64 a column of type t STORES for
+// the boxed value v, whichever of that type's legal boxes v happens to be.
+//
+// It exists because one value of such a type has more than one box in this
+// engine and they are not interchangeable as bytes. GetValue FORMATS the
+// three whose storage is not their text — DATE to "2006-01-02", IPv4 to its
+// dotted quad, MAC to its colon form — while the aggregate's int-keyed SoA
+// path, its migration to the generic map (migrateToGenericMap) and the
+// packed-key unpacking all hand back the raw integer. A group key that
+// serializes whichever box it is given therefore has TWO identities for one
+// value, which is #788: a k-way merge compares bytes, so "14610" and
+// "\n2010-01-01" never combined and every DATE group came out twice with the
+// right total and the wrong grouping.
+//
+// The answer is a function of (t, value) and of nothing else, so it lives
+// beside GetValue and SetValue — the two boxings it has to agree with — and
+// its parses are literally theirs (parseDateString, net.ParseIP, net.ParseMAC).
+//
+// ok is false for a box that no column of type t can produce (a string that
+// is not a date/address, a float where an integer is stored). The caller
+// decides what an impossible box means; this never guesses an integer for it,
+// because a wrong integer is a wrong GROUP.
+func KeyStorageInt(v any, t TypeID) (int64, bool) {
+	switch tv := v.(type) {
+	case int64:
+		return tv, true
+	case int32:
+		return int64(tv), true
+	case int:
+		return int64(tv), true
+	case bool:
+		if t != TypeBool {
+			return 0, false
+		}
+		if tv {
+			return 1, true
+		}
+		return 0, true
+	case string:
+		return parseKeyStorageText(tv, t)
+	case []byte:
+		return parseKeyStorageText(string(tv), t)
+	}
+	return 0, false
+}
+
+// parseKeyStorageText re-reads a DISPLAY form back into storage for the three
+// int-stored types GetValue formats. Every other int-stored type boxes as an
+// integer, so text for one of them is not a value that column can hold.
+func parseKeyStorageText(s string, t TypeID) (int64, bool) {
+	switch t {
+	case TypeDate:
+		d, ok := parseDateString(s)
+		if !ok {
+			return 0, false
+		}
+		return int64(d), true
+	case TypeIPv4:
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return 0, false
+		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			return 0, false
+		}
+		return int64(binary.BigEndian.Uint32(ip4)), true
+	case TypeMAC:
+		hw, err := net.ParseMAC(s)
+		if err != nil || len(hw) != 6 {
+			return 0, false
+		}
+		var n uint64
+		for _, b := range hw {
+			n = (n << 8) | uint64(b)
+		}
+		return int64(n), true
+	}
+	return 0, false
+}
+
 // --- Nested-aware typed copy primitives ---
 //
 // These three primitives are the kernel surface that lets Sort/Window

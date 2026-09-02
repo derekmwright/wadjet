@@ -2063,12 +2063,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 		// ClickBench Q19's profile.
 		h.deferGenericKeyBoxing = true
 		for _, t := range h.groupColTypes {
-			switch t {
-			case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration,
-				batch.TypeInt32, batch.TypePort, batch.TypeProtocol,
-				batch.TypeFloat64, batch.TypeFloat32, batch.TypeBool,
-				batch.TypeString, batch.TypeBytes:
-			default:
+			if !genericKeyBoxingDeferrable(t) {
 				h.deferGenericKeyBoxing = false
 			}
 		}
@@ -6324,6 +6319,30 @@ type keySerCol struct {
 	bools []bool
 	bytes *batch.BytesColumn
 	nulls *batch.Bitmap
+}
+
+// genericKeyBoxingDeferrable reports whether a group column of type t may
+// skip consume-time boxing on the generic SoA path. Named rather than inline
+// so the ONE type set is shared by the three functions that must agree about
+// it — buildKeySerCols' kinds, serializeGroupKey's payloads and
+// decodeSerializedKey's re-boxing — and so a gate can drive the real
+// predicate instead of a copy of it
+// (TestEveryGroupKeyProducerWritesTheSameBytes).
+//
+// The set is exactly the types that both round-trip through the binary key
+// encoding losslessly AND box to a primitive whose reconstruction is trivial
+// (GetValue parity). The network types, DATE and UUID box as FORMATTED
+// STRINGS; DECIMAL boxes as one too, and its storage is an Int128 plus a
+// scale rather than a flat typed slice.
+func genericKeyBoxingDeferrable(t batch.TypeID) bool {
+	switch t {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration,
+		batch.TypeInt32, batch.TypePort, batch.TypeProtocol,
+		batch.TypeFloat64, batch.TypeFloat32, batch.TypeBool,
+		batch.TypeString, batch.TypeBytes:
+		return true
+	}
+	return false
 }
 
 // buildKeySerCols resolves the group-key columns of one batch. dst is

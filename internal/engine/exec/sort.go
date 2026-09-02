@@ -1268,7 +1268,15 @@ func appendKeyValueWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
 // appendContainerKeyValue, which the drained partial's VALUE uses — must not
 // apply and this one must.
 func AppendBoxedGroupKey(dst []byte, v any, col *parquet.Column) []byte {
-	return appendKeyValueWithMeta(dst, v, col)
+	if col == nil {
+		return appendKeyValue(dst, v)
+	}
+	// appendGroupKeyColumn, not appendKeyValueWithMeta: the declared type is
+	// right here, and dispatching on it is what gives a DATE / IPv4 / MAC key
+	// the same bytes the engine's own int-keyed drain writes (#788). Routing
+	// the one EXPORTED producer through anything else would be a second
+	// definition of equality again, one package over.
+	return appendGroupKeyColumn(dst, v, col.Type, col)
 }
 
 // appendKeyElemsWithMeta is appendKeyElems with the elements' DECLARED type

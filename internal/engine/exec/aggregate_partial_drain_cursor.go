@@ -2,7 +2,6 @@ package exec
 
 import (
 	"sort"
-	"strconv"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
@@ -439,20 +438,15 @@ func appendSerializedKey(buf []byte, vals []any, types []batch.TypeID, meta []pa
 		if i > 0 {
 			buf = append(buf, 0)
 		}
-		if i < len(types) && types[i] == batch.TypeCIDR {
-			if s, ok := v.(string); ok {
-				buf = appendKeyValue(buf, kernel.CidrOrderKey(s))
-				continue
-			}
-		}
+		var m *parquet.Column
 		if i < len(meta) {
-			switch meta[i].Type {
-			case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
-				buf = appendKeyValueWithMeta(buf, v, &meta[i])
-				continue
-			}
+			m = &meta[i]
 		}
-		buf = appendKeyValue(buf, v)
+		if i < len(types) {
+			buf = appendGroupKeyColumn(buf, v, types[i], m)
+			continue
+		}
+		buf = appendGroupKeyColumnMeta(buf, v, m)
 	}
 	return buf
 }
@@ -476,23 +470,6 @@ func (c *partialGroupCursor) appendIntModeSortKey(buf []byte, gi int) []byte {
 		buf = appendTypedIntKey(buf, f.get(k), c.groupColTypes[i])
 	}
 	return buf
-}
-
-// appendTypedIntKey writes one int-mode column value to buf using the same
-// text encoding appendKeyValue produces for the corresponding boxed `any`.
-// The shared encoding makes this byte-identical to the prior boxed path.
-func appendTypedIntKey(buf []byte, v int64, t batch.TypeID) []byte {
-	switch t {
-	case batch.TypeBool:
-		return strconv.AppendBool(buf, v != 0)
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		return strconv.AppendInt(buf, int64(int32(v)), 10)
-	default:
-		// int64 + every wider-or-equal type stored as int64 (timestamp,
-		// ipv4, mac, duration, ...). reifyIntKey returns int64(v) for these,
-		// and appendKeyValue's int64 branch is strconv.AppendInt(buf, tv, 10).
-		return strconv.AppendInt(buf, v, 10)
-	}
 }
 
 // Peek implements partialRunSource.Peek. Returns nil when exhausted.
