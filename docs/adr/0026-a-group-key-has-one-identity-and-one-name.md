@@ -1,6 +1,18 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795))
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795).
+
+§2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
+#795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
+`Stage.GroupByCols` and the RESOLUTION spelling in `Stage.GroupByResolve`,
+index-aligned, both through `distributed.OpSpec` and the worker's aggregate
+builder. `worker.derivedGroupKeys` is retired to a compatibility fallback,
+`refuseUnstageableGroupKey` and all three of its conditions are deleted, and
+§4a's refusal is retired with them. What remains refused is a plan that carries
+the key's value nowhere — stated by a stream model (`stageStreamColumns`) that
+mirrors the join executor's own naming rule — and a key whose expression is an
+AGGREGATE or WINDOW call that no projection can evaluate, which a DISTINCT
+lowering produces and which the carrier cannot help.)
 
 ## Context
 
@@ -78,14 +90,40 @@ is wrong in the more dangerous direction than the defect being fixed.
 keys, as PostgreSQL has them. A node kind the canonicaliser does not know
 keeps its own `String()` — the behaviour every caller had before.
 
-### 2. `plansql.GroupKeyName` is the published name; the SLOT is where the value lives
+### 2. A key has a PUBLISHED name and a RESOLUTION spelling, and a Stage carries both
 
-A derived key is not a column of the aggregate's input, so one of the two
-engines has to materialize it. **It is materialized into a hidden slot —
+A GROUP BY key answers two different questions, and until 2026-09-02 the stage
+DAG had one field for both.
+
+- **What is this key CALLED?** Every consumer above the aggregate — the SELECT
+  list, HAVING, a sort key, the next stage's merge, the gather's rename —
+  reads the value under one name. That is the PUBLISHED name:
+  `plansql.GroupKeyName`, and `Stage.GroupByCols` carries it.
+- **Where does the fragment FIND it?** The aggregate looks the key up in its
+  own input, which is a different relation with different column names. That
+  is the RESOLUTION spelling, and `Stage.GroupByResolve` carries it,
+  index-aligned.
+
+The two are the same string for every ordinary `GROUP BY c` and every ordinary
+`GROUP BY c + 1`, which is why one field survived so long. They are different
+strings whenever the key names a derived table's alias: a join's stream carries
+`w` where the query wrote `x.w`, and `y.w` where the join qualified a
+duplicate, while the alias's defining expression `a * 3` names a column the
+join does not carry at all. `Stage.GroupByCols` was both at once, and the
+worker recovered the second by PARSING the first (`worker.derivedGroupKeys`) —
+which a text cannot say (§2c: `GROUP BY "g + 1"` names a column, `GROUP BY
+g + 1` is arithmetic, and both are recorded as `g + 1`). Every shape whose two
+names differ was answered from the wrong one: ONE NULL group over the whole
+table, silently, on both DAG arms, where the single-process path answers
+PostgreSQL's rows (#736, #777, #781, #794, #795).
+
+A derived key is not a column of the aggregate's input at all, so one of the
+two engines has to materialize it. **It is materialized into a hidden slot —
 `SlotName(SlotGroupKey, N)`, i.e. `__gb_expr_N` — and PUBLISHED under its
 canonical text by a rename at the aggregate's output.** The name a consumer
 uses and the name the value is stored under are two different names on
-purpose.
+purpose. `GroupKeyResolution.Computed` is the planner's answer to "must this
+fragment materialize the value", and nothing downstream re-derives it.
 
 The first version of this ADR materialized the key under its own canonical
 text and called the resulting collision "possible and accepted". That was
@@ -106,6 +144,119 @@ The pre-aggregate projection APPENDS on the single-process path and
 input column won and the query grouped by it; the worker's projection
 NARROWS, so the key won and shadowed the column an aggregate needed. One
 name, two operators, two different wrong answers.
+
+#### Only ONE class of reader reads the resolution spelling
+
+`Stage.GroupByCols` has about twenty-five non-test readers, and the design is
+only safe if each of them reads the name it means. The census, classified:
+
+| class | readers | what they read |
+|---|---|---|
+| **AUTHOR** — writes both names | `walkStages`' aggregate arm and `stageGroupKeyNames`, `set_op_stages.emitSetOpCountingStage`, `fuse_stage_chains` (carries the pair onto the absorbing join), `agg_over_exchange.rewireAggOverRawExchange` (takes over the dropped scan's list when a merge becomes a raw aggregate), `resolveStageGroupKeys` (settles a derived alias) | both |
+| **RESOLUTION** — the fragment that COMPUTES the key | `worker.buildFragmentHashAggregate` and `worker.buildAggInputProjection` via `fragmentGroupKeyPlan`; the three dispatch sites that build a non-merge `OpHashAggregate` (`buildAggregateFragment`, `buildScanAggregateFragment`, the chain-terminal partial); `pruneFusedAggOutputCols`' read-set argument; `agg_over_exchange`'s `aggInputsCovered` | RESOLUTION |
+| **PUBLISHED** — everything above the aggregate | `aggregateOutputName` (sort keys), `agg_output_projection`'s `aggregateStageOutputs`/`aggregateStageDecls`, `agg_rename_retarget`, `stageEmittedColumns` and `stageStreamColumns`, `distribution.go`'s `RequiredChildDistribution`/`OutputDistribution`, `exchange_partial_agg`'s payload split and `Exchange.PartialAggGroupBy`, `dispatchFinalAggregateFanout`'s `-interm` stage, `aggregate_shuffle`'s key-coverage test, `shared_subplan_dedup`'s probe-key coverage, `coordinator.aggregate_shuffle`'s pre-computed signature, the worker's merge-mode aggregate and its `mergeByPosition` ordinal | PUBLISHED |
+| **PRESENCE** — asks only whether there IS an aggregate | `native_dag_rewrite`, `fuse_stage_chains`' eligibility tests, `fuse_scan_aggregate_shuffle`, `fuse_scan_shuffle`, `dynamic_filter_attach`, `join_input_projection`, `project_stage_insert`, `filter_carrier`, `carrier_schema`, `eager_feed`, `execute_stage_dag`'s fragment-shape guards | neither |
+
+Two of those moved when the names separated, and both are recorded rather than
+inferred. `aggregateOutputName` used to answer the DISPATCH re-spelling,
+because a stage published its keys under the spelling the worker computed them
+from; it now answers what the fragment EMITS, which is the same name the
+single-process aggregate emits for the same query. And `aggregate_shuffle`'s
+pre-compute synthesis writes each key twice — once as a select item and once
+in the `GROUP BY` — from one list, which is sound only while a key's published
+name is also a spelling the base table can evaluate; it now DECLINES a
+candidate whose two names differ (`AggShuffleRejectKeyNameIsNotItsSpelling`)
+rather than synthesizing SQL over a column the table does not have.
+
+The type system carries part of this: `GroupByResolve` is a `[]GroupKeyResolution`
+and not a second `[]string`, so a reader that wants a list of NAMES cannot pick
+it up by accident, and `resolveExprs` is the one place that turns it back into
+text.
+
+#### #794 dissolves by construction
+
+The merge boundary needed no repair at all once the fields separated. A
+`final_aggregate` or `merge_aggregate` in merge mode reads a partial's OUTPUT,
+where every key is already a column under its published name — so it carries no
+resolution list, and `Exchange.PartialAggGroupBy` (minted from the exchange's
+PAYLOAD columns) and the `-interm` stage of `dispatchFinalAggregateFanout`
+(minted from `stage.GroupByCols`) are reading the only name there is. The
+exception is a `RawInputAggregate` final: the distribution pass hash-partitions
+RAW rows into disjoint groups and that final aggregates them in one level, so
+it computes its keys and carries the list. `stageComputesGroupKeys` states the
+rule once and `TestStageCarriesOneGroupKeyList` asserts it in both directions —
+a computing stage without a list, and a merge with one, are both failures.
+
+#### The resolution is decided AFTER the projection passes
+
+For a key that names a derived table's COMPUTED alias there are two candidate
+spellings — the alias, and the expression that defines it — and which one a
+fragment carries is decided by `attachScanSelectProjections` and
+`absorbWindowArmProjection`, which run after `walkStages` emits the stage.
+`resolveStageGroupKeys` settles it at the end of `PlanDistributed`, exactly
+where `resolveFilterAliasSpelling` settles a predicate's spelling and
+`resolveDerivedAliasSortKeys` a sort key's (ADR-0025). Its rules, in order:
+
+1. the stream carries the alias under its QUALIFIED spelling (`y.w`), because
+   the join qualified a duplicate — resolve by that name;
+2. the stream carries exactly ONE column of the alias's bare name, some
+   fragment COMPUTED it, and no arm's column of that name was dropped —
+   resolve by the bare name;
+3. the stream carries every column the DEFINITION reads — resolve by the
+   definition, materialized into a slot;
+4. none of the above — REFUSED, and the coordinator answers the query on its
+   local pipeline.
+
+Rule 2's MATERIALIZED test is what keeps it off the shape that killed the
+previous attempt. `(SELECT id, SUM(id) OVER () + 0 AS g FROM collslot) x GROUP
+BY g` puts a window alias over a table that has its own `g`; the stream carries
+that base column under the same name, nothing computed it, so rule 2 declines
+and rule 3 answers `__win_0 + 0` — which is what the DAG has always evaluated
+there, correctly.
+
+#### The model the rules read
+
+`stageStreamColumns` (`planner/physical/stage_stream_model.go`) lists what a
+stage's fragment SHIPS, per column, and it mirrors the executor rather than
+guessing:
+
+- a JOIN emits the probe's columns and then the build's with every DUPLICATE
+  name QUALIFIED by its owning alias, which is `joinOutputSchemaWithMapping`'s
+  own rule — so a stream really does carry `w` and `y.w` at once. §4a's claim
+  that "a join stream carries `w`, never `y.w`" was a fact about the old MODEL
+  and not about the engine (#795);
+- a duplicate the join cannot qualify is DROPPED, and the model records it as
+  dropped so a key naming that arm is refused rather than bound to the other
+  arm's column of the same name;
+- a CHAINED link carries its OWN `Columns` as that link's output filter, so a
+  fused chain's real output is the LAST link's list — reading the stage's list
+  is what refused a CTE shape the DAG was executing correctly (#795);
+- an output filter is applied with BOTH halves of the qualified↔bare fallback
+  the executor applies;
+- a column is MATERIALIZED when some fragment computes it under that exact
+  name (a projection output, a window output, an aggregate key or output) and
+  merely present when a scan reads it. Only the first can be a derived alias.
+
+`Stage.Columns` on a scan is a READ SET and not an output schema — it carries
+names ancestors asked for, including ones no file has — so the model
+intersects it with the catalog's declared schema where one is known. That is
+`dropUnbackedJoinColumns`' correction one stage type over, and it is the reason
+a phantom name cannot make rule 3 accept something the fragment cannot read.
+
+#### Compatibility is a decision
+
+An `OpSpec` with no `GroupByResolve` is an OLDER coordinator, and the worker
+falls back to `derivedGroupKeys` — the text parse this field replaces, which is
+exactly the behaviour that worker had before. That is the precedent
+`buildAggInputProjection` already set for `GroupByTypes`, and it is asserted
+(`TestFragmentFallsBackWhenTheCoordinatorSendsNoResolution`) rather than
+described. The other direction is stated and NOT supported: a NEW coordinator
+talking to an OLD worker sends published names in `GroupByCols`, and for the
+shapes whose two names differ that worker will compute the key from the
+published name — which is the wrong answer those shapes already give today.
+Mixed-version clusters are a deployment ordering (workers first), not a
+compatibility contract; nothing in the wire format detects the skew, and a
+version that could is out of scope here.
 
 ### 2a. A slot is ALLOCATED, never merely named
 
@@ -412,7 +563,7 @@ the aggregate's own output, is REUSED when the SELECT list already computes it
 and hoisted into the nested-aggregate slot family otherwise, which is what
 HAVING has done since it grew `__having_N`.
 
-### 4a. A key that NAMES a window's output is REFUSED, because the question is about a stage (2026-09-01, #777)
+### 4a. A key that NAMES a window's output is a STAGE question, and §2's two names answer it (2026-09-01 #777; resolved 2026-09-02 #794/#795)
 
 The other direction of §4: not a key read above a window, but a WINDOW OUTPUT
 read as a key. `SELECT x.id, x.w, COUNT(*) FROM (SELECT id, SUM(a) OVER () + 0
@@ -456,11 +607,64 @@ useful than the fix:
   the tree contained a window alias that shadows a base column, which is
   method 10 turned against the predicate itself.
 
-So the cell is REFUSED — `refuseUnstageableGroupKey` condition (3) — and routed
-to the coordinator-local pipeline, where the derived table's Project is a real
-operator and the alias is a real column. That answers PostgreSQL's rows for
-every shape in the cell INCLUDING the ones the DAG previously got right by
-luck, which is the only disposition that is base-or-better everywhere.
+The cell was REFUSED — `refuseUnstageableGroupKey` condition (3) — and routed
+to the coordinator-local pipeline, which answered PostgreSQL's rows for every
+shape in it including the ones the DAG used to get right by luck. That refusal
+was a placeholder, and it is **retired** (2026-09-02): `refuseUnstageableGroupKey`
+is gone, and so are its other two conditions, because the question all three
+were standing in for is answered by §2's two names.
+
+A first attempt at the stage-level answer was built and WITHDRAWN before them.
+`respellAggregateGroupKeys` re-spelled `GroupByCols` after the projection
+passes, and an adversarial review found two defects that were the same fact
+twice: a `Stage` carrying ONE name per key cannot state a derived alias.
+
+- A join fragment's stream was believed to carry `w` and never `y.w`, so a
+  qualified alias could only be resolved by its BARE name, and when both arms
+  publish that name the batch holds two columns called `w` with
+  `RecordBatch.ColumnIndex` answering the first. `SELECT y.w, COUNT(*) FROM
+  (SELECT id, a*3 AS w FROM decpair) x JOIN (SELECT id, a*100 AS w FROM decpair)
+  y ON x.id = y.id GROUP BY y.w` answered x's values on the broadcast arm.
+- `stageEmittedColumns` under-reported a join fragment's real output — a chained
+  link carries its own `Columns`, and a stage that declares no list forwards
+  everything — so "the producer does not emit this" was evidence about the MODEL
+  as much as about the plan. Bounded by that model the pass refused a CTE shape
+  the DAG was EXECUTING correctly and routed it local: right to refused-routed,
+  a regression in kind (protocol item 8).
+
+Both are answered, and the second one twice over. The first claim was simply
+FALSE about the engine: `joinOutputSchemaWithMapping` qualifies a duplicate
+build column with its owning alias, so the stream carries `w` AND `y.w`, and
+`stageStreamColumns` now models that — the ambiguous pair resolves per ARM, in
+both key directions, by the qualified name where the join qualified it and by
+the bare one where it did not. The second is #795: the model reports a chained
+link's own `Columns`, applies an output filter with both halves of the
+qualified↔bare fallback, and records a duplicate the join had to DROP so a key
+naming that arm is refused instead of bound to the other arm's column.
+
+What remains refused is not a spelling choice, and it is two classes rather
+than one. The first is a plan fact: a derived arm whose inner `ORDER BY …
+LIMIT` stopped `attachScanSelectProjections` from materializing its alias, read
+through a join whose exchange manifest ships neither the alias nor the
+expression's columns. Nothing in that plan carries the value, the model says so
+exactly, and the error carries the stream's column list.
+
+The second was found by retiring the old refusal and measuring what came out
+from under it, and it belongs to a different pass. A DISTINCT over a SELECT
+list makes every item a GROUP BY key, so `COUNT(*) + 0 AS w` and
+`SUM(a) OVER () + 0 AS w` become key EXPRESSIONS and the stage carries the CALL
+as the key's text — as BOTH names, which agree. There is nothing for the
+carrier to separate: what is wrong is that a pre-aggregate PROJECTION evaluates
+a scalar over one row and an aggregate call is not one, while the value it
+names was computed by the operator below and published under `__agg_0` /
+`__win_0`. On base the aggregate spelling answered ONE NULL group silently and
+the window spelling was covered by condition (3)'s refusal.
+`refuseUnevaluableGroupKey` states it and routes; the repair is for the
+DISTINCT lowering to record the slot rather than the call, and that is the next
+lead in this family.
+
+`resolveStageGroupKeys` raises both, and the coordinator answers the query on
+its local pipeline.
 
 The refusal's worst case is NOT "a slow correct answer", and saying so was too
 comfortable. `runRefusedLocal` runs under a budget of 8× `localFastPathBytes`,
@@ -468,76 +672,30 @@ so a routed query carrying a JOIN under a small `--local-fastpath-bytes` can
 fail LOUDLY where the DAG would have completed — and the join's build check
 fires before the aggregate ever reaches its spill path, so the failure is a
 budget refusal rather than a degraded run. Every case observed while measuring
-this was base-WRONG → loud, which is still an improvement in kind; the residual
-risk is a shape that is base-RIGHT and routes into that budget, which nothing
-in the corpus produces but nothing rules out either. It lives with #782: while
-the spilled aggregate answers nondeterministically, "spill instead of refuse"
-is not the safer branch to widen the budget towards.
+this was base-WRONG → routed-right, which is still an improvement in kind; the
+residual risk is a shape that is base-RIGHT and routes into that budget, which
+nothing in the corpus produces but nothing rules out either.
 
-The refusal is a placeholder for a stage-level answer, not a settled position.
-The real fix re-spells `GroupByCols` over the producing fragment's
-actually-emitted columns — the `emittedThroughPassThrough` /
-`respellSpecsOverProducerOutput` machinery `absorbWindowArmProjection` itself
-uses — as a pass that runs AFTER the projection passes. When that exists,
-condition (3) is deleted and `TestWindowOutputAsAGroupKeyMatchesPostgres`'s
-`routed` flags flip to false; every entry there asserts BOTH the rows and
-whether the refusal fired, so neither half can move in silence.
-
-**That pass was built, and withdrawn** (2026-09-02). `respellAggregateGroupKeys`
-re-spelled `GroupByCols` after the projection passes exactly as sketched above,
-and an adversarial review found two defects that are the same fact twice: a
-STAGE does not carry enough to name a derived alias.
-
-- A join fragment's stream carries `w`, never `y.w` — only a join KEY arrives
-  qualified — so a qualified alias can only be resolved by its BARE name, and
-  when both arms publish that name the batch holds two columns called `w` with
-  `RecordBatch.ColumnIndex` answering the first. `SELECT y.w, COUNT(*) FROM
-  (SELECT id, a*3 AS w FROM decpair) x JOIN (SELECT id, a*100 AS w FROM decpair)
-  y ON x.id = y.id GROUP BY y.w` answered x's values on the broadcast arm:
-  five plausible rows of a different column, which is the wrongness nothing
-  downstream can notice. Its sibling `GROUP BY x.w` was right by luck.
-- `stageEmittedColumns` under-reports a join fragment's real output — a chained
-  link carries its own `Columns`, and a stage that declares no list forwards
-  everything — so "the producer does not emit this" is evidence about the MODEL
-  as much as about the plan. Bounded by that model the pass refused
-  `WITH c AS (SELECT id, a*2 AS dv FROM decpair) SELECT dv, COUNT(*) FROM
-  decpair t JOIN decpair u ON t.id=u.id JOIN c ON c.id=t.id GROUP BY dv`, which
-  the DAG was EXECUTING correctly, and routed it local: right to refused-routed,
-  a regression in kind (protocol item 8) that the covering test could not see
-  because it asserted rows and not the mechanism.
-
-Both are §2's one-field problem wearing a spelling: `Stage.GroupByCols` is
-simultaneously what the worker COMPUTES the key from and what it PUBLISHES it
-as, and no single string can be both when the resolution name is an expression
-over columns the join does not carry and the published name is a bare alias the
-stream cannot qualify. Choosing between the two spellings better is not the
-fix; carrying BOTH is.
-
-So the pass is withdrawn and the cell stays REFUSED (condition 3) or PINNED, and
-the disposition is recorded rather than approximated. The structural fix — a
-Stage carrying the resolution spelling beside the published name, through
-`distributed.OpSpec` (a plain Go struct, `internal/distributed/messages.go`),
-the worker's aggregate builder, the exchange's partial (`PartialAggGroupBy`) and
-the coordinator's fan-out intermediate phase, with the join-output model made
-complete — is its own arc, led by #794 and #795. The pins in
-`TestWindowOutputAsAGroupKeyMatchesPostgres` carry its shapes, including the
-ambiguous-alias pair in both key directions, and each asserts the DISPOSITION
-beside the rows so a move between "answered wrongly" and "refused and routed"
-cannot be silent.
+`TestWindowOutputAsAGroupKeyMatchesPostgres` asserts the disposition beside the
+rows for every shape in the cell, so neither half can move in silence: the #777
+entries now assert `routed=false` and PostgreSQL's rows on both DAG arms, and
+the one shape that still routes asserts `routed=true` with the mechanism named
+in the test.
 
 The same one-field problem in a shape with no window in it — a computed alias
-over a BARE SCAN, and its aggregate-wrapped spelling — is **#781**, pinned in
-that gate. The discarded wide predicate would not have fixed the
-aggregate-wrapped spelling either: `COUNT(*) + 0 AS w` references no `__win_N`
-slot, so no window-shaped condition can see it. That is the clearest evidence
-that the question is about what a STAGE emits and not about what kind of node
-produced it.
+over a BARE SCAN, and its aggregate-wrapped spelling — was **#781**, pinned in
+that gate and now asserted. The discarded wide predicate would not have fixed
+the aggregate-wrapped spelling either: `COUNT(*) + 0 AS w` references no
+`__win_N` slot, so no window-shaped condition could see it. That is the
+clearest evidence that the question was about what a STAGE emits and not about
+what kind of node produced it.
 
-Both halves were needed. With only the walks widened, `SELECT g + 1, COUNT(*),
-SUM(COUNT(*)) OVER ()` stopped failing loudly and started answering NULL, and
-`ORDER BY COUNT(*)` started answering in an arbitrary order — a LOUD failure
-turned SILENT, which is a regression in kind (protocol item 8) even though the
-loud failure was itself an accident of a different column's projection.
+Both halves of §4 were needed. With only the walks widened, `SELECT g + 1,
+COUNT(*), SUM(COUNT(*)) OVER ()` stopped failing loudly and started answering
+NULL, and `ORDER BY COUNT(*)` started answering in an arbitrary order — a LOUD
+failure turned SILENT, which is a regression in kind (protocol item 8) even
+though the loud failure was itself an accident of a different column's
+projection.
 
 ### 5. A name re-spelled for dispatch is TYPED where it was re-spelled TO (2026-09-02, #792 / #775 / #729)
 
@@ -705,21 +863,37 @@ level away from.
     the aggregate emits keys before outputs (the KEY's value under the
     aggregate's alias).
 
-    Both are REFUSED and ROUTED (`ErrGroupKeyDistributed` →
-    `runGroupKeyLocal`) rather than fixed on the DAG, and that is a
-    deliberate, narrow choice rather than the end of the story. The fix this
-    ADR sketches — the source-spelled expression on the stage beside the
-    published name — is a wire change through `distributed.OpSpec` and the
-    worker's aggregate builder, and the v0.18.8 author probed one shape of it
-    (a `groupKeysPublishedBelow` consultation at stage emission) and reverted
-    it when it never fired. The refusal makes the two shapes ANSWER
-    PostgreSQL's rows on every arm today, and its predicate is exactly the
-    condition `groupKeyOutputs` already computes, so the day a Stage carries
-    two names the refusal is deleted with the same one-line test.
+    Both were REFUSED and ROUTED (`ErrGroupKeyDistributed` →
+    `runGroupKeyLocal`) rather than fixed on the DAG — deliberate and narrow,
+    and not the end of the story. **Both refusals are DELETED 2026-09-02** and
+    both shapes now run ON the DAG. The key an aggregate DIRECTLY BELOW
+    publishes carries `Computed=false` and is looked up as the COLUMN it is,
+    instead of being re-parsed as arithmetic over leaves that aggregate no
+    longer emits — that is §2's two names.
 
-    The narrowness is asserted, not asserted-to:
-    `ctl/an-ordinary-computed-key-still-runs-on-the-dag` fails if the refusal
-    starts swallowing plain `GROUP BY g + 1`.
+    The second is not the two names, and finding that out is the useful part.
+    A derived key sharing its published name with an aggregate output gives the
+    stage TWO output columns of one name, and no carrier makes a name
+    unambiguous. What made it wrong was a reader that tried:
+    `absorbAggregateOutputProjection` renamed exactly ONE of the two onto the
+    query's alias, and every reference spelled before that pass — the sort key
+    `aggregateOutputName` had resolved, the gather's rename — then named a
+    column whose meaning had changed under it. The query came back ordered by
+    the COUNT. The pass DECLINES there now, and the readers that can tell the
+    two apart do it by CLASS and by POSITION rather than by name: the aggregate
+    emits keys before outputs, the gather's `OutputRename.IsAgg` pairs each
+    rename with the column of its own class (#575), and a merge addresses its
+    aggregates by ordinal (`mergeByPosition`). "A projection carried wrong is
+    worse than one not carried at all" is that pass's own rule, and this is a
+    case of it.
+
+    The narrowness is still asserted, and now in the other direction:
+    `ctl/an-ordinary-computed-key-still-runs-on-the-dag` fails if anything
+    starts swallowing plain `GROUP BY g + 1`, and
+    `DAGResolvesAComputedKeyAgainstTheScan/DistinctOverTheKey` asserts
+    `GroupKeyLocalRoutes()` did NOT move — the DAG executes it now, and a
+    return to routing would be a regression in kind that its rows alone cannot
+    see.
 
     "All on the DAG arms alone" was written here and is FALSE with a WINDOW
     present: `SELECT DISTINCT g + 1 AS k, ROW_NUMBER() OVER (…) … GROUP BY
@@ -737,16 +911,17 @@ level away from.
 
     That narrowing also decided **#781**, filed from the same matrix while
     gating #777: a computed alias over a BARE SCAN used as a key through a
-    join or a DISTINCT. It stays OPEN and PINNED, and 2026-09-02 established
-    WHY rather than closing it: its key needs the two names §2 is about, and
-    every attempt to choose between them at stage level fails on a shape the
-    stage cannot describe (§4a's withdrawal record). Its TYPE half is closed
-    separately as **#792** by §5's scope walk — the key was dispatched
-    correctly all along and only its DECLARATION was wrong, so the loud cell of
-    the pin (`a-computed-decimal-alias-over-a-bare-scan`) is now an assertion
-    while the NULL-key cells stay pins. The structural fix is #794's arc, and
-    #795 — a join fragment's output is wider than the stage model reports — is
-    its other lead.
+    join or a DISTINCT. 2026-09-02 established WHY before closing it: its key
+    needs the two names §2 is about, and every attempt to CHOOSE between them
+    at stage level fails on a shape the stage cannot describe (§4a's withdrawal
+    record). Carrying BOTH closes it — the join arm's projection materializes
+    the alias, the stream carries it, and the resolution names it — including
+    the AGGREGATE-wrapped spelling and the ambiguous two-arm pair in both key
+    directions. Its TYPE half was closed separately as **#792** by §5's scope
+    walk: the key was dispatched correctly all along and only its DECLARATION
+    was wrong. One shape of the cell still routes and is asserted as routing —
+    a derived arm with an inner `ORDER BY … LIMIT` read through a join, where
+    no fragment in the plan carries either the alias or its definition.
 
     Also still open in the family: **#785**, an aggregate aliased like the key
     BESIDE a HAVING on it, which answers zero rows on every arm and is
@@ -793,7 +968,40 @@ as an expression.
   both directions: spellings that must collapse, and expressions that must
   not.
 
-Both halves were verified able to fail: stubbing `ExprIdentity` to
-`n.String()` fails the paren-nested, identifier-case and ORDER BY entries;
-stubbing `GroupKeyName` the same way fails every delimited-identifier
-entry.
+§2's two names have four gates of their own, and each fails on a different
+half of the carrier:
+
+- `physical.TestStageCarriesOneGroupKeyList` — the CARRIER invariant over
+  every TPC-H plan: one group-key list per stage, the resolution list index-
+  aligned with it, present on exactly the stages that COMPUTE their keys and
+  absent from every merge, and no key left DEFERRED when planning returns.
+- `physical.TestEveryComputedKeyResolvesAgainstItsProducer` — the resolution
+  pass's own claim, over the derived-alias shapes: the spelling a fragment
+  resolves a key by names something that fragment's input carries. A COMPUTED
+  resolution is checked as an expression and a NAME as a name, which is §2c
+  inside the assertion.
+- `physical.TestGroupKeyPublishedNameIsTheQuerysOwn` — the published half,
+  including the two qualified keys that strip to one name and must keep their
+  qualifiers.
+- `coordinator.TestStageCarriesFilterAndProjectionTwoPath` §
+  `R4/…/DAGResolvesAComputedKeyAgainstTheScan` — the two shapes #736 refused,
+  now asserted ON the DAG with `GroupKeyLocalRoutes()` beside the rows, plus
+  `ctl/an-ordinary-computed-key-still-runs-on-the-dag` as the width guard.
+- `coordinator.TestWindowOutputAsAGroupKeyMatchesPostgres` — the whole #777 and
+  #781 cell, every entry asserting the DISPOSITION beside PostgreSQL's ordered
+  rows on both DAG arms, including the ambiguous two-arm pair in both key
+  directions and the two shapes that still route.
+- `worker.TestFragmentResolvesAndPublishesTheTwoNames` and its three
+  siblings — the wire's half, driven through the real aggregate builder: the
+  derived alias, the qualified alias, the slot, the key an aggregate below
+  publishes, and a merge; plus the compatibility fallback when a spec carries
+  no resolution list, and the property that what the DAG's aggregate emits is
+  what `exec.PublishedGroupKeyNames` gives the single-process one.
+
+Every half was verified able to fail. Stubbing `ExprIdentity` to `n.String()`
+fails the paren-nested, identifier-case and ORDER BY entries; stubbing
+`GroupKeyName` the same way fails every delimited-identifier entry; dropping
+`GroupByResolve` from `walkStages`' partial-aggregate literal fails
+`TestStageCarriesOneGroupKeyList`; and making `resolveStageGroupKeys` a no-op
+fails `TestEveryComputedKeyResolvesAgainstItsProducer` on the join shapes and
+`TestWindowOutputAsAGroupKeyMatchesPostgres` on every #777 and #781 entry.

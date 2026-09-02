@@ -464,9 +464,50 @@ operators (`distributed/messages.go:260`). The worker requires `Operators` to be
 non-empty (`worker/executor_stage.go:22`).
 
 Conversion lives in `coordinator/execute_stage_dag.go`:
-- `buildAggregateFragment` (`:2373`) → `OpShuffleSource` + `OpHashAggregate{GroupByCols, Aggregates, MergeMode, InputRowBound}`. **`MergeMode = stage.Type=="final_aggregate"||"merge_aggregate"`** (`:2400`) — merge mode rewrites `InputCol→OutputCol` and `COUNT→SUM`. `InputRowBound` is `aggregateInputRowBound`: the exact Σ`PartitionRows` over the partitions bound to this task (0 = unknown), which decides the worker aggregate's group-index layout — see `docs/design/unbounded-final-aggregate-layout.md`.
+- `buildAggregateFragment` (`:2373`) → `OpShuffleSource` + `OpHashAggregate{GroupByCols, GroupByResolve, Aggregates, MergeMode, InputRowBound}`. **`MergeMode = stage.Type=="final_aggregate"||"merge_aggregate"`** (`:2400`) — merge mode rewrites `InputCol→OutputCol` and `COUNT→SUM`. `InputRowBound` is `aggregateInputRowBound`: the exact Σ`PartitionRows` over the partitions bound to this task (0 = unknown), which decides the worker aggregate's group-index layout — see `docs/design/unbounded-final-aggregate-layout.md`.
 - `buildSortFragment` (`:2514`), shuffle dispatch `dispatchShuffleStage` (`:772`).
 - Terminal stage gets an `OpGatherSink` when `gatherReplySubject != ""`.
+
+### A GROUP BY key crosses the boundary under TWO names
+
+`Stage.GroupByCols` is what the aggregate **publishes** each key as — the name
+every consumer above the stage reads, and the same text the single-process
+planner hands `exec.HashAggregate`. `Stage.GroupByResolve` is index-aligned
+with it and is what the fragment that **computes** the key resolves it BY,
+against the columns its own input carries: a column of that input
+(`Computed=false`), or an expression the fragment materializes into a hidden
+`__gb_expr_N` slot (`Computed=true`). Both ride `distributed.OpSpec`, and the
+worker's `buildFragmentHashAggregate` sets `exec.HashAggregate.GroupByCols`
+from the first and `GroupByOutNames` from the second — the same pair the
+single-process builder sets (ADR-0026 §2).
+
+Which stages carry a resolution list is the whole of #794:
+
+| stage | computes its keys? | carries `GroupByResolve` |
+|---|---|---|
+| `scan` with `FusedAggGroupBy` | yes — from the table's raw rows | yes |
+| `aggregate` (the partial) | yes — from raw upstream rows | yes |
+| `hash_join`/`broadcast_join` with `ChainedAggGroupBy` | yes — from the join's rows | yes |
+| `final_aggregate` with `RawInputAggregate` | yes — the exchange below partitions raw rows into disjoint groups | yes |
+| `final_aggregate` / `merge_aggregate` (merge mode) | **no** — the input is a partial's OUTPUT | **no** |
+| `exchange-repartition` with `PartialAggGroupBy` | no — the payload IS the partial's output | n/a |
+| the `-interm` phase of `dispatchFinalAggregateFanout` | no — same | n/a |
+
+The last three are the merge boundary, and it needs no agreement to keep: a
+key reaching them is already a column of the stream under its published name,
+so there is only one name to have.
+
+The resolution spelling of a key that names a derived table's COMPUTED alias
+is not decidable where `walkStages` emits the stage — whether any fragment
+publishes the alias is what `attachScanSelectProjections` and
+`absorbWindowArmProjection` decide, later. `resolveStageGroupKeys`
+(`planner/physical/group_key_resolution.go`) settles it at the end of
+`PlanDistributed`, against `stageStreamColumns` — a model of what a fragment
+SHIPS that mirrors `joinOutputSchemaWithMapping` line for line, including the
+duplicate-name qualification that makes a join stream carry `w` and `y.w` at
+once, and a chained link's own `Columns` as that link's output filter (#795).
+A key the plan carries nowhere is refused there with the stream's column list
+in the message, and the coordinator answers it on its local pipeline.
 
 ### A base table reaches the worker THREE ways, and all three must declare its types
 
