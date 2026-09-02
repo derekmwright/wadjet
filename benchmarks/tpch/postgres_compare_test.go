@@ -410,6 +410,15 @@ func postgresCellDiff(pgRows []map[string]any, pgCols []string, wRows []map[stri
 const (
 	pgBugWadjet      = "WADJET BUG:"
 	pgBugUnsupported = "UNIMPLEMENTED IN WADJET:"
+	// pgDivergenceCarrier is the third kind, and it is not a bug: the answer
+	// PostgreSQL gives has no exact value in a 128-bit fixed-point carrier at
+	// the type ADR-0024 computes for it, so wadjet raises 22003 rather than
+	// showing a narrower number (item 4; ADR-0024 item 7 records the same
+	// trade for the set-operation cap). It still RATCHETS — an entry that
+	// starts agreeing fails the way every other pin does — because a rule
+	// change that makes wadjet answer again is exactly what must re-open this
+	// record.
+	pgDivergenceCarrier = "DELIBERATE (ADR-0024 items 1 and 4):"
 )
 
 // windowCountNullPin is #670, found while fixing #586 and filed rather than
@@ -1533,13 +1542,25 @@ func postgresSemanticsCases() []pgCase {
 				`FROM dec_probe ORDER BY d_key`},
 		pgCase{name: "WideDecimalMulNarrow", exactNumeric: true,
 			sql: `SELECT d_key, round(d_wide * d_2, 6) AS p FROM dec_probe ORDER BY d_key`},
-		// (38,10) x (38,10) is item 3's ADJUSTMENT case: p = 77 wants 57
-		// integer digits, so the scale falls to its floor min(20,6) = 6 and
-		// the precision to 38. PostgreSQL's numeric is unbounded and keeps
-		// all 20 fraction digits, so this is compared as a ROW COUNT — the
-		// documented divergence in the number of digits kept.
+		// (38,10) x (38,10) wants p = 77, s = 20. Since #749 an EXACT
+		// operator keeps its scale and caps its precision, so the product is
+		// DECIMAL(38,20) — PostgreSQL's own scale — and d_wide's values run
+		// to ~9.9e14, whose square needs 30 integer digits. 30 + 20 is past
+		// the carrier, so every row raises 22003 where PostgreSQL answers.
+		//
+		// That is the trade #749 makes deliberately, and it is the shape it
+		// costs: item 3's reduction used to answer this at scale 6, and
+		// answering `dw + 1` and `dw * 2` at PostgreSQL's own scale is what
+		// retiring it bought. This is the pathological corner of the carrier
+		// bound, the same one ADR-0024 item 7 records for the set-operation
+		// cap, not a BI query — but it IS a query that stopped answering, and
+		// it is recorded here rather than removed from the corpus.
 		pgCase{name: "WideDecimalSquaredRowCount",
-			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide * d_wide >= 0`},
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide * d_wide >= 0`,
+			knownBug: pgDivergenceCarrier + " (38,10) x (38,10) is DECIMAL(38,20) since #749, and the " +
+				"square of a ~9.9e14 value needs 30 integer digits — no Int128 holds it at scale 20, so " +
+				"wadjet raises 22003 where PostgreSQL's unbounded numeric answers",
+			issue: "#749"},
 		// An INTEGER operand joins as its whole range at scale 0, and a
 		// numeric LITERAL as its spelling — so `d_2 * 2` keeps scale 2 and
 		// `d_2 + 0.005` gains one.

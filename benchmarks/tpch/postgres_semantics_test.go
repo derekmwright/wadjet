@@ -96,6 +96,16 @@ func TestPostgresOracleCorpusPinsAreAccountable(t *testing.T) {
 		case strings.HasPrefix(c.knownBug, pgBugUnsupported):
 			// An unimplemented spelling may be pinned without an issue — an
 			// error is an acceptable answer — but an issue is preferred.
+		case strings.HasPrefix(c.knownBug, pgDivergenceCarrier):
+			// A DELIBERATE carrier divergence is not a bug and has no fix to
+			// track, so it does not need an issue — but it does need the
+			// RECORD that decided it, or "deliberate" is just a shrug with a
+			// prefix. The reason text must name the ADR.
+			if !strings.Contains(c.knownBug, "ADR-") {
+				t.Errorf("%s is pinned as a deliberate divergence but names no ADR. A deliberate "+
+					"divergence that cites no record is an exemption nobody decided; name the "+
+					"record that did.", c.name)
+			}
 		default:
 			t.Errorf("%s has a knownBug that opens with neither %q nor %q, so the divergence's KIND is not "+
 				"stated: %.60s...", c.name, pgBugWadjet, pgBugUnsupported, c.knownBug)

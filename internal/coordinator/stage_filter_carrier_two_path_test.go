@@ -2303,28 +2303,31 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				}
 			})
-			// #749: arithmetic over a DECIMAL(38,10) keeps too few decimal
-			// places. The group key REACHES this now (it used to fail to type
-			// at all), so the family inherits it. PostgreSQL keeps scale 10
-			// through `+ 1`; we come back at scale 9, correctly rounded,
-			// which is the hardest kind of wrong to notice.
+			// #749, and this is the pin's own ratchet having fired: the key
+			// used to come back at scale 9 for `+ 1` and 8 for `* 2` —
+			// correctly ROUNDED values of the wrong type, which is the
+			// hardest kind of wrong to notice — and it answers PostgreSQL's
+			// digits now. The pin said "assert it and delete the pin"; this
+			// is that assertion.
 			//
-			// TODO(#749): delete this pin when the scale survives.
-			t.Run("WideDecimalKeyLosesScale", func(t *testing.T) {
+			// An EXACT operator caps its PRECISION at 38 and keeps its SCALE
+			// (batch.DecimalResultType). Item 3's reduction spent fraction
+			// digits the answer has to buy integer digits it may not need;
+			// item 4's 22003 is the honest answer for a value that then does
+			// not fit.
+			t.Run("WideDecimalKeyKeepsItsScale", func(t *testing.T) {
 				// The EXACT strings, not a scale test. Asserting only that
-				// the scale is not 10 would pass just as happily if a change
-				// moved it to 8 or 11, and the value here is exact
-				// fixed-point: every digit is part of the answer.
+				// the scale IS 10 would pass just as happily on a value that
+				// had lost a digit elsewhere, and this is exact fixed-point:
+				// every digit is part of the answer.
 				//
 				// dw = -1339555555706255.5281706149 (scale 10), so
-				// PostgreSQL's numeric rule (max of the operand scales) gives
-				// -1339555555706254.5281706149 for `+ 1` and
-				// -2679111111412511.0563412298 for `* 2`. We keep nine and
-				// eight places respectively, correctly ROUNDED — a right
-				// value of the wrong type, which no float comparison can see.
-				for _, c := range []struct{ expr, got, pg string }{
-					{"dw + 1", "-1339555555706254.528170615", "-1339555555706254.5281706149"},
-					{"dw * 2", "-2679111111412511.05634123", "-2679111111412511.0563412298"},
+				// PostgreSQL's numeric rule — max of the operand scales for
+				// `+`, their sum for `*` — gives these two, digit for digit,
+				// on both arms.
+				for _, c := range []struct{ expr, want string }{
+					{"dw + 1", "-1339555555706254.5281706149"},
+					{"dw * 2", "-2679111111412511.0563412298"},
 				} {
 					sql := fmt.Sprintf(`SELECT %[1]s AS k, COUNT(*) AS n FROM decagg `+
 						`WHERE dw IS NOT NULL GROUP BY %[1]s ORDER BY k LIMIT 1`, c.expr)
@@ -2334,17 +2337,9 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 							t.Fatalf("%s arm returned %d rows, want 1\n  SQL: %s",
 								arm.name, len(res.Rows), sql)
 						}
-						got := fmt.Sprintf("%v", res.Rows[0]["k"])
-						if got == c.pg {
-							t.Fatalf("%s arm now answers %q, which is PostgreSQL's. #749 is "+
-								"fixed for this shape — assert it and delete the pin\n  SQL: %s",
-								arm.name, got, sql)
-						}
-						if got != c.got {
-							t.Errorf("%s arm answered %q; this pin records %q and PostgreSQL "+
-								"says %q. The answer MOVED without becoming right, which is a "+
-								"change #749 has to account for\n  SQL: %s",
-								arm.name, got, c.got, c.pg, sql)
+						if got := fmt.Sprintf("%v", res.Rows[0]["k"]); got != c.want {
+							t.Errorf("%s arm answered %q, want %q (live PostgreSQL 17)\n  SQL: %s",
+								arm.name, got, c.want, sql)
 						}
 					}
 				}
