@@ -1,6 +1,10 @@
 package kernel
 
-import "github.com/derekmwright/wadjet/internal/engine/batch"
+import (
+	"math/bits"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+)
 
 // --- Generic aggregate slice functions (monomorphized at compile time) ---
 
@@ -603,13 +607,43 @@ func ResolveRowCount(countStar bool) RowAggUpdater {
 // merges. Adopting its scale turned SUM(a) WHERE id < 5 into 3824.00 where the
 // answer is 38.24 — 10^scale too large, on SUM, AVG, MIN and MAX alike (#685).
 
-// sumSliceCheckedInt64 is sumSlice for INT64 data with the wrap detected. It
-// is a separate function rather than a flag on sumSlice because sumSlice is
-// generic over every numeric width and only this one can wrap into a type that
-// is also its own accumulator.
-func sumSliceCheckedInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLen int, acc *Accumulator) (int64, int64) {
-	var sum, count int64
-	over := false
+// sumSliceExactInt64 sums an INT64 vector in 128 BITS and reports whether the
+// batch's true total fits back into int64. It replaces the per-row branch the
+// first cut of this check used.
+//
+// The 128-bit form is the CHEAPEST EXACT one measured, and it is cheaper for
+// the shape of the work rather than the width. A per-row
+// `over = over || (sum^s)&(v^s) < 0` puts a BRANCH on the loop-carried sum;
+// this is an ADD/ADC pair whose carry feeds a SECOND accumulator and whose sign
+// count feeds a THIRD, so three independent chains issue together.
+// BenchmarkBatchSumInt64, medians of 7 runs at -benchtime=3000x:
+//
+//	unchecked base (no exactness at all)      517 ns
+//	per-row branch (8d34890b)               1 257 ns   +143%
+//	this                                      954 ns    +85%
+//
+// Every alternative the round-3 review named was measured and is slower or no
+// better: the branchless `overBits |=` (~1 100), a magnitude probe proving the
+// batch cannot wrap before running the untouched base loop (~1 300 — the probe
+// is a second full pass and no cheaper than the sum), and two- and four-lane
+// unrollings of this loop (~1 015). The residual is not a spelling problem: the
+// base loop is already ISSUE-limited at about 1.1 cycles per row (load, add,
+// index, branch), so any exactness at all costs roughly a cycle per row. What
+// is left is a bounded cost on a kernel that, since #784, serves computed
+// integer arguments and TIMESTAMP/DURATION sums — a bare SUM over an integer
+// COLUMN takes the Int128 carrier instead.
+//
+// It is also the more correct reading. The per-row form was STICKY — a running
+// total that left the int64 range and came back failed a query whose answer was
+// representable — where this one asks the question once, of the number the
+// batch actually produced. The cross-batch fold in ResolveBatchSum keeps the
+// conservative reading, because there the running total IS the answer so far.
+//
+// (hi, lo) is the exact two's-complement 128-bit sum; it fits in int64 exactly
+// when hi is int64(lo)'s sign extension.
+func sumSliceExactInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLen int, acc *Accumulator) (int64, int64) {
+	var lo uint64
+	var hi, count int64
 	// The same four specialized loops sumSlice has, for the same reason: the
 	// null predicate is resolved once per vector, not once per row.
 	switch {
@@ -619,17 +653,17 @@ func sumSliceCheckedInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLe
 				continue
 			}
 			v := data[idx]
-			s := sum + v
-			over = over || (sum^s)&(v^s) < 0
-			sum = s
+			var c uint64
+			lo, c = bits.Add64(lo, uint64(v), 0)
+			hi += (v >> 63) + int64(c)
 			count++
 		}
 	case sel != nil:
 		for _, idx := range sel {
 			v := data[idx]
-			s := sum + v
-			over = over || (sum^s)&(v^s) < 0
-			sum = s
+			var c uint64
+			lo, c = bits.Add64(lo, uint64(v), 0)
+			hi += (v >> 63) + int64(c)
 		}
 		count = int64(len(sel))
 	case nulls.HasNulls():
@@ -638,24 +672,39 @@ func sumSliceCheckedInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLe
 				continue
 			}
 			v := data[i]
-			s := sum + v
-			over = over || (sum^s)&(v^s) < 0
-			sum = s
+			var c uint64
+			lo, c = bits.Add64(lo, uint64(v), 0)
+			hi += (v >> 63) + int64(c)
 			count++
 		}
 	default:
-		for i := 0; i < vecLen; i++ {
-			v := data[i]
-			s := sum + v
-			over = over || (sum^s)&(v^s) < 0
-			sum = s
+		var csum uint64
+		var signs int64
+		for _, v := range data[:vecLen] {
+			var c uint64
+			lo, c = bits.Add64(lo, uint64(v), 0)
+			csum += c
+			signs += v >> 63
 		}
+		hi += signs + int64(csum)
 		count = int64(vecLen)
 	}
-	if over {
+	sum := int64(lo)
+	if hi != sum>>63 {
 		acc.IntOverflow = true
 	}
 	return sum, count
+}
+
+// foldInt64Checked adds a batch's sum into the accumulator's running total and
+// latches a wrap. One check per BATCH, not per row.
+func foldInt64Checked(acc *Accumulator, s, c int64) {
+	total := acc.SumI64 + s
+	if (acc.SumI64^total)&(s^total) < 0 {
+		acc.IntOverflow = true
+	}
+	acc.SumI64 = total
+	acc.Count += c
 }
 
 // ResolveBatchSum returns a batch-level sum kernel for the given column type.
@@ -663,17 +712,12 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
-			// sumSlice itself can wrap over one batch, and so can the fold
-			// into the accumulator. Both are checked: an int64 sum that
-			// wrapped is a different number wearing the right type, and
-			// ADR-0012 item 9 makes it a 22003 rather than an answer.
-			s, c := sumSliceCheckedInt64(vec.Int64Data, &vec.Nulls, sel, vecLen, acc)
-			total := acc.SumI64 + s
-			if (acc.SumI64^total)&(s^total) < 0 {
-				acc.IntOverflow = true
-			}
-			acc.SumI64 = total
-			acc.Count += c
+			// The batch sum and the fold into the accumulator can each wrap,
+			// and both are checked: an int64 sum that wrapped is a different
+			// number wearing the right type, and ADR-0012 item 9 makes it a
+			// 22003 rather than an answer.
+			s, c := sumSliceExactInt64(vec.Int64Data, &vec.Nulls, sel, vecLen, acc)
+			foldInt64Checked(acc, s, c)
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
