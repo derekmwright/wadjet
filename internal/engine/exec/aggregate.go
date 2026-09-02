@@ -5305,6 +5305,31 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		h.partialSpillFiles = append(h.partialSpillFiles, o.partialSpillFiles...)
 		o.partialSpillFiles = nil
 	}
+	// The LEGACY raw-row pair, for the same reason. A clone that took the
+	// raw-row branch owns spilled row FILES and the in-memory buffer that has
+	// not reached one yet, and Close removes the files and drops the buffer —
+	// so leaving them here loses every row in them, not merely a partial
+	// aggregate. The bytes ride along because the primary now owns the
+	// tracker charge for them and its own flush threshold has to see them.
+	//
+	// Production cannot reach this today: a clone's tracking-only view makes
+	// ShouldSpillFor false, SpillSome refuses anything that is not
+	// canUseExternalMerge, and DrainOnHeapPressure refuses both, so the
+	// pressure branch never fires for a clone. The TEST knobs on this branch
+	// do reach it — forcedDrainDue ignores ShouldSpillFor — and so would any
+	// future change that gives a clone a spill-capable manager. It is 49% row
+	// loss when reached (4000 rows in, 2048 out, at Workers=8 with the drain
+	// forced and partitioned aggregation off), and the invariance oracle runs
+	// with WADJET_PARTITIONED_AGG=0, which is the arm that takes this branch.
+	if len(o.spillFiles) > 0 {
+		h.spillFiles = append(h.spillFiles, o.spillFiles...)
+		o.spillFiles = nil
+	}
+	if len(o.spillBuffer) > 0 {
+		h.spillBuffer = append(h.spillBuffer, o.spillBuffer...)
+		h.spillBufferBytes += o.spillBufferBytes
+		o.spillBuffer, o.spillBufferBytes = nil, 0
+	}
 
 	// When the parent (h) was never fed a batch — runParallel's warmup batch
 	// gets consumed when present, but if the warmup row group is fully
