@@ -642,6 +642,67 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			}
 		})
 	}
+	// #796 — the boundary of the walk that closes #775, pinned rather than
+	// described. §5's rule types a name where it was RE-SPELLED TO, and the six
+	// #775 entries above are a window over a SCAN. Put ONE derived table between
+	// the window and the scan and the same shape is LOUD on both DAG arms, at
+	// the same site and with the same error text:
+	//
+	//	SELECT SUM(w*2) FROM (SELECT id, SUM(a) OVER () AS w
+	//	                      FROM (SELECT id, a FROM decpair) t) x
+	//	  PG 17:             numeric 953.82
+	//	  single:            953.82 in a FLOAT box
+	//	  dag, dag-shuffled, dag+morsel4:
+	//	                     final_aggregate-3 … post-breaker exec:
+	//	                     cannot store string into FLOAT64 vector
+	//
+	// The single arm's BOX is part of the pin and was measured here rather than
+	// assumed: the six #775 entries above answer `s=953.82` — an exact DECIMAL —
+	// and one derived-table level between the window and the scan costs the
+	// SINGLE path that too, leaving the right value under float64 where
+	// PostgreSQL says numeric. So the nesting loses the declaration on every
+	// arm; the DAG arms are merely the ones where losing it is LOUD.
+	//
+	// Base-identical on 10fad851, so this is neither a regression nor a wrong
+	// ANSWER — but it is a shape just outside a rule this branch states, which
+	// protocol rule 11 says must carry a fixture. The nesting is the trigger and
+	// not a name collision: the review measured the same failure with the inner
+	// table rebinding `w`, with a distinct inner alias, and with the minimal
+	// pass-through below.
+	//
+	// The single arm is GATED so a "fix" that made every arm fail equally could
+	// not pass this, and the DAG arms RATCHET: the day either answers, this pin
+	// fails and the shape belongs in the census above beside its #775 siblings.
+	//
+	// TODO(#796): delete this when a window over a DERIVED TABLE types like a
+	// window over a scan.
+	t.Run("#796/computed_agg_arg_over_a_window_whose_input_is_a_derived_table", func(t *testing.T) {
+		const sql = `SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w ` +
+			`FROM (SELECT id, a FROM decpair) t) x`
+		// PostgreSQL 17 says numeric 953.82; the single arm's VALUE agrees and
+		// its BOX does not. Both halves are pinned, so a fix that restores the
+		// declaration on the single path fails here too and gets recorded.
+		const want = "s=float:953.82"
+		got, err := na2Run(tmdRunSingle(ctx, single, sql))
+		if err != nil {
+			t.Fatalf("single arm: %v\n  SQL: %s", err, sql)
+		}
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("single arm: %v, this pin records [%s] and PostgreSQL 17 says numeric "+
+				"953.82. If the box is now exact, #796 has moved on this arm: re-measure and "+
+				"update the pin\n  SQL: %s", got, want, sql)
+		}
+		for _, arm := range []struct {
+			name string
+			c    *Coordinator
+		}{{"dag", coord}, {"dag-shuffled", coordB}, {"dag+morsel4", coordM}} {
+			if _, err := tmdRunDAG(ctx, arm.c, sql); err == nil {
+				t.Errorf("the %s arm now ANSWERS this, so #796 is fixed for it. Move the shape "+
+					"into the census above beside the #775 entries and delete this pin"+
+					"\n  SQL: %s", arm.name, sql)
+			}
+		}
+	})
 	na2CheckEngagement(t)
 }
 

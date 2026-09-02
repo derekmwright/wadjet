@@ -18,6 +18,13 @@ import (
 type dajArm struct {
 	name string
 	run  func(string) (*oracle.Result, error)
+	// coord is the arm's coordinator, nil for the single-process one. It is
+	// here so a subtest can assert the MECHANISM beside the rows: a review
+	// found a shape in this very file that moved from executing distributed to
+	// being refused and routed while the subtest stayed green, because the
+	// subtest read rows only — the answer was right either way and the
+	// distribution was gone.
+	coord *Coordinator
 }
 
 func dajArms(t *testing.T, ctx context.Context) []dajArm {
@@ -30,9 +37,9 @@ func dajArms(t *testing.T, ctx context.Context) []dajArm {
 	tmdWriteTables(t, ctx, infraB, nil)
 	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	return []dajArm{
-		{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }},
-		{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }},
-		{"dag-shuffled", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }},
+		{name: "single", run: func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }},
+		{name: "dag", run: func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }, coord: coord},
+		{name: "dag-shuffled", run: func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, q) }, coord: coordB},
 	}
 }
 
@@ -473,11 +480,26 @@ func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
 	// in the DERIVED spelling, and correct in the BARE spelling — so it is
 	// the qualified GROUP-BY key's own resolution and not the chain. Pinned
 	// rather than described, so the day it agrees this gate FAILS.
+	// The MECHANISM in one sentence, the same one the seven pins in
+	// window_key_group_two_path_test.go carry: `Stage.GroupByCols` is
+	// simultaneously what the worker COMPUTES the key from and what it
+	// PUBLISHES it as (ADR-0026 §2), and a key naming a CTE's computed alias
+	// needs those to be two different strings — the defining expression `a * 2`
+	// is spelled over a column the join does not carry, and the alias `dv` is a
+	// bare name a join stream cannot qualify. ADR-0026 §4a records the pass that
+	// tried to choose between them at stage level and was withdrawn.
+	//
+	// TODO(#794): delete this when a Stage carries the resolution spelling
+	// beside the published name.
 	t.Run("2join/group-by-qualified-alias", func(t *testing.T) {
 		sql := cte + "SELECT c.dv AS dv, COUNT(*) AS n FROM " + chain2 + "GROUP BY c.dv ORDER BY c.dv"
 		const want = "5 rows: -0.02|1;0.00|1;4.00|1;25.50|4;|2;" // PostgreSQL 17
-		const pinned = "1 rows: |9;"                             // TODO: unfiled residual
+		const pinned = "1 rows: |9;"                             // TODO(#794)
 		for _, arm := range arms {
+			routesBefore := int64(0)
+			if arm.coord != nil {
+				routesBefore = arm.coord.GroupKeyLocalRoutes()
+			}
 			res, err := arm.run(sql)
 			if err != nil {
 				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
@@ -490,13 +512,25 @@ func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
 				}
 				continue
 			}
+			// The DISPOSITION beside the rows. This shape is a wrong ANSWER and
+			// not a refusal, and the difference is the whole point: a change
+			// that starts ROUTING it to the coordinator-local pipeline has made
+			// it right by a different mechanism, which is a fix to record
+			// rather than a pin to keep. Rows alone cannot tell those apart —
+			// that is exactly how a right-to-routed move in the bare-alias
+			// subtest below survived a full review round.
+			if arm.coord.GroupKeyLocalRoutes() != routesBefore {
+				t.Errorf("the %s arm ROUTED this to the local pipeline where this pin records "+
+					"the DAG answering it wrongly. If the answer is now PostgreSQL's, that is "+
+					"a fix: assert it and delete the pin\n  SQL: %s", arm.name, sql)
+			}
 			switch got {
 			case want:
 				t.Errorf("the %s arm now groups by the qualified derived alias — the residual "+
 					"is fixed, delete this pin and assert PostgreSQL's rows on every arm"+
 					"\n  SQL: %s", arm.name, sql)
 			case pinned:
-				t.Logf("known residual, NOT gated: the %s arm collapses GROUP BY c.dv into one "+
+				t.Logf("known residual (#794): the %s arm collapses GROUP BY c.dv into one "+
 					"NULL group (identical on 376b2cac, at one join, and in the derived "+
 					"spelling; the BARE spelling is correct on every arm)", arm.name)
 			default:
@@ -507,13 +541,30 @@ func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
 	})
 	// …and the BARE spelling beside it, which is correct on every arm and is
 	// what says the qualifier is the whole of that residual.
+	//
+	// It asserts that the DAG EXECUTES it, not only that the answer is right.
+	// This subtest is where a right-to-refused-routed move hid through a whole
+	// review round: a group-key pass read an exchange's empty column list as
+	// "the stream no longer carries this name", refused a key the DAG had been
+	// evaluating correctly, and the coordinator-local pipeline answered. The
+	// rows never moved. The mechanism did.
 	t.Run("2join/group-by-bare-alias", func(t *testing.T) {
 		sql := cte + "SELECT dv, COUNT(*) AS n FROM " + chain2 + "GROUP BY dv ORDER BY dv"
 		const want = "5 rows: -0.02|1;0.00|1;4.00|1;25.50|4;|2;"
 		for _, arm := range arms {
+			routesBefore := int64(0)
+			if arm.coord != nil {
+				routesBefore = arm.coord.GroupKeyLocalRoutes()
+			}
 			res, err := arm.run(sql)
 			if err != nil {
 				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			if arm.coord != nil && arm.coord.GroupKeyLocalRoutes() != routesBefore {
+				t.Errorf("the %s arm ROUTED this shape to the coordinator-local pipeline. The "+
+					"answer is right either way, which is why this has to be asserted: the DAG "+
+					"executes this key, and a group-key refusal that starts firing on it is a "+
+					"right-to-routed regression in kind (#795)\n  SQL: %s", arm.name, sql)
 			}
 			if got := dajDigest(res, []string{"dv", "n"}); got != want {
 				t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
