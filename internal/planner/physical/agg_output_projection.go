@@ -99,6 +99,25 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 		return nil
 	}
 	groupKeys, aggOuts := aggregateStageOutputs(stage)
+	// DECLINED where this aggregate publishes ONE NAME TWICE — a derived key
+	// and one of the aggregate's own outputs both answering to `g + 1`
+	// (`SELECT g + 1 AS k, COUNT(*) AS "g + 1" … GROUP BY g + 1`).
+	//
+	// Carrying the projection there renames exactly one of the two, and every
+	// reference spelled BEFORE it — the sort key `aggregateOutputName`
+	// resolved to `g + 1`, the gather's rename — then names a column whose
+	// meaning has changed under it: the survivor is the OTHER class's. The
+	// query came back ordered by the COUNT.
+	//
+	// Declining leaves both columns under that one name, where the consumers
+	// that CAN tell them apart do: `exec.HashAggregate` emits keys before
+	// outputs, the gather's `OutputRename.IsAgg` pairs each rename with the
+	// column of its own class (#575), and a merge addresses its aggregates by
+	// ordinal (`mergeByPosition`). A projection carried wrong is worse than
+	// one not carried at all, which is this pass's own rule.
+	if aggregatePublishesADuplicateName(groupKeys, aggOuts, stage) {
+		return nil
+	}
 	decls := aggregateStageDecls(stage)
 	// The identity indexes, built once. Each re-parses every published name,
 	// and the walk below asks them at every node of every SELECT item.
@@ -389,6 +408,29 @@ func requoteAggOutputRefsIdx(n plansql.Node, emitted, byIdentity map[string]stri
 	// Every other node kind — a function call, a CASE, a subquery — is left
 	// alone rather than guessed at, which keeps the plan exactly as it was.
 	return nil, false
+}
+
+// aggregatePublishesADuplicateName reports whether this aggregate emits two
+// columns of one name — a group key and an aggregate output sharing it, or two
+// aggregates aliased alike.
+func aggregatePublishesADuplicateName(groupKeys, aggOuts map[string]string, stage *Stage) bool {
+	for low := range groupKeys {
+		if _, both := aggOuts[low]; both {
+			return true
+		}
+	}
+	seen := make(map[string]bool, len(stage.AggSpecs))
+	for _, a := range stage.AggSpecs {
+		low := strings.ToLower(a.OutputCol)
+		if low == "" {
+			continue
+		}
+		if seen[low] {
+			return true
+		}
+		seen[low] = true
+	}
+	return false
 }
 
 // aggregateStageOutputs lists the columns an aggregate stage's fragment emits,

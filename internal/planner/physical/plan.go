@@ -2622,13 +2622,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseGroupingSets(node); err != nil {
 		return nil, err
 	}
-	// A DERIVED key whose published name one of the aggregate's own outputs
-	// also answers to: two columns of one name, and a stage projection that
-	// renamed either of them would change what every reference spelled before
-	// it means (ADR-0026 §2's remaining condition).
-	if err := refuseUnstageableGroupKey(node); err != nil {
-		return nil, err
-	}
+	// A GROUP BY key whose RESOLUTION name and PUBLISHED name have to differ
+	// was refused HERE while `Stage.GroupByCols` was one field for both. It is
+	// not refused any more: the stage carries both names, and the resolution a
+	// derived alias needs is settled at the END of planning, against what the
+	// producing fragment really emits (resolveStageGroupKeys, ADR-0026 §2).
 	// A `real IN (...)` list holding a literal that is not a real is a
 	// PLAN-time error in PostgreSQL, raised whether or not the predicate is
 	// ever reached (#631 follow-up). Refuse it here so the DAG cannot answer

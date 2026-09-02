@@ -2356,11 +2356,17 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		// its PUBLISHED name were one `Stage.GroupByCols` entry, and these
 		// shapes need them to differ.
 		//
-		// The key an aggregate DIRECTLY BELOW publishes is answered by
-		// ADR-0026 §2's two names and runs on the DAG. The aggregate ALIASED
-		// like the key is still routed local: its two output columns share one
-		// published name, which no carrier makes unambiguous. The third was
-		// fixed outright — the argument's delimiters are stripped the way the
+		// Two of them were answered by a REFUSAL that routed the query onto the
+		// coordinator-local single-process pipeline — the engine that carried
+		// the two names separately. Since ADR-0026 §2 the STAGE carries both
+		// (`Stage.GroupByResolve` beside `Stage.GroupByCols`), the refusal is
+		// deleted, and both run ON the DAG: the key an aggregate below already
+		// publishes is resolved as the COLUMN it is instead of being re-parsed
+		// as arithmetic, and the derived key that shares its published name
+		// with an aggregate output is resolved by its hidden slot while the
+		// projection above it is pinned to the physical slot its provenance
+		// names (#575's mechanism, now on both engines). The third was fixed
+		// outright: the argument's delimiters are stripped the way the
 		// single-process path has always stripped them.
 		t.Run("DAGResolvesAComputedKeyAgainstTheScan", func(t *testing.T) {
 			dag := sfcArms(ctx, single, coord)[1]
@@ -2473,7 +2479,18 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 			// An aggregate ALIASED like the key: one published name, two
 			// columns of the batch, and every by-name lookup answers with the
-			// FIRST — the key's. Routed local, like the DISTINCT above was.
+			// FIRST — the key's. It used to be routed local like the DISTINCT
+			// above, and it runs on the DAG now.
+			//
+			// Not because anything learned to tell the two apart by NAME —
+			// nothing can. `absorbAggregateOutputProjection` DECLINES over an
+			// aggregate that publishes one name twice, because carrying that
+			// projection renames exactly one of the two and every reference
+			// spelled before it then means the other. The consumers that CAN
+			// tell them apart do it by CLASS and by POSITION: the aggregate
+			// emits keys before outputs, the gather's `OutputRename.IsAgg`
+			// pairs each rename with the column of its own class (#575), and a
+			// merge addresses its aggregates by ordinal (`mergeByPosition`).
 			t.Run("AggregateAliasedLikeTheKey", func(t *testing.T) {
 				sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS "g + 1" FROM %s `+
 					`GROUP BY g + 1 ORDER BY k`, tbl)
