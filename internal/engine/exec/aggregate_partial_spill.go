@@ -26,7 +26,7 @@ import (
 //
 // File format (little-endian):
 //
-//   magic       "WAGS\x01"             (5 bytes)
+//   magic       "WAGS\x02"             (5 bytes)
 //   numGroupCols   uint32
 //   for each group col:
 //     nameLen     uint16
@@ -64,7 +64,11 @@ import (
 // partialTagContainer (aggregate_container_key.go), which is what lets a
 // container group key survive the round trip at all (#566, #576).
 
-const partialSpillMagic = "WAGS\x01"
+// Bumped to \x02 when the INT64 SUM carrier gained its overflow byte: a run
+// written without it and read with it would shift every field after the first
+// integer sum. Runs never outlive the query that wrote them, so the bump is a
+// guard against a mixed build tree rather than a compatibility promise.
+const partialSpillMagic = "WAGS\x02"
 
 const (
 	partialRowMarker byte = 0x01
@@ -348,6 +352,15 @@ func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Acc
 		case spec.IsFloat:
 			return writeFloat64(w, scratch, a.SumF64)
 		default:
+			// The INT64 carrier's wrap flag rides with its value for the same
+			// reason the DECIMAL one does. Without it a drained partial came
+			// back holding the wrapped total and nothing that said so, and
+			// `SELECT g, SUM(-b) … GROUP BY g` answered the wrapped digits on
+			// the budgeted arm while the in-memory arm refused (review round 2
+			// F4) — the arm exists to catch exactly that.
+			if err := writeBool(w, a.IntOverflow); err != nil {
+				return err
+			}
 			return writeInt64(w, scratch, a.SumI64)
 		}
 	case AggCount:
@@ -417,6 +430,11 @@ func readAcc(r *bufio.Reader, scratch []byte, spec partialAggSpec, a *kernel.Acc
 			}
 			a.SumF64 = v
 		default:
+			of, err := readBool(r)
+			if err != nil {
+				return err
+			}
+			a.IntOverflow = of
 			v, err := readInt64(r, scratch)
 			if err != nil {
 				return err
@@ -1951,7 +1969,7 @@ func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partial
 	}
 	for j, agg := range h.Aggs {
 		colIdx := nGroupCols + j
-		if err := h.decAggErr(&g.Accs[j], j, agg.Func); err != nil {
+		if err := h.aggEmitErr(&g.Accs[j], j, agg.Func); err != nil {
 			return err
 		}
 		writeAccToColumn(out.Columns[colIdx], i, &g.Accs[j], agg.Func)
@@ -2022,7 +2040,7 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 			dst.DecimalData.Scale == batch.AvgScale(acc.DecScale) {
 			q, ok := acc.DecimalAvg()
 			if !ok {
-				// Unreachable: every caller runs decAggErr first, which
+				// Unreachable: every caller runs aggEmitErr first, which
 				// fails the query on exactly this condition. Kept as a
 				// non-answer rather than a wrong one for the day a new
 				// caller forgets, since an approximation here would be the

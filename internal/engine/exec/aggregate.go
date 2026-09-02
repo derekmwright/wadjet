@@ -225,7 +225,7 @@ type HashAggregate struct {
 	// kernel.Accumulator.DecScaleConflict, for the GROUPED paths whose state
 	// lives in the flat SoA arrays: those hold one scale per aggregate and no
 	// per-group accumulator to carry a flag on, so the latch is here and
-	// decAggErr reads it for every group. See Consume, where it is set.
+	// aggEmitErr reads it for every group. See Consume, where it is set.
 	decScaleConflict  bool
 	hasDecAggInput    bool                    // any aggregate reads a DECIMAL column — gates the per-batch scale reconciliation in Consume
 	aggBoxedMinMax    []bool                  // per aggregate: MIN/MAX over ARRAY/ROW/MAP/VECTOR, which retains a value instead of filling an Accumulator slot (#426)
@@ -4728,7 +4728,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.outputPos = 1
 		out := batch.NewRecordBatch(h.emitOutputSchema(), 1)
 		for j, agg := range h.Aggs {
-			if err := h.decAggErr(&h.scalarAccs[j], j, agg.Func); err != nil {
+			if err := h.aggEmitErr(&h.scalarAccs[j], j, agg.Func); err != nil {
 				return nil, err
 			}
 			result := finalizeKernelAcc(&h.scalarAccs[j], agg.Func)
@@ -4951,7 +4951,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 				// return type and Vector.SetValue's type switch — saves one
 				// box per (row × simple-agg-col) at SF100 scale.
 				if ext != nil && ext.accs != nil {
-					if err := h.decAggErr(&ext.accs[j], j, agg.Func); err != nil {
+					if err := h.aggEmitErr(&ext.accs[j], j, agg.Func); err != nil {
 						return nil, err
 					}
 					writeAccToColumn(out.Columns[colIdx], i, &ext.accs[j], agg.Func)
@@ -4962,7 +4962,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 					// retain it), so this is alloc-free.
 					var acc kernel.Accumulator
 					loadAccFromFlat(&h.intFlatAccs[j], countArrayOf(h.intFlatAccs, j), start+i, &acc)
-					if err := h.decAggErr(&acc, j, agg.Func); err != nil {
+					if err := h.aggEmitErr(&acc, j, agg.Func); err != nil {
 						return nil, err
 					}
 					writeAccToColumn(out.Columns[colIdx], i, &acc, agg.Func)
@@ -6057,6 +6057,17 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 		if hfa.sumI64 != nil {
 			hfa.sumI64[dstIdx] += ofa.sumI64[srcIdx]
 		}
+		if hfa.sumI64 != nil {
+			// The int64 fold is checked here for the same reason the scatter
+			// is: two group partials that each held their sum can wrap when
+			// combined, and this is where a drained partial rejoins.
+			cur, add := hfa.sumI64[dstIdx], ofa.sumI64[srcIdx]
+			sum := cur + add
+			if (cur^sum)&(add^sum) < 0 {
+				hfa.sumIntOverflow = true
+			}
+			hfa.sumI64[dstIdx] = sum
+		}
 		if hfa.sumF64 != nil {
 			hfa.sumF64[dstIdx] += ofa.sumF64[srcIdx]
 		}
@@ -6069,6 +6080,9 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 		}
 		if ofa.sumDecOverflow {
 			hfa.sumDecOverflow = true
+		}
+		if ofa.sumIntOverflow {
+			hfa.sumIntOverflow = true
 		}
 		if ofa.hasMin != nil && ofa.hasMin[srcIdx] {
 			if hfa.hasMin[dstIdx] {
@@ -6153,6 +6167,9 @@ func copyFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 		}
 		if sfa.sumDecOverflow {
 			dfa.sumDecOverflow = true
+		}
+		if sfa.sumIntOverflow {
+			dfa.sumIntOverflow = true
 		}
 		if dfa.minI64 != nil {
 			dfa.minI64[dstIdx] = sfa.minI64[srcIdx]
@@ -6736,6 +6753,24 @@ func decimalSumOverflow(col string) error {
 		"the running total is outside the range DECIMAL(38) can represent", col)
 }
 
+// integerSumOverflow reports a SUM whose INT64 carrier wrapped. It is
+// decimalSumOverflow's sibling and says which carrier so the reading is not
+// ambiguous: the wrapped total is a different number wearing the right type,
+// and ADR-0012 item 9 makes it an error rather than an answer.
+//
+// The carrier is not always the exact one. A BARE integer column sums into
+// Int128 and is exact (#784); a COMPUTED integer argument is declared bigint
+// on purpose, so that `SUM(CASE WHEN … THEN 1 ELSE 0 END)` keeps PostgreSQL's
+// int8 OID (physical.aggOutputFromInputDecl), and that is the arm this error
+// belongs to. PostgreSQL would answer the exact numeric; wadjet refuses.
+func integerSumOverflow(col string) error {
+	if col == "" {
+		col = "sum"
+	}
+	return sqlerr.New("22003", "SUM over an integer expression overflowed the 64-bit accumulator (%s): "+
+		"the running total is outside the range BIGINT can represent", col)
+}
+
 // decimalScaleConflict reports an accumulator handed DECIMAL values at two
 // different scales — see kernel.Accumulator.DecScaleConflict. The unscaled
 // integers were added as if they were counted in one scale and they were not,
@@ -6778,15 +6813,21 @@ func decimalAvgUnrepresentable(col string) error {
 		"the sum scaled to the output's scale is outside the range DECIMAL(38) can represent", col)
 }
 
-// decAggErr returns the error for aggregate j when its accumulator cannot
-// answer EXACTLY: a DECIMAL SUM that wrapped, or a DECIMAL AVG whose exact
-// quotient has no Int128. nil otherwise.
+// aggEmitErr returns the error for aggregate j when its accumulator cannot
+// answer EXACTLY: a SUM that wrapped — on either carrier — or a DECIMAL AVG
+// whose exact quotient has no Int128. nil otherwise.
+//
+// It was decAggErr, for the DECIMAL carrier alone, and the name was the whole
+// gap: an integer SUM has a carrier too, it wraps at 2^63 instead of at 38
+// digits, and nothing looked. `SUM(-b)` over a column whose total is exactly
+// 2^64 answered 0 while `SUM(b)` answered 18446744073709551616 (review round 2
+// F4). Both carriers now report through one door.
 //
 // The AVG arm divides here and again in the writer. That is deliberate: the
 // alternative is an error return threaded through writeAccToColumn's typed
 // fast path, and a DECIMAL AVG is not on any hot path (TPC-H's prices are
 // FLOAT64), so the second division costs nothing that shows.
-func (h *HashAggregate) decAggErr(acc *kernel.Accumulator, j int, fn AggFunc) error {
+func (h *HashAggregate) aggEmitErr(acc *kernel.Accumulator, j int, fn AggFunc) error {
 	name := func() string {
 		if j < len(h.Aggs) {
 			return h.Aggs[j].OutputCol
@@ -6795,6 +6836,12 @@ func (h *HashAggregate) decAggErr(acc *kernel.Accumulator, j int, fn AggFunc) er
 	}
 	if acc.DecOverflow {
 		return decimalSumOverflow(name())
+	}
+	// The integer carrier's wrap. Read only for the functions that ACCUMULATE
+	// into SumI64 — SUM, and AVG over the int32 class — because MIN/MAX and
+	// COUNT share the accumulator type and never write that field.
+	if acc.IntOverflow && (fn == AggSum || fn == AggAvg) {
+		return integerSumOverflow(name())
 	}
 	if acc.DecScaleConflict || h.decScaleConflict {
 		return decimalScaleConflict(name())
@@ -7368,6 +7415,7 @@ func loadAccFromFlat(fa *flatAccumArrays, countArr []int64, gi int, dst *kernel.
 	dst.IsDecimal = fa.isDecimal
 	dst.DecScale = fa.decScale
 	dst.DecOverflow = fa.sumDecOverflow
+	dst.IntOverflow = fa.sumIntOverflow
 	if fa.sumI64 != nil {
 		dst.SumI64 = fa.sumI64[gi]
 	}
@@ -7472,6 +7520,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 				acc.IsDecimal = fa.isDecimal
 				acc.DecScale = fa.decScale
 				acc.DecOverflow = fa.sumDecOverflow
+				acc.IntOverflow = fa.sumIntOverflow
 				if fa.sumI64 != nil {
 					acc.SumI64 = fa.sumI64[gi]
 				}
@@ -7547,6 +7596,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 			acc.IsDecimal = fa.isDecimal
 			acc.DecScale = fa.decScale
 			acc.DecOverflow = fa.sumDecOverflow
+			acc.IntOverflow = fa.sumIntOverflow
 			if fa.sumI64 != nil {
 				acc.SumI64 = fa.sumI64[gi]
 			}
@@ -7635,6 +7685,9 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 			}
 			if acc.DecOverflow {
 				fa.sumDecOverflow = true
+			}
+			if acc.IntOverflow {
+				fa.sumIntOverflow = true
 			}
 			if fa.minI64 != nil {
 				fa.minI64[gi] = acc.MinI64

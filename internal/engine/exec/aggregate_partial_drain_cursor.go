@@ -328,6 +328,7 @@ func (c *partialGroupCursor) loadHeadAccsSoA(gi int) {
 			IsDecimal:   fa.isDecimal,
 			DecScale:    fa.decScale,
 			DecOverflow: fa.sumDecOverflow,
+			IntOverflow: fa.sumIntOverflow,
 		}
 		// Resolve the count array through the sharing link (nil for MIN/MAX).
 		if ca := countArrayOf(c.flatAccs, ai); ca != nil {

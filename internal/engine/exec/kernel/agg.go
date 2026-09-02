@@ -71,13 +71,11 @@ func countSlice(nulls *batch.Bitmap, sel []uint32, vecLen int) int64 {
 
 func sumRowInt64(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
-		acc.SumI64 += vec.Int64Data[row]
-		acc.Count++
+		addInt64Checked(acc, vec.Int64Data[row])
 	}
 }
 func sumRowInt64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
-	acc.SumI64 += vec.Int64Data[row]
-	acc.Count++
+	addInt64Checked(acc, vec.Int64Data[row])
 }
 
 func sumRowInt32(acc *Accumulator, vec *batch.Vector, row int) {
@@ -323,6 +321,19 @@ func maxRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
 			acc.HasMax = true
 		}
 	}
+}
+
+// addInt64Checked is the accumulate step for an INT64 sum that must be loud
+// when it wraps (ADR-0012 item 9). The test is the standard two's-complement
+// one: a sum whose sign differs from BOTH addends' is a wrap, and it costs two
+// XORs and a branch that is never taken on real data.
+func addInt64Checked(acc *Accumulator, v int64) {
+	s := acc.SumI64 + v
+	if (acc.SumI64^s)&(v^s) < 0 {
+		acc.IntOverflow = true
+	}
+	acc.SumI64 = s
+	acc.Count++
 }
 
 // --- Integer-into-Int128 updaters (#784) ---
@@ -592,13 +603,61 @@ func ResolveRowCount(countStar bool) RowAggUpdater {
 // merges. Adopting its scale turned SUM(a) WHERE id < 5 into 3824.00 where the
 // answer is 38.24 — 10^scale too large, on SUM, AVG, MIN and MAX alike (#685).
 
+// sumSliceCheckedInt64 is sumSlice for INT64 data with the wrap detected. It
+// is a separate function rather than a flag on sumSlice because sumSlice is
+// generic over every numeric width and only this one can wrap into a type that
+// is also its own accumulator.
+func sumSliceCheckedInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLen int, acc *Accumulator) (int64, int64) {
+	var sum, count int64
+	over := false
+	hasNulls := nulls.HasNulls()
+	if sel != nil {
+		for _, idx := range sel {
+			if hasNulls && nulls.IsNullFast(int(idx)) {
+				continue
+			}
+			v := data[idx]
+			s := sum + v
+			over = over || (sum^s)&(v^s) < 0
+			sum = s
+			count++
+		}
+		if over {
+			acc.IntOverflow = true
+		}
+		return sum, count
+	}
+	for row := 0; row < vecLen; row++ {
+		if hasNulls && nulls.IsNullFast(row) {
+			continue
+		}
+		v := data[row]
+		s := sum + v
+		over = over || (sum^s)&(v^s) < 0
+		sum = s
+		count++
+	}
+	if over {
+		acc.IntOverflow = true
+	}
+	return sum, count
+}
+
 // ResolveBatchSum returns a batch-level sum kernel for the given column type.
 func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
-			s, c := sumSlice(vec.Int64Data, &vec.Nulls, sel, vecLen)
-			acc.SumI64 += s
+			// sumSlice itself can wrap over one batch, and so can the fold
+			// into the accumulator. Both are checked: an int64 sum that
+			// wrapped is a different number wearing the right type, and
+			// ADR-0012 item 9 makes it a 22003 rather than an answer.
+			s, c := sumSliceCheckedInt64(vec.Int64Data, &vec.Nulls, sel, vecLen, acc)
+			total := acc.SumI64 + s
+			if (acc.SumI64^total)&(s^total) < 0 {
+				acc.IntOverflow = true
+			}
+			acc.SumI64 = total
 			acc.Count += c
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeDate:

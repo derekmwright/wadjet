@@ -51,6 +51,13 @@ type flatAccumArrays struct {
 	// mergeFlatAccs and copied onto every accumulator loadAccFromFlat
 	// builds, which is where the emit path reads it.
 	sumDecOverflow bool
+	// sumIntOverflow is sumDecOverflow for the INT64 carrier: at least one
+	// group's integer SUM wrapped. It exists because the DECIMAL carrier is
+	// not every integer SUM's carrier — a COMPUTED integer argument is
+	// declared bigint on purpose, so that `SUM(CASE WHEN … THEN 1 ELSE 0 END)`
+	// keeps PostgreSQL's int8 OID (aggOutputFromInputDecl) — and that arm was
+	// the one with no overflow check at all.
+	sumIntOverflow bool
 }
 
 // countArrayOf resolves the count array an aggregate reads, following the
@@ -181,6 +188,50 @@ func ensureAppendCap[T any](s []T, n int) []T {
 // gi[i] = group index for iteration index i, or -1 to skip (null GROUP BY key).
 // sel: if non-nil, data is accessed at sel[i]; if nil, data is accessed at i.
 // n: number of direct rows (used when sel is nil).
+
+// scatterSumInt64Checked is scatterSumInt for INT64 data with the WRAP
+// detected. It is a separate function rather than a flag on the generic one
+// because scatterSumInt is instantiated for int32 too, where a sum into int64
+// cannot wrap for any batch this engine will ever hold, and the typed-kernel
+// rule says the int32 loop should not pay for the int64 loop's check.
+//
+// Returns true when some group's running sum changed sign in the way only a
+// wrap can, which the caller ORs into flatAccumArrays.sumIntOverflow.
+func scatterSumInt64Checked(sumArr, countArr []int64, data []int64, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) bool {
+	over := false
+	hasNulls := nulls.HasNulls()
+	if sel != nil {
+		for si := range sel {
+			row := int(sel[si])
+			idx := gi[si]
+			if idx < 0 || (hasNulls && nulls.IsNullFast(row)) {
+				continue
+			}
+			cur, v := sumArr[idx], data[row]
+			sum := cur + v
+			over = over || (cur^sum)&(v^sum) < 0
+			sumArr[idx] = sum
+			if countArr != nil {
+				countArr[idx]++
+			}
+		}
+		return over
+	}
+	for row := 0; row < n; row++ {
+		idx := gi[row]
+		if idx < 0 || (hasNulls && nulls.IsNullFast(row)) {
+			continue
+		}
+		cur, v := sumArr[idx], data[row]
+		sum := cur + v
+		over = over || (cur^sum)&(v^sum) < 0
+		sumArr[idx] = sum
+		if countArr != nil {
+			countArr[idx]++
+		}
+	}
+	return over
+}
 
 func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
@@ -723,7 +774,9 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 	case AggSum:
 		switch col.Type {
 		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
-			scatterSumInt(fa.sumI64, fa.count, col.Int64Data, gi, &col.Nulls, sel, n)
+			if scatterSumInt64Checked(fa.sumI64, fa.count, col.Int64Data, gi, &col.Nulls, sel, n) {
+				fa.sumIntOverflow = true
+			}
 		case batch.TypeInt32, batch.TypePort, batch.TypeDate:
 			scatterSumInt(fa.sumI64, fa.count, col.Int32Data, gi, &col.Nulls, sel, n)
 		case batch.TypeFloat64:
@@ -806,7 +859,9 @@ func scatterFlatAggUpdateNoCount(fa *flatAccumArrays, gi []int32, fn AggFunc, co
 	}
 	switch col.Type {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
-		scatterSumIntNoCount(fa.sumI64, col.Int64Data, gi, &col.Nulls, sel, n)
+		if scatterSumInt64Checked(fa.sumI64, nil, col.Int64Data, gi, &col.Nulls, sel, n) {
+			fa.sumIntOverflow = true
+		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
 		scatterSumIntNoCount(fa.sumI64, col.Int32Data, gi, &col.Nulls, sel, n)
 	case batch.TypeFloat64:

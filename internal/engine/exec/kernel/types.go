@@ -38,6 +38,14 @@ type Accumulator struct {
 	IsString  bool // true when the source column is byte-backed (MIN/MAX): STRING, BYTES, IPV6, CIDR, UUID
 	IsBool    bool // true when the source column is BOOL (MIN/MAX); the value rides in MinI64/MaxI64 as 0/1
 	DecScale  int  // scale for DECIMAL columns
+	// IntOverflow marks an INT64 SUM that WRAPPED. It is DecOverflow's
+	// integer sibling and is read at the same emit-time check: ADR-0012 item 9
+	// says a wrapped sum is a different number wearing the right type, so the
+	// query fails rather than showing it. Before #784's review round it was
+	// silent — `SUM(-b)` over a column whose total is exactly 2^64 answered 0
+	// while `SUM(b)` and `SUM(b + 0)` were exact, so three spellings of one
+	// question were right and two were zero.
+	IntOverflow bool
 	// DecOverflow marks a DECIMAL SUM that left the 128-bit range. SumDec
 	// then holds the WRAPPED value — a different number — so the emit path
 	// turns this into a query error instead of writing it out (#455). It
@@ -50,7 +58,7 @@ type Accumulator struct {
 	// 4) is 2550 under whichever scale wins — 25.50 or 0.2550 depending on
 	// arrival order, never the 12.8775 that is the answer. It rides the
 	// accumulator beside DecOverflow, for the same reason and through the same
-	// emit-time channel (exec.decAggErr), because there is no other way for a
+	// emit-time channel (exec.aggEmitErr), because there is no other way for a
 	// kernel with no error return to refuse.
 	//
 	// It is one door of several, not the last one, and the difference matters
@@ -62,7 +70,7 @@ type Accumulator struct {
 	// SoA arrays, which hold one scale per aggregate and no per-group
 	// accumulator to carry a flag on, so their latch is
 	// exec.HashAggregate.decScaleConflict instead and reaches the same
-	// decAggErr. What NEITHER covers is the SCAN: two base-table files whose
+	// aggEmitErr. What NEITHER covers is the SCAN: two base-table files whose
 	// footers declare one column at two scales are read, mixed and answered
 	// with no check anywhere, on every path including the fast one. That is a
 	// scan-level schema-drift check and a pre-existing residual — recorded in
@@ -136,7 +144,7 @@ func (a *Accumulator) FinalSum() any {
 // the increment is fixed rather than PostgreSQL's significant-digit rule.
 //
 // nil for a quotient with no Int128 is NOT the answer to that case: callers
-// run exec.decAggErr first, which fails the query the way a SUM overflow
+// run exec.aggEmitErr first, which fails the query the way a SUM overflow
 // does. Returning nil here would be a NULL the client cannot tell from "no
 // rows".
 func (a *Accumulator) FinalAvg() any {
@@ -221,9 +229,19 @@ func (a *Accumulator) FinalMax() any {
 // Merge combines another accumulator's state into this one.
 // Used for parallel aggregation: each worker builds partial state, then merges.
 func (a *Accumulator) Merge(other *Accumulator) {
-	a.SumI64 += other.SumI64
+	// The int64 FOLD is checked for the same reason the per-row add is: two
+	// partials that each held their sum can still wrap when combined, and a
+	// merge is where morsel parallelism and the drain both land.
+	si := a.SumI64 + other.SumI64
+	if (a.SumI64^si)&(other.SumI64^si) < 0 {
+		a.IntOverflow = true
+	}
+	a.SumI64 = si
 	a.SumF64 += other.SumF64
 	a.Count += other.Count
+	if other.IntOverflow {
+		a.IntOverflow = true
+	}
 	if other.IsFloat {
 		a.IsFloat = true
 	}

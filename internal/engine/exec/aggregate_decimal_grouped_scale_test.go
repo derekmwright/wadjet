@@ -22,7 +22,7 @@ import (
 //
 // The latch is the operator's (HashAggregate.decScaleConflict), set where
 // Consume already compares the batch's vector against the aggregate's
-// established scale, and read at the same decAggErr the ungrouped form reads.
+// established scale, and read at the same aggEmitErr the ungrouped form reads.
 func TestGroupedDecimalAggregateRefusesTwoContributingScales(t *testing.T) {
 	ctx := context.Background()
 	at := func(scale int, key int64, unscaled int64) *batch.RecordBatch {
