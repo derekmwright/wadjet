@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it)
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795))
 
 ## Context
 
@@ -483,6 +483,48 @@ condition (3) is deleted and `TestWindowOutputAsAGroupKeyMatchesPostgres`'s
 `routed` flags flip to false; every entry there asserts BOTH the rows and
 whether the refusal fired, so neither half can move in silence.
 
+**That pass was built, and withdrawn** (2026-09-02). `respellAggregateGroupKeys`
+re-spelled `GroupByCols` after the projection passes exactly as sketched above,
+and an adversarial review found two defects that are the same fact twice: a
+STAGE does not carry enough to name a derived alias.
+
+- A join fragment's stream carries `w`, never `y.w` — only a join KEY arrives
+  qualified — so a qualified alias can only be resolved by its BARE name, and
+  when both arms publish that name the batch holds two columns called `w` with
+  `RecordBatch.ColumnIndex` answering the first. `SELECT y.w, COUNT(*) FROM
+  (SELECT id, a*3 AS w FROM decpair) x JOIN (SELECT id, a*100 AS w FROM decpair)
+  y ON x.id = y.id GROUP BY y.w` answered x's values on the broadcast arm:
+  five plausible rows of a different column, which is the wrongness nothing
+  downstream can notice. Its sibling `GROUP BY x.w` was right by luck.
+- `stageEmittedColumns` under-reports a join fragment's real output — a chained
+  link carries its own `Columns`, and a stage that declares no list forwards
+  everything — so "the producer does not emit this" is evidence about the MODEL
+  as much as about the plan. Bounded by that model the pass refused
+  `WITH c AS (SELECT id, a*2 AS dv FROM decpair) SELECT dv, COUNT(*) FROM
+  decpair t JOIN decpair u ON t.id=u.id JOIN c ON c.id=t.id GROUP BY dv`, which
+  the DAG was EXECUTING correctly, and routed it local: right to refused-routed,
+  a regression in kind (protocol item 8) that the covering test could not see
+  because it asserted rows and not the mechanism.
+
+Both are §2's one-field problem wearing a spelling: `Stage.GroupByCols` is
+simultaneously what the worker COMPUTES the key from and what it PUBLISHES it
+as, and no single string can be both when the resolution name is an expression
+over columns the join does not carry and the published name is a bare alias the
+stream cannot qualify. Choosing between the two spellings better is not the
+fix; carrying BOTH is.
+
+So the pass is withdrawn and the cell stays REFUSED (condition 3) or PINNED, and
+the disposition is recorded rather than approximated. The structural fix — a
+Stage carrying the resolution spelling beside the published name, through
+`distributed.OpSpec` (a plain Go struct, `internal/distributed/messages.go`),
+the worker's aggregate builder, the exchange's partial (`PartialAggGroupBy`) and
+the coordinator's fan-out intermediate phase, with the join-output model made
+complete — is its own arc, led by #794 and #795. The pins in
+`TestWindowOutputAsAGroupKeyMatchesPostgres` carry its shapes, including the
+ambiguous-alias pair in both key directions, and each asserts the DISPOSITION
+beside the rows so a move between "answered wrongly" and "refused and routed"
+cannot be silent.
+
 The same one-field problem in a shape with no window in it — a computed alias
 over a BARE SCAN, and its aggregate-wrapped spelling — is **#781**, pinned in
 that gate. The discarded wide predicate would not have fixed the
@@ -496,6 +538,63 @@ SUM(COUNT(*)) OVER ()` stopped failing loudly and started answering NULL, and
 `ORDER BY COUNT(*)` started answering in an arbitrary order — a LOUD failure
 turned SILENT, which is a regression in kind (protocol item 8) even though the
 loud failure was itself an accident of a different column's projection.
+
+### 5. A name re-spelled for dispatch is TYPED where it was re-spelled TO (2026-09-02, #792 / #775 / #729)
+
+A GROUP BY key and an aggregate's ARGUMENT are both RE-SPELLED before dispatch —
+the key into its defining expression, the argument into the column a rename
+Project binds — and §2c's rule applies to both: a name so re-spelled is typed
+where it was re-spelled TO, not where the query wrote it. Two declaration scopes
+were consulted, in fixed order, each with its own gate, and neither gate asked
+the question that decides it:
+
+- the EMITTED scope was accepted whenever `nodeDeclaredType` answered Decided,
+  which arithmetic always does — the FLOAT rule is a rule, not an observation.
+  `GROUP BY k` over `(SELECT c_dec + 1 AS k FROM typemx) s` dispatches as
+  `c_dec + 1` into a scope carrying `k` and no `c_dec`, was answered FLOAT64
+  *with confidence*, and died at the #361 store guard on both DAG arms for a
+  query the same SQL over the base table answers (**#792**).
+- the SOURCE scope (`sourceColDeclsThroughRenames`) stops at a COMPUTED
+  projection item and returns NOTHING, because a rename may rebind a name to a
+  different value. True of a NAME; not true of the DEFINING EXPRESSION that item
+  was hoisted out of, which is spelled in the Project's own input scope. So
+  `a * 3` over `(SELECT id, a * 3 AS w FROM decpair) x` had no scope at all and
+  fell to the same float rule (#786, and **#729**'s last DAG residual — a
+  fractional literal in a key over a renamed DECIMAL).
+- the same walk stopped at the immediate child for an aggregate's ARGUMENT.
+  `SUM(w * 2)` hoists its constant out of the aggregate, so the stage carries
+  `SUM(__win_0)` plus a POST-BREAKER projection `__agg_0 * 2`; the Project below
+  the aggregate emits `id` and `w`, so `__win_0` resolved nowhere, the aggregate
+  declared FLOAT64 over a DECIMAL window slot, `aggOutputFromInputDecl`
+  inherited it, and that projection met an exact DECIMAL at the store guard
+  (**#775**). `aggSpecInputDecimal` also asked the SCAN-only walk where
+  `aggSpecOutputType` asked the emitted one — two functions answering one
+  question about one column with two different walks, which is ADR-0023 item 5
+  one layer over.
+
+`physical.namingScopeDecls` descends the chain below the aggregate until it
+reaches the level whose emitted columns can NAME every column the expression
+references. Descending is gated on COVERAGE in both directions, and that is what
+makes it safe: a name the Project's OUTPUT can name stops at the OUTPUT, so a
+rebound name is never read past its rebinding; a name it cannot name is looked
+for one level down, where it either resolves or the walk gives up and the caller
+keeps the answer it had.
+
+`groupKeyScopeDescends` — Project, Filter, Sort, Limit, Distinct, Window — is
+its OWN list and deliberately not `logical.AggScopePreservingWrapper`, for the
+reason §4 gives about the fifth reader: "are this node's input columns still
+values of the same rows" is not "do this node's rows carry one row per group",
+and a shared list that answers both is a list answering neither. A node belongs
+here when a name it does not emit may still be a name its INPUT emits, for the
+same rows. `NodeAggregate` is excluded, and that is the boundary: an aggregate
+REPLACES its input's scope with keys and aggregate outputs.
+
+| claim | fixture that attempts it |
+|---|---|
+| the descent never types a name from past its rebinding | `ctl/a-derived-alias-that-shadows-a-base-column` — `typemx.g` is `i % 7`, eight groups against the derived three, so binding or typing the wrong `g` is a visible wrong answer |
+| a value-preserving wrapper between the Project and the scan is looked through | `ctl/a-derived-table-with-an-order-by-inside` and `…-with-a-limit-inside`, both DECIMAL so the type is what is gated |
+| the emitted scope still wins where it names the columns | TPC-H Q07/Q08/Q09's `GROUP BY SUBSTR(l_shipdate, 1, 4)` in `TestTPCHStageDumpGolden`, and `ctl/an-ordinary-computed-key-still-runs-on-the-dag` |
+| an aggregate's argument and a key get ONE answer | `TestNumericArc2ShapesMatchPostgres`'s six `#775` entries beside their FLOAT and bare-argument controls |
 
 ## Consequences
 
@@ -535,11 +634,17 @@ loud failure was itself an accident of a different column's projection.
     and `inputColDecimal` stopped at a `NodeWindow`, so the slot had no
     declared type and the float rule stood; both walks now add the window's
     own slots from `windowSpecOutputType`, which `emittedColDecimal` has read
-    since #586. What remains is the AGGREGATE's output declaration —
-    `SUM(w * 2)` over a DECIMAL window output still fails the #361 store guard
-    at `final_aggregate` on both DAG arms, byte-identical to `de95b3b5`,
-    because `AggSpec` has an OutputType and no (p,s) (ADR-0024 item 2). Filed
-    as **#775**.
+    since #586. The AGGREGATE's output declaration is CLOSED 2026-09-02 with
+    **#775**, and the input declaration was the missing half rather than the
+    output one. `SUM(w * 2)` hoists its constant out, so the aggregate is
+    `SUM(__win_0)`, and `aggInputColumnType`/`aggInputColumnDecimal` looked that
+    re-spelled name up in the scope of the Project directly below the aggregate
+    — which had renamed `__win_0` to `w`. The declaration fell to FLOAT64,
+    `aggOutputFromInputDecl` inherited it, and the POST-BREAKER projection
+    `__agg_0 * 2` met an exact DECIMAL at the store guard. §5's
+    `namingScopeDecls` answers it, and `aggSpecInputDecimal` — which asked the
+    SCAN-only walk where `aggSpecOutputType` asked the emitted one — now asks
+    the same one.
   - **#774** — CLOSED 2026-09-01, and it was §4's own defect one reader over
     rather than a third consumer of the HAVING respelling. A WHERE on the key
     applied ABOVE the window admitted no row at all, on every arm: the outer
@@ -620,16 +725,16 @@ loud failure was itself an accident of a different column's projection.
 
     That narrowing also decided **#781**, filed from the same matrix while
     gating #777: a computed alias over a BARE SCAN used as a key through a
-    join or a DISTINCT. The wide predicate answered it, the narrow one does
-    not, and the wide one is not available — so #781 stays open and pinned.
-    Its key IS a column of the aggregate's input by every logical-plan test;
-    only the STAGE spelling is wrong (`aggStageGroupKey` dispatches the
-    defining expression), so the site is `assertGroupKeysResolve` — the
-    GROUP-BY twin of `assertAggregateInputsResolve`, which does not exist. One
-    was written and discarded here: its input modelling excludes a JOIN, which
-    is the producer under every #781 shape, so it fired on no fixture at all,
-    and a guard no fixture reaches is untested code on the default path
-    (method 10).
+    join or a DISTINCT. It stays OPEN and PINNED, and 2026-09-02 established
+    WHY rather than closing it: its key needs the two names §2 is about, and
+    every attempt to choose between them at stage level fails on a shape the
+    stage cannot describe (§4a's withdrawal record). Its TYPE half is closed
+    separately as **#792** by §5's scope walk — the key was dispatched
+    correctly all along and only its DECLARATION was wrong, so the loud cell of
+    the pin (`a-computed-decimal-alias-over-a-bare-scan`) is now an assertion
+    while the NULL-key cells stay pins. The structural fix is #794's arc, and
+    #795 — a join fragment's output is wider than the stage model reports — is
+    its other lead.
 
     Also still open in the family: **#785**, an aggregate aliased like the key
     BESIDE a HAVING on it, which answers zero rows on every arm and is

@@ -93,6 +93,33 @@ not what the semantics are (ADR-0012 decides that).
     guard that only fires on a shape no fixture produces (`hot` on a stored
     reserved column) is untested code on the default path.
 
+11. **A fix's BOUNDARY is a claim, and gets a fixture that attempts it — and
+    a fix that has to be bounded is not a fix.** Every "this pass acts only
+    on X" is method 10 wearing a different hat: the corpus carries a shape
+    just outside X, and where the disposition is a REFUSAL the fixture
+    asserts the routed flag (`Coordinator.GroupKeyLocalRoutes()`) beside the
+    rows. Rows alone cannot tell "the DAG executed this" from "the DAG
+    refused it and the local pipeline answered", so a right-to-routed move
+    is invisible to a row assertion — one survived a whole review round on a
+    green test that checked only the answer.
+
+    The rule the boundary itself has to pass is stricter. A fix bounded by a
+    model the same commit knows to be incomplete, or one that leaves the
+    ISSUE'S OWN HEADLINE SHAPE pinned, is a surface repair standing where a
+    structural one belongs, and it is not shipped. The disposition then is to
+    DEFER the issue with its structural mechanism written down and END the
+    work on it — not to bound the fix and pin the residual, which spends the
+    evidence and leaves the defect. A residual whose mechanism an ADR already
+    names is the next arc's LEAD, not a filed follow-up.
+
+    The 2026-09-02 group-key arc is the worked example. A pass that re-spelled
+    a stage's GROUP BY key against its producer's emitted columns fixed four
+    shapes and was withdrawn whole, because its two failures were one fact —
+    a `Stage` carries one name where the key needs two — and every bound that
+    made the pass safe also made it decline the shapes the issue was filed
+    for. The typing half of the same arc, which is a real fix at an exact
+    site, shipped in the same branch.
+
 ## What the reviewer then does
 
 Refute, concretely. The review's only currency is a failing input: SQL, the

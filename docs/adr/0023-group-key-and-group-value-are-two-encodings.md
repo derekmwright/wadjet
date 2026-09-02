@@ -1,6 +1,6 @@
 # ADR-0023: A group's KEY and its VALUE are two encodings; never decode one out of the other
 
-Status: Accepted (landed 2026-08-25 with the #566/#576 fix). Supplements
+Status: Accepted (landed 2026-08-25 with the #566/#576 fix; amended 2026-08-29 with item 7, and 2026-09-02 with item 8 — one key ENCODER per column TYPE, after #788 found four types keyed two ways inside ONE operator). Supplements
 ADR-0006, which says every pipeline breaker degrades past memory but does not
 say what a drained group's bytes have to be.
 
@@ -199,6 +199,57 @@ derived from the other.**
    9007199254740993 and 9007199254740992.0 are EQUAL — PostgreSQL's answer,
    pinned so nobody "fixes" it into an exact integer comparison.
 
+8. **One key ENCODER per column TYPE, and the type is what dispatches it.**
+   (Added 2026-09-02 with the #788 fix.) Item 5 says a key producer is SHARED
+   and states it for the one consumer outside `exec`. The same rule holds
+   INSIDE one operator, and there it had been broken for four types.
+
+   A `HashAggregate` produces the bytes the k-way merger compares from four
+   places, holding one value in three different Go boxes:
+
+   | producer | the box it holds |
+   |---|---|
+   | the int-mode and packed-int drains (`appendIntModeSortKey`) | the int64 STORAGE |
+   | the compact and str/generic drains (`appendSerializedKey`) | `Vector.GetValue`'s box |
+   | `migrateToGenericMap`, when a NULL key migrates an int-keyed table mid-consume | the RAW int64, re-boxed |
+   | `decodeSerializedKey`, on the deferred generic path | re-boxed from the binary hash key |
+
+   Those are not one encoding. `GetValue` FORMATS the int-stored types whose
+   storage is not their text, so a DATE key was `14610` from the int drain and
+   `\n2010-01-01` from the boxed remainder; the merge compares bytes and never
+   combined them, and 421 groups came back as 772–841 rows with `sum(n)`
+   unchanged — right totals, wrong grouping, past a spill boundary only (#788).
+   Patching the int drain alone still reproduced, because `migrateToGenericMap`
+   is a second source of the digits. The sweep for the property found FOUR
+   types with two identities: DATE, IPv4 and MAC (display text against storage
+   digits) and BOOL, whose migration box is `int64(1)` where `GetValue`'s is
+   `true`.
+
+   `exec.appendGroupKeyColumn` is the single encoder, dispatched on the
+   DECLARED type and never on the box — the box is exactly what disagreed —
+   with `appendTypedIntKey` as its int arm and `batch.KeyStorageInt` as the
+   inverse boxing that lets the boxed producers reach the same integer. The
+   encoding is the value's STORAGE and not its display: it is what the hot int
+   path already wrote for INT32/PORT/PROTOCOL, what the coordinator's own
+   cross-worker re-aggregation already wrote for DATE/IPv4/MAC, and item 1's
+   own rule that a key is keyed on what the comparator compares. A box no
+   column of the type can hold is NOT guessed into an integer — a wrong integer
+   is a wrong GROUP — and keys as its own length-prefixed text, which cannot
+   collide with the bare-digit arm.
+
+   The gate is `exec.TestEveryGroupKeyProducerWritesTheSameBytes`: for every
+   flat type and every producer, one value has ONE merge key, compared byte for
+   byte. It deliberately does not go through a query — a query reaches these
+   producers only under a memory budget, a key-path migration and a partitioned
+   plan at once, which is why #788 survived four investigation rounds — and
+   `TestGroupKeyProducerSweepCoversEveryDeclaredType` fails when a 23rd type is
+   added without a sample. The end-to-end arm is
+   `wadjet.TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget`, whose
+   `group_by_distinct_c_date` cell was the #788 pin.
+
+   The VALUE a group emits is untouched by all of this: it stays the boxed
+   round trip of items 2–3, and nothing decodes a value out of a key.
+
 ## Consequences
 
 - Adding a type to the group-key path means answering both questions
@@ -218,6 +269,11 @@ derived from the other.**
   spill view whose `ShouldSpillFor` is false — and a gate that claims to and
   does not is worse than no gate: the first version of that arm measured zero
   drain writes for three of the four container types.
+- The per-TYPE seam has a gate of its own, and it is the one the three layers
+  above could not be: `exec.TestEveryGroupKeyProducerWritesTheSameBytes` asks
+  the property directly, per type and per producer, with no query and no
+  memory budget in the way. A gate whose trigger is a CONDITION cannot be
+  relied on to fire; this one is decidable.
 - `typematrix.Corpus` now puts a container in the GROUP-BY position. It never
   did, which is why a whole class of container-key defects was invisible to
   every differential gate in the repo.
