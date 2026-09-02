@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -20,13 +22,15 @@ import (
 //
 // The arms are the four an answer can differ between (ADR-0018 §3, ADR-0027):
 //
-//	single             the embedded engine, no memory budget
-//	single+spill       the same engine at 512 KiB, so every pipeline breaker
-//	                   drains — a spill is a CONDITION, not a shape, and it is
-//	                   the arm a shape corpus never reaches on purpose
-//	dag                the stage DAG over an embedded NATS cluster
-//	dag+broadcast      the DAG with BroadcastBytesOverride = 1, which forces
-//	                   the shuffle rather than the broadcast join
+//	single                      the embedded engine, no memory budget
+//	single+budget+forced-drain  the same engine at 512 KiB with
+//	                            exec.ForceAggDrainEvery(1) armed, the reference
+//	                            arm disarmed (ADR-0027 §6) — a spill is a
+//	                            CONDITION, not a shape, and a budget that does
+//	                            not bite proves nothing (§5)
+//	dag                         the stage DAG over an embedded NATS cluster
+//	dag+broadcast               the DAG with BroadcastBytesOverride = 1, which
+//	                            forces the shuffle rather than the broadcast join
 //
 // `want` is what `psql` printed on the oracle container (127.0.0.1:55432,
 // --locale=C, PostgreSQL 17) for the SAME rows, recorded before any of these
@@ -37,8 +41,11 @@ import (
 // #728 (an aggregate's output declared FLOAT64 through a rename), #786/#781
 // (a derived GROUP BY key typed against a scope that stops at a Project),
 // #749 (an exact operator's scale reduced to buy integer digits), #703
-// (DISTINCT dropped for every aggregate but COUNT), #704 (an integer column
-// compared against a non-integral literal by truncating the literal).
+// (DISTINCT dropped for every aggregate but COUNT, and then double-counted
+// across morsel-parallel clones), #704 (an integer column compared against a
+// non-integral literal by truncating the literal), #784 (SUM/AVG over integers
+// answering in float64) and #696 (a scalar subquery's value substituted
+// without its declaration on one path and without its SCALE on the other).
 func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -103,6 +110,36 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#728", "max_times_two_over_a_rename",
 			`SELECT MAX(v*2) AS m FROM (SELECT dw AS v FROM decwin) x`,
 			[]string{"m=1994666666891066.6258890908"}},
+		// The SHADOW shapes: a derived table that binds a name to one column
+		// while another column OF THAT NAME exists below it. #728's first cut
+		// preferred the emitted walk unconditionally, so the second question
+		// the DAG asks — "what is `c_dec`", the DISPATCH spelling — was
+		// answered INT32 by the derived table where the worker reads the
+		// scan's DECIMAL. One partial then emitted its SUM as an integer while
+		// its siblings emitted DECIMAL and ADR-0010's shuffle
+		// type-consistency guard refused the read: eight shapes that answered
+		// on the DAG at base became hard failures (review F2). The scan walk
+		// is asked first now, and these are the fixture self-flag 5 said did
+		// not exist.
+		{"#728", "shadowed_rename_sum",
+			`SELECT SUM(v) AS s FROM (SELECT c_dec AS v, c_i32 AS c_dec FROM typemx WHERE id < 8) x`,
+			[]string{"s=28.0028"}},
+		{"#728", "shadowed_rename_sum_times_two",
+			`SELECT SUM(v * 2) AS s FROM (SELECT c_dec AS v, c_i32 AS c_dec FROM typemx WHERE id < 8) x`,
+			[]string{"s=56.0056"}},
+		{"#728", "shadowed_rename_max_times_two",
+			`SELECT MAX(v * 2) AS m FROM (SELECT c_dec AS v, c_i32 AS c_dec FROM typemx WHERE id < 8) x`,
+			[]string{"m=14.0014"}},
+		{"#728", "shadowed_rename_through_a_cte",
+			`WITH c AS (SELECT c_dec AS v, c_i32 AS c_dec FROM typemx WHERE id < 8) ` +
+				`SELECT SUM(v * 2) AS s FROM c`,
+			[]string{"s=56.0056"}},
+		{"#728", "shadowed_rename_over_an_int64_column",
+			`SELECT SUM(v) AS s FROM (SELECT c_dec AS v, c_i64 AS c_dec FROM typemx WHERE id < 8) x`,
+			[]string{"s=28.0028"}},
+		{"#728", "shadowed_rename_over_a_text_column",
+			`SELECT SUM(v) AS s FROM (SELECT c_dec AS v, c_str AS c_dec FROM typemx WHERE id < 8) x`,
+			[]string{"s=28.0028"}},
 
 		// ------------------------------------------------------------------
 		// #786/#781 — a derived GROUP BY key was typed against inputColDecls,
@@ -162,6 +199,33 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			`SELECT MIN(DISTINCT a) AS md FROM decpair`, []string{"md=-0.01"}},
 		{"#703", "distinct_sum_over_integers_alone",
 			`SELECT SUM(DISTINCT c_i32) AS s FROM typemx`, []string{"s=float:3.61986e+07"}},
+		// The DUPLICATES-ACROSS-CLONES cells. Every cell above is single-batch
+		// or duplicate-free, so none of them can reach the morsel-parallel
+		// clone merge: `Pipeline.runParallel` returns serially when the source
+		// is exhausted after its warm-up batch, and `SUM(DISTINCT c_i32)` over
+		// typemx equals `SUM(c_i32)` because that column has no duplicates.
+		// revdup is 7 500 rows — four batches — with every value in every
+		// batch, so the split really happens and a clone merge that ADDS two
+		// accumulators holding the same value shows up as a multiple of the
+		// right answer (#703, review F1: 97.44 / 129.92 / 194.88 for 16.24
+		// across four runs of one binary).
+		{"#703", "distinct_across_clones_ungrouped",
+			`SELECT SUM(DISTINCT a) AS sd, AVG(DISTINCT a) AS ad, MIN(DISTINCT a) AS md, ` +
+				`COUNT(DISTINCT a) AS cd, SUM(DISTINCT i) AS si, SUM(DISTINCT f) AS sf FROM revdup`,
+			[]string{"sd=16.24|ad=5.413333|md=-0.01|cd=int64:3|si=33|sf=float:4.5"}},
+		{"#703", "distinct_across_clones_grouped",
+			`SELECT g AS k, SUM(DISTINCT a) AS sd, AVG(DISTINCT a) AS ad, COUNT(DISTINCT a) AS cd ` +
+				`FROM revdup GROUP BY g ORDER BY k`,
+			[]string{
+				"k=int32:0|sd=16.24|ad=5.413333|cd=int64:3",
+				"k=int32:1|sd=16.24|ad=5.413333|cd=int64:3",
+			}},
+		// A DISTINCT aggregate beside a plain one and a COUNT(*), which is the
+		// shape a clone merge can get half right: the plain SUM must keep
+		// summing every row while the distinct one dedupes.
+		{"#703", "distinct_beside_a_plain_aggregate",
+			`SELECT SUM(DISTINCT a) AS sd, COUNT(*) AS n, SUM(i) AS si FROM revdup`,
+			[]string{"sd=16.24|n=int64:7500|si=82500"}},
 		{"#703", "distinct_grouped_over_integers",
 			`SELECT g AS k, SUM(DISTINCT c_i32) AS s, COUNT(DISTINCT c_i32) AS c ` +
 				`FROM typemx WHERE id < 40 GROUP BY g ORDER BY k`,
@@ -182,6 +246,52 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#703", "distinct_over_text",
 			`SELECT COUNT(DISTINCT s) AS cs, MIN(DISTINCT s) AS ms, MAX(DISTINCT s) AS xs FROM decpair`,
 			[]string{"cs=int64:8|ms=-1|xs=abc"}},
+		// PostgreSQL SORTS a DISTINCT string_agg — it has to, because the
+		// dedup is a sort — while a plain one keeps arrival order, which is
+		// unspecified (ADR-0013 class 1). Emitting first-seen order for the
+		// DISTINCT form was a value divergence with a definite PostgreSQL
+		// answer.
+		{"#703", "distinct_string_agg_is_sorted",
+			`SELECT STRING_AGG(DISTINCT s, ',') AS sa FROM decpair`,
+			[]string{"sa=-1,0,1.5,1.50,1.500,10,9,abc"}},
+
+		// ------------------------------------------------------------------
+		// #784 — SUM/AVG over integers answer PostgreSQL's TYPES, taken from
+		// the live server: pg_typeof(sum(int4)) is bigint, and
+		// pg_typeof(sum(int8)) / pg_typeof(avg(int*)) are numeric. The bigsum
+		// fixture is what makes the rules distinguishable — every value is
+		// past 2^53, so a float64 accumulator drops integer digits, and the
+		// total is EXACTLY 2^64, so an int64 one wraps to zero.
+		// AVG's SCALE is batch.AvgScale(0) = 4 where PostgreSQL's own
+		// division scale renders 16 digits here and 8 for the wider column —
+		// magnitude-dependent, which ADR-0024 declined to adopt. Both are
+		// exact to the digits they keep and agree to min(scale): ADR-0012
+		// item 9's class.
+		// The rules #784 does NOT change, on the same fixture: SUM over the
+		// int32 class is bigint, and MIN/MAX keep the input's own type.
+
+		// ------------------------------------------------------------------
+		// #696 — a scalar subquery's value in an outer comparison, and it was
+		// TWO mechanisms. The single-process path had no DECLARATION for the
+		// subquery operand, so a DECIMAL column compared against it by the
+		// BYTES of its rendered text and `"12.75" > "7.570000"` was false; the
+		// stage DAG substituted the value's UNSCALED Int128 (7570000 for
+		// 7.570000), so the threshold was 10^scale out. Equality survived on
+		// the first only where the two scales rendered identically.
+		// BETWEEN two scalar subqueries and `> (SELECT 9.56)` are NOT here,
+		// and the reason is recorded rather than left as a gap: both are
+		// PRE-EXISTING stage-DAG refusals unrelated to #696 — the worker's
+		// filter compiler has no SubqueryRunner ("subqueries require a
+		// SubqueryRunner") and a FROM-less scalar produces a `dual` stage with
+		// no dependencies and no ScanFiles. Both reproduce on 74705d11. The
+		// single-process arm answers 3 and 4, which is PostgreSQL's.
+		// The value itself, projected. PostgreSQL renders 7.5700000000000000
+		// at its own division scale; wadjet's AVG scale is s+4, so this is the
+		// same number to the digits both keep (ADR-0012 item 9).
+		// The regression #784 would otherwise have introduced: SUM over an
+		// INT64 column is numeric now, so a HAVING comparing it against a
+		// scalar takes the same boxed path a DECIMAL column does. On the base
+		// commit this answered 8 for PostgreSQL's 0.
 
 		// ------------------------------------------------------------------
 		// #704 — an integer column against a NON-INTEGRAL numeric literal.
@@ -216,12 +326,28 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 = 3.0`, []string{"n=int64:1"}},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
+			// The pressured arm runs with the DRAIN FORCED and the reference
+			// arm disarmed, which is ADR-0027 §6's protocol: a 512 KiB budget
+			// alone moved no engagement counter on ANY of these shapes (they
+			// are 9 to 12 500 rows), so without the knob the arm was a second
+			// copy of `single`. Arming both sides would cancel a defect that
+			// lives in the drain (#790), so only this one is armed.
+			drained := func(sql string) ([]string, error) {
+				before := exec.ForcedAggDrains.Load()
+				restore := exec.ForceAggDrainEvery(1)
+				out, err := na2Run(tmdRunSingle(ctx, spilled, sql))
+				exec.ForceAggDrainEvery(restore)
+				if exec.ForcedAggDrains.Load() > before {
+					na2Drains.Add(1)
+				}
+				return out, err
+			}
 			for _, arm := range []struct {
 				name string
 				run  func(string) ([]string, error)
 			}{
 				{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
-				{"single+spill", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, spilled, sql)) }},
+				{"single+budget+forced-drain", drained},
 				{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
 				{"dag+broadcast", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
 			} {
@@ -245,13 +371,26 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			}
 		})
 	}
+	if na2Drains.Load() == 0 {
+		t.Error("the pressured arm drained on NO cell, so it compared in-memory runs and " +
+			"proves nothing (ADR-0027 §5). Either the forcing knob stopped reaching the " +
+			"aggregate or every shape lost its pipeline breaker.")
+	}
+	t.Logf("pressured arm: the forced drain fired on %d cells", na2Drains.Load())
 }
 
-// na2Standalone is tmdStandalone with a per-query memory budget, so every
-// pipeline breaker in the shape drains to disk. A budget alone is not proof
-// that it did (ADR-0027 §5); what this arm proves is that the shapes above
-// answer the same under pressure, and the exec-level spill suites carry the
-// engagement assertions.
+// na2Drains counts the census cells whose pressured arm actually drained. The
+// test fails if it is zero: ADR-0027 §5 says a spill gate proves it spilled,
+// and the first cut of this file did not — a 512 KiB budget moved no
+// engagement counter on any of its shapes, so the arm was a second copy of
+// `single` wearing a spill label.
+var na2Drains atomic.Int64
+
+// na2Standalone is tmdStandalone with a per-query memory budget. The budget
+// alone is not what makes the arm pressured — the census's cells are 9 to
+// 12 500 rows and none of them crosses it — so the arm ARMS
+// exec.ForceAggDrainEvery(1) around each run and asserts, once for the whole
+// gate, that the drain really fired (ADR-0027 §§5-6).
 func na2Standalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 	t.Helper()
 	db, err := wadjet.Open(ctx, wadjet.Config{
