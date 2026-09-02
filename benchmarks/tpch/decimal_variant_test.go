@@ -564,32 +564,19 @@ func decimalPin(n int) (why, arm string, ok bool) {
 	// numeric literal declaring the LITERAL's type — and both are gated again:
 	// Q14's decimal branch fires and used to raise the #361 store guard, Q08's
 	// takes no row at SF0.01 and used to answer under a float carrier.
-	switch n {
-	case 15:
-		return scalarSubqueryBug + " Q15 compares `total_revenue = (SELECT MAX(total_revenue) …)`. " +
-			"Equality against a scalar of the column's OWN scale is right on the single-process path, " +
-			"so that arm stays fully gated; the DAG answers 0 rows where the truth is 1.", armDAG, true
-	case 22:
-		return scalarSubqueryBug + " Q22 compares `c_acctbal > (SELECT AVG(c_acctbal) …)`, an ORDERING " +
-			"comparison against a scalar of a DIFFERENT scale, and BOTH arms are wrong. The DAG answers " +
-			"0 rows. The single-process arm answers the right NUMBER of groups with the wrong " +
-			"membership — cntrycode 17 is 10 customers totalling 63418.94 where PostgreSQL and DuckDB " +
-			"both say 8 and 62288.98, and five of the seven groups are inflated. That is why this " +
-			"corpus does not carry the float gate's count-only relaxation for Q22: it made this exact " +
-			"wrong answer report green.", armBoth, true
-	}
+	// EMPTY since #696. Q15 (`total_revenue = (SELECT MAX(total_revenue) …)`)
+	// and Q22 (`c_acctbal > (SELECT AVG(c_acctbal) …)`) were the two entries,
+	// and their ratchets fired the moment both halves of the scalar
+	// substitution were fixed: the single-process path now carries the
+	// subquery's DECLARATION into the comparison, and the stage DAG
+	// substitutes the value AT ITS SCALE instead of its unscaled Int128. Both
+	// queries are gated again, on both arms, digit for digit.
+	//
+	// It is kept as a function rather than deleted because it is the seam the
+	// next carrier-only defect goes in: a divergence the FLOAT64 fixture
+	// cannot express has nowhere else to be recorded.
 	return "", "", false
 }
-
-// scalarSubqueryBug is #696, whose two arms fail differently and whose
-// numbers are DuckDB's over the committed fixture, not either wadjet path's.
-const scalarSubqueryBug = "#696 — substituting a scalar subquery's DECIMAL value into an outer " +
-	"comparison loses the value. The stage DAG compares against the value's UNSCALED Int128 carrier " +
-	"(off by 10^scale, so `> AVG` selects nothing and `> MIN` selects every row); the single-process " +
-	"path is right for equality at the column's own scale and wrong for an ordering comparison across " +
-	"scales (`c_acctbal > (SELECT AVG(c_acctbal) FROM customer)` returns 796 where the truth is 726, " +
-	"admitting balances down to 6.34 against a 4454.58 threshold). The subquery COMPUTES the right " +
-	"value; the substitution is what loses it."
 
 // decimalFixtureRows reads the committed DECIMAL(15,2) parquet through
 // Wadjet's reader, so both arms answer over the same bytes the stored

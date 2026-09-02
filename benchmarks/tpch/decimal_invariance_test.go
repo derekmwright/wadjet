@@ -181,13 +181,11 @@ func twoPathDecimalPin(n int) (why string, ok bool) {
 	// Q14 was here for #695 — a CASE over a DECIMAL column and a numeric
 	// literal declared the literal's type, so neither path could run it. Both
 	// paths run it and agree now, so the query is gated again.
-	switch n {
-	case 15:
-		return scalarSubqueryBug + " Arm A is right here and arm B answers 0 rows.", true
-	case 22:
-		return scalarSubqueryBug + " Both arms are wrong and differently: arm B answers 0 rows, arm A " +
-			"the right number of groups with inflated membership.", true
-	}
+	// Q15 and Q22 were here for #696 — a scalar subquery's DECIMAL value
+	// substituted into an outer comparison without its declaration on the
+	// single-process path and without its SCALE on the stage DAG. Both halves
+	// are fixed, the two arms agree digit for digit, and the pins' own
+	// ratchets fired; the queries are gated again.
 	return "", false
 }
 

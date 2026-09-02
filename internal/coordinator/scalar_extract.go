@@ -220,18 +220,21 @@ func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 		if vec.DecimalData.Data == nil {
 			return "0"
 		}
-		d := vec.DecimalData.Data[row]
-		// Render as signed 128-bit integer; exact scale is metadata
-		// that's typically embedded in the schema, which isn't available
-		// through this helper. Q15's aggregate is float64 so decimal is
-		// not the Q15 path; handle int-only for now.
-		if d.Hi == 0 {
-			return strconv.FormatUint(d.Lo, 10)
-		}
-		if d.Hi == -1 {
-			return "-" + strconv.FormatUint(^d.Lo+1, 10)
-		}
-		return fmt.Sprintf("%d%020d", d.Hi, d.Lo)
+		// The value AT ITS SCALE, which the vector carries (#696). This used
+		// to render the raw UNSCALED Int128 with a comment saying the scale
+		// "isn't available through this helper" — it is, on the vector the
+		// row came from — and the substituted threshold was therefore 10^scale
+		// times the number the subquery computed. Over decpair:
+		//
+		//	a > (SELECT AVG(a))   7.570000 substituted as 7570000  -> 0 rows (PG: 4)
+		//	a > (SELECT MIN(a))     -0.01  substituted as      -1  -> 7 rows (PG: 6)
+		//	a = (SELECT MAX(a))     12.75  substituted as    1275  -> 0 rows (PG: 4)
+		//
+		// silently, on the stage DAG only, while the single-process path
+		// answered from the same subquery's real value. FormatDecimal is the
+		// same rendering a DECIMAL column's own box uses, so the worker
+		// re-parses exactly the digits any other DECIMAL literal would carry.
+		return vec.DecimalData.Data[row].FormatDecimal(vec.DecimalData.Scale)
 	default:
 		return "null"
 	}
