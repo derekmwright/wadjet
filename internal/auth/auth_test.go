@@ -352,9 +352,9 @@ func TestMTLSAuth(t *testing.T) {
 	cfg.MTLS = MTLSConfig{
 		Enabled: true,
 		RoleMap: map[string]string{
-			"grafana.internal":    "reader",
-			"etl.internal":       "admin",
-			"alice@example.com":  "analyst",
+			"grafana.internal":  "reader",
+			"etl.internal":      "admin",
+			"alice@example.com": "analyst",
 		},
 		DefaultRole: "reader",
 	}
@@ -654,7 +654,10 @@ func TestParsePolicies(t *testing.T) {
 		},
 	}
 
-	ps := ParsePolicies(configs)
+	ps, err := ParsePolicies(configs)
+	if err != nil {
+		t.Fatalf("ParsePolicies: %v", err)
+	}
 
 	p := ps.Lookup("users", "analyst")
 	if p == nil {
@@ -859,7 +862,10 @@ func TestClearanceLevelPolicies(t *testing.T) {
 		// top_secret has no policy — full access by default
 	}
 
-	ps := ParsePolicies(configs)
+	ps, err := ParsePolicies(configs)
+	if err != nil {
+		t.Fatalf("ParsePolicies: %v", err)
+	}
 
 	row := map[string]any{
 		"id":             int64(1),

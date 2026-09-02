@@ -1230,63 +1230,19 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	var provider *auth.Provider
 
 	if configFile != "" {
-		cfg, loadErr := config.Load(configFile)
-		if loadErr == nil {
-			cfgMgr = config.NewManager(cfg, logger)
+		fileCfg, mgr, prov, wireErr := wireAuthFromConfig(ctx, configFile, logger)
+		if wireErr != nil {
+			return wireErr
+		}
+		cfgMgr, provider = mgr, prov
+		srvCfg.Provider = provider
 
-			// Build initial auth
-			authn, authz := buildAuth(cfg.Auth)
-			var policies *auth.PolicySet
-			if len(cfg.Auth.Policies) > 0 {
-				policies = buildPolicies(cfg.Auth.Policies)
+		if fileCfg.Auth.MTLS.Enabled {
+			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)
+			if err != nil {
+				return fmt.Errorf("configuring mTLS: %w", err)
 			}
-			provider = auth.NewProvider(authn, authz, policies, logger)
-			// Wire ABAC evaluator (explicit policies or auto-migrate from RBAC)
-			if len(cfg.Auth.ABACPolicies) > 0 {
-				abac := buildABACPolicies(cfg.Auth.ABACPolicies)
-				authCfg := buildAuthConfig(cfg.Auth)
-				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
-				provider.UpdateFromConfig(authCfg, policyCfgs, abac...)
-			} else if len(cfg.Auth.Roles) > 0 {
-				authCfg := buildAuthConfig(cfg.Auth)
-				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
-				provider.UpdateFromConfig(authCfg, policyCfgs)
-			}
-			srvCfg.Provider = provider
-
-			// Subscribe to config changes to rebuild auth
-			cfgMgr.Subscribe(func(event config.ChangeEvent) {
-				authCfg := buildAuthConfig(event.New.Auth)
-				policyCfgs := buildPolicyConfigs(event.New.Auth.Policies)
-				abacPolicies := buildABACPolicies(event.New.Auth.ABACPolicies)
-				provider.UpdateFromConfig(authCfg, policyCfgs, abacPolicies...)
-				logger.Info("auth hot-reloaded",
-					"enabled", event.New.Auth.Enabled,
-					"api_keys", len(event.New.Auth.APIKeys),
-					"roles", len(event.New.Auth.Roles),
-					"abac_policies", len(event.New.Auth.ABACPolicies),
-				)
-			})
-
-			if cfg.Auth.MTLS.Enabled {
-				tlsCfg, err := buildTLSConfig(cfg.Auth.MTLS)
-				if err != nil {
-					return fmt.Errorf("configuring mTLS: %w", err)
-				}
-				srvCfg.TLSConfig = tlsCfg
-			}
-
-			logger.Info("authentication enabled (hot-reloadable)",
-				"api_keys", len(cfg.Auth.APIKeys),
-				"jwt", cfg.Auth.JWT.Enabled,
-				"mtls", cfg.Auth.MTLS.Enabled,
-				"roles", len(cfg.Auth.Roles),
-				"policies", len(cfg.Auth.Policies),
-			)
-
-			// Start file watcher for config hot-reload
-			watcher := config.NewWatcher(config.WatcherConfig{Path: configFile}, cfgMgr, logger)
-			go watcher.Watch(ctx)
+			srvCfg.TLSConfig = tlsCfg
 		}
 	}
 
@@ -1530,44 +1486,19 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	var provider *auth.Provider
 
 	if configFile != "" {
-		if cfg, loadErr := config.Load(configFile); loadErr == nil {
-			cfgMgr = config.NewManager(cfg, logger)
+		fileCfg, mgr, prov, wireErr := wireAuthFromConfig(ctx, configFile, logger)
+		if wireErr != nil {
+			return wireErr
+		}
+		cfgMgr, provider = mgr, prov
+		srvCfg.Provider = provider
 
-			authn, authz := buildAuth(cfg.Auth)
-			var policies *auth.PolicySet
-			if len(cfg.Auth.Policies) > 0 {
-				policies = buildPolicies(cfg.Auth.Policies)
+		if fileCfg.Auth.MTLS.Enabled {
+			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)
+			if err != nil {
+				return fmt.Errorf("configuring mTLS: %w", err)
 			}
-			provider = auth.NewProvider(authn, authz, policies, logger)
-			if len(cfg.Auth.ABACPolicies) > 0 {
-				abac := buildABACPolicies(cfg.Auth.ABACPolicies)
-				authCfg := buildAuthConfig(cfg.Auth)
-				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
-				provider.UpdateFromConfig(authCfg, policyCfgs, abac...)
-			} else if len(cfg.Auth.Roles) > 0 {
-				authCfg := buildAuthConfig(cfg.Auth)
-				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
-				provider.UpdateFromConfig(authCfg, policyCfgs)
-			}
-			srvCfg.Provider = provider
-
-			cfgMgr.Subscribe(func(event config.ChangeEvent) {
-				authCfg := buildAuthConfig(event.New.Auth)
-				policyCfgs := buildPolicyConfigs(event.New.Auth.Policies)
-				abacPolicies := buildABACPolicies(event.New.Auth.ABACPolicies)
-				provider.UpdateFromConfig(authCfg, policyCfgs, abacPolicies...)
-			})
-
-			if cfg.Auth.MTLS.Enabled {
-				tlsCfg, err := buildTLSConfig(cfg.Auth.MTLS)
-				if err != nil {
-					return fmt.Errorf("configuring mTLS: %w", err)
-				}
-				srvCfg.TLSConfig = tlsCfg
-			}
-
-			watcher := config.NewWatcher(config.WatcherConfig{Path: configFile}, cfgMgr, logger)
-			go watcher.Watch(ctx)
+			srvCfg.TLSConfig = tlsCfg
 		}
 	}
 
@@ -2053,25 +1984,91 @@ func buildPolicyConfigs(cfgs []config.AuthPolicy) []auth.PolicyConfig {
 	return policyCfgs
 }
 
+// wireAuthFromConfig loads the YAML config file and builds the hot-reloadable
+// auth provider both serve modes share. It is the single place a config-borne
+// security control comes into existence, so it is the single place one can be
+// REFUSED.
+//
+// Nothing here degrades. Before #802 the two callers wrote `if cfg, loadErr :=
+// config.Load(configFile); loadErr == nil { ... }` — an unreadable config file
+// silently started a server with NO authentication at all — and the policy
+// parse underneath turned an unrecognised `columns:` action into a grant. Both
+// failures now stop the process with the reason.
+//
+// The hot-reload subscription refuses the same way: a reload whose policies do
+// not parse is logged and dropped, and the provider keeps the state it already
+// had rather than swapping in a weaker one.
+func wireAuthFromConfig(ctx context.Context, configFile string, logger *slog.Logger) (*config.Config, *config.Manager, *auth.Provider, error) {
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading config %q: %w", configFile, err)
+	}
+
+	provider, err := buildProviderFromConfig(cfg, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading config %q: %w", configFile, err)
+	}
+
+	cfgMgr := config.NewManager(cfg, logger)
+	cfgMgr.Subscribe(func(event config.ChangeEvent) {
+		authCfg := buildAuthConfig(event.New.Auth)
+		policyCfgs := buildPolicyConfigs(event.New.Auth.Policies)
+		abacPolicies := buildABACPolicies(event.New.Auth.ABACPolicies)
+		if err := provider.UpdateFromConfig(authCfg, policyCfgs, abacPolicies...); err != nil {
+			logger.Error("auth hot-reload REFUSED — keeping the previous configuration",
+				"path", configFile, "error", err)
+			return
+		}
+		logger.Info("auth hot-reloaded",
+			"enabled", event.New.Auth.Enabled,
+			"api_keys", len(event.New.Auth.APIKeys),
+			"roles", len(event.New.Auth.Roles),
+			"policies", len(event.New.Auth.Policies),
+			"abac_policies", len(event.New.Auth.ABACPolicies),
+		)
+	})
+
+	logger.Info("authentication enabled (hot-reloadable)",
+		"api_keys", len(cfg.Auth.APIKeys),
+		"jwt", cfg.Auth.JWT.Enabled,
+		"mtls", cfg.Auth.MTLS.Enabled,
+		"roles", len(cfg.Auth.Roles),
+		"policies", len(cfg.Auth.Policies),
+	)
+
+	watcher := config.NewWatcher(config.WatcherConfig{Path: configFile}, cfgMgr, logger)
+	go watcher.Watch(ctx)
+
+	return cfg, cfgMgr, provider, nil
+}
+
 // buildProviderFromConfig constructs an auth.Provider from a loaded config,
 // mirroring the coordinator/standalone wiring but WITHOUT the hot-reload
 // watcher (callers that need a one-shot provider, e.g. the mcp command). Auth
 // disabled in config yields an enabled==false provider, which enforcement
 // treats as a no-op. logger may be nil.
-func buildProviderFromConfig(cfg *config.Config, logger *slog.Logger) *auth.Provider {
+func buildProviderFromConfig(cfg *config.Config, logger *slog.Logger) (*auth.Provider, error) {
 	authn, authz := buildAuth(cfg.Auth)
 	var policies *auth.PolicySet
 	if len(cfg.Auth.Policies) > 0 {
-		policies = buildPolicies(cfg.Auth.Policies)
+		var err error
+		policies, err = buildPolicies(cfg.Auth.Policies)
+		if err != nil {
+			return nil, fmt.Errorf("auth policies: %w", err)
+		}
 	}
 	provider := auth.NewProvider(authn, authz, policies, logger)
 	if len(cfg.Auth.ABACPolicies) > 0 {
 		abac := buildABACPolicies(cfg.Auth.ABACPolicies)
-		provider.UpdateFromConfig(buildAuthConfig(cfg.Auth), buildPolicyConfigs(cfg.Auth.Policies), abac...)
+		if err := provider.UpdateFromConfig(buildAuthConfig(cfg.Auth), buildPolicyConfigs(cfg.Auth.Policies), abac...); err != nil {
+			return nil, fmt.Errorf("auth policies: %w", err)
+		}
 	} else if len(cfg.Auth.Roles) > 0 {
-		provider.UpdateFromConfig(buildAuthConfig(cfg.Auth), buildPolicyConfigs(cfg.Auth.Policies))
+		if err := provider.UpdateFromConfig(buildAuthConfig(cfg.Auth), buildPolicyConfigs(cfg.Auth.Policies)); err != nil {
+			return nil, fmt.Errorf("auth policies: %w", err)
+		}
 	}
-	return provider
+	return provider, nil
 }
 
 func buildAuth(cfg config.Auth) (*auth.Authenticator, *auth.Authorizer) {
@@ -2106,17 +2103,8 @@ func buildAuth(cfg config.Auth) (*auth.Authenticator, *auth.Authorizer) {
 	return auth.New(authCfg)
 }
 
-func buildPolicies(cfgs []config.AuthPolicy) *auth.PolicySet {
-	policyCfgs := make([]auth.PolicyConfig, len(cfgs))
-	for i, c := range cfgs {
-		policyCfgs[i] = auth.PolicyConfig{
-			Table:     c.Table,
-			Role:      c.Role,
-			Columns:   c.Columns,
-			RowFilter: c.RowFilter,
-		}
-	}
-	return auth.ParsePolicies(policyCfgs)
+func buildPolicies(cfgs []config.AuthPolicy) (*auth.PolicySet, error) {
+	return auth.ParsePolicies(buildPolicyConfigs(cfgs))
 }
 
 // buildABACPolicies converts config ABAC policies to auth ABAC policies.
@@ -2423,7 +2411,11 @@ Configure in Claude Desktop's claude_desktop_config.json:
 				if loadErr != nil {
 					return fmt.Errorf("loading config %q: %w", configFile, loadErr)
 				}
-				provider = buildProviderFromConfig(cfg, logger)
+				p, buildErr := buildProviderFromConfig(cfg, logger)
+				if buildErr != nil {
+					return fmt.Errorf("loading config %q: %w", configFile, buildErr)
+				}
+				provider = p
 			}
 
 			token := mcpAPIKey

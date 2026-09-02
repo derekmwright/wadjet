@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -254,7 +255,10 @@ func TestMigrateRBACWildcardTable(t *testing.T) {
 	roles := []RoleConfig{
 		{Name: "admin", Tables: []string{"*"}, Allow: []string{"admin"}},
 	}
-	policies := MigrateRBACToABAC(roles, nil)
+	policies, err := MigrateRBACToABAC(roles, nil)
+	if err != nil {
+		t.Fatalf("MigrateRBACToABAC: %v", err)
+	}
 
 	if len(policies) != 1 {
 		t.Fatalf("expected 1 policy, got %d", len(policies))
@@ -273,7 +277,10 @@ func TestMigrateRBACCellPolicyWildcardTable(t *testing.T) {
 			Columns: map[string]string{"salary": "deny"},
 		},
 	}
-	policies := MigrateRBACToABAC(nil, cellPolicies)
+	policies, err := MigrateRBACToABAC(nil, cellPolicies)
+	if err != nil {
+		t.Fatalf("MigrateRBACToABAC: %v", err)
+	}
 
 	if len(policies) != 1 {
 		t.Fatalf("expected 1 policy, got %d", len(policies))
@@ -293,7 +300,10 @@ func TestMigrateRBACCellPolicyAllowColumn(t *testing.T) {
 			Columns: map[string]string{"id": "allow", "name": "allow"},
 		},
 	}
-	policies := MigrateRBACToABAC(nil, cellPolicies)
+	policies, err := MigrateRBACToABAC(nil, cellPolicies)
+	if err != nil {
+		t.Fatalf("MigrateRBACToABAC: %v", err)
+	}
 	// All columns are "allow" and no row filter -> no obligations -> skipped
 	if len(policies) != 0 {
 		t.Fatalf("expected 0 policies (all allow, no obligations), got %d", len(policies))
@@ -346,22 +356,56 @@ func TestApplyToRowsEmptyColumns(t *testing.T) {
 	}
 }
 
-func TestParsePoliciesDefaultAction(t *testing.T) {
+// TestParsePoliciesRefusesUnknownColumnAction is the unit half of #802's gate.
+// This test used to be TestParsePoliciesDefaultAction and asserted the exact
+// defect: an unrecognised action returned ColumnAllow, so a `columns:` entry
+// that could not be read granted the column in full.
+func TestParsePoliciesRefusesUnknownColumnAction(t *testing.T) {
 	configs := []PolicyConfig{
 		{
 			Table:   "events",
 			Role:    "reader",
-			Columns: map[string]string{"col": "unknown_action"},
+			Columns: map[string]string{"col": "***REDACTED***"},
 		},
 	}
-	ps := ParsePolicies(configs)
-	p := ps.Lookup("events", "reader")
-	if p == nil {
-		t.Fatal("expected policy")
+	ps, err := ParsePolicies(configs)
+	if err == nil {
+		t.Fatalf("expected an error for an unrecognised column action, got policy set %v", ps)
 	}
-	// Unknown action should default to ColumnAllow
-	if p.Columns["col"] != ColumnAllow {
-		t.Errorf("expected ColumnAllow for unknown action, got %d", p.Columns["col"])
+	if ps != nil {
+		t.Errorf("a refused parse must return no policy set, got %v", ps)
+	}
+	// The message has to be actionable: which column, and what it could not read.
+	for _, want := range []string{`"col"`, `"***REDACTED***"`, `"events"`, `"reader"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+}
+
+// TestParseColumnActionVocabulary pins the accepted spellings on both sides:
+// the three actions parse (case- and space-insensitively), and anything else
+// is an error rather than a default.
+func TestParseColumnActionVocabulary(t *testing.T) {
+	good := map[string]ColumnPolicy{
+		"allow": ColumnAllow, "ALLOW": ColumnAllow, " allow ": ColumnAllow,
+		"mask": ColumnMask, "Mask": ColumnMask,
+		"deny": ColumnDeny, "DENY": ColumnDeny,
+	}
+	for in, want := range good {
+		got, err := ParseColumnAction("c", in)
+		if err != nil {
+			t.Errorf("ParseColumnAction(%q): unexpected error %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("ParseColumnAction(%q) = %d, want %d", in, got, want)
+		}
+	}
+	for _, in := range []string{"", "***REDACTED***", "redact", "hide", "null", "true", "ALLOWED", "masked"} {
+		if _, err := ParseColumnAction("c", in); err == nil {
+			t.Errorf("ParseColumnAction(%q): expected an error, got none", in)
+		}
 	}
 }
 
@@ -394,7 +438,9 @@ func TestUpdateFromConfigWithABACPolicies(t *testing.T) {
 		},
 	}
 
-	p.UpdateFromConfig(cfg, nil, abacPolicies...)
+	if err := p.UpdateFromConfig(cfg, nil, abacPolicies...); err != nil {
+		t.Fatalf("UpdateFromConfig: %v", err)
+	}
 	if p.Evaluator() == nil {
 		t.Fatal("expected evaluator with ABAC policies")
 	}

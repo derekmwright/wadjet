@@ -152,7 +152,8 @@ auth:
     - table: flow_logs
       role: reader
       columns:
-        src_ip: mask                     # action: allow | mask | deny
+        src_ip: mask                     # action: allow | mask | deny — anything
+                                         # else and the server refuses to start
       row_filter: "src_ip LIKE '10.%' OR src_ip LIKE '172.16.%'"
 
   # ABAC policies (attribute-based access control)

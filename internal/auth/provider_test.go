@@ -92,7 +92,9 @@ func TestProviderUpdateFromConfig(t *testing.T) {
 		{Table: "users", Role: "reader", Columns: map[string]string{"email": "mask"}},
 	}
 
-	p.UpdateFromConfig(cfg, policyCfgs)
+	if err := p.UpdateFromConfig(cfg, policyCfgs); err != nil {
+		t.Fatalf("UpdateFromConfig: %v", err)
+	}
 
 	if !p.Enabled() {
 		t.Fatal("expected enabled after config update")

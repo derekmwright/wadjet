@@ -123,7 +123,10 @@ auth:
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	provider := buildProviderFromConfig(cfg, logger)
+	provider, err := buildProviderFromConfig(cfg, logger)
+	if err != nil {
+		t.Fatalf("building provider: %v", err)
+	}
 	if !provider.Enabled() {
 		t.Fatal("test setup: provider from this config should be enabled")
 	}

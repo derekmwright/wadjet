@@ -5,7 +5,15 @@ import "fmt"
 // MigrateRBACToABAC converts legacy RBAC role and policy configs into equivalent
 // ABAC policies. This runs at startup when ABACPolicies is empty but Roles/Policies
 // are populated, providing full backward compatibility.
-func MigrateRBACToABAC(roles []RoleConfig, cellPolicies []PolicyConfig) []AccessControlPolicy {
+//
+// It is THE shipped enforcement path for a `policies:` block — the obligations
+// it emits are what auth.EnforcePlanPolicies injects into the plan — so it
+// reads column actions through the same ParseColumnAction as ParsePolicies and
+// fails on the same inputs (#802). Its own switch previously matched "deny"
+// and "mask" case-sensitively and dropped everything else, which turned both a
+// typo AND a capitalised `Mask` into no obligation at all: a silent grant on
+// the very path that enforces.
+func MigrateRBACToABAC(roles []RoleConfig, cellPolicies []PolicyConfig) ([]AccessControlPolicy, error) {
 	var policies []AccessControlPolicy
 
 	// Convert each role into an ABAC policy
@@ -71,21 +79,26 @@ func MigrateRBACToABAC(roles []RoleConfig, cellPolicies []PolicyConfig) []Access
 	for _, cp := range cellPolicies {
 		var obligations []Obligation
 
-		for col, action := range cp.Columns {
+		for _, col := range sortedColumnNames(cp.Columns) {
+			action, err := ParseColumnAction(col, cp.Columns[col])
+			if err != nil {
+				return nil, fmt.Errorf("policy for table %q role %q: %w", cp.Table, cp.Role, err)
+			}
 			switch action {
-			case "deny":
+			case ColumnDeny:
 				obligations = append(obligations, Obligation{
 					Type:   "deny_column",
 					Target: col,
 				})
-			case "mask":
+			case ColumnMask:
 				obligations = append(obligations, Obligation{
 					Type:     "mask_column",
 					Target:   col,
 					MaskFunc: "redact",
 				})
+			case ColumnAllow:
+				// no obligation
 			}
-			// "allow" needs no obligation
 		}
 
 		if cp.RowFilter != "" {
@@ -130,5 +143,5 @@ func MigrateRBACToABAC(roles []RoleConfig, cellPolicies []PolicyConfig) []Access
 		})
 	}
 
-	return policies
+	return policies, nil
 }

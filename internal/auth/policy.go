@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -23,11 +25,11 @@ type CellMaskFunc func(val any) any
 // AccessPolicy defines cell-level access control for a table.
 // Policies are evaluated per-role to filter rows and mask/deny columns.
 type AccessPolicy struct {
-	Table      string            // table name this policy applies to
-	Role       string            // role name this policy applies to
+	Table      string                  // table name this policy applies to
+	Role       string                  // role name this policy applies to
 	Columns    map[string]ColumnPolicy // column name -> policy
 	MaskValues map[string]CellMaskFunc // column name -> custom mask function (optional)
-	RowFilter  string            // SQL predicate appended to WHERE clause (e.g. "region = 'us'")
+	RowFilter  string                  // SQL predicate appended to WHERE clause (e.g. "region = 'us'")
 }
 
 // PolicySet holds all access policies, indexed by table+role.
@@ -127,14 +129,43 @@ func defaultMask(val any) any {
 
 // PolicyConfig is the YAML representation of cell-level access policies.
 type PolicyConfig struct {
-	Table   string              `yaml:"table"`
-	Role    string              `yaml:"role"`
-	Columns map[string]string   `yaml:"columns"` // column name -> "allow", "mask", "deny"
+	Table     string            `yaml:"table"`
+	Role      string            `yaml:"role"`
+	Columns   map[string]string `yaml:"columns"`    // column name -> "allow", "mask", "deny"
 	RowFilter string            `yaml:"row_filter"` // SQL WHERE predicate
 }
 
-// ParsePolicies converts YAML policy configs into a PolicySet.
-func ParsePolicies(configs []PolicyConfig) *PolicySet {
+// ColumnActions lists the actions a policy's `columns:` map accepts, in the
+// order an error message should offer them.
+var ColumnActions = []string{"allow", "mask", "deny"}
+
+// ParseColumnAction maps one YAML column action to its ColumnPolicy.
+//
+// An unrecognised action is an ERROR, not a default. Before #802 the default
+// arm returned ColumnAllow, so `columns: {src_ip: "***REDACTED***"}` — the
+// spelling every version of docs/security.md recommended — parsed to a full
+// grant, and an operator who believed a PII column was masked was served it
+// in the clear. A column-access control that cannot be understood must refuse
+// to load: loud beats plausible, and a security control never degrades to a
+// grant.
+func ParseColumnAction(column, action string) (ColumnPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "allow":
+		return ColumnAllow, nil
+	case "mask":
+		return ColumnMask, nil
+	case "deny":
+		return ColumnDeny, nil
+	default:
+		return ColumnDeny, fmt.Errorf("column %q: unknown action %q (want one of %s)",
+			column, action, strings.Join(ColumnActions, ", "))
+	}
+}
+
+// ParsePolicies converts YAML policy configs into a PolicySet. It fails on the
+// first unrecognised column action, naming the table, role, column and the
+// value it could not read (#802).
+func ParsePolicies(configs []PolicyConfig) (*PolicySet, error) {
 	ps := NewPolicySet()
 	for _, cfg := range configs {
 		p := &AccessPolicy{
@@ -142,22 +173,27 @@ func ParsePolicies(configs []PolicyConfig) *PolicySet {
 			Role:    cfg.Role,
 			Columns: make(map[string]ColumnPolicy, len(cfg.Columns)),
 		}
-		for col, action := range cfg.Columns {
-			switch strings.ToLower(action) {
-			case "allow":
-				p.Columns[col] = ColumnAllow
-			case "mask":
-				p.Columns[col] = ColumnMask
-			case "deny":
-				p.Columns[col] = ColumnDeny
-			default:
-				p.Columns[col] = ColumnAllow
+		// Sorted so a config with two bad columns always names the same one.
+		for _, col := range sortedColumnNames(cfg.Columns) {
+			policy, err := ParseColumnAction(col, cfg.Columns[col])
+			if err != nil {
+				return nil, fmt.Errorf("policy for table %q role %q: %w", cfg.Table, cfg.Role, err)
 			}
+			p.Columns[col] = policy
 		}
 		if cfg.RowFilter != "" {
 			p.RowFilter = cfg.RowFilter
 		}
 		ps.Add(p)
 	}
-	return ps
+	return ps, nil
+}
+
+func sortedColumnNames(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

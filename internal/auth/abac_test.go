@@ -472,14 +472,17 @@ func TestMigrateRBACToABAC(t *testing.T) {
 	}
 	cellPolicies := []PolicyConfig{
 		{
-			Table:   "users",
-			Role:    "reader",
-			Columns: map[string]string{"email": "mask", "ssn": "deny"},
+			Table:     "users",
+			Role:      "reader",
+			Columns:   map[string]string{"email": "mask", "ssn": "deny"},
 			RowFilter: "department = 'public'",
 		},
 	}
 
-	policies := MigrateRBACToABAC(roles, cellPolicies)
+	policies, err := MigrateRBACToABAC(roles, cellPolicies)
+	if err != nil {
+		t.Fatalf("MigrateRBACToABAC: %v", err)
+	}
 
 	pe := NewPolicyEvaluator(policies)
 
@@ -551,7 +554,9 @@ func TestProviderEvaluator(t *testing.T) {
 	}
 
 	// UpdateFromConfig with roles should auto-migrate
-	p.UpdateFromConfig(cfg, nil)
+	if err := p.UpdateFromConfig(cfg, nil); err != nil {
+		t.Fatalf("UpdateFromConfig: %v", err)
+	}
 	if p.Evaluator() == nil {
 		t.Fatal("expected evaluator after UpdateFromConfig with roles")
 	}

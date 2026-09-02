@@ -308,9 +308,13 @@ This means existing RBAC configurations work unchanged — they get ABAC evaluat
 Cell-level policies provide fine-grained data access control. Row filters are injected into the query plan **before** execution (pushed down to scan operators for distributed enforcement). Column masking is applied **after** execution but **before** results are returned.
 
 Each policy names a table/role pair. **`columns` maps a column name to an
-ACTION — `allow`, `mask` or `deny` — not to a replacement string.** Any other
-value is treated as `allow`, so a policy written with a replacement string
-silently grants full access to that column.
+ACTION — `allow`, `mask` or `deny` — not to a replacement string.** The action
+is matched case-insensitively; any other value is a configuration error and the
+server **refuses to start**, naming the table, role, column and the value it
+could not read. A cell policy never degrades to a grant, so a config written
+with a replacement string fails loudly instead of silently returning the column
+in full. On hot reload the same refusal keeps the previous configuration in
+place rather than installing a weaker one.
 
 ```yaml
 auth:

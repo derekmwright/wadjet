@@ -91,11 +91,20 @@ func (p *Provider) UpdateWithEvaluator(authn *Authenticator, authz *Authorizer, 
 // UpdateFromConfig rebuilds auth from a Config and atomically swaps.
 // If abacPolicies is non-empty, builds an ABAC evaluator. Otherwise, if RBAC
 // roles and cell policies are present, auto-migrates them to ABAC.
-func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacPolicies ...AccessControlPolicy) {
+//
+// A policy this cannot read returns an error and swaps NOTHING: the provider
+// keeps the state it already had. That matters most on hot reload, where the
+// alternative to refusing an unreadable `columns:` action is installing a
+// weaker policy set than the operator asked for (#802).
+func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacPolicies ...AccessControlPolicy) error {
 	authn, authz := New(cfg)
 	var legacyPolicies *PolicySet
 	if len(policyCfgs) > 0 {
-		legacyPolicies = ParsePolicies(policyCfgs)
+		var err error
+		legacyPolicies, err = ParsePolicies(policyCfgs)
+		if err != nil {
+			return err
+		}
 	}
 
 	var evaluator *PolicyEvaluator
@@ -103,9 +112,13 @@ func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacP
 		evaluator = NewPolicyEvaluator(abacPolicies)
 	} else if len(cfg.Roles) > 0 {
 		// Auto-migrate RBAC to ABAC
-		migrated := MigrateRBACToABAC(cfg.Roles, policyCfgs)
+		migrated, err := MigrateRBACToABAC(cfg.Roles, policyCfgs)
+		if err != nil {
+			return err
+		}
 		evaluator = NewPolicyEvaluator(migrated)
 	}
 
 	p.UpdateWithEvaluator(authn, authz, legacyPolicies, evaluator)
+	return nil
 }
