@@ -97,6 +97,20 @@ func New(cfg Config, logger *slog.Logger) *Server {
 		audit:    auth.NewAuditLogger(logger),
 	}
 
+	// Middleware BEFORE routes: chi v5 panics ("all middlewares must be
+	// defined before routes on a mux") when Use runs after the first route
+	// is registered, so the auth middleware cannot be installed in Start()
+	// (#801). Everything Use needs — Provider, Auth — is already in cfg
+	// here, and routes registered later through Mux() (admin, ops) inherit
+	// the stack, which is what an authenticated deployment wants anyway.
+	if s.provider != nil {
+		// Hot-reloadable auth via Provider
+		s.mux.Use(auth.ProviderMiddleware(s.provider, s.logger))
+	} else if cfg.Auth != nil && cfg.Auth.Enabled() {
+		// Static auth (backwards compatible)
+		s.mux.Use(auth.Middleware(cfg.Auth, s.logger))
+	}
+
 	s.mux.Post("/v1/queries", s.handleQuery)
 	s.mux.Get("/v1/queries", s.handleListQueries)
 	s.mux.Post("/v1/queries/async", s.handleAsyncQuery)
@@ -145,14 +159,7 @@ func (s *Server) newPlanner() *physical.Planner {
 
 // Start starts the HTTP server.
 func (s *Server) Start() error {
-	if s.provider != nil {
-		// Hot-reloadable auth via Provider
-		s.mux.Use(auth.ProviderMiddleware(s.provider, s.logger))
-	} else if s.config.Auth != nil && s.config.Auth.Enabled() {
-		// Static auth (backwards compatible)
-		s.mux.Use(auth.Middleware(s.config.Auth, s.logger))
-	}
-
+	// Auth middleware is installed in New() — see the comment there (#801).
 	s.server = &http.Server{
 		Handler:      s.mux,
 		TLSConfig:    s.config.TLSConfig,

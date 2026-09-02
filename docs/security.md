@@ -2,11 +2,6 @@
 
 Wadjet provides layered security: authentication, authorization (RBAC and ABAC), and cell-level access policies. Authentication, role and policy configuration is hot-reloadable; the mTLS listener's certificates and CA are read once at startup and require a restart to rotate.
 
-> **Known breakage at this commit:** starting the server with `--config` panics
-> before it serves — the auth middleware is installed after the routes are
-> registered, which chi v5 rejects. Every YAML configuration in this document
-> is therefore currently unusable through `wadjet serve --config=...`.
-
 ## Authentication
 
 Three authentication methods are supported. Configure one in the YAML config file.
