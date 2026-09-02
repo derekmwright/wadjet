@@ -813,6 +813,91 @@ func numericFieldOverflow(p, s int) error {
 			"absolute value less than 10^%d", p, s, p-s)
 }
 
+// Int64ResultOf reports whether an expression produces an INT64 box against
+// this batch — DecimalResultOf's integer sibling, for the same consumers and
+// the same reason.
+//
+// The stage DAG's gather re-compiles a wrapped aggregate's expression from its
+// AST and has only the input batch to type it from, so it materialized every
+// non-boolean, non-decimal result into a FLOAT64 vector. Since #784 that is a
+// visible divergence rather than a rounding: `SELECT SUM(c_i32 * 2)` is
+// rewritten to `SUM(c_i32) * 2` above the aggregate, PostgreSQL and the
+// single-process path both declare it bigint, and the DAG handed the client a
+// float8 — the same number under a different wire OID depending on which
+// engine ran it.
+//
+// Like DecimalResultOf, the answer is a pure function of the input SCHEMA — an
+// integer column stays an integer column for every batch of one query — so a
+// caller may resolve it per batch without the type flapping. It is deliberately
+// NARROW: integer arithmetic over integer leaves and nothing else. A shape it
+// does not recognise keeps the float64 materialization it had, which is the
+// direction that cannot turn a right answer into a wrong one.
+func Int64ResultOf(e Expr, b *batch.RecordBatch) bool {
+	switch v := e.(type) {
+	case *ColRef:
+		v.resolve(b)
+		if v.idx < 0 || v.idx >= len(b.Columns) || v.structField != "" {
+			return false
+		}
+		switch v.typ {
+		case batch.TypeInt32, batch.TypeInt64:
+			return true
+		}
+		return false
+	case *Lit:
+		// An INTEGER spelling only. `2` contributes an integer to integer
+		// arithmetic; `2.0` makes the expression numeric in PostgreSQL and
+		// float here, and either way not this.
+		return v.Text != "" && integerLiteralText(v.Text)
+	case *UnaryOp:
+		return (v.Op == "-" || v.Op == "+") && Int64ResultOf(v.Operand, b)
+	case *BinOpNumeric:
+		// The node compileBinOp emits for an ordinary numeric pair, and it has
+		// already RESOLVED which mode it runs in against this batch — the same
+		// answer classifyOperand reads for the decimal one. Asking it is
+		// exact where re-deriving the rule from the leaves would be a second
+		// opinion that can disagree.
+		v.resolveMode(b)
+		return v.isInt && !v.isDec
+	case *BinOp:
+		switch v.Op {
+		case "+", "-", "*", "/", "%":
+		default:
+			return false
+		}
+		// A DECIMAL operand anywhere makes the result exact fixed point, which
+		// is DecimalResultOf's answer and takes precedence at every caller.
+		if _, _, dec := DecimalResultOf(e, b); dec {
+			return false
+		}
+		return Int64ResultOf(v.Left, b) && Int64ResultOf(v.Right, b)
+	}
+	return false
+}
+
+// integerLiteralText reports whether a numeric literal's own spelling is an
+// integer: optional sign, digits, nothing else. A point or an exponent makes it
+// numeric (ADR-0024: a literal contributes its SPELLING), so `2` and `2.0` are
+// different operands and only the first keeps integer arithmetic integer.
+func integerLiteralText(t string) bool {
+	if t == "" {
+		return false
+	}
+	i := 0
+	if t[0] == '+' || t[0] == '-' {
+		i = 1
+	}
+	if i >= len(t) {
+		return false
+	}
+	for ; i < len(t); i++ {
+		if t[i] < '0' || t[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // DecimalResultOf reports the EXACT fixed-point type an expression produces
 // against this batch, and whether it produces one at all.
 //

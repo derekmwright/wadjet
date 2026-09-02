@@ -1191,6 +1191,50 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 	}
 }
 
+// evalInt64Column materializes an INTEGER expression result. It is
+// evalExprColumn's integer arm, kept beside evalDecimalColumn: the box an
+// integer expression produces is an int64 and the vector that holds it without
+// loss is an INT64 one.
+//
+// A box that is not an integer nulls the row rather than being coerced. That
+// cannot happen for an expression Int64ResultOf accepted — it is integer
+// arithmetic over integer leaves — and nulling is the reading that cannot turn
+// a wrong type into a wrong number.
+func evalInt64Column(e expr.Expr, b *batch.RecordBatch) *batch.Vector {
+	v := batch.NewVector(parquet.TypeInt64, b.Len)
+	if cap(v.Int64Data) < b.Len {
+		v.Int64Data = make([]int64, b.Len)
+	} else {
+		v.Int64Data = v.Int64Data[:b.Len]
+	}
+	emit := func(row, dst int) {
+		val := e.Eval(b, row)
+		switch x := val.(type) {
+		case int64:
+			v.Int64Data[dst] = x
+			v.Nulls.SetValid(dst)
+		case int32:
+			v.Int64Data[dst] = int64(x)
+			v.Nulls.SetValid(dst)
+		case int:
+			v.Int64Data[dst] = int64(x)
+			v.Nulls.SetValid(dst)
+		default:
+			v.Nulls.SetNull(dst)
+		}
+	}
+	if b.Sel != nil {
+		for i, row := range b.Sel {
+			emit(int(row), i)
+		}
+		return v
+	}
+	for row := 0; row < b.Len; row++ {
+		emit(row, row)
+	}
+	return v
+}
+
 // evalExprColumn builds a new Vector by evaluating e against each row of b.
 // Used by applyOutputRenames to materialize wrapped-aggregate and
 // wrapped-window columns at gather time. outType is decided once per query by
@@ -1215,6 +1259,15 @@ func evalExprColumn(e expr.Expr, b *batch.RecordBatch, outType parquet.TypeID) *
 	// input SCHEMA, so it is the same for every batch of one query.
 	if _, scale, ok := expr.DecimalResultOf(e, b); ok {
 		return evalDecimalColumn(e, b, scale)
+	}
+	// An INTEGER result, for the same reason and by the same rule (#784).
+	// `SELECT SUM(c_i32 * 2)` is rewritten to `SUM(c_i32) * 2` above the
+	// aggregate, so this materialization is what declares the client's type:
+	// PostgreSQL and the single-process path both say bigint, and a float64
+	// vector here handed the same query a different wire OID depending on
+	// which engine ran it.
+	if expr.Int64ResultOf(e, b) {
+		return evalInt64Column(e, b)
 	}
 	v := batch.NewVector(parquet.TypeFloat64, b.Len)
 	if cap(v.Float64Data) < b.Len {
