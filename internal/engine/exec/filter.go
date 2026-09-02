@@ -211,11 +211,22 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	int64Val, int64Status := kernel.Int64FilterConst(value)
 	int32Val, int32Status := kernel.Int32FilterConst(value)
 	int64Op, int32Op := op, op
-	var int64Verdict, int32Verdict kernel.IntBoundVerdict
 	if kOpOK {
 		var k64, k32 kernel.CompareOp
-		int64Val, k64, int64Verdict, int64Status = kernel.IntFilterBound(value, kOp)
-		int32Val, k32, int32Verdict, int32Status = kernel.Int32FilterBound(value, kOp)
+		var v64, v32 kernel.IntBoundVerdict
+		int64Val, k64, v64, int64Status = kernel.IntFilterBound(value, kOp)
+		int32Val, k32, v32, int32Status = kernel.Int32FilterBound(value, kOp)
+		// A whole-column verdict is folded into the (value, operator) pair
+		// rather than carried as a per-row branch. `x < MinInt64` is false for
+		// every x and `x >= MinInt64` is true for every x, so the row loop
+		// stays exactly the comparison it always was — the vectorized kernel
+		// does the same thing with matchNothingKernel / matchAllNonNullKernel.
+		// Carrying it as a branch instead cost +9.6% on FilterAndPredicate
+		// (review round 1, F11).
+		int64Val, k64 = intBoundAsCompare(int64Val, k64, v64, -1<<63)
+		var v32wide int64
+		v32wide, k32 = intBoundAsCompare(int64(int32Val), k32, v32, -1<<31)
+		int32Val = int32(v32wide)
 		int64Op, int32Op = execCompareOp(k64), execCompareOp(k32)
 	}
 	// A FLOAT column's literal is read through the float input grammar when it
@@ -281,9 +292,6 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			if int64Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int64Status, strVal)})
 			}
-			if b, decided := intBoundAnswer(int64Verdict); decided {
-				return b
-			}
 			return compareInt64(v.Int64Data[row], int64Val, int64Op)
 		case batch.TypeTimestamp:
 			// TIMESTAMP reads intVal (parseTimestampString), not the integer
@@ -292,9 +300,6 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 		case batch.TypeInt32:
 			if int32Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
-			}
-			if b, decided := intBoundAnswer(int32Verdict); decided {
-				return b
 			}
 			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), int32Op)
 		case batch.TypeFloat64:
@@ -347,16 +352,10 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			if int32Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
 			}
-			if b, decided := intBoundAnswer(int32Verdict); decided {
-				return b
-			}
 			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), int32Op)
 		case batch.TypeDuration:
 			if int64Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int64Status, strVal)})
-			}
-			if b, decided := intBoundAnswer(int64Verdict); decided {
-				return b
 			}
 			return compareInt64(v.Int64Data[row], int64Val, int64Op)
 		case batch.TypeUUID:
@@ -755,12 +754,13 @@ func intLitError(typ batch.TypeID, st kernel.IntConstStatus, text string) error 
 	return intStatusError(st, name, text)
 }
 
-// intBoundAnswer turns kernel.IntFilterBound's whole-column verdict into the
-// row path's answer. decided=false means "compare this row" (#704).
+// intBoundAsCompare folds kernel.IntFilterBound's whole-column verdict into
+// the (value, operator) pair the row loop already applies, so the verdict costs
+// nothing per row (#704, and F11's regression).
 //
-// A NULL row never reaches here: the caller's null guard runs first, so
-// IntBoundAll answering true is "every non-NULL row", the same set the
-// vectorized kernel's comparison loop selects.
+// A NULL row never reaches the comparison: the caller's null guard runs first,
+// so IntBoundAll is "every non-NULL row", the same set the vectorized kernel's
+// comparison loop selects.
 // kernelCompareOp and execCompareOp translate between this package's
 // CompareOp and the kernel's. The two enums agree on their first six values
 // and this package adds OpIsNull/OpIsNotNull, which the kernel has no reading
@@ -775,14 +775,17 @@ func kernelCompareOp(op CompareOp) (kernel.CompareOp, bool) {
 
 func execCompareOp(op kernel.CompareOp) CompareOp { return CompareOp(op) }
 
-func intBoundAnswer(v kernel.IntBoundVerdict) (val, decided bool) {
+func intBoundAsCompare(val int64, op kernel.CompareOp, v kernel.IntBoundVerdict, min int64) (int64, kernel.CompareOp) {
 	switch v {
 	case kernel.IntBoundNone:
-		return false, true
+		// No row: every integer is >= its type's minimum, so `< min` is false
+		// for all of them — and for the NULL rows too, which the caller's own
+		// null guard has already excluded.
+		return min, kernel.OpLt
 	case kernel.IntBoundAll:
-		return true, true
+		return min, kernel.OpGe
 	}
-	return false, false
+	return val, op
 }
 
 // intConstError is decimalConstError's counterpart for the integer-family

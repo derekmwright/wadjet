@@ -2263,10 +2263,12 @@ func Int32FilterBound(v any, op CompareOp) (int32, CompareOp, IntBoundVerdict, I
 	switch v.(type) {
 	case float64, float32:
 	default:
-		// Every non-float box keeps Int32FilterConst's own answer, IntConstRange
-		// included: a QUOTED '3000000000' against an int4 column is
-		// PostgreSQL's 22003 (the unknown literal is coerced to the column's
-		// type) and #536 settled that. Only a NUMBER reaches the verdicts.
+		// Every box that is not a FLOAT keeps Int32FilterConst's own answer,
+		// IntConstRange included: a QUOTED '3000000000' against an int4 column
+		// is PostgreSQL's 22003 (the unknown literal is coerced to the
+		// column's type) and #536 settled that. An INTEGER box out of range
+		// takes the same refusal, which is why this says "not a float" rather
+		// than "not a number".
 		n, st := Int32FilterConst(v)
 		return n, op, IntBoundCompare, st
 	}
