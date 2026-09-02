@@ -103,14 +103,23 @@ func (p *Pipeline) Run(ctx context.Context) (err error) {
 	// through their own Clone().
 	EnableBoundedOutput(p.Ops)
 
-	if p.Workers > 1 && p.allOpsCloneable() && sinkSurvivesCloning(p.Sink) {
+	if p.Workers > 1 && p.allOpsCloneable() && SinkSurvivesCloning(p.Sink) {
 		return p.runParallel(ctx)
 	}
 	return p.runSerial(ctx)
 }
 
-// sinkSurvivesCloning reports whether the sink's state can be split across
+// SinkSurvivesCloning reports whether the sink's state can be split across
 // morsel-parallel clones and merged back.
+//
+// EXPORTED because CloneSink has TWO call sites, not one: this package's
+// Pipeline.runParallel and the worker's runBreakerConsumeParallel. Guarding
+// only the first left the whole defect below reachable on the stage DAG
+// whenever a fragment's breaker ran morsel-parallel — `SUM(DISTINCT a)`
+// answered 64.96 for 16.24 with four morsel workers, exactly four times over,
+// and `STRING_AGG(DISTINCT …)` emitted every value four times in a row.
+// TestCloneSinkCallersConsultTheCloneFence enumerates the call sites so a
+// third one cannot be added without consulting this.
 //
 // A DISTINCT aggregate other than COUNT cannot (#703). Its accumulator holds a
 // SUM (or a mean, or a variance triple) that each clone has already folded its
@@ -132,7 +141,7 @@ func (p *Pipeline) Run(ctx context.Context) (err error) {
 // shape. The cost is morsel parallelism for queries that were WRONG before, and
 // only for those; the spilled path is unaffected because it re-aggregates from
 // raw rows.
-func sinkSurvivesCloning(s Sink) bool {
+func SinkSurvivesCloning(s Sink) bool {
 	h, ok := s.(*HashAggregate)
 	if !ok {
 		return true

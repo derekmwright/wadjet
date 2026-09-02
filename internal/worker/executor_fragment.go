@@ -1915,7 +1915,17 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 			mergeable, isMergeable := breakers[j].Op.(exec.MergeableSink)
 			k, release := 1, func() {}
 			var gate *widthGate
-			if isMergeable {
+			// exec.SinkSurvivesCloning beside the mergeability check, and it
+			// is the SECOND caller of that fence: a DISTINCT aggregate other
+			// than COUNT has no mergeable partial form (#291, #703), and this
+			// site clones one exactly as Pipeline.runParallel does. With four
+			// morsel workers `SUM(DISTINCT a)` answered 64.96 for 16.24 —
+			// four times over, deterministically at a fixed width and
+			// nondeterministically under the auto one — and
+			// `STRING_AGG(DISTINCT …)` emitted every value four times in a
+			// row. RawInputAggregate prevents cross-TASK partial aggregation
+			// and says nothing about intra-task clones.
+			if isMergeable && exec.SinkSurvivesCloning(breakers[j].Op) {
 				k, gate, release = e.morselFragmentWorkers(task, phaseOps)
 			}
 			if k > 1 {
