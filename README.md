@@ -316,61 +316,62 @@ Coordinator `c7g.2xlarge` + 3× `c7gd.4xlarge` workers (16 vCPU / 32 GB /
 NVMe each), SF100 Parquet on S3 (us-east-2), NATS control plane, gRPC
 streaming exchange with durable S3 fallback. Steady-state suite (mean of
 runs 2-4 of 4; caches populated — cold run 1 of the same session was
-2m47s). Row counts are validated per run and the answers are additionally
+2m40s). Row counts are validated per run and the answers are additionally
 verifiable value-level against a committed DuckDB fingerprint ground
 truth (`benchmarks/tpch/fingerprint-sf100.json`, captured in-region).
-2026-08-23 at v0.18.0, SF100 window 6, `results/w6cand` run
-`20260823-020311` (same-window baseline `results/w6base` run
-`20260823-014839`, engine `9a8b564` / v0.17.0-clawback).
+2026-09-02 at v0.18.12 (main `8b693f30`), run `20260902-215039`
+(same-window control run `20260902-210947`, engine `550bb20`).
 
 | Query | Time | | Query | Time |
 |---|---:|---|---|---:|
-| Q01 | 3.5s | | Q12 | 4.6s |
-| Q02 | 4.2s | | Q13 | 5.3s |
-| Q03 | 9.2s | | Q14 | 1.8s |
-| Q04 | 5.1s | | Q15 | 1.8s |
-| Q05 | 6.0s | | Q16 | 5.1s |
-| Q06 | 0.8s | | Q17 | 5.6s |
-| Q07 | 4.2s | | Q18 | 10.5s |
-| Q08 | 15.0s | | Q19 | 3.8s |
-| Q09 | 14.2s | | Q20 | 9.2s |
-| Q10 | 11.1s | | Q21 | 9.0s |
-| Q11 | 2.6s | | Q22 | 2.8s |
+| Q01 | 3.5s | | Q12 | 3.5s |
+| Q02 | 3.7s | | Q13 | 5.2s |
+| Q03 | 9.2s | | Q14 | 1.7s |
+| Q04 | 5.4s | | Q15 | 1.8s |
+| Q05 | 6.0s | | Q16 | 3.5s |
+| Q06 | 0.9s | | Q17 | 1.6s |
+| Q07 | 4.8s | | Q18 | 12.0s |
+| Q08 | 10.4s | | Q19 | 3.7s |
+| Q09 | 11.3s | | Q20 | 9.2s |
+| Q10 | 11.5s | | Q21 | 11.0s |
+| Q11 | 3.0s | | Q22 | 2.5s |
 
-**Suite total: 2m15s steady (mean of runs 2-4) / 2m47s cold.** The best
-single steady run was 2m14s (134.40s, run 4), beating the prior all-time
-record of 2m33s (152.9s, 2026-08-22); the cold run also beat the prior
-best cold of 2m59s (179.4s, 2026-08-22). Same-window baseline on engine
-`9a8b564` (v0.17.0-clawback) was 2m25s steady / 3m24s cold (145.43s /
-203.67s) — a 7.0% steady-state improvement, 18.1% on cold, 10.5% on
-suite totals across all 4 runs (639.97s vs 572.47s). Row counts and
-DuckDB fingerprint value signatures are identical across every arm and
-run of this window. This is the arc that follows v0.17.0-clawback:
-coordinator-side probe-split placement now groups a broadcast join's
-probe files by rendezvous owner and dispatches one task per owner
-instead of an even split placed by memory binpack
-(`WADJET_PROBE_SPLIT_AFFINITY`) — base-table peer traffic falls 51.6 GB
-→ 5.0 GB per suite and steady-run acquisition stragglers on the
-Q08/Q09/Q17 probe-split stages go from 2 to 0; the scheduler's affinity
-tier moved ahead of locality and the scan prefetcher skips its redundant
-spill copy once a peer fetch already populated the cache
-(`WADJET_AFFINITY_BEFORE_LOCALITY`, `WADJET_PREFETCH_CACHE_SKIP`, riders
-on the same fix). The unbounded final aggregate's group-index layout is
-now decided from its input-row bound at construction, so a sink whose
-row count cannot amortize the flat→bucketed conversion is born flat and
-never pays it (`WADJET_TWO_LEVEL_ROW_BOUND`) — Q18 −1.7s, −70 CPU-s per
-suite off the int-aggregate probe+convert path. The coordinator's own
-stage-output reads (gather-merge scalar substitution) now try the
-producing worker's local copy before S3 (`WADJET_COORD_PEER_READS`) —
-the 12 scalar-substitution reads across the 4-run suite drop from
-4,635ms to 40ms of total wait. And the scan source's decoded row-group output is now
-pooled and reused across row groups instead of minting a fresh
-multi-hundred-MB arena per group (`WADJET_SCAN_BACKING_REUSE`) —
-allocation −453 GiB/run (−24.6%), GC cycles −18.5%. Same-window arc
-scoreboard (v0.17.0-clawback `9a8b564` → main `be5fcf1`): worker CPU
-3,201.9 → 3,048.3 CPU-s/run (41.4% → 44.1% utilization), inter-node peer
-bytes 137.87 → 96.03 GiB/run (−30%), heap allocation 1,878.4 → 1,392.3
-GiB/run (−25.9%), GC cycles 1,483 → 1,159/run (−21.9%). Full attribution:
+**Suite total: 2m05s steady (mean of runs 2-4) / 2m40s cold.** The best
+single steady run was 2m04s (123.81s, run 2), beating the prior all-time
+record of 2m14s (134.40s, 2026-08-23), which in turn had beaten 2m33s
+(152.9s, 2026-08-22); the cold run of 2m40s (159.68s) beats the prior
+best cold of 2m47s (166.74s, 2026-08-23) and 2m59s (179.4s, 2026-08-22).
+The same-window control on engine `550bb20` was 2m19s steady / 2m52s
+cold (138.80s / 171.77s) — a 9.7% steady-state improvement, 7.0% on
+cold, 8.9% on suite totals across all 4 runs (588.2s vs 535.6s). All 22
+queries pass on every run of both arms, row counts are identical in
+every cell, and the DuckDB fingerprint value signatures agree across
+arms on every query that emits one — Q01's `avg_qty` narrows from
+float64 width to `DECIMAL(38,4)` because AVG over an integer column now
+declares PostgreSQL's exact type (ADR-0012 item 9), which is a declared
+scale change, not a value change. This arc's win is one mechanism: the
+stage DAG emitted every base-table read with an empty column projection,
+and the worker reverted to the full file schema whenever any single
+requested name was absent — so a compute stage reading a base table read
+Parquet at full width on the DAG while the single-process path
+projected. Both halves are fixed, and the broadcast-join probe stages
+that read `lineitem` are where it lands: decoded scan bytes −37.3%,
+worker heap allocation −37.1% per run at a flat allocation count
+(−1.2%), scan decode time −48.0%, `broadcast_join` stage wall −45.3%
+across the suite (Q17 −73%, Q16 −40%, Q08 −33%, Q12 −27%, Q09 −26%).
+Q08 and Q09, historically bimodal and never observed below 14s on this
+topology, run 10.2-11.5s in every steady run. Two queries regress
+against it: Q21 +21% (13.4% more bytes pass the semi-anti bloom on its
+`lineitem` scan) and Q18 +14%, which moves no bytes and is spread across
+every stage as a per-row compute tax that this window's data does not
+discriminate. Same-window scoreboard (`550bb20` → `8b693f30`): worker
+CPU 3,143.9 → 2,514.6 CPU-s/run (−20.0%), heap allocation 1,804.4 →
+1,135.9 GiB/run (−37.1%), GC cycles 1,435 → 1,006 (−29.9%), inter-node
+peer bytes 92.16 → 89.65 GiB per 4-run suite, and every other wire
+counter within 5.2%.
+Full attribution:
+[sf100-baseline-v0.18.12-2026-09-02.md](docs/benchmarks/sf100-baseline-v0.18.12-2026-09-02.md).
+Prior windows:
 [probe-split-affinity-2026-08-22.md](docs/benchmarks/probe-split-affinity-2026-08-22.md),
 [sf100-window4-analysis-2026-08-22.md](docs/benchmarks/sf100-window4-analysis-2026-08-22.md),
 [sf100-window5-analysis-2026-08-23.md](docs/benchmarks/sf100-window5-analysis-2026-08-23.md),
@@ -389,11 +390,12 @@ methodology: page-cache drop before each query, cold + 2 hot tries,
 one process per query. Every query result is cell-exact against DuckDB
 on the same data (`benchmarks/clickbench/`). 2026-08-22 at
 v0.17.0-clawback, `benchmarks/clickbench/results-c6a-20260822-v0170.json`
-— **not re-run for v0.18.0**; this arc targeted the distributed SF100
-TPC-H path only (probe-split placement, aggregate layout, coordinator
-stage reads, scan backing reuse — all worker/coordinator-side, out of
-scope for a single-node suite), so the numbers below are carried
-forward unchanged from v0.17.0-clawback.
+— **last measured at v0.17.0-clawback and not re-run since**; the
+numbers below are carried forward unchanged and are not a claim about
+v0.18.x on this suite. The releases since then targeted the distributed
+SF100 TPC-H path, but v0.18.12's scan-projection fix reaches worker-side
+Parquet reads, so this suite is due a re-run rather than another
+carry-forward.
 
 | Query | Cold | Hot | Query | Cold | Hot |
 |---|---:|---:|---|---:|---:|
