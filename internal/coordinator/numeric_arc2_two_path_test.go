@@ -146,6 +146,22 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#703", "distinct_over_the_wider_decimal_column",
 			`SELECT SUM(DISTINCT b) AS sb FROM decpair`,
 			[]string{"sb=49.2400"}},
+		// UNGROUPED and ALONE is the shape the first cut missed: an ungrouped
+		// aggregate whose every function has a BATCH kernel takes the scalar
+		// fast path, which folds a whole vector at a time and never consults
+		// the group's set. resolveBatchAggKernel answers by FUNC, so it
+		// declined COUNT(DISTINCT) — its own AggFunc — and returned SUM's for
+		// SUM(DISTINCT). Each of these must therefore stand ALONE: putting a
+		// COUNT(DISTINCT) beside them declines the fast path for its own
+		// reason and hides the defect.
+		{"#703", "distinct_sum_alone_is_ungrouped",
+			`SELECT SUM(DISTINCT a) AS sd FROM decpair`, []string{"sd=14.74"}},
+		{"#703", "distinct_avg_alone_is_ungrouped",
+			`SELECT AVG(DISTINCT a) AS ad FROM decpair`, []string{"ad=3.685000"}},
+		{"#703", "distinct_min_alone_is_ungrouped",
+			`SELECT MIN(DISTINCT a) AS md FROM decpair`, []string{"md=-0.01"}},
+		{"#703", "distinct_sum_over_integers_alone",
+			`SELECT SUM(DISTINCT c_i32) AS s FROM typemx`, []string{"s=float:3.61986e+07"}},
 		{"#703", "distinct_grouped_over_integers",
 			`SELECT g AS k, SUM(DISTINCT c_i32) AS s, COUNT(DISTINCT c_i32) AS c ` +
 				`FROM typemx WHERE id < 40 GROUP BY g ORDER BY k`,

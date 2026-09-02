@@ -2079,6 +2079,19 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			if h.batchAggKernels[i] == nil {
 				allBatchable = false
 			}
+			// A DISTINCT aggregate has no batch kernel, for the same reason
+			// it has no flat scatter one: a batch kernel folds a whole vector
+			// into an accumulator and never asks what the group has already
+			// seen. resolveBatchAggKernel answers by FUNC, so it declines
+			// COUNT(DISTINCT) — which is its own AggFunc — and happily
+			// returned SUM's for `SUM(DISTINCT a)`. UNGROUPED was therefore
+			// the one shape #703's fix missed: `SELECT SUM(DISTINCT a) FROM
+			// decpair` stayed 52.99 while the grouped form and the same query
+			// with a COUNT(DISTINCT) beside it (which declines the fast path
+			// for its own reason) both answered PostgreSQL's 14.74.
+			if agg.Distinct {
+				allBatchable = false
+			}
 		}
 		if allBatchable {
 			h.isScalarAgg = true
