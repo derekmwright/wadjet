@@ -547,15 +547,27 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			// copy of `single`. Arming both sides would cancel a defect that
 			// lives in the drain (#790), so only this one is armed.
 			drained := func(sql string) ([]string, error) {
-				before := exec.ForcedAggDrains.Load()
+				beforeDrain := exec.ForcedAggDrains.Load()
+				beforeRaw := exec.RawRowSpillFiles.Load()
 				restore := exec.ForceAggDrainEvery(1)
+				// The RUN FLOOR comes down with the drain knob, because the
+				// class that cannot take the partial-state drain takes the
+				// LEGACY raw-row spill instead and a 12 500-row fixture never
+				// crosses its default target. Both are on the pressured arm
+				// only; the reference stays disarmed (ADR-0027 §6).
+				restoreRuns := exec.ForceSmallSpillRuns(512)
 				out, err := na2Run(tmdRunSingle(ctx, spilled, sql))
+				restoreRuns()
 				exec.ForceAggDrainEvery(restore)
-				fired := exec.ForcedAggDrains.Load() > before
+				fired := exec.ForcedAggDrains.Load() > beforeDrain
 				if fired {
 					na2Drains.Add(1)
 				}
-				na2Engaged.Store(tc.name, na2Cell{sql: tc.sql, drained: fired})
+				na2Engaged.Store(tc.name, na2Cell{
+					sql:     tc.sql,
+					drained: fired,
+					rawRows: exec.RawRowSpillFiles.Load() > beforeRaw,
+				})
 				return out, err
 			}
 			for _, arm := range []struct {
@@ -604,6 +616,7 @@ var na2Engaged sync.Map
 type na2Cell struct {
 	sql     string
 	drained bool
+	rawRows bool
 }
 
 // na2NoDrainReason says why a shape cannot engage the forced aggregate drain,
@@ -621,7 +634,10 @@ type na2Cell struct {
 //     state the partial-state run format does not carry, so
 //     exec.canUseExternalMerge declines and the operator takes the LEGACY
 //     raw-row spill instead. That path does spill — it is simply not the drain
-//     exec.ForcedAggDrains counts, so this knob cannot make it fire.
+//     exec.ForcedAggDrains counts, so this knob cannot make it fire. This class
+//     is PROVEN rather than excused: na2CheckEngagement requires those cells to
+//     move exec.RawRowSpillFiles, so "it spills elsewhere" is an assertion and
+//     not a claim in a comment (review round 3, F5).
 //
 // A cell that is grouped, carries no DISTINCT, and still does not drain has
 // lost its pipeline breaker, and naming that is the point of returning "".
@@ -645,8 +661,8 @@ func na2CheckEngagement(t *testing.T) {
 			"aggregate or every shape lost its pipeline breaker.")
 		return
 	}
-	var unnamed []string
-	total, named := 0, 0
+	var unnamed, unproven []string
+	total, named, proven := 0, 0, 0
 	na2Engaged.Range(func(k, v any) bool {
 		name, cell := k.(string), v.(na2Cell)
 		total++
@@ -659,9 +675,26 @@ func na2CheckEngagement(t *testing.T) {
 			unnamed = append(unnamed, name)
 		case !cell.drained:
 			named++
+			// Class 2 says the shape spills SOMEWHERE ELSE. That is a claim
+			// about behaviour, so it is asserted: the cell must have written a
+			// raw-row spill file.
+			if strings.HasPrefix(why, "grouped DISTINCT") {
+				if cell.rawRows {
+					proven++
+				} else {
+					unproven = append(unproven, name)
+				}
+			}
 		}
 		return true
 	})
+	if len(unproven) > 0 {
+		sort.Strings(unproven)
+		t.Errorf("%d grouped-DISTINCT cells are excused as taking the legacy raw-row "+
+			"spill and wrote NO raw-row file: %v\nEither they spill nowhere — in which "+
+			"case that arm compared two in-memory runs — or the class is wrong "+
+			"(ADR-0027 §5).", len(unproven), unproven)
+	}
 	if len(unnamed) > 0 {
 		sort.Strings(unnamed)
 		t.Errorf("the pressured arm did NOT drain on %d cells and nothing says why: %v\n"+
@@ -669,8 +702,9 @@ func na2CheckEngagement(t *testing.T) {
 			"breaker, and that arm then compared two in-memory runs (ADR-0027 §5).",
 			len(unnamed), unnamed)
 	}
-	t.Logf("pressured arm: the forced drain fired on %d of %d cells; %d cannot drain, by class",
-		na2Drains.Load(), total, named)
+	t.Logf("pressured arm: the forced drain fired on %d of %d cells; %d cannot drain, "+
+		"by class, of which %d are PROVEN to spill on the raw-row path",
+		na2Drains.Load(), total, named, proven)
 }
 
 // na2Drains counts the census cells whose pressured arm actually drained. The
