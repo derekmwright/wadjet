@@ -23,7 +23,7 @@ func TestAggInputProjectionDeclaredGroupKeyType(t *testing.T) {
 	keyCol := func(t *testing.T, groupByTypes map[string]int,
 		groupByDecimal map[string]distributed.DecimalMeta) exec.ProjectColumn {
 		t.Helper()
-		project, _, err := buildAggInputProjection([]string{key}, nil, nil, groupByTypes, groupByDecimal)
+		project, _, err := buildAggInputProjection([]string{key}, nil, nil, groupByTypes, groupByDecimal, nil)
 		if err != nil {
 			t.Fatalf("buildAggInputProjection: %v", err)
 		}

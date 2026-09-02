@@ -392,6 +392,12 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// not interchangeable.
 		"ScanDeletes": "hashed",
 		"FilterExprs": "hashed", "GroupByCols": "hashed", "AggSpecs": "hashed",
+		// GroupByResolve rides with GroupByCols for FilterAliases' reason: it
+		// is the same keys' second spelling, index-aligned, and two subtrees
+		// whose keys resolve against different columns are not
+		// interchangeable — one computes `a * 3` from a scan and the other
+		// reads a join's `w`, and only this field says which (ADR-0026 §2).
+		"GroupByResolve": "hashed",
 		// FilterAliases rides with FilterExprs: it is the same predicates'
 		// second spelling, index-aligned, and two subtrees whose predicates
 		// resolved from different aliases are not interchangeable — the

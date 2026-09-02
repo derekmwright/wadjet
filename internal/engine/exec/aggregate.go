@@ -5021,20 +5021,30 @@ func (h *HashAggregate) emitOutputSchema() []parquet.Column {
 	return h.emitSchema
 }
 
-func (h *HashAggregate) outputSchema() []parquet.Column {
-	cols := make([]parquet.Column, 0, len(h.GroupByCols)+len(h.Aggs)+len(h.NullGroupCols))
-
-	// Pre-compute output names: strip table qualifiers unless stripping would
-	// create duplicate column names (e.g., GROUP BY n1.n_name, n2.n_name must
-	// keep qualifiers so downstream projections can distinguish them).
-	// GroupByAll (DISTINCT) passes the input schema through verbatim — the
-	// operator must be name-transparent to downstream column references.
-	outNames := make([]string, len(h.GroupByCols))
-	if h.GroupByAll {
-		copy(outNames, h.GroupByCols)
+// PublishedGroupKeyNames is the name each GROUP BY key's value is emitted
+// under, given the names the aggregate RESOLVES its keys by (groupByCols) and
+// the planner's published overrides (groupByOutNames, empty entries meaning
+// "apply the rule below").
+//
+// The rule: strip a table qualifier, unless stripping would make two keys
+// share one output name — `GROUP BY n1.n_name, n2.n_name` keeps both
+// qualifiers so a projection above can tell them apart. `GroupByAll`
+// (DISTINCT) passes its input schema through verbatim, because the operator
+// must be name-transparent to every downstream column reference.
+//
+// It is exported because BOTH engines have to answer this question with one
+// rule. The single-process planner feeds this operator directly; the stage DAG
+// ships the key list to a worker that builds its own HashAggregate, and the
+// worker computes the same answer from the same inputs so the two aggregate
+// output schemas are identical (ADR-0026 §2b). A copy of the rule in the
+// planner is exactly how the two would drift.
+func PublishedGroupKeyNames(groupByCols, groupByOutNames []string, groupByAll bool) []string {
+	outNames := make([]string, len(groupByCols))
+	if groupByAll {
+		copy(outNames, groupByCols)
 	} else {
-		baseCounts := make(map[string]int, len(h.GroupByCols))
-		for i, name := range h.GroupByCols {
+		baseCounts := make(map[string]int, len(groupByCols))
+		for i, name := range groupByCols {
 			base := name
 			if dot := strings.IndexByte(name, '.'); dot >= 0 {
 				base = name[dot+1:]
@@ -5042,7 +5052,7 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 			outNames[i] = base
 			baseCounts[base]++
 		}
-		for i, name := range h.GroupByCols {
+		for i, name := range groupByCols {
 			if baseCounts[outNames[i]] > 1 {
 				outNames[i] = name // keep qualified to avoid ambiguity
 			}
@@ -5053,10 +5063,17 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	// and neither the qualifier strip nor the ambiguity rule applies to a
 	// name the planner already decided (ADR-0026).
 	for i := range outNames {
-		if i < len(h.GroupByOutNames) && h.GroupByOutNames[i] != "" {
-			outNames[i] = h.GroupByOutNames[i]
+		if i < len(groupByOutNames) && groupByOutNames[i] != "" {
+			outNames[i] = groupByOutNames[i]
 		}
 	}
+	return outNames
+}
+
+func (h *HashAggregate) outputSchema() []parquet.Column {
+	cols := make([]parquet.Column, 0, len(h.GroupByCols)+len(h.Aggs)+len(h.NullGroupCols))
+
+	outNames := PublishedGroupKeyNames(h.GroupByCols, h.GroupByOutNames, h.GroupByAll)
 
 	for i, name := range outNames {
 		typ := parquet.TypeString // default fallback

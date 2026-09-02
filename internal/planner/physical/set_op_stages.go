@@ -188,6 +188,12 @@ func (p *Planner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *
 		Type:        "final_aggregate",
 		Tasks:       1,
 		GroupByCols: append([]string(nil), outNames...),
+		// A RawInputAggregate reads the union's RAW rows, so it computes its
+		// keys and carries a resolution list. Here the two names are the same
+		// string — the set operation's result columns are what every arm's
+		// projection publishes — and saying so explicitly is what keeps the
+		// worker off the text-parsing recovery (ADR-0026 §2).
+		GroupByResolve: identityGroupKeyResolutions(outNames),
 		AggSpecs: []AggSpec{
 			{Func: "SUM", InputCol: SetOpLeftCountCol, OutputCol: SetOpLeftCountCol,
 				OutputType: parquet.TypeInt64, OutputTypeKnown: true},

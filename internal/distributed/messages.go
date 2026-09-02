@@ -595,7 +595,32 @@ type OpSpec struct {
 	ReplySubject string `json:"reply_subject,omitempty"`
 
 	// OpHashAggregate (pipeline-breaker).
-	GroupByCols []string `json:"group_by_cols,omitempty"` // empty = scalar aggregate
+	//
+	// GroupByCols is what this aggregate PUBLISHES each key as — the name the
+	// stage above and the gather read. Empty = scalar aggregate.
+	GroupByCols []string `json:"group_by_cols,omitempty"`
+	// GroupByResolve is index-aligned with GroupByCols: what THIS fragment
+	// resolves each key by, against the columns its own input carries. It is
+	// a different string from the published name whenever the key names a
+	// derived table's alias — a join's stream carries `w` where the query
+	// wrote `x.w`, and `y.w` where the join qualified a duplicate — and it is
+	// the hidden-slot marker (Computed) for a key the fragment must
+	// materialize.
+	//
+	// The worker decides NOTHING about a key by parsing text. It used to:
+	// `derivedGroupKeys` re-derived "is this key derived?" from the spelling,
+	// which cannot say (`GROUP BY "g + 1"` names a column and `GROUP BY g + 1`
+	// is arithmetic, and both are recorded as `g + 1`), so a key whose two
+	// names differ collapsed the whole table into one NULL group (ADR-0026
+	// §2/§2c, #736, #781, #794).
+	//
+	// Absent — an older coordinator — the worker falls back to that parse,
+	// which is exactly the behaviour this field replaces, for the reason
+	// GroupByTypes tolerates the same absence. A NEWER coordinator talking to
+	// an older worker degrades the same way and no further: GroupByCols is
+	// the published name, which for every shape the old parse got right is
+	// also the spelling it computed from.
+	GroupByResolve []GroupKeyResolveSpec `json:"group_by_resolve,omitempty"`
 	// GroupByTypes carries the plan-time parquet.TypeID (as int) of each
 	// DERIVED GROUP BY key expression, keyed by the exact key text in
 	// GroupByCols. Carried for AggSpec.InputType's reason (#333): the
@@ -774,6 +799,20 @@ type ProjectSpec struct {
 type DecimalMeta struct {
 	Precision int `json:"precision,omitempty"`
 	Scale     int `json:"scale,omitempty"`
+}
+
+// GroupKeyResolveSpec is one GROUP BY key's RESOLUTION spelling on the wire —
+// what the fragment computing the key looks up in its own input, beside the
+// PUBLISHED name the same index of OpSpec.GroupByCols carries.
+//
+// The pair is the whole of ADR-0026 §2 on the distributed side: an aggregate
+// names a key one way for its consumers and finds it another way in its input,
+// and one field cannot be both. `Computed` is the planner's answer to "must
+// this fragment materialize the value", which no reader may re-derive from the
+// text (§2c).
+type GroupKeyResolveSpec struct {
+	Expr     string `json:"expr,omitempty"`
+	Computed bool   `json:"computed,omitempty"`
 }
 
 // AggSpec defines an aggregation in a task.

@@ -52,6 +52,7 @@ const (
 	AggShuffleRejectBelowThreshold                                  // input scan bytes ≤ threshold
 	AggShuffleRejectScanHasFilters                                  // input scan has pushed predicates (Phase 2 scope)
 	AggShuffleRejectKeysNotCovered                                  // aggregate GROUP BY keys don't cover join build keys
+	AggShuffleRejectKeyNameIsNotItsSpelling                         // a key's PUBLISHED name is not the spelling the scan can evaluate
 )
 
 // AggregateShuffleDiag records the best observed rejection for telemetry.
@@ -150,6 +151,22 @@ func PickAggregateShuffleCandidateDiag(stages []Stage, thresholdBytes int64) Agg
 			})
 			continue
 		}
+		// The pre-compute SQL below writes each key TWICE — once as a select
+		// item and once in the GROUP BY — from one list, which is sound only
+		// while a key's PUBLISHED name is also the spelling the base table can
+		// evaluate. Since ADR-0026 §2 those are two fields, and a key naming a
+		// derived table's alias publishes `x.w` while the scan evaluates
+		// `a * 3`: the synthesized SQL would name a column the table does not
+		// have. Decline rather than synthesize it — this is an optimization,
+		// and the query runs the ordinary way.
+		if !keyNamesAreTheirSpelling(aggStage) {
+			setBest(AggShuffleRejectKeyNameIsNotItsSpelling, AggregateShuffleDiag{
+				JoinStageID:       j.ID,
+				InputScanAlias:    scan.ScanAlias,
+				ObservedScanBytes: scan.EstimatedBytes,
+			})
+			continue
+		}
 		return AggregateShuffleDiag{
 			Candidate: AggregateShuffleCandidate{
 				JoinStageID:      j.ID,
@@ -184,9 +201,30 @@ func (r AggregateShuffleRejectReason) String() string {
 		return "scan_has_filters"
 	case AggShuffleRejectKeysNotCovered:
 		return "keys_not_covered"
+	case AggShuffleRejectKeyNameIsNotItsSpelling:
+		return "key_name_is_not_its_spelling"
 	default:
 		return "unknown"
 	}
+}
+
+// keyNamesAreTheirSpelling reports whether every GROUP BY key of this stage is
+// published under the same text the fragment resolves it by — the condition
+// under which one list can serve as both a projection and a GROUP BY clause.
+func keyNamesAreTheirSpelling(s Stage) bool {
+	if len(s.GroupByResolve) == 0 {
+		return true
+	}
+	keys := stageGroupKeyList(&s)
+	if len(keys) != len(s.GroupByResolve) {
+		return false
+	}
+	for i, r := range s.GroupByResolve {
+		if r.Expr != keys[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // followToAggregate walks the dependency chain from startID through transparent

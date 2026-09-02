@@ -2351,17 +2351,16 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 		})
 
-		// The DAG residuals of this family, which were pinned and are now
-		// answered. Each was pre-existing on ff7c3f19 and each is #736's
-		// mechanism 3: on the stage DAG a computed key's RESOLUTION name and
-		// its PUBLISHED name are one `Stage.GroupByCols` entry, and these
+		// The DAG residuals of this family. Each was pre-existing on ff7c3f19
+		// and each is #736's mechanism 3: a computed key's RESOLUTION name and
+		// its PUBLISHED name were one `Stage.GroupByCols` entry, and these
 		// shapes need them to differ.
 		//
-		// Two get their answer from a REFUSAL that routes the query onto the
-		// coordinator-local single-process pipeline — the engine that carries
-		// the two names separately (a hidden `__gb_expr_N` slot and
-		// `exec.HashAggregate.GroupByOutNames`, ADR-0026 §2). The third is
-		// fixed outright: the argument's delimiters are stripped the way the
+		// The key an aggregate DIRECTLY BELOW publishes is answered by
+		// ADR-0026 §2's two names and runs on the DAG. The aggregate ALIASED
+		// like the key is still routed local: its two output columns share one
+		// published name, which no carrier makes unambiguous. The third was
+		// fixed outright — the argument's delimiters are stripped the way the
 		// single-process path has always stripped them.
 		t.Run("DAGResolvesAComputedKeyAgainstTheScan", func(t *testing.T) {
 			dag := sfcArms(ctx, single, coord)[1]
@@ -2389,10 +2388,17 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					t.Errorf("the DAG arm put %v where PostgreSQL has the NULL group\n  SQL: %s",
 						res.Rows[wantKeys]["k"], sql)
 				}
-				if coord.GroupKeyLocalRoutes() == before {
-					t.Errorf("the DAG arm answered without the group-key refusal firing — "+
-						"either walkStages grew a real lowering (delete refuseUnstageableGroupKey "+
-						"and gate it) or the query never reached PlanDistributed\n  SQL: %s", sql)
+				// The DISPOSITION beside the rows, and it moved with the fix:
+				// this shape used to be REFUSED and answered by the local
+				// pipeline, and the DAG executes it now. Asserting that the
+				// route did NOT fire is what keeps a silent return to routing
+				// from passing on rows alone.
+				if coord.GroupKeyLocalRoutes() != before {
+					t.Errorf("the DAG arm ROUTED this to the coordinator-local pipeline. The "+
+						"answer is right either way, which is why the disposition is asserted: "+
+						"a key an aggregate DIRECTLY BELOW publishes is resolved as the COLUMN "+
+						"it is (Stage.GroupByResolve, Computed=false), and a refusal that starts "+
+						"firing on it is a right-to-routed regression in kind\n  SQL: %s", sql)
 				}
 			})
 			t.Run("CountOverDistinctOverTheKey", func(t *testing.T) {
@@ -2467,7 +2473,7 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			})
 			// An aggregate ALIASED like the key: one published name, two
 			// columns of the batch, and every by-name lookup answers with the
-			// FIRST — the key's. Routed local, like the DISTINCT above.
+			// FIRST — the key's. Routed local, like the DISTINCT above was.
 			t.Run("AggregateAliasedLikeTheKey", func(t *testing.T) {
 				sql := fmt.Sprintf(`SELECT g + 1 AS k, COUNT(*) AS "g + 1" FROM %s `+
 					`GROUP BY g + 1 ORDER BY k`, tbl)

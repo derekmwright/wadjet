@@ -126,11 +126,21 @@ func rewireAggOverRawExchange(stages []Stage) []Stage {
 			if a.Exchange.Count <= 0 || !keysEqual(a.Exchange.Keys, fa.GroupByCols) {
 				continue
 			}
-			if !aggInputsCovered(fa.GroupByCols, scanB.FusedAggSpecs, scanA.Columns) {
+			// Over the RESOLUTION spelling: after the rewrite this final
+			// computes its keys from A's RAW rows, and what it evaluates there
+			// is the spelling the dropped fused scan resolved them by — the
+			// published name may be a derived table's alias, which no base
+			// table has (ADR-0026 §2).
+			if !aggInputsCovered(resolveExprs(scanB.GroupByResolve), scanB.FusedAggSpecs, scanA.Columns) {
 				continue
 			}
-			// Rewrite: F aggregates A's raw partitions directly.
+			// Rewrite: F aggregates A's raw partitions directly. It stops being
+			// a merge and becomes a fragment that COMPUTES its keys, so it
+			// takes over the dropped scan's resolution list with its specs —
+			// without it the worker would resolve every key by its PUBLISHED
+			// name against raw table rows (#794).
 			fa.AggSpecs = append([]AggSpec(nil), scanB.FusedAggSpecs...)
+			fa.GroupByResolve = append([]GroupKeyResolution(nil), scanB.GroupByResolve...)
 			fa.RawInputAggregate = true
 			fa.Dependencies[0] = a.ID
 			fa.Distribution = Distribution{

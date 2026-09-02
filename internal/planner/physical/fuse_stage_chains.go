@@ -262,6 +262,13 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 				continue
 			}
 			p.ChainedAggGroupBy = append([]string(nil), c.GroupByCols...)
+			// …and BOTH names with it. The absorbed partial computed its
+			// keys from the join's rows, and the chain-terminal aggregate
+			// on this stage computes them from exactly the same rows, so
+			// the resolution list travels unchanged. Dropping it here would
+			// send the join's fragment back to re-deriving the key by
+			// parsing its published name (ADR-0026 §2, #794).
+			p.GroupByResolve = append([]GroupKeyResolution(nil), c.GroupByResolve...)
 			// The absorbed stage's derived-key types ride along: the
 			// chain-terminal partial builds the same pre-aggregate
 			// projection the standalone stage would have (#379).

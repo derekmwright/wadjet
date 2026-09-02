@@ -38,6 +38,45 @@ func wireGroupByDecimal(m map[string]logical.DecimalMeta) map[string]distributed
 	return out
 }
 
+// wireGroupKeyResolve converts the planner's GROUP BY key RESOLUTION list to
+// its wire form (OpSpec.GroupByResolve), index-aligned with the published
+// names in OpSpec.GroupByCols.
+//
+// It is a function for wireGroupByTypes' reason one field over: three dispatch
+// paths build a partial aggregate — the standalone stage, the fused
+// scan-aggregate, and the chain-terminal one on a join — and a resolution list
+// that reached only some of them would send the others back to re-deriving the
+// key by parsing its published name, which is exactly the defect the second
+// name exists to remove (ADR-0026 §2, #794).
+//
+// Only a fragment that COMPUTES its keys carries one: a merge-mode aggregate
+// reads a partial's output, where every key is already a column under its
+// published name, and shipping a resolution list there would say the two names
+// differ where they cannot.
+func wireGroupKeyResolve(resolve []physical.GroupKeyResolution) []distributed.GroupKeyResolveSpec {
+	if len(resolve) == 0 {
+		return nil
+	}
+	out := make([]distributed.GroupKeyResolveSpec, len(resolve))
+	for i, r := range resolve {
+		out[i] = distributed.GroupKeyResolveSpec{Expr: r.Expr, Computed: r.Computed}
+	}
+	return out
+}
+
+// mergeModeResolve is wireGroupKeyResolve for the aggregate fragment builder,
+// which serves BOTH roles from one stage type: the standalone partial (raw
+// upstream rows, keys computed here) and the merge (a partial's output, keys
+// already columns). A merge carries no resolution list, and that is the whole
+// of #794 — the intermediate phase and the exchange's partial both consume the
+// partial's OUTPUT, so there is nothing for them to agree with.
+func mergeModeResolve(stage physical.Stage, mergeMode bool) []distributed.GroupKeyResolveSpec {
+	if mergeMode {
+		return nil
+	}
+	return wireGroupKeyResolve(stage.GroupByResolve)
+}
+
 // wireAggSpecs converts planner aggregate specs to their wire form.
 //
 // One function rather than a struct literal per dispatch path: there are

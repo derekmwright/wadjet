@@ -187,14 +187,14 @@ func TestDerivedTableAliasJoinAndGroupKeys(t *testing.T) {
 		stages := planStagesForRenameTest(t,
 			`SELECT k, COUNT(*) AS c FROM (SELECT n_regionkey AS k, n_name FROM nation) u
 			 GROUP BY u.k`)
-		assertGroupKeys(t, stages, "n_regionkey")
+		assertGroupKeys(t, stages, "u.k", "n_regionkey")
 	})
 	t.Run("chained qualified group key", func(t *testing.T) {
 		stages := planStagesForRenameTest(t,
 			`SELECT y.j, COUNT(*) AS c FROM
 			 (SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier) x) y
 			 GROUP BY y.j`)
-		assertGroupKeys(t, stages, "s_nationkey")
+		assertGroupKeys(t, stages, "y.j", "s_nationkey")
 	})
 }
 
@@ -223,22 +223,48 @@ func assertJoinKeysResolved(t *testing.T, stages []Stage, wantLeft, wantRight st
 	}
 }
 
-func assertGroupKeys(t *testing.T, stages []Stage, want string) {
+// assertGroupKeys asserts BOTH of a group key's names: what the stage
+// PUBLISHES it as, and — on the stage whose fragment computes it — what that
+// fragment RESOLVES it by.
+//
+// Asserting the published name alone is what let a stage carry a spelling no
+// stream answers to: the key that reaches the worker has to name a column of
+// the fragment's INPUT, and the name the consumers above read has to be the
+// one the query wrote. One field could not be both (ADR-0026 §2, #794).
+func assertGroupKeys(t *testing.T, stages []Stage, wantPublished, wantResolve string) {
 	t.Helper()
-	found := false
+	found, computed := false, false
 	for i := range stages {
 		s := &stages[i]
-		if len(s.GroupByCols) == 0 {
+		keys := stageGroupKeyList(s)
+		if len(keys) == 0 {
 			continue
 		}
 		found = true
-		if len(s.GroupByCols) != 1 || !strings.EqualFold(s.GroupByCols[0], want) {
-			t.Errorf("stage %s GROUP BY %v, want [%s] — an unresolved key fails the task with "+
-				"`GROUP BY key %q is not a column of its input`", s.ID, s.GroupByCols, want, s.GroupByCols[0])
+		if len(keys) != 1 || !strings.EqualFold(keys[0], wantPublished) {
+			t.Errorf("stage %s publishes GROUP BY %v, want [%s] — the consumers above read "+
+				"this name", s.ID, keys, wantPublished)
+		}
+		if !stageComputesGroupKeys(s) {
+			if len(s.GroupByResolve) != 0 {
+				t.Errorf("stage %s does not compute its keys but carries a resolution list %v "+
+					"— a merge reads a partial's output, where the two names are one",
+					s.ID, s.GroupByResolve)
+			}
+			continue
+		}
+		computed = true
+		if len(s.GroupByResolve) != 1 || !strings.EqualFold(s.GroupByResolve[0].Expr, wantResolve) {
+			t.Errorf("stage %s resolves GROUP BY by %v, want [%s] — an unresolved key fails the "+
+				"task with `GROUP BY key %q is not a column of its input`",
+				s.ID, s.GroupByResolve, wantResolve, keys[0])
 		}
 	}
 	if !found {
 		t.Fatalf("no aggregate stage in the plan")
+	}
+	if !computed {
+		t.Fatalf("no stage in the plan COMPUTES the group key — nothing carries the resolution")
 	}
 }
 

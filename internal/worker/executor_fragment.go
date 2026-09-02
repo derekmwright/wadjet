@@ -2123,8 +2123,9 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		// (e.g. SUM(l_extendedprice*(1-l_discount))). Skipped for merge mode:
 		// the partial stage already computed the derived column under OutputCol.
 		if spec.BuildProject && !spec.MergeMode {
+			keyPlan, _ := fragmentGroupKeyPlan(spec)
 			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil,
-				spec.GroupByTypes, spec.GroupByDecimal)
+				spec.GroupByTypes, spec.GroupByDecimal, keyPlan)
 			if perr != nil {
 				return nil, fmt.Errorf("agg input project: %w", perr)
 			}
@@ -2511,17 +2512,24 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			aggCols[i].InputColIdxSet = true
 		}
 	}
-	// A fragment that BUILDS its own input projection computes each derived
-	// key into a hidden slot, so the aggregate RESOLVES by the slot and
-	// PUBLISHES under the key's own canonical text — the same pair the
-	// single-process planner sets, which is what keeps the two engines'
-	// aggregate output schemas equal. In MERGE mode no projection is built
-	// (the partial stage already emitted the key under its published name),
-	// so the two are the same list (ADR-0026).
+	// The key's TWO names. `spec.GroupByCols` is what this aggregate
+	// PUBLISHES; `spec.GroupByResolve` is what it RESOLVES each key by
+	// against its own input — a column of that input, or an expression this
+	// fragment materializes into a hidden slot. The planner decides which;
+	// nothing here re-reads a name as structure (ADR-0026 §2, §2c).
+	//
+	// In MERGE mode there is no resolution list and none is wanted: the
+	// partial below already emitted every key under its published name.
 	groupCols, outNames := spec.GroupByCols, []string(nil)
 	if spec.BuildProject && !spec.MergeMode {
-		if _, slots := derivedGroupKeys(spec.GroupByCols, spec.Aggregates, nil,
+		if slots, published, ok := fragmentGroupKeyNames(spec); ok {
+			groupCols, outNames = slots, published
+		} else if _, slots := derivedGroupKeys(spec.GroupByCols, spec.Aggregates, nil,
 			spec.GroupByTypes); !equalStringSlices(slots, spec.GroupByCols) {
+			// An older coordinator sent no resolution list: recover it the
+			// way this worker always did, by parsing the one name it has.
+			// That is exactly the behaviour the field replaces, and it is the
+			// same tolerance GroupByTypes' absence already gets.
 			groupCols = slots
 			outNames = append([]string(nil), spec.GroupByCols...)
 		}

@@ -3069,6 +3069,7 @@ func (c *Coordinator) dispatchComputeStage(
 			chainedOps = append(chainedOps, distributed.OpSpec{
 				Type:           distributed.OpHashAggregate,
 				GroupByCols:    append([]string(nil), stage.ChainedAggGroupBy...),
+				GroupByResolve: wireGroupKeyResolve(stage.GroupByResolve),
 				GroupByTypes:   wireGroupByTypes(stage.GroupByTypes),
 				GroupByDecimal: wireGroupByDecimal(stage.GroupByDecimal),
 				Aggregates:     decomposeCovar(decomposeVar(decomposeAvg(chainAggs))),
@@ -3974,8 +3975,13 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 	mergeMode := (stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
 		!stage.RawInputAggregate
 	ops = append(ops, distributed.OpSpec{
-		Type:           distributed.OpHashAggregate,
-		GroupByCols:    append([]string(nil), stage.GroupByCols...),
+		Type:        distributed.OpHashAggregate,
+		GroupByCols: append([]string(nil), stage.GroupByCols...),
+		// Only where this fragment COMPUTES the keys. A merge reads a
+		// partial's output, where the key is already a column under its
+		// published name — so the two names are one there by construction,
+		// and #794's merge boundary needs no agreement to keep (ADR-0026 §2).
+		GroupByResolve: mergeModeResolve(stage, mergeMode),
 		GroupByTypes:   wireGroupByTypes(stage.GroupByTypes),
 		GroupByDecimal: wireGroupByDecimal(stage.GroupByDecimal),
 		Aggregates:     append([]distributed.AggSpec(nil), aggs...),
@@ -4437,6 +4443,7 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 	ops = append(ops, distributed.OpSpec{
 		Type:           distributed.OpHashAggregate,
 		GroupByCols:    append([]string(nil), stage.FusedAggGroupBy...),
+		GroupByResolve: wireGroupKeyResolve(stage.GroupByResolve),
 		GroupByTypes:   wireGroupByTypes(stage.GroupByTypes),
 		GroupByDecimal: wireGroupByDecimal(stage.GroupByDecimal),
 		Aggregates:     append([]distributed.AggSpec(nil), aggs...),

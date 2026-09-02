@@ -126,7 +126,38 @@ type Stage struct {
 	FilterAliases []FilterAliasSpec
 
 	// Aggregate metadata
+	//
+	// GroupByCols is what the aggregate PUBLISHES each GROUP BY key as — the
+	// name every consumer ABOVE it reads. It is `plansql.GroupKeyName`, the
+	// same text the single-process planner feeds `exec.HashAggregate`, so
+	// both engines' aggregate output schemas are one schema (ADR-0026 §2b).
+	// GroupByResolve beside it is what the fragment that COMPUTES the key
+	// resolves it BY, against its own input.
 	GroupByCols []string
+	// GroupByResolve is GroupByCols' second spelling, index-aligned with it:
+	// the name or expression the COMPUTING fragment resolves each key by,
+	// against the columns its input carries. A stage whose fragment does not
+	// compute the keys — every merge-mode aggregate, whose input is a
+	// partial's output where the key is already a column under its published
+	// name — carries no list at all, and that is what makes the merge
+	// boundary correct by construction rather than by agreement (#794).
+	//
+	// The two are one field's worth of information only when they are the
+	// same string, which is every ordinary `GROUP BY c` and every ordinary
+	// `GROUP BY c + 1`. They are different strings whenever the key names a
+	// derived table's alias: the join stream carries `w` where the query
+	// wrote `x.w`, and the defining expression `a * 3` names a column the
+	// join does not carry at all. `Stage.GroupByCols` used to be both at
+	// once, and the worker re-derived "is this key derived?" by PARSING it —
+	// which is why every shape in that class answered one NULL group
+	// (ADR-0026 §2, §4a; #736, #777, #781, #794, #795).
+	//
+	// Index-aligned with whichever group-key list the stage carries:
+	// GroupByCols, FusedAggGroupBy on a fused scan-aggregate, or
+	// ChainedAggGroupBy on a join that absorbed one. A stage carries exactly
+	// one of the three; `stageGroupKeyList` is that rule, and
+	// TestStageCarriesOneGroupKeyList asserts it.
+	GroupByResolve []GroupKeyResolution
 	// GroupByTypes is the plan-time output type of each DERIVED (non-bare)
 	// GROUP BY key expression, keyed by the exact GroupByCols text — the
 	// same inferProjectionTypeCols answer the single-process pre-aggregate
@@ -2591,8 +2622,10 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseGroupingSets(node); err != nil {
 		return nil, err
 	}
-	// And a GROUP BY key whose RESOLUTION name and PUBLISHED name have to
-	// differ, which `Stage.GroupByCols` cannot express (#736 mechanism 3).
+	// A DERIVED key whose published name one of the aggregate's own outputs
+	// also answers to: two columns of one name, and a stage projection that
+	// renamed either of them would change what every reference spelled before
+	// it means (ADR-0026 §2's remaining condition).
 	if err := refuseUnstageableGroupKey(node); err != nil {
 		return nil, err
 	}
@@ -2879,6 +2912,15 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// reason the two sort-key passes do — the alias is real exactly where
 	// that pass materialized it.
 	resolveFilterAliasSpelling(stages)
+	// ADR-0026 §2: and the same repair for a GROUP BY KEY that names a derived
+	// table's computed alias. It runs here, after the projection passes, for
+	// exactly the reason the two above do — whether any fragment publishes the
+	// alias is what those passes decide — and it is the half `walkStages`
+	// cannot do, which is why three attempts to infer it from node kinds each
+	// bound a different wrong column (§4a, #777, #781, #794).
+	if err := resolveStageGroupKeys(stages); err != nil {
+		return nil, err
+	}
 	// #656 F2: a SELECT list that became nobody's job. Refused HERE rather
 	// than at dispatch so the coordinator can route the query local and
 	// ANSWER it, instead of handing the client the producer's raw columns.
@@ -5544,25 +5586,23 @@ func resolveSortKeyColumn(key string, child *logical.Node) string {
 // own spelling of the matching group key or aggregate output — so a sort key
 // resolved through a rename lands on a column the stage really produces.
 //
-// A group key is reported the way walkStages will EMIT it, which is through
-// resolveAggInputName: a key naming a subquery's rename is dispatched under
-// the source column, because the Project that would have created the alias
-// emits no stage (#355).
+// A group key is reported the way the aggregate's fragment will EMIT it —
+// `stageEmittedKeyNames` over the key's PUBLISHED name — which is one answer
+// for both engines. It used to be the DISPATCH re-spelling
+// (`aggStageGroupKey`), because a stage published its keys under the spelling
+// the worker computed them from; now the two names are separate fields and the
+// published one is what any consumer above the aggregate reads (ADR-0026 §2b,
+// #355 and #794).
 func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 	var child *logical.Node
 	if len(n.Children) == 1 {
 		child = n.Children[0]
 	}
-	haveExprs := len(n.GroupByExprs) == len(n.GroupBy)
+	published, resolve := stageGroupKeyNames(n, child)
+	names := stageEmittedKeyNames(published, resolve)
 	emit := func(i int, g string) (string, bool) {
-		if child != nil {
-			var e plansql.Node
-			if haveExprs && i >= 0 {
-				e = n.GroupByExprs[i]
-			}
-			if resolved, renamed := aggStageGroupKey(g, e, child); renamed {
-				return resolved, true
-			}
+		if i >= 0 && i < len(names) {
+			return names[i], true
 		}
 		return g, true
 	}
@@ -5942,40 +5982,51 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			}
 			aggSpecs = append(aggSpecs, spec)
 		}
-		groupBy := make([]string, len(node.GroupBy))
-		copy(groupBy, node.GroupBy)
-		// Same resolution for the GROUP BY keys, and the same defect without
-		// it: an unresolvable key serializes as NULL rather than failing, so
-		// `GROUP BY k` over `SELECT o_orderstatus AS k` collapsed 3 groups
-		// into one NULL group of every row.
+		// The key's TWO names: what the aggregate publishes it as, and what
+		// the fragment computing it resolves it by. Before they were two, an
+		// unresolvable key serialized as NULL rather than failing, so `GROUP
+		// BY k` over `SELECT o_orderstatus AS k` collapsed 3 groups into one
+		// NULL group of every row — and the key an aggregate BELOW already
+		// published was recomputed against a schema without its leaves, which
+		// is the same collapse one shape over (ADR-0026 §2, #736, #794).
+		groupBy, groupByResolve := stageGroupKeyNames(node, aggChild)
+		// The gather's output renames read the LOGICAL name and need the name
+		// the stage's fragment actually EMITS for it. That used to be the
+		// dispatch re-spelling, because the dispatch spelling was also the
+		// published one; now it is exec's own output rule over the published
+		// list, which is what the single-process aggregate emits for the same
+		// query (#355, #467, ADR-0026 §2b).
+		emitted := stageEmittedKeyNames(groupBy, groupByResolve)
 		haveGBExprs := len(node.GroupByExprs) == len(node.GroupBy)
-		for i, key := range groupBy {
+		for i, key := range node.GroupBy {
 			var keyExpr plansql.Node
 			if haveGBExprs {
 				keyExpr = node.GroupByExprs[i]
 			}
-			if resolved, renamed := aggStageDispatchKey(key, keyExpr, aggChild); renamed {
-				groupBy[i] = resolved
-				if p.aggStageRenames == nil {
-					p.aggStageRenames = make(map[string]string)
-				}
-				p.aggStageRenames[strings.ToLower(key)] = resolved
-				// The gather's rename reads this map by the name the outer
-				// SELECT list uses, which for a key written through the
-				// derived table's alias (`GROUP BY u.k`) is the BARE one
-				// (`SELECT k`). Record both spellings or the lookup misses
-				// and the result comes back at full upstream width (#467).
-				if bare := derivedScopeBareName(key, aggChild); bare != "" {
-					if _, taken := p.aggStageRenames[strings.ToLower(bare)]; !taken {
-						p.aggStageRenames[strings.ToLower(bare)] = resolved
-					}
+			if _, renamed := aggStageDispatchKey(key, keyExpr, aggChild); !renamed {
+				continue
+			}
+			if p.aggStageRenames == nil {
+				p.aggStageRenames = make(map[string]string)
+			}
+			p.aggStageRenames[strings.ToLower(key)] = emitted[i]
+			// The gather's rename reads this map by the name the outer
+			// SELECT list uses, which for a key written through the
+			// derived table's alias (`GROUP BY u.k`) is the BARE one
+			// (`SELECT k`). Record both spellings or the lookup misses
+			// and the result comes back at full upstream width (#467).
+			if bare := derivedScopeBareName(key, aggChild); bare != "" {
+				if _, taken := p.aggStageRenames[strings.ToLower(bare)]; !taken {
+					p.aggStageRenames[strings.ToLower(bare)] = emitted[i]
 				}
 			}
 		}
 		// Plan-time types for the derived keys, computed here where the
 		// aggregate's input schema is still known (#379); every stage
-		// shape below carries the same map.
-		groupByTypes, groupByDecimal := derivedGroupKeyTypes(groupBy, aggChild)
+		// shape below carries the same map. Keyed by the PUBLISHED name,
+		// which is index-aligned with the resolution list and survives
+		// resolveStageGroupKeys re-spelling one.
+		groupByTypes, groupByDecimal := stageGroupKeyDecls(groupBy, groupByResolve, aggChild)
 
 		// Optimization: fuse aggregation into scan when the only child
 		// stages are scans (no joins or sorts in between). This eliminates
@@ -5999,10 +6050,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		if hasDistinctAgg || anyAggNeedsWholeInput(aggSpecs) {
 			finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
 			*stages = append(*stages, Stage{
-				ID:                finalStageID,
-				Type:              "final_aggregate",
-				Tasks:             1,
-				GroupByCols:       groupBy,
+				ID:          finalStageID,
+				Type:        "final_aggregate",
+				Tasks:       1,
+				GroupByCols: groupBy,
+				// A RawInputAggregate final reads RAW rows, not a partial's
+				// output, so it is the one final that COMPUTES its keys and
+				// therefore the one that carries the resolution list.
+				GroupByResolve:    groupByResolve,
 				GroupByTypes:      groupByTypes,
 				GroupByDecimal:    groupByDecimal,
 				AggSpecs:          aggSpecs,
@@ -6016,6 +6071,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 				if (*stages)[i].Type == "scan" {
 					(*stages)[i].FusedAggGroupBy = groupBy
+					(*stages)[i].GroupByResolve = groupByResolve
 					(*stages)[i].GroupByTypes = groupByTypes
 					(*stages)[i].GroupByDecimal = groupByDecimal
 					(*stages)[i].FusedAggSpecs = aggSpecs
@@ -6029,8 +6085,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// 143 B/row vs the ~25 B/row its 2-column read set
 					// needs). Strip pure outputs from the read set; an
 					// output that aliases a real input (SUM(x) AS x) stays.
+					// Both names: the read set must keep every column the
+					// fragment READS, and after the two names separated that
+					// is the RESOLUTION spelling — the published name is what
+					// the aggregate emits, which is exactly what may be
+					// pruned.
 					(*stages)[i].Columns = pruneFusedAggOutputCols(
-						(*stages)[i].Columns, groupBy, aggSpecs, (*stages)[i].FilterExprs)
+						(*stages)[i].Columns, append(append([]string(nil), groupBy...),
+							resolveExprs(groupByResolve)...), aggSpecs, (*stages)[i].FilterExprs)
 				}
 			}
 			// Skip the separate aggregate stage — scans produce partial aggs.
@@ -6041,10 +6103,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Standard two-phase distributed aggregation
 			stageID := fmt.Sprintf("aggregate-%d", len(*stages))
 			stage := Stage{
-				ID:             stageID,
-				Type:           "aggregate",
-				Tasks:          1,
-				GroupByCols:    groupBy,
+				ID:          stageID,
+				Type:        "aggregate",
+				Tasks:       1,
+				GroupByCols: groupBy,
+				// The PARTIAL computes the keys from raw upstream rows, so it
+				// is the stage that carries the resolution list. The final
+				// below reads this stage's OUTPUT, where every key is already
+				// a column under its published name (#794).
+				GroupByResolve: groupByResolve,
 				GroupByTypes:   groupByTypes,
 				GroupByDecimal: groupByDecimal,
 				AggSpecs:       aggSpecs,

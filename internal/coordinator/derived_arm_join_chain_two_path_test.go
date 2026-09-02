@@ -475,26 +475,27 @@ func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
 		}
 	})
 
-	// GROUP BY on the QUALIFIED derived alias, which both DAG arms collapse
-	// into ONE NULL group. Identical on 376b2cac, identical at ONE join and
-	// in the DERIVED spelling, and correct in the BARE spelling — so it is
-	// the qualified GROUP-BY key's own resolution and not the chain. Pinned
-	// rather than described, so the day it agrees this gate FAILS.
-	// The MECHANISM in one sentence, the same one the seven pins in
-	// window_key_group_two_path_test.go carry: `Stage.GroupByCols` is
-	// simultaneously what the worker COMPUTES the key from and what it
-	// PUBLISHES it as (ADR-0026 §2), and a key naming a CTE's computed alias
-	// needs those to be two different strings — the defining expression `a * 2`
-	// is spelled over a column the join does not carry, and the alias `dv` is a
-	// bare name a join stream cannot qualify. ADR-0026 §4a records the pass that
-	// tried to choose between them at stage level and was withdrawn.
+	// GROUP BY on the QUALIFIED derived alias, which both DAG arms used to
+	// collapse into ONE NULL group. Identical on 376b2cac, identical at ONE
+	// join and in the DERIVED spelling, and correct in the BARE spelling — so
+	// it was the qualified GROUP-BY key's own resolution and not the chain.
 	//
-	// TODO(#794): delete this when a Stage carries the resolution spelling
-	// beside the published name.
+	// The MECHANISM, and what closed it: `Stage.GroupByCols` was
+	// simultaneously what the worker COMPUTES the key from and what it
+	// PUBLISHES it as, and a key naming a CTE's computed alias needs those to
+	// be two different strings — the defining expression `a * 2` is spelled
+	// over a column the join does not carry, while the alias is what the join
+	// stream really holds. ADR-0026 §2 carries both now: the CTE's projection
+	// materializes `dv` on its scan's fragment, the join ships it (bare where
+	// nothing contests the name, qualified `c.dv` where the shuffled arm's
+	// second join does), and `resolveStageGroupKeys` names it.
+	//
+	// It asserts the DISPOSITION beside the rows on both DAG arms: this key is
+	// EXECUTED on the DAG, and a refusal that started firing on it would be a
+	// right-to-routed regression the rows cannot see.
 	t.Run("2join/group-by-qualified-alias", func(t *testing.T) {
 		sql := cte + "SELECT c.dv AS dv, COUNT(*) AS n FROM " + chain2 + "GROUP BY c.dv ORDER BY c.dv"
 		const want = "5 rows: -0.02|1;0.00|1;4.00|1;25.50|4;|2;" // PostgreSQL 17
-		const pinned = "1 rows: |9;"                             // TODO(#794)
 		for _, arm := range arms {
 			routesBefore := int64(0)
 			if arm.coord != nil {
@@ -504,38 +505,16 @@ func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, sql)
 			}
-			got := dajDigest(res, []string{"dv", "n"})
-			if arm.name == "single" {
-				if got != want {
-					t.Errorf("the single arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
-						got, want, sql)
-				}
-				continue
+			if got := dajDigest(res, []string{"dv", "n"}); got != want {
+				t.Errorf("the %s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
+					arm.name, got, want, sql)
 			}
-			// The DISPOSITION beside the rows. This shape is a wrong ANSWER and
-			// not a refusal, and the difference is the whole point: a change
-			// that starts ROUTING it to the coordinator-local pipeline has made
-			// it right by a different mechanism, which is a fix to record
-			// rather than a pin to keep. Rows alone cannot tell those apart —
-			// that is exactly how a right-to-routed move in the bare-alias
-			// subtest below survived a full review round.
-			if arm.coord.GroupKeyLocalRoutes() != routesBefore {
-				t.Errorf("the %s arm ROUTED this to the local pipeline where this pin records "+
-					"the DAG answering it wrongly. If the answer is now PostgreSQL's, that is "+
-					"a fix: assert it and delete the pin\n  SQL: %s", arm.name, sql)
-			}
-			switch got {
-			case want:
-				t.Errorf("the %s arm now groups by the qualified derived alias — the residual "+
-					"is fixed, delete this pin and assert PostgreSQL's rows on every arm"+
-					"\n  SQL: %s", arm.name, sql)
-			case pinned:
-				t.Logf("known residual (#794): the %s arm collapses GROUP BY c.dv into one "+
-					"NULL group (identical on 376b2cac, at one join, and in the derived "+
-					"spelling; the BARE spelling is correct on every arm)", arm.name)
-			default:
-				t.Errorf("the %s arm answered\n  %s\nwhich is neither the pinned\n  %s\n"+
-					"nor PostgreSQL's\n  %s\n  SQL: %s", arm.name, got, pinned, want, sql)
+			if arm.coord != nil && arm.coord.GroupKeyLocalRoutes() != routesBefore {
+				t.Errorf("the %s arm ROUTED this shape to the coordinator-local pipeline. The "+
+					"answer is right either way, which is why this has to be asserted: the DAG "+
+					"resolves this key against the CTE arm's own projection, and a group-key "+
+					"refusal that starts firing on it is a right-to-routed regression in kind "+
+					"(#794/#795)\n  SQL: %s", arm.name, sql)
 			}
 		}
 	})

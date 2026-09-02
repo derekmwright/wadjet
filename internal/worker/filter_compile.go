@@ -161,12 +161,17 @@ func compileFilterExprs(exprs []string, scanSchema bool) ([]exec.UnaryOperator, 
 // and typed COALESCE(l_extendedprice, 0) Int64 from the literal alone —
 // truncating every float group key on write (#379). Absent entries (bare
 // keys, older coordinators) keep the inference.
+// keys, when non-nil, is the planner's own two-name answer (OpSpec.
+// GroupByResolve) and REPLACES the text-parsing recovery below: it says which
+// keys this fragment materializes, which slot each one lands in, and what the
+// aggregate publishes them as. nil is an older coordinator.
 func buildAggInputProjection(
 	groupBy []string,
 	aggs []distributed.AggSpec,
 	filterCols []string,
 	groupByTypes map[string]int,
 	groupByDecimal map[string]distributed.DecimalMeta,
+	keys *fragmentGroupKeys,
 ) (*exec.Project, []string, error) {
 	// Detect derived inputs. An aggregate can carry InputExpr explicitly;
 	// a GROUP BY column is "derived" when parsing it yields anything
@@ -180,7 +185,28 @@ func buildAggInputProjection(
 			hasDerived = true
 		}
 	}
-	derivedGroupBy, slots := derivedGroupKeys(groupBy, aggs, filterCols, groupByTypes)
+	// Keyed by the SLOT the value lands in, not by the key's text: the slot is
+	// unique by construction (it is allocated), and the text is not — two keys
+	// of one published name would otherwise share one expression.
+	derivedGroupBy := map[string]plansql.Node{}
+	var slots []string
+	if keys != nil {
+		// The planner's answer, index-aligned with the published names.
+		slots = keys.resolve
+		for _, slot := range slots {
+			if node, isComputed := keys.computed[slot]; isComputed {
+				derivedGroupBy[slot] = node
+			}
+		}
+	} else {
+		legacy, legacySlots := derivedGroupKeys(groupBy, aggs, filterCols, groupByTypes)
+		slots = legacySlots
+		for i, g := range groupBy {
+			if node, ok := legacy[g]; ok && i < len(slots) {
+				derivedGroupBy[slots[i]] = node
+			}
+		}
+	}
 	if len(derivedGroupBy) > 0 {
 		hasDerived = true
 	}
@@ -208,7 +234,11 @@ func buildAggInputProjection(
 		})
 	}
 	for gi, c := range groupBy {
-		if node, ok := derivedGroupBy[c]; ok {
+		slot := ""
+		if gi < len(slots) {
+			slot = slots[gi]
+		}
+		if node, ok := derivedGroupBy[slot]; ok {
 			// Compile the expression once and emit a projection under
 			// the same name HashAggregate expects.
 			collectFilterColumns(node, nil)
@@ -224,7 +254,6 @@ func buildAggInputProjection(
 			// different wrong answers. The key is published under its
 			// canonical text by GroupByOutNames on the aggregate itself
 			// (ADR-0026).
-			slot := slots[gi]
 			if seen[slot] {
 				continue
 			}
@@ -235,9 +264,17 @@ func buildAggInputProjection(
 			// COALESCE(l_extendedprice, 0) infers Int64 from its literal
 			// and the float keys truncate on write (#379).
 			outType := physical.ProjectionOutputType(node, parquet.TypeString)
-			if t, ok := groupByTypes[c]; ok {
+			declType, declDec := groupByTypes, groupByDecimal
+			declKey := c
+			if keys != nil {
+				// The wire carries the declaration under the key's PUBLISHED
+				// name; fragmentGroupKeyPlan re-keyed it onto the slot the
+				// value actually lands in.
+				declType, declDec, declKey = keys.slotType, keys.slotDecimal, slot
+			}
+			if t, ok := declType[declKey]; ok {
 				outType = expr.Decl(parquet.TypeID(t))
-				if m, ok := groupByDecimal[c]; ok && m.Precision > 0 {
+				if m, ok := declDec[declKey]; ok && m.Precision > 0 {
 					// A DECIMAL key's (p,s), without which the vector below
 					// comes out at scale 0 and truncates every value written
 					// into it — 12.7500 and 12.7501 collapsing into one group
@@ -265,7 +302,7 @@ func buildAggInputProjection(
 			})
 			continue
 		}
-		addPassthrough(c)
+		addPassthrough(slot)
 	}
 	for _, c := range filterCols {
 		addPassthrough(c)
@@ -479,8 +516,103 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 	return exec.NewProject(projCols), nil
 }
 
+// fragmentGroupKeys is one fragment's answer to both halves of ADR-0026 §2:
+// the column each GROUP BY key is RESOLVED by against this fragment's input,
+// and the name the aggregate PUBLISHES it under.
+type fragmentGroupKeys struct {
+	// resolve is what exec.HashAggregate looks each key up by: a column of
+	// the input, or the hidden slot this fragment materializes it into.
+	resolve []string
+	// published is exec.HashAggregate.GroupByOutNames — the name each key's
+	// output column carries, computed by the SAME rule the single-process
+	// operator applies to its own key list, so the two aggregate output
+	// schemas are one schema (ADR-0026 §2b).
+	published []string
+	// computed maps a slot to the expression this fragment evaluates into it.
+	computed map[string]plansql.Node
+	// slotType / slotDecimal are the planner's declaration for each slot,
+	// re-keyed off the published name the wire carries them under.
+	slotType    map[string]int
+	slotDecimal map[string]distributed.DecimalMeta
+}
+
+// fragmentGroupKeyPlan reads the planner's two names off the spec.
+//
+// ok=false means this spec carries no resolution list — an older coordinator —
+// and the caller falls back to derivedGroupKeys, which recovers the second name
+// by PARSING the first. That parse is what this field replaces: a text cannot
+// say whether the query wrote a name or an expression, so a key whose two names
+// differ was computed from its published name and collapsed the whole table
+// into one NULL group (ADR-0026 §2c, #736, #781, #794).
+func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, bool) {
+	if len(spec.GroupByResolve) != len(spec.GroupByCols) || len(spec.GroupByCols) == 0 {
+		return nil, false
+	}
+	// The shared allocator, seeded exactly as derivedGroupKeys seeds it: a
+	// slot is hidden only when nothing else in this fragment answers to it,
+	// and a group key's own name, an aggregate's argument or output, and a
+	// filter column are the three ways something can (ADR-0026 §2a).
+	alloc := plansql.NewSlotAllocator(spec.GroupByCols...)
+	for _, a := range spec.Aggregates {
+		alloc.Seed(a.InputCol, a.InputCol2, a.OutputCol)
+	}
+	for _, r := range spec.GroupByResolve {
+		alloc.Seed(r.Expr)
+	}
+	p := &fragmentGroupKeys{
+		resolve:     make([]string, len(spec.GroupByCols)),
+		computed:    map[string]plansql.Node{},
+		slotType:    map[string]int{},
+		slotDecimal: map[string]distributed.DecimalMeta{},
+	}
+	byRule := make([]string, len(spec.GroupByCols))
+	overrides := make([]string, len(spec.GroupByCols))
+	for i, pub := range spec.GroupByCols {
+		r := spec.GroupByResolve[i]
+		if !r.Computed {
+			p.resolve[i], byRule[i] = r.Expr, pub
+			continue
+		}
+		node, err := plansql.ParseExpression(r.Expr)
+		if err != nil {
+			// A resolution this worker cannot parse is not something to
+			// guess at: fall back whole, so the fragment behaves the way an
+			// older worker would rather than half one way and half the other.
+			return nil, false
+		}
+		slot, okSlot := alloc.Next(plansql.SlotGroupKey)
+		if !okSlot {
+			slot = plansql.SlotName(plansql.SlotGroupKey, 0)
+		}
+		p.resolve[i], byRule[i], overrides[i] = slot, slot, pub
+		p.computed[slot] = node
+		if t, has := spec.GroupByTypes[pub]; has {
+			p.slotType[slot] = t
+		}
+		if d, has := spec.GroupByDecimal[pub]; has {
+			p.slotDecimal[slot] = d
+		}
+	}
+	p.published = exec.PublishedGroupKeyNames(byRule, overrides, false)
+	return p, true
+}
+
+// fragmentGroupKeyNames is fragmentGroupKeyPlan's answer for the aggregate
+// builder: what to resolve each key by, and what to publish it as.
+func fragmentGroupKeyNames(spec distributed.OpSpec) (resolve, published []string, ok bool) {
+	p, ok := fragmentGroupKeyPlan(spec)
+	if !ok {
+		return nil, nil, false
+	}
+	return p.resolve, p.published, true
+}
+
 // derivedGroupKeys splits a fragment's GROUP BY key list into the keys this
 // fragment must COMPUTE and the column each key is RESOLVED by.
+//
+// It is the COMPATIBILITY path since ADR-0026's two-name carrier landed: a
+// spec that carries OpSpec.GroupByResolve says both names outright and nothing
+// is derived from text. See fragmentGroupKeyPlan.
 //
 // A key is derived when parsing it yields anything but a bare column
 // reference, and also when it IS a bare reference the planner marked derived:
