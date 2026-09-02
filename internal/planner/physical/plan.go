@@ -1762,10 +1762,9 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 	}
 }
 
-// materializeCTEColumnar runs a CTE body into a spill-backed collector,
-// applying the same first-row string→numeric coercion the boxed path did
-// (see cteCoercingSink). Returns the collector and the (possibly coerced)
-// output schema; the caller owns the collector and must Release it —
+// materializeCTEColumnar runs a CTE body into a spill-backed collector.
+// Returns the collector and the schema the body's own pipeline produced (see
+// cteMaterializingSink); the caller owns the collector and must Release it —
 // normally via PhysicalPlan.Cleanup through releaseCTECache.
 func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string) (*exec.SpillableBatchCollector, []parquet.Column, error) {
 	source, ops, _, err := p.buildSubqueryPipeline(ctx, sql)
@@ -1773,7 +1772,7 @@ func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string) (*exec
 		return nil, nil, err
 	}
 	coll := &exec.SpillableBatchCollector{Spill: p.getSpillManager()}
-	sink := &cteCoercingSink{coll: coll}
+	sink := &cteMaterializingSink{coll: coll}
 	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
 	if err := pipeline.Run(ctx); err != nil {
 		coll.Release()
@@ -1824,117 +1823,48 @@ func (p *Planner) cteCacheHasCollectors() bool {
 	return false
 }
 
-// cteCoercingSink wraps the CTE collector with the columnar equivalent of
-// inferCTESchema's first-row coercion: the expression evaluator emits
-// numeric literals as strings ("SELECT 1" produces "1"), and the boxed CTE
-// path coerced such columns to Int64/Float64 by inspecting the first row.
-// The plan is decided once, from the first non-empty batch, and every batch
-// is transformed BEFORE it reaches the collector — so spilled runs already
-// hold coerced data and replays need no per-reference transform. Columns
-// whose first value does not parse stay strings (real string data is never
-// touched: "CEO" doesn't parse).
-type cteCoercingSink struct {
-	coll    *exec.SpillableBatchCollector
-	planned bool
-	coerce  []parquet.TypeID // per-column target; TypeString = leave as-is
-	any     bool             // true when at least one column coerces
-	schema  []parquet.Column // output schema (coerced types); nil until first non-empty batch
+// cteMaterializingSink wraps the CTE collector and records the schema the CTE
+// body's own pipeline produced, which IS the CTE's schema.
+//
+// It used to SNIFF. The boxed CTE path rebuilt a schema from `map[string]any`
+// rows, where a numeric-looking string is indistinguishable from a number, so
+// it read the FIRST ROW of every STRING column and rewrote the WHOLE column to
+// INT64/FLOAT64 when that one value parsed; the columnar path inherited the
+// rule. That is a VALUE re-read as a TYPE — ADR-0026 §2c's confusion pointed
+// at data instead of at a name — and it made a column's type depend on the
+// rows the body happened to emit first.
+//
+// Over `decpair.s`, a genuine TEXT column holding "1.50", "1.5", "abc",
+// "1.500", the first row parsed. The column came back double precision:
+// `WHERE s = '1.50'` compared NUMBERS and counted 4 where PostgreSQL counts 1,
+// "abc" silently became NULL, and `SUM(CASE WHEN s='abc' THEN v ELSE 0 END)`
+// failed with `invalid input syntax for type double precision: "abc"` on a
+// query PostgreSQL answers with 25.50 (#727). The derived-table spelling of
+// the same query was right throughout, so two spellings of one question
+// answered two numbers. The old comment's claim — "real string data is never
+// touched: CEO doesn't parse" — is the impossibility no fixture attempted
+// (correctness-fix protocol rule 10), and adding `WHERE id = 3` to the body
+// was enough to flip the type back.
+//
+// Nothing needs the coercion now: a bare column carries the catalog's
+// declaration through the pipeline, and `SELECT 1` already declares INT64 at
+// the projection (#369), which is where a literal's type belongs.
+type cteMaterializingSink struct {
+	coll   *exec.SpillableBatchCollector
+	schema []parquet.Column // the first non-empty batch's schema; nil until then
 }
 
-func (s *cteCoercingSink) Init(ctx context.Context) error { return s.coll.Init(ctx) }
+func (s *cteMaterializingSink) Init(ctx context.Context) error { return s.coll.Init(ctx) }
 
-func (s *cteCoercingSink) Consume(ctx context.Context, b *batch.RecordBatch) error {
-	if !s.planned && b.ActiveLen() > 0 {
-		s.planBatch(b)
-	}
-	if s.any {
-		b = s.applyCoercions(b)
+func (s *cteMaterializingSink) Consume(ctx context.Context, b *batch.RecordBatch) error {
+	if s.schema == nil && b.ActiveLen() > 0 {
+		s.schema = append([]parquet.Column(nil), b.Schema...)
 	}
 	return s.coll.Consume(ctx, b)
 }
 
-func (s *cteCoercingSink) Finalize(ctx context.Context) error { return s.coll.Finalize(ctx) }
-func (s *cteCoercingSink) Close() error                       { return s.coll.Close() }
-
-// planBatch decides per-column coercions from the first active row,
-// mirroring inferCTESchema's rule: int64 first, then float64.
-func (s *cteCoercingSink) planBatch(b *batch.RecordBatch) {
-	s.planned = true
-	row0 := 0
-	if b.Sel != nil {
-		row0 = int(b.Sel[0])
-	}
-	s.coerce = make([]parquet.TypeID, len(b.Schema))
-	s.schema = append([]parquet.Column(nil), b.Schema...)
-	for ci, col := range b.Schema {
-		s.coerce[ci] = parquet.TypeString // sentinel: no coercion
-		if col.Type != parquet.TypeString {
-			continue
-		}
-		vec := b.Columns[ci]
-		if vec.Nulls.IsNullFast(row0) {
-			continue
-		}
-		v := string(vec.BytesData.Value(row0))
-		if _, err := strconv.ParseInt(v, 10, 64); err == nil {
-			s.coerce[ci] = parquet.TypeInt64
-		} else if _, err := strconv.ParseFloat(v, 64); err == nil {
-			s.coerce[ci] = parquet.TypeFloat64
-		}
-		if s.coerce[ci] != parquet.TypeString {
-			s.any = true
-			s.schema[ci].Type = s.coerce[ci]
-			s.schema[ci].Nullable = true
-		}
-	}
-}
-
-// applyCoercions rebuilds the coerced columns as typed vectors. All Len
-// slots are converted (Sel-agnostic — inactive slots become null, which is
-// harmless because Sel guards every read downstream); unparseable values
-// become null, matching what FromRows produced when the boxed path's
-// coerced schema met a non-numeric string.
-func (s *cteCoercingSink) applyCoercions(b *batch.RecordBatch) *batch.RecordBatch {
-	cols := append([]*batch.Vector(nil), b.Columns...)
-	for ci, target := range s.coerce {
-		if target == parquet.TypeString || ci >= len(cols) {
-			continue
-		}
-		src := cols[ci]
-		dst := batch.NewVector(target, b.Len)
-		for i := 0; i < b.Len; i++ {
-			if src.Nulls.IsNullFast(i) {
-				dst.Nulls.SetNull(i)
-				continue
-			}
-			v := string(src.BytesData.Value(i))
-			switch target {
-			case parquet.TypeInt64:
-				iv, err := strconv.ParseInt(v, 10, 64)
-				if err != nil {
-					dst.Nulls.SetNull(i)
-					continue
-				}
-				dst.Int64Data[i] = iv
-			case parquet.TypeFloat64:
-				fv, err := strconv.ParseFloat(v, 64)
-				if err != nil {
-					dst.Nulls.SetNull(i)
-					continue
-				}
-				dst.Float64Data[i] = fv
-			}
-			dst.Nulls.SetValid(i)
-		}
-		cols[ci] = dst
-	}
-	return &batch.RecordBatch{
-		Schema:  s.schema,
-		Columns: cols,
-		Len:     b.Len,
-		Sel:     b.Sel,
-	}
-}
+func (s *cteMaterializingSink) Finalize(ctx context.Context) error { return s.coll.Finalize(ctx) }
+func (s *cteMaterializingSink) Close() error                       { return s.coll.Close() }
 
 // inferCTESchema derives column types from a CTE's SQL and data rows.
 func (p *Planner) inferCTESchema(sql string, rows []map[string]any) []parquet.Column {
