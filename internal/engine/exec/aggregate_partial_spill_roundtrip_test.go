@@ -37,6 +37,7 @@ func TestPartialSpillRunCarriesEveryAccumulatorFieldItsSpecClaims(t *testing.T) 
 			HasMin:      true,
 			HasMax:      true,
 			DecOverflow: true,
+			IntOverflow: true,
 			IsFloat:     true,
 			IsDecimal:   true,
 			DecScale:    6,
@@ -53,7 +54,13 @@ func TestPartialSpillRunCarriesEveryAccumulatorFieldItsSpecClaims(t *testing.T) 
 	}{
 		{"sum-int", partialAggSpec{Func: AggSum},
 			[]field{{"Count", func(a *kernel.Accumulator) any { return a.Count }},
-				{"SumI64", func(a *kernel.Accumulator) any { return a.SumI64 }}}},
+				{"SumI64", func(a *kernel.Accumulator) any { return a.SumI64 }},
+				// The INT64 carrier's wrap flag, which the run format gained
+				// with WAGS\x02. Deleting the writeBool/readBool pair left both
+				// spill-format tests and the whole exec package green — only a
+				// coordinator cell one package away caught it (review round 3,
+				// F3), and this is the gate whose stated job it was.
+				{"IntOverflow", func(a *kernel.Accumulator) any { return a.IntOverflow }}}},
 		{"sum-float", partialAggSpec{Func: AggSum, IsFloat: true},
 			[]field{{"Count", func(a *kernel.Accumulator) any { return a.Count }},
 				{"SumF64", func(a *kernel.Accumulator) any { return a.SumF64 }}}},
