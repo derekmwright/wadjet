@@ -610,10 +610,12 @@ func ResolveRowCount(countStar bool) RowAggUpdater {
 func sumSliceCheckedInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLen int, acc *Accumulator) (int64, int64) {
 	var sum, count int64
 	over := false
-	hasNulls := nulls.HasNulls()
-	if sel != nil {
+	// The same four specialized loops sumSlice has, for the same reason: the
+	// null predicate is resolved once per vector, not once per row.
+	switch {
+	case sel != nil && nulls.HasNulls():
 		for _, idx := range sel {
-			if hasNulls && nulls.IsNullFast(int(idx)) {
+			if nulls.IsNullFast(int(idx)) {
 				continue
 			}
 			v := data[idx]
@@ -622,20 +624,33 @@ func sumSliceCheckedInt64(data []int64, nulls *batch.Bitmap, sel []uint32, vecLe
 			sum = s
 			count++
 		}
-		if over {
-			acc.IntOverflow = true
+	case sel != nil:
+		for _, idx := range sel {
+			v := data[idx]
+			s := sum + v
+			over = over || (sum^s)&(v^s) < 0
+			sum = s
 		}
-		return sum, count
-	}
-	for row := 0; row < vecLen; row++ {
-		if hasNulls && nulls.IsNullFast(row) {
-			continue
+		count = int64(len(sel))
+	case nulls.HasNulls():
+		for i := 0; i < vecLen; i++ {
+			if nulls.IsNullFast(i) {
+				continue
+			}
+			v := data[i]
+			s := sum + v
+			over = over || (sum^s)&(v^s) < 0
+			sum = s
+			count++
 		}
-		v := data[row]
-		s := sum + v
-		over = over || (sum^s)&(v^s) < 0
-		sum = s
-		count++
+	default:
+		for i := 0; i < vecLen; i++ {
+			v := data[i]
+			s := sum + v
+			over = over || (sum^s)&(v^s) < 0
+			sum = s
+		}
+		count = int64(vecLen)
 	}
 	if over {
 		acc.IntOverflow = true
