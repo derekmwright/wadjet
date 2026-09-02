@@ -269,7 +269,17 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		// sort merges), so it clusters like a sort-free grouped final.
 		if len(stage.GroupByCols) > 0 &&
 			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && !stage.HasLimit)) {
-			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.GroupByCols}
+			keys, ok := clusteringKeysForAggregate(stage)
+			if !ok {
+				// A RawInputAggregate whose keys are MATERIALIZED by its own
+				// fragment has no column to cluster its input on: the value
+				// does not exist until the pre-aggregate projection computes
+				// it. Demanding one anyway spliced an exchange keyed on the
+				// PUBLISHED name over a stream that carries neither it nor
+				// its bare form. Singleton is slower and right.
+				return RequiredDistribution{Kind: RequiredAny}
+			}
+			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: keys}
 		}
 		return RequiredDistribution{Kind: RequiredAny}
 	case StageSort, "merge_sort":
@@ -299,6 +309,33 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 	default:
 		return RequiredDistribution{Kind: RequiredAny}
 	}
+}
+
+// clusteringKeysForAggregate is the column list a grouped final/merge
+// aggregate's INPUT has to be clustered on.
+//
+// For a MERGE that is the published list: its input is a partial's output,
+// where every key is already a column under that name. For a
+// RawInputAggregate it is the RESOLUTION spelling, because its input is RAW
+// rows — the distribution pass hash-partitions them into disjoint groups and
+// the final aggregates them in one level, so the columns it must be
+// partitioned on are the ones the fragment RESOLVES the keys by (ADR-0026 §2).
+//
+// ok=false when the keys are MATERIALIZED by the fragment itself: there is no
+// input column to cluster on, and the caller asks for nothing rather than for
+// a name the stream does not carry.
+func clusteringKeysForAggregate(stage Stage) ([]string, bool) {
+	if !stage.RawInputAggregate || len(stage.GroupByResolve) != len(stage.GroupByCols) {
+		return stage.GroupByCols, true
+	}
+	keys := make([]string, len(stage.GroupByResolve))
+	for i, r := range stage.GroupByResolve {
+		if r.Computed || r.Expr == "" {
+			return nil, false
+		}
+		keys[i] = r.Expr
+	}
+	return keys, true
 }
 
 // OutputDistribution computes the partitioning a stage's output has, given
@@ -399,9 +436,15 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 		if len(stage.GroupByCols) > 0 &&
 			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && !stage.HasLimit)) &&
 			len(stage.Dependencies) == 1 {
-			if depDist, ok := deps[stage.Dependencies[0]]; ok &&
+			// Against the same list RequiredChildDistribution asked for: a
+			// RawInputAggregate's input is RAW rows and is clustered on the
+			// RESOLUTION spelling, while its own output carries the published
+			// names. Comparing the delivered keys with the published list
+			// would say "not mirrored" for an input that is.
+			want, ok := clusteringKeysForAggregate(stage)
+			if depDist, has := deps[stage.Dependencies[0]]; ok && has &&
 				depDist.Kind == DistHashPartitioned &&
-				keysEqual(depDist.Keys, stage.GroupByCols) {
+				keysEqual(depDist.Keys, want) {
 				return depDist
 			}
 		}
