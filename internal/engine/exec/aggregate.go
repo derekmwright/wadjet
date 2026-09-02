@@ -6055,11 +6055,8 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 			hfa.count[dstIdx] += ofa.count[srcIdx]
 		}
 		if hfa.sumI64 != nil {
-			hfa.sumI64[dstIdx] += ofa.sumI64[srcIdx]
-		}
-		if hfa.sumI64 != nil {
-			// The int64 fold is checked here for the same reason the scatter
-			// is: two group partials that each held their sum can wrap when
+			// The int64 fold is CHECKED for the same reason the scatter is:
+			// two group partials that each held their sum can wrap when
 			// combined, and this is where a drained partial rejoins.
 			cur, add := hfa.sumI64[dstIdx], ofa.sumI64[srcIdx]
 			sum := cur + add
