@@ -408,16 +408,35 @@ func TestScanDecodeAhead_AdmittedPastQueuedConsumers(t *testing.T) {
 		return bypasses, stalls
 	}
 
-	oldBypasses, oldStalls := run(t, false)
-	if oldBypasses != 0 {
-		t.Fatalf("old policy recorded %d decode bypasses; it has no such path", oldBypasses)
+	// Both surviving assertions are about an INTERLEAVING having happened —
+	// the decoder asked for a token while consumers were queued — and no
+	// arrangement of sleeps makes a scheduler produce one. A run that did not
+	// produce it is not evidence of a defect, so a single run cannot decide
+	// either. This is ADR-0013's bounded-retry mechanism: every attempt is a
+	// real run whose CORRECTNESS assertions (rows, sum, tokens returned) still
+	// fail immediately inside `run`, the loop stops the instant the
+	// interleaving is observed, and only an unbroken run of attempts that
+	// never produced it reaches the failure.
+	//
+	// It failed on CI at 33623247288 with "decode was never admitted past the
+	// queued consumers" while passing 15 of 15 locally: a loaded runner simply
+	// did not put a consumer in the queue at the moment the decoder asked.
+	const attempts = 5
+	var oldBypasses, oldStalls, newBypasses int64
+	for i := 0; i < attempts && oldStalls == 0; i++ {
+		oldBypasses, oldStalls = run(t, false)
+		if oldBypasses != 0 {
+			t.Fatalf("old policy recorded %d decode bypasses; it has no such path", oldBypasses)
+		}
 	}
 	if oldStalls == 0 {
-		t.Fatal("old policy: decode never token-stalled, so the fixture does not exercise admission")
+		t.Fatalf("old policy: decode never token-stalled in %d attempts, so the fixture does not exercise admission", attempts)
 	}
-	newBypasses, _ := run(t, true)
+	for i := 0; i < attempts && newBypasses == 0; i++ {
+		newBypasses, _ = run(t, true)
+	}
 	if newBypasses == 0 {
-		t.Fatal("new policy: decode was never admitted past the queued consumers")
+		t.Fatalf("new policy: decode was never admitted past the queued consumers in %d attempts", attempts)
 	}
 }
 
