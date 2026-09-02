@@ -200,8 +200,24 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	// `k = 'abc'` — and `k = '42'` — as the zero value and matched every row
 	// holding it. TIMESTAMP/DATE keep intVal (parseTimestampString), which is
 	// #493's territory, not this fix's.
+	//
+	// IntFilterBound, not Int64FilterConst: a constant with a FRACTION belongs
+	// to no integer, so the OPERATOR is rewritten rather than the value
+	// truncated — `c = 3.5` matched the row holding 3 and `c = -0.5` the row
+	// holding 0, because Go's float->int conversion truncates toward zero
+	// (#704). The verdicts answer the whole column and are hoisted here with
+	// the constants.
+	kOp, kOpOK := kernelCompareOp(op)
 	int64Val, int64Status := kernel.Int64FilterConst(value)
 	int32Val, int32Status := kernel.Int32FilterConst(value)
+	int64Op, int32Op := op, op
+	var int64Verdict, int32Verdict kernel.IntBoundVerdict
+	if kOpOK {
+		var k64, k32 kernel.CompareOp
+		int64Val, k64, int64Verdict, int64Status = kernel.IntFilterBound(value, kOp)
+		int32Val, k32, int32Verdict, int32Status = kernel.Int32FilterBound(value, kOp)
+		int64Op, int32Op = execCompareOp(k64), execCompareOp(k32)
+	}
 	// A FLOAT column's literal is read through the float input grammar when it
 	// is QUOTED, exactly as the vectorized kernel does (#646). toFloat64 has no
 	// string arm, so every quoted constant used to read as 0.0 — `f = '3.1'`
@@ -265,7 +281,10 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			if int64Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int64Status, strVal)})
 			}
-			return compareInt64(v.Int64Data[row], int64Val, op)
+			if b, decided := intBoundAnswer(int64Verdict); decided {
+				return b
+			}
+			return compareInt64(v.Int64Data[row], int64Val, int64Op)
 		case batch.TypeTimestamp:
 			// TIMESTAMP reads intVal (parseTimestampString), not the integer
 			// grammar — a quoted string is a timestamp here (#493).
@@ -274,7 +293,10 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			if int32Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
 			}
-			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), op)
+			if b, decided := intBoundAnswer(int32Verdict); decided {
+				return b
+			}
+			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), int32Op)
 		case batch.TypeFloat64:
 			if float64Status != kernel.NumConstOK {
 				panic(fatalEvalError{floatConstError(v.Type, value, litText)})
@@ -325,12 +347,18 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			if int32Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
 			}
-			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), op)
+			if b, decided := intBoundAnswer(int32Verdict); decided {
+				return b
+			}
+			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), int32Op)
 		case batch.TypeDuration:
 			if int64Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int64Status, strVal)})
 			}
-			return compareInt64(v.Int64Data[row], int64Val, op)
+			if b, decided := intBoundAnswer(int64Verdict); decided {
+				return b
+			}
+			return compareInt64(v.Int64Data[row], int64Val, int64Op)
 		case batch.TypeUUID:
 			// A UUID column stores 16 RAW bytes; the literal is 36 characters
 			// of text. Comparing them directly could never match, so
@@ -725,6 +753,36 @@ func intLitError(typ batch.TypeID, st kernel.IntConstStatus, text string) error 
 		name = "integer"
 	}
 	return intStatusError(st, name, text)
+}
+
+// intBoundAnswer turns kernel.IntFilterBound's whole-column verdict into the
+// row path's answer. decided=false means "compare this row" (#704).
+//
+// A NULL row never reaches here: the caller's null guard runs first, so
+// IntBoundAll answering true is "every non-NULL row", the same set the
+// vectorized kernel's comparison loop selects.
+// kernelCompareOp and execCompareOp translate between this package's
+// CompareOp and the kernel's. The two enums agree on their first six values
+// and this package adds OpIsNull/OpIsNotNull, which the kernel has no reading
+// for — ok=false for those, so the caller keeps the plain constant readers.
+func kernelCompareOp(op CompareOp) (kernel.CompareOp, bool) {
+	switch op {
+	case OpEq, OpNe, OpLt, OpLe, OpGt, OpGe:
+		return kernel.CompareOp(op), true
+	}
+	return 0, false
+}
+
+func execCompareOp(op kernel.CompareOp) CompareOp { return CompareOp(op) }
+
+func intBoundAnswer(v kernel.IntBoundVerdict) (val, decided bool) {
+	switch v {
+	case kernel.IntBoundNone:
+		return false, true
+	case kernel.IntBoundAll:
+		return true, true
+	}
+	return false, false
 }
 
 // intConstError is decimalConstError's counterpart for the integer-family

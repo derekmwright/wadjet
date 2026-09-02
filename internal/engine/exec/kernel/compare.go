@@ -362,22 +362,38 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// parseTimestampString: `k = 'abc'` (and `k = '42'`) coerced to 0 and
 		// matched every row holding zero (#536). A literal that names no
 		// integer returns no kernel; exec.intConstError raises 22P02.
-		n, st := Int64FilterConst(value)
+		//
+		// IntFilterBound, not Int64FilterConst: a constant with a FRACTION
+		// belongs to no integer, and reading it as int64(3.5) matched the row
+		// holding 3 (#704). It rewrites the operator instead.
+		n, op2, verdict, st := IntFilterBound(value, op)
 		if st != IntConstOK {
 			return nil
 		}
-		return compareFilterImpl(getInt64Data, n, op)
+		switch verdict {
+		case IntBoundNone:
+			return matchNothingKernel
+		case IntBoundAll:
+			return matchAllNonNullKernel(getInt64Data, int64(math.MinInt64))
+		}
+		return compareFilterImpl(getInt64Data, n, op2)
 	case batch.TypeTimestamp:
 		// TIMESTAMP keeps its own string grammar (parseTimestampString via
 		// toInt64): a quoted string against a TIMESTAMP column is a timestamp,
 		// not an integer — #493, not #536.
 		return compareFilterImpl(getInt64Data, toInt64(value), op)
 	case batch.TypeInt32:
-		n, st := Int32FilterConst(value)
+		n, op2, verdict, st := Int32FilterBound(value, op)
 		if st != IntConstOK {
 			return nil
 		}
-		return compareFilterImpl(getInt32Data, n, op)
+		switch verdict {
+		case IntBoundNone:
+			return matchNothingKernel
+		case IntBoundAll:
+			return matchAllNonNullKernel(getInt32Data, int32(math.MinInt32))
+		}
+		return compareFilterImpl(getInt32Data, n, op2)
 	case batch.TypeFloat64:
 		// Not compareFilterImpl: FLOAT compares in PostgreSQL's total order,
 		// where NaN is the greatest value and equal to itself, so `> 1e300`
@@ -469,19 +485,33 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// package asks the caller to raise — see compareFilterDecimal.
 		return nil
 	case batch.TypePort, batch.TypeProtocol:
-		// int32-backed integer types: same silent-zero as TypeInt32 (#536).
-		n, st := Int32FilterConst(value)
+		// int32-backed integer types: same silent-zero as TypeInt32 (#536),
+		// and the same fractional-constant rewrite (#704).
+		n, op2, verdict, st := Int32FilterBound(value, op)
 		if st != IntConstOK {
 			return nil
 		}
-		return compareFilterImpl(getInt32Data, n, op)
+		switch verdict {
+		case IntBoundNone:
+			return matchNothingKernel
+		case IntBoundAll:
+			return matchAllNonNullKernel(getInt32Data, int32(math.MinInt32))
+		}
+		return compareFilterImpl(getInt32Data, n, op2)
 	case batch.TypeDuration:
-		// int64-backed integer type: same silent-zero as TypeInt64 (#536).
-		n, st := Int64FilterConst(value)
+		// int64-backed integer type: same silent-zero as TypeInt64 (#536),
+		// and the same fractional-constant rewrite (#704).
+		n, op2, verdict, st := IntFilterBound(value, op)
 		if st != IntConstOK {
 			return nil
 		}
-		return compareFilterImpl(getInt64Data, n, op)
+		switch verdict {
+		case IntBoundNone:
+			return matchNothingKernel
+		case IntBoundAll:
+			return matchAllNonNullKernel(getInt64Data, int64(math.MinInt64))
+		}
+		return compareFilterImpl(getInt64Data, n, op2)
 	case batch.TypeUUID:
 		// ok is false when the literal is 36/32 characters of something
 		// other than hex, or any other length: not a UUID at all. The old
@@ -1332,12 +1362,24 @@ func float32InSet(values []any) (set map[float32]struct{}, hasNaN bool, st NumCo
 // so one predicate gets one answer whichever spelling the query used. A member
 // that names no integer, or one that overflows the column type, declines the
 // whole set; exec.intConstError raises PostgreSQL's 22P02 or 22003 for it.
+// int64InSet and int32InSet build an IN-list membership set.
+//
+// A member with a FRACTION is DROPPED rather than truncated (#704): no integer
+// equals 3.5, so it can contribute no match — `c IN (3.5, 99.5)` is empty and
+// `c NOT IN (3.5, 99.5)` is every non-NULL row, which an empty set gives
+// exactly. Truncating it added 3 to the set instead, and the IN list matched
+// the rows holding 3 while the scalar `= 3.5` matched them too. A member
+// outside the column's range is dropped for the same reason, which is why
+// these use IntFilterBound's equality verdict rather than the const readers.
 func int64InSet(values []any) (map[int64]struct{}, NumConstStatus) {
 	set := make(map[int64]struct{}, len(values))
 	for _, v := range values {
-		n, st := Int64FilterConst(v)
+		n, _, verdict, st := IntFilterBound(v, OpEq)
 		if st != NumConstOK {
 			return nil, st
+		}
+		if verdict != IntBoundCompare {
+			continue // no integer equals this member
 		}
 		set[n] = struct{}{}
 	}
@@ -1347,9 +1389,12 @@ func int64InSet(values []any) (map[int64]struct{}, NumConstStatus) {
 func int32InSet(values []any) (map[int32]struct{}, NumConstStatus) {
 	set := make(map[int32]struct{}, len(values))
 	for _, v := range values {
-		n, st := Int32FilterConst(v)
+		n, _, verdict, st := Int32FilterBound(v, OpEq)
 		if st != NumConstOK {
 			return nil, st
+		}
+		if verdict != IntBoundCompare {
+			continue
 		}
 		set[n] = struct{}{}
 	}
@@ -2107,6 +2152,143 @@ const (
 	IntConstSyntax
 	IntConstRange
 )
+
+// IntBoundVerdict is how a comparison between an INTEGER column and a numeric
+// constant that no row can equal is answered: by comparing against a rewritten
+// bound, or by the constant answer the whole column has.
+type IntBoundVerdict uint8
+
+const (
+	// IntBoundCompare: use the returned (value, operator) pair.
+	IntBoundCompare IntBoundVerdict = iota
+	// IntBoundNone: no row satisfies the predicate (NULLs excluded anyway).
+	IntBoundNone
+	// IntBoundAll: every non-NULL row satisfies it.
+	IntBoundAll
+)
+
+// IntFilterBound resolves an integer column's filter constant AND its operator
+// together, which is what a NON-INTEGRAL constant needs and Int64FilterConst
+// alone cannot give (#704).
+//
+// `int64(3.5)` is 3, so `c = 3.5` matched the row holding 3 and `c IN (3.5)`
+// matched it too; Go truncates TOWARD ZERO, so `c = -0.5` matched the row
+// holding 0. PostgreSQL compares `bigint = numeric` exactly and answers no
+// rows for all three. The typemx measurement in the arc brief read 0 for the
+// INT64 column only because no row of it holds 3 — `c_i64 = 1000003.5` matched
+// one, which is the same defect one fixture row away.
+//
+// For an integer column c and a constant f with a fraction, floor(f) = n:
+//
+//	c =  f  ->  no row          c <> f  ->  every non-NULL row
+//	c >  f  ->  c >  n          c >= f  ->  c >  n
+//	c <  f  ->  c <= n          c <= f  ->  c <= n
+//
+// The same rewrite answers a constant OUTSIDE int64 entirely (±Infinity
+// included, which is why the infinities need no arm of their own): there the
+// verdict is the whole column's, one way or the other. A NaN constant declines
+// — the caller raises rather than comparing against an implementation-defined
+// conversion — and no SQL spelling reaches this with one, since a quoted 'NaN'
+// is read by the integer grammar and refused there.
+//
+// Every non-float box delegates to Int64FilterConst with the operator
+// unchanged, so the ordinary path is exactly what it was.
+func IntFilterBound(v any, op CompareOp) (int64, CompareOp, IntBoundVerdict, IntConstStatus) {
+	var f float64
+	switch tv := v.(type) {
+	case float64:
+		f = tv
+	case float32:
+		f = float64(tv)
+	default:
+		n, st := Int64FilterConst(v)
+		return n, op, IntBoundCompare, st
+	}
+	if math.IsNaN(f) {
+		return 0, op, IntBoundCompare, IntConstSyntax
+	}
+	// Outside int64 the whole column is on one side of the constant. The
+	// bounds are compared as floats on purpose: float64(math.MaxInt64) rounds
+	// UP to 2^63, so `>=` here means "at or past the first float above every
+	// int64", which is the right cut.
+	switch {
+	case f >= 9223372036854775808.0: // 2^63, the first float past MaxInt64
+		return 0, op, intBoundAbove(op), IntConstOK
+	case f < -9223372036854775808.0: // below MinInt64
+		return 0, op, intBoundBelow(op), IntConstOK
+	}
+	n := math.Floor(f)
+	if n == f {
+		return int64(n), op, IntBoundCompare, IntConstOK
+	}
+	switch op {
+	case OpEq:
+		return 0, op, IntBoundNone, IntConstOK
+	case OpNe:
+		return 0, op, IntBoundAll, IntConstOK
+	case OpGt, OpGe:
+		return int64(n), OpGt, IntBoundCompare, IntConstOK
+	case OpLt, OpLe:
+		return int64(n), OpLe, IntBoundCompare, IntConstOK
+	}
+	return int64(n), op, IntBoundCompare, IntConstOK
+}
+
+// intBoundAbove is the verdict for a constant greater than every value the
+// column can hold; intBoundBelow for one smaller than every value.
+func intBoundAbove(op CompareOp) IntBoundVerdict {
+	switch op {
+	case OpLt, OpLe, OpNe:
+		return IntBoundAll
+	default: // OpEq, OpGt, OpGe
+		return IntBoundNone
+	}
+}
+
+func intBoundBelow(op CompareOp) IntBoundVerdict {
+	switch op {
+	case OpGt, OpGe, OpNe:
+		return IntBoundAll
+	default: // OpEq, OpLt, OpLe
+		return IntBoundNone
+	}
+}
+
+// Int32FilterBound is IntFilterBound narrowed to the int32-backed integer
+// types. A bound OUTSIDE int32 is the whole column's answer here rather than
+// the IntConstRange refusal Int32FilterConst makes for an equality constant:
+// `c_i32 > 3.5e9` names no int32 and no int32 satisfies it, which is a verdict
+// and not an error.
+func Int32FilterBound(v any, op CompareOp) (int32, CompareOp, IntBoundVerdict, IntConstStatus) {
+	switch v.(type) {
+	case float64, float32:
+	default:
+		// Every non-float box keeps Int32FilterConst's own answer, IntConstRange
+		// included: a QUOTED '3000000000' against an int4 column is
+		// PostgreSQL's 22003 (the unknown literal is coerced to the column's
+		// type) and #536 settled that. Only a NUMBER reaches the verdicts.
+		n, st := Int32FilterConst(v)
+		return n, op, IntBoundCompare, st
+	}
+	n, outOp, verdict, st := IntFilterBound(v, op)
+	if st != IntConstOK || verdict != IntBoundCompare {
+		return 0, outOp, verdict, st
+	}
+	switch {
+	case n > math.MaxInt32:
+		return 0, outOp, intBoundAbove(outOp), IntConstOK
+	case n < math.MinInt32:
+		return 0, outOp, intBoundBelow(outOp), IntConstOK
+	}
+	return int32(n), outOp, IntBoundCompare, IntConstOK
+}
+
+// matchAllNonNullKernel selects every row the column does not hold NULL in —
+// IntBoundAll's kernel. It is spelled as an ordinary comparison rather than a
+// bespoke loop so the NULL rule stays in exactly one place.
+func matchAllNonNullKernel[T Ordered](getData func(v *batch.Vector) []T, min T) FilterKernel {
+	return compareFilterImpl(getData, min, OpGe)
+}
 
 // pgIntWhitespace is the whitespace PostgreSQL's integer input (pg_strtoint*)
 // skips at both ends: C isspace() in the default locale — space, tab,

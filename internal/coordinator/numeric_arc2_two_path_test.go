@@ -166,6 +166,38 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#703", "distinct_over_text",
 			`SELECT COUNT(DISTINCT s) AS cs, MIN(DISTINCT s) AS ms, MAX(DISTINCT s) AS xs FROM decpair`,
 			[]string{"cs=int64:8|ms=-1|xs=abc"}},
+
+		// ------------------------------------------------------------------
+		// #704 — an integer column against a NON-INTEGRAL numeric literal.
+		// The filter kernels read the constant with `int64(float)`, which
+		// TRUNCATES toward zero, so `= 3.5` matched the row holding 3 and
+		// `= -0.5` matched the row holding 0. The typemx measurement in the
+		// arc brief read 0 for the INT64 column only because no row of that
+		// column holds 3; `c_i64 = 1000003.5` matched one.
+		{"#704", "int32_eq_a_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 = 3.5`, []string{"n=int64:0"}},
+		{"#704", "int32_ne_a_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 <> 3.5`, []string{"n=int64:4828"}},
+		{"#704", "int32_ne_a_negative_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 <> -0.5`, []string{"n=int64:4828"}},
+		{"#704", "int64_not_in_a_fraction_list",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i64 NOT IN (3.5, 99.5)`, []string{"n=int64:4839"}},
+		{"#704", "int32_in_a_fraction_list",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 IN (3.5, 99.5)`, []string{"n=int64:0"}},
+		{"#704", "int32_eq_a_negative_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 = -0.5`, []string{"n=int64:0"}},
+		{"#704", "int32_gt_a_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 > 3.5`, []string{"n=int64:4826"}},
+		{"#704", "int32_le_a_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 <= 3.5`, []string{"n=int64:2"}},
+		{"#704", "int32_lt_a_negative_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 < -0.5`, []string{"n=int64:0"}},
+		{"#704", "int64_eq_a_fraction_a_row_would_truncate_onto",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i64 = 1000003.5`, []string{"n=int64:0"}},
+		{"#704", "int64_ge_a_fraction",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i64 >= 3.5`, []string{"n=int64:4838"}},
+		{"#704", "int32_eq_an_integral_literal_still_matches",
+			`SELECT COUNT(*) AS n FROM typemx WHERE c_i32 = 3.0`, []string{"n=int64:1"}},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			for _, arm := range []struct {
