@@ -335,6 +335,37 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			want: "4 rows: 1.0000|1;2.0001|1;3.0002|1;4.0003|1;",
 		},
 		{
+			// Method 10 for the typing walk's descent: a derived alias that
+			// SHADOWS a base column. `typemx.g` is `i % 7` — seven groups plus
+			// a NULL — so a scope walk that typed or bound the SCAN's `g`
+			// instead of the derived `id % 3` would answer eight rows here,
+			// silently, with the right total.
+			name: "ctl/a-derived-alias-that-shadows-a-base-column",
+			sql: "SELECT x.g AS g, COUNT(*) AS n FROM (SELECT id, id % 3 AS g FROM typemx) x " +
+				"GROUP BY x.g ORDER BY g",
+			cols: []string{"g", "n"},
+			want: "3 rows: 0|1667;1|1667;2|1666;",
+		},
+		{
+			// The two shapes that put a value-preserving WRAPPER between the
+			// derived Project and the scan, which is what `groupKeyScopeDescends`
+			// has to look through. Both are DECIMAL, so a scope that stopped at
+			// the Project would type them FLOAT64 and die at the #361 store
+			// guard rather than answering.
+			name: "ctl/a-derived-table-with-an-order-by-inside",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl +
+				" ORDER BY id) x GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+		},
+		{
+			name: "ctl/a-derived-table-with-a-limit-inside",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl +
+				" ORDER BY id LIMIT 5) x GROUP BY x.w ORDER BY w",
+			cols: []string{"w", "n"},
+			want: "3 rows: -0.03|1;6.00|1;38.25|3;",
+		},
+		{
 			// A computed alias BESIDE a window that has nothing to do with it.
 			// `id % 7 AS k` is ordinary arithmetic over a scan column; round 1's
 			// second predicate answered the alias here and turned a correct DAG
@@ -400,7 +431,25 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 	// fix has to be about what a STAGE emits rather than about what kind of node
 	// produced it.
 	//
-	// TODO(#781): delete these when a computed alias over a bare scan resolves.
+	// The MECHANISM in one sentence, and it is structural rather than a
+	// spelling bug: `Stage.GroupByCols` is simultaneously what the worker
+	// COMPUTES the key from and what it PUBLISHES it as (ADR-0026 §2), so a key
+	// that names a derived table's computed alias has two names and one field
+	// — and neither of them works here, because the defining expression is
+	// spelled over columns the join does not carry while the alias is a bare
+	// name a join stream cannot qualify.
+	//
+	// This arc built and then WITHDREW a pass that chose between the two
+	// spellings against the producing fragment's emitted columns (ADR-0026
+	// §4a/§5): it bound a qualified alias to the wrong join arm, and it refused
+	// a shape the DAG already answered, both because the stage model
+	// under-reports a join fragment's output (#795). The disposition is to
+	// carry TWO names on the Stage, through `distributed.OpSpec`, the worker's
+	// aggregate builder, the exchange's partial and the fan-out's intermediate
+	// phase, with that model made complete — its own arc, led by #794 and #795.
+	//
+	// TODO(#794): delete these when a Stage carries the resolution spelling
+	// beside the published name.
 	for _, c := range []struct {
 		name, sql string
 		cols      []string
@@ -435,6 +484,52 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			dagPinned: "8 rows: 0|;1|;2|;3|;4|;5|;6|;|;",
 		},
 		{
+			// TWO derived arms publishing the SAME alias from DIFFERENT
+			// expressions, with the key naming one of them. It is here because
+			// it is the shape that says what the structural fix has to carry: a
+			// join fragment's stream holds `w` and never `y.w` — only a join KEY
+			// arrives qualified — so a stage that names the key by its alias can
+			// only name it BARE, and the batch then holds two columns called
+			// `w` with `RecordBatch.ColumnIndex` answering the first. A
+			// published name that cannot say WHICH `w` is not a published name.
+			//
+			// Both directions, because a repair that picks the first hit is
+			// right on one of them by luck: the bare `w` a broadcast join
+			// happens to carry is the PROBE arm's, so `GROUP BY x.w` would look
+			// fixed while `GROUP BY y.w` silently answered x's values.
+			name: "pin781/ambiguous-alias-two-arms-key-names-the-build-arm",
+			sql: "SELECT y.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl +
+				") x JOIN (SELECT id, a*100 AS w FROM " + tbl + ") y ON x.id=y.id " +
+				"GROUP BY y.w ORDER BY w",
+			cols:      []string{"w", "n"},
+			pg:        "5 rows: -1.00|1;0.00|1;200.00|1;1275.00|4;|2;",
+			dagPinned: "1 rows: |9;",
+		},
+		{
+			name: "pin781/ambiguous-alias-two-arms-key-names-the-probe-arm",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a*3 AS w FROM " + tbl +
+				") x JOIN (SELECT id, a*100 AS w FROM " + tbl + ") y ON x.id=y.id " +
+				"GROUP BY x.w ORDER BY w",
+			cols:      []string{"w", "n"},
+			pg:        "5 rows: -0.03|1;0.00|1;6.00|1;38.25|4;|2;",
+			dagPinned: "1 rows: |9;",
+		},
+		{
+			// The same computed alias with a LIMIT inside the derived table,
+			// read through a join. Its no-join twin
+			// (`ctl/a-derived-table-with-a-limit-inside`, asserted above) is
+			// right on every arm, which is what says the LIMIT is not the
+			// trigger — the join is, and the aggregate it produces is a single
+			// MERGE-mode final with no partial beneath it, so the two names a
+			// key needs have nowhere to live (#794).
+			name: "pin781/a-derived-table-with-a-limit-inside-under-a-join",
+			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT id, a * 3 AS w FROM " + tbl +
+				" ORDER BY id LIMIT 5) x JOIN " + tbl + " z ON x.id = z.id GROUP BY x.w ORDER BY w",
+			cols:      []string{"w", "n"},
+			pg:        "3 rows: -0.03|1;6.00|1;38.25|3;",
+			dagPinned: "1 rows: |5;",
+		},
+		{
 			// And through a DISTINCT rather than a join, so the pin covers both
 			// producers the plain-arithmetic entries above cover.
 			name: "pin781/an-aggregate-wrapped-alias-under-a-distinct",
@@ -448,6 +543,10 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			for _, arm := range arms {
+				routesBefore := int64(0)
+				if arm.coord != nil {
+					routesBefore = arm.coord.GroupKeyLocalRoutes()
+				}
 				res, err := arm.run(c.sql)
 				if arm.coord == nil {
 					if err != nil {
@@ -469,8 +568,21 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 				}
 				if err != nil {
 					t.Fatalf("the %s arm now FAILS where this pin records %q; PostgreSQL answers "+
-						"%q. Re-measure #781 and update or delete this pin: %v\n  SQL: %s",
+						"%q. Re-measure #794 and update or delete this pin: %v\n  SQL: %s",
 						arm.name, c.dagPinned, c.pg, err, c.sql)
+				}
+				// The DISPOSITION, beside the rows. Every shape here is a wrong
+				// ANSWER and not a refusal, and the difference matters: a change
+				// that starts routing one of these to the coordinator-local
+				// pipeline has made it RIGHT by a different mechanism, which is
+				// a fix to record rather than a pin to keep. Asserting rows
+				// alone cannot tell the two apart — that is how a
+				// right-to-routed move survived a whole review round elsewhere
+				// in this cell.
+				if arm.coord.GroupKeyLocalRoutes() != routesBefore {
+					t.Errorf("the %s arm ROUTED this shape to the local pipeline where this pin "+
+						"records the DAG answering it wrongly. If the answer is now PostgreSQL's, "+
+						"that is a fix: assert it and delete the pin\n  SQL: %s", arm.name, c.sql)
 				}
 				got := dajDigest(res, c.cols)
 				if got == c.pg {
