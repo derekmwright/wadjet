@@ -2482,6 +2482,11 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			InputCol2:  a.InputCol2,
 			Separator:  a.Separator,
 			Percentile: a.Percentile,
+			// SQL's DISTINCT for every aggregate but COUNT, which arrives as
+			// the func name "count_distinct" (#703). The planner routes every
+			// DISTINCT aggregate through the one-level RawInputAggregate
+			// shape, so this stage sees raw rows and the set is exact.
+			Distinct:   a.Distinct,
 			OutputCol:  a.OutputCol,
 			OutputType: aggSpecOutputType(a),
 			// The (p,s) the identity row of a zero-input aggregate declares.

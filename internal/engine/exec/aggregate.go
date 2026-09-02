@@ -92,6 +92,22 @@ type AggColumn struct {
 	Separator       string  // separator for STRING_AGG (default ',')
 	InputCol2       string  // second input column (corr, covar, min_by, max_by)
 	Percentile      float64 // percentile value for percentile_cont/percentile_disc
+	// Distinct is SQL's `AGG(DISTINCT x)` for every aggregate but COUNT,
+	// which spells it as its own AggFunc (AggCountDistinct) because its whole
+	// state IS the set.
+	//
+	// It used to be dropped for all the others: the planner mapped the flag
+	// onto AggCountDistinct and threw it away otherwise, so over decpair
+	// `SUM(DISTINCT a)` answered 52.99 for PostgreSQL's 14.74 and
+	// `AVG(DISTINCT a)` 7.570000 for 3.685 — the plain aggregate wearing the
+	// DISTINCT spelling, silently (#703). MIN/MAX were right by construction
+	// and stay so; every other aggregate now dedupes its input.
+	//
+	// The set is the same distinctSet COUNT(DISTINCT) uses and it is keyed on
+	// the value at its EXACT type (ADR-0023's encoding through
+	// appendColumnValue), so a DECIMAL dedupes at its own scale rather than
+	// through a float.
+	Distinct bool
 	// InputColIdx pins the input to a physical column POSITION, bypassing
 	// name resolution, when InputColIdxSet is true. A distributed merge over
 	// two aggregates sharing one alias (#575) reads two partial columns of
@@ -1694,6 +1710,15 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	// STRING_AGG, etc. which need the generic processRow path).
 	allSimpleAggs := true
 	for i, agg := range h.Aggs {
+		// A DISTINCT aggregate reads its own value set before it accumulates,
+		// which the flat scatter kernels have no room for: they update an
+		// array slot from a vector and never look at what came before. So a
+		// DISTINCT aggregate takes the generic processRow path, exactly as
+		// COUNT(DISTINCT) already does (#703).
+		if agg.Distinct {
+			allSimpleAggs = false
+			h.needsDistinct = true
+		}
 		switch agg.Func {
 		case AggCountDistinct, AggApproxDistinct:
 			allSimpleAggs = false
@@ -3903,9 +3928,23 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 // h.needsDistinct / h.needsExtra.
 func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBatch) {
 	for i, agg := range h.Aggs {
+		// The DISTINCT set of an aggregate that is not COUNT (#703). Allocated
+		// here, beside COUNT(DISTINCT)'s, so one merge rule
+		// (mergeSinkState/distinctSet.mergeFrom) serves both.
+		if agg.Distinct && ext.distinctSets != nil && ext.distinctSets[i] == nil {
+			// A TWO-ARGUMENT aggregate dedupes on the pair, so its key is the
+			// two encodings appended — a string set whatever the first
+			// column's type is. distinctFirstSighting builds the same key.
+			typ := h.distinctColType(b, i)
+			if i < len(h.aggColIdx2) && h.aggColIdx2[i] >= 0 {
+				typ = batch.TypeString
+			}
+			ext.distinctSets[i] = newDistinctSetFor(typ)
+			h.distinctBytes += 48
+		}
 		switch agg.Func {
 		case AggCountDistinct, AggApproxDistinct:
-			if ext.distinctSets != nil {
+			if ext.distinctSets != nil && ext.distinctSets[i] == nil {
 				ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
 				h.distinctBytes += 48
 			}
@@ -3949,6 +3988,13 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row int) {
 	ext := gs.extras
 	for i, agg := range h.Aggs {
+		// SQL's DISTINCT, for every aggregate whose state is not itself the
+		// set: the row is folded in the FIRST time this group sees its value
+		// and skipped afterwards (#703). COUNT(DISTINCT)/APPROX_DISTINCT keep
+		// their own arms below — their answer IS the set's size.
+		if agg.Distinct && !h.distinctFirstSighting(ext, i, b, row) {
+			continue
+		}
 		// MIN/MAX over a container is the one aggregate whose FUNC does not
 		// decide its path — the input type does. Kept ahead of the switch,
 		// behind one bool, so the ordinary MIN/MAX arm below stays exactly
@@ -5680,6 +5726,65 @@ func (h *HashAggregate) distinctColType(b *batch.RecordBatch, i int) batch.TypeI
 		}
 	}
 	return batch.TypeString
+}
+
+// distinctFirstSighting reports whether this group is seeing aggregate i's
+// argument value for the FIRST time, recording it if so — SQL's
+// `AGG(DISTINCT x)` for every aggregate whose state is not the set itself
+// (#703).
+//
+// A NULL argument answers true and records nothing: NULL is not part of any
+// aggregate's input, and every arm of updateGroup skips it on its own, so
+// answering false here would only move that skip earlier — while putting NULL
+// in the set would make the FIRST null suppress a later real value under a
+// representation where they collide.
+//
+// The key is the value at its EXACT type: the int set for the int-class
+// columns, and otherwise appendColumnValue's encoding — the same one the
+// group key uses (ADR-0023), so a DECIMAL dedupes on its unscaled integer at
+// its own scale and never through a float. A second argument (CORR, COVAR_*,
+// MIN_BY, MAX_BY) is appended to the same key, because PostgreSQL's DISTINCT
+// dedupes an aggregate's whole ARGUMENT LIST rather than its first argument.
+func (h *HashAggregate) distinctFirstSighting(ext *groupStateExtras, i int, b *batch.RecordBatch, row int) bool {
+	if ext == nil || i >= len(ext.distinctSets) {
+		return true
+	}
+	ds := ext.distinctSets[i]
+	if ds == nil {
+		return true
+	}
+	idx := h.aggColIdx[i]
+	if idx < 0 || idx >= len(b.Columns) {
+		return true
+	}
+	v := b.Columns[idx]
+	if v.Nulls.IsNullFast(row) {
+		return true
+	}
+	idx2 := -1
+	if i < len(h.aggColIdx2) {
+		idx2 = h.aggColIdx2[i]
+	}
+	if ds.ints != nil && idx2 < 0 {
+		if ds.addInt(intColValue(v, row)) {
+			h.distinctBytes += 16
+			return true
+		}
+		return false
+	}
+	h.keyBuf = appendColumnValue(h.keyBuf[:0], v, row, v.Type)
+	if idx2 >= 0 && idx2 < len(b.Columns) {
+		v2 := b.Columns[idx2]
+		if v2.Nulls.IsNullFast(row) {
+			return true
+		}
+		h.keyBuf = appendColumnValue(h.keyBuf, v2, row, v2.Type)
+	}
+	if ds.addStr(h.keyBuf) {
+		h.distinctBytes += int64(len(h.keyBuf)) + 48
+		return true
+	}
+	return false
 }
 
 // intColValue reads an int-class column value widened to int64.

@@ -655,6 +655,14 @@ type AggSpec struct {
 	InputCol2  string
 	Separator  string
 	Percentile float64
+	// Distinct is SQL's `AGG(DISTINCT x)` for every aggregate but COUNT,
+	// which travels as the Func string "count_distinct" instead. It is
+	// mirrored onto distributed.AggSpec at dispatch and read back into
+	// exec.AggColumn.Distinct by the worker; without it a distributed
+	// SUM(DISTINCT x) was a plain SUM (#703). Every DISTINCT aggregate
+	// already forces the one-level RawInputAggregate shape (hasDistinctAgg),
+	// so the worker's final stage sees raw rows and the set is exact.
+	Distinct bool
 }
 
 // SortKeySpec defines a sort key in a stage.
@@ -5713,6 +5721,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// to COUNT(x) on every path).
 			if agg.Distinct && strings.EqualFold(agg.Func, "count") {
 				spec.Func = "count_distinct"
+			} else if agg.Distinct {
+				// Every OTHER aggregate carries the flag itself (#703). The
+				// worker maps it onto exec.AggColumn.Distinct; before this it
+				// was dropped here and a distributed SUM(DISTINCT x) was a
+				// plain SUM, silently.
+				spec.Distinct = true
 			}
 			if agg.Distinct {
 				hasDistinctAgg = true
@@ -9234,6 +9248,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			Percentile: agg.Percentile,
 			OutputCol:  agg.OutputCol,
 			OutputType: outType,
+			// DISTINCT for every aggregate PostgreSQL accepts it for, not
+			// only COUNT (#703). COUNT spells it as its own AggFunc above —
+			// its state IS the set — so the flag would be redundant there;
+			// MIN/MAX are unaffected by de-duplication and carry it only so
+			// the two paths declare the same spec.
+			Distinct: agg.Distinct && fn != exec.AggCountDistinct,
 		}
 		// And the (p,s) a bare TypeID cannot carry, for the same reason: it
 		// decides what the identity row of an EMPTY input declares, which is

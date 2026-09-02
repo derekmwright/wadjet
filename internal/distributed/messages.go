@@ -863,6 +863,11 @@ type AggSpec struct {
 	// Zero for every other function (and a legal fraction for those two,
 	// which is why nothing reads it as "unset").
 	Percentile float64 `json:"percentile,omitempty"`
+	// Distinct is SQL's `AGG(DISTINCT x)` for every aggregate but COUNT,
+	// which travels as Func "count_distinct". The worker maps it onto
+	// exec.AggColumn.Distinct; a plan that dropped it ran a plain SUM under
+	// the DISTINCT spelling (#703).
+	Distinct bool `json:"distinct,omitempty"`
 }
 
 // GatherBatchMsg is the NATS message body the worker publishes to the

@@ -59,6 +59,7 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 			InputCol2:  a.InputCol2,
 			Separator:  a.Separator,
 			Percentile: a.Percentile,
+			Distinct:   a.Distinct,
 		}
 		// physical.AggSpec.OutputType (parquet.TypeID, plain int) is itself
 		// ambiguous at zero: TypeBool IS zero, and it is a GENUINE

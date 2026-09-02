@@ -134,6 +134,38 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		{"#749", "wide_decimal_minus_a_fraction_keeps_the_wider_scale",
 			`SELECT dw - 0.5 AS d FROM decwin WHERE id = 199`,
 			[]string{"d=997333333445532.8129445454"}},
+
+		// ------------------------------------------------------------------
+		// #703 — DISTINCT was mapped onto COUNT's own AggFunc and dropped for
+		// every other aggregate, so SUM(DISTINCT a) was a plain SUM wearing
+		// the DISTINCT spelling.
+		{"#703", "distinct_over_a_decimal_column",
+			`SELECT SUM(DISTINCT a) AS sd, AVG(DISTINCT a) AS ad, MIN(DISTINCT a) AS md, ` +
+				`MAX(DISTINCT a) AS xd, COUNT(DISTINCT a) AS cd FROM decpair`,
+			[]string{"sd=14.74|ad=3.685000|md=-0.01|xd=12.75|cd=int64:4"}},
+		{"#703", "distinct_over_the_wider_decimal_column",
+			`SELECT SUM(DISTINCT b) AS sb FROM decpair`,
+			[]string{"sb=49.2400"}},
+		{"#703", "distinct_grouped_over_integers",
+			`SELECT g AS k, SUM(DISTINCT c_i32) AS s, COUNT(DISTINCT c_i32) AS c ` +
+				`FROM typemx WHERE id < 40 GROUP BY g ORDER BY k`,
+			// Sorted as TEXT by na2Run, so the NULL key leads.
+			[]string{
+				"k=NULL|s=float:225|c=int64:3",
+				"k=int32:0|s=float:231|c=int64:5",
+				"k=int32:1|s=float:333|c=int64:6",
+				"k=int32:2|s=float:351|c=int64:6",
+				"k=int32:3|s=float:255|c=int64:5",
+				"k=int32:4|s=float:312|c=int64:5",
+				"k=int32:5|s=float:249|c=int64:4",
+				"k=int32:6|s=float:300|c=int64:5",
+			}},
+		{"#703", "distinct_over_a_float_column",
+			`SELECT SUM(DISTINCT f) AS sf, AVG(DISTINCT f) AS af FROM decpair`,
+			[]string{"sf=float:138.75|af=float:17.3438"}},
+		{"#703", "distinct_over_text",
+			`SELECT COUNT(DISTINCT s) AS cs, MIN(DISTINCT s) AS ms, MAX(DISTINCT s) AS xs FROM decpair`,
+			[]string{"cs=int64:8|ms=-1|xs=abc"}},
 	} {
 		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
 			for _, arm := range []struct {

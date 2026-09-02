@@ -99,6 +99,17 @@ func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, 
 			// marks bare SUM/MIN/MAX today, so this is belt-and-braces.
 			unknown = true
 		}
+		if s.Distinct {
+			// A DISTINCT aggregate has no partial form this operator can
+			// combine: two senders that each saw the same value would each
+			// contribute it, and the merge above adds them (#703 — the same
+			// double-count #291 recorded for COUNT(DISTINCT), which reaches
+			// here as the "count_distinct" func name and is refused by the
+			// parse above). Disabling the pre-combine is free: the plan
+			// already routes every DISTINCT aggregate through the one-level
+			// RawInputAggregate shape.
+			unknown = true
+		}
 		aggs[i] = exec.AggColumn{
 			Func:       fn,
 			InputCol:   s.InputCol,
