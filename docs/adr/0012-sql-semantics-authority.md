@@ -342,6 +342,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      no comparator or key ever meets one.
    - **A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.** (Closed #617.) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k WHERE ...` references a sibling of the comma join in its ON clause. PostgreSQL 17 rejects this with "invalid reference to FROM-clause entry"; wadjet answers it, matching DuckDB. This is a strict SUPERSET: errors on PostgreSQL, runs on wadjet; not a value divergence and not a wire-protocol violation. Gated against DuckDB and the two-path oracle (PostgreSQL offers no value to assert). #593 fixed the prior silent-zero wrong answer in this shape. The reject-like-PostgreSQL alternative was considered and declined because no client should rely on the error and the planner lacks the ON-scope validation it would require.
 
+   - **An EXACT decimal operator raises where PostgreSQL answers, past the
+     carrier.** (Added 2026-09-02, #749.) `+ - * %` keep PostgreSQL's scale
+     and cap the precision at 38 (ADR-0024 §3's 2026-09-02 amendment), so a
+     result needing more than 38 digits at that scale is a 22003 rather than a
+     value rounded to fewer fraction digits. The reachable case is
+     `DECIMAL(38,10) × DECIMAL(38,10)`, whose type is `(38,20)`: a product past
+     10^18 raises where PostgreSQL's unbounded numeric answers. It is item 1's
+     finite carrier, not a new position, and it is the trade #749 makes
+     deliberately — a right value of the wrong type is worse than an error.
+     Pinned in the PostgreSQL corpus as `WideDecimalSquaredRowCount` under the
+     kind `pgDivergenceCarrier`, which ratchets.
+
+   - **DISTINCT is accepted for aggregates PostgreSQL refuses it for.** (Added
+     2026-09-02, #703.) Wadjet honours `AGG(DISTINCT x)` for every aggregate
+     its parser accepts it on. Three of those PostgreSQL either refuses or does
+     not have: `MEDIAN(DISTINCT a)`, `APPROX_DISTINCT(DISTINCT a)` and
+     `MIN_BY(DISTINCT a, b)` — PostgreSQL spells the first with `WITHIN GROUP`
+     and answers `cannot use DISTINCT with WITHIN GROUP`, and has neither of
+     the others. A strict SUPERSET: an error there, an answer here, never a
+     different value for a query both engines accept. The DISTINCT semantics
+     for the aggregates PostgreSQL DOES accept it on are PostgreSQL's, values
+     and ordering both — `STRING_AGG(DISTINCT s, ',')` sorts the distinct
+     values, which is what PostgreSQL's dedup produces and what wadjet emits
+     since #703's review round.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`

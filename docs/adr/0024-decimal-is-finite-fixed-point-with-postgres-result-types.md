@@ -62,6 +62,7 @@ Category resolution is PostgreSQL's, already pinned for set operations by
 `TestSetOpWidenLadder` and now applied everywhere:
 
     INT32 → INT64 → DECIMAL → FLOAT64
+    SUM(int2/int4) → bigint ; SUM(int8) → numeric ; AVG(int*) → numeric
     numeric ⊕ integer   → numeric      (an integer is DECIMAL(10,0) / (19,0))
     numeric ⊕ float8    → float8       (float8 is the category's preferred type)
     int ⊕ int           → int          (truncating division, as PostgreSQL)
@@ -270,6 +271,46 @@ the fraction is at that floor does the integer part shrink (`(40,4)` →
 `(38,4)`, not `(38,2)`). This is Spark's `adjustPrecisionScale` verbatim.
 It is a **documented divergence in the number of digits kept**, the same class ADR-0012 item 9 already accepts for AVG:
 both engines are exact to the digits they keep and agree to `min(scale)`.
+
+**Amended 2026-09-02 (#749): the reduction applies to DIVISION only. For
+`+ - * %` the precision is capped at 38 and the SCALE IS KEPT.**
+
+The rule above spends fraction digits to buy integer ones. For an operator
+whose scale is EXACT — the scale at which the result has no rounding at all —
+those are digits the answer has, and spending them produces a correctly
+ROUNDED value of the wrong type, which is indistinguishable from an exact one.
+Over a `DECIMAL(38,10)` column it made `dw + 1` scale 9 and `dw * 2` scale 8
+where PostgreSQL keeps all ten:
+
+    dw      997333333445533.3129445454
+    dw + 1  997333333445534.3129445454   was  ...534.312944545
+    dw * 2  1994666666891066.6258890908  was  ...066.62588909
+
+Item 4 is what replaces it: a value with no exact carrier at its declared type
+is a loud 22003, never a silently narrower one (correctness-fix protocol rule
+8, "loud beats plausible"). So an exact operator whose computed precision
+exceeds 38 caps the precision and keeps the scale, whenever the scale itself is
+one the carrier can declare; a scale past 38 keeps the old reduction, because
+there is no exact type to preserve.
+
+DIVISION is untouched. Its scale is `max(6, s1 + p2 + 1)` — a floor this
+project chose, not a fact about the operands — so reducing it drops no digit
+the answer had.
+
+**What it costs, recorded rather than left to be discovered.** RANGE, and the
+carrier's own: at scale s an Int128 holds `38 − s` integer digits.
+`DECIMAL(38,10) × DECIMAL(38,10)` is `(38,20)` now rather than `(38,6)`, so a
+product past 10^18 raises 22003 where it used to come back rounded to six
+fraction digits, and where PostgreSQL's unbounded numeric answers. That is a
+query which stopped answering, it is the same trade item 7 makes for the
+set-operation cap, and it is pinned in the PostgreSQL corpus as
+`WideDecimalSquaredRowCount` under the kind `pgDivergenceCarrier` — a pin that
+ratchets, so a rule change that makes wadjet answer it again re-opens this
+paragraph. TPC-H's `DECIMAL(15,2)` arithmetic never reaches p > 38, so the
+benchmark fixture is unaffected.
+
+`batch.DecimalResultType` is the one function; `batch.TestDecimalResultTypeFollowsADR0024`
+carries a row per operator for both sides of the boundary.
 
 Scale reduction and division round half away from zero, PostgreSQL's numeric
 rounding.

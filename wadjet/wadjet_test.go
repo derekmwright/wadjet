@@ -1084,10 +1084,13 @@ func TestCTEColumnarMaterialization(t *testing.T) {
 	})
 
 	t.Run("literal_cte_numeric_coercion", func(t *testing.T) {
-		// The expression evaluator can emit numeric literals as strings;
-		// the boxed CTE path coerced them via inferCTESchema's first-row
-		// rule. The columnar path must preserve that (cteCoercingSink) so
-		// arithmetic over a literal CTE still works.
+		// Arithmetic over a literal CTE. The boxed CTE path used to make this
+		// work by SNIFFING — inferCTESchema read the first row of every string
+		// column and re-typed it — and the columnar path inherited the sniff
+		// until #727 removed it, because a genuine TEXT column of
+		// numeric-looking values was re-typed too. What keeps this working is
+		// the literal's own declaration: `SELECT 7` declares INT64 at the
+		// projection (#369). Do not restore a value sniff to make it pass.
 		result, err := db.Query(ctx, `
 			WITH t AS (SELECT 7 AS n)
 			SELECT n + 1 AS m FROM t
