@@ -132,24 +132,40 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 		}
 		switch {
 		case computed:
-			// Nothing on the stage carried this value under any name, so
-			// there is no old spelling to retarget.
-			// Nothing on the stage carries this value. The expression is
-			// written over the aggregate's OUTPUT columns (the logical
-			// planner already replaced its nested aggregates with refs to
-			// their synthetic OutputCol), so its declared type has to come
-			// from those outputs — there is no catalog column to read it off.
-			// AggSpec carries an OutputType but no (p,s) for a DECIMAL one,
-			// so an expression over a DECIMAL aggregate cannot be DECLARED
-			// here at all: the inference falls to the float rule, and with
-			// exact DECIMAL arithmetic the evaluator then hands an exact
-			// value to a FLOAT64 vector. Decline the whole projection and
-			// leave `SUM(a) * 2` on the route it already had — a wrong
-			// declaration is worse than no projection (ADR-0024 item 2).
-			if referencesDecimalAggregate(p.ASTExpr, stage) {
+			// Nothing on the stage carries this value under any name, so
+			// there is no old spelling to retarget. The expression is written
+			// over the aggregate's OUTPUT columns (the logical planner already
+			// replaced its nested aggregates with refs to their synthetic
+			// OutputCol), so its declared type has to come from those outputs
+			// — there is no catalog column to read it off.
+			//
+			// The comment here used to say "AggSpec carries an OutputType but
+			// no (p,s) for a DECIMAL one, so an expression over a DECIMAL
+			// aggregate cannot be DECLARED here at all", and declined the
+			// whole projection on that ground. AggSpec has carried
+			// OutputPrecision/OutputScale since #685, so it is declarable:
+			// stageAggregateDecls folds this stage's own aggregate outputs
+			// into the map the inference reads.
+			//
+			// Two shapes turn on it. `SUM(c_i32 * 2)` is rewritten to
+			// `SUM(c_i32) * 2` above the aggregate, so the ARITHMETIC is what
+			// declares the client's type: bigint on the single-process path
+			// and float8 here, a wire OID that differs between the two engines
+			// for the same query (#784, review round 2 F3). And an aggregate
+			// over a DECIMAL WINDOW output — `SUM(w * 2)` over
+			// `SUM(a) OVER ()` — declared float8 and met the exact DECIMAL the
+			// evaluator produced at the #361 store guard, on both DAG arms
+			// (#775).
+			//
+			// The decline survives for the case that motivated it: a DECIMAL
+			// aggregate whose (p,s) the spec does NOT carry. A DECIMAL
+			// declared with no scale reads every value back at 10^0, which is
+			// worse than no projection (ADR-0024 item 2).
+			aggDecls, complete := stageAggregateDecls(stage, decls)
+			if !complete && referencesDecimalAggregate(p.ASTExpr, stage) {
 				return nil
 			}
-			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, nil, decls)
+			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, nil, aggDecls)
 			typ, prec, scale := declTypeParts(decl)
 			specs = append(specs, ProjectExprSpec{
 				Expr: src, Name: strings.ToLower(alias),
@@ -418,6 +434,45 @@ func aggregateStageDecls(s *Stage) colDecls {
 // referencesDecimalAggregate reports whether an expression names an aggregate
 // output this stage declares DECIMAL. Stage.AggSpec has no (p,s) for one, so
 // such an expression has no declarable type here.
+// stageAggregateDecls is decls with this stage's own AGGREGATE OUTPUTS folded
+// in, so an expression written over them can be DECLARED rather than declined.
+//
+// complete=false means at least one DECIMAL aggregate output carries no (p,s);
+// the caller then declines the projection rather than declaring a DECIMAL with
+// no scale, which reads every value back at 10^0.
+//
+// The map is copied rather than mutated: decls is the caller's view of the
+// aggregate's INPUT and the pass-through arms below read it again.
+func stageAggregateDecls(stage *Stage, decls colDecls) (colDecls, bool) {
+	if stage == nil || len(stage.AggSpecs) == 0 {
+		return decls, true
+	}
+	types := make(map[string]parquet.TypeID, len(decls.types)+len(stage.AggSpecs))
+	for k, v := range decls.types {
+		types[k] = v
+	}
+	dec := make(map[string]logical.DecimalMeta, len(decls.dec)+len(stage.AggSpecs))
+	for k, v := range decls.dec {
+		dec[k] = v
+	}
+	complete := true
+	for _, a := range stage.AggSpecs {
+		name := strings.ToLower(strings.TrimSpace(a.OutputCol))
+		if name == "" || !a.OutputTypeKnown {
+			continue
+		}
+		if a.OutputType == parquet.TypeDecimal {
+			if a.OutputPrecision <= 0 {
+				complete = false
+				continue
+			}
+			dec[name] = logical.DecimalMeta{Precision: a.OutputPrecision, Scale: a.OutputScale}
+		}
+		types[name] = a.OutputType
+	}
+	return colDecls{types: types, fields: decls.fields, dec: dec}, complete
+}
+
 func referencesDecimalAggregate(n plansql.Node, stage *Stage) bool {
 	dec := map[string]bool{}
 	for _, a := range stage.AggSpecs {

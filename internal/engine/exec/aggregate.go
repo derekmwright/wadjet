@@ -7169,7 +7169,8 @@ func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
 // aggIntExact reports whether an aggregate over an INTEGER column accumulates
 // in the Int128 carrier because PostgreSQL answers it in numeric (#784).
 //
-//	SUM(int2/int4) -> bigint    already exact in int64; NOT here
+//	SUM(int2/int4) -> bigint    exact in int64; here only when the DECLARATION
+//	                            says numeric, which is AVG's decomposed SUM leg
 //	SUM(int8)      -> numeric   an int64 sum WRAPS past 2^63
 //	AVG(int*)      -> numeric   the float64 mean loses integer digits past 2^53
 //
@@ -7195,7 +7196,18 @@ func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
 func aggIntExact(agg AggColumn, typ batch.TypeID) bool {
 	switch agg.Func {
 	case AggSum:
-		if typ != batch.TypeInt64 {
+		// INT32 is here too, and only the DECLARATION lets it in. A user's
+		// SUM(int4) declares bigint and keeps its int64 array; the SUM LEG of
+		// a decomposed AVG(int4) declares numeric, because AVG(int*) is
+		// numeric and its sum has to be the same carrier. Deciding that from
+		// the input type alone made the partial's carrier depend on whether a
+		// task SAW A BATCH: one that did emitted int64 (the SUM(int4) rule)
+		// and one that did not emitted the spec's DECIMAL, and ADR-0010's
+		// shuffle type guard refused the read. `SELECT AVG(c_i32) FROM typemx
+		// WHERE id < 3` — any predicate selective enough to leave a scan task
+		// empty — was a hard DAG failure on a query the single-process path
+		// answers (#784, review round 2 B2).
+		if typ != batch.TypeInt64 && typ != batch.TypeInt32 {
 			return false
 		}
 	case AggAvg:
