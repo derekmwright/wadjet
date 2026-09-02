@@ -180,9 +180,28 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 				}
 				exec.ForceAggDrainEvery(restore)
 			}
+			// The ratchet: a pin that starts agreeing has outlived its bug and
+			// must be deleted. It fires only on a sample that could have SEEN
+			// the divergence, which is the same rule the rest of this file
+			// applies to the spilled arm — one passing run proves nothing.
+			//
+			// The pinned defects here are nondeterministic (#788 is wrong on 9
+			// to 12 runs out of 12), so under the reduced replication of
+			// `-short` a single lucky run reads exactly like a fix and turned
+			// this gate red at random on CI, on a tree where nothing about
+			// #788 had changed. Agreement is a fix's proof at the full run
+			// count and a coin toss at one; below the threshold it is logged,
+			// and the full-replication arm (CI's Type-Matrix step runs this
+			// file without -short) keeps the ratchet honest.
 			if cell.knownBug != "" && agreed == answered && spillMxPinConditionHolds() {
-				t.Fatalf("pinned as %s, but all %d budgeted runs agreed — delete the pin, that agreement is the fix's proof\n  SQL: %s",
-					cell.knownBug, answered, cell.sql)
+				if answered < spillMxRatchetMinRuns {
+					t.Logf("pinned as %s and all %d budgeted run(s) agreed — too few runs to tell a fix "+
+						"from a lucky sample of a nondeterministic defect, so the ratchet is not fired here; "+
+						"the full-replication arm decides", cell.knownBug, answered)
+				} else {
+					t.Fatalf("pinned as %s, but all %d budgeted runs agreed — delete the pin, that agreement is the fix's proof\n  SQL: %s",
+						cell.knownBug, answered, cell.sql)
+				}
 			}
 		})
 	}
@@ -435,6 +454,12 @@ func spillMxRawRowPin(col string) string {
 // spillMxRuns is the replication count per spilled cell. One passing spilled
 // run proves nothing: which batch drains follows tracker timing, and the
 // defects this sweep exists for are wrong on a MINORITY of runs.
+// spillMxRatchetMinRuns is the smallest sample on which "every run agreed" is
+// evidence that a pinned defect is FIXED rather than evidence that it did not
+// fire this time. The pinned defects are nondeterministic, so this is the full
+// replication count: below it the ratchet logs instead of failing.
+const spillMxRatchetMinRuns = 5
+
 func spillMxRuns() int {
 	if testing.Short() {
 		return 1
