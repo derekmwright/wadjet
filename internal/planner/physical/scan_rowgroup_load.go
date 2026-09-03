@@ -58,6 +58,11 @@ var ScanRowGroupBuffers = optswitch.Register("scan-rg-buffers", "WADJET_SCAN_RG_
 var (
 	rgLoadsRowGroup  atomic.Int64
 	rgLoadsWholeFile atomic.Int64
+
+	// rgBuffersResident is the process-wide count of row-group buffers held
+	// right now, across every scan. It is what a leak looks like from
+	// outside: after the last query of a process has finished, it is zero.
+	rgBuffersResident atomic.Int64
 )
 
 // RowGroupLoadStats returns how many parquet file loads this process has done
@@ -65,6 +70,11 @@ var (
 func RowGroupLoadStats() (rowGroup, wholeFile int64) {
 	return rgLoadsRowGroup.Load(), rgLoadsWholeFile.Load()
 }
+
+// RowGroupBuffersResident is how many row-group buffers this process is
+// holding. Zero between queries; anything else is a buffer, and the tracker
+// charge that goes with it, that no scan gave back.
+func RowGroupBuffersResident() int64 { return rgBuffersResident.Load() }
 
 // rgSlabs holds one parquet file's bytes one row group at a time and feeds
 // them to a parquet.FileReader in row-group mode.
@@ -208,7 +218,7 @@ func (s *rgSlabs) advance() error {
 		return nil
 	}
 
-	buf := getRowGroupBuf(int(n))
+	buf := getRowGroupBuf(int(n), peakRowGroupBytes(s.starts, s.ends))
 	// The bytes are about to become resident, so this is the same
 	// non-discretionary charge the whole-file load makes — at row-group
 	// granularity, and released at row-group granularity. cap(), not n: a
@@ -235,6 +245,7 @@ func (s *rgSlabs) advance() error {
 	s.next++
 	s.mu.Unlock()
 	s.inner.residentSlabs.Add(1)
+	rgBuffersResident.Add(1)
 	return nil
 }
 
@@ -263,6 +274,7 @@ func (s *rgSlabs) release(rgIdx int) {
 	if had {
 		putReadBuf(buf)
 		s.inner.residentSlabs.Add(-1)
+		rgBuffersResident.Add(-1)
 	}
 	s.releaseCharge(n)
 }
@@ -293,6 +305,7 @@ func (s *rgSlabs) close() {
 	for rg, buf := range bufs {
 		putReadBuf(buf)
 		s.inner.residentSlabs.Add(-1)
+		rgBuffersResident.Add(-1)
 		total += charges[rg]
 	}
 	s.releaseCharge(total)
@@ -304,15 +317,22 @@ func (s *rgSlabs) close() {
 }
 
 // getRowGroupBuf is getReadBuf with an upper bound on what it will accept from
-// the pool. readBufPool is a single class with no ceiling — it holds whatever
-// the largest file read put back, which at SF100 is hundreds of megabytes — so
-// an unbounded Get would hand a 100 KiB row group a 283 MB buffer. That buffer
-// is resident memory and cap() is what this path charges for, so the budget
-// would see a row group as large as the largest file the process ever read.
-func getRowGroupBuf(size int) []byte {
+// the pool: a buffer larger than the biggest row group THIS FILE has is not
+// this file's buffer, and is put back.
+//
+// readBufPool is a single class with no ceiling — it holds whatever the largest
+// file read put back, which at SF100 is hundreds of megabytes — so an unbounded
+// Get would hand a 100 KiB row group a 283 MB buffer. That buffer is resident
+// memory and cap() is what this path charges for, so the budget would see a row
+// group as large as the largest file the process ever read.
+//
+// The bound is the file's own peak row group rather than a multiple of the
+// request, so nothing here is a number anybody picked: it comes out of the
+// footer.
+func getRowGroupBuf(size int, peak int64) []byte {
 	if v := readBufPool.Get(); v != nil {
 		buf := v.([]byte)
-		if cap(buf) >= size && cap(buf) <= 2*size+64*1024 {
+		if cap(buf) >= size && int64(cap(buf)) <= peak {
 			return buf[:size]
 		}
 		readBufPool.Put(buf)

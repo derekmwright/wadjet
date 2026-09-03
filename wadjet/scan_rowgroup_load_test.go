@@ -93,6 +93,7 @@ func TestAJoinAtAFixedBudgetIsDecidedByTheQueryNotTheScheduler(t *testing.T) {
 	}
 
 	parA, parR := answersAt(t, runtime.NumCPU(), runs)
+	var serA int
 	// The control arm runs fewer times on purpose: what it has to catch is a
 	// DISAGREEMENT with the arm above, and at base that disagreement was
 	// total (0 of 20 answered free, 20 of 20 at GOMAXPROCS=1). The many-run
@@ -107,15 +108,24 @@ func TestAJoinAtAFixedBudgetIsDecidedByTheQueryNotTheScheduler(t *testing.T) {
 			"runs answered and %d refused. At a fixed budget on fixed data a query has one outcome; "+
 			"this is #789", spillMxBudget/1024, parA, parA+parR, parR)
 	}
-	serA, serR := answersAt(t, 1, serialRuns)
-	if serA != 0 && serR != 0 {
-		t.Fatalf("the same join at %d KiB reached BOTH dispositions at GOMAXPROCS=1: %d answered, "+
-			"%d refused", spillMxBudget/1024, serA, serR)
-	}
-	if (parA > 0) != (serA > 0) {
-		t.Fatalf("the parallel arm and the GOMAXPROCS=1 control DISAGREE at %d KiB: parallel answered "+
-			"%d of %d, control answered %d of %d. The query's outcome is being decided by the "+
-			"scheduler, which is #789", spillMxBudget/1024, parA, parA+parR, serA, serA+serR)
+	// Two controls, not one. GOMAXPROCS=1 removes decode parallelism outright;
+	// GOMAXPROCS=2 leaves it and only changes how much — which is the arm that
+	// catches a fix that merely moved the boundary rather than removing it.
+	for _, procs := range []int{1, 2} {
+		ctlA, ctlR := answersAt(t, procs, serialRuns)
+		if ctlA != 0 && ctlR != 0 {
+			t.Fatalf("the same join at %d KiB reached BOTH dispositions at GOMAXPROCS=%d: %d "+
+				"answered, %d refused", spillMxBudget/1024, procs, ctlA, ctlR)
+		}
+		if (parA > 0) != (ctlA > 0) {
+			t.Fatalf("the parallel arm and the GOMAXPROCS=%d control DISAGREE at %d KiB: parallel "+
+				"answered %d of %d, control answered %d of %d. The query's outcome is being decided "+
+				"by the scheduler, which is #789",
+				procs, spillMxBudget/1024, parA, parA+parR, ctlA, ctlA+ctlR)
+		}
+		if procs == 1 {
+			serA = ctlA
+		}
 	}
 	if !engaged {
 		t.Fatal("no scan read row group at a time — the dispositions above agreed, but not because of " +
@@ -196,46 +206,115 @@ func (s *countingStore) dataFile(t *testing.T) string {
 // GETs for a five-row-group file.
 func TestAScanIssuesOneObjectGetPerFile(t *testing.T) {
 	ctx := context.Background()
-	st := newCountingStore()
-	db, err := Open(ctx, Config{Store: st, Bucket: "test"})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-	schema := typematrix.Schema()
-	if err := db.CreateTable(ctx, typematrix.Table, schema, nil); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	ing := db.NewIngester(typematrix.Table, schema, nil, ingest.Config{
-		MaxBufferRows: typematrix.Rows + 1, RowGroupSize: typematrix.RowGroup,
-	})
-	if err := ing.Ingest(ctx, typematrix.Data(typematrix.Rows)); err != nil {
-		t.Fatalf("ingest: %v", err)
-	}
-	if err := ing.FlushAll(ctx); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	key := st.dataFile(t)
 
-	for _, q := range []struct{ name, sql string }{
-		{"full scan", `SELECT COUNT(*) AS n, MIN(c_str) AS m FROM ` + typematrix.Table},
-		{"projected scan", `SELECT SUM(id) AS s FROM ` + typematrix.Table},
-	} {
-		t.Run(q.name, func(t *testing.T) {
-			st.reset()
-			rgBefore, _ := physical.RowGroupLoadStats()
-			if _, err := tmRun(ctx, db, q.sql); err != nil {
-				t.Fatalf("%s: %v", q.name, err)
+	// File SHAPE is the axis that matters here: a file with one row group has
+	// nothing to cut up, and one with many is where a per-row-group read would
+	// show as N requests instead of 1.
+	shapes := []struct {
+		name     string
+		rows     int
+		rowGroup int
+	}{
+		{"one row group", 500, 5000},
+		{"a few row groups", typematrix.Rows, typematrix.RowGroup}, // 5
+		{"many row groups", typematrix.Rows, 200},                  // 25
+		{"tiny file", 50, 25},                                      // 2, a few KB
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			st := newCountingStore()
+			db, err := Open(ctx, Config{Store: st, Bucket: "test"})
+			if err != nil {
+				t.Fatalf("open: %v", err)
 			}
-			if rgAfter, _ := physical.RowGroupLoadStats(); rgAfter == rgBefore {
-				t.Fatal("the scan did not read row group at a time — this gate proved nothing")
+			defer db.Close()
+			schema := typematrix.Schema()
+			if err := db.CreateTable(ctx, typematrix.Table, schema, nil); err != nil {
+				t.Fatalf("create: %v", err)
 			}
-			gets, _ := st.count(key)
-			if gets != 1 {
-				t.Fatalf("%s issued %d Get calls for one file, want exactly 1. The row-group read "+
-					"streams ONE body and cuts it up; one request per row group would reverse the "+
-					"recorded whole-file-GET decision (docs/design/scan-pread-reads.md)", q.name, gets)
+			ing := db.NewIngester(typematrix.Table, schema, nil, ingest.Config{
+				MaxBufferRows: sh.rows + 1, RowGroupSize: sh.rowGroup,
+			})
+			if err := ing.Ingest(ctx, typematrix.Data(sh.rows)); err != nil {
+				t.Fatalf("ingest: %v", err)
+			}
+			if err := ing.FlushAll(ctx); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			key := st.dataFile(t)
+
+			for _, q := range []struct{ name, sql string }{
+				{"full scan", `SELECT COUNT(*) AS n, MIN(c_str) AS m FROM ` + typematrix.Table},
+				{"projected scan", `SELECT SUM(id) AS s FROM ` + typematrix.Table},
+			} {
+				st.reset()
+				rgBefore, wholeBefore := physical.RowGroupLoadStats()
+				if _, err := tmRun(ctx, db, q.sql); err != nil {
+					t.Fatalf("%s: %v", q.name, err)
+				}
+				rgAfter, wholeAfter := physical.RowGroupLoadStats()
+				if rgAfter == rgBefore && wholeAfter == wholeBefore {
+					t.Fatalf("%s loaded no file at all — this gate proved nothing", q.name)
+				}
+				gets, _ := st.count(key)
+				if gets != 1 {
+					t.Fatalf("%s over a %s file issued %d Get calls for one file, want exactly 1. "+
+						"The row-group read streams ONE body and cuts it up; one request per row "+
+						"group would reverse the recorded whole-file-GET decision "+
+						"(docs/design/scan-pread-reads.md)", q.name, sh.name, gets)
+				}
+				if rgAfter == rgBefore {
+					t.Logf("%s: whole-file read (no decoded footer yet), 1 Get", q.name)
+				}
 			}
 		})
+	}
+}
+
+// TestNoQueryLeavesARowGroupBufferBehind: after a query finishes — answered or
+// refused — the scan has given every row-group buffer back, and with it the
+// tracker charge that rode on it. A leak here is a phantom reservation on a
+// worker's shared tracker, which starves every later task's admission.
+//
+// Every query SHAPE is run, because the scan has a different teardown for
+// each: a full drain, an early stop under LIMIT, a pipeline breaker that holds
+// its input, and a refusal that unwinds mid-scan.
+func TestNoQueryLeavesARowGroupBufferBehind(t *testing.T) {
+	ctx := context.Background()
+	tbl := typematrix.Table
+	shapes := []struct{ name, sql string }{
+		{"scan", `SELECT COUNT(*) AS n, MIN(c_str) AS m FROM ` + tbl},
+		{"scan with LIMIT", `SELECT id, c_str FROM ` + tbl + ` ORDER BY id LIMIT 5`},
+		{"aggregate", `SELECT c_i32 AS k, COUNT(*) AS n FROM ` + tbl + ` GROUP BY c_i32`},
+		{"join", fmt.Sprintf(`SELECT z.c_str AS k, COUNT(*) AS n FROM %[1]s x JOIN %[1]s z ON x.id = z.id GROUP BY z.c_str`, tbl)},
+		{"window", `SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS r FROM ` + tbl + ` ORDER BY id`},
+		{"sort", `SELECT id, c_str FROM ` + tbl + ` ORDER BY c_str, id`},
+		{"filtered scan", `SELECT COUNT(*) AS n FROM ` + tbl + ` WHERE c_i32 > 100`},
+	}
+	// Both arms: with room, and at a budget tight enough that shapes refuse
+	// mid-scan. A refusal unwinds a different way than a drain.
+	for _, budget := range []int64{0, spillMxBudget} {
+		db := spillMxOpen(t, budget)
+		for _, sh := range shapes {
+			name := sh.name
+			if budget > 0 {
+				name += " (budgeted)"
+			}
+			t.Run(name, func(t *testing.T) {
+				rgBefore, _ := physical.RowGroupLoadStats()
+				_, err := tmRun(ctx, db, sh.sql)
+				if err != nil && !strings.Contains(err.Error(), "memory budget exceeded") {
+					t.Fatalf("%s: %v", sh.sql, err)
+				}
+				if rgAfter, _ := physical.RowGroupLoadStats(); rgAfter == rgBefore {
+					t.Fatal("no scan read row group at a time — nothing to leak, nothing proved")
+				}
+				if n := physical.RowGroupBuffersResident(); n != 0 {
+					t.Fatalf("%d row-group buffer(s) still held after the query finished (err=%v). "+
+						"Each one is a pooled buffer nobody returned and a tracker charge nobody "+
+						"released", n, err)
+				}
+			})
+		}
 	}
 }
