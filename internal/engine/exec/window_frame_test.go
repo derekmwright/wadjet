@@ -227,55 +227,6 @@ func TestWindowAggregatesHonorFrame(t *testing.T) {
 	}
 }
 
-// TestWindowFrameRowOrientedMatchesColumnar: the spill path computes windows
-// over row maps in a completely separate switch. Both owe the same answer,
-// and the spill path silently disagreeing is the failure nobody notices.
-func TestWindowFrameRowOrientedMatchesColumnar(t *testing.T) {
-	specs := []WindowColumn{
-		{Func: WinLastValue, InputCol: "s", OutputCol: "out", OutputType: parquet.TypeString,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("unbounded_preceding", 0, "unbounded_following", 0)},
-		{Func: WinFirstValue, InputCol: "s", OutputCol: "out", OutputType: parquet.TypeString,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("preceding", 1, "current_row", 0)},
-		{Func: WinNthValue, NthValueN: 2, InputCol: "s", OutputCol: "out", OutputType: parquet.TypeString,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("preceding", 1, "current_row", 0)},
-		{Func: WinNthValue, NthValueN: 2, InputCol: "s", OutputCol: "out", OutputType: parquet.TypeString,
-			OrderBy: frameOrderBy()},
-		{Func: WinSum, InputCol: "v", OutputCol: "out", OutputType: parquet.TypeFloat64,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("unbounded_preceding", 0, "unbounded_following", 0)},
-		{Func: WinSum, InputCol: "v", OutputCol: "out", OutputType: parquet.TypeFloat64,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("preceding", 1, "following", 1)},
-		{Func: WinSum, InputCol: "v", OutputCol: "out", OutputType: parquet.TypeFloat64,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("preceding", 3, "preceding", 2)},
-		{Func: WinAvg, InputCol: "v", OutputCol: "out", OutputType: parquet.TypeFloat64,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("preceding", 1, "following", 1)},
-		{Func: WinCount, OutputCol: "out", OutputType: parquet.TypeInt64,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("preceding", 3, "preceding", 2)},
-		{Func: WinMin, InputCol: "v", OutputCol: "out", OutputType: parquet.TypeFloat64,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("preceding", 1, "current_row", 0)},
-		{Func: WinMax, InputCol: "v", OutputCol: "out", OutputType: parquet.TypeFloat64,
-			OrderBy: frameOrderBy(), Frame: rowsFrame("current_row", 0, "following", 1)},
-	}
-	for _, wc := range specs {
-		name := wc.OutputCol
-		if wc.Frame != nil {
-			name = wc.InputCol + "/" + wc.Frame.Start.Type + "-" + wc.Frame.End.Type
-		}
-		t.Run(name, func(t *testing.T) {
-			columnar := runFrameWindow(t, wc)
-			rows := frameTestRows()
-			computeWindowRowOriented(rows, wc, frameTestSchema)
-			if len(rows) != len(columnar) {
-				t.Fatalf("row count %d vs %d", len(rows), len(columnar))
-			}
-			for i := range rows {
-				if rows[i]["out"] != columnar[i] {
-					t.Errorf("row %d: row-oriented %v, columnar %v", i, rows[i]["out"], columnar[i])
-				}
-			}
-		})
-	}
-}
-
 // TestWindowFrameRangePeerGroups pins RANGE mode's defining behaviour: its
 // bounds move by ORDER-BY PEER GROUP, not by row. Every row here ties with
 // its neighbour, so a RANGE frame and the row-counting ROWS frame of the same

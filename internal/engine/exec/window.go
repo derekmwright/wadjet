@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -422,7 +423,6 @@ type Window struct {
 	totalRows  int
 	trackedMem int64 // memory reserved from shared tracker by this operator
 	schema     []parquet.Column
-	spillFiles []string // legacy row-oriented spill (schemas the columnar run format can't carry)
 	runFiles   []string // sorted columnar runs (external partition-at-a-time path)
 	groups     []windowSpecGroup
 	ext        *windowExtState // final-pass streaming state, drained by Next
@@ -463,6 +463,17 @@ func (w *Window) Init(_ context.Context) error {
 	w.emitted = false
 	w.finalized = false
 	w.groups = groupWindowSpecs(w.Columns)
+	// A Window with no window functions computes nothing, and every path
+	// below reads w.groups[0] or w.groups[len-1]. It used to have a second
+	// implementation instead — the row-oriented spill, which was that
+	// condition's only reader and which nothing could reach (#460). Refusing
+	// it here is what lets the rest of this operator be written against the
+	// spec it does have, and it is loud rather than an index panic: both
+	// constructors build the column list from a plan node's window
+	// expressions, so an empty one is a caller bug, not a query.
+	if len(w.groups) == 0 {
+		return fmt.Errorf("window operator built with no window functions: nothing to compute")
+	}
 	w.ext = nil
 	// Register with the relief registry up front: Window self-spills during
 	// Consume, so it must be visible to RequestRelief before any batch arrives.
@@ -527,22 +538,13 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// runs); the legacy row path keeps the old flush-on-pressure behavior.
 	// Peer relief (SpillSome) bypasses the floor.
 	if w.Spill != nil && w.Spill.ShouldSpillFor(memory.SpillCheap) && len(w.batches) > 0 {
-		if !w.useColumnarRuns() || w.trackedMem >= minSortRunBytes {
+		if w.trackedMem >= minSortRunBytes {
 			if _, err := w.flushSpillLocked(); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
-}
-
-// useColumnarRuns reports whether spill goes through the external
-// partition-at-a-time path. Every column type round-trips the columnar run
-// format (nested ARRAY/MAP/ROW included); the only remaining requirement is
-// a window spec to sort runs by — the degenerate no-spec case keeps the
-// legacy row spill.
-func (w *Window) useColumnarRuns() bool {
-	return len(w.groups) > 0
 }
 
 // flushSpillLocked drains all buffered batches to disk and releases their
@@ -553,29 +555,16 @@ func (w *Window) flushSpillLocked() (int64, error) {
 	if len(w.batches) == 0 || w.trackedMem == 0 {
 		return 0, nil
 	}
-	if w.useColumnarRuns() {
-		// -1 (NoLimit): a window run is never top-K truncated, unlike
-		// exec.Sort's own Limit-bearing calls to this same helper (#481
-		// repurposed 0 as a real, meaningful bound there — this call site
-		// must keep meaning "every row").
-		path, err := sortBatchesToRun(w.Spill.SpillDir(), w.schema, w.batches, w.totalRows, w.groups[0].sortKeys, -1)
-		if err != nil {
-			return 0, err
-		}
-		if path != "" {
-			w.runFiles = append(w.runFiles, path)
-			WindowRunsWritten.Add(1)
-		}
-	} else {
-		var rows []map[string]any
-		for _, sb := range w.batches {
-			rows = append(rows, sb.ToRows()...)
-		}
-		path, err := w.Spill.SpillRows(rows)
-		if err != nil {
-			return 0, err
-		}
-		w.spillFiles = append(w.spillFiles, path)
+	// -1 (NoLimit): a window run is never top-K truncated, unlike exec.Sort's
+	// own Limit-bearing calls to this same helper (#481 repurposed 0 as a
+	// real, meaningful bound there — this call site must keep meaning "every
+	// row").
+	path, err := sortBatchesToRun(w.Spill.SpillDir(), w.schema, w.batches, w.totalRows, w.groups[0].sortKeys, -1)
+	if err != nil {
+		return 0, err
+	}
+	if path != "" {
+		w.runFiles = append(w.runFiles, path)
 		WindowRunsWritten.Add(1)
 	}
 	w.batches = w.batches[:0]
@@ -597,9 +586,6 @@ func (w *Window) Finalize(_ context.Context) error {
 		w.accState.Store(int32(memory.OpClosed))
 		w.unregisterAccounted()
 		w.unregisterAccounted = nil
-	}
-	if len(w.spillFiles) > 0 {
-		return w.finalizeWithSpill()
 	}
 	if len(w.runFiles) > 0 {
 		return w.finalizeExternal()
@@ -805,60 +791,6 @@ func (w *Window) finalizeColumnar() error {
 	return nil
 }
 
-// finalizeWithSpill handles the spill path — reads spilled rows and computes
-// window functions in row-oriented mode to avoid materializing a giant combined
-// columnar batch (which would defeat the purpose of spilling).
-func (w *Window) finalizeWithSpill() error {
-	// Collect all data as rows — in-memory batches + spill files
-	var allRows []map[string]any
-	for _, b := range w.batches {
-		allRows = append(allRows, b.ToRows()...)
-	}
-	w.batches = nil
-
-	for _, f := range w.spillFiles {
-		spilled, err := memory.ReadSpilledRows(f)
-		if err != nil {
-			return err
-		}
-		// Consumed for good — unlink now rather than relying on
-		// SpillManager.Cleanup, which the shared (worker-injected) manager
-		// path never calls (#324). Files not yet reached when an error
-		// aborts this loop stay in w.spillFiles for Close's backstop.
-		w.Spill.RemoveSpilled(f)
-		allRows = append(allRows, spilled...)
-	}
-	w.spillFiles = nil
-
-	if len(allRows) == 0 {
-		return nil
-	}
-
-	// Initialize window output columns in each row
-	for _, row := range allRows {
-		for _, wc := range w.Columns {
-			row[wc.OutputCol] = nil
-		}
-	}
-
-	// Compute each window function on the row slice
-	for _, wc := range w.Columns {
-		computeWindowRowOriented(allRows, wc, w.schema)
-	}
-
-	// Materialize into output batches
-	outSchema := w.buildOutputSchema()
-	for pos := 0; pos < len(allRows); {
-		end := pos + batch.DefaultBatchSize
-		if end > len(allRows) {
-			end = len(allRows)
-		}
-		w.result = append(w.result, batch.FromRows(outSchema, allRows[pos:end]))
-		pos = end
-	}
-	return nil
-}
-
 func (w *Window) buildOutputSchema() []parquet.Column {
 	outSchema := make([]parquet.Column, len(w.schema))
 	copy(outSchema, w.schema)
@@ -887,13 +819,6 @@ func (w *Window) Close() error {
 			w.Spill.ReleaseTracking(w.trackedMem)
 			w.trackedMem = 0
 		}
-		// Row-oriented spill files never consumed by finalizeWithSpill
-		// (error or early-cancel path). Nothing else removes them on the
-		// shared-manager path (#324).
-		for _, f := range w.spillFiles {
-			w.Spill.RemoveSpilled(f)
-		}
-		w.spillFiles = nil
 	}
 	w.mu.Unlock()
 	if w.unregisterAccounted != nil {
@@ -2061,390 +1986,4 @@ func rowMapCarries(part []map[string]any, col string) bool {
 		}
 	}
 	return false
-}
-
-// --- Row-oriented window computation (spill path) ---
-
-// windowRowCompares holds the boxed comparators one row-oriented window
-// column needs — one per PARTITION BY column, one per ORDER BY key, and one
-// for the value column MIN/MAX ranks — resolved ONCE from the declared
-// schema.
-//
-// Resolving them is what makes this path agree with the columnar one. A row
-// map carries values, not declarations: Vector.GetValue renders a ROW as an
-// unordered map and a DECIMAL as text, so a comparator with nothing but the
-// box has to guess a field order and a numeric order, and guessed the wrong
-// one both times (#444). Resolving per column also keeps the type switch out
-// of the comparison loop, which is the codebase's typed-kernel rule.
-type windowRowCompares struct {
-	partition []boxedCompare
-	order     []boxedCompare
-	input     boxedCompare
-}
-
-func newWindowRowCompares(schema []parquet.Column, wc WindowColumn) windowRowCompares {
-	rc := windowRowCompares{
-		partition: make([]boxedCompare, len(wc.PartitionBy)),
-		order:     make([]boxedCompare, len(wc.OrderBy)),
-		input:     newBoxedCompareFor(schema, wc.InputCol),
-	}
-	for i, pk := range wc.PartitionBy {
-		rc.partition[i] = newBoxedCompareFor(schema, pk)
-	}
-	for i, ok := range wc.OrderBy {
-		rc.order[i] = newBoxedCompareFor(schema, ok.Column)
-	}
-	return rc
-}
-
-// computeWindowRowOriented computes a single window function over row data.
-// Used when spill occurred to avoid materializing a giant columnar batch.
-func computeWindowRowOriented(rows []map[string]any, wc WindowColumn, schema []parquet.Column) {
-	if len(rows) == 0 {
-		return
-	}
-	rc := newWindowRowCompares(schema, wc)
-
-	// Sort by partition+order keys
-	sort.SliceStable(rows, func(a, b int) bool {
-		for i, pk := range wc.PartitionBy {
-			cmp := rc.partition[i](rows[a][pk], rows[b][pk])
-			if cmp != 0 {
-				return cmp < 0
-			}
-		}
-		for i, ok := range wc.OrderBy {
-			cmp := rc.order[i](rows[a][ok.Column], rows[b][ok.Column])
-			if cmp != 0 {
-				if ok.Order == Descending {
-					return cmp > 0
-				}
-				return cmp < 0
-			}
-		}
-		return false
-	})
-
-	// Walk partitions
-	i := 0
-	for i < len(rows) {
-		partEnd := i + 1
-		for partEnd < len(rows) && samePartitionRows(rows[i], rows[partEnd], wc.PartitionBy, rc.partition) {
-			partEnd++
-		}
-		computePartitionRowOriented(rows[i:partEnd], wc, rc)
-		i = partEnd
-	}
-}
-
-func samePartitionRows(a, b map[string]any, partCols []string, cmps []boxedCompare) bool {
-	for i, col := range partCols {
-		if cmps[i](a[col], b[col]) != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func sameOrderRows(a, b map[string]any, orderCols []SortKey, cmps []boxedCompare) bool {
-	for i, ok := range orderCols {
-		if cmps[i](a[ok.Column], b[ok.Column]) != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func rowFloat64(row map[string]any, col string) float64 {
-	v := row[col]
-	if v == nil {
-		return 0
-	}
-	switch val := v.(type) {
-	case float64:
-		return val
-	case float32:
-		return float64(val)
-	case int64:
-		return float64(val)
-	case int32:
-		return float64(val)
-	case int:
-		return float64(val)
-	default:
-		return 0
-	}
-}
-
-// rowPeerGroups labels every row of a partition with its ORDER-BY peer group,
-// the row-oriented twin of columnarPeerGroups.
-func rowPeerGroups(part []map[string]any, orderBy []SortKey, cmps []boxedCompare) ([]int32, []int32) {
-	n := len(part)
-	lo := make([]int32, n)
-	hi := make([]int32, n)
-	for i := 0; i < n; {
-		j := i + 1
-		for j < n && sameOrderRows(part[i], part[j], orderBy, cmps) {
-			j++
-		}
-		for k := i; k < j; k++ {
-			lo[k], hi[k] = int32(i), int32(j)
-		}
-		i = j
-	}
-	return lo, hi
-}
-
-// computePartitionRowOriented computes a window function for one partition.
-func computePartitionRowOriented(part []map[string]any, wc WindowColumn, rc windowRowCompares) {
-	n := len(part)
-	outCol := wc.OutputCol
-
-	// Same frame resolution as computePartitionColumnar — the two paths owe
-	// the same answer, and the spill path silently disagreeing with the
-	// in-memory one is the failure mode nobody notices (#350).
-	var fr resolvedFrame
-	if frameSensitive(wc.Func) {
-		fr = resolveFrame(wc, n, len(wc.OrderBy) > 0, func() ([]int32, []int32) {
-			return rowPeerGroups(part, wc.OrderBy, rc.order)
-		})
-	}
-
-	switch wc.Func {
-	case WinRowNumber:
-		for i := 0; i < n; i++ {
-			part[i][outCol] = int64(i + 1)
-		}
-
-	case WinRank:
-		rank := int64(1)
-		for i := 0; i < n; i++ {
-			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy, rc.order) {
-				rank = int64(i + 1)
-			}
-			part[i][outCol] = rank
-		}
-
-	case WinDenseRank:
-		rank := int64(1)
-		for i := 0; i < n; i++ {
-			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy, rc.order) {
-				rank++
-			}
-			part[i][outCol] = rank
-		}
-
-	case WinSum:
-		var sum float64
-		curLo, curHi := 0, 0
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			curLo, curHi = slideRowSum(part, wc.InputCol, lo, hi, curLo, curHi, &sum)
-			if hi <= lo {
-				part[i][outCol] = nil
-				continue
-			}
-			part[i][outCol] = sum
-		}
-
-	// COUNT(*) counts rows; COUNT(col) counts the rows where col is not
-	// NULL (#670). This is the columnar arm's rule on the row-oriented
-	// carrier: a row map holds nil for a NULL, and a column the partition
-	// does not carry at all is absent from every map — which is a lost
-	// column, not a NULL one, so it keeps counting rows.
-	case WinCount:
-		countsRows := wc.InputCol == "" || wc.InputCol == "*"
-		if !countsRows && n > 0 {
-			if _, present := part[0][wc.InputCol]; !present {
-				countsRows = !rowMapCarries(part, wc.InputCol)
-			}
-		}
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			if hi < lo {
-				hi = lo
-			}
-			if countsRows {
-				part[i][outCol] = int64(hi - lo)
-				continue
-			}
-			var c int64
-			for r := lo; r < hi; r++ {
-				if part[r][wc.InputCol] != nil {
-					c++
-				}
-			}
-			part[i][outCol] = c
-		}
-
-	case WinAvg:
-		var sum float64
-		curLo, curHi := 0, 0
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			curLo, curHi = slideRowSum(part, wc.InputCol, lo, hi, curLo, curHi, &sum)
-			if hi <= lo {
-				part[i][outCol] = nil
-				continue
-			}
-			part[i][outCol] = sum / float64(hi-lo)
-		}
-
-	case WinMin, WinMax:
-		want := -1
-		if wc.Func == WinMax {
-			want = 1
-		}
-		d := &frameMinMaxDeque{
-			want:   want,
-			get:    func(i int) any { return part[i][wc.InputCol] },
-			isNull: func(i int) bool { return part[i][wc.InputCol] == nil },
-			cmp: func(i, j int) int {
-				return rc.input(part[i][wc.InputCol], part[j][wc.InputCol])
-			},
-		}
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			if hi < lo {
-				hi = lo
-			}
-			part[i][outCol] = d.value(lo, hi)
-		}
-
-	case WinLag:
-		offset := wc.LagLeadOffset
-		if offset <= 0 {
-			offset = 1
-		}
-		for i := 0; i < n; i++ {
-			if i-offset >= 0 {
-				part[i][outCol] = part[i-offset][wc.InputCol]
-			} else if wc.LagLeadDefault != nil {
-				part[i][outCol] = wc.LagLeadDefault
-			}
-		}
-
-	case WinLead:
-		offset := wc.LagLeadOffset
-		if offset <= 0 {
-			offset = 1
-		}
-		for i := 0; i < n; i++ {
-			if i+offset < n {
-				part[i][outCol] = part[i+offset][wc.InputCol]
-			} else if wc.LagLeadDefault != nil {
-				part[i][outCol] = wc.LagLeadDefault
-			}
-		}
-
-	case WinFirstValue:
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			if hi <= lo {
-				part[i][outCol] = nil
-				continue
-			}
-			part[i][outCol] = part[lo][wc.InputCol]
-		}
-
-	case WinLastValue:
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			if hi <= lo {
-				part[i][outCol] = nil
-				continue
-			}
-			part[i][outCol] = part[hi-1][wc.InputCol]
-		}
-
-	case WinNtile:
-		buckets := wc.NtileBuckets
-		if buckets <= 0 {
-			buckets = 1
-		}
-		base := n / buckets
-		remainder := n % buckets
-		bucket := int64(1)
-		count := 0
-		limit := base
-		if remainder > 0 {
-			limit++
-		}
-		for i := 0; i < n; i++ {
-			part[i][outCol] = bucket
-			count++
-			if count >= limit && int(bucket) < buckets {
-				bucket++
-				count = 0
-				if int(bucket) <= remainder {
-					limit = base + 1
-				} else {
-					limit = base
-				}
-			}
-		}
-
-	case WinPercentRank:
-		if n <= 1 {
-			for i := 0; i < n; i++ {
-				part[i][outCol] = float64(0)
-			}
-		} else {
-			rank := int64(1)
-			for i := 0; i < n; i++ {
-				if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy, rc.order) {
-					rank = int64(i + 1)
-				}
-				part[i][outCol] = float64(rank-1) / float64(n-1)
-			}
-		}
-
-	case WinCumeDist:
-		for i := 0; i < n; {
-			j := i + 1
-			for j < n && sameOrderRows(part[i], part[j], wc.OrderBy, rc.order) {
-				j++
-			}
-			cd := float64(j) / float64(n)
-			for k := i; k < j; k++ {
-				part[k][outCol] = cd
-			}
-			i = j
-		}
-
-	case WinNthValue:
-		nth := wc.NthValueN
-		if nth <= 0 {
-			nth = 1
-		}
-		for i := 0; i < n; i++ {
-			lo, hi := fr.bounds(i)
-			if pos := lo + nth - 1; pos < hi {
-				part[i][outCol] = part[pos][wc.InputCol]
-			} else {
-				part[i][outCol] = nil
-			}
-		}
-	}
-}
-
-// slideRowSum is the row-oriented twin of float64FrameAcc.slide, on the legacy
-// spill path (computePartitionRowOriented). That path is reachable only for a
-// Window with NO spec groups — i.e. no window columns at all, so nothing to
-// compute — and it has not moved with #586: it still adds before it retracts
-// and still divides AVG by the frame's width. Left as it is rather than fixed
-// blind, since no query reaches it and no gate can show the difference.
-func slideRowSum(part []map[string]any, inputCol string, lo, hi, curLo, curHi int, sum *float64) (int, int) {
-	if hi < lo {
-		hi = lo
-	}
-	for curHi < hi {
-		*sum += rowFloat64(part[curHi], inputCol)
-		curHi++
-	}
-	for curLo < lo {
-		*sum -= rowFloat64(part[curLo], inputCol)
-		curLo++
-	}
-	return curLo, curHi
 }

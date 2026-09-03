@@ -356,7 +356,7 @@ Parallel workers check `ctx.Err()` and all `DoneSignaler`s on every batch iterat
 
 ### Resolved: Row-Oriented Fallbacks
 
-> **All three converted to columnar formats:** sort/window spill writes sorted columnar runs, aggregate spill writes partial group state, and worker shuffle writes WSHF. The one residual `ToRows` on a spill path is the legacy raw-row buffer for extra-state aggregates and GROUPING SETS. The original analysis follows.
+> **All three converted to columnar formats:** sort/window spill writes sorted columnar runs, aggregate spill writes partial group state, and worker shuffle writes WSHF. The window operator's row-oriented spill has since been DELETED outright (2026-09-03): it was selected by a condition — a Window with no window functions — that no plan produces, so nothing could reach it, and it carried a stale frame implementation no gate could compare. The one residual `ToRows` on a spill path is the legacy raw-row buffer for extra-state aggregates and GROUPING SETS. The original analysis follows.
 
 Three separate paths fall back to `map[string]any` row format:
 1. **Sort spill** (`sort.go:102-145`)
