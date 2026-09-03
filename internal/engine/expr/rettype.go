@@ -313,6 +313,17 @@ func (r Ret) operatorResolvedType(d DeclType, seen []DeclType, conf []Confidence
 	if !isNumericDecl(a0) || !isNumericDecl(a1) {
 		return DeclType{}, false
 	}
+	if a0.ExactSet || a1.ExactSet {
+		// A numeric LITERAL, whose own declaration is FLOAT64 here while its
+		// fixed-point contribution is its SPELLING (ADR-0024's recorded
+		// deferral, DeclType.Exact). PostgreSQL types `12.75` numeric, so
+		// `NULLIF(numeric(15,2), 12.75)` is numeric there — and reading that
+		// FLOAT64 as "argument 1 is a float" made it double precision, which
+		// widened a real COLUMN in the COALESCE above it and printed 0.1 as
+		// 0.10000000149011612. The ordinary ladder below already answers this
+		// pair correctly, so decline and let it.
+		return DeclType{}, false
+	}
 	switch {
 	case isIntDecl(a0) && isIntDecl(a1):
 		return a0, true

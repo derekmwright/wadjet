@@ -155,27 +155,30 @@ func mmOrderByReference(t *testing.T, db *DB, col string, where ...string) (lo, 
 }
 
 // mmOutputType is the declared output type of MIN/MAX over a column of the
-// given type: its own, except that the int32-class widens to INT64 and
-// FLOAT32 to FLOAT64.
+// given type: its own, except that the int32-class widens to INT64.
 //
-// DECIMAL used to be a third exception — its accumulator finalized through
-// ToFloat64, so the answer came back as a double and everything past the
-// 16th digit was gone (#455). It answers in DECIMAL now, so the exception is
-// deleted rather than documented: that deletion IS the fix's proof here.
+// Two exceptions have been DELETED rather than documented, and each deletion
+// is a fix's proof. DECIMAL was one — its accumulator finalized through
+// ToFloat64, so the answer came back as a double and everything past the 16th
+// digit was gone (#455). FLOAT32 was the other: `pg_typeof(min(real))` is
+// real on the live server, the value was always exact (a float32 widened to a
+// float64 is), and only the declaration said double precision — so a client
+// read a Double for a column that is a Float everywhere else in the query
+// (#760).
+//
+// The int32 widening stays because it is real: wadjet's MIN/MAX over an int32
+// column answers int64, and PostgreSQL's answers integer — the standing
+// int4/int8 width divergence, not this rule's.
 func mmOutputType(in parquet.TypeID) parquet.TypeID {
-	switch in {
-	case parquet.TypeInt32:
+	if in == parquet.TypeInt32 {
 		return parquet.TypeInt64
-	case parquet.TypeFloat32:
-		return parquet.TypeFloat64
 	}
 	return in
 }
 
 // mmWiden converts a projected value into the shape MIN/MAX declares for its
-// column, for the two types whose aggregate output is not the input's own:
-// the int32 class widens to int64 and FLOAT32 to float64. Nothing else is
-// converted, so a genuine type change still fails — DECIMAL in particular
+// column, for the ONE type whose aggregate output is not the input's own: the
+// int32 class widens to int64. Nothing else is converted, so a genuine type change still fails — DECIMAL in particular
 // compares as the same TEXT the projection renders, which is what makes this
 // a check on the digits and not on a rounding of them (#455).
 func mmWiden(t *testing.T, in parquet.TypeID, v any) any {
@@ -183,19 +186,15 @@ func mmWiden(t *testing.T, in parquet.TypeID, v any) any {
 	if v == nil {
 		return nil
 	}
-	switch in {
-	case parquet.TypeInt32:
+	if in == parquet.TypeInt32 {
 		n, ok := v.(int32)
 		if !ok {
 			t.Fatalf("projection of an INT32 column boxed %T", v)
 		}
 		return int64(n)
-	case parquet.TypeFloat32:
-		f, ok := v.(float32)
-		if !ok {
-			t.Fatalf("projection of a FLOAT32 column boxed %T", v)
-		}
-		return float64(f)
 	}
+	// FLOAT32 was here and is not any more (#760): MIN/MAX over a REAL
+	// answers REAL, so the aggregate's box and the projection's are the same
+	// and there is nothing to convert.
 	return v
 }
