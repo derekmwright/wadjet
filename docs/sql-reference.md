@@ -778,6 +778,25 @@ table is not affected: `SELECT * FROM (SELECT * FROM t) x ORDER BY 1` answers,
 as do an explicit column list, aliased columns, and a nested derived table
 inside it (measured on all three execution paths).
 
+## Derived tables and CTE column lists
+
+A derived table or a CTE may rename its output columns positionally with a
+column-alias list:
+
+```sql
+SELECT kk, nn FROM (SELECT s, n FROM t) AS b(kk, nn)
+WITH c(kk, nn) AS (SELECT s, n FROM t) SELECT kk FROM c
+```
+
+Fewer aliases than columns rename a **prefix** — `AS b(kk)` over a two-column
+subquery publishes `kk` and the second column's own name. More aliases than the
+subquery has columns is SQLSTATE `42P10` (`table "b" has 2 columns available
+but 3 columns specified`). Both are PostgreSQL's rules.
+
+A list written over a subquery whose SELECT list contains `*` is not applied:
+the star's width is not resolvable at that point, and renaming the wrong
+columns would be a wrong answer rather than a missing one.
+
 ## LIMIT and OFFSET
 
 ```sql

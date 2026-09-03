@@ -670,6 +670,22 @@ func RebuildSQL(info *SelectInfo, rewrittenWhere Node) string {
 				sb.WriteString(" ")
 				sb.WriteString(t.Alias)
 			}
+			// The COLUMN-ALIAS LIST is part of the source, not decoration:
+			// `(SELECT s, n FROM t) AS b(kk, nn)` publishes kk and nn, and a
+			// rebuild that drops it hands the re-parsed statement a derived
+			// table whose columns are still called s and n — so the
+			// correlated predicate this function exists to rewrite then names
+			// a column that is not there (#613).
+			if len(t.ColumnAliases) > 0 {
+				sb.WriteString("(")
+				for j, c := range t.ColumnAliases {
+					if j > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(QuoteIdent(c))
+				}
+				sb.WriteString(")")
+			}
 		}
 	}
 

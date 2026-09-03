@@ -1443,26 +1443,16 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 				plan.CTERefAlias = table.Alias
 			}
 
-			// If the CTE has an explicit column list, wrap with a rename projection
-			if len(cte.Columns) > 0 {
-				// Count output columns from the plan
-				outCols := countOutputCols(plan, selectInfo)
-				if len(cte.Columns) == outCols {
-					var projections []Projection
-					srcNames := getOutputColNames(selectInfo)
-					for i, newName := range cte.Columns {
-						srcName := srcNames[i]
-						projections = append(projections, Projection{
-							Column: srcName,
-							Alias:  newName,
-							Expr:   srcName,
-						})
-					}
-					plan = NewProject(plan, projections)
-				}
+			// The explicit column list renames the CTE's OUTPUT columns. It
+			// wraps the finished plan rather than rewriting the body's SELECT
+			// aliases, because a CTE's body SQL is re-read by consumers that
+			// would not see the rewrite — the cte cache and the physical
+			// binder's own view (validate.go's b.ctes).
+			renamed, err := applyColumnAliasProject(plan, selectInfo, cte.Columns, cte.Name)
+			if err != nil {
+				return nil, err
 			}
-
-			return plan, nil
+			return renamed, nil
 		}
 	}
 	// Check for derived table (subquery in FROM): name starts with "("
@@ -1476,6 +1466,18 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		selectInfo, err := plansql.ExtractSelect(parsed)
 		if err != nil {
 			return nil, fmt.Errorf("extracting SELECT from derived table: %w", err)
+		}
+		// The COLUMN-ALIAS LIST renames the derived table's columns
+		// positionally: `(SELECT s, n FROM t) AS b(kk, nn)` publishes kk and
+		// nn. Only the CTE arm honoured it, so on a derived table the names
+		// resolved to nothing and an EXISTS or IN over one answered ZERO ROWS
+		// with no error (#613).
+		aliasName := table.Alias
+		if aliasName == "" {
+			aliasName = "subquery"
+		}
+		if err := applyColumnAliases(selectInfo, table.ColumnAliases, aliasName); err != nil {
+			return nil, err
 		}
 		plan, err := BuildFromSelectWithCTEs(selectInfo, ctes)
 		if err != nil {
@@ -1552,6 +1554,93 @@ func setSubtreeAlias(n *Node, alias string) {
 	for _, c := range n.Children {
 		setSubtreeAlias(c, alias)
 	}
+}
+
+// applyColumnAliases renames a subquery's output columns positionally, the way
+// `(SELECT …) AS b(kk, nn)` and `WITH c(kk, nn) AS (…)` do.
+//
+// PostgreSQL's arity rules, measured live on postgres:17-alpine over a
+// two-column derived table:
+//
+//	AS b(kk, nn)         → columns kk, nn
+//	AS b(kk)             → columns kk, n — FEWER aliases rename a PREFIX
+//	AS b(kk, nn, extra)  → 42P10 `table "b" has 2 columns available but
+//	                       3 columns specified`
+//
+// The CTE arm used to apply the list only when the counts matched EXACTLY and
+// drop it in silence otherwise, so both of the mismatches above answered under
+// the wrong names.
+//
+// A subquery whose SELECT list carries a `*` is left alone: the star's width
+// is a catalog question this layer cannot ask (ExpandStarProjections answers
+// it later), so neither the rename nor the arity refusal can be made
+// truthfully here. Guessing would rename the wrong columns, which is a wrong
+// answer rather than a missing one.
+//
+// It rewrites the DERIVED TABLE's own SELECT ALIASES rather than stacking a
+// rename Project above the finished plan. `AS b(kk)` means exactly what
+// `SELECT s AS kk` means, and the spelling that already worked on every path
+// is the one with the alias inside. A CTE takes applyColumnAliasProject
+// instead, because its body SQL is re-read by consumers a rewritten SELECT
+// list would be invisible to.
+func applyColumnAliases(info *plansql.SelectInfo, aliases []string, relName string) error {
+	if len(aliases) == 0 || info == nil {
+		return nil
+	}
+	// A set operation's output names come from its LEFTMOST arm, which is
+	// where PostgreSQL applies the list too.
+	cols := info
+	for cols.Union != nil {
+		cols = cols.Union.Left
+	}
+	for _, c := range cols.Columns {
+		if c.Star {
+			return nil
+		}
+	}
+	if len(aliases) > len(cols.Columns) {
+		return sqlerr.New("42P10",
+			"table %q has %d columns available but %d columns specified",
+			relName, len(cols.Columns), len(aliases))
+	}
+	for i, name := range aliases {
+		cols.Columns[i].Alias = name
+	}
+	return nil
+}
+
+// applyColumnAliasProject is applyColumnAliases' Project-on-top form, for a
+// CTE. Both obey the same PostgreSQL arity rules — a shorter list renames a
+// PREFIX, a longer one is 42P10 — and differ only in where the rename is
+// written.
+func applyColumnAliasProject(plan *Node, info *plansql.SelectInfo, aliases []string, relName string) (*Node, error) {
+	if len(aliases) == 0 || info == nil {
+		return plan, nil
+	}
+	cols := info
+	for cols.Union != nil {
+		cols = cols.Union.Left
+	}
+	for _, c := range cols.Columns {
+		if c.Star {
+			return plan, nil
+		}
+	}
+	if len(aliases) > len(cols.Columns) {
+		return nil, sqlerr.New("42P10",
+			"table %q has %d columns available but %d columns specified",
+			relName, len(cols.Columns), len(aliases))
+	}
+	srcNames := getOutputColNames(cols)
+	projections := make([]Projection, 0, len(srcNames))
+	for i, srcName := range srcNames {
+		outName := srcName
+		if i < len(aliases) {
+			outName = aliases[i]
+		}
+		projections = append(projections, Projection{Column: srcName, Alias: outName, Expr: srcName})
+	}
+	return NewProject(plan, projections), nil
 }
 
 // countOutputCols returns the number of output columns from a select info.

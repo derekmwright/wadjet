@@ -271,13 +271,12 @@ var pins = map[string]struct {
 	// the user is told. Both harnesses ask about the DISPOSITION before the
 	// rows, so a pinned entry that errors is a logged divergence and one that
 	// starts ANSWERING PostgreSQL's number still fails the pin.
-	"derived_exists_colalias": {"#613", "a derived table's column-alias LIST `(…) AS b(kk,nn)` is " +
-		"dropped by resolveTableOrCTE, so b.kk/b.nn resolve to nothing where PostgreSQL says 23; " +
-		"the `SELECT s AS kk` rename spelling (derived_exists_renamed) is right, so it is the alias " +
-		"LIST, not the rename, that is unhandled — and the decline route inherits it. It answered 0 " +
-		"until the consumer half of #734/#679/#535 made the unparseable re-run LOUD", "subquery parse error", "EXISTS subquery requires a SubqueryRunner"},
-	"derived_in_colalias": {"#613", "the IN spelling of the same dropped column-alias list: it " +
-		"answered 0 where PostgreSQL says 36, and is LOUD now for the same reason", "subquery parse error", "subquery parse error"},
+	// derived_exists_colalias and derived_in_colalias were pinned here under
+	// #613 and are gone: a derived table's column-alias list `(…) AS b(kk,nn)`
+	// is applied on both arms now, so both answer PostgreSQL's 23 and 36. The
+	// corpus entries stay, because they are the only ones that reach the list
+	// through a CORRELATED subquery — the site it was lost at last.
+	//
 	// cte_probe_base_build and cte_referenced_twice were pinned here under
 	// #535 and are gone: a CTE reference is a named SCOPE and the four
 	// outer-scope collectors read it off the subtree root now, so a
@@ -553,8 +552,12 @@ func sharedNameCorpus() []Case {
 
 	// --- pinned, tracked elsewhere ---------------------------------------
 	//
-	// A derived table's column-alias LIST is dropped by the builder (#613);
-	// the rename spelling above is right, so the list is the gap. Pinned.
+	// A derived table's column-alias LIST, fixed in #613 and no longer pinned:
+	// `AS b(kk, nn)` renames positionally, so these answer PostgreSQL's 23
+	// and 36 on every arm. Kept in the corpus because they are the only
+	// entries that reach the list through a CORRELATED subquery, which is
+	// where it was lost last (RebuildSQL dropped it from the FROM clause it
+	// rebuilds per row).
 	add("derived_exists_colalias", fmt.Sprintf(
 		`SELECT COUNT(*) AS n FROM %s a WHERE EXISTS (SELECT 1 FROM `+
 			`(SELECT s, n FROM %s WHERE id < 20) AS b(kk, nn) WHERE b.kk = a.s AND b.nn = a.n)`,

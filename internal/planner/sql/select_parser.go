@@ -842,6 +842,16 @@ func (p *selectParser) parseTableRef() (TableRef, error) {
 		}
 		if p.peek() == TokenIdent {
 			tr.Alias = p.advance().val
+			// The COLUMN-ALIAS LIST: `(SELECT …) AS b(kk, nn)` renames the
+			// derived table's columns positionally. It was accepted only on
+			// the table-function path (parseTableRefTail), so on a derived
+			// table the open paren fell through to the end-of-statement guard
+			// and the whole statement was 42601 — including inside an EXISTS
+			// or IN subquery, where the refusal surfaced as a subquery parse
+			// error (#613).
+			if err := p.parseColumnAliasList(&tr); err != nil {
+				return TableRef{}, err
+			}
 		}
 		if tr.Alias == "" {
 			tr.Alias = tr.Name
@@ -1126,28 +1136,40 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 			return TableRef{}, fmt.Errorf("expected alias after AS")
 		}
 		tr.Alias = aliasTok.val
-		// Optional column alias list
-		if p.peek() == TokenLParen {
-			p.advance() // consume (
-			for {
-				colTok, err := p.expect(TokenIdent)
-				if err != nil {
-					return TableRef{}, fmt.Errorf("expected column alias")
-				}
-				tr.ColumnAliases = append(tr.ColumnAliases, colTok.val)
-				if p.peek() != TokenComma {
-					break
-				}
-				p.advance() // consume ,
-			}
-			if _, err := p.expect(TokenRParen); err != nil {
-				return TableRef{}, fmt.Errorf("expected ) after column aliases")
-			}
+		if err := p.parseColumnAliasList(&tr); err != nil {
+			return TableRef{}, err
 		}
 	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
 		tr.Alias = p.advance().val
 	}
 	return tr, nil
+}
+
+// parseColumnAliasList reads the optional `(col, col, …)` that may follow a
+// FROM source's alias — `AS b(kk, nn)`. One reader for every source kind: a
+// derived table, a table function and a VALUES list all take the same list,
+// and having it in two places is how the derived-table arm came to be missing
+// it (#613).
+func (p *selectParser) parseColumnAliasList(tr *TableRef) error {
+	if p.peek() != TokenLParen {
+		return nil
+	}
+	p.advance() // consume (
+	for {
+		colTok, err := p.expect(TokenIdent)
+		if err != nil {
+			return fmt.Errorf("expected column alias")
+		}
+		tr.ColumnAliases = append(tr.ColumnAliases, colTok.val)
+		if p.peek() != TokenComma {
+			break
+		}
+		p.advance() // consume ,
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return fmt.Errorf("expected ) after column aliases")
+	}
+	return nil
 }
 
 // isJoinKeyword returns true if the current token is a join/clause keyword.

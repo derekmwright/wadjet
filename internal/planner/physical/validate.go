@@ -614,6 +614,21 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 			into.open = true
 			return nil
 		}
+		// The COLUMN-ALIAS LIST renames those outputs positionally, and this
+		// binder has to see the renamed names or `b.kk` is 42703 against a
+		// scope that still holds the inner spellings (#613). A list LONGER
+		// than the output is 42P10, PostgreSQL's own refusal, raised here as
+		// well as in the logical builder because the two are separate entry
+		// paths and a subquery reaches only this one.
+		if n := len(tr.ColumnAliases); n > 0 {
+			if n > len(names) {
+				return sqlerr.New("42P10",
+					"table %q has %d columns available but %d columns specified",
+					qual, len(names), n)
+			}
+			names = append([]string(nil), names...)
+			copy(names, tr.ColumnAliases)
+		}
 		for _, n := range names {
 			into.addQualified(qual, n)
 		}
