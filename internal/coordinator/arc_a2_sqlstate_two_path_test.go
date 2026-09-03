@@ -37,6 +37,15 @@ type a2StateCell struct {
 	// runtime marks a failure raised inside a worker task rather than by the
 	// planner. Those are the ones #649 is about; the others are the controls.
 	runtime bool
+	// dagOnly marks a shape the SINGLE path ANSWERS and only the DAG refuses
+	// — the #807/#658 residual. Its class is asserted on the DAG arms alone,
+	// because there is no failure on the other two to classify.
+	dagOnly bool
+	// wantRoutes is the routing delta each DAG arm must show. The zero value
+	// means the DAG EXECUTED this shape; anything else names the refusal it
+	// took, and says that the two DAG arms are the coordinator-local pipeline
+	// for this cell (rule 11).
+	wantRoutes a2Routes
 }
 
 func a2StateCells() []a2StateCell {
@@ -51,14 +60,25 @@ func a2StateCells() []a2StateCell {
 		{issue: "#649", name: "bad_cidr_literal_22P02", runtime: true,
 			sql:  `SELECT COUNT(*) FROM typemx WHERE c_cidr = '192.168/16'`,
 			want: "22P02"},
+		// The literals here have to be ones PostgreSQL ACTUALLY refuses. The
+		// first version of these three cells used the BRACED UUID
+		// `'{a0eebc99-...}'` — which PostgreSQL accepts — and passed only
+		// because wadjet refused it too; #627's widening made the premise
+		// visible by making the cell fail. Measured now, not assumed.
 		{issue: "#649", name: "bad_uuid_literal_22P02", runtime: true,
-			sql:  `SELECT COUNT(*) FROM typemx WHERE c_uuid = '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'`,
+			sql:  `SELECT COUNT(*) FROM typemx WHERE c_uuid = 'not-a-uuid'`,
 			want: "22P02"},
 		{issue: "#649", name: "bad_uuid_literal_in_list_22P02", runtime: true,
-			sql:  `SELECT COUNT(*) FROM typemx WHERE c_uuid IN ('{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}')`,
+			sql:  `SELECT COUNT(*) FROM typemx WHERE c_uuid IN ('not-a-uuid')`,
 			want: "22P02"},
+		// `'zzz'` and not `'not-a-mac-at-all'`: the second is refused by the
+		// single-process path and ANSWERS 0 on the DAG — a two-path
+		// disposition split of #579's own class, pinned by
+		// TestANetworkLiteralHasOneDispositionAtEverySite rather than
+		// asserted here, because this gate is about the SQLSTATE of a
+		// refusal and not about which engine refuses.
 		{issue: "#649", name: "bad_mac_literal_22P02", runtime: true,
-			sql:  `SELECT COUNT(*) FROM typemx WHERE c_mac = 'not-a-mac-at-all'`,
+			sql:  `SELECT COUNT(*) FROM typemx WHERE c_mac = 'zzz'`,
 			want: "22P02"},
 		// A runtime failure reached through a shape that puts the error in a
 		// LATER stage than the scan, so the fix is not "the scan stage's
@@ -68,6 +88,28 @@ func a2StateCells() []a2StateCell {
 			sql: `SELECT g, MAX(CAST('1e39' AS DECIMAL(38,10))) AS v FROM typemx ` +
 				`WHERE id < 100 GROUP BY g ORDER BY g`,
 			want: "22003"},
+
+		// ---- the STAGE-BUILDER failures, which had no class at all --------
+		//
+		// The invariant this gate states is "every failure a client sees
+		// carries its SQLSTATE", and it was FALSE for the two loudest DAG
+		// failures on this branch — the ones the #807/#658 deferral pins.
+		// They arrived `ERR[]` while the three runtime classes above carried
+		// theirs, and a ten-cell census that covers only the classes it chose
+		// is not a census.
+		//
+		// 0A000, because PostgreSQL ANSWERS both queries: the class owed is
+		// "this engine does not implement it". Classified at the OPERATOR
+		// (exec.unresolvedSortKey, exec.boundWindowKey,
+		// exec.unresolvedAggColumn), which is the one place both engines
+		// reach, so the single-process path carries it too.
+		{issue: "#649", name: "sort_key_no_producer_emits_0A000", runtime: true,
+			sql:  `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY x.w`,
+			want: "0A000", dagOnly: true},
+		{issue: "#649", name: "window_key_no_producer_emits_0A000", runtime: true,
+			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
+				`FROM (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
+			want: "0A000", dagOnly: true},
 
 		// ---- PLAN-time controls: they already worked and must not move ----
 		{issue: "#649", name: "ctl_plan_time_bad_literal_22P02",
@@ -114,21 +156,28 @@ func TestATaskErrorCarriesItsSQLStateOverTheDAG(t *testing.T) {
 				}
 			}
 
-			_, serr := tmdRunSingle(ctx, single, tc.sql)
-			check("single", serr)
-			for i := 0; i < 5; i++ {
-				_, err := tmdRunSingle(ctx, spilled, tc.sql)
-				check("spilled", err)
-				if t.Failed() {
-					break
+			if !tc.dagOnly {
+				_, serr := tmdRunSingle(ctx, single, tc.sql)
+				check("single", serr)
+				for i := 0; i < 5; i++ {
+					_, err := tmdRunSingle(ctx, spilled, tc.sql)
+					check("spilled", err)
+					if t.Failed() {
+						break
+					}
 				}
+			} else if _, serr := tmdRunSingle(ctx, single, tc.sql); serr != nil {
+				t.Errorf("single arm: %v — this cell records a DAG-only refusal, so the "+
+					"single-process path must ANSWER\n  SQL: %s", serr, tc.sql)
 			}
 			for _, arm := range []struct {
 				name string
 				c    *Coordinator
 			}{{"dag", coord}, {"dag-shuffled", coordB}} {
+				before := a2ReadRoutes(arm.c)
 				_, err := tmdRunDAG(ctx, arm.c, tc.sql)
 				check(arm.name, err)
+				a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.c), tc.wantRoutes, tc.sql)
 			}
 		})
 	}

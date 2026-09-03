@@ -103,13 +103,25 @@ func TestANetworkLiteralHasOneDispositionAtEverySite(t *testing.T) {
 		name string
 		run  func(string) ([]string, error)
 	} {
+		// Every DAG arm reads the routing counters around its own run and
+		// asserts that NOTHING routed (rule 11). Every shape in this gate
+		// names a real table, so a route here would mean one of the nine
+		// refusals fired and the "DAG" arm was the coordinator-local pipeline
+		// -- which is exactly what five cells in the arc's other gates turned
+		// out to be.
+		dag := func(c *Coordinator, name, sql string) ([]string, error) {
+			before := a2ReadRoutes(c)
+			got, err := na2Run(tmdRunDAG(ctx, c, sql))
+			a2CheckRoutes(t, name, before, a2ReadRoutes(c), a2Routes{}, sql)
+			return got, err
+		}
 		return []struct {
 			name string
 			run  func(string) ([]string, error)
 		}{
 			{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
-			{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
-			{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+			{"dag", func(sql string) ([]string, error) { return dag(coord, "dag", sql) }},
+			{"dag-shuffled", func(sql string) ([]string, error) { return dag(coordB, "dag-shuffled", sql) }},
 		}
 	}
 
@@ -145,18 +157,71 @@ func TestANetworkLiteralHasOneDispositionAtEverySite(t *testing.T) {
 	// and the row-at-a-time path. Unifying the REFUSAL is the rest of #579 and
 	// is not in this commit; unifying the GRAMMAR is, and the accepted half
 	// above proves it.
+	//
+	// One entry has an EMPTY refusedAt and it is not an oversight:
+	// `c_mac = 'not-a-mac-at-all'` is refused by the single-process path and
+	// ANSWERS 0 on both DAG arms, measured. The literal parses on neither, so
+	// the difference is which layer meets it first — the scan's row-group
+	// prune withholds a domain it cannot build and the DAG's fragment then
+	// never evaluates the predicate, while the single-process filter does and
+	// raises. It is the same DATA-dependence as the empty-scan site, one
+	// engine over, and it is pinned rather than fixed for the same reason the
+	// rest of #579 is.
 	for _, tc := range []struct {
 		col, lit  string
 		refusedAt map[string]bool
+		// singleOnly names the sites where the SINGLE path refuses and the
+		// DAG answers. Those cells assert the split rather than one
+		// disposition, so closing it is visible.
+		singleOnly map[string]bool
 	}{
-		{"c_mac", "zzz", map[string]bool{"eq": true, "in": true}},
-		{"c_uuid", "not-a-uuid", map[string]bool{"eq": true, "in": true}},
-		{"c_cidr", "zzz", map[string]bool{"eq": true, "in": true}},
+		{"c_mac", "zzz", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_uuid", "not-a-uuid", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_cidr", "zzz", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_mac", "not-a-mac-at-all", nil,
+			map[string]bool{"eq": true, "in": true}},
+		// The five REGROUPINGS. Twelve hex digits with one or two separators
+		// ANYWHERE parsed while the widening counted separators instead of
+		// GROUP SIZES, so wadjet accepted five spellings PostgreSQL 17
+		// refuses with 22P02 — a superset the code's own comment and
+		// ADR-0012's entry both denied. Measured on 17.11: the grouped-hex
+		// grammar is 6+6 and 4+4+4 and nothing else.
+		//
+		// They sit in the REFUSED table rather than in a note because a bound
+		// with no fixture is the shape this arc keeps finding: the accepted
+		// half had ten literals x seven sites and the refused half had none
+		// of these.
+		{"c_mac", "0-8-002b010203", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_mac", "0:8002b010203", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_mac", "08-002b010203", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_mac", "08002b:01:0203", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_mac", "08:002b:010203", map[string]bool{"eq": true, "in": true}, nil},
+		// A sixth regrouping, added because the five above all keep 12
+		// digits in 2 or 3 groups: this one is 6+4+2, which the SIZE check
+		// refuses and a COUNT check would not.
+		{"c_mac", "08002b:0102:03", map[string]bool{"eq": true, "in": true}, nil},
 	} {
 		t.Run("#579/pin_refused_at_some_sites/"+tc.col+"/"+tc.lit, func(t *testing.T) {
 			for _, site := range a2NetSites(tc.col, tc.lit) {
 				for _, arm := range arms() {
 					_, err := arm.run(site.sql)
+					if tc.singleOnly[site.name] {
+						// The split: single refuses, the DAG answers.
+						if arm.name == "single" {
+							if err == nil {
+								t.Errorf("single arm, site %s: ANSWERED; this pin records that "+
+									"it REFUSES and the DAG does not\n  SQL: %s", site.name, site.sql)
+							}
+							continue
+						}
+						if err != nil {
+							t.Errorf("%s arm, site %s now REFUSES like the single-process path — "+
+								"the two-path split this pin records is CLOSED, so move this "+
+								"literal into refusedAt\n  err: %v\n  SQL: %s",
+								arm.name, site.name, err, site.sql)
+						}
+						continue
+					}
 					if tc.refusedAt[site.name] {
 						if err == nil {
 							t.Errorf("%s arm, site %s: ANSWERED a literal PostgreSQL refuses\n  SQL: %s",
