@@ -28,6 +28,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -835,6 +836,11 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		if errors.As(err, &qp) {
 			result.Panicked = true
 		}
+		// And the SQLSTATE, for the same reason and by the same means: read
+		// off the error's TYPE chain here, where the typed error still
+		// exists, because the coordinator receives only Error's text and
+		// cannot recover a class from it without guessing (#649).
+		result.SQLState = sqlerr.StateOf(err)
 		// And for a refusal the PLAN earns rather than the machine: #503's
 		// declared-schema guard says the same thing on every worker and on
 		// every attempt, so saying it three times only costs the stage its

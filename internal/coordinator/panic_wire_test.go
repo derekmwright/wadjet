@@ -47,7 +47,8 @@ func TestQueryPanicMessageSurvivesStageFraming(t *testing.T) {
 
 func TestStageTaskFailureCarriesInternalErrorSQLSTATE(t *testing.T) {
 	raw := panicText(t)
-	err := stageTaskFailure(true, fmt.Errorf("stage join-3: task t-1 failed after 3 attempts: %s", raw))
+	err := stageTaskFailure(taskFailure{TaskID: "t-1", Panicked: true},
+		fmt.Errorf("stage join-3: task t-1 failed after 3 attempts: %s", raw))
 	if got := sqlerr.StateOf(err); got != exec.SQLStateInternalError {
 		t.Errorf("SQLSTATE = %q, want %q — a panic that crossed the wire must still reach "+
 			"the client as internal_error, not the blanket class", got, exec.SQLStateInternalError)
@@ -58,9 +59,28 @@ func TestStageTaskFailureCarriesInternalErrorSQLSTATE(t *testing.T) {
 
 	// An ordinary failure keeps whatever code it already had (usually none),
 	// so this must not blanket-stamp XX000 onto everything.
-	plain := stageTaskFailure(false, errors.New("stage join-3: task t-1 failed"))
+	plain := stageTaskFailure(taskFailure{TaskID: "t-1"},
+		errors.New("stage join-3: task t-1 failed"))
 	if got := sqlerr.StateOf(plain); got != "" {
-		t.Errorf("SQLSTATE = %q on a non-panic failure, want none", got)
+		t.Errorf("SQLSTATE = %q on a non-panic failure that carried none, want none", got)
+	}
+
+	// #649: a non-panic failure whose WORKER assigned a class keeps that
+	// class. No class is the honest answer only when the producer never gave
+	// one — inventing one here would be guessing, and stamping XX000 onto
+	// every runtime failure would be the same error in the other direction.
+	classed := stageTaskFailure(taskFailure{TaskID: "t-1", SQLState: "22012"},
+		errors.New("stage div-1: task t-1 failed after 1 attempts: division by zero"))
+	if got := sqlerr.StateOf(classed); got != "22012" {
+		t.Errorf("SQLSTATE = %q, want 22012 — the worker's own class must survive the DAG", got)
+	}
+	// Panicked outranks it: XX000 is what a panic is, whatever the panicking
+	// error happened to carry.
+	both := stageTaskFailure(taskFailure{TaskID: "t-1", Panicked: true, SQLState: "22012"},
+		errors.New("stage div-1: task t-1 failed"))
+	if got := sqlerr.StateOf(both); got != exec.SQLStateInternalError {
+		t.Errorf("SQLSTATE = %q on a panic that also carried 22012, want %q",
+			got, exec.SQLStateInternalError)
 	}
 }
 
@@ -80,7 +100,8 @@ func TestCastErrorTextIsNotMisclassifiedAsPanic(t *testing.T) {
 
 	// stageTaskFailure must not stamp XX000 onto it: the worker correctly
 	// determined this was not a *exec.QueryPanic, so Panicked is false.
-	err := stageTaskFailure(false, fmt.Errorf("stage cast-1: task t-1 failed after 1 attempts: %s", castErrMsg))
+	err := stageTaskFailure(taskFailure{TaskID: "t-1", SQLState: "22P02"},
+		fmt.Errorf("stage cast-1: task t-1 failed after 1 attempts: %s", castErrMsg))
 	if got := sqlerr.StateOf(err); got == exec.SQLStateInternalError {
 		t.Errorf("SQLSTATE = %q, a CAST error was misclassified as an internal panic", got)
 	}
@@ -131,8 +152,9 @@ func TestRecoveredPanicIsNotRetried(t *testing.T) {
 		t.Errorf("the task was re-dispatched %d times; a recovered panic must not be retried",
 			republished)
 	}
-	if _, msg, panicked, failed := tr.FirstError(); !failed || !panicked {
-		t.Errorf("FirstError() = (%q, panicked=%v, failed=%v), want panicked=true and failed=true", msg, panicked, failed)
+	if f, failed := tr.FirstError(); !failed || !f.Panicked {
+		t.Errorf("FirstError() = (%q, panicked=%v, failed=%v), want panicked=true and failed=true",
+			f.Message, f.Panicked, failed)
 	}
 }
 

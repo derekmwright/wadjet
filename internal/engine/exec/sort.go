@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -99,7 +100,7 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		// final columnar sort) shares this schema.
 		for _, k := range s.Keys {
 			if columnIndexFallback(b, k.Column) < 0 {
-				return fmt.Errorf("sort: key column %q does not exist in the input schema", k.Column)
+				return unresolvedSortKey(k.Column)
 			}
 		}
 		s.schema = b.Schema
@@ -1487,4 +1488,24 @@ func appendKeyElem(buf []byte, v any) []byte {
 	default:
 		return appendKeyRaw(append(buf, keyElemOther), fmt.Sprint(tv))
 	}
+}
+
+// A key that names no column of its input is 0A000 (feature_not_supported),
+// not the blanket class.
+//
+// It reaches a CLIENT — `SELECT x.w FROM (SELECT g*3 AS w FROM t ORDER BY w
+// LIMIT 5) x ORDER BY x.w` is a query PostgreSQL ANSWERS, and on the stage DAG
+// it arrives here (#807/#658) — so "every failure a client sees carries its
+// SQLSTATE" (#649) covers it. It carried none: `ERR[]`, while the census's own
+// 22003 and 22012 cells carried theirs.
+//
+// 0A000 and not 42703 or XX000 for the reason commit 7 gave the five
+// order_by_keys.go refusals it classified: PostgreSQL answers the query, so the
+// class a client is owed is "this engine does not implement it", not "your SQL
+// is wrong" and not "tell someone". The MESSAGE keeps naming the planner bug —
+// this is still a backstop against a wrong answer, not a supported refusal —
+// and the class is what a client branches on.
+func unresolvedSortKey(col string) error {
+	return sqlerr.New("0A000",
+		"sort: key column %q does not exist in the input schema", col)
 }

@@ -76,7 +76,7 @@ func TestTaskRetrier_AllSucceedFirstTry(t *testing.T) {
 	if !tr.Observe(okResult("c", "f-c")) {
 		t.Fatal("not done after 3/3")
 	}
-	if _, _, _, failed := tr.FirstError(); failed {
+	if _, failed := tr.FirstError(); failed {
 		t.Fatal("unexpected failure")
 	}
 	files := tr.Files()
@@ -108,7 +108,7 @@ func TestTaskRetrier_FailThenRetrySucceeds(t *testing.T) {
 	if !tr.Observe(okResult("a", "f-a2")) {
 		t.Fatal("not done after retry success")
 	}
-	if _, _, _, failed := tr.FirstError(); failed {
+	if _, failed := tr.FirstError(); failed {
 		t.Fatal("unexpected terminal failure")
 	}
 	if files := tr.Files(); files[0][0] != "f-a2" {
@@ -135,7 +135,8 @@ func TestTaskRetrier_ExhaustsAttempts(t *testing.T) {
 	if !tr.Observe(failResult("a", "boom-3")) {
 		t.Fatal("not terminal after attempts exhausted")
 	}
-	taskID, errMsg, _, failed := tr.FirstError()
+	f, failed := tr.FirstError()
+	taskID, errMsg := f.TaskID, f.Message
 	if !failed || taskID != "a" || errMsg != "boom-3" {
 		t.Fatalf("FirstError = (%s,%s,%v), want (a,boom-3,true)", taskID, errMsg, failed)
 	}
@@ -161,7 +162,8 @@ func TestTaskRetrier_PlanRefusalIsTerminalImmediately(t *testing.T) {
 	if n := len(rep.snapshot()); n != 0 {
 		t.Fatalf("republished %d times after a plan refusal, want 0", n)
 	}
-	taskID, errMsg, _, failed := tr.FirstError()
+	f, failed := tr.FirstError()
+	taskID, errMsg := f.TaskID, f.Message
 	if !failed || taskID != "a" || errMsg != r.Error {
 		t.Fatalf("FirstError = (%s,%s,%v), want (a,%q,true)", taskID, errMsg, failed, r.Error)
 	}
@@ -182,7 +184,7 @@ func TestTaskRetrier_RetryDisabled(t *testing.T) {
 	if !tr.Observe(failResult("a", "boom")) {
 		t.Fatal("with retry disabled, first failure must be terminal")
 	}
-	if _, _, _, failed := tr.FirstError(); !failed {
+	if _, failed := tr.FirstError(); !failed {
 		t.Fatal("expected terminal failure")
 	}
 	if len(rep.snapshot()) != 0 {
@@ -239,7 +241,7 @@ func TestTaskRetrier_LateDuplicateAfterRetry(t *testing.T) {
 	if !tr.Observe(okResult("a", "f-final")) {
 		t.Fatal("success must complete the stage")
 	}
-	if _, _, _, failed := tr.FirstError(); failed {
+	if _, failed := tr.FirstError(); failed {
 		t.Fatal("success must clear failure state")
 	}
 	if files := tr.Files(); files[0][0] != "f-final" {
@@ -296,7 +298,7 @@ func TestTaskRetrier_RetryStuck_Redispatches(t *testing.T) {
 	if !tr.Observe(okResult("a", "f-a1")) {
 		t.Fatal("stage must complete on the surviving attempt's result")
 	}
-	if _, _, _, failed := tr.FirstError(); failed {
+	if _, failed := tr.FirstError(); failed {
 		t.Fatal("unexpected terminal failure")
 	}
 }
@@ -322,7 +324,7 @@ func TestTaskRetrier_RetryStuck_CapDoesNotFail(t *testing.T) {
 	if tr.Terminal() != 0 {
 		t.Fatal("stuck-past-cap must not mark the task terminal")
 	}
-	if _, _, _, failed := tr.FirstError(); failed {
+	if _, failed := tr.FirstError(); failed {
 		t.Fatal("stuck-past-cap must not record a terminal failure")
 	}
 	// A surviving attempt's success still completes the stage.
@@ -538,7 +540,7 @@ func TestTaskRetrier_StaleInputAttemptRetries(t *testing.T) {
 	if !tr.Observe(okResult("a", "f-a2")) {
 		t.Fatal("not done after retry success")
 	}
-	if _, _, _, failed := tr.FirstError(); failed {
+	if _, failed := tr.FirstError(); failed {
 		t.Fatal("stale-attempt retry must recover cleanly")
 	}
 }

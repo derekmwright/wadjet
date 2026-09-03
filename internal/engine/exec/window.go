@@ -2,7 +2,6 @@ package exec
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -397,7 +397,11 @@ func boundWindowKey(b *batch.RecordBatch, clause, name string) (string, error) {
 		for i, c := range b.Schema {
 			have[i] = c.Name
 		}
-		return "", fmt.Errorf("window: %s %q is not a column of its input (input has: %s)",
+		// 0A000 for the reason unresolvedSortKey states: this reaches a
+		// client for a query PostgreSQL answers (#658), and it carried no
+		// class at all.
+		return "", sqlerr.New("0A000",
+			"window: %s %q is not a column of its input (input has: %s)",
 			clause, name, strings.Join(have, ", "))
 	}
 	return b.Schema[idx].Name, nil

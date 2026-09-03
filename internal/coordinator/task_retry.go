@@ -87,27 +87,54 @@ type taskAttemptState struct {
 	partBytes []int64
 	errMsg    string
 	panicked  bool
+	sqlState  string
 	attempts  int
 	terminal  bool
 }
 
+// taskFailure is one terminal task failure, carried as a value because the
+// coordinator has to know three things about it and reading any of them off
+// the message TEXT is exactly what Panicked's own doc forbids: Error is
+// free-form and a user's own SQL can put any substring in it.
+type taskFailure struct {
+	TaskID   string
+	Message  string
+	Panicked bool
+	// SQLState is ResultNotification.SQLState for the same failure: the class
+	// the worker's typed error carried, or "" when it carried none.
+	SQLState string
+}
+
 // stageTaskFailure carries a failed stage task's SQLSTATE across the process
-// boundary. err is the caller's framing of the worker's raw error text,
-// whose wording each stage type owns; panicked is the worker's
-// ResultNotification.Panicked bit for that same failure.
+// boundary. err is the caller's framing of the worker's raw error text, whose
+// wording each stage type owns; f carries the worker's own classification of
+// that same failure.
 //
-// A worker-side panic is converted at the worker's own boundary and reaches
-// the coordinator as a bare STRING in a ResultNotification — the *QueryPanic
-// and its XX000 do not survive that trip, and framing the text with %s
-// produced an error with no code at all, so the client was handed the blanket
-// class instead of internal_error. panicked is what there is to key off: it
-// is set from the worker's error TYPE, not from the error text, because that
-// text is free-form and can legitimately contain any substring — including
-// one that used to double as the panic marker (a CAST reporting back an
-// invalid input of "internal error in x" is exactly that collision).
-func stageTaskFailure(panicked bool, err error) error {
-	if panicked {
+// A worker-side error is converted at the worker's boundary and reaches the
+// coordinator as a bare STRING in a ResultNotification — the typed error and
+// its class do not survive that trip, and framing the text with %s produced an
+// error with no code at all. So the class travels as a field. Two of them:
+//
+//   - Panicked, for a query-scoped panic (ADR-0019). It wins, because XX000
+//     is what a panic is regardless of any class the panicking error carried.
+//   - SQLState, for every ordinary runtime failure (#649). A DECIMAL overflow
+//     is 22003, a division by zero is 22012 and an invalid network literal is
+//     22P02 on the single-process path, and all three reached the client with
+//     no class at all through the DAG until this field existed. An empty
+//     SQLState leaves the error as it was: no class is the honest answer for
+//     a failure whose producer never assigned one, and inventing one here
+//     would be guessing.
+//
+// Neither is ever derived from the text. Error is free-form and can
+// legitimately contain any substring — including one that used to double as
+// the panic marker, which a CAST reporting back an invalid input of "internal
+// error in x" reproduced exactly.
+func stageTaskFailure(f taskFailure, err error) error {
+	if f.Panicked {
 		return sqlerr.Wrap(exec.SQLStateInternalError, err)
+	}
+	if f.SQLState != "" {
+		return sqlerr.Wrap(f.SQLState, err)
 	}
 	return err
 }
@@ -207,6 +234,7 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	}
 	st.errMsg = r.Error
 	st.panicked = r.Panicked
+	st.sqlState = r.SQLState
 	if r.MissingInputKey != "" {
 		// Tag both the fatal-classified case and attempts-exhausted-on-
 		// missing-input so ExecuteSQL's streaming-disabled re-execution
@@ -259,18 +287,22 @@ func (tr *taskRetrier) IsTerminal(taskID string) bool {
 }
 
 // FirstError returns the first terminal failure in dispatch order, if any.
-// panicked reports whether that failure's ResultNotification.Panicked bit
-// was set, for callers deciding SQLSTATE (see stageTaskFailure) — never
-// derive it by re-inspecting errMsg's text.
-func (tr *taskRetrier) FirstError() (taskID, errMsg string, panicked, failed bool) {
+//
+// The classification bits travel WITH the message rather than beside it:
+// Panicked and SQLState are the worker's own answers, read from its error's
+// TYPE, and a caller must never re-derive either by inspecting Message.
+func (tr *taskRetrier) FirstError() (taskFailure, bool) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	for _, id := range tr.order {
 		if st := tr.states[id]; st.terminal && st.errMsg != "" {
-			return id, st.errMsg, st.panicked, true
+			return taskFailure{
+				TaskID: id, Message: st.errMsg,
+				Panicked: st.panicked, SQLState: st.sqlState,
+			}, true
 		}
 	}
-	return "", "", false, false
+	return taskFailure{}, false
 }
 
 // Files returns per-task result files in dispatch order. Only meaningful

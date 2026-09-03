@@ -1581,7 +1581,12 @@ func unresolvedAggColumn(role, col string, b *batch.RecordBatch) error {
 	for i, c := range b.Schema {
 		have[i] = c.Name
 	}
-	return fmt.Errorf("hash aggregate: %s %q is not a column of its input (input has: %s)",
+	// 0A000, the same class its sort and window siblings carry: this is a
+	// planner bound reaching a client on a query PostgreSQL answers, and the
+	// message keeps naming the bug while the class says what a client can do
+	// about it (#649's invariant, #776's shape).
+	return sqlerr.New("0A000",
+		"hash aggregate: %s %q is not a column of its input (input has: %s)",
 		role, col, strings.Join(have, ", "))
 }
 

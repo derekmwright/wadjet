@@ -1075,6 +1075,21 @@ type ResultNotification struct {
 	// decision and the SQLSTATE handed to the client key off this field,
 	// not off Error.
 	Panicked bool `json:"panicked,omitempty"`
+	// SQLState is the PostgreSQL SQLSTATE the worker's error carried, set
+	// from sqlerr.StateOf on the error's TYPE chain and empty when it carried
+	// none. It is a TYPED FIELD for the reason Panicked above is one: Error
+	// is free-form text that can embed any substring a user's own SQL puts
+	// there, so a coordinator that recovered a class by matching that text
+	// could be handed any class by a crafted literal.
+	//
+	// Without it a runtime task failure crossed the DAG as a bare string and
+	// reached the client with no class at all (#649): a DECIMAL overflow that
+	// is 22003 on the single-process path, a division by zero that is 22012,
+	// and an invalid network literal that is 22P02 all arrived as the blanket
+	// class, so a client could not tell a data error from a syntax error from
+	// an internal one. Plan-time refusals were unaffected — they never leave
+	// the coordinator — which is why the split looked arbitrary from outside.
+	SQLState string `json:"sqlstate,omitempty"`
 
 	// Result location
 	ResultPath  string   `json:"result_path,omitempty"`
