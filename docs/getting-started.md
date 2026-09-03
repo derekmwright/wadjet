@@ -1,24 +1,27 @@
 # Getting Started
 
-Wadjet is a distributed SQL analytics engine for Go: embed it directly in
-your Go application, or deploy it as a standalone server (or a coordinator +
-worker cluster) speaking the PostgreSQL wire protocol, HTTP, and gRPC. Both
-paths run the same SQL engine over Apache Parquet and Apache Iceberg tables
-— on local disk when embedding, or S3-compatible object storage for the
-server — with first-class network-telemetry types (IPv4, IPv6, CIDR, MAC,
-Port, Protocol) on top. This guide walks through installing it, querying
-files on disk, the embedded Go API, and then running the server: creating a
-table, ingesting data, and querying managed storage.
+Wadjet is a distributed SQL analytics engine for Go: use it as an embedded
+Go library, or deploy it as a standalone server (or a coordinator + worker
+cluster) speaking the PostgreSQL wire protocol, HTTP, and gRPC. Both paths
+run the same SQL engine over Apache Parquet tables on local disk or
+S3-compatible object storage — that storage choice is independent of
+embedding vs. deploying — with first-class network-telemetry types (IPv4,
+IPv6, CIDR, MAC, Port, Protocol) on top. Embedding is source-level within
+this repository today (see [Embedding](embedding.md) below for what that
+means). This guide walks through installing the CLI, querying files on
+disk, the embedded path, and then running the server: creating a table,
+ingesting data, and querying managed storage.
 
 ## Prerequisites
 
 - **Go 1.26+**
 
 Nothing else is required to query local files. Managed tables need object
-storage — local disk (`objstore.FileStore`, no server) when embedding, or an
-S3-compatible store (MinIO for local development, AWS S3 or similar for
-production) for the standalone/distributed server. Distributed mode
-(coordinator + worker split) additionally needs:
+storage — local disk or an S3-compatible store (MinIO for local
+development, AWS S3 or similar for production) — and that choice is the
+same whether you embed the library or run the server
+(`--storage-type=file --data-dir=...` vs. the default `--storage-type=s3`).
+Distributed mode (coordinator + worker split) additionally needs:
 
 - **NATS** (only required for distributed mode)
 
@@ -39,6 +42,11 @@ go build -o wadjet-bin ./cmd/wadjet
 ```bash
 go get github.com/derekmwright/wadjet/wadjet
 ```
+
+`go get` succeeds, but calling `wadjet.Open` needs types (`objstore.Store`,
+`parquet.Schema`, `ingest.Config`) that today live under `internal/...` and
+so are only importable from code inside this repository — see
+[Embedding](embedding.md) before writing an out-of-tree program against it.
 
 ## Your First Query (No Setup)
 
@@ -61,8 +69,18 @@ Paths may be local files, `~/` home-relative paths, glob patterns (`logs/*.json`
 
 ## Your First Table (Embedded Go)
 
-Wadjet is also a Go library — no server process required. Point it at local
-disk or an S3-compatible store; the rest of the API is identical either way:
+Wadjet's `wadjet` package is also a Go library, used by `cmd/wadjet` itself
+— no server process required. Point it at local disk or an S3-compatible
+store; the rest of the API is identical either way.
+
+> **Not consumable from an out-of-tree Go module today.** `wadjet.Config.Store`
+> is `objstore.Store`, `CreateTable` takes `parquet.Schema` and `NewIngester`
+> takes `ingest.Config` — all three from
+> `github.com/derekmwright/wadjet/internal/...`, which Go forbids external
+> modules from importing (`use of internal package ... not allowed`). The
+> program below therefore lives inside this repository (`cmd/<yourtool>/`,
+> for example), not in a separate module you `go get` it into. See
+> [Embedding](embedding.md) for the full picture.
 
 ```go
 package main
@@ -163,6 +181,14 @@ func main() {
 }
 ```
 
+This table's catalog registration lives only in this one process:
+`wadjet.Open` here has no `Config.MetaKV`, so it gets an in-memory catalog
+that dies with the process — running the program a second time starts from
+an empty catalog again (the Parquet data itself does land under
+`./wadjet-data/wadjet/tables/flow_logs/...` and simply accumulates). A
+persistent catalog needs `Config.MetaKV` built from NATS JetStream; see
+[Embedding](embedding.md).
+
 The rest of this guide covers the **server** deployment — the same engine
 behind `wadjet serve`, speaking the PostgreSQL wire protocol, HTTP, and
 gRPC, backed by managed object storage.
@@ -188,6 +214,17 @@ mc mb local/wadjet
 ```
 
 ## Start the Server
+
+> **`query`, `create-table`, `shell`, and `tables` are standalone commands,
+> not clients of a running `serve` process.** Each opens the object store
+> and a catalog directly, the same way the embedded example above does —
+> none of them connect over the network to `serve` (the HTTP and gRPC
+> sections below are how a remote client reaches a running server). Each
+> `query` / `create-table` / `shell` invocation also starts from a fresh,
+> empty, in-memory catalog, so a table one invocation creates is not visible
+> to another; `tables` additionally fails outright today
+> (`Error: reading catalog meta: key not found`) regardless of what has been
+> created. Within a single `shell` session, statements do share one catalog.
 
 ### Standalone Mode (Single Process)
 
@@ -294,6 +331,7 @@ See [gRPC API](grpc-api.md) for the full service reference.
 
 ## Next Steps
 
+- [Embedding](embedding.md) — The full embedded API reference, and what "Not consumable from an out-of-tree Go module today" means in practice
 - [Ingestion Guide](ingestion.md) — Bento pipelines, partitioning strategies, tuning flush thresholds
 - [SQL Reference](sql-reference.md) — Supported syntax, aggregates, joins
 - [gRPC API](grpc-api.md) — Generate type-safe clients for any language
