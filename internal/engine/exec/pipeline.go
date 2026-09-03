@@ -32,6 +32,78 @@ type Pipeline struct {
 	Ops     []UnaryOperator
 	Sink    Sink
 	Workers int // number of parallel workers (0 or 1 = serial)
+
+	// Morsel-parallel clones, held so Close() can reach them.
+	//
+	// runParallel builds a cloned operator chain and a cloned sink per
+	// worker 1..N-1. On the normal path it closes the op chains and either
+	// closes or hands the clone sinks to the primary (partitioned
+	// adoption), and calls releaseClones so nothing below double-closes.
+	// On every OTHER path — a worker error, a cancelled context, a clone's
+	// own Init failing — it returns ABOVE that teardown, and Close() held
+	// no reference to the clones at all: p.Ops is opChains[0] and p.Sink is
+	// workerSinks[0]. A cancelled morsel-parallel GROUP BY therefore left
+	// 6,164,505 B in 163 aggregate partial-state files that no correctly
+	// placed defer could reach, because the files belong to CLONE sinks
+	// (#625 M2, ADR-0028). Guarded by a mutex only because a clone's Init
+	// error can return while other clones are still being constructed;
+	// every worker goroutine has finished by the time Close runs.
+	cloneMu    sync.Mutex
+	cloneOps   [][]UnaryOperator
+	cloneSinks []Sink
+}
+
+// trackClone records a clone chain / sink so Close() can reclaim it if
+// runParallel never reaches its teardown.
+func (p *Pipeline) trackCloneOps(chain []UnaryOperator) {
+	p.cloneMu.Lock()
+	p.cloneOps = append(p.cloneOps, chain)
+	p.cloneMu.Unlock()
+}
+
+func (p *Pipeline) trackCloneSink(s Sink) {
+	p.cloneMu.Lock()
+	p.cloneSinks = append(p.cloneSinks, s)
+	p.cloneMu.Unlock()
+}
+
+// releaseCloneOps / releaseCloneSinks drop the tracking once runParallel's
+// own teardown has taken ownership (closed them, or handed the sinks to the
+// primary's adoptedPartitions, whose Close closes them in turn).
+func (p *Pipeline) releaseCloneOps() {
+	p.cloneMu.Lock()
+	p.cloneOps = nil
+	p.cloneMu.Unlock()
+}
+
+func (p *Pipeline) releaseCloneSinks() {
+	p.cloneMu.Lock()
+	p.cloneSinks = nil
+	p.cloneMu.Unlock()
+}
+
+// closeTrackedClones closes every clone runParallel did not hand off. It is
+// idempotent: the tracking slices are cleared as they are drained.
+func (p *Pipeline) closeTrackedClones() error {
+	p.cloneMu.Lock()
+	ops, sinks := p.cloneOps, p.cloneSinks
+	p.cloneOps, p.cloneSinks = nil, nil
+	p.cloneMu.Unlock()
+
+	var firstErr error
+	for _, chain := range ops {
+		for _, op := range chain {
+			if err := op.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	for _, s := range sinks {
+		if err := s.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // FatalEvalPanic marks a panic value that carries a query ERROR rather than a
@@ -581,6 +653,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			}
 		}
 		opChains[i] = chain
+		p.trackCloneOps(chain)
 	}
 
 	// Per-worker sinks for MergeableSink: each worker gets its own sink
@@ -611,6 +684,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				return fmt.Errorf("cloned sink init: %w", err)
 			}
 			workerSinks[i] = cloned
+			p.trackCloneSink(cloned)
 		}
 	}
 
@@ -821,6 +895,10 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				workerSinks[i].Close()
 			}
 		}
+		// Ownership has moved: closed above, or adopted by the primary
+		// (whose Close closes its adoptedPartitions). Anything Close()
+		// still tracks after this point would be a double close.
+		p.releaseCloneSinks()
 	}
 
 	// Close cloned ops (workers 1..N).
@@ -829,13 +907,17 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			op.Close()
 		}
 	}
+	p.releaseCloneOps()
 
 	return p.Sink.Finalize(ctx)
 }
 
 // Close releases all resources in the pipeline.
 func (p *Pipeline) Close() error {
-	var firstErr error
+	// Clones first: a clone sink's Close is what removes its aggregate
+	// partial-state and drained-run files, and on an error or cancel path
+	// runParallel never got to its own teardown (#625 M2).
+	firstErr := p.closeTrackedClones()
 	if err := p.Source.Close(); err != nil && firstErr == nil {
 		firstErr = err
 	}

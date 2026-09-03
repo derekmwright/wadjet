@@ -1141,6 +1141,16 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if pipeline == nil {
 		return nil
 	}
+	// This function ran the pipeline on three paths and closed it on none of
+	// them, so a stage task that spilled left its sort runs, aggregate
+	// partial-state files and morsel-clone state in the worker's scratch
+	// directory — the same shape as #625's M1/M2 on the single-process
+	// paths, on the DAG side (#819). physPlan.Cleanup only unlinks the
+	// SpillManager's own files, and the operator run files are not
+	// registered with it. Registered here, above every branch, so it also
+	// covers the two sink-swapping paths below; the sinks they install are
+	// idempotent on Close.
+	defer pipeline.Close()
 
 	// Build-cache pre-scan tasks (StageID == "build-cache-scan") read whole
 	// tables that may not fit in worker memory. Replace the default CollectSink

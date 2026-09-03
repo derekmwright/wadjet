@@ -1,6 +1,7 @@
 # ADR-0028: A breaker is scoped by operation class, and every exit path of a query reclaims the same way
 
-Status: Accepted (2026-09-03, the operational-lifecycle arc: #798, #820, #821, #822)
+Status: Accepted (2026-09-03, the operational-lifecycle arc: #798, #820,
+#821, #822, #625, #817, #818, #819)
 
 ## Context
 
@@ -51,6 +52,44 @@ Finally, none of it was configurable or observable: `DefaultCircuitConfig()`
 was passed literally, there was no flag, config key, env var or kill
 switch, and no metric recorded that a breaker had opened (#822).
 
+**Query reclamation.** The second half of the same failure of scope. A query
+writes to two places that outlive its goroutine — local spill scratch and
+the object store's `queries/<id>/*` prefix — and the code that reclaimed
+them was attached to the SUCCESSFUL exit only. Round-0 measured, at a
+4 MiB budget with the spill floors lowered, a cancelled single-process
+query against a control arm running the identical query to completion:
+
+| shape | control, after | cancelled, after | leaked |
+|---|---|---|---|
+| `ORDER BY` | 0 files / 0 B | 3 files | 1,339,590 B |
+| `GROUP BY` | 0 files / 0 B | 117 files | 4,843,311 B |
+| `ROW_NUMBER() OVER (…)` | 0 files / 0 B | 60 files | 26,791,800 B |
+
+The file count goes UP after the cancel (117 vs 116, 60 vs 59): a spill
+file mid-write finishes and is then orphaned. Four independent mechanisms,
+each with its own site:
+
+- **M1** `defer pipeline.Close()` sat BELOW the `Run` error check at
+  `wadjet.go` (twice) and `internal/server/server.go`. A cancelled `Run`
+  returns from the function, so the `defer` STATEMENT never executes.
+  `physPlan.Cleanup` is correctly deferred but only unlinks the
+  SpillManager's own files; the operator run files (`sort-run-*.bin`,
+  `agg-spill-*.bin`, `window-*.bin`, `build-spill-*.bin`) are created with
+  a bare `os.Create` and are removed only by the operator's `Close`. The
+  CORRECT form already existed in the tree, at
+  `internal/coordinator/local_fastpath.go`, and had never been applied to
+  the other three sites.
+- **M2** `Pipeline.Close` held no reference to the morsel-parallel clones,
+  and `runParallel` returns above its own teardown on every error and
+  cancel path. Worse, the three pipeline-breaker source adapters built
+  their inner pipeline as a LOCAL variable inside `Next` and discarded it,
+  so nothing could reach the clones at all. M1 alone leaves the aggregate
+  family leaking 6,164,505 B in 163 files.
+- **M3** The DAG's per-query cleanup is a one-shot LIST+DELETE that a
+  straggler upload can land after. Measured: at cancel and at `ExecuteSQL`
+  return the prefix held 0 objects, and one `.wshf` landed afterwards.
+- **M4** `Coordinator.CancelQuery` never called `cleanupQuery` at all.
+
 ## Decision
 
 1. **The breaker is scoped by operation class — read, write, delete — with
@@ -88,7 +127,38 @@ switch, and no metric recorded that a breaker had opened (#822).
    open, labelled by class, so an operator can see that DELETEs are
    tripping without concluding that reads are.
 
-5. **The single construction site is pinned.** Every assertion about the
+5. **Every exit path of a query runs the same reclamation.** Completion,
+   error, cancel and worker drain reclaim the same things: the pipeline is
+   closed (its `defer` registered BEFORE `Run`, never after), the plan's
+   `Cleanup` runs, and the coordinator's `cleanupQuery` runs. There is no
+   "successful exit" cleanup and "everything else" cleanup.
+
+6. **An operator that creates a file owns it, and the object that built a
+   pipeline owns the pipeline.** `Pipeline.Close` reaches the clones it
+   built; a source adapter that runs an inner pipeline HOLDS it and closes
+   it; the plan closes the HashJoins it built (only `HashJoin.Close`
+   returns the build's reservation and removes the grace partition files,
+   which the flush loop otherwise removes only on a run to completion);
+   and the worker's `executePipelineTask`, which ran a pipeline on three
+   paths and closed it on none, closes it too (#819).
+
+7. **A one-shot cleanup cannot win a race, so the loser refuses instead.**
+   Rather than re-arming a sweep, a worker REFUSES to upload a stage
+   output for a query it has already tombstoned — ADR-0009's tombstone
+   mechanism, extended from the async upload manager (where it has
+   governed since the q22-R2 stall) to the synchronous stage uploads.
+   Refusals are counted (`worker.StageUploadsRefused`); a refusal is not a
+   task failure, because nothing will ever read that output.
+
+8. **State the coordinator cannot free is bounded by time at the holder.**
+   The worker's `ResultStore` had a hard capacity and no eviction: the
+   only removal path was a broadcast that a cancelled query never sent,
+   so a worker that missed one held those bytes for its process lifetime
+   and — once full — silently sent every later stage output to S3 for the
+   rest of that lifetime. It prunes on insert past a TTL, the same pattern
+   the worker's `cancelled` map already used, and counts what it evicted.
+
+9. **The single construction site is pinned.** Every assertion about the
    breaker's behaviour assumes one process-wide instance;
    `TestCircuitBreakerHasExactlyOneConstructionSite` fails if a second
    `NewCircuitStore` call appears, so a second breaker has to be argued
@@ -125,3 +195,16 @@ switch, and no metric recorded that a breaker had opened (#822).
   explicitly rather than implying a YAML block that would be inert.
 - The breaker still shares one instance across buckets. That is now a
   pinned, argued property rather than an accident.
+- Routing cancelled queries through `cleanupQuery` increases exactly the
+  delete volume that opened the breaker, on the workload (a dashboard that
+  cancels constantly) that motivates the reclamation fix. That is why the
+  breaker's per-class scoping lands FIRST: without it, decision 5 makes
+  decision 1's symptom worse.
+- The reclamation gate is a BYTE COUNT, per operator family, with a
+  control arm that runs the identical query to completion and an
+  engagement assertion so a non-spilling run cannot pass vacuously. It
+  runs with several morsel workers on the aggregate family deliberately:
+  a serial-only version of the same gate passes with M2 unfixed.
+- `ResultStore`'s TTL is a backstop, not the mechanism. A rising
+  `Evicted()` means a terminal broadcast is not arriving, which is a
+  defect to find rather than a condition to tolerate.

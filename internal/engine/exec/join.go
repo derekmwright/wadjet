@@ -4391,6 +4391,16 @@ func (h *HashJoin) Close() error {
 	h.strIndex = nil
 	h.bloom = nil
 	h.bloomMask = 0
+	// The grace build's partition files are removed by the flush loop when
+	// it reaches its last partition — i.e. only when the query RUNS TO
+	// COMPLETION. A cancelled or failed query left every build-spill-*.bin
+	// and probe-part-*.bin behind, and nothing ever revisited them (#625).
+	// cleanup() is written to be safe to call while cloned probes still
+	// hold this spillState: it clears the bookkeeping as it deletes, which
+	// is what keeps a later HasPendingFlush from re-opening a deleted file.
+	if h.spillState != nil {
+		h.spillState.cleanup()
+	}
 	return nil
 }
 

@@ -449,10 +449,19 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	}
 
 	pipeline := physPlan.Pipeline
+	// The defer is registered BEFORE Run, not after: a cancelled or failing
+	// Run returns from this function, and a `defer` STATEMENT placed below
+	// the error check never executes at all. That is how a cancelled query
+	// left every operator's spill scratch on disk — sort runs, aggregate
+	// partial-state files and window runs are created with a bare os.Create
+	// and are never registered with the SpillManager, so physPlan.Cleanup
+	// cannot see them; only the operator's own Close() removes them
+	// (#625 M1, ADR-0028). The correct form already existed at
+	// internal/coordinator/local_fastpath.go and was never applied here.
+	defer pipeline.Close()
 	if err := pipeline.Run(ctx); err != nil {
 		return nil, fmt.Errorf("executing query: %w", err)
 	}
-	defer pipeline.Close()
 
 	var rows []map[string]any
 	var rowValues [][]any
@@ -567,10 +576,13 @@ func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, log
 	// Wrap all operators with profiling decorators before execution
 	collector := exec.WrapPipeline(pipeline)
 
+	// Registered before Run for the same reason as the Query path: a defer
+	// below a failing Run's error check never runs, so a cancelled query
+	// keeps its spill scratch (#625 M1).
+	defer pipeline.Close()
 	if err := pipeline.Run(ctx); err != nil {
 		return nil, fmt.Errorf("executing query for EXPLAIN ANALYZE: %w", err)
 	}
-	defer pipeline.Close()
 
 	// Count result rows from the sink
 	var totalRows int64

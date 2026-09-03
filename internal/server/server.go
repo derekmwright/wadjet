@@ -496,11 +496,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Execute
 	pipeline := physPlan.Pipeline
+	// Registered before Run: a defer below a failing Run's error check never
+	// runs, so an aborted HTTP query kept its spill scratch (#625 M1).
+	defer pipeline.Close()
 	if err := pipeline.Run(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "execution error: "+err.Error())
 		return
 	}
-	defer pipeline.Close()
 
 	// Collect results
 	var rows []map[string]any

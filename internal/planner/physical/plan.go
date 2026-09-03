@@ -875,6 +875,16 @@ type Planner struct {
 	res            *queryResources             // per-query spill manager + memory tracker (lazy, shared with child planners)
 	WorkerCount    int                         // number of distributed workers (for shuffle partitioning)
 
+	// builtJoins are the HashJoins this plan owns. HashJoin.Close is the
+	// only thing that returns the build's tracker reservation and removes
+	// the grace build's partition files, and its own doc comment says the
+	// OWNER must call it — on the distributed path the fragment executor
+	// does, and on the single-process path nobody did. The plan's Cleanup
+	// is that owner (#625, ADR-0028). Cleanup runs after Pipeline.Close
+	// (defer order at the call sites), so nothing is freed under a live
+	// operator.
+	builtJoins []*exec.HashJoin
+
 	// BroadcastBytesThreshold is the maximum estimated build-side size for
 	// a join to be planned as broadcast_join. Builds above this become
 	// hash_join (hash-shuffle), eliminating the N× build-cache duplication
@@ -1892,6 +1902,17 @@ func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string) (*exec
 	return coll, schema, nil
 }
 
+// closeBuiltJoins closes every HashJoin this plan built: it returns the
+// build side's tracker reservation and removes the grace build's partition
+// files, which the flush loop only removes when the query runs to
+// completion. Idempotent — HashJoin.Close zeroes what it releases.
+func (p *Planner) closeBuiltJoins() {
+	for _, hj := range p.builtJoins {
+		hj.Close()
+	}
+	p.builtJoins = nil
+}
+
 // releaseScanCache drops every duplicate-scan cache entry so cached
 // batches don't outlive their query. Idempotent; wired into
 // PhysicalPlan.Cleanup, Plan's error paths, and Plan's per-query reset.
@@ -2569,14 +2590,16 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// phantom on the worker-lifetime tracker.
 	if sm := p.spillManagerIfSet(); sm != nil {
 		plan.Cleanup = func() {
+			p.closeBuiltJoins()
 			p.releaseCTECache()
 			p.releaseScanCache()
 			sm.Cleanup()
 		}
-	} else if p.cteCacheHasCollectors() || p.scanCache != nil {
+	} else if p.cteCacheHasCollectors() || p.scanCache != nil || len(p.builtJoins) > 0 {
 		// Shared (worker-injected) spill manager: its dir outlives this
 		// query, so the collectors' scratch must be released explicitly.
 		plan.Cleanup = func() {
+			p.closeBuiltJoins()
 			p.releaseCTECache()
 			p.releaseScanCache()
 		}
@@ -7382,6 +7405,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)
+	p.builtJoins = append(p.builtJoins, hj)
 	// The pair's COMMON type, which both sides' key bytes are built at and
 	// which the integer / bloom fast paths are gated on (#615, ADR-0023).
 	// Nil for every join whose key types already agree — every TPC-H join —
@@ -14796,6 +14820,12 @@ type aggSourceAdapter struct {
 	childOps    []exec.UnaryOperator
 	agg         *exec.HashAggregate
 	initialized bool
+	// pipe is the inner pipeline this adapter runs. It is HELD, not
+	// discarded: it owns the child ops and the morsel-parallel clone
+	// sinks, and only its Close reaches them. Discarding it left a
+	// cancelled GROUP BY's agg-spill-*.bin files on disk for the process
+	// lifetime (#625 M2).
+	pipe *exec.Pipeline
 }
 
 // ServesHeldState marks the adapter's output phase as a held-state drain —
@@ -14810,13 +14840,13 @@ func (a *aggSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 	if !a.initialized {
 		a.initialized = true
 		// Run child pipeline into aggregate
-		pipe := &exec.Pipeline{
+		a.pipe = &exec.Pipeline{
 			Source:  a.childSource,
 			Ops:     a.childOps,
 			Sink:    a.agg,
 			Workers: innerPipelineWorkers(a.childSource),
 		}
-		if err := pipe.Run(ctx); err != nil {
+		if err := a.pipe.Run(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -14831,6 +14861,11 @@ func (a *aggSourceAdapter) RowsScanned() int64 {
 }
 
 func (a *aggSourceAdapter) Close() error {
+	if a.pipe != nil {
+		// Reaches the child ops and the clone sinks as well as the
+		// aggregate and the source.
+		return a.pipe.Close()
+	}
 	a.agg.Close()
 	return a.childSource.Close()
 }
@@ -14846,6 +14881,7 @@ type sortSourceAdapter struct {
 	childOps    []exec.UnaryOperator
 	sort        *exec.Sort
 	initialized bool
+	pipe        *exec.Pipeline // held so Close reaches the child ops and clones (#625 M2)
 }
 
 // ServesHeldState marks the adapter's output phase as a held-state drain —
@@ -14859,13 +14895,13 @@ func (s *sortSourceAdapter) Init(ctx context.Context) error {
 func (s *sortSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if !s.initialized {
 		s.initialized = true
-		pipe := &exec.Pipeline{
+		s.pipe = &exec.Pipeline{
 			Source:  s.childSource,
 			Ops:     s.childOps,
 			Sink:    s.sort,
 			Workers: innerPipelineWorkers(s.childSource),
 		}
-		if err := pipe.Run(ctx); err != nil {
+		if err := s.pipe.Run(ctx); err != nil {
 			return nil, err
 		}
 		// Top-K truncation: discard everything beyond sort.Limit rows. >= 0,
@@ -14878,6 +14914,9 @@ func (s *sortSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error
 }
 
 func (s *sortSourceAdapter) Close() error {
+	if s.pipe != nil {
+		return s.pipe.Close()
+	}
 	s.sort.Close()
 	return s.childSource.Close()
 }
@@ -14898,6 +14937,7 @@ type windowSourceAdapter struct {
 	childOps    []exec.UnaryOperator
 	win         *exec.Window
 	initialized bool
+	pipe        *exec.Pipeline // held so Close reaches the child ops and clones (#625 M2)
 }
 
 func (w *windowSourceAdapter) Init(_ context.Context) error { return nil }
@@ -14905,12 +14945,12 @@ func (w *windowSourceAdapter) Init(_ context.Context) error { return nil }
 func (w *windowSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if !w.initialized {
 		w.initialized = true
-		pipe := &exec.Pipeline{
+		w.pipe = &exec.Pipeline{
 			Source: w.childSource,
 			Ops:    w.childOps,
 			Sink:   w.win,
 		}
-		if err := pipe.Run(ctx); err != nil {
+		if err := w.pipe.Run(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -14925,6 +14965,9 @@ func (w *windowSourceAdapter) RowsScanned() int64 {
 }
 
 func (w *windowSourceAdapter) Close() error {
+	if w.pipe != nil {
+		return w.pipe.Close()
+	}
 	w.win.Close()
 	return w.childSource.Close()
 }
