@@ -46,3 +46,4 @@ Conventions:
 | [0026](0026-a-group-key-has-one-identity-and-one-name.md) | A GROUP BY key has one identity and one published name | Accepted |
 | [0027](0027-a-spill-gate-proves-it-spilled.md) | A spill gate proves it spilled, and a clone's spill artifacts belong to the primary (amended 2026-09-03: #791's third route) | Accepted |
 | [0028](0028-operational-invariants-breaker-scope-and-query-reclamation.md) | A breaker is scoped by operation class, and every exit path of a query reclaims the same way | Accepted |
+| [0029](0029-configuration-precedence.md) | Configuration precedence: explicit flag > env > file > default, resolved once from one registry | Accepted |

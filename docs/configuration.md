@@ -2,6 +2,90 @@
 
 Wadjet is configured through CLI flags, environment variables, and an optional YAML configuration file.
 
+## Precedence
+
+**An explicit flag beats an environment variable, which beats the config file, which beats the default.**
+
+```
+--flag  >  WADJET_*  >  wadjet.yaml  >  built-in default
+```
+
+A flag counts only when you actually type it. A flag's *default* never beats
+an environment variable or a config-file value — that is PostgreSQL's rule
+(`postgresql.conf` loses to `PGOPTIONS` loses to a session `SET`), and
+[ADR-0029](adr/0029-configuration-precedence.md) records why Wadjet takes it.
+
+Every setting is resolved once, before any command runs, and every part of
+the process reads that one resolution. `GET /v1/admin/config` reports the
+resolved value of every key together with the tier it came from.
+
+Two conventions follow from the order:
+
+- **An empty value never overrides a lower tier**, on any tier.
+  `--nats-tls-cert=""` and `WADJET_NATS_TLS_CERT=` both read as *unset*, not
+  as *explicitly blank*.
+- **A config-file key written with its type's zero value reads as absent.**
+  `bucket: ""` does not override; omit the key or give it a value.
+
+An unreadable or unparseable `--config` file stops the process with the
+reason, on every command. It is never skipped.
+
+**An unrecognised key is an error too.** The config file is decoded strictly:
+a key the schema does not define stops the process with that key's name.
+`storage.buckett` and a misspelled `stroage:` section used to be ignored in
+silence, which — now that the file tier actually reaches runtime — is the
+difference between reading the right bucket and the wrong one with nothing
+said at startup. PostgreSQL refuses an unrecognised parameter in
+`postgresql.conf` for the same reason. The cost is forward compatibility: an
+older binary refuses a file written for a newer one.
+
+**A key with no runtime consumer is an error as well.** The `parquet:`
+section is parsed and reported but reaches no writer (see below); setting it
+stops the process naming the key, rather than accepting a value nothing
+reads.
+
+### What changed when the loader landed
+
+Before this release the real order was *flag — even at its default — beats
+the config file, which reached only `auth`, `query_limits` and `geoip`, with
+environment variables reaching nothing at all*. Ten settings have a flag
+whose default is not the zero value, so that default used to win silently.
+They now lose to an environment variable or a config file that sets them:
+
+| Setting | Flag (default) | Lower tier that now wins | Before | After |
+|---|---|---|---|---|
+| `mode` | `--mode` (`standalone`) | `WADJET_MODE`, `mode:` | flag default | env, else file |
+| `http.addr` | `--http-addr` (`:8080`) | `WADJET_HTTP_ADDR`, `http.addr` | flag default | env, else file |
+| `grpc.addr` | `--grpc-addr` (`:9090`) | `WADJET_GRPC_ADDR`, `grpc.addr` | flag default | env, else file |
+| `storage.type` | `--storage-type` (`s3`) | `WADJET_STORAGE_TYPE`, `storage.type` | flag default | env, else file |
+| `storage.endpoint` | `--endpoint` (`localhost:9000`) | `WADJET_STORAGE_ENDPOINT`, `storage.endpoint` | flag default | env, else file |
+| `storage.bucket` | `--bucket` (`wadjet`) | `WADJET_STORAGE_BUCKET`, `storage.bucket` | flag default | env, else file |
+| `nats.port` | `--nats-port` (`4222`) | `WADJET_NATS_PORT`, `nats.port` | flag default | env, else file |
+| `nats.cluster_id` | `--cluster-id` (`local`) | `WADJET_NATS_CLUSTER_ID`, `nats.cluster_id` | flag default | env, else file |
+| `worker.max_concurrent` | `--max-concurrent` (`4`) | `WADJET_WORKER_MAX_CONCURRENT`, `worker.max_concurrent` | flag default | env, else file |
+| `worker.result_store_bytes` | `--result-store` (`512 MiB`) | `worker.result_store_bytes` | flag default | file |
+
+Concretely: a unit that exports `WADJET_STORAGE_BUCKET=prod` without passing
+`--bucket` moves from reading bucket `wadjet` to reading bucket `prod`. If
+you set the same setting two ways today and relied on the flag default
+winning, pass the flag explicitly.
+
+`WADJET_ENABLE_ALERTS` changes in the other direction: it used to override
+`--enable-alerts` unconditionally, and now an explicitly typed
+`--enable-alerts=false` wins over it. Setting only the variable behaves as
+before.
+
+Fifteen more settings had a flag whose default *is* the zero value; for those
+nothing changes except that the environment variable and the config file
+start working. The `storage:`, `nats:`, `http:`, `grpc:`, `worker:` and
+`telemetry:` sections of the config file reach runtime as of that
+change.
+
+`worker.result_store_bytes` gained one more behaviour: the automatic clamp to
+15% of the memory envelope now applies only when the result store was left at
+its default *everywhere*. Setting it in the config file is as explicit as
+passing `--result-store`.
+
 ## CLI Flags
 
 ### `serve` Command
@@ -110,6 +194,10 @@ storage:
   bucket: "wadjet"
   use_ssl: false
   region: ""
+  circuit:                    # object-store circuit breaker (ADR-0028)
+    failure_threshold: 5      # consecutive failures in one class before it opens
+    reset_timeout: 30s        # how long an open breaker stays open
+    request_timeout: 10s      # per-request timeout for non-streaming operations
 
 nats:
   port: 4222
@@ -134,10 +222,26 @@ worker:
   spill_dir: ""               # spill directory (default: OS temp dir)
   result_store_bytes: 0       # in-memory result store (0 = disabled, use S3)
 
-parquet:
-  compression: "snappy"       # snappy, zstd, gzip, lz4, none
-  row_group_size: 131072      # 128K rows per row group
-  page_buffer_size: 262144    # 256 KB page buffer
+alerts:
+  enabled: false              # CREATE ALERT DDL and the scheduler
+
+query:
+  intermediate_ttl: 1h        # reclaim age for a leftover queries/<id>/ prefix
+  intermediate_sweep: 10m     # how often the coordinator sweeps queries/
+
+# The `parquet:` section is DEFERRED and REFUSED. It has no runtime
+# consumer: every ingest writer is built from ingest.DefaultConfig(), and
+# reaching the writer needs wadjet.Config -> ingest.Config ->
+# parquet.WriterConfig plumbing at seven call sites. Setting any of these
+# keys stops the process naming the key, rather than accepting a value
+# nothing reads. They stay in the schema (and in GET /v1/admin/config, with
+# "reaches_runtime": false) so the refusal can name them; uncommenting this
+# block will NOT start.
+#
+# parquet:
+#   compression: "snappy"       # snappy, zstd, gzip, lz4, none
+#   row_group_size: 131072      # 128K rows per row group
+#   page_buffer_size: 262144    # 256 KB page buffer
 
 auth:
   enabled: true
@@ -227,20 +331,51 @@ auth:
 
 ## Hot Reload
 
-The configuration file is watched for changes via filesystem notifications. When the file is modified:
+The configuration file is watched for changes (modtime + size polling). When
+the file is modified:
 
 1. The new config is parsed and validated
 2. Auth providers are updated atomically
 3. Active connections continue with their existing credentials
 4. New requests use the updated configuration
 
-You can subscribe to config changes programmatically:
+**`auth` is the hot-reloadable section.** A key is hot-reloadable only when
+something in the running process re-reads it, and the auth provider is the
+one subscriber there is. Everything else — `mode`, `storage`, `nats`, `http`,
+`grpc`, `worker`, `parquet`, `telemetry`, `query`, `query_limits` — takes
+effect at startup and is *preserved* across a reload, so the running
+configuration and the reported configuration never disagree.
 
-```go
-cfg := config.LoadOrDefault("/path/to/wadjet.yaml")
-// Config is loaded once at startup; the auth Provider handles hot-reload
-// by watching the file and swapping credentials atomically.
+`PUT /v1/admin/config` and `PUT /v1/admin/tuning` follow the same rule: a
+write to a key nothing consumes is refused with HTTP 409 naming the key,
+rather than accepted with `{"status":"applied"}` while nothing changes.
+Restart with the flag, the environment variable or the config file to change
+those.
+
+`GET /v1/admin/config` reports every key as
+
+```json
+"storage.bucket": {
+  "value": "prod",
+  "source": "env",
+  "env": "WADJET_STORAGE_BUCKET",
+  "flag": "--bucket",
+  "hot_reloadable": false
+}
 ```
+
+`source` is one of `flag`, `env`, `file`, `default` or `admin`. Credentials
+(`storage.access_key`, `storage.secret_key`) report their source with
+`"redacted": true` and no value.
+
+`POST /v1/admin/config/reload` re-reads the file. Keys it could not apply —
+the startup-only ones — come back in the response as `not_applied`, and are
+logged as a warning, rather than being dropped behind a bare `"reloaded"`.
+
+**The admin API exists only when the server was started with `--config`**:
+it is constructed alongside the auth provider, which the config file
+defines. A process configured purely by flags and environment variables has
+no `/v1/admin/config` to read its own resolution from.
 
 ## Storage Tuning
 
@@ -319,16 +454,15 @@ Per-role limits fully override global limits when defined. See [Security](securi
 
 ## Environment Variables
 
-> **None of these reach a running server.** The `WADJET_*` overrides below are
-> read by `applyEnvOverrides` (`internal/config/config.go`), which is called
-> only from `config.LoadOrDefault` — and nothing on the `serve`, `query`,
-> `shell` or `mcp` path calls that; they all use `config.Load`, which applies
-> the file and the defaults only. Use the config file or the CLI flags. The
-> tables below record what the parser understands, not what a deployment can
-> set. (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are the exception: those
-> are read by the MinIO credential chain, not by this code.)
+These are read by the loader on every command, and they beat the config file
+and the flag defaults (see [Precedence](#precedence)). An empty value reads
+as unset. The tables below are the complete set — a test asserts that they
+match the configuration registry exactly, so a variable that works is listed
+here and a variable listed here works.
 
-A subset of the configuration is *parsed* from `WADJET_*` environment variables — the ones listed below, and no others (`internal/config/config.go`, `applyEnvOverrides`).
+(`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are read by the MinIO
+credential chain rather than by this loader; they apply when
+`storage.access_key` / `storage.secret_key` resolve to empty.)
 
 ### S3/Storage
 
@@ -343,6 +477,9 @@ A subset of the configuration is *parsed* from `WADJET_*` environment variables 
 | `WADJET_STORAGE_SECRET_KEY` | `--secret-key` | S3 secret key |
 | `WADJET_STORAGE_REGION` | `--region` | S3 region |
 | `WADJET_STORAGE_USE_SSL` | `--ssl` | TLS for S3 connections |
+| `WADJET_STORAGE_CIRCUIT_THRESHOLD` | `--storage-circuit-threshold` | Consecutive failures in one operation class before its breaker opens |
+| `WADJET_STORAGE_CIRCUIT_RESET` | `--storage-circuit-reset` | How long an open breaker stays open (duration) |
+| `WADJET_STORAGE_CIRCUIT_REQUEST_TIMEOUT` | `--storage-circuit-request-timeout` | Per-request object-store timeout (duration) |
 
 ### Server
 
@@ -362,25 +499,34 @@ There is no environment variable for the connection cap, the slow-query threshol
 | `WADJET_NATS_URL` | NATS server URL (worker mode) |
 | `WADJET_NATS_CLUSTER_ID` | Cluster identifier for federation |
 | `WADJET_NATS_LEAF_REMOTES` | Comma-separated remote NATS URLs for leaf nodes |
-| `WADJET_NATS_TLS_CERT` / `_KEY` / `_CA` | NATS mTLS material |
+| `WADJET_NATS_TLS_CERT` | NATS mTLS certificate file |
+| `WADJET_NATS_TLS_KEY` | NATS mTLS private key file |
+| `WADJET_NATS_TLS_CA` | CA certificate that verifies the peer (enables mTLS) |
 
 #### NATS mTLS
 
-`nats.tls_cert` / `nats.tls_key` / `nats.tls_ca` are the ONE part of the
-`nats:` section that reaches the running process. Each is resolved
-independently: the CLI flag (`--nats-tls-cert` and friends) first, then the
-environment variable, then the config file.
+`nats.tls_cert` / `nats.tls_key` / `nats.tls_ca` are resolved per field like
+every other key: the CLI flag (`--nats-tls-cert` and friends) first, then the
+environment variable, then the config file. A deployment may take the
+certificate from a flag, the key from the environment and the CA from the
+file.
 
 **All three are required together.** The NATS connection is secured only
 when the certificate, the private key AND the CA are all present, so naming
-one or two of them used to disable TLS silently. A partial set is now a
-startup error naming what is missing, rather than a plaintext connection
-the operator never hears about.
+one or two of them used to disable TLS silently. A partial set is a startup
+error naming what is missing, rather than a plaintext connection the
+operator never hears about.
 
 The rest of the `nats:` section — and `storage:`, `http:`, `grpc:`,
-`worker:`, `parquet:` and `telemetry:` — is parsed and validated but does
-not reach runtime; only `auth`, `query_limits` and `geoip` do. Use the
-flags and environment variables for everything else.
+`worker:`, `telemetry:`, `query:`, `query_limits:`, `geoip:`, `alerts:` and
+`auth:` — reaches runtime since the loader landed, in every run mode that
+has the consumer. `telemetry:` reaches all three (`standalone` did not call
+the OTLP initializer at all before this arc); `query:` is coordinator-side,
+so it does nothing in `worker` mode.
+
+The one exception is `parquet:`, which has no runtime consumer and is
+REFUSED at startup rather than accepted — see the note in the YAML sample
+above.
 
 ### Worker
 
@@ -390,7 +536,9 @@ flags and environment variables for everything else.
 | `WADJET_WORKER_MEMORY_BUDGET` | Per-task memory budget |
 | `WADJET_WORKER_SPILL_DIR` | Spill directory |
 
-The LRU cache size and the result-store capacity have no environment variable; use `--cache-bytes` and `--result-store`.
+The LRU cache size and the result-store capacity have no environment
+variable; use `--cache-bytes` / `--result-store`, or the `worker.cache_bytes`
+/ `worker.result_store_bytes` config-file keys.
 
 ### Query Limits
 
@@ -399,6 +547,8 @@ The LRU cache size and the result-store capacity have no environment variable; u
 | `WADJET_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
 | `WADJET_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
 | `WADJET_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
+| `WADJET_QUERY_INTERMEDIATE_TTL` | Reclaim age for a leftover `queries/<id>/` prefix (duration) |
+| `WADJET_QUERY_INTERMEDIATE_SWEEP` | How often the coordinator sweeps `queries/` (duration) |
 
 ### Telemetry and GeoIP
 
@@ -407,6 +557,7 @@ The LRU cache size and the result-store capacity have no environment variable; u
 | `WADJET_OTEL_ENDPOINT` | OTLP gRPC endpoint for trace export |
 | `WADJET_OTEL_INSECURE` | Plaintext gRPC for the OTLP exporter |
 | `WADJET_OTEL_SAMPLE_RATE` | Trace sampling rate (0.0-1.0) |
+| `WADJET_ENABLE_ALERTS` | Enable `CREATE ALERT` DDL and the scheduler |
 | `WADJET_GEOIP_CITY_DB` | Path to GeoLite2-City.mmdb |
 | `WADJET_GEOIP_ASN_DB` | Path to GeoLite2-ASN.mmdb |
 

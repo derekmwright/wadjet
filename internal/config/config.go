@@ -2,11 +2,13 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,8 +24,25 @@ type Config struct {
 	Parquet     Parquet     `yaml:"parquet"`
 	Auth        Auth        `yaml:"auth"`
 	GeoIP       GeoIP       `yaml:"geoip"`
+	Alerts      Alerts      `yaml:"alerts"`       // CREATE ALERT DDL + scheduler
 	QueryLimits QueryLimits `yaml:"query_limits"` // global query cost limits
+	Query       Query       `yaml:"query"`        // coordinator query lifecycle
 	Telemetry   Telemetry   `yaml:"telemetry"`    // OpenTelemetry tracing export
+}
+
+// Alerts configures the alert DDL and scheduler.
+type Alerts struct {
+	Enabled bool `yaml:"enabled"` // enable CREATE ALERT DDL and the scheduler
+}
+
+// Query configures the coordinator's query lifecycle. Zero values mean
+// "use the built-in default", matching the flags of the same name.
+type Query struct {
+	// IntermediateTTL is the age after which the coordinator's periodic
+	// sweep reclaims a queries/<id>/* prefix the per-query cleanup did not.
+	IntermediateTTL time.Duration `yaml:"intermediate_ttl"`
+	// IntermediateSweep is how often that sweep runs.
+	IntermediateSweep time.Duration `yaml:"intermediate_sweep"`
 }
 
 // Telemetry configures OpenTelemetry tracing export.
@@ -142,6 +161,17 @@ type Storage struct {
 	Bucket    string `yaml:"bucket"`
 	UseSSL    bool   `yaml:"use_ssl"`
 	Region    string `yaml:"region"`
+	// Circuit configures the per-operation-class object-store circuit
+	// breaker (ADR-0028).
+	Circuit StorageCircuit `yaml:"circuit"`
+}
+
+// StorageCircuit configures the object-store circuit breaker. Zero values
+// mean "use the built-in default", matching the flags of the same name.
+type StorageCircuit struct {
+	FailureThreshold int           `yaml:"failure_threshold"` // consecutive failures in one class before the class opens
+	ResetTimeout     time.Duration `yaml:"reset_timeout"`     // how long an open breaker stays open
+	RequestTimeout   time.Duration `yaml:"request_timeout"`   // per-request timeout for non-streaming operations
 }
 
 // NATS configures the embedded NATS server or client connection.
@@ -215,6 +245,18 @@ func DefaultConfig() Config {
 }
 
 // Load reads a YAML config file and merges with defaults.
+//
+// The decode is STRICT: a key the schema does not define is an error naming
+// it. Before the precedence loader a mistyped `storage:` key was inert
+// anyway, because the whole section was; now the difference between
+// `bucket:` and `buckett:` is the difference between reading the right
+// bucket and the wrong one, with nothing said at startup. PostgreSQL
+// refuses an unrecognised parameter in postgresql.conf for the same reason,
+// and ADR-0029 already takes its precedence order.
+//
+// The cost is forward compatibility: an older binary refuses a file written
+// for a newer one. That is the trade this repo wants — a silently ignored
+// key is a silently wrong deployment, which is the whole of #808.
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
@@ -223,11 +265,25 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
 
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config file: %w", err)
+	if err := strictUnmarshal(data, &cfg); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+// strictUnmarshal decodes YAML into out, refusing any key the schema does
+// not define. An empty document is not an error.
+func strictUnmarshal(data []byte, out *Config) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil // an empty file is a valid empty configuration
+		}
+		return fmt.Errorf("parsing config file: %w", err)
+	}
+	return nil
 }
 
 // LoadOrDefault loads a config file if it exists, otherwise returns defaults.
@@ -249,131 +305,56 @@ func LoadOrDefault(path string) *Config {
 	return cfg
 }
 
-// applyEnvOverrides reads WADJET_* environment variables and overrides config values.
+// applyEnvOverrides reads WADJET_* environment variables and overrides
+// config values. It is the environment TIER of the resolver (resolve.go) run
+// on its own, for callers that have no command line.
+//
+// The variable set is the configuration registry's (registry.go), so this
+// function, the resolver, the admin endpoint's effective-value report and
+// the list below cannot disagree about which variables exist.
+// TestEnvironmentVariableNamesAgreeEverywhere asserts that the list below
+// and docs/configuration.md's tables name exactly this set.
+//
 // Supported variables:
 //
-//	WADJET_MODE                   - standalone, coordinator, worker
-//	WADJET_HTTP_ADDR              - HTTP listen address
-//	WADJET_GRPC_ADDR              - gRPC listen address
-//	WADJET_STORAGE_TYPE           - s3, file
-//	WADJET_STORAGE_ENDPOINT       - S3/MinIO endpoint
-//	WADJET_STORAGE_ACCESS_KEY     - S3 access key
-//	WADJET_STORAGE_SECRET_KEY     - S3 secret key
-//	WADJET_STORAGE_BUCKET         - S3 bucket name
-//	WADJET_STORAGE_REGION         - S3 region
-//	WADJET_STORAGE_USE_SSL        - true/false
-//	WADJET_NATS_PORT              - NATS listen port
-//	WADJET_NATS_URL               - NATS URL (worker mode)
-//	WADJET_NATS_CLUSTER_ID        - cluster identifier
-//	WADJET_NATS_LEAF_REMOTES      - comma-separated remote NATS URLs
-//	WADJET_NATS_TLS_CERT          - NATS TLS certificate file
-//	WADJET_NATS_TLS_KEY           - NATS TLS private key file
-//	WADJET_NATS_TLS_CA            - NATS TLS CA file (enables mTLS)
-//	WADJET_WORKER_MAX_CONCURRENT  - max concurrent tasks
-//	WADJET_WORKER_MEMORY_BUDGET   - per-task memory budget (bytes)
-//	WADJET_WORKER_SPILL_DIR       - spill directory
-//	WADJET_GEOIP_CITY_DB          - GeoLite2-City.mmdb path
-//	WADJET_GEOIP_ASN_DB           - GeoLite2-ASN.mmdb path
-//	WADJET_OTEL_ENDPOINT          - OTLP gRPC endpoint (e.g. localhost:4317)
-//	WADJET_OTEL_INSECURE          - true/false (plaintext gRPC)
-//	WADJET_OTEL_SAMPLE_RATE       - 0.0-1.0 sampling rate
+//	WADJET_MODE                             - standalone, coordinator, worker
+//	WADJET_STORAGE_TYPE                     - s3, file
+//	WADJET_STORAGE_ENDPOINT                 - S3/MinIO endpoint
+//	WADJET_STORAGE_ACCESS_KEY               - S3 access key
+//	WADJET_STORAGE_SECRET_KEY               - S3 secret key
+//	WADJET_STORAGE_BUCKET                   - S3 bucket name
+//	WADJET_STORAGE_USE_SSL                  - true/false
+//	WADJET_STORAGE_REGION                   - S3 region
+//	WADJET_STORAGE_CIRCUIT_THRESHOLD        - consecutive failures before a breaker class opens
+//	WADJET_STORAGE_CIRCUIT_RESET            - how long an open breaker stays open (duration)
+//	WADJET_STORAGE_CIRCUIT_REQUEST_TIMEOUT  - per-request object-store timeout (duration)
+//	WADJET_NATS_PORT                        - NATS listen port
+//	WADJET_NATS_URL                         - NATS URL (worker mode)
+//	WADJET_NATS_CLUSTER_ID                  - cluster identifier
+//	WADJET_NATS_LEAF_REMOTES                - comma-separated remote NATS URLs
+//	WADJET_NATS_TLS_CERT                    - NATS TLS certificate file
+//	WADJET_NATS_TLS_KEY                     - NATS TLS private key file
+//	WADJET_NATS_TLS_CA                      - NATS TLS CA file (enables mTLS)
+//	WADJET_HTTP_ADDR                        - HTTP listen address
+//	WADJET_GRPC_ADDR                        - gRPC listen address
+//	WADJET_WORKER_MAX_CONCURRENT            - max concurrent tasks
+//	WADJET_WORKER_MEMORY_BUDGET             - per-task memory budget (bytes)
+//	WADJET_WORKER_SPILL_DIR                 - spill directory
+//	WADJET_ENABLE_ALERTS                    - true/false (CREATE ALERT DDL and scheduler)
+//	WADJET_GEOIP_CITY_DB                    - GeoLite2-City.mmdb path
+//	WADJET_GEOIP_ASN_DB                     - GeoLite2-ASN.mmdb path
+//	WADJET_QUERY_INTERMEDIATE_TTL           - queries/<id>/ reclaim age (duration)
+//	WADJET_QUERY_INTERMEDIATE_SWEEP         - queries/ sweep interval (duration)
+//	WADJET_QUERY_MAX_SCAN_BYTES             - max estimated scan bytes per query
+//	WADJET_QUERY_MAX_SCAN_ROWS              - max estimated scan rows per query
+//	WADJET_QUERY_MAX_SCAN_FILES             - max scan files per query
+//	WADJET_OTEL_ENDPOINT                    - OTLP gRPC endpoint (e.g. localhost:4317)
+//	WADJET_OTEL_INSECURE                    - true/false (plaintext gRPC)
+//	WADJET_OTEL_SAMPLE_RATE                 - 0.0-1.0 sampling rate
 func applyEnvOverrides(cfg *Config) {
-	if v := os.Getenv("WADJET_MODE"); v != "" {
-		cfg.Mode = v
-	}
-	if v := os.Getenv("WADJET_HTTP_ADDR"); v != "" {
-		cfg.HTTP.Addr = v
-	}
-	if v := os.Getenv("WADJET_GRPC_ADDR"); v != "" {
-		cfg.GRPC.Addr = v
-	}
-	if v := os.Getenv("WADJET_STORAGE_TYPE"); v != "" {
-		cfg.Storage.Type = v
-	}
-	if v := os.Getenv("WADJET_STORAGE_ENDPOINT"); v != "" {
-		cfg.Storage.Endpoint = v
-	}
-	if v := os.Getenv("WADJET_STORAGE_ACCESS_KEY"); v != "" {
-		cfg.Storage.AccessKey = v
-	}
-	if v := os.Getenv("WADJET_STORAGE_SECRET_KEY"); v != "" {
-		cfg.Storage.SecretKey = v
-	}
-	if v := os.Getenv("WADJET_STORAGE_BUCKET"); v != "" {
-		cfg.Storage.Bucket = v
-	}
-	if v := os.Getenv("WADJET_STORAGE_REGION"); v != "" {
-		cfg.Storage.Region = v
-	}
-	if v := os.Getenv("WADJET_STORAGE_USE_SSL"); v != "" {
-		cfg.Storage.UseSSL = strings.EqualFold(v, "true") || v == "1"
-	}
-	if v := os.Getenv("WADJET_NATS_PORT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.NATS.Port = n
-		}
-	}
-	if v := os.Getenv("WADJET_NATS_URL"); v != "" {
-		cfg.NATS.URL = v
-	}
-	if v := os.Getenv("WADJET_NATS_CLUSTER_ID"); v != "" {
-		cfg.NATS.ClusterID = v
-	}
-	if v := os.Getenv("WADJET_NATS_LEAF_REMOTES"); v != "" {
-		cfg.NATS.LeafRemotes = strings.Split(v, ",")
-	}
-	if v := os.Getenv("WADJET_NATS_TLS_CERT"); v != "" {
-		cfg.NATS.TLSCert = v
-	}
-	if v := os.Getenv("WADJET_NATS_TLS_KEY"); v != "" {
-		cfg.NATS.TLSKey = v
-	}
-	if v := os.Getenv("WADJET_NATS_TLS_CA"); v != "" {
-		cfg.NATS.TLSCA = v
-	}
-	if v := os.Getenv("WADJET_WORKER_MAX_CONCURRENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Worker.MaxConcurrent = n
-		}
-	}
-	if v := os.Getenv("WADJET_WORKER_MEMORY_BUDGET"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			cfg.Worker.MemoryBudget = n
-		}
-	}
-	if v := os.Getenv("WADJET_WORKER_SPILL_DIR"); v != "" {
-		cfg.Worker.SpillDir = v
-	}
-	if v := os.Getenv("WADJET_GEOIP_CITY_DB"); v != "" {
-		cfg.GeoIP.CityDB = v
-	}
-	if v := os.Getenv("WADJET_GEOIP_ASN_DB"); v != "" {
-		cfg.GeoIP.ASNDB = v
-	}
-	if v := os.Getenv("WADJET_QUERY_MAX_SCAN_BYTES"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			cfg.QueryLimits.MaxScanBytes = n
-		}
-	}
-	if v := os.Getenv("WADJET_QUERY_MAX_SCAN_ROWS"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			cfg.QueryLimits.MaxScanRows = n
-		}
-	}
-	if v := os.Getenv("WADJET_QUERY_MAX_SCAN_FILES"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.QueryLimits.MaxScanFiles = n
-		}
-	}
-	if v := os.Getenv("WADJET_OTEL_ENDPOINT"); v != "" {
-		cfg.Telemetry.Endpoint = v
-	}
-	if v := os.Getenv("WADJET_OTEL_INSECURE"); v != "" {
-		cfg.Telemetry.Insecure = strings.EqualFold(v, "true") || v == "1"
-	}
-	if v := os.Getenv("WADJET_OTEL_SAMPLE_RATE"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			cfg.Telemetry.SampleRate = f
+	for _, k := range keys {
+		if v, ok := envValue(k, os.LookupEnv); ok {
+			k.Set(cfg, v)
 		}
 	}
 }

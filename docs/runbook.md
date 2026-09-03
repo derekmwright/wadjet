@@ -222,7 +222,7 @@ what a SET-style facility could expose cheaply vs never.
 | `--log-level` | info | slog level | **feasible** (slog LevelVar pattern) |
 | `--otel-endpoint`, `--otel-insecure` | — | tracing exporter | boot-only |
 | `--geoip-city`, `--geoip-asn` | — | GeoIP databases | feasible-with-work (reload) |
-| `--config` | — | YAML file; the `auth:`, `geoip:` and `query_limits:` sections are applied at runtime. The `storage:`/`nats:`/`http:`/`grpc:`/`worker:`/`parquet:` sections parse but never reach the running process — use the flags above. See `configuration.md`. | n/a |
+| `--config` | — | YAML file. Every section reaches the running process except `parquet:`, which has no consumer and is REFUSED if set. Precedence is explicit flag > `WADJET_*` > file > default, so a flag left at its default no longer beats the file — see `configuration.md` and ADR-0029. An unparseable file, an unrecognised key, or a key with no consumer stops the process naming it. | n/a |
 
 ## 3. Runtime switches: current state and the path there
 
