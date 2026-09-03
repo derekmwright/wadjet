@@ -379,6 +379,12 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 		return nil, fmt.Errorf("resolving positional refs: %w", err)
 	}
 
+	// An UNKNOWN-typed literal used as a truth value becomes the boolean it
+	// names, or is refused with PostgreSQL's own 22P02 (#599).
+	if err := CoerceBooleanLiterals(info); err != nil {
+		return nil, err
+	}
+
 	// Propagate CTE definitions
 	info.CTEs = cteDefs
 

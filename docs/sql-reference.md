@@ -814,6 +814,31 @@ body, or a forward reference to a later item — is SQLSTATE `42P01`
 (`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
 the exception: a recursive CTE's name IS visible inside its own body.
 
+## Predicates must be boolean
+
+`WHERE`, `HAVING`, a `JOIN ... ON` condition, the operands of `NOT`/`AND`/`OR`
+and a searched `CASE`'s `WHEN` all require a boolean. A non-boolean there is
+SQLSTATE `42804`, naming the site and the type:
+
+```
+wadjet=> SELECT id FROM t WHERE bytes_in;
+ERROR:  argument of WHERE must be type boolean, not type bigint
+wadjet=> SELECT id FROM t WHERE NOT bytes_in;
+ERROR:  argument of NOT must be type boolean, not type bigint
+```
+
+A quoted literal is the exception, as it is in PostgreSQL: it has no type of
+its own, so a boolean context reads it with the boolean input function.
+`WHERE 'true'`, `'t'`, `'yes'`, `'on'`, `'1'` and any non-empty prefix of those
+words are TRUE; `'false'`, `'no'`, `'off'`, `'0'` are FALSE; `WHERE NULL`
+returns no rows; and a string naming no boolean is SQLSTATE `22P02`
+(`invalid input syntax for type boolean: "abc"`).
+
+The refusal is made where the type is PROVABLE — a column whose declaration
+the planner carries, a numeric literal, arithmetic, or `COUNT`. A predicate
+whose type the planner cannot prove (a scalar function's result, a column of a
+derived table or CTE) is not refused.
+
 ## LIMIT and OFFSET
 
 ```sql

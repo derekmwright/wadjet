@@ -476,10 +476,16 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if err := b.checkExpr(info.WhereExpr, resolve); err != nil {
 		return err
 	}
+	if err := checkBooleanContext(info.WhereExpr, resolve, "WHERE"); err != nil {
+		return err
+	}
 	// JOIN conditions reference columns from the joined sources (all already in
 	// `resolve`). USING/NATURAL/CROSS joins have no CondExpr → skipped.
 	for i := range info.Joins {
 		if err := b.checkExpr(info.Joins[i].CondExpr, resolve); err != nil {
+			return err
+		}
+		if err := checkBooleanContext(info.Joins[i].CondExpr, resolve, "JOIN/ON"); err != nil {
 			return err
 		}
 	}
@@ -491,6 +497,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			continue
 		}
 		if err := b.checkExpr(col.ASTExpr, resolve); err != nil {
+			return err
+		}
+		// A searched CASE's WHEN is a boolean context wherever it sits (#599).
+		if err := checkCaseWhenContexts(col.ASTExpr, resolve); err != nil {
 			return err
 		}
 		if err := b.checkExpr(col.AggArgExpr, resolve); err != nil {
@@ -528,6 +538,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		}
 	}
 	// HAVING / QUALIFY
+	if err := checkBooleanContext(info.HavingExpr, withOut, "HAVING"); err != nil {
+		return err
+	}
 	if err := b.checkExpr(info.HavingExpr, withOut); err != nil {
 		return err
 	}
