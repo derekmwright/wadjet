@@ -7849,6 +7849,15 @@ func fnAtTimezone(args []any) any {
 // initialization.
 var processStart = time.Now()
 
+// ProcessStart returns the instant this process began — the value
+// pg_postmaster_start_time() reports. Exported so a gate can assert that the
+// wire carries THIS process's start EXACTLY, instead of bounding it against
+// wall-clock time at assertion time. That bound is a statement about how long
+// the rest of a test binary ran, not about the server: at 300 seconds it
+// failed permanently once the -race suite crossed five minutes (#563), and
+// with the bound removed it passes for a server reporting 1970 (#518).
+func ProcessStart() time.Time { return processStart }
+
 // fnPgPostmasterStartTime implements pg_postmaster_start_time(). DataGrip asks
 // for it while opening a connection (`select round(extract(epoch from
 // pg_postmaster_start_time() at time zone 'UTC')) as startup_time`) to label

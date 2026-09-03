@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -418,46 +419,53 @@ func TestDataGripOpeningSequenceSimpleProtocol(t *testing.T) {
 	}
 }
 
-// startupTimePlausible reports whether a startup_time value returned by
-// pg_postmaster_start_time() looks like a real process start rather than
-// garbage. It deliberately has no upper bound: startup comes from a
-// package-level time.Time captured once at process init
-// (expr.processStart), so "now" can legitimately be arbitrarily far past
-// it depending on how long the rest of this test binary's suite ran before
-// reaching the caller — under -race that can run past any fixed few-minute
-// window with nothing wrong on the server (#518). The only thing that can
-// never be true of a real process start is that it is in the future.
-func startupTimePlausible(startup, now float64) bool {
-	return now-startup >= 0
+// startupTimeIsThisProcess reports whether a startup_time value returned by
+// pg_postmaster_start_time() is THIS process's start.
+//
+// The property the DataGrip opening sequence needs is "the server reports its
+// own start, not a zero and not a stale constant", and the server runs in this
+// test binary — so the answer is knowable EXACTLY and nothing about wall-clock
+// "now" belongs in it. Both earlier spellings compared the value against
+// time.Now() at assertion time, which measures how long the rest of the suite
+// ran rather than anything the server did: the 300-second bound failed
+// permanently once the pgwire -race package crossed five minutes (#563), and
+// dropping the bound to "not in the future" (#518) passes for a server that
+// answers 1970.
+//
+// pg_postmaster_start_time formats expr.processStart as RFC3339, which is
+// second precision, and the query rounds that epoch — so the admissible answer
+// is that one second.
+func startupTimeIsThisProcess(startup float64, procStart time.Time) bool {
+	return int64(startup) == procStart.Unix()
 }
 
-// TestStartupTimePlausible pins #518: a startup_time far in the past must
-// stay plausible however long the rest of the -race suite took to reach the
-// caller, and one that reports a future timestamp must not.
-func TestStartupTimePlausible(t *testing.T) {
+// TestStartupTimeIsThisProcess pins both spellings this replaces: the value
+// this process started at is accepted however long the suite has been running
+// (#563/#518), and a stale constant or a future timestamp is not (#563's
+// property, which the unbounded check could not see).
+func TestStartupTimeIsThisProcess(t *testing.T) {
+	procStart := time.Unix(1_700_000_000, 0)
 	tests := []struct {
-		name          string
-		startup, now  float64
-		wantPlausible bool
+		name    string
+		startup float64
+		want    bool
 	}{
-		{"just started", 1_000_000, 1_000_000, true},
-		{"a few seconds of query round trips", 1_000_000, 1_000_003, true},
+		{"this process's start", 1_700_000_000, true},
 		{
-			// Before the fix this was rejected by a hardcoded 300s bound
-			// measured against total suite runtime rather than the
-			// server's actual start — exactly the -race flake in #518.
-			name:          "far in the past under a slow -race suite",
-			startup:       1_000_000,
-			now:           1_000_000 + 400,
-			wantPlausible: true,
+			// The -race flake: the suite ran 400s before reaching the
+			// assertion. Nothing about the value changed, so it still holds.
+			name: "unchanged after a slow -race suite", startup: 1_700_000_000, want: true,
 		},
-		{"in the future is never a real process start", 1_000_000, 999_999, false},
+		{"the epoch is not this process", 0, false},
+		{"a stale constant is not this process", 1_600_000_000, false},
+		{"one second late is not this process", 1_700_000_001, false},
+		{"the future is never a process start", 1_700_000_060, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := startupTimePlausible(tt.startup, tt.now); got != tt.wantPlausible {
-				t.Errorf("startupTimePlausible(%v, %v) = %v, want %v",
-					tt.startup, tt.now, got, tt.wantPlausible)
+			if got := startupTimeIsThisProcess(tt.startup, procStart); got != tt.want {
+				t.Errorf("startupTimeIsThisProcess(%v, %v) = %v, want %v",
+					tt.startup, procStart.Unix(), got, tt.want)
 			}
 		})
 	}
@@ -571,8 +579,9 @@ func TestDataGripOpeningSequencePgx(t *testing.T) {
 		t.Fatalf("scanning startup_time as a number: %v", err)
 	}
 	t.Logf("startup_time = %v", startup)
-	if !startupTimePlausible(startup, float64(time.Now().Unix())) {
-		t.Errorf("startup_time %v is in the future relative to now — not this process's start", startup)
+	if !startupTimeIsThisProcess(startup, expr.ProcessStart()) {
+		t.Errorf("startup_time %v is not this process's start (%d) — the DataGrip opening sequence "+
+			"reads this as the server's uptime", startup, expr.ProcessStart().Unix())
 	}
 
 	// The database picker. An empty list here is what left DataGrip with no
