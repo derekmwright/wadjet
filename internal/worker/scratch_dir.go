@@ -32,8 +32,18 @@ import (
 // Tests get their root from t.TempDir() by passing it as the spill directory,
 // exactly like every other spill artifact.
 //
-// TestNoRuntimeScratchPathIsHardcodedUnderTmp keeps the class closed: a new
-// bare-/tmp literal on a runtime scratch path fails it.
+// EVERY ROOT THIS FILE CAN CREATE IS A ROOT A SWEEPER REACHES, and that is a
+// property of the pair rather than of either half: `Worker.sweepAbandonedScratchRoots`
+// scans the system temp dir AND the configured spill directory, both by pid
+// liveness, and the MkdirTemp-failure fallback below degrades to the flat
+// pre-#833 shape that `sweepStaleBuildCacheFiles` already reclaims. The first
+// draft of this file scanned only the temp dir, which left an operator-set
+// `--spill-dir` — the production deployment — with per-task scratch nothing
+// reclaimed after a hard kill.
+//
+// TestNoRuntimeScratchPathIsHardcodedUnderTmp keeps the /tmp-literal class
+// closed; TestAnAbandonedScratchRootUnderAConfiguredSpillDirIsReclaimed keeps
+// this one.
 
 // execScratchPrefix names this executor's root under the scratch directory.
 // The pid it carries is what lets sweepAbandonedScratchRoots reap one left by
@@ -60,7 +70,8 @@ func (e *Executor) scratchRoot() string {
 		dir, err := os.MkdirTemp(base, fmt.Sprintf("%s%d-", execScratchPrefix, os.Getpid()))
 		if err != nil {
 			e.logger.Warn("could not create a private scratch root; per-task scratch "+
-				"falls back to the base directory and may collide with another executor on this host",
+				"falls back to the pre-#833 shape, which collides with another executor "+
+				"running the same task ID on this host",
 				"base", base, "error", err)
 			dir = base
 		}
@@ -83,11 +94,22 @@ func (e *Executor) scratchRoot() string {
 // fragment in a test — gets a fixed segment rather than being flattened into
 // the root, so the shape of the path does not depend on the field being set.
 func (e *Executor) taskScratchDir(task distributed.Task, kind string) string {
+	root := e.scratchRoot()
+	if root == e.spillDir || root == os.TempDir() {
+		// The MkdirTemp-failure fallback. Degrade to the PRE-#833 shape —
+		// `<base>/<kind>-<task>` — rather than to `<base>/<query>/<kind>-<task>`:
+		// the flat one is what Worker.sweepStaleBuildCacheFiles reclaims after
+		// a hard kill (its top-level `stage-`/`shuffle-` arms), and a nested
+		// one under a `<query>` directory nothing removes would leak forever.
+		// A collision is recoverable; an unreclaimable multi-GB orphan on a
+		// spill volume is the failure ADR-0009 exists for.
+		return filepath.Join(root, kind+"-"+scratchPathSegment(task.ID))
+	}
 	query := task.QueryID
 	if query == "" {
 		query = "no-query"
 	}
-	return filepath.Join(e.scratchRoot(), scratchPathSegment(query), kind+"-"+scratchPathSegment(task.ID))
+	return filepath.Join(root, scratchPathSegment(query), kind+"-"+scratchPathSegment(task.ID))
 }
 
 // scratchPathSegment makes an id safe as one path segment. Query and task ids

@@ -57,17 +57,45 @@ reused and two executors can live in one process. It nests under whatever this
 ADR's scratch root already is — the configured `--spill-dir` when there is one,
 the per-process `wadjet-worker-<pid>` directory when there is not.
 
-Reclamation is unchanged in kind: both root names carry their owning pid, and
-`sweepAbandonedScratchRoots` reads it out of either, so a root whose owner is
-gone is reaped and one whose owner may be writing right now is never touched.
-`Worker.Stop` removes its executor's instance root; the per-task directories
-under it are still removed by the sink that made them.
+**Reclamation follows the root, and this took two passes to get right — the
+first one moved the scratch out of the reach of the only sweeper that had ever
+found it.** Before this amendment a hard-killed worker left
+`<spillDir>/stage-<taskID>/`, which `sweepStaleBuildCacheFiles` reclaims by its
+top-level `stage-`/`shuffle-` arms ("this is the only path that reclaims
+those", its own comment). Putting the same files a level down, under a private
+root, took them out of that match — and `sweepAbandonedScratchRoots` opened the
+system temp dir and nothing else, so on the production deployment (an
+operator-set `--spill-dir` on an NVMe volume) NOTHING reclaimed them. A worker
+that is OOM-killed leaked its per-task scratch forever: the 98 GB failure this
+ADR exists for, reintroduced by the fix for #833.
+
+So the invariant is stated as a property of the pair, not of either half:
+
+- **Every directory a worker can create a root in is a directory a sweeper
+  scans.** `sweepAbandonedScratchRoots` walks the system temp dir AND
+  `w.config.SpillDir`, and ownership is decided by pid liveness in both — both
+  root names carry their owning pid, `scratchRootOwnerPID` reads it out of
+  either, and a root whose owner is still running is never touched.
+- **The MkdirTemp-failure fallback degrades to a shape that is still
+  reclaimed.** When no private root can be made, a task's scratch is the flat
+  pre-#833 `<base>/<kind>-<task>`, which `sweepStaleBuildCacheFiles` already
+  matches — not `<base>/<query>/<kind>-<task>`, which no sweeper would see. A
+  collision in that case is recoverable; an unreclaimable orphan is not.
+
+`Worker.Stop` removes its executor's instance root on the clean path; the
+per-task directories under it are still removed by the sink that made them.
 
 Gates: `worker.TestTwoExecutorsRunningOneTaskIDKeepSeparateScratch` and
 `TestTwoExecutorsRunOneTaskIDConcurrentlyAndBothAnswer` (the end-to-end arm,
 ten iterations of one task ID on two executors at once) fail on revert;
-`TestNoRuntimeScratchPathIsHardcodedUnderTmp` closes the class by scanning the
-query-executing package trees for a fixed `/tmp` literal. Operator-facing
+`TestNoRuntimeScratchPathIsHardcodedUnderTmp` closes the /tmp-literal class by
+scanning the query-executing package trees; and
+`TestAnAbandonedScratchRootUnderAConfiguredSpillDirIsReclaimed` closes the
+disk-leak class — the old shape reclaimed, the new shape reclaimed, and a LIVE
+owner's root untouched, with a spill directory that is NOT under the temp dir.
+That last condition is the one the suite lacked: every scratch-sweep test that
+existed set `TMPDIR`, which is exactly why the regression above was invisible
+to it. `TestScratchFallbackShapeStaysReclaimable` covers the fallback. Operator-facing
 defaults in `internal/harness` and `cmd/` are out of that scope on purpose: a
 default a human overrides on the command line is not a per-task directory two
 processes race on.

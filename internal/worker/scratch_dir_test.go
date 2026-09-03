@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -314,4 +315,113 @@ func TestNoRuntimeScratchPathIsHardcodedUnderTmp(t *testing.T) {
 			strings.Join(offenders, "\n  "))
 	}
 	t.Logf("scanned %d package trees, skipped %d dot/underscore directories", len(scope), skippedDirs)
+}
+
+// TestAnAbandonedScratchRootUnderAConfiguredSpillDirIsReclaimed is the
+// disk-leak gate for #833's own fix, lifted from the round-0 review.
+//
+// Moving per-task scratch under a private root moved it out of reach of the
+// only sweeper that had ever reclaimed it on the production deployment.
+// Before, a hard-killed worker left `<spillDir>/stage-<taskID>/` and
+// `<spillDir>/shuffle-<taskID>/`, which `sweepStaleBuildCacheFiles` matches by
+// its top-level `stage-`/`shuffle-` arms — "this is the only path that
+// reclaims those", as its own comment says. After, the same files live at
+// `<spillDir>/wadjet-exec-<pid>-<rand>/<query>/stage-<task>/`, a level below
+// that match; and `sweepAbandonedScratchRoots` opened the system temp dir and
+// nothing else, so with `--spill-dir=/mnt/nvme` it never looked where the root
+// was. Nothing reclaimed it. That is the failure ADR-0009 exists for.
+//
+// The gate is the pair, because either half alone passes: the OLD shape is
+// reclaimed by the old sweeper, the NEW shape by the widened one, and a LIVE
+// owner's root by neither. Every scratch-sweep test that existed set TMPDIR,
+// which is exactly why the regression was invisible to the suite — so this one
+// sets a spill dir that is NOT under the temp dir.
+func TestAnAbandonedScratchRootUnderAConfiguredSpillDirIsReclaimed(t *testing.T) {
+	spill := t.TempDir() // stands in for --spill-dir=/mnt/nvme
+	t.Setenv("TMPDIR", t.TempDir())
+
+	dead := aDeadPID(t)
+	live := os.Getpid()
+
+	// Three roots: what the tree left before this arc, what it leaves now, and
+	// one whose owner is still running and must not be touched.
+	oldShape := filepath.Join(spill, "stage-frag-morsel-agg")
+	deadRoot := filepath.Join(spill, execScratchPrefix+strconv.Itoa(dead)+"-abc123")
+	deadShape := filepath.Join(deadRoot, "q-1", "stage-frag-morsel-agg")
+	liveRoot := filepath.Join(spill, execScratchPrefix+strconv.Itoa(live)+"-def456")
+	liveShape := filepath.Join(liveRoot, "q-2", "stage-frag-morsel-agg")
+	for _, d := range []string{oldShape, deadShape, liveShape} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "p0.wshf"), make([]byte, 1<<20), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w := &Worker{logger: slog.Default()}
+	w.config.SpillDir = spill
+	w.sweepStaleBuildCacheFiles()
+	w.sweepAbandonedScratchRoots()
+
+	if _, err := os.Stat(oldShape); err == nil {
+		t.Errorf("the PRE-ARC shape %s survived both sweeps — the sweeper that reclaimed it "+
+			"before this arc must keep doing so", oldShape)
+	}
+	if _, err := os.Stat(deadRoot); err == nil {
+		t.Errorf("LEAK: the orphaned scratch root %s (owner pid %d is dead) survived both "+
+			"sweeps. On a configured --spill-dir nothing else ever reclaims it, so a worker "+
+			"that is OOM-killed leaks its per-task scratch forever (#833's own fix caused "+
+			"this; ADR-0009 is the record)", deadRoot, dead)
+	}
+	if _, err := os.Stat(liveShape); err != nil {
+		t.Errorf("the LIVE owner's scratch %s was deleted (%v) — a co-located worker may be "+
+			"writing into it right now; ownership is decided by pid liveness for this reason",
+			liveShape, err)
+	}
+}
+
+// TestScratchFallbackShapeStaysReclaimable: when MkdirTemp cannot make a
+// private root, scratch degrades to the FLAT pre-#833 shape rather than to a
+// nested one under a `<query>` directory. The flat one is what
+// sweepStaleBuildCacheFiles reclaims; a nested one would be a leak with no
+// sweeper at all, which is a worse failure than the collision the fallback
+// admits.
+func TestScratchFallbackShapeStaysReclaimable(t *testing.T) {
+	spill := t.TempDir()
+	e := NewExecutor(objstore.NewMemStore(), NewLRUCache(1<<20), nil)
+	e.SetMemoryBudget(0, spill)
+	// Force the fallback: pretend MkdirTemp failed and the root IS the base.
+	e.scratchOnce.Do(func() { e.scratchDir = spill })
+
+	dir := e.taskScratchDir(distributed.Task{ID: "frag-morsel-agg", QueryID: "q-1"}, "stage")
+	if got, want := dir, filepath.Join(spill, "stage-frag-morsel-agg"); got != want {
+		t.Fatalf("the fallback scratch path is %s, want the flat pre-#833 shape %s — a nested "+
+			"path here is reclaimed by nothing after a hard kill", got, want)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "p0.wshf"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{logger: slog.Default()}
+	w.config.SpillDir = spill
+	w.sweepStaleBuildCacheFiles()
+	if _, err := os.Stat(dir); err == nil {
+		t.Fatalf("the fallback's scratch %s survived the stale-artifact sweep", dir)
+	}
+}
+
+// aDeadPID finds a pid no process holds, so the sweeper's liveness check has
+// something to call abandoned. Skips rather than guesses when it cannot.
+func aDeadPID(t *testing.T) int {
+	t.Helper()
+	for pid := 40000; pid < 60000; pid++ {
+		if !processAlive(pid) {
+			return pid
+		}
+	}
+	t.Skip("no dead pid available on this machine")
+	return 0
 }
