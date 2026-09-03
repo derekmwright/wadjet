@@ -74,7 +74,7 @@ Three read paths, all resolving through `objstore.Store`:
 Store construction and decorator chain:
 
 - Base store built once in `cmd/wadjet/main.go` (`newStore()`), wrapped
-  with `CircuitStore` at `main.go:405` — the single process-wide seam.
+  with `CircuitStore` at `main.go:531` — the single process-wide seam.
 - The worker additionally wraps per-query with `CachedStore` (in-heap
   LRU, `executor.go:539`) before building the catalog, so both scan-side
   paths see `CachedStore → CircuitStore → MinIO`.
@@ -117,7 +117,7 @@ type BaseTableCache struct { inner objstore.Store /* + dir, budget, lru */ }
 ```
 
 Inserted **once, process-wide**, directly above the circuit breaker at
-`main.go:405`:
+`main.go:531`:
 
 ```
 worker per-query:  CachedStore(heap LRU) → BaseTableCache(NVMe) → CircuitStore → MinIO
@@ -211,10 +211,12 @@ best-effort — the cache can never change results, only skip GETs.
   `filepath.Join(spillDir, "base-cache")`) — inherits the NVMe mount with
   zero terraform changes; override for setups where cache and spill
   should live on different volumes.
-- Plumbing mirrors `--cache-bytes`: flag vars + registration next to
-  `main.go:152-153`; since the decorator is constructed in `main.go`
-  (not `worker.New`), the values do not need to ride `worker.Config` —
-  standalone and worker modes share the one seam.
+- Plumbing mirrors `--cache-bytes`: var declared at `main.go:138`,
+  registered at `main.go:258` — the same var-block-then-registration
+  pattern `--cache-bytes` itself uses (`main.go:110`, `:218`); since the
+  decorator is constructed in `main.go` (not `worker.New`), the values do
+  not need to ride `worker.Config` — standalone and worker modes share the
+  one seam.
 - Terraform: `base_table_cache_bytes` var, default 0; the SF100 tfvars
   set it (proposed: 150 GB per worker process — SF100 working set
   ~100 GB, leaves ~85 GB of the 237 GB NVMe for spill; spill peak in
