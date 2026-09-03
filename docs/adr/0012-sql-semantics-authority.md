@@ -502,16 +502,28 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `boundary_qualified_key_bare_select_item`.
 
    - **`SELECT *` over a join or a USING join, in three places.** (Added
-     2026-09-03, #810 / #655.) A star whose FROM is not a single base-table
-     scan is left unexpanded — `logical.ExpandStarProjections` declines it
-     because guessing a join's column set would silently change which columns a
-     query returns — and three shapes are refused as a consequence, all loudly
-     and all answered by PostgreSQL:
+     2026-09-03, #810 / #655.) A star over a JOIN is left unexpanded —
+     `logical.ExpandStarProjections` declines it because guessing a join's
+     column set would silently change which columns a query returns — and
+     three shapes are refused as a consequence, all loudly and all answered by
+     PostgreSQL:
      `SELECT * FROM a JOIN b ORDER BY 1` (42P10), `SELECT * FROM a JOIN b USING (c)`
      (0A000, because USING merges the joined column into ONE output column),
      and a `USING` clause following another join on the same FROM item (0A000).
      Lifting them needs an ORDERED model of a join's emitted columns; they
      should be lifted together.
+
+     **The bound is narrower than "not a single base-table scan", and the
+     record said the wider thing.** Measured on all three arms, `routed=none`:
+     a positional reference over a star whose FROM is a DERIVED TABLE answers —
+     `SELECT * FROM (SELECT * FROM zzp) x ORDER BY 1`, an explicit column list
+     inside, aliased columns inside, and a derived table nested two deep all
+     answer. Only a derived table whose OWN FROM is a join refuses, which is
+     the join case one level down. The true statement is "a star over a join,
+     or over a derived table whose own FROM is a join". The engine's 42P10
+     message carried the same over-broad phrase and is corrected with this
+     entry (`logical.RefuseUnresolvedOrdinalSortKeys`); the refusal itself did
+     not change.
 
    - **Abbreviated CIDR and inet literals.** (Added 2026-09-03, #627.)
      PostgreSQL reads `'10'::cidr` as 10.0.0.0/8 and `'192.168'::cidr` as
@@ -529,9 +541,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      (`0-8-002b010203`, `0:8002b010203`, `08-002b010203`, `08002b:01:0203`,
      `08:002b:010203`, `08002b:0102:03`) were answered. Measured on 17.11: the
      grouped-hex grammar is 6+6 and 4+4+4 and nothing else. The equality is
-     enforced now and the six sit in the refused half of
-     `coordinator.TestANetworkLiteralHasOneDispositionAtEverySite`, at every
-     site, because a bound with no fixture is how this one survived review.
+     enforced now and the six are cells in the refused half of
+     `coordinator.TestANetworkLiteralHasOneDispositionAtEverySite`, rendered at
+     all seven sites — but the 22P02 refusal is ASSERTED at two of them (`eq`
+     and `in`, on all three arms) and the other five are pinned as ANSWERING.
+     Four of those five (`case`, `is_distinct`, `greatest`, `least`) answer
+     because the boxed-pair comparators reach them while the refusal lives in
+     the kernel and the row-at-a-time path; the fifth (`empty_scan`) answers for
+     a different reason — the refusal is per ROW, so a predicate no row reaches
+     never raises (the gate states both, at
+     `arc_a2_network_literal_two_path_test.go:154-158` and `:62-64`). That
+     residual is what #579 recorded before it closed COMPLETED on 2026-08-28,
+     and **#627 is the open tracker that carries it**: its body names the same
+     data-dependent runtime refusal (`exec/filter.go`'s `networkConstError`),
+     states that #579's original defect "is therefore still open for the
+     network types", and prescribes the unification — plan-time and runtime on
+     the same predicate, with a guard test asserting the disposition "at every
+     site (WHERE =, IS DISTINCT FROM, IN, simple CASE, GREATEST/LEAST)", which
+     is this entry's site list. So this entry, the gate's pins and #627 are one
+     record, and it fires when #627 closes. A fixture at every site, a refusal asserted
+     at two: that distinction is the same one this entry's first version lost,
+     and a bound with no fixture is how the defect survived review.
 
    - **A `VARCHAR(n)` or `CHAR(n)` cast destination drops its `n` — in the
      VALUE first, and on the wire after it.** (Added 2026-09-03, #708's other
@@ -567,9 +597,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      five cells: a folded literal and a real STRING vector for each engine
      layer, plus a within-length control and an unparameterized control so a
      repair that truncates everything fails too. It is a local pin rather than
-     a `knownBug` corpus entry because the corpus requires a Wadjet-bug pin to
-     name an issue and this one was found in review with none filed; the pin
-     fires the day either half is closed, which is what a record owes.
+     a `knownBug` corpus entry because it was written in review before the
+     issue existed; the divergence is filed as **#838**, so moving the pin into
+     the corpus as a `knownBug` entry naming it is now the tidier home. Either
+     way the pin fires the day either half is closed, which is what a record
+     owes.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as

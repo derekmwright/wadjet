@@ -19,8 +19,14 @@ Three-layer design:
    the same keys.
 2. **Overlay**: with `--streaming-exchange` (default on), consumers
    actually read stage outputs from the producing worker's local disk —
-   same-worker mmap, then peer gRPC, then NATS KV for small payloads —
-   with S3 as the last-resort tier. Producer death before a durable copy
+   same-worker mmap, then NATS KV for small payloads, then peer gRPC —
+   with S3 as the last-resort tier. (**Amended 2026-09-03**: this line
+   listed peer gRPC before NATS KV. `openNextFileTiered` tries them in
+   the order mmap `internal/worker/stream_source.go:742` → KV `:759` →
+   peer fetch `:790` → S3 `:814`, which is also the order
+   `docs/design/streaming-exchange.md` gives at lines 78-81 and 253-258.
+   The decision is unchanged; the record's ordering was wrong, and
+   `docs/architecture.md` had already inherited it.) Producer death before a durable copy
    exists degrades to a one-shot whole-query re-execution with streaming
    disabled.
 3. **Escape hatch**: queries under `--local-fastpath-bytes` (64 MiB

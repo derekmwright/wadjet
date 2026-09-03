@@ -22,9 +22,9 @@ import (
 // A star's source columns come from the scan's catalog-annotated schema
 // (ScanColumns, populated by physical.AnnotateScanColumns), so this resolves
 // only when a single base-table scan sits below the projection — the shape
-// clients send. A star over a join or a derived table is left alone: its column
-// set is not knowable here, and guessing it would silently change which columns
-// a query returns.
+// clients send. A star over a join — or over a derived table whose own FROM is
+// a join — is left alone: its column set is not knowable here, and guessing it
+// would silently change which columns a query returns.
 func ExpandStarProjections(n *Node) {
 	if n == nil {
 		return

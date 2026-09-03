@@ -140,9 +140,11 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 //
 // This is a PIN and not an acceptance. It asserts today's answer so that the
 // day either half is closed it FAILS and names itself — the same contract the
-// oracle's knownBug entries carry, held here because the pin the PostgreSQL
-// corpus would take must name an issue and this divergence was found in review
-// with none filed. The ORDER is value-first and ADR-0012 item 5 records why:
+// oracle's knownBug entries carry. The divergence is filed as **#838**; the pin
+// lives here rather than in the PostgreSQL corpus because it was written in
+// review before the issue existed, and moving it into the corpus as a
+// `knownBug` entry naming #838 is now the tidier home for it.
+// The ORDER is value-first and ADR-0012 item 5 records why:
 // declaring `character varying(4)` while returning six characters is a worse
 // lie than declaring nothing, so the length is enforced before it is declared.
 func TestStringCastDropsItsLengthParameter(t *testing.T) {

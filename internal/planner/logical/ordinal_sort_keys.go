@@ -97,10 +97,11 @@ func RefuseUnresolvedOrdinalSortKeys(n *Node) error {
 			}
 			return sqlerr.New("42P10",
 				"ORDER BY position %d: `SELECT *` over this FROM clause expands to a "+
-					"column list the planner cannot count — a star over a join or over "+
-					"a derived table is left unexpanded, because guessing its column set "+
-					"would silently change which columns the query returns. Name the "+
-					"columns, or ORDER BY the column itself",
+					"column list the planner cannot count — a star over a join, or over "+
+					"a derived table whose own FROM is a join, is left unexpanded, "+
+					"because guessing its column set would silently change which "+
+					"columns the query returns. Name the columns, or ORDER BY the "+
+					"column itself",
 				k.Position)
 		}
 	}

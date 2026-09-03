@@ -646,10 +646,13 @@ A position past the end of the select list is SQLSTATE `42P10`
 (`ORDER BY position N is not in select list`).
 
 One shape is refused that PostgreSQL answers: a positional reference over a
-`SELECT *` whose FROM clause is a **join** or a **derived table**, where the
-star is left unexpanded because its column set is not resolvable from the
-catalog alone. That is `42P10` with a message saying so; name the columns, or
-sort by the column itself.
+`SELECT *` whose FROM clause is a **join**, or a derived table whose **own**
+FROM is a join, where the star is left unexpanded because its column set is not
+resolvable from the catalog alone. That is `42P10` with a message saying so;
+name the columns, or sort by the column itself. A star over an ordinary derived
+table is not affected: `SELECT * FROM (SELECT * FROM t) x ORDER BY 1` answers,
+as do an explicit column list, aliased columns, and a nested derived table
+inside it (measured on all three execution paths).
 
 ## LIMIT and OFFSET
 
@@ -911,7 +914,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 358 built-in scalar functions across several categories.
+Wadjet includes 359 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -1693,6 +1696,37 @@ Values in INSERT/UPDATE are automatically coerced to the target column type:
 ARRAY, ROW, MAP and VECTOR columns cannot be written with `INSERT ... VALUES`:
 the value parser accepts a single literal token per value, not a composite
 expression.
+
+### Errors
+
+Every DML statement reports the same SQLSTATE a `SELECT` reports for the same
+mistake, so a client can branch on the class rather than on the message text:
+
+| Mistake | SQLSTATE | Message |
+|---|---|---|
+| The relation does not exist (INSERT, UPDATE, DELETE, and both MERGE relations) | `42P01` | `relation "x" does not exist` |
+| An INSERT column list names a column the table does not have | `42703` | `column "c" of relation "x" does not exist` |
+| A `WHERE` or `SET` names a column the table does not have | `42703` | names the column |
+| A value cannot be parsed as the target column's type | `22P02` | names the value |
+| A value does not fit the target column's declared type — a DECIMAL past its `(p, s)`, an integer past the column's width | `22003` | names the type or the bound, never the value — `INT64 out of range` for an integer column, `numeric field overflow: a field with precision p, scale s must round to an absolute value less than 10^(p−s)` for a DECIMAL one. The column comes from the caller: `row N, column "c"` on the INSERT path, `SET c` on the UPDATE path |
+
+A statement that fails leaves the row set exactly as it found it: the INSERT
+that names a bad column writes none of its rows, and a failed `UPDATE` — one
+whose `SET` value the column's type refuses — deletes nothing.
+
+Gates: `wadjet.TestEveryDMLDoorCarriesItsSQLState` (ten shapes, class and
+message per shape, plus a row count afterwards proving a refused INSERT wrote
+nothing), `wadjet.TestFailedUpdateLeavesTheRowSetUnchanged` (nine refused
+`SET` values, row set asserted intact after each),
+`wadjet.TestDMLSetExpressionFollowsPostgresAssignmentCast` for the `22003`
+boundary, and the pgwire DML census
+(`internal/server/pgwire/dml_census_test.go`), which carries the `42P01`,
+`42703` and `22P02` classes as wire cells beside PostgreSQL 17's own answer —
+it contains no `22003` cell, and no *DML* gate asserts a `22003` message
+text — what the DML gates assert is the class and the unchanged row set.
+(Elsewhere the text is gated: the decimal-overflow message is asserted in
+`internal/engine/exec/decimal_coerce_test.go`, two coordinator two-path gates
+and `internal/storage/parquet/wide_decimal_test.go`.)
 
 ## Limitations
 
