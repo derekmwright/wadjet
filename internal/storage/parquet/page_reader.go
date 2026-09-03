@@ -422,6 +422,17 @@ func NewColumnPageReaderIn(buf []byte, base, fileSize int64, cm *ColumnMetaData,
 		return &ColumnPageReader{openErr: err, codec: cm.Codec, physType: cm.Type,
 			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel}
 	}
+	if end == start {
+		// An EMPTY chunk has no bytes to read and its offset is whatever the
+		// writer happened to leave behind — chunkExtent skips it for exactly
+		// that reason, so it is not inside any row group's range and must not
+		// be measured against one. A reader over no bytes yields no pages,
+		// which is what the whole-file form does with the same metadata.
+		return &ColumnPageReader{
+			codec: cm.Codec, physType: cm.Type,
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel,
+		}
+	}
 	off, endOff := start-base, end-base
 	if base < 0 || off < 0 || endOff < off || endOff > int64(len(buf)) {
 		return &ColumnPageReader{

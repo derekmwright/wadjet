@@ -220,6 +220,38 @@ func TestRowGroupModeRefusesBytesThatAreNotTheRowGroups(t *testing.T) {
 	}
 }
 
+// TestAnEmptyChunkReadsAsEmptyInRowGroupMode: a column chunk with no
+// compressed bytes has no bytes to read and an offset the writer never had to
+// set — `chunkExtent` skips it when it computes a row group's range for
+// exactly that reason, so it is not inside that range and must not be measured
+// against it. Both forms must yield a reader over no pages, not an error and
+// not a read outside the buffer.
+func TestAnEmptyChunkReadsAsEmptyInRowGroupMode(t *testing.T) {
+	data := writeStagedTestFile(t, CompressionNone, 256, 500)
+	fr, err := OpenFileReaderFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end, _, err := fr.RowGroupByteRange(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An empty chunk whose recorded offset is 0 — before the row group's
+	// buffer, which is the case a containment check would refuse.
+	empty := &ColumnMetaData{Type: PhysicalInt64, Codec: CodecNone, DataPageOffset: 0, TotalCompressedSize: 0}
+
+	whole := NewColumnPageReader(data, empty, 0, 0)
+	wp, werr := whole.NextPage()
+	if werr != nil || wp != nil {
+		t.Fatalf("whole-file form over an empty chunk: page=%v err=%v, want nil/nil", wp, werr)
+	}
+	in := NewColumnPageReaderIn(data[start:end], start, int64(len(data)), empty, 0, 0)
+	ip, ierr := in.NextPage()
+	if ierr != nil || ip != nil {
+		t.Fatalf("row-group form over an empty chunk: page=%v err=%v, want nil/nil", ip, ierr)
+	}
+}
+
 type rowGroupBytesFunc func(rgIdx int) ([]byte, int64, error)
 
 func (f rowGroupBytesFunc) RowGroupBytes(rgIdx int) ([]byte, int64, error) { return f(rgIdx) }
