@@ -63,10 +63,14 @@ Three read paths, all resolving through `objstore.Store`:
   tried 2026-03-20 and reverted for S3 throttling (`fe52a79`,
   `scan_prefetch.go:69-72`).
 - **Single-process scan (standalone + local fast path):**
-  `scanSourceInner.ensureLoaded` (`internal/planner/physical/util.go:341`)
-  does `cat.Store().Get` → whole file into a pooled heap buffer →
-  `parquet.NewReaderFromBytes`. Footer/row-group metadata reads use
-  `GetReaderAt` when available (`util.go:576-625`).
+  `fileSlot.ensureLoaded` (`internal/planner/physical/util.go`) does ONE
+  `cat.Store().Get` per file and lands the body into one pooled buffer per ROW
+  GROUP, charged and released as each row group decodes
+  (`scan_rowgroup_load.go`, #789); a file whose footer this process has not
+  decoded keeps the older whole-file buffer + `parquet.NewReaderFromBytes`.
+  Either way it is one whole-object GET, which is what this document's
+  throttling argument above rests on. Footer/row-group metadata reads use
+  `GetReaderAt` when available.
 - **Alt scanner:** `internal/engine/scan/scanner.go` uses
   `ReaderAtStore` column-chunk range reads when the store supports it
   (`scanner.go:181`).
