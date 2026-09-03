@@ -332,6 +332,13 @@ func (s *fileSlot) tryRowGroupLoad(inner *scanSourceInner, ctx context.Context) 
 	// The footer must already be decoded: reading it from the object here
 	// would be a second request per file, which is the decision this design
 	// keeps.
+	//
+	// The identity carries the SIZE, and every site that populates the cache
+	// keys it by the authoritative size (the one GetReaderAt or the body
+	// itself reports), never by the manifest's hint. So a hit here means the
+	// manifest's SizeBytes and the object agree, which is what the byte ranges
+	// below are measured against; a stale manifest entry misses and takes the
+	// whole-file read, which handles a wrong size explicitly.
 	rdr := parquet.LookupFooter(footerCacheIdentity(inner.cat, s.entry, s.entry.SizeBytes))
 	if rdr == nil {
 		return nil, nil
