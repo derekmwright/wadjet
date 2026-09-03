@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // ErrDMLTargetMoved reports that a DML statement's manifest change cannot be
@@ -143,7 +145,12 @@ func (c *Catalog) CommitDML(_ context.Context, tableName string, newFiles []Pend
 		}
 		return nil
 	}
-	return fmt.Errorf("DML commit failed after %d CAS retries (table %q)", maxRetries, tableName)
+	// 40001, not a stateless error: exhausting the CAS retries under pure
+	// CONTENTION is the same "retry this statement" answer as losing the
+	// target-moved race, and it reached the client as the blanket 42000 while
+	// its sibling reached it as 40001 (review P2).
+	return sqlerr.Wrap("40001",
+		fmt.Errorf("DML commit failed after %d CAS retries (table %q)", maxRetries, tableName))
 }
 
 // mergeDeleteMarkers folds incoming markers into existing ones, one entry per
