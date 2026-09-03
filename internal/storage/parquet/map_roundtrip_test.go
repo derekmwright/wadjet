@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"reflect"
@@ -517,10 +518,51 @@ func TestMapLayoutUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(buf.Bytes(), want) {
+	// The footer's created_by carries the WRITER'S VERSION since #456, so it is
+	// per-build by design: a golden that pinned it would fail on every release
+	// and pass only on the machine that recorded it. Both sides are normalized
+	// to one constant, which leaves this test measuring what it says it
+	// measures — the MAP's encoded column data and its schema layout.
+	got := withCreatedBy(t, buf.Bytes(), goldenCreatedBy)
+	want = withCreatedBy(t, want, goldenCreatedBy)
+	if !bytes.Equal(got, want) {
 		t.Fatalf("single-entry MAP layout changed: %d bytes now, %d before\n now: %s\nwas: %s",
-			buf.Len(), len(want), hex.EncodeToString(buf.Bytes()), goldenSingleEntryMap)
+			len(got), len(want), hex.EncodeToString(got), hex.EncodeToString(want))
 	}
+}
+
+// goldenCreatedBy is the constant every golden-bytes comparison here
+// normalizes to. Its value does not matter; that it is FIXED does.
+const goldenCreatedBy = "wadjet (golden)"
+
+// withCreatedBy rewrites a parquet file's footer with a fixed created_by,
+// through the same footer decode/re-encode StripDeclaredSchema uses. It is the
+// tool a byte-for-byte fixture needs now that created_by identifies the build
+// that wrote the file (#456).
+func withCreatedBy(t *testing.T, data []byte, createdBy string) []byte {
+	t.Helper()
+	const magic = "PAR1"
+	const trailer = 4 + len(magic)
+	if len(data) < trailer+len(magic) || !bytes.Equal(data[len(data)-len(magic):], []byte(magic)) {
+		t.Fatalf("not a parquet file (%d bytes)", len(data))
+	}
+	footerLen := int(binary.LittleEndian.Uint32(data[len(data)-trailer : len(data)-len(magic)]))
+	start := len(data) - trailer - footerLen
+	if footerLen <= 0 || start < len(magic) {
+		t.Fatalf("footer length %d does not fit a %d-byte file", footerLen, len(data))
+	}
+	meta, err := DecodeFileMetaData(data[start : len(data)-trailer])
+	if err != nil {
+		t.Fatalf("decoding footer: %v", err)
+	}
+	meta.CreatedBy = createdBy
+	out := append([]byte{}, data[:start]...)
+	footer := EncodeFileMetaData(meta)
+	out = append(out, footer...)
+	var lenBuf [4]byte
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(footer)))
+	out = append(out, lenBuf[:]...)
+	return append(out, magic...)
 }
 
 // TestMapAcceptsStorageShapeEntries pins the round trip UPDATE and MERGE

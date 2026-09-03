@@ -389,6 +389,37 @@ db.CreateTable(ctx, "netflow", parquet.Schema{
 
 Or via the HTTP API, create tables, then start querying.
 
+## Which Wadjet Wrote a File
+
+Every parquet file Wadjet writes stamps its own version into the footer's
+`created_by` field, in the Apache convention parquet-mr and PyArrow already
+parse:
+
+```
+wadjet version 0.18.22 (build 8b693f30c1de)
+```
+
+Read it with any parquet tool — `parquet-tools meta`, or PyArrow:
+
+```python
+import pyarrow.parquet as pq
+pq.ParquetFile("chunk_0000.parquet").metadata.created_by
+# 'wadjet version 0.18.22 (build 8b693f30c1de)'
+```
+
+The version comes from the build itself, so what you see depends on how the
+binary was produced: a release build reports its tag, a build from a working
+commit reports Go's pseudo-version (`0.18.22-0.20260903172650-fd679ae9e742`,
+which is deliberately *not* trimmed to the base tag — that build is a commit
+*after* v0.18.22, not v0.18.22), and a test fixture reports `0.0.0-devel`. A
+build hash follows the version whenever the toolchain recorded one, with
+`-dirty` appended if the tree had uncommitted changes.
+
+This is what lets a migration enumerate the *files* affected by a fixed writer
+defect instead of guessing at *ingest dates*. Files written before Wadjet
+v0.18.23 carry the constant `wadjet (native writer)` and cannot be attributed
+more precisely than that.
+
 ## Ingestion Best Practices
 
 ### File Sizing

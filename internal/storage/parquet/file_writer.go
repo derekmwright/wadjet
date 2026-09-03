@@ -1245,7 +1245,7 @@ func (nw *NativeWriter) writeFooter() error {
 		Schema:           schemaElements,
 		NumRows:          totalRows,
 		RowGroups:        nw.rowGroups,
-		CreatedBy:        "wadjet (native writer)",
+		CreatedBy:        CreatedBy(),
 		KeyValueMetadata: kv,
 	}
 
