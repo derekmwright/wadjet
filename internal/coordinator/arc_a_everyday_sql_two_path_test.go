@@ -700,32 +700,32 @@ func arcACells() []arcACell {
 				`SELECT 1 FROM numwidth b WHERE a.w_d2 = b.w_i64)`,
 			want: []string{"n=int64:3"}},
 
-		{issue: "#535", name: "exists_over_a_cte_is_loud",
+		// ANSWERING SINCE THE CORRELATION ARC (#535's producer half). A CTE
+		// reference is a named SCOPE and the four outer-scope collectors read
+		// it now, so all three spellings are decorrelated into ordinary
+		// semi/anti joins — which is why the DAG arms EXECUTE them
+		// (wantCorrRoutes 0) rather than routing local. The rest of the
+		// family, including the shapes that were only ever silent, is
+		// `TestArcD5CorrelationMatchesPostgres`'s #535 group.
+		{issue: "#535", name: "exists_over_a_cte",
 			sql: `WITH u AS (SELECT g AS did FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS c FROM u WHERE EXISTS (` +
 				`SELECT 1 FROM typemx_dim WHERE typemx_dim.k = u.did)`,
-			wantErrLike:    "planned as uncorrelated",
-			wantErrLikeDAG: "SubqueryRunner",
-			pgSays:         "47 — and 3 for the NOT EXISTS twin"},
-		{issue: "#535", name: "not_exists_over_a_cte_is_loud",
+			want: []string{"c=int64:47"}},
+		{issue: "#535", name: "not_exists_over_a_cte",
 			sql: `WITH u AS (SELECT g AS did FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS c FROM u WHERE NOT EXISTS (` +
 				`SELECT 1 FROM typemx_dim WHERE typemx_dim.k = u.did)`,
-			wantErrLike:    "planned as uncorrelated",
-			wantErrLikeDAG: "SubqueryRunner",
-			pgSays:         "3"},
+			want: []string{"c=int64:3"}},
 		// The SCALAR spelling of the same CTE shape was silently wrong on ALL
 		// FOUR arms — including the two DAG ones, where it ROUTED local and
 		// produced the same constant. "Loud on the DAG" was never a property
 		// of #535, only of the EXISTS spelling.
-		{issue: "#535", name: "scalar_subquery_over_a_cte_is_loud",
+		{issue: "#535", name: "scalar_subquery_over_a_cte",
 			sql: `WITH u AS (SELECT g AS did FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS c FROM u WHERE (` +
 				`SELECT COUNT(*) FROM typemx_dim WHERE typemx_dim.k = u.did) > 0`,
-			wantErrLike:    "planned as uncorrelated",
-			wantErrLikeDAG: "planned as uncorrelated",
-			wantCorrRoutes: 1,
-			pgSays:         "47"},
+			want: []string{"c=int64:47"}},
 		// THE BOUNDARY OF THE SCOPE-FREE GUARD, pinned rather than described
 		// (protocol rule 11: a fix's boundary is a claim and gets a fixture
 		// that attempts it).

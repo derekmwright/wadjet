@@ -1490,6 +1490,9 @@ func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
 			continue
 		}
 
+		// Wire the current plan as the left (probe) child — at the BOTTOM of
+		// the chain, because a correlated NOT IN lowers to two anti joins
+		// (correlatedNotInPoisonJoin).
 		// Wire the current plan as the left (probe) child
 		joinNode.Children[0] = currentPlan
 		currentPlan = joinNode
@@ -2624,9 +2627,65 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 			colToTable[strings.ToLower(col)] = tableID
 		}
 	}
+	// A CTE reference is a named scope whose OUTPUT columns the enclosing
+	// query may name bare, and those names are the CTE's own — `did`, not the
+	// `g` the scan below emits. See cteScopeNames (#535).
+	if names := cteScopeNames(n); len(names) > 0 {
+		for _, name := range names {
+			tables[strings.ToLower(name)] = true
+		}
+		scope := strings.ToLower(names[0])
+		if n.CTERefAlias != "" {
+			scope = strings.ToLower(n.CTERefAlias)
+		}
+		for _, col := range subtreeOutputNames(n) {
+			colToTable[strings.ToLower(col)] = scope
+		}
+	}
 	for _, child := range n.Children {
 		collectScanInfoRec(child, tables, colToTable)
 	}
+}
+
+// subtreeOutputNames lists the column names this subtree PUBLISHES, for the
+// shapes a CTE body ends in. It answers only where the answer is exact — a
+// Project's aliases and an Aggregate's keys and outputs — and nothing at all
+// otherwise, because a wrong name here would attribute an outer column to a
+// scope that does not carry it.
+func subtreeOutputNames(n *Node) []string {
+	if n == nil {
+		return nil
+	}
+	switch n.Type {
+	case NodeProject:
+		out := make([]string, 0, len(n.Projections))
+		for _, p := range n.Projections {
+			name := p.Alias
+			if name == "" {
+				name = p.Column
+			}
+			if name != "" && name != "*" {
+				out = append(out, name)
+			}
+		}
+		return out
+	case NodeAggregate:
+		out := make([]string, 0, len(n.GroupBy)+len(n.AggExprs))
+		out = append(out, n.GroupBy...)
+		for _, a := range n.AggExprs {
+			if a.OutputCol != "" {
+				out = append(out, a.OutputCol)
+			}
+		}
+		return out
+	case NodeScan:
+		return n.ScanColumns
+	}
+	// A Filter, Sort or Limit publishes what its child does.
+	if len(n.Children) == 1 {
+		return subtreeOutputNames(n.Children[0])
+	}
+	return nil
 }
 
 // predicateTableRefs returns the set of tables referenced by a predicate's column refs.
@@ -3345,9 +3404,41 @@ func collectTableNames(n *Node, tables map[string]bool) {
 			tables[strings.ToLower(name)] = true
 		}
 	}
+	for _, name := range cteScopeNames(n) {
+		tables[strings.ToLower(name)] = true
+	}
 	for _, child := range n.Children {
 		collectTableNames(child, tables)
 	}
+}
+
+// cteScopeNames lists the names a CTE REFERENCE gives this subtree — the
+// scope an enclosing query qualifies its output columns by.
+//
+// A derived table's alias is stamped onto every scan below it, so
+// Node.ScopeNames already answers for that spelling. A CTE's is not, and
+// deliberately: stamping it would make two relations comma-joined inside the
+// body share one identity for predicate attribution (#281's q18 spelling), so
+// the name sits on the SUBTREE ROOT instead (Node.CTEName, plus
+// Node.CTERefAlias for `FROM c AS x`). physical.subtreeNamesRelation has read
+// both since #653; the LOGICAL correlation collectors read only the scans, so
+// a correlated reference INTO a CTE named a relation they had never heard of
+// and the subquery was not recognized as correlated at all — 0 rows in
+// silence on the single-process pipeline, "EXISTS subquery requires a
+// SubqueryRunner" on the DAG, and for the IN spelling an inner filter
+// `k = did` over a column the build side does not have (#535).
+func cteScopeNames(n *Node) []string {
+	if n == nil {
+		return nil
+	}
+	var out []string
+	if n.CTEName != "" {
+		out = append(out, n.CTEName)
+	}
+	if n.CTERefAlias != "" {
+		out = append(out, n.CTERefAlias)
+	}
+	return out
 }
 
 // stripTableQualifiers removes table qualifiers from ColRef nodes in an AST.

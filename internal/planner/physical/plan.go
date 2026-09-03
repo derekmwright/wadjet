@@ -13298,6 +13298,17 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 				aliases[strings.ToLower(name)] = true
 			}
 		}
+		// So does a CTE reference. It records its scope on the SUBTREE ROOT
+		// rather than on the scans below (subtreeNamesRelation says why), so
+		// a walk that reads only NodeScan never sees it and `WHERE EXISTS
+		// (… WHERE t.k = u.did)` over a CTE `u` was not recognized as
+		// correlated at all (#535).
+		if n.CTEName != "" {
+			aliases[strings.ToLower(n.CTEName)] = true
+		}
+		if n.CTERefAlias != "" {
+			aliases[strings.ToLower(n.CTERefAlias)] = true
+		}
 		for _, child := range n.Children {
 			walk(child)
 		}
@@ -13674,12 +13685,73 @@ func collectOuterColumns(node *logical.Node) map[string]string {
 				colMap[strings.ToLower(col)] = tableID
 			}
 		}
+		// A CTE reference's OUTPUT columns answer to the CTE's scope, and
+		// those names are the CTE's own — `did`, not the `g` the scan below
+		// emits. Read off the subtree root for collectTableAliases' reason
+		// (#535).
+		if scope := cteScopeID(n); scope != "" {
+			for _, col := range cteOutputNames(n) {
+				colMap[strings.ToLower(col)] = scope
+			}
+		}
 		for _, child := range n.Children {
 			walk(child)
 		}
 	}
 	walk(node)
 	return colMap
+}
+
+// cteScopeID is the name an enclosing query calls this CTE reference by: the
+// reference's own alias where it has one, else the CTE's name.
+func cteScopeID(n *logical.Node) string {
+	if n == nil {
+		return ""
+	}
+	if n.CTERefAlias != "" {
+		return strings.ToLower(n.CTERefAlias)
+	}
+	return strings.ToLower(n.CTEName)
+}
+
+// cteOutputNames lists the column names a CTE subtree PUBLISHES, for the
+// shapes a CTE body ends in. It answers only where the answer is exact — a
+// Project's aliases and an Aggregate's keys and outputs — and nothing at all
+// otherwise, because a wrong name here would attribute an outer column to a
+// scope that does not carry it.
+func cteOutputNames(n *logical.Node) []string {
+	if n == nil {
+		return nil
+	}
+	switch n.Type {
+	case logical.NodeProject:
+		out := make([]string, 0, len(n.Projections))
+		for _, p := range n.Projections {
+			name := p.Alias
+			if name == "" {
+				name = p.Column
+			}
+			if name != "" && name != "*" {
+				out = append(out, name)
+			}
+		}
+		return out
+	case logical.NodeAggregate:
+		out := make([]string, 0, len(n.GroupBy)+len(n.AggExprs))
+		out = append(out, n.GroupBy...)
+		for _, a := range n.AggExprs {
+			if a.OutputCol != "" {
+				out = append(out, a.OutputCol)
+			}
+		}
+		return out
+	case logical.NodeScan:
+		return n.ScanColumns
+	}
+	if len(n.Children) == 1 {
+		return cteOutputNames(n.Children[0])
+	}
+	return nil
 }
 
 // subqueryInnerColumns returns a resolver that reports a table's columns from

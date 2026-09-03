@@ -277,14 +277,11 @@ var pins = map[string]struct {
 		"until the consumer half of #734/#679/#535 made the unparseable re-run LOUD", "subquery parse error", "EXISTS subquery requires a SubqueryRunner"},
 	"derived_in_colalias": {"#613", "the IN spelling of the same dropped column-alias list: it " +
 		"answered 0 where PostgreSQL says 36, and is LOUD now for the same reason", "subquery parse error", "subquery parse error"},
-	"cte_probe_base_build": {"#535", "the PROBE side is a CTE and a correlated EXISTS over one is not " +
-		"decorrelated at all (its outer-scope collectors lack the CTE's alias), so it stays a Filter " +
-		"predicate and answered 30 where PostgreSQL says 19; the BUILD side is a BASE table here, " +
-		"which rules out the derived/CTE build-side path as the cause. LOUD now: the dangling " +
-		"reference is refused before the standalone re-run", "planned as uncorrelated", "EXISTS subquery requires a SubqueryRunner"},
-	"cte_referenced_twice": {"#535", "the same probe-side-CTE defect with the CTE on BOTH sides: the " +
-		"build side is fixed by the CTE decline, but the probe CTE is still not decorrelated, so it " +
-		"answered 30 where PostgreSQL says 27. LOUD now, for the same reason", "planned as uncorrelated", "EXISTS subquery requires a SubqueryRunner"},
+	// cte_probe_base_build and cte_referenced_twice were pinned here under
+	// #535 and are gone: a CTE reference is a named SCOPE and the four
+	// outer-scope collectors read it off the subtree root now, so a
+	// correlated EXISTS over one is decorrelated like any other. Both are
+	// gated outright.
 }
 
 // Corpus is the query set. Every entry counts rows, because a count is what

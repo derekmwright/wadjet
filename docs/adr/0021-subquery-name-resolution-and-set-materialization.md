@@ -218,7 +218,58 @@ sub WHERE sub.g = typemx.g)`, `typemx.g` is not dangling. That query answers
 50 for PostgreSQL's 47 — every row — and the same query with the outer
 relation aliased is right. No scope-free predicate can tell the two apart;
 closing it is a producer repair. It is pinned as
-`boundary_unaliased_base_table_correlation_stays_silent` in the arc-A census.
+`boundary_unaliased_base_table_correlation_stays_silent` in the arc-A census
+and in the correlation census.
+
+### 1d. A CTE reference is a SCOPE the correlation collectors can see
+
+(Added 2026-09-03, #535.)
+
+§1c named the producer gap and left it: "the three outer-scope collectors read
+only `NodeScan` so a CTE's scope — recorded on the subtree root as `CTEName` /
+`CTERefAlias` — is invisible to them". This is that repair, and it is one
+sentence of model: **a CTE reference is a named scope exactly as a derived
+table's alias is; the two record it in different PLACES, and every reader has
+to know both.**
+
+A derived table's alias is stamped onto every scan below it
+(`setSubtreeAlias`), so `Node.ScopeNames` answers for that spelling. A CTE's
+name is NOT stamped, and deliberately — stamping it would make two relations
+comma-joined inside the body share one identity for predicate attribution
+(#281's q18 spelling) — so it sits on the SUBTREE ROOT.
+`physical.subtreeNamesRelation` has read both since #653; the four correlation
+collectors read only the scans. The four are
+`logical.collectTableNames`, `logical.collectScanInfo`,
+`physical.collectTableAliases` and `physical.collectOuterColumns`, and each now
+also reads `CTEName` / `CTERefAlias` off the node it is standing on, plus the
+CTE subtree's PUBLISHED column names for the unqualified spelling — `did`, the
+name the CTE's own Project invents, which no scan below emits.
+
+Measured against live PostgreSQL 17 over the type-matrix fixture, before →
+after, on all four arms:
+
+| shape | before | after | PG |
+|---|---|---|---|
+| `EXISTS` over a CTE | loud (0 before v0.18.16) | 47 | 47 |
+| `NOT EXISTS` over a CTE | loud (50 before) | 3 | 3 |
+| its SCALAR spelling | loud (0 before) | 47 | 47 |
+| correlated `IN` over a CTE | `ColColFilter: could not resolve kernel for k 0 did` | 47 | 47 |
+| under a reference alias (`FROM u AS z`) | loud | 47 | 47 |
+| correlated on a BARE name (`= did`) | loud | 47 | 47 |
+
+The IN spelling is the one worth naming separately: it was not merely
+un-decorrelated. The rewrite FIRED, and the correlation term — whose `u.`
+qualifier named nothing either collector knew — was classified as an
+INNER-only condition and stripped to `k = did`, a comparison the build side
+has no `did` for. One missing scope name, three different failures.
+
+Both DAG arms now EXECUTE these shapes (`CorrelatedLocalRoutes` delta 0)
+rather than routing them to the coordinator-local pipeline, which is asserted
+beside the rows in `coordinator.TestArcD5CorrelationMatchesPostgres`.
+
+The §1c boundary is unchanged: an outer table correlated by its own TABLE NAME
+against an inner relation reading the same table under an alias has no CTE and
+no scope to record, so it stays silent and stays pinned.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
