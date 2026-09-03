@@ -37,10 +37,16 @@ func readUntilReady(t *testing.T, c *pgClient, budget time.Duration) (types stri
 // for a message that should not be there yet.
 func assertNothingPending(t *testing.T, c *pgClient, what string) {
 	t.Helper()
-	if err := c.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
+	// readMsg sets its own deadline from the client's budget, so shortening
+	// the budget is what shortens this wait — setting a deadline here would be
+	// overwritten. It has to be a WAIT: proving no message arrives means
+	// waiting for one that never comes.
+	saved := c.readBudget
+	c.readBudget = 500 * time.Millisecond
+	defer func() {
+		c.readBudget = saved
+		_ = c.conn.SetReadDeadline(time.Time{})
+	}()
 	typ, _, err := c.readMsg()
 	if err == nil {
 		t.Fatalf("%s: an unsolicited %q was buffered on the connection. A client consumes "+

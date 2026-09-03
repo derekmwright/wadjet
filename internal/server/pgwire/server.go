@@ -841,98 +841,159 @@ func unescapeCopyText(s string) string {
 	return b.String()
 }
 
+// handleQuery answers one simple-protocol Query message.
+//
+// A simple-protocol string can carry SEVERAL statements, and PostgreSQL runs
+// them as a SEQUENCE: it parses the WHOLE string first, then executes the
+// statements in order with one CommandComplete each, an error stopping the
+// sequence, and exactly ONE ReadyForQuery ending the message. Before this the
+// only semicolon handling here was `strings.TrimRight(sql, ";")`, so a
+// two-statement string was ONE statement to everything below and the tail's
+// fate depended on which sub-parser swallowed it: `INSERT …; INSERT …` ran the
+// first and silently dropped the second, and `INSERT …; ZZZ NOT SQL` ran the
+// INSERT and silently ignored the garbage (#711).
+//
+// WHO OWES THE ReadyForQuery is the thing to get right, and it is why the
+// per-statement work is a separate function that never sends one. This
+// function sends exactly one Z per message on every path it can take; a PANIC
+// sends none from here and dispatch's recover sends it instead, which is the
+// invariant that function documents and which a second Z would break for every
+// client on the connection.
 func (c *pgConn) handleQuery(sql string) {
-	sql = strings.TrimSpace(sql)
+	c.runSimpleQuery(sql)
+	c.sendReadyForQuery()
+}
+
+// runSimpleQuery runs a simple-protocol string as a sequence. It never sends a
+// ReadyForQuery: handleQuery owns the one this message gets.
+func (c *pgConn) runSimpleQuery(sql string) {
 	if c.logger != nil {
 		c.logger.Debug("pgwire simple query", "sql", sql)
 	}
-	if sql == "" {
+	stmts := plansql.SplitStatements(sql)
+	if len(stmts) == 0 {
 		c.sendEmptyQuery()
-		c.sendReadyForQuery()
 		return
 	}
 
-	// Handle ; at end.
+	// PARSE THE WHOLE STRING FIRST. `INSERT …; ZZZ NOT SQL` runs NOTHING in
+	// PostgreSQL — the syntax error is raised before the first statement
+	// executes — and running the INSERT and dropping the garbage is the
+	// silent half of #711.
 	//
-	// DEFERRED — #711: a MULTI-STATEMENT simple-protocol string. This is the
-	// only semicolon handling in the path and it is trailing-only, so
-	// `DELETE …; DELETE …` is ONE statement to everything below. PostgreSQL
-	// runs it as a SEQUENCE: one CommandComplete per statement, an error
-	// stops the sequence, and a single ReadyForQuery ends the whole message.
-	//
-	// Measured, and it bounds the work: PostgreSQL's EXTENDED protocol
-	// REFUSES a multi-statement string with 42601 and wadjet's already does,
-	// so this is a simple-protocol change and nothing else. What it needs is
-	// (a) a top-level semicolon splitter that respects string literals,
-	// dollar-quoting and comments — the raw material is TokenSemicolon,
-	// lexDollarString, and the depth-counting scan in dml_parser.go's
-	// HasTopLevelWhereToken — and (b) this function restructured so the
-	// per-statement body emits N CommandCompletes while exactly ONE
-	// ReadyForQuery is emitted at the end, including on error: the
-	// dispatch-level recover at the top of this file assumes handleQuery owes
-	// at most one 'Z', and a second one desynchronizes every client.
-	//
-	// It is the only change in the DML arc that touches the protocol state
-	// machine, which is why it is deferred whole rather than attempted beside
-	// twelve value fixes. Two shapes are refused today and the classes differ:
-	// a second statement with a WHERE is 42601 (the expression parser's
-	// unconsumed-tail check), and a FIRST statement with no WHERE silently
-	// drops the tail and trips the empty-predicate backstop as XX000.
-	sql = strings.TrimRight(sql, ";")
-	sql = strings.TrimSpace(sql)
-	if sql == "" {
-		c.sendEmptyQuery()
-		c.sendReadyForQuery()
-		return
+	// Only when there IS more than one statement: for a single statement
+	// "parse the whole string first" and "parse it when you run it" are the
+	// same thing, and paying for a second parse on every simple query to make
+	// them look different would be a cost for nothing.
+	if len(stmts) > 1 {
+		ctx, cancel := c.queryContext()
+		defer cancel()
+		for _, stmt := range stmts {
+			if err := c.checkSimpleStatement(stmt); err != nil {
+				// 42601 is the fallback, not the answer: sendQueryError
+				// prefers the class the error already carries, and a parse
+				// failure that carries none is a syntax error.
+				c.sendQueryError(ctx, "42601", err)
+				return
+			}
+		}
 	}
 
+	for _, stmt := range stmts {
+		if !c.runSimpleStatement(stmt) {
+			// An error stops the sequence, as it does in PostgreSQL. What
+			// PostgreSQL ALSO does is roll the earlier statements back — the
+			// simple string is one implicit transaction — and wadjet has no
+			// transactions to roll back with, so the statements that already
+			// ran stay. That divergence is recorded in ADR-0012's list and in
+			// docs/sql-reference.md; it is the engine's transaction scope, not
+			// this door's sequencing.
+			return
+		}
+	}
+}
+
+// checkSimpleStatement reports whether one statement of a multi-statement
+// string is something this door can run, without running it.
+//
+// It has to agree with runSimpleStatement about what "can run" means, which is
+// why it repeats that function's prefix tests rather than only calling
+// plansql.Parse: `BEGIN`, `SET …`, `DISCARD ALL` and the introspection
+// answers are statements this server handles WITHOUT the parser, and a check
+// that ran the parser over them would refuse a script every BI tool sends.
+func (c *pgConn) checkSimpleStatement(sql string) error {
+	if simpleStatementIsHandledWithoutParsing(strings.ToUpper(sql)) {
+		return nil
+	}
+	if ans := c.matchIntrospection(sql, strings.ToUpper(sql)); ans != nil {
+		return nil
+	}
+	_, err := plansql.Parse(sql)
+	return err
+}
+
+// simpleStatementIsHandledWithoutParsing lists the statement prefixes
+// runSimpleStatement answers from the connection state rather than from the
+// parser. It takes the UPPERCASED statement, as the dispatch below does.
+func simpleStatementIsHandledWithoutParsing(upper string) bool {
+	switch {
+	case strings.HasPrefix(upper, "BEGIN"),
+		strings.HasPrefix(upper, "COMMIT"),
+		strings.HasPrefix(upper, "END"),
+		strings.HasPrefix(upper, "ROLLBACK"),
+		strings.HasPrefix(upper, "SET "),
+		strings.HasPrefix(upper, "RESET "),
+		strings.HasPrefix(upper, "DISCARD "),
+		strings.HasPrefix(upper, "DEALLOCATE"):
+		return true
+	}
+	return strings.HasPrefix(upper, "COPY ") && strings.Contains(upper, "FROM STDIN")
+}
+
+// runSimpleStatement runs ONE statement and sends its CommandComplete (or its
+// rows and then its CommandComplete, or an ErrorResponse). It reports whether
+// the sequence should continue.
+func (c *pgConn) runSimpleStatement(sql string) bool {
 	// Special handling for SET/RESET/DISCARD/BEGIN/COMMIT/ROLLBACK
 	// that BI tools send during connection setup
 	upper := strings.ToUpper(sql)
 	if strings.HasPrefix(upper, "BEGIN") {
 		c.txState = 'T'
 		c.sendCommandComplete("BEGIN")
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 	if strings.HasPrefix(upper, "COMMIT") || strings.HasPrefix(upper, "END") {
 		c.txState = 'I'
 		c.sendCommandComplete("COMMIT")
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 	if strings.HasPrefix(upper, "ROLLBACK") {
 		c.txState = 'I'
 		c.sendCommandComplete("ROLLBACK")
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 	if strings.HasPrefix(upper, "SET ") {
 		c.handleSet(sql)
 		c.sendCommandComplete("SET")
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 	if strings.HasPrefix(upper, "RESET ") ||
 		strings.HasPrefix(upper, "DISCARD ") ||
 		strings.HasPrefix(upper, "DEALLOCATE") {
 		c.sendCommandComplete("SET")
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 
 	// Handle introspection/synthetic queries (SELECT 1, version(), pg_catalog, etc.)
 	if ans := c.matchIntrospection(sql, upper); ans != nil {
 		c.sendSynthAnswer(ans)
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 
 	// Handle COPY FROM STDIN
 	if strings.HasPrefix(upper, "COPY ") && strings.Contains(upper, "FROM STDIN") {
 		c.handleCopyIn(sql)
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 
 	// Handle DML (INSERT/UPDATE/DELETE/MERGE) via Execute path.
@@ -946,27 +1007,23 @@ func (c *pgConn) handleQuery(sql string) {
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {
 			c.sendQueryError(ctx, "53300", errors.New("query queue timeout"))
-			c.sendReadyForQuery()
-			return
+			return false
 		}
 		result, err := c.db.Execute(ctx, sql)
 		c.server.releaseQuery()
 		if err != nil {
 			c.sendQueryError(ctx, "42000", err)
-			c.sendReadyForQuery()
-			return
+			return false
 		}
 		c.sendCommandComplete(commandTag(result.Command, result.RowsAffected))
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	if !c.server.acquireQuery(ctx) {
 		c.sendQueryError(ctx, "53300", errors.New("query queue timeout"))
-		c.sendReadyForQuery()
-		return
+		return false
 	}
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
@@ -983,8 +1040,7 @@ func (c *pgConn) handleQuery(sql string) {
 	c.server.releaseQuery()
 	if err != nil {
 		c.sendQueryError(ctx, "42000", err)
-		c.sendReadyForQuery()
-		return
+		return false
 	}
 	// A cancelled statement must never answer with rows. Execution does not
 	// always surface the cancellation as an error — exec.Pipeline's parallel
@@ -996,8 +1052,7 @@ func (c *pgConn) handleQuery(sql string) {
 			stream.Close()
 		}
 		c.sendError("ERROR", sqlstateQueryCanceled, msg)
-		c.sendReadyForQuery()
-		return
+		return false
 	}
 
 	// Send RowDescription
@@ -1015,8 +1070,7 @@ func (c *pgConn) handleQuery(sql string) {
 			stream.Close()
 		}
 		c.sendEmptyQuery()
-		c.sendReadyForQuery()
-		return
+		return true
 	}
 	if len(result.ColumnMetas) > 0 {
 		c.sendTypedRowDescription(result.ColumnMetas, nil)
@@ -1031,13 +1085,12 @@ func (c *pgConn) handleQuery(sql string) {
 		// Partial DataRows followed by ErrorResponse is legal in the v3
 		// protocol; the client discards the partial result.
 		c.sendQueryError(ctx, "58030", fmt.Errorf("reading result batches: %w", sendErr))
-		c.sendReadyForQuery()
-		return
+		return false
 	}
 
 	// Send CommandComplete
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", sent))
-	c.sendReadyForQuery()
+	return true
 }
 
 // Extended Query protocol handlers
@@ -1063,6 +1116,33 @@ func (c *pgConn) handleParse(payload []byte) {
 				oids[i] = binary.BigEndian.Uint32(payload[i*4:])
 			}
 		}
+	}
+
+	// A PREPARED STATEMENT CARRIES ONE STATEMENT. PostgreSQL refuses a
+	// multi-statement string here with 42601, `cannot insert multiple commands
+	// into a prepared statement`, and accepts one only on the simple query
+	// protocol — measured against 17.11 through pgx in QueryExecModeExec, for
+	// `INSERT …; INSERT …`, `DELETE …; DELETE …`, `SELECT …; SELECT …`,
+	// `DELETE …; SELECT …` and `SELECT …; DELETE …` alike.
+	//
+	// This is the door #711's sequencing must NOT reach: Bind/Execute answer
+	// with one CommandComplete and one result set, so a second statement here
+	// has nowhere to be reported. Refusing is not a limitation, it is what
+	// PostgreSQL does.
+	//
+	// The refusal follows the extended protocol's error discipline: report and
+	// enter skipUntilSync, so every message up to the client's Sync is
+	// discarded and Sync — the only message that owes a Z in this
+	// sub-protocol — delivers it exactly once. A ReadyForQuery from here would
+	// be the spurious-Z desync dispatch's comment describes.
+	if err := plansql.CheckSingleStatement(sql); err != nil {
+		code := sqlerr.StateOf(err)
+		if code == "" {
+			code = "42601"
+		}
+		c.sendError("ERROR", code, err.Error())
+		c.skipUntilSync = true
+		return
 	}
 
 	if name == "" {

@@ -99,11 +99,6 @@ func TestParseRejectsTrailingInput(t *testing.T) {
 			stopsAt: "ESCAPE",
 		},
 		{
-			name:    "a second statement after a semicolon",
-			sql:     "SELECT 1; SELECT 2",
-			stopsAt: "SELECT",
-		},
-		{
 			name:    "trailing input inside EXPLAIN",
 			sql:     "EXPLAIN SELECT COUNT(*) FROM nation WHERE n_regionkey = 1 GARBAGE",
 			stopsAt: "GARBAGE",

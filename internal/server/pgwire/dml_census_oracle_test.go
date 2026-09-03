@@ -72,14 +72,32 @@ func TestDMLCensusMatchesPostgres(t *testing.T) {
 	record := os.Getenv("WADJET_CENSUS_RECORD") != ""
 	var recorded []string
 	for _, sh := range censusShapes() {
-		got := censusPGAnswer(ctx, t, tx, sh)
+		got := censusPGAnswer(ctx, t, tx, sh, pgx.QueryExecModeSimpleProtocol)
+		// An entry that declares a PROTOCOL SPLIT gets both halves measured.
+		// Only those: running every shape twice would surface unrelated
+		// simple-vs-extended differences this corpus does not claim anything
+		// about, and the split is a property of multi-statement strings alone.
+		gotOne := ""
+		if sh.pgOne != "" {
+			gotOne = censusPGAnswer(ctx, t, tx, sh, pgx.QueryExecModeExec)
+		}
 		if record {
-			recorded = append(recorded, fmt.Sprintf("%s\n\tpg=%s", sh.name, got))
+			line := fmt.Sprintf("%s\n\tpg=%s", sh.name, got)
+			if sh.pgOne != "" {
+				line += fmt.Sprintf("\n\tpgOne=%s", gotOne)
+			}
+			recorded = append(recorded, line)
 			continue
 		}
 		if got != sh.pg {
 			t.Errorf("%s\n  PostgreSQL 17 answers %s\n  the census records    %s\n"+
 				"  The corpus's PG column is wrong; fix the entry, not the engine.", sh.sql, got, sh.pg)
+		}
+		if sh.pgOne != "" && gotOne != sh.pgOne {
+			t.Errorf("%s\n  PostgreSQL 17 answers %s on the EXTENDED protocol\n"+
+				"  the census records    %s\n"+
+				"  The corpus's pgOne column is wrong; fix the entry, not the engine.",
+				sh.sql, gotOne, sh.pgOne)
 		}
 	}
 	if record {
@@ -90,8 +108,15 @@ func TestDMLCensusMatchesPostgres(t *testing.T) {
 	}
 }
 
-// censusPGAnswer runs one shape inside a savepoint and rolls it back.
-func censusPGAnswer(ctx context.Context, t *testing.T, tx pgx.Tx, sh censusShape) string {
+// censusPGAnswer runs one shape inside a savepoint, in the requested protocol
+// mode, and rolls it back.
+//
+// The MODE is a parameter because for a multi-statement string PostgreSQL's
+// own answer depends on it: the simple query protocol runs the sequence, and
+// every one-statement entry point answers 42601. Recording only one of those
+// and comparing all three wadjet doors to it would have blamed wadjet for
+// reproducing PostgreSQL faithfully.
+func censusPGAnswer(ctx context.Context, t *testing.T, tx pgx.Tx, sh censusShape, mode pgx.QueryExecMode) string {
 	t.Helper()
 	if _, err := tx.Exec(ctx, "SAVEPOINT census"); err != nil {
 		t.Fatal(err)
@@ -103,7 +128,7 @@ func censusPGAnswer(ctx context.Context, t *testing.T, tx pgx.Tx, sh censusShape
 	}()
 
 	if sh.tbl == "" {
-		cols, rows, err := censusPGRows(ctx, tx, sh.sql)
+		cols, rows, err := censusPGRows(ctx, tx, sh.sql, mode)
 		if err != nil {
 			return "state=" + censusState(err)
 		}
@@ -111,7 +136,7 @@ func censusPGAnswer(ctx context.Context, t *testing.T, tx pgx.Tx, sh censusShape
 	}
 
 	head := ""
-	if tag, err := tx.Exec(ctx, sh.sql); err != nil {
+	if tag, err := censusPGExec(ctx, tx, sh.sql, mode); err != nil {
 		// The statement aborted the savepoint's subtransaction; the digest
 		// below cannot run until it is released, so report the class alone
 		// beside the table state the fixture guarantees is untouched.
@@ -119,23 +144,49 @@ func censusPGAnswer(ctx context.Context, t *testing.T, tx pgx.Tx, sh censusShape
 		if _, rbErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT census"); rbErr != nil {
 			t.Fatalf("rolling back after %q: %v", sh.sql, rbErr)
 		}
-		cols, rows, dErr := censusPGRows(ctx, tx, censusDigestSQL[sh.tbl])
+		cols, rows, dErr := censusPGRows(ctx, tx, censusDigestSQL[sh.tbl], pgx.QueryExecModeSimpleProtocol)
 		if dErr != nil {
 			t.Fatalf("digest after %q: %v", sh.sql, dErr)
 		}
 		return "state=" + state + " table=" + censusDigest(cols, rows)
 	} else {
-		head = "tag=" + tag.String()
+		head = "tag=" + tag
 	}
-	cols, rows, err := censusPGRows(ctx, tx, censusDigestSQL[sh.tbl])
+	cols, rows, err := censusPGRows(ctx, tx, censusDigestSQL[sh.tbl], pgx.QueryExecModeSimpleProtocol)
 	if err != nil {
 		t.Fatalf("digest after %q: %v", sh.sql, err)
 	}
 	return head + " table=" + censusDigest(cols, rows)
 }
 
-func censusPGRows(ctx context.Context, tx pgx.Tx, sql string) ([]string, []map[string]any, error) {
-	rows, err := tx.Query(ctx, sql)
+// censusPGExec runs one statement against PostgreSQL and returns its COMMAND
+// TAG, in the requested protocol mode. It is the PostgreSQL twin of
+// censusWireExec, and it is a separate function for the same reason: pgx v5
+// short-circuits a zero-argument Exec onto the SIMPLE protocol whatever the
+// mode says, so an Exec-based "extended" arm silently measures the simple door.
+func censusPGExec(ctx context.Context, tx pgx.Tx, sql string, mode pgx.QueryExecMode) (string, error) {
+	if mode == pgx.QueryExecModeSimpleProtocol {
+		tag, err := tx.Exec(ctx, sql, mode)
+		if err != nil {
+			return "", err
+		}
+		return tag.String(), nil
+	}
+	rows, err := tx.Query(ctx, sql, mode)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return rows.CommandTag().String(), nil
+}
+
+func censusPGRows(ctx context.Context, tx pgx.Tx, sql string, mode pgx.QueryExecMode) ([]string, []map[string]any, error) {
+	rows, err := tx.Query(ctx, sql, mode)
 	if err != nil {
 		return nil, nil, err
 	}

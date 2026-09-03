@@ -56,7 +56,24 @@ type censusShape struct {
 	emb string
 	sim string
 	ext string
-	bug string // issue number, or "" when every door already agrees with PG
+	// pgOne is PostgreSQL's answer through an entry point that carries ONE
+	// statement — the extended protocol, a prepared statement, PQexecParams —
+	// when that differs from `pg`, which is measured on the SIMPLE protocol.
+	//
+	// For every shape but one family the two are the same and this is empty.
+	// The exception is a MULTI-STATEMENT string: PostgreSQL accepts one ONLY
+	// on the simple query protocol and answers 42601 `cannot insert multiple
+	// commands into a prepared statement` everywhere else. The census's
+	// premise — one PostgreSQL answer, three wadjet doors — is false exactly
+	// there, and recording it as a wadjet door split would have blamed wadjet
+	// for reproducing PostgreSQL faithfully.
+	//
+	// The embedded door is held to pgOne because `wadjet.DB.Execute` and
+	// `wadjet.DB.Query` return exactly ONE result, like a prepared statement;
+	// pgwire's simple door is held to `pg`, because that is the door
+	// PostgreSQL gives multi-statement to.
+	pgOne string
+	bug   string // issue number, or "" when every door already agrees with PG
 }
 
 // doors returns the recorded answer for each door, defaults resolved.
@@ -71,6 +88,15 @@ func (s censusShape) doors() (emb, sim, ext string) {
 		ext = sim
 	}
 	return emb, sim, ext
+}
+
+// pgDoors returns the PostgreSQL answer each door is held to.
+func (s censusShape) pgDoors() (emb, sim, ext string) {
+	one := s.pgOne
+	if one == "" {
+		one = s.pg
+	}
+	return one, s.pg, one
 }
 
 func censusShapes() []censusShape {
@@ -702,20 +728,76 @@ func censusShapes() []censusShape {
 			pg:  "tag=UPDATE 5 table=[1:2.5:3 2:-2.5:-3 3:0.5:1 4:3.5:4 5:1.5:2]",
 			emb: "tag=UPDATE 5 table=[1:2.5:3 2:-2.5:-3 3:0.5:1 4:3.5:4 5:1.5:2]"},
 
-		// P-R2-4 — the one deferral that was documented and NOT pinned.
-		// #711's deferral names two refused shapes; the INSERT spelling is
-		// refused by neither engine and the two do different things with it.
-		// PostgreSQL runs BOTH statements; wadjet runs the first, silently
-		// DROPS the tail, and reports the first statement's tag — a lost
-		// write dressed as success, which is the one outcome a deferral must
-		// never leave unrecorded. Pinned here so it is loud in the corpus
-		// even while the fix is deferred.
-		{name: "#711 two INSERTs in one message drop the second", tbl: "pr",
+		// ---------------------------------------------------------------
+		// #711 — a string carrying MORE THAN ONE statement.
+		//
+		// This is the one family where PostgreSQL's own answer depends on the
+		// protocol, so the entries carry `pgOne` beside `pg`: the simple query
+		// protocol runs the sequence and reports the LAST statement's tag,
+		// and every one-statement entry point answers 42601. Both halves are
+		// measured, the second through pgx in QueryExecModeExec.
+		//
+		// What was here before was a pin recording the silent half: `INSERT …;
+		// INSERT …` ran the first statement, DROPPED the second, and reported
+		// the first one's tag as success.
+		// ---------------------------------------------------------------
+		{name: "#711 two INSERTs in one message", tbl: "pr",
 			sql: "INSERT INTO arcb_pr (id, n, name) VALUES (7, 70, 'w'); " +
 				"INSERT INTO arcb_pr (id, n, name) VALUES (8, 80, 'x')",
-			pg:  "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 7:70:w 8:80:x]",
-			emb: "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 7:70:w]",
-			bug: "#711"},
+			pg:    "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 7:70:w 8:80:x]",
+			pgOne: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb:   "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			sim:   "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 7:70:w 8:80:x]",
+			ext:   "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#711 two DELETEs in one message", tbl: "pr",
+			sql:   "DELETE FROM arcb_pr WHERE id = 1; DELETE FROM arcb_pr WHERE id = 2",
+			pg:    "tag=DELETE 1 table=[3:30:c]",
+			pgOne: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb:   "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			sim:   "tag=DELETE 1 table=[3:30:c]",
+			ext:   "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#711 DELETE then SELECT", tbl: "pr",
+			sql:   "DELETE FROM arcb_pr WHERE id = 1; SELECT id FROM arcb_pr",
+			pg:    "tag=SELECT 2 table=[2:20:b 3:30:c]",
+			pgOne: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb:   "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			sim:   "tag=SELECT 2 table=[2:20:b 3:30:c]",
+			ext:   "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#711 SELECT then DELETE", tbl: "pr",
+			sql:   "SELECT id FROM arcb_pr; DELETE FROM arcb_pr WHERE id = 1",
+			pg:    "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			pgOne: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb:   "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			sim:   "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			ext:   "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#711 a DELETE with no WHERE then a DELETE", tbl: "pr",
+			sql:   "DELETE FROM arcb_pr; DELETE FROM arcb_pr WHERE id = 2",
+			pg:    "tag=DELETE 0 table=[]",
+			pgOne: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb:   "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			sim:   "tag=DELETE 0 table=[]",
+			ext:   "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
+		// PARSE THE WHOLE STRING FIRST: the INSERT does NOT run, on any door.
+		// This is the silent half of #711 and no cell recorded it.
+		{name: "#711 a statement then garbage runs nothing", tbl: "pr",
+			sql: "INSERT INTO arcb_pr (id, n, name) VALUES (7, 70, 'w'); ZZZ NOT SQL",
+			pg:  "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#711 garbage then a statement runs nothing", tbl: "pr",
+			sql: "ZZZ NOT SQL; INSERT INTO arcb_pr (id, n, name) VALUES (7, 70, 'w')",
+			pg:  "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
+		// A semicolon inside a literal is not a separator, and a trailing one
+		// is not a second statement. These are the boundary from the other
+		// side: a splitter that cut on them would refuse statements that work.
+		{name: "control #711 a semicolon inside a string literal", tbl: "pr",
+			sql: "UPDATE arcb_pr SET name = 'a;b' WHERE id = 1",
+			pg:  "tag=UPDATE 1 table=[1:10:a;b 2:20:b 3:30:c]",
+			emb: "tag=UPDATE 1 table=[1:10:a;b 2:20:b 3:30:c]"},
+		{name: "control #711 a trailing semicolon", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id = 1;",
+			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
 
 		// The verbs, working. These carry no bug and are the regression
 		// half of the census: they fail if a later fix moves a RIGHT answer.

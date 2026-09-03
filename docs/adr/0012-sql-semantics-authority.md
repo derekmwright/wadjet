@@ -59,6 +59,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    to begin with, and are recorded here so a future gate does not mistake
    them for undecided.)
 
+   - **A multi-statement simple-query string is not one transaction.**
+     (Added 2026-09-03, #711.) PostgreSQL's simple query protocol wraps a
+     string carrying several statements in an IMPLICIT TRANSACTION, so a
+     failure in the third statement rolls the first two back — measured:
+     `INSERT …; SELECT 1/0` leaves the table untouched. Wadjet runs the same
+     string as a sequence with the same tags and the same stop-at-the-first-
+     error rule, and the statements that already committed STAY.
+
+     It is not a sequencing divergence and cannot be closed by the sequencing:
+     wadjet has no transactions at all — `BEGIN` and `COMMIT` are accepted and
+     ignored on every door — so there is nothing to roll back with. What
+     changes if transactions are ever implemented is this entry, not the
+     splitter. Recorded here so a future gate does not read it as undecided.
+     The value half agrees: which statements run, in what order, with which
+     command tags, and that a syntax error anywhere runs none of them, are
+     all PostgreSQL's answers and are gated per door in the DML census and in
+     `internal/server/pgwire/multi_statement_test.go`.
    - **Collation.** Wadjet compares and sorts strings with BINARY collation,
      not PostgreSQL's locale-dependent collation. Locale-sensitive comparison
      costs real work on every string compare and sort, surprises analysts

@@ -256,8 +256,19 @@ const (
 	QueryUnsupported
 )
 
-// Parse parses a SQL string into a ParsedQuery.
+// Parse parses ONE SQL statement into a ParsedQuery.
+//
+// A string carrying SEVERAL statements is refused here, which is what makes
+// this function the one-statement entry point every one-statement door needs:
+// `wadjet.DB.Execute`, `wadjet.DB.Query`, the HTTP door and the CLI all reach
+// it, and all of them return exactly one result. Only the pgwire SIMPLE query
+// protocol runs a sequence, and it splits the string with SplitStatements
+// before it gets here (#711). See CheckSingleStatement for what "refused"
+// means and why the order matters.
 func Parse(sql string) (*ParsedQuery, error) {
+	if err := CheckSingleStatement(sql); err != nil {
+		return nil, err
+	}
 	q, err := parseDispatch(sql)
 	if err != nil {
 		// A statement this parser cannot read is a syntax error from this

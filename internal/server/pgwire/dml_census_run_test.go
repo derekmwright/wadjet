@@ -104,14 +104,15 @@ func TestDMLCensus(t *testing.T) {
 			}
 
 			wantEmb, wantSim, wantExt := sh.doors()
-			for _, d := range []struct{ door, got, want string }{
-				{"embedded", emb, wantEmb},
-				{"simple", simple, wantSim},
-				{"extended", ext, wantExt},
+			pgEmb, pgSim, pgExt := sh.pgDoors()
+			for _, d := range []struct{ door, got, want, pg string }{
+				{"embedded", emb, wantEmb, pgEmb},
+				{"simple", simple, wantSim, pgSim},
+				{"extended", ext, wantExt, pgExt},
 			} {
 				if d.got != d.want {
 					t.Errorf("%s\n  %s door answered %s\n  recorded          %s\n"+
-						"  (PostgreSQL 17:  %s)", sh.sql, d.door, d.got, d.want, sh.pg)
+						"  (PostgreSQL 17:  %s)", sh.sql, d.door, d.got, d.want, d.pg)
 				}
 			}
 
@@ -119,13 +120,19 @@ func TestDMLCensus(t *testing.T) {
 			// with PostgreSQL, so a move away from PG is a regression; an
 			// entry with one claims some door does not, so agreement means
 			// the fix landed and the pin is now the thing that is wrong.
-			agrees := wantEmb == sh.pg && wantSim == sh.pg && wantExt == sh.pg
+			//
+			// Each door is held to the PostgreSQL answer for the PROTOCOL it
+			// is: the simple door to `pg`, the one-statement doors to `pgOne`
+			// where the shape declares one. That distinction exists for
+			// multi-statement strings only, where PostgreSQL itself answers
+			// differently per protocol.
+			agrees := wantEmb == pgEmb && wantSim == pgSim && wantExt == pgExt
 			switch {
 			case sh.bug == "" && !agrees:
 				t.Errorf("%s\n  recorded as agreeing with PostgreSQL, but\n"+
-					"  embedded %s\n  simple   %s\n  extended %s\n  PG 17    %s\n"+
+					"  embedded %s (PG %s)\n  simple   %s (PG %s)\n  extended %s (PG %s)\n"+
 					"  Either this is a regression, or the entry needs a `bug`.",
-					sh.sql, wantEmb, wantSim, wantExt, sh.pg)
+					sh.sql, wantEmb, pgEmb, wantSim, pgSim, wantExt, pgExt)
 			case sh.bug != "" && agrees:
 				t.Errorf("%s\n  pinned as %s, but every door now answers what PostgreSQL 17 does:\n  %s\n"+
 					"  DELETE THE PIN — that is the fix's proof.", sh.sql, sh.bug, sh.pg)

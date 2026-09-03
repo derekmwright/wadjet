@@ -1677,6 +1677,34 @@ something else (`MERGE INTO t AS x USING s AS t`).
 A target row may be affected at most once. Two source rows matching one target
 row is SQLSTATE `21000` (`MERGE command cannot affect row a second time`).
 
+### Several statements in one message
+
+A SQL string may carry several statements separated by semicolons, and where
+it is accepted depends on the door, exactly as it does in PostgreSQL:
+
+| Door | A multi-statement string |
+|---|---|
+| pgwire **simple** query protocol (`psql`, `PQexec`) | runs them **in sequence**, one command tag per statement |
+| pgwire **extended** protocol (pgx, JDBC, psycopg, every ORM) | SQLSTATE `42601`, `cannot insert multiple commands into a prepared statement` |
+| embedded `wadjet.DB.Execute` / `Query`, the HTTP API, the CLI | SQLSTATE `42601`, the same — they answer with one result |
+
+On the simple protocol the **whole string is parsed before any statement
+runs**, so `INSERT ...; ZZZ NOT SQL` runs nothing and reports the syntax
+error. The statements then run in order, each sending its own
+`CommandComplete`; an error stops the sequence, and the message ends with a
+single `ReadyForQuery`.
+
+A semicolon is a separator only when it is one at the top level. Semicolons
+inside string literals (`'a;b'`), quoted identifiers (`"a;b"`), dollar-quoted
+strings (`$$a;b$$`), line and block comments, and parentheses are text, and a
+trailing semicolon is not a second statement.
+
+**An error does not undo the statements before it.** PostgreSQL wraps a simple
+query string in an implicit transaction and rolls the whole string back;
+wadjet has no transactions — `BEGIN` and `COMMIT` are accepted and ignored —
+so each statement commits on its own and the ones that already ran stay. This
+is the engine's transaction scope, not a property of the sequencing.
+
 ### Concurrency
 
 A DELETE, UPDATE or MERGE reads the table's manifest, scans the files it
@@ -1772,7 +1800,6 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
 - `JOIN ... USING` that follows another join on the same `FROM` item —
   rejected (`0A000`); the column could come from either relation on the left
 - A SUBQUERY in an `UPDATE` / `DELETE` / `MERGE` predicate — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS`, and a `MERGE ... WHEN ... AND` carrying one — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner. What closing it needs, and what blocks it today, is ADR-0031.
-- Two statements in one message. `DELETE ...; DELETE ...` and `UPDATE ...; UPDATE ...` are refused (42601 when the second statement carries a WHERE, XX000 when the first does not); `INSERT ...; INSERT ...` is **not** refused — the first statement runs, the tail is silently dropped, and the tag reports the first statement's count. PostgreSQL runs both statements. Do not put two statements in one message until #711 lands.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
 - A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000

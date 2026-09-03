@@ -78,6 +78,11 @@ type pgClient struct {
 	// Cancellation key material from BackendKeyData, recorded by startup.
 	pid    int32
 	secret int32
+	// readBudget is how long readMsg waits for one message. It is a field
+	// rather than a constant because a test that expects NO message has to
+	// wait for the timeout, and paying five seconds for each such assertion
+	// made assertNothingPending the slowest thing in the package.
+	readBudget time.Duration
 }
 
 func newPGClient(t *testing.T, addr string) *pgClient {
@@ -87,7 +92,7 @@ func newPGClient(t *testing.T, addr string) *pgClient {
 		t.Fatalf("connecting to pgwire: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return &pgClient{conn: conn, t: t}
+	return &pgClient{conn: conn, t: t, readBudget: 5 * time.Second}
 }
 
 func (c *pgClient) startup(user, database string) {
@@ -184,7 +189,11 @@ func (c *pgClient) writeMsg(typ byte, payload []byte) {
 }
 
 func (c *pgClient) readMsg() (byte, []byte, error) {
-	c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	budget := c.readBudget
+	if budget == 0 {
+		budget = 5 * time.Second
+	}
+	c.conn.SetReadDeadline(time.Now().Add(budget))
 	var header [5]byte
 	if _, err := io.ReadFull(c.conn, header[:]); err != nil {
 		return 0, nil, err
