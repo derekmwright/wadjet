@@ -209,3 +209,53 @@ moment a spilling nested-loop join makes the shape answer.
 
 The producers table above is unchanged in count: producer 5 charges the index
 of a build that reaches `reconcileHashMemory` on either path.
+
+### 2026-09-03 (the spilled-arm arc): #823's reclaim half, MEASURED and DEFERRED
+
+Producer 5's "released" column above says a grace eviction does not free the
+index. Here is what that costs, so the next arc starts from a number instead
+of an argument. A partition-on-arrival build of 2,000 rows in 256-row arrivals
+against a 1 MiB budget, then every partition evicted — 64 of 64, all 64
+`buildBatches` slots nil, no build column data left in memory at all:
+
+| | bytes | share of the residual |
+|---|---|---|
+| `Tracker.Used()` | 106,320 | — |
+| the hash index total | 98,304 | 92% |
+| ...of which the hash TABLE | 65,536 | 62% |
+| ...of which arena + chain | 28,672 | 27% |
+| ...of which the bloom filter | 4,096 | 4% |
+
+At 20,000 rows the same shape gives `used = 562,359` with 696,320 gross index,
+524,288 of it hash table. **The dominant term is the hash TABLE, not the
+arena.**
+
+**Why per-partition ARENAS alone are not the fix**, even though they are the
+contained change. A key's partition is a function of the KEY
+(`spillPartition`), so a per-partition arena needs no widening of what the
+hash table stores — `intIndex.Get(key)` can index `arena[spillPartition(key)]`
+with the same int32. That is a real, bounded refactor. It reclaims the 27%,
+and leaves the 62%: `used` after a full eviction would fall from 106,320 to
+about 77,648 on the fixture above, which does not return the floor to anything
+like zero. Rule 11 forbids shipping it: it is bounded by a model the same
+commit knows is incomplete, and it leaves #823's own headline shape — `used`
+far above the floor after 64 evictions — exactly where it was.
+
+**What the whole fix is.** Per-partition hash TABLES: `intIndex` and
+`strIndex` become one per partition, and the arenas follow for free because a
+partition's table only ever addresses its own. Eviction then frees a
+partition's table, arena and chain with its columns, and the only thing that
+must survive is the bloom filter, which is 4% and covers spilled keys on
+purpose. The cost is that the probe's inner loop — `inlineIntProbe` and the
+typed emit switch, the hottest code in the engine — gains a partition
+selection per row, and 64 tables sized independently change the load factors
+and the growth path the current single table was tuned for. That is a
+performance-bearing change to a hot kernel and needs its own arc with its own
+A/B, not a rider on a correctness arc.
+
+**How the residual is pinned.**
+`exec.TestEvictingEveryPartitionLeavesTheIndexCharged` measures the floor after
+a full eviction and fails in BOTH directions: if `used` falls below the index's
+own bytes the reclaim has landed and the pin must be deleted (with this section
+and producer 5's row); if what survives stops being mostly index, the pin has
+stopped measuring #823 and says so.
