@@ -548,6 +548,29 @@ func spillMxCells() []spillMxCell {
 			`SELECT COUNT(*) AS n, COUNT(a.%[1]s) AS nn FROM %[2]s a JOIN %[2]s b `+
 				`ON COALESCE(a.%[1]s, a.%[1]s) = COALESCE(b.%[1]s, b.%[1]s) `+
 				`WHERE a.id < 200 AND b.id < 200`, n, tbl)})
+		// The same cross join asked to carry a VALUE, not only a count
+		// (round-0 review, P4). Every cell above projects `COUNT(*)` and
+		// nothing else, so the family could not see what a cross join does to
+		// a value it has to materialize and order through its output. Here the
+		// keyed column travels as a value on BOTH sides and MIN/MAX read it
+		// back, over an ORDERED result so row order is compared too.
+		//
+		// A GROUP BY over this join is deliberately NOT a cell, and that is a
+		// measurement rather than an omission: it is WRONG today for six of
+		// the eighteen types (`2 rows, want 3` on c_bool at 1 MiB), it is
+		// equally wrong at fd679ae9 with no budget at all, and the mechanism
+		// is #847 — a group key that reaches `aggPreProject`'s sparse-write
+		// path under a selection vector. A cell whose expected state is
+		// "wrong" does not belong in a sweep whose contract is "the budgeted
+		// answer equals the unbudgeted one"; it belongs in a pin, and it has
+		// one: computed_group_key_over_a_cross_join_pin_test.go, which fails
+		// the moment the shape starts answering and says to add the cell here.
+		add(spillMxCell{name: "join_computed_value_" + n, joinBudget: true, ordered: true, sql: fmt.Sprintf(
+			`SELECT COUNT(*) AS n, MIN(a.%[1]s) AS alo, MAX(a.%[1]s) AS ahi, `+
+				`MIN(b.%[1]s) AS blo, MAX(b.%[1]s) AS bhi, MIN(b.id) AS ilo, MAX(b.id) AS ihi `+
+				`FROM %[2]s a JOIN %[2]s b `+
+				`ON COALESCE(a.%[1]s, a.%[1]s) = COALESCE(b.%[1]s, b.%[1]s) `+
+				`WHERE a.id < 200 AND b.id < 200`, n, tbl)})
 		// MIN/MAX as an aggregate INPUT for every ordered type, grouped by a
 		// nullable key so the key-path migration runs underneath. GROUP BY g is
 		// eight groups of a few hundred bytes, which no budget makes spill —

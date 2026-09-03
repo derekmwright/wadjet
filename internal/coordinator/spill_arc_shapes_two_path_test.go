@@ -111,6 +111,61 @@ func TestSpillArcShapesAgreeOnBothDistributionArms(t *testing.T) {
 			"ungrouped: canUseExternalMerge is false and M3 removed the row buffer",
 		},
 		{
+			// #832 on the DAG. A join whose ON equates two EXPRESSIONS has no
+			// equi-key and is planned as a CROSS join, whose probe reads every
+			// build row — so its build cannot be grace-partitioned, and a
+			// budgeted worker now takes the flat build for it. The spilled arm
+			// is gated by the sweep's crossjoin family; without these cells the
+			// fix is gated on one arm out of four, and the arm that changed on
+			// the DAG (a worker WITH a memory budget) is not it.
+			"832_computed_key_upper",
+			`SELECT COUNT(*) AS n FROM typemx a JOIN typemx b ON UPPER(a.c_str) = UPPER(b.c_str) ` +
+				`WHERE a.id < 200 AND b.id < 200`,
+			"ungrouped COUNT(*): no group state for a forced drain to write",
+		},
+		{
+			// The arithmetic spelling, which reaches the same disposition by a
+			// different route through the planner.
+			"832_computed_key_numeric",
+			`SELECT COUNT(*) AS n FROM typemx a JOIN typemx b ON a.id + 1 = b.id + 1 ` +
+				`WHERE a.id < 200 AND b.id < 200`,
+			"ungrouped COUNT(*): no group state for a forced drain to write",
+		},
+		{
+			// The WIDE build — the whole fixture, not two hundred rows. It is
+			// the cell that says #832's residual is NOT a distributed one: the
+			// single-process arm REFUSES this at 512 KiB, because a cross
+			// join's build cannot spill and must fit, while the budgeted DAG
+			// arm answers it — the DAG splits the build across workers, so no
+			// single build has to fit one worker's budget.
+			"832_computed_key_wide",
+			`SELECT COUNT(*) AS n FROM typemx a JOIN typemx b ON UPPER(a.c_str) = UPPER(b.c_str)`,
+			"ungrouped COUNT(*): no group state for a forced drain to write",
+		},
+		{
+			// #791 on the DAG: a shape-only column counted beside a
+			// NON-SIMPLE aggregate, which is the route onto the raw-row buffer
+			// the fix taught to carry lengths.
+			"791_grouped_shape_only",
+			`SELECT g AS k, COUNT(c_str) AS n, COUNT(DISTINCT id) AS d FROM typemx GROUP BY g ORDER BY k`,
+			"non-simple aggregate: the legacy raw-row path, not the external merge",
+		},
+		{
+			// A shape use that reads the LENGTH rather than only the null
+			// mask, so the box has to CARRY the length across the DAG's own
+			// spill, not merely refuse the value.
+			"791_grouped_shape_only_length",
+			`SELECT g AS k, AVG(LENGTH(c_str)) AS a, COUNT(DISTINCT id) AS d FROM typemx GROUP BY g ORDER BY k`,
+			"non-simple aggregate: the legacy raw-row path, not the external merge",
+		},
+		{
+			// The GROUPING SETS route onto the same buffer, which needs no
+			// second aggregate at all.
+			"791_grouped_shape_only_rollup",
+			`SELECT g AS k, COUNT(c_str) AS n FROM typemx GROUP BY ROLLUP(g)`,
+			"GROUPING SETS: the legacy raw-row path, not the external merge",
+		},
+		{
 			// #632: a top-level BYTES group key, on the raw-row path that
 			// COUNT(DISTINCT) forces.
 			"632_bytes_key",
