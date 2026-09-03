@@ -1710,13 +1710,25 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 
 	// COUNT is the one aggregate an empty frame does not make NULL: it
 	// counts the rows it can see, and seeing none is 0.
+	//
+	// WHAT it counts depends on the spelling. COUNT(*) counts ROWS;
+	// COUNT(col) counts the rows where col is NOT NULL, exactly as the
+	// grouped aggregate does — a NULL is not part of an aggregate's input
+	// (#670). WindowColumn.InputCol already tells them apart: "*" for the
+	// star form, the column's name for the other.
 	case WinCount:
+		var acc nonNullFrameAcc
+		countsRows := inputVec == nil
 		for i := 0; i < n; i++ {
 			lo, hi := fr.bounds(i)
 			if hi < lo {
 				hi = lo
 			}
-			winVec.Int64Data[start+i] = int64(hi - lo)
+			if countsRows {
+				winVec.Int64Data[start+i] = int64(hi - lo)
+			} else {
+				winVec.Int64Data[start+i] = acc.slide(inputVec, start, lo, hi)
+			}
 			winVec.Nulls.SetValid(start + i)
 		}
 
@@ -1961,6 +1973,41 @@ type float64FrameAcc struct {
 	lo, hi int
 }
 
+// nonNullFrameAcc counts the NON-NULL rows of a sliding frame — COUNT(col)'s
+// answer, as against COUNT(*)'s row count (#670).
+//
+// It carries the retract-before-add / reset-between-disjoint-frames shape of
+// float64FrameAcc.slide for the same reason: an ORDER-BY'd frame grows a row
+// at a time over a whole partition, and recounting it per row is quadratic.
+// Unlike the float accumulator it has nothing to cancel, so the ordering here
+// is only about arithmetic on the count.
+type nonNullFrameAcc struct {
+	count  int64
+	lo, hi int
+}
+
+func (a *nonNullFrameAcc) slide(in *batch.Vector, start, lo, hi int) int64 {
+	if hi < lo {
+		hi = lo
+	}
+	if lo >= a.hi {
+		a.count, a.lo, a.hi = 0, lo, lo
+	}
+	for a.lo < lo {
+		if r := start + a.lo; !in.Nulls.IsNullFast(r) {
+			a.count--
+		}
+		a.lo++
+	}
+	for a.hi < hi {
+		if r := start + a.hi; !in.Nulls.IsNullFast(r) {
+			a.count++
+		}
+		a.hi++
+	}
+	return a.count
+}
+
 func (a *float64FrameAcc) reset(pos int) {
 	a.sum, a.count = 0, 0
 	a.lo, a.hi = pos, pos
@@ -1995,6 +2042,21 @@ func (a *float64FrameAcc) slide(in *batch.Vector, rd windowNumericReader, start,
 		}
 		a.hi++
 	}
+}
+
+// rowMapCarries reports whether ANY row of the partition has col as a key.
+//
+// Asked of every row, not of the first: a producer may store a NULL as a
+// present key with a nil value or leave the key out entirely, so "row 0 is
+// NULL" and "the plan lost this column" are the same observation on one row.
+// Only the second is a reason for COUNT(col) to fall back to counting rows.
+func rowMapCarries(part []map[string]any, col string) bool {
+	for _, row := range part {
+		if _, ok := row[col]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Row-oriented window computation (spill path) ---
@@ -2181,13 +2243,34 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn, rc wind
 			part[i][outCol] = sum
 		}
 
+	// COUNT(*) counts rows; COUNT(col) counts the rows where col is not
+	// NULL (#670). This is the columnar arm's rule on the row-oriented
+	// carrier: a row map holds nil for a NULL, and a column the partition
+	// does not carry at all is absent from every map — which is a lost
+	// column, not a NULL one, so it keeps counting rows.
 	case WinCount:
+		countsRows := wc.InputCol == "" || wc.InputCol == "*"
+		if !countsRows && n > 0 {
+			if _, present := part[0][wc.InputCol]; !present {
+				countsRows = !rowMapCarries(part, wc.InputCol)
+			}
+		}
 		for i := 0; i < n; i++ {
 			lo, hi := fr.bounds(i)
 			if hi < lo {
 				hi = lo
 			}
-			part[i][outCol] = int64(hi - lo)
+			if countsRows {
+				part[i][outCol] = int64(hi - lo)
+				continue
+			}
+			var c int64
+			for r := lo; r < hi; r++ {
+				if part[r][wc.InputCol] != nil {
+					c++
+				}
+			}
+			part[i][outCol] = c
 		}
 
 	case WinAvg:

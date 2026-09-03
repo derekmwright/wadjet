@@ -112,6 +112,95 @@ func arcACells() []arcACell {
 		{issue: "#783", name: "control_scalar_agg_over_derived_limit",
 			sql:  `SELECT MAX(x.id) AS m FROM (SELECT id FROM typemx LIMIT 100) x`,
 			want: []string{"m=int64:99"}},
+
+		// ------------------------------------------------------------------
+		// #670 — `COUNT(col) OVER` counted the FRAME'S ROWS instead of the
+		// non-NULL values in it. The input vector was never read: the answer
+		// was `hi - lo`, which is `COUNT(*)`'s answer under COUNT(col)'s
+		// spelling.
+		//
+		// Both spellings ride in ONE query wherever possible, because the
+		// defect makes them equal and a fixture that asks only one cannot
+		// see that. `m1` is NULL at id 16, 33 and 50 within the first 60
+		// rows, which is what makes the two columns differ at all.
+		//
+		// The four sites are three code paths, and the shapes below reach
+		// each: PARTITION BY is the partition-at-a-time columnar walker
+		// (window.go), the row-oriented twin of it is the spilled arm, and a
+		// spec with NO PARTITION BY streams through window_global.go — once
+		// for the whole-input form and once through the ORDER-BY running
+		// frame that backfills at each peer group's close.
+		{issue: "#670", name: "count_col_over_partition",
+			sql: `SELECT id AS i, COUNT(m1) OVER (PARTITION BY g) AS cm, ` +
+				`COUNT(*) OVER (PARTITION BY g) AS cr FROM typemx WHERE id < 20 ORDER BY id`,
+			want: []string{
+				"i=int64:0|cm=int64:3|cr=int64:3", "i=int64:1|cm=int64:3|cr=int64:3",
+				"i=int64:2|cm=int64:2|cr=int64:3", "i=int64:3|cm=int64:3|cr=int64:3",
+				"i=int64:4|cm=int64:3|cr=int64:3", "i=int64:5|cm=int64:2|cr=int64:2",
+				"i=int64:6|cm=int64:2|cr=int64:2", "i=int64:7|cm=int64:3|cr=int64:3",
+				"i=int64:8|cm=int64:3|cr=int64:3", "i=int64:9|cm=int64:2|cr=int64:3",
+				"i=int64:10|cm=int64:3|cr=int64:3", "i=int64:11|cm=int64:3|cr=int64:3",
+				"i=int64:12|cm=int64:1|cr=int64:1", "i=int64:13|cm=int64:2|cr=int64:2",
+				"i=int64:14|cm=int64:3|cr=int64:3", "i=int64:15|cm=int64:3|cr=int64:3",
+				"i=int64:16|cm=int64:2|cr=int64:3", "i=int64:17|cm=int64:3|cr=int64:3",
+				"i=int64:18|cm=int64:3|cr=int64:3", "i=int64:19|cm=int64:2|cr=int64:2"}},
+		{issue: "#670", name: "count_col_over_whole_input",
+			sql: `SELECT DISTINCT COUNT(m1) OVER () AS cm, COUNT(*) OVER () AS cr ` +
+				`FROM typemx WHERE id < 20`,
+			want: []string{"cm=int64:19|cr=int64:20"}},
+		{issue: "#670", name: "count_col_over_ordered_running_frame",
+			sql: `SELECT id AS i, COUNT(m1) OVER (ORDER BY id) AS cm FROM typemx ` +
+				`WHERE id < 20 ORDER BY id`,
+			want: []string{
+				"i=int64:0|cm=int64:1", "i=int64:1|cm=int64:2", "i=int64:2|cm=int64:3",
+				"i=int64:3|cm=int64:4", "i=int64:4|cm=int64:5", "i=int64:5|cm=int64:6",
+				"i=int64:6|cm=int64:7", "i=int64:7|cm=int64:8", "i=int64:8|cm=int64:9",
+				"i=int64:9|cm=int64:10", "i=int64:10|cm=int64:11", "i=int64:11|cm=int64:12",
+				"i=int64:12|cm=int64:13", "i=int64:13|cm=int64:14", "i=int64:14|cm=int64:15",
+				"i=int64:15|cm=int64:16", "i=int64:16|cm=int64:16", "i=int64:17|cm=int64:17",
+				"i=int64:18|cm=int64:18", "i=int64:19|cm=int64:19"}},
+		// An ALL-NULL frame. COUNT is the one aggregate that answers 0 rather
+		// than NULL over nothing, and it must keep doing so — a fix that made
+		// COUNT(col) NULL here would agree with SUM and disagree with
+		// PostgreSQL.
+		{issue: "#670", name: "count_col_over_an_all_null_frame",
+			sql: `SELECT id AS i, COUNT(m1) OVER () AS cm, COUNT(*) OVER () AS cr ` +
+				`FROM typemx WHERE id IN (16,33,50) ORDER BY id`,
+			want: []string{
+				"i=int64:16|cm=int64:0|cr=int64:3", "i=int64:33|cm=int64:0|cr=int64:3",
+				"i=int64:50|cm=int64:0|cr=int64:3"}},
+		{issue: "#670", name: "count_col_over_an_all_null_partition",
+			sql: `SELECT id AS i, COUNT(m1) OVER (PARTITION BY g) AS cm, ` +
+				`COUNT(*) OVER (PARTITION BY g) AS cr FROM typemx WHERE id IN (16,33,50) ORDER BY id`,
+			want: []string{
+				"i=int64:16|cm=int64:0|cr=int64:1", "i=int64:33|cm=int64:0|cr=int64:1",
+				"i=int64:50|cm=int64:0|cr=int64:1"}},
+		// An EMPTY frame is 0 for BOTH spellings — the row-count answer and
+		// the non-NULL-count answer coincide there, which is why an empty
+		// frame alone cannot gate this fix and is here as a control.
+		{issue: "#670", name: "count_over_an_empty_frame_is_zero_for_both",
+			sql: `SELECT id AS i, COUNT(m1) OVER (PARTITION BY g ORDER BY id ` +
+				`ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS cm, ` +
+				`COUNT(*) OVER (PARTITION BY g ORDER BY id ` +
+				`ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS cr ` +
+				`FROM typemx WHERE id < 8 ORDER BY id`,
+			want: []string{
+				"i=int64:0|cm=int64:0|cr=int64:0", "i=int64:1|cm=int64:0|cr=int64:0",
+				"i=int64:2|cm=int64:0|cr=int64:0", "i=int64:3|cm=int64:0|cr=int64:0",
+				"i=int64:4|cm=int64:0|cr=int64:0", "i=int64:5|cm=int64:0|cr=int64:0",
+				"i=int64:6|cm=int64:0|cr=int64:0", "i=int64:7|cm=int64:1|cr=int64:1"}},
+		// COUNT(*) OVER must not move. This partition holds exactly two rows,
+		// one of them the NULL one, so the star form's answer (2) and the
+		// column form's (1) differ by the whole of the defect: a fix that
+		// made the star form count non-NULLs too fails here.
+		{issue: "#670", name: "control_count_star_over_partition_stays_rows",
+			sql: `SELECT id AS i, COUNT(m1) OVER (PARTITION BY g) AS cm, ` +
+				`COUNT(*) OVER (PARTITION BY g) AS cr FROM typemx WHERE id IN (2,16) ORDER BY id`,
+			want: []string{
+				"i=int64:2|cm=int64:1|cr=int64:2", "i=int64:16|cm=int64:1|cr=int64:2"}},
+		{issue: "#670", name: "control_grouped_count_unchanged",
+			sql:  `SELECT COUNT(m1) AS cm, COUNT(*) AS cr FROM typemx WHERE id < 20`,
+			want: []string{"cm=int64:19|cr=int64:20"}},
 	}
 }
 

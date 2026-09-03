@@ -70,6 +70,11 @@ type globalWindowStats struct {
 	// the row count, and a column whose every row is NULL answers NULL
 	// rather than 0.
 	cnt []int64
+	// nonNull[i] counts the NON-NULL rows a whole-input COUNT(col) column
+	// saw. Separate from cnt[i], which only SUM/AVG fill: the two are the
+	// same number for a column both read, but a query that windows COUNT
+	// without SUM fills only this one (#670).
+	nonNull []int64
 	// notSummable[i] marks a SUM/AVG column whose input type has no numeric
 	// reading (IPV4, MAC, the byte-backed types, the containers). Its answer
 	// is NULL, the same as the grouped aggregate's — see vecFloat64 (#412).
@@ -211,6 +216,7 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 		decSum:      make([]Int128Sum, nc),
 		decOverflow: make([]bool, nc),
 		cnt:         make([]int64, nc),
+		nonNull:     make([]int64, nc),
 		notSummable: make([]bool, nc),
 		first:       make([]any, nc),
 		last:        make([]any, nc),
@@ -260,6 +266,16 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 							st.cnt[i]++
 						}
 						st.sum[i] += f
+					}
+				// A whole-input COUNT(col) needs the partition's non-NULL
+				// total in pass 1, the same way SUM needs its sum: pass 2
+				// writes the same number into every row. COUNT(*) never
+				// reaches here — globalInputIdxs leaves its index -1 and the
+				// guard above skips it — which is exactly the distinction
+				// (#670).
+				case WinCount:
+					if len(wc.OrderBy) == 0 && !b.Columns[ii].Nulls.IsNullFast(r) {
+						st.nonNull[i]++
 					}
 				case WinMin:
 					if len(wc.OrderBy) == 0 {
@@ -665,12 +681,22 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 		}
 		vec.Nulls.SetValid(r)
 
+	// COUNT(*) counts rows; COUNT(col) counts the rows where col is not
+	// NULL (#670). inVec is nil exactly for the star form — globalInputIdxs
+	// finds no column named "*" — so the two spellings are told apart the
+	// same way here as on the partition-at-a-time path.
 	case WinCount:
 		if len(wc.OrderBy) > 0 {
-			s.runCount[i]++
+			if inVec == nil || !inVec.Nulls.IsNullFast(r) {
+				s.runCount[i]++
+			}
 			return nil
 		}
-		vec.Int64Data[r] = n
+		if inVec == nil {
+			vec.Int64Data[r] = n
+		} else {
+			vec.Int64Data[r] = s.stats.nonNull[i]
+		}
 		vec.Nulls.SetValid(r)
 
 	case WinMin:

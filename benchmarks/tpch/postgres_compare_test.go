@@ -421,19 +421,6 @@ const (
 	pgDivergenceCarrier = "DELIBERATE (ADR-0024 items 1 and 4):"
 )
 
-// windowCountNullPin is #670, found while fixing #586 and filed rather than
-// fixed there: `COUNT(col) OVER (...)` answers the frame's ROW COUNT instead
-// of the column's non-NULL count, so a NULL in the frame inflates it. The
-// grouped `COUNT(col)` is right, which makes this the same
-// windowed-versus-grouped disagreement #586 closed for SUM/AVG, at the one
-// function #586 deliberately left alone (COUNT(*) must keep counting rows).
-//
-// It is pinned on an entry whose OTHER columns — the exact SUM beside it —
-// stay gated, so the pin cannot hide a regression in what this entry is
-// actually here for.
-const windowCountNullPin = pgBugWadjet + " COUNT(col) OVER counts the frame's rows rather than " +
-	"the column's non-NULL values, so a NULL in the frame inflates it; the grouped COUNT(col) is right"
-
 // postgresCorpus is the 22 TPC-H queries plus the PostgreSQL-semantics shapes
 // they leave dark.
 //
@@ -3308,7 +3295,7 @@ func postgresSemanticsCases() []pgCase {
 			SUM(v) OVER (PARTITION BY m) AS s, COUNT(v) OVER (PARTITION BY m) AS c FROM (
 				SELECT d_key, d_key % 3 AS m,
 					CASE WHEN d_key % 11 = 0 THEN NULL ELSE d_4 END AS v
-				FROM dec_probe) s ORDER BY d_key`, knownBug: windowCountNullPin, issue: "#670"},
+				FROM dec_probe) s ORDER BY d_key`},
 		pgCase{name: "WindowSumDecimalAllNullPartition", exactNumeric: true, sql: `SELECT d_key, m,
 			SUM(v) OVER (PARTITION BY m) AS s FROM (
 				SELECT d_key, CASE WHEN d_key % 11 = 0 THEN 0 ELSE 1 END AS m,
