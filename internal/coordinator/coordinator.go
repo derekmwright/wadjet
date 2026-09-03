@@ -282,6 +282,11 @@ type Coordinator struct {
 	// because no stage computed the SELECT list, and which ran on the
 	// coordinator-local pipeline instead (#656 F2).
 	localUnreachableOutput atomic.Int64
+	// localTableLess counts queries whose plan the stage DAG refused because
+	// they read from no table at all, and which ran on the coordinator-local
+	// pipeline instead (#806). Before the refusal they FAILED on the DAG:
+	// "stage dual-0 has no dependencies and no ScanFiles".
+	localTableLess atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -1057,6 +1062,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// (#656 F2).
 		if errors.Is(err, physical.ErrUnreachableGatherOutput) {
 			return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a SELECT that reads no table at all. Its `dual` stage has no
+		// dependencies and no scan files, so the dispatcher could not build
+		// task inputs for it and every table-less SELECT FAILED on the DAG
+		// (#806). There is nothing to distribute — the answer is one row —
+		// and the dual stage's own comment already says it runs here.
+		if errors.Is(err, physical.ErrTableLessSelectDistributed) {
+			return c.runTableLessLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}

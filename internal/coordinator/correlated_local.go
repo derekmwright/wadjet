@@ -118,6 +118,30 @@ func (c *Coordinator) runUnreachableOutputLocal(ctx context.Context, queryID str
 		"SELECT list no stage computes", &c.localUnreachableOutput)
 }
 
+// runTableLessLocal executes a query the stage DAG refused
+// (physical.ErrTableLessSelectDistributed) on the coordinator-local
+// single-process pipeline, whose DualSource produces the one row a SELECT
+// with no FROM is.
+//
+// The DAG emits a `dual` stage with no dependencies and no ScanFiles, and the
+// dispatcher's task-input builder requires one or the other — so every
+// table-less SELECT past pgwire's synthetic-answer list FAILED on the DAG with
+// "stage dual-0 has no dependencies and no ScanFiles" (#806). Routing beats
+// handing the client an error, exactly as #359 does for correlated subqueries;
+// and unlike those, this one gives up no parallelism, because the answer is
+// one row.
+func (c *Coordinator) runTableLessLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"table-less SELECT with no distributed stage", &c.localTableLess)
+}
+
+// TableLessLocalRoutes reports how many plans refused for a table-less SELECT
+// were routed to the coordinator-local pipeline (#806). Separate from the
+// other counters so a suite can assert WHICH refusal fired.
+func (c *Coordinator) TableLessLocalRoutes() int64 {
+	return c.localTableLess.Load()
+}
+
 // UnreachableOutputLocalRoutes reports how many plans refused for an
 // uncomputed SELECT list were routed to the coordinator-local pipeline.
 func (c *Coordinator) UnreachableOutputLocalRoutes() int64 {

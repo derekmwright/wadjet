@@ -62,6 +62,10 @@ type arcACell struct {
 	// wantCorrRoutes is the CorrelatedLocalRoutes delta each DAG arm must
 	// show for this shape. 0 = the DAG executed it.
 	wantCorrRoutes int64
+	// wantTableLessRoutes is the TableLessLocalRoutes delta each DAG arm must
+	// show. 1 = the DAG refused the plan for a SELECT with no FROM and the
+	// coordinator-local pipeline answered (#806).
+	wantTableLessRoutes int64
 	// pgSays records PostgreSQL 17's answer in prose when `want` cannot
 	// hold it (a refusal, or a deliberate divergence).
 	pgSays string
@@ -404,6 +408,39 @@ func arcACells() []arcACell {
 			want: []string{"v=2011-02-02"}},
 
 		// ------------------------------------------------------------------
+		// #806 — a table-less SELECT could not run on the DAG at all.
+		//
+		// `SELECT 1`, `SELECT CONCAT('a', NULL, 'b')` — every SELECT with no
+		// FROM — becomes a `logical.NodeDual`, and walkStages emits a Stage of
+		// type "dual" with Tasks 1, no dependencies and no ScanFiles.
+		// `buildTaskInputsForStage`'s default arm requires one or the other,
+		// so the dispatch failed with "stage dual-0 has no dependencies and no
+		// ScanFiles" and the query had no answer. pgwire's synthetic-answer
+		// list hides the introspection shapes a BI client sends; anything past
+		// it reached this.
+		//
+		// The DAG refuses the plan now and the coordinator-local pipeline
+		// answers, which is what the dual stage's own comment ("runs locally
+		// on coordinator") has always claimed. The counter is asserted beside
+		// the rows on every cell in this census, so this class of answer
+		// cannot be mistaken for the DAG executing the shape.
+		{issue: "#806", name: "table_less_select_of_an_expression",
+			sql: `SELECT CONCAT('a', NULL, 'b') AS v, 1 AS n`, want: []string{"v=ab|n=int64:1"},
+			wantTableLessRoutes: 1},
+		{issue: "#806", name: "table_less_select_of_a_null_propagating_operator",
+			sql: `SELECT 'a' || NULL AS p`, want: []string{"p=NULL"},
+			wantTableLessRoutes: 1},
+		{issue: "#806", name: "table_less_select_union",
+			sql:  `SELECT 1 AS n UNION ALL SELECT 2 AS n ORDER BY n`,
+			want: []string{"n=int64:1", "n=int64:2"}, wantTableLessRoutes: 1},
+		// The control: the same expression WITH a FROM stays on the DAG, so
+		// the refusal is scoped to the shape that has no stage and does not
+		// quietly route ordinary queries local.
+		{issue: "#806", name: "control_same_expression_with_a_from_stays_on_the_dag",
+			sql:  `SELECT CONCAT('a', NULL, 'b') AS v FROM typemx WHERE id = 0`,
+			want: []string{"v=ab"}},
+
+		// ------------------------------------------------------------------
 		// #767 part (2) — a NON-AGGREGATED LATERAL whose projection does not
 		// publish the correlated column answered ZERO ROWS.
 		//
@@ -622,17 +659,28 @@ func TestArcAEverydaySQLMatchesPostgres(t *testing.T) {
 				name string
 				c    *Coordinator
 			}{{"dag", coord}, {"dag-shuffled", coordB}} {
-				before := arm.c.CorrelatedLocalRoutes()
+				beforeCorr := arm.c.CorrelatedLocalRoutes()
+				beforeTL := arm.c.TableLessLocalRoutes()
 				got, err := na2Run(tmdRunDAG(ctx, arm.c, tc.sql))
 				check(arm.name, got, err)
 				// Rule 11: the routing counter travels beside the rows. A
 				// shape that answers correctly because the DAG REFUSED it
 				// and the local pipeline ran is not the DAG answering.
-				if d := arm.c.CorrelatedLocalRoutes() - before; d != tc.wantCorrRoutes {
+				// BOTH counters are read on EVERY cell, not only the ones
+				// that expect a route: a right-to-routed move is exactly
+				// what rows alone cannot see.
+				if d := arm.c.CorrelatedLocalRoutes() - beforeCorr; d != tc.wantCorrRoutes {
 					t.Errorf("%s arm: CorrelatedLocalRoutes moved by %d, want %d\n"+
 						"  (0 = the DAG executed this shape; 1 = it refused the plan and "+
 						"the coordinator-local pipeline answered)\n  SQL: %s",
 						arm.name, d, tc.wantCorrRoutes, tc.sql)
+				}
+				if d := arm.c.TableLessLocalRoutes() - beforeTL; d != tc.wantTableLessRoutes {
+					t.Errorf("%s arm: TableLessLocalRoutes moved by %d, want %d\n"+
+						"  (0 = the DAG executed this shape; 1 = it refused the plan for a "+
+						"SELECT with no FROM and the coordinator-local pipeline answered)"+
+						"\n  SQL: %s",
+						arm.name, d, tc.wantTableLessRoutes, tc.sql)
 				}
 			}
 		})

@@ -2643,6 +2643,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseScalarSubqueryProjections(node); err != nil {
 		return nil, err
 	}
+	// A SELECT with no FROM emits a `dual` stage with no dependencies and no
+	// scan files, which the dispatcher cannot build task inputs for — so the
+	// query FAILED on the DAG rather than answering (#806). Refuse before
+	// stage generation so the coordinator routes it onto its local engine,
+	// which is what the dual stage's own comment has always claimed happens.
+	if err := refuseTableLessSelect(node); err != nil {
+		return nil, err
+	}
 	stages := p.generateStages(node)
 	if p.setOpErr != nil {
 		return nil, p.setOpErr
