@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
@@ -396,10 +395,7 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 	if e.stageOutputRefusedForTerminalQuery(&task) {
 		return nil
 	}
-	spillDir := filepath.Join(e.spillDir, "stage-"+task.ID)
-	if e.spillDir == "" {
-		spillDir = filepath.Join(os.TempDir(), "stage-"+task.ID)
-	}
+	spillDir := stageSpillDir(e, task)
 	if err := os.MkdirAll(spillDir, 0o755); err != nil {
 		return fmt.Errorf("stage task %s: creating spill dir: %w", task.ID, err)
 	}

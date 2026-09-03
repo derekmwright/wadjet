@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -3097,11 +3096,13 @@ func (e *Executor) openFragmentSink(task distributed.Task, spec distributed.OpSp
 	}
 }
 
+// stageSpillDir is one stage sink's scratch directory: under this executor's
+// own root, then the query, then the task (scratch_dir.go). It was
+// `<spillDir>/stage-<taskID>`, falling back to a bare `/tmp/stage-<taskID>`,
+// which two executors on one host shared and then removed from under each
+// other (#833).
 func stageSpillDir(e *Executor, task distributed.Task) string {
-	if e.spillDir == "" {
-		return filepath.Join(os.TempDir(), "stage-"+task.ID)
-	}
-	return filepath.Join(e.spillDir, "stage-"+task.ID)
+	return e.taskScratchDir(task, "stage")
 }
 
 // fragmentExchangeSink wraps partitionedShuffleSink with lazy schema discovery

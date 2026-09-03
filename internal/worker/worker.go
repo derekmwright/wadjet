@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1328,6 +1327,7 @@ func (w *Worker) Stop() {
 		w.peerClient.Close()
 	}
 	w.executor.uploads.Drain()
+	w.executor.RemoveScratchRoot()
 
 	w.logFinalScanStats()
 
@@ -1552,11 +1552,15 @@ func (w *Worker) sweepAbandonedScratchRoots() {
 	self := os.Getpid()
 	var removed int
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), scratchRootPrefix) {
+		if !e.IsDir() {
 			continue
 		}
-		pid, err := strconv.Atoi(strings.TrimPrefix(e.Name(), scratchRootPrefix))
-		if err != nil || pid <= 0 || pid == self {
+		// Both root kinds are swept by the same rule: the per-PROCESS root a
+		// worker creates here, and the per-INSTANCE root an Executor with no
+		// configured SpillDir creates here (scratch_dir.go, #833). Both name
+		// their owning pid, and ownership is what decides.
+		pid, ok := scratchRootOwnerPID(e.Name())
+		if !ok || pid == self {
 			continue
 		}
 		if processAlive(pid) {

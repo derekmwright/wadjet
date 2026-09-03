@@ -348,6 +348,8 @@ Workers can be configured with a per-task memory budget (`--memory-budget`). Whe
 
 Set `--spill-dir` to a fast local disk (SSD/NVMe preferred) for best spill performance. Spill files are cleaned up automatically after each task completes.
 
+Two workers on one host may share one `--spill-dir`. Each worker owns a private subdirectory under it, and a task's scratch is placed under that by query and by task, so two workers running the same task ID — which happens whenever they serve the same query — never write into or delete each other's files.
+
 ### In-Memory Result Store
 
 Enable `--result-store` to cache intermediate stage results in memory, avoiding S3 round-trips between stages that execute on the same worker. This is the single biggest optimization for multi-stage query latency.

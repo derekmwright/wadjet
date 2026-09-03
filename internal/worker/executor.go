@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	runtimemetrics "runtime/metrics"
 	"strings"
 	"sync"
@@ -204,6 +203,14 @@ type Executor struct {
 	// sweepScanDecodeAheadQueryStats once idle, so the map stays bounded
 	// on long-running workers.
 	scanDecodeAheadByQuery sync.Map // task QueryID string -> *decodeAheadQueryStats
+
+	// This executor's private per-task scratch root (scratch_dir.go). Created
+	// on first use with os.MkdirTemp so two executors on one host — two
+	// co-located workers, or two test processes reusing fixed task IDs —
+	// cannot write into or remove each other's per-task directories (#833).
+	scratchOnce sync.Once
+	scratchMu   sync.Mutex
+	scratchDir  string
 }
 
 // decodeAheadQueryStats is one query's decode-ahead counter slice.
@@ -1429,11 +1436,10 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	var wshfPrune *exec.ColumnPrune
 	wshfPruneResolved := false
 
-	// Set up the spill directory for the sink's partition files.
-	spillDir := filepath.Join(e.spillDir, "shuffle-"+task.ID)
-	if e.spillDir == "" {
-		spillDir = filepath.Join(os.TempDir(), "shuffle-"+task.ID)
-	}
+	// Set up the spill directory for the sink's partition files. Per executor
+	// instance, per query, per task (#833): a bare task-ID path is shared by
+	// every executor on the host, and this one is os.RemoveAll'd below.
+	spillDir := e.taskScratchDir(task, "shuffle")
 	if err := os.MkdirAll(spillDir, 0o755); err != nil {
 		return fmt.Errorf("shuffle task %s: creating spill dir: %w", task.ID, err)
 	}

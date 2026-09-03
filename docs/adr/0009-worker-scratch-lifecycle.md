@@ -37,4 +37,39 @@ broadcast handler exactly when the next query's tasks start.
   ledger now rides every run so the correlation accumulates for free;
   the async default stands on hygiene grounds regardless.
 
+## Amendment 2026-09-03: a scratch path names its OWNER, not just its task
+
+A task ID identifies a task within a QUERY, so it does not identify a
+directory on a HOST. The stage sinks built their scratch as
+`<spillDir>/stage-<taskID>` — or, with no spill directory configured, as a
+bare `/tmp/stage-<taskID>` — and every executor on the box derived the same
+path. Both finalize paths end in `os.RemoveAll` on it, so whichever task
+finished first deleted the other's partition files: `stat spill file: no such
+file or directory`. Two co-located workers is the production shape; two `go
+test` processes in `internal/worker`, which reuse fixed task IDs, is the CI
+shape, and it is where it was found — four morsel tests fail in a combined run
+and the package passes alone (#833).
+
+**A per-task scratch path is `<scratch root>/<executor instance>/<query>/<kind>-<task>`.**
+The instance segment is created once per `Executor` with `os.MkdirTemp`, which
+is atomic and collision-free by construction; a pid is not, because pids are
+reused and two executors can live in one process. It nests under whatever this
+ADR's scratch root already is — the configured `--spill-dir` when there is one,
+the per-process `wadjet-worker-<pid>` directory when there is not.
+
+Reclamation is unchanged in kind: both root names carry their owning pid, and
+`sweepAbandonedScratchRoots` reads it out of either, so a root whose owner is
+gone is reaped and one whose owner may be writing right now is never touched.
+`Worker.Stop` removes its executor's instance root; the per-task directories
+under it are still removed by the sink that made them.
+
+Gates: `worker.TestTwoExecutorsRunningOneTaskIDKeepSeparateScratch` and
+`TestTwoExecutorsRunOneTaskIDConcurrentlyAndBothAnswer` (the end-to-end arm,
+ten iterations of one task ID on two executors at once) fail on revert;
+`TestNoRuntimeScratchPathIsHardcodedUnderTmp` closes the class by scanning the
+query-executing package trees for a fixed `/tmp` literal. Operator-facing
+defaults in `internal/harness` and `cmd/` are out of that scope on purpose: a
+default a human overrides on the command line is not a per-task directory two
+processes race on.
+
 References: `docs/design/async-scratch-purge.md`.
