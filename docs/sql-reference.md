@@ -1801,7 +1801,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   rejected (`0A000`); the column could come from either relation on the left
 - A SUBQUERY in an `UPDATE` / `DELETE` / `MERGE` predicate — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS`, and a `MERGE ... WHEN ... AND` carrying one — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner. What closing it needs, and what blocks it today, is ADR-0031.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
-- `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
+- `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000. `BY TARGET` is PostgreSQL 17's spelling of the ordinary `NOT MATCHED`; `BY SOURCE` walks the target rows no source row matched, which is how a MERGE expresses the delete half of a full-sync upsert. Eleven cells in the DML census carry PostgreSQL 17's answer for both forms beside the refusal.
 - A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000
 - `RANGE` window frames with a value offset, and the `GROUPS` frame mode
 - `SELECT DISTINCT ON (...)`

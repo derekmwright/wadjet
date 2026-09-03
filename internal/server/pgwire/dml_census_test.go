@@ -482,19 +482,54 @@ func censusShapes() []censusShape {
 
 		// ---------------------------------------------------------------
 		// #718 — MERGE WHEN NOT MATCHED BY SOURCE / BY TARGET.
+		//
+		// DEFERRED, and these cells are the deferral's record: every one
+		// carries PostgreSQL 17's own answer beside wadjet's 0A000, so the
+		// arc that implements the clause kinds has the semantics measured
+		// rather than remembered — including the two spellings PostgreSQL
+		// answers with a SYNTAX error rather than a feature refusal, the
+		// TARGET-ONLY scope of a BY SOURCE clause, and the fact that "matched
+		// by source" is decided by the ON condition and NOT by whether a WHEN
+		// MATCHED clause fired. ADR-0031's neighbour in the parser
+		// (internal/planner/sql/parser.go) carries the mechanism.
 		// ---------------------------------------------------------------
-		{name: "#718 WHEN NOT MATCHED BY SOURCE THEN DELETE", tbl: "pr",
-			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+		{name: "#718 BY SOURCE THEN DELETE", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE",
+			pg:  "tag=MERGE 2 table=[1:10:a]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 BY SOURCE THEN UPDATE", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = 0",
+			pg:  "tag=MERGE 2 table=[1:10:a 2:0:b 3:0:c]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 BY SOURCE with a condition on the target", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE AND t.n > 25 THEN DELETE",
+			pg:  "tag=MERGE 1 table=[1:10:a 2:20:b]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 BY SOURCE with a bare column name", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE AND n > 25 THEN DELETE",
+			pg:  "tag=MERGE 1 table=[1:10:a 2:20:b]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 BY SOURCE cannot see the source", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = s.n",
+			pg:  "state=42P01 table=[1:10:a 2:20:b 3:30:c]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 two BY SOURCE clauses, the first firing wins", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE AND t.n > 25 THEN DELETE " +
+				"WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = 0",
+			pg: "tag=MERGE 2 table=[1:10:a 2:0:b]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 a MATCHED clause that does not fire still matched by source", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN MATCHED AND t.n > 99 THEN DELETE " +
+				"WHEN NOT MATCHED BY SOURCE THEN UPDATE SET n = 0",
+			pg: "tag=MERGE 2 table=[1:10:a 2:0:b 3:0:c]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 BY SOURCE THEN INSERT is a syntax error", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN INSERT (id, n, name) VALUES (1, 1, 'z')",
+			pg:  "state=42601 table=[1:10:a 2:20:b 3:30:c]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 BY TARGET THEN INSERT", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY TARGET THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)",
+			pg:  "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:400:y]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 BY TARGET THEN DELETE is a syntax error", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN NOT MATCHED BY TARGET THEN DELETE",
+			pg:  "state=42601 table=[1:10:a 2:20:b 3:30:c]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
+		{name: "#718 the full-sync upsert", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = s.n " +
+				"WHEN NOT MATCHED THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name) " +
 				"WHEN NOT MATCHED BY SOURCE THEN DELETE",
-			pg:  "tag=MERGE 2 table=[1:10:a]",
-			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#718"},
-		{name: "#718 WHEN NOT MATCHED BY TARGET THEN INSERT", tbl: "pr",
-			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
-				"WHEN NOT MATCHED BY TARGET THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)",
-			pg:  "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:400:y]",
-			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#718"},
+			pg: "tag=MERGE 4 table=[1:100:a 4:400:y]", emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]", bug: "#718"},
 
 		// ---------------------------------------------------------------
 		// #837 — a MERGE whose two relations have the SAME EXPOSED NAME.
