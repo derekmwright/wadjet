@@ -148,9 +148,15 @@ func TestMetadataMinMax(t *testing.T) {
 			wantRows: []map[string]any{{"lo": 1.5, "hi": 16.5}},
 		},
 		{
-			name: "float32 widens to float64", wantFire: true,
+			// REAL in, REAL out -- `pg_typeof(min(real))` is real (#760). The
+			// statistics path and the SCAN path have to agree, which is what
+			// physical.mmTypeFor's own doc says and what this cell is here to
+			// hold: with only one of them moved, the same MIN answered
+			// `double precision` or `real` depending on whether a WHERE
+			// clause sent the query down the other one.
+			name: "float32 stays float32", wantFire: true,
 			sql:      "SELECT MIN(f32) AS lo, MAX(f32) AS hi FROM events",
-			wantRows: []map[string]any{{"lo": 1.25, "hi": 16.25}},
+			wantRows: []map[string]any{{"lo": float32(1.25), "hi": float32(16.25)}},
 		},
 		{
 			name: "mixed columns plus COUNT(*)", wantFire: true,
