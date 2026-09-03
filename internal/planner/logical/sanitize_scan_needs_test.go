@@ -90,6 +90,41 @@ func TestSanitizeScanNeeds(t *testing.T) {
 			[]string{"orders.o_orderkey"},
 			[]string{"o_orderkey"},
 		},
+		{
+			// #776: a DERIVED TABLE'S ALIAS BECOMES THE SCAN'S ALIAS, so the
+			// outer query's reference to that derived table's own SELECT-list
+			// alias arrives here QUALIFIED and matching. `x.w` over
+			// `(SELECT g*3 AS w FROM lineitem) x` is the Project's OUTPUT
+			// name, not a column of lineitem, and keeping it put a name no
+			// file has into the read set every emitted-set model reads.
+			//
+			// The bare spelling was already dropped by the branch below; only
+			// the qualified one got through, which is why the CTE spelling of
+			// the same query was REFUSED at plan time while the derived-table
+			// spelling failed loud at dispatch.
+			"own-alias qualified name the table does not have drops",
+			lineitem,
+			[]string{"l1.w", "l1.l_orderkey", "l_quantity"},
+			[]string{"l_orderkey", "l_quantity"},
+		},
+		{
+			// …and the same reference is KEPT when the schema is unknown:
+			// full width is the safe failure mode, which is what every other
+			// undecidable case here does.
+			"own-alias qualified name kept without schema",
+			noSchema,
+			[]string{"l1.w", "l1.l_orderkey"},
+			[]string{"l_orderkey", "w"},
+		},
+		{
+			// A hidden slot arriving qualified keeps the derived-column
+			// semantics the bare branch gives it: nothing reads it off a
+			// file, and the worker's guard needs it to stay reachable.
+			"own-alias qualified hidden slot kept",
+			lineitem,
+			[]string{"l1.__having_0", "l_quantity"},
+			[]string{"__having_0", "l_quantity"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

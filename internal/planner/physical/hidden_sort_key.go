@@ -286,15 +286,36 @@ func stageEmittedColumns(s *Stage) map[string]string {
 			out[strings.ToLower(n)] = n
 		}
 	}
+	// A SCAN's column lists are a READ SET, not an output schema: they carry
+	// names ancestors asked for, and a name the TABLE does not have is not a
+	// column the fragment can ship. Intersecting with the declared schema is
+	// what makes this model a fact rather than a restatement of what somebody
+	// asked for — the same intersection `scanStreamColumnsFiltered` applies,
+	// asked here so the reachability check, the hidden-sort-key pass and the
+	// derived-alias passes all read one answer (#776, ADR-0026 §4b).
+	declared := map[string]bool{}
+	if s.Type == StageScan {
+		for _, c := range s.ScanSchema {
+			declared[strings.ToLower(c.Name)] = true
+		}
+	}
+	addRead := func(names []string) {
+		for _, n := range names {
+			if len(declared) > 0 && !declared[strings.ToLower(stripQualifier(n))] {
+				continue
+			}
+			add([]string{n})
+		}
+	}
 	switch {
 	case len(s.ProjectExprs) > 0:
 		for _, p := range s.ProjectExprs {
 			add([]string{p.Name})
 		}
 	case len(s.OutputColumns) > 0:
-		add(s.OutputColumns)
+		addRead(s.OutputColumns)
 	default:
-		add(s.Columns)
+		addRead(s.Columns)
 	}
 	// An aggregate's output IS its group keys and its aggregates, and a
 	// fused scan-aggregate's is the same — none of which appears in any

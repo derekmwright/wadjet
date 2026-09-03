@@ -93,23 +93,24 @@ func a2StateCells() []a2StateCell {
 		//
 		// The invariant this gate states is "every failure a client sees
 		// carries its SQLSTATE", and it was FALSE for the two loudest DAG
-		// failures on this branch — the ones the #807/#658 deferral pins.
-		// They arrived `ERR[]` while the three runtime classes above carried
+		// failures when this file was written — the #807/#658 shapes. They
+		// arrived `ERR[]` while the three runtime classes above carried
 		// theirs, and a ten-cell census that covers only the classes it chose
-		// is not a census.
+		// is not a census. 0A000, because PostgreSQL ANSWERS both queries, and
+		// classified at the OPERATOR (exec.unresolvedSortKey,
+		// exec.boundWindowKey, exec.unresolvedAggColumn) so both engines carry
+		// it.
 		//
-		// 0A000, because PostgreSQL ANSWERS both queries: the class owed is
-		// "this engine does not implement it". Classified at the OPERATOR
-		// (exec.unresolvedSortKey, exec.boundWindowKey,
-		// exec.unresolvedAggColumn), which is the one place both engines
-		// reach, so the single-process path carries it too.
-		{issue: "#649", name: "sort_key_no_producer_emits_0A000", runtime: true,
-			sql:  `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY x.w`,
-			want: "0A000", dagOnly: true},
-		{issue: "#649", name: "window_key_no_producer_emits_0A000", runtime: true,
-			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
-				`FROM (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
-			want: "0A000", dagOnly: true},
+		// The two cells that carried them are GONE, and where they went
+		// matters: the planner no longer builds a plan that reaches either
+		// operator with a key its input cannot resolve — the phantom scan
+		// column that produced those plans is closed (#776) — so both queries
+		// now ANSWER, and a cell asserting their SQLSTATE would have been a
+		// gate that cannot fire. The classification is asserted at the
+		// operator instead, with no plan and no query in the way:
+		// `exec.TestAnUnresolvableKeyCarriesTheNotImplementedClass`. The DAG's
+		// own job here — carrying a task failure's class across the wire — is
+		// what the three runtime cells above still hold.
 
 		// ---- PLAN-time controls: they already worked and must not move ----
 		{issue: "#649", name: "ctl_plan_time_bad_literal_22P02",

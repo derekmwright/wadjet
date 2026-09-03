@@ -2999,6 +2999,17 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 			}
 		}
 	}
+	// The catalog's declared columns, BEFORE the resolution passes rather
+	// than after them. `Stage.Columns` on a scan is a READ SET — names
+	// ancestors asked for — and every model of "what does this stage emit"
+	// reads it, so the only thing that makes a scan's emitted set a fact is
+	// intersecting it with the columns the TABLE has. ADR-0026 §4b recorded
+	// that `stageStreamColumns` already performs that intersection and that
+	// it was INERT, because this annotation ran at the very end of planning;
+	// running it here is what makes it real, and what lets
+	// `stageEmittedColumns` ask the same question (#776). The late call
+	// below stays: it is idempotent and it covers stages later passes add.
+	p.annotateScanSchemas(ctx, stages)
 	// #169: when the SELECT list carries scalar expressions and the gather
 	// reads a bare leaf scan, the expressions would never be computed —
 	// applyOutputRenames can rename/drop but not evaluate. Attach the
