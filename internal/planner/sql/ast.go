@@ -42,14 +42,42 @@ func (c *ColRef) String() string {
 	return QuoteIdent(c.Column)
 }
 
+// FoldIdent is the case fold PostgreSQL applies to an UNQUOTED identifier:
+// ASCII A-Z becomes a-z and NOTHING else changes.
+//
+// The ASCII restriction is PostgreSQL's own, measured on postgres:17-alpine
+// with a UTF8 server encoding: `CREATE TABLE t (Ä int)` stores the column as
+// `Ä`, and `SELECT 1 AS Ä` publishes `Ä`. strings.ToLower would fold it to
+// `ä` and invent a name no PostgreSQL client would expect, so the fold is
+// written out byte by byte rather than borrowed from unicode.
+func FoldIdent(s string) string {
+	hasUpper := false
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			hasUpper = true
+			break
+		}
+	}
+	if !hasUpper {
+		return s
+	}
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
 // QuoteIdent renders an identifier so that re-parsing it yields the same
 // identifier. Names the lexer would otherwise re-read as something else —
 // embedded dots (a flat JSON column such as id.orig_h), spaces, other
-// punctuation, a leading digit, or a keyword spelling — come back
-// double-quoted with any interior quote doubled. Names that already lex as
-// a single unquoted identifier are returned unchanged, so printed SQL for
-// ordinary columns is byte-identical to what it was before delimited
-// identifiers existed.
+// punctuation, a leading digit, an ASCII UPPER-CASE letter (which the lexer
+// folds, #731), or a keyword spelling — come back double-quoted with any
+// interior quote doubled. Names that already lex as a single unquoted
+// identifier are returned unchanged, so printed SQL for ordinary columns is
+// byte-identical to what it was before delimited identifiers existed.
 func QuoteIdent(name string) string {
 	if !identNeedsQuoting(name) {
 		return name
@@ -70,7 +98,7 @@ func QuoteIdent(name string) string {
 // function call, an arithmetic expression, a literal, a multi-level path);
 // callers then fall back to their own string handling.
 func SplitIdentRef(s string) (qualifier, name string, ok bool) {
-	lx := newLexer(s)
+	lx := newVerbatimLexer(s)
 	first := lx.nextToken()
 	if first.typ != TokenIdent {
 		return "", "", false
@@ -114,6 +142,12 @@ func identNeedsQuoting(name string) bool {
 	}
 	for i, r := range name {
 		switch {
+		case r >= 'A' && r <= 'Z':
+			// The lexer folds it, so an unquoted rendering would come back
+			// as a DIFFERENT name. Parse(QuoteIdent(n)) == n is what the
+			// planner relies on every time it renders a reference and
+			// re-parses it (#731).
+			return true
 		case r == '_' || unicode.IsLetter(r):
 			// always allowed
 		case r >= '0' && r <= '9':

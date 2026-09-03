@@ -23,6 +23,40 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `CREATE SNAPSHOT` | Capture a point-in-time snapshot of the catalog |
 | `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions (coordinator mode) |
 
+## Identifiers
+
+An **unquoted** identifier is folded to lower case, exactly as PostgreSQL folds
+one, so `SELECT G`, `SELECT g` and `SELECT G` inside a `GROUP BY` are one name.
+A **delimited** identifier — one written between double quotes — keeps its
+bytes, so `"id.orig_h"` is a single column name with a dot in it and `"Kk"` is
+a different name from `kk`.
+
+```sql
+SELECT WatchID FROM hits          -- the column watchid, published as `watchid`
+SELECT g AS Foo FROM t            -- published as `foo`
+SELECT g AS "Foo" FROM t          -- published as `Foo`
+SELECT "id.orig_h" FROM conn      -- one column, not conn.orig_h
+```
+
+The fold is ASCII `A`–`Z` only, which is what PostgreSQL does in a UTF-8
+database: `Ä` is not folded to `ä`.
+
+**Resolving a folded name against a mixed-case schema.** Parquet files and
+ingested data routinely carry CamelCase column names, so a folded reference
+that matches no column byte for byte resolves case-insensitively when exactly
+one column matches — `SELECT WatchID`, `SELECT watchid` and `SELECT "WatchID"`
+all read a column stored as `WatchID`. If two columns in scope match only
+case-insensitively the reference is ambiguous, SQLSTATE `42702`. A column
+stored under two spellings that differ only by case cannot exist: `CREATE
+TABLE` refuses such a schema.
+
+A **delimited** reference does not get that concession — it is matched byte for
+byte, so `SELECT "G"` over a column named `g` is SQLSTATE `42703`
+(`column "G" does not exist`), which is PostgreSQL's answer too.
+
+Table names, table aliases, CTE names and function names follow the same rule.
+`SELECT * FROM t` publishes each column under the schema's own spelling.
+
 ## SELECT Statement
 
 ```sql

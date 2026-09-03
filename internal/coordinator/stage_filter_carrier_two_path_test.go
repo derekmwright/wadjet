@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -3168,51 +3169,55 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 
-		// The residual, pinned. An unquoted identifier is never folded to
-		// lower case anywhere in the engine, so a GROUP BY term written in a
-		// different case from the column computes over a name nothing
-		// resolves and the whole table collapses into one NULL group.
-		// PostgreSQL answers 8 rows. This is NOT the identity mechanism:
-		// `SELECT G FROM t` with no GROUP BY at all is wrong the same way.
-		//
-		// THE MECHANISM, localized 2026-09-02 by the arc-A round-0 pass, so
-		// that the next attempt starts from it rather than from the symptom.
-		// TWO resolvers disagree about case, and the one that would REFUSE is
-		// the one that folds:
-		//
-		//   physical/validate.go  colScope.resolveRef lowercases both the
-		//                         reference and the qualifier, so `G` resolves
-		//                         to `g` and the 42703 refusal never fires
-		//   batch/batch.go        RecordBatch.ColumnIndex compares byte for
-		//                         byte and answers -1, which the
-		//                         single-process path renders NULL and the
-		//                         DAG's stage schema check refuses
-		//
-		// So the SILENCE IS PRODUCED BY THE FOLD: making the validator exact
-		// would turn every one of these into an immediate 42703 — and break
-		// every mixed-case ClickBench query (hits.UserID, EventTime,
-		// WatchID), which is why the issue's two halves cannot land
-		// separately. The fix is an unquoted reference resolving
-		// CASE-INSENSITIVELY against the schema, REFUSED (42702) when more
-		// than one column matches, and a QUOTED one resolving byte-exactly —
-		// with the planner then naming the stored column exactly, so
-		// ColumnIndex stays byte-exact. That needs an input the AST does not
-		// have: `plansql.ColRef` carries Table, Column and Slot and no
-		// `Quoted` flag, so it cannot tell `G` from `"G"`. (The LEXER does:
-		// its token carries `quoted`, which is where the flag comes from.)
-		// It is a deliberate, recordable divergence from PostgreSQL — which
-		// refuses `SELECT UserID` over a stored `"UserID"` — that makes
-		// strictly more queries answer and changes no answer.
-		//
-		// TODO(#731): delete this pin when identifiers fold.
+		// An unquoted identifier FOLDS at the lexer, so a GROUP BY term
+		// written in a different case from the column is the same term
+		// (#731). This was the pin that recorded one NULL group over the whole
+		// 5000-row table; PostgreSQL answers one row per key, and so does
+		// every arm now. The DELIMITED spelling beside it is the boundary:
+		// `"G"` names no column of this table and is 42703, which is
+		// PostgreSQL's answer too.
 		t.Run("IdentifierCaseInTheGroupByTerm", func(t *testing.T) {
 			sql := fmt.Sprintf(`SELECT g + 1 AS gk, COUNT(*) AS n FROM %s GROUP BY G + 1 ORDER BY gk`, tbl)
 			for _, arm := range sfcArms(ctx, single, coord) {
 				res := sfcRun(t, arm, sql)
-				if len(res.Rows) != 1 {
-					t.Fatalf("%s arm now returns %d rows where this pin records 1; PostgreSQL "+
-						"answers %d. #731 is fixed — assert PostgreSQL's answer and delete this "+
-						"pin\n  SQL: %s", arm.name, len(res.Rows), wantKeys+1, sql)
+				if len(res.Rows) != wantKeys+1 {
+					t.Fatalf("%s arm returned %d rows, want %d (PostgreSQL's answer)\n  SQL: %s",
+						arm.name, len(res.Rows), wantKeys+1, sql)
+				}
+			}
+		})
+
+		t.Run("IdentifierCaseInTheSelectListAndTheFilter", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT ID, G FROM %s WHERE ID < 3 ORDER BY ID`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res := sfcRun(t, arm, sql)
+				if len(res.Rows) != 3 {
+					t.Fatalf("%s arm returned %d rows, want 3\n  SQL: %s", arm.name, len(res.Rows), sql)
+				}
+				if got := res.Columns; len(got) != 2 || got[0] != "id" || got[1] != "g" {
+					t.Fatalf("%s arm published %v, want [id g] — PostgreSQL publishes the FOLDED "+
+						"spelling of an unquoted reference\n  SQL: %s", arm.name, got, sql)
+				}
+				for _, r := range res.Rows {
+					if r["id"] == nil || r["g"] == nil {
+						t.Fatalf("%s arm answered NULL for a resolvable column: %v\n  SQL: %s",
+							arm.name, r, sql)
+					}
+				}
+			}
+		})
+
+		t.Run("ADelimitedIdentifierIsByteExact", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT "G" FROM %s WHERE id < 3`, tbl)
+			for _, arm := range sfcArms(ctx, single, coord) {
+				res, err := arm.run(sql)
+				if err == nil {
+					t.Fatalf("%s arm answered %d rows for a delimited name no column carries; "+
+						"PostgreSQL is 42703\n  SQL: %s", arm.name, len(res.Rows), sql)
+				}
+				if got := sqlerr.StateOf(err); got != "42703" {
+					t.Fatalf("%s arm: SQLSTATE %q, want 42703 (err: %v)\n  SQL: %s",
+						arm.name, got, err, sql)
 				}
 			}
 		})

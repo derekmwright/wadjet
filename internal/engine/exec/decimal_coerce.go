@@ -147,7 +147,7 @@ func (d *DecimalCoerce) resolve(in *batch.RecordBatch) error {
 	d.resolved = true
 	schema := append([]parquet.Column(nil), in.Schema...)
 	for _, want := range d.cols {
-		idx := in.ColumnIndex(want.Name)
+		idx := in.ResolveColumnIndex(want.Name)
 		if idx < 0 {
 			return fmt.Errorf("decimal coerce: column %q is not in the input schema", want.Name)
 		}

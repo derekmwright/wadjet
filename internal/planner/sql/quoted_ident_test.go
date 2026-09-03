@@ -312,7 +312,13 @@ func TestQuoteIdent(t *testing.T) {
 		want string
 	}{
 		{"l_orderkey", "l_orderkey"},
-		{"CounterID", "CounterID"},
+		// An ASCII upper-case letter must come back DELIMITED: the lexer
+		// folds an unquoted identifier (#731), so rendering `CounterID`
+		// bare would re-parse as `counterid` — a different name. The
+		// planner renders and re-parses references constantly, and
+		// Parse(QuoteIdent(n)) == n is what that relies on.
+		{"CounterID", `"CounterID"`},
+		{"WatchID", `"WatchID"`},
 		{"_x1", "_x1"},
 		{"id.orig_h", `"id.orig_h"`},
 		{"src host", `"src host"`},

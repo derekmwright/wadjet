@@ -320,7 +320,7 @@ func nonNullKeySel(b *batch.RecordBatch, side *smjSide) ([]uint32, error) {
 	keyIdx := make([]int, len(side.keys))
 	anyNulls := false
 	for i, k := range side.keys {
-		idx := b.ColumnIndex(k.Column)
+		idx := b.ResolveColumnIndex(k.Column)
 		if idx < 0 {
 			return nil, fmt.Errorf("sort-merge join: %s-side key column %q not found", side.name, k.Column)
 		}
@@ -479,12 +479,10 @@ func (j *SortMergeJoin) resolveCompareKernels() error {
 }
 
 func schemaColumnIndex(schema []parquet.Column, name string) int {
-	for i, col := range schema {
-		if col.Name == name {
-			return i
-		}
-	}
-	return -1
+	// batch.ResolveSchemaIndex, not a bare byte compare: a key name arrives
+	// FOLDED from the lexer (#731) while the schema may carry the catalog's
+	// own CamelCase spelling.
+	return batch.ResolveSchemaIndex(schema, name)
 }
 
 // openStream builds the side's merged sorted stream: pre-merged file runs

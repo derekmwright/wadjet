@@ -155,7 +155,7 @@ func (c *lazyColIdx) resolveSlow(b *batch.RecordBatch, name string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.resolved.Load() {
-		c.idx = b.ColumnIndex(name)
+		c.idx = b.ResolveColumnIndex(name)
 		c.resolved.Store(true)
 	}
 	return c.idx
@@ -1001,16 +1001,16 @@ func (f *KernelFilter) Init(_ context.Context) error { return nil }
 
 func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
-		f.colIdx = in.ColumnIndex(f.ColName)
+		f.colIdx = in.ResolveColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			// Strip table alias qualifier (e.g. "n1.n_name" → "n_name")
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ColumnIndex(parts[1])
+			f.colIdx = in.ResolveColumnIndex(parts[1])
 			if f.colIdx < 0 && f.RowFallback != nil {
 				// ROW-field access: the qualifier names a ROW column whose
 				// field the typed kernel cannot reach — delegate to the
 				// row-at-a-time predicate.
-				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
 					// The literal is still checked against the FIELD's
 					// declared type first — every check the resolved-column
 					// path below makes. Delegating without them is how
@@ -1166,12 +1166,12 @@ func (f *InFilter) Init(_ context.Context) error { return nil }
 
 func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
-		f.colIdx = in.ColumnIndex(f.ColName)
+		f.colIdx = in.ResolveColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ColumnIndex(parts[1])
+			f.colIdx = in.ResolveColumnIndex(parts[1])
 			if f.colIdx < 0 && f.RowFallback != nil {
-				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
 				}
@@ -1319,16 +1319,16 @@ func (f *LikeFilter) Init(_ context.Context) error { return nil }
 
 func (f *LikeFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
-		f.colIdx = in.ColumnIndex(f.ColName)
+		f.colIdx = in.ResolveColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ColumnIndex(parts[1])
+			f.colIdx = in.ResolveColumnIndex(parts[1])
 			if f.colIdx < 0 && f.RowFallback != nil {
 				// A ROW FIELD PATH the LIKE kernel cannot reach — same
 				// delegation KernelFilter makes, and for the same reason:
 				// without it the name resolved to nothing and every row was
 				// dropped silently (#568).
-				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
 				}
@@ -1428,12 +1428,12 @@ func (f *NullCheckFilter) Init(_ context.Context) error { return nil }
 
 func (f *NullCheckFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
-		f.colIdx = in.ColumnIndex(f.ColName)
+		f.colIdx = in.ResolveColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ColumnIndex(parts[1])
+			f.colIdx = in.ResolveColumnIndex(parts[1])
 			if f.colIdx < 0 && f.RowFallback != nil {
-				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
 				}
@@ -1808,15 +1808,15 @@ func (f *ColColFilter) Init(_ context.Context) error { return nil }
 
 func (f *ColColFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
-		f.leftIdx = in.ColumnIndex(f.LeftCol)
+		f.leftIdx = in.ResolveColumnIndex(f.LeftCol)
 		if f.leftIdx < 0 && strings.Contains(f.LeftCol, ".") {
 			parts := strings.SplitN(f.LeftCol, ".", 2)
-			f.leftIdx = in.ColumnIndex(parts[1])
+			f.leftIdx = in.ResolveColumnIndex(parts[1])
 		}
-		f.rightIdx = in.ColumnIndex(f.RightCol)
+		f.rightIdx = in.ResolveColumnIndex(f.RightCol)
 		if f.rightIdx < 0 && strings.Contains(f.RightCol, ".") {
 			parts := strings.SplitN(f.RightCol, ".", 2)
-			f.rightIdx = in.ColumnIndex(parts[1])
+			f.rightIdx = in.ResolveColumnIndex(parts[1])
 		}
 		if f.leftIdx >= 0 && f.rightIdx >= 0 {
 			lt, rt := in.Columns[f.leftIdx].Type, in.Columns[f.rightIdx].Type

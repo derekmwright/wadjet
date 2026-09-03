@@ -68,12 +68,12 @@ func (c *lazyFieldIdx) get(b *batch.RecordBatch, name string) (int, int) {
 		return c.idx, c.field
 	}
 	c.field = -1
-	c.idx = b.ColumnIndex(name)
+	c.idx = b.ResolveColumnIndex(name)
 	if c.idx < 0 {
 		if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
-			c.idx = b.ColumnIndex(name[dot+1:])
+			c.idx = b.ResolveColumnIndex(name[dot+1:])
 			if c.idx < 0 {
-				if pi := b.ColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
+				if pi := b.ResolveColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
 					for j, fn := range b.Columns[pi].FieldNames {
 						if strings.EqualFold(fn, name[dot+1:]) && j < len(b.Columns[pi].Children) {
 							c.idx, c.field = pi, j
@@ -307,7 +307,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				// all-zero int column for UPPER/SUBSTR and a panic for
 				// concatenation, whose vectorized kernel writes into
 				// BytesData the mistyped vector does not have (#327).
-				srcIdx = in.ColumnIndex(proj.Name)
+				srcIdx = in.ResolveColumnIndex(proj.Name)
 			}
 			if srcIdx >= 0 {
 				typ = in.Schema[srcIdx].Type
@@ -592,10 +592,10 @@ func fieldPathColumn(b *batch.RecordBatch, name string) (parquet.Column, bool) {
 	if dot <= 0 || dot == len(name)-1 {
 		return parquet.Column{}, false
 	}
-	if b.ColumnIndex(name) >= 0 || b.ColumnIndex(name[dot+1:]) >= 0 {
+	if b.ResolveColumnIndex(name) >= 0 || b.ResolveColumnIndex(name[dot+1:]) >= 0 {
 		return parquet.Column{}, false
 	}
-	pi := b.ColumnIndex(name[:dot])
+	pi := b.ResolveColumnIndex(name[:dot])
 	if pi < 0 || pi >= len(b.Columns) || b.Columns[pi].Type != batch.TypeRow {
 		return parquet.Column{}, false
 	}
@@ -648,11 +648,11 @@ func vectorColumn(name string, v *batch.Vector) parquet.Column {
 }
 
 func resolvePlainColumn(b *batch.RecordBatch, name string) (int, bool) {
-	if idx := b.ColumnIndex(name); idx >= 0 {
+	if idx := b.ResolveColumnIndex(name); idx >= 0 {
 		return idx, true
 	}
 	if dot := strings.IndexByte(name, '.'); dot > 0 {
-		if pi := b.ColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
+		if pi := b.ResolveColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
 			return -1, true
 		}
 	}

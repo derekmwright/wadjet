@@ -127,7 +127,12 @@ type ColRef struct {
 // column after dropping a table qualifier, and a `row.field` path whose first
 // part is a ROW column of the batch.
 func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField string) {
-	idx = b.ColumnIndex(name)
+	// ResolveColumnIndex, not ColumnIndex: the reference arrives FOLDED from
+	// the lexer (#731) and the batch may carry the catalog's own CamelCase
+	// spelling (`WatchID`), which is byte-exact everywhere else. The rule and
+	// why a delimited reference does NOT fold are in
+	// internal/engine/batch/schema.go.
+	idx = b.ResolveColumnIndex(name)
 	if idx >= 0 {
 		return idx, ""
 	}
@@ -155,7 +160,7 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 	}
 	parts := strings.SplitN(name, ".", 2)
 	// Try unqualified (strip table prefix)
-	if idx = b.ColumnIndex(parts[1]); idx >= 0 {
+	if idx = b.ResolveColumnIndex(parts[1]); idx >= 0 {
 		return idx, ""
 	}
 	// Try as struct field access: parts[0] is a ROW column, parts[1] is field
@@ -165,7 +170,7 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 	// spelling left the path unresolved and the branch below bound the FIELD
 	// name to whatever scalar column happened to end in `.b`, which is
 	// ADR-0022's violation exactly.
-	parentIdx := b.ColumnIndex(parts[0])
+	parentIdx := b.ResolveColumnIndex(parts[0])
 	if parentIdx < 0 {
 		parentIdx = uniqueQualifiedColumn(b, parts[0])
 	}

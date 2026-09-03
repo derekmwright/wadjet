@@ -429,11 +429,11 @@ func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column,
 	for i, wc := range g.cols {
 		inputIdx := -1
 		if wc.InputCol != "" {
-			inputIdx = combined.ColumnIndex(wc.InputCol)
+			inputIdx = combined.ResolveColumnIndex(wc.InputCol)
 		}
 		orderIdxs := make([]int, len(wc.OrderBy))
 		for j, key := range wc.OrderBy {
-			orderIdxs[j] = combined.ColumnIndex(key.Column)
+			orderIdxs[j] = combined.ResolveColumnIndex(key.Column)
 		}
 		if err := computePartitionColumnar(combined, combined.Columns[base+i], 0, n, wc, inputIdx, orderIdxs); err != nil {
 			return nil, err

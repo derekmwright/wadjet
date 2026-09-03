@@ -1211,7 +1211,7 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 		// Resolve column indices for sort
 		sortKeyIdxs := make([]int, len(sortKeys))
 		for i, key := range sortKeys {
-			sortKeyIdxs[i] = combined.ColumnIndex(key.Column)
+			sortKeyIdxs[i] = combined.ResolveColumnIndex(key.Column)
 		}
 
 		// Build and sort permutation
@@ -1262,15 +1262,15 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 	// Resolve column indices
 	inputIdx := -1
 	if wc.InputCol != "" {
-		inputIdx = combined.ColumnIndex(wc.InputCol)
+		inputIdx = combined.ResolveColumnIndex(wc.InputCol)
 	}
 	partIdxs := make([]int, len(wc.PartitionBy))
 	for i, col := range wc.PartitionBy {
-		partIdxs[i] = combined.ColumnIndex(col)
+		partIdxs[i] = combined.ResolveColumnIndex(col)
 	}
 	orderIdxs := make([]int, len(wc.OrderBy))
 	for i, key := range wc.OrderBy {
-		orderIdxs[i] = combined.ColumnIndex(key.Column)
+		orderIdxs[i] = combined.ResolveColumnIndex(key.Column)
 	}
 
 	// Walk partitions on sorted data

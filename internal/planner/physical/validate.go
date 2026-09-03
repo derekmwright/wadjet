@@ -75,6 +75,13 @@ type colScope struct {
 	// whose field shape this binder does not carry, is never in the map and so
 	// is never refused. Only ROW columns with a non-empty field list appear.
 	rowFields map[string][]parquet.Column
+	// exact records the SPELLING each source published, so a DELIMITED
+	// reference can be held to the bytes PostgreSQL holds it to. Every other
+	// map here is keyed on the folded name, which is right for an unquoted
+	// reference — the lexer already folded it (#731) — and wrong for a
+	// quoted one: `SELECT "G"` over a column `g` is 42703 in PostgreSQL, not
+	// a read of `g`.
+	exact map[string]bool
 }
 
 // typeAmbiguous marks a bare column name that two FROM sources declare with
@@ -98,11 +105,12 @@ func (s *colScope) providesBareColumn(name string) bool {
 func newColScope() *colScope {
 	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
 		colTypes: map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
-		rowFields: map[string][]parquet.Column{}}
+		rowFields: map[string][]parquet.Column{}, exact: map[string]bool{}}
 }
 
 func (s *colScope) addColumn(col string) {
 	s.cols[strings.ToLower(col)] = true
+	s.exact[col] = true
 }
 
 // addOutputColumn adds a SELECT output alias. An output name resolves before
@@ -111,6 +119,7 @@ func (s *colScope) addColumn(col string) {
 func (s *colScope) addOutputColumn(col string) {
 	c := strings.ToLower(col)
 	s.cols[c] = true
+	s.exact[col] = true
 	if s.srcCount[c] > 1 {
 		s.srcCount[c] = 1
 	}
@@ -122,6 +131,7 @@ func (s *colScope) addOutputColumn(col string) {
 func (s *colScope) addQualified(qual, col string) {
 	c := strings.ToLower(col)
 	s.cols[c] = true
+	s.exact[col] = true
 	s.srcCount[c]++
 	if qual == "" {
 		return
@@ -198,6 +208,9 @@ func (s *colScope) merge(o *colScope) {
 	for c := range o.cols {
 		s.cols[c] = true
 	}
+	for c := range o.exact {
+		s.exact[c] = true
+	}
 	for q, cs := range o.quals {
 		if s.quals[q] == nil {
 			s.quals[q] = map[string]bool{}
@@ -248,6 +261,34 @@ func (s *colScope) clone() *colScope {
 // two sources both provide (42702, #367). Every uncertain case resolves —
 // a false positive breaks a working query; a false negative merely lets a
 // typo through to the existing runtime check.
+// refuseDelimitedMiss is the byte-exactness a DELIMITED identifier is owed.
+//
+// Every other map on this scope is keyed on the FOLDED name, which is the
+// right key for an unquoted reference because the lexer folded it already
+// (#731). A reference that still carries an ASCII upper-case letter can only
+// have been written between double quotes, and PostgreSQL matches such a name
+// byte for byte: over a column `g`, `SELECT "G"` is 42703 there, and answering
+// it with `g`'s values — or, as this engine did, with a column of NULLs — is a
+// silent wrong answer either way.
+//
+// It fires ONLY where the scope KNOWS the spelling, which is a BASE TABLE's
+// columns — the ones whose declared type this binder carries, so colTypes is
+// the test. Every other name here has passed through a planner pass that may
+// have lowercased it before registering (agg_output_projection emits
+// `strings.ToLower(alias)`), and refusing on a spelling the scope no longer
+// has would break `SELECT id AS "Kk" … ORDER BY "Kk"`, which works.
+// `SELECT "WatchID"` over a base table publishing `WatchID` finds those bytes
+// in exact and passes.
+func (s *colScope) refuseDelimitedMiss(ref *plansql.ColRef) error {
+	if plansql.FoldIdent(ref.Column) == ref.Column || s.exact[ref.Column] {
+		return nil
+	}
+	if _, fromBaseTable := s.colTypes[strings.ToLower(ref.Column)]; !fromBaseTable {
+		return nil
+	}
+	return sqlerr.New("42703", "column %q does not exist", ref.Column)
+}
+
 func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 	if s == nil || s.open {
 		return nil
@@ -258,7 +299,7 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 		if cols, ok := s.quals[q]; ok {
 			// Qualifier is a known table/alias: a miss iff the column is absent.
 			if cols[col] {
-				return nil
+				return s.refuseDelimitedMiss(ref)
 			}
 			return s.unknownColumn(ref)
 		}
@@ -291,6 +332,9 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 	}
 	if !s.cols[col] {
 		return s.unknownColumn(ref)
+	}
+	if err := s.refuseDelimitedMiss(ref); err != nil {
+		return err
 	}
 	if s.srcCount[col] > 1 {
 		// Two of this block's sources both provide the name. Resolving it

@@ -17,10 +17,15 @@ func TestKeywordAliasAfterAs(t *testing.T) {
 		{"SELECT n_name AS value FROM nation", "value"},
 		{"SELECT n_name AS key FROM nation", "key"},
 		{"SELECT n_name AS end FROM nation", "end"},
-		// The spelling the user wrote survives: the lexer uppercases keyword
-		// tokens for comparison, and echoing that back would rename the
-		// column to ROWS.
-		{"SELECT COUNT(*) AS Rows FROM nation", "Rows"},
+		// An unquoted keyword spelling is an unquoted IDENTIFIER, so it
+		// folds like one. Measured on PostgreSQL 17: `SELECT 1 AS Desc`
+		// publishes `desc` and `SELECT 1 AS "Desc"` publishes `Desc`
+		// (#731). Echoing the lexer's uppercased val would still be wrong —
+		// that would rename the column to ROWS.
+		{"SELECT COUNT(*) AS Rows FROM nation", "rows"},
+		{`SELECT COUNT(*) AS "Rows" FROM nation`, "Rows"},
+		{"SELECT n_name AS Nm FROM nation", "nm"},
+		{`SELECT n_name AS "Nm" FROM nation`, "Nm"},
 		// A plain identifier alias is unchanged.
 		{"SELECT n_name AS nm FROM nation", "nm"},
 	}

@@ -1538,14 +1538,19 @@ func ColumnIndexFallback(b *batch.RecordBatch, name string) int {
 // disagreement rather than adding a special case. Ambiguity still declines —
 // two arms that both spell `.w` keep the loud failure instead of the engine
 // guessing an arm (#742).
+// Every step resolves through ResolveColumnIndex rather than ColumnIndex: a
+// reference arrives FOLDED from the lexer (#731) while the batch carries the
+// catalog's own spelling, which for a parquet-registered table is CamelCase
+// (`WatchID`). The rule, and why a DELIMITED reference does not fold, are in
+// internal/engine/batch/schema.go.
 func columnIndexFallback(b *batch.RecordBatch, name string) int {
-	if idx := b.ColumnIndex(name); idx >= 0 {
+	if idx := b.ResolveColumnIndex(name); idx >= 0 {
 		return idx
 	}
 	bare := name
 	if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
 		bare = name[dotIdx+1:]
-		if idx := b.ColumnIndex(bare); idx >= 0 {
+		if idx := b.ResolveColumnIndex(bare); idx >= 0 {
 			return idx
 		}
 	}
@@ -1554,8 +1559,11 @@ func columnIndexFallback(b *batch.RecordBatch, name string) int {
 	// pick the wrong column.
 	suffix := "." + bare
 	match := -1
+	folded := batch.IsFoldedIdent(bare)
 	for i, c := range b.Schema {
-		if strings.HasSuffix(c.Name, suffix) {
+		if strings.HasSuffix(c.Name, suffix) ||
+			(folded && len(c.Name) >= len(suffix) &&
+				batch.EqualFoldIdent(c.Name[len(c.Name)-len(suffix):], suffix)) {
 			if match >= 0 {
 				return -1 // ambiguous
 			}

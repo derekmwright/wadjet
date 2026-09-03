@@ -141,6 +141,52 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      same rule; a boxed comparator that reads a rendered address or a
      formatted decimal is not that order (`internal/engine/exec/
      compare_boxed.go`).
+   - **A FOLDED identifier resolves case-insensitively when exactly one
+     column matches.** (Added 2026-09-03, #731.) An UNQUOTED identifier folds
+     to lower case at the lexer and a DELIMITED one keeps its bytes, which is
+     PostgreSQL's rule exactly (`plansql.FoldIdent`, ASCII `A-Z` only —
+     verified live on a UTF8 postgres:17-alpine, where `CREATE TABLE t (Ä int)`
+     stores `Ä` and `SELECT 1 AS Ä` publishes `Ä`). PostgreSQL then matches the
+     folded name EXACTLY against the catalog, so a column stored as `"WatchID"`
+     is unreachable as `watchid` — `SELECT WatchID FROM hits` there is 42703
+     `column "watchid" does not exist`.
+
+     Wadjet resolves it. Its tables come from parquet and ingest, where
+     CamelCase column names are ordinary — ClickBench's `hits` has `WatchID`,
+     `UserID`, `EventTime`, and all 43 of its queries spell them that way — so
+     a folded reference that misses byte-exact resolves case-insensitively
+     when EXACTLY ONE column of the input matches. Two matches resolve to
+     nothing and the caller reports the miss; within one table that cannot
+     happen, because `catalog.checkDistinctColumnNames` already refuses a
+     schema whose columns collide under `parquet.FoldName`, and across
+     relations the planner refuses first with 42702 `column reference "g" is
+     ambiguous` — PostgreSQL's own answer to that shape.
+
+     The rule is one function, `batch.ResolveColumnIndex`
+     (`internal/engine/batch/schema.go`), and the SCHEMA stays byte-exact:
+     `batch.ColumnIndex` still compares `col.Name == name`, `SELECT *` still
+     publishes the catalog's own spellings, and every producer writes the name
+     it was given. What folds is the RESOLVER.
+
+     **A DELIMITED reference does NOT get the concession**, and that boundary
+     is what keeps the divergence a superset rather than a different answer:
+     a reference still carrying an ASCII upper-case letter can only have been
+     written between double quotes, so it resolves byte-exact only, and
+     `SELECT "G"` over a column `g` is **42703** here as it is in PostgreSQL.
+     It used to answer a column of NULLs. The refusal fires only where the
+     scope carries a BASE TABLE's own spelling
+     (`physical.colScope.refuseDelimitedMiss`), because a planner pass may
+     have lowercased an alias before registering it and refusing on a spelling
+     the scope no longer has would break `SELECT id AS "Kk" … ORDER BY "Kk"`.
+
+     Everything else this arc moved is PostgreSQL's answer rather than a
+     divergence: `SELECT G` publishes `g`, `SELECT g AS Foo` publishes `foo`,
+     `SELECT 1 AS Desc` publishes `desc`, `AS "Foo"` publishes `Foo`, a table
+     alias and a CTE name fold, and a DDL declaration now keeps a delimited
+     column name's bytes (`parquet.DeclaredColumn` lowercased every
+     declaration before, so the one spelling PostgreSQL guarantees was the one
+     that could not be stored).
+
    - **TIMESTAMP is `timestamp without time zone`, and a literal's offset is
      DISCARDED.** (Added 2026-09-03, #692; this entry records a divergence
      CLOSED, not one kept.) Wadjet declares TIMESTAMP as PostgreSQL's

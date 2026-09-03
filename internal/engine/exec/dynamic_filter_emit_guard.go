@@ -123,7 +123,7 @@ func (op *DynamicFilterEmitOp) bufferBatch(in *batch.RecordBatch) bool {
 	// and suffix fallback as the emit key column).
 	for _, g := range op.guards {
 		if !g.resolved {
-			g.colIdx = in.ColumnIndex(g.column)
+			g.colIdx = in.ResolveColumnIndex(g.column)
 			if g.colIdx < 0 {
 				g.colIdx = uniqueSuffixColumnIndex(in, g.column)
 			}

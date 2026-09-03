@@ -278,9 +278,12 @@ type token struct {
 	typ TokenType
 	val string
 	pos int // byte offset in original input
-	// raw is the ORIGINAL spelling of a keyword token, whose val is
-	// uppercased for comparison. Empty for every other token, where val is
-	// already verbatim.
+	// raw is the ORIGINAL spelling of a token whose val was normalized: a
+	// keyword (val uppercased for comparison) or an unquoted identifier
+	// (val folded to lower case, #731). Empty for every other token, where
+	// val is already verbatim. It is the spelling to ECHO — a syntax error
+	// names the text the client sent, and a type name is not an identifier
+	// reference — never the spelling to RESOLVE.
 	raw string
 	// quoted marks a TokenIdent that came from a double-quoted
 	// ("delimited") identifier. Such a token is always exactly one
@@ -288,6 +291,15 @@ type token struct {
 	// dots, spaces, or keyword spellings inside it are part of the name
 	// rather than syntax.
 	quoted bool
+}
+
+// source is the spelling the client actually sent, for a message that echoes
+// the input rather than naming a resolved object.
+func (t token) source() string {
+	if t.raw != "" {
+		return t.raw
+	}
+	return t.val
 }
 
 // stateFn is a state function in the Pike lexer pattern.
@@ -303,11 +315,23 @@ type lexer struct {
 	start   int    // start byte position of current token
 	width   int    // width of last rune read (for backup)
 	pending *token // pending token to return
+	// verbatim suppresses the unquoted-identifier fold. It is for the
+	// callers that lex a NAME rather than a query — SplitIdentRef and the
+	// helpers built on it are asked to split `WatchID` or `"my tbl"."c"`
+	// into its parts, not to bind it, and folding a schema-derived name
+	// there would rename the column the caller is asking about.
+	verbatim bool
 }
 
 // newLexer creates a new lexer for the given input.
 func newLexer(input string) *lexer {
 	return &lexer{input: input}
+}
+
+// newVerbatimLexer creates a lexer that does NOT fold unquoted identifiers.
+// See lexer.verbatim.
+func newVerbatimLexer(input string) *lexer {
+	return &lexer{input: input, verbatim: true}
 }
 
 // --- Character-level operations ---
@@ -863,11 +887,20 @@ func lexIdentOrKeyword(l *lexer) stateFn {
 		// val is uppercased so keyword comparisons can be exact; raw keeps
 		// the spelling the user wrote, which matters where a keyword is
 		// accepted as a NAME (an alias after AS) and the name is echoed back
-		// to the client as a result column.
+		// to the client as a result column — folded there, since an unquoted
+		// keyword spelling is an unquoted identifier.
 		l.emitVal(kwType, upper)
 		l.pending.raw = word
-	} else {
+	} else if folded := FoldIdent(word); l.verbatim || folded == word {
 		l.emit(TokenIdent)
+	} else {
+		// An UNQUOTED identifier folds, here, once — PostgreSQL's rule and
+		// the reason `SELECT G` reads the column `g`. Everything downstream
+		// then sees ONE spelling for one name, which is what lets the
+		// engine's byte-exact `batch.RecordBatch.ColumnIndex` stay
+		// byte-exact (#731).
+		l.emitVal(TokenIdent, folded)
+		l.pending.raw = word
 	}
 	return nil
 }

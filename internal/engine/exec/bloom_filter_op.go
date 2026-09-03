@@ -96,7 +96,7 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	if !op.resolved {
 		op.keyIdx = make([]int, len(op.leftKeys))
 		for i, col := range op.leftKeys {
-			op.keyIdx[i] = in.ColumnIndex(col)
+			op.keyIdx[i] = in.ResolveColumnIndex(col)
 		}
 		op.resolved = true
 		if !op.keyTypesAgree(in) {
@@ -667,7 +667,7 @@ func (bb *BloomBuilder) Add(b *batch.RecordBatch, keyCol string) error {
 	if b == nil {
 		return nil
 	}
-	colIdx := b.ColumnIndex(keyCol)
+	colIdx := b.ResolveColumnIndex(keyCol)
 	if colIdx < 0 {
 		return nil
 	}

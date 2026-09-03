@@ -394,8 +394,17 @@ func ParseDecimalParams(s string) (precision, scale int, err error) {
 // `MAP(STRING, DECIMAL(9,2))` lost their element, field and key/value
 // declarations entirely (#675). ResolveColumn already knew how to read all of
 // them and had no non-test caller; this is that caller.
+// The NAME is taken as given. It used to be lowercased here, which folded a
+// DELIMITED declaration too — `CREATE TABLE t ("WatchID" INT64)` stored
+// `watchid`, so the one spelling PostgreSQL guarantees would work was the one
+// that did not, and a DDL-created table could not hold a name a
+// parquet-registered one holds every day. Since #731 an UNQUOTED identifier
+// is already folded when it gets here (the lexer does it, once), so the only
+// declarations this changes are the delimited ones, which are exactly the
+// ones that asked to keep their bytes. Fold-uniqueness within the schema is
+// still enforced, by catalog.checkDistinctColumnNames.
 func DeclaredColumn(name, typeStr string, nullable bool) (Column, error) {
-	col, err := ResolveColumn(strings.ToLower(name), typeStr)
+	col, err := ResolveColumn(name, typeStr)
 	if err != nil {
 		return Column{}, err
 	}

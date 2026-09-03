@@ -594,7 +594,7 @@ func lexParseDescribe(sql string, l *lexer) (*ParsedQuery, error) {
 		Type: QueryDescribe,
 		SQL:  sql,
 		Describe: &DescribeInfo{
-			TableName: strings.ToLower(tok.val),
+			TableName: tok.val,
 		},
 	}, nil
 }
@@ -624,7 +624,7 @@ func lexParseShow(sql string, l *lexer) (*ParsedQuery, error) {
 			Type: QueryDescribe,
 			SQL:  sql,
 			Describe: &DescribeInfo{
-				TableName: strings.ToLower(nameTok.val),
+				TableName: nameTok.val,
 			},
 		}, nil
 
@@ -881,7 +881,9 @@ func collectTypeParams(l *lexer) (string, error) {
 			tok.typ != TokenLParen && prev != TokenLParen && prev != TokenComma {
 			b.WriteByte(' ')
 		}
-		b.WriteString(tok.val)
+		// source(), not val: a type name inside the parameters is not an
+		// identifier reference either (#731).
+		b.WriteString(tok.source())
 		prev = tok.typ
 		if depth == 0 {
 			return b.String(), nil
@@ -939,7 +941,10 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 			return nil, fmt.Errorf("CREATE TABLE: expected type for column %q, got %q", colNameTok.val, colTypeTok.val)
 		}
 
-		typeName := colTypeTok.val
+		// The type's SOURCE spelling: a type name is not an identifier
+		// reference, so the lexer's unquoted-identifier fold (#731) must not
+		// rewrite `BIGINT` to `bigint` in what SHOW COLUMNS echoes back.
+		typeName := colTypeTok.source()
 		// Optional type parameters: DECIMAL(10,2), VECTOR(384),
 		// ARRAY(DECIMAL(9,2)), ROW(a INT64, d DECIMAL(9,2)),
 		// MAP(STRING, INT64).
@@ -960,7 +965,7 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 		}
 
 		col := ColumnDef{
-			Name:     strings.ToLower(colNameTok.val),
+			Name:     colNameTok.val,
 			Type:     typeName,
 			Nullable: true,
 		}
@@ -1013,7 +1018,7 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 			if keyTok.typ != TokenIdent {
 				return nil, fmt.Errorf("CREATE TABLE: expected partition key name, got %q", keyTok.val)
 			}
-			partitionKeys = append(partitionKeys, strings.ToLower(keyTok.val))
+			partitionKeys = append(partitionKeys, keyTok.val)
 		}
 	}
 
@@ -1021,7 +1026,7 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 		Type: QueryCreateTable,
 		SQL:  sql,
 		CreateTable: &CreateTableInfo{
-			Name:          strings.ToLower(nameTok.val),
+			Name:          nameTok.val,
 			Columns:       columns,
 			PartitionKeys: partitionKeys,
 		},
@@ -1289,7 +1294,7 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 		if nameTok.typ != TokenIdent {
 			return nil, fmt.Errorf("expected CTE name, got %q", nameTok.val)
 		}
-		cteName := strings.ToLower(nameTok.val)
+		cteName := nameTok.val
 
 		// Check for optional column list: name(col1, col2, ...) AS (...)
 		// vs name AS (SELECT ...)
@@ -1316,7 +1321,7 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 					if colTok.typ != TokenIdent {
 						return nil, fmt.Errorf("expected column name in CTE %q column list, got %q", cteName, colTok.val)
 					}
-					columns = append(columns, strings.ToLower(colTok.val))
+					columns = append(columns, colTok.val)
 					next := l.nextToken()
 					if next.typ == TokenRParen {
 						break
@@ -1417,7 +1422,7 @@ func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
 	}
 
 	info := &AlterTableInfo{
-		Table:    strings.ToLower(nameTok.val),
+		Table:    nameTok.val,
 		Nullable: true,
 	}
 
@@ -1433,7 +1438,7 @@ func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
 		if tok.typ != TokenIdent {
 			return nil, fmt.Errorf("ALTER TABLE ADD: column name is required")
 		}
-		info.ColumnName = strings.ToLower(tok.val)
+		info.ColumnName = tok.val
 
 		typeTok := l.nextToken()
 		if typeTok.typ != TokenIdent {
@@ -1472,7 +1477,7 @@ func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
 		if tok.typ != TokenIdent {
 			return nil, fmt.Errorf("ALTER TABLE DROP: column name is required")
 		}
-		info.ColumnName = strings.ToLower(tok.val)
+		info.ColumnName = tok.val
 
 	case TokenKWRename:
 		// RENAME [COLUMN] old TO new
@@ -1484,7 +1489,7 @@ func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
 		if tok.typ != TokenIdent {
 			return nil, fmt.Errorf("ALTER TABLE RENAME: column name is required")
 		}
-		info.ColumnName = strings.ToLower(tok.val)
+		info.ColumnName = tok.val
 
 		toTok := l.nextToken()
 		if toTok.typ != TokenKWTo {
@@ -1495,7 +1500,7 @@ func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
 		if newTok.typ != TokenIdent {
 			return nil, fmt.Errorf("ALTER TABLE RENAME: new column name is required")
 		}
-		info.NewColumnName = strings.ToLower(newTok.val)
+		info.NewColumnName = newTok.val
 
 	default:
 		return nil, fmt.Errorf("ALTER TABLE: expected ADD, DROP, or RENAME, got %q", actionTok.val)
@@ -1540,7 +1545,7 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		}
 		targetName = partTok.val
 	}
-	info := &MergeInfo{Target: strings.ToLower(targetName), TargetQualifier: targetQualifier}
+	info := &MergeInfo{Target: targetName, TargetQualifier: targetQualifier}
 
 	// Optional alias. AS must be followed by a NAME: taking whatever came
 	// next made `MERGE INTO t AS USING s ...` an alias of "USING" and then
@@ -1552,10 +1557,10 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		if aliasTok.typ != TokenIdent {
 			return nil, fmt.Errorf("MERGE: expected target alias after AS, got %q", aliasTok.val)
 		}
-		info.TargetAlias = strings.ToLower(aliasTok.val)
+		info.TargetAlias = aliasTok.val
 	} else if peek.typ == TokenIdent && !isClauseKeyword(peek) {
 		l.nextToken()
-		info.TargetAlias = strings.ToLower(peek.val)
+		info.TargetAlias = peek.val
 	}
 
 	// USING
@@ -1596,7 +1601,7 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		info.Source = "(" + strings.TrimSpace(l.input[start:end]) + ")"
 		l.start = l.pos
 	} else if sourceTok.typ == TokenIdent {
-		info.Source = strings.ToLower(sourceTok.val)
+		info.Source = sourceTok.val
 	} else {
 		return nil, fmt.Errorf("MERGE: expected source table or subquery after USING")
 	}
@@ -1609,10 +1614,10 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		if aliasTok.typ != TokenIdent {
 			return nil, fmt.Errorf("MERGE: expected source alias after AS, got %q", aliasTok.val)
 		}
-		info.SourceAlias = strings.ToLower(aliasTok.val)
+		info.SourceAlias = aliasTok.val
 	} else if peek.typ == TokenIdent && !isClauseKeyword(peek) {
 		l.nextToken()
-		info.SourceAlias = strings.ToLower(peek.val)
+		info.SourceAlias = peek.val
 	}
 
 	// ON condition
@@ -1823,7 +1828,7 @@ func lexParseCreateView(sql string, l *lexer, replace bool) (*ParsedQuery, error
 		Type: QueryCreateView,
 		SQL:  sql,
 		CreateView: &CreateViewInfo{
-			Name:    strings.ToLower(nameTok.val),
+			Name:    nameTok.val,
 			SQL:     viewSQL,
 			Replace: replace,
 		},
@@ -2086,7 +2091,7 @@ func lexParseDropView(sql string, l *lexer) (*ParsedQuery, error) {
 		Type: QueryDropView,
 		SQL:  sql,
 		DropView: &DropViewInfo{
-			Name:     strings.ToLower(tok.val),
+			Name:     tok.val,
 			IfExists: ifExists,
 		},
 	}, nil

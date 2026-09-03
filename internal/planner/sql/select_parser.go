@@ -98,8 +98,10 @@ func (p *selectParser) expectEndOfStatement() error {
 	case TokenError:
 		return fmt.Errorf("syntax error at position %d: %s", p.cur.pos, p.cur.val)
 	default:
+		// The spelling the client SENT, not the folded one: a syntax error
+		// echoes input, it does not name a resolved object (#731).
 		return fmt.Errorf("syntax error at or near %q (position %d): trailing input after the end of the statement",
-			p.cur.val, p.cur.pos)
+			p.cur.source(), p.cur.pos)
 	}
 }
 
@@ -523,7 +525,12 @@ func (p *selectParser) takeAliasAfterAs() (string, bool) {
 	}
 	p.advance()
 	if tok.raw != "" {
-		return tok.raw, true
+		// A keyword spelling used as a name is an UNQUOTED identifier, so it
+		// folds like one: PostgreSQL publishes `SELECT 1 AS Desc` as `desc`
+		// and `AS "Desc"` as `Desc` (measured). raw is only ever set on a
+		// keyword token; a delimited identifier arrives with raw empty and
+		// keeps its bytes.
+		return FoldIdent(tok.raw), true
 	}
 	return tok.val, true
 }

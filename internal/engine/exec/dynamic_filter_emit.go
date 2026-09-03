@@ -88,7 +88,7 @@ func (op *DynamicFilterEmitOp) Execute(_ context.Context, in *batch.RecordBatch)
 	op.sawRows = true
 
 	if !op.resolved {
-		op.keyIdx = in.ColumnIndex(op.keyColumn)
+		op.keyIdx = in.ResolveColumnIndex(op.keyColumn)
 		if op.keyIdx < 0 {
 			// Join outputs may carry the key alias-qualified
 			// ("l1.l_orderkey"). Accept a UNIQUE suffix match; ambiguity
@@ -269,7 +269,7 @@ func uniqueSuffixColumnIndex(in *batch.RecordBatch, name string) int {
 				break
 			}
 		}
-		if cn == name {
+		if cn == name || (batch.IsFoldedIdent(name) && batch.EqualFoldIdent(cn, name)) {
 			if found >= 0 {
 				return -1
 			}
