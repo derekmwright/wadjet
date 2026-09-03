@@ -82,6 +82,26 @@ func raisePowerDomain(base, exp float64) {
 	}
 }
 
+// int32Count narrows a Go count to the int4 the length family declares,
+// raising 22003 rather than WRAPPING past 2^31 (#637).
+//
+// #530 made LENGTH / OCTET_LENGTH / BIT_LENGTH / CARDINALITY answer int4,
+// which is PostgreSQL's declaration for all four, and the conversion was a
+// bare `int32(len(...))`: past the boundary it produces a negative number
+// under a right type, which is the class ADR-0012 item 9 calls a different
+// number wearing the right type. PostgreSQL raises `integer out of range`.
+//
+// The inputs that reach the boundary are extreme — BIT_LENGTH needs a string
+// past 256 MB, OCTET_LENGTH one past 2 GB, CARDINALITY an array of 2.1 billion
+// elements — which is exactly why the wrap was silent: no fixture has one, and
+// the check costs a compare that the branch predictor answers for free.
+func int32Count(n int) int32 {
+	if n > math.MaxInt32 || n < math.MinInt32 {
+		panic(fatalEval{sqlerr.New("22003", "integer out of range")})
+	}
+	return int32(n)
+}
+
 // raiseFloatRangeResult is PostgreSQL's float8 result check, the one every
 // libm-backed function in float.c runs after computing: an infinite result
 // from finite arguments OVERFLOWED, and a zero result from a non-zero

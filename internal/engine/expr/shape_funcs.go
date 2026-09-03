@@ -47,7 +47,7 @@ func fnOctetLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return int32(len(toString(args[0])))
+	return int32Count(len(toString(args[0])))
 }
 
 // fnBitLength returns the number of bits (8 x octet_length).
@@ -55,7 +55,7 @@ func fnBitLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return int32(8 * len(toString(args[0])))
+	return int32Count(8 * len(toString(args[0])))
 }
 
 // --- vectorized kernels ---

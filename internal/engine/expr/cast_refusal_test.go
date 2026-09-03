@@ -134,6 +134,76 @@ func TestCastTextToFloatReadsOrRefuses(t *testing.T) {
 // shared by ingest, the comparison kernels and this cast. This pin fails the
 // day the cast starts refusing, which is the signal to record the accept-set
 // rather than discover it.
+// TestArrayLengthIsDimensionAware is #637: `array_length` was registered as an
+// alias of the one-argument `cardinality`, so it answered 0 for an empty array
+// where PostgreSQL answers NULL and IGNORED its dimension argument entirely.
+//
+// The two functions disagree on an empty array ON PURPOSE — cardinality counts
+// elements and is 0, array_length asks "how long is dimension 1" and there is
+// no dimension 1 — and the alias made them agree. Every expectation is live
+// postgres:17.11.
+func TestArrayLengthIsDimensionAware(t *testing.T) {
+	three := []any{int64(1), int64(2), int64(3)}
+	empty := []any{}
+	for _, c := range []struct {
+		name string
+		args []any
+		want any
+	}{
+		{"dimension 1 of a 3-element array", []any{three, int64(1)}, int32(3)},
+		{"dimension 2 of a 1-D array", []any{three, int64(2)}, nil},
+		{"dimension 0", []any{three, int64(0)}, nil},
+		{"a negative dimension", []any{three, int64(-1)}, nil},
+		{"a NULL dimension", []any{three, nil}, nil},
+		{"dimension 1 of an EMPTY array", []any{empty, int64(1)}, nil},
+		{"a NULL array", []any{nil, int64(1)}, nil},
+		// The one-argument spelling PostgreSQL does not have keeps
+		// cardinality's answer, so nothing that called it changes.
+		{"the one-argument wadjet spelling", []any{three}, int32(3)},
+		{"the one-argument spelling over an empty array", []any{empty}, int32(0)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fnArrayLength(c.args); got != c.want {
+				t.Errorf("array_length%v = %#v, want %#v (live PostgreSQL 17.11)",
+					c.args, got, c.want)
+			}
+		})
+	}
+	// CARDINALITY is the control and must NOT move: 0 for an empty array is
+	// what PostgreSQL answers for it, and it is the answer array_length no
+	// longer shares.
+	if got := fnCardinality([]any{empty}); got != int32(0) {
+		t.Errorf("cardinality(ARRAY[]) = %#v, want int32(0) — PostgreSQL answers 0 here and "+
+			"NULL for array_length, which is the whole distinction", got)
+	}
+}
+
+// TestInt32CountRaisesInsteadOfWrapping is #637's second half. #530 made the
+// length family answer int4, which is PostgreSQL's declaration, through a bare
+// `int32(len(...))`: past the boundary that produces a NEGATIVE number under a
+// right type. PostgreSQL raises `integer out of range`.
+//
+// The function is tested directly because the inputs that reach the boundary
+// cannot be built in a test — BIT_LENGTH needs a string past 256 MB and
+// CARDINALITY an array of 2.1 billion elements. That unreachability is exactly
+// why the wrap was silent, and it is why the check is asserted at the
+// conversion rather than through a query nobody can write.
+func TestInt32CountRaisesInsteadOfWrapping(t *testing.T) {
+	if got := int32Count(math.MaxInt32); got != math.MaxInt32 {
+		t.Errorf("int32Count(MaxInt32) = %d, want %d", got, math.MaxInt32)
+	}
+	if got := int32Count(0); got != 0 {
+		t.Errorf("int32Count(0) = %d, want 0", got)
+	}
+	for _, n := range []int{math.MaxInt32 + 1, math.MinInt32 - 1} {
+		state, msg := recoverFatalEvalForTest(t, func() { int32Count(n) })
+		if state != "22003" || msg != "integer out of range" {
+			t.Errorf("int32Count(%d) raised [%s] %s, want [22003] integer out of range "+
+				"(live PostgreSQL 17.11)", n, state, msg)
+		}
+	}
+}
+
 func TestCastToANetworkTypeStillPassesThrough(t *testing.T) {
 	b := castRefusalBatch(t)
 	for _, dest := range []string{"ipv4", "ipv6", "cidr", "macaddr", "mac"} {
