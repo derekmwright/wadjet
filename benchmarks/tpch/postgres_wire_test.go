@@ -1872,15 +1872,22 @@ func sqlstateName(code string) string {
 	}
 }
 
+// wireTagCase is one statement whose CommandComplete tag is compared.
+type wireTagCase struct {
+	name string
+	sql  string
+	// setup runs on BOTH servers before the case, in dialect-neutral SQL.
+	// The DML cases use it to restore the scratch table, so each one's count
+	// is what it says it is regardless of what ran before it.
+	setup []string
+	pin   string
+}
+
 // runWireCommandTags compares the CommandComplete tag, which a client uses for
 // its "n rows affected" report and, for some drivers, to decide whether a
 // result set follows at all.
 func runWireCommandTags(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) {
-	cases := []struct {
-		name string
-		sql  string
-		pin  string
-	}{
+	cases := []wireTagCase{
 		{name: "SelectRows", sql: `SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3`},
 		{name: "SelectZeroRows", sql: `SELECT n_nationkey FROM nation WHERE n_nationkey < 0`},
 		{name: "SelectOneRow", sql: `SELECT COUNT(*) FROM nation`},
@@ -1888,8 +1895,12 @@ func runWireCommandTags(t *testing.T, ctx context.Context, wConn, pConn *pgconn.
 		{name: "Commit", sql: `COMMIT`},
 		{name: "Set", sql: `SET extra_float_digits = 3`},
 	}
+	cases = append(cases, wireDMLTagCases(t, ctx, wConn, pConn)...)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			for _, stmt := range c.setup {
+				execBothOrFail(t, ctx, wConn, pConn, stmt, stmt)
+			}
 			pRes := pConn.ExecParams(ctx, c.sql, nil, nil, nil, nil).Read()
 			if pRes.Err != nil {
 				t.Fatalf("the ORACLE refused %q: %v", c.sql, pRes.Err)
@@ -1919,6 +1930,88 @@ func runWireCommandTags(t *testing.T, ctx context.Context, wConn, pConn *pgconn.
 			}
 			t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropCommandTag, detail, c.sql)
 		})
+	}
+}
+
+// wireDMLTagCases builds a scratch table on both servers and returns one case
+// per DML verb × {0 rows, 1 row, N rows}.
+//
+// The CommandTags gate had six cases and NOT ONE of them was DML, so the one
+// wire defect it existed to catch was invisible to it: over the EXTENDED
+// protocol — the protocol pgx, JDBC, psycopg and every ORM use — wadjet
+// reported `SELECT 1` for every INSERT, UPDATE, DELETE and MERGE (#816). The
+// gate used the right door and had no fixture that attempted the shape, which
+// is correctness-fix-protocol method 10 in its purest form. This is the
+// fixture.
+//
+// The tag is not decoration: for a write it IS the statement's whole answer.
+// An ORM's optimistic-concurrency check — `UPDATE … WHERE version = ?`, then
+// "if 0 rows affected, someone else won" — cannot detect a conflict when
+// every write reports 1.
+func wireDMLTagCases(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) []wireTagCase {
+	t.Helper()
+
+	// A leftover from a crashed run must not decide this run's counts.
+	execBoth(ctx, wConn, pConn, `DROP TABLE wire_dml`, `DROP TABLE IF EXISTS wire_dml`)
+	execBoth(ctx, wConn, pConn, `DROP TABLE wire_dml_src`, `DROP TABLE IF EXISTS wire_dml_src`)
+
+	execBothOrFail(t, ctx, wConn, pConn,
+		`CREATE TABLE wire_dml (id INT64, n INT64)`,
+		`CREATE TABLE wire_dml (id bigint, n bigint)`)
+	execBothOrFail(t, ctx, wConn, pConn,
+		`CREATE TABLE wire_dml_src (id INT64, n INT64)`,
+		`CREATE TABLE wire_dml_src (id bigint, n bigint)`)
+	execBothOrFail(t, ctx, wConn, pConn,
+		`INSERT INTO wire_dml_src (id, n) VALUES (1, 100), (9, 900)`,
+		`INSERT INTO wire_dml_src (id, n) VALUES (1, 100), (9, 900)`)
+	t.Cleanup(func() {
+		bg := context.Background()
+		execBoth(bg, wConn, pConn, `DROP TABLE wire_dml`, `DROP TABLE IF EXISTS wire_dml`)
+		execBoth(bg, wConn, pConn, `DROP TABLE wire_dml_src`, `DROP TABLE IF EXISTS wire_dml_src`)
+	})
+
+	// Every case restores the same three rows first, so its count is what its
+	// name says regardless of what ran before it.
+	reset := []string{
+		`DELETE FROM wire_dml WHERE id > -1000000`,
+		`INSERT INTO wire_dml (id, n) VALUES (1, 10), (2, 20), (3, 30)`,
+	}
+	c := func(name, sql string) wireTagCase {
+		return wireTagCase{name: name, sql: sql, setup: reset}
+	}
+	return []wireTagCase{
+		c("InsertOneRow", `INSERT INTO wire_dml (id, n) VALUES (4, 40)`),
+		c("InsertManyRows", `INSERT INTO wire_dml (id, n) VALUES (5, 50), (6, 60)`),
+		c("UpdateOneRow", `UPDATE wire_dml SET n = 99 WHERE id = 1`),
+		c("UpdateZeroRows", `UPDATE wire_dml SET n = 99 WHERE id = 999`),
+		c("UpdateManyRows", `UPDATE wire_dml SET n = 0 WHERE id > 0`),
+		c("DeleteOneRow", `DELETE FROM wire_dml WHERE id = 1`),
+		c("DeleteZeroRows", `DELETE FROM wire_dml WHERE id = 999`),
+		c("DeleteManyRows", `DELETE FROM wire_dml WHERE id > 0`),
+		c("MergeOneRow", `MERGE INTO wire_dml AS t USING wire_dml_src AS s ON t.id = s.id `+
+			`WHEN MATCHED THEN UPDATE SET n = s.n`),
+		c("MergeZeroRows", `MERGE INTO wire_dml AS t USING wire_dml_src AS s ON t.id = s.id `+
+			`WHEN MATCHED AND s.n > 100000 THEN DELETE`),
+		c("MergeManyRows", `MERGE INTO wire_dml AS t USING wire_dml_src AS s ON t.id = s.id `+
+			`WHEN MATCHED THEN UPDATE SET n = s.n `+
+			`WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, s.n)`),
+	}
+}
+
+// execBoth runs a statement on each server and IGNORES failures: it is for the
+// pre-run cleanup, where "the table was not there" is the expected outcome.
+func execBoth(ctx context.Context, wConn, pConn *pgconn.PgConn, wSQL, pSQL string) {
+	wConn.ExecParams(ctx, wSQL, nil, nil, nil, nil).Read()
+	pConn.ExecParams(ctx, pSQL, nil, nil, nil, nil).Read()
+}
+
+func execBothOrFail(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn, wSQL, pSQL string) {
+	t.Helper()
+	if res := wConn.ExecParams(ctx, wSQL, nil, nil, nil, nil).Read(); res.Err != nil {
+		t.Fatalf("wadjet fixture %q: %v", wSQL, res.Err)
+	}
+	if res := pConn.ExecParams(ctx, pSQL, nil, nil, nil, nil).Read(); res.Err != nil {
+		t.Fatalf("PostgreSQL fixture %q: %v", pSQL, res.Err)
 	}
 }
 

@@ -1522,6 +1522,12 @@ From lowest to highest:
 
 Wadjet supports INSERT, UPDATE, and DELETE via merge-on-read semantics. Deleted rows are tracked as markers in the manifest and filtered out at scan time. Updated rows are implemented as DELETE + INSERT of the modified values.
 
+Over the PostgreSQL wire protocol a DML statement completes with PostgreSQL's
+command tag — `INSERT 0 <n>`, `UPDATE <n>`, `DELETE <n>`, `MERGE <n>` — on
+both the simple protocol (psql) and the extended protocol (pgx, JDBC,
+psycopg, and every ORM), so a driver's "rows affected" is the number of rows
+the statement actually affected.
+
 ### INSERT
 
 ```sql

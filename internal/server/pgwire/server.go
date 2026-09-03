@@ -909,10 +909,7 @@ func (c *pgConn) handleQuery(sql string) {
 	// merge reported `SELECT 1` — a command tag naming the wrong statement
 	// and the wrong count, which for a client is the statement's whole
 	// answer. PostgreSQL reports `MERGE <n>` (#686 R2-5).
-	if strings.HasPrefix(upper, "INSERT ") ||
-		strings.HasPrefix(upper, "UPDATE ") ||
-		strings.HasPrefix(upper, "DELETE ") ||
-		strings.HasPrefix(upper, "MERGE ") {
+	if isDMLSQL(upper) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {
@@ -1216,6 +1213,25 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 		return
 	}
 
+	// A DML statement without RETURNING produces no tuples, so it describes
+	// as NoData — PostgreSQL's answer, and the only honest one.
+	//
+	// It used to fall through to the execution below, which meant Describe
+	// RAN THE WRITE to discover a shape it does not have, cached the
+	// one-row `{"result": "DELETE 2"}` that DB.Query wraps a DML result in,
+	// and let Execute report that row's shape: `SELECT 1` for every INSERT,
+	// UPDATE, DELETE and MERGE a driver sent (#816). Every ORM reads
+	// RowsAffected from that tag, so an optimistic-concurrency check —
+	// `UPDATE … WHERE version = ?`, then "if 0 rows, someone else won" —
+	// could never detect a conflict. Not describing it here is half the fix;
+	// handleExecute's DML branch is the other half.
+	if isDMLSQL(strings.ToUpper(sql)) {
+		c.closeDescribeCache()
+		c.describedSQL = sql
+		c.sendNoData()
+		return
+	}
+
 	// Introspection queries answer synthetically. Describe resolves them
 	// through the same matcher Execute uses and describes the exact column
 	// list that Execute will send rows for — a guessed description (the old
@@ -1359,6 +1375,33 @@ func (c *pgConn) handleExecute(payload []byte) {
 		strings.HasPrefix(upper, "DEALLOCATE") ||
 		strings.HasPrefix(upper, "CLOSE") {
 		c.sendCommandComplete("SET")
+		return
+	}
+
+	// DML on the EXTENDED protocol. This branch did not exist: a write fell
+	// through to c.db.Query below, which wraps a DML result as the one row
+	// `{"result": "DELETE 2"}`, and the SELECT tag was emitted for it — so
+	// every INSERT, UPDATE, DELETE and MERGE sent by pgx, JDBC, psycopg or
+	// any ORM completed with `SELECT 1` (#816). The table state was right; a
+	// client's RowsAffected was 1 whatever happened.
+	//
+	// The same shape as the simple path's branch, minus the ReadyForQuery:
+	// on this protocol Sync sends it, and sending one here would put a second
+	// 'Z' on the wire for one Query message.
+	if isDMLSQL(upper) {
+		ctx, cancel := c.queryContext()
+		defer cancel()
+		if !c.server.acquireQuery(ctx) {
+			c.sendQueryError(ctx, "53300", errors.New("query queue timeout"))
+			return
+		}
+		result, err := c.db.Execute(ctx, sql)
+		c.server.releaseQuery()
+		if err != nil {
+			c.sendQueryError(ctx, "42000", err)
+			return
+		}
+		c.sendCommandComplete(commandTag(result.Command, result.RowsAffected))
 		return
 	}
 
@@ -2774,6 +2817,21 @@ func extractSelectColumns(sql string) []string {
 		cols = append(cols, it.label)
 	}
 	return cols
+}
+
+// isDMLSQL reports whether an UPPERCASED statement is a DML verb.
+//
+// One predicate, because the simple and the extended protocol must agree
+// about which statements are writes. They did not: the simple path had this
+// test inline and the extended path had none at all, so every DML statement
+// over the extended protocol — the protocol pgx, JDBC, psycopg and every ORM
+// use — fell through to the QUERY path and reported `SELECT 1` (#816).
+func isDMLSQL(upper string) bool {
+	upper = strings.TrimSpace(upper)
+	return strings.HasPrefix(upper, "INSERT ") ||
+		strings.HasPrefix(upper, "UPDATE ") ||
+		strings.HasPrefix(upper, "DELETE ") ||
+		strings.HasPrefix(upper, "MERGE ")
 }
 
 func isCommandSQL(sql string) bool {
