@@ -305,13 +305,47 @@ func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map
 // their branches, over the same candidate positions the TYPE resolution folds
 // (expr.Ret.SameAsArgs), and keep the typmod only when every branch carries
 // the same one. A NULL branch carries nothing and is skipped, the way it is
-// skipped when the common TYPE is chosen. Everything else — an aggregate, an
-// operator, a CAST, any other function call — carries -1, and one of those
-// anywhere in the fold makes the whole result -1.
+// skipped when the common TYPE is chosen.
+//
+// A CAST is NOT one of the constructs that carry -1, and ADR-0024 item 5 said
+// it was until #708 corrected it from the live server: a cast to a
+// PARAMETERIZED numeric IMPOSES its destination's modifier on the result —
+// `CAST(a AS numeric(9,2))` and `a::numeric(18,4)` both describe with their
+// own (p,s) in PostgreSQL 17. That is the cast's own typmod, not
+// select_common_typmod over its inputs, so the arm below does not recurse
+// into the operand. Only a BARE `CAST(a AS numeric)` drops to plain numeric.
+//
+// Everything else — an aggregate, an operator, any other function call, and a
+// cast to a type whose modifier wadjet does not send — carries -1, and one of
+// those anywhere in the fold makes the whole result -1.
+//
+// That last class is a DIVERGENCE from PostgreSQL, not a match, and the first
+// version of this comment read the other way. Only DECIMAL reaches
+// pgwire.TypeMod today, so `CAST(c AS VARCHAR(4))` is -1 here and -1 on the
+// wire — the two wadjet layers agree with EACH OTHER, and PostgreSQL 17.11
+// describes that cast as `character varying(4)`. The VALUE diverges too and
+// that is the sharper half: PostgreSQL truncates to n (`abcdef` becomes
+// `abcd`) and wadjet returns the whole string, because expr.castTargetType
+// maps CHAR / VARCHAR / TEXT / STRING onto one unparameterized TypeString.
+// Both halves are pinned by wadjet.TestStringCastDropsItsLengthParameter and
+// recorded in ADR-0012 item 5, where the ORDER is written down: the length is
+// ENFORCED before it is DECLARED, since declaring a bound nothing enforces is
+// the first of two lies rather than the end of one.
 func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool) (int, int, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
 		return declaredTypmod(n.Inner, decls, computed)
+	case *plansql.CastNode:
+		// The destination's OWN modifier, and only when it names one.
+		// DecimalCastDest reports hasParams=false for a bare NUMERIC /
+		// DECIMAL, which is the spelling PostgreSQL describes as plain
+		// numeric — so that falls through to the unconstrained answer with
+		// every non-decimal destination.
+		p, s, hasParams, ok := expr.DecimalCastDest(n.TypeName)
+		if !ok || !hasParams {
+			return 0, 0, false
+		}
+		return p, s, true
 	case *plansql.ColRef:
 		if computed[strings.ToLower(cleanExpr(n.String()))] || computed[strings.ToLower(n.Column)] {
 			return 0, 0, false

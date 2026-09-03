@@ -729,6 +729,31 @@ func wireCorpus() []wireCase {
 		{name: "DecimalColumnZeroRowsViaNaN", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_2 = 'NaN'`},
 		{name: "DecimalColumnAllRowsViaNegInfinity",
 			sql: `SELECT d_2 FROM dec_probe WHERE d_2 > '-Infinity' AND d_key < 4 ORDER BY d_key`},
+		// #708 — a CAST that NAMES a (p,s) carries it. These four replace
+		// `wadjet.TestCastTypmodIsUnconstrained`, the pin that recorded the
+		// divergence: `declaredTypmod` had no CAST arm and answered -1 for
+		// every spelling, while the TYPE side already resolved the
+		// destination's (p,s) — so the two halves of one declaration
+		// disagreed and a JDBC client's `getPrecision()` read 0 for a column
+		// the query itself declares DECIMAL(9,2).
+		//
+		// The VALUES agree on every arm, which is why this belongs HERE and
+		// nowhere else: no value oracle can see a right number under a
+		// missing modifier. PostgreSQL 17 sends atttypmod 589830 for
+		// numeric(9,2) and 1179656 for numeric(18,4) — ((p<<16)|s)+VARHDRSZ.
+		//
+		// The BARE spelling is the control and it must keep sending -1: a
+		// `CAST(x AS numeric)` with no parameters describes as plain numeric
+		// on the live server, so an arm that imposed a modifier for every
+		// cast would be a new divergence in the other direction.
+		{name: "CastToParameterizedDecimal",
+			sql: `SELECT CAST(d_2 AS DECIMAL(9,2)) AS v FROM dec_probe WHERE d_key = 1`},
+		{name: "CastToWiderParameterizedDecimal",
+			sql: `SELECT CAST(d_2 AS DECIMAL(18,4)) AS v FROM dec_probe WHERE d_key = 1`},
+		{name: "CastToParameterizedDecimalColonColon",
+			sql: `SELECT d_4::DECIMAL(9,2) AS v FROM dec_probe WHERE d_key = 1`},
+		{name: "CastToBareDecimalStaysUnconstrained",
+			sql: `SELECT CAST(d_2 AS DECIMAL) AS v FROM dec_probe WHERE d_key = 1`},
 		// MIN/SUM over a DECIMAL column (FIX 2, fold-in to #457/#458): live
 		// PostgreSQL's \gdesc declares typmod -1 ("unconstrained numeric")
 		// for MIN(numeric(p,s)), SUM(numeric(p,s)), and every other

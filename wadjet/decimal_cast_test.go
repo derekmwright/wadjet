@@ -67,21 +67,33 @@ func TestDecimalCastIsExact(t *testing.T) {
 }
 
 // TestDecimalCastDeclaresItsDestination is the declared type at the wire,
-// where a client meets it. A CAST is a function call for
-// select_common_typmod's purposes, so the typmod is unconstrained (ADR-0024
-// item 5) even though the engine sizes its vector from a real (p,s).
+// where a client meets it.
+//
+// A CAST that NAMES a (p,s) imposes it — that is the cast's own modifier,
+// not select_common_typmod over its inputs, and PostgreSQL 17's \gdesc says
+// so: `numeric(9,0)` for `CAST(x AS DECIMAL(9))`, `numeric(18,4)` for
+// `CAST(x AS NUMERIC(18,4))`. Only a BARE destination drops to plain numeric.
+//
+// This test asserted the opposite until #708, which is where ADR-0024 item 5
+// was corrected: it listed a CAST among the typmod--1 constructs. The three
+// bare spellings below are the half that was always right, and they are the
+// control — an arm that imposed a modifier for EVERY cast would be a new
+// divergence in the other direction.
 func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 	db := ddrOpen(t)
 	for _, tc := range []struct {
 		sql              string
 		precision, scale int
+		// wantUnconstrained is PostgreSQL's answer, measured live: true
+		// where \gdesc says plain `numeric`, false where it names (p,s).
+		wantUnconstrained bool
 	}{
-		{"SELECT CAST(a AS DECIMAL(10,2)) AS v FROM decdecl", 10, 2},
-		{"SELECT CAST(a AS NUMERIC(18,4)) AS v FROM decdecl", 18, 4},
-		{"SELECT CAST(a AS DECIMAL(9)) AS v FROM decdecl", 9, 0},
-		{"SELECT CAST(a AS DECIMAL) AS v FROM decdecl", 38, 2},
-		{"SELECT CAST(b AS NUMERIC) AS v FROM decdecl", 38, 4},
-		{"SELECT CAST(id AS DECIMAL) AS v FROM decdecl", 38, 0},
+		{"SELECT CAST(a AS DECIMAL(10,2)) AS v FROM decdecl", 10, 2, false},
+		{"SELECT CAST(a AS NUMERIC(18,4)) AS v FROM decdecl", 18, 4, false},
+		{"SELECT CAST(a AS DECIMAL(9)) AS v FROM decdecl", 9, 0, false},
+		{"SELECT CAST(a AS DECIMAL) AS v FROM decdecl", 38, 2, true},
+		{"SELECT CAST(b AS NUMERIC) AS v FROM decdecl", 38, 4, true},
+		{"SELECT CAST(id AS DECIMAL) AS v FROM decdecl", 38, 0, true},
 	} {
 		t.Run(tc.sql, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)
@@ -96,9 +108,89 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 				t.Errorf("declared DECIMAL(%d,%d), want DECIMAL(%d,%d)",
 					m.Precision, m.Scale, tc.precision, tc.scale)
 			}
-			if !m.WireUnconstrained {
-				t.Errorf("declared a typmod on the wire; a CAST is a function call for " +
-					"select_common_typmod and carries -1 (ADR-0024 item 5)")
+			if m.WireUnconstrained != tc.wantUnconstrained {
+				t.Errorf("WireUnconstrained = %v, want %v — PostgreSQL 17 describes this "+
+					"as %s (ADR-0024 item 5, corrected by #708)",
+					m.WireUnconstrained, tc.wantUnconstrained,
+					map[bool]string{true: "plain numeric", false: "numeric(p,s)"}[tc.wantUnconstrained])
+			}
+		})
+	}
+}
+
+// TestStringCastDropsItsLengthParameter pins the half of #708 that was NOT
+// fixed, in the direction that matters.
+//
+// #708 made a cast that names a (p,s) carry it on the wire, and the entry
+// above is that gate. It covered the DECIMAL family only, because DECIMAL is
+// the only type whose modifier reaches pgwire.TypeMod. The string family gets
+// the destination's length parsed and then dropped in BOTH halves, and the
+// value half is a wrong answer rather than wrong metadata. Measured live on
+// postgres:17.11:
+//
+//	SELECT CAST('abcdef' AS VARCHAR(4))   PG: abcd    wadjet: abcdef
+//	SELECT CAST('abcdef' AS CHAR(4))      PG: abcd    wadjet: abcdef
+//	SELECT CAST('12.7500' AS VARCHAR(4))  PG: 12.7    wadjet: 12.7500
+//	\gdesc of the first                   PG: character varying(4)
+//	                                      wadjet: unconstrained STRING
+//
+// `expr.castTargetType` maps CHAR / VARCHAR / TEXT / STRING to one
+// batch.TypeString, so nothing truncates; `physical.declaredTypmod` returns -1
+// for every non-DECIMAL destination, so RowDescription says unconstrained.
+//
+// This is a PIN and not an acceptance. It asserts today's answer so that the
+// day either half is closed it FAILS and names itself — the same contract the
+// oracle's knownBug entries carry, held here because the pin the PostgreSQL
+// corpus would take must name an issue and this divergence was found in review
+// with none filed. The ORDER is value-first and ADR-0012 item 5 records why:
+// declaring `character varying(4)` while returning six characters is a worse
+// lie than declaring nothing, so the length is enforced before it is declared.
+func TestStringCastDropsItsLengthParameter(t *testing.T) {
+	db := ddrOpen(t)
+	for _, tc := range []struct {
+		name, sql string
+		// want is wadjet's answer, which is the divergence; pgSays is
+		// PostgreSQL 17.11's, measured live on the oracle server.
+		want, pgSays string
+	}{
+		// A FOLDED literal, and the same question over a real STRING VECTOR:
+		// the length is dropped in the compiler and in the kernel, so a fix
+		// to either alone leaves the other cell failing.
+		{"literal_varchar", `SELECT CAST('abcdef' AS VARCHAR(4)) AS v FROM decdecl WHERE id = 1`,
+			"abcdef", "abcd"},
+		{"literal_char", `SELECT CAST('abcdef' AS CHAR(4)) AS v FROM decdecl WHERE id = 1`,
+			"abcdef", "abcd"},
+		{"column_varchar", `SELECT CAST(s AS VARCHAR(4)) AS v FROM decdecl WHERE id = 2`,
+			"12.7500", "12.7"},
+		// Two controls that a fix must NOT change: a value already within n,
+		// and the unparameterized destination. They fail if a repair
+		// truncates everything rather than truncating to n.
+		{"ctl_within_length", `SELECT CAST(s AS VARCHAR(4)) AS v FROM decdecl WHERE id = 3`,
+			"abc", "abc"},
+		{"ctl_unparameterized", `SELECT CAST('abcdef' AS VARCHAR) AS v FROM decdecl WHERE id = 1`,
+			"abcdef", "abcdef"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			if len(res.Rows) != 1 {
+				t.Fatalf("%d rows, want 1", len(res.Rows))
+			}
+			got, _ := res.Rows[0]["v"].(string)
+			if got != tc.want {
+				t.Errorf("value %q, want %q (PostgreSQL 17.11 says %q).\n"+
+					"  If this now equals PostgreSQL, the length parameter is being "+
+					"enforced: DELETE this cell, and check that the wire declaration "+
+					"moved with it — ADR-0012 item 5 records that the value half comes "+
+					"first and the declaration follows it.",
+					got, tc.want, tc.pgSays)
+			}
+			if len(res.ColumnMetas) != 1 {
+				t.Fatalf("%d column metas, want 1", len(res.ColumnMetas))
+			}
+			if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeString {
+				t.Errorf("declared %s, want STRING — every string destination is one "+
+					"unparameterized STRING here, which is the metadata half of the "+
+					"same gap", m.TypeID)
 			}
 		})
 	}

@@ -338,8 +338,10 @@ the inputs a result is resolved from: the typmod survives when every one of
 them carries the SAME one, and the result is unconstrained otherwise.
 
 A BARE COLUMN REFERENCE carries its column's typmod. An aggregate call, a
-window function, an operator, a CAST and every other function call carry
-−1 — so one of those anywhere in the fold makes the whole result −1. The
+window function, an operator and every other function call carry
+−1 — so one of those anywhere in the fold makes the whole result −1. A CAST
+is NOT one of them and this item said it was: see the correction below, which
+is now the rule the code implements rather than a divergence it records. The
 CHOICE constructs fold their branches over exactly the arguments their TYPE
 resolution folds, which is why `NULLIF(numeric(9,2), numeric(18,4))` keeps
 `numeric(9,2)` (it mirrors argument 0 alone) while `GREATEST` over the same
@@ -388,18 +390,33 @@ fatal), and the third unions them, which is what keeps a window output, an
 aggregate output, arithmetic or a CAST below a join unconstrained now that
 the map beneath it resolves at all.
 
-**Correction, recorded rather than left standing: a CAST that NAMES a (p,s)
-KEEPS it.** The sentence above lists a CAST among the constructs that carry
-−1, and postgres 17.11 disagrees — `CAST(a AS numeric(18,4))` and
+**Correction, and it is now IMPLEMENTED: a CAST that NAMES a (p,s) KEEPS
+it.** The first version of this item listed a CAST among the constructs that
+carry −1, and postgres 17.11 disagrees — `CAST(a AS numeric(18,4))` and
 `a::numeric(9,2)` both describe with their destination's modifier, and only a
 BARE `CAST(a AS numeric)` drops to plain numeric. This is the cast's own
-typmod being imposed on the result, not `select_common_typmod`. Wadjet sends
-−1 for both spellings: `declaredTypmod` has no CAST arm. It is a divergence
-of the same client-visible kind as #587's — a JDBC client reads
-`getPrecision()` as 0 — and it is NOT covered by #697's fix, which is about
-resolving the columns below a join. Filed as #708 and pinned by
-`wadjet.TestCastTypmodIsUnconstrained`, so the record does not read as a gate
-that exists.
+typmod being imposed on the result, not `select_common_typmod`, which is why
+the arm does not recurse into the operand.
+
+Wadjet sent −1 for both parameterized spellings — `declaredTypmod` had no
+CAST arm — while the TYPE side (`castDeclaredDecimal`) already resolved the
+destination's (p,s). The two halves of one declaration disagreed, and a JDBC
+client read `getPrecision()` as 0 for a column its own query declares
+DECIMAL(9,2). Fixed 2026-09-03 (#708): `declaredTypmod` has a `*plansql.CastNode`
+arm answering the destination's own (p,s) when it names one and falling through
+to unconstrained when it does not. The pin
+`wadjet.TestCastTypmodIsUnconstrained` is DELETED — it failed on the fix,
+which was its proof — and four wire-corpus entries replace it
+(`CastToParameterizedDecimal`, `CastToWiderParameterizedDecimal`,
+`CastToParameterizedDecimalColonColon`, and the bare-destination control
+`CastToBareDecimalStaysUnconstrained`), because only the WIRE arm can see this
+at all: the values agree on every path.
+
+A cast to a type whose modifier wadjet does not send is NOT covered and does
+not need to be: `pgwire.TypeMod` answers −1 for every TypeID but DECIMAL, so
+a `VARCHAR(n)` or `TIME(n)` destination is unconstrained here and on the wire,
+and the two agree. That is a site this record names as uncovered rather than
+one it claims (protocol method 9).
 
 ### 6. NaN is a comparison literal, not a stored value
 

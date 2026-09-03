@@ -1232,38 +1232,6 @@ func TestWideNumericLiteralInAChoiceStaysFloat(t *testing.T) {
 	}
 }
 
-// TestCastTypmodIsUnconstrained pins #708, a divergence #695's review found in
-// the RECORD before it found it in the code: ADR-0024 item 5 listed a CAST
-// among the constructs that carry typmod -1, and PostgreSQL 17.11 does not.
-//
-// A cast to a PARAMETERIZED numeric imposes its destination's typmod on the
-// result — `a::numeric(9,2)` and `CAST(a AS numeric(18,4))` both describe with
-// their (p,s), and only a BARE `CAST(a AS numeric)` drops to plain numeric.
-// That is the cast's own modifier, not select_common_typmod over its inputs.
-// physical.declaredTypmod has no CAST arm and sends -1 for every spelling.
-//
-// It is NOT what #695 or #697 are about — neither touches a cast — so it is
-// pinned here rather than fixed in passing. The pin FAILS when the arm lands,
-// which is #708's proof.
-func TestCastTypmodIsUnconstrained(t *testing.T) {
-	db := ddrOpen(t)
-	for _, sql := range []string{
-		"SELECT CAST(a AS DECIMAL(9,2)) AS v FROM " + ddrTable + " WHERE id = 1",
-		"SELECT CAST(b AS DECIMAL(18,4)) AS v FROM " + ddrTable + " WHERE id = 1",
-	} {
-		res := ddrQuery(t, db, sql)
-		m := res.ColumnMetas[0]
-		if m.TypeID != parquet.TypeDecimal {
-			t.Fatalf("%s declared %s, want DECIMAL — the TYPE side already names the "+
-				"destination's (p,s)", sql, m.TypeID)
-		}
-		if !m.WireUnconstrained {
-			t.Errorf("%s now carries its typmod on the wire, which is what PostgreSQL does — "+
-				"#708 has landed, so delete this pin and add a wire-corpus entry", sql)
-		}
-	}
-}
-
 // TestNullifTypmodFollowsArgumentZeroNotTheFoldedType is the wire-only defect
 // #695's re-review found, and it exists only because the TYPE fold learned to
 // widen: `NULLIF(i64, d92)` now DECLARES DECIMAL(21,2) (PostgreSQL types it
