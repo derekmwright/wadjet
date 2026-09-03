@@ -125,9 +125,21 @@ func TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter(t *testing.T) {
 // footer key exists for, and the only ones this gate can say anything about;
 // every other type is annotated in the file and reads back correctly with or
 // without the declaration.
+//
+// The CONTAINER columns are here since #608, and their absence was the gap that
+// issue names. Until then this list held only top-level scalars, so a gate
+// built to prove that a pre-v0.18.0 file's inexpressible types survive could
+// not see one nested inside a ROW, ARRAY or MAP — which is precisely where they
+// did NOT survive: the file-side overlay learned to recurse in #589 and the
+// catalog-side retype stayed top-level-only, so `c_row.ip` and `c_row.mc` read
+// back as "" from a blob-stripped file while `c_ipv4` beside them read
+// correctly. c_row and c_rownest carry IPv4, MAC and CIDR fields; c_arr and
+// c_map carry leaves of their own.
 func legacyBoundaryColumn(col string) bool {
 	switch col {
 	case "c_ipv4", "c_ipv6", "c_mac", "c_uuid", "c_bytes", "c_port", "c_proto", "c_dur", "c_cidr":
+		return true
+	case "c_row", "c_rownest", "c_arr", "c_map":
 		return true
 	}
 	return false

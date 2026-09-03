@@ -424,11 +424,42 @@ applied to depth: a type the reader can read as a top-level column it can read
 three containers deep, and vice versa.
 
 The corollary about consumers that read types from the CATALOG rather than the
-file (`retypeFromCatalog`, the `SchemaAs`/`ReadRowsAs` path) is the SAME
-top-level-only limitation, unchanged here on purpose: it only matters for
-pre-`wadjet.schema` files, which have no blob, and the no-blob path is pinned
-by `TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter`. Moving both halves at
-once would leave that gate unable to say which one moved (#608).
+file (`retypeFromCatalog`, the `SchemaAs`/`ReadRowsAs` path) was the SAME
+top-level-only limitation, left unchanged in #589 on purpose: it only matters
+for pre-`wadjet.schema` files, which have no blob, and the no-blob path is
+pinned by `TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter`. Moving both
+halves at once would have left that gate unable to say which one moved (#608).
+
+**Closed 2026-09-03 (#608): the catalog-side half recurses too, and it takes
+three seams rather than one.** The rule for a leaf is the file-side rule
+already — substitute only where the file ANNOTATED nothing (or annotated the
+UTF8 that CIDR shares with STRING) and the storage matches, decline otherwise
+— and the walk is driven by the file's node tree, so the catalog cannot reach
+deeper than the file's own schema does. The one difference from the TOP-LEVEL
+pass is deliberate: drift there is an ERROR, because the catalog names a column
+the query asked for by name; inside a container it is DECLINED, because the
+file-side overlay already declines silently on every condition it cannot meet
+and making the same disagreement fatal would refuse files that read correctly
+today.
+
+The three seams are the finding. Repairing the leaf array that the nested
+DECODE reads (`leafColumnsFromCatalog`) fixed the single-process engine and
+left the stage DAG answering `167772160` for `10.0.0.0` over the same bytes —
+a two-path divergence one level below the one #423's gate was built for. The
+DAG resolves its read schema through `Reader.SchemaAs` and carries the result
+onward, so `retypeFromCatalog` has to write the catalog's types into the
+returned Column TREE as well. And that still was not enough, because the
+declaration reaches a worker as `distributed.ColumnSpec`, which carried
+`{Name, Type, Precision, Scale, Dimension}` and no container shape at all: a
+`ROW`'s TypeID says nothing about its fields, so the nested types could not
+cross the wire. `ColumnSpec` now carries `ElementType`/`Fields`, both
+`omitempty`, so a flat declaration encodes exactly as before and a worker that
+ignores them behaves exactly as before.
+
+`legacyBoundaryColumn` in the coordinator's legacy-file gate now names the
+CONTAINER columns beside the nine scalars. Its omission was the reason a gate
+built to prove that a pre-v0.18.0 file's inexpressible types survive could not
+see the case where they did not.
 
 ### 9. A DECIMAL's declaration is half of every value, so the CATALOG's is the one that counts
 

@@ -757,12 +757,25 @@ type PreComputedAggregate struct {
 // dropped them would declare a type the worker cannot build. They are
 // omitempty and zero for every other type, so the join-side declarations
 // (BuildSchema / ProbeSchema) encode exactly as they did before.
+//
+// ElementType and Fields carry a CONTAINER's shape, and they exist for the
+// same reason the three scalars above do: a bare TypeID that says ROW says
+// nothing about the ROW's fields, so a declaration that stopped at the top
+// level could not tell the worker what an IPv6 inside that ROW is. Nine of
+// this engine's types have no parquet annotation, so for a file written before
+// the wadjet.schema footer key existed the catalog is the ONLY place a nested
+// leaf's type survives — and it could not cross the wire (#608). ARRAY and MAP
+// use ElementType, ROW uses Fields, exactly as parquet.Column does. Both are
+// omitempty, so a flat declaration encodes byte-for-byte as it did before and
+// a worker that ignores them behaves exactly as it did.
 type ColumnSpec struct {
-	Name      string `json:"name"`
-	Type      int    `json:"type"`
-	Precision int    `json:"precision,omitempty"`
-	Scale     int    `json:"scale,omitempty"`
-	Dimension int    `json:"dimension,omitempty"`
+	Name        string       `json:"name"`
+	Type        int          `json:"type"`
+	Precision   int          `json:"precision,omitempty"`
+	Scale       int          `json:"scale,omitempty"`
+	Dimension   int          `json:"dimension,omitempty"`
+	ElementType *ColumnSpec  `json:"element_type,omitempty"`
+	Fields      []ColumnSpec `json:"fields,omitempty"`
 }
 
 // ProjectSpec is one output column of an OpProject: Name is the emitted

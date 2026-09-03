@@ -28,7 +28,7 @@ func (r *Reader) SchemaAs(declared []Column) ([]Column, error) {
 	if len(declared) == 0 {
 		return r.schema.Columns, nil
 	}
-	return retypeFromCatalog(r.schema.Columns, declared, r.fr.Leaves())
+	return retypeFromCatalog(r.schema.Columns, declared, r.fr.SchemaRoot(), r.fr.Leaves())
 }
 
 // StripDeclaredSchema rewrites a parquet file's footer WITHOUT its

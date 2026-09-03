@@ -161,7 +161,7 @@ func TestMapLevelsMatchTheFooter(t *testing.T) {
 	}
 	fr := r.FileReader()
 	for i, leaf := range fr.Leaves() {
-		lcd, err := readLeafColumn(fr, 0, i)
+		lcd, err := readLeafColumn(fr, 0, i, fr.LeafColumn(i))
 		if err != nil {
 			t.Fatalf("leaf %v: %v", leaf.Path, err)
 		}
@@ -694,7 +694,7 @@ func TestMapLevelSitesAgree(t *testing.T) {
 		}
 
 		// Site 3: the levels actually written.
-		lcd, err := readLeafColumn(fr, 0, i)
+		lcd, err := readLeafColumn(fr, 0, i, fr.LeafColumn(i))
 		if err != nil {
 			t.Fatalf("leaf %s: %v", key, err)
 		}

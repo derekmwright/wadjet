@@ -210,20 +210,43 @@ func wireColumnSpecs(cols []parquet.Column) []distributed.ColumnSpec {
 	}
 	out := make([]distributed.ColumnSpec, len(cols))
 	for i, c := range cols {
-		out[i] = distributed.ColumnSpec{
-			Name: c.Name,
-			Type: int(c.Type),
-			// The parameters a bare TypeID does not carry. A scan's
-			// declaration needs them — the reader sizes a VECTOR's storage
-			// from its dimension and renders a DECIMAL from its scale
-			// (#423) — and they are zero for every other type, so the join
-			// declarations this also serves are unchanged.
-			Precision: c.Precision,
-			Scale:     c.Scale,
-			Dimension: c.Dimension,
-		}
+		out[i] = wireColumnSpec(c)
 	}
 	return out
+}
+
+// wireColumnSpec encodes one declared column, CONTAINERS INCLUDED.
+//
+// The parameters a bare TypeID does not carry come along: a scan's declaration
+// needs them (the reader sizes a VECTOR's storage from its dimension and
+// renders a DECIMAL from its scale, #423), and they are zero for every other
+// type, so the join declarations this also serves are unchanged.
+//
+// The recursion is #608's. A ROW's TypeID says nothing about its fields, so a
+// declaration that stopped at the top level could not tell a worker that a leaf
+// inside that ROW is an IPv6 — and for a file written before the wadjet.schema
+// footer key existed, the catalog is the only place that survives. The DAG's
+// scan then answered 167772160 where the single-process engine answered
+// 10.0.0.0, over the same bytes.
+func wireColumnSpec(c parquet.Column) distributed.ColumnSpec {
+	spec := distributed.ColumnSpec{
+		Name:      c.Name,
+		Type:      int(c.Type),
+		Precision: c.Precision,
+		Scale:     c.Scale,
+		Dimension: c.Dimension,
+	}
+	if c.ElementType != nil {
+		e := wireColumnSpec(*c.ElementType)
+		spec.ElementType = &e
+	}
+	if len(c.Fields) > 0 {
+		spec.Fields = make([]distributed.ColumnSpec, len(c.Fields))
+		for i, f := range c.Fields {
+			spec.Fields[i] = wireColumnSpec(f)
+		}
+	}
+	return spec
 }
 
 // flattenStageFiles returns all output files in a single flat list,

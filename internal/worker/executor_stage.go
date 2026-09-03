@@ -686,14 +686,34 @@ func execColumns(specs []distributed.ColumnSpec) []parquet.Column {
 	}
 	out := make([]parquet.Column, len(specs))
 	for i, s := range specs {
-		out[i] = parquet.Column{
-			Name:      s.Name,
-			Type:      parquet.TypeID(s.Type),
-			Nullable:  true,
-			Precision: s.Precision,
-			Scale:     s.Scale,
-			Dimension: s.Dimension,
-		}
+		out[i] = execColumn(s)
 	}
 	return out
+}
+
+// execColumn decodes one declared column, CONTAINERS INCLUDED — the inverse of
+// coordinator.wireColumnSpec. A nested subtree arrives only from a coordinator
+// that sends one; nil ElementType and empty Fields decode exactly as they did
+// before, which is what keeps a mixed-version cluster reading what it read
+// last release (#608).
+func execColumn(s distributed.ColumnSpec) parquet.Column {
+	col := parquet.Column{
+		Name:      s.Name,
+		Type:      parquet.TypeID(s.Type),
+		Nullable:  true,
+		Precision: s.Precision,
+		Scale:     s.Scale,
+		Dimension: s.Dimension,
+	}
+	if s.ElementType != nil {
+		e := execColumn(*s.ElementType)
+		col.ElementType = &e
+	}
+	if len(s.Fields) > 0 {
+		col.Fields = make([]parquet.Column, len(s.Fields))
+		for i, f := range s.Fields {
+			col.Fields[i] = execColumn(f)
+		}
+	}
+	return col
 }

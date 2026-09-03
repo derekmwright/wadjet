@@ -59,7 +59,7 @@ func mapOfListLeaves(t *testing.T) (*nestedNode, []leafColumnData, []*SchemaNode
 	pages := make([]leafColumnData, len(leaves))
 	elemIdx := -1
 	for i := range leaves {
-		if pages[i], err = readLeafColumn(fr, 0, i); err != nil {
+		if pages[i], err = readLeafColumn(fr, 0, i, fr.LeafColumn(i)); err != nil {
 			t.Fatalf("leaf %v: %v", leaves[i].Path, err)
 		}
 		if leaves[i].Path[len(leaves[i].Path)-1] == "element" {

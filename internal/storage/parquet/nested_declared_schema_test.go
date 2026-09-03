@@ -298,6 +298,13 @@ func ndsElem(v any, i int) any {
 // internal/coordinator asserted here at the unit, so a change to the overlay
 // that started INVENTING nested types (rather than restoring declared ones)
 // fails in this package rather than three layers up.
+//
+// Its claim NARROWED with #608, and the narrowing is the point: what a
+// blob-stripped file cannot do is describe itself. Reading it against the
+// CATALOG now does recover those types at every depth — see
+// TestCatalogRepairsNestedTypesInAPreV0180File — which is why every read
+// below passes a nil schema. The two tests are the two halves of one rule:
+// the READER alone cannot recover a lost type, and the catalog can.
 func TestNestedDeclaredTypesNeedTheFooterBlob(t *testing.T) {
 	schema := ndsSchema(TypeIPv6)
 	rows := []map[string]any{{

@@ -186,7 +186,7 @@ func (r *Reader) readRowGroupRange(schema []Column, selectedColumns []string, fr
 	if len(selectedColumns) > 0 {
 		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
 	}
-	readCols, err := retypeFromCatalog(readCols, schema, r.fr.Leaves())
+	readCols, err := retypeFromCatalog(readCols, schema, r.fr.SchemaRoot(), r.fr.Leaves())
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +289,13 @@ func nestedReadPlans(root *SchemaNode, readCols []Column, numLeaves int) ([]nest
 // leaf-level pages with def/rep levels and assembling nested structures.
 func (r *Reader) readRowsNested(readCols []Column, from, to int) ([]map[string]any, error) {
 	leaves := r.fr.Leaves()
+	// The type each LEAF is decoded as. It is the file's own declared column
+	// per leaf, with the CATALOG's type restored at every leaf the catalog
+	// reaches admissibly — which is the only way a pre-v0.18.0 file's nested
+	// IPv6 or UUID can be recovered at all, since such a file carries no
+	// wadjet.schema blob and the catalog is the only place its types survive
+	// (#608, ADR-0018 §8).
+	leafCols := leafColumnsFromCatalog(r.fr, readCols)
 
 	leafByName := TopLevelLeafIndex(leaves)
 	plans, needLeaf := nestedReadPlans(r.fr.SchemaRoot(), readCols, len(leaves))
@@ -308,7 +315,7 @@ func (r *Reader) readRowsNested(readCols []Column, from, to int) ([]map[string]a
 			if !needLeaf[i] {
 				continue
 			}
-			lcd, err := readLeafColumn(r.fr, rgIdx, i)
+			lcd, err := readLeafColumn(r.fr, rgIdx, i, leafCols[i])
 			if err != nil {
 				return nil, fmt.Errorf("reading leaf column %v: %w", leaves[i].Path, err)
 			}
@@ -362,23 +369,27 @@ type leafColumnData struct {
 	typeID    TypeID
 }
 
-// readLeafColumn reads all pages for a leaf column and returns raw values with levels.
-func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
+// readLeafColumn reads all pages for a leaf column and returns raw values with
+// levels.
+//
+// col is the whole Column this leaf decodes AS, not just its TypeID: a leaf
+// below a container needs its VECTOR dimension and its DECIMAL precision to
+// decode, exactly as a top-level leaf does.
+//
+// It is the CALLER's answer rather than nodeToColumn's bare inference, and it
+// was resolved in two steps. FileReader.LeafColumn supplies the file's own
+// DECLARED schema, which is what the top-level arm of this same read already
+// uses — taking the inference here instead meant an IPv6, a UUID or a BYTES
+// leaf below a container recovered as TypeString, decodePresentValues handed
+// sixteen intact bytes to the caller as a Go string, batch.Vector.SetValue read
+// that as text, net.ParseIP refused it, and the value came back as "" (#589).
+// leafColumnsFromCatalog then restores the CATALOG's type at every leaf the
+// catalog reaches admissibly, which is the only way a file written before the
+// wadjet.schema footer key existed can have its nested types recovered at all
+// (#608).
+func readLeafColumn(fr *FileReader, rgIdx, colIdx int, col Column) (leafColumnData, error) {
 	leaves := fr.Leaves()
 	leaf := leaves[colIdx]
-	// The whole Column, not just its TypeID: a leaf below a container needs
-	// its VECTOR dimension and its DECIMAL precision to decode, exactly as a
-	// top-level leaf does.
-	//
-	// FileReader.LeafColumn, not nodeToColumn: the file's own DECLARED
-	// schema, which is what the top-level arm of this same read already uses
-	// (readCols comes from r.schema). Taking the bare parquet inference here
-	// instead meant an IPv6, a UUID or a BYTES leaf below a container — the
-	// types parquet has no annotation for — recovered as TypeString, and
-	// decodePresentValues handed sixteen intact bytes to the caller as a Go
-	// string. batch.Vector.SetValue read that as text, net.ParseIP refused
-	// it, and the value read back as "" (#589).
-	col := fr.LeafColumn(colIdx)
 	typeID := col.Type
 
 	lcd := leafColumnData{
@@ -765,7 +776,7 @@ func fixedByteWidth(c Column) int {
 // that from a correct read. A named error says which column, what the
 // catalog claims and what the file actually holds — which is the whole
 // diagnosis.
-func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Column, error) {
+func retypeFromCatalog(readCols, catalog []Column, root *SchemaNode, leaves []*SchemaNode) ([]Column, error) {
 	if len(catalog) == 0 || len(readCols) == 0 {
 		return readCols, nil
 	}
@@ -841,6 +852,21 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 			if want.Type == TypeDecimal &&
 				(want.Precision != c.Precision || want.Scale != c.Scale) {
 				out[i].Precision, out[i].Scale = want.Precision, want.Scale
+			}
+			// Same reasoning one level down, for a CONTAINER. A file written
+			// before the wadjet.schema footer key existed carries no record of
+			// its nested leaves' types, and the catalog is the only place they
+			// survive — so an IPv6 inside a ROW read back as "" long after the
+			// FILE-side overlay learned to recurse (#589), because this half
+			// did not. Doing it HERE rather than only at the decode is what
+			// reaches the stage DAG: its scan source resolves through
+			// Reader.SchemaAs and carries the result onward, so a type not
+			// written into the returned Column is a type that path never sees.
+			if isNestedType(want.Type) && root != nil {
+				if n := nestedFileNode(root, c.Name); n != nil {
+					out[i] = retypeNestedFromCatalog(out[i], &want, n)
+					out[i].Name = want.Name
+				}
 			}
 			continue
 		}

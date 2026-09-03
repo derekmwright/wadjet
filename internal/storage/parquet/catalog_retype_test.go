@@ -146,7 +146,7 @@ func TestRetypeFromCatalogAcceptsTheEightLossyTypes(t *testing.T) {
 			out, err := retypeFromCatalog(
 				[]Column{{Name: "c", Type: tc.recovered}},
 				[]Column{{Name: "c", Type: tc.want}},
-				nil,
+				nil, nil,
 			)
 			if err != nil {
 				t.Fatalf("retype %s over %s: %v", tc.want, tc.recovered, err)
@@ -165,7 +165,7 @@ func TestRetypeFromCatalogLeavesNestedAlone(t *testing.T) {
 	out, err := retypeFromCatalog(
 		[]Column{{Name: "m", Type: TypeMap}, {Name: "a", Type: TypeArray}},
 		[]Column{{Name: "m", Type: TypeString}, {Name: "a", Type: TypeRow}},
-		nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("nested columns: %v", err)
@@ -319,7 +319,7 @@ func TestPhysicalReadableAsUsesTheFileLeafNotTheWriterMapping(t *testing.T) {
 			_, err := retypeFromCatalog(
 				[]Column{{Name: "d", Type: TypeDecimal, Precision: 9, Scale: 2}},
 				[]Column{{Name: "d", Type: want}},
-				leaves,
+				nil, leaves,
 			)
 			if err == nil {
 				t.Fatalf("catalog %s over an INT32-backed DECIMAL leaf was accepted", want)
@@ -337,7 +337,7 @@ func TestPhysicalReadableAsUsesTheFileLeafNotTheWriterMapping(t *testing.T) {
 	if _, err := retypeFromCatalog(
 		[]Column{{Name: "d", Type: TypeInt64}},
 		[]Column{{Name: "d", Type: TypeIPv4}},
-		ok,
+		nil, ok,
 	); err != nil {
 		t.Errorf("IPv4 over an INT64 leaf: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestRetypeChecksFixedLenByteArrayWidth(t *testing.T) {
 	if _, err := retypeFromCatalog(
 		[]Column{{Name: "u", Type: TypeString}},
 		[]Column{{Name: "u", Type: TypeUUID}},
-		leaves,
+		nil, leaves,
 	); err == nil {
 		t.Fatal("UUID declared over an 8-byte FIXED_LEN_BYTE_ARRAY leaf was accepted")
 	}
@@ -360,7 +360,7 @@ func TestRetypeChecksFixedLenByteArrayWidth(t *testing.T) {
 	if _, err := retypeFromCatalog(
 		[]Column{{Name: "u", Type: TypeString}},
 		[]Column{{Name: "u", Type: TypeUUID}},
-		leaves,
+		nil, leaves,
 	); err != nil {
 		t.Fatalf("UUID over a 16-byte leaf: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestRetypeAdmissionMatrix(t *testing.T) {
 			_, err := retypeFromCatalog(
 				[]Column{{Name: "c", Type: li.recovered}},
 				[]Column{wantCol},
-				[]*SchemaNode{li.node},
+				nil, []*SchemaNode{li.node},
 			)
 			if admit && err != nil {
 				t.Errorf("file %s (recovered %s) → catalog %s: refused (%v), want accepted",
@@ -515,7 +515,7 @@ func TestRetypeRefusesEveryCatalogDecimal(t *testing.T) {
 			_, err := retypeFromCatalog(
 				[]Column{{Name: "c", Type: recovered}},
 				[]Column{{Name: "c", Type: TypeDecimal, Precision: 18, Scale: 2}},
-				[]*SchemaNode{node},
+				nil, []*SchemaNode{node},
 			)
 			if err == nil {
 				t.Fatalf("catalog DECIMAL over a %s leaf (recovered %s) was accepted", ft, recovered)
@@ -621,7 +621,7 @@ func TestRetypeRefusesFoldCollidingNames(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := retypeFromCatalog(tc.file, tc.catalog, nil)
+			_, err := retypeFromCatalog(tc.file, tc.catalog, nil, nil)
 			if err == nil {
 				t.Fatal("retypeFromCatalog accepted a name that resolves to two columns — " +
 					"the surviving entry, and so the answer's type, is decided by list order")
@@ -643,7 +643,7 @@ func TestRetypeAcceptsCaseMismatchedSingleColumn(t *testing.T) {
 	out, err := retypeFromCatalog(
 		[]Column{{Name: "Amount", Type: TypeInt64}},
 		[]Column{{Name: "amount", Type: TypeDuration}},
-		nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("a single case-mismatched column was refused: %v", err)
