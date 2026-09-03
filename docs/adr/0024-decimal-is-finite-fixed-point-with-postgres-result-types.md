@@ -2,7 +2,12 @@
 
 Status: Accepted (2026-08-29, opening the numeric-parity arc after v0.18.4).
 Extends ADR-0012 items 9 and 12, which settled the aggregate and set-operation
-halves of this question piecemeal; this record settles the whole type.
+halves of this question piecemeal; this record settles the whole type. Amended
+2026-09-03 (#712) with the measured door census for the declared-precision
+band: every door where the `(p, s)` is a DECLARATION already enforces it and
+agrees with PostgreSQL, the shapes the issue named as unguarded are the ones
+PostgreSQL leaves UNCONSTRAINED, and the real residual is the opposite
+divergence — see "The second of those two, measured 2026-09-03".
 
 ## Context
 
@@ -457,6 +462,53 @@ inside the Int128 but past the type's own `10^p` band is stored, so
 capped at 38. Item 4 makes the declared precision the bound that matters and
 the set-operation coercion (`physical.setOpCheckedDecimalText`) is the only
 door enforcing it today.
+
+**The second of those two, measured 2026-09-03 (#712): the record was right
+about the mechanism and wrong about which way it points, and closing it as
+written would be a regression.** The door census below is a live
+postgres:17-alpine transcript over `CREATE TEMP TABLE (a numeric(38,30))`
+holding 1.5:
+
+| shape | wadjet | PostgreSQL 17.11 |
+|---|---|---|
+| `INSERT INTO d(a) VALUES (100000000)` | 22003 | 22003 |
+| `UPDATE d SET a = 100000000` | 22003 | 22003 |
+| `UPDATE d SET a = GREATEST(a,100000000)` | 22003 | 22003 |
+| `CAST(100000000 AS DECIMAL(38,30))`, `::DECIMAL(38,30)` | 22003 | 22003 |
+| `GREATEST(a, 100000000)` | `100000000.000…0` | `100000000` |
+| `LEAST(a, -100000000)` | `-100000000.000…0` | `-100000000` |
+| `CASE WHEN true THEN 100000000 ELSE a END` | `100000000.000…0` | `100000000` |
+| `a + 100000000` | **22003** | `100000001.500…0` |
+| `SUM(a) + 100000000` | **22003** | `100000001.500…0` |
+| `SELECT a FROM d UNION ALL SELECT 100000000` | **22003** | 2 rows |
+
+`pg_typeof` on every one of the computed shapes is bare `numeric` — typmod
+−1. **PostgreSQL does not constrain a computed expression to a column's
+typmod**, so the band exists there only where the type is a DECLARATION: a
+store or an explicit cast. Every such door in wadjet already enforces it, all
+five agree with PostgreSQL digit for digit, and there is no unguarded store
+(`INSERT … SELECT` is unparsed, 42601, so that door does not exist).
+
+The three shapes #712 names as the defect are exactly the ones PostgreSQL
+leaves unconstrained, and their VALUES are right today —
+`ColumnMeta.WireUnconstrained` already reports typmod −1 for them, so the wire
+agrees too. Adding a `10^p` check at `SetValueChecked`/`SetComputedChecked`
+would turn three right answers into 22003 and widen an ADR-0012 item 1
+violation instead of closing one. It is not shipped.
+
+The residual that IS real points the other way, and it is the
+`pgDivergenceCarrier` class §3 already records for `*` and §7 for set
+operations, now measured for `+` and for an aggregate result: the fold
+SYNTHESISES a constrained `(38,30)` where PostgreSQL is unbounded, and the
+arithmetic then enforces that synthesised band as a declaration
+(`expr.resolveDecimalMode` → `batch.DecimalResultType` → `DecimalAddAt` →
+`decimalAtPrecision` → `numericFieldOverflow`). Closing it means giving the
+computed DECIMAL domain the CARRIER bound instead of a synthesised `10^p`
+band — representing "unconstrained numeric" in the VALUE domain the way
+`WireUnconstrained` already represents it on the wire. That is the numeric
+typing layer, not storage, and it is its own arc. `batch.DecimalColumn` gains
+no `Precision` field here: with enforcement it is the regression above, and
+without it, it is dead weight.
 
 **What the 22003 covers today, and what it does not.** It covers every site
 that produces a value through the checked reader: `ParseDecimalStringChecked`,
