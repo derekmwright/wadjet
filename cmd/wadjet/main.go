@@ -130,6 +130,21 @@ var (
 )
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the root command with every persistent flag registered
+// and the configuration loader installed.
+//
+// It is a function (rather than inline in main) so the precedence census can
+// drive the REAL command with the REAL flag registrations through the REAL
+// PersistentPreRunE — a census that ran against a model of the loader could
+// pass while the binary disagreed with it. Building it also RESETS every
+// bound package variable to its registered default, which is what makes one
+// census cell independent of the last.
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "wadjet",
 		Short: "Wadjet — lightweight distributed analytical query engine",
@@ -139,10 +154,18 @@ func main() {
 		// exceeded" buries the message. Flag/usage mistakes still show
 		// usage via the FlagErrorFunc below.
 		SilenceUsage: true,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// One loader, two passes: defaults -> config file -> env, then
+			// the flags the operator actually typed. Every command runs it,
+			// so no code path can read a value the resolution disagrees
+			// with (ADR-0029, #808).
+			if err := resolveConfiguration(cmd); err != nil {
+				return err
+			}
 			// Process-wide planner knobs (package-level state read at plan
 			// time; the logical optimizer has no per-query config surface).
 			logical.BushyJoinReorder.Store(bushyJoinReorder)
+			return nil
 		},
 	}
 
@@ -242,9 +265,15 @@ func main() {
 		return err
 	})
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	// Snapshot the flag DEFAULTS while they are still the bound variables'
+	// values. They are the resolver's default tier for every key that has a
+	// flag: the binary runs on the flag default today, and
+	// config.DefaultConfig() is not always the same value (it sets
+	// storage.access_key to "minioadmin" where --access-key defaults to ""
+	// and means "auto-detect from env/IAM").
+	snapshotConfigFlagDefaults()
+
+	return rootCmd
 }
 
 func serveCmd() *cobra.Command {
@@ -427,10 +456,15 @@ func serveCmd() *cobra.Command {
 			// the whole GOMEMLIMIT and was the proximate OOM-kill in the
 			// 2026-06-11 edge validation (the boot invariant flagged
 			// Σcaps > GOMEMLIMIT, but it is advisory). When the operator
-			// didn't set --result-store explicitly, clamp it to 15% of the
+			// didn't set the result store ANYWHERE, clamp it to 15% of the
 			// envelope; large results fall through to S3 as always. No
 			// change on big machines (15% of a 24 GiB limit ≫ 512 MiB).
-			if !cmd.Root().PersistentFlags().Changed("result-store") {
+			//
+			// The guard is the resolved SOURCE, not the flag alone: a
+			// `worker.result_store_bytes` in the config file is as explicit
+			// as typing --result-store, and clamping it would be a new way
+			// to ignore the file (#808).
+			if effectiveResolution().Source("worker.result_store_bytes") == config.SourceDefault {
 				if maxStore := goMemLimit * 15 / 100; resultStoreBytes > maxStore {
 					resultStoreBytes = maxStore
 					logger.Info("auto-scaled result store to envelope",
@@ -465,14 +499,15 @@ func serveCmd() *cobra.Command {
 
 		// Wrap store with circuit breaker for S3 resilience. The breaker is
 		// scoped per operation class — a failing delete or upload burst must
-		// never fast-fail a base-table read (ADR-0028). Thresholds come from
-		// the flags; note that the config FILE does not reach storage.* yet
-		// (#808), so a YAML storage.circuit block would be inert and none is
-		// read here.
+		// never fast-fail a base-table read (ADR-0028). The thresholds are
+		// resolved config keys: a `storage.circuit:` block in the YAML, a
+		// WADJET_STORAGE_CIRCUIT_* variable and the flags all reach here, in
+		// ADR-0029's order.
+		circuit := effectiveConfig().Storage.Circuit
 		circuitCfg := objstore.CircuitConfig{
-			FailureThreshold: circuitThreshold,
-			ResetTimeout:     circuitResetTimeout,
-			RequestTimeout:   circuitRequestTimeout,
+			FailureThreshold: circuit.FailureThreshold,
+			ResetTimeout:     circuit.ResetTimeout,
+			RequestTimeout:   circuit.RequestTimeout,
 		}
 		store = objstore.NewCircuitStore(store, circuitCfg, logger)
 
@@ -506,9 +541,11 @@ func serveCmd() *cobra.Command {
 			}
 		}
 
-		if v := os.Getenv("WADJET_ENABLE_ALERTS"); v == "1" || strings.EqualFold(v, "true") {
-			enableAlerts = true
-		}
+		// WADJET_ENABLE_ALERTS used to be read here, and it beat the flag
+		// unconditionally — the opposite of every other tier. It is an
+		// ordinary resolved key now (alerts.enabled), so `alerts:` in the
+		// config file works and an explicit --enable-alerts=false wins
+		// (ADR-0029).
 		if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_PREFIX"); v != "" {
 			*catalogSnapshotPrefix = v
 		}
@@ -518,7 +555,7 @@ func serveCmd() *cobra.Command {
 			}
 		}
 
-		switch mode {
+		switch serveMode() {
 		case "standalone":
 			return runStandalone(ctx, store, logger, enableAlerts, *catalogSnapshotPrefix, *catalogSnapshotInterval, *forceRestoreCatalog)
 		case "coordinator":
@@ -526,7 +563,7 @@ func serveCmd() *cobra.Command {
 		case "worker":
 			return runWorker(ctx, store, logger)
 		default:
-			return fmt.Errorf("unknown mode: %s", mode)
+			return fmt.Errorf("unknown mode: %s", serveMode())
 		}
 	}
 	return cmd
@@ -549,7 +586,7 @@ func queryCmd() *cobra.Command {
 			}
 
 			// Load GeoIP databases if configured
-			if err := loadGeoIP(nil, logger); err != nil {
+			if err := loadGeoIP(logger); err != nil {
 				return fmt.Errorf("loading GeoIP: %w", err)
 			}
 			defer geoip.Close()
@@ -869,7 +906,7 @@ func shellCmd() *cobra.Command {
 			}
 
 			// Load GeoIP databases if configured
-			if err := loadGeoIP(nil, logger); err != nil {
+			if err := loadGeoIP(logger); err != nil {
 				return fmt.Errorf("loading GeoIP: %w", err)
 			}
 			defer geoip.Close()
@@ -1022,23 +1059,43 @@ func runShell(ctx context.Context, db *wadjet.DB, f format.Format) error {
 	return nil
 }
 
+// newStore builds the object store from the RESOLVED storage configuration.
+// Before #808's fix it read the flag variables, so the whole `storage:`
+// section of the config file was parsed, validated and reported by the admin
+// endpoint without ever reaching a connection.
 func newStore() (objstore.Store, error) {
-	switch storageType {
+	st := effectiveConfig().Storage
+	switch st.Type {
 	case "file":
-		dir := dataDir
+		dir := st.DataDir
 		if dir == "" {
 			dir = "/var/lib/wadjet/data"
 		}
 		return objstore.NewFileStore(dir)
 	default:
 		return objstore.NewMinIOStore(objstore.MinIOConfig{
-			Endpoint:  endpoint,
-			AccessKey: accessKey,
-			SecretKey: secretKey,
-			UseSSL:    useSSL,
-			Region:    s3Region,
+			Endpoint:  st.Endpoint,
+			AccessKey: st.AccessKey,
+			SecretKey: st.SecretKey,
+			UseSSL:    st.UseSSL,
+			Region:    st.Region,
 		})
 	}
+}
+
+// natsServerConfig builds the embedded NATS server configuration from the
+// RESOLVED `nats:` section. runStandalone and runCoordinator share it, which
+// is also the seam the census asserts the file and environment tiers reach.
+func natsServerConfig() distributed.NATSConfig {
+	n := effectiveConfig().NATS
+	cfg := distributed.DefaultNATSConfig()
+	cfg.Port = n.Port
+	cfg.ClusterID = n.ClusterID
+	cfg.LeafRemotes = n.LeafRemotes
+	if n.StoreDir != "" {
+		cfg.StoreDir = n.StoreDir
+	}
+	return cfg
 }
 
 func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool, snapshotPrefix string, snapshotInterval time.Duration, forceRestoreTS string) error {
@@ -1056,13 +1113,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	startBackgroundGC(ctx, logger)
 
 	// Start embedded NATS (with optional leaf node connections)
-	natsCfg := distributed.DefaultNATSConfig()
-	natsCfg.Port = natsPort
-	natsCfg.ClusterID = clusterID
-	natsCfg.LeafRemotes = leafRemotes
-	if natsStoreDir != "" {
-		natsCfg.StoreDir = natsStoreDir
-	}
+	natsCfg := natsServerConfig()
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
@@ -1098,12 +1149,12 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	// Restore persisted UDFs and wire persistence callback
 	wireUDFPersistence(cat, logger)
 
-	// Load GeoIP databases if configured
-	var fileCfg *config.Config
-	if configFile != "" {
-		fileCfg, _ = config.Load(configFile)
-	}
-	if err := loadGeoIP(fileCfg, logger); err != nil {
+	// Load GeoIP databases if configured. The two dropped-error
+	// `config.Load(configFile)` reads that used to sit here are gone: the
+	// file is loaded once, in the root command's PersistentPreRunE, and a
+	// parse failure stops the process there instead of silently yielding a
+	// nil config here (#802's doctrine, #808's loader).
+	if err := loadGeoIP(logger); err != nil {
 		return fmt.Errorf("loading GeoIP: %w", err)
 	}
 	defer geoip.Close()
@@ -1210,6 +1261,15 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	coord.StartQueryActiveHandler()
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, queryIntermediateGC)
 
+	// OpenTelemetry. runStandalone did not call this at all, so the
+	// `telemetry:` section and WADJET_OTEL_* reached nothing in the DEFAULT
+	// run mode while working in the other two — "the config reaches runtime"
+	// has to mean every mode that has the consumer, not two of three.
+	if otelTP := initTelemetry(ctx, logger); otelTP != nil {
+		coord.SetTelemetry(otelTP)
+		defer otelTP.Shutdown(context.Background())
+	}
+
 	// Enable alerts feature flag; in standalone mode StartLeaderWatch is a
 	// no-op so we start the scheduler directly here if enabled.
 	coord.SetAlertsEnabled(alertsEnabled)
@@ -1256,8 +1316,21 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	var provider *auth.Provider
 	// Hoisted out of the block below: the pgwire DB is opened further down
 	// and needs the same limits.
-	var globalLimits *config.QueryLimits
-	var roleLimits map[string]*config.QueryLimits
+	// The cost guard reaches every planner a served query can meet: the
+	// HTTP server's own (embedded, no-coordinator) path, the coordinator's
+	// four, and — below — the embedded DB that pgwire falls back to for any
+	// statement its routing gate declines and for every statement when a
+	// provider is present but disabled (#803).
+	//
+	// It is wired from the RESOLVED config and OUTSIDE the `--config` block.
+	// Both assignments used to live inside it, so a deployment that exported
+	// WADJET_QUERY_MAX_SCAN_BYTES and passed no config file resolved the key,
+	// reported it through GET /v1/admin/config, and ran with no cost guard at
+	// all — #808's own shape surviving in one corner. Per-role limits still
+	// come from the file, because roles do.
+	globalLimits, roleLimits := effectiveConfig().EffectiveQueryLimits()
+	srvCfg.QueryLimits, srvCfg.RoleLimits = globalLimits, roleLimits
+	coord.SetQueryLimits(globalLimits, roleLimits)
 
 	if configFile != "" {
 		fileCfg, mgr, prov, wireErr := wireAuthFromConfig(ctx, configFile, logger)
@@ -1266,15 +1339,6 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		}
 		cfgMgr, provider = mgr, prov
 		srvCfg.Provider = provider
-
-		// The cost guard reaches every planner a served query can meet: the
-		// HTTP server's own (embedded, no-coordinator) path, the
-		// coordinator's four, and — below — the embedded DB that pgwire
-		// falls back to for any statement its routing gate declines and for
-		// every statement when a provider is present but disabled (#803).
-		globalLimits, roleLimits = fileCfg.EffectiveQueryLimits()
-		srvCfg.QueryLimits, srvCfg.RoleLimits = globalLimits, roleLimits
-		coord.SetQueryLimits(globalLimits, roleLimits)
 
 		if fileCfg.Auth.MTLS.Enabled {
 			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)
@@ -1387,14 +1451,8 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool, snapshotPrefix string, snapshotInterval time.Duration, forceRestoreTS string) error {
 	// Start embedded NATS (with optional leaf node connections)
 	// Bind to 0.0.0.0 so remote workers can connect.
-	natsCfg := distributed.DefaultNATSConfig()
+	natsCfg := natsServerConfig()
 	natsCfg.Host = "0.0.0.0"
-	natsCfg.Port = natsPort
-	natsCfg.ClusterID = clusterID
-	natsCfg.LeafRemotes = leafRemotes
-	if natsStoreDir != "" {
-		natsCfg.StoreDir = natsStoreDir
-	}
 	// Apply NATS mTLS config: CLI flag, then env var, then the config file
 	// (#827). A config file that will not PARSE is a startup error, and
 	// partially-specified material is a startup error.
@@ -1540,6 +1598,12 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	var cfgMgr *config.Manager
 	var provider *auth.Provider
 
+	// The cost guard, from the resolved config and outside the `--config`
+	// block — see runStandalone. This mode serves no pgwire listener (#803).
+	globalLimits, roleLimits := effectiveConfig().EffectiveQueryLimits()
+	srvCfg.QueryLimits, srvCfg.RoleLimits = globalLimits, roleLimits
+	coord.SetQueryLimits(globalLimits, roleLimits)
+
 	if configFile != "" {
 		fileCfg, mgr, prov, wireErr := wireAuthFromConfig(ctx, configFile, logger)
 		if wireErr != nil {
@@ -1547,13 +1611,6 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		}
 		cfgMgr, provider = mgr, prov
 		srvCfg.Provider = provider
-
-		// The cost guard reaches every planner a served query can meet here:
-		// the HTTP server's own (embedded, no-coordinator) path and the
-		// coordinator's four. This mode serves no pgwire listener (#803).
-		globalLimits, roleLimits := fileCfg.EffectiveQueryLimits()
-		srvCfg.QueryLimits, srvCfg.RoleLimits = globalLimits, roleLimits
-		coord.SetQueryLimits(globalLimits, roleLimits)
 
 		if fileCfg.Auth.MTLS.Enabled {
 			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)
@@ -1668,12 +1725,9 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		return fmt.Errorf("creating JetStream: %w", err)
 	}
 
-	// Load GeoIP databases if configured
-	var fileCfg *config.Config
-	if configFile != "" {
-		fileCfg, _ = config.Load(configFile)
-	}
-	if err := loadGeoIP(fileCfg, logger); err != nil {
+	// Load GeoIP databases if configured (from the resolved config; see
+	// runStandalone).
+	if err := loadGeoIP(logger); err != nil {
 		return fmt.Errorf("loading GeoIP: %w", err)
 	}
 	defer geoip.Close()
@@ -2074,18 +2128,28 @@ func buildPolicyConfigs(cfgs []config.AuthPolicy) []auth.PolicyConfig {
 // not parse is logged and dropped, and the provider keeps the state it already
 // had rather than swapping in a weaker one.
 func wireAuthFromConfig(ctx context.Context, configFile string, logger *slog.Logger) (*config.Config, *config.Manager, *auth.Provider, error) {
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("loading config %q: %w", configFile, err)
-	}
+	// The file was read and resolved once, in the root command's
+	// PersistentPreRunE, and an unparseable one stopped the process there.
+	// Loading it a second time here would give the auth provider a
+	// different view of the configuration from the one the rest of the
+	// process runs on — which is the whole of #808 in miniature.
+	res := effectiveResolution()
+	cfg := res.Config()
 
 	provider, err := buildProviderFromConfig(cfg, logger)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("loading config %q: %w", configFile, err)
 	}
 
-	cfgMgr := config.NewManager(cfg, logger)
-	cfgMgr.Subscribe(func(event config.ChangeEvent) {
+	// The manager carries the RESOLUTION, so GET /v1/admin/config reports
+	// the effective value of every key with the tier it came from, instead
+	// of a file-and-defaults view of a process running on something else
+	// (#828).
+	cfgMgr := config.NewManagerFromResolution(res, logger)
+	// Declaring the keys is what makes them hot-reloadable: auth is the one
+	// section with a subscriber that applies a change at runtime, so it is
+	// the one section the admin API will accept a write for.
+	cfgMgr.SubscribeKeys([]string{"auth"}, func(event config.ChangeEvent) {
 		authCfg := buildAuthConfig(event.New.Auth)
 		policyCfgs := buildPolicyConfigs(event.New.Auth.Policies)
 		abacPolicies := buildABACPolicies(event.New.Auth.ABACPolicies)
@@ -2243,17 +2307,13 @@ func buildABACPolicies(cfgs []config.ABACPolicy) []auth.AccessControlPolicy {
 	return policies
 }
 
-// loadGeoIP loads MaxMind GeoIP databases from CLI flags or config file.
-func loadGeoIP(cfg *config.Config, logger *slog.Logger) error {
-	cityDB, asnDB := geoipCityDB, geoipASNDB
-	if cfg != nil {
-		if cfg.GeoIP.CityDB != "" && cityDB == "" {
-			cityDB = cfg.GeoIP.CityDB
-		}
-		if cfg.GeoIP.ASNDB != "" && asnDB == "" {
-			asnDB = cfg.GeoIP.ASNDB
-		}
-	}
+// loadGeoIP loads the MaxMind GeoIP databases named by the RESOLVED
+// configuration. The flag/file tie-break it used to do by hand is the
+// loader's job now (ADR-0029), which is also how the environment tier
+// (WADJET_GEOIP_CITY_DB / _ASN_DB) starts reaching it.
+func loadGeoIP(logger *slog.Logger) error {
+	g := effectiveConfig().GeoIP
+	cityDB, asnDB := g.CityDB, g.ASNDB
 	if cityDB == "" && asnDB == "" {
 		return nil
 	}
@@ -2352,24 +2412,21 @@ func buildTLSConfig(cfg config.AuthMTLS) (*tls.Config, error) {
 }
 
 // resolveNATSTLSPaths returns the NATS TLS cert/key/CA paths: CLI flag
-// first, then environment variable, then the config file.
+// first, then environment variable, then the config file — resolved per
+// field, so a deployment may take the certificate from a flag, the key from
+// the environment and the CA from the file.
 //
-// The config-file tier is new. The doc comment said "CLI flags take
-// priority, then env vars, then config file values" and the body read the
-// flags and os.Getenv and NOTHING ELSE — cfg.NATS.TLSCert/TLSKey/TLSCA
-// were parsed, validated, reported by the admin endpoint, and never
-// consulted here. A deployment that put its mTLS material in the YAML, as
-// docs/configuration.md describes, got a server that connected to NATS
-// WITHOUT TLS and said nothing (#827).
+// Since #808's loader this is the SAME order the whole process resolves on
+// (ADR-0029), and the three flag variables it reads first already hold the
+// loader's answer, so the two cannot disagree —
+// TestNATSTLSAgreesWithTheResolvedConfig drives all eight presence cells
+// through the real command and asserts exactly that. What this function
+// still owns, and the loader does not, is the REFUSAL below.
 //
 // Material that is NAMED and then not used is a startup error, not a
-// silent downgrade. The connection is only secured when all three paths
-// are present, so naming one or two of them used to disable TLS quietly;
-// that now refuses to start. This is one face of #808 — the config file is
-// dead for nats.* entirely, and for storage.*, http.*, grpc.*, worker.*,
-// parquet.* and telemetry.* besides — and the general precedence repair is
-// a separate product decision. The security consequence is why this tier
-// is wired now rather than waiting for it.
+// silent downgrade. The connection is only secured when all three paths are
+// present, so naming one or two of them used to disable TLS quietly; that
+// now refuses to start (#827).
 func resolveNATSTLSPaths(cfg *config.Config) (cert, key, ca string, err error) {
 	pick := func(flag, env string, file func() string) string {
 		if flag != "" {
@@ -2415,30 +2472,23 @@ func resolveNATSTLSPaths(cfg *config.Config) (cert, key, ca string, err error) {
 // initTelemetry creates an OTel TracerProvider if an OTLP endpoint is configured.
 // Returns nil if no endpoint is set (tracing disabled).
 func initTelemetry(ctx context.Context, logger *slog.Logger) *telemetry.Provider {
-	endpoint := otelEndpoint
-	insecure := otelInsecure
-	var sampleRate float64
-
-	// CLI flags take precedence; fall back to env vars / config file
-	if endpoint == "" {
-		endpoint = os.Getenv("WADJET_OTEL_ENDPOINT")
-	}
-	if endpoint == "" {
+	// The three tiers used to be walked by hand here, in the OPPOSITE
+	// convention to the rest of the process: a flag won only when non-empty,
+	// the environment was consulted second, and the config file's
+	// `telemetry:` section was never consulted at all. They are ordinary
+	// resolved keys now (ADR-0029, #808).
+	t := effectiveConfig().Telemetry
+	if t.Endpoint == "" {
 		return nil
 	}
-	if !insecure {
-		insecure = os.Getenv("WADJET_OTEL_INSECURE") == "true" || os.Getenv("WADJET_OTEL_INSECURE") == "1"
-	}
-	if v := os.Getenv("WADJET_OTEL_SAMPLE_RATE"); v != "" {
-		fmt.Sscanf(v, "%f", &sampleRate)
-	}
+	sampleRate := t.SampleRate
 	if sampleRate <= 0 {
 		sampleRate = 1.0
 	}
 
 	tp, err := telemetry.Init(ctx, telemetry.Config{
-		Endpoint:   endpoint,
-		Insecure:   insecure,
+		Endpoint:   t.Endpoint,
+		Insecure:   t.Insecure,
 		SampleRate: sampleRate,
 	}, logger)
 	if err != nil {
@@ -2461,6 +2511,12 @@ func initTelemetry(ctx context.Context, logger *slog.Logger) *telemetry.Provider
 // the process with the reason"), and it applies on EVERY mode, not only the
 // ones that happen to load the file again later for another reason: worker
 // mode has no wireAuthFromConfig and would have run to completion.
+//
+// The root command's loader now refuses the same file earlier and for every
+// command (resolveConfiguration), so in a real process this read is a
+// second look at a file already known to parse. It stays because it is the
+// security control's OWN guarantee: the tier does not depend on some other
+// caller having checked first, and its gates hold it to that.
 func loadConfigForNATSTLS() (*config.Config, error) {
 	if configFile == "" {
 		return nil, nil
@@ -2555,11 +2611,11 @@ Configure in Claude Desktop's claude_desktop_config.json:
 			var provider *auth.Provider
 			var identity *auth.Identity
 			if configFile != "" {
-				cfg, loadErr := config.Load(configFile)
-				if loadErr != nil {
-					return fmt.Errorf("loading config %q: %w", configFile, loadErr)
-				}
-				p, buildErr := buildProviderFromConfig(cfg, logger)
+				// The resolved config, not a second read of the file: the
+				// root command already loaded it and refused an unparseable
+				// one, and MCP must enforce the same auth block the rest of
+				// the process runs on (#808).
+				p, buildErr := buildProviderFromConfig(effectiveConfig(), logger)
 				if buildErr != nil {
 					return fmt.Errorf("loading config %q: %w", configFile, buildErr)
 				}
