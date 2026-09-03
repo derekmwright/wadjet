@@ -668,21 +668,19 @@ func arcACells() []arcACell {
 				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
 			want: []string{"v=int64:9"}},
 
-		{issue: "#679", name: "exists_over_a_derived_table_cross_width_is_loud",
+		// ANSWERING SINCE THE CORRELATION ARC (#679's producer half). The
+		// re-run now renders every outer value TYPED — a DECIMAL as a DECIMAL
+		// literal at the column's own scale — so `'2.00' = b.k` is gone and
+		// with it the 22P02 that made these loud. The per-type matrix that
+		// earns it is `TestArcD5CorrelationMatchesPostgres`'s #679 family.
+		{issue: "#679", name: "exists_over_a_derived_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
-			wantErrLike:    "could not be executed",
-			wantErrLikeDAG: "could not be executed",
-			wantCorrRoutes: 1,
-			pgSays: "3 — the re-run renders the DECIMAL outer value as a QUOTED string, " +
-				"and '2.00' against a BIGINT raises 22P02"},
-		{issue: "#679", name: "not_exists_over_a_derived_table_cross_width_is_loud",
+			want: []string{"n=int64:3"}, wantCorrRoutes: 1},
+		{issue: "#679", name: "not_exists_over_a_derived_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE NOT EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
-			wantErrLike:    "could not be executed",
-			wantErrLikeDAG: "could not be executed",
-			wantCorrRoutes: 1,
-			pgSays:         "7"},
+			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
 		// #679's three controls, all of which ANSWER at base and must keep
 		// answering — the dossier's own point that three of the four widths
 		// would let a wrong fix pass. The trigger is DECIMAL outer against

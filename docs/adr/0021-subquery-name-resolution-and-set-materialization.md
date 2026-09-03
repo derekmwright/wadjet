@@ -271,6 +271,65 @@ The §1c boundary is unchanged: an outer table correlated by its own TABLE NAME
 against an inner relation reading the same table under an alias has no CTE and
 no scope to record, so it stays silent and stays pinned.
 
+### 1e. The re-run's outer values are TYPED, and a type with no literal is a refusal
+
+(Added 2026-09-03, #679.)
+
+The re-run is the fallback for a correlated subquery this engine cannot
+express as a join, and it substitutes the outer row's values into the
+subquery's WHERE as literal TEXT. What that text MEANS is decided by the
+literal's own spelling — so a value whose Go box has lost its wadjet type gets
+RE-TYPED by whatever the box happens to look like.
+
+`batch.Vector.GetValue` is a boxing boundary, not a display one: a DECIMAL
+comes back as its rendered text, a DATE as a formatted string, a TIMESTAMP as
+a bare int64 of epoch milliseconds, BYTES as a `[]byte`, and the six
+network-native types and UUID as their canonical text. The renderer read the
+box, and its `default:` arm wrapped anything unrecognized in quotes. `a.w_d2 =
+b.k` against a BIGINT inner therefore became `'2.00' = b.k` and raised 22P02
+for a query PostgreSQL answers with 3 rows.
+
+**The rule: every outer value is rendered as a literal this engine's own
+parser reads back as the SAME value at the SAME type, and a type that has no
+such literal is a REFUSAL rather than a guess.**
+
+A CAST where the bare spelling would re-type the value (DECIMAL at the
+column's own scale, DATE, TIMESTAMP, REAL, DOUBLE PRECISION), a bare numeric
+where the type already is the literal's (the integer family, PORT, PROTOCOL,
+DURATION), a quoted string where the comparison kernels resolve a string
+operand against the column's declared type (the network types, UUID, STRING).
+The CASTs are load-bearing and not decoration: a bare numeric literal is
+float8 in this dialect (ADR-0024's literal-typing rule), so a REAL rendered
+without one is compared as a double — measured, `c_f32 = 0.14285715` matches
+0 rows where the column's own value matches 1.
+
+Two families have no literal at all, and both FAIL the query with 0A000
+(`expr.UnrenderableOuterValueError`) rather than being rendered as something
+else:
+
+- **ARRAY, ROW, MAP and VECTOR.** There is no container literal in this
+  dialect.
+- **A BYTES value that is not valid UTF-8, or that holds a NUL.** The only
+  bytea spelling the parser accepts is a quoted string, and those bytes do not
+  survive it — a NUL cannot travel through the wire's text format at all
+  (#570). They would come back as DIFFERENT bytes, which is a wrong answer
+  rather than a failure.
+
+NaN and the infinities join them, for the reason §2 already gives about the
+IN-set materialization: this dialect has no numeric literal for either.
+
+The gate is `expr.TestOuterLiteralRendersEveryTypeAsItsOwnType` (all 22 types
+plus the refusals) and the #679 family of the correlation census, which runs
+all 18 flat types as the OUTER value of a correlated EXISTS over a derived
+table — the decline that keeps the shape on the re-run — against PostgreSQL's
+own answers over the same rows, on four arms. The counts differ per type (29,
+30, 38, 58, 60), so no single wrong answer passes them all.
+
+This does not make the shape distributed: a derived-table inner is still a
+decline, so both DAG arms route it to the coordinator-local pipeline
+(`CorrelatedLocalRoutes` 1, asserted). Decorrelating THROUGH a derived-table
+inner is a producer repair and is not attempted here.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

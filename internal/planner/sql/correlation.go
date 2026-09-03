@@ -397,7 +397,7 @@ func RewriteOuterRefs(node Node, outerTables map[string]bool, vals map[string]an
 		if n.Table != "" && outerTables[strings.ToLower(n.Table)] {
 			key := strings.ToLower(n.Table) + "." + strings.ToLower(n.Column)
 			if v, ok := vals[key]; ok {
-				return anyToLit(v)
+				return outerValueLit(v)
 			}
 		}
 		return n
@@ -509,7 +509,7 @@ func RewriteUnqualifiedOuterRefs(node Node, unqualOuter map[string]string, vals 
 			if tbl, ok := unqualOuter[col]; ok {
 				key := tbl + "." + col
 				if v, ok := vals[key]; ok {
-					return anyToLit(v)
+					return outerValueLit(v)
 				}
 			}
 		}
@@ -583,6 +583,23 @@ func RewriteUnqualifiedOuterRefs(node Node, unqualOuter map[string]string, vals 
 }
 
 // anyToLit converts a Go value to an AST Lit node with proper quoting.
+// outerValueLit is the value a correlated re-run substitutes for one outer
+// column reference.
+//
+// A caller that KNOWS the column's wadjet type renders the literal itself and
+// puts the resulting node in the map — that is the only way a DECIMAL, a
+// TIMESTAMP or a REAL can keep its type across the substitution, because the
+// Go box they arrive in no longer says which one it is (expr.outerLiteral,
+// #679). anyToLit stays for the callers that have only a box: it can read an
+// integer, a float, a string and a bool, and it is what this function falls
+// back to.
+func outerValueLit(v any) Node {
+	if n, ok := v.(Node); ok {
+		return n
+	}
+	return anyToLit(v)
+}
+
 func anyToLit(v any) *Lit {
 	if v == nil {
 		return &Lit{Value: "null", Kind: LitNull}

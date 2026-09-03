@@ -219,7 +219,17 @@ func readOuterValues(b *batch.RecordBatch, row int, refs []plansql.OuterRef) (ma
 		if v == nil {
 			return nil, &MissingOuterColumnError{Ref: ref, Available: batchColumnNames(b)}
 		}
-		vals[key] = v.GetValue(row)
+		// The LITERAL, not the box. The box has lost the column's wadjet type
+		// for half the type system — a DECIMAL boxes as its rendered text, a
+		// DATE as a formatted string, a TIMESTAMP as a bare int64 — and a
+		// renderer that reads the box re-types the value by what it looks
+		// like: `a.w_d2 = b.k` became `'2.00' = b.k` and raised 22P02 for a
+		// query PostgreSQL answers (#679). See outer_literal.go.
+		lit, err := outerLiteral(v, row)
+		if err != nil {
+			return nil, err
+		}
+		vals[key] = lit
 	}
 	return vals, nil
 }

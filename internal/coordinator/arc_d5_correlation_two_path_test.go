@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -50,7 +51,10 @@ type arcD5Cell struct {
 }
 
 func arcD5Cells() []arcD5Cell {
-	return append(arcD5CTEScopeCells(), arcD5AggregateArgumentCells()...)
+	return append(append(
+		arcD5CTEScopeCells(),
+		arcD5TypedRerunCells()...),
+		arcD5AggregateArgumentCells()...)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +146,79 @@ func arcD5CTEScopeCells() []arcD5Cell {
 			wantErrLikeDAG: "SubqueryRunner",
 			pgSays:         "47"},
 	}
+}
+
+// ---------------------------------------------------------------------------
+// #679 — the re-run renders every outer value TYPED.
+//
+// A correlated subquery this engine cannot express as a join is re-executed
+// per outer row with the outer values substituted as LITERAL TEXT, and the
+// renderer read the Go BOX rather than the column's type. `batch.Vector.
+// GetValue` hands a DECIMAL back as its rendered text, so `a.w_d2 = b.k`
+// became `'2.00' = b.k` and raised 22P02 for a query PostgreSQL answers with
+// 3 rows. DATE, TIMESTAMP, BYTES, the six network types and UUID reached the
+// same `default:` arm.
+//
+// The per-type matrix below is the gate the fix earns: all 18 flat types as
+// the OUTER value of a correlated EXISTS whose inner is a derived table (the
+// decline that keeps the shape on the re-run), each against PostgreSQL's own
+// answer over the same rows. A rendering that re-types a value answers a
+// different number, and the counts differ per type — 29, 30, 38, 58, 60 — so
+// no single wrong answer passes them all.
+func arcD5TypedRerunCells() []arcD5Cell {
+	// PostgreSQL 17 over the type-matrix fixture, measured live.
+	want := map[string]int{
+		"c_bool": 58, "c_i32": 29, "c_i64": 29, "c_f32": 29, "c_f64": 29,
+		"c_str": 29, "c_bytes": 29, "c_ts": 29, "c_ipv4": 29, "c_ipv6": 30,
+		"c_cidr": 38, "c_mac": 30, "c_port": 30, "c_proto": 60, "c_dur": 30,
+		"c_uuid": 30, "c_date": 60, "c_dec": 30,
+	}
+	cols := make([]string, 0, len(want))
+	for c := range want {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+
+	out := make([]arcD5Cell, 0, len(cols)+5)
+	for _, c := range cols {
+		out = append(out, arcD5Cell{
+			issue: "#679", name: "rerun_renders_" + c,
+			sql: fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 60 AND EXISTS (`+
+				`SELECT 1 FROM (SELECT %s AS k FROM typemx WHERE id >= 30 AND id < 5000 `+
+				`GROUP BY %s) b WHERE a.%s = b.k)`, c, c, c),
+			want:           []string{fmt.Sprintf("n=int64:%d", want[c])},
+			wantCorrRoutes: 1,
+		})
+	}
+	// The issue's own shape and its NOT EXISTS twin: a DECIMAL outer value
+	// against a BIGINT inner, over a derived table.
+	out = append(out,
+		arcD5Cell{issue: "#679", name: "exists_over_a_derived_table_cross_width",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
+			want: []string{"n=int64:3"}, wantCorrRoutes: 1},
+		arcD5Cell{issue: "#679", name: "not_exists_over_a_derived_table_cross_width",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE NOT EXISTS (` +
+				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
+			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+		// The three controls that answered at base: three of the four width
+		// pairs were already right, which is what would have let a wrong fix
+		// pass. The trigger is a DECIMAL outer against an INTEGER inner over
+		// a derived table, not "a correlated EXISTS".
+		arcD5Cell{issue: "#679", name: "control_derived_table_same_width",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_i64 = b.k)`,
+			want: []string{"n=int64:9"}, wantCorrRoutes: 1},
+		arcD5Cell{issue: "#679", name: "control_derived_table_decimal_decimal",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT w_d4 AS k FROM numwidth GROUP BY w_d4) b WHERE a.w_d2 = b.k)`,
+			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+		arcD5Cell{issue: "#679", name: "control_base_table_cross_width",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM numwidth b WHERE a.w_d2 = b.w_i64)`,
+			want: []string{"n=int64:3"}},
+	)
+	return out
 }
 
 // ---------------------------------------------------------------------------

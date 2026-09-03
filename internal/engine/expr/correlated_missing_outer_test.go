@@ -38,16 +38,19 @@ func outerRefBatch() *batch.RecordBatch {
 func TestReadOuterValuesMissingColumnErrors(t *testing.T) {
 	b := outerRefBatch()
 
+	// The map holds the LITERAL the re-run's SQL will carry, not the Go box
+	// the column happens to hand out (#679, outer_literal.go), so the
+	// expectations are the literal's rendered text.
 	tests := []struct {
 		name    string
 		refs    []plansql.OuterRef
 		wantErr bool
-		want    map[string]any
+		want    map[string]string
 	}{
 		{
 			name: "present",
 			refs: []plansql.OuterRef{{Table: "c1", Column: "c_nationkey"}},
-			want: map[string]any{"c1.c_nationkey": int64(7)},
+			want: map[string]string{"c1.c_nationkey": "7"},
 		},
 		{
 			// ColumnByName is case-sensitive and correlation analysis
@@ -55,7 +58,7 @@ func TestReadOuterValuesMissingColumnErrors(t *testing.T) {
 			// otherwise miss and — before the guard — read as NULL.
 			name: "case_folded",
 			refs: []plansql.OuterRef{{Table: "h", Column: "searchphrase"}},
-			want: map[string]any{"h.searchphrase": "hello"},
+			want: map[string]string{"h.searchphrase": "'hello'"},
 		},
 		{
 			// The #347 condition. Absent must not read as NULL.
@@ -98,8 +101,12 @@ func TestReadOuterValuesMissingColumnErrors(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			for k, want := range tc.want {
-				if got := vals[k]; got != want {
-					t.Errorf("vals[%q] = %v (%T), want %v (%T)", k, got, got, want, want)
+				lit, ok := vals[k].(plansql.Node)
+				if !ok {
+					t.Fatalf("vals[%q] = %v (%T), want a rendered literal node", k, vals[k], vals[k])
+				}
+				if got := lit.String(); got != want {
+					t.Errorf("vals[%q] renders %q, want %q", k, got, want)
 				}
 			}
 		})
@@ -118,8 +125,12 @@ func TestReadOuterValuesPresentNullIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a present column holding NULL must not error: %v", err)
 	}
-	if v, ok := vals["c1.c_nationkey"]; !ok || v != nil {
-		t.Errorf("vals = %v, want the key present with a nil value", vals)
+	lit, ok := vals["c1.c_nationkey"].(plansql.Node)
+	if !ok {
+		t.Fatalf("vals = %v, want the key present with a rendered literal", vals)
+	}
+	if got := lit.String(); got != "null" {
+		t.Errorf("vals[%q] renders %q, want the NULL literal", "c1.c_nationkey", got)
 	}
 }
 
