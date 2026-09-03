@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,11 +68,13 @@ import (
 // generator, or recognised by fuzzKnownDivergence and skipped — a harness that
 // keeps re-finding a filed defect drowns the new ones.
 
-const (
-	fuzzDuckDBBin = "/tmp/duckdb"
-	// fuzzMaxRows caps how large a reference result the harness materializes.
-	fuzzMaxRows = 200000
-)
+// fuzzDuckDBBin is a var, not a const, only so the reap-ordering gate in
+// shape_fuzz_reap_test.go can point fuzzDuckDB at a stub child. Nothing else
+// writes it.
+var fuzzDuckDBBin = "/tmp/duckdb"
+
+// fuzzMaxRows caps how large a reference result the harness materializes.
+const fuzzMaxRows = 200000
 
 // errTooLarge marks a reference result past fuzzMaxRows: not a defect, just a
 // query this harness declines to compare.
@@ -367,12 +370,25 @@ func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
-	defer func() {
-		// Drain and reap: the reader stops early on an over-cap result, and a
-		// child left blocked on a full pipe would wedge the run.
-		io.Copy(io.Discard, stdout)
-		cmd.Wait()
-	}()
+	// Drain and reap: the reader stops early on an over-cap result, and a child
+	// left blocked on a full pipe would wedge the run.
+	//
+	// cmd.Wait is also the ONLY thing that joins the goroutine os/exec starts
+	// to copy the child's stderr into a non-pipe Stderr, so it has to happen
+	// before anything reads that buffer — and reading it is exactly what the
+	// "DuckDB rejected the statement" branch below does. Left in a bare defer
+	// the reap ran AFTER the return expression, which both raced the copier
+	// under -race and reported a truncated or empty message for the one case
+	// whose whole diagnostic IS that message (#701). Once, called from both
+	// places: whichever runs first does the work.
+	var reapOnce sync.Once
+	reap := func() {
+		reapOnce.Do(func() {
+			io.Copy(io.Discard, stdout)
+			cmd.Wait()
+		})
+	}
+	defer reap()
 
 	r := csv.NewReader(stdout)
 	r.LazyQuotes = true
@@ -403,7 +419,9 @@ func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
 		rows = append(rows, row)
 	}
 	if cols == nil {
-		// No header at all: DuckDB rejected the statement.
+		// No header at all: DuckDB rejected the statement. Reap first — the
+		// stderr copier is still running until Wait joins it.
+		reap()
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = "no output"
