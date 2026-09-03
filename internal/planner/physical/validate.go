@@ -716,8 +716,17 @@ func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
 		b.ctes[name] = cteEntry{open: true}
 		return nil
 	}
-	// Register before validating the body so a body parse/validation issue can't
-	// leave the name unregistered.
+	// The BODY is validated BEFORE the name is registered, because a
+	// non-recursive CTE's own name is not in scope inside its own body —
+	// PostgreSQL's rule. Registering first made `WITH t AS (SELECT * FROM t)`
+	// resolve the body's FROM to the CTE itself, so a CTE that SHADOWS a base
+	// table could not read the table it shadows: `WITH decpair AS (SELECT id,
+	// a * 2 AS dv FROM decpair)` was 42703 `unknown column "a"` on every arm,
+	// where PostgreSQL answers (#771). A body that fails validation returns
+	// that error, so nothing is left half-registered.
+	if err := b.validateBlock(ctx, body, nil); err != nil {
+		return err
+	}
 	if len(cte.Columns) > 0 {
 		if err := refuseReservedSlotNames(cte.Columns, "CTE column"); err != nil {
 			return err
@@ -728,7 +737,7 @@ func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
 	} else {
 		b.ctes[name] = cteEntry{cols: names}
 	}
-	return b.validateBlock(ctx, body, nil)
+	return nil
 }
 
 // checkUngrouped enforces PostgreSQL's grouping rule: in a GROUPED query,

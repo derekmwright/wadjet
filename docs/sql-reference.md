@@ -797,6 +797,23 @@ A list written over a subquery whose SELECT list contains `*` is not applied:
 the star's width is not resolvable at that point, and renaming the wrong
 columns would be a wrong answer rather than a missing one.
 
+### CTE scope
+
+A non-recursive CTE's own name is not in scope inside its own body. A CTE may
+therefore shadow a base table and still read it:
+
+```sql
+-- the body's FROM events reads the TABLE; the outer query reads the CTE
+WITH events AS (SELECT id, bytes_in * 2 AS dv FROM events)
+SELECT id, dv FROM events
+```
+
+A CTE name is visible to SIBLING and LATER CTEs and to the main query. A
+reference to a WITH item that is not yet defined — its own name inside its
+body, or a forward reference to a later item — is SQLSTATE `42P01`
+(`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
+the exception: a recursive CTE's name IS visible inside its own body.
+
 ## LIMIT and OFFSET
 
 ```sql

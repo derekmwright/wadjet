@@ -1393,7 +1393,7 @@ func buildLimitNode(plan *Node, info *plansql.SelectInfo) (*Node, error) {
 // resolveTableOrCTE checks whether a table reference matches a CTE name.
 func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, error) {
 	nameLower := strings.ToLower(table.Name)
-	for _, cte := range ctes {
+	for i, cte := range ctes {
 		if cte.Name == nameLower {
 			// Recursive CTEs are materialized by the physical planner via
 			// fixed-point iteration (materializeRecursiveCTE). Don't expand
@@ -1415,8 +1415,21 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 			if err != nil {
 				return nil, fmt.Errorf("extracting SELECT from CTE %q: %w", cte.Name, err)
 			}
-			// Pass the same CTE defs so CTEs can reference earlier CTEs
-			plan, err := BuildFromSelectWithCTEs(selectInfo, ctes)
+			// EARLIER CTEs only. A non-recursive CTE's own name is NOT in
+			// scope inside its own body — PostgreSQL's rule and the SQL
+			// standard's: `WITH t AS (SELECT * FROM t) SELECT * FROM t`
+			// reads the BASE table inside, and a WITH item that is not yet
+			// defined is 42P01 there with a DETAIL naming it. Passing the
+			// WHOLE list made a CTE that shadows a base table read ITSELF —
+			// `WITH decpair AS (SELECT id, a * 2 AS dv FROM decpair)` was
+			// `unknown column "a"` on every arm — and, when nothing else
+			// answers to the name, re-entered this function without bound and
+			// took the PROCESS DOWN with a stack overflow, which Go cannot
+			// recover from and any pgwire client can reach (#771).
+			//
+			// LATER CTEs are excluded for the same reason: PostgreSQL refuses
+			// a forward reference rather than resolving it.
+			plan, err := BuildFromSelectWithCTEs(selectInfo, ctes[:i])
 			if err != nil {
 				return nil, fmt.Errorf("building plan for CTE %q: %w", cte.Name, err)
 			}

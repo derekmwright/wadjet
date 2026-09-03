@@ -1450,6 +1450,20 @@ func (p *Planner) subqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 	return schema[0], true
 }
 
+// buildSubqueryPipelineScoped is buildSubqueryPipeline with the enclosing WITH
+// list given explicitly. A CTE's own BODY is built with only the CTEs defined
+// BEFORE it, because a non-recursive CTE's name is not in scope inside its own
+// body — PostgreSQL's rule (#771). Passing the whole list made a CTE that
+// SHADOWS a base table materialize a body that read ITSELF, and the query
+// answered NULL for every column the CTE computes.
+func (p *Planner) buildSubqueryPipelineScoped(ctx context.Context, sql string,
+	ctes []plansql.CTEDef) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	saved := p.ctes
+	p.ctes = ctes
+	defer func() { p.ctes = saved }()
+	return p.buildSubqueryPipeline(ctx, sql)
+}
+
 func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// Parse using our SQL parser
 	pq, err := plansql.Parse(sql)
@@ -1964,7 +1978,7 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 
 	p.cteCache = make(map[string]*cteMaterialized)
 
-	for _, cte := range root.CTEs {
+	for i, cte := range root.CTEs {
 		if cte.Recursive {
 			p.materializeRecursiveCTE(ctx, cte)
 			continue
@@ -1972,12 +1986,14 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 		if refCounts[cte.Name] < 2 {
 			continue
 		}
+		// EARLIER CTEs only — see buildSubqueryPipelineScoped (#771).
+		//
 		// Materialize columnar into a tracker-charged, spill-backed
 		// collector. The previous shape boxed the whole result via
 		// CollectSink.ToRows (one map[string]any per row, entirely outside
 		// the budget/spill machinery) — `WITH x AS (SELECT * FROM lineitem)`
 		// held the full table in coordinator-process heap.
-		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL)
+		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, root.CTEs[:i])
 		if err != nil {
 			continue // fall back to inline expansion
 		}
@@ -1993,8 +2009,9 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 // Returns the collector and the schema the body's own pipeline produced (see
 // cteMaterializingSink); the caller owns the collector and must Release it —
 // normally via PhysicalPlan.Cleanup through releaseCTECache.
-func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string) (*exec.SpillableBatchCollector, []parquet.Column, error) {
-	source, ops, _, err := p.buildSubqueryPipeline(ctx, sql)
+func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string,
+	scope []plansql.CTEDef) (*exec.SpillableBatchCollector, []parquet.Column, error) {
+	source, ops, _, err := p.buildSubqueryPipelineScoped(ctx, sql, scope)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2174,7 +2191,9 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 	if !ok {
 		// No UNION ALL found — fall back to non-recursive (columnar)
 		// materialization.
-		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL)
+		// A RECURSIVE CTE's name IS in scope inside its own body, which is
+		// what makes it recursive, so this one keeps the whole list.
+		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, p.ctes)
 		if err != nil {
 			return
 		}
