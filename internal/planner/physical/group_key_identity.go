@@ -50,6 +50,13 @@ type groupKeyOut struct {
 	// Identity is plansql.ExprIdentity of the key expression: the key a
 	// consumer's own expression is looked up by.
 	Identity string
+	// Delimited marks a key written as a DELIMITED identifier whose name
+	// contains a dot — `GROUP BY "a.b"`, the flat-JSON shape Zeek produces
+	// (`id.orig_h`). It is ONE name, so exec's qualifier strip must not run
+	// on it: that strip is a plain IndexByte and cannot tell a qualifier
+	// from a delimited name that contains a dot, and it published the key
+	// under `b` where PostgreSQL publishes `a.b` (#740).
+	Delimited bool
 	// Derived marks a key the aggregate's input does not already carry, so
 	// one of the two paths has to materialize it.
 	Derived bool
@@ -141,6 +148,7 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 		if haveExprs {
 			e = agg.GroupByExprs[i]
 		}
+		k.Delimited = delimitedWholeName(e)
 		if e == nil {
 			// No AST for this key: parse the recorded text so the identity
 			// is still the canonical one. A text that does not parse keeps
@@ -349,13 +357,27 @@ func aggScopePreservingWrapper(t logical.NodeType) bool {
 // derived reports whether any entry is set; the caller leaves GroupByOutNames
 // nil otherwise, so a plan with no derived key is byte-identical to one made
 // before slots existed.
+// delimitedWholeName reports whether a GROUP BY term is a single DELIMITED
+// identifier carrying a dot — `GROUP BY "a.b"`, the flat-JSON shape Zeek
+// produces (`id.orig_h`).
+//
+// The AST is the test, not the recorded TEXT: `plansql.GroupKeyName` records
+// a key under `NormalizeIdentRef`, which strips the delimiters, so by the
+// time a term is a string `"a.b"` and `a.b` are the same eight bytes. The
+// ColRef still knows — a delimited name is one Column with an empty Table,
+// where a qualified reference splits into both (#740).
+func delimitedWholeName(e plansql.Node) bool {
+	ref, ok := plansql.Unparen(e).(*plansql.ColRef)
+	return ok && ref.Table == "" && strings.Contains(ref.Column, ".")
+}
+
 func publishedGroupKeyNames(keys []groupKeyOut, elided map[int]bool) (names []string, derived bool) {
 	names = make([]string, 0, len(keys))
 	for i, k := range keys {
 		if elided[i] {
 			continue
 		}
-		if k.Derived {
+		if k.Derived || k.Delimited {
 			names = append(names, k.Name)
 			derived = true
 			continue

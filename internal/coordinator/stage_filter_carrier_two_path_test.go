@@ -3147,24 +3147,51 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 
-		// A delimited key containing a DOT is published under its part after
-		// the dot. The VALUES agree with PostgreSQL on every arm; the column
-		// NAME does not (`b` where PostgreSQL says `a.b`).
-		//
-		// TODO(#740): delete this pin when the whole name survives.
-		t.Run("DelimitedKeyWithADotLosesItsQualifier", func(t *testing.T) {
-			sql := fmt.Sprintf(`SELECT "a.b", COUNT(*) AS n FROM `+
-				`(SELECT c_i32 AS "a.b" FROM %s WHERE id < 5) s GROUP BY "a.b" ORDER BY 1`, tbl)
+		// A delimited key containing a DOT is ONE name and is published
+		// whole. PostgreSQL 17, measured: `SELECT "a.b", COUNT(*) … GROUP BY
+		// "a.b"` publishes `a.b`. This engine published `b` — the aggregate's
+		// qualifier strip is a plain IndexByte and cannot tell a qualifier
+		// from a delimited name that carries a dot, so a client keying its
+		// result set by column name looked up a column that was not there
+		// (#740).
+		t.Run("DelimitedKeyWithADotKeepsItsWholeName", func(t *testing.T) {
+			for _, tc := range []struct {
+				name, sql, want string
+			}{
+				{"through a derived table", fmt.Sprintf(`SELECT "a.b", COUNT(*) AS n FROM `+
+					`(SELECT c_i32 AS "a.b" FROM %s WHERE id < 5) s GROUP BY "a.b" ORDER BY 1`, tbl), "a.b"},
+				{"qualified by the derived alias", fmt.Sprintf(`SELECT s."a.b", COUNT(*) AS n FROM `+
+					`(SELECT c_i32 AS "a.b" FROM %s WHERE id < 5) s GROUP BY s."a.b" ORDER BY 1`, tbl), "a.b"},
+				{"aliased, which always worked", fmt.Sprintf(`SELECT "a.b" AS x, COUNT(*) AS n FROM `+
+					`(SELECT c_i32 AS "a.b" FROM %s WHERE id < 5) s GROUP BY "a.b" ORDER BY x`, tbl), "x"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, tc.sql)
+						if len(res.Rows) != 5 {
+							t.Errorf("%s arm returned %d rows, want 5\n  SQL: %s",
+								arm.name, len(res.Rows), tc.sql)
+						}
+						if res.Columns[0] != tc.want {
+							t.Errorf("%s arm published %q, want %q (PostgreSQL's own name)\n  SQL: %s",
+								arm.name, res.Columns[0], tc.want, tc.sql)
+						}
+					}
+				})
+			}
+		})
+
+		// The boundary from the other side (rule 11): a real TABLE QUALIFIER
+		// is still stripped, and two keys whose bare names collide still keep
+		// both qualifiers. Nothing about the delimited rule may reach them.
+		t.Run("ATableQualifierIsStillStripped", func(t *testing.T) {
+			sql := fmt.Sprintf(`SELECT a.g, COUNT(*) AS n FROM %s a WHERE a.id < 5 `+
+				`GROUP BY a.g ORDER BY 1`, tbl)
 			for _, arm := range sfcArms(ctx, single, coord) {
 				res := sfcRun(t, arm, sql)
-				if len(res.Rows) != 5 {
-					t.Errorf("%s arm returned %d rows, want 5\n  SQL: %s",
-						arm.name, len(res.Rows), sql)
-				}
-				if res.Columns[0] == "a.b" {
-					t.Fatalf("%s arm now publishes the whole delimited name, which is "+
-						"PostgreSQL's answer. #740 is fixed — assert it and delete this "+
-						"pin\n  SQL: %s", arm.name, sql)
+				if res.Columns[0] != "g" {
+					t.Errorf("%s arm published %q, want g — a table qualifier is stripped\n  SQL: %s",
+						arm.name, res.Columns[0], sql)
 				}
 			}
 		})
