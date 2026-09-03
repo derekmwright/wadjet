@@ -75,6 +75,25 @@ func TestEveryDMLDoorAnswersTheSame(t *testing.T) {
 		{name: "UPDATE table-qualified WHERE under an alias", sql: "UPDATE pr815 AS a SET n = 1 WHERE pr815.id = 1"},
 		{name: "INSERT value count mismatch", sql: "INSERT INTO pr815 (id, n) VALUES (5)"},
 		{name: "MERGE unknown ON column", sql: "MERGE INTO pr815 AS t USING src815 AS s ON t.nosuchcol = s.id WHEN MATCHED THEN DELETE"},
+
+		// A TRAILING COMMENT IS NOT A SECOND STATEMENT. `…; -- query tag` is
+		// what ORMs, migration runners and hand-typed psql produce constantly,
+		// and treating the comment as a second statement made every
+		// one-statement door — this one included — refuse the whole string
+		// with 42601 (#711 review B1). PostgreSQL 17 runs all four, measured.
+		{name: "DELETE with a trailing line comment",
+			sql: "DELETE FROM pr815 WHERE id = 1; -- audit note", pgTag: "DELETE 1"},
+		{name: "DELETE with a trailing block comment",
+			sql: "DELETE FROM pr815 WHERE id = 1; /* audit */", pgTag: "DELETE 1"},
+		{name: "UPDATE with a trailing comment on its own line",
+			sql: "UPDATE pr815 SET n = 99 WHERE id = 1;\n-- audit note", pgTag: "UPDATE 1"},
+		{name: "INSERT with a trailing comment",
+			sql: "INSERT INTO pr815 (id, n, name) VALUES (9, 90, 'z'); -- note", pgTag: "INSERT 0 1"},
+		{name: "a leading comment",
+			sql: "-- lead\nDELETE FROM pr815 WHERE id = 1", pgTag: "DELETE 1"},
+		// And a genuine second statement is still refused on this door.
+		{name: "two statements are refused",
+			sql: "DELETE FROM pr815 WHERE id = 1; DELETE FROM pr815 WHERE id = 2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			embedded := embeddedDoorAnswer(t, tc.sql)

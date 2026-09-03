@@ -42,18 +42,29 @@ import (
 // unconsumed remainder is returned as one final piece, for the same reason:
 // the error is the statement's, and Parse is what reports it.
 //
-// Empty pieces are dropped, so a trailing `;`, a doubled `;;` and a string of
-// only whitespace and semicolons all yield what they mean. An input with no
-// statement at all yields nil, which callers read as PostgreSQL's EmptyQuery.
+// A piece with NO STATEMENT IN IT is dropped, and that means whitespace,
+// semicolons AND COMMENTS. `SELECT 1; -- trailing comment` is one statement in
+// PostgreSQL and was one statement here before this function existed; treating
+// the comment as a second statement made that string — and `…; /* banner */`,
+// and a stray `--` from an editor, and the `-- query tag` every ORM appends —
+// a two-statement string that every one-statement door then refused with 42601.
+// Trimming whitespace alone is not enough for the same reason `strings.Split`
+// is not enough one paragraph up: only the lexer knows what a comment is.
+// A piece whose first token is EOF holds nothing to run.
+//
+// An input with no statement at all yields nil, which callers read as
+// PostgreSQL's EmptyQuery — and PostgreSQL answers a comment-only query string
+// with exactly that.
 func SplitStatements(sql string) []string {
 	l := newLexer(sql)
 	depth := 0
 	start := 0
 	var out []string
 	add := func(s string) {
-		if s = strings.TrimSpace(s); s != "" {
-			out = append(out, s)
+		if s = strings.TrimSpace(s); s == "" || !holdsAStatement(s) {
+			return
 		}
+		out = append(out, s)
 	}
 	for {
 		tok := l.nextToken()
@@ -76,16 +87,18 @@ func SplitStatements(sql string) []string {
 	}
 }
 
-// IsMultiStatement reports whether sql carries more than one statement.
+// holdsAStatement reports whether a piece contains anything to run, which is
+// the lexer's question and not a regexp's: a comment can carry a semicolon, a
+// quote and a `/*` of its own, and the lexer is where this file already trusts
+// that knowledge (skipWhitespace treats both comment forms as whitespace).
 //
-// It is the predicate every ONE-STATEMENT entry point owes: the extended
-// protocol, a prepared statement, and the embedded `wadjet.DB` API each return
-// exactly one result, so a string carrying two statements has no answer they
-// can give. PostgreSQL refuses it there with 42601, `cannot insert multiple
-// commands into a prepared statement`, and accepts it only on the simple query
-// protocol.
-func IsMultiStatement(sql string) bool {
-	return len(SplitStatements(sql)) > 1
+// An UNTERMINATED block or line comment reads to end of input and leaves EOF,
+// so `SELECT 1; /* never closed` is one statement here. PostgreSQL raises
+// `unterminated /* comment` for it; wadjet answered it before this arc and
+// still does, which is a "PostgreSQL rejects, wadjet answers" superset and not
+// something this function narrows or widens.
+func holdsAStatement(piece string) bool {
+	return newLexer(piece).nextToken().typ != TokenEOF
 }
 
 // CheckSingleStatement refuses a string that carries more than one statement,
@@ -111,6 +124,12 @@ func CheckSingleStatement(sql string) error {
 	if len(stmts) < 2 {
 		return nil
 	}
+	return multiStatementError(stmts)
+}
+
+// multiStatementError is the refusal itself, shared with Parse so the two
+// doors cannot word the same rule differently.
+func multiStatementError(stmts []string) error {
 	for _, stmt := range stmts {
 		if _, err := parseDispatch(stmt); err != nil {
 			if sqlerr.StateOf(err) != "" {

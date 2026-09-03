@@ -1687,7 +1687,7 @@ it is accepted depends on the door, exactly as it does in PostgreSQL:
 | pgwire **simple** query protocol (`psql`, `PQexec`) | runs them **in sequence**, one command tag per statement |
 | pgwire **extended** protocol (pgx, JDBC, psycopg, every ORM) | SQLSTATE `42601`, `cannot insert multiple commands into a prepared statement` |
 | embedded `wadjet.DB.Execute` / `Query`, the CLI | SQLSTATE `42601`, the same — they answer with one result |
-| the HTTP API | HTTP 400, `SQL parse error: cannot insert multiple commands into a prepared statement` (this door reports parse failures as text, not as a SQLSTATE) |
+| the HTTP API | HTTP 400 with `"sqlstate": "42601"` in the body |
 
 On the simple protocol the **whole string is parsed before any statement
 runs**, so `INSERT ...; ZZZ NOT SQL` runs nothing and reports the syntax
@@ -1697,8 +1697,13 @@ single `ReadyForQuery`.
 
 A semicolon is a separator only when it is one at the top level. Semicolons
 inside string literals (`'a;b'`), quoted identifiers (`"a;b"`), dollar-quoted
-strings (`$$a;b$$`), line and block comments, and parentheses are text, and a
-trailing semicolon is not a second statement.
+strings (`$$a;b$$`), line and block comments, and parentheses are text.
+
+A piece with **nothing to run** in it is not a statement, so neither a trailing
+semicolon nor a trailing COMMENT makes a second one: `DELETE ... WHERE id = 1;
+-- audit note` and `... ; /* banner */` are one statement, as they are in
+PostgreSQL. The same holds for a comment-only piece between two statements, and
+a string that is only comments is an empty query.
 
 **An error does not undo the statements before it.** PostgreSQL wraps a simple
 query string in an implicit transaction and rolls the whole string back;

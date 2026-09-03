@@ -266,8 +266,21 @@ const (
 // before it gets here (#711). See CheckSingleStatement for what "refused"
 // means and why the order matters.
 func Parse(sql string) (*ParsedQuery, error) {
-	if err := CheckSingleStatement(sql); err != nil {
-		return nil, err
+	stmts := SplitStatements(sql)
+	if len(stmts) > 1 {
+		return nil, multiStatementError(stmts)
+	}
+	// PARSE THE PIECE, NOT THE STRING. The splitter is what decides where the
+	// statement ends, and handing parseDispatch the raw text instead put the
+	// tail back: `DELETE … WHERE id = 1; -- audit note` parses as a DELETE
+	// whose WHERE clause is the text `id = 1; -- audit note`, which
+	// BuildDMLPredicate then refuses 42601 — the same right→loud regression
+	// one layer down from the one the splitter fixed (#711 review B1).
+	//
+	// A string with NO statement in it keeps its own text, so a comment-only
+	// or empty input reaches the dispatcher exactly as it did before.
+	if len(stmts) == 1 {
+		sql = stmts[0]
 	}
 	q, err := parseDispatch(sql)
 	if err != nil {

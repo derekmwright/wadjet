@@ -1,10 +1,10 @@
 package sql
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
-	"unicode"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
@@ -83,6 +83,53 @@ func TestSplitStatements(t *testing.T) {
 			sql:  "SELECT 1; ZZZ NOT SQL",
 			want: []string{"SELECT 1", "ZZZ NOT SQL"}},
 
+		// --- A COMMENT IS NOT A STATEMENT ---------------------------------
+		//
+		// Trimming whitespace alone left `-- trailing comment` standing as a
+		// second statement, so `SELECT 1; -- c` became a MULTI-statement string
+		// and every one-statement door refused it 42601. PostgreSQL 17.11 runs
+		// all of these (measured), and so did wadjet before the splitter
+		// existed.
+		{name: "a trailing line comment",
+			sql: "SELECT 1; -- a comment", want: []string{"SELECT 1"}},
+		{name: "a trailing line comment on its own line",
+			sql: "SELECT 1;\n-- a comment", want: []string{"SELECT 1"}},
+		{name: "a bare trailing --",
+			sql: "SELECT 1; --", want: []string{"SELECT 1"}},
+		{name: "a trailing block comment",
+			sql: "SELECT 1; /* c */", want: []string{"SELECT 1"}},
+		{name: "a trailing nested block comment",
+			sql: "SELECT 1; /* a /* b */ c */", want: []string{"SELECT 1"}},
+		{name: "a DML statement with an audit comment",
+			sql:  "DELETE FROM t WHERE id = 1; -- audit note",
+			want: []string{"DELETE FROM t WHERE id = 1"}},
+		{name: "a comment-only piece in the MIDDLE",
+			sql:  "SELECT 1; -- middle\n; SELECT 2",
+			want: []string{"SELECT 1", "SELECT 2"}},
+		{name: "a block-comment-only piece in the middle",
+			sql:  "SELECT 1; /* mid */ ; SELECT 2",
+			want: []string{"SELECT 1", "SELECT 2"}},
+		{name: "a comment between two statements rides on the second",
+			sql:  "SELECT 1; /* c */ SELECT 2",
+			want: []string{"SELECT 1", "/* c */ SELECT 2"}},
+		{name: "a semicolon inside a comment between two statements",
+			sql:  "SELECT 1; /* ; */ SELECT 2",
+			want: []string{"SELECT 1", "/* ; */ SELECT 2"}},
+		{name: "a leading comment rides on the first statement",
+			sql: "-- lead\nSELECT 1", want: []string{"-- lead\nSELECT 1"}},
+		{name: "only a line comment",
+			sql: "-- nothing to run", want: nil},
+		{name: "only a block comment",
+			sql: "/* nothing to run */", want: nil},
+		{name: "only comments and semicolons",
+			sql: " -- a\n ; /* b */ ; ", want: nil},
+		// An UNTERMINATED comment reads to end of input, so the piece holds
+		// nothing and is dropped. PostgreSQL raises `unterminated /* comment`;
+		// wadjet answered `SELECT 1` before this arc and still does — a
+		// superset this function neither widens nor narrows.
+		{name: "an unterminated trailing block comment",
+			sql: "SELECT 1; /* never closed", want: []string{"SELECT 1"}},
+
 		// --- malformed input is NOT cut up --------------------------------
 		//
 		// An unterminated literal or an unbalanced paren has an error, and the
@@ -112,67 +159,75 @@ func TestSplitStatements(t *testing.T) {
 	}
 }
 
-func TestIsMultiStatement(t *testing.T) {
-	for _, tc := range []struct {
-		sql  string
-		want bool
-	}{
-		{"", false},
-		{";", false},
-		{"SELECT 1", false},
-		{"SELECT 1;", false},
-		{"SELECT 1;;", false},
-		{"UPDATE t SET name = 'a;b'", false},
-		{"SELECT 1; SELECT 2", true},
-		{"SELECT 1; SELECT 2;", true},
-		{"INSERT INTO t (id) VALUES (1); ZZZ", true},
-	} {
-		if got := IsMultiStatement(tc.sql); got != tc.want {
-			t.Errorf("IsMultiStatement(%q) = %v, want %v", tc.sql, got, tc.want)
-		}
-	}
-}
-
-// FuzzSplitStatements: the pieces must reassemble into the input with only
-// semicolons and whitespace removed, so no split can lose or invent SQL. A
-// splitter that dropped a byte would silently drop part of a statement.
+// FuzzSplitStatements: the pieces carry exactly the TOKENS the input carried,
+// minus the semicolons, in order — so no split can lose SQL or invent it.
+//
+// The invariant is over tokens rather than bytes because a piece that holds
+// only whitespace and COMMENTS is dropped, and a byte-level invariant would
+// then have to know what a comment is — which is the lexer's job and the
+// thing this function exists to defer to. Tokens say the load-bearing part
+// directly: whatever the splitter dropped could not have been executed.
 func FuzzSplitStatements(f *testing.F) {
 	for _, s := range []string{
 		"", ";", "SELECT 1", "SELECT 1; SELECT 2", "UPDATE t SET n = 'a;b'",
 		"SELECT $$a;b$$", "SELECT /* ; */ 1", `SELECT "a;b"`, "SELECT 'a; b",
 		"SELECT (1;2)", "-- ;", "SELECT 1 -- ;\n; SELECT 2",
+		"SELECT 1; -- c", "SELECT 1; /* c */", "/* only */", "SELECT 1; /* open",
 	} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, sql string) {
 		parts := SplitStatements(sql)
-		var joined string
-		for _, p := range parts {
-			joined += p
-		}
-		// Semicolons and whitespace are what a split is allowed to remove.
-		// Whitespace is unicode.IsSpace because that is what TrimSpace uses;
-		// a narrower set here tests the trim rather than the splitter.
-		strip := func(s string) string {
-			var b []rune
-			for _, r := range s {
-				if r == ';' || unicode.IsSpace(r) {
-					continue
-				}
-				b = append(b, r)
-			}
-			return string(b)
-		}
-		if strip(joined) != strip(sql) {
-			t.Fatalf("SplitStatements(%q) = %#v\n  reassembles to %q, want %q",
-				sql, parts, strip(joined), strip(sql))
-		}
 		for _, p := range parts {
 			if p == "" {
 				t.Fatalf("SplitStatements(%q) returned an empty piece: %#v", sql, parts)
 			}
 		}
+		want, wantOK := lexTokens(sql)
+		var got []string
+		for _, p := range parts {
+			pt, ok := lexTokens(p)
+			if !ok {
+				// A piece that does not lex is the statement's own error to
+				// report; the table tests cover those shapes.
+				return
+			}
+			got = append(got, pt...)
+		}
+		if !wantOK {
+			return
+		}
+		if len(got) != len(want) {
+			t.Fatalf("SplitStatements(%q) = %#v\n  carries %d tokens, the input carries %d\n  got  %v\n  want %v",
+				sql, parts, len(got), len(want), got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("SplitStatements(%q) = %#v\n  token %d is %q, the input has %q",
+					sql, parts, i, got[i], want[i])
+			}
+		}
 	})
+}
+
+// lexTokens returns every token of sql except semicolons, as type:value
+// strings, and whether the whole string lexed. Semicolons are excluded because
+// they are exactly what a split consumes.
+func lexTokens(sql string) ([]string, bool) {
+	l := newLexer(sql)
+	var out []string
+	for {
+		tok := l.nextToken()
+		switch tok.typ {
+		case TokenEOF:
+			return out, true
+		case TokenError:
+			return out, false
+		case TokenSemicolon:
+		default:
+			out = append(out, fmt.Sprintf("%d:%s", tok.typ, tok.val))
+		}
+	}
 }
 
 // Parse is the ONE-STATEMENT entry point, and a string carrying two statements
@@ -211,6 +266,8 @@ func TestParseRefusesMultipleStatements(t *testing.T) {
 			sql: "SELECT id FROM t; DELETE FROM t WHERE id = 1"},
 		{name: "three statements", state: "42601", msg: multi,
 			sql: "SELECT 1; SELECT 2; SELECT 3"},
+		{name: "two statements separated by a comment-only piece", state: "42601", msg: multi,
+			sql: "SELECT 1; -- middle\n; SELECT 2"},
 		// A syntax error anywhere outranks the multi-command refusal, which is
 		// what "parse the whole string first" means: PostgreSQL answers
 		// `INSERT …; ZZZ NOT SQL` with `syntax error at or near "ZZZ"`, not
@@ -244,9 +301,9 @@ func TestParseRefusesMultipleStatements(t *testing.T) {
 	}
 }
 
-// The other half: a single statement with a semicolon in it, or a trailing
-// one, must still parse. A splitter that cut on those would refuse statements
-// that work today.
+// The other half: a single statement with a semicolon in it, a trailing one, or
+// a trailing COMMENT, must still parse. A splitter that cut on any of those
+// would refuse statements that work.
 func TestParseAcceptsSingleStatementsWithSemicolons(t *testing.T) {
 	for _, sql := range []string{
 		"SELECT 1",
@@ -258,6 +315,20 @@ func TestParseAcceptsSingleStatementsWithSemicolons(t *testing.T) {
 		"UPDATE t SET name = 'a;b' WHERE id = 1",
 		"INSERT INTO t (id, name) VALUES (1, 'a;b')",
 		`SELECT "a;b" FROM t`,
+		// A COMMENT AFTER THE SEMICOLON. This list had the comment BEFORE it
+		// ("SELECT 1 -- ; a comment") and not after, and the missing half is
+		// exactly what regressed: `SELECT 1; -- c` became a two-statement
+		// string that every one-statement door refused with 42601, where
+		// PostgreSQL 17.11 runs it and so did this parser before the arc.
+		"SELECT 1; -- a comment",
+		"SELECT 1;\n-- a comment",
+		"SELECT 1; --",
+		"SELECT 1; /* c */",
+		"SELECT 1; /* a /* nested */ b */",
+		"DELETE FROM t WHERE id = 1; -- audit note",
+		"UPDATE t SET n = 1 WHERE id = 1; /* audit */",
+		"INSERT INTO t (id) VALUES (1); -- note",
+		"SELECT 1; /* never closed",
 	} {
 		if _, err := Parse(sql); err != nil {
 			t.Errorf("Parse(%q) = %v, want it to parse", sql, err)

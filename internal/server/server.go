@@ -242,10 +242,17 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		done = s.metrics.QueryTimer("sql")
 	}
 
-	// Parse SQL
+	// Parse SQL.
+	//
+	// writeSQLError, not writeError: a parse failure carries a SQLSTATE
+	// (plansql.Parse wraps everything stateless as 42601) and this was the one
+	// refusal class on this door that dropped it, so a client could branch on
+	// `sqlstate` for a bad column and not for bad syntax. The two-door gate
+	// caught it when #711 moved the multi-statement refusal from execute time
+	// to parse time and the HTTP door stopped reporting its class.
 	parsed, err := plansql.Parse(req.SQL)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "SQL parse error: "+err.Error())
+		writeSQLError(w, http.StatusBadRequest, "SQL parse error: "+err.Error(), err)
 		return
 	}
 

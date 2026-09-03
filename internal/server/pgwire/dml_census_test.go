@@ -833,6 +833,35 @@ func censusShapes() []censusShape {
 			sql: "DELETE FROM arcb_pr WHERE id = 1;",
 			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
 			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
+		// A TRAILING COMMENT IS NOT A SECOND STATEMENT EITHER, and this is the
+		// cell that was missing: the splitter trimmed whitespace only, so
+		// `…; -- note` became a two-statement string and every door refused it
+		// 42601 where PostgreSQL runs it (review B1).
+		{name: "control #711 a trailing line comment", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id = 1; -- audit note",
+			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
+		{name: "control #711 a trailing block comment", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id = 1; /* audit */",
+			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
+		{name: "control #711 a bare trailing --", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id = 1; --",
+			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
+		{name: "control #711 a leading comment", tbl: "pr",
+			sql: "-- lead\nDELETE FROM arcb_pr WHERE id = 1",
+			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
+		// A comment-only piece BETWEEN two statements is dropped, and the two
+		// statements still run in sequence on the door that runs sequences.
+		{name: "#711 a comment-only piece in the middle", tbl: "pr",
+			sql:   "DELETE FROM arcb_pr WHERE id = 1; -- middle\n; DELETE FROM arcb_pr WHERE id = 2",
+			pg:    "tag=DELETE 1 table=[3:30:c]",
+			pgOne: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb:   "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			sim:   "tag=DELETE 1 table=[3:30:c]",
+			ext:   "state=42601 table=[1:10:a 2:20:b 3:30:c]"},
 
 		// The verbs, working. These carry no bug and are the regression
 		// half of the census: they fail if a later fix moves a RIGHT answer.
