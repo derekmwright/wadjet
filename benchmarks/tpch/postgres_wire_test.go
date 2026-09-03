@@ -779,6 +779,26 @@ func wireCorpus() []wireCase {
 		{name: "CastFloatToIntegerRoundsHalfToEven",
 			sql: `SELECT CAST(r_val AS BIGINT) AS v FROM real_probe WHERE r_key IN (16, 17) ORDER BY r_key`},
 
+		// #760 — SUM and MIN/MAX over a REAL answer at REAL width.
+		//
+		// The values agree here, so only the declared OID separates the right
+		// answer from the wrong one — except SUM, where the two ENGINES
+		// disagreed on the number itself: 16777216 on the single-process path
+		// and 16777215.600000001 on the DAG, reproducibly, because the batch
+		// sum was float32 and the fold float64.
+		//
+		// The AVG entry is the control that keeps the two apart:
+		// `pg_typeof(avg(real))` is double precision on the same server, so
+		// AVG must NOT narrow, and its total widens each value rather than
+		// the batch's float32 sum.
+		{name: "SumOverReal", sql: `SELECT SUM(r_val) AS v FROM real_probe WHERE r_key IN (0, 16, 17)`},
+		{name: "MinOverReal", sql: `SELECT MIN(r_val) AS v FROM real_probe WHERE r_key IN (0, 16, 17)`},
+		{name: "MaxOverReal", sql: `SELECT MAX(r_val) AS v FROM real_probe WHERE r_key IN (0, 16, 17)`},
+		{name: "CtlAvgOverRealIsDouble", sql: `SELECT AVG(r_val) AS v FROM real_probe WHERE r_key IN (0, 16, 17)`},
+		{name: "CtlSumOverDoubleUnchanged", sql: `SELECT SUM(d_val) AS v FROM real_probe WHERE r_key IN (0, 16, 17)`},
+		{name: "GroupedSumOverReal",
+			sql: `SELECT r_grp, SUM(r_val) AS v FROM real_probe WHERE r_key IN (0, 16, 17) GROUP BY r_grp ORDER BY r_grp`},
+
 		// #708 — a CAST that NAMES a (p,s) carries it. These four replace
 		// `wadjet.TestCastTypmodIsUnconstrained`, the pin that recorded the
 		// divergence: `declaredTypmod` had no CAST arm and answered -1 for

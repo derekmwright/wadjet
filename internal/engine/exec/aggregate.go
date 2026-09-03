@@ -5393,8 +5393,14 @@ func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
 		return parquet.TypeInt64, true
 	case batch.TypeInt32:
 		return parquet.TypeInt64, true
-	case batch.TypeFloat64, batch.TypeFloat32:
+	case batch.TypeFloat64:
 		return parquet.TypeFloat64, true
+	case batch.TypeFloat32:
+		// REAL in, REAL out — `pg_typeof(min(real))` is real (#760). The
+		// value was always exact (a float32 widened to a float64 is), so this
+		// is the declaration catching up with it, and the planner's
+		// minMaxDeclaredType carries the same rule so the two paths agree.
+		return parquet.TypeFloat32, true
 	case batch.TypeDecimal:
 		return parquet.TypeDecimal, true
 	case batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:

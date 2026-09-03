@@ -123,7 +123,15 @@ func mmTypeFor(t parquet.TypeID) (kind mmKind, out parquet.TypeID, ok bool) {
 		return mmInt, parquet.TypeDate, true
 	case parquet.TypeTimestamp:
 		return mmInt, parquet.TypeTimestamp, true
-	case parquet.TypeFloat32, parquet.TypeFloat64:
+	case parquet.TypeFloat32:
+		// REAL in, REAL out — `pg_typeof(min(real))` is real (#760). This
+		// arm must track exec.minMaxOutputType exactly, which is what the
+		// doc above says and what a float32 column proved: with the scan
+		// path emitting real and this one emitting double, one query
+		// answered two types depending on whether a WHERE clause sent it
+		// down the statistics path.
+		return mmFloat, parquet.TypeFloat32, true
+	case parquet.TypeFloat64:
 		return mmFloat, parquet.TypeFloat64, true
 	}
 	return 0, 0, false
@@ -434,6 +442,12 @@ func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node
 				vec.Float64Data[0] = c.maxF
 			} else {
 				vec.Float64Data[0] = c.minF
+			}
+		case parquet.TypeFloat32:
+			if o.isMax {
+				vec.Float32Data[0] = float32(c.maxF)
+			} else {
+				vec.Float32Data[0] = float32(c.minF)
 			}
 		default:
 			return nil, false

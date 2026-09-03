@@ -40,10 +40,10 @@ func a2DomainRun(res *oracle.Result, err error) ([]string, error) {
 	return out, nil
 }
 
-// A function answers in its argument's own DOMAIN — on both engines, and at
-// the width PostgreSQL declares.
+// A function answers in its argument's own DOMAIN, and an aggregate at its
+// column's own WIDTH — on both engines, and at the width PostgreSQL declares.
 //
-// Two issues, one consumer. `physical.nodeDeclaredType` reads whatever the
+// Three issues, one consumer. `physical.nodeDeclaredType` reads whatever the
 // declaration layer says and turns it into the wire's OID; when that
 // declaration is a FIXED float64 the kernel has no domain to compute in, and
 // the wrong OID becomes a wrong NUMBER:
@@ -54,6 +54,13 @@ func a2DomainRun(res *oracle.Result, err error) ([]string, error) {
 //	#757  NULLIF took its type from argument 0 alone. PostgreSQL takes it from
 //	      the comparison OPERATOR the two arguments select, which is argument
 //	      0's own width within one numeric family and float8 across families.
+//	#760  SUM over a REAL summed each batch at float32 and FOLDED at float64,
+//	      so one pass over four rows rounded to the real answer by luck while
+//	      three workers' partials kept a residue a real accumulator discards:
+//	      16777216 on one engine, 16777215.600000001 on the other, every run.
+//	      AVG had the mirror defect — the single path widened the float32
+//	      BATCH SUM instead of each value, and answered 5592405.33 where the
+//	      DAG and the server answer 5592405.2.
 //
 // Every expectation is live PostgreSQL 17's, measured over this fixture. The
 // Go box is printed for every non-string value (na2Run), because a float64
@@ -158,6 +165,43 @@ func a2DomainCells() []a2DomainCell {
 				"SCALE is ADR-0012 item 12's recorded class: PostgreSQL's numeric carries a " +
 				"per-VALUE dscale and takes the integer's 0, a wadjet DECIMAL column has one " +
 				"declared scale for the whole column and renders at it. Same number"},
+
+		// ---- #760: REAL aggregates at REAL width --------------------------
+		{issue: "#760", name: "sum_over_real",
+			sql: `SELECT SUM(n_f32) AS v FROM numfold`,
+			want: []string{"v=float32:1.6777216e+07"},
+			pgSays: "real 1.6777216e+07 — 16777215.600000001 on the DAG before this"},
+		{issue: "#760", name: "min_over_real",
+			sql:    `SELECT MIN(n_f32) AS v FROM numfold`,
+			want:   []string{"v=float32:-0.5"},
+			pgSays: "real -0.5"},
+		{issue: "#760", name: "max_over_real",
+			sql:    `SELECT MAX(n_f32) AS v FROM numfold`,
+			want:   []string{"v=float32:1.6777216e+07"},
+			pgSays: "real 1.6777216e+07"},
+		{issue: "#760", name: "avg_over_real",
+			sql:    `SELECT AVG(n_f32) AS v FROM numfold`,
+			want:   []string{"v=float64:5.5924052e+06"},
+			pgSays: "double precision 5592405.2 — the single path answered 5592405.33"},
+		// The same MIN with a WHERE clause, which is what sends it down the
+		// SCAN path instead of the metadata-statistics path. Those are two
+		// different producers of one answer and they declared different
+		// TYPES: `physical.mmTypeFor`'s own doc says it must track
+		// exec.minMaxOutputType, and a float32 column is what proved it.
+		{issue: "#760", name: "min_over_real_through_the_scan",
+			sql:    `SELECT MIN(n_f32) AS v FROM numfold WHERE id < 99`,
+			want:   []string{"v=float32:-0.5"},
+			pgSays: "real -0.5, the same answer by a different producer"},
+		{issue: "#760", name: "grouped_sum_over_real",
+			sql: `SELECT id, SUM(n_f32) AS v FROM numfold GROUP BY id ORDER BY id`,
+			want: []string{
+				"id=int64:1|v=float32:0.1", "id=int64:2|v=NULL",
+				"id=int64:3|v=float32:1.6777216e+07", "id=int64:4|v=float32:-0.5"},
+			pgSays: "real, one row per group"},
+		{issue: "#760", name: "ctl_sum_over_double_unchanged",
+			sql:    `SELECT SUM(n_f64) AS v FROM numfold`,
+			want:   []string{"v=float64:1.677721695e+07"},
+			pgSays: "double precision 1.677721695e+07"},
 	}
 }
 

@@ -14072,6 +14072,13 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 		if t, ok := aggIntegerOutputType(fn, in); ok {
 			return t, true
 		}
+		if fn == "sum" && in == parquet.TypeFloat32 {
+			// `pg_typeof(sum(real))` is real, and the accumulator now sums at
+			// that width (kernel.Accumulator.SumF32, #760). Declaring double
+			// over a float32 accumulator would be the mirror of the defect —
+			// a wider OID on a narrower number.
+			return parquet.TypeFloat32, true
+		}
 		return aggOutputType(agg.Func, agg.Distinct), true
 	}
 	if fn == "min_by" || fn == "max_by" {
@@ -14434,6 +14441,14 @@ func minMaxDeclaredType(in parquet.TypeID) parquet.TypeID {
 		return parquet.TypeBool
 	case parquet.TypeInt64, parquet.TypeInt32:
 		return parquet.TypeInt64
+	case parquet.TypeFloat32:
+		// MIN/MAX of a REAL is a value the column HOLDS, so it answers in
+		// REAL — `pg_typeof(min(real))` is real on the live server. The
+		// accumulator already carried the exact value (a float32 widened to a
+		// float64 is exact); only the declaration said double precision, so a
+		// client read a Double for a column that is a Float everywhere else
+		// in the query (#760).
+		return parquet.TypeFloat32
 	case parquet.TypeDecimal:
 		// MIN/MAX of a DECIMAL is a value the column HOLDS, so it answers in
 		// DECIMAL — the accumulator was always an exact Int128 and only the

@@ -32,7 +32,7 @@ func TestMMTypeFor(t *testing.T) {
 		{"int64", parquet.TypeInt64, parquet.TypeInt64, true},
 		{"date stays date", parquet.TypeDate, parquet.TypeDate, true},
 		{"timestamp stays timestamp", parquet.TypeTimestamp, parquet.TypeTimestamp, true},
-		{"float32 widens to float64", parquet.TypeFloat32, parquet.TypeFloat64, true},
+		{"float32 stays float32", parquet.TypeFloat32, parquet.TypeFloat32, true},
 		{"float64", parquet.TypeFloat64, parquet.TypeFloat64, true},
 		// Declined: truncatable, unordered, or unrepresentable statistics.
 		{"string declined", parquet.TypeString, 0, false},

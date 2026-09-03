@@ -8,6 +8,43 @@ import (
 
 // --- Generic aggregate slice functions (monomorphized at compile time) ---
 
+// sumSliceFloat32Widened totals a REAL column at DOUBLE width, widening each
+// value before adding it. See the TypeFloat32 arm of ResolveBatchSum for why
+// the widening has to happen per value rather than on the batch's own float32
+// sum (#760).
+func sumSliceFloat32Widened(data []float32, nulls *batch.Bitmap, sel []uint32, vecLen int) (float64, int64) {
+	var sum float64
+	var count int64
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					sum += float64(data[idx])
+					count++
+				}
+			}
+			return sum, count
+		}
+		for _, idx := range sel {
+			sum += float64(data[idx])
+		}
+		return sum, int64(len(sel))
+	}
+	if nulls.HasNulls() {
+		for i := 0; i < vecLen; i++ {
+			if !nulls.IsNullFast(i) {
+				sum += float64(data[i])
+				count++
+			}
+		}
+		return sum, count
+	}
+	for i := 0; i < vecLen; i++ {
+		sum += float64(data[i])
+	}
+	return sum, int64(vecLen)
+}
+
 func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint32, vecLen int) (T, int64) {
 	var sum T
 	var count int64
@@ -104,6 +141,9 @@ func sumRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 	acc.IsFloat = true
 }
 
+// REAL width, the row-at-a-time twin of the batched arm in ResolveBatchSum.
+// The two must accumulate at the SAME width or one query answers two numbers
+// depending on which path the operator took (#760).
 func sumRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		acc.SumF64 += float64(vec.Float32Data[row])
@@ -794,8 +834,24 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 		}
 	case batch.TypeFloat32:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
-			s, c := sumSlice(vec.Float32Data, &vec.Nulls, sel, vecLen)
-			acc.SumF64 += float64(s)
+			// Widened PER VALUE, not per batch sum (#760). PostgreSQL's
+			// avg(real) is double precision and totals each value at that
+			// width: over 0.1, 16777216 and -0.5 the per-value float8 total
+			// is 16777215.6 and its average 5592405.2, which is what the
+			// server answers. Summing the batch at float32 first absorbs the
+			// 0.1 and averages 5592405.33 — which is what the single-process
+			// path answered while the DAG, whose three workers each summed
+			// ONE row, answered PostgreSQL's number. One query, two engines,
+			// two numbers, reproducibly: not ADR-0013's legal float
+			// nondeterminism.
+			//
+			// SUM(real) is real on the same server, and the REAL-width
+			// DECLARATION narrows this total once at the store rather than
+			// carrying a second accumulator — which is also what makes the
+			// two engines agree there, because the narrowing happens on every
+			// partial and again on the merge.
+			s, c := sumSliceFloat32Widened(vec.Float32Data, &vec.Nulls, sel, vecLen)
+			acc.SumF64 += s
 			acc.Count += c
 			acc.IsFloat = true
 		}
