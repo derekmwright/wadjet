@@ -218,19 +218,31 @@ func (s *rgSlabs) advance() error {
 		return nil
 	}
 
-	buf := getRowGroupBuf(int(n), peakRowGroupBytes(s.starts, s.ends))
-	// The bytes are about to become resident, so this is the same
-	// non-discretionary charge the whole-file load makes — at row-group
-	// granularity, and released at row-group granularity. cap(), not n: a
-	// pooled buffer larger than the row group is resident memory too, which
-	// is what the whole-file path's reconcile says. A scan holding nothing
-	// never waits — the floor that makes this deadlock-free.
-	charge := int64(cap(buf))
+	// Reserve BEFORE the allocation, so admission and spill pressure see the
+	// load coming instead of discovering it as drift — the same order and the
+	// same call the whole-file load uses, at row-group granularity, and
+	// released at row-group granularity. A scan holding nothing never waits:
+	// the floor that makes this deadlock-free.
 	wait := fileLoadReserveWait
 	if s.inner.residentSlabs.Load() == 0 {
 		wait = 0
 	}
-	memory.ReserveOrForce(s.ctx, s.inner.memTracker, s.inner.spillMgr, charge, wait, "scan row group load")
+	memory.ReserveOrForce(s.ctx, s.inner.memTracker, s.inner.spillMgr, n, wait, "scan row group load")
+
+	// Then reconcile to the pooled buffer's real capacity: a buffer larger
+	// than the row group is resident memory too. The pool cannot hand back one
+	// larger than this file's biggest row group, so the reconcile is small and
+	// bounded by the file rather than by whatever the process read last.
+	buf := getRowGroupBuf(int(n), peakRowGroupBytes(s.starts, s.ends))
+	charge := n
+	if d := int64(cap(buf)) - charge; d != 0 && s.inner.memTracker != nil {
+		if d > 0 {
+			s.inner.memTracker.ForceReserve(d)
+		} else {
+			s.inner.memTracker.Release(-d)
+		}
+		charge = int64(cap(buf))
+	}
 
 	if _, err := io.ReadFull(s.body, buf[:n]); err != nil {
 		putReadBuf(buf)

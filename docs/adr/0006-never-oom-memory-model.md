@@ -84,7 +84,7 @@ tracker:**
 | # | producer | what | loud? | released |
 |---|---|---|---|---|
 | 1 | `memory.ReserveOrForce` (`memory/acquire.go:33`, `:50`) | a scan's file load — ONE ROW GROUP at a time where the footer is already decoded, the whole file otherwise | WARNs at `:50` | when THAT ROW GROUP is decoded (`fileSlot.releaseRG`), or, on the whole-file path, when the file's last one is |
-| 2 | `fileSlot.ensureLoaded`'s pool reconcile (`planner/physical/util.go`) | the pooled buffer's real capacity above the file size — WHOLE-FILE path only; the row-group path charges `cap()` up front and takes no buffer larger than the file's biggest row group | silent | with (1) |
+| 2 | the pool reconcile after (1)'s reservation (`planner/physical/util.go`, `scan_rowgroup_load.go`) | the pooled buffer's real capacity above what was reserved — bounded on the row-group path, which refuses a pooled buffer larger than the file's biggest row group | silent | with (1) |
 | 3 | `scanSourceInner.trackScanBatch` (`planner/physical/plan.go`) | every decoded row-group batch | silent | when the batch leaves through `next()` |
 | 4 | `scanSourceInner.trackPooledBuf` (same file) | the EAGER scan path's whole-file buffers, `cap(buf)`, no ceiling | silent | at scan close (`releasePooledBufs`) — coarser than (1) |
 | 5 | `HashJoin.reconcileHashMemory` (`engine/exec/join.go`) | the hash arena and index | WARNs once when it crosses the budget (this arc) | at join Close; a grace eviction does NOT free it (#823) |
