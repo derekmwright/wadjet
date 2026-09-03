@@ -718,7 +718,10 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 		return nil
 	}
 
-	g := &groupCheck{from: from, keys: map[string]bool{}, idents: map[string]bool{}, bare: map[string]bool{}}
+	g := &groupCheck{from: from, keys: map[string]bool{}, idents: map[string]bool{}, bare: map[string]bool{},
+		// One source in the FROM: a qualifier then names that source and
+		// nothing else, so it is spelling (#738).
+		unqualify: len(from.quals) == 1}
 	g.addGroupTerms(info)
 
 	// SELECT list. An output alias is NOT visible here — a select item cannot
@@ -783,6 +786,18 @@ type groupCheck struct {
 	keys   map[string]bool
 	idents map[string]bool
 	bare   map[string]bool
+	// unqualify erases TABLE QUALIFIERS from every expression identity this
+	// check renders, so `SELECT typemx.g + 1 ... GROUP BY g + 1` matches
+	// (#738). It is set only when the block's FROM provides exactly ONE
+	// source, because that is the scope in which `t.x` and `x` are the same
+	// expression; over a join they are not, and `GROUP BY zzj.d92` licensing
+	// `SELECT zzp.d92` would be a wrong answer, not a missed match.
+	//
+	// PostgreSQL erases the qualifier at every arity, because its comparison
+	// is over RESOLVED targetlist entries rather than over text. Matching that
+	// needs the resolution, not a wider text rule — which is why the bound is
+	// here and why the join case keeps its 42803, gated below.
+	unqualify bool
 }
 
 // identKey renders a resolved (source, column) identity. Both halves are
@@ -953,6 +968,23 @@ func (g *groupCheck) check(node plansql.Node) error {
 	}
 	if k := groupTermKey(node); k != "" && g.keys[k] {
 		return nil
+	}
+	// The same term with its table QUALIFIER erased, in a single-relation
+	// block: `SELECT typemx.g + 1 ... GROUP BY g + 1` is one expression
+	// written twice, and PostgreSQL answers it (#738).
+	//
+	// The erasure is on the TERM alone and deliberately NOT on the KEY. That
+	// asymmetry is what keeps the MIRROR spelling — a qualified KEY and a bare
+	// term — refusing: PostgreSQL answers that one too, and answering it here
+	// needs the aggregate to evaluate `typemx.g + 1` over a batch whose column
+	// is `g`, which it cannot; the projection above then read a column that
+	// does not exist and every group's key came back NULL. A loud 42803 is the
+	// right disposition for a shape this engine cannot compute, and turning it
+	// into a plausible NULL would be the regression protocol method 8 names.
+	if g.unqualify {
+		if k := plansql.ExprIdentityUnqualified(node); k != "" && g.keys[k] {
+			return nil
+		}
 	}
 	switch n := node.(type) {
 	case *plansql.ColRef:

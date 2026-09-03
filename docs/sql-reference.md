@@ -564,6 +564,33 @@ allowed in WHERE`), and inside another aggregate's arguments it is 42803
 applies, and the same ones it applies to `SUM`, `COUNT` and every other
 aggregate.
 
+### When two spellings are one GROUP BY key
+
+A `SELECT` item and a `GROUP BY` term are the same key when they are the same
+EXPRESSION, not when they are the same text. Parentheses, identifier case and
+whitespace are spelling, and so are two more:
+
+```sql
+-- A table qualifier, when the FROM has ONE relation
+SELECT flow_logs.bytes_in + 1, COUNT(*) FROM flow_logs GROUP BY bytes_in + 1
+
+-- A CAST type synonym: INT/INTEGER/INT4, BIGINT/INT8, SMALLINT/INT2,
+-- REAL/FLOAT4, DOUBLE PRECISION/FLOAT8, DEC/DECIMAL/NUMERIC, BOOL/BOOLEAN,
+-- VARCHAR/CHARACTER VARYING
+SELECT CAST(b AS DEC(9,2)), COUNT(*) FROM t GROUP BY CAST(b AS DECIMAL(9,2))
+```
+
+`VARCHAR` and `TEXT` are **not** synonyms, and PostgreSQL does not treat them
+as one either — that pair is SQLSTATE `42803` on both.
+
+Two shapes are refused that PostgreSQL answers, both loudly with `42803`:
+
+- a qualifier over a **join**, where `a.x` and `b.x` are different columns and
+  erasing the qualifier would group by the wrong one;
+- a **qualified GROUP BY term with an unqualified select item** — the mirror of
+  the first example above. The erasure applies to the select item, not to the
+  key.
+
 **Two deliberate divergences from PostgreSQL, both loud:**
 
 - `ORDER BY GROUPING(a)` is **not accepted** (PostgreSQL accepts it). Sorting

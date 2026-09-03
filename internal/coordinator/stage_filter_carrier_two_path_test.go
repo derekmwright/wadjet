@@ -3115,28 +3115,11 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			}
 		})
 
-		// Two spellings PostgreSQL accepts and we refuse with 42803: a table
-		// QUALIFIER on the select item, and a CAST type SYNONYM. Loud, and
-		// identical on every arm, so these are false refusals rather than
-		// wrong answers.
-		//
-		// TODO(#738): delete this pin when the identity erases both.
-		t.Run("OverRefusedSpellings", func(t *testing.T) {
-			for _, sql := range []string{
-				fmt.Sprintf(`SELECT %[1]s.g + 1 AS k, COUNT(*) AS n FROM %[1]s `+
-					`GROUP BY g + 1 ORDER BY k`, tbl),
-				fmt.Sprintf(`SELECT CAST(g AS INT) AS k, COUNT(*) AS n FROM %s `+
-					`GROUP BY CAST(g AS INTEGER) ORDER BY k`, tbl),
-			} {
-				for _, arm := range sfcArms(ctx, single, coord) {
-					if _, err := arm.run(sql); err == nil {
-						t.Fatalf("%s arm now ANSWERS a spelling this pin records as 42803; "+
-							"PostgreSQL answers it too. #738 is fixed — assert the answer "+
-							"and delete this pin\n  SQL: %s", arm.name, sql)
-					}
-				}
-			}
-		})
+		// The two spellings this pin recorded as 42803 — a table QUALIFIER on
+		// the select item, and a CAST type SYNONYM — are ANSWERED now (#738,
+		// 2026-09-03), and asserted with their rows by
+		// TestTheIdentityErasesAQualifierAndATypeSynonym. The pin is gone
+		// because it failed on the change, which is what it was for.
 
 		// GROUP BY a name that is BOTH a select alias and an input column.
 		// PostgreSQL resolves it to the input COLUMN and then refuses the

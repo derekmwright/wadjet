@@ -2063,6 +2063,7 @@ func condQualifiers(join plansql.JoinInfo) map[string]bool {
 // FIELD PATH is a *ColRef too and resolves through the same dotted spelling
 // on both engines. Rewriting those would only re-point a resolution that
 // works.
+
 func computedGroupKeyRefs(agg *Node) map[string]string {
 	if agg == nil || len(agg.GroupByExprs) != len(agg.GroupBy) {
 		return nil
@@ -2088,6 +2089,7 @@ func computedGroupKeyRefs(agg *Node) map[string]string {
 		if _, taken := refs[id]; !taken {
 			refs[id] = agg.GroupBy[i]
 		}
+
 	}
 	return refs
 }

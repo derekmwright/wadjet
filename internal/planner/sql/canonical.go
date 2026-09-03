@@ -49,6 +49,61 @@ func ExprIdentity(n Node) string {
 	return c.String()
 }
 
+// ExprIdentityUnqualified is ExprIdentity with TABLE QUALIFIERS erased as
+// well, so `typemx.g + 1` and `g + 1` are one identity (#738).
+//
+// It is a SEPARATE function and not a fourth rule in ExprIdentity, because
+// erasing a qualifier needs a SCOPE that this file does not have: `a.x` and
+// `b.x` over a join are two expressions and `t.x` and `x` in a single-relation
+// block are one. Only a caller holding the block's FROM list can tell them
+// apart, and exactly one does — physical.groupCheck, which uses this when the
+// block has ONE source and ExprIdentity when it has more.
+//
+// Erasing it unconditionally would make two different expressions one
+// identity, which is the failure this file's header calls "the wrong answer in
+// the more dangerous direction".
+func ExprIdentityUnqualified(n Node) string {
+	c := canonicalExpr(stripQualifiers(n), true)
+	if c == nil {
+		return ""
+	}
+	return c.String()
+}
+
+// stripQualifiers rebuilds n with every ColRef's table qualifier removed. It
+// walks through canonicalExpr's own rebuild rather than duplicating the node
+// switch: canonicalExpr copies every node it knows, so replacing the ColRef
+// arm's input is enough.
+func stripQualifiers(n Node) Node {
+	switch e := n.(type) {
+	case nil:
+		return nil
+	case *ColRef:
+		return &ColRef{Column: e.Column}
+	case *ParenNode:
+		return &ParenNode{Inner: stripQualifiers(e.Inner)}
+	case *BinaryOp:
+		return &BinaryOp{Left: stripQualifiers(e.Left), Op: e.Op, Right: stripQualifiers(e.Right)}
+	case *UnaryOp:
+		return &UnaryOp{Op: e.Op, Inner: stripQualifiers(e.Inner)}
+	case *CastNode:
+		return &CastNode{Inner: stripQualifiers(e.Inner), TypeName: e.TypeName}
+	case *FuncCallNode:
+		args := make([]Node, len(e.Args))
+		for i, a := range e.Args {
+			args[i] = stripQualifiers(a)
+		}
+		c := *e
+		c.Args = args
+		return &c
+	}
+	// A node kind this does not know keeps its qualifiers, which is the
+	// conservative answer: the identity then differs from the bare spelling
+	// and the check declines rather than admitting a reference it cannot see
+	// through.
+	return n
+}
+
 // GroupKeyName is the column name a GROUP BY term's value is published under
 // by the aggregate, on both execution paths.
 //
@@ -154,7 +209,7 @@ func canonicalExpr(n Node, fold bool) Node {
 		}
 		return out
 	case *CastNode:
-		return &CastNode{Inner: canonicalExpr(e.Inner, fold), TypeName: strings.ToUpper(e.TypeName)}
+		return &CastNode{Inner: canonicalExpr(e.Inner, fold), TypeName: canonicalTypeName(e.TypeName)}
 	case *CaseNode:
 		out := &CaseNode{Subject: canonicalExpr(e.Subject, fold), Else: canonicalExpr(e.Else, fold),
 			Whens: make([]WhenClause, len(e.Whens))}
@@ -176,6 +231,78 @@ func canonicalExpr(n Node, fold bool) Node {
 		return out
 	}
 	return n
+}
+
+// canonicalTypeName folds a CAST's destination to one spelling per TYPE, so
+// `CAST(g AS INT)` and `CAST(g AS INTEGER)` are one identity (#738).
+//
+// The set is PostgreSQL's own, measured rather than assumed — a synonym pair
+// there is a pair `SELECT CAST(g AS a) FROM t GROUP BY CAST(g AS b)` answers
+// for, and a non-pair is one it refuses with 42803:
+//
+//	INT / INTEGER / INT4          SMALLINT / INT2
+//	BIGINT / INT8                 REAL / FLOAT4
+//	DOUBLE PRECISION / FLOAT8     DEC / DECIMAL / NUMERIC
+//	BOOL / BOOLEAN                CHARACTER VARYING / VARCHAR
+//
+// VARCHAR and TEXT are NOT a pair and are deliberately absent: PostgreSQL
+// refuses that spelling too, and wadjet refusing it is right in kind. Getting
+// the set wrong in the other direction makes two DIFFERENT expressions one
+// identity, which is the property this whole file exists to keep.
+//
+// The PARAMETERS are folded with the name — `DEC(9,2)` and `DECIMAL(9, 2)` are
+// one destination — because whitespace inside them is spelling and nothing
+// else, exactly as it is outside them.
+func canonicalTypeName(name string) string {
+	base, params := splitTypeParams(name)
+	if canon, ok := typeNameSynonyms[base]; ok {
+		base = canon
+	}
+	if params == "" {
+		return base
+	}
+	return base + "(" + params + ")"
+}
+
+// splitTypeParams separates a type name from its parenthesised parameters and
+// normalizes the whitespace in both: `dec( 9 , 2 )` becomes ("DEC", "9,2").
+func splitTypeParams(name string) (string, string) {
+	t := strings.TrimSpace(name)
+	open := strings.IndexByte(t, '(')
+	if open < 0 || !strings.HasSuffix(t, ")") {
+		return strings.ToUpper(strings.Join(strings.Fields(t), " ")), ""
+	}
+	base := strings.ToUpper(strings.Join(strings.Fields(t[:open]), " "))
+	inner := t[open+1 : len(t)-1]
+	parts := strings.Split(inner, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return base, strings.Join(parts, ",")
+}
+
+// typeNameSynonyms maps every spelling of one type to a single canonical one.
+// Keys and values are upper-cased with runs of whitespace collapsed, which is
+// the form splitTypeParams produces.
+var typeNameSynonyms = map[string]string{
+	"INTEGER":           "INT",
+	"INT4":              "INT",
+	"INT":               "INT",
+	"INT8":              "BIGINT",
+	"BIGINT":            "BIGINT",
+	"INT2":              "SMALLINT",
+	"SMALLINT":          "SMALLINT",
+	"FLOAT4":            "REAL",
+	"REAL":              "REAL",
+	"FLOAT8":            "DOUBLE PRECISION",
+	"DOUBLE PRECISION":  "DOUBLE PRECISION",
+	"DECIMAL":           "DECIMAL",
+	"DEC":               "DECIMAL",
+	"NUMERIC":           "DECIMAL",
+	"BOOLEAN":           "BOOL",
+	"BOOL":              "BOOL",
+	"CHARACTER VARYING": "VARCHAR",
+	"VARCHAR":           "VARCHAR",
 }
 
 // canonicalOperand is canonicalExpr for a position where the rendering must
@@ -200,6 +327,25 @@ func isInfixNode(n Node) bool {
 		return true
 	}
 	return false
+}
+
+// groupKeyRefLookup finds the published name for an expression that IS one of
+// the aggregate's group keys.
+//
+// It tries the ordinary identity first and the QUALIFIER-ERASED one second, so
+// `SELECT typemx.g + 1 ... GROUP BY g + 1` substitutes (#738). The second
+// lookup is safe because the map only ever CONTAINS an unqualified entry when
+// the builder registered one, and it registers one only for a block whose FROM
+// has a single relation — the scope in which a qualifier is spelling. Over a
+// join the map holds qualified identities alone, so an unqualified probe finds
+// nothing and the substitution declines, which is what keeps `GROUP BY zzj.d92`
+// from licensing `SELECT zzp.d92`.
+func groupKeyRefLookup(keys map[string]string, n Node) (string, bool) {
+	if name, ok := keys[ExprIdentity(n)]; ok {
+		return name, true
+	}
+	name, ok := keys[ExprIdentityUnqualified(n)]
+	return name, ok
 }
 
 // ReplaceGroupKeyRefs rewrites every subexpression that IS one of an
@@ -232,7 +378,7 @@ func ReplaceGroupKeyRefs(node Node, keys map[string]string) Node {
 		if _, isRef := n.(*ColRef); isRef {
 			return nil, false
 		}
-		if name, ok := keys[ExprIdentity(n)]; ok {
+		if name, ok := groupKeyRefLookup(keys, n); ok {
 			return &ColRef{Column: name}, true
 		}
 		return nil, false
