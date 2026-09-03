@@ -208,6 +208,37 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 		}
 	}
 	if agg := aggregateBelow(project); agg != nil && !sortTermResolvesOverAggregate(ob.Expr, agg) {
+		// #597: `GROUP BY g ORDER BY MAX(id)` — an aggregate the SELECT list
+		// does not carry. PostgreSQL answers it, DuckDB answers it, and this
+		// engine refused it.
+		//
+		// The value already exists by the time this runs: BuildFromSelect
+		// hoists every aggregate named only in ORDER BY onto the Aggregate
+		// node under a slot of its own (#811), for the reason PostgreSQL has
+		// to compute it too — one that raises must raise. So the term needs no
+		// evaluation at all, only a NAME: the hidden projection is a plain
+		// reference to that output column, which the single-process Project
+		// copies and which `physical.resolveHiddenSortKeys` maps straight onto
+		// the column the aggregate stage emits (annotateHiddenSortSource's
+		// simple-ColRef arm sets SourceColumn, and nothing has to be
+		// materialized on either engine).
+		//
+		// Only a BARE call qualifies. `ORDER BY COUNT(*) * 2` is a value
+		// COMPUTED from the aggregate's output, which is the case the refusal
+		// below is really about — the DAG's sort runs between the aggregate
+		// and the gather with nothing in between to evaluate it — and it stays
+		// refused, with a fixture that attempts it.
+		if call, ok := bareAggregateCall(ob.Expr); ok {
+			if out := aggregateOutputForCall(call, agg); out != "" {
+				return Projection{
+					Expr:    out,
+					Column:  out,
+					Alias:   name,
+					ASTExpr: &plansql.ColRef{Column: out},
+					Hidden:  true,
+				}, nil
+			}
+		}
 		// The DELIBERATE exclusion. Over a GROUP BY, a materialized key is
 		// honoured only where BOTH engines can find it: the single-process
 		// Project computes it from the aggregate's output, and the DAG's
@@ -555,4 +586,53 @@ func ungroupedAggregateSort(ob plansql.OrderByItem, project *Node, info *plansql
 		return false
 	}
 	return aggregateBelow(project) != nil
+}
+
+// bareAggregateCall reports the aggregate call an ORDER BY term IS, as opposed
+// to one it merely contains. `MAX(id)` and `(MAX(id))` qualify; `MAX(id) + 1`
+// and `LENGTH(MIN(c_str))` do not — those are values computed FROM an
+// aggregate's output, which is a different question with a different answer.
+func bareAggregateCall(ast plansql.Node) (*plansql.FuncCallNode, bool) {
+	call, ok := unwrapParens(ast).(*plansql.FuncCallNode)
+	if !ok {
+		return nil, false
+	}
+	aggs := plansql.FindAllAggregates(call)
+	if len(aggs) != 1 || aggs[0] != call {
+		return nil, false
+	}
+	return call, true
+}
+
+// aggregateOutputForCall names the column an Aggregate node publishes this
+// call's value under, or "" when it computes no such aggregate.
+//
+// The match is reuseOrAddAggregate's, field for field, because that is the
+// function that decided which output the call was hoisted into: comparing
+// rendered TEXT instead would miss `COUNT(*)`, whose AggExpr carries an empty
+// InputCol where the call says `*` (the same normalisation HAVING's reuse test
+// had to make, and got wrong once).
+func aggregateOutputForCall(call *plansql.FuncCallNode, agg *Node) string {
+	if call == nil || agg == nil || len(call.Args) > 1 {
+		return ""
+	}
+	inputCol := ""
+	if len(call.Args) > 0 {
+		inputCol = cleanExpr(call.Args[0].String())
+	}
+	funcName := strings.ToLower(call.Name)
+	if funcName == "count" && (inputCol == "*" || inputCol == "") {
+		inputCol = ""
+	}
+	for _, a := range agg.AggExprs {
+		if a.InputCol2 != "" || a.Separator != "" || a.Percentile != 0 {
+			continue
+		}
+		if strings.EqualFold(a.Func, funcName) &&
+			strings.EqualFold(a.InputCol, inputCol) &&
+			a.Distinct == call.Distinct {
+			return a.OutputCol
+		}
+	}
+	return ""
 }

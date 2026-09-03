@@ -4153,13 +4153,7 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "GroupedOrderByAggregate",
 			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY COUNT(*), n_regionkey`},
 		pgCase{name: "GroupedOrderByUnselectedAggregate",
-			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey ORDER BY MAX(n_nationkey)`,
-			knownBug: pgBugUnsupported + " ORDER BY an aggregate the SELECT list does not carry is refused " +
-				"outright (\"an aggregate expression that is not itself a select item cannot be sorted on\"). " +
-				"resolveOrderBy already materializes an unselected ORDER BY COLUMN under a hidden projection " +
-				"(#320); the aggregate spelling needs the same treatment one node down. A refusal is the safe " +
-				"direction of failure, which is why this is pinned rather than fixed here",
-			issue: "#597"},
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey ORDER BY MAX(n_nationkey)`},
 		pgCase{name: "GroupedCorrelatedOuterColumn",
 			sql: `SELECT r_regionkey, (SELECT COUNT(*) FROM nation n WHERE n.n_regionkey = r.r_regionkey) AS c
 				FROM region r ORDER BY r_regionkey`},
