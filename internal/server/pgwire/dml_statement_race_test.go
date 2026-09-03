@@ -66,7 +66,12 @@ func statementRaces() []statementRace {
 			outer:  "UPDATE arcb_pr SET n = 111 WHERE id = 1",
 			inner:  "UPDATE arcb_pr SET n = 222 WHERE id = 1",
 			tables: []string{"[1:111:a 2:20:b 3:30:c]", "[1:222:a 2:20:b 3:30:c]"},
-			tags:   []string{"UPDATE 1", "UPDATE 0"},
+			// UPDATE 1 in BOTH serial orders — the row exists and matches
+			// either way, so PostgreSQL cannot answer UPDATE 0 here and
+			// allowing it would let a lost row through as success. (The
+			// UPDATE || DELETE cell below does list both counts, because
+			// there the two orders genuinely differ.)
+			tags:   []string{"UPDATE 1"},
 			redone: true},
 
 		// Read-modify-write, which is the shape a lost update is usually
@@ -291,9 +296,24 @@ func raceTable(t *testing.T, ctx context.Context, db *wadjet.DB) string {
 // TestConcurrentDMLStormReports40001: a statement that loses the ROW race on
 // every attempt reports the retryable class and writes nothing, exactly as one
 // that loses the file race does (#691's P2 arm, over the new conflict).
+//
+// THE CLASS ALONE CANNOT GATE THIS, and asserting only the class made a test
+// that could not fail. `armAlways` fires inside CommitDML's own CAS loop too,
+// so with the row check backed out the interfering statement still bumps the
+// revision under every attempt and CommitDML exhausts its OWN maxRetries and
+// returns a PRE-EXISTING 40001 ("DML commit failed after 10 CAS retries") —
+// which satisfies a class assertion, and satisfies the two value assertions
+// as well, because the outer statement never commits either way. Measured:
+// 3/3 PASS with the fix reverted (review B2).
+//
+// What names the new mechanism is the error's CAUSE and the REDO COUNT: this
+// statement must fail because a row it was superseding had already been
+// superseded, and it must have redone itself to find that out. CommitDML's
+// CAS-exhaustion carries neither.
 func TestConcurrentDMLStormReports40001(t *testing.T) {
 	ctx := context.Background()
 	db, hook := raceDB(t)
+	before := db.DMLRedos()
 
 	// A fresh interfering UPDATE on EVERY manifest read, so the outer
 	// statement's markers always name a row somebody else just superseded.
@@ -312,6 +332,25 @@ func TestConcurrentDMLStormReports40001(t *testing.T) {
 	if got := sqlerr.StateOf(err); got != "40001" {
 		t.Errorf("SQLSTATE %q, want 40001 serialization_failure (err: %v)", got, err)
 	}
+	// THE MECHANISM. The 40001 must be the one the STATEMENT gives up with
+	// after redoing itself, carrying the row conflict as its cause — not the
+	// catalog's CAS-exhaustion, which this fixture produces with or without
+	// the rule under test.
+	if !errors.Is(err, catalog.ErrDMLRowSuperseded) {
+		t.Errorf("the 40001 does not carry ErrDMLRowSuperseded, so it is not the row "+
+			"conflict this gate is for: %v", err)
+	}
+	if !strings.Contains(err.Error(), "changed under this statement") {
+		t.Errorf("the 40001 is not the STATEMENT's give-up after its redos: %v", err)
+	}
+	// And it redid itself its whole bound before giving up. Zero redos means
+	// the conflict was never observed and the failure came from somewhere
+	// else (review B2).
+	if redos := db.DMLRedos() - before; redos < dmlCommitAttemptsForGate {
+		t.Errorf("the statement redid itself %d time(s) before reporting 40001, want %d — "+
+			"a 40001 without redos is not this rule firing", redos, dmlCommitAttemptsForGate)
+	}
+
 	// It wrote nothing of its own: the value is the interfering statement's.
 	table := raceTable(t, ctx, db)
 	if strings.Contains(table, "1:111:a") {
@@ -322,6 +361,13 @@ func TestConcurrentDMLStormReports40001(t *testing.T) {
 		t.Errorf("key 1 appears %d times in %s, want 1", got, table)
 	}
 }
+
+// dmlCommitAttemptsForGate mirrors wadjet's unexported dmlCommitAttempts: the
+// number of times a DML statement redoes itself before reporting 40001. It is
+// duplicated rather than exported because exporting a retry bound invites
+// callers to depend on it; if the two ever disagree this gate fails, which is
+// the right direction.
+const dmlCommitAttemptsForGate = 5
 
 // TestCommitDMLRefusesAMarkerForARowAlreadySuperseded pins the catalog's half
 // directly, the way #691's file half is pinned: the rule lives in the catalog

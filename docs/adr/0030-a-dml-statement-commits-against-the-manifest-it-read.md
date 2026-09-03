@@ -239,8 +239,19 @@ three doors. Each asserts the table is **one of** the states a serial order
 could produce, the tag is one of the tags that order carries, AND whether the
 statement redid itself (`DB.DMLRedos()`), which is the boundary claim: the
 disjoint-row cells must commit with zero redos.
-`TestConcurrentDMLStormReports40001` covers exhaustion,
 `TestCommitDMLRefusesAMarkerForARowAlreadySuperseded` pins the catalog's half
 directly, including that a partially overlapping marker batch is refused
-WHOLE. Confirmed to fail with the row check backed out, with exactly the
-tables in the amendment's table above.
+WHOLE. Both were confirmed to fail with the row check backed out, with exactly
+the tables in the amendment's table above (33 and 1 failing subtests).
+
+`TestConcurrentDMLStormReports40001` covers exhaustion, and its assertion is
+the ERROR'S CAUSE and the REDO COUNT rather than the class. The class alone
+could not gate it: the fixture's always-armed hook bumps the manifest revision
+inside `CommitDML`'s own CAS loop as well, so with the row check backed out the
+commit exhausts its own `maxRetries` and returns a PRE-EXISTING 40001 ("DML
+commit failed after 10 CAS retries") that satisfies a class assertion — and
+satisfies "the table is intact" too, because the statement never commits either
+way. It passed 3/3 reverted. It now asserts that the 40001 carries
+`ErrDMLRowSuperseded`, that its text is the STATEMENT's give-up rather than the
+catalog's, and that the statement redid itself its full bound; reverted, it
+fails 3/3 naming all three.
