@@ -8,11 +8,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Predicate evaluates a row and returns true if it passes the filter.
@@ -1544,20 +1544,18 @@ func toInt64(v any) int64 {
 	}
 }
 
+// parseTimestampString parses a timestamp literal into epoch milliseconds for
+// an implicit string-to-timestamp comparison, through the SAME function the
+// writer and the ingest boundary use.
+//
+// It used to be a private copy of the layout list, and the copy had drifted
+// from the writer's: the space-separated millisecond form stored fine and no
+// predicate could read it back. It also converted an offset-bearing literal to
+// its UTC instant while PostgreSQL's `timestamp without time zone` discards
+// the offset, so a predicate and a write disagreed about what the same literal
+// means (#692).
 func parseTimestampString(s string) int64 {
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05",
-		"2006-01-02T15:04:05.000",
-		"2006-01-02 15:04:05",
-		"2006-01-02",
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.UnixMilli()
-		}
-	}
-	return 0
+	return parquet.ParseTimestampMillisOrZero(s)
 }
 
 // ChainFilter applies a sequence of unary filter operators in order.

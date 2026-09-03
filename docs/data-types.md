@@ -61,6 +61,14 @@ IPv4, IPv6, MAC, Port and Protocol are stored in compact binary representations 
 | `Date` | `int32` | Days since 1970-01-01 | Calendar dates, partition keys |
 | `Duration` | `int64` | Nanoseconds | Time intervals, latency measurements |
 
+`Timestamp` is PostgreSQL's `timestamp without time zone`, which is the type it
+declares on the wire. A literal that carries a UTC offset has that offset
+**discarded** — `'2020-01-01T05:30:00+05:30'` is `2020-01-01 05:30:00`, not the
+instant it names — and this holds for a value being stored and for the same
+literal in a predicate, which read it through one accept-set. A literal whose
+fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
+text that is not a timestamp at all is 22007.
+
 ### Identifier Types
 
 | Type | Go Backing | Size | Use Cases |

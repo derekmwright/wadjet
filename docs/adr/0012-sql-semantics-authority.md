@@ -124,6 +124,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      same rule; a boxed comparator that reads a rendered address or a
      formatted decimal is not that order (`internal/engine/exec/
      compare_boxed.go`).
+   - **TIMESTAMP is `timestamp without time zone`, and a literal's offset is
+     DISCARDED.** (Added 2026-09-03, #692; this entry records a divergence
+     CLOSED, not one kept.) Wadjet declares TIMESTAMP as PostgreSQL's
+     `timestamp without time zone` on the wire and therefore has to mean what
+     that type means: `'2020-01-01T05:30:00+05:30'` is `2020-01-01 05:30:00`.
+     It used to be read as the INSTANT the offset names and normalized to UTC
+     — `time.Parse` yields a fixed +05:30 zone and `UnixMilli` converts it —
+     so wadjet stored `2020-01-01 00:00:00` and answered a different question
+     than the literal asked. Verified live: `'…+05:30'::timestamp` is
+     `2020-01-01 05:30:00` and `'…+05:30'::timestamptz AT TIME ZONE 'UTC'` is
+     `2020-01-01 00:00:00`, which is what wadjet was storing.
+
+     The rule is one function, `parquet.ParseTimestampMillis`, and the two
+     comparison kernels reach it through
+     `parquet.ParseTimestampMillisOrZero` instead of keeping copies of the
+     layout list. They had two copies and both had DRIFTED from the writer's,
+     so the space-separated millisecond form stored fine and no predicate
+     could read it back — a literal that STORES has to be a literal a
+     predicate over the same column reads the same way, and one function is
+     the only thing that keeps that true. The classification goes with it:
+     a timestamp whose FIELDS name no instant (2020-02-30, month 13, hour 25)
+     is **22008**, text that is not a timestamp at all is **22007**, exactly
+     as DATE has classified since #560.
    - **A TEXT value compared against a NUMBER.** (Added 2026-08-24, #504.)
      PostgreSQL refuses the pair outright — verified live, `WHERE s = 1.5`
      over a `text` column is 42883 "operator does not exist: text = numeric",

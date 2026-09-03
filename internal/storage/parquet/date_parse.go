@@ -398,9 +398,11 @@ func normalizeTemporalBox(t TypeID, val any) (any, bool, error) {
 }
 
 // timestampLayouts is the accept-set for a TIMESTAMP text literal, in the
-// order tried. It is the list the comparison kernel already parses a string
-// against (kernel.parseTimestampString), so a literal that STORES is a literal
-// a predicate over the same column reads the same way.
+// order tried. It is the ONE list: the comparison kernel and the scan filter
+// reach it through ParseTimestampMillisOrZero rather than keeping copies,
+// which is what makes "a literal that STORES is a literal a predicate over
+// the same column reads the same way" a fact rather than a comment. The two
+// copies it used to describe had drifted (#692).
 var timestampLayouts = []string{
 	time.RFC3339Nano,
 	time.RFC3339,
@@ -423,21 +425,128 @@ func ParseTimestampMillis(s string) (int64, error) {
 	trimmed := strings.TrimSpace(s)
 	for _, layout := range timestampLayouts {
 		if t, err := time.Parse(layout, trimmed); err == nil {
-			return t.UnixMilli(), nil
+			return timestampWallClockMillis(t), nil
 		}
+	}
+	// The literal named no timestamp. Which KIND of failure it is decides the
+	// SQLSTATE, exactly as it does for DATE.
+	if timestampFieldsOutOfRange(trimmed) {
+		return 0, &TimestampParseError{Text: s, FieldRange: true}
 	}
 	return 0, &TimestampParseError{Text: s}
 }
 
-// TimestampParseError is ParseTimestampMillis's failure, carrying PostgreSQL's
-// 22007 the way DateParseError carries its own.
-type TimestampParseError struct{ Text string }
+// ParseTimestampMillisOrZero is the COMPARISON contract: the epoch
+// millisecond value, or 0 for text that names no timestamp.
+//
+// It exists so the comparison kernels stop carrying their own copy of the
+// layout list. They had two, and both had DRIFTED from the writer's — the
+// space-separated millisecond form stored fine and no predicate could read it
+// back — while the doc comment on timestampLayouts asserted the three were the
+// same list. A literal that STORES has to be a literal a predicate over the
+// same column reads the same way, and one function is the only way to keep
+// that true (#692).
+//
+// Zero is a defensible answer for a comparison (it cannot match) and an
+// indefensible one for a WRITE, which is why the writer's entry point above
+// returns an error instead.
+func ParseTimestampMillisOrZero(s string) int64 {
+	ms, err := ParseTimestampMillis(s)
+	if err != nil {
+		return 0
+	}
+	return ms
+}
+
+// timestampWallClockMillis reads a parsed timestamp as PostgreSQL's
+// `timestamp without time zone` does: the WALL-CLOCK FIELDS are the value and
+// any offset the literal carried is DISCARDED.
+//
+// `time.Parse(RFC3339, "2020-01-01T05:30:00+05:30")` yields 05:30 in a fixed
+// +05:30 zone, and UnixMilli then converts it to the UTC INSTANT — midnight —
+// so wadjet stored a different timestamp than the literal spells. PostgreSQL
+// stores 05:30:00, and `'…+05:30'::timestamp` = `2020-01-01 05:30:00` is
+// verifiable on any server. This engine's TIMESTAMP is declared as
+// `timestamp without time zone` on the wire, so it has to mean what that type
+// means (ADR-0012: PostgreSQL decides). A literal spelling `Z` is unaffected —
+// discarding a zero offset changes nothing.
+func timestampWallClockMillis(t time.Time) int64 {
+	return time.Date(t.Year(), t.Month(), t.Day(),
+		t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC).UnixMilli()
+}
+
+// timestampFieldsOutOfRange reports whether text SHAPED like a timestamp names
+// field values no calendar or clock has — 2020-02-30, month 13, hour 25 —
+// which PostgreSQL answers with 22008 (datetime_field_overflow) rather than
+// 22007 (invalid_datetime_format). Text that is not a timestamp at all
+// ("not-a-timestamp") is 22007 and returns false here.
+//
+// The DATE side has carried this classification since #560; TIMESTAMP simply
+// never got it, so every bad literal was 22007 (#692).
+func timestampFieldsOutOfRange(s string) bool {
+	datePart, timePart := s, ""
+	if i := strings.IndexAny(s, "T "); i >= 0 {
+		datePart, timePart = s[:i], strings.TrimSpace(s[i+1:])
+	}
+	// The DATE parser owns the calendar rule, round trip included.
+	if _, err := ParseDateDays(datePart); err != nil {
+		var de *DateParseError
+		if errors.As(err, &de) {
+			return de.FieldRange
+		}
+		return false
+	}
+	if timePart == "" {
+		return false
+	}
+	// Strip a zone suffix before reading the clock fields.
+	if i := strings.IndexAny(timePart, "Zz+"); i > 0 {
+		timePart = timePart[:i]
+	} else if i := strings.LastIndex(timePart, "-"); i > 0 {
+		timePart = timePart[:i]
+	}
+	fields := strings.Split(timePart, ":")
+	if len(fields) < 2 || len(fields) > 3 {
+		return false
+	}
+	limits := []int{23, 59, 60} // PostgreSQL accepts second 60 (leap second)
+	for i, f := range fields {
+		if i == 2 {
+			f = strings.SplitN(f, ".", 2)[0]
+		}
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			return false
+		}
+		if n < 0 || n > limits[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// TimestampParseError is ParseTimestampMillis's failure. FieldRange separates
+// PostgreSQL's two classes exactly as DateParseError's does: 22008 for a
+// timestamp whose fields name no instant, 22007 for text that is not a
+// timestamp at all.
+type TimestampParseError struct {
+	Text       string
+	FieldRange bool
+}
 
 func (e *TimestampParseError) Error() string {
+	if e.FieldRange {
+		return fmt.Sprintf("date/time field value out of range: %q", e.Text)
+	}
 	return fmt.Sprintf("invalid input syntax for type timestamp: %q", e.Text)
 }
 
-func (e *TimestampParseError) SQLState() string { return "22007" }
+func (e *TimestampParseError) SQLState() string {
+	if e.FieldRange {
+		return "22008"
+	}
+	return "22007"
+}
 
 // ParseDurationNanos converts a DURATION string to nanoseconds.
 //
