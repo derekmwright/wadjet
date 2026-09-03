@@ -78,7 +78,7 @@ SQL text
 - **Selection vectors**: Filtering marks indices instead of copying rows
 - **Push-based pipelines**: Source → UnaryOperator chain → Sink
 - **Pipeline breakers**: Aggregate, Sort, Window act as SinkSource (consume all, then produce)
-- **Spill-to-disk**: All pipeline breakers degrade gracefully past memory — HashJoin (grace partition-on-arrival), HashAggregate (partial-state k-way merge), Sort and Window (sorted-run external merge, streaming k-way; empty-PARTITION-BY windows stream via a two-pass evaluator over the runs; nested Array/Map/Row schemas ride the columnar run format). Remaining bound: cume_dist holds back the open ORDER-BY peer group; window-partition peak memory is the largest single partition.
+- **Spill-to-disk**: All pipeline breakers degrade gracefully past memory — HashJoin (grace partition-on-arrival), HashAggregate (partial-state k-way merge), Sort and Window (sorted-run external merge, streaming k-way; empty-PARTITION-BY windows stream via a two-pass evaluator over the runs; nested Array/Map/Row schemas ride the columnar run format). Remaining bounds: cume_dist holds back the open ORDER-BY peer group; window-partition peak memory is the largest single partition; a CROSS join — which is how a join on an EXPRESSION rather than on columns is executed — does not spill at all, because its probe reads every build row and so cannot use a partitioned build (ADR-0006's 2026-09-03 routed-probe amendment, #832): its build must fit the budget and refuses loudly when it does not.
 - **Batch pooling**: `BatchPool` for zero-alloc batch reuse
 
 ### Core Interfaces

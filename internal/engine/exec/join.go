@@ -1018,7 +1018,11 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// and a MemTracker (so it dispatches to buildPartitioned below), register as
 	// a Spillable so the worker's SpillManager.RequestRelief can target this
 	// operator's in-memory partitions when another task hits Reserve failure.
-	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly && !h.semiAntiNEEligible() {
+	// The condition is the dispatch's own: a join that will not partition has
+	// no in-memory partition to offer, and advertising relief it cannot give
+	// makes another operator wait for room that never arrives.
+	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly && !h.semiAntiNEEligible() &&
+		h.probeRoutesByPartition() {
 		// Register with the relief registry for the duration of Build (the
 		// spill-eligible phase).
 		h.accInstanceID = memory.NextInstanceID()
@@ -1031,15 +1035,17 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	}
 
 	// Spill-eligible builds (MemTracker + Spill both configured — the
-	// production worker config) always partition on arrival. Spill is then
+	// production worker config) partition on arrival WHEN THE PROBE ROUTES BY
+	// THE PARTITION KEY (probeRoutesByPartition). Spill is then
 	// O(partition) instead of O(total): each pressure event evicts one
 	// partition rather than freezing, repartitioning, and rebuilding the whole
 	// flat state. There is no at-entry pressure heuristic — partitioning is
-	// unconditional for spill-eligible builds, so a build that mispredicts its
+	// unconditional for those builds, so a build that mispredicts its
 	// pressure can never get stuck on a flat path with no cheap spill (the
-	// Q17/Q18 mc=4 failure mode). The flat path below runs only for callers
+	// Q17/Q18 mc=4 failure mode). The flat path below runs for callers
 	// without a tracker/spill (embedded queries, tests, spill-replay rebuilds),
-	// where it is a pure in-memory build that never spills.
+	// where it is a pure in-memory build that never spills, and for the joins
+	// whose probe does not route.
 	// Distinct-pair NE builds (join_semianti_ne.go) take the flat path
 	// below: their state is keyOnly-class compact (24 B/key vs stored
 	// batches), so the partition-on-arrival spill machinery is skipped the
@@ -1047,7 +1053,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// column fails to resolve on the first batch) builds flat+full without
 	// spill — planner catalog type gating makes that branch theoretical.
 	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly && !h.semiAntiNEEligible() {
-		return h.buildPartitioned(ctx, source)
+		if h.probeRoutesByPartition() {
+			return h.buildPartitioned(ctx, source)
+		}
+		JoinUnroutedProbeFlatBuilds.Add(1)
 	}
 
 	// No-spill flat build: serial insertion. A per-worker parallel build was
@@ -1225,17 +1234,25 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			continue
 		}
 
-		// Track memory if a budget is set. This flat path runs only for callers
-		// without a configured Spill manager (embedded queries, tests, the
-		// spill-replay tmpJoin rebuild) — see Build's dispatch above — so a
-		// Reserve failure has no spill recourse and fails loudly rather than
-		// silently over-committing. Spill-eligible builds use buildPartitioned.
+		// Track memory if a budget is set. This flat path has no spill
+		// recourse, so a Reserve failure fails loudly rather than silently
+		// over-committing. Two kinds of caller reach it — see Build's dispatch
+		// above — and the message says which, because "no spill configured" is
+		// a lie to the second: a caller with no Spill manager at all (embedded
+		// queries, tests, the spill-replay tmpJoin rebuild), and a CROSS join,
+		// whose probe reads every build row and so cannot use a partitioned
+		// build it would have to evict from (#832).
 		if h.MemTracker != nil {
 			cost := hashBuildBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
 				h.mu.Unlock()
-				return fmt.Errorf("hash join build (no spill configured): %w (build_rows=%d, batches=%d)",
-					err, h.buildRows, len(h.buildBatches))
+				why := "no spill configured"
+				if h.Spill != nil && !h.probeRoutesByPartition() {
+					why = "a cross join's probe reads every build row, so its build cannot be " +
+						"grace-partitioned and cannot spill; the build must fit the budget"
+				}
+				return fmt.Errorf("hash join build (%s): %w (build_rows=%d, batches=%d)",
+					why, err, h.buildRows, len(h.buildBatches))
 			}
 			h.trackedMem += cost
 		}

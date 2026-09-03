@@ -314,6 +314,8 @@ The ingester is a micro-batch accumulator that:
 
 Each task can be assigned a memory budget via `worker.memory_budget`. Every pipeline breaker — HashJoin, HashAggregate, Sort and Window — spills intermediate state to disk past the budget rather than growing memory unboundedly (ADR-0027). HashJoin uses grace partition-on-arrival, HashAggregate spills partial group state and k-way merges it, and Sort and Window write sorted columnar runs and stream a k-way merge over them.
 
+The one exception is a **cross join**, which is also how a join on an expression rather than on columns is executed. Grace partitioning works because a probe row only needs the build rows of its own partition; a cross join's probe row needs every build row, so its build cannot be evicted and does not spill. Such a build must fit the budget and fails loudly with `memory budget exceeded` when it does not.
+
 ```
 Task starts → MemoryTracker created with budget
   → Operator allocates → Tracker.Reserve(n)

@@ -309,6 +309,7 @@ and a budget below their sum makes queries refuse rather than run slowly:
 | a scan's whole-file load | the parquet file's bytes | its last row group has been decoded |
 | decoded read-ahead | **not bounded by the budget** — one decoded row group per scan worker, plus whatever is queued for the consumer | the consumer takes the batch |
 | a hash join's index | ~40 bytes per build row | the join closes — grace eviction frees the build's COLUMNS, not its index entries |
+| a CROSS join's whole build side | every build row's columns | the join closes — a cross join's probe reads every build row, so its build cannot be partitioned and evicted and does not spill at all |
 | an uncorrelated `IN (SELECT …)` membership set | ~24 bytes per inner row | the query's plan is torn down |
 
 So a per-task budget wants room for the largest file a scan will load, plus

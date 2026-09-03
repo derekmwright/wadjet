@@ -23,7 +23,11 @@ heartbeat starvation followed by reap/redispatch loops.
   process death. What a drained group's BYTES have to be is
   [ADR-0023](0023-group-key-and-group-value-are-two-encodings.md): the
   merge key and the group's value are two encodings, and neither is
-  derived from the other.
+  derived from the other. The one operator "every breaker spills" does
+  NOT cover is a CROSS join — see the 2026-09-03 amendment on the routed
+  probe: grace partitioning is sound only for a probe that routes by the
+  partition key, and a cross join's does not, so its build must fit the
+  budget and REFUSES loudly when it cannot.
 - **OS-facing relief valves**, each with a kill switch: mmap relief
   (RSS ceiling via MADV_DONTNEED), bounded dirty writes, the page-cache
   refault sensor with its episode cap, GOGC=100 + GOMEMLIMIT.
@@ -165,3 +169,43 @@ HAVE arrived remains unreleasable by a grace eviction, which is #823's open
 half: the arena is global across the 64 partitions, so evicting one frees its
 column data and leaves its chain entries. Per-partition index state is the fix
 and it is its own arc.
+
+### 2026-09-03 (the spilled-arm arc): grace partitioning requires a routed probe
+
+`spillOneInMemoryPartition` frees an evicted partition's build batches by
+setting `h.buildBatches[i] = nil`, and its own comment says why that is safe:
+"unreachable on the in-memory probe path because HashJoinProbe.Execute routes
+spilled-partition rows to disk before any hash lookup". That argument is about
+a KEY-ROUTED probe, and it was written as though every probe were one.
+
+A **CROSS join's is not.** It has no key: `computeBuildPartitionRows` sends
+every build row to one partition, `HashJoinProbe.Execute` returns to
+`nextCrossChunk` before the routing runs at all, and `nextCrossChunk` walks
+EVERY entry of `buildBatches` for every probe row. One eviction therefore nils
+the slot it is about to read. That is #832 — a join whose `ON` equates two
+expressions rather than two columns has no equi-key, is planned as a cross join
+with the condition as a filter above it, and panicked on the spilled arm with
+`invalid memory address or nil pointer dereference` while the single-process,
+DAG and DAG-shuffled arms and PostgreSQL all answered. Not a race: a cross join
+whose build evicts ALWAYS reads a nil slot.
+
+**A join whose probe does not route by the partition key does not take the
+partitioned build** (`HashJoin.probeRoutesByPartition`, checked at the build
+dispatch and again at the eviction site). It takes the flat build, which
+reserves per arrival batch and REFUSES when the budget cannot hold it —
+ADR-0006's "degrade or fail loudly", with a message naming the reason rather
+than the flat path's older "no spill configured", which was a lie to this
+caller.
+
+**What is NOT fixed, and is recorded rather than bounded away.** Such a build
+cannot spill AT ALL, because there is no blockwise nested-loop join to spill
+into: the emitter would have to re-read the spilled build per probe batch, and
+that operator does not exist. A cross join whose build exceeds the budget
+therefore refuses. Skipping the nil slots instead would have been the bandaid —
+it turns a loud crash into a silently missing row, which is strictly worse
+(rule 8). The residual is pinned as a loud failure in the type-matrix spill
+sweep (`join_computed_wide_refuses_under_the_smaller_budget`), so it fails the
+moment a spilling nested-loop join makes the shape answer.
+
+The producers table above is unchanged in count: producer 5 charges the index
+of a build that reaches `reconcileHashMemory` on either path.

@@ -46,6 +46,19 @@ var (
 	RawRowSpillFiles atomic.Int64
 	// SortRunsWritten counts sorted columnar runs Sort wrote to disk.
 	SortRunsWritten atomic.Int64
+	// JoinUnroutedProbeFlatBuilds counts spill-eligible HashJoin builds that
+	// took the FLAT path because their probe does not route by the partition
+	// key — a cross join, whose every probe row reads every build row
+	// (probeRoutesByPartition, #832).
+	//
+	// It is an engagement counter for a decision rather than for a file: the
+	// cells that need it are ones where spilling is not merely absent but
+	// IMPOSSIBLE, so "the operator wrote a run" cannot be their evidence and
+	// "the operator reached the decision that keeps it readable" is. Without
+	// it a computed-key cell would compare two in-memory runs and pass with
+	// the fix deleted, which is the anti-pattern ADR-0027 decision 5 exists
+	// for.
+	JoinUnroutedProbeFlatBuilds atomic.Int64
 	// WindowRunsWritten counts run files Window wrote to disk, columnar runs
 	// and the legacy row-oriented spill together.
 	WindowRunsWritten atomic.Int64
