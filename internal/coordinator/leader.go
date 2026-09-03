@@ -47,6 +47,13 @@ type leaderPayload struct {
 // The leader writes its ID + timestamp, refreshing every 2s with a 5s TTL.
 // CAS (revision-based) updates prevent split-brain. Standbys poll the key
 // and attempt acquisition when it expires.
+//
+// NOT YET WIRED INTO ANY SERVER MODE. `NewLeaderElection` has no non-test
+// caller and `Coordinator.SetLeaderElection` has no caller at all, so no
+// `wadjet serve` path instantiates this and no deployment has ever run it.
+// The behaviour described here — and every defect fixed in it — is therefore
+// forward-looking: it is what will be true of the first mode that wires it
+// up, not a description of anything a running server does today.
 type LeaderElection struct {
 	kv       jetstream.KeyValue
 	id       string // unique coordinator ID
@@ -242,10 +249,9 @@ func (le *LeaderElection) refreshLease(ctx context.Context) bool {
 //     `wrong last sequence: 0`: the subject holds no message at all. Nobody
 //     else holds the lease either, because there is nothing to hold. Treating
 //     that as "lost" resigned leadership over an empty key and then waited a
-//     full standby poll before even LOOKING at it, so a lone coordinator went
-//     leaderless for more than a second because its own lease expired (#559).
-//     The right move is to race the standbys for it immediately: Create is
-//     atomic, so exactly one instance wins and split-brain is impossible.
+//     full standby poll before even LOOKING at it (#559). The right move is to
+//     race the standbys for it immediately: Create is atomic, so exactly one
+//     instance wins and split-brain is impossible.
 //   - Someone else holds it. Then leadership really is lost, and the standby
 //     path is correct.
 //   - WE hold it, at a revision this instance did not record — the update

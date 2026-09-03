@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -11,6 +12,18 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// errOnGetKV answers Get with a transport-shaped error while every other
+// operation goes to the real store — the "the who-holds question cannot be
+// answered" state reclaimLease must resolve by standing down.
+type errOnGetKV struct {
+	jetstream.KeyValue
+	err error
+}
+
+func (k errOnGetKV) Get(_ context.Context, _ string) (jetstream.KeyValueEntry, error) {
+	return nil, k.err
+}
+
 // A failed lease refresh is a QUESTION — the key is not at the revision this
 // coordinator recorded — and standing down is only one of its three answers.
 //
@@ -18,10 +31,13 @@ import (
 // ticks at 2s, so a tick the runtime delivered late let the entry age out, the
 // CAS came back `wrong last sequence: 0` (the subject holds no message at all),
 // and the coordinator resigned over a key NOBODY held. It then waited a whole
-// standby poll before so much as looking at it, which is a leaderless second in
-// a single-coordinator deployment — a liveness hole in production, not a test
-// artifact. Filed as a flake because a busy machine is what makes a 2s tick
-// miss a 5s deadline.
+// standby poll before so much as looking at it. Filed as a flake because a busy
+// machine is what makes a 2s tick miss a 5s deadline; the logic was simply
+// wrong, and the load only decided how often it was reached.
+//
+// This is FORWARD-LOOKING, not a fixed outage: LeaderElection has no non-test
+// caller (see its type doc), so no shipped server mode has ever run it. What is
+// fixed is the logic the first mode to wire it up will inherit.
 //
 // The three answers are asserted here against a live embedded NATS, with no
 // sleeps and no dependence on scheduling: the store is put into each state
@@ -149,6 +165,55 @@ func TestFailedLeaseRefreshAsksWhoHoldsTheLeaseBeforeStandingDown(t *testing.T) 
 		}
 		if !le.refreshLease(ctx) {
 			t.Fatal("the refresh after adoption failed: the adopted revision is wrong")
+		}
+	})
+
+	// The who-holds question is not always answerable. Both cells below are
+	// branches of reclaimLease that stand down correctly today and are each one
+	// `if` away from returning true in a future edit, which is the whole reason
+	// they are gated rather than left to review.
+
+	t.Run("UnanswerableWhoHoldsStandsDown", func(t *testing.T) {
+		js := setupNATSJetStream(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		le := newLeader(t, js, "coord-1")
+		if !le.tryAcquire(ctx) {
+			t.Fatal("could not acquire the lease to begin with")
+		}
+		dropTheKey(t, ctx, js)
+		// Every other operation still reaches the real store; only the
+		// who-holds Get cannot be answered.
+		le.kv = errOnGetKV{KeyValue: le.kv, err: errors.New("nats: connection closed")}
+
+		if le.refreshLease(ctx) {
+			t.Fatal("the coordinator kept leadership although the store could not say who holds the lease")
+		}
+		if got := le.LeaseReclaims(); got != 0 {
+			t.Fatalf("LeaseReclaims = %d after an unanswerable question, want 0", got)
+		}
+	})
+
+	t.Run("UnreadableLeaderPayloadStandsDown", func(t *testing.T) {
+		js := setupNATSJetStream(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		le := newLeader(t, js, "coord-1")
+		if !le.tryAcquire(ctx) {
+			t.Fatal("could not acquire the lease to begin with")
+		}
+		// A key whose payload cannot be parsed says nothing about who holds it.
+		if _, err := le.kv.Put(ctx, leaderKey, []byte("{not json")); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+
+		if le.refreshLease(ctx) {
+			t.Fatal("the coordinator kept leadership over a key it cannot read")
+		}
+		if got := le.LeaseReclaims(); got != 0 {
+			t.Fatalf("LeaseReclaims = %d, want 0", got)
 		}
 	})
 
