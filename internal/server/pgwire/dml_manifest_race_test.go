@@ -51,23 +51,31 @@ type compactingKV struct {
 	catalog.MetaKV
 	key string
 
-	mu    sync.Mutex
-	armed bool
-	fired bool
-	fire  func()
+	mu     sync.Mutex
+	armed  bool
+	fired  bool
+	always bool // fire on EVERY read, not only the first
+	inFire bool // re-entrancy guard: the compactor reads this key too
+	fire   func()
 }
 
 func (k *compactingKV) Get(key string) ([]byte, uint64, error) {
 	val, rev, err := k.MetaKV.Get(key)
 	k.mu.Lock()
-	run := k.armed && !k.fired && strings.HasSuffix(key, k.key)
+	run := k.armed && !k.inFire && (k.always || !k.fired) && strings.HasSuffix(key, k.key)
 	if run {
-		k.fired = true // before fire(): the compactor reads this key too
+		// inFire, not just `fired`: the compactor reads this same key, so
+		// without a re-entrancy guard an always-armed hook recurses until the
+		// stack gives out. `fired` records that it happened at all.
+		k.fired, k.inFire = true, true
 	}
 	f := k.fire
 	k.mu.Unlock()
 	if run && f != nil {
 		f()
+		k.mu.Lock()
+		k.inFire = false
+		k.mu.Unlock()
 	}
 	return val, rev, err
 }
@@ -75,7 +83,16 @@ func (k *compactingKV) Get(key string) ([]byte, uint64, error) {
 func (k *compactingKV) arm(fire func()) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.armed, k.fired, k.fire = true, false, fire
+	k.armed, k.fired, k.always, k.inFire, k.fire = true, false, false, false, fire
+}
+
+// armAlways fires on EVERY manifest read, so a statement can never commit and
+// has to exhaust its retries. It is the fixture for the 40001 arm, which
+// nothing reached while the hook fired once (review P2).
+func (k *compactingKV) armAlways(fire func()) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.armed, k.fired, k.always, k.inFire, k.fire = true, false, true, false, fire
 }
 
 func (k *compactingKV) didFire() bool {

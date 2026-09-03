@@ -1608,8 +1608,12 @@ against the manifest that replaced them. A statement that keeps losing that
 race reports SQLSTATE **40001** (`serialization_failure`), which a client is
 expected to retry; the table is unchanged when it does.
 
-Wadjet has no row-level concurrency control: two statements updating the same
-row both succeed, and the later commit wins, as with any merge-on-read table.
+Wadjet has no row-level concurrency control, and the outcome of two statements
+updating the same row is **duplication**, not a lost update: each reads the row
+at its own manifest revision, each writes a replacement, each marks the copy it
+read, and the key ends up present TWICE. Measured, and identical before this
+arc — nothing here changed it. Serialize writers to one row yourself, or read
+the table through a query that de-duplicates on the key.
 
 ### Type Coercion
 
@@ -1639,11 +1643,12 @@ expression.
 - `NATURAL JOIN` — rejected; write the join condition with `ON`
 - `JOIN ... USING (col)` — not parsed; write `ON a.col = b.col`
 - A SUBQUERY in an `UPDATE` / `DELETE` `WHERE` clause — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS` — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner.
-- Two statements in one simple-protocol message (`DELETE ...; DELETE ...`) — refused. The extended protocol refuses it as PostgreSQL does (42601).
+- Two statements in one message. `DELETE ...; DELETE ...` and `UPDATE ...; UPDATE ...` are refused (42601 when the second statement carries a WHERE, XX000 when the first does not); `INSERT ...; INSERT ...` is **not** refused — the first statement runs, the tail is silently dropped, and the tag reports the first statement's count. PostgreSQL runs both statements. Do not put two statements in one message until #711 lands.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
 - A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000
 - `RANGE` window frames with a value offset, and the `GROUPS` frame mode
 - `SELECT DISTINCT ON (...)`
-- An ORDERING quantifier over a subquery — `x < ALL (SELECT ...)`, `x > ANY (SELECT ...)` — SQLSTATE 0A000. The equality forms are supported: `= ANY` / `= SOME` over a subquery is `IN`, and `<> ALL` is `NOT IN`.
+- An ORDERING quantifier over a subquery — `x < ALL (SELECT ...)`, `x > ANY (SELECT ...)` — SQLSTATE 0A000, on the DML doors and on the query path alike. The equality forms are supported: `= ANY` / `= SOME` over a subquery is `IN`, and `<> ALL` is `NOT IN`.
+- A row comparison whose two sides have different arities — `(a, b) = (1)` — SQLSTATE 42601. PostgreSQL words the same refusal 42883.
 - No time-of-day type: a Parquet `TIME` column is read as its raw integer in the file's own unit

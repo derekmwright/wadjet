@@ -35,6 +35,11 @@ var censusFixture = []string{
 	"CREATE TABLE arcb_dup (id INT64, n INT64, name STRING)",
 	"CREATE TABLE arcb_fl (id INT64, f FLOAT64, n INT64)",
 	"CREATE TABLE arcb_ts (id INT64, t TIMESTAMP)",
+	// The column families the corpus could not reach — and B5 lived in exactly
+	// that gap: `DELETE FROM t WHERE ts > 5` EMPTIED a TIMESTAMP table, and so
+	// did the BOOL and IPv4 spellings, where PostgreSQL raises 42883. No cell
+	// could have seen it because no fixture had one of those columns.
+	"CREATE TABLE arcb_mix (id INT64, ts TIMESTAMP, flag BOOL, ip IPV4, raw BYTES, d DECIMAL(9,2))",
 	// An EMPTY table. A plan-time refusal is invisible on a populated one:
 	// the runtime raises on the first row either way, so "the statement was
 	// refused before it read anything" needs a table with nothing to read.
@@ -47,6 +52,7 @@ var censusSeed = []string{
 	"INSERT INTO arcb_dup (id, n, name) VALUES (2, 100, 'p'), (2, 200, 'q')",
 	"INSERT INTO arcb_fl (id, f, n) VALUES (1, 2.5, 0), (2, -2.5, 0), (3, 0.5, 0), (4, 3.5, 0), (5, 1.5, 0)",
 	"INSERT INTO arcb_ts (id, t) VALUES (1, '2000-01-01T00:00:00Z')",
+	"INSERT INTO arcb_mix (id, ts, flag, ip, raw, d) VALUES (1, '2020-01-01T00:00:00Z', true, '10.0.0.1', 'ab', 1.50), (2, '2021-01-01T00:00:00Z', false, '10.0.0.2', 'cd', 2.50)",
 }
 
 // censusDigestSQL reads a fixture table back in a fixed column order.
@@ -55,6 +61,7 @@ var censusDigestSQL = map[string]string{
 	"fl": "SELECT id, f, n FROM arcb_fl ORDER BY id",
 	"ts": "SELECT id, t FROM arcb_ts ORDER BY id",
 	"em": "SELECT id, n, name FROM arcb_empty ORDER BY id",
+	"mx": "SELECT id, flag FROM arcb_mix ORDER BY id",
 }
 
 func newCensusDB(t *testing.T) *wadjet.DB {
@@ -127,7 +134,13 @@ func TestDMLCensus(t *testing.T) {
 	}
 
 	if record {
+		// A RECORDING is not a PASS. Every assertion above is skipped in this
+		// mode, so a green run with WADJET_CENSUS_RECORD set says nothing —
+		// and a green run is exactly what a tired author or a CI job that
+		// inherited the variable would read as one (review P20).
 		t.Logf("recorded census:\n%s", strings.Join(recorded, "\n"))
+		t.Fatal("WADJET_CENSUS_RECORD was set: this run RECORDED the census and asserted nothing. " +
+			"Paste the door lines into censusShapes() and re-run without the variable.")
 	}
 }
 

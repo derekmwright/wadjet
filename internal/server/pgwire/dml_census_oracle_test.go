@@ -31,7 +31,7 @@ import (
 )
 
 // censusPGFixture is censusFixture in PostgreSQL's spelling. `COLLATE "C"` on
-// the text column is not decoration: wadjet compares strings by BYTES, and
+// the text column is not decoration: wadjet compares strings raw BYTES, and
 // without it PostgreSQL's default collation makes `name > '5'` a different
 // question (ADR-0012; the pg-oracle fixture does the same).
 var censusPGFixture = []string{
@@ -41,6 +41,7 @@ var censusPGFixture = []string{
 	`CREATE TEMP TABLE arcb_fl (id bigint, f double precision, n bigint)`,
 	`CREATE TEMP TABLE arcb_ts (id bigint, t timestamp)`,
 	`CREATE TEMP TABLE arcb_empty (id bigint, n bigint, name text COLLATE "C")`,
+	`CREATE TEMP TABLE arcb_mix (id bigint, ts timestamp, flag boolean, ip inet, raw bytea, d numeric(9,2))`,
 }
 
 func TestDMLCensusMatchesPostgres(t *testing.T) {
@@ -82,7 +83,10 @@ func TestDMLCensusMatchesPostgres(t *testing.T) {
 		}
 	}
 	if record {
+		// See the wadjet arm: a recording asserts nothing and must not be
+		// readable as a pass (review P20).
 		t.Logf("recorded PostgreSQL census:\n%s", strings.Join(recorded, "\n"))
+		t.Fatal("WADJET_CENSUS_RECORD was set: this run RECORDED PostgreSQL's answers and asserted nothing.")
 	}
 }
 

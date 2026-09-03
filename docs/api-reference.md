@@ -95,7 +95,13 @@ Execute a SQL query and return results.
 ```
 
 An error the statement's own text caused carries the PostgreSQL SQLSTATE
-alongside the message, and answers `400 Bad Request` rather than `500`:
+alongside the message. Classes `22` (data exception) and `42` (syntax /
+access rule) also answer `400 Bad Request`; every other class — `23502`
+not-null, `0A000` unsupported feature, `40001` serialization failure — carries
+its `sqlstate` under a `500`, and a refusal raised while PARSING (an
+unsupported clause such as `RETURNING`) answers `400` with a message and no
+`sqlstate` key at all. The pgwire door delivers the class in every one of
+those cases; this door is the narrower one.
 
 ```json
 {
@@ -106,8 +112,10 @@ alongside the message, and answers `400 Bad Request` rather than `500`:
 
 **DML:** the same endpoint runs `INSERT`, `UPDATE`, `DELETE` and `MERGE`
 through the same implementation the embedded API and the PostgreSQL wire
-protocol use, so a statement's table state, command tag and SQLSTATE do not
-depend on which door it arrived by. A DML statement answers with a single row
+protocol use, so a statement's table state and command tag do not depend on
+which door it arrived by — the tag is PostgreSQL's own rendering, `INSERT 0 3`
+rather than `INSERT 3`. The SQLSTATE is the same class on every door; how this
+door SURFACES it differs, as the error section above records. A DML statement answers with a single row
 carrying its command tag:
 
 ```json

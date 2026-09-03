@@ -146,7 +146,19 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      the only thing that keeps that true. The classification goes with it:
      a timestamp whose FIELDS name no instant (2020-02-30, month 13, hour 25)
      is **22008**, text that is not a timestamp at all is **22007**, exactly
-     as DATE has classified since #560.
+     as DATE has classified since #560. Hour 24 and second 60 are NOT
+     field-range failures: PostgreSQL reads them as the next day and the next
+     minute, and so does this — refusing input PostgreSQL accepts is what item
+     1 forbids, and the first pass refused both.
+
+     **Residuals, kept and pinned rather than described only in a test file.**
+     `CAST(<bad literal> AS TIMESTAMP)` answers NULL where PostgreSQL raises
+     22008 or 22007: the CAST path has no per-row error channel for a temporal
+     conversion, so it produces a value or nothing, and "nothing" is NULL. It
+     is the one #692 cell the census still pins. Sub-millisecond precision is
+     TRUNCATED to the millisecond the column stores — `.123456` reads back
+     `.123` — which is a declared-type property of TIMESTAMP here and a
+     stored-value divergence from PostgreSQL's microseconds.
    - **A TEXT value compared against a NUMBER.** (Added 2026-08-24, #504.)
      PostgreSQL refuses the pair outright — verified live, `WHERE s = 1.5`
      over a `text` column is 42883 "operator does not exist: text = numeric",
@@ -248,11 +260,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      table. Temporal and network columns against a number are deliberately
      NOT refused — those parsers are stricter than PostgreSQL's input grammar
      and refusing on them would reject input PostgreSQL accepts, which item 1
-     forbids. Both halves are pinned in the DML census
-     (`internal/server/pgwire/dml_census_test.go`): the DML entries assert
-     42883 on all three doors, the two SELECT entries stay pinned as this
-     divergence, and eight boundary entries assert the pairs that must keep
-     working.
+     forbids.
+
+     The refused pairs are: an unquoted NUMBER against any column type that is
+     not a numeric family — STRING, BYTES, BOOL, TIMESTAMP, DATE and the
+     network types, since PostgreSQL refuses the OPERATOR for all of them —
+     a BOOLEAN literal against a non-BOOL column, and a quoted literal naming
+     no value of a numeric column. PORT, PROTOCOL and DURATION keep answering:
+     they are wadjet-native, PostgreSQL has no such type and therefore no
+     opinion, and the superset rule applies. The first pass listed only STRING
+     and BYTES and justified the rest with an argument about quoted input
+     reaching a type parser; that argument cannot apply to an unquoted number,
+     and the measurement refuted it — `DELETE … WHERE ts > 5` EMPTIED a
+     TIMESTAMP table, as did the BOOL and IPv4 spellings.
+
+     Every half is pinned in the DML census
+     (`internal/server/pgwire/dml_census_test.go`): the DML entries assert the
+     class PostgreSQL gives — 42883 for a refused OPERATOR, 22P02 for a quoted
+     literal naming no value, which are two different conditions and word
+     themselves differently — the two SELECT entries stay pinned as this
+     divergence, and the boundary entries assert both the pairs that must keep
+     working and the pairs that must keep refusing. All four DML verbs are
+     covered: MERGE's `WHEN … AND` condition runs the same check as a DELETE's
+     and an UPDATE's WHERE.
 
      **The equivalent question for CIDR is open, and must not be answered one
      site at a time.** (Added 2026-08-25, #546.) A CIDR value is stored as

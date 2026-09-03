@@ -45,11 +45,14 @@ type censusShape struct {
 	// "" means the statement is a QUERY and its own rows are the answer.
 	tbl string
 	pg  string // PostgreSQL 17, measured
-	// One field per door, because the doors DISAGREE and the disagreement is
-	// half of what this corpus is for: the extended protocol reports
-	// `SELECT 1` for every DML statement (#816) and the wire manufactures a
-	// blanket 42000 for an error the engine gave no class (#719). An empty
-	// `sim` means "the same as emb"; an empty `ext` means "the same as sim".
+	// One field per door, because the doors CAN disagree and recording that is
+	// half of what this corpus is for. Two splits it was built to hold are
+	// now closed — the extended protocol's `SELECT 1` for every DML statement
+	// (#816) and pgwire's blanket 42000 over an error the engine gave no class
+	// (#719) — so every one of the entries below currently records the same
+	// answer on all three doors. The fields stay per-door because a split is
+	// exactly what a regression here would look like. An empty `sim` means
+	// "the same as emb"; an empty `ext` means "the same as sim".
 	emb string
 	sim string
 	ext string
@@ -495,6 +498,173 @@ func censusShapes() []censusShape {
 			emb: "state=42P01"},
 
 		// ---------------------------------------------------------------
+		// ---------------------------------------------------------------
+		// ROUND 1 — one cell per adversarial-review finding. Each was a
+		// silent wrong write, a wrong answer or a right→wrong regression that
+		// every gate in the tree was structurally unable to see.
+		// ---------------------------------------------------------------
+
+		// B1 — a PADDED quoted literal. The #690 commit moved TrimSpace to
+		// the outside of the quotes, so `'  7  '` reached strconv and an
+		// INSERT/UPDATE that PostgreSQL and this engine's own base commit
+		// answer was REFUSED. Whitespace is data for TEXT and ignorable for
+		// every other type, which is PostgreSQL's rule.
+		{name: "B1 padded numeric literal in UPDATE", tbl: "fl",
+			sql: "UPDATE arcb_fl SET n = '  7  ' WHERE id = 1",
+			pg:  "tag=UPDATE 1 table=[1:2.5:7 2:-2.5:0 3:0.5:0 4:3.5:0 5:1.5:0]",
+			emb: "tag=UPDATE 1 table=[1:2.5:7 2:-2.5:0 3:0.5:0 4:3.5:0 5:1.5:0]"},
+		{name: "B1 padded float literal in UPDATE", tbl: "fl",
+			sql: "UPDATE arcb_fl SET f = '  7.5  ' WHERE id = 1",
+			pg:  "tag=UPDATE 1 table=[1:7.5:0 2:-2.5:0 3:0.5:0 4:3.5:0 5:1.5:0]",
+			emb: "tag=UPDATE 1 table=[1:7.5:0 2:-2.5:0 3:0.5:0 4:3.5:0 5:1.5:0]"},
+		{name: "B1 padded literal in INSERT", tbl: "pr",
+			sql: "INSERT INTO arcb_pr (id, n, name) VALUES ('  9  ', '  90  ', '  padded  ')",
+			pg:  "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 9:90:  padded  ]",
+			emb: "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 9:90:  padded  ]"},
+		{name: "B1 padded bool literal", tbl: "mx",
+			sql: "UPDATE arcb_mix SET flag = '  true  ' WHERE id = 2",
+			pg:  "tag=UPDATE 1 table=[1:true 2:true]",
+			emb: "tag=UPDATE 1 table=[1:true 2:true]"},
+
+		// B2 — the round trip. A row must be findable by the literal that
+		// wrote it; the #692 commit fixed the write path and left the
+		// comparison path applying the offset, so it was not.
+		{name: "B2 offset literal round trip, insert", tbl: "ts",
+			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-06-01T12:00:00+05:30')",
+			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-06-01T12:00:00Z]",
+			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-06-01T12:00:00Z]"},
+		{name: "B2 offset literal round trip, select", sql: "SELECT count(*) AS c FROM arcb_ts WHERE t = '2000-01-01 00:00:00+00:00'",
+			pg:  "rows=[1]",
+			emb: "rows=[1]"},
+		{name: "B2 space-separated offset literal", tbl: "ts",
+			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01 12:00:00-08:00')",
+			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]",
+			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]"},
+		{name: "B2 two-digit offset literal", tbl: "ts",
+			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01 12:00:00-08')",
+			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]",
+			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]"},
+		{name: "P9 hour 24 is the next day", tbl: "ts",
+			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01 24:00:00')",
+			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-02T00:00:00Z]",
+			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-02T00:00:00Z]"},
+		{name: "P9 second 60 is the next minute", tbl: "ts",
+			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01 23:59:60')",
+			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-02T00:00:00Z]",
+			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-02T00:00:00Z]"},
+
+		// B5 — the DECLARED #721 exclusion. Every one of these EMPTIED its
+		// table; PostgreSQL refuses the operator categorically.
+		{name: "B5 timestamp column > number", tbl: "mx",
+			sql: "DELETE FROM arcb_mix WHERE ts > 5",
+			pg:  "state=42883 table=[1:true 2:false]",
+			emb: "state=42883 table=[1:true 2:false]"},
+		{name: "B5 bool column > number", tbl: "mx",
+			sql: "DELETE FROM arcb_mix WHERE flag > 0",
+			pg:  "state=42883 table=[1:true 2:false]",
+			emb: "state=42883 table=[1:true 2:false]"},
+		{name: "B5 bool column = number", tbl: "mx",
+			sql: "DELETE FROM arcb_mix WHERE flag = 1",
+			pg:  "state=42883 table=[1:true 2:false]",
+			emb: "state=42883 table=[1:true 2:false]"},
+		{name: "B5 inet column > number", tbl: "mx",
+			sql: "DELETE FROM arcb_mix WHERE ip > 5",
+			pg:  "state=42883 table=[1:true 2:false]",
+			emb: "state=42883 table=[1:true 2:false]"},
+		{name: "B5 bytes column > number", tbl: "mx",
+			sql: "DELETE FROM arcb_mix WHERE raw > 5",
+			pg:  "state=42883 table=[1:true 2:false]",
+			emb: "state=42883 table=[1:true 2:false]"},
+		{name: "B5 boundary decimal column > number", tbl: "mx",
+			sql: "DELETE FROM arcb_mix WHERE d > 5",
+			pg:  "tag=DELETE 0 table=[1:true 2:false]",
+			emb: "tag=DELETE 0 table=[1:true 2:false]"},
+		{name: "B5 boundary int column > number", tbl: "mx",
+			sql: "DELETE FROM arcb_mix WHERE id > 5",
+			pg:  "tag=DELETE 0 table=[1:true 2:false]",
+			emb: "tag=DELETE 0 table=[1:true 2:false]"},
+
+		// B4 — #721 reaching MERGE's WHEN … AND, the fourth DML verb.
+		{name: "B4 MERGE WHEN condition, text column > number", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.name > 5 THEN DELETE",
+			pg:  "state=42883 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42883 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "B4 MERGE WHEN condition, text column > number, UPDATE arm", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.name > 5 THEN UPDATE SET n = 999",
+			pg:  "state=42883 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42883 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "B4 boundary MERGE WHEN condition that must keep working", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND s.n > 1 THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+
+		// B6 — a subquery source's unknown column, on the two arms that WRITE.
+		{name: "B6 subquery source, unknown column in SET", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n FROM arcb_src) AS s ON t.id = s.id " +
+				"WHEN MATCHED THEN UPDATE SET n = s.nosuchcol",
+			pg:  "state=42703 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42703 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "B6 subquery source, unknown column in INSERT VALUES", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n FROM arcb_src) AS s ON t.id = s.id " +
+				"WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, s.nosuchcol)",
+			pg:  "state=42703 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42703 table=[1:10:a 2:20:b 3:30:c]"},
+
+		// B7 — an ordering quantifier over a subquery, and a row arity
+		// mismatch. The refusal now REACHES the client instead of being
+		// discarded so the raw-string fallback could guess; what remains is
+		// that PostgreSQL SUPPORTS the ordering quantifier (recorded as a
+		// limitation in docs/sql-reference.md) and words the arity mismatch
+		// 42883 where this says 42601. Both loud, both pinned under #710.
+		// mismatch: the compiler refused both and the planner threw the
+		// refusal away, then guessed with the predicate TEXT.
+		{name: "B7 ordering quantifier over a subquery", sql: "SELECT count(*) AS c FROM arcb_pr WHERE name > ANY (SELECT name FROM arcb_src)",
+			pg:  "rows=[0]",
+			emb: "state=0A000",
+			bug: "#710"},
+		{name: "B7 ordering quantifier over a subquery, numeric column", sql: "SELECT count(*) AS c FROM arcb_pr WHERE id > ANY (SELECT id FROM arcb_src)",
+			pg:  "rows=[2]",
+			emb: "state=0A000",
+			bug: "#710"},
+		{name: "B7 row arity mismatch", sql: "SELECT count(*) AS c FROM arcb_pr WHERE (id, n) = (1)",
+			pg:  "state=42883",
+			emb: "state=42601",
+			bug: "#710"},
+
+		// P6 / P18 — INSERT gets the assignment cast and its classes.
+		{name: "P6 INSERT rounds a fractional literal into an integer column", tbl: "fl",
+			sql: "INSERT INTO arcb_fl (id, f, n) VALUES (20, 0.0, 2.5)",
+			pg:  "tag=INSERT 0 1 table=[1:2.5:0 20:0:3 2:-2.5:0 3:0.5:0 4:3.5:0 5:1.5:0]",
+			emb: "tag=INSERT 0 1 table=[1:2.5:0 20:0:3 2:-2.5:0 3:0.5:0 4:3.5:0 5:1.5:0]"},
+		{name: "P18 INSERT of unreadable text carries its class", tbl: "pr",
+			sql: "INSERT INTO arcb_pr (id, n, name) VALUES (9, 'abc', 'z')",
+			pg:  "state=22P02 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=22P02 table=[1:10:a 2:20:b 3:30:c]"},
+
+		// P5 — an explicit CAST decides the assignment-cast family.
+		{name: "P5 float column cast to numeric rounds half away", tbl: "fl",
+			sql: "UPDATE arcb_fl SET n = f::numeric",
+			pg:  "tag=UPDATE 5 table=[1:2.5:3 2:-2.5:-3 3:0.5:1 4:3.5:4 5:1.5:2]",
+			emb: "tag=UPDATE 5 table=[1:2.5:3 2:-2.5:-3 3:0.5:1 4:3.5:4 5:1.5:2]"},
+
+		// P-R2-4 — the one deferral that was documented and NOT pinned.
+		// #711's deferral names two refused shapes; the INSERT spelling is
+		// refused by neither engine and the two do different things with it.
+		// PostgreSQL runs BOTH statements; wadjet runs the first, silently
+		// DROPS the tail, and reports the first statement's tag — a lost
+		// write dressed as success, which is the one outcome a deferral must
+		// never leave unrecorded. Pinned here so it is loud in the corpus
+		// even while the fix is deferred.
+		{name: "#711 two INSERTs in one message drop the second", tbl: "pr",
+			sql: "INSERT INTO arcb_pr (id, n, name) VALUES (7, 70, 'w'); " +
+				"INSERT INTO arcb_pr (id, n, name) VALUES (8, 80, 'x')",
+			pg:  "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 7:70:w 8:80:x]",
+			emb: "tag=INSERT 0 1 table=[1:10:a 2:20:b 3:30:c 7:70:w]",
+			bug: "#711"},
+
 		// The verbs, working. These carry no bug and are the regression
 		// half of the census: they fail if a later fix moves a RIGHT answer.
 		// ---------------------------------------------------------------

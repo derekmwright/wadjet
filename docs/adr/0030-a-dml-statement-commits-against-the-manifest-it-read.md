@@ -127,19 +127,26 @@ can reach the old shape by accident.
   `TestCommitDMLRefusesAMarkerForAFileTheManifestLost` pins the catalog's
   half directly.
 
-- **The residual is bytes, not rows.** A refused attempt has already
-  written its parquet objects to the store; they stay there, referenced by
-  nothing, until the orphan sweep reclaims them. This is a leak on a rare
-  retry, and it cannot become a wrong answer: the manifest is the only
-  thing that decides which rows exist (ADR-0020's layer-0 reasoning, and
-  the objects carry the engine-written marker so reclaim can see them).
+- **The residual is bytes, not rows, and the leak is PERMANENT absent an
+  operator.** A refused attempt has already written its parquet objects to
+  the store; they stay there, referenced by nothing. This record used to say
+  "until the orphan sweep reclaims them" — there is no such sweep:
+  `docs/ingestion.md` states that wadjet ships no orphan-Parquet reaper and
+  that periodic cleanup is the operator's job. Measured at 10 unreferenced
+  chunk objects from two retried statements. It cannot become a wrong
+  answer — the manifest is the only thing that decides which rows exist
+  (ADR-0020's layer-0 reasoning) — but it is bytes an operator has to
+  collect, not bytes something collects for them.
 
-- **What is still not closed.** Two writers racing each other — not a
-  compactor, but two `UPDATE`s over the same rows — still both succeed, and
-  the second one's markers are valid because the files did not move. That
-  is lost-update, not corruption, and it is what a table with no row-level
-  concurrency control gives; closing it needs a conflict rule over ROWS,
-  which this record does not decide. ADR-0020's honesty requirement
+- **What is still not closed, and it is not lost-update.** Two writers racing
+  each other — not a compactor, but two `UPDATE`s over the same rows — both
+  succeed, and the second one's markers are valid because the files did not
+  move. The outcome is DUPLICATION: each reads the row at its own revision,
+  each writes a replacement, each marks the copy it read, and the key ends up
+  present twice (measured: `[1:111:a 1:222:a 2:20:b 3:30:c]`). This record
+  first called it "lost update", which is the wrong failure mode — nothing is
+  lost and nothing wins. Closing it needs a conflict rule over ROWS, which
+  this record does not decide. ADR-0020's honesty requirement
   (`:112-128`) applied in reverse: this one is a closure of the
   compaction-window shape and a narrowing of nothing else, and the record
   says which.
