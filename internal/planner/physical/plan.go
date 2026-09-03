@@ -11009,6 +11009,12 @@ func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, exp
 	if t, ok := scalarFnDeclaredDecimal(n, decls); ok {
 		return t, expr.Decided
 	}
+	// ...and the same for the INTEGER and REAL domains, which is ABS and MOD
+	// alone — every other member of that family IS double precision over an
+	// integer in PostgreSQL (#768).
+	if t, ok := scalarFnDeclaredNumericDomain(n, decls); ok {
+		return t, expr.Decided
+	}
 	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (expr.DeclType, expr.Confidence) {
 		return nodeDeclaredType(n.Args[i], decls)
 	})

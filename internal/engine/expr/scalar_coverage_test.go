@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"fmt"
 	"math"
 	"testing"
 )
@@ -62,7 +63,10 @@ func TestFnMod(t *testing.T) {
 		{"basic mod", []any{10.0, 3.0}, math.Mod(10.0, 3.0)},
 		{"exact divide", []any{9.0, 3.0}, math.Mod(9.0, 3.0)},
 		{"negative", []any{-10.0, 3.0}, math.Mod(-10.0, 3.0)},
-		{"int args", []any{int64(10), int64(3)}, math.Mod(10, 3)},
+		// INTEGER arguments answer INTEGER remainder, in the argument's own
+		// domain — `pg_typeof(mod(int8, int))` is bigint (#768). It is
+		// checked separately below because this table's comparison is
+		// float64-shaped.
 	}
 	for _, tc := range tests {
 		got := fnMod(tc.args)
@@ -81,6 +85,30 @@ func TestFnMod(t *testing.T) {
 		ef := tc.expect.(float64)
 		if gf != ef {
 			t.Errorf("%s: expected %v, got %v", tc.name, ef, gf)
+		}
+	}
+
+	// The INTEGER domain, which the float64-shaped table above cannot hold
+	// (#768). PostgreSQL's `mod(int8, int)` is bigint and its remainder is
+	// exact -- `MOD(-6, 3)` is 0, never math.Mod's signed -0.
+	for _, tc := range []struct {
+		name   string
+		args   []any
+		expect any
+	}{
+		{"int64 args", []any{int64(10), int64(3)}, int64(1)},
+		{"int64 negative", []any{int64(-10), int64(3)}, int64(-1)},
+		{"int64 exact, no signed zero", []any{int64(-6), int64(3)}, int64(0)},
+		{"int32 args stay int32", []any{int32(10), int32(3)}, int32(1)},
+		{"mixed widths widen", []any{int32(10), int64(3)}, int64(1)},
+		// A zero divisor keeps the float path, which answers NaN -- the
+		// behaviour every other numeric type here has, and not this rule's
+		// to change.
+		{"zero divisor stays float", []any{int64(10), int64(0)}, math.Mod(10, 0)},
+	} {
+		got := fnMod(tc.args)
+		if fmt.Sprintf("%T:%v", got, got) != fmt.Sprintf("%T:%v", tc.expect, tc.expect) {
+			t.Errorf("%s: got %#v (%T), want %#v (%T)", tc.name, got, got, tc.expect, tc.expect)
 		}
 	}
 }

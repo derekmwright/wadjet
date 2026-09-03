@@ -234,14 +234,13 @@ var nfCarrierRefusals = map[string]string{
 //
 // A pin that starts agreeing FAILS, which is how the fix will announce itself.
 var nfBoxPins = map[string]string{
-	"NULLIF|n_i32|n_f32":   "int32",  // PostgreSQL declares double precision
-	"NULLIF|n_i32|n_f64":   "int32",  // PostgreSQL declares double precision
-	"NULLIF|n_i64|n_f32":   "int64",  // PostgreSQL declares double precision
-	"NULLIF|n_i64|n_f64":   "int64",  // PostgreSQL declares double precision
-	"NULLIF|n_d152|n_f32":  "string", // PostgreSQL declares double precision
-	"NULLIF|n_d152|n_f64":  "string", // PostgreSQL declares double precision
-	"NULLIF|n_d3810|n_f32": "string", // PostgreSQL declares double precision
-	"NULLIF|n_d3810|n_f64": "string", // PostgreSQL declares double precision
+	// The eight NULLIF rows are GONE (#757, 2026-09-03). NULLIF's type comes
+	// from the comparison OPERATOR its two arguments select — argument 0's
+	// own width within the integer or float family, float8 for an integer or
+	// a DECIMAL against a float — and both the declaration
+	// (expr.Ret.operatorResolvedType) and the box (expr.nullifArmsBoxMode)
+	// follow it now. They agree with PostgreSQL outright rather than needing
+	// an exemption.
 
 	// --- The arm-kind rows, none of them the fold's own doing ------------
 	//
@@ -251,14 +250,14 @@ var nfBoxPins = map[string]string{
 	// and the width is the standing int4/int8 divergence, not a value.
 	"CASE|n_i32|ARITH":  "int64", // PostgreSQL declares integer
 	"CASE|n_i32|NESTED": "int64", // PostgreSQL declares integer
-	// A scalar math function declared RetFloat64 loses the integer domain
-	// its argument had: PostgreSQL's abs() preserves it (bigint in, bigint
-	// out; real in, real out). Same failure mode as the arithmetic arm, a
-	// different site — expr.DefaultRegistry's return declarations, not
-	// nodeDeclaredType — so the fix above does not reach it.
-	"CASE|n_i32|FUNCABS": "float64", // PostgreSQL declares integer
-	"CASE|n_i64|FUNCABS": "float64", // PostgreSQL declares bigint
-	"CASE|n_f32|FUNCABS": "float64", // PostgreSQL declares real
+	// The three FUNCABS rows are GONE (#768, 2026-09-03). abs() answers in
+	// its argument's own domain now — integer in, integer out; real in, real
+	// out — declared by physical.scalarFnDeclaredNumericDomain and computed
+	// by expr.absKeepsDomain / expr.vecAbsDomain, which move together
+	// because declaring bigint over a ToFloat64 computation would put a right
+	// OID on a rounded number. Only abs and mod: CEIL, FLOOR, ROUND, TRUNC,
+	// SIGN, SQRT, POWER, LN and EXP over an integer ARE double precision in
+	// PostgreSQL, measured, and still are here.
 	// A bare numeric LITERAL arm decides nothing here, so the column's own
 	// type answers and the literal is read at that type. ADR-0024 records
 	// the deferral for a fold of literals ALONE; against a typed integer
@@ -285,16 +284,16 @@ var nfValuePins = map[string]string{
 	// numeric and keeps the half.
 	"CASE|n_i32|LITNUM": "3|100|100|100",
 	"CASE|n_i64|LITNUM": "4|100|100|100",
-	// float -> integer CAST rounding. PostgreSQL's float8-to-int8 cast is
-	// rint(), which rounds halves to EVEN, so -0.5 casts to 0; this engine
-	// rounds the half away from zero and answers -1. A cast rule, reached
-	// here only because a CAST is one of the arm kinds.
-	"CASE|n_f32|CASTI64": "0.1|<NULL>|1.6777216e+07|-1",
-	// abs() declared float8 (see the box pin above) widens the real column
-	// to double, so 0.1 prints with the digits a float32 never held. This is
-	// the value half of that defect, and the row that shows a wrong return
-	// declaration is a wrong NUMBER and not only a wrong OID.
-	"CASE|n_f32|FUNCABS": "0.10000000149011612|<NULL>|16777216|0.5",
+	// The float -> integer CAST rounding row is GONE (#768, 2026-09-03).
+	// PostgreSQL's float-to-integer cast is rint(), half to EVEN, and this
+	// engine rounded halves away from zero: -0.5 answered -1 where the
+	// server answers 0. The NUMERIC-to-integer cast rounds the other way on
+	// the same server (-0.5::numeric::int is -1) and still does here, which
+	// is why only the float arm moved.
+	// The FUNCABS value row is GONE with its box pin (#768): abs() over a
+	// real is computed in float32 now, so 0.1 stays 0.1. It was the clearest
+	// case in the corpus of a wrong return DECLARATION being a wrong NUMBER
+	// and not only a wrong OID.
 }
 
 // nfBox is the Go box a value of PostgreSQL's declared type arrives in when

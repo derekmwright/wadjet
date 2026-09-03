@@ -729,6 +729,56 @@ func wireCorpus() []wireCase {
 		{name: "DecimalColumnZeroRowsViaNaN", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_2 = 'NaN'`},
 		{name: "DecimalColumnAllRowsViaNegInfinity",
 			sql: `SELECT d_2 FROM dec_probe WHERE d_2 > '-Infinity' AND d_key < 4 ORDER BY d_key`},
+		// #768 — ABS answers in its argument's OWN domain, and #757 —
+		// NULLIF's type comes from the OPERATOR its two arguments select.
+		//
+		// These belong on the WIRE arm and nowhere else. The values agree on
+		// every arm for most of them, so only the declared OID separates a
+		// right answer from a wrong one — except `ABS(real)`, where the wrong
+		// declaration WAS a wrong number: computing through a double gave
+		// 0.1 the digits a float32 never held.
+		//
+		// The FLOOR entries are the controls that make this a rule rather
+		// than a rewrite: `floor(bigint)` IS double precision in PostgreSQL,
+		// measured, and so are CEIL, ROUND, TRUNC, SIGN, SQRT, POWER, LN and
+		// EXP over an integer. Only ABS and MOD preserve the domain.
+		{name: "AbsOverReal", sql: `SELECT ABS(r_val) AS v FROM real_probe WHERE r_key IN (0, 16) ORDER BY r_key`},
+		{name: "AbsOverBigint", sql: `SELECT ABS(r_key) AS v FROM real_probe WHERE r_key IN (0, 3) ORDER BY r_key`},
+		{name: "AbsOverInteger", sql: `SELECT ABS(r_grp) AS v FROM real_probe WHERE r_key IN (0, 3) ORDER BY r_key`},
+		{name: "AbsOverDouble", sql: `SELECT ABS(d_val) AS v FROM real_probe WHERE r_key IN (0, 16) ORDER BY r_key`},
+		{name: "ModOverBigint", sql: `SELECT MOD(r_key, 3) AS v FROM real_probe WHERE r_key IN (0, 3, 4) ORDER BY r_key`},
+		{name: "ModOverInteger", sql: `SELECT MOD(r_grp, 3) AS v FROM real_probe WHERE r_key IN (0, 3, 4) ORDER BY r_key`},
+		// MOD over an int4 column against an int8 COLUMN really is bigint on
+		// both engines; the entry above uses a literal, and this one makes
+		// the widening rule itself non-vacuous.
+		{name: "ModIntegerAgainstBigint",
+			sql: `SELECT MOD(r_grp, r_key + 3) AS v FROM real_probe WHERE r_key IN (0, 3, 4) ORDER BY r_key`},
+		{name: "CtlFloorOverBigintIsDouble",
+			sql: `SELECT FLOOR(r_key) AS v FROM real_probe WHERE r_key IN (0, 3) ORDER BY r_key`},
+		{name: "CtlCeilOverBigintIsDouble",
+			sql: `SELECT CEIL(r_key) AS v FROM real_probe WHERE r_key IN (0, 3) ORDER BY r_key`},
+		{name: "CtlSqrtOverBigintIsDouble",
+			sql: `SELECT SQRT(r_key) AS v FROM real_probe WHERE r_key IN (0, 4) ORDER BY r_key`},
+		// #757's rows. The first two are argument 0's own width within one
+		// family; the third and fourth are the cross-family pairs where
+		// PostgreSQL resolves to float8 and a fold over the arguments would
+		// answer `real` instead — which is what makes NULLIF a different rule
+		// from GREATEST, not a variation on it.
+		{name: "NullifWithinTheIntegerFamily",
+			sql: `SELECT NULLIF(r_grp, r_key) AS v FROM real_probe WHERE r_key IN (0, 3) ORDER BY r_key`},
+		{name: "NullifWithinTheFloatFamily",
+			sql: `SELECT NULLIF(r_val, d_val) AS v FROM real_probe WHERE r_key IN (0, 16) ORDER BY r_key`},
+		{name: "NullifIntegerAgainstAReal",
+			sql: `SELECT NULLIF(r_key, r_val) AS v FROM real_probe WHERE r_key IN (0, 3) ORDER BY r_key`},
+		{name: "NullifRealAgainstAnInteger",
+			sql: `SELECT NULLIF(r_val, r_key) AS v FROM real_probe WHERE r_key IN (0, 16) ORDER BY r_key`},
+		{name: "NullifDecimalAgainstADouble",
+			sql: `SELECT NULLIF(d_2, d_wide) AS v FROM dec_probe WHERE d_key IN (1, 2) ORDER BY d_key`},
+		// #768's other value half: PostgreSQL's float-to-integer cast is
+		// rint(), half to EVEN, and the numeric-to-integer cast is not.
+		{name: "CastFloatToIntegerRoundsHalfToEven",
+			sql: `SELECT CAST(r_val AS BIGINT) AS v FROM real_probe WHERE r_key IN (16, 17) ORDER BY r_key`},
+
 		// #708 — a CAST that NAMES a (p,s) carries it. These four replace
 		// `wadjet.TestCastTypmodIsUnconstrained`, the pin that recorded the
 		// divergence: `declaredTypmod` had no CAST arm and answered -1 for
@@ -1238,14 +1288,13 @@ func wireCorpus() []wireCase {
 		// The integer spelling of the same shape, kept because it is the one
 		// the issue was reported with. Its VALUES still gate; only the
 		// declared type is pinned, and to a different defect.
+		// The pins are GONE (#768, 2026-09-03): ABS answers in its argument's
+		// own domain now, so the OID and the size agree with PostgreSQL
+		// outright. This entry announced the fix by failing, which is what a
+		// pin is for — the change was made for #768's own shapes and this
+		// one, filed as #530, came along with them.
 		{name: "DuplicateNameIntegerFuncs",
-			sql: `SELECT ABS(n_nationkey), ABS(n_regionkey) FROM nation ORDER BY n_nationkey LIMIT 6`,
-			pins: map[string]string{
-				wirePropTypeOIDs: "#530: ABS over an integer is int4 in PostgreSQL and wadjet declares " +
-					"float8, because the expr layer computes it as a float64 — the same defect LENGTH " +
-					"has, and nothing to do with the duplicate NAME this entry is here for",
-				wirePropTypeSizes: "#530, follows the OID: 8 for float8 where PostgreSQL declares 4",
-			}},
+			sql: `SELECT ABS(n_nationkey), ABS(n_regionkey) FROM nation ORDER BY n_nationkey LIMIT 6`},
 		// CAST's label, pinned rather than changed: PostgreSQL names a cast
 		// after its ARGUMENT (`n_nationkey`), and only after the target type
 		// when the argument has no name of its own.

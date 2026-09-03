@@ -2951,6 +2951,11 @@ func (e *FuncCall) resolveFnSlow() {
 		if len(e.Args) >= 2 {
 			e.nullifArms = armExtremumArms(e.Args)
 		}
+		// The box follows the DECLARATION's rule, which for NULLIF is the
+		// operator its two arguments select rather than a fold over them
+		// (#757). Set before choiceArms is built below, so the first batch
+		// resolves under the right rule.
+		e.dch.nullif = true
 	}
 	if idx, poly := DefaultRegistry.ReturnType(e.Name).SameAsArgs(len(e.Args)); poly {
 		arms := make([]Expr, 0, len(idx))
@@ -2958,6 +2963,12 @@ func (e *FuncCall) resolveFnSlow() {
 			if i >= 0 && i < len(e.Args) {
 				arms = append(arms, e.Args[i])
 			}
+		}
+		if e.dch.nullif {
+			// NULLIF's candidate list is [0] — the value comes from argument
+			// 0 — but its TYPE is decided by BOTH arguments through the
+			// operator they select, so the box resolver needs both (#757).
+			arms = append([]Expr(nil), e.Args[:2]...)
 		}
 		e.choiceArms = arms
 	}
@@ -3754,7 +3765,7 @@ func init() {
 
 		// Conditional
 		"coalesce": {fnCoalesce, RetSameAsArg(batch.TypeFloat64)},
-		"nullif":   {fnNullIf, RetSameAsArg(batch.TypeFloat64, 0).TypeOverAllArgs()},
+		"nullif":   {fnNullIf, RetSameAsArg(batch.TypeFloat64, 0).TypeOverAllArgs().OperatorResolved()},
 		"ifnull":   {fnIfNull, RetSameAsArg(batch.TypeString, 0, 1)},
 		"if":       {fnIf, RetSameAsArg(batch.TypeString, 1, 2).Control(0)},
 
@@ -4425,6 +4436,13 @@ func fnAbs(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
+	// ABS answers in its argument's own domain (#768). An integer stays an
+	// integer and a real stays a real, which is what PostgreSQL declares AND
+	// what keeps `ABS(real 0.1)` from acquiring a double's digits. Everything
+	// else falls through to the float path unchanged.
+	if v, ok := absKeepsDomain(args[0]); ok {
+		return v
+	}
 	return math.Abs(ToFloat64(args[0]))
 }
 
@@ -4504,6 +4522,12 @@ func fnSqrt(args []any) any {
 func fnMod(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
+	}
+	// Integer remainder over two integers (#768): math.Mod answered `-0` for
+	// MOD(-6, 3), a signed zero no integer remainder has, and declared it
+	// double where PostgreSQL declares the argument's own integer width.
+	if v, ok := modKeepsDomain(args[0], args[1]); ok {
+		return v
 	}
 	return math.Mod(ToFloat64(args[0]), ToFloat64(args[1]))
 }
@@ -6502,7 +6526,27 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		if i, ok := toInt64Safe(v); ok {
 			return castIntInRange(i, dest)
 		}
-		return castIntInRange(int64(math.Round(ToFloat64(v))), dest)
+		// A FLOAT source rounds HALF TO EVEN, which is PostgreSQL's rint()
+		// and C's default rounding mode: `-0.5::float8::int` is 0 there and
+		// this engine answered -1, `0.5` is 0 and this answered 1, `2.5` is 2
+		// and this answered 3. Measured live on 17 (#768).
+		//
+		// A CONSTANT operand does NOT: PostgreSQL types a bare `-0.5`
+		// numeric, and its numeric-to-integer cast rounds HALF AWAY FROM ZERO
+		// (`CAST(-0.5 AS int)` is -1 there, `CAST(2.5 AS int)` is 3). The two
+		// sources round differently on the same server and so must these. The
+		// operand's box cannot tell them apart — a bare numeric literal is a
+		// float64 here, which is ADR-0024's recorded literal-typing deferral
+		// — so the distinction is made from the EXPRESSION: a literal, or a
+		// unary sign over one, is a constant. That is the same test
+		// physical.isConstNumericLitNode makes for the same reason, and it
+		// covers both spellings because `-0.5` parses as a UnaryOp and `0.5`
+		// as a Lit, and covering only one made the two halves of one query
+		// disagree about their own type (#668's note).
+		if isConstNumericOperand(e.Operand) {
+			return castIntInRange(int64(math.Round(ToFloat64(v))), dest)
+		}
+		return castIntInRange(int64(math.RoundToEven(ToFloat64(v))), dest)
 	case "real", "float4":
 		// REAL is float4, a NARROWER type than the float64 every other
 		// numeric box in this engine carries — and this arm used to sit
@@ -11494,6 +11538,12 @@ func vecContains(args []*batch.Vector, out *batch.Vector, n int) {
 
 func vecAbs(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
+	// The typed path, when the projection allocated the argument's own domain
+	// (#768). It declines whenever the output is a float64 vector, which is
+	// every argument type this rule does not cover, and the loop below runs.
+	if vecAbsDomain(src, out, n) {
+		return
+	}
 	hasNulls := src.Nulls.HasNulls()
 	for i := 0; i < n; i++ {
 		if hasNulls && src.Nulls.IsNullFast(i) {

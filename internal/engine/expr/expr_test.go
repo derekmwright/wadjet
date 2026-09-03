@@ -269,11 +269,15 @@ func TestNullPropagation(t *testing.T) {
 
 func TestCast(t *testing.T) {
 	b := testBatch()
-	// CAST(amount AS int): 100.5 ROUNDS to 101, half away from zero —
-	// PostgreSQL's numeric→int rule (#373); TRUNC() is the truncating form.
+	// CAST(amount AS int) over a FLOAT column: 100.5 rounds to 100, half to
+	// EVEN, which is PostgreSQL's rint() for a float8 source (#768). The
+	// numeric→int rule is the other one — half AWAY from zero — and it still
+	// applies to a numeric literal and to a DECIMAL: `CAST(-0.5 AS int)` is
+	// -1 and `CAST(-0.5::float8 AS int)` is 0 on the live server, and
+	// TestCastFractionalToIntegerRounds holds the literal half.
 	e := &Cast{Operand: &ColRef{Name: "amount"}, DestType: "int"}
-	if v := e.Eval(b, 0); v != int64(101) {
-		t.Fatalf("expected 101, got %v", v)
+	if v := e.Eval(b, 0); v != int64(100) {
+		t.Fatalf("expected 100, got %v", v)
 	}
 	// CAST(id AS string)
 	e2 := &Cast{Operand: &ColRef{Name: "id"}, DestType: "string"}

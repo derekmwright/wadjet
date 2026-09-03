@@ -203,6 +203,66 @@ func choiceDecimalArithOperand(node plansql.Node, decls colDecls) (batch.Decimal
 	return t.Dec(), true, true
 }
 
+// scalarFnDeclaredNumericDomain is scalarFnDeclaredDecimal's sibling for the
+// INTEGER and REAL domains: ABS and MOD answer in their argument's own type,
+// where the registry's fixed RetFloat64 declared double precision for all of
+// them (#768).
+//
+// Only those two. Measured on live PostgreSQL 17 for every numeric width:
+// CEIL, FLOOR, ROUND, TRUNC and SIGN over an int4 or an int8 ARE double
+// precision there, and so are SQRT, POWER, LN and EXP — a blanket
+// "type this family from its argument" pass would have introduced a divergence
+// where none existed. The numeric column of that table is
+// scalarFnDeclaredDecimal's territory and is unchanged.
+//
+// The kernel moves with the declaration (expr.absKeepsDomain,
+// expr.modKeepsDomain, expr.vecAbsDomain). Declaring bigint over a
+// ToFloat64 computation would put a right OID on a rounded number, which is
+// the failure protocol method 8 names — and it is not hypothetical here:
+// `ABS(real 0.1)` answered 0.10000000149011612, the double's digits for a
+// value a real never held.
+func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, bool) {
+	want, ok := expr.NumericDomainScalarFn(n.Name)
+	if !ok || len(n.Args) != want {
+		return expr.DeclType{}, false
+	}
+	if isConstNumericLitNode(n.Args[0]) {
+		// A CONSTANT VALUE argument stays on the float path, exactly as
+		// scalarFnDeclaredDecimal keeps it there: `ABS(-1)` is a
+		// constant-folded expression and making it change type by what
+		// wrapped it is the inconsistency that arm avoids.
+		//
+		// Only argument 0. MOD's DIVISOR is a literal in almost every real
+		// query — `MOD(id, 3)` — and gating on it would have left the whole
+		// function on the float path, which is the shape #768 is filed for.
+		return expr.DeclType{}, false
+	}
+	args := make([]batch.TypeID, 0, want)
+	for i, a := range n.Args {
+		t, c := nodeDeclaredType(a, decls)
+		if c != expr.Decided {
+			return expr.DeclType{}, false
+		}
+		if i > 0 && isConstNumericLitNode(a) {
+			// A constant integer literal contributes NO rung to the WIDTH,
+			// which is CommonDeclType's rule for a quoted literal and
+			// PostgreSQL's for an untyped one: `MOD(int4_col, 3)` is integer
+			// there, and this layer types a bare `3` INT64, so folding it in
+			// would declare bigint for the most ordinary spelling of MOD.
+			// A `MOD(int4_col, int8_col)` pair still widens — the exemption
+			// is for literals only.
+			args = append(args, args[0])
+			continue
+		}
+		args = append(args, t.ID)
+	}
+	out, ok := expr.NumericDomainResult(n.Name, args)
+	if !ok {
+		return expr.DeclType{}, false
+	}
+	return expr.Decl(out), true
+}
+
 // scalarFnDeclaredDecimal is the DECIMAL declaration of a scalar math function
 // that answers in its argument's OWN domain — abs/ceil/floor/round/trunc/sign
 // over a DECIMAL, and mod, which is the `%` operator spelled as a call

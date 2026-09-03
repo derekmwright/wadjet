@@ -71,6 +71,21 @@ type decimalChoice struct {
 	ready atomic.Bool
 	mu    sync.Mutex
 	mode  choiceBoxMode
+	// nullif routes the mode through NULLIF's operator rule instead of
+	// select_common_type (#757). Set by the node that builds the arms, once,
+	// before any batch arrives.
+	nullif bool
+}
+
+// armsBoxMode picks the rule this node's construct resolves under. Every
+// construct but NULLIF folds its arms with select_common_type; NULLIF's type
+// comes from the comparison OPERATOR its two arguments select, and the box has
+// to follow the same rule the declaration does.
+func (c *decimalChoice) armsBoxMode(arms []Expr, b *batch.RecordBatch) (choiceBoxMode, bool) {
+	if c.nullif {
+		return nullifArmsBoxMode(arms, b)
+	}
+	return choiceArmsBoxMode(arms, b)
 }
 
 // resolveSlow runs at most once per node. The arms are built by the CALLER and
@@ -81,7 +96,7 @@ func (c *decimalChoice) resolveSlow(b *batch.RecordBatch, arms []Expr) choiceBox
 	if c.ready.Load() {
 		return c.mode
 	}
-	mode, settled := choiceArmsBoxMode(arms, b)
+	mode, settled := c.armsBoxMode(arms, b)
 	if !settled {
 		// An arm whose kind this batch could not settle answers for THIS
 		// batch only. Latching it would freeze the node's mode on whichever
@@ -125,6 +140,55 @@ func choiceArmsBoxMode(arms []Expr, b *batch.RecordBatch) (choiceBoxMode, bool) 
 		return choiceBoxFloat64, settled
 	}
 	return choiceBoxNone, settled
+}
+
+// nullifArmsBoxMode is choiceArmsBoxMode under NULLIF's own rule (#757).
+//
+// The DECLARATION side is Ret.operatorResolvedType, and this is its value
+// half: PostgreSQL types NULLIF from the `=` OPERATOR its two arguments
+// select, not from select_common_type over them, so the box the runtime hands
+// the vector has to follow the same rule or the plan allocates one type and
+// the kernel writes another. It did: once the declaration moved,
+// `NULLIF(numeric(15,2), real)` allocated a FLOAT64 vector — which is what
+// PostgreSQL declares — and the kernel still handed it argument 0's DECIMAL
+// TEXT, which the #361 store guard refused. Loudly, which is the good
+// outcome, but the query stopped answering.
+//
+// The rule, and it is the same four cases the declaration walks: argument 0's
+// own width when both are integers or when argument 0 is a float; float8 when
+// argument 0 is an integer or a DECIMAL and argument 1 is a float (there is no
+// such operator, so both coerce to the category's preferred type); the DECIMAL
+// fold otherwise.
+func nullifArmsBoxMode(arms []Expr, b *batch.RecordBatch) (choiceBoxMode, bool) {
+	if len(arms) < 2 {
+		return choiceBoxNone, false
+	}
+	_, _, dec0 := decimalArmFold(arms[:1], b)
+	_, _, dec1 := decimalArmFold(arms[1:2], b)
+	k0, s0 := joinFoldKinds(arms[:1], b)
+	k1, s1 := joinFoldKinds(arms[1:2], b)
+	if !s0 || !s1 {
+		// An arm this batch could not settle answers for THIS batch only,
+		// exactly as choiceBoxMode holds the line: latching would freeze the
+		// node on whichever batch arrived first.
+		return choiceBoxNone, false
+	}
+	isFloat := func(k boxKind) bool { return k == boxFloat32 || k == boxFloat64 }
+	isInt := func(k boxKind) bool { return k == boxInt32 || k == boxInt64 }
+	switch {
+	case !dec0 && isFloat(k0):
+		if k0 == boxFloat32 {
+			return choiceBoxFloat32, true
+		}
+		return choiceBoxFloat64, true
+	case !dec1 && isFloat(k1):
+		return choiceBoxFloat64, true
+	case dec0 || dec1:
+		return choiceBoxDecimal, true
+	case isInt(k0) && isInt(k1):
+		return choiceBoxInt64, true
+	}
+	return choiceBoxNone, false
 }
 
 // choiceBox applies the resolved mode to one chosen box.
