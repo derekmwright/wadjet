@@ -33,6 +33,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/geoip"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -5015,10 +5016,11 @@ func parseDateValue(v any) time.Time {
 	case civilDate:
 		return tv.t
 	case string:
-		for _, layout := range []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
-			if t, err := time.Parse(layout, tv); err == nil {
-				return t
-			}
+		// THE accept-set, offset discarded — the same function the writer and
+		// the comparison kernels read, so a CAST answers the instant the
+		// literal SPELLS rather than the instant its offset names (B2).
+		if t, ok := parquet.ParseTimestampWallClock(tv); ok {
+			return t
 		}
 	case int32:
 		// Days since epoch
@@ -5424,24 +5426,21 @@ func parseDateToEpochDaysCachedOK(s string) (int64, bool) {
 // compares against a DATE column's int32-range value, and an int64 outside
 // that range simply never equals one — the value has nowhere further to
 // truncate to.
+// parseDateToEpochDaysOK reads a date literal through THE accept-set, so a
+// DATE predicate and a TIMESTAMP predicate cannot disagree about what one
+// literal names (review B2).
 func parseDateToEpochDaysOK(s string) (int64, bool) {
-	for _, layout := range []string{
-		"2006-01-02",
-		time.RFC3339,
-		"2006-01-02T15:04:05",
-		"2006-01-02 15:04:05",
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			const secondsPerDay = 86400
-			sec := t.Unix()
-			days := sec / secondsPerDay
-			if sec%secondsPerDay < 0 {
-				days--
-			}
-			return days, true
-		}
+	t, ok := parquet.ParseTimestampWallClock(s)
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	const secondsPerDay = 86400
+	sec := t.Unix()
+	days := sec / secondsPerDay
+	if sec%secondsPerDay < 0 {
+		days--
+	}
+	return days, true
 }
 
 // parseTimestampToEpochMs parses common timestamp string formats into epoch
@@ -5469,20 +5468,19 @@ func parseTimestampToEpochMsCachedOK(s string) (int64, bool) {
 
 // parseTimestampToEpochMsOK is the uncached parse with an explicit success
 // signal (see parseDateToEpochDaysOK).
+// parseTimestampToEpochMsOK reads a timestamp literal through THE accept-set.
+//
+// It used to carry its own copy of the layout list AND apply the literal's
+// offset, so once #692 fixed the writer and the two kernels this one disagreed
+// with them: a row written with `'2020-06-01T12:00:00+05:30'` could not be
+// found by `WHERE t = ` that same literal (review B2). One function, one
+// answer, on every path.
 func parseTimestampToEpochMsOK(s string) (int64, bool) {
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05",
-		"2006-01-02T15:04:05.000",
-		"2006-01-02 15:04:05",
-		"2006-01-02",
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.UnixMilli(), true
-		}
+	t, ok := parquet.ParseTimestampWallClock(s)
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	return t.UnixMilli(), true
 }
 
 func toBool(e Expr, b *batch.RecordBatch, row int) bool {

@@ -406,10 +406,21 @@ func normalizeTemporalBox(t TypeID, val any) (any, bool, error) {
 var timestampLayouts = []string{
 	time.RFC3339Nano,
 	time.RFC3339,
+	// The SPACE-separated spellings with an offset, and the two-digit offset
+	// form. PostgreSQL accepts all four — `'2020-01-01 12:00:00-08:00'` and
+	// `'…-08'` are ordinary timestamp input there — and this list had none of
+	// them, so the "a literal's offset is DISCARDED on every path" rule held
+	// only for the T-separated spelling and the others were 22007 (review
+	// P10). Refusing input PostgreSQL accepts is what ADR-0012 item 1 forbids.
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05-07:00",
+	"2006-01-02 15:04:05-07",
+	"2006-01-02T15:04:05.999999999-07",
+	"2006-01-02T15:04:05-07",
 	"2006-01-02T15:04:05",
-	"2006-01-02T15:04:05.000",
+	"2006-01-02T15:04:05.999999999",
 	"2006-01-02 15:04:05",
-	"2006-01-02 15:04:05.000",
+	"2006-01-02 15:04:05.999999999",
 	"2006-01-02",
 }
 
@@ -423,10 +434,8 @@ var timestampLayouts = []string{
 // 1970-01-01T00:00:00Z stored under the caller's timestamp.
 func ParseTimestampMillis(s string) (int64, error) {
 	trimmed := strings.TrimSpace(s)
-	for _, layout := range timestampLayouts {
-		if t, err := time.Parse(layout, trimmed); err == nil {
-			return timestampWallClockMillis(t), nil
-		}
+	if t, ok := ParseTimestampWallClock(trimmed); ok {
+		return t.UnixMilli(), nil
 	}
 	// The literal named no timestamp. Which KIND of failure it is decides the
 	// SQLSTATE, exactly as it does for DATE.
@@ -434,6 +443,80 @@ func ParseTimestampMillis(s string) (int64, error) {
 		return 0, &TimestampParseError{Text: s, FieldRange: true}
 	}
 	return 0, &TimestampParseError{Text: s}
+}
+
+// ParseTimestampWallClock is THE timestamp accept-set: every layout this
+// engine takes, with the offset discarded, returning the instant whose UTC
+// fields are the literal's wall clock.
+//
+// It is exported because there were FOUR copies of this decision and they
+// disagreed after #692 fixed two of them: the writer and the two comparison
+// kernels discarded the offset while `expr.parseTimestampToEpochMsOK` and
+// `expr.castTemporal` still applied it, so a row inserted with
+// `'2020-06-01T12:00:00+05:30'` could not be found by `WHERE t = ` that same
+// literal — right→wrong on the one invariant the commit exists to establish
+// (review B2). Every path now reads this function.
+func ParseTimestampWallClock(s string) (time.Time, bool) {
+	trimmed := normalizeTimestampOverflow(strings.TrimSpace(s))
+	for _, layout := range timestampLayouts {
+		if t, err := time.Parse(layout, trimmed); err == nil {
+			return time.Date(t.Year(), t.Month(), t.Day(),
+				t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// normalizeTimestampOverflow rewrites the two clock spellings PostgreSQL
+// ACCEPTS and Go's time.Parse rejects: hour 24 (the end of a day, which
+// PostgreSQL reads as 00:00 of the next one) and second 60 (a leap second,
+// which it reads as the next minute). `'2020-01-01 24:00:00'::timestamp` and
+// `'2020-01-01 23:59:60'::timestamp` are both `2020-01-02 00:00:00` there —
+// measured, not remembered. This engine refused both, which is the ADR-0012
+// item 1 violation review P9 names.
+//
+// The rewrite is textual and conservative: it fires only on an exact `24:00`
+// hour with zero minutes and seconds, or an exact `:60` second, and leaves
+// everything else — hour 25, minute 60 — to the parser and the field-range
+// classifier.
+func normalizeTimestampOverflow(s string) string {
+	sep := strings.IndexAny(s, "T ")
+	if sep < 0 {
+		return s
+	}
+	date, clock := s[:sep], s[sep+1:]
+	zone := ""
+	if i := strings.IndexAny(clock, "Zz+"); i > 0 {
+		clock, zone = clock[:i], clock[i:]
+	} else if i := strings.LastIndex(clock, "-"); i > 0 {
+		clock, zone = clock[:i], clock[i:]
+	}
+	day, err := ParseDateDays(date)
+	if err != nil {
+		return s
+	}
+	switch {
+	case clock == "24:00:00" || clock == "24:00":
+		next := time.Unix(int64(day+1)*86400, 0).UTC()
+		return next.Format("2006-01-02") + s[sep:sep+1] + "00:00:00" + zone
+	case strings.HasSuffix(clock, ":60"):
+		hm := strings.Split(strings.TrimSuffix(clock, ":60"), ":")
+		if len(hm) != 2 {
+			return s
+		}
+		h, herr := strconv.Atoi(hm[0])
+		m, merr := strconv.Atoi(hm[1])
+		if herr != nil || merr != nil || h > 23 || m > 59 {
+			return s
+		}
+		bumped := time.Date(1970, 1, 1, h, m, 0, 0, time.UTC).Add(time.Minute)
+		if bumped.Day() != 1 {
+			next := time.Unix(int64(day+1)*86400, 0).UTC()
+			return next.Format("2006-01-02") + s[sep:sep+1] + "00:00:00" + zone
+		}
+		return date + s[sep:sep+1] + bumped.Format("15:04:05") + zone
+	}
+	return s
 }
 
 // ParseTimestampMillisOrZero is the COMPARISON contract: the epoch
@@ -474,6 +557,8 @@ func timestampWallClockMillis(t time.Time) int64 {
 	return time.Date(t.Year(), t.Month(), t.Day(),
 		t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC).UnixMilli()
 }
+
+var _ = timestampWallClockMillis
 
 // timestampFieldsOutOfRange reports whether text SHAPED like a timestamp names
 // field values no calendar or clock has — 2020-02-30, month 13, hour 25 —
