@@ -150,10 +150,17 @@ func (s *Server) Mux() chi.Router {
 // newPlanner creates a fresh Planner for a single request. The Planner carries
 // per-query mutable state (scanCounter, scanCache, cteCache) so it must not be
 // shared across concurrent requests.
-func (s *Server) newPlanner() *physical.Planner {
+//
+// It installs the cost guard here rather than at its callers, the same way
+// wadjet.DB.newPlanner does: the EXPLAIN caller below used to omit it, and
+// while EXPLAIN plans without scanning — so no spend escaped — a
+// construction site that only sometimes carries the guard is the shape the
+// #803 wiring exists to remove.
+func (s *Server) newPlanner(r *http.Request) *physical.Planner {
 	p := physical.NewPlanner(s.catalog)
 	p.SortMergeJoinBytes = s.config.SortMergeJoinBytes
 	p.LateMaterialization = s.config.LateMaterialization
+	p.QueryLimits = s.resolveQueryLimits(r)
 	return p
 }
 
@@ -462,7 +469,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Annotate scan columns from catalog so optimizer can resolve unqualified refs
-	planner := s.newPlanner()
+	planner := s.newPlanner(r)
 
 	// Reject references to columns that resolve to no source (plan-time name binding).
 	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
@@ -476,9 +483,6 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		planner.AnnotateScanColumns(r.Context(), plan)
 	})
-
-	// Apply query cost limits (per-role or global)
-	planner.QueryLimits = s.resolveQueryLimits(r)
 
 	// Build physical plan
 	physPlan, err := planner.Plan(r.Context(), logicalPlan)
@@ -1226,7 +1230,7 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		writeError(w, http.StatusBadRequest, "plan build error: "+err.Error())
 		return
 	}
-	planner := s.newPlanner()
+	planner := s.newPlanner(r)
 	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

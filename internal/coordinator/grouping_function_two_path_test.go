@@ -291,6 +291,116 @@ func TestAggregatePlacementMatchesPostgres(t *testing.T) {
 	}
 }
 
+// TestAggregatePlacementBoundaryPins is #809: the two levels
+// checkAggregatePlacement does NOT reach, pinned with the answer they give
+// today so the boundary is a fixture and not a claim in a comment (rule 11).
+//
+// Neither is a regression — both behave identically with the check disabled,
+// so this is behaviour that predates the placement rule — but the check's own
+// comment describes a scope, and these are the shapes just outside it.
+//
+// TODO(#809): when either starts raising 42803, this test FAILS. That is the
+// signal to delete the pin and move the shape into
+// TestAggregatePlacementMatchesPostgres above, where it belongs.
+//
+// Why they are not fixed here:
+//
+//   - (a) The refusal is not lost by the placement scan, which deliberately
+//     does not descend into a subquery (a subquery is its own level, and
+//     `WHERE h > (SELECT AVG(h) FROM t)` is ordinary SQL). The INNER statement
+//     on its own IS refused correctly. What loses it is the scalar-subquery
+//     materialization path, which never builds the inner SelectInfo through
+//     BuildFromSelectWithCTEs — so the fix is in that path, not at this walk.
+//   - (b) `col.IsWindow` skips the whole column, which is broader than
+//     PostgreSQL's rule: a window function OVER an aggregate is legal, but a
+//     nested aggregate inside one is not. Scanning the window call's ARGUMENT
+//     nodes would catch the first shape below in about four lines — but the
+//     second one nests inside the window's ORDER BY term, and WindowSpec
+//     carries PartitionBy/OrderBy/Args as raw STRINGS, not AST. Half a rule
+//     is worse than a recorded boundary.
+func TestAggregatePlacementBoundaryPins(t *testing.T) {
+	ctx := context.Background()
+	single := tmdStandalone(t, ctx)
+	coord := tmdCluster(t, ctx)
+
+	// (a) An aggregate in the WHERE of a scalar subquery used in a WHERE
+	// comparison. PostgreSQL 17.11: 42803 `aggregate functions are not
+	// allowed in WHERE`.
+	const scalarSub = "SELECT g FROM collslot WHERE h > " +
+		"(SELECT AVG(x.h) FROM collslot x WHERE SUM(x.h) > 0) GROUP BY g"
+
+	res, err := tmdRunSingle(ctx, single, scalarSub)
+	if err != nil {
+		t.Fatalf("TODO(#809) pin (a) single: now refuses (%v) — lift the pin", err)
+	}
+	if len(res.Rows) != 0 {
+		t.Errorf("TODO(#809) pin (a) single: answered %d rows, pinned at 0", len(res.Rows))
+	}
+
+	// The DAG arm refuses it, but for an unrelated reason and with no
+	// SQLSTATE — the filter compiler has no subquery runner. Loud, not wrong,
+	// and not the placement rule.
+	if _, err := tmdRunDAG(ctx, coord, scalarSub); err == nil {
+		t.Errorf("TODO(#809) pin (a) dag: now answers; it used to fail in the filter compiler")
+	} else if got := sqlerr.StateOf(err); got != "" {
+		t.Errorf("TODO(#809) pin (a) dag: now carries SQLSTATE %q — check whether it is 42803 and lift the pin", got)
+	}
+
+	// (b) A nested aggregate inside a WINDOW column, which the IsWindow skip
+	// passes over whole. PostgreSQL 17.11: 42803 `aggregate function calls
+	// cannot be nested` for both.
+	for _, tc := range []struct {
+		name string
+		sql  string
+		rows int
+	}{
+		{"nested-inside-the-window-argument",
+			"SELECT SUM(SUM(COUNT(*))) OVER () AS w FROM collslot GROUP BY g", 3},
+		{"nested-inside-the-window-order-by",
+			"SELECT SUM(COUNT(*)) OVER (ORDER BY SUM(COUNT(*))) AS w FROM collslot GROUP BY g", 3},
+	} {
+		for _, arm := range []struct {
+			name string
+			run  func(string) (*oracle.Result, error)
+		}{
+			{"single", func(sql string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
+			{"dag", func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
+		} {
+			t.Run(tc.name+"/"+arm.name, func(t *testing.T) {
+				res, err := arm.run(tc.sql)
+				if err != nil {
+					t.Fatalf("TODO(#809) pin (b): now refuses (%v) — lift the pin", err)
+				}
+				if len(res.Rows) != tc.rows {
+					t.Errorf("TODO(#809) pin (b): answered %d rows, pinned at %d", len(res.Rows), tc.rows)
+				}
+			})
+		}
+	}
+
+	// The CONTROL the IsWindow skip exists for, and the reason (b) is a pin
+	// rather than a blanket refusal: a window function OVER an aggregate is
+	// LEGAL in PostgreSQL and must keep answering. A narrowing that broke this
+	// would be worse than the boundary it closes.
+	const legalWindowOverAgg = "SELECT SUM(COUNT(*)) OVER () AS w FROM collslot GROUP BY g ORDER BY w LIMIT 2"
+	for _, arm := range []struct {
+		name string
+		run  func(string) (*oracle.Result, error)
+	}{
+		{"single", func(sql string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
+		{"dag", func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
+	} {
+		got, err := arm.run(legalWindowOverAgg)
+		if err != nil {
+			t.Errorf("%s: PostgreSQL accepts SUM(COUNT(*)) OVER () and wadjet must too: %v", arm.name, err)
+			continue
+		}
+		if len(got.Rows) != 2 {
+			t.Errorf("%s: SUM(COUNT(*)) OVER () answered %d rows, want 2", arm.name, len(got.Rows))
+		}
+	}
+}
+
 // TestAggregatePlacementAcceptsWhatPostgresAccepts is the OTHER half: the
 // refusal must not reach a level it does not own. Every shape here is legal in
 // PostgreSQL 17.11 and must stay legal — an aggregate in a SUBQUERY inside

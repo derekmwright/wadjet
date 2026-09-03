@@ -477,13 +477,14 @@ journalctl -u wadjet | grep 'component=audit'
 Wadjet estimates query cost at plan time using manifest metadata (file sizes, row counts) before any I/O occurs. Cost-based guards can reject expensive queries before they execute.
 
 `query_limits:` in the config file is enforced on **every** plan a served query
-can meet. There are two planner-construction sites in the process and both
-carry the limits:
+can meet. Each planner-construction site installs the limits in its
+constructor, so an entry point added later carries the guard by construction:
 
 | Site | Reached by |
 |---|---|
 | `Coordinator` — the distributed planner, the in-process small-query fast path, the pipeline the DAG's refusals route to, and the async `SubmitSQL` planner | HTTP, gRPC, and the pgwire statements the coordinator answers |
 | `wadjet.DB` — the embedded planner | the embedded Go API, and every pgwire statement the coordinator does **not** answer |
+| `server.Server` — the HTTP server's own planner | `POST /v1/queries` and `EXPLAIN` on a deployment with no coordinator |
 
 That second row is load-bearing. pgwire routes a statement to the coordinator
 only when it begins with `SELECT` or `WITH ` and the connection's auth state
@@ -493,7 +494,7 @@ present but `enabled: false` — *every* statement fall back to the embedded
 planner. Before the limits reached `wadjet.DB` those were unbounded, so the
 guard had a hole exactly where the BI clients sit.
 
-Per-role limits resolve from the identity on the connection on both sites.
+Per-role limits resolve from the identity on the request or connection at every site.
 
 > **Environment variables do not set these limits.** `WADJET_QUERY_MAX_SCAN_BYTES`,
 > `_ROWS` and `_FILES` are parsed by `config.applyEnvOverrides`, which nothing
