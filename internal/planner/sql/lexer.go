@@ -33,20 +33,20 @@ const (
 	TokenRBrace    // }
 
 	// Operators
-	TokenPlus    // +
-	TokenMinus   // -
-	TokenSlash   // /
-	TokenPercent // %
-	TokenConcat      // ||
-	TokenDoubleColon // ::
+	TokenPlus            // +
+	TokenMinus           // -
+	TokenSlash           // /
+	TokenPercent         // %
+	TokenConcat          // ||
+	TokenDoubleColon     // ::
 	TokenJSONArrow       // ->
 	TokenJSONDoubleArrow // ->>
-	TokenEq          // =
-	TokenNotEq   // != or <>
-	TokenLT      // <
-	TokenLTEq    // <=
-	TokenGT      // >
-	TokenGTEq    // >=
+	TokenEq              // =
+	TokenNotEq           // != or <>
+	TokenLT              // <
+	TokenLTEq            // <=
+	TokenGT              // >
+	TokenGTEq            // >=
 
 	// Keywords (case-insensitive, val is always uppercase)
 	TokenKWCreate
@@ -230,47 +230,47 @@ var keywords = map[string]TokenType{
 	"FULL":      TokenKWFull,
 	"CROSS":     TokenKWCross,
 	"NATURAL":   TokenKWNatural,
-	"OVER":       TokenKWOver,
-	"NULLS":      TokenKWNulls,
-	"FIRST":      TokenKWFirst,
-	"LAST":       TokenKWLast,
-	"ROWS":       TokenKWRows,
-	"RANGE":      TokenKWRange,
-	"UNBOUNDED":  TokenKWUnbounded,
-	"PRECEDING":  TokenKWPreceding,
-	"FOLLOWING":  TokenKWFollowing,
-	"CURRENT":    TokenKWCurrent,
-	"ROW":        TokenKWRow,
-	"CUBE":       TokenKWCube,
-	"ROLLUP":     TokenKWRollup,
-	"GROUPING":   TokenKWGrouping,
-	"SETS":       TokenKWSets,
-	"FETCH":      TokenKWFetch,
-	"VIEW":       TokenKWView,
-	"ALTER":      TokenKWAlter,
-	"ADD":        TokenKWAdd,
-	"COLUMN":     TokenKWColumn,
-	"RENAME":     TokenKWRename,
-	"TO":         TokenKWTo,
-	"UPDATE":     TokenKWUpdate,
-	"SET":        TokenKWSet,
-	"DELETE":     TokenKWDelete,
-	"INSERT":     TokenKWInsert,
-	"INTO":       TokenKWInto,
-	"VALUES":     TokenKWValues,
-	"MERGE":      TokenKWMerge,
-	"USING":      TokenKWUsing,
-	"MATCHED":    TokenKWMatched,
-	"ALERT":      TokenKWAlert,
-	"EVERY":      TokenKWEvery,
-	"WEBHOOK":    TokenKWWebhook,
-	"HEADERS":    TokenKWHeaders,
-	"ENABLE":     TokenKWEnable,
-	"DISABLE":    TokenKWDisable,
-	"SECONDS":    TokenKWSeconds,
-	"MINUTES":    TokenKWMinutes,
-	"HOURS":      TokenKWHours,
-	"SNAPSHOT":   TokenKWSnapshot,
+	"OVER":      TokenKWOver,
+	"NULLS":     TokenKWNulls,
+	"FIRST":     TokenKWFirst,
+	"LAST":      TokenKWLast,
+	"ROWS":      TokenKWRows,
+	"RANGE":     TokenKWRange,
+	"UNBOUNDED": TokenKWUnbounded,
+	"PRECEDING": TokenKWPreceding,
+	"FOLLOWING": TokenKWFollowing,
+	"CURRENT":   TokenKWCurrent,
+	"ROW":       TokenKWRow,
+	"CUBE":      TokenKWCube,
+	"ROLLUP":    TokenKWRollup,
+	"GROUPING":  TokenKWGrouping,
+	"SETS":      TokenKWSets,
+	"FETCH":     TokenKWFetch,
+	"VIEW":      TokenKWView,
+	"ALTER":     TokenKWAlter,
+	"ADD":       TokenKWAdd,
+	"COLUMN":    TokenKWColumn,
+	"RENAME":    TokenKWRename,
+	"TO":        TokenKWTo,
+	"UPDATE":    TokenKWUpdate,
+	"SET":       TokenKWSet,
+	"DELETE":    TokenKWDelete,
+	"INSERT":    TokenKWInsert,
+	"INTO":      TokenKWInto,
+	"VALUES":    TokenKWValues,
+	"MERGE":     TokenKWMerge,
+	"USING":     TokenKWUsing,
+	"MATCHED":   TokenKWMatched,
+	"ALERT":     TokenKWAlert,
+	"EVERY":     TokenKWEvery,
+	"WEBHOOK":   TokenKWWebhook,
+	"HEADERS":   TokenKWHeaders,
+	"ENABLE":    TokenKWEnable,
+	"DISABLE":   TokenKWDisable,
+	"SECONDS":   TokenKWSeconds,
+	"MINUTES":   TokenKWMinutes,
+	"HOURS":     TokenKWHours,
+	"SNAPSHOT":  TokenKWSnapshot,
 }
 
 // token is a lexical token produced by the lexer.
