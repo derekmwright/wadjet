@@ -53,6 +53,21 @@ Variable-length types use an **offset/data** columnar layout: a contiguous data 
 
 IPv4, IPv6, MAC, Port and Protocol are stored in compact binary representations rather than as text, enabling efficient comparison and aggregation while keeping human-readable input/output formats. CIDR is the exception: it stores its text form directly.
 
+**Literal spellings in a comparison.** A `MAC` or `UUID` literal compared
+against a column is read in every spelling PostgreSQL accepts, at every site
+(`=`, `IN`, `CASE`, `IS DISTINCT FROM`, `GREATEST`, `LEAST`):
+
+| Type | Accepted spellings |
+|---|---|
+| `MAC` | `08:00:2b:01:02:03`, `08-00-2b-01-02-03`, `0800.2b01.0203`, `08002b010203`, `08002b:010203`, `08002b-010203`, `0800-2b01-0203`, and the same in upper case. A grouped-hex spelling must split the twelve digits `6+6` or `4+4+4`; any other regrouping is `22P02`, as it is in PostgreSQL |
+| `UUID` | dashed, undashed, braced (`{...}`), and any case |
+
+An abbreviated `CIDR` (`'10'`, `'192.168/16'`) is **not** accepted: PostgreSQL
+infers the mask from the address CLASS there, and wadjet does not implement
+that inference. `INSERT` and the `mac_*` formatting functions read only the
+spellings Go's parser takes (colon, hyphen, dotted, and the bare twelve
+digits), not the three grouped-hex forms above.
+
 ### Temporal Types
 
 | Type | Go Backing | Precision | Use Cases |

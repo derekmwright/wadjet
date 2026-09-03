@@ -5099,22 +5099,16 @@ func fnUUIDToString(args []any) any {
 }
 
 // parseUUIDHex parses a UUID string (with or without dashes) into 16 bytes.
+// parseUUIDHex is the boxed-pair path's UUID literal, delegating to the
+// kernel's one parser for the same reason macLitToInt64 does — the braced
+// spelling PostgreSQL accepts reached the vectorized kernel and not this copy
+// (#627, protocol method 6).
 func parseUUIDHex(s string) []byte {
-	clean := make([]byte, 0, 32)
-	for i := 0; i < len(s); i++ {
-		if s[i] != '-' {
-			clean = append(clean, s[i])
-		}
-	}
-	if len(clean) != 32 {
+	raw, ok := kernel.UUIDLiteralToRaw(s)
+	if !ok || len(raw) != 16 {
 		return nil
 	}
-	raw := make([]byte, 16)
-	_, err := hex.Decode(raw, clean)
-	if err != nil {
-		return nil
-	}
-	return raw
+	return []byte(raw)
 }
 
 // ipv4LitToInt64 parses a dotted-quad IPv4 literal into the int64 encoding
@@ -5137,16 +5131,14 @@ func ipv4LitToInt64(s string) (int64, bool) {
 // macLitToInt64 parses a MAC literal into the int64 encoding TypeMAC columns
 // use — batch.Vector.SetValue's TypeMAC case: the six bytes packed
 // big-endian into the low 48 bits.
+// macLitToInt64 is the BOXED-PAIR path's MAC literal, delegating to the
+// kernel's one parser for the reason exec.parseMACFilterVal does: a second
+// copy of the grammar is a second answer to "is this a MAC", and #627's
+// widening reached the vectorized kernel while this copy still refused the
+// same spelling — so `c_mac = '08002b:010203'` answered on one comparison path
+// and raised 22P02 on another (protocol method 6).
 func macLitToInt64(s string) (int64, bool) {
-	hw, err := net.ParseMAC(s)
-	if err != nil || len(hw) != 6 {
-		return 0, false
-	}
-	var n uint64
-	for _, b := range hw {
-		n = (n << 8) | uint64(b)
-	}
-	return int64(n), true
+	return kernel.MACLitKey(s)
 }
 
 // --- Network function implementations ---

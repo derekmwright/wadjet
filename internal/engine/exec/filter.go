@@ -418,17 +418,21 @@ func parseIPv4FilterVal(value any) int64 {
 	return 0
 }
 
+// parseMACFilterVal is the row-at-a-time path's MAC literal, and it DELEGATES
+// to the kernel's one parser rather than carrying a second copy of the
+// grammar.
+//
+// It carried one, and that is how #627's widening reached three of the four
+// comparison sites and not the fourth: the vectorized kernel took the
+// PostgreSQL spellings, this path still called net.ParseMAC directly, and a
+// query answered or refused depending on which comparison path the plan chose.
+// One grammar, one definition (protocol method 6).
 func parseMACFilterVal(value any) int64 {
-	s := fmt.Sprint(value)
-	hw, err := net.ParseMAC(s)
-	if err != nil || len(hw) != 6 {
+	n, ok := kernel.MACLitKey(fmt.Sprint(value))
+	if !ok {
 		return 0
 	}
-	var n uint64
-	for _, b := range hw {
-		n = (n << 8) | uint64(b)
-	}
-	return int64(n)
+	return n
 }
 
 func parseIPv6FilterVal(value any) string {

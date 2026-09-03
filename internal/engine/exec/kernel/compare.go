@@ -2547,7 +2547,14 @@ func IPv4LitKey(s string) (int64, bool) { return parseIPv4ToInt64(s) }
 // ok is false when s names no address at all (#519; see parseIPv4ToInt64).
 func parseMACToInt64(s string) (int64, bool) {
 	hw, err := net.ParseMAC(s)
-	if err != nil || len(hw) != 6 {
+	if err != nil {
+		if b, ok := pgMACGroupedHex(s); ok {
+			hw = b
+		} else {
+			return 0, false
+		}
+	}
+	if len(hw) != 6 {
 		return 0, false
 	}
 	var n uint64
@@ -2555,6 +2562,92 @@ func parseMACToInt64(s string) (int64, bool) {
 		n = (n << 8) | uint64(b)
 	}
 	return int64(n), true
+}
+
+// pgMACGroupedHex reads the two macaddr spellings PostgreSQL accepts and Go's
+// net.ParseMAC does not (#627).
+//
+// PostgreSQL takes six spellings for one address; Go's parser takes four of
+// them (`xx:xx:xx:xx:xx:xx`, `xx-xx-...`, the dotted `xxxx.xxxx.xxxx`, and the
+// same in upper case). The two it does not are the ones that group the twelve
+// hex digits into halves:
+//
+//	08002b:010203      a colon between two 6-digit groups
+//	08002b-010203      a hyphen between them
+//	0800-2b01-0203     three 4-digit groups (Go takes `0800.2b01.0203`, not this)
+//
+// This is a VALUE-PRESERVING widening: every spelling names the same six
+// bytes, and the address a query means does not depend on which one the user
+// typed. It is #627's half that ships; the abbreviated CIDR/inet grammar is
+// its own decision, because PostgreSQL's abbreviation is CLASSFUL address
+// inference (`'10'` is 10.0.0.0/8 and `'192.168'` is 192.168.0.0/24) and
+// reproducing inet_net_pton bit-exactly is a different size of change.
+//
+// The digits must be exactly twelve hexadecimal characters AND the separators
+// must split them 6+6 or 4+4+4, which is the whole of PostgreSQL's grouped-hex
+// grammar; the size check below carries the measurement. A string Go rejected
+// for a real reason is still rejected here.
+func pgMACGroupedHex(s string) ([]byte, bool) {
+	digits := make([]byte, 0, 12)
+	var sizes []int
+	run := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == ':' || c == '-':
+			if run == 0 {
+				return nil, false // a separator with no digits before it
+			}
+			sizes = append(sizes, run)
+			run = 0
+		case isHexDigit(c):
+			digits = append(digits, c)
+			run++
+			if len(digits) > 12 {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	if run == 0 || len(digits) != 12 {
+		return nil, false
+	}
+	sizes = append(sizes, run)
+	// The GROUP SIZES, not merely the separator COUNT. PostgreSQL's two
+	// grouped-hex spellings are 6+6 and 4+4+4 and nothing else — measured on
+	// 17.11 over every 12-digit regrouping:
+	//
+	//	08002b:010203   08002b-010203   0800-2b01-0203      accepted
+	//	0-8-002b010203  0:8002b010203   08-002b010203       22P02
+	//	08002b:01:0203  08:002b:010203  08002b:0102:03      22P02
+	//
+	// Counting separators alone took all nine, which is a SUPERSET of
+	// PostgreSQL's grammar rather than the equality this function and
+	// ADR-0012's #627 entry both claimed. A superset is a keeper only when it
+	// is recorded; an unrecorded one is a claim the code does not make true,
+	// so the bound is enforced here instead.
+	switch len(sizes) {
+	case 2:
+		if sizes[0] != 6 || sizes[1] != 6 {
+			return nil, false
+		}
+	case 3:
+		if sizes[0] != 4 || sizes[1] != 4 || sizes[2] != 4 {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	out := make([]byte, 6)
+	if _, err := hex.Decode(out, digits); err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func isHexDigit(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 // MACLitKey exports parseMACToInt64 for exec.networkConstError; see
@@ -2578,6 +2671,13 @@ func MACLitKey(s string) (int64, bool) { return parseMACToInt64(s) }
 func parseUUIDToRawString(s string) (string, bool) {
 	if len(s) == 16 {
 		return s, true
+	}
+	// The BRACED spelling PostgreSQL accepts — `{a0eebc99-...-a11}` — is one
+	// of the six it takes for one value, and it is the only one this parser
+	// did not (#627). Value-preserving: the braces are punctuation, and the
+	// dash-free and mixed-case forms already worked.
+	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
+		s = s[1 : len(s)-1]
 	}
 	clean := make([]byte, 0, 32)
 	for i := 0; i < len(s); i++ {

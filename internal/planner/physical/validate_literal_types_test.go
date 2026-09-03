@@ -120,7 +120,13 @@ func TestPlanTimeNeverRefusesPGValidNetworkLiteral(t *testing.T) {
 		{"c", "192.168.1"},
 		{"c", "10/8"},
 		{"c", "192.168/16"},
-		{"v4", "192.168"},
+		// `{"v4", "192.168"}` was here and is WRONG: PostgreSQL REFUSES
+		// `'192.168'::inet` with 22P02. The abbreviation is a CIDR-only
+		// grammar there — `inet` takes an abbreviated form only WITH an
+		// explicit mask, `'10/8'::inet` — and this entry asserted the
+		// opposite, so the guard was holding the plan-time validator to a
+		// claim the server does not make. Measured live on 17 (#627).
+		{"v4", "10/8"},
 		{"v6", "::ffff:1.2.3.4"},
 		// macaddr notations PostgreSQL accepts.
 		{"m", "08002b:010203"},
