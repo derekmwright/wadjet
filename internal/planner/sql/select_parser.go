@@ -1409,6 +1409,22 @@ func (p *selectParser) parseComparison() (Node, error) {
 				if _, err := p.expect(TokenRParen); err != nil {
 					return nil, fmt.Errorf("expected ) after %s subquery", upper)
 				}
+				// `x = ANY (subquery)` IS `x IN (subquery)`, and
+				// `x <> ALL (subquery)` IS `x NOT IN (subquery)` — the
+				// standard defines them that way. Normalizing here rather
+				// than at each consumer means the subquery machinery every
+				// path already has for IN serves both spellings: the
+				// decorrelation rewrites, the DAG's serialized filter and
+				// the worker's compile, which has no SubqueryRunner and
+				// refused `= ANY (subquery)` outright while answering the
+				// identical `IN (subquery)` (#710, found by the two-path
+				// arm). One node, one set of guarantees.
+				switch {
+				case (upper == "ANY" || upper == "SOME") && op == "=":
+					return &InExpr{Left: left, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
+				case upper == "ALL" && (op == "<>" || op == "!="):
+					return &InExpr{Left: left, Not: true, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
+				}
 				return &AnyAllExpr{Left: left, Op: op, Modifier: upper, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
 			}
 			// Value list

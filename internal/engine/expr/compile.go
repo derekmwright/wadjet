@@ -8,6 +8,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // compileContext holds optional state for expression compilation.
@@ -310,6 +311,26 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return &UnaryOp{Operand: operand, Op: n.Op}, nil
 
 	case *plansql.CmpExpr:
+		// A ROW VALUE on either side is a row comparison, not two operands
+		// (#710). Intercepted before the operands compile, because a
+		// TupleNode has no scalar meaning to compile TO.
+		if lt, lok := asTuple(unwrapCompileParens(n.Left)); lok {
+			rt, rok := asTuple(unwrapCompileParens(n.Right))
+			if !rok {
+				return nil, sqlerr.New("42601",
+					"row expression compared against a non-row value: %s", node.String())
+			}
+			op, ok := cmpOpFromSQL(n.Op)
+			if !ok {
+				return nil, sqlerr.New("0A000", "operator %q is not supported on row values", n.Op)
+			}
+			return compileRowCmp(lt, rt, op, ctx)
+		}
+		if _, rok := asTuple(unwrapCompileParens(n.Right)); rok {
+			return nil, sqlerr.New("42601",
+				"row expression compared against a non-row value: %s", node.String())
+		}
+
 		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
 			return nil, err
@@ -344,6 +365,35 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return compileCmp(left, right, op), nil
 
 	case *plansql.InExpr:
+		// `(a, b) IN ((1, 2), (3, 4))` is a disjunction of row equalities,
+		// which is how PostgreSQL defines it (#710).
+		if lt, ok := asTuple(unwrapCompileParens(n.Left)); ok {
+			var arms []Expr
+			for _, v := range n.Values {
+				rt, ok := asTuple(unwrapCompileParens(v))
+				if !ok {
+					return nil, sqlerr.New("42601",
+						"row expression compared against a non-row value: %s", v.String())
+				}
+				arm, err := compileRowCmp(lt, rt, CmpEq, ctx)
+				if err != nil {
+					return nil, err
+				}
+				arms = append(arms, arm)
+			}
+			if len(arms) == 0 {
+				return nil, sqlerr.New("42601", "IN with no values: %s", node.String())
+			}
+			combined := arms[0]
+			for _, a := range arms[1:] {
+				combined = &Or{Left: combined, Right: a}
+			}
+			if n.Not {
+				return &Not{Operand: combined}, nil
+			}
+			return combined, nil
+		}
+
 		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
 			return nil, err
@@ -594,8 +644,48 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		// text, which silently produced a wrong answer (#610). Fail loudly.
 		return nil, fmt.Errorf("window function %s reached the expression compiler unextracted", node.String())
 
+	case *plansql.AnyAllExpr:
+		// `x = ANY (…)` / `x <> ALL (…)`. Compiled to real comparisons with
+		// PostgreSQL's three-valued fold; it used to fall through to the
+		// default arm below and become a STRING constant, so the predicate
+		// matched nothing at all (#710).
+		return compileQuantified(n, ctx)
+
+	case *plansql.TupleNode:
+		// A row value is only meaningful as an operand of a comparison or of
+		// IN, and both of those intercept it above. Reaching here means one
+		// was written somewhere a row value has no meaning.
+		return nil, sqlerr.New("42601", "row expression %s is not valid here", node.String())
+
+	case *plansql.LiteralPlaceholder:
+		// The coordinator substitutes the concrete literal into the
+		// SERIALIZED expression before a fragment compiles it. One that
+		// reaches the compiler means that substitution was missed, and the
+		// old default arm turned it into the string ":name" — a silently
+		// wrong predicate rather than a failure.
+		return nil, fmt.Errorf("literal placeholder %s reached the expression compiler unsubstituted", node.String())
+
 	default:
-		return &Lit{Val: node.String()}, nil
+		// FAIL, do not guess. This arm returned `&Lit{Val: node.String()}` —
+		// the node's own SQL text as a string constant — for every node type
+		// the compiler had no case for. That is how #610 (a window function)
+		// and #710 (ANY/ALL and row values) each produced a silently wrong
+		// answer from one line. Every node type the parser can build is now
+		// enumerated above; a new one fails here instead of compiling to
+		// its own spelling.
+		return nil, fmt.Errorf("expression %s (%T) reached the compiler with no rule for it", node.String(), node)
+	}
+}
+
+// unwrapCompileParens strips redundant parentheses so a row value spelled
+// `((a, b))` is still recognised as one.
+func unwrapCompileParens(n plansql.Node) plansql.Node {
+	for {
+		p, ok := n.(*plansql.ParenNode)
+		if !ok {
+			return n
+		}
+		n = p.Inner
 	}
 }
 

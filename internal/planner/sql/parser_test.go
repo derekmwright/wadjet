@@ -1698,7 +1698,12 @@ func TestAnyAllSome(t *testing.T) {
 		{"any values", "SELECT * FROM t WHERE x = ANY (1, 2, 3)", "= ANY"},
 		{"all values", "SELECT * FROM t WHERE x > ALL (10, 20)", "> ALL"},
 		{"some values", "SELECT * FROM t WHERE x != SOME (5, 6)", "!= SOME"},
-		{"any subquery", "SELECT * FROM t WHERE x = ANY (SELECT id FROM u)", "= ANY"},
+		// `= ANY (subquery)` and `<> ALL (subquery)` normalize to IN and
+		// NOT IN at parse time: the standard defines them as those, and one
+		// node means one set of guarantees on every path (#710). The
+		// ORDERING quantifiers over a subquery keep their own node.
+		{"any subquery is IN", "SELECT * FROM t WHERE x = ANY (SELECT id FROM u)", "in ("},
+		{"not-equal all subquery is NOT IN", "SELECT * FROM t WHERE x <> ALL (SELECT id FROM u)", "not in ("},
 		{"all subquery", "SELECT * FROM t WHERE x < ALL (SELECT val FROM u)", "< ALL"},
 	}
 	for _, tt := range tests {

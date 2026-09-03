@@ -327,6 +327,38 @@ SELECT * FROM syslog WHERE severity IN ('error', 'critical')
 SELECT * FROM flow_logs WHERE dst_port NOT IN (22, 23)
 ```
 
+### Quantified Comparison (ANY / SOME / ALL)
+
+```sql
+SELECT * FROM flow_logs WHERE dst_port = ANY(ARRAY[80, 443, 8080])
+SELECT * FROM flow_logs WHERE dst_port <> ALL(ARRAY[22, 23])
+SELECT * FROM flow_logs WHERE bytes_in > ANY(ARRAY[1000, 5000])
+SELECT * FROM flow_logs WHERE src_ip = ANY(SELECT ip FROM watchlist)
+```
+
+The candidate list is an `ARRAY[...]` literal, a comma-separated value list, or
+a subquery. Over a subquery only the equality forms are supported: `= ANY` /
+`= SOME` means `IN` and `<> ALL` means `NOT IN`; an ordering quantifier over a
+subquery is SQLSTATE 0A000.
+
+NULL follows PostgreSQL: `ANY` is TRUE if any comparison is TRUE, NULL if none
+is TRUE and any is NULL, FALSE otherwise; `ALL` is FALSE if any comparison is
+FALSE, NULL if none is FALSE and any is NULL, TRUE otherwise.
+
+### Row Values
+
+```sql
+SELECT * FROM flow_logs WHERE (src_ip, dst_port) = ('10.0.0.1', 443)
+SELECT * FROM flow_logs WHERE (src_ip, dst_port) IN (('10.0.0.1', 443), ('10.0.0.2', 80))
+SELECT * FROM events WHERE (day, seq) > (17, 100)
+```
+
+A row comparison compares field by field. `=` and `<>` look at every field;
+the ordering operators stop at the first field pair that is not equal and
+answer from it, so `(1, 2) < (1, 3)` is true and `(2, 0) < (1, 9)` is false.
+A NULL in a field the comparison has to look at makes the whole comparison
+NULL. Both sides must have the same number of fields (otherwise 42601).
+
 ### BETWEEN Predicate
 
 ```sql
@@ -1610,4 +1642,5 @@ expression.
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
 - `RANGE` window frames with a value offset, and the `GROUPS` frame mode
 - `SELECT DISTINCT ON (...)`
+- An ORDERING quantifier over a subquery — `x < ALL (SELECT ...)`, `x > ANY (SELECT ...)` — SQLSTATE 0A000. The equality forms are supported: `= ANY` / `= SOME` over a subquery is `IN`, and `<> ALL` is `NOT IN`.
 - No time-of-day type: a Parquet `TIME` column is read as its raw integer in the file's own unit
