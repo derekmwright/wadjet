@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -55,6 +56,9 @@ type LeaderElection struct {
 	logger   *slog.Logger
 	cancel   context.CancelFunc
 	done     chan struct{}
+	// leaseReclaims counts refreshes that FAILED their CAS and were resolved
+	// by reclaimLease without standing down.
+	leaseReclaims atomic.Int64
 }
 
 // NewLeaderElection creates a new leader election instance.
@@ -219,13 +223,82 @@ func (le *LeaderElection) refreshLease(ctx context.Context) bool {
 	}
 
 	rev, err := le.kv.Update(ctx, leaderKey, payload, le.rev)
+	if err == nil {
+		le.rev = rev
+		return true
+	}
+	le.logger.Warn("leader lease refresh failed", "error", err)
+	return le.reclaimLease(ctx, payload, err)
+}
+
+// reclaimLease decides what a FAILED refresh actually MEANS by asking the
+// store who holds the lease now. A CAS rejection says only that the key is
+// not at the revision this instance recorded, and there are three states
+// behind that, which are not the same thing:
+//
+//   - The key is GONE. The KV bucket's TTL is 5s and the refresh ticks every
+//     2s, so a tick the runtime delivers late — a GC pause, a busy host, a
+//     slow round trip — lets the entry age out. The CAS then reports
+//     `wrong last sequence: 0`: the subject holds no message at all. Nobody
+//     else holds the lease either, because there is nothing to hold. Treating
+//     that as "lost" resigned leadership over an empty key and then waited a
+//     full standby poll before even LOOKING at it, so a lone coordinator went
+//     leaderless for more than a second because its own lease expired (#559).
+//     The right move is to race the standbys for it immediately: Create is
+//     atomic, so exactly one instance wins and split-brain is impossible.
+//   - Someone else holds it. Then leadership really is lost, and the standby
+//     path is correct.
+//   - WE hold it, at a revision this instance did not record — the update
+//     landed but its acknowledgement did not come back. Adopting the store's
+//     revision is the whole repair; resigning would have been a flap over a
+//     lease that was never in doubt.
+//
+// Any other error leaves the question unanswered, and an unanswered question
+// about who is leader is answered by standing down.
+func (le *LeaderElection) reclaimLease(ctx context.Context, payload []byte, cause error) bool {
+	entry, err := le.kv.Get(ctx, leaderKey)
+	if errors.Is(err, jetstream.ErrKeyNotFound) {
+		rev, cerr := le.kv.Create(ctx, leaderKey, payload)
+		if cerr != nil {
+			le.logger.Warn("leader lease expired and another coordinator took it",
+				"id", le.id, "cause", cause, "error", cerr)
+			return false
+		}
+		le.rev = rev
+		le.leaseReclaims.Add(1)
+		le.logger.Warn("leader lease had expired; reacquired it without standing down",
+			"id", le.id, "cause", cause)
+		return true
+	}
 	if err != nil {
-		le.logger.Warn("leader lease refresh failed", "error", err)
+		le.logger.Warn("leader lease refresh failed and the holder could not be read",
+			"id", le.id, "cause", cause, "error", err)
 		return false
 	}
-	le.rev = rev
+
+	var p leaderPayload
+	if uerr := json.Unmarshal(entry.Value(), &p); uerr != nil {
+		le.logger.Warn("leader key is unreadable, standing down",
+			"id", le.id, "error", uerr)
+		return false
+	}
+	if p.ID != le.id {
+		le.logger.Warn("leader lease is held by another coordinator",
+			"id", le.id, "holder", p.ID, "cause", cause)
+		return false
+	}
+	le.rev = entry.Revision()
+	le.leaseReclaims.Add(1)
+	le.logger.Warn("leader lease is still ours at a revision we had not recorded; adopting it",
+		"id", le.id, "revision", entry.Revision(), "cause", cause)
 	return true
 }
+
+// LeaseReclaims reports how many times a failed refresh was resolved by
+// consulting the store instead of standing down. Exposed so a gate can tell
+// "the refresh simply succeeded" from "the recovery path ran and held", which
+// the leadership flag alone cannot.
+func (le *LeaderElection) LeaseReclaims() int64 { return le.leaseReclaims.Load() }
 
 // runStandby polls for leader key expiry and attempts acquisition.
 // Returns true if leadership was acquired (should transition to leader),
