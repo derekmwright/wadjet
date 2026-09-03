@@ -300,6 +300,41 @@ memory_budget = 1G  → spill after 1 GB per task (aggressive, rare spills)
 - Start with `total_worker_ram / (max_concurrent * 2)` — this gives each task half the proportional memory, leaving headroom for the Go runtime, cache, and result store
 - Example: 4 GB RAM, 4 concurrent tasks → `memory_budget = 4GB / (4 * 2) = 512 MB`
 
+**What the budget must hold that cannot spill.** The budget is not only the
+spill threshold — several things are charged to it that no spill gives back,
+and a budget below their sum makes queries refuse rather than run slowly:
+
+| charge | size | released when |
+|---|---|---|
+| a scan's whole-file load | the parquet file's bytes | its last row group has been decoded |
+| decoded read-ahead | **not bounded by the budget** — one decoded row group per scan worker, plus whatever is queued for the consumer | the consumer takes the batch |
+| a hash join's index | ~40 bytes per build row | the join closes — grace eviction frees the build's COLUMNS, not its index entries |
+| an uncorrelated `IN (SELECT …)` membership set | ~24 bytes per inner row | the query's plan is torn down |
+
+So a per-task budget wants room for the largest file a scan will load, plus
+roughly `40 × build_rows` for the largest join, plus several decoded row groups
+of the widest column a scan projects, on top of whatever the spilling operators
+need. The read-ahead row is the one with no ceiling: how many decoded row groups
+are in flight follows the scan's worker count and how fast the consumer takes
+them, not the budget. A join whose index alone does not fit refuses with
+`memory budget exceeded`, which is the right answer to a budget that small.
+
+**Size with margin, not to the edge.** A budget set so tightly that a query's
+demand lands ON it rather than under it does not fail predictably: how many row
+groups the scan has decoded ahead of the operator that reserves is decided by
+the scheduler, so the same query on the same data at the same budget can answer
+on one run and refuse on the next. This is a known open defect (#789) — measured
+at 2 refusals in 20 identical runs on a 512 KiB budget, and 0 in 20 with
+`GOMAXPROCS=1`. It is a sizing hazard, not a correctness one: the refusal is
+loud and no answer is ever wrong. Leaving headroom above the figures in the
+table avoids the regime entirely.
+
+A refusal names what it could not fit: an `IN subquery membership set` refusal
+is the uncorrelated-subquery row above, and a `hash join build` refusal is the
+index row. A `hash join index overhead forced past budget` WARN in the log means
+a join's index crossed the budget on rows it had already accepted — the budget
+is below that join's floor.
+
 **Monitoring spill behavior:**
 
 ```promql

@@ -57,8 +57,10 @@ import (
 //     cell that ANSWERS on every replication fails, naming the tolerance to
 //     delete. NO CELL CARRIES IT TODAY — the eighteen join cells that did were
 //     tolerating #789's nondeterministic refusal, and every one of them answers
-//     on every run at the budget it runs at. The field and its ratchet stay for
-//     the next shape that needs one.
+//     on every run at the budget it runs at. What they still carry is the
+//     BUDGET that tolerance came with, and that is ratcheted separately at the
+//     end of this test. The field and its ratchet stay for the next shape that
+//     needs one.
 //   - A cell with a knownBug is compared and its divergence logged instead of
 //     failed, and it FAILS IF IT STARTS AGREEING — the ADR-0013 ratchet, so
 //     the pin cannot outlive its bug.
@@ -244,6 +246,57 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 		})
 	}
 
+	// The RATCHET on joinBudget, in the shape #824 gave budgetMayRefuse.
+	//
+	// joinBudget is the surviving half of the tolerance #824 retired: it is a
+	// per-family budget RAISE, and a raise nothing checks is indistinguishable
+	// from a raise nothing needs. So every cell that carries it is also run at
+	// spillMxBudget, and if EVERY one of them answers on EVERY run there, the
+	// raise has outlived its reason and the gate fails naming it.
+	//
+	// The ratchet is on the FAMILY, not the cell, because the raise is one
+	// decision for one family — and because a per-cell ratchet cannot be
+	// judged here. The shapes this guards are nondeterministic at
+	// spillMxBudget by a MINORITY of runs (c_uuid answered 19 of 20 in one
+	// sample of three and 20 of 20 in the others), so "this cell answered five
+	// times" is a coin toss, while "all eighteen answered every time" is not:
+	// it cannot happen while three of them refuse on nineteen runs in twenty.
+	// ADR-0027's rule for a condition-triggered pin is to bound the condition
+	// and never tolerate a split; the family is the granularity at which this
+	// condition can be bounded.
+	//
+	// Any error counts as "did not answer", not just a budget refusal. That is
+	// the correct direction for a ratchet that fires only on UNANIMOUS success:
+	// an unrelated breakage keeps it quiet rather than failing it, and the
+	// breakage is caught by the cell's own run above. It costs the sweep
+	// len(joinBudget cells) x spillMxRuns() extra queries, short-circuited at
+	// the first non-answer.
+	if smaller := arms[spillMxBudget]; smaller != nil {
+		joinCells, allAnswered := 0, true
+		for _, cell := range spillMxCells() {
+			if !cell.joinBudget {
+				continue
+			}
+			joinCells++
+			for run := 0; run < spillMxRuns() && allAnswered; run++ {
+				if _, err := tmRun(ctx, smaller, cell.sql); err != nil {
+					allAnswered = false
+				}
+			}
+			if !allAnswered {
+				break
+			}
+		}
+		t.Logf("joinBudget ratchet: %d cells probed at %d KiB", joinCells, spillMxBudget/1024)
+		if joinCells > 0 && allAnswered {
+			t.Fatalf("every one of the %d joinBudget cells answered on all %d runs at %d KiB — the "+
+				"budget raise has outlived its reason (#789). Delete joinBudget from the "+
+				"join_group_by_* cells, delete the #789 residual pin in "+
+				"join_budget_determinism_test.go, and close #789; that they answer is the fix's proof",
+				joinCells, spillMxRuns(), spillMxBudget/1024)
+		}
+	}
+
 	// Per-family engagement. One counter for the whole file is not enough: the
 	// first version of this gate asserted only JoinPartitionsEvicted, which the
 	// 18 join cells satisfied on their own while 54 sort and window cells — and
@@ -271,8 +324,12 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 // The two budgets. spillMxBudget is where the arc's four defects live. The
 // join family needs its own: at 512 KiB the scan's whole-file buffer alone
 // holds ~460 KiB of it, and for the widest keys the build's demand lands on
-// the budget rather than under it, so the query never reaches the replay the
-// cell is for.
+// the budget rather than under it — so whether the query answers follows how
+// far the scan decoded ahead, which is #789 and is OPEN. The raise is not a
+// tolerance: at spillMxJoinBudget every cell answers on every run and a
+// refusal fails, and the joinBudget ratchet at the end of
+// TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget fails the whole family if
+// the raise ever stops being needed.
 const (
 	spillMxBudget     int64 = 512 * 1024
 	spillMxJoinBudget int64 = 1024 * 1024
@@ -420,12 +477,22 @@ func spillMxCells() []spillMxCell {
 		// HashJoin grace partitioning BELOW the aggregate: the spilled probe
 		// partitions replay after the workers finish, which is #782 itself.
 		//
-		// These eighteen cells carried budgetMayRefuse, tolerating #789's
-		// nondeterministic refusal. With the tolerance ratcheting they were
-		// measured: at spillMxJoinBudget all eighteen answer on all five runs,
-		// so the tolerance is gone and a refusal here now fails the gate.
-		// Whether the BUDGET they run at is still needed is a separate
-		// question, and it gets its own ratchet in #789's commit.
+		// The family runs at spillMxJoinBudget, and #824 took away the
+		// tolerance that used to sit beside it: a refusal at 1 MiB now FAILS.
+		// What it may NOT do is claim the budget raise is no longer needed.
+		// Measured at spillMxBudget, 20 runs per column, three independent
+		// samples on this tree: fourteen columns answer 20/20, c_cidr refuses
+		// 20/20, and c_str, c_bytes and c_uuid reach BOTH dispositions on
+		// identical data (c_str 0/2/1 answers of 20, c_bytes 0/1/2, c_uuid
+		// 19/20/20). At 512 KiB those shapes sit exactly at their demand —
+		// the file buffer plus the scan's decoded read-ahead plus the join's
+		// unspillable index plus the build — so which side of the budget the
+		// build's first Reserve lands on follows how far the scan ran ahead.
+		// That is #789, and it is OPEN: two bounds for it were implemented in
+		// this arc and both are refused on measurement (ADR-0006's open
+		// residual). The budget raise is what the family needs until it is
+		// closed, and the joinBudget ratchet at the end of this file's sweep is
+		// what forces a fix to come back and delete it.
 		add(spillMxCell{name: "join_group_by_" + n, joinBudget: true, sql: fmt.Sprintf(
 			`SELECT z.%[1]s AS k, COUNT(*) AS n FROM %[2]s x JOIN %[2]s z ON x.id = z.id GROUP BY z.%[1]s`, n, tbl)})
 		// MIN/MAX as an aggregate INPUT for every ordered type, grouped by a

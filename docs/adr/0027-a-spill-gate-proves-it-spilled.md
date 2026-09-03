@@ -96,6 +96,21 @@ Mechanisms, each with its instrumented evidence in the commit body:
    #789's moving floor. All eighteen answer on every run at
    `spillMxJoinBudget`, so none of them carries the tolerance any more.
 
+   **The BUDGET RAISE those cells came with is the other half of the same
+   tolerance, and it ratchets too.** A cell that runs at a larger budget than
+   the rest of the sweep is tolerating something, and a raise nothing checks is
+   indistinguishable from a raise nothing needs. So the sweep runs every
+   `joinBudget` cell at `spillMxBudget` as well and FAILS the family when all
+   of them answer on every run there, naming what to delete. It is a FAMILY
+   ratchet, not a per-cell one, for two reasons: the raise is one decision for
+   one family, and the condition cannot be judged per cell — three of these
+   shapes reach both dispositions at `spillMxBudget` on a minority of runs
+   (#789, open), so "this cell answered five times" is the split this decision
+   forbids, while "all eighteen answered every time" is not. Any error counts
+   as "did not answer", which is the correct direction for a ratchet that fires
+   only on unanimous success: an unrelated breakage keeps it quiet rather than
+   turning it red, and that breakage is caught by the cell's own budgeted run.
+
 ## Alternatives rejected
 
 - Demoting to the keyed merge whenever a flush happened (#782 candidate b):
