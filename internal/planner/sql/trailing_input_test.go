@@ -64,11 +64,12 @@ func TestParseRejectsTrailingInput(t *testing.T) {
 			sql:     "SELECT COUNT(*) FROM nation NATURAL JOIN region",
 			stopsAt: "NATURAL",
 		},
-		{
-			name:    "JOIN USING",
-			sql:     "SELECT COUNT(*) FROM nation JOIN region USING (n_regionkey)",
-			stopsAt: "USING",
-		},
+		// `JOIN ... USING` is PARSED now (#655), so it is no longer an
+		// example of input the parser stops at. Its own coverage is
+		// TestParseJoinUsingDesugarsToItsConditions, which asserts the
+		// desugaring the clause produces, and
+		// coordinator.TestJoinUsingAndTheLeadingDotLiteral, which asserts the
+		// rows on four arms.
 		{
 			// A named-window clause we do not implement. Dropping it left the
 			// OVER references dangling.

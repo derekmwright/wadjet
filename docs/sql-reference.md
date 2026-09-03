@@ -638,6 +638,21 @@ SELECT * FROM flow_logs ORDER BY timestamp DESC LIMIT 100 OFFSET 200
 
 Wadjet supports multiple join types using a hash join strategy.
 
+### Join conditions
+
+A join names its condition with `ON`, or with `USING (col, ...)` when both
+sides carry the same column name:
+
+```sql
+-- These two are the same join
+FROM flow_logs f JOIN device_inventory d ON f.device_id = d.device_id
+FROM flow_logs f JOIN device_inventory d USING (device_id)
+```
+
+`USING` accepts several columns — `USING (device_id, day)` — and both sides
+remain addressable by their qualified names (`f.device_id`, `d.device_id`).
+See **Limitations** for the two `USING` shapes that are refused.
+
 ### Inner Join
 
 ```sql
@@ -1654,8 +1669,12 @@ expression.
 
 ## Limitations
 
-- `NATURAL JOIN` — rejected; write the join condition with `ON`
-- `JOIN ... USING (col)` — not parsed; write `ON a.col = b.col`
+- `NATURAL JOIN` — rejected (SQLSTATE `0A000`); write the join condition with `ON`
+- `SELECT *` over a `JOIN ... USING` — rejected (`0A000`): `USING` merges the
+  joined column into one output column, and a star's column set over a join is
+  not resolved by the planner. Name the columns, or join with `ON`
+- `JOIN ... USING` that follows another join on the same `FROM` item —
+  rejected (`0A000`); the column could come from either relation on the left
 - A SUBQUERY in an `UPDATE` / `DELETE` `WHERE` clause — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS` — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner.
 - Two statements in one message. `DELETE ...; DELETE ...` and `UPDATE ...; UPDATE ...` are refused (42601 when the second statement carries a WHERE, XX000 when the first does not); `INSERT ...; INSERT ...` is **not** refused — the first statement runs, the tail is silently dropped, and the tag reports the first statement's count. PostgreSQL runs both statements. Do not put two statements in one message until #711 lands.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000

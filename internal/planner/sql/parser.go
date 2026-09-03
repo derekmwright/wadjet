@@ -482,7 +482,15 @@ type JoinInfo struct {
 	RightTableRef *TableRef // full right-side table ref (includes function info)
 	Condition     string
 	CondExpr      Node
-	Lateral       bool // LATERAL join — right side can reference left side columns
+	// Using is the column list of a `JOIN ... USING (a, b)`, lower-cased, in
+	// the order written. The join CONDITION is desugared into Condition /
+	// CondExpr at parse time (`<left>.a = <right>.a AND ...`), because that
+	// half needs no catalog; the list is kept because the OUTPUT half does —
+	// USING merges the joined column into ONE output column under `SELECT *`,
+	// and deciding which columns a star stands for is a catalog question
+	// (#655).
+	Using   []string
+	Lateral bool // LATERAL join — right side can reference left side columns
 	// FromItem is the index into SelectInfo.Tables of the comma-separated
 	// FROM item this join EXTENDS. A FROM list is a list of items and an
 	// explicit JOIN belongs to the item it follows, but the parser flattens

@@ -615,6 +615,16 @@ func lexStart(l *lexer) stateFn {
 		l.emit(TokenStar)
 		return nil
 	case r == '.':
+		// `.5` is a numeric literal, not a dot followed by a 5 (#655).
+		// PostgreSQL, DuckDB and the SQL standard all accept the leading-dot
+		// form; wadjet reported `unexpected token "."` at the literal's own
+		// position for `SELECT .5`, `WHERE m1 > .5` and `SELECT .5 + 1`.
+		// Only when a DIGIT follows: a bare dot is still the qualifier
+		// separator in `t.c`, and a dot at the end of input is still an
+		// error.
+		if d := l.peek(); d >= '0' && d <= '9' {
+			return lexNumber
+		}
 		l.emit(TokenDot)
 		return nil
 	case r == '+':
@@ -799,10 +809,14 @@ func lexQuotedIdent(l *lexer) stateFn {
 }
 
 // lexNumber scans an integer, decimal, or scientific notation number.
-// The first digit has already been consumed by lexStart.
-// Accepts: 123, 3.14, 1e10, 1E-5, 3.14e+2
+// The first digit — or a leading `.` immediately followed by one — has
+// already been consumed by lexStart.
+// Accepts: 123, 3.14, .5, 1e10, 1E-5, 3.14e+2, .5e3
 func lexNumber(l *lexer) stateFn {
-	seenDot := false
+	// A leading `.` is already consumed and IS the decimal point, so a second
+	// one ends the number: `.5.5` lexes as `.5` then `.5`, which the parser
+	// then refuses as it refuses `1.5.5`.
+	seenDot := l.pos > l.start && l.input[l.start] == '.'
 	for {
 		r := l.peek()
 		if r >= '0' && r <= '9' {

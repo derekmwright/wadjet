@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"strconv"
 	"strings"
 )
@@ -612,7 +613,11 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 			// `FROM nation NATURAL JOIN region` as plain `FROM nation`
 			// (#337). Same shape as JOIN ... USING: an error a client can
 			// act on, not a wrong answer.
-			return fmt.Errorf("NATURAL JOIN is not supported at position %d; write the join condition with ON", p.cur.pos)
+			// 0A000, not 42601: PostgreSQL ANSWERS this. The class a client
+			// is owed is "this engine does not implement it", not "your SQL
+			// is wrong" (#655, family C).
+			return sqlerr.New("0A000",
+				"NATURAL JOIN is not supported at position %d; write the join condition with ON", p.cur.pos)
 		case TokenComma:
 			// Cross join via comma
 			p.advance()
@@ -686,10 +691,127 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 			}
 			ji.Condition = condExpr.String()
 			ji.CondExpr = condExpr
+		} else if p.isKeyword(TokenKWUsing) {
+			// JOIN ... USING (a, b). The lexer has had the token since MERGE
+			// was added; the clause had no arm here, so it fell through to the
+			// end-of-statement guard and was reported as trailing input
+			// (#655).
+			//
+			// The CONDITION is desugared to `<left>.c = <right>.c` for each
+			// column, which is exactly what USING means and needs no catalog.
+			// The left qualifier is the FROM item this join extends; a join
+			// CHAIN over the same item is refused below, because the column
+			// could then live in either of the left side's relations and
+			// picking one without the catalog would be a guess that changes
+			// the answer.
+			if err := p.parseJoinUsing(info, &ji); err != nil {
+				return err
+			}
 		}
 
 		info.Joins = append(info.Joins, ji)
 	}
+}
+
+// parseJoinUsing parses `USING (a, b, ...)` and desugars it into ji's ON
+// condition.
+//
+// The column list is also recorded on ji: the join CONDITION is all a
+// predicate needs, but `SELECT *` over a USING join emits the joined column
+// ONCE — three output columns for two two-column tables, not four — and that
+// is a projection question the parser cannot answer.
+func (p *selectParser) parseJoinUsing(info *SelectInfo, ji *JoinInfo) error {
+	usingPos := p.cur.pos
+	p.advance() // consume USING
+	if _, err := p.expect(TokenLParen); err != nil {
+		return fmt.Errorf("expected ( after USING at position %d", usingPos)
+	}
+	var cols []string
+	for {
+		if p.peek() != TokenIdent {
+			return fmt.Errorf("expected a column name in USING at position %d", p.cur.pos)
+		}
+		cols = append(cols, strings.ToLower(p.advance().val))
+		if p.peek() != TokenComma {
+			break
+		}
+		p.advance()
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return fmt.Errorf("expected ) to close USING at position %d", usingPos)
+	}
+
+	// The left side's qualifier. A join CHAIN — `a JOIN b USING (c) JOIN d
+	// USING (c)`, or `a JOIN b ON ... JOIN d USING (c)` — puts more than one
+	// relation on the left, and which of them carries `c` is a catalog
+	// question. Refused rather than guessed: qualifying against the wrong one
+	// answers a DIFFERENT query, and this clause is being added precisely so
+	// a client stops getting an answer it cannot check.
+	for _, prior := range info.Joins {
+		if prior.FromItem == ji.FromItem {
+			return sqlerr.New("0A000",
+				"JOIN ... USING at position %d follows another join on the same FROM item; the "+
+					"column could come from either relation on the left, which needs the catalog "+
+					"— write the join condition with ON", usingPos)
+		}
+	}
+	if ji.FromItem < 0 || ji.FromItem >= len(info.Tables) {
+		return sqlerr.New("0A000",
+			"JOIN ... USING at position %d has no left relation to resolve against", usingPos)
+	}
+	left := info.Tables[ji.FromItem]
+	leftQual := left.Alias
+	if leftQual == "" {
+		leftQual = left.Name
+	}
+	rightQual := ji.RightAlias
+	if rightQual == "" {
+		rightQual = ji.RightTable
+	}
+	if leftQual == "" || rightQual == "" {
+		return sqlerr.New("0A000",
+			"JOIN ... USING at position %d cannot name one of its sides; alias the relations, "+
+				"or write the join condition with ON", usingPos)
+	}
+
+	var cond Node
+	for _, c := range cols {
+		eq := &CmpExpr{
+			Op:    "=",
+			Left:  &ColRef{Table: leftQual, Column: c},
+			Right: &ColRef{Table: rightQual, Column: c},
+		}
+		if cond == nil {
+			cond = eq
+			continue
+		}
+		cond = &AndNode{Left: cond, Right: eq}
+	}
+	// The OUTPUT half, which this clause does NOT implement and must not
+	// answer wrong. `SELECT *` over a USING join emits the joined column
+	// ONCE — three output columns for two two-column tables, where an ON join
+	// emits four — and the star's column set over a join is not knowable
+	// here: logical.ExpandStarProjections declines a star whose source is not
+	// a lone scan, by design, because guessing it would silently change which
+	// columns a query returns. Answering four columns would be a wrong answer
+	// in kind, so the shape is REFUSED and #655 stays open on it.
+	//
+	// Only a BARE star merges. `aa.*` names one side and needs no merge, so
+	// it is admitted.
+	for _, c := range info.Columns {
+		if c.Star && c.TableRef == "" {
+			return sqlerr.New("0A000",
+				"SELECT * over a JOIN ... USING at position %d is not supported: USING merges the "+
+					"joined column into ONE output column and the star's column set over a join "+
+					"is not resolvable here — name the columns, or write the join condition with ON",
+				usingPos)
+		}
+	}
+
+	ji.Using = cols
+	ji.Condition = cond.String()
+	ji.CondExpr = cond
+	return nil
 }
 
 func (p *selectParser) parseTableRef() (TableRef, error) {

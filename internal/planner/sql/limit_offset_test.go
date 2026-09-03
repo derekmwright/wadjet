@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"strings"
 	"testing"
 )
@@ -155,5 +156,57 @@ func TestParseNaturalJoinNamesItself(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "NATURAL JOIN is not supported") {
 		t.Errorf("error does not name NATURAL JOIN: %v", err)
+	}
+	// 0A000, not 42601: PostgreSQL ANSWERS a NATURAL JOIN, so the class a
+	// client is owed is "this engine does not implement it", not "your SQL is
+	// wrong" (#655, family C). NATURAL's keys ARE the columns the two sides
+	// share, which is a catalog question the parser cannot ask — the refusal
+	// stays until it is resolved in the scope layer.
+	if got := sqlerr.StateOf(err); got != "0A000" {
+		t.Errorf("SQLSTATE = %q, want 0A000", got)
+	}
+}
+
+// TestParseJoinUsingDesugarsToItsConditions is the arm the same clause gained
+// (#655). The lexer has had the USING token since MERGE; the join-clause
+// parser had an ON arm and no USING arm, so the clause fell through to the
+// end-of-statement guard and was reported as trailing input.
+//
+// What is asserted here is the DESUGARING, which is where a mistake would be
+// silent: a condition that named one column instead of two, or qualified a
+// side wrongly, still parses and still answers — with the wrong rows. The row
+// answers are gated on four arms by
+// coordinator.TestJoinUsingAndTheLeadingDotLiteral.
+func TestParseJoinUsingDesugarsToItsConditions(t *testing.T) {
+	for _, tc := range []struct {
+		sql       string
+		wantCond  string
+		wantUsing []string
+	}{
+		{"SELECT COUNT(*) FROM nation JOIN region USING (r_regionkey)",
+			"nation.r_regionkey = region.r_regionkey", []string{"r_regionkey"}},
+		{"SELECT COUNT(*) FROM nation n LEFT JOIN region r USING (a, b)",
+			"n.a = r.a and n.b = r.b", []string{"a", "b"}},
+		// The self-join: the qualifiers are the ALIASES, which is the only
+		// thing that makes the condition mean anything at all here.
+		{"SELECT COUNT(*) FROM nation a JOIN nation b USING (n_nationkey)",
+			"a.n_nationkey = b.n_nationkey", []string{"n_nationkey"}},
+	} {
+		q, err := Parse(tc.sql)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", tc.sql, err)
+			continue
+		}
+		if q.SelectInfo == nil || len(q.SelectInfo.Joins) != 1 {
+			t.Errorf("Parse(%q) produced %d joins, want 1", tc.sql, len(q.SelectInfo.Joins))
+			continue
+		}
+		j := q.SelectInfo.Joins[0]
+		if j.Condition != tc.wantCond {
+			t.Errorf("Parse(%q) condition = %q, want %q", tc.sql, j.Condition, tc.wantCond)
+		}
+		if strings.Join(j.Using, ",") != strings.Join(tc.wantUsing, ",") {
+			t.Errorf("Parse(%q) Using = %v, want %v", tc.sql, j.Using, tc.wantUsing)
+		}
 	}
 }
