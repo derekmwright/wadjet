@@ -3075,6 +3075,16 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := assertUnionArmsAgreeOnTypes(stages); err != nil {
 		return nil, err
 	}
+	// And for a stage the dispatcher could not build task inputs for at all —
+	// one naming neither a dependency nor a table. #806 refused ONE producer
+	// of that shape (a table-less SELECT's `dual` stage); this asks the same
+	// question of the FINISHED stage list, which catches the second one
+	// (#812, a scalar subquery over a CTE in a WHERE clause) and any third.
+	// Loud at dispatch with an internal message and no SQLSTATE; answerable
+	// on the local engine.
+	if err := refuseUnbuildableStages(stages); err != nil {
+		return nil, err
+	}
 	// #423: the worker's scan reads column TYPES from the FILE, and a
 	// parquet file cannot express nine of ours. Declare the catalog's
 	// schema for every table this plan scans so a file written before the

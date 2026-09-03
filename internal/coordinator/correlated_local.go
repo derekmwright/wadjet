@@ -142,6 +142,31 @@ func (c *Coordinator) TableLessLocalRoutes() int64 {
 	return c.localTableLess.Load()
 }
 
+// runUnbuildableStageLocal executes a query the stage DAG refused
+// (physical.ErrUnbuildableStageDistributed) on the coordinator-local
+// single-process pipeline.
+//
+// The refused plan holds a stage naming neither a dependency nor a table, and
+// the dispatcher's task-input builder needs one or the other. #806 fixed one
+// producer of that shape by node kind; this catches it by the PROPERTY, which
+// is what a second producer needed — a scalar subquery over a CTE in a WHERE
+// clause, whose substitution leaves such a stage while the same query over a
+// BASE TABLE or a DERIVED TABLE plans and answers (#812).
+//
+// Routing beats handing the client `stage sort-4 has no dependencies and no
+// ScanFiles`, which is an internal message about the planner's own output and
+// carries no SQLSTATE at all.
+func (c *Coordinator) runUnbuildableStageLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"a stage with no dependencies and no scan files", &c.localUnbuildableStage)
+}
+
+// UnbuildableStageLocalRoutes reports how many plans refused for an
+// undispatchable stage were routed to the coordinator-local pipeline (#812).
+func (c *Coordinator) UnbuildableStageLocalRoutes() int64 {
+	return c.localUnbuildableStage.Load()
+}
+
 // UnreachableOutputLocalRoutes reports how many plans refused for an
 // uncomputed SELECT list were routed to the coordinator-local pipeline.
 func (c *Coordinator) UnreachableOutputLocalRoutes() int64 {

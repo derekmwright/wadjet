@@ -294,6 +294,12 @@ type Coordinator struct {
 	// pipeline instead (#806). Before the refusal they FAILED on the DAG:
 	// "stage dual-0 has no dependencies and no ScanFiles".
 	localTableLess atomic.Int64
+	// localUnbuildableStage counts queries whose plan the stage DAG refused
+	// because a stage named neither a dependency nor a table, so the
+	// dispatcher could not build task inputs for it (#812). #806's refusal is
+	// the same condition asked of ONE node kind; this one is asked of the
+	// finished stage list, which is what a second producer needed.
+	localUnbuildableStage atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -1079,6 +1085,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// and the dual stage's own comment already says it runs here.
 		if errors.Is(err, physical.ErrTableLessSelectDistributed) {
 			return c.runTableLessLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a stage the dispatcher could not build task inputs for. #806
+		// was one producer of that shape and #812 is another — a scalar
+		// subquery over a CTE in a WHERE clause, whose substitution leaves a
+		// stage naming neither a dependency nor a table. The query answers
+		// here, where the CTE is a real operator, instead of failing three
+		// task attempts later with an internal message and no SQLSTATE.
+		if errors.Is(err, physical.ErrUnbuildableStageDistributed) {
+			return c.runUnbuildableStageLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
