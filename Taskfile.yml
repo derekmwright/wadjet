@@ -76,6 +76,11 @@ tasks:
       - task: lint
       - task: test
 
+  docs:check:
+    desc: Verify every relative link/#anchor in README.md, docs/**/*.md, and CONTRIBUTING.md resolves, and that every docs/*.md page is reachable from docs/README.md
+    cmds:
+      - go run ./tools/docscheck .
+
   # --- Benchmark deploy pipeline ---
   # Usage:
   #   task bench:stage PROFILE=sf100-distributed     # Build + upload binaries

@@ -27,6 +27,13 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Docs Link Check
+        # Resolves every relative link and #anchor in README.md, docs/**/*.md,
+        # and CONTRIBUTING.md against the tree, and asserts every docs/*.md
+        # page is reachable from docs/README.md. Pure filesystem/regex work
+        # over ~165 files — a few hundred ms, no fixtures or servers needed.
+        run: go run ./tools/docscheck .
+
       - name: Unit Tests
         # -short skips heavy SF0.3 Polars/multi-cache-file local repro tests
         # that exist for hunting SF100 distributed bugs offline. They each
