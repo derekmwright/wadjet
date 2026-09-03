@@ -378,25 +378,21 @@ func arcACells() []arcACell {
 		{issue: "#544", name: "cast_timestamp_of_a_null_row_stays_null",
 			sql:  `SELECT CAST(c_ts AS STRING) AS v FROM typemx WHERE id = 52`,
 			want: []string{"v=NULL"}},
-		// THE AGGREGATE SPELLING, pinned. `CAST(MAX(c_ts) AS STRING)` renders
-		// on the single-process path and answers NULL on BOTH DAG arms — for
-		// every type, not only TIMESTAMP, and identically at this arc's base.
-		// It is not this commit's defect and not its fix's boundary either:
-		// the derived-table spelling of the same question
-		// (`SELECT CAST(m AS STRING) FROM (SELECT MAX(c_ts) AS m …) d`) is
-		// right on all four arms here and was uniformly wrong before, so the
-		// rendering fix does travel. What does not is the aggregate-output
-		// ColRef on a stage that loses it.
+		// THE AGGREGATE SPELLING. `CAST(MAX(c_ts) AS STRING)` rendered on the
+		// single-process path and answered NULL on BOTH DAG arms — for every
+		// type, not only TIMESTAMP — while the derived-table spelling of the
+		// same question was right everywhere. That was never this cell's
+		// rendering: the gather EVALUATES a wrapped aggregate, and it built
+		// every such column into a float64 vector and nulled a string box.
 		//
-		// Filed as #831. Pinned rather than described because #544's claim is
-		// "renders on all four arms" and this is the spelling where that is
-		// false; the day the DAG stops answering NULL, this cell fails and the
-		// pin comes out.
-		{issue: "#544", name: "boundary_cast_of_an_aggregate_is_null_on_the_dag",
-			sql:     `SELECT CAST(MAX(c_ts) AS STRING) AS v FROM typemx WHERE id < 5`,
-			want:    []string{"v=2023-11-14 22:17:24"},
-			wantDAG: []string{"v=NULL"},
-			pgSays:  "2023-11-14 22:17:24 on every arm (#831)"},
+		// Filed as #831 and closed by declaring the column's type on the
+		// rename the gather evaluates. The `wantDAG` divergence is gone, which
+		// is the fix's proof; the whole type × consumer census lives in
+		// `TestAnOuterExpressionOverAPublishedSlotAgreesOnEveryArm`.
+		{issue: "#544", name: "cast_of_an_aggregate_renders_on_every_arm",
+			sql:    `SELECT CAST(MAX(c_ts) AS STRING) AS v FROM typemx WHERE id < 5`,
+			want:   []string{"v=2023-11-14 22:17:24"},
+			pgSays: "2023-11-14 22:17:24 on every arm (#831)"},
 		{issue: "#544", name: "control_cast_of_an_aggregate_through_a_derived_table",
 			sql: `SELECT CAST(m AS STRING) AS v FROM ` +
 				`(SELECT MAX(c_ts) AS m FROM typemx WHERE id < 5) d`,

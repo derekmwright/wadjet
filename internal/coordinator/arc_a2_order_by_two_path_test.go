@@ -233,18 +233,22 @@ func a2OrderCells() []a2OrderCell {
 			wantErrLike: "for SELECT DISTINCT, ORDER BY expressions must appear in select list",
 			wantState:   "42P10",
 			pgSays:      `42P10: for SELECT DISTINCT, ORDER BY expressions must appear in select list`},
-		// THE BOUNDARY this commit does not cross, and it is #597: with a
-		// GROUP BY the aggregate sort term is NOT a no-op — there are many
-		// rows and their order depends on it — so the term cannot be dropped
-		// and the refusal stands. 0A000 rather than 42803, because
-		// PostgreSQL ANSWERS this and the class owed to a client is "not
-		// implemented here", not "your SQL is wrong". The fixture attempts
-		// the boundary (protocol rule 11) so lifting it is visible.
-		{issue: "#597", name: "boundary_grouped_order_by_aggregate",
-			sql:         `SELECT g FROM typemx GROUP BY g ORDER BY MAX(id)`,
-			wantErrLike: "an aggregate expression that is not itself a select item cannot be sorted on",
-			wantState:   "0A000",
-			pgSays:      "PostgreSQL ANSWERS: 8 rows, groups ordered by their maxima"},
+		// What was #597's BOUNDARY, and is now its answer. With a GROUP BY
+		// the aggregate sort term is not a no-op — there are many rows and
+		// their order depends on it — so the term could not be dropped, and
+		// the refusal stood. It does not need dropping: the aggregate is
+		// already hoisted onto the Aggregate node by #811's own change above,
+		// so the term needs a NAME and not an evaluation, and the hidden
+		// projection is a plain reference to that output column.
+		//
+		// Asserted as a SEQUENCE, because that is the only thing that can
+		// tell this fix from the failure it could have had: a hidden key
+		// resolving to nothing orders by NULL on every row and returns
+		// exactly these eight groups.
+		{issue: "#597", name: "grouped_order_by_an_unselected_aggregate", ordered: true,
+			sql:    `SELECT g FROM typemx GROUP BY g ORDER BY MAX(id)`,
+			want:   []string{"g=NULL", "g=int32:2", "g=int32:3", "g=int32:4", "g=int32:5", "g=int32:6", "g=int32:0", "g=int32:1"},
+			pgSays: "8 rows, groups ordered by their maxima"},
 	}
 }
 
