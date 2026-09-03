@@ -1,6 +1,8 @@
 # ADR-0027: A spill gate proves it spilled, and a clone's spill artifacts belong to the primary
 
-Status: Accepted (2026-09-01, the spill-correctness arc: #782, #779, #632, #790; residuals #788, #791)
+Status: Accepted (2026-09-01, the spill-correctness arc: #782, #779, #632,
+#790; residuals #788, #791). Amended 2026-09-03 (operational-lifecycle arc):
+#791's third route, and why its plan-time fix is refused.
 
 ## Context
 
@@ -102,8 +104,54 @@ Mechanisms, each with its instrumented evidence in the commit body:
   the totals intact. Patching one producer does not close it; it is
   ADR-0026's territory (one identity per key). The sweep cell is pinned
   with a ratchet scoped to the two switches the bug needs.
-- #791 (grouped raw-row path reads a shape-only column) is loud, pinned as
-  a known error, and fails the pin if it starts answering.
+- #791 (grouped raw-row path reads a shape-only column) is loud, pinned,
+  and fails the pin if it starts answering.
+
+  **Amended 2026-09-03 (the operational-lifecycle arc): #791 has a THIRD
+  route, and it is why the plan-time fix is REFUSED rather than deferred
+  for want of effort.** The filing names two ways onto the raw-row path
+  beside a shape-only column — a non-simple aggregate, and GROUPING
+  SETS/ROLLUP. The third is a nullable GROUP BY key that actually CONTAINS
+  a NULL: `migrateToGenericMap` clears `useIntGroupKey` and sets no
+  replacement flag, so `canUseExternalMerge()` is false from that batch on
+  and the aggregate takes the raw-row buffer with ONE SIMPLE aggregate and
+  nothing else. Measured at 512 KiB in the sweep's own arm, twelve runs
+  each: `SELECT g, COUNT(c_str) … GROUP BY g` (nullable, has NULLs) fails
+  7 of 12 with the drain knob disarmed and 12 of 12 with
+  `ForceAggDrainEvery(1)`; the identical shape on `GROUP BY id`
+  (non-nullable) answers 12 of 12 either way. Both are now cells in the
+  sweep, and the pair is the fixture: they differ only in the key's
+  nullability, so a fix that closes one and not the other is visible.
+
+  The filing prefers a plan-time decline — "have the planner decline the
+  shape-only decode when the plan contains an aggregate that can reach the
+  raw-row path". That cannot be written correctly. `simpleAggs` and the
+  key-mode flags are latched from the FIRST BATCH'S VECTOR TYPES inside
+  `resolveIndices`, not from the logical plan, and the third route depends
+  on DATA — whether a nullable key contains a NULL. No plan-time fact
+  answers that. A plan-time decline can therefore only be conservative to
+  any GROUP BY on a nullable key, or any non-simple aggregate, or any
+  GROUPING SET, beside a shape-only column — which disables the shape-only
+  optimization for most `GROUP BY … COUNT(col)` shapes, including the
+  ClickBench Q28 family the optimization was built for. That is a product
+  trade, not a bug fix, so it is refused here and recorded.
+
+  The other direction — teaching the raw-row buffer to carry lengths and
+  refuse values — is NOT foreclosed by decision 4 above. Decision 4
+  rejected buffer-teaching for the UNGROUPED case, on the grounds that the
+  buffer bought nothing there; that argument does not transfer to grouped
+  shapes, whose state grows with the key set. If #791 is taken, that is the
+  direction, and it needs its own amendment.
+
+  Both halves of the pair arm `ForceAggDrainEvery(1)`, which is decision 6
+  applied to this defect: whether the aggregate reaches the raw-row buffer
+  follows tracker timing, so the un-forced shape fails 7 runs in 12 and the
+  forced one fails 12 in 12, while the non-nullable twin answers 12 in 12
+  either way. The first draft instead pinned "at least one of five runs
+  failed" — a TOLERANCE, which demands a particular outcome mix from an
+  uncontrolled coin. It could not pass under `-short` (one run satisfies
+  neither edge) and flaked 5 times in 50 at five runs. A pin whose trigger
+  is a CONDITION bounds the condition; it never tolerates a split.
 - The typematrix fixture has no negative numbers, so the sweep sees only
   the lost-MIN half of decision 3's defect; the exec-level gate carries
   negated twins.

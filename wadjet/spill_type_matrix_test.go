@@ -106,6 +106,15 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 			arm := arms[budget]
 			w := refs[cell.name]
 			engagedBefore := cell.engagement()
+			// A cell whose defect is CONDITION-triggered arms the drain knob
+			// for its own runs, so the condition is reached on EVERY run
+			// instead of on a coin flip (ADR-0027 decision 6). The knob is
+			// restored before the next cell, and the reference arm was taken
+			// with it DISARMED at the top of this test.
+			if cell.forceDrainEvery > 0 {
+				prevKnob := exec.ForceAggDrainEvery(cell.forceDrainEvery)
+				defer exec.ForceAggDrainEvery(prevKnob)
+			}
 			answered, agreed := 0, 0
 			for run := 0; run < spillMxRuns(); run++ {
 				got, err := tmRun(ctx, arm, cell.sql)
@@ -273,6 +282,18 @@ type spillMxCell struct {
 	// the cell. The ratchet in the direction a loud bug needs it — the pin
 	// cannot outlive the fix any more than knownBug's can.
 	knownError string
+	// forceDrainEvery arms exec.ForceAggDrainEvery(N) around THIS cell's
+	// runs. A defect whose trigger is a CONDITION is pinned by bounding the
+	// condition, never by tolerating an outcome mix: the first draft of this
+	// cell pinned "at least one of five runs failed", which demands a
+	// particular split from an uncontrolled coin — it could not pass under
+	// -short (one run satisfies neither edge) and flaked 5 times in 50 at
+	// five runs. ADR-0013's evidence classes and ADR-0027 decision 6 both
+	// say the same thing: force the condition, then assert loudly on EVERY
+	// run. Measured for #791's third route: 7/12 loud with the knob
+	// disarmed, 12/12 with ForceAggDrainEvery(1), and the non-nullable twin
+	// answers 12/12 either way.
+	forceDrainEvery int64
 }
 
 // engagement reads the counter for this cell's operator family, and
@@ -411,6 +432,53 @@ func spillMxCells() []spillMxCell {
 		noSpill:    "the shape fails before any spill file is written",
 		sql: fmt.Sprintf(
 			`SELECT g AS k, COUNT(c_str) AS n, COUNT(DISTINCT id) AS d FROM %s GROUP BY g`, tbl)})
+	// #791's THIRD ROUTE, found in this arc's round 0 and pinned here so the
+	// residual is recorded rather than remembered.
+	//
+	// The filing describes two ways onto the raw-row path beside a shape-only
+	// column: a non-simple aggregate (the cell above) and GROUPING SETS. There
+	// is a third, and it is DATA-dependent: a nullable GROUP BY key that
+	// actually carries a NULL migrates the int-keyed path to the generic
+	// string map (migrateToGenericMap clears useIntGroupKey and sets no
+	// replacement flag), so canUseExternalMerge is false from that batch on and
+	// the aggregate takes the raw-row buffer with ONE SIMPLE aggregate and
+	// nothing else. Measured at 512 KiB, five runs each:
+	//
+	//	GROUP BY g      (nullable, has NULLs)   5/5 fail
+	//	GROUP BY id     (non-nullable)          0/5 fail
+	//
+	// The pair is the fixture: the two shapes differ ONLY in the key's
+	// nullability, so a fix that closes one and not the other is visible.
+	//
+	// Both halves arm ForceAggDrainEvery(1) so the pressure check lands on
+	// every batch and the route is taken every run: 7/12 loud with the knob
+	// disarmed against 12/12 with it, while the non-nullable twin answers
+	// 12/12 either way. Pinning the un-forced 7-in-12 as "some runs fail"
+	// would be a tolerance, which is what ADR-0013 forbids.
+	//
+	// This is why the plan-time fix the filing prefers is REFUSED (ADR-0027
+	// amendment): simpleAggs and the key-mode flags are latched from the first
+	// batch's vector types inside resolveIndices, not from the logical plan,
+	// and the third route depends on whether a nullable key CONTAINS a NULL.
+	// No plan-time fact answers that, so a plan-time decline can only be
+	// conservative to any GROUP BY on a nullable key beside a shape-only
+	// column — which disables the shape-only optimization for most
+	// `GROUP BY … COUNT(col)` shapes, including the ClickBench family it was
+	// built for.
+	add(spillMxCell{name: "grouped_nullable_key_shape_only_count", knownBug: "#791",
+		knownError:      "shape-only BytesColumn",
+		forceDrainEvery: 1,
+		noSpill:         "the shape fails before any spill file is written",
+		sql: fmt.Sprintf(
+			`SELECT g AS k, COUNT(c_str) AS n FROM %s GROUP BY g`, tbl)})
+	// The twin that must keep ANSWERING: the same shape on a NON-nullable
+	// key, which never migrates and so never reaches the raw-row path. If a
+	// #791 fix ever makes this one fail, it has widened the defect rather
+	// than closed it.
+	add(spillMxCell{name: "grouped_nonnull_key_shape_only_count",
+		forceDrainEvery: 1,
+		sql: fmt.Sprintf(
+			`SELECT id AS k, COUNT(c_str) AS n FROM %s GROUP BY id`, tbl)})
 	add(spillMxCell{name: "scalar_counts",
 		// M3's whole point: an ungrouped aggregate no longer buffers or drains
 		// anything, so there is nothing here for a spill counter to see. Its

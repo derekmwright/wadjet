@@ -213,6 +213,7 @@ refactor(scan): extract predicate pushdown into separate module
   Integer SUM/AVG are EXACT types (bigint / numeric), not float64, and a sum that would wrap is an error, never a wrapped number. A DECIMAL result that does not fit the 128-bit carrier at PostgreSQL's scale is 22003, never a silently narrower scale. Deliberate divergences live in ADR-0012's list; a pin that starts agreeing FAILS.
 
 - **Test patterns**: Table-driven tests preferred. Use `tb.Helper()` in test helpers. Use `objstore.NewMemStore()` for storage in tests (no real S3).
+- **A gate that walks the filesystem must skip directory names starting with `.` or `_`** (what the Go toolchain itself skips) or enumerate packages with `go list` / `golang.org/x/tools/go/packages` instead. A git worktree lives at `.claude/worktrees/<name>/`, NESTED inside the module root, and is a full second copy of the source — a walking gate sees every file in it a second time, so its verdict depends on whether anybody happens to have a worktree open. This has now been the defect twice (`61eba248`, then the #798 breaker-scope pin).
 
 ### Code Style
 

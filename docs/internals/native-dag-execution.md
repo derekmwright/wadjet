@@ -891,6 +891,64 @@ The refusal is not the answer: it is the handoff. Refusing beat dropping the DIS
 Declaring the star's group keys is also what stops the column pruner from eating the dedup. A `NodeDistinct` names no columns, so `computeRequiredColumns` narrowed a star DISTINCT's scan to whatever else the query mentioned: `SELECT COUNT(*) FROM (SELECT DISTINCT * FROM lineitem) u` deduplicated on ONE column (the distinct `l_orderkey` count, 14979 instead of 60175), and over a join it pruned to zero columns and tripped the schemaless-batch guard (#277). Group keys are required columns (#479).
 - **`ExtractMergeInfo` walks a Project CHAIN** above the aggregate, not a single node, composing renames innermost-outward. A derived table's SELECT list and the outer query's are separate `NodeProject`s that nothing merges, so `SELECT c FROM (SELECT COUNT(*) AS c FROM t) u` stacks two; stopping at the first made the aggregate invisible and a probe-split merge concatenated the workers' partial groups instead of re-aggregating them.
 
+### `COUNT(DISTINCT)` on the DAG, and what a partial-dedup exchange would need (#294)
+
+A DISTINCT aggregate has no bounded partial form (#291), so the DAG routes
+every aggregate carrying one through the one-level shape:
+`RawInputAggregate: true, Tasks: 1` (`planner/physical/plan.go`, the
+`hasDistinctAgg` arm), and `execute_stage_dag.go` then REFUSES to fan it
+out. One task reads the whole input. Measured intra-node, before any
+cluster factor: grouped `COUNT(DISTINCT)` 291.0 ms at one worker against
+67.5 ms at eight (4.31x); ungrouped 189.9 → 49.3 (3.85x).
+
+One family escapes, through the logical rewrite in
+`planner/logical/count_distinct_rewrite.go` (gated by the `optswitch`
+`two-level-distinct` / `WADJET_TWO_LEVEL_DISTINCT`): a two-level fold that
+dedups at level 1 by adding the distinct column to the GROUP BY and counts
+at level 2. It applies only when ALL of eight rules hold — one aggregate
+node with no grouping sets; **exactly one** DISTINCT aggregate; it is
+`COUNT` over a non-empty input column; its input expression, if present, is
+a bare column reference; every other aggregate is count/sum/min/max/avg; if
+grouped, the distinct column AND every group key are integer-typed; if
+grouped, no more than one aggregate in total (Q10 regressed +54% otherwise,
+pending NDV bounds); and no group key equals the distinct column. SF1
+single-process A/B through the toggle: an eligible global
+`COUNT(DISTINCT)` 99.2 ms ON against 155.6 ms OFF (1.57x); the ineligible
+shapes do not move with the toggle, which is the control that validates the
+census.
+
+Everything else — a grouped `COUNT(DISTINCT)` with a second aggregate, a
+STRING group key, a STRING distinct column under an integer group key
+(a shape the filing does not name), multi-distinct, `COUNT(DISTINCT expr)`,
+`SUM(DISTINCT …)` global or grouped — takes the `Tasks: 1` route.
+
+**The remaining half is a LEAD, not a follow-up.** A distributed
+partial-dedup exchange needs three things that do not exist, and this is
+recorded so the next attempt starts here:
+
+1. **A dedup-capable exchange sink.** `StageExchangeRepartition` carries
+   `Exchange.Keys` / `Count` / `ComputedCols` and has no dedup-at-write
+   flag and no per-partition set state. Dropping duplicate `(K, x)` pairs
+   at write time is a stateful sink the exchange writer does not have.
+2. **A wire encoding for a distinct set.** ADR-0010's `.wshf` header has no
+   spelling for one, and `AggSpec` has no partial/merge form for
+   `Distinct` — only `count_distinct` as a `Func` string. Every merge-form
+   aggregate on the wire today has a BOUNDED partial; a distinct set does
+   not.
+3. **A cost model.** Rule 7 above is explicitly blocked on NDV-based
+   pair-cardinality bounds that do not exist, and the same bound is what
+   decides whether a dedup exchange pays for itself. ANALYZE's sketches are
+   the raw material; nothing consumes them at plan time for this.
+
+Extending the rewrite to `SUM(DISTINCT x)` is structurally a one-line
+change at the level-2 fold table (`sum` over `x` instead of `count`) —
+`innerGroupBy := append(n.GroupBy, x)` is already "dedup at the input's
+exact type" and AVG already decomposes. It is blocked by rule 3, which
+excludes every non-COUNT aggregate before that point, and by rule 2 for the
+mixed `SUM(DISTINCT a), COUNT(*)` shape, which needs PostgreSQL's
+join-of-aggregates or a per-aggregate hash — a structure this file does not
+have.
+
 ## Set operations
 
 `planner/physical/set_op_stages.go`. Until #346 `walkStages` walked both arms
