@@ -6543,14 +6543,44 @@ func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 	// the same list, keyed on the FIELD's type (#568).
 	switch cr.valueType() {
 	case batch.TypeIPv4, batch.TypeMAC, batch.TypeDate, batch.TypeFloat32:
+		dv, ok := cr.displayValue(b, row)
+		if !ok {
+			return v
+		}
+		return dv
+
+	case batch.TypeTimestamp:
+		// TIMESTAMP is the one type on this list whose display form
+		// Vector.GetValue does NOT produce: it keeps the raw epoch-ms int64,
+		// deliberately and with five consumers that need it (the GROUP BY
+		// key, the aggregate and window spill row encoding, the window
+		// comparator, the row map an UPDATE re-ingests) — see the comment on
+		// that arm. So the rendering happens HERE, at the text site, from
+		// the column's DECLARED type, which is the split FormatTimestamp's
+		// own doc describes.
+		//
+		// Without it `CAST(c_ts AS STRING)` answered "1700000000000" and
+		// `c_ts LIKE '2023%'` was false for 2023-11-14 (#544) — while the
+		// SAME column projected over pgwire arrives as PostgreSQL's
+		// `timestamp` text, because the send path converts under OID 1114
+		// (#321). One connection, one column, two answers.
+		//
+		// displayValue is used for the read rather than Int64Data directly
+		// because it goes through GetValue, which resolves a dictionary or
+		// selection VIEW to its base row; the arms above rely on the same.
+		dv, ok := cr.displayValue(b, row)
+		if !ok {
+			return v
+		}
+		ms, ok := dv.(int64)
+		if !ok {
+			return v // NULL (nil), or a box this column's type does not make
+		}
+		return batch.FormatTimestamp(ms)
+
 	default:
 		return v
 	}
-	dv, ok := cr.displayValue(b, row)
-	if !ok {
-		return v
-	}
-	return dv
 }
 
 // stringOperand reports v's text when it is a string or byte slice — the two

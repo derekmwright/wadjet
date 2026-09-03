@@ -39,6 +39,12 @@ type arcACell struct {
 	// the shape is LOUD, and PostgreSQL refuses it too (or wadjet
 	// deliberately does — the cell's comment says which).
 	wantErrLike string
+	// wantDAG, when set, is what the two DAG arms must answer INSTEAD of
+	// `want`. It exists to PIN a per-arm divergence rather than describe one:
+	// a shape whose two engines disagree is a real state, and a census that
+	// can only say "all four arms agree" has to leave it out — which is how a
+	// boundary goes unrecorded.
+	wantDAG []string
 	// wantErrLikeDAG, when set, is what the two DAG arms' error must carry
 	// instead. It exists because a stage carries its projection as TEXT and
 	// the worker RE-PARSES it, so a refusal the single-process compiler makes
@@ -330,6 +336,65 @@ func arcACells() []arcACell {
 			wantErrLike:    "unknown function",
 			wantErrLikeDAG: `unexpected token "||"`,
 			pgSays:         `42883 function ||(text, text) does not exist`},
+
+		// ------------------------------------------------------------------
+		// #544 — `CAST(ts AS STRING)` and `LIKE` over a TIMESTAMP rendered
+		// EPOCH MILLISECONDS. `boxedTextOperand` — the resolver CAST and LIKE
+		// share — listed IPv4, MAC, DATE and FLOAT32 as the types whose box
+		// has to be undone before it becomes text, and TIMESTAMP was not on
+		// it, so the raw int64 reached the text path unchanged.
+		//
+		// The fixture's c_ts is 1700000000000 + 61000*id ms, which
+		// PostgreSQL 17 renders `2023-11-14 22:13:20` and up. Rendering it as
+		// the number also made `LIKE '2023%'` false for a 2023 timestamp,
+		// which is the shape a reporting filter takes.
+		//
+		// The projection over pgwire ALREADY rendered this column as
+		// PostgreSQL's timestamp text (the send path converts under OID 1114,
+		// #321) — so before this the same column answered two ways on one
+		// connection, and now it answers one.
+		{issue: "#544", name: "cast_timestamp_as_string",
+			sql: `SELECT id AS i, CAST(c_ts AS STRING) AS v FROM typemx WHERE id < 3 ORDER BY id`,
+			want: []string{
+				"i=int64:0|v=2023-11-14 22:13:20", "i=int64:1|v=2023-11-14 22:14:21",
+				"i=int64:2|v=2023-11-14 22:15:22"}},
+		{issue: "#544", name: "cast_timestamp_like_the_year",
+			sql:  `SELECT COUNT(*) AS n FROM typemx WHERE CAST(c_ts AS STRING) LIKE '2023%' AND id < 100`,
+			want: []string{"n=int64:99"}},
+		{issue: "#544", name: "timestamp_like_without_a_cast",
+			sql:  `SELECT COUNT(*) AS n FROM typemx WHERE c_ts LIKE '2023%' AND id < 100`,
+			want: []string{"n=int64:99"}},
+		{issue: "#544", name: "cast_timestamp_of_a_null_row_stays_null",
+			sql:  `SELECT CAST(c_ts AS STRING) AS v FROM typemx WHERE id = 52`,
+			want: []string{"v=NULL"}},
+		// THE AGGREGATE SPELLING, pinned. `CAST(MAX(c_ts) AS STRING)` renders
+		// on the single-process path and answers NULL on BOTH DAG arms — for
+		// every type, not only TIMESTAMP, and identically at this arc's base.
+		// It is not this commit's defect and not its fix's boundary either:
+		// the derived-table spelling of the same question
+		// (`SELECT CAST(m AS STRING) FROM (SELECT MAX(c_ts) AS m …) d`) is
+		// right on all four arms here and was uniformly wrong before, so the
+		// rendering fix does travel. What does not is the aggregate-output
+		// ColRef on a stage that loses it.
+		//
+		// Filed as #831. Pinned rather than described because #544's claim is
+		// "renders on all four arms" and this is the spelling where that is
+		// false; the day the DAG stops answering NULL, this cell fails and the
+		// pin comes out.
+		{issue: "#544", name: "boundary_cast_of_an_aggregate_is_null_on_the_dag",
+			sql:     `SELECT CAST(MAX(c_ts) AS STRING) AS v FROM typemx WHERE id < 5`,
+			want:    []string{"v=2023-11-14 22:17:24"},
+			wantDAG: []string{"v=NULL"},
+			pgSays:  "2023-11-14 22:17:24 on every arm (#831)"},
+		{issue: "#544", name: "control_cast_of_an_aggregate_through_a_derived_table",
+			sql: `SELECT CAST(m AS STRING) AS v FROM ` +
+				`(SELECT MAX(c_ts) AS m FROM typemx WHERE id < 5) d`,
+			want: []string{"v=2023-11-14 22:17:24"}},
+		// DATE was on the list already and must stay right — it is the
+		// control that says the list, not the rendering, was the defect.
+		{issue: "#544", name: "control_cast_date_as_string",
+			sql:  `SELECT CAST(c_date AS STRING) AS v FROM typemx WHERE id = 1`,
+			want: []string{"v=2011-02-02"}},
 	}
 }
 
@@ -357,8 +422,17 @@ func TestArcAEverydaySQLMatchesPostgres(t *testing.T) {
 			// digest in benchmarks/tpch, not here.
 			want := append([]string(nil), tc.want...)
 			sort.Strings(want)
+			wantOnDAG := want
+			if tc.wantDAG != nil {
+				wantOnDAG = append([]string(nil), tc.wantDAG...)
+				sort.Strings(wantOnDAG)
+			}
 			check := func(arm string, got []string, err error) {
 				t.Helper()
+				want := want
+				if strings.HasPrefix(arm, "dag") {
+					want = wantOnDAG
+				}
 				if tc.wantErrLike != "" {
 					wantErr := tc.wantErrLike
 					if tc.wantErrLikeDAG != "" && strings.HasPrefix(arm, "dag") {

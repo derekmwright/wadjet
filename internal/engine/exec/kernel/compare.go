@@ -1962,6 +1962,16 @@ func likeTextRenderer(typ batch.TypeID) func(*batch.Vector, int) string {
 		return func(v *batch.Vector, i int) string { return likeFormatMAC(uint64(v.Int64Data[i])) }
 	case batch.TypePort, batch.TypeProtocol:
 		return func(v *batch.Vector, i int) string { return strconv.Itoa(int(v.Int32Data[i])) }
+	case batch.TypeTimestamp:
+		// The default arm below renders through Vector.GetValue, which is
+		// right for DATE (it formats) and wrong for TIMESTAMP (it keeps the
+		// raw epoch-ms int64, deliberately — five compute paths read it as a
+		// number). So `c_ts LIKE '2023%'` matched the DIGITS of
+		// 1700000000000 and was false for 2023-11-14, on the single-process
+		// path only: the DAG's filter goes through expr.Like, which renders
+		// from the declared type. Two implementations of one rule, and this
+		// is the second one (#544).
+		return func(v *batch.Vector, i int) string { return batch.FormatTimestamp(v.Int64Data[i]) }
 	case batch.TypeIPv6:
 		return func(v *batch.Vector, i int) string {
 			raw := v.BytesData.Value(i)

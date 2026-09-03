@@ -1047,8 +1047,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     claim now holds for every flat type PostgreSQL gives wadjet a printed
     form to agree on, verified against live PostgreSQL 17: `date::text` and
     a `real` column's `::text` match wadjet's rendering exactly.
-    `wadjet.TestCastStringAgreesWithProjectionAcrossFixture` sweeps DATE and
-    FLOAT32 across the type-matrix fixture; item 11 below records LIKE's own
+    `wadjet.TestCastStringAgreesWithPostgresAcrossFixture` sweeps every flat
+    type across the type-matrix fixture; item 11 below records LIKE's own
     sweep, `wadjet.TestLikeAnswersTheSameAtBothSites`, which already covered
     every flat type and is what caught FLOAT32 for LIKE in the first place.)
 
@@ -1154,9 +1154,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     these would need to take, and it is one check for all of them precisely
     because the column's declaration is known before any type's differing
     runtime code path matters. (Unrelated to this pair, and mentioned only
-    because it was found alongside them and is not fixed here either: #544,
-    `CAST(timestamp AS STRING)` and LIKE render epoch milliseconds rather
-    than the instant pgwire renders.)
+    because it was found alongside them: #544, where `CAST(timestamp AS
+    STRING)` and LIKE rendered epoch milliseconds rather than the instant
+    pgwire renders. That one is FIXED — see the amendment at the end of item
+    11 — and this sentence is left in place only so the pairing that found it
+    still reads.)
 
     **Item 6's PLAN-TIME refusal has the identical gap, for the identical
     structural reason.** (Added 2026-08-25, #579.) `checkLiteralTypes`/
@@ -1242,7 +1244,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     which still agree; the additional claim that CAST agrees with LIKE holds
     for every flat type EXCEPT this one, and only because PostgreSQL breaks
     it first. `wadjet.TestCastStringPinsPostgresRenderingPerType` pins the
-    hex spelling and `TestCastStringAgreesWithProjectionAcrossFixture` builds
+    hex spelling and `TestCastStringAgreesWithPostgresAcrossFixture` builds
     the BYTES expectation from the projected bytes rather than from CAST, so
     an implementation and a comparator agreeing on the same wrong hex still
     fail.
@@ -1287,6 +1289,56 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     through a derived value (#583, `ByteaTextFunctionOverBytes` and
     `ByteaConcat`). `OCTET_LENGTH` over bytea declares float8 for #530's
     reason, unrelated to this type.
+
+    **A TIMESTAMP renders its INSTANT through CAST and LIKE.** (Amended
+    2026-09-02, #544.) The paragraph above says the text is "the value's own
+    printed form — `Vector.GetValue`'s rendering … epoch MILLISECONDS for a
+    TIMESTAMP". That sentence recorded the defect as the rule. `GetValue`
+    keeps a TIMESTAMP as its raw epoch-ms int64 deliberately — it is also
+    the GROUP BY key, the aggregate and window spill row encoding, the
+    window comparator, and the row map an UPDATE re-ingests — but that box
+    is a COMPUTE form, not a display one, and pgwire has converted it to
+    PostgreSQL's `timestamp` on the way out since #321. So one column
+    answered `2023-11-14 22:13:20` when projected over the wire and
+    `1700000000000` when CAST, on one connection. Both text sites now render
+    from the DECLARED type instead: `expr.boxedTextOperand` (CAST and the
+    row-path LIKE) and `kernel.likeTextRenderer` (the single-process LIKE
+    kernel, whose default arm was that `GetValue` call — which is why
+    `c_ts LIKE '2023%'` was false on the single-process path and true on the
+    DAG). `Vector.GetValue` is unchanged, and so is the embedded API's int64
+    box for a projected TIMESTAMP: that is a third question — what the Go
+    API hands back — bounded by the same five consumers, and not this one.
+
+    **A SUB-SECOND timestamp is PADDED to three digits, and that is a
+    recorded divergence.** (Added 2026-09-02 by the review of #544.)
+    PostgreSQL prints the MINIMAL fraction — verified live,
+    `('2023-11-14 22:13:20.500'::timestamp)::text` is
+    `2023-11-14 22:13:20.5` and `.250` prints `.25` — while
+    `batch.FormatTimestamp` always prints three. It is the same function
+    pgwire's send path calls, so the padding is what a CLIENT sees, not only
+    what CAST answers: the divergence is on the WIRE and the two are
+    consistent with each other, which is the property #544 was about.
+    Keeping it is a choice about a rendering, and it is recorded rather than
+    quietly true: every `c_ts` in the type-matrix fixture is a whole second,
+    so the sweep that claims "CAST agrees with PostgreSQL" never reaches the
+    branch where it does not. `wadjet.TestCastTimestampSubSecondIsPaddedToMilliseconds`
+    pins it on its own two-row fixture and fails the day the padding goes;
+    `pgTextOf` in the same file answers PostgreSQL's minimal form, so the
+    sweep's reference is PostgreSQL's rule and not the implementation's.
+
+    **DURATION is NOT fixed, and the reason is a type-model gap rather than
+    an omission.** `CAST(c_dur AS STRING)` answers the raw nanosecond count
+    (`1000000`) where PostgreSQL's `interval` — the type wadjet's DDL accepts
+    as a synonym for DURATION — answers `00:00:00.001`. It is left alone
+    because wadjet has no canonical TEXT for the type for a CAST to agree
+    with: `pgTypeOID` maps DURATION to OID 25 (text) and the send path writes
+    the nanosecond count, `docs/sql-reference.md` documents the type as
+    "integer nanoseconds", and the INSERT coercion reads one. Rendering only
+    the CAST would make the same column answer two ways again — precisely the
+    defect this amendment closes for TIMESTAMP, re-opened one type over.
+    Closing it means choosing DURATION's text form ONCE and moving the wire
+    (OID 1186), the send path, the row reader, the INSERT coercion and the
+    reference doc together. That is a lead, not a CAST-site fix.
 
 12. **A set operation's result type is the COMMON type of its arms, and every
     arm is MOVED into it — never reinterpreted.** (Added 2026-08-25, #533.)
