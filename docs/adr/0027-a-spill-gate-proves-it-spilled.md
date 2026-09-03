@@ -80,6 +80,22 @@ Mechanisms, each with its instrumented evidence in the commit body:
    BOTH sides of a comparison cancels the defect — #790 was nearly missed
    that way.
 
+7. **A TOLERANCE in a spill gate ratchets, exactly like a pin.** `knownBug`
+   and `knownError` already fail their cell when the pinned state stops
+   reproducing — deleting the pin is the fix's proof. `budgetMayRefuse`, the
+   sweep's third tolerance, did not: a cell could answer on every
+   replication for release after release, and the tolerance — with the
+   larger budget that came with it — would quietly outlive the defect that
+   justified them. It now fails a cell that answers on every run, naming
+   what to delete (#824). The threshold is the pins' own
+   (`spillMxRatchetMinRuns`), because what is tolerated is itself
+   nondeterministic: "no run refused" is evidence at full replication and a
+   coin toss at one.
+
+   The eighteen `join_group_by_*` cells that carried it were tolerating
+   #789's moving floor. All eighteen answer on every run at
+   `spillMxJoinBudget`, so none of them carries the tolerance any more.
+
 ## Alternatives rejected
 
 - Demoting to the keyed merge whenever a flush happened (#782 candidate b):

@@ -50,12 +50,15 @@ import (
 //     nondeterminism class 9, not a defect. Every other type, DECIMAL
 //     included, is compared exactly.
 //   - A cell marked budgetMayRefuse accepts "memory budget exceeded" as an
-//     outcome, because at 512 KiB the scan's own file load already holds
-//     ~460 KiB and the join build legitimately has nowhere to go. A loud
-//     refusal is the right answer to a budget that small (ADR-0006); a WRONG
-//     answer is not, so the comparison still runs on the runs that answered,
-//     and a cell where NO run answered fails as vacuous. That the refusal is
-//     nondeterministic at a fixed budget is filed as #789.
+//     outcome, because a loud refusal is the right answer to a budget too
+//     small for the shape (ADR-0006); a WRONG answer is not, so the comparison
+//     still runs on the runs that answered, and a cell where NO run answered
+//     fails as vacuous. This tolerance RATCHETS like the other two (#824): a
+//     cell that ANSWERS on every replication fails, naming the tolerance to
+//     delete. NO CELL CARRIES IT TODAY — the eighteen join cells that did were
+//     tolerating #789's nondeterministic refusal, and every one of them answers
+//     on every run at the budget it runs at. The field and its ratchet stay for
+//     the next shape that needs one.
 //   - A cell with a knownBug is compared and its divergence logged instead of
 //     failed, and it FAILS IF IT STARTS AGREEING — the ADR-0013 ratchet, so
 //     the pin cannot outlive its bug.
@@ -115,11 +118,12 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 				prevKnob := exec.ForceAggDrainEvery(cell.forceDrainEvery)
 				defer exec.ForceAggDrainEvery(prevKnob)
 			}
-			answered, agreed := 0, 0
+			answered, agreed, refused := 0, 0, 0
 			for run := 0; run < spillMxRuns(); run++ {
 				got, err := tmRun(ctx, arm, cell.sql)
 				if err != nil {
 					if cell.budgetMayRefuse && strings.Contains(err.Error(), "memory budget exceeded") {
+						refused++
 						continue // a loud refusal, see the doc comment
 					}
 					if cell.knownError != "" && strings.Contains(err.Error(), cell.knownError) {
@@ -213,6 +217,30 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 						cell.knownBug, answered, cell.sql)
 				}
 			}
+			// The SAME ratchet for budgetMayRefuse (#824). knownBug and
+			// knownError both fail the cell when the pinned state stops
+			// reproducing; budgetMayRefuse did not, so a cell could answer on
+			// every replication for release after release with the tolerance —
+			// and the budget it was moved to — quietly outliving the defect
+			// that justified them. A tolerance nothing checks is indisting-
+			// uishable from a tolerance nothing needs.
+			//
+			// The threshold is the knownBug ratchet's, for the same reason:
+			// the refusal being tolerated here is NONDETERMINISTIC (#789 — 2
+			// of 20 at 512 KiB), so "no run refused" is evidence at the full
+			// replication count and a coin toss at one.
+			if cell.budgetMayRefuse && refused == 0 {
+				if answered < spillMxRatchetMinRuns {
+					t.Logf("marked budgetMayRefuse and all %d budgeted run(s) answered — too few runs to tell a "+
+						"stale tolerance from a lucky sample of a nondeterministic refusal, so the ratchet is not "+
+						"fired here; the full-replication arm decides", answered)
+				} else {
+					t.Fatalf("marked budgetMayRefuse, but all %d budgeted runs ANSWERED at %d KiB — delete "+
+						"budgetMayRefuse from this cell, and if it also carries joinBudget move it back to "+
+						"spillMxBudget; that it answers is the fix's proof\n  SQL: %s",
+						answered, budget/1024, cell.sql)
+				}
+			}
 		})
 	}
 
@@ -241,9 +269,10 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 }
 
 // The two budgets. spillMxBudget is where the arc's four defects live. The
-// join shape needs its own: at 512 KiB the scan's file load alone holds
-// ~460 KiB, so the build has nowhere to go and refuses outright for the wide
-// byte-array columns — the query never reaches the replay the cell is for.
+// join family needs its own: at 512 KiB the scan's whole-file buffer alone
+// holds ~460 KiB of it, and for the widest keys the build's demand lands on
+// the budget rather than under it, so the query never reaches the replay the
+// cell is for.
 const (
 	spillMxBudget     int64 = 512 * 1024
 	spillMxJoinBudget int64 = 1024 * 1024
@@ -263,7 +292,9 @@ type spillMxCell struct {
 	// ordered: the query's own ORDER BY decides row order, so do not sort.
 	ordered bool
 	// budgetMayRefuse: a loud "memory budget exceeded" is an accepted outcome
-	// for this shape at this budget.
+	// for this shape at this budget. Ratchets in the direction a tolerance
+	// needs it (#824): every budgeted run ANSWERING fails the cell, because a
+	// tolerance that is never exercised is a tolerance nothing needs.
 	budgetMayRefuse bool
 	// joinBudget: run this cell at spillMxJoinBudget instead.
 	joinBudget bool
@@ -388,7 +419,14 @@ func spillMxCells() []spillMxCell {
 			`SELECT id, %[1]s AS v, ROW_NUMBER() OVER (ORDER BY %[1]s, id) AS r FROM %[2]s ORDER BY id`, n, tbl)})
 		// HashJoin grace partitioning BELOW the aggregate: the spilled probe
 		// partitions replay after the workers finish, which is #782 itself.
-		add(spillMxCell{name: "join_group_by_" + n, budgetMayRefuse: true, joinBudget: true, sql: fmt.Sprintf(
+		//
+		// These eighteen cells carried budgetMayRefuse, tolerating #789's
+		// nondeterministic refusal. With the tolerance ratcheting they were
+		// measured: at spillMxJoinBudget all eighteen answer on all five runs,
+		// so the tolerance is gone and a refusal here now fails the gate.
+		// Whether the BUDGET they run at is still needed is a separate
+		// question, and it gets its own ratchet in #789's commit.
+		add(spillMxCell{name: "join_group_by_" + n, joinBudget: true, sql: fmt.Sprintf(
 			`SELECT z.%[1]s AS k, COUNT(*) AS n FROM %[2]s x JOIN %[2]s z ON x.id = z.id GROUP BY z.%[1]s`, n, tbl)})
 		// MIN/MAX as an aggregate INPUT for every ordered type, grouped by a
 		// nullable key so the key-path migration runs underneath. GROUP BY g is
