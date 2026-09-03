@@ -558,6 +558,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      no comparator or key ever meets one.
    - **A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.** (Closed #617.) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k WHERE ...` references a sibling of the comma join in its ON clause. PostgreSQL 17 rejects this with "invalid reference to FROM-clause entry"; wadjet answers it, matching DuckDB. This is a strict SUPERSET: errors on PostgreSQL, runs on wadjet; not a value divergence and not a wire-protocol violation. Gated against DuckDB and the two-path oracle (PostgreSQL offers no value to assert). #593 fixed the prior silent-zero wrong answer in this shape. The reject-like-PostgreSQL alternative was considered and declined because no client should rely on the error and the planner lacks the ON-scope validation it would require.
 
+   - **An aggregate of the OUTER level inside a subquery's WHERE is refused;
+     PostgreSQL accepts it.** (Added 2026-09-03, #809.) `HAVING (SELECT MAX(k)
+     FROM dim d WHERE d.k = SUM(t.g)) > 0` is legal SQL — the aggregate
+     belongs to the enclosing query's grouped level — and PostgreSQL 17
+     answers it. This engine has never answered it on any path: the subquery
+     is re-run standalone and its own level-local placement rule fires, since
+     nothing at that site holds the outer scope. It is a LOWERING gap and it
+     is LOUD (42803, PostgreSQL's own SQLSTATE and message), not a wrong
+     value, and it is recorded here so the next reader does not mistake the
+     refusal for a decision. The plan-time rule added by #809 is deliberately
+     written so it does NOT reach this shape — it refuses only an aggregate
+     that names no relation outside the subquery's own FROM — so nothing that
+     could one day answer is refused earlier because of it. Pinned as
+     `boundary_outer_level_aggregate_inside_a_subquery_is_refused` in the
+     correlation census; the day it answers, the pin fails.
+
    - **An EXACT decimal operator raises where PostgreSQL answers, past the
      carrier.** (Added 2026-09-02, #749.) `+ - * %` keep PostgreSQL's scale
      and cap the precision at 38 (ADR-0024 §3's 2026-09-02 amendment), so a

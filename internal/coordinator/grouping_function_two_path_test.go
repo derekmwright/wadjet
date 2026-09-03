@@ -305,18 +305,17 @@ func TestAggregatePlacementMatchesPostgres(t *testing.T) {
 //
 // Why they are not fixed here:
 //
-//   - (a) HALF-LIFTED 2026-09-02. The refusal was never lost by the placement
-//     scan, which deliberately does not descend into a subquery (a subquery is
-//     its own level, and `WHERE h > (SELECT AVG(h) FROM t)` is ordinary SQL) —
-//     the INNER statement on its own has always been refused correctly. What
-//     lost it was the CONSUMER: `ScalarSubquery.resolveSlow` folded the run's
-//     failure into a NULL value, so the comparison read UNKNOWN and the query
-//     answered zero rows with no error anywhere. #734/#679/#535's consumer
-//     half made that FAIL instead, and `SubqueryRunFailedError` reports the
-//     wrapped failure's SQLSTATE — so the SINGLE-PROCESS arm now raises
-//     PostgreSQL's own 42803 and is ASSERTED below rather than pinned. The DAG
-//     arm still refuses for an unrelated reason and with no SQLSTATE (its
-//     filter compiler has no subquery runner), and that half stays pinned.
+//   - (a) LIFTED 2026-09-03 (#809's DAG half). It was half-lifted the day
+//     before: `ScalarSubquery.resolveSlow` had folded the run's failure into a
+//     NULL value, so the comparison read UNKNOWN and the query answered zero
+//     rows with no error anywhere; #734/#679/#535's consumer half made that
+//     FAIL, which gave the SINGLE-PROCESS arm PostgreSQL's own 42803 while the
+//     DAG arm still refused for an unrelated reason and with no SQLSTATE. The
+//     placement rule now reaches into a SUBQUERY's own level
+//     (`checkSubqueryAggregatePlacement`), so BOTH arms raise 42803 at PLAN
+//     TIME and the shape is asserted below rather than pinned. Its boundary —
+//     an aggregate inside a subquery that belongs to the OUTER level, which
+//     PostgreSQL accepts — is a fixture in the correlation census.
 //   - (b) `col.IsWindow` skips the whole column, which is broader than
 //     PostgreSQL's rule: a window function OVER an aggregate is legal, but a
 //     nested aggregate inside one is not. Scanning the window call's ARGUMENT
@@ -335,28 +334,30 @@ func TestAggregatePlacementBoundaryPins(t *testing.T) {
 	const scalarSub = "SELECT g FROM collslot WHERE h > " +
 		"(SELECT AVG(x.h) FROM collslot x WHERE SUM(x.h) > 0) GROUP BY g"
 
-	// GATED, not pinned: PostgreSQL 17.11 raises 42803 here and so does the
-	// single-process engine. It answered zero rows in silence until the
-	// scalar-subquery consumer stopped folding a failed run into NULL.
-	if _, err := tmdRunSingle(ctx, single, scalarSub); err == nil {
-		t.Errorf("pin (a) single: answered, where PostgreSQL 17.11 raises 42803 "+
-			"`aggregate functions are not allowed in WHERE`\n  SQL: %s", scalarSub)
-	} else {
+	// GATED on BOTH arms: PostgreSQL 17.11 raises 42803 here and so does this
+	// engine, at plan time, since the placement rule reaches a subquery's own
+	// level. The DAG arm is the half #809 was filed for: it used to fail in
+	// the worker's filter compiler with "subqueries require a SubqueryRunner"
+	// and no SQLSTATE at all.
+	for _, arm := range []struct {
+		name string
+		run  func(string) (*oracle.Result, error)
+	}{
+		{"single", func(sql string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
+		{"dag", func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
+	} {
+		_, err := arm.run(scalarSub)
+		if err == nil {
+			t.Errorf("%s: answered, where PostgreSQL 17.11 raises 42803 "+
+				"`aggregate functions are not allowed in WHERE`\n  SQL: %s", arm.name, scalarSub)
+			continue
+		}
 		if got := sqlerr.StateOf(err); got != "42803" {
-			t.Errorf("pin (a) single: SQLSTATE %q, want 42803\n  %v", got, err)
+			t.Errorf("%s: SQLSTATE %q, want 42803\n  %v", arm.name, got, err)
 		}
 		if !strings.Contains(err.Error(), "aggregate functions are not allowed in WHERE") {
-			t.Errorf("pin (a) single: %v\n  want the inner statement's own refusal", err)
+			t.Errorf("%s: %v\n  want the inner statement's own refusal", arm.name, err)
 		}
-	}
-
-	// The DAG arm refuses it, but for an unrelated reason and with no
-	// SQLSTATE — the filter compiler has no subquery runner. Loud, not wrong,
-	// and not the placement rule.
-	if _, err := tmdRunDAG(ctx, coord, scalarSub); err == nil {
-		t.Errorf("TODO(#809) pin (a) dag: now answers; it used to fail in the filter compiler")
-	} else if got := sqlerr.StateOf(err); got != "" {
-		t.Errorf("TODO(#809) pin (a) dag: now carries SQLSTATE %q — check whether it is 42803 and lift the pin", got)
 	}
 
 	// (b) A nested aggregate inside a WINDOW column, which the IsWindow skip

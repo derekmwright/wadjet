@@ -51,11 +51,18 @@ type arcD5Cell struct {
 }
 
 func arcD5Cells() []arcD5Cell {
-	return append(append(append(
+	var out []arcD5Cell
+	for _, group := range [][]arcD5Cell{
 		arcD5CTEScopeCells(),
-		arcD5TypedRerunCells()...),
-		arcD5NotInCells()...),
-		arcD5AggregateArgumentCells()...)
+		arcD5TypedRerunCells(),
+		arcD5NotInCells(),
+		arcD5AggregatePlacementCells(),
+		arcD5FailedSubquerySetCells(),
+		arcD5AggregateArgumentCells(),
+	} {
+		out = append(out, group...)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +308,125 @@ func arcD5NotInCells() []arcD5Cell {
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
 				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 3)`,
 			want: []string{"n=int64:5"}},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #809's DAG half, and the silent shape beside it — an aggregate in a
+// SUBQUERY's own WHERE.
+//
+// The placement rule is level-local and deliberately does not descend into a
+// subquery: a subquery is its own level, and `WHERE h > (SELECT AVG(h) FROM
+// t)` is ordinary SQL. What that left uncovered is the subquery's OWN level,
+// which nothing else reaches when the planner takes the subquery APART rather
+// than running it. A decorrelated IN builds its inner plan straight from the
+// parsed subquery, so `SUM(b.w_i32) > 0` reached a Filter and the whole
+// predicate answered every row — 10 of 10, in silence, on all four arms,
+// where PostgreSQL 17 raises 42803. The EXISTS spelling is the same.
+//
+// #809's own shape is the loud half of the same gap: the single-process arm
+// raised PostgreSQL's 42803 (its Runner plans the subquery, and the rule
+// fires there) while the DAG arm failed in the worker's filter compiler with
+// "subqueries require a SubqueryRunner" and no SQLSTATE at all.
+func arcD5AggregatePlacementCells() []arcD5Cell {
+	const pgSays = "42803 `aggregate functions are not allowed in WHERE`"
+	return []arcD5Cell{
+		{issue: "#809", name: "aggregate_in_a_decorrelated_not_in_subquery_where",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE SUM(b.w_i32) > 0)`,
+			wantErrLike: "aggregate functions are not allowed in WHERE",
+			pgSays:      pgSays + " — this answered 10 of 10 rows in silence"},
+		{issue: "#809", name: "aggregate_in_a_decorrelated_in_subquery_where",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE SUM(b.w_i32) > 0)`,
+			wantErrLike: "aggregate functions are not allowed in WHERE", pgSays: pgSays},
+		{issue: "#809", name: "aggregate_in_a_decorrelated_exists_subquery_where",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM numwidth b WHERE SUM(b.w_i32) > 0 AND b.w_key = a.w_key)`,
+			wantErrLike: "aggregate functions are not allowed in WHERE", pgSays: pgSays},
+		{issue: "#809", name: "aggregate_in_a_scalar_subquery_where_is_loud_on_the_dag_too",
+			sql: `SELECT g FROM gcov WHERE h > (` +
+				`SELECT AVG(x.h) FROM gcov x WHERE SUM(x.h) > 0) GROUP BY g`,
+			wantErrLike: "aggregate functions are not allowed in WHERE",
+			pgSays:      pgSays + " — the DAG arm used to fail with no SQLSTATE at all"},
+		// The two spellings that carry no relation qualifier. They were
+		// equally silent before and are refused now: the rule asks whether an
+		// aggregate names a relation the subquery does NOT provide, not
+		// whether every reference is one of its own — see
+		// logical.checkSubqueryAggregatePlacement for why that way round.
+		{issue: "#809", name: "count_star_in_a_subquery_where",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE COUNT(*) > 0)`,
+			wantErrLike: "aggregate functions are not allowed in WHERE", pgSays: pgSays},
+		{issue: "#809", name: "unqualified_aggregate_in_a_subquery_where",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE SUM(w_i32) > 0)`,
+			wantErrLike: "aggregate functions are not allowed in WHERE", pgSays: pgSays},
+		// THE BOUNDARY, pinned rather than described. An aggregate inside a
+		// subquery may belong to the OUTER level, and PostgreSQL ACCEPTS it —
+		// this query answers one row there. This engine refuses it on every
+		// arm, at this arc's base and at its tip alike: the subquery is
+		// re-run standalone and the level-local rule fires at ITS level, with
+		// no outer scope to say the aggregate is not its own. That is a
+		// LOWERING gap, not a semantic decision, and the plan-time rule is
+		// deliberately written so it does not reach this shape — nothing that
+		// could one day answer is refused earlier because of it. The day it
+		// answers `g=int32:1|n=int64:7`, this pin FAILS.
+		{issue: "#809", name: "boundary_outer_level_aggregate_inside_a_subquery_is_refused",
+			sql: `SELECT g, COUNT(*) AS n FROM typemx WHERE id < 50 GROUP BY g ` +
+				`HAVING (SELECT MAX(d.k) FROM typemx_dim d WHERE d.k = SUM(typemx.g)) > 0 ORDER BY g`,
+			wantErrLike:    "could not be executed",
+			wantCorrRoutes: 1,
+			pgSays:         "one row, g=1 n=7 — an aggregate of the OUTER level is legal inside a subquery"},
+		// The controls: a subquery whose aggregate is in the SELECT list (the
+		// ordinary shape the level-local scope exists for) and an ordinary
+		// inner-only predicate. Both must keep answering, or the new descent
+		// has refused legal SQL.
+		{issue: "#809", name: "control_aggregate_in_a_subquery_select_list",
+			sql:  `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i64 > (SELECT AVG(b.w_i64) FROM numwidth b)`,
+			want: []string{"n=int64:1"}},
+		{issue: "#809", name: "control_ordinary_inner_predicate",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 3)`,
+			want: []string{"n=int64:3"}},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #601 — a failed IN-subquery is not an EMPTY set.
+//
+// `InSubquery.resolveSlow` set `emptySet = true` on a subquery ERROR as well
+// as on a genuinely empty result, and #550/#571 had made `emptySet` decide
+// NULL-keyed probe rows (`x IN (empty)` = FALSE, `x NOT IN (empty)` = TRUE,
+// which is correct for a REAL empty set) — so a subquery that FAILED silently
+// decided those rows where it previously returned UNKNOWN.
+//
+// The mechanism was fixed by v0.18.16's consumer half (844b502b): the run's
+// error now raises `SubqueryRunFailedError` before `emptySet` is ever
+// computed. It had no regression test of its own, which the issue asks for,
+// and these are it — an IN and a NOT IN whose subquery cannot be run, over a
+// column that holds NULLs, so the rows the conflation used to decide are in
+// the fixture.
+func arcD5FailedSubquerySetCells() []arcD5Cell {
+	return []arcD5Cell{
+		{issue: "#601", name: "failed_in_subquery_is_not_an_empty_set",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE SUM(b.w_i32) > 0)`,
+			wantErrLike: "aggregate functions are not allowed in WHERE",
+			pgSays: "42803 — and the rows this decided are numwidth's NULL-keyed ones, " +
+				"which `x IN (empty)` would have answered FALSE for"},
+		{issue: "#601", name: "failed_not_in_subquery_is_not_an_empty_set",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE SUM(b.w_i32) > 0)`,
+			wantErrLike: "aggregate functions are not allowed in WHERE",
+			pgSays:      "42803 — `x NOT IN (empty)` would have answered TRUE for every one of them"},
+		// The control: a REAL empty set still decides those rows, which is
+		// the behaviour #550/#571 added and this must not undo.
+		{issue: "#601", name: "control_a_genuinely_empty_set_still_decides_null_keys",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 0)`,
+			want:   []string{"n=int64:10"},
+			pgSays: "10 — every row, NULL-keyed ones included, because the list is empty"},
 	}
 }
 
