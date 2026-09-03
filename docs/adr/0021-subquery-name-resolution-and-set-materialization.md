@@ -334,8 +334,25 @@ own answers over the same rows, on four arms. The counts differ per type (29,
 
 This does not make the shape distributed: a derived-table inner is still a
 decline, so both DAG arms route it to the coordinator-local pipeline
-(`CorrelatedLocalRoutes` 1, asserted). Decorrelating THROUGH a derived-table
-inner is a producer repair and is not attempted here.
+(`CorrelatedLocalRoutes` 1, asserted). `innerRelationsAreScannable` declines it
+because the decorrelations build their inner plan with
+`NewScan(info.Tables[0].Name, …)` and a derived table has no table name to
+scan. Decorrelating THROUGH one is a producer repair — build the inner plan
+from the derived table's own SQL and let `repairDecorrelatedSpelling` model
+what that subtree emits — and it is not attempted here.
+
+**What the fallback costs, measured while building this gate.** A re-run
+scans the inner relation again for every outer row, and those re-runs execute
+inside the OUTER query's memory tracker without releasing their scan
+reservations. Under a 512 KiB budget `used` climbs to about 1.7× the budget
+and STAYS there, so every subsequent `scan file load` is FORCED past the
+budget (ADR-0006's escape hatch) and pays roughly two seconds — 295 forced
+reservations in ten minutes over the type-matrix fixture, about five minutes
+for one per-type cell against 0.71 s for the same cell with no budget. The
+fallback is not merely slower than a join; under a memory budget it degrades
+superlinearly, and that is the strongest argument for the repair above. The
+tracker half of it belongs to the re-run's memory lifetime, not to the
+correlation model.
 
 ### 1f. A correlated NOT IN is not an anti join
 
