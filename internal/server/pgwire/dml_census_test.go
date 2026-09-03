@@ -286,25 +286,26 @@ func censusShapes() []censusShape {
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
 				"WHEN MATCHED AND CASE WHEN s.n > 1 THEN true ELSE false END THEN DELETE",
 			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
-			emb: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#722"},
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
 		{name: "#722 CASE in the UPDATE SET action", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
 				"WHEN MATCHED THEN UPDATE SET n = CASE WHEN s.n > 50 THEN 1 ELSE 2 END",
 			pg:  "tag=MERGE 1 table=[1:1:a 2:20:b 3:30:c]",
-			emb: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#722"},
+			emb: "tag=MERGE 1 table=[1:1:a 2:20:b 3:30:c]"},
 		{name: "#722 CASE in the INSERT VALUES action", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
 				"WHEN NOT MATCHED THEN INSERT (id, n, name) VALUES (s.id, CASE WHEN s.n > 50 THEN 1 ELSE 2 END, s.name)",
 			pg:  "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:1:y]",
-			emb: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#722"},
+			emb: "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:1:y]"},
+		// The ON scan no longer truncates this, so the statement now reaches
+		// the executor — where MERGE's ON is equality-between-the-two-relations
+		// and nothing else, and says so with 0A000. The residual is that
+		// restriction, not the parser's.
 		{name: "#722 CASE in the ON condition", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s " +
 				"ON CASE WHEN t.id = s.id THEN true ELSE false END WHEN MATCHED THEN DELETE",
 			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
-			emb: "state=42601 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
 			bug: "#722"},
 		{name: "control merge AND condition without a CASE", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id WHEN MATCHED AND s.n > 1 THEN DELETE",

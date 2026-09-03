@@ -1554,16 +1554,8 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 	}
 	l.nextToken()
 
-	// Read condition until WHEN
-	condStart := l.pos
-	for {
-		pk := l.peekToken()
-		if pk.typ == TokenKWWhen || pk.typ == TokenEOF {
-			break
-		}
-		l.nextToken()
-	}
-	info.OnCondition = strings.TrimSpace(l.input[condStart:l.pos])
+	// Read condition until the clause's own WHEN — not a CASE expression's.
+	info.OnCondition = scanMergeClauseUntil(l, TokenKWWhen)
 
 	// Parse WHEN clauses
 	for l.peekToken().typ == TokenKWWhen {
@@ -1602,27 +1594,10 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 				"MERGE: WHEN NOT MATCHED BY %s is not supported", strings.ToUpper(side.val))
 		}
 
-		// Optional AND condition.
-		//
-		// The scan ends at the FIRST THEN with no nesting state, so a CASE
-		// expression in the condition is cut at the CASE's own THEN and the
-		// rest is read as the clause's action: `AND CASE WHEN s.n > 1 THEN
-		// true ELSE false END THEN DELETE` fails with "expected UPDATE,
-		// DELETE, or INSERT after THEN", naming the action rather than the
-		// condition. PostgreSQL runs it. Fixing it needs CASE/END depth here
-		// and in the action scan below (wadjet#722); it is pre-existing and
-		// deliberately left alone by #686.
+		// Optional AND condition, scanned to the clause's own THEN.
 		if l.peekToken().typ == TokenKWAnd {
 			l.nextToken()
-			andStart := l.pos
-			for {
-				pk := l.peekToken()
-				if pk.typ == TokenKWThen || pk.typ == TokenEOF {
-					break
-				}
-				l.nextToken()
-			}
-			clause.Condition = strings.TrimSpace(l.input[andStart:l.pos])
+			clause.Condition = scanMergeClauseUntil(l, TokenKWThen)
 		}
 
 		// THEN
@@ -1637,31 +1612,15 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		case TokenKWUpdate:
 			l.nextToken()
 			clause.Action = "UPDATE"
-			// Read until next WHEN or EOF
-			sqlStart := l.pos
-			for {
-				pk := l.peekToken()
-				if pk.typ == TokenKWWhen || pk.typ == TokenEOF || pk.typ == TokenSemicolon {
-					break
-				}
-				l.nextToken()
-			}
-			clause.SQL = strings.TrimSpace(l.input[sqlStart:l.pos])
+			// Read until the next clause's WHEN — not a CASE's.
+			clause.SQL = scanMergeClauseUntil(l, TokenKWWhen, TokenSemicolon)
 		case TokenKWDelete:
 			l.nextToken()
 			clause.Action = "DELETE"
 		case TokenKWInsert:
 			l.nextToken()
 			clause.Action = "INSERT"
-			sqlStart := l.pos
-			for {
-				pk := l.peekToken()
-				if pk.typ == TokenKWWhen || pk.typ == TokenEOF || pk.typ == TokenSemicolon {
-					break
-				}
-				l.nextToken()
-			}
-			clause.SQL = strings.TrimSpace(l.input[sqlStart:l.pos])
+			clause.SQL = scanMergeClauseUntil(l, TokenKWWhen, TokenSemicolon)
 		default:
 			return nil, fmt.Errorf("MERGE: expected UPDATE, DELETE, or INSERT after THEN")
 		}
@@ -1674,6 +1633,56 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		SQL:   sql,
 		Merge: info,
 	}, nil
+}
+
+// scanMergeClauseUntil consumes input up to the next stop token that is at
+// DEPTH ZERO — outside every parenthesis and every CASE … END — and returns
+// the raw text it consumed.
+//
+// All four of a MERGE's scans used to stop at the first stop token whatever
+// its nesting, and a CASE expression carries the very keywords they stop on
+// (#722):
+//
+//	ON        stops at WHEN   broken by `ON CASE WHEN … END`
+//	AND       stops at THEN   broken by `AND CASE … THEN … END`
+//	THEN UPDATE SET  at WHEN  broken by `SET n = CASE WHEN … END`
+//	THEN INSERT …    at WHEN  broken by `VALUES (CASE WHEN … END)`
+//
+// The issue names the first two. A fix that patched only those would leave
+// `ON` and `THEN INSERT` broken, which is why all four go through one
+// function: the nesting rule is a property of a MERGE clause, not of one
+// clause position.
+//
+// The pattern is collectUntil's (dml_parser.go): the stop test is
+// `depth == 0 && stop`, never `stop` alone, and EOF breaks unconditionally so
+// an unbalanced `(` or a CASE with no END cannot spin at depth > 0 forever —
+// FuzzParseSQL found that shape once already.
+func scanMergeClauseUntil(l *lexer, stop ...TokenType) string {
+	stopAt := make(map[TokenType]bool, len(stop))
+	for _, t := range stop {
+		stopAt[t] = true
+	}
+	start := l.pos
+	depth := 0
+	for {
+		pk := l.peekToken()
+		if pk.typ == TokenEOF {
+			break
+		}
+		if depth == 0 && stopAt[pk.typ] {
+			break
+		}
+		switch pk.typ {
+		case TokenLParen, TokenKWCase:
+			depth++
+		case TokenRParen, TokenKWEnd:
+			if depth > 0 {
+				depth--
+			}
+		}
+		l.nextToken()
+	}
+	return strings.TrimSpace(l.input[start:l.pos])
 }
 
 // isClauseKeyword returns true if a token is a clause-level keyword.

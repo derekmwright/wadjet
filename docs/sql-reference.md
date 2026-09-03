@@ -1640,6 +1640,7 @@ expression.
 - `JOIN ... USING (col)` — not parsed; write `ON a.col = b.col`
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
+- A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000
 - `RANGE` window frames with a value offset, and the `GROUPS` frame mode
 - `SELECT DISTINCT ON (...)`
 - An ORDERING quantifier over a subquery — `x < ALL (SELECT ...)`, `x > ANY (SELECT ...)` — SQLSTATE 0A000. The equality forms are supported: `= ANY` / `= SOME` over a subquery is `IN`, and `<> ALL` is `NOT IN`.
