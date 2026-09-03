@@ -107,6 +107,24 @@ const (
 	boxInt64
 	boxFloat32
 	boxFloat64
+	// boxTimestamp/boxDate: values from here are TEMPORAL, and the two are
+	// separate kinds because they are separate DOMAINS — a TIMESTAMP is
+	// epoch MILLISECONDS and a DATE is epoch DAYS. compare()'s fallback
+	// picks the domain from the MAGNITUDE of the numeric side
+	// (parseTemporalInt64OK: |ref| < 500_000 means days), which is a guess
+	// that is wrong for every TIMESTAMP inside +/-500,000 ms of the epoch —
+	// 1969-12-31T23:51:40Z through 1970-01-01T00:08:20Z, the sentinel band
+	// log data is full of. `WHERE ts = '1970-01-01T00:00:01'` answered 1
+	// through the pre-parsed CmpTemporalLit path and `WHERE ts = s`, with
+	// the identical text in a STRING column, answered 1 where 2 rows match:
+	// one predicate, two answers, decided by spelling (#826). The symmetric
+	// hazard is a DATE beyond 500,000 epoch days, read as milliseconds.
+	//
+	// The domain is a property of the operand's DECLARATION and of nothing
+	// else, which is what ADR-0012 item 8 says such a reading must come
+	// from.
+	boxTimestamp
+	boxDate
 )
 
 // castNumericKind is the kind a CAST to a non-DECIMAL numeric type produces.
@@ -346,9 +364,16 @@ func declaredBoxKind(t batch.TypeID) (boxKind, bool) {
 		return boxIPv6, true
 	case batch.TypeBool:
 		return boxBool, true
+	case batch.TypeTimestamp:
+		return boxTimestamp, true
+	case batch.TypeDate:
+		return boxDate, true
 	}
 	return boxUnknown, false
 }
+
+// isTemporalKind reports whether a kind names a temporal DOMAIN.
+func isTemporalKind(k boxKind) bool { return k == boxTimestamp || k == boxDate }
 
 func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 	switch v := e.(type) {
@@ -844,8 +869,101 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 		return true
 	case rk == boxBool && lk == boxQuoted && lText != "":
 		return true
+	// A TEMPORAL operand meeting anything whose values can arrive as text.
+	// The domain (epoch days vs epoch milliseconds) is the declaration's to
+	// state; compare()'s fallback infers it from the value's magnitude and
+	// gets it wrong inside +/-500,000 of the epoch (#826). Both a QUOTED
+	// literal and a genuine STRING column reach here, because the defect is
+	// the same in both spellings — and it was VISIBLE only in the second,
+	// since the literal spelling is specialized into CmpTemporalLit at
+	// compile time and pre-parses in the column's own domain.
+	case isTemporalKind(lk) && (rk == boxQuoted || rk == boxText):
+		return true
+	case isTemporalKind(rk) && (lk == boxQuoted || lk == boxText):
+		return true
 	}
 	return false
+}
+
+// temporalTextOrder compares a TEMPORAL operand against a text one in the
+// temporal operand's OWN domain, which its kind names.
+//
+// tv is the temporal operand's box: a TIMESTAMP column boxes as int64 epoch
+// milliseconds, a DATE column as its formatted "YYYY-MM-DD" text. other is
+// the text operand's box, and otherText its literal source when it has one
+// (a quoted literal's box and its text are the same string; a STRING column
+// has no source text).
+//
+// Both sides are converted to the DECLARED domain's unit and compared there.
+// Nothing here consults a magnitude: that is the whole point. A side that
+// will not parse returns ok=false and the pair falls through to compare(),
+// which is what it did before this rule existed.
+func temporalTextOrder(kind boxKind, tv, other any, otherText string) (int, bool) {
+	s, ok := other.(string)
+	if !ok {
+		s = otherText
+		if s == "" {
+			return 0, false
+		}
+	}
+	switch kind {
+	case boxTimestamp:
+		ms, ok := tv.(int64)
+		if !ok {
+			return 0, false
+		}
+		rms, ok := parseTimestampToEpochMsCachedOK(s)
+		if !ok {
+			return 0, false
+		}
+		return cmpInt64(ms, rms), true
+	case boxDate:
+		// A DATE operand reaches here as its EPOCH-DAY count, which is what
+		// ColRef.Eval hands out for a TypeDate column — not as the rendered
+		// text this arm first assumed. Getting that wrong made the whole arm
+		// dead code: tv.(string) never matched, the pair fell back to
+		// compare()'s magnitude heuristic, and the DATE half of #826 was
+		// never fixed at all. It looked fixed because a fixture inside the
+		// band (1970-01-02 is day 1, and |1| < 500_000) is where the
+		// heuristic is accidentally right; past 500,000 epoch days
+		// (3500-01-01 is 558,821) `d = ds` answered 0 for 2 and `d < ds`
+		// answered 3 for 1.
+		//
+		// Both spellings are accepted, because a DATE can also arrive as
+		// text through a CAST or a rendered container element, and the
+		// string form must not silently take the magnitude path either.
+		var ld int64
+		switch v := tv.(type) {
+		case int64:
+			ld = v
+		case int32:
+			ld = int64(v)
+		case string:
+			d, ok := parseDateToEpochDaysCachedOK(v)
+			if !ok {
+				return 0, false
+			}
+			ld = d
+		default:
+			return 0, false
+		}
+		rd, ok := parseDateToEpochDaysCachedOK(s)
+		if !ok {
+			return 0, false
+		}
+		return cmpInt64(ld, rd), true
+	}
+	return 0, false
+}
+
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 // netOrder orders two network-typed boxes by the address's own order, with
@@ -1048,6 +1166,15 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 	case rk == boxBool && lk == boxQuoted:
 		if rb, ok := rv.(bool); ok {
 			return -boolOrder(rb, boolFromText(lText)), true, false
+		}
+	// A TEMPORAL operand against text, in the DECLARED domain (#826).
+	case isTemporalKind(lk) && (rk == boxQuoted || rk == boxText):
+		if c, ok := temporalTextOrder(lk, lv, rv, rText); ok {
+			return c, true, false
+		}
+	case isTemporalKind(rk) && (lk == boxQuoted || lk == boxText):
+		if c, ok := temporalTextOrder(rk, rv, lv, lText); ok {
+			return -c, true, false
 		}
 	}
 	// Nothing above could read this pair. If both KINDS say numeric, the boxes
