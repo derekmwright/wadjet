@@ -290,22 +290,45 @@ this patch does.
   summary.txt    oracle, seed, database, wall-clock instant, the assertion
   queries.sql    every partition's SQL in order, executable as-is
   rerun.txt      each arm RE-EXECUTED immediately on the same connection,
-                 with instants either side, beside what the oracle saw
+                 with instants either side, its FULL row set beside the full
+                 row set the oracle read, and a STABLE/TRANSIENT verdict
   plans.txt      EXPLAIN of each arm
-  fixtures.txt   every table's cardinality and full contents
+  schema.sql     CREATE TABLE per table, from information_schema
+  fixtures.csv   every table's cardinality and contents, as RFC4180 CSV
 ```
 
-Reading `rerun.txt`:
+`schema.sql` then `fixtures.csv` then `queries.sql` rebuilds the finding on
+any server, without the round's log. Two details that are deliberate, both
+learned from the first five dumps this produced:
 
-- **re-run agrees with the first read → STABLE.** The answer is
+- **The dump never issues `SELECT *`.** Wadjet's pgwire sends no
+  RowDescription for a star projection returning zero rows (#846), so JDBC
+  throws "No results were returned by the query" — which replaced three of
+  those five dumps' table contents with a stack trace. The column list comes
+  from `information_schema.columns` and is always explicit. Do not
+  "simplify" it back.
+- **Values are CSV-quoted, and NULL is unquoted.** The generator produces
+  values containing `|`, `"` and newlines; an unquoted dump of those is not
+  recoverable, and `NULL` has to be distinguishable from the string
+  `"NULL"` and from `""`.
+
+Reading `rerun.txt` — it states the verdict per arm, so this is what the
+verdict MEANS rather than how to derive it:
+
+- **STABLE** (re-run matched the first read). The answer is
   deterministically wrong. Replay the seed per "Reproducing a finding from
-  a seed" and it will reproduce; file it with the minimal repro.
-- **re-run disagrees → TRANSIENT.** The first read saw state that no
-  longer exists — manifest visibility, background compaction, a cache.
-  This is the class three soaks' worth of violations fell into, and the
-  dump is the only place it is visible. Attach the whole directory to the
-  issue; a seed replay will NOT reproduce it and its absence is not
-  evidence.
+  a seed" and it will reproduce; reduce it and file it.
+- **TRANSIENT** (re-run differed). The first read saw state that no longer
+  exists — manifest visibility, background compaction, a cache. This is the
+  class three soaks' worth of violations fell into, and the dump is the only
+  place it is visible. Attach the whole directory to the issue; a seed
+  replay will NOT reproduce it and its absence is not evidence.
+
+Row sets are sorted before comparison, because an unordered query may
+legitimately return its rows in any order — so a reordering never reads as
+TRANSIENT. When a TLP oracle only ever held its three partition branches
+concatenated, the concatenation carries the verdict and each branch is
+dumped separately for its SQL, plan and re-run rows, marked `verdict: n/a`.
 
 The directory root is `sqlancer-violations` under the run's working
 directory (`run.sh` always sets one; it prints the path to stderr).
