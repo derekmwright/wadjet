@@ -7,7 +7,7 @@ This guide covers how to configure Wadjet for different hardware profiles — fr
 | Parameter | CLI Flag | YAML Key | Default | What It Controls |
 |-----------|----------|----------|---------|------------------|
 | Worker concurrency | `--max-concurrent` | `worker.max_concurrent` | 4 | Parallel tasks per worker |
-| LRU cache size | `--cache-bytes` | `worker.cache_bytes` | 0 = auto (10% of memory) | Parquet data cache |
+| LRU cache size | `--cache-bytes` | `worker.cache_bytes` | 0 = auto (10% of the Go memory limit, ~7.5% of detected memory) | Parquet data cache |
 | Memory budget | `--memory-budget` | `worker.memory_budget` | 0 (auto-detect from cgroup, else unlimited) | Per-task memory limit before spilling to disk |
 | Spill directory | `--spill-dir` | `worker.spill_dir` | OS temp dir | Where spill files are written |
 | Result store | `--result-store` | `worker.result_store_bytes` | 512 MiB | In-memory cache for intermediate stage results (0 = disabled) |

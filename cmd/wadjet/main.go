@@ -50,6 +50,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// memoryEnvelopeNumerator/memoryEnvelopeDenominator and cacheBytesAutoDivisor
+// together define the --cache-bytes auto-detect default computed in
+// PersistentPreRunE: goMemLimit = detected memory *
+// memoryEnvelopeNumerator / memoryEnvelopeDenominator, and (when
+// --memory-budget is left at its 0 default) cacheBytes = goMemLimit /
+// cacheBytesAutoDivisor. Named — rather than left as the literals `3`,
+// `4`, `10` at their call sites — so the --cache-bytes flag's help string
+// and TestCacheBytesHelpStringMatchesComputation cannot drift out of sync
+// with the computation again the way the help string did: it said the
+// auto-detect share was 20%, then (after fixing that) a still-wrong "10%
+// of memory" with no envelope/detected distinction, before landing here.
+const (
+	memoryEnvelopeNumerator   = 3
+	memoryEnvelopeDenominator = 4
+	cacheBytesAutoDivisor     = 10
+)
+
 var (
 	mode                  string
 	storageType           string
@@ -198,7 +215,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 0, "Total process RSS ceiling in MB; when --mmap-relief is set, relieve the coldest mmap'd cache files to bring RSS back to this level. 0 = auto: 85% of the detected memory limit (the old absolute default of 16000 could never fire inside an edge-sized envelope). Tune below the worker cgroup memory.max so relief has headroom.")
 	rootCmd.PersistentFlags().BoolVar(&boundedDirtyWrites, "bounded-dirty-writes", true, "Bound the dirty page-cache footprint of spill/cache/stage file writes via windowed sync_file_range, and drop spill-file pages from cache as they are written. Default true (validated suite-neutral at SF100, -15% on Q05, faster-than-off under edge caps); --bounded-dirty-writes=false restores kernel-writeback-only.")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
-	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 10% of memory)")
+	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 10% of the Go memory limit, ~7.5% of detected memory)")
 
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 	rootCmd.PersistentFlags().IntVar(&circuitThreshold, "storage-circuit-threshold", 5, "Consecutive object-store failures IN ONE OPERATION CLASS (read / write / delete) before that class's circuit breaker opens and its requests fast-fail. Classes are independent: a delete or upload burst failing never fast-fails a read (ADR-0028). 0 = use the default (5).")
@@ -330,7 +347,7 @@ func serveCmd() *cobra.Command {
 			// constrained-memory paths locally, and overriding it with the
 			// 75%-of-physical default would silently mask the very
 			// workloads we're testing.
-			goMemLimit := memLimit * 3 / 4
+			goMemLimit := memLimit * memoryEnvelopeNumerator / memoryEnvelopeDenominator
 			if envLim := os.Getenv("GOMEMLIMIT"); envLim != "" {
 				if parsed, ok := parseGoMemLimit(envLim); ok {
 					goMemLimit = parsed
@@ -399,8 +416,10 @@ func serveCmd() *cobra.Command {
 					}
 					cacheBytes = available
 				} else {
-					// Default: 10% of envelope for cross-query S3 file cache.
-					cacheBytes = goMemLimit / 10
+					// Default: 10% of the envelope for cross-query S3 file
+					// cache (~7.5% of detected memory, since goMemLimit
+					// itself is 75% of detected — see cacheBytesAutoDivisor).
+					cacheBytes = goMemLimit / cacheBytesAutoDivisor
 				}
 				logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
 			}

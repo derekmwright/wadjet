@@ -221,7 +221,7 @@ readinessProbe:
 
 4. **Check file sizes:** Many small files (< 1 MB) cause high S3 LIST/GET overhead. Re-tune Bento's batch size to produce larger files (64–256 MB target).
 
-5. **Check cache hit ratio:** A low cache hit ratio means workers are re-reading data from S3. Increase `--cache-bytes` to hold more of the working set (`0` = auto: 10% of detected memory).
+5. **Check cache hit ratio:** A low cache hit ratio means workers are re-reading data from S3. Increase `--cache-bytes` to hold more of the working set (`0` = auto: 10% of the Go memory limit, ~7.5% of detected memory).
 
 6. **Check worker count:** In distributed mode, add more workers for parallelism:
    ```bash

@@ -356,7 +356,7 @@ Results below 512 KB are always passed inline via NATS messages regardless of re
 
 ### LRU Cache
 
-Workers cache recently-read Parquet file data in an LRU cache (`--cache-bytes`; the default of `0` auto-sizes it to 10% of detected memory). This benefits:
+Workers cache recently-read Parquet file data in an LRU cache (`--cache-bytes`; the default of `0` auto-sizes it to 10% of the Go memory limit, ~7.5% of detected memory — the Go limit is itself only 75% of what's detected). This benefits:
 
 - Repeated queries against the same time range
 - Join probes that reference the same build-side data

@@ -111,7 +111,7 @@ passing `--result-store`.
 | `--pg-addr` | PostgreSQL wire protocol listen address | `:5433` |
 | `--metrics-addr` | Prometheus metrics listen address (worker mode only) | `:9100` |
 | `--max-concurrent` | Maximum concurrent tasks per worker | `4` |
-| `--cache-bytes` | LRU file cache size in bytes (0 = auto: 10% of memory) | `0` |
+| `--cache-bytes` | LRU file cache size in bytes (0 = auto: 10% of the Go memory limit, ~7.5% of detected memory) | `0` |
 | `--query-timeout` | Default query timeout (`30s`, `5m`, `0` = unlimited) | `0` |
 | `--morsel-workers` | Intra-fragment parallel consumers (0 = auto, 1 = serial) | `0` |
 | `--local-fastpath-bytes` | Queries under this post-pruning scan size run in-process on the coordinator (0 = disabled) | `64 MiB` |
