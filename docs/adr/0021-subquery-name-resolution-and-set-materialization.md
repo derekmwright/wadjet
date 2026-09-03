@@ -482,6 +482,48 @@ makes them COMPUTED projections. #767's own text records the DAG failure
 separately; the census pins the mixed shape with that message and the day it
 answers there the pin fails.
 
+### 1i. What the correlation arc MEASURED and did not move
+
+(Added 2026-09-03, #616 / #614 / #714.)
+
+Three filings describe a tree that has changed under them. Each is pinned in
+the correlation census with what it does NOW beside PostgreSQL's answer, so
+the record is a fixture rather than a memory.
+
+- **#616 — a correlated scalar subquery whose own FROM is a comma join.** It
+  ANSWERS PostgreSQL's value on all four arms over every fixture tried here
+  (46, 47, 21). What still fails is narrower than the filing and is not a
+  correlation defect: with the SAME table on both sides of the inner comma
+  join, under a MEMORY BUDGET, the query panics in
+  `exec.HashJoinProbe.lookupBuild` — the dual-int-key path reads
+  `h.buildBatches[0]` before walking the chain, and a SPILLED build has no
+  batch 0. Every other arm answers 9. **And TPC-H Q2 in its official comma
+  spelling still HANGS** over the committed SF0.01 fixture (measured: a 5
+  minute test timeout with no rows), which is the deadlock the issue reports.
+  Both belong to the join — the spill path and the shared scan cache — not to
+  the correlation model.
+
+- **#614 — a derived table in a subquery's FROM referencing the enclosing
+  query.** MEASURED, because the question was open: it is LEGAL WITHOUT
+  LATERAL and PostgreSQL 17 ANSWERS it (40 rows over the multikey fixture).
+  LATERAL governs references to same-level FROM siblings; a reference to an
+  OUTER-QUERY column from inside a sub-SELECT's derived table needs none. This
+  engine refuses it on all four arms with 42P01 `missing FROM-clause entry for
+  table "a"` — a message that asserts the SQL is invalid, which it is not. The
+  refusal comes from the PHYSICAL column-scope validator, whose scope for a
+  derived table inside a subquery does not merge the enclosing query's
+  aliases. Loud, not wrong; supporting the shape is a dependent join and is
+  what §1c calls the thing that removes the class.
+
+- **#714 — an aggregate argument containing a scalar subquery.** The headline
+  ("refused on the stage DAG") is gone: it ANSWERS on all four arms, the DAG
+  routing the plan local for its SELECT-list subquery (#659's route), and the
+  VALUE is PostgreSQL's. What diverges is the TYPE: `SUM(a + (SELECT 1))` over
+  a DECIMAL column comes back float8 where PostgreSQL says numeric, while the
+  same SUM without the subquery stays exact. That is a numeric-typing residual
+  (ADR-0024's rung), not a correlation one, and the census pins all three
+  boxes side by side.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

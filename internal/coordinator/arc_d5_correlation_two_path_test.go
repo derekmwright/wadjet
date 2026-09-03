@@ -37,6 +37,12 @@ type arcD5Cell struct {
 	// it, so a refusal the single-process compiler makes by name the DAG can
 	// make somewhere else entirely.
 	wantErrLikeDAG string
+	// wantErrLikeSpilled, when set, is what the BUDGETED arm alone must fail
+	// with. A spill is a CONDITION and not a shape (ADR-0027), so a defect
+	// that only the spilled path reaches is a real state the census has to be
+	// able to say — otherwise the shape has to be dropped, which is how one
+	// goes unrecorded.
+	wantErrLikeSpilled string
 	// wantDAG, when set, is what the two DAG arms must answer INSTEAD of
 	// `want`.
 	wantDAG []string
@@ -59,6 +65,7 @@ func arcD5Cells() []arcD5Cell {
 		arcD5LateralCells(),
 		arcD5AggregatePlacementCells(),
 		arcD5FailedSubquerySetCells(),
+		arcD5MeasuredCells(),
 		arcD5AggregateArgumentCells(),
 	} {
 		out = append(out, group...)
@@ -239,9 +246,9 @@ func arcD5TypedRerunCells() []arcD5Cell {
 // all four arms and in silence; 13 is exactly what the corresponding NOT
 // EXISTS answers, which is the diagnosis.
 //
-// The lowering is now DECLINED (logical.correlatedNotInIsNotAnAntiJoin says
-// why an anti join cannot carry the rule and what would be needed to make one
-// that could), so the predicate stays a subquery and
+// The lowering is now DECLINED (logical.tryDecorrelateInSubquery's closing
+// comment says why an anti join cannot carry the rule and what would be needed
+// to make one that could), so the predicate stays a subquery and
 // expr.CorrelatedInSubquery.EvalBoolNull answers it per outer row. That is the
 // exact rule — and it costs a route on the DAG, which is what
 // `wantCorrRoutes: 1` records here rather than leaving to prose.
@@ -486,6 +493,97 @@ func arcD5AggregatePlacementCells() []arcD5Cell {
 }
 
 // ---------------------------------------------------------------------------
+// #616 / #614 / #714 — the three shapes this arc MEASURED rather than moved.
+//
+// Each was filed against a tree that has since changed under it, and each is
+// pinned here with what it actually does now beside PostgreSQL's answer, so
+// the record is a fixture and not a memory.
+func arcD5MeasuredCells() []arcD5Cell {
+	return []arcD5Cell{
+		// #616 — a correlated scalar subquery whose own FROM is a COMMA JOIN.
+		// It ANSWERS PostgreSQL's value on all four arms for every shape
+		// tried, which the issue's "cannot be executed" no longer describes.
+		{issue: "#616", name: "comma_joined_correlated_inner_two_relations",
+			sql: `SELECT COUNT(*) AS n FROM typemx p WHERE p.id < 50 AND p.c_i32 = (` +
+				`SELECT MIN(b.c_i32) FROM typemx b, typemx_dim d WHERE b.g = d.k AND b.id = p.id)`,
+			want: []string{"n=int64:46"}, wantCorrRoutes: 1},
+		{issue: "#616", name: "comma_joined_correlated_inner_group_key",
+			sql: `SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 50 AND a.g = (` +
+				`SELECT MIN(b.g) FROM typemx b, typemx_dim d WHERE b.g = d.k AND b.id = a.id)`,
+			want: []string{"n=int64:47"}, wantCorrRoutes: 1},
+		{issue: "#616", name: "comma_joined_correlated_inner_over_the_multikey_fixture",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n = (` +
+				`SELECT MIN(b.n) FROM mk_inner b, mk_dim d WHERE b.g = d.k AND b.id = a.id)`,
+			want: []string{"n=int64:21"}, wantCorrRoutes: 1},
+		// THE ONE THAT STILL FAILS, and it is not a correlation defect: the
+		// same table on BOTH sides of the inner comma join, under a MEMORY
+		// BUDGET, panics inside the hash join's dual-int-key probe —
+		// `exec.HashJoinProbe.lookupBuild` reads `h.buildBatches[0]` before
+		// walking the chain and a SPILLED build has no batch 0. Every other
+		// arm answers PostgreSQL's 9. Recorded here because #616's shape is
+		// how it was reached; it belongs to the join's spill path.
+		{issue: "#616", name: "boundary_self_comma_joined_inner_panics_under_a_budget",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i64 = (` +
+				`SELECT MIN(b.w_i64) FROM numwidth b, numwidth c ` +
+				`WHERE b.w_key = c.w_key AND b.w_key = a.w_key)`,
+			want:               []string{"n=int64:9"},
+			wantErrLikeSpilled: "internal error in operator chain",
+			pgSays:             "9 on every arm; the budgeted arm panics in exec/join.go's lookupBuild"},
+
+		// #614 — a DERIVED TABLE inside a subquery's FROM that references the
+		// ENCLOSING query. MEASURED against live PostgreSQL 17, because the
+		// question was open: it is LEGAL WITHOUT LATERAL and PostgreSQL
+		// ANSWERS it with 40. LATERAL governs references to same-level FROM
+		// siblings; a reference to an OUTER-QUERY column from inside a
+		// sub-SELECT's derived table needs none. #614's own text is right and
+		// the "PostgreSQL rejects this" reading is wrong.
+		//
+		// This engine refuses it on all four arms with 42P01 `missing
+		// FROM-clause entry for table "a"` — a message that asserts the SQL
+		// is invalid, which it is not. The refusal comes from the PHYSICAL
+		// column-scope validator, whose scope for a derived table inside a
+		// subquery does not merge the enclosing query's aliases. Loud, not
+		// wrong; pinned with PostgreSQL's answer so the day it changes this
+		// fires.
+		{issue: "#614", name: "boundary_derived_table_in_a_subquery_from_references_the_outer_query",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT s, n FROM mk_inner WHERE mk_inner.n = a.n) d)`,
+			wantErrLike: `missing FROM-clause entry for table "a"`,
+			pgSays: "40 — this is legal SQL and needs no LATERAL; the refusal's message " +
+				"says the reference is invalid, and it is not"},
+
+		// #714 — an aggregate argument containing a SCALAR SUBQUERY. The
+		// issue's headline is "refused on the stage DAG (subqueries require a
+		// SubqueryRunner)"; that tree is gone. It ANSWERS on all four arms,
+		// with the DAG routing the plan to the coordinator-local pipeline for
+		// its SELECT-list subquery (#659's route), and the VALUE is
+		// PostgreSQL's.
+		//
+		// What is still divergent is the TYPE: `SUM(a + (SELECT 1))` over a
+		// DECIMAL column comes back FLOAT8 where PostgreSQL says numeric, and
+		// the control one line down shows the same SUM without the subquery
+		// staying exact. That is a numeric-typing residual (ADR-0024's
+		// literal/declaration rung), not a correlation one, and it is pinned
+		// with the box each renders.
+		{issue: "#714", name: "scalar_subquery_in_an_aggregate_argument_answers",
+			sql:                  `SELECT SUM(a + (SELECT 1)) AS s FROM decpair`,
+			want:                 []string{"s=float:59.99"},
+			wantScalarProjRoutes: 1,
+			pgSays:               "numeric 59.99 — the VALUE agrees, the TYPE does not"},
+		{issue: "#714", name: "scalar_aggregate_subquery_in_an_aggregate_argument_answers",
+			sql:                  `SELECT SUM(a + (SELECT MAX(id) FROM decpair)) AS s FROM decpair`,
+			want:                 []string{"s=float:115.99"},
+			wantScalarProjRoutes: 1,
+			pgSays:               "numeric 115.99"},
+		{issue: "#714", name: "control_the_same_sum_without_a_subquery_stays_exact",
+			sql:  `SELECT SUM(a) AS s FROM decpair`,
+			want: []string{"s=52.99"},
+			pgSays: "numeric 52.99 — rendered as exact text here, which is what the two " +
+				"cells above lose"},
+	}
+}
+
+// ---------------------------------------------------------------------------
 // #601 — a failed IN-subquery is not an EMPTY set.
 //
 // `InSubquery.resolveSlow` set `emptySet = true` on a subquery ERROR as well
@@ -652,6 +750,9 @@ func TestArcD5CorrelationMatchesPostgres(t *testing.T) {
 					if tc.wantErrLikeDAG != "" {
 						wantErr = tc.wantErrLikeDAG
 					}
+				}
+				if arm == "spilled" && tc.wantErrLikeSpilled != "" {
+					wantErr = tc.wantErrLikeSpilled
 				}
 				if wantErr != "" {
 					if err == nil {
