@@ -1,6 +1,11 @@
 # Wadjet Documentation
 
-Wadjet is an analytical query engine written in Go, inspired by systems like DuckDB. It provides columnar storage via Parquet, vectorized query execution, SQL support, and optional distributed processing over NATS and S3-compatible object storage.
+Wadjet is a distributed SQL query engine for analytical (OLAP) workloads,
+written in Go: columnar storage in Apache Parquet (and Apache Iceberg metadata)
+on S3-compatible object storage, vectorized execution, full analytical SQL, a
+PostgreSQL wire-protocol front end, and a coordinator + worker distribution
+model. Its differentiating niche is network telemetry — IPv4, IPv6, CIDR, MAC,
+Port and Protocol are first-class column types with 100+ network functions.
 
 ## Documentation Index
 
@@ -9,6 +14,8 @@ Wadjet is an analytical query engine written in Go, inspired by systems like Duc
 | [Getting Started](getting-started.md) | Installation, first table, first query |
 | [Architecture](architecture.md) | System internals, execution model, data flow |
 | [ADRs](adr/README.md) | Architecture decision records — what's settled, what it beat, and the evidence |
+| [Benchmarks](benchmarks/README.md) | Every measurement memo: topology, scale factor, headline numbers, reproduction |
+| [Internals: native-DAG execution](internals/native-dag-execution.md) | File-anchored map of the distributed execution path |
 | [Configuration](configuration.md) | YAML config, environment variables, CLI flags |
 | [Data Types](data-types.md) | Supported column types including network primitives |
 | [Ingestion](ingestion.md) | Writing data: micro-batch accumulator, partitioning, Bento pipelines |

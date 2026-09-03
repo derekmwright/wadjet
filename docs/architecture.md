@@ -1,6 +1,41 @@
 # Architecture
 
-Wadjet is a columnar analytical query engine designed for high-throughput scan-heavy workloads over S3-compatible object storage. This document covers the system's internals.
+Wadjet is a **distributed SQL query engine for analytical (OLAP) workloads**: a
+columnar engine with vectorized execution over Apache Parquet and Apache
+Iceberg tables on S3-compatible object storage, written in Go, with a query
+coordinator and worker processes and a PostgreSQL wire-protocol front end. This
+document covers the system's internals.
+
+## The engine in one table
+
+Every row is vocabulary this codebase actually implements, with where to read
+it. Nothing here is aspirational; where a mechanism is off by default that is
+stated.
+
+| Mechanism | What it means here | Where |
+|---|---|---|
+| SQL parser | hand-written recursive descent, no parser generator | `internal/planner/sql/`, [ADR-0003](adr/0003-recursive-descent-parser.md) |
+| Logical plan + optimizer | typed node tree, rule-based rewrites, and cost-based join reordering (DP up to 16 relations, greedy beyond) over column statistics populated at ingest or by `ANALYZE TABLE`, with min/max and heuristic fallbacks when neither ran | `internal/planner/logical/optimizer.go:3848`, `stats.go:143-144` (the two populators) and `:152-162` (the min/max fallback) |
+| Physical plan | executable pipelines, and for distributed queries a DAG of stages | `internal/planner/physical/` |
+| Push-based vectorized execution | Source → UnaryOperator chain → Sink over 2048-row batches, selection vectors instead of copies, type dispatch resolved once per batch into typed kernels | `internal/engine/exec/`, [ADR-0002](adr/0002-push-based-vectorized-execution.md) |
+| Pipeline breakers with spill | hash join (grace partition-on-arrival), hash aggregate (partial-state k-way merge), sort and window (external sorted-run merge) | `internal/engine/exec/`, [ADR-0027](adr/0027-a-spill-gate-proves-it-spilled.md) |
+| Memory budget, never-OOM | shared per-process pool, per-task charges, ownership ledger, OS-facing relief valves | `internal/engine/memory/`, [ADR-0006](adr/0006-never-oom-memory-model.md) |
+| Morsel-driven parallelism | intra-fragment parallel pipeline consumers, width adapts to input size and idle CPU tokens (`--morsel-workers=1` is the serial kill switch) | `internal/engine/exec/`, [design note](design/morsel-execution.md) |
+| Stage-DAG execution | each stage's output materializes to the object store and the next stage reads it back — exchange spooling, the model Trino calls fault-tolerant execution, **not** a classic streaming exchange between concurrently running stages | [internals map](internals/native-dag-execution.md), [ADR-0004](adr/0004-stage-dag-with-streaming-exchange.md) |
+| Streaming-exchange overlay | on top of that, a consumer reads a producer's output through a tier ladder — same-worker mmap, then NATS KV for small payloads (≤ 4 MB), then a peer fetch over gRPC, with S3 as the last-resort tier — while the upload proceeds asynchronously; any failure falls through to the durable copy (default on) | `internal/worker/stream_source.go:742, 759, 790, 814`; [design note](design/streaming-exchange.md) lines 78-81 and 253-258; [ADR-0004](adr/0004-stage-dag-with-streaming-exchange.md) §Decision 2 (amended — its prose ordered peer gRPC before KV) |
+| Hash-partitioned shuffle | `exchange-repartition` stages write one `.wshf` columnar shuffle file per output partition. The format has one writer package (`internal/worker/shuffle_format.go`) and one reader package (`internal/wshf/`) by decision | [ADR-0010](adr/0010-shuffle-wire-formats.md) §Decision, lines 43-54 |
+| Broadcast + probe-split joins | a build side under the broadcast threshold replicates to every worker and the probe files split across workers | `internal/coordinator/`, [design note](design/scan-affinity.md) |
+| Skew-aware splits | a partition group whose probe bytes exceed the floor *and* ≥2× the mean splits into k sub-tasks (`--skew-split=false` is the kill switch) | [design note](design/skew-aware-shuffle.md) |
+| Small-query local fast path | a query whose post-pruning scan bytes stay under `--local-fastpath-bytes` (64 MiB default) runs in-process on the coordinator, skipping the DAG | `internal/coordinator/local_fastpath.go`, [internals map](internals/native-dag-execution.md#small-query-local-fast-path-routing-ahead-of-the-dag) |
+| 3-level predicate pushdown | partition pruning → row-group statistics pruning → row-level filtering, plus a dictionary-probe row-group prune (level 2.5) and LIKE pushdown into the level-3 filter | `internal/engine/scan/`, `dict_prune.go:11`, `like_filter.go:5` |
+| Parquet reader/writer | own implementation: column projection, row-group pruning, nested types; a file's own statistics are treated as input, not fact | `internal/storage/parquet/`, [ADR-0018](adr/0018-parquet-file-numbers-are-input.md) |
+| Iceberg metadata | read-only v1/v2 metadata, manifest lists and manifests, bridged into the native catalog | `internal/iceberg/` |
+| NATS control plane | heartbeats, cancel/complete broadcasts, the KV catalog, and JetStream task queues in the default NATS dispatch mode | `internal/distributed/`, [ADR-0005](adr/0005-split-control-and-data-plane.md) |
+| gRPC data plane | worker↔worker exchange fetches ride gRPC whatever `--data-plane` says (the peer listener exists whenever `--streaming-exchange` is on, its default — `cmd/wadjet/main.go:2691-2696`); task dispatch, results and gather payloads move there too under `--data-plane=grpc` | `internal/dataplane/`, [ADR-0005](adr/0005-split-control-and-data-plane.md) |
+| Object-store circuit breaker | per operation class (read / write / delete), so a failing upload burst never fast-fails reads | [ADR-0028](adr/0028-operational-invariants-breaker-scope-and-query-reclamation.md) |
+| PostgreSQL wire protocol | `psql`, JDBC/ODBC and BI clients connect directly; PostgreSQL decides semantics, DuckDB is the performance goal and an oracle | `internal/server/pgwire/`, [ADR-0012](adr/0012-sql-semantics-authority.md) |
+| Kill switches | optimizations that could change the row set register a toggle (`WADJET_<NAME>=0`) and are swept by the invariance oracle | `internal/optswitch/` |
+| Configuration precedence | explicit flag > environment > file > default, resolved once from one registry | `internal/config/`, [ADR-0029](adr/0029-configuration-precedence.md) |
 
 ## High-Level Architecture
 
@@ -119,7 +154,16 @@ Record batches are reused via `BatchPool` — a thread-safe, per-schema object p
 
 `GlobalPool` provides cross-operator batch sharing: multiple operators with the same schema share a single pool, improving reuse in multi-operator pipelines.
 
-> **Future: Go Arenas.** When Go arenas reach GA (currently experimental behind `GOEXPERIMENT=arenas`), the BatchPool backing allocator should be swapped to arena-based allocation. Arena lifecycle maps naturally to batch lifecycle: allocate vectors/bitmaps from an arena, free the entire arena when the batch is released. This would eliminate GC pressure on the batch processing path entirely. The pool abstraction makes this swap straightforward — only `Get()` and the underlying allocation need to change.
+> **Arena allocation is a rejected alternative, with one narrow exception.**
+> A custom arena allocator was shelved in 2026-06 — specifically the
+> BytesColumn *decode* arena, which managed per-value lifetimes inside shared
+> buffers — and stays rejected without new evidence
+> ([ADR-0006](adr/0006-never-oom-memory-model.md), lines 31 and 68-71).
+> The exception the evidence did buy is not the batch path: whole pointer-free
+> arrays of typed aggregate group state are allocated off-heap
+> (`internal/engine/memory/offheap_linux.go`, kill switch `WADJET_OFFHEAP_AGG`),
+> because at 100M-group scale heap-grown state measured 22.3 GB of heap on
+> 12 GB live (ADR-0006, 2026-08-17 amendment).
 
 ## Query Execution Pipeline
 
@@ -287,8 +331,13 @@ The **ResultStore** is an in-memory cache for intermediate stage results, avoidi
 ```
 Without ResultStore:                    With ResultStore:
 Stage 1 → write to S3 → Stage 2        Stage 1 → memory → Stage 2
-          ~50-200ms per hop                       ~0ms
+          one object PUT + GET                    no object-store round trip
 ```
+
+(The saving is a round trip per stage hop, not a banked number: what the S3
+hop costs at scale is measured per window in
+[docs/benchmarks](benchmarks/README.md), and the streaming-exchange overlay
+below is the mechanism that removes it for the cross-worker case.)
 
 The result store is keyed by S3 path (what the result *would* be stored as), bounded by a configurable capacity (`worker.result_store_bytes`). When full, new results fall back to S3 transparently. Per-query cleanup removes entries after a query completes.
 
@@ -314,19 +363,88 @@ graph TD
     RN["Remote NATS<br/>(site-east)"]
     W3["Worker 3 (site-east)"]
 
-    CO -- "NATS/JetStream<br/>tasks + results" --- W1
+    CO -- "NATS/JetStream<br/>tasks + results<br/><sub>(gRPC streams under --data-plane=grpc)</sub>" --- W1
     CO -- "NATS/JetStream<br/>tasks + results" --- W2
+    W1 -- "gRPC peer exchange<br/><sub>stage outputs</sub>" --- W2
     CO -- "Leaf Node Connection" --> RN
     RN --- W3
 ```
 
-- **Coordinator**: Receives queries, builds plans, dispatches task messages to NATS, collects results, merges final output. For federated queries, splits scan stages per cluster.
-- **Workers**: Pull tasks from a JetStream consumer, execute a plan fragment locally, write intermediate results to result store or S3, publish completion notifications. Cluster-scoped: workers only pull tasks for their cluster.
+- **Coordinator**: Receives queries, builds plans, dispatches task messages, collects results, merges final output. For federated queries, splits scan stages per cluster. It is not purely a control node: the small-query fast path executes a query end-to-end in-process, and the coordinator reads stage outputs directly when it is the consumer.
+- **Workers**: Pull tasks from a JetStream consumer (or accept them on a gRPC stream under `--data-plane=grpc`), execute a plan fragment locally, write intermediate results to result store or the object store, publish completion notifications. Cluster-scoped: workers only pull tasks for their cluster.
 - **Heartbeats**: Workers send heartbeats (with cluster ID) every 10 seconds; coordinator reaps workers that miss heartbeats
 - **Task types**: `pipeline` (whole query on one worker), `stage` (one DAG stage fragment), `shuffle` (hash-partition rows into N `.wshf` files), `gather` (stream pipeline output to a reply subject). A `stage` task's operator kind is carried separately in its `StageType`.
 - **Task routing**: Tasks are published to cluster-scoped NATS subjects (`wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`). Workers subscribe to their cluster's filter (`wadjet.tasks.<cluster-id>.>`)
-- **Worker concurrency**: 4 concurrent tasks per worker (default)
-- **Worker cache**: 256 MB LRU cache for recently-read Parquet data
+- **Task placement**: eager reservation → cache affinity → input locality → memory bin-pack → round-robin, under a same-batch anti-clump cap ([ADR-0008](adr/0008-task-placement-policy.md))
+- **Worker concurrency**: 4 concurrent tasks per worker (default), auto-tuned down when the detected memory envelope cannot cover that many task budgets
+- **Worker cache**: 256 MB LRU cache for recently-read Parquet data by default in the worker library (`internal/worker/worker.go:191`). Left at 0, the CLI derives it from the Go memory limit instead: a tenth of it on the default path (`cmd/wadjet/main.go:403`), or the remainder after task footprint and headroom capped at a fifth when an explicit `--memory-budget` is set (`main.go:393-401`). The limit is itself 75 % of the detected machine memory (`main.go:333`), so the default works out near 7.5 % of RAM — the flag's own help string still says "20% of memory" and is stale
+
+### Stage DAG, exchange and shuffle
+
+A distributed query is a **DAG of stages** that workers run as **fragments**
+(pipelines of operator specs). Each stage's output **materializes to the object
+store** under `queries/<id>/…` and the next stage reads it back; the terminal
+`gather` streams the result to the coordinator. That is exchange spooling — the
+model Trino calls fault-tolerant execution — and not a classic streaming
+exchange between concurrently running stages: task retries are idempotent
+overwrites of the same keys once a stage's output is durable. The granularity
+is coarser than it looks while the streaming overlay is on, though: a producer
+that dies before its durable copy has landed costs a **one-shot whole-query
+re-execution with streaming disabled**, not a task retry
+([ADR-0004](adr/0004-stage-dag-with-streaming-exchange.md) §Decision item 2
+and §Consequences; `internal/coordinator/peer_locations.go:401`,
+`coordinator.go:1143-1147`).
+
+On top of the durable path sits the **streaming-exchange overlay** (default
+on): a consumer reads its input through a tier ladder, in the order
+`openNextFileTiered` tries them (`internal/worker/stream_source.go`) —
+same-worker mmap first at `:742` (no RPC at all, which is what ADR-0008's
+locality placement exists to produce), then the NATS KV fast path at `:759`
+for small stage outputs (the bound is 4 MB, `internal/worker/executor.go:45`),
+then a peer fetch over gRPC at `:790`, with
+S3 at `:814` as the last-resort tier — while the upload proceeds
+asynchronously. Any failure falls through to the durable copy. How eagerly those uploads happen is a policy —
+`--shuffle-durability=eager|lazy|off` ([ADR-0007](adr/0007-shuffle-durability-policy.md),
+[design note](design/shuffle-durability.md)).
+
+Joins take one of three shapes, chosen in the physical planner
+(`internal/planner/physical/plan.go:6493`, emitted at `:6519-6522`, size gate at `:7145-7156`,
+sort-merge gate at `sort_merge_join.go:24-45`) from a broadcast threshold the
+coordinator derives from the live worker pool before planning
+(`coordinator.go:1016, 3278`):
+
+- **broadcast** — a build side under the broadcast threshold replicates to
+  every worker, and the probe side's files split across workers, each running
+  the whole join; the coordinator merges the partials.
+- **hash shuffle** — `exchange-repartition` stages hash-partition both sides
+  into `.wshf` files ([ADR-0010](adr/0010-shuffle-wire-formats.md)), and each
+  partition group becomes a join task.
+- **sort-merge** — both sides sort into spill-friendly runs and stream a merge,
+  bounding join memory at cursor state instead of a resident build table
+  (`--sort-merge-join-bytes`, off by default).
+
+One hot key means one oversized partition, one straggler task, and therefore
+the stage's wall clock plus a budget breach on exactly the worst worker. So a
+shuffled join's hot partition group — over an absolute floor **and** ≥2× the
+mean group — splits at dispatch into k sub-tasks that divide its probe files
+and replicate its build files, bounding that task's input and memory footprint
+([design note](design/skew-aware-shuffle.md) lines 20-26,
+`internal/coordinator/skew_split.go:96`; `--skew-split=false` to disable).
+
+The file-anchored map of all of this — the two coordinator entry paths, stage
+emission, Stage→fragment conversion, and how to inspect a plan — is
+[docs/internals/native-dag-execution.md](internals/native-dag-execution.md).
+Read it before navigating coordinator or planner distribution code.
+
+### Client surfaces
+
+| Surface | Where | Notes |
+|---|---|---|
+| PostgreSQL wire protocol | `internal/server/pgwire/` | `psql`, JDBC, ODBC, BI tools; simple and extended query protocols, `CancelRequest`, SQLSTATE-carrying errors |
+| HTTP REST | `internal/server/` | queries, table management, health, Prometheus metrics |
+| gRPC | `proto/wadjet/v1/`, `internal/server/grpc.go` | protobuf service for generated clients |
+| MCP | `internal/server/` (`wadjet mcp`) | stdio only, no network listener; enforces the same ABAC when a config supplies auth |
+| Embedded Go API | `wadjet/` | `wadjet.Open`, typed in terms of `internal/` packages, so embedding lives in-repo today ([Embedding](embedding.md)) |
 
 ### Federation
 
