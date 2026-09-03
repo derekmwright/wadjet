@@ -5318,16 +5318,72 @@ func parseTemporalInt64OK(ref int64, s string) (int64, bool) {
 }
 
 // Deterministic temporal-string parsers are called row-by-row from
-// Cmp.EvalBool whenever a date/timestamp column is compared against a string
-// literal (e.g., `l_shipdate <= '1998-09-02'`). At SF100 the 22Q suite spent
-// 4.24% of worker CPU (236s cum) parsing the SAME literal strings over and
-// over — every row of every filter re-walked the layout list. SQL queries
-// have a fixed, tiny set of date literals (TPC-H Q03/Q04/Q06/Q07/Q10/Q12/
-// Q14/Q15/Q20: ~1-3 literals each; suite-wide < 20 distinct strings), so a
-// memoization cache stays trivially small and never grows unbounded.
+// Cmp.EvalBool whenever a date/timestamp value is compared against a string.
+// At SF100 the 22Q suite spent 4.24% of worker CPU (236s cum) re-parsing
+// strings — every row of every filter re-walked the layout list — so the
+// result is memoized.
+//
+// The memo is BOUNDED, and the reason is that its stated rationale was
+// wrong about its own population. The original argument was "SQL queries
+// have a fixed, tiny set of date literals … so a memoization cache stays
+// trivially small and never grows unbounded". But the LITERAL shape never
+// reaches here: compileCmp specializes a bare column against a string
+// literal into CmpTemporalLit, which pre-parses once at compile time
+// through the UNCACHED entry points, so `ts <= '1998-09-02'` adds zero
+// entries. What does reach the memo is, by construction, the shape that
+// specialization declined — a temporal value against another COLUMN's text
+// — and those strings are DATA. The population is unbounded and the map is
+// process-global with no eviction, so a query over a text column of
+// timestamps added one entry per distinct value for the process's lifetime
+// (#619).
+//
+// The bound is a generational reset rather than an LRU: the memo exists to
+// collapse repetition WITHIN a scan, so dropping the whole generation when
+// it fills costs a re-parse of the current working set and nothing else,
+// for one counter and no eviction bookkeeping.
+const temporalMemoCap = 4096
+
+// temporalMemo is a string→temporalParseResult memo with a hard entry cap.
+type temporalMemo struct {
+	m sync.Map
+	n atomic.Int64
+}
+
+func (c *temporalMemo) load(s string) (temporalParseResult, bool) {
+	v, ok := c.m.Load(s)
+	if !ok {
+		return temporalParseResult{}, false
+	}
+	return v.(temporalParseResult), true
+}
+
+func (c *temporalMemo) store(s string, r temporalParseResult) {
+	if c.n.Load() >= temporalMemoCap {
+		// Drop the generation. Concurrent stores may overshoot the cap by
+		// however many are in flight, which is bounded by the worker count
+		// and is why the gate asserts a ceiling rather than an equality.
+		c.m.Clear()
+		c.n.Store(0)
+	}
+	if _, loaded := c.m.LoadOrStore(s, r); !loaded {
+		c.n.Add(1)
+	}
+}
+
+func (c *temporalMemo) entries() int {
+	n := 0
+	c.m.Range(func(_, _ any) bool { n++; return true })
+	return n
+}
+
+func (c *temporalMemo) reset() {
+	c.m.Clear()
+	c.n.Store(0)
+}
+
 var (
-	dateEpochDaysCache    sync.Map // map[string]temporalParseResult → epoch days
-	timestampEpochMsCache sync.Map // map[string]temporalParseResult → epoch milliseconds
+	dateEpochDaysCache    temporalMemo // epoch days
+	timestampEpochMsCache temporalMemo // epoch milliseconds
 )
 
 // temporalParseResult is a cached string→epoch conversion's outcome,
@@ -5345,12 +5401,11 @@ type temporalParseResult struct {
 // serve a repeated literal from a map lookup instead of re-walking up to 4
 // time.Parse layouts every row.
 func parseDateToEpochDaysCachedOK(s string) (int64, bool) {
-	if v, ok := dateEpochDaysCache.Load(s); ok {
-		r := v.(temporalParseResult)
+	if r, ok := dateEpochDaysCache.load(s); ok {
 		return r.v, r.ok
 	}
 	days, ok := parseDateToEpochDaysOK(s)
-	dateEpochDaysCache.Store(s, temporalParseResult{v: days, ok: ok})
+	dateEpochDaysCache.store(s, temporalParseResult{v: days, ok: ok})
 	return days, ok
 }
 
@@ -5404,12 +5459,11 @@ func parseTimestampToEpochMs(s string) int64 {
 // caller warms the other's lookup too, and there is exactly one cache of
 // timestamp parses rather than one per caller.
 func parseTimestampToEpochMsCachedOK(s string) (int64, bool) {
-	if v, ok := timestampEpochMsCache.Load(s); ok {
-		r := v.(temporalParseResult)
+	if r, ok := timestampEpochMsCache.load(s); ok {
 		return r.v, r.ok
 	}
 	ms, ok := parseTimestampToEpochMsOK(s)
-	timestampEpochMsCache.Store(s, temporalParseResult{v: ms, ok: ok})
+	timestampEpochMsCache.store(s, temporalParseResult{v: ms, ok: ok})
 	return ms, ok
 }
 
