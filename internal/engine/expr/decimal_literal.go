@@ -282,6 +282,11 @@ type extremumArms struct {
 	// literal per PAIR asked bigint's input function for it and raised 22P02.
 	// Same publish boxOperand.kind uses, for the same reason.
 	common atomic.Int32
+	// nullif marks the table as NULLIF's, which shares it for the COMPARISON
+	// and for nothing else: NULLIF's TYPE is the operator its two arguments
+	// select rather than the ladder above (#757), so materialize must not
+	// bring its winner to this fold's width.
+	nullif bool
 }
 
 // commonKind folds every non-quoted argument's kind through PostgreSQL's
@@ -335,12 +340,39 @@ func (a *extremumArms) materialize(b *batch.RecordBatch, idx int, v any) any {
 	if a == nil || idx < 0 || idx >= len(a.ops) {
 		return v
 	}
-	if a.ops[idx].resolve(b) != boxQuoted {
-		return v
-	}
 	typ, ok := numberKindType(a.commonKind(b))
 	if !ok {
 		return v
+	}
+	if a.ops[idx].resolve(b) != boxQuoted {
+		if a.nullif {
+			// NULLIF shares this table for the COMPARISON and nothing else.
+			// Its TYPE is the operator its two arguments select, not the
+			// select_common_type ladder commonKind folds (#757), and its box
+			// is rewritten by nullifArmsBoxMode above — narrowing here would
+			// apply the WRONG rule and did: `NULLIF(int4, real)` is double
+			// precision on the server and 16777217 exactly, and the ladder's
+			// float32 turned it into 16777216.
+			return v
+		}
+		// A COLUMN's box, brought to the FOLD's width (#758).
+		//
+		// This used to return early: only a QUOTED literal was rewritten, so
+		// a column won at its OWN width and the comparison's common kind
+		// applied to the comparison alone. `GREATEST(real, integer)` folds to
+		// real, and over 16777216 and 16777217 — which are the SAME real —
+		// the integer arm won and came back as the integer 16777217. The
+		// PROJECTION narrowed it on the way into a real vector, which is why
+		// the bare call looked right; `GREATEST(real, integer) * 2` never
+		// reaches a vector before the multiply and answered 33554434 where
+		// PostgreSQL answers 33554432, and `CAST(... AS DECIMAL(30,6))` kept
+		// the integer's digits the same way.
+		//
+		// COALESCE over the same pair was ALREADY right, through
+		// choiceNumberBox — the routine this one now mirrors. That control is
+		// what localized the defect to pickExtremum rather than to "the
+		// composite fold".
+		return extremumWinnerBox(typ, v)
 	}
 	text := a.texts[idx]
 	// The value is materialized at the FOLD's type, never at the DECLARED one.
@@ -380,6 +412,51 @@ func (a *extremumArms) materialize(b *batch.RecordBatch, idx int, v any) any {
 		return n
 	}
 	return v
+}
+
+// extremumWinnerBox brings a non-quoted winner to the fold's numeric width.
+//
+// Only the FLOAT widths rewrite anything. An INTEGER fold's winners are
+// already integers; a DECIMAL fold's are already that type's text, and the
+// integer-to-text rewrite a DECIMAL fold needs is decimalChoiceBox's, which
+// runs above this through the choice-box path. Narrowing here and there would
+// be two rules for one question.
+//
+// A string box under a float fold is a DECIMAL column's rendered text, read
+// the same way choiceNumberBox reads one; a box that does not parse is left
+// exactly as it arrived, because the store's #361 guard reporting it is better
+// than a plausible wrong number (protocol method 8).
+func extremumWinnerBox(typ batch.TypeID, v any) any {
+	if typ != batch.TypeFloat32 && typ != batch.TypeFloat64 {
+		return v
+	}
+	var f float64
+	switch x := v.(type) {
+	case float64:
+		f = x
+	case float32:
+		f = float64(x)
+	case int64:
+		f = float64(x)
+	case int32:
+		f = float64(x)
+	case int:
+		f = float64(x)
+	case string:
+		g, st := kernel.FloatLitText(x, 64)
+		if st != kernel.NumConstOK {
+			return v
+		}
+		f = g
+	default:
+		return v
+	}
+	if typ == batch.TypeFloat32 {
+		// float64 of the NARROWED value, which is how ColRef.Eval boxes a
+		// real column — the same reading the quoted arm above gives.
+		return float64(float32(f))
+	}
+	return f
 }
 
 // armExtremumArms builds the per-argument table. It is always built — unlike

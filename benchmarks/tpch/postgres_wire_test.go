@@ -779,6 +779,41 @@ func wireCorpus() []wireCase {
 		{name: "CastFloatToIntegerRoundsHalfToEven",
 			sql: `SELECT CAST(r_val AS BIGINT) AS v FROM real_probe WHERE r_key IN (16, 17) ORDER BY r_key`},
 
+		// #758 — GREATEST/LEAST hand the winner over at the FOLD's width.
+		//
+		// The bare call was already right, because the projection narrowed the
+		// winner into the fold's vector on the way out; ARITHMETIC over it
+		// never reaches a vector before the operator, which is where the
+		// integer's own width survived. So the arithmetic entry is the one
+		// that gates the value, and the bare one gates the declaration.
+		{name: "GreatestRealInteger",
+			sql: `SELECT GREATEST(r_val, 16777217) AS v FROM real_probe WHERE r_key IN (16, 20) ORDER BY r_key`,
+			pins: map[string]string{
+				wirePropFloatRender: "DELIBERATE and pre-existing, independent of #758's narrowing: " +
+					"wadjet spells a real 16777216 as \"16777216\" and PostgreSQL as " +
+					"\"1.6777216e+07\" — the same number under the same OID, differing only in " +
+					"where each engine switches to exponent form. Every other property of this " +
+					"statement stays gated, and the arithmetic entry below — where the VALUE " +
+					"this issue is about lives — is unpinned",
+			}},
+		// The integer operand is the LITERAL 16777217 and not `r_grp`, and
+		// that is what makes this entry able to fail. `r_grp` is 0..3 on every
+		// row of real_probe, so the REAL arm always won and the integer-arm
+		// handover #758 is about never happened: the entry PASSED with the
+		// fix's source reverted while calling itself "the one that gates the
+		// value". 16777217 and the real 16777216 are the SAME real, so either
+		// may win the comparison and the value differs by 1 unless the winner
+		// is brought to the fold's width — which is the defect exactly.
+		//
+		// A literal rather than a fixture row because `real_probe.r_grp` is
+		// cast to DECIMAL(9,2) by another corpus entry, and an r_grp past
+		// 2^24 overflows that: the oracle then refuses the OTHER query and
+		// stops being ground truth for it.
+		{name: "GreatestRealIntegerArithmetic",
+			sql: `SELECT GREATEST(r_val, 16777217) * 2 AS v FROM real_probe WHERE r_key IN (16, 20) ORDER BY r_key`},
+		{name: "CtlCoalesceRealIntegerArithmetic",
+			sql: `SELECT COALESCE(r_val, 16777217) * 2 AS v FROM real_probe WHERE r_key IN (16, 20) ORDER BY r_key`},
+
 		// #760 — SUM and MIN/MAX over a REAL answer at REAL width.
 		//
 		// The values agree here, so only the declared OID separates the right

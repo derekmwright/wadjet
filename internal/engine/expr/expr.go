@@ -2950,6 +2950,7 @@ func (e *FuncCall) resolveFnSlow() {
 	case "nullif":
 		if len(e.Args) >= 2 {
 			e.nullifArms = armExtremumArms(e.Args)
+			e.nullifArms.nullif = true
 		}
 		// The box follows the DECLARATION's rule, which for NULLIF is the
 		// operator its two arguments select rather than a fold over them

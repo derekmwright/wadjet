@@ -1538,13 +1538,27 @@ var nfPosRefusals = map[string]string{
 // value to real before the union widens it, as PostgreSQL does, and the DAG's
 // arm reconciliation does not. That asymmetry is part of #758.
 var nfPosPins = map[string]string{
+	// The ARITHMETIC and SET-OP rows are GONE (#758, 2026-09-03).
+	// extremumArms.materialize rewrote only a QUOTED literal's box, so a
+	// COLUMN won at its OWN width: `GREATEST(real, '3.5', integer)` folds to
+	// real, the integer arm won over 16777216/16777217 — the same real — and
+	// came back as the integer. The projection narrowed it into a real
+	// vector, which is why the bare call looked right and `* 2` answered
+	// 33554434. The winner is brought to the fold's width now
+	// (extremumWinnerBox), and COALESCE over the same pair — which was
+	// ALREADY right, through choiceNumberBox — is what localized it.
+	//
+	// The two CAST rows stay, at a NEW value, and the pin's own comment
+	// predicted it: PostgreSQL renders a `float4 -> numeric` cast at six
+	// SIGNIFICANT digits (16777200.000000), which is a rendering rule this
+	// engine does not have. What moved is the DIGIT the fold was wrong
+	// about — 16777217 was the integer's value at the integer's width, and
+	// 16777216 is the real the fold resolves to. Closer, and still not
+	// PostgreSQL's; the residual is the float4-to-numeric rendering alone.
 	"RealBesideDecimal|CastOfTheComposite|dag":        "1,0.100000;2,<NULL>;3,16777216.000000;4,-0.500000",
 	"RealBesideDecimal|CastOfTheComposite|single":     "1,0.100000;2,<NULL>;3,16777216.000000;4,-0.500000",
-	"RealQuotedFractionInt|ArithmeticOverIt|dag":      "1,7;2,7;3,33554434;4,7",
-	"RealQuotedFractionInt|ArithmeticOverIt|single":   "1,7;2,7;3,33554434;4,7",
-	"RealQuotedFractionInt|CastOfTheComposite|dag":    "1,3.500000;2,3.500000;3,16777217.000000;4,3.500000",
-	"RealQuotedFractionInt|CastOfTheComposite|single": "1,3.500000;2,3.500000;3,16777217.000000;4,3.500000",
-	"RealQuotedFractionInt|SetOpArm|dag":              "-0.25;0.2;3.5;3.5;3.5;16777217;16777217;<NULL>",
+	"RealQuotedFractionInt|CastOfTheComposite|dag":    "1,3.500000;2,3.500000;3,16777216.000000;4,3.500000",
+	"RealQuotedFractionInt|CastOfTheComposite|single": "1,3.500000;2,3.500000;3,16777216.000000;4,3.500000",
 }
 
 // TestNumericFoldValuePositionsTwoPath takes the composites this fix moves

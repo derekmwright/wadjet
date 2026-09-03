@@ -43,7 +43,7 @@ func a2DomainRun(res *oracle.Result, err error) ([]string, error) {
 // A function answers in its argument's own DOMAIN, and an aggregate at its
 // column's own WIDTH — on both engines, and at the width PostgreSQL declares.
 //
-// Three issues, one consumer. `physical.nodeDeclaredType` reads whatever the
+// Four issues, one consumer. `physical.nodeDeclaredType` reads whatever the
 // declaration layer says and turns it into the wire's OID; when that
 // declaration is a FIXED float64 the kernel has no domain to compute in, and
 // the wrong OID becomes a wrong NUMBER:
@@ -71,6 +71,11 @@ type a2DomainCell struct {
 	issue, name, sql string
 	want             []string
 	pgSays           string
+	// wantRoutes is the routing delta each DAG arm must show. The zero value
+	// means the DAG EXECUTED this shape; anything else names the refusal it
+	// took, and says that the two DAG arms are the coordinator-local pipeline
+	// for this cell (rule 11).
+	wantRoutes a2Routes
 }
 
 func a2DomainCells() []a2DomainCell {
@@ -126,14 +131,28 @@ func a2DomainCells() []a2DomainCell {
 		// PostgreSQL's float-to-integer cast is rint(), half to EVEN; its
 		// numeric-to-integer cast is not. Both are asserted, because a fix
 		// that moved them together would be a new divergence.
+		// `FROM numfold WHERE id = 1` and not a bare SELECT: a table-less
+		// SELECT ROUTES (#806) and its DAG arms would be the local pipeline.
+		// The operands are still literals, which is what the rounding rule
+		// keys on.
 		{issue: "#768", name: "cast_float_to_integer_is_half_to_even",
-			sql:    `SELECT CAST(CAST(-0.5 AS DOUBLE) AS BIGINT) AS a, CAST(CAST(0.5 AS DOUBLE) AS BIGINT) AS b, CAST(CAST(2.5 AS DOUBLE) AS BIGINT) AS c, CAST(CAST(1.5 AS DOUBLE) AS BIGINT) AS d`,
+			sql: `SELECT CAST(CAST(-0.5 AS DOUBLE) AS BIGINT) AS a, CAST(CAST(0.5 AS DOUBLE) AS BIGINT) AS b, ` +
+				`CAST(CAST(2.5 AS DOUBLE) AS BIGINT) AS c, CAST(CAST(1.5 AS DOUBLE) AS BIGINT) AS d ` +
+				`FROM numfold WHERE id = 1`,
 			want:   []string{"a=int64:0|b=int64:0|c=int64:2|d=int64:2"},
 			pgSays: "0, 0, 2, 2"},
 		{issue: "#768", name: "ctl_cast_numeric_to_integer_is_half_away",
-			sql:    `SELECT CAST(-0.5 AS BIGINT) AS a, CAST(2.5 AS BIGINT) AS b`,
+			sql:    `SELECT CAST(-0.5 AS BIGINT) AS a, CAST(2.5 AS BIGINT) AS b FROM numfold WHERE id = 1`,
 			want:   []string{"a=int64:-1|b=int64:3"},
 			pgSays: "-1, 3 — the other rounding, on the same server"},
+		// The table-less spelling of the same pair, with its route ASSERTED:
+		// #806 refuses a SELECT with no FROM and the coordinator answers, so
+		// this cell's DAG arms are that pipeline and its claim is about it.
+		{issue: "#768", name: "ctl_cast_numeric_tableless_routes",
+			sql:        `SELECT CAST(-0.5 AS BIGINT) AS a, CAST(2.5 AS BIGINT) AS b`,
+			want:       []string{"a=int64:-1|b=int64:3"},
+			wantRoutes: a2Routes{TableLess: 1},
+			pgSays:     "-1, 3 — routed on both DAG arms"},
 
 		// ---- #757: NULLIF resolves through the comparison operator --------
 		{issue: "#757", name: "nullif_integer_against_real",
@@ -166,10 +185,69 @@ func a2DomainCells() []a2DomainCell {
 				"per-VALUE dscale and takes the integer's 0, a wadjet DECIMAL column has one " +
 				"declared scale for the whole column and renders at it. Same number"},
 
+		// ---- #758: GREATEST/LEAST hand over the winner at the fold's width ---
+		//
+		// `extremumArms.materialize` rewrote only a QUOTED literal's box, so a
+		// COLUMN won at its OWN width. `GREATEST(real, integer)` folds to real
+		// and 16777216 / 16777217 are the SAME real, so the integer arm won
+		// and came back as the integer. The PROJECTION narrowed it into a real
+		// vector, which is why the bare call looked right — and `* 2` never
+		// reaches a vector before the multiply, so it answered 33554434 where
+		// PostgreSQL answers 33554432.
+		//
+		// COALESCE over the same pair was ALREADY right (choiceNumberBox), and
+		// that is the control below: it localizes the defect to pickExtremum
+		// rather than to "the composite fold", and it is the routine the fix
+		// mirrors.
+		{issue: "#758", name: "greatest_real_integer_arithmetic",
+			sql: `SELECT id, GREATEST(n_f32, n_i32) * 2 AS v FROM numfold ORDER BY id`,
+			want: []string{
+				"id=int64:1|v=float64:6", "id=int64:2|v=NULL",
+				"id=int64:3|v=float64:3.3554432e+07", "id=int64:4|v=float64:-1"},
+			pgSays: "6, NULL, 33554432, -1 — it answered 33554434 for the third"},
+		{issue: "#758", name: "greatest_real_integer_projection",
+			sql: `SELECT id, GREATEST(n_f32, n_i32) AS v FROM numfold ORDER BY id`,
+			want: []string{
+				"id=int64:1|v=float32:3", "id=int64:2|v=NULL",
+				"id=int64:3|v=float32:1.6777216e+07", "id=int64:4|v=float32:-0.5"},
+			pgSays: "real: 3, NULL, 1.6777216e+07, -0.5 — right BEFORE this too, " +
+				"because the projection narrowed it; that is what hid the defect"},
+		// LEAST DOES detect the defect, with a strict MINIMUM past -2^24 —
+		// the first version of this cell said it could not, because the
+		// fixture's 16777217 is a maximum. A negative pair needs no fixture
+		// change and makes the control a gate: the integer arm wins, and its
+		// value differs by 2 (after the *2) unless it is brought to the
+		// fold's REAL width. Both measured on PostgreSQL 17.
+		{issue: "#758", name: "least_real_integer_wins_at_real_width",
+			sql: `SELECT LEAST(CAST(-16777216 AS REAL), CAST(-16777219 AS BIGINT)) * 2 AS a, ` +
+				`LEAST(CAST(-16777216 AS REAL), CAST(-16777217 AS INTEGER)) * 2 AS b ` +
+				`FROM numfold WHERE id = 1`,
+			want:   []string{"a=float64:-3.355444e+07|b=float64:-3.3554432e+07"},
+			pgSays: "-33554440, -33554432 — with #758 reverted: -33554438, -33554434"},
+		{issue: "#758", name: "ctl_least_real_integer_arithmetic",
+			sql: `SELECT id, LEAST(n_f32, n_i32) * 2 AS v FROM numfold ORDER BY id`,
+			want: []string{
+				"id=int64:1|v=float64:0.20000000298023224", "id=int64:2|v=NULL",
+				"id=int64:3|v=float64:3.3554432e+07", "id=int64:4|v=float64:-10"},
+			pgSays: "0.20000000298023224, NULL, 33554432, -10 — LEAST shares the site"},
+		{issue: "#758", name: "ctl_coalesce_real_integer_arithmetic",
+			sql: `SELECT id, COALESCE(n_f32, n_i32) * 2 AS v FROM numfold ORDER BY id`,
+			want: []string{
+				"id=int64:1|v=float64:0.20000000298023224", "id=int64:2|v=NULL",
+				"id=int64:3|v=float64:3.3554432e+07", "id=int64:4|v=float64:-1"},
+			pgSays: "the reference: right before this change and after it"},
+		{issue: "#758", name: "ctl_greatest_grouped_key",
+			sql: `SELECT GREATEST(n_f32, n_i32) AS k, COUNT(*) AS n FROM numfold ` +
+				`GROUP BY GREATEST(n_f32, n_i32) ORDER BY k`,
+			want: []string{
+				"k=NULL|n=int64:1", "k=float32:-0.5|n=int64:1",
+				"k=float32:3|n=int64:1", "k=float32:1.6777216e+07|n=int64:1"},
+			pgSays: "four groups — the composite as a GROUP BY key, right before and after"},
+
 		// ---- #760: REAL aggregates at REAL width --------------------------
 		{issue: "#760", name: "sum_over_real",
-			sql: `SELECT SUM(n_f32) AS v FROM numfold`,
-			want: []string{"v=float32:1.6777216e+07"},
+			sql:    `SELECT SUM(n_f32) AS v FROM numfold`,
+			want:   []string{"v=float32:1.6777216e+07"},
 			pgSays: "real 1.6777216e+07 — 16777215.600000001 on the DAG before this"},
 		{issue: "#760", name: "min_over_real",
 			sql:    `SELECT MIN(n_f32) AS v FROM numfold`,
@@ -250,8 +328,10 @@ func TestAFunctionAnswersInItsArgumentsOwnDomain(t *testing.T) {
 				name string
 				c    *Coordinator
 			}{{"dag", coord}, {"dag-shuffled", coordB}} {
+				before := a2ReadRoutes(arm.c)
 				got, err := a2DomainRun(tmdRunDAG(ctx, arm.c, tc.sql))
 				check(arm.name, got, err)
+				a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.c), tc.wantRoutes, tc.sql)
 			}
 		})
 	}
