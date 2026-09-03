@@ -1513,20 +1513,33 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 	// Source table or subquery
 	sourceTok := l.nextToken()
 	if sourceTok.typ == TokenLParen {
-		// Subquery — collect balanced parens
+		// Subquery — collect balanced parens THROUGH THE LEXER.
+		//
+		// It used to be a character loop, which cannot tell a parenthesis
+		// from one inside a string literal: `USING (SELECT id, ')' AS c FROM
+		// src) s` closed the subquery at the quoted `)` and failed with
+		// "expected ON", and the `'('` spelling failed as an unterminated
+		// subquery. PostgreSQL runs both. It is the same "a scan that does
+		// not know its own nesting" line #722 set out to close, and the one
+		// MERGE scan that fix left on the old pattern (review P16).
 		depth := 1
 		start := l.pos
+		end := l.pos
 		for depth > 0 {
-			ch := l.next()
-			if ch == '(' {
+			tok := l.nextToken()
+			switch tok.typ {
+			case TokenLParen:
 				depth++
-			} else if ch == ')' {
+			case TokenRParen:
 				depth--
-			} else if ch == eof {
+			case TokenEOF:
 				return nil, fmt.Errorf("MERGE: unterminated subquery in USING")
 			}
+			if depth > 0 {
+				end = l.pos
+			}
 		}
-		info.Source = "(" + strings.TrimSpace(l.input[start:l.pos-1]) + ")"
+		info.Source = "(" + strings.TrimSpace(l.input[start:end]) + ")"
 		l.start = l.pos
 	} else if sourceTok.typ == TokenIdent {
 		info.Source = strings.ToLower(sourceTok.val)
@@ -1592,9 +1605,10 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		// not — the per-source-row `matched` bookkeeping is the right signal
 		// but is not recorded per target. BY TARGET is a synonym for plain
 		// NOT MATCHED and maps onto the existing branch. This is a FEATURE,
-		// not a wrong answer, and it is pinned four ways: the two 0A000 rows
+		// not a wrong answer, and it is pinned three ways: the two 0A000 rows
 		// in the DML census, TestMergeNotMatchedBySourceIsReportedAsUnsupported,
-		// and the two limitation lines in docs/sql-reference.md.
+		// and the limitation bullet in docs/sql-reference.md, which covers
+		// both forms in one line.
 		if l.peekToken().typ == TokenKWBy {
 			l.nextToken()
 			side := l.nextToken()

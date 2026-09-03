@@ -425,6 +425,36 @@ func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 	}
 }
 
+// LeadingKeyword returns a statement's first keyword, uppercased, with leading
+// whitespace and comments skipped — or "" when the statement has no keyword.
+//
+// It exists because a TEXT PREFIX is not a classifier. pgwire decided "is this
+// DML" with `strings.HasPrefix(upper, "INSERT ")` — a literal space — so
+// `INSERT\nINTO t …`, `UPDATE\tt SET …` and `/* hint */ UPDATE …` all missed
+// the branch. Multi-line SQL is what every ORM and JDBC prepared statement
+// emits and a `/* … */` prefix is what sqlcommenter prepends, so the miss was
+// the common case, not the corner: those statements fell through to the QUERY
+// path, which meant Describe EXECUTED the write and Execute ran it AGAIN — a
+// duplicated row reported as `SELECT 1` (review B3).
+//
+// The lexer already knows what a comment and a quoted identifier are, so this
+// asks it rather than re-deciding.
+func LeadingKeyword(sql string) string {
+	l := newLexer(sql)
+	for {
+		tok := l.nextToken()
+		switch tok.typ {
+		case TokenEOF:
+			return ""
+		case TokenLParen:
+			// `(SELECT …)`: a parenthesized statement is not DML.
+			return "("
+		default:
+			return strings.ToUpper(tok.val)
+		}
+	}
+}
+
 // insertValueText renders one VALUES entry as the literal text the executors'
 // converters read.
 //

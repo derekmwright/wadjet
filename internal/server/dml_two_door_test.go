@@ -38,43 +38,60 @@ func TestEveryDMLDoorAnswersTheSame(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sql  string
+		// pgTag is PostgreSQL 17's CommandComplete for this statement,
+		// MEASURED. Comparing the two doors to each other could never fail on
+		// the tag, because both built it the same way; comparing them to
+		// PostgreSQL is what makes the doc line "the command tag does not
+		// depend on which door it arrived by" checkable (review B8).
+		pgTag string
 	}{
 		// The four verbs, firing.
-		{"INSERT", "INSERT INTO pr815 (id, n, name) VALUES (9, 90, 'z')"},
-		{"INSERT no column list", "INSERT INTO pr815 VALUES (8, 80, 'y')"},
-		{"INSERT multi row", "INSERT INTO pr815 (id, n, name) VALUES (7, 70, 'w'), (6, 60, 'v')"},
-		{"UPDATE", "UPDATE pr815 SET n = 99 WHERE id = 1"},
-		{"UPDATE all rows", "UPDATE pr815 SET n = 0 WHERE id > 0"},
-		{"UPDATE expression over the column", "UPDATE pr815 SET n = n + 1 WHERE id = 2"},
-		{"DELETE", "DELETE FROM pr815 WHERE id = 1"},
-		{"DELETE many", "DELETE FROM pr815 WHERE id > 1"},
-		{"MERGE update", "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = s.n"},
-		{"MERGE delete", "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED THEN DELETE"},
-		{"MERGE insert", "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)"},
+		{name: "INSERT", sql: "INSERT INTO pr815 (id, n, name) VALUES (9, 90, 'z')", pgTag: "INSERT 0 1"},
+		{name: "INSERT no column list", sql: "INSERT INTO pr815 VALUES (8, 80, 'y')", pgTag: "INSERT 0 1"},
+		{name: "INSERT multi row", sql: "INSERT INTO pr815 (id, n, name) VALUES (7, 70, 'w'), (6, 60, 'v')", pgTag: "INSERT 0 2"},
+		{name: "UPDATE", sql: "UPDATE pr815 SET n = 99 WHERE id = 1", pgTag: "UPDATE 1"},
+		{name: "UPDATE all rows", sql: "UPDATE pr815 SET n = 0 WHERE id > 0", pgTag: "UPDATE 3"},
+		{name: "UPDATE expression over the column", sql: "UPDATE pr815 SET n = n + 1 WHERE id = 2", pgTag: "UPDATE 1"},
+		{name: "DELETE", sql: "DELETE FROM pr815 WHERE id = 1", pgTag: "DELETE 1"},
+		{name: "DELETE many", sql: "DELETE FROM pr815 WHERE id > 1", pgTag: "DELETE 2"},
+		{name: "MERGE update", sql: "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = s.n"},
+		{name: "MERGE delete", sql: "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED THEN DELETE"},
+		{name: "MERGE insert", sql: "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id, n, name) VALUES (s.id, s.n, s.name)"},
 
 		// The four verbs, matching nothing: the count is the whole answer.
-		{"UPDATE no match", "UPDATE pr815 SET n = 99 WHERE id = 99"},
-		{"DELETE no match", "DELETE FROM pr815 WHERE id = 99"},
-		{"MERGE no match", "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED AND s.n > 100000 THEN DELETE"},
+		{name: "UPDATE no match", sql: "UPDATE pr815 SET n = 99 WHERE id = 99", pgTag: "UPDATE 0"},
+		{name: "DELETE no match", sql: "DELETE FROM pr815 WHERE id = 99", pgTag: "DELETE 0"},
+		{name: "MERGE no match", sql: "MERGE INTO pr815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED AND s.n > 100000 THEN DELETE"},
 
 		// Refusals: the SQLSTATE is the answer, and the table must be
 		// untouched on both doors.
-		{"DELETE unknown table", "DELETE FROM nosuch815 WHERE id = 1"},
-		{"UPDATE unknown table", "UPDATE nosuch815 SET n = 1 WHERE id = 1"},
-		{"INSERT unknown table", "INSERT INTO nosuch815 (id) VALUES (1)"},
-		{"MERGE unknown target", "MERGE INTO nosuch815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED THEN DELETE"},
-		{"DELETE unknown column", "DELETE FROM pr815 WHERE nosuchcol = 1"},
-		{"UPDATE unknown SET target", "UPDATE pr815 SET nosuchcol = 1 WHERE id = 1"},
-		{"DELETE wrong-typed literal", "DELETE FROM pr815 WHERE id = 'abc'"},
-		{"UPDATE table-qualified WHERE under an alias", "UPDATE pr815 AS a SET n = 1 WHERE pr815.id = 1"},
-		{"INSERT value count mismatch", "INSERT INTO pr815 (id, n) VALUES (5)"},
-		{"MERGE unknown ON column", "MERGE INTO pr815 AS t USING src815 AS s ON t.nosuchcol = s.id WHEN MATCHED THEN DELETE"},
+		{name: "DELETE unknown table", sql: "DELETE FROM nosuch815 WHERE id = 1"},
+		{name: "UPDATE unknown table", sql: "UPDATE nosuch815 SET n = 1 WHERE id = 1"},
+		{name: "INSERT unknown table", sql: "INSERT INTO nosuch815 (id) VALUES (1)"},
+		{name: "MERGE unknown target", sql: "MERGE INTO nosuch815 AS t USING src815 AS s ON t.id = s.id WHEN MATCHED THEN DELETE"},
+		{name: "DELETE unknown column", sql: "DELETE FROM pr815 WHERE nosuchcol = 1"},
+		{name: "UPDATE unknown SET target", sql: "UPDATE pr815 SET nosuchcol = 1 WHERE id = 1"},
+		{name: "DELETE wrong-typed literal", sql: "DELETE FROM pr815 WHERE id = 'abc'"},
+		{name: "UPDATE table-qualified WHERE under an alias", sql: "UPDATE pr815 AS a SET n = 1 WHERE pr815.id = 1"},
+		{name: "INSERT value count mismatch", sql: "INSERT INTO pr815 (id, n) VALUES (5)"},
+		{name: "MERGE unknown ON column", sql: "MERGE INTO pr815 AS t USING src815 AS s ON t.nosuchcol = s.id WHEN MATCHED THEN DELETE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			embedded := embeddedDoorAnswer(t, tc.sql)
 			over := httpDoorAnswer(t, tc.sql)
 			if embedded != over {
 				t.Errorf("%s\n  embedded door: %s\n  HTTP door:     %s", tc.sql, embedded, over)
+			}
+			// The third comparison, and the only one that can fail on a tag
+			// both doors render identically and wrongly (review B8).
+			if tc.pgTag != "" {
+				want := "tag=" + tc.pgTag + " "
+				for _, got := range []string{embedded, over} {
+					if !strings.HasPrefix(got, want) {
+						t.Errorf("%s\n  answered %s\n  PostgreSQL 17 CommandComplete: %s",
+							tc.sql, got, tc.pgTag)
+					}
+				}
 			}
 		})
 	}
@@ -125,7 +142,11 @@ func embeddedDoorAnswer(t *testing.T, sql string) string {
 	if execErr != nil {
 		state = doorStateOrNone(execErr)
 	} else {
-		tag = fmt.Sprintf("%s %d", res.Command, res.RowsAffected)
+		// res.Tag(), not a local format — the gate used to build the tag the
+		// same way BOTH doors did, so it could not see that the HTTP door
+		// dropped INSERT's oid field while pgwire and PostgreSQL keep it
+		// (review B8).
+		tag = res.Tag()
 	}
 	return doorAnswer(tag, state, embeddedDigest(t, db))
 }

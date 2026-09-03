@@ -575,8 +575,13 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 	resp := QueryResponse{
 		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
 		Columns: []string{"result"},
-		Rows:    []map[string]any{{"result": fmt.Sprintf("%s %d", result.Command, result.RowsAffected)}},
-		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+		// result.Tag(), not a local format: PostgreSQL's INSERT tag has an oid
+		// field and pgwire renders it, so building the tag here made the same
+		// statement `INSERT 0 3` over the wire and `INSERT 3` over REST —
+		// under a doc line promising the tag does not depend on the door
+		// (review B8).
+		Rows:  []map[string]any{{"result": result.Tag()}},
+		Stats: QueryStats{Elapsed: time.Since(start).String()},
 	}
 
 	if s.metrics != nil {
@@ -603,7 +608,14 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 // (RecoverQueryPanic, #677), so a statement that panics still reaches the
 // client as a SQLSTATE rather than as a dropped connection.
 func (s *Server) dml() *wadjet.DB {
-	return wadjet.Attach(s.catalog)
+	db := wadjet.Attach(s.catalog)
+	// The cost guard #803 installed on this server's SELECT path. MERGE reads
+	// its source through db.Query — an arbitrary SELECT — so a door that
+	// gained MERGE here would otherwise run one with no limit at all, on the
+	// one entry point #803 was filed about (review P3). A door that runs an
+	// unbounded SELECT is the defect that flag exists to prevent.
+	db.SetQueryLimits(s.config.QueryLimits, s.config.RoleLimits)
+	return db
 }
 
 func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {

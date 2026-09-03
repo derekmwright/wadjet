@@ -26,6 +26,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -940,7 +941,7 @@ func (c *pgConn) handleQuery(sql string) {
 	// merge reported `SELECT 1` — a command tag naming the wrong statement
 	// and the wrong count, which for a client is the statement's whole
 	// answer. PostgreSQL reports `MERGE <n>` (#686 R2-5).
-	if isDMLSQL(upper) {
+	if isDMLSQL(sql) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {
@@ -1256,7 +1257,7 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	// `UPDATE … WHERE version = ?`, then "if 0 rows, someone else won" —
 	// could never detect a conflict. Not describing it here is half the fix;
 	// handleExecute's DML branch is the other half.
-	if isDMLSQL(strings.ToUpper(sql)) {
+	if isDMLSQL(sql) {
 		c.closeDescribeCache()
 		c.describedSQL = sql
 		c.sendNoData()
@@ -1419,7 +1420,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// The same shape as the simple path's branch, minus the ReadyForQuery:
 	// on this protocol Sync sends it, and sending one here would put a second
 	// 'Z' on the wire for one Query message.
-	if isDMLSQL(upper) {
+	if isDMLSQL(sql) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {
@@ -2857,12 +2858,18 @@ func extractSelectColumns(sql string) []string {
 // test inline and the extended path had none at all, so every DML statement
 // over the extended protocol — the protocol pgx, JDBC, psycopg and every ORM
 // use — fell through to the QUERY path and reported `SELECT 1` (#816).
-func isDMLSQL(upper string) bool {
-	upper = strings.TrimSpace(upper)
-	return strings.HasPrefix(upper, "INSERT ") ||
-		strings.HasPrefix(upper, "UPDATE ") ||
-		strings.HasPrefix(upper, "DELETE ") ||
-		strings.HasPrefix(upper, "MERGE ")
+//
+// It reads the leading KEYWORD TOKEN, not a text prefix. The prefix version
+// tested `HasPrefix(upper, "INSERT ")` with a literal space, so multi-line SQL
+// and a leading `/* hint */` — what ORMs and APM layers actually emit — missed
+// the branch, and missing it meant Describe EXECUTED the write and Execute ran
+// it again (review B3).
+func isDMLSQL(sql string) bool {
+	switch plansql.LeadingKeyword(sql) {
+	case "INSERT", "UPDATE", "DELETE", "MERGE":
+		return true
+	}
+	return false
 }
 
 func isCommandSQL(sql string) bool {
@@ -3998,12 +4005,7 @@ func appendInt32(buf []byte, v int32) []byte {
 // DELETE with "could not interpret result from server: DELETE 0 0" and drivers
 // that parse the tag for an affected-row count read the wrong field.
 func commandTag(command string, rows int64) string {
-	cmd := strings.ToUpper(strings.TrimSpace(command))
-	if cmd == "" {
-		cmd = "SELECT"
-	}
-	if cmd == "INSERT" {
-		return fmt.Sprintf("INSERT 0 %d", rows)
-	}
-	return fmt.Sprintf("%s %d", cmd, rows)
+	// One renderer for every door (review B8): the HTTP door used to build the
+	// tag itself and dropped INSERT's oid field.
+	return wadjet.CommandTag(command, rows)
 }
