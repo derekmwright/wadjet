@@ -1,19 +1,55 @@
-# Wadjet
+# Wadjet — distributed SQL analytics engine in Go
 
 [![Release](https://img.shields.io/github/v/release/derekmwright/wadjet?sort=semver)](https://github.com/derekmwright/wadjet/releases) [![CI](https://img.shields.io/github/actions/workflow/status/derekmwright/wadjet/ci.yml?branch=main&label=CI)](https://github.com/derekmwright/wadjet/actions/workflows/ci.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/go.mod) [![License](https://img.shields.io/github/license/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/derekmwright/wadjet)](https://goreportcard.com/report/github.com/derekmwright/wadjet) [![Issues](https://img.shields.io/github/issues/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/issues)
 
-A lightweight analytical query engine in pure Go. Columnar storage on Parquet, vectorized execution, full SQL, and optional distributed processing over NATS and S3-compatible object storage.
+**Distributed SQL, analytical (OLAP) workloads.** A columnar query engine with
+vectorized execution, a cost-based optimizer, and spill-to-disk in every
+pipeline breaker — for analytical SQL over data too big for one machine.
+
+**Open formats on object storage.** Tables are Apache Parquet files on any
+S3-compatible store (AWS S3, MinIO, R2), queried in place with no
+import step; Apache Iceberg table metadata is read natively. No proprietary
+storage format.
+
+**One Go binary.** No JVM, no CGo dependencies, no external query engine. Run
+it standalone, as a coordinator plus horizontally scaled workers, or embedded
+as a Go library; clients connect over the PostgreSQL wire protocol, HTTP,
+gRPC, or MCP.
+
+**Network telemetry is the niche it is built for.** IPv4, IPv6, CIDR, MAC,
+Port and Protocol are first-class column types with 100+ network functions —
+CIDR and subnet math, TCP/DNS/TLS/HTTP inspection, ICMP, IPv6 tunneling,
+JA3/JA3S fingerprinting, GeoIP/ASN enrichment — so flow and packet analytics
+are ordinary SQL instead of string parsing.
 
 ## Why Wadjet
 
 - **No coordinator bottleneck** — the coordinator plans queries and schedules tasks; workers read from and write results to object storage directly. The one exception is the small-query fast path, which executes queries under `--local-fastpath-bytes` in-process on the coordinator.
-- **Lightweight workers** — viable at 512 MB RAM with spill-to-disk. Scale to zero, start in under 2 seconds.
+- **Fast start, small idle footprint** — a standalone process (embedded NATS + coordinator + worker) answers on the PostgreSQL wire protocol a measured 43 ms after exec and idles at ~46 MiB RSS; a worker process idles at ~33 MiB. Method and machine: [Benchmarks index § Local process measurements](docs/benchmarks/README.md#local-process-measurements-2026-09-03).
+- **Memory is a budget, not a requirement** — every pipeline breaker (hash join, hash aggregate, sort, window) spills to disk past its per-task `--memory-budget`, and a heap-pressure valve spills again if the process itself is running out of room, so degradation is slowdown rather than process death ([ADR-0006](docs/adr/0006-never-oom-memory-model.md), [ADR-0027](docs/adr/0027-a-spill-gate-proves-it-spilled.md)). Measured: the 22-query TPC-H SF1 suite completes single-process with the Go heap capped at 1 GiB — 10 pressure spills, 1.35 GiB peak RSS, identical answers, 3.2–5.0× the query time of the same suite uncapped (two single runs) ([method](docs/benchmarks/README.md#local-process-measurements-2026-09-03)).
 - **Single binary** — run standalone for development or split into coordinator + workers for production.
 - **Pure Go** — no JVM, no CGo, no external query engine dependencies. Custom recursive descent SQL parser, vectorized batch execution, typed kernel dispatch.
 - **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 100+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
 - **Nested types** — ARRAY, ROW/STRUCT, and MAP column types with dot-notation field access, array functions, and full Parquet round-trip.
 - **Table functions** — `read_json()`, `read_csv()`, `read_parquet()` query local files and HTTP URLs directly from SQL, with glob patterns and named parameters.
 - **GeoIP enrichment** — optional MaxMind GeoLite2/GeoIP2 integration with 11 functions for IP geolocation (country, city, subdivision, coordinates, timezone, continent) and ASN lookup (AS number, organization).
+
+## How Wadjet compares
+
+Wadjet is a distributed SQL engine over a lake: it owns no storage format,
+reads Parquet and Iceberg in place on object storage, and puts coordinator +
+worker execution behind the kind of vectorized engine that is usually
+single-node. The comparisons below are measured or explicitly unmeasured —
+every number links to the memo that produced it, and where a head-to-head has
+not been run, that is said rather than implied. What Wadjet does *not* do yet,
+and against whom, is catalogued in
+[Competitive Gaps](docs/competitive-gaps.md).
+
+- **Trino** — the one measured head-to-head. Identical hardware, same day, SF100 TPC-H on S3 (coordinator `c7g.2xlarge` + 3× `c7gd.4xlarge` workers), Trino 470 in fault-tolerant execution (`retry-policy=TASK` + S3 exchange spooling): steady suite **198.5 s vs 221.2 s** (−10 %) as means of runs 3–4, per-query geomean **−19 %**, **12 of 22** queries won, cold a tie ([comparison memo](docs/benchmarks/trino-comparison-2026-08-14.md), 2026-08-14). Wadjet has since improved on that topology — steady mean 198.5 s → **125.3 s**, best single suite wall 187.2 s → **123.8 s** ([baseline memo](docs/benchmarks/sf100-baseline-v0.18.12-2026-09-02.md), 2026-09-02) — while Trino has not been re-run, so the *current* gap is unmeasured.
+- **ClickHouse** — no head-to-head has been run. The only shared reference point is ClickBench on its official `c6a.4xlarge` spec, where Wadjet's own 43-query run placed **combined #41, hot #66, cold #17 in a 136-entry field** for that machine — the 135 published entries plus our own unpublished row, which `rank.py` appends before scoring. Scored by `benchmarks/clickbench/rank.py`, which reproduces the official formula against a local clone of the published listing (2026-08-22, v0.17.0-clawback, `benchmarks/clickbench/results-c6a-20260822-v0170.json`); not re-run since, not an upstream listing entry, and the listing snapshot it was scored against is not committed here.
+- **DuckDB** — embedded single-process analytical SQL, and the execution model closest to Wadjet's; Wadjet adds distributed execution over object storage plus a server (pgwire, HTTP, gRPC). DuckDB is also Wadjet's value oracle, in two gates that run before a merge or a release rather than in `ci.yml`: `TestDuckDBCompare` (TPC-H, both execution arms against a stored DuckDB fingerprint of the committed 3.7 MB SF0.01 Parquet fixture, loaded into an in-memory store — the live DuckDB binary comparison behind it is opt-in via `WADJET_DUCKDB_COMPARE=1`) and `TestHitsCorrectness` (ClickBench, cell-exact against a DuckDB baseline over a 1M-row `hits` part, opt-in via `WADJET_HITS_PART`). DuckDB is the performance goal; PostgreSQL decides semantics ([ADR-0012](docs/adr/0012-sql-semantics-authority.md)).
+- **DataFusion** — a Rust query-engine *library* you embed and extend. Wadjet is a complete engine and server in Go: its own recursive-descent parser, optimizer, coordinator, workers and PostgreSQL wire protocol, with no plan-fragment assembly required of the user.
+- **Doris / StarRocks** — distributed OLAP databases that own their storage and ingest into it. Wadjet is built around object storage and open formats: a table is a set of Parquet files that any other engine can read, and the catalog is metadata in NATS KV rather than a storage engine.
 
 ## Quick Start
 
@@ -192,7 +228,7 @@ Full analytical SQL via a custom recursive descent parser:
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
 - VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
 - `embed()` SQL function — OpenAI, Voyage AI, and Ollama embedding providers with batched API calls (one call per record batch) and LRU cache
-- 358 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
+- 359 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
 - 28 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
 - User-defined functions (CREATE FUNCTION)
 
@@ -260,7 +296,7 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 
 ### Storage
 
-- **Apache Parquet** on any S3-compatible store (MinIO, AWS S3, R2, SeaweedFS)
+- **Apache Parquet** on any S3-compatible store (MinIO, AWS S3, R2)
 - **Apache Iceberg** metadata reading — v1/v2 table metadata and manifest parsing. Registration is a Go API (`internal/iceberg`) with no SQL or CLI surface yet; writes are not supported
 - **Hive-style partitioning** with automatic time-based partition keys
 - **NATS KV catalog** with revision-based optimistic concurrency
@@ -272,7 +308,7 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 - **Streaming exchange** (default on) — consumers fetch stage outputs directly from producer workers' local disk over gRPC with asynchronous S3 upload; any failure falls back to the durable S3 path (SF100 suite −23% vs S3-only shuffle)
 - **Small-query fast path** — queries under a post-pruning size threshold (default 64 MiB) execute in-process on the coordinator, skipping the DAG entirely
 - **Broadcast + probe-split joins** — small builds replicate to all workers; the probe side's files split across workers with coordinator merge
-- **Split control/data plane** — NATS for heartbeats, cancellation, and the KV catalog; one multiplexed gRPC stream per worker for task dispatch and results
+- **Split control/data plane** — NATS carries heartbeats, cancellation, the KV catalog and (by default) task dispatch and results; worker↔worker exchange fetches always ride a dedicated gRPC listener, and `--data-plane=grpc` moves dispatch, results and gather payloads onto one multiplexed gRPC stream per worker as well ([ADR-0005](docs/adr/0005-split-control-and-data-plane.md); `--data-plane=grpc` is what the SF100 benchmark topology runs)
 - **Memory-aware scheduling** — per-task byte estimates bin-packed against live worker pool budgets, with admission gating under memory pressure
 - **Graceful worker drain** — SIGTERM stops intake, finishes in-flight tasks, flushes uploads, then exits; Kubernetes-ready with `/healthz`, `/readyz`, and `POST /drain`
 - **Catalog snapshots** — periodic S3 snapshots of the NATS KV catalog; a rebooted cluster discovers its tables in seconds
@@ -307,9 +343,17 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 All 22 TPC-H queries pass with row-count-validated results at SF0.01 (CI,
 ~5s), SF10, and SF100 (~600M lineitem rows, distributed with
 spill-to-disk). Cross-engine result validation against DuckDB confirms
-identical results over the same S3 Parquet data. ClickBench runs the full
-43-query suite under the official methodology with cell-exact
-cross-validation against DuckDB.
+identical results on both execution arms (`TestDuckDBCompare`) — over the
+committed SF0.01 Parquet fixture, not over the S3 data the SF100 numbers below
+come from; no DuckDB comparison in this tree reads S3.
+ClickBench runs the full 43-query suite under the official methodology; its
+cell-exact DuckDB cross-validation is a separate gate (`TestHitsCorrectness`)
+over a 1M-row `hits` part, not over the 100M-row run.
+
+Every run behind the numbers below has a dated memo with its topology,
+validation and mechanism attribution:
+[Benchmarks index](docs/benchmarks/README.md) — start there for what was
+measured, on what hardware, and how to reproduce it.
 
 ### TPC-H SF100, distributed (4 nodes)
 
@@ -338,16 +382,22 @@ truth (`benchmarks/tpch/fingerprint-sf100.json`, captured in-region).
 | Q11 | 3.0s | | Q22 | 2.5s |
 
 **Suite total: 2m05s steady (mean of runs 2-4) / 2m40s cold.** The best
-single steady run was 2m04s (123.81s, run 2), beating the prior all-time
-record of 2m14s (134.40s, 2026-08-23), which in turn had beaten 2m33s
-(152.9s, 2026-08-22); the cold run of 2m40s (159.68s) beats the prior
-best cold of 2m47s (166.74s, 2026-08-23) and 2m59s (179.4s, 2026-08-22).
+single steady run was 2m04s (123.81s, run 2) — the fastest suite run
+recorded on this topology. Ranking the arms before it by their own best steady
+run: window 6's candidate 2m14s (134.40s) and window 5's
+`WADJET_PREFETCH_CACHE_SKIP=0` arm 2m16s (136.03s), both 2026-08-23 (window 6's
+candidate also ran 135.26s in the same window, which is why this is an arm
+ranking, not a run ranking). The cold run of 2m40s (159.68s) is likewise ahead
+of the two best colds before it, 2m46s (165.69s) and 2m47s (166.74s), both
+2026-08-23.
 The same-window control on engine `550bb20` was 2m19s steady / 2m52s
 cold (138.80s / 171.77s) — a 9.7% steady-state improvement, 7.0% on
 cold, 8.9% on suite totals across all 4 runs (588.2s vs 535.6s). All 22
 queries pass on every run of both arms, row counts are identical in
-every cell, and the DuckDB fingerprint value signatures agree across
-arms on every query that emits one — Q01's `avg_qty` narrows from
+every cell, and the cross-arm value signatures (`vsig`, wadjet's own
+per-column sums) agree on 20 of the 21 queries that emit one — Q20 emits
+none because both its output columns are strings, and Q01's `avg_qty`
+narrows from
 float64 width to `DECIMAL(38,4)` because AVG over an integer column now
 declares PostgreSQL's exact type (ADR-0012 item 9), which is a declared
 scale change, not a value change. This arc's win is one mechanism: the
@@ -359,7 +409,9 @@ projected. Both halves are fixed, and the broadcast-join probe stages
 that read `lineitem` are where it lands: decoded scan bytes −37.3%,
 worker heap allocation −37.1% per run at a flat allocation count
 (−1.2%), scan decode time −48.0%, `broadcast_join` stage wall −45.3%
-across the suite (Q17 −73%, Q16 −40%, Q08 −33%, Q12 −27%, Q09 −26%).
+across 14 `broadcast_join` stages; end-to-end, the five queries that move
+most are Q17 −73%, Q16 −40%, Q08 −33%, Q12 −27%, Q09 −26%, and two further
+carriers barely move (Q20 −4.3%, Q02 −9.7%).
 Q08 and Q09, historically bimodal and never observed below 14s on this
 topology, run 10.2-11.5s in every steady run. Two queries regress
 against it: Q21 +21% (13.4% more bytes pass the semi-anti bloom on its
@@ -368,8 +420,10 @@ every stage as a per-row compute tax that this window's data does not
 discriminate. Same-window scoreboard (`550bb20` → `8b693f30`): worker
 CPU 3,143.9 → 2,514.6 CPU-s/run (−20.0%), heap allocation 1,804.4 →
 1,135.9 GiB/run (−37.1%), GC cycles 1,435 → 1,006 (−29.9%), inter-node
-peer bytes 92.16 → 89.65 GiB per 4-run suite, and every other wire
-counter within 5.2%.
+peer bytes 92.16 → 89.65 GiB per 4-run suite. Every wire BYTE row in the
+memo's table moves within 5.2% except base-table peer fetches (−25.4% over
+43 → 39 fetches); the file and request COUNTS reach −9.1 to −9.3%
+(`upload_cancelled`, streaming reads, base-table peer fetches).
 Full attribution:
 [sf100-baseline-v0.18.12-2026-09-02.md](docs/benchmarks/sf100-baseline-v0.18.12-2026-09-02.md).
 Prior windows:
@@ -426,7 +480,8 @@ carry-forward.
 **Suite sums: 2m42s cold / 1m25s hot (43/43, no failures).** By the
 official ClickBench formula (reproducible via
 `benchmarks/clickbench/rank.py`) this places Wadjet at combined #41,
-hot #66, and cold #17 of the 136 published `c6a.4xlarge` entries
+hot #66, and cold #17 in a 136-entry `c6a.4xlarge` field (135 published
+entries plus our own unpublished row, which `rank.py` appends before scoring)
 (as of 2026-08-22) — ahead of the Trino, Presto, Impala, Spark,
 Daft, GlareDB, and pg_duckdb Parquet entries on the same hardware.
 The v0.17.0-clawback arc that produced these numbers targeted the
@@ -459,7 +514,7 @@ cd deploy/benchmark/terraform-clickbench && tofu apply   # official ClickBench r
 
 ```
 wadjet serve --mode=standalone     # All-in-one (dev / small workloads)
-wadjet serve --mode=coordinator    # Plans queries, embeds NATS, touches zero data
+wadjet serve --mode=coordinator    # Plans queries, embeds NATS, runs small queries in-process
 wadjet serve --mode=worker         # Stateless task executor, scale horizontally
 ```
 
@@ -547,6 +602,7 @@ importing. Embedding code therefore lives inside this repository today — see
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | Installation, first table, first query |
 | [Architecture](docs/architecture.md) | System internals, execution model, data flow |
+| [Benchmarks index](docs/benchmarks/README.md) | Every measurement memo: topology, scale, headline numbers, reproduction |
 | [SQL Reference](docs/sql-reference.md) | Full SQL syntax, functions, operators |
 | [Data Types](docs/data-types.md) | Column types including network primitives |
 | [HTTP API](docs/api-reference.md) | REST endpoints for queries, tables, health |
