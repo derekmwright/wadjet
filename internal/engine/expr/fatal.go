@@ -153,7 +153,28 @@ func IsNumericRange(err error) bool {
 // (#646). Naming them together here keeps the six sites from drifting apart as
 // a fourth class arrives.
 func IsCompileRefusal(err error) bool {
-	return IsUnknownFunc(err) || IsInvalidLiteral(err) || IsNumericRange(err)
+	return IsUnknownFunc(err) || IsInvalidLiteral(err) || IsNumericRange(err) ||
+		carriesSQLState(err)
+}
+
+// carriesSQLState reports whether an error already decided its own PostgreSQL
+// class, which makes it a REFUSAL rather than "the compiler could not build
+// this, try something else".
+//
+// The planner kept only the three named predicates above and let every other
+// compile error fall through to `parseSimplePredicate(pred.Raw)`, which splits
+// the predicate TEXT on the first operator and compares a column against the
+// remainder. On a STRING column that is type-valid, so it succeeded — silently
+// and WRONGLY: `v > ANY (SELECT k FROM d1)` answered every row where
+// PostgreSQL answers one, and the 0A000 the compiler had just minted never
+// reached the client (review B7). An error that knows its class is an answer,
+// not a hint.
+func carriesSQLState(err error) bool {
+	if err == nil {
+		return false
+	}
+	var c interface{ SQLState() string }
+	return errors.As(err, &c) && c.SQLState() != ""
 }
 
 // raiseRealConversionError aborts a CAST to REAL that cannot carry its value,
