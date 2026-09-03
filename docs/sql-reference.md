@@ -1733,7 +1733,12 @@ tables — so concurrent writers to one table proceed in parallel.
 
 A statement that keeps losing the race reports SQLSTATE **40001**
 (`serialization_failure`), which a client is expected to retry; the table is
-unchanged when it does.
+unchanged when it does. A statement redoes itself at most five times, so 40001
+appears only under sustained contention on the SAME rows — measured, eight
+concurrent writers on one row over twenty rounds: 120 statements reported
+`UPDATE 1` and 40 reported 40001, and the table held the right rows every time.
+PostgreSQL blocks the loser on a row lock instead of refusing it, so a client
+that never retried would see errors here where it would see latency there.
 
 What this does **not** give you is a unique constraint. Two concurrent
 `INSERT`s of the same key, or two `MERGE`s that both take their `WHEN NOT

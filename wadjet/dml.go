@@ -752,10 +752,21 @@ func mergeExposedNames(info *plansql.MergeInfo) (target, source string, err erro
 	if source == "" {
 		source = info.Source
 	}
-	// The MERGE parser lower-cases every relation name and alias it reads, so
-	// these are already folded; folding again costs nothing and keeps the rule
-	// readable as the case-insensitive comparison it is.
-	if strings.EqualFold(target, source) {
+	// BYTE-EXACT, on the names the parser gives us. PostgreSQL folds UNQUOTED
+	// identifiers to lower case and then compares the results exactly, so
+	// quoting defeats the collision: `MERGE INTO t USING s AS "T"` is legal
+	// (measured on 17.11 — MERGE 1) while `USING s AS T` is 42712. An
+	// EqualFold here would refuse both, which is a refusal PostgreSQL does not
+	// make.
+	//
+	// It does not fully close that shape, and the reason is one layer up: the
+	// MERGE parser lower-cases EVERY relation name and alias it reads,
+	// delimited ones included (parser.go, `strings.ToLower(aliasTok.val)`), so
+	// `"T"` has already become `t` by the time it reaches here and this
+	// function cannot tell it from an unquoted one. Identifier folding is Arc
+	// D4's territory; the census carries the shape with PostgreSQL's answer
+	// beside it, pinned, so it fails the day folding preserves quoting.
+	if target == source {
 		return "", "", sqlerr.New("42712",
 			"name %q specified more than once (it is used both as MERGE target table and data source)",
 			target)

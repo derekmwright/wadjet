@@ -479,6 +479,15 @@ func censusShapes() []censusShape {
 			pg:  "tag=DELETE 3 table=[]",
 			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
 			bug: "#688"},
+		// The MERGE spelling. docs/sql-reference.md's limitation bullet names
+		// it and the corpus did not, so the documented refusal set and the
+		// pinned one disagreed by one shape (review P3).
+		{name: "#688 merge WHEN MATCHED AND a subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.id IN (SELECT id FROM arcb_src) THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
+			bug: "#688"},
 
 		// ---------------------------------------------------------------
 		// #718 — MERGE WHEN NOT MATCHED BY SOURCE / BY TARGET.
@@ -566,10 +575,24 @@ func censusShapes() []censusShape {
 			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n, name FROM arcb_src) AS t ON t.id = t.id WHEN MATCHED THEN DELETE",
 			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
 			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
-		{name: "#837 the collision is case-insensitive", tbl: "pr",
+		// An UNQUOTED alias folds, so this one collides in both engines. The
+		// comparison itself is byte-exact; the folding is the parser's.
+		{name: "#837 an unquoted alias folds and collides", tbl: "pr",
 			sql: "MERGE INTO arcb_pr USING arcb_src AS ARCB_PR ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN DELETE",
 			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
 			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		// A DELIMITED alias does NOT fold, so it does not collide — PostgreSQL
+		// runs this one (measured: MERGE 1). Wadjet refuses it, because its
+		// MERGE parser lower-cases delimited identifiers too and the two names
+		// are identical by the time the rule sees them. The refusal is loud
+		// and writes nothing; the residual is identifier folding, which Arc D4
+		// owns. Pinned so it fails the day folding preserves quoting
+		// (review P2).
+		{name: "#837 a delimited alias does not fold and is legal", tbl: "pr",
+			sql: `MERGE INTO arcb_pr USING arcb_src AS "ARCB_PR" ON arcb_pr.id = "ARCB_PR".id WHEN MATCHED THEN DELETE`,
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			bug: "#837-folding"},
 		{name: "#837 the UPDATE arm is refused before it writes", tbl: "pr",
 			sql: "MERGE INTO arcb_pr USING arcb_src AS arcb_pr ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN UPDATE SET n = 0",
 			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
