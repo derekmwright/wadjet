@@ -862,6 +862,88 @@ failure turned SILENT, which is a regression in kind (protocol item 8) even
 though the loud failure was itself an accident of a different column's
 projection.
 
+### 4b. A SORT or WINDOW key over a computed derived alias is the SAME question, and it is blocked by a PHANTOM COLUMN, not by the carrier (2026-09-03, #807 / #658 — DEFERRED)
+
+§2's two names answer a GROUP BY key that names a derived table's computed
+alias. A SORT key and a WINDOW key over the same alias are the same question at
+two other callers of one function, and they are still open. The residual is
+recorded here because the repair was attempted, measured, and stopped one layer
+BELOW this record's territory — so the next attempt does not spend the same
+evidence.
+
+The shape:
+
+```sql
+SELECT x.w FROM (SELECT g * 3 AS w FROM t ORDER BY w LIMIT 5) x ORDER BY x.w
+```
+
+right on the single-process pipeline, and on both DAG arms
+`sort: key column "w" does not exist in the input schema`. The window spelling
+is one caller over — `window: PARTITION BY "gk" is not a column of its input
+(input has: id, g)`. `physical.derivedAliasSourceColumn` declines a computed
+alias BY DESIGN (its doc says it returns `""` for one), so `SortKeySpec.AliasSource`
+stays empty and the stage keys on a name nothing emits.
+
+**What §2's model says to do, and why it is not enough.** Give the key its
+alias's DEFINITION as the second name — the field `SourceExpr` already there
+for a synthetic `__sortkey_N` — and let `resolveHiddenSortKeys` materialize it
+onto the producing fragment under the alias's own name, which
+`materializeSortKey` already does. That is the right shape and the carrier
+needs only a flag to say which of the two spellings it is holding. It does not
+work, for a reason neither issue names and which was found by building it:
+
+> **The scan's REQUESTED COLUMN LIST already contains the alias.**
+
+Column pruning records `w` as a column the scan needs, because the Project that
+publishes it sits above that scan. Every "what does this stage emit" model in
+the planner — `stageEmittedColumns`, and through it `emittedThroughPassThrough`
+and `gatherOutputSources` — reads a scan's emitted set off that list. So:
+
+- ask the stream whether `w` exists, and it says YES, and the pass skips the
+  materialization that would have created it;
+- ask instead whether some fragment MATERIALIZES `w` (the right question, and
+  the one `resolveDerivedAliasSortKeys` already asks), and the materialization
+  runs — but it builds its pass-through list from that same column list, so the
+  projection carries `w` as a pass-through of a column the table does not have
+  and the failure MOVES to the scan:
+  `operator execute: column "w" does not exist in the input schema`.
+
+That phantom is **#776's own mechanism one consumer over**: a scan REQUESTS a
+column its table lacks, the parquet reader narrows it away silently, and every
+reachability model above believes the scan produces it. #776 shows it as wrong
+COLUMN NAMES and NULL values out of the gather; this shows it as a
+materialization that cannot be placed.
+
+**So the order is fixed, and it is the reverse of the one the issues were filed
+in.** The pruner must stop putting a Project's output name into the scan below
+it FIRST; then §2's two-name carrier extends to `SortKeySpec` and
+`WindowColSpec` mechanically. Repairing the key resolution first is a fix
+bounded by a model the same change knows to be incomplete, which protocol rule
+11 says is not shipped — so it was not.
+
+**And that first change has a PRECEDENT in this tree, which is where the next
+attempt starts.** `logical.pushColumnNeeds` already solves this exact phantom
+for a WINDOW: it deletes each `WindowExpr.OutputCol` from the needs set it
+pushes down (`optimizer.go`), with a comment naming the identical failure — a
+scan asked for a column its table does not have, `#694` round 2 — and it states
+the rule generally: a node's own output is skipped when it is PUSHED PAST the
+node that computes it, not when it is COLLECTED. One node kind over,
+`sanitizeScanNeeds` drops, at the scan itself, every name the scan's schema
+lacks. So "a Project's output name is not a need of the scan below it" is not a
+new rule to invent; it is the Window arm's rule applied to the Project arm, plus
+the sanitize that already runs. What §2's carrier then needs is only a
+materialization with somewhere to place the column. Neither #807 nor #658 names
+either function, and the first attempt rediscovered the phantom from scratch.
+
+Pinned by `coordinator.TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG`,
+eleven cells on three arms: the four loud SORT shapes, the two loud WINDOW
+shapes, the plain-rename controls that prove the defect is the COMPUTED alias
+and not the derived table, and the CTE and count-above spellings that are RIGHT
+today by ROUTING — asserted with `UnreachableOutputLocalRoutes` beside the rows,
+because a fix that makes the DAG execute a shape it currently routes is
+invisible to a row check and so is the regression back (rule 11). Nothing in the
+tree named #807 before it.
+
 ### 5. A name re-spelled for dispatch is TYPED where it was re-spelled TO (2026-09-02, #792 / #775 / #729)
 
 A GROUP BY key and an aggregate's ARGUMENT are both RE-SPELLED before dispatch —
