@@ -296,10 +296,11 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 		}
 		t.Logf("joinBudget ratchet: %d cells probed at %d KiB", joinCells, spillMxBudget/1024)
 		if joinCells > 0 && allAnswered {
-			t.Fatalf("every one of the %d joinBudget cells answered on all %d runs at %d KiB — the "+
-				"budget raise has outlived its reason (#789). Delete joinBudget from the "+
-				"join_group_by_* cells, delete the #789 residual pin in "+
-				"join_budget_determinism_test.go, and close #789; that they answer is the fix's proof",
+			t.Fatalf("every one of the %d join-family cells answered on all %d runs at %d KiB — the "+
+				"budget raise has outlived its reason. #789's half of it is already gone (the "+
+				"join_group_by_* cells run at spillMxBudget since the scan stopped holding whole "+
+				"files); what is left is #832's, so drop joinBudget from the join_computed_* cells "+
+				"and close it — that they answer is the fix's proof",
 				joinCells, spillMxRuns(), spillMxBudget/1024)
 		}
 	}
@@ -510,23 +511,22 @@ func spillMxCells() []spillMxCell {
 		// HashJoin grace partitioning BELOW the aggregate: the spilled probe
 		// partitions replay after the workers finish, which is #782 itself.
 		//
-		// The family runs at spillMxJoinBudget, and #824 took away the
-		// tolerance that used to sit beside it: a refusal at 1 MiB now FAILS.
-		// What it may NOT do is claim the budget raise is no longer needed.
-		// Measured at spillMxBudget, 20 runs per column, three independent
-		// samples on this tree: fourteen columns answer 20/20, c_cidr refuses
-		// 20/20, and c_str, c_bytes and c_uuid reach BOTH dispositions on
-		// identical data (c_str 0/2/1 answers of 20, c_bytes 0/1/2, c_uuid
-		// 19/20/20). At 512 KiB those shapes sit exactly at their demand —
-		// the file buffer plus the scan's decoded read-ahead plus the join's
-		// unspillable index plus the build — so which side of the budget the
-		// build's first Reserve lands on follows how far the scan ran ahead.
-		// That is #789, and it is OPEN: two bounds for it were implemented in
-		// this arc and both are refused on measurement (ADR-0006's open
-		// residual). The budget raise is what the family needs until it is
-		// closed, and the joinBudget ratchet at the end of this file's sweep is
-		// what forces a fix to come back and delete it.
-		add(spillMxCell{name: "join_group_by_" + n, joinBudget: true, sql: fmt.Sprintf(
+		// This family ran at spillMxJoinBudget until #789's file half was
+		// fixed. At 512 KiB the scan's whole-file buffer alone held ~412 KiB
+		// of the budget, and which side of it the build's first Reserve landed
+		// on followed how far the scan had decoded ahead: measured over 20 runs
+		// per column with a fresh database each, c_cidr refused 20/20 with the
+		// scheduler free and answered 20/20 at GOMAXPROCS=1, and c_str and
+		// c_bytes reached both dispositions inside one arm. The scan now holds
+		// its file one ROW GROUP at a time, charged and released per row group,
+		// and all eighteen columns answer 20/20 at spillMxBudget on all three
+		// scheduler arms (GOMAXPROCS 24, 2 and 1) — so the raise is gone from
+		// these cells, and this comment is what replaces it.
+		//
+		// The RAISE ITSELF and its ratchet stay, for the join_computed_* cells
+		// below: a cross join cannot spill at all, so its build has to fit,
+		// which is #832's residual and a different reason from #789's.
+		add(spillMxCell{name: "join_group_by_" + n, sql: fmt.Sprintf(
 			`SELECT z.%[1]s AS k, COUNT(*) AS n FROM %[2]s x JOIN %[2]s z ON x.id = z.id GROUP BY z.%[1]s`, n, tbl)})
 		// A COMPUTED join key, per type (#832). An ON clause that equates two
 		// EXPRESSIONS rather than two bare columns leaves the operator no

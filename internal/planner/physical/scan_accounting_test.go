@@ -79,11 +79,11 @@ func TestScanAccounting_FileChargeLifecycle(t *testing.T) {
 		t.Fatalf("used = %d while file held, want >= %d", used, entry.SizeBytes)
 	}
 
-	slot.releaseRG(inner) // rg 1 of 2 — buffer still held
+	slot.releaseRG(inner, 0) // rg 1 of 2 — buffer still held
 	if used := tracker.Used(); used < entry.SizeBytes {
 		t.Fatalf("used = %d after first releaseRG, want >= %d (buffer still held)", used, entry.SizeBytes)
 	}
-	slot.releaseRG(inner) // last rg — buffer and charge released
+	slot.releaseRG(inner, 1) // last rg — buffer and charge released
 	if used := tracker.Used(); used != 0 {
 		t.Fatalf("used = %d after last releaseRG, want 0", used)
 	}
@@ -253,7 +253,7 @@ func TestScanAccounting_DrainSlotChargesOnAbandonedScan(t *testing.T) {
 	if _, err := slot.ensureLoaded(inner, context.Background()); err != nil {
 		t.Fatalf("ensureLoaded: %v", err)
 	}
-	slot.releaseRG(inner) // 1 of 2 consumed, then the scan is abandoned
+	slot.releaseRG(inner, 0) // 1 of 2 consumed, then the scan is abandoned
 
 	if used := tracker.Used(); used < entry.SizeBytes {
 		t.Fatalf("used = %d before drain, want >= %d", used, entry.SizeBytes)

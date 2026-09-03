@@ -378,6 +378,15 @@ type fileSlot struct {
 	chargedBytes int64               // bytes reserved on inner.memTracker for dataBuf; released with it
 	gateBytes    int64               // bytes admitted on inner.loadGate; released with the buffer
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
+
+	// wantRG is the ascending list of row groups that survived pruning, set
+	// by buildRGUnits beside rgRemaining. rgs is the row-group-at-a-time
+	// backing (scan_rowgroup_load.go) when the slot took that path: one
+	// buffer per row group, each charged when it lands and released when its
+	// row group has been decoded, instead of one whole-file dataBuf held
+	// until the last one is.
+	wantRG []int
+	rgs    *rgSlabs
 }
 
 // newPreloadedFileSlot wraps an already-loaded *parquet.FileReader as a
@@ -436,6 +445,33 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 			}
 		}
 	}
+
+	// Row-group-at-a-time load: one Get, one buffer per row group, each
+	// charged and released with its row group (scan_rowgroup_load.go). Taken
+	// when the footer is already decoded, which is what carries the byte
+	// ranges; otherwise the whole-file read below.
+	if rdr, slabs := s.tryRowGroupLoad(inner, ctx); rdr != nil {
+		if inner.loadGate != nil {
+			// What this slot can hold at once is its largest row group, not
+			// its file: the gate is a bound on peak heap from loads, and
+			// admitting the file size here would starve the lanes of files
+			// whose bytes never all become resident.
+			peak := peakRowGroupBytes(slabs.starts, slabs.ends)
+			if peak < 1 {
+				peak = 1
+			}
+			if err := inner.loadGate.acquire(ctx, peak); err != nil {
+				s.loadErr = err
+				return nil, s.loadErr
+			}
+			s.gateBytes = peak
+		}
+		s.rgs = slabs
+		s.nativeReader = rdr
+		rgLoadsRowGroup.Add(1)
+		return s.nativeReader, nil
+	}
+	rgLoadsWholeFile.Add(1)
 
 	// Admit this load against the byte-budgeted gate so peak heap from
 	// loaded files is bounded by the gate's budget regardless of how many
@@ -538,13 +574,30 @@ func (s *fileSlot) releaseGate(inner *scanSourceInner) {
 	s.gateBytes = 0
 }
 
-// releaseRG decrements the row-group refcount and frees the file bytes
-// once the last row group has been processed. Safe to call from any worker.
-func (s *fileSlot) releaseRG(inner *scanSourceInner) {
+// releaseRG frees row group rgIdx's bytes and its tracker charge, and — when
+// it was the file's last — everything the slot still holds. Safe to call from
+// any worker.
+//
+// In row-group mode the charge released here is THIS row group's, so a scan's
+// resident file bytes are the row groups still being decoded rather than every
+// file it has opened. In whole-file mode there is one charge and it is
+// released when the refcount reaches zero, which is what #789 measured: the
+// file stays on the ledger while every other operator admits against it.
+func (s *fileSlot) releaseRG(inner *scanSourceInner, rgIdx int) {
+	s.mu.Lock()
+	rgs := s.rgs
+	s.mu.Unlock()
+	if rgs != nil {
+		rgs.release(rgIdx)
+	}
 	if s.rgRemaining.Add(-1) > 0 {
 		return
 	}
+	if rgs != nil {
+		rgs.close()
+	}
 	s.mu.Lock()
+	s.rgs = nil
 	s.reader = nil
 	s.nativeReader = nil
 	buf := s.dataBuf
@@ -578,6 +631,13 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner) {
 // tasks' admission and forcing chronic over-spilling. Callers must ensure
 // the rg workers have exited (Close does wg.Wait first).
 func (s *fileSlot) drainAbandoned(inner *scanSourceInner) {
+	s.mu.Lock()
+	rgs := s.rgs
+	s.rgs = nil
+	s.mu.Unlock()
+	if rgs != nil {
+		rgs.close()
+	}
 	s.mu.Lock()
 	s.reader = nil
 	s.nativeReader = nil
@@ -874,6 +934,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 				rgIndex:     rgIdx,
 				numRows:     rgNumRows,
 			})
+			slot.wantRG = append(slot.wantRG, rgIdx)
 			keptInFile++
 			rowOffset += rgNumRows
 		}
@@ -1086,14 +1147,14 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 	}
 	rdr, err := unit.slot.ensureLoaded(inner, ctx)
 	if err != nil || rdr == nil {
-		unit.slot.releaseRG(inner)
+		unit.slot.releaseRG(inner, unit.rgIndex)
 		return nil
 	}
 	// Dictionary-probe pruning: an equality conjunct whose constant is
 	// absent from a pure-dictionary chunk proves the row group empty for
 	// this query — skip the decode entirely (see scan/dict_prune.go).
 	if len(inner.eqProbes) > 0 && scan.CanDictPruneRowGroup(rdr, unit.rgIndex, inner.eqProbes) {
-		unit.slot.releaseRG(inner)
+		unit.slot.releaseRG(inner, unit.rgIndex)
 		return nil
 	}
 	// Scan-level filter: evaluate pushed conjuncts off the pages before
@@ -1103,7 +1164,7 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 	if len(inner.rowPreds) > 0 {
 		sel, dec, ferr := scan.EvalRowGroupPreds(rdr, unit.rgIndex, inner.rowPreds, int(unit.numRows))
 		if ferr != nil {
-			unit.slot.releaseRG(inner)
+			unit.slot.releaseRG(inner, unit.rgIndex)
 			select {
 			case inner.errCh <- fmt.Errorf("scan filter %s row group %d: %w", unit.slot.entry.Path, unit.rgIndex, ferr):
 			default:
@@ -1112,7 +1173,7 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 		}
 		switch dec {
 		case scan.FilterNone:
-			unit.slot.releaseRG(inner)
+			unit.slot.releaseRG(inner, unit.rgIndex)
 			return nil
 		case scan.FilterPartial:
 			filterSel = sel
@@ -1123,7 +1184,7 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 		// for values nobody reads, which was the entire remaining cost of
 		// the filtered-count floor shape.
 		if inner.countOnlyScan && !inner.emitRowLoc {
-			unit.slot.releaseRG(inner)
+			unit.slot.releaseRG(inner, unit.rgIndex)
 			return &batch.RecordBatch{Len: int(unit.numRows), Sel: filterSel}
 		}
 	}
@@ -1133,7 +1194,7 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 	// consumed for their shape only decode to per-row lengths with no value
 	// bytes at all (lengths_decode.go).
 	b, err := scan.ReadRowGroupNativeShaped(rdr, unit.rgIndex, inner.readSchema(), inner.pool, filterSel, inner.shapeOnlyCols)
-	unit.slot.releaseRG(inner)
+	unit.slot.releaseRG(inner, unit.rgIndex)
 	if err != nil {
 		// Surface the first decode error so the scan FAILS instead of
 		// silently dropping this row group's rows — a swallowed error here

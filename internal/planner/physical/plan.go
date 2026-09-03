@@ -15733,6 +15733,12 @@ type scanSourceInner struct {
 	// waiting on the budget (memory.ReserveOrForce). nil-safe.
 	spillMgr *memory.SpillManager
 
+	// residentSlabs counts the row-group buffers this scan source is holding
+	// across every file (scan_rowgroup_load.go). It is the deadlock-freedom
+	// floor: a loader with nothing resident admits its next row group without
+	// waiting, because there is nothing decoding that could free room for it.
+	residentSlabs atomic.Int64
+
 	// batchCharges maps decoded batches currently held by the scan source
 	// (decode in progress, prefetched, or queued in batchCh) to the bytes
 	// charged against memTracker when they were decoded. Released when the
