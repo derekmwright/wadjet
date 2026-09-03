@@ -129,6 +129,53 @@ func wwslCells() []wwslCell {
 				"id=int64:1|w=float:10000|s=int64:1001", "id=int64:2|w=float:10000|s=int64:2001",
 				"id=int64:3|w=float:10000|s=int64:3001", "id=int64:4|w=float:10000|s=int64:4001"},
 			pgSays: "4 rows, w=10000"},
+		// #776's own headline shape, and the DEFERRAL under it. The wrapped
+		// window inside a DERIVED TABLE, read through a bare forward of its
+		// alias: the outer item `x.w` is a plain column reference to a
+		// COMPUTED alias, so the rename walk answers the name itself — "the
+		// stage that evaluates it emits it under this very name" — and on the
+		// DAG no stage does. The client used to get the window stage's raw
+		// columns, `__win_N` included, for a query that asked for three;
+		// `assertGatherOutputIsReachable` refuses the plan now and the
+		// coordinator-local pipeline answers it, which is why these two cells
+		// assert the counter rather than an error.
+		//
+		// The repair is one line of the same two-name shape a sort key over
+		// this alias already takes — give the spec the DEFINITION as its Expr
+		// and keep the alias as its Name, through `derivedAliasDefinition` —
+		// and it was BUILT, MEASURED, and WITHDRAWN. It makes the one-level
+		// shape execute and it makes `s` come back FLOAT64 where the
+		// single-process arm and PostgreSQL both say bigint: the SIBLING item
+		// `x.plain + 1` is typed by `sourceColDeclsThroughRenames`, which
+		// bails on the WHOLE Project as soon as one of its items is computed
+		// — and the alias `w` is computed — so the item falls to the float
+		// rule. Right-by-routing becoming executed-with-the-wrong-wire-type is
+		// a right-to-anything-else move, so it is not shipped (protocol
+		// rule 11).
+		//
+		// What it needs first is ADR-0026 §5's walk: `namingScopeDecls`
+		// descends per REFERENCE under a coverage test instead of bailing per
+		// Project, and it is what typed a GROUP BY key and an aggregate
+		// argument correctly through the same shape. Applying it to
+		// `attachScanSelectProjections`' companion items is numeric-typing
+		// territory and its own change; with it, the substitution is a
+		// one-liner and #717 falls with these two.
+		{name: "wrapped_window_inside_a_derived_table_routes",
+			sql: `SELECT x.id AS zid, x.w AS zw, x.plain + 1 AS s ` +
+				`FROM (SELECT id, plain, SUM(plain) OVER () + 0 AS w FROM wintab0) x ORDER BY x.id`,
+			want: []string{
+				"zid=int64:1|zw=float:10000|s=int64:1001", "zid=int64:2|zw=float:10000|s=int64:2001",
+				"zid=int64:3|zw=float:10000|s=int64:3001", "zid=int64:4|zw=float:10000|s=int64:4001"},
+			wantUnreach: 1,
+			pgSays:      "4 rows — [zid|zw|s], which is what #776 asked for"},
+		{name: "two_derived_tables_over_one_wrapped_window_routes",
+			sql: `SELECT z.id AS zid, z.w AS zw, z.s AS s FROM (SELECT x.id, x.w, x.plain + 1 AS s ` +
+				`FROM (SELECT id, plain, SUM(plain) OVER () + 0 AS w FROM wintab0) x) z ORDER BY z.id`,
+			want: []string{
+				"zid=int64:1|zw=float:10000|s=int64:1001", "zid=int64:2|zw=float:10000|s=int64:2001",
+				"zid=int64:3|zw=float:10000|s=int64:3001", "zid=int64:4|zw=float:10000|s=int64:4001"},
+			wantUnreach: 1,
+			pgSays:      "the same 4 rows"},
 		// Controls, both right before this change and required to stay right.
 		// The first has no wrapper at all (the window's output IS the item),
 		// the second no window; both were already executing on the DAG, and a

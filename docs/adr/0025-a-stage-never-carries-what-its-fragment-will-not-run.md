@@ -1,6 +1,6 @@
 # ADR-0025: A stage never carries a predicate or a projection its fragment will not run
 
-Status: Accepted (2026-08-29, #656)
+Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan)
 
 ## Context
 
@@ -1825,6 +1825,69 @@ differently and the store guard raised 22003 on a query PostgreSQL answers.
 `materializedBuildColOrigins` is what makes the value agree with the
 declaration there, and the DAG keeps the raw origins because on the DAG they
 are true.
+
+### A SCAN'S READ SET IS A PLAN-TIME FACT, and so is the type of a column the GATHER computes (2026-09-03, arc S1: #776, #831, #645, #713)
+
+This ADR's rule is about what a stage CARRIES. Four defects one arc apart were
+about what a stage is BELIEVED to carry, and they came apart into two rules.
+
+**A scan requests only columns its table HAS.** `Stage.Columns` on a scan is a
+READ SET — names ancestors asked for — and every model of what a stage emits
+reads it: `stageEmittedColumns`, and through it `emittedThroughPassThrough`,
+`gatherOutputSources` and `stageStreamColumns`. A name in that list the TABLE
+does not have is therefore not a slow scan; it is a fact those models get
+wrong, and three consumers acted on it. The sort-key and derived-alias passes
+saw the alias in the stream and skipped the materialization that would have
+created it (#807, #658); `attachScanSelectProjections` built a projection
+carrying the phantom as a pass-through and the fragment above it failed loud
+(#776); `assertGatherOutputIsReachable` believed a scan produced a column it
+cannot.
+
+The site was `logical.sanitizeScanNeeds`, one branch of it: a derived table's
+alias BECOMES the scan's `TableAlias`, so `x.w` over `(SELECT g*3 AS w FROM t) x`
+matched the qualifier branch and was kept as the bare `w` whether or not the
+schema had it. The bare spelling was already dropped; only the qualified one got
+through, which is why the CTE spelling of the same query was REFUSED at plan
+time and answered locally while the derived-table spelling failed at dispatch.
+It is `pushColumnNeeds`' NodeWindow rule — a node's own output is not a need of
+the node below it — reached from the sanitize side, where a qualified spelling
+arrives, and it binds only where the catalog schema is known. With no schema
+every name is kept and full width stays the safe failure mode.
+`annotateScanSchemas` moved ahead of the resolution passes so the intersection
+ADR-0026 §2 records as INERT is live.
+
+**A column the GATHER computes is typed by the PLAN.** The gather EVALUATES a
+SELECT item that wraps an aggregate or a window, from the `__agg_N` / `__win_N`
+column the producing stage publishes, and it built every such column into a
+FLOAT64 vector with a runtime escape for an exact DECIMAL and one for an
+integer. Everything else — a STRING above all, and any DATE, TIMESTAMP or
+network address a CAST or a CASE can produce — fell to `default: SetNull`: NULL
+on both DAG arms for every type, while the single-process path rendered the
+value (#831, #645). The rule is this ADR's own, one operator over: a column
+that exists in no catalog has its declared type AS its runtime type, so
+`OutputRename` carries `inferProjectionDeclType`'s answer — the same call
+`attachScanSelectProjections` makes for an item a FRAGMENT computes — and the
+materialization is `exec.Project`'s. Using the declaration rather than probing a
+box is the point: the two engines then build the same column from the same
+expression, and a declaration that is wrong is wrong on BOTH instead of silent
+on one.
+
+Two smaller members of the same family, both "a projection NARROWS to its
+outputs, so everything the operator will read has to be one of them":
+
+- `attachScanSelectProjections` abandoned the WHOLE SELECT list when ONE item
+  wrapped a hidden slot, because that item's recorded text is a spelling no
+  parser accepts. The item is attached as a PASS-THROUGH of the slot the gather
+  will read instead, and the rest of the list attaches normally (#776). An item
+  reading two slots takes the first in its own position and the rest ride past
+  the end of the select list, where the gather — which projects to exactly its
+  rename list — never looks.
+- `worker.buildAggInputProjection` built its list from a two-column aggregate's
+  FIRST argument alone, so `MIN_BY(a*2, id)` reached `exec.HashAggregate` with
+  the ordering column gone from the stream (#713). A computed SECOND argument
+  is materialized by no engine and stays loud on all of them, which is the
+  boundary: emitting a pass-through of a name nothing produces would replace one
+  engine's loud failure with a column of NULLs.
 
 ## Consequences
 

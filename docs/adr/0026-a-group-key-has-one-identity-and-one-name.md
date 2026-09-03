@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -862,7 +862,7 @@ failure turned SILENT, which is a regression in kind (protocol item 8) even
 though the loud failure was itself an accident of a different column's
 projection.
 
-### 4b. A SORT or WINDOW key over a computed derived alias is the SAME question, and it is blocked by a PHANTOM COLUMN, not by the carrier (2026-09-03, #807 / #658 — DEFERRED)
+### 4b. A SORT or WINDOW key over a computed derived alias is the SAME question, and it was blocked by a PHANTOM COLUMN, not by the carrier (2026-09-03, #807 / #658 — DEFERRED, then CLOSED the same day)
 
 §2's two names answer a GROUP BY key that names a derived table's computed
 alias. A SORT key and a WINDOW key over the same alias are the same question at
@@ -943,6 +943,62 @@ today by ROUTING — asserted with `UnreachableOutputLocalRoutes` beside the row
 because a fix that makes the DAG execute a shape it currently routes is
 invisible to a row check and so is the regression back (rule 11). Nothing in the
 tree named #807 before it.
+
+#### CLOSED, and the phantom was the whole of it (2026-09-03, arc S1)
+
+The order this section fixed was right and the estimate of what came after it
+was wrong. Once the phantom was closed the carrier needed no extension at all,
+and that is the correction worth keeping.
+
+**The phantom's site was one branch of `sanitizeScanNeeds`, not `pushColumnNeeds`.**
+The paragraph above points at the Window arm's rule "applied to the Project
+arm"; the measurement says the bare spelling was already handled — a bare `w`
+IS dropped by the sanitize the paragraph names — and what got through was the
+QUALIFIED one. A derived table's alias BECOMES the scan's `TableAlias`, so
+`x.w` matched the qualifier branch and was kept as the bare `w` whether or not
+the schema had it. The CTE spelling of the same query is the control that
+proves the site: `c.w` does not match the alias, the name was dropped, and that
+plan was REFUSED and answered locally where the derived-table spelling failed
+loud. One query, two spellings, two dispositions.
+
+`annotateScanSchemas` also moved from the end of `PlanDistributed` to before
+the resolution passes, which makes §2's own intersection in `stageStreamColumns`
+— recorded above as INERT — live, and lets `stageEmittedColumns` ask the same
+question.
+
+**And then the key needs no second name on the wire.** §2 gives a GROUP BY key
+a PUBLISHED name and a RESOLUTION spelling because the fragment has to look the
+key up in a relation whose columns are spelled differently. A sort or window key
+over a computed derived alias has the same two names — `w`, and `g * 3` — but
+the second is consumed at PLAN time: `SortKeySpec.AliasExpr` carries the
+definition, `materializeAliasColumns` projects it onto the producing fragment
+under the ALIAS'S OWN NAME, and the key, the gather's rename, an outer sort and
+the exchange that clusters a PARTITION BY all keep reading the one published
+name. Nothing new crosses the wire, and `distributed.OpSpec` is untouched.
+
+The WINDOW half runs at STAGE EMISSION rather than in a late pass, because a
+PARTITION BY key is also the stage's DISTRIBUTION and rewriting it after
+`EnsureDistribution` would leave the exchange and the operator keyed on
+different columns. Both halves share one materializer, which takes the whole
+set of aliases at once: `OpProject` narrows to its projections, so a window with
+a computed PARTITION BY and a computed ORDER BY needs both columns from one
+call.
+
+The BOUNDARY is `derivedAliasDefinition`, and it is stated positively rather
+than by enumerating what to avoid — the rule ADR-0025 arrived at for an
+aggregate's argument, after enumeration was wrong twice. It looks through
+Project, Filter, Sort and Limit, which is exactly where `walkStages` provably
+emits no stage for the Project, and stops at everything else. Below a JOIN, an
+AGGREGATE, a DISTINCT or a set operation the alias is MATERIALIZED — the arm's
+own projection, the aggregate's output name, the DISTINCT's group key — so
+substituting the definition there would compute it a second time over columns
+that relation no longer carries. The corpus attempts both sides: the
+plain-rename controls, the CTE spellings, and #716's two collapsing producers,
+which still refuse and still answer on the coordinator-local pipeline.
+
+The eleven cells now assert `UnreachableOutputLocalRoutes` = 0 on both DAG arms
+with PostgreSQL's rows, and #716's SCAN producer falls to the same
+materialization and is asserted as PLANNED rather than deferred.
 
 ### 5. A name re-spelled for dispatch is TYPED where it was re-spelled TO (2026-09-02, #792 / #775 / #729)
 

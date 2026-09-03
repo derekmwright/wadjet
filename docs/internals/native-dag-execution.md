@@ -268,6 +268,89 @@ This is the follow-on to #390: that guard keeps a sort with a dependent as its
 own stage rather than folding it into a predecessor dispatch may re-fan-out,
 and that stage is exactly the one whose input had no key to sort on.
 
+### A scan's READ SET is a plan-time fact, and every emitted-set model rests on it
+
+`Stage.Columns` on a scan is `logical.Node.RequiredColumns` copied verbatim
+(`plan.go`'s scan arm), and it is a READ SET — the names ancestors asked for —
+not an output schema. Four models read it as one:
+
+| model | file | what it answers |
+|---|---|---|
+| `stageEmittedColumns` | `hidden_sort_key.go` | what a stage's fragment ships |
+| `emittedThroughPassThrough` | `hidden_sort_key.go` | the same, following a window/sort/limit/exchange down to its producer |
+| `gatherOutputSources` | `carrier_assert.go` | whether every `OutputRename.From` is a column some stage emits |
+| `stageStreamColumns` | `stage_stream_model.go` | the join-aware version a GROUP BY key's resolution is decided against |
+
+So a name in a scan's read set that the TABLE does not have is a lie all four
+believe. It made `resolveDerivedAliasSortKeys` skip a materialization, made
+`attachScanSelectProjections` carry a phantom through as a pass-through, and
+made the reachability check pass a plan that then failed at dispatch (#776,
+#807, #658). `logical.sanitizeScanNeeds` now drops a qualified reference's bare
+column when the scan's declared schema lacks it — a derived table's alias
+BECOMES the scan's `TableAlias`, which is how `x.w` got in — and
+`annotateScanSchemas` runs BEFORE the resolution passes so the intersection
+`stageStreamColumns` performs is live rather than inert.
+
+`physical.TestAScanRequestsOnlyColumnsItsTableHas` is the invariant, over
+TPC-H's 22 plans and a derived-alias corpus, asserted on the LOGICAL
+`RequiredColumns` so a plan the DAG refuses is still checked. It is also the
+claim that the worker's `parquet projection narrowed: requested columns missing
+from schema` warning is unreachable from a planned query.
+
+### A SORT or WINDOW key over a computed derived alias is MATERIALIZED, not renamed
+
+`derivedAliasSourceColumn` answers "which column does the stream already carry
+for this alias" and returns "" for a COMPUTED one, because there is none. The
+key then named nothing: `sort: key column "w" does not exist in the input
+schema`, and one caller over `window: PARTITION BY "gk" is not a column of its
+input` (#807, #658).
+
+The key carries two names, ADR-0026 §2's pair at a third caller:
+`SortKeySpec.Column` is what it is CALLED — the alias the query wrote — and
+`SortKeySpec.AliasExpr` is where the value comes FROM, the definition spelled in
+the producer's scope. `materializeAliasColumns` projects the definition onto the
+producing fragment under the ALIAS's own name, so the second name is consumed at
+plan time and `distributed.OpSpec` is untouched.
+
+Two placements, one materializer:
+
+- a SORT key is settled in `resolveDerivedAliasSortKeys`, at the end of
+  `PlanDistributed`, for the reason every other alias pass runs there — whether
+  a fragment already publishes the alias is what the projection passes decide;
+- a WINDOW key is settled at STAGE EMISSION, in `walkStages`' `NodeWindow` arm,
+  because a PARTITION BY key is also the stage's DISTRIBUTION and rewriting it
+  after `EnsureDistribution` would leave the exchange and the operator keyed on
+  different columns.
+
+`derivedAliasDefinition` draws the boundary and draws it positively: it looks
+through Project, Filter, Sort and Limit — exactly where `walkStages` provably
+emits no stage for the Project — and stops at everything else. Below a JOIN, an
+AGGREGATE, a DISTINCT or a set operation the alias is MATERIALIZED already, and
+substituting the definition would compute it a second time over columns that
+relation no longer carries.
+
+### What the GATHER computes, it types from the PLAN
+
+`OutputRename.Expr` is compiled and evaluated at the gather for a SELECT item
+that wraps an aggregate or a window (`SUM(x) OVER () + 1`, `CAST(MAX(c) AS
+STRING)`), because nothing between the producing stage and the client applies
+the wrapper. `evalExprColumn` chooses the output vector's type in this order:
+
+1. a BOOLEAN compiled expression → a real Bool column (the three-valued
+   protocol, so UNKNOWN becomes SQL NULL);
+2. `expr.DecimalResultOf` → an exact fixed-point column at the input schema's
+   scale;
+3. `expr.Int64ResultOf` → an INT64 column;
+4. the PLAN's declaration (`OutputRename.Type`) → `exec.Project`'s own
+   materialization, a vector of that type and `SetValue` per row;
+5. FLOAT64, the historical default.
+
+Arms 2 and 3 read the input SCHEMA and stay ahead of the declaration because a
+schema is a stronger answer than an inference. Arm 4 is what makes every other
+type reachable: without it a STRING result — and any DATE, TIMESTAMP or network
+address a CAST or CASE can produce — fell to the float64 switch and was nulled
+row by row, on both DAG arms, for every type (#831, #645).
+
 ## Derived-table aliases: eight resolvers, one convention
 
 Because a Project emits no stage, **a derived table's rename happens nowhere

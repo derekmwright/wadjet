@@ -593,9 +593,7 @@ Two shapes are refused that PostgreSQL answers, both loudly with `42803`:
 
 **Two deliberate divergences from PostgreSQL, both loud:**
 
-- `ORDER BY GROUPING(a)` is **not accepted** (PostgreSQL accepts it). Sorting
-  on an aggregate expression that is not itself a select item is refused
-  engine-wide, because the distributed sort has nowhere to evaluate one. Select
+- `ORDER BY GROUPING(a)` is **not accepted** (PostgreSQL accepts it). Select
   the call and order by its alias instead:
   `SELECT GROUPING(a) AS g, ... ORDER BY g`.
 - `GROUP BY GROUPING(a)` reports a syntax error (42601) where PostgreSQL
@@ -644,6 +642,19 @@ SELECT * FROM flow_logs ORDER BY bytes_in DESC NULLS LAST
 
 A position past the end of the select list is SQLSTATE `42P10`
 (`ORDER BY position N is not in select list`).
+
+### ORDER BY an aggregate the SELECT list does not carry
+
+```sql
+-- The aggregate is computed for the ordering and never returned
+SELECT src_ip FROM flow_logs GROUP BY src_ip ORDER BY MAX(bytes_in) DESC
+SELECT src_ip FROM flow_logs GROUP BY src_ip ORDER BY COUNT(*), MIN(bytes_in)
+```
+
+A bare aggregate CALL in `ORDER BY` is answered whether or not the SELECT list
+carries it, as PostgreSQL does. An expression COMPUTED from an aggregate's
+output (`ORDER BY COUNT(*) * 2`) is refused with SQLSTATE `0A000`: select the
+expression and order by its alias.
 
 One shape is refused that PostgreSQL answers: a positional reference over a
 `SELECT *` whose FROM clause is a **join**, or a derived table whose **own**
@@ -1818,6 +1829,10 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
 - A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000
 - `RANGE` window frames with a value offset, and the `GROUPS` frame mode
 - `SELECT DISTINCT ON (...)`
+- `ORDER BY <expression over an aggregate>` — `ORDER BY COUNT(*) * 2` — SQLSTATE
+  `0A000`. A bare aggregate call is answered; a value computed from one has
+  nowhere to be evaluated between the distributed aggregate and the gather.
+  Select the expression and order by its alias
 - An ORDERING quantifier over a subquery — `x < ALL (SELECT ...)`, `x > ANY (SELECT ...)` — SQLSTATE 0A000, on the DML doors and on the query path alike. The equality forms are supported: `= ANY` / `= SOME` over a subquery is `IN`, and `<> ALL` is `NOT IN`.
 - A row comparison whose two sides have different arities — `(a, b) = (1)` — SQLSTATE 42601. PostgreSQL words the same refusal 42883.
 - No time-of-day type: a Parquet `TIME` column is read as its raw integer in the file's own unit
