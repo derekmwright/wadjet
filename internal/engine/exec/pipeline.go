@@ -434,6 +434,10 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		!primaryAgg.GroupByAll && !opsReuseBuffers(p.Ops)
 	var partQueues []chan partitionItem
 	var producersWG sync.WaitGroup
+	// Set immediately before the worker goroutines are launched. Until it
+	// is, every producer slot producersWG holds is owed by a worker that
+	// does not exist, and the returning goroutine owes them itself.
+	workersSpawned := false
 	if usePartitioned {
 		PartitionedAggRuns.Add(1)
 		primaryAgg.PartitionedDisjoint = true
@@ -466,6 +470,17 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			producersWG.Wait()
 			for ; closed < len(partQueues); closed++ {
 				close(partQueues[closed])
+			}
+		}()
+		// Every return between here and the worker spawn is a return that
+		// produced NOTHING, so no worker will ever call producersWG.Done()
+		// and the closer above would block in Wait() forever — one leaked
+		// goroutine and p.Workers channels per query. The commonest of
+		// those returns is the limit-exhausted early-out below, which is
+		// the ordinary "GROUP BY over a derived LIMIT" plan (#783).
+		defer func() {
+			if !workersSpawned {
+				producersWG.Add(-p.Workers)
 			}
 		}()
 	}
@@ -517,6 +532,30 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			}
 		}
 		if exhausted {
+			// The LIMIT was satisfied by the warm-up batch, so no worker is
+			// launched. In PARTITIONED mode that batch was not given to the
+			// sink: it was parked in pendingWarmup for worker 0, and worker
+			// 0 is what this return skips. Consuming it here is the whole
+			// answer — every row of a `GROUP BY over a derived LIMIT` plan
+			// is in that slice, and finalizing without it published an empty
+			// aggregate: zero groups where PostgreSQL has 100 (#783).
+			//
+			// It goes to p.Sink directly rather than through
+			// partitionAndDeliver: routing needs owners, and the owners are
+			// the workers that are not being launched. One sink consuming
+			// every row is trivially disjoint — but the flag is cleared
+			// anyway, because it is an assertion about a partitioning that
+			// did not happen.
+			if usePartitioned {
+				primaryAgg.PartitionedDisjoint = false
+				for _, wb := range pendingWarmup {
+					if err := p.Sink.Consume(ctx, wb); err != nil {
+						return fmt.Errorf("sink consume: %w", err)
+					}
+					wb.Release()
+				}
+				pendingWarmup = nil
+			}
 			return p.Sink.Finalize(ctx)
 		}
 	}
@@ -592,6 +631,11 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 
+	// From here every producer slot is owed by a worker that will run and
+	// call stopProducing, so the early-return release above must not fire.
+	// Set before the loop, not inside it: a panic between two iterations
+	// would otherwise leave the count released twice.
+	workersSpawned = true
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func(workerID int, ops []UnaryOperator) {
