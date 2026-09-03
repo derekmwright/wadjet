@@ -182,10 +182,10 @@ Full analytical SQL via a custom recursive descent parser:
 - SELECT, INSERT, UPDATE, DELETE, MERGE, EXPLAIN, DESCRIBE, SHOW, ANALYZE
 - CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE VIEW, CREATE/ALTER/DROP ALERT, ALTER TABLE
 - CTEs (`WITH ... AS`), UNION / INTERSECT / EXCEPT (with ALL variants)
-- INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs
+- INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)`
 - Subqueries: scalar, IN, EXISTS, correlated subqueries
 - Window functions with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs
-- GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references
+- GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references (including over `SELECT *`)
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
 - Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`

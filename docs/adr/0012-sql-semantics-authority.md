@@ -459,6 +459,118 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      values, which is what PostgreSQL's dedup produces and what wadjet emits
      since #703's review round.
 
+   - **An unaliased expression is named after its own TEXT, not `?column?`.**
+     (Added 2026-09-03, #732 — the DECISION, taken and recorded rather than
+     implemented.) PostgreSQL's naming rule for a SELECT item with no `AS` is
+     five rules, measured live on 17:
+
+     | shape | PostgreSQL | wadjet |
+     |---|---|---|
+     | a bare column, `SELECT c` | `c` | `c` |
+     | a function call, `SELECT SUBSTR(c,1,2)` | `substr` | `substr` |
+     | an aggregate, `SELECT COUNT(*)` | `count` | `count(*)` |
+     | a CASE | `case` | its full text |
+     | a CAST, `SELECT CAST(g AS BIGINT)` | `g` — its OPERAND's name, and only the TARGET TYPE when the operand has none | its full text |
+     | anything else, `SELECT g + 1` | `?column?` | `g + 1` |
+
+     Wadjet keeps the expression's own text. It is MORE informative than
+     `?column?` for the last row — a client showing a result set gets `g + 1`
+     instead of a placeholder — and adopting PostgreSQL's rule renames columns
+     this repository's own corpora assert: `benchmarks/tpch/postgres_compare_test.go`
+     records that the semantics corpus is deliberately name-blind BECAUSE of
+     this. The rule is recorded here so a future gate does not read the
+     divergence as undecided, and `wireCorpus`'s `field_names` pins carry it
+     per entry.
+
+     What is NOT deliberate, and was fixed: the two ENGINES naming one query
+     differently. The DAG folded the case of that text and the single-process
+     path did not, so `SUM(a) OVER () + 1` arrived as `sum(a) over (...) + 1`
+     from one and `sum(a) OVER (...) + 1` from the other (#744). Whatever rule
+     this item settles on, both paths send it —
+     `coordinator.TestBothPathsNameAnUnaliasedExpressionTheSameWay`.
+
+   - **A qualified GROUP BY term with an unqualified select item.** (Added
+     2026-09-03, #738.) `SELECT g + 1 ... GROUP BY typemx.g + 1` is answered by
+     PostgreSQL and refused here with 42803. The MIRROR — a qualified select
+     item over a bare key — is answered, because a qualifier is spelling in a
+     single-relation block; this direction is not, because the aggregate would
+     have to evaluate `typemx.g + 1` over a batch whose column is `g`. It
+     cannot, and making the identity match on both sides produced a NULL key
+     for every group. A loud refusal for a shape the engine cannot compute
+     beats a plausible NULL (correctness-protocol method 8). Gated by
+     `coordinator.TestTheIdentityErasesAQualifierAndATypeSynonym`'s
+     `boundary_qualified_key_bare_select_item`.
+
+   - **`SELECT *` over a join or a USING join, in three places.** (Added
+     2026-09-03, #810 / #655.) A star whose FROM is not a single base-table
+     scan is left unexpanded — `logical.ExpandStarProjections` declines it
+     because guessing a join's column set would silently change which columns a
+     query returns — and three shapes are refused as a consequence, all loudly
+     and all answered by PostgreSQL:
+     `SELECT * FROM a JOIN b ORDER BY 1` (42P10), `SELECT * FROM a JOIN b USING (c)`
+     (0A000, because USING merges the joined column into ONE output column),
+     and a `USING` clause following another join on the same FROM item (0A000).
+     Lifting them needs an ORDERED model of a join's emitted columns; they
+     should be lifted together.
+
+   - **Abbreviated CIDR and inet literals.** (Added 2026-09-03, #627.)
+     PostgreSQL reads `'10'::cidr` as 10.0.0.0/8 and `'192.168'::cidr` as
+     192.168.0.0/24 — CLASSFUL address inference, and a `cidr`-only grammar:
+     `'192.168'::inet` is 22P02 there. Wadjet refuses every abbreviated form
+     with 22P02. Reproducing `inet_net_pton`'s legacy class inference
+     bit-exactly is its own decision with its own oracle corpus.
+
+     The MAC and UUID halves of the same issue are NOT divergences: every
+     spelling PostgreSQL accepts is accepted, at every comparison site, and
+     nothing more. That last clause is the part the first version of this entry
+     asserted without holding — `pgMACGroupedHex` counted SEPARATORS rather
+     than GROUP SIZES, so twelve hex digits with one or two separators anywhere
+     parsed, and six spellings PostgreSQL refuses with 22P02
+     (`0-8-002b010203`, `0:8002b010203`, `08-002b010203`, `08002b:01:0203`,
+     `08:002b:010203`, `08002b:0102:03`) were answered. Measured on 17.11: the
+     grouped-hex grammar is 6+6 and 4+4+4 and nothing else. The equality is
+     enforced now and the six sit in the refused half of
+     `coordinator.TestANetworkLiteralHasOneDispositionAtEverySite`, at every
+     site, because a bound with no fixture is how this one survived review.
+
+   - **A `VARCHAR(n)` or `CHAR(n)` cast destination drops its `n` — in the
+     VALUE first, and on the wire after it.** (Added 2026-09-03, #708's other
+     half, found in this arc's review and OPEN.) Measured live on 17.11
+     against the same query through the embedded API:
+
+     | shape | PostgreSQL 17.11 | wadjet |
+     |---|---|---|
+     | `CAST('abcdef' AS VARCHAR(4))` | `abcd` | `abcdef` |
+     | `CAST('abcdef' AS CHAR(4))` | `abcd` | `abcdef` |
+     | `CAST('12.7500' AS VARCHAR(4))` | `12.7` | `12.7500` |
+     | `\gdesc` of the first | `character varying(4)` | unconstrained STRING |
+
+     Two mechanisms, one cause. `expr.castTargetType` maps `CHAR`, `VARCHAR`,
+     `TEXT` and `STRING` onto a single unparameterized `batch.TypeString`, so
+     the length is parsed and then dropped and nothing truncates;
+     `physical.declaredTypmod` returns -1 for every destination whose modifier
+     does not reach `pgwire.TypeMod`, and only DECIMAL does. #708 closed the
+     DECIMAL half of exactly this question and left this one, which its own
+     code comment named — as an agreement, which it is not.
+
+     **The order is value-first, and that is the decision this entry records.**
+     Declaring `character varying(4)` while returning six characters is a
+     worse lie than declaring nothing: a client that trusts the description to
+     size a buffer is then wrong in the direction that overflows. So the
+     length is ENFORCED before it is DECLARED, which means carrying it beside
+     `batch.TypeString` from `castTargetType` through the cast kernel, with
+     PostgreSQL's own split between the spellings that truncate (an explicit
+     `CAST`) and the ones that raise `22001` (an INSERT into a `varchar(n)`
+     column).
+
+     Pinned in BOTH halves by `wadjet.TestStringCastDropsItsLengthParameter`,
+     five cells: a folded literal and a real STRING vector for each engine
+     layer, plus a within-length control and an unparameterized control so a
+     repair that truncates everything fails too. It is a local pin rather than
+     a `knownBug` corpus entry because the corpus requires a Wadjet-bug pin to
+     name an issue and this one was found in review with none filed; the pin
+     fires the day either half is closed, which is what a record owes.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`
