@@ -133,8 +133,43 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 	}, nil
 }
 
+// dmlCommitAttempts bounds how many times a DML statement re-reads the
+// manifest and redoes its scan after finding that the files it read are no
+// longer the files the table has.
+//
+// A retry is not a fallback: the statement observed a manifest, matched rows
+// in files that manifest named, and CommitDML refused because compaction
+// rewrote them underneath it (#691). Redoing the scan against the manifest
+// that replaced it is the only way to answer the statement correctly, and it
+// is what "one CAS against the revision you read" means for a statement that
+// must also write. A statement that keeps losing the race reports 40001, the
+// class PostgreSQL gives a client that should retry.
+const dmlCommitAttempts = 5
+
+// retryMovedTarget runs one DML statement, redoing it whole while CommitDML
+// reports that its target files moved.
+func (db *DB) retryMovedTarget(table string, once func() (*ExecResult, error)) (*ExecResult, error) {
+	var err error
+	for attempt := 0; attempt < dmlCommitAttempts; attempt++ {
+		var res *ExecResult
+		res, err = once()
+		if err == nil || !errors.Is(err, catalog.ErrDMLTargetMoved) {
+			return res, err
+		}
+	}
+	return nil, sqlerr.Wrap("40001", fmt.Errorf(
+		"table %q changed under this statement %d times (compaction rewrote the files it read); retry it: %w",
+		table, dmlCommitAttempts, err))
+}
+
 // executeDelete handles DELETE FROM table [WHERE condition]
 func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*ExecResult, error) {
+	return db.retryMovedTarget(info.Table, func() (*ExecResult, error) {
+		return db.deleteOnce(ctx, info)
+	})
+}
+
+func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecResult, error) {
 	if err := CheckDMLQualifier(info.DMLTarget); err != nil {
 		return nil, err
 	}
@@ -178,8 +213,14 @@ func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*Exe
 		}
 	}
 
+	// One CAS, validated against the manifest it commits into: a marker for a
+	// file compaction rewrote while this statement was scanning is refused
+	// rather than committed against nothing (#691).
 	if len(markers) > 0 {
-		if err := db.catalog.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
+		if err := db.catalog.CommitDML(ctx, info.Table, nil, markers); err != nil {
+			if errors.Is(err, catalog.ErrDMLTargetMoved) {
+				return nil, err // the caller redoes the statement
+			}
 			return nil, fmt.Errorf("recording delete markers: %w", err)
 		}
 	}
@@ -192,6 +233,12 @@ func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*Exe
 
 // executeUpdate handles UPDATE table SET col=val [WHERE condition]
 func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*ExecResult, error) {
+	return db.retryMovedTarget(info.Table, func() (*ExecResult, error) {
+		return db.updateOnce(ctx, info)
+	})
+}
+
+func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecResult, error) {
 	if err := CheckDMLQualifier(info.DMLTarget); err != nil {
 		return nil, err
 	}
@@ -228,7 +275,7 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 	//
 	// EVERY REPLACEMENT ROW IS DURABLE BEFORE ANY MARKER IS COMMITTED. The
 	// markers accumulate across the whole statement, one FlushAll follows the
-	// loop, and only then does a single AddDeleteMarkers commit them.
+	// loop, and only then does a single CommitDML commit them.
 	//
 	// Committing a file's marker inside the loop is what made this per-FILE
 	// rather than per-STATEMENT. Ingest only BUFFERS, so with the marker for
@@ -239,10 +286,11 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 	// (#647 re-review). Marker-first, the shape before that, lost them on the
 	// FIRST file.
 	//
-	// What remains is duplication, never loss: an auto-flush that already
-	// landed some replacement rows followed by a failure leaves those rows
-	// beside the originals the uncommitted markers would have deleted. The
-	// transactional marker+ingest commit is a known separate issue.
+	// The remaining duplication is closed by DeferManifestCommit: the
+	// ingester holds its flushed files OUT of the manifest and they land in
+	// the SAME CAS as the markers, so a refused commit has published nothing
+	// and the statement is simply redone (#691). What an interrupted attempt
+	// leaves behind is unreferenced objects in the store, never a row.
 	var totalUpdated int64
 	var ing *ingest.Ingester
 	var markers []catalog.DeleteMarker
@@ -280,6 +328,7 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 
 			if ing == nil {
 				ing = ingest.New(db.catalog, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
+				ing.DeferManifestCommit()
 			}
 			if err := ing.Ingest(ctx, updatedRows); err != nil {
 				return nil, fmt.Errorf("inserting updated rows: %w", err)
@@ -289,16 +338,23 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 		}
 	}
 
+	var pending []catalog.PendingFile
 	if ing != nil {
 		if err := ing.FlushAll(ctx); err != nil {
 			// No markers are committed on this path: every row this statement
 			// matched is still where it was.
 			return nil, fmt.Errorf("flushing updated rows: %w", err)
 		}
+		pending = ing.PendingFiles()
 	}
 
-	if len(markers) > 0 {
-		if err := db.catalog.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
+	// The replacement rows and the markers that supersede what they replace,
+	// in ONE CAS, validated against the manifest it commits into (#691).
+	if len(pending) > 0 || len(markers) > 0 {
+		if err := db.catalog.CommitDML(ctx, info.Table, pending, markers); err != nil {
+			if errors.Is(err, catalog.ErrDMLTargetMoved) {
+				return nil, err // the caller redoes the statement
+			}
 			return nil, fmt.Errorf("recording delete markers: %w", err)
 		}
 	}
@@ -312,6 +368,12 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 // It reads both target and source tables, joins on the ON condition, then applies
 // WHEN MATCHED (UPDATE/DELETE) and WHEN NOT MATCHED (INSERT) clauses.
 func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecResult, error) {
+	return db.retryMovedTarget(info.Target, func() (*ExecResult, error) {
+		return db.mergeOnce(ctx, info)
+	})
+}
+
+func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResult, error) {
 	if err := CheckDMLQualifier(plansql.DMLTarget{
 		Table:     info.Target,
 		Qualifier: info.TargetQualifier,
@@ -467,18 +529,26 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 	// hold fails here, and committing the markers first would delete the
 	// matched rows and then refuse to write their replacements (#647 review).
 	allInserts := append(updateRows, insertRows...)
+	var pending []catalog.PendingFile
 	if len(allInserts) > 0 {
 		ing := ingest.New(db.catalog, info.Target, targetMeta.Schema, targetMeta.PartitionKeys, ingest.DefaultConfig())
+		// The new rows land in the SAME CAS as the markers that remove the
+		// rows they replace, or neither does (#691).
+		ing.DeferManifestCommit()
 		if err := ing.Ingest(ctx, allInserts); err != nil {
 			return nil, fmt.Errorf("ingesting rows: %w", err)
 		}
 		if err := ing.FlushAll(ctx); err != nil {
 			return nil, fmt.Errorf("flushing rows: %w", err)
 		}
+		pending = ing.PendingFiles()
 	}
 
-	if len(deleteMarkers) > 0 {
-		if err := db.catalog.AddDeleteMarkers(ctx, info.Target, deleteMarkers); err != nil {
+	if len(pending) > 0 || len(deleteMarkers) > 0 {
+		if err := db.catalog.CommitDML(ctx, info.Target, pending, deleteMarkers); err != nil {
+			if errors.Is(err, catalog.ErrDMLTargetMoved) {
+				return nil, err // the caller redoes the statement
+			}
 			return nil, fmt.Errorf("recording delete markers: %w", err)
 		}
 	}

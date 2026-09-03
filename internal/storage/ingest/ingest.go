@@ -55,6 +55,37 @@ type Ingester struct {
 	buffers map[string]*partitionBuffer // partition path -> buffer
 	done    chan struct{}
 	wg      sync.WaitGroup
+
+	// deferCommit holds every flushed file OUT of the manifest so the caller
+	// can commit them together with something else. See DeferManifestCommit.
+	deferCommit bool
+	pending     []catalog.PendingFile
+}
+
+// DeferManifestCommit stops this Ingester from registering its flushed files
+// in the manifest, holding them in PendingFiles instead.
+//
+// It exists for one caller: a DML statement, which must commit the rows it
+// WRITES and the delete markers that remove the rows they REPLACE in one CAS
+// or neither (#691). The default — a manifest commit per flushed file — makes
+// an UPDATE two independent commits, so a marker commit refused at the end
+// left the replacement rows beside the originals, reporting an error over a
+// table that now had both.
+//
+// Call it before the first Ingest, and never on an Ingester whose background
+// flusher is Start()ed: the pending list is drained by the caller, not by a
+// timer. The files are already durable in the object store when they land
+// here; only their manifest entries are held.
+func (ing *Ingester) DeferManifestCommit() { ing.deferCommit = true }
+
+// PendingFiles returns the flushed files whose manifest entries are being
+// held, and clears the list.
+func (ing *Ingester) PendingFiles() []catalog.PendingFile {
+	ing.mu.Lock()
+	defer ing.mu.Unlock()
+	out := ing.pending
+	ing.pending = nil
+	return out
 }
 
 type partitionBuffer struct {
@@ -443,7 +474,17 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 	// never a path this table's manifest can already hold, so a collision
 	// here should be refused loudly rather than silently replacing an
 	// existing entry.
-	if err := ing.catalog.AddNewFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
+	//
+	// Unless the caller deferred the manifest commit, in which case the file
+	// is HELD and committed later in the same CAS as the delete markers that
+	// supersede what it replaces (#691). See DeferManifestCommit.
+	if ing.deferCommit {
+		ing.pending = append(ing.pending, catalog.PendingFile{
+			PartValues: buf.values,
+			PartPath:   partPath,
+			Entry:      fileEntry,
+		})
+	} else if err := ing.catalog.AddNewFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
 		return fmt.Errorf("updating manifest: %w", err)
 	}
 

@@ -1546,6 +1546,20 @@ UPDATE table_name SET col1 = val1 [, col2 = val2 ...] [WHERE condition]
 
 Internally executes as DELETE of matching rows + INSERT of modified rows.
 
+### Concurrency
+
+A DELETE, UPDATE or MERGE reads the table's manifest, scans the files it
+names, and commits its change — the replacement rows and the delete markers
+that supersede what they replace — in a **single compare-and-swap** against
+that manifest. If background compaction rewrote the files the statement read
+while it was scanning, the commit is refused and the statement is redone
+against the manifest that replaced them. A statement that keeps losing that
+race reports SQLSTATE **40001** (`serialization_failure`), which a client is
+expected to retry; the table is unchanged when it does.
+
+Wadjet has no row-level concurrency control: two statements updating the same
+row both succeed, and the later commit wins, as with any merge-on-read table.
+
 ### Type Coercion
 
 Values in INSERT/UPDATE are automatically coerced to the target column type:

@@ -695,6 +695,14 @@ func DeletedRowsByFile(markers []DeleteMarker) map[string]map[int64]bool {
 
 // AddDeleteMarkers adds delete markers to a table's manifest using CAS.
 // Merges new markers with existing ones for the same file.
+//
+// It does NOT check that the files its markers name are still in the manifest,
+// and it is not the entry point a DML statement uses. `CommitDML` is: it
+// validates every marker against the manifest it is committing into, and lands
+// the statement's new files in the same CAS (#691). This one stays as the
+// low-level primitive for callers that mint markers against a manifest they
+// are holding right now — the GC and compaction tests, and any embedder
+// managing markers directly.
 func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers []DeleteMarker) error {
 	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
@@ -711,59 +719,10 @@ func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers 
 			return fmt.Errorf("decoding manifest: %w", err)
 		}
 
-		// Merge markers: combine row indices for same file path
-		existing := make(map[string]map[int64]bool)
-		for _, dm := range manifest.DeleteMarkers {
-			if existing[dm.FilePath] == nil {
-				existing[dm.FilePath] = make(map[int64]bool)
-			}
-			for _, idx := range dm.RowIndices {
-				existing[dm.FilePath][idx] = true
-			}
-		}
-		for _, dm := range markers {
-			if existing[dm.FilePath] == nil {
-				existing[dm.FilePath] = make(map[int64]bool)
-			}
-			for _, idx := range dm.RowIndices {
-				existing[dm.FilePath][idx] = true
-			}
-		}
-
-		// Rebuild merged markers, preserving earliest CreatedAt per file
-		existingTimes := make(map[string]time.Time)
-		for _, dm := range manifest.DeleteMarkers {
-			if !dm.CreatedAt.IsZero() {
-				if t, ok := existingTimes[dm.FilePath]; !ok || dm.CreatedAt.Before(t) {
-					existingTimes[dm.FilePath] = dm.CreatedAt
-				}
-			}
-		}
-		for _, dm := range markers {
-			if !dm.CreatedAt.IsZero() {
-				if t, ok := existingTimes[dm.FilePath]; !ok || dm.CreatedAt.Before(t) {
-					existingTimes[dm.FilePath] = dm.CreatedAt
-				}
-			}
-		}
-
-		now := time.Now().UTC()
-		manifest.DeleteMarkers = nil
-		for filePath, indices := range existing {
-			rows := make([]int64, 0, len(indices))
-			for idx := range indices {
-				rows = append(rows, idx)
-			}
-			createdAt := now
-			if t, ok := existingTimes[filePath]; ok {
-				createdAt = t
-			}
-			manifest.DeleteMarkers = append(manifest.DeleteMarkers, DeleteMarker{
-				FilePath:   filePath,
-				RowIndices: rows,
-				CreatedAt:  createdAt,
-			})
-		}
+		// One merge rule, shared with CommitDML: the rule decides which rows a
+		// reader skips, so two copies of it are two definitions of which rows
+		// a table has.
+		manifest.DeleteMarkers = mergeDeleteMarkers(manifest.DeleteMarkers, markers)
 		manifest.UpdatedAt = time.Now().UTC()
 
 		updated, err := json.Marshal(manifest)
