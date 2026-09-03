@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/storage/partition"
@@ -158,13 +159,18 @@ func (ing *Ingester) validateRow(row map[string]any) error {
 		v, ok := row[col.Name]
 		if !ok {
 			if !col.Nullable {
-				return fmt.Errorf("missing required column %q (NOT NULL)", col.Name)
+				// PostgreSQL: 23502, not_null_violation. Without a class this
+				// crossed the wire as the blanket 42000, which tells a client
+				// its SQL was malformed rather than that its DATA was (#814).
+				return sqlerr.New("23502",
+					"null value in column %q violates not-null constraint", col.Name)
 			}
 			continue
 		}
 		if v == nil {
 			if !col.Nullable {
-				return fmt.Errorf("column %q cannot be null (NOT NULL constraint)", col.Name)
+				return sqlerr.New("23502",
+					"null value in column %q violates not-null constraint", col.Name)
 			}
 			continue
 		}

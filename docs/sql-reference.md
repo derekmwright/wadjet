@@ -1530,6 +1530,19 @@ INSERT INTO table_name [(col1, col2, ...)] VALUES (val1, val2, ...) [, (val3, va
 
 If column list is omitted, values are matched to schema column order.
 
+The column list is resolved against the table before anything is written, and
+the refusals carry PostgreSQL's classes:
+
+| Statement | SQLSTATE |
+|---|---|
+| a column the table does not have | 42703 `column "x" of relation "t" does not exist` |
+| the same column named twice | 42701 `column "x" specified more than once` |
+| a row with the wrong number of values | 42601 |
+| a NOT NULL column left without a value | 23502 |
+
+Column names are matched case-insensitively, as they are in `UPDATE ... SET`
+and in a `WHERE` clause.
+
 ### DELETE
 
 ```sql

@@ -76,6 +76,54 @@ func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (r
 	}
 }
 
+// resolveInsertColumns turns an INSERT's column list into the columns it
+// names, refusing one the table does not have.
+//
+// It returns the STORED name for each position (so the row map is keyed the
+// way the schema is) beside the whole parquet.Column (so a DECIMAL literal is
+// judged against the declared (p, s) here rather than at the flush, which is
+// what names the row that carried it — #647).
+//
+// The message and the class are PostgreSQL's, and the lookup is
+// case-insensitive for the same reason ResolveDMLSetClauses' is: INSERT was
+// the one DML clause that resolved case-SENSITIVELY, so `INSERT INTO t (ID)`
+// failed on a table whose column is `id` while `UPDATE t SET ID = …`
+// succeeded.
+func resolveInsertColumns(named []string, table string, schema []parquet.Column) ([]string, []parquet.Column, error) {
+	if len(named) == 0 {
+		// No explicit list: schema order, every column.
+		names := make([]string, len(schema))
+		cols := make([]parquet.Column, len(schema))
+		for i, col := range schema {
+			names[i], cols[i] = col.Name, col
+		}
+		return names, cols, nil
+	}
+	byName := make(map[string]parquet.Column, len(schema))
+	for _, col := range schema {
+		byName[strings.ToLower(col.Name)] = col
+	}
+	names := make([]string, len(named))
+	cols := make([]parquet.Column, len(named))
+	seen := make(map[string]bool, len(named))
+	for i, raw := range named {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		col, ok := byName[name]
+		if !ok {
+			return nil, nil, sqlerr.New("42703", "column %q of relation %q does not exist", name, table)
+		}
+		if seen[name] {
+			// PostgreSQL: 42701, `column "x" specified more than once`.
+			// Without this the second value silently overwrote the first in
+			// the row map and the statement reported success.
+			return nil, nil, sqlerr.New("42701", "column %q specified more than once", name)
+		}
+		seen[name] = true
+		names[i], cols[i] = col.Name, col
+	}
+	return names, cols, nil
+}
+
 // executeInsert handles INSERT INTO table [(cols)] VALUES (v1, v2), ...
 func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*ExecResult, error) {
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
@@ -83,33 +131,38 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 		return nil, fmt.Errorf("table %q: %w", info.Table, err)
 	}
 
-	// Determine column ordering
-	columns := info.Columns
-	if len(columns) == 0 {
-		// No explicit columns — use schema order
-		columns = make([]string, len(tableMeta.Schema.Columns))
-		for i, col := range tableMeta.Schema.Columns {
-			columns[i] = col.Name
-		}
-	}
-
-	// Build a column map for value conversion. The whole COLUMN, not its
-	// TypeID: a DECIMAL literal is judged against the declared (p, s), and
-	// refusing it here rather than at the flush names the row that carried it.
-	colByName := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
-	for _, col := range tableMeta.Schema.Columns {
-		colByName[col.Name] = col
+	// RESOLVE the column list against the table, before a single value is
+	// converted and long before anything is written.
+	//
+	// This used to be `columns := info.Columns` taken verbatim, and the
+	// lookup below was `colByName[colName]` with no `ok`. A miss yielded the
+	// ZERO parquet.Column, whose Type is TypeBool (the zero of the iota
+	// block), so convertValue took `strconv.ParseBool`: `ParseBool("1")`
+	// SUCCEEDS, the row was built with a key no column has, and
+	// ingest.validateRow iterates the SCHEMA rather than the row so an extra
+	// key is structurally invisible to it. `INSERT INTO pr (id, nosuchcol)
+	// VALUES (9, 1)` therefore answered `INSERT 0 1` having silently dropped
+	// the typo'd column and written a row with a missing value — a user's
+	// typo becoming data (#814). The mild face, when ParseBool also failed,
+	// was `strconv.ParseBool: parsing "zz"` for a column that does not exist.
+	columns, cols, err := resolveInsertColumns(info.Columns, info.Table, tableMeta.Schema.Columns)
+	if err != nil {
+		return nil, err
 	}
 
 	// Convert parsed string values to typed rows
 	var rows []map[string]any
 	for rowIdx, vals := range info.Values {
 		if len(vals) != len(columns) {
-			return nil, fmt.Errorf("row %d: expected %d values, got %d", rowIdx, len(columns), len(vals))
+			// PostgreSQL: 42601, `INSERT has more target columns than
+			// expressions` / `more expressions than target columns`.
+			return nil, sqlerr.New("42601",
+				"row %d: INSERT has %d target column(s) and %d expression(s)",
+				rowIdx, len(columns), len(vals))
 		}
 		row := make(map[string]any, len(columns))
 		for i, colName := range columns {
-			v, err := ConvertValueForColumn(vals[i], colByName[colName])
+			v, err := ConvertValueForColumn(vals[i], cols[i])
 			if err != nil {
 				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
 			}

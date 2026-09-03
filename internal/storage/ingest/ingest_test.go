@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -269,8 +270,15 @@ func TestIngestValidation_MissingRequiredColumn(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing NOT NULL column")
 	}
-	if !strings.Contains(err.Error(), "missing required column") {
+	// The message and the class are PostgreSQL's: a NOT NULL column absent
+	// from the row is 23502 (not_null_violation), the same as a NULL in one.
+	// Without a class this crossed the wire as the blanket 42000, which tells
+	// a client its SQL was malformed rather than that its DATA was (#814).
+	if !strings.Contains(err.Error(), `null value in column "id" violates not-null constraint`) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := sqlerr.StateOf(err); got != "23502" {
+		t.Errorf("SQLSTATE %q, want 23502 (err: %v)", got, err)
 	}
 }
 
@@ -295,8 +303,11 @@ func TestIngestValidation_NullInNotNullColumn(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for null in NOT NULL column")
 	}
-	if !strings.Contains(err.Error(), "cannot be null") {
+	if !strings.Contains(err.Error(), `null value in column "id" violates not-null constraint`) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := sqlerr.StateOf(err); got != "23502" {
+		t.Errorf("SQLSTATE %q, want 23502 (err: %v)", got, err)
 	}
 }
 
