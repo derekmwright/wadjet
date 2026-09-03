@@ -443,6 +443,11 @@ func startupTimeIsThisProcess(startup float64, procStart time.Time) bool {
 // this process started at is accepted however long the suite has been running
 // (#563/#518), and a stale constant or a future timestamp is not (#563's
 // property, which the unbounded check could not see).
+//
+// The substitution was RUN, not reasoned about: making fnPgPostmasterStartTime
+// return a fixed 2020 timestamp fails TestDataGripOpeningSequencePgx with
+// "startup_time 1.6e+09 is not this process's start (1788460853)", where the
+// previous `now - startup >= 0` check passed. Re-verified in review.
 func TestStartupTimeIsThisProcess(t *testing.T) {
 	procStart := time.Unix(1_700_000_000, 0)
 	tests := []struct {
