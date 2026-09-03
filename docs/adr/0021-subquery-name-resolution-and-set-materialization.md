@@ -393,6 +393,48 @@ lowering, and its cost is a route to the coordinator-local pipeline on both
 DAG arms, asserted as `CorrelatedLocalRoutes` 1 beside the rows in the
 correlation census rather than described here.
 
+### 1g. An aggregate's derived ARGUMENT is a scope, like every other expression
+
+(Added 2026-09-03, #734.)
+
+§1c named this one too: "the aggregate-argument compile site never asks for
+the outer scope at all". It is one call. `physical.buildAggregate` materializes
+a derived aggregate argument into a synthetic `__agg_expr_N` column and
+compiled it with `expr.CompileWithRunner` — a runner and nothing else — while
+the SELECT-list projection site three thousand lines away compiles the SAME
+kind of expression with `CompileWithScopeResolver` and the child's outer
+tables and columns.
+
+With no outer scope a correlated subquery is not RECOGNIZED as correlated: it
+becomes the uncorrelated evaluator, which runs its text ONCE against no outer
+row and memoizes a query-wide constant. `SUM(CASE WHEN EXISTS (SELECT 1 FROM
+decpair y WHERE y.id = x.id * 2) THEN 1 ELSE 0 END)` read constant FALSE and
+answered 0 for PostgreSQL's 4, in silence, until v0.18.16 made the dangling
+re-run loud. The IDENTICAL expression one level down — the same CASE in a
+derived table's SELECT list, summed above it — has always answered 4.
+
+The site now asks, and every spelling of the position answers PostgreSQL's
+value on all four arms: EXISTS, NOT EXISTS, IN, a scalar subquery, inside
+SUM / COUNT / MAX, grouped and ungrouped.
+
+**The residual is the ROUTE, and it is pinned as a PAIR rather than
+described.** An aggregate ARGUMENT is not a decorrelation site at all — the
+three decorrelation passes walk `NodeFilter` and nothing else — so even a
+plain COLUMN-keyed correlation stays a per-row subquery there and both DAG
+arms route the plan to the coordinator-local pipeline, while the SAME
+correlation in a WHERE becomes a semi join both arms execute. The census
+carries the two side by side (`control_same_correlation_in_a_where_
+decorrelates` at 0 routes, `residual_same_correlation_in_an_aggregate_
+argument_routes` at 1), so the day the second reaches 0 the pin fails and the
+residual is closed.
+
+Closing it is the `__sub_N` shape: lift the subquery into a marker LEFT join
+below the aggregate, publish the marker under a hidden slot, and let the
+argument read the column. It needs one thing this tree does not have — a
+decorrelation that can key on an EXPRESSION (`y.id = x.id * 2`), which
+`extractCorrelatedRefs` declines today, for the WHERE spelling as much as for
+this one.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

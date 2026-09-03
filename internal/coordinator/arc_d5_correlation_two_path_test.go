@@ -433,10 +433,97 @@ func arcD5FailedSubquerySetCells() []arcD5Cell {
 // ---------------------------------------------------------------------------
 // #734 — a correlated subquery inside an AGGREGATE ARGUMENT.
 //
-// Cells are added by the commit that lowers the shape; until then the
-// aggregate-argument family is covered by the arc-A census, which records it
-// as LOUD (v0.18.16's consumer half) with PostgreSQL's answers beside it.
-func arcD5AggregateArgumentCells() []arcD5Cell { return nil }
+// The aggregate's derived-input compile site asked for NO outer scope, so a
+// correlated subquery there was compiled as UNCORRELATED and run ONCE against
+// no outer row — a query-wide constant. `SUM(CASE WHEN EXISTS (SELECT 1 FROM
+// decpair y WHERE y.id = x.id * 2) THEN 1 ELSE 0 END)` read FALSE and answered
+// 0 for PostgreSQL's 4, in silence, until v0.18.16 made the dangling re-run
+// loud. The IDENTICAL expression one level down — in a derived table's SELECT
+// list — has always answered, because that site does ask.
+//
+// The DAG arms route these to the coordinator-local pipeline, and that is the
+// RESIDUAL, asserted rather than described: an aggregate ARGUMENT is not a
+// decorrelation site at all (decorrelateExists / decorrelateInSubqueries /
+// decorrelateScalarSubqueries walk NodeFilter only), so even a plain
+// COLUMN-keyed correlation stays a per-row subquery there while the same
+// correlation in a WHERE becomes a semi join — which is the pair of cells
+// below the headline group.
+func arcD5AggregateArgumentCells() []arcD5Cell {
+	return []arcD5Cell{
+		{issue: "#734", name: "exists_in_an_aggregate_argument",
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			want: []string{"v=int64:4"}, wantCorrRoutes: 1},
+		{issue: "#734", name: "not_exists_in_an_aggregate_argument",
+			sql: `SELECT SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			want: []string{"v=int64:5"}, wantCorrRoutes: 1},
+		{issue: "#734", name: "exists_in_a_count_argument",
+			sql: `SELECT COUNT(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
+				`THEN 1 END) AS v FROM decpair x`,
+			want: []string{"v=int64:4"}, wantCorrRoutes: 1},
+		// The IN spelling of the same position. Its answer is 0 and that is
+		// PostgreSQL's: `y.id = x.id * 2 AND x.id = y.id` forces x.id = 0,
+		// which no row holds. It sits beside its non-zero twin below so a
+		// "0 because the correlation was dropped" cannot pass as this.
+		{issue: "#734", name: "in_subquery_in_an_aggregate_argument",
+			sql: `SELECT SUM(CASE WHEN x.id IN (SELECT y.id FROM decpair y WHERE y.id = x.id * 2) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			want: []string{"v=int64:0"}, wantCorrRoutes: 1,
+			pgSays: "0 — and 9 for the same shape correlated on y.id = x.id"},
+		{issue: "#734", name: "in_subquery_in_an_aggregate_argument_nonzero",
+			sql: `SELECT SUM(CASE WHEN x.id IN (SELECT y.id FROM decpair y WHERE y.id = x.id) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			want: []string{"v=int64:9"}, wantCorrRoutes: 1},
+		// A GROUPED aggregate, so the correlated argument is evaluated on the
+		// rows of every group and not once for the whole relation.
+		{issue: "#734", name: "exists_in_a_grouped_aggregate_argument",
+			sql: `SELECT x.id AS gk, SUM(CASE WHEN EXISTS (SELECT 1 FROM decpair y ` +
+				`WHERE y.id = x.id * 2) THEN 1 ELSE 0 END) AS v FROM decpair x GROUP BY x.id ORDER BY gk`,
+			want: []string{
+				"gk=int64:1|v=int64:1", "gk=int64:2|v=int64:1", "gk=int64:3|v=int64:1",
+				"gk=int64:4|v=int64:1", "gk=int64:5|v=int64:0", "gk=int64:6|v=int64:0",
+				"gk=int64:7|v=int64:0", "gk=int64:8|v=int64:0", "gk=int64:9|v=int64:0"},
+			wantCorrRoutes: 1},
+		{issue: "#734", name: "not_exists_in_a_max_argument_over_a_column",
+			sql: `SELECT MAX(CASE WHEN NOT EXISTS (SELECT 1 FROM typemx_dim d WHERE d.k = a.g) ` +
+				`THEN a.id ELSE 0 END) AS v FROM typemx a WHERE a.id < 50`,
+			want: []string{"v=int64:38"}, wantCorrRoutes: 1},
+		{issue: "#734", name: "exists_in_a_grouped_aggregate_argument_over_a_column_key",
+			sql: `SELECT a.g AS gk, SUM(CASE WHEN EXISTS (SELECT 1 FROM typemx_dim d WHERE d.k = a.g) ` +
+				`THEN 1 ELSE 0 END) AS v FROM typemx a WHERE a.id < 50 GROUP BY a.g ORDER BY gk`,
+			want: []string{
+				"gk=NULL|v=int64:0", "gk=int32:0|v=int64:8", "gk=int32:1|v=int64:7",
+				"gk=int32:2|v=int64:7", "gk=int32:3|v=int64:6", "gk=int32:4|v=int64:6",
+				"gk=int32:5|v=int64:6", "gk=int32:6|v=int64:7"},
+			wantCorrRoutes: 1},
+		// THE RESIDUAL, as a PAIR. The same correlation, on a plain column,
+		// in the two positions: a WHERE decorrelates into a semi join and
+		// both DAG arms EXECUTE it (0 routes); an aggregate ARGUMENT does
+		// not, and routes. Closing that needs the aggregate argument to
+		// become a decorrelation site — a marker LEFT join publishing a
+		// hidden slot the argument reads — which is #734's own next step and
+		// not this commit's. The day the second cell shows 0 routes, this
+		// pin FAILS and the residual is closed.
+		{issue: "#734", name: "control_same_correlation_in_a_where_decorrelates",
+			sql: `SELECT COUNT(*) AS v FROM typemx a WHERE a.id < 50 AND EXISTS (` +
+				`SELECT 1 FROM typemx_dim d WHERE d.k = a.g)`,
+			want: []string{"v=int64:47"}},
+		{issue: "#734", name: "residual_same_correlation_in_an_aggregate_argument_routes",
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM typemx_dim d WHERE d.k = a.g) ` +
+				`THEN 1 ELSE 0 END) AS v FROM typemx a WHERE a.id < 50`,
+			want: []string{"v=int64:47"}, wantCorrRoutes: 1,
+			pgSays: "47 — the value is right on every arm; what is pinned here is the ROUTE"},
+		// The control that answered at base and must keep answering: an
+		// UNCORRELATED subquery in an aggregate argument was never this
+		// defect, which is what says the CORRELATION and not the position was
+		// the trigger. It takes the SELECT-list route, not the correlated one.
+		{issue: "#734", name: "control_uncorrelated_exists_in_an_aggregate_argument",
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = 2) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			want: []string{"v=int64:9"}, wantScalarProjRoutes: 1},
+	}
+}
 
 func TestArcD5CorrelationMatchesPostgres(t *testing.T) {
 	if testing.Short() {

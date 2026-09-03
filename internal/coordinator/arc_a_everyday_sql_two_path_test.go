@@ -633,27 +633,23 @@ func arcACells() []arcACell {
 		// The refusal is a FATAL EVALUATION error, so it reaches the client
 		// as a query error on both engines; on the DAG arms it arrives inside
 		// the task failure, which is why the DAG's expected text differs.
-		{issue: "#734", name: "exists_in_an_aggregate_argument_is_loud",
+		// ANSWERING SINCE THE CORRELATION ARC (#734). The aggregate's
+		// derived-input compile site now asks for the outer scope, so the
+		// subquery compiles as the correlated one it is. The family, its
+		// grouped and IN spellings and the routing residual are
+		// `TestArcD5CorrelationMatchesPostgres`'s #734 group.
+		{issue: "#734", name: "exists_in_an_aggregate_argument",
 			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
 				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
-			wantErrLike:    "planned as uncorrelated",
-			wantErrLikeDAG: "planned as uncorrelated",
-			wantCorrRoutes: 1,
-			pgSays:         "4 — and 5 for the NOT EXISTS twin"},
-		{issue: "#734", name: "not_exists_in_an_aggregate_argument_is_loud",
+			want: []string{"v=int64:4"}, wantCorrRoutes: 1},
+		{issue: "#734", name: "not_exists_in_an_aggregate_argument",
 			sql: `SELECT SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
 				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
-			wantErrLike:    "planned as uncorrelated",
-			wantErrLikeDAG: "planned as uncorrelated",
-			wantCorrRoutes: 1,
-			pgSays:         "5"},
-		{issue: "#734", name: "exists_in_a_count_argument_is_loud",
+			want: []string{"v=int64:5"}, wantCorrRoutes: 1},
+		{issue: "#734", name: "exists_in_a_count_argument",
 			sql: `SELECT COUNT(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
 				`THEN 1 END) AS v FROM decpair x`,
-			wantErrLike:    "planned as uncorrelated",
-			wantErrLikeDAG: "planned as uncorrelated",
-			wantCorrRoutes: 1,
-			pgSays:         "4"},
+			want: []string{"v=int64:4"}, wantCorrRoutes: 1},
 		// #734's controls, which ANSWER and must keep answering: the same
 		// EXISTS in the WHERE and in the SELECT list is decorrelated
 		// properly, and an UNCORRELATED EXISTS in an aggregate argument is

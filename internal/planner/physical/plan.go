@@ -9626,7 +9626,29 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				continue
 			}
 			synName := SlotName(SlotAggInput, i)
-			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption())
+			// WITH THE OUTER SCOPE, exactly as the SELECT-list projection
+			// site compiles its own expressions (see the CompileWith*
+			// ladder above). Without it this site asked for none, so a
+			// correlated subquery in an AGGREGATE ARGUMENT was compiled as
+			// UNCORRELATED and run ONCE against no outer row: `SUM(CASE WHEN
+			// EXISTS (SELECT 1 FROM y WHERE y.id = x.id * 2) THEN 1 ELSE 0
+			// END)` read a query-wide constant FALSE and answered 0 for
+			// PostgreSQL's 4, in silence, until v0.18.16 made the dangling
+			// re-run loud (#734, ADR-0021 §1c). The identical expression one
+			// level down — in a derived table's SELECT list — has always
+			// answered, because that site does ask.
+			aggOuterTables := collectTableAliases(node.Children[0])
+			aggOuterCols := collectOuterColumns(node.Children[0])
+			var compiled expr.Expr
+			var compErr error
+			if len(aggOuterTables) > 0 {
+				compiled, compErr = expr.CompileWithScopeResolver(agg.InputExpr, p.subqueryRunner,
+					aggOuterTables, aggOuterCols, p.subqueryInnerColumns(),
+					p.subqueryDeclOption(), p.subqueryBudgetOption())
+			} else {
+				compiled, compErr = expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner,
+					p.subqueryDeclOption(), p.subqueryBudgetOption())
+			}
 			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
 			}
