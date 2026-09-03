@@ -6258,7 +6258,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// aggregate input, so #685's output declaration inherited
 					// the same wrong carrier.
 					if t, p, sc, known := aggOutputFromInputDecl(
-						agg.Func, agg.Distinct, spec.InputType, spec.InputPrecision, spec.InputScale); known {
+						agg.Func, agg.Distinct, spec.InputType, spec.InputPrecision, spec.InputScale,
+						aggInputIsWideInteger(agg.InputExpr, emittedColDecls(exprCols))); known {
 						spec.OutputType, spec.OutputTypeKnown = t, true
 						spec.OutputPrecision, spec.OutputScale = p, sc
 					}
@@ -9818,7 +9819,8 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		if synName, ok := syntheticNames[i]; ok {
 			if d, ok := synDecl[synName]; ok {
 				if t, prec, sc, known := aggOutputFromInputDecl(
-					agg.Func, agg.Distinct, d.Type, d.Precision, d.Scale); known {
+					agg.Func, agg.Distinct, d.Type, d.Precision, d.Scale,
+					aggInputIsWideInteger(agg.InputExpr, aggInputDecls)); known {
 					ac.OutputType = t
 					ac.OutputPrecision, ac.OutputScale = prec, sc
 				}
@@ -14518,7 +14520,11 @@ func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta,
 //
 // ok=false only for a function whose output does not follow its input at all;
 // those keep aggOutputType's answer, which is already input-independent.
-func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precision, scale int) (
+// wideInt says the computed integer argument provably carries an int8-domain
+// operand (aggInputIsWideInteger). It is what lets this function apply
+// PostgreSQL's by-WIDTH SUM rule to an expression whose declared TypeID this
+// engine has already widened to INT64.
+func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precision, scale int, wideInt bool) (
 	out parquet.TypeID, outPrecision, outScale int, ok bool,
 ) {
 	name := strings.ToLower(strings.TrimSpace(fn))
@@ -14559,9 +14565,20 @@ func aggOutputFromInputDecl(fn string, distinct bool, in parquet.TypeID, precisi
 		//
 		// A BARE COLUMN is not affected: aggSpecOutputType answers it from the
 		// column's real width, where int8 is int8.
+		//
+		// The residual that paragraph names is CLOSED for every expression
+		// whose width can be READ (#841): aggInputIsWideInteger walks the AST
+		// and the column declarations and answers "this carries an int8-domain
+		// operand", which is exactly what PostgreSQL's rule needs. A shape it
+		// cannot see through keeps the int4 reading, so Q12's CASE of ones is
+		// still bigint and nothing moves on a shape nobody can point at.
 		if _, ok := aggIntegerOutputType(name, in); ok {
 			if name == "avg" {
 				m, _ := aggIntegerOutputDecimal("avg", parquet.TypeInt32)
+				return parquet.TypeDecimal, m.Precision, m.Scale, true
+			}
+			if wideInt {
+				m, _ := aggIntegerOutputDecimal("sum", parquet.TypeInt64)
 				return parquet.TypeDecimal, m.Precision, m.Scale, true
 			}
 			return parquet.TypeInt64, 0, 0, true
