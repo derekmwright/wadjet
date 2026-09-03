@@ -232,6 +232,71 @@ func (bc *BytesColumn) Value(i int) []byte {
 	return bc.Data[start:end]
 }
 
+// IsShapeOnly reports whether this vector's bytes were never decoded — the
+// lengths-only scan decode, or a copy that propagated the mark. A VIEW is
+// shape-only when the vector it looks through is.
+func (v *Vector) IsShapeOnly() bool {
+	if v == nil {
+		return false
+	}
+	if v.Base != nil {
+		return v.Base.IsShapeOnly()
+	}
+	return v.BytesData.ShapeOnly
+}
+
+// setShapeOnlyLen writes one row of a shape-only column: the length advances
+// the offsets and no byte is written. Sequential, like Set and copyShapeRange,
+// because offset i+1 is defined against offset i.
+//
+// The destination must be a bytes-backed column that holds no values. A
+// shape-only length landing on a column with real bytes in it, or on a
+// fixed-width one, is the same confusion copyShapeRange refuses and it is
+// refused the same way — the #361 guard, which the pipeline seams turn into a
+// query error rather than a wrong answer.
+func (v *Vector) setShapeOnlyLen(i, n int) {
+	switch v.Type {
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+	default:
+		v.mismatch(ShapeOnlyLen(n))
+		return
+	}
+	bc := &v.BytesData
+	if len(bc.Data) > 0 {
+		panic("batch: a shape-only length written into a column holding values — " +
+			"some consumer of this column is not a shape consumer (planner analysis bug)")
+	}
+	bc.ShapeOnly = true
+	bc.Offsets[i+1] = bc.Offsets[i] + uint32(n)
+}
+
+// ShapeOnlyLen is what the boxing boundary hands back for a row of a
+// SHAPE-ONLY column: the value is NOT AVAILABLE, and this is its byte length.
+//
+// It exists because a shape-only column has to survive a ROW-SHAPED detour.
+// The scan decodes lengths and no bytes when the planner proves every use of
+// the column reads its shape (COUNT, LENGTH, IS NULL, empty-string), and the
+// vector paths carry that faithfully — copyShapeRange propagates the mark
+// rather than moving bytes that do not exist. The row paths could not: a
+// grouped aggregate under memory pressure buffers its input through
+// RecordBatch.ToRows, whose per-row box comes from Vector.GetValue, and the
+// only thing GetValue could produce for such a row was the panic that says a
+// value was read (#791).
+//
+// So the box is neither the value nor a rendering of it. It is a REFUSAL that
+// carries the length: LengthAt's answer, and nothing else. Written back
+// through SetValue it reconstructs a shape-only column with the same
+// per-row lengths, so what comes out of the detour is what went in — and a
+// consumer that then wants the bytes raises the same guard it always did,
+// at the same place, saying the same thing.
+//
+// A type of its own rather than an int: an int would be indistinguishable
+// from a value at every `switch v := x.(type)` in the tree, which is exactly
+// how a lossy encoding gets written by accident (#632, ADR-0023 item 6 — an
+// encoder must never write bytes its own reader refuses, and a renderer is
+// not a value).
+type ShapeOnlyLen int
+
 // LengthAt returns the byte length of row i without reading the value. It
 // is the only value-shaped accessor valid on a shape-only column, and it
 // mirrors Value's defensive handling of the descending-offset hazard.
@@ -654,6 +719,15 @@ func (v *Vector) GetValue(i int) any {
 		// index (base applies its own null bitmap).
 		return v.Base.GetValue(int(v.Indices[i]))
 	}
+	if v.BytesData.ShapeOnly {
+		// The bytes were never decoded. Hand back the length — the one thing
+		// this column HAS — rather than the panic that used to be the only
+		// answer here, which stopped a correct query the moment it took a
+		// row-shaped detour (#791). The mark travels with the box, so
+		// SetValue rebuilds a shape-only column and a later value read raises
+		// the guard at its own site.
+		return ShapeOnlyLen(v.BytesData.LengthAt(i))
+	}
 	// Hot types first as if-chain for better branch prediction
 	switch v.Type {
 	case TypeInt64, TypeTimestamp:
@@ -782,6 +856,10 @@ func (v *Vector) SetValue(i int, val any) {
 		return
 	}
 	v.Nulls.SetValid(i)
+	if n, ok := val.(ShapeOnlyLen); ok {
+		v.setShapeOnlyLen(i, int(n))
+		return
+	}
 	switch v.Type {
 	case TypeBool:
 		// A value-shape mismatch here used to write NULL, and before that an

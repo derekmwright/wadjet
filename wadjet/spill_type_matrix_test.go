@@ -621,61 +621,67 @@ func spillMxCells() []spillMxCell {
 			counts = append(counts, fmt.Sprintf("COUNT(%s) AS n_%s", c.Name, c.Name))
 		}
 	}
-	// The GROUPED half of #779's branch, pinned as #791: a shape-only column
-	// counted beside a NON-simple aggregate keeps the raw-row buffer, and the
-	// buffer still reads the column's values. Loud, on every run, on this
-	// commit and on e96640c6. The pin's ratchet runs in the direction a loud
-	// bug needs: the cell FAILS if the shape starts answering.
-	add(spillMxCell{name: "grouped_shape_only_count", knownBug: "#791",
-		knownError: "shape-only BytesColumn",
-		noSpill:    "the shape fails before any spill file is written",
-		sql: fmt.Sprintf(
-			`SELECT g AS k, COUNT(c_str) AS n, COUNT(DISTINCT id) AS d FROM %s GROUP BY g`, tbl)})
-	// #791's THIRD ROUTE, found in this arc's round 0 and pinned here so the
-	// residual is recorded rather than remembered.
+	// The GROUPED half of #779's branch, which was #791 and is now a fixed
+	// shape rather than a pinned one. The pins that stood here — two
+	// knownError cells asserting "shape-only BytesColumn" on every budgeted
+	// run — are DELETED, and their deletion is the fix's proof: a knownError
+	// cell FAILS the moment its shape answers.
 	//
-	// The filing describes two ways onto the raw-row path beside a shape-only
-	// column: a non-simple aggregate (the cell above) and GROUPING SETS. There
-	// is a third, and it is DATA-dependent: a nullable GROUP BY key that
-	// actually carries a NULL migrates the int-keyed path to the generic
-	// string map (migrateToGenericMap clears useIntGroupKey and sets no
-	// replacement flag), so canUseExternalMerge is false from that batch on and
-	// the aggregate takes the raw-row buffer with ONE SIMPLE aggregate and
-	// nothing else. Measured at 512 KiB, five runs each:
+	// A shape-only column reaches the raw-row buffer by three routes, and all
+	// three are cells below because they are three different ways to make
+	// canUseExternalMerge false, not one:
 	//
-	//	GROUP BY g      (nullable, has NULLs)   5/5 fail
-	//	GROUP BY id     (non-nullable)          0/5 fail
+	//	a NON-SIMPLE aggregate beside the count   COUNT(DISTINCT), MEDIAN
+	//	GROUPING SETS / ROLLUP
+	//	a NULLABLE key that CONTAINS a NULL       migrateToGenericMap
 	//
-	// The pair is the fixture: the two shapes differ ONLY in the key's
-	// nullability, so a fix that closes one and not the other is visible.
+	// The third is DATA-dependent, which is why the plan-time fix the filing
+	// preferred cannot be written (ADR-0027's 2026-09-03 amendment) and why
+	// the buffer was taught instead: the row boundary hands back
+	// batch.ShapeOnlyLen — the length and a refusal of the value — and writes
+	// it back as a shape-only column with the same lengths.
 	//
-	// Both halves arm ForceAggDrainEvery(1) so the pressure check lands on
-	// every batch and the route is taken every run: 7/12 loud with the knob
-	// disarmed against 12/12 with it, while the non-nullable twin answers
-	// 12/12 either way. Pinning the un-forced 7-in-12 as "some runs fail"
-	// would be a tolerance, which is what ADR-0013 forbids.
-	//
-	// This is why the plan-time fix the filing prefers is REFUSED (ADR-0027
-	// amendment): simpleAggs and the key-mode flags are latched from the first
-	// batch's vector types inside resolveIndices, not from the logical plan,
-	// and the third route depends on whether a nullable key CONTAINS a NULL.
-	// No plan-time fact answers that, so a plan-time decline can only be
-	// conservative to any GROUP BY on a nullable key beside a shape-only
-	// column — which disables the shape-only optimization for most
-	// `GROUP BY … COUNT(col)` shapes, including the ClickBench family it was
-	// built for.
-	add(spillMxCell{name: "grouped_nullable_key_shape_only_count", knownBug: "#791",
-		knownError:      "shape-only BytesColumn",
+	// Every one of these cells asserts its RAW-ROW ENGAGEMENT through the
+	// family counter: they are the "rawrow" family, and a cell that answers
+	// without writing a spill file would be comparing two in-memory runs.
+	// Measured at 512 KiB, five runs each, with the raw-row files each shape
+	// actually wrote: str_distinct 23, bytes_distinct 22, str_median 25,
+	// rollup 6, nullable-key 140.
+	add(spillMxCell{name: "group_by_distinct_shape_only_count", sql: fmt.Sprintf(
+		`SELECT g AS k, COUNT(c_str) AS n, COUNT(DISTINCT id) AS d FROM %s GROUP BY g`, tbl)})
+	// The BYTES twin. #632's defect was on this same buffer and BYTES was its
+	// arm, so the pair says the two encodings stay apart.
+	add(spillMxCell{name: "group_by_distinct_shape_only_count_bytes", sql: fmt.Sprintf(
+		`SELECT g AS k, COUNT(c_bytes) AS n, COUNT(DISTINCT id) AS d FROM %s GROUP BY g`, tbl)})
+	// A different non-simple aggregate, so the route is not COUNT(DISTINCT)'s
+	// alone.
+	add(spillMxCell{name: "group_by_distinct_shape_only_count_median", sql: fmt.Sprintf(
+		`SELECT g AS k, COUNT(c_str) AS n, MEDIAN(c_i64) AS m FROM %s GROUP BY g`, tbl)})
+	// The GROUPING SETS route, which needs no second aggregate at all.
+	add(spillMxCell{name: "group_by_distinct_shape_only_count_rollup", sql: fmt.Sprintf(
+		`SELECT g AS k, COUNT(c_str) AS n FROM %s GROUP BY ROLLUP(g)`, tbl)})
+	// A shape use that reads the LENGTH rather than only the null mask: it is
+	// what says the box carries the length rather than merely refusing the
+	// value. AVG(LENGTH(col)) is the ClickBench Q28 shape the whole shape-only
+	// optimization was built for.
+	add(spillMxCell{name: "group_by_distinct_shape_only_length", sql: fmt.Sprintf(
+		`SELECT g AS k, AVG(LENGTH(c_str)) AS a, COUNT(DISTINCT id) AS d FROM %s GROUP BY g`, tbl)})
+	// The THIRD route, and its twin. These two differ ONLY in the key's
+	// nullability — the nullable one migrates to the generic map and takes the
+	// raw-row buffer, the non-nullable one never does — so a fix that closed
+	// one and not the other would be visible here. Both arm
+	// ForceAggDrainEvery(1) so the route is taken on every run rather than on
+	// a coin flip: before the fix the nullable half failed 7 of 12 runs
+	// disarmed and 12 of 12 armed, while the twin answered 12 of 12 either
+	// way. The names keep the group_by_distinct_ prefix so the nullable one is
+	// counted in the rawrow family it engages.
+	add(spillMxCell{name: "group_by_distinct_shape_only_nullable_key",
 		forceDrainEvery: 1,
-		noSpill:         "the shape fails before any spill file is written",
 		sql: fmt.Sprintf(
 			`SELECT g AS k, COUNT(c_str) AS n FROM %s GROUP BY g`, tbl)})
-	// The twin that must keep ANSWERING: the same shape on a NON-nullable
-	// key, which never migrates and so never reaches the raw-row path. If a
-	// #791 fix ever makes this one fail, it has widened the defect rather
-	// than closed it.
 	add(spillMxCell{name: "grouped_nonnull_key_shape_only_count",
 		forceDrainEvery: 1,
+		noSpill:         "a non-nullable key never migrates, so this shape never reaches the raw-row buffer",
 		sql: fmt.Sprintf(
 			`SELECT id AS k, COUNT(c_str) AS n FROM %s GROUP BY id`, tbl)})
 	add(spillMxCell{name: "scalar_counts",

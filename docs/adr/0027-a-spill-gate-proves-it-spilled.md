@@ -1,8 +1,10 @@
 # ADR-0027: A spill gate proves it spilled, and a clone's spill artifacts belong to the primary
 
 Status: Accepted (2026-09-01, the spill-correctness arc: #782, #779, #632,
-#790; residuals #788, #791). Amended 2026-09-03 (operational-lifecycle arc):
-#791's third route, and why its plan-time fix is refused.
+#790; residual #788). Amended 2026-09-03 twice: the operational-lifecycle arc
+added #791's third route and why its plan-time fix is refused, and the
+spilled-arm arc added decision 8, which FIXES #791 in the direction that
+amendment left open.
 
 ## Context
 
@@ -59,8 +61,10 @@ Mechanisms, each with its instrumented evidence in the commit body:
 
 4. **An ungrouped aggregate never buffers its input.** Its state is one row
    of accumulators plus extra state; the buffer bought nothing and read
-   columns the planner had shipped shape-only. Grouped shapes keep the
-   buffer, and the grouped half of the shape-only problem is #791, pinned.
+   columns the planner had shipped shape-only. Grouped shapes KEEP the
+   buffer — their state grows with the key set, so moving input to disk is a
+   real trade — and what the buffer had to learn instead is decision 8: a
+   shape-only column stays shape-only across it.
 
 5. **A spill gate proves it spilled.** The type-matrix spill sweep
    (`wadjet.TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget`) asserts
@@ -111,13 +115,65 @@ Mechanisms, each with its instrumented evidence in the commit body:
    only on unanimous success: an unrelated breakage keeps it quiet rather than
    turning it red, and that breakage is caught by the cell's own budgeted run.
 
+8. **A shape-only column stays shape-only across the raw-row buffer.**
+   (Added 2026-09-03 with the #791 fix; it is the amendment the 2026-09-03
+   operational-lifecycle amendment below said this direction would need.)
+
+   The scan decodes a byte-array column as lengths-and-no-bytes when the
+   planner proves every use of it reads its SHAPE — `COUNT(col)`,
+   `LENGTH(col)`, `IS NULL`, the empty-string comparisons. The vector paths
+   carried that faithfully; `copyShapeRange` propagates the mark rather than
+   moving bytes that do not exist. The ROW paths could not. A grouped
+   aggregate under pressure buffers its input through `RecordBatch.ToRows`,
+   whose per-row box comes from `Vector.GetValue`, and the only answer
+   GetValue had for such a row was the panic that says a value was read. So
+   four correct queries answered only while they had memory to spare (#791).
+
+   The box is `batch.ShapeOnlyLen`: **the length, and a refusal of the
+   value.** Written back through `SetValue` it reconstructs a shape-only
+   column with the same per-row lengths, so what comes out of the detour is
+   what went in, and a consumer that then wants the bytes raises the same
+   guard at the same place. `memory.SpillManager.SpillRows` carries it under
+   a tag of its own (`spillTagShapeOnly`), for the reason `spillTagBytes`
+   exists: down any value arm it would come back as bytes the file never
+   held, which is #632's class one step worse.
+
+   It is a TYPE of its own and not an `int`, because an int is
+   indistinguishable from a value at every `switch v := x.(type)` in the
+   tree — item 6's rule, that neither encoder may write bytes its own reader
+   refuses, applied to a box.
+
+   Three routes reach the raw-row buffer beside a shape-only column and all
+   three are gated (a NON-SIMPLE aggregate, GROUPING SETS/ROLLUP, and a
+   NULLABLE key that contains a NULL), together with a `LENGTH` shape that
+   reads the carried length rather than only the null mask, and with the
+   NON-NULLABLE twin that must keep never reaching the buffer.
+
+   **The boundary is checked, not asserted.** GetValue no longer panicking
+   means a shape-only column that DID reach a client would come back as an
+   integer where a string belongs — loud turned silent, which a census
+   forbids. The planner's analysis already makes that impossible (it refuses
+   to run unless the plan's output comes from a Project or an Aggregate,
+   whose output schema is a list in which a column is a VALUE use), so
+   `CollectSink.Consume` now REFUSES a result batch carrying one, naming the
+   column. `exec.TestACollectSinkRefusesAShapeOnlyResultColumn` is the
+   fixture that attempts the impossibility.
+
+   **The ClickBench Q28 family keeps the optimization.** Nothing in the
+   planner changed: the plan-time decline this ADR refused below is still
+   refused, and `TestTPCHDuckDBOracleDifferential`'s engagement check — the
+   shape-only analysis must fire somewhere in the corpus — still fires.
+
 ## Alternatives rejected
 
 - Demoting to the keyed merge whenever a flush happened (#782 candidate b):
   lands the query on the O(state) in-memory merge for a condition unrelated
   to disjointness, and on the encoding path that decision 3 had to fix.
-- Teaching the raw-row buffer about shape-only columns for the ungrouped
-  case: the buffer has no reason to exist there (decision 4).
+- Teaching the raw-row buffer about shape-only columns for the UNGROUPED
+  case: the buffer has no reason to exist there (decision 4). The grouped
+  case is decision 8, and the two dispositions are not in tension: the
+  ungrouped buffer was deleted because it bought nothing, and the grouped
+  one was taught because it buys the trade it exists for.
 - Narrowing BYTES `SetValue` against a string carrier: a shared coercion
   the ingest and expression paths rely on; the producer was fixed instead,
   and no producer of a rendered BYTES form remains (the review searched).
@@ -135,8 +191,12 @@ Mechanisms, each with its instrumented evidence in the commit body:
   the totals intact. Patching one producer does not close it; it is
   ADR-0026's territory (one identity per key). The sweep cell is pinned
   with a ratchet scoped to the two switches the bug needs.
-- #791 (grouped raw-row path reads a shape-only column) is loud, pinned,
-  and fails the pin if it starts answering.
+- #791 (grouped raw-row path reads a shape-only column) is FIXED by decision
+  8 above, and the two `knownError` cells that pinned it are deleted — a
+  knownError cell fails the moment its shape answers, so their deletion is
+  the fix's proof. The analysis of the third route below stands as written
+  and is why the fix took the buffer-teaching direction rather than the
+  plan-time one.
 
   **Amended 2026-09-03 (the operational-lifecycle arc): #791 has a THIRD
   route, and it is why the plan-time fix is REFUSED rather than deferred
@@ -171,8 +231,8 @@ Mechanisms, each with its instrumented evidence in the commit body:
   refuse values — is NOT foreclosed by decision 4 above. Decision 4
   rejected buffer-teaching for the UNGROUPED case, on the grounds that the
   buffer bought nothing there; that argument does not transfer to grouped
-  shapes, whose state grows with the key set. If #791 is taken, that is the
-  direction, and it needs its own amendment.
+  shapes, whose state grows with the key set. **That is the direction #791
+  was taken in, on 2026-09-03: decision 8 is its amendment.**
 
   Both halves of the pair arm `ForceAggDrainEvery(1)`, which is decision 6
   applied to this defect: whether the aggregate reaches the raw-row buffer

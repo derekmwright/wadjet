@@ -39,7 +39,6 @@ func TestShapeOnlyValueReadPanics(t *testing.T) {
 		"Value":             func() { _ = v.BytesData.Value(0) },
 		"StringValue":       func() { _ = v.BytesData.StringValue(0) },
 		"UnsafeStringValue": func() { _ = v.BytesData.UnsafeStringValue(0) },
-		"GetValue":          func() { _ = v.GetValue(0) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
@@ -49,6 +48,36 @@ func TestShapeOnlyValueReadPanics(t *testing.T) {
 			}()
 			read()
 		})
+	}
+}
+
+// GetValue is the one accessor above that no longer panics, and the change is
+// deliberate (#791). It is not a value accessor: it is the BOXING BOUNDARY the
+// row paths go through — RecordBatch.ToRows, and through it the grouped
+// aggregate's raw-row buffer — and a panic there stopped a correct query the
+// moment it took a row-shaped detour, on a column the planner had proved
+// nobody reads the bytes of. It now hands back the one thing the column HAS.
+//
+// The three accessors above still panic, and that is the line: a caller
+// asking for BYTES is refused, a caller boxing a ROW is given the length in a
+// box it cannot mistake for a value.
+func TestShapeOnlyGetValueBoxesTheLength(t *testing.T) {
+	v := shapeColumn(t, []int{0, 5, 90})
+	for i, want := range []int{0, 5, 90} {
+		got := v.GetValue(i)
+		n, ok := got.(ShapeOnlyLen)
+		if !ok {
+			t.Fatalf("row %d boxed as %T:%v, want a ShapeOnlyLen — a plain int or string here "+
+				"is indistinguishable from a value at every type switch in the tree", i, got, got)
+		}
+		if int(n) != want {
+			t.Errorf("row %d: boxed length %d, want %d", i, n, want)
+		}
+	}
+	// A NULL row still boxes as nil, ahead of the shape-only check.
+	v.Nulls.SetNull(1)
+	if got := v.GetValue(1); got != nil {
+		t.Fatalf("a NULL row boxed as %T:%v, want nil", got, got)
 	}
 }
 

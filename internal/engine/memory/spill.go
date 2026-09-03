@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
 )
 
@@ -37,9 +38,17 @@ const (
 	// string and BYTES SetValue accepted as a value, so a spilled group came
 	// back keyed by nine ASCII bytes instead of by its two (#632). The value
 	// is 8 to match exec's partialTag* set, which was numbered for it.
-	spillTagBytes  byte = 8
-	spillRowMarker byte = 0x01
-	spillEndMarker byte = 0x00
+	spillTagBytes byte = 8
+	// spillTagShapeOnly carries a SHAPE-ONLY row: a byte length and no bytes,
+	// because the scan decoded lengths only (batch.ShapeOnlyLen, #791). It is
+	// a tag of its own for the reason spillTagBytes is: written down any of
+	// the value arms it would come back as a VALUE — 7 bytes of something, or
+	// the text "7" — and a column the planner proved nobody reads the bytes of
+	// would start carrying bytes that were never on disk. 11 continues past
+	// exec's partialTag* set, whose 10 is the container tag.
+	spillTagShapeOnly byte = 11
+	spillRowMarker    byte = 0x01
+	spillEndMarker    byte = 0x00
 )
 
 // spillFileSeq is a global atomic counter for unique spill file names.
@@ -799,6 +808,14 @@ func (sm *SpillManager) SpillRows(rows []map[string]any) (string, error) {
 				binary.LittleEndian.PutUint32(buf[:4], uint32(len(val)))
 				w.Write(buf[:4])
 				w.Write(val)
+			case batch.ShapeOnlyLen:
+				// A row of a column whose bytes were never decoded. The
+				// LENGTH goes to disk and nothing else, and it comes back as
+				// the same refusal — down any value arm this would become a
+				// value the file never held (#791).
+				w.WriteByte(spillTagShapeOnly)
+				binary.LittleEndian.PutUint32(buf[:4], uint32(val))
+				w.Write(buf[:4])
 			default:
 				// Fallback: encode as string via fmt
 				s := fmt.Sprintf("%v", val)
@@ -916,6 +933,11 @@ func ReadSpilledRows(path string) ([]map[string]any, error) {
 					return nil, err
 				}
 				row[col] = valBuf
+			case spillTagShapeOnly:
+				if _, err := io.ReadFull(r, buf[:4]); err != nil {
+					return nil, err
+				}
+				row[col] = batch.ShapeOnlyLen(binary.LittleEndian.Uint32(buf[:4]))
 			default:
 				return nil, fmt.Errorf("unknown spill type tag %d", tag)
 			}

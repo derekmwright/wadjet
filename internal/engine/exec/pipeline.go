@@ -1144,6 +1144,28 @@ func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	}
 	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
+	// A RESULT batch may not carry a shape-only column. The scan decodes one
+	// as lengths-and-no-bytes only because the planner proved every use of it
+	// reads its shape, and the analysis enforces that by refusing to run at
+	// all unless the plan's output comes from a Project or an Aggregate —
+	// whose output schema is an explicit list in which a column is a VALUE
+	// use. So this cannot happen, and that is exactly why it is checked here:
+	// since #791 the row boundary hands back batch.ShapeOnlyLen instead of
+	// panicking, and a shape-only column that DID reach the client would come
+	// out as an integer where a string belongs. Loud, at the boundary that
+	// knows, rather than plausible in a result set.
+	for j, col := range b.Columns {
+		if col.IsShapeOnly() {
+			name := ""
+			if j < len(b.Schema) {
+				name = b.Schema[j].Name
+			}
+			s.mu.Unlock()
+			return fmt.Errorf("result column %q is shape-only: the scan decoded its lengths and "+
+				"no bytes, so its values are not available to a client — some consumer of this "+
+				"column is not a shape consumer (planner analysis bug)", name)
+		}
+	}
 	// Snapshot the selection vector — see BatchSink.Consume for the full
 	// rationale. Filter operators reuse outSel across calls; sinks that
 	// hold batches across calls would otherwise see clobbered Sel data.
