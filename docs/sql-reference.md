@@ -17,7 +17,7 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `CREATE [OR REPLACE] FUNCTION` | Register a user-defined function |
 | `DROP FUNCTION [IF EXISTS]` | Remove a user-defined function |
 | `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
-| `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
+| `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; target and source must have different exposed names (SQLSTATE 42712 otherwise); `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
 | `ANALYZE [TABLE] table_name` | Collect column statistics for the cost-based planner |
 | `ALTER TABLE ... ADD \| DROP \| RENAME COLUMN` | Schema evolution |
 | `CREATE SNAPSHOT` | Capture a point-in-time snapshot of the catalog |
