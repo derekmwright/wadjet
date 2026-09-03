@@ -77,11 +77,9 @@ type rgSlabs struct {
 	inner  *scanSourceInner
 	slot   *fileSlot
 	ctx    context.Context
-	size   int64
 	want   []int   // row groups that survived pruning, ascending
 	starts []int64 // byte range of want[i]
 	ends   []int64
-	rdr    *parquet.FileReader
 
 	loadMu  sync.Mutex
 	body    io.ReadCloser
@@ -270,9 +268,17 @@ func (s *rgSlabs) release(rgIdx int) {
 }
 
 // close releases every buffer and charge still held and closes the body. Safe
-// to call more than once. Callers must ensure no decode is still reading a
+// to call more than once. Callers must ensure no decode is still READING a
 // buffer (the rg workers have exited).
+//
+// It takes loadMu first and holds it throughout, which is the same order
+// RowGroupBytes takes (loadMu, then mu) and is what makes it safe against a
+// loader mid-advance: a slab published into the maps after they were emptied
+// would be a buffer and a charge nobody ever releases.
 func (s *rgSlabs) close() {
+	s.loadMu.Lock()
+	defer s.loadMu.Unlock()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -291,12 +297,10 @@ func (s *rgSlabs) close() {
 	}
 	s.releaseCharge(total)
 
-	s.loadMu.Lock()
 	if s.body != nil {
 		s.body.Close()
 		s.body = nil
 	}
-	s.loadMu.Unlock()
 }
 
 // getRowGroupBuf is getReadBuf with an upper bound on what it will accept from
@@ -338,8 +342,8 @@ func (s *fileSlot) tryRowGroupLoad(inner *scanSourceInner, ctx context.Context) 
 		return nil, nil
 	}
 	slabs := &rgSlabs{
-		inner: inner, slot: s, ctx: ctx, size: s.entry.SizeBytes,
-		want: s.wantRG, starts: starts, ends: ends, rdr: rdr,
+		inner: inner, slot: s, ctx: ctx,
+		want: s.wantRG, starts: starts, ends: ends,
 		bufs:     make(map[int][]byte, len(s.wantRG)),
 		bases:    make(map[int]int64, len(s.wantRG)),
 		charges:  make(map[int]int64, len(s.wantRG)),
