@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,32 @@ func TestMultiKeyCorrelatedTwoPath(t *testing.T) {
 					t.Errorf("both arms now AGREE with PostgreSQL (%d), so %s is FIXED:\n  %s\n"+
 						"Delete its pin in internal/oracle/multikey.", c.Want, c.Issue, c.KnownBug)
 					return
+				}
+				// A pinned entry may FAIL only with the error its pin names.
+				// Without this, "pinned" meant "may fail in any way at all" and
+				// a future regression of any class in any pinned entry would
+				// have passed — four of them became loud when #734/#679/#535's
+				// consumer half landed, and that is what the pin records.
+				for _, e := range []struct {
+					arm  string
+					err  error
+					want string
+				}{
+					{"single-process", singleErr, c.LoudLike},
+					{"stage DAG", dagErr, c.LoudLikeDAG},
+				} {
+					if e.err == nil {
+						continue
+					}
+					if e.want == "" {
+						t.Fatalf("the %s arm FAILED on an entry pinned on its VALUE:\n  %v\n"+
+							"  %s\n  SQL: %s", e.arm, e.err, c.KnownBug, c.SQL)
+					}
+					if !strings.Contains(e.err.Error(), e.want) {
+						t.Fatalf("the %s arm is pinned as LOUD with %q and failed with a "+
+							"different one:\n  %v\n  %s\n  SQL: %s",
+							e.arm, e.want, e.err, c.KnownBug, c.SQL)
+					}
 				}
 				t.Logf("known divergence, tracked in %s — NOT gated:\n  %s\n  single=%d (%v) dag=%d (%v) want %d",
 					c.Issue, c.KnownBug, single64, singleErr, dag64, dagErr, c.Want)

@@ -5767,9 +5767,18 @@ func (e *ScalarSubquery) resolveSlow() {
 		return
 	}
 	defer e.resolved.Store(true)
+	// The same guard ExistsSubquery.resolveSlow carries, for the same reason:
+	// a scalar subquery this evaluator runs ONCE has to be one that really
+	// reads no outer row. `WHERE (SELECT COUNT(*) FROM dim WHERE dim.k =
+	// u.did) > 0` over a CTE was planned here and answered a query-wide
+	// constant 0 on all four arms (#535).
+	refuseDanglingSubquery("scalar", e.SQL)
 	rows, err := e.Runner(e.SQL)
-	if err != nil || len(rows) == 0 {
-		e.val = nil
+	if err != nil {
+		failEval(&SubqueryRunFailedError{Kind: "scalar", SQL: e.SQL, Err: err})
+	}
+	if len(rows) == 0 {
+		e.val = nil // a genuine empty result IS SQL NULL
 		return
 	}
 	// Return first column of first row
@@ -6088,12 +6097,16 @@ func (e *InSubquery) resolveSlow() {
 	// write is under resolveMu and published by the Store above, the same
 	// release the value set itself rides.
 	e.probe.expr = e.Expr
+	// The same guard the other two uncorrelated evaluators carry: a set this
+	// resolves ONCE has to be one that reads no outer row (#734/#679/#535).
+	refuseDanglingSubquery("IN", e.SQL)
 	rows, err := e.Runner(e.SQL)
 	if err != nil {
-		// An empty set: every probe misses, which is what the pre-#398
-		// code answered on the failing call and on every call after it.
-		e.emptySet = true
-		return
+		// NOT an empty set. Treating the failure as "every probe misses" is
+		// the same fold the correlated evaluators made, one construct over:
+		// a membership set that could not be built has no answer, and
+		// answering FALSE for every row is a confident wrong one.
+		failEval(&SubqueryRunFailedError{Kind: "IN", SQL: e.SQL, Err: err})
 	}
 	// Collect values and detect predominant type for hash set
 	var rawVals []any
@@ -6345,8 +6358,22 @@ func (e *ExistsSubquery) resolveSlow() {
 	if e.resolved.Load() {
 		return
 	}
+	// This evaluator runs the subquery ONCE, query-wide, and memoizes — which
+	// is only sound if the subquery really is uncorrelated. When the
+	// classifier missed a correlation (an EXISTS inside an aggregate ARGUMENT
+	// is compiled with no outer scope at all, #734) the text still names the
+	// outer relation, and standalone `ResolveColumnRef` strips the qualifier
+	// and rebinds it — so this answered a query-wide CONSTANT, TRUE or FALSE
+	// according to whether the two relations happened to share a column name.
+	// Checked once here, where it costs one parse per query (#734/#679/#535).
+	refuseDanglingSubquery("EXISTS", e.SQL)
 	rows, err := e.Runner(e.SQL)
-	e.exists = err == nil && len(rows) > 0
+	if err != nil {
+		// `err == nil && len(rows) > 0` made a failure indistinguishable
+		// from an empty result. They are not the same thing.
+		failEval(&SubqueryRunFailedError{Kind: "EXISTS", SQL: e.SQL, Err: err})
+	}
+	e.exists = len(rows) > 0
 	e.resolved.Store(true)
 }
 

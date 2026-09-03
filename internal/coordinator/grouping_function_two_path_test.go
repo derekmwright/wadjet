@@ -305,12 +305,18 @@ func TestAggregatePlacementMatchesPostgres(t *testing.T) {
 //
 // Why they are not fixed here:
 //
-//   - (a) The refusal is not lost by the placement scan, which deliberately
-//     does not descend into a subquery (a subquery is its own level, and
-//     `WHERE h > (SELECT AVG(h) FROM t)` is ordinary SQL). The INNER statement
-//     on its own IS refused correctly. What loses it is the scalar-subquery
-//     materialization path, which never builds the inner SelectInfo through
-//     BuildFromSelectWithCTEs — so the fix is in that path, not at this walk.
+//   - (a) HALF-LIFTED 2026-09-02. The refusal was never lost by the placement
+//     scan, which deliberately does not descend into a subquery (a subquery is
+//     its own level, and `WHERE h > (SELECT AVG(h) FROM t)` is ordinary SQL) —
+//     the INNER statement on its own has always been refused correctly. What
+//     lost it was the CONSUMER: `ScalarSubquery.resolveSlow` folded the run's
+//     failure into a NULL value, so the comparison read UNKNOWN and the query
+//     answered zero rows with no error anywhere. #734/#679/#535's consumer
+//     half made that FAIL instead, and `SubqueryRunFailedError` reports the
+//     wrapped failure's SQLSTATE — so the SINGLE-PROCESS arm now raises
+//     PostgreSQL's own 42803 and is ASSERTED below rather than pinned. The DAG
+//     arm still refuses for an unrelated reason and with no SQLSTATE (its
+//     filter compiler has no subquery runner), and that half stays pinned.
 //   - (b) `col.IsWindow` skips the whole column, which is broader than
 //     PostgreSQL's rule: a window function OVER an aggregate is legal, but a
 //     nested aggregate inside one is not. Scanning the window call's ARGUMENT
@@ -329,12 +335,19 @@ func TestAggregatePlacementBoundaryPins(t *testing.T) {
 	const scalarSub = "SELECT g FROM collslot WHERE h > " +
 		"(SELECT AVG(x.h) FROM collslot x WHERE SUM(x.h) > 0) GROUP BY g"
 
-	res, err := tmdRunSingle(ctx, single, scalarSub)
-	if err != nil {
-		t.Fatalf("TODO(#809) pin (a) single: now refuses (%v) — lift the pin", err)
-	}
-	if len(res.Rows) != 0 {
-		t.Errorf("TODO(#809) pin (a) single: answered %d rows, pinned at 0", len(res.Rows))
+	// GATED, not pinned: PostgreSQL 17.11 raises 42803 here and so does the
+	// single-process engine. It answered zero rows in silence until the
+	// scalar-subquery consumer stopped folding a failed run into NULL.
+	if _, err := tmdRunSingle(ctx, single, scalarSub); err == nil {
+		t.Errorf("pin (a) single: answered, where PostgreSQL 17.11 raises 42803 "+
+			"`aggregate functions are not allowed in WHERE`\n  SQL: %s", scalarSub)
+	} else {
+		if got := sqlerr.StateOf(err); got != "42803" {
+			t.Errorf("pin (a) single: SQLSTATE %q, want 42803\n  %v", got, err)
+		}
+		if !strings.Contains(err.Error(), "aggregate functions are not allowed in WHERE") {
+			t.Errorf("pin (a) single: %v\n  want the inner statement's own refusal", err)
+		}
 	}
 
 	// The DAG arm refuses it, but for an unrelated reason and with no

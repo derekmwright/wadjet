@@ -1,7 +1,9 @@
 package expr
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -49,13 +51,95 @@ func TestScalarSubqueryEmpty(t *testing.T) {
 	}
 }
 
+// TestScalarSubqueryError: a subquery that could not be RUN is not a subquery
+// whose value is NULL.
+//
+// This test used to assert the opposite — `expected nil on error` — which is
+// the shape a test takes when it was written from the implementation. NULL is
+// a value: it makes every comparison above it UNKNOWN and the row silently
+// vanishes, so a failed subquery answered "no rows" with no error anywhere
+// (#734/#679/#535, protocol item 8). It fails the query now, through the
+// FatalEvalError channel the pipeline recovers into a query error.
 func TestScalarSubqueryError(t *testing.T) {
 	b := testBatch()
 	runner := mockRunner(nil, fmt.Errorf("table not found"))
 
 	sq := &ScalarSubquery{SQL: "SELECT 1 FROM nonexistent", Runner: runner}
-	if v := sq.Eval(b, 0); v != nil {
-		t.Fatalf("expected nil on error, got %v", v)
+	err := catchFatalEval(t, func() { sq.Eval(b, 0) })
+	if err == nil {
+		t.Fatal("a scalar subquery whose runner failed answered a value instead of failing")
+	}
+	var sfe *SubqueryRunFailedError
+	if !errors.As(err, &sfe) {
+		t.Fatalf("got %T (%v), want *SubqueryRunFailedError", err, err)
+	}
+	if !strings.Contains(err.Error(), "table not found") {
+		t.Errorf("the error does not carry the runner's own message: %v", err)
+	}
+}
+
+// TestSubqueryDanglingReferenceIsRefused: an UNCORRELATED evaluator handed a
+// subquery whose text still names a relation it does not read is a
+// misclassified CORRELATED subquery. Run standalone it does not fail — the
+// resolver strips the qualifier and rebinds — so it answers a query-wide
+// constant. It is refused instead (#734/#679/#535).
+func TestSubqueryDanglingReferenceIsRefused(t *testing.T) {
+	b := testBatch()
+	called := 0
+	runner := func(string) ([]map[string]any, error) {
+		called++
+		return []map[string]any{{"n": int64(1)}}, nil
+	}
+	for _, tc := range []struct {
+		name string
+		eval func()
+	}{
+		{"exists", func() {
+			(&ExistsSubquery{SQL: "SELECT 1 FROM inner_t y WHERE y.id = outer_t.id", Runner: runner}).EvalBool(b, 0)
+		}},
+		{"scalar", func() {
+			(&ScalarSubquery{SQL: "SELECT COUNT(*) FROM inner_t y WHERE y.id = outer_t.id", Runner: runner}).Eval(b, 0)
+		}},
+		{"in", func() {
+			(&InSubquery{Expr: &ColRef{Name: "id"},
+				SQL: "SELECT y.id FROM inner_t y WHERE y.id = outer_t.id", Runner: runner}).EvalBool(b, 0)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := called
+			err := catchFatalEval(t, tc.eval)
+			if err == nil {
+				t.Fatal("a subquery correlated on an outer relation was executed as " +
+					"uncorrelated and answered a constant")
+			}
+			var dse *DanglingSubqueryError
+			if !errors.As(err, &dse) {
+				t.Fatalf("got %T (%v), want *DanglingSubqueryError", err, err)
+			}
+			if called != before {
+				t.Error("the subquery was RUN before it was refused; the guard has to " +
+					"fire before the runner, or the failure depends on what the run " +
+					"happens to answer")
+			}
+			if dse.SQLState() != "0A000" {
+				t.Errorf("SQLSTATE %s, want 0A000 (feature_not_supported)", dse.SQLState())
+			}
+		})
+	}
+}
+
+// TestUncorrelatedSubqueryWithNoDanglingRefStillRuns is the boundary the
+// guard above claims: a genuinely uncorrelated subquery, qualified references
+// and all, is untouched by it.
+func TestUncorrelatedSubqueryWithNoDanglingRefStillRuns(t *testing.T) {
+	b := testBatch()
+	runner := mockRunner([]map[string]any{{"n": int64(7)}}, nil)
+	sq := &ScalarSubquery{SQL: "SELECT COUNT(*) AS n FROM inner_t y WHERE y.id = 2", Runner: runner}
+	if err := catchFatalEval(t, func() { sq.Eval(b, 0) }); err != nil {
+		t.Fatalf("an uncorrelated subquery was refused: %v", err)
+	}
+	if got := sq.Eval(b, 0); got != int64(7) {
+		t.Errorf("value = %v, want 7", got)
 	}
 }
 
@@ -166,12 +250,21 @@ func TestExistsSubqueryEmpty(t *testing.T) {
 	}
 }
 
+// TestExistsSubqueryError: like TestScalarSubqueryError, this asserted the
+// old fold — `expected EXISTS to be false on error`, which is the whole of
+// `runErr == nil && len(rows) > 0`. A subquery that could not be RUN did not
+// "not exist"; nobody was told anything (#734/#679/#535).
 func TestExistsSubqueryError(t *testing.T) {
 	b := testBatch()
-	runner := mockRunner(nil, fmt.Errorf("error"))
+	runner := mockRunner(nil, fmt.Errorf("boom"))
 	exists := &ExistsSubquery{SQL: "SELECT 1", Runner: runner}
-	if exists.EvalBool(b, 0) {
-		t.Fatal("expected EXISTS to be false on error")
+	err := catchFatalEval(t, func() { exists.EvalBool(b, 0) })
+	if err == nil {
+		t.Fatal("an EXISTS whose runner failed answered FALSE instead of failing")
+	}
+	var sfe *SubqueryRunFailedError
+	if !errors.As(err, &sfe) {
+		t.Fatalf("got %T (%v), want *SubqueryRunFailedError", err, err)
 	}
 }
 

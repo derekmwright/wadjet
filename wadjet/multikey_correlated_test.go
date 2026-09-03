@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/oracle/multikey"
@@ -30,6 +31,31 @@ func TestMultiKeyCorrelatedSubqueries(t *testing.T) {
 	for _, c := range multikey.Corpus() {
 		t.Run(c.Name, func(t *testing.T) {
 			res, err := tmRun(ctx, db, c.SQL)
+			// A PINNED entry is asked about its disposition before its rows.
+			// Four of them are LOUD now rather than silently wrong (#734/
+			// #679/#535's consumer half): the re-run they were producing a
+			// constant from raises, and an evaluator that used to eat that
+			// raise fails the query instead. An error is still a divergence
+			// from PostgreSQL, so the pin stands — but it is no longer a
+			// WRONG ANSWER, and a harness that Fatal'd on any error before
+			// consulting the pin reported the improvement as a regression.
+			// The two-path twin of this gate (internal/coordinator) already
+			// asked in this order.
+			if err != nil && c.LoudLike != "" {
+				// A pinned entry whose divergence is a REFUSAL is allowed to
+				// fail — with THE ERROR THE PIN NAMES, and no other. Accepting
+				// any error for any pinned entry would have made every one of
+				// them pass on a future regression of any class; the pin says
+				// which failure it records, so that is what is asserted.
+				if !strings.Contains(err.Error(), c.LoudLike) {
+					t.Fatalf("this entry is pinned as LOUD with %q, and it failed with "+
+						"a different one:\n  %v\n  %s\n  SQL: %s", c.LoudLike, err, c.KnownBug, c.SQL)
+				}
+				t.Logf("known divergence, tracked in %s — LOUD rather than silently "+
+					"wrong, and NOT gated:\n  %s\n  error: %v\n  want %d\n  SQL: %s",
+					c.Issue, c.KnownBug, err, c.Want, c.SQL)
+				return
+			}
 			if err != nil {
 				t.Fatalf("%v\n  SQL: %s", err, c.SQL)
 			}

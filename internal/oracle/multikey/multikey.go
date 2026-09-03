@@ -222,31 +222,69 @@ type Case struct {
 	KnownBug string
 	// Issue is the tracker reference for a KnownBug.
 	Issue string
+	// LoudLike and LoudLikeDAG are the substrings the entry's ERROR must
+	// carry, per ARM, where the pinned divergence is a REFUSAL rather than a
+	// wrong number. Empty means the entry is pinned on its VALUE and an error
+	// from that arm is a failure, as it was before any entry became loud.
+	//
+	// They exist so that "this entry is pinned" cannot mean "this entry may
+	// fail in any way at all". Four entries went from a wrong number to a
+	// refusal when #734/#679/#535's consumer half landed, and a harness that
+	// simply stopped asserting on error for every pinned entry would have
+	// swallowed a future regression of any class in any of them.
+	//
+	// TWO fields because the two engines refuse these for two DIFFERENT
+	// reasons, both pre-existing: the single-process path fails inside the
+	// per-row re-run (an unparseable rebuild, or a reference it refuses to
+	// resolve standalone), while the DAG never gets that far — its worker has
+	// no SubqueryRunner and the filter compile refuses first. One substring
+	// for both would have had to be short enough to match neither precisely.
+	LoudLike    string
+	LoudLikeDAG string
 }
 
 // pins are the entries whose Want a defect OTHER than #562 keeps wadjet from
 // answering. Each is a live PostgreSQL answer that some other part of the
 // engine gets wrong; none of them is a multi-key-key-list defect, and all of
 // them reproduce with ONE key too, which is how they were told apart.
-var pins = map[string]struct{ issue, reason string }{
+var pins = map[string]struct {
+	issue, reason string
+	// loudLike / loudLikeDAG are the substrings the entry's ERROR must carry,
+	// per arm, where the pinned divergence is a REFUSAL rather than a wrong
+	// number (see Case.LoudLike). Empty for an entry pinned on its VALUE,
+	// where an error is still a failure.
+	loudLike, loudLikeDAG string
+}{
 	"notin_str_i64": {"#578", "a CORRELATED NOT IN is lowered to a plain anti join, so it " +
-		"answers its NOT EXISTS twin instead of NOT IN's three-valued rule (#507's remainder)"},
-	"notin_null_build_key": {"#578", "same: the correlated NOT IN answers the two-valued question"},
+		"answers its NOT EXISTS twin instead of NOT IN's three-valued rule (#507's remainder)", "", ""},
+	"notin_null_build_key": {"#578", "same: the correlated NOT IN answers the two-valued question", "", ""},
 	"notin_null_probe_key": {"#578", "same, and this one needs only the PROBE's own NULL key — " +
-		"the half of the rule that requires no per-group state"},
+		"the half of the rule that requires no per-group state", "", ""},
+	// LOUD SINCE 2026-09-02 (#734/#679/#535, the consumer half). These four
+	// used to answer a WRONG NUMBER; they now FAIL the query. The re-run
+	// their per-row predicate produced could not be executed — the dropped
+	// column-alias list makes the rebuilt SQL unparseable, and the
+	// un-decorrelated CTE reference dangles — and the evaluator that ate that
+	// failure and returned a boolean constant fails instead. The divergence
+	// from PostgreSQL is unchanged and the pins stand; what changed is that
+	// the user is told. Both harnesses ask about the DISPOSITION before the
+	// rows, so a pinned entry that errors is a logged divergence and one that
+	// starts ANSWERING PostgreSQL's number still fails the pin.
 	"derived_exists_colalias": {"#613", "a derived table's column-alias LIST `(…) AS b(kk,nn)` is " +
-		"dropped by resolveTableOrCTE, so b.kk/b.nn resolve to nothing and EXISTS answers 0 where " +
-		"PostgreSQL says 23; the `SELECT s AS kk` rename spelling (derived_exists_renamed) is right, " +
-		"so it is the alias LIST, not the rename, that is unhandled — and the decline route inherits it"},
-	"derived_in_colalias": {"#613", "the IN spelling of the same dropped column-alias list: 0 where " +
-		"PostgreSQL says 36"},
+		"dropped by resolveTableOrCTE, so b.kk/b.nn resolve to nothing where PostgreSQL says 23; " +
+		"the `SELECT s AS kk` rename spelling (derived_exists_renamed) is right, so it is the alias " +
+		"LIST, not the rename, that is unhandled — and the decline route inherits it. It answered 0 " +
+		"until the consumer half of #734/#679/#535 made the unparseable re-run LOUD", "subquery parse error", "EXISTS subquery requires a SubqueryRunner"},
+	"derived_in_colalias": {"#613", "the IN spelling of the same dropped column-alias list: it " +
+		"answered 0 where PostgreSQL says 36, and is LOUD now for the same reason", "subquery parse error", "subquery parse error"},
 	"cte_probe_base_build": {"#535", "the PROBE side is a CTE and a correlated EXISTS over one is not " +
 		"decorrelated at all (its outer-scope collectors lack the CTE's alias), so it stays a Filter " +
-		"predicate and answers 30 where PostgreSQL says 19; the BUILD side is a BASE table here, " +
-		"which rules out the derived/CTE build-side path as the cause"},
+		"predicate and answered 30 where PostgreSQL says 19; the BUILD side is a BASE table here, " +
+		"which rules out the derived/CTE build-side path as the cause. LOUD now: the dangling " +
+		"reference is refused before the standalone re-run", "planned as uncorrelated", "EXISTS subquery requires a SubqueryRunner"},
 	"cte_referenced_twice": {"#535", "the same probe-side-CTE defect with the CTE on BOTH sides: the " +
 		"build side is fixed by the CTE decline, but the probe CTE is still not decorrelated, so it " +
-		"answers 30 where PostgreSQL says 27"},
+		"answered 30 where PostgreSQL says 27. LOUD now, for the same reason", "planned as uncorrelated", "EXISTS subquery requires a SubqueryRunner"},
 }
 
 // Corpus is the query set. Every entry counts rows, because a count is what
@@ -270,6 +308,7 @@ func sharedNameCorpus() []Case {
 		c := Case{Name: name, SQL: sql, Want: want, Keys: keys}
 		if p, ok := pins[name]; ok {
 			c.Issue, c.KnownBug = p.issue, p.reason
+			c.LoudLike, c.LoudLikeDAG = p.loudLike, p.loudLikeDAG
 		}
 		out = append(out, c)
 	}

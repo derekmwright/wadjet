@@ -554,6 +554,168 @@ func arcACells() []arcACell {
 			wantErrLikeDAGShuffled: "where an earlier file of the same stage input named it",
 			pgSays: "five rows with columns (id, customer, total, amount) — no order_id, " +
 				"and no refusal on any arm"},
+		// ------------------------------------------------------------------
+		// #734 / #679 / #535 — the correlated-subquery family, CONSUMER half.
+		//
+		// One idiom, three spellings, three different confident wrong
+		// answers to one event: a subquery that could not be run standalone
+		// became `false` (EXISTS: `runErr == nil && len(rows) > 0`), `NULL`
+		// (scalar) or `e.Not` (IN). And an UNCORRELATED evaluator handed a
+		// misclassified correlated subquery ran it ONCE against no outer row,
+		// where `expr.ResolveColumnRef` strips the dangling qualifier and
+		// rebinds it — so the predicate read a query-wide CONSTANT: TRUE
+		// where the two relations share a column name (every row comes back)
+		// and FALSE where they do not (none does).
+		//
+		// The measured answers at base, against live PostgreSQL 17:
+		//
+		//	#734 EXISTS in an aggregate ARGUMENT      0 for 4, NOT EXISTS 9 for 5
+		//	#679 EXISTS over a DERIVED table          0 for 3, NOT EXISTS 10 for 7
+		//	#535 EXISTS over a CTE                    0 for 47, NOT EXISTS 50 for 3
+		//	#535 the SCALAR spelling over a CTE       0 for 47, on all four arms
+		//	#535 unaliased base table by table name  50 for 47, every row
+		//
+		// Every one of them is LOUD now, on all four arms. That is this
+		// commit's whole claim: it does not make these queries ANSWER — the
+		// correlation model is still short (ADR-0021) — it makes them stop
+		// answering wrongly. The producers are a separate question and a
+		// separate commit.
+		//
+		// The refusal is a FATAL EVALUATION error, so it reaches the client
+		// as a query error on both engines; on the DAG arms it arrives inside
+		// the task failure, which is why the DAG's expected text differs.
+		{issue: "#734", name: "exists_in_an_aggregate_argument_is_loud",
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			wantErrLike:    "planned as uncorrelated",
+			wantErrLikeDAG: "planned as uncorrelated",
+			wantCorrRoutes: 1,
+			pgSays:         "4 — and 5 for the NOT EXISTS twin"},
+		{issue: "#734", name: "not_exists_in_an_aggregate_argument_is_loud",
+			sql: `SELECT SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			wantErrLike:    "planned as uncorrelated",
+			wantErrLikeDAG: "planned as uncorrelated",
+			wantCorrRoutes: 1,
+			pgSays:         "5"},
+		{issue: "#734", name: "exists_in_a_count_argument_is_loud",
+			sql: `SELECT COUNT(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2) ` +
+				`THEN 1 END) AS v FROM decpair x`,
+			wantErrLike:    "planned as uncorrelated",
+			wantErrLikeDAG: "planned as uncorrelated",
+			wantCorrRoutes: 1,
+			pgSays:         "4"},
+		// #734's controls, which ANSWER and must keep answering: the same
+		// EXISTS in the WHERE and in the SELECT list is decorrelated
+		// properly, and an UNCORRELATED EXISTS in an aggregate argument is
+		// not this defect at all — which is what says the correlation, not
+		// the position, is the trigger.
+		{issue: "#734", name: "control_exists_in_where",
+			sql: `SELECT COUNT(*) AS v FROM decpair x ` +
+				`WHERE EXISTS (SELECT 1 FROM decpair y WHERE y.id = x.id * 2)`,
+			want: []string{"v=int64:4"}, wantCorrRoutes: 1},
+		{issue: "#734", name: "control_uncorrelated_exists_in_an_aggregate_argument",
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = 2) ` +
+				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
+			want: []string{"v=int64:9"}},
+
+		{issue: "#679", name: "exists_over_a_derived_table_cross_width_is_loud",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
+			wantErrLike:    "could not be executed",
+			wantErrLikeDAG: "could not be executed",
+			wantCorrRoutes: 1,
+			pgSays: "3 — the re-run renders the DECIMAL outer value as a QUOTED string, " +
+				"and '2.00' against a BIGINT raises 22P02"},
+		{issue: "#679", name: "not_exists_over_a_derived_table_cross_width_is_loud",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE NOT EXISTS (` +
+				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
+			wantErrLike:    "could not be executed",
+			wantErrLikeDAG: "could not be executed",
+			wantCorrRoutes: 1,
+			pgSays:         "7"},
+		// #679's three controls, all of which ANSWER at base and must keep
+		// answering — the dossier's own point that three of the four widths
+		// would let a wrong fix pass. The trigger is DECIMAL outer against
+		// INTEGER inner OVER A DERIVED TABLE, not "a correlated EXISTS".
+		{issue: "#679", name: "control_exists_over_a_derived_table_same_width",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_i64 = b.k)`,
+			want: []string{"n=int64:9"}, wantCorrRoutes: 1},
+		{issue: "#679", name: "control_exists_over_a_derived_table_decimal_decimal",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT w_d4 AS k FROM numwidth GROUP BY w_d4) b WHERE a.w_d2 = b.k)`,
+			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+		{issue: "#679", name: "control_exists_over_a_base_table_cross_width",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
+				`SELECT 1 FROM numwidth b WHERE a.w_d2 = b.w_i64)`,
+			want: []string{"n=int64:3"}},
+
+		{issue: "#535", name: "exists_over_a_cte_is_loud",
+			sql: `WITH u AS (SELECT g AS did FROM typemx WHERE id < 50) ` +
+				`SELECT COUNT(*) AS c FROM u WHERE EXISTS (` +
+				`SELECT 1 FROM typemx_dim WHERE typemx_dim.k = u.did)`,
+			wantErrLike:    "planned as uncorrelated",
+			wantErrLikeDAG: "SubqueryRunner",
+			pgSays:         "47 — and 3 for the NOT EXISTS twin"},
+		{issue: "#535", name: "not_exists_over_a_cte_is_loud",
+			sql: `WITH u AS (SELECT g AS did FROM typemx WHERE id < 50) ` +
+				`SELECT COUNT(*) AS c FROM u WHERE NOT EXISTS (` +
+				`SELECT 1 FROM typemx_dim WHERE typemx_dim.k = u.did)`,
+			wantErrLike:    "planned as uncorrelated",
+			wantErrLikeDAG: "SubqueryRunner",
+			pgSays:         "3"},
+		// The SCALAR spelling of the same CTE shape was silently wrong on ALL
+		// FOUR arms — including the two DAG ones, where it ROUTED local and
+		// produced the same constant. "Loud on the DAG" was never a property
+		// of #535, only of the EXISTS spelling.
+		{issue: "#535", name: "scalar_subquery_over_a_cte_is_loud",
+			sql: `WITH u AS (SELECT g AS did FROM typemx WHERE id < 50) ` +
+				`SELECT COUNT(*) AS c FROM u WHERE (` +
+				`SELECT COUNT(*) FROM typemx_dim WHERE typemx_dim.k = u.did) > 0`,
+			wantErrLike:    "planned as uncorrelated",
+			wantErrLikeDAG: "planned as uncorrelated",
+			wantCorrRoutes: 1,
+			pgSays:         "47"},
+		// THE BOUNDARY OF THE SCOPE-FREE GUARD, pinned rather than described
+		// (protocol rule 11: a fix's boundary is a claim and gets a fixture
+		// that attempts it).
+		//
+		// `plansql.DanglingTableRefs` asks whether a qualified reference names
+		// a relation no FROM clause INSIDE the subquery provides. That needs
+		// no outer scope, which is what lets it guard a site that has lost
+		// one — and it is blind to exactly one shape: an outer table
+		// correlated BY ITS TABLE NAME where the inner relation reads the SAME
+		// table under an alias. `typemx.g` is not dangling, because the
+		// subquery's own FROM is `typemx sub`.
+		//
+		// So this one stays SILENTLY WRONG: 50 rows for PostgreSQL's 47,
+		// every row, because the correlation is dropped and the predicate
+		// reads constant TRUE. The same query one alias later
+		// (`FROM typemx t0 … sub.g = t0.g`) is right, and is the control
+		// below. Closing it needs the PRODUCER repaired — the classifier that
+		// decides what is correlated — not a wider consumer guard: no
+		// scope-free predicate can tell this reference from a self-contained
+		// one. The day it starts failing or answering 47, this pin FAILS.
+		{issue: "#535", name: "boundary_unaliased_base_table_correlation_stays_silent",
+			sql: `SELECT COUNT(*) AS c FROM typemx WHERE id < 50 AND EXISTS (` +
+				`SELECT 1 FROM typemx sub WHERE sub.g = typemx.g)`,
+			want:           []string{"c=int64:50"},
+			wantErrLikeDAG: "SubqueryRunner",
+			pgSays:         "47"},
+		// #535's two controls, which ANSWER at base and must keep answering:
+		// the DERIVED-table spelling of the same query, and the ALIASED base
+		// table. They are what says the CTE and the bare table name are the
+		// trigger.
+		{issue: "#535", name: "control_exists_over_a_derived_table",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT g AS did FROM typemx WHERE id < 50) u ` +
+				`WHERE EXISTS (SELECT 1 FROM typemx_dim WHERE typemx_dim.k = u.did)`,
+			want: []string{"c=int64:47"}},
+		{issue: "#535", name: "control_aliased_base_table_correlation",
+			sql: `SELECT COUNT(*) AS c FROM typemx t0 WHERE t0.id < 50 AND EXISTS (` +
+				`SELECT 1 FROM typemx sub WHERE sub.g = t0.g)`,
+			want: []string{"c=int64:47"}},
+
 		{issue: "#767", name: "control_lateral_non_agg_select_star_inside",
 			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o ` +
 				`JOIN LATERAL (SELECT * FROM lat_item WHERE order_id = o.id) li ON true ` +

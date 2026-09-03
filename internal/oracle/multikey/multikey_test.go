@@ -124,12 +124,19 @@ func TestPinsNameRealEntries(t *testing.T) {
 	for _, c := range Corpus() {
 		inCorpus[c.Name] = true
 	}
-	for _, set := range []map[string]struct{ issue, reason string }{pins, dnPins} {
-		for name, p := range set {
-			if !inCorpus[name] {
-				t.Errorf("pin %q (%s) matches no corpus entry — the entry was renamed or removed, "+
-					"so the pin now exempts nothing. Delete it or fix the name.", name, p.issue)
-			}
+	// Both pin tables, read through their ISSUE alone, so the two need not
+	// share a struct shape: `pins` carries the per-arm loud-error substrings
+	// (Case.LoudLike / LoudLikeDAG) and `dnPins` does not.
+	for name, p := range pins {
+		if !inCorpus[name] {
+			t.Errorf("pin %q (%s) matches no corpus entry — the entry was renamed or removed, "+
+				"so the pin now exempts nothing. Delete it or fix the name.", name, p.issue)
+		}
+	}
+	for name, p := range dnPins {
+		if !inCorpus[name] {
+			t.Errorf("pin %q (%s) matches no corpus entry — the entry was renamed or removed, "+
+				"so the pin now exempts nothing. Delete it or fix the name.", name, p.issue)
 		}
 	}
 }

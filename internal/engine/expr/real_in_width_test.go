@@ -274,7 +274,15 @@ func TestRealInBindingDeclinesNonRealColumns(t *testing.T) {
 }
 
 // catchFatalEval runs fn and returns the query error it raised through the
-// expression layer's panic channel (fatalEval), or nil when it raised none.
+// expression layer's panic channel, or nil when it raised none.
+//
+// It recognizes what exec.recoverFatalEval recognizes — anything satisfying
+// `error` plus `FatalEvalError() error` — rather than the `fatalEval` wrapper
+// alone. Both spellings are in use and both reach the client the same way: the
+// wrapper carries a bare sqlerr (division by zero, 22P02), while an evaluator
+// with something to say implements the interface on its own error type
+// (MissingOuterColumnError, SubqueryRunFailedError, DanglingSubqueryError).
+// Matching only the wrapper made this helper a twin of half the boundary.
 func catchFatalEval(t *testing.T, fn func()) (err error) {
 	t.Helper()
 	defer func() {
@@ -282,7 +290,10 @@ func catchFatalEval(t *testing.T, fn func()) (err error) {
 		if r == nil {
 			return
 		}
-		fe, ok := r.(fatalEval)
+		fe, ok := r.(interface {
+			error
+			FatalEvalError() error
+		})
 		if !ok {
 			panic(r)
 		}

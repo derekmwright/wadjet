@@ -167,6 +167,59 @@ decorrelated at all because its outer-scope collectors lack the CTE's alias
 (#535). Both reproduce with one key and are the corpus's `derived_*_colalias`
 and `cte_probe_base_build` / `cte_referenced_twice` entries.
 
+### 1c. A subquery that cannot be RUN is not a subquery that is FALSE
+
+(Added 2026-09-02, #734 / #679 / #535.)
+
+The declines above are the PRODUCER half — which subqueries this engine turns
+into a join, and which it leaves as a per-row predicate. What a subquery that
+was left behind then ANSWERS is the consumer half, and it used to answer a
+constant.
+
+Three evaluators folded a run-time failure into a value, and folded it three
+different ways for one event: `CorrelatedExistsSubquery` read
+`runErr == nil && len(rows) > 0`, so a failed re-run was "does not exist";
+`CorrelatedScalarSubquery` returned NULL; `CorrelatedInSubquery` returned
+`e.Not`. None reached the client. And the three UNCORRELATED evaluators —
+which run their subquery ONCE, query-wide, and memoize — were handed
+subqueries that were correlated and had not been recognized as such, so they
+ran text still naming the outer relation. Standalone that does not fail
+either: `expr.ResolveColumnRef` STRIPS the qualifier and retries the bare
+name, so `sub.g = typemx.g` rebinds to the inner relation's own column and
+reads constant TRUE, while `y.id = x.id * 2` — where nothing rebinds — reads
+constant FALSE. One misclassification, two different confident wrong answers,
+decided by whether the two relations happen to share a column name.
+
+**The rule now: a subquery this engine cannot run, or one it is about to run
+standalone whose text still names a relation it does not read, FAILS the
+query.** Both checks live at the evaluators, and the second uses
+`plansql.DanglingTableRefs`, which needs no outer scope — so it guards a site
+that has LOST that scope, independently of whether the classifier is ever
+repaired. The measured effect, against live PostgreSQL 17: an EXISTS inside
+an aggregate ARGUMENT (0 for 4, NOT EXISTS 9 for 5), an EXISTS over a DERIVED
+table at cross widths (0 for 3, NOT EXISTS 10 for 7), an EXISTS over a CTE (0
+for 47, NOT EXISTS 50 for 3) and its SCALAR spelling (0 for 47 on all four
+arms) all stop answering and start failing.
+
+**This makes those queries LOUD, not right.** The producers are unchanged and
+the model is still the one §1/§1a/§1b describe: the aggregate-argument compile
+site never asks for the outer scope at all, `#679`'s re-run renders a DECIMAL
+outer value as a QUOTED string, and the three outer-scope collectors read only
+`NodeScan` so a CTE's scope — recorded on the subtree root as `CTEName` /
+`CTERefAlias` — is invisible to them. General decorrelation (a dependent join)
+is what removes the class; anything short of it narrows the silent set.
+
+**One shape stays SILENT, and it is the guard's boundary rather than an
+omission.** `DanglingTableRefs` asks whether a qualified reference names a
+relation no FROM clause INSIDE the subquery provides, and it is blind to an
+outer table correlated BY ITS TABLE NAME where the inner relation reads the
+SAME table under an alias: in `FROM typemx WHERE EXISTS (SELECT 1 FROM typemx
+sub WHERE sub.g = typemx.g)`, `typemx.g` is not dangling. That query answers
+50 for PostgreSQL's 47 — every row — and the same query with the outer
+relation aliased is right. No scope-free predicate can tell the two apart;
+closing it is a producer repair. It is pinned as
+`boundary_unaliased_base_table_correlation_stays_silent` in the arc-A census.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is
