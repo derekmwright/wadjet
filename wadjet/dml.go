@@ -30,6 +30,32 @@ type ExecResult struct {
 	Command      string // INSERT, UPDATE, DELETE
 }
 
+// Tag renders this result the way PostgreSQL's CommandComplete does.
+//
+// It is a method on the result rather than a private helper in one door
+// because the doors DISAGREED: pgwire special-cased INSERT to PostgreSQL's
+// three-field `INSERT <oid> <rows>` form and the HTTP door rendered
+// `fmt.Sprintf("%s %d", …)`, so the same statement was `INSERT 0 3` over the
+// wire and `INSERT 3` over REST — while docs/api-reference.md claimed the tag
+// does not depend on the door (review B8). One renderer is the only way that
+// claim can be true.
+func (r *ExecResult) Tag() string { return CommandTag(r.Command, r.RowsAffected) }
+
+// CommandTag is Tag for a caller holding the verb and the count separately.
+//
+// PostgreSQL's INSERT tag carries an oid field that has been fixed at 0 since
+// 12; every other verb is `VERB <rows>`. Measured, not remembered.
+func CommandTag(command string, rows int64) string {
+	cmd := strings.ToUpper(strings.TrimSpace(command))
+	if cmd == "" {
+		cmd = "SELECT"
+	}
+	if cmd == "INSERT" {
+		return fmt.Sprintf("INSERT 0 %d", rows)
+	}
+	return fmt.Sprintf("%s %d", cmd, rows)
+}
+
 // Execute runs a DML statement (INSERT/UPDATE/DELETE/MERGE) and returns the
 // result.
 func (db *DB) Execute(ctx context.Context, sql string) (*ExecResult, error) {
@@ -124,11 +150,32 @@ func resolveInsertColumns(named []string, table string, schema []parquet.Column)
 	return names, cols, nil
 }
 
+// dmlRelationError is a DML door's table lookup reported the way the SELECT
+// door already reports it.
+//
+// #719: all four doors wrapped catalog.GetTable's miss with %w and handed the
+// client `table "x": table "x" not found` and NO SQLSTATE, while
+// `MERGE ... USING nosuchtable` — which reaches the relation through db.Query
+// and therefore through the planner — answered 42P01 with PostgreSQL's own
+// wording. One statement class, two dispositions, and they disagreed on the
+// MESSAGE as well as the class. PostgreSQL 17 says
+// `relation "nosuchtable" does not exist`; so does this now, on every door.
+//
+// A transport failure is deliberately NOT 42P01: the table's existence is
+// unknown then, which is the same distinction physical.validate makes on the
+// read path.
+func dmlRelationError(name string, err error) error {
+	if errors.Is(err, catalog.ErrTableNotFound) {
+		return sqlerr.New("42P01", "relation %q does not exist", name)
+	}
+	return fmt.Errorf("table %q: %w", name, err)
+}
+
 // executeInsert handles INSERT INTO table [(cols)] VALUES (v1, v2), ...
 func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*ExecResult, error) {
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
-		return nil, fmt.Errorf("table %q: %w", info.Table, err)
+		return nil, dmlRelationError(info.Table, err)
 	}
 
 	// RESOLVE the column list against the table, before a single value is
@@ -162,7 +209,16 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 		}
 		row := make(map[string]any, len(columns))
 		for i, colName := range columns {
-			v, err := ConvertValueForColumn(vals[i], cols[i])
+			// assignLiteralToColumn, not ConvertValueForColumn: the ASSIGNMENT
+			// CAST is part of what a literal means, and INSERT was the one
+			// verb that did not get it. `INSERT INTO t (n) VALUES (2.5)` into
+			// an INT64 column failed with `strconv.ParseInt: parsing "2.5"`
+			// and NO SQLSTATE, while `UPDATE t SET n = 2.5` stored 3 — an
+			// INSERT-vs-UPDATE split inside one engine, and a divergence from
+			// PostgreSQL, which stores 3 (review P6). It also carries the
+			// classes the cast raises, so an out-of-range INSERT is 22003 and
+			// unreadable text is 22P02 rather than the blanket 42000 (P18).
+			v, err := assignLiteralToColumn(vals[i], cols[i])
 			if err != nil {
 				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
 			}
@@ -228,7 +284,7 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 	}
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
-		return nil, fmt.Errorf("table %q: %w", info.Table, err)
+		return nil, dmlRelationError(info.Table, err)
 	}
 	schema := tableMeta.Schema.Columns
 
@@ -297,7 +353,7 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 	}
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
-		return nil, fmt.Errorf("table %q: %w", info.Table, err)
+		return nil, dmlRelationError(info.Table, err)
 	}
 	schema := tableMeta.Schema.Columns
 
@@ -435,7 +491,7 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	}
 	targetMeta, err := db.catalog.GetTable(ctx, info.Target)
 	if err != nil {
-		return nil, fmt.Errorf("target table %q: %w", info.Target, err)
+		return nil, dmlRelationError(info.Target, err)
 	}
 
 	// Read all source rows via a query
@@ -1087,7 +1143,23 @@ func (ev *mergeEvaluator) resolveRefIn(ref *plansql.ColRef, matched bool) (parqu
 		side = ev.colByName
 	case ev.sourceAlias:
 		if !ev.sourceKnown {
-			// Nothing to check against; the row still carries the value.
+			// A SUBQUERY source: its output column NAMES are known (the
+			// statement has already run it) even though its declared TYPES
+			// are not. The names are enough to REFUSE a mistyped one, and
+			// refusing is what this has to do: without it `SET n = s.nosuchcol`
+			// resolved to a spelling the merged row does not hold, `ev.value`
+			// read nil, and the statement WROTE NULL OVER A GOOD VALUE and
+			// reported MERGE 1 — on exactly the surface this arc extended,
+			// while the named-table spelling of the same mistake was already
+			// 42703 (review B6).
+			if ev.sourceNamed {
+				if _, ok := ev.srcByName[col]; !ok {
+					return parquet.Column{}, "", sqlerr.New("42703",
+						"column %s.%s does not exist", qual, ref.Column)
+				}
+			}
+			// The row carries the value; the TYPE is still unknown, which is
+			// what keeps ev.value's declared-schema refusal in place.
 			return parquet.Column{}, qual + "." + col, nil
 		}
 		side = ev.srcByName
@@ -1150,13 +1222,34 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 	return col, nil
 }
 
+// dmlSourceIsFloat reports whether a SET expression's DECLARED family is a
+// FLOAT, which is what decides PostgreSQL's assignment-cast rounding (#699).
+//
+// An explicit CAST decides it outright, before the declared-type layer is
+// asked. That layer resolves `f::numeric` from the OPERAND — a float8 column —
+// and answers FLOAT, so the half-to-even rule was applied to an expression
+// whose PostgreSQL source type is numeric and 5 of 8 rows differed from
+// PostgreSQL (review P5). A cast is the user saying which family this is.
+func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column) bool {
+	if c, ok := unwrapDMLParens(node).(*plansql.CastNode); ok {
+		switch strings.ToLower(strings.TrimSpace(c.TypeName)) {
+		case "float", "float4", "float8", "real", "double precision", "double",
+			"float32", "float64":
+			return true
+		}
+		return false
+	}
+	decl, conf := physical.DeclaredTypeOfNode(node, schema)
+	return conf == expr.Decided &&
+		(decl.ID == parquet.TypeFloat32 || decl.ID == parquet.TypeFloat64)
+}
+
 // sourceIsFloat reports whether an expression's DECLARED type is a FLOAT,
 // which is what decides PostgreSQL's assignment-cast rounding (#699). The
 // namespace is the merged one, so `s.f` resolves to the source's declaration
 // exactly as the expression evaluator resolves it.
 func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
-	d, conf := physical.DeclaredTypeOfNode(node, ev.mergedCols)
-	return conf == expr.Decided && (d.ID == parquet.TypeFloat32 || d.ID == parquet.TypeFloat64)
+	return dmlSourceIsFloat(node, ev.mergedCols)
 }
 
 // value resolves one SET / VALUES expression against the merged row.
@@ -1218,7 +1311,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 		// strictly better than the source text this used to store.
 		return nil, sqlerr.New("0A000",
 			"MERGE cannot evaluate %q: the source %q has no declared schema to resolve it against",
-			text, ev.target)
+			text, ev.source)
 	}
 	compiled, err := expr.Compile(node)
 	if err != nil {
@@ -1268,6 +1361,15 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any, matched boo
 	// rewrote the row where PostgreSQL raises 42804 and writes nothing
 	// (#686 R2-1).
 	if err := ev.checkConditionType(node, matched); err != nil {
+		return false, err
+	}
+	// The same operand-pair refusal a DELETE's and an UPDATE's WHERE gets.
+	// It reached BuildDMLPredicate only, whose callers are deleteOnce and
+	// updateOnce, so MERGE — the fourth DML verb — kept the behaviour #721
+	// was filed for: `WHEN MATCHED AND t.name > 5 THEN DELETE` DESTROYED a row
+	// PostgreSQL refuses with 42883, and it is the very predicate the fix's
+	// own commit body calls out as having emptied a table (review B4).
+	if err := refuseDMLLiteralPairs(node, ev.mergedCols); err != nil {
 		return false, err
 	}
 	// An untyped string literal is CAST to boolean rather than evaluated:
@@ -2010,7 +2112,7 @@ func dmlColumnLiteralPair(a, b plansql.Node, byName map[string]parquet.Column) (
 func refuseDMLPair(col parquet.Column, lit *plansql.Lit, op string) error {
 	switch lit.Kind {
 	case plansql.LitNumber:
-		if col.Type == parquet.TypeString || col.Type == parquet.TypeBytes {
+		if refusesNumericLiteral(col.Type) {
 			return sqlerr.New("42883",
 				"operator does not exist: %s %s numeric",
 				pgOperandTypeName(col.Type), op)
@@ -2028,6 +2130,34 @@ func refuseDMLPair(col parquet.Column, lit *plansql.Lit, op string) error {
 		return expr.RefuseNumericLiteral(col.Type, lit.Value)
 	}
 	return nil
+}
+
+// refusesNumericLiteral reports whether PostgreSQL has no operator between a
+// column of this type and an unquoted NUMBER.
+//
+// The first pass listed only String and Bytes, and justified the omission with
+// "those parsers are stricter than PostgreSQL's input grammar, so refusing
+// would reject input PostgreSQL accepts". That argument is about a QUOTED
+// literal reaching a type's input function; it cannot apply to an unquoted
+// number, which is never input to a timestamp or inet parser at all —
+// PostgreSQL refuses the OPERATOR categorically. The measurement refuted the
+// exclusion outright: `DELETE FROM t WHERE ts > 5` EMPTIED a TIMESTAMP table,
+// and so did the BOOL and IPv4 spellings, where PostgreSQL raises 42883
+// (review B5).
+//
+// The wadjet-native numeric-ish types are the deliberate exception: PORT,
+// PROTOCOL and DURATION are stored as integers, PostgreSQL has no such type
+// and therefore no opinion, and ADR-0012's superset rule keeps them answering.
+// The containers are refused because a number cannot be compared to one under
+// any reading.
+func refusesNumericLiteral(t parquet.TypeID) bool {
+	switch t {
+	case parquet.TypeInt32, parquet.TypeInt64,
+		parquet.TypeFloat32, parquet.TypeFloat64, parquet.TypeDecimal,
+		parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
+		return false
+	}
+	return true
 }
 
 // pgOperandTypeName renders a column type the way PostgreSQL names it in an
@@ -2055,6 +2185,14 @@ func pgOperandTypeName(t parquet.TypeID) string {
 		return "timestamp without time zone"
 	case parquet.TypeDate:
 		return "date"
+	case parquet.TypeIPv4, parquet.TypeIPv6:
+		return "inet"
+	case parquet.TypeCIDR:
+		return "cidr"
+	case parquet.TypeMAC:
+		return "macaddr"
+	case parquet.TypeUUID:
+		return "uuid"
 	default:
 		return t.String()
 	}
@@ -2232,10 +2370,8 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// The AST is still in hand here, and it is the only place the source's
 		// DECLARED family can be read — one line above where it used to be
 		// thrown away at expr.Compile (#699).
-		decl, conf := physical.DeclaredTypeOfNode(node, schema)
-		srcFloat := conf == expr.Decided &&
-			(decl.ID == parquet.TypeFloat32 || decl.ID == parquet.TypeFloat64)
-		out = append(out, DMLAssignment{Column: name, col: col, expr: compiled, srcFloat: srcFloat})
+		out = append(out, DMLAssignment{Column: name, col: col, expr: compiled,
+			srcFloat: dmlSourceIsFloat(node, schema)})
 	}
 	return out, nil
 }
@@ -2458,7 +2594,12 @@ func ConvertValueForColumn(s string, col parquet.Column) (any, error) {
 // handled before this — and a field whose text happened to begin and end with
 // an apostrophe silently lost both (#690's third site).
 func ConvertTextForColumn(s string, col parquet.Column) (any, error) {
-	return decimalChecked(convertUnquoted(strings.TrimSpace(s), col.Type))(col)
+	// No TrimSpace here: convertUnquoted trims per TYPE, so a COPY field into a
+	// TEXT column keeps its padding — PostgreSQL's `  spaced  ` stays
+	// `  spaced  ` — while a field into a numeric column still parses. Trimming
+	// here was the third literal rule the commit meant to remove and did not
+	// (review P7).
+	return decimalChecked(convertUnquoted(s, col.Type))(col)
 }
 
 // decimalChecked is the shared tail of the two converters: a DECIMAL value is
@@ -2551,7 +2692,23 @@ func convertValue(s string, typ parquet.TypeID) (any, error) {
 
 // convertUnquoted is convertValue's body: the text is already a VALUE, with
 // no SQL keyword and no quoting left in it.
+//
+// WHITESPACE IS DATA FOR TEXT AND IGNORABLE FOR EVERYTHING ELSE, which is
+// PostgreSQL's rule and, once the quotes come off, the only place it can be
+// applied. `TrimSpace` used to run on the OUTSIDE of the quotes, so it was a
+// no-op for `'  7  '` and the padding reached strconv: an INSERT or UPDATE of
+// a padded numeric literal was REFUSED where PostgreSQL — and this engine
+// before #690 — stores 7 (`'  7  '::bigint` is 7, and `'  spaced  '::text`
+// keeps both runs). Trimming per TYPE rather than per literal is what makes
+// both true at once (review B1, P7).
 func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
+	switch typ {
+	case parquet.TypeString, parquet.TypeBytes:
+		// The value is the bytes. Nothing is trimmed.
+	default:
+		s = strings.TrimSpace(s)
+	}
+
 	switch typ {
 	case parquet.TypeBool:
 		return strconv.ParseBool(s)
