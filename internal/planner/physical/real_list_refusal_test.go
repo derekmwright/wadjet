@@ -14,9 +14,10 @@ import (
 // "the OPERAND's type decides" rule visible.
 func rlrDecls() colDecls {
 	return colDecls{types: map[string]parquet.TypeID{
-		"r_val": parquet.TypeFloat32,
-		"d_val": parquet.TypeFloat64,
-		"r_key": parquet.TypeInt64,
+		"r_val":   parquet.TypeFloat32,
+		"r_other": parquet.TypeFloat32,
+		"d_val":   parquet.TypeFloat64,
+		"r_key":   parquet.TypeInt64,
 	}}
 }
 
@@ -24,6 +25,24 @@ func rlrCol(name string) *plansql.ColRef { return &plansql.ColRef{Column: name} 
 
 func rlrNum(text string) *plansql.Lit {
 	return &plansql.Lit{Value: text, Kind: plansql.LitNumber}
+}
+
+func rlrFn(name string, args ...plansql.Node) *plansql.FuncCallNode {
+	return &plansql.FuncCallNode{Name: name, Args: args}
+}
+
+// rlrCase builds `CASE WHEN r_key >= 0 THEN then ELSE els END`, with a nil
+// `els` meaning no ELSE at all — the implicit untyped NULL branch, which
+// contributes no type.
+func rlrCase(then, els plansql.Node) *plansql.CaseNode {
+	n := &plansql.CaseNode{Whens: []plansql.WhenClause{{
+		Cond:   &plansql.BinaryOp{Left: rlrCol("r_key"), Op: ">=", Right: rlrNum("0")},
+		Result: then,
+	}}}
+	if els != nil {
+		n.Else = els
+	}
+	return n
 }
 
 // TestRealTypedNodeFollowsPostgresOperandType pins the rule that decides
@@ -80,6 +99,43 @@ func TestRealTypedNodeFollowsPostgresOperandType(t *testing.T) {
 		{"ParenthesizedRealPlusZero", &plansql.ParenNode{
 			Inner: &plansql.BinaryOp{Left: rlrCol("r_val"), Op: "+", Right: rlrNum("0")}}, false},
 		{"Literal", rlrNum("3.1"), false},
+
+		// #654: the rule is the RESOLVED TYPE, not a syntactic case list.
+		// Every `true` below is `real` on the live server (pg_typeof), every
+		// `false` is double precision or numeric there, and each was measured
+		// rather than reasoned about.
+		{"AbsOfReal", rlrFn("abs", rlrCol("r_val")), true},
+		{"AbsOfDouble", rlrFn("abs", rlrCol("d_val")), false},
+		{"AbsOfInteger", rlrFn("abs", rlrCol("r_key")), false},
+		{"GreatestOfReals", rlrFn("greatest", rlrCol("r_val"), rlrCol("r_other")), true},
+		{"GreatestMixedWidth", rlrFn("greatest", rlrCol("r_val"), rlrCol("d_val")), false},
+		{"LeastOfReals", rlrFn("least", rlrCol("r_val"), rlrCol("r_other")), true},
+		{"CoalesceOfReals", rlrFn("coalesce", rlrCol("r_val"), rlrCol("r_other")), true},
+		{"CoalesceMixedWidth", rlrFn("coalesce", rlrCol("r_val"), rlrCol("d_val")), false},
+		{"NullifOfReals", rlrFn("nullif", rlrCol("r_val"), rlrCol("r_other")), true},
+		// A function with no float4 overload: `ceil(real)` is double
+		// precision there, and so are sqrt, ln, exp and power.
+		{"CeilOfReal", rlrFn("ceil", rlrCol("r_val")), false},
+		{"SqrtOfReal", rlrFn("sqrt", rlrCol("r_val")), false},
+		// CASE folds its arms, and a missing ELSE contributes no type.
+		{"CaseOfReals", rlrCase(rlrCol("r_val"), rlrCol("r_other")), true},
+		{"CaseMixedWidth", rlrCase(rlrCol("r_val"), rlrCol("d_val")), false},
+		{"CaseWithNoElse", rlrCase(rlrCol("r_val"), nil), true},
+		// real OP real is real; real OP anything else widens. This pair is
+		// what says both sides are tested rather than one followed down.
+		{"RealTimesRealCast", &plansql.BinaryOp{Left: rlrCol("r_val"), Op: "*",
+			Right: cast(rlrNum("1"), "REAL")}, true},
+		{"RealDividedByReal", &plansql.BinaryOp{Left: rlrCol("r_val"), Op: "/",
+			Right: rlrCol("r_other")}, true},
+		{"RealTimesDouble", &plansql.BinaryOp{Left: rlrCol("r_val"), Op: "*",
+			Right: rlrCol("d_val")}, false},
+		// Nested: the walk goes all the way down and one non-real anywhere
+		// takes the whole expression out.
+		{"AbsOfNegatedReal", rlrFn("abs", unary("-", rlrCol("r_val"))), true},
+		{"AbsOfRealPlusInteger", rlrFn("abs",
+			&plansql.BinaryOp{Left: rlrCol("r_val"), Op: "+", Right: rlrNum("1")}), false},
+		{"GreatestOfAbsAndReal", rlrFn("greatest",
+			rlrFn("abs", rlrCol("r_val")), rlrCol("r_other")), true},
 	}
 	for _, c := range cases {
 		if got := realTypedNode(c.node, rlrDecls()); got != c.want {

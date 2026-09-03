@@ -313,8 +313,119 @@ func realTypedOperand(e Expr, b *batch.RecordBatch) (real, settled bool) {
 			return realTypedOperand(n.Operand, b)
 		}
 		return false, true
+	case *BinOp:
+		// real OP real is real; anything else widens. `r * CAST(1 AS REAL)`
+		// is real and `r * 1` is double precision, both verified with
+		// pg_typeof — the pair that says this tests BOTH sides rather than
+		// following one down to a column.
+		switch n.Op {
+		case "+", "-", "*", "/":
+			return realTypedPair(n.Left, n.Right, b)
+		}
+		return false, true
+	case *BinOpNumeric:
+		switch n.Op {
+		case "+", "-", "*", "/":
+			return realTypedPair(n.Left, n.Right, b)
+		}
+		return false, true
+	case *Case:
+		// caseResultArms is the DECIMAL fold's list and it is the right one
+		// here too: the operand and the WHEN conditions only steer, so they
+		// contribute no type. A missing ELSE is an implicit untyped NULL and
+		// is skipped, the way CommonDeclType skips it.
+		return realTypedArms(caseResultArms(n), b)
+	case *Coalesce:
+		// COALESCE compiles to its own node rather than a FuncCall
+		// (compileFuncCall's special form), so it needs its own arm — the
+		// shape that made the first version of this walk answer "double" for
+		// `COALESCE(r, r2)` while GREATEST over the same pair answered real.
+		return realTypedArms(n.Args, b)
+	case *FuncCall:
+		return realTypedFuncOperand(n, b)
+	case *numericFuncCall:
+		// Every function the registry declares NUMERIC is wrapped so binary
+		// operators over it take the typed path, and ABS is one of them — a
+		// type switch on *FuncCall alone misses the wrapper and answered
+		// "double" for `ABS(r)`.
+		return realTypedFuncOperand(n.FuncCall, b)
+	case *decimalScalarFn:
+		// ABS compiles to THIS, not to a FuncCall: `abs` is in
+		// decimalScalarOps, so the compiler wraps it in the exact-decimal node
+		// with the FuncCall kept as `fallback`. When the node resolves to
+		// DECIMAL mode the result is numeric and never real; when it does not,
+		// the fallback is what runs and the function rule decides. Missing
+		// this arm is why `ABS(r) IN (3.1, 7.1)` still answered zero after
+		// GREATEST, LEAST, CASE, NULLIF and COALESCE were fixed.
+		if n.resolve(b) {
+			return false, true
+		}
+		if n.fallback == nil {
+			return false, true
+		}
+		return realTypedFuncOperand(n.fallback, b)
 	}
 	return false, true
+}
+
+// realTypedPair is `real OP real`, and it is deliberately AND over both sides
+// including the settled flag: an unsettled side makes the whole answer
+// unsettled, because a column that resolves in no batch yet says nothing about
+// the next one.
+func realTypedPair(l, r any, b *batch.RecordBatch) (real, settled bool) {
+	le, lok := l.(Expr)
+	re, rok := r.(Expr)
+	if !lok || !rok {
+		return false, true
+	}
+	lReal, lSettled := realTypedOperand(le, b)
+	rReal, rSettled := realTypedOperand(re, b)
+	return lReal && rReal, lSettled && rSettled
+}
+
+// realTypedArms is a choice construct's candidate list: real only when EVERY
+// candidate is, which is what PostgreSQL's common-type resolution says for a
+// CASE / COALESCE / GREATEST / LEAST / NULLIF / IF over reals.
+func realTypedArms(arms []Expr, b *batch.RecordBatch) (real, settled bool) {
+	if len(arms) == 0 {
+		return false, true
+	}
+	settled = true
+	for _, a := range arms {
+		if a == nil {
+			return false, settled
+		}
+		r, s := realTypedOperand(a, b)
+		settled = settled && s
+		if !r {
+			return false, settled
+		}
+	}
+	return true, settled
+}
+
+// realTypedFuncOperand is the FUNCTION half, and physical.realTypedFuncNode's
+// twin. ABS is the one scalar function with a float4 overload in PostgreSQL;
+// the CHOICE functions the registry names through Ret.SameAsArgs mirror their
+// arguments. Everything else widens, including anything this cannot type.
+func realTypedFuncOperand(n *FuncCall, b *batch.RecordBatch) (real, settled bool) {
+	if strings.EqualFold(strings.TrimSpace(n.Name), "abs") {
+		if len(n.Args) != 1 {
+			return false, true
+		}
+		return realTypedOperand(n.Args[0], b)
+	}
+	idx, poly := DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args))
+	if !poly {
+		return false, true
+	}
+	arms := make([]Expr, 0, len(idx))
+	for _, i := range idx {
+		if i >= 0 && i < len(n.Args) {
+			arms = append(arms, n.Args[i])
+		}
+	}
+	return realTypedArms(arms, b)
 }
 
 // contains probes the narrowed set with the column's own float32 value.

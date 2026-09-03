@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -154,6 +155,15 @@ func realTypedNode(node plansql.Node, decls colDecls) bool {
 	case *plansql.ParenNode:
 		return realTypedNode(n.Inner, decls)
 	case *plansql.ColRef:
+		if decls.isFieldPath(n) {
+			// A ROW FIELD of FLOAT32 reads through the boxed path exactly as
+			// a column does, and expr.realTypedOperand has always said so.
+			// The two twins disagreeing here is #654's "latent asymmetry":
+			// the plan-time refusal was missed and only the row-loop backstop
+			// raised.
+			f, ok := decls.field(n)
+			return ok && f.Type == parquet.TypeFloat32
+		}
 		t, ok := decls.colType(n)
 		return ok && t == parquet.TypeFloat32
 	case *plansql.CastNode:
@@ -165,8 +175,87 @@ func realTypedNode(node plansql.Node, decls colDecls) bool {
 		if n.Op == "-" || n.Op == "+" {
 			return realTypedNode(n.Inner, decls)
 		}
+	case *plansql.BinaryOp:
+		// real OP real is real; anything else widens. `r * CAST(1 AS REAL)`
+		// is real and `r * 1` is double precision — both verified with
+		// pg_typeof, and they are the pair that says this must test BOTH
+		// sides rather than follow one down to a column.
+		switch n.Op {
+		case "+", "-", "*", "/":
+			return realTypedNode(n.Left, decls) && realTypedNode(n.Right, decls)
+		}
+	case *plansql.CaseNode:
+		return realTypedChoice(caseArmNodes(n), decls)
+	case *plansql.FuncCallNode:
+		return realTypedFuncNode(n, decls)
 	}
 	return false
+}
+
+// realTypedChoice reports whether every arm of a choice construct is real,
+// which is what makes the construct real: PostgreSQL resolves a CASE /
+// COALESCE / GREATEST / LEAST / NULLIF / IF to the common type of its
+// candidates, and `real` with `real` is `real` (pg_typeof, verified live for
+// all six).
+//
+// An arm that is not real — including one this walk cannot type — makes the
+// whole construct not-real, which is the conservative side: it leaves the list
+// widened exactly as it was before.
+func realTypedChoice(arms []plansql.Node, decls colDecls) bool {
+	if len(arms) == 0 {
+		return false
+	}
+	for _, a := range arms {
+		if a == nil || !realTypedNode(a, decls) {
+			return false
+		}
+	}
+	return true
+}
+
+// caseArmNodes is a CASE's candidate list: the THEN results and the ELSE. A
+// missing ELSE is an implicit untyped NULL, which contributes no type — so it
+// is skipped here rather than counted as a non-real arm, the way
+// expr.CommonDeclType skips it.
+func caseArmNodes(n *plansql.CaseNode) []plansql.Node {
+	arms := make([]plansql.Node, 0, len(n.Whens)+1)
+	for _, w := range n.Whens {
+		arms = append(arms, w.Result)
+	}
+	if n.Else != nil {
+		arms = append(arms, n.Else)
+	}
+	return arms
+}
+
+// realTypedFuncNode is the FUNCTION half of the resolved-type rule.
+//
+// Two families, and the list is short because PostgreSQL's is: ABS is the one
+// scalar function with a float4 overload (`abs(real)` is real; CEIL, FLOOR,
+// SQRT, ROUND, TRUNC and SIGN over a real are double precision or numeric —
+// each measured, which is the same measurement scalarFnDeclaredNumericDomain
+// records for the integer domain), and the CHOICE functions the registry
+// already names through Ret.SameAsArgs mirror their arguments.
+//
+// An AGGREGATE needs no arm: MIN/MAX/SUM over a real declare FLOAT32 for their
+// output column, so the operand a HAVING sees is a bare ColRef of that column
+// and the ColRef arm answers it. AVG is double precision in PostgreSQL and its
+// output column is not FLOAT32 here either, so it stays widened without a rule.
+func realTypedFuncNode(n *plansql.FuncCallNode, decls colDecls) bool {
+	if strings.EqualFold(strings.TrimSpace(n.Name), "abs") {
+		return len(n.Args) == 1 && realTypedNode(n.Args[0], decls)
+	}
+	idx, poly := expr.DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args))
+	if !poly {
+		return false
+	}
+	arms := make([]plansql.Node, 0, len(idx))
+	for _, i := range idx {
+		if i >= 0 && i < len(n.Args) {
+			arms = append(arms, n.Args[i])
+		}
+	}
+	return realTypedChoice(arms, decls)
 }
 
 // realListLiteralText unwraps a member to the numeric text the refusal reads,

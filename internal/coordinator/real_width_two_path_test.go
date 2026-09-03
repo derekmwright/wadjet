@@ -207,6 +207,42 @@ func rwpWant() []rwpCase {
 		{"InSingleNonRepresentable", "r_val IN (3.1)", nil},
 		{"InSingleRepresentable", "r_val IN (1.5)", []int64{17}},
 
+		// --- #654: a COMPUTED real operand narrows exactly like a bare one ---
+		//
+		// PostgreSQL resolves the array's element type from the operand's own
+		// RESOLVED TYPE, not from whether it is a column. Every operand below
+		// is `real` on the live server (pg_typeof, measured), so the list is
+		// real[] and the non-representable 3.1 finds row 3 — and every one of
+		// them answered ZERO ROWS here, because the rule was a syntactic case
+		// list of {Paren, ColRef, CAST(real), UnaryOp(±)}.
+		{"InAbs", "ABS(r_val) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InGreatest", "GREATEST(r_val, r_other) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InLeast", "LEAST(r_val, r_other) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InCoalesce", "COALESCE(r_val, r_other) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InCase", "(CASE WHEN r_key >= 0 THEN r_val ELSE r_other END) IN (3.1, 7.1)",
+			[]int64{3, 7}},
+		{"InNullif", "NULLIF(r_val, 0) IN (3.1, 7.1)", []int64{3, 7}},
+		// real OP real is real: the multiply by a REAL one narrows and the
+		// multiply by an INTEGER one does not. They are the pair that says
+		// this tests BOTH operands rather than following one down to a column
+		// — `pg_typeof(r * 1)` is double precision on the server.
+		{"InRealTimesRealCast", "r_val * CAST(1 AS REAL) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InRealPlusRealCast", "r_val + CAST(0 AS REAL) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InRealTimesIntegerLiteralWidens", "r_val * 1 IN (3.1, 7.1)", nil},
+		// A function with NO float4 overload widens, and CEIL is the one to
+		// pick because its result is still integral: `ceil(real)` is double
+		// precision there, and the two members are exact, so the rows match
+		// for a reason that has nothing to do with the width.
+		{"InCeilWidens", "CEIL(r_val) IN (4, 8)", []int64{3, 7}},
+		// NOT IN over the same computed operand, and the DOUBLE control: the
+		// narrowing must follow the operand's type and not the function.
+		{"NotInAbs", "ABS(r_val) NOT IN (3.1, 7.1)",
+			join([]int64{0, 1, 2}, []int64{4, 5, 6}, seq(8, 17), []int64{19, 20, 21, 22, 23})},
+		{"InAbsOfDouble", "ABS(d_val) IN (3.1, 7.1)", []int64{3, 7}},
+		// Arity 1 still WIDENS over a computed operand, exactly as over a
+		// bare column: PostgreSQL builds no array for a single member.
+		{"InAbsSingleWidens", "ABS(r_val) IN (3.1)", nil},
+
 		// --- Column-to-column: no literal, so no width to resolve ---
 		//
 		// Unchanged by #631 and asserted so: PostgreSQL compares real to real
