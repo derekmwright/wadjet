@@ -2,9 +2,12 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/oracle"
 )
 
 // The two wadjet paths must DESCRIBE one query identically.
@@ -38,6 +41,11 @@ type a2NameCell struct {
 	// the #732 decision has its measurement beside the shape rather than in a
 	// scratch file.
 	pgName []string
+	// wantRoutes is the routing delta each DAG arm must show. The zero value
+	// means the DAG EXECUTED this shape; anything else names the refusal it
+	// took, and says that the two DAG arms are the coordinator-local pipeline
+	// for this cell (rule 11).
+	wantRoutes a2Routes
 }
 
 func a2NameCells() []a2NameCell {
@@ -95,6 +103,106 @@ func a2NameCells() []a2NameCell {
 	}
 }
 
+// The two paths must also DECLARE one query identically (#813).
+//
+// `CAST(SUM(a) OVER () AS BIGINT)` came back as an int64 from the
+// single-process engine and as a float64 from the DAG. The declaration was the
+// same on both — `inferCastType("bigint")` is INT64 — and the DAG's VALUE was
+// not: `expr.Int64ResultOf`, which decides whether the gather materializes an
+// expression into an INT64 vector or a float64 one, had no CAST arm, so the
+// integer box the cast produces went into a float64 column. One query, two
+// wire OIDs, decided by which engine ran it.
+//
+// This gate is the type twin of the name gate above, and it lives beside it
+// for the reason that one exists: nothing in the tree compared the two paths'
+// declared TYPES either, because every two-path row comparison reads each
+// arm's values through that arm's own boxes.
+type a2DeclCell struct {
+	issue, name, sql string
+	// want is the Go box each row's value column must arrive in, on BOTH
+	// paths. It is the box and not the number: the numbers agreed all along.
+	want   string
+	pgSays string
+	// wantRoutes is the routing delta each DAG arm must show. The zero value
+	// means the DAG EXECUTED this shape; anything else names the refusal it
+	// took, and says that the two DAG arms are the coordinator-local pipeline
+	// for this cell (rule 11).
+	wantRoutes a2Routes
+}
+
+func a2DeclCells() []a2DeclCell {
+	return []a2DeclCell{
+		{issue: "#813", name: "cast_window_to_bigint",
+			sql:  `SELECT CAST(SUM(a) OVER () AS BIGINT) AS v FROM decpair ORDER BY id LIMIT 1`,
+			want: "int64", pgSays: "bigint"},
+		{issue: "#813", name: "cast_window_to_integer",
+			sql:  `SELECT CAST(SUM(a) OVER () AS INTEGER) AS v FROM decpair ORDER BY id LIMIT 1`,
+			want: "int64", pgSays: "integer — wadjet's standing int4/int8 width divergence, " +
+				"and the DOMAIN is what this cell is about"},
+		{issue: "#813", name: "cast_window_to_smallint",
+			sql:  `SELECT CAST(SUM(a) OVER () AS SMALLINT) AS v FROM decpair ORDER BY id LIMIT 1`,
+			want: "int64", pgSays: "smallint"},
+		// The controls: a non-integer destination must stay float, and a cast
+		// over a GROUPED aggregate — which already agreed — must not move.
+		{issue: "#813", name: "ctl_cast_window_to_double",
+			sql:  `SELECT CAST(SUM(a) OVER () AS DOUBLE) AS v FROM decpair ORDER BY id LIMIT 1`,
+			want: "float64", pgSays: "double precision"},
+		{issue: "#813", name: "ctl_cast_grouped_aggregate_to_bigint",
+			sql:  `SELECT CAST(SUM(id) AS BIGINT) AS v FROM typemx GROUP BY g ORDER BY g LIMIT 1`,
+			want: "int64", pgSays: "bigint"},
+	}
+}
+
+func TestBothPathsDeclareACastOverAWindowTheSameWay(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+
+	single := tmdStandalone(t, ctx)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	infraB := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraB, nil)
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
+
+	for _, tc := range a2DeclCells() {
+		t.Run(tc.issue+"/"+tc.name, func(t *testing.T) {
+			box := func(arm string, res *oracle.Result, err error) string {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("%s arm: %v\n  SQL: %s", arm, err, tc.sql)
+				}
+				if len(res.Rows) == 0 {
+					t.Fatalf("%s arm: no rows\n  SQL: %s", arm, tc.sql)
+				}
+				got := fmt.Sprintf("%T", res.Rows[0]["v"])
+				if got != tc.want {
+					t.Errorf("%s arm: v arrives as %s, want %s\n  PostgreSQL 17 declares %s\n  SQL: %s",
+						arm, got, tc.want, tc.pgSays, tc.sql)
+				}
+				return got
+			}
+			sres, serr := tmdRunSingle(ctx, single, tc.sql)
+			s := box("single", sres, serr)
+			for _, arm := range []struct {
+				name string
+				c    *Coordinator
+			}{{"dag", coord}, {"dag-shuffled", coordB}} {
+				before := a2ReadRoutes(arm.c)
+				dres, derr := tmdRunDAG(ctx, arm.c, tc.sql)
+				a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.c), tc.wantRoutes, tc.sql)
+				if d := box(arm.name, dres, derr); d != s {
+					t.Errorf("the two wadjet paths declare one query differently\n"+
+						"  single       %s\n  %-12s %s\n  SQL: %s", s, arm.name, d, tc.sql)
+				}
+			}
+		})
+	}
+}
+
 func TestBothPathsNameAnUnaliasedExpressionTheSameWay(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -137,6 +245,7 @@ func TestBothPathsNameAnUnaliasedExpressionTheSameWay(t *testing.T) {
 				name string
 				c    *Coordinator
 			}{{"dag", coord}, {"dag-shuffled", coordB}} {
+				before := a2ReadRoutes(arm.c)
 				d := names(arm.name, func() ([]string, error) {
 					res, err := tmdRunDAG(ctx, arm.c, tc.sql)
 					if err != nil {
@@ -144,6 +253,7 @@ func TestBothPathsNameAnUnaliasedExpressionTheSameWay(t *testing.T) {
 					}
 					return res.Columns, nil
 				})
+				a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.c), tc.wantRoutes, tc.sql)
 				// Asserted against the SINGLE arm as well as against `want`,
 				// so a future change that moves BOTH paths in step is caught
 				// by `want` and one that moves only one is caught here even

@@ -6489,6 +6489,10 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		return e.castToDecimal(b, row, v, d)
 	}
 	switch dest {
+	// Keep this label list and IsIntegerCastDest in step: that predicate is
+	// what tells the DAG's gather materialization to build an INT64 vector
+	// for this destination (#813), and a label here it does not know would
+	// put the same query's answer in a float64 one.
 	case "int", "integer", "int4", "bigint", "int8", "signed", "smallint", "int2":
 		// A string that does not read as a number is refused, not coerced to
 		// 0: PostgreSQL raises 22P02 invalid_text_representation and ADR-0012

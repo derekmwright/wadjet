@@ -871,6 +871,29 @@ func Int64ResultOf(e Expr, b *batch.RecordBatch) bool {
 			return false
 		}
 		return Int64ResultOf(v.Left, b) && Int64ResultOf(v.Right, b)
+	case *Cast:
+		// A CAST to an INTEGER destination produces an int64 box whatever its
+		// operand was — castIntInRange returns one for every spelling,
+		// smallint included (#813).
+		//
+		// Without this arm the gather's materialization fell through to its
+		// float64 vector, so `CAST(SUM(a) OVER () AS BIGINT)` came back
+		// bigint from the single-process engine and double precision from the
+		// DAG: one query, two wire OIDs, decided by which engine ran it.
+		return IsIntegerCastDest(v.DestType)
+	}
+	return false
+}
+
+// IsIntegerCastDest reports whether a CAST destination names an integer type.
+//
+// The list is Cast.Eval's own switch, and it is a function rather than a
+// second copy of that switch so the two cannot drift: a destination this says
+// yes to must be one that switch answers an int64 for.
+func IsIntegerCastDest(dest string) bool {
+	switch strings.ToLower(strings.TrimSpace(dest)) {
+	case "int", "integer", "int4", "bigint", "int8", "signed", "smallint", "int2":
+		return true
 	}
 	return false
 }
