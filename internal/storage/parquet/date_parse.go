@@ -77,6 +77,18 @@ func IsDateParseError(err error) bool {
 // nonexistent or out-of-range calendar date such as 2026-02-30, month 13 or
 // day 32 (22008).
 //
+// Two of those refusals exist because PostgreSQL refuses them and they used to
+// be SUPERSET accepts here, on the WRITE path, so wadjet STORED a date no
+// PostgreSQL client could have written (#641): YEAR ZERO in every spelling
+// (22008 — PostgreSQL's calendar puts 1 BC immediately before 1 AD), and a
+// MONTH field of exactly three digits (see threeDigitMonthKind, which is also
+// why a FOUR-digit month and a three-digit DAY are still accepted).
+//
+// The accept-set is still narrower than PostgreSQL's in the other direction,
+// and every one of those is a REFUSAL rather than a different value: the
+// two-field day-of-year form ('2026-003' is 2026-01-03 there), the BC suffix,
+// and the DateStyle-dependent spellings deferred to #639.
+//
 // Not accepted, and deliberately ERRORING rather than guessing (#639): any
 // spelling whose field ORDER PostgreSQL decides from DateStyle rather than
 // from the digits — a short leading field it reads as the MONTH ("5/6/7" is
@@ -110,6 +122,17 @@ func ParseDateDays(s string) (int32, error) {
 		return 0, &DateParseError{Text: s, FieldRange: true}
 	}
 
+	// There is no year zero. PostgreSQL's calendar runs 4713 BC .. 5874897 AD
+	// with 1 BC immediately before 1 AD, so every spelling of year 0000 is
+	// 22008 there — '0000-01-01', '0000-1-1', '0000/01/01', '0000.01.01',
+	// '0000-12-31', '00000101' and '00001231', all measured live on
+	// postgres:17-alpine. Go's calendar is proleptic and HAS one, so this used
+	// to store day -719528 for a string PostgreSQL refuses to parse: an
+	// accepted value on the WRITE path that no PostgreSQL client could have
+	// written (#641).
+	if y == 0 {
+		return 0, &DateParseError{Text: s, FieldRange: true}
+	}
 	// Month and day ranges, then calendar existence via a UTC round-trip:
 	// time.Date normalizes an impossible day (2026-02-30 → 2026-03-02), so a
 	// mismatch after construction is a nonexistent date.
@@ -195,7 +218,47 @@ func splitDateFields(s string) (y, m, d int, kind dateFieldsKind) {
 	if len(parts[0]) < 4 {
 		return 0, 0, 0, dateFieldsNone
 	}
+	if kind := threeDigitMonthKind(parts[1]); kind != dateFieldsOK {
+		return 0, 0, 0, kind
+	}
 	return atoiN(parts[0]), atoiN(parts[1]), atoiN(parts[2]), dateFieldsOK
+}
+
+// threeDigitMonthKind refuses a middle field of EXACTLY three digits, which is
+// the one width PostgreSQL will not read as a month.
+//
+// The rule is PostgreSQL's DecodeNumber (datetime.c), and it is narrower than
+// "wider than two digits": a three-digit field with only the YEAR decided so
+// far, whose value is 1..366, is a DAY OF YEAR. So '2026-003' is 2026-01-03
+// there — but in a THREE-field date the day-of-year leaves the third field
+// nowhere to go and PostgreSQL answers 22007, while a three-digit value
+// OUTSIDE 1..366 is not a day of year at all, falls through to the month slot
+// and is 22008. Measured live on postgres:17-alpine:
+//
+//	'2026-003-12'   22007       '2026-012-12'   22007       '2026-366-12'  22007
+//	'2026-000-12'   22008       '2026-367-12'   22008       '2026-999-12'  22008
+//	'2026-0003-12'  2026-03-12  '2026-00003-12' 2026-03-12
+//	'2026-01-003'   2026-01-03  '2026-01-0003'  2026-01-03
+//
+// FOUR or more digits is a year-shaped token PostgreSQL accepts as the month,
+// and a three-digit DAY is accepted too — the year and the month are already
+// decided by then, so the day-of-year branch cannot fire. Both keep working
+// here unchanged, which is why this tests the width EXACTLY rather than
+// bounding it: refusing len > 2 would have refused input PostgreSQL takes,
+// which is the divergence ADR-0012 item 1 forbids, in exchange for closing one
+// it permits.
+//
+// wadjet used to read every all-digit middle field as a month, so
+// '2026-003-12' stored 2026-03-12 for a string PostgreSQL rejects (#641).
+// dateFieldsOK here means "not this case", not "valid".
+func threeDigitMonthKind(month string) dateFieldsKind {
+	if len(month) != 3 {
+		return dateFieldsOK
+	}
+	if v := atoiN(month); v >= 1 && v <= 366 {
+		return dateFieldsNone // PostgreSQL's day-of-year, then a field too many
+	}
+	return dateFieldsBad // read as a month, and out of range
 }
 
 // isTimeOfDay reports whether s is a plausible HH:MM[:SS[.fraction]] time,

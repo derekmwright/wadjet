@@ -98,6 +98,19 @@ literal in a predicate, which read it through one accept-set. A literal whose
 fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
 text that is not a timestamp at all is 22007.
 
+`Date` takes the unambiguous year-first spellings PostgreSQL's default
+`DateStyle` reads exactly one way: a four-or-more-digit leading year with a
+`-`, `/` or `.` separator (`2026-01-02`, `2026-1-2`, `2026/01/02`,
+`2026.1.1`), the compact `20260102`, and any of those followed by a
+time-of-day, which is truncated. Anything it cannot read identically to
+PostgreSQL is an **error**, never a guess: a spelling whose field order
+`DateStyle` decides (`01/02/2026`, two-digit years, month names), **year
+zero** — PostgreSQL's calendar puts 1 BC immediately before 1 AD, so
+`0000-01-01` is 22008 there — and a **month field of exactly three digits**
+(`2026-003-12`), which PostgreSQL reads as a day-of-year and then rejects. A
+four-digit month (`2026-0003-12`) and a three-digit day (`2026-01-003`) are
+accepted, as they are by PostgreSQL.
+
 ### Identifier Types
 
 | Type | Go Backing | Size | Use Cases |
