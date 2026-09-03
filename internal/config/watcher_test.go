@@ -24,6 +24,7 @@ worker:
 
 	cfg := DefaultConfig()
 	m := NewManager(&cfg, nil)
+	m.SubscribeKeys([]string{"worker"}, func(ChangeEvent) {})
 
 	var reloaded atomic.Int32
 	m.Subscribe(func(_ ChangeEvent) {

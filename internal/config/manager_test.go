@@ -17,9 +17,19 @@ func TestManagerCurrent(t *testing.T) {
 	}
 }
 
+// A Manager only holds values something consumes: a key with no subscriber
+// is preserved on Apply, because the manager is what GET /v1/admin/config
+// reports and the process is not running on a value nothing re-reads (#828).
+// Every test below that expects a worker.* or parquet.* write to land
+// therefore declares the subscriber that would apply it.
+func consumeWorkerAndParquet(m *Manager) {
+	m.SubscribeKeys([]string{"worker", "parquet"}, func(ChangeEvent) {})
+}
+
 func TestManagerApply(t *testing.T) {
 	cfg := DefaultConfig()
 	m := NewManager(&cfg, nil)
+	consumeWorkerAndParquet(m)
 
 	newCfg := DefaultConfig()
 	newCfg.Worker.MaxConcurrent = 16
@@ -33,8 +43,13 @@ func TestManagerApply(t *testing.T) {
 	if got.Worker.MaxConcurrent != 16 {
 		t.Fatalf("expected max_concurrent=16, got %d", got.Worker.MaxConcurrent)
 	}
-	if got.Parquet.Compression != "zstd" {
-		t.Fatalf("expected compression=zstd, got %s", got.Parquet.Compression)
+	// parquet.* is a Rule 11 deferral: no runtime consumer exists to reach,
+	// so no subscriber can make it hot-reloadable and Apply preserves it.
+	// Reporting "zstd" here would be the manager claiming a codec the
+	// writers are not using (#828).
+	if got.Parquet.Compression != "snappy" {
+		t.Fatalf("expected the deferred parquet.compression to be preserved (snappy), got %s",
+			got.Parquet.Compression)
 	}
 }
 
@@ -43,10 +58,11 @@ func TestManagerApplyPreservesFrozenFields(t *testing.T) {
 	cfg.HTTP.Addr = ":9090"
 	cfg.NATS.Port = 5222
 	m := NewManager(&cfg, nil)
+	consumeWorkerAndParquet(m)
 
 	newCfg := DefaultConfig()
-	newCfg.HTTP.Addr = ":1111"  // should be ignored
-	newCfg.NATS.Port = 9999     // should be ignored
+	newCfg.HTTP.Addr = ":1111" // should be ignored
+	newCfg.NATS.Port = 9999    // should be ignored
 	newCfg.Worker.MaxConcurrent = 8
 
 	if err := m.Apply(&newCfg); err != nil {
@@ -68,6 +84,7 @@ func TestManagerApplyPreservesFrozenFields(t *testing.T) {
 func TestManagerApplyValidation(t *testing.T) {
 	cfg := DefaultConfig()
 	m := NewManager(&cfg, nil)
+	consumeWorkerAndParquet(m)
 
 	bad := DefaultConfig()
 	bad.Worker.MaxConcurrent = 0
@@ -90,7 +107,7 @@ func TestManagerSubscribe(t *testing.T) {
 
 	var called atomic.Int32
 	var lastEvent ChangeEvent
-	m.Subscribe(func(event ChangeEvent) {
+	m.SubscribeKeys([]string{"worker"}, func(event ChangeEvent) {
 		called.Add(1)
 		lastEvent = event
 	})
@@ -127,6 +144,7 @@ worker:
 
 	cfg := DefaultConfig()
 	m := NewManager(&cfg, nil)
+	consumeWorkerAndParquet(m)
 
 	if err := m.Reload(path); err != nil {
 		t.Fatal(err)
@@ -143,8 +161,8 @@ func TestManagerMultipleSubscribers(t *testing.T) {
 	m := NewManager(&cfg, nil)
 
 	var count1, count2 atomic.Int32
-	m.Subscribe(func(_ ChangeEvent) { count1.Add(1) })
-	m.Subscribe(func(_ ChangeEvent) { count2.Add(1) })
+	m.SubscribeKeys([]string{"worker"}, func(_ ChangeEvent) { count1.Add(1) })
+	m.SubscribeKeys([]string{"worker"}, func(_ ChangeEvent) { count2.Add(1) })
 
 	newCfg := DefaultConfig()
 	newCfg.Worker.MaxConcurrent = 7

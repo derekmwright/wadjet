@@ -130,23 +130,30 @@ func (m *Manager) SubscribeKeys(prefixes []string, fn Subscriber) {
 }
 
 // Apply atomically replaces the configuration and notifies subscribers.
-// Fields that should not be hot-reloaded (Mode, HTTP.Addr, NATS.Port) are
-// preserved from the current config.
+//
+// Every registry key that no subscriber consumes is PRESERVED from the
+// current config. The manager is what GET /v1/admin/config reports, so a
+// value it holds must be a value the process is actually running on: a file
+// edit or an admin write that moves a key nothing re-reads would otherwise
+// make the endpoint report a configuration that does not exist until the
+// next restart (#828). The freeze used to be a hardcoded list — Mode,
+// HTTP.Addr and the NATS fields — which left worker.* and parquet.* free to
+// drift away from the running process.
+//
+// Sections outside the registry (auth and its policies) are not touched:
+// that is where the hot-reload path actually lives.
 func (m *Manager) Apply(newCfg *Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	old := m.current.Load()
 
-	// Preserve non-hot-reloadable fields from current config
 	frozen := *newCfg
-	frozen.Mode = old.Mode
-	frozen.HTTP.Addr = old.HTTP.Addr
-	frozen.NATS.Port = old.NATS.Port
-	frozen.NATS.URL = old.NATS.URL
-	frozen.NATS.StoreDir = old.NATS.StoreDir
-	frozen.NATS.ClusterID = old.NATS.ClusterID
-	frozen.NATS.LeafRemotes = old.NATS.LeafRemotes
+	for _, k := range keys {
+		if !m.hotReloadableLocked(k) {
+			k.Set(&frozen, k.Get(old))
+		}
+	}
 
 	if err := validate(&frozen); err != nil {
 		return fmt.Errorf("config validation: %w", err)
@@ -171,8 +178,8 @@ func (m *Manager) Reload(path string) error {
 }
 
 // ReloadWithReport reads the config file, applies it, and returns the
-// registry keys the FILE changed that no subscriber consumes — the ones
-// Apply preserved.
+// registry keys THE FILE SETS that no subscriber consumes — the ones Apply
+// preserved.
 //
 // Apply preserving them is right: the running process is not going to
 // re-read a startup-only key, and the manager must report the running
@@ -181,15 +188,27 @@ func (m *Manager) Reload(path string) error {
 // it took effect. The PUT path answers 409 naming such a key; a file reload
 // cannot refuse (the file legitimately carries startup-only keys for the
 // NEXT start), so it reports instead.
+//
+// The report is FileKeys ∩ !HotReloadable, and it has to be. Diffing the
+// running config against Load(path) instead names keys the file never
+// mentions: the running config's default tier is the FLAG's default, while
+// Load merges over DefaultConfig(), and decision 2 of ADR-0029 exists
+// precisely because those two differ — DefaultConfig() sets
+// storage.access_key to "minioadmin" where --access-key defaults to "",
+// and worker.cache_bytes to 256 MiB where --cache-bytes defaults to 0. That
+// diff reported three keys on every reload of any file in any deployment
+// before this, plus one per key taken from a flag or the environment, so
+// the config-file WATCHER emitted the warning on every legitimate auth
+// edit and the one true positive arrived buried in sixteen false ones.
 func (m *Manager) ReloadWithReport(path string) ([]string, error) {
-	cfg, err := Load(path)
+	cfg, fileKeys, err := LoadWithKeys(path)
 	if err != nil {
 		return nil, fmt.Errorf("reloading config: %w", err)
 	}
 	var ignored []string
-	for _, name := range ChangedKeys(m.Current(), cfg) {
-		if !m.HotReloadable(name) {
-			ignored = append(ignored, name)
+	for _, k := range keys {
+		if fileKeys[k.Name] && !m.HotReloadable(k.Name) {
+			ignored = append(ignored, k.Name)
 		}
 	}
 	if err := m.Apply(cfg); err != nil {

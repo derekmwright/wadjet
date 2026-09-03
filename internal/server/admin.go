@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -61,45 +62,109 @@ func (a *AdminAPI) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// GET /v1/admin/config — returns current hot-reloadable config (auth, worker, parquet sections).
+// GET /v1/admin/config — the EFFECTIVE configuration, key by key, each with
+// the tier it came from and whether it can be changed at runtime.
+//
+// It used to report `manager.Current()` — the config file merged over the
+// defaults — while the process ran on the flag variables, so an operator
+// read a configuration that was not the running one and could not tell
+// which tier had won (#828). Every key the resolver knows is reported now,
+// with its source (flag / env / file / default / admin).
+//
+// A secret's VALUE is never echoed back; its source is, because "where did
+// this credential come from" is the question an operator actually has and
+// it leaks nothing.
 func (a *AdminAPI) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	cfg := a.manager.Current()
+	res := a.manager.Resolution()
+	cfg := res.Config()
 
-	// Return only hot-reloadable sections (exclude sensitive secrets)
-	resp := map[string]any{
-		"mode": cfg.Mode,
+	entries := make(map[string]any, len(config.Keys()))
+	order := make([]string, 0, len(config.Keys()))
+	for _, k := range config.Keys() {
+		entry := map[string]any{
+			"source":         string(res.Source(k.Name)),
+			"hot_reloadable": a.manager.HotReloadable(k.Name),
+		}
+		if k.Secret {
+			entry["redacted"] = true
+		} else {
+			entry["value"] = k.Get(cfg)
+		}
+		if k.Deferred {
+			// Rule 11: a key with no runtime consumer says so, rather than
+			// reporting a value the process is not acting on.
+			entry["reaches_runtime"] = false
+			entry["deferred_reason"] = k.DeferredWhy
+		}
+		if k.Env != "" {
+			entry["env"] = k.Env
+		}
+		if k.Flag != "" {
+			entry["flag"] = "--" + k.Flag
+		}
+		entries[k.Name] = entry
+		order = append(order, k.Name)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":  cfg.Mode,
+		"keys":  entries,
+		"order": order,
 		"auth": map[string]any{
-			"enabled":    cfg.Auth.Enabled,
-			"num_keys":   len(cfg.Auth.APIKeys),
-			"jwt":        cfg.Auth.JWT.Enabled,
-			"mtls":       cfg.Auth.MTLS.Enabled,
-			"num_roles":  len(cfg.Auth.Roles),
+			"enabled":      cfg.Auth.Enabled,
+			"num_keys":     len(cfg.Auth.APIKeys),
+			"jwt":          cfg.Auth.JWT.Enabled,
+			"mtls":         cfg.Auth.MTLS.Enabled,
+			"num_roles":    len(cfg.Auth.Roles),
 			"num_policies": len(cfg.Auth.Policies),
 		},
-		"worker": map[string]any{
-			"max_concurrent": cfg.Worker.MaxConcurrent,
-			"cache_bytes":    cfg.Worker.CacheBytes,
-		},
-		"parquet": map[string]any{
-			"compression":      cfg.Parquet.Compression,
-			"row_group_size":   cfg.Parquet.RowGroupSize,
-			"page_buffer_size": cfg.Parquet.PageBufferSize,
-		},
-	}
-	writeJSON(w, http.StatusOK, resp)
+	})
 }
 
-// PUT /v1/admin/config — applies a full config update (hot-reloadable fields only).
+// refuseNotHotReloadable answers 409 naming every registry key the request
+// would change that no subscriber applies at runtime, and reports whether it
+// wrote a response.
+//
+// This is #828's other half. `Apply` used to silently FREEZE Mode, HTTP.Addr
+// and the NATS fields and accept everything else, so a PUT of
+// worker.max_concurrent returned {"status":"applied"} and changed nothing —
+// the only Manager subscriber in the tree is the auth reload. A value the
+// process will not act on is refused with its name, never accepted quietly.
+func (a *AdminAPI) refuseNotHotReloadable(w http.ResponseWriter, current, proposed *config.Config) bool {
+	var refused []string
+	for _, name := range config.ChangedKeys(current, proposed) {
+		if !a.manager.HotReloadable(name) {
+			refused = append(refused, name)
+		}
+	}
+	if len(refused) == 0 {
+		return false
+	}
+	writeError(w, http.StatusConflict,
+		"not hot-reloadable, nothing consumes a runtime change to: "+strings.Join(refused, ", ")+
+			" — restart with the flag, the environment variable or the config file instead")
+	return true
+}
+
+// PUT /v1/admin/config — applies a config update, or refuses it by name.
+//
+// The body is decoded ONTO the current configuration rather than into a zero
+// one: a PUT that mentions three fields used to blank every field it did not
+// mention, which then read as a change to each of them.
 func (a *AdminAPI) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	var cfg config.Config
+	current := a.manager.Current()
+	cfg := *current
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid config: "+err.Error())
+		return
+	}
+	if a.refuseNotHotReloadable(w, current, &cfg) {
 		return
 	}
 	if err := a.manager.Apply(&cfg); err != nil {
@@ -123,12 +188,24 @@ func (a *AdminAPI) handleReload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path field is required")
 		return
 	}
-	if err := a.manager.Reload(req.Path); err != nil {
+	// The keys the file changed that nothing re-reads are REPORTED, not
+	// silently dropped. A file reload cannot refuse the way PUT does — the
+	// file legitimately carries startup-only keys for the next start — but
+	// answering a bare "reloaded" is how an operator comes to believe an
+	// edit to worker.max_concurrent took effect (#828).
+	ignored, err := a.manager.ReloadWithReport(req.Path)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "reload failed: "+err.Error())
 		return
 	}
 	a.logger.Info("config reloaded from file via admin API", "path", req.Path)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+	resp := map[string]any{"status": "reloaded"}
+	if len(ignored) > 0 {
+		resp["not_applied"] = ignored
+		resp["not_applied_reason"] = "these keys take effect only at startup; " +
+			"the running process was not changed"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // POST /v1/admin/auth/keys — add a new API key.
@@ -245,8 +322,8 @@ func (a *AdminAPI) handleUpdateTuning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		MaxConcurrent *int   `json:"max_concurrent,omitempty"`
-		CacheBytes    *int64 `json:"cache_bytes,omitempty"`
+		MaxConcurrent *int    `json:"max_concurrent,omitempty"`
+		CacheBytes    *int64  `json:"cache_bytes,omitempty"`
 		Compression   *string `json:"compression,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -254,7 +331,8 @@ func (a *AdminAPI) handleUpdateTuning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := *a.manager.Current()
+	current := a.manager.Current()
+	cfg := *current
 	if req.MaxConcurrent != nil {
 		cfg.Worker.MaxConcurrent = *req.MaxConcurrent
 	}
@@ -263,6 +341,12 @@ func (a *AdminAPI) handleUpdateTuning(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Compression != nil {
 		cfg.Parquet.Compression = *req.Compression
+	}
+	// Same refusal as PUT /v1/admin/config: worker.* and parquet.* have no
+	// subscriber, so a "tuning" write here changed a value nothing reads and
+	// answered {"status":"updated"} (#828).
+	if a.refuseNotHotReloadable(w, current, &cfg) {
+		return
 	}
 	if err := a.manager.Apply(&cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

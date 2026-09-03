@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -33,6 +34,11 @@ func newTestAdminAPI(t *testing.T) (*AdminAPI, *config.Manager, chi.Router) {
 		},
 	}
 	mgr := config.NewManager(initial, logger)
+	// A key is writable at runtime only if a subscriber applies it (#828).
+	// These tests exercise the worker tuning surface, so they declare the
+	// subscriber that surface would need; the refusal itself is gated in
+	// admin_config_source_test.go.
+	mgr.SubscribeKeys([]string{"worker"}, func(config.ChangeEvent) {})
 
 	api := NewAdminAPI(mgr, nil, logger)
 	r := chi.NewRouter()
@@ -151,6 +157,17 @@ func TestHandleGetConfig(t *testing.T) {
 	if body["mode"] != "standalone" {
 		t.Errorf("expected mode=standalone, got %v", body["mode"])
 	}
+	keys, ok := body["keys"].(map[string]any)
+	if !ok {
+		t.Fatalf("no per-key report in the response: %v", body)
+	}
+	entry, ok := keys["worker.max_concurrent"].(map[string]any)
+	if !ok {
+		t.Fatalf("worker.max_concurrent missing from the report: %v", keys)
+	}
+	if entry["source"] == nil {
+		t.Errorf("worker.max_concurrent reported without a source: %v", entry)
+	}
 }
 
 // --- handleUpdateConfig ---
@@ -158,9 +175,16 @@ func TestHandleGetConfig(t *testing.T) {
 func TestHandleUpdateConfig_Success(t *testing.T) {
 	_, _, router := newTestAdminAPI(t)
 
+	// Parquet is a Rule 11 deferral with no consumer, so a PUT may not move
+	// it; this body changes only the worker keys the fixture subscribes to.
 	cfg := config.Config{
 		Mode:   "standalone",
 		Worker: config.Worker{MaxConcurrent: 8, CacheBytes: 128 * 1024 * 1024},
+		Parquet: config.Parquet{
+			Compression:    "snappy",
+			RowGroupSize:   10000,
+			PageBufferSize: 1024,
+		},
 	}
 	body, _ := json.Marshal(cfg)
 
@@ -192,11 +216,9 @@ func TestHandleUpdateConfig_InvalidBody(t *testing.T) {
 func TestHandleUpdateConfig_ValidationError(t *testing.T) {
 	_, _, router := newTestAdminAPI(t)
 
-	// MaxConcurrent = 0 should fail validation
-	cfg := config.Config{
-		Worker: config.Worker{MaxConcurrent: 0},
-	}
-	body, _ := json.Marshal(cfg)
+	// MaxConcurrent = 0 should fail validation. The body is decoded onto the
+	// CURRENT config, so naming only this field leaves the rest alone.
+	body := []byte(`{"Worker":{"MaxConcurrent":0}}`)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("PUT", "/v1/admin/config", bytes.NewReader(body))
@@ -450,8 +472,15 @@ func TestHandleUpdateTuning_Compression(t *testing.T) {
 	req = withAdminCtx(req)
 	router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	// parquet.compression is deferred: no writer reads it, so the tuning
+	// endpoint refuses it by name instead of answering "updated" (#828).
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for a deferred key, got %d", w.Code)
+	}
+	var errBody map[string]string
+	json.NewDecoder(w.Body).Decode(&errBody)
+	if !strings.Contains(errBody["error"], "parquet.compression") {
+		t.Fatalf("the refusal does not name the key: %v", errBody)
 	}
 }
 
