@@ -105,46 +105,10 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 			h.spillState = newSpillState(h.Spill.SpillDir(), b.Schema)
 		}
 
-		// Track this batch's bytes against the shared pool. Like the legacy
-		// path, we Reserve and fall back to spilling on over-budget. Unlike
-		// the legacy path, the spill is incremental — pick one partition and
-		// evict it instead of repartitioning the whole flat state.
-		cost := hashBuildBytes(b)
-		if err := h.MemTracker.Reserve(cost); err != nil {
-			if spillErr := h.spillUntilCanReserve(cost); spillErr != nil {
-				h.mu.Unlock()
-				return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
-					spillErr, h.buildRows, len(h.buildBatches))
-			}
-			if err2 := h.MemTracker.Reserve(cost); err2 != nil {
-				h.mu.Unlock()
-				return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
-					err2, h.buildRows, len(h.buildBatches))
-			}
-		}
-		h.trackedMem += cost
-
-		// Update key min/max even before partitioning — bloom + dynamic-range
-		// pushdowns use these for ALL keys, including those that later spill.
-		h.updateKeyMinMax(b)
-
-		if err := h.partitionAndIndexBatch(b); err != nil {
+		if err := h.absorbArrivalBatch(b); err != nil {
 			h.mu.Unlock()
-			return fmt.Errorf("partition+index: %w", err)
+			return err
 		}
-
-		// Reactive spill if pool pressure is over the spill-cheap threshold
-		// (60% of budget) — release one partition's bytes before the next
-		// batch arrives. spillUntilCanReserve uses the same logic but is
-		// driven by Reserve failure; here we proactively keep headroom.
-		if h.Spill.ShouldSpillFor(memory.SpillCheap) {
-			if _, err := h.spillOneInMemoryPartition(); err != nil {
-				h.mu.Unlock()
-				return fmt.Errorf("spilling under pressure: %w", err)
-			}
-		}
-
-		h.reconcileHashMemory()
 
 		h.mu.Unlock()
 	}
@@ -177,6 +141,156 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	h.applyBuildSchemaHint()
 	h.buildDone = true
 	return nil
+}
+
+// minArrivalChunkRows is the floor below which splitting an arrival batch
+// stops being a way to fit the build and starts being a way to spend the
+// query's time. A build that cannot reserve 32 rows' worth of columns has a
+// budget below this operator's floor, and the honest answer there is the loud
+// refusal ADR-0006 asks for, not 5,000 single-row reservations.
+const minArrivalChunkRows = 32
+
+// absorbArrivalBatch charges one arrival batch to the shared pool, scatters it
+// into its grace partitions and indexes it. Caller holds h.mu.
+//
+// Like the legacy path it Reserves and falls back to spilling on over-budget;
+// unlike the legacy path the spill is incremental - pick one partition and
+// evict it instead of repartitioning the whole flat state.
+//
+// #598 is the third fallback, after Reserve and after eviction: a batch whose
+// own columns do not fit the pool is SPLIT and absorbed in pieces. Without it
+// the build's FIRST batch had nowhere to go - largestInMemoryPartition returns
+// -1 when nothing has been stored yet, so spillUntilCanReserve frees 0 and the
+// retry fails for exactly the reason the first attempt did, and the query died
+// with `used=0, requested=7813532` while the same rows delivered in smaller
+// batches built fine. The trigger is exactly hashBuildBytes(b) > what the pool
+// can give, which the parquet ROW GROUP decides: the scan hands the build one
+// batch per row group, so a fat row group is a fat arrival batch.
+//
+// Splitting and not overcommitting is deliberate. The filing's other direction
+// - reserve past the budget for the first batch - would be an EIGHTH
+// unceilinged ForceReserve producer on a query tracker (ADR-0006's 2026-09-03
+// census enumerates the seven that exist, two of them in this file's own
+// operator), and the overcommitted bytes would join the floor every DOWNSTREAM
+// operator's Reserve is measured against, with the join's own index share
+// provably unreleasable (#823). Seven producers is a reason to add none, not a
+// reason the next one is cheap. Splitting adds no new overcommit.
+func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
+	cost := hashBuildBytes(b)
+	if err := h.MemTracker.Reserve(cost); err != nil {
+		if spillErr := h.spillUntilCanReserve(cost); spillErr != nil {
+			return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
+				spillErr, h.buildRows, len(h.buildBatches))
+		}
+		if err2 := h.MemTracker.Reserve(cost); err2 != nil {
+			if chunk := h.arrivalChunkRows(b, cost); chunk > 0 {
+				return h.absorbInChunks(b, chunk)
+			}
+			return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
+				err2, h.buildRows, len(h.buildBatches))
+		}
+	}
+	h.trackedMem += cost
+
+	// Update key min/max even before partitioning - bloom + dynamic-range
+	// pushdowns use these for ALL keys, including those that later spill.
+	h.updateKeyMinMax(b)
+
+	if err := h.partitionAndIndexBatch(b); err != nil {
+		return fmt.Errorf("partition+index: %w", err)
+	}
+
+	// Reactive spill if pool pressure is over the spill-cheap threshold
+	// (60% of budget) - release one partition's bytes before the next
+	// batch arrives. spillUntilCanReserve uses the same logic but is
+	// driven by Reserve failure; here we proactively keep headroom.
+	if h.Spill.ShouldSpillFor(memory.SpillCheap) {
+		if _, err := h.spillOneInMemoryPartition(); err != nil {
+			return fmt.Errorf("spilling under pressure: %w", err)
+		}
+	}
+
+	h.reconcileHashMemory()
+	return nil
+}
+
+// arrivalChunkRows returns how many rows of b to absorb at a time when b as a
+// whole cannot be reserved, or 0 when splitting cannot help and the build must
+// refuse loudly.
+//
+// It is asked only after eviction has already run, so Used() is at this
+// query's floor and (budget - used) is the largest reservation that can still
+// be satisfied. Half of that is the target, leaving the other half for the
+// index growth the partition step charges through reconcileHashMemory
+// immediately afterwards. The result is capped at accumFlushRows so a split
+// batch stays on the per-partition accumulator's tuned path, and floored at
+// minArrivalChunkRows so a budget below this operator's floor refuses instead
+// of grinding.
+func (h *HashJoin) arrivalChunkRows(b *batch.RecordBatch, cost int64) int {
+	rows := b.ActiveLen()
+	if rows < 2 || cost <= 0 {
+		return 0
+	}
+	budget := h.MemTracker.Budget()
+	if budget <= 0 {
+		return 0 // no budget to fit into: the Reserve failed for another reason
+	}
+	avail := (budget - h.MemTracker.Used()) / 2
+	if avail <= 0 {
+		return 0
+	}
+	perRow := cost / int64(rows)
+	if perRow <= 0 {
+		perRow = 1
+	}
+	chunk := int(avail / perRow)
+	if chunk > accumFlushRows {
+		chunk = accumFlushRows
+	}
+	if chunk < minArrivalChunkRows || chunk >= rows {
+		return 0 // splitting buys nothing, or buys too little to be worth it
+	}
+	return chunk
+}
+
+// absorbInChunks re-offers b to absorbArrivalBatch in dense slices of chunk
+// rows. Each slice is a COPY (compactBatchForRows), so what the build stores
+// and charges is the slice's own footprint rather than a view onto a batch
+// whose MemBytes describes all of it; b itself is released by its owner as
+// usual. A chunk that still cannot be reserved refuses through the same path
+// as any other batch. The recursion is bounded, not one level deep: a chunk
+// that still cannot reserve re-enters arrivalChunkRows, which either returns 0
+// (chunk >= rows, or below minArrivalChunkRows) and refuses, or returns a
+// strictly smaller chunk. Since every step divides by at least two and stops
+// at minArrivalChunkRows, the depth is at most log2(rows/32) - and no shape
+// found in this arc's probes recursed twice.
+func (h *HashJoin) absorbInChunks(b *batch.RecordBatch, chunk int) error {
+	rows := activeRowIndexes(b)
+	for start := 0; start < len(rows); start += chunk {
+		end := min(start+chunk, len(rows))
+		part := compactBatchForRows(b, rows[start:end])
+		if err := h.absorbArrivalBatch(part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// activeRowIndexes returns b's live row positions: its selection vector when
+// it carries one, and 0..Len otherwise.
+func activeRowIndexes(b *batch.RecordBatch) []int {
+	if b.Sel != nil {
+		out := make([]int, len(b.Sel))
+		for i, s := range b.Sel {
+			out[i] = int(s)
+		}
+		return out
+	}
+	out := make([]int, b.Len)
+	for i := range out {
+		out[i] = i
+	}
+	return out
 }
 
 // partitionAndIndexBatch scatters b's rows into hash partitions, writing rows
