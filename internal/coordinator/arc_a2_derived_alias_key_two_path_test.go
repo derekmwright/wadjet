@@ -9,7 +9,7 @@ import (
 )
 
 // A SORT or WINDOW key that names a derived table's COMPUTED alias — #807 and
-// #658, and the phantom scan column that was under both of them.
+// #658, and the two things that were under them.
 //
 // `SELECT x.w FROM (SELECT g * 3 AS w FROM t ORDER BY w LIMIT 5) x` was right
 // on the single-process pipeline and LOUD on both DAG arms:
@@ -17,42 +17,52 @@ import (
 // spelling was the same site one caller over:
 // `window: PARTITION BY "gk" is not a column of its input (input has: id, g)`.
 //
-// # The mechanism, and why the loud half went first
+// # Two names, and the phantom that hid them
 //
-// `physical.derivedAliasSourceColumn` declines a computed alias by design, so
-// `SortKeySpec.AliasSource` stays empty and the stage keys on a name nothing
-// emits. The repair — give the key the alias's DEFINITION and materialize it
-// onto the producing fragment — was attempted, measured and stopped one layer
-// below, because
+// `physical.derivedAliasSourceColumn` declines a computed alias BY DESIGN —
+// there is no source column to point at — so `SortKeySpec.AliasSource` stayed
+// empty and the stage keyed on a name nothing emits. The repair is ADR-0026
+// §2's two names at a third caller: `Column` is what the key is CALLED, the
+// alias the query wrote, and `AliasExpr` is where the value comes FROM,
+// `g * 3` spelled in the producer's own scope. The definition is MATERIALIZED
+// onto the producing fragment under the alias's own name, so every consumer
+// above — the sort's own key, an outer sort's key, the gather's rename, the
+// window's PARTITION BY and its distribution — keeps reading one name.
+//
+// Answering with the DEFINITION instead of the alias would be wrong wherever
+// some fragment DOES materialize it, which is the mistake ADR-0025 records for
+// an aggregate's argument below a join. `derivedAliasDefinition` therefore
+// looks through Project, Filter, Sort and Limit and stops at everything else:
+// below a JOIN, an AGGREGATE, a DISTINCT or a set operation the alias is real,
+// and the plain-rename and CTE controls here are what hold that boundary.
+//
+// The attempt before this one was blocked one layer down, and the record is
+// worth keeping because it says where the next one starts:
 //
 //	the SCAN'S REQUESTED COLUMN LIST ALREADY CONTAINED THE ALIAS.
 //
 // A derived table's alias BECOMES the scan's `TableAlias`, and
 // `logical.sanitizeScanNeeds` kept a qualified reference's bare column
-// whenever the qualifier matched — schema or no schema — so `x.w` was written
-// into the scan below as a column `typemx` does not have. Every model of what
-// a stage emits reads that list (`physical.stageEmittedColumns`, and through
-// it `emittedThroughPassThrough`, `gatherOutputSources`, `stageStreamColumns`),
-// so the pass believed `w` existed and skipped the materialization; asking
-// instead whether some fragment MATERIALIZES it built the projection from the
-// same list and moved the failure down to the scan.
+// whenever the qualifier matched, so `x.w` was written into the scan below as
+// a column `typemx` does not have. Every model of what a stage emits reads
+// that list, so the pass believed `w` existed and skipped the
+// materialization; asking instead whether some fragment MATERIALIZES it built
+// the projection from the same list and moved the failure down to the scan.
+// That phantom is #776's own mechanism and it is closed first.
 //
-// That phantom is #776's own mechanism one consumer over, and it is closed:
-// a scan requests only columns its table HAS. Every cell asserts
-// `UnreachableOutputLocalRoutes` beside the rows, because a row check cannot
-// tell "the DAG ran this" from "the DAG refused it and the coordinator-local
-// pipeline answered", and a move in either direction is invisible without the
-// counter (rule 11).
+// Every cell asserts `UnreachableOutputLocalRoutes` beside the rows. A row
+// check cannot tell "the DAG ran this" from "the DAG refused it and the
+// coordinator-local pipeline answered" — the CTE and count-above spellings
+// were RIGHT before this change, by routing — so the counter is the only thing
+// that sees the move in either direction (rule 11).
 type a2AliasKeyCell struct {
 	issue, name, sql string
 	// want is the single-process answer, which is PostgreSQL's.
 	want []string
 	// wantUnreach is the UnreachableOutputLocalRoutes delta each DAG arm must
-	// show. 1 = the DAG refused the plan and the coordinator-local pipeline
-	// answered — which is why these cells assert the counter beside the rows:
-	// a fix that makes the DAG EXECUTE a shape it currently routes is
-	// invisible to a row check, and a regression from executed to routed is
-	// equally invisible (rule 11).
+	// show. It is 0 for every cell: the DAG plans and RUNS all of them. A 1
+	// here would mean the plan was refused and the coordinator-local pipeline
+	// answered — the same rows, which is exactly why the counter is asserted.
 	wantUnreach int64
 	pgSays      string
 }
@@ -63,41 +73,34 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 		{issue: "#807", name: "grouped_over_derived_computed_alias",
 			sql: `SELECT x.w, COUNT(*) AS n FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 100) x ` +
 				`GROUP BY x.w ORDER BY x.w`,
-			want:        []string{"w=int64:0|n=int64:100"},
-			wantUnreach: 1,
-			pgSays:      "one row, 0|100"},
+			want:   []string{"w=int64:0|n=int64:100"},
+			pgSays: "one row, 0|100"},
 		{issue: "#807", name: "derived_computed_alias_inner_order_and_limit",
-			sql:         `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY x.w`,
-			want:        []string{"w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0"},
-			wantUnreach: 1,
-			pgSays:      "5 rows of 0"},
+			sql:    `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY x.w`,
+			want:   []string{"w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0"},
+			pgSays: "5 rows of 0"},
 		{issue: "#807", name: "derived_computed_alias_no_inner_limit",
-			sql:         `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w) x ORDER BY x.w LIMIT 5`,
-			want:        []string{"w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0"},
-			wantUnreach: 1,
-			pgSays:      "5 rows of 0"},
+			sql:    `SELECT x.w FROM (SELECT g*3 AS w FROM typemx ORDER BY w) x ORDER BY x.w LIMIT 5`,
+			want:   []string{"w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0", "w=int64:0"},
+			pgSays: "5 rows of 0"},
 		// ANY computed alias, not just arithmetic: the walk declines on
 		// `proj.Column == ""`, which a function call has too.
 		{issue: "#807", name: "derived_computed_alias_function_call",
-			sql:         `SELECT x.w FROM (SELECT ABS(g) AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY x.w`,
-			want:        []string{"w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0"},
-			wantUnreach: 1,
-			pgSays:      "5 rows of 0"},
-		// RIGHT, and right by ROUTING: the CTE spelling and the shape with no
-		// sort above the derived table both refuse the DAG plan and answer on
-		// the coordinator's local pipeline. A fix that makes them EXECUTE is
-		// what the counter is here to notice.
-		{issue: "#807", name: "routed_cte_spelling",
+			sql:    `SELECT x.w FROM (SELECT ABS(g) AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY x.w`,
+			want:   []string{"w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0", "w=int32:0"},
+			pgSays: "5 rows of 0"},
+		// The CTE spelling and the shape with no sort above the derived table.
+		// Both were right BY ROUTING before this change and both execute now,
+		// which no row assertion can see.
+		{issue: "#807", name: "cte_spelling",
 			sql: `WITH c AS (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 100) ` +
 				`SELECT c.w, COUNT(*) AS n FROM c GROUP BY c.w ORDER BY c.w`,
-			want:        []string{"w=int64:0|n=int64:100"},
-			wantUnreach: 1,
-			pgSays:      "one row, 0|100"},
-		{issue: "#807", name: "routed_count_above_the_derived_limit",
-			sql:         `SELECT COUNT(*) AS n FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 100) x`,
-			want:        []string{"n=int64:100"},
-			wantUnreach: 1,
-			pgSays:      "100"},
+			want:   []string{"w=int64:0|n=int64:100"},
+			pgSays: "one row, 0|100"},
+		{issue: "#807", name: "count_above_the_derived_limit",
+			sql:    `SELECT COUNT(*) AS n FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 100) x`,
+			want:   []string{"n=int64:100"},
+			pgSays: "100"},
 		// The control that says the defect is the COMPUTED alias and not the
 		// derived table: a plain RENAME has a source column, so
 		// derivedAliasSourceColumn answers and the DAG executes it.
@@ -118,8 +121,7 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 				"id=int64:0|gk=int64:0|s=float:0", "id=int64:1|gk=int64:2|s=float:1",
 				"id=int64:2|gk=int64:4|s=float:2", "id=int64:3|gk=int64:6|s=float:3",
 				"id=int64:4|gk=int64:8|s=float:4", "id=int64:5|gk=int64:10|s=float:5"},
-			wantUnreach: 1,
-			pgSays:      "6 rows, each its own partition"},
+			pgSays: "6 rows, each its own partition"},
 		{issue: "#658", name: "window_order_by_computed_alias",
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (ORDER BY z.gk) AS s ` +
 				`FROM (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
@@ -127,17 +129,15 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 				"id=int64:0|gk=int64:0|s=float:0", "id=int64:1|gk=int64:2|s=float:1",
 				"id=int64:2|gk=int64:4|s=float:3", "id=int64:3|gk=int64:6|s=float:6",
 				"id=int64:4|gk=int64:8|s=float:10", "id=int64:5|gk=int64:10|s=float:15"},
-			wantUnreach: 1,
-			pgSays:      "6 rows, running total"},
-		{issue: "#658", name: "routed_window_cte_spelling",
+			pgSays: "6 rows, running total"},
+		{issue: "#658", name: "window_cte_spelling",
 			sql: `WITH c AS (SELECT id, g*2 AS gk, id AS v FROM typemx WHERE id < 6) ` +
 				`SELECT c.id, c.gk, SUM(c.v) OVER (PARTITION BY c.gk) AS s FROM c ORDER BY c.id`,
 			want: []string{
 				"id=int64:0|gk=int64:0|s=float:0", "id=int64:1|gk=int64:2|s=float:1",
 				"id=int64:2|gk=int64:4|s=float:2", "id=int64:3|gk=int64:6|s=float:3",
 				"id=int64:4|gk=int64:8|s=float:4", "id=int64:5|gk=int64:10|s=float:5"},
-			wantUnreach: 1,
-			pgSays:      "6 rows, each its own partition"},
+			pgSays: "6 rows, each its own partition"},
 		{issue: "#658", name: "ctl_window_partition_by_plain_rename",
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
 				`FROM (SELECT id, g AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,

@@ -755,6 +755,29 @@ type SortKeySpec struct {
 	SourcePrecision int
 	SourceScale     int
 
+	// AliasExpr is the DEFINING EXPRESSION of a key that names a DERIVED
+	// TABLE's COMPUTED alias, with AliasExprType its declared type. It is
+	// ADR-0026 §2's two names for a SORT key: `Column` is what the key is
+	// CALLED — `w`, the alias the query wrote — and this is where the value
+	// comes FROM, `g * 3`, spelled in the scope of the fragment that will
+	// compute it.
+	//
+	// Two names are needed because neither one alone is right on every plan.
+	// `derivedAliasSourceColumn` declines a computed alias by design (there
+	// is no source column to point at), so `AliasSource` stays empty and the
+	// stage keyed on a name nothing emits: `sort: key column "w" does not
+	// exist in the input schema` on both DAG arms for a query the
+	// single-process pipeline answers (#807). Answering with the DEFINITION
+	// instead would be wrong wherever some fragment DOES materialize the
+	// alias — which is the mistake ADR-0025 records for an aggregate's
+	// argument below a join — so the alias is kept as the published name and
+	// the definition is materialized under it.
+	AliasExpr          string
+	AliasExprType      parquet.TypeID
+	AliasExprTypeKnown bool
+	AliasExprPrecision int
+	AliasExprScale     int
+
 	// AliasSource is the column the producing stream carries for a key that
 	// names a DERIVED TABLE's SELECT-list alias — the non-synthetic sibling
 	// of SourceColumn above (#467, #468).
@@ -7060,15 +7083,39 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// clusters the window's input is keyed on it, and rewriting the
 			// key after EnsureDistribution would leave the two disagreeing.
 			partitionBy := append([]string(nil), ec.PartitionBy...)
+			// A COMPUTED alias (`PARTITION BY gk` over `SELECT g*2 AS gk`)
+			// has no source column, so the walk above declines it and the
+			// key named nothing the window's input carries:
+			// `window: PARTITION BY "gk" is not a column of its input` on
+			// both DAG arms for a query the single-process path answers
+			// (#658). The value is MADE instead — the definition is
+			// materialized onto the producing fragment under the alias's own
+			// name — which is the same two names ADR-0026 §2 gives a GROUP BY
+			// key and #807 gives a sort key, at the third caller of one
+			// function.
+			var winAliases []aliasColumn
 			for i, pb := range partitionBy {
 				if src := derivedAliasSourceColumn(pb, winChild); src != "" {
 					partitionBy[i] = cleanExpr(src)
+					continue
+				}
+				if c := derivedAliasColumnFor(pb, winChild); c.Expr != "" {
+					winAliases = append(winAliases, c)
+					partitionBy[i] = c.Name
 				}
 			}
 			for i := range orderBy {
 				if src := derivedAliasSourceColumn(orderBy[i].Column, winChild); src != "" {
 					orderBy[i].Column = cleanExpr(src)
+					continue
 				}
+				if c := derivedAliasColumnFor(orderBy[i].Column, winChild); c.Expr != "" {
+					winAliases = append(winAliases, c)
+					orderBy[i].Column = c.Name
+				}
+			}
+			if len(winAliases) > 0 {
+				materializeWindowAliasKeys((*stages)[preCount:], winAliases)
 			}
 			// …and the ARGUMENT, which exec.Window also reads by name off
 			// the input batch: `SUM(v) OVER ()` over `SELECT c_i64 AS v`

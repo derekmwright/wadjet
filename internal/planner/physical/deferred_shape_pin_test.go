@@ -45,7 +45,8 @@ func dspPlan(t *testing.T, sql string) error {
 	return ValidateNativeDAGShape(stages)
 }
 
-// TestOrderedProjectionUnderAnAggregateIsDeferredToLocal pins #716.
+// TestOrderedProjectionUnderAnAggregateIsDeferredToLocal pins what is LEFT of
+// #716, and asserts the half that is no longer deferred.
 //
 // `SELECT COUNT(*) FROM (SELECT k * 2 AS d FROM … ORDER BY d) x` orders on a
 // SELECT-list ALIAS inside a derived table whose consumer is an aggregate. The
@@ -55,11 +56,29 @@ func dspPlan(t *testing.T, sql string) error {
 // the refusal this failed at DISPATCH with `sort: key column "d" does not exist
 // in the input schema`, for every producer class including a plain scan.
 //
-// TODO(#716): materialize the key on the DAG. When that lands this test fails,
-// and the fix is to delete it and assert the distributed plan instead.
+// The SCAN producer is FIXED (#807's materialization: the key's defining
+// expression is projected onto the producing fragment under the alias's own
+// name) and is asserted here as planning, because a pin that keeps recording a
+// deferral after the deferral is over is how a fix goes unnoticed.
+//
+// The other two producers stay deferred, and the reason is the boundary
+// `derivedAliasDefinition` draws: an AGGREGATE and a DISTINCT MATERIALIZE the
+// alias — it is the aggregate's output name, or the DISTINCT's group key — so
+// substituting the definition there would compute it a second time over
+// columns that relation no longer carries. Both answer correctly through the
+// coordinator's local pipeline.
+//
+// TODO(#716): materialize the key over a collapsing producer too. When that
+// lands these two fail, and the fix is to delete them and assert the plan.
 func TestOrderedProjectionUnderAnAggregateIsDeferredToLocal(t *testing.T) {
+	t.Run("scan_is_planned", func(t *testing.T) {
+		sql := `SELECT COUNT(*) AS n FROM (SELECT n_nationkey * 2 AS d FROM nation ORDER BY d) x`
+		if err := dspPlan(t, sql); err != nil {
+			t.Fatalf("the DAG refused a shape it now plans — the derived alias's definition is "+
+				"materialized onto the producing fragment (#807): %v\n  SQL: %s", err, sql)
+		}
+	})
 	for _, tc := range []struct{ name, sql string }{
-		{"scan", `SELECT COUNT(*) AS n FROM (SELECT n_nationkey * 2 AS d FROM nation ORDER BY d) x`},
 		{"aggregate", `SELECT COUNT(*) AS n FROM (SELECT k * 2 AS d FROM ` +
 			`(SELECT n_regionkey + 1 AS k, COUNT(*) AS v FROM nation GROUP BY n_regionkey + 1) s ` +
 			`ORDER BY d) x`},
@@ -70,8 +89,9 @@ func TestOrderedProjectionUnderAnAggregateIsDeferredToLocal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := dspPlan(t, tc.sql)
 			if err == nil {
-				t.Fatalf("the DAG now PLANS this shape, so #716 has landed — delete this pin "+
-					"and assert the distributed plan\n  SQL: %s", tc.sql)
+				t.Fatalf("the DAG now PLANS this shape, so #716 has landed for a COLLAPSING "+
+					"producer too — delete this cell and assert the distributed plan\n  SQL: %s",
+					tc.sql)
 			}
 			if !errors.Is(err, ErrUnreachableGatherOutput) {
 				t.Fatalf("refused, but not with the sentinel the coordinator routes on — the "+
