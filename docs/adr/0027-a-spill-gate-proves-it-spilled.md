@@ -97,23 +97,27 @@ Mechanisms, each with its instrumented evidence in the commit body:
    coin toss at one.
 
    The eighteen `join_group_by_*` cells that carried it were tolerating
-   #789's moving floor. All eighteen answer on every run at
-   `spillMxJoinBudget`, so none of them carries the tolerance any more.
+   #789's moving floor. All eighteen answer on every run, so none of them
+   carries the tolerance any more.
 
-   **The BUDGET RAISE those cells came with is the other half of the same
-   tolerance, and it ratchets too.** A cell that runs at a larger budget than
-   the rest of the sweep is tolerating something, and a raise nothing checks is
-   indistinguishable from a raise nothing needs. So the sweep runs every
-   `joinBudget` cell at `spillMxBudget` as well and FAILS the family when all
-   of them answer on every run there, naming what to delete. It is a FAMILY
-   ratchet, not a per-cell one, for two reasons: the raise is one decision for
-   one family, and the condition cannot be judged per cell — three of these
-   shapes reach both dispositions at `spillMxBudget` on a minority of runs
-   (#789, open), so "this cell answered five times" is the split this decision
-   forbids, while "all eighteen answered every time" is not. Any error counts
-   as "did not answer", which is the correct direction for a ratchet that fires
-   only on unanimous success: an unrelated breakage keeps it quiet rather than
-   turning it red, and that breakage is caught by the cell's own budgeted run.
+   **The BUDGET RAISE those cells came with was the other half of the same
+   tolerance, and it ratcheted too** — the sweep ran every `joinBudget` cell at
+   `spillMxBudget` as well and FAILED the family when all of them answered
+   there, naming what to delete. **That ratchet fired and has been answered
+   (2026-09-03).** A scan now holds a parquet file one row group at a time
+   rather than whole (#789's file half, ADR-0006's 2026-09-03 amendment), all
+   eighteen cells answer 20 of 20 runs at `spillMxBudget` on both the free and
+   the `GOMAXPROCS=1` arms, and `joinBudget`, `spillMxJoinBudget` and the
+   family ratchet are deleted. The sweep has one budget again.
+
+   The RULE the ratchet encoded stands and is what to re-apply if a family ever
+   needs a raise again: a cell that runs at a larger budget than the rest of the
+   sweep is tolerating something, a raise nothing checks is indistinguishable
+   from a raise nothing needs, and the ratchet belongs on the FAMILY rather than
+   the cell — the raise is one decision for one family, and a per-cell judgement
+   over a nondeterministic refusal is the split decision 6 forbids. Any error
+   counts as "did not answer", which is the correct direction for a ratchet that
+   fires only on unanimous success.
 
 8. **A shape-only column stays shape-only across the raw-row buffer.**
    (Added 2026-09-03 with the #791 fix; it is the amendment the 2026-09-03
