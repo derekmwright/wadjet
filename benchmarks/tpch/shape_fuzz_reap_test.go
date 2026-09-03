@@ -50,13 +50,12 @@ func TestFuzzDuckDBReapsTheChildBeforeReadingItsStderr(t *testing.T) {
 		t.Fatalf("write stub: %v", err)
 	}
 
-	prev := fuzzDuckDBBin
-	fuzzDuckDBBin = stub
-	t.Cleanup(func() { fuzzDuckDBBin = prev })
-
+	// The stub is passed, not assigned to a package var: a global the gate
+	// reassigned would be one a future parallel test could race.
+	//
 	// Replicated: a single agreeing run of an ordering gate proves nothing.
 	for i := 0; i < 20; i++ {
-		rows, cols, err := fuzzDuckDB("", "SELECT 1")
+		rows, cols, err := fuzzDuckDBWithBin(stub, "", "SELECT 1")
 		if err == nil {
 			t.Fatalf("attempt %d: stub oracle returned rows=%d cols=%v and no error; the rejection branch was not reached", i, len(rows), cols)
 		}

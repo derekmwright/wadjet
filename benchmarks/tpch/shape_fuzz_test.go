@@ -68,13 +68,11 @@ import (
 // generator, or recognised by fuzzKnownDivergence and skipped — a harness that
 // keeps re-finding a filed defect drowns the new ones.
 
-// fuzzDuckDBBin is a var, not a const, only so the reap-ordering gate in
-// shape_fuzz_reap_test.go can point fuzzDuckDB at a stub child. Nothing else
-// writes it.
-var fuzzDuckDBBin = "/tmp/duckdb"
-
-// fuzzMaxRows caps how large a reference result the harness materializes.
-const fuzzMaxRows = 200000
+const (
+	fuzzDuckDBBin = "/tmp/duckdb"
+	// fuzzMaxRows caps how large a reference result the harness materializes.
+	fuzzMaxRows = 200000
+)
 
 // errTooLarge marks a reference result past fuzzMaxRows: not a defect, just a
 // query this harness declines to compare.
@@ -328,6 +326,14 @@ func fuzzQueryWadjet(ctx context.Context, db *wadjet.DB, sql string) (out fuzzRe
 const fuzzOracleTimeout = 90 * time.Second
 
 func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
+	return fuzzDuckDBWithBin(fuzzDuckDBBin, setup, sql)
+}
+
+// fuzzDuckDBWithBin is fuzzDuckDB against a named oracle binary. The seam
+// exists for the reap-ordering gate (shape_fuzz_reap_test.go), which drives a
+// stub child: a package-level var the gate reassigned would be a global two
+// parallel tests could race, and this is one parameter instead.
+func fuzzDuckDBWithBin(bin, setup, sql string) ([]map[string]string, []string, error) {
 	// PostgreSQL null placement, which is what wadjet implements:
 	// NULLS LAST for ASC, NULLS FIRST for DESC. DuckDB defaults to
 	// NULLS LAST in both directions, and that is a SEMANTIC difference
@@ -354,7 +360,7 @@ func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
 	// unblock the harness. CommandContext closes both paths.
 	ctx, cancel := context.WithTimeout(context.Background(), fuzzOracleTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, fuzzDuckDBBin)
+	cmd := exec.CommandContext(ctx, bin)
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdin = strings.NewReader(script)
 	// DuckDB spills to a .tmp directory under its working directory; without
