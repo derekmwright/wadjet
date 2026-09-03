@@ -83,6 +83,18 @@ type colScope struct {
 // sentinel has to sit outside the enum's range.
 const typeAmbiguous = parquet.TypeID(-1)
 
+// providesBareColumn reports, with CERTAINTY, that one of this scope's own
+// sources carries the bare column name. An open scope — a table function, a
+// SELECT *, a table the catalog does not have — answers false for everything,
+// because nothing there is certain and the caller's fallback is the behaviour
+// that existed before it asked (#739).
+func (s *colScope) providesBareColumn(name string) bool {
+	if s == nil || s.open {
+		return false
+	}
+	return s.cols[strings.ToLower(name)]
+}
+
 func newColScope() *colScope {
 	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
 		colTypes: map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
@@ -441,6 +453,25 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			return err
 		}
 	}
+	// PostgreSQL's precedence for a bare GROUP BY name: an INPUT COLUMN wins
+	// over a SELECT alias. The parser substituted the alias's expression
+	// unconditionally — it has no schema — and this is the layer that does,
+	// so the substitution is undone for every name one of this block's own
+	// sources really provides (#739).
+	//
+	// BEFORE checkUngrouped, deliberately: the grouping rule is asked of the
+	// terms the query actually groups by, and reverting afterwards would
+	// check one set of keys and execute another. `SELECT c_i32 AS g,
+	// COUNT(*) FROM t GROUP BY g` becomes GROUP BY the INPUT g here, which
+	// leaves c_i32 ungrouped, which is the 42803 PostgreSQL raises for it.
+	//
+	// `from`, not `resolve`: an OUTER scope's columns are not this block's
+	// input, and a correlated name that happens to match an alias must not
+	// pull the group key out from under it. An OPEN scope answers false for
+	// every name — nothing is certain there — so the substitution stands and
+	// the answer is the pre-#739 one, which is the binder's own stance that
+	// a false positive breaks a working query.
+	plansql.RevertGroupByAliasesShadowedByInput(info, from.providesBareColumn)
 	// A bare column beside an aggregate with no GROUP BY has no defined
 	// answer — which n_name should the single aggregate row carry?
 	if err := checkUngrouped(info, from); err != nil {
@@ -823,6 +854,17 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 			continue
 		}
 		add(gbExpr)
+		// A bare term the INPUT provides binds to the input column, not to
+		// the SELECT alias that happens to share its name — PostgreSQL's
+		// precedence, applied to the group terms just above by
+		// plansql.RevertGroupByAliasesShadowedByInput. Admitting the
+		// same-named select item's expression here would undo it for the
+		// grouping check alone: `SELECT c_i32 AS g … GROUP BY g` would group
+		// by `g` and still count `c_i32` as grouped, which is the 42803
+		// PostgreSQL raises going missing (#739).
+		if groupTermBindsToInput(gbExpr, g.from) {
+			continue
+		}
 		if item := selectItemForGroupTerm(info, gbExpr); item != nil {
 			add(item.ASTExpr)
 			if a := strings.ToLower(strings.TrimSpace(item.Alias)); a != "" {
@@ -850,6 +892,22 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 			}
 		}
 	}
+}
+
+// groupTermBindsToInput reports whether a GROUP BY term is a bare column name
+// one of this block's own sources certainly provides — the case where
+// PostgreSQL binds it to the INPUT COLUMN rather than to a SELECT alias of the
+// same name (#739). A qualified term always names a source column and needs no
+// question asked.
+func groupTermBindsToInput(term plansql.Node, from *colScope) bool {
+	ref, ok := unparen(term).(*plansql.ColRef)
+	if !ok {
+		return false
+	}
+	if ref.Table != "" {
+		return true
+	}
+	return from.providesBareColumn(ref.Column)
 }
 
 // selectItemForGroupTerm resolves a GROUP BY term that names a select item

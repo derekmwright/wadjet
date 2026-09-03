@@ -414,17 +414,31 @@ type SelectInfo struct {
 	GroupBy      []string
 	GroupByExprs []Node     // AST for GROUP BY expressions (parallel to GroupBy)
 	GroupingSets [][]string // GROUPING SETS / CUBE / ROLLUP (nil = simple GROUP BY)
-	Having       string
-	HavingExpr   Node
-	Distinct     bool
-	Qualify      string
-	QualifyExpr  Node
-	OrderBy      []OrderByItem
-	Limit        string
-	Offset       string
-	Windows      []WindowSpec // window function specs extracted during pre-parse
-	CTEs         []CTEDef     // CTE definitions extracted during pre-parse
-	Union        *UnionInfo   // non-nil if this is a UNION query
+	// GroupByAliasOrigin records, per GROUP BY entry, the bare name the
+	// parser SUBSTITUTED a SELECT alias's expression for — "" where it did
+	// not. It exists because the substitution is PROVISIONAL: PostgreSQL
+	// resolves a bare GROUP BY name against the INPUT COLUMNS FIRST and only
+	// then against an output alias, and the parser has no schema, so it
+	// cannot know which. The scope layer can (physical.colScope), and
+	// RevertGroupByAliasesShadowedByInput undoes the entries the input
+	// really provides.
+	//
+	// Recorded rather than decided-later-from-scratch so that an entry point
+	// with no catalog — and therefore no scope — keeps exactly the answer it
+	// had before the rule existed, instead of losing the substitution
+	// entirely (#739).
+	GroupByAliasOrigin []string
+	Having             string
+	HavingExpr         Node
+	Distinct           bool
+	Qualify            string
+	QualifyExpr        Node
+	OrderBy            []OrderByItem
+	Limit              string
+	Offset             string
+	Windows            []WindowSpec // window function specs extracted during pre-parse
+	CTEs               []CTEDef     // CTE definitions extracted during pre-parse
+	Union              *UnionInfo   // non-nil if this is a UNION query
 }
 
 // TableRef is a reference to a table or table-producing function.
@@ -1089,9 +1103,17 @@ func resolveSetOpOrderBy(info *SelectInfo) error {
 }
 
 // resolveGroupByAliasRef resolves GROUP BY <alias> where <alias> names a
-// SELECT column with a computed expression. Plain column refs (including
-// renamed ones) are left alone — the aggregate resolves those by name, and
-// a table column with the same name keeps precedence over the alias.
+// SELECT column, PROVISIONALLY.
+//
+// It substitutes unconditionally, because it runs in the parser and the
+// parser has no schema: it cannot ask whether an input column already owns
+// the name. Its own comment used to claim that "a table column with the same
+// name keeps precedence over the alias", which was the intended rule written
+// down as though it were the present one — there was no such check anywhere.
+// The precedence is applied by RevertGroupByAliasesShadowedByInput, at the
+// layer that knows the FROM sources; the name substituted is recorded in
+// SelectInfo.GroupByAliasOrigin so that undoing it needs no re-derivation
+// (#739).
 func resolveGroupByAliasRef(info *SelectInfo, i int, gb string) {
 	// Asked of the parsed term, not of its spelling. A bare name is a
 	// *ColRef with no qualifier however it was written, so a DELIMITED one —
@@ -1115,8 +1137,63 @@ func resolveGroupByAliasRef(info *SelectInfo, i int, gb string) {
 	for _, col := range info.Columns {
 		if col.Alias != "" && strings.EqualFold(col.Alias, name) && !col.IsAgg && !col.IsWindow {
 			substituteGroupByExpr(info, i, col)
+			recordGroupByAliasOrigin(info, i, name)
 			return
 		}
+	}
+}
+
+// recordGroupByAliasOrigin notes that GROUP BY entry i was a bare name the
+// parser replaced with a SELECT alias's expression, so the scope layer can
+// undo it where an INPUT COLUMN of that name exists — PostgreSQL's precedence
+// (#739). See SelectInfo.GroupByAliasOrigin.
+func recordGroupByAliasOrigin(info *SelectInfo, i int, name string) {
+	for len(info.GroupByAliasOrigin) < len(info.GroupBy) {
+		info.GroupByAliasOrigin = append(info.GroupByAliasOrigin, "")
+	}
+	if i < len(info.GroupByAliasOrigin) {
+		info.GroupByAliasOrigin[i] = name
+	}
+}
+
+// RevertGroupByAliasesShadowedByInput applies PostgreSQL's precedence for a
+// bare GROUP BY name: an INPUT COLUMN wins over a SELECT alias.
+//
+// The parser substitutes such a name with the alias's defining expression
+// unconditionally, and its own doc comment claimed the opposite ("a table
+// column with the same name keeps precedence over the alias") — protocol item
+// 9's exact failure mode, a record describing intended behaviour as present
+// behaviour. There is no precedence check in the parser and there cannot be
+// one: it has no schema and no scope. So the substitution is provisional and
+// this undoes it, called from the layer that knows what the FROM sources
+// provide.
+//
+// provides reports whether one of this block's own sources carries the bare
+// name. It must answer only where it is CERTAIN: an unenumerable source (a
+// table function, a SELECT *, a table absent from the catalog) has to answer
+// false, which keeps the substitution and the pre-#739 answer.
+//
+// The wrong-answer shape this closes: `SELECT h AS g, COUNT(*) FROM gcov
+// GROUP BY g, h` grouped by (h, h) and answered 2 rows where PostgreSQL — which
+// groups by (g, h) — answers 6. Both engines answered, and they answered
+// different numbers.
+func RevertGroupByAliasesShadowedByInput(info *SelectInfo, provides func(bare string) bool) {
+	if info == nil || provides == nil || len(info.GroupByAliasOrigin) == 0 {
+		return
+	}
+	for i, origin := range info.GroupByAliasOrigin {
+		if origin == "" || i >= len(info.GroupBy) {
+			continue
+		}
+		if !provides(origin) {
+			continue
+		}
+		ref := &ColRef{Column: origin}
+		if i < len(info.GroupByExprs) {
+			info.GroupByExprs[i] = ref
+		}
+		info.GroupBy[i] = GroupKeyName(ref)
+		info.GroupByAliasOrigin[i] = ""
 	}
 }
 

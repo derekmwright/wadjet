@@ -3115,22 +3115,25 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 
 		// GROUP BY a name that is BOTH a select alias and an input column.
 		// PostgreSQL resolves it to the input COLUMN and then refuses the
-		// query, because the select list's own `c_i32` is then ungrouped; we
-		// resolve it to the alias and answer.
+		// query, because the select list's own `c_i32` is then ungrouped.
 		//
-		// TODO(#739): delete this pin when the input column wins.
-		t.Run("GroupByAliasShadowsAnInputColumn", func(t *testing.T) {
+		// This was pinned as `GroupByAliasShadowsAnInputColumn` — 20 rows on
+		// both arms — until #739 moved the precedence to the scope layer. It
+		// is a GATE now: the refusal is the answer, and it is asserted rather
+		// than recorded.
+		t.Run("GroupByAliasLosesToAnInputColumn", func(t *testing.T) {
 			sql := fmt.Sprintf(`SELECT c_i32 AS g, COUNT(*) AS n FROM %s WHERE id < 20 `+
 				`GROUP BY g ORDER BY g`, tbl)
 			for _, arm := range sfcArms(ctx, single, coord) {
 				res, err := arm.run(sql)
-				if err != nil {
-					t.Fatalf("%s arm now REFUSES this, which is PostgreSQL's answer. #739 is "+
-						"fixed — assert the refusal and delete this pin\n  SQL: %s", arm.name, sql)
+				if err == nil {
+					t.Fatalf("%s arm answered %d rows; PostgreSQL 17 raises 42803 here, "+
+						"because GROUP BY g binds to the INPUT column and c_i32 is then "+
+						"ungrouped (#739)\n  SQL: %s", arm.name, len(res.Rows), sql)
 				}
-				if len(res.Rows) != 20 {
-					t.Errorf("%s arm returned %d rows, want the pinned 20\n  SQL: %s",
-						arm.name, len(res.Rows), sql)
+				if !strings.Contains(err.Error(), "must appear in the GROUP BY clause") {
+					t.Errorf("%s arm: %v\n  want the 42803 grouping refusal\n  SQL: %s",
+						arm.name, err, sql)
 				}
 			}
 		})

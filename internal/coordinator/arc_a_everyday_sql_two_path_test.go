@@ -555,6 +555,59 @@ func arcACells() []arcACell {
 			pgSays: "five rows with columns (id, customer, total, amount) — no order_id, " +
 				"and no refusal on any arm"},
 		// ------------------------------------------------------------------
+		// #739 — GROUP BY a name that is BOTH a SELECT alias and an INPUT
+		// COLUMN.
+		//
+		// `resolveGroupByAliasRef` substituted any matching non-aggregate
+		// SELECT alias unconditionally, and its own doc comment said the
+		// opposite ("a table column with the same name keeps precedence over
+		// the alias"). There was no such check: it runs in the PARSER, which
+		// has no schema and cannot ask. PostgreSQL resolves a bare GROUP BY
+		// name against the INPUT COLUMNS first and against an output alias
+		// only when there is none.
+		//
+		// The primary assertion is the shape where BOTH ENGINES ANSWER and
+		// they answer DIFFERENT NUMBERS — a refusal-only fix would pass a
+		// row-count check and still group by the wrong thing. `SELECT h AS g
+		// … GROUP BY g, h` grouped by (h, h) and gave 2 rows; PostgreSQL
+		// groups by (g, h) and gives 6.
+		{issue: "#739", name: "group_by_a_name_that_is_alias_and_column",
+			sql:  `SELECT h AS g, COUNT(*) AS n FROM gcov GROUP BY g, h ORDER BY 1`,
+			want: []string{"g=int32:0|n=int64:10", "g=int32:0|n=int64:10", "g=int32:0|n=int64:10", "g=int32:1|n=int64:10", "g=int32:1|n=int64:10", "g=int32:1|n=int64:10"}},
+		// The four REFUSAL spellings. PostgreSQL raises 42803 for each,
+		// because the GROUP BY binds to the input column and the SELECT's own
+		// expression is then ungrouped. Wadjet answered rows for all four.
+		{issue: "#739", name: "group_by_alias_shadowing_an_input_column",
+			sql:         `SELECT c_i32 AS g, COUNT(*) AS n FROM typemx WHERE id < 20 GROUP BY g ORDER BY g`,
+			wantErrLike: "must appear in the GROUP BY clause",
+			pgSays:      `42803 column "typemx.c_i32" must appear in the GROUP BY clause`},
+		{issue: "#739", name: "group_by_delimited_alias_shadowing_a_stored_column",
+			sql:         `SELECT g + 1 AS "g + 1", COUNT(*) AS n FROM gcov GROUP BY "g + 1" ORDER BY n`,
+			wantErrLike: "must appear in the GROUP BY clause",
+			pgSays:      `42803 column "gcov.g" must appear in the GROUP BY clause`},
+		{issue: "#739", name: "group_by_delimited_alias_shadowing_bare",
+			sql:         `SELECT g + 1 AS "g + 1" FROM gcov GROUP BY "g + 1"`,
+			wantErrLike: "must appear in the GROUP BY clause",
+			pgSays:      `42803 column "gcov.g" must appear in the GROUP BY clause`},
+		{issue: "#739", name: "group_by_delimited_alias_shadowing_another_stored_column",
+			sql:         `SELECT g + 1 AS "g plus 1", COUNT(*) AS n FROM gcov GROUP BY "g plus 1" ORDER BY n`,
+			wantErrLike: "must appear in the GROUP BY clause",
+			pgSays:      `42803 column "gcov.g" must appear in the GROUP BY clause`},
+		// The controls. An alias that collides with NOTHING still resolves to
+		// its expression — that is the whole of what the parser's
+		// substitution is for, and reverting it unconditionally would break
+		// every `GROUP BY <computed alias>` query in the corpus. And an
+		// UNALIASED delimited term was already 42803 and must stay so.
+		{issue: "#739", name: "control_alias_colliding_with_nothing_still_resolves",
+			sql: `SELECT g + 1 AS zz, COUNT(*) AS n FROM gcov GROUP BY zz ORDER BY zz`,
+			want: []string{
+				"zz=int64:1|n=int64:20", "zz=int64:2|n=int64:20", "zz=int64:3|n=int64:20"}},
+		{issue: "#739", name: "control_unaliased_delimited_term",
+			sql:         `SELECT g + 1 AS k, COUNT(*) AS n FROM gcov GROUP BY "g + 1" ORDER BY k`,
+			wantErrLike: "must appear in the GROUP BY clause",
+			pgSays:      `42803 column "gcov.g" must appear in the GROUP BY clause`},
+
+		// ------------------------------------------------------------------
 		// #734 / #679 / #535 — the correlated-subquery family, CONSUMER half.
 		//
 		// One idiom, three spellings, three different confident wrong
