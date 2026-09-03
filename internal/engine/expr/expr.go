@@ -6569,7 +6569,13 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// `double precision` (float(1..24) is real, float(25..53) is double,
 		// and an unqualified FLOAT is the latter) — verified with pg_typeof —
 		// so only the two spellings that really name float4 narrow.
-		f := ToFloat64(v)
+		// TEXT is read by real's own input function, which REFUSES what it
+		// cannot read rather than answering ToFloat64's zero (#839's sibling
+		// hole: `CAST('abc' AS REAL)` answered 0).
+		f, isText := castFloatText(v, "real", 32)
+		if !isText {
+			f = ToFloat64(v)
+		}
 		// PostgreSQL refuses a conversion that loses the value outright rather
 		// than answering an infinity or a zero (float.c's overflow and
 		// underflow checks, both SQLSTATE 22003). A value that is ALREADY
@@ -6582,7 +6588,14 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		}
 		return float32(f)
 	case "float", "double", "float8", "double precision", "float64":
+		// Same hole, the wider destination: `CAST('abc' AS DOUBLE PRECISION)`
+		// answered 0, a plausible measurement where PostgreSQL raises 22P02.
+		if f, isText := castFloatText(v, "double precision", 64); isText {
+			return f
+		}
 		return ToFloat64(v)
+	case "uuid":
+		return castToUUID(v)
 	case "bool", "boolean":
 		// The conversion the operand's DECLARATION selects, not the one its
 		// Go box suggests — see cast_bool.go for what each source type

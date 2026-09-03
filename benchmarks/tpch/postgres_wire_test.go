@@ -716,6 +716,12 @@ func wireCorpus() []wireCase {
 		// A TIMESTAMP expression: declared 1114 and rendered, not the boxed
 		// epoch-millisecond integer (#363).
 		{name: "TimestampColumn", sql: `SELECT CAST('1996-01-10 12:34:56' AS timestamp) AS ts`},
+		// A UUID expression: OID 2950 and size 16, the canonical lowercase
+		// text, and the 16-byte binary form. Until #839 the cast declared
+		// OID 25 and returned its operand unchanged, so a driver with a UUID
+		// scanner never saw one — and the mixed-case spelling below is the
+		// value half: PostgreSQL prints a uuid lowercase whatever was written.
+		{name: "UUIDColumn", sql: `SELECT CAST('123E4567-E89B-12D3-A456-426614174000' AS uuid) AS u`},
 		// A boolean expression, whose PostgreSQL text form is 't'/'f' and
 		// whose binary form is one byte (#364).
 		{name: "BooleanExpression", sql: `SELECT (n_regionkey = 1) AS is_one FROM nation ORDER BY n_nationkey LIMIT 4`},
@@ -1682,6 +1688,14 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "ArcSineOutOfRange", sql: `SELECT ASIN(2)`},
 		{name: "ArcCosineOutOfRange", sql: `SELECT ACOS(2)`},
 		{name: "ModuloByZero", sql: `SELECT MOD(1, 0)`},
+		// #839 and the ZERO half of its census. A CAST that cannot read its
+		// text answered the text back (uuid) or the number 0 (the float
+		// family) — the second being the one a client cannot detect at all.
+		{name: "CastTextToUUIDInvalid", sql: `SELECT CAST('not-a-uuid' AS uuid)`},
+		{name: "CastTextToDoubleInvalid", sql: `SELECT CAST('abc' AS double precision)`},
+		{name: "CastTextToRealInvalid", sql: `SELECT CAST('abc' AS real)`},
+		{name: "CastTextToNumericInvalid", sql: `SELECT CAST('abc' AS numeric)`},
+		{name: "CastTextToDoubleOutOfRange", sql: `SELECT CAST('1e400' AS double precision)`},
 		// ADR-0024 item 4 at the DECIMAL arithmetic and CAST sites: a value
 		// with no carrier at its declared type is 22003 and a zero divisor is
 		// 22012, and the two must stay APART — a caller that branched on "did

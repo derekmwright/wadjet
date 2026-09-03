@@ -2309,6 +2309,16 @@ func pgTypeOID(typeName string) int {
 		// (#570). oidBytea in bindparams.go is the same number, used for
 		// inbound Bind parameters and the pg_type catalog row.
 		return 17 // bytea
+	case "UUID":
+		// PostgreSQL's uuid. The engine boxes a UUID as its canonical text —
+		// the same 36 characters OID 2950's TEXT format carries — so the text
+		// bytes on the wire do not change; what changes is that a driver can
+		// now recognise the column (pgx's UUID scanner, pgJDBC's
+		// java.util.UUID) instead of being handed a String under OID 25
+		// (#839). appendBinaryUUID below writes the 16-byte binary form,
+		// because under 2950 the raw text would be a lie the way it was for
+		// numeric and date.
+		return 2950 // uuid
 	case "VECTOR":
 		return 25 // text (pgvector uses custom OID, but text works for display)
 	default:
@@ -2875,6 +2885,8 @@ func pgFormatType(typeName string) string {
 		return "numeric"
 	case "BYTES":
 		return "bytea"
+	case "UUID":
+		return "uuid"
 	default:
 		return "text"
 	}
@@ -3183,6 +3195,8 @@ func pgTypeSize(oid int) int16 {
 		return 4
 	case 1114: // timestamp
 		return 8
+	case 2950: // uuid
+		return 16
 	default:
 		return -1 // variable length
 	}
@@ -3231,7 +3245,15 @@ func sendColumnTypes(columns []string, metas []wadjet.ColumnMeta) []parquet.Type
 				continue
 			}
 		}
-		if m.TypeID != parquet.TypeTimestamp && m.TypeID != parquet.TypeDate && m.TypeID != parquet.TypeDecimal {
+		// The list is exactly the types whose BINARY form differs from the
+		// text the engine boxes them as. UUID joined it with #839: declaring
+		// OID 2950 makes the 36-character text the wrong bytes under a binary
+		// format code, the same way declaring 1082 did for a date. The
+		// WireProtocol oracle's binary_decode property is what caught the
+		// omission when the OID moved and this list did not.
+		switch m.TypeID {
+		case parquet.TypeTimestamp, parquet.TypeDate, parquet.TypeDecimal, parquet.TypeUUID:
+		default:
 			continue
 		}
 		if types == nil {
@@ -3414,6 +3436,14 @@ func (c *pgConn) sendDataRowFormatted(columns []string, cells []any, fmtCodes []
 			// one the OID change would otherwise have CREATED (under OID 25
 			// the raw bytes were the right binary form of a text column).
 			c.buf = appendBinaryNumeric(c.buf, ds)
+		case binary && colType == parquet.TypeUUID && dsOK:
+			// Binary `uuid` is 16 raw bytes. A UUID is boxed as its canonical
+			// 36-character text, which appendBinaryValue's string arm would
+			// have written verbatim under OID 2950 — the defect the numeric
+			// and date arms above exist to prevent, and the one declaring
+			// 2950 would otherwise have CREATED (under OID 25 those text
+			// bytes WERE the right binary form).
+			c.buf = appendBinaryUUID(c.buf, ds)
 		case binary:
 			c.buf = appendBinaryValue(c.buf, val)
 		default:
@@ -3446,6 +3476,46 @@ func appendBinaryTimestamp(buf []byte, ms int64) []byte {
 	buf = appendInt32(buf, 8)
 	return append(buf, byte(us>>56), byte(us>>48), byte(us>>40), byte(us>>32),
 		byte(us>>24), byte(us>>16), byte(us>>8), byte(us))
+}
+
+// appendBinaryUUID encodes a canonical 8-4-4-4-12 UUID text into PostgreSQL's
+// binary `uuid` (OID 2950): the 16 bytes, in order, with no separators.
+//
+// A value that does not parse is sent as NULL. The field is a fixed 16 bytes,
+// so there is no way to say "not a uuid" other than absence — and writing the
+// 36-character text instead, which is what the generic encoder did, hands the
+// client 36 bytes to read as 16.
+func appendBinaryUUID(buf []byte, s string) []byte {
+	var out [16]byte
+	n := 0
+	for i := 0; i < len(s) && n < 32; i++ {
+		ch := s[i]
+		if ch == '-' {
+			continue
+		}
+		var d byte
+		switch {
+		case ch >= '0' && ch <= '9':
+			d = ch - '0'
+		case ch >= 'a' && ch <= 'f':
+			d = ch - 'a' + 10
+		case ch >= 'A' && ch <= 'F':
+			d = ch - 'A' + 10
+		default:
+			return appendInt32(buf, -1)
+		}
+		if n%2 == 0 {
+			out[n/2] = d << 4
+		} else {
+			out[n/2] |= d
+		}
+		n++
+	}
+	if n != 32 {
+		return appendInt32(buf, -1)
+	}
+	buf = appendInt32(buf, 16)
+	return append(buf, out[:]...)
 }
 
 // pgEpochDays is 2000-01-01 expressed in days since the Unix epoch — the

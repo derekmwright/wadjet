@@ -159,6 +159,15 @@ func (e *Cast) castToDecimal(b *batch.RecordBatch, row int, v any, d decimalDest
 		// resolve. Answering the float64 this arm answered before ADR-0024 is
 		// the honest fallback: it is what the planner declared for the same
 		// shape, so the two still agree.
+		//
+		// TEXT still has to be READ, not assumed: `CAST('abc' AS NUMERIC)`
+		// reached ToFloat64 and answered 0 — a number where PostgreSQL raises
+		// 22P02, and the PARAMETERIZED spelling one line down has raised it
+		// since #555. One destination cannot have two answers depending on
+		// whether the caller wrote the (p,s) (#839's census).
+		if f, isText := castFloatText(v, "numeric", 64); isText {
+			return f
+		}
 		return ToFloat64(v)
 	}
 	unscaled, ok := castDecimalValue(v, typ.Scale)

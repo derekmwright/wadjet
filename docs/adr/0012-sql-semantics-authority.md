@@ -191,6 +191,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      data exception, and minting 22007 for it would put a data-exception code
      on a type error. The boundary is attempted from the outside by
      `expr.TestCastTemporalRefusalStopsAtText`.
+   - **A CAST to a NETWORK type does not read its text.** (Added 2026-09-03,
+     #839's census.) `CAST('abc' AS IPV4|IPV6|CIDR|MACADDR)` returns the text
+     under a STRING declaration; PostgreSQL raises 22P02 for its
+     inet/cidr/macaddr equivalents. The reason it is recorded rather than fixed
+     is a rule this ADR already enforces elsewhere: the engine has ONE text
+     accept-set per type and it lives in one function (`parquet.ParseDateDays`
+     for dates). The network types have none — the ingest boundary type-checks
+     the Go box and not the text, and the abbreviated-literal divergence above
+     shows the literal accept-set already differs from PostgreSQL's — so a
+     validator written inside `Cast.Eval` would give one engine two answers to
+     "is this an address". Pinned by
+     `expr.TestCastToANetworkTypeStillPassesThrough`, which fails the day the
+     cast starts refusing. UUID and the float family were the same shape and
+     ARE fixed: both had a single unambiguous accept-set to read.
    - **A DMY date spelling is 22007 here and 22008 in PostgreSQL.**
      (Added 2026-09-03, #840; the accept-set is #639's.) Both engines REFUSE
      `'31/12/1996'`. PostgreSQL's DateStyle ISO, MDY reads the leading field

@@ -11269,6 +11269,12 @@ func inferCastType(typeName string) parquet.TypeID {
 		return parquet.TypeDate
 	case "TIMESTAMP", "DATETIME", "TIMESTAMPTZ":
 		return parquet.TypeTimestamp
+	case "UUID":
+		// The declaration half of #839. `CAST(x AS UUID)` declared STRING, so
+		// the cast changed neither the value nor the type a client sees —
+		// OID 25 for a column PostgreSQL declares 2950, and a driver that
+		// branches on the OID (pgx's UUID scanner, pgJDBC's) never saw one.
+		return parquet.TypeUUID
 	default:
 		return parquet.TypeString
 	}
