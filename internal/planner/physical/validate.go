@@ -702,6 +702,17 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 			break
 		}
 	}
+	// An aggregate in ORDER BY makes the query grouped too, which is what
+	// PostgreSQL's parseCheckAggregates does — it reads the sort clause
+	// alongside the select list and the HAVING. Without this,
+	// `SELECT id FROM t ORDER BY MAX(id)` was not judged at all and returned
+	// every row, where PostgreSQL raises the 42803 below (#811).
+	for _, ob := range info.OrderBy {
+		if ob.Expr != nil && len(plansql.FindAllAggregates(ob.Expr)) > 0 {
+			hasAgg = true
+			break
+		}
+	}
 	grouped := len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 || hasAgg || info.HavingExpr != nil
 	if !grouped {
 		return nil

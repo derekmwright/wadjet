@@ -193,6 +193,20 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			break
 		}
 	}
+	// An aggregate in ORDER BY makes the query aggregated too, exactly as one
+	// in the SELECT list or a HAVING clause does — PostgreSQL's
+	// parseCheckAggregates reads the sort clause along with the rest (#811).
+	//
+	// This was read off the SELECT list alone, so `SELECT 1 FROM t ORDER BY
+	// MAX(id)` built no Aggregate at all: the ORDER BY term was then a name
+	// nothing carried, it was dropped, and the query returned every row where
+	// PostgreSQL returns ONE. The `SELECT id ...` spelling returned every row
+	// where PostgreSQL raises 42803 — the refusal that check lives in
+	// physical.checkUngrouped and was unreachable for the same reason.
+	orderByAggs := orderByAggregates(info)
+	if len(orderByAggs) > 0 {
+		hasAgg = true
+	}
 
 	// Track columns that need AST rewriting for nested aggregates.
 	// Key: column index, Value: rewritten AST with aggregate replaced by ColRef.
@@ -462,6 +476,27 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					aggs = append(aggs, ae)
 					havingReplacements[hKey] = synName
 				}
+			}
+		}
+
+		// The same hoist for an aggregate named only in ORDER BY (#811).
+		//
+		// It is COMPUTED even though nothing reads its value: PostgreSQL
+		// computes it too, and an aggregate that would raise (a SUM that
+		// overflows, a CAST inside its argument) has to raise here as well.
+		// Its output column is dropped with the rest of the planner's own
+		// slots, so nothing reaches the client.
+		//
+		// The sort key itself is settled in resolveOrderBy: with no GROUP BY
+		// the aggregate emits exactly ONE row, so the ORDER BY is provably a
+		// no-op and the term is dropped rather than materialized. WITH a
+		// GROUP BY it is not a no-op, and that case is still refused (#597).
+		for _, oAgg := range orderByAggs {
+			if strings.EqualFold(oAgg.Name, "grouping") {
+				continue // not an aggregate; it has its own slot family
+			}
+			if _, err := reuseOrAddAggregate(oAgg, &aggs, &aggCounter); err != nil {
+				return nil, err
 			}
 		}
 

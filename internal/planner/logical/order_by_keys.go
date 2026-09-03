@@ -1,10 +1,10 @@
 package logical
 
 import (
-	"fmt"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // ORDER BY over an expression, and the family it closes.
@@ -100,6 +100,23 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 			continue
 		}
 
+		// An aggregate term over an UNGROUPED aggregate query (#811).
+		//
+		// Dropped, not materialized, and the reason is a proof rather than a
+		// convenience: an aggregate with no GROUP BY and no GROUPING SETS
+		// emits exactly ONE row, and one row is sorted. Nothing about the
+		// result can depend on this term, so there is no "arbitrary order"
+		// for the drop to hide — which is the ONLY condition under which this
+		// pass drops a term rather than failing.
+		//
+		// The aggregate itself is still computed: the builder hoisted it into
+		// the aggregate node above, so a SUM that would overflow still
+		// overflows. With a GROUP BY the drop would be a silent wrong order
+		// over many rows, and that shape keeps its refusal below (#597).
+		if ungroupedAggregateSort(ob, project, info) {
+			continue
+		}
+
 		// A select-list POSITION the parser could not count, because the list
 		// carries a `*`. It is not materialized — the value it names is a
 		// column of the expanded list, and ResolveOrdinalSortKeys names it
@@ -153,7 +170,8 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 // never come back as an arbitrary order (#320).
 func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name string, starOnly bool) (Projection, error) {
 	if ob.Expr == nil {
-		return Projection{}, orderByError(ob, "the term did not parse into an expression the planner can evaluate")
+		return Projection{}, orderByError(ob, "42601",
+			"the term did not parse into an expression the planner can evaluate")
 	}
 	if lit, ok := unwrapParens(ob.Expr).(*plansql.Lit); ok && lit.Kind == plansql.LitNumber {
 		// A numeric constant in ORDER BY is a select-list POSITION.
@@ -163,19 +181,30 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 		// expands, later. Materializing the constant would sort by a column
 		// that is the same in every row: a silent no-op, which is the whole
 		// failure mode this pass exists to end.
-		return Projection{}, orderByError(ob, "a numeric constant is a select-list position, and this one names no select item — `SELECT *` is expanded too late for the planner to count its positions here")
+		return Projection{}, orderByError(ob, "42P10",
+			"a numeric constant is a select-list position, and this one names no select item")
 	}
 	if child != nil && child.Type == NodeDistinct {
 		// Materializing here would widen the DISTINCT's dedup key and change
 		// which rows survive. SQL rejects the shape for the same reason.
-		return Projection{}, orderByError(ob, "SELECT DISTINCT requires every ORDER BY term to appear in the select list")
+		// PostgreSQL's own class and wording: "for SELECT DISTINCT, ORDER BY
+		// expressions must appear in select list", 42P10.
+		return Projection{}, orderByError(ob, "42P10",
+			"for SELECT DISTINCT, ORDER BY expressions must appear in select list")
 	}
 	if starOnly {
 		// The star has to expand into real columns before the projection can
 		// carry anything alongside it, and ExpandStarProjections only resolves
 		// a star that reads one base table.
 		if loneScan(child) == nil {
-			return Projection{}, orderByError(ob, "`SELECT *` over more than one relation cannot carry a computed sort key — name the columns, or select the sort expression")
+			// 0A000, not 42703: PostgreSQL ANSWERS this shape. The refusal is
+			// wadjet's own bound — a star over a join is left unexpanded
+			// because guessing its column set would change which columns the
+			// query returns — and a client is owed the class that says
+			// "this engine does not implement it" rather than one that says
+			// "your SQL is wrong".
+			return Projection{}, orderByError(ob, "0A000",
+				"`SELECT *` over more than one relation cannot carry a computed sort key — name the columns, or select the sort expression")
 		}
 	}
 	if agg := aggregateBelow(project); agg != nil && !sortTermResolvesOverAggregate(ob.Expr, agg) {
@@ -191,9 +220,24 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 		// on small inputs and lose it on large ones — the routing-dependent
 		// answer this whole suite exists to prevent — the query fails on both.
 		if containsAggregateCall(ob.Expr) {
-			return Projection{}, orderByError(ob, "an aggregate expression that is not itself a select item cannot be sorted on — select it, then ORDER BY its alias")
+			// 0A000: PostgreSQL ANSWERS this (`GROUP BY g ORDER BY MAX(id)`
+			// returns the groups ordered by their maxima), so the class has
+			// to say "not implemented here", not "your SQL is wrong". #597.
+			return Projection{}, orderByError(ob, "0A000",
+				"an aggregate expression that is not itself a select item cannot be sorted on — select it, then ORDER BY its alias")
 		}
-		return Projection{}, orderByError(ob, "over a GROUP BY, only a grouped column, a grouping expression, or a select-list alias can be sorted on — select this expression, then ORDER BY its alias")
+		// 0A000, measured rather than assumed. The shape PostgreSQL refuses
+		// here — `GROUP BY g ORDER BY LENGTH(c_str)`, an UNGROUPED column in
+		// the sort term — never reaches this line: physical.checkUngrouped
+		// settles it earlier with PostgreSQL's own 42803 and its own wording.
+		// What reaches this line is a term computed from GROUPED columns
+		// (`ORDER BY g * 2`), which PostgreSQL ANSWERS, so the class owed is
+		// "not implemented here". The one case that could arrive here and be
+		// a genuine 42803 is a block whose sources checkUngrouped could not
+		// enumerate, where it declines to judge at all; a class divergence
+		// there is the cost of that stance, not of this one.
+		return Projection{}, orderByError(ob, "0A000",
+			"over a GROUP BY, only a grouped column, a grouping expression, or a select-list alias can be sorted on — select this expression, then ORDER BY its alias")
 	}
 	proj := Projection{
 		Expr:    cleanExpr(ob.Column),
@@ -209,8 +253,15 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 
 // orderByError reports a sort key the engine cannot honour. Named separately
 // so every instance of this family reads the same way at the client.
-func orderByError(ob plansql.OrderByItem, reason string) error {
-	return fmt.Errorf("ORDER BY %s: %s", cleanExpr(ob.Column), reason)
+//
+// Every one of them carries a SQLSTATE, and which one is a measured question
+// rather than a stylistic one (family C, #811): 42P10 and 42803 where
+// PostgreSQL refuses the same shape with that class, 0A000 where PostgreSQL
+// ANSWERS it and the refusal is wadjet's own bound. A refusal with no class
+// reaches a client as the blanket 42000, which cannot be told from a syntax
+// error — and every refusal in this file used to send exactly that.
+func orderByError(ob plansql.OrderByItem, state, reason string) error {
+	return sqlerr.New(state, "ORDER BY %s: %s", cleanExpr(ob.Column), reason)
 }
 
 func orderExprFor(column string, ob plansql.OrderByItem) OrderExpr {
@@ -470,4 +521,38 @@ func unwrapParens(n plansql.Node) plansql.Node {
 // containsAggregateCall reports whether the expression calls an aggregate.
 func containsAggregateCall(ast plansql.Node) bool {
 	return len(plansql.FindAllAggregates(ast)) > 0
+}
+
+// orderByAggregates is every aggregate CALL named in an ORDER BY term.
+//
+// PostgreSQL's parseCheckAggregates reads the sort clause along with the
+// select list and the HAVING, so an aggregate here makes the query aggregated
+// (#811). Exported inside the package only; the physical binder asks the same
+// question of the same SelectInfo through its own copy, because it validates
+// before a logical plan exists.
+func orderByAggregates(info *plansql.SelectInfo) []*plansql.FuncCallNode {
+	var out []*plansql.FuncCallNode
+	for _, ob := range info.OrderBy {
+		if ob.Expr == nil {
+			continue
+		}
+		out = append(out, plansql.FindAllAggregates(ob.Expr)...)
+	}
+	return out
+}
+
+// ungroupedAggregateSort reports whether this ORDER BY term may be dropped
+// because the query it sorts returns exactly one row.
+//
+// Three conditions, all necessary: the term names an aggregate, an Aggregate
+// node exists below the projection, and that aggregate has NO grouping — no
+// GROUP BY and no GROUPING SETS. Only then is the row count provably one.
+func ungroupedAggregateSort(ob plansql.OrderByItem, project *Node, info *plansql.SelectInfo) bool {
+	if ob.Expr == nil || !containsAggregateCall(ob.Expr) {
+		return false
+	}
+	if len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 {
+		return false
+	}
+	return aggregateBelow(project) != nil
 }

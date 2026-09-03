@@ -67,6 +67,11 @@ type a2OrderCell struct {
 	wantState string
 	// pgSays records PostgreSQL 17's own disposition in prose, measured live.
 	pgSays string
+	// wantRoutes is the routing delta each DAG arm must show. The zero value
+	// means the DAG EXECUTED this shape; anything else names the refusal it
+	// took, and says that the two DAG arms are the coordinator-local pipeline
+	// for this cell (rule 11).
+	wantRoutes a2Routes
 	// ordered, when set, asserts the row SEQUENCE rather than the multiset —
 	// the point of a sort key is the order, and a multiset comparison cannot
 	// tell `ORDER BY 1` from `ORDER BY 1 DESC`.
@@ -160,6 +165,86 @@ func a2OrderCells() []a2OrderCell {
 			wantErrLike: "expands to a column list the planner cannot count",
 			wantState:   "42P10",
 			pgSays:      "PostgreSQL ANSWERS: 3 rows, 4 columns, ordered by a.id"},
+
+		// ------------------------------------------------------------------
+		// #811 — an aggregate in ORDER BY makes the query AGGREGATED.
+		//
+		// `hasAgg` was read off the SELECT list alone, so a query whose only
+		// aggregate was in ORDER BY built no Aggregate node: the sort term
+		// named nothing, was dropped, and every row came back where
+		// PostgreSQL returns ONE. The 42803 that should have refused the
+		// ungrouped spelling lives in physical.checkUngrouped and was
+		// unreachable for the same reason — `grouped` did not read the sort
+		// clause either.
+		//
+		// This is the SILENT half of #597's site. The grouped half — the
+		// refusal at the same line — is still refused; see the boundary cell
+		// at the end.
+		{issue: "#811", name: "constant_select_ordered_by_aggregate",
+			sql:    `SELECT 1 AS one FROM typemx ORDER BY MAX(id)`,
+			want:   []string{"one=int64:1"},
+			pgSays: "1 row: the aggregate collapses the table to one group"},
+		{issue: "#811", name: "string_constant_ordered_by_count",
+			sql:    `SELECT 'x' AS lit FROM typemx ORDER BY COUNT(*)`,
+			want:   []string{"lit=x"},
+			pgSays: "1 row"},
+		{issue: "#811", name: "aggregate_select_ordered_by_other_aggregate",
+			sql:    `SELECT COUNT(*) AS c FROM typemx ORDER BY MAX(id)`,
+			want:   []string{"c=int64:5000"},
+			pgSays: "1 row: 5000"},
+		{issue: "#811", name: "min_ordered_by_max",
+			sql:    `SELECT MIN(id) AS m FROM typemx ORDER BY MAX(id)`,
+			want:   []string{"m=int64:0"},
+			pgSays: "1 row: 0"},
+		// The arm that ANSWERED where PostgreSQL refuses. `id` is neither
+		// grouped nor aggregated, and the aggregate in ORDER BY is what makes
+		// that a question at all.
+		{issue: "#811", name: "ungrouped_column_ordered_by_aggregate",
+			sql:         `SELECT id FROM typemx ORDER BY MAX(id)`,
+			wantErrLike: `column "id" must appear in the GROUP BY clause`,
+			wantState:   "42803",
+			pgSays:      `42803: column "typemx.id" must appear in the GROUP BY clause or be used in an aggregate function`},
+		// The control that separates the two halves: with no aggregate
+		// anywhere the query is NOT aggregated and every row comes back, which
+		// is what `SELECT 1 AS one FROM t` must keep doing.
+		{issue: "#811", name: "ctl_constant_select_no_aggregate",
+			sql:    `SELECT COUNT(*) AS n FROM (SELECT 1 AS one FROM typemx) z`,
+			want:   []string{"n=int64:5000"},
+			pgSays: "1 row: 5000 — the inner query is not aggregated"},
+		// Family C's third face: every refusal in order_by_keys.go now
+		// carries a class. This one is PostgreSQL's own, measured live.
+		{issue: "#811", name: "grouped_order_by_ungrouped_column",
+			sql:         `SELECT g FROM typemx GROUP BY g ORDER BY LENGTH(c_str)`,
+			wantErrLike: `column "c_str" must appear in the GROUP BY clause`,
+			wantState:   "42803",
+			pgSays:      `42803: column "typemx.c_str" must appear in the GROUP BY clause or be used in an aggregate function`},
+		// The sibling that reaches order_by_keys.go's own refusal instead: a
+		// term computed from a GROUPED column, which PostgreSQL ANSWERS. Its
+		// class is 0A000 for that reason and not 42803 — measuring which
+		// refusal a shape actually reaches is what settles the class, and the
+		// two shapes look alike from the SQL.
+		{issue: "#811", name: "grouped_order_by_computed_grouped_column",
+			sql:         `SELECT g FROM typemx GROUP BY g ORDER BY g * 2`,
+			wantErrLike: "over a GROUP BY, only a grouped column",
+			wantState:   "0A000",
+			pgSays:      "PostgreSQL ANSWERS: 8 rows ordered by g*2"},
+		{issue: "#811", name: "distinct_order_by_unselected",
+			sql:         `SELECT DISTINCT g FROM typemx ORDER BY id`,
+			wantErrLike: "for SELECT DISTINCT, ORDER BY expressions must appear in select list",
+			wantState:   "42P10",
+			pgSays:      `42P10: for SELECT DISTINCT, ORDER BY expressions must appear in select list`},
+		// THE BOUNDARY this commit does not cross, and it is #597: with a
+		// GROUP BY the aggregate sort term is NOT a no-op — there are many
+		// rows and their order depends on it — so the term cannot be dropped
+		// and the refusal stands. 0A000 rather than 42803, because
+		// PostgreSQL ANSWERS this and the class owed to a client is "not
+		// implemented here", not "your SQL is wrong". The fixture attempts
+		// the boundary (protocol rule 11) so lifting it is visible.
+		{issue: "#597", name: "boundary_grouped_order_by_aggregate",
+			sql:         `SELECT g FROM typemx GROUP BY g ORDER BY MAX(id)`,
+			wantErrLike: "an aggregate expression that is not itself a select item cannot be sorted on",
+			wantState:   "0A000",
+			pgSays:      "PostgreSQL ANSWERS: 8 rows, groups ordered by their maxima"},
 	}
 }
 
@@ -238,8 +323,10 @@ func TestOrderByResolvesAPositionAfterTheStarExpands(t *testing.T) {
 				name string
 				c    *Coordinator
 			}{{"dag", coord}, {"dag-shuffled", coordB}} {
+				before := a2ReadRoutes(arm.c)
 				got, err := a2OrderRun(tmdRunDAG(ctx, arm.c, tc.sql))
 				check(arm.name, got, err)
+				a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.c), tc.wantRoutes, tc.sql)
 			}
 		})
 	}
