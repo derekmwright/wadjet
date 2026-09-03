@@ -627,6 +627,17 @@ func (w *Worker) Start(ctx context.Context) error {
 		if w.executor.broadcastCache != nil {
 			w.executor.broadcastCache.CleanupQuery(queryID)
 		}
+		// A cancelled query will never read its own stage outputs, so its
+		// ResultStore entries are pure leak — and the store has a hard
+		// capacity with no eviction, so enough of them wedge it and every
+		// later stage output silently falls back to S3 for the process
+		// lifetime. The COMPLETE handler has always done this; the CANCEL
+		// handler did not, and the gap was reachable exactly through
+		// Coordinator.CancelQuery, which publishes cancel and not complete
+		// (#818, and its coordinator half #817).
+		if w.executor.resultStore != nil {
+			w.executor.resultStore.CleanupQuery(queryID)
+		}
 		w.executor.peers.CleanupQuery(queryID)
 		w.logger.Debug("query cancelled", "query_id", queryID)
 	})
@@ -1401,6 +1412,17 @@ func (w *Worker) logFinalScanStats() {
 		"psi_mem_some_ms", psiMemSome/1e3, "psi_mem_full_ms", psiMemFull/1e3,
 		"psi_io_some_ms", psiIOSome/1e3, "psi_io_full_ms", psiIOFull/1e3,
 		"sched_wait_ms", schedWaitTotalMs())
+}
+
+// ResultStore returns the worker's in-memory stage-result store, or nil
+// when --result-store is 0. Exported for the reclamation gate: what the
+// store still holds after a terminal broadcast is the only observable that
+// catches the CANCEL handler's missing cleanup (#818, ADR-0028).
+func (w *Worker) ResultStore() *ResultStore {
+	if w.executor == nil {
+		return nil
+	}
+	return w.executor.resultStore
 }
 
 // SetTelemetry enables OpenTelemetry tracing on the worker.

@@ -31,6 +31,12 @@ func (e *Executor) executeStage(ctx context.Context, task distributed.Task, resu
 // post-write actions in writeUnpartitionedWSHF, but reads from disk instead of
 // keeping the entire payload in heap.
 func (e *Executor) uploadUnpartitionedSpill(ctx context.Context, task distributed.Task, sink *unpartitionedStageSink, result *distributed.ResultNotification) error {
+	// A straggler finishing after its query's terminal broadcast would
+	// re-create the queries/<id>/* prefix the coordinator just reclaimed
+	// (#625 M3).
+	if e.stageOutputRefusedForTerminalQuery(&task) {
+		return nil
+	}
 	key := fmt.Sprintf("%s%s.wshf", task.ResultPrefix, task.ID)
 	srcPath := sink.Path()
 
@@ -387,6 +393,9 @@ func (e *Executor) writeStageOutput(ctx context.Context, task distributed.Task, 
 // into task.NumPartitions output files and uploads each non-empty partition
 // to <ResultBucket>/<ResultPrefix>partition=NNNN/<TaskID>.wshf.
 func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed.Task, batches []*batch.RecordBatch, schema []parquet.Column, result *distributed.ResultNotification) error {
+	if e.stageOutputRefusedForTerminalQuery(&task) {
+		return nil
+	}
 	spillDir := filepath.Join(e.spillDir, "stage-"+task.ID)
 	if e.spillDir == "" {
 		spillDir = filepath.Join(os.TempDir(), "stage-"+task.ID)
@@ -510,6 +519,9 @@ func (e *Executor) uploadPartitionedShuffleFiles(ctx context.Context, task distr
 // (e.g., aggregate feeding final_aggregate, or pipeline output to a
 // downstream stage that re-partitions).
 func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.Task, batches []*batch.RecordBatch, schema []parquet.Column, result *distributed.ResultNotification) error {
+	if e.stageOutputRefusedForTerminalQuery(&task) {
+		return nil
+	}
 	var buf bytes.Buffer
 	sw := newShuffleWriter(&buf, schema)
 	if err := sw.writeHeader(); err != nil {

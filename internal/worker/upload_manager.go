@@ -485,6 +485,29 @@ func (m *uploadManager) queryState(root string) *queryUploadState {
 	return qs
 }
 
+// StageUploadsRefused counts stage-output uploads refused because the query
+// was already tombstoned. It is the M3 half of #625: the coordinator's
+// per-query cleanup is a one-shot LIST+DELETE, and a straggler task that
+// finishes after it lands recreates the prefix that was just reclaimed —
+// then nothing revisits it until the TTL sweep. The async upload path has
+// refused tombstoned roots since the q22-R2 stall (queryState returns nil);
+// the SYNCHRONOUS stage uploads did not, and a synchronous .wshf landing
+// after ExecuteSQL returned is exactly what round-0 measured.
+var StageUploadsRefused atomic.Int64
+
+// IsTerminal reports whether CancelQuery has already tombstoned this root.
+// Nil-safe and safe for unknown roots (both report false), because a worker
+// without an upload manager has no tombstones and must upload normally.
+func (m *uploadManager) IsTerminal(root string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, terminal := m.cancelledRoots[root]
+	return terminal
+}
+
 // CancelQuery aborts pending uploads for a terminal query, drops its scope,
 // and tombstones the root so a straggler task's later StartTask can't
 // resurrect it. Queued lazy jobs are elided — counted as PUT work the query

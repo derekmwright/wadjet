@@ -3581,6 +3581,21 @@ func (c *Coordinator) CancelQuery(queryID string) error {
 	}
 
 	c.tracker.Cancel(queryID)
+
+	// A cancel is a terminal exit, and every terminal exit runs the same
+	// reclamation (ADR-0028). This path used to publish CancelSubject and
+	// stop there: it never deleted queries/<id>/*, never dropped the
+	// peer-location hints, never purged the NATS-KV result keys, and — the
+	// one with no other backstop — never published CompleteSubject, which
+	// is the message that lets a worker drop its ResultStore entry. The
+	// worker's CANCEL handler frees four caches and deliberately not that
+	// one, so a query cancelled through this API held its result bytes for
+	// the worker's whole process lifetime, and enough of them wedge the
+	// store permanently (#817, #818). Everything else terminal already went
+	// through cleanupQuery; this was the only user-facing path that did
+	// not.
+	c.cleanupQuery(queryID)
+
 	c.logger.Info("query cancelled", "query_id", queryID)
 	return nil
 }

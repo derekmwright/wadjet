@@ -20,6 +20,31 @@ func (e *Executor) asyncUploadEligible(task *distributed.Task) (root string, ok 
 	return root, root != ""
 }
 
+// stageOutputRefusedForTerminalQuery reports whether this task's stage
+// output must not be uploaded because its query is already terminal on
+// this worker. A one-shot per-query cleanup cannot win a race against a
+// straggler upload; ADR-0009's tombstone is the structurally honest side
+// of that race, and it already governs the ASYNC path (uploadManager's
+// queryState returns nil for a tombstoned root). Extending it to the
+// synchronous uploads closes the last producer of a re-created
+// queries/<id>/* prefix (#625 M3, ADR-0028).
+//
+// A refusal is not a task failure: the query is terminal, so nothing will
+// ever read this output. It is counted so an operator can see it.
+func (e *Executor) stageOutputRefusedForTerminalQuery(task *distributed.Task) bool {
+	if e.uploads == nil {
+		return false
+	}
+	root := distributed.TaskRootQueryID(task)
+	if root == "" || !e.uploads.IsTerminal(root) {
+		return false
+	}
+	StageUploadsRefused.Add(1)
+	e.logger.Debug("stage output not uploaded: query already terminal",
+		"task_id", task.ID, "root_query_id", root)
+	return true
+}
+
 // finishStageOutputAsync completes one finalized local stage-output file
 // the Phase-B way: adopt it into the LocalStageCache (peers and the
 // background upload read the adopted copy), record it on the result, and
