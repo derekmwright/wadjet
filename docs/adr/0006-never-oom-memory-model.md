@@ -74,7 +74,7 @@ decode arena is NOT reopened — that design managed per-value
 lifetimes inside shared buffers, the complexity this exception
 excludes.
 
-### 2026-09-03: the ForceReserve census, and #789 left OPEN
+### 2026-09-03: the ForceReserve census, and #789 (file half closed, decode half deferred)
 
 `Tracker.ForceReserve` (`memory/tracker.go`) cannot fail and has no ceiling.
 Every argument in this arc rests on knowing who calls it, so here is the
@@ -83,7 +83,7 @@ tracker:**
 
 | # | producer | what | loud? | released |
 |---|---|---|---|---|
-| 1 | `memory.ReserveOrForce` (`memory/acquire.go:33`, `:50`) | a scan's whole-file load | WARNs at `:50` | when the file's LAST row group is decoded (`fileSlot.releaseRG`) |
+| 1 | `memory.ReserveOrForce` (`memory/acquire.go:33`, `:50`) | a scan's file load — ONE ROW GROUP at a time where the footer is already decoded, the whole file otherwise | WARNs at `:50` | when THAT ROW GROUP is decoded (`fileSlot.releaseRG`), or, on the whole-file path, when the file's last one is |
 | 2 | `fileSlot.ensureLoaded`'s pool reconcile (`planner/physical/util.go:484`) | the pooled buffer's real capacity above the file size | silent | with (1) |
 | 3 | `scanSourceInner.trackScanBatch` (`planner/physical/plan.go`) | every decoded row-group batch | silent | when the batch leaves through `next()` |
 | 4 | `scanSourceInner.trackPooledBuf` (same file) | the EAGER scan path's whole-file buffers, `cap(buf)`, no ceiling | silent | at scan close (`releasePooledBufs`) — coarser than (1) |
@@ -104,57 +104,79 @@ against, and the join's own share of them is provably unreleasable (5 above).
 Seven silent-or-loud producers is a reason to add none, not a reason the next
 one is cheap. A build that cannot reserve a whole arrival batch splits it.
 
-**#789 — a query's outcome at a fixed budget still follows the scan's
-read-ahead. OPEN; this is a residual, not a decision.**
+**#789 — a query's outcome at a fixed budget followed the scan's read-ahead.
+The FILE half is closed (2026-09-03); the DECODE half is deferred with its
+mechanism.**
 
-Producer 3 charges every decoded row-group batch and releases it when the
-consumer takes the batch, so the floor at the build's first `Reserve` carries
-however many row groups the scan decoded ahead. Measured on the type-matrix
-self-join at 512 KiB: `k x 17,888` bytes, `k in 0..3`, and the join fits for
-`k <= 2` and not for `k = 3` — 2 refusals in 20 runs of an identical query, 0
-in 20 with `GOMAXPROCS=1`. Two bounds were implemented in this arc and **both
-are refused on measurement**:
+Two charges moved the floor between identical runs of one query.
 
-- **By the budget's free HEADROOM** — the design `scan.DecodeWindow`'s ledger
-  already uses on the worker path (`NewDecodeWindowWithLedger`, admission by
-  `ledger.Reserve` with the delivery cursor always forced through). On the
-  embedded scan path it INVERTS the result: 3 of 20 runs answered where 17 of
-  20 answered without it, and the `GOMAXPROCS=1` control went from 20 answers
-  to 0. The reason is producer 1's release granularity: `used` contains the
-  scan's own whole-file buffer, which is freed only when the file's LAST row
-  group has been decoded, so a headroom-derived bound throttles exactly the
-  decoding that would release it. A bound whose input is dominated by the
-  charge it is shrinking is a feedback loop.
-- **By a fixed SHARE of the budget** (`budget/N` per scan source, one-batch
-  floor). This removes the feedback, but the value decides the answer: swept at
-  512 KiB, 20 runs per column, `N = 2 / 4 / 8 / 16` moves which of the eighteen
-  join keys are deterministic (`c_bytes` and `c_cidr` answer 20/20 at `N = 8`;
-  all eighteen do at `N = 16`) while the census wall goes from 39-67 s to
-  638 s, because once the allowance falls below one batch the source decodes
-  serially. That is a knob trading determinism against decode parallelism, not
-  an invariant, and this ADR does not encode knobs.
+**The file, closed.** Producer 1 charged the WHOLE parquet file and producer 1's
+release point was the file's LAST row group, so for the length of a scan every
+other operator admitted against a floor that was the scan's file — 412,074
+bytes of a 512 KiB budget on the type-matrix fixture, 79% of it. Measured with a
+fresh database per run, 20 runs per column, all 18 flat columns: `c_cidr`
+refused 20/20 with the scheduler free and answered 20/20 at `GOMAXPROCS=1`;
+`c_str` answered 2 of 20 and `c_bytes` 1 of 20 with the scheduler free and
+20/20 serially.
 
-**What the fix requires, in code terms.** Headroom admission is the right
-design and it is already in the tree; what blocks it here is that the embedded
-scan's file charge is all-or-nothing. `fileSlot` holds ONE pooled `[]byte` for
-the whole parquet file (`ensureLoaded`) and the decoder reads row groups out of
-it, so the charge cannot be released per row group without the bytes being
-released per row group — which means per-column-chunk ranged reads. That path
-exists (`docs/design/scan-pread-reads.md`, staged pread) but is taken only when
-the store hands back an `*os.File`; the whole-file read for object stores is a
-recorded decision with its own measurements ("one object GET beats per-chunk
-ranged GETs"). Reopening it is a scan-architecture arc, not a rider on an
-accounting fix, so #789 is deferred here under the correctness-fix protocol's
-rule 11 with its mechanism written down rather than bounded by a constant.
+The scan now lands its file into ONE BUFFER PER ROW GROUP, out of the same
+single object GET, cut at the byte ranges the footer already carries
+(`parquet.FileReader.SetRowGroupBytes`, `planner/physical/scan_rowgroup_load.go`).
+Each buffer is charged when it lands and released when its row group has been
+decoded, and the read is demand-driven with each row group admitted by
+`ReserveOrForce` before it is read — no share, no count, no new constant: what
+a scan holds follows the BUDGET. All 18 columns now answer 20/20 on both arms,
+and the doubled budget the join family carried, with the ratchet that watched
+it, are deleted. Kill switch `WADJET_SCAN_RG_BUFFERS=0`.
 
-**How the residual is pinned, so a fix cannot land quietly.** The type-matrix
-join family keeps `spillMxJoinBudget`, and that raise now RATCHETS: the sweep
-runs every raised cell at `spillMxBudget` and fails the family if all of them
-answer on every run. `wadjet.TestAScansDecodedReadAheadStillOverdrawsTheBudget`
-pins the loud face of the same residual — a shape whose row groups are big
-enough that read-ahead alone carries the query to 1.4-1.7x its budget, refusing
-on every run — and fails if it answers or if the refusal is issued from under
-the budget.
+Two paths keep the whole-file read, deliberately: a file whose row-group
+metadata came from the catalog's ANALYZE-written blob has no decoded footer, so
+its byte ranges would cost a second request per file — the one thing the
+recorded whole-file-GET decision forbids (`docs/design/scan-pread-reads.md`);
+and local-fd stores keep staged pread, which holds no whole-file buffer at all.
+Carrying byte ranges in the RG-metadata blob would close the first, and is a
+catalog-format change, not this one.
+
+**The decode, deferred.** Producer 3 charges a decoded batch AFTER the decode
+and releases it when the consumer takes it. A charge taken after the allocation
+bounds nothing, so a shape whose row groups are big enough carries itself past
+its budget on read-ahead alone; `wadjet.TestAScansDecodedReadAheadStillOverdrawsTheBudget`
+pins one (4,000 rows of 512-byte strings, row groups of 512, 1 MiB) that
+refuses on every run holding 1.04x-1.73x its budget.
+
+The fix is admission BEFORE the decode, against the projected columns'
+uncompressed bytes from the footer — the class ADR-0015 records for the
+worker's decode window. It was implemented and MEASURED here, twice, and both
+forms are refused on the measurement:
+
+- with `ReserveOrForce`'s bounded-wait-then-force, the pinned shape answered
+  1 of 20 runs and took 156 s against 0.25 s;
+- with the wait ended by a CONDITION rather than a clock (wait while this
+  source holds decoded bytes its consumer has not taken; force when it holds
+  nothing, one forcer at a time), it answered 17-19 of 20 and took ~90 s.
+
+Both replace a deterministic refusal with a nondeterministic answer — the
+defect class — at 350x the wall. The reason is structural: at a budget that
+tight the scan serializes, and part of what it then waits on is the join's hash
+index, which a grace eviction cannot free (#823's deferred half, the arena is
+global across the 64 partitions). **Admission cannot bound what it cannot cause
+to be released.** So the decode half waits on #823's per-partition index state,
+and this ADR records it as deferred rather than bounded by something that
+measures worse. The earlier bounds this section carried — a headroom bound
+that inverted the result 17/20 -> 3/20, and a `budget/N` share whose value
+decided which shapes were deterministic — stay REJECTED; the headroom one was
+inverted by producer 1's granularity, which is the half now closed, and it is
+the CONDITION-ended form above that supersedes it.
+
+**How the deferred half is pinned, so a fix cannot land quietly.**
+`wadjet.TestAScansDecodedReadAheadStillOverdrawsTheBudget` runs the pinned
+shape 20 times and fails if ANY run answers — an answer means the read-ahead is
+bounded. It also carries the two measurements above, so the next reader does
+not re-derive the appealing version. The file half's own gates are
+`wadjet.TestAJoinAtAFixedBudgetIsDecidedByTheQueryNotTheScheduler` (the census
+as an assertion, with the `GOMAXPROCS=1` control it must agree with) and
+`wadjet.TestAScanIssuesOneObjectGetPerFile` (the request count the design had
+to keep).
 
 **What this arc DID settle about the ledger.** A downstream operator inherits
 an overdrawn tracker, and that is correct: there is one ledger per query and a

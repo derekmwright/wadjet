@@ -306,29 +306,40 @@ and a budget below their sum makes queries refuse rather than run slowly:
 
 | charge | size | released when |
 |---|---|---|
-| a scan's whole-file load | the parquet file's bytes | its last row group has been decoded |
+| a scan's file load | one ROW GROUP's bytes at a time, or the whole file when the file's footer has not been decoded in this process yet (see below) | that row group has been decoded — the whole file's, when it is the whole file |
 | decoded read-ahead | **not bounded by the budget** — one decoded row group per scan worker, plus whatever is queued for the consumer | the consumer takes the batch |
 | a hash join's index | ~40 bytes per build row | the join closes — grace eviction frees the build's COLUMNS, not its index entries |
 | a CROSS join's whole build side | every build row's columns | the join closes — a cross join's probe reads every build row, so its build cannot be partitioned and evicted and does not spill at all |
 | an uncorrelated `IN (SELECT …)` membership set | ~24 bytes per inner row | the query's plan is torn down |
 
-So a per-task budget wants room for the largest file a scan will load, plus
-roughly `40 × build_rows` for the largest join, plus several decoded row groups
-of the widest column a scan projects, on top of whatever the spilling operators
-need. The read-ahead row is the one with no ceiling: how many decoded row groups
-are in flight follows the scan's worker count and how fast the consumer takes
-them, not the budget. A join whose index alone does not fit refuses with
+So a per-task budget wants room for the largest ROW GROUP a scan will read,
+plus roughly `40 × build_rows` for the largest join, plus several decoded row
+groups of the widest column a scan projects, on top of whatever the spilling
+operators need. A join whose index alone does not fit refuses with
 `memory budget exceeded`, which is the right answer to a budget that small.
 
-**Size with margin, not to the edge.** A budget set so tightly that a query's
-demand lands ON it rather than under it does not fail predictably: how many row
-groups the scan has decoded ahead of the operator that reserves is decided by
-the scheduler, so the same query on the same data at the same budget can answer
-on one run and refuse on the next. This is a known open defect (#789) — measured
-at 2 refusals in 20 identical runs on a 512 KiB budget, and 0 in 20 with
-`GOMAXPROCS=1`. It is a sizing hazard, not a correctness one: the refusal is
-loud and no answer is ever wrong. Leaving headroom above the figures in the
-table avoids the regime entirely.
+**A scan holds row groups, not files.** A scan reads its parquet files with one
+object GET each — the request count is unchanged — but lands the body into one
+buffer per row group, charging each when it lands and releasing it when that row
+group has been decoded. Under a budget the read is admitted: the scan advances
+only as far as the budget has room for, so what a scan holds follows the budget
+rather than how far the scheduler let it run ahead. Two cases still read the
+whole file into one buffer, and want a budget sized to the FILE rather than to a
+row group: a table whose row-group metadata comes from `ANALYZE`'s persisted
+blob, where the file's footer has not been decoded in the process and the byte
+ranges are not in hand, and stores that hand back a local file descriptor, which
+read each column chunk on demand and hold no whole-file buffer at all.
+`WADJET_SCAN_RG_BUFFERS=0` restores the whole-file read everywhere.
+
+**Decoded read-ahead is still not bounded by the budget.** How many DECODED row
+groups are in flight follows the scan's worker count and how fast the consumer
+takes them: a batch is charged after it is decoded, and a charge taken after the
+allocation bounds nothing. On a budget sized so a query's demand lands ON it
+rather than under it, a shape with fat row groups can carry itself past the
+budget on read-ahead alone and refuse. That is a known open defect (#789's
+remaining half) and a sizing hazard, not a correctness one: the refusal is loud
+and no answer is ever wrong. Leaving headroom above the figures in the table —
+several decoded row groups of the widest column projected — avoids it.
 
 A refusal names what it could not fit: an `IN subquery membership set` refusal
 is the uncorrelated-subquery row above, and a `hash join build` refusal is the

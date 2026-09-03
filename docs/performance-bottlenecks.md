@@ -106,12 +106,14 @@ The data is already available — `RowGroupStats()` reads `ci.MinValue(p)` and `
 ### 5. Full-File S3 Download Strategy — half closed, half deliberate
 
 > **Partly closed.** Local-fd stores skip the whole-file read entirely and pread each projected column chunk; the worker uses `GetReaderAt` range reads whenever column projection is active (Q07 reading 3 of 16 lineitem columns: 1 GB vs 3.5 GB). **What remains is deliberate:** non-local stores keep the whole-file GET because one object GET beats per-chunk ranged GETs for the narrow TPC-H tables it serves — see `docs/design/scan-pread-reads.md`. Reopening this needs a measurement on a wide table, not a heuristic.
+>
+> **The MEMORY half is closed separately (2026-09-03, #789).** The one GET stays one GET, but its body is landed into one buffer per ROW GROUP, charged and released per row group, so a scan holds the row groups it is decoding rather than the file — `internal/planner/physical/scan_rowgroup_load.go`. Bandwidth is unchanged, which is what the rest of this item is about.
 
-**Location:** `internal/planner/physical/util.go:454-461`
+**Location:** `internal/planner/physical/util.go` (`fileSlot.ensureLoaded`)
 
 ```go
 rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
-data, err := readAll(rc)  // downloads entire file into memory
+// one request, whole body — landed per row group, but every byte is fetched
 ```
 
 The comment explains the rationale: "a single S3 GET is far cheaper than N range reads per column page." This is true for wide projections but wasteful for narrow ones.

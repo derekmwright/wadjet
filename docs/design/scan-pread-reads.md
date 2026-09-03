@@ -99,6 +99,18 @@ allocation rate flat (`pread_allocs` marker near-zero after warmup):
 an unpooled path would push the whole scan byte volume through the
 heap and convert the GC pause problem into a GC frequency problem.
 
+## Related: the object-store path stopped holding a whole file (2026-09-03)
+
+This design removed the whole-file buffer for stores that hand back a local
+file descriptor. Non-local stores keep the whole-file GET — one object GET
+beats per-chunk ranged GETs for the narrow tables it serves, and that decision
+is unchanged — but they no longer hold the file in ONE buffer: the body of that
+single GET is landed into one buffer per row group, charged and released as
+each row group decodes, so a scan's memory charge is the row groups it is
+decoding (#789, `internal/planner/physical/scan_rowgroup_load.go`, kill switch
+`WADJET_SCAN_RG_BUFFERS=0`). The request count, and the bytes fetched, are the
+same as before.
+
 ## Engagement markers
 
 `drop-behind stats` wlog lines carry `pread_chunks`, `pread_bytes`,
