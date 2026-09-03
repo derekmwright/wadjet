@@ -874,6 +874,10 @@ type batchRenamer struct {
 	// float64 0/1 (#610 review). Everything else stays float64, the historical
 	// wrapped-aggregate output.
 	exprType map[int]parquet.TypeID
+	// exprDecl carries the DECIMAL (p,s) beside exprType for a rename the plan
+	// declared, because a DECIMAL is an unscaled integer plus a scale and a
+	// vector built at the wrong one reads back a power of ten out.
+	exprDecl map[int]parquet.Column
 	project  bool
 }
 
@@ -886,6 +890,7 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 	br := &batchRenamer{renames: renames, project: true}
 	br.compiled = make(map[int]expr.Expr, len(renames))
 	br.exprType = make(map[int]parquet.TypeID, len(renames))
+	br.exprDecl = make(map[int]parquet.Column, len(renames))
 	for i, r := range renames {
 		if r.Expr == nil {
 			continue
@@ -906,6 +911,20 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 			br.exprType[i] = parquet.TypeBool
 		} else if _, ok := e.(expr.BoolExpr); ok {
 			br.exprType[i] = parquet.TypeBool
+		} else if r.TypeKnown {
+			// The PLAN's declaration wins over the historical float64. A
+			// column the gather computes exists in no catalog, so its declared
+			// type IS its runtime type (ADR-0025), and it is the same
+			// inference attachScanSelectProjections makes for a SELECT item a
+			// FRAGMENT computes — one rule for a computed column's type,
+			// whichever operator ends up computing it. Without it every
+			// non-numeric, non-boolean result was nulled: `CAST(MAX(c_ts) AS
+			// STRING)`, `UPPER(MAX(c_str))`, `CASE … THEN 'a' ELSE 'b' END`
+			// over a window, on both DAG arms, for every type (#831, #645).
+			br.exprType[i] = r.Type
+			br.exprDecl[i] = parquet.Column{
+				Type: r.Type, Precision: r.Precision, Scale: r.Scale,
+			}
 		}
 	}
 	if br.project && len(columns) > 0 {
@@ -1160,7 +1179,7 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 			// newBatchRenamer (TypeBool==0, so a zero-value default here would
 			// be wrong — the map entry is always present instead).
 			outType := br.exprType[i]
-			col := evalExprColumn(e, b, outType)
+			col := evalExprColumn(e, b, outType, br.exprDecl[i])
 			newCols[i] = col
 			// The SCHEMA follows the vector, not the other way round: an
 			// EXACT DECIMAL result is typed from the input schema at the first
@@ -1246,7 +1265,8 @@ func evalInt64Column(e expr.Expr, b *batch.RecordBatch) *batch.Vector {
 // producing strings) still lands on the float64 path and is nulled — a
 // pre-existing bound, but no longer a LEAK: the wrapper is recognized and
 // projected, never passed through as internal columns.
-func evalExprColumn(e expr.Expr, b *batch.RecordBatch, outType parquet.TypeID) *batch.Vector {
+func evalExprColumn(e expr.Expr, b *batch.RecordBatch, outType parquet.TypeID,
+	decl parquet.Column) *batch.Vector {
 	if outType == parquet.TypeBool {
 		return evalBoolColumn(e, b)
 	}
@@ -1268,6 +1288,21 @@ func evalExprColumn(e expr.Expr, b *batch.RecordBatch, outType parquet.TypeID) *
 	// which engine ran it.
 	if expr.Int64ResultOf(e, b) {
 		return evalInt64Column(e, b)
+	}
+	// Everything else the PLAN declared. The two arms above read the input
+	// SCHEMA and are kept ahead of it because a schema is a stronger answer
+	// than an inference; what this arm adds is every type neither of them
+	// names — STRING above all, but also a DATE, a TIMESTAMP or a network
+	// address a CASE or a CAST can produce — which fell to the float64 switch
+	// below and were nulled row by row (#831, #645).
+	//
+	// The materialization is exec.Project's, value for value: a vector of the
+	// declared type and SetValue per row. That is the point of using the
+	// declaration rather than probing a box — the two engines then build the
+	// same column from the same expression, and a declaration that is wrong is
+	// wrong on both instead of silent on one.
+	if outType != parquet.TypeFloat64 && outType != parquet.TypeBool {
+		return evalDeclaredColumn(e, b, decl)
 	}
 	v := batch.NewVector(parquet.TypeFloat64, b.Len)
 	if cap(v.Float64Data) < b.Len {
@@ -5596,4 +5631,24 @@ func (c *Coordinator) dispatchGatherStage(
 		"query_id", queryID, "msg_count", recv.msgCount.Load(),
 		"err", waitErr)
 	return res, waitErr
+}
+
+// evalDeclaredColumn materializes an expression at the type the PLAN declared
+// for it, which for a column no catalog carries IS its runtime type
+// (ADR-0025). It is exec.Project's own materialization — a vector of the
+// declared type, SetValue per row — so the gather and the single-process
+// projection build the same column from the same expression.
+func evalDeclaredColumn(e expr.Expr, b *batch.RecordBatch, decl parquet.Column) *batch.Vector {
+	v := batch.NewVectorWithScale(decl.Type, b.Len, decl.Scale)
+	emit := func(row, dst int) { v.SetValue(dst, e.Eval(b, row)) }
+	if b.Sel != nil {
+		for i, src := range b.Sel {
+			emit(int(src), i)
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			emit(i, i)
+		}
+	}
+	return v
 }

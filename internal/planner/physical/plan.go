@@ -496,6 +496,23 @@ type OutputRename struct {
 	// select order is not their output order; the gather uses this to pair
 	// each rename with the column of its own class (#575).
 	IsAgg bool
+	// Type is the PLAN's declared output type for a rename the gather has to
+	// EVALUATE (Expr non-nil), with TypeKnown distinguishing a declaration
+	// from the zero value the way ProjectExprSpec.TypeKnown does — TypeBool
+	// is 0, so a genuinely boolean expression is indistinguishable from "not
+	// set" without it.
+	//
+	// A column the gather computes exists in no catalog, so its declared type
+	// IS its runtime type — the same rule ADR-0025 states for a materialized
+	// sort key and for every ProjectExprSpec. Without it the gather built
+	// EVERY wrapped expression into a float64 vector and nulled any box that
+	// is not a number or a bool, so `CAST(MAX(c_ts) AS STRING)` came back NULL
+	// on both DAG arms for every type while the single-process path rendered
+	// the value (#831, #645).
+	Type      parquet.TypeID
+	TypeKnown bool
+	Precision int
+	Scale     int
 }
 
 // ProjectExprSpec is one SELECT-list item a scan fragment must emit: Name is
@@ -3757,9 +3774,12 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	// answered correctly — the same identity gap as #723, one stage later.
 	keyRefs := groupKeyByIdentity(aggregateUnderOutput(root))
 	renames := make([]OutputRename, 0, len(proj))
+	renameScope := findOutputProjectionNode(root)
 	for _, p := range proj {
 		var src, target string
 		var astExpr plansql.Node
+		var declType expr.DeclType
+		declKnown := false
 		isAgg := p.IsAgg
 		switch {
 		case p.IsAgg:
@@ -3808,6 +3828,12 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			}
 			astExpr = plansql.ReplaceGroupKeyRefs(p.ASTExpr, keyRefs)
 			src = firstColRefName(astExpr)
+			// The declaration for the column the gather is about to build.
+			// Inferred against the scope the RESPELLED expression reads —
+			// the producer's output, where `__agg_N` and `__win_N` live —
+			// which is the same scope attachScanSelectProjections types its
+			// own specs against.
+			declType, declKnown = inferRenameExprDecl(astExpr, renameScope)
 		case p.Column != "" && p.Alias != "":
 			// Bare column reference. Worker may emit qualified ("n1.n_name")
 			// or unqualified ("n_name") depending on the upstream join chain.
@@ -3841,7 +3867,11 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 		default:
 			continue
 		}
-		renames = append(renames, OutputRename{From: src, To: target, Expr: astExpr, IsAgg: isAgg})
+		renames = append(renames, OutputRename{
+			From: src, To: target, Expr: astExpr, IsAgg: isAgg,
+			Type: declType.ID, TypeKnown: declKnown,
+			Precision: declType.Precision, Scale: declType.Scale,
+		})
 	}
 	return renames
 }
@@ -16094,4 +16124,20 @@ func joinProbeOutputFilter(node *logical.Node) map[string]bool {
 		}
 	}
 	return filter
+}
+
+// inferRenameExprDecl types an expression the GATHER will evaluate, against
+// the scope the producer below the output projection emits.
+//
+// It is the same call attachScanSelectProjections makes for a SELECT item its
+// own fragment computes — one rule for a computed column's type, whichever
+// operator ends up computing it. A scope it cannot read leaves the rename
+// undeclared, and the gather keeps the runtime detections it had.
+func inferRenameExprDecl(astExpr plansql.Node, scope *logical.Node) (expr.DeclType, bool) {
+	if astExpr == nil || scope == nil || len(scope.Children) != 1 {
+		return expr.DeclType{}, false
+	}
+	child := scope.Children[0]
+	return inferProjectionDeclType(astExpr, parquet.TypeString,
+		strictIntArithCols(child), inputColDecls(child)), true
 }
