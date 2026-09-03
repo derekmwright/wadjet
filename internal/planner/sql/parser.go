@@ -1581,6 +1581,20 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 		// treating the clause as an ordinary NOT MATCHED would act on the
 		// wrong rows. It is an unimplemented FEATURE, not bad SQL, so it is
 		// 0A000 and it refuses (#686 R2-3, wadjet#718).
+		//
+		// DEFERRED — #718, and the mechanism is two changes on top of this
+		// one. The parser needs a CLAUSE-KIND field: MergeWhenClause carries
+		// only `Matched bool`, which cannot express the difference between
+		// NOT MATCHED, NOT MATCHED BY SOURCE and NOT MATCHED BY TARGET. The
+		// executor needs a SECOND set beside matchedTargetIndices: that one
+		// records the targets a WHEN MATCHED clause FIRED on, and BY SOURCE's
+		// complement is "no source row matched this target at all", fired or
+		// not — the per-source-row `matched` bookkeeping is the right signal
+		// but is not recorded per target. BY TARGET is a synonym for plain
+		// NOT MATCHED and maps onto the existing branch. This is a FEATURE,
+		// not a wrong answer, and it is pinned four ways: the two 0A000 rows
+		// in the DML census, TestMergeNotMatchedBySourceIsReportedAsUnsupported,
+		// and the two limitation lines in docs/sql-reference.md.
 		if l.peekToken().typ == TokenKWBy {
 			l.nextToken()
 			side := l.nextToken()

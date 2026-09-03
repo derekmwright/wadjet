@@ -186,7 +186,7 @@ Full analytical SQL via a custom recursive descent parser:
 - Subqueries: scalar, IN, EXISTS, correlated subqueries
 - Window functions with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references
-- CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE
+- CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
 - Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters

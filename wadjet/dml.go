@@ -2069,10 +2069,34 @@ func pgOperandTypeName(t parquet.TypeID) string {
 // every row and reported "UPDATE 0", where PostgreSQL raises 42703 (#678).
 // Every column the clause names is resolved here, before anything executes.
 //
-// It is exported because the HTTP DML executors are a second copy of the
-// embedded ones and had a third and fourth copy of this compile step. A
-// predicate is only half of the contract, though; MatchDMLRows is the other
-// half and is the one that must be used to RUN it.
+// It is exported because MatchDMLRows is the other half of the contract and
+// is the one that must be used to RUN a predicate. (The HTTP door is no longer
+// a second caller: since #815 it reaches the executors through
+// DB.ExecuteParsed like everything else.)
+//
+// DEFERRED — #688: A SUBQUERY IN A DML PREDICATE.
+//
+// `DELETE … WHERE id IN (SELECT …)`, `NOT IN (SELECT …)`, a scalar subquery
+// and a correlated EXISTS are all 0A000 here, and the reason is structural
+// rather than local: THIS FUNCTION IS NOT A PLANNER. It parses, resolves the
+// column names against the target's schema, and calls expr.Compile with a NIL
+// runner. Every planner-resident guarantee is therefore absent on this door —
+// the subquery runner, the decorrelation rewrites, the plan-time literal
+// refusals (#721's had to be re-implemented here for exactly that reason) and
+// node-coverage validation.
+//
+// The STRUCTURAL fix is to plan a DML predicate through the normal planner, so
+// that a DML WHERE is a WHERE. The BOUNDED one — handing
+// expr.CompileWithRunner a db.Query closure — is three lines, closes
+// `IN (SELECT …)`, `NOT IN (SELECT …)` and the scalar subquery, and leaves
+// CORRELATED EXISTS refused. Correlated EXISTS is the shape #688's own body
+// names first, so rule 11 of docs/design/correctness-fix-protocol.md forbids
+// shipping it: a fix bounded by a model that leaves the issue's headline shape
+// pinned is a surface repair standing where a structural one belongs, and the
+// disposition is to DEFER with the mechanism written down. This is that
+// writing-down; the five #688 entries in the DML census
+// (internal/server/pgwire/dml_census_test.go) are its pin, each carrying
+// PostgreSQL 17's answer beside the refusal.
 //
 // THE EMPTY-PREDICATE BACKSTOP. A nil predicate is the widest answer this
 // function can give — every row of the table — so "the statement had no

@@ -1638,6 +1638,8 @@ expression.
 
 - `NATURAL JOIN` — rejected; write the join condition with `ON`
 - `JOIN ... USING (col)` — not parsed; write `ON a.col = b.col`
+- A SUBQUERY in an `UPDATE` / `DELETE` `WHERE` clause — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS` — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner.
+- Two statements in one simple-protocol message (`DELETE ...; DELETE ...`) — refused. The extended protocol refuses it as PostgreSQL does (42601).
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
 - A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000

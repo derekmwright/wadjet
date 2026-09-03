@@ -851,7 +851,32 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 
-	// Handle ; at end
+	// Handle ; at end.
+	//
+	// DEFERRED — #711: a MULTI-STATEMENT simple-protocol string. This is the
+	// only semicolon handling in the path and it is trailing-only, so
+	// `DELETE …; DELETE …` is ONE statement to everything below. PostgreSQL
+	// runs it as a SEQUENCE: one CommandComplete per statement, an error
+	// stops the sequence, and a single ReadyForQuery ends the whole message.
+	//
+	// Measured, and it bounds the work: PostgreSQL's EXTENDED protocol
+	// REFUSES a multi-statement string with 42601 and wadjet's already does,
+	// so this is a simple-protocol change and nothing else. What it needs is
+	// (a) a top-level semicolon splitter that respects string literals,
+	// dollar-quoting and comments — the raw material is TokenSemicolon,
+	// lexDollarString, and the depth-counting scan in dml_parser.go's
+	// HasTopLevelWhereToken — and (b) this function restructured so the
+	// per-statement body emits N CommandCompletes while exactly ONE
+	// ReadyForQuery is emitted at the end, including on error: the
+	// dispatch-level recover at the top of this file assumes handleQuery owes
+	// at most one 'Z', and a second one desynchronizes every client.
+	//
+	// It is the only change in the DML arc that touches the protocol state
+	// machine, which is why it is deferred whole rather than attempted beside
+	// twelve value fixes. Two shapes are refused today and the classes differ:
+	// a second statement with a WHERE is 42601 (the expression parser's
+	// unconsumed-tail check), and a FIRST statement with no WHERE silently
+	// drops the tail and trips the empty-predicate backstop as XX000.
 	sql = strings.TrimRight(sql, ";")
 	sql = strings.TrimSpace(sql)
 	if sql == "" {
