@@ -74,6 +74,15 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 		path   string
 	}
 
+	// The CATALOG's schema for this table, which is the domain every bound
+	// ANALYZE persists is recorded in. A miss is not fatal: the reconciliation
+	// it feeds is a no-op for every file that declares what the catalog does,
+	// which is every file this writer produces.
+	var declared []parquet.Column
+	if meta, err := c.GetTable(ctx, name); err == nil && meta != nil {
+		declared = meta.Schema.Columns
+	}
+
 	// Build job queue.
 	var jobs []fileJob
 	for pi, part := range manifest.Partitions {
@@ -105,7 +114,7 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 					resCh <- fileResult{pi: j.pi, fi: j.fi, err: err}
 					continue
 				}
-				sk, err := computeFileSketches(ctx, c.store, c.bucket, j.path)
+				sk, err := computeFileSketches(ctx, c.store, c.bucket, j.path, declared)
 				resCh <- fileResult{pi: j.pi, fi: j.fi, sketches: sk, err: err}
 			}
 		}()
@@ -289,7 +298,10 @@ type fileColumnSketches struct {
 // Uses ReadRowGroup which materializes each row as a map[string]any —
 // the same value representation the ingest path uses, so produced
 // stats are byte-compatible across collection sites.
-func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path string) (*fileColumnSketches, error) {
+// declared, when non-nil, is the CATALOG's schema for the table this file
+// belongs to. Every row-group bound is recorded in that domain rather than in
+// the file's own — see the ReconcileRowGroupStats call below.
+func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path string, declared []parquet.Column) (*fileColumnSketches, error) {
 	rc, _, err := store.Get(ctx, bucket, path)
 	if err != nil {
 		return nil, fmt.Errorf("get: %w", err)
@@ -334,7 +346,13 @@ func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		out.rgStats[rg] = reader.RowGroupStats(rg)
+		// Recorded in the CATALOG's domain, not the file's. A DECIMAL bound is
+		// an unscaled integer whose meaning is half a declaration, so a bound
+		// persisted from a file that declares another scale would be read back
+		// later against a predicate at the declared scale and prune away rows
+		// it does not cover — and the consumer of persisted metadata has no
+		// footer left to reconcile it against (#707, ADR-0018).
+		out.rgStats[rg] = parquet.ReconcileRowGroupStats(reader.FileReader(), declared, reader.RowGroupStats(rg))
 		if len(sketchCols) == 0 {
 			// Nothing to sketch: the footer stats above are the whole
 			// answer, and a projection of no columns would read them all.

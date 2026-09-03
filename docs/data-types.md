@@ -31,6 +31,20 @@ CREATE TABLE transactions (
 - **Arithmetic**: SUM, AVG, MIN, MAX all use exact Int128 arithmetic through the aggregate pipeline
 - **Parquet storage**: Written as Parquet DECIMAL logical type for interoperability
 
+**The catalog's `(precision, scale)` is the column's type, whatever a file says.**
+A parquet DECIMAL column chunk stores only the unscaled integer — the scale
+lives in the file's schema — so a file registered against this table that
+declares a different scale holds the right *number* under a different half of
+the declaration. Wadjet moves such a value to the column's declared scale as it
+reads it, with PostgreSQL's assignment-cast rules: exact when the scale rises,
+rounded half away from zero when it falls, and `22003 numeric field overflow`
+when the result does not fit the declared precision. Row-group statistics are
+moved the same way, so predicate pruning stays correct, and `COMPACT` rewrites
+such a file at the declared scale. This is what makes it safe to register
+files written by pyarrow, parquet-mr or Spark against an existing table whose
+DECIMAL columns were declared with different parameters. See
+[ADR-0018 §9](adr/0018-parquet-file-numbers-are-input.md).
+
 ### String and Binary Types
 
 | Type | Go Backing | Storage | Use Cases |

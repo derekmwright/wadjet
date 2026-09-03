@@ -12,7 +12,11 @@ column (#428). A second compatibility note follows the pre-#409 one, for the
 do not agree", after the same self-describing-footer channel §3 and §4 rely
 on was found to stop at the top level: an IPv6 or a UUID inside a ROW, ARRAY
 or MAP read back as the empty string while the flat column read correctly
-(#589).
+(#589). Amended 2026-09-03 with §9, "a DECIMAL's declaration is half of every
+value, so the CATALOG's is the one that counts", after two files of one table
+declaring one column at two scales were found to answer a plain projection
+100x wrong on the single-process engine and 100x wrong the OTHER way on the
+stage DAG (#707).
 
 ## Context
 
@@ -425,6 +429,86 @@ top-level-only limitation, unchanged here on purpose: it only matters for
 pre-`wadjet.schema` files, which have no blob, and the no-blob path is pinned
 by `TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter`. Moving both halves at
 once would leave that gate unable to say which one moved (#608).
+
+### 9. A DECIMAL's declaration is half of every value, so the CATALOG's is the one that counts
+
+(Added 2026-09-03, #707.)
+
+§4 settles what a DECIMAL carrier MEANS: the unscaled integer at the column's
+declared scale. It does not settle WHOSE declaration, and for every other type
+the question does not arise — an INT64 leaf is an int64 whoever wrote it. A
+DECIMAL column chunk carries only the integer; the scale lives in a schema. So
+when a file's schema and the catalog's disagree about the scale, the same bytes
+are two different numbers, and there is no bit anywhere in the data that says
+which.
+
+Two files of one table can disagree: a foreign writer (pyarrow's
+`decimal128(15,4)` registered against a `DECIMAL(15,2)` table), a pre-#647
+write path, an unrepaired §8/#608 file. Before this rule, none of the read
+paths asked. The single-process scan allocated the output vector from the
+CATALOG's schema and copied the file's carriers into it verbatim, so a
+`12.7500` written at scale 4 came back as `1275.00` — a hundredfold error on a
+plain `SELECT id, a`, with no aggregate and no error. The stage DAG took the
+FILE's `(p, s)` through `retypeFromCatalog` and wrote it into the `.wshf`
+header, so the same two files declared one column two ways and the read either
+collided in `wshf.SchemaGuard` (ADR-0010) or, where no shuffle stood above it,
+answered `0.1275` — wrong in the OTHER direction from the single-process
+engine, which is §3's invariant broken as loudly as it can be.
+
+**The catalog's `(p, s)` is the column's type on every path, and a file that
+declares another scale has its carriers MOVED to it at read.** Not
+reinterpreted, and not refused: the file holds the right number and says so, so
+the number survives. The move is PostgreSQL's assignment cast, measured live —
+exact when the scale rises, half AWAY FROM ZERO when it falls, `22003` when the
+result has no carrier or leaves the declared band. It is one function,
+`parquet.DecimalRescale`, routed through `DecimalValueFromText` so it inherits
+ADR-0024's already-gated grammar rather than growing a second scaling rule;
+`batch.TestDecimalRescaleAgreesWithBatchRescale` holds it to the engine's
+`batch.Rescale` so the two cannot drift.
+
+The reconciliation reaches four places, and the fourth is the one that is easy
+to miss:
+
+- the native columnar decode (`scan.rescaleDecimalChunk`, the shape
+  `rescaleTimestampChunk` already had for the same reason one type over);
+- the row reader's decode, in BOTH of its DECIMAL boxes — an int64 to 18
+  declared digits and a `Decimal128` beyond, because `decodeDecimalValues`
+  chooses between them by precision and reconciling only one would repair a
+  narrow column and silently leave a wide one;
+- `retypeFromCatalog`, which now adopts the catalog's `(p, s)` where it used to
+  `continue` on a matching TypeID, so a stage's `.wshf` header declares the
+  relation and not the file;
+- **the row-group STATISTICS.** A footer's DECIMAL min/max is the same kind of
+  thing as a value — an unscaled integer at the file's scale — and a predicate
+  arrives at the catalog's. Reconciling the values and leaving the bounds alone
+  moves the defect rather than fixing it: `WHERE a = 12.75` pruned away the
+  whole row group of a file declaring `(15,4)`, because the predicate was 1275
+  and the footer said 127500. `parquet.ReconcileRowGroupStats` moves the bounds
+  by the same function, which is EXACT rather than approximate because
+  round-half-away-from-zero is monotone — the rescaled minimum is the minimum
+  of the rescaled values. A bound that cannot be moved is DROPPED, never
+  guessed at (§5's rule: withholding costs a prune, guessing costs rows).
+  ANALYZE records its persisted bounds in the CATALOG's domain for the same
+  reason, since a consumer of persisted metadata has no footer left to
+  reconcile against.
+
+Compaction needs no rule of its own and gets the property for free: it already
+reads through `ReadRowGroupAs` with the table's schema and writes under the
+table's schema, so once the reader reconciles, mixed-scale inputs become one
+correctly-scaled output. That matters more here than anywhere else, because
+compaction DELETES its inputs —
+`compaction.TestCompactionReconcilesMixedDeclaredScales` is the gate, run three
+passes for §4's idempotence property.
+
+The boundary is a claim and the corpus attempts it from both sides: this
+reconciles a SCALE disagreement and nothing else. A file that agrees about the
+scale is read exactly as before, and its values are NOT held to the catalog's
+precision at read — a per-value band check on every DECIMAL column of every
+ordinary file is a different change with a different cost, and #647 already
+refuses such a value at the door it is written through. A catalog DECIMAL over
+a leaf carrying NO decimal annotation states no scale, so §4's
+already-unscaled rule stands there; both read paths refuse that pairing earlier
+anyway.
 
 ## Consequences
 

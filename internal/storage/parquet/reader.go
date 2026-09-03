@@ -824,6 +824,24 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 		// name the caller asked for rather than by the one on disk.
 		out[i].Name = want.Name
 		if want.Type == c.Type {
+			// One type, two DECLARATIONS. For a DECIMAL that is not a
+			// tautology: the column chunk carries only the unscaled integer
+			// and the schema carries the scale, so a file declaring
+			// DECIMAL(15,4) under a catalog DECIMAL(15,2) column holds the
+			// right number under the wrong half of it. The catalog is the
+			// authority for a table's type (ADR-0018), so the read adopts its
+			// (p, s) here and the DECODE moves each carrier to it
+			// (readColumnToAny; scan.rescaleDecimalChunk on the native path).
+			//
+			// This used to `continue`, which kept the FILE's (p, s) — so the
+			// stage DAG wrote a .wshf header at the file's scale, two files of
+			// one table declared one column two ways, and the read either
+			// collided in wshf.SchemaGuard or answered a number 100x off with
+			// no error at all (#707).
+			if want.Type == TypeDecimal &&
+				(want.Precision != c.Precision || want.Scale != c.Scale) {
+				out[i].Precision, out[i].Scale = want.Precision, want.Scale
+			}
 			continue
 		}
 		if isNestedType(c.Type) || isNestedType(want.Type) {
@@ -1031,6 +1049,50 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]
 				if iv, ok := v.(int64); ok {
 					values[i] = TimestampToEngineMillis(iv, div)
 				}
+			}
+		}
+	}
+	// A DECIMAL column whose FILE declares another SCALE is moved to the
+	// catalog's, which is the same reconciliation the native scan performs in
+	// scan.rescaleDecimalChunk and for the same reason: the chunk carries the
+	// unscaled integer and the declaration carries the scale, so a file read
+	// under a scale it was not written at is a different NUMBER (#707,
+	// ADR-0018). The two paths call one function so they cannot drift.
+	if typeID == TypeDecimal && colIdx < len(leaves) {
+		if from, need := DecimalRescalePlan(leaves[colIdx], col); need {
+			// Both of this path's DECIMAL boxes, because decodeDecimalValues
+			// chooses between them by the column's PRECISION: an int64 to 18
+			// digits and a Decimal128 beyond. Rescaling only one of them would
+			// reconcile a narrow column and silently leave a wide one — the
+			// exact shape of #419, one level up.
+			for i, v := range values {
+				var d Decimal128
+				switch tv := v.(type) {
+				case int64:
+					d = Decimal128From(tv)
+				case Decimal128:
+					d = tv
+				default:
+					continue // NULL, or a box no decimal leaf produces
+				}
+				out, err := DecimalRescale(d, from, col.Scale, col.Precision)
+				if err != nil {
+					return nil, fmt.Errorf("column %s: %w", col.Name, err)
+				}
+				if _, wide := v.(Decimal128); wide {
+					values[i] = out
+					continue
+				}
+				n, ok := out.Int64()
+				if !ok {
+					// The moved value no longer fits the box this column's
+					// declared precision chose. Widening the box would hand a
+					// consumer a type it does not expect for this column, so
+					// this is the same 22003 the carrier check raises.
+					return nil, fmt.Errorf("column %s: %w", col.Name,
+						decimalOverflow(decimalEffectivePrecision(col.Precision), col.Scale))
+				}
+				values[i] = n
 			}
 		}
 	}

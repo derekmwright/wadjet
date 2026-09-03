@@ -167,7 +167,10 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	activeRGs := make([]int, 0, numRGs)
 	for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
 		if len(preds) > 0 && scan.StatsPrune.On() {
-			stats := pqReader.RowGroupStats(rgIdx)
+			// A DECIMAL bound is an unscaled integer at the FILE's declared
+			// scale and the predicate arrives at the READ SCHEMA's, so the
+			// bounds are reconciled the same way the values are (#707).
+			stats := parquet.ReconcileRowGroupStats(fr, readSchema, pqReader.RowGroupStats(rgIdx))
 			pruned := false
 			for _, pred := range preds {
 				op := mapPredOp(pred.Op)
@@ -653,10 +656,16 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 
 	// Catalog-persisted row-group metadata. Best-effort: nil on any
 	// error, and files missing from the map take the footer-read path.
+	//
+	// It needs no DECIMAL reconciliation of its own: ANALYZE records a bound
+	// in the CATALOG's domain (catalog.analyzeFile), so a persisted bound is
+	// already at the declared scale, while a bound read from a FOOTER below is
+	// at whatever scale that file declares and is moved there (#707).
 	var rgMeta map[string][]parquet.RowGroupStats
 	if inner.cat != nil {
 		rgMeta, _ = inner.cat.TableRGMeta(ctx, inner.tableName)
 	}
+	rgSchema := inner.readSchema()
 
 	slots := make([]*fileSlot, len(inner.files))
 	fileRGStats := make([][]parquet.RowGroupStats, len(inner.files))
@@ -736,7 +745,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 						footerCacheIdentity(inner.cat, entry, entry.SizeBytes)); meta != nil {
 						stats := make([]parquet.RowGroupStats, meta.NumRowGroups())
 						for rg := range stats {
-							stats[rg] = meta.RowGroupStats(rg)
+							stats[rg] = parquet.ReconcileRowGroupStats(meta, rgSchema, meta.RowGroupStats(rg))
 						}
 						slots[idx] = &fileSlot{entry: entry}
 						fileRGStats[idx] = stats
@@ -795,7 +804,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 
 					stats := make([]parquet.RowGroupStats, meta.NumRowGroups())
 					for rg := range stats {
-						stats[rg] = meta.RowGroupStats(rg)
+						stats[rg] = parquet.ReconcileRowGroupStats(meta, rgSchema, meta.RowGroupStats(rg))
 					}
 					slots[idx] = &fileSlot{entry: entry}
 					fileRGStats[idx] = stats

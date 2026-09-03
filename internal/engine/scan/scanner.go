@@ -412,7 +412,11 @@ func (s *Scanner) decodeRowGroupsNative(ctx context.Context, fr *pqt.FileReader,
 			return nil, fmt.Errorf("scan cancelled: %w", err)
 		}
 		if len(s.statsPredicates) > 0 && StatsPrune.On() {
-			rgStats := fr.RowGroupStats(rgIdx)
+			// The footer's DECIMAL bounds are unscaled integers at the FILE's
+			// declared scale; the predicate arrives at the CATALOG's. See
+			// ReconcileRowGroupStats — without it a file declaring another
+			// scale is pruned away entirely (#707).
+			rgStats := pqt.ReconcileRowGroupStats(fr, schema, fr.RowGroupStats(rgIdx))
 			pruned := false
 			for _, pred := range s.statsPredicates {
 				if CanPruneRowGroup(pred, rgStats) {

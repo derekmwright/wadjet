@@ -261,7 +261,7 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 						pres = newRowPresence(b.Columns[i], leaves, childIdx)
 						measured = pres != nil
 					}
-					if err := readColumnNative(b.Columns[i].Children[j], fr, rgIdx, childIdx, numRows, field.Type, pres); err != nil {
+					if err := readColumnNative(b.Columns[i].Children[j], fr, rgIdx, childIdx, numRows, field.Type, field.Precision, pres); err != nil {
 						return fmt.Errorf("reading ROW field %s.%s: %w", col.Name, field.Name, err)
 					}
 				}
@@ -314,7 +314,7 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 				}
 				return nil
 			}
-			if err := readColumnNative(b.Columns[i], fr, rgIdx, ci, numRows, col.Type, nil); err != nil {
+			if err := readColumnNative(b.Columns[i], fr, rgIdx, ci, numRows, col.Type, col.Precision, nil); err != nil {
 				return fmt.Errorf("reading column %s: %w", col.Name, err)
 			}
 			if cacheable {
@@ -336,7 +336,13 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 // presence is nil for every column except the first leaf of a ROW, where it
 // carries the enclosing group's own null bits out of the same definition
 // levels this walk already decodes (see rowPresence).
-func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numRows int, catalogType pqt.TypeID, presence *rowPresence) error {
+// catalogPrecision is the DECLARED precision of the destination column, and it
+// is carried separately from catalogType for one reason: a DECIMAL whose file
+// declares another SCALE is rescaled after the page loop, and the rescale is
+// held to the catalog's precision (see rescaleDecimalChunk). It is ignored for
+// every other type. The destination SCALE is not passed — it is already on the
+// vector, which is what the values have to end up meaning.
+func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numRows int, catalogType pqt.TypeID, catalogPrecision int, presence *rowPresence) error {
 	pr := fr.ColumnPages(rgIdx, colIdx)
 	if pr == nil {
 		return fmt.Errorf("column %d not found in row group %d", colIdx, rgIdx)
@@ -421,6 +427,11 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 
 	if catalogType == pqt.TypeTimestamp && offset > 0 {
 		rescaleTimestampChunk(vec, leaves, colIdx, offset)
+	}
+	if catalogType == pqt.TypeDecimal && offset > 0 {
+		if err := rescaleDecimalChunk(vec, leaves, colIdx, offset, catalogPrecision); err != nil {
+			return leafErr(leaves, colIdx, err)
+		}
 	}
 
 	return nil
@@ -518,6 +529,57 @@ func rescaleTimestampChunk(vec *batch.Vector, leaves []*pqt.SchemaNode, colIdx, 
 		n = len(vec.Int64Data)
 	}
 	pqt.ScaleTimestampsToEngine(vec.Int64Data[:n], div)
+}
+
+// rescaleDecimalChunk moves a just-decoded DECIMAL chunk from the scale the
+// FILE declares to the scale the CATALOG does — the same shape as
+// rescaleTimestampChunk above, and for the same reason: the values a column
+// chunk carries mean what a DECLARATION says they mean, and the file's
+// declaration is input rather than fact (ADR-0018).
+//
+// For a TIMESTAMP the two declarations can only differ by a power of ten that
+// always divides exactly, so that one cannot fail. A DECIMAL can: the catalog's
+// scale may need digits the carrier has no room for, and the answer then is
+// PostgreSQL's 22003 rather than a wrapped number (#707).
+//
+// NULL slots are rescaled along with the rest, deliberately. A null cell's
+// carrier is not a value — nothing reads it — so branching per row to skip it
+// would buy a per-row test on the repair path to avoid work on cells whose
+// content is already unspecified, and a rescale that FAILS on one would refuse
+// a file over a number no query can see. Zero is the only carrier the batch
+// allocator puts there and zero rescales to zero at every scale.
+//
+// Non-inlined for the frame-size reason columnDecodePlan's comment gives: this
+// sits on the stack of every per-column errgroup goroutine.
+//
+//go:noinline
+func rescaleDecimalChunk(vec *batch.Vector, leaves []*pqt.SchemaNode, colIdx, offset, precision int) error {
+	if colIdx >= len(leaves) || vec == nil {
+		return nil
+	}
+	from, need := pqt.DecimalRescalePlan(leaves[colIdx], pqt.Column{
+		Type: pqt.TypeDecimal, Precision: precision, Scale: vec.DecimalData.Scale,
+	})
+	if !need {
+		return nil
+	}
+	n := offset
+	if n > len(vec.DecimalData.Data) {
+		n = len(vec.DecimalData.Data)
+	}
+	to := vec.DecimalData.Scale
+	for i := 0; i < n; i++ {
+		v := vec.DecimalData.Data[i]
+		if v.Hi == 0 && v.Lo == 0 {
+			continue // zero at every scale; the common NULL-slot carrier
+		}
+		out, err := pqt.DecimalRescale(pqt.Decimal128{Hi: v.Hi, Lo: v.Lo}, from, to, precision)
+		if err != nil {
+			return err
+		}
+		vec.DecimalData.Data[i] = batch.Int128{Hi: out.Hi, Lo: out.Lo}
+	}
+	return nil
 }
 
 // resolveNativeDictionary resolves INT32 dictionary indices to actual values.
