@@ -885,18 +885,8 @@ func (c *pgConn) runSimpleQuery(sql string) {
 	// "parse the whole string first" and "parse it when you run it" are the
 	// same thing, and paying for a second parse on every simple query to make
 	// them look different would be a cost for nothing.
-	if len(stmts) > 1 {
-		ctx, cancel := c.queryContext()
-		defer cancel()
-		for _, stmt := range stmts {
-			if err := c.checkSimpleStatement(stmt); err != nil {
-				// 42601 is the fallback, not the answer: sendQueryError
-				// prefers the class the error already carries, and a parse
-				// failure that carries none is a syntax error.
-				c.sendQueryError(ctx, "42601", err)
-				return
-			}
-		}
+	if len(stmts) > 1 && !c.parseWholeString(stmts) {
+		return
 	}
 
 	for _, stmt := range stmts {
@@ -911,6 +901,30 @@ func (c *pgConn) runSimpleQuery(sql string) {
 			return
 		}
 	}
+}
+
+// parseWholeString parses every statement of a multi-statement string before
+// any of them runs, reporting the first failure. It returns whether to
+// continue.
+//
+// Its own statement context, in its own function, so the cancel is scoped to
+// the parse rather than to the whole sequence: beginStatement makes the
+// connection's current statement the one it just started, and a `defer` inside
+// an `if` block in runSimpleQuery would hold this one open across every
+// statement that follows.
+func (c *pgConn) parseWholeString(stmts []string) bool {
+	ctx, cancel := c.queryContext()
+	defer cancel()
+	for _, stmt := range stmts {
+		if err := c.checkSimpleStatement(stmt); err != nil {
+			// 42601 is the fallback, not the answer: sendQueryError prefers
+			// the class the error already carries, and a parse failure that
+			// carries none is a syntax error.
+			c.sendQueryError(ctx, "42601", err)
+			return false
+		}
+	}
+	return true
 }
 
 // checkSimpleStatement reports whether one statement of a multi-statement
