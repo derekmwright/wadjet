@@ -554,6 +554,65 @@ value is published under the input column's own name and every consumer
 already reads it there; a mapping for them would only re-route a resolution
 that works.
 
+#### 3a. An AGGREGATE OUTPUT may still take a group key's name, and that is DEFERRED (2026-09-02, #785)
+
+This ADR gives a group KEY one identity and one name. It says nothing about
+an AGGREGATE OUTPUT minting the same name, and one can:
+
+```
+SELECT COUNT(*) AS g, g AS x FROM t GROUP BY g HAVING COUNT(*) > 0
+  → Aggregate: group_by=[g] aggs=[count() AS g]   -- TWO columns named g
+    Filter: [g > 0]                                -- the HAVING
+```
+
+Every consumer above the aggregate resolves a name through
+`batch.RecordBatch.ColumnIndex`, which returns the FIRST match — the key. So
+the HAVING was evaluated against the key's values `{0,1,2}` instead of the
+counts `{80,80,80}`: `> 0` dropped one group, `> 1` two, `> 79` all three,
+where PostgreSQL 17 keeps all three every time. (The ladder is the
+instrument: a row count alone cannot tell "bound to the key" from "bound to
+the count".) The computed spelling is the same collision —
+`GROUP BY g + 1` emits the key as `g + 1` and `COUNT(*) AS "g + 1"` names the
+aggregate that — and it answers 0 rows for PostgreSQL's 8, on all four arms.
+
+**The exact-site fix does not work, and the reason is structural.** Giving
+the colliding aggregate a hidden slot and letting the SELECT-list projection
+rename it — the nested-aggregate rewrite's existing machinery — fixes the
+ladder on the single-process path and BREAKS the DAG. Measured: the
+`HAVING g + 1 > 2` control, right on all four arms before, came back with
+the COUNT under `k` and NULL under `g + 1`. The projection above the
+aggregate becomes `[g + 1 AS k, __agg_0 AS "g + 1"]`, whose output name
+`g + 1` is another item's SOURCE name — a PERMUTATION — and
+`absorbAggregateOutputProjection` carries the SELECT list onto the aggregate
+stage as a rename map, which has no order.
+
+That pass already declines when the aggregate publishes ONE NAME TWICE
+(`aggregatePublishesADuplicateName`), which is what kept the shape merely
+wrong rather than differently wrong; giving the aggregate a slot stops that
+guard firing and puts the permutation through instead. It is the same fact
+the 2026-09-02 group-key arc withdrew a pass for — a `Stage` carries one
+name where two are needed — reached from the projection rather than from the
+key.
+
+So #785 is DEFERRED under the correctness protocol's rule 11 rather than
+bounded and pinned. The shape the fix has to take: the collision is resolved
+where a Stage can express it, which means either the projection above a
+colliding aggregate is NOT absorbed (a real `project` stage evaluates the
+permutation), or the GROUP KEY takes the hidden slot instead of the
+aggregate — §2's machinery in the other direction, a key that RESOLVES under
+its own name and PUBLISHES under a slot, which today only a DERIVED key
+does. The existing pin
+(`stage_filter_carrier_two_path_test.go`'s `pin785-…`) still records the
+two-path answer and now carries this mechanism in its own comment, so the
+next attempt reads it where it will be standing rather than here; nothing new
+was pinned, because pinning the residual of a withdrawn pass spends the
+evidence and leaves the defect.
+
+A duplicate OUTPUT name is not the defect and must not be refused:
+PostgreSQL accepts `SELECT COUNT(*) AS g, g AS x` and answers it. What must
+not stand is `ColumnIndex`'s first-match rule deciding which of two columns
+a query meant.
+
 ### 4. A WINDOW above the aggregate is spelled against what it publishes (2026-09-01, #737)
 
 `SELECT g + 1 AS k, ROW_NUMBER() OVER (ORDER BY g + 1) FROM t GROUP BY g + 1`

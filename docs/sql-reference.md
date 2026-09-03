@@ -704,6 +704,19 @@ SELECT CAST(dst_port AS Int64) FROM flow_logs
 SELECT CAST(bytes_in AS Float64) / CAST(packets AS Float64) AS avg_size FROM flow_logs
 ```
 
+`CAST(<col> AS STRING)` renders the value's own printed form — the text the
+column projects and the text `LIKE` matches against, which for a TIMESTAMP is
+`2006-01-02 15:04:05` (UTC, with milliseconds only when non-zero), for a DATE
+`2006-01-02`, for IPv4/IPv6/MAC/CIDR/UUID the address or identifier, and for
+BYTES `\x` plus lowercase hex.
+
+Two of those renderings differ from PostgreSQL's, and they differ everywhere —
+on the wire, in a projection and in a CAST alike, so a query never disagrees
+with itself. A sub-second TIMESTAMP is padded to three fractional digits
+(`2023-11-14 22:13:20.500`) where PostgreSQL prints the minimal fraction
+(`…20.5`). A DURATION renders its raw nanosecond count where PostgreSQL's
+`interval` prints `00:00:00.001`.
+
 ## Window Functions
 
 Window functions compute values across sets of rows related to the current row without collapsing them into groups.
@@ -716,7 +729,7 @@ Window functions compute values across sets of rows related to the current row w
 | `RANK()` | Rank with gaps for ties |
 | `DENSE_RANK()` | Rank without gaps for ties |
 | `SUM(expr)` | Running or partition sum |
-| `COUNT(expr)` | Running or partition count |
+| `COUNT(expr)` | Running or partition count — `COUNT(col)` counts the frame's NON-NULL values, `COUNT(*)` counts its rows; both answer 0 (never NULL) over an empty frame |
 | `AVG(expr)` | Running or partition average |
 | `MIN(expr)` | Running or partition minimum |
 | `MAX(expr)` | Running or partition maximum |

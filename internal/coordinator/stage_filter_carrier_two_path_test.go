@@ -2530,6 +2530,31 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			// `AggScopePreservingWrapper` is what fixed the same collision
 			// under a WINDOW, and this shape is unchanged by it. Measured.
 			//
+			// THE MECHANISM, and why the obvious fix was WITHDRAWN rather than
+			// landed (2026-09-02, ADR-0026 §3a — read it before trying again).
+			// The Aggregate emits its keys and its aggregate outputs into ONE
+			// schema, and `batch.RecordBatch.ColumnIndex` returns the FIRST
+			// match, so the HAVING binds the key. Giving the colliding aggregate
+			// a HIDDEN SLOT and letting the SELECT-list projection rename it —
+			// the nested-aggregate rewrite's existing machinery — fixes the
+			// single-process ladder (`> 0 / > 1 / > 79` goes from 2/1/0 rows to
+			// PostgreSQL's 3/3/3) and BREAKS the DAG: the projection becomes
+			// `[g + 1 AS k, __agg_0 AS "g + 1"]`, whose output name is another
+			// item's SOURCE name — a PERMUTATION — and
+			// `absorbAggregateOutputProjection` carries the SELECT list onto the
+			// producer as a rename MAP, which has no order. Measured: the
+			// `HAVING g + 1 > 2` control, right on all four arms today, came back
+			// with the COUNT under `k` and NULL under `g + 1`.
+			// `aggregatePublishesADuplicateName` is what declines that projection
+			// today, and giving the aggregate a slot is exactly what stops it
+			// firing. So the fix is either "do not absorb a projection whose
+			// outputs permute its inputs" or "the GROUP KEY takes the slot" —
+			// §2's two names in the other direction.
+			//
+			// A duplicate OUTPUT name is legal SQL and must stay accepted:
+			// PostgreSQL answers `SELECT COUNT(*) AS g, g AS x`. What must not
+			// stand is first-match deciding which column it meant.
+			//
 			// TODO(#785): delete when the HAVING binds the aggregate.
 			t.Run("pin785-AnAggregateAliasedLikeAPlainKeyBesideAHaving", func(t *testing.T) {
 				const pinned = `SELECT COUNT(*) AS g, g AS x FROM collslot ` +
@@ -3166,6 +3191,35 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 		// resolves and the whole table collapses into one NULL group.
 		// PostgreSQL answers 8 rows. This is NOT the identity mechanism:
 		// `SELECT G FROM t` with no GROUP BY at all is wrong the same way.
+		//
+		// THE MECHANISM, localized 2026-09-02 by the arc-A round-0 pass, so
+		// that the next attempt starts from it rather than from the symptom.
+		// TWO resolvers disagree about case, and the one that would REFUSE is
+		// the one that folds:
+		//
+		//   physical/validate.go  colScope.resolveRef lowercases both the
+		//                         reference and the qualifier, so `G` resolves
+		//                         to `g` and the 42703 refusal never fires
+		//   batch/batch.go        RecordBatch.ColumnIndex compares byte for
+		//                         byte and answers -1, which the
+		//                         single-process path renders NULL and the
+		//                         DAG's stage schema check refuses
+		//
+		// So the SILENCE IS PRODUCED BY THE FOLD: making the validator exact
+		// would turn every one of these into an immediate 42703 — and break
+		// every mixed-case ClickBench query (hits.UserID, EventTime,
+		// WatchID), which is why the issue's two halves cannot land
+		// separately. The fix is an unquoted reference resolving
+		// CASE-INSENSITIVELY against the schema, REFUSED (42702) when more
+		// than one column matches, and a QUOTED one resolving byte-exactly —
+		// with the planner then naming the stored column exactly, so
+		// ColumnIndex stays byte-exact. That needs an input the AST does not
+		// have: `plansql.ColRef` carries Table, Column and Slot and no
+		// `Quoted` flag, so it cannot tell `G` from `"G"`. (The LEXER does:
+		// its token carries `quoted`, which is where the flag comes from.)
+		// It is a deliberate, recordable divergence from PostgreSQL — which
+		// refuses `SELECT UserID` over a stored `"UserID"` — that makes
+		// strictly more queries answer and changes no answer.
 		//
 		// TODO(#731): delete this pin when identifiers fold.
 		t.Run("IdentifierCaseInTheGroupByTerm", func(t *testing.T) {

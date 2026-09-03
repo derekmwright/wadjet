@@ -716,6 +716,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        exact to the digits they keep and agree to `min(both scales)`: the
        same class as the DECIMAL AVG bullet above, and what the wire oracle's
        `SumAvgOverInteger` float-render pin cites.
+
+       **RE-AFFIRMED 2026-09-02** after the arc-A round-0 pass re-opened it
+       as a candidate defect and measured PostgreSQL 17 directly. The rule
+       there is `select_div_scale`: at least sixteen SIGNIFICANT digits, so
+       the FRACTIONAL digit count moves with the magnitude of the answer, and
+       the output column's declared typmod is **−1** — unconstrained, no
+       `(p,s)` at all. Measured: `AVG(c_i32)` over 5 000 rows answers
+       `7497.6449875724937862` (16 fractional digits), `AVG(c_i64)` answers
+       `2499158148.41289523` (8), `AVG` of three 1s answers
+       `1.00000000000000000000` (20), and `AVG(numeric(18,4))` of 1 and 2
+       answers `1.5000000000000000` (16) — so the INPUT scale is not what
+       decides either. Wadjet answers `7497.6450`, `2499158148.4129`,
+       `1.0000`, `1.5000` at its fixed scale 4.
+       This is **not representable** on wadjet's model, not merely
+       unimplemented: a column carries ONE declared scale on a 38-digit
+       carrier, and sixteen fractional digits over a quotient with twenty-three
+       integer digits needs thirty-nine. Adopting PostgreSQL's rule is a
+       carrier-and-column-model change, not a constant. The piece that IS a
+       real metadata divergence is the unconstrained numeric DECLARATION on
+       the wire, which this ADR already tracks as #542. If anything here is
+       worth doing it is RAISING `batch.AvgScaleIncrement` — a bigger fixed
+       number of fractional digits, still fixed — and that is a benchmarked
+       type-width change rather than a correctness fix.
      - **A COMPUTED integer argument is declared BIGINT**, not numeric. Wadjet
        declares every integer expression INT64 (ADR-0024's recorded
        divergence), so a computed argument cannot tell int4 from int8; reading
