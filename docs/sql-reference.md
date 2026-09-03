@@ -1686,7 +1686,8 @@ it is accepted depends on the door, exactly as it does in PostgreSQL:
 |---|---|
 | pgwire **simple** query protocol (`psql`, `PQexec`) | runs them **in sequence**, one command tag per statement |
 | pgwire **extended** protocol (pgx, JDBC, psycopg, every ORM) | SQLSTATE `42601`, `cannot insert multiple commands into a prepared statement` |
-| embedded `wadjet.DB.Execute` / `Query`, the HTTP API, the CLI | SQLSTATE `42601`, the same — they answer with one result |
+| embedded `wadjet.DB.Execute` / `Query`, the CLI | SQLSTATE `42601`, the same — they answer with one result |
+| the HTTP API | HTTP 400, `SQL parse error: cannot insert multiple commands into a prepared statement` (this door reports parse failures as text, not as a SQLSTATE) |
 
 On the simple protocol the **whole string is parsed before any statement
 runs**, so `INSERT ...; ZZZ NOT SQL` runs nothing and reports the syntax
