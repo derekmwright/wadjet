@@ -1073,6 +1073,11 @@ type queryResources struct {
 	mu         sync.Mutex
 	spillMgr   *memory.SpillManager
 	memTracker *memory.Tracker
+	// inSubqueries are the uncorrelated IN-subquery membership sets compiled
+	// under this query's budget. They are held HERE rather than on the
+	// Planner because forSubquery copies the Planner by value and shares only
+	// this holder — a nested subquery's charge has to reach the same release.
+	inSubqueries []*expr.InSubquery
 }
 
 // resources returns this planner's shared per-query resources, allocating the
@@ -1139,6 +1144,66 @@ func (p *Planner) getMemTracker() *memory.Tracker {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.memTracker
+}
+
+// subqueryBudgetOption charges an uncorrelated IN-subquery's membership set to
+// this query's tracker, and records the node so the charge is released when the
+// plan is torn down (#531, ADR-0006).
+//
+// Returns nil — a no-op option — when this query has no tracker, which keeps
+// the unbudgeted behavior for embedded callers that set no MemoryBudget.
+//
+// Why the charge needs an owner at all. An InSubquery holds its membership map
+// for the life of the compiled Expr tree: `id IN (SELECT id + 0 FROM t)`
+// declines decorrelation (a computed inner item is not a semi-join key), so it
+// builds a hash set of every inner row and probes it per row. Measured on the
+// type-matrix fixture, that set is 120,000 bytes and the query ANSWERED at an
+// 8 KiB budget — 14.6× the whole allowance, unaccounted, while the same run
+// logged the scan forcing its file load past that budget. The shapes that DO
+// decorrelate never reach this type; their build side is already budgeted and
+// spillable.
+func (p *Planner) subqueryBudgetOption() expr.CompileOption {
+	tracker := p.getMemTracker()
+	if tracker == nil {
+		return nil
+	}
+	r := p.resources()
+	return expr.WithBudget(tracker, func(in *expr.InSubquery) {
+		r.mu.Lock()
+		r.inSubqueries = append(r.inSubqueries, in)
+		r.mu.Unlock()
+	})
+}
+
+// releaseSubqueryCharges returns every budgeted IN-subquery membership set to
+// the tracker. Idempotent, and safe on a node whose subquery never ran.
+//
+// This is the teardown point #531 needed and InSubquery.Release had no caller
+// for: wiring the charge without one converts an unaccounted map into a
+// permanently-charged one, which is worse than the bug. A compiled Expr tree's
+// life ends with the plan that built it, so the plan's Cleanup owns this — the
+// same ownership ADR-0028 gave the grace join's build reservation.
+//
+// It hangs off queryResources rather than off the Planner because Plan REPLACES
+// p.res on entry: a Cleanup that reached for p.resources() at teardown time
+// would release the NEXT query's charges and leave its own. The holder is
+// captured when the Cleanup is built.
+func (r *queryResources) releaseSubqueryCharges() {
+	r.mu.Lock()
+	nodes := r.inSubqueries
+	r.inSubqueries = nil
+	r.mu.Unlock()
+	for _, in := range nodes {
+		in.Release()
+	}
+}
+
+// hasSubqueryCharges reports whether anything is waiting for
+// releaseSubqueryCharges, so Plan can attach a Cleanup for it alone.
+func (r *queryResources) hasSubqueryCharges() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.inSubqueries) > 0
 }
 
 // spillManagerIfSet returns the per-query spill manager without creating one.
@@ -2531,6 +2596,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// predicate no row ever reaches, which the operator-level check cannot
 	// (#631 follow-up).
 	if err := refuseUnrepresentableRealInList(node); err != nil {
+		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()
 		return nil, err
@@ -2538,6 +2604,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
+		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()  // free CTE spill scratch on the no-Cleanup path
 		p.releaseScanCache() // drop the scan cache's tracker reservation
 		return nil, err
@@ -2588,18 +2655,21 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// scan cache release matters most on the shared-tracker path: its
 	// reservation would otherwise outlive the query as a permanent
 	// phantom on the worker-lifetime tracker.
+	res := p.resources()
 	if sm := p.spillManagerIfSet(); sm != nil {
 		plan.Cleanup = func() {
 			p.closeBuiltJoins()
+			res.releaseSubqueryCharges()
 			p.releaseCTECache()
 			p.releaseScanCache()
 			sm.Cleanup()
 		}
-	} else if p.cteCacheHasCollectors() || p.scanCache != nil || len(p.builtJoins) > 0 {
+	} else if p.cteCacheHasCollectors() || p.scanCache != nil || len(p.builtJoins) > 0 || res.hasSubqueryCharges() {
 		// Shared (worker-injected) spill manager: its dir outlives this
 		// query, so the collectors' scratch must be released explicitly.
 		plan.Cleanup = func() {
 			p.closeBuiltJoins()
+			res.releaseSubqueryCharges()
 			p.releaseCTECache()
 			p.releaseScanCache()
 		}
@@ -2609,6 +2679,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	plan.Stages = p.generateStages(node)
 
 	if err := p.enforceQueryLimits(plan.Stages, node); err != nil {
+		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()
 		return nil, err
@@ -9030,7 +9101,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					aggOutputCol += ")"
 					// Replace inner aggregate with a column reference in the AST
 					rewritten := replaceAggWithColRef(proj.ASTExpr, innerAgg, aggOutputCol)
-					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner)
+					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner, p.subqueryBudgetOption())
 					if expr.IsCompileRefusal(compErr) {
 						return nil, nil, nil, compErr
 					}
@@ -9075,9 +9146,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption())
+					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption())
 				} else {
-					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption())
+					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption())
 				}
 			} else {
 				// With the child's DECLARED column types in hand, so a pair
@@ -9086,7 +9157,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				// always compiled to instead of deferring the question to the
 				// first batch (#555 review).
 				compiled, compErr = expr.CompileWithColumnTypes(
-					astExpr, p.subqueryRunner, childColTypes.types)
+					astExpr, p.subqueryRunner, childColTypes.types, p.subqueryBudgetOption())
 			}
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a
@@ -9354,7 +9425,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				continue
 			}
 			synName := SlotName(SlotAggInput, i)
-			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner, p.subqueryDeclOption())
+			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption())
 			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
 			}
@@ -9608,7 +9679,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				if _, isLit := gbExpr.(*plansql.Lit); !isLit {
 					continue
 				}
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption())
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption())
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}
@@ -9651,7 +9722,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// GroupByOutNames below, which is what keeps the two
 				// engines' output schemas equal (#720, ADR-0026).
 				synName := keyOuts[i].Slot
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption())
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption())
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}
@@ -12312,12 +12383,12 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		var err error
 		if len(outerTables) > 0 {
 			if len(outerCols) > 0 {
-				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption())
+				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption())
 			} else {
-				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption())
+				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption())
 			}
 		} else {
-			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption())
+			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption())
 		}
 		if expr.IsCompileRefusal(err) {
 			return nil, err

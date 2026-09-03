@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -127,10 +128,14 @@ func TestInSubqueryRefusesPastTheBudget(t *testing.T) {
 	t.Fatal("unreachable: EvalBool should have panicked")
 }
 
-// TestInSubqueryUnbudgetedByDefault guards the opt-in shape of the fix: a
-// nil Budget (every CompileWith* entry point except CompileWithBudget) must
-// behave exactly as it did before #528 — no panic, no charge, ordinary IN
-// semantics.
+// TestInSubqueryUnbudgetedByDefault still pins the nil case; what it no longer
+// describes is production. Since #531 the planner passes WithBudget on every
+// compile site that carries a subquery runner, so a query's membership set IS
+// charged. A nil Budget remains the shape for every compile that does not ask
+// for one — the worker, coordinator and DML sites compile with no runner at
+// all, so they refuse an uncorrelated IN rather than build a set — and it must
+// behave exactly as it did before #528: no panic, no charge, ordinary IN
+// semantics, and a Release that is a harmless no-op.
 func TestInSubqueryUnbudgetedByDefault(t *testing.T) {
 	b := testBatch()
 	inSq := &InSubquery{
@@ -148,10 +153,13 @@ func TestInSubqueryUnbudgetedByDefault(t *testing.T) {
 	inSq.Release()
 }
 
-// TestCompileWithBudgetChargesTheCompiledInSubquery is the compile-time
-// wiring half of #528: CompileWithBudget must thread its budget onto an
-// InSubquery it constructs, and every existing CompileWith* entry point
-// must keep leaving it nil.
+// TestCompileWithBudgetChargesTheCompiledInSubquery is the compile-time wiring
+// half of #528: a budget must reach the InSubquery a compile constructs, and a
+// compile that does not ask for one must keep leaving it nil. Production wires
+// it through the WithBudget OPTION (#531) rather than through this entry point,
+// because an entry point that takes a budget and nothing else silently drops
+// the options its call site was already passing — WithSubqueryDeclTypes among
+// them, which is #696.
 func TestCompileWithBudgetChargesTheCompiledInSubquery(t *testing.T) {
 	rows := make([]map[string]any, 0, 5_000)
 	for i := int64(0); i < 5_000; i++ {
@@ -171,7 +179,7 @@ func TestCompileWithBudgetChargesTheCompiledInSubquery(t *testing.T) {
 	}
 
 	acct := &fakeAccountant{}
-	compiled, err := CompileWithBudget(info.WhereExpr, runner, nil, nil, nil, acct)
+	compiled, err := CompileWithBudget(info.WhereExpr, runner, nil, nil, nil, acct, func(*InSubquery) {})
 	if err != nil {
 		t.Fatalf("CompileWithBudget: %v", err)
 	}
@@ -189,9 +197,31 @@ func TestCompileWithBudgetChargesTheCompiledInSubquery(t *testing.T) {
 		t.Fatalf("Reserve calls = %v, want exactly one positive charge", acct.reserved)
 	}
 
-	// CompileWithRunner (and every other existing entry point) must still
-	// leave Budget nil — the opt-in contract this fix promises for every
-	// caller that has not been updated to supply one.
+	// The option is the shape production uses, and it must reach the same
+	// node — through an entry point that keeps its other options.
+	tracked := 0
+	compiled3, err := CompileWithRunner(info.WhereExpr, runner,
+		WithBudget(acct, func(*InSubquery) { tracked++ }),
+		WithSubqueryDeclTypes(func(string) (batch.TypeID, int, int, bool) { return 0, 0, 0, false }))
+	if err != nil {
+		t.Fatalf("CompileWithRunner+WithBudget: %v", err)
+	}
+	if in3, ok := compiled3.(*InSubquery); !ok || in3.Budget != MemoryAccountant(acct) {
+		t.Fatalf("WithBudget did not reach the compiled InSubquery (%T)", compiled3)
+	}
+	if tracked != 1 {
+		t.Fatalf("WithBudget handed the caller %d nodes to release, want 1 — a charge whose "+
+			"teardown point the caller never sees is the #531 failure", tracked)
+	}
+
+	// A budget with no release hook is REFUSED at construction: charging
+	// without a teardown turns an unaccounted map into a permanently charged
+	// one, which is worse than the bug.
+	if WithBudget(acct, nil) != nil {
+		t.Fatal("WithBudget accepted a nil release function")
+	}
+
+	// CompileWithRunner without the option must still leave Budget nil.
 	compiled2, err := CompileWithRunner(info.WhereExpr, runner)
 	if err != nil {
 		t.Fatalf("CompileWithRunner: %v", err)

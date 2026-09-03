@@ -19,8 +19,13 @@ type compileContext struct {
 	// budget charges an uncorrelated IN-subquery's membership set to the
 	// caller's per-task memory tracker (ADR-0006, #528). nil (the default,
 	// and every existing CompileWith* entry point below) keeps the
-	// pre-#528 unbudgeted behavior — set via CompileWithBudget.
+	// pre-#528 unbudgeted behavior — set via the WithBudget option.
 	budget MemoryAccountant
+	// trackInSubquery is handed every budgeted InSubquery this compile
+	// builds, so the caller has something to call Release on. It is set by
+	// WithBudget and only by WithBudget, because a charge with no teardown is
+	// worse than no charge at all (#531).
+	trackInSubquery func(*InSubquery)
 	// colTypes is the DECLARED type of each input column, when the caller
 	// knows it. compileBinOp needs it for one decision and one only: a pair
 	// that COULD be DECIMAL at runtime has to reach BinOpNumeric to find out,
@@ -66,6 +71,39 @@ type CompileOption func(*compileContext)
 // compileContext.subqueryDecl (#696).
 func WithSubqueryDeclTypes(f SubqueryDeclFunc) CompileOption {
 	return func(c *compileContext) { c.subqueryDecl = f }
+}
+
+// WithBudget charges an uncorrelated InSubquery's membership set to the
+// caller's memory tracker (ADR-0006, #528, #531), and hands the caller each
+// such node so it can Release the charge when the compiled tree's life ends.
+//
+// It is an OPTION rather than a seventh CompileWith* function because the
+// options carry things a compile site already needs: swapping a call site to
+// an entry point that takes a budget and nothing else silently drops
+// WithSubqueryDeclTypes, and a scalar subquery then compares by the bytes of
+// its box again (#696). Every existing entry point takes opts; this composes
+// with them.
+//
+// release is REQUIRED and the option refuses a nil one, because the failure it
+// prevents is worse than the bug it fixes: an InSubquery holds its membership
+// map for the life of the compiled tree, so charging without a teardown turns
+// an unaccounted map into a permanently-charged one, and a task that plans
+// several of them runs out of budget for work that has already finished.
+// InSubquery.Release is idempotent and safe on a node that never resolved.
+//
+// What this does NOT do is bound the ALLOCATION. chargeMemory runs after
+// resolveSlow has built the map, so it makes the set visible to the budget and
+// turns a set that is over budget on its own into a query error; it does not
+// stop a subquery large enough to exhaust the machine from doing so. See
+// chargeMemory's doc.
+func WithBudget(budget MemoryAccountant, release func(*InSubquery)) CompileOption {
+	if budget == nil || release == nil {
+		return nil
+	}
+	return func(c *compileContext) {
+		c.budget = budget
+		c.trackInSubquery = release
+	}
 }
 
 func applyCompileOptions(c *compileContext, opts []CompileOption) *compileContext {
@@ -116,40 +154,33 @@ func CompileWithScopeResolver(node plansql.Node, runner SubqueryRunner, outerTab
 	}, opts))
 }
 
-// CompileWithBudget is CompileWithScopeResolver plus a memory budget that an
-// uncorrelated InSubquery charges its membership set against (ADR-0006,
-// #528). budget may be nil, which keeps the pre-#528 unbudgeted behavior
-// every other CompileWith* entry point still has; any *memory.Tracker
-// satisfies MemoryAccountant structurally; see that type's doc for why this
-// package does not import internal/engine/memory to accept one.
+// CompileWithBudget is CompileWithScopeResolver plus the WithBudget option,
+// kept as the shape this package's own tests compile through. Production wires
+// the budget through WithBudget on whichever entry point the call site already
+// uses, so the compile keeps the other options it was passing (#531).
+//
+// budget may be nil, which keeps the pre-#528 unbudgeted behavior every other
+// CompileWith* entry point still has; any *memory.Tracker satisfies
+// MemoryAccountant structurally; see that type's doc for why this package does
+// not import internal/engine/memory to accept one.
 //
 // outerTables, outerCols and innerCols may be nil for a top-level,
-// non-correlated compile — pass CompileWithScope's or CompileWithRunner's
-// arguments through unchanged and add only the budget.
+// non-correlated compile.
 //
-// NOTHING IN PRODUCTION CALLS THIS YET — only this package's tests do, so
-// #528's mechanism is present and inert. #531 is the wiring, into
-// Planner.makeSubqueryRunner (internal/planner/physical/plan.go). Two things
-// that wiring must do beyond the one-line call-site change, both easy to
-// miss because neither shows up while Budget is nil:
-//
-//   - Call InSubquery.Release when the compiled Expr tree is torn down.
-//     Release has no caller today; without one, every uncorrelated
-//     IN-subquery in a task keeps its charge for the task's lifetime, and a
-//     task that plans several runs out of budget for work that has already
-//     finished. This is the half that needs a decision (where an Expr tree's
-//     lifetime ends), not just a line.
-//   - Not mistake the charge for a guard. chargeMemory runs AFTER
-//     resolveSlow has built the map, so it makes the set visible to the
-//     budget; it does not prevent the allocation. See its doc.
-func CompileWithBudget(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string, innerCols plansql.TableColumns, budget MemoryAccountant) (Expr, error) {
-	return compileWithCtx(node, &compileContext{
+// release is the teardown hook WithBudget requires, and this entry point does
+// not get to skip it: injecting a no-op here would be the exact state
+// WithBudget refuses to construct, spelled differently. It may be nil only
+// alongside a nil budget, where nothing is charged.
+func CompileWithBudget(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string, innerCols plansql.TableColumns, budget MemoryAccountant, release func(*InSubquery), opts ...CompileOption) (Expr, error) {
+	if budget != nil {
+		opts = append(opts, WithBudget(budget, release))
+	}
+	return compileWithCtx(node, applyCompileOptions(&compileContext{
 		runner:      runner,
 		outerTables: outerTables,
 		outerCols:   outerCols,
 		innerCols:   innerCols,
-		budget:      budget,
-	})
+	}, opts))
 }
 
 func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
@@ -347,7 +378,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						}
 					}
 				}
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not, Budget: ctx.budget}, nil
+				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not, Budget: ctx.budget}
+				if ctx.trackInSubquery != nil {
+					ctx.trackInSubquery(in)
+				}
+				return in, nil
 			}
 		}
 		var values []Expr
@@ -870,8 +905,8 @@ func possiblyDecimalAtRuntime(e Expr, ctx *compileContext) bool {
 // question — whether an operand pair could be exact fixed-point — which
 // without them has to be deferred to the first batch, at the cost of the
 // vectorized float path for every pair that turns out not to be.
-func CompileWithColumnTypes(node plansql.Node, runner SubqueryRunner, colTypes map[string]batch.TypeID) (Expr, error) {
-	return compileWithCtx(node, &compileContext{runner: runner, colTypes: colTypes})
+func CompileWithColumnTypes(node plansql.Node, runner SubqueryRunner, colTypes map[string]batch.TypeID, opts ...CompileOption) (Expr, error) {
+	return compileWithCtx(node, applyCompileOptions(&compileContext{runner: runner, colTypes: colTypes}, opts))
 }
 
 // isIntNative returns true if the expression natively produces int64 values

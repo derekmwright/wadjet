@@ -5875,16 +5875,15 @@ type InSubquery struct {
 	// computed inner select item is unbounded (a LIMIT/OFFSET or an
 	// ungrouped-aggregate inner item is bounded by construction).
 	//
-	// TODAY IT IS ALWAYS NIL IN PRODUCTION: CompileWithBudget, the only
-	// entry point that sets it, has no non-test caller. Wiring it into
-	// Planner.makeSubqueryRunner is #531 — and whoever does that MUST wire
-	// Release with it. Nothing calls Release now (see its doc), which is
-	// harmless only because nothing charges: the moment a real tracker is
-	// threaded in, every uncorrelated IN-subquery in a task LEAKS its
-	// charge for the task's lifetime, and a task that plans several of them
-	// runs out of budget for work that has already finished. The compile
-	// side is one line; the release side is a lifetime question about where
-	// a compiled Expr tree is torn down, and it is the harder half.
+	// Set in production by expr.WithBudget, which the physical planner
+	// passes at every compile site that carries a subquery runner (#531).
+	// The option also hands the planner each node it budgets, because the
+	// release side is the half that matters: a charge with no teardown point
+	// makes every uncorrelated IN-subquery in a task hold its bytes for the
+	// task's lifetime, and a task that plans several of them runs out of
+	// budget for work that has already finished. WithBudget therefore
+	// refuses a nil release hook rather than construct that state; the
+	// teardown point is PhysicalPlan.Cleanup.
 	Budget MemoryAccountant
 	// resolved publishes the set: stored last under resolveMu. Same
 	// contract, and the same defect, as ScalarSubquery's (#398) — an
@@ -6309,14 +6308,14 @@ func (e *InSubquery) chargeMemory() {
 // idempotent — a caller that does not know whether resolveSlow ever ran, or
 // has already called Release, may call it any number of times.
 //
-// It has NO CALLER outside this package's tests. That is not an oversight
-// left to be tidied later: it is the unfinished half of #531. While Budget
-// is always nil in production both halves are no-ops and nothing is wrong,
-// but wiring CompileWithBudget without also finding a teardown point for
-// this call converts an unbudgeted map into a permanently-charged one, which
-// is a worse failure than the one #528 set out to fix — the bytes are
-// returned to the OS by GC and never returned to the tracker. See Budget's
-// doc for where that seam is.
+// Its caller is the plan that compiled the tree: the physical planner
+// registers every InSubquery compiled under a budget (expr.WithBudget's
+// release hook) and PhysicalPlan.Cleanup releases them, which is the
+// teardown point #531 needed and #528 left open. Wiring the charge WITHOUT
+// one converts an unbudgeted map into a permanently-charged one — a worse
+// failure than the one #528 set out to fix, because the bytes are returned
+// to the OS by GC and never returned to the tracker — which is why
+// WithBudget refuses to construct a budget with a nil release hook.
 func (e *InSubquery) Release() {
 	if e.Budget == nil {
 		return
