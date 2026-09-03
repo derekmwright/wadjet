@@ -26,7 +26,8 @@ import (
 type FileReader struct {
 	data       []byte        // entire file in memory; nil in staged (pread) mode
 	src        io.ReaderAt   // staged mode: chunk reads issue ranged reads here
-	size       int64         // staged mode: file size (chunk-range clamp)
+	size       int64         // staged and row-group modes: file size (chunk-range clamp)
+	rgSrc      RowGroupBytes // row-group mode: one buffer per row group (rowgroup_bytes.go)
 	meta       *FileMetaData // decoded footer
 	schemaRoot *SchemaNode   // schema tree
 	leaves     []*SchemaNode // leaf nodes indexed by column position
@@ -253,9 +254,20 @@ func (f *FileReader) ColumnPages(rgIdx, colIdx int) *ColumnPageReader {
 	}
 
 	var pr *ColumnPageReader
-	if f.data == nil && f.src != nil {
+	switch {
+	case f.data == nil && f.src == nil && f.rgSrc != nil:
+		// Row-group mode: the bytes of this chunk's row group, and only
+		// them, are resident. Still zero-copy — the offsets are biased by
+		// the buffer's file offset (rowgroup_bytes.go).
+		buf, base, err := f.rgSrc.RowGroupBytes(rgIdx)
+		if err != nil {
+			return &ColumnPageReader{openErr: err, codec: cc.MetaData.Codec, physType: cc.MetaData.Type,
+				maxDefLevel: maxDef, maxRepLevel: maxRep}
+		}
+		pr = NewColumnPageReaderIn(buf, base, f.size, cc.MetaData, maxDef, maxRep)
+	case f.data == nil && f.src != nil:
 		pr = NewColumnPageReaderAt(f.src, f.size, cc.MetaData, maxDef, maxRep)
-	} else {
+	default:
 		pr = NewColumnPageReader(f.data, cc.MetaData, maxDef, maxRep)
 	}
 

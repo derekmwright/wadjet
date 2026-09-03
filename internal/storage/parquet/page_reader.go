@@ -405,6 +405,43 @@ func NewColumnPageReaderAt(src io.ReaderAt, fileSize int64, cm *ColumnMetaData, 
 	}
 }
 
+// NewColumnPageReaderIn is slice mode over a buffer holding only PART of the
+// file: buf covers file bytes [base, base+len(buf)), and the chunk's range is
+// translated into it. Used by row-group mode (rowgroup_bytes.go), where the
+// file's bytes are held one row group at a time so each row group's memory is
+// freed as soon as it has been decoded.
+//
+// Page access is the same zero-copy slicing the whole-file form does — no
+// staging copy, no pooled chunk buffer, nothing to Close. A chunk whose range
+// is not entirely inside buf is REFUSED: decoding it would read a neighbour's
+// bytes as this column's values, which is the silent-wrong-answer shape
+// chunkRange and ValidateChunkLayout exist to prevent.
+func NewColumnPageReaderIn(buf []byte, base, fileSize int64, cm *ColumnMetaData, maxDefLevel, maxRepLevel int) *ColumnPageReader {
+	start, end, err := chunkRange(cm, fileSize)
+	if err != nil {
+		return &ColumnPageReader{openErr: err, codec: cm.Codec, physType: cm.Type,
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel}
+	}
+	off, endOff := start-base, end-base
+	if base < 0 || off < 0 || endOff < off || endOff > int64(len(buf)) {
+		return &ColumnPageReader{
+			openErr: fmt.Errorf("column chunk spans [%d, %d), which is not inside the "+
+				"%d bytes this row group holds at offset %d", start, end, len(buf), base),
+			codec: cm.Codec, physType: cm.Type,
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel,
+		}
+	}
+	return &ColumnPageReader{
+		data:        buf,
+		off:         int(off),
+		endOff:      int(endOff),
+		codec:       cm.Codec,
+		physType:    cm.Type,
+		maxDefLevel: maxDefLevel,
+		maxRepLevel: maxRepLevel,
+	}
+}
+
 // ensureData stages the chunk bytes in staged mode; a no-op in slice
 // mode. Any read error surfaces to the NextPage/NextDictionary caller —
 // a staged chunk must never silently read as empty.
