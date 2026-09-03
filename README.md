@@ -2,25 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/derekmwright/wadjet?sort=semver)](https://github.com/derekmwright/wadjet/releases) [![CI](https://img.shields.io/github/actions/workflow/status/derekmwright/wadjet/ci.yml?branch=main&label=CI)](https://github.com/derekmwright/wadjet/actions/workflows/ci.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/go.mod) [![License](https://img.shields.io/github/license/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/derekmwright/wadjet)](https://goreportcard.com/report/github.com/derekmwright/wadjet) [![Issues](https://img.shields.io/github/issues/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/issues)
 
-**Distributed SQL, analytical (OLAP) workloads.** A columnar query engine with
-vectorized execution, a cost-based optimizer, and spill-to-disk in every
-pipeline breaker — for analytical SQL over data too big for one machine.
-
-**Open formats on object storage.** Tables are Apache Parquet files on any
-S3-compatible store (AWS S3, MinIO, R2), queried in place with no
-import step; Apache Iceberg table metadata is read natively. No proprietary
-storage format.
-
-**One Go binary.** No JVM, no CGo dependencies, no external query engine. Run
-it standalone, as a coordinator plus horizontally scaled workers, or embedded
-as a Go library; clients connect over the PostgreSQL wire protocol, HTTP,
-gRPC, or MCP.
-
-**Network telemetry is the niche it is built for.** IPv4, IPv6, CIDR, MAC,
-Port and Protocol are first-class column types with 100+ network functions —
-CIDR and subnet math, TCP/DNS/TLS/HTTP inspection, ICMP, IPv6 tunneling,
-JA3/JA3S fingerprinting, GeoIP/ASN enrichment — so flow and packet analytics
-are ordinary SQL instead of string parsing.
+Wadjet is a distributed SQL analytics engine for Go. Embed it directly in your Go application, or deploy it as a fault-tolerant query cluster with durable S3 exchange. Vectorized columnar OLAP over Parquet and Apache Iceberg, with PostgreSQL wire protocol, no JVM, and no CGo. Built for network telemetry with first-class IPv4/IPv6/CIDR/MAC/Port/Protocol types and 100+ network functions.
 
 ## Why Wadjet
 
@@ -33,6 +15,63 @@ are ordinary SQL instead of string parsing.
 - **Nested types** — ARRAY, ROW/STRUCT, and MAP column types with dot-notation field access, array functions, and full Parquet round-trip.
 - **Table functions** — `read_json()`, `read_csv()`, `read_parquet()` query local files and HTTP URLs directly from SQL, with glob patterns and named parameters.
 - **GeoIP enrichment** — optional MaxMind GeoLite2/GeoIP2 integration with 11 functions for IP geolocation (country, city, subdivision, coordinates, timezone, continent) and ASN lookup (AS number, organization).
+
+## Start embedded, scale distributed
+
+One engine, two deployments. The same SQL, the same optimized logical plan, and
+gates that assert the same answers on both.
+
+**Embedded — a Go library.** Open a store, open a database, query it:
+
+```go
+store, _ := objstore.NewFileStore("/var/lib/wadjet")  // or NewMinIOStore(...) for S3
+db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "analytics"})
+res, _ := db.Query(ctx, "SELECT src_ip, SUM(bytes_in) FROM flow_logs GROUP BY 1")
+```
+
+Local disk or object storage is the only choice to make — same engine either
+way. (This snippet is compiled as an example in `wadjet/example_readme_test.go`,
+so it cannot drift from the API.)
+
+**Distributed — the same binary, one flag.** Start all-in-one, then split the
+roles when one machine stops being enough:
+
+```bash
+wadjet serve --mode=standalone                       # embedded NATS + coordinator + worker
+wadjet serve --mode=coordinator --nats-url=...       # plans, dispatches, merges
+wadjet serve --mode=worker      --nats-url=...       # executes fragments, scale horizontally
+```
+
+Both paths consume the identical optimized logical plan; what changes is
+whether it runs in one process or as a stage DAG across workers
+([internals map](docs/internals/native-dag-execution.md)).
+
+**The proof, stated as such.** "Same answers" is a gate, not a promise:
+
+- `TestTwoPathInvariance` (`benchmarks/tpch/two_path_invariance_test.go:379`)
+  runs every corpus query through the single-process engine and the
+  distributed stage DAG against one shared catalog and store, and requires
+  identical results.
+- `TestStandaloneVsDistributedDifferential`
+  (`internal/coordinator/differential_test.go:160`) does the same for seeded
+  random queries against a 3-worker cluster, shrinking any divergence to a
+  minimal repro. It runs in CI.
+- `TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget`
+  (`wadjet/spill_type_matrix_test.go:67`) and
+  `TestSpillArcShapesAgreeOnBothDistributionArms`
+  (`internal/coordinator/spill_arc_shapes_two_path_test.go:50`) hold the
+  answers steady when memory forces spilling, on both arms.
+
+**Two honest clauses.** The Go API is pre-1.0, and today `wadjet.Config` is
+typed in terms of `internal/` packages, which Go forbids an out-of-tree module
+from importing — embedding therefore lives inside this repository until that is
+fixed ([#805](https://github.com/derekmwright/wadjet/issues/805), and see
+[Embedding](docs/embedding.md)). And "fault-tolerant" here means the exchange is
+durable: every stage's output lands in object storage, task retries are
+idempotent overwrites, but a worker lost before its durable copy has landed
+costs a one-shot re-execution of the **query**, not of the task
+([ADR-0004](docs/adr/0004-stage-dag-with-streaming-exchange.md) §Decision
+items 1–2 and §Consequences).
 
 ## How Wadjet compares
 
