@@ -172,9 +172,15 @@ func TestManifestSnapshotPinsReadsAcrossAStatement(t *testing.T) {
 		t.Fatalf("only %d scan stages for table t — the self-join did not produce the two-scan-node shape this test needs", scanStages)
 	}
 
-	if got := kv.manifestGets(); got != 2 {
-		t.Errorf("manifest Get calls = %d, want exactly 2 (one GetManifest, one AggregateColumnStats) "+
-			"for a self-join over one table pinned to one statement", got)
+	// ONE read, not two. AggregateColumnStats used to fetch the manifest
+	// again as the first statement of its body, so a pinned statement still
+	// paid two reads of the same key — and could get two DIFFERENT
+	// manifests, since a writer can commit between them. It now takes the
+	// pinned manifest and its revision (#540).
+	if got := kv.manifestGets(); got != 1 {
+		t.Errorf("manifest Get calls = %d, want exactly 1 for a self-join over one table "+
+			"pinned to one statement: the manifest and the column statistics are ONE read "+
+			"of ONE revision (#540)", got)
 	}
 }
 
@@ -423,9 +429,10 @@ func TestManifestSnapshotPinsTheMetadataFoldReads(t *testing.T) {
 			if _, err := planner.PlanDistributed(ctx, logicalPlan); err != nil {
 				t.Fatalf("PlanDistributed: %v", err)
 			}
-			if got := kv.manifestGets(); got != 2 {
-				t.Errorf("manifest Get calls = %d, want exactly 2 (one GetManifest, one "+
-					"AggregateColumnStats) — a metadata-fold path is reading the catalog unpinned", got)
+			if got := kv.manifestGets(); got != 1 {
+				t.Errorf("manifest Get calls = %d, want exactly 1 — a metadata-fold path is "+
+					"reading the catalog unpinned, or AggregateColumnStats has gone back to "+
+					"fetching its own manifest (#540)", got)
 			}
 
 			// The unpinned contrast, so a green assertion above cannot be

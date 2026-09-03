@@ -410,6 +410,21 @@ func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionMa
 	return manifest, err
 }
 
+// GetManifestWithRevision is GetManifest with the KV revision the manifest
+// came from, so a caller that must pin a CONSISTENT view of a table can
+// hand both halves to AggregateColumnStatsFrom instead of letting it read
+// the manifest a second time.
+//
+// Without it, a statement that read the manifest and then asked for column
+// statistics got TWO reads of the same key, and — because a writer can
+// commit between them — a stats map describing rows the pinned manifest
+// does not contain. Measured with a NATS-equivalent KV: a pinned 2-file
+// manifest of 200 rows alongside stats reporting TotalRows=300, and the
+// tear then pinned for the whole statement (#540).
+func (c *Catalog) GetManifestWithRevision(_ context.Context, tableName string) (*PartitionManifest, uint64, error) {
+	return c.manifestWithRevision(tableName)
+}
+
 // manifestWithRevision returns the manifest together with the KV revision
 // it came from. Derived caches (aggregate column stats, RG metadata) key
 // on that revision so they expire exactly when the manifest does, rather
@@ -1632,10 +1647,35 @@ func (c *Catalog) requeuePendingDrop(pd pendingTableDrop) {
 
 // AggregateColumnStats computes table-level column statistics by merging
 // per-file stats across all partitions. Returns nil for columns without stats.
-func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map[string]TableColumnStats, error) {
+func (c *Catalog) AggregateColumnStats(ctx context.Context, tableName string) (map[string]TableColumnStats, error) {
 	manifest, rev, err := c.manifestWithRevision(tableName)
 	if err != nil {
 		return nil, err
+	}
+	return c.AggregateColumnStatsFrom(ctx, tableName, manifest, rev)
+}
+
+// AggregateColumnStatsFrom is AggregateColumnStats over a manifest the
+// caller ALREADY HOLDS, with the revision it came from.
+//
+// The revision is not decorative: it keys the memo, and passing the pair is
+// what makes the statistics and the manifest ONE consistent view. The
+// internal fetch this replaces was the first statement of the body, so a
+// caller that had just read the manifest read it again and could receive a
+// different one — stats describing files the pinned manifest does not list
+// (an AddFiles landed between the two reads) or omitting files it does
+// (RemoveFiles, compaction). The direction is fixed, because
+// annotateScanColumns reads the manifest first and the stats second, so the
+// stats are always the newer half.
+//
+// Today's two consumers are cost-model only, so a torn view is a worse plan
+// rather than a wrong answer. That is a property of the current code and
+// not an invariant: the natural next optimizer feature — proving a
+// predicate unsatisfiable from ScanColStats.MinValue/MaxValue — turns it
+// into dropped rows on the day it lands (#540).
+func (c *Catalog) AggregateColumnStatsFrom(_ context.Context, tableName string, manifest *PartitionManifest, rev uint64) (map[string]TableColumnStats, error) {
+	if manifest == nil {
+		return nil, fmt.Errorf("aggregate column stats for table %q: nil manifest", tableName)
 	}
 
 	// Memoized result for this manifest revision? The stats map is shared —

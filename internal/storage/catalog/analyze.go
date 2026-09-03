@@ -3,6 +3,7 @@ package catalog
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"runtime"
@@ -64,9 +65,9 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 	// order produced (order doesn't matter for correctness, since each
 	// file's HLL is per-file).
 	type fileResult struct {
-		pi, fi    int
-		sketches  *fileColumnSketches
-		err       error
+		pi, fi   int
+		sketches *fileColumnSketches
+		err      error
 	}
 	type fileJob struct {
 		pi, fi int
@@ -120,6 +121,7 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 
 	analyzed := 0
 	rgMetaFiles := make([]FileRGMeta, 0, len(jobs))
+	sketched := make(map[string]sketchedFile, len(jobs))
 	for r := range resCh {
 		if r.err != nil {
 			return analyzed, fmt.Errorf("analyze %s: file %s: %w", name, manifest.Partitions[r.pi].Files[r.fi].Path, r.err)
@@ -171,6 +173,11 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 		}
 		f.SketchesKey = key
 		manifest.Partitions[r.pi].Files[r.fi] = f
+		// Keyed by PATH, not by (partition, file) index: the manifest this
+		// commits into is re-read under CAS below, and a concurrent writer
+		// can have changed both indices by then. A path is immutable
+		// (#494), which is why it is the join key.
+		sketched[f.Path] = sketchedFile{key: f.SketchesKey, stats: f.ColumnStats}
 		analyzed++
 	}
 
@@ -178,23 +185,88 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 	// reader that sees the new RGMetaKey finds the blob present. (The
 	// reverse race — old manifest, new blob — is safe by construction:
 	// blob entries are keyed by immutable file paths.)
+	rgMetaKey := ""
 	if len(rgMetaFiles) > 0 {
-		key, err := c.PutTableRGMeta(ctx, name, rgMetaFiles)
+		k, err := c.PutTableRGMeta(ctx, name, rgMetaFiles)
 		if err != nil {
 			return analyzed, fmt.Errorf("analyze %s: %w", name, err)
 		}
-		manifest.RGMetaKey = key
+		rgMetaKey = k
 	}
 
-	// Bump the manifest version: ANALYZE changed its content (sketch keys,
-	// cleared inline bytes), and cross-process consumers key derived-stats
-	// caches on UpdatedAt.
-	manifest.UpdatedAt = time.Now().UTC()
-	c.invalidateManifestCache(name)
-	if err := c.putJSON(c.key("manifest."+name), manifest); err != nil {
+	// Commit through the same revision CAS every other manifest writer
+	// uses, re-reading and re-attaching on a mismatch.
+	//
+	// This used to be a blind Put. ANALYZE reads the manifest, then spends
+	// MINUTES decoding every file (1-2 min for SF10 lineitem, longer at
+	// SF100), then writes back whatever it read at the start — so an
+	// AddFiles that committed anywhere in that window was overwritten and
+	// the files it registered vanished from the manifest. Ingest flushes
+	// on a 60-second cadence by default, so the window is not theoretical
+	// (#830). The catalog is built on revision CAS (CLAUDE.md §Storage);
+	// this was the one manifest writer outside it.
+	if err := c.commitAnalyzed(name, sketched, rgMetaKey); err != nil {
 		return analyzed, fmt.Errorf("analyze %s: persist manifest: %w", name, err)
 	}
 	return analyzed, nil
+}
+
+// sketchedFile is what ANALYZE computed for one file, joined back onto the
+// manifest by the file's immutable path.
+type sketchedFile struct {
+	key   string
+	stats map[string]FileColumnStats
+}
+
+// commitAnalyzed re-reads the manifest under CAS and re-attaches the
+// sketches ANALYZE computed, so files another writer added during the scan
+// survive. Files that are gone by commit time are simply not found — their
+// sketch blob is orphaned, which the object store's own lifecycle handles
+// and which is strictly better than resurrecting a removed file.
+func (c *Catalog) commitAnalyzed(name string, sketched map[string]sketchedFile, rgMetaKey string) error {
+	c.invalidateManifestCache(name)
+	key := c.key("manifest." + name)
+	const maxRetries = 10
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		data, rev, err := c.kv.Get(key)
+		if err != nil {
+			return err
+		}
+		var fresh PartitionManifest
+		if err := json.Unmarshal(data, &fresh); err != nil {
+			return fmt.Errorf("unmarshaling manifest: %w", err)
+		}
+		for pi := range fresh.Partitions {
+			for fi := range fresh.Partitions[pi].Files {
+				upd, ok := sketched[fresh.Partitions[pi].Files[fi].Path]
+				if !ok {
+					continue
+				}
+				fresh.Partitions[pi].Files[fi].SketchesKey = upd.key
+				fresh.Partitions[pi].Files[fi].ColumnStats = upd.stats
+			}
+		}
+		if rgMetaKey != "" {
+			fresh.RGMetaKey = rgMetaKey
+		}
+		// Bump the manifest version: ANALYZE changed its content (sketch
+		// keys, cleared inline bytes), and cross-process consumers key
+		// derived-stats caches on UpdatedAt.
+		fresh.UpdatedAt = time.Now().UTC()
+		updated, err := json.Marshal(fresh)
+		if err != nil {
+			return fmt.Errorf("marshaling manifest: %w", err)
+		}
+		if _, err = c.kv.Update(key, updated, rev); err == ErrRevisionMismatch {
+			casBackoff(attempt)
+			c.invalidateManifestCache(name)
+			continue
+		} else if err != nil {
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("manifest update failed after %d CAS retries (table %q)", maxRetries, name)
 }
 
 // fileColumnSketches bundles HLL and reservoir-sample collectors per
@@ -285,4 +357,3 @@ func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path
 	}
 	return out, nil
 }
-

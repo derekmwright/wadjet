@@ -77,6 +77,7 @@ type ManifestSnapshot struct {
 // would defeat the pin exactly as much as retrying a successful one would.
 type cachedManifestEntry struct {
 	manifest *catalog.PartitionManifest
+	rev      uint64
 	err      error
 }
 
@@ -121,7 +122,7 @@ func (m *ManifestSnapshot) Get(ctx context.Context, cat *catalog.Catalog, table 
 	}
 	m.mu.Unlock()
 
-	manifest, err := cat.GetManifest(ctx, table)
+	manifest, rev, err := cat.GetManifestWithRevision(ctx, table)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -130,8 +131,19 @@ func (m *ManifestSnapshot) Get(ctx context.Context, cat *catalog.Catalog, table 
 		// caller in this statement agrees on one manifest object.
 		return e.manifest, e.err
 	}
-	m.byTbl[table] = &cachedManifestEntry{manifest: manifest, err: err}
+	m.byTbl[table] = &cachedManifestEntry{manifest: manifest, rev: rev, err: err}
 	return manifest, err
+}
+
+// pinnedManifest returns the snapshot's entry for table, reading it through
+// Get first when nothing has yet. It is what lets AggregateColumnStats hand
+// the SAME manifest object and revision to the catalog rather than letting
+// it read the key again (#540).
+func (m *ManifestSnapshot) pinnedManifest(ctx context.Context, cat *catalog.Catalog, table string) *cachedManifestEntry {
+	m.Get(ctx, cat, table)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.byTbl[table]
 }
 
 // AggregateColumnStats returns table's aggregated per-column stats, reading
@@ -147,7 +159,16 @@ func (m *ManifestSnapshot) AggregateColumnStats(ctx context.Context, cat *catalo
 	}
 	m.mu.Unlock()
 
-	stats, err := cat.AggregateColumnStats(ctx, table)
+	// Read the STATS from the manifest this statement has already pinned,
+	// not from a fresh one. Two reads of one key can straddle a writer, and
+	// the statistics are the newer half (#540).
+	var stats map[string]catalog.TableColumnStats
+	var err error
+	if e := m.pinnedManifest(ctx, cat, table); e != nil && e.err == nil {
+		stats, err = cat.AggregateColumnStatsFrom(ctx, table, e.manifest, e.rev)
+	} else {
+		stats, err = cat.AggregateColumnStats(ctx, table)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
