@@ -722,6 +722,13 @@ func wireCorpus() []wireCase {
 		// scanner never saw one — and the mixed-case spelling below is the
 		// value half: PostgreSQL prints a uuid lowercase whatever was written.
 		{name: "UUIDColumn", sql: `SELECT CAST('123E4567-E89B-12D3-A456-426614174000' AS uuid) AS u`},
+		// FLOAT(n) resolves by WIDTH (#652): float(1..24) declares real (OID
+		// 700, size 4) and float(25..53) double precision (701, size 8). Both
+		// declared an unconstrained STRING before, with the double's digits
+		// under it — the wire arm is what sees a right number under a wrong
+		// OID, and the VALUE moves too: float(1) of 1/3 is 0.33333334.
+		{name: "FloatPrecisionNarrow", sql: `SELECT CAST(1.0/3 AS float(1)) AS f`},
+		{name: "FloatPrecisionWide", sql: `SELECT CAST(1.0/3 AS float(25)) AS f`},
 		// A boolean expression, whose PostgreSQL text form is 't'/'f' and
 		// whose binary form is one byte (#364).
 		{name: "BooleanExpression", sql: `SELECT (n_regionkey = 1) AS is_one FROM nation ORDER BY n_nationkey LIMIT 4`},
@@ -1696,6 +1703,10 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "CastTextToRealInvalid", sql: `SELECT CAST('abc' AS real)`},
 		{name: "CastTextToNumericInvalid", sql: `SELECT CAST('abc' AS numeric)`},
 		{name: "CastTextToDoubleOutOfRange", sql: `SELECT CAST('1e400' AS double precision)`},
+		// FLOAT(n)'s two ends, which PostgreSQL refuses as a type modifier out
+		// of range rather than as a data exception (#652).
+		{name: "FloatPrecisionTooSmall", sql: `SELECT CAST(1.0 AS float(0))`},
+		{name: "FloatPrecisionTooLarge", sql: `SELECT CAST(1.0 AS float(54))`},
 		// ADR-0024 item 4 at the DECIMAL arithmetic and CAST sites: a value
 		// with no carrier at its declared type is 22003 and a zero divisor is
 		// 22012, and the two must stay APART — a caller that branched on "did

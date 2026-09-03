@@ -6501,6 +6501,24 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	if n, ok := e.stringDestination(); ok {
 		return truncateToChars(castStringRender(b, row, e.Operand, v), n)
 	}
+	// FLOAT(n), the third parameterized destination and the third one that
+	// matched no case label: `float(1)` reached `default: return v` and
+	// answered a double under a STRING declaration (#652). PostgreSQL
+	// resolves it by WIDTH — float(1..24) is real, float(25..53) is double —
+	// so the narrow half takes the REAL arm's rounding and its 22003 range
+	// check rather than a second copy of them.
+	if bits, err, ok := parquet.FloatTypePrecision(e.DestType); ok {
+		if err != nil {
+			panic(fatalEval{err})
+		}
+		if bits <= 24 {
+			return e.castToReal(v)
+		}
+		if f, isText := castFloatText(v, "double precision", 64); isText {
+			return f
+		}
+		return ToFloat64(v)
+	}
 	switch dest {
 	// Keep this label list and IsIntegerCastDest in step: that predicate is
 	// what tells the DAG's gather materialization to build an INT64 vector
@@ -6579,24 +6597,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// `double precision` (float(1..24) is real, float(25..53) is double,
 		// and an unqualified FLOAT is the latter) — verified with pg_typeof —
 		// so only the two spellings that really name float4 narrow.
-		// TEXT is read by real's own input function, which REFUSES what it
-		// cannot read rather than answering ToFloat64's zero (#839's sibling
-		// hole: `CAST('abc' AS REAL)` answered 0).
-		f, isText := castFloatText(v, "real", 32)
-		if !isText {
-			f = ToFloat64(v)
-		}
-		// PostgreSQL refuses a conversion that loses the value outright rather
-		// than answering an infinity or a zero (float.c's overflow and
-		// underflow checks, both SQLSTATE 22003). A value that is ALREADY
-		// infinite, or already zero, is representable and passes through.
-		// kernel.Float32FitOf is the one place that rule lives — the IN-list
-		// refusals read it too, so `CAST(x AS REAL)` and `x IN (lit)` cannot
-		// disagree about what a real can hold.
-		if fit := kernel.Float32FitOf(f); fit != kernel.Float32Fits {
-			raiseRealConversionError(e.Operand, f, fit)
-		}
-		return float32(f)
+		return e.castToReal(v)
 	case "float", "double", "float8", "double precision", "float64":
 		// Same hole, the wider destination: `CAST('abc' AS DOUBLE PRECISION)`
 		// answered 0, a plausible measurement where PostgreSQL raises 22P02.
@@ -6639,6 +6640,43 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	default:
 		return v
 	}
+}
+
+// castToReal narrows a value to float4, which is what `REAL`, `FLOAT4` and
+// `FLOAT(1..24)` all name — one function so the three spellings cannot round
+// differently (#652).
+//
+// REAL is a NARROWER type than the float64 every other numeric box in this
+// engine carries, and this arm used to sit beside "float"/"double" and answer
+// ToFloat64, so `CAST(x AS REAL)` was a NO-OP. PostgreSQL types the result
+// float4 and rounds the value into it, which changes the answer of anything
+// that compares it:
+//
+//	r_val = CAST(3.1 AS REAL)  ->  Filter: (r_val = '3.1'::real) -> the row
+//	CAST(1.0/3 AS REAL)        ->  0.33333334, not 0.3333333333333333
+//
+// Bare FLOAT is deliberately NOT here. PostgreSQL's unqualified `float` is
+// `double precision` — verified with pg_typeof — so only the spellings that
+// really name float4 narrow.
+func (e *Cast) castToReal(v any) any {
+	// TEXT is read by real's own input function, which REFUSES what it
+	// cannot read rather than answering ToFloat64's zero (#839's sibling
+	// hole: `CAST('abc' AS REAL)` answered 0).
+	f, isText := castFloatText(v, "real", 32)
+	if !isText {
+		f = ToFloat64(v)
+	}
+	// PostgreSQL refuses a conversion that loses the value outright rather
+	// than answering an infinity or a zero (float.c's overflow and underflow
+	// checks, both SQLSTATE 22003). A value that is ALREADY infinite, or
+	// already zero, is representable and passes through. kernel.Float32FitOf
+	// is the one place that rule lives — the IN-list refusals read it too, so
+	// `CAST(x AS REAL)` and `x IN (lit)` cannot disagree about what a real can
+	// hold.
+	if fit := kernel.Float32FitOf(f); fit != kernel.Float32Fits {
+		raiseRealConversionError(e.Operand, f, fit)
+	}
+	return float32(f)
 }
 
 // castStringRender is the TEXT a CAST to the string family produces, for the

@@ -121,6 +121,19 @@ func ParseTypeID(s string) (TypeID, error) {
 		_ = base
 		return TypeString, nil
 	}
+	// FLOAT(n) — the SQL-standard spelling of "a binary float with at least n
+	// bits of mantissa", which PostgreSQL resolves to real or double precision
+	// (#652). It failed the whole CREATE TABLE before, for the same reason
+	// VARCHAR(4) did.
+	if bits, err, ok := FloatTypePrecision(upper); ok {
+		if err != nil {
+			return 0, err
+		}
+		if bits <= 24 {
+			return TypeFloat32, nil
+		}
+		return TypeFloat64, nil
+	}
 	switch upper {
 	case "BOOL", "BOOLEAN":
 		return TypeBool, nil
@@ -159,6 +172,48 @@ func ParseTypeID(s string) (TypeID, error) {
 	default:
 		return 0, fmt.Errorf("unknown type: %s", s)
 	}
+}
+
+// FloatTypePrecision reads `FLOAT(n)`, the SQL-standard spelling of a binary
+// float with at least n bits of mantissa (#652).
+//
+// PostgreSQL 17 resolves it by WIDTH — `float(1..24)` is real, `float(25..53)`
+// is double precision, and a bare `FLOAT` is double precision (pg_typeof,
+// measured live) — and refuses the two ends with 22023 and its own wording:
+//
+//	CAST(x AS FLOAT(0))   precision for type float must be at least 1 bit
+//	CAST(x AS FLOAT(54))  precision for type float must be less than 54 bits
+//
+// ok=false means the name is not a parameterized FLOAT at all and the caller's
+// own rules stand; a non-nil error is the 22023, which every caller must
+// PROPAGATE rather than fall back around — it is the answer to the query.
+//
+// It lives here, below both the expression layer and the planner, because all
+// three read it: the cast evaluator picks float32 vs float64 from it, the
+// planner declares the output column from it, and DDL types a column from it.
+// One reading, three callers, which is what keeps a `FLOAT(1)` column and a
+// `CAST(x AS FLOAT(1))` from disagreeing about what a float(1) is.
+func FloatTypePrecision(name string) (bits int, err error, ok bool) {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	base, isParam := stripTypeParams(upper, "FLOAT")
+	if !isParam {
+		return 0, nil, false
+	}
+	_ = base
+	open := strings.IndexByte(upper, '(')
+	n, convErr := strconv.Atoi(strings.TrimSpace(upper[open+1 : len(upper)-1]))
+	if convErr != nil {
+		return 0, nil, false
+	}
+	// 22023 is PostgreSQL's invalid_parameter_value, which is what it raises
+	// for a type modifier outside its type's range.
+	if n < 1 {
+		return 0, sqlerr.New("22023", "precision for type float must be at least 1 bit"), true
+	}
+	if n > 53 {
+		return 0, sqlerr.New("22023", "precision for type float must be less than 54 bits"), true
+	}
+	return n, nil, true
 }
 
 // stripTypeParams reports whether upper is one of names followed by a

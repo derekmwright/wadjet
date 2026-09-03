@@ -11243,6 +11243,19 @@ func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, exp
 // TIME stays a string: the engine has no time-of-day column type, so
 // `TIME '10:00:00'` keeps its text, and so does expr.Cast.
 func inferCastType(typeName string) parquet.TypeID {
+	// FLOAT(n) carries its width in the NAME, so it matches no case label
+	// below and used to reach `default: return TypeString` — a numeric value
+	// under a STRING column, the #310/#443 shape (#652). PostgreSQL resolves
+	// it by width: float(1..24) is real, float(25..53) is double precision.
+	// parquet.FloatTypePrecision is the one reading of that rule; an
+	// out-of-range n is refused by the evaluator with 22023, and declaring
+	// double for it here costs nothing because no row is ever produced.
+	if bits, err, ok := parquet.FloatTypePrecision(typeName); ok {
+		if err == nil && bits <= 24 {
+			return parquet.TypeFloat32
+		}
+		return parquet.TypeFloat64
+	}
 	switch strings.ToUpper(strings.TrimSpace(typeName)) {
 	case "INTEGER", "INT", "INT4", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2":
 		// Every integer spelling lands on INT64: the engine has no int16

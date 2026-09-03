@@ -58,6 +58,26 @@ is likewise held to the column's band: a value the declared type cannot hold is
 
 Variable-length types use an **offset/data** columnar layout: a contiguous data buffer with a parallel offset array indexing into it. This avoids per-row heap allocation.
 
+#### `FLOAT(n)`
+
+`FLOAT(n)` is the SQL-standard spelling of "a binary float with at least n bits
+of mantissa", and it resolves by WIDTH exactly as PostgreSQL does:
+
+| Spelling | Type |
+|---|---|
+| `FLOAT(1)` … `FLOAT(24)` | `Float32` (real, OID 700) |
+| `FLOAT(25)` … `FLOAT(53)` | `Float64` (double precision, OID 701) |
+| `FLOAT` (bare) | `Float64` — PostgreSQL's unqualified `float` is double precision |
+| `REAL`, `FLOAT4` | `Float32` |
+| `DOUBLE PRECISION`, `FLOAT8` | `Float64` |
+| `FLOAT(0)`, `FLOAT(54)` | `ERROR 22023` — the same message PostgreSQL gives |
+
+```sql
+SELECT CAST(1.0/3 AS FLOAT(1));    -- 0.33333334          (real)
+SELECT CAST(1.0/3 AS FLOAT(25));   -- 0.3333333333333333  (double precision)
+CREATE TABLE t (f FLOAT(1));       -- a Float32 column
+```
+
 #### `VARCHAR(n)` and `CHAR(n)`
 
 `VARCHAR`, `CHAR`, `CHARACTER`, `CHARACTER VARYING`, `NCHAR`, `NVARCHAR` and

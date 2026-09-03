@@ -98,9 +98,20 @@ func TestParseTypeID_AllTypes(t *testing.T) {
 		{"CHARACTER VARYING(10)", TypeString, false},
 		{"NVARCHAR(8)", TypeString, false},
 		{"TEXT(8)", TypeString, false},
+		// FLOAT(n) resolves by WIDTH, which is PostgreSQL's rule: float(1..24)
+		// is real and float(25..53) is double precision (pg_typeof, measured
+		// live). It failed the whole CREATE TABLE before, like VARCHAR(4).
+		{"FLOAT(1)", TypeFloat32, false},
+		{"FLOAT(24)", TypeFloat32, false},
+		{"float(25)", TypeFloat64, false},
+		{"FLOAT(53)", TypeFloat64, false},
+		// The two ends PostgreSQL refuses with 22023.
+		{"FLOAT(0)", 0, true},
+		{"FLOAT(54)", 0, true},
 		// The NAME is matched exactly, not by prefix, so a longer name that
 		// merely starts the same way is still unknown.
 		{"VARCHARX(1)", 0, true},
+		{"FLOATX(1)", 0, true},
 		// Unknown
 		{"BANANA", 0, true},
 		{"", 0, true},

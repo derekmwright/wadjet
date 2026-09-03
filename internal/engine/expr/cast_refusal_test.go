@@ -204,6 +204,96 @@ func TestInt32CountRaisesInsteadOfWrapping(t *testing.T) {
 	}
 }
 
+// TestCastToFloatPrecisionResolvesByWidth is #652: `CAST(1.0/3 AS FLOAT(1))`
+// answered 0.3333333333333333 — a DOUBLE — where PostgreSQL answers
+// 0.33333334, because `float(1)` matched no case label in Cast.Eval's switch
+// and the whole cast reached `default: return v`.
+//
+// PostgreSQL resolves FLOAT(n) by WIDTH: float(1..24) is real, float(25..53)
+// is double precision, and a bare FLOAT is double precision — all three
+// verified with pg_typeof on 17.11, along with the two refusals.
+func TestCastToFloatPrecisionResolvesByWidth(t *testing.T) {
+	b := castRefusalBatch(t)
+	third := &Lit{Val: 1.0 / 3.0}
+	for _, c := range []struct {
+		dest string
+		want any
+	}{
+		{"float(1)", float32(1.0 / 3.0)},
+		{"FLOAT(24)", float32(1.0 / 3.0)},
+		{"float(25)", 1.0 / 3.0},
+		{"float(53)", 1.0 / 3.0},
+		// A bare FLOAT is double precision there, and always was here.
+		{"float", 1.0 / 3.0},
+		// The two spellings that really name float4 are unchanged.
+		{"real", float32(1.0 / 3.0)},
+		{"float4", float32(1.0 / 3.0)},
+	} {
+		if got := (&Cast{Operand: third, DestType: c.dest}).Eval(b, 0); got != c.want {
+			t.Errorf("CAST(1.0/3 AS %s) = %#v, want %#v (live PostgreSQL 17.11)",
+				c.dest, got, c.want)
+		}
+	}
+	for _, c := range []struct{ dest, msg string }{
+		{"float(0)", "precision for type float must be at least 1 bit"},
+		{"FLOAT(54)", "precision for type float must be less than 54 bits"},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() {
+			(&Cast{Operand: third, DestType: c.dest}).Eval(b, 0)
+		})
+		if state != "22023" || msg != c.msg {
+			t.Errorf("CAST(x AS %s) raised [%s] %s, want [22023] %s (live PostgreSQL 17.11)",
+				c.dest, state, msg, c.msg)
+		}
+	}
+	// FLOAT(n) narrows a value the type cannot carry the same way REAL does —
+	// one castToReal, three spellings, so they cannot round differently.
+	state, msg := recoverFatalEvalForTest(t, func() {
+		(&Cast{Operand: &Lit{Val: "abc"}, DestType: "float(1)"}).Eval(b, 0)
+	})
+	if state != "22P02" || msg != `invalid input syntax for type real: "abc"` {
+		t.Errorf("CAST('abc' AS FLOAT(1)) raised [%s] %s, want the REAL refusal", state, msg)
+	}
+}
+
+// TestUnknownCastTypeStillDeclaresString is #652's SECOND half, DEFERRED and
+// pinned.
+//
+// `CAST(1 AS NOSUCHTYPE)` answers 1 declared STRING; PostgreSQL raises 42704
+// `type "nosuchtype" does not exist`. The fix is not a refusal bolted onto any
+// one of the four functions that read a destination name — expr.castDestType,
+// physical.inferCastType, expr.castTemporalKindLower and
+// parquet.ParseTypeID each accept a DIFFERENT subset, and a refusal built on
+// one alone would reject types the others accept. `CAST(x AS TIME)` is the
+// live example: parquet.ParseTypeID has no TIME, the cast layer passes its
+// text through on purpose, and PostgreSQL accepts it.
+//
+// TODO(#652): delete this when there is ONE list of accepted cast
+// destinations, the way parquet.ParseDateDays is the one date accept-set. This
+// pin fires the day the cast starts refusing an unknown name.
+func TestUnknownCastTypeStillDeclaresString(t *testing.T) {
+	b := castRefusalBatch(t)
+	got := func() (v any) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("CAST(1 AS NOSUCHTYPE) now raises %v — #652's unknown-type half has "+
+					"moved. Check that the refusal reads ONE accepted-destination list and "+
+					"that CAST(x AS TIME) still answers, then delete this pin.", r)
+			}
+		}()
+		return (&Cast{Operand: &Lit{Val: int64(1)}, DestType: "nosuchtype"}).Eval(b, 0)
+	}()
+	if got != int64(1) {
+		t.Errorf("CAST(1 AS NOSUCHTYPE) = %#v, this pin records the operand passed through", got)
+	}
+	// The shape that makes the deferral a deferral rather than an omission:
+	// PostgreSQL ACCEPTS this one, and no list here knows the name.
+	if got := (&Cast{Operand: &Lit{Val: "10:00:00"}, DestType: "time"}).Eval(b, 0); got != "10:00:00" {
+		t.Errorf("CAST('10:00:00' AS TIME) = %#v, want the text unchanged — PostgreSQL accepts "+
+			"TIME and a refusal built on any single destination list here would reject it", got)
+	}
+}
+
 func TestCastToANetworkTypeStillPassesThrough(t *testing.T) {
 	b := castRefusalBatch(t)
 	for _, dest := range []string{"ipv4", "ipv6", "cidr", "macaddr", "mac"} {
