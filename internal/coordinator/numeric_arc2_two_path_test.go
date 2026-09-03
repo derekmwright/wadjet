@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/worker"
@@ -670,37 +671,128 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 	// table rebinding `w`, with a distinct inner alias, and with the minimal
 	// pass-through below.
 	//
-	// The single arm is GATED so a "fix" that made every arm fail equally could
-	// not pass this, and the DAG arms RATCHET: the day either answers, this pin
-	// fails and the shape belongs in the census above beside its #775 siblings.
+	// The LOUD half of that pin is GONE since #841. The const-arith aggregate
+	// lift was rewriting this `SUM(w*2)` into `SUM(w)*2`, and it was the LIFTED
+	// form that met the store guard: `SUM(w)` over the derived-table window
+	// slot declared FLOAT64 while the value arrived as a DECIMAL's text. With
+	// the lift declined (it may not move a per-row refusal — see
+	// logical.rewriteConstArithAggs) the multiplication happens in the
+	// projection and every arm answers the same thing the single arm always
+	// did. Measured on all five: `s=float:953.82`.
+	//
+	// What is LEFT is the declaration, and it is now the SAME on every arm,
+	// which is what makes the remaining pin a one-line statement instead of an
+	// arm-by-arm one: PostgreSQL 17 says numeric 953.82, wadjet says the right
+	// value in a float64 box, because one derived-table level between the
+	// window and the scan loses the exact declaration the six #775 entries
+	// above keep.
 	//
 	// TODO(#796): delete this when a window over a DERIVED TABLE types like a
-	// window over a scan.
+	// window over a scan. The pin fails the day any arm's box becomes exact.
 	t.Run("#796/computed_agg_arg_over_a_window_whose_input_is_a_derived_table", func(t *testing.T) {
 		const sql = `SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w ` +
 			`FROM (SELECT id, a FROM decpair) t) x`
-		// PostgreSQL 17 says numeric 953.82; the single arm's VALUE agrees and
-		// its BOX does not. Both halves are pinned, so a fix that restores the
-		// declaration on the single path fails here too and gets recorded.
 		const want = "s=float:953.82"
-		got, err := na2Run(tmdRunSingle(ctx, single, sql))
-		if err != nil {
-			t.Fatalf("single arm: %v\n  SQL: %s", err, sql)
-		}
-		if len(got) != 1 || got[0] != want {
-			t.Errorf("single arm: %v, this pin records [%s] and PostgreSQL 17 says numeric "+
-				"953.82. If the box is now exact, #796 has moved on this arm: re-measure and "+
-				"update the pin\n  SQL: %s", got, want, sql)
-		}
 		for _, arm := range []struct {
 			name string
-			c    *Coordinator
-		}{{"dag", coord}, {"dag-shuffled", coordB}, {"dag+morsel4", coordM}} {
-			if _, err := tmdRunDAG(ctx, arm.c, sql); err == nil {
-				t.Errorf("the %s arm now ANSWERS this, so #796 is fixed for it. Move the shape "+
-					"into the census above beside the #775 entries and delete this pin"+
-					"\n  SQL: %s", arm.name, sql)
+			run  func(string) ([]string, error)
+		}{
+			{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
+			{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
+			{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+			{"dag+morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
+		} {
+			got, err := arm.run(sql)
+			if err != nil {
+				t.Errorf("%s arm: %v — this shape ANSWERS on every arm since #841; a failure here "+
+					"is a regression, not the old pin\n  SQL: %s", arm.name, err, sql)
+				continue
 			}
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("%s arm: %v, this pin records [%s] and PostgreSQL 17 says numeric 953.82. "+
+					"If the box is now exact, #796 is fixed: re-measure every arm and delete this "+
+					"pin\n  SQL: %s", arm.name, got, want, sql)
+			}
+		}
+	})
+	// ------------------------------------------------------------------
+	// #841 — ONE DISPOSITION PER EXPRESSION, on the same five arms.
+	//
+	// `c_i64 * 9223372036854775807` overflows int64 on every row it reaches.
+	// PROJECTED it raised 22003; under SUM it answered an exact
+	// 9223399706970886371327421, because the const-arith aggregate lift had
+	// turned `SUM(x * k)` into `SUM(x) * k` and SUM(bigint) is an exact
+	// numeric that cannot overflow. Two dispositions for one expression, and
+	// PostgreSQL 17.11 has only one: `bigint out of range` for the input
+	// expression in EVERY position — measured live for the projection, SUM,
+	// AVG, MIN, MAX, a GROUP BY key and a window.
+	//
+	// The census is here rather than beside its own fix because the arms are
+	// what makes it a gate: the lift is a LOGICAL rewrite, so a regression
+	// would show identically on all five, and the DAG arms are where the
+	// aggregate is also SPLIT into partial and final.
+	for _, tc := range []struct{ name, sql string }{
+		{"projected", `SELECT c_i64 * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"sum", `SELECT SUM(c_i64 * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"avg", `SELECT AVG(c_i64 * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"min", `SELECT MIN(c_i64 * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"max", `SELECT MAX(c_i64 * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"group_by_the_expression",
+			`SELECT COUNT(*) AS n FROM typemx WHERE id = 1 GROUP BY c_i64 * 9223372036854775807`},
+		{"window", `SELECT MAX(c_i64 * 9223372036854775807) OVER () AS v FROM typemx WHERE id = 1`},
+		// The ADDITIVE spellings, which the lift moved through a different
+		// arm (SUM(x+k) → SUM(x) + k*COUNT(x)).
+		{"projected_plus", `SELECT c_i64 + 9223372036854775807 AS v FROM typemx WHERE id = 3`},
+		{"sum_plus", `SELECT SUM(c_i64 + 9223372036854775807) AS v FROM typemx WHERE id = 3`},
+		{"min_plus", `SELECT MIN(c_i64 + 9223372036854775807) AS v FROM typemx WHERE id = 3`},
+		{"avg_plus", `SELECT AVG(c_i64 + 9223372036854775807) AS v FROM typemx WHERE id = 3`},
+		{"sum_const_minus", `SELECT SUM(-9223372036854775807 - c_i64) AS v FROM typemx WHERE id = 3`},
+		{"projected_const_minus", `SELECT -9223372036854775807 - c_i64 AS v FROM typemx WHERE id = 3`},
+	} {
+		t.Run("#841/"+tc.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				name string
+				run  func(string) ([]string, error)
+			}{
+				{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
+				{"single+budget", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, spilled, sql)) }},
+				{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
+				{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+				{"dag+morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
+			} {
+				got, err := arm.run(tc.sql)
+				if err == nil {
+					t.Errorf("%s arm ANSWERED %v; PostgreSQL 17.11 raises 22003 `bigint out of "+
+						"range` for this expression in EVERY position, and the projected spelling "+
+						"raises it here. One expression, one disposition (#841, ADR-0024 item 2)."+
+						"\n  SQL: %s", arm.name, got, tc.sql)
+					continue
+				}
+				if state := sqlerr.StateOf(err); state != "22003" {
+					t.Errorf("%s arm raised SQLSTATE %s, want 22003\n  err: %v\n  SQL: %s",
+						arm.name, state, err, tc.sql)
+				}
+				if !strings.Contains(err.Error(), "bigint out of range") {
+					t.Errorf("%s arm: %q does not carry PostgreSQL's message `bigint out of range`"+
+						"\n  SQL: %s", arm.name, err, tc.sql)
+				}
+			}
+		})
+	}
+	// The BOUNDARY of that decline, attempted from the outside (rule 11). A
+	// NON-INTEGER literal keeps the lift, and it must: PostgreSQL types the
+	// pair numeric there and `SUM(a*2.0)` over bigint's maximum ANSWERS
+	// 18446744073709551614.0 on the server. A decline that swallowed this
+	// shape too would be a refusal PostgreSQL does not make.
+	t.Run("#841/a_non_integer_literal_still_answers", func(t *testing.T) {
+		const sql = `SELECT SUM(c_i64 * 2.0) AS v FROM typemx WHERE id = 1`
+		got, err := na2Run(tmdRunSingle(ctx, single, sql))
+		if err != nil {
+			t.Fatalf("this must ANSWER — PostgreSQL types `bigint * numeric` numeric and never "+
+				"refuses it: %v\n  SQL: %s", err, sql)
+		}
+		if len(got) != 1 || got[0] != "v=2000006.0" {
+			t.Errorf("got %v, want [v=2000006.0] (live PostgreSQL 17.11)\n  SQL: %s", got, sql)
 		}
 	})
 	na2CheckEngagement(t)

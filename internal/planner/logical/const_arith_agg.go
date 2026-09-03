@@ -4,8 +4,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
+
+// constArithAggToggle is this rewrite's kill switch. It had none, which is why
+// #841 was invisible to the optimization-invariance oracle for as long as it
+// existed: the oracle enumerates optswitch.All() and re-runs every corpus
+// query with each switch disabled, and a rewrite outside the registry is
+// simply never disabled. Registering it is part of the definition of done for
+// optimization work (#287) and extends the oracle for free.
+var constArithAggToggle = optswitch.Register("const-arith-agg", "WADJET_CONST_ARITH_AGG",
+	"lift a constant out of an aggregate: SUM(x*k) → SUM(x)*k, AVG(x±k) → AVG(x)±k, "+
+		"MIN/MAX(x±k) → MIN/MAX(x)±k. Disabling it evaluates the aggregate's input per row.")
 
 // rewriteConstArithAggs rewrites aggregates over (column op constant) into
 // arithmetic over plain-column aggregates, recursively through the
@@ -23,7 +34,60 @@ import (
 // rows where x is non-null, which is what SUM(x) + k*COUNT(x) computes.
 // DISTINCT aggregates are never rewritten. Returns nil when nothing
 // changed so callers can keep the original node.
+//
+// # What the lift may not move: the per-row REFUSAL (#841)
+//
+// The lift is an identity over VALUES and not over DISPOSITIONS. `x op k` is
+// evaluated once per row; `agg(x) op k` is evaluated once. When the per-row
+// form can RAISE, the lifted form answers a query PostgreSQL refuses — which
+// is how `SUM(big * 2)` came back as an exact 18446744073709551614 while the
+// projected `big * 2` raised 22003 on the same row. One expression, two
+// dispositions, and the aggregate's was the wrong one: PostgreSQL raises
+// `bigint out of range` for the input expression in EVERY position, verified
+// live on 17.11 for SUM, AVG, MIN, MAX, a GROUP BY key and a window.
+//
+// The rule is stated against PostgreSQL, not against this engine's kernels,
+// because PostgreSQL is what the disposition has to match:
+//
+//   - An INTEGER literal makes the per-row pair an INTEGER pair there, and
+//     `int op int` overflow is 22003. `+ - *` therefore DECLINE — the same
+//     decline `/` has carried since #369 for the same reason (the column's
+//     type is unknown at this stage, so the per-row semantics cannot be
+//     reproduced by the lifted form).
+//   - A NON-INTEGER literal makes the pair numeric or float there, and
+//     PostgreSQL never refuses those: `SUM(a*2.0)` over bigint's maximum
+//     answers 18446744073709551614.0 on the server. So the lift cannot lose a
+//     refusal PostgreSQL makes, and it stays.
+//
+// This engine's own DECIMAL carrier can refuse where PostgreSQL answers
+// (ADR-0012 records that divergence), and the lift can move that refusal too —
+// in the direction of PostgreSQL's answer, never away from it, so it is not a
+// disposition this rule has to preserve.
+//
+// # The cost, measured rather than assumed
+//
+// The ClickBench Q30 shape — `SUM(col + k)` ninety times over one integer
+// column — no longer lifts, and that is expensive: 200 000 rows × 90
+// aggregates, median of three runs of five, 7.6 ms with the lift and 342 ms
+// without it, ~45×. Ninety per-row expression passes and ninety accumulators
+// instead of a SUM and a COUNT.
+//
+// It ships anyway, and the reason is a standing rule rather than a judgement
+// call: a correctness fix is never gated on a perf A/B, and PostgreSQL decides
+// what is an error (ADR-0012 item 1). The loss is confined to one shape family
+// and is fully recoverable — every ClickBench column here is int4-domain, read
+// as int64 by this engine, so `col + k` CANNOT leave int64's range and the
+// lift is provably safe for exactly those. What the recovery needs is the
+// operand's TYPE, and this pass runs in the syntactic BUILDER, before
+// physical.AnnotateScanColumns has put any type on a scan. The follow-up is
+// therefore to run the lift where types are known — after annotation, over the
+// built Aggregate and the Project above it — and lift only where the width
+// walk (physical.aggInputIsWideInteger's sibling question) says the per-row
+// form cannot refuse. That is a planner-layer change and it is filed as one.
 func rewriteConstArithAggs(node plansql.Node) plansql.Node {
+	if !constArithAggToggle.On() {
+		return nil
+	}
 	changed := false
 	out := rewriteCAA(node, &changed)
 	if !changed {
@@ -85,6 +149,15 @@ func rewriteOneAgg(fn *plansql.FuncCallNode) plansql.Node {
 	var err error
 	k, err = strconv.ParseFloat(kNode.Value, 64)
 	if err != nil {
+		return nil
+	}
+	// An INTEGER literal makes the per-row pair an integer pair in PostgreSQL,
+	// where overflow is 22003 — a refusal the lifted form cannot make. See the
+	// header: `+ - *` decline for it, `/` already declined below for its own
+	// reason (truncation), and a non-integer literal keeps the lift because
+	// PostgreSQL's numeric never refuses (#841).
+	_, kIsInteger := strconv.ParseInt(strings.TrimSpace(kNode.Value), 10, 64)
+	if kIsInteger == nil && (bin.Op == "+" || bin.Op == "-" || bin.Op == "*") {
 		return nil
 	}
 
