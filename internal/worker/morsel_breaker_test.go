@@ -381,10 +381,28 @@ func TestExecuteFragment_MorselParallel_AggPressureCollapse(t *testing.T) {
 // continuation then consumes the remaining input through the primary.
 // Pre-fix, its nil batchUpdaters scratch panicked with index-out-of-range
 // on the first post-merge batch; post-fix the totals must be exact.
+// TestExecuteFragment_MorselParallel_AggCollapseUnresolvedPrimary asserts what
+// happens to aggregate STATE across a morsel collapse, and opens by requiring a
+// collapse to have happened. That precondition used to be left to the budget,
+// and a collapse is a CONDITION rather than a plan shape: the stop check runs
+// only after a morsel has been consumed, so a run whose four consumers drained
+// all 64 files before the tracker crossed its 40% mark recorded zero collapses
+// however busy the machine was, and the gate failed with "expected at least one
+// pressure collapse" while nothing was wrong (#564). A gate whose trigger is a
+// condition cannot be relied on to fire (ADR-0027).
+//
+// The knob makes the FIRST stop check collapse, taking the same latch, the same
+// serial continuation and the same clone merge that pressure would have taken —
+// so what is asserted below is still the production path. The budget is left
+// tiny anyway, so the fixture keeps its shape.
 func TestExecuteFragment_MorselParallel_AggCollapseUnresolvedPrimary(t *testing.T) {
-	// Enough input files that the pressure collapse reliably fires while the
-	// channel still holds unconsumed batches — the serial continuation must
-	// actually consume through the adopted primary for the repro to bite.
+	prev := ForceMorselCollapseEvery(1)
+	t.Cleanup(func() { ForceMorselCollapseEvery(prev) })
+	forcedBefore := ForcedMorselCollapses.Load()
+
+	// Enough input files that the collapse lands while the channel still holds
+	// unconsumed batches — the serial continuation must actually consume
+	// through the adopted primary for the repro to bite.
 	const numFiles = 64
 	const rowsPerFile = 2048
 	const totalRows = numFiles * rowsPerFile
@@ -411,8 +429,14 @@ func TestExecuteFragment_MorselParallel_AggCollapseUnresolvedPrimary(t *testing.
 	if err := executor.executeStage(context.Background(), task, result); err != nil {
 		t.Fatalf("executeStage: %v", err)
 	}
+	// A forcing knob that silently stopped engaging would turn this gate into
+	// a no-op, so the knob's own counter is asserted beside the collapse.
+	if got := ForcedMorselCollapses.Load(); got <= forcedBefore {
+		t.Fatalf("the collapse forcing knob never engaged (%d -> %d): this run collapsed by accident or "+
+			"not at all, and the assertions below prove nothing", forcedBefore, got)
+	}
 	if got := executor.morselCollapses.Load(); got < 1 {
-		t.Fatalf("expected at least one pressure collapse (repro precondition), counter = %d", got)
+		t.Fatalf("expected at least one collapse (repro precondition), counter = %d", got)
 	}
 	const wantRows = totalRows - rowsPerFile
 	if result.NumRows != int64(wantRows) {

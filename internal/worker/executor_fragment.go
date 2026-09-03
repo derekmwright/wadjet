@@ -1412,6 +1412,7 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		}()
 
 		var collapsed atomic.Bool
+		var collapseSeq atomic.Int64 // forcing knob's per-fragment phase; test only
 		g, gctx := errgroup.WithContext(ctx)
 		for i := 0; i < k; i++ {
 			driver := drivers[i]
@@ -1433,7 +1434,10 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 					if collapsed.Load() {
 						return true
 					}
-					if heapPressureActive() {
+					// Knob first: armed, it must decide, or a run where
+					// pressure happened to win would leave the gate that
+					// armed it unable to tell that it engaged at all.
+					if forcedCollapseDue(&collapseSeq) || heapPressureActive() {
 						collapsed.Store(true)
 						return true
 					}
@@ -1696,6 +1700,7 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	}()
 
 	var collapsed atomic.Bool
+	var collapseSeq atomic.Int64 // forcing knob's per-breaker phase; test only
 	g, gctx := errgroup.WithContext(ctx)
 	for i := 0; i < k; i++ {
 		driver := drivers[i]
@@ -1718,7 +1723,11 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 				if collapsed.Load() {
 					return true
 				}
-				if e.sharedSpill != nil && e.sharedSpill.ShouldSpillFor(memory.SpillCheap) {
+				// Knob first: armed, it must decide, or a run where pressure
+				// happened to win would leave the gate that armed it unable
+				// to tell that it engaged at all.
+				if forcedCollapseDue(&collapseSeq) ||
+					(e.sharedSpill != nil && e.sharedSpill.ShouldSpillFor(memory.SpillCheap)) {
 					collapsed.Store(true)
 					return true
 				}
