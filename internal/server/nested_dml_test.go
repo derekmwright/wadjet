@@ -54,8 +54,8 @@ func TestServerDeleteAndUpdateOnRowOfContainerColumn(t *testing.T) {
 		if err != nil {
 			t.Fatalf("executeDMLDelete on a table with a ROW-of-container column: %v (#448/#449)", err)
 		}
-		if res.rowsAffected != 1 {
-			t.Fatalf("rowsAffected = %d, want 1", res.rowsAffected)
+		if res.RowsAffected != 1 {
+			t.Fatalf("rowsAffected = %d, want 1", res.RowsAffected)
 		}
 
 		surviving := nestServerSurvivingRows(t, cat, "srv_row_del", filePath, schema)
@@ -83,8 +83,8 @@ func TestServerDeleteAndUpdateOnRowOfContainerColumn(t *testing.T) {
 		if err != nil {
 			t.Fatalf("executeDMLUpdate on a table with a ROW-of-container column: %v (#448/#449)", err)
 		}
-		if res.rowsAffected != 1 {
-			t.Fatalf("rowsAffected = %d, want 1", res.rowsAffected)
+		if res.RowsAffected != 1 {
+			t.Fatalf("rowsAffected = %d, want 1", res.RowsAffected)
 		}
 
 		want := rows()
@@ -153,8 +153,8 @@ func TestServerDeleteAndUpdateOnTopLevelArrayAndMapColumns(t *testing.T) {
 		if err != nil {
 			t.Fatalf("executeDMLDelete on a table with top-level ARRAY/MAP columns: %v (#448/#449 F1)", err)
 		}
-		if res.rowsAffected != 1 {
-			t.Fatalf("rowsAffected = %d, want 1", res.rowsAffected)
+		if res.RowsAffected != 1 {
+			t.Fatalf("rowsAffected = %d, want 1", res.RowsAffected)
 		}
 
 		surviving := nestServerSurvivingRows(t, cat, "srv_toplevel_del", filePath, schema)
@@ -185,8 +185,8 @@ func TestServerDeleteAndUpdateOnTopLevelArrayAndMapColumns(t *testing.T) {
 		if err != nil {
 			t.Fatalf("executeDMLUpdate on a table with top-level ARRAY/MAP columns: %v (#448/#449 F1)", err)
 		}
-		if res.rowsAffected != 1 {
-			t.Fatalf("rowsAffected = %d, want 1", res.rowsAffected)
+		if res.RowsAffected != 1 {
+			t.Fatalf("rowsAffected = %d, want 1", res.RowsAffected)
 		}
 
 		want := rows()

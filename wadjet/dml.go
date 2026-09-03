@@ -30,21 +30,37 @@ type ExecResult struct {
 	Command      string // INSERT, UPDATE, DELETE
 }
 
-// Execute runs a DML statement (INSERT/UPDATE/DELETE) and returns the result.
-func (db *DB) Execute(ctx context.Context, sql string) (res *ExecResult, err error) {
+// Execute runs a DML statement (INSERT/UPDATE/DELETE/MERGE) and returns the
+// result.
+func (db *DB) Execute(ctx context.Context, sql string) (*ExecResult, error) {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return nil, fmt.Errorf("parsing SQL: %w", err)
+	}
+	return db.ExecuteParsed(ctx, parsed)
+}
+
+// ExecuteParsed runs an already-parsed DML statement.
+//
+// It is the ONE DML entry point (#815): the embedded door, the pgwire door and
+// the HTTP API server all reach the executors below through it, so a fix is
+// written once and every door carries the same table state, command tag and
+// SQLSTATE. It is exported for the callers that have already parsed — the HTTP
+// handler routes on the statement type before dispatching — and for the tests
+// that drive a synthesized statement no text can spell.
+func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (res *ExecResult, err error) {
 	// Same seam as DB.Query: DML builds row batches (batch.FromRows) with
 	// user-supplied values, so batch.TypeMismatchError (#361's guard) must
 	// come back as an error, never a process exit — and since #511 so must
-	// any other panic this statement reaches.
+	// any other panic this statement reaches. The HTTP door relies on this
+	// boundary too: net/http answers a panic by dropping the connection, so
+	// without it a panicking statement reached that client as a transport EOF
+	// instead of a SQLSTATE (#677).
 	defer func() {
 		if r := recover(); r != nil {
 			err = exec.RecoverQueryPanic(ctx, "embedded statement", r)
 		}
 	}()
-	parsed, err := plansql.Parse(sql)
-	if err != nil {
-		return nil, fmt.Errorf("parsing SQL: %w", err)
-	}
 
 	switch parsed.Type {
 	case plansql.QueryInsert:
@@ -1547,6 +1563,17 @@ func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []
 }
 
 // readParquetFile downloads and decodes a Parquet file into a RecordBatch.
+// ReadDataFile reads one of a table's data files as a columnar batch, through
+// the exact path the DML executors read it.
+//
+// Exported for the gates that assert what a statement left in a specific FILE
+// rather than what a query returns: delete markers are metadata, so a file's
+// surviving rows can only be seen by reading the file and applying them (#815
+// folded the HTTP door's own copy of this reader into this one).
+func (db *DB) ReadDataFile(ctx context.Context, filePath string, schema []parquet.Column) (*batch.RecordBatch, error) {
+	return db.readParquetFile(ctx, filePath, schema)
+}
+
 func (db *DB) readParquetFile(ctx context.Context, filePath string, schema []parquet.Column) (*batch.RecordBatch, error) {
 	store := db.catalog.Store()
 

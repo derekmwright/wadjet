@@ -106,7 +106,7 @@ func httpDML(t *testing.T, cat *catalog.Catalog, sql string) int64 {
 	if err != nil {
 		t.Fatalf("%s: %v", sql, err)
 	}
-	return res.rowsAffected
+	return res.RowsAffected
 }
 
 // liveRows is the table's rows minus its delete markers — the merge-on-read

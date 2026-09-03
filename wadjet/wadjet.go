@@ -1178,6 +1178,29 @@ func (db *DB) Catalog() *catalog.Catalog {
 	return db.catalog
 }
 
+// Attach wraps an ALREADY-INITIALIZED catalog as a DB, without creating a
+// second catalog or re-running Init.
+//
+// It exists so a process that already owns a *catalog.Catalog — the HTTP API
+// server in coordinator mode — reaches DML through the SAME implementation the
+// embedded and pgwire doors use, instead of keeping its own copy of the
+// executors. internal/server carried an independent INSERT/UPDATE/DELETE that
+// had drifted into the same defects as this package's (#815): an unresolved
+// INSERT column list (#814), the marker/manifest window (#691), the literal
+// kind discarded in SET (#690) — and no MERGE at all. A fix written once has
+// to be reachable from both doors, and this is that reach.
+//
+// The returned DB owns no background goroutines (Open's alert scheduler is not
+// started), so it needs no Close; the caller keeps ownership of the catalog.
+func Attach(cat *catalog.Catalog) *DB {
+	return &DB{
+		store:   cat.Store(),
+		catalog: cat,
+		bucket:  cat.Bucket(),
+		logger:  slog.Default(),
+	}
+}
+
 // Store returns the underlying object store.
 func (db *DB) Store() objstore.Store {
 	return db.store

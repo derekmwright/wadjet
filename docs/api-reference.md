@@ -94,6 +94,31 @@ Execute a SQL query and return results.
 }
 ```
 
+An error the statement's own text caused carries the PostgreSQL SQLSTATE
+alongside the message, and answers `400 Bad Request` rather than `500`:
+
+```json
+{
+  "error": "DML execution error: column \"nosuchcol\" of relation \"flow_logs\" does not exist",
+  "sqlstate": "42703"
+}
+```
+
+**DML:** the same endpoint runs `INSERT`, `UPDATE`, `DELETE` and `MERGE`
+through the same implementation the embedded API and the PostgreSQL wire
+protocol use, so a statement's table state, command tag and SQLSTATE do not
+depend on which door it arrived by. A DML statement answers with a single row
+carrying its command tag:
+
+```json
+{
+  "query_id": "q-1756900000000",
+  "columns": ["result"],
+  "rows": [{"result": "DELETE 2"}],
+  "stats": {"elapsed": "12ms", "rows_scanned": 0}
+}
+```
+
 **cURL Example:**
 
 ```bash

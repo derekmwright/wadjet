@@ -2,13 +2,10 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -24,18 +21,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
-	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/metrics"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
-	"github.com/derekmwright/wadjet/internal/storage/ingest"
-	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
@@ -573,18 +566,7 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 		}
 	}
 
-	parsed, err := plansql.Parse(sql)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "SQL parse error: "+err.Error())
-		return
-	}
-
-	result, err := runHTTPDML(ctx, s.catalog, parsed)
-	if err == errUnsupportedDML {
-		writeError(w, http.StatusBadRequest, "unsupported DML type")
-		return
-	}
-
+	result, err := s.dml().Execute(ctx, sql)
 	if err != nil {
 		writeSQLError(w, http.StatusInternalServerError, "DML execution error: "+err.Error(), err)
 		return
@@ -593,7 +575,7 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 	resp := QueryResponse{
 		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
 		Columns: []string{"result"},
-		Rows:    []map[string]any{{"result": fmt.Sprintf("%s %d", result.command, result.rowsAffected)}},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("%s %d", result.Command, result.RowsAffected)}},
 		Stats:   QueryStats{Elapsed: time.Since(start).String()},
 	}
 
@@ -608,287 +590,20 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 	writeJSON(w, http.StatusOK, resp)
 }
 
-type dmlResult struct {
-	rowsAffected int64
-	command      string
-}
-
-// errUnsupportedDML is the one failure handleDML reports as a shape problem
-// rather than an execution error.
-var errUnsupportedDML = errors.New("unsupported DML type")
-
-// runHTTPDML dispatches one DML statement under a query-scoped panic boundary.
+// dml returns the DML door: the SAME implementation the embedded and pgwire
+// doors run.
 //
-// This is a goroutine entry point in ADR-0019's sense — net/http runs each
-// request on its own goroutine, and its own recover answers a panic by
-// DROPPING THE CONNECTION and logging a stack. So a DML statement that
-// panicked reached the client as a transport EOF plus a goroutine dump
-// instead of a SQLSTATE, where the same statement on the embedded and pgwire
-// doors (which both have a boundary) reported 22012 or 22P02 (#677).
+// This server used to carry its own INSERT/UPDATE/DELETE executors over the
+// catalog, and no MERGE — a second copy that had drifted into the same defects
+// as the first and had to be fixed twice or left wrong (#815). wadjet.Attach
+// wraps the catalog this server already owns, so there is one executor, one
+// command tag and one SQLSTATE per statement whichever door a user reaches.
 //
-// The obligations this frame holds are none beyond its return value: it takes
-// no lock, owns no channel and holds no reservation, so RecoverQueryPanic's
-// error IS the discharge. A FatalEvalPanic keeps its own SQLSTATE; anything
-// else becomes XX000 and is counted by exec.QueryPanicsRecovered, which is
-// what keeps a new panic from becoming invisible.
-func runHTTPDML(ctx context.Context, cat *catalog.Catalog, parsed *plansql.ParsedQuery) (res *dmlResult, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			res, err = nil, exec.RecoverQueryPanic(ctx, "HTTP DML statement", r)
-		}
-	}()
-	switch parsed.Type {
-	case plansql.QueryInsert:
-		return executeDMLInsert(ctx, cat, parsed.Insert)
-	case plansql.QueryUpdate:
-		return executeDMLUpdate(ctx, cat, parsed.Update)
-	case plansql.QueryDelete:
-		return executeDMLDelete(ctx, cat, parsed.Delete)
-	default:
-		return nil, errUnsupportedDML
-	}
-}
-
-func executeDMLInsert(ctx context.Context, cat *catalog.Catalog, info *plansql.InsertInfo) (*dmlResult, error) {
-	tableMeta, err := cat.GetTable(ctx, info.Table)
-	if err != nil {
-		return nil, fmt.Errorf("table %q: %w", info.Table, err)
-	}
-
-	columns := info.Columns
-	if len(columns) == 0 {
-		columns = make([]string, len(tableMeta.Schema.Columns))
-		for i, col := range tableMeta.Schema.Columns {
-			columns[i] = col.Name
-		}
-	}
-
-	// The whole COLUMN, not its TypeID: a DECIMAL literal is judged against
-	// the declared (p, s) here, so a value the column cannot hold names the
-	// row that carried it instead of failing a later flush.
-	colByName := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
-	for _, col := range tableMeta.Schema.Columns {
-		colByName[col.Name] = col
-	}
-
-	var rows []map[string]any
-	for rowIdx, vals := range info.Values {
-		if len(vals) != len(columns) {
-			return nil, fmt.Errorf("row %d: expected %d values, got %d", rowIdx, len(columns), len(vals))
-		}
-		row := make(map[string]any, len(columns))
-		for i, colName := range columns {
-			v, err := wadjet.ConvertValueForColumn(vals[i], colByName[colName])
-			if err != nil {
-				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
-			}
-			row[colName] = v
-		}
-		rows = append(rows, row)
-	}
-
-	ing := ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
-	if err := ing.Ingest(ctx, rows); err != nil {
-		return nil, fmt.Errorf("ingesting rows: %w", err)
-	}
-	if err := ing.FlushAll(ctx); err != nil {
-		return nil, fmt.Errorf("flushing rows: %w", err)
-	}
-
-	return &dmlResult{rowsAffected: int64(len(rows)), command: "INSERT"}, nil
-}
-
-func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.DeleteInfo) (*dmlResult, error) {
-	if err := wadjet.CheckDMLQualifier(info.DMLTarget); err != nil {
-		return nil, err
-	}
-	tableMeta, err := cat.GetTable(ctx, info.Table)
-	if err != nil {
-		return nil, fmt.Errorf("table %q: %w", info.Table, err)
-	}
-
-	manifest, err := cat.GetManifest(ctx, info.Table)
-	if err != nil {
-		return nil, fmt.Errorf("reading manifest: %w", err)
-	}
-
-	schema := tableMeta.Schema.Columns
-	predicate, err := wadjet.BuildDMLPredicate(info.DMLTarget, schema)
-	if err != nil {
-		return nil, err
-	}
-
-	var totalDeleted int64
-	var markers []catalog.DeleteMarker
-
-	// Rows an earlier statement already removed are not rows this one can
-	// match — the filter the SELECT path has always applied (#674).
-	gone := catalog.DeletedRowsByFile(manifest.DeleteMarkers)
-
-	for _, part := range manifest.Partitions {
-		for _, file := range part.Files {
-			b, err := readDMLFile(ctx, cat, file.Path, schema)
-			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", file.Path, err)
-			}
-			if b == nil {
-				continue
-			}
-			indices, err := wadjet.MatchDMLRows(ctx, b, predicate, gone[file.Path])
-			if err != nil {
-				return nil, err
-			}
-			if len(indices) > 0 {
-				markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices})
-				totalDeleted += int64(len(indices))
-			}
-		}
-	}
-
-	if len(markers) > 0 {
-		if err := cat.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
-			return nil, fmt.Errorf("recording delete markers: %w", err)
-		}
-	}
-
-	return &dmlResult{rowsAffected: totalDeleted, command: "DELETE"}, nil
-}
-
-func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.UpdateInfo) (*dmlResult, error) {
-	if err := wadjet.CheckDMLQualifier(info.DMLTarget); err != nil {
-		return nil, err
-	}
-	tableMeta, err := cat.GetTable(ctx, info.Table)
-	if err != nil {
-		return nil, fmt.Errorf("table %q: %w", info.Table, err)
-	}
-
-	manifest, err := cat.GetManifest(ctx, info.Table)
-	if err != nil {
-		return nil, fmt.Errorf("reading manifest: %w", err)
-	}
-
-	schema := tableMeta.Schema.Columns
-	predicate, err := wadjet.BuildDMLPredicate(info.DMLTarget, schema)
-	if err != nil {
-		return nil, err
-	}
-
-	// Resolve every SET clause ONCE, against the schema and the column's full
-	// declaration, BEFORE the loop below touches a file: an unknown target is
-	// 42703 and a value the column cannot hold is refused here rather than
-	// after a delete marker is committed (#647, #678).
-	assigns, err := wadjet.ResolveDMLSetClauses(info.SetClauses, info.DMLTarget, schema)
-	if err != nil {
-		return nil, err
-	}
-
-	var totalUpdated int64
-	var ing *ingest.Ingester
-	var markers []catalog.DeleteMarker
-
-	// Rows an earlier statement already removed are not rows this one can
-	// match. Without this an UPDATE re-emitted every superseded copy beside
-	// the live one and marked its file again, so re-updating one row produced
-	// 1, then 2, then 4 rows (#674).
-	gone := catalog.DeletedRowsByFile(manifest.DeleteMarkers)
-
-	// Per-file streaming: box only the matched rows (the previous ToRows
-	// boxed every row of every file even at zero WHERE selectivity), hand
-	// them to the ingester, then commit that file's delete markers —
-	// accumulating updatedRows table-wide held the whole table as boxed maps
-	// on a broad UPDATE.
-	//
-	// EVERY REPLACEMENT ROW IS DURABLE BEFORE ANY MARKER IS COMMITTED, for
-	// the reason wadjet/dml.go's twin gives at length: Ingest only BUFFERS, so
-	// a marker committed per FILE inside this loop is durable while its
-	// replacement rows are still in RAM, and a failure on a later file — a
-	// legacy value past the column's precision, or an object-store error in
-	// the auto-flush that bounds memory — returned without flushing and left
-	// the earlier files' matched rows gone (#647 re-review). Markers
-	// accumulate, one FlushAll follows the loop, one AddDeleteMarkers commits
-	// them, and a flush failure commits none. What remains is duplication,
-	// never loss; the transactional marker+ingest commit is a known separate
-	// issue.
-	for _, part := range manifest.Partitions {
-		for _, file := range part.Files {
-			b, err := readDMLFile(ctx, cat, file.Path, schema)
-			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", file.Path, err)
-			}
-			if b == nil {
-				continue
-			}
-			indices, err := wadjet.MatchDMLRows(ctx, b, predicate, gone[file.Path])
-			if err != nil {
-				// A predicate that cannot answer fails the STATEMENT, before
-				// any marker is committed.
-				return nil, err
-			}
-			if len(indices) == 0 {
-				continue
-			}
-			updatedRows, err := wadjet.BuildUpdatedRows(ctx, b, indices, assigns)
-			if err != nil {
-				return nil, err
-			}
-			if ing == nil {
-				ing = ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
-			}
-			if err := ing.Ingest(ctx, updatedRows); err != nil {
-				return nil, fmt.Errorf("inserting updated rows: %w", err)
-			}
-			markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices})
-			totalUpdated += int64(len(indices))
-		}
-	}
-
-	if ing != nil {
-		if err := ing.FlushAll(ctx); err != nil {
-			// No markers are committed on this path: every row this statement
-			// matched is still where it was.
-			return nil, fmt.Errorf("flushing updated rows: %w", err)
-		}
-	}
-	if len(markers) > 0 {
-		if err := cat.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
-			return nil, fmt.Errorf("recording delete markers: %w", err)
-		}
-	}
-
-	return &dmlResult{rowsAffected: totalUpdated, command: "UPDATE"}, nil
-}
-
-func readDMLFile(ctx context.Context, cat *catalog.Catalog, filePath string, schema []parquet.Column) (*batch.RecordBatch, error) {
-	store := cat.Store()
-	if ras, ok := store.(objstore.ReaderAtStore); ok {
-		ra, size, err := ras.GetReaderAt(ctx, cat.Bucket(), filePath)
-		if err != nil {
-			return nil, err
-		}
-		defer ra.Close()
-		reader, err := parquet.NewReader(ra, size)
-		if err != nil {
-			return nil, err
-		}
-		return scan.ReadFileColumnar(reader, schema)
-	}
-
-	rc, _, err := store.Get(ctx, cat.Bucket(), filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, rc); err != nil {
-		return nil, err
-	}
-	data := buf.Bytes()
-	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, err
-	}
-	return scan.ReadFileColumnar(reader, schema)
+// The panic boundary the old copy installed lives inside DB.Execute
+// (RecoverQueryPanic, #677), so a statement that panics still reaches the
+// client as a SQLSTATE rather than as a dropped connection.
+func (s *Server) dml() *wadjet.DB {
+	return wadjet.Attach(s.catalog)
 }
 
 func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
@@ -1605,6 +1320,3 @@ func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
 	}
 	return parquet.Schema{Columns: columns}, nil
 }
-
-// Ensure batch is used (it's referenced via types flowing through)
-var _ = batch.DefaultBatchSize

@@ -11,6 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // aliasServerSchema and aliasServerRows are the same three-row fixture the
@@ -71,7 +72,7 @@ func TestServerDMLTableAliasMatchesPostgres(t *testing.T) {
 			cat, filePath := nestServerDMLSetup(t, "sa686", aliasServerSchema, aliasServerRows())
 
 			parsed, err := plansql.Parse(tc.sql)
-			var res *dmlResult
+			var res *wadjet.ExecResult
 			if err == nil {
 				switch {
 				case parsed.Delete != nil:
@@ -86,7 +87,7 @@ func TestServerDMLTableAliasMatchesPostgres(t *testing.T) {
 			if tc.state != "" {
 				if err == nil {
 					t.Fatalf("%s affected %d rows; PostgreSQL refuses it with %s",
-						tc.sql, res.rowsAffected, tc.state)
+						tc.sql, res.RowsAffected, tc.state)
 				}
 				if got := sqlerr.StateOf(err); got != tc.state {
 					t.Errorf("%s: SQLSTATE %q, want %q (err: %v)", tc.sql, got, tc.state, err)
@@ -95,8 +96,8 @@ func TestServerDMLTableAliasMatchesPostgres(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s: %v", tc.sql, err)
 				}
-				if res.rowsAffected != tc.count {
-					t.Errorf("%s affected %d rows, want %d", tc.sql, res.rowsAffected, tc.count)
+				if res.RowsAffected != tc.count {
+					t.Errorf("%s affected %d rows, want %d", tc.sql, res.RowsAffected, tc.count)
 				}
 			}
 			if got := aliasServerRowSet(t, cat, filePath); strings.Join(got, " ") != strings.Join(tc.rows, " ") {
