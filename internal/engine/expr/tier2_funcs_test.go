@@ -203,9 +203,28 @@ func TestInverseTrig(t *testing.T) {
 		t.Error("atan2(1,1) should be pi/4")
 	}
 
-	// Out of range returns nil
-	if asin([]any{float64(2)}) != nil {
-		t.Error("asin(2) should be nil")
+	// Out of range RAISES since #840 — it answered nil, which is the same box
+	// a NULL argument produces, so `WHERE ASIN(x) IS NULL` could not tell a
+	// missing value from an impossible one. PostgreSQL 17.11 says 22003
+	// "input is out of range" for both functions and both signs.
+	for _, c := range []struct {
+		name string
+		fn   func([]any) any
+		arg  float64
+	}{
+		{"asin(2)", asin, 2}, {"asin(-2)", asin, -2},
+		{"acos(2)", acos, 2}, {"acos(-2)", acos, -2},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { c.fn([]any{c.arg}) })
+		if state != "22003" || msg != "input is out of range" {
+			t.Errorf("%s raised [%s] %s, want [22003] input is out of range "+
+				"(live PostgreSQL 17.11)", c.name, state, msg)
+		}
+	}
+	// NaN is a value PostgreSQL answers with, not a domain failure: it is
+	// neither less than -1 nor greater than 1, and the refusal is written so.
+	if got := asin([]any{math.NaN()}); got == nil || !math.IsNaN(got.(float64)) {
+		t.Errorf("ASIN(NaN) = %v, want NaN (PostgreSQL answers NaN)", got)
 	}
 }
 
@@ -224,8 +243,20 @@ func TestLog2(t *testing.T) {
 	if fn([]any{float64(8)}) != float64(3) {
 		t.Errorf("log2(8) = %v, want 3", fn([]any{float64(8)}))
 	}
-	if fn([]any{float64(-1)}) != nil {
-		t.Error("log2(-1) should be nil")
+	// LOG2 is a wadjet extension — PostgreSQL has no such function — and it
+	// takes LOG's refusal, because one engine cannot answer "what is the
+	// logarithm of zero" two ways depending on which base a caller spells.
+	for _, c := range []struct {
+		arg float64
+		msg string
+	}{
+		{-1, "cannot take logarithm of a negative number"},
+		{0, "cannot take logarithm of zero"},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { fn([]any{c.arg}) })
+		if state != "2201E" || msg != c.msg {
+			t.Errorf("LOG2(%v) raised [%s] %s, want [2201E] %s", c.arg, state, msg, c.msg)
+		}
 	}
 }
 

@@ -101,14 +101,23 @@ func TestFnMod(t *testing.T) {
 		{"int64 exact, no signed zero", []any{int64(-6), int64(3)}, int64(0)},
 		{"int32 args stay int32", []any{int32(10), int32(3)}, int32(1)},
 		{"mixed widths widen", []any{int32(10), int64(3)}, int64(1)},
-		// A zero divisor keeps the float path, which answers NaN -- the
-		// behaviour every other numeric type here has, and not this rule's
-		// to change.
-		{"zero divisor stays float", []any{int64(10), int64(0)}, math.Mod(10, 0)},
 	} {
 		got := fnMod(tc.args)
 		if fmt.Sprintf("%T:%v", got, got) != fmt.Sprintf("%T:%v", tc.expect, tc.expect) {
 			t.Errorf("%s: got %#v (%T), want %#v (%T)", tc.name, got, got, tc.expect, tc.expect)
+		}
+	}
+	// A zero divisor used to fall to the float path and answer NaN — pinned
+	// here as "not this rule's to change". PostgreSQL 17 answers 22012 for
+	// `mod(1, 0)` and `mod(1.0, 0.0)` alike, and a NaN remainder is a value
+	// no modulus has (#840's census).
+	for _, args := range [][]any{
+		{int64(10), int64(0)}, {int32(10), int32(0)}, {10.0, 0.0}, {int64(10), 0.0},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { fnMod(args) })
+		if state != "22012" || msg != "division by zero" {
+			t.Errorf("MOD(%v) raised [%s] %s, want [22012] division by zero (live PostgreSQL 17.11)",
+				args, state, msg)
 		}
 	}
 }
@@ -287,6 +296,37 @@ func TestFnPow(t *testing.T) {
 	if fnPow([]any{2.0, 3.0}) != 8.0 {
 		t.Error("pow")
 	}
+	// PostgreSQL's dpow() refusals, all four measured live on 17.11. POWER(0,
+	// -1) answered +Infinity here, which is worse than a NULL: it propagates
+	// arithmetically and nothing downstream can see where it came from.
+	for _, c := range []struct {
+		name       string
+		base, exp  float64
+		state, msg string
+	}{
+		{"zero to a negative power", 0, -1, "2201F",
+			"zero raised to a negative power is undefined"},
+		{"negative to a non-integer power", -1, 0.5, "2201F",
+			"a negative number raised to a non-integer power yields a complex result"},
+		{"overflow", 2, 10000, "22003", "value out of range: overflow"},
+		{"underflow", 2, -10000, "22003", "value out of range: underflow"},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { fnPow([]any{c.base, c.exp}) })
+		if state != c.state || msg != c.msg {
+			t.Errorf("POWER(%v, %v) [%s] raised [%s] %s, want [%s] %s (live PostgreSQL 17.11)",
+				c.base, c.exp, c.name, state, msg, c.state, c.msg)
+		}
+	}
+	// The boundary, attempted from outside: PostgreSQL answers 1 for
+	// POWER(0,0), 0 for POWER(0,5) — a zero result whose BASE is zero has not
+	// underflowed — and -8 for POWER(-8, 3), an integer exponent.
+	for _, c := range []struct {
+		base, exp, want float64
+	}{{0, 0, 1}, {0, 5, 0}, {-2, 3, -8}} {
+		if got := fnPow([]any{c.base, c.exp}); got != c.want {
+			t.Errorf("POWER(%v, %v) = %v, want %v (PostgreSQL answers it)", c.base, c.exp, got, c.want)
+		}
+	}
 }
 
 func TestFnSqrt(t *testing.T) {
@@ -296,11 +336,25 @@ func TestFnSqrt(t *testing.T) {
 	if fnSqrt([]any{nil}) != nil {
 		t.Error("nil arg")
 	}
-	if fnSqrt([]any{-1.0}) != nil {
-		t.Error("negative")
+	// A negative argument RAISES since #840; it answered NULL here.
+	state, msg := recoverFatalEvalForTest(t, func() { fnSqrt([]any{-1.0}) })
+	if state != "2201F" || msg != "cannot take square root of a negative number" {
+		t.Errorf("SQRT(-1) raised [%s] %s, want [2201F] cannot take square root of a "+
+			"negative number (live PostgreSQL 17.11)", state, msg)
 	}
 	if fnSqrt([]any{4.0}) != 2.0 {
 		t.Error("sqrt")
+	}
+	// The values PostgreSQL passes through rather than refusing: NaN, +Inf and
+	// negative zero. They are the refusal's boundary, attempted from outside.
+	if got := fnSqrt([]any{math.NaN()}); got == nil || !math.IsNaN(got.(float64)) {
+		t.Errorf("SQRT(NaN) = %v, want NaN (PostgreSQL answers NaN)", got)
+	}
+	if got := fnSqrt([]any{math.Inf(1)}); got != math.Inf(1) {
+		t.Errorf("SQRT(Infinity) = %v, want +Inf (PostgreSQL answers Infinity)", got)
+	}
+	if got := fnSqrt([]any{math.Copysign(0, -1)}); got != math.Copysign(0, -1) {
+		t.Errorf("SQRT(-0.0) = %v, want -0 (PostgreSQL answers -0)", got)
 	}
 }
 
@@ -707,21 +761,33 @@ func TestFnLog(t *testing.T) {
 	if result.(float64)-3.0 > 1e-10 {
 		t.Errorf("expected ~3.0, got %v", result)
 	}
-	// negative value
-	if fnLog([]any{-1.0}) != nil {
-		t.Error("negative value")
+	// The domain failures. Each answered NULL until #840; each carries the
+	// SQLSTATE and the message PostgreSQL 17.11 gives for it, and the base-1
+	// one is deliberately NOT a logarithm error: log(v)/log(1) divides by
+	// zero and the server reports 22012.
+	for _, c := range []struct {
+		name       string
+		args       []any
+		state, msg string
+	}{
+		{"negative value", []any{-1.0}, "2201E", "cannot take logarithm of a negative number"},
+		{"zero value", []any{0.0}, "2201E", "cannot take logarithm of zero"},
+		{"base 1", []any{1.0, 8.0}, "22012", "division by zero"},
+		{"base negative", []any{-1.0, 8.0}, "2201E", "cannot take logarithm of a negative number"},
+		{"base zero", []any{0.0, 8.0}, "2201E", "cannot take logarithm of zero"},
+		{"value negative with base", []any{2.0, -8.0}, "2201E",
+			"cannot take logarithm of a negative number"},
+		{"value zero with base", []any{2.0, 0.0}, "2201E", "cannot take logarithm of zero"},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { fnLog(c.args) })
+		if state != c.state || msg != c.msg {
+			t.Errorf("LOG %s raised [%s] %s, want [%s] %s (live PostgreSQL 17.11)",
+				c.name, state, msg, c.state, c.msg)
+		}
 	}
-	// base 1
-	if fnLog([]any{1.0, 8.0}) != nil {
-		t.Error("base 1")
-	}
-	// base negative
-	if fnLog([]any{-1.0, 8.0}) != nil {
-		t.Error("base negative")
-	}
-	// val negative with base
-	if fnLog([]any{2.0, -8.0}) != nil {
-		t.Error("val negative")
+	// NaN passes through: PostgreSQL answers NaN, not an error.
+	if got := fnLog([]any{math.NaN()}); got == nil || !math.IsNaN(got.(float64)) {
+		t.Errorf("LOG(NaN) = %v, want NaN", got)
 	}
 }
 
@@ -732,8 +798,26 @@ func TestFnLn(t *testing.T) {
 	if fnLn([]any{nil}) != nil {
 		t.Error("nil arg")
 	}
-	if fnLn([]any{-1.0}) != nil {
-		t.Error("negative")
+	// #840's headline pair.
+	for _, c := range []struct {
+		arg        float64
+		state, msg string
+	}{
+		{0, "2201E", "cannot take logarithm of zero"},
+		{-1, "2201E", "cannot take logarithm of a negative number"},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { fnLn([]any{c.arg}) })
+		if state != c.state || msg != c.msg {
+			t.Errorf("LN(%v) raised [%s] %s, want [%s] %s (live PostgreSQL 17.11)",
+				c.arg, state, msg, c.state, c.msg)
+		}
+	}
+	// PostgreSQL answers Infinity for LN('Infinity') and NaN for LN('NaN').
+	if got := fnLn([]any{math.Inf(1)}); got != math.Inf(1) {
+		t.Errorf("LN(Infinity) = %v, want +Inf", got)
+	}
+	if got := fnLn([]any{math.NaN()}); got == nil || !math.IsNaN(got.(float64)) {
+		t.Errorf("LN(NaN) = %v, want NaN", got)
 	}
 	result := fnLn([]any{math.E})
 	if math.Abs(result.(float64)-1.0) > 1e-10 {
@@ -755,6 +839,28 @@ func TestFnExp(t *testing.T) {
 	result = fnExp([]any{1.0})
 	if math.Abs(result.(float64)-math.E) > 1e-10 {
 		t.Error("exp(1) != e")
+	}
+	// PostgreSQL's float8 result check, which every libm-backed function in
+	// float.c runs: an infinite result from a finite argument OVERFLOWED and a
+	// zero result from a non-zero argument UNDERFLOWED. Both answered a number
+	// here — +Inf and 0 — where the server raises.
+	for _, c := range []struct {
+		arg float64
+		msg string
+	}{
+		{1000, "value out of range: overflow"},
+		{-1000, "value out of range: underflow"},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { fnExp([]any{c.arg}) })
+		if state != "22003" || msg != c.msg {
+			t.Errorf("EXP(%v) raised [%s] %s, want [22003] %s (live PostgreSQL 17.11)",
+				c.arg, state, msg, c.msg)
+		}
+	}
+	// An INFINITE argument keeps its infinity: the overflow check is about a
+	// finite input producing an infinite result.
+	if got := fnExp([]any{math.Inf(1)}); got != math.Inf(1) {
+		t.Errorf("EXP(Infinity) = %v, want +Inf", got)
 	}
 }
 

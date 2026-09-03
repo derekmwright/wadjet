@@ -1662,6 +1662,26 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "CastTextToDateFieldOutOfRange", sql: `SELECT CAST('2020-02-30' AS date)`},
 		{name: "CastTextToTimestampInvalidSyntax", sql: `SELECT CAST('not-a-timestamp' AS timestamp)`},
 		{name: "CastTextToTimestampFieldOutOfRange", sql: `SELECT CAST('2020-02-30 12:00:00' AS timestamp)`},
+		// The math DOMAIN refusals (#840). PostgreSQL uses four codes here and
+		// they are four different answers: 2201E for a logarithm's domain,
+		// 2201F for a square root's and for the two undefined powers, 22003
+		// for an inverse-trig argument and for a float result that left the
+		// type, 22012 for a base-1 logarithm and a zero modulus. Every one of
+		// them was a NULL or an infinity before, which a value oracle reads as
+		// an ordinary row.
+		{name: "LogarithmOfZero", sql: `SELECT LN(0)`},
+		{name: "LogarithmOfANegativeNumber", sql: `SELECT LN(-1)`},
+		{name: "Log10OfZero", sql: `SELECT LOG(0)`},
+		{name: "LogarithmBaseOne", sql: `SELECT LOG(1, 8)`},
+		{name: "SquareRootOfANegativeNumber", sql: `SELECT SQRT(-1)`},
+		{name: "ZeroToANegativePower", sql: `SELECT POWER(0, -1)`},
+		{name: "NegativeToANonIntegerPower", sql: `SELECT POWER(-1, 0.5)`},
+		{name: "PowerOverflow", sql: `SELECT POWER(2, 10000)`},
+		{name: "ExpOverflow", sql: `SELECT EXP(1000)`},
+		{name: "ExpUnderflow", sql: `SELECT EXP(-1000)`},
+		{name: "ArcSineOutOfRange", sql: `SELECT ASIN(2)`},
+		{name: "ArcCosineOutOfRange", sql: `SELECT ACOS(2)`},
+		{name: "ModuloByZero", sql: `SELECT MOD(1, 0)`},
 		// ADR-0024 item 4 at the DECIMAL arithmetic and CAST sites: a value
 		// with no carrier at its declared type is 22003 and a zero divisor is
 		// 22012, and the two must stay APART — a caller that branched on "did

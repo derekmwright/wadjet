@@ -4506,7 +4506,11 @@ func fnPow(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	return math.Pow(ToFloat64(args[0]), ToFloat64(args[1]))
+	base, exp := ToFloat64(args[0]), ToFloat64(args[1])
+	raisePowerDomain(base, exp)
+	r := math.Pow(base, exp)
+	raiseFloatRangeResult(r, base, base != 0 && !math.IsInf(exp, 0))
+	return r
 }
 
 func fnSqrt(args []any) any {
@@ -4514,9 +4518,7 @@ func fnSqrt(args []any) any {
 		return nil
 	}
 	v := ToFloat64(args[0])
-	if v < 0 {
-		return nil
-	}
+	raiseSquareRootDomain(v)
 	return math.Sqrt(v)
 }
 
@@ -4530,7 +4532,14 @@ func fnMod(args []any) any {
 	if v, ok := modKeepsDomain(args[0], args[1]); ok {
 		return v
 	}
-	return math.Mod(ToFloat64(args[0]), ToFloat64(args[1]))
+	// A zero divisor is 22012, PostgreSQL's division_by_zero, and not the NaN
+	// math.Mod answers with. modKeepsDomain declines for a zero divisor as
+	// well as for a non-integer operand, so this is the one place both reach.
+	d := ToFloat64(args[1])
+	if d == 0 {
+		raiseDivisionByZero()
+	}
+	return math.Mod(ToFloat64(args[0]), d)
 }
 
 func fnLog(args []any) any {
@@ -4538,18 +4547,19 @@ func fnLog(args []any) any {
 		return nil
 	}
 	v := ToFloat64(args[0])
-	if v <= 0 {
-		return nil
-	}
 	if len(args) >= 2 && args[1] != nil {
 		// LOG(base, value)
-		base := v
-		val := ToFloat64(args[1])
-		if base <= 0 || base == 1 || val <= 0 {
-			return nil
+		base, val := v, ToFloat64(args[1])
+		raiseLogarithmDomain(base)
+		raiseLogarithmDomain(val)
+		if base == 1 {
+			// log(val)/log(1) divides by zero, and PostgreSQL reports it as
+			// exactly that: `log(1::numeric, 8)` is 22012, not 2201E.
+			raiseDivisionByZero()
 		}
 		return math.Log(val) / math.Log(base)
 	}
+	raiseLogarithmDomain(v)
 	return math.Log10(v)
 }
 
@@ -4558,9 +4568,7 @@ func fnLn(args []any) any {
 		return nil
 	}
 	v := ToFloat64(args[0])
-	if v <= 0 {
-		return nil
-	}
+	raiseLogarithmDomain(v)
 	return math.Log(v)
 }
 
@@ -4568,7 +4576,10 @@ func fnExp(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return math.Exp(ToFloat64(args[0]))
+	v := ToFloat64(args[0])
+	r := math.Exp(v)
+	raiseFloatRangeResult(r, v, v != 0)
+	return r
 }
 
 func fnSign(args []any) any {
@@ -7177,9 +7188,7 @@ func fnAsin(args []any) any {
 		return nil
 	}
 	v := ToFloat64(args[0])
-	if v < -1 || v > 1 {
-		return nil
-	}
+	raiseTrigDomain(v)
 	return math.Asin(v)
 }
 
@@ -7188,9 +7197,7 @@ func fnAcos(args []any) any {
 		return nil
 	}
 	v := ToFloat64(args[0])
-	if v < -1 || v > 1 {
-		return nil
-	}
+	raiseTrigDomain(v)
 	return math.Acos(v)
 }
 
@@ -7220,9 +7227,10 @@ func fnLog2(args []any) any {
 		return nil
 	}
 	v := ToFloat64(args[0])
-	if v <= 0 {
-		return nil
-	}
+	// PostgreSQL has no LOG2; this is a wadjet extension, and it takes LOG's
+	// refusal because one engine cannot have two answers to "what is the
+	// logarithm of zero" depending on the base a caller spells.
+	raiseLogarithmDomain(v)
 	return math.Log2(v)
 }
 
