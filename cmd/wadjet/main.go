@@ -73,6 +73,11 @@ var (
 	boundedDirtyWrites    bool
 	spillDir              string
 	resultStoreBytes      int64
+	circuitThreshold      int
+	circuitResetTimeout   time.Duration
+	circuitRequestTimeout time.Duration
+	queryIntermediateTTL  time.Duration
+	queryIntermediateGC   time.Duration
 	pgAddr                string
 	pgTLSCert             string
 	pgTLSKey              string
@@ -173,6 +178,11 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
 
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
+	rootCmd.PersistentFlags().IntVar(&circuitThreshold, "storage-circuit-threshold", 5, "Consecutive object-store failures IN ONE OPERATION CLASS (read / write / delete) before that class's circuit breaker opens and its requests fast-fail. Classes are independent: a delete or upload burst failing never fast-fails a read (ADR-0028). 0 = use the default (5).")
+	rootCmd.PersistentFlags().DurationVar(&circuitResetTimeout, "storage-circuit-reset", 30*time.Second, "How long an open object-store circuit breaker stays open before admitting one half-open probe. 0 = use the default (30s).")
+	rootCmd.PersistentFlags().DurationVar(&circuitRequestTimeout, "storage-circuit-request-timeout", 10*time.Second, "Per-request object-store timeout applied by the circuit breaker to non-streaming operations (Head/List/Delete/BucketExists/MakeBucket). Streaming Get/GetReaderAt and Put are bounded by the transport and the caller's context instead. 0 = use the default (10s).")
+	rootCmd.PersistentFlags().DurationVar(&queryIntermediateTTL, "query-intermediate-ttl", time.Hour, "Age after which the coordinator's periodic sweep reclaims a queries/<id>/* prefix that the per-query cleanup did not (in-flight queries are always skipped). 0 = use the default (1h).")
+	rootCmd.PersistentFlags().DurationVar(&queryIntermediateGC, "query-intermediate-sweep", 10*time.Minute, "How often the coordinator sweeps queries/ for prefixes older than --query-intermediate-ttl. 0 = use the default (10m).")
 	rootCmd.PersistentFlags().StringVar(&pgAddr, "pg-addr", ":5433", "PostgreSQL wire protocol listen address")
 	rootCmd.PersistentFlags().StringVar(&pgTLSCert, "pg-tls-cert", "", "TLS certificate file for PostgreSQL wire protocol")
 	rootCmd.PersistentFlags().StringVar(&pgTLSKey, "pg-tls-key", "", "TLS private key file for PostgreSQL wire protocol")
@@ -453,8 +463,18 @@ func serveCmd() *cobra.Command {
 			return err
 		}
 
-		// Wrap store with circuit breaker for S3 resilience
-		store = objstore.NewCircuitStore(store, objstore.DefaultCircuitConfig(), logger)
+		// Wrap store with circuit breaker for S3 resilience. The breaker is
+		// scoped per operation class — a failing delete or upload burst must
+		// never fast-fail a base-table read (ADR-0028). Thresholds come from
+		// the flags; note that the config FILE does not reach storage.* yet
+		// (#808), so a YAML storage.circuit block would be inert and none is
+		// read here.
+		circuitCfg := objstore.CircuitConfig{
+			FailureThreshold: circuitThreshold,
+			ResetTimeout:     circuitResetTimeout,
+			RequestTimeout:   circuitRequestTimeout,
+		}
+		store = objstore.NewCircuitStore(store, circuitCfg, logger)
 
 		// Base-table NVMe cache sits ABOVE the breaker: hits never consult
 		// it (a warm cache keeps serving through an S3 brownout), misses
@@ -1122,6 +1142,11 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	m := metrics.New()
 	m.Registry.MustRegister(alerts.Collectors()...)
 	w.SetMetrics(m)
+	if cb := objstore.FindCircuitStore(store); cb != nil {
+		cb.SetOnOpen(func(class objstore.OpClass) {
+			m.CircuitBreakerOpened.WithLabelValues(class.String()).Inc()
+		})
+	}
 
 	// Start coordinator
 	durability, err := parseShuffleDurability(shuffleDurability)
@@ -1133,6 +1158,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		ResultBucket:           bucket,
 		DynamicFilters:         dynamicFiltersFromEnv(),
 		LocalFastPathBytes:     localFastPathBytes,
+		IntermediateTTL:        queryIntermediateTTL,
 		BroadcastBytesOverride: broadcastBytes,
 		SortMergeJoinBytes:     sortMergeJoinBytes,
 		LateMaterialization:    lateMaterialization,
@@ -1182,7 +1208,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	coord.Workers().StartSubStatsLogger(ctx)
 	coord.StartQueryReaper(ctx)
 	coord.StartQueryActiveHandler()
-	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
+	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, queryIntermediateGC)
 
 	// Enable alerts feature flag; in standalone mode StartLeaderWatch is a
 	// no-op so we start the scheduler directly here if enabled.
@@ -1414,6 +1440,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		ResultBucket:           bucket,
 		DynamicFilters:         dynamicFiltersFromEnv(),
 		LocalFastPathBytes:     localFastPathBytes,
+		IntermediateTTL:        queryIntermediateTTL,
 		BroadcastBytesOverride: broadcastBytes,
 		SortMergeJoinBytes:     sortMergeJoinBytes,
 		LateMaterialization:    lateMaterialization,
@@ -1452,7 +1479,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	coord.Workers().StartSubStatsLogger(ctx)
 	coord.StartQueryReaper(ctx)
 	coord.StartQueryActiveHandler()
-	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
+	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, queryIntermediateGC)
 
 	// Enable alerts feature flag; in coordinator mode StartLeaderWatch manages
 	// the scheduler lifecycle on leader transitions.
@@ -1485,6 +1512,11 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 
 	m := metrics.New()
 	m.Registry.MustRegister(alerts.Collectors()...)
+	if cb := objstore.FindCircuitStore(store); cb != nil {
+		cb.SetOnOpen(func(class objstore.OpClass) {
+			m.CircuitBreakerOpened.WithLabelValues(class.String()).Inc()
+		})
+	}
 	dlq := coordinator.NewDLQ(js)
 
 	srvCfg := server.Config{
@@ -1691,6 +1723,11 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	// Initialize Prometheus metrics
 	m := metrics.New()
 	w.SetMetrics(m)
+	if cb := objstore.FindCircuitStore(store); cb != nil {
+		cb.SetOnOpen(func(class objstore.OpClass) {
+			m.CircuitBreakerOpened.WithLabelValues(class.String()).Inc()
+		})
+	}
 
 	// Start /metrics HTTP endpoint for Prometheus scraping, plus the
 	// Kubernetes lifecycle surface: liveness, readiness (false once

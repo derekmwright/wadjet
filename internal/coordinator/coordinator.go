@@ -81,6 +81,13 @@ type Config struct {
 	// the distributed stage DAG alike (the join stage swaps operator; its
 	// exchange children are identical). 0 = disabled (default, dormant).
 	SortMergeJoinBytes int64
+	// IntermediateTTL is how long a queries/<id>/* prefix that the
+	// per-query cleanup missed survives before the periodic sweep reclaims
+	// it. 0 = 1 hour. It is a backstop, not the primary reclamation: every
+	// terminal path (completion, error, cancel) runs cleanupQuery
+	// (ADR-0028), so a prefix reaching this TTL means one of them was
+	// prevented — typically by an open delete breaker.
+	IntermediateTTL time.Duration
 	// LateMaterialization emits inner/left hash-join output as view
 	// (dictionary) columns with the gather deferred to first touch
 	// (docs/design/late-materialization.md), on the local fast path and in
@@ -523,10 +530,12 @@ func (c *Coordinator) SetTelemetry(tp *telemetry.Provider) {
 	c.otel = tp
 }
 
-// Cleaner returns the result cleaner, creating it if needed.
+// Cleaner returns the result cleaner, creating it if needed. Its TTL is
+// the sweep backstop for prefixes the per-query cleanup did not reclaim;
+// Config.IntermediateTTL (--query-intermediate-ttl) sets it, 0 = 1 hour.
 func (c *Coordinator) Cleaner(store objstore.Store, bucket string) *ResultCleaner {
 	if c.cleaner == nil {
-		c.cleaner = NewResultCleaner(store, bucket, 0, c.logger)
+		c.cleaner = NewResultCleaner(store, bucket, c.config.IntermediateTTL, c.logger)
 		c.cleaner.SetActiveQueriesFunc(c.tracker.ActiveQueryIDs)
 	}
 	return c.cleaner

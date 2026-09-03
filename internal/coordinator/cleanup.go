@@ -43,6 +43,15 @@ func (rc *ResultCleaner) SetActiveQueriesFunc(fn func() map[string]struct{}) {
 }
 
 // CleanQuery removes all result files for a specific query.
+//
+// It reports what it actually reclaimed. The loop used to log every failure
+// and continue with a nil return, so a caller was told the cleanup succeeded
+// after deleting nothing (measured: deleted=0, err=<nil> while the store's
+// breaker was open) and nothing ever retried. It also kept issuing deletes
+// after the caller's deadline had expired, manufacturing one instant
+// DeadlineExceeded per remaining object — a burst of consecutive failures
+// that opened the breaker by itself (#820, and the producer half of #798).
+// The first ctx error ends the loop; anything left is named in the error.
 func (rc *ResultCleaner) CleanQuery(ctx context.Context, queryID string) (int, error) {
 	prefix := fmt.Sprintf("queries/%s/", queryID)
 	objects, err := rc.store.List(ctx, rc.bucket, objstore.ListOptions{Prefix: prefix})
@@ -51,14 +60,26 @@ func (rc *ResultCleaner) CleanQuery(ctx context.Context, queryID string) (int, e
 	}
 
 	deleted := 0
+	var firstErr error
 	for _, obj := range objects {
+		if cerr := ctx.Err(); cerr != nil {
+			return deleted, fmt.Errorf("cleaning query %s: stopped after %d of %d objects: %w",
+				queryID, deleted, len(objects), cerr)
+		}
 		if err := rc.store.Delete(ctx, rc.bucket, obj.Key); err != nil {
 			rc.logger.Warn("failed to delete result file", "path", obj.Key, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		deleted++
 	}
 
+	if firstErr != nil {
+		return deleted, fmt.Errorf("cleaning query %s: %d of %d objects remain: %w",
+			queryID, len(objects)-deleted, len(objects), firstErr)
+	}
 	rc.logger.Info("cleaned query results", "query_id", queryID, "deleted", deleted)
 	return deleted, nil
 }
@@ -74,14 +95,27 @@ func (rc *ResultCleaner) CleanAll(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("listing results: %w", err)
 	}
 	deleted := 0
+	var firstErr error
 	for _, obj := range objects {
-		if err := rc.store.Delete(ctx, rc.bucket, obj.Key); err == nil {
-			deleted++
+		if cerr := ctx.Err(); cerr != nil {
+			return deleted, fmt.Errorf("cleaning all query intermediates: stopped after %d of %d objects: %w",
+				deleted, len(objects), cerr)
 		}
+		if err := rc.store.Delete(ctx, rc.bucket, obj.Key); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		deleted++
 	}
 	if deleted > 0 {
 		rc.logger.Info("cleaned all query intermediates on shutdown",
 			"objects_deleted", deleted)
+	}
+	if firstErr != nil {
+		return deleted, fmt.Errorf("cleaning all query intermediates: %d of %d objects remain: %w",
+			len(objects)-deleted, len(objects), firstErr)
 	}
 	return deleted, nil
 }
@@ -103,6 +137,8 @@ func (rc *ResultCleaner) CleanStale(ctx context.Context) (int, error) {
 	cutoff := time.Now().Add(-rc.ttl)
 	deleted := 0
 	skipped := 0
+	stale := 0
+	var firstErr error
 	for _, obj := range objects {
 		if obj.LastModified.Before(cutoff) {
 			if active != nil {
@@ -112,14 +148,26 @@ func (rc *ResultCleaner) CleanStale(ctx context.Context) (int, error) {
 					continue
 				}
 			}
-			if err := rc.store.Delete(ctx, rc.bucket, obj.Key); err == nil {
-				deleted++
+			stale++
+			if cerr := ctx.Err(); cerr != nil {
+				return deleted, fmt.Errorf("cleaning stale results: stopped after %d objects: %w", deleted, cerr)
 			}
+			if err := rc.store.Delete(ctx, rc.bucket, obj.Key); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			deleted++
 		}
 	}
 
 	if deleted > 0 || skipped > 0 {
 		rc.logger.Info("cleaned stale results", "deleted", deleted, "skipped_active", skipped, "ttl", rc.ttl)
+	}
+	if firstErr != nil {
+		return deleted, fmt.Errorf("cleaning stale results: %d of %d stale objects remain: %w",
+			stale-deleted, stale, firstErr)
 	}
 	return deleted, nil
 }

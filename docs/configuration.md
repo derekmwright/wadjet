@@ -34,7 +34,34 @@ Wadjet is configured through CLI flags, environment variables, and an optional Y
 | `--shuffle-durability` | Stage-output durability: `eager`, `lazy`, `off` | `eager` |
 | `--skew-split` | Adaptive skew-aware shuffle layout | `true` |
 | `--drain-timeout` | Bound on graceful worker drain (0 = unbounded) | `0` |
+| `--storage-circuit-threshold` | Consecutive object-store failures **in one operation class** (read / write / delete) before that class's circuit breaker opens | `5` |
+| `--storage-circuit-reset` | How long an open object-store breaker stays open before admitting one half-open probe | `30s` |
+| `--storage-circuit-request-timeout` | Per-request object-store timeout the breaker applies to non-streaming operations (Head/List/Delete/BucketExists/MakeBucket) | `10s` |
+| `--query-intermediate-ttl` | Age at which the periodic sweep reclaims a `queries/<id>/*` prefix the per-query cleanup missed | `1h` |
+| `--query-intermediate-sweep` | How often that sweep runs | `10m` |
 | `--config` | Path to YAML config file | none |
+
+#### Object-store circuit breaker
+
+The breaker keeps a dead object store from turning every query into a pile
+of timeouts. It is scoped **by operation class** — reads (`Get`,
+`GetReaderAt`, `Head`, `List`, `BucketExists`), writes (`Put`,
+`PutIfMatch`, `MakeBucket`) and deletes each carry their own consecutive
+failure counter and their own open/half-open state — so a failing scratch
+cleanup or a throttled upload burst can never fast-fail a base-table read
+(ADR-0028). A NotFound is a healthy answer and clears the counter; a
+client-side `context.Canceled` is neutral.
+
+`wadjet_circuit_breaker_opened_total{class}` counts transitions into the
+open state, labelled `read`, `write` or `delete`. An operator seeing
+`class="delete"` climbing is seeing scratch reclamation struggling, not a
+read outage.
+
+**These five settings are flags and defaults only.** The YAML file does not
+reach `storage.*` or the coordinator's cleanup settings today (see
+[Environment Variables](#environment-variables) for the same limitation on
+the env layer); putting a `storage.circuit` block in the config file has no
+effect.
 
 ### `query` Command
 

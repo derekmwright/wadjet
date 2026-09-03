@@ -63,6 +63,30 @@ Wadjet exposes Prometheus metrics at `GET /metrics`.
 | `wadjet_cache_misses_total` | Counter | LRU cache misses |
 | `wadjet_cache_bytes` | Gauge | Current cache size in bytes |
 
+**Object-store circuit breaker:**
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `wadjet_circuit_breaker_opened_total` | Counter | `class` | Transitions into the open state, by operation class (`read`, `write`, `delete`) |
+
+The breaker is scoped per operation class (ADR-0028): reads, writes and
+deletes carry independent consecutive-failure counters, so a failing
+scratch cleanup or a throttled upload burst cannot fast-fail a base-table
+read. Read the label before you read the count:
+
+- `class="delete"` climbing — scratch reclamation is struggling. Query
+  results still answer, but `queries/<id>/*` prefixes accumulate until the
+  `--query-intermediate-ttl` sweep gets them. Check object-store delete
+  latency and quota.
+- `class="write"` climbing — stage output and ingest uploads are failing.
+  Queries that need to materialize a stage will fail; reads of existing
+  data still work.
+- `class="read"` climbing — this is the one that fails queries outright.
+  Clients see `circuit breaker open: S3 unavailable`.
+
+Tune with `--storage-circuit-threshold`, `--storage-circuit-reset` and
+`--storage-circuit-request-timeout` (see `docs/configuration.md`).
+
 ### Alert Metrics
 
 Registered when the alert scheduler runs (`--enable-alerts`):

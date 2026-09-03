@@ -29,10 +29,10 @@ type Metrics struct {
 	PartitionsPruned  prometheus.Counter
 
 	// Worker metrics
-	WorkerTasks     *prometheus.CounterVec
+	WorkerTasks        *prometheus.CounterVec
 	WorkerTaskDuration *prometheus.HistogramVec
-	WorkerActive    prometheus.Gauge
-	WorkerMemory    prometheus.Gauge
+	WorkerActive       prometheus.Gauge
+	WorkerMemory       prometheus.Gauge
 
 	// Coordinator metrics
 	RegisteredWorkers prometheus.Gauge
@@ -51,6 +51,12 @@ type Metrics struct {
 	CacheHits   prometheus.Counter
 	CacheMisses prometheus.Counter
 	CacheBytes  prometheus.Gauge
+
+	// Object-store circuit breaker. Labelled by operation class (read /
+	// write / delete) because the classes are independent breakers: an
+	// operator needs to see that DELETEs are tripping without concluding
+	// that reads are (ADR-0028).
+	CircuitBreakerOpened *prometheus.CounterVec
 }
 
 // New creates and registers all Prometheus metrics with a custom registry.
@@ -229,6 +235,13 @@ func New() *Metrics {
 			Name:      "bytes",
 			Help:      "Current cache size in bytes.",
 		}),
+
+		CircuitBreakerOpened: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "wadjet",
+			Subsystem: "circuit",
+			Name:      "breaker_opened_total",
+			Help:      "Object-store circuit breaker transitions into the open state, by operation class.",
+		}, []string{"class"}),
 	}
 
 	// Register all metrics with custom registry
@@ -258,6 +271,7 @@ func New() *Metrics {
 		m.CacheHits,
 		m.CacheMisses,
 		m.CacheBytes,
+		m.CircuitBreakerOpened,
 	)
 
 	return m
