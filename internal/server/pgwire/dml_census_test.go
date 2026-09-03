@@ -377,10 +377,23 @@ func censusShapes() []censusShape {
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, 'not-a-timestamp')",
 			pg:  "state=22007 table=[1:2000-01-01T00:00:00Z]",
 			emb: "state=22007 table=[1:2000-01-01T00:00:00Z]"},
+		// The pin is GONE: this cell carried `emb: "rows=[~]"` and
+		// `bug: "#692"` because the CAST answered NULL. #836 routed the
+		// temporal conversion through the per-row error channel the numeric
+		// casts already used, so both engines now raise 22008 and the cell is
+		// an ordinary agreement.
 		{name: "#692 cast an impossible day", sql: "SELECT CAST('2020-02-30T00:00:00' AS TIMESTAMP) AS c",
 			pg:  "state=22008",
-			emb: "rows=[~]",
-			bug: "#692"},
+			emb: "state=22008"},
+		{name: "#836 cast text that is not a timestamp", sql: "SELECT CAST('not-a-timestamp' AS TIMESTAMP) AS c",
+			pg:  "state=22007",
+			emb: "state=22007"},
+		{name: "#840 cast text that is not a date", sql: "SELECT CAST('not-a-date' AS DATE) AS c",
+			pg:  "state=22007",
+			emb: "state=22007"},
+		{name: "#840 cast an impossible day to date", sql: "SELECT CAST('2020-02-30' AS DATE) AS c",
+			pg:  "state=22008",
+			emb: "state=22008"},
 		{name: "control insert a UTC timestamp", tbl: "ts",
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01T05:30:00Z')",
 			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T05:30:00Z]",

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -56,11 +57,6 @@ func TestCastToDateProducesEpochDays(t *testing.T) {
 		// A bare number keeps the days-since-epoch reading the whole
 		// date-arithmetic family gives it (parseDateArg).
 		{"int column", &ColRef{Name: "n"}, want},
-		// No instant, no date. A pass-through of the original value is the
-		// defect and is the one answer ruled out.
-		{"unparseable text", &ColRef{Name: "junk"}, nil},
-		{"unparseable literal", &Lit{Val: "31/12/1996"}, nil},
-		{"empty string", &Lit{Val: ""}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -70,6 +66,75 @@ func TestCastToDateProducesEpochDays(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCastToDateRaisesForTextThatNamesNoDay is #840's DATE half: the NULL
+// these three used to answer is now the SQLSTATE PostgreSQL raises.
+//
+// The three cells were pinned as `nil` here until this change; they are the
+// proof, so they moved rather than being added beside the old ones. Every
+// expectation is live postgres:17.11, and the pair of codes is the whole
+// point — a client branches on 22007 to report a malformed literal and on
+// 22008 to report a date that does not exist.
+func TestCastToDateRaisesForTextThatNamesNoDay(t *testing.T) {
+	b := dateCastBatch(t)
+	for _, c := range []struct {
+		name       string
+		operand    Expr
+		state, msg string
+	}{
+		{"unparseable column text", &ColRef{Name: "junk"}, "22007",
+			`invalid input syntax for type date: "not-a-date"`},
+		{"an impossible day", &Lit{Val: "1996-02-30"}, "22008",
+			`date/time field value out of range: "1996-02-30"`},
+		{"an impossible month", &Lit{Val: "1996-13-01"}, "22008",
+			`date/time field value out of range: "1996-13-01"`},
+		{"empty string", &Lit{Val: ""}, "22007",
+			`invalid input syntax for type date: ""`},
+		// A DMY spelling: both engines REFUSE it, and they disagree about the
+		// CLASS. PostgreSQL's DateStyle ISO, MDY reads the leading field as a
+		// month and calls month 31 a field-range failure (22008); wadjet's
+		// accept-set refuses every spelling whose field ORDER DateStyle would
+		// decide (#639), so it is not a date at all here and the code is
+		// 22007. That classification is `parquet.ParseDateDays`'s and it is
+		// the SAME answer at the ingest boundary, the writer and the filter
+		// kernel — so this is one accept-set decision showing through a new
+		// door, not a divergence this CAST introduced. Pinned, in ADR-0012's
+		// list, against #639's accept-set rather than against this cast.
+		{"a DMY spelling wadjet's accept-set does not read as a date",
+			&Lit{Val: "31/12/1996"}, "22007",
+			`invalid input syntax for type date: "31/12/1996"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, msg := recoverFatalEvalForTest(t, func() {
+				(&Cast{Operand: c.operand, DestType: "date"}).Eval(b, 0)
+			})
+			if state != c.state || msg != c.msg {
+				t.Errorf("CAST(%s AS DATE) raised [%s] %s, want [%s] %s (live PostgreSQL 17.11)",
+					c.name, state, msg, c.state, c.msg)
+			}
+		})
+	}
+}
+
+// recoverFatalEvalForTest runs f and reports the SQLSTATE and message of the
+// per-row refusal it raised. It fails the test when f produces a value: "this
+// raises" is the assertion, so an answer must not read as an empty string.
+func recoverFatalEvalForTest(t *testing.T, f func()) (state, msg string) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("no refusal was raised")
+		}
+		fe, ok := r.(fatalEval)
+		if !ok {
+			panic(r)
+		}
+		state, msg = sqlerr.StateOf(fe.err), fe.err.Error()
+	}()
+	f()
+	return "", ""
 }
 
 func TestCastToTimestampProducesEpochMillis(t *testing.T) {
@@ -86,7 +151,6 @@ func TestCastToTimestampProducesEpochMillis(t *testing.T) {
 		{"timestamp column keeps its clock", &ColRef{Name: "ts"}, withClock},
 		{"text column", &ColRef{Name: "s"}, midnight},
 		{"text literal with a clock", &Lit{Val: "1996-01-10 13:45:30"}, withClock},
-		{"unparseable text", &ColRef{Name: "junk"}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -101,6 +165,72 @@ func TestCastToTimestampProducesEpochMillis(t *testing.T) {
 	b.Columns[2].Nulls.SetNull(0)
 	if got := (&Cast{Operand: &ColRef{Name: "s"}, DestType: "timestamp"}).Eval(b, 0); got != nil {
 		t.Errorf("CAST(NULL AS TIMESTAMP) = %v, want nil", got)
+	}
+}
+
+// TestCastToTimestampRaisesForTextThatNamesNoInstant is #836 and #840's
+// TIMESTAMP half — the cell the DML census pinned as `rows=[~]` and ADR-0012
+// described as unreachable because "the CAST path has no per-row error
+// channel for a temporal conversion".
+func TestCastToTimestampRaisesForTextThatNamesNoInstant(t *testing.T) {
+	b := dateCastBatch(t)
+	for _, c := range []struct {
+		name       string
+		operand    Expr
+		state, msg string
+	}{
+		{"unparseable column text", &ColRef{Name: "junk"}, "22007",
+			`invalid input syntax for type timestamp: "not-a-date"`},
+		// #836's own headline shape: a well-formed timestamp naming a day
+		// February does not have.
+		{"an impossible day", &Lit{Val: "2020-02-30 12:00:00"}, "22008",
+			`date/time field value out of range: "2020-02-30 12:00:00"`},
+		{"an impossible month", &Lit{Val: "2020-13-01T00:00:00"}, "22008",
+			`date/time field value out of range: "2020-13-01T00:00:00"`},
+		{"an impossible hour", &Lit{Val: "2020-01-01T25:00:00"}, "22008",
+			`date/time field value out of range: "2020-01-01T25:00:00"`},
+		{"text that is not a timestamp", &Lit{Val: "not-a-timestamp"}, "22007",
+			`invalid input syntax for type timestamp: "not-a-timestamp"`},
+		{"empty string", &Lit{Val: ""}, "22007",
+			`invalid input syntax for type timestamp: ""`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, msg := recoverFatalEvalForTest(t, func() {
+				(&Cast{Operand: c.operand, DestType: "timestamp"}).Eval(b, 0)
+			})
+			if state != c.state || msg != c.msg {
+				t.Errorf("CAST(%s AS TIMESTAMP) raised [%s] %s, want [%s] %s (live PostgreSQL 17.11)",
+					c.name, state, msg, c.state, c.msg)
+			}
+		})
+	}
+}
+
+// TestCastTemporalRefusalStopsAtText is the BOUNDARY of the refusal above,
+// attempted from the outside (protocol rule 11).
+//
+// Only TEXT raises. A box with no temporal reading at all is a TYPE-PAIR
+// failure — `CAST(true AS date)` is 42846 `cannot cast type boolean to date`
+// in PostgreSQL, a parse-time refusal and not a data exception — so minting
+// 22007 for it would put a data-exception code on a type error. Those keep
+// the NULL they have; ADR-0012's divergence list records it. This cell fails
+// if a later pass widens the raise past text without deciding that question.
+func TestCastTemporalRefusalStopsAtText(t *testing.T) {
+	b := dateCastBatch(t)
+	for _, dest := range []string{"date", "timestamp"} {
+		got := func() (v any) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("CAST(<boolean> AS %s) raised %v; PostgreSQL answers 42846 for this "+
+						"TYPE PAIR at parse time, not a data exception. Widening the refusal past "+
+						"text needs that question decided first (ADR-0012 item 1).", dest, r)
+				}
+			}()
+			return (&Cast{Operand: &Lit{Val: true}, DestType: dest}).Eval(b, 0)
+		}()
+		if got != nil {
+			t.Errorf("CAST(<boolean> AS %s) = %v, want nil", dest, got)
+		}
 	}
 }
 
@@ -202,9 +332,13 @@ func TestDateArithThroughBinOp(t *testing.T) {
 		{"date - 1.5 declines",
 			&BinOp{Left: castDate(lit("1996-01-10")), Right: &Lit{Val: 1.5}, Op: "-"},
 			float64(9503.5), ""},
-		// NULL in, NULL out.
+		// NULL in, NULL out. The operand is a genuine NULL and not the `junk`
+		// column: text that names no date is a REFUSAL now (#840), and a cell
+		// that stood in for NULL with unparseable text was asserting the
+		// defect — CAST(<not a date> AS DATE) - 1 is 22007 in PostgreSQL, not
+		// a NULL row.
 		{"NULL operand",
-			&BinOp{Left: castDate(&ColRef{Name: "junk"}), Right: &Lit{Val: int64(1)}, Op: "-"},
+			&BinOp{Left: castDate(&Lit{Val: nil}), Right: &Lit{Val: int64(1)}, Op: "-"},
 			nil, ""},
 	}
 	for _, c := range cases {

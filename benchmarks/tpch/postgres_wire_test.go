@@ -1653,6 +1653,15 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "SyntaxError", sql: `SELECT FROM WHERE`},
 		{name: "DivisionByZero", sql: `SELECT 1/0`},
 		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`},
+		// The temporal casts, whose refusal is the wire arm's business because
+		// the two codes are DIFFERENT ANSWERS to a client: 22007 says the
+		// literal is malformed, 22008 says the calendar has no such day. Both
+		// were a NULL row until #836/#840 — a value oracle sees nothing wrong
+		// with a NULL, which is precisely why these live here.
+		{name: "CastTextToDateInvalidSyntax", sql: `SELECT CAST('not-a-date' AS date)`},
+		{name: "CastTextToDateFieldOutOfRange", sql: `SELECT CAST('2020-02-30' AS date)`},
+		{name: "CastTextToTimestampInvalidSyntax", sql: `SELECT CAST('not-a-timestamp' AS timestamp)`},
+		{name: "CastTextToTimestampFieldOutOfRange", sql: `SELECT CAST('2020-02-30 12:00:00' AS timestamp)`},
 		// ADR-0024 item 4 at the DECIMAL arithmetic and CAST sites: a value
 		// with no carrier at its declared type is 22003 and a zero divisor is
 		// 22012, and the two must stay APART — a caller that branched on "did

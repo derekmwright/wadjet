@@ -93,12 +93,14 @@ func pbCorpus() []pbEntry {
 			wantErr: "division by zero",
 		},
 		{
-			// No wantErr: CAST AS DATE does not currently validate its input
-			// (#340, open on its own terms). This entry is here for the
-			// SURVIVAL arm — whatever the cast decides, the build side must
-			// not take the process with it.
-			name: "join_build_date_cast",
-			sql:  `SELECT * FROM t0 JOIN t2 ON TRUE WHERE CAST(t0.c0 AS DATE) > DATE '1970-01-01'`,
+			// CAST AS DATE validates its input since #840: `t0.c0` holds text
+			// naming no day, so this is a QUERY error with PostgreSQL's own
+			// code, raised from a JOIN BUILD side — which is the arm this
+			// entry exists for. The comment here used to say the cast does
+			// not validate and left wantErr empty.
+			name:    "join_build_date_cast",
+			sql:     `SELECT * FROM t0 JOIN t2 ON TRUE WHERE CAST(t0.c0 AS DATE) > DATE '1970-01-01'`,
+			wantErr: "invalid input syntax for type date",
 		},
 		{
 			name:     "concat_on_join_build",

@@ -168,14 +168,37 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      minute, and so does this — refusing input PostgreSQL accepts is what item
      1 forbids, and the first pass refused both.
 
-     **Residuals, kept and pinned rather than described only in a test file.**
-     `CAST(<bad literal> AS TIMESTAMP)` answers NULL where PostgreSQL raises
-     22008 or 22007: the CAST path has no per-row error channel for a temporal
-     conversion, so it produces a value or nothing, and "nothing" is NULL. It
-     is the one #692 cell the census still pins. Sub-millisecond precision is
-     TRUNCATED to the millisecond the column stores — `.123456` reads back
-     `.123` — which is a declared-type property of TIMESTAMP here and a
-     stored-value divergence from PostgreSQL's microseconds.
+     `CAST(<bad literal> AS TIMESTAMP)` **raises** the same pair of codes since
+     #836/#840. The residual this paragraph used to record — "the CAST path has
+     no per-row error channel for a temporal conversion, so it produces a value
+     or nothing, and nothing is NULL" — was FALSE when it was written: the
+     channel is `expr.fatalEval`, the numeric casts had used it since #367, and
+     #836 is the issue that read the tree instead of the record. Method 9 in the
+     correctness-fix protocol is about exactly this direction of error. The
+     census pin is deleted; both engines answer 22008 for an impossible day and
+     22007 for text that is not a timestamp.
+
+     **Residual, kept.** Sub-millisecond precision is TRUNCATED to the
+     millisecond the column stores — `.123456` reads back `.123` — which is a
+     declared-type property of TIMESTAMP here and a stored-value divergence
+     from PostgreSQL's microseconds.
+   - **A temporal CAST over a box with no temporal reading keeps NULL.**
+     (Added 2026-09-03, #836/#840.) `CAST(<text> AS DATE|TIMESTAMP)` raises
+     22007/22008 for text naming no instant. Every OTHER box that fails to
+     parse — a boolean, a container — keeps the NULL it had, because
+     PostgreSQL answers those at PARSE time with **42846**
+     (`cannot cast type boolean to date`): it is a TYPE-PAIR refusal, not a
+     data exception, and minting 22007 for it would put a data-exception code
+     on a type error. The boundary is attempted from the outside by
+     `expr.TestCastTemporalRefusalStopsAtText`.
+   - **A DMY date spelling is 22007 here and 22008 in PostgreSQL.**
+     (Added 2026-09-03, #840; the accept-set is #639's.) Both engines REFUSE
+     `'31/12/1996'`. PostgreSQL's DateStyle ISO, MDY reads the leading field
+     as a month and calls month 31 a field-range failure; wadjet refuses every
+     spelling whose field ORDER DateStyle would decide, so it is "not a date"
+     and the code is 22007. One accept-set decision, the same at the ingest
+     boundary, the writer and the filter kernel — `parquet.ParseDateDays` is
+     the single classifier — now visible through CAST as well.
    - **A TEXT value compared against a NUMBER.** (Added 2026-08-24, #504.)
      PostgreSQL refuses the pair outright — verified live, `WHERE s = 1.5`
      over a `text` column is 42883 "operator does not exist: text = numeric",

@@ -11971,15 +11971,14 @@ func castTemporalKindLower(dest string) castTemporalKindT {
 // parses a column value itself, so the cast cannot disagree with date_add,
 // date_diff or `date ± INTERVAL` about what a column means.
 //
-// An operand that resolves to no instant at all becomes NULL. When #340 chose
-// that, the expression layer had no per-row error channel; it has one now
-// (FatalEvalPanic, #347), and the numeric casts use it — CAST('abc' AS
-// integer) raises 22P02 per ADR-0012's PostgreSQL-decides-error-versus-not
-// rule (#367). The temporal casts deliberately keep NULL for the moment:
-// their unparseable inputs are pinned across date_cast_test.go and the
-// change is a semantics flip of its own, to be made on its own issue rather
-// than as a rider. Until then this is TRY_CAST's rule (DuckDB raises; its
-// TRY_CAST returns NULL) and a documented divergence from PostgreSQL.
+// TEXT that resolves to no instant at all RAISES — 22007 for text that is not
+// a date, 22008 for a well-formed date naming no day — which is what
+// PostgreSQL answers and what #836 and #840 are. #340 chose NULL because the
+// expression layer had no per-row error channel; it has one (FatalEvalPanic,
+// #347), the numeric casts have used it since #367, and #836 is the issue
+// that noticed ADR-0012's residual text still said otherwise. Every non-text
+// box that fails to parse keeps its NULL — see raiseTemporalCastRefusal for
+// why that boundary is where PostgreSQL puts it.
 func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castTemporalKindT) any {
 	src, ok := temporalOperand(b, row, operand, v)
 	if !ok {
@@ -11987,6 +11986,7 @@ func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castT
 	}
 	t, _, ok := parseDateArg(src)
 	if !ok {
+		raiseTemporalCastRefusal(src, kind)
 		return nil
 	}
 	if kind == castToDateKind {
