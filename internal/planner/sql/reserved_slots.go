@@ -67,6 +67,7 @@ const (
 	SlotAvgCount     SlotFamily = "__avg_count"   // AVG's decomposed COUNT leg
 	SlotVarState     SlotFamily = "__var_state"   // STDDEV/VARIANCE partial state
 	SlotCovarState   SlotFamily = "__covar_state" // CORR/COVAR partial state
+	SlotGrouping     SlotFamily = "__grouping_"   // a GROUPING(...) bitmask
 	// The SUFFIX-minted families: their names carry a discriminator rather than
 	// a bare index, so they are rendered with fmt.Sprintf against the constant
 	// rather than through SlotName. They are reserved on the same grounds.
@@ -100,7 +101,7 @@ var suffixMintedFamilies = []SlotFamily{
 var allSlotFamilies = []SlotFamily{
 	SlotWindowOutput, SlotWindowKey, SlotSortKey, SlotGroupKey, SlotAggInput,
 	SlotNestedAgg, SlotScalar, SlotHaving, SlotTwoLevel, SlotSetOpCount,
-	SlotAvgSum, SlotAvgCount, SlotVarState, SlotCovarState,
+	SlotAvgSum, SlotAvgCount, SlotVarState, SlotCovarState, SlotGrouping,
 }
 
 // reservedSlotPrefixes is the reservation. It is a superset of the families
@@ -115,6 +116,7 @@ var reservedSlotPrefixes = []string{
 	"__covar_state",
 	"__default__",
 	"__gb_expr_",
+	"__grouping_",
 	"__having_",
 	"__precomp_agg_",
 	"__row_loc",

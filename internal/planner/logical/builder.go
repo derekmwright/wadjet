@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // BuildFromSelect constructs a logical plan from a parsed SELECT query.
@@ -20,6 +21,14 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// Handle set operations (UNION, INTERSECT, EXCEPT)
 	if info.Union != nil {
 		return buildSetOpPlan(info, ctes)
+	}
+
+	// Where an aggregate or grouping operation may APPEAR, before anything is
+	// planned. Every arm of a set operation reaches this through its own
+	// recursive call, and a subquery through its own, so the scan stays
+	// level-local.
+	if err := checkAggregatePlacement(info); err != nil {
+		return nil, err
 	}
 
 	var plan *Node
@@ -206,14 +215,61 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	winAggRefs := map[string]string{}
 
 	// GROUP BY / aggregation
+	// GROUPING(...) anywhere in the SELECT list or HAVING (#804). Every call
+	// gets a hidden aggregate output slot: the operator that assigned a row
+	// its grouping set is the only thing that can answer the question, and
+	// giving the plain-GROUP-BY case its own constant-folded spelling would
+	// be a second mechanism that a nested call could not use. groupingSlots
+	// maps a SELECT-list index whose column IS a bare call to its slot; a
+	// call nested inside a larger expression is substituted into that
+	// expression instead, through the machinery that already does this for
+	// nested aggregates. Declared out here because the projection loop below
+	// is what consumes them.
+	var groupingCalls []GroupingCall
+	groupingSlots := map[int]string{}
+	groupingSlotFor := map[string]string{}
+
+	// allocGroupingSlot validates one GROUPING call's arguments and returns
+	// the slot its bitmask is published under, reusing the slot when the same
+	// call appears more than once.
+	allocGroupingSlot := func(fn *plansql.FuncCallNode) (string, error) {
+		args := make([]string, 0, len(fn.Args))
+		for _, a := range fn.Args {
+			args = append(args, cleanExpr(plansql.Unparen(a).String()))
+		}
+		if len(args) == 0 {
+			return "", sqlerr.New(groupingErrSQLState, "GROUPING requires at least one argument")
+		}
+		if err := checkGroupingArgs(args, info); err != nil {
+			return "", err
+		}
+		key := strings.ToLower(fn.String())
+		if slot, ok := groupingSlotFor[key]; ok {
+			return slot, nil
+		}
+		slot := plansql.SlotName(plansql.SlotGrouping, len(groupingCalls))
+		groupingCalls = append(groupingCalls, GroupingCall{Args: args, OutputCol: slot})
+		groupingSlotFor[key] = slot
+		return slot, nil
+	}
+
 	if hasAgg || len(info.GroupBy) > 0 {
 		var aggs []AggExpr
 		aggCounter := 0
 
 		for i, col := range info.Columns {
 			if col.IsAgg {
-				// Skip GROUPING() — it's computed during output, not a real aggregate
-				if col.AggFunc == "grouping" {
+				// GROUPING() is not an aggregate: it reads which grouping SET
+				// produced the row, which only the operator that assigned the
+				// set knows. It gets a hidden aggregate output slot (or, with
+				// a plain GROUP BY, the constant 0 — every key is grouped in
+				// every row) and the projection below reads that (#804).
+				if fn := bareGroupingCall(col.ASTExpr); fn != nil {
+					slot, err := allocGroupingSlot(fn)
+					if err != nil {
+						return nil, err
+					}
+					groupingSlots[i] = slot
 					continue
 				}
 
@@ -262,6 +318,21 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 						aggKey := strings.ToLower(agg.String())
 						if existing, ok := aggSyntheticNames[aggKey]; ok {
 							replacements[aggKey] = existing
+							continue
+						}
+						// A GROUPING(...) nested in a larger expression —
+						// `GROUPING(g) + 1`, `CASE WHEN GROUPING(g) = 1 ...`,
+						// `SUM(v) + GROUPING(g)`. It is not an aggregate and
+						// must not become one: it substitutes its bitmask
+						// slot into the surrounding expression the same way a
+						// real nested aggregate substitutes its output (#804).
+						if strings.EqualFold(agg.Name, "grouping") {
+							slot, err := allocGroupingSlot(agg)
+							if err != nil {
+								return nil, err
+							}
+							replacements[aggKey] = slot
+							aggSyntheticNames[aggKey] = slot
 							continue
 						}
 						syntheticName := plansql.SlotName(plansql.SlotNestedAgg, aggCounter)
@@ -328,6 +399,19 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			havingAggs := plansql.FindAllAggregates(info.HavingExpr)
 			for _, hAgg := range havingAggs {
 				hKey := strings.ToLower(hAgg.String())
+				// GROUPING in HAVING — `HAVING GROUPING(g) = 0` — is the same
+				// substitution as in the SELECT list, and it must happen here
+				// or the loop below mints an AggExpr for a function no
+				// aggregate kernel implements: the column came back empty and
+				// the HAVING matched NO rows, silently (#804).
+				if strings.EqualFold(hAgg.Name, "grouping") {
+					slot, err := allocGroupingSlot(hAgg)
+					if err != nil {
+						return nil, err
+					}
+					havingReplacements[hKey] = slot
+					continue
+				}
 				aggInputCol := ""
 				var aggInputExpr plansql.Node
 				if len(hAgg.Args) > 0 {
@@ -425,6 +509,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 
 			aggNode := buildGroupingSets(plan, allGroupCols, aggs, info.GroupingSets)
+			aggNode.GroupingCalls = groupingCalls
 			// The keys' PARSED forms travel with them here too. A grouping-set
 			// term is a GROUP BY term and nothing about the construct changes
 			// what `g + 1` means: it is arithmetic one of the engines has to
@@ -443,6 +528,12 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 			aggNode := NewAggregate(plan, groupBy, aggs)
 			aggNode.GroupByExprs = info.GroupByExprs
+			// GROUPING(...) under a plain GROUP BY is always 0 — every key is
+			// grouped in every row — but it takes the SAME slot as it does
+			// over grouping sets rather than a constant-folded spelling of
+			// its own. One mechanism: a nested call substitutes a column
+			// reference either way, and there is no second path to get wrong.
+			aggNode.GroupingCalls = groupingCalls
 			plan = aggNode
 			groupKeyRefs = computedGroupKeyRefs(aggNode)
 		}
@@ -639,6 +730,18 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					Alias:      name,
 					Column:     src,
 					SlotSource: src,
+				})
+				continue
+			}
+			// GROUPING(...) reads the aggregate's hidden bitmask slot by name
+			// (the window-column pattern), or is the constant 0 when a plain
+			// GROUP BY leaves every key grouped in every row (#804).
+			if slot, ok := groupingSlots[i]; ok {
+				projections = append(projections, Projection{
+					Expr:       slot,
+					Alias:      groupingOutputName(col),
+					Column:     slot,
+					SlotSource: slot,
 				})
 				continue
 			}

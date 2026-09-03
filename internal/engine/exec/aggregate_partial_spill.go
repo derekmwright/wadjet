@@ -1272,6 +1272,7 @@ func (m *kWayMerger) Close() error {
 //   - one of the SoA paths in use (so accs live in intFlatAccs and we can
 //     drain them with a uniform key-extraction strategy)
 //   - no grouping sets (those route through the generic per-row path)
+//   - no GROUPING() calls
 //
 // Other configurations fall back to the legacy raw-row spill behavior.
 func (h *HashAggregate) canUseExternalMerge() bool {
@@ -1279,6 +1280,17 @@ func (h *HashAggregate) canUseExternalMerge() bool {
 		return false
 	}
 	if len(h.GroupingSets) > 0 {
+		return false
+	}
+	// writeMergedRow fills the group-key and aggregate columns only, so this
+	// path would leave every GROUPING() column unwritten. A plain GROUP BY
+	// carrying one reaches here, and today its answer happens to be right —
+	// the column is non-nullable Int32, its unwritten zero value is 0, and 0
+	// IS the bitmask when there are no grouping sets. That is an accident of
+	// two independent facts, not an invariant: this refuses on its own terms
+	// so the next change to either one cannot turn it into a wrong number
+	// (#804).
+	if len(h.GroupingCalls) > 0 {
 		return false
 	}
 	return h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey ||

@@ -4473,8 +4473,78 @@ func postgresSemanticsCases() []pgCase {
 	)
 
 	out = append(out, groupKeySpellingCases()...)
+	out = append(out, groupingFunctionCases()...)
 
 	return out
+}
+
+// groupingFunctionCases is the #804 family: SQL's GROUPING(a[, b, ...]) over
+// GROUPING SETS / ROLLUP / CUBE, which did not parse at all — GROUPING was
+// lexed only as the `GROUPING SETS` keyword, so the one function that tells a
+// super-aggregate row from a data NULL was unreachable while all three
+// grouping constructs worked.
+//
+// PostgreSQL is the authority on three things here that only it can settle:
+// the bit ORDER (leftmost argument is the most significant bit, so
+// GROUPING(a, b) and GROUPING(b, a) differ), the RESULT TYPE (`integer`,
+// which the wire arm checks as an OID), and the COLUMN NAME of an unaliased
+// call (`grouping`).
+//
+// The fixture carries a genuine NULL in the grouped column, because that is
+// the only shape where the answer cannot be reconstructed from the key
+// columns: `a IS NULL` is true for a data NULL and for a set NULL alike, and
+// GROUPING is the one thing that separates them.
+func groupingFunctionCases() []pgCase {
+	const rows = `SELECT CAST(1 AS INTEGER) AS a, CAST(10 AS INTEGER) AS b
+		UNION ALL SELECT CAST(1 AS INTEGER), CAST(20 AS INTEGER)
+		UNION ALL SELECT CAST(2 AS INTEGER), CAST(10 AS INTEGER)
+		UNION ALL SELECT CAST(NULL AS INTEGER), CAST(10 AS INTEGER)`
+
+	return []pgCase{
+		{name: "GroupingRollupOneArg",
+			sql: `SELECT a, GROUPING(a) AS ga, COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY ROLLUP(a) ORDER BY ga, a`},
+		{name: "GroupingRollupSeparatesDataNullFromSetNull",
+			sql: `SELECT GROUPING(a) AS ga, COUNT(*) AS n FROM (` + rows + `) t
+				WHERE a IS NULL OR a IS NOT NULL
+				GROUP BY ROLLUP(a) ORDER BY ga, n`},
+		{name: "GroupingCubeTwoArgs",
+			sql: `SELECT a, b, GROUPING(a) AS ga, GROUPING(b) AS gb,
+				GROUPING(a, b) AS gab, GROUPING(b, a) AS gba, COUNT(*) AS n
+				FROM (` + rows + `) t GROUP BY CUBE(a, b) ORDER BY gab, a, b`},
+		{name: "GroupingSetsTwoArgs",
+			sql: `SELECT a, b, GROUPING(a, b) AS gab, COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY GROUPING SETS ((a, b), (a), (b), ()) ORDER BY gab, a, b`},
+		{name: "GroupingPlainGroupByIsZero",
+			sql: `SELECT a, GROUPING(a) AS ga, COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY a ORDER BY a`},
+		{name: "GroupingUnaliasedColumnName",
+			sql: `SELECT GROUPING(a), COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY ROLLUP(a) ORDER BY grouping, n`},
+		// NESTED in a larger expression: the bitmask substitutes INTO the
+		// expression. Projecting the slot for the whole column instead
+		// dropped the arithmetic and answered the bare bitmask.
+		{name: "GroupingNestedArithmetic",
+			sql: `SELECT a, GROUPING(a) + 1 AS g1, COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY ROLLUP(a) ORDER BY g1, a`},
+		{name: "GroupingNestedInCaseBesideAnAggregate",
+			sql: `SELECT CASE WHEN GROUPING(a) = 1 THEN 'total' ELSE 'row' END AS label,
+				SUM(b) + GROUPING(a) AS s, COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY ROLLUP(a) ORDER BY label, s`},
+		// HAVING over the bitmask, both directions. The aggregate loop used
+		// to mint an AggExpr for a function no kernel implements, so the
+		// predicate matched NO rows at all.
+		{name: "GroupingHavingDetailRows",
+			sql: `SELECT a, COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY ROLLUP(a) HAVING GROUPING(a) = 0 ORDER BY a`},
+		{name: "GroupingHavingTotalRow",
+			sql: `SELECT COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY ROLLUP(a) HAVING GROUPING(a) = 1`},
+		// The same call twice: one slot, two output columns.
+		{name: "GroupingRepeatedIdenticalCall",
+			sql: `SELECT GROUPING(a) AS x, GROUPING(a) AS y, COUNT(*) AS n FROM (` + rows + `) t
+				GROUP BY ROLLUP(a) ORDER BY x, n`},
+	}
 }
 
 // groupKeySpellingCases is the #720/#723/#725 family: ONE computed GROUP BY

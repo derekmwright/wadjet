@@ -55,6 +55,18 @@ func refuseGroupingSets(n *logical.Node) error {
 			" which answers different rows",
 			ErrGroupingSetsDistributed, len(n.GroupingSets), n.GroupBy)
 	}
+	// GROUPING(...) rides on the sets, so the clause above catches every plan
+	// the builder produces. This second arm is the BOUNDARY claim made
+	// checkable: a GroupingCalls-bearing aggregate that somehow reached the
+	// DAG without its sets would answer a bitmask nothing computed — the
+	// silent-wrong-number outcome this issue exists to avoid — so it refuses
+	// on its own terms rather than relying on the first arm's invariant
+	// (#804).
+	if n.Type == logical.NodeAggregate && len(n.GroupingCalls) > 0 {
+		return fmt.Errorf("%w: an aggregate carrying %d GROUPING() call(s) has"+
+			" no distributed stage that can compute the bitmask",
+			ErrGroupingSetsDistributed, len(n.GroupingCalls))
+	}
 	for _, child := range n.Children {
 		if err := refuseGroupingSets(child); err != nil {
 			return err

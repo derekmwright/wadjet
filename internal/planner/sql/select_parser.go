@@ -485,7 +485,13 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 	// way PostgreSQL labels it (`upper`, not `upper(t.c)` and certainly not
 	// `c)`). Aggregates keep the name the planner already gives them — see
 	// funcCallLabel.
-	if col.Alias == "" && !col.IsAgg {
+	// GROUPING is in knownAggregates so the clause machinery treats it as one,
+	// but it is not an aggregate whose output name the planner owns — the
+	// aggregate builder skips it entirely and the bitmask comes from a hidden
+	// slot. So it takes the ordinary function label, which is what PostgreSQL
+	// reports for an unaliased `SELECT GROUPING(g)`: the column name
+	// `grouping` (verified against PostgreSQL 17).
+	if col.Alias == "" && (!col.IsAgg || col.AggFunc == "grouping") {
 		if label := funcCallLabel(expr); label != "" {
 			col.Alias = label
 		}
@@ -1700,6 +1706,32 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			return p.parseFuncCall("every")
 		}
 		return nil, fmt.Errorf("unexpected token %q at position %d", p.cur.val, p.cur.pos)
+
+	case TokenKWGrouping:
+		// GROUPING is a lexer keyword for `GROUP BY GROUPING SETS`, which the
+		// GROUP BY clause consumes (GROUPING followed by SETS) before any
+		// expression is parsed. In an expression, GROUPING(...) is SQL's
+		// grouping-set discriminator — "grouping" has been in knownAggregates
+		// all along — but the keyword token never reached the function-call
+		// path, so `SELECT GROUPING(a) ... GROUP BY ROLLUP(a)` failed with
+		// `unexpected token "GROUPING"` (#804, the shape of #371's EVERY and
+		// #382's REPLACE). Gated on a following '(' the same way, so
+		// `GROUP BY GROUPING SETS` is unaffected.
+		if p.peekN(1) == TokenLParen {
+			p.advance() // consume GROUPING
+			return p.parseFuncCall("grouping")
+		}
+		// Without a '(' after it, GROUPING in an expression is a NAME — and
+		// it is the name PostgreSQL itself gives an unaliased GROUPING(...)
+		// output column, so `ORDER BY grouping` over such a SELECT list is
+		// ordinary SQL that PostgreSQL accepts (verified against 17).
+		// GROUPING is a col_name_keyword there: legal as a column, and the
+		// GROUP BY clause has already consumed the `GROUPING SETS` spelling
+		// before any expression is parsed, so nothing here is ambiguous.
+		// Lower-cased because the lexer normalizes a keyword's value to upper
+		// case, while the name this resolves against is the lower-cased
+		// function label parseFuncCall produced.
+		return &ColRef{Column: strings.ToLower(p.advance().val)}, nil
 
 	case TokenKWReplace:
 		// REPLACE is a lexer keyword only for CREATE OR REPLACE. In an

@@ -185,7 +185,20 @@ type HashAggregate struct {
 	routeFallback atomic.Bool
 	NullGroupCols []string // GROUPING SETS: columns to output as NULL (legacy per-node)
 	GroupingSets  [][]int  // single-pass grouping sets: column indices within GroupByCols per set
-	InputRowHint  int64    // estimated input rows for pre-sizing hash table
+	// GroupingCalls / GroupingCallNames implement SQL's GROUPING(a[, b, ...])
+	// over those sets: one entry per call, holding the GroupByCols positions
+	// its arguments name IN ARGUMENT ORDER, and the output column the bitmask
+	// is published under. Argument order is the answer — the leftmost
+	// argument is the most significant bit — so these are positions, not a
+	// set (#804).
+	//
+	// Only the operator that assigned a row its grouping set can answer this:
+	// a key that is NULL because its set excluded it is indistinguishable, in
+	// the output, from a key that is NULL in the data. That is the whole
+	// reason SQL has the function.
+	GroupingCalls     [][]int
+	GroupingCallNames []string
+	InputRowHint      int64 // estimated input rows for pre-sizing hash table
 	// GroupNDVHint is the planner's HLL-based estimate of GROUP-KEY
 	// cardinality (catalog merged sketches; ~2% error) — the quantity the
 	// hash table actually holds, unlike InputRowHint's input-row proxy.
@@ -4771,6 +4784,11 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 
 	out := batch.NewRecordBatch(h.emitOutputSchema(), numRows)
 
+	// One mask per (grouping set, GROUPING call); nil when the query has no
+	// GROUPING(...). Depends on nothing per-row, so it is computed once here
+	// rather than per group (#804).
+	gMasks := h.groupingMasks()
+
 	for i := 0; i < numRows; i++ {
 		var gs *groupState
 		if h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey {
@@ -4970,6 +4988,31 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		for k := 0; k < len(h.NullGroupCols); k++ {
 			if nullColIdx+k < len(out.Columns) {
 				out.Columns[nullColIdx+k].SetValue(i, nil)
+			}
+		}
+
+		// GROUPING(...) bitmasks. gs.setID is the only record of WHICH set
+		// produced this row, and it is the only thing that can answer the
+		// question: ext.keyValues[j] == nil is not a proxy, because a key
+		// grouped in this set can be NULL in the data (#804).
+		if len(h.GroupingCalls) > 0 {
+			base := nullColIdx + len(h.NullGroupCols)
+			switch {
+			case len(gMasks) == 0:
+				// No grouping sets: every key is grouped in every row, so
+				// every GROUPING call answers 0. Reached by a plain GROUP BY,
+				// where gs is nil on the SoA key paths and is not needed.
+				for k := range h.GroupingCalls {
+					if base+k < len(out.Columns) {
+						out.Columns[base+k].SetValue(i, int32(0))
+					}
+				}
+			case gs != nil && int(gs.setID) >= 0 && int(gs.setID) < len(gMasks):
+				for k, mask := range gMasks[gs.setID] {
+					if base+k < len(out.Columns) {
+						out.Columns[base+k].SetValue(i, mask)
+					}
+				}
 			}
 		}
 	}
@@ -5226,7 +5269,47 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	for _, name := range h.NullGroupCols {
 		cols = append(cols, parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true})
 	}
+	// GROUPING(...) bitmasks. Int32, because PostgreSQL's GROUPING returns
+	// `integer` — checked with \gdesc against PostgreSQL 17 — and the wire
+	// has to declare the OID a client expects.
+	for _, name := range h.GroupingCallNames {
+		cols = append(cols, parquet.Column{Name: name, Type: parquet.TypeInt32})
+	}
 	return cols
+}
+
+// groupingMasks precomputes, for every grouping set, the bitmask each
+// GROUPING(...) call answers on a row from that set: bit (n-1-i) is set when
+// argument i's key position is NOT in the set. PostgreSQL orders the bits
+// with the LEFTMOST argument most significant, so GROUPING(g, h) and
+// GROUPING(h, g) differ (2 vs 1 on a row grouping h but not g).
+//
+// Indexed [setIdx][callIdx]. Computed once per operator: the answer depends
+// only on the set and the call, never on the row.
+func (h *HashAggregate) groupingMasks() [][]int32 {
+	if len(h.GroupingCalls) == 0 || len(h.GroupingSets) == 0 {
+		return nil
+	}
+	masks := make([][]int32, len(h.GroupingSets))
+	for s, set := range h.GroupingSets {
+		inSet := make(map[int]bool, len(set))
+		for _, ci := range set {
+			inSet[ci] = true
+		}
+		row := make([]int32, len(h.GroupingCalls))
+		for c, args := range h.GroupingCalls {
+			var mask int32
+			n := len(args)
+			for i, keyPos := range args {
+				if !inSet[keyPos] {
+					mask |= 1 << uint(n-1-i)
+				}
+			}
+			row[c] = mask
+		}
+		masks[s] = row
+	}
+	return masks
 }
 
 // decOutputParams returns the (precision, scale) a DECIMAL aggregate output
@@ -5334,6 +5417,11 @@ func (h *HashAggregate) CloneSink() SinkSource {
 		Aggs:            h.Aggs,
 		NullGroupCols:   h.NullGroupCols,
 		GroupingSets:    h.GroupingSets,
+		// A clone emits, so it needs the GROUPING(...) columns too: without
+		// them its output schema is one column short of the primary's and
+		// the merge reads past the end.
+		GroupingCalls:     h.GroupingCalls,
+		GroupingCallNames: h.GroupingCallNames,
 		// No spill manager — partial aggregates are small enough
 		strNullGroupIdx: -1, // defensive: Init sets it, but the zero value is a VALID slot
 	}

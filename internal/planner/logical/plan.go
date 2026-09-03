@@ -201,6 +201,16 @@ type Node struct {
 	AggExprs         []AggExpr
 	GroupingSetNulls []string   // columns that should be NULL in this grouping set (legacy, per-node)
 	GroupingSets     [][]string // single-pass grouping sets: each entry lists the columns in that set
+	// GroupingCalls is one entry per distinct GROUPING(...) call at this
+	// query level — SELECT list, HAVING, or nested inside either — in the
+	// order the slots were allocated.
+	//
+	// Set whenever the query has a GROUP BY, sets or not: a plain GROUP BY
+	// answers 0 for every call (every key is grouped in every row) but takes
+	// the SAME hidden slot rather than a constant fold of its own, so a call
+	// nested in a larger expression has one substitution to make on either
+	// shape. See builder.go's allocGroupingSlot (#804).
+	GroupingCalls []GroupingCall
 
 	// Sort
 	OrderBy []OrderExpr
@@ -343,6 +353,23 @@ type Projection struct {
 	// extractOutputRenames leaves it out of the DAG's output schema, and
 	// hiddenSortTrimOp drops it on the single-process pipeline.
 	Hidden bool
+}
+
+// GroupingCall is one GROUPING(a[, b, ...]) call in a SELECT list over
+// GROUPING SETS / ROLLUP / CUBE.
+//
+// Args are the group-key spellings the call asks about, IN ARGUMENT ORDER,
+// because the order is the answer: PostgreSQL returns a bitmask whose
+// leftmost argument is the most significant bit, so GROUPING(g, h) and
+// GROUPING(h, g) differ (2 vs 1 on a row that groups h but not g — verified
+// against PostgreSQL 17).
+//
+// OutputCol is the hidden aggregate output slot the bitmask is published
+// under; the SELECT-list projection reads that slot by name, the way a
+// window column reads its own slot.
+type GroupingCall struct {
+	Args      []string
+	OutputCol string
 }
 
 // AggExpr is an aggregation expression.

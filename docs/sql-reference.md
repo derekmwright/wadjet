@@ -501,6 +501,52 @@ GROUP BY CUBE (region, product)
 
 Each grouping set produces its own aggregation level. Columns not in a given set are NULL in the output.
 
+### GROUPING
+
+`GROUPING(a[, b, ...])` returns an integer bitmask saying which of its
+arguments were **not** grouped in the row's grouping set. It is the only way
+to tell a super-aggregate NULL apart from a NULL that was in the data — for a
+nullable column, `a IS NULL` is true for both.
+
+```sql
+SELECT region, GROUPING(region) AS is_total, SUM(sales)
+FROM orders
+GROUP BY ROLLUP (region)
+-- is_total = 0 on a per-region row (including one whose region IS NULL),
+-- 1 on the grand-total row.
+```
+
+The leftmost argument is the **most significant** bit, so argument order
+matters: over `CUBE (a, b)`, on a row that groups `b` but not `a`,
+`GROUPING(a, b)` is `2` and `GROUPING(b, a)` is `1`. Every argument must be a
+GROUP BY term of the same query level; anything else is SQLSTATE 42803. With a
+plain `GROUP BY` every key is grouped in every row, so the result is always
+`0`. An unaliased call reports the column name `grouping`. All of this follows
+PostgreSQL.
+
+A `GROUPING` call is legal only where an aggregate's output is in scope — the
+SELECT list and `HAVING`. In a `WHERE` clause or a `JOIN ... ON` condition,
+which run before grouping, it is SQLSTATE 42803 (`grouping operations are not
+allowed in WHERE`), and inside another aggregate's arguments it is 42803
+(`aggregate function calls cannot be nested`) — the same rules PostgreSQL
+applies, and the same ones it applies to `SUM`, `COUNT` and every other
+aggregate.
+
+**Two deliberate divergences from PostgreSQL, both loud:**
+
+- `ORDER BY GROUPING(a)` is **not accepted** (PostgreSQL accepts it). Sorting
+  on an aggregate expression that is not itself a select item is refused
+  engine-wide, because the distributed sort has nowhere to evaluate one. Select
+  the call and order by its alias instead:
+  `SELECT GROUPING(a) AS g, ... ORDER BY g`.
+- `GROUP BY GROUPING(a)` reports a syntax error (42601) where PostgreSQL
+  reports 42803. The statement is rejected either way; only the code differs.
+
+Queries using `GROUPING SETS`, `ROLLUP` or `CUBE` — with or without
+`GROUPING(...)` — execute on the single-process pipeline: the distributed
+stage DAG has no grouping-set stage and refuses them explicitly, so the
+coordinator routes them local rather than answering a plain `GROUP BY`.
+
 ## HAVING
 
 Filters groups after aggregation (whereas WHERE filters rows before aggregation):

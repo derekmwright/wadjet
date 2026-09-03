@@ -622,6 +622,11 @@ func wireCorpus() []wireCase {
 		// COUNT(*) is int8 in PostgreSQL, and a driver that reads it as int4
 		// truncates silently past 2^31. Wadjet agrees on the OID here.
 		{name: "CountStar", sql: `SELECT COUNT(*) AS c FROM nation`},
+		// GROUPING(...) is `integer` in PostgreSQL, not bigint and not text.
+		// The value arm cannot see a right bitmask under a wrong OID, and a
+		// client that reads int4 where int8 is declared reads garbage (#804).
+		{name: "GroupingBitmask", sql: `SELECT n_regionkey, GROUPING(n_regionkey) AS g, COUNT(*) AS c ` +
+			`FROM nation GROUP BY ROLLUP(n_regionkey) ORDER BY g, n_regionkey`},
 		// SUM over an int4 column is int8 in PostgreSQL and AVG is numeric.
 		// The OID and SIZE pins are GONE since #784: `pg_typeof(sum(int4))` is
 		// bigint and `pg_typeof(avg(int4))` is numeric on the live server, and

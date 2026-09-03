@@ -9693,7 +9693,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// with. Keyed on the materialized name, `ROLLUP (g + 1)` found nothing,
 	// produced an EMPTY set, and every set collapsed to the grand total.
 	var postOps []exec.UnaryOperator
-	if len(node.GroupingSets) > 0 {
+	if len(node.GroupingSets) > 0 || len(node.GroupingCalls) > 0 {
 		keyIndex := make(map[string]int, len(node.GroupBy))
 		for i, c := range node.GroupBy {
 			// FIRST wins. The key list is deduped upstream, so a repeat should
@@ -9711,18 +9711,40 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				keyIndex[strings.ToLower(c)] = i
 			}
 		}
-		sets := make([][]int, len(node.GroupingSets))
-		for i, set := range node.GroupingSets {
-			indices := make([]int, 0, len(set))
-			for _, col := range set {
-				if idx, ok := keyIndex[strings.ToLower(strings.TrimSpace(col))]; ok {
-					indices = append(indices, idx)
+		if len(node.GroupingSets) > 0 {
+			sets := make([][]int, len(node.GroupingSets))
+			for i, set := range node.GroupingSets {
+				indices := make([]int, 0, len(set))
+				for _, col := range set {
+					if idx, ok := keyIndex[strings.ToLower(strings.TrimSpace(col))]; ok {
+						indices = append(indices, idx)
+					}
 				}
+				sets[i] = indices
 			}
-			sets[i] = indices
+			hashAgg.GroupingSets = sets
 		}
-		hashAgg.GroupingSets = sets
-	} else if len(node.GroupingSetNulls) > 0 {
+
+		// GROUPING(a[, b, ...]): the same name→key-position map, but the
+		// ARGUMENT ORDER is preserved and an unresolvable argument is an
+		// error rather than a silently dropped bit. Dropping one would shift
+		// every bit below it and answer a different number (#804); the
+		// grouping-set loop above can drop a term because a set is a SET.
+		for _, call := range node.GroupingCalls {
+			positions := make([]int, 0, len(call.Args))
+			for _, arg := range call.Args {
+				idx, ok := keyIndex[strings.ToLower(strings.TrimSpace(arg))]
+				if !ok {
+					return nil, nil, nil, sqlerr.New("42803",
+						"arguments to GROUPING must be grouping expressions of the associated query level: %q is not a group key of this aggregate", arg)
+				}
+				positions = append(positions, idx)
+			}
+			hashAgg.GroupingCalls = append(hashAgg.GroupingCalls, positions)
+			hashAgg.GroupingCallNames = append(hashAgg.GroupingCallNames, call.OutputCol)
+		}
+	}
+	if len(node.GroupingSets) == 0 && len(node.GroupingSetNulls) > 0 {
 		hashAgg.NullGroupCols = node.GroupingSetNulls
 	}
 
