@@ -48,3 +48,4 @@ Conventions:
 | [0028](0028-operational-invariants-breaker-scope-and-query-reclamation.md) | A breaker is scoped by operation class, and every exit path of a query reclaims the same way | Accepted |
 | [0029](0029-configuration-precedence.md) | Configuration precedence: explicit flag > env > file > default, resolved once from one registry | Accepted |
 | [0030](0030-a-dml-statement-commits-against-the-manifest-it-read.md) | A DML statement commits its files and its delete markers in one CAS, validated against the manifest it read | Accepted |
+| [0031](0031-a-dml-predicate-is-not-planned.md) | A DML predicate is compiled, not planned; closing that needs a row identity the planner can project | Accepted |

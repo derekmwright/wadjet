@@ -2299,10 +2299,18 @@ func pgOperandTypeName(t parquet.TypeID) string {
 // names first, so rule 11 of docs/design/correctness-fix-protocol.md forbids
 // shipping it: a fix bounded by a model that leaves the issue's headline shape
 // pinned is a surface repair standing where a structural one belongs, and the
-// disposition is to DEFER with the mechanism written down. This is that
-// writing-down; the five #688 entries in the DML census
-// (internal/server/pgwire/dml_census_test.go) are its pin, each carrying
-// PostgreSQL 17's answer beside the refusal.
+// disposition is to DEFER with the mechanism written down. The five #688
+// entries in the DML census (internal/server/pgwire/dml_census_test.go) are
+// its pin, each carrying PostgreSQL 17's answer beside the refusal.
+//
+// ADR-0031 is where the structural design is written down, and it says what
+// BLOCKS it: a delete marker names (file, file-absolute row), the planner has
+// no way to PROJECT a column that is not in the table's schema, and the one
+// synthetic scan column that exists (`physical.RowLocColumn`) carries a
+// scan-instance-local ordinal and is fenced off from the very scan paths a DML
+// predicate must keep working on. Arc D3 measured that and deferred #688
+// again; the record lists the work, in dependency order, that its own arc
+// would do.
 //
 // THE EMPTY-PREDICATE BACKSTOP. A nil predicate is the widest answer this
 // function can give — every row of the table — so "the statement had no

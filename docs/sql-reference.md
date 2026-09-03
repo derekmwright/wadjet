@@ -1771,7 +1771,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   not resolved by the planner. Name the columns, or join with `ON`
 - `JOIN ... USING` that follows another join on the same `FROM` item —
   rejected (`0A000`); the column could come from either relation on the left
-- A SUBQUERY in an `UPDATE` / `DELETE` `WHERE` clause — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS` — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner.
+- A SUBQUERY in an `UPDATE` / `DELETE` / `MERGE` predicate — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS`, and a `MERGE ... WHEN ... AND` carrying one — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner. What closing it needs, and what blocks it today, is ADR-0031.
 - Two statements in one message. `DELETE ...; DELETE ...` and `UPDATE ...; UPDATE ...` are refused (42601 when the second statement carries a WHERE, XX000 when the first does not); `INSERT ...; INSERT ...` is **not** refused — the first statement runs, the tail is silently dropped, and the tag reports the first statement's count. PostgreSQL runs both statements. Do not put two statements in one message until #711 lands.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000
