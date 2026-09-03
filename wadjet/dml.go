@@ -1150,6 +1150,15 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 	return col, nil
 }
 
+// sourceIsFloat reports whether an expression's DECLARED type is a FLOAT,
+// which is what decides PostgreSQL's assignment-cast rounding (#699). The
+// namespace is the merged one, so `s.f` resolves to the source's declaration
+// exactly as the expression evaluator resolves it.
+func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
+	d, conf := physical.DeclaredTypeOfNode(node, ev.mergedCols)
+	return conf == expr.Decided && (d.ID == parquet.TypeFloat32 || d.ID == parquet.TypeFloat64)
+}
+
 // value resolves one SET / VALUES expression against the merged row.
 //
 // A column REFERENCE is checked as well as converted: its box comes from the
@@ -1188,7 +1197,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 					}
 				}
 			}
-			cast, cerr := assignEvaluatedValue(v, col)
+			cast, cerr := assignEvaluatedValue(v, col, ev.sourceIsFloat(node))
 			if cerr != nil {
 				return nil, cerr
 			}
@@ -1216,7 +1225,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 		return nil, fmt.Errorf("compiling %q: %w", text, err)
 	}
 	b := batch.FromRows(ev.mergedCols, []map[string]any{lowercaseKeys(merged)})
-	v, err := assignEvaluatedValue(compiled.Eval(b, 0), col)
+	v, err := assignEvaluatedValue(compiled.Eval(b, 0), col, ev.sourceIsFloat(node))
 	if err != nil {
 		return nil, err
 	}
@@ -1429,7 +1438,7 @@ func lowercaseKeys(m map[string]any) map[string]any {
 //	                  99999999.99 into (9,2) -> 22003
 //	target FLOAT8     n -> 10    d -> 1.5    1 + 1 -> 2
 //	target TEXT       5 -> '5'   n -> '10'   d -> '1.50'   UPPER(s) -> 'X'
-func assignEvaluatedValue(v any, col parquet.Column) (any, error) {
+func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool) (any, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -1437,7 +1446,7 @@ func assignEvaluatedValue(v any, col parquet.Column) (any, error) {
 	case parquet.TypeDecimal:
 		return assignDecimalValue(v, col)
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
-		return assignIntegerValue(v, col)
+		return assignIntegerValue(v, col, srcFloat)
 	case parquet.TypeFloat32, parquet.TypeFloat64:
 		return assignFloatValue(v, col)
 	case parquet.TypeString:
@@ -1518,25 +1527,28 @@ func dmlBoxTypeName(v any) string {
 // assignIntegerValue rounds, ranges and narrows a value into an integer
 // column.
 //
-// A fractional value ROUNDS half away from zero and only a value outside the
-// column's range (NaN and the infinities included) is 22003 — PostgreSQL's
-// numeric-to-integer assignment cast.
+// A fractional value ROUNDS the way PostgreSQL's assignment cast rounds, and
+// which way that is depends on the SOURCE's declared type: a float8 rounds
+// half to EVEN (C's rint) and a numeric half AWAY FROM ZERO. Only a value
+// outside the column's range (NaN and the infinities included) is 22003.
 //
-// TODO(#699): PostgreSQL rounds a float8 half to EVEN and a numeric half AWAY
-// from zero, and this engine boxes both families as float64, so one rule has
-// to serve both. Half-away-from-zero is kept because it matches the far
-// commoner spelling (`SET n = 0 - 2.5` is -3 in PostgreSQL); `SET n = f` with
-// a FLOAT64 column holding exactly 2.5 stores 3 where PostgreSQL stores 2.
-// Closing it needs the source expression's declared TYPE, which expr.Expr does
-// not carry. The divergence is PINNED, not merely described, by
-// TestFloatHalfRoundingIsPinnedToTheNumericRule — changing this rule fails
-// that test in either direction.
+// This engine boxes both families as float64, so the BOX cannot decide it:
+// `SET n = f` over a FLOAT64 column and `SET n = 0 - 2.5` arrive here as the
+// same Go type and want opposite answers — 2 and -3. One rule served both, and
+// it was the numeric one, so `UPDATE fl SET n = f` over 2.5, -2.5, 0.5, 3.5,
+// 1.5 stored 3, -3, 1, 4, 2 where PostgreSQL stores 2, -2, 0, 4, 2 — three of
+// five rows wrong, silently (#699).
+//
+// srcFloat is the DECLARATION, resolved once per SET clause through
+// physical.DeclaredTypeOfNode — the same declared-type layer the query path
+// reads, not a private approximation of it. An expression whose type the layer
+// declines to decide keeps the numeric rule, which is what it had.
 //
 // The range check reaches PORT (uint16) and PROTOCOL (uint8) too, because
 // nothing below this line re-checks either — convertValue does, but only for
 // literals — so an out-of-range computed value would truncate into a port no
 // real port can be.
-func assignIntegerValue(v any, col parquet.Column) (any, error) {
+func assignIntegerValue(v any, col parquet.Column, srcFloat bool) (any, error) {
 	var n int64
 	switch t := v.(type) {
 	case bool:
@@ -1548,13 +1560,18 @@ func assignIntegerValue(v any, col parquet.Column) (any, error) {
 	case int:
 		n = int64(t)
 	case float64:
-		r := math.Round(t) // Go's Round is half AWAY FROM ZERO, like PostgreSQL numeric's
+		// math.Round is half AWAY FROM ZERO (PostgreSQL numeric's rule);
+		// math.RoundToEven is half TO EVEN (PostgreSQL float8's, C's rint).
+		r := math.Round(t)
+		if srcFloat {
+			r = math.RoundToEven(t)
+		}
 		if math.IsNaN(r) || math.IsInf(r, 0) || r < -9.223372036854776e18 || r > 9.223372036854776e18 {
 			return nil, sqlerr.New("22003", "%s out of range", col.Type)
 		}
 		n = int64(r)
 	case float32:
-		return assignIntegerValue(float64(t), col)
+		return assignIntegerValue(float64(t), col, srcFloat)
 	case string:
 		// The box a DECIMAL column reads back as. DecimalValueFromText at
 		// scale 0 IS the rounding rule, exactly, and it refuses text that
@@ -1657,7 +1674,9 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 		// "invalid syntax" and "value out of range" carry no SQLSTATE, while
 		// the cast raises PostgreSQL's own 22P02 for text naming no number
 		// and 22003 for a magnitude the column cannot hold.
-		return assignEvaluatedValue(text, col)
+		// A LITERAL, so the numeric rule: PostgreSQL reads an unadorned
+		// `2.5` as numeric and rounds it half away from zero (#699).
+		return assignEvaluatedValue(text, col, false)
 	}
 	return nil, err
 }
@@ -2112,6 +2131,13 @@ type DMLAssignment struct {
 	col      parquet.Column
 	constant any       // used when expr is nil
 	expr     expr.Expr // per-row evaluation
+	// srcFloat is the source expression's DECLARED family: true for float4 /
+	// float8, which round half to EVEN on assignment to an integer column,
+	// false for everything else, which rounds half away from zero. The
+	// compiled expr cannot carry it — expr.Expr is one method, Eval — and the
+	// BOX cannot decide it, because this engine boxes both families as
+	// float64 (#699).
+	srcFloat bool
 }
 
 // ResolveDMLSetClauses resolves an UPDATE's SET list against the table's
@@ -2179,7 +2205,13 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		if err != nil {
 			return nil, fmt.Errorf("SET %s: compiling %q: %w", name, sc.Value, err)
 		}
-		out = append(out, DMLAssignment{Column: name, col: col, expr: compiled})
+		// The AST is still in hand here, and it is the only place the source's
+		// DECLARED family can be read — one line above where it used to be
+		// thrown away at expr.Compile (#699).
+		decl, conf := physical.DeclaredTypeOfNode(node, schema)
+		srcFloat := conf == expr.Decided &&
+			(decl.ID == parquet.TypeFloat32 || decl.ID == parquet.TypeFloat64)
+		out = append(out, DMLAssignment{Column: name, col: col, expr: compiled, srcFloat: srcFloat})
 	}
 	return out, nil
 }
@@ -2268,7 +2300,7 @@ func BuildUpdatedRows(ctx context.Context, b *batch.RecordBatch, matched []int64
 				row[a.Column] = a.constant
 				continue
 			}
-			v, err := assignEvaluatedValue(a.expr.Eval(b, int(idx)), a.col)
+			v, err := assignEvaluatedValue(a.expr.Eval(b, int(idx)), a.col, a.srcFloat)
 			if err != nil {
 				return nil, fmt.Errorf("SET %s: %w", a.Column, err)
 			}

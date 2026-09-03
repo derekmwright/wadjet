@@ -10697,6 +10697,37 @@ func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) expr.DeclT
 // The confidence matters only inside a nested call: everything below returns a
 // type it decides outright, but a function call may return one it merely
 // guessed, and its caller must keep looking (see expr.Confidence, #331).
+// DeclaredTypeOfNode resolves an expression's DECLARED type against a table's
+// columns, for a caller outside the planner.
+//
+// The one caller is the DML door, and the question it has to answer is
+// PostgreSQL's assignment-cast rounding rule: a float8 source rounds half to
+// EVEN and a numeric source half AWAY FROM ZERO, and this engine boxes both
+// families as float64, so the BOX cannot decide it — `SET n = f` and
+// `SET n = 0 - 2.5` arrive at assignIntegerValue as the same Go type and want
+// opposite answers (#699). The declaration can decide it, and this is the
+// layer that already does so for every projection and comparison, so the DML
+// door reads the same answer the query path reads rather than a private
+// approximation of it.
+func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclType, expr.Confidence) {
+	decls := colDecls{
+		types:  make(map[string]parquet.TypeID, len(schema)),
+		fields: map[string][]parquet.Column{},
+		dec:    map[string]logical.DecimalMeta{},
+	}
+	for _, c := range schema {
+		name := strings.ToLower(c.Name)
+		decls.types[name] = c.Type
+		if c.Type == parquet.TypeDecimal {
+			decls.dec[name] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale}
+		}
+		if len(c.Fields) > 0 {
+			decls.fields[name] = c.Fields
+		}
+	}
+	return nodeDeclaredType(node, decls)
+}
+
 func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Confidence) {
 	switch n := node.(type) {
 	case *plansql.ColRef:

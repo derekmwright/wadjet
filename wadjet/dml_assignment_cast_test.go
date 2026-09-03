@@ -303,65 +303,82 @@ func TestDecimalPartitionPathIsCanonicalWhicheverPathWroteIt(t *testing.T) {
 	}
 }
 
-// PIN: PostgreSQL rounds a float8 half to EVEN and a numeric half AWAY from
-// zero, and this engine boxes both as float64 — so one rounding rule has to
-// serve both, and half-away-from-zero is the one kept.
+// The assignment cast rounds by the SOURCE'S DECLARED FAMILY: a float8 half to
+// EVEN, a numeric half AWAY FROM ZERO — PostgreSQL's two rules, both of them.
 //
-// TODO(#699): give the assignment cast the source's TYPE so each family gets
-// its own rule. Until then the divergence is REAL and is pinned here rather
-// than described in prose: the values below were read off postgres:17-alpine,
-// and this test fails if the rule is ever changed in either direction — which
-// is the point, because "we chose half-away-from-zero" is only true while
-// something checks it.
+// This test used to pin ONE rule serving both, because the engine boxes both
+// families as float64 and the box cannot tell them apart. The DECLARATION can,
+// and #699's fix reads it through the same declared-type layer the query path
+// uses, so the pin now asserts the two rules rather than the compromise.
 //
-//	        float8   numeric   wadjet
-//	 2.5 ->    2         3        3     <- diverges from float8
-//	-2.5 ->   -2        -3       -3     <- diverges from float8
-//	 0.5 ->    0         1        1     <- diverges from float8
-//	 3.5 ->    4         4        4        agrees with both
-//	 1.5 ->    2         2        2        agrees with both
-func TestFloatHalfRoundingIsPinnedToTheNumericRule(t *testing.T) {
+// Every value below was read off postgres:17-alpine, and the test fails if
+// either rule moves — including if the two collapse back into one, which is
+// what the float8 rows exist to catch.
+//
+//	              float8   numeric
+//	 2.5      ->     2         3
+//	-2.5      ->    -2        -3
+//	 0.5      ->     0         1
+//	 3.5      ->     4         4      (the families agree)
+//	 1.5      ->     2         2      (the families agree)
+func TestAssignmentCastRoundsByTheSourcesDeclaredFamily(t *testing.T) {
 	for _, tc := range []struct {
-		f          string
-		pgFloat8   string
-		pgNumeric  string
-		wadjetWant string
+		name string
+		// setup runs before the UPDATE; src is the SET expression.
+		setup []string
+		src   string
+		want  string
 	}{
-		{f: "2.5", pgFloat8: "2", pgNumeric: "3", wadjetWant: "3"},
-		{f: "0 - 2.5", pgFloat8: "-2", pgNumeric: "-3", wadjetWant: "-3"},
-		{f: "0.5", pgFloat8: "0", pgNumeric: "1", wadjetWant: "1"},
-		{f: "3.5", pgFloat8: "4", pgNumeric: "4", wadjetWant: "4"},
-		{f: "1.5", pgFloat8: "2", pgNumeric: "2", wadjetWant: "2"},
+		// NUMERIC sources: an unadorned decimal literal, and arithmetic over
+		// them. PostgreSQL types these as numeric and rounds half away.
+		{name: "numeric literal 2.5", src: "2.5", want: "3"},
+		{name: "numeric literal -2.5", src: "0 - 2.5", want: "-3"},
+		{name: "numeric literal 0.5", src: "0.5", want: "1"},
+		{name: "numeric literal 3.5", src: "3.5", want: "4"},
+		{name: "numeric literal 1.5", src: "1.5", want: "2"},
+
+		// FLOAT8 sources: a cast, and a bare FLOAT64 column — the shape #699
+		// was filed for, where three of five rows were wrong.
+		{name: "float8 cast 2.5", src: "2.5::float8", want: "2"},
+		{name: "float8 cast 0.5", src: "0.5::float8", want: "0"},
+		{name: "float8 cast 3.5", src: "3.5::float8", want: "4"},
+		{name: "float8 cast 1.5", src: "1.5::float8", want: "2"},
+		{name: "float8 column 2.5", setup: []string{"UPDATE rz SET f = 2.5"}, src: "f", want: "2"},
+		{name: "float8 column -2.5", setup: []string{"UPDATE rz SET f = 0 - 2.5"}, src: "f", want: "-2"},
+		{name: "float8 column 0.5", setup: []string{"UPDATE rz SET f = 0.5"}, src: "f", want: "0"},
+		{name: "float8 column 3.5", setup: []string{"UPDATE rz SET f = 3.5"}, src: "f", want: "4"},
+		{name: "float8 column 1.5", setup: []string{"UPDATE rz SET f = 1.5"}, src: "f", want: "2"},
+		{name: "float8 arithmetic", setup: []string{"UPDATE rz SET f = 2.5"}, src: "f + 0", want: "2"},
 	} {
-		t.Run(tc.f, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			if _, err := db.Query(ctx, "CREATE TABLE rz (id INT64, n INT64)"); err != nil {
+			if _, err := db.Query(ctx, "CREATE TABLE rz (id INT64, n INT64, f FLOAT64)"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Execute(ctx, "INSERT INTO rz VALUES (1, 0)"); err != nil {
+			if _, err := db.Execute(ctx, "INSERT INTO rz VALUES (1, 0, 0)"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Execute(ctx, "UPDATE rz SET n = "+tc.f); err != nil {
-				t.Fatalf("UPDATE rz SET n = %s: %v", tc.f, err)
+			for _, stmt := range tc.setup {
+				if _, err := db.Execute(ctx, stmt); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+			}
+			if _, err := db.Execute(ctx, "UPDATE rz SET n = "+tc.src); err != nil {
+				t.Fatalf("UPDATE rz SET n = %s: %v", tc.src, err)
 			}
 			q, qerr := db.Query(ctx, "SELECT n FROM rz")
 			if qerr != nil {
 				t.Fatal(qerr)
 			}
-			got := fmt.Sprint(q.Rows[0]["n"])
-			if got != tc.wadjetWant {
-				t.Fatalf("SET n = %s stored %s, want %s — the rounding rule moved. PostgreSQL: "+
-					"float8 %s, numeric %s. Changing the rule needs TODO(#699) resolved and this "+
-					"pin updated, not deleted", tc.f, got, tc.wadjetWant, tc.pgFloat8, tc.pgNumeric)
-			}
-			if tc.pgFloat8 != tc.pgNumeric && got != tc.pgNumeric {
-				t.Errorf("SET n = %s stored %s; the kept rule is PostgreSQL's NUMERIC one (%s)",
-					tc.f, got, tc.pgNumeric)
+			if got := fmt.Sprint(q.Rows[0]["n"]); got != tc.want {
+				t.Fatalf("SET n = %s stored %s, want %s (PostgreSQL 17). The assignment cast's "+
+					"rounding rule moved: a float8 source rounds half to EVEN, a numeric source "+
+					"half AWAY FROM ZERO, and neither may borrow the other's", tc.src, got, tc.want)
 			}
 		})
 	}
