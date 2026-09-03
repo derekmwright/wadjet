@@ -202,7 +202,9 @@ refactor(scan): extract predicate pushdown into separate module
   go test -run 'TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget' ./wadjet/
   go test -run 'TestSpillArcShapesAgreeOnBothDistributionArms' ./internal/coordinator/   # DAG arms, forced drain
   go test -run 'TestEveryGroupKeyProducerWritesTheSameBytes' ./internal/engine/exec/     # the seam, per type per producer
+  go test -run 'TestContainerWindowKeysAnswerTheSameAcrossAWindowSpill' ./wadjet/        # containers through a window spill
   ```
+  The container window gate runs at a 256 KiB budget, not the sweep's 512 KiB, and that is load-bearing: at 512 KiB the ARRAY and MAP columns never reach the spill threshold, so those cells would compare two in-memory runs. It asserts engagement PER CELL for that reason.
   The third is the SEAM gate and it is the one to run first after touching a group key's encoding: a HashAggregate writes the merge key from four producers holding three different Go boxes, and it asserts that all of them write the SAME bytes for every flat type (ADR-0023 item 8, #788). It needs no budget and no plan, which is the point — a gate whose trigger is a CONDITION cannot be relied on to fire, and #788 survived four investigation rounds behind one.
   Condition-triggered defects are gated with the test-only knobs `exec.ForceAggDrainEvery(N)` / `WADJET_TEST_FORCE_AGG_DRAIN_EVERY=N` and `exec.ForceSmallSpillRuns` — take the reference arm DISARMED (arming both sides cancels the defect, #790). A single passing spilled run proves nothing: replicate.
 - **Numeric typing gate**: a number means the same thing in every spelling and on every path, and the WIRE declares what PostgreSQL declares (ADR-0024 item 2, ADR-0012). After any change to numeric typing, DECIMAL arithmetic, aggregate result types, integer accumulators or the comparison kernels, run the five-arm census and BOTH oracle arms — the wire arm is the only one that sees a right value under a wrong OID:
