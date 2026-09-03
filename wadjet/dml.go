@@ -479,7 +479,11 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	// declared columns — a MERGE value is judged against the target's declared
 	// (p, s) as it is resolved, before any marker is written (#647 re-review)
 	// — and the merged namespace an expression is evaluated in (#678).
-	ev := db.buildMergeEvaluator(ctx, info, targetMeta.Schema.Columns, targetAlias, sourceAlias)
+	sourceColNames := make([]string, 0, len(sourceResult.ColumnMetas))
+	for _, cm := range sourceResult.ColumnMetas {
+		sourceColNames = append(sourceColNames, cm.Name)
+	}
+	ev := db.buildMergeEvaluator(ctx, info, targetMeta.Schema.Columns, targetAlias, sourceAlias, sourceColNames)
 
 	// Parse ON condition into equality key pairs for row matching
 	onKeys, err := parseOnKeys(info.OnCondition, targetAlias, sourceAlias)
@@ -514,6 +518,29 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 					return nil, cerr
 				}
 				if ci >= 0 {
+					// A TARGET ROW MAY BE AFFECTED ONCE.
+					//
+					// matchedTargetIndices was written by both arms below and
+					// never read, and because it is a SET a target hit twice
+					// contributed ONE delete marker while updateRows — a
+					// slice — got TWO appends. So one original was marked
+					// deleted and two replacements were ingested, and
+					// `MERGE … USING dup ON t.id = s.id WHEN MATCHED THEN
+					// UPDATE` reported `MERGE 2` over a table that now held
+					// the row TWICE, with different values (#689).
+					//
+					// The check is here, above the switch, rather than inside
+					// either arm: UPDATE-then-DELETE on one target is equally
+					// a second affect, and PostgreSQL refuses that too. It is
+					// also before any write, so the statement leaves the table
+					// exactly as it found it. PostgreSQL: 21000,
+					// cardinality_violation — the codebase's first.
+					if matchedTargetIndices[tIdx] {
+						return nil, sqlerr.New("21000",
+							"MERGE command cannot affect row a second time (target %q); "+
+								"ensure that not more than one source row matches any one target row",
+							info.Target)
+					}
 					wc := info.WhenClauses[ci]
 					switch strings.ToUpper(wc.Action) {
 					case "UPDATE":
@@ -878,6 +905,13 @@ type mergeEvaluator struct {
 	mergedCols   []parquet.Column          // the merged row's batch schema
 	mergedByName map[string]parquet.Column // the same, by the spelling it is keyed on
 	sourceKnown  bool                      // false when the source's declared schema is unavailable
+	// sourceNamed is true when the source's COLUMN NAMES are known even
+	// though its declared TYPES are not — a subquery source, whose rows the
+	// statement has already read. It gates name RESOLUTION (checkOnKeys) and
+	// nothing else: every use that needs a declared type stays behind
+	// sourceKnown, because inferring a type from a boxed value is how a
+	// DECIMAL or a DATE (both boxed as strings) gets silently mistyped.
+	sourceNamed bool
 }
 
 // buildMergeEvaluator assembles the merged namespace from the two tables'
@@ -889,7 +923,8 @@ type mergeEvaluator struct {
 // SOURCE, because that is what buildMergedRow's map holds: it writes the
 // target's names first and the source's over them.
 func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
-	targetCols []parquet.Column, targetAlias, sourceAlias string) *mergeEvaluator {
+	targetCols []parquet.Column, targetAlias, sourceAlias string,
+	sourceColNames []string) *mergeEvaluator {
 
 	ev := &mergeEvaluator{
 		target:       info.Target,
@@ -908,9 +943,26 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	if srcMeta, err := db.catalog.GetTable(ctx, info.Source); err == nil {
 		sourceCols = srcMeta.Schema.Columns
 		ev.sourceKnown = true
-	}
-	for _, c := range sourceCols {
-		ev.srcByName[strings.ToLower(c.Name)] = c
+		for _, c := range sourceCols {
+			ev.srcByName[strings.ToLower(c.Name)] = c
+		}
+	} else if len(sourceColNames) > 0 {
+		// A SUBQUERY source has no catalog entry, so the source half of
+		// checkOnKeys was skipped entirely and
+		// `USING (SELECT …) s ON t.id = s.nosuchcol` matched nothing and
+		// reported `MERGE 0` — a wrong answer dressed as a no-op, where
+		// PostgreSQL raises 42703 (#689 part 2's residual).
+		//
+		// The statement has ALREADY RUN the subquery by the time this is
+		// built, so its output column NAMES are known even though no
+		// declaration exists for their types. Only the names are recorded,
+		// and only in srcByName: the merged namespace below stays built from
+		// `sourceCols`, so no untyped column can reach the value resolution
+		// that judges a literal against a declaration.
+		ev.sourceNamed = true
+		for _, n := range sourceColNames {
+			ev.srcByName[strings.ToLower(n)] = parquet.Column{Name: n}
+		}
 	}
 
 	plain := make(map[string]bool, len(targetCols)+len(sourceCols))
@@ -947,7 +999,7 @@ func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
 		if _, ok := ev.colByName[strings.ToLower(k.TargetCol)]; !ok {
 			return sqlerr.New("42703", "column %s.%s does not exist", ev.targetAlias, k.TargetCol)
 		}
-		if ev.sourceKnown {
+		if ev.sourceKnown || ev.sourceNamed {
 			if _, ok := ev.srcByName[strings.ToLower(k.SourceCol)]; !ok {
 				return sqlerr.New("42703", "column %s.%s does not exist", ev.sourceAlias, k.SourceCol)
 			}

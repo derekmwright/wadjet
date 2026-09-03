@@ -197,13 +197,11 @@ func censusShapes() []censusShape {
 		{name: "#689 two source rows update one target", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_dup AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = s.n",
 			pg:  "state=21000 table=[1:10:a 2:20:b 3:30:c]",
-			emb: "tag=MERGE 2 table=[1:10:a 2:100:b 2:200:b 3:30:c]",
-			bug: "#689"},
+			emb: "state=21000 table=[1:10:a 2:20:b 3:30:c]"},
 		{name: "#689 two source rows delete one target", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_dup AS s ON t.id = s.id WHEN MATCHED THEN DELETE",
 			pg:  "state=21000 table=[1:10:a 2:20:b 3:30:c]",
-			emb: "tag=MERGE 2 table=[1:10:a 3:30:c]",
-			bug: "#689"},
+			emb: "state=21000 table=[1:10:a 2:20:b 3:30:c]"},
 		{name: "#689 unknown target column in ON", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.nosuchcol = s.id WHEN MATCHED THEN DELETE",
 			pg:  "state=42703 table=[1:10:a 2:20:b 3:30:c]",
@@ -215,12 +213,30 @@ func censusShapes() []censusShape {
 		{name: "#689 unknown source column in ON, subquery source", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n FROM arcb_src) AS s ON t.id = s.nosuchcol WHEN MATCHED THEN DELETE",
 			pg:  "state=42703 table=[1:10:a 2:20:b 3:30:c]",
-			emb: "tag=MERGE 0 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#689"},
+			emb: "state=42703 table=[1:10:a 2:20:b 3:30:c]"},
 		{name: "#689 unknown target column in ON, subquery source", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n FROM arcb_src) AS s ON t.nosuchcol = s.id WHEN MATCHED THEN DELETE",
 			pg:  "state=42703 table=[1:10:a 2:20:b 3:30:c]",
 			emb: "state=42703 table=[1:10:a 2:20:b 3:30:c]"},
+		// The BOUNDARY of the subquery-source ON fix. Knowing the source's
+		// column NAMES is enough to resolve an ON key and not enough to
+		// EVALUATE a SET expression — a subquery's output has no declared
+		// types, and inferring them from boxed values is how a DECIMAL or a
+		// DATE (both boxed as strings) gets silently mistyped. The first
+		// shape must keep working, the second must keep REFUSING.
+		{name: "#689 subquery source, ON resolves and DELETE fires", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n FROM arcb_src) AS s ON t.id = s.id WHEN MATCHED THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+		{name: "#689 subquery source, a bare source reference in SET", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n FROM arcb_src) AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = s.n",
+			pg:  "tag=MERGE 1 table=[1:100:a 2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[1:100:a 2:20:b 3:30:c]"},
+		{name: "#689 subquery source, a COMPUTED SET expression still refuses", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n FROM arcb_src) AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = s.n + 1",
+			pg:  "tag=MERGE 1 table=[1:101:a 2:20:b 3:30:c]",
+			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
+			bug: "#689"},
 		{name: "control merge upsert", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
 				"WHEN MATCHED THEN UPDATE SET n = s.n " +
