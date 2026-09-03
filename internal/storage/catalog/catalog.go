@@ -367,12 +367,40 @@ func checkDistinctColumnNames(schema parquet.Schema) error {
 // rejects a query on the former (42P01) and stays conservative on the latter.
 var ErrTableNotFound = errors.New("not found")
 
+// tableNotFoundError is ErrTableNotFound carrying PostgreSQL's class.
+//
+// The sentinel cannot: it is an errors.New, so it has no SQLState method for
+// sqlerr.StateOf to find, and every caller that wraps it with a plain
+// fmt.Errorf produced an error with NO CLASS AT ALL. The query path papered
+// over that with one explicit conversion in the planner's validator — the only
+// `errors.Is(err, catalog.ErrTableNotFound)` → 42P01 in the non-test tree — so
+// `SELECT * FROM nosuchtable` was 42P01 while `DELETE FROM nosuchtable`,
+// `UPDATE`, `INSERT` and `MERGE INTO` all reached the client with no class,
+// which pgwire then reported as the blanket 42000: "your SQL is malformed"
+// for a statement whose SQL is fine and whose TABLE is missing (#719).
+//
+// Putting the code on the error itself fixes every caller at once, including
+// the four DML wraps and the HTTP door, because StateOf walks the whole %w
+// chain. errors.Is(err, ErrTableNotFound) keeps working through Unwrap, and
+// the message is byte-identical to the fmt.Errorf it replaces.
+type tableNotFoundError struct{ name string }
+
+func (e *tableNotFoundError) Error() string {
+	return fmt.Sprintf("table %q %s", e.name, ErrTableNotFound.Error())
+}
+
+func (e *tableNotFoundError) Unwrap() error { return ErrTableNotFound }
+
+// SQLState implements sqlerr.Coder without importing sqlerr, which would be a
+// cycle — the same arrangement DateParseError uses in the parquet package.
+func (e *tableNotFoundError) SQLState() string { return "42P01" }
+
 // GetTable returns the metadata for a table.
 func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
 	var meta TableMeta
 	if err := c.getJSON(c.key("table."+name), &meta); err != nil {
 		if err == ErrKeyNotFound {
-			return nil, fmt.Errorf("table %q %w", name, ErrTableNotFound)
+			return nil, &tableNotFoundError{name: name}
 		}
 		return nil, err
 	}
