@@ -377,7 +377,7 @@ graph TD
 - **Task routing**: Tasks are published to cluster-scoped NATS subjects (`wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`). Workers subscribe to their cluster's filter (`wadjet.tasks.<cluster-id>.>`)
 - **Task placement**: eager reservation → cache affinity → input locality → memory bin-pack → round-robin, under a same-batch anti-clump cap ([ADR-0008](adr/0008-task-placement-policy.md))
 - **Worker concurrency**: 4 concurrent tasks per worker (default), auto-tuned down when the detected memory envelope cannot cover that many task budgets
-- **Worker cache**: 256 MB LRU cache for recently-read Parquet data by default in the worker library (`internal/worker/worker.go:191`). Left at 0, the CLI derives it from the Go memory limit instead: a tenth of it on the default path (`cmd/wadjet/main.go:403`), or the remainder after task footprint and headroom capped at a fifth when an explicit `--memory-budget` is set (`main.go:393-401`). The limit is itself 75 % of the detected machine memory (`main.go:333`), so the default works out near 7.5 % of RAM — the flag's own help string still says "20% of memory" and is stale
+- **Worker cache**: 256 MB LRU cache for recently-read Parquet data by default in the worker library (`internal/worker/worker.go:191`). Left at 0, the CLI derives it from the Go memory limit instead: a tenth of it on the default path (`cmd/wadjet/main.go:403`), or the remainder after task footprint and headroom capped at a fifth when an explicit `--memory-budget` is set (`main.go:393-401`). The limit is itself 75 % of the detected machine memory (`main.go:333`), so the default works out near 7.5 % of RAM. The flag's own help string says "10% of memory" — the envelope share, not raw RAM
 
 ### Stage DAG, exchange and shuffle
 

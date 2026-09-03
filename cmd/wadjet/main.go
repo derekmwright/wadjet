@@ -198,7 +198,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 0, "Total process RSS ceiling in MB; when --mmap-relief is set, relieve the coldest mmap'd cache files to bring RSS back to this level. 0 = auto: 85% of the detected memory limit (the old absolute default of 16000 could never fire inside an edge-sized envelope). Tune below the worker cgroup memory.max so relief has headroom.")
 	rootCmd.PersistentFlags().BoolVar(&boundedDirtyWrites, "bounded-dirty-writes", true, "Bound the dirty page-cache footprint of spill/cache/stage file writes via windowed sync_file_range, and drop spill-file pages from cache as they are written. Default true (validated suite-neutral at SF100, -15% on Q05, faster-than-off under edge caps); --bounded-dirty-writes=false restores kernel-writeback-only.")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
-	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
+	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 10% of memory)")
 
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 	rootCmd.PersistentFlags().IntVar(&circuitThreshold, "storage-circuit-threshold", 5, "Consecutive object-store failures IN ONE OPERATION CLASS (read / write / delete) before that class's circuit breaker opens and its requests fast-fail. Classes are independent: a delete or upload burst failing never fast-fails a read (ADR-0028). 0 = use the default (5).")

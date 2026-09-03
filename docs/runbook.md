@@ -203,7 +203,7 @@ what a SET-style facility could expose cheaply vs never.
 | `--cluster-id`, `--leaf-remote` | local | federation topology | boot-only |
 | `--memory-budget` | 0 = auto | per-task budget; also drives GOMEMLIMIT derivation | boot-only today (tracker budgets + GOMEMLIMIT cached at start) |
 | `--shared-pool-budget` | 0 = auto | worker-wide reservation pool | boot-only today (same) |
-| `--cache-bytes` | 0 = auto (20% mem) | LRU file cache size | boot-only (sized at start) |
+| `--cache-bytes` | 0 = auto (10% mem) | LRU file cache size | boot-only (sized at start) |
 | `--spill-dir` | OS temp | spill volume | boot-only |
 | `--max-concurrent` | 4 | task slots per worker (memory-owner count) | feasible-with-work (semaphore is sized at Start; needs a resizable gate) |
 | `--max-concurrent-queries` | 0 | coordinator query gate | **feasible** (admission check) |
