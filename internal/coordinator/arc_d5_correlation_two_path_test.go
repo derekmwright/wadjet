@@ -56,6 +56,7 @@ func arcD5Cells() []arcD5Cell {
 		arcD5CTEScopeCells(),
 		arcD5TypedRerunCells(),
 		arcD5NotInCells(),
+		arcD5LateralCells(),
 		arcD5AggregatePlacementCells(),
 		arcD5FailedSubquerySetCells(),
 		arcD5AggregateArgumentCells(),
@@ -308,6 +309,98 @@ func arcD5NotInCells() []arcD5Cell {
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
 				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 3)`,
 			want: []string{"n=int64:5"}},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #767 part 1 — an aggregated LATERAL keeps the outer row it matches nothing
+// for.
+//
+// PostgreSQL evaluates a LATERAL subquery ONCE PER OUTER ROW, and an UNGROUPED
+// aggregate over an empty input still yields one row — so an outer row the
+// lateral matches nothing for SURVIVES, with COUNT reading 0 and every other
+// aggregate NULL. `buildLateralSubquery` decorrelates by injecting the
+// correlated column into the subquery's GROUP BY, which turns "one row per
+// outer row" into "one row per group that EXISTS": an INNER join then dropped
+// that row (2 for PostgreSQL's 3, in silence) and the LEFT spelling kept it at
+// COUNT = NULL, which is a different wrong answer to the same question.
+//
+// A subquery the QUERY grouped is untouched and is the control: `GROUP BY x`
+// over an empty input yields no row in PostgreSQL either.
+func arcD5LateralCells() []arcD5Cell {
+	const dagCarrier = "does not exist in the input schema"
+	return []arcD5Cell{
+		{issue: "#767", name: "inner_lateral_ungrouped_count_keeps_the_unmatched_row",
+			sql: `SELECT o.customer AS c, s.item_count AS n FROM lat_ord o JOIN LATERAL (` +
+				`SELECT COUNT(*) AS item_count FROM lat_item WHERE order_id = o.id) s ON true ` +
+				`ORDER BY o.customer`,
+			want: []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"}},
+		{issue: "#767", name: "left_lateral_ungrouped_count_reads_zero_not_null",
+			sql: `SELECT o.customer AS c, s.item_count AS n FROM lat_ord o LEFT JOIN LATERAL (` +
+				`SELECT COUNT(*) AS item_count FROM lat_item WHERE order_id = o.id) s ON true ` +
+				`ORDER BY o.customer`,
+			want: []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"}},
+		// The rewritten reference has to reach the WHERE too, or the row this
+		// commit restores is filtered back out by the predicate that selects
+		// it. PostgreSQL answers exactly Carol.
+		{issue: "#767", name: "lateral_count_default_reaches_the_where_clause",
+			sql: `SELECT o.customer AS c, s.item_count AS n FROM lat_ord o JOIN LATERAL (` +
+				`SELECT COUNT(*) AS item_count FROM lat_item WHERE order_id = o.id) s ON true ` +
+				`WHERE s.item_count = 0 ORDER BY o.customer`,
+			want: []string{"c=Carol|n=int64:0"}},
+		// The issue's own shape, COUNT and SUM together. Right on both
+		// single-process arms; LOUD on both DAG arms for a SECOND and older
+		// defect this commit does not touch — a BARE projection of a
+		// NULL-padded lateral aggregate's non-COUNT output is not carried by
+		// the join stage. #767 records it separately ("LEFT JOIN LATERAL
+		// (agg) fails on the stage DAG … pre-existing"), the COUNT column
+		// beside it runs on the DAG, and the day this cell answers there the
+		// pin fails.
+		{issue: "#767", name: "lateral_count_and_sum_together",
+			sql: `SELECT o.customer AS c, s.item_count AS n, s.total_amount AS t FROM lat_ord o ` +
+				`JOIN LATERAL (SELECT COUNT(*) AS item_count, SUM(amount) AS total_amount ` +
+				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.customer`,
+			want: []string{
+				"c=Alice|n=int64:2|t=float:150", "c=Bob|n=int64:2|t=float:200",
+				"c=Carol|n=int64:0|t=NULL"},
+			wantErrLikeDAG: dagCarrier,
+			pgSays:         "the same three rows on every arm; the DAG's refusal is a carrier defect, not a value"},
+		// A SUM-only lateral: PostgreSQL's empty-input value IS NULL there,
+		// so the LEFT pad is already right and only the ROW had to be kept.
+		{issue: "#767", name: "lateral_sum_only_keeps_the_row_at_null",
+			sql: `SELECT o.customer AS c, s.t AS t FROM lat_ord o JOIN LATERAL (` +
+				`SELECT SUM(amount) AS t FROM lat_item WHERE order_id = o.id) s ON true ` +
+				`ORDER BY o.customer`,
+			want:                  []string{"c=Alice|t=float:150", "c=Bob|t=float:200", "c=Carol|t=NULL"},
+			wantUnreachableRoutes: 1},
+		// THE CONTROL that draws the line: a subquery the QUERY grouped
+		// yields NO row over an empty input in PostgreSQL either, so Carol's
+		// count is NULL and not 0. A fix that defaulted every lateral
+		// aggregate would answer 0 here and be wrong.
+		{issue: "#767", name: "control_user_grouped_lateral_pads_null",
+			sql: `SELECT o.customer AS c, s.n2 AS n FROM lat_ord o LEFT JOIN LATERAL (` +
+				`SELECT order_id, COUNT(*) AS n2 FROM lat_item WHERE order_id = o.id ` +
+				`GROUP BY order_id) s ON true ORDER BY o.customer`,
+			want:           []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=NULL"},
+			wantErrLikeDAG: dagCarrier,
+			pgSays:         "Alice 2, Bob 2, Carol NULL — a grouped empty input yields no row"},
+		// The NON-aggregated lateral, which this commit must not touch: an
+		// outer row with no match is correctly absent from an INNER join and
+		// NULL-padded by a LEFT one, on every arm.
+		{issue: "#767", name: "control_non_aggregated_lateral_inner",
+			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o JOIN LATERAL (` +
+				`SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"c=Alice|a=float:50", "c=Alice|a=float:100",
+				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
+		{issue: "#767", name: "control_non_aggregated_lateral_left",
+			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o LEFT JOIN LATERAL (` +
+				`SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"c=Alice|a=float:50", "c=Alice|a=float:100",
+				"c=Bob|a=float:75", "c=Bob|a=float:125", "c=Carol|a=NULL"}},
 	}
 }
 

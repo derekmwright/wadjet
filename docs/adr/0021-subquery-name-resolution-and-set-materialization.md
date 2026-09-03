@@ -435,6 +435,53 @@ decorrelation that can key on an EXPRESSION (`y.id = x.id * 2`), which
 `extractCorrelatedRefs` declines today, for the WHERE spelling as much as for
 this one.
 
+### 1h. A LATERAL runs per OUTER ROW, and an empty input still answers
+
+(Added 2026-09-03, #767 part 1.)
+
+PostgreSQL evaluates a LATERAL subquery once per outer row. An UNGROUPED
+aggregate over an empty input still yields exactly one row, so an outer row
+the lateral matches nothing for SURVIVES — `COUNT` reading 0 and every other
+aggregate NULL.
+
+`buildLateralSubquery` decorrelates by promoting the correlated equality into
+the join condition and injecting the correlated inner column into the
+subquery's GROUP BY. That turns "one row per outer row" into "one row per
+GROUP THAT EXISTS", and the difference is the whole defect: an INNER join
+dropped the unmatched outer row (2 for PostgreSQL's 3, in silence) and the
+LEFT spelling kept it with `COUNT = NULL`, which is a different wrong answer
+to the same question.
+
+Two things restore it, both decided in the builder from the subquery AS
+WRITTEN (`logical.lateralEmptyInput`), before the key injection:
+
+- the join is a LEFT join whatever the query wrote, because the lateral side
+  produces a row for every outer row and only the decorrelation made that
+  conditional;
+- references to the lateral's COUNT outputs are wrapped in `COALESCE(…, 0)` in
+  the enclosing SELECT list, WHERE, HAVING and ORDER BY. NULL is already right
+  for every other aggregate — `SUM` of nothing IS NULL in PostgreSQL — so
+  COUNT is the only family that needs one.
+
+A subquery the QUERY grouped is untouched, and is the control: `GROUP BY x`
+over an empty input yields NO row in PostgreSQL either, so the unmatched outer
+row is correctly NULL-padded there and not defaulted.
+
+**`SELECT *` is the boundary**, pinned rather than described: a star expands
+in a later pass over the plan's own schema, so there is nothing in the
+SelectInfo to rewrite and the padded COUNT reads NULL where PostgreSQL reads
+0.
+
+**The DAG carries the COUNT column and not its siblings, and that is a
+SECOND, older defect this does not touch.** A BARE projection of a NULL-padded
+lateral aggregate's output is not carried by the join stage: it either refuses
+with `ErrUnreachableGatherOutput` and routes local (right answer, recorded
+cost) or reaches the worker and fails with `column "s.total_amount" does not
+exist in the input schema`. The COUNT columns escape it because the COALESCE
+makes them COMPUTED projections. #767's own text records the DAG failure
+separately; the census pins the mixed shape with that message and the day it
+answers there the pin fails.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

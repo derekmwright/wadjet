@@ -221,21 +221,34 @@ func TestLateralJoin_WithAggregation(t *testing.T) {
 		t.Fatalf("query failed: %v", err)
 	}
 
-	// Alice and Bob have line items; Carol (no items) excluded by INNER JOIN.
-	//
-	// PostgreSQL 17 answers 3 rows here, Carol included at item_count=0 —
-	// see the note in TestLateralJoin_LeftJoinWithAggregation. The 2 below
-	// is this engine's decorrelation, not PostgreSQL's answer; it is kept
-	// as the gate for the join key the rewrite depends on.
-	if len(r.Rows) != 2 {
-		t.Fatalf("expected 2 rows, got %d: %v", len(r.Rows), r.Rows)
+	// THREE rows, which is PostgreSQL 17's answer: a LATERAL is evaluated
+	// once per outer row and an UNGROUPED aggregate over an empty input
+	// still yields one, so Carol — who has no line items — survives an INNER
+	// join at item_count = 0 and total_amount = NULL. The decorrelation
+	// turns "one row per outer row" into "one row per group that exists",
+	// which used to drop her; logical.lateralEmptyInput restores it (#767
+	// part 1). This test asserted 2 as a ratchet until it did.
+	if len(r.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d: %v", len(r.Rows), r.Rows)
 	}
 
-	// Verify aggregation results
+	want := map[string][2]any{
+		"Alice": {int64(2), 150.0},
+		"Bob":   {int64(2), 200.0},
+		"Carol": {int64(0), nil},
+	}
 	for _, row := range r.Rows {
-		cnt, _ := row["item_count"].(int64)
-		if cnt != 2 {
-			t.Errorf("expected item_count=2 for %v, got %v", row["customer"], row["item_count"])
+		cust, _ := row["customer"].(string)
+		w, ok := want[cust]
+		if !ok {
+			t.Errorf("unexpected customer %q", cust)
+			continue
+		}
+		if row["item_count"] != w[0] {
+			t.Errorf("%s: item_count = %v, want %v (live PostgreSQL 17)", cust, row["item_count"], w[0])
+		}
+		if row["total_amount"] != w[1] {
+			t.Errorf("%s: total_amount = %v, want %v (live PostgreSQL 17)", cust, row["total_amount"], w[1])
 		}
 	}
 }
@@ -277,12 +290,12 @@ func TestLateralJoin_LeftJoinWithAggregation(t *testing.T) {
 	if _, ok := got["Carol"]; !ok {
 		t.Error("Carol must survive the LEFT JOIN")
 	}
-	// Carol's cell is deliberately not asserted: PostgreSQL 17 answers 0
-	// there, because it evaluates the subquery per outer row and an
-	// unGROUPed aggregate over an empty input still produces one row. This
-	// engine rewrites the correlation into GROUP BY + join, which produces
-	// no group for an outer key with no matches, so the LEFT JOIN pads it
-	// NULL. Same cause makes the INNER JOIN above answer 2 rows where
-	// PostgreSQL answers 3. That gap is older than this test and is not
-	// what this test gates.
+	// Carol's cell IS asserted now, and it is 0: PostgreSQL evaluates the
+	// subquery per outer row, an ungrouped COUNT over an empty input is 0,
+	// and logical.lateralEmptyInput makes the decorrelation say the same
+	// (#767 part 1). It read NULL — the LEFT join's pad — until it did.
+	if got["Carol"] != int64(0) {
+		t.Errorf("Carol: item_count = %v, want 0 (live PostgreSQL 17: an ungrouped "+
+			"COUNT over an empty input is 0, not NULL)", got["Carol"])
+	}
 }

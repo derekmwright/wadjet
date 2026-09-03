@@ -95,7 +95,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				// LATERAL subquery: decorrelate by extracting correlated
 				// WHERE predicates and moving them to the join condition.
 				left := crossFold(idx)
-				right, joinCond, err := buildLateralSubquery(left, join, ctes)
+				right, joinCond, empty, err := buildLateralSubquery(left, join, ctes)
 				if err != nil {
 					return nil, err
 				}
@@ -104,6 +104,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				jt := join.Type
 				if joinCond != "" && strings.EqualFold(strings.TrimSpace(jt), "cross join") {
 					jt = "join"
+				}
+				// An UNGROUPED aggregate over an empty input still yields one
+				// row, so an outer row the lateral matches nothing for
+				// SURVIVES in PostgreSQL — see lateralEmptyInput (#767 part 1).
+				if empty.ungroupedAggregate {
+					jt = "left"
+					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
 				}
 				items[idx] = NewJoin(left, right, jt, joinCond)
 			} else {
@@ -1553,7 +1560,7 @@ func getOutputColNames(info *plansql.SelectInfo) []string {
 // 2. Parsing the subquery and splitting WHERE into correlated vs local predicates
 // 3. Building the inner plan with only local predicates
 // 4. Returning the inner plan and the combined join condition
-func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, error) {
+func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, error) {
 	// Collect left-side table aliases to detect correlated references
 	leftAliases := collectLogicalAliases(left)
 
@@ -1561,11 +1568,11 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	inner := join.RightTable[1 : len(join.RightTable)-1]
 	parsed, err := plansql.Parse(inner)
 	if err != nil {
-		return nil, "", fmt.Errorf("parsing LATERAL subquery: %w", err)
+		return nil, "", lateralEmptyInput{}, fmt.Errorf("parsing LATERAL subquery: %w", err)
 	}
 	subInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil, "", fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
+		return nil, "", lateralEmptyInput{}, fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
 	}
 
 	// Split WHERE clause into correlated and local predicates
@@ -1603,6 +1610,9 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			break
 		}
 	}
+	// What an EMPTY inner input means for this lateral, decided BEFORE the
+	// key injection below adds a GROUP BY of its own. See lateralEmptyInput.
+	empty := lateralEmptyInputOf(subInfo, hasAgg, len(correlatedParts) > 0)
 	if len(correlatedParts) > 0 {
 		// The key must be SELECTED — and, for an aggregated subquery, grouped.
 		// The rewrite above promotes the correlated equality into the join
@@ -1679,7 +1689,7 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 
 	right, err := BuildFromSelectWithCTEs(subInfo, ctes)
 	if err != nil {
-		return nil, "", fmt.Errorf("building LATERAL subquery plan: %w", err)
+		return nil, "", lateralEmptyInput{}, fmt.Errorf("building LATERAL subquery plan: %w", err)
 	}
 	if join.RightAlias != "" {
 		setSubtreeAlias(right, join.RightAlias)
@@ -1701,7 +1711,7 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	}
 	joinCond := strings.Join(condParts, " AND ")
 
-	return right, joinCond, nil
+	return right, joinCond, empty, nil
 }
 
 // collectLogicalAliases collects table names and aliases from scan nodes.
