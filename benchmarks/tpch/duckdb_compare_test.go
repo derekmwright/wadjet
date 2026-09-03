@@ -2417,7 +2417,7 @@ func fixtureSchemasFor(f Fixture, data map[string][]map[string]any) map[string]p
 // duckdbFixtureRows reads every committed DuckDB-written parquet through
 // Wadjet's reader. Both arms are loaded from these rows, so they answer over
 // the same data the stored fingerprints describe.
-func duckdbFixtureRows(t *testing.T) map[string][]map[string]any {
+func duckdbFixtureRows(t testing.TB) map[string][]map[string]any {
 	t.Helper()
 	dataDir := filepath.Join(".", duckdbDataDir)
 	out := make(map[string][]map[string]any, len(AllTables))
@@ -2439,7 +2439,7 @@ func ingestDuckDBFixture(t *testing.T, ctx context.Context, data map[string][]ma
 }
 
 // openFixtureDB is ingestDuckDBFixture for a chosen fixture.
-func openFixtureDB(t *testing.T, ctx context.Context, f Fixture, data map[string][]map[string]any) *wadjet.DB {
+func openFixtureDB(t testing.TB, ctx context.Context, f Fixture, data map[string][]map[string]any) *wadjet.DB {
 	t.Helper()
 	store := objstore.NewMemStore()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "tpch"})

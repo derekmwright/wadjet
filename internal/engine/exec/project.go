@@ -208,10 +208,34 @@ type Project struct {
 // but no per-row typed path (e.g. embed() → VECTOR). Such a projection can only
 // run through the batched VecEval path (non-sel branch); under a selection
 // vector it would otherwise fall back to per-row Expr eval. Computed once.
+// DecimalBoxedCells counts DECIMAL cells written through the BOXED checked
+// writer instead of the exact fixed-point vector kernel. Each one is a round
+// trip the value did not need — Int128 → FormatDecimal → FormatUint → an any
+// box → SetComputedChecked → DecimalTextParts re-parse, four allocations,
+// between two exact kernels — so this counter is the observable #705's
+// ratchet asserts on. It is incremented only on the fallback path, which is
+// the path the fix removes; the exact kernel adds nothing.
+var DecimalBoxedCells atomic.Int64
+
 func (p *Project) needsVecCompaction() bool {
 	if !p.vecCompactChecked {
 		for _, proj := range p.Projections {
 			if proj.VecEval != nil && proj.Float64Eval == nil && proj.Int64Eval == nil {
+				p.vecCompact = true
+				break
+			}
+			// A DECIMAL projection under a live selection vector took the
+			// boxed per-row writer, because the exact kernel writes rows
+			// 0..n-1 densely and the sel branch writes compacted output
+			// positions. That box is four allocations per cell — Int128 →
+			// FormatDecimal → FormatUint → any → SetComputedChecked →
+			// DecimalTextParts re-parse — i.e. the value is rendered to
+			// decimal TEXT and parsed back between two exact kernels
+			// (#825, the second operator of #705's one mechanism).
+			// Compacting the selection away is what lets the kernel run,
+			// and it also keeps a filtered-out row from raising this
+			// expression's 22003/22012 for a row the query excluded.
+			if proj.VecDecimalEval != nil {
 				p.vecCompact = true
 				break
 			}
@@ -412,6 +436,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				// falls back to its own per-row loop for these — through the
 				// UNCHECKED SetValue, which is the saturation this exists to
 				// stop.
+				DecimalBoxedCells.Add(int64(len(in.Sel)))
 				for outRow, idx := range in.Sel {
 					if err := col.SetComputedChecked(outRow, proj.Expr(in, int(idx))); err != nil {
 						return nil, err
@@ -459,6 +484,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				}
 				// The checked writer, for the reason the selection-vector
 				// branch above documents.
+				DecimalBoxedCells.Add(int64(in.Len))
 				for i := 0; i < in.Len; i++ {
 					if err := col.SetComputedChecked(i, proj.Expr(in, i)); err != nil {
 						return nil, err

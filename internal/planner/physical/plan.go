@@ -9422,6 +9422,31 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						pc.Int64Eval = ie.EvalInt64
 					}
 				}
+				// Exact fixed-point arithmetic into a DECIMAL aggregate
+				// input, gated on the DECLARED type exactly like the paths
+				// above and like the SELECT-list projection builder.
+				//
+				// The kernel existed and was reachable — BinOpNumeric
+				// implements DecimalVecExpr and writes carriers straight
+				// into out.DecimalData.Data — and it was attached in
+				// exactly ONE place in the tree, the SELECT-list builder.
+				// Every DECIMAL aggregate input therefore took the boxed
+				// checked writer: 4.00 allocations per computed cell, at
+				// SF1 48,026,572 for Q01's two computed columns over
+				// 6,001,215 rows, 1804x the FLOAT64 arm's object count.
+				// The mechanism is one round trip — Int128 →
+				// FormatDecimal → FormatUint → any box →
+				// SetComputedChecked → DecimalTextParts re-parse — so the
+				// value is rendered to decimal TEXT and parsed back
+				// between two exact kernels (#705). The BYTE ratio is a
+				// different thing and is NOT a defect: the Int128 carrier
+				// is 16 B against float64's 8, which is ADR-0024's
+				// predicted cost.
+				if pc.Type == parquet.TypeDecimal {
+					if dv, ok := compiled.(expr.DecimalVecExpr); ok {
+						pc.VecDecimalEval = dv.EvalDecimalVec
+					}
+				}
 				// A ROW FIELD PATH declares the FIELD, wholesale: its (p,s),
 				// its dimension, its nested shape. colRefDeclaredType above
 				// declines every parameterized type — it can only answer a
@@ -11201,6 +11226,15 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		in = a.materialize(in)
 		hasSel = false
 	}
+	// Same trade for the exact fixed-point kernel: it writes rows 0..n-1
+	// densely, so it needs the selection compacted away. Paying one gather
+	// buys back four allocations per computed DECIMAL cell — and it also
+	// keeps the kernel from raising this expression's 22003/22012 for a row
+	// the filter excluded (#705).
+	if hasSel && a.hasVecDecimal() {
+		in = a.materialize(in)
+		hasSel = false
+	}
 
 	// Cache output schema on first call (avoids per-batch allocation)
 	if a.cachedSchema == nil {
@@ -11277,6 +11311,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 				// GREATEST/COALESCE/CASE is a VALUE, and SetValue's
 				// saturating DECIMAL arms would make a wrong one silently
 				// (ADR-0024 item 4).
+				exec.DecimalBoxedCells.Add(int64(len(in.Sel)))
 				for _, idx := range in.Sel {
 					if err := col.SetComputedChecked(int(idx), c.Expr(in, int(idx))); err != nil {
 						return nil, err
@@ -11307,6 +11342,16 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			}
 		} else {
 			if col.Type == parquet.TypeDecimal {
+				// Exact fixed-point arithmetic writes carriers directly:
+				// no box to check, because nothing is converted (ADR-0024
+				// item 3). Its own errors travel the per-row panic channel.
+				// A false report means the exact mode did not apply to this
+				// batch, and the checked writer below answers instead --
+				// the same order exec.Project uses (#705, #825).
+				if c.VecDecimalEval != nil && c.VecDecimalEval(in, col, in.Len) {
+					continue
+				}
+				exec.DecimalBoxedCells.Add(int64(in.Len))
 				for i := 0; i < in.Len; i++ {
 					if err := col.SetComputedChecked(i, c.Expr(in, i)); err != nil {
 						return nil, err
@@ -11365,6 +11410,17 @@ func (a *aggPreProject) materialize(in *batch.RecordBatch) *batch.RecordBatch {
 func (a *aggPreProject) hasVecFloat64() bool {
 	for _, c := range a.computed {
 		if c.VecEval != nil || c.VecFloat64Eval != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// hasVecDecimal reports whether any computed column carries the exact
+// fixed-point vector kernel.
+func (a *aggPreProject) hasVecDecimal() bool {
+	for _, c := range a.computed {
+		if c.VecDecimalEval != nil {
 			return true
 		}
 	}

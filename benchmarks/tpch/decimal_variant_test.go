@@ -581,7 +581,7 @@ func decimalPin(n int) (why, arm string, ok bool) {
 // decimalFixtureRows reads the committed DECIMAL(15,2) parquet through
 // Wadjet's reader, so both arms answer over the same bytes the stored
 // fingerprints describe.
-func decimalFixtureRows(t *testing.T) map[string][]map[string]any {
+func decimalFixtureRows(t testing.TB) map[string][]map[string]any {
 	t.Helper()
 	dataDir := filepath.Join(".", duckdbDecimalDataDir)
 	out := make(map[string][]map[string]any, len(AllTablesDecimal))
@@ -596,7 +596,7 @@ func decimalFixtureRows(t *testing.T) map[string][]map[string]any {
 }
 
 // ingestDecimalFixture builds arm A over the DECIMAL schemas.
-func ingestDecimalFixture(t *testing.T, ctx context.Context, data map[string][]map[string]any) *wadjet.DB {
+func ingestDecimalFixture(t testing.TB, ctx context.Context, data map[string][]map[string]any) *wadjet.DB {
 	t.Helper()
 	return openFixtureDB(t, ctx, DecimalFixture, data)
 }
