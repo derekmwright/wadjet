@@ -65,9 +65,9 @@ tools/sqlancer/build.sh [target-dir]     # default target-dir: /tmp/sqlancer-wad
 ```
 
 This clones `sqlancer/sqlancer` (GPLv3 — deliberately never vendored into
-this repo, see "Licensing" below), applies
-`tools/sqlancer/patches/0001-wadjet-dialect-fixups.patch` (see "Patches
-applied to the SQLancer clone"), copies in the three
+this repo, see "Licensing" below), applies every
+`tools/sqlancer/patches/*.patch` in name order (see "Patches applied to the
+SQLancer clone"), copies in the three
 `tools/sqlancer/adapter-src/sqlancer/wadjet/*.java` files, and runs
 `mvn package -DskipTests`, producing `target/sqlancer-2.0.0.jar`. Rerunning
 it against the same `target-dir` reuses the clone and re-applies the patch
@@ -106,8 +106,13 @@ diagnosed; see "Known friction".
 
 ## Patches applied to the SQLancer clone
 
-`patches/0001-wadjet-dialect-fixups.patch`, applied by `build.sh`. Every
-patch here is a **rendering-only** change to `sqlancer.postgres`'s shared
+`build.sh` applies every `patches/*.patch` in name order. There are two:
+`0002-tlp-violation-dump.patch` is diagnostics only and is described under
+"Self-diagnosing violation dumps" above — it adds output on the path that
+was already about to throw, and changes no oracle's verdict.
+
+`patches/0001-wadjet-dialect-fixups.patch` is the dialect patch. Every
+change in it is a **rendering-only** change to `sqlancer.postgres`'s shared
 query-generation code — none change what any oracle expects a query to
 return, only which of several syntactically-equivalent (in real
 PostgreSQL) spellings gets emitted. Each was found by running the pilot
@@ -256,10 +261,73 @@ with the seed value in the header. To reproduce:
    they're already valid, executable SQL in file order, no reconstruction
    needed.
 
+## Self-diagnosing violation dumps
+
+`patches/0002-tlp-violation-dump.patch` makes every TLP violation write a
+directory of everything a human needs to decide the finding offline, and
+names that directory in the `AssertionError`. Read `rerun.txt` first.
+
+Why it exists: three soaks (2026-08-24, -25, -28) each logged a batch of
+TLP violations over outer/cross JOINs that **never reproduced** — the one
+captured instance survived both a fresh-server reconstruction and a
+byte-for-byte 622-statement replay (wadjet#626). The controlled class
+experiment that closed out v0.18.3 ruled out the obvious explanation:
+`ComparatorHelper.isEqualDouble`'s epsilon is `|a-b| < 0.001*max(|a|,|b|)
++ 0.001` — a **1e-3 relative** tolerance, ten orders of magnitude wider
+than any float accumulation-order delta, and the harness's type pool is
+INT/BOOLEAN/TEXT besides. **A TLP violation is never float accumulation
+order; triage goes straight to the transient-state lead.** The one
+retained signature was a 9.2x wrong join CARDINALITY, which is
+count-visible and would equally break `COUNT(*)`.
+
+The measurement that separates a transient state read from a stable wrong
+answer only exists at the moment of the violation, and it costs nothing:
+re-execute both arms immediately, on the same connection. That is what
+this patch does.
+
+```
+<run-dir>/sqlancer-violations/<oracle>-seed<N>-<millis>-<seq>/
+  summary.txt    oracle, seed, database, wall-clock instant, the assertion
+  queries.sql    every partition's SQL in order, executable as-is
+  rerun.txt      each arm RE-EXECUTED immediately on the same connection,
+                 with instants either side, beside what the oracle saw
+  plans.txt      EXPLAIN of each arm
+  fixtures.txt   every table's cardinality and full contents
+```
+
+Reading `rerun.txt`:
+
+- **re-run agrees with the first read → STABLE.** The answer is
+  deterministically wrong. Replay the seed per "Reproducing a finding from
+  a seed" and it will reproduce; file it with the minimal repro.
+- **re-run disagrees → TRANSIENT.** The first read saw state that no
+  longer exists — manifest visibility, background compaction, a cache.
+  This is the class three soaks' worth of violations fell into, and the
+  dump is the only place it is visible. Attach the whole directory to the
+  issue; a seed replay will NOT reproduce it and its absence is not
+  evidence.
+
+The directory root is `sqlancer-violations` under the run's working
+directory (`run.sh` always sets one; it prints the path to stderr).
+Override with `-Dwadjet.violationDir=/some/path` in `JAVA_TOOL_OPTIONS`.
+Nothing in the dump can fail the run: every step is best-effort and a
+dump that cannot be written leaves the finding's own message intact.
+
+Covers the aggregate arm (`PostgresTLPAggregateOracle.aggregateCheck`) and
+both result-set arms — cardinality and content — through
+`ComparatorHelper.assumeResultSetsAreEqual`, which TLP-WHERE, TLP-HAVING
+and `QUERY_PARTITIONING`'s composite all share.
+
 ## Triage protocol
 
 For every SQLancer-reported failure, in order:
 
+0. **A TLP violation wrote a dump — read it before anything else.** See
+   "Self-diagnosing violation dumps" above. `rerun.txt` answers
+   stable-vs-transient in one look, and the rest of this protocol only
+   applies to a STABLE finding: a transient one cannot be reduced or
+   replayed, and step 2 will waste the afternoon that three previous soaks
+   already spent. Attach the directory to the issue either way.
 1. **Classify the failure shape first — with the classifier, not a grep.**
    This section used to say to grep a soak log for `"counts mismatch"` /
    `"mismatch:"`. **That grep cannot match a real TLP violation and never

@@ -1,0 +1,355 @@
+diff --git a/src/sqlancer/WadjetViolationDump.java b/src/sqlancer/WadjetViolationDump.java
+new file mode 100644
+--- /dev/null
++++ b/src/sqlancer/WadjetViolationDump.java
+@@ -0,0 +1,265 @@
++package sqlancer;
++
++import java.io.IOException;
++import java.io.PrintWriter;
++import java.io.StringWriter;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++import java.sql.ResultSet;
++import java.sql.ResultSetMetaData;
++import java.sql.Statement;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicLong;
++
++/**
++ * wadjet-harness addition: turn an oracle violation into a self-diagnosing
++ * artifact instead of a log line.
++ *
++ * <p>
++ * Three SQLancer soaks (2026-08-24, -25, -28) each logged a batch of TLP
++ * violations over outer/cross JOINs that have NEVER reproduced — the one
++ * captured instance survived both a fresh-server reconstruction and a
++ * byte-for-byte 622-statement replay. A controlled class experiment ruled out
++ * float accumulation order (wadjet#626): the oracle's own epsilon is a 1e-3
++ * RELATIVE tolerance, ten orders of magnitude wider than any accumulation-order
++ * delta, and the one retained signature was a 9.2x cardinality discrepancy, not
++ * a rounding artifact. The lead is therefore a TRANSIENT STATE read, and the
++ * one measurement that separates a transient read from a stable wrong answer is
++ * an immediate re-execution on the same connection — which costs nothing and
++ * cannot be reconstructed after the fact.
++ *
++ * <p>
++ * So on every violation this writes a directory holding what a human needs to
++ * decide offline, and names it in the AssertionError:
++ *
++ * <ul>
++ * <li>{@code summary.txt} — oracle, seed, database, wall-clock instant, and the
++ * assertion message itself.
++ * <li>{@code queries.sql} — every partition's SQL, in order, executable as-is.
++ * <li>{@code rerun.txt} — each query RE-EXECUTED immediately on the same
++ * connection, with the wall-clock instant before and after and its row count and
++ * first-column values, next to what the oracle originally saw. A first read that
++ * disagrees with its own immediate re-run is a transient-state defect; one that
++ * agrees is stable-wrong and reproducible offline. This file is the whole point
++ * of the dump.
++ * <li>{@code plans.txt} — EXPLAIN of each query on this arm.
++ * <li>{@code fixtures.txt} — every table's cardinality and full contents, so the
++ * finding can be rebuilt without the round's log.
++ * </ul>
++ *
++ * <p>
++ * Nothing here may throw: a dump that fails must leave the FINDING intact rather
++ * than replace it with its own stack trace. Every failure is recorded in the
++ * returned string and, where it happened mid-file, in the file.
++ *
++ * <p>
++ * The directory root is {@code sqlancer-violations} under the process's working
++ * directory — which {@code tools/sqlancer/run.sh} always sets to a scratch dir —
++ * and is overridable with {@code -Dwadjet.violationDir=...}.
++ */
++public final class WadjetViolationDump {
++
++    /** Bounds every value list this writes, so one cross-product finding cannot fill a disk. */
++    private static final int MAX_ROWS = 2000;
++
++    private static final AtomicLong SEQ = new AtomicLong();
++
++    private WadjetViolationDump() {
++    }
++
++    /**
++     * One arm of the comparison: a label, the SQL, and what the oracle saw.
++     */
++    public static final class Arm {
++        private final String label;
++        private final String sql;
++        private final String originallySaw;
++
++        public Arm(String label, String sql, String originallySaw) {
++            this.label = label;
++            this.sql = sql;
++            this.originallySaw = originallySaw;
++        }
++    }
++
++    /**
++     * Writes the dump and returns a one-line description of where it went, for
++     * appending to the AssertionError message. Never throws.
++     */
++    public static String write(SQLGlobalState<?, ?> state, String oracle, String assertionMessage, List<Arm> arms) {
++        Path dir;
++        try {
++            String root = System.getProperty("wadjet.violationDir", "sqlancer-violations");
++            long seed = state.getState() == null ? -1 : state.getState().getSeedValue();
++            dir = Paths.get(root).resolve(String.format("%s-seed%d-%d-%d", oracle, seed,
++                    System.currentTimeMillis(), SEQ.incrementAndGet()));
++            Files.createDirectories(dir);
++        } catch (Exception e) {
++            return "diagnosis dump FAILED before it began: " + e;
++        }
++        writeQuietly(dir, "summary.txt", summary(state, oracle, assertionMessage, arms));
++        writeQuietly(dir, "queries.sql", queries(arms));
++        writeQuietly(dir, "rerun.txt", rerun(state, arms));
++        writeQuietly(dir, "plans.txt", plans(state, arms));
++        writeQuietly(dir, "fixtures.txt", fixtures(state));
++        return "diagnosis dump: " + dir.toAbsolutePath() + " (read rerun.txt first: a first read that disagrees "
++                + "with its own immediate re-run is transient state, not a stable wrong answer)";
++    }
++
++    private static String summary(SQLGlobalState<?, ?> state, String oracle, String assertionMessage, List<Arm> arms) {
++        StringBuilder sb = new StringBuilder();
++        sb.append("oracle:    ").append(oracle).append('\n');
++        sb.append("seed:      ").append(state.getState() == null ? "unknown" : state.getState().getSeedValue())
++                .append('\n');
++        sb.append("database:  ").append(state.getDatabaseName()).append('\n');
++        sb.append("thrown at: ").append(Instant.now()).append('\n');
++        sb.append("arms:      ").append(arms.size()).append('\n');
++        sb.append('\n');
++        sb.append("Replay: tools/sqlancer/run.sh --random-seed <seed> --max-generated-databases 1 \\\n");
++        sb.append("          --num-threads 1 --oracle <same oracle> ... (see tools/sqlancer/README.md,\n");
++        sb.append("          \"Reproducing a finding from a seed\").\n");
++        sb.append('\n');
++        sb.append("--- assertion ---\n").append(assertionMessage).append('\n');
++        return sb.toString();
++    }
++
++    private static String queries(List<Arm> arms) {
++        StringBuilder sb = new StringBuilder();
++        for (Arm a : arms) {
++            sb.append("-- arm: ").append(a.label).append('\n');
++            sb.append("-- the oracle saw: ").append(a.originallySaw).append('\n');
++            sb.append(a.sql).append(";\n\n");
++        }
++        return sb.toString();
++    }
++
++    /**
++     * The diagnosis. Each arm is re-executed immediately, on the same connection,
++     * and its answer is put beside what the oracle saw the first time.
++     */
++    private static String rerun(SQLGlobalState<?, ?> state, List<Arm> arms) {
++        StringBuilder sb = new StringBuilder();
++        sb.append("Each query below was re-executed IMMEDIATELY after the violation, on the SAME\n");
++        sb.append("connection, in the order shown.\n");
++        sb.append("  same as the first read   -> STABLE: the answer is wrong deterministically and\n");
++        sb.append("                              replaying the seed offline reproduces it.\n");
++        sb.append("  differs                  -> TRANSIENT: the first read saw state that no longer\n");
++        sb.append("                              exists (manifest visibility, compaction, cache), which\n");
++        sb.append("                              is why three soaks' worth of these never replayed.\n\n");
++        for (Arm a : arms) {
++            sb.append("=== arm: ").append(a.label).append(" ===\n");
++            sb.append("the oracle saw: ").append(a.originallySaw).append('\n');
++            sb.append("re-run started: ").append(Instant.now()).append('\n');
++            String got;
++            try {
++                got = firstColumn(state, a.sql);
++            } catch (Exception e) {
++                got = "re-run FAILED: " + stack(e);
++            }
++            sb.append("re-run ended:   ").append(Instant.now()).append('\n');
++            sb.append("re-run saw:\n").append(got).append('\n');
++        }
++        return sb.toString();
++    }
++
++    private static String plans(SQLGlobalState<?, ?> state, List<Arm> arms) {
++        StringBuilder sb = new StringBuilder();
++        for (Arm a : arms) {
++            sb.append("=== arm: ").append(a.label).append(" ===\n");
++            try {
++                sb.append(allColumns(state, "EXPLAIN " + a.sql));
++            } catch (Exception e) {
++                sb.append("EXPLAIN FAILED: ").append(stack(e));
++            }
++            sb.append('\n');
++        }
++        return sb.toString();
++    }
++
++    /**
++     * Every table's cardinality and contents, so the finding can be rebuilt from
++     * this directory alone.
++     */
++    private static String fixtures(SQLGlobalState<?, ?> state) {
++        StringBuilder sb = new StringBuilder();
++        List<String> tables = new ArrayList<>();
++        try (Statement st = state.getConnection().createStatement();
++                ResultSet rs = st.executeQuery("SELECT table_name FROM information_schema.tables "
++                        + "WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_name")) {
++            while (rs.next()) {
++                tables.add(rs.getString(1));
++            }
++        } catch (Exception e) {
++            return "listing tables FAILED: " + stack(e);
++        }
++        for (String t : tables) {
++            sb.append("=== table: ").append(t).append(" ===\n");
++            try {
++                sb.append("cardinality: ").append(scalar(state, "SELECT COUNT(*) FROM " + t)).append('\n');
++                sb.append(allColumns(state, "SELECT * FROM " + t));
++            } catch (Exception e) {
++                sb.append("reading FAILED: ").append(stack(e));
++            }
++            sb.append('\n');
++        }
++        return sb.toString();
++    }
++
++    private static String scalar(SQLGlobalState<?, ?> state, String sql) throws Exception {
++        try (Statement st = state.getConnection().createStatement(); ResultSet rs = st.executeQuery(sql)) {
++            return rs.next() ? rs.getString(1) : "(no row)";
++        }
++    }
++
++    private static String firstColumn(SQLGlobalState<?, ?> state, String sql) throws Exception {
++        StringBuilder sb = new StringBuilder();
++        int n = 0;
++        try (Statement st = state.getConnection().createStatement(); ResultSet rs = st.executeQuery(sql)) {
++            while (rs.next()) {
++                if (n < MAX_ROWS) {
++                    sb.append("  ").append(rs.getString(1)).append('\n');
++                }
++                n++;
++            }
++        }
++        return "rows: " + n + (n > MAX_ROWS ? " (first " + MAX_ROWS + " shown)\n" : "\n") + sb;
++    }
++
++    private static String allColumns(SQLGlobalState<?, ?> state, String sql) throws Exception {
++        StringBuilder sb = new StringBuilder();
++        int n = 0;
++        try (Statement st = state.getConnection().createStatement(); ResultSet rs = st.executeQuery(sql)) {
++            ResultSetMetaData md = rs.getMetaData();
++            int cols = md.getColumnCount();
++            while (rs.next() && n < MAX_ROWS) {
++                for (int i = 1; i <= cols; i++) {
++                    if (i > 1) {
++                        sb.append('|');
++                    }
++                    sb.append(rs.getString(i));
++                }
++                sb.append('\n');
++                n++;
++            }
++        }
++        return sb.toString();
++    }
++
++    private static String stack(Throwable t) {
++        StringWriter sw = new StringWriter();
++        t.printStackTrace(new PrintWriter(sw));
++        return sw.toString();
++    }
++
++    private static void writeQuietly(Path dir, String name, String content) {
++        try {
++            Files.write(dir.resolve(name), content.getBytes(StandardCharsets.UTF_8));
++        } catch (IOException e) {
++            // A dump that cannot be written must not replace the finding.
++        }
++    }
++}
+diff --git a/src/sqlancer/ComparatorHelper.java b/src/sqlancer/ComparatorHelper.java
+--- a/src/sqlancer/ComparatorHelper.java
++++ b/src/sqlancer/ComparatorHelper.java
+@@ -102,7 +102,13 @@
+                             + "Second query:\"%s\", whose cardinality is: %d",
+                     resultSet.size(), secondResultSet.size(), originalQueryString, resultSet.size(),
+                     combinedQueryString, secondResultSet.size());
+-            throw new AssertionError(assertionMessage);
++            // wadjet-harness patch (wadjet#626): see the comment on the content
++            // mismatch below. A CARDINALITY mismatch is the shape the one
++            // retained soak signature had (a 9.2x wrong join cardinality), so
++            // this branch especially needs the immediate re-run.
++            throw new AssertionError(assertionMessage + System.lineSeparator()
++                    + dumpTLPViolation(state, "tlp-cardinality", assertionMessage, originalQueryString,
++                            resultSet.size() + " rows", combinedString, secondResultSet.size() + " rows"));
+         }
+ 
+         Set<String> firstHashSet = new HashSet<>(resultSet);
+@@ -125,10 +131,34 @@
+             String assertionMessage = String.format("The content of the result sets mismatch!" + System.lineSeparator()
+                     + "First query : \"%s\"" + System.lineSeparator() + "Second query: \"%s\"", originalQueryString,
+                     secondQueryString);
+-            throw new AssertionError(assertionMessage);
++            // wadjet-harness patch (wadjet#626): re-execute both arms
++            // immediately, on the same connection, and dump the answers beside
++            // what was just seen. Three soaks' worth of TLP violations never
++            // reproduced offline, and the measurement that tells a transient
++            // state read from a stable wrong answer only exists at the moment of
++            // the violation. See tools/sqlancer/README.md, "Self-diagnosing
++            // violation dumps".
++            throw new AssertionError(assertionMessage + System.lineSeparator()
++                    + dumpTLPViolation(state, "tlp-content", assertionMessage, originalQueryString,
++                            firstResultSetMisses.toString(), combinedString, secondResultSetMisses.toString()));
+         }
+     }
+ 
++    /**
++     * wadjet-harness patch (wadjet#626): builds the arm list a TLP result-set
++     * violation needs and writes the diagnosis dump. Never throws.
++     */
++    private static String dumpTLPViolation(SQLGlobalState<?, ?> state, String oracle, String assertionMessage,
++            String originalQueryString, String originallySaw, List<String> combinedString, String combinedSaw) {
++        List<WadjetViolationDump.Arm> arms = new ArrayList<>();
++        arms.add(new WadjetViolationDump.Arm("unpartitioned", originalQueryString, originallySaw));
++        for (int i = 0; i < combinedString.size(); i++) {
++            arms.add(new WadjetViolationDump.Arm("partition-" + i, combinedString.get(i),
++                    i == 0 ? combinedSaw : "(combined with the other partitions)"));
++        }
++        return WadjetViolationDump.write(state, oracle, assertionMessage, arms);
++    }
++
+     public static void assumeResultSetsAreEqual(List<String> resultSet, List<String> secondResultSet,
+             String originalQueryString, List<String> combinedString, SQLGlobalState<?, ?> state,
+             UnaryOperator<String> canonicalizationRule) {
+diff --git a/src/sqlancer/postgres/oracle/tlp/PostgresTLPAggregateOracle.java b/src/sqlancer/postgres/oracle/tlp/PostgresTLPAggregateOracle.java
+--- a/src/sqlancer/postgres/oracle/tlp/PostgresTLPAggregateOracle.java
++++ b/src/sqlancer/postgres/oracle/tlp/PostgresTLPAggregateOracle.java
+@@ -11,6 +11,7 @@
+ import sqlancer.ComparatorHelper;
+ import sqlancer.IgnoreMeException;
+ import sqlancer.Randomly;
++import sqlancer.WadjetViolationDump;
+ import sqlancer.common.oracle.TestOracle;
+ import sqlancer.common.query.SQLQueryAdapter;
+ import sqlancer.common.query.SQLancerResultSet;
+@@ -80,7 +81,18 @@
+             }
+             String assertionMessage = String.format("the results mismatch!\n%s\n%s", firstQueryString,
+                     secondQueryString);
+-            throw new AssertionError(assertionMessage);
++            // wadjet-harness patch (wadjet#626): a TLP-Aggregate violation is
++            // never float accumulation order — isEqualDouble's epsilon is a 1e-3
++            // RELATIVE tolerance, ten orders of magnitude wider than any
++            // accumulation-order delta — so the lead is a transient state read,
++            // and the one measurement that separates transient from stable is an
++            // immediate re-execution on the same connection. Three soaks of
++            // these never replayed because nobody took it. See
++            // tools/sqlancer/README.md, "Self-diagnosing violation dumps".
++            String dump = WadjetViolationDump.write(state, "tlp-aggregate", assertionMessage,
++                    Arrays.asList(new WadjetViolationDump.Arm("unpartitioned", originalQuery, firstResult),
++                            new WadjetViolationDump.Arm("partitioned", metamorphicQuery, secondResult)));
++            throw new AssertionError(assertionMessage + "\n" + dump);
+         }
+     }
+ 

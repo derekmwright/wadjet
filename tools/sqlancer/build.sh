@@ -29,10 +29,12 @@ else
     git clone --depth 1 https://github.com/sqlancer/sqlancer.git "$TARGET_DIR"
 fi
 
-echo "Applying $SCRIPT_DIR/patches/0001-wadjet-dialect-fixups.patch"
-( cd "$TARGET_DIR" && git apply --check "$SCRIPT_DIR/patches/0001-wadjet-dialect-fixups.patch" 2>/dev/null ) \
-    && ( cd "$TARGET_DIR" && git apply "$SCRIPT_DIR/patches/0001-wadjet-dialect-fixups.patch" ) \
-    || echo "  (already applied — skipping)"
+for patch in "$SCRIPT_DIR"/patches/*.patch; do
+    echo "Applying $patch"
+    ( cd "$TARGET_DIR" && git apply --check "$patch" 2>/dev/null ) \
+        && ( cd "$TARGET_DIR" && git apply "$patch" ) \
+        || echo "  (already applied — skipping)"
+done
 
 echo "Installing WadjetProvider adapter sources"
 mkdir -p "$TARGET_DIR/src/sqlancer/wadjet"
