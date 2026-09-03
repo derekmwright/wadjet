@@ -474,15 +474,31 @@ journalctl -u wadjet | grep 'component=audit'
 
 ## Query Cost Estimation and Guards
 
-> **NOT WIRED at this commit.** The cost guard itself is implemented and tested
-> in the physical planner, and the config and environment-variable surfaces
-> parse, but nothing assigns the server's `QueryLimits`/`RoleLimits` outside
-> tests. `query_limits:` in the YAML, per-role `query_limits:`, and
-> `WADJET_QUERY_MAX_SCAN_BYTES` / `_ROWS` / `_FILES` currently have **no effect
-> on any query**, on any protocol. Do not rely on them as a control. The rest of
-> this section is the design record.
-
 Wadjet estimates query cost at plan time using manifest metadata (file sizes, row counts) before any I/O occurs. Cost-based guards can reject expensive queries before they execute.
+
+`query_limits:` in the config file is enforced on **every** plan a served query
+can meet. There are two planner-construction sites in the process and both
+carry the limits:
+
+| Site | Reached by |
+|---|---|
+| `Coordinator` — the distributed planner, the in-process small-query fast path, the pipeline the DAG's refusals route to, and the async `SubmitSQL` planner | HTTP, gRPC, and the pgwire statements the coordinator answers |
+| `wadjet.DB` — the embedded planner | the embedded Go API, and every pgwire statement the coordinator does **not** answer |
+
+That second row is load-bearing. pgwire routes a statement to the coordinator
+only when it begins with `SELECT` or `WITH ` and the connection's auth state
+allows it, so a leading comment (`/* … */ SELECT …`, which JDBC, DataGrip and
+dbt emit routinely), `TABLE t`, `VALUES (…)`, and — when an `auth:` block is
+present but `enabled: false` — *every* statement fall back to the embedded
+planner. Before the limits reached `wadjet.DB` those were unbounded, so the
+guard had a hole exactly where the BI clients sit.
+
+Per-role limits resolve from the identity on the connection on both sites.
+
+> **Environment variables do not set these limits.** `WADJET_QUERY_MAX_SCAN_BYTES`,
+> `_ROWS` and `_FILES` are parsed by `config.applyEnvOverrides`, which nothing
+> on the `serve` path calls — the same is true of every other `WADJET_*` config
+> override. Use the config file.
 
 ### Configuration
 
@@ -529,21 +545,15 @@ auth:
 
 Per-role `query_limits` override the global limits entirely. If a role defines `query_limits`, only those limits apply — the global limits are ignored for that role. To grant unlimited access, define a role with no `query_limits` (or set all values to 0).
 
-### Environment Variable Overrides
-
-Global query limits can also be set via environment variables (useful for container deployments):
-
-| Variable | Description |
-|----------|-------------|
-| `WADJET_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
-| `WADJET_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
-| `WADJET_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
-
 ### Example Error
+
+A rejection carries SQLSTATE **`53400`** (`configuration_limit_exceeded`), so a
+PostgreSQL client can tell an administrator's cap apart from a syntax or type
+error and stop retrying.
 
 ```json
 {
-  "error": "query exceeds scan size limit: estimated 234.5 GB across 2,847 files, limit is 100.0 GB. Add a WHERE clause to narrow the scan."
+  "error": "physical plan error: query would scan 234.5GB (251804272557 bytes) across 2847 files, exceeding limit of 100.0GB \u2014 add a WHERE clause or partition filter"
 }
 ```
 

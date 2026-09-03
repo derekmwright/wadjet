@@ -10,6 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
@@ -165,8 +166,17 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	planner.MemoryBudget = 8 * threshold
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
+	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
+		// A cost-guard rejection is the one planning failure that is a
+		// DECISION, not a shape the DAG might cover: the same limits are
+		// installed on the distributed planner, so re-planning there
+		// reproduces it exactly. Report it here instead of logging a
+		// misleading "routing to DAG" for a deliberate refusal (#803).
+		if sqlerr.StateOf(err) == physical.QueryLimitSQLState {
+			return nil, true, err
+		}
 		c.logger.Warn("local fast path plan failed, routing to DAG",
 			"query", queryID, "error", err)
 		return nil, false, nil

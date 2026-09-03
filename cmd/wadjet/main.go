@@ -1228,6 +1228,10 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	var cfgMgr *config.Manager
 	var provider *auth.Provider
+	// Hoisted out of the block below: the pgwire DB is opened further down
+	// and needs the same limits.
+	var globalLimits *config.QueryLimits
+	var roleLimits map[string]*config.QueryLimits
 
 	if configFile != "" {
 		fileCfg, mgr, prov, wireErr := wireAuthFromConfig(ctx, configFile, logger)
@@ -1236,6 +1240,15 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		}
 		cfgMgr, provider = mgr, prov
 		srvCfg.Provider = provider
+
+		// The cost guard reaches every planner a served query can meet: the
+		// HTTP server's own (embedded, no-coordinator) path, the
+		// coordinator's four, and — below — the embedded DB that pgwire
+		// falls back to for any statement its routing gate declines and for
+		// every statement when a provider is present but disabled (#803).
+		globalLimits, roleLimits = fileCfg.EffectiveQueryLimits()
+		srvCfg.QueryLimits, srvCfg.RoleLimits = globalLimits, roleLimits
+		coord.SetQueryLimits(globalLimits, roleLimits)
 
 		if fileCfg.Auth.MTLS.Enabled {
 			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)
@@ -1283,6 +1296,8 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		Bucket:       bucket,
 		MetaKV:       kv,
 		AuthProvider: provider,
+		QueryLimits:  globalLimits,
+		RoleLimits:   roleLimits,
 	})
 	if err != nil {
 		return fmt.Errorf("opening DB for pgwire: %w", err)
@@ -1492,6 +1507,13 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		}
 		cfgMgr, provider = mgr, prov
 		srvCfg.Provider = provider
+
+		// The cost guard reaches every planner a served query can meet here:
+		// the HTTP server's own (embedded, no-coordinator) path and the
+		// coordinator's four. This mode serves no pgwire listener (#803).
+		globalLimits, roleLimits := fileCfg.EffectiveQueryLimits()
+		srvCfg.QueryLimits, srvCfg.RoleLimits = globalLimits, roleLimits
+		coord.SetQueryLimits(globalLimits, roleLimits)
 
 		if fileCfg.Auth.MTLS.Enabled {
 			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)

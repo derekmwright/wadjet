@@ -222,7 +222,7 @@ what a SET-style facility could expose cheaply vs never.
 | `--log-level` | info | slog level | **feasible** (slog LevelVar pattern) |
 | `--otel-endpoint`, `--otel-insecure` | — | tracing exporter | boot-only |
 | `--geoip-city`, `--geoip-asn` | — | GeoIP databases | feasible-with-work (reload) |
-| `--config` | — | YAML file; **only the `auth:` and `geoip:` sections are applied at runtime**. The `storage:`/`nats:`/`http:`/`grpc:`/`worker:`/`parquet:`/`query_limits:` sections parse but never reach the running process — use the flags above. See `configuration.md`. | n/a |
+| `--config` | — | YAML file; the `auth:`, `geoip:` and `query_limits:` sections are applied at runtime. The `storage:`/`nats:`/`http:`/`grpc:`/`worker:`/`parquet:` sections parse but never reach the running process — use the flags above. See `configuration.md`. | n/a |
 
 ## 3. Runtime switches: current state and the path there
 

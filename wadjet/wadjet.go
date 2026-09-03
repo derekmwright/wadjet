@@ -14,6 +14,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/alerts"
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -38,6 +39,8 @@ type DB struct {
 	alertSchedulerStop  context.CancelFunc
 	sortMergeJoinBytes  int64
 	lateMaterialization bool
+	queryLimits         *config.QueryLimits
+	roleQueryLimits     map[string]*config.QueryLimits
 }
 
 // Config holds configuration for creating a DB instance.
@@ -66,6 +69,21 @@ type Config struct {
 	// EnableAlerts turns on the CREATE ALERT scheduler in embedded mode.
 	// When true, Open() creates a Scheduler that evaluates alerts on cadence.
 	EnableAlerts bool
+	// QueryLimits / RoleLimits are the cost guard (docs/security.md,
+	// "Query Cost Estimation and Guards"): the global limits, and the
+	// per-role overrides keyed by role name (an entry present with a nil
+	// value means that role is unlimited).
+	//
+	// The embedded planner is the LAST entry point that could reach a scan
+	// without them. Every other one — HTTP, gRPC, and the pgwire statements
+	// the coordinator answers — goes through Coordinator.ExecuteSQL, which
+	// carries the same limits; but pgwire falls back to this DB for any
+	// statement its routing gate declines (a leading comment, TABLE, VALUES)
+	// and for every statement when a provider is present but disabled, so a
+	// guard that stopped at the coordinator left the PostgreSQL wire — the
+	// protocol the BI clients use — unbounded (#803).
+	QueryLimits *config.QueryLimits
+	RoleLimits  map[string]*config.QueryLimits
 }
 
 // Open creates and initializes a new Wadjet database.
@@ -92,6 +110,8 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		spillDir:            cfg.SpillDir,
 		logger:              cfg.Logger,
 		authProvider:        cfg.AuthProvider,
+		queryLimits:         cfg.QueryLimits,
+		roleQueryLimits:     cfg.RoleLimits,
 		sortMergeJoinBytes:  cfg.SortMergeJoinBytes,
 		lateMaterialization: cfg.LateMaterialization,
 	}
@@ -166,13 +186,42 @@ func (e *dbExecutor) Query(ctx context.Context, sqlText string, limit int) ([]ma
 // newPlanner creates a fresh Planner for a single query. The Planner carries
 // per-query mutable state (scanCounter, scanCache, planCtx) so it must not be
 // shared across concurrent calls.
-func (db *DB) newPlanner() *physical.Planner {
+//
+// It is the embedded engine's ONE planner-construction site, which is why the
+// cost guard is installed here rather than at each caller: a future query
+// entry point gets the limits by construction instead of by remembering.
+func (db *DB) newPlanner(ctx context.Context) *physical.Planner {
 	p := physical.NewPlanner(db.catalog)
 	p.MemoryBudget = db.memoryBudget
 	p.SpillDir = db.spillDir
 	p.SortMergeJoinBytes = db.sortMergeJoinBytes
 	p.LateMaterialization = db.lateMaterialization
+	p.QueryLimits = db.resolveQueryLimits(ctx)
 	return p
+}
+
+// SetQueryLimits installs the cost guard after Open, for callers that build
+// the DB before they have read the config (the `serve` command opens the
+// pgwire DB alongside the coordinator). Call before serving traffic, the same
+// contract as Coordinator.SetQueryLimits.
+func (db *DB) SetQueryLimits(global *config.QueryLimits, perRole map[string]*config.QueryLimits) {
+	db.queryLimits = global
+	db.roleQueryLimits = perRole
+}
+
+// resolveQueryLimits returns the limits for the identity in ctx: the per-role
+// override when the role names one (a nil entry = unlimited, which is how a
+// role that declares no query_limits overrides the global cap), else the
+// global limits.
+func (db *DB) resolveQueryLimits(ctx context.Context) *config.QueryLimits {
+	if db.roleQueryLimits != nil {
+		if id := auth.IdentityFromContext(ctx); id != nil {
+			if limits, ok := db.roleQueryLimits[id.Role]; ok {
+				return limits
+			}
+		}
+	}
+	return db.queryLimits
 }
 
 // CreateTable creates a new table with the given schema and partition keys.
@@ -358,7 +407,7 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 		return nil, fmt.Errorf("extracting SELECT: %w", err)
 	}
 
-	planner := db.newPlanner()
+	planner := db.newPlanner(ctx)
 
 	// Reject references to columns that resolve to no source (plan-time name
 	// binding) before annotation/optimization rewrite the plan.
@@ -448,7 +497,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 		return nil, fmt.Errorf("extracting SELECT: %w", err)
 	}
 
-	planner := db.newPlanner()
+	planner := db.newPlanner(ctx)
 	// Before the build, for the reason Query's own call site records: the
 	// builder's own refusals carry no SQLSTATE (#590).
 	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {

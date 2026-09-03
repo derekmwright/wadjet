@@ -26,6 +26,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -4381,6 +4382,13 @@ func hasLimit(n *logical.Node) bool {
 	return false
 }
 
+// QueryLimitSQLState is the SQLSTATE a cost-guard rejection carries:
+// PostgreSQL class 53 (insufficient resources), 53400
+// configuration_limit_exceeded. The limit is a configured bound, not a
+// property of the statement, so a client can tell "your administrator caps
+// this" apart from a syntax or type error and stop retrying (#803).
+const QueryLimitSQLState = "53400"
+
 // enforceQueryLimits checks estimated query cost against configured limits.
 func (p *Planner) enforceQueryLimits(stages []Stage, node *logical.Node) error {
 	if p.QueryLimits == nil {
@@ -4390,23 +4398,23 @@ func (p *Planner) enforceQueryLimits(stages []Stage, node *logical.Node) error {
 	cost := EstimateCost(stages, node)
 
 	if limits.MaxScanBytes > 0 && cost.TotalBytes > limits.MaxScanBytes {
-		return fmt.Errorf("query would scan %s (%d bytes) across %d files, exceeding limit of %s — add a WHERE clause or partition filter",
+		return sqlerr.New(QueryLimitSQLState, "query would scan %s (%d bytes) across %d files, exceeding limit of %s — add a WHERE clause or partition filter",
 			formatBytes(cost.TotalBytes), cost.TotalBytes, cost.TotalFiles, formatBytes(limits.MaxScanBytes))
 	}
 	if limits.MaxScanRows > 0 && cost.TotalRows > limits.MaxScanRows {
-		return fmt.Errorf("query would scan %d rows across %d files, exceeding limit of %d rows — add a WHERE clause or LIMIT",
+		return sqlerr.New(QueryLimitSQLState, "query would scan %d rows across %d files, exceeding limit of %d rows — add a WHERE clause or LIMIT",
 			cost.TotalRows, cost.TotalFiles, limits.MaxScanRows)
 	}
 	if limits.MaxScanFiles > 0 && cost.TotalFiles > limits.MaxScanFiles {
-		return fmt.Errorf("query would scan %d files, exceeding limit of %d — add a partition filter",
+		return sqlerr.New(QueryLimitSQLState, "query would scan %d files, exceeding limit of %d — add a partition filter",
 			cost.TotalFiles, limits.MaxScanFiles)
 	}
 	if limits.RequireFilterAboveBytes > 0 && cost.TotalBytes > limits.RequireFilterAboveBytes && !cost.HasFilter {
-		return fmt.Errorf("query scans %s without a WHERE clause (filter required above %s)",
+		return sqlerr.New(QueryLimitSQLState, "query scans %s without a WHERE clause (filter required above %s)",
 			formatBytes(cost.TotalBytes), formatBytes(limits.RequireFilterAboveBytes))
 	}
 	if limits.RequireLimitAboveRows > 0 && cost.TotalRows > limits.RequireLimitAboveRows && !cost.HasLimit {
-		return fmt.Errorf("query scans %d rows without a LIMIT (limit required above %d rows)",
+		return sqlerr.New(QueryLimitSQLState, "query scans %d rows without a LIMIT (limit required above %d rows)",
 			cost.TotalRows, limits.RequireLimitAboveRows)
 	}
 	return nil

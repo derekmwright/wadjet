@@ -284,7 +284,16 @@ Per-role limits fully override global limits when defined. See [Security](securi
 
 ## Environment Variables
 
-A subset of the configuration can be overridden via `WADJET_*` environment variables — the ones listed below, and no others (`internal/config/config.go`, `applyEnvOverrides`). This is useful for container and cloud deployments where config files may not be practical.
+> **None of these reach a running server.** The `WADJET_*` overrides below are
+> read by `applyEnvOverrides` (`internal/config/config.go`), which is called
+> only from `config.LoadOrDefault` — and nothing on the `serve`, `query`,
+> `shell` or `mcp` path calls that; they all use `config.Load`, which applies
+> the file and the defaults only. Use the config file or the CLI flags. The
+> tables below record what the parser understands, not what a deployment can
+> set. (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are the exception: those
+> are read by the MinIO credential chain, not by this code.)
+
+A subset of the configuration is *parsed* from `WADJET_*` environment variables — the ones listed below, and no others (`internal/config/config.go`, `applyEnvOverrides`).
 
 ### S3/Storage
 

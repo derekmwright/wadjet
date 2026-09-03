@@ -13,17 +13,17 @@ import (
 
 // Config is the top-level configuration for Wadjet.
 type Config struct {
-	Mode            string          `yaml:"mode"`             // standalone, coordinator, worker
-	Storage         Storage         `yaml:"storage"`
-	NATS            NATS            `yaml:"nats"`
-	HTTP            HTTP            `yaml:"http"`
-	GRPC            GRPC            `yaml:"grpc"`
-	Worker          Worker          `yaml:"worker"`
-	Parquet         Parquet         `yaml:"parquet"`
-	Auth            Auth            `yaml:"auth"`
-	GeoIP           GeoIP           `yaml:"geoip"`
-	QueryLimits     QueryLimits     `yaml:"query_limits"`     // global query cost limits
-	Telemetry       Telemetry       `yaml:"telemetry"`        // OpenTelemetry tracing export
+	Mode        string      `yaml:"mode"` // standalone, coordinator, worker
+	Storage     Storage     `yaml:"storage"`
+	NATS        NATS        `yaml:"nats"`
+	HTTP        HTTP        `yaml:"http"`
+	GRPC        GRPC        `yaml:"grpc"`
+	Worker      Worker      `yaml:"worker"`
+	Parquet     Parquet     `yaml:"parquet"`
+	Auth        Auth        `yaml:"auth"`
+	GeoIP       GeoIP       `yaml:"geoip"`
+	QueryLimits QueryLimits `yaml:"query_limits"` // global query cost limits
+	Telemetry   Telemetry   `yaml:"telemetry"`    // OpenTelemetry tracing export
 }
 
 // Telemetry configures OpenTelemetry tracing export.
@@ -42,22 +42,22 @@ type GeoIP struct {
 // QueryLimits configures cost-based query guards. Zero values mean unlimited.
 // Per-role limits in Auth.Roles override these global defaults.
 type QueryLimits struct {
-	MaxScanBytes  int64 `yaml:"max_scan_bytes"`  // max estimated bytes across all scans
-	MaxScanRows   int64 `yaml:"max_scan_rows"`   // max estimated rows across all scans
-	MaxScanFiles  int   `yaml:"max_scan_files"`  // max files across all scans
+	MaxScanBytes            int64 `yaml:"max_scan_bytes"`             // max estimated bytes across all scans
+	MaxScanRows             int64 `yaml:"max_scan_rows"`              // max estimated rows across all scans
+	MaxScanFiles            int   `yaml:"max_scan_files"`             // max files across all scans
 	RequireFilterAboveBytes int64 `yaml:"require_filter_above_bytes"` // require WHERE on tables exceeding this size
 	RequireLimitAboveRows   int64 `yaml:"require_limit_above_rows"`   // require LIMIT on scans exceeding this row count
 }
 
 // Auth configures authentication and authorization.
 type Auth struct {
-	Enabled      bool              `yaml:"enabled"`
-	APIKeys      []AuthAPIKey      `yaml:"api_keys"`
-	JWT          AuthJWT           `yaml:"jwt"`
-	MTLS         AuthMTLS          `yaml:"mtls"`
-	Roles        []AuthRole        `yaml:"roles"`
-	Policies     []AuthPolicy      `yaml:"policies"`      // cell-level access policies (legacy)
-	ABACPolicies []ABACPolicy      `yaml:"abac_policies"` // ABAC access control policies
+	Enabled      bool         `yaml:"enabled"`
+	APIKeys      []AuthAPIKey `yaml:"api_keys"`
+	JWT          AuthJWT      `yaml:"jwt"`
+	MTLS         AuthMTLS     `yaml:"mtls"`
+	Roles        []AuthRole   `yaml:"roles"`
+	Policies     []AuthPolicy `yaml:"policies"`      // cell-level access policies (legacy)
+	ABACPolicies []ABACPolicy `yaml:"abac_policies"` // ABAC access control policies
 }
 
 // AuthAPIKey defines an API key credential.
@@ -80,9 +80,9 @@ type AuthJWT struct {
 type AuthMTLS struct {
 	Enabled     bool              `yaml:"enabled"`
 	CAFile      string            `yaml:"ca_file"`
-	CertFile    string            `yaml:"cert_file"`    // server TLS cert
-	KeyFile     string            `yaml:"key_file"`     // server TLS key
-	RoleMap     map[string]string `yaml:"role_map"`     // CN/SAN -> role
+	CertFile    string            `yaml:"cert_file"` // server TLS cert
+	KeyFile     string            `yaml:"key_file"`  // server TLS key
+	RoleMap     map[string]string `yaml:"role_map"`  // CN/SAN -> role
 	DefaultRole string            `yaml:"default_role"`
 }
 
@@ -90,8 +90,8 @@ type AuthMTLS struct {
 type AuthRole struct {
 	Name        string       `yaml:"name"`
 	Tables      []string     `yaml:"tables"`       // table names or "*" for all
-	Allow       []string     `yaml:"allow"`         // "read", "write", "admin"
-	QueryLimits *QueryLimits `yaml:"query_limits"`  // per-role overrides (nil = use global)
+	Allow       []string     `yaml:"allow"`        // "read", "write", "admin"
+	QueryLimits *QueryLimits `yaml:"query_limits"` // per-role overrides (nil = use global)
 }
 
 // AuthPolicy defines a cell-level access policy for a table+role.
@@ -104,18 +104,18 @@ type AuthPolicy struct {
 
 // ABACPolicy defines an attribute-based access control policy in config.
 type ABACPolicy struct {
-	Name        string         `yaml:"name"`
-	Description string         `yaml:"description"`
-	Priority    int            `yaml:"priority"`  // lower = evaluated first
-	Enabled     *bool          `yaml:"enabled"`   // nil = true
-	Rules       []ABACRule     `yaml:"rules"`
+	Name        string     `yaml:"name"`
+	Description string     `yaml:"description"`
+	Priority    int        `yaml:"priority"` // lower = evaluated first
+	Enabled     *bool      `yaml:"enabled"`  // nil = true
+	Rules       []ABACRule `yaml:"rules"`
 }
 
 // ABACRule defines a single rule within an ABAC policy.
 type ABACRule struct {
-	Effect      string            `yaml:"effect"`      // "allow" or "deny"
-	Conditions  []ABACCondition   `yaml:"conditions"`
-	Obligations []ABACObligation  `yaml:"obligations"` // only for "allow" rules
+	Effect      string           `yaml:"effect"` // "allow" or "deny"
+	Conditions  []ABACCondition  `yaml:"conditions"`
+	Obligations []ABACObligation `yaml:"obligations"` // only for "allow" rules
 }
 
 // ABACCondition defines a condition that must match for the rule to apply.
@@ -134,8 +134,8 @@ type ABACObligation struct {
 
 // Storage configures the object store connection.
 type Storage struct {
-	Type      string `yaml:"type"`       // "s3" (default) or "file"
-	DataDir   string `yaml:"data_dir"`   // local directory for type=file
+	Type      string `yaml:"type"`     // "s3" (default) or "file"
+	DataDir   string `yaml:"data_dir"` // local directory for type=file
 	Endpoint  string `yaml:"endpoint"`
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
@@ -171,13 +171,13 @@ type Worker struct {
 	MaxConcurrent    int    `yaml:"max_concurrent"`
 	CacheBytes       int64  `yaml:"cache_bytes"`
 	MemoryBudget     int64  `yaml:"memory_budget"`      // per-task memory budget in bytes (0 = unlimited, no spill)
-	SpillDir         string `yaml:"spill_dir"`           // directory for spill files (default: os temp dir)
-	ResultStoreBytes int64  `yaml:"result_store_bytes"`  // in-memory result store capacity (0 = disabled)
+	SpillDir         string `yaml:"spill_dir"`          // directory for spill files (default: os temp dir)
+	ResultStoreBytes int64  `yaml:"result_store_bytes"` // in-memory result store capacity (0 = disabled)
 }
 
 // Parquet configures Parquet file writing.
 type Parquet struct {
-	Compression    string `yaml:"compression"`     // snappy, zstd, gzip, lz4, none
+	Compression    string `yaml:"compression"`      // snappy, zstd, gzip, lz4, none
 	RowGroupSize   int    `yaml:"row_group_size"`   // rows per row group
 	PageBufferSize int    `yaml:"page_buffer_size"` // page size in bytes
 }
@@ -376,4 +376,40 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Telemetry.SampleRate = f
 		}
 	}
+}
+
+// EffectiveQueryLimits extracts the cost guard from a loaded config: the
+// global limits, and the per-role map a planner resolves against for the
+// identity answering a query.
+//
+// EVERY configured role gets an entry, nil meaning unlimited — a role that
+// declares no `query_limits` OVERRIDES the global limits rather than
+// inheriting them, which is what docs/security.md's "Per-Role Limits" section
+// says and how its `admin` example is meant to read. A role nobody configured
+// (and an unauthenticated request) falls back to the global limits.
+//
+// Returns (nil, nil) for a config with neither, so an unconfigured deployment
+// stays unlimited and pays nothing.
+func (c *Config) EffectiveQueryLimits() (*QueryLimits, map[string]*QueryLimits) {
+	if c == nil {
+		return nil, nil
+	}
+	var global *QueryLimits
+	if c.QueryLimits != (QueryLimits{}) {
+		g := c.QueryLimits
+		global = &g
+	}
+	if len(c.Auth.Roles) == 0 {
+		return global, nil
+	}
+	perRole := make(map[string]*QueryLimits, len(c.Auth.Roles))
+	for _, r := range c.Auth.Roles {
+		if r.QueryLimits == nil {
+			perRole[r.Name] = nil
+			continue
+		}
+		lim := *r.QueryLimits
+		perRole[r.Name] = &lim
+	}
+	return global, perRole
 }

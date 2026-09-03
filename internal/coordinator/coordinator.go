@@ -20,6 +20,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/alerts"
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/dataplane"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/telemetry"
@@ -154,6 +155,38 @@ func (c *Coordinator) SetAuthProvider(p *auth.Provider) {
 	c.authProvider = p
 }
 
+// SetQueryLimits wires the configured cost guard into every plan the
+// coordinator builds: the global limits and the per-role overrides
+// (role name -> limits; a role present here uses ITS limits and not the
+// global ones, including a nil entry meaning unlimited).
+//
+// This is what makes `query_limits:` a control rather than a parsed-and-
+// discarded config section. The guard itself has always been implemented in
+// physical.Planner.enforceQueryLimits and reached only the HTTP server's
+// no-coordinator path; in every `wadjet serve` mode the coordinator answers,
+// and its planners were built without limits, so nothing bounded a query on
+// any protocol (#803).
+//
+// Call before serving traffic (same contract as SetAuthProvider).
+func (c *Coordinator) SetQueryLimits(global *config.QueryLimits, perRole map[string]*config.QueryLimits) {
+	c.queryLimits = global
+	c.roleQueryLimits = perRole
+}
+
+// resolveQueryLimits returns the limits that apply to the identity in ctx:
+// the per-role override when the role names one, else the global limits.
+// Nil means unlimited, which is also what a role mapped to nil means.
+func (c *Coordinator) resolveQueryLimits(ctx context.Context) *config.QueryLimits {
+	if c.roleQueryLimits != nil {
+		if id := auth.IdentityFromContext(ctx); id != nil {
+			if limits, ok := c.roleQueryLimits[id.Role]; ok {
+				return limits
+			}
+		}
+	}
+	return c.queryLimits
+}
+
 // EnforcesABAC reports whether ExecuteSQL enforces access policies itself.
 // pgwire uses this to decide that routing authed connections through the
 // coordinator is safe (canBypassDB).
@@ -262,6 +295,12 @@ type Coordinator struct {
 	// nil = no coordinator-side enforcement; callers must gate routing
 	// (pgwire canBypassDB) or pre-enforce (HTTP row-filter context).
 	authProvider *auth.Provider
+
+	// queryLimits / roleQueryLimits carry the configured cost guard
+	// (SetQueryLimits); every planner this coordinator builds gets the
+	// limits resolveQueryLimits picks for the request's identity.
+	queryLimits     *config.QueryLimits
+	roleQueryLimits map[string]*config.QueryLimits
 
 	// Alert scheduler fields (see alerts.go for lifecycle methods).
 	alertScheduler       *alerts.Scheduler
@@ -961,6 +1000,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
+	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		// A per-row correlated subquery has no distributed lowering — the
@@ -3205,6 +3245,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
+	planner.QueryLimits = c.resolveQueryLimits(ctx)
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return "", "", fmt.Errorf("physical plan: %w", err)
