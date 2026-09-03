@@ -58,6 +58,34 @@ is likewise held to the column's band: a value the declared type cannot hold is
 
 Variable-length types use an **offset/data** columnar layout: a contiguous data buffer with a parallel offset array indexing into it. This avoids per-row heap allocation.
 
+#### `VARCHAR(n)` and `CHAR(n)`
+
+`VARCHAR`, `CHAR`, `CHARACTER`, `CHARACTER VARYING`, `NCHAR`, `NVARCHAR` and
+`TEXT` all name the one `String` type. A **length parameter is honoured by an
+explicit `CAST` and dropped by DDL**:
+
+```sql
+SELECT CAST('abcdef' AS VARCHAR(4));   -- abcd   (truncated to 4 CHARACTERS)
+SELECT CAST('éàüxyz' AS VARCHAR(3));   -- éàü    (characters, not bytes)
+SELECT CAST(12345 AS VARCHAR(3));      -- 123    (the rendering is truncated)
+SELECT CAST('abcdef' AS VARCHAR(0));   -- ERROR 22023: length for type varchar must be at least 1
+
+CREATE TABLE t (v VARCHAR(4));         -- accepted; the 4 is NOT stored
+INSERT INTO t VALUES ('abcdef');       -- accepted (PostgreSQL raises 22001)
+```
+
+Two differences from PostgreSQL to know about:
+
+- **`CHAR(n)` truncates but does not pad.** PostgreSQL stores a short `CHAR(n)`
+  padded to n and then strips the trailing blanks again for `length()`, `||`
+  and every comparison. Wadjet has one unparameterized string type, so it
+  stores what you gave it: `CAST('ab' AS CHAR(4))` renders `ab` where
+  PostgreSQL renders `ab  `, and `length`, `||` and `=` agree with PostgreSQL
+  exactly because nothing was padded.
+- **The wire does not declare the length.** `RowDescription` reports an
+  unconstrained `text` where PostgreSQL reports `character varying(4)`. The
+  VALUE is bounded; the description is not.
+
 ### Network Types
 
 | Type | Go Backing | Size | Format | Use Cases |

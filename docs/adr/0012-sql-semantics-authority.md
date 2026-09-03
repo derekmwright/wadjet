@@ -617,45 +617,62 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      at two: that distinction is the same one this entry's first version lost,
      and a bound with no fixture is how the defect survived review.
 
-   - **A `VARCHAR(n)` or `CHAR(n)` cast destination drops its `n` — in the
-     VALUE first, and on the wire after it.** (Added 2026-09-03, #708's other
-     half, found in this arc's review and OPEN.) Measured live on 17.11
-     against the same query through the embedded API:
+   - **A `VARCHAR(n)` or `CHAR(n)` cast ENFORCES its `n` and still does not
+     DECLARE it; a short `CHAR(n)` is not padded.** (Added 2026-09-03 as #708's
+     other half; the VALUE half CLOSED by #838 on the same day, the rest open.)
+     Measured live on 17.11 against the same query through the embedded API:
 
      | shape | PostgreSQL 17.11 | wadjet |
      |---|---|---|
-     | `CAST('abcdef' AS VARCHAR(4))` | `abcd` | `abcdef` |
-     | `CAST('abcdef' AS CHAR(4))` | `abcd` | `abcdef` |
-     | `CAST('12.7500' AS VARCHAR(4))` | `12.7` | `12.7500` |
-     | `\gdesc` of the first | `character varying(4)` | unconstrained STRING |
+     | `CAST('abcdef' AS VARCHAR(4))` | `abcd` | `abcd` |
+     | `CAST('abcdef' AS CHAR(4))` | `abcd` | `abcd` |
+     | `CAST('éàüxyz' AS VARCHAR(3))` | `éàü` | `éàü` |
+     | `CAST('abcdef' AS VARCHAR(0))` | 22023 | 22023 |
+     | `\gdesc` of the first | `character varying(4)`, atttypmod 8, OID 1043 | unconstrained STRING, OID 25 |
+     | `CAST('ab' AS CHAR(4))` | `ab  ` (padded) | `ab` |
+     | `LENGTH(CAST('ab' AS CHAR(4)))` | 2 | 2 |
+     | `CAST('ab' AS CHAR(4)) \|\| 'x'` | `abx` | `abx` |
+     | `CAST('ab' AS CHAR(4)) = 'ab'` | true | true |
+     | `CREATE TABLE t (v VARCHAR(4))` | accepted, atttypmod 8 | accepted, `n` not stored |
+     | `INSERT` of a too-long value into it | 22001 | accepted |
 
-     Two mechanisms, one cause. `expr.castTargetType` maps `CHAR`, `VARCHAR`,
-     `TEXT` and `STRING` onto a single unparameterized `batch.TypeString`, so
-     the length is parsed and then dropped and nothing truncates;
-     `physical.declaredTypmod` returns -1 for every destination whose modifier
-     does not reach `pgwire.TypeMod`, and only DECIMAL does. #708 closed the
-     DECIMAL half of exactly this question and left this one, which its own
-     code comment named — as an agreement, which it is not.
+     **The order was value-first, and that is the decision this entry records.**
+     Declaring `character varying(4)` while returning six characters is a worse
+     lie than declaring nothing: a client that trusts the description to size a
+     buffer is then wrong in the direction that overflows. `expr.Cast.Eval`
+     matches the lowered type name exactly, so `varchar(4)` matched no case
+     label at all and the cast reached `default: return v` — the length was
+     parsed by the SQL parser and dropped. It now truncates to n CHARACTERS,
+     which is what PostgreSQL counts.
 
-     **The order is value-first, and that is the decision this entry records.**
-     Declaring `character varying(4)` while returning six characters is a
-     worse lie than declaring nothing: a client that trusts the description to
-     size a buffer is then wrong in the direction that overflows. So the
-     length is ENFORCED before it is DECLARED, which means carrying it beside
-     `batch.TypeString` from `castTargetType` through the cast kernel, with
-     PostgreSQL's own split between the spellings that truncate (an explicit
-     `CAST`) and the ones that raise `22001` (an INSERT into a `varchar(n)`
-     column).
+     **CHAR(n) truncates and does NOT pad, deliberately.** PostgreSQL's bpchar
+     pads the stored value to n and then strips trailing blanks for `length()`,
+     for `||` and for every comparison — the four rows above are all measured.
+     This engine has one `TypeString` and no bpchar type, so padding would put
+     the blanks into GROUP BY keys, join keys and equality, where PostgreSQL
+     strips them: it would buy a right rendering with a WRONG ROW SET. The
+     residual is therefore the rendered value of a SHORT `CHAR(n)`, and the
+     three consumer rows above are the fixtures that say why.
 
-     Pinned in BOTH halves by `wadjet.TestStringCastDropsItsLengthParameter`,
-     five cells: a folded literal and a real STRING vector for each engine
-     layer, plus a within-length control and an unparameterized control so a
-     repair that truncates everything fails too. It is a local pin rather than
-     a `knownBug` corpus entry because it was written in review before the
-     issue existed; the divergence is filed as **#838**, so moving the pin into
-     the corpus as a `knownBug` entry naming it is now the tidier home. Either
-     way the pin fires the day either half is closed, which is what a record
-     owes.
+     **Still open: the DECLARATION.** `physical.declaredTypmod` answers only
+     for DECIMAL and `pgwire.TypeMod` has no string arm, so RowDescription
+     says unconstrained `text` where PostgreSQL says `character varying(4)`.
+     Closing it means carrying the length beside `batch.TypeString` from the
+     cast's declared type through `ColumnMeta` to `TypeMod` (n+4) and moving
+     the OID to 1043 / 1042 for a length-carrying string only — a plain TEXT
+     column must stay 25.
+
+     **Still open: DDL keeps no `n`.** `parquet.ParseTypeID` used to REFUSE
+     `VARCHAR(4)` outright ("unknown type"), so a PostgreSQL user's ordinary
+     `VARCHAR(255)` failed the whole CREATE TABLE; it is accepted now and the
+     length is dropped, which makes an INSERT past n a superset (PostgreSQL
+     raises 22001) rather than a refused table.
+
+     Pinned by `wadjet.TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration`:
+     the value cells now assert PostgreSQL's own answers, the declaration cell
+     asserts the unconstrained STRING and fires the day it carries a length,
+     and the three bpchar consumers assert the agreement that padding would
+     cost. The divergence is filed as **#838**.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as

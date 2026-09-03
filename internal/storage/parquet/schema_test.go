@@ -84,6 +84,23 @@ func TestParseTypeID_AllTypes(t *testing.T) {
 		{"ROW(name STRING)", TypeRow, false},
 		{"STRUCT(x INT)", TypeRow, false},
 		{"MAP(STRING, INT)", TypeMap, false},
+		// A PARAMETERIZED string spelling: what a PostgreSQL user writes and
+		// what a migration tool emits. `VARCHAR(255)` used to fail the whole
+		// CREATE TABLE with "unknown type", because the switch below reads the
+		// WHOLE name and the parameter made it match nothing (#838). The
+		// length is not stored — one unparameterized TypeString is all there
+		// is — so an INSERT past n is accepted where PostgreSQL raises 22001,
+		// a superset ADR-0012 records.
+		{"VARCHAR(255)", TypeString, false},
+		{"varchar(4)", TypeString, false},
+		{"CHAR(4)", TypeString, false},
+		{"CHARACTER(4)", TypeString, false},
+		{"CHARACTER VARYING(10)", TypeString, false},
+		{"NVARCHAR(8)", TypeString, false},
+		{"TEXT(8)", TypeString, false},
+		// The NAME is matched exactly, not by prefix, so a longer name that
+		// merely starts the same way is still unknown.
+		{"VARCHARX(1)", 0, true},
 		// Unknown
 		{"BANANA", 0, true},
 		{"", 0, true},

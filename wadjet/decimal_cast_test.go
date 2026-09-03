@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -118,59 +119,71 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 	}
 }
 
-// TestStringCastDropsItsLengthParameter pins the half of #708 that was NOT
-// fixed, in the direction that matters.
-//
-// #708 made a cast that names a (p,s) carry it on the wire, and the entry
-// above is that gate. It covered the DECIMAL family only, because DECIMAL is
-// the only type whose modifier reaches pgwire.TypeMod. The string family gets
-// the destination's length parsed and then dropped in BOTH halves, and the
-// value half is a wrong answer rather than wrong metadata. Measured live on
-// postgres:17.11:
-//
-//	SELECT CAST('abcdef' AS VARCHAR(4))   PG: abcd    wadjet: abcdef
-//	SELECT CAST('abcdef' AS CHAR(4))      PG: abcd    wadjet: abcdef
-//	SELECT CAST('12.7500' AS VARCHAR(4))  PG: 12.7    wadjet: 12.7500
-//	\gdesc of the first                   PG: character varying(4)
-//	                                      wadjet: unconstrained STRING
-//
-// `expr.castTargetType` maps CHAR / VARCHAR / TEXT / STRING to one
-// batch.TypeString, so nothing truncates; `physical.declaredTypmod` returns -1
-// for every non-DECIMAL destination, so RowDescription says unconstrained.
-//
-// This is a PIN and not an acceptance. It asserts today's answer so that the
-// day either half is closed it FAILS and names itself — the same contract the
-// oracle's knownBug entries carry. The divergence is filed as **#838**; the pin
-// lives here rather than in the PostgreSQL corpus because it was written in
-// review before the issue existed, and moving it into the corpus as a
-// `knownBug` entry naming #838 is now the tidier home for it.
-// The ORDER is value-first and ADR-0012 item 5 records why:
+// TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration is #838, one half
+// closed and one half pinned — in the ORDER ADR-0012 item 5 sets down, because
 // declaring `character varying(4)` while returning six characters is a worse
-// lie than declaring nothing, so the length is enforced before it is declared.
-func TestStringCastDropsItsLengthParameter(t *testing.T) {
+// lie than declaring nothing.
+//
+// The VALUE half is FIXED. `expr.Cast.Eval`'s switch matches the lowered type
+// name exactly, so `varchar(4)` matched no case label at all and the whole
+// cast reached `default: return v` — the length was parsed by the SQL parser
+// and then dropped, and a client casting to bound a width got its operand
+// back. It now truncates to n CHARACTERS (PostgreSQL counts characters:
+// `CAST('éàüxyz' AS VARCHAR(3))` is `éàü`, six octets), and `VARCHAR(0)` is
+// 22023 as it is on the server.
+//
+// The DECLARATION half is still pinned below: `physical.declaredTypmod`
+// answers only for DECIMAL and `pgwire.TypeMod` has no string arm, so
+// RowDescription says unconstrained `text` where PostgreSQL 17.11's \gdesc
+// says `character varying(4)` with atttypmod 8. It is the half #708 named when
+// it shipped DECIMAL's modifier and left the string family.
+//
+// CHAR(n) truncates and does NOT pad, which is a decision. PostgreSQL's bpchar
+// pads the stored value but strips trailing blanks for `length()`, for `||`
+// and for every comparison — all three verified live — and this engine has one
+// TypeString and no bpchar. Padding would leak blanks into GROUP BY keys, join
+// keys and equality where PostgreSQL strips them: a WRONG ROW SET in exchange
+// for a right rendering. The residual is the rendered value of a SHORT CHAR(n)
+// and ADR-0012's list records it.
+func TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration(t *testing.T) {
 	db := ddrOpen(t)
 	for _, tc := range []struct {
 		name, sql string
-		// want is wadjet's answer, which is the divergence; pgSays is
-		// PostgreSQL 17.11's, measured live on the oracle server.
+		// want is now PostgreSQL 17.11's own answer, measured live: the value
+		// half agrees. pgSays is kept beside it so a cell that ever diverges
+		// again names what the server said.
 		want, pgSays string
 	}{
 		// A FOLDED literal, and the same question over a real STRING VECTOR:
-		// the length is dropped in the compiler and in the kernel, so a fix
-		// to either alone leaves the other cell failing.
+		// the length was dropped in the compiler and in the kernel, so a fix
+		// to either alone would leave the other cell failing.
 		{"literal_varchar", `SELECT CAST('abcdef' AS VARCHAR(4)) AS v FROM decdecl WHERE id = 1`,
-			"abcdef", "abcd"},
+			"abcd", "abcd"},
 		{"literal_char", `SELECT CAST('abcdef' AS CHAR(4)) AS v FROM decdecl WHERE id = 1`,
-			"abcdef", "abcd"},
+			"abcd", "abcd"},
 		{"column_varchar", `SELECT CAST(s AS VARCHAR(4)) AS v FROM decdecl WHERE id = 2`,
-			"12.7500", "12.7"},
-		// Two controls that a fix must NOT change: a value already within n,
-		// and the unparameterized destination. They fail if a repair
-		// truncates everything rather than truncating to n.
+			"12.7", "12.7"},
+		// The multi-byte cell, which is the one that tells CHARACTERS from
+		// BYTES: three characters, six octets. Truncating bytes would cut a
+		// rune in half and put invalid UTF-8 on the wire.
+		{"multibyte_counts_characters",
+			`SELECT CAST('éàüxyz' AS VARCHAR(3)) AS v FROM decdecl WHERE id = 1`,
+			"éàü", "éàü"},
+		// A non-string operand: PostgreSQL truncates the RENDERING.
+		{"number_renders_then_truncates",
+			`SELECT CAST(12345 AS VARCHAR(3)) AS v FROM decdecl WHERE id = 1`, "123", "123"},
+		// Two controls that the fix must NOT change: a value already within n,
+		// and the unparameterized destination. They fail if a repair truncates
+		// everything rather than truncating to n.
 		{"ctl_within_length", `SELECT CAST(s AS VARCHAR(4)) AS v FROM decdecl WHERE id = 3`,
 			"abc", "abc"},
 		{"ctl_unparameterized", `SELECT CAST('abcdef' AS VARCHAR) AS v FROM decdecl WHERE id = 1`,
 			"abcdef", "abcdef"},
+		// The bpchar RESIDUAL, pinned: PostgreSQL pads a short CHAR(n) to n on
+		// the wire and this does not. Its three consumers agree with the
+		// server BECAUSE it does not pad — the cells below assert that.
+		{"residual_short_char_is_not_padded",
+			`SELECT CAST('ab' AS CHAR(4)) AS v FROM decdecl WHERE id = 1`, "ab", "ab  "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)
@@ -179,23 +192,62 @@ func TestStringCastDropsItsLengthParameter(t *testing.T) {
 			}
 			got, _ := res.Rows[0]["v"].(string)
 			if got != tc.want {
-				t.Errorf("value %q, want %q (PostgreSQL 17.11 says %q).\n"+
-					"  If this now equals PostgreSQL, the length parameter is being "+
-					"enforced: DELETE this cell, and check that the wire declaration "+
-					"moved with it — ADR-0012 item 5 records that the value half comes "+
-					"first and the declaration follows it.",
-					got, tc.want, tc.pgSays)
+				t.Errorf("value %q, want %q (PostgreSQL 17.11 says %q)", got, tc.want, tc.pgSays)
 			}
 			if len(res.ColumnMetas) != 1 {
 				t.Fatalf("%d column metas, want 1", len(res.ColumnMetas))
 			}
-			if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeString {
-				t.Errorf("declared %s, want STRING — every string destination is one "+
-					"unparameterized STRING here, which is the metadata half of the "+
-					"same gap", m.TypeID)
+			// The DECLARATION half, still pinned: every string destination is
+			// one unparameterized STRING here, and PostgreSQL describes
+			// `CAST(x AS VARCHAR(4))` as character varying(4), atttypmod 8,
+			// OID 1043. The day this carries the length, delete the pin and
+			// move the \gdesc assertion into the wire corpus.
+			if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeString || m.Precision != 0 {
+				t.Errorf("declared %s(%d) — this pin records an unconstrained STRING. If the "+
+					"length is now carried, #838's METADATA half has moved: check that "+
+					"pgwire.TypeMod sends n+4 and that the OID moved to 1043/1042 with it, "+
+					"then delete this pin", m.TypeID, m.Precision)
 			}
 		})
 	}
+	// The three bpchar consumers, which agree with PostgreSQL BECAUSE CHAR(n)
+	// is not padded. They are the reason the padding residual above is a
+	// residual and not a bug: padding would move all three away from the
+	// server. Every expectation measured live on postgres:17.11.
+	for _, tc := range []struct {
+		name, sql string
+		want      any
+	}{
+		{"length_of_a_short_char", `SELECT LENGTH(CAST('ab' AS CHAR(4))) AS v FROM decdecl WHERE id = 1`,
+			int32(2)},
+		{"concat_of_a_short_char", `SELECT CAST('ab' AS CHAR(4)) || 'x' AS v FROM decdecl WHERE id = 1`,
+			"abx"},
+		{"equality_of_a_short_char", `SELECT CAST('ab' AS CHAR(4)) = 'ab' AS v FROM decdecl WHERE id = 1`,
+			true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			if len(res.Rows) != 1 || res.Rows[0]["v"] != tc.want {
+				t.Errorf("%v, want %#v (live PostgreSQL 17.11) — bpchar strips trailing blanks "+
+					"for length, || and comparison, so PADDING CHAR(n) would move this cell "+
+					"away from the server", res.Rows, tc.want)
+			}
+		})
+	}
+	// The destination PostgreSQL refuses outright.
+	t.Run("zero_length_is_22023", func(t *testing.T) {
+		_, err := db.Query(context.Background(),
+			`SELECT CAST('abcdef' AS VARCHAR(0)) AS v FROM decdecl WHERE id = 1`)
+		if err == nil {
+			t.Fatal("answered; PostgreSQL 17.11 raises 22023")
+		}
+		if got, want := sqlerr.StateOf(err), "22023"; got != want {
+			t.Errorf("SQLSTATE %s, want %s: %v", got, want, err)
+		}
+		if !strings.Contains(err.Error(), "length for type varchar must be at least 1") {
+			t.Errorf("%v does not carry PostgreSQL's message", err)
+		}
+	})
 }
 
 // TestDecimalCastRefusesWhatItCannotCarry is ADR-0024 items 4 and 6: a cast

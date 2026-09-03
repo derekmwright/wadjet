@@ -108,6 +108,19 @@ func ParseTypeID(s string) (TypeID, error) {
 	if strings.HasPrefix(upper, "VECTOR") {
 		return TypeVector, nil
 	}
+	// A PARAMETERIZED string spelling. `VARCHAR(255)` is what a PostgreSQL
+	// user writes and what a migration tool emits, and it used to fail the
+	// whole CREATE TABLE with `unknown type: VARCHAR(4)` — this switch reads
+	// the WHOLE name, so the parameter made it match nothing. The length is
+	// not stored (one unparameterized TypeString is all the engine has), so an
+	// INSERT past n is accepted where PostgreSQL raises 22001: a SUPERSET,
+	// which ADR-0012 records as the acceptable direction, and a far smaller
+	// divergence than refusing the table (#838).
+	if base, ok := stripTypeParams(upper, "VARCHAR", "CHARACTER VARYING", "CHAR",
+		"CHARACTER", "NCHAR", "NVARCHAR", "TEXT"); ok {
+		_ = base
+		return TypeString, nil
+	}
 	switch upper {
 	case "BOOL", "BOOLEAN":
 		return TypeBool, nil
@@ -146,6 +159,24 @@ func ParseTypeID(s string) (TypeID, error) {
 	default:
 		return 0, fmt.Errorf("unknown type: %s", s)
 	}
+}
+
+// stripTypeParams reports whether upper is one of names followed by a
+// parenthesized parameter list — `VARCHAR(255)`, `CHARACTER VARYING (10)` —
+// and returns the bare name. It matches the NAME exactly rather than by
+// prefix, so `VARCHARX(1)` is still unknown.
+func stripTypeParams(upper string, names ...string) (string, bool) {
+	open := strings.IndexByte(upper, '(')
+	if open < 0 || !strings.HasSuffix(upper, ")") {
+		return "", false
+	}
+	base := strings.TrimSpace(upper[:open])
+	for _, n := range names {
+		if base == n {
+			return base, true
+		}
+	}
+	return "", false
 }
 
 // ParseDecimalParams extracts precision and scale from a type string like

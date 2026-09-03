@@ -6470,6 +6470,9 @@ type Cast struct {
 	// `DECIMAL(10, 2)` is fixed for the query and re-parsing the type name
 	// per row cost a string walk on every value (cast_decimal.go).
 	decDest castDecimalState
+	// strDest caches the parsed VARCHAR(n) / CHAR(n) length, for the same
+	// reason again (cast_string_length.go, #838).
+	strDest castStringState
 }
 
 func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
@@ -6490,6 +6493,13 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// with the (p,s) silently ignored (ADR-0024 item 3, #555).
 	if d, ok := e.decimalDestination(); ok {
 		return e.castToDecimal(b, row, v, d)
+	}
+	// A length-carrying STRING destination has the SAME shape and had the
+	// same defect: `varchar(4)` matches no case label either, so the whole
+	// cast reached `default: return v` and returned six characters where
+	// PostgreSQL returns four (#838).
+	if n, ok := e.stringDestination(); ok {
+		return truncateToChars(castStringRender(b, row, e.Operand, v), n)
 	}
 	switch dest {
 	// Keep this label list and IsIntegerCastDest in step: that predicate is
@@ -6625,17 +6635,27 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// '%A%'` is true, matching the 0x41 byte, not the letter in a hex
 		// spelling), so kernel.likeTextRenderer keeps matching the raw
 		// bytes. The two disagree in PostgreSQL, so they disagree here.
-		text := boxedTextOperand(b, row, e.Operand, v)
-		if raw, ok := text.([]byte); ok {
-			return `\x` + hex.EncodeToString(raw)
-		}
-		if s, ok := stringOperand(text); ok {
-			return s
-		}
-		return fmt.Sprint(text)
+		return castStringRender(b, row, e.Operand, v)
 	default:
 		return v
 	}
+}
+
+// castStringRender is the TEXT a CAST to the string family produces, for the
+// unparameterized destinations and for VARCHAR(n) / CHAR(n) alike. It is one
+// function because the two must not drift: `CAST(ts AS TEXT)` and
+// `CAST(ts AS VARCHAR(4))` render the same instant, and the second is the
+// first cut to four characters (#838). See the arm above for what each source
+// family renders as and why.
+func castStringRender(b *batch.RecordBatch, row int, operand Expr, v any) string {
+	text := boxedTextOperand(b, row, operand, v)
+	if raw, ok := text.([]byte); ok {
+		return `\x` + hex.EncodeToString(raw)
+	}
+	if s, ok := stringOperand(text); ok {
+		return s
+	}
+	return fmt.Sprint(text)
 }
 
 // boxedTextOperand renders a bare-column operand as the text the column's
