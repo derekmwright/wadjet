@@ -344,7 +344,7 @@ Each worker defaults to processing 4 tasks concurrently. For CPU-heavy workloads
 
 ### Memory Budget and Spill-to-Disk
 
-Workers can be configured with a per-task memory budget (`--memory-budget`). When a pipeline breaker (HashJoin, HashAggregate, Sort, Window) exceeds the budget, it spills intermediate state to disk instead of growing memory unboundedly. This makes workers viable at 512 MB - 2 GB RAM.
+Workers can be configured with a per-task memory budget (`--memory-budget`). When a pipeline breaker (HashJoin, HashAggregate, Sort, Window) exceeds the budget, it spills intermediate state to disk instead of growing memory unboundedly, so a worker's peak memory tracks its budget and caches rather than the size of its input. What a worker actually needs is therefore a sizing question, not a fixed number — see [Performance Tuning](tuning.md) for the profiles, and the [benchmarks index](benchmarks/README.md#local-process-measurements-2026-09-03) for the process footprints that have been measured (an idle worker is ~33 MiB RSS; the banked SF100 runs use 32 GB workers).
 
 Set `--spill-dir` to a fast local disk (SSD/NVMe preferred) for best spill performance. Spill files are cleaned up automatically after each task completes.
 

@@ -14,8 +14,8 @@ Wadjet competes at two levels:
 | Strength | Competitor Comparison |
 |----------|----------------------|
 | 22 native types including IPv4, IPv6, CIDR, MAC, Port, Protocol, and VECTOR(N) | No competitor has first-class network types; all require string parsing |
-| 80+ network functions (JA3, DNS, TLS, HTTP, TCP flags, GeoIP) | Splunk has similar via SPL; no SQL engine matches this |
-| Single Go binary, 512 MB viable | DuckDB is single-binary but C++; ClickHouse needs 4+ GB |
+| 100+ network functions (JA3, DNS, TLS, HTTP, TCP flags, GeoIP) | Splunk has similar via SPL; no SQL engine matches this |
+| Single Go binary; every pipeline breaker spills, so peak memory tracks the budget rather than the input ([measured footprints](benchmarks/README.md#local-process-measurements-2026-09-03)) | DuckDB is single-binary but C++ and single-node; the JVM engines are not a single binary at all |
 | Distributed over NATS + S3 with zero-coordinator-bottleneck | DuckDB is single-node; ClickHouse needs ZooKeeper/Keeper |
 | PostgreSQL wire protocol (psql, JDBC, Superset, DBeaver) | ClickHouse has its own protocol; DuckDB has no server mode |
 | RBAC + ABAC with row filtering and column masking | Rare in embedded engines; common only in enterprise SIEM |
@@ -288,14 +288,20 @@ and sample rate. Prometheus metrics remain available alongside.
 
 ### Positioning Strategy
 
-Wadjet's network-native type system and 80+ network functions are **genuinely unmatched** in the market. No SQL engine — not ClickHouse, not DuckDB, not Elasticsearch — has first-class IPv4/IPv6/CIDR/MAC/Port/Protocol types with dedicated storage and vectorized operations.
+Wadjet's network-native type system and 100+ network functions are **genuinely unmatched** in the market. No SQL engine — not ClickHouse, not DuckDB, not Elasticsearch — has first-class IPv4/IPv6/CIDR/MAC/Port/Protocol types with dedicated storage and vectorized operations.
 
-**Recommended positioning**: "The only analytics engine built for network data" — lean into the network-native angle rather than competing as a general-purpose OLAP engine. For Warden: "Security analytics with SQL, not SPL" — attract teams frustrated with Splunk's proprietary query language and pricing.
+**Recommended positioning** (settled 2026-09-03, and the reason the README
+opens the way it does): the category comes first and the niche second — a
+general-purpose distributed SQL / OLAP engine over Parquet and Iceberg on
+object storage, which happens to do network telemetry better than anything
+else. The niche is a reason to choose Wadjet, never the definition of it, so
+"the only analytics engine built for network data" is a second line, not the
+first. See [docs/positioning/github-metadata.md](positioning/github-metadata.md). For Warden: "Security analytics with SQL, not SPL" — attract teams frustrated with Splunk's proprietary query language and pricing.
 
 **Key differentiators to emphasize**:
 1. Network-native types with zero parsing overhead
 2. PostgreSQL wire protocol (use any SQL tool, no vendor lock-in)
-3. Single binary, 512 MB viable (runs on edge hardware)
+3. Single binary that spills rather than dies when memory binds (edge-sized deployments are a sizing exercise, not a fixed floor)
 4. RBAC + ABAC with cell-level policies (compliance-ready)
 5. MCP server for AI-assisted threat hunting
 6. GeoIP + JA3 + DNS/TLS/HTTP protocol analysis built-in

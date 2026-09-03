@@ -1,6 +1,10 @@
 # Getting Started
 
-This guide walks you through installing Wadjet, querying files on disk, and then creating a table, ingesting data, and running queries against managed storage.
+Wadjet is a distributed SQL query engine for analytical (OLAP) workloads over
+Apache Parquet and Apache Iceberg tables on S3-compatible object storage, with
+first-class network-telemetry types on top. This guide walks you through
+installing it, querying files on disk, and then creating a table, ingesting
+data, and running queries against managed storage.
 
 ## Prerequisites
 
