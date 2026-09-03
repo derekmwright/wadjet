@@ -3655,11 +3655,21 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 		switch {
 		case p.IsAgg:
 			// AggSpec.OutputCol == alias; if no alias, fall back to expr.
+			//
+			// The SOURCE is the lowercased text because that is the spelling
+			// the aggregate stage emits under. The TARGET is the name the
+			// CLIENT is told, and it is the expression text VERBATIM —
+			// `deriveColumns` (wadjet/wadjet.go) sends `col.Expr` unfolded on
+			// the single-process path, and the two paths must describe one
+			// query identically (#744). Case-folding here is what made
+			// `SUM(a) OVER (...) + 1` arrive as `... over (...) + 1` from the
+			// DAG and `... OVER (...) + 1` from the single-process engine.
 			target = p.Alias
-			if target == "" {
-				target = strings.ToLower(p.Expr)
-			}
 			src = target
+			if target == "" {
+				target = p.Expr
+				src = strings.ToLower(p.Expr)
+			}
 		case p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) &&
 			(referencesSyntheticAgg(p.ASTExpr) || referencesSyntheticWindow(p.ASTExpr)):
 			// Wrapped aggregate — the logical layer replaced aggregate calls
@@ -3679,9 +3689,13 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			// window stage and the gather ever applies the "+ 1"; evaluating
 			// it here is what keeps the DAG's answer equal to the
 			// single-process pipeline's instead of emitting the bare window.
+			//
+			// Verbatim, not lowercased, for the same reason as the aggregate
+			// arm above (#744): this is the CLIENT's name, and the source is
+			// resolved separately by firstColRefName.
 			target = p.Alias
 			if target == "" {
-				target = strings.ToLower(p.Expr)
+				target = p.Expr
 			}
 			astExpr = plansql.ReplaceGroupKeyRefs(p.ASTExpr, keyRefs)
 			src = firstColRefName(astExpr)
