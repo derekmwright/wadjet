@@ -35,6 +35,10 @@ var censusFixture = []string{
 	"CREATE TABLE arcb_dup (id INT64, n INT64, name STRING)",
 	"CREATE TABLE arcb_fl (id INT64, f FLOAT64, n INT64)",
 	"CREATE TABLE arcb_ts (id INT64, t TIMESTAMP)",
+	// An EMPTY table. A plan-time refusal is invisible on a populated one:
+	// the runtime raises on the first row either way, so "the statement was
+	// refused before it read anything" needs a table with nothing to read.
+	"CREATE TABLE arcb_empty (id INT64, n INT64, name STRING)",
 }
 
 var censusSeed = []string{
@@ -50,6 +54,7 @@ var censusDigestSQL = map[string]string{
 	"pr": "SELECT id, n, name FROM arcb_pr ORDER BY id",
 	"fl": "SELECT id, f, n FROM arcb_fl ORDER BY id",
 	"ts": "SELECT id, t FROM arcb_ts ORDER BY id",
+	"em": "SELECT id, n, name FROM arcb_empty ORDER BY id",
 }
 
 func newCensusDB(t *testing.T) *wadjet.DB {

@@ -40,6 +40,7 @@ var censusPGFixture = []string{
 	`CREATE TEMP TABLE arcb_dup (id bigint, n bigint, name text COLLATE "C")`,
 	`CREATE TEMP TABLE arcb_fl (id bigint, f double precision, n bigint)`,
 	`CREATE TEMP TABLE arcb_ts (id bigint, t timestamp)`,
+	`CREATE TEMP TABLE arcb_empty (id bigint, n bigint, name text COLLATE "C")`,
 }
 
 func TestDMLCensusMatchesPostgres(t *testing.T) {

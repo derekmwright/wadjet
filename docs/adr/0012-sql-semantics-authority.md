@@ -192,6 +192,45 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      single-letter `t` is psql's display) and what the row path's `fmt.Sprint`
      already produced.
 
+     **The divergence is a READ-side concession, and a DML statement's
+     qualifying predicate does not get it.** (Added 2026-09-03, #721.) The
+     entry above was reasoned entirely about the query path, where its
+     consequence is a wrong COUNT for a spelling PostgreSQL refuses to
+     resolve. On a DELETE the same rule DESTROYS ROWS:
+
+         DELETE FROM pr WHERE name > 5     PostgreSQL 42883
+                                           wadjet DELETE 3, table EMPTIED
+
+     `"a" > "5"` is true for every row (0x61 > 0x35), so wadjet answered
+     PostgreSQL's answer to a DIFFERENT predicate and emptied a three-row
+     table. Nobody wrote that consequence down because no fixture attempted
+     it — the issue that reported the class even claimed it was "the SAFE
+     direction … no row is destroyed", which the measurement refutes.
+
+     So the rule now splits by what the predicate DECIDES. A SELECT keeps the
+     byte rule and its reasoning: the overload machinery this entry says would
+     be needed is still not built, and every answer the rule gives is
+     PostgreSQL's answer to the quoted spelling. A DML statement's WHERE
+     refuses the pair with **42883**, before any row is read, at
+     `wadjet.refuseDMLLiteralPairs`. Two more pairs go with it, for the same
+     reason: any non-BOOL column against a BOOLEAN literal (`id = true`,
+     PostgreSQL's `bigint = boolean`, which the DML door answered `DELETE 0`
+     and the SELECT door 22P02 — two doors disagreeing about one predicate),
+     and a numeric column against a quoted literal naming no value of it,
+     which the runtime already refuses but only once a ROW reaches it, so
+     `DELETE FROM empty WHERE id = 'abc'` answered `DELETE 0`.
+
+     The asymmetry is the point, not an oversight: a concession whose cost is
+     an answer is not the same decision as a concession whose cost is the
+     table. Temporal and network columns against a number are deliberately
+     NOT refused — those parsers are stricter than PostgreSQL's input grammar
+     and refusing on them would reject input PostgreSQL accepts, which item 1
+     forbids. Both halves are pinned in the DML census
+     (`internal/server/pgwire/dml_census_test.go`): the DML entries assert
+     42883 on all three doors, the two SELECT entries stay pinned as this
+     divergence, and eight boundary entries assert the pairs that must keep
+     working.
+
      **The equivalent question for CIDR is open, and must not be answered one
      site at a time.** (Added 2026-08-25, #546.) A CIDR value is stored as
      TEXT, and every KEY and every column-to-column comparison uses that text
