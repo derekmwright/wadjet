@@ -1558,15 +1558,48 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 // which keeps every other plan spelled exactly as before: `(SELECT … FROM
 // nation) u` scans `nation AS u` today and after this change.
 func setSubtreeAlias(n *Node, alias string) {
+	// The alias REPLACES a scan's own only when the subtree holds ONE
+	// relation. With two or more, every unaliased scan took the derived
+	// table's alias and the relations became indistinguishable: `SELECT c
+	// FROM (SELECT t0.c1 AS c FROM t0, t2, t1 WHERE t0.c1 IS NOT NULL) x`
+	// bound `t0.c1` to whichever relation was planned last and answered t2's
+	// values — a silent wrong answer, and NULL for rows the query's own WHERE
+	// says are not null (#843). The CTE arm has always declined to stamp for
+	// the same reason (#281's q18 spelling); the derived arm is that comment's
+	// own hazard, reached by a FROM list rather than a comma join inside a
+	// CTE.
+	//
+	// DerivedAliases is appended either way: it RECORDS that this subtree is
+	// reachable as `alias` without claiming the scan is called that, which is
+	// what the alias resolvers read (#751, #773).
+	single := countScans(n) == 1
+	setSubtreeAliasWalk(n, alias, single)
+}
+
+func setSubtreeAliasWalk(n *Node, alias string, replace bool) {
 	if n.Type == NodeScan {
-		if n.TableAlias == "" || strings.EqualFold(n.TableAlias, n.TableName) {
+		if replace && (n.TableAlias == "" || strings.EqualFold(n.TableAlias, n.TableName)) {
 			n.TableAlias = alias
 		}
 		n.DerivedAliases = append(n.DerivedAliases, alias)
 	}
 	for _, c := range n.Children {
-		setSubtreeAlias(c, alias)
+		setSubtreeAliasWalk(c, alias, replace)
 	}
+}
+
+func countScans(n *Node) int {
+	if n == nil {
+		return 0
+	}
+	total := 0
+	if n.Type == NodeScan {
+		total = 1
+	}
+	for _, c := range n.Children {
+		total += countScans(c)
+	}
+	return total
 }
 
 // applyColumnAliases renames a subquery's output columns positionally, the way

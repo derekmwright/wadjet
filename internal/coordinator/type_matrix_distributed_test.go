@@ -15,6 +15,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/oracle"
+	"github.com/derekmwright/wadjet/internal/oracle/collide"
 	"github.com/derekmwright/wadjet/internal/oracle/multikey"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -457,7 +458,22 @@ func tmdTables() []tmdTable {
 		// items is the row every one of #767's shapes turns on.
 		{latOrdTable, latOrdSchema(), latOrdData()},
 		{latItemTable, latItemSchema(), latItemData()},
-	}, multikeyTables()...)
+	}, append(multikeyTables(), collideTables()...)...)
+}
+
+// collideTables is the COLLIDING-BARE-NAME fixture (#843): three relations
+// whose columns are all called c0, c1, c2. Every other fixture in this package
+// prefixes its column names per table, so no two DIFFERENT relations in one
+// query ever share a bare name that means different things — which is the
+// blind spot the defect lived in. Going through collide.Tables() means an
+// entry added to the corpus cannot be forgotten in this gate.
+func collideTables() []tmdTable {
+	src := collide.Tables()
+	out := make([]tmdTable, len(src))
+	for i, t := range src {
+		out[i] = tmdTable{t.Name, t.Schema, t.Rows}
+	}
+	return out
 }
 
 // tmdStoresAReservedName reports whether a fixture's schema declares a column

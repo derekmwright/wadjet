@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/oracle"
+	"github.com/derekmwright/wadjet/internal/oracle/collide"
 	"github.com/derekmwright/wadjet/internal/oracle/multikey"
 )
 
@@ -4232,6 +4233,7 @@ func postgresSemanticsCases() []pgCase {
 	)
 
 	out = append(out, multiKeyCorrelatedCases()...)
+	out = append(out, collidingBareNameCases()...)
 
 	// --- A window's PARTITION BY / ORDER BY key spelling (#585) -------------
 	//
@@ -4906,6 +4908,32 @@ func multiKeyCorrelatedCases() []pgCase {
 	out := make([]pgCase, 0, 80)
 	for _, c := range multikey.Corpus() {
 		pc := pgCase{name: "MultiKey_" + c.Name, sql: c.SQL}
+		if c.KnownBug != "" {
+			pc.knownBug, pc.issue = pgBugWadjet+" "+c.KnownBug, c.Issue
+		}
+		out = append(out, pc)
+	}
+	return out
+}
+
+// collidingBareNameCases is the SQLancer-shaped family: three relations whose
+// columns are all called c0, c1, c2 (#843, #844).
+//
+// Every other fixture this oracle carries prefixes its column names per
+// relation — TPC-H's `l_`/`o_`/`c_`/`n_`, multikey's shared schema across
+// four tables that MEAN the same thing — so no entry here had ever asked what
+// `t0.c1` resolves to when `t2` also has a `c1`. Twelve releases of gates
+// never saw the family, and it took a fuzzer to find it: inside a derived
+// table with two or more UNALIASED relations, every base scan was re-aliased
+// to the derived table's alias and a qualified reference bound to whichever
+// relation was planned last.
+//
+// The pins come from the corpus itself (collide.Case.KnownBug/Issue) so a pin
+// cannot go stale in one consumer and not the other.
+func collidingBareNameCases() []pgCase {
+	out := make([]pgCase, 0, 16)
+	for _, c := range collide.Corpus() {
+		pc := pgCase{name: "Collide_" + c.Name, sql: c.SQL, ordered: c.Ordered}
 		if c.KnownBug != "" {
 			pc.knownBug, pc.issue = pgBugWadjet+" "+c.KnownBug, c.Issue
 		}

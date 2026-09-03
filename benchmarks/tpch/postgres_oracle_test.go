@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/derekmwright/wadjet/internal/oracle/collide"
 	"github.com/derekmwright/wadjet/internal/oracle/multikey"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -372,6 +373,11 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 		t.Fatalf("%v", err)
 	}
 	for _, tbl := range multikey.Tables() {
+		if err := sink(tbl.Name, tbl.Rows); err != nil {
+			t.Fatalf("%v", err)
+		}
+	}
+	for _, tbl := range collide.Tables() {
 		if err := sink(tbl.Name, tbl.Rows); err != nil {
 			t.Fatalf("%v", err)
 		}
@@ -751,6 +757,13 @@ func oracleTables() map[string]parquet.Schema {
 	// columns, over DATE, CIDR and UUID columns the TPC-H schema does not have
 	// at all.
 	for _, t := range multikey.Tables() {
+		out[t.Name] = t.Schema
+	}
+	// The COLLIDING-BARE-NAME fixture (#843/#844). Every other table this
+	// oracle carries prefixes its column names per relation, so no entry could
+	// ever ask what `t0.c1` means when `t2` has a `c1` too — which is exactly
+	// the question the SQLancer-shaped defects turn on.
+	for _, t := range collide.Tables() {
 		out[t.Name] = t.Schema
 	}
 	out[pgNetTable] = parquet.Schema{Columns: []parquet.Column{
