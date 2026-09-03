@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"runtime"
 	"strings"
@@ -282,6 +283,10 @@ type HashJoin struct {
 	// actual hash table grows beyond this (e.g., string arenas, grow() doubling),
 	// the delta is reserved so spill triggers at the right threshold.
 	trackedHashOverhead int64
+	// hashOverheadWarned keeps reconcileHashMemory's over-budget WARN to one
+	// line per join: the reconcile runs on every arrival batch, and a build
+	// that has crossed the budget once crosses it on every batch after.
+	hashOverheadWarned bool
 
 	// Grace Hash Join spill state. Non-nil when build-side data has been
 	// partitioned and spilled to disk due to memory pressure.
@@ -598,8 +603,10 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	// type check is guaranteed to run early enough to matter (#615).
 	h.buildKeyErr = h.checkBuildKeyTypes(b)
 	hint := 64
-	if h.BuildRowHint > 0 {
-		hint = int(h.BuildRowHint)
+	// preSizeRowHint, not BuildRowHint: the index is unspillable state and may
+	// not be pre-sized past the budget's room (#823).
+	if n := h.preSizeRowHint(b); n > 0 {
+		hint = n
 	}
 	if len(h.buildKeyIdx) == 1 && h.buildKeyIdx[0] >= 0 {
 		col := b.Columns[h.buildKeyIdx[0]]
@@ -852,9 +859,78 @@ func (h *HashJoin) hashTableOverhead() int64 {
 	return size
 }
 
+// joinIndexBytesPerRow is what ONE build row costs in hash-index state that
+// the grace path can never give back: 8 B of arena (buildRef), 4 B of
+// arenaNext, and its share of a hash slot at the tables' 70% target load
+// factor (16 B / 0.7 ≈ 23 B). Rounded to 40 to line up with hashBuildBytes'
+// own per-row hash charge, so the two figures are read in the same units.
+const joinIndexBytesPerRow = 40
+
+// preSizeRowHint is how many build rows the arena and hash index may be
+// pre-allocated for, which is NOT the same question as how many rows the build
+// expects (#823).
+//
+// BuildRowHint is the planner's estimate of the WHOLE build. Pre-sizing to it
+// charges the tracker — through reconcileHashMemory's ForceReserve, which
+// cannot fail and has no ceiling — for capacity that holds nothing yet: a
+// 5,000-row hint put 191,072 bytes on the ledger on a batch of 20 rows, 36% of
+// a 512 KiB budget, before the build had stored anything. Every later Reserve
+// in the query was then measured against a floor that described a build that
+// had not happened, and the query refused for want of room the join was only
+// holding a reservation on.
+//
+// So the pre-size is bounded by the room that EXISTS when the build starts —
+// what the budget still has, less the arrival batch that is about to be
+// charged. Sizing it that way is what keeps the pre-allocation from being the
+// charge that crosses the line: it can only claim room that is free and that
+// nothing else is already committed to. The structures grow on demand past the
+// cap (both hash tables round up to a power of two on CheckGrow; the arena
+// appends), so it costs a few rehashes on a build genuinely bigger than its
+// budget's headroom, and costs nothing at all when there is room — on an
+// unbudgeted tracker, or any budget with headroom to spare, this returns the
+// hint unchanged and no pre-allocation changes.
+//
+// What it does NOT fix, and is recorded on #823 and in ADR-0027: the index
+// state this bounds is still UNRELEASABLE once the rows do arrive. The arena
+// is global across the 64 grace partitions, so evicting a partition frees its
+// column data and leaves its chain entries behind — the join's floor stays
+// proportional to TOTAL build rows however much it spills. Making that
+// reclaimable means per-partition index state, which is its own arc.
+func (h *HashJoin) preSizeRowHint(b *batch.RecordBatch) int {
+	if h.BuildRowHint <= 0 {
+		return 0
+	}
+	hint := int(h.BuildRowHint)
+	if h.MemTracker == nil {
+		return hint
+	}
+	budget := h.MemTracker.Budget()
+	if budget <= 0 {
+		return hint
+	}
+	room := (budget - h.MemTracker.Used() - hashBuildBytes(b)) / joinIndexBytesPerRow
+	if room < 0 {
+		room = 0
+	}
+	if int64(hint) > room {
+		return int(room)
+	}
+	return hint
+}
+
 // reconcileHashMemory checks if the hash table has grown beyond what
 // EstimateBatchBytes charged (40 bytes/row) and reserves the delta.
 // Called periodically during Build to keep the tracker accurate.
+//
+// The delta goes through ForceReserve, which cannot fail: an index entry for a
+// row the build has already accepted is not optional, and refusing it here
+// would leave the tracker describing a table that exists. When that forced
+// charge is what takes the query PAST its budget the tracker stops being a
+// budget, so it says so once, naming the join, instead of leaving the next
+// operator's Reserve to fail against a floor nothing explains (#823). Of the
+// seven ForceReserve producers ADR-0006's 2026-09-03 census enumerates, this
+// and memory.ReserveOrForce are the two that report crossing the line; the
+// other five are silent, which is recorded there rather than fixed here.
 func (h *HashJoin) reconcileHashMemory() {
 	if h.MemTracker == nil {
 		return
@@ -862,7 +938,21 @@ func (h *HashJoin) reconcileHashMemory() {
 	actual := h.hashTableOverhead()
 	if actual > h.trackedHashOverhead {
 		delta := actual - h.trackedHashOverhead
+		before := h.MemTracker.Used()
 		h.MemTracker.ForceReserve(delta) // always track; triggers ShouldSpill sooner
+		if budget := h.MemTracker.Budget(); budget > 0 && before <= budget && before+delta > budget && !h.hashOverheadWarned {
+			h.hashOverheadWarned = true
+			slog.Warn("hash join index overhead forced past budget",
+				"tracker", h.MemTracker.Name(),
+				"purpose", "hash join index",
+				"bytes", delta,
+				"index_total", actual,
+				"build_rows", h.buildRows,
+				"used", before+delta,
+				"budget", budget,
+				"note", "grace eviction frees build columns, not index entries (#823)",
+			)
+		}
 		h.trackedHashOverhead = actual
 		h.trackedMem += delta
 		// Publish the true owned footprint for the drift-backstop. keyBuf is
@@ -1015,8 +1105,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			h.neTryEnable(b)
 
 			// Pre-allocate arena and index to avoid repeated slice growth.
-			if h.BuildRowHint > 0 && !h.SemiAntiKeyOnly && !h.neActive {
-				hint := int(h.BuildRowHint)
+			if hint := h.preSizeRowHint(b); hint > 0 && !h.SemiAntiKeyOnly && !h.neActive {
 				h.arena = make([]buildRef, 0, hint)
 				h.arenaNext = make([]int32, 0, hint)
 				// intIndex already pre-sized by tryEnableIntKey; only pre-size string table

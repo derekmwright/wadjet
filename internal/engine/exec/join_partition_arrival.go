@@ -90,10 +90,11 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 				return h.buildKeyErr
 			}
 
-			// Pre-allocate arena and string index using BuildRowHint when set.
+			// Pre-allocate arena and string index using BuildRowHint when set,
+			// bounded by the budget's room — this is unspillable state and
+			// pre-sizing it charged 191,072 bytes on a 20-row batch (#823).
 			// Hash tables for the int paths were sized by tryEnableIntKey.
-			if h.BuildRowHint > 0 {
-				hint := int(h.BuildRowHint)
+			if hint := h.preSizeRowHint(b); hint > 0 {
 				h.arena = make([]buildRef, 0, hint)
 				h.arenaNext = make([]int32, 0, hint)
 				if !h.useIntKey && !h.useDualIntKey {
