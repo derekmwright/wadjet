@@ -52,6 +52,13 @@ type arcACell struct {
 	// different message. Recording both is the honest form; asserting one
 	// substring for both would have meant weakening it to nothing.
 	wantErrLikeDAG string
+	// wantErrLikeDAGShuffled, when set, is what the `dag-shuffled` arm ALONE
+	// must fail with. The two DAG arms are two engines often enough that a
+	// shape can answer on one and be refused on the other — ADR-0010's
+	// shuffle name/type consistency refusals are exactly that — and a census
+	// that can only say "both DAG arms alike" has to drop such a shape rather
+	// than record it.
+	wantErrLikeDAGShuffled string
 	// wantCorrRoutes is the CorrelatedLocalRoutes delta each DAG arm must
 	// show for this shape. 0 = the DAG executed it.
 	wantCorrRoutes int64
@@ -395,6 +402,128 @@ func arcACells() []arcACell {
 		{issue: "#544", name: "control_cast_date_as_string",
 			sql:  `SELECT CAST(c_date AS STRING) AS v FROM typemx WHERE id = 1`,
 			want: []string{"v=2011-02-02"}},
+
+		// ------------------------------------------------------------------
+		// #767 part (2) — a NON-AGGREGATED LATERAL whose projection does not
+		// publish the correlated column answered ZERO ROWS.
+		//
+		// `buildLateralSubquery` decorrelates by PROMOTING the correlated
+		// equality into the join condition and rebuilding the inner plan
+		// without it. The join therefore keys on the INNER column — which the
+		// inner SELECT list has to publish, or `exec.HashJoin` resolves the
+		// build key to index -1, every build row serializes the same
+		// degenerate key, and nothing matches. The injection that guarantees
+		// the key is published was gated on `hasAgg`, so an ordinary narrowed
+		// projection got none.
+		//
+		// Measured proof that the KEY is the mechanism and not the shape:
+		// `SELECT amount, order_id` and `SELECT *` were right on every arm at
+		// base, because they happen to publish it. Those are the controls.
+		// The DAG was right at base too — it re-plans the join — so this is a
+		// single-process defect and the DAG cells are the ratchet.
+		{issue: "#767", name: "lateral_non_agg_inner_narrowed_projection",
+			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o ` +
+				`JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"c=Alice|a=float:50", "c=Alice|a=float:100",
+				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
+		{issue: "#767", name: "lateral_non_agg_left_narrowed_projection",
+			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o ` +
+				`LEFT JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"c=Alice|a=float:50", "c=Alice|a=float:100",
+				"c=Bob|a=float:75", "c=Bob|a=float:125", "c=Carol|a=NULL"}},
+		{issue: "#767", name: "control_lateral_non_agg_key_published",
+			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o ` +
+				`JOIN LATERAL (SELECT amount, order_id FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"c=Alice|a=float:50", "c=Alice|a=float:100",
+				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
+		// THE BOUNDARY, pinned rather than described (protocol rule 11). The
+		// injected key is a real output column of the lateral side, so an
+		// OUTER `SELECT *` sees it: PostgreSQL publishes only `amount` here
+		// and wadjet publishes `order_id, amount`. That is NOT new — the
+		// AGGREGATED arm has injected and leaked the same way since #591, and
+		// this cell's pre-fix reading for the aggregated spelling is
+		// `[id customer total order_id n]` — but this commit makes it true of
+		// the non-aggregated arm too, so it is stated here with the answer it
+		// gives rather than left to be discovered.
+		//
+		// Before this commit this shape answered ZERO ROWS AND NO COLUMNS, so
+		// the move is catastrophically-wrong → right-rows-plus-a-column. The
+		// day the extra column goes (the decorrelation stops publishing its
+		// join key, or a projection above the join prunes it) this pin FAILS,
+		// which is how it should end.
+		{issue: "#767", name: "boundary_outer_star_sees_the_injected_key",
+			sql: `SELECT * FROM lat_ord o ` +
+				`JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"order_id=int64:1|amount=float:100|id=int64:1|customer=Alice|total=float:150",
+				"order_id=int64:1|amount=float:50|id=int64:1|customer=Alice|total=float:150",
+				"order_id=int64:2|amount=float:125|id=int64:2|customer=Bob|total=float:200",
+				"order_id=int64:2|amount=float:75|id=int64:2|customer=Bob|total=float:200"},
+			pgSays: "the same four rows with columns (id, customer, total, amount) — no order_id"},
+		// P2's shape, pinned. `lateralSelectsColumn` decides "the subquery
+		// already publishes the key" by matching the key's name against a
+		// select item's ALIAS as well as against its source column — so an
+		// inner projection that aliases some OTHER column to the key's name
+		// looks like it publishes the key, the injection is skipped, and the
+		// join key is missing again. Zero rows for PostgreSQL's four, on all
+		// four arms, at this arc's base and at its tip alike.
+		//
+		// It is NOT fixed here, and not for want of effort. Matching on the
+		// published COLUMN instead would inject `order_id` beside an output
+		// column ALREADY named `order_id` that holds the AMOUNT — two columns
+		// of one name in the lateral side's schema, resolved by
+		// `batch.RecordBatch.ColumnIndex`'s first match. The row count would
+		// become four and `li.order_id` would then read the KEY (1,1,2,2) where
+		// PostgreSQL reads the amount (50,100,75,125): an obviously-wrong zero
+		// traded for a plausible wrong number, which protocol item 8 refuses.
+		// Publishing the key under a name nothing can collide with — a hidden
+		// slot — is the fix, and that is the same slot-and-permutation
+		// territory #785 was deferred into (ADR-0026 §3a).
+		//
+		// So `control_lateral_non_agg_key_published` says only what it
+		// measures: a subquery publishing the key under its OWN name needs no
+		// injection. It does not say that naming the key is always safe, and
+		// this cell is why.
+		{issue: "#767", name: "boundary_inner_alias_shadowing_the_key_answers_nothing",
+			sql: `SELECT o.customer AS c, li.order_id AS a FROM lat_ord o ` +
+				`JOIN LATERAL (SELECT amount AS order_id FROM lat_item WHERE order_id = o.id) li ` +
+				`ON true ORDER BY o.customer, a`,
+			want:   []string{},
+			pgSays: "4 rows — Alice 50, Alice 100, Bob 75, Bob 125"},
+		// The LEFT twin of the outer-star boundary below. The INNER spelling
+		// answers on all four arms; this one is LOUD on dag-shuffled, and was
+		// loud there at base too with a different message — so the arm where
+		// the shape FAILS was the untested half of that boundary. The refusal
+		// is ADR-0010's shuffle name-consistency check: the NULL-padded side
+		// names its column one way in one file of a stage input and another way
+		// in the next.
+		{issue: "#767", name: "boundary_outer_star_left_twin_is_loud_on_a_shuffled_dag",
+			sql: `SELECT * FROM lat_ord o ` +
+				`LEFT JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|amount=float:100",
+				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|amount=float:50",
+				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|amount=float:125",
+				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|amount=float:75",
+				"id=int64:3|customer=Carol|total=float:0|order_id=NULL|amount=NULL"},
+			wantErrLikeDAGShuffled: "where an earlier file of the same stage input named it",
+			pgSays: "five rows with columns (id, customer, total, amount) — no order_id, " +
+				"and no refusal on any arm"},
+		{issue: "#767", name: "control_lateral_non_agg_select_star_inside",
+			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o ` +
+				`JOIN LATERAL (SELECT * FROM lat_item WHERE order_id = o.id) li ON true ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"c=Alice|a=float:50", "c=Alice|a=float:100",
+				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
 	}
 }
 
@@ -433,11 +562,18 @@ func TestArcAEverydaySQLMatchesPostgres(t *testing.T) {
 				if strings.HasPrefix(arm, "dag") {
 					want = wantOnDAG
 				}
-				if tc.wantErrLike != "" {
-					wantErr := tc.wantErrLike
-					if tc.wantErrLikeDAG != "" && strings.HasPrefix(arm, "dag") {
-						wantErr = tc.wantErrLikeDAG
-					}
+				// The expected disposition is PER ARM. A shape can be loud on
+				// one engine and answering on another — a refusal one path
+				// makes and the other does not is a real state, and the
+				// census has to be able to say it rather than drop the shape.
+				wantErr := tc.wantErrLike
+				if strings.HasPrefix(arm, "dag") && tc.wantErrLikeDAG != "" {
+					wantErr = tc.wantErrLikeDAG
+				}
+				if arm == "dag-shuffled" && tc.wantErrLikeDAGShuffled != "" {
+					wantErr = tc.wantErrLikeDAGShuffled
+				}
+				if wantErr != "" {
 					if err == nil {
 						t.Errorf("%s arm: answered %v, but this shape must be LOUD\n"+
 							"  want an error containing %q\n  PostgreSQL 17: %s\n  SQL: %s",

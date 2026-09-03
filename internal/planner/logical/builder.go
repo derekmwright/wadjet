@@ -1568,13 +1568,13 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			break
 		}
 	}
-	if hasAgg && len(correlatedParts) > 0 {
-		// The key must be SELECTED as well as grouped. The rewrite above
-		// promotes the correlated equality into the join condition, so the
-		// join keys on the inner column — and a column the subquery's select
-		// list does not publish is not there to key on. It used to be there
-		// by accident: buildProject elided every projection over an
-		// aggregate, so the aggregate's raw output (keys first, then
+	if len(correlatedParts) > 0 {
+		// The key must be SELECTED — and, for an aggregated subquery, grouped.
+		// The rewrite above promotes the correlated equality into the join
+		// condition, so the join keys on the inner column — and a column the
+		// subquery's select list does not publish is not there to key on. It
+		// used to be there by accident: buildProject elided every projection
+		// over an aggregate, so the aggregate's raw output (keys first, then
 		// aggregates) reached the join and the key leaked through. Once that
 		// elision became conditional on the shapes matching (c55492d1, #591)
 		// the projection was kept, the key was genuinely gone, and
@@ -1583,22 +1583,52 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		// serialized the same degenerate key, nothing equalled the probe's
 		// real value, and the query answered zero rows (a LEFT JOIN LATERAL
 		// answered every aggregate NULL, which is worse).
+		//
+		// That reasoning never depended on the aggregate, but the gate did:
+		// it read `hasAgg && …`, so a NON-aggregated LATERAL whose projection
+		// narrows away the correlated column got no injection and hit the
+		// identical degenerate key. `JOIN LATERAL (SELECT amount FROM item
+		// WHERE order_id = o.id)` answered ZERO rows and its LEFT twin
+		// answered every amount NULL, on the single-process path, where
+		// PostgreSQL 17 answers four rows and five (#767 part 2). It was
+		// invisible because every LATERAL test in the tree writes `SELECT *`,
+		// which publishes the key by definition — and lateralSelectsColumn
+		// still declines to inject there and where the list names the key
+		// under its own name, so the controls are unchanged.
+		//
+		// It declines in one case where it should not, and that is a stated
+		// boundary rather than an oversight: it matches the key's name
+		// against a select item's ALIAS as well as its source column, so
+		// `SELECT amount AS order_id` looks like it publishes `order_id` and
+		// gets no injection — zero rows for PostgreSQL's four, here and at
+		// this arc's base. Matching the published COLUMN instead would inject
+		// a second `order_id` beside the aliased one, and `li.order_id` would
+		// then read the KEY where PostgreSQL reads the amount: a plausible
+		// wrong number for an obvious zero, which protocol item 8 refuses.
+		// The key has to be published under a name nothing can collide with —
+		// a hidden slot — which is #785's territory (ADR-0026 §3a). Pinned as
+		// `boundary_inner_alias_shadowing_the_key_answers_nothing`.
+		//
+		// The GROUP BY half stays gated on hasAgg: a subquery with no
+		// aggregate has nothing to group.
 		var injected []plansql.SelectColumn
 		for _, cp := range correlatedParts {
 			innerCol := extractInnerColumn(cp, leftAliases)
 			if innerCol == "" {
 				continue
 			}
-			// Add to GROUP BY if not already present
-			found := false
-			for _, g := range subInfo.GroupBy {
-				if strings.EqualFold(g, innerCol) {
-					found = true
-					break
+			if hasAgg {
+				// Add to GROUP BY if not already present
+				found := false
+				for _, g := range subInfo.GroupBy {
+					if strings.EqualFold(g, innerCol) {
+						found = true
+						break
+					}
 				}
-			}
-			if !found {
-				subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
+				if !found {
+					subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
+				}
 			}
 			if lateralSelectsColumn(subInfo.Columns, innerCol) || lateralSelectsColumn(injected, innerCol) {
 				continue

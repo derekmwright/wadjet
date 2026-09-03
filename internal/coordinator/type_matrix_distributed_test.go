@@ -443,6 +443,14 @@ func tmdTables() []tmdTable {
 		// resolved against the wrong side renders identically.
 		{zzpTable, zzpSchema(), zzpData()},
 		{zzjTable, zzjSchema(), zzjData()},
+		// The LATERAL fixture (#767). Rides along for the same reason as the
+		// fixtures above: only the arc-A census names it, and no type-matrix
+		// corpus entry does. The type matrix cannot stand in for it — nothing
+		// there is a correlated LATERAL, which is a join the PLANNER
+		// manufactures out of a subquery, and its one order with no line
+		// items is the row every one of #767's shapes turns on.
+		{latOrdTable, latOrdSchema(), latOrdData()},
+		{latItemTable, latItemSchema(), latItemData()},
 	}, multikeyTables()...)
 }
 
