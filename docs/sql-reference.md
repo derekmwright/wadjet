@@ -605,10 +605,24 @@ SELECT * FROM flow_logs ORDER BY src_ip ASC, bytes_in DESC
 -- Positional references
 SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY 1 ORDER BY 2 DESC
 
+-- Positional references over SELECT * — the star's columns count one position
+-- each, in schema order, so position 2 is the table's second column
+SELECT * FROM flow_logs ORDER BY 1
+SELECT *, 1 AS marker FROM flow_logs ORDER BY 2 DESC
+
 -- Null ordering
 SELECT * FROM flow_logs ORDER BY src_ip ASC NULLS FIRST
 SELECT * FROM flow_logs ORDER BY bytes_in DESC NULLS LAST
 ```
+
+A position past the end of the select list is SQLSTATE `42P10`
+(`ORDER BY position N is not in select list`).
+
+One shape is refused that PostgreSQL answers: a positional reference over a
+`SELECT *` whose FROM clause is a **join** or a **derived table**, where the
+star is left unexpanded because its column set is not resolvable from the
+catalog alone. That is `42P10` with a message saying so; name the columns, or
+sort by the column itself.
 
 ## LIMIT and OFFSET
 

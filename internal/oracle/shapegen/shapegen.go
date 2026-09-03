@@ -1633,10 +1633,18 @@ func (g *Gen) genOrderLimit(q *Query) {
 		used[it.Alias] = true
 		desc := g.chance(0.45)
 		switch {
-		case g.chance(0.2) && !q.Distinct && it.Star == "":
-			// By ordinal. Not with SELECT * (rejected by design) and not with
-			// DISTINCT (the term must be a select item, which it is, but the
-			// ordinal form is the interesting path here).
+		case g.chance(0.2) && !q.Distinct && !q.hasStar():
+			// By ordinal. Not with a star ANYWHERE in the select list, and
+			// `it.Star == ""` was the wrong test for that: a position counts
+			// OUTPUT columns, so a star occupies as many of them as its source
+			// has, and `SELECT t0.*, LENGTH(c_str) AS c1 ... ORDER BY 2` names
+			// the star's SECOND column in PostgreSQL, not c1. The generator
+			// computed the ordinal from the ITEM index and recorded c1 as the
+			// key, so the absolute order check judged the wrong column — and
+			// it only became visible when #810 made wadjet resolve positions
+			// PostgreSQL's way. Verified on live PostgreSQL 17. Not with
+			// DISTINCT either (the term must be a select item, which it is,
+			// but the ordinal form is the interesting path here).
 			q.Order = append(q.Order, Order{Expr: fmt.Sprint(idx + 1), Desc: desc, Key: it.Alias, Exact: it.Exact, Opaque: it.Opaque})
 		case g.chance(0.25) && !it.Agg && len(q.GroupBy) == 0:
 			// By the expression itself rather than its alias. PostgreSQL

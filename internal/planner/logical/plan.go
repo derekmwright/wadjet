@@ -472,6 +472,14 @@ type OrderExpr struct {
 	Column     string
 	Desc       bool
 	NullsFirst *bool // nil = default, true = NULLS FIRST, false = NULLS LAST
+	// Position is a select-list ordinal the parser could not count, because
+	// the list carries a `*` at or before it and a star's width is a catalog
+	// question (#810). Non-zero means Column is not yet a name;
+	// ResolveOrdinalSortKeys fills it in after ExpandStarProjections and
+	// clears this. A key that reaches the physical planner still carrying one
+	// is refused loudly rather than sorted on the constant, which would be a
+	// silent no-op.
+	Position int
 }
 
 // StripTopSortLimit removes the outermost Sort and Limit nodes from a logical

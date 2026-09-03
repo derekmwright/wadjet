@@ -1033,12 +1033,34 @@ func resolvePositionalRefs(info *SelectInfo) error {
 	}
 
 	// Resolve ORDER BY positional refs
+	//
+	// firstStar is where counting stops being possible. A `*` stands for
+	// however many columns its source has, which is a catalog question this
+	// layer cannot ask, so a position at or after one is left as written for
+	// logical.ResolveOrdinalSortKeys to answer after star expansion (#810).
+	// Before that, `SELECT * FROM t ORDER BY 1` counted the star as ONE item,
+	// rewrote the term to the literal text `*`, and the query was refused on
+	// every arm — while PostgreSQL answers it, and it is what every
+	// "preview this table" button emits.
+	firstStar := -1
+	for i, c := range info.Columns {
+		if c.Star {
+			firstStar = i
+			break
+		}
+	}
 	for i, ob := range info.OrderBy {
 		pos, err := strconv.Atoi(strings.TrimSpace(ob.Column))
 		if err != nil {
 			continue // not a number, leave as-is
 		}
-		if pos < 1 || pos > len(info.Columns) {
+		if pos < 1 {
+			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(info.Columns))
+		}
+		if firstStar >= 0 && pos > firstStar {
+			continue // not countable here; resolved after the star expands
+		}
+		if pos > len(info.Columns) {
 			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(info.Columns))
 		}
 		col := info.Columns[pos-1]

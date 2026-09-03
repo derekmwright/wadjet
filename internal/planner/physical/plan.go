@@ -2581,6 +2581,13 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		p.ctes = node.CTEs
 	}
 
+	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). Refused
+	// here rather than in buildSort so this path and PlanDistributed say the
+	// same thing about the same query.
+	if err := logical.RefuseUnresolvedOrdinalSortKeys(node); err != nil {
+		return nil, err
+	}
+
 	// Materialize CTEs referenced multiple times. Each CTE is computed once
 	// and cached so that all references (main query + subqueries) see the
 	// exact same data. This prevents float64 accumulation-order divergence
@@ -2703,6 +2710,13 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// route the query onto its local single-process engine instead of the
 	// scalar-deferral path silently answering 0 (#359).
 	if err := p.refuseCorrelatedSubqueries(node); err != nil {
+		return nil, err
+	}
+	// A `SELECT * ... ORDER BY <n>` whose star never expanded (#810). This is
+	// a genuine refusal of the QUERY, not of the distributed plan: it is NOT
+	// one of the typed errors the coordinator routes local on, because the
+	// single-process path refuses it too.
+	if err := logical.RefuseUnresolvedOrdinalSortKeys(node); err != nil {
 		return nil, err
 	}
 	// A DISTINCT with no stage and no coordinator dedup is a DROPPED
@@ -15887,6 +15901,7 @@ func (p *Planner) expandStarProjections(ctx context.Context, node, child *logica
 	}
 	p.AnnotateScanColumns(ctx, child)
 	logical.ExpandStarProjections(node)
+	logical.ResolveOrdinalSortKeys(node)
 }
 
 // limitPushdownSafe reports whether a LIMIT may be applied independently by

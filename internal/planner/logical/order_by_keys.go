@@ -100,6 +100,18 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 			continue
 		}
 
+		// A select-list POSITION the parser could not count, because the list
+		// carries a `*`. It is not materialized — the value it names is a
+		// column of the expanded list, and ResolveOrdinalSortKeys names it
+		// once the star has expanded (#810).
+		if pos, ok := deferredOrdinal(ob, info.Columns); ok {
+			keys = append(keys, OrderExpr{
+				Column: cleanExpr(ob.Column), Position: pos,
+				Desc: ob.Desc, NullsFirst: ob.NullsFirst,
+			})
+			continue
+		}
+
 		name, ok := sortAlloc.Next(plansql.SlotSortKey)
 		if !ok {
 			continue // the family is exhausted; leave the term as written

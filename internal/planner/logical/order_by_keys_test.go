@@ -307,12 +307,12 @@ func TestOrderByUnhonourableKeyErrors(t *testing.T) {
 			// reason.
 			name: "SELECT DISTINCT with a computed key",
 			sql:  "SELECT DISTINCT a FROM t ORDER BY -a",
-			want: "SELECT DISTINCT requires every ORDER BY term",
+			want: "for SELECT DISTINCT, ORDER BY expressions must appear in select list",
 		},
 		{
 			name: "SELECT DISTINCT ordering on an unselected column",
 			sql:  "SELECT DISTINCT a FROM t ORDER BY b",
-			want: "SELECT DISTINCT requires every ORDER BY term",
+			want: "for SELECT DISTINCT, ORDER BY expressions must appear in select list",
 		},
 		{
 			// The DAG's sort runs between the aggregate and the gather with
@@ -333,16 +333,18 @@ func TestOrderByUnhonourableKeyErrors(t *testing.T) {
 			sql:  "SELECT a, COUNT(*) AS c FROM t GROUP BY a ORDER BY b",
 			want: "only a grouped column, a grouping expression, or a select-list alias",
 		},
-		{
-			// The parser resolves an ORDER BY position against the select
-			// list; under a star there is nothing to count yet, so the term
-			// reaches the planner naming no item. Materializing the constant
-			// would sort by a column identical in every row — a no-op dressed
-			// as an ordering.
-			name: "ordinal under a star select",
-			sql:  "SELECT * FROM t ORDER BY 1",
-			want: "a numeric constant is a select-list position",
-		},
+		// `SELECT * FROM t ORDER BY 1` USED to be here. It is answered now
+		// (#810): the ordinal is deferred past the parser, where a star's
+		// width is not knowable, and resolved after ExpandStarProjections
+		// against the columns the star produced. This layer no longer refuses
+		// it — the star has not expanded here either, because that needs the
+		// catalog, so the key simply carries its Position and the physical
+		// planner resolves or refuses it.
+		//
+		// What is still LOUD, and where, is gated by
+		// coordinator.TestOrderByResolvesAPositionAfterTheStarExpands: an
+		// out-of-range position is 42P10 with PostgreSQL's own wording, and a
+		// star over a join is 42P10 saying the column list cannot be counted.
 	}
 
 	for _, tt := range tests {
