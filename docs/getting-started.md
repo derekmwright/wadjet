@@ -1,18 +1,25 @@
 # Getting Started
 
-Wadjet is a distributed SQL query engine for analytical (OLAP) workloads over
-Apache Parquet and Apache Iceberg tables on S3-compatible object storage, with
-first-class network-telemetry types on top. This guide walks you through
-installing it, querying files on disk, and then creating a table, ingesting
-data, and running queries against managed storage.
+Wadjet is a distributed SQL analytics engine for Go: embed it directly in
+your Go application, or deploy it as a standalone server (or a coordinator +
+worker cluster) speaking the PostgreSQL wire protocol, HTTP, and gRPC. Both
+paths run the same SQL engine over Apache Parquet and Apache Iceberg tables
+— on local disk when embedding, or S3-compatible object storage for the
+server — with first-class network-telemetry types (IPv4, IPv6, CIDR, MAC,
+Port, Protocol) on top. This guide walks through installing it, querying
+files on disk, the embedded Go API, and then running the server: creating a
+table, ingesting data, and querying managed storage.
 
 ## Prerequisites
 
 - **Go 1.26+**
 
-Nothing else is required to query local files. Managed tables additionally need:
+Nothing else is required to query local files. Managed tables need object
+storage — local disk (`objstore.FileStore`, no server) when embedding, or an
+S3-compatible store (MinIO for local development, AWS S3 or similar for
+production) for the standalone/distributed server. Distributed mode
+(coordinator + worker split) additionally needs:
 
-- **S3-compatible object storage** (MinIO for local development, AWS S3 or similar for production)
 - **NATS** (only required for distributed mode)
 
 ## Installation
@@ -52,80 +59,10 @@ JSON
 
 Paths may be local files, `~/` home-relative paths, glob patterns (`logs/*.json`), or HTTP URLs.
 
-The rest of this guide covers **managed tables** — persistent, partitioned, statistics-backed storage — which is where object storage comes in.
-
-## Start MinIO (Local Development)
-
-If you don't have an S3-compatible store running:
-
-```bash
-docker run -d --name minio \
-  -p 9000:9000 -p 9001:9001 \
-  -e MINIO_ROOT_USER=minioadmin \
-  -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio server /data --console-address ":9001"
-```
-
-Create a bucket:
-
-```bash
-# Using mc (MinIO client)
-mc alias set local http://localhost:9000 minioadmin minioadmin
-mc mb local/wadjet
-```
-
-## Start the Server
-
-### Standalone Mode (Single Process)
-
-```bash
-./wadjet-bin serve \
-  --mode standalone \
-  --endpoint localhost:9000 \
-  --access-key minioadmin \
-  --secret-key minioadmin \
-  --bucket wadjet \
-  --http-addr :8080
-```
-
-This starts an embedded coordinator and worker in a single process — ideal for development and single-node deployments.
-
-### One-Off Query
-
-```bash
-./wadjet-bin query \
-  --endpoint localhost:9000 \
-  --access-key minioadmin \
-  --secret-key minioadmin \
-  --bucket wadjet \
-  "SELECT * FROM my_table LIMIT 10"
-```
-
-Supports `--format` flag: `json` (default), `table`, or `csv`.
-
-### Interactive Shell
-
-```bash
-./wadjet-bin shell \
-  --endpoint localhost:9000 \
-  --access-key minioadmin \
-  --secret-key minioadmin \
-  --bucket wadjet
-```
-
-Supports `--format` flag: `table` (default), `json`, or `csv`.
-
-### List Tables
-
-```bash
-./wadjet-bin tables \
-  --endpoint localhost:9000 \
-  --access-key minioadmin \
-  --secret-key minioadmin \
-  --bucket wadjet
-```
-
 ## Your First Table (Embedded Go)
+
+Wadjet is also a Go library — no server process required. Point it at local
+disk or an S3-compatible store; the rest of the API is identical either way:
 
 ```go
 package main
@@ -145,13 +82,10 @@ import (
 func main() {
     ctx := context.Background()
 
-    // Create an S3-compatible object store client
-    store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
-        Endpoint:  "localhost:9000",
-        AccessKey: "minioadmin",
-        SecretKey: "minioadmin",
-        UseSSL:    false,
-    })
+    // Local disk needs no server. Swap in objstore.NewMinIOStore(...) to
+    // point at an S3-compatible store instead — the rest of this program
+    // is unchanged either way.
+    store, err := objstore.NewFileStore("./wadjet-data")
     if err != nil {
         log.Fatal(err)
     }
@@ -227,6 +161,81 @@ func main() {
         fmt.Println(row)
     }
 }
+```
+
+The rest of this guide covers the **server** deployment — the same engine
+behind `wadjet serve`, speaking the PostgreSQL wire protocol, HTTP, and
+gRPC, backed by managed object storage.
+
+## Start MinIO (Local Development)
+
+If you don't have an S3-compatible store running:
+
+```bash
+docker run -d --name minio \
+  -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+```
+
+Create a bucket:
+
+```bash
+# Using mc (MinIO client)
+mc alias set local http://localhost:9000 minioadmin minioadmin
+mc mb local/wadjet
+```
+
+## Start the Server
+
+### Standalone Mode (Single Process)
+
+```bash
+./wadjet-bin serve \
+  --mode standalone \
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket wadjet \
+  --http-addr :8080
+```
+
+This starts an embedded coordinator and worker in a single process — ideal for development and single-node deployments.
+
+### One-Off Query
+
+```bash
+./wadjet-bin query \
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket wadjet \
+  "SELECT * FROM my_table LIMIT 10"
+```
+
+Supports `--format` flag: `json` (default), `table`, or `csv`.
+
+### Interactive Shell
+
+```bash
+./wadjet-bin shell \
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket wadjet
+```
+
+Supports `--format` flag: `table` (default), `json`, or `csv`.
+
+### List Tables
+
+```bash
+./wadjet-bin tables \
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket wadjet
 ```
 
 ## Your First Query (HTTP API)
