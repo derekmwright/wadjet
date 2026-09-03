@@ -230,10 +230,11 @@ func (s *rgSlabs) advance() error {
 	memory.ReserveOrForce(s.ctx, s.inner.memTracker, s.inner.spillMgr, n, wait, "scan row group load")
 
 	// Then reconcile to the pooled buffer's real capacity: a buffer larger
-	// than the row group is resident memory too. The pool cannot hand back one
-	// larger than this file's biggest row group, so the reconcile is small and
-	// bounded by the file rather than by whatever the process read last.
-	buf := getRowGroupBuf(int(n), peakRowGroupBytes(s.starts, s.ends))
+	// than the row group is resident memory too. The pool is size-classed, so
+	// that reconcile is bounded — cap() is at most twice the row group — and
+	// the buffer is reused across row groups and files instead of being
+	// allocated per read.
+	buf := s.inner.getSlab(int(n))
 	charge := n
 	if d := int64(cap(buf)) - charge; d != 0 && s.inner.memTracker != nil {
 		if d > 0 {
@@ -245,7 +246,7 @@ func (s *rgSlabs) advance() error {
 	}
 
 	if _, err := io.ReadFull(s.body, buf[:n]); err != nil {
-		putReadBuf(buf)
+		s.inner.putSlab(buf)
 		s.releaseCharge(charge)
 		return fmt.Errorf("read %s row group %d: %w", s.slot.entry.Path, rg, err)
 	}
@@ -284,7 +285,7 @@ func (s *rgSlabs) release(rgIdx int) {
 	s.mu.Unlock()
 
 	if had {
-		putReadBuf(buf)
+		s.inner.putSlab(buf)
 		s.inner.residentSlabs.Add(-1)
 		rgBuffersResident.Add(-1)
 	}
@@ -315,7 +316,7 @@ func (s *rgSlabs) close() {
 
 	var total int64
 	for rg, buf := range bufs {
-		putReadBuf(buf)
+		s.inner.putSlab(buf)
 		s.inner.residentSlabs.Add(-1)
 		rgBuffersResident.Add(-1)
 		total += charges[rg]
@@ -328,28 +329,36 @@ func (s *rgSlabs) close() {
 	}
 }
 
-// getRowGroupBuf is getReadBuf with an upper bound on what it will accept from
-// the pool: a buffer larger than the biggest row group THIS FILE has is not
-// this file's buffer, and is put back.
+// getSlab and putSlab reuse row-group buffers WITHIN one scan source.
 //
-// readBufPool is a single class with no ceiling — it holds whatever the largest
-// file read put back, which at SF100 is hundreds of megabytes — so an unbounded
-// Get would hand a 100 KiB row group a 283 MB buffer. That buffer is resident
-// memory and cap() is what this path charges for, so the budget would see a row
-// group as large as the largest file the process ever read.
+// The process-wide readBufPool cannot serve them: it also holds whole-FILE
+// buffers, which are orders of magnitude larger than a row group, and its only
+// acceptance rule is "big enough" — so a row-group request draws a whole-file
+// buffer, and `cap()`, which is what this path charges, becomes the largest
+// file the process ever read. Bounding that acceptance instead makes every
+// request MISS and turns the pool into an allocation per row group, which is
+// what it was measured doing: +16% heap over the TPC-H SF1 suite. A
+// size-classed pool has the opposite problem at the small end — its 64 KiB
+// floor charges a 5 KiB row group for 64 KiB.
 //
-// The bound is the file's own peak row group rather than a multiple of the
-// request, so nothing here is a number anybody picked: it comes out of the
-// footer.
-func getRowGroupBuf(size int, peak int64) []byte {
-	if v := readBufPool.Get(); v != nil {
+// One scan source reads one table, whose row groups are the same size to
+// within a few percent, so a plain "big enough" pool over THAT population fits
+// tightly: cap() is the row group's own size, the charge is honest, and the
+// buffers are reused for every row group of every file the scan reads.
+func (inner *scanSourceInner) getSlab(n int) []byte {
+	if v := inner.slabPool.Get(); v != nil {
 		buf := v.([]byte)
-		if cap(buf) >= size && int64(cap(buf)) <= peak {
-			return buf[:size]
+		if cap(buf) >= n {
+			return buf[:n]
 		}
-		readBufPool.Put(buf)
 	}
-	return make([]byte, size)
+	return make([]byte, n)
+}
+
+func (inner *scanSourceInner) putSlab(buf []byte) {
+	if cap(buf) > 0 {
+		inner.slabPool.Put(buf[:cap(buf)])
+	}
 }
 
 // tryRowGroupLoad builds the row-group-at-a-time backing for this slot when

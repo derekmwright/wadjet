@@ -15733,6 +15733,11 @@ type scanSourceInner struct {
 	// waiting on the budget (memory.ReserveOrForce). nil-safe.
 	spillMgr *memory.SpillManager
 
+	// slabPool reuses this scan's row-group buffers (scan_rowgroup_load.go).
+	// Per SOURCE rather than per process: one source reads one table, so its
+	// row groups are one size and a "big enough" pool over them fits tightly.
+	slabPool sync.Pool
+
 	// residentSlabs counts the row-group buffers this scan source is holding
 	// across every file (scan_rowgroup_load.go). It is the deadlock-freedom
 	// floor: a loader with nothing resident admits its next row group without
