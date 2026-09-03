@@ -3185,7 +3185,14 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 	}
 	hasExpr := false
 	specs := make([]ProjectExprSpec, 0, len(proj))
-	for _, p := range proj {
+	// slotPassThrough[j] marks a SELECT item the fragment cannot compute —
+	// one wrapping a hidden slot the GATHER evaluates — whose spec is a
+	// pass-through of that slot rather than the item's value. It is
+	// index-aligned with proj, because every consumer that pairs a spec with
+	// a select item does so by position.
+	slotPassThrough := make([]bool, len(proj))
+	var extraSlots []string
+	for j, p := range proj {
 		if p.IsAgg {
 			return stages // aggregates compute in their own fragments
 		}
@@ -3215,7 +3222,33 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 				// this returned by the stage-type check instead, and
 				// attaching it made every task fail to compile it (#610's
 				// shapes, caught by the #656 window branch).
-				return stages
+				//
+				// So this ITEM cannot be attached. Abandoning the WHOLE
+				// SELECT list because of it was #776: one wrapped window
+				// beside two ordinary items left the other two computed by
+				// nobody, and the reachability check then refused the plan
+				// (`the gather renames "plain + 1" to "s" and no stage emits
+				// a column of that name`) for a query the DAG can run.
+				//
+				// What this item needs from the fragment is not its VALUE
+				// but the SLOT the gather will evaluate it from, so it is
+				// attached as a PASS-THROUGH of that slot and the rest of
+				// the list is attached normally. Its alias is not applied to
+				// the slot (aliasedSpecsFor / anyRenamed skip it): the
+				// gather's own rename carries the alias, and its Expr is
+				// what produces the value.
+				slots, complete := syntheticSlotRefs(p.ASTExpr)
+				if !complete || len(slots) == 0 {
+					// A node kind the walk does not descend into may hide a
+					// second slot, and a pass-through that names fewer slots
+					// than the gather will read answers NULL. Keep today's
+					// decline rather than invent a column list.
+					return stages
+				}
+				slotPassThrough[j] = true
+				extraSlots = append(extraSlots, slots[1:]...)
+				specs = append(specs, ProjectExprSpec{Expr: slots[0], Name: slots[0]})
+				continue
 			}
 			hasExpr = true
 			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
@@ -3225,6 +3258,23 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ,
 			TypeKnown: typeKnown, Precision: prec, Scale: scale})
+	}
+	// A wrapped item reading TWO slots needs both on the stream, and only the
+	// first could take its own position. The rest ride at the END, past the
+	// index range every by-position consumer walks: the gather projects to
+	// exactly its rename list, so a column past that list costs a copy and
+	// changes no output.
+	for _, slot := range extraSlots {
+		dup := false
+		for _, sp := range specs {
+			if strings.EqualFold(sp.Name, slot) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			specs = append(specs, ProjectExprSpec{Expr: slot, Name: slot})
+		}
 	}
 	// #386: a NESTED subquery rename never trips anyRenamed — the outer list
 	// merely forwards the alias (`SELECT k FROM (SELECT r_regionkey AS k FROM
@@ -3241,6 +3291,15 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 	}
 	anyNestedRename := false
 	for j := range specs {
+		if j >= len(proj) || slotPassThrough[j] {
+			// A hidden-slot pass-through — the item's own position, or one of
+			// the extras appended past the select list — names a column the
+			// producer computes, not a name the query wrote. Resolving it
+			// through the rename chain would look for a source it has no
+			// business having, and indexing proj by it is out of range
+			// outright (#776).
+			continue
+		}
 		if proj[j].ASTExpr != nil && !isSimpleColRefForRename(proj[j].ASTExpr) {
 			// #387: an EXPRESSION referencing a nested rename (`k + 1` over
 			// `r_regionkey AS k`) was attached verbatim, so the fragment
@@ -3299,7 +3358,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 	}
 	// The other trigger is a sort key naming an alias, which needs the target
 	// stage's keys — decided below, once the target is known.
-	if !hasExpr && !anyRenamed(proj, specs) && !anyNestedRename {
+	if !hasExpr && !anyRenamed(proj, specs, slotPassThrough) && !anyNestedRename {
 		return stages
 	}
 	var gather *Stage
@@ -3347,13 +3406,15 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		// the coverage decision downstream handle that case instead — it
 		// puts the projection above the sort, where nothing needs the
 		// dropped columns.
-		if projectionNeedsItsOwnStage(s, aliasedSpecsFor(proj, specs)) &&
-			orderingSurvivesAProjectStage(stages, i, aliasedSpecsFor(proj, specs)) &&
-			(viaSort == nil || projectionCoversSortKeys(aliasedSpecsFor(proj, specs), viaSort.SortKeys)) {
+		if projectionNeedsItsOwnStage(s, aliasedSpecsFor(proj, specs, slotPassThrough)) &&
+			orderingSurvivesAProjectStage(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough)) &&
+			(viaSort == nil || projectionCoversSortKeys(
+				aliasedSpecsFor(proj, specs, slotPassThrough), viaSort.SortKeys)) {
 			// Written against what the producer EMITS, not what the query
 			// wrote: above an aggregate a computed group key is a column
 			// NAME, and rebuilding it as arithmetic answers NULL.
-			aliased, ok := respellSpecsOverProducerOutput(stages, i, aliasedSpecsFor(proj, specs))
+			aliased, ok := respellSpecsOverProducerOutput(stages, i,
+				aliasedSpecsFor(proj, specs, slotPassThrough))
 			if ok && specsResolveAgainstStageOutput(stages, i, aliased) {
 				keys := stages[i].SortKeys
 				stages = insertProjectStageAbove(stages, i, aliased)
@@ -3439,6 +3500,13 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		aliased := make([]ProjectExprSpec, len(specs))
 		for j, sp := range specs {
 			aliased[j] = sp
+			if j >= len(proj) || slotPassThrough[j] {
+				// A hidden-slot pass-through is not the item's VALUE, so it
+				// must not take the item's alias: the gather's own rename
+				// carries the alias and evaluates the wrapped expression
+				// from this column (#776).
+				continue
+			}
 			if a := proj[j].Alias; a != "" {
 				// VERBATIM, which is the whole point of the paragraph above:
 				// the sort keys on the ALIAS, so the projection has to emit
@@ -3616,8 +3684,14 @@ func repointGatherRenames(gather *Stage, aliased []ProjectExprSpec) {
 // alias-naming projection could make any difference at all. Cheap pre-gate
 // for attachScanSelectProjections: with no rename and no expression there is
 // nothing for it to do, and it can decline before looking at any stage.
-func anyRenamed(proj []logical.Projection, specs []ProjectExprSpec) bool {
+func anyRenamed(proj []logical.Projection, specs []ProjectExprSpec, slotPassThrough []bool) bool {
 	for j, p := range proj {
+		if j < len(slotPassThrough) && slotPassThrough[j] {
+			// The spec names a hidden SLOT, not the item's value, and the
+			// gather renames it. A pass attached only for that would be a
+			// projection nothing asked for (#776).
+			continue
+		}
 		if p.Alias != "" && !strings.EqualFold(p.Alias, specs[j].Name) {
 			return true
 		}

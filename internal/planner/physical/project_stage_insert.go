@@ -138,10 +138,18 @@ func projectionNeedsItsOwnStage(s *Stage, specs []ProjectExprSpec) bool {
 // aliasedSpecsFor names each spec by the user's ALIAS when one exists — the
 // same renaming the join and window paths apply, factored out so the
 // collapsing-producer branch above can build the list before deciding.
-func aliasedSpecsFor(proj []logical.Projection, specs []ProjectExprSpec) []ProjectExprSpec {
+func aliasedSpecsFor(proj []logical.Projection, specs []ProjectExprSpec,
+	slotPassThrough []bool) []ProjectExprSpec {
 	out := make([]ProjectExprSpec, len(specs))
 	for j, sp := range specs {
 		out[j] = sp
+		if j < len(slotPassThrough) && slotPassThrough[j] {
+			// A hidden-slot pass-through carries the column the GATHER
+			// evaluates the item from, not the item's value, so the item's
+			// alias belongs to the gather's rename and not to this spec
+			// (#776).
+			continue
+		}
 		if j < len(proj) && proj[j].Alias != "" {
 			// VERBATIM. An alias's case is part of the name a delimited
 			// identifier gives — PostgreSQL publishes `Kk` for `AS "Kk"` and
