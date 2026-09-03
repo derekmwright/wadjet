@@ -1,8 +1,15 @@
 # ADR-0021: A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized
 
-Status: Accepted (2026-08-25; §1a added the same day after a derived-table; §1b added for the CTE and recursive-CTE remainder
-inner was found to reach the executor as a scan of a nonexistent table; §3
-added the same day (#562))
+Status: Accepted (2026-08-25). §1a was added the same day, after a
+derived-table inner was found to reach the executor as a scan of a nonexistent
+table; §1b for the CTE and recursive-CTE remainder; §3 the same day (#562).
+§1c (2026-09-02) made a subquery that cannot be RUN fail instead of answering
+a constant. §1d–§1i (2026-09-03) are the PRODUCER half §1c said was still
+short: the CTE scope the collectors could not see (§1d), the re-run's typed
+outer values (§1e), the correlated NOT IN an anti join cannot express (§1f),
+the aggregate argument that asked for no outer scope (§1g), the LATERAL whose
+empty input still answers (§1h), and what that arc measured and did not move
+(§1i).
 
 ## Context
 
@@ -683,8 +690,13 @@ class the invariance oracle enumerates, and the oracle would have reported
 - Reachable from #562's corpus and tracked separately, because they reproduce
   with ONE key: #577 (a semi/anti join whose build side is a derived table
   matches nothing), #578 (a CORRELATED `NOT IN` answers its `NOT EXISTS`
-  twin — #507's remainder) and #584 (an unqualified outer conjunct pushed onto
-  a decorrelated EXISTS's subquery scan)
+  twin — #507's remainder, closed by §1f) and #584 (an unqualified outer
+  conjunct pushed onto a decorrelated EXISTS's subquery scan)
+- The producer half, §1d–§1i: #535 (the CTE scope), #679 (the typed re-run),
+  #538 / #578 / #539 (correlated `NOT IN`), #734 (the aggregate argument),
+  #767 (LATERAL over an empty input), #809 / #601 (an aggregate in a
+  subquery's own WHERE), and #616 / #614 / #714 (measured, not moved).
+  `internal/coordinator/arc_d5_correlation_two_path_test.go` is their census.
 - `internal/planner/logical/inner_key_spelling.go`,
   `internal/planner/logical/semi_anti_dedup.go`,
   `internal/planner/physical/in_subquery_set.go`,

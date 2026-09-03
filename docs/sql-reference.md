@@ -395,7 +395,7 @@ WHERE src_ip IN (SELECT ip_address FROM device_inventory WHERE role = 'server')
 
 ### Correlated Subqueries
 
-Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row:
+Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. The outer relation may be a CTE, a derived table or a base table:
 
 ```sql
 -- EXISTS with correlation
@@ -416,7 +416,29 @@ SELECT c.c_name FROM customer c
 WHERE NOT EXISTS (
     SELECT 1 FROM orders o WHERE o.o_custkey = c.c_custkey
 )
+
+-- Over a CTE, correlated on a column the CTE renames
+WITH recent AS (SELECT o_custkey AS cust FROM orders WHERE o_orderdate > DATE '1998-01-01')
+SELECT COUNT(*) FROM recent r
+WHERE EXISTS (SELECT 1 FROM customer c WHERE c.c_custkey = r.cust)
 ```
+
+Two shapes are deliberately NOT turned into a join, and run as a per-row
+subquery instead — a slower right answer:
+
+- **A correlated `NOT IN`.** `NOT IN` is three-valued and its third value is
+  per correlation group (a NULL in *that group's* list makes the predicate
+  UNKNOWN), which an anti join cannot express. An UNCORRELATED `NOT IN` still
+  becomes a null-aware anti join.
+- **A subquery whose own FROM is a derived table or a CTE**, or whose
+  correlation is not a simple equality of two columns.
+
+Both stay correct on every execution path; on a distributed cluster the query
+runs on the coordinator rather than across workers.
+
+A correlated subquery inside an **aggregate argument** —
+`SUM(CASE WHEN EXISTS (…) THEN 1 ELSE 0 END)` — is evaluated per row, not
+decorrelated.
 
 ### Derived Tables
 
@@ -429,6 +451,28 @@ FROM (
 ) AS t
 WHERE t.total > 1000000
 ```
+
+### LATERAL Joins
+
+A `LATERAL` subquery may reference columns of the FROM items to its left, and
+is evaluated once per outer row:
+
+```sql
+SELECT o.customer, s.item_count, s.total_amount
+FROM orders o
+JOIN LATERAL (
+    SELECT COUNT(*) AS item_count, SUM(amount) AS total_amount
+    FROM line_items WHERE order_id = o.id
+) s ON true
+```
+
+An UNGROUPED aggregate over an empty input still yields one row, so an outer
+row the lateral matches nothing for **survives even an inner join**, with
+`COUNT` reading 0 and every other aggregate NULL — the order with no line
+items above comes back at `item_count = 0, total_amount = NULL`. A lateral
+subquery that writes its own `GROUP BY` follows the ordinary rule instead: an
+empty input yields no row, and the outer row is dropped by an inner join and
+NULL-padded by a `LEFT JOIN LATERAL`.
 
 ## Aggregate Functions
 
@@ -1912,4 +1956,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   Select the expression and order by its alias
 - An ORDERING quantifier over a subquery — `x < ALL (SELECT ...)`, `x > ANY (SELECT ...)` — SQLSTATE 0A000, on the DML doors and on the query path alike. The equality forms are supported: `= ANY` / `= SOME` over a subquery is `IN`, and `<> ALL` is `NOT IN`.
 - A row comparison whose two sides have different arities — `(a, b) = (1)` — SQLSTATE 42601. PostgreSQL words the same refusal 42883.
+- An AGGREGATE in a subquery's own `WHERE` — `x IN (SELECT y FROM t WHERE SUM(y) > 0)` — SQLSTATE `42803`, `aggregate functions are not allowed in WHERE`, which is what PostgreSQL raises. An aggregate belonging to the ENCLOSING query is legal there in PostgreSQL and is refused here with the same code: a lowering gap, recorded in ADR-0012's divergence list.
+- A DERIVED TABLE inside a subquery's `FROM` that references the enclosing query — `WHERE EXISTS (SELECT 1 FROM (SELECT … WHERE t.k = a.k) d)` — SQLSTATE `42P01`. PostgreSQL answers this (no `LATERAL` is needed for a reference to an OUTER query); this engine has no lowering for it.
+- A correlated subquery this engine cannot express as a join is re-run per outer row with the outer values substituted as literals, so an outer value with no literal spelling that reads back unchanged — an ARRAY / ROW / MAP / VECTOR, a BYTES value that is not valid UTF-8 or holds a NUL, NaN or ±Infinity — is SQLSTATE `0A000` rather than a wrong answer.
 - No time-of-day type: a Parquet `TIME` column is read as its raw integer in the file's own unit

@@ -258,7 +258,7 @@ Full analytical SQL via a custom recursive descent parser:
 - CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE VIEW, CREATE/ALTER/DROP ALERT, ALTER TABLE
 - CTEs (`WITH ... AS`), UNION / INTERSECT / EXCEPT (with ALL variants)
 - INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)`
-- Subqueries: scalar, IN, EXISTS, correlated subqueries
+- Subqueries: scalar, IN, EXISTS, correlated subqueries (over a base table, a derived table or a CTE), and `LATERAL` joins
 - Window functions with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references (including over `SELECT *`)
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`
