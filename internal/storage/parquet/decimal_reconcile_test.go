@@ -307,6 +307,53 @@ func TestDecimalRescalePlanNamesItsBoundary(t *testing.T) {
 	}
 }
 
+// FuzzDecimalRescale drives the reconciliation with the two inputs that come
+// out of an UNTRUSTED footer: the carrier and the scale the file declares for
+// it. Neither is checked by anything upstream — SchemaElement.Scale is an int32
+// straight off the thrift, and a hostile or corrupt file is free to say -1 or
+// 2^31-1 — so this is the same class as the page-reader fuzzers beside it
+// (ADR-0018 rule 1, CLAUDE.md "Parquet Package Safety").
+//
+// Three properties, and none of them is "it returns the right number" (the
+// math/big oracle above owns that): it never panics, a SUCCESS is always inside
+// the declared band, and the answer never depends on how the same value was
+// spelled into the carrier.
+func FuzzDecimalRescale(f *testing.F) {
+	f.Add(int64(0), uint64(1275), 2, 4, 15)
+	f.Add(int64(-1), uint64(^uint64(0)-1274), 4, 2, 15)
+	f.Add(int64(0), uint64(0), 0, 38, 38)
+	f.Add(int64(1<<62), uint64(0), 38, 0, 38)
+	f.Add(int64(-1<<63), uint64(0), 0, 1, 38)
+	f.Add(int64(0), uint64(1), -1, 2, 9)
+	f.Add(int64(0), uint64(1), 1<<30, 2, 9)
+	f.Fuzz(func(t *testing.T, hi int64, lo uint64, from, to, precision int) {
+		d := Decimal128{Hi: hi, Lo: lo}
+		out, err := DecimalRescale(d, from, to, precision)
+		if err != nil {
+			// Every refusal carries PostgreSQL's SQLSTATE, or a client sees a
+			// blanket 42000 for a value error (#673's shape).
+			if s := sqlerr.StateOf(err); s != "22003" {
+				t.Fatalf("rescale({%d,%d}, %d->%d, p=%d) refused with SQLSTATE %q, want 22003",
+					hi, lo, from, to, precision, s)
+			}
+			return
+		}
+		// A success is inside the band the caller declared.
+		mag := new(big.Int).Abs(decimal128ToBig(out))
+		p := decimalEffectivePrecision(precision)
+		lim := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(p)), nil)
+		if mag.Cmp(lim) >= 0 {
+			t.Fatalf("rescale({%d,%d}, %d->%d, p=%d) = %s, which is not below 10^%d",
+				hi, lo, from, to, precision, out.String(), p)
+		}
+		// Deterministic: the same inputs answer the same way.
+		again, err2 := DecimalRescale(d, from, to, precision)
+		if err2 != nil || again != out {
+			t.Fatalf("rescale is not deterministic: %s then (%s, %v)", out.String(), again.String(), err2)
+		}
+	})
+}
+
 // TestDecimalFileScaleReadsTheAnnotation checks the half of the plan that
 // reads the FILE, including the case an unannotated leaf produces.
 func TestDecimalFileScaleReadsTheAnnotation(t *testing.T) {
