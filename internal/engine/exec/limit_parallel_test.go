@@ -78,8 +78,8 @@ func chunkedRows(sizes ...int) [][]map[string]any {
 // both take the partial-skip branch, both trim from the same stale `seen`, and
 // both store `l.Offset`.
 //
-// LIMIT: `remaining := l.Max - l.passed.Load()` has the identical shape and
-// over-DELIVERS — two workers each seeing the whole budget pass their whole
+// LIMIT (#845): `remaining := l.Max - l.passed.Load()` has the identical shape
+// and over-DELIVERS — two workers each seeing the whole budget pass their whole
 // batch, so `LIMIT 3` returns more than three rows.
 //
 // The barrier is what makes this deterministic rather than a one-in-thousands
@@ -198,20 +198,27 @@ func sumInts(v []int) int {
 	return t
 }
 
-// The same property end to end, through the pipeline that actually shares the
-// operator. This is the reachability half of the gate above: it proves the
-// shared-instance path is the one a plan takes (a Limit over a scan source with
-// Workers > 1), so a future change that stopped sharing the operator would show
-// up here as a changed row count rather than as a silently narrower gate.
+// REACHABILITY, not failure power. This asserts that the plan shape #567 lives
+// in still routes through the SHARED Limit — a Limit over a scan-like source
+// with Workers > 1, which is what `Pipeline.Run` requires before it calls
+// runParallel — so a future change that stopped sharing the operator, or that
+// stopped taking runParallel for this shape, fails here instead of quietly
+// narrowing the gate above to a unit test of an unreached code path.
 //
-// -short skips it: the loop is deliberately long, because the pipeline's own
-// scheduling makes the losing interleaving rare — which is exactly why #567 was
-// filed as a flake rather than as the wrong answer it is.
+// It is NOT the defect gate and must not be read as one. Measured on the
+// reverted operator: the losing interleaving is 1 in 20,000 THROUGH THE
+// PIPELINE (against 12 in 20,000 driving the operator directly), because the
+// scheduler has to put two workers inside Execute together without the barrier
+// the gate above uses. A loop long enough to have real failure power here would
+// need roughly 92,000 iterations for p>0.99 — so the earlier 400-iteration loop
+// bought a 2% chance of firing at 400 pipeline runs, which reads as a second
+// failure gate while being none. The failure gate is
+// TestLimitCountsOffsetAndLimitOnceUnderConcurrentExecute, which fails 6 of its
+// 8 cells on revert in a single run.
 func TestParallelPipelineAppliesOffsetOnceOverTheWholeStream(t *testing.T) {
-	if testing.Short() {
-		t.Skip("stress loop; -short")
-	}
-	const iterations = 400
+	// A handful, because the assertion is structural: repetition adds nothing
+	// a single run does not already establish.
+	const iterations = 5
 	for i := 0; i < iterations; i++ {
 		src := &chunkSource{schema: limitTestSchema, chunks: chunkedRows(9, 9, 7)}
 		sink := &CollectSink{SkipFinalizeToRows: true}

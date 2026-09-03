@@ -78,7 +78,8 @@ func (l *Limit) AcceptsViews() bool { return true }
 //
 // `remaining := l.Max - l.passed.Load()` had the identical shape and
 // over-DELIVERED: two workers each seeing the whole budget passed their
-// whole batch, so a `LIMIT 3` returned six rows.
+// whole batch, so a `LIMIT 3` returned six rows (#845, the OFFSET twin —
+// same operator, same read-modify-write, opposite direction).
 //
 // WHICH rows an unordered OFFSET or LIMIT drops is unspecified (ADR-0013
 // classes 1 and 3) and still is — the claim order varies with scheduling.
