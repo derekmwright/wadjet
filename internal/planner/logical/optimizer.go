@@ -1927,7 +1927,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		joinType = "anti"
 	}
 
-	return &Node{
+	miss := &Node{
 		Type:      NodeJoin,
 		Children:  []*Node{nil, innerPlan},
 		JoinType:  joinType,
@@ -1939,7 +1939,64 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		// correlation group and one flag on the operator cannot say that.
 		NullAwareAnti: inExpr.Not && len(correlationKeys) == 0,
 	}
+	if !inExpr.Not || len(correlationKeys) == 0 {
+		return miss
+	}
+	// A CORRELATED NOT IN is not lowered to this join at all — see
+	// correlatedNotInIsNotAnAntiJoin.
+	return nil
 }
+
+// correlatedNotInIsNotAnAntiJoin records why `x NOT IN (SELECT y … WHERE
+// <corr>)` is left as a subquery predicate — the half #507 scoped out in
+// writing and #538 / #578 filed.
+//
+// NOT IN is three-valued: TRUE only when x differs from every y in ITS OWN
+// correlation group, FALSE when it equals one, and UNKNOWN — so WHERE drops
+// the row — when x is NULL and the group is non-empty, or when the group holds
+// a NULL y that x did not otherwise match. An anti join answers the TWO-valued
+// question "did nothing match", which is its NOT EXISTS twin: measured against
+// live PostgreSQL 17 over the multikey fixture, three shapes answered 13 for
+// 9, 6 and 9 — exactly what the corresponding NOT EXISTS answers, on all four
+// arms and in silence.
+//
+// `Node.NullAwareAnti` cannot express the correlated form and the comment on
+// it has said so since #507: the flag reads ONE fact off the WHOLE build side
+// and empties the output when it is true, so setting it here would drop every
+// row the moment ANY group held a NULL. The fact this predicate needs is per
+// correlation GROUP.
+//
+// The identity that WOULD express it with joins this engine already has is:
+//
+//	x NOT IN (SELECT y FROM t WHERE corr)
+//	  ≡  NOT EXISTS (SELECT 1 FROM t WHERE corr AND y = x)
+//	     AND NOT EXISTS (SELECT 1 FROM t WHERE corr AND (y IS NULL OR x IS NULL))
+//
+// — an ordinary equi-key anti join beside a second one whose residual is
+// `(y IS NULL OR x IS NULL)`. Both hash-partition like any other join, so
+// neither needs #539's replicated build. It was built and measured, and it
+// does not work TODAY for a reason that is not in this package: a semi/anti
+// join's residual is compiled by physical.BuildSemiAntiFilter, which reads the
+// filter as TEXT — split on " and ", then find one of six comparison operators
+// — so an OR and an IS NULL compile to NOTHING and are dropped in SILENCE, and
+// physical.extractFilterBuildColumns narrows the stored build by the same text
+// split and would drop the very column the residual reads. Measured with the
+// two-join form in place: 0 rows for PostgreSQL's 9.
+//
+// So the honest lowering is none: leave the IN a subquery predicate, where
+// `expr.CorrelatedInSubquery.EvalBoolNull` already carries the exact
+// three-valued rule per outer row (a NULL probe is UNKNOWN, a miss against a
+// set containing a NULL is UNKNOWN, an empty set is TRUE). A slower right
+// answer beats a wrong one, and the stage DAG routes such a plan to the
+// coordinator-local pipeline — which the census asserts with
+// CorrelatedLocalRoutes beside the rows, so the cost is recorded and not
+// merely described.
+//
+// Lifting this needs the semi/anti residual to be a real expression compiler
+// and its build-column extractor to be AST-based rather than a text split.
+// That is the same class of defect as #562 and it lives in
+// internal/planner/physical.
+func correlatedNotInIsNotAnAntiJoin() {}
 
 // pushdownPredicates pushes filter predicates closer to scan nodes.
 func pushdownPredicates(n *Node) *Node {

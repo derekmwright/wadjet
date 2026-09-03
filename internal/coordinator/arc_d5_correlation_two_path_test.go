@@ -51,9 +51,10 @@ type arcD5Cell struct {
 }
 
 func arcD5Cells() []arcD5Cell {
-	return append(append(
+	return append(append(append(
 		arcD5CTEScopeCells(),
 		arcD5TypedRerunCells()...),
+		arcD5NotInCells()...),
 		arcD5AggregateArgumentCells()...)
 }
 
@@ -219,6 +220,88 @@ func arcD5TypedRerunCells() []arcD5Cell {
 			want: []string{"n=int64:3"}},
 	)
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// #538 / #578 — a correlated NOT IN keeps NOT IN's three-valued rule.
+//
+// It was lowered to a plain anti join, which answers the TWO-valued question
+// "did nothing match" — its NOT EXISTS twin. Measured against live PostgreSQL
+// 17 over the multikey fixture, three shapes answered 13 for 9, 6 and 9, on
+// all four arms and in silence; 13 is exactly what the corresponding NOT
+// EXISTS answers, which is the diagnosis.
+//
+// The lowering is now DECLINED (logical.correlatedNotInIsNotAnAntiJoin says
+// why an anti join cannot carry the rule and what would be needed to make one
+// that could), so the predicate stays a subquery and
+// expr.CorrelatedInSubquery.EvalBoolNull answers it per outer row. That is the
+// exact rule — and it costs a route on the DAG, which is what
+// `wantCorrRoutes: 1` records here rather than leaving to prose.
+func arcD5NotInCells() []arcD5Cell {
+	return []arcD5Cell{
+		{issue: "#578", name: "correlated_not_in_string_key",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s NOT IN (` +
+				`SELECT b.s FROM mk_inner b WHERE b.n = a.n)`,
+			want: []string{"n=int64:9"}, wantCorrRoutes: 1,
+			pgSays: "9; the NOT EXISTS twin answers 13, which is what the anti join gave"},
+		{issue: "#578", name: "correlated_not_in_integer_key",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n NOT IN (` +
+				`SELECT b.n FROM mk_inner b WHERE b.s = a.s)`,
+			want: []string{"n=int64:6"}, wantCorrRoutes: 1},
+		// The build key guarded IS NOT NULL, so the poison here comes from
+		// the PROBE's own NULL — #578's half that needs no per-group state.
+		{issue: "#578", name: "correlated_not_in_null_free_build_key",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s NOT IN (` +
+				`SELECT b.s FROM mk_inner b WHERE b.n = a.n AND b.s IS NOT NULL)`,
+			want: []string{"n=int64:9"}, wantCorrRoutes: 1},
+		{issue: "#538", name: "correlated_not_in_decimal_key",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.d NOT IN (` +
+				`SELECT b.d FROM mk_inner b WHERE b.n = a.n)`,
+			want: []string{"n=int64:5"}, wantCorrRoutes: 1},
+		// EVERY group is empty here, and that is the edge both a flag on the
+		// operator and a plain `x IS NOT NULL` conjunct get wrong: `x NOT IN
+		// ()` is TRUE for every row INCLUDING a NULL-keyed one, because there
+		// is nothing for the comparison to be UNKNOWN about. 40 of 40.
+		{issue: "#538", name: "correlated_not_in_every_group_empty",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s NOT IN (` +
+				`SELECT b.s FROM mk_inner b WHERE b.n = a.n AND b.id < 0)`,
+			want: []string{"n=int64:40"}, wantCorrRoutes: 1,
+			pgSays: "40 — an empty list makes NOT IN TRUE even for a NULL probe key"},
+		{issue: "#538", name: "correlated_not_in_over_a_cte",
+			sql: `WITH u AS (SELECT g AS did FROM typemx WHERE id < 50) ` +
+				`SELECT COUNT(*) AS c FROM u WHERE u.did NOT IN (` +
+				`SELECT d.k FROM typemx_dim d WHERE d.k = u.did)`,
+			want: []string{"c=int64:3"}, wantCorrRoutes: 1,
+			pgSays: "3 — and those 3 rows are exactly the NULL-keyed ones, whose group is empty"},
+		{issue: "#538", name: "correlated_not_in_self_join_key",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key = a.w_key)`,
+			want: []string{"n=int64:0"}, wantCorrRoutes: 1},
+		// The controls, which must keep their PLAN as well as their answer.
+		// The NOT EXISTS twin is what an anti join really means and still
+		// decorrelates (0 routes); the UNCORRELATED NOT IN keeps #507's
+		// null-aware anti join; and the correlated IN — which needs no
+		// third value — still decorrelates too. A fix that declined all
+		// three would pass a rows-only check and cost every one of them
+		// its join.
+		{issue: "#578", name: "control_correlated_not_exists_twin",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE NOT EXISTS (` +
+				`SELECT 1 FROM mk_inner b WHERE b.n = a.n AND b.s = a.s)`,
+			want: []string{"n=int64:13"}},
+		{issue: "#578", name: "control_uncorrelated_not_in_stays_null_aware",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s NOT IN (` +
+				`SELECT b.s FROM mk_inner b)`,
+			want:   []string{"n=int64:0"},
+			pgSays: "0 — mk_inner.s holds a NULL, which empties a NOT IN outright"},
+		{issue: "#578", name: "control_correlated_in_still_decorrelates",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s IN (` +
+				`SELECT b.s FROM mk_inner b WHERE b.n = a.n)`,
+			want: []string{"n=int64:27"}},
+		{issue: "#578", name: "control_uncorrelated_not_in_over_a_filter",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 3)`,
+			want: []string{"n=int64:5"}},
+	}
 }
 
 // ---------------------------------------------------------------------------

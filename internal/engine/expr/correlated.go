@@ -91,9 +91,6 @@ func (e *CorrelatedInSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 // the NOT IN trap, same rule as the uncorrelated InSubquery.
 func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	lv := e.Expr.Eval(b, row)
-	if lv == nil {
-		return false, true
-	}
 
 	sql, err := e.buildSQL(b, row)
 	if err != nil {
@@ -105,6 +102,21 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 		// answer, and returning "not a member" is the third of the three
 		// different wrong answers these evaluators gave to one event.
 		failEval(&SubqueryRunFailedError{Kind: "IN", SQL: sql, Err: runErr})
+	}
+
+	// The EMPTY set decides before the probe's own NULL does. `x IN ()` is
+	// FALSE and `x NOT IN ()` is TRUE for EVERY row, a NULL-keyed one
+	// included: both rules of the three-valued reading are about a
+	// COMPARISON, and over an empty set there is nothing to compare — the
+	// same edge `exec.HashJoin`'s null-aware anti join guards with
+	// `buildRows > 0` (#507). Reading the probe's NULL first answered UNKNOWN
+	// there and dropped the row: 36 rows for PostgreSQL's 40 on a correlated
+	// NOT IN whose every group is empty (#538/#578).
+	if len(rows) == 0 {
+		return e.Not, false
+	}
+	if lv == nil {
+		return false, true
 	}
 
 	sawNull := false

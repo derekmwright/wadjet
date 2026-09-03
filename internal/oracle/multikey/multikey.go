@@ -255,11 +255,12 @@ var pins = map[string]struct {
 	// where an error is still a failure.
 	loudLike, loudLikeDAG string
 }{
-	"notin_str_i64": {"#578", "a CORRELATED NOT IN is lowered to a plain anti join, so it " +
-		"answers its NOT EXISTS twin instead of NOT IN's three-valued rule (#507's remainder)", "", ""},
-	"notin_null_build_key": {"#578", "same: the correlated NOT IN answers the two-valued question", "", ""},
-	"notin_null_probe_key": {"#578", "same, and this one needs only the PROBE's own NULL key — " +
-		"the half of the rule that requires no per-group state", "", ""},
+	// The three notin_* entries were pinned here under #578 and are gone: a
+	// correlated NOT IN is no longer lowered to an anti join, which answers
+	// the two-valued question, so the predicate stays a subquery and
+	// expr.CorrelatedInSubquery.EvalBoolNull carries the three-valued rule
+	// per outer row. They are gated outright now.
+	//
 	// LOUD SINCE 2026-09-02 (#734/#679/#535, the consumer half). These four
 	// used to answer a WRONG NUMBER; they now FAIL the query. The re-run
 	// their per-row predicate produced could not be executed — the dropped

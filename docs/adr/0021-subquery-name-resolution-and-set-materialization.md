@@ -330,6 +330,69 @@ decline, so both DAG arms route it to the coordinator-local pipeline
 (`CorrelatedLocalRoutes` 1, asserted). Decorrelating THROUGH a derived-table
 inner is a producer repair and is not attempted here.
 
+### 1f. A correlated NOT IN is not an anti join
+
+(Added 2026-09-03, #538 / #578.)
+
+`x NOT IN (SELECT y FROM t WHERE <corr>)` is three-valued: TRUE only when x
+differs from every y in ITS OWN correlation group, FALSE when it equals one,
+and UNKNOWN — so WHERE drops the row — when x is NULL and the group is
+non-empty, or when the group holds a NULL y that x did not otherwise match.
+
+An anti join answers the TWO-valued question "did nothing match", which is its
+NOT EXISTS twin. Measured against live PostgreSQL 17 over the multikey
+fixture, three shapes answered 13 for 9, 6 and 9, on all four arms and in
+silence — and 13 is exactly what the corresponding NOT EXISTS answers, which
+is the diagnosis rather than a coincidence.
+
+`Node.NullAwareAnti` cannot express the correlated form, and #507's comment
+has said so since it shipped: the flag reads ONE fact off the WHOLE build side
+("did any row have a NULL key") and empties the output when it is true, so
+setting it here would drop every row the moment ANY group held a NULL, and
+#539 makes such a join replicate its build rather than shuffle. The fact this
+predicate needs is per correlation GROUP.
+
+**The rule now: a CORRELATED NOT IN is not lowered to a join at all.** It
+stays a subquery predicate, where `expr.CorrelatedInSubquery.EvalBoolNull`
+carries the exact rule per outer row. The uncorrelated form is unchanged and
+keeps #507's null-aware anti join; so does a correlated `IN`, which needs no
+third value.
+
+That evaluator had the same empty-set defect the operator guards against, and
+it is fixed here: `x NOT IN ()` is TRUE for EVERY row INCLUDING a NULL-keyed
+one, because both halves of the three-valued reading are about a COMPARISON
+and over an empty set there is nothing to compare. Reading the probe's NULL
+before the set answered UNKNOWN and dropped the row — 36 of 40 where
+PostgreSQL says 40, and 0 of 3 on the CTE spelling whose survivors ARE the
+NULL-keyed rows. The empty set now decides first, which is
+`exec.HashJoin`'s own `buildRows > 0` guard stated at the evaluator.
+
+**What was built, measured and NOT shipped**, because it does not work in this
+tree and the reason is worth recording. The identity
+
+	x NOT IN (SELECT y FROM t WHERE corr)
+	  ≡  NOT EXISTS (SELECT 1 FROM t WHERE corr AND y = x)
+	     AND NOT EXISTS (SELECT 1 FROM t WHERE corr AND (y IS NULL OR x IS NULL))
+
+lowers to an ordinary equi-key anti join beside a second one whose residual is
+`(y IS NULL OR x IS NULL)`. Both hash-partition like any other join, so
+neither needs #539's replicated build — it would keep the join AND the rule.
+It fails at the semi/anti residual: `physical.BuildSemiAntiFilter` reads the
+filter as TEXT (split on `" and "`, then find one of six comparison
+operators), so an OR and an IS NULL compile to NOTHING and are dropped in
+SILENCE, and `physical.extractFilterBuildColumns` narrows the stored build by
+the same text split and would delete the very column the residual reads.
+Measured with the two-join form in place: 0 rows for PostgreSQL's 9.
+
+That is the same class of defect as #562 — a decorrelation's rendering
+defeating a text splitter — one layer down. **Lifting this decline needs the
+semi/anti residual to be a real expression compiler and its build-column
+extractor to be AST-based**, and a filter neither can compile must be a
+refusal rather than a silent drop. Until then the decline is the honest
+lowering, and its cost is a route to the coordinator-local pipeline on both
+DAG arms, asserted as `CorrelatedLocalRoutes` 1 beside the rows in the
+correlation census rather than described here.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is

@@ -54,8 +54,14 @@ func TestMultiKeySemiJoinBuildSideEmitsEveryKey(t *testing.T) {
 			wantKeys: 2,
 		},
 		{
-			name:     "correlated NOT IN: the IN key plus two correlations",
-			sql:      `SELECT o_orderkey FROM orders a WHERE a.o_orderkey NOT IN (SELECT b.o_orderkey FROM orders b WHERE b.o_custkey = a.o_custkey AND b.o_orderstatus = a.o_orderstatus)`,
+			// The correlated NOT IN spelling of the same shape used to stand
+			// here with wantKeys 3. It is no longer lowered to a join at all
+			// — an anti join answers the two-valued question and NOT IN's
+			// third value is per correlation GROUP (#538/#578) — so the
+			// narrowing this test is about never sees it. Its NOT EXISTS
+			// twin, which IS what an anti join means, keeps the coverage.
+			name:     "correlated NOT EXISTS: two correlations plus an inner key",
+			sql:      `SELECT o_orderkey FROM orders a WHERE NOT EXISTS (SELECT 1 FROM orders b WHERE b.o_orderkey = a.o_orderkey AND b.o_custkey = a.o_custkey AND b.o_orderstatus = a.o_orderstatus)`,
 			wantKeys: 3,
 		},
 		{
