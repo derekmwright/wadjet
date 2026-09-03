@@ -445,6 +445,16 @@ func insertValueText(toks []token, tableName string, ordinal int) (string, error
 	switch {
 	case len(toks) == 0:
 		return "", fmt.Errorf("value %d of the VALUES tuple in INSERT INTO %s: empty value", ordinal, tableName)
+	case len(toks) == 1 && toks[0].typ == TokenString:
+		// RE-QUOTED. The lexer strips a string literal's quotes and resolves
+		// its doubled apostrophes, so a bare val cannot be told from the NULL
+		// keyword or from an identifier: `VALUES (9, 'NULL')` and
+		// `VALUES (9, NULL)` arrived at the converter as the same three
+		// letters, and the converter reads the word `null` as the keyword, so
+		// both stored a SQL NULL (#690). Quoting it back is what carries the
+		// literal's KIND through a []string, and convertValue reverses it
+		// exactly.
+		return "'" + strings.ReplaceAll(toks[0].val, "'", "''") + "'", nil
 	case len(toks) == 1:
 		return toks[0].val, nil
 	case len(toks) == 2 && toks[1].typ == TokenNumber && toks[0].typ == TokenMinus:

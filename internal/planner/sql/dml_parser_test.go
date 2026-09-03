@@ -151,8 +151,11 @@ func TestParseInsert_MultipleRows(t *testing.T) {
 	if len(q.Insert.Values) != 3 {
 		t.Fatalf("expected 3 value rows, got %d", len(q.Insert.Values))
 	}
-	if q.Insert.Values[1][0] != "Bob" {
-		t.Fatalf("expected row 1 val 0 = \"Bob\", got %q", q.Insert.Values[1][0])
+	// RE-QUOTED: a string literal's KIND has to survive a []string, and the
+	// quotes are the only thing that carries it. Bare, `'NULL'` and the NULL
+	// keyword were the same four letters and both stored a SQL NULL (#690).
+	if q.Insert.Values[1][0] != "'Bob'" {
+		t.Fatalf("expected row 1 val 0 = \"'Bob'\", got %q", q.Insert.Values[1][0])
 	}
 }
 
@@ -213,14 +216,20 @@ func TestParseInsert_ValueSplitting(t *testing.T) {
 		{"redundant_parens", `INSERT INTO t (a, b) VALUES ((1), 2)`, [][]string{{"1", "2"}}},
 		{"nested_parens_around_sign", `INSERT INTO t (a, b) VALUES (((-3)), 2)`,
 			[][]string{{"-3", "2"}}},
-		// A string literal keeps arriving unquoted, commas and parens inside
-		// it included: it is one lexer token and always was.
+		// A string literal arrives RE-QUOTED, commas and parens inside it
+		// included: it is one lexer token and always was, but the quotes are
+		// what tell the converter it is a STRING rather than the NULL keyword
+		// or an identifier. Unquoted, `'NULL'` and `NULL` were the same four
+		// letters and both stored a SQL NULL (#690). The doubled apostrophe
+		// the re-quote writes is the one convertValue un-doubles.
 		{"string_with_comma", `INSERT INTO t (a, b) VALUES (1, 'a, b')`,
-			[][]string{{"1", "a, b"}}},
+			[][]string{{"1", "'a, b'"}}},
 		{"string_with_paren", `INSERT INTO t (a, b) VALUES (1, 'has (paren)')`,
-			[][]string{{"1", "has (paren)"}}},
+			[][]string{{"1", "'has (paren)'"}}},
 		{"string_with_escaped_quote", `INSERT INTO t (a, b) VALUES (1, 'it''s')`,
-			[][]string{{"1", "it's"}}},
+			[][]string{{"1", "'it''s'"}}},
+		{"a string spelling NULL is not the keyword", `INSERT INTO t (a, b) VALUES (1, 'NULL')`,
+			[][]string{{"1", "'NULL'"}}},
 		{"null_keyword", `INSERT INTO t (a, b) VALUES (1, NULL)`, [][]string{{"1", "NULL"}}},
 		{"single_column", `INSERT INTO t (a) VALUES (-7)`, [][]string{{"-7"}}},
 	} {

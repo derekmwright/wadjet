@@ -2204,6 +2204,17 @@ func dmlLiteralText(n plansql.Node) (string, bool) {
 		if e.Kind == plansql.LitNull {
 			return "NULL", true
 		}
+		if e.Kind == plansql.LitString {
+			// RE-QUOTED, not bare. This returned e.Value for every kind,
+			// which collapsed LitNull and LitString{"NULL"} into the
+			// byte-identical text "NULL" — so `SET name = 'NULL'` stored a
+			// SQL NULL and `SET name = '''a'''` stored `a`, both reported as
+			// success (#690). Lit.String is the faithful re-quoting renderer
+			// that was already in the AST and unused here, and convertValue
+			// reverses it exactly: it tests the NULL keyword before stripping
+			// the quotes, and un-doubles what the re-quote doubled.
+			return e.String(), true
+		}
 		return e.Value, true
 	case *plansql.UnaryOp:
 		if e.Op != "-" && e.Op != "+" {
@@ -2377,14 +2388,36 @@ func convertTemporalValue(s string, typ parquet.TypeID) (any, error) {
 // resolved Decimal128 instead would change the box a DECIMAL partition key is
 // formatted from, and the check costs one parse per literal, not per row.
 func ConvertValueForColumn(s string, col parquet.Column) (any, error) {
-	v, err := convertValue(s, col.Type)
-	if err != nil || v == nil || col.Type != parquet.TypeDecimal {
-		return v, err
+	return decimalChecked(convertValue(s, col.Type))(col)
+}
+
+// ConvertTextForColumn converts RAW TEXT — not a SQL literal — to the box a
+// column stores.
+//
+// The difference from ConvertValueForColumn is the two rules that belong to
+// LITERAL text and to nothing else: the word `null` is the SQL keyword, and a
+// leading and trailing apostrophe are quoting. A COPY field is neither. It
+// used to go through the literal converter, so a COPY field spelled `NULL`
+// became a SQL NULL — even though COPY's own NULL marker is `\N` and is
+// handled before this — and a field whose text happened to begin and end with
+// an apostrophe silently lost both (#690's third site).
+func ConvertTextForColumn(s string, col parquet.Column) (any, error) {
+	return decimalChecked(convertUnquoted(strings.TrimSpace(s), col.Type))(col)
+}
+
+// decimalChecked is the shared tail of the two converters: a DECIMAL value is
+// judged against the column's declared (p, s) HERE, before the caller commits
+// anything destructive.
+func decimalChecked(v any, err error) func(parquet.Column) (any, error) {
+	return func(col parquet.Column) (any, error) {
+		if err != nil || v == nil || col.Type != parquet.TypeDecimal {
+			return v, err
+		}
+		if _, derr := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); derr != nil {
+			return nil, derr
+		}
+		return v, nil
 	}
-	if _, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); err != nil {
-		return nil, err
-	}
-	return v, nil
 }
 
 // convertValue's default case (return the trimmed, unquoted string as-is)
@@ -2439,16 +2472,30 @@ func ConvertValueForColumn(s string, col parquet.Column) (any, error) {
 func convertValue(s string, typ parquet.TypeID) (any, error) {
 	s = strings.TrimSpace(s)
 
-	// Handle NULL
+	// The NULL KEYWORD — and it is tested BEFORE the quotes come off, which
+	// is the whole of one half of #690: `'NULL'` is a three-letter STRING and
+	// must survive as one. It only survives if the text that reaches here is
+	// still quoted, which is why dmlLiteralText and insertValueText re-quote
+	// a string literal instead of handing over its bare value.
 	if strings.EqualFold(s, "null") {
 		return nil, nil
 	}
 
-	// Strip quotes for string literals
+	// Strip the quoting, and un-double the apostrophes the quoting doubled.
+	// The two are one transformation and neither is correct alone: stripping
+	// by itself is lossless only for values with no apostrophe in them, so
+	// `'''a'''` — the SQL spelling of the value `'a'` — lost one layer and
+	// stored `''a''` (#690).
 	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
-		s = s[1 : len(s)-1]
+		s = strings.ReplaceAll(s[1:len(s)-1], "''", "'")
 	}
 
+	return convertUnquoted(s, typ)
+}
+
+// convertUnquoted is convertValue's body: the text is already a VALUE, with
+// no SQL keyword and no quoting left in it.
+func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 	switch typ {
 	case parquet.TypeBool:
 		return strconv.ParseBool(s)

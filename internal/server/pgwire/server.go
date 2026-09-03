@@ -732,7 +732,13 @@ func (c *pgConn) handleCopyIn(sql string) {
 					}
 					// Unescape backslash sequences
 					val = unescapeCopyText(val)
-					v, err := wadjet.ConvertValueForColumn(val, colByName[colName])
+					// ConvertTextForColumn, not ConvertValueForColumn: a COPY
+					// field is raw text, not a SQL literal. The literal
+					// converter reads the word `null` as the keyword and
+					// strips a leading/trailing apostrophe, so a field
+					// spelled `NULL` became a SQL NULL — even though COPY's
+					// own NULL marker is `\N` and is handled above (#690).
+					v, err := wadjet.ConvertTextForColumn(val, colByName[colName])
 					if err != nil {
 						// The converter's own SQLSTATE, not a hardcoded
 						// 22P02: a DECIMAL field past the column's declared
