@@ -134,8 +134,33 @@ func (bc *BytesColumn) PreAllocBytes(n int) {
 // created with NewBytesColumn(capacity >= i+1). Values must be set in order
 // (i = 0, 1, 2, ...) because later offsets depend on prior data length.
 func (bc *BytesColumn) Set(i int, val []byte) {
+	bc.refuseValueIntoShapeOnly(len(val))
 	bc.Data = append(bc.Data, val...)
 	bc.Offsets[i+1] = uint32(len(bc.Data))
+}
+
+// refuseValueIntoShapeOnly is copyShapeRange's guard in the other direction,
+// and the two together are what keep one column from carrying both encodings.
+//
+// copyShapeRange refuses a SHAPE landing on a destination that holds VALUES.
+// This refuses n bytes of VALUE landing on a destination already marked
+// shape-only. Without it the mix was silent and produced a wrong LENGTH rather
+// than an error: the offsets advance by the appended bytes while the earlier
+// rows' offsets describe lengths of bytes that were never written, so the pair
+// goes descending and LengthAt's defence against a malformed pair answers 0.
+// Before #791 the mix was loud by accident — GetValue panicked on the shape
+// rows — and teaching the row boundary to box a length took that away, so the
+// guard is now explicit (ADR-0023 item 6: neither encoder may write bytes its
+// own reader refuses).
+//
+// ZERO bytes is not a value write. WriteNullAt advances a shape-only column's
+// offsets through Set(i, nil), and a zero-length row is the same thing
+// copyShapeRange writes for a zero-length shape row.
+func (bc *BytesColumn) refuseValueIntoShapeOnly(n int) {
+	if n > 0 && bc.ShapeOnly {
+		panic("batch: value bytes written into a shape-only BytesColumn — the scan decoded " +
+			"lengths only, so this column cannot also carry values (planner analysis bug)")
+	}
 }
 
 // SetString writes a string value at positional index i. Same contract as
@@ -144,6 +169,7 @@ func (bc *BytesColumn) Set(i int, val []byte) {
 // []byte(s) conversion first — one heap allocation per row on the
 // string-producing projection paths.
 func (bc *BytesColumn) SetString(i int, val string) {
+	bc.refuseValueIntoShapeOnly(len(val))
 	bc.Data = append(bc.Data, val...)
 	bc.Offsets[i+1] = uint32(len(bc.Data))
 }
@@ -155,6 +181,7 @@ func (bc *BytesColumn) SetString(i int, val string) {
 func (bc *BytesColumn) BulkSet(dstOffset int, srcData []byte, srcOffsets []uint32, n int) {
 	baseOff := uint32(len(bc.Data))
 	srcBase := srcOffsets[0]
+	bc.refuseValueIntoShapeOnly(int(srcOffsets[n] - srcBase))
 	bc.Data = append(bc.Data, srcData[srcBase:srcOffsets[n]]...)
 	for i := 0; i < n; i++ {
 		bc.Offsets[dstOffset+i+1] = baseOff + (srcOffsets[i+1] - srcBase)
@@ -172,6 +199,7 @@ func (dst *BytesColumn) BulkCopy(dstOff int, src *BytesColumn, srcOff, count int
 	baseOff := uint32(len(dst.Data))
 	srcStart := src.Offsets[srcOff]
 	srcEnd := src.Offsets[srcOff+count]
+	dst.refuseValueIntoShapeOnly(int(srcEnd - srcStart))
 	dst.Data = append(dst.Data, src.Data[srcStart:srcEnd]...)
 	for i := 0; i < count; i++ {
 		dst.Offsets[dstOff+i+1] = baseOff + (src.Offsets[srcOff+i+1] - srcStart)
@@ -189,6 +217,7 @@ func (dst *BytesColumn) SetFrom(di int, src *BytesColumn, si int) {
 	}
 	srcStart := src.Offsets[si]
 	srcEnd := src.Offsets[si+1]
+	dst.refuseValueIntoShapeOnly(int(srcEnd - srcStart))
 	dst.Data = append(dst.Data, src.Data[srcStart:srcEnd]...)
 	dst.Offsets[di+1] = uint32(len(dst.Data))
 }

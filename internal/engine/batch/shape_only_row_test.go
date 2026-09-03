@@ -159,3 +159,105 @@ func pstr(r any) string {
 	}
 	return ""
 }
+
+// TestShapeOnlyDestinationRefusesAValueWrite is the OTHER order of the same
+// confusion, and it was silent until the round-0 review found it.
+//
+// TestShapeOnlyLengthIsRefusedByAWrongDestination above covers value-then-shape.
+// This is shape-then-value: a column already marked shape-only, then real bytes
+// written into it through one of the four value writers. The offsets then
+// advance by the appended bytes while the earlier rows' offsets describe
+// lengths of bytes that were never written, the pair goes DESCENDING, and
+// LengthAt's defence against a malformed pair answers 0 — a wrong LENGTH, not
+// an error. Measured before the guard: `LengthAt=0 want 7`.
+//
+// Before #791 this mix was loud by accident, because GetValue panicked on the
+// shape rows; teaching the row boundary to box a length took that accident
+// away. So the guard is explicit now, and it is the mirror of copyShapeRange's
+// (ADR-0023 item 6).
+func TestShapeOnlyDestinationRefusesAValueWrite(t *testing.T) {
+	fresh := func() *Vector {
+		v := NewVector(TypeString, 4)
+		v.SetValue(0, ShapeOnlyLen(5))
+		v.SetValue(1, ShapeOnlyLen(5))
+		return v
+	}
+	src := NewVector(TypeString, 2)
+	src.SetValue(0, "abcdefg")
+	src.SetValue(1, "hij")
+
+	for _, tc := range []struct {
+		name  string
+		write func(*Vector)
+	}{
+		{"SetValue", func(v *Vector) { v.SetValue(2, "abcdefg") }},
+		{"Set", func(v *Vector) { v.BytesData.Set(2, []byte("abcdefg")) }},
+		{"SetString", func(v *Vector) { v.BytesData.SetString(2, "abcdefg") }},
+		{"SetFrom", func(v *Vector) { v.BytesData.SetFrom(2, &src.BytesData, 0) }},
+		{"BulkCopy", func(v *Vector) { v.BytesData.BulkCopy(2, &src.BytesData, 0, 2) }},
+		{"BulkSet", func(v *Vector) {
+			v.BytesData.BulkSet(2, src.BytesData.Data, src.BytesData.Offsets, 2)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := fresh()
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("%s wrote real bytes into a shape-only column and did not raise "+
+						"the guard; the offsets now disagree with the arena and LengthAt "+
+						"answers %d for a row whose length is 7",
+						tc.name, v.BytesData.LengthAt(2))
+				}
+				if !strings.Contains(strings.ToLower(pstr(r)), "shape-only") {
+					t.Fatalf("raised, but not by name: %v", r)
+				}
+			}()
+			tc.write(v)
+		})
+	}
+}
+
+// The row detour is the path #791 opened, so it gets the same fixture: a
+// FromRows whose rows mix shape-only lengths and real values must be refused,
+// not silently produce a column whose offsets lie.
+func TestFromRowsRefusesMixedShapeAndValueRows(t *testing.T) {
+	schema := []parquet.Column{{Name: "s", Type: parquet.TypeString, Nullable: true}}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("FromRows accepted a mix of shape-only lengths and real values in one " +
+				"column; the result's offsets describe bytes that are not there")
+		}
+		if !strings.Contains(strings.ToLower(pstr(r)), "shape-only") {
+			t.Fatalf("raised, but not by name: %v", r)
+		}
+	}()
+	FromRows(schema, []map[string]any{
+		{"s": ShapeOnlyLen(5)},
+		{"s": ShapeOnlyLen(5)},
+		{"s": "abcdefg"},
+	})
+}
+
+// The two things that must NOT be refused, because both are how a shape-only
+// column legitimately advances its offsets: a NULL row (WriteNullAt writes
+// zero bytes through Set) and a zero-length shape row.
+func TestShapeOnlyColumnStillAcceptsNullsAndEmptyRows(t *testing.T) {
+	v := NewVector(TypeString, 4)
+	v.SetValue(0, ShapeOnlyLen(5))
+	v.SetValue(1, nil) // WriteNullAt -> BytesData.Set(1, nil)
+	v.SetValue(2, ShapeOnlyLen(0))
+	v.SetValue(3, ShapeOnlyLen(4))
+	if !v.IsShapeOnly() {
+		t.Fatal("the column stopped being shape-only")
+	}
+	if !v.Nulls.IsNull(1) {
+		t.Error("row 1 lost its NULL")
+	}
+	for i, want := range []int{5, 0, 0, 4} {
+		if got := v.BytesData.LengthAt(i); got != want {
+			t.Errorf("row %d: LengthAt=%d want %d (offsets=%v)", i, got, want, v.BytesData.Offsets)
+		}
+	}
+}

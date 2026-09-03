@@ -159,10 +159,25 @@ Mechanisms, each with its instrumented evidence in the commit body:
    column. `exec.TestACollectSinkRefusesAShapeOnlyResultColumn` is the
    fixture that attempts the impossibility.
 
+   **The confusion is refused in BOTH directions.** A shape-only length
+   landing on a column that holds values was refused from the start
+   (`copyShapeRange`'s guard, and `setShapeOnlyLen`'s). The other order —
+   value bytes written into a column already marked shape-only, through
+   `Set`, `SetString`, `BulkSet`, `BulkCopy` or `SetFrom` — was SILENT, and
+   produced a wrong LENGTH rather than an error: the offsets advance by the
+   appended bytes while the earlier rows' offsets describe bytes that were
+   never written, the pair goes descending, and `LengthAt`'s defence against a
+   malformed pair answers 0. It was loud by accident before this decision,
+   because GetValue panicked on the shape rows, and boxing the length took
+   that accident away. `refuseValueIntoShapeOnly` is the mirror guard; zero
+   bytes is not a value write, because that is how `WriteNullAt` advances a
+   shape-only column's offsets.
+
    **The ClickBench Q28 family keeps the optimization.** Nothing in the
    planner changed: the plan-time decline this ADR refused below is still
-   refused, and `TestTPCHDuckDBOracleDifferential`'s engagement check — the
-   shape-only analysis must fire somewhere in the corpus — still fires.
+   refused, and the corpus engagement check — `ShapeOnlyColumnsPlanned` must
+   move somewhere in the corpus, `benchmarks/tpch/oracle_test.go:96`, inside
+   `TestTPCHOptimizationInvariance` — still fires.
 
 ## Alternatives rejected
 
