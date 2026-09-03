@@ -276,29 +276,58 @@ func TestFnSqrt(t *testing.T) {
 	}
 }
 
+// TestFnConcat asserts the CONCAT() FUNCTION's rule and TestFnConcatOp the
+// `||` OPERATOR's. They are two rules, and until #609 they were one function:
+// this test asserted `||`'s rule under CONCAT's name, which is the shape a
+// test takes when it was written from the implementation rather than from
+// PostgreSQL. Every expectation below was read off live PostgreSQL 17.
 func TestFnConcat(t *testing.T) {
 	// empty args -> empty string (sb.String() with no writes)
 	result := fnConcat([]any{})
 	if result != "" {
 		t.Errorf("expected empty string for no args, got %v", result)
 	}
-	// nil arg returns nil (SQL convention)
-	if fnConcat([]any{nil}) != nil {
-		t.Error("nil arg should return nil")
+	// A NULL argument is IGNORED, and CONCAT of only NULLs is the empty
+	// string — never NULL. PostgreSQL 17: `SELECT CONCAT(NULL)` = ''.
+	if got := fnConcat([]any{nil}); got != "" {
+		t.Errorf("CONCAT(NULL) = %#v, want \"\" (PostgreSQL 17 ignores a NULL argument)", got)
+	}
+	if got := fnConcat([]any{nil, nil}); got != "" {
+		t.Errorf("CONCAT(NULL, NULL) = %#v, want \"\"", got)
 	}
 	// Single arg
 	if fnConcat([]any{"hello"}) != "hello" {
 		t.Error("single")
 	}
-	// Multiple args - any nil returns nil
-	result = fnConcat([]any{"a", nil, "b"})
-	if result != nil {
-		t.Errorf("expected nil for concat with nil arg, got %v", result)
+	// PostgreSQL 17: `SELECT CONCAT('a', NULL, 'b')` = 'ab'.
+	if got := fnConcat([]any{"a", nil, "b"}); got != "ab" {
+		t.Errorf("CONCAT('a', NULL, 'b') = %#v, want \"ab\"", got)
 	}
 	// Multiple args all non-nil
 	result = fnConcat([]any{"a", "b", "c"})
 	if result != "abc" {
 		t.Errorf("expected 'abc', got %v", result)
+	}
+}
+
+// TestFnConcatOp is the RATCHET on the other half of #609: the `||` operator
+// PROPAGATES NULL, which is the rule that was already right and which a fix
+// aimed at CONCAT could only break.
+func TestFnConcatOp(t *testing.T) {
+	if got := fnConcatOp([]any{nil}); got != nil {
+		t.Errorf("NULL || nothing = %#v, want nil (PostgreSQL 17 propagates)", got)
+	}
+	if got := fnConcatOp([]any{"a", nil, "b"}); got != nil {
+		t.Errorf("'a' || NULL || 'b' = %#v, want nil", got)
+	}
+	if got := fnConcatOp([]any{"a", "b"}); got != "ab" {
+		t.Errorf("'a' || 'b' = %#v, want \"ab\"", got)
+	}
+	// And the two are not the same function: the day a refactor points them
+	// at one kernel again, this fails.
+	if got := fnConcat([]any{"a", nil, "b"}); got == fnConcatOp([]any{"a", nil, "b"}) {
+		t.Errorf("CONCAT and || answered the same thing (%#v) for a NULL argument; "+
+			"they are two rules and #609 is that they shared one kernel", got)
 	}
 }
 

@@ -91,6 +91,17 @@ var unimplementedAggregates = map[string]bool{
 // expr.Compile of count(*) is a supported call. Those pass through untouched;
 // this function only decides the fate of names nothing claims.
 func checkKnown(name string) error {
+	// ConcatOpFunc is the `||` OPERATOR's implementation, registered under
+	// punctuation so that CONCAT cannot reach it and it cannot reach CONCAT
+	// (#609). It is NOT a function anyone may call: the lexer hands a
+	// DELIMITED identifier through to the call path, so `SELECT "||"(a, b)`
+	// would otherwise resolve to the operator's kernels — and PostgreSQL 17
+	// answers 42883 `function ||(text, text) does not exist` for exactly that
+	// spelling. The operator's own compile never asks: compile.go's BinaryOp
+	// arm builds the call through compileFuncCallNamed with the check off.
+	if name == ConcatOpFunc {
+		return &UnknownFuncError{Name: name}
+	}
 	if DefaultRegistry.Has(name) || plansql.IsAggregate(name) {
 		return nil
 	}
@@ -159,6 +170,14 @@ func IsUnknownFunc(err error) bool {
 func nearestFunc(name string) string {
 	best, bestDist := "", 3
 	for _, cand := range DefaultRegistry.Names() {
+		// The `||` OPERATOR's implementation is in the registry but is not a
+		// function anyone may call (checkKnown refuses it), so suggesting it
+		// answered `unknown function: || (did you mean ||?)` — the index
+		// proposing the very name it had just refused. Nothing else in the
+		// registry is unspellable, so this is the whole exclusion (#609).
+		if cand == ConcatOpFunc {
+			continue
+		}
 		// Length alone rules out most of a 300-entry registry.
 		if d := len(cand) - len(name); d > 2 || d < -2 {
 			continue

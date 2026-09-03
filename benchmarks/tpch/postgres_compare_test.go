@@ -643,21 +643,18 @@ func postgresRowFieldCases() []pgCase {
 	// A field as a FUNCTION ARGUMENT, where the box has to be undone: the
 	// engine hands a field over the way a column of its type is handed over,
 	// and every family that renders one has to accept a field path too.
-	out = append(out, pgCase{
-		name:  "RowFieldTextFunctions",
-		sql:   `SELECT k, UPPER(rw.a) AS u, LENGTH(rw.a) AS l, CONCAT('x=', rw.b) AS c FROM ` + tbl + ` ORDER BY k`,
-		pgSQL: `SELECT k, UPPER((rw).a) AS u, LENGTH((rw).a) AS l, CONCAT('x=', (rw).b) AS c FROM ` + tbl + ` ORDER BY k`,
-		// The UPPER and LENGTH columns are GATED and pass; the pin is the
-		// CONCAT one, and it is not about field paths at all. PostgreSQL's
-		// CONCAT IGNORES a NULL argument — that is what distinguishes it from
-		// `||` — and wadjet's propagates, so `CONCAT('x=', <null>)` is NULL
-		// here and 'x=' there. A flat column and a bare NULL literal diverge
-		// identically; this entry is only where it happened to be caught.
-		knownBug: pgBugWadjet + " CONCAT propagates NULL where PostgreSQL ignores it, so " +
-			"CONCAT('x=', <null field>) is NULL here and 'x=' there. Not field-path specific: " +
-			"CONCAT('a', NULL, 'b') answers NULL over a flat column and a bare literal too",
-		issue: "#609",
-	})
+	add("RowFieldTextFunctions",
+		`SELECT k, UPPER(rw.a) AS u, LENGTH(rw.a) AS l, CONCAT('x=', rw.b) AS c FROM `+tbl+` ORDER BY k`,
+		`SELECT k, UPPER((rw).a) AS u, LENGTH((rw).a) AS l, CONCAT('x=', (rw).b) AS c FROM `+tbl+` ORDER BY k`)
+	// The `||` twin of the CONCAT column above, over the same NULL field.
+	// PostgreSQL's two spellings answer DIFFERENTLY on a NULL — CONCAT
+	// ignores it, `||` propagates it — and until #609 they were one pair of
+	// kernels here, so a fix at one is a regression at the other unless both
+	// are gated. This entry is the second half; the first is the CONCAT
+	// column beside it (which was pinned, and the pin is gone as the proof).
+	add("RowFieldPipeConcatPropagatesNull",
+		`SELECT k, 'x=' || CAST(rw.b AS VARCHAR) AS c FROM `+tbl+` ORDER BY k`,
+		`SELECT k, 'x=' || CAST((rw).b AS VARCHAR) AS c FROM `+tbl+` ORDER BY k`)
 	// Arithmetic over an integer field stays INTEGER, the way it does over an
 	// integer column (#297's rule).
 	add("RowFieldIntArithmetic",
@@ -797,6 +794,39 @@ func postgresSemanticsCases() []pgCase {
 		// direction and on placement.
 		pgCase{name: "NullOrderSecondKey", sql: `SELECT n_regionkey AS r, NULLIF(n_nationkey % 5, 1) AS k, n_name
 			FROM nation ORDER BY r DESC, k DESC NULLS LAST, n_name`},
+
+		// --- CONCAT versus `||` on a NULL (#609) -------------------------
+		//
+		// PostgreSQL's two spellings of string concatenation answer
+		// DIFFERENTLY on a NULL: CONCAT() IGNORES a NULL argument (and
+		// CONCAT of only NULLs is the empty string, not NULL), while `||`
+		// PROPAGATES it. They were ONE pair of kernels here until #609 —
+		// compile.go lowered `||` to concat() — so exactly one of them could
+		// be right, and the one that was right was `||`.
+		//
+		// The corpus had no flat-column and no bare-literal entry for either:
+		// the only CONCAT-with-NULL case in it was a ROW FIELD path, which is
+		// where the divergence happened to be caught rather than where it
+		// lives. Both spellings ride here, over a flat column made NULL by
+		// NULLIF and over a bare literal, so a fix at one that regresses the
+		// other cannot pass.
+		pgCase{name: "ConcatIgnoresNullColumn", sql: `SELECT n_nationkey AS k,
+			CONCAT('r=', NULLIF(n_regionkey, 1)) AS c FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "PipeConcatPropagatesNullColumn", sql: `SELECT n_nationkey AS k,
+			'r=' || CAST(NULLIF(n_regionkey, 1) AS VARCHAR) AS c FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "ConcatIgnoresNullLiteral", sql: `SELECT CONCAT('a', NULL, 'b') AS c
+			FROM nation WHERE n_nationkey = 0`},
+		pgCase{name: "ConcatOfOnlyNullsIsEmptyString", sql: `SELECT CONCAT(NULL, NULL) AS c
+			FROM nation WHERE n_nationkey = 0`},
+		pgCase{name: "PipeConcatWithNullLiteral", sql: `SELECT 'a' || NULL AS c
+			FROM nation WHERE n_nationkey = 0`},
+		// CONCAT_WS was already PostgreSQL's rule and is the model the fix
+		// copied — it skips NULL VALUES and answers NULL only for a NULL
+		// SEPARATOR. Both halves are here so the model itself is gated.
+		pgCase{name: "ConcatWsSkipsNullValues", sql: `SELECT CONCAT_WS('-', 'a', NULL, 'b') AS c
+			FROM nation WHERE n_nationkey = 0`},
+		pgCase{name: "ConcatWsNullSeparatorIsNull", sql: `SELECT CONCAT_WS(NULL, 'a', 'b') AS c
+			FROM nation WHERE n_nationkey = 0`},
 	)
 
 	// --- DECIMAL predicates ---------------------------------------------

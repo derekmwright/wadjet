@@ -2574,6 +2574,13 @@ type FuncCall struct {
 // emits raw epoch-ms), and these functions must stay consistent with
 // result-output rendering.
 var stringInputFuncs = map[string]bool{
+	// The `||` operator is here for the same reason `concat` is: it reads
+	// every argument as text, so an IPv4/MAC/DATE column on either side has
+	// to be rendered rather than read as its raw encoded integer. Splitting
+	// it out of `concat` for #609 would otherwise have silently taken that
+	// rendering away from `ipv4_col || '/24'` (#500's defect, restored).
+	ConcatOpFunc: true,
+
 	"upper": true, "lower": true, "concat": true, "length": true,
 	"len": true, "substr": true, "substring": true, "trim": true,
 	"ltrim": true, "rtrim": true, "replace": true, "reverse": true,
@@ -3701,8 +3708,14 @@ func init() {
 		"upper":  {fnUpper, RetString},
 		"lower":  {fnLower, RetString},
 		"concat": {fnConcat, RetString},
-		"length": {fnLength, RetInt32},
-		"len":    {fnLength, RetInt32},
+		// ConcatOpFunc is the `||` OPERATOR, not a function anyone can call:
+		// its name is punctuation, which no SQL identifier — delimited or
+		// not — can be. It is registered here rather than compiled inline so
+		// it inherits the declared String return type and the vec dispatch
+		// (#328), while keeping CONCAT's NULL rule off it (#609).
+		ConcatOpFunc: {fnConcatOp, RetString},
+		"length":     {fnLength, RetInt32},
+		"len":        {fnLength, RetInt32},
 		// length() has always counted BYTES here (see fnLength), so
 		// octet_length is an exact alias and bit_length is 8x. The rune-counting
 		// member of the family is char_length/character_length below. These
@@ -4161,6 +4174,7 @@ func init() {
 		"left":             vecLeft,
 		"right":            vecRight,
 		"concat":           vecConcat,
+		ConcatOpFunc:       vecConcatOp,
 		"starts_with":      vecStartsWith,
 		"ends_with":        vecEndsWith,
 		"contains":         vecContains,
@@ -4202,11 +4216,47 @@ func fnLower(args []any) any {
 	return strings.ToLower(toString(args[0]))
 }
 
+// ConcatOpFunc is the registry name of the `||` OPERATOR's implementation.
+//
+// It is punctuation on purpose. A registry entry is reachable from SQL only
+// if a query can spell its name, and no SQL identifier — bare or delimited —
+// is `||`: the lexer reads those two bytes as an operator token before any
+// identifier rule sees them. So the operator's NULL-propagating kernels
+// cannot be invoked as a function, and `CONCAT` cannot reach them (#609).
+// The census carries a fixture that attempts both spellings, because
+// "unspellable" is a claim and the protocol's method 10 says a claim gets a
+// fixture rather than a comment.
+const ConcatOpFunc = "||"
+
+// fnConcat is the CONCAT() FUNCTION, which IGNORES NULL arguments —
+// `CONCAT('a', NULL, 'b')` is `ab` and `CONCAT(NULL, NULL)` is the EMPTY
+// STRING, never NULL (PostgreSQL 17; ADR-0012 makes it the authority). It is
+// fnConcatWS without a separator, which is where the rule was already right
+// (#609).
+//
+// The `||` OPERATOR is the other rule and has its own kernels below: it
+// propagates NULL. The two were one function until #609, which is why
+// making this one NULL-tolerant is only half the fix.
 func fnConcat(args []any) any {
 	var sb strings.Builder
 	for _, a := range args {
 		if a == nil {
-			return nil // SQL concat with NULL returns NULL
+			continue
+		}
+		sb.WriteString(toString(a))
+	}
+	return sb.String()
+}
+
+// fnConcatOp is the `||` OPERATOR: NULL in any operand makes the whole
+// expression NULL. Registered under a name no SQL identifier can spell, so
+// the operator and the function cannot be confused for one another by a
+// query — compile.go lowers `||` to it (#609).
+func fnConcatOp(args []any) any {
+	var sb strings.Builder
+	for _, a := range args {
+		if a == nil {
+			return nil
 		}
 		sb.WriteString(toString(a))
 	}
@@ -11216,7 +11266,32 @@ func vecRight(args []*batch.Vector, out *batch.Vector, n int) {
 	}
 }
 
+// vecConcat is fnConcat's kernel: a NULL argument contributes nothing and
+// the row is never NULL. The row and vector paths are separately reachable —
+// which one runs depends on whether every argument is a byte-array-shaped
+// vector (see FuncCall.EvalVec) — so both carry the rule (#609).
 func vecConcat(args []*batch.Vector, out *batch.Vector, n int) {
+	for i := 0; i < n; i++ {
+		total := 0
+		for _, arg := range args {
+			if arg.Nulls.HasNulls() && arg.Nulls.IsNullFast(i) {
+				continue
+			}
+			total += int(arg.BytesData.Offsets[i+1] - arg.BytesData.Offsets[i])
+		}
+		buf := make([]byte, 0, total)
+		for _, arg := range args {
+			if arg.Nulls.HasNulls() && arg.Nulls.IsNullFast(i) {
+				continue
+			}
+			buf = append(buf, arg.BytesData.Value(i)...)
+		}
+		out.BytesData.Set(i, buf)
+	}
+}
+
+// vecConcatOp is fnConcatOp's kernel: the `||` operator, NULL-propagating.
+func vecConcatOp(args []*batch.Vector, out *batch.Vector, n int) {
 	for i := 0; i < n; i++ {
 		isNull := false
 		for _, arg := range args {

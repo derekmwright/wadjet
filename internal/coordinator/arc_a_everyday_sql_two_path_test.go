@@ -39,6 +39,13 @@ type arcACell struct {
 	// the shape is LOUD, and PostgreSQL refuses it too (or wadjet
 	// deliberately does — the cell's comment says which).
 	wantErrLike string
+	// wantErrLikeDAG, when set, is what the two DAG arms' error must carry
+	// instead. It exists because a stage carries its projection as TEXT and
+	// the worker RE-PARSES it, so a refusal the single-process compiler makes
+	// by NAME the DAG makes at the LEXER — same disposition (loud, no rows),
+	// different message. Recording both is the honest form; asserting one
+	// substring for both would have meant weakening it to nothing.
+	wantErrLikeDAG string
 	// wantCorrRoutes is the CorrelatedLocalRoutes delta each DAG arm must
 	// show for this shape. 0 = the DAG executed it.
 	wantCorrRoutes int64
@@ -201,6 +208,128 @@ func arcACells() []arcACell {
 		{issue: "#670", name: "control_grouped_count_unchanged",
 			sql:  `SELECT COUNT(m1) AS cm, COUNT(*) AS cr FROM typemx WHERE id < 20`,
 			want: []string{"cm=int64:19|cr=int64:20"}},
+
+		// ------------------------------------------------------------------
+		// #609 — `CONCAT` propagated NULL where PostgreSQL 17 IGNORES it.
+		// `CONCAT('x=', g)` answered NULL for a row whose g is NULL, where
+		// PostgreSQL answers 'x='; `CONCAT(NULL, NULL)` answered NULL where
+		// PostgreSQL answers ''.
+		//
+		// THE TRAP, and why half of this block is `||` cells: `||` was
+		// COMPILED AS `concat` (compile.go's BinaryOp arm, #328), so the two
+		// spellings were ONE pair of kernels — and the rules differ. Making
+		// the kernels NULL-tolerant would have made `||` ignore NULL too,
+		// which is the opposite of PostgreSQL and turns a CORRECT answer
+		// wrong. The `||` cells below are RATCHETS, not coverage: they carry
+		// the answer that was already right, over a NULL COLUMN and over a
+		// NULL LITERAL, on all four arms.
+		//
+		// Every cell carries a FROM: a table-less SELECT cannot run on the
+		// DAG at all (#806, below), which is a different defect and must not
+		// be what these cells measure.
+		//
+		// The two kernels are separately reachable and both carry the rule.
+		// `CONCAT('x=', g)` over an INT32 column takes the PER-ROW path (the
+		// vec dispatch refuses a non-byte-array text argument), and
+		// `CONCAT(c_str, '|', c_str)` over a STRING column takes the
+		// VECTORIZED one — so both spellings appear.
+		{issue: "#609", name: "concat_over_a_null_column_per_row_path",
+			sql: `SELECT id AS i, CONCAT('x=', g) AS v FROM typemx WHERE id IN (12,13,14) ORDER BY id`,
+			want: []string{
+				"i=int64:12|v=x=", "i=int64:13|v=x=6", "i=int64:14|v=x=0"}},
+		{issue: "#609", name: "concat_over_a_null_column_vector_path",
+			sql: `SELECT id AS i, CONCAT(c_str, '|', c_str) AS v FROM typemx ` +
+				`WHERE id IN (41,42,43) ORDER BY id`,
+			want: []string{
+				"i=int64:41|v=s-000041|s-000041", "i=int64:42|v=|",
+				"i=int64:43|v=s-000043|s-000043"}},
+		{issue: "#609", name: "concat_of_a_null_literal",
+			sql:  `SELECT CONCAT('a', NULL, 'b') AS v FROM typemx WHERE id = 0`,
+			want: []string{"v=ab"}},
+		{issue: "#609", name: "concat_of_only_nulls_is_the_empty_string",
+			sql:  `SELECT CONCAT(NULL, NULL) AS v FROM typemx WHERE id = 0`,
+			want: []string{"v="}},
+		// RATCHETS. `||` must keep PROPAGATING NULL.
+		{issue: "#609", name: "ratchet_pipe_over_a_null_column",
+			sql: `SELECT id AS i, 'x=' || CAST(g AS STRING) AS v FROM typemx ` +
+				`WHERE id IN (12,13,14) ORDER BY id`,
+			want: []string{
+				"i=int64:12|v=NULL", "i=int64:13|v=x=6", "i=int64:14|v=x=0"}},
+		{issue: "#609", name: "ratchet_pipe_over_a_null_string_column_vector_path",
+			sql: `SELECT id AS i, c_str || '|' || c_str AS v FROM typemx ` +
+				`WHERE id IN (41,42,43) ORDER BY id`,
+			want: []string{
+				"i=int64:41|v=s-000041|s-000041", "i=int64:42|v=NULL",
+				"i=int64:43|v=s-000043|s-000043"}},
+		{issue: "#609", name: "ratchet_pipe_with_a_null_literal",
+			sql:  `SELECT 'a' || NULL AS v FROM typemx WHERE id = 0`,
+			want: []string{"v=NULL"}},
+		{issue: "#609", name: "ratchet_null_literal_pipe_left",
+			sql:  `SELECT NULL || 'b' AS v FROM typemx WHERE id = 0`,
+			want: []string{"v=NULL"}},
+		// CONCAT_WS was already PostgreSQL's rule and is the model the fix
+		// copied; it must not move.
+		{issue: "#609", name: "control_concat_ws_unchanged",
+			sql:  `SELECT CONCAT_WS('-', 'a', NULL, 'b') AS v FROM typemx WHERE id = 0`,
+			want: []string{"v=a-b"}},
+		// The `||` operator READS EVERY ARGUMENT AS TEXT, exactly as CONCAT
+		// does, so a column whose box is a raw encoded integer — IPv4, MAC,
+		// DATE — has to be RENDERED before it is concatenated. That rendering
+		// is not in either kernel: it is `stringInputFuncs` MEMBERSHIP, which
+		// `concat` has and which `||` INHERITED until #609 split them.
+		//
+		// The replacement entry (`ConcatOpFunc: true`) had no gate. Deleting
+		// it makes `c_ipv4 || '/24'` PANIC on single and spilled — a vec
+		// kernel indexing a zero-length Offsets slice, #509's dead-server
+		// class — and answer `167772161/24` on both DAG arms, #500's
+		// raw-encoded-integer class. Both have shipped before, which is why
+		// the comment on that line was not enough (protocol method 10).
+		//
+		// Each cell carries BOTH SPELLINGS IN ONE QUERY. What is asserted is
+		// the property the entry buys — the operator renders what the function
+		// renders — rather than a literal a later rendering change would have
+		// to chase. The MAC and DATE values are also PostgreSQL 17's
+		// `macaddr::text` and `date::text`; the IPv4 one is not, because
+		// PostgreSQL's `inet` carries a netmask and prints `10.0.0.1/32` while
+		// wadjet's IPV4 is a bare address — a type difference, not a rendering
+		// one.
+		{issue: "#609", name: "pipe_renders_a_network_column_like_concat",
+			sql: `SELECT c_ipv4 || '/24' AS p, CONCAT(c_ipv4, '/24') AS f ` +
+				`FROM typemx WHERE id = 1`,
+			want: []string{"p=10.0.0.1/24|f=10.0.0.1/24"}},
+		{issue: "#609", name: "pipe_renders_a_mac_column_like_concat",
+			sql: `SELECT c_mac || '!' AS p, CONCAT(c_mac, '!') AS f ` +
+				`FROM typemx WHERE id = 1`,
+			want: []string{"p=aa:bb:cc:00:00:01!|f=aa:bb:cc:00:00:01!"}},
+		{issue: "#609", name: "pipe_renders_a_date_column_like_concat",
+			sql: `SELECT c_date || 'x' AS p, CONCAT(c_date, 'x') AS f ` +
+				`FROM typemx WHERE id = 1`,
+			want: []string{"p=2011-02-02x|f=2011-02-02x"}},
+		// FLOAT32 is the one type on `boxedTextOperand`'s list that the
+		// FUNCTION-ARGUMENT rewrite does not reach, so BOTH spellings
+		// concatenate the float64 widening where PostgreSQL 17 prints the
+		// float32 shortest round-trip (`0.14285715x`). Pre-existing and SHARED
+		// by the two spellings — which is exactly what says the split did not
+		// cause it — and pinned here rather than described, so the day either
+		// spelling moves this cell fails.
+		{issue: "#609", name: "boundary_float32_concat_widens_on_both_spellings",
+			sql: `SELECT c_f32 || 'x' AS p, CONCAT(c_f32, 'x') AS f ` +
+				`FROM typemx WHERE id = 1`,
+			want: []string{"p=0.1428571492433548x|f=0.1428571492433548x"},
+			pgSays: "0.14285715x for both — the float32 shortest round-trip, which " +
+				"CAST and LIKE already render (#521) and the function-argument path does not"},
+		// The `||` operator's kernels are registered under a name that is
+		// PUNCTUATION so CONCAT cannot reach them. "No query can spell it" is
+		// a CLAIM, and the protocol's method 10 says a claim gets a fixture
+		// that ATTEMPTS it rather than a comment: the lexer does hand a
+		// DELIMITED identifier to the call path, so this spelling reaches the
+		// registry — and is refused there, which is what PostgreSQL 17 does
+		// (`function ||(text, text) does not exist`, 42883).
+		{issue: "#609", name: "the_operators_registry_name_is_not_callable",
+			sql:            `SELECT "||"('a','b') AS v FROM typemx WHERE id = 0`,
+			wantErrLike:    "unknown function",
+			wantErrLikeDAG: `unexpected token "||"`,
+			pgSays:         `42883 function ||(text, text) does not exist`},
 	}
 }
 
@@ -231,15 +360,19 @@ func TestArcAEverydaySQLMatchesPostgres(t *testing.T) {
 			check := func(arm string, got []string, err error) {
 				t.Helper()
 				if tc.wantErrLike != "" {
+					wantErr := tc.wantErrLike
+					if tc.wantErrLikeDAG != "" && strings.HasPrefix(arm, "dag") {
+						wantErr = tc.wantErrLikeDAG
+					}
 					if err == nil {
 						t.Errorf("%s arm: answered %v, but this shape must be LOUD\n"+
 							"  want an error containing %q\n  PostgreSQL 17: %s\n  SQL: %s",
-							arm, got, tc.wantErrLike, tc.pgSays, tc.sql)
+							arm, got, wantErr, tc.pgSays, tc.sql)
 						return
 					}
-					if !strings.Contains(err.Error(), tc.wantErrLike) {
+					if !strings.Contains(err.Error(), wantErr) {
 						t.Errorf("%s arm: error %v\n  want one containing %q\n  SQL: %s",
-							arm, err, tc.wantErrLike, tc.sql)
+							arm, err, wantErr, tc.sql)
 					}
 					return
 				}

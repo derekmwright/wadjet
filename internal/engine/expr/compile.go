@@ -195,14 +195,20 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 
 	case *plansql.BinaryOp:
 		if n.Op == "||" {
-			// SQL string concatenation. Compiled as concat() so it shares
-			// that function's scalar and vectorized kernels and its
-			// declared String return type — BinOp.Eval only knows
-			// arithmetic, and returned NULL for every row (#328).
-			return compileFuncCallNode(&plansql.FuncCallNode{
-				Name: "concat",
+			// SQL string concatenation. Compiled as a registered function so
+			// it gets a scalar and a vectorized kernel and a declared String
+			// return type — BinOp.Eval only knows arithmetic, and returned
+			// NULL for every row (#328).
+			//
+			// The function it lowers to is ConcatOpFunc, NOT `concat`. They
+			// were the same function until #609, and they answer differently
+			// on a NULL: PostgreSQL's CONCAT() IGNORES a NULL argument while
+			// `||` PROPAGATES it. Sharing one kernel meant only one of the
+			// two could be right, and the one that was right was `||`.
+			return compileFuncCallNamed(&plansql.FuncCallNode{
+				Name: ConcatOpFunc,
 				Args: []plansql.Node{n.Left, n.Right},
-			}, ctx)
+			}, ctx, false)
 		}
 		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
@@ -932,6 +938,18 @@ func compileLit(n *plansql.Lit) (Expr, error) {
 }
 
 func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, error) {
+	return compileFuncCallNamed(n, ctx, true)
+}
+
+// compileFuncCallNamed is compileFuncCallNode with the "may a query spell
+// this name" check made optional.
+//
+// checked=false is for a call this compiler MINTS rather than reads. Today
+// that is only the `||` operator, whose kernels are registered under a name
+// no query may spell precisely so that CONCAT cannot reach them (#609) — so
+// the name check that exists to refuse `SELECT "||"(a, b)` must not also
+// refuse the operator it implements.
+func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked bool) (Expr, error) {
 	name := strings.ToLower(n.Name)
 
 	var args []Expr
@@ -952,8 +970,10 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 		return &Coalesce{Args: args}, nil
 	}
 
-	if err := checkKnown(name); err != nil {
-		return nil, err
+	if checked {
+		if err := checkKnown(name); err != nil {
+			return nil, err
+		}
 	}
 
 	// element_at / the x[k] subscript route MAP key lookup vs. ARRAY index

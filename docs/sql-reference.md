@@ -656,7 +656,7 @@ FROM flow_logs
 | `*` | Multiplication |
 | `/` | Division |
 | `%` | Modulo |
-| `\|\|` | String concatenation |
+| `\|\|` | String concatenation — NULL in either operand makes the result NULL (use `CONCAT` to ignore NULLs) |
 
 ## DISTINCT
 
@@ -818,7 +818,7 @@ Wadjet includes 358 built-in scalar functions across several categories.
 |----------|-------------|---------|
 | `UPPER(s)` | Uppercase | `UPPER(protocol)` |
 | `LOWER(s)` | Lowercase | `LOWER(hostname)` |
-| `CONCAT(a, b, ...)` | Concatenate strings | `CONCAT(src_ip, ':', src_port)` |
+| `CONCAT(a, b, ...)` | Concatenate strings; **NULL arguments are ignored** (all-NULL gives `''`, never NULL) — `\|\|` propagates NULL instead | `CONCAT(src_ip, ':', src_port)` |
 | `LENGTH(s)` / `LEN(s)` | String length in **bytes** (use `CHAR_LENGTH` for characters) | `LENGTH(message)` |
 | `SUBSTR(s, start, len)` | Extract substring | `SUBSTR(message, 1, 50)` |
 | `TRIM(s)` | Remove leading/trailing whitespace | `TRIM(hostname)` |

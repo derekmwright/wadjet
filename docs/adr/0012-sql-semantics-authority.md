@@ -1052,6 +1052,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     sweep, `wadjet.TestLikeAnswersTheSameAtBothSites`, which already covered
     every flat type and is what caught FLOAT32 for LIKE in the first place.)
 
+    **A FLOAT32 concatenated as TEXT is rendered at FLOAT64 WIDTH, and that
+    is a recorded divergence.** (Added 2026-09-02, #609's review.) The
+    paragraph above says a FLOAT32's text is `0.14285715`, its shortest
+    round-trip, and that is what `CAST` and `LIKE` answer — they share
+    `boxedTextOperand`, whose type list has FLOAT32 on it since #521. The
+    FUNCTION-ARGUMENT path does not: `expr.ColRef.Eval` widens a FLOAT32 to
+    float64 on the way out and the text kernels stringify that, so
+    `CONCAT(c_f32, 'x')` and `c_f32 || 'x'` both answer
+    `0.1428571492433548x` where PostgreSQL 17 answers `0.14285715x`
+    (`(1.0::real/7.0::real)::text || 'x'`, verified live).
+
+    It is recorded rather than left to be re-found because it is one type's
+    text having TWO renderings inside one engine — the shape this item exists
+    to close — and because the #609 split of `||` from `CONCAT` is where a
+    reader will look for it. BOTH spellings answer alike, which is precisely
+    what says the split did not cause it: the divergence is older than the
+    split and belongs to the float32 renderer on the function-argument path,
+    not to either concatenation kernel. Pinned as the arc-A census cell
+    `#609/boundary_float32_concat_widens_on_both_spellings`, which asserts
+    the two spellings AGREE and carries PostgreSQL's answer beside them, so
+    the day either moves the cell fails. The fix is to render a FLOAT32
+    argument at its own width where every other boxed type is already
+    rendered (`FuncCall.Eval`'s `stringInputFuncs` rewrite, beside the
+    IPv4/MAC/DATE arms), not in `fnConcat` or `fnConcatOp`.
+
     **Both sites must render alike, and two did not.** `ResolveLikeFilterKernel`
     (`internal/engine/exec/kernel/compare.go`) unconditionally read the
     column's `BytesData`, with no per-type dispatch at all — the same shape
