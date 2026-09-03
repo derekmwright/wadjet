@@ -1656,6 +1656,27 @@ UPDATE table_name SET col1 = val1 [, col2 = val2 ...] [WHERE condition]
 
 Internally executes as DELETE of matching rows + INSERT of modified rows.
 
+### MERGE
+
+```sql
+MERGE INTO target [AS alias] USING source [AS alias] ON condition
+  WHEN MATCHED [AND cond] THEN UPDATE SET ... | DELETE
+  WHEN NOT MATCHED [AND cond] THEN INSERT (cols) VALUES (...)
+```
+
+The target and the source must have **different exposed names** — the alias
+where one is written, the relation's own name otherwise. `MERGE INTO t USING s
+AS t`, `MERGE INTO t USING t` and `MERGE INTO t AS x USING s AS x` are all
+SQLSTATE `42712` (`name "t" specified more than once`), refused before anything
+is written, as PostgreSQL refuses them. The rule is over exposed names and not
+over relations, so a table may be merged into itself under two different
+aliases (`MERGE INTO t AS a USING t AS b ON a.id = b.id`), and a source may be
+aliased with the target's *table* name when the target itself is aliased to
+something else (`MERGE INTO t AS x USING s AS t`).
+
+A target row may be affected at most once. Two source rows matching one target
+row is SQLSTATE `21000` (`MERGE command cannot affect row a second time`).
+
 ### Concurrency
 
 A DELETE, UPDATE or MERGE reads the table's manifest, scans the files it
@@ -1718,6 +1739,7 @@ mistake, so a client can branch on the class rather than on the message text:
 | Mistake | SQLSTATE | Message |
 |---|---|---|
 | The relation does not exist (INSERT, UPDATE, DELETE, and both MERGE relations) | `42P01` | `relation "x" does not exist` |
+| A MERGE whose target and source have the same exposed name — `MERGE INTO t USING s AS t`, `MERGE INTO t USING t`, `MERGE INTO t AS x USING s AS x` | `42712` | `name "t" specified more than once` |
 | An INSERT column list names a column the table does not have | `42703` | `column "c" of relation "x" does not exist` |
 | A `WHERE` or `SET` names a column the table does not have | `42703` | names the column |
 | A value cannot be parsed as the target column's type | `22P02` | names the value |

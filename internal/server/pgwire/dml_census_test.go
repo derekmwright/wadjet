@@ -471,6 +471,58 @@ func censusShapes() []censusShape {
 			bug: "#718"},
 
 		// ---------------------------------------------------------------
+		// #837 — a MERGE whose two relations have the SAME EXPOSED NAME.
+		//
+		// The rule PostgreSQL applies is over EXPOSED names — the alias where
+		// one is written, the relation's own name otherwise — and the last two
+		// entries are the controls that say so: two DIFFERENT aliases over the
+		// SAME table is legal, and a source aliased with the target's TABLE
+		// NAME is legal when the target itself is aliased to something else.
+		// A rule spelled "the source is not the target table" would refuse
+		// both, and PostgreSQL answers both.
+		// ---------------------------------------------------------------
+		{name: "#837 source alias equals the target name", tbl: "pr",
+			sql: "MERGE INTO arcb_pr USING arcb_src AS arcb_pr ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN DELETE",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#837 target alias equals the source name", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS arcb_src USING arcb_src ON arcb_src.id = arcb_src.id WHEN MATCHED THEN DELETE",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#837 self-merge with no aliases", tbl: "pr",
+			sql: "MERGE INTO arcb_pr USING arcb_pr ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN DELETE",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#837 both relations aliased to the same name", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS x USING arcb_src AS x ON x.id = x.id WHEN MATCHED THEN DELETE",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#837 subquery source aliased with the target name", tbl: "pr",
+			sql: "MERGE INTO arcb_pr USING (SELECT id, n, name FROM arcb_src) AS arcb_pr ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN DELETE",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#837 subquery source aliased with the target alias", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING (SELECT id, n, name FROM arcb_src) AS t ON t.id = t.id WHEN MATCHED THEN DELETE",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#837 the collision is case-insensitive", tbl: "pr",
+			sql: "MERGE INTO arcb_pr USING arcb_src AS ARCB_PR ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN DELETE",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#837 the UPDATE arm is refused before it writes", tbl: "pr",
+			sql: "MERGE INTO arcb_pr USING arcb_src AS arcb_pr ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN UPDATE SET n = 0",
+			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "control #837 self-merge with DISTINCT aliases is legal", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_pr AS s ON t.id = s.id WHEN MATCHED THEN DELETE",
+			pg:  "tag=MERGE 3 table=[]",
+			emb: "tag=MERGE 3 table=[]"},
+		{name: "control #837 source aliased with the target's TABLE name is legal", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS arcb_pr ON t.id = arcb_pr.id WHEN MATCHED THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+
+		// ---------------------------------------------------------------
 		// #719 — the SQLSTATE a DML runtime failure carries.
 		// ---------------------------------------------------------------
 		{name: "#719 delete from a table that does not exist", tbl: "pr",

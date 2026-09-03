@@ -527,6 +527,15 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 		return nil, fmt.Errorf("reading source %q: %w", info.Source, err)
 	}
 
+	// The two relations must have DIFFERENT exposed names, and the check is
+	// here — after both relations resolve, before anything is written —
+	// because that is where PostgreSQL puts it: a missing relation is 42P01
+	// first, and only then is a duplicate name 42712 (measured, both orders).
+	targetAlias, sourceAlias, err := mergeExposedNames(info)
+	if err != nil {
+		return nil, err
+	}
+
 	// Read the target's LIVE rows, each one carrying the (file, row-in-file)
 	// it came from.
 	//
@@ -546,15 +555,6 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	targetRows, err := db.readMergeTarget(ctx, info.Target, targetMeta.Schema.Columns)
 	if err != nil {
 		return nil, err
-	}
-
-	targetAlias := info.TargetAlias
-	if targetAlias == "" {
-		targetAlias = info.Target
-	}
-	sourceAlias := info.SourceAlias
-	if sourceAlias == "" {
-		sourceAlias = info.Source
 	}
 
 	// The resolver for every SET / VALUES expression. It carries the target's
@@ -719,6 +719,48 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 		RowsAffected: rowsAffected,
 		Command:      "MERGE",
 	}, nil
+}
+
+// mergeExposedNames returns the names a MERGE's ON condition and its SET /
+// VALUES expressions resolve against — the alias where one is written, the
+// relation's own name otherwise — and refuses the statement when they are the
+// same name.
+//
+// PostgreSQL: 42712, `name "t" specified more than once`, DETAIL "The name is
+// used both as MERGE target table and data source", raised in
+// transformMergeStmt BEFORE anything is written. Wadjet answered `MERGE 1` and
+// WROTE, and the self-merge spelling `MERGE INTO t USING t ON t.id = t.id`
+// EMPTIED the table where PostgreSQL refuses the statement (#837).
+//
+// The mechanism is buildMergedRow: it writes both relations' columns into one
+// map under `exposedName + "." + column`, so when the two exposed names
+// collide the source's values overwrite the target's at every qualified key.
+// `ON t.id = t.id` then compares a source column with itself — a tautology
+// that matches every pair of rows — instead of resolving to the ambiguity
+// PostgreSQL reports. Same family as #689's `sourceNamed`.
+//
+// The rule is over EXPOSED names, which is not the same as "the source is not
+// the target table". `MERGE INTO t AS x USING t AS y` is legal and wadjet
+// already answers it correctly, and so is `MERGE INTO t AS x USING s AS t` —
+// PostgreSQL accepts both, measured.
+func mergeExposedNames(info *plansql.MergeInfo) (target, source string, err error) {
+	target = info.TargetAlias
+	if target == "" {
+		target = info.Target
+	}
+	source = info.SourceAlias
+	if source == "" {
+		source = info.Source
+	}
+	// The MERGE parser lower-cases every relation name and alias it reads, so
+	// these are already folded; folding again costs nothing and keeps the rule
+	// readable as the case-insensitive comparison it is.
+	if strings.EqualFold(target, source) {
+		return "", "", sqlerr.New("42712",
+			"name %q specified more than once (it is used both as MERGE target table and data source)",
+			target)
+	}
+	return target, source, nil
 }
 
 // mergeTargetRow is one live row of a MERGE target together with WHERE IT IS.
