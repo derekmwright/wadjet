@@ -340,7 +340,7 @@ published one, or whose Computed entry does not parse, is NOT a version: a
 coordinator that sends the field sends it aligned, and
 `TestStageCarriesOneGroupKeyList` asserts that at plan time. Falling back there
 would answer the query by the pre-arc rule with no signal, so the task FAILS
-instead (`TestFragmentRefusesAMisalignedResolutionList`). The fallback is for
+instead (`TestFragmentRefusesAMisalignedResolutionList`). What the check can see is LENGTH: a list of the wrong length, or an entry that does not parse, fails the task naming both lists. A list of the right length whose entries are PERMUTED is indistinguishable from a correct one on the wire — the entries are positional and carry no key name — so that skew is prevented by upgrade order (workers first), not detected. The fallback is for
 the ABSENT list and nothing else.
 
 The other direction is NOT supported, and the measurement is worse than the
