@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/alerts"
@@ -41,6 +42,9 @@ type DB struct {
 	lateMaterialization bool
 	queryLimits         *config.QueryLimits
 	roleQueryLimits     map[string]*config.QueryLimits
+	// dmlRedos counts DML statements redone because the table changed under
+	// them between the manifest read and the commit. See DMLRedos.
+	dmlRedos atomic.Uint64
 }
 
 // Config holds configuration for creating a DB instance.

@@ -1661,18 +1661,31 @@ Internally executes as DELETE of matching rows + INSERT of modified rows.
 A DELETE, UPDATE or MERGE reads the table's manifest, scans the files it
 names, and commits its change — the replacement rows and the delete markers
 that supersede what they replace — in a **single compare-and-swap** against
-that manifest. If background compaction rewrote the files the statement read
-while it was scanning, the commit is refused and the statement is redone
-against the manifest that replaced them. A statement that keeps losing that
-race reports SQLSTATE **40001** (`serialization_failure`), which a client is
-expected to retry; the table is unchanged when it does.
+that manifest. The commit is refused if anything the statement read has moved
+since it read it:
 
-Wadjet has no row-level concurrency control, and the outcome of two statements
-updating the same row is **duplication**, not a lost update: each reads the row
-at its own manifest revision, each writes a replacement, each marks the copy it
-read, and the key ends up present TWICE. Measured, and identical before this
-arc — nothing here changed it. Serialize writers to one row yourself, or read
-the table through a query that de-duplicates on the key.
+- **compaction rewrote the files it scanned**, or
+- **another statement already superseded a row it is superseding**.
+
+Either way the statement is redone whole against the manifest that replaced
+the one it read, so its outcome is one of the serial orders the two statements
+could have produced. **Two statements updating the same row leave the key
+present once**, with one of the two values; the second `DELETE` of a row the
+first already removed reports `DELETE 0`, as PostgreSQL does; and an `UPDATE`
+whose row a concurrent `DELETE` removed reports `UPDATE 0`. Statements over
+*different* rows never conflict — the rule is over rows, not over files or
+tables — so concurrent writers to one table proceed in parallel.
+
+A statement that keeps losing the race reports SQLSTATE **40001**
+(`serialization_failure`), which a client is expected to retry; the table is
+unchanged when it does.
+
+What this does **not** give you is a unique constraint. Two concurrent
+`INSERT`s of the same key, or two `MERGE`s that both take their `WHEN NOT
+MATCHED` arm for the same key, both insert — PostgreSQL does the same without
+a unique index, and wadjet has no unique indexes. Nothing here spans more than
+one statement either: wadjet has no transactions, so `BEGIN`/`COMMIT` are
+accepted and ignored and each statement commits on its own.
 
 ### Type Coercion
 

@@ -1,7 +1,9 @@
 # ADR-0030: A DML statement commits against the manifest it read
 
 Status: Accepted (2026-09-03, the DML-hygiene arc: #691, with #815's
-one-implementation merge underneath it).
+one-implementation merge underneath it). Amended 2026-09-03 (arc D3, #835):
+the rule now covers statement-vs-STATEMENT as well as
+statement-vs-compaction — see "Amendment" at the end.
 
 ## Context
 
@@ -138,15 +140,107 @@ can reach the old shape by accident.
   (ADR-0020's layer-0 reasoning) — but it is bytes an operator has to
   collect, not bytes something collects for them.
 
-- **What is still not closed, and it is not lost-update.** Two writers racing
-  each other — not a compactor, but two `UPDATE`s over the same rows — both
-  succeed, and the second one's markers are valid because the files did not
-  move. The outcome is DUPLICATION: each reads the row at its own revision,
-  each writes a replacement, each marks the copy it read, and the key ends up
-  present twice (measured: `[1:111:a 1:222:a 2:20:b 3:30:c]`). This record
-  first called it "lost update", which is the wrong failure mode — nothing is
-  lost and nothing wins. Closing it needs a conflict rule over ROWS, which
-  this record does not decide. ADR-0020's honesty requirement
-  (`:112-128`) applied in reverse: this one is a closure of the
-  compaction-window shape and a narrowing of nothing else, and the record
-  says which.
+- **Statement-vs-statement was left open here and is closed by the amendment
+  below.** Two writers racing each other — not a compactor, but two `UPDATE`s
+  over the same rows — both succeeded, and the second one's markers were valid
+  because the files did not move. The outcome was DUPLICATION: each read the
+  row at its own revision, each wrote a replacement, each marked the copy it
+  read, and the key ended up present twice (measured:
+  `[1:111:a 1:222:a 2:20:b 3:30:c]`). This record first called it "lost
+  update", which is the wrong failure mode — nothing is lost and nothing wins.
+  It said closing it needs a conflict rule over ROWS, which this record did not
+  decide; the amendment decides it. ADR-0020's honesty requirement (`:112-128`)
+  applied in reverse: the original record was a closure of the
+  compaction-window shape and a narrowing of nothing else, and it said which.
+
+## Amendment (2026-09-03, arc D3, #835): the rule is over ROWS as well as files
+
+### What the file-level rule missed
+
+`CommitDML` validated that every marker names a file the manifest **still
+holds**, and nothing else. Two statements over the same row leave that
+predicate satisfied — neither removed a file — so both committed. Measured on
+v0.18.22 with the second statement run to completion inside the first's own
+manifest read:
+
+| A (outer) ‖ B (inner, commits first) | B | A | table afterwards |
+|---|---|---|---|
+| `UPDATE n=111 WHERE id=1` ‖ `UPDATE n=222 WHERE id=1` | `UPDATE 1` | `UPDATE 1` | `1:111` **and** `1:222` |
+| `UPDATE n=n+1 WHERE id=1` ‖ `UPDATE n=n+1 WHERE id=1` | `UPDATE 1` | `UPDATE 1` | `1:11` **and** `1:11` |
+| `UPDATE n=111 WHERE id=1` ‖ `DELETE WHERE id=1` | `DELETE 1` | `UPDATE 1` | the deleted row is **back** |
+| `DELETE WHERE id=1` ‖ `UPDATE n=222 WHERE id=1` | `UPDATE 1` | `DELETE 1` | `DELETE 1`, and the row is **still readable** |
+| `UPDATE n=111 WHERE id=1` ‖ `MERGE … UPDATE SET n=s.n` | `MERGE 1` | `UPDATE 1` | `1:100` **and** `1:111` |
+
+The family is wider than #835's title: the record's "duplication" is one of
+five outcomes, and two of the others resurrect a row a `DELETE` reported as
+deleted.
+
+### The decision
+
+**A DML statement's commit is refused if another statement has already
+superseded a (file, row) this one is superseding** — `ErrDMLRowSuperseded`,
+raised inside the same CAS, beside the file-level `ErrDMLTargetMoved`. The
+statement is then redone whole through the path #691 built, so the outcome is
+one of the serial orders PostgreSQL could have produced. The redo bound
+(`dmlCommitAttempts` = 5) and the 40001 after it are unchanged.
+
+**The predicate is a per-(file, row) marker-set test, and it is exact.** It
+rests on an invariant the DML door already keeps for #674's reason: every
+scan filters through `DeletedRowsByFile` before it matches, so a statement
+NEVER mints a marker for a row the manifest it read had already marked. A
+marker that collides at commit time therefore collides with a statement that
+committed *in the window*, and with nothing else.
+
+### Alternatives rejected
+
+- **A lock around the statement, or around the table.** This is the bandaid
+  the issue names. It answers the same headline and takes concurrent DML on
+  DIFFERENT rows down with it, which is the majority of concurrent DML. The
+  gate asserts the difference directly: the disjoint-row cases must commit
+  with **zero** redos (`DB.DMLRedos()`), which a lock cannot do and which rows
+  alone cannot distinguish.
+
+- **A row VERSION carried in the manifest.** A per-row version column would
+  also work and would additionally catch a statement that read a row it did
+  not mark. It costs a new manifest field, a migration for every existing
+  table, and a per-row cost on every commit; the marker set is already in the
+  manifest, already read by every DML statement, and already exact for the
+  shape that is wrong. ADR-0018's rule — the file is the input, do not invent
+  a second source of truth — applies to the manifest too.
+
+- **Compare the manifest REVISION the statement read.** Wrong in both
+  directions, for the reasons the original record gives: an unrelated write
+  moves the revision, and an UPDATE's own ingest moves it.
+
+- **Serialize at the catalog with a CAS on a per-row key.** That is a lock
+  with extra steps, and it makes the catalog's key space a function of table
+  cardinality.
+
+### What is still open, and it is not a race
+
+- **No unique constraint.** Two `INSERT`s of the same key, or two `MERGE`s
+  that both take the `WHEN NOT MATCHED` arm, both insert. Neither mints a
+  marker, so no conflict rule can see them. PostgreSQL behaves the same way
+  without a unique index, and wadjet has no unique indexes; this is a missing
+  CONSTRAINT, not a missing conflict rule, and it is out of this record's
+  scope.
+- **No transactions.** The rule is per statement. `BEGIN`/`COMMIT` are
+  accepted and ignored, so nothing spans two statements.
+- **The byte leak is unchanged.** A refused attempt's parquet objects stay in
+  the store, unreferenced, and there is no orphan sweep (see Consequences
+  above). A row conflict makes a redo more likely than a compaction race did,
+  so the leak is reachable more often — it is still bytes, never rows.
+
+### Gate
+
+`TestConcurrentDMLLeavesOneOfTwoSerialOrders`
+(`internal/server/pgwire/dml_statement_race_test.go`) — eleven interleavings ×
+three doors. Each asserts the table is **one of** the states a serial order
+could produce, the tag is one of the tags that order carries, AND whether the
+statement redid itself (`DB.DMLRedos()`), which is the boundary claim: the
+disjoint-row cells must commit with zero redos.
+`TestConcurrentDMLStormReports40001` covers exhaustion,
+`TestCommitDMLRefusesAMarkerForARowAlreadySuperseded` pins the catalog's half
+directly, including that a partially overlapping marker batch is refused
+WHOLE. Confirmed to fail with the row check backed out, with exactly the
+tables in the amendment's table above.

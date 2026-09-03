@@ -243,37 +243,63 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 }
 
 // dmlCommitAttempts bounds how many times a DML statement re-reads the
-// manifest and redoes its scan after finding that the files it read are no
-// longer the files the table has.
+// manifest and redoes its scan after finding that the table changed under it.
 //
 // A retry is not a fallback: the statement observed a manifest, matched rows
-// in files that manifest named, and CommitDML refused because compaction
-// rewrote them underneath it (#691). Redoing the scan against the manifest
-// that replaced it is the only way to answer the statement correctly, and it
-// is what "one CAS against the revision you read" means for a statement that
-// must also write. A statement that keeps losing the race reports 40001, the
-// class PostgreSQL gives a client that should retry.
+// in files that manifest named, and CommitDML refused — because compaction
+// rewrote those files (#691) or because another STATEMENT already superseded
+// a row this one is about to supersede (#835). Redoing the scan against the
+// manifest that replaced it is the only way to answer the statement
+// correctly, and it is what "one CAS against the revision you read" means for
+// a statement that must also write. A statement that keeps losing the race
+// reports 40001, the class PostgreSQL gives a client that should retry.
 const dmlCommitAttempts = 5
 
-// retryMovedTarget runs one DML statement, redoing it whole while CommitDML
-// reports that its target files moved.
-func (db *DB) retryMovedTarget(table string, once func() (*ExecResult, error)) (*ExecResult, error) {
+// retryConflicted runs one DML statement, redoing it whole while CommitDML
+// reports that the manifest it read no longer describes the rows it matched.
+//
+// Both refusals are the same answer — "you read a state that is gone, read
+// again" — and both are redone the same way. The redo is what makes the
+// outcome one of the serial orders PostgreSQL could have produced: a second
+// UPDATE of one row re-reads the row the first one wrote and replaces THAT,
+// so the key stays unique; a DELETE whose row a concurrent statement already
+// removed re-scans, matches nothing, and reports `DELETE 0`.
+func (db *DB) retryConflicted(table string, once func() (*ExecResult, error)) (*ExecResult, error) {
 	var err error
 	for attempt := 0; attempt < dmlCommitAttempts; attempt++ {
 		var res *ExecResult
 		res, err = once()
-		if err == nil || !errors.Is(err, catalog.ErrDMLTargetMoved) {
+		if err == nil || !dmlNeedsRedo(err) {
 			return res, err
 		}
+		db.dmlRedos.Add(1)
 	}
 	return nil, sqlerr.Wrap("40001", fmt.Errorf(
-		"table %q changed under this statement %d times (compaction rewrote the files it read); retry it: %w",
+		"table %q changed under this statement %d times; retry it: %w",
 		table, dmlCommitAttempts, err))
 }
 
+// dmlNeedsRedo reports whether a commit failure means "read again and redo".
+func dmlNeedsRedo(err error) bool {
+	return errors.Is(err, catalog.ErrDMLTargetMoved) || errors.Is(err, catalog.ErrDMLRowSuperseded)
+}
+
+// DMLRedos counts the DML statements this DB has redone because the table
+// changed under them between the manifest read and the commit — a compaction
+// that rewrote the files they read, or another statement that superseded a
+// row they were superseding.
+//
+// It is exported because a gate cannot otherwise tell "both statements
+// committed on their first attempt because their rows were disjoint" from
+// "the second one redid itself and got the same answer": the rows look
+// identical either way, and a boundary is a claim that needs its own
+// assertion (docs/design/correctness-fix-protocol.md item 11). It is a
+// process-lifetime counter, never reset.
+func (db *DB) DMLRedos() uint64 { return db.dmlRedos.Load() }
+
 // executeDelete handles DELETE FROM table [WHERE condition]
 func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*ExecResult, error) {
-	return db.retryMovedTarget(info.Table, func() (*ExecResult, error) {
+	return db.retryConflicted(info.Table, func() (*ExecResult, error) {
 		return db.deleteOnce(ctx, info)
 	})
 }
@@ -327,7 +353,7 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 	// rather than committed against nothing (#691).
 	if len(markers) > 0 {
 		if err := db.catalog.CommitDML(ctx, info.Table, nil, markers); err != nil {
-			if errors.Is(err, catalog.ErrDMLTargetMoved) {
+			if dmlNeedsRedo(err) {
 				return nil, err // the caller redoes the statement
 			}
 			return nil, fmt.Errorf("recording delete markers: %w", err)
@@ -342,7 +368,7 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 
 // executeUpdate handles UPDATE table SET col=val [WHERE condition]
 func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*ExecResult, error) {
-	return db.retryMovedTarget(info.Table, func() (*ExecResult, error) {
+	return db.retryConflicted(info.Table, func() (*ExecResult, error) {
 		return db.updateOnce(ctx, info)
 	})
 }
@@ -461,7 +487,7 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 	// in ONE CAS, validated against the manifest it commits into (#691).
 	if len(pending) > 0 || len(markers) > 0 {
 		if err := db.catalog.CommitDML(ctx, info.Table, pending, markers); err != nil {
-			if errors.Is(err, catalog.ErrDMLTargetMoved) {
+			if dmlNeedsRedo(err) {
 				return nil, err // the caller redoes the statement
 			}
 			return nil, fmt.Errorf("recording delete markers: %w", err)
@@ -477,7 +503,7 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 // It reads both target and source tables, joins on the ON condition, then applies
 // WHEN MATCHED (UPDATE/DELETE) and WHEN NOT MATCHED (INSERT) clauses.
 func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecResult, error) {
-	return db.retryMovedTarget(info.Target, func() (*ExecResult, error) {
+	return db.retryConflicted(info.Target, func() (*ExecResult, error) {
 		return db.mergeOnce(ctx, info)
 	})
 }
@@ -682,7 +708,7 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 
 	if len(pending) > 0 || len(deleteMarkers) > 0 {
 		if err := db.catalog.CommitDML(ctx, info.Target, pending, deleteMarkers); err != nil {
-			if errors.Is(err, catalog.ErrDMLTargetMoved) {
+			if dmlNeedsRedo(err) {
 				return nil, err // the caller redoes the statement
 			}
 			return nil, fmt.Errorf("recording delete markers: %w", err)
