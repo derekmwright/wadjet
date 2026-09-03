@@ -362,6 +362,34 @@ func buildAggInputProjection(
 		})
 	}
 
+	// The SECOND argument of a two-column aggregate — CORR/COVAR_*(x, y),
+	// MIN_BY/MAX_BY(value, ordering) — is a column of this projection's
+	// OUTPUT too, and it was only ever added by the `InputExpr == ""` branch
+	// above, which a COMPUTED first argument skips. So `MIN_BY(a*2, id)`
+	// reached HashAggregate with `input has: a * 2`, the ordering column gone
+	// from the stream, and both DAG arms failed loud on a query the
+	// single-process path answers (#713). A projection NARROWS to its
+	// outputs: every argument the aggregate will read has to be one of them.
+	//
+	// Only a bare column REFERENCE is passed through. A computed second
+	// argument (`MIN_BY(a, id*2)`) is materialized by no engine — the
+	// single-process pre-aggregate projection does not carry it either, and
+	// both paths fail loud with the same message and the same class — so
+	// emitting a pass-through of a name nothing produces would replace one
+	// engine's loud failure with a column of NULLs, which is the trade this
+	// file exists to refuse.
+	for _, a := range aggs {
+		if a.InputCol2 == "" || seen[a.InputCol2] {
+			continue
+		}
+		if node, err := plansql.ParseExpression(a.InputCol2); err == nil {
+			if _, bare := node.(*plansql.ColRef); !bare {
+				continue
+			}
+		}
+		addPassthrough(a.InputCol2)
+	}
+
 	// Make sure all bare columns referenced by expressions are passed
 	// through (HashAggregate doesn't need them, but filter columns are
 	// captured separately).
