@@ -1395,8 +1395,16 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	if natsStoreDir != "" {
 		natsCfg.StoreDir = natsStoreDir
 	}
-	// Apply NATS mTLS config from CLI flags or env overrides
-	applyNATSTLS(&natsCfg, logger)
+	// Apply NATS mTLS config: CLI flag, then env var, then the config file
+	// (#827). A config file that will not PARSE is a startup error, and
+	// partially-specified material is a startup error.
+	natsFileCfg, err := loadConfigForNATSTLS()
+	if err != nil {
+		return err
+	}
+	if err := applyNATSTLS(&natsCfg, natsFileCfg, logger); err != nil {
+		return err
+	}
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
@@ -1619,11 +1627,19 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		natsAddr = fmt.Sprintf("nats://127.0.0.1:%d", natsPort)
 	}
 
-	// Build NATS client TLS config if mTLS is configured
+	// Build NATS client TLS config if mTLS is configured. The config file is
+	// a tier here, and material named but unusable is a startup error rather
+	// than a silent plaintext connection (#827).
+	natsFileCfg, err := loadConfigForNATSTLS()
+	if err != nil {
+		return err
+	}
 	var natsTLSCfg *tls.Config
-	tlsCert, tlsKey, tlsCA := resolveNATSTLSPaths()
+	tlsCert, tlsKey, tlsCA, err := resolveNATSTLSPaths(natsFileCfg)
+	if err != nil {
+		return err
+	}
 	if tlsCert != "" && tlsKey != "" && tlsCA != "" {
-		var err error
 		natsTLSCfg, err = distributed.BuildNATSClientTLS(tlsCert, tlsKey, tlsCA)
 		if err != nil {
 			return fmt.Errorf("building NATS TLS config: %w", err)
@@ -2335,22 +2351,65 @@ func buildTLSConfig(cfg config.AuthMTLS) (*tls.Config, error) {
 	return auth.NewTLSConfig(cfg.CertFile, cfg.KeyFile, clientCA)
 }
 
-// resolveNATSTLSPaths returns TLS cert/key/CA paths from CLI flags, env vars, or config file.
-// CLI flags take priority, then env vars, then config file values.
-func resolveNATSTLSPaths() (cert, key, ca string) {
-	cert, key, ca = natsTLSCert, natsTLSKey, natsTLSCA
-	// Env vars override CLI flags (already handled by applyEnvOverrides on config),
-	// but CLI flags are direct — check env only if flag is empty.
+// resolveNATSTLSPaths returns the NATS TLS cert/key/CA paths: CLI flag
+// first, then environment variable, then the config file.
+//
+// The config-file tier is new. The doc comment said "CLI flags take
+// priority, then env vars, then config file values" and the body read the
+// flags and os.Getenv and NOTHING ELSE — cfg.NATS.TLSCert/TLSKey/TLSCA
+// were parsed, validated, reported by the admin endpoint, and never
+// consulted here. A deployment that put its mTLS material in the YAML, as
+// docs/configuration.md describes, got a server that connected to NATS
+// WITHOUT TLS and said nothing (#827).
+//
+// Material that is NAMED and then not used is a startup error, not a
+// silent downgrade. The connection is only secured when all three paths
+// are present, so naming one or two of them used to disable TLS quietly;
+// that now refuses to start. This is one face of #808 — the config file is
+// dead for nats.* entirely, and for storage.*, http.*, grpc.*, worker.*,
+// parquet.* and telemetry.* besides — and the general precedence repair is
+// a separate product decision. The security consequence is why this tier
+// is wired now rather than waiting for it.
+func resolveNATSTLSPaths(cfg *config.Config) (cert, key, ca string, err error) {
+	pick := func(flag, env string, file func() string) string {
+		if flag != "" {
+			return flag
+		}
+		if v := os.Getenv(env); v != "" {
+			return v
+		}
+		return file()
+	}
+	natsFile := func(get func(config.NATS) string) func() string {
+		return func() string {
+			if cfg == nil {
+				return ""
+			}
+			return get(cfg.NATS)
+		}
+	}
+	cert = pick(natsTLSCert, "WADJET_NATS_TLS_CERT", natsFile(func(n config.NATS) string { return n.TLSCert }))
+	key = pick(natsTLSKey, "WADJET_NATS_TLS_KEY", natsFile(func(n config.NATS) string { return n.TLSKey }))
+	ca = pick(natsTLSCA, "WADJET_NATS_TLS_CA", natsFile(func(n config.NATS) string { return n.TLSCA }))
+
+	var missing []string
 	if cert == "" {
-		cert = os.Getenv("WADJET_NATS_TLS_CERT")
+		missing = append(missing, "certificate")
 	}
 	if key == "" {
-		key = os.Getenv("WADJET_NATS_TLS_KEY")
+		missing = append(missing, "private key")
 	}
 	if ca == "" {
-		ca = os.Getenv("WADJET_NATS_TLS_CA")
+		missing = append(missing, "CA")
 	}
-	return
+	if len(missing) > 0 && len(missing) < 3 {
+		return "", "", "", fmt.Errorf(
+			"NATS TLS is partially configured: no %s. All three of the certificate, "+
+				"the private key and the CA are required, and a partial set would connect "+
+				"to NATS WITHOUT TLS. Supply the rest, or remove the ones that are set",
+			strings.Join(missing, " and "))
+	}
+	return cert, key, ca, nil
 }
 
 // initTelemetry creates an OTel TracerProvider if an OTLP endpoint is configured.
@@ -2389,16 +2448,46 @@ func initTelemetry(ctx context.Context, logger *slog.Logger) *telemetry.Provider
 	return tp
 }
 
-// applyNATSTLS sets TLS fields on a NATSConfig from CLI flags/env vars.
-// Used by runCoordinator to configure mTLS on the embedded NATS server.
-func applyNATSTLS(cfg *distributed.NATSConfig, logger *slog.Logger) {
-	cert, key, ca := resolveNATSTLSPaths()
+// loadConfigForNATSTLS reads the config file for the NATS TLS tier and
+// PROPAGATES a parse failure.
+//
+// Dropping that error is how the tier's own stated invariant gets
+// falsified: an unparseable file that NAMES tls_cert, tls_key and tls_ca
+// yields a nil config, resolveNATSTLSPaths then sees three empty strings —
+// which is the legitimate "no TLS configured" shape — and the process
+// connects to NATS in PLAINTEXT with no error and no warning. #802 settled
+// exactly this doctrine for the auth block ("an unreadable config file
+// silently started a server with NO authentication at all — that now stops
+// the process with the reason"), and it applies on EVERY mode, not only the
+// ones that happen to load the file again later for another reason: worker
+// mode has no wireAuthFromConfig and would have run to completion.
+func loadConfigForNATSTLS() (*config.Config, error) {
+	if configFile == "" {
+		return nil, nil
+	}
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("loading config file %q: %w", configFile, err)
+	}
+	return cfg, nil
+}
+
+// applyNATSTLS sets TLS fields on a NATSConfig from the flag / env / config
+// tiers. Used by runCoordinator to configure mTLS on the embedded NATS
+// server. It returns an error when the material is partially specified,
+// which would otherwise start a plaintext server (#827).
+func applyNATSTLS(cfg *distributed.NATSConfig, fileCfg *config.Config, logger *slog.Logger) error {
+	cert, key, ca, err := resolveNATSTLSPaths(fileCfg)
+	if err != nil {
+		return err
+	}
 	if cert != "" && key != "" && ca != "" {
 		cfg.TLSCert = cert
 		cfg.TLSKey = key
 		cfg.TLSCA = ca
 		logger.Info("NATS mTLS enabled on server", "ca", ca, "cert", cert)
 	}
+	return nil
 }
 
 // resolveMCPAuth decides the MCP session identity and enforces fail-closed

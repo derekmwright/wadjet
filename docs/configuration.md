@@ -37,7 +37,7 @@ Wadjet is configured through CLI flags, environment variables, and an optional Y
 | `--storage-circuit-threshold` | Consecutive object-store failures **in one operation class** (read / write / delete) before that class's circuit breaker opens | `5` |
 | `--storage-circuit-reset` | How long an open object-store breaker stays open before admitting one half-open probe | `30s` |
 | `--storage-circuit-request-timeout` | Per-request object-store timeout the breaker applies to non-streaming operations (Head/List/Delete/BucketExists/MakeBucket) | `10s` |
-| `--query-intermediate-ttl` | Age at which the periodic sweep reclaims a `queries/<id>/*` prefix the per-query cleanup missed | `1h` |
+| `--query-intermediate-ttl` | Age at which the periodic sweep reclaims a `queries/<id>/*` prefix the per-query cleanup missed (`serve` modes only — see below) | `1h` |
 | `--query-intermediate-sweep` | How often that sweep runs | `10m` |
 | `--config` | Path to YAML config file | none |
 
@@ -56,6 +56,11 @@ client-side `context.Canceled` is neutral.
 open state, labelled `read`, `write` or `delete`. An operator seeing
 `class="delete"` climbing is seeing scratch reclamation struggling, not a
 read outage.
+
+`--query-intermediate-ttl` and `--query-intermediate-sweep` reach the two
+`serve` modes that build a coordinator (`standalone` and `coordinator`). A
+coordinator constructed by the embedded API keeps the built-in 1-hour TTL
+and 10-minute sweep; there is no library setting for them.
 
 **These five settings are flags and defaults only.** The YAML file does not
 reach `storage.*` or the coordinator's cleanup settings today (see
@@ -112,6 +117,9 @@ nats:
   store_dir: "/tmp/wadjet-nats"
   cluster_id: "local"         # unique cluster ID for federation
   leaf_remotes: []            # remote NATS URLs for leaf node connections
+  tls_cert: ""                # NATS mTLS certificate (see the note below)
+  tls_key: ""                 # NATS mTLS private key
+  tls_ca: ""                  # CA that verifies the peer
 
 http:
   addr: ":8080"
@@ -355,6 +363,24 @@ There is no environment variable for the connection cap, the slow-query threshol
 | `WADJET_NATS_CLUSTER_ID` | Cluster identifier for federation |
 | `WADJET_NATS_LEAF_REMOTES` | Comma-separated remote NATS URLs for leaf nodes |
 | `WADJET_NATS_TLS_CERT` / `_KEY` / `_CA` | NATS mTLS material |
+
+#### NATS mTLS
+
+`nats.tls_cert` / `nats.tls_key` / `nats.tls_ca` are the ONE part of the
+`nats:` section that reaches the running process. Each is resolved
+independently: the CLI flag (`--nats-tls-cert` and friends) first, then the
+environment variable, then the config file.
+
+**All three are required together.** The NATS connection is secured only
+when the certificate, the private key AND the CA are all present, so naming
+one or two of them used to disable TLS silently. A partial set is now a
+startup error naming what is missing, rather than a plaintext connection
+the operator never hears about.
+
+The rest of the `nats:` section — and `storage:`, `http:`, `grpc:`,
+`worker:`, `parquet:` and `telemetry:` — is parsed and validated but does
+not reach runtime; only `auth`, `query_limits` and `geoip` do. Use the
+flags and environment variables for everything else.
 
 ### Worker
 
