@@ -94,11 +94,17 @@ Execute a SQL query and return results.
 }
 ```
 
-Every refusal a STATEMENT earns carries the PostgreSQL SQLSTATE alongside the
-message — from `SELECT`, from DML, from `EXPLAIN`, and from the DDL statements
-this same endpoint runs, including an unknown type name (`42704`), a missing
-function (`42883`), a missing table (`42P01`) and a duplicate one (`42P07`) —
-and the class decides the HTTP status:
+Almost every refusal a STATEMENT earns carries the PostgreSQL SQLSTATE
+alongside the message — from `SELECT`, from DML, from `EXPLAIN`, and from the
+DDL statements this same endpoint runs, including an unknown type name
+(`42704`), a missing function (`42883`), a missing table (`42P01`) and a
+duplicate one (`42P07`) — and the class decides the HTTP status.
+
+Three refusals still answer with the message alone, because the engine raises
+no class for them: a duplicate **function** name (PostgreSQL's `42723`), a
+duplicate **column** in `CREATE TABLE` (`42701`), and `ALTER TABLE`, which this
+engine does not support. They are the exception the sentence above allows for,
+and they are the same on the PostgreSQL wire protocol.
 
 | SQLSTATE class | Meaning | Status |
 |---|---|---|
