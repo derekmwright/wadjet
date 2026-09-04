@@ -9,7 +9,7 @@ import (
 
 func TestReserveOrForce_CleanUnderBudget(t *testing.T) {
 	tr := NewTracker("test", 1000)
-	forced := ReserveOrForce(context.Background(), tr, nil, 400, time.Second, "test")
+	forced := ReserveOrForce(context.Background(), tr, nil, 400, time.Second, ForceUnattributed)
 	if forced {
 		t.Fatal("expected clean reservation under budget")
 	}
@@ -19,11 +19,11 @@ func TestReserveOrForce_CleanUnderBudget(t *testing.T) {
 }
 
 func TestReserveOrForce_NilTrackerOrZeroBytes(t *testing.T) {
-	if ReserveOrForce(context.Background(), nil, nil, 100, 0, "test") {
+	if ReserveOrForce(context.Background(), nil, nil, 100, 0, ForceUnattributed) {
 		t.Fatal("nil tracker must be a no-op, not forced")
 	}
 	tr := NewTracker("test", 10)
-	if ReserveOrForce(context.Background(), tr, nil, 0, 0, "test") {
+	if ReserveOrForce(context.Background(), tr, nil, 0, 0, ForceUnattributed) {
 		t.Fatal("zero bytes must be a no-op")
 	}
 	if tr.Used() != 0 {
@@ -36,7 +36,7 @@ func TestReserveOrForce_ForcedPastBudget(t *testing.T) {
 	if err := tr.Reserve(90); err != nil {
 		t.Fatal(err)
 	}
-	forced := ReserveOrForce(context.Background(), tr, nil, 50, 10*time.Millisecond, "test")
+	forced := ReserveOrForce(context.Background(), tr, nil, 50, 10*time.Millisecond, ForceUnattributed)
 	if !forced {
 		t.Fatal("expected forced fallback past budget")
 	}
@@ -55,7 +55,7 @@ func TestReserveOrForce_SucceedsAfterConcurrentRelease(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		tr.Release(90)
 	}()
-	forced := ReserveOrForce(context.Background(), tr, nil, 50, 2*time.Second, "test")
+	forced := ReserveOrForce(context.Background(), tr, nil, 50, 2*time.Second, ForceUnattributed)
 	if forced {
 		t.Fatal("expected clean reservation once budget freed")
 	}
@@ -120,7 +120,7 @@ func TestReserveOrForce_ReliefUnblocksReservation(t *testing.T) {
 	unregister := sm.RegisterAccounted(op)
 	defer unregister()
 
-	forced := ReserveOrForce(context.Background(), tr, sm, 50, 2*time.Second, "test")
+	forced := ReserveOrForce(context.Background(), tr, sm, 50, 2*time.Second, ForceUnattributed)
 	if forced {
 		t.Fatal("expected relief to unblock a clean reservation")
 	}

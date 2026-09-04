@@ -709,7 +709,7 @@ func heapPressureExceeded() bool {
 // budget so ShouldSpill() can detect the threshold crossing.
 func (sm *SpillManager) TrackBatch(bytes int64) {
 	if sm.tracker != nil && bytes > 0 {
-		sm.tracker.ForceReserve(bytes)
+		sm.tracker.ForceReserveFor(bytes, ForceSpillTracking)
 	}
 }
 
@@ -719,7 +719,7 @@ func (sm *SpillManager) TrackBatch(bytes int64) {
 // concurrent operators' accounting.
 func (sm *SpillManager) ReleaseTracking(bytes int64) {
 	if sm.tracker != nil && bytes > 0 {
-		sm.tracker.Release(bytes)
+		sm.tracker.ReleaseForced(bytes, ForceSpillTracking)
 	}
 }
 

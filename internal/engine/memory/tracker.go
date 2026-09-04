@@ -23,6 +23,16 @@ type Tracker struct {
 	peak   atomic.Int64
 	parent *Tracker
 
+	// forced[p] is the OUTSTANDING bytes charged past the budget for purpose
+	// p — ForceReserveFor adds, ReleaseForced subtracts. A refusal reads it so
+	// the message can name what is holding the budget instead of leaving the
+	// reader with a number nothing explains (#789, #853). See forced.go.
+	forced [numForcePurposes]atomic.Int64
+
+	// underflowWarned keeps Release's negative-`used` WARN to one line per
+	// tracker: an over-release repeats on every batch after the first.
+	underflowWarned atomic.Bool
+
 	// published holds per-instance externally-reported owned-byte counters,
 	// keyed by instanceID -> *atomic.Int64. Operators publish their current owned
 	// footprint here; the spill manager reads it wait-free. A sync.Map (rather
@@ -54,8 +64,8 @@ func (t *Tracker) Reserve(n int64) error {
 	newUsed := t.used.Add(n)
 	if t.budget > 0 && newUsed > t.budget {
 		t.used.Add(-n) // rollback
-		return fmt.Errorf("%s: %w (used=%d, requested=%d, budget=%d)",
-			t.name, ErrMemoryExceeded, newUsed-n, n, t.budget)
+		return fmt.Errorf("%s: %w (used=%d, requested=%d, budget=%d%s)",
+			t.name, ErrMemoryExceeded, newUsed-n, n, t.budget, t.forcedSuffix())
 	}
 
 	if t.parent != nil {
@@ -70,8 +80,23 @@ func (t *Tracker) Reserve(n int64) error {
 }
 
 // Release frees n bytes of previously reserved memory.
+//
+// A release that drives `used` below zero is always an accounting bug — bytes
+// given back that were never taken — and it is not a harmless one: from that
+// point every admission on this tracker is measured against a floor lower than
+// the memory that actually exists, so the budget stops bounding anything. It is
+// NOT clamped here, because a clamp would hide the producer; it says so once
+// per tracker and the ledger-conservation gates assert the exact figure
+// (#823's over-release was found this way).
 func (t *Tracker) Release(n int64) {
-	t.used.Add(-n)
+	newUsed := t.used.Add(-n)
+	if newUsed < 0 && t.underflowWarned.CompareAndSwap(false, true) {
+		slog.Warn("memory tracker released more than was reserved (accounting bug)",
+			"tracker", t.name,
+			"released", n,
+			"resulting_used", newUsed,
+		)
+	}
 	if t.parent != nil {
 		t.parent.Release(n)
 	}
@@ -114,11 +139,19 @@ func (t *Tracker) Transfer(from, to *Tracker, n int64) {
 		from.parent.Release(n)
 	}
 
-	newTo := to.used.Add(n)
-	if to.parent != nil {
-		to.parent.ForceReserve(n)
+	to.addUsed(n)
+}
+
+// addUsed moves the counter without touching the forced census. Transfer uses
+// it because a transfer is not a new charge: counting it as forced would grow a
+// census that nothing ever decrements, and the bytes it moves were attributed
+// where they were first reserved.
+func (t *Tracker) addUsed(n int64) {
+	newUsed := t.used.Add(n)
+	if t.parent != nil {
+		t.parent.addUsed(n)
 	}
-	to.bumpPeak(newTo)
+	t.bumpPeak(newUsed)
 }
 
 // Used returns the current memory usage in bytes.
@@ -138,12 +171,84 @@ func (t *Tracker) Name() string {
 
 // ForceReserve adds n bytes without checking or rolling back on over-budget.
 // Used by operators that need to track usage for spill detection without failing.
+//
+// Prefer ForceReserveFor: a forced charge with no purpose is a charge no
+// refusal can explain, which is what ForceUnattributed records.
 func (t *Tracker) ForceReserve(n int64) {
+	t.ForceReserveFor(n, ForceUnattributed)
+}
+
+// ForceReserveFor is ForceReserve with the charge attributed to a purpose, so
+// a later refusal can name what is holding the budget. Release it with
+// ReleaseForced under the SAME purpose — the census counts outstanding bytes,
+// not a lifetime total, so an unpaired release leaves it describing memory that
+// is no longer there.
+func (t *Tracker) ForceReserveFor(n int64, p ForcePurpose) {
+	if n == 0 {
+		return
+	}
+	if p >= numForcePurposes {
+		p = ForceUnattributed
+	}
 	newUsed := t.used.Add(n)
+	t.forced[p].Add(n)
 	if t.parent != nil {
-		t.parent.ForceReserve(n)
+		t.parent.ForceReserveFor(n, p)
 	}
 	t.bumpPeak(newUsed)
+}
+
+// ReleaseForced frees n bytes that were charged with ForceReserveFor under p.
+func (t *Tracker) ReleaseForced(n int64, p ForcePurpose) {
+	if n == 0 {
+		return
+	}
+	if p >= numForcePurposes {
+		p = ForceUnattributed
+	}
+	t.forced[p].Add(-n)
+	t.used.Add(-n)
+	if t.parent != nil {
+		t.parent.ReleaseForced(n, p)
+	}
+}
+
+// ForcedFor returns the outstanding bytes charged past the budget for p.
+func (t *Tracker) ForcedFor(p ForcePurpose) int64 {
+	if p >= numForcePurposes {
+		return 0
+	}
+	return t.forced[p].Load()
+}
+
+// ForcedBytes returns the outstanding forced total and the purpose holding the
+// largest share of it.
+func (t *Tracker) ForcedBytes() (total int64, top ForcePurpose, topBytes int64) {
+	for p := ForcePurpose(0); p < numForcePurposes; p++ {
+		n := t.forced[p].Load()
+		if n <= 0 {
+			continue
+		}
+		total += n
+		if n > topBytes {
+			top, topBytes = p, n
+		}
+	}
+	return total, top, topBytes
+}
+
+// forcedSuffix is what a refusal appends so the reader can tell whose bytes the
+// floor is made of. Empty when nothing was forced, which is the common case and
+// leaves the message exactly as it was.
+func (t *Tracker) forcedSuffix() string {
+	total, top, topBytes := t.ForcedBytes()
+	if total <= 0 {
+		return ""
+	}
+	if total == topBytes {
+		return fmt.Sprintf(", of which forced=%d by %q", total, top.String())
+	}
+	return fmt.Sprintf(", of which forced=%d (largest: %d by %q)", total, topBytes, top.String())
 }
 
 // Peak returns the highest value ever observed by used. Used by per-task
@@ -256,4 +361,7 @@ func (t *Tracker) ReserveBlocking(ctx context.Context, n int64, pollInterval tim
 // construct a new tracker.
 func (t *Tracker) Reset() {
 	t.used.Store(0)
+	for p := range t.forced {
+		t.forced[p].Store(0)
+	}
 }

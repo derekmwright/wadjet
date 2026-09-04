@@ -149,12 +149,16 @@ type rgSlabs struct {
 	next    int   // index into want of the next row group to load
 	loadErr error
 
-	mu       sync.Mutex
-	bufs     map[int][]byte
-	bases    map[int]int64
-	charges  map[int]int64
-	released map[int]bool
-	closed   bool
+	mu      sync.Mutex
+	bufs    map[int][]byte
+	bases   map[int]int64
+	charges map[int]int64
+	// forcedCharge[rg] records that this row group's bytes were taken PAST
+	// the budget, so its release comes off the forced census rather than off
+	// the plain counter (memory/forced.go).
+	forcedCharge map[int]bool
+	released     map[int]bool
+	closed       bool
 }
 
 // rowGroupRanges is the ascending byte range of every row group in want, or
@@ -279,7 +283,8 @@ func (s *rgSlabs) advance() error {
 	if s.inner.residentSlabs.Load() == 0 {
 		wait = 0
 	}
-	memory.ReserveOrForce(s.ctx, s.inner.memTracker, s.inner.spillMgr, n, wait, "scan row group load")
+	forced := memory.ReserveOrForce(s.ctx, s.inner.memTracker, s.inner.spillMgr, n, wait,
+		memory.ForceScanFileLoad)
 
 	// The charge stands at the row group's own byte range. The buffer it is
 	// held in is a power-of-two class of that range, so it is at most twice as
@@ -291,7 +296,7 @@ func (s *rgSlabs) advance() error {
 
 	if _, err := io.ReadFull(s.body, buf[:n]); err != nil {
 		s.inner.putSlab(buf)
-		s.releaseCharge(charge)
+		s.releaseCharge(charge, forced)
 		return fmt.Errorf("read %s row group %d: %w", s.slot.entry.Path, rg, err)
 	}
 	s.pos = end
@@ -299,6 +304,7 @@ func (s *rgSlabs) advance() error {
 	s.bufs[rg] = buf[:n]
 	s.bases[rg] = start
 	s.charges[rg] = charge
+	s.forcedCharge[rg] = forced
 	s.next++
 	s.mu.Unlock()
 	s.inner.residentSlabs.Add(1)
@@ -306,10 +312,18 @@ func (s *rgSlabs) advance() error {
 	return nil
 }
 
-func (s *rgSlabs) releaseCharge(n int64) {
-	if n > 0 && s.inner.memTracker != nil {
-		s.inner.memTracker.Release(n)
+// releaseCharge gives a row group's bytes back. forced says whether they were
+// taken PAST the budget: the forced census counts OUTSTANDING bytes, so the two
+// halves come off different counters (memory/forced.go).
+func (s *rgSlabs) releaseCharge(n int64, forced bool) {
+	if n <= 0 || s.inner.memTracker == nil {
+		return
 	}
+	if forced {
+		s.inner.memTracker.ReleaseForced(n, memory.ForceScanFileLoad)
+		return
+	}
+	s.inner.memTracker.Release(n)
 }
 
 // release frees row group rgIdx's buffer and its tracker charge. Idempotent,
@@ -326,6 +340,8 @@ func (s *rgSlabs) release(rgIdx int) {
 	delete(s.bases, rgIdx)
 	n := s.charges[rgIdx]
 	delete(s.charges, rgIdx)
+	forced := s.forcedCharge[rgIdx]
+	delete(s.forcedCharge, rgIdx)
 	s.mu.Unlock()
 
 	if had {
@@ -333,7 +349,7 @@ func (s *rgSlabs) release(rgIdx int) {
 		s.inner.residentSlabs.Add(-1)
 		rgBuffersResident.Add(-1)
 	}
-	s.releaseCharge(n)
+	s.releaseCharge(n, forced)
 }
 
 // close releases every buffer and charge still held and closes the body. Safe
@@ -354,18 +370,24 @@ func (s *rgSlabs) close() {
 		return
 	}
 	s.closed = true
-	bufs, charges := s.bufs, s.charges
+	bufs, charges, forced := s.bufs, s.charges, s.forcedCharge
 	s.bufs, s.bases, s.charges = map[int][]byte{}, map[int]int64{}, map[int]int64{}
+	s.forcedCharge = map[int]bool{}
 	s.mu.Unlock()
 
-	var total int64
+	var clean, forcedTotal int64
 	for rg, buf := range bufs {
 		s.inner.putSlab(buf)
 		s.inner.residentSlabs.Add(-1)
 		rgBuffersResident.Add(-1)
-		total += charges[rg]
+		if forced[rg] {
+			forcedTotal += charges[rg]
+		} else {
+			clean += charges[rg]
+		}
 	}
-	s.releaseCharge(total)
+	s.releaseCharge(forcedTotal, true)
+	s.releaseCharge(clean, false)
 
 	if s.body != nil {
 		s.body.Close()
@@ -563,6 +585,8 @@ func (s *fileSlot) tryRowGroupLoad(inner *scanSourceInner, ctx context.Context) 
 		bases:    make(map[int]int64, len(s.wantRG)),
 		charges:  make(map[int]int64, len(s.wantRG)),
 		released: make(map[int]bool, len(s.wantRG)),
+
+		forcedCharge: make(map[int]bool, len(s.wantRG)),
 	}
 	rdr.SetRowGroupBytes(slabs, s.entry.SizeBytes)
 	return rdr, slabs

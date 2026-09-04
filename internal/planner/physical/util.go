@@ -376,6 +376,7 @@ type fileSlot struct {
 	dataBuf      []byte              // pooled buffer holding the file bytes; returned to pool on releaseRG
 	stagedFile   *os.File            // staged pread mode: local fd; column chunks read on demand (no dataBuf)
 	chargedBytes int64               // bytes reserved on inner.memTracker for dataBuf; released with it
+	forcedBytes  int64               // of chargedBytes, the part taken PAST the budget (memory.ForceScanFileLoad)
 	gateBytes    int64               // bytes admitted on inner.loadGate; released with the buffer
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
 
@@ -496,7 +497,10 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	// forced and the ledger stays honest. Released by releaseCharge (error
 	// paths) or releaseRG (with the buffer).
 	if inner.memTracker != nil && s.entry.SizeBytes > 0 {
-		memory.ReserveOrForce(ctx, inner.memTracker, inner.spillMgr, s.entry.SizeBytes, fileLoadReserveWait, "scan file load")
+		if memory.ReserveOrForce(ctx, inner.memTracker, inner.spillMgr, s.entry.SizeBytes,
+			fileLoadReserveWait, memory.ForceScanFileLoad) {
+			s.forcedBytes = s.entry.SizeBytes
+		}
 		s.chargedBytes = s.entry.SizeBytes
 	}
 
@@ -520,9 +524,19 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	if s.chargedBytes > 0 {
 		if d := int64(cap(data)) - s.chargedBytes; d != 0 {
 			if d > 0 {
-				inner.memTracker.ForceReserve(d)
+				// Producer 2: the reconcile is a ForceReserve by construction,
+				// so it joins the forced portion of this slot's charge.
+				inner.memTracker.ForceReserveFor(d, memory.ForceScanFileLoad)
+				s.forcedBytes += d
 			} else {
-				inner.memTracker.Release(-d)
+				give := min(s.forcedBytes, -d)
+				if give > 0 {
+					inner.memTracker.ReleaseForced(give, memory.ForceScanFileLoad)
+					s.forcedBytes -= give
+				}
+				if rest := -d - give; rest > 0 {
+					inner.memTracker.Release(rest)
+				}
 			}
 			s.chargedBytes = int64(cap(data))
 		}
@@ -560,9 +574,18 @@ const fileLoadReserveWait = 2 * time.Second
 // data buffer. Caller must hold s.mu.
 func (s *fileSlot) releaseCharge(inner *scanSourceInner) {
 	if s.chargedBytes > 0 && inner.memTracker != nil {
-		inner.memTracker.Release(s.chargedBytes)
+		// The forced portion comes off the forced census, the rest is a plain
+		// release: the census counts OUTSTANDING forced bytes, so a release
+		// that forgets which half it is unbalances it (memory/forced.go).
+		if s.forcedBytes > 0 {
+			inner.memTracker.ReleaseForced(s.forcedBytes, memory.ForceScanFileLoad)
+		}
+		if rest := s.chargedBytes - s.forcedBytes; rest > 0 {
+			inner.memTracker.Release(rest)
+		}
 	}
 	s.chargedBytes = 0
+	s.forcedBytes = 0
 }
 
 // releaseGate returns this slot's admitted bytes to the load gate.

@@ -15963,7 +15963,7 @@ func (inner *scanSourceInner) trackScanBatch(b *batch.RecordBatch) {
 		return
 	}
 	inner.batchCharges.Store(b, n)
-	inner.memTracker.ForceReserve(n)
+	inner.memTracker.ForceReserveFor(n, memory.ForceScanDecodedBatch)
 }
 
 // releaseScanBatch releases the charge recorded by trackScanBatch.
@@ -15973,7 +15973,7 @@ func (inner *scanSourceInner) releaseScanBatch(b *batch.RecordBatch) {
 		return
 	}
 	if n, ok := inner.batchCharges.LoadAndDelete(b); ok {
-		inner.memTracker.Release(n.(int64))
+		inner.memTracker.ReleaseForced(n.(int64), memory.ForceScanDecodedBatch)
 	}
 }
 
@@ -16021,7 +16021,7 @@ func (inner *scanSourceInner) trackPooledBuf(buf []byte) {
 
 	if inner.memTracker != nil {
 		n := int64(cap(buf))
-		inner.memTracker.ForceReserve(n)
+		inner.memTracker.ForceReserveFor(n, memory.ForceScanPooledBuffer)
 		inner.trackedBufBytes.Add(n)
 	}
 }
@@ -16037,7 +16037,7 @@ func (inner *scanSourceInner) releasePooledBufs() {
 	if inner.memTracker != nil {
 		released := inner.trackedBufBytes.Swap(0)
 		if released > 0 {
-			inner.memTracker.Release(released)
+			inner.memTracker.ReleaseForced(released, memory.ForceScanPooledBuffer)
 		}
 	}
 
