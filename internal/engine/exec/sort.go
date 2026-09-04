@@ -30,6 +30,25 @@ type SortKey struct {
 	Column    string
 	Order     SortOrder
 	NullsLast bool
+	// SlotPos is the 1-based position of the input column this key sorts on,
+	// or 0 to resolve Column by name.
+	//
+	// A name is an address only while it is unique. `SELECT n_name AS u,
+	// n_regionkey AS u FROM nation ORDER BY 2, 1` sorted by column ONE,
+	// because every by-name resolution binds the FIRST column carrying `u` —
+	// the right VALUES in the wrong SEQUENCE, which no unordered comparison
+	// can see (#557). The planner knows the position exactly and hands it
+	// over here.
+	SlotPos int
+}
+
+// index resolves the key against an input schema: by POSITION when the
+// planner supplied one and it is in range, by NAME otherwise.
+func (k SortKey) index(b *batch.RecordBatch) int {
+	if k.SlotPos > 0 && k.SlotPos <= len(b.Schema) {
+		return k.SlotPos - 1
+	}
+	return columnIndexFallback(b, k.Column)
 }
 
 // Sort is a Sink that accumulates all batches columnar and sorts them
@@ -99,7 +118,7 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		// every downstream resolution (top-K compaction, spill runs, the
 		// final columnar sort) shares this schema.
 		for _, k := range s.Keys {
-			if columnIndexFallback(b, k.Column) < 0 {
+			if k.index(b) < 0 {
 				return unresolvedSortKey(k.Column)
 			}
 		}

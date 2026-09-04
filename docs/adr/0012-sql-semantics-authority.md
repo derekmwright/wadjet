@@ -141,6 +141,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      same rule; a boxed comparator that reads a rendered address or a
      formatted decimal is not that order (`internal/engine/exec/
      compare_boxed.go`).
+   - **`ORDER BY <name>` over two output columns of that name is answered,
+     not refused.** (Added 2026-09-03, #557.) An output slot's identity is its
+     POSITION: two output columns may share a NAME — PostgreSQL answers
+     `SELECT abs(a), abs(b)` with two columns called `abs`, and `SELECT n_name
+     AS u, n_comment AS u` with two called `u` — and neither the values nor a
+     positional `ORDER BY N` may collapse them.
+
+     PostgreSQL goes one step further and refuses `ORDER BY u` when `u` names
+     two of them: 42702 `ORDER BY "u" is ambiguous`, verified live. Wadjet
+     resolves it to the first, which is a superset — it answers a statement
+     PostgreSQL declines rather than answering it differently — and is the
+     same shape as the HAVING-sees-output-aliases entry above: this binder
+     puts output names in one scope and a bare name resolves to the first
+     match there. The POSITIONAL spelling, which is the one that was WRONG
+     (`ORDER BY 2` sorted by column 1 on every arm), is PostgreSQL's answer
+     now.
+
    - **A FOLDED identifier resolves case-insensitively when exactly one
      column matches.** (Added 2026-09-03, #731.) An UNQUOTED identifier folds
      to lower case at the lexer and a DELIMITED one keeps its bytes, which is

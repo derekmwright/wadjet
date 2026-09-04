@@ -814,6 +814,21 @@ body, or a forward reference to a later item — is SQLSTATE `42P01`
 (`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
 the exception: a recursive CTE's name IS visible inside its own body.
 
+## Duplicate output column names
+
+A result may carry two columns of the same name — `SELECT abs(a), abs(b)` is
+two columns called `abs`, and an explicit `AS u` twice is two called `u`. Both
+keep their own values, on every execution path and over a set operation.
+
+A slot's identity is its POSITION, so `ORDER BY 2` sorts by the second output
+column whatever it is called. Sorting by an ambiguous NAME (`ORDER BY u` where
+two columns are called `u`) is answered here — it binds the first — where
+PostgreSQL refuses it with SQLSTATE `42702`.
+
+Reading a result by column name cannot represent both columns; the embedded
+API exposes the positional form (`QueryResult.Cells`) for exactly this case,
+and the wire protocol sends every column regardless.
+
 ## Set operations
 
 `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` combine two queries. Either arm

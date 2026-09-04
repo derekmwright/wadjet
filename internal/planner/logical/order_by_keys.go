@@ -296,7 +296,10 @@ func orderByError(ob plansql.OrderByItem, state, reason string) error {
 }
 
 func orderExprFor(column string, ob plansql.OrderByItem) OrderExpr {
-	return OrderExpr{Column: column, Desc: ob.Desc, NullsFirst: ob.NullsFirst}
+	// SlotPos rides along with every key built from an ORDINAL. A name
+	// addresses one column only while it is unique, and this is where the
+	// position would otherwise be lost (#557).
+	return OrderExpr{Column: column, Desc: ob.Desc, NullsFirst: ob.NullsFirst, SlotPos: ob.Ordinal}
 }
 
 // sortKeyCarried reports whether the Sort's input already emits key.

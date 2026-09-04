@@ -106,7 +106,10 @@ func resolveSortKeysForBatches(keys []SortKey, batches []*batch.RecordBatch) ([]
 		// arbitrary order (#314). A key that matches nothing is still
 		// skipped, as before — that is a missing COLUMN, a different
 		// failure than an unsupported TYPE.
-		idx := columnIndexFallback(firstBatch, key.Column)
+		// key.index, not columnIndexFallback: the planner may have supplied
+		// the key's POSITION, which is the only address that survives two
+		// output columns sharing a name (#557).
+		idx := key.index(firstBatch)
 		if idx >= len(firstBatch.Columns) {
 			idx = -1 // schema/column count mismatch — skip this key
 		}
@@ -432,7 +435,7 @@ func newRunMerger(schema []parquet.Column, keys []SortKey, cursors []*runCursor)
 			continue
 		}
 		first := live[0].cur
-		idx := columnIndexFallback(first, key.Column)
+		idx := key.index(first)
 		if idx >= len(first.Columns) {
 			continue
 		}

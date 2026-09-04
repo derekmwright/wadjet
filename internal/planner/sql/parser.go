@@ -548,6 +548,16 @@ type OrderByItem struct {
 	Expr       Node
 	Desc       bool
 	NullsFirst *bool // nil = default, true = NULLS FIRST, false = NULLS LAST
+	// Ordinal is the 1-based select-list POSITION this term was written as,
+	// or 0 when it was written as a name or an expression.
+	//
+	// It survives resolvePositionalRefs' rewrite because a NAME is not an
+	// address once two output columns share one: `SELECT n_name AS u,
+	// n_regionkey AS u FROM nation ORDER BY 2, 1` sorted by column ONE on
+	// every arm, since every resolver below binds the first column carrying
+	// `u`. The position is known exactly at the rewrite and was thrown away
+	// there (#557).
+	Ordinal int
 }
 
 // --- Lexer-based pre-parse functions ---
@@ -1129,6 +1139,9 @@ func resolvePositionalRefs(info *SelectInfo) error {
 				info.OrderBy[i].Expr = col.ASTExpr
 			}
 		}
+		// The POSITION rides along with the name it was rewritten to. A name
+		// addresses one column only while it is unique (#557).
+		info.OrderBy[i].Ordinal = pos
 	}
 
 	return nil

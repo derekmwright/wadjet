@@ -720,6 +720,10 @@ type SortKeySpec struct {
 	Column    string
 	Desc      bool
 	NullsLast bool
+	// SlotPos is the 1-based position of the input column this key sorts on,
+	// or 0 to resolve Column by name. A name is an address only while it is
+	// unique, and two output columns may legally share one (#557).
+	SlotPos int
 
 	// SourceExpr, SourceColumn and SourceType describe what MATERIALIZES a
 	// synthetic ORDER BY key — a term the SELECT list does not carry, which
@@ -6466,6 +6470,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Column:    resolveSortKeyColumn(ob.Column, sortChild),
 				Desc:      ob.Desc,
 				NullsLast: resolveNullsLast(ob),
+				SlotPos:   sortKeySlotPos(ob, node),
 			}
 			// A projection absorbed onto the producer while this subtree was
 			// walked (absorbAggregateOutputProjection) MAKES the alias real
@@ -11836,6 +11841,39 @@ func (a *aggPreProject) hasVecDecimal() bool {
 
 func (a *aggPreProject) Close() error { return nil }
 
+// sortKeySlotPos is the input column index (1-based) a sort key addresses, or
+// 0 to resolve it by name.
+//
+// It answers only when the Sort's input PROVABLY publishes the select list in
+// order and by itself — the projection immediately below it, with no star left
+// unexpanded and no hidden column ahead of the visible ones. Everywhere else
+// the name is the address it always was; a position guessed against a schema
+// this layer cannot enumerate would sort by the wrong column, which is the
+// defect rather than the fix.
+func sortKeySlotPos(ob logical.OrderExpr, sortNode *logical.Node) int {
+	if ob.SlotPos <= 0 || sortNode == nil || len(sortNode.Children) == 0 {
+		return 0
+	}
+	child := sortNode.Children[0]
+	if child == nil || child.Type != logical.NodeProject || logical.HasStarProjection(child) {
+		return 0
+	}
+	visible := logical.VisibleProjections(child.Projections)
+	if ob.SlotPos > len(visible) {
+		return 0
+	}
+	// The hidden columns a Sort's projection appends come AFTER the visible
+	// ones (hiddenSortTrimOp trims the tail), so a visible position is the
+	// same index in the batch — but only when the visible ones really are the
+	// prefix.
+	for i := 0; i < len(visible); i++ {
+		if child.Projections[i] != visible[i] {
+			return 0
+		}
+	}
+	return ob.SlotPos
+}
+
 func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	if len(node.Children) == 0 {
 		return nil, nil, nil, fmt.Errorf("sort has no child")
@@ -11856,6 +11894,12 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 			Column:    cleanExpr(ob.Column),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
+			// The select-list POSITION, when the term was written as one.
+			// The Project below a Sort narrows the schema to exactly its
+			// visible outputs in order, so position i of the select list is
+			// column i of this operator's input — and it is the only address
+			// that survives two outputs sharing a name (#557).
+			SlotPos: sortKeySlotPos(ob, node),
 		})
 	}
 
@@ -11953,6 +11997,7 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 			Column:    cleanExpr(ob.Column),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
+			SlotPos:   sortKeySlotPos(ob, sortNode),
 		})
 	}
 
@@ -12158,17 +12203,36 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		// (exec.coerceDecimalVector), rather than saturating silently. The
 		// right arm is coerced against its OWN schema, before alignSetOpRows
 		// re-keys it to the result names.
-		leftRows, err := coerceSetOpArmRows(leftSink.ToRows(), leftSchema, schema)
+		//
+		// POSITIONALLY, from here to the batch. SQL says the arms of a set
+		// operation correspond by POSITION and a result may legally carry two
+		// output columns of the same NAME — `SELECT n_name AS u, n_comment AS
+		// u FROM nation UNION ALL …` is two columns called `u` in PostgreSQL
+		// too. A map keyed by name holds ONE of them, so both output columns
+		// came back carrying the SECOND source column's value: every row
+		// wrong, no error, and only on this path — the stage DAG answers it
+		// correctly, which is what isolated the collapse as the cause (#556,
+		// and #844's UNION ALL branch, which is the same map).
+		//
+		// The rows keep their map form — every helper below reads it, and the
+		// DECIMAL, dedup and overflow rules those helpers encode are not what
+		// is wrong here — but their KEYS become slot positions, which are
+		// addresses. The schemas are renamed to match for the duration and
+		// the result batch is renamed back at the end, so nothing outside
+		// this function sees a slot name.
+		posResult := setOpSlotSchema(schema)
+		leftRows, err := coerceSetOpArmRows(
+			setOpArmRows(leftSink, leftSchema), setOpSlotSchema(leftSchema), posResult)
 		if err != nil {
 			return nil, fmt.Errorf("executing %s left side: %w", u.op, err)
 		}
-		rightRows, err := coerceSetOpArmRows(rightSink.ToRows(), rightSchema, schema)
+		rightRows, err := coerceSetOpArmRows(
+			setOpArmRows(rightSink, rightSchema), setOpSlotSchema(rightSchema), posResult)
 		if err != nil {
 			return nil, fmt.Errorf("executing %s right side: %w", u.op, err)
 		}
-		rightRows = alignSetOpRows(leftSchema, rightSchema, rightRows)
 
-		keyer := newSetOpKeyer(schema)
+		keyer := newSetOpKeyer(posResult)
 
 		var resultRows []map[string]any
 
@@ -12194,9 +12258,17 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 				// under a DECIMAL(38,10) union, silently (#553). ADR-0024
 				// item 4: at a value-producing site, no exact carrier is a
 				// 22003 error, never the nearest storable number.
-				b, err := batch.FromRowsChecked(schema, resultRows)
+				b, err := batch.FromRowsChecked(posResult, resultRows)
 				if err != nil {
 					return nil, fmt.Errorf("building the %s result: %w", u.op, err)
+				}
+				// Back to the names the query publishes. The slots were an
+				// internal addressing scheme for the rows above; the result
+				// takes the FIRST arm's column names, duplicates included.
+				for i := range b.Schema {
+					if i < len(schema) {
+						b.Schema[i].Name = schema[i].Name
+					}
 				}
 				u.batches = []*batch.RecordBatch{b}
 			}
@@ -12323,6 +12395,61 @@ func exceptRows(k *setOpKeyer, left, right []map[string]any, all bool) []map[str
 // unknown (an arm that produced nothing has no schema), or when the widths
 // differ — a width mismatch is a malformed set operation, not something to
 // paper over here.
+// setOpSlotName is the internal address of one output column of a set
+// operation. It is in the reserved hidden-slot namespace, so no query can
+// spell it and it cannot collide with a column of either arm.
+func setOpSlotName(i int) string { return "__setop_" + strconv.Itoa(i) }
+
+// setOpSlotSchema is cols with every column renamed to its slot. Types,
+// precision and scale are untouched — only the ADDRESS changes.
+func setOpSlotSchema(cols []parquet.Column) []parquet.Column {
+	out := make([]parquet.Column, len(cols))
+	for i, c := range cols {
+		c.Name = setOpSlotName(i)
+		out[i] = c
+	}
+	return out
+}
+
+// setOpArmRows boxes one arm's result with its columns keyed by POSITION.
+//
+// CollectSink.ToRowValues is the positional form and it is non-nil exactly
+// when the map form would lose a column — that is, when two of the arm's
+// output columns share a name, which is the shape this exists for. When it is
+// nil the map IS the positional form and the arm's own schema order supplies
+// the addresses.
+func setOpArmRows(sink *exec.CollectSink, schema []parquet.Column) []map[string]any {
+	if vals := sink.ToRowValues(); vals != nil {
+		out := make([]map[string]any, len(vals))
+		for i, cells := range vals {
+			m := make(map[string]any, len(schema))
+			for j := range schema {
+				if j < len(cells) {
+					m[setOpSlotName(j)] = cells[j]
+				}
+			}
+			out[i] = m
+		}
+		return out
+	}
+	rows := sink.ToRows()
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		m := make(map[string]any, len(schema))
+		for j, c := range schema {
+			m[setOpSlotName(j)] = row[c.Name]
+		}
+		out[i] = m
+	}
+	return out
+}
+
+// alignSetOpRows re-keys an arm's rows to the result's column names.
+//
+// It is no longer reached from the set-operation adapter, which addresses its
+// arms by POSITION (setOpArmRows) and therefore needs no re-keying at all.
+// Kept for the other caller and because it states the rule the slots enforce:
+// the arms correspond by position, and the result takes the first arm's names.
 func alignSetOpRows(want, have []parquet.Column, rows []map[string]any) []map[string]any {
 	if len(want) == 0 || len(want) != len(have) {
 		return rows

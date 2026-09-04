@@ -2361,7 +2361,8 @@ func (e *Executor) buildFragmentSort(ctx context.Context, spec distributed.OpSpe
 		if k.Desc {
 			order = exec.Descending
 		}
-		keys[i] = exec.SortKey{Column: k.Column, Order: order, NullsLast: k.PlaceNullsLast()}
+		keys[i] = exec.SortKey{Column: k.Column, Order: order, NullsLast: k.PlaceNullsLast(),
+			SlotPos: k.SlotPos}
 	}
 	sorter := exec.NewSort(keys)
 	if sm := e.spillFor(ctx); sm != nil {
@@ -2398,7 +2399,8 @@ func (e *Executor) buildFragmentWindow(ctx context.Context, spec distributed.OpS
 			if k.Desc {
 				order = exec.Descending
 			}
-			orderBy = append(orderBy, exec.SortKey{Column: k.Column, Order: order, NullsLast: k.PlaceNullsLast()})
+			orderBy = append(orderBy, exec.SortKey{Column: k.Column, Order: order,
+				NullsLast: k.PlaceNullsLast(), SlotPos: k.SlotPos})
 		}
 		outType := parquet.TypeFloat64
 		if wc.OutputType != nil {

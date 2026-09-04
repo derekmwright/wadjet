@@ -480,6 +480,11 @@ type OrderExpr struct {
 	// is refused loudly rather than sorted on the constant, which would be a
 	// silent no-op.
 	Position int
+	// SlotPos is the 1-based select-list POSITION this key was written as,
+	// kept even after Column has been resolved to a name. Unlike Position it
+	// is not a "not yet resolved" marker: it is the ADDRESS, for the case
+	// where the name is not one because two output columns share it (#557).
+	SlotPos int
 }
 
 // StripTopSortLimit removes the outermost Sort and Limit nodes from a logical

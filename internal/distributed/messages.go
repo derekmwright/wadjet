@@ -953,6 +953,13 @@ type SortKeySpec struct {
 	// order came back wrong and an explicit NULLS LAST was dropped, while
 	// descending was correct by accident (#330).
 	NullsLast *bool `json:"nulls_last,omitempty"`
+	// SlotPos is the 1-based position of the input column this key sorts on,
+	// or 0 to resolve Column by name. It rides the wire because a NAME is not
+	// an address once two output columns share one — `SELECT a AS u, b AS u
+	// … ORDER BY 2` bound the FIRST column called `u` on every arm, right
+	// values in the wrong sequence (#557). Absent in a spec written before
+	// the field existed, which reads as 0 and keeps the by-name resolution.
+	SlotPos int `json:"slot_pos,omitempty"`
 }
 
 // PlaceNullsLast reports where NULLs belong for this key, applying the engine

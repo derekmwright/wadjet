@@ -146,23 +146,32 @@ func TestDuplicateOutputNamesOnBothCoordinatorPaths(t *testing.T) {
 			ref: `SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
 			      FROM nation ORDER BY n_nationkey`},
 
-		// --- pinned residuals, each tracked and each still diverging -------
+		// --- shapes that were pinned and now agree -------------------------
+		//
+		// #556: the single-process set-operation lowering resolved the arms'
+		// columns by NAME — through a map[string]any, which holds ONE column of
+		// a duplicated name — so both outputs carried the second source column
+		// on all 30 rows while the DAG answered correctly. The arms are
+		// addressed by POSITION now.
 		{name: "union all over duplicates",
 			dup:       `SELECT n_name AS u, n_comment AS u FROM nation UNION ALL SELECT r_name, r_comment FROM region`,
 			ref:       `SELECT n_name AS u1, n_comment AS u2 FROM nation UNION ALL SELECT r_name, r_comment FROM region`,
-			unordered: true,
-			pins: map[string]string{armLocal: "#556: the single-process set-operation lowering resolves the " +
-				"arms' columns by NAME, so both outputs carry the second source column — all 30 rows. " +
-				"The DAG answers it correctly, which is what isolates the collision as the cause"}},
+			unordered: true},
+		// #557: resolvePositionalRefs rewrites ORDER BY N to the NAME of the
+		// N-th select item, and a name stops being an address once two items
+		// share it — the sort bound the FIRST column carrying it, on BOTH arms.
+		// The values were paired correctly and only the ORDER was wrong, which
+		// no unordered comparison can see. The ordinal rides to the sort as a
+		// POSITION now (exec.SortKey.SlotPos).
 		{name: "positional ORDER BY over duplicates",
 			dup: `SELECT n_name AS u, n_regionkey AS u FROM nation ORDER BY 2, 1`,
-			ref: `SELECT n_name AS u1, n_regionkey AS u2 FROM nation ORDER BY 2, 1`,
-			pins: map[string]string{
-				armLocal: "#557: resolvePositionalRefs rewrites ORDER BY N to the NAME of the N-th select " +
-					"item, and a name is not an address once two items share it — the sort binds the first " +
-					"column carrying it. VALUES are paired correctly; only the ORDER is wrong",
-				armDAG: "#557, same cause on the other path",
-			}},
+			ref: `SELECT n_name AS u1, n_regionkey AS u2 FROM nation ORDER BY 2, 1`},
+		{name: "positional ORDER BY over duplicates, descending",
+			dup: `SELECT n_name AS u, n_regionkey AS u FROM nation ORDER BY 2 DESC, 1`,
+			ref: `SELECT n_name AS u1, n_regionkey AS u2 FROM nation ORDER BY 2 DESC, 1`},
+		{name: "positional ORDER BY over three duplicates",
+			dup: `SELECT n_name AS u, n_regionkey AS u, n_comment AS u FROM nation ORDER BY 2, 3, 1`,
+			ref: `SELECT n_name AS u1, n_regionkey AS u2, n_comment AS u3 FROM nation ORDER BY 2, 3, 1`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range []struct {
