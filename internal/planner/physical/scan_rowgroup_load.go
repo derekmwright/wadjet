@@ -448,32 +448,37 @@ func slabClass(n int) int {
 }
 
 func (inner *scanSourceInner) getSlab(n int) []byte {
-	p := slabBucket(slabClass(n))
-	if v := p.Get(); v != nil {
-		buf := v.([]byte)
-		// By construction this fits: every buffer in a bucket was allocated
-		// at the bucket's class, and n is in that class. The check is a
-		// belt-and-braces read of an invariant, not a probe — a bucket that
-		// could hand back a buffer too small for its own class would make one
-		// Get a lottery, which is what an earlier version was: buffers were
-		// allocated at the ROW GROUP's size, so a bucket held a 82,000-byte
-		// buffer beside a 100,000-byte one and two requests for 99,800 served
-		// zero of them and allocated twice.
-		if cap(buf) >= n {
-			rgSlabReuses.Add(1)
-			return buf[:n]
+	// This class, then the one above it. A scan's row groups straddle a class
+	// boundary as soon as compression moves them a few percent across one, and
+	// looking only in this class keeps two working sets alive where one would
+	// do. The upper bucket is admitted only when the buffer still satisfies
+	// the invariant, so probing it cannot hold a row group in more than twice
+	// its bytes.
+	//
+	// A BUCKET'S MEMBERS CAN DIFFER IN CAPACITY, because a buffer is allocated
+	// at the ROW GROUP's size and not at the class's, so one Get can draw a
+	// buffer too small for this request and miss. That is deliberate and it is
+	// measured: allocating every buffer at the class makes any member serve
+	// any request of the class — one Get, no miss — and costs **+6.6% suite
+	// heap over TPC-H SF1, separated across five base/tip pairs**, because
+	// sync.Pool sheds at every GC, so the rounding is paid again and again
+	// rather than once per class. The miss costs one allocation of exactly
+	// what the row group needs; the uniformity costs a fraction of every
+	// buffer forever. The cheaper of the two is the one that ships.
+	class := slabClass(n)
+	for _, c := range [2]int{class, 2 * class} {
+		p := slabBucket(c)
+		if v := p.Get(); v != nil {
+			buf := v.([]byte)
+			if cap(buf) >= n && cap(buf) <= 2*n {
+				rgSlabReuses.Add(1)
+				return buf[:n]
+			}
+			p.Put(buf) // not ours: too small, or bigger than the bound allows
 		}
-		p.Put(buf)
 	}
-	// Allocated at the CLASS, so every buffer in a bucket is interchangeable
-	// for every row group of that class. The rounding this costs — at most
-	// twice the row group, which is the invariant — is paid once per class per
-	// process, not once per buffer, because the pool below is process-wide and
-	// warm from the query before. (It was measured at +10.9% suite heap when
-	// the pool was per-SOURCE and therefore cold at every query; that is what
-	// made the pool process-wide, and what makes the rounding affordable now.)
 	rgSlabAllocs.Add(1)
-	return make([]byte, n, slabClass(n))
+	return make([]byte, n)
 }
 
 func (inner *scanSourceInner) putSlab(buf []byte) {

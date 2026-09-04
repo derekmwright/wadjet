@@ -434,16 +434,22 @@ func TestSlabsAreReusedAcrossFilesOfSimilarShape(t *testing.T) {
 			"held in more than twice its size")
 	}
 
-	// (2) every buffer is allocated at its class, so any member fits any
-	// request in it.
-	ResetSlabPoolsForTest()
+	// (2) a fresh buffer is exactly the row group's bytes — no rounding.
+	// This is the half the measurement bought: allocating at the CLASS makes
+	// every member of a bucket serve every request in it, so one Get never
+	// misses, and costs +6.6% suite heap over TPC-H SF1, separated across five
+	// base/tip pairs, because sync.Pool sheds at every GC and the rounding is
+	// paid again and again rather than once per class. The miss that exact
+	// allocation admits costs one allocation of exactly what is needed; the
+	// rounding costs a fraction of every buffer forever.
 	inner := &scanSourceInner{}
 	for _, n := range append(append([]int{}, sameShape...), 1, 4095, 1<<20) {
+		ResetSlabPoolsForTest() // so this getSlab is an allocation, not a reuse
 		buf := inner.getSlab(n)
-		if cap(buf) != slabClass(n) {
-			t.Fatalf("a %d-byte row group was allocated with cap %d, want its class %d: a bucket "+
-				"whose members have different capacities cannot promise that one Get serves the "+
-				"request", n, cap(buf), slabClass(n))
+		if cap(buf) != n {
+			t.Fatalf("a %d-byte row group was allocated with cap %d — a fresh buffer is the row "+
+				"group's own size; rounding it up to the class measured +6.6%% suite heap",
+				n, cap(buf))
 		}
 		inner.putSlab(buf)
 	}
