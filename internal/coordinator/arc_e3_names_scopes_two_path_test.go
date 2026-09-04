@@ -453,6 +453,31 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 				"dag":     "g,x | 0,0 | 1,1 | 2,2",
 				"dagshuf": "g,x | 0,0 | 1,1 | 2,2",
 			}},
+		// The ORDER BY face of the same collision, PINNED. `ORDER BY COUNT(*)`
+		// over an aggregate aliased `g` resolves the sort key to what the
+		// aggregate PUBLISHES — the name `g` — and the stage then sorts by
+		// the first column of that name, which is the KEY. The rows are all
+		// there and every value is right; the SEQUENCE is `x` descending.
+		//
+		// It is the same first-match rule the gather's pairing and the
+		// fragment's projection each meet, at a third consumer, and closing
+		// it means the sort key carrying the aggregate's POSITION —
+		// `SortKeySpec.SlotPos` exists for the positional-ORDER-BY case
+		// (#557) and nothing sets it here. Pre-existing: base answers the
+		// same. The non-colliding control beside it is right on every arm,
+		// which is what says the collision is the trigger.
+		{name: "785/order-by-the-aggregate-under-a-colliding-alias",
+			sql: "SELECT COUNT(*) AS g, g AS x FROM typemx GROUP BY g " +
+				"ORDER BY COUNT(*) DESC, x",
+			want: "g,x | 660,0 | 660,1 | 660,6 | 659,2 | 659,3 | 659,4 | 659,5 | 384,NULL",
+			pin: map[string]string{
+				"dag":     "g,x | 384,NULL | 660,6 | 659,5 | 659,4 | 659,3 | 659,2 | 660,1 | 660,0",
+				"dagshuf": "g,x | 384,NULL | 660,6 | 659,5 | 659,4 | 659,3 | 659,2 | 660,1 | 660,0",
+			}},
+		{name: "785/ctl-order-by-the-aggregate-without-a-collision",
+			sql: "SELECT COUNT(*) AS c, g AS x FROM typemx GROUP BY g " +
+				"ORDER BY COUNT(*) DESC, x",
+			want: "c,x | 660,0 | 660,1 | 660,6 | 659,2 | 659,3 | 659,4 | 659,5 | 384,NULL"},
 		{name: "785/ctl-no-having",
 			sql:  "SELECT COUNT(*) AS g, g AS x FROM collslot GROUP BY g ORDER BY x",
 			want: "g,x | 80,0 | 80,1 | 80,2"},
