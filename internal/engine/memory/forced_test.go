@@ -132,6 +132,50 @@ func (h *underflowCounter) WithGroup(name string) slog.Handler {
 	return &underflowCounter{inner: h.inner.WithGroup(name), n: h.n}
 }
 
+// The BOUNDARY of the short-circuit is a claim, so attempt it from both sides
+// and on the line. The rule is `n > budget`, not "the tracker is full": a
+// request the budget could hold, even by one byte, is a request waiting can
+// still satisfy, and one that is exactly the budget is the last such request.
+//
+// The tracker is filled to its budget first, so all three requests miss their
+// clean Reserve and the only thing that differs between the cells is which side
+// of the boundary `n` falls on.
+func TestTheShortCircuitsBoundaryIsExactlyGreaterThanBudget(t *testing.T) {
+	const budget = 512 << 10
+	const wait = 300 * time.Millisecond
+
+	for _, tc := range []struct {
+		name     string
+		n        int64
+		wantWait bool
+	}{
+		{"one byte under the budget", budget - 1, true},
+		{"exactly the budget", budget, true},
+		{"one byte over the budget", budget + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTracker("query", budget)
+			tr.ForceReserveFor(budget, ForceScanDecodedBatch) // full: every cell misses
+
+			start := time.Now()
+			forced := ReserveOrForce(context.Background(), tr, nil, tc.n, wait, ForceScanFileLoad)
+			elapsed := time.Since(start)
+
+			if !forced {
+				t.Fatalf("n=%d was admitted against a budget of %d that is already full",
+					tc.n, budget)
+			}
+			waited := elapsed > wait/2
+			if waited != tc.wantWait {
+				verb := map[bool]string{true: "waited", false: "did not wait"}
+				t.Errorf("n=%d against budget=%d %s (%v); the rule is n > budget, so this "+
+					"cell should have %s", tc.n, budget, verb[waited], elapsed,
+					map[bool]string{true: "waited", false: "short-circuited"}[tc.wantWait])
+			}
+		})
+	}
+}
+
 // Every producer that can charge past the budget names what the charge is for,
 // and every one of them gives it back under the same name. The census counts
 // OUTSTANDING bytes, so an unpaired release leaves it describing memory that is
