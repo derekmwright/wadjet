@@ -1912,6 +1912,25 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 		ctx = context.Background()
 	}
 	p.AnnotateScanColumns(ctx, logicalPlan)
+
+	// The DAG's counterpart of buildSubqueryPipeline: this is a whole second
+	// query, planned here, and it must carry the same column policy as its
+	// enclosing statement (#859). The barrier is absorbed into the scan stage
+	// by walkStages below, exactly as it is for the outer plan.
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+		if denied := pol.DeniedColumns(); len(denied) > 0 {
+			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
+				return denied[strings.ToLower(table)]
+			}); err != nil {
+				return "", err
+			}
+		}
+		logicalPlan, err = p.applyContextColumnPolicies(ctx, logicalPlan)
+		if err != nil {
+			return "", err
+		}
+	}
+
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		p.AnnotateScanColumns(ctx, plan)
 	})

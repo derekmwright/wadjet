@@ -159,6 +159,12 @@ type Node struct {
 
 	// Filter
 	Predicates []Predicate
+	// PolicyFilter marks a Filter injected by row-level security
+	// (InjectRowFilter) rather than written by the client. It is the
+	// counterpart of SecurityBarrier below: together they are how a caller
+	// asks "does this plan carry enforcement I must not throw away"
+	// (PlanCarriesPolicyEnforcement).
+	PolicyFilter bool
 
 	// Project
 	Projections []Projection
@@ -666,6 +672,7 @@ func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
 			Raw:     raw,
 			ASTExpr: ast,
 		}})
+		filterNode.PolicyFilter = true
 		return filterNode
 	}
 

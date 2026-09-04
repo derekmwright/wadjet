@@ -51,6 +51,31 @@ func ColumnPoliciesFromContext(ctx context.Context) TablePolicies {
 	return tp
 }
 
+// PlanCarriesPolicyEnforcement reports whether this plan carries anything a
+// policy put there: a security projection, or a row filter injected by
+// row-level security.
+//
+// A caller that is about to hand a query to something that will RE-PLAN it
+// from the SQL TEXT — the coordinator's async door dispatches a
+// TaskTypePipeline task carrying `SQLText`, and the worker parses, builds and
+// optimizes it again with no policy in reach — has to ask this first. The
+// enforced plan does not survive that hop, and answering from the re-planned
+// one hands the caller the stored values.
+func PlanCarriesPolicyEnforcement(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	if (n.Type == NodeProject && n.SecurityBarrier) || (n.Type == NodeFilter && n.PolicyFilter) {
+		return true
+	}
+	for _, c := range n.Children {
+		if PlanCarriesPolicyEnforcement(c) {
+			return true
+		}
+	}
+	return false
+}
+
 // For returns the policies for one table, matched case-insensitively.
 func (tp TablePolicies) For(table string) []ColumnPolicy {
 	if len(tp) == 0 || table == "" {

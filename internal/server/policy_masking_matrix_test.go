@@ -242,6 +242,9 @@ type pmDoor struct {
 type pmRig struct {
 	doors    []pmDoor
 	provider *auth.Provider
+	// asyncBase is the HTTP base URL of the coordinator-backed server, the
+	// one that carries POST /v1/queries/async.
+	asyncBase string
 }
 
 func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog) {
@@ -592,7 +595,7 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 		pmDoor{"http/local", httpRun(hsLocal.URL)},
 		pmDoor{"http/dag", httpRun(hsDAG.URL)})
 
-	return pmRig{doors: doors, provider: provider}
+	return pmRig{doors: doors, provider: provider, asyncBase: hsDAG.URL}
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +888,77 @@ func TestPolicyMaskingLeavesUnpolicedIdentitiesAlone(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestAsyncDoorRefusesAPolicedStatement — the async door
+// (`POST /v1/queries/async`) dispatches ONE pipeline task carrying the SQL
+// TEXT, and the worker parses, builds and optimizes it again with no policy in
+// reach. At af6f18db and at the arc's own first tip it therefore answered a
+// policed identity with every stored value, including the DENIED column, while
+// the coordinator's own plan string showed the security projection.
+//
+// A policy that cannot be delivered refuses. The control is the same door
+// under an identity with no obligations, which must still work.
+func TestAsyncDoorRefusesAPolicedStatement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster and three servers")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	rig := pmRigUp(t, ctx)
+
+	post := func(key, sql string) (int, string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"sql": sql})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			rig.asyncBase+"/v1/queries/async", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(raw)
+	}
+
+	for _, sql := range []string{
+		`SELECT id, ssn FROM e7emp`,
+		`SELECT * FROM e7emp`,
+		`SELECT SUM(acct) AS s FROM e7emp`,
+		`SELECT ssn, COUNT(*) AS c FROM e7emp GROUP BY ssn`,
+	} {
+		status, body := post("analyst-key", sql)
+		if status == http.StatusOK {
+			t.Errorf("async %q was ACCEPTED for a policed identity: %s", sql, body)
+			continue
+		}
+		if !strings.Contains(body, "security policy") {
+			t.Errorf("async %q refused with %d %s; want the policy refusal", sql, status, body)
+		}
+		for _, bad := range pmTrueValues() {
+			if strings.Contains(body, bad) {
+				t.Errorf("async %q leaked %q in its refusal: %s", sql, bad, body)
+			}
+		}
+	}
+
+	// A denied column is refused by NAME before the door's own refusal — the
+	// 42703 the rest of the matrix asserts, on this door too.
+	if _, body := post("analyst-key", `SELECT salary FROM e7emp`); !strings.Contains(body, "salary") {
+		t.Errorf("async SELECT salary: %s", body)
+	}
+
+	// The control: an identity with no obligations still gets async.
+	if status, body := post("admin-key", `SELECT id FROM e7emp`); status != http.StatusAccepted &&
+		status != http.StatusOK {
+		t.Errorf("async for an unpoliced identity: %d %s — the refusal must be about the POLICY, "+
+			"not about the door", status, body)
 	}
 }
 

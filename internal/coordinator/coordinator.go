@@ -32,6 +32,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -3290,8 +3291,42 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		physical.NewPlannerForContext(ctx, c.catalog).AnnotateScanColumns(ctx, plan)
 	}
 	explainAnnotator(logicalPlan)
+
+	// ABAC at plan level — the SAME call ExecuteSQL makes, in the same
+	// position (after annotation, before Optimize). The async door
+	// (`POST /v1/queries/async`) reaches the engine here and nowhere else, so
+	// without it that door answered every policed identity from the stored
+	// column while every other door masked (#859).
+	if c.EnforcesABAC() {
+		ctx, logicalPlan, err = auth.EnforcePlanPolicies(ctx, c.authProvider, c.catalog,
+			selectInfo, logicalPlan, "coordinator")
+		if err != nil {
+			return "", "", err
+		}
+	} else if rowFilters := auth.RowFiltersFromContext(ctx); len(rowFilters) > 0 {
+		for table, filter := range rowFilters {
+			logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
+		}
+	}
+
 	logicalPlan = logical.Optimize(logicalPlan, explainAnnotator)
 	planStr = logicalPlan.PrettyPrint(0)
+
+	// The async door dispatches ONE pipeline task carrying the SQL TEXT, and
+	// the worker parses, builds and optimizes it AGAIN (worker/executor.go's
+	// executePipeline) with no policy in reach. The plan enforced above does
+	// not survive that hop: the coordinator's plan showed the security
+	// projection while the rows the worker produced carried the stored values
+	// (#859). A policy that cannot be delivered REFUSES — a control never
+	// degrades to a grant (ADR-0033 decision 4), and this door is loud until a
+	// pipeline task can carry the enforced plan instead of its text.
+	if logical.PlanCarriesPolicyEnforcement(logicalPlan) {
+		return "", "", sqlerr.Wrap("0A000", fmt.Errorf(
+			"asynchronous submission is not available for this identity: the query "+
+				"carries a row or column security policy, and the asynchronous path "+
+				"re-plans the statement on a worker where the policy is not in reach; "+
+				"use POST /v1/queries"))
+	}
 
 	// Generate distributed stages and route to pipeline execution
 	planner := physical.NewPlannerForContext(ctx, c.catalog)
