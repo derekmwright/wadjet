@@ -123,12 +123,19 @@ const (
 	                       WHERE EXISTS (SELECT 1 FROM d WHERE d.k = o.k)`
 	// The same question in the one position that is still not a decorrelation
 	// site: an aggregate ARGUMENT (deferral D1). It answers the same number
-	// and it is re-run once per outer row, which is what
-	// TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow needs to reach the
-	// memory defect it is really about.
+	// and it is re-run once per outer row.
 	arcD5RerunInAnAggregateArgument = `SELECT SUM(CASE WHEN EXISTS (
 	                                     SELECT 1 FROM d5_inner i WHERE i.k = o.k)
 	                                   THEN 1 ELSE 0 END) FROM d5_outer o`
+	// The same question again, asked with IN — the one construct that wants
+	// the whole SET and therefore still LOADS the inner file per outer row.
+	// EXISTS stops at the first row now (plansql.AppendRowLimit), which is
+	// why the reserve-wait pin below cannot be driven through it: a read that
+	// stops never asks for the file-sized reservation the pin is about. The
+	// construct changed; the memory defect did not.
+	arcD5RerunSetInAnAggregateArgument = `SELECT SUM(CASE WHEN o.k IN (
+	                                        SELECT i.k FROM d5_inner i WHERE i.k = o.k)
+	                                      THEN 1 ELSE 0 END) FROM d5_outer o`
 )
 
 // TestEveryCorrelatedInnerIsReadOnce is the DELETED pin of deferral D2, kept
@@ -207,7 +214,11 @@ func TestEveryCorrelatedInnerIsReadOnce(t *testing.T) {
 //     row. The shape that reached it used to be a DERIVED-TABLE inner; that
 //     one now lowers (#852), so this pin drives the re-run through the
 //     position that still does not lower — an aggregate ARGUMENT, which is not
-//     a decorrelation site at all (deferral D1, #734's residual). The two are
+//     a decorrelation site at all (deferral D1, #734's residual) — and asks
+//     the question with IN rather than EXISTS, because an EXISTS stops at its
+//     first row now (round 2, plansql.AppendRowLimit) and a read that stops
+//     never asks for the file-sized reservation defect 2 is about. IN wants
+//     the whole SET, so it still loads the file. The two are
 //     the same re-run and the same cost; only the reason it is reached moved.
 //  2. memory — internal/engine/memory.ReserveOrForce waits the caller's full
 //     relief timeout (physical.fileLoadReserveWait, 2s) for a reservation of n
@@ -243,7 +254,7 @@ func TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow(t *testing.T) {
 	// of the file, not of the query.
 	db, store := arcD5RerunFixture(t, ctx, budget, outerRows, 60000, 120)
 	slog.SetDefault(slog.New(counter))
-	res, err := db.Query(ctx, arcD5RerunInAnAggregateArgument)
+	res, err := db.Query(ctx, arcD5RerunSetInAnAggregateArgument)
 	slog.SetDefault(prev)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -270,6 +281,35 @@ func TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow(t *testing.T) {
 		t.Errorf("reservation was %d bytes against a %d-byte budget; this pin needs a "+
 			"single file LARGER than the budget to reach the futile wait — the "+
 			"fixture stopped reaching its own condition", bytes, budget)
+	}
+
+	// THE CONTROL, and it is the round-2 fix's cost proof. The SAME question
+	// in the SAME non-decorrelated position, asked with EXISTS instead of IN,
+	// pays none of this: an EXISTS reads one row (plansql.AppendRowLimit), so
+	// no read ever asks for a file-sized reservation and the futile wait is
+	// never entered. Same fixture, same budget, same answer.
+	//
+	// It is the control and not a second pin because what it holds is a
+	// CONSTRUCT's rule, not the memory defect above: if a future change makes
+	// EXISTS read the whole file again, the 2s-per-row wait comes back with
+	// it and this line is where that shows.
+	db2, store2 := arcD5RerunFixture(t, ctx, budget, outerRows, 60000, 120)
+	control := &arcD5ForcedCounter{}
+	slog.SetDefault(slog.New(control))
+	res2, err := db2.Query(ctx, arcD5RerunInAnAggregateArgument)
+	slog.SetDefault(prev)
+	if err != nil {
+		t.Fatalf("EXISTS control: %v", err)
+	}
+	if got := fmt.Sprint(res2.Rows[0][res2.Columns[0]]); got != fmt.Sprint(outerRows) {
+		t.Fatalf("EXISTS control: SUM = %s, want %d", got, outerRows)
+	}
+	t.Logf("EXISTS control: inner reads=%d forced reservations=%d reservation bytes=%d",
+		store2.gets.Load(), control.forced.Load(), control.bytes.Load())
+	if control.forced.Load() != 0 {
+		t.Errorf("the EXISTS spelling forced %d reservations; it reads ONE row, so it "+
+			"must never ask for a reservation the budget cannot hold — each one costs "+
+			"the full 2s relief wait for nothing", control.forced.Load())
 	}
 }
 
