@@ -40,6 +40,29 @@ import (
 // wire metadata and poisonous here — a confidently-wrong arm type makes the
 // ladder cast the column, which moves values.
 func setOpArmDecls(n *logical.Node) colDecls {
+	return setOpArmDeclsInScope(n, nil)
+}
+
+// setOpArmDeclsInScope is setOpArmDecls carrying the relation names the
+// ENCLOSING query has for the subtree it is entering — a derived table's
+// alias, a CTE's name and the name one reference gives it — collected on the
+// way down from the subtree ROOT, where they are recorded, to the Project that
+// publishes the columns they qualify.
+//
+// It is a SCOPE and not a set of stamps. armScopeNames used to walk the whole
+// subtree and collect every derived alias in it, on the claim that a name from
+// an INNER derived table "only ever ADDS a resolution for a spelling SQL
+// cannot legally write". That claim is false where the inner name is also a
+// LEGAL one at the outer level: over
+//
+//	(SELECT id, dx FROM (SELECT id, dx FROM b) a) s JOIN ja a ON s.id = a.id
+//
+// the inner `a` was stamped onto the LEFT side's emitted names, so `a.dx`
+// existed on both sides of the join at two different (p,s), joinArmDecls
+// deleted the contested key as it must, the arm came back untyped and the set
+// operation was REFUSED — for a query PostgreSQL answers, where the only
+// legal `a` is the join's right side (#682).
+func setOpArmDeclsInScope(n *logical.Node, scope []string) colDecls {
 	if n == nil {
 		return colDecls{}
 	}
@@ -50,17 +73,22 @@ func setOpArmDecls(n *logical.Node) colDecls {
 		if len(n.Children) != 1 {
 			return colDecls{}
 		}
-		return setOpArmDecls(n.Children[0])
+		// A pass-through node can be the subtree ROOT that carries the alias —
+		// `(SELECT … ORDER BY id) s` records `s` on the Sort — so the scope
+		// travels down through it to the Project that publishes the columns.
+		return setOpArmDeclsInScope(n.Children[0], armScopeAt(n, scope))
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return colDecls{}
 		}
-		return joinArmDecls(setOpArmDecls(n.Children[0]), setOpArmDecls(n.Children[1]))
+		// Each side opens its own scope: a name in scope for the join is not
+		// in scope for one of its sides.
+		return joinArmDecls(setOpArmDeclsInScope(n.Children[0], nil), setOpArmDeclsInScope(n.Children[1], nil))
 	case logical.NodeProject:
 		if len(n.Children) != 1 {
 			return colDecls{}
 		}
-		return projectArmDecls(n, setOpArmDecls(n.Children[0]))
+		return projectArmDecls(n, setOpArmDeclsInScope(n.Children[0], nil), armScopeAt(n, scope))
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		// A nested set operation emits what ITS OWN reconciliation makes its
 		// arms agree on. setOpArmProjection already asks that question when
@@ -86,12 +114,27 @@ func setOpArmDecls(n *logical.Node) colDecls {
 // delimited identifier can contain a dot ("id.orig_h", a flat Zeek JSON
 // column) and IS one name, which is why colDecls.colDecl resolves the full
 // dotted spelling as a column of its own first (ADR-0022).
+//
+// An ALIAS HIDES the table name, so a scan that has one answers to it alone.
+// PostgreSQL is explicit about this — `SELECT ja.dx FROM ja a` is "invalid
+// reference to FROM-clause entry for table ja", and wadjet's own resolver
+// refuses it too ("missing FROM-clause entry") on every path — so keying the
+// table name behind an alias described a spelling neither engine can execute
+// and cost a real one: over `(SELECT id, dx FROM jb) ja JOIN ja a`, the
+// derived table's legal `ja.dx` collided with the hidden `ja.dx` of the
+// aliased base table at a different (p,s), joinArmDecls deleted the contested
+// key, and the set operation was refused for a query PostgreSQL answers
+// (#682).
 func scanArmDecls(n *logical.Node) colDecls {
 	if len(n.ScanColTypes) == 0 {
 		return colDecls{}
 	}
+	names := []string{n.TableAlias, n.TableName}
+	if strings.TrimSpace(n.TableAlias) != "" {
+		names = names[:1]
+	}
 	quals := make([]string, 0, 2)
-	for _, q := range []string{n.TableAlias, n.TableName} {
+	for _, q := range names {
 		q = strings.ToLower(strings.TrimSpace(q))
 		if q == "" {
 			continue
@@ -226,7 +269,7 @@ func setOpNodeDecls(n *logical.Node) colDecls {
 // wire schema and the wrong one here: an arm confidently typed STRING makes
 // the ladder refuse a union of two numbers, and an arm confidently typed with
 // the wrong DECIMAL scale moves values by a power of ten.
-func projectArmDecls(n *logical.Node, in colDecls) colDecls {
+func projectArmDecls(n *logical.Node, in colDecls, quals []string) colDecls {
 	strictInt := strictIntArithCols(n.Children[0])
 	types := make(map[string]parquet.TypeID, len(n.Projections))
 	var dec map[string]logical.DecimalMeta
@@ -243,14 +286,13 @@ func projectArmDecls(n *logical.Node, in colDecls) colDecls {
 			dec[lc] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
 		}
 	}
-	// The SCOPE names this Project's output answers to — a derived table's
+	// quals is the SCOPE this Project's output answers to — a derived table's
 	// alias, a CTE's name — keyed alongside the bare ones, exactly as
 	// scanArmDecls keys a scan's table alias. Without them a DERIVED side of a
 	// join contributed only bare names, joinArmDecls deleted the contested
 	// one, and `s.dx` over `(SELECT id, dx FROM b) s JOIN a` resolved to
 	// nothing: the arm came back untyped and every file kept its own scale —
 	// #551 again, one node down.
-	quals := armScopeNames(n)
 	for _, proj := range n.Projections {
 		name := declaredProjectionName(proj)
 		if name == "" {
@@ -294,44 +336,30 @@ func projectArmDecls(n *logical.Node, in colDecls) colDecls {
 	return colDecls{types: types, fields: inputColFields(n), dec: dec}
 }
 
-// armScopeNames collects the relation names a subtree answers to: a CTE's name
-// and the alias one reference gives it, both recorded on the subtree ROOT, and
-// the DERIVED TABLE aliases stamped onto every scan below it. It is the same
-// association subtreeNamesRelation tests one name at a time, enumerated.
-//
-// A name from an INNER derived table is collected too — the walk cannot tell
-// at which level a stamp was applied — so `i.x` resolves for `(SELECT z AS x
-// FROM (SELECT e2 AS z FROM t) i) a` even though only `a.x` is in scope for
-// the enclosing query. That only ever ADDS a resolution for a spelling SQL
-// cannot legally write; it never redirects one that can.
-func armScopeNames(n *logical.Node) []string {
-	var out []string
-	seen := map[string]bool{}
+// armScopeAt adds the relation names recorded ON ONE NODE to the scope in
+// force: the DERIVED TABLE alias the enclosing query gave this subtree, a
+// CTE's name, and the alias one reference gives that CTE. All three are
+// recorded on the subtree ROOT (logical.setSubtreeAlias, resolveTableOrCTE),
+// which is why the scope is collected on the way DOWN rather than gathered
+// from the whole subtree: the stamps a scan carries include the ones every
+// ENCLOSING derived table applied, and those name a different level.
+func armScopeAt(n *logical.Node, scope []string) []string {
+	out := scope
 	add := func(name string) {
 		lc := strings.ToLower(strings.TrimSpace(name))
-		if lc == "" || seen[lc] {
+		if lc == "" {
 			return
 		}
-		seen[lc] = true
-		out = append(out, lc)
-	}
-	var walk func(*logical.Node)
-	walk = func(n *logical.Node) {
-		if n == nil {
-			return
-		}
-		add(n.CTEName)
-		add(n.CTERefAlias)
-		if n.Type == logical.NodeScan {
-			for _, d := range n.DerivedAliases {
-				add(d)
+		for _, have := range out {
+			if have == lc {
+				return
 			}
 		}
-		for _, c := range n.Children {
-			walk(c)
-		}
+		out = append(append([]string(nil), out...), lc)
 	}
-	walk(n)
+	add(n.DerivedAlias)
+	add(n.CTEName)
+	add(n.CTERefAlias)
 	return out
 }
 

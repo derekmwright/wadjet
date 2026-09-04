@@ -40,12 +40,23 @@ func TestSetOpArmDeclsKeepsAJoinsTwoSidesApart(t *testing.T) {
 		want       expr.DeclType
 		wantDecide expr.Confidence
 	}{
-		// The two qualified spellings, under the alias and under the table
-		// name — both are how a query can write the reference.
+		// The ALIAS is how a query writes the reference for a scan that has
+		// one.
 		{"left alias", &plansql.ColRef{Table: "a", Column: "dx"}, expr.DeclDecimal(9, 2), expr.Decided},
 		{"right alias", &plansql.ColRef{Table: "b", Column: "dx"}, expr.DeclDecimal(18, 4), expr.Decided},
-		{"left table name", &plansql.ColRef{Table: "ja", Column: "dx"}, expr.DeclDecimal(9, 2), expr.Decided},
-		{"right table name", &plansql.ColRef{Table: "jb", Column: "dx"}, expr.DeclDecimal(18, 4), expr.Decided},
+		// The TABLE NAME behind that alias is not, and this walk no longer
+		// claims it. `SELECT ja.dx FROM ja a` is "invalid reference to
+		// FROM-clause entry for table ja" in PostgreSQL 17.11 (measured live)
+		// and "missing FROM-clause entry" in wadjet on every path, so a
+		// declaration for it describes a spelling neither engine executes —
+		// and it collided with the LEGAL `ja.dx` of a derived table aliased
+		// `ja` beside it, which is #682's second shape. Undecided leaves the
+		// bare-name fallback in lookupColKey to answer, which is what it did
+		// for every reference this walk cannot key.
+		{"left table name behind an alias", &plansql.ColRef{Table: "ja", Column: "dx"},
+			expr.DeclType{}, expr.Undecided},
+		{"right table name behind an alias", &plansql.ColRef{Table: "jb", Column: "dx"},
+			expr.DeclType{}, expr.Undecided},
 		// The BARE name still says nothing: the two sides disagree about it,
 		// and an unqualified reference names no one column. Answering with
 		// either side would be the mirror image of the defect.
