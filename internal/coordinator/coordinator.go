@@ -3591,6 +3591,13 @@ func schemaOrDeclared(gathered []parquet.Column, stages []physical.Stage) []parq
 // lengths — which pgwire would send as a RowDescription whose field count
 // disagrees with the DataRows it then writes.
 //
+// The two guards fire under the SAME condition, which is what makes that
+// true: gatherReceiver sets r.columns from the first decoded batch carrying a
+// schema and appends every decoded batch to r.batches, so an empty column
+// list means the gather saw no batch with a schema — exactly when
+// gatherSchema is empty and schemaOrDeclared takes the declared path too.
+// Neither can substitute for the other alone.
+//
 // Only a zero-row result needs it, and only one whose column names came from
 // nowhere else: extractOutputRenames covers a written-out SELECT list, but a
 // bare `SELECT *` has no visible select items to walk, so its zero-row result
