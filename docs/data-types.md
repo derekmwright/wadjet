@@ -188,12 +188,14 @@ literal in a predicate, which read it through one accept-set. A literal whose
 fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
 text that is not a timestamp at all is 22007.
 
-**Where this accept-set applies:** the INGEST door (`COPY`, the Go ingester, a
-Bento-written table registered through Wadjet) and a DATE literal in
-`INSERT … VALUES`. `CAST(<text> AS DATE)` is a separate parser in the
-expression layer and does not yet agree with it — notably it still accepts
-`'0000-01-01'`, and it answers NULL where the doors above raise an error
-(tracked for the expression layer, not closed here).
+**Where this accept-set applies: everywhere.** The INGEST door (`COPY`, the Go
+ingester, a Bento-written table registered through Wadjet), a DATE literal in
+`INSERT … VALUES`, a literal in a predicate, and `CAST(<text> AS DATE)` all
+read the same function, so a spelling that stores is a spelling a filter
+matches and a cast converts — same value, same refusal, same SQLSTATE. The
+`CAST` door used to be a second parser that answered NULL where the others
+raised and accepted `'0000-01-01'`; it now takes both its value and its
+refusal from the shared accept-set.
 
 `Date` takes the unambiguous year-first spellings PostgreSQL's default
 `DateStyle` reads exactly one way: a four-or-more-digit leading year with a

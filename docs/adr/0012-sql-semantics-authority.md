@@ -247,8 +247,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      cast starts refusing. UUID and the float family were the same shape and
      ARE fixed: both had a single unambiguous accept-set to read.
    - **The CAST door reads the engine's ONE temporal accept-set, and inherits
-     its residuals.** (Added 2026-09-03, #840; the accept-set is #639's and
-     #641's.) `CAST(<text> AS DATE|TIMESTAMP)` takes both its VALUE and its
+     its refusals.** (Added 2026-09-03, #840; the accept-set is #639's and
+     #641's. Amended 2026-09-04: #641 landed and the last residual here closed
+     itself, which is what a shared accept-set is FOR.) `CAST(<text> AS DATE|TIMESTAMP)` takes both its VALUE and its
      refusal from `parquet.ParseDateDays` / `ParseTimestampMillis` — the same
      function the ingest boundary, the parquet writers, the row→batch builder
      and the filter kernel read — so a literal that STORES is a literal a
@@ -261,15 +262,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        field as a month and calls month 31 a field-range failure, while wadjet
        refuses every spelling whose field ORDER DateStyle would decide, so it
        is "not a date" and the class differs.
-     - `'0000-01-01'` and `'2024-001-01'` are **ACCEPTED** where PostgreSQL
-       raises 22008 and 22007: there is no year zero, and a three-digit month
-       is not a date. The accept-set is one function shared by five doors, so
-       the refusal belongs there and not inside the cast — a second reading
-       inside the cast is how the value and the code came to disagree in the
-       first place. The storage arc's **#641** is closing it in
-       `ParseDateDays`; this door inherits it with no further change. Pinned by
-       `expr.TestCastToDateInheritsTheSharedAcceptSetsResiduals`, which fires
-       when it lands.
+     - `'0000-01-01'` and `'2024-001-01'` are **REFUSED, with PostgreSQL's own
+       codes and messages** — 22008 for a year the calendar does not have
+       (1 BC sits immediately before 1 AD there) and 22007 for a three-digit
+       month, which PostgreSQL reads as a day-of-year and then rejects. This
+       started as the entry's one open residual, and the way it closed is the
+       point of the entry: the refusal was added ONCE, in
+       `parquet.ParseDateDays` (**#641**, the storage arc), and the CAST door
+       inherited it with no change in `expr` at all. **The two doors have
+       converged**: the ingest boundary, `INSERT … VALUES`, a predicate and a
+       CAST now give the same answer to "is this a date", including these two
+       spellings. The pin that recorded the residual fired the day #641 landed
+       and was deleted — that firing is the fix's proof. The cells live in
+       `expr.TestCastToDateRaisesForTextThatNamesNoDay` now, with
+       `expr.TestCastToDateStillReadsTheYearsAroundTheRefusal` asserting the
+       boundary the new refusal must not cross: `0001-01-01`, `10000-01-01`
+       and the compact `19960110` all still answer, as they do on 17.11.
      - The compact 8-digit form `'20240101'` is ACCEPTED, as PostgreSQL accepts
        it. It briefly RAISED — #836's first pass took only the error CODE from
        the shared parser and left the value to a narrower reading — which is

@@ -114,6 +114,23 @@ func TestCastToDateRaisesForTextThatNamesNoDay(t *testing.T) {
 		// with a leading minus, so this is not a date at all in either engine.
 		{"a negative year", &Lit{Val: "-0001-01-01"}, "22007",
 			`invalid input syntax for type date: "-0001-01-01"`},
+		// YEAR ZERO and a THREE-DIGIT MONTH, promoted here from the pin this
+		// file used to carry. Both were ACCEPTED — `0000-01-01` answered a
+		// day and `2024-001-01` answered 2024-01-01 — and both were left
+		// alone on purpose: the reading is `parquet.ParseDateDays`'s, shared
+		// by the ingest boundary, the writers, the row→batch builder and the
+		// filter kernel, and a second reading inside the CAST would have been
+		// the very two-answers-for-one-question defect this file is about.
+		// The storage arc closed it at the accept-set (#641) and this door
+		// inherited the refusal with no change here — which is exactly what
+		// the pin predicted, and why deleting it is the proof. Codes and
+		// messages measured on live 17.11 and identical on both engines.
+		{"year zero", &Lit{Val: "0000-01-01"}, "22008",
+			`date/time field value out of range: "0000-01-01"`},
+		{"the other end of year zero", &Lit{Val: "0000-12-31"}, "22008",
+			`date/time field value out of range: "0000-12-31"`},
+		{"a three-digit month", &Lit{Val: "2024-001-01"}, "22007",
+			`invalid input syntax for type date: "2024-001-01"`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			state, msg := recoverFatalEvalForTest(t, func() {
@@ -162,48 +179,41 @@ func TestCastToDateReadsTheEngineAcceptSet(t *testing.T) {
 	}
 }
 
-// TestCastToDateInheritsTheSharedAcceptSetsResiduals is a DEFERRAL, pinned.
+// TestCastToDateStillReadsTheYearsAroundTheRefusal is the BOUNDARY of the
+// refusal the two cells above assert, and it is the half a census of failures
+// cannot carry.
 //
-// Two spellings PostgreSQL 17.11 refuses are ACCEPTED by
-// `parquet.ParseDateDays`, and therefore by this cast:
+// The pin this replaces recorded a residual: `0000-01-01` and `2024-001-01`
+// were ACCEPTED here because `parquet.ParseDateDays` accepted them, and the
+// fix belonged in that one shared accept-set rather than in a second reading
+// inside the CAST. #641 landed it there, the CAST inherited it, and the pin
+// fired — which is what a pin that starts agreeing is for. The two spellings
+// now sit in the census above.
 //
-//	'0000-01-01'    PG 22008 (there is no year zero)   here: 1970-01-01 − …
-//	'2024-001-01'   PG 22007 (a three-digit month)     here: 2024-01-01
-//
-// They are not fixed HERE on purpose. The accept-set is one function shared by
-// the ingest boundary, the parquet writers, the row→batch builder and the
-// filter kernel, and adding a second reading inside the cast would give the
-// engine two answers to "is this a date" — the exact failure that made the
-// value and the code disagree above. The refusal belongs in ParseDateDays, and
-// the storage arc's #641 is closing it there for the ingest and INSERT doors;
-// this door inherits it with no further change the day that lands.
-//
-// TODO(#641): delete this when ParseDateDays refuses a year zero and a
-// three-digit month. The pin fires then, which is the signal that the CAST
-// door inherited the fix.
-func TestCastToDateInheritsTheSharedAcceptSetsResiduals(t *testing.T) {
+// What remains worth asserting is that the refusal did not over-fire. A rule
+// written as "reject a year starting 000" would take year 1 with it, and a
+// three-digit-month rule written on field WIDTH would take the compact
+// 8-digit form. Both still answer, on live 17.11 and here, with the same day
+// numbers.
+func TestCastToDateStillReadsTheYearsAroundTheRefusal(t *testing.T) {
+	b := dateCastBatch(t)
 	for _, c := range []struct {
-		in       string
-		pgSays   string
-		wantDays int64
+		in   string
+		want int64
 	}{
-		{"0000-01-01", `22008 date/time field value out of range`, -719528},
-		{"2024-001-01", `22007 invalid input syntax for type date`, 19723},
+		// The first day PostgreSQL has: year zero is refused, year 1 is not.
+		{"0001-01-01", -719162},
+		// Past four digits, which PostgreSQL also accepts.
+		{"10000-01-01", 2932897},
+		// The compact form, whose month field is two digits with no
+		// separator — the shape a width-based three-digit-month rule would
+		// have swallowed.
+		{"19960110", 9505},
 	} {
-		b := dateCastBatch(t)
-		got := func() (v any) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("CAST(%q AS DATE) now raises %v — parquet.ParseDateDays has "+
-						"learned this refusal (#641) and the cast inherited it. Delete this "+
-						"pin and move the cell into the census above.", c.in, r)
-				}
-			}()
-			return (&Cast{Operand: &Lit{Val: c.in}, DestType: "date"}).Eval(b, 0)
-		}()
-		if got != c.wantDays {
-			t.Errorf("CAST(%q AS DATE) = %v, this pin records %d; PostgreSQL 17.11 says %s",
-				c.in, got, c.wantDays, c.pgSays)
+		if got := (&Cast{Operand: &Lit{Val: c.in}, DestType: "date"}).Eval(b, 0); got != c.want {
+			t.Errorf("CAST(%q AS DATE) = %v, want %d — #641's year-zero and three-digit-month "+
+				"refusals must not reach this spelling (live PostgreSQL 17.11 answers it)",
+				c.in, got, c.want)
 		}
 	}
 }
