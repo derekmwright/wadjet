@@ -606,6 +606,16 @@ func censusShapes() []censusShape {
 			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
 			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
 
+		// A correlated reference to a column the target does not have. A
+		// documented refusal is a promise about the CODE (ADR-0012), and this
+		// one carried none at all on the embedded door and the pgwire layer's
+		// 42000 fallback on the wire. It is a new refusal path this arc
+		// opened, so it needed a cell as much as a code.
+		{name: "#688 delete correlated on a column the target does not have", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE EXISTS (SELECT 1 FROM arcb_src s WHERE s.id = arcb_pr.nosuchcol)",
+			pg:  "state=42703 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42703 table=[1:10:a 2:20:b 3:30:c]"},
+
 		// STILL REFUSED, and pinned rather than described: a subquery in the
 		// SET LIST. It is a different site — ResolveDMLSetClauses, which
 		// resolves an assignment against the target column's declaration —

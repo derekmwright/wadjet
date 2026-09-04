@@ -277,6 +277,18 @@ func (e *MissingOuterColumnError) Error() string {
 		e.Ref.Table, e.Ref.Column, strings.Join(e.Available, ", "))
 }
 
+// SQLState is PostgreSQL's 42703 (undefined_column).
+//
+// The two ways to reach this error are a PLANNING defect — the outer query
+// pruned a column its subquery correlates on — and a reference to a column
+// the outer relation simply does not have, which is what a client sees when
+// it writes `WHERE EXISTS (… WHERE s.id = t.nosuchcol)`. PostgreSQL answers
+// the second with 42703, and a client cannot tell the two apart from the
+// wire, so the code has to be the one the shape a client can actually write
+// deserves. Without it this reached the client with no SQLSTATE at all on the
+// embedded door and the pgwire layer's 42000 fallback on the wire.
+func (e *MissingOuterColumnError) SQLState() string { return "42703" }
+
 // FatalEvalError satisfies the marker the pipeline drivers recover on. Expr's
 // Eval/EvalBool have no error return, so a failure that must not be mistaken
 // for a NULL travels as a panic carrying this value and is turned back into a
