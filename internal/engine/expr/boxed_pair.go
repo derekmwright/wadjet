@@ -612,33 +612,32 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 }
 
 // elementOperandKind classifies element_at's result from its CONTAINER
-// argument's element vector. Only a bare column argument answers: anything
-// else has no vector to read a child type off, and a wrong kind is worse than
-// no kind (the whole premise of ADR-0012 item 8).
+// argument's element vector, at ANY depth and for any container expression
+// whose declared shape resolves — a column, a nested element_at, a
+// COALESCE/CASE/GREATEST over them (containerVector, #669).
+//
+// Requiring a bare `*ColRef` here is what left `GREATEST(element_at(
+// element_at(aa, 1), 1), '2')` unclassified: it answered "2" over 12.75,
+// because "2" sorts above "12.75" as TEXT, and the predicate spelling of the
+// same comparison lost every row it should have found.
+//
+// A producer that declares no shape still answers boxUnknown: a wrong kind is
+// worse than no kind, which is the whole premise of ADR-0012 item 8.
 //
 // unsettled while the column does not resolve, for classifyOperand's reason —
 // a name that resolves in no batch yet says nothing about the next one.
 func elementOperandKind(container Expr, b *batch.RecordBatch) (boxKind, bool) {
-	col, ok := container.(*ColRef)
-	if !ok {
-		return boxUnknown, true
+	if col, ok := container.(*ColRef); ok {
+		col.resolve(b)
+		if col.idx < 0 || col.idx >= len(b.Columns) {
+			return boxUnknown, false
+		}
 	}
-	col.resolve(b)
-	if col.idx < 0 || col.idx >= len(b.Columns) {
-		return boxUnknown, false
-	}
-	child := b.Columns[col.idx].Child
+	// containerElementVector answers the MAP's VALUE and the ARRAY's element,
+	// never the entry ROW a MAP materializes as.
+	child := containerElementVector(containerVector(container, b), b)
 	if child == nil {
 		return boxUnknown, true
-	}
-	if staticallyMap(container, b) {
-		// A MAP materializes as ARRAY(ROW("key","value")), and element_at
-		// answers the VALUE — so the element kind is the second field's,
-		// never the entry row's.
-		if len(child.Children) != 2 {
-			return boxUnknown, true
-		}
-		child = child.Children[1]
 	}
 	switch child.Type {
 	case batch.TypeDecimal:

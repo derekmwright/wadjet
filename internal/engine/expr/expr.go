@@ -11399,11 +11399,17 @@ func fnRowField(args []any) any {
 // not (#607).
 type elementAtExpr struct {
 	arg0, arg1 Expr
-	// resolved publishes isMap, decided on the first Eval because a ColRef
-	// needs the batch to know its column's declared type. Set last under mu.
+	// resolved publishes isMap and decimalKey, decided on the first Eval
+	// because a ColRef needs the batch to know its column's declared type.
+	// Set last under mu.
 	resolved atomic.Bool
 	mu       sync.Mutex
 	isMap    bool
+	// decimalKey is true for a MAP whose KEY is declared DECIMAL. Such a key
+	// is stored at the key column's scale and boxes as that text, so
+	// `element_at(mk, 12.75)` looked up "12.75" against a key rendered
+	// "12.7500" at (18,4) and matched nothing on every row (#669 item 2).
+	decimalKey bool
 }
 
 func (e *elementAtExpr) Eval(b *batch.RecordBatch, row int) any {
@@ -11416,7 +11422,7 @@ func (e *elementAtExpr) Eval(b *batch.RecordBatch, row int) any {
 		e.resolveDispatch(b)
 	}
 	if e.isMap {
-		return mapElementAt(container, key)
+		return mapElementAt(container, key, e.decimalKey)
 	}
 	return fnElementAt([]any{container, key})
 }
@@ -11428,6 +11434,9 @@ func (e *elementAtExpr) resolveDispatch(b *batch.RecordBatch) {
 		return
 	}
 	e.isMap = staticallyMap(e.arg0, b)
+	if k := containerKeyVector(containerVector(e.arg0, b)); k != nil {
+		e.decimalKey = k.Type == batch.TypeDecimal
+	}
 	e.resolved.Store(true)
 }
 
@@ -11438,16 +11447,18 @@ func (e *elementAtExpr) resolveDispatch(b *batch.RecordBatch) {
 // (map_from_entries is RetMap; map_entries is RetArray, so map_entries(m)[i]
 // correctly indexes). Anything else is treated as an ARRAY.
 func staticallyMap(e Expr, b *batch.RecordBatch) bool {
-	switch a := e.(type) {
-	case *ColRef:
-		a.resolve(b)
-		return a.typ == batch.TypeMap
-	case *FuncCall:
+	if a, ok := e.(*FuncCall); ok {
 		t, c := DefaultRegistry.ReturnType(a.Name).Resolve(len(a.Args), nil)
-		return c != Undecided && t.ID == batch.TypeMap
-	default:
-		return false
+		if c != Undecided && t.ID == batch.TypeMap {
+			return true
+		}
 	}
+	// Any container expression whose declared shape this batch can resolve —
+	// a column, a nested element_at, a COALESCE/CASE/GREATEST over them
+	// (#635). A producer that declares no container shape stays an ARRAY
+	// here, which is what it was before.
+	v := containerVector(e, b)
+	return v != nil && v.Type == batch.TypeMap
 }
 
 // mapElementAt looks key up in a MAP value in either materialized shape: a Go
@@ -11457,15 +11468,38 @@ func staticallyMap(e Expr, b *batch.RecordBatch) bool {
 // key returns the LAST match, matching toMap (the shape map_keys/map_values and
 // a MAP GROUP BY key go through, which last-write-wins into a Go map). An
 // absent key returns NULL.
-func mapElementAt(m, key any) any {
+// decimalKey spells both sides through batch.CanonicalDecimalText, the
+// minimal-scale form AppendDecimalKey already uses for a stored DECIMAL, so
+// `element_at(mk, 12.75)` finds the key a DECIMAL(18,4) column renders
+// "12.7500" — two spellings of one number are one key (ADR-0012 item 8). It is
+// set only when the map's KEY column is declared DECIMAL: a STRING-keyed map
+// must keep matching by its bytes, where "1.50" and "1.5" are two keys.
+func mapElementAt(m, key any, decimalKey bool) any {
+	norm := func(s string) string {
+		if !decimalKey {
+			return s
+		}
+		if c, ok := batch.CanonicalDecimalText(s); ok {
+			return c
+		}
+		return s
+	}
+	want := norm(fmt.Sprint(key))
 	if gm, ok := m.(map[string]any); ok {
-		return gm[fmt.Sprint(key)]
+		if !decimalKey {
+			return gm[want]
+		}
+		for k, v := range gm {
+			if norm(k) == want {
+				return v
+			}
+		}
+		return nil
 	}
 	entries, ok := toSlice(m)
 	if !ok {
 		return nil
 	}
-	want := fmt.Sprint(key)
 	var val any
 	found := false
 	for _, entry := range entries {
@@ -11473,7 +11507,7 @@ func mapElementAt(m, key any) any {
 		if !ok {
 			continue
 		}
-		if fmt.Sprint(row["key"]) == want {
+		if norm(fmt.Sprint(row["key"])) == want {
 			val, found = row["value"], true
 		}
 	}
