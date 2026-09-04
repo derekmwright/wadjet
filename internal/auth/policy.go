@@ -64,68 +64,21 @@ func (ps *PolicySet) Lookup(table, role string) *AccessPolicy {
 	return nil
 }
 
-// ApplyToRow applies column policies to a single result row.
-// Returns the filtered row with masked/denied columns handled.
-func (p *AccessPolicy) ApplyToRow(row map[string]any) map[string]any {
-	if p == nil || len(p.Columns) == 0 {
-		return row
-	}
-
-	result := make(map[string]any, len(row))
-	for col, val := range row {
-		policy, hasPol := p.Columns[col]
-		if !hasPol {
-			// No explicit policy — allow by default
-			result[col] = val
-			continue
-		}
-
-		switch policy {
-		case ColumnAllow:
-			result[col] = val
-		case ColumnMask:
-			if fn, ok := p.MaskValues[col]; ok {
-				result[col] = fn(val)
-			} else {
-				result[col] = defaultMask(val)
-			}
-		case ColumnDeny:
-			// Omit from result
-		}
-	}
-	return result
-}
-
-// ApplyToRows applies column policies to all result rows.
-func (p *AccessPolicy) ApplyToRows(rows []map[string]any) []map[string]any {
-	if p == nil || len(p.Columns) == 0 {
-		return rows
-	}
-	result := make([]map[string]any, len(rows))
-	for i, row := range rows {
-		result[i] = p.ApplyToRow(row)
-	}
-	return result
-}
-
-// defaultMask returns a redacted placeholder based on the value type.
-func defaultMask(val any) any {
-	if val == nil {
-		return nil
-	}
-	switch val.(type) {
-	case string:
-		return "***"
-	case int, int32, int64:
-		return int64(0)
-	case float32, float64:
-		return float64(0)
-	case bool:
-		return false
-	default:
-		return "***"
-	}
-}
+// There is deliberately no ApplyToRow / ApplyToRows here any more.
+//
+// A cell policy is enforced at the SCAN, by the security projection
+// auth.EnforcePlanPolicies injects (#859). A second, result-row pass could
+// only ever rewrite an output column that still carried the policed column's
+// NAME: it cannot reach `SUM(acct)`, `COUNT(DISTINCT ssn)`, a GROUP BY key, a
+// join key or a WHERE predicate, because the pipeline consumed those values
+// long before any row reached it — and it existed on ONE door (HTTP) while
+// pgwire and the embedded API had no such pass at all. A door-specific
+// enforcement is a second, weaker enforcement path; the plan-time one is the
+// only one.
+//
+// A YAML `policies:` block still works exactly as before: MigrateRBACToABAC
+// turns it into the deny_column / mask_column obligations the plan-time path
+// enforces.
 
 // PolicyConfig is the YAML representation of cell-level access policies.
 type PolicyConfig struct {

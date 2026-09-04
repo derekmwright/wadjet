@@ -670,34 +670,6 @@ func TestHandleDMLInsertPortProtocolDuration(t *testing.T) {
 	}
 }
 
-// --- defaultMaskValue ---
-
-func TestDefaultMaskValue(t *testing.T) {
-	tests := []struct {
-		name string
-		val  any
-		want any
-	}{
-		{"nil", nil, nil},
-		{"string", "secret", "***"},
-		{"int", 42, int64(0)},
-		{"int32", int32(1), int64(0)},
-		{"int64", int64(9), int64(0)},
-		{"float32", float32(1.5), float64(0)},
-		{"float64", float64(2.5), float64(0)},
-		{"bool", true, false},
-		{"other", []byte{1, 2}, "***"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := defaultMaskValue(tt.val)
-			if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", tt.want) {
-				t.Errorf("expected %v, got %v", tt.want, got)
-			}
-		})
-	}
-}
-
 // --- resolveQueryLimits ---
 
 func TestResolveQueryLimits(t *testing.T) {
@@ -785,94 +757,6 @@ func TestGetEvaluator_Nil(t *testing.T) {
 	if got != nil {
 		t.Error("expected nil without provider configured")
 	}
-}
-
-// --- applyColumnPolicies ---
-
-func TestApplyColumnPolicies_EmptyRows(t *testing.T) {
-	srv, _ := newTestServer(t)
-	identity := &auth.Identity{Name: "user", Role: "reader"}
-	got := srv.applyColumnPolicies(identity, "table", nil, nil)
-	if got != nil {
-		t.Error("expected nil for empty rows")
-	}
-}
-
-func TestApplyColumnPolicies_ABACMaskAndDeny(t *testing.T) {
-	srv, _ := newTestServer(t)
-	srv.audit = auth.NewAuditLogger(srv.logger)
-
-	identity := &auth.Identity{Name: "user", Role: "reader"}
-	decisions := auth.TableDecisions{
-		"secrets": {
-			Allowed: true,
-			Columns: []auth.ColumnDecision{
-				{Column: "ssn", Allowed: false},
-				{Column: "name", Allowed: true, MaskFunc: "redact"},
-			},
-		},
-	}
-
-	rows := []map[string]any{
-		{"ssn": "123-45-6789", "name": "Alice", "age": 30},
-	}
-
-	result := srv.applyColumnPolicies(identity, "secrets", decisions, rows)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(result))
-	}
-	if _, exists := result[0]["ssn"]; exists {
-		t.Error("ssn column should be denied/removed")
-	}
-	if result[0]["name"] != "***" {
-		t.Errorf("name should be masked, got %v", result[0]["name"])
-	}
-	if result[0]["age"] != 30 {
-		t.Errorf("age should be unchanged, got %v", result[0]["age"])
-	}
-}
-
-func TestApplyColumnPolicies_NoColumnsDecision(t *testing.T) {
-	srv, _ := newTestServer(t)
-	identity := &auth.Identity{Name: "user", Role: "reader"}
-	decisions := auth.TableDecisions{
-		"data": {Allowed: true, Columns: nil},
-	}
-	rows := []map[string]any{{"col1": "val"}}
-	result := srv.applyColumnPolicies(identity, "data", decisions, rows)
-	if result[0]["col1"] != "val" {
-		t.Error("expected rows unchanged when no column decisions")
-	}
-}
-
-// --- auditColumnPolicy ---
-
-func TestAuditColumnPolicy_NilAudit(t *testing.T) {
-	srv, _ := newTestServer(t)
-	srv.audit = nil
-	// Should not panic
-	srv.auditColumnPolicy(&auth.Identity{Name: "test"}, "table", nil)
-}
-
-func TestAuditColumnPolicy_NilPolicy(t *testing.T) {
-	srv, _ := newTestServer(t)
-	srv.audit = auth.NewAuditLogger(srv.logger)
-	// Should not panic
-	srv.auditColumnPolicy(&auth.Identity{Name: "test"}, "table", nil)
-}
-
-func TestAuditColumnPolicy_WithMaskAndDeny(t *testing.T) {
-	srv, _ := newTestServer(t)
-	srv.audit = auth.NewAuditLogger(srv.logger)
-
-	policy := &auth.AccessPolicy{
-		Columns: map[string]auth.ColumnPolicy{
-			"ssn":    auth.ColumnMask,
-			"salary": auth.ColumnDeny,
-		},
-	}
-	// Should not panic
-	srv.auditColumnPolicy(&auth.Identity{Name: "test"}, "employees", policy)
 }
 
 // --- columnDefsToSchema ---

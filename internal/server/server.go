@@ -334,15 +334,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 			tableDecisions = make(auth.TableDecisions)
 
-			allTables := make([]string, 0, len(selectInfo.Tables)+len(selectInfo.Joins))
-			for _, t := range selectInfo.Tables {
-				allTables = append(allTables, t.Name)
-			}
-			for _, j := range selectInfo.Joins {
-				allTables = append(allTables, j.RightTable)
-			}
-
-			for _, tableName := range allTables {
+			// Only the FROM-list names the catalog knows as TABLES: a
+			// derived table is listed under its own subquery text and a CTE
+			// reference under the CTE's name, and handing those to a
+			// default-deny evaluator refused every query containing one
+			// (#859). The base tables behind them are policed by
+			// auth.EnforcePlanPolicies, which walks the PLAN.
+			for _, tableName := range auth.StatementBaseTables(r.Context(), s.catalog, selectInfo) {
 				td := evaluator.EvaluateTableAccess(subject, tableName, auth.ActionRead, env)
 				if !td.Allowed {
 					writeError(w, http.StatusForbidden,
@@ -350,6 +348,23 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				tableDecisions[tableName] = td
+				// Audit the column policy at DECISION time. It used to be
+				// logged from applyColumnPolicies, over the result rows, so a
+				// query that returned nothing logged nothing even though the
+				// policy had shaped the plan (#859).
+				if s.audit != nil {
+					var masked, denied []string
+					for _, col := range td.Columns {
+						if !col.Allowed {
+							denied = append(denied, col.Column)
+						} else if col.MaskFunc != "" || col.MaskExpr != "" {
+							masked = append(masked, col.Column)
+						}
+					}
+					if len(masked) > 0 || len(denied) > 0 {
+						s.audit.LogColumnPolicy(identity, tableName, masked, denied)
+					}
+				}
 				if td.RowFilter != "" {
 					if rowFilters == nil {
 						rowFilters = make(auth.RowFilters)
@@ -421,14 +436,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Apply cell-level access policies (column masking/denial)
-		if identity != nil && len(rows) > 0 {
-			tableName := ""
-			if len(selectInfo.Tables) > 0 {
-				tableName = selectInfo.Tables[0].Name
-			}
-			rows = s.applyColumnPolicies(identity, tableName, tableDecisions, rows)
-		}
+		// No result-row masking here. Column policy is enforced at the SCAN,
+		// inside coord.ExecuteSQL, for every consumer above it (#859) — a
+		// second pass over the rows could only ever mask an output column
+		// that still carries the policed column's name, and never the
+		// aggregate, group key or join key computed from it.
 
 		resp := QueryResponse{
 			QueryID: result.QueryID,
@@ -463,29 +475,49 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Inject row-level security filters into logical plan
-	for table, filter := range rowFilters {
-		logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
-	}
-
 	// Annotate scan columns from catalog so optimizer can resolve unqualified refs
 	planner := s.newPlanner(r)
 
-	// Reject references to columns that resolve to no source (plan-time name binding).
-	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
+	// Reject references to columns that resolve to no source (plan-time name
+	// binding), under the calling identity's schema: a denied column is not
+	// in this caller's table, so it is not in the "available:" hint (#859).
+	if err := auth.ValidateStatementColumns(r.Context(), s.provider, s.catalog, selectInfo, "http"); err != nil {
 		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 
-	planner.AnnotateScanColumns(r.Context(), logicalPlan)
+	execCtx := r.Context()
+	planner.AnnotateScanColumns(execCtx, logicalPlan)
+
+	// ABAC at plan level, through the SAME auth.EnforcePlanPolicies the
+	// embedded engine and the coordinator use. This door used to plan without
+	// it and mask the RESULT ROWS afterwards instead (applyColumnPolicies),
+	// which cannot reach a value the pipeline already consumed: `SUM(acct)`,
+	// `COUNT(DISTINCT ssn)`, `GROUP BY ssn`, a join on a masked column and
+	// `WHERE ssn = '<true value>'` were all answered from the raw column, and
+	// only a result column that still carried the policed column's NAME was
+	// masked at all (#859). One enforcement path, at the scan, for every door.
+	execCtx, logicalPlan, err = auth.EnforcePlanPolicies(execCtx, s.provider, s.catalog,
+		selectInfo, logicalPlan, "http")
+	if err != nil {
+		writeSQLError(w, http.StatusForbidden, err.Error(), err)
+		return
+	}
+	if s.getEvaluator() == nil {
+		// Static (non-ABAC) deployment: the legacy PolicySet's row filters,
+		// collected above, are the only ones there are.
+		for table, filter := range rowFilters {
+			logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
+		}
+	}
 
 	// Optimize — pass scan annotator for new scans created during IN decorrelation
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
-		planner.AnnotateScanColumns(r.Context(), plan)
+		planner.AnnotateScanColumns(execCtx, plan)
 	})
 
 	// Build physical plan
-	physPlan, err := planner.Plan(r.Context(), logicalPlan)
+	physPlan, err := planner.Plan(execCtx, logicalPlan)
 	if err != nil {
 		writeSQLError(w, http.StatusInternalServerError, "physical plan error: "+err.Error(), err)
 		return
@@ -499,7 +531,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Registered before Run: a defer below a failing Run's error check never
 	// runs, so an aborted HTTP query kept its spill scratch (#625 M1).
 	defer pipeline.Close()
-	if err := pipeline.Run(r.Context()); err != nil {
+	if err := pipeline.Run(execCtx); err != nil {
 		writeSQLError(w, http.StatusInternalServerError, "execution error: "+err.Error(), err)
 		return
 	}
@@ -508,15 +540,6 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	var rows []map[string]any
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		rows = collectSink.ToRows()
-	}
-
-	// Apply cell-level access policies (column masking/denial)
-	if identity != nil && len(rows) > 0 {
-		tableName := ""
-		if len(selectInfo.Tables) > 0 {
-			tableName = selectInfo.Tables[0].Name
-		}
-		rows = s.applyColumnPolicies(identity, tableName, tableDecisions, rows)
 	}
 
 	// Extract column names
@@ -872,102 +895,6 @@ func (s *Server) getEvaluator() *auth.PolicyEvaluator {
 	return nil
 }
 
-// auditColumnPolicy logs which columns were masked or denied for this query.
-// applyColumnPolicies applies ABAC table decisions or falls back to legacy PolicySet
-// for column masking/denial on result rows.
-func (s *Server) applyColumnPolicies(identity *auth.Identity, tableName string, decisions auth.TableDecisions, rows []map[string]any) []map[string]any {
-	if len(rows) == 0 {
-		return rows
-	}
-
-	// ABAC path: use pre-evaluated table decisions
-	if td, ok := decisions[tableName]; ok && len(td.Columns) > 0 {
-		var masked, denied []string
-		for _, col := range td.Columns {
-			if !col.Allowed {
-				denied = append(denied, col.Column)
-			} else if col.MaskFunc != "" {
-				masked = append(masked, col.Column)
-			}
-		}
-		if len(masked) > 0 || len(denied) > 0 {
-			if s.audit != nil {
-				s.audit.LogColumnPolicy(identity, tableName, masked, denied)
-			}
-			// Build deny/mask sets for fast lookup
-			denySet := make(map[string]bool, len(denied))
-			for _, c := range denied {
-				denySet[c] = true
-			}
-			maskSet := make(map[string]bool, len(masked))
-			for _, c := range masked {
-				maskSet[c] = true
-			}
-			result := make([]map[string]any, len(rows))
-			for i, row := range rows {
-				filtered := make(map[string]any, len(row))
-				for col, val := range row {
-					if denySet[col] {
-						continue
-					}
-					if maskSet[col] {
-						filtered[col] = defaultMaskValue(val)
-					} else {
-						filtered[col] = val
-					}
-				}
-				result[i] = filtered
-			}
-			return result
-		}
-		return rows
-	}
-
-	// Legacy fallback: use PolicySet
-	if policies := s.getPolicies(); policies != nil {
-		if policy := policies.Lookup(tableName, identity.Role); policy != nil {
-			rows = policy.ApplyToRows(rows)
-			s.auditColumnPolicy(identity, tableName, policy)
-		}
-	}
-	return rows
-}
-
-// defaultMaskValue returns a redacted placeholder based on value type.
-func defaultMaskValue(val any) any {
-	if val == nil {
-		return nil
-	}
-	switch val.(type) {
-	case string:
-		return "***"
-	case int, int32, int64:
-		return int64(0)
-	case float32, float64:
-		return float64(0)
-	case bool:
-		return false
-	default:
-		return "***"
-	}
-}
-
-func (s *Server) auditColumnPolicy(identity *auth.Identity, table string, policy *auth.AccessPolicy) {
-	if s.audit == nil || policy == nil {
-		return
-	}
-	var masked, denied []string
-	for col, cp := range policy.Columns {
-		switch cp {
-		case auth.ColumnMask:
-			masked = append(masked, col)
-		case auth.ColumnDeny:
-			denied = append(denied, col)
-		}
-	}
-	s.audit.LogColumnPolicy(identity, table, masked, denied)
-}
-
 func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
 	tableName := parsed.Describe.TableName
 
@@ -1020,7 +947,7 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		return
 	}
 	planner := s.newPlanner(r)
-	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
+	if err := auth.ValidateStatementColumns(r.Context(), s.provider, s.catalog, selectInfo, "http"); err != nil {
 		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}

@@ -510,129 +510,6 @@ func TestAuthorizer(t *testing.T) {
 	})
 }
 
-// --- Cell-Level Access Policies ---
-
-func TestAccessPolicyMask(t *testing.T) {
-	policy := &AccessPolicy{
-		Table: "users",
-		Role:  "analyst",
-		Columns: map[string]ColumnPolicy{
-			"name":  ColumnAllow,
-			"email": ColumnMask,
-			"ssn":   ColumnDeny,
-		},
-	}
-
-	row := map[string]any{
-		"name":  "Alice Smith",
-		"email": "alice@example.com",
-		"ssn":   "123-45-6789",
-		"age":   int64(30), // no policy — allowed by default
-	}
-
-	result := policy.ApplyToRow(row)
-
-	if result["name"] != "Alice Smith" {
-		t.Fatalf("expected name=Alice Smith, got %v", result["name"])
-	}
-	if result["email"] != "***" {
-		t.Fatalf("expected masked email=***, got %v", result["email"])
-	}
-	if _, exists := result["ssn"]; exists {
-		t.Fatal("ssn should be denied/omitted")
-	}
-	if result["age"] != int64(30) {
-		t.Fatalf("age should be allowed by default, got %v", result["age"])
-	}
-}
-
-func TestAccessPolicyMaskTypes(t *testing.T) {
-	policy := &AccessPolicy{
-		Columns: map[string]ColumnPolicy{
-			"name":   ColumnMask,
-			"score":  ColumnMask,
-			"count":  ColumnMask,
-			"active": ColumnMask,
-		},
-	}
-
-	row := map[string]any{
-		"name":   "Bob",
-		"score":  99.5,
-		"count":  int64(42),
-		"active": true,
-	}
-
-	result := policy.ApplyToRow(row)
-
-	if result["name"] != "***" {
-		t.Fatalf("expected masked string, got %v", result["name"])
-	}
-	if result["score"] != float64(0) {
-		t.Fatalf("expected masked float=0, got %v", result["score"])
-	}
-	if result["count"] != int64(0) {
-		t.Fatalf("expected masked int=0, got %v", result["count"])
-	}
-	if result["active"] != false {
-		t.Fatalf("expected masked bool=false, got %v", result["active"])
-	}
-}
-
-func TestAccessPolicyCustomMask(t *testing.T) {
-	policy := &AccessPolicy{
-		Columns: map[string]ColumnPolicy{
-			"email": ColumnMask,
-		},
-		MaskValues: map[string]CellMaskFunc{
-			"email": func(val any) any {
-				s, ok := val.(string)
-				if !ok {
-					return "***"
-				}
-				parts := strings.SplitN(s, "@", 2)
-				if len(parts) != 2 {
-					return "***"
-				}
-				return "***@" + parts[1]
-			},
-		},
-	}
-
-	row := map[string]any{"email": "alice@example.com"}
-	result := policy.ApplyToRow(row)
-
-	if result["email"] != "***@example.com" {
-		t.Fatalf("expected ***@example.com, got %v", result["email"])
-	}
-}
-
-func TestAccessPolicyApplyToRows(t *testing.T) {
-	policy := &AccessPolicy{
-		Columns: map[string]ColumnPolicy{
-			"ssn": ColumnDeny,
-		},
-	}
-
-	rows := []map[string]any{
-		{"name": "Alice", "ssn": "111"},
-		{"name": "Bob", "ssn": "222"},
-	}
-
-	result := policy.ApplyToRows(rows)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 rows, got %d", len(result))
-	}
-	for _, row := range result {
-		if _, exists := row["ssn"]; exists {
-			t.Fatal("ssn should be denied")
-		}
-		if row["name"] == nil {
-			t.Fatal("name should be present")
-		}
-	}
-}
-
 func TestParsePolicies(t *testing.T) {
 	configs := []PolicyConfig{
 		{
@@ -862,51 +739,60 @@ func TestClearanceLevelPolicies(t *testing.T) {
 		// top_secret has no policy — full access by default
 	}
 
-	ps, err := ParsePolicies(configs)
-	if err != nil {
+	// The assertion is on the OBLIGATIONS the migration emits, because those
+	// are what the engine enforces. A `policies:` block is not a result-row
+	// rewriter any more (#859): MigrateRBACToABAC turns it into the same
+	// deny_column / mask_column / row_filter obligations an `abac_policies:`
+	// block produces, and auth.EnforcePlanPolicies injects them at the scan.
+	if _, err := ParsePolicies(configs); err != nil {
 		t.Fatalf("ParsePolicies: %v", err)
 	}
-
-	row := map[string]any{
-		"id":             int64(1),
-		"date":           "2026-03-15",
-		"source":         "HUMINT-ALPHA",
-		"content":        "Operational details...",
-		"classification": "SECRET",
+	migrated, err := MigrateRBACToABAC(nil, configs)
+	if err != nil {
+		t.Fatalf("MigrateRBACToABAC: %v", err)
 	}
 
-	// UNCLASSIFIED clearance
-	unclass := ps.Lookup("intelligence", "unclassified")
-	result := unclass.ApplyToRow(row)
-	if _, exists := result["source"]; exists {
-		t.Fatal("unclassified should not see source")
-	}
-	if _, exists := result["content"]; exists {
-		t.Fatal("unclassified should not see content")
-	}
-	if result["id"] != int64(1) {
-		t.Fatal("unclassified should see id")
+	// role -> obligation type -> target (row_filter keyed by "")
+	got := map[string]map[string]map[string]bool{}
+	for _, pol := range migrated {
+		for _, rule := range pol.Rules {
+			role := ""
+			for _, s := range rule.Subjects {
+				if s.Attribute == "subject.role" {
+					role, _ = s.Value.(string)
+				}
+			}
+			if got[role] == nil {
+				got[role] = map[string]map[string]bool{}
+			}
+			for _, ob := range rule.Obligations {
+				if got[role][ob.Type] == nil {
+					got[role][ob.Type] = map[string]bool{}
+				}
+				got[role][ob.Type][ob.Target] = true
+			}
+		}
 	}
 
-	// SECRET clearance
-	secret := ps.Lookup("intelligence", "secret")
-	result2 := secret.ApplyToRow(row)
-	if result2["source"] != "***" {
-		t.Fatalf("secret should see masked source, got %v", result2["source"])
+	if !got["unclassified"]["deny_column"]["source"] || !got["unclassified"]["deny_column"]["content"] {
+		t.Errorf("unclassified: want source and content DENIED, got %v", got["unclassified"])
 	}
-	if result2["content"] != "Operational details..." {
-		t.Fatal("secret should see content")
+	if got["unclassified"]["deny_column"]["id"] {
+		t.Errorf("unclassified: id must stay visible, got %v", got["unclassified"])
 	}
-
-	// TOP SECRET — no policy, full access
-	topSecret := ps.Lookup("intelligence", "top_secret")
-	if topSecret != nil {
-		t.Fatal("top_secret should have no policy (full access)")
+	if !got["secret"]["mask_column"]["source"] {
+		t.Errorf("secret: want source MASKED, got %v", got["secret"])
 	}
-	// No policy means ApplyToRow returns original
-	result3 := topSecret.ApplyToRow(row)
-	if result3["source"] != "HUMINT-ALPHA" {
-		t.Fatalf("top_secret should see full source, got %v", result3["source"])
+	if got["secret"]["deny_column"]["content"] {
+		t.Errorf("secret: content must stay visible, got %v", got["secret"])
+	}
+	if len(got["top_secret"]) != 0 {
+		t.Errorf("top_secret has no policy and must carry no obligation, got %v", got["top_secret"])
+	}
+	for _, role := range []string{"unclassified", "secret"} {
+		if len(got[role]["row_filter"]) == 0 {
+			t.Errorf("%s: the row filter was dropped by the migration", role)
+		}
 	}
 }
 

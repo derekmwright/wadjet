@@ -317,45 +317,6 @@ func TestPolicySetNilLookup(t *testing.T) {
 	}
 }
 
-func TestDefaultMaskNilValue(t *testing.T) {
-	result := defaultMask(nil)
-	if result != nil {
-		t.Errorf("expected nil for nil value, got %v", result)
-	}
-}
-
-func TestDefaultMaskUnknownType(t *testing.T) {
-	result := defaultMask([]int{1, 2, 3})
-	if result != "***" {
-		t.Errorf("expected *** for unknown type, got %v", result)
-	}
-}
-
-func TestDefaultMaskIntType(t *testing.T) {
-	result := defaultMask(42)
-	if result != int64(0) {
-		t.Errorf("expected 0 for int, got %v (%T)", result, result)
-	}
-}
-
-func TestApplyToRowsNilPolicy(t *testing.T) {
-	var p *AccessPolicy
-	rows := []map[string]any{{"a": 1}}
-	result := p.ApplyToRows(rows)
-	if len(result) != 1 || result[0]["a"] != 1 {
-		t.Error("nil policy should pass rows through unchanged")
-	}
-}
-
-func TestApplyToRowsEmptyColumns(t *testing.T) {
-	p := &AccessPolicy{Columns: map[string]ColumnPolicy{}}
-	rows := []map[string]any{{"a": 1}, {"a": 2}}
-	result := p.ApplyToRows(rows)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 rows, got %d", len(result))
-	}
-}
-
 // TestParsePoliciesRefusesUnknownColumnAction is the unit half of #802's gate.
 // This test used to be TestParsePoliciesDefaultAction and asserted the exact
 // defect: an unrecognised action returned ColumnAllow, so a `columns:` entry
