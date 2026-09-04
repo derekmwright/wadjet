@@ -45,7 +45,7 @@ func TestRowFieldPathIsAskedBeforeTheQualifierIsStripped(t *testing.T) {
 		{
 			// The defect's own shape: a ROW column and a scalar column of the
 			// FIELD's name in one stream.
-			name: "a container beside a column of the field's name",
+			name:  "a container beside a column of the field's name",
 			batch: mk(id, row, flatB), ref: "c_row.b",
 			parent: 1, field: 1, ok: true,
 		},

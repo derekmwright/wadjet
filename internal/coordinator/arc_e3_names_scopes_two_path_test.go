@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +174,24 @@ func e3Render(cols []string, rows [][]any) string {
 	return b.String()
 }
 
+// e3SortedRender is e3Render with the ROWS sorted, so a result can be compared
+// as a multiset when only its order is in question.
+func e3SortedRender(cols []string, rows [][]any) string {
+	return e3SortLines(e3Render(cols, rows))
+}
+
+// e3SortLines sorts the row segments of an e3Render string, keeping the column
+// header first.
+func e3SortLines(rendered string) string {
+	parts := strings.Split(rendered, " | ")
+	if len(parts) < 2 {
+		return rendered
+	}
+	head, body := parts[0], append([]string(nil), parts[1:]...)
+	sort.Strings(body)
+	return head + " | " + strings.Join(body, " | ")
+}
+
 // e3Case is one shape: the SQL, PostgreSQL 17's answer rendered by e3Render,
 // and whether the DAG arms are expected to ROUTE the query to the
 // coordinator's local pipeline instead of executing it as stages.
@@ -199,6 +218,14 @@ type e3Case struct {
 	// beside it carries the mechanism. A pin that starts AGREEING fails, so
 	// deleting it is the next fix's proof.
 	pin map[string]string
+	// pinOrder names the arms whose ROWS are PostgreSQL's but whose ORDER is
+	// not. It is a pin on the ORDER alone, and it exists because pinning the
+	// wrong order as a STRING would pin an unordered result: the sequence a
+	// DAG arm returns when the sort key it was given is the wrong one is not
+	// stable across runs, so the assertion has to be "the multiset is right
+	// AND the sequence is not" rather than any particular sequence. It fails
+	// the day the arm sorts correctly, which is what makes it a pin.
+	pinOrder map[string]bool
 }
 
 func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
@@ -454,12 +481,7 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 			want: "c,c,c,c | 20,0,0,0 | 20,0,0,1 | 20,0,0,2 | 20,0,0,3 | " +
 				"20,1,1,0 | 20,1,1,1 | 20,1,1,2 | 20,1,1,3 | " +
 				"20,2,2,0 | 20,2,2,1 | 20,2,2,2 | 20,2,2,3",
-			pin: map[string]string{
-				"dag": "c,c,c,c | 20,0,0,0 | 20,1,1,0 | 20,2,2,0 | 20,1,1,1 | 20,2,2,1 | " +
-					"20,0,0,1 | 20,2,2,2 | 20,0,0,2 | 20,1,1,2 | 20,0,0,3 | 20,1,1,3 | 20,2,2,3",
-				"dagshuf": "c,c,c,c | 20,0,0,0 | 20,1,1,0 | 20,2,2,0 | 20,1,1,1 | 20,2,2,1 | " +
-					"20,0,0,1 | 20,2,2,2 | 20,0,0,2 | 20,1,1,2 | 20,0,0,3 | 20,1,1,3 | 20,2,2,3",
-			}},
+			pinOrder: map[string]bool{"dag": true, "dagshuf": true}},
 	}
 
 	for _, c := range cases {
@@ -481,6 +503,18 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 					t.Fatalf("%s arm refused the query: %v\n  SQL: %s", arm.name, err, c.sql)
 				}
 				got := e3Render(cols, rows)
+				if c.pinOrder[arm.name] {
+					if got == c.want {
+						t.Errorf("the %s arm now answers PostgreSQL's rows IN ORDER for a "+
+							"shape this gate pins as mis-ordered. It is fixed: assert it and "+
+							"delete the pin\n  %s\n  SQL: %s", arm.name, got, c.sql)
+					} else if sorted := e3SortedRender(cols, rows); sorted != e3SortLines(c.want) {
+						t.Errorf("the %s arm answered a different SET of rows, not merely a "+
+							"different ORDER\n  got  %s\n  want %s\n  SQL: %s",
+							arm.name, sorted, e3SortLines(c.want), c.sql)
+					}
+					continue
+				}
 				if pinned, ok := c.pin[arm.name]; ok {
 					switch {
 					case got == c.want:
