@@ -52,14 +52,37 @@ LIMIT 100`
 // The two texts ask the identical question, so the comparison is row for row
 // and cell for cell rather than a count — a spelling that lost the inner comma
 // join's other three relations would not merely return fewer rows, it would
-// return a MIN over the wrong set, and only the values say so.
+// return a MIN over the wrong set, and only the values say so. That IS the
+// defect: at 2d4220c9 the rewrite fired on a comma inner and built only its
+// FIRST relation, and this query then failed LOUDLY in 22 ms with
+// `ColColFilter: could not resolve kernel for s_suppkey 0 ps_suppkey`
+// (measured at that revision by round 1's review). The DEADLOCK #616's title
+// reports belongs to an earlier base than this arc's, on the same shape and
+// from the same missing relations; which of the two a given base shows is what
+// the issue's own "depending on the base" records.
 //
-// The DEADLINE is the other half of the gate and it is deliberate. The defect
-// this closes is a DEADLOCK for one of its two spellings, and a hang pinned
-// with a generous timeout is a slow test while a hang pinned with a short one
-// is a fact: at this tip the query answers in under a tenth of a second at
-// SF0.01, so thirty seconds separates "answered" from "wedged" with no room
-// for argument.
+// WHAT MAKES THIS PASS is the BUILD SIDE — logical.decorrelatedInnerPlan
+// planning the subquery's whole FROM clause instead of `Tables[0]` — and NOT
+// the in-place comma lift beside it. Measured, because the difference matters
+// to a reader deciding what to revert: with `commaChain` forced false, so the
+// equalities are left to Optimize's own later liftWhereEquiPredsIntoJoins,
+// this gate still PASSES, in 7.1 s rather than 91 ms. The in-place lift is a
+// ~75x performance lever on top of a correctness fix, not the correctness fix.
+//
+// No single revert available in THIS tree reproduces the base's failure, and
+// that is worth stating rather than papering over: the tree no longer contains
+// the path that produced it ("fire the rewrite and drop the relations").
+// Turning the #852 kill switch off (WADJET_DECORRELATED_INNER_PLAN=0) declines
+// the comma inner instead, so the per-row re-run answers it correctly in 91 ms
+// and this gate passes. The gate's claim is therefore about the ANSWER at the
+// tip and about the base it fails at, which the review verified directly.
+//
+// The DEADLINE is the other half of the gate and it is deliberate. One of the
+// two failure modes this shape has shown is a DEADLOCK, and a hang pinned with
+// a generous timeout is a slow test while a hang pinned with a short one is a
+// fact: at this tip the query answers in under a tenth of a second at SF0.01,
+// so thirty seconds separates "answered" from "wedged" with no room for
+// argument.
 func TestQ2CommaSpellingAnswersTheSameAsTheExplicitJoin(t *testing.T) {
 	db := setupTPCH(t, SF001)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

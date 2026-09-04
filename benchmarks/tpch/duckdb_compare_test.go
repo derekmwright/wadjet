@@ -1690,7 +1690,9 @@ func duckdbCorpus() []duckdbCase {
 		// the decorrelations built their build side out of
 		// `NewScan(info.Tables[0])`, which drops every inner relation past the
 		// first — so the plan either errored on an unresolved join-key kernel
-		// or deadlocked on the shared scan cache's ready channel (#616). A
+		// (`ColColFilter: could not resolve kernel for s_suppkey 0
+		// ps_suppkey`, 22 ms, which is what 2d4220c9 does) or deadlocked on
+		// the shared scan cache's ready channel, on an earlier base (#616). A
 		// hang would have wedged CI.
 		//
 		// It answers now (ADR-0021 §1j lifts the inner comma FROM into a join
