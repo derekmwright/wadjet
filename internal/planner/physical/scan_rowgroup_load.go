@@ -423,7 +423,7 @@ func (inner *scanSourceInner) getSlab(n int) []byte {
 	// probing it cannot hold a row group in more than twice its bytes.
 	class := slabClass(n)
 	for _, c := range [2]int{class, 2 * class} {
-		p := inner.slabBucket(c)
+		p := slabBucket(c)
 		if v := p.Get(); v != nil {
 			buf := v.([]byte)
 			if cap(buf) >= n && cap(buf) <= 2*n {
@@ -448,24 +448,36 @@ func (inner *scanSourceInner) getSlab(n int) []byte {
 
 func (inner *scanSourceInner) putSlab(buf []byte) {
 	if cap(buf) > 0 {
-		inner.slabBucket(slabClass(cap(buf))).Put(buf[:cap(buf)])
+		slabBucket(slabClass(cap(buf))).Put(buf[:cap(buf)])
 	}
 }
 
-// slabBucket returns the pool for a size class, creating it on first use. A
-// scan reads a handful of row-group shapes, so the map stays tiny — and two
-// files whose row groups differ by a few percent of compression land in the
-// same class, which is the reuse the exact-byte key threw away.
-func (inner *scanSourceInner) slabBucket(class int) *sync.Pool {
-	inner.slabMu.Lock()
-	defer inner.slabMu.Unlock()
-	if inner.slabPools == nil {
-		inner.slabPools = make(map[int]*sync.Pool, 4)
-	}
-	p := inner.slabPools[class]
+// slabBucket returns the pool for a size class, creating it on first use.
+//
+// PROCESS-wide, like the whole-file read's readBufPool and for the same
+// reason: a scan source lives for one query, so a pool that lives with it is
+// cold at every query and the scan allocates its whole working set again —
+// measured at +8.4% suite heap over TPC-H SF1 against the whole-file read,
+// whose pool is warm from the query before. What makes a shared pool safe here
+// is the CLASS: readBufPool mixes whole-file buffers with row-group ones and
+// hands out whatever is big enough, which is how a 332-byte row group came to
+// be held in 105,900 bytes; a class bucket can only ever hand back a buffer
+// within a factor of two of what was asked for.
+//
+// A handful of classes exist in any process, so the map stays tiny, and
+// sync.Pool sheds idle buffers at GC exactly as readBufPool's do.
+var (
+	slabPoolMu sync.Mutex
+	slabPools  = map[int]*sync.Pool{}
+)
+
+func slabBucket(class int) *sync.Pool {
+	slabPoolMu.Lock()
+	defer slabPoolMu.Unlock()
+	p := slabPools[class]
 	if p == nil {
 		p = &sync.Pool{}
-		inner.slabPools[class] = p
+		slabPools[class] = p
 	}
 	return p
 }
