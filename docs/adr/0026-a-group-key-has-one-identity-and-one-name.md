@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -604,7 +604,7 @@ value is published under the input column's own name and every consumer
 already reads it there; a mapping for them would only re-route a resolution
 that works.
 
-#### 3a. An AGGREGATE OUTPUT may still take a group key's name, and that is DEFERRED (2026-09-02, #785)
+#### 3a. An AGGREGATE OUTPUT may still take a group key's name, and the HAVING binds it through the slot it OWNS (2026-09-02 #785, CLOSED 2026-09-04 by arc E3)
 
 This ADR gives a group KEY one identity and one name. It says nothing about
 an AGGREGATE OUTPUT minting the same name, and one can:
@@ -623,7 +623,7 @@ where PostgreSQL 17 keeps all three every time. (The ladder is the
 instrument: a row count alone cannot tell "bound to the key" from "bound to
 the count".) The computed spelling is the same collision —
 `GROUP BY g + 1` emits the key as `g + 1` and `COUNT(*) AS "g + 1"` names the
-aggregate that — and it answers 0 rows for PostgreSQL's 8, on all four arms.
+aggregate that — and it answered 0 rows for PostgreSQL's 8, on all four arms.
 
 **The exact-site fix does not work, and the reason is structural.** Giving
 the colliding aggregate a hidden slot and letting the SELECT-list projection
@@ -636,32 +636,46 @@ aggregate becomes `[g + 1 AS k, __agg_0 AS "g + 1"]`, whose output name
 `absorbAggregateOutputProjection` carries the SELECT list onto the aggregate
 stage as a rename map, which has no order.
 
-That pass already declines when the aggregate publishes ONE NAME TWICE
-(`aggregatePublishesADuplicateName`), which is what kept the shape merely
-wrong rather than differently wrong; giving the aggregate a slot stops that
-guard firing and puts the permutation through instead. It is the same fact
-the 2026-09-02 group-key arc withdrew a pass for — a `Stage` carries one
-name where two are needed — reached from the projection rather than from the
-key.
+**The fix is the OTHER direction: nothing about the SELECT list changes, and
+the HAVING stops asking the batch for a name two columns answer to.**
 
-So #785 is DEFERRED under the correctness protocol's rule 11 rather than
-bounded and pinned. The shape the fix has to take: the collision is resolved
-where a Stage can express it, which means either the projection above a
-colliding aggregate is NOT absorbed (a real `project` stage evaluates the
-permutation), or the GROUP KEY takes the hidden slot instead of the
-aggregate — §2's machinery in the other direction, a key that RESOLVES under
-its own name and PUBLISHES under a slot, which today only a DERIVED key
-does. The existing pin
-(`stage_filter_carrier_two_path_test.go`'s `pin785-…`) still records the
-two-path answer and now carries this mechanism in its own comment, so the
-next attempt reads it where it will be standing rather than here; nothing new
-was pinned, because pinning the residual of a withdrawn pass spends the
-evidence and leaves the defect.
+A HAVING's aggregate is REUSED from the SELECT list when the two normalize to
+the same (function, input, distinct) — that is what keeps `SELECT a, COUNT(*)
+AS c … HAVING COUNT(*) > 1` from counting twice. The reuse points the
+rewritten predicate at `AggExpr.OutputCol`, and that is the whole defect: an
+output column's NAME is not a handle when the aggregate's own output batch
+answers to it twice.
 
-A duplicate OUTPUT name is not the defect and must not be refused:
-PostgreSQL accepts `SELECT COUNT(*) AS g, g AS x` and answers it. What must
-not stand is `ColumnIndex`'s first-match rule deciding which of two columns
-a query meant.
+So the reuse is DECLINED when `AggExpr.OutputCol` is also a GROUP BY key's
+published name (or a second aggregate's output name), and the HAVING takes the
+branch that already existed for an aggregate the SELECT list does not carry: a
+`__having_N` slot, which nothing else in the batch answers to, computed a
+second time. `logical.aggOutputNameIsShared` is the test and it is asked of
+the aggregate's own output batch — group keys under their published names
+(`cleanExpr` of the GROUP BY term, what `NewAggregate` is given, §2b) plus the
+aggregate outputs.
+
+Costing one extra aggregate in the collision case is the price, and it is
+paid only there. The SELECT list is untouched: a duplicate OUTPUT name is
+legal SQL — PostgreSQL accepts `SELECT COUNT(*) AS g, g AS x` and answers it —
+and `absorbAggregateOutputProjection` still declines over it, so no
+permutation is ever carried as a rename map.
+
+**The gather's half of the same collision.** `renameSourceIndices`
+(`coordinator/execute_stage_dag.go`) pairs a group of renames sharing one
+source name with the columns of their own CLASS (#575); a group of ONE fell
+through to `resolveRenameSource`, which is deterministic in the name and
+therefore always answered the FIRST column. With the key NOT in the select
+list — `SELECT COUNT(*) AS g, MIN(id) AS m FROM t GROUP BY g` — there is
+exactly one rename spelled `g` and the first column of that name is the KEY,
+so both DAG arms answered the key's values under the aggregate's alias while
+single and spilled answered the count. `classScopedMatch` applies the same
+class rule to a singleton group: an aggregate output takes the LAST column of
+its name, a key reference the FIRST, and with one column of the name both
+answers are that column.
+
+What must not stand is `ColumnIndex`'s first-match rule deciding which of two
+columns a query meant — and after this it no longer does on either engine.
 
 #### 3b. A lowering records the SLOT the operator below publishes, never the call the query wrote (2026-09-04, #797)
 

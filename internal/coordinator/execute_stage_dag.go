@@ -1069,9 +1069,54 @@ func renameSourceIndices(names []string, renames []physical.OutputRename) []int 
 			// of the group — which is right when it is a single shared
 			// source and refused outright when it is ambiguous.
 		}
+		if len(group) == 1 {
+			// ONE rename over SEVERAL columns of its name. The producer is an
+			// aggregate that publishes its key and its output under one name
+			// — `SELECT COUNT(*) AS g, MIN(id) AS m FROM t GROUP BY g` names
+			// the count `g` and the key is called `g` too — and the first
+			// match is the KEY, so the DAG answered the key's values under the
+			// aggregate's alias (0,1,2,3,4,5 for PostgreSQL's six 1s) while
+			// the single-process path answered the count (#785 family,
+			// ADR-0026 §3a).
+			//
+			// The same CLASS rule the mixed group above uses, and it rests on
+			// the same fact: the aggregate emits every group key before every
+			// aggregate output, so within `matches` (ascending) an aggregate
+			// output is at the END and a key reference at the front. With one
+			// column of the name both answers are that column, so this changes
+			// nothing outside the collision.
+			if idx, ok := classScopedMatch(names, renames[group[0]]); ok {
+				out[group[0]] = idx
+				continue
+			}
+		}
 		out[group[0]] = resolveRenameSource(names, renames[group[0]].From)
 	}
 	return out
+}
+
+// classScopedMatch resolves ONE rename whose source name several columns
+// answer to, by the CLASS of the select item: an aggregate output takes the
+// LAST such column, a group-key reference the FIRST. It reports false when the
+// name is not duplicated, where the ordinary resolution already answers.
+func classScopedMatch(names []string, r physical.OutputRename) (int, bool) {
+	if r.Expr != nil {
+		return 0, false
+	}
+	key := strings.ToLower(strings.TrimSpace(r.From))
+	var matches []int
+	for i, n := range names {
+		if strings.EqualFold(strings.TrimSpace(n), key) {
+			matches = append(matches, i)
+		}
+	}
+	if len(matches) < 2 {
+		return 0, false
+	}
+	if r.IsAgg {
+		return matches[len(matches)-1], true
+	}
+	return matches[0], true
 }
 
 // resolveRenameSource finds the column an OutputRename's source names, with

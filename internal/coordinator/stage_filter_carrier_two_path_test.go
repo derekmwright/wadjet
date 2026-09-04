@@ -2515,76 +2515,54 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 					}
 				}
 			})
-			// #785's PLAIN-COLUMN twin, pinned. An aggregate ALIASED like the
-			// key is #736's condition (2) — but that condition fires only for a
-			// DERIVED key, and here the key is a plain column, so nothing
-			// refuses and BOTH engines are wrong the same way.
+			// #785's PLAIN-COLUMN twin, and the pin it replaces.
 			//
 			// `SELECT COUNT(*) AS g, g AS x … GROUP BY g HAVING COUNT(*) > 0`
-			// drops the group `g = 0`: the HAVING's `COUNT(*)` is respelled
-			// against what the aggregate publishes and binds the KEY's column
-			// (0, 1, 2) instead of the count, so `0 > 0` is false. Every count
-			// is 80, so no surviving row looks wrong — only the missing one
-			// does, which is why this asserts the whole ordered result.
+			// used to drop the group `g = 0`: the HAVING's `COUNT(*)` was
+			// respelled against what the aggregate PUBLISHES, and an aggregate
+			// aliased like the key publishes a name the batch answers TWICE —
+			// `batch.RecordBatch.ColumnIndex` returns the first match, which is
+			// the key — so the predicate read (0, 1, 2) instead of (80, 80, 80)
+			// and `0 > 0` was false.
 			//
-			// NOT the fifth reader: `aggregateOutputNames` reading
-			// `AggScopePreservingWrapper` is what fixed the same collision
-			// under a WINDOW, and this shape is unchanged by it. Measured.
+			// The HAVING binds the aggregate through the slot it OWNS now: the
+			// builder DECLINES to reuse an aggregate whose output name is also
+			// a group key's published name, and mints `__having_N` for the
+			// predicate instead (#785). The SELECT list is untouched — a
+			// duplicate OUTPUT name is legal SQL PostgreSQL answers, and the
+			// consumers that publish it tell the two apart by CLASS and
+			// POSITION (#575).
 			//
-			// THE MECHANISM, and why the obvious fix was WITHDRAWN rather than
-			// landed (2026-09-02, ADR-0026 §3a — read it before trying again).
-			// The Aggregate emits its keys and its aggregate outputs into ONE
-			// schema, and `batch.RecordBatch.ColumnIndex` returns the FIRST
-			// match, so the HAVING binds the key. Giving the colliding aggregate
-			// a HIDDEN SLOT and letting the SELECT-list projection rename it —
-			// the nested-aggregate rewrite's existing machinery — fixes the
-			// single-process ladder (`> 0 / > 1 / > 79` goes from 2/1/0 rows to
-			// PostgreSQL's 3/3/3) and BREAKS the DAG: the projection becomes
-			// `[g + 1 AS k, __agg_0 AS "g + 1"]`, whose output name is another
-			// item's SOURCE name — a PERMUTATION — and
-			// `absorbAggregateOutputProjection` carries the SELECT list onto the
-			// producer as a rename MAP, which has no order. Measured: the
-			// `HAVING g + 1 > 2` control, right on all four arms today, came back
-			// with the COUNT under `k` and NULL under `g + 1`.
-			// `aggregatePublishesADuplicateName` is what declines that projection
-			// today, and giving the aggregate a slot is exactly what stops it
-			// firing. So the fix is either "do not absorb a projection whose
-			// outputs permute its inputs" or "the GROUP KEY takes the slot" —
-			// §2's two names in the other direction.
-			//
-			// A duplicate OUTPUT name is legal SQL and must stay accepted:
-			// PostgreSQL answers `SELECT COUNT(*) AS g, g AS x`. What must not
-			// stand is first-match deciding which column it meant.
-			//
-			// TODO(#785): delete when the HAVING binds the aggregate.
-			t.Run("pin785-AnAggregateAliasedLikeAPlainKeyBesideAHaving", func(t *testing.T) {
-				const pinned = `SELECT COUNT(*) AS g, g AS x FROM collslot ` +
-					`GROUP BY g HAVING COUNT(*) > 0 ORDER BY x`
-				for _, arm := range sfcArms(ctx, single, coord) {
-					res := sfcRun(t, arm, pinned)
-					if len(res.Rows) == 3 {
-						t.Fatalf("the %s arm now answers three groups — PostgreSQL's. #785 is "+
-							"fixed for this shape; assert it and delete this pin\n  SQL: %s",
-							arm.name, pinned)
-					}
-					if len(res.Rows) != 2 {
-						t.Errorf("the %s arm answered %d rows; this pin records 2 and PostgreSQL "+
-							"answers 3. The answer MOVED without becoming right, which is a "+
-							"change #785 has to account for\n  SQL: %s",
-							arm.name, len(res.Rows), pinned)
-						continue
-					}
-					// The two that survive are x = 1 and x = 2; the DROPPED one
-					// is x = 0, and naming it is what makes the pin readable.
-					for i, want := range []int64{1, 2} {
-						if got, ok := numAsInt(res.Rows[i]["x"]); !ok || got != want {
-							t.Errorf("the %s arm row %d: x = %v, this pin records %d\n  SQL: %s",
-								arm.name, i, res.Rows[i]["x"], want, pinned)
+			// The LADDER is the instrument and it is why all three rungs are
+			// here: every group has 80 rows, so a row COUNT alone cannot tell
+			// "bound to the key" from "bound to the count" — bound to the key,
+			// `> 0` keeps 2, `> 1` keeps 1 and `> 79` keeps none.
+			t.Run("AnAggregateAliasedLikeAPlainKeyBesideAHaving", func(t *testing.T) {
+				for _, rung := range []string{"0", "1", "79"} {
+					sql := "SELECT COUNT(*) AS g, g AS x FROM collslot " +
+						"GROUP BY g HAVING COUNT(*) > " + rung + " ORDER BY x"
+					for _, arm := range sfcArms(ctx, single, coord) {
+						res := sfcRun(t, arm, sql)
+						if len(res.Rows) != 3 {
+							t.Errorf("%s arm returned %d rows, PostgreSQL 17 answers 3\n  SQL: %s",
+								arm.name, len(res.Rows), sql)
+							continue
+						}
+						for i, want := range []int64{0, 1, 2} {
+							if got, ok := numAsInt(res.Rows[i]["x"]); !ok || got != want {
+								t.Errorf("%s arm row %d: x = %v, PostgreSQL 17 answers %d\n  SQL: %s",
+									arm.name, i, res.Rows[i]["x"], want, sql)
+							}
+							if got, ok := numAsInt(res.Rows[i]["g"]); !ok || got != 80 {
+								t.Errorf("%s arm row %d: the aggregate's column = %v, PostgreSQL 17 "+
+									"answers the COUNT 80 — the KEY's value is under the "+
+									"aggregate's alias\n  SQL: %s", arm.name, i, res.Rows[i]["g"], sql)
+							}
 						}
 					}
 				}
 				// The three controls that make the cell exactly this one. Each
-				// is correct on both arms and must stay so.
+				// was correct before the fix and must stay so.
 				for _, c := range []struct{ name, sql string }{
 					{"ctl/no-having", `SELECT COUNT(*) AS g, g AS x FROM collslot ` +
 						`GROUP BY g ORDER BY x`},
