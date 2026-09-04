@@ -499,8 +499,9 @@ KIND decides what happens to a pair the ON rejects. A repair that forces a
 LEFT join and defaults unconditionally has thrown the ON away, and that is
 not a smaller fix — it turned six PostgreSQL-correct answers wrong, `ON s.n
 > 5` answering three rows for PostgreSQL's none and printing 0 for counts of
-2. So `logical.lateralEmptyInputPlan` decides between three cases from the
-subquery and the join AS WRITTEN, before the key injection:
+2. So `logical.lateralEmptyInputPlan` reads the subquery and the join AS
+WRITTEN, before the key injection, and decides between three cases — under a
+fourth condition, stated after them, that overrides all three:
 
 - **No written `ON`, or `ON true`** — the condition rejects nothing, so making
   the join LEFT on the correlation and defaulting the COUNT outputs IS the
