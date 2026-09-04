@@ -3154,7 +3154,15 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 // commits its markers at the end (ADR-0030), so a subquery over the TARGET
 // TABLE sees the pre-statement state — which is PostgreSQL's rule.
 func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
-	_, innerCols, opts := db.newPlanner(ctx).SubqueryEnv(ctx)
+	p := db.newPlanner(ctx)
+	// The planner's memory tracker exists only once something has asked for
+	// it, and nothing on this door ever calls Plan(). Asking here is what
+	// makes SubqueryEnv's budget option non-nil, so an IN-subquery's
+	// membership map is CHARGED to this statement's budget the way the query
+	// path charges it (ADR-0006, #531). Without it the map was the one
+	// allocation on a write door that nothing accounted for.
+	p.EnsureMemoryTracker()
+	_, innerCols, opts := p.SubqueryEnv(ctx)
 	return &DMLSubqueryEnv{Runner: db.dmlSubqueryRunner(ctx), InnerCols: innerCols, Opts: opts}
 }
 
@@ -3170,10 +3178,29 @@ func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
 // have deleted every row. DB.Query validates the relation and raises. One
 // door, one answer to "what does this subquery mean".
 func (db *DB) dmlSubqueryRunner(ctx context.Context) expr.SubqueryRunner {
+	bound := physical.MaxInlinedInSetRows()
 	return func(sql string) ([]map[string]any, error) {
 		res, err := db.Query(ctx, sql)
 		if err != nil {
 			return nil, err
+		}
+		// THE SET IS BOUNDED HERE because nothing else bounds it. The query
+		// path's `WADJET_IN_SET_MAX` guards the planner's INLINING of an
+		// IN-set into filter text (physical/in_subquery_set.go); this door
+		// takes no such path — `expr.InSubquery` builds a membership map from
+		// whatever this runner returns — so before this line
+		// `DELETE FROM t WHERE id IN (SELECT id FROM huge)` pulled every id
+		// into coordinator memory with no budget and no cap, on a WRITE door,
+		// where the arc's own base had no set at all.
+		//
+		// A refusal past the bound and not a truncation: a set short by one
+		// row deletes the wrong rows. 0 disables the bound, the same spelling
+		// the query path gives it.
+		if bound > 0 && len(res.Rows) > bound {
+			return nil, sqlerr.New("54000",
+				"a subquery in a DML predicate returned %d rows, past the %d-row bound "+
+					"(WADJET_IN_SET_MAX); narrow the subquery or raise the bound",
+				len(res.Rows), bound)
 		}
 		return res.Rows, nil
 	}

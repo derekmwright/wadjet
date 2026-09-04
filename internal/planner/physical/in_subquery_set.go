@@ -75,6 +75,18 @@ var ErrInSubqueryDistributed = errors.New(
 // refusal without a fixture large enough to cross the real bound.
 const defaultInlinedInSetRows = 10000
 
+// MaxInlinedInSetRows is the bound, for the doors that materialize a subquery
+// result WITHOUT going through this file's inlining. The DML doors are those:
+// they hand `expr.InSubquery` a runner and it builds its membership map from
+// whatever the runner returns, so the bound this package applies to the
+// planner's own inlining reaches nothing there and a write statement could
+// pull an unbounded relation into coordinator memory.
+//
+// The number means the same thing at both sites — how many rows a subquery
+// result may become a set of — even though what it protects differs (plan
+// text here, a hash map there). One knob, one meaning; two would be two.
+func MaxInlinedInSetRows() int { return maxInlinedInSetRows() }
+
 func maxInlinedInSetRows() int {
 	if v := os.Getenv("WADJET_IN_SET_MAX"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
