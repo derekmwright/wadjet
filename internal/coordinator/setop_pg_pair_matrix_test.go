@@ -3,7 +3,11 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -317,12 +321,15 @@ func setOpPairRefRows(t *testing.T, run func(string) (*oracle.Result, error),
 	return out
 }
 
-// TestTheCarrierGapListIsTheCodes asserts that the list this file states and
-// the set the planner actually refuses are the same set. The round-2 review
-// found ADR-0012 and docs/sql-reference.md naming two carrier pairs where the
-// code refused twenty, and this file's own header naming a different set again
-// from the map eight lines below it — a list nobody checks drifts from the code
-// the moment the code moves.
+// TestTheCarrierGapListIsTheCodes asserts that the list this file states, the
+// set the planner actually refuses, and the PARAGRAPH ADR-0012 states it in are
+// all one set. The round-2 review found ADR-0012 and docs/sql-reference.md
+// naming two carrier pairs where the code refused twenty, and this file's own
+// header naming a different set again from the map eight lines below it; the
+// round-3 review found the replacement ADR paragraph claiming EIGHT ordered
+// pairs beside its own table of fourteen — with this test, which read only the
+// code and this file, green throughout. A paragraph no test reads is a
+// paragraph nothing keeps true, so this one reads it.
 func TestTheCarrierGapListIsTheCodes(t *testing.T) {
 	code := map[[2]parquet.TypeID]bool{}
 	for _, p := range physical.SetOpCarrierGapPairs() {
@@ -337,6 +344,50 @@ func TestTheCarrierGapListIsTheCodes(t *testing.T) {
 		if !setOpPairNoCarrierPairs[p] {
 			t.Errorf("the planner refuses %s ∪ %s and this list does not say so — add it, and "+
 				"add it to ADR-0012 item 12's carrier list too", p[0], p[1])
+		}
+	}
+
+	// The ADR's own two claims: the COUNT in its sentence and the type names in
+	// the table under it. The path is fixed rather than walked — a gate that
+	// walks the tree sees a git worktree's second copy of every file, which
+	// CLAUDE.md records as having been the defect twice already.
+	adr, err := os.ReadFile(filepath.Join("..", "..", "docs", "adr",
+		"0012-sql-semantics-authority.md"))
+	if err != nil {
+		t.Fatalf("reading ADR-0012, which item 12 states this list in: %v", err)
+	}
+	body := string(adr)
+	m := regexp.MustCompile(`there are (\d+) ordered ones`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("ADR-0012 item 12 no longer states the carrier-pair count as " +
+			`"there are N ordered ones" — restore that spelling or teach this test the new ` +
+			"one; an unread claim is how the paragraph came to say EIGHT beside a table of " +
+			"fourteen")
+	}
+	stated, _ := strconv.Atoi(m[1])
+	if stated != len(code) {
+		t.Errorf("ADR-0012 item 12 says there are %d ordered carrier-gap pairs; "+
+			"physical.SetOpCarrierGapPairs computes %d", stated, len(code))
+	}
+	// And every computed pair appears in the table that follows the sentence,
+	// under wadjet's own type names — which is what the refusal the client
+	// reads names too.
+	table := body[strings.Index(body, m[0]):]
+	if end := strings.Index(table, "The INTEGER and FLOAT rungs"); end > 0 {
+		table = table[:end]
+	}
+	for p := range code {
+		a, b := p[0].String(), p[1].String()
+		found := false
+		for _, line := range strings.Split(table, "\n") {
+			if strings.Contains(line, a) && strings.Contains(line, b) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the planner refuses %s ∪ %s and ADR-0012 item 12's carrier table has no "+
+				"row naming both", a, b)
 		}
 	}
 }

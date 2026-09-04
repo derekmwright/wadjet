@@ -2338,10 +2338,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     refusals already use — because PostgreSQL ANSWERS the query. Unclassified it
     reached a client as XX000, which says the server broke.
 
-    The pairs, in full (there are EIGHT ordered ones, and the list is COMPUTED
-    from the predicate by `physical.SetOpCarrierGapPairs` and checked against
-    this paragraph's claim by `coordinator.TestTheCarrierGapListIsTheCodes` —
-    an earlier draft of this paragraph named two while the code refused twenty):
+    The pairs, in full — there are 14 ordered ones. The list is COMPUTED from
+    the predicate by `physical.SetOpCarrierGapPairs`, and
+    `coordinator.TestTheCarrierGapListIsTheCodes` READS THIS PARAGRAPH: it
+    parses the count in the sentence you are reading and the type names in the
+    table below, and fails when either disagrees with the computed set. An
+    earlier draft named two pairs while the code refused twenty, and the draft
+    after it said EIGHT while its own table listed fourteen — a paragraph a test
+    does not read is a paragraph nothing keeps true.
 
     | pair | PostgreSQL resolves | why there is no carrier |
     |---|---|---|
