@@ -114,7 +114,6 @@ type rgSlabs struct {
 	want   []int   // row groups that survived pruning, ascending
 	starts []int64 // byte range of want[i]
 	ends   []int64
-	peak   int64 // the largest of those ranges: this file's slab bucket
 
 	loadMu  sync.Mutex
 	body    io.ReadCloser
@@ -254,25 +253,16 @@ func (s *rgSlabs) advance() error {
 	}
 	memory.ReserveOrForce(s.ctx, s.inner.memTracker, s.inner.spillMgr, n, wait, "scan row group load")
 
-	// Then reconcile to the pooled buffer's real capacity: a buffer larger
-	// than the row group is resident memory too. The pool is bucketed by THIS
-	// FILE's largest row group, so the reconcile is bounded by that — never by
-	// another file's shape or by a fixed class — and the buffer is reused
-	// across row groups and files of the same shape instead of being allocated
-	// per read.
-	buf := s.inner.getSlab(int(n), s.peak)
+	// The charge stands at the row group's own byte range. The buffer it is
+	// held in is a power-of-two class of that range, so it is at most twice as
+	// big, and that slack is pool capacity — bounded by the row group itself
+	// and handed to the next row group — rather than this query's memory.
+	// ADR-0006's producer row 2 records the decision and its bound.
+	buf := s.inner.getSlab(int(n))
 	charge := n
-	if d := int64(cap(buf)) - charge; d != 0 && s.inner.memTracker != nil {
-		if d > 0 {
-			s.inner.memTracker.ForceReserve(d)
-		} else {
-			s.inner.memTracker.Release(-d)
-		}
-		charge = int64(cap(buf))
-	}
 
 	if _, err := io.ReadFull(s.body, buf[:n]); err != nil {
-		s.inner.putSlab(buf, s.peak)
+		s.inner.putSlab(buf)
 		s.releaseCharge(charge)
 		return fmt.Errorf("read %s row group %d: %w", s.slot.entry.Path, rg, err)
 	}
@@ -311,7 +301,7 @@ func (s *rgSlabs) release(rgIdx int) {
 	s.mu.Unlock()
 
 	if had {
-		s.inner.putSlab(buf, s.peak)
+		s.inner.putSlab(buf)
 		s.inner.residentSlabs.Add(-1)
 		rgBuffersResident.Add(-1)
 	}
@@ -342,7 +332,7 @@ func (s *rgSlabs) close() {
 
 	var total int64
 	for rg, buf := range bufs {
-		s.inner.putSlab(buf, s.peak)
+		s.inner.putSlab(buf)
 		s.inner.residentSlabs.Add(-1)
 		rgBuffersResident.Add(-1)
 		total += charges[rg]
@@ -368,39 +358,64 @@ var poisonReusedSlabs atomic.Bool
 func PoisonReusedSlabs(on bool) (prev bool) { return poisonReusedSlabs.Swap(on) }
 
 // getSlab and putSlab reuse row-group buffers within one scan source, in
-// buckets sized by the FILE the row group belongs to.
+// buckets that are power-of-two size classes OF THE ROW GROUP'S OWN byte
+// range.
 //
 // What a row group's buffer may be is not a matter of taste: it is charged to
 // the query's memory budget, so a buffer bigger than the row group is a charge
-// for memory the row group does not need. Three shapes were tried and two are
-// wrong for a reason worth keeping:
+// for memory the row group does not need. Three shapes were tried and each
+// failed at one end or the other, which is why the rule that ships states an
+// invariant instead of a preference:
 //
 //   - The process-wide readBufPool, whose only rule is "big enough". It also
 //     holds whole-FILE buffers, so a row-group request draws one and the
 //     charge becomes the largest file the process ever read.
-//   - A size-classed pool (the parquet chunk pool's). Its 64 KiB floor charges
-//     a 5 KiB row group for 64 KiB — a fixed floor is a tuning constant with a
-//     pool's manners.
+//   - The parquet chunk pool's size classes. They have a 64 KiB FLOOR, so a
+//     5 KiB row group is held in 64 KiB — a fixed floor is a tuning constant
+//     with a pool's manners, and the gates caught it.
 //   - One "big enough" pool per scan SOURCE. A source reads one TABLE, and a
 //     table's files do not share a row-group size: a compacted file beside a
 //     freshly ingested one is ordinary. Measured, a 332-byte row group of a
-//     1,988-byte file drew a 105,900-byte buffer left by another file of the
-//     same table and was charged for it — 319x the row group, 53x the file.
+//     1,988-byte file drew a 105,900-byte buffer another file left behind and
+//     was charged for it — 319x the row group, 53x the file.
+//   - Bucketing by the FILE's exact largest row group fixed that but keyed on
+//     a byte count that compression makes different for every file, so no two
+//     files shared a bucket and every row group allocated: +29.2% heap over
+//     the TPC-H SF1 suite, separated across five pairs.
 //
-// What ships buckets the pool by the file's own largest row group, read out of
-// the footer (`peakRowGroupBytes`). Every buffer in a bucket is that size, so
-// a row group is charged at most the largest row group OF ITS OWN FILE — the
-// bound ADR-0006's producer row 2 states — and files of the same shape, which
-// is what a table's files usually are, reuse each other's buffers. Nothing
-// here is a number anybody chose: the bucket comes out of the file.
-func (inner *scanSourceInner) getSlab(n int, peak int64) []byte {
-	if peak < int64(n) {
-		peak = int64(n)
+// THE INVARIANT: a row group is CHARGED its own byte range, and HELD in a
+// buffer of at most twice that. The class is derived from the row group, so
+// there is no floor and no chosen number; rounding to a power of two is what
+// lets files of similar shape — which is what a table's files are — share a
+// bucket, so the buffers are reused instead of allocated. The slack between
+// the charge and the buffer is pool capacity, bounded by the row group itself
+// and reused across the scan; ADR-0006's producer row 2 records that the
+// row-group path does not reconcile the charge up to it, and why.
+//
+// Gated by TestARowGroupIsHeldInABufferAtMostTwiceItsSize (the invariant, over
+// sizes from one byte to a megabyte) and
+// TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes (the charge,
+// end to end over a table whose files have different row-group sizes).
+
+// slabClass is the smallest power of two at least n — the row group's own size
+// class. No minimum: a 332-byte row group's class is 512, not a floor.
+func slabClass(n int) int {
+	if n <= 1 {
+		return 1
 	}
-	p := inner.slabBucket(peak)
+	c := 1
+	for c < n {
+		c <<= 1
+	}
+	return c
+}
+
+func (inner *scanSourceInner) getSlab(n int) []byte {
+	class := slabClass(n)
+	p := inner.slabBucket(class)
 	if v := p.Get(); v != nil {
 		buf := v.([]byte)
-		if int64(cap(buf)) >= int64(n) {
+		if cap(buf) >= n {
 			rgSlabReuses.Add(1)
 			if poisonReusedSlabs.Load() {
 				b := buf[:cap(buf)]
@@ -412,28 +427,29 @@ func (inner *scanSourceInner) getSlab(n int, peak int64) []byte {
 		}
 		p.Put(buf) // a bucket's buffers are one size; this one is not ours
 	}
-	return make([]byte, n, peak)
+	return make([]byte, n, class)
 }
 
-func (inner *scanSourceInner) putSlab(buf []byte, peak int64) {
+func (inner *scanSourceInner) putSlab(buf []byte) {
 	if cap(buf) > 0 {
-		inner.slabBucket(peak).Put(buf[:cap(buf)])
+		inner.slabBucket(cap(buf)).Put(buf[:cap(buf)])
 	}
 }
 
-// slabBucket returns the pool for buffers of the given file-peak size,
-// creating it on first use. A scan reads a handful of file shapes, so the map
-// stays tiny.
-func (inner *scanSourceInner) slabBucket(peak int64) *sync.Pool {
+// slabBucket returns the pool for a size class, creating it on first use. A
+// scan reads a handful of row-group shapes, so the map stays tiny — and two
+// files whose row groups differ by a few percent of compression land in the
+// same class, which is the reuse the exact-byte key threw away.
+func (inner *scanSourceInner) slabBucket(class int) *sync.Pool {
 	inner.slabMu.Lock()
 	defer inner.slabMu.Unlock()
 	if inner.slabPools == nil {
-		inner.slabPools = make(map[int64]*sync.Pool, 2)
+		inner.slabPools = make(map[int]*sync.Pool, 4)
 	}
-	p := inner.slabPools[peak]
+	p := inner.slabPools[class]
 	if p == nil {
 		p = &sync.Pool{}
-		inner.slabPools[peak] = p
+		inner.slabPools[class] = p
 	}
 	return p
 }
@@ -468,7 +484,7 @@ func (s *fileSlot) tryRowGroupLoad(inner *scanSourceInner, ctx context.Context) 
 	}
 	slabs := &rgSlabs{
 		inner: inner, slot: s, ctx: ctx,
-		want: s.wantRG, starts: starts, ends: ends, peak: peakRowGroupBytes(starts, ends),
+		want: s.wantRG, starts: starts, ends: ends,
 		bufs:     make(map[int][]byte, len(s.wantRG)),
 		bases:    make(map[int]int64, len(s.wantRG)),
 		charges:  make(map[int]int64, len(s.wantRG)),

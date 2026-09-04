@@ -141,13 +141,13 @@ func TestAPoisonedSlabIsActuallyReused(t *testing.T) {
 	prevPoison := PoisonReusedSlabs(true)
 	defer PoisonReusedSlabs(prevPoison)
 	inner := &scanSourceInner{}
-	const n, peak = 4096, 8192
-	first := inner.getSlab(n, peak)
+	const n = 4096
+	first := inner.getSlab(n)
 	for i := range first[:cap(first)] {
 		first[:cap(first)][i] = 0x01
 	}
-	inner.putSlab(first, peak)
-	again := inner.getSlab(n, peak)
+	inner.putSlab(first)
+	again := inner.getSlab(n)
 	if cap(again) != cap(first) {
 		t.Fatalf("the pool did not hand the buffer back (cap %d then %d)", cap(first), cap(again))
 	}

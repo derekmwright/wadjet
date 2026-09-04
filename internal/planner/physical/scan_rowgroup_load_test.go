@@ -366,3 +366,52 @@ func TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes(t *testing.
 		t.Fatalf("used = %d after both files drained, want 0", used)
 	}
 }
+
+// TestARowGroupIsHeldInABufferAtMostTwiceItsSize is the slab pool's stated
+// invariant, and it is stated rather than preferred because every wrong pool
+// this arc tried broke it at one end or the other: the process-wide pool held
+// a 100 KiB row group in whatever the largest file left behind; the parquet
+// chunk pool's 64 KiB FLOOR held a 5 KiB row group in 64 KiB; a bucket keyed
+// on the file's exact largest row group held nothing twice, because
+// compression makes that number different for every file.
+//
+// The bound has no floor and no chosen number: the class is the row group's
+// own size rounded up to a power of two, so the buffer is never more than
+// twice what the row group needs, at any size.
+func TestARowGroupIsHeldInABufferAtMostTwiceItsSize(t *testing.T) {
+	inner := &scanSourceInner{}
+	for _, n := range []int{1, 2, 3, 100, 332, 4095, 4096, 4097, 82_000, 1 << 20, (1 << 20) + 1} {
+		buf := inner.getSlab(n)
+		if len(buf) != n {
+			t.Fatalf("getSlab(%d) has len %d", n, len(buf))
+		}
+		if cap(buf) < n {
+			t.Fatalf("getSlab(%d) has cap %d, which cannot hold it", n, cap(buf))
+		}
+		if cap(buf) > 2*n {
+			t.Fatalf("a %d-byte row group is held in a %d-byte buffer — %.1fx. The bound is twice "+
+				"the row group's own byte range, with no floor; a pool that exceeds it is charging "+
+				"the budget for a shape that is not this row group's",
+				n, cap(buf), float64(cap(buf))/float64(n))
+		}
+		inner.putSlab(buf)
+	}
+}
+
+// TestSlabsAreReusedAcrossFilesOfSimilarShape: the bound above is worth
+// nothing if it costs the reuse. Two files whose row groups differ by a few
+// percent — which is what compression does to one table's files — must share a
+// bucket, or every row group allocates. Keying the bucket on the file's EXACT
+// largest row group did exactly that and cost +29.2% heap over TPC-H SF1.
+func TestSlabsAreReusedAcrossFilesOfSimilarShape(t *testing.T) {
+	inner := &scanSourceInner{}
+	before := RowGroupSlabReuses()
+	// One file's row groups, then another's, a few percent apart.
+	for _, n := range []int{100_000, 97_400, 103_100, 99_800} {
+		inner.putSlab(inner.getSlab(n))
+	}
+	if got := RowGroupSlabReuses() - before; got < 3 {
+		t.Fatalf("%d of 3 possible reuses across row groups within a few percent of each other — "+
+			"the bucket key is discriminating shapes that should share a buffer", got)
+	}
+}
