@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # Distribution-Property Pass — Phase 1 Implementation Plan
 
 
@@ -7,7 +9,7 @@
 
 **Tech Stack:** Go 1.22+, existing `internal/planner/physical` package (Stage / Distribution / DistKind), existing TPC-H test harness in `plan_tpch_test.go` (`tpchPlanQueryMap`, `setupTPCHCatalog`, `sqlToStages`), `testing` package with table-driven tests, `benchmarks/tpch/` `TestTPCHQueries` for SF0.01 correctness verification.
 
-**Spec:** `docs/archive/specs/2026-04-20-distribution-property-phase-1.md`
+**Spec:** `docs/_archive/specs/2026-04-20-distribution-property-phase-1.md`
 
 **Worktree:** `/home/dwright/Projects/caelum/.worktrees/distribution-phase-1` on branch `feat/distribution-property-phase-1`, parent commit `0b78c4e`.
 
@@ -37,7 +39,7 @@ Total churn: ~400 added lines, ~3 modified lines. No file deletions.
 ```go
 // RequiredKind enumerates the partitioning a consumer needs from each input.
 // Mirrors Spark's Distribution trait subclasses; see the Phase 1 spec
-// (docs/archive/specs/2026-04-20-distribution-property-phase-1.md) §"The
+// (docs/_archive/specs/2026-04-20-distribution-property-phase-1.md) §"The
 // property algebra" for the satisfaction truth table.
 type RequiredKind int
 
@@ -94,7 +96,7 @@ Phase 1 of the distribution-property pass. Adds the consumer-side type that
 mirrors Spark's Distribution trait subclasses. Pure type additions; no
 behavior change. Truth table for the predicate is documented in the spec.
 
-Spec: docs/archive/specs/2026-04-20-distribution-property-phase-1.md
+Spec: docs/_archive/specs/2026-04-20-distribution-property-phase-1.md
 EOF
 )"
 ```
@@ -254,7 +256,7 @@ The single mechanical predicate that drives the property algebra.
 Implements all five RequiredKind cases per the Phase 1 spec truth table.
 Table-driven test covers the full DistKind × RequiredKind matrix (19 cases).
 
-Spec: docs/archive/specs/2026-04-20-distribution-property-phase-1.md
+Spec: docs/_archive/specs/2026-04-20-distribution-property-phase-1.md
 EOF
 )"
 ```
@@ -1359,7 +1361,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// Phase 1 distribution-property pass: populate Stage.Distribution for
 	// every stage and assert exchange consistency. In BehaviorPreservingMode
 	// (default), violations are logged but do not fail planning. See
-	// docs/archive/specs/2026-04-20-distribution-property-phase-1.md.
+	// docs/_archive/specs/2026-04-20-distribution-property-phase-1.md.
 	assignStageDistributions(stages, p.WorkerCount)
 	if err := AssertExchangeConsistency(stages); err != nil {
 		// In strict mode (Phase 2 onward, or test override) this is a
@@ -1423,7 +1425,7 @@ EOF
 // inconsistent plan. Either way, the spec's load-bearing invariant is
 // broken and Phase 2 cannot proceed safely.
 //
-// Spec: docs/archive/specs/2026-04-20-distribution-property-phase-1.md
+// Spec: docs/_archive/specs/2026-04-20-distribution-property-phase-1.md
 func TestTPCHDistributionConsistency(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
@@ -1616,7 +1618,7 @@ If Step 3 required test updates, commit them as their own `test(planner): ...` c
 
 - [ ] **Step 1: Audit the spec's acceptance criteria against the implementation**
 
-Re-read `docs/archive/specs/2026-04-20-distribution-property-phase-1.md` §"Goals" (numbered 1-6). Confirm each is satisfied:
+Re-read `docs/_archive/specs/2026-04-20-distribution-property-phase-1.md` §"Goals" (numbered 1-6). Confirm each is satisfied:
 
 | Goal | Verification |
 |---|---|

@@ -10,6 +10,6 @@
 // existing distributed_tpch_test.go in internal/coordinator so there is
 // exactly one implementation.
 //
-// See docs/archive/specs/2026-04-08-distributed-test-harness-design.md
+// See docs/_archive/specs/2026-04-08-distributed-test-harness-design.md
 // for the full design.
 package harness

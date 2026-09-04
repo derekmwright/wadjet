@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # Native-DAG Distributed Execution — PR B Implementation Plan
 
 
@@ -7,7 +9,7 @@
 
 **Tech Stack:** Go, NATS JetStream + request/reply, MinIO S3 client, existing `partitionedShuffleSink` / `partitionShardSource` on workers.
 
-**Spec:** `docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md` (commit `ba9c9ac`).
+**Spec:** `docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md` (commit `ba9c9ac`).
 
 **Base branch:** `feat/distribution-property-phase-2` AFTER PR A (harness S3 mode) merges. First task of this plan reverts the Phase 2b runtime work.
 
@@ -95,7 +97,7 @@ wrong row counts, 3.24× total slowdown. Root cause: collapse-to-pipeline-0
 discards multi-step shuffle information.
 
 Replaced by native stage-DAG execution — see
-docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md.
+docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md.
 
 Phase 2a (EnsureDistribution planner pass, 707a0f2..d1e8175) stands — its
 Exchange-annotated plans are the input to the new executeStageDAG."
@@ -179,7 +181,7 @@ Five new fields on the Task message for native-DAG execution:
 Unused in this commit; consumed by the worker's source/sink selection
 (Task 3 and Task 5) and the new coordinator dispatchers (Tasks 6-10).
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -392,7 +394,7 @@ Gather stage tasks instead of writing to S3 — coordinator subscribes
 directly to the reply stream. One GatherBatchMsg per output batch,
 terminated by a message with Terminal=true.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -521,7 +523,7 @@ selectSourceForAlias inspects file patterns and picks partitionShardSource
 or non-partitioned .wshf). Used by pipeline tasks consuming upstream stage
 output in the native-DAG executor.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -688,7 +690,7 @@ Core data structures for the native-DAG executor. Each dispatched stage
 produces a StageOutput; downstream stages consume via collectInputs and
 partitionFilesForWorker. No dispatch logic yet — wired in Tasks 6-10.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -983,7 +985,7 @@ StageOutput (not a raw physical.Stage scan), which lets chained shuffles
 work: each successive repartition stage shuffles the previous stage's
 partitioned output.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1103,7 +1105,7 @@ output as input. Currently thinly wraps preScanBuildTables for backward
 compat; fuller refactor in Task 13 when PreScannedInputs/BuildCachePreScans
 are removed from physical.Stage.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1276,7 +1278,7 @@ with no upstream shuffle gets per-worker scan partitioning; a pipeline
 stage with partitioned upstream input gets its partition slice via
 partitionFilesForWorker.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1520,7 +1522,7 @@ QueryResult. Replaces mergeProbePartials (S3-list-based merge) and
 ExtractMergeInfo(logicalPlan) (Gather stage now carries Ordering/Limit
 on its Exchange payload).
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1602,7 +1604,7 @@ In `internal/coordinator/coordinator.go`, find the `Coordinator` struct and add:
 	// legacy four-mode switch. Defaults true; set false to fall back to
 	// legacy dispatch during Phase 3 rollout. Flag is removed after
 	// one week of stability — see
-	// docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md.
+	// docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md.
 	UseNativeDAG bool
 ```
 
@@ -1661,7 +1663,7 @@ Returns a QueryResult from the terminal Gather.
 UseNativeDAG flag defaults true; legacy switch retained for one-week
 rollback window per spec.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1759,7 +1761,7 @@ roots, Gather is a trivial one-worker pass-through.
 
 Matches Trino's 'output fragment' invariant.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1839,7 +1841,7 @@ call to the Gather stage itself. ExchangeStage payload gains Limit int.
 Coordinator no longer extracts from the logical plan for the gather
 step — the stage is self-describing.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1901,7 +1903,7 @@ Baselines captured from main's SF0.01 TPC-H output using the PARITY
 harness. Feat branch (native-DAG executor) now compares against these
 canonical baselines — any divergence flags a real correctness issue.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -1919,7 +1921,7 @@ Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-de
                --wadjet-bin=./wadjet_bin --no-compare 2>&1 | tee /tmp/harness-native-dag.txt
 ```
 
-Expected: all 22 queries pass; row counts match the Phase 2b-broken row counts we captured in `docs/archive/research/sf10-phase2b-2026-04-21/main-60bb9d3.txt` (since those are from main, which is what native-DAG should match).
+Expected: all 22 queries pass; row counts match the Phase 2b-broken row counts we captured in `docs/_archive/research/sf10-phase2b-2026-04-21/main-60bb9d3.txt` (since those are from main, which is what native-DAG should match).
 
 Specifically, look for:
 - Q18: 100 rows (not 0, not timeout)
@@ -1969,10 +1971,10 @@ If all green, proceed. If regressions remain, STOP and investigate.
 - [ ] **Step 4: Archive results**
 
 ```bash
-mkdir -p docs/archive/research/sf10-native-dag-$(date +%Y-%m-%d)
-cp /tmp/sf10-main-native.txt docs/archive/research/sf10-native-dag-$(date +%Y-%m-%d)/main.txt
-cp /tmp/sf10-feat-native.txt docs/archive/research/sf10-native-dag-$(date +%Y-%m-%d)/feat.txt
-git add docs/archive/research/
+mkdir -p docs/_archive/research/sf10-native-dag-$(date +%Y-%m-%d)
+cp /tmp/sf10-main-native.txt docs/_archive/research/sf10-native-dag-$(date +%Y-%m-%d)/main.txt
+cp /tmp/sf10-feat-native.txt docs/_archive/research/sf10-native-dag-$(date +%Y-%m-%d)/feat.txt
+git add docs/_archive/research/
 git commit -m "docs: archive SF10 native-DAG A/B results"
 ```
 
@@ -2048,7 +2050,7 @@ Deleted:
 Q17 aggregate-shuffle pre-compute path retained — lift to logical
 rewrite in Phase 4.
 
-Phase 3 spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 spec: docs/_archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -2090,7 +2092,7 @@ Each unknown is flagged and bounded; no silent gaps.
 
 ## Execution handoff
 
-Plan saved to `docs/archive/plans/2026-04-22-native-dag-execution.md` (this file) and `docs/archive/plans/2026-04-22-harness-s3-mode.md` (PR A).
+Plan saved to `docs/_archive/plans/2026-04-22-native-dag-execution.md` (this file) and `docs/_archive/plans/2026-04-22-harness-s3-mode.md` (PR A).
 
 Two execution options:
 1. **Subagent-driven** (recommended) — fresh subagent per task + review checkpoints

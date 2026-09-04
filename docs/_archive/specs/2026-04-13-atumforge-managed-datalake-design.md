@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # AtumForge Managed Datalake Analytics — Design Spec
 
 > **Status:** Future vision — not for immediate implementation. Wadjet engine must reach production maturity first.

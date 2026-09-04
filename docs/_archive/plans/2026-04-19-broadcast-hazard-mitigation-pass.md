@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # Broadcast-Hazard Mitigation Pass Implementation Plan
 
 
@@ -7,7 +9,7 @@
 
 **Tech Stack:** Go 1.22+, existing `internal/planner/physical` (Stage / candidate types, `followToAggregate`, `followToScan`, `keysCovered`), existing `internal/coordinator` (NATS task dispatch, `runShuffleSide`, `preComputeDerivedAggregate`), `testing` package with table-driven tests against synthetic `[]Stage`.
 
-**Spec:** `docs/archive/specs/2026-04-19-broadcast-hazard-mitigation-pass.md`
+**Spec:** `docs/_archive/specs/2026-04-19-broadcast-hazard-mitigation-pass.md`
 
 ---
 

@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # Spill Trigger Redesign Implementation Plan
 
 
@@ -7,7 +9,7 @@
 
 **Tech Stack:** Go, `internal/engine/memory/`, `internal/planner/physical/plan.go` (scan source pool), `internal/engine/exec/{aggregate,join,sort,window}.go`.
 
-**Spec:** `docs/archive/specs/2026-04-18-spill-trigger-redesign.md`
+**Spec:** `docs/_archive/specs/2026-04-18-spill-trigger-redesign.md`
 
 ---
 

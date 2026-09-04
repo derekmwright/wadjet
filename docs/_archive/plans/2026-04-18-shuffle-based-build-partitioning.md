@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # Shuffle-Based Build Partitioning Implementation Plan
 
 
@@ -7,7 +9,7 @@
 
 **Tech Stack:** Go, NATS JetStream, S3 (MinIO in tests), `wadjet` engine `exec` package, custom WSHF on-disk format.
 
-**Spec:** `docs/archive/specs/2026-04-18-shuffle-based-build-partitioning-design.md`
+**Spec:** `docs/_archive/specs/2026-04-18-shuffle-based-build-partitioning-design.md`
 
 ---
 

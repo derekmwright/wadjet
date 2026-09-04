@@ -1,10 +1,12 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # Distribution-Property Pass — Phase 1: wire up the existing scaffolding
 
 **Status:** Draft
 **Date:** 2026-04-20
 **Author:** Derek Wright (with Claude)
 **Branch:** `feat/distribution-property-phase-1`
-**Companion research brief:** `docs/archive/research/2026-04-19-distribution-model-trino-spark.md`
+**Companion research brief:** `docs/_archive/research/2026-04-19-distribution-model-trino-spark.md`
 **Origin context:** `feat/broadcast-hazard-mitigation` (parked at `67ba055`) — five SF10 iterations confirmed the whack-a-mole pattern is an architectural mismatch, not a bug.
 **Architectural invariant established:** *Every stage in a distributed plan declares the actual partitioning of its output, and every consuming stage's required input distribution is checkable against the producer's actual distribution via a single `Satisfies` predicate. Phase 1 establishes this property + assertion infrastructure with zero behavior change.*
 

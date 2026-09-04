@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # Distribution-Property Phase 2 Implementation Plan
 
 
@@ -7,7 +9,7 @@
 
 **Tech Stack:** Go 1.22+; existing Wadjet planner/coordinator; NATS JetStream for task dispatch; TPC-H SF0.01 / SF1 / SF10 for validation.
 
-**Spec:** `docs/archive/specs/2026-04-20-distribution-property-phase-2-design.md`
+**Spec:** `docs/_archive/specs/2026-04-20-distribution-property-phase-2-design.md`
 
 ---
 
@@ -2100,7 +2102,7 @@ gh pr create --title "Distribution-property phase 2: exchange insertion + retire
 ## Summary
 
 Implements Phase 2 of the distribution-property pass
-(spec: `docs/archive/specs/2026-04-20-distribution-property-phase-2-design.md`).
+(spec: `docs/_archive/specs/2026-04-20-distribution-property-phase-2-design.md`).
 
 Replaces the coordinator-level four-mode routing switch with a
 property-based Exchange insertion pass (`EnsureDistribution`). Three

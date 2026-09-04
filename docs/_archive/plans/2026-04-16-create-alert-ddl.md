@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded design note.** Kept for design lineage only; it does not describe the current code. Current positions: `docs/adr/` (decisions), `docs/internals/` (code maps), `docs/design/` (active memos). Search skips `docs/_archive/` by default (`.ignore`); use `rg --no-ignore` to include it.
+
 # CREATE ALERT DDL v1 — Implementation Plan
 
 
@@ -7,7 +9,7 @@
 
 **Tech Stack:** Go stdlib (`net/http`, `net/http/httptest`), existing `internal/planner/sql/` hand-rolled parser, existing `internal/storage/catalog/` NATS KV (MemKV in tests), existing Prometheus metrics registry, existing MCP + pgwire servers.
 
-**Spec:** `docs/archive/specs/2026-04-16-create-alert-ddl-design.md`
+**Spec:** `docs/_archive/specs/2026-04-16-create-alert-ddl-design.md`
 
 ---
 
