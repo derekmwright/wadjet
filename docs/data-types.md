@@ -82,17 +82,40 @@ CREATE TABLE t (f FLOAT(1));       -- a Float32 column
 
 `VARCHAR`, `CHAR`, `CHARACTER`, `CHARACTER VARYING`, `NCHAR`, `NVARCHAR` and
 `TEXT` all name the one `String` type. A **length parameter is honoured by an
-explicit `CAST` and dropped by DDL**:
+explicit `CAST` and dropped by DDL** — but both doors read the modifier the
+same way, so a length a `CAST` refuses is refused by `CREATE TABLE` too:
 
 ```sql
 SELECT CAST('abcdef' AS VARCHAR(4));   -- abcd   (truncated to 4 CHARACTERS)
 SELECT CAST('éàüxyz' AS VARCHAR(3));   -- éàü    (characters, not bytes)
 SELECT CAST(12345 AS VARCHAR(3));      -- 123    (the rendering is truncated)
-SELECT CAST('abcdef' AS VARCHAR(0));   -- ERROR 22023: length for type varchar must be at least 1
 
 CREATE TABLE t (v VARCHAR(4));         -- accepted; the 4 is NOT stored
 INSERT INTO t VALUES ('abcdef');       -- accepted (PostgreSQL raises 22001)
 ```
+
+**Invalid length modifiers**, with PostgreSQL's own codes and messages. Each is
+refused identically by a `CAST` and by `CREATE TABLE`:
+
+| Modifier | SQLSTATE | Message |
+|---|---|---|
+| `VARCHAR(0)`, `CHAR(0)` | `22023` | `length for type varchar must be at least 1` (`char` for the `CHAR` family) |
+| `VARCHAR(abc)` — not a number | `42601` | `syntax error at or near "abc"` |
+| `VARCHAR(-1)` — negative | `42601` | `syntax error at or near "-"` |
+| `VARCHAR(10485761)` — past the cap | `22023` | `length for type varchar cannot exceed 10485760` |
+| `TEXT(5)` — `TEXT` takes no modifier | `42601` | `type modifier is not allowed for type "text"` |
+
+```sql
+SELECT CAST('abcdef' AS VARCHAR(0));   -- ERROR 22023: length for type varchar must be at least 1
+CREATE TABLE t (v VARCHAR(0));         -- ERROR 22023: column "v": length for type varchar must be at least 1
+SELECT CAST('abcdef' AS TEXT(5));      -- ERROR 42601: type modifier is not allowed for type "text"
+CREATE TABLE t (v TEXT(5));            -- ERROR 42601: column "v": type modifier is not allowed for type "text"
+```
+
+The DDL door prefixes the offending column name and, because the DDL lexer
+folds an unquoted identifier to upper case before the type name is read, echoes
+a non-numeric modifier as `"ABC"` where the `CAST` door echoes `"abc"`. The
+code and the rule are the same on both.
 
 Two differences from PostgreSQL to know about:
 

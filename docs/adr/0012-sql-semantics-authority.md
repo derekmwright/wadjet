@@ -730,11 +730,63 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      length is dropped, which makes an INSERT past n a superset (PostgreSQL
      raises 22001) rather than a refused table.
 
+     **An INVALID modifier is refused identically by both doors**, because
+     both read it with `parquet.StringTypeLength` — one accept-set, the model
+     `ParseDateDays` set. Measured live and asserted at both doors:
+
+     | modifier | SQLSTATE | message |
+     |---|---|---|
+     | `VARCHAR(0)`, `CHAR(0)` | 22023 | `length for type varchar \| char must be at least 1` |
+     | `VARCHAR(10485761)` | 22023 | `length for type varchar cannot exceed 10485760` |
+     | `VARCHAR(abc)` | 42601 | `syntax error at or near "abc"` |
+     | `VARCHAR(-1)` | 42601 | `syntax error at or near "-"` |
+     | `TEXT(5)` | 42601 | `type modifier is not allowed for type "text"` |
+
+     Two SPELLING differences on the DDL door, both recorded rather than
+     fixed: it prefixes `column "v": `, and the DDL lexer folds an unquoted
+     identifier to upper case before the type name is read, so `VARCHAR(abc)`
+     echoes `"ABC"` there and `"abc"` from a CAST. The code and the rule are
+     the same; only the echoed token's case differs, and moving it would mean
+     changing when the lexer folds.
+
      Pinned by `wadjet.TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration`:
      the value cells now assert PostgreSQL's own answers, the declaration cell
      asserts the unconstrained STRING and fires the day it carries a length,
      and the three bpchar consumers assert the agreement that padding would
-     cost. The divergence is filed as **#838**.
+     cost. The divergence is filed as **#838**. User-facing:
+     `docs/data-types.md` §`VARCHAR(n)` and `CHAR(n)`, `docs/sql-reference.md`
+     §Casts and errors.
+
+   - **An integer result with no room in its declared type FAILS; it is never
+     a wrapped number — and the check is at the STORE, not in the kernel.**
+     (Added 2026-09-04, round-1 review P1.)
+
+     `ABS(<int4 column>)` at -2147483648 answered -2147483648 where PostgreSQL
+     17.11 raises `integer out of range` (22003), while the int8 twin already
+     raised. Neither evaluator was wrong. `ColRef.Eval` widens an INT32 column
+     to an int64 box on purpose (this list's "every integer spelling is INT64"
+     superset), so the kernel computed 2147483648 — correct arithmetic — and
+     `batch.SetValue`'s TypeInt32 arm narrowed it back with a bare
+     `int32(tv)`. A different number wearing the right type: item 9's class.
+
+     The refusal therefore belongs at the seam every such kernel crosses, and
+     `batch.IntegerRangeError` raises there with the exec.FatalEvalPanic
+     contract #361's TypeMismatchError already uses. A check inside ABS would
+     have covered one function and, in the vectorized half, would have been
+     DEAD CODE: the registry declares `abs` float64 while the planner declares
+     the projection int4, so `FuncCall.EvalVec`'s `vecOutputHolds` guard sends
+     every such call to the per-row path and `vecAbsDomain`'s narrow arms are
+     unreachable from a projection. Measured, not inferred.
+
+     **What stays a superset**: `-<int4 column>` at the floor and
+     `<int4 column> * 2` still ANSWER, in int64, where PostgreSQL raises —
+     this list's widening divergence, unchanged and now pinned in the same
+     gate so the new refusal cannot swallow it silently.
+
+     Gated by `coordinator.TestIntegerMinimumIsLoudOnEveryArm` (nine shapes ×
+     five arms over the `intmin` fixture), `batch.TestInt32StoreKeepsTheNumberOrRefuses`
+     (the seam with no plan) and `pgwire.TestIntegerOutOfRangeReaches22003OnTheWire`
+     (the wire).
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as

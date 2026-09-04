@@ -837,10 +837,15 @@ are different answers — a client branches on them:
 | `CAST('abc' AS INTEGER \| BIGINT \| REAL \| DOUBLE PRECISION \| NUMERIC \| BOOLEAN)` | `22P02` | invalid input syntax for type … |
 | `CAST('1e400' AS DOUBLE PRECISION)` | `22003` | "1e400" is out of range for type double precision |
 | `CAST(1e40 AS REAL)` | `22003` | … is out of range for type real |
-| `CAST('abcdef' AS VARCHAR(0))` | `22023` | length for type varchar must be at least 1 |
+| `CAST('abcdef' AS VARCHAR(0))` / `CHAR(0)` | `22023` | length for type varchar \| char must be at least 1 |
+| `CAST('abcdef' AS VARCHAR(10485761))` | `22023` | length for type varchar cannot exceed 10485760 |
+| `CAST('abcdef' AS VARCHAR(abc))` / `VARCHAR(-1)` | `42601` | syntax error at or near "abc" \| "-" |
+| `CAST('abcdef' AS TEXT(5))` | `42601` | type modifier is not allowed for type "text" |
 | `CAST(x AS FLOAT(0))` / `FLOAT(54)` | `22023` | precision for type float must be at least 1 bit / less than 54 bits |
 | `CAST(x AS DECIMAL(p,s))` past the carrier | `22003` | numeric field overflow |
 | `bigint` arithmetic past its range | `22003` | bigint out of range |
+| `ABS(<int4 column>)` at `-2147483648` | `22003` | integer out of range |
+| `ABS(<int8 column>)` at `-9223372036854775808` | `22003` | bigint out of range |
 | `1/0`, `x % 0`, `MOD(x, 0)`, `LOG(1, x)` | `22012` | division by zero |
 | `LN(0)`, `LOG(0)`, `LOG2(0)` | `2201E` | cannot take logarithm of zero |
 | `LN(-1)`, `LOG(-1)` | `2201E` | cannot take logarithm of a negative number |
@@ -850,6 +855,25 @@ are different answers — a client branches on them:
 | `POWER(2, 10000)`, `EXP(1000)` | `22003` | value out of range: overflow |
 | `EXP(-1000)` | `22003` | value out of range: underflow |
 | `ASIN(2)`, `ACOS(2)` | `22003` | input is out of range |
+
+The four string-modifier refusals and the two `FLOAT(n)` ones are read by ONE
+function, so **`CREATE TABLE` refuses exactly what a `CAST` refuses**, with the
+same code and the same message (the DDL door adds a `column "v": ` prefix, and
+folds an unquoted non-numeric modifier to upper case before quoting it):
+
+```sql
+SELECT CAST('abcdef' AS VARCHAR(0));  -- 22023 length for type varchar must be at least 1
+CREATE TABLE t (v VARCHAR(0));        -- 22023 column "v": length for type varchar must be at least 1
+CREATE TABLE t (v TEXT(5));           -- 42601 column "v": type modifier is not allowed for type "text"
+CREATE TABLE t (v VARCHAR(255));      -- accepted; the 255 is not stored
+```
+
+Wadjet's own `ABS` refusals are the two-complement asymmetry, not an
+arithmetic limit: `|min|` has no value in the type it came from, so it fails
+rather than answering the same negative number back. `-2147483647` and every
+value above it answer normally. Note that wadjet computes every integer
+expression in 64 bits, so `<int4 column> * 2` and `-<int4 column>` ANSWER where
+PostgreSQL raises `integer out of range` — a deliberate superset (ADR-0012).
 
 NaN and the infinities are **values**, not failures, and pass through the way
 PostgreSQL passes them: `SQRT('NaN')` is NaN, `LN('Infinity')` is Infinity,
