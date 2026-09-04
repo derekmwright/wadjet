@@ -9568,6 +9568,15 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			outDecl = inferProjectionDeclType(typeExpr, outDecl.ID, strictInt, colTypes)
 		}
 		outType := outDecl.ID
+		// The planner's declaration is the AUTHORITY for this projection's
+		// arithmetic mode, and the compiled tree is told it here rather than
+		// deriving its own. Two walks over two representations of one
+		// expression is how a float came to be computed under an INT64
+		// declaration and TRUNCATED into the vector (round-1 review, B3);
+		// expr.StampArithMode is the seam that makes it one decision.
+		if compiledExpr != nil {
+			expr.StampArithMode(compiledExpr, outType == parquet.TypeInt64)
+		}
 
 		pc := exec.ProjectColumn{
 			Name: name,

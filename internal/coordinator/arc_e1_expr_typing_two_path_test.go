@@ -209,6 +209,64 @@ func TestArcE1ExprTypingOnEveryArm(t *testing.T) {
 		})
 	}
 
+	// ---------------------------------------------------------------- #849
+	// A choice construct with a FRACTIONAL literal arm, on every arm. The
+	// integer rung declared an INT64 vector for it and the 1.5 the evaluator
+	// produced was TRUNCATED into that vector — `LEAST(c_i64, 1.5) * 3` was 4
+	// for the server's 4.5, and the same shape times int8's maximum was
+	// MinInt64 (round-1 review, B3).
+	//
+	// The DAG arms matter here beyond the usual reason: the declared type is
+	// what a stage's output schema carries, so a choice typed INT64 on one
+	// side of a shuffle and DECIMAL on the other is ADR-0010's consistency
+	// refusal rather than a value.
+	for _, tc := range []struct {
+		name, sql string
+		want      []string
+	}{
+		{"least", `SELECT LEAST(c_i64, 1.5) AS v FROM typemx WHERE id = 1`,
+			[]string{"v=1.5"}},
+		{"least_plus_one", `SELECT LEAST(c_i64, 1.5) + 1 AS v FROM typemx WHERE id = 1`,
+			[]string{"v=2.5"}},
+		{"least_times_three", `SELECT LEAST(c_i64, 1.5) * 3 AS v FROM typemx WHERE id = 1`,
+			[]string{"v=4.5"}},
+		{"case_else", `SELECT (CASE WHEN id > 900 THEN c_i64 ELSE 1.5 END) + 1 AS v ` +
+			`FROM typemx WHERE id = 1`, []string{"v=2.5"}},
+		{"coalesce_nullif", `SELECT COALESCE(NULLIF(c_i64, 1000003), 2.5) + 1 AS v ` +
+			`FROM typemx WHERE id = 1`, []string{"v=3.5"}},
+		{"greatest", `SELECT GREATEST(0 - c_i64, 1.5) + 1 AS v FROM typemx WHERE id = 1`,
+			[]string{"v=2.5"}},
+		// The choice as a GROUP BY key, which is where the declared type
+		// becomes a shuffle key rather than an output column.
+		// id 0 holds c_i64 = 0, which IS the least — so the range starts at 1,
+		// to keep this cell about the KEY's type rather than about which arm
+		// each row picks.
+		{"grouped_by_the_choice",
+			`SELECT LEAST(c_i64, 1.5) AS k, COUNT(*) AS n FROM typemx WHERE id > 0 AND id < 4 ` +
+				`GROUP BY LEAST(c_i64, 1.5)`, []string{"k=1.5|n=int64:3"}},
+		// The BOUNDARY: a WHOLE-number literal keeps the integer domain.
+		{"ctl_whole_literal", `SELECT LEAST(c_i64, 2) + 1 AS v FROM typemx WHERE id = 1`,
+			[]string{"v=int64:3"}},
+		{"ctl_whole_literal_case",
+			`SELECT (CASE WHEN id > 0 THEN c_i64 ELSE 1 END) * 2 AS v FROM typemx WHERE id = 1`,
+			[]string{"v=int64:2000006"}},
+	} {
+		t.Run("#849/fractional_arm/"+tc.name, func(t *testing.T) {
+			for _, arm := range arms() {
+				got, err := arm.run(tc.sql)
+				if err != nil {
+					t.Errorf("%s arm: %v\n  SQL: %s", arm.name, err, tc.sql)
+					continue
+				}
+				if len(got) != len(tc.want) || (len(got) > 0 && got[0] != tc.want[0]) {
+					t.Errorf("%s arm: got %v, want %v (live PostgreSQL 17.11) — a choice with "+
+						"a fractional literal arm is numeric, and an integer claim TRUNCATES "+
+						"the value\n  SQL: %s", arm.name, got, tc.want, tc.sql)
+				}
+			}
+		})
+	}
+
 	// ---------------------------------------------------------------- #850
 	// The lift REWRITES the aggregate set, and the DAG splits every aggregate
 	// into a partial and a final. `SUM(x) + k*COUNT(x)` is the shape where

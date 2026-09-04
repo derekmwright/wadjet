@@ -787,15 +787,15 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 			declared = append(declared, m)
 		}
 	}
-	if !sawDecimal {
-		// The rung is DECIMAL because a numeric LITERAL put it there and no
-		// operand is a genuine DECIMAL — `COALESCE(i32, 1.5)`, which
-		// PostgreSQL types numeric. The runtime's choice fold declines for a
-		// constant arm on purpose (ADR-0024: a constant CONTRIBUTES to the
-		// fold and never TRIGGERS it), so declaring DECIMAL here would build a
-		// vector for a value the evaluator never renders. Keep what this
-		// answered before — ADR-0024's recorded literal deferral, pinned by
-		// TestFractionalLiteralBesideAnIntegerColumnStaysInteger.
+	if !sawDecimal && !fractionalLitTriggersFold(decided) {
+		// The rung is DECIMAL because a numeric LITERAL put it there, no
+		// operand is a genuine DECIMAL, and the literal is a WHOLE number —
+		// `COALESCE(i32, 2)`. A constant CONTRIBUTES to the fold and does not
+		// TRIGGER it (ADR-0024), so the integer declaration stands and the
+		// runtime's choice fold declines in step.
+		//
+		// A FRACTIONAL literal beside a non-constant arm is the exception, and
+		// fractionalLitTriggersFold is where it is decided for both sides.
 		return typed[0], true
 	}
 	if sawUnknown {
@@ -806,6 +806,46 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 		return typed[0], true
 	}
 	return DeclDecimal(m.Precision, m.Scale), true
+}
+
+// fractionalLitTriggersFold reports whether a numeric literal with a
+// FRACTIONAL spelling, beside at least one arm that is not a constant, must
+// put a choice construct on the DECIMAL rung.
+//
+// It is the one exception to "a constant contributes to the fold and never
+// triggers it" (ADR-0024), and it is here because the alternative is a wrong
+// VALUE rather than a wrong type. `LEAST(c_i64, 1.5)` is `numeric` on
+// PostgreSQL 17.11 and answers 1.5; declaring it INT64 — which the integer
+// rung's `typed[0]` did — builds an int64 vector, and the 1.5 the evaluator
+// produces is TRUNCATED into it. Arithmetic over it then made the truncation
+// worse: `LEAST(c_i64, 1.5) * 3` was 4 for the server's 4.5, and
+// `(CASE … ELSE 1.5 END) * <int8 max>` was MinInt64 for an exact numeric
+// (round-1 review, B3).
+//
+// Two conditions, and the second is what keeps the deferral this narrows:
+//
+//   - the literal's SPELLING has a non-zero scale. `COALESCE(i32, 2)` is
+//     integer in PostgreSQL too and is untouched.
+//   - at least one arm is NOT a constant. With every arm constant there is
+//     nothing to resolve the literal against, and `GREATEST(-2.5, -7.5)` keeps
+//     the FLOAT64 a bare numeric literal declares — ADR-0024's literal
+//     deferral, unchanged, and the case CommonDeclType's allLiterals clause
+//     returns before reaching here anyway.
+//
+// expr.decimalArmFold makes the identical call over the COMPILED arms, so the
+// vector the plan builds and the box the runtime hands it stay one decision.
+func fractionalLitTriggersFold(decided []DeclType) bool {
+	frac, nonConst := false, false
+	for _, d := range decided {
+		if d.Lit {
+			if d.ExactSet && d.Exact.Scale > 0 {
+				frac = true
+			}
+			continue
+		}
+		nonConst = true
+	}
+	return frac && nonConst
 }
 
 // numericRungFold folds the deciders through PostgreSQL's select_common_type

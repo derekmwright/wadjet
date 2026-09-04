@@ -1056,6 +1056,31 @@ func caseResultArms(v *Case) []Expr {
 // expr.CommonDeclType folds the same alternatives over their DECLARED types,
 // and the two must agree: a plan that declares DECIMAL for an expression the
 // runtime boxes as an integer hands the store a carrier instead of a value.
+// fracLitArmTriggersFold is expr.CommonDeclType's fractionalLitTriggersFold
+// over the COMPILED arms: a numeric literal whose spelling has a non-zero
+// scale, beside at least one arm that is not a constant, puts the choice on
+// the DECIMAL rung. See that function for why this one exception to
+// ADR-0024's "a constant never triggers the fold" exists.
+func fracLitArmTriggersFold(arms []Expr) bool {
+	frac, nonConst := false, false
+	for _, a := range arms {
+		if a == nil {
+			continue
+		}
+		if lit, isLit := a.(*Lit); isLit && lit.Val == nil {
+			continue
+		}
+		if !isConstNumericLit(a) {
+			nonConst = true
+			continue
+		}
+		if t, ok := constArmDecimalType(a); ok && t.Scale > 0 {
+			frac = true
+		}
+	}
+	return frac && nonConst
+}
+
 func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 	metas := make([]batch.DecimalType, 0, len(arms))
 	// The same list without the CONSTANTS, which is what the fold falls back
@@ -1081,9 +1106,14 @@ func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 			declared = append(declared, t)
 		}
 	}
-	if !sawDecimal {
+	if !sawDecimal && !fracLitArmTriggersFold(arms) {
 		// All-integer alternatives are an INTEGER expression, not a decimal
 		// one: `COALESCE(i, 0)` is integer in PostgreSQL too.
+		//
+		// A FRACTIONAL literal beside a non-constant arm is the exception —
+		// expr.CommonDeclType's fractionalLitTriggersFold makes the identical
+		// call over the DECLARED arms, and the two must not drift or the plan
+		// builds one vector and this hands it another box (round-1 B3).
 		return 0, 0, false
 	}
 	m, ok := foldDecimalMetas(metas, declared)

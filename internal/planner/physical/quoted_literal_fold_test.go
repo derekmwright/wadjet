@@ -170,7 +170,15 @@ func TestQuotedLiteralIsUnknownInTheFold(t *testing.T) {
 // So a CONSTANT is folded at PostgreSQL's rung for its spelling only when
 // there is a TYPED operand to resolve it against — `CASE … THEN i32 ELSE 0
 // END` is `integer` on both engines — and a composite of nothing but constants
-// keeps the deferral. The wide-literal case keeps it too, for the reason
+// keeps the deferral.
+//
+// The one case a constant does TRIGGER the fold is a FRACTIONAL literal beside
+// a non-constant arm, and it is not a reopening of the deferral: it is the
+// only reading under which the value survives. An integer declaration there
+// builds an integer vector and the fraction the evaluator produces is
+// truncated into it (round-1 review, B3). expr.fractionalLitTriggersFold and
+// its runtime twin expr.fracLitArmTriggersFold are the one place that is
+// decided. The wide-literal case keeps it too, for the reason
 // wadjet.TestWideNumericLiteralInAChoiceStaysFloat pins: past a double's ~17
 // significant digits the literal's BOX has already lost the digits a DECIMAL
 // declaration would claim to hold.
@@ -186,8 +194,15 @@ func TestNumericLiteralKeepsItsOwnDeclarationInAFold(t *testing.T) {
 			"COALESCE(i32, 3000000000)", expr.Decl(parquet.TypeInt64)},
 		{"a fractional literal does not make a float column double",
 			"GREATEST(f32, 3.5)", expr.Decl(parquet.TypeFloat32)},
-		{"a fractional literal beside an int column keeps the integer",
-			"COALESCE(i32, 1.5)", expr.Decl(parquet.TypeInt32)},
+		// A FRACTIONAL literal beside a non-constant arm is the ONE case where
+		// a constant triggers the fold, and it is a value that forced it:
+		// PostgreSQL types `COALESCE(i32, 1.5)` numeric, the integer
+		// declaration built an int32 vector, and the 1.5 the evaluator
+		// produced was TRUNCATED into it — `LEAST(c_i64, 1.5) * 3` answered 4
+		// for the server's 4.5 (round-1 review, B3). The scale comes from the
+		// literal's spelling; the precision from the column's range plus it.
+		{"a fractional literal beside an int column widens to the decimal rung",
+			"COALESCE(i32, 1.5)", expr.DeclDecimal(11, 1)},
 		{"two literals keep the literal declaration",
 			"GREATEST(0.5, 1.5)", expr.DeclNumericLit(parquet.TypeFloat64, "0.5")},
 		{"a wide literal beside a decimal stays float",
