@@ -966,18 +966,21 @@ of its own and takes the other arm's — `SELECT addr FROM t UNION ALL SELECT
 '10.0.0.9'` is an `IPV4` union, not a type error — and `PORT`, `PROTOCOL` and
 `DURATION` are integers, which is what they declare on the wire.
 
-A few pairs PostgreSQL resolves are not yet CARRIED here, and each is refused
-on every path with SQLSTATE `0A000` and a message naming the two carriers —
-`CAST` both arms to one type:
+A few set operations PostgreSQL resolves are not yet CARRIED here. Each is
+refused on every path, before execution, with SQLSTATE `0A000` and a message
+saying what is missing:
 
 - `DATE` beside `TIMESTAMP`;
 - two members of the `IPV4` / `IPV6` / `CIDR` family;
 - `PORT`, `PROTOCOL` or `DURATION` beside a `DECIMAL`. Beside an integer or a
   float they resolve and answer.
+
+  For those three, `CAST` both arms to one type.
+
 - a QUOTED literal whose resolved type is `BOOLEAN`, an integer, a float,
-  `TIMESTAMP`, `PORT`, `PROTOCOL` or `DURATION` — the literal arrives as text
-  and those columns are not built from text here. Write the literal unquoted,
-  or `CAST` it. `NULL` is unaffected, and the other types
+  `TIMESTAMP`, `PORT`, `PROTOCOL` or `DURATION`: the literal reaches the result
+  column as text, and those columns are not built from text here. Write the
+  literal unquoted, or `CAST` it. `NULL` is unaffected, and the remaining types
   (`TEXT`, `BYTEA`, the address types, `UUID`, `DATE`, `NUMERIC`) resolve and
   answer.
 
