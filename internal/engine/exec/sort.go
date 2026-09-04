@@ -484,6 +484,22 @@ func (s *Sort) MergeSink(other SinkSource) {
 	if s.schema == nil {
 		s.schema = o.schema
 	}
+	// EVERY sorted run the clone wrote belongs to the primary now, and the
+	// transfer comes FIRST — ADR-0027 decision 1, which HashAggregate.
+	// mergeSinkState already applies to its four artifact lists. A Sort clone
+	// has one list, `runFiles`, and it was not transferred at all: the
+	// clone's Close then deleted the files (`removeRunFiles(s.runFiles)`) and
+	// every row in them left the answer with no error anywhere — 1,100 /
+	// 2,800 / 3,300 rows of 5,000, each a whole number of source batches
+	// (#864, #790's shape on the Sort).
+	//
+	// `finalizeExternalMerge` merges the runs and the in-memory remainder in
+	// key order, so which sink wrote a run does not matter; that all of them
+	// are present does.
+	if len(o.runFiles) > 0 {
+		s.runFiles = append(s.runFiles, o.runFiles...)
+		o.runFiles = nil
+	}
 	s.batches = append(s.batches, o.batches...)
 	s.totalRows += o.totalRows
 	o.batches = nil

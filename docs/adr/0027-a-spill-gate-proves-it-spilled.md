@@ -4,7 +4,9 @@ Status: Accepted (2026-09-01, the spill-correctness arc: #782, #779, #632,
 #790; residual #788). Amended 2026-09-03 twice: the operational-lifecycle arc
 added #791's third route and why its plan-time fix is refused, and the
 spilled-arm arc added decision 8, which FIXES #791 in the direction that
-amendment left open.
+amendment left open. Amended 2026-09-04 by the spill-and-clone arc: decision 9
+carries decision 1 to the Sort (#864), and says what the tracking-only clone
+view is and is not for.
 
 ## Context
 
@@ -182,6 +184,51 @@ Mechanisms, each with its instrumented evidence in the commit body:
    refused, and the corpus engagement check — `ShapeOnlyColumnsPlanned` must
    move somewhere in the corpus, `benchmarks/tpch/oracle_test.go:96`, inside
    `TestTPCHOptimizationInvariance` — still fires.
+
+9. **Decision 1 is about EVERY cloneable sink, and the Sort was the one it had
+   not reached.** (Added 2026-09-04 with the #864 fix.)
+
+   Decision 1 says every spill artifact a clone owns is transferred to the
+   primary at `MergeSink`, before any merge branch is chosen. It was written
+   against the HashAggregate's four artifact lists and it was implemented
+   there. `Sort` has ONE list — `runFiles`, the sorted columnar runs — and
+   `Sort.MergeSink` transferred the clone's batches, its row count, its schema
+   and its tracker charge, and not that. `Sort.Close` then deleted the files
+   (`removeRunFiles(s.runFiles)`), so every row in them left the answer with no
+   error anywhere: 1,100 / 2,800 / 3,300 rows of 5,000, each a whole number of
+   source batches, on 18 of 18 of the sweep's ORDER BY cells (#864, which is
+   #790's shape on a different operator).
+
+   `finalizeExternalMerge` merges the runs and the in-memory remainder in key
+   order, so WHICH sink wrote a run does not matter; that all of them are
+   present does. The transfer is unconditional and comes first, exactly as
+   decision 1 says.
+
+   **May a clone spill in production, now that the merge is right?** For the
+   Sort, nothing about the ANSWER says it may not: run file names are unique
+   process-wide (`spillFileSeq`), each run is independently sorted, and the
+   k-way merge is indifferent to provenance. The reason a clone still does not
+   spill is `SpillManager.TrackingOnlyView`, and its reasons are about MEMORY
+   POLICY rather than correctness — a clone registers on the view, so it is
+   invisible to the real manager's `RequestRelief` targeting and cannot honour
+   `SpillSome` on a peer's behalf; under pressure the intended response is to
+   collapse parallelism and merge into the spill-armed primary. Changing that
+   is a measured trade (run counts, merge fan-in, relief targeting), not a bug
+   fix, and it is NOT made here.
+
+   What did change is that the tracking-only view is no longer LOAD-BEARING for
+   the answer. It was: the only reason #864 was latent rather than a shipped
+   wrong answer is that `ShouldSpillFor` answers false for a clone, and the E5
+   arc's note on both forcing knobs said arming either around a whole query
+   drops 44% to 78% of the rows. A guard that hides a wrong answer is not a
+   guard, it is a coincidence. With the transfer in place, the sweep's ORDER BY
+   and window cells take a forced-run arm (`forcedRunArm`,
+   `wadjet/spill_type_matrix_test.go`) that arms `ForceSortSpillEvery(1)` /
+   `ForceWindowSpillEvery(1)` around the WHOLE QUERY and asserts the full row
+   set — which is the END-TO-END spilled-sort claim decision 6's per-operator
+   gates cannot make, and which that E5 note recorded as owed and blocked.
+   `exec.Window` has no `CloneSink` today, so it has no clone arm to be wrong
+   about; the day it gets one, decision 1 covers it before it is written.
 
 ## Alternatives rejected
 

@@ -198,6 +198,42 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 				}
 				exec.ForceAggDrainEvery(restore)
 			}
+			// The FORCED-RUN arm: the sort or the window writes a run on every
+			// Consume, so this cell asserts what the per-operator forced-run
+			// gates cannot — that a spilled sort or window answers END TO END,
+			// through the planner, the pipeline and the morsel clone merge,
+			// what an unspilled one answers. It returned 44% to 78% of the
+			// rows until #864.
+			//
+			// Engagement is asserted per RUN here rather than logged: with the
+			// knob armed the operator has no discretion, so a cell that wrote
+			// no run did not reach the operator at all and is comparing two
+			// in-memory answers.
+			if cell.forcedRunArm {
+				window := strings.HasPrefix(cell.name, "window_")
+				var restore int64
+				if window {
+					restore = exec.ForceWindowSpillEvery(1)
+					defer exec.ForceWindowSpillEvery(restore)
+				} else {
+					restore = exec.ForceSortSpillEvery(1)
+					defer exec.ForceSortSpillEvery(restore)
+				}
+				for run := 0; run < 2; run++ {
+					before := exec.ForcedSortSpills.Load() + exec.ForcedWindowSpills.Load()
+					got, err := tmRun(ctx, arm, cell.sql)
+					if err != nil {
+						t.Fatalf("forced-run pass %d: %v\n  SQL: %s", run, err, cell.sql)
+					}
+					if exec.ForcedSortSpills.Load()+exec.ForcedWindowSpills.Load() == before {
+						t.Fatalf("forced-run pass %d wrote NO forced run, so it compared two "+
+							"in-memory answers\n  SQL: %s", run, cell.sql)
+					}
+					if diff := spillMxDiff(spillMxRender(got.Columns, got.Rows, cell.ordered), w); diff != "" {
+						t.Fatalf("forced-run pass %d: %s\n  SQL: %s", run, diff, cell.sql)
+					}
+				}
+			}
 			// The ratchet: a pin that starts agreeing has outlived its bug and
 			// must be deleted. It fires only on a sample that could have SEEN
 			// the divergence, which is the same rule the rest of this file
@@ -288,23 +324,24 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 			// threshold, and this gate was red on every one of those runs with
 			// nothing about the window changed.
 			//
-			// Both families' spill evidence now lives at the operator:
-			// exec.TestEverySortedTypeSurvivesAForcedRun and
-			// exec.TestEveryWindowedTypeSurvivesAForcedRun arm
-			// exec.ForceSortSpillEvery / exec.ForceWindowSpillEvery and put
-			// EVERY flat type through the run writer, the run reader and the
-			// merge, on every run and every core count. Those gates cover more
-			// TYPES than the assertion removed here, and they do it
-			// deterministically — but they are per-OPERATOR, so the END-TO-END
-			// claim "a spilled sort/window answers what an unspilled one
-			// answers, through the planner and the pipeline" is OWED and is
-			// blocked on #864: arming either knob around a whole query drops
-			// 44% to 78% of the rows through the clone merge, which is a
-			// defect to fix, not a gate to write around.
+			// What is RECORDED here is BUDGET-driven engagement only. The
+			// spill evidence itself is asserted twice over, and neither place
+			// depends on this coin: exec.TestEverySortedTypeSurvivesAForcedRun
+			// and exec.TestEveryWindowedTypeSurvivesAForcedRun put EVERY flat
+			// type through the run writer, the run reader and the merge at the
+			// operator, and the forcedRunArm pass above does it END TO END,
+			// per cell, through the planner, the pipeline and the morsel clone
+			// merge — asserting per run that a forced run was actually
+			// written, so it cannot pass vacuously.
 			//
-			// What these cells still gate meanwhile is the ANSWER under a
-			// budget, asserted per run above, on whatever spilling the box
-			// happens to produce.
+			// That end-to-end arm was owed and blocked on #864 (arming either
+			// knob around a whole query returned 44% to 78% of the rows,
+			// because a Sort clone's run files were never transferred at
+			// MergeSink). #864 is fixed, so the arm is here.
+			//
+			// What these cells still gate under a real budget is the ANSWER,
+			// asserted per run above, on whatever spilling the box happens to
+			// produce.
 			//
 			// The AGGREGATE family is deliberately still asserted. Its drain
 			// does not hang on this reading: past ShouldSpillFor it must clear
@@ -419,6 +456,24 @@ type spillMxCell struct {
 	// disarmed, 12/12 with ForceAggDrainEvery(1), and the non-nullable twin
 	// answers 12/12 either way.
 	forceDrainEvery int64
+	// forcedRunArm adds a second pass with exec.ForceSortSpillEvery(1) /
+	// exec.ForceWindowSpillEvery(1) armed, so the operator writes a run on
+	// every Consume instead of when the scan's read-ahead happens to push the
+	// tracker over 40% of the budget.
+	//
+	// This is the END-TO-END spilled-sort/window claim: the per-operator
+	// forced-run gates (exec.TestEverySortedTypeSurvivesAForcedRun and its
+	// window twin) drive ONE operator, and the claim they cannot make is that
+	// a spilled sort answers, through the planner, the pipeline and the
+	// MORSEL CLONE MERGE, what an unspilled one answers. Arming the knob here
+	// returned 1,100 / 2,800 / 3,300 rows of 5,000 on 18 of 18 ORDER BY cells
+	// until #864 was fixed — every count a whole number of source batches,
+	// because a clone's run files were never transferred at MergeSink and its
+	// Close deleted them.
+	//
+	// The reference is the disarmed one taken at the top of this test: a knob
+	// armed on BOTH sides lets a shared defect cancel out (#790).
+	forcedRunArm bool
 }
 
 // engagement reads the counter for this cell's operator family, and
@@ -511,14 +566,14 @@ func spillMxCells() []spillMxCell {
 			`SELECT DISTINCT %[1]s AS v FROM %[2]s`, n, tbl)})
 		// Sort: external merge over sorted runs. id breaks ties, so the answer
 		// is a total order and row ORDER is comparable.
-		add(spillMxCell{name: "order_by_" + n, ordered: true, sql: fmt.Sprintf(
+		add(spillMxCell{name: "order_by_" + n, ordered: true, forcedRunArm: true, sql: fmt.Sprintf(
 			`SELECT id, %[1]s AS v FROM %[2]s ORDER BY %[1]s, id`, n, tbl)})
 		// Window: partitioned external merge, then the empty-PARTITION-BY
 		// streaming evaluator. Both OVER clauses carry a TOTAL order (id is
 		// unique), so neither is ADR-0013's unspecified-window class 10.
-		add(spillMxCell{name: "window_partition_" + n, ordered: true, sql: fmt.Sprintf(
+		add(spillMxCell{name: "window_partition_" + n, ordered: true, forcedRunArm: true, sql: fmt.Sprintf(
 			`SELECT %[1]s AS k, id, ROW_NUMBER() OVER (PARTITION BY %[1]s ORDER BY id) AS r FROM %[2]s ORDER BY %[1]s, id`, n, tbl)})
-		add(spillMxCell{name: "window_global_" + n, ordered: true, sql: fmt.Sprintf(
+		add(spillMxCell{name: "window_global_" + n, ordered: true, forcedRunArm: true, sql: fmt.Sprintf(
 			`SELECT id, %[1]s AS v, ROW_NUMBER() OVER (ORDER BY %[1]s, id) AS r FROM %[2]s ORDER BY id`, n, tbl)})
 		// HashJoin grace partitioning BELOW the aggregate: the spilled probe
 		// partitions replay after the workers finish, which is #782 itself.
