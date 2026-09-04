@@ -250,6 +250,31 @@ func TestArcE1ExprTypingOnEveryArm(t *testing.T) {
 		{"ctl_whole_literal_case",
 			`SELECT (CASE WHEN id > 0 THEN c_i64 ELSE 1 END) * 2 AS v FROM typemx WHERE id = 1`,
 			[]string{"v=int64:2000006"}},
+		// The values that say the KERNEL followed the declaration, not only
+		// that the declaration moved (round-2 review, B1r2). Every one of
+		// these is outside float64's exact integers, so a float64 computation
+		// under the numeric declaration answers a DIFFERENT NUMBER rather than
+		// a differently-spelled one — which the cells above, all inside 2^53,
+		// could not see.
+		//
+		// PostgreSQL 17.11, measured:
+		//   COALESCE(9007199254740993::bigint,1.5)+1        9007199254740994
+		//   COALESCE(1000003::bigint,1.5)*999999999999      1000002999998999997
+		//   (CASE … ELSE 1.5 END)*12345678901               12345715938036703
+		//   (CASE … ELSE 1.5 END)+12345678901234567         12345678902234570
+		// The trailing `.0` is ADR-0024's recorded per-value scale (#764).
+		{"exact_past_2_53",
+			`SELECT COALESCE(CAST(9007199254740993 AS BIGINT), 1.5) + 1 AS v ` +
+				`FROM typemx WHERE id = 1`, []string{"v=9007199254740994.0"}},
+		{"exact_wide_product",
+			`SELECT COALESCE(c_i64, 1.5) * 999999999999 AS v FROM typemx WHERE id = 1`,
+			[]string{"v=1000002999998999997.0"}},
+		{"exact_wide_product_case",
+			`SELECT (CASE WHEN id > 0 THEN c_i64 ELSE 1.5 END) * 12345678901 AS v ` +
+				`FROM typemx WHERE id = 1`, []string{"v=12345715938036703.0"}},
+		{"exact_wide_sum_case",
+			`SELECT (CASE WHEN id > 0 THEN c_i64 ELSE 1.5 END) + 12345678901234567 AS v ` +
+				`FROM typemx WHERE id = 1`, []string{"v=12345678902234570.0"}},
 	} {
 		t.Run("#849/fractional_arm/"+tc.name, func(t *testing.T) {
 			for _, arm := range arms() {

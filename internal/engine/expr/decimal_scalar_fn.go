@@ -45,13 +45,18 @@ type decimalScalarFn struct {
 
 	// mode is resolved once against the first batch: the argument's (p,s),
 	// the result's, and whether the exact path applies at all.
-	ready    atomic.Bool
-	mu       sync.Mutex
-	on       bool
-	in       batch.DecimalType
-	out      batch.DecimalType
-	digitsN  int
-	modMode  decMode
+	ready   atomic.Bool
+	mu      sync.Mutex
+	on      bool
+	in      batch.DecimalType
+	out     batch.DecimalType
+	digitsN int
+	modMode decMode
+	// modOps are the exact accessors resolveDecimalMode settled on for
+	// mod(x, y). They are stored rather than re-asserted because the second
+	// argument may be a CHOOSING construct, which reaches the exact path
+	// through boxedDecimalOperand and does not implement decimalOperand.
+	modOps   decOperands
 	isModDec bool
 }
 
@@ -151,11 +156,11 @@ func (e *decimalScalarFn) resolveMode(b *batch.RecordBatch) bool {
 	if e.modArg != nil {
 		// mod(x, y) is the `%` operator spelled as a call, so it takes the
 		// same result-type rule and the same kernel — one rule, not two.
-		m, ok := resolveDecimalMode("%", e.arg, e.modArg, b)
+		m, ops, ok := resolveDecimalMode("%", e.arg, e.modArg, b)
 		if !ok {
 			return false
 		}
-		e.modMode, e.isModDec = m, true
+		e.modMode, e.modOps, e.isModDec = m, ops, true
 		e.out = m.out
 		return true
 	}
@@ -280,7 +285,7 @@ func (e *decimalScalarFn) evalDecimal(b *batch.RecordBatch, row int) (batch.Int1
 		return batch.Int128{}, false
 	}
 	if e.isModDec {
-		rv, ok := e.modArg.(decimalOperand).evalDecimal(b, row)
+		rv, ok := e.modOps.r.evalDecimal(b, row)
 		if !ok {
 			return batch.Int128{}, false
 		}
@@ -318,8 +323,8 @@ func (e *decimalScalarFn) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector
 	}
 	if e.isModDec {
 		// mod is a two-operand op and shares the arithmetic kernel.
-		lv, lok := e.arg.(decimalOperand).decimalVec(b)
-		rv, rok := e.modArg.(decimalOperand).decimalVec(b)
+		lv, lok := e.modOps.l.decimalVec(b)
+		rv, rok := e.modOps.r.decimalVec(b)
 		if lok && rok {
 			markColumnarNulls(e.arg, e.modArg, b, out, n)
 			f := kernel.DecimalArithVec(kernel.DecimalOpMod, out.DecimalData.Data, lv, rv, outP, outS, n, &out.Nulls)

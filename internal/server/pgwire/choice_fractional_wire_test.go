@@ -39,6 +39,28 @@ func TestChoiceWithAFractionalLiteralIsNumericOnTheWire(t *testing.T) {
 			1700, "2.5"},
 		{"greatest", `SELECT GREATEST(0 - visits, 1.5) + 1 AS v FROM users WHERE id = 1`,
 			1700, "2.5"},
+		// The values that say the KERNEL followed the declaration (round-2
+		// review, B1r2). Every cell above is inside float64's exact integers,
+		// so a float computation under OID 1700 still spelled the right
+		// number; these two are not, and the wire carried a ROUNDED number
+		// under an exact type — `922337203685477600000.0` where the server
+		// says `922337203685477580700`. Measured on PostgreSQL 17.11:
+		//
+		//	SELECT (CASE WHEN true THEN 100::bigint ELSE 1.5 END)*9223372036854775807
+		//	  --> 922337203685477580700
+		//	SELECT COALESCE(100::bigint,1.5)*999999999999
+		//	  --> 99999999999900
+		//
+		// The trailing `.0` is ADR-0024's recorded per-value scale (#764):
+		// PostgreSQL's numeric carries each value's own dscale where a
+		// single-scale vector renders every row at the fold's. The DIGITS are
+		// the server's, which is what this cell is for.
+		{"exact_times_int8_max",
+			`SELECT (CASE WHEN id > 0 THEN visits ELSE 1.5 END) * 9223372036854775807 AS v ` +
+				`FROM users WHERE id = 1`, 1700, "922337203685477580700.0"},
+		{"exact_wide_product",
+			`SELECT COALESCE(visits, 1.5) * 999999999999 AS v FROM users WHERE id = 1`,
+			1700, "99999999999900.0"},
 		// The BOUNDARY: a WHOLE-number literal keeps the integer domain and
 		// its int8 declaration, which is what #849 is for. A pass that widened
 		// every choice would fail here.

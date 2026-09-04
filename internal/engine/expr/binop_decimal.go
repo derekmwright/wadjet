@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -294,6 +295,124 @@ type decMode struct {
 	text string
 }
 
+// choiceDecimalArms is the alternatives a CHOOSING construct answers with —
+// CASE's result arms, COALESCE's arguments, and the arguments a polymorphic
+// registry entry mirrors (GREATEST/LEAST/COALESCE all of them, NULLIF argument
+// 0, IF its two branches). ok=false means this node is not such a construct.
+//
+// One reading, because two drifted: DecimalResultOf spelled these three cases
+// out for the GATHER path and resolveDecimalMode did not spell them out at
+// all, which is how a choice came to be DECLARED numeric and COMPUTED in
+// float64 (round-2 review, B1r2).
+func choiceDecimalArms(e Expr) ([]Expr, bool) {
+	switch v := e.(type) {
+	case *Case:
+		return caseResultArms(v), true
+	case *Coalesce:
+		return v.Args, true
+	case *FuncCall:
+		idx, poly := DefaultRegistry.ReturnType(v.Name).SameAsArgs(len(v.Args))
+		if !poly {
+			return nil, false
+		}
+		arms := make([]Expr, 0, len(idx))
+		for _, i := range idx {
+			if i >= 0 && i < len(v.Args) {
+				arms = append(arms, v.Args[i])
+			}
+		}
+		return arms, true
+	}
+	return nil, false
+}
+
+// boxedDecimalOperand adapts a node that PRODUCES an exact decimal but has no
+// exact accessor into a decimalOperand, by reading its own box back.
+//
+// The three choosing constructs are that node. They fold their arms to a
+// DECIMAL (p,s) and box the chosen value the way a DECIMAL COLUMN boxes one —
+// its rendered text, decimalChoiceBox — so the exact value IS available; there
+// was simply no interface to ask through, and `COALESCE(c_i64, 1.5) * 999…`
+// therefore ran on ToFloat64 while the planner declared it numeric. A value
+// under the wrong kernel is worse than the honest float8 declaration it
+// replaced: `9007199254740993 + 1` answered 9007199254740992 under OID 1700.
+//
+// Reading the text back is exact and cannot silently truncate —
+// ParseDecimalStringChecked refuses a value with digits below the scale rather
+// than rounding it — and it is the same route EvalDecimalInto already takes
+// for these nodes at the store. It is the SLOW form of the interface on
+// purpose: no columnar arm, so the caller's per-row loop reads it, which is
+// what a construct that chooses per row can offer anyway.
+type boxedDecimalOperand struct {
+	e Expr
+	t batch.DecimalType
+}
+
+func (o boxedDecimalOperand) decimalType(*batch.RecordBatch) (batch.DecimalType, bool) {
+	return o.t, true
+}
+
+func (o boxedDecimalOperand) decimalVec(*batch.RecordBatch) (kernel.DecimalOperandVec, bool) {
+	return kernel.DecimalOperandVec{}, false
+}
+
+func (o boxedDecimalOperand) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
+	boxed := o.e.Eval(b, row)
+	if boxed == nil {
+		return batch.Int128{}, false
+	}
+	var text string
+	switch t := boxed.(type) {
+	case string:
+		text = t
+	case int64:
+		text = strconv.FormatInt(t, 10)
+	case int32:
+		text = strconv.FormatInt(int64(t), 10)
+	case int:
+		text = strconv.FormatInt(int64(t), 10)
+	case float64:
+		// decimalChoiceBox rewrites an INTEGER arm's box to text and leaves
+		// every other one alone, so a chosen arm that is a numeric LITERAL
+		// arrives as the float64 compileLit built for it. It is still an
+		// exact value here: decimalArmFold declines the whole fold for a
+		// float COLUMN (ADR-0024 item 2), so the only float box that reaches
+		// a decimal-mode choice is a literal, and 'f' with -1 digits renders
+		// the shortest text that round-trips it — `1.5`, not `1.500000`.
+		text = strconv.FormatFloat(t, 'f', -1, 64)
+	case float32:
+		text = strconv.FormatFloat(float64(t), 'f', -1, 32)
+	default:
+		// A box of no numeric shape at all. The node did not resolve its
+		// decimal mode for this batch after all, and reading it as exact
+		// would be a guess.
+		return batch.Int128{}, false
+	}
+	v, err := batch.ParseDecimalStringChecked(text, o.t.Scale)
+	if err != nil {
+		panic(fatalEval{err})
+	}
+	return v, true
+}
+
+// decimalOperandOf resolves an operand's exact accessor: the interface when the
+// node implements it, and the boxed adapter for a choosing construct whose
+// arms fold to a DECIMAL.
+func decimalOperandOf(e Expr, b *batch.RecordBatch) (decimalOperand, bool) {
+	if o, ok := e.(decimalOperand); ok {
+		return o, true
+	}
+	arms, isChoice := choiceDecimalArms(e)
+	if !isChoice {
+		return nil, false
+	}
+	p, sc, ok := decimalArmFold(arms, b)
+	if !ok {
+		return nil, false
+	}
+	return boxedDecimalOperand{e: e, t: batch.DecimalType{Precision: p, Scale: sc}}, true
+}
+
 // resolveDecimalMode decides whether this node computes in exact fixed point,
 // and at what type.
 //
@@ -304,23 +423,23 @@ type decMode struct {
 //
 // A FLOAT operand does not implement decimalOperand at all, so `d * f` never
 // reaches this and resolves float mode, which is what PostgreSQL answers.
-func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decMode, bool) {
+func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decMode, decOperands, bool) {
 	code, ok := kernel.DecimalOpOf(op)
 	if !ok {
-		return decMode{}, false
+		return decMode{}, decOperands{}, false
 	}
-	lo, lok := left.(decimalOperand)
-	ro, rok := right.(decimalOperand)
+	lo, lok := decimalOperandOf(left, b)
+	ro, rok := decimalOperandOf(right, b)
 	if !lok || !rok {
-		return decMode{}, false
+		return decMode{}, decOperands{}, false
 	}
 	lt, lok := lo.decimalType(b)
 	rt, rok := ro.decimalType(b)
 	if !lok || !rok {
-		return decMode{}, false
+		return decMode{}, decOperands{}, false
 	}
 	if !operandIsDecimalTyped(left, b) && !operandIsDecimalTyped(right, b) {
-		return decMode{}, false
+		return decMode{}, decOperands{}, false
 	}
 	if op == "/" && isConstNumericLit(left) && isConstNumericLit(right) {
 		// A division between two CONSTANTS keeps the float path it has always
@@ -333,11 +452,11 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 		// OWN scales and drops nothing, which is why only this one declines
 		// (TestCompileBinOpDivision has pinned the float answer for this shape
 		// since #369).
-		return decMode{}, false
+		return decMode{}, decOperands{}, false
 	}
 	p, s, ok := batch.DecimalResultType(op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
 	if !ok {
-		return decMode{}, false
+		return decMode{}, decOperands{}, false
 	}
 	return decMode{
 		op:   code,
@@ -345,7 +464,16 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 		r:    rt,
 		out:  batch.DecimalType{Precision: p, Scale: s},
 		text: op,
-	}, true
+	}, decOperands{l: lo, r: ro}, true
+}
+
+// decOperands is the pair of exact accessors resolveDecimalMode settled on,
+// carried beside the mode so the evaluators never re-assert the interface.
+// They cannot: an operand may be a choosing construct, which reaches the exact
+// path through boxedDecimalOperand and does not implement decimalOperand
+// itself, so `e.Left.(decimalOperand)` would panic on it.
+type decOperands struct {
+	l, r decimalOperand
 }
 
 // operandIsDecimalTyped reports whether an operand is a DECIMAL rather than an
@@ -382,6 +510,16 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 		return castIsExactDecimal(v)
 	case *decimalScalarFn:
 		return v.resolve(b)
+	}
+	// A CHOOSING construct is decimal-typed when its arms fold to a DECIMAL,
+	// which is the same question its own box mode asks (choiceArmsBoxMode).
+	// `COALESCE(bigint, 1.5)` is numeric on PostgreSQL and boxed as decimal
+	// text here, so it is a genuine DECIMAL operand and not an integer wearing
+	// a fixed-point type — without this arm the pair below fell to the int or
+	// float mode and the exact kernel was never selected (round-2 review).
+	if arms, isChoice := choiceDecimalArms(e); isChoice {
+		_, _, ok := decimalArmFold(arms, b)
+		return ok
 	}
 	return false
 }
@@ -429,8 +567,7 @@ func (e *BinOpNumeric) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128,
 		}
 		return batch.Int128From(v), true
 	}
-	lo, _ := e.Left.(decimalOperand)
-	ro, _ := e.Right.(decimalOperand)
+	lo, ro := e.decOps.l, e.decOps.r
 	lv, lok := lo.evalDecimal(b, row)
 	if !lok {
 		return batch.Int128{}, false
@@ -511,8 +648,8 @@ func (e *BinOpNumeric) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n
 		// cannot turn into a refusal of a value the column can hold.
 		outP = batch.MaxDecimalPrecision
 	}
-	lv, lok := e.Left.(decimalOperand).decimalVec(b)
-	rv, rok := e.Right.(decimalOperand).decimalVec(b)
+	lv, lok := e.decOps.l.decimalVec(b)
+	rv, rok := e.decOps.r.decimalVec(b)
 	if lok && rok {
 		markColumnarNulls(e.Left, e.Right, b, out, n)
 		f := kernel.DecimalArithVec(e.dec.op, out.DecimalData.Data, lv, rv, outP, outS, n, &out.Nulls)
@@ -524,8 +661,8 @@ func (e *BinOpNumeric) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector, n
 	// One operand has no columnar form — an integer column, or nested
 	// arithmetic. Still unboxed: the values come out of evalDecimal and go
 	// straight into the carrier slice.
-	lo := e.Left.(decimalOperand)
-	ro := e.Right.(decimalOperand)
+	lo := e.decOps.l
+	ro := e.decOps.r
 	m := e.dec
 	m.out = batch.DecimalType{Precision: outP, Scale: outS}
 	for i := 0; i < n && i < len(out.DecimalData.Data); i++ {
@@ -615,6 +752,7 @@ type decArm struct {
 	mu    sync.Mutex
 	on    bool
 	mode  decMode
+	ops   decOperands
 }
 
 // resolve settles the mode once per node against the first batch that can
@@ -629,7 +767,7 @@ func (a *decArm) resolve(op string, left, right Expr, b *batch.RecordBatch) (dec
 	if a.ready.Load() {
 		return a.mode, a.on
 	}
-	a.mode, a.on = resolveDecimalMode(op, left, right, b)
+	a.mode, a.ops, a.on = resolveDecimalMode(op, left, right, b)
 	a.ready.Store(true)
 	return a.mode, a.on
 }
@@ -642,11 +780,11 @@ func (a *decArm) evalDecimalBox(op string, left, right Expr, b *batch.RecordBatc
 	if !on {
 		return nil, false
 	}
-	lv, lok := left.(decimalOperand).evalDecimal(b, row)
+	lv, lok := a.ops.l.evalDecimal(b, row)
 	if !lok {
 		return nil, true // NULL, and this arm still owns the answer
 	}
-	rv, rok := right.(decimalOperand).evalDecimal(b, row)
+	rv, rok := a.ops.r.evalDecimal(b, row)
 	if !rok {
 		return nil, true
 	}
@@ -951,11 +1089,7 @@ func DecimalResultOf(e Expr, b *batch.RecordBatch) (precision, scale int, ok boo
 			return 0, 0, false
 		}
 		return m.out.Precision, m.out.Scale, true
-	case *Case:
-		return decimalArmFold(caseResultArms(v), b)
-	case *Coalesce:
-		return decimalArmFold(v.Args, b)
-	case *FuncCall:
+	case *Case, *Coalesce, *FuncCall:
 		// A POLYMORPHIC function answers with one of its arguments, and the
 		// registry already names WHICH ones: GREATEST/LEAST/COALESCE mirror
 		// every argument, NULLIF mirrors argument 0 alone, IF mirrors its two
@@ -964,15 +1098,12 @@ func DecimalResultOf(e Expr, b *batch.RecordBatch) (precision, scale int, ok boo
 		// exactly the one a hand-written `case "greatest", "least"` missed.
 		// Every other function declares its own type, and the exact ones
 		// compile to decimalScalarFn rather than to a FuncCall.
-		idx, poly := DefaultRegistry.ReturnType(v.Name).SameAsArgs(len(v.Args))
-		if !poly {
+		//
+		// choiceDecimalArms is that reading, shared with resolveDecimalMode so
+		// the gather and the kernel cannot disagree about which nodes choose.
+		arms, isChoice := choiceDecimalArms(v)
+		if !isChoice {
 			return 0, 0, false
-		}
-		arms := make([]Expr, 0, len(idx))
-		for _, i := range idx {
-			if i >= 0 && i < len(v.Args) {
-				arms = append(arms, v.Args[i])
-			}
 		}
 		return decimalArmFold(arms, b)
 	}

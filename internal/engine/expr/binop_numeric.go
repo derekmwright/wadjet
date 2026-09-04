@@ -79,8 +79,13 @@ type BinOpNumeric struct {
 	// it is checked FIRST, because an integer operand beside a DECIMAL one is
 	// DECIMAL(19,0) in the result-type rule and must not take the int path.
 	// See binop_decimal.go.
-	isDec  bool
-	dec    decMode
+	isDec bool
+	dec   decMode
+	// decOps are the exact accessors resolveDecimalMode settled on. They are
+	// stored rather than re-asserted per row because an operand may be a
+	// CHOOSING construct, which reaches the exact path through
+	// boxedDecimalOperand and does not implement decimalOperand itself.
+	decOps decOperands
 	opCode arithOp       // e.Op as an opcode: no per-row string compare
 	flt    *BinOpFloat64 // delegate for float mode (keeps its typed fast path)
 	// divTrunc marks a `/` whose operands are integer-typed while the node
@@ -188,7 +193,7 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 	// be caught by the int mode below, and `d * f` must not be caught by this
 	// one — a float operand does not implement decimalOperand at all, which
 	// is what makes that fall through to float mode (ADR-0024 item 2).
-	e.dec, e.isDec = resolveDecimalMode(e.Op, e.Left, e.Right, b)
+	e.dec, e.decOps, e.isDec = resolveDecimalMode(e.Op, e.Left, e.Right, b)
 	e.isInt = !e.isDec && intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
 	if !e.isInt && !e.isDec {
 		e.flt = &BinOpFloat64{Left: e.Left, Right: e.Right, Op: e.Op}
