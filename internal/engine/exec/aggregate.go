@@ -1470,7 +1470,33 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		// buffer rows on disk and re-aggregate in Finalize.
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
-		h.spillBufferBytes += b.MemBytes()
+		// CHARGE what this buffer now holds. The rows are ours: `ToRows`
+		// copies them out of the batch, which the pipeline releases as soon
+		// as Consume returns, so from here the buffer is memory the tracker
+		// cannot otherwise see.
+		//
+		// Every release site — flushSpillBuffer, Finalize's drain of the
+		// unflushed tail, and Close — already released `spillBufferBytes`
+		// ("release the tracker bytes charged for them", flushSpillBuffer),
+		// and nothing ever charged them. So the ledger lost this figure on
+		// every query that took the raw-row branch: measured at 931,840 bytes
+		// released against zero charged on the filing's own shape, which is
+		// what drove the query tracker to -165,652 (#862). A negative ledger
+		// is not cosmetic — from there every admission is measured against a
+		// floor below the memory that exists.
+		//
+		// The estimate is the batch's own MemBytes, deliberately the SAME
+		// figure the release sites use, so the pair is exact. It understates
+		// the boxed rows the buffer actually holds; making it truthful is a
+		// separate change, and one that must not arrive as an unpaired half.
+		bufBytes := b.MemBytes()
+		h.spillBufferBytes += bufBytes
+		if h.Spill != nil && bufBytes > 0 {
+			h.Spill.TrackBatch(bufBytes)
+			if h.accInstanceID != 0 {
+				h.Spill.Tracker().PublishOwned(h.accInstanceID, h.trackedGroupMem+h.spillBufferBytes)
+			}
+		}
 		if h.spillBufferBytes >= spillFileTargetBytes {
 			if err := h.flushSpillBuffer(); err != nil {
 				return err

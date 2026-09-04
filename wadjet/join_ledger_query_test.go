@@ -51,13 +51,14 @@ import (
 // in a real query fails here, and the engagement assert below keeps it honest
 // about reaching the already-spilled write path at all.
 //
-// NO AGGREGATE in any query, deliberately. `HashAggregate.Close` over-releases
-// `trackedGroupMem` through `SpillManager.ReleaseTracking` on a morsel-parallel
-// emit clone and drives the same tracker below zero — reproduced at `2d4220c9`
-// as well as here, from `emitDrain.produce -> HashAggregate.Close ->
-// ReleaseTracking` (`released=189416 resulting=-151298`). That is a defect of
-// the AGGREGATE's ledger, in another operator, and it is filed separately;
-// putting a GROUP BY in this gate would make it measure that instead of this.
+// The AGGREGATE was excluded from this gate until #862 was fixed, and it is a
+// cell now. The symptom read as `HashAggregate.Close` over-releasing on a
+// morsel-parallel emit clone (`emitDrain.produce -> HashAggregate.Close ->
+// ReleaseTracking`, `released=189416 resulting=-151298`), and the producer was
+// one line away: the raw-row buffer accumulated `spillBufferBytes` at its
+// append site and never CHARGED them, while three sites released them. The
+// aggregate cells below carry an engagement assert of their own — the parallel
+// emit must actually run, or they are not the shape the filing named.
 func TestNoQueryOverReleasesItsMemoryLedger(t *testing.T) {
 	var underflows atomic.Int64
 	prev := slog.Default()
@@ -73,17 +74,31 @@ func TestNoQueryOverReleasesItsMemoryLedger(t *testing.T) {
 	queries := []string{
 		`SELECT a.id, b.pad FROM e5led a JOIN e5led b ON a.id = b.id`,
 		`SELECT a.pad, b.id FROM e5led a JOIN e5led b ON a.pad = b.pad`,
+		// #862's shape: a GROUP BY above a join, which is what adopts
+		// partitions and fans the emission out across clones.
+		`SELECT b.pad AS k, COUNT(*) AS n FROM e5led a JOIN e5led b ON a.id = b.id GROUP BY b.pad`,
+		// ...and one that reaches the RAW-ROW buffer, whose unpaired
+		// `spillBufferBytes` was the producer: COUNT(DISTINCT) is non-simple,
+		// so canUseExternalMerge is false and a grouped shape under pressure
+		// buffers its input rows.
+		`SELECT b.id % 97 AS k, COUNT(DISTINCT b.pad) AS n FROM e5led a JOIN e5led b ON a.id = b.id GROUP BY b.id % 97`,
 	}
-	evicted := int64(0)
+	evicted, emits := int64(0), int64(0)
 	for _, budget := range []int64{4 << 20, 2 << 20} {
 		for _, q := range queries {
 			db := ledgerOpen(t, budget)
 			before := exec.JoinPartitionsEvicted.Load()
+			beforeEmit := exec.ParallelEmitRuns.Load()
 			// A refusal is a legal outcome at these budgets; an over-release is
 			// not, and it is what this gate measures.
 			_, _ = db.Query(context.Background(), q)
 			evicted += exec.JoinPartitionsEvicted.Load() - before
+			emits += exec.ParallelEmitRuns.Load() - beforeEmit
 		}
+	}
+	if emits == 0 {
+		t.Error("no query took the parallel emit path, so the aggregate cells did not " +
+			"reach the morsel-clone shape #862 was filed on")
 	}
 	if evicted == 0 {
 		t.Fatal("no grace partition was evicted by any of these queries, so none of them " +
