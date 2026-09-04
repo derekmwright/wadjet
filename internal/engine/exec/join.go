@@ -728,9 +728,17 @@ func (h *HashJoin) emitsUnmatchedBuildRows() bool {
 // after each batch to maintain the load factor invariant.
 func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 	pt := h.idxPart(key)
+	// The table is minted by growPartFor before the insert loop that calls
+	// this — every caller pre-grows the part its rows belong to. The nil
+	// branch is the ad-hoc caller's fallback and is a predicted branch, not
+	// a call, because this runs once per build row.
+	t := pt.ints
+	if t == nil {
+		t = pt.intTable(h.perPartHint())
+	}
 	idx := int32(len(pt.arena))
 	pt.arena = append(pt.arena, ref)
-	old, existed := pt.intTable(h.perPartHint()).PutNoGrow(key, idx)
+	old, existed := t.PutNoGrow(key, idx)
 	if existed {
 		pt.next = append(pt.next, old)
 	} else {
@@ -740,9 +748,13 @@ func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 
 func (h *HashJoin) arenaAppendStr(ref buildRef) {
 	pt := h.idxPartBytes(h.keyBuf)
+	t := pt.strs
+	if t == nil {
+		t = h.strTable(pt, h.perPartHint())
+	}
 	idx := int32(len(pt.arena))
 	pt.arena = append(pt.arena, ref)
-	head, existed := h.strTable(pt, h.perPartHint()).PutNoGrow(h.keyBuf, idx)
+	head, existed := t.PutNoGrow(h.keyBuf, idx)
 	if existed {
 		pt.next = append(pt.next, head)
 	} else {
