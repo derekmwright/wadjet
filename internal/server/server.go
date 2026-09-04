@@ -314,7 +314,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error())
+		writeSQLError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error(), err)
 		return
 	}
 
@@ -411,13 +411,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := s.coord.ExecuteSQL(execCtx, req.SQL)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "distributed execution error: "+err.Error())
+			writeSQLError(w, http.StatusInternalServerError, "distributed execution error: "+err.Error(), err)
 			return
 		}
 
 		rows, rowsErr := result.Rows()
 		if rowsErr != nil {
-			writeError(w, http.StatusInternalServerError, "reading result batches: "+rowsErr.Error())
+			writeSQLError(w, http.StatusInternalServerError, "reading result batches: "+rowsErr.Error(), rowsErr)
 			return
 		}
 
@@ -459,7 +459,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Build logical plan
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "plan build error: "+err.Error())
+		writeSQLError(w, http.StatusBadRequest, "plan build error: "+err.Error(), err)
 		return
 	}
 
@@ -473,7 +473,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Reject references to columns that resolve to no source (plan-time name binding).
 	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 
@@ -487,7 +487,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Build physical plan
 	physPlan, err := planner.Plan(r.Context(), logicalPlan)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "physical plan error: "+err.Error())
+		writeSQLError(w, http.StatusInternalServerError, "physical plan error: "+err.Error(), err)
 		return
 	}
 	if physPlan.Cleanup != nil {
@@ -500,7 +500,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// runs, so an aborted HTTP query kept its spill scratch (#625 M1).
 	defer pipeline.Close()
 	if err := pipeline.Run(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "execution error: "+err.Error())
+		writeSQLError(w, http.StatusInternalServerError, "execution error: "+err.Error(), err)
 		return
 	}
 
@@ -753,25 +753,60 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// writeSQLError is writeError for a failure that may carry a SQLSTATE.
+// writeSQLError is writeError for a failure that may carry a SQLSTATE, and it
+// is the ONLY place this door decides an HTTP status from one.
 //
 // A statement refused for what it CONTAINS is the client's error, not the
 // server's: a DECIMAL literal past the column's precision (22003) or text
 // naming no number (22P02) came back as 500 Internal Server Error with the
 // code nowhere in the body, so an HTTP client could neither see that its own
-// input was wrong nor branch on why (#647 re-review). Any error carrying a
-// SQLSTATE in the 22 (data exception) or 42 (syntax/access) classes is a 400
-// with the code in the payload; everything else keeps the caller's status.
+// input was wrong nor branch on why (#647 re-review). #848 is the same defect
+// one class wider: `SELECT nosuchcol FROM t` and `SELECT * FROM nosuchtable`
+// answered 500 with no `sqlstate` at all, because the name-resolution, plan
+// and execution paths still called writeError. Every refusal on this door now
+// comes through here.
+//
+// The class → status table, which is also docs/api-reference.md's:
+//
+//	0A  feature not supported            400
+//	22  data exception                   400  (2201x, 22003, 22012, 22P02, …)
+//	23  integrity constraint violation   400
+//	42  syntax error / access rule       400  (42601, 42703, 42P01, 42883, …)
+//	anything else                        the caller's status — 500 for XX
+//	                                     (internal), 58 (storage/system) and
+//	                                     any class this engine has not placed.
+//
+// The MESSAGE for a classified error is err.Error() verbatim: the same bytes
+// the pgwire door puts in the ErrorResponse 'M' field for the same statement,
+// so a client that reads one door's message can compare it with the other's.
+// The caller's contextual prefix ("execution error: ") survives only on the
+// unclassified path, where naming the stage is the only localization there is.
+//
+// There is deliberately no second SQLSTATE table here: the code comes from
+// sqlerr.StateOf, which is the same call pgwire's sendQueryError makes.
 func writeSQLError(w http.ResponseWriter, status int, msg string, err error) {
 	state := sqlerr.StateOf(err)
 	if state == "" {
 		writeError(w, status, msg)
 		return
 	}
-	if strings.HasPrefix(state, "22") || strings.HasPrefix(state, "42") {
+	if sqlStateIsClientFault(state) {
 		status = http.StatusBadRequest
 	}
-	writeJSON(w, status, map[string]string{"error": msg, "sqlstate": state})
+	writeJSON(w, status, map[string]string{"error": err.Error(), "sqlstate": state})
+}
+
+// sqlStateIsClientFault reports whether a SQLSTATE names something wrong with
+// the statement rather than with the server. See writeSQLError's table.
+func sqlStateIsClientFault(state string) bool {
+	switch {
+	case strings.HasPrefix(state, "0A"),
+		strings.HasPrefix(state, "22"),
+		strings.HasPrefix(state, "23"),
+		strings.HasPrefix(state, "42"):
+		return true
+	}
+	return false
 }
 
 // resolveQueryLimits returns the effective query limits for the request identity.
@@ -957,13 +992,13 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request, parsed *
 func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error())
+		writeSQLError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error(), err)
 		return
 	}
 
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "plan build error: "+err.Error())
+		writeSQLError(w, http.StatusBadRequest, "plan build error: "+err.Error(), err)
 		return
 	}
 	planner := s.newPlanner(r)
@@ -980,7 +1015,7 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 	if parsed.Explain.Verbose {
 		physPlan, err := planner.Plan(r.Context(), logicalPlan)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "physical plan error: "+err.Error())
+			writeSQLError(w, http.StatusInternalServerError, "physical plan error: "+err.Error(), err)
 			return
 		}
 		// The pipeline is never run for EXPLAIN, but planning may have

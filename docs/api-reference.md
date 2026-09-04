@@ -94,18 +94,28 @@ Execute a SQL query and return results.
 }
 ```
 
-An error the statement's own text caused carries the PostgreSQL SQLSTATE
-alongside the message. Classes `22` (data exception) and `42` (syntax /
-access rule) also answer `400 Bad Request`; every other class — `23502`
-not-null, `0A000` unsupported feature, `40001` serialization failure — carries
-its `sqlstate` under a `500`, and a refusal raised while PARSING (an
-unsupported clause such as `RETURNING`) answers `400` with a message and no
-`sqlstate` key at all. The pgwire door delivers the class in every one of
-those cases; this door is the narrower one.
+Every refusal this door reports carries the PostgreSQL SQLSTATE alongside the
+message, and the class decides the HTTP status:
+
+| SQLSTATE class | Meaning | Status |
+|---|---|---|
+| `0A` | feature not supported (`0A000`) | `400` |
+| `22` | data exception (`22003`, `22012`, `22P02`, `2201E`, …) | `400` |
+| `23` | integrity constraint violation (`23502`, `23505`) | `400` |
+| `42` | syntax error or access rule violation (`42601`, `42703`, `42P01`, `42883`, …) | `400` |
+| anything else | server-side or transport failure (`XX000` internal, `58030` I/O) | `500` |
+
+A statement refused for what it *contains* is the client's error, not the
+server's, which is why those four classes answer `400 Bad Request`. An error
+that carries no SQLSTATE at all — a malformed request body, a missing `sql`
+field — answers with the `error` key alone.
+
+The message for a classified error is the engine's own, the same text the
+PostgreSQL wire protocol puts in its `ErrorResponse`:
 
 ```json
 {
-  "error": "DML execution error: column \"nosuchcol\" of relation \"flow_logs\" does not exist",
+  "error": "unknown column \"nosuchcol\" (available: bytes_in, src_ip, ts)",
   "sqlstate": "42703"
 }
 ```
@@ -114,8 +124,9 @@ those cases; this door is the narrower one.
 through the same implementation the embedded API and the PostgreSQL wire
 protocol use, so a statement's table state and command tag do not depend on
 which door it arrived by — the tag is PostgreSQL's own rendering, `INSERT 0 3`
-rather than `INSERT 3`. The SQLSTATE is the same class on every door; how this
-door SURFACES it differs, as the error section above records. A DML statement answers with a single row
+rather than `INSERT 3`. The SQLSTATE is the same class on every door, and so is
+the message; this door additionally turns the class into an HTTP status, as the
+error section above records. A DML statement answers with a single row
 carrying its command tag:
 
 ```json
