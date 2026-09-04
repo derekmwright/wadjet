@@ -40,17 +40,27 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	// not carry the WITH, so without it a CTE named in a decorrelated
 	// subquery's FROM is indistinguishable from a base table and becomes a
 	// Scan of a name no catalog has — IN answers 0, NOT IN every row (#535,
-	// #581, and the recursive #F1). innerRelationsAreScannable uses it to
-	// decline the shape, exactly as it declines a derived table.
+	// #581, and the recursive #F1). innerRelationsAreBuildable uses it to
+	// decline a RECURSIVE one; every other shape is BUILT (#852).
 	ctes := plan.CTEs
-	plan = decorrelateExists(plan, ctes)
-	plan = decorrelateInSubqueries(plan, ctes)
+	// The catalog annotator, as one function. The three decorrelations build
+	// their subquery's FROM clause as a plan and hand it here, because the
+	// comma lift they then run can only attribute an UNQUALIFIED column to
+	// its relation from the scan's own column list (#616, TPC-H Q2's
+	// official comma spelling writes every key that way). Annotators are
+	// idempotent, so running one on a subtree costs a catalog read the
+	// passes below would have made anyway.
+	annotate := func(n *Node) {
+		for _, a := range annotators {
+			a(n)
+		}
+	}
+	plan = decorrelateExists(plan, ctes, annotate)
+	plan = decorrelateInSubqueries(plan, ctes, annotate)
 	// Annotate new scans created by IN decorrelation so scalar subquery
 	// decorrelation can resolve unqualified column references.
-	for _, annotate := range annotators {
-		annotate(plan)
-	}
-	plan = decorrelateScalarSubqueries(plan, ctes)
+	annotate(plan)
+	plan = decorrelateScalarSubqueries(plan, ctes, annotate)
 	plan = extractCommonORPredicates(plan)
 	// Before pushdownPredicates: an ON conjunct the join cannot represent
 	// becomes a filter above it, and pushdown is then what puts the
@@ -1094,7 +1104,7 @@ func extractJoinColumnRefs(cond string, refs map[string]bool) {
 // Becomes: LEFT JOIN (SELECT key, agg(...) FROM ... GROUP BY key) ON key = outer.key
 //
 //	WHERE col OP agg_result
-func decorrelateScalarSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
+func decorrelateScalarSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *Node {
 	if n == nil {
 		return nil
 	}
@@ -1104,7 +1114,7 @@ func decorrelateScalarSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
 
 	// Recursively process children first (bottom-up)
 	for i, child := range n.Children {
-		n.Children[i] = decorrelateScalarSubqueries(child, ctes)
+		n.Children[i] = decorrelateScalarSubqueries(child, ctes, annotate)
 	}
 
 	if n.Type != NodeFilter || len(n.Children) == 0 {
@@ -1126,7 +1136,7 @@ func decorrelateScalarSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
 	scalarIdx := 0
 
 	for _, pred := range flatPreds {
-		joinNode, rewrittenPred, ok := tryDecorrelateScalarSubquery(pred, outerTables, outerColMap, scalarIdx, ctes)
+		joinNode, rewrittenPred, ok := tryDecorrelateScalarSubquery(pred, outerTables, outerColMap, scalarIdx, ctes, annotate)
 		if !ok {
 			remainingPreds = append(remainingPreds, pred)
 			continue
@@ -1150,7 +1160,7 @@ func decorrelateScalarSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
 // tryDecorrelateScalarSubquery attempts to convert a predicate containing a
 // correlated scalar subquery into a LEFT JOIN + Aggregate. Returns the join
 // node (with nil left child), the rewritten predicate, and true on success.
-func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, outerColMap map[string]string, idx int, ctes []plansql.CTEDef) (*Node, Predicate, bool) {
+func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, outerColMap map[string]string, idx int, ctes []plansql.CTEDef, annotate func(*Node)) (*Node, Predicate, bool) {
 	if pred.ASTExpr == nil {
 		return nil, pred, false
 	}
@@ -1230,32 +1240,15 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		return nil, pred, false
 	}
 
-	// Build inner plan from subquery's FROM/JOIN
-	if !innerRelationsAreScannable(info, ctes) {
+	// The build side is the subquery's OWN FROM clause as a plan, with its
+	// inner-only WHERE conditions above it — see decorrelated_inner_plan.go.
+	// A condition naming more than one inner relation has no spelling that
+	// survives this rewrite unless the comma lift can turn it into a join
+	// condition; where it cannot, the decline leaves the scalar subquery as
+	// written.
+	innerPlan, ok := decorrelatedInnerPlan(info, innerFilterNodes, ctes, annotate)
+	if !ok {
 		return nil, pred, false
-	}
-	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
-	var innerPlan *Node = innerScan
-	for _, j := range info.Joins {
-		rightScan := NewScan(j.RightTable, j.RightAlias)
-		innerPlan = NewJoin(innerPlan, rightScan, j.Type, j.Condition)
-	}
-
-	// Apply inner-only filters to the subquery plan
-	if len(innerFilterNodes) > 0 {
-		joinedInner := len(info.Joins) > 0 || len(info.Tables) > 1
-		var innerPreds []Predicate
-		for _, f := range innerFilterNodes {
-			// A condition naming more than one inner relation has no
-			// spelling that survives this rewrite — decline and leave the
-			// scalar subquery as written (see innerOnlyPredicate).
-			inner, ok := innerOnlyPredicate(f, joinedInner)
-			if !ok {
-				return nil, pred, false
-			}
-			innerPreds = append(innerPreds, inner)
-		}
-		innerPlan = NewFilter(innerPlan, innerPreds)
 	}
 
 	// Extract aggregate from the SELECT column expression
@@ -1450,7 +1443,7 @@ func replaceSubqueryInExpr(expr plansql.Node, target *plansql.SubqueryNode, repl
 //
 // NOTE: NOT IN with nullable columns has different NULL semantics than AntiJoin.
 // This is safe for TPC-H queries where IN columns are NOT NULL.
-func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
+func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *Node {
 	if n == nil {
 		return nil
 	}
@@ -1460,7 +1453,7 @@ func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
 
 	// Recursively process children first (bottom-up)
 	for i, child := range n.Children {
-		n.Children[i] = decorrelateInSubqueries(child, ctes)
+		n.Children[i] = decorrelateInSubqueries(child, ctes, annotate)
 	}
 
 	if n.Type != NodeFilter || len(n.Children) == 0 {
@@ -1484,7 +1477,7 @@ func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef) *Node {
 			continue
 		}
 
-		joinNode := tryDecorrelateInSubquery(inExpr, subq, outerTables, outerColMap, ctes)
+		joinNode := tryDecorrelateInSubquery(inExpr, subq, outerTables, outerColMap, ctes, annotate)
 		if joinNode == nil {
 			remainingPreds = append(remainingPreds, pred)
 			continue
@@ -1649,69 +1642,11 @@ func innerGroupKey(info *plansql.SelectInfo, term string) InnerKeyRef {
 	return ref
 }
 
-// innerRelationsAreScannable reports whether every relation the subquery's
-// FROM/JOIN list names is one the decorrelation rewrites can turn into a plain
-// Scan node.
-//
-// A DERIVED TABLE is not. The parser keeps a FROM-subquery as a table whose
-// NAME is its own SQL text — `(SELECT …)` — and the plan BUILDER recognises
-// that prefix and recurses into it (builder.go, "Check for derived table").
-// The three decorrelations below do not: each calls NewScan on the name it was
-// handed, producing a Scan of a table the catalog has never heard of. That
-// scan is not an error. It yields ZERO batches, so the semi/anti join's build
-// side is empty and `IN` answers nothing while `NOT IN` answers every row —
-// silently, on both paths (#571).
-//
-// Declining is the answer rather than building the derived plan here, for the
-// reason ADR-0021 §1 gives: the rewrite would then have to NAME the derived
-// side's columns, and inner_key_spelling.go's model of what a subtree emits
-// has no arm for a derived scan, so the reference it settled on would be a
-// guess. A declined IN stays a subquery predicate, executed as written — the
-// single-process path resolves it through expr.InSubquery and the stage DAG
-// materializes the set (ADR-0021 §2). A slower right answer beats a wrong one.
-//
-// A CTE name has the same exposure by a different spelling, and it IS covered
-// now that the enclosing WITH is threaded here (ctes): a CTE reference resolves
-// to NewScan of the CTE's bare name — a table no catalog has — exactly as a
-// derived table's SQL-text name does, so IN answered 0 and NOT IN every row
-// for a CTE-fed subquery too (#535, #581). Declining routes it to the same
-// materialize/local paths, which resolve the CTE (buildSubqueryPipeline merges
-// the enclosing WITH). A recursive CTE is declined here as well; the
-// materializer then REFUSES it rather than reading its cacheless set as empty
-// (#F1, physical/in_subquery_set.go).
-func innerRelationsAreScannable(info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
-	cteName := make(map[string]bool, len(ctes)+len(info.CTEs))
-	for _, c := range ctes {
-		cteName[strings.ToLower(c.Name)] = true
-	}
-	for _, c := range info.CTEs {
-		cteName[strings.ToLower(c.Name)] = true
-	}
-	scannable := func(name string) bool {
-		name = strings.TrimSpace(name)
-		if strings.HasPrefix(name, "(") {
-			return false // derived table: builder recurses into its text
-		}
-		return !cteName[strings.ToLower(name)] // a CTE name is not a base scan
-	}
-	for _, t := range info.Tables {
-		if !scannable(t.Name) {
-			return false
-		}
-	}
-	for _, j := range info.Joins {
-		if !scannable(j.RightTable) {
-			return false
-		}
-	}
-	return true
-}
-
 // tryDecorrelateInSubquery attempts to convert an IN/NOT IN subquery into a
 // SemiJoin (IN) or AntiJoin (NOT IN) node. Handles uncorrelated IN with
 // optional GROUP BY + HAVING, and correlated IN with equality keys.
 // Returns nil if decorrelation is not possible.
-func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef) *Node {
+func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node)) *Node {
 	parsed, err := plansql.Parse(subq.SQL)
 	if err != nil {
 		return nil
@@ -1754,17 +1689,6 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		return nil
 	}
 
-	// Build inner plan: Scan → optional JOINs
-	if !innerRelationsAreScannable(info, ctes) {
-		return nil
-	}
-	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
-	var innerPlan *Node = innerScan
-	for _, j := range info.Joins {
-		rightScan := NewScan(j.RightTable, j.RightAlias)
-		innerPlan = NewJoin(innerPlan, rightScan, j.Type, j.Condition)
-	}
-
 	// Build inner table set for classifying WHERE conditions
 	innerTableSet := make(map[string]bool)
 	for _, t := range info.Tables {
@@ -1781,7 +1705,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	}
 
 	// Classify WHERE conditions into inner-only vs correlated
-	var innerFilterPreds []Predicate
+	var innerFilterNodes []plansql.Node
 	var correlationKeys []DecorrelatedKey
 
 	if info.WhereExpr != nil {
@@ -1803,18 +1727,16 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 				correlationKeys = append(correlationKeys, DecorrelatedKey{Outer: outerCol, Op: "=", Inner: innerRef})
 			} else {
 				// Inner-only condition (including subquery expressions)
-				pred, ok := innerOnlyPredicate(node, len(info.Joins) > 0 || len(info.Tables) > 1)
-				if !ok {
-					return nil
-				}
-				innerFilterPreds = append(innerFilterPreds, pred)
+				innerFilterNodes = append(innerFilterNodes, node)
 			}
 		}
 	}
 
-	// Apply inner-only WHERE conditions
-	if len(innerFilterPreds) > 0 {
-		innerPlan = NewFilter(innerPlan, innerFilterPreds)
+	// The build side is the subquery's OWN FROM clause as a plan, with its
+	// inner-only WHERE conditions above it — see decorrelated_inner_plan.go.
+	innerPlan, ok := decorrelatedInnerPlan(info, innerFilterNodes, ctes, annotate)
+	if !ok {
+		return nil
 	}
 
 	// Handle GROUP BY + HAVING
@@ -1906,7 +1828,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	}
 
 	// Recursively decorrelate nested IN subqueries in the inner plan
-	innerPlan = decorrelateInSubqueries(innerPlan, ctes)
+	innerPlan = decorrelateInSubqueries(innerPlan, ctes, annotate)
 
 	// Build join condition: outer IN column = inner SELECT column, plus any
 	// correlated equalities. The build-side spelling of each is what
@@ -3011,7 +2933,7 @@ func splitOnAnd(raw, upper string) []string {
 // decorrelateExists converts correlated EXISTS/NOT EXISTS subqueries in Filter
 // predicates into SemiJoin/AntiJoin nodes. This eliminates per-row subquery
 // execution by materializing the subquery as a hash join build side.
-func decorrelateExists(n *Node, ctes []plansql.CTEDef) *Node {
+func decorrelateExists(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *Node {
 	if n == nil {
 		return nil
 	}
@@ -3021,7 +2943,7 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef) *Node {
 
 	// Recursively process children first (bottom-up)
 	for i, child := range n.Children {
-		n.Children[i] = decorrelateExists(child, ctes)
+		n.Children[i] = decorrelateExists(child, ctes, annotate)
 	}
 
 	if n.Type != NodeFilter || len(n.Children) == 0 {
@@ -3051,7 +2973,7 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef) *Node {
 			continue
 		}
 
-		joinNode := tryDecorrelateExists(existsNode, outerTables, outerColMap, ctes)
+		joinNode := tryDecorrelateExists(existsNode, outerTables, outerColMap, ctes, annotate)
 		if joinNode == nil {
 			remainingPreds = append(remainingPreds, pred)
 			continue
@@ -3074,7 +2996,7 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef) *Node {
 // tryDecorrelateExists attempts to convert an EXISTS/NOT EXISTS subquery
 // into a SemiJoin/AntiJoin node. Returns nil if decorrelation is not possible.
 // The returned join node has a nil left child (to be filled by the caller).
-func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef) *Node {
+func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node)) *Node {
 	parsed, err := plansql.Parse(exists.SQL)
 	if err != nil {
 		return nil
@@ -3161,29 +3083,11 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		return nil // no equality keys → can't use hash join
 	}
 
-	// Build inner plan: Scan → optional JOINs
-	if !innerRelationsAreScannable(info, ctes) {
+	// The build side is the subquery's OWN FROM clause as a plan, with its
+	// inner-only WHERE conditions above it — see decorrelated_inner_plan.go.
+	innerPlan, ok := decorrelatedInnerPlan(info, innerFilterNodes, ctes, annotate)
+	if !ok {
 		return nil
-	}
-	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
-	var innerPlan *Node = innerScan
-	for _, j := range info.Joins {
-		rightScan := NewScan(j.RightTable, j.RightAlias)
-		innerPlan = NewJoin(innerPlan, rightScan, j.Type, j.Condition)
-	}
-
-	// Apply inner-only filters
-	if len(innerFilterNodes) > 0 {
-		joinedInner := len(info.Joins) > 0 || len(info.Tables) > 1
-		var innerPreds []Predicate
-		for _, f := range innerFilterNodes {
-			pred, ok := innerOnlyPredicate(f, joinedInner)
-			if !ok {
-				return nil
-			}
-			innerPreds = append(innerPreds, pred)
-		}
-		innerPlan = NewFilter(innerPlan, innerPreds)
 	}
 
 	// Build semi/anti join

@@ -104,10 +104,31 @@ type emittedCol struct {
 // named it) is emitted verbatim, and a colliding build column with no alias
 // to disambiguate by is dropped — both are what the executor does.
 //
+// A subtree that is a NAMED SCOPE — a derived table with an alias, or a CTE
+// reference — emits its root's columns under that scope's name and no other.
+// The enclosing query writes `d.k` for them, and the scan below emits `k`
+// owned by whatever base relation it reads, so without the override the
+// qualified spelling resolves to nothing and the key keeps the rewrite's
+// guess. A CTE records the name on the subtree ROOT rather than on the scans
+// (ADR-0021 §1d), which is why this is read here and not from the scan arm.
+//
 // This is a model of another package's behavior, so it is pinned by value:
 // the semi/anti-join answers this spelling decides are asserted against
 // PostgreSQL over fixtures that put each arm on the probe in turn.
 func emittedColumns(n *Node) []emittedCol {
+	cols := emittedColumnsOfNode(n)
+	owner := scopeOwnerOf(n)
+	if owner == "" || len(cols) == 0 {
+		return cols
+	}
+	out := make([]emittedCol, len(cols))
+	for i, c := range cols {
+		out[i] = emittedCol{name: stripQualifier(c.name), owner: owner}
+	}
+	return out
+}
+
+func emittedColumnsOfNode(n *Node) []emittedCol {
 	if n == nil {
 		return nil
 	}

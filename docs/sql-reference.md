@@ -465,7 +465,7 @@ WHERE src_ip IN (SELECT ip_address FROM device_inventory WHERE role = 'server')
 
 ### Correlated Subqueries
 
-Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. The outer relation may be a CTE, a derived table or a base table:
+Subqueries that reference columns from the outer query. The optimizer decorrelates them where it can — EXISTS / NOT EXISTS and IN become semi/anti joins, and a correlated scalar subquery becomes a join against a grouped aggregate — so they are not re-executed per outer row. Either side may be a CTE, a derived table, a comma-joined list or a base table: the subquery's own FROM clause is planned the way a top-level FROM clause is.
 
 ```sql
 -- EXISTS with correlation
@@ -500,11 +500,16 @@ subquery instead — a slower right answer:
   per correlation group (a NULL in *that group's* list makes the predicate
   UNKNOWN), which an anti join cannot express. An UNCORRELATED `NOT IN` still
   becomes a null-aware anti join.
-- **A subquery whose own FROM is a derived table or a CTE**, or whose
-  correlation is not a simple equality of two columns.
+- **A subquery whose correlation is not a simple equality of two columns**,
+  whose own FROM reads a **RECURSIVE** CTE, or whose own FROM JOINS a derived
+  table or a CTE reference to another relation.
 
 Both stay correct on every execution path; on a distributed cluster the query
 runs on the coordinator rather than across workers.
+
+A derived table, an ordinary CTE reference and a comma-joined FROM list in the
+subquery are decorrelated like a base table. They used to run as a per-row
+subquery, which read the inner relation once for every outer row.
 
 A correlated subquery inside an **aggregate argument** —
 `SUM(CASE WHEN EXISTS (…) THEN 1 ELSE 0 END)` — is evaluated per row, not

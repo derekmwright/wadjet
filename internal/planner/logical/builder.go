@@ -31,181 +31,9 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		return nil, err
 	}
 
-	var plan *Node
-
-	// FROM clause — build scan nodes (or CTE sub-plans)
-	if len(info.Joins) > 0 {
-		// Build join tree
-		if len(info.Tables) == 0 {
-			return nil, fmt.Errorf("no tables in FROM clause")
-		}
-		// Comma-separated FROM entries beyond the first parse into
-		// info.Tables (the parser only emits JoinInfo for explicit JOIN
-		// syntax). Each is a FROM ITEM, and an explicit JOIN extends the
-		// item it follows — JoinInfo.FromItem says which. Build every item's
-		// own subtree first, then cross-join the items left to right;
-		// pushdownPredicates, liftWhereEquiPredsIntoJoins and reorderJoins
-		// recover the real join conditions from WHERE.
-		//
-		// Dropping the extra tables silently returned wrong results (#281).
-		// Folding them in BEFORE the explicit joins — which is what this did
-		// until #593/#594 — was the next wrong answer: `FROM a JOIN b ON …,
-		// c` planned as `(a × c) ⋈ b` rather than `(a ⋈ b) × c`, so a real
-		// cross product sat under the equi-join (60,175 × 2,000 rows on the
-		// SF0.01 fixture, an OOM kill at 30 GB, #593) and the WHERE equality
-		// between b and c straddled that join's two sides, where its key
-		// pair resolves against neither and the query answers zero rows with
-		// no error (#594).
-		items := make([]*Node, len(info.Tables))
-		for i, t := range info.Tables {
-			item, err := resolveTableOrCTE(t, ctes)
-			if err != nil {
-				return nil, err
-			}
-			items[i] = item
-		}
-		// crossFold merges items[0..k] into items[k], left-deep, leaving nil
-		// behind. LATERAL needs it: its right side may reference EVERY
-		// preceding FROM item, not just the one it extends.
-		crossFold := func(k int) *Node {
-			var acc *Node
-			for i := 0; i <= k; i++ {
-				if items[i] == nil {
-					continue
-				}
-				if acc == nil {
-					acc = items[i]
-				} else {
-					acc = NewJoin(acc, items[i], "cross", "")
-				}
-				items[i] = nil
-			}
-			items[k] = acc
-			return acc
-		}
-
-		for joinIdx, join := range info.Joins {
-			// FromItem is non-decreasing across Joins, so the slot a join
-			// names is never one an earlier crossFold emptied.
-			idx := join.FromItem
-			if idx < 0 || idx >= len(items) {
-				idx = len(items) - 1
-			}
-			if join.Lateral && strings.HasPrefix(join.RightTable, "(") {
-				// LATERAL subquery: decorrelate by extracting correlated
-				// WHERE predicates and moving them to the join condition.
-				left := crossFold(idx)
-				right, joinCond, empty, err := buildLateralSubquery(left, join, ctes)
-				if err != nil {
-					return nil, err
-				}
-				// Cross join with correlated predicates → inner join
-				// (cross join skips key parsing in the physical planner)
-				jt := join.Type
-				if joinCond != "" && strings.EqualFold(strings.TrimSpace(jt), "cross join") {
-					jt = "join"
-				}
-				// An UNGROUPED aggregate over an empty input still yields one
-				// row, so an outer row the lateral matches nothing for
-				// SURVIVES in PostgreSQL — see lateralEmptyInput (#767 part 1).
-				//
-				// The join's OWN `ON` decides what happens to that row NEXT,
-				// and it has to keep deciding: PostgreSQL evaluates the
-				// lateral per outer row, THEN applies the join condition. A
-				// repair that forces LEFT and defaults the COUNT without
-				// looking at the ON keeps rows the ON rejects and prints 0
-				// for a count of 2. See lateralEmptyInputPlan for the three
-				// cases and which of them this can express.
-				switch lateralEmptyInputPlan(jt, empty,
-					lateralJoinNullExtendsAfter(info.Joins, joinIdx)) {
-				case lateralPadThenFilter:
-					// The lateral yields a row for every outer row (LEFT on
-					// the CORRELATION alone, defaults applied), and the
-					// written ON then filters — which for an INNER join is
-					// exactly a WHERE, so it moves there and is defaulted
-					// with everything else.
-					jt = "left"
-					joinCond = empty.correlationCond
-					andIntoWhere(info, empty.onResidual, empty.onResidualExpr)
-					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
-				case lateralPadOnly:
-					jt = "left"
-					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
-				case lateralNoRepair:
-					// Left as written. See lateralEmptyInputPlan.
-				}
-				items[idx] = NewJoin(left, right, jt, joinCond)
-			} else {
-				rightRef := plansql.TableRef{
-					Name:  join.RightTable,
-					Alias: join.RightAlias,
-				}
-				if join.RightTableRef != nil {
-					rightRef = *join.RightTableRef
-				}
-				right, err := resolveTableOrCTE(rightRef, ctes)
-				if err != nil {
-					return nil, err
-				}
-				// The join's left is its own FROM item — UNLESS its ON clause
-				// references an earlier comma item, which SQL scopes it to see
-				// (a JOIN's ON may name any relation to its left in the FROM
-				// list). `FROM a, b JOIN c ON a.k = c.k` must put a in the
-				// join's left subtree, or the key naming a resolves to nothing
-				// and the join answers no rows — the #593/#594 failure mode,
-				// reached here by an ON rather than a WHERE. Fold only the
-				// referenced case, so a join whose ON stays within its own two
-				// sides keeps the later comma items as siblings (the shape the
-				// #593/#594 builder fix restored).
-				left := items[idx]
-				switch {
-				case join.Lateral:
-					left = crossFold(idx)
-				case onRefsEarlierItem(join, items, idx):
-					// A QUALIFIED reference to an earlier comma item.
-					left = crossFold(idx)
-				case isInnerOrCrossJoin(join.Type) && !onConfinedToOwnSides(join, items[idx], right):
-					// An INNER/cross join whose ON is NOT provably confined to
-					// its own two sides — a bare (unqualified) cross-item key
-					// is the common case — may reference an earlier comma item
-					// that onRefsEarlierItem cannot see without a qualifier.
-					// main folded every comma item in first, which made such
-					// ONs resolve; restore that here. OUTER joins deliberately
-					// do NOT take this path: folding preceding items into a
-					// preserved side changes which rows survive.
-					left = crossFold(idx)
-				}
-				items[idx] = NewJoin(left, right, join.Type, join.Condition)
-			}
-		}
-		for _, item := range items {
-			if item == nil {
-				continue
-			}
-			if plan == nil {
-				plan = item
-			} else {
-				plan = NewJoin(plan, item, "cross", "")
-			}
-		}
-	} else if len(info.Tables) > 0 {
-		var err error
-		plan, err = resolveTableOrCTE(info.Tables[0], ctes)
-		if err != nil {
-			return nil, err
-		}
-		// Comma-join FROM list (see the explicit-join branch above).
-		for _, t := range info.Tables[1:] {
-			right, err := resolveTableOrCTE(t, ctes)
-			if err != nil {
-				return nil, err
-			}
-			plan = NewJoin(plan, right, "cross", "")
-		}
-	} else {
-		// Table-less SELECT (e.g., SELECT CURRENT_DATE, SELECT 1+1).
-		// Use a single-row dual source so the projection evaluates once.
-		plan = &Node{Type: NodeDual}
+	plan, err := buildFromClause(info, ctes)
+	if err != nil {
+		return nil, err
 	}
 
 	// WHERE clause
@@ -1388,6 +1216,198 @@ func buildLimitNode(plan *Node, info *plansql.SelectInfo) (*Node, error) {
 		return plan, nil
 	}
 	return NewLimit(plan, limit, offset), nil
+}
+
+// buildFromClause plans a SELECT's FROM list: every comma item's own subtree,
+// then the explicit JOINs attached to the item each one follows.
+//
+// It is a function rather than an inline block because the three
+// decorrelations need the SAME assembly for the subquery they lower. Building
+// the inner side out of `NewScan(info.Tables[0].Name)` instead was the source
+// of a defect class of its own — a derived table has no name a Scan can hold,
+// and neither does a CTE reference, so the semi/anti join's build side became
+// a scan of a table the catalog has never heard of and answered NOTHING
+// (#571, #535). Declining those shapes made them right and SLOW — one re-read
+// of the inner relation per outer row (#852); this is what makes them right
+// and fast. See decorrelated_inner_plan.go.
+func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
+	var plan *Node
+	// FROM clause — build scan nodes (or CTE sub-plans)
+	if len(info.Joins) > 0 {
+		// Build join tree
+		if len(info.Tables) == 0 {
+			return nil, fmt.Errorf("no tables in FROM clause")
+		}
+		// Comma-separated FROM entries beyond the first parse into
+		// info.Tables (the parser only emits JoinInfo for explicit JOIN
+		// syntax). Each is a FROM ITEM, and an explicit JOIN extends the
+		// item it follows — JoinInfo.FromItem says which. Build every item's
+		// own subtree first, then cross-join the items left to right;
+		// pushdownPredicates, liftWhereEquiPredsIntoJoins and reorderJoins
+		// recover the real join conditions from WHERE.
+		//
+		// Dropping the extra tables silently returned wrong results (#281).
+		// Folding them in BEFORE the explicit joins — which is what this did
+		// until #593/#594 — was the next wrong answer: `FROM a JOIN b ON …,
+		// c` planned as `(a × c) ⋈ b` rather than `(a ⋈ b) × c`, so a real
+		// cross product sat under the equi-join (60,175 × 2,000 rows on the
+		// SF0.01 fixture, an OOM kill at 30 GB, #593) and the WHERE equality
+		// between b and c straddled that join's two sides, where its key
+		// pair resolves against neither and the query answers zero rows with
+		// no error (#594).
+		items := make([]*Node, len(info.Tables))
+		for i, t := range info.Tables {
+			item, err := resolveTableOrCTE(t, ctes)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		// crossFold merges items[0..k] into items[k], left-deep, leaving nil
+		// behind. LATERAL needs it: its right side may reference EVERY
+		// preceding FROM item, not just the one it extends.
+		crossFold := func(k int) *Node {
+			var acc *Node
+			for i := 0; i <= k; i++ {
+				if items[i] == nil {
+					continue
+				}
+				if acc == nil {
+					acc = items[i]
+				} else {
+					acc = NewJoin(acc, items[i], "cross", "")
+				}
+				items[i] = nil
+			}
+			items[k] = acc
+			return acc
+		}
+
+		for joinIdx, join := range info.Joins {
+			// FromItem is non-decreasing across Joins, so the slot a join
+			// names is never one an earlier crossFold emptied.
+			idx := join.FromItem
+			if idx < 0 || idx >= len(items) {
+				idx = len(items) - 1
+			}
+			if join.Lateral && strings.HasPrefix(join.RightTable, "(") {
+				// LATERAL subquery: decorrelate by extracting correlated
+				// WHERE predicates and moving them to the join condition.
+				left := crossFold(idx)
+				right, joinCond, empty, err := buildLateralSubquery(left, join, ctes)
+				if err != nil {
+					return nil, err
+				}
+				// Cross join with correlated predicates → inner join
+				// (cross join skips key parsing in the physical planner)
+				jt := join.Type
+				if joinCond != "" && strings.EqualFold(strings.TrimSpace(jt), "cross join") {
+					jt = "join"
+				}
+				// An UNGROUPED aggregate over an empty input still yields one
+				// row, so an outer row the lateral matches nothing for
+				// SURVIVES in PostgreSQL — see lateralEmptyInput (#767 part 1).
+				//
+				// The join's OWN `ON` decides what happens to that row NEXT,
+				// and it has to keep deciding: PostgreSQL evaluates the
+				// lateral per outer row, THEN applies the join condition. A
+				// repair that forces LEFT and defaults the COUNT without
+				// looking at the ON keeps rows the ON rejects and prints 0
+				// for a count of 2. See lateralEmptyInputPlan for the three
+				// cases and which of them this can express.
+				switch lateralEmptyInputPlan(jt, empty,
+					lateralJoinNullExtendsAfter(info.Joins, joinIdx)) {
+				case lateralPadThenFilter:
+					// The lateral yields a row for every outer row (LEFT on
+					// the CORRELATION alone, defaults applied), and the
+					// written ON then filters — which for an INNER join is
+					// exactly a WHERE, so it moves there and is defaulted
+					// with everything else.
+					jt = "left"
+					joinCond = empty.correlationCond
+					andIntoWhere(info, empty.onResidual, empty.onResidualExpr)
+					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
+				case lateralPadOnly:
+					jt = "left"
+					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
+				case lateralNoRepair:
+					// Left as written. See lateralEmptyInputPlan.
+				}
+				items[idx] = NewJoin(left, right, jt, joinCond)
+			} else {
+				rightRef := plansql.TableRef{
+					Name:  join.RightTable,
+					Alias: join.RightAlias,
+				}
+				if join.RightTableRef != nil {
+					rightRef = *join.RightTableRef
+				}
+				right, err := resolveTableOrCTE(rightRef, ctes)
+				if err != nil {
+					return nil, err
+				}
+				// The join's left is its own FROM item — UNLESS its ON clause
+				// references an earlier comma item, which SQL scopes it to see
+				// (a JOIN's ON may name any relation to its left in the FROM
+				// list). `FROM a, b JOIN c ON a.k = c.k` must put a in the
+				// join's left subtree, or the key naming a resolves to nothing
+				// and the join answers no rows — the #593/#594 failure mode,
+				// reached here by an ON rather than a WHERE. Fold only the
+				// referenced case, so a join whose ON stays within its own two
+				// sides keeps the later comma items as siblings (the shape the
+				// #593/#594 builder fix restored).
+				left := items[idx]
+				switch {
+				case join.Lateral:
+					left = crossFold(idx)
+				case onRefsEarlierItem(join, items, idx):
+					// A QUALIFIED reference to an earlier comma item.
+					left = crossFold(idx)
+				case isInnerOrCrossJoin(join.Type) && !onConfinedToOwnSides(join, items[idx], right):
+					// An INNER/cross join whose ON is NOT provably confined to
+					// its own two sides — a bare (unqualified) cross-item key
+					// is the common case — may reference an earlier comma item
+					// that onRefsEarlierItem cannot see without a qualifier.
+					// main folded every comma item in first, which made such
+					// ONs resolve; restore that here. OUTER joins deliberately
+					// do NOT take this path: folding preceding items into a
+					// preserved side changes which rows survive.
+					left = crossFold(idx)
+				}
+				items[idx] = NewJoin(left, right, join.Type, join.Condition)
+			}
+		}
+		for _, item := range items {
+			if item == nil {
+				continue
+			}
+			if plan == nil {
+				plan = item
+			} else {
+				plan = NewJoin(plan, item, "cross", "")
+			}
+		}
+	} else if len(info.Tables) > 0 {
+		var err error
+		plan, err = resolveTableOrCTE(info.Tables[0], ctes)
+		if err != nil {
+			return nil, err
+		}
+		// Comma-join FROM list (see the explicit-join branch above).
+		for _, t := range info.Tables[1:] {
+			right, err := resolveTableOrCTE(t, ctes)
+			if err != nil {
+				return nil, err
+			}
+			plan = NewJoin(plan, right, "cross", "")
+		}
+	} else {
+		// Table-less SELECT (e.g., SELECT CURRENT_DATE, SELECT 1+1).
+		// Use a single-row dual source so the projection evaluates once.
+		plan = &Node{Type: NodeDual}
+	}
+
+	return plan, nil
 }
 
 // resolveTableOrCTE checks whether a table reference matches a CTE name.

@@ -124,10 +124,22 @@ func dedupSemiAntiBuildSide(n *Node) *Node {
 // this reads the same way: parse, flatten the top-level ANDs, and require
 // each conjunct to be an equality between two bare column references.
 //
-// Side membership is decided by walking the right subtree's available
-// columns; whichever side of each equality resolves there is the build key.
-// A name that resolves on BOTH sides (a self-join's `k = k`) is not
-// attributable from the condition alone and bails — as it always has.
+// Side membership is decided by what the build subtree's ROOT EMITS, which is
+// the schema the narrowing's own Project will read. It used to be decided by
+// collectSubtreeColumns — every column the subtree READS anywhere — and the
+// two differ exactly where a Project renames: over a derived table
+// `(SELECT c_bool AS k FROM typemx GROUP BY c_bool) b`, the read set holds
+// `c_bool` and the emitted set holds `k`, so `c_bool = k` attributed the BUILD
+// key to `c_bool` and projected a column the build root does not have —
+// `column "c_bool" does not exist in the input schema`, at build time, on
+// every arm. That was unreachable until a derived table could BE a build side
+// (#852); it is a defect in this attribution either way.
+//
+// emittedColumns needs the scan annotation, so an un-annotated subtree emits
+// nothing and the read set is the fallback — the pre-#852 behaviour, and a
+// decline at worst. A name that resolves on BOTH sides (a self-join's
+// `k = k`) is not attributable from the condition alone and bails, as it
+// always has.
 //
 // The last decline is about the narrowing's own Project rather than the
 // condition: it aliases every key to its BARE name, so a QUALIFIED key would
@@ -138,7 +150,20 @@ func extractRightJoinKeys(cond string, rightSubtree *Node) []string {
 		return nil
 	}
 	rightCols := collectSubtreeColumns(rightSubtree)
-	if len(rightCols) == 0 {
+	rightEmits := emittedColumns(rightSubtree)
+	inRight := func(name string) bool {
+		bareName := strings.ToLower(stripQualifier(name))
+		if len(rightEmits) > 0 {
+			for _, e := range rightEmits {
+				if strings.EqualFold(e.name, name) || strings.EqualFold(stripQualifier(e.name), bareName) {
+					return true
+				}
+			}
+			return false
+		}
+		return containsColumn(rightCols, bareName)
+	}
+	if len(rightCols) == 0 && len(rightEmits) == 0 {
 		return nil
 	}
 	expr := tryParseExpr(cond)
@@ -160,8 +185,8 @@ func extractRightJoinKeys(cond string, rightSubtree *Node) []string {
 			// sentinel — names no build column.
 			return nil
 		}
-		lInRight := containsColumn(rightCols, strings.ToLower(stripQualifier(l)))
-		rInRight := containsColumn(rightCols, strings.ToLower(stripQualifier(r)))
+		lInRight := inRight(l)
+		rInRight := inRight(r)
 		var key string
 		switch {
 		case rInRight && !lInRight:

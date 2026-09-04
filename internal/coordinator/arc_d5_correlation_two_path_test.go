@@ -105,6 +105,7 @@ func arcD5Cells() []arcD5Cell {
 		arcD5AggregatePlacementCells(),
 		arcD5FailedSubquerySetCells(),
 		arcD5MeasuredCells(),
+		arcD5DerivedInnerCells(),
 		arcD5AggregateArgumentCells(),
 	} {
 		out = append(out, group...)
@@ -177,10 +178,12 @@ func arcD5CTEScopeCells() []arcD5Cell {
 			sql: `SELECT COUNT(*) AS c FROM typemx t0 WHERE t0.id < 50 AND EXISTS (` +
 				`SELECT 1 FROM typemx sub WHERE sub.g = t0.g)`,
 			want: []string{"c=int64:47"}},
+		// A CTE on the INNER side is now BUILT into the semi join's build
+		// side rather than declined, so both DAG arms execute it (#852).
 		{issue: "#535", name: "control_cte_on_the_inner_side",
 			sql: `WITH d AS (SELECT k FROM typemx_dim) SELECT COUNT(*) AS c FROM typemx a ` +
 				`WHERE a.id < 50 AND EXISTS (SELECT 1 FROM d WHERE d.k = a.g)`,
-			want: []string{"c=int64:47"}, wantCorrRoutes: 1},
+			want: []string{"c=int64:47"}},
 		{issue: "#535", name: "control_uncorrelated_in_over_a_cte",
 			sql: `WITH u AS (SELECT g AS did, id FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS c FROM u WHERE u.did IN (SELECT d.k FROM typemx_dim d)`,
@@ -212,7 +215,7 @@ func arcD5CTEScopeCells() []arcD5Cell {
 			sql: `WITH u AS (SELECT g AS did, id FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS n FROM u a WHERE EXISTS (` +
 				`SELECT 1 FROM u b WHERE b.did = a.did AND b.id <> a.id)`,
-			want: []string{"n=int64:47"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:47"}},
 		{issue: "#535", name: "boundary_unaliased_base_table_correlation_stays_silent",
 			sql: `SELECT COUNT(*) AS c FROM typemx WHERE id < 50 AND EXISTS (` +
 				`SELECT 1 FROM typemx sub WHERE sub.g = typemx.g)`,
@@ -234,23 +237,31 @@ func arcD5CTEScopeCells() []arcD5Cell {
 // same `default:` arm.
 //
 // The per-type matrix below is the gate the fix earns: all 18 flat types as
-// the OUTER value of a correlated EXISTS whose inner is a derived table (the
-// decline that keeps the shape on the re-run), each against PostgreSQL's own
-// answer over the same rows. A rendering that re-types a value answers a
-// different number, and the counts differ per type — 29, 30, 38, 58, 60 — so
-// no single wrong answer passes them all.
+// the OUTER value of a correlated EXISTS, each against PostgreSQL's own answer
+// over the same rows. A rendering that re-types a value answers a different
+// number, and the counts differ per type — 14, 15, 19, 29, 30, five distinct
+// answers — so no single wrong answer passes them all.
+//
+// THE POSITION MOVED AND THE NUMBERS DID NOT (#852). These cells used to reach
+// the re-run through a DERIVED-TABLE inner, which was the decline that kept
+// the shape off the join path. A derived-table inner now LOWERS, so that
+// spelling no longer re-runs anything and the gate would have been silently
+// testing the join's comparison kernels instead of the literal renderer. They
+// reach it through the position that is still not a decorrelation site — an
+// aggregate ARGUMENT (deferral D1) — with the SAME predicate over the SAME
+// rows, so every expected count is unchanged and each was re-measured on all
+// four arms. `SUM(CASE WHEN <pred> THEN 1 ELSE 0 END)` over the rows a
+// `COUNT(*) … WHERE <pred>` counted is the same number by construction.
 func arcD5TypedRerunCells() []arcD5Cell {
 	// PostgreSQL 17 over the type-matrix fixture, measured live.
 	//
-	// The ranges are BOUNDED on purpose. The inner side is a derived table,
-	// which is the decline that keeps the shape on the re-run — and a re-run
-	// happens PER OUTER ROW, so the work is (outer rows × inner rows) per
-	// execution and there are eight executions per cell (one single, five
-	// spilled, two DAG). Over the whole 5000-row table that is 43 million row
-	// reads across this group and the census exceeded its own 30-minute
-	// context. 30 × 585 keeps the per-type spread that makes a wrong
-	// rendering visible — 14, 15, 19, 29, 30, four distinct answers and
-	// c_i32 alone at 14 — at a seventeenth of the cost.
+	// The ranges are BOUNDED on purpose. A re-run happens PER OUTER ROW, so
+	// the work is (outer rows × inner rows) per execution and there are eight
+	// executions per cell (one single, five spilled, two DAG). Over the whole
+	// 5000-row table that is 43 million row reads across this group and the
+	// census exceeded its own 30-minute context. 30 × 585 keeps the per-type
+	// spread that makes a wrong rendering visible — 14, 15, 19, 29, 30, four
+	// distinct answers and c_i32 alone at 14 — at a seventeenth of the cost.
 	want := map[string]int{
 		"c_bool": 29, "c_i32": 14, "c_i64": 15, "c_f32": 15, "c_f64": 15,
 		"c_str": 15, "c_bytes": 15, "c_ts": 15, "c_ipv4": 15, "c_ipv6": 15,
@@ -263,29 +274,48 @@ func arcD5TypedRerunCells() []arcD5Cell {
 	}
 	sort.Strings(cols)
 
-	out := make([]arcD5Cell, 0, len(cols)+5)
+	out := make([]arcD5Cell, 0, len(cols)+9)
 	for _, c := range cols {
 		out = append(out, arcD5Cell{
 			issue: "#679", name: "rerun_renders_" + c,
-			sql: fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 30 AND EXISTS (`+
+			sql: fmt.Sprintf(`SELECT SUM(CASE WHEN EXISTS (`+
 				`SELECT 1 FROM (SELECT %s AS k FROM typemx WHERE id >= 15 AND id < 600 `+
-				`GROUP BY %s) b WHERE a.%s = b.k)`, c, c, c),
+				`GROUP BY %s) b WHERE a.%s = b.k) THEN 1 ELSE 0 END) AS n `+
+				`FROM typemx a WHERE a.id < 30`, c, c, c),
 			want:            []string{fmt.Sprintf("n=int64:%d", want[c])},
 			wantCorrRoutes:  1,
 			skipBudgetedArm: true,
 		})
 	}
 	// The issue's own shape and its NOT EXISTS twin: a DECIMAL outer value
-	// against a BIGINT inner, over a derived table.
+	// against a BIGINT inner. In the aggregate-argument position, which is
+	// where the RE-RUN — and so the literal rendering this issue is about —
+	// still happens.
 	out = append(out,
+		arcD5Cell{issue: "#679", name: "rerun_renders_a_decimal_outer_cross_width",
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM (` +
+				`SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k) ` +
+				`THEN 1 ELSE 0 END) AS n FROM numwidth a`,
+			want: []string{"n=int64:3"}, wantCorrRoutes: 1},
+		arcD5Cell{issue: "#679", name: "rerun_renders_a_decimal_outer_cross_width_negated",
+			sql: `SELECT SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM (` +
+				`SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k) ` +
+				`THEN 1 ELSE 0 END) AS n FROM numwidth a`,
+			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+
+		// The same four shapes in a WHERE, which now LOWER (#852). They are
+		// kept because they still gate the cross-width comparison — the same
+		// DECIMAL-against-BIGINT question, asked of the JOIN's kernel instead
+		// of the literal renderer — and because the ROUTE is the fix's proof:
+		// zero, where every one of them cost one before.
 		arcD5Cell{issue: "#679", name: "exists_over_a_derived_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
-			want: []string{"n=int64:3"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:3"}},
 		arcD5Cell{issue: "#679", name: "not_exists_over_a_derived_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE NOT EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
-			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:7"}},
 		// The three controls that answered at base: three of the four width
 		// pairs were already right, which is what would have let a wrong fix
 		// pass. The trigger is a DECIMAL outer against an INTEGER inner over
@@ -293,32 +323,57 @@ func arcD5TypedRerunCells() []arcD5Cell {
 		arcD5Cell{issue: "#679", name: "control_derived_table_same_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_i64 = b.k)`,
-			want: []string{"n=int64:9"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:9"}},
 		arcD5Cell{issue: "#679", name: "control_derived_table_decimal_decimal",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_d4 AS k FROM numwidth GROUP BY w_d4) b WHERE a.w_d2 = b.k)`,
-			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:7"}},
 		// THE DOCUMENTED REFUSAL, end to end. `docs/sql-reference.md` and
 		// ADR-0021 §1e promise 0A000 for an outer value with no literal
-		// spelling; until this cell existed only the unit test exercised it,
-		// and a promise about a SQLSTATE that no query reaches is not a
+		// spelling; a promise about a SQLSTATE that no query reaches is not a
 		// promise. The container columns live in typemx_nested.
+		//
+		// These two used to be spelled as a WHERE-clause EXISTS over a derived
+		// table. That spelling now LOWERS, so it never renders a literal and
+		// never reaches the refusal — the pair below it records what it
+		// answers instead. The promise is kept in the position that still
+		// re-runs.
 		arcD5Cell{issue: "#679", name: "container_outer_value_is_refused_with_0A000",
-			sql: `SELECT COUNT(*) AS n FROM typemx_nested a WHERE a.id < 5 AND EXISTS (` +
-				`SELECT 1 FROM (SELECT c_arr AS k, id FROM typemx_nested WHERE id < 3) b ` +
-				`WHERE b.k = a.c_arr)`,
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM typemx_nested b ` +
+				`WHERE b.c_arr = a.c_arr) THEN 1 ELSE 0 END) AS n ` +
+				`FROM typemx_nested a WHERE a.id < 5`,
 			wantErrLike:    "has no literal spelling that reads back as the same value",
 			wantSQLState:   "0A000",
 			wantCorrRoutes: 1,
 			pgSays:         "PostgreSQL compares arrays and answers; this engine has no literal for one"},
 		arcD5Cell{issue: "#679", name: "vector_outer_value_is_refused_with_0A000",
-			sql: `SELECT COUNT(*) AS n FROM typemx_nested a WHERE a.id < 5 AND EXISTS (` +
-				`SELECT 1 FROM (SELECT c_vec AS k, id FROM typemx_nested WHERE id < 3) b ` +
-				`WHERE b.k = a.c_vec)`,
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM typemx_nested b ` +
+				`WHERE b.c_vec = a.c_vec) THEN 1 ELSE 0 END) AS n ` +
+				`FROM typemx_nested a WHERE a.id < 5`,
 			wantErrLike:    "has no literal spelling that reads back as the same value",
 			wantSQLState:   "0A000",
 			wantCorrRoutes: 1,
 			pgSays:         "the refusal is this engine's own; PostgreSQL has no VECTOR type"},
+		// And what the LOWERED spelling of those two answers, which is the
+		// other half of the same finding: a container correlation that never
+		// renders a literal needs no literal, so it is not refused — it is
+		// ANSWERED, and the answer is PostgreSQL's. The ARRAY cell was
+		// measured against live PostgreSQL 17 over these same five rows (4);
+		// VECTOR has no PostgreSQL type, so its 3 is this engine's own and is
+		// derived from the fixture: c_vec is [i, i+0.5, -i, 0.25], distinct
+		// per row, so ids 0, 1 and 2 match and ids 3 and 4 do not.
+		arcD5Cell{issue: "#679", name: "container_correlation_lowers_and_answers",
+			sql: `SELECT COUNT(*) AS n FROM typemx_nested a WHERE a.id < 5 AND EXISTS (` +
+				`SELECT 1 FROM (SELECT c_arr AS k, id FROM typemx_nested WHERE id < 3) b ` +
+				`WHERE b.k = a.c_arr)`,
+			want:   []string{"n=int64:4"},
+			pgSays: "4 — an empty array equals an empty array, so a.id 0 and 3 both match b.id 0"},
+		arcD5Cell{issue: "#679", name: "vector_correlation_lowers_and_answers",
+			sql: `SELECT COUNT(*) AS n FROM typemx_nested a WHERE a.id < 5 AND EXISTS (` +
+				`SELECT 1 FROM (SELECT c_vec AS k, id FROM typemx_nested WHERE id < 3) b ` +
+				`WHERE b.k = a.c_vec)`,
+			want:   []string{"n=int64:3"},
+			pgSays: "no VECTOR type; 3 is the fixture's own arithmetic"},
 		arcD5Cell{issue: "#679", name: "control_base_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM numwidth b WHERE a.w_d2 = b.w_i64)`,
@@ -908,18 +963,48 @@ func arcD5MeasuredCells() []arcD5Cell {
 		// #616 — a correlated scalar subquery whose own FROM is a COMMA JOIN.
 		// It ANSWERS PostgreSQL's value on all four arms for every shape
 		// tried, which the issue's "cannot be executed" no longer describes.
+		//
+		// It now LOWERS as well, on both DAG arms (zero routes, where each of
+		// these cost one before). The comma FROM is built as a chain of
+		// condition-less cross joins and liftWhereEquiPredsIntoJoins turns its
+		// equalities into join conditions BEFORE the correlation terms are
+		// classified — which is what stops innerOnlyPredicate declining a
+		// condition that names two inner relations at once (#852 /
+		// logical.decorrelatedInnerPlan).
+		//
+		// WHAT THAT COSTS, pinned rather than described: the 512 KiB arm no
+		// longer answers these three. A re-run builds no hash table, and the
+		// join it is replaced by materialises a 5 000-row build whose INDEX
+		// entries a grace eviction cannot free (#823, "grace eviction frees
+		// build columns, not index entries") — so the operator refuses past
+		// the budget, which is ADR-0006's designed answer and not a wrong one.
+		// Measured: these answer at a 1 MiB budget and refuse at 512 KiB. The
+		// day the index becomes spillable, or the plan's floor drops, these
+		// three stop erroring and the pin fails.
 		{issue: "#616", name: "comma_joined_correlated_inner_two_relations",
 			sql: `SELECT COUNT(*) AS n FROM typemx p WHERE p.id < 50 AND p.c_i32 = (` +
 				`SELECT MIN(b.c_i32) FROM typemx b, typemx_dim d WHERE b.g = d.k AND b.id = p.id)`,
-			want: []string{"n=int64:46"}, wantCorrRoutes: 1},
+			want:               []string{"n=int64:46"},
+			wantErrLikeSpilled: "memory budget exceeded",
+			pgSays:             "46 on every unbudgeted arm; at 512 KiB the join's build does not fit"},
 		{issue: "#616", name: "comma_joined_correlated_inner_group_key",
 			sql: `SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 50 AND a.g = (` +
 				`SELECT MIN(b.g) FROM typemx b, typemx_dim d WHERE b.g = d.k AND b.id = a.id)`,
-			want: []string{"n=int64:47"}, wantCorrRoutes: 1},
+			want:               []string{"n=int64:47"},
+			wantErrLikeSpilled: "memory budget exceeded",
+			pgSays:             "47 on every unbudgeted arm; at 512 KiB the join's build does not fit"},
+		// The 40-row fixture refuses at 512 KiB too, and its numbers say the
+		// cost is the PLAN's shape rather than any one relation's size:
+		// `build_rows=15` against `used=498058` of a 524288-byte budget — the
+		// join's own build is fifteen rows, and what fills the budget is the
+		// three scans, the aggregate and the second join a re-run never builds
+		// at all.
 		{issue: "#616", name: "comma_joined_correlated_inner_over_the_multikey_fixture",
 			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n = (` +
 				`SELECT MIN(b.n) FROM mk_inner b, mk_dim d WHERE b.g = d.k AND b.id = a.id)`,
-			want: []string{"n=int64:21"}, wantCorrRoutes: 1},
+			want:               []string{"n=int64:21"},
+			wantErrLikeSpilled: "memory budget exceeded",
+			pgSays:             "21 on every unbudgeted arm; at 512 KiB the plan does not fit"},
 		// THE ONE THAT STILL FAILS, and it is not a correlation defect: the
 		// same table on BOTH sides of the inner comma join, under a MEMORY
 		// BUDGET, panics inside the hash join's dual-int-key probe —
@@ -1305,4 +1390,165 @@ func arcD5RouteDelta(before, after [4]int64) [4]int64 {
 		d[i] = after[i] - before[i]
 	}
 	return d
+}
+
+// ---------------------------------------------------------------------------
+// #852 — a correlated subquery whose own FROM is a DERIVED TABLE, a CTE
+// REFERENCE or a COMMA LIST is decorrelated like any other.
+//
+// The three decorrelations used to assemble the build side out of
+// `NewScan(info.Tables[0].Name, …)`, which is a model of a FROM clause with
+// three holes in it: a derived table has no name a Scan can hold, neither does
+// a CTE reference, and a comma list past the first entry was dropped outright.
+// Declining all three was right and SLOW — the subquery stayed a per-row
+// predicate and the re-run read the whole inner relation once per outer row
+// (2N+1 reads for N outer rows, `TestEveryCorrelatedInnerIsReadOnce`) while
+// both DAG arms routed the plan to the coordinator-local pipeline.
+//
+// The build side is now the subquery's own plan (logical.decorrelatedInnerPlan
+// over the builder's buildFromClause), so every cell here answers the SAME
+// number it always did and costs ZERO routes. The route is the whole point of
+// the group: the answers were never wrong, so only the counter can see the
+// change — a cell that starts routing again means the rewrite has declined and
+// the per-row re-run is back.
+//
+// The BASE-TABLE spelling of each shape sits beside it, because a pair is what
+// says "the same question, differently spelled" rather than "some number".
+func arcD5DerivedInnerCells() []arcD5Cell {
+	return []arcD5Cell{
+		{issue: "#852", name: "control_exists_over_a_base_table",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM mk_inner b WHERE b.n = a.n)`,
+			want: []string{"n=int64:40"}},
+		{issue: "#852", name: "exists_over_a_derived_table",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT s, n FROM mk_inner) b WHERE b.n = a.n)`,
+			want: []string{"n=int64:40"}},
+		{issue: "#852", name: "exists_over_a_cte_reference",
+			sql: `WITH b AS (SELECT s, n FROM mk_inner) SELECT COUNT(*) AS n FROM mk_outer a ` +
+				`WHERE EXISTS (SELECT 1 FROM b WHERE b.n = a.n)`,
+			want: []string{"n=int64:40"}},
+		{issue: "#852", name: "not_exists_over_a_derived_table",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE NOT EXISTS (` +
+				`SELECT 1 FROM (SELECT s, n FROM mk_inner) b WHERE b.n = a.n)`,
+			want:   []string{"n=int64:0"},
+			pgSays: "0 — every mk_outer row has an mk_inner row of the same n"},
+		{issue: "#852", name: "control_correlated_in_over_a_base_table",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s IN (` +
+				`SELECT b.s FROM mk_inner b WHERE b.n = a.n)`,
+			want: []string{"n=int64:27"}},
+		{issue: "#852", name: "correlated_in_over_a_derived_table",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s IN (` +
+				`SELECT b.s FROM (SELECT s, n FROM mk_inner) b WHERE b.n = a.n)`,
+			want: []string{"n=int64:27"}},
+		{issue: "#852", name: "correlated_in_over_a_cte_reference",
+			sql: `WITH b AS (SELECT s, n FROM mk_inner) SELECT COUNT(*) AS n FROM mk_outer a ` +
+				`WHERE a.s IN (SELECT b.s FROM b WHERE b.n = a.n)`,
+			want: []string{"n=int64:27"}},
+		// The scalar spelling adds an Aggregate and a LEFT JOIN to the plan,
+		// and at 512 KiB that sits ON the floor rather than under or over it:
+		// the scans FORCE their row-group loads past the budget (ADR-0006's
+		// forced producers) and the join, which honours it, then refuses with
+		// `used` already past the limit before it has reserved anything —
+		// `used=535822, requested=72, build_rows=0`. A re-run built neither
+		// operator, so this is a cost the lowering added.
+		//
+		// The arm is DROPPED rather than pinned either way, and the reason is
+		// the measurement: across census runs it both answered and refused.
+		// Which batch crosses a budget is a CONDITION and not a shape
+		// (ADR-0027), so pinning either outcome here would be pinning a coin
+		// flip. It answers at 1 MiB, and the three #616 comma cells — which
+		// refuse at 512 KiB on every replicate — carry the same finding
+		// deterministically.
+		{issue: "#852", name: "correlated_scalar_over_a_derived_table",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n = (` +
+				`SELECT MAX(b.n) FROM (SELECT s, n FROM mk_inner) b WHERE b.n = a.n)`,
+			want:            []string{"n=int64:40"},
+			skipBudgetedArm: true},
+		// THE KEY-ATTRIBUTION CELL. A derived table that RENAMES its column,
+		// with the OUTER key sharing the source column's name — which is what
+		// happens whenever both sides read the same table. The build root
+		// emits `k`; the subtree READS `c_bool`; and the semi/anti narrowing
+		// used to decide which side of `c_bool = k` is the build key by
+		// walking what the subtree reads, so it projected `c_bool` over a root
+		// that has only `k` and the query failed at build time with `column
+		// "c_bool" does not exist in the input schema` on every arm.
+		// Attribution reads the EMITTED set now (ADR-0021 1j). Revert that
+		// one hunk and this cell is the one that fails.
+		{issue: "#852", name: "derived_inner_that_renames_its_key_column",
+			sql: `SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 30 AND EXISTS (` +
+				`SELECT 1 FROM (SELECT c_bool AS k FROM typemx WHERE id >= 15 AND id < 600 ` +
+				`GROUP BY c_bool) b WHERE a.c_bool = b.k)`,
+			want:            []string{"n=int64:29"},
+			skipBudgetedArm: true,
+			pgSays:          "29 - the same number the re-run spelling of this answers"},
+		{issue: "#852", name: "exists_over_a_comma_joined_inner",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM mk_inner b, mk_dim d WHERE b.g = d.k AND b.n = a.n)`,
+			want: []string{"n=int64:40"}},
+		{issue: "#852", name: "control_exists_over_an_explicit_join_inner",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM mk_inner b JOIN mk_dim d ON b.g = d.k WHERE b.n = a.n)`,
+			want: []string{"n=int64:40"}},
+		// THE BOUNDARY, measured and pinned rather than described: a derived
+		// table or a CTE reference JOINED to another relation still declines,
+		// and the route is what it costs.
+		//
+		// The build side would then carry TWO renamings — the join's own
+		// (probe bare, build qualified where the bare name collides, decided
+		// by reorderJoins) and the derived arm's Project, whose published name
+		// is one no scan below it produces. The logical model tracks both and
+		// the single-process arm answers correctly; the stage DAG's
+		// carried-column derivation does not, and answers a DIFFERENT number
+		// rather than failing. Measured over the TPC-H SF0.01 fixture, which
+		// is where the two-path oracle caught it:
+		//
+		//	SELECT COUNT(*) FROM nation a WHERE a.n_nationkey IN (
+		//	  SELECT s.k FROM (SELECT c.n_nationkey AS k, c.n_regionkey AS rk
+		//	                     FROM nation c) s
+		//	  JOIN nation b ON b.n_regionkey = s.rk WHERE s.k < 3)
+		//	-- PostgreSQL 17 and single-process: 3.  Stage DAG: 10.
+		//
+		// The spelling that puts the derived arm on the PROBE happens to agree
+		// today, and that is the reason both decline: which arm goes where is
+		// reorderJoins' decision from row counts, so a cut drawn there would
+		// move under the fixture. Closing it is the stage model's carried
+		// columns (physical/join_carried_columns.go), not this rewrite's.
+		{issue: "#852", name: "boundary_derived_inner_joined_to_a_relation_still_routes",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT c.n AS k, c.g AS rk FROM mk_inner c) s ` +
+				`JOIN mk_dim b ON b.k = s.rk WHERE s.k = a.n)`,
+			want:           []string{"n=int64:40"},
+			wantCorrRoutes: 1,
+			pgSays:         "40 on every arm; what is pinned here is the ROUTE the decline costs"},
+		{issue: "#852", name: "boundary_cte_inner_joined_to_a_relation_still_routes",
+			sql: `WITH s AS (SELECT c.n AS k, c.g AS rk FROM mk_inner c) ` +
+				`SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM s JOIN mk_dim b ON b.k = s.rk WHERE s.k = a.n)`,
+			want:           []string{"n=int64:40"},
+			wantCorrRoutes: 1,
+			pgSays:         "40 — the CTE spelling of the same boundary"},
+		// The UNCORRELATED spelling of the divergence itself, over this
+		// package's own fixture: both arms must agree, and they do only
+		// because the rewrite declines. The day this is decorrelated and the
+		// carried columns are still wrong, the two arms answer 24 and 40.
+		{issue: "#852", name: "boundary_uncorrelated_in_over_a_joined_derived_inner_agrees",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n IN (` +
+				`SELECT s.k FROM (SELECT c.n AS k, c.g AS rk FROM mk_inner c) s ` +
+				`JOIN mk_inner b ON b.g = s.rk WHERE s.k < 3)`,
+			want:   []string{"n=int64:24"},
+			pgSays: "24 — mk_outer's n cycles 0..4 and the set is {0,1,2}"},
+
+		// THE ONE RELATION THE BUILD SIDE STILL DECLINES, and the decline is
+		// what keeps the materialized-IN route's own refusal reachable: a
+		// RECURSIVE CTE reference is a tagged scan the physical planner
+		// resolves by fixed-point iteration from a cache a semi-join build
+		// side is not prepared through. It routes, and that route is the cost.
+		{issue: "#852", name: "boundary_recursive_cte_inner_still_routes",
+			sql: `WITH RECURSIVE r(x) AS (SELECT 0 UNION ALL SELECT x + 1 FROM r WHERE x < 4) ` +
+				`SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n IN (SELECT r.x FROM r)`,
+			want:                 []string{"n=int64:40"},
+			wantInSubqueryRoutes: 1,
+			pgSays:               "40 — every mk_outer row's n is in 0..4"},
+	}
 }

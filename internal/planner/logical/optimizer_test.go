@@ -574,7 +574,7 @@ func TestDecorrelateExists_SingleTable(t *testing.T) {
 		{Raw: "EXISTS(...)", ASTExpr: existsNode},
 	})
 
-	result := decorrelateExists(filter, nil)
+	result := decorrelateExists(filter, nil, nil)
 
 	if result.Type != NodeJoin {
 		t.Fatalf("expected semi join, got %s", result.Type)
@@ -600,7 +600,7 @@ func TestDecorrelateExists_NotExists(t *testing.T) {
 		{Raw: "NOT EXISTS(...)", ASTExpr: existsNode},
 	})
 
-	result := decorrelateExists(filter, nil)
+	result := decorrelateExists(filter, nil, nil)
 
 	if result.Type != NodeJoin {
 		t.Fatalf("expected anti join, got %s", result.Type)
@@ -625,7 +625,7 @@ func TestDecorrelateExists_MultiTableSubquery(t *testing.T) {
 		{Raw: "EXISTS(...)", ASTExpr: existsNode},
 	})
 
-	result := decorrelateExists(filter, nil)
+	result := decorrelateExists(filter, nil, nil)
 
 	if result.Type != NodeJoin {
 		t.Fatalf("expected semi join for multi-table EXISTS, got %s", result.Type)
@@ -670,7 +670,7 @@ func TestDecorrelateExists_MultiTableNotExists(t *testing.T) {
 		{Raw: "NOT EXISTS(...)", ASTExpr: existsNode},
 	})
 
-	result := decorrelateExists(filter, nil)
+	result := decorrelateExists(filter, nil, nil)
 
 	if result.Type != NodeJoin {
 		t.Fatalf("expected anti join, got %s", result.Type)

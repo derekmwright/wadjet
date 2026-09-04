@@ -121,45 +121,41 @@ const (
 	arcD5RerunOverCTE = `WITH d AS (SELECT k FROM d5_inner)
 	                     SELECT count(*) FROM d5_outer o
 	                       WHERE EXISTS (SELECT 1 FROM d WHERE d.k = o.k)`
+	// The same question in the one position that is still not a decorrelation
+	// site: an aggregate ARGUMENT (deferral D1). It answers the same number
+	// and it is re-run once per outer row, which is what
+	// TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow needs to reach the
+	// memory defect it is really about.
+	arcD5RerunInAnAggregateArgument = `SELECT SUM(CASE WHEN EXISTS (
+	                                     SELECT 1 FROM d5_inner i WHERE i.k = o.k)
+	                                   THEN 1 ELSE 0 END) FROM d5_outer o`
 )
 
-// TestCorrelatedRerunReadsTheInnerOncePerOuterRow pins deferral D2: the arc's
-// decorrelators lower a correlated EXISTS whose FROM is a BASE TABLE, and only
-// that. Give the same subquery a DERIVED TABLE or a CTE REFERENCE and the
-// rewrite does not fire, so the re-run fallback answers it — reading the whole
-// inner relation once per outer row.
+// TestEveryCorrelatedInnerIsReadOnce is the DELETED pin of deferral D2, kept
+// as its inverse — which is the fix's proof (#852).
 //
-// Both halves are asserted, because the pair is the finding. The base-table
-// spelling is the property the arc bought (ONE read, flat in outer rows); the
-// other two are the boundary of what it bought, and the census cannot see them
-// because a census compares ANSWERS and all three answers are right.
+// It used to assert the defect: the decorrelators lowered a correlated EXISTS
+// whose FROM was a BASE TABLE and only that, so the same subquery over a
+// DERIVED TABLE or a CTE REFERENCE fell back to the per-row re-run and read
+// the whole inner relation once for every outer row — measured at 2N+1 reads
+// for N outer rows against a flat 3 for the spelling that lowered. All three
+// answers were right, which is why no answer-comparing gate could see it; a
+// fetch count is exact and it is the quantity the cost is linear in.
 //
-// What flips this pin: teaching decorrelateExists (and its IN and scalar
-// siblings, internal/planner/logical/optimizer.go) to match a subquery whose
-// FROM is a derived table or a CTE reference rather than only NodeScan. When
-// that lands, the derived and CTE arms read the inner ONCE and the two
-// "want ... per outer row" assertions below fail — deleting them is the proof.
-//
-// The cost this bounds, measured (see REPORT.md, issue text 2): the SAME shape
-// under a 512 KiB budget with an inner file larger than the whole budget pays
-// physical.fileLoadReserveWait — 2 seconds — on EVERY one of those reads,
-// because memory.ReserveOrForce waits out a reservation that cannot succeed.
-// One outer row per 2 seconds is what took the round-0 census past its
-// 30-minute timeout. TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow
-// below reaches that, at the smallest size that reaches it.
-func TestCorrelatedRerunReadsTheInnerOncePerOuterRow(t *testing.T) {
+// The build side is now the subquery's OWN PLAN (logical.decorrelatedInnerPlan
+// over the builder's buildFromClause), so all three spellings read the inner
+// ONCE for the join build, whatever the outer row count. Revert that and the
+// derived and CTE arms go back to one read per outer row and this fails.
+func TestEveryCorrelatedInnerIsReadOnce(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range []struct {
 		name string
 		sql  string
-		// perOuterRow says whether the inner relation is read once for the
-		// whole query or once for each row of d5_outer.
-		perOuterRow bool
 	}{
-		{"base table inner: decorrelated", arcD5RerunOverBase, false},
-		{"derived table inner: re-run", arcD5RerunOverDerived, true},
-		{"cte reference inner: re-run", arcD5RerunOverCTE, true},
+		{"base table inner", arcD5RerunOverBase},
+		{"derived table inner", arcD5RerunOverDerived},
+		{"cte reference inner", arcD5RerunOverCTE},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Two outer sizes, because the SHAPE of the growth is the claim.
@@ -172,37 +168,18 @@ func TestCorrelatedRerunReadsTheInnerOncePerOuterRow(t *testing.T) {
 					t.Fatalf("outer=%d: %v", outerRows, err)
 				}
 				if got := fmt.Sprint(res.Rows[0][res.Columns[0]]); got != fmt.Sprint(outerRows) {
-					// Every spelling is right regardless of how it is executed;
-					// that is exactly why only a cost probe can see the gap.
 					t.Fatalf("outer=%d: count(*) = %s, want %d", outerRows, got, outerRows)
 				}
 				counts[outerRows] = store.gets.Load()
 			}
 			t.Logf("inner-file reads: outer=8 -> %d, outer=16 -> %d", counts[8], counts[16])
 
-			if tc.perOuterRow {
-				// Measured at this tip: 2N+1 reads for N outer rows (17 and 33).
-				// The assertion is "at least one per row" so that a re-run which
-				// reads its inner more cheaply still counts as the defect.
-				if counts[8] < 8 || counts[16] < 16 {
-					t.Errorf("re-run shape read the inner %d/%d times for 8/16 outer rows;\n"+
-						"  want at least one read per outer row. If the decorrelator now "+
-						"covers a derived-table or CTE inner, this pin has been fixed: "+
-						"delete it and say so (D5 deferral D2).",
-						counts[8], counts[16])
-				}
-				if counts[16] <= counts[8] {
-					t.Errorf("re-run shape read the inner %d times for 8 outer rows and %d "+
-						"for 16; the cost must grow with the outer row count or this is "+
-						"no longer the re-run fallback", counts[8], counts[16])
-				}
-				return
-			}
-			// The decorrelated shape: the inner relation is read for the join
-			// build, once, no matter how many outer rows probe it.
 			if counts[8] != counts[16] {
-				t.Errorf("decorrelated shape read the inner %d times for 8 outer rows and "+
-					"%d for 16; a decorrelated EXISTS reads its inner once", counts[8], counts[16])
+				t.Errorf("read the inner %d times for 8 outer rows and %d for 16; a "+
+					"decorrelated correlated subquery reads its inner ONCE, however many "+
+					"outer rows probe it. A count that grows with the outer rows means the "+
+					"rewrite declined and the per-row re-run answered (#852).",
+					counts[8], counts[16])
 			}
 			// Measured at this tip: 3, and 3 for either outer size. The bound
 			// is deliberately a small constant rather than the exact number —
@@ -210,9 +187,8 @@ func TestCorrelatedRerunReadsTheInnerOncePerOuterRow(t *testing.T) {
 			// outer rows, and a scan that splits its reads differently is not
 			// this defect coming back.
 			if counts[8] > 4 {
-				t.Errorf("decorrelated shape read the inner %d times for 8 outer rows; "+
-					"want a small constant (3 at the time of writing), not a per-row re-read",
-					counts[8])
+				t.Errorf("read the inner %d times for 8 outer rows; want a small constant "+
+					"(3 at the time of writing), not a per-row re-read", counts[8])
 			}
 		})
 	}
@@ -226,8 +202,13 @@ func TestCorrelatedRerunReadsTheInnerOncePerOuterRow(t *testing.T) {
 // The condition is the CONJUNCTION of two independent defects, and neither one
 // alone is expensive:
 //
-//  1. planner — the shape above: a derived-table inner is not decorrelated, so
-//     the inner file is loaded once per outer row.
+//  1. planner — a correlated subquery the decorrelators do not lower is re-run
+//     from the top for every outer row, so the inner file is loaded once per
+//     row. The shape that reached it used to be a DERIVED-TABLE inner; that
+//     one now lowers (#852), so this pin drives the re-run through the
+//     position that still does not lower — an aggregate ARGUMENT, which is not
+//     a decorrelation site at all (deferral D1, #734's residual). The two are
+//     the same re-run and the same cost; only the reason it is reached moved.
 //  2. memory — internal/engine/memory.ReserveOrForce waits the caller's full
 //     relief timeout (physical.fileLoadReserveWait, 2s) for a reservation of n
 //     bytes against a budget SMALLER THAN n. That reservation cannot succeed:
@@ -238,10 +219,10 @@ func TestCorrelatedRerunReadsTheInnerOncePerOuterRow(t *testing.T) {
 // and at this tip: forced == outer rows, one reservation of 933732 bytes
 // against a 524288-byte budget, wall == 2s x outer rows.
 //
-// What flips this pin: fixing EITHER defect. Decorrelating the derived-table
-// inner drops forced to 1; short-circuiting ReserveOrForce when n > budget
-// drops the wall to ~0 while forced stays at the outer row count. The pin
-// asserts the two separately so the failure names which one moved.
+// What flips this pin: fixing EITHER defect. Making the aggregate argument a
+// decorrelation site drops forced to 1; short-circuiting ReserveOrForce when
+// n > budget drops the wall to ~0 while forced stays at the outer row count.
+// The pin asserts the two separately so the failure names which one moved.
 //
 // Deliberately two outer rows. The defect is per-row and constant per row, so
 // two rows prove the multiplication that twenty would only prove more slowly.
@@ -262,7 +243,7 @@ func TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow(t *testing.T) {
 	// of the file, not of the query.
 	db, store := arcD5RerunFixture(t, ctx, budget, outerRows, 60000, 120)
 	slog.SetDefault(slog.New(counter))
-	res, err := db.Query(ctx, arcD5RerunOverDerived)
+	res, err := db.Query(ctx, arcD5RerunInAnAggregateArgument)
 	slog.SetDefault(prev)
 	if err != nil {
 		t.Fatalf("query: %v", err)

@@ -9,7 +9,9 @@ short: the CTE scope the collectors could not see (§1d), the re-run's typed
 outer values (§1e), the correlated NOT IN an anti join cannot express (§1f),
 the aggregate argument that asked for no outer scope (§1g), the LATERAL whose
 empty input still answers (§1h), and what that arc measured and did not move
-(§1i).
+(§1i). §1j (2026-09-04) gives the answer §1a and §1b declined to give — the
+build side is the subquery's own FROM clause as a plan — and SUPERSEDES both
+declines for every relation but a recursive CTE (#852, #616).
 
 ## Context
 
@@ -117,6 +119,10 @@ defect one layer down.
 
 ### 1a. A relation the rewrite cannot BUILD is declined too
 
+(SUPERSEDED by §1j, 2026-09-04: the rewrite now BUILDS it. This section
+records why the decline was right while the build side was assembled out of
+`NewScan`, and the defect that made the decline necessary.)
+
 Naming is not the only thing the rewrites get from the subquery. Each of them
 turns the subquery's FROM/JOIN list into Scan nodes directly —
 `NewScan(info.Tables[0].Name, …)` — and a DERIVED TABLE is not a name a Scan
@@ -142,6 +148,10 @@ pre-reorder guess, which is exactly the silent wrong answer §1 exists to
 remove. A CTE name has the same exposure by a different spelling; §1b covers it.
 
 ### 1b. A CTE name is declined too, and a recursive CTE is refused downstream
+
+(SUPERSEDED IN PART by §1j, 2026-09-04: an ordinary CTE reference is now
+BUILT into the build side. The RECURSIVE half stands unchanged — it is the
+one relation §1j still declines, and the reason is this section's.)
 
 A CTE reference is `NewScan(cteName)` — a table the catalog has never heard of,
 the same empty-build failure §1a describes, but spelled as a bare identifier
@@ -683,6 +693,131 @@ the record is a fixture rather than a memory.
   (ADR-0024's rung), not a correlation one, and the census pins all three
   boxes side by side.
 
+### 1j. The build side is the subquery's OWN FROM clause, as a plan
+
+(Added 2026-09-04, #852 / #616. This is the answer §1a and §1b declined to
+give, and it SUPERSEDES both declines — read those two sections as the record
+of why the decline was right at the time, not as current behaviour.)
+
+Every one of the three decorrelations assembled its build side out of
+`NewScan(info.Tables[0].Name, …)` plus one `Scan` per explicit `JOIN`. That is
+a model of a FROM clause with three holes in it:
+
+- a **derived table** has no name a Scan can hold (§1a),
+- a **CTE reference** has the same exposure spelled as a bare identifier (§1b),
+- a **comma list** past its first entry was dropped outright, and the
+  equalities that would have joined it stayed in the subquery's WHERE, where
+  `innerOnlyPredicate` declines a condition naming two inner relations.
+
+§1a and §1b closed the first two by DECLINING them, which is right and slow:
+the subquery stays a per-row predicate and the re-run reads the whole inner
+relation once for every outer row. Measured with an object-store read counter
+over an 8- and a 16-row outer, all three spellings of one question:
+
+| subquery `FROM` | reads, 8 outer rows | 16 outer rows |
+|---|---|---|
+| base table | 3 | 3 |
+| derived table | 17 | 33 | 
+| CTE reference | 17 | 33 |
+
+`2N+1` against a flat 3, with both DAG arms routing the plan to the
+coordinator-local pipeline. The answers were all right, which is why no
+answer-comparing gate could see it (#852).
+
+**The build side is now the subquery's own plan.** `logical.buildFromClause`
+is the BUILDER's own FROM assembly, extracted so the decorrelations call
+exactly what a top-level query calls — so a derived table, a CTE reference, a
+comma list and an explicit JOIN plan there the way they plan anywhere else.
+`innerRelationsAreScannable` retires; what is left of it is
+`innerRelationsAreBuildable`, whose decline list is one entry long: a
+RECURSIVE CTE, which is a tagged scan the physical planner resolves by
+fixed-point iteration from a cache a semi-join build side is not prepared
+through. That decline is also what keeps the materialized-IN route's own
+recursive refusal reachable (§1b, `physical/in_subquery_set.go`).
+
+Two things had to follow, and they are the whole of §1's delicacy:
+
+**Names.** A derived table's or a CTE's subtree ROOT is a Project, and the
+enclosing query calls its columns by the SCOPE it gave that arm — `d.k`, not
+`d5_inner.k`. `emittedColumns` now reads that scope off the node it is
+standing on (`DerivedAlias`, `CTERefAlias`, `CTEName` — a CTE records it on the
+root and a derived table on the root AND the scans, §1d), and re-owns every
+column the root emits to it. Without that, `spellInner` reports "unresolved"
+for `d.k`, the rewrite keeps its pre-reorder guess, and that is exactly the
+silent wrong answer §1 exists to remove.
+
+**A comma inner's equalities are JOIN CONDITIONS, not filters.** Built as
+written they are condition-less cross joins with the equalities left in the
+subquery's WHERE. `liftWhereEquiPredsIntoJoins` is the pass that already fixes
+that shape one level up, so `decorrelatedInnerPlan` runs it HERE, on the
+freshly built subtree, before the inner-only conditions are classified — which
+is the ORDER this decision has always implied and #616 asked for. Two
+consequences are load-bearing:
+
+- The lift attributes an UNQUALIFIED column to its relation from the scan's
+  own column list, so the subtree is ANNOTATED first. It is annotated ONLY on
+  this path and only when something needs lifting: annotating every inner
+  subtree would hand `reorderJoins` statistics it did not have before, which
+  moves the join order of plans that have nothing to do with a comma inner
+  (TPC-H Q2's explicit-JOIN spelling was the one that showed it).
+- Whatever the lift cannot attribute is DECLINED, not left above the join. A
+  qualified residual there names a column the join emits bare, which
+  `expr.ResolveColumnRef` resolves by stripping the qualifier — onto whichever
+  relation the reorderer put on the probe. `everyLiftedPredicateLanded` is the
+  check, so the boundary is asserted rather than assumed.
+
+**A latent defect one layer down became reachable and is fixed with it.**
+`extractRightJoinKeys` (§3's narrowing) decided which side of each equality is
+the build key by walking `collectSubtreeColumns` — every column the subtree
+READS anywhere. That differs from what its ROOT EMITS exactly where a Project
+renames: over `(SELECT c_bool AS k FROM typemx GROUP BY c_bool) b`, the read
+set holds `c_bool` and the emitted set holds `k`, so `c_bool = k` attributed
+the BUILD key to `c_bool` and projected a column the build root does not have
+— `column "c_bool" does not exist in the input schema`, at build time, on
+every arm. Side membership now reads `emittedColumns`, with the read set as
+the fallback for an un-annotated subtree (a decline at worst).
+
+**The boundary, and it is drawn wider than the shape that was caught.** A
+derived table or a CTE reference JOINED to another relation is DECLINED. The
+build side would then carry TWO renamings — the join's own, and the derived
+arm's Project, whose published name is one no scan below it produces — and
+while the model above tracks both, the stage DAG's carried-column derivation
+does not. It answers a DIFFERENT number rather than failing:
+
+```sql
+SELECT COUNT(*) FROM nation a WHERE a.n_nationkey IN (
+  SELECT s.k FROM (SELECT c.n_nationkey AS k, c.n_regionkey AS rk FROM nation c) s
+  JOIN nation b ON b.n_regionkey = s.rk WHERE s.k < 3)
+-- PostgreSQL 17 and the single-process arm: 3.  Stage DAG: 10.
+```
+
+The two-path invariance oracle is what caught it, on the first run after the
+build side started planning derived tables. The spelling that puts the derived
+arm on the PROBE agrees today, and that is the reason BOTH decline rather than
+only the one measured: which arm goes where is `reorderJoins`' decision from
+row counts, so a cut drawn there would move under the fixture. Closing it is
+`physical/join_carried_columns.go`, not this rewrite.
+
+**What it costs, measured rather than assumed.** A re-run builds no hash
+table; the join that replaces it does. Under the correlation census's 512 KiB
+arm three comma-inner cells that answered before now REFUSE past the budget —
+`build_rows=15` against `used=498058` on the 40-row fixture, so what fills the
+budget is the plan's other operators rather than the build — and the same
+queries answer at 1 MiB. That is ADR-0006's designed answer to a plan whose
+floor exceeds its budget, not a wrong one, and #823 names the part that cannot
+be evicted (a grace eviction frees build columns, not index entries). All
+three are pinned with `wantErrLikeSpilled` so the day the floor drops they
+fail. A fourth cell — the correlated SCALAR over a derived table, which adds an
+Aggregate and a LEFT JOIN — sits ON the floor rather than above or below it
+and both answered and refused across census runs, so its budgeted arm is
+dropped with that measurement recorded instead of a coin flip pinned.
+
+**What it buys, per shape:** every derived-table, CTE-reference and
+comma-joined correlated inner in the census moves from ONE
+`CorrelatedLocalRoutes` to zero — both DAG arms execute them — and the inner
+relation is read once instead of once per outer row. The answers are
+unchanged, which is the point: only the counter and the read count can see it.
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is
@@ -844,6 +979,7 @@ class the invariance oracle enumerates, and the oracle would have reported
   matches nothing), #578 (a CORRELATED `NOT IN` answers its `NOT EXISTS`
   twin — #507's remainder, closed by §1f) and #584 (an unqualified outer
   conjunct pushed onto a decorrelated EXISTS's subquery scan)
+- §1j: #852 (the derived / CTE / comma inner the build side now plans), #616
 - The producer half, §1d–§1i: #535 (the CTE scope), #679 (the typed re-run),
   #538 / #578 / #539 (correlated `NOT IN`), #734 (the aggregate argument),
   #767 (LATERAL over an empty input), #809 / #601 (an aggregate in a
