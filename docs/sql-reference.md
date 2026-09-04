@@ -2050,10 +2050,15 @@ Three properties are worth knowing:
 - A **scalar** subquery is at most ONE row. Zero rows is SQL `NULL`; more than
   one is SQLSTATE `21000`, `more than one row returned by a subquery used as an
   expression`, and nothing is written. The same rule applies in a `SELECT`.
-- The subquery's result is **bounded** by `WADJET_IN_SET_MAX` (default 10,000
-  rows; `0` disables the bound). Past it the statement is refused with SQLSTATE
-  `54000` and writes nothing — a set short by one row would delete the wrong
-  rows, so the bound refuses rather than truncating.
+- An `IN` / `NOT IN` subquery's **set** is bounded by `WADJET_IN_SET_MAX`
+  (default 10,000 rows; `0` disables the bound). Past it the statement is
+  refused with SQLSTATE `54000` and writes nothing — a set short by one row
+  would delete the wrong rows, so the bound refuses rather than truncating.
+  The bound is on the SET, so it does not reach the other constructs:
+  `EXISTS` asks whether there is A row and reads one, and a scalar subquery
+  reads two — enough for the `21000` above, which is the code it raises past
+  the bound as well, because what is wrong there is the query's meaning and
+  not its size.
 
 ### UPDATE
 

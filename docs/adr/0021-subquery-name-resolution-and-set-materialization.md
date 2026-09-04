@@ -1000,6 +1000,21 @@ rows are neither one per task nor one per file, and a SINGLE-row producer can
 surface in more than one file, so a count taken there is unsound in both
 directions. The lever the deferral exists for is untouched.
 
+**How much a construct READS is part of the rule** (added round 2). `> 1` is
+the whole cardinality test, so the second row decides it and the read stops
+there (`plansql.AppendRowLimit`, `LIMIT 2`); `EXISTS` asks whether there is A
+row and reads one. This is not only an efficiency: the DML doors bound what a
+subquery may return (`WADJET_IN_SET_MAX`, ADR-0031's amendment), and a bound
+applied to every construct alike refused `DELETE … WHERE EXISTS (SELECT 1 FROM
+big)` where PostgreSQL answers, and reported a multi-row scalar subquery as
+**54000** — a resource complaint — where the rule above says **21000**, a
+statement about the data. A bound belongs to the construct that wants what it
+bounds: `IN` wants a SET and keeps it (`expr.WithSetRowBound`, on the node and
+not in the runner, because a runner sees SQL text and cannot tell which
+construct asked). The append is declined where a trailing `LIMIT` would not be
+an append — the subquery already carries `LIMIT`/`OFFSET`, or is a `UNION` —
+because bounding a READ must never change a QUERY.
+
 ### 5a. An ALIAS hides its table name — §1c's boundary, closed
 
 §1c recorded a shape it could not close and said what closing it needed: *"No

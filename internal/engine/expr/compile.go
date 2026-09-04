@@ -54,6 +54,19 @@ type compileContext struct {
 	// nil means "not known", which is every caller that cannot plan a
 	// subquery — the compile then classifies as it always did.
 	subqueryDecl SubqueryDeclFunc
+	// setRowBound bounds the MEMBERSHIP SET an IN-subquery may build, in
+	// rows. Zero means unbounded, which is every caller that does not ask.
+	//
+	// It sits on the IN constructs and nowhere else because it is a bound on
+	// a SET, and IN is the only construct that wants one: EXISTS wants to
+	// know whether there is a row and a scalar subquery is an error past one,
+	// so both read a bounded number of rows by construction
+	// (plansql.AppendRowLimit) and neither is charged for a set it never
+	// builds. Bounding them anyway refused `DELETE ... WHERE EXISTS (SELECT 1
+	// FROM big)` where PostgreSQL answers, and reported a multi-row scalar
+	// subquery as 54000 — a resource complaint — where this engine's own rule
+	// is 21000, a statement about the data.
+	setRowBound int
 }
 
 // SubqueryDeclFunc resolves a scalar subquery's SQL to the declared type of
@@ -105,6 +118,22 @@ func WithBudget(budget MemoryAccountant, release func(*InSubquery)) CompileOptio
 		c.budget = budget
 		c.trackInSubquery = release
 	}
+}
+
+// WithSetRowBound bounds the membership set an IN-subquery may build, in
+// rows, and refuses past it rather than truncating: a set short by one row is
+// a different answer, and on a write door it deletes the wrong rows.
+//
+// It is the DML doors' knob (`WADJET_IN_SET_MAX`, the same number the query
+// path gives its own inlining) and it is applied HERE, at the construct, and
+// not in the runner those doors hand the compiler — a runner sees SQL text
+// and cannot tell which construct asked, so bounding there charged EXISTS and
+// a scalar subquery for rows neither reads. n <= 0 leaves the set unbounded.
+func WithSetRowBound(n int) CompileOption {
+	if n <= 0 {
+		return nil
+	}
+	return func(c *compileContext) { c.setRowBound = n }
 }
 
 func applyCompileOptions(c *compileContext, opts []CompileOption) *compileContext {
@@ -424,11 +453,13 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 								OuterTables:     ctx.outerTables,
 								ParsedInfo:      info,
 								UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
+								SetBound:        ctx.setRowBound,
 							}, nil
 						}
 					}
 				}
-				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not, Budget: ctx.budget}
+				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not,
+					Budget: ctx.budget, SetBound: ctx.setRowBound}
 				if ctx.trackInSubquery != nil {
 					ctx.trackInSubquery(in)
 				}

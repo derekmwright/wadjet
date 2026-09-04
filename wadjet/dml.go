@@ -3163,6 +3163,21 @@ func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
 	// allocation on a write door that nothing accounted for.
 	p.EnsureMemoryTracker()
 	_, innerCols, opts := p.SubqueryEnv(ctx)
+	// THE SET IS BOUNDED HERE because nothing else bounds it. The query
+	// path's `WADJET_IN_SET_MAX` guards the planner's INLINING of an IN-set
+	// into filter text (physical/in_subquery_set.go); this door takes no such
+	// path — `expr.InSubquery` builds a membership map from whatever the
+	// runner returns — so before this line
+	// `DELETE FROM t WHERE id IN (SELECT id FROM huge)` pulled every id into
+	// coordinator memory with no budget and no cap, on a WRITE door, where
+	// the arc's own base had no set at all.
+	//
+	// On the CONSTRUCT and not in the runner: a runner sees SQL text and
+	// cannot tell whether IN, EXISTS or a scalar comparison asked for it, so
+	// bounding there refused `DELETE ... WHERE EXISTS (SELECT 1 FROM big)` —
+	// a question one row answers — and reported a multi-row scalar subquery
+	// as 54000 where this engine's own rule is 21000.
+	opts = append(opts, expr.WithSetRowBound(physical.MaxInlinedInSetRows()))
 	return &DMLSubqueryEnv{Runner: db.dmlSubqueryRunner(ctx), InnerCols: innerCols, Opts: opts}
 }
 
@@ -3177,30 +3192,16 @@ func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
 // would answer `DELETE 0` where PostgreSQL raises 42P01 — and `NOT IN` would
 // have deleted every row. DB.Query validates the relation and raises. One
 // door, one answer to "what does this subquery mean".
+//
+// What it does NOT do is decide how many rows a subquery may return. That is
+// the CONSTRUCT's question — IN wants a set and is bounded, EXISTS wants a row
+// and a scalar subquery is an error past one — and this function cannot see
+// which one asked (dmlSubqueryEnv, expr.WithSetRowBound).
 func (db *DB) dmlSubqueryRunner(ctx context.Context) expr.SubqueryRunner {
-	bound := physical.MaxInlinedInSetRows()
 	return func(sql string) ([]map[string]any, error) {
 		res, err := db.Query(ctx, sql)
 		if err != nil {
 			return nil, err
-		}
-		// THE SET IS BOUNDED HERE because nothing else bounds it. The query
-		// path's `WADJET_IN_SET_MAX` guards the planner's INLINING of an
-		// IN-set into filter text (physical/in_subquery_set.go); this door
-		// takes no such path — `expr.InSubquery` builds a membership map from
-		// whatever this runner returns — so before this line
-		// `DELETE FROM t WHERE id IN (SELECT id FROM huge)` pulled every id
-		// into coordinator memory with no budget and no cap, on a WRITE door,
-		// where the arc's own base had no set at all.
-		//
-		// A refusal past the bound and not a truncation: a set short by one
-		// row deletes the wrong rows. 0 disables the bound, the same spelling
-		// the query path gives it.
-		if bound > 0 && len(res.Rows) > bound {
-			return nil, sqlerr.New("54000",
-				"a subquery in a DML predicate returned %d rows, past the %d-row bound "+
-					"(WADJET_IN_SET_MAX); narrow the subquery or raise the bound",
-				len(res.Rows), bound)
 		}
 		return res.Rows, nil
 	}

@@ -33,6 +33,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/geoip"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"golang.org/x/net/publicsuffix"
 )
@@ -5904,9 +5905,18 @@ func (e *ScalarSubquery) resolveSlow() {
 	// u.did) > 0` over a CTE was planned here and answered a query-wide
 	// constant 0 on all four arms (#535).
 	refuseDanglingSubquery("scalar", e.SQL)
-	rows, err := e.Runner(e.SQL)
+	// TWO ROWS, not the whole result: `> 1` is the entire cardinality rule,
+	// so the read stops where the answer is known (plansql.AppendRowLimit).
+	// e.SQL — not the bounded text — is what every error below names, because
+	// the bound is this engine's business and the query is the user's.
+	rows, err := e.Runner(plansql.WithRowLimit(e.SQL, 2))
 	if err != nil {
 		failEval(&SubqueryRunFailedError{Kind: "scalar", SQL: e.SQL, Err: err})
+	}
+	if len(rows) > 1 {
+		// Reported with no count: the read stopped on purpose, so this site
+		// knows "more than one" and not how many more.
+		failEval(&ScalarSubqueryRowsError{SQL: e.SQL})
 	}
 	v, cardErr := ScalarSubqueryValue(e.SQL, rows)
 	if cardErr != nil {
@@ -5958,6 +5968,17 @@ type InSubquery struct {
 	// refuses a nil release hook rather than construct that state; the
 	// teardown point is PhysicalPlan.Cleanup.
 	Budget MemoryAccountant
+	// SetBound bounds the membership set in ROWS, refusing past it rather
+	// than truncating — a set short by one row is a different answer, and on
+	// a write door it deletes the wrong rows. Zero is unbounded.
+	//
+	// It lives on this construct and not in the runner because a runner sees
+	// SQL text and cannot tell which construct asked for it. IN is the one
+	// that wants a SET; EXISTS wants a row and a scalar subquery is an error
+	// past one, and both read a bounded number of rows by construction now
+	// (plansql.AppendRowLimit). Bounding all three in the runner charged
+	// those two for a set neither builds.
+	SetBound int
 	// resolved publishes the set: stored last under resolveMu. Same
 	// contract, and the same defect, as ScalarSubquery's (#398) — an
 	// unsynchronized flag let a parallel worker probe a half-built map.
@@ -6234,6 +6255,9 @@ func (e *InSubquery) resolveSlow() {
 		// answering FALSE for every row is a confident wrong one.
 		failEval(&SubqueryRunFailedError{Kind: "IN", SQL: e.SQL, Err: err})
 	}
+	if e.SetBound > 0 && len(rows) > e.SetBound {
+		failEval(&InSetTooLargeError{SQL: e.SQL, Rows: len(rows), Bound: e.SetBound})
+	}
 	// Collect values and detect predominant type for hash set
 	var rawVals []any
 	{
@@ -6493,7 +6517,8 @@ func (e *ExistsSubquery) resolveSlow() {
 	// according to whether the two relations happened to share a column name.
 	// Checked once here, where it costs one parse per query (#734/#679/#535).
 	refuseDanglingSubquery("EXISTS", e.SQL)
-	rows, err := e.Runner(e.SQL)
+	// ONE ROW. EXISTS asks whether there is a row; the first one answers it.
+	rows, err := e.Runner(plansql.WithRowLimit(e.SQL, 1))
 	if err != nil {
 		// `err == nil && len(rows) > 0` made a failure indistinguishable
 		// from an empty result. They are not the same thing.

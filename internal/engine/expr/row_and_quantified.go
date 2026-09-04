@@ -218,9 +218,11 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 			}
 			switch {
 			case op == CmpEq && !all:
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Budget: ctx.budget}, nil
+				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner,
+					Budget: ctx.budget, SetBound: ctx.setRowBound}, nil
 			case op == CmpNe && all:
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: true, Budget: ctx.budget}, nil
+				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: true,
+					Budget: ctx.budget, SetBound: ctx.setRowBound}, nil
 			}
 			return nil, sqlerr.New("0A000",
 				"%s %s (subquery) is not supported; only `= ANY` and `<> ALL` over a subquery are", n.Op, n.Modifier)

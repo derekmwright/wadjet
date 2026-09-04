@@ -60,6 +60,90 @@ func TestADMLSubquerysResultIsBounded(t *testing.T) {
 	assertArcbPr(t, ctx, db, "2 3", "the control must have deleted row 1")
 }
 
+// TestTheDMLBoundIsOnTheSetAndNotOnEveryDMLSubquery is the other half of the
+// bound: it is a bound on a SET, and only one of the four subquery constructs
+// asks for one.
+//
+// EXISTS asks whether there is A row. A scalar subquery is an ERROR past ONE.
+// Bounding those the way an IN-set is bounded charged them for rows neither
+// would ever look at, and the charge was a WRONG ANSWER twice over:
+//
+//	DELETE ... WHERE EXISTS (SELECT 1 FROM big)   refused (54000) where
+//	                                              PostgreSQL answers
+//	DELETE ... WHERE n < (SELECT n FROM big)      reported 54000 where this
+//	                                              engine's own rule is 21000
+//
+// The second is the worse one, because 54000 is a resource complaint and
+// 21000 is a statement about the data: a client that reads the code learns
+// the wrong thing about its own query. Two rows is all the cardinality rule
+// needs, and it needs them whatever the bound says.
+//
+// The read is bounded at the construct now (plansql.AppendRowLimit), so
+// neither reaches the runner's cap at all. IN keeps it — IN really does need
+// the set — which the test above gates.
+//
+// WADJET_IN_SET_MAX=1 with a two-row arcb_src puts every cell here one row
+// past the bound, which is how the whole file can run on the census fixture.
+func TestTheDMLBoundIsOnTheSetAndNotOnEveryDMLSubquery(t *testing.T) {
+	t.Setenv("WADJET_IN_SET_MAX", "1")
+	ctx := context.Background()
+
+	// An EXISTS past the bound ANSWERS, on each of the three doors.
+	answers := []struct {
+		name, sql, want, why string
+	}{
+		{"delete EXISTS", "DELETE FROM arcb_pr WHERE EXISTS (SELECT 1 FROM arcb_src)",
+			"", "arcb_src has rows, so every arcb_pr row goes"},
+		{"delete NOT EXISTS", "DELETE FROM arcb_pr WHERE NOT EXISTS (SELECT 1 FROM arcb_src)",
+			"1 2 3", "arcb_src has rows, so NOT EXISTS matches nothing"},
+		{"delete correlated EXISTS", "DELETE FROM arcb_pr WHERE EXISTS " +
+			"(SELECT 1 FROM arcb_src s WHERE s.id <> arcb_pr.id)",
+			"", "every outer row has a non-matching src row, and rows 2 and 3 have two"},
+		{"update EXISTS", "UPDATE arcb_pr SET n = 0 WHERE EXISTS (SELECT 1 FROM arcb_src)",
+			"1 2 3", "an UPDATE writes values, not rows — the ids stay"},
+		{"merge EXISTS", "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+			"WHEN MATCHED AND EXISTS (SELECT 1 FROM arcb_src) THEN DELETE",
+			"2 3", "arcb_src matches arcb_pr row 1 only"},
+	}
+	for _, c := range answers {
+		t.Run(c.name, func(t *testing.T) {
+			db := newCensusDB(t)
+			if _, err := db.Execute(ctx, c.sql); err != nil {
+				t.Fatalf("an EXISTS asks whether there is A row and must not be charged for "+
+					"a set it never builds; this refused past WADJET_IN_SET_MAX: %v", err)
+			}
+			assertArcbPr(t, ctx, db, c.want, c.why)
+		})
+	}
+
+	// A multi-row scalar subquery past the bound is 21000, not 54000 — on
+	// each of the three doors, and correlated as well as not.
+	cardinality := []struct{ name, sql string }{
+		{"delete scalar", "DELETE FROM arcb_pr WHERE n < (SELECT n FROM arcb_src)"},
+		{"delete correlated scalar", "DELETE FROM arcb_pr WHERE n < " +
+			"(SELECT s.n FROM arcb_src s WHERE s.id <> arcb_pr.id)"},
+		{"update scalar", "UPDATE arcb_pr SET n = 0 WHERE n < (SELECT n FROM arcb_src)"},
+		{"merge scalar", "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+			"WHEN MATCHED AND t.n < (SELECT n FROM arcb_src) THEN DELETE"},
+	}
+	for _, c := range cardinality {
+		t.Run(c.name, func(t *testing.T) {
+			db := newCensusDB(t)
+			_, err := db.Execute(ctx, c.sql)
+			if err == nil {
+				t.Fatal("a scalar subquery over two rows must raise, never take the first row")
+			}
+			if got := sqlerr.StateOf(err); got != "21000" {
+				t.Errorf("SQLSTATE %q, want 21000 (cardinality_violation): the second row "+
+					"decides this, and it decides it before any resource bound does — "+
+					"54000 here tells a client its query is too big when what is wrong "+
+					"is its meaning\n  %v", got, err)
+			}
+			assertArcbPr(t, ctx, db, "1 2 3", "the refused statement writes nothing")
+		})
+	}
+}
+
 // assertArcbPr reads arcb_pr's ids back and compares them to a
 // space-separated list.
 func assertArcbPr(t *testing.T, ctx context.Context, db *wadjet.DB, want, why string) {

@@ -38,12 +38,21 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 	if err != nil {
 		failEval(err)
 	}
-	rows, runErr := e.Runner(sql)
+	// TWO ROWS, not the whole result: `> 1` is the entire cardinality rule
+	// (ADR-0021 §5), so the second row is where the answer is already known.
+	// The bound is on the READ and not on the rule — a third row raises the
+	// same 21000 the tenth would.
+	rows, runErr := e.Runner(plansql.AppendRowLimit(sql, e.ParsedInfo, 2))
 	if runErr != nil {
 		// NOT NULL. A scalar subquery that could not be run has no value,
 		// and NULL is a value — one that makes every comparison above it
 		// UNKNOWN and the row silently vanish.
 		failEval(&SubqueryRunFailedError{Kind: "scalar", SQL: sql, Err: runErr})
+	}
+	if len(rows) > 1 {
+		// Reported with no count: the read stopped on purpose, so this site
+		// knows "more than one" and not how many more.
+		failEval(&ScalarSubqueryRowsError{SQL: sql})
 	}
 	v, err := ScalarSubqueryValue(sql, rows)
 	if err != nil {
@@ -73,6 +82,17 @@ type CorrelatedInSubquery struct {
 	OuterTables     map[string]bool
 	ParsedInfo      *plansql.SelectInfo
 	UnqualOuterCols map[string]string
+	// SetBound bounds the membership set in ROWS, refusing past it rather
+	// than truncating — a set short by one row is a different answer, and on
+	// a write door it deletes the wrong rows. Zero is unbounded.
+	//
+	// It lives on this construct and not in the runner because a runner sees
+	// SQL text and cannot tell which construct asked for it. IN is the one
+	// that wants a SET; EXISTS wants a row and a scalar subquery is an error
+	// past one, and both read a bounded number of rows by construction now
+	// (plansql.AppendRowLimit). Bounding all three in the runner charged
+	// those two for a set neither builds.
+	SetBound int
 }
 
 func (e *CorrelatedInSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -100,6 +120,9 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 		// answer, and returning "not a member" is the third of the three
 		// different wrong answers these evaluators gave to one event.
 		failEval(&SubqueryRunFailedError{Kind: "IN", SQL: sql, Err: runErr})
+	}
+	if e.SetBound > 0 && len(rows) > e.SetBound {
+		failEval(&InSetTooLargeError{SQL: sql, Rows: len(rows), Bound: e.SetBound})
 	}
 
 	// The EMPTY set decides before the probe's own NULL does. `x IN ()` is
@@ -165,7 +188,9 @@ func (e *CorrelatedExistsSubquery) EvalBool(b *batch.RecordBatch, row int) bool 
 	if err != nil {
 		failEval(err)
 	}
-	rows, runErr := e.Runner(sql)
+	// ONE ROW. EXISTS asks whether there is a row, so the first one answers
+	// it; nothing above this line has ever looked at a second.
+	rows, runErr := e.Runner(plansql.AppendRowLimit(sql, e.ParsedInfo, 1))
 	if runErr != nil {
 		// NOT "does not exist". `runErr == nil && len(rows) > 0` read a
 		// failure as FALSE, so a re-run that raised — #679's quoted DECIMAL
@@ -386,6 +411,33 @@ func (e *ScalarSubqueryRowsError) SQLState() string { return "21000" }
 // FatalEvalError satisfies the marker the pipeline drivers recover on, so
 // this reaches the client as a query error rather than taking the process.
 func (e *ScalarSubqueryRowsError) FatalEvalError() error { return e }
+
+// InSetTooLargeError reports an IN-subquery whose result is past the row
+// bound the caller set (expr.WithSetRowBound).
+//
+// It REFUSES rather than truncating because a membership set short by one row
+// is not a smaller answer, it is a different one — and on a write door it
+// deletes the wrong rows. 54000 is program_limit_exceeded, which is what this
+// is: a limit this engine imposes, named in the message so the reader can
+// raise it.
+type InSetTooLargeError struct {
+	SQL   string
+	Rows  int
+	Bound int
+}
+
+func (e *InSetTooLargeError) Error() string {
+	return fmt.Sprintf(
+		"a subquery in a DML predicate returned %d rows, past the %d-row bound "+
+			"(WADJET_IN_SET_MAX); narrow the subquery or raise the bound\n  subquery: %s",
+		e.Rows, e.Bound, e.SQL)
+}
+
+// SQLState is PostgreSQL's 54000 (program_limit_exceeded).
+func (e *InSetTooLargeError) SQLState() string { return "54000" }
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on.
+func (e *InSetTooLargeError) FatalEvalError() error { return e }
 
 // SubqueryRunFailedError reports a subquery whose standalone execution
 // failed. It is a fatal evaluation error rather than a value because every
