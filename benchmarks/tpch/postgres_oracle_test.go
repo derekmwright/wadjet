@@ -514,7 +514,13 @@ func (o *postgresOracle) createPostgresSchema(t *testing.T, ctx context.Context)
 		}
 		cols := make([]string, 0, len(schema.Columns))
 		for _, c := range schema.Columns {
-			cols = append(cols, c.Name+" "+postgresColumnType(t, c))
+			// QUOTED, so PostgreSQL stores the spelling wadjet stores. Every
+			// fixture but the CamelCase one is lower case already and reads
+			// identically either way; that one is here precisely because its
+			// names are not, and an unquoted declaration would fold them —
+			// the two engines would then hold two different schemas and the
+			// COPY that loads this fixture would not find its own columns.
+			cols = append(cols, `"`+c.Name+`" `+postgresColumnType(t, c))
 		}
 		ddl := fmt.Sprintf("CREATE TABLE %s (%s)", name, strings.Join(cols, ", "))
 		if _, err := o.conn.Exec(ctx, ddl); err != nil {

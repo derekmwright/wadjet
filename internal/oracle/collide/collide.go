@@ -18,7 +18,11 @@
 // rows.
 package collide
 
-import "github.com/derekmwright/wadjet/internal/storage/parquet"
+import (
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
 
 // The three relations. SQLancer's own names, kept, so a dump from it can be
 // replayed against this fixture without renaming anything.
@@ -36,7 +40,33 @@ const (
 	// arms.
 	T4 = "clt4"
 	T5 = "clt5"
+	// TCam is a CamelCase SCHEMA — the shape a parquet-registered table has,
+	// and ClickBench's `hits` exactly. It is here because no DAG or worker
+	// gate put one through `batch.resolveFoldedIndex`'s case-insensitive arm:
+	// the two-path corpora all run on all-lower-case fixtures, so the half of
+	// #731 that keeps ClickBench working never executed on a worker.
+	TCam = "cltcam"
 )
+
+// CamelSchema is TCam's: names a parquet file would carry, not names a DDL
+// would fold.
+func CamelSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "WatchID", Type: parquet.TypeInt64},
+		{Name: "UserID", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "EventDate", Type: parquet.TypeInt32, Nullable: true},
+		{Name: "SearchPhrase", Type: parquet.TypeString, Nullable: true},
+	}}
+}
+
+// CamelData is TCam's rows.
+func CamelData() []map[string]any {
+	return []map[string]any{
+		{"WatchID": int64(1), "UserID": int64(10), "EventDate": int32(20), "SearchPhrase": "abc"},
+		{"WatchID": int64(2), "UserID": int64(10), "EventDate": int32(21), "SearchPhrase": "abd"},
+		{"WatchID": int64(3), "UserID": int64(11), "EventDate": int32(20), "SearchPhrase": "zzz"},
+	}
+}
 
 // CaseSchema is T4's and T5's, parameterized by the case-carrying column's
 // spelling: `MixedCol` in one relation, `mixedcol` in the other.
@@ -113,6 +143,7 @@ func Tables() []FixtureTable {
 		{T2, Schema(), Data(T2)},
 		{T4, CaseSchema("MixedCol"), CaseData(T4)},
 		{T5, CaseSchema("mixedcol"), CaseData(T5)},
+		{TCam, CamelSchema(), CamelData()},
 	}
 }
 
@@ -123,6 +154,16 @@ type Case struct {
 	SQL     string
 	Want    []string
 	Ordered bool
+	// PGSQL is the spelling PostgreSQL needs for the same question, when the
+	// wadjet spelling is one PostgreSQL cannot resolve. It is filled in
+	// automatically for every entry naming a CamelCase column of this fixture
+	// — see pgSpelling — because that unquoted spelling IS the divergence
+	// ADR-0012 records: PostgreSQL matches a folded name exactly against the
+	// catalog, so `clt4.MixedCol` is 42703 there and `clt4."MixedCol"` is the
+	// question it can answer. Every value this corpus asserts is therefore
+	// PostgreSQL's answer to the quoted spelling, which is the contract that
+	// entry states.
+	PGSQL string
 	// Ref is the same question with DISTINCT output names, for the entries
 	// whose own names collide. A result read BY NAME cannot represent two
 	// columns of one name, so the duplicate spelling is compared against its
@@ -137,10 +178,82 @@ type Case struct {
 	Issue    string
 }
 
+// camelColumns are this fixture's stored names that are NOT their own folded
+// form. A reference to one is resolvable unquoted here and only quoted in
+// PostgreSQL.
+//
+// `MixedCol` is matched CASE-SENSITIVELY because clt5 stores a DIFFERENT
+// column spelled `mixedcol`, which needs no quoting and must not be rewritten
+// into clt4's — the whole point of the pair. The rest have no lower-case twin,
+// so a reference to them in any case names the one stored column.
+var camelColumns = []struct {
+	name    string
+	anyCase bool
+}{
+	{"MixedCol", false},
+	{"WatchID", true}, {"UserID", true}, {"EventDate", true}, {"SearchPhrase", true},
+}
+
+// pgSpelling quotes every reference to a CamelCase column of this fixture, in
+// whatever case the entry wrote it, so PostgreSQL resolves the same column.
+// Text already inside double quotes is left alone.
+func pgSpelling(sql string) string {
+	isIdentByte := func(c byte) bool {
+		return c == '_' || (c >= '0' && c <= '9') ||
+			(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	for _, col := range camelColumns {
+		name := col.name
+		var b strings.Builder
+		i, inQuote := 0, false
+		for i < len(sql) {
+			if sql[i] == '"' {
+				inQuote = !inQuote
+				b.WriteByte(sql[i])
+				i++
+				continue
+			}
+			match := false
+			if !inQuote && i+len(name) <= len(sql) &&
+				(i == 0 || !isIdentByte(sql[i-1])) &&
+				(i+len(name) == len(sql) || !isIdentByte(sql[i+len(name)])) {
+				if col.anyCase {
+					match = strings.EqualFold(sql[i:i+len(name)], name)
+				} else {
+					match = sql[i:i+len(name)] == name
+				}
+			}
+			if match {
+				b.WriteString(`"` + name + `"`)
+				i += len(name)
+				continue
+			}
+			b.WriteByte(sql[i])
+			i++
+		}
+		sql = b.String()
+	}
+	return sql
+}
+
+// withPGSpelling fills in PGSQL for every entry whose own spelling PostgreSQL
+// cannot resolve, and leaves an entry that already carries one alone.
+func withPGSpelling(cases []Case) []Case {
+	for i := range cases {
+		if cases[i].PGSQL != "" {
+			continue
+		}
+		if pg := pgSpelling(cases[i].SQL); pg != cases[i].SQL {
+			cases[i].PGSQL = pg
+		}
+	}
+	return cases
+}
+
 // Corpus is the shape list. Each entry names a way two relations that share a
 // bare column name can be confused for one another.
 func Corpus() []Case {
-	return []Case{
+	return withPGSpelling([]Case{
 		{Name: "qualified_ref_no_derived",
 			SQL:  "SELECT MIN(" + T0 + ".c1) AS m FROM " + T0 + ", " + T2,
 			Want: []string{"m=2145758213"}},
@@ -256,12 +369,78 @@ func Corpus() []Case {
 			SQL:     "SELECT " + T1 + ".c2, " + T1 + ".c1 FROM " + T1 + " ORDER BY 2, 1",
 			Ordered: true,
 			Want:    []string{"c2=t1-a c1=7", "c2=t1-b c1=9"}},
+		// A CamelCase SCHEMA, referenced in every case, on every arm. Every
+		// output is ALIASED to a lower-case name on purpose: the PostgreSQL
+		// oracle declares this fixture with unquoted DDL, so PostgreSQL folds
+		// the stored names and only the aliases are comparable between the
+		// two engines. What is under test is the RESOLUTION, which is the
+		// half of #731 that keeps ClickBench working and which no DAG gate
+		// exercised before (round-1 P7).
+		{Name: "camel_bare_reference",
+			SQL:     "SELECT WatchID AS w FROM " + TCam + " ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1", "w=2", "w=3"}},
+		{Name: "camel_folded_reference",
+			SQL:     "SELECT watchid AS w FROM " + TCam + " ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1", "w=2", "w=3"}},
+		{Name: "camel_upper_reference",
+			SQL:     "SELECT WATCHID AS w FROM " + TCam + " ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1", "w=2", "w=3"}},
+		{Name: "camel_in_a_filter",
+			SQL:     "SELECT UserID AS u FROM " + TCam + " WHERE WatchID > 1 ORDER BY u",
+			Ordered: true,
+			Want:    []string{"u=10", "u=11"}},
+		{Name: "camel_qualified",
+			SQL:     "SELECT h.WatchID AS w FROM " + TCam + " h WHERE h.UserID > 0 ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1", "w=2", "w=3"}},
+		{Name: "camel_group_by",
+			SQL: "SELECT EventDate AS d, COUNT(*) AS n FROM " + TCam +
+				" GROUP BY EventDate ORDER BY d",
+			Ordered: true,
+			Want:    []string{"d=20 n=2", "d=21 n=1"}},
+		{Name: "camel_aggregate_input",
+			SQL:  "SELECT MAX(WatchID) AS mx, SUM(UserID) AS s FROM " + TCam,
+			Want: []string{"mx=3 s=31"}},
+		{Name: "camel_sort_key_not_projected",
+			SQL:     "SELECT UserID AS u FROM " + TCam + " ORDER BY WatchID DESC",
+			Ordered: true,
+			Want:    []string{"u=11", "u=10", "u=10"}},
+		{Name: "camel_join_key",
+			SQL: "SELECT a.WatchID AS w FROM " + TCam + " a JOIN " + TCam +
+				" b ON a.WatchID = b.WatchID ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1", "w=2", "w=3"}},
+		{Name: "camel_distinct",
+			SQL:     "SELECT DISTINCT SearchPhrase AS p FROM " + TCam + " ORDER BY p",
+			Ordered: true,
+			Want:    []string{"p=abc", "p=abd", "p=zzz"}},
+		{Name: "camel_window",
+			SQL: "SELECT WatchID AS w, ROW_NUMBER() OVER (PARTITION BY UserID ORDER BY WatchID) " +
+				"AS rn FROM " + TCam + " ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1 rn=1", "w=2 rn=2", "w=3 rn=1"}},
+		{Name: "camel_derived_table",
+			SQL:     "SELECT s.w AS w FROM (SELECT WatchID AS w FROM " + TCam + ") s ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1", "w=2", "w=3"}},
+		{Name: "camel_cte",
+			SQL: "WITH c AS (SELECT WatchID AS w, UserID AS u FROM " + TCam +
+				") SELECT SUM(u) AS s FROM c",
+			Want: []string{"s=31"}},
+		{Name: "camel_in_subquery",
+			SQL: "SELECT WatchID AS w FROM " + TCam + " WHERE UserID IN (SELECT UserID FROM " +
+				TCam + ") ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1", "w=2", "w=3"}},
 		{Name: "nested_derived_tables",
 			SQL: "SELECT c FROM (SELECT c FROM (SELECT " + T0 + ".c2 AS c FROM " + T0 + ", " +
 				T2 + ") y) x ORDER BY c",
 			Ordered: true,
 			Want:    []string{"c=t0-a", "c=t0-a", "c=t0-b", "c=t0-b"}},
-	}
+	})
 }
 
 // DuplicateNameCorpus is the part of this fixture whose answer cannot be read
@@ -276,7 +455,7 @@ func Corpus() []Case {
 // Want here is one string per row, cells joined by "|", in the entry's own
 // ORDER. Measured on live postgres:17-alpine.
 func DuplicateNameCorpus() []Case {
-	return []Case{
+	return withPGSpelling([]Case{
 		{Name: "two_same_named_columns_from_two_relations",
 			SQL: "SELECT " + T1 + ".c0, " + T2 + ".c1, " + T2 + ".c0 FROM " + T1 + ", " + T2 +
 				" ORDER BY 2, 1, 3",
@@ -310,5 +489,5 @@ func DuplicateNameCorpus() []Case {
 				"false|1737580880|false", "false|1737580880|false",
 				"true|1737580880|false", "true|1737580880|false",
 			}},
-	}
+	})
 }

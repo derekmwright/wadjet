@@ -2,8 +2,7 @@ package sql
 
 import (
 	"fmt"
-	"math"
-	"strconv"
+	"math/big"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -982,7 +981,18 @@ func emitRadixNumber(l *lexer, base int) stateFn {
 			return l.errorf("invalid integer literal %q: an underscore must separate digits", raw)
 		}
 	}
-	var acc int64
+	// EXACT, through math/big: a radix literal has no width of its own.
+	// PostgreSQL promotes one past bigint to `numeric` and answers the number
+	// — `SELECT 0x8000000000000000` is 9223372036854775808 there, verified
+	// live — so accumulating into an int64 and refusing the overflow rejected
+	// input PostgreSQL accepts, which ADR-0012 item 1 forbids. Emitting the
+	// exact decimal text hands the literal to the same path that already
+	// carries `SELECT 9223372036854775808`, which is where the width decision
+	// belongs (ADR-0024 item 6: a numeric literal's exact digits are the
+	// carrier).
+	acc := new(big.Int)
+	radix := big.NewInt(int64(base))
+	digit := new(big.Int)
 	for i := 0; i < len(digits); i++ {
 		c := digits[i]
 		var v int64
@@ -994,12 +1004,10 @@ func emitRadixNumber(l *lexer, base int) stateFn {
 		default:
 			v = int64(c-'A') + 10
 		}
-		if acc > (math.MaxInt64-v)/int64(base) {
-			return l.errorf("value %q is out of range for type bigint", raw)
-		}
-		acc = acc*int64(base) + v
+		acc.Mul(acc, radix)
+		acc.Add(acc, digit.SetInt64(v))
 	}
-	l.emitVal(TokenNumber, strconv.FormatInt(acc, 10))
+	l.emitVal(TokenNumber, acc.String())
 	return nil
 }
 

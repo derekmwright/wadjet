@@ -50,9 +50,17 @@ case-insensitively the reference is ambiguous, SQLSTATE `42702`. A column
 stored under two spellings that differ only by case cannot exist: `CREATE
 TABLE` refuses such a schema.
 
-A **delimited** reference does not get that concession — it is matched byte for
-byte, so `SELECT "G"` over a column named `g` is SQLSTATE `42703`
-(`column "G" does not exist`), which is PostgreSQL's answer too.
+A **delimited** reference carrying an upper-case letter does not get that
+concession — it is matched byte for byte, so `SELECT "G"` over a column named
+`g` is SQLSTATE `42703` (`column "G" does not exist`), which is PostgreSQL's
+answer too. An all-lower-case delimited reference is indistinguishable from an
+unquoted one below the parser and does get it: `SELECT "watchid"` reads a
+column stored `WatchID` here, where PostgreSQL is `42703`.
+
+A **qualifier** — a table name or alias before the dot — is always matched byte
+for byte, in either case. A delimited alias `"T"` and an unquoted `t` are two
+different relations, and `SELECT "T".x FROM t` is SQLSTATE `42P01`
+(`missing FROM-clause entry for table "T"`), as it is in PostgreSQL.
 
 Table names, table aliases, CTE names and function names follow the same rule.
 `SELECT * FROM t` publishes each column under the schema's own spelling.
@@ -795,7 +803,10 @@ but 3 columns specified`). Both are PostgreSQL's rules.
 
 A list written over a subquery whose SELECT list contains `*` is not applied:
 the star's width is not resolvable at that point, and renaming the wrong
-columns would be a wrong answer rather than a missing one.
+columns would be a wrong answer rather than a missing one. PostgreSQL does
+apply it there, so that spelling publishes the inner column names here and the
+aliases there — a divergence in the published NAMES only, recorded in
+ADR-0012.
 
 ### CTE scope
 
@@ -863,10 +874,20 @@ SELECT id FROM t WHERE k = '1_000'     -- the same grammar in a predicate
 ```
 
 `0x`/`0X`, `0o`/`0O` and `0b`/`0B` are radix prefixes; `_` separates digits and
-must sit between them (`_100`, `100_` and `1__0` are SQLSTATE `22P02`, though
-`0x_1A` is legal because the prefix stands in front of the underscore); and a
-leading zero is DECIMAL, so `017` is seventeen. A value outside the target
-type's range is SQLSTATE `22003`, never a wrapped number.
+must sit between them; and a leading zero is DECIMAL, so `017` is seventeen.
+`0x_1A` is legal, because the prefix stands in front of the underscore.
+
+Where an underscore is misplaced depends on the door, as it does in
+PostgreSQL. Written as an unquoted literal, `100_` and `1__0` are SQLSTATE
+`42601` (`trailing junk after numeric literal`) — the number does not simply
+stop at the underscore and hand the rest to the parser as a column alias. Read
+as TEXT into an integer type, `'_100'`, `'100_'`, `'1__0'` and `'0x'` are
+SQLSTATE `22P02`.
+
+An unquoted radix literal has no width of its own and is read exactly, however
+long: `0x8000000000000000` is 9223372036854775808. Reading text INTO a type is
+where a range applies — `CAST('0x8000000000000000' AS BIGINT)` is SQLSTATE
+`22003`, never a wrapped number.
 
 An error message quotes the offending text byte for byte, as PostgreSQL does —
 a literal containing a non-ASCII byte is echoed, not escaped.

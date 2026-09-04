@@ -616,6 +616,25 @@ func wireCorpus() []wireCase {
 		// and an int. Every column used to be declared OID 25; the OIDs are
 		// right now, and this entry is what keeps them right.
 		{name: "IntTextInt", sql: `SELECT n_nationkey, n_name, n_regionkey FROM nation ORDER BY n_nationkey LIMIT 3`},
+		// IDENTIFIER CASE on the WIRE (#731). The name a client reads a
+		// column by is `field_names`, and this arm is the only place that
+		// compares it for a #731 shape: an unquoted reference and an unquoted
+		// alias FOLD, a delimited one keeps its bytes, and a keyword spelling
+		// used as an alias folds like the identifier it is. Measured live —
+		// `SELECT g AS Foo` publishes `foo` there and `AS "Foo"` publishes
+		// `Foo`.
+		{name: "IdentifierCaseUnquotedReference",
+			sql: `SELECT N_NAME FROM nation ORDER BY n_nationkey LIMIT 1`},
+		{name: "IdentifierCaseDelimitedReference",
+			sql: `SELECT "n_name" FROM nation ORDER BY n_nationkey LIMIT 1`},
+		{name: "IdentifierCaseUnquotedAlias",
+			sql: `SELECT n_name AS Foo FROM nation ORDER BY n_nationkey LIMIT 1`},
+		{name: "IdentifierCaseDelimitedAlias",
+			sql: `SELECT n_name AS "Foo" FROM nation ORDER BY n_nationkey LIMIT 1`},
+		{name: "IdentifierCaseKeywordAlias",
+			sql: `SELECT n_name AS Desc FROM nation ORDER BY n_nationkey LIMIT 1`},
+		{name: "IdentifierCaseQualifiedReference",
+			sql: `SELECT N.N_NAME FROM nation N ORDER BY 1 LIMIT 1`},
 		// A float column, where the declared OID and the text spelling of the
 		// value are separate questions.
 		{name: "Float8Column", sql: `SELECT o_orderkey, o_totalprice FROM orders ORDER BY o_orderkey LIMIT 3`},

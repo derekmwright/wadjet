@@ -189,6 +189,41 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 			return parquet.TypeInt64, "bigint", true
 		}
 		return 0, "", false
+	case *plansql.SubqueryNode:
+		// A SCALAR SUBQUERY used as a predicate is typed by its single select
+		// item, and the same rule applies to it — `WHERE (SELECT COUNT(*)
+		// FROM t)` is 42804 `argument of WHERE must be type boolean, not type
+		// bigint` in PostgreSQL, measured live, while the bare `HAVING
+		// COUNT(*)` was already refused here. Two spellings of one type
+		// disagreeing is the shape #599 exists to end (round-1 P6).
+		//
+		// Only the item this layer can type is refused, which is the same
+		// bound the rest of the function keeps: an aggregate with a fixed
+		// result type. A subquery selecting a plain COLUMN is typed by its
+		// OWN relation, which this scope does not carry, and is left alone.
+		return subqueryItemType(n.SQL, scope)
+	}
+	return 0, "", false
+}
+
+// subqueryItemType types a scalar subquery by its single select item, when
+// this layer can. Its own FROM is a different scope, so only an item whose
+// type is fixed regardless of input — an aggregate like COUNT — is answered.
+func subqueryItemType(sql string, scope *colScope) (parquet.TypeID, string, bool) {
+	inner := parseSelect(sql)
+	if inner == nil || inner.Union != nil || len(inner.Columns) != 1 {
+		return 0, "", false
+	}
+	col := inner.Columns[0]
+	if col.Star || col.IsWindow {
+		return 0, "", false
+	}
+	if col.ASTExpr != nil {
+		return provableNonBooleanType(col.ASTExpr, scope)
+	}
+	// An aggregate the extractor recorded without an AST still names itself.
+	if col.IsAgg && strings.EqualFold(col.AggFunc, "count") {
+		return parquet.TypeInt64, "bigint", true
 	}
 	return 0, "", false
 }

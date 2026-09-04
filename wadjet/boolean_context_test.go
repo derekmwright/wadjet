@@ -64,6 +64,19 @@ func TestNonBooleanPredicateIsATypeError(t *testing.T) {
 			state: "42804", msg: "argument of CASE/WHEN must be type boolean, not type bigint"},
 		{name: "a string naming no boolean", sql: "SELECT id FROM cb WHERE 'abc'",
 			state: "22P02", msg: `invalid input syntax for type boolean: "abc"`},
+		// A SCALAR SUBQUERY is typed by its single select item and takes the
+		// same rule. The bare `HAVING COUNT(*)` above was already refused, so
+		// leaving this one silent meant two spellings of one type disagreeing
+		// (round-1 P6).
+		{name: "a scalar subquery in WHERE",
+			sql:   "SELECT id FROM cb WHERE (SELECT COUNT(*) FROM cb)",
+			state: "42804", msg: "argument of WHERE must be type boolean, not type bigint"},
+		{name: "a scalar subquery under AND",
+			sql:   "SELECT id FROM cb WHERE id > 0 AND (SELECT COUNT(*) FROM cb)",
+			state: "42804", msg: "argument of AND must be type boolean, not type bigint"},
+		{name: "a scalar subquery in a searched CASE's WHEN",
+			sql:   "SELECT CASE WHEN (SELECT COUNT(*) FROM cb) THEN 'x' END AS c FROM cb",
+			state: "42804", msg: "argument of CASE/WHEN must be type boolean, not type bigint"},
 
 		// The UNKNOWN-typed literal half: PostgreSQL coerces, so these ANSWER.
 		{name: "the literal true", sql: "SELECT id FROM cb WHERE 'true' ORDER BY id",
@@ -107,6 +120,12 @@ func TestNonBooleanPredicateIsATypeError(t *testing.T) {
 			sql:  "SELECT a.id FROM cb a JOIN cb z ON a.b = z.b ORDER BY 1",
 			rows: []string{"[1]", "[2]"}},
 		{name: "ctl: a real HAVING", sql: "SELECT id FROM cb GROUP BY id HAVING COUNT(*) > 0 ORDER BY id",
+			rows: []string{"[1]", "[2]"}},
+		{name: "ctl: EXISTS is a predicate, not a value",
+			sql:  "SELECT id FROM cb WHERE EXISTS (SELECT 1 FROM cb) ORDER BY id",
+			rows: []string{"[1]", "[2]"}},
+		{name: "ctl: a scalar subquery COMPARED is a predicate",
+			sql:  "SELECT id FROM cb WHERE (SELECT COUNT(*) FROM cb) > 0 ORDER BY id",
 			rows: []string{"[1]", "[2]"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

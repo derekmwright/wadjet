@@ -45,6 +45,36 @@ func TestIntegerLiteralGrammar(t *testing.T) {
 		{name: "hex in arithmetic", sql: "SELECT 0x1A + 1 AS v", rows: []string{"[27]"}},
 		{name: "hex in a predicate", sql: "SELECT id FROM lit WHERE k = 0x1A", rows: []string{"[1]"}},
 		{name: "underscores in a decimal literal", sql: "SELECT 1_000.5 AS v", rows: []string{"[1000.5]"}},
+		// A radix literal has no width of its own. PostgreSQL promotes one
+		// past bigint to `numeric` and ANSWERS it (measured: `\gdesc` says
+		// numeric for 0x8000000000000000 and bigint for 0x7fffffffffffffff),
+		// so refusing the overflow would reject input PostgreSQL accepts —
+		// which is what this lexer did before it rendered the value through
+		// math/big. Past bigint the two spellings are compared to EACH OTHER
+		// instead (TestARadixLiteralMeansItsDecimalSpelling), because this
+		// engine promotes any literal past int64 to float64 and that is a
+		// numeric question, not an identifier one.
+		{name: "at the bigint boundary", sql: "SELECT 0x7fffffffffffffff AS v",
+			rows: []string{"[9223372036854775807]"}},
+		// The other side of the same boundary: the CAST door reads the value
+		// INTO a type, so there the overflow IS 22003, as PostgreSQL says.
+		{name: "the CAST door still refuses the overflow",
+			sql:   "SELECT CAST('0x8000000000000000' AS BIGINT) AS v",
+			state: "22003", msg: `value "0x8000000000000000" is out of range for type bigint`},
+		// PostgreSQL refuses a numeric literal that runs into an identifier
+		// character — 42601 `trailing junk after numeric literal`. This lexer
+		// stopped the number at the underscore and handed the rest to the
+		// parser as an implicit ALIAS, so `SELECT 100_` answered 100 under a
+		// column called `_`, and `1__0` under `__0` — the shape of the
+		// reserved hidden-slot namespace.
+		{name: "a trailing underscore is junk, not an alias", sql: "SELECT 100_",
+			state: "42601", msg: "trailing junk after numeric literal"},
+		{name: "two underscores together are junk", sql: "SELECT 1__0",
+			state: "42601", msg: "trailing junk after numeric literal"},
+		{name: "a separator with nothing after it", sql: "SELECT 1_000_",
+			state: "42601", msg: "trailing junk after numeric literal"},
+		{name: "ctl: a real alias with no space", sql: "SELECT 1 x", rows: []string{"[1]"}},
+		{name: "ctl: a real alias with AS", sql: "SELECT 100 AS x", rows: []string{"[100]"}},
 
 		// The CAST door: a quoted literal read as an integer.
 		{name: "cast hex", sql: "SELECT CAST('0x1A' AS BIGINT) AS v", rows: []string{"[26]"}},
@@ -108,6 +138,43 @@ func TestIntegerLiteralGrammar(t *testing.T) {
 				if got := fmt.Sprint(res.Cells(i)); got != w {
 					t.Errorf("row %d = %s, want %s\n  SQL: %s", i, got, w, tc.sql)
 				}
+			}
+		})
+	}
+}
+
+// A radix literal past bigint means what its DECIMAL spelling means.
+//
+// PostgreSQL answers the exact number under `numeric` for both spellings.
+// This engine promotes a literal past int64 to float64 for BOTH — a residual
+// of its own (a numeric question, not an identifier one), and the property
+// #634 owns is that the two spellings cannot disagree: rendering the radix
+// value through math/big is what makes `0x8000000000000000` and
+// `9223372036854775808` one number instead of one number and one 42601.
+func TestARadixLiteralMeansItsDecimalSpelling(t *testing.T) {
+	ctx := context.Background()
+	db := intLitDB(t, ctx)
+	for _, tc := range []struct{ radix, decimal string }{
+		{"SELECT 0x7fffffffffffffff AS v", "SELECT 9223372036854775807 AS v"},
+		{"SELECT 0x8000000000000000 AS v", "SELECT 9223372036854775808 AS v"},
+		{"SELECT 0xffffffffffffffffff AS v", "SELECT 4722366482869645213695 AS v"},
+		{"SELECT 0b1111111111111111111111111111111111111111111111111111111111111111 AS v",
+			"SELECT 18446744073709551615 AS v"},
+		{"SELECT 0o777777777777777777777 AS v", "SELECT 9223372036854775807 AS v"},
+	} {
+		t.Run(tc.radix, func(t *testing.T) {
+			a, err := db.Query(ctx, tc.radix)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.radix, err)
+			}
+			b, err := db.Query(ctx, tc.decimal)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.decimal, err)
+			}
+			got, want := fmt.Sprint(a.Cells(0)), fmt.Sprint(b.Cells(0))
+			if got != want {
+				t.Errorf("%s answered %s; the same number written in decimal answers %s",
+					tc.radix, got, want)
 			}
 		})
 	}

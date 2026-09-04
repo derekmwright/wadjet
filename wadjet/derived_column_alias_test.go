@@ -32,6 +32,7 @@ func TestDerivedTableColumnAliasList(t *testing.T) {
 		cols  []string
 		rows  []string
 		state string
+		msg   string
 	}{
 		{name: "renames positionally",
 			sql:  "SELECT * FROM (SELECT s, n FROM dca) AS b(kk, nn) ORDER BY kk, nn",
@@ -61,12 +62,26 @@ func TestDerivedTableColumnAliasList(t *testing.T) {
 		{name: "FEWER aliases rename a prefix",
 			sql:  "SELECT * FROM (SELECT s, n FROM dca) AS b(kk) ORDER BY 1, 2",
 			cols: []string{"kk", "n"}, rows: []string{"[a 10]", "[a 30]", "[b 20]"}},
+		// PostgreSQL names the RELATION KIND in the refusal, and it is a
+		// different word per door — measured live: a derived table is a
+		// `table`, a CTE is a `WITH query`, and a VALUES list used as a table
+		// source is a `table` too. The VALUES door was 42601 with a message
+		// of its own (round-1 P4).
 		{name: "MORE aliases than columns is 42P10",
 			sql:   "SELECT * FROM (SELECT s, n FROM dca) AS b(kk, nn, extra)",
-			state: "42P10"},
+			state: "42P10",
+			msg:   `table "b" has 2 columns available but 3 columns specified`},
 		{name: "MORE aliases on a CTE is 42P10 too",
 			sql:   "WITH c(kk, nn, extra) AS (SELECT s, n FROM dca) SELECT * FROM c",
-			state: "42P10"},
+			state: "42P10",
+			msg:   `WITH query "c" has 2 columns available but 3 columns specified`},
+		{name: "MORE aliases on a VALUES list is 42P10 too",
+			sql:   "SELECT * FROM (VALUES (1, 2), (3, 4)) AS v(kk, nn, extra)",
+			state: "42P10",
+			msg:   `table "v" has 2 columns available but 3 columns specified`},
+		{name: "FEWER aliases on a VALUES list rename a prefix",
+			sql:  "SELECT * FROM (VALUES (1, 2)) AS v(kk) ORDER BY 1",
+			cols: []string{"kk", "column2"}, rows: []string{"[1 2]"}},
 		{name: "FEWER aliases on a CTE rename a prefix",
 			sql:  "WITH c(kk) AS (SELECT s, n FROM dca) SELECT * FROM c ORDER BY 1, 2",
 			cols: []string{"kk", "n"}, rows: []string{"[a 10]", "[a 30]", "[b 20]"}},
@@ -82,6 +97,9 @@ func TestDerivedTableColumnAliasList(t *testing.T) {
 				}
 				if got := sqlerr.StateOf(err); got != tc.state {
 					t.Fatalf("%s: SQLSTATE %q, want %q (err: %v)", tc.sql, got, tc.state, err)
+				}
+				if tc.msg != "" && !containsSub(err.Error(), tc.msg) {
+					t.Errorf("%s: message %q does not carry PostgreSQL's %q", tc.sql, err, tc.msg)
 				}
 				return
 			}

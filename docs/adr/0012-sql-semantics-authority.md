@@ -141,6 +141,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      same rule; a boxed comparator that reads a rendered address or a
      formatted decimal is not that order (`internal/engine/exec/
      compare_boxed.go`).
+   - **A column-alias list over a `SELECT *` is not applied.** (Added
+     2026-09-04, #613.) `(…) AS b(kk, nn)` renames a derived table's columns
+     positionally, and PostgreSQL applies it whatever the subquery's SELECT
+     list looks like: `SELECT * FROM (SELECT * FROM t) AS b(kk, nn)` publishes
+     `kk | nn | …` there. Wadjet leaves the list alone when the subquery's
+     SELECT list carries a `*`, so it publishes the inner names, because the
+     star's width is a catalog question `logical.applyColumnAliases` cannot
+     ask — `ExpandStarProjections` answers it later, and renaming the wrong
+     columns would be a wrong ANSWER rather than a missing one. The VALUES and
+     the arity refusal are unaffected; only the star spelling diverges, and
+     only in the published NAMES.
+
    - **`ORDER BY <name>` over two output columns of that name is answered,
      not refused.** (Added 2026-09-03, #557.) An output slot's identity is its
      POSITION: two output columns may share a NAME — PostgreSQL answers
@@ -185,9 +197,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      publishes the catalog's own spellings, and every producer writes the name
      it was given. What folds is the RESOLVER.
 
-     **A DELIMITED reference does NOT get the concession**, and that boundary
-     is what keeps the divergence a superset rather than a different answer:
-     a reference still carrying an ASCII upper-case letter can only have been
+     **A DELIMITED reference CARRYING AN UPPER-CASE LETTER does NOT get the
+     concession**, and that boundary is what keeps the divergence a superset
+     rather than a different answer: such a reference can only have been
      written between double quotes, so it resolves byte-exact only, and
      `SELECT "G"` over a column `g` is **42703** here as it is in PostgreSQL.
      It used to answer a column of NULLs. The refusal fires only where the
@@ -195,6 +207,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      (`physical.colScope.refuseDelimitedMiss`), because a planner pass may
      have lowercased an alias before registering it and refusing on a spelling
      the scope no longer has would break `SELECT id AS "Kk" … ORDER BY "Kk"`.
+
+     An ALL-LOWER-CASE delimited reference DOES get the concession, and that
+     is a second divergence rather than an oversight. Nothing below the parser
+     carries a `Quoted` bit: the resolver infers delimitedness from the name
+     itself — an upper-case letter can only have survived the fold by being
+     quoted — and `"watchid"` is indistinguishable from `watchid` by that
+     test. So `SELECT "watchid"` reads a column stored `WatchID` here where
+     PostgreSQL is 42703. Same superset direction as the unquoted spelling,
+     and gated as a control at `wadjet/identifier_case_test.go`. Closing it
+     means threading a `Quoted` bit from the lexer to the batch resolver,
+     which is a carrier change, not a rule change.
+
+     **A QUALIFIER never gets the concession, in either case.** A qualifier is
+     a RELATION's name or alias and PostgreSQL matches those byte-exactly
+     against what the FROM clause declared: a delimited alias `"T"` is not
+     reachable as `t`, and `SELECT "T".x FROM t` is 42P01. Folding the whole
+     dotted name bound a reference to the WRONG RELATION — over `FROM rvc t,
+     rvd2 "T"` the join emits `g` and `T.g`, and `t.g` fold-matched `T.g` and
+     answered the other relation's row. `batch.foldedNameMatches` judges the
+     two halves by the two rules, and `physical.colScope.exactQuals` refuses a
+     delimited qualifier the FROM never declared.
 
      Everything else this arc moved is PostgreSQL's answer rather than a
      divergence: `SELECT G` publishes `g`, `SELECT g AS Foo` publishes `foo`,

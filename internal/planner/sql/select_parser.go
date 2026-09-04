@@ -980,7 +980,16 @@ func (p *selectParser) parseValuesTableRef() (TableRef, error) {
 		alias = p.advance().val
 	}
 	if len(colAliases) > ncols {
-		return TableRef{}, fmt.Errorf("VALUES has %d columns, but %d column aliases were given", ncols, len(colAliases))
+		// PostgreSQL's own message and class for the shape, verbatim: a
+		// VALUES list used as a table source is a "table" there, and too many
+		// column aliases is 42P10, not a syntax error (#613 round-1 P4).
+		name := alias
+		if name == "" {
+			name = "*VALUES*"
+		}
+		return TableRef{}, sqlerr.New("42P10",
+			"table %q has %d columns available but %d columns specified",
+			name, ncols, len(colAliases))
 	}
 
 	colNames := make([]string, ncols)

@@ -1461,7 +1461,7 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 			// aliases, because a CTE's body SQL is re-read by consumers that
 			// would not see the rewrite — the cte cache and the physical
 			// binder's own view (validate.go's b.ctes).
-			renamed, err := applyColumnAliasProject(plan, selectInfo, cte.Columns, cte.Name)
+			renamed, err := applyColumnAliasProject(plan, selectInfo, cte.Columns, cte.Name, "WITH query")
 			if err != nil {
 				return nil, err
 			}
@@ -1489,7 +1489,7 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		if aliasName == "" {
 			aliasName = "subquery"
 		}
-		if err := applyColumnAliases(selectInfo, table.ColumnAliases, aliasName); err != nil {
+		if err := applyColumnAliases(selectInfo, table.ColumnAliases, aliasName, "table"); err != nil {
 			return nil, err
 		}
 		plan, err := BuildFromSelectWithCTEs(selectInfo, ctes)
@@ -1629,7 +1629,7 @@ func countScans(n *Node) int {
 // is the one with the alias inside. A CTE takes applyColumnAliasProject
 // instead, because its body SQL is re-read by consumers a rewritten SELECT
 // list would be invisible to.
-func applyColumnAliases(info *plansql.SelectInfo, aliases []string, relName string) error {
+func applyColumnAliases(info *plansql.SelectInfo, aliases []string, relName, kind string) error {
 	if len(aliases) == 0 || info == nil {
 		return nil
 	}
@@ -1646,8 +1646,8 @@ func applyColumnAliases(info *plansql.SelectInfo, aliases []string, relName stri
 	}
 	if len(aliases) > len(cols.Columns) {
 		return sqlerr.New("42P10",
-			"table %q has %d columns available but %d columns specified",
-			relName, len(cols.Columns), len(aliases))
+			"%s %q has %d columns available but %d columns specified",
+			kind, relName, len(cols.Columns), len(aliases))
 	}
 	for i, name := range aliases {
 		cols.Columns[i].Alias = name
@@ -1658,8 +1658,9 @@ func applyColumnAliases(info *plansql.SelectInfo, aliases []string, relName stri
 // applyColumnAliasProject is applyColumnAliases' Project-on-top form, for a
 // CTE. Both obey the same PostgreSQL arity rules — a shorter list renames a
 // PREFIX, a longer one is 42P10 — and differ only in where the rename is
-// written.
-func applyColumnAliasProject(plan *Node, info *plansql.SelectInfo, aliases []string, relName string) (*Node, error) {
+// written and in what PostgreSQL CALLS the relation in the refusal: a derived
+// table is a `table`, a CTE is a `WITH query` (measured live).
+func applyColumnAliasProject(plan *Node, info *plansql.SelectInfo, aliases []string, relName, kind string) (*Node, error) {
 	if len(aliases) == 0 || info == nil {
 		return plan, nil
 	}
@@ -1674,8 +1675,8 @@ func applyColumnAliasProject(plan *Node, info *plansql.SelectInfo, aliases []str
 	}
 	if len(aliases) > len(cols.Columns) {
 		return nil, sqlerr.New("42P10",
-			"table %q has %d columns available but %d columns specified",
-			relName, len(cols.Columns), len(aliases))
+			"%s %q has %d columns available but %d columns specified",
+			kind, relName, len(cols.Columns), len(aliases))
 	}
 	srcNames := getOutputColNames(cols)
 	projections := make([]Projection, 0, len(srcNames))

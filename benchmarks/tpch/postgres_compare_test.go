@@ -4933,7 +4933,7 @@ func multiKeyCorrelatedCases() []pgCase {
 func collidingBareNameCases() []pgCase {
 	out := make([]pgCase, 0, 16)
 	for _, c := range collide.Corpus() {
-		pc := pgCase{name: "Collide_" + c.Name, sql: c.SQL, ordered: c.Ordered}
+		pc := pgCase{name: "Collide_" + c.Name, sql: c.SQL, ordered: c.Ordered, pgSQL: c.PGSQL}
 		if c.KnownBug != "" {
 			pc.knownBug, pc.issue = pgBugWadjet+" "+c.KnownBug, c.Issue
 		}

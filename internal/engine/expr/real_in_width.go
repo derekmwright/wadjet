@@ -474,6 +474,9 @@ func (r *realLitSet) contains(f float32) bool {
 // type the comparison casts it to. It is the row path's spelling of the
 // refusal exec.floatConstError makes for the vectorized kernel (#549).
 func raiseNumericOutOfRange(destType, input string) {
-	panic(fatalEval{sqlerr.New("22003", "%s is out of range for type %s",
+	// `value "X" is out of range for type T` — PostgreSQL's exact wording for
+	// a value read INTO a type, which exec.intConstError already emits for the
+	// same condition on the vectorized path.
+	panic(fatalEval{sqlerr.New("22003", "value %s is out of range for type %s",
 		sqlerr.Quote(kernel.RealOverflowText(input)), destType)})
 }
