@@ -101,12 +101,28 @@ func TestAggSpecOutputType(t *testing.T) {
 		{"min over a column two scans type differently",
 			aggNodeOver(&logical.Node{Type: logical.NodeJoin, Children: []*logical.Node{orders, customer}}),
 			logical.AggExpr{Func: "min", InputCol: "o_orderkey"}, 0, true},
+		// A DERIVED argument is typed from the EXPRESSION, over the
+		// aggregate's own input declarations — the same source the runtime
+		// AggColumn and the DAG's AggSpec read (#867). This entry used to
+		// record the opposite (undeclared, so FLOAT64 by fall-through), which
+		// is what made `SUM(c_i64 * 3000000) + 1` float8 and dropped its
+		// outer operand.
 		{"min over a derived expression", aggNodeOver(orders),
 			logical.AggExpr{Func: "min", InputCol: "expr", InputExpr: &plansql.BinaryOp{
 				Op:    "+",
 				Left:  &plansql.ColRef{Column: "o_totalprice"},
 				Right: &plansql.Lit{Value: "1", Kind: plansql.LitNumber},
-			}}, 0, true},
+			}}, parquet.TypeFloat64, false},
+		// An argument whose own type is UNDECIDED keeps the old answer: a
+		// column no scan below carries declares nothing, so neither does an
+		// aggregate over an expression built on it. The boundary, from the
+		// other side.
+		{"min over a derived expression on a column nothing declares", aggNodeOver(orders),
+			logical.AggExpr{Func: "min", InputCol: "expr", InputExpr: &plansql.BinaryOp{
+				Op:    "||",
+				Left:  &plansql.ColRef{Column: "nowhere"},
+				Right: &plansql.ColRef{Column: "alsonowhere"},
+			}}, parquet.TypeString, false},
 		{"min over an unannotated scan (no catalog entry)",
 			aggNodeOver(typedScanNode("mystery", nil)),
 			logical.AggExpr{Func: "min", InputCol: "x"}, 0, true},

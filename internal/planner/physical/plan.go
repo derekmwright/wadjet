@@ -15483,6 +15483,21 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 	}
 	if agg.InputExpr != nil {
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+			// A COMPUTED argument is typed from its own EXPRESSION, over the
+			// aggregate's input declarations — the same source the runtime
+			// AggColumn/AggSpec already read through aggOutputFromInputDecl
+			// (plan.go's synDecl override, and the DAG's spec.OutputType).
+			//
+			// Declining here is what made `SUM(c_i64 * 3000000) + 1` float8:
+			// the aggregate's own output was right, the walk OVER it was not,
+			// so `__agg_0` was declared FLOAT64 in emittedColDecls and the
+			// arithmetic above it took nodeDeclaredType's float fall-through.
+			// A float64 cannot hold 36280278840510000001, so the `+ 1`
+			// vanished and the answer came back BELOW the sum it was added to
+			// (#867).
+			if t, known := aggComputedInputOutputType(node, agg); known {
+				return t, true
+			}
 			return unresolved()
 		}
 	}
@@ -15521,6 +15536,36 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 	return minMaxDeclaredType(in), true
 }
 
+// aggComputedInputDecl types an aggregate whose ARGUMENT is an expression
+// rather than a bare column, from that expression's own declaration over the
+// aggregate's input columns. It is the declared-schema side of the rule the
+// runtime already applies: plan.go's AggColumn override and the DAG's
+// AggSpec both call aggOutputFromInputDecl with the projection's declared
+// type of the computed argument, and this reads the same function from the
+// same source so the DECLARATION and the VALUE cannot disagree (#867).
+//
+// ok=false when the aggregate has no input node to type, when the child is
+// missing, or when the argument's own type is undecided — the caller then
+// keeps whatever it declared before.
+func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, int, int, bool) {
+	if agg.InputExpr == nil || node == nil || len(node.Children) == 0 {
+		return 0, 0, 0, false
+	}
+	decls := inputColDecls(node.Children[0])
+	d, c := nodeDeclaredType(agg.InputExpr, decls)
+	if c == expr.Undecided {
+		return 0, 0, 0, false
+	}
+	return aggOutputFromInputDecl(agg.Func, agg.Distinct, d.ID, d.Precision, d.Scale,
+		aggInputIsWideInteger(agg.InputExpr, decls))
+}
+
+// aggComputedInputOutputType is aggComputedInputDecl's TypeID-only face.
+func aggComputedInputOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
+	t, _, _, ok := aggComputedInputDecl(node, agg)
+	return t, ok
+}
+
 // aggSpecOutputDecimal is aggSpecOutputType's companion for the one piece a
 // bare TypeID cannot carry: MIN/MAX/MIN_BY/MAX_BY of a DECIMAL(p,s) column
 // answers in that SAME (p,s) — it hands back a value the column already
@@ -15550,6 +15595,11 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	}
 	if agg.InputExpr != nil {
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+			// aggSpecOutputType's rule, for the (p,s) half: a computed
+			// argument declares what its own expression declares (#867).
+			if t, prec, scale, known := aggComputedInputDecl(node, agg); known && t == parquet.TypeDecimal {
+				return logical.DecimalMeta{Precision: prec, Scale: scale}, true
+			}
 			return logical.DecimalMeta{}, false
 		}
 	}
