@@ -237,6 +237,26 @@ func rwpWant() []rwpCase {
 		// explicitly WIDER arm still widens, and PostgreSQL answers no rows.
 		{"InCoalesceWithADoubleCastWidens",
 			"COALESCE(r_val, CAST(0 AS DOUBLE PRECISION)) IN (3.1, 7.1)", nil},
+		// PINNED, review round 0's P5: a DECIMAL MEMBER of the list. The
+		// operand's type is real on both sides and PostgreSQL still narrows —
+		// `CAST(7.1 AS numeric(9,2))` is a numeric CONSTANT, coerced into the
+		// list's element type exactly as an untyped literal is, so the server
+		// answers rows 3 and 7 for both spellings. Wadjet answers NONE:
+		// realListLiteralText unwraps a bare literal, a CAST TO REAL and unary
+		// ±, and a cast to numeric is "not a constant", which takes the array
+		// away entirely.
+		//
+		// It is base-identical and the BARE and COMPUTED operands agree with
+		// each other, so #654's own parity statement holds — this is a
+		// LIST-ELEMENT type the census does not reach, and the fix belongs
+		// with realListLiteralText rather than with the operand rule.
+		//
+		// TODO(#654): delete when a DECIMAL member keeps the list narrowed.
+		// The pin fires the day it does.
+		{"InDecimalMemberStillWidens_pin",
+			"ABS(r_val) IN (3.1, CAST(7.1 AS DECIMAL(9,2)))", nil},
+		{"InDecimalMemberBareOperandStillWidens_pin",
+			"r_val IN (CAST(3.1 AS DECIMAL(9,2)), 7.1)", nil},
 		// real OP real is real: the multiply by a REAL one narrows and the
 		// multiply by an INTEGER one does not. They are the pair that says
 		// this tests BOTH operands rather than following one down to a column

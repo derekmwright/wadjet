@@ -784,6 +784,45 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 	// pair numeric there and `SUM(a*2.0)` over bigint's maximum ANSWERS
 	// 18446744073709551614.0 on the server. A decline that swallowed this
 	// shape too would be a refusal PostgreSQL does not make.
+	// #849, PINNED — the shape #841's census does NOT cover, and until this it
+	// had no fixture anywhere in the tree (review round 0, P4).
+	//
+	// Integer arithmetic loses its DOMAIN under a CAST, a function or a choice
+	// operand: `CAST(c_i64 AS BIGINT) * <int8 max>` is computed in float64 and
+	// answers ~8.5e37 where PostgreSQL raises 22003 `bigint out of range`. It
+	// is ONE disposition — projected and aggregated agree — so #841's rule is
+	// satisfied and this is outside it; it is a wrong VALUE in both positions,
+	// which is what #849 is for. Mechanism: physical.intArithAllInt has no
+	// CastNode arm, and its FuncCallNode arm asks expr.FuncReturnsInteger,
+	// which is false for ABS.
+	//
+	// Base-identical. The pin exists so the day the integer domain is kept
+	// something FAILS and says so — rule 11's "a shape just outside a rule
+	// this branch states must carry a fixture", applied where the branch's
+	// own #796 pin already applies it.
+	//
+	// TODO(#849): delete when integer arithmetic keeps its domain under a
+	// CAST / function / choice operand.
+	for _, tc := range []struct{ name, sql string }{
+		{"cast_operand_projected", `SELECT CAST(c_i64 AS BIGINT) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"cast_operand_summed", `SELECT SUM(CAST(c_i64 AS BIGINT) * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"abs_operand_projected", `SELECT ABS(c_i64) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"abs_operand_summed", `SELECT SUM(ABS(c_i64) * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+	} {
+		t.Run("#849/"+tc.name, func(t *testing.T) {
+			got, err := na2Run(tmdRunSingle(ctx, single, tc.sql))
+			if err != nil {
+				t.Fatalf("this pin records an ANSWER; a refusal means #849 has moved — "+
+					"re-measure both positions and move the shape into the #841 census: %v"+
+					"\n  SQL: %s", err, tc.sql)
+			}
+			if len(got) != 1 || !strings.HasPrefix(got[0], "v=float:") {
+				t.Errorf("got %v, this pin records a float64 box; PostgreSQL 17.11 raises 22003 "+
+					"`bigint out of range` for this expression in BOTH positions\n  SQL: %s",
+					got, tc.sql)
+			}
+		})
+	}
 	t.Run("#841/a_non_integer_literal_still_answers", func(t *testing.T) {
 		const sql = `SELECT SUM(c_i64 * 2.0) AS v FROM typemx WHERE id = 1`
 		got, err := na2Run(tmdRunSingle(ctx, single, sql))
