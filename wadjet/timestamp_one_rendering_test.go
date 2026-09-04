@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // #544: a TIMESTAMP coerced to text renders the INSTANT, at every site, and
@@ -152,36 +153,82 @@ func TestTimestampHasOneRenderingAtEverySite(t *testing.T) {
 			}
 		})
 	}
-	// The RESIDUAL, pinned rather than described: a timestamp-VALUED scalar
-	// function still renders RFC3339 with a `T` and a `Z`.
+	// The FUNCTION RESULTS. This block was a single pin recording that a
+	// timestamp-VALUED scalar function renders RFC3339 — `2023-11-14T00:00:00Z`
+	// where the very column it read renders `2023-11-14 00:00:00` and where
+	// PostgreSQL 17.11 renders the same. "One rendering at every site" was
+	// true of the cast, the concatenation and the wire and false of the
+	// twenty-odd expressions that PRODUCE an instant, which is the larger half
+	// of the surface a client meets.
 	//
-	// It is a different mechanism from the two closed above, and that is what
-	// makes it a residual rather than an unfinished fix: this engine has no
-	// TIMESTAMP-valued function RESULT at all. Every timestamp-producing
-	// scalar — date_trunc, now, from_unixtime, the timezone family — returns
-	// TEXT it formats itself, so the format is a per-function choice rather
-	// than a property of a type, and there is no single renderer for the rule
-	// above to reach. The structural fix is for those functions to return the
-	// engine's TIMESTAMP box and let batch.FormatTimestamp render it, which is
-	// a change to ~14 registry entries and their declared return types.
+	// Every one of them now ends at expr.formatInstant, which is
+	// batch.FormatTimestamp — the renderer the cast, the sort key and pgwire's
+	// send path already share. Each cell below was measured on live PostgreSQL
+	// 17.11.
+	for _, c := range []struct{ name, sql, want string }{
+		{"date_trunc_day", `SELECT DATE_TRUNC('day', c_ts) AS v FROM ` + tbl +
+			` WHERE id = 0`, "2023-11-14 00:00:00"},
+		{"date_trunc_hour", `SELECT DATE_TRUNC('hour', c_ts) AS v FROM ` + tbl +
+			` WHERE id = 0`, "2023-11-14 22:00:00"},
+		{"date_trunc_month", `SELECT DATE_TRUNC('month', c_ts) AS v FROM ` + tbl +
+			` WHERE id = 0`, "2023-11-01 00:00:00"},
+		// The unit that does nothing still renders the one way — the arm that
+		// returns its argument had its own Format call too.
+		{"date_trunc_milliseconds", `SELECT DATE_TRUNC('milliseconds', c_ts) AS v FROM ` + tbl +
+			` WHERE id = 0`, "2023-11-14 22:13:20"},
+		// And the same instant reached three other ways: an epoch, a zone
+		// conversion, and interval arithmetic over text carrying a clock.
+		{"from_unixtime", `SELECT FROM_UNIXTIME(1699999999) AS v FROM ` + tbl +
+			` WHERE id = 0`, "2023-11-14 22:13:19"},
+		{"timezone_utc", `SELECT TIMEZONE('UTC', c_ts) AS v FROM ` + tbl +
+			` WHERE id = 0`, "2023-11-14 22:13:20"},
+		{"text_instant_plus_interval",
+			`SELECT '2023-11-14 22:13:20' + INTERVAL '1' HOUR AS v FROM ` + tbl +
+				` WHERE id = 0`, "2023-11-14 23:13:20"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := db.Query(ctx, c.sql)
+			if err != nil {
+				t.Fatalf("%v\n  SQL: %s", err, c.sql)
+			}
+			if len(res.Rows) != 1 || res.Rows[0]["v"] != c.want {
+				t.Errorf("= %#v, want %q (live PostgreSQL 17.11). Every instant-valued "+
+					"expression renders through expr.formatInstant; a `T` and a `Z` here "+
+					"mean a second renderer came back (#544)\n  SQL: %s",
+					res.Rows, c.want, c.sql)
+			}
+		})
+	}
+	// The RESIDUAL that survives, pinned rather than described. The VALUE is
+	// PostgreSQL's now; the DECLARED TYPE is not. `date_trunc` RETURNS
+	// `timestamp` on the server (OID 1114) and this engine declares its result
+	// STRING, because the scalar registry is `func([]any) any` with a single
+	// static Ret per entry and no TIMESTAMP-valued function result exists.
 	//
-	// live PostgreSQL 17.11: `date_trunc('day', timestamp '2023-11-14
-	// 22:13:20')::text` is "2023-11-14 00:00:00".
+	// That is a different mechanism from the rendering — a client that asks
+	// what the column IS still gets `text`, and no amount of formatting fixes
+	// it — so it is recorded, not bandaged (correctness-fix protocol rule 11).
+	// The structural fix is for ~14 registry entries to return the engine's
+	// TIMESTAMP box and carry parquet.TypeTimestamp in their declaration,
+	// which is a change to the registry's type channel, not to these
+	// functions.
 	//
-	// TODO(#544): delete this pin when a timestamp-valued function returns the
-	// TIMESTAMP box instead of formatting its own text.
-	t.Run("residual_date_trunc_renders_rfc3339", func(t *testing.T) {
+	// TODO(#544): delete this pin when a timestamp-valued function declares
+	// TIMESTAMP.
+	t.Run("residual_date_trunc_declares_string_not_timestamp", func(t *testing.T) {
 		res, err := db.Query(ctx,
 			`SELECT DATE_TRUNC('day', c_ts) AS v FROM `+tbl+` WHERE id = 0`)
 		if err != nil {
 			t.Fatalf("%v", err)
 		}
-		const pin = "2023-11-14T00:00:00Z"
-		if len(res.Rows) != 1 || res.Rows[0]["v"] != pin {
-			t.Errorf("= %#v, this pin records %q and PostgreSQL 17.11 says "+
-				"\"2023-11-14 00:00:00\". If the rendering has moved, #544's residual is "+
-				"closed: re-measure every timestamp-valued function and delete this pin",
-				res.Rows, pin)
+		if len(res.ColumnMetas) != 1 {
+			t.Fatalf("want one column meta, got %d", len(res.ColumnMetas))
+		}
+		if got := res.ColumnMetas[0].TypeID; got != parquet.TypeString {
+			t.Errorf("DATE_TRUNC declares %v; this pin records STRING, and PostgreSQL "+
+				"declares timestamp (OID 1114). If it has moved, #544's declaration "+
+				"residual is closed: delete this pin and re-measure the wire OID of "+
+				"every timestamp-valued function", got)
 		}
 	})
 }

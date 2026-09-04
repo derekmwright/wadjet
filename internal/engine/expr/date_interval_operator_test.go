@@ -140,11 +140,14 @@ func intervalOperatorCases() []intervalOpCase {
 			want: [2]string{"1996-04-13", "1961-05-12"}},
 		{label: "text_day_plus_1_year", col: "sd", op: "+", unit: "year", n: 1,
 			want: [2]string{"1997-03-13", "1962-04-12"}},
-		// TEXT carrying a clock keeps the string path's RFC3339 rendering.
-		// That is the second of the two renderers, and it is pinned here so a
-		// future change has to notice it rather than quietly make it a third.
+		// TEXT carrying a clock. This pin used to read "the second of the two
+		// renderers … so a future change has to notice it rather than quietly
+		// make it a third" — and #544's second pass is that change: the string
+		// path now ends at formatInstant like every other instant-valued
+		// expression, so a clock-bearing text operand and a TIMESTAMP column
+		// answer the same bytes. There is one renderer.
 		{label: "text_instant_minus_90_day", col: "s", op: "-", unit: "day", n: 90,
-			want: [2]string{"1995-12-14T14:25:36Z", "1961-01-12T06:07:00Z"}},
+			want: [2]string{"1995-12-14 14:25:36", "1961-01-12 06:07:00"}},
 
 		// The control: a date LITERAL, the form that was already correct. Its
 		// answer does not depend on the row, and must not change.

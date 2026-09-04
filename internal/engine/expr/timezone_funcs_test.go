@@ -2,6 +2,7 @@ package expr
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,11 +17,15 @@ func TestPgPostmasterStartTime(t *testing.T) {
 	}
 	got, ok := fn(nil).(string)
 	if !ok {
-		t.Fatalf("want RFC3339 text like now(), got %T", fn(nil))
+		t.Fatalf("want timestamp text like now(), got %T", fn(nil))
 	}
-	ts, err := time.Parse(time.RFC3339, got)
+	// The engine's one instant rendering, which is PostgreSQL's: a space, no
+	// `T` and no `Z`, with a fractional second only when there is one. It was
+	// RFC3339 until #544's second pass; parsing it that way is what this
+	// assertion is for.
+	ts, err := time.Parse("2006-01-02 15:04:05.999", got)
 	if err != nil {
-		t.Fatalf("not RFC3339: %q (%v)", got, err)
+		t.Fatalf("not the engine's timestamp rendering: %q (%v)", got, err)
 	}
 	if d := time.Since(ts); d < 0 || d > time.Minute {
 		t.Fatalf("process start %v is %v away from now — not this process", ts, d)
@@ -90,9 +95,14 @@ func TestTimezoneUTCIsInstantPreserving(t *testing.T) {
 			if before != after {
 				t.Fatalf("timezone(%q, %v) moved the instant: epoch %v → %v", zone, in, before, after)
 			}
-			// The rendered form is UTC, not the input's original offset.
-			if s, ok := shifted.(string); !ok || s[len(s)-1] != 'Z' {
-				t.Fatalf("timezone(%q, %v) = %v, want a UTC-rendered timestamp", zone, in, shifted)
+			// The rendered form is UTC, not the input's original offset. The
+			// engine's one rendering carries no zone AT ALL — which is what
+			// makes it correct only here, where the value IS UTC — so the
+			// check is that no offset survived, not that a `Z` did (#544).
+			s, ok := shifted.(string)
+			if !ok || strings.ContainsAny(s, "TZ+") {
+				t.Fatalf("timezone(%q, %v) = %v, want a UTC-rendered timestamp "+
+					"with no zone suffix", zone, in, shifted)
 			}
 		}
 	}

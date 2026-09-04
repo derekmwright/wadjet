@@ -1694,6 +1694,13 @@ LIMIT 10
 | `AT_TIMEZONE(ts, tz)` | Convert timestamp to timezone | `AT_TIMEZONE(ts, 'America/New_York')` |
 | `HUMAN_READABLE_SECONDS(n)` | Format seconds as human string | `HUMAN_READABLE_SECONDS(3661)` → `'1 hour, 1 minute, 1 second'` |
 
+A function that RETURNS an instant renders it the one way this engine renders
+a timestamp — `DATE_TRUNC('day', ts)` is `2023-11-14 00:00:00`, the same text
+the column it read produces and the text PostgreSQL produces. `TO_ISO8601` and
+`AT_TIMEZONE` are the exceptions: the first is named for its format, and the
+second returns a wall clock in another zone whose offset is part of the value.
+See [data-types.md](data-types.md) §Timestamp, "One rendering".
+
 ### Hash Functions
 
 | Function | Description | Example |

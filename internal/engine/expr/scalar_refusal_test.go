@@ -85,38 +85,45 @@ func TestScalarFunctionsStillAnswerInsideTheirDomain(t *testing.T) {
 		// The thirteen units PostgreSQL 17.11 accepts for a timestamp, each
 		// measured on the server. This engine's instants are epoch
 		// MILLISECONDS, so milliseconds and microseconds are the identity.
+		//
+		// The wanted TEXT is the server's too, and it was not when these cells
+		// were first written: the units were measured live and then spelled
+		// RFC3339, because that is what fnDateTrunc happened to answer.
+		// PostgreSQL says `2023-05-17 00:00:00`; so does the TIMESTAMP column
+		// this reads and so does the wire. #544's second pass routed every
+		// arm through formatInstant, and these fourteen cells are its gate.
 		{"microseconds", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "microseconds"}, ts}},
-			"2023-05-17T13:24:35Z"},
+			"2023-05-17 13:24:35"},
 		{"milliseconds", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "milliseconds"}, ts}},
-			"2023-05-17T13:24:35Z"},
+			"2023-05-17 13:24:35"},
 		{"second", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "second"}, ts}},
-			"2023-05-17T13:24:35Z"},
+			"2023-05-17 13:24:35"},
 		{"minute", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "minute"}, ts}},
-			"2023-05-17T13:24:00Z"},
+			"2023-05-17 13:24:00"},
 		{"hour", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "hour"}, ts}},
-			"2023-05-17T13:00:00Z"},
+			"2023-05-17 13:00:00"},
 		{"day", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "day"}, ts}},
-			"2023-05-17T00:00:00Z"},
+			"2023-05-17 00:00:00"},
 		{"week", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "week"}, ts}},
-			"2023-05-15T00:00:00Z"},
+			"2023-05-15 00:00:00"},
 		{"month", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "month"}, ts}},
-			"2023-05-01T00:00:00Z"},
+			"2023-05-01 00:00:00"},
 		{"quarter", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "quarter"}, ts}},
-			"2023-04-01T00:00:00Z"},
+			"2023-04-01 00:00:00"},
 		{"year", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "year"}, ts}},
-			"2023-01-01T00:00:00Z"},
+			"2023-01-01 00:00:00"},
 		{"decade", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "decade"}, ts}},
-			"2020-01-01T00:00:00Z"},
+			"2020-01-01 00:00:00"},
 		// PostgreSQL's centuries and millennia START at year 1, so 2023 falls
 		// in the century beginning 2001 and the millennium beginning 2001 —
 		// not 2000. Measured; the arithmetic that "looks right" is wrong here.
 		{"century", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "century"}, ts}},
-			"2001-01-01T00:00:00Z"},
+			"2001-01-01 00:00:00"},
 		{"millennium", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "millennium"}, ts}},
-			"2001-01-01T00:00:00Z"},
+			"2001-01-01 00:00:00"},
 		// Case-insensitive, as on the server.
 		{"upper_case_unit", &FuncCall{Name: "date_trunc", Args: []Expr{&Lit{Val: "MONTH"}, ts}},
-			"2023-05-01T00:00:00Z"},
+			"2023-05-01 00:00:00"},
 		{"width_bucket_in_range", &FuncCall{Name: "width_bucket", Args: []Expr{
 			&Lit{Val: 1.0}, &Lit{Val: 0.0}, &Lit{Val: 10.0}, &Lit{Val: int64(5)}}}, int32(1)},
 		{"width_bucket_below_the_low_bound", &FuncCall{Name: "width_bucket", Args: []Expr{

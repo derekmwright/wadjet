@@ -1048,27 +1048,45 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      pass-throughs) and two `runWireErrors` entries. User-facing:
      `docs/sql-reference.md` §Casts and errors.
 
-   - **A timestamp-VALUED scalar function renders ISO 8601, not PostgreSQL's
-     timestamp text.** (Added 2026-09-04, from #544's residual.)
+   - **A timestamp-VALUED scalar function DECLARES text where PostgreSQL
+     declares timestamp.** (Added 2026-09-04, from #544's residual; the
+     rendering half CLOSED 2026-09-04.)
 
-     `DATE_TRUNC('day', ts)` answers `2023-11-14T00:00:00Z` where PostgreSQL
-     17.11 answers `2023-11-14 00:00:00` (measured), and the same holds for
-     `NOW`, `FROM_UNIXTIME`, `TO_ISO8601`'s siblings and the timezone family.
+     `DATE_TRUNC('day', ts)` answered `2023-11-14T00:00:00Z` where PostgreSQL
+     17.11 answers `2023-11-14 00:00:00`, and so did `NOW`,
+     `CURRENT_TIMESTAMP`, `FROM_UNIXTIME`, `DATE_PARSE`, `TIMEZONE`,
+     `PG_POSTMASTER_START_TIME` and interval arithmetic over a text operand.
 
-     It is a different mechanism from the coercion rule #544 closed, and that
-     is why it is recorded rather than fixed with it: this engine has no
-     TIMESTAMP-valued function RESULT at all. Every timestamp-producing scalar
-     is declared `RetString` and formats its own text, so the format is a
-     per-function choice rather than a property of a type, and
-     `batch.FormatTimestamp` — the one renderer the coercion rule now reaches
-     at every site, pgwire's send path included — has nothing to be called
-     from. The structural fix is for those functions to return the engine's
-     TIMESTAMP box and take their declared type with it, which is ~14 registry
-     entries and their planner declarations.
+     The first version of this entry said the fix had to wait for a
+     TIMESTAMP-valued function result, because "the format is a per-function
+     choice rather than a property of a type, and `batch.FormatTimestamp` has
+     nothing to be called from". That was wrong on its own terms: a function
+     that formats its own text can be given the ONE formatter to call, and the
+     twelve `date_trunc` arms plus the six other sites now call
+     `expr.formatInstant`, which is `batch.FormatTimestamp`. The VALUE is
+     PostgreSQL's at every site, and one renderer is exactly the property
+     #544 states.
 
-     Pinned by `wadjet.TestTimestampHasOneRenderingAtEverySite`'s
-     `residual_date_trunc_renders_rfc3339` cell, which fails the day any of
-     them moves.
+     Two functions deliberately keep an ISO 8601 rendering: `TO_ISO8601`,
+     whose name is its format contract, and `AT_TIMEZONE`, whose result is a
+     wall clock in another zone that a zoneless rendering would publish as
+     UTC — the same misreading `TIMEZONE` declines a non-UTC zone rather than
+     commit.
+
+     **What still diverges** is the DECLARATION. `date_trunc` RETURNS
+     `timestamp` (OID 1114) on the server and `text` (OID 25) here: the scalar
+     registry is `func([]any) any` with one static `Ret` per entry, so a
+     function result cannot be TIMESTAMP-typed at all. A client that asks what
+     the column IS gets the wrong answer, and no amount of formatting fixes
+     that — which is why it is recorded rather than bandaged (protocol rule
+     11). The structural fix is a type channel in the registry: ~14 entries
+     return the engine's TIMESTAMP box and carry `parquet.TypeTimestamp`, and
+     the planner's declared type follows.
+
+     Gated by `wadjet.TestTimestampHasOneRenderingAtEverySite` — seven
+     function-result value cells for the closed half, and the
+     `residual_date_trunc_declares_string_not_timestamp` pin for the open one,
+     which fails the day a timestamp-valued function declares TIMESTAMP.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as

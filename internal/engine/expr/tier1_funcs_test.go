@@ -198,8 +198,10 @@ func TestBase64RoundTrip(t *testing.T) {
 func TestFromUnixtime(t *testing.T) {
 	fn := DefaultRegistry.Lookup("from_unixtime")
 	got := fn([]any{float64(0)})
-	if got != "1970-01-01T00:00:00Z" {
-		t.Errorf("from_unixtime(0) = %v", got)
+	if got != "1970-01-01 00:00:00" {
+		t.Errorf("from_unixtime(0) = %v, want the engine's one instant "+
+			"rendering — the same text a TIMESTAMP column of that instant "+
+			"answers, not RFC3339 (#544)", got)
 	}
 	got = fn([]any{float64(1700000000)})
 	if got == nil {

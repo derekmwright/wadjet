@@ -803,12 +803,13 @@ func dateAddInterval(dateStr string, iv IntervalValue, subtract bool) string {
 		return ""
 	}
 	t = addInterval(t, iv, subtract)
-	// Return date format if no time component, otherwise RFC3339.
+	// A whole day is a calendar date; anything with a clock is an instant and
+	// renders the one way this engine renders instants (formatInstant).
 	if iv.Hours == 0 && iv.Minutes == 0 && iv.Seconds == 0 &&
 		t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
 		return t.Format("2006-01-02")
 	}
-	return t.Format(time.RFC3339)
+	return formatInstant(t)
 }
 
 // --- Arithmetic ---
@@ -4816,7 +4817,7 @@ func fnCastString(args []any) any {
 // --- Date/time functions ---
 
 func fnNow(args []any) any {
-	return time.Now().Format(time.RFC3339)
+	return formatInstant(time.Now())
 }
 
 func fnYear(args []any) any {
@@ -4878,41 +4879,41 @@ func fnDateTrunc(args []any) any {
 	}
 	switch unit {
 	case "year":
-		return time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location()))
 	case "quarter":
 		q1 := time.Month((int(t.Month())-1)/3*3 + 1)
-		return time.Date(t.Year(), q1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year(), q1, 1, 0, 0, 0, 0, t.Location()))
 	case "month":
-		return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location()))
 	case "week":
 		// ISO convention (DuckDB/Postgres): truncate to Monday.
 		d := t
 		for d.Weekday() != time.Monday {
 			d = d.AddDate(0, 0, -1)
 		}
-		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location()))
 	case "day":
-		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()))
 	case "hour":
-		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location()))
 	case "minute":
-		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location()))
 	case "second":
-		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location()))
 	case "decade":
-		return time.Date(t.Year()/10*10, 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date(t.Year()/10*10, 1, 1, 0, 0, 0, 0, t.Location()))
 	case "century":
 		// PostgreSQL's centuries START at year 1: date_trunc('century',
 		// '2023-05-17') is 2001-01-01, not 2000-01-01. Measured live.
-		return time.Date((t.Year()-1)/100*100+1, 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date((t.Year()-1)/100*100+1, 1, 1, 0, 0, 0, 0, t.Location()))
 	case "millennium":
-		return time.Date((t.Year()-1)/1000*1000+1, 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+		return formatInstant(time.Date((t.Year()-1)/1000*1000+1, 1, 1, 0, 0, 0, 0, t.Location()))
 	case "milliseconds", "microseconds":
 		// This engine's instants are epoch MILLISECONDS, so both of these are
 		// the identity here. PostgreSQL truncates a microsecond value to the
 		// millisecond for the first and answers the value itself for the
 		// second; over a millisecond-resolution instant those coincide.
-		return t.Format(time.RFC3339)
+		return formatInstant(t)
 	default:
 		// PostgreSQL refuses a unit its timestamp functions do not know rather
 		// than answering NULL, and the accepted set is exactly the thirteen
@@ -5096,13 +5097,13 @@ func dateShift(args []any, subtract bool) any {
 // interval argument (dateShift) — one function, so the operator and the
 // function family cannot answer the same question differently (issue #332).
 //
-// Two instant renderers already coexist, and this deliberately keeps it at two:
-// a TEXT operand goes on rendering RFC3339 through dateAddInterval (TPC-H Q1's
-// `DATE '1998-12-01' - INTERVAL '90' DAY` is a text operand and its output is
-// pinned), while a resolved temporal COLUMN renders through formatDateResult —
-// batch.FormatTimestamp, the engine's one timestamp renderer, which is what
-// #322 settled for date_add over a TIMESTAMP column. A third renderer here
-// would make the output format depend on how the value reached the operator.
+// There is ONE instant renderer now. A TEXT operand goes through
+// dateAddInterval and a resolved temporal COLUMN through formatDateResult, and
+// both end at formatInstant — so the output format no longer depends on how
+// the value reached the operator, which is what #322 settled for date_add over
+// a TIMESTAMP column and what #544's second pass finished for the rest. A
+// whole DAY still renders as a calendar date on both paths, which is what
+// TPC-H Q1's pinned `DATE '1998-12-01' - INTERVAL '90' DAY` reads.
 func intervalShift(v any, iv IntervalValue, subtract bool) any {
 	if ds, ok := v.(string); ok {
 		return dateAddInterval(ds, iv, subtract)
@@ -5151,16 +5152,49 @@ func parseDateArg(v any) (time.Time, bool, bool) {
 	return t, true, true
 }
 
+// formatInstant renders an instant the ONE way this engine renders one:
+// batch.FormatTimestamp over epoch milliseconds, which is what pgwire's send
+// path, the TIMESTAMP-to-text cast, the sort/compare key and formatDateResult
+// already use — `2023-05-17 13:24:35`, PostgreSQL's own text for a timestamp,
+// with a fractional second only when there is one.
+//
+// Every function whose RESULT is an instant goes through here. Before #544's
+// second pass, twelve arms of date_trunc plus now(), current_timestamp(),
+// from_unixtime(), date_parse(), timezone() and date-string arithmetic each
+// called `Format(time.RFC3339)` directly, so `date_trunc('day', ts)` answered
+// `2023-05-17T00:00:00Z` where the column it came from answered
+// `2023-05-17 00:00:00` and where PostgreSQL answers the same. One value, two
+// spellings, decided by which expression the value passed through — the exact
+// shape #544 closed for the cast and the wire.
+//
+// The instant is normalized to UTC because that is what the engine's TIMESTAMP
+// is: epoch milliseconds, no zone. Callers that truncate in the parsed value's
+// own location keep doing so — this changes how the result PRINTS, never which
+// instant it is.
+//
+// Two functions deliberately do NOT come through here, and both are about the
+// value rather than the dialect:
+//
+//   - to_iso8601(), whose NAME is its format contract.
+//   - at_timezone(), whose result is a wall clock in ANOTHER zone. Printed
+//     bare it would be read back as UTC, which is the misreading fnTimezone
+//     refuses a non-UTC zone rather than commit; its offset is load-bearing.
+//
+// The resolution limit is the millisecond, because that is the engine's
+// instant. A caller holding finer precision loses it here, as it does on the
+// wire (docs/data-types.md, "One rendering").
+func formatInstant(t time.Time) string {
+	return batch.FormatTimestamp(t.UTC().UnixMilli())
+}
+
 // formatDateResult renders a date-arithmetic result. A whole day stays a
-// calendar date; an instant goes through batch.FormatTimestamp, the engine's
-// one timestamp renderer, so date_add over a TIMESTAMP column reads exactly
-// the way the column itself does.
+// calendar date; an instant goes through formatInstant, so date_add over a
+// TIMESTAMP column reads exactly the way the column itself does.
 func formatDateResult(t time.Time, dateOnly bool) string {
-	t = t.UTC()
 	if dateOnly {
-		return t.Format("2006-01-02")
+		return t.UTC().Format("2006-01-02")
 	}
-	return batch.FormatTimestamp(t.UnixMilli())
+	return formatInstant(t)
 }
 
 // fnToDate converts a date, a timestamp or a string to a calendar date.
@@ -7174,7 +7208,7 @@ func fnFromUnixtime(args []any) any {
 		return nil
 	}
 	epoch := int64(ToFloat64(args[0]))
-	return time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+	return formatInstant(time.Unix(epoch, 0))
 }
 
 func fnToUnixtime(args []any) any {
@@ -7207,7 +7241,7 @@ func fnDateParse(args []any) any {
 	if err != nil {
 		return nil
 	}
-	return t.Format(time.RFC3339)
+	return formatInstant(t)
 }
 
 // sqlFormatToGo converts SQL date format specifiers to Go time layout.
@@ -8126,7 +8160,7 @@ func fnLastDayOfMonth(args []any) any {
 }
 
 func fnCurrentTimestamp(args []any) any {
-	return time.Now().Format(time.RFC3339)
+	return formatInstant(time.Now())
 }
 
 func fnAtTimezone(args []any) any {
@@ -8142,6 +8176,13 @@ func fnAtTimezone(args []any) any {
 	if err != nil {
 		return nil
 	}
+	// NOT formatInstant. Every other timestamp-valued function renders through
+	// it (#544), and this one must not: the result is a wall clock in `loc`,
+	// and the engine's one rendering has no zone, so printing it bare would
+	// publish 07:00 New York as 07:00 UTC — five hours wrong the moment
+	// anything parses it back. Keeping the offset is the same position
+	// fnTimezone takes when it declines a non-UTC zone rather than convert
+	// with a guessed sign; both wait on a naive-timestamp type.
 	return t.In(loc).Format(time.RFC3339)
 }
 
@@ -8166,11 +8207,12 @@ func ProcessStart() time.Time { return processStart }
 // PostgreSQL reports when the postmaster — the process that owns the cluster —
 // started. `wadjet serve` is that process, so process start is the honest
 // answer. The value is a timestamp in the representation now() and
-// current_timestamp use, RFC3339 text: the scalar registry is func([]any) any
-// with no type channel, and every temporal function downstream (parseTime,
-// epoch, timezone) reads that form.
+// current_timestamp use — formatInstant text, the engine's one instant
+// rendering: the scalar registry is func([]any) any with no type channel, and
+// every temporal function downstream (parseTime, epoch, timezone) reads that
+// form. It carries the MILLISECOND now, where RFC3339 second-truncated it.
 func fnPgPostmasterStartTime(args []any) any {
-	return processStart.Format(time.RFC3339)
+	return formatInstant(processStart)
 }
 
 // fnEpoch implements EXTRACT(EPOCH FROM ts), which the parser rewrites to
@@ -8228,7 +8270,7 @@ func fnTimezone(args []any) any {
 	if t.IsZero() {
 		return nil
 	}
-	return t.UTC().Format(time.RFC3339)
+	return formatInstant(t)
 }
 
 // isUTCZone reports whether a zone name is one of the spellings of UTC that

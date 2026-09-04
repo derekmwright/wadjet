@@ -29,6 +29,11 @@ const (
 	testDateEpochS  = 9568 * 86400 // midnight of that day
 	testTSEpochS    = 826727136    // that instant
 	testISOText     = "1996-03-13T14:25:36Z"
+	// The same instant as this engine RENDERS it — batch.FormatTimestamp,
+	// which is what a TIMESTAMP column, the wire and every instant-valued
+	// expression answer. The RFC3339 spelling above is an INPUT this engine
+	// accepts, not an output it produces (#544).
+	testInstantText = "1996-03-13 14:25:36"
 )
 
 // temporalBatch builds a one-row batch holding the same day in a DATE column
@@ -89,13 +94,16 @@ func datePartFamily() []datePartCase {
 			fn: "date_format", extraArgs: []Expr{&Lit{Val: "%Y-%m-%d"}},
 			wantDate: "1996-03-13", wantInstant: "1996-03-13",
 		},
+		// date_trunc renders through formatInstant, so it reads the way the
+		// TIMESTAMP column it was given reads and the way PostgreSQL renders
+		// a timestamp — not RFC3339 (#544's second pass).
 		{
 			fn: "date_trunc", unitArg: &Lit{Val: "month"},
-			wantDate: "1996-03-01T00:00:00Z", wantInstant: "1996-03-01T00:00:00Z",
+			wantDate: "1996-03-01 00:00:00", wantInstant: "1996-03-01 00:00:00",
 		},
 		{
 			fn: "date_trunc", unitArg: &Lit{Val: "day"},
-			wantDate: "1996-03-13T00:00:00Z", wantInstant: "1996-03-13T00:00:00Z",
+			wantDate: "1996-03-13 00:00:00", wantInstant: "1996-03-13 00:00:00",
 		},
 		// The two-argument extract(): reachable as written SQL, and the one
 		// shape with a vectorized kernel of its own to disagree with.
@@ -322,9 +330,14 @@ func TestTemporalInputFuncsCoverage(t *testing.T) {
 func TestAtTimezoneOverTemporalColumns(t *testing.T) {
 	b := temporalBatch(t)
 	tz := &FuncCall{Name: "timezone", Args: []Expr{&Lit{Val: "UTC"}, &ColRef{Name: "ts"}}}
-	if got := tz.Eval(b, 0); got != testISOText {
-		t.Errorf("timezone('UTC', ts): got %v want %v", got, testISOText)
+	if got := tz.Eval(b, 0); got != testInstantText {
+		t.Errorf("timezone('UTC', ts): got %v want %v", got, testInstantText)
 	}
+	// at_timezone is the ONE instant-valued function that does not render
+	// through formatInstant, and deliberately: its result is a wall clock in
+	// the named zone, and this engine's rendering carries no zone, so printing
+	// it bare would publish a local clock as UTC. The offset is part of the
+	// value here (see fnAtTimezone).
 	at := &FuncCall{Name: "at_timezone", Args: []Expr{&ColRef{Name: "d"}, &Lit{Val: "UTC"}}}
 	if got := at.Eval(b, 0); got != "1996-03-13T00:00:00Z" {
 		t.Errorf("at_timezone(d, 'UTC'): got %v want 1996-03-13T00:00:00Z", got)

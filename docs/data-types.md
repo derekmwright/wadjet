@@ -209,16 +209,37 @@ fractional second with its trailing zeros trimmed as PostgreSQL trims them
 is stored as. The same holds for a timestamp produced by an expression rather
 than read from a column, and for `Date` with its own `1996-03-13` form.
 
+The rule covers timestamp-VALUED functions too — `DATE_TRUNC`, `NOW`,
+`CURRENT_TIMESTAMP`, `FROM_UNIXTIME`, `DATE_PARSE`, `TIMEZONE`,
+`PG_POSTMASTER_START_TIME` and interval arithmetic over a text operand all
+render this way. `DATE_TRUNC('day', ts)` is `2023-11-14 00:00:00`, the same
+text the column it read produces.
+
+**The resolution is the millisecond.** A `Timestamp` is epoch milliseconds, so
+a rendered instant carries at most three fractional digits: `.5`, `.25`,
+`.123` — never `.123456`. PostgreSQL's `timestamp` holds microseconds and
+prints all six when they are there, so a value that reaches this engine with
+finer precision (a microsecond literal, a Parquet column written at
+microsecond or nanosecond resolution) is truncated to the millisecond on the
+way in, and every rendering of it — the wire, a cast, a function result —
+shows the truncated value consistently. It is one rendering of one stored
+instant, not a rounding applied at print time.
+
 `Duration` is the exception, and deliberately: it declares `int8` on the wire
 counting nanoseconds, so `CAST(d AS TEXT)` renders that integer — the text
 agrees with the declaration and with the projection.
 
-A timestamp-VALUED scalar function (`DATE_TRUNC`, `NOW`, `FROM_UNIXTIME`, the
-timezone family) still returns ISO 8601 with a `T` and a `Z`
-(`2023-11-14T00:00:00Z`) where PostgreSQL returns `2023-11-14 00:00:00`. Those
-functions return text they format themselves rather than a `Timestamp` value,
-so the rule above has no single renderer to reach; it is recorded in
-ADR-0012's divergence list.
+Two functions keep an ISO 8601 rendering, and both are about the value rather
+than the dialect. `TO_ISO8601` is named for its format. `AT_TIMEZONE` returns a
+wall clock in the zone you asked for, and the rendering above carries no zone —
+printed bare, `at_timezone(ts, 'America/New_York')` would read back as UTC and
+be five hours wrong — so it keeps its offset.
+
+What a timestamp-valued function still gets wrong is its DECLARED type, not its
+text: `DATE_TRUNC` returns `timestamp` (OID 1114) on PostgreSQL and `text` (OID
+25) here, because the scalar registry has one static return type per function
+and no TIMESTAMP-valued function result exists. Recorded in ADR-0012's
+divergence list.
 
 **Where this accept-set applies: everywhere.** The INGEST door (`COPY`, the Go
 ingester, a Bento-written table registered through Wadjet), a DATE literal in

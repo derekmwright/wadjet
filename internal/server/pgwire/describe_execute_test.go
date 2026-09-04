@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -432,11 +433,19 @@ func TestDataGripOpeningSequenceSimpleProtocol(t *testing.T) {
 // dropping the bound to "not in the future" (#518) passes for a server that
 // answers 1970.
 //
-// pg_postmaster_start_time formats expr.processStart as RFC3339, which is
-// second precision, and the query rounds that epoch — so the admissible answer
-// is that one second.
+// pg_postmaster_start_time formats expr.processStart through the engine's one
+// instant rendering, which carries MILLISECONDS — it was RFC3339, second
+// precision, until #544's second pass. The query ROUNDS that epoch, so a
+// process that started at .714 answers the NEXT second, and `int64(startup) ==
+// procStart.Unix()` would have failed for every start past the half second.
+//
+// The admissible answer is therefore the rounding of this process's start, not
+// its truncation: compare against the millisecond value and allow exactly the
+// half second round() can move it. That stays as tight as the old check — one
+// second late is still not this process — and does not depend on where in the
+// second the binary happened to launch.
 func startupTimeIsThisProcess(startup float64, procStart time.Time) bool {
-	return int64(startup) == procStart.Unix()
+	return math.Abs(startup-float64(procStart.UnixMilli())/1000) <= 0.5
 }
 
 // TestStartupTimeIsThisProcess pins both spellings this replaces: the value
