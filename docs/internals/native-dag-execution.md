@@ -293,9 +293,16 @@ BECOMES the scan's `TableAlias`, which is how `x.w` got in — and
 
 `physical.TestAScanRequestsOnlyColumnsItsTableHas` is the invariant, over
 TPC-H's 22 plans and a derived-alias corpus, asserted on the LOGICAL
-`RequiredColumns` so a plan the DAG refuses is still checked. It is also the
-claim that the worker's `parquet projection narrowed: requested columns missing
-from schema` warning is unreachable from a planned query.
+`RequiredColumns` so a plan the DAG refuses is still checked.
+
+What it asserts is exactly: **no scan requests a name of the QUERY's own
+vocabulary that its table lacks.** It deliberately does not judge the row-count
+sentinel or a `__`-prefixed hidden slot — those are computed by a projection and
+never read off a file, which is the derived-column case the worker's own
+`parquet projection narrowed: requested columns missing from schema` warning
+calls legitimate. So the gate does not prove that warning unreachable; it proves
+that the class of name which used to reach it — a derived table's SELECT-list
+alias, arriving qualified — no longer does.
 
 ### A SORT or WINDOW key over a computed derived alias is MATERIALIZED, not renamed
 
@@ -341,8 +348,13 @@ the wrapper. `evalExprColumn` chooses the output vector's type in this order:
 2. `expr.DecimalResultOf` → an exact fixed-point column at the input schema's
    scale;
 3. `expr.Int64ResultOf` → an INT64 column;
-4. the PLAN's declaration (`OutputRename.Type`) → `exec.Project`'s own
-   materialization, a vector of that type and `SetValue` per row;
+4. the PLAN's declaration (`OutputRename.Type`), **when the plan reached one**
+   → `exec.Project`'s own materialization, a vector of that type and
+   `SetValue` per row. `inferRenameExprDecl` asks `emittedColDecls` of the node
+   below the output projection — `inputColTypes` has no Aggregate arm, so the
+   window half of the family was typed and the aggregate half was not — and it
+   declines to declare at all when the inference is `expr.Undecided`, because
+   the STRING fallback declared as a fact rendered a DATE as its epoch day;
 5. FLOAT64, the historical default.
 
 Arms 2 and 3 read the input SCHEMA and stay ahead of the declaration because a

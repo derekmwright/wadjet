@@ -4154,6 +4154,24 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY COUNT(*), n_regionkey`},
 		pgCase{name: "GroupedOrderByUnselectedAggregate",
 			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey ORDER BY MAX(n_nationkey)`},
+		// An outer expression over an AGGREGATE whose result is the
+		// aggregate's OWN type. The gather evaluates these from the
+		// `__agg_N` slot and builds the output column from the PLAN's
+		// declaration, so the declaration is what a client's OID comes from —
+		// and neither oracle arm had a shape of this kind, which is how a DAG
+		// declaring `text` for a DATE went unseen (#831 review B1). The
+		// WireProtocol arm is the half that matters here: a value oracle
+		// cannot see a right value under a wrong OID.
+		pgCase{name: "CaseOverAggregateKeepsItsOwnType", exactNumeric: true,
+			sql: `SELECT CASE WHEN MAX(l_quantity) > 0 THEN MAX(l_extendedprice) ELSE NULL END AS v
+				FROM lineitem`},
+		pgCase{name: "CoalesceOverAggregateKeepsItsOwnType", exactNumeric: true,
+			sql: `SELECT COALESCE(MAX(l_extendedprice), MIN(l_extendedprice)) AS v FROM lineitem`},
+		pgCase{name: "GreatestOverAggregateKeepsItsOwnType", exactNumeric: true,
+			sql: `SELECT GREATEST(MAX(l_extendedprice), MIN(l_extendedprice)) AS v FROM lineitem`},
+		pgCase{name: "GroupedCaseOverAggregateKeepsItsOwnType", exactNumeric: true, ordered: true,
+			sql: `SELECT l_returnflag, CASE WHEN MAX(l_quantity) > 0 THEN MAX(l_extendedprice)
+				ELSE NULL END AS v FROM lineitem GROUP BY l_returnflag ORDER BY l_returnflag`},
 		pgCase{name: "GroupedCorrelatedOuterColumn",
 			sql: `SELECT r_regionkey, (SELECT COUNT(*) FROM nation n WHERE n.n_regionkey = r.r_regionkey) AS c
 				FROM region r ORDER BY r_regionkey`},

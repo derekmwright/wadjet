@@ -10160,6 +10160,24 @@ func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strict
 // Callers that materialize a vector from the answer take this one; callers
 // that only need the TypeID keep the wrapper above.
 func inferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls colDecls) expr.DeclType {
+	t, _ := inferProjectionDeclTypeConf(node, fallback, strictInt, decls)
+	return t
+}
+
+// inferProjectionDeclTypeConf is inferProjectionDeclType with the CONFIDENCE
+// it reached. It holds the BODY, and the wrapper above is one line, because
+// two copies of the two arms below — integer-preserving arithmetic, and the
+// declarations withheld for a bare reference — is how two callers come to
+// disagree about one column.
+//
+// A projection may declare a GUESS: exec.Project builds the vector and the
+// runtime corrects what it can. The GATHER may not — `evalDeclaredColumn`
+// builds the vector from the declaration alone and `SetValue` renders whatever
+// box arrives into it, so an UNDECIDED answer dressed as the STRING fallback
+// turns a DATE into its epoch day (#831 review). That caller asks for the
+// confidence and declines on Undecided.
+func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
+	strictInt map[string]bool, decls colDecls) (expr.DeclType, expr.Confidence) {
 	if strictInt != nil && expr.IntArithOn() {
 		inner := node
 		for {
@@ -10170,7 +10188,7 @@ func inferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictI
 			inner = p.Inner
 		}
 		if bo, ok := inner.(*plansql.BinaryOp); ok && intArithAllInt(bo, strictInt, decls) {
-			return expr.Decl(parquet.TypeInt64)
+			return expr.Decl(parquet.TypeInt64), expr.Decided
 		}
 	}
 	_, bareRef := node.(*plansql.ColRef)
@@ -10203,9 +10221,9 @@ func inferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictI
 	// polymorphic function's fallback is what types SELECT NULLIF(int_col, 1)
 	// numeric. Only expr.Undecided leaves the type to the caller.
 	if t, c := nodeDeclaredType(node, decls); c != expr.Undecided {
-		return t
+		return t, c
 	}
-	return expr.Decl(fallback)
+	return expr.Decl(fallback), expr.Undecided
 }
 
 // intArithAllInt mirrors expr.operandIsInt over the AST: int-typed scan
@@ -16185,6 +16203,26 @@ func inferRenameExprDecl(astExpr plansql.Node, scope *logical.Node) (expr.DeclTy
 		return expr.DeclType{}, false
 	}
 	child := scope.Children[0]
-	return inferProjectionDeclType(astExpr, parquet.TypeString,
-		strictIntArithCols(child), inputColDecls(child)), true
+	// emittedColDecls, not inputColDecls. The scope is the node BELOW the
+	// output projection, and what the gather's expression reads is what that
+	// node EMITS: a WINDOW's `__win_N` slots, and an AGGREGATE's `__agg_N`
+	// outputs. `inputColTypes` has a Window arm (#729) and NO Aggregate arm,
+	// so the window half of this family was typed and the aggregate half fell
+	// through to the STRING fallback — `emittedColTypes`' aggregate arm
+	// already declares each output from `aggSpecOutputType`, which is the same
+	// rule the stage's own AggSpec carries. One rule, both slot families.
+	//
+	// And the declaration is made only when the inference DECIDED. A fallback
+	// is not a declaration: typed STRING and declared anyway,
+	// `CASE WHEN MAX(id) > 0 THEN MAX(c_date) ELSE NULL END` built a String
+	// vector and `SetValue` rendered the epoch day `16195` where PostgreSQL
+	// and the single-process path say `2014-05-05`. An undecided rename keeps
+	// `evalExprColumn`'s float64 arm — what it had before the declaration
+	// existed — so a shape this walk cannot type is never made worse by it.
+	d, conf := inferProjectionDeclTypeConf(astExpr, parquet.TypeString,
+		strictIntArithCols(child), emittedColDecls(child))
+	if conf == expr.Undecided {
+		return expr.DeclType{}, false
+	}
+	return d, true
 }

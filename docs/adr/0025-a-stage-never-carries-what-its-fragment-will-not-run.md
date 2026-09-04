@@ -1865,12 +1865,44 @@ network address a CAST or a CASE can produce — fell to `default: SetNull`: NUL
 on both DAG arms for every type, while the single-process path rendered the
 value (#831, #645). The rule is this ADR's own, one operator over: a column
 that exists in no catalog has its declared type AS its runtime type, so
-`OutputRename` carries `inferProjectionDeclType`'s answer — the same call
-`attachScanSelectProjections` makes for an item a FRAGMENT computes — and the
-materialization is `exec.Project`'s. Using the declaration rather than probing a
-box is the point: the two engines then build the same column from the same
-expression, and a declaration that is wrong is wrong on BOTH instead of silent
-on one.
+`OutputRename` carries the plan's inference and the materialization is
+`exec.Project`'s.
+
+Two things about that answer are load-bearing, and the first cut of this section
+got both wrong.
+
+**The scope is what the node EMITS.** `inferRenameExprDecl` asks
+`emittedColDecls` of the node below the output projection, not `inputColDecls`.
+`inputColTypes` has a Window arm (#729) and NO Aggregate arm, so the WINDOW half
+of the family was typed and the AGGREGATE half fell through;
+`emittedColTypes`' aggregate arm already declares each output from
+`aggSpecOutputType`, which is the same rule the stage's own `AggSpec` carries.
+One rule, both slot families.
+
+**A FALLBACK IS NOT A DECLARATION.** A projection may declare a guess —
+`exec.Project` builds the vector and the runtime corrects what it can. The
+GATHER may not: `evalDeclaredColumn` builds the vector from the declaration
+alone and `SetValue` renders whatever box arrives into it. Declared STRING
+because nothing decided, `CASE WHEN MAX(id) > 0 THEN MAX(c_date) ELSE NULL END`
+came back as the epoch day `16195` where PostgreSQL and the single-process path
+say `2014-05-05` — the new mechanism PRODUCING a wrong answer rather than
+failing to fix one. The rename is therefore declared only when the inference
+reaches `expr.Decided` or `expr.Guessed`, and an Undecided one keeps
+`evalExprColumn`'s float64 arm, which is what it had before the declaration
+existed. `inferProjectionDeclTypeConf` holds the body and
+`inferProjectionDeclType` is its one-line caller, so the two can never answer
+differently.
+
+The claim this supports is narrow, and the wider one the first cut made — "*a
+declaration that is wrong is wrong on BOTH instead of silent on one*" — is FALSE
+and withdrawn. The two engines type a computed column through two different
+walks: `attachScanSelectProjections` types a `project` stage's spec from
+`inputColDecls`, which above a Project or an Aggregate answers nothing, so the
+derived-table spelling of the same question still renders a DATE as its epoch
+day on the DAG (pinned in
+`coordinator.TestTheDerivedTableSpellingIsNotAControlForTheOwnTypeCase`; the fix
+is to give that walk `emittedColTypes`' answer, which is merging the two).
+What holds is that the GATHER no longer declares a type it did not derive.
 
 Two smaller members of the same family, both "a projection NARROWS to its
 outputs, so everything the operator will read has to be one of them":

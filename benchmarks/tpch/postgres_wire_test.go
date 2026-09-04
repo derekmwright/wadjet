@@ -622,6 +622,24 @@ func wireCorpus() []wireCase {
 		// COUNT(*) is int8 in PostgreSQL, and a driver that reads it as int4
 		// truncates silently past 2^31. Wadjet agrees on the OID here.
 		{name: "CountStar", sql: `SELECT COUNT(*) AS c FROM nation`},
+		// An outer expression over an AGGREGATE whose result is the
+		// aggregate's OWN type. The DECLARATION is the whole question: the
+		// value is a number either way, and a client reading `text` where
+		// PostgreSQL declares `numeric` gets a string. Nothing in this corpus
+		// asked it before — every aggregate entry here returns a number
+		// directly — which is how a DAG declaring the STRING fallback for a
+		// DATE went unseen by both oracle arms (#831 review B1).
+		//
+		// This arm runs wadjet's pgwire over the EMBEDDED db, so what it pins
+		// is the declaration both engines are supposed to produce. That the
+		// DAG's column agrees with it is the census's half
+		// (coordinator.TestAnOuterExpressionOverAPublishedSlotAgreesOnEveryArm),
+		// and the two together are what covers the shape.
+		{name: "CaseOverAggregateKeepsItsOwnType",
+			sql: `SELECT CASE WHEN MAX(l_quantity) > 0 THEN MAX(l_extendedprice) ELSE NULL END AS v ` +
+				`FROM lineitem`},
+		{name: "CoalesceOverAggregateKeepsItsOwnType",
+			sql: `SELECT COALESCE(MAX(l_extendedprice), MIN(l_extendedprice)) AS v FROM lineitem`},
 		// GROUPING(...) is `integer` in PostgreSQL, not bigint and not text.
 		// The value arm cannot see a right bitmask under a wrong OID, and a
 		// client that reads int4 where int8 is declared reads garbage (#804).
