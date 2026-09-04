@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // The correlation census (ADR-0021 §1c): every shape of a correlated subquery
@@ -82,6 +84,10 @@ type arcD5Cell struct {
 	wantScalarProjRoutes  int64
 	wantInSubqueryRoutes  int64
 	wantUnreachableRoutes int64
+	// wantSQLState, when set, is the SQLSTATE every arm's error must carry.
+	// A documented refusal is a promise about the CODE as much as the text,
+	// and the code is what a client branches on.
+	wantSQLState string
 	// pgSays records PostgreSQL 17's answer in prose where `want` cannot hold
 	// it (a refusal, or a deliberate divergence).
 	pgSays string
@@ -186,6 +192,25 @@ func arcD5CTEScopeCells() []arcD5Cell {
 		// SILENTLY WRONG at 50 for PostgreSQL's 47 on the two single-process
 		// arms and LOUD on the DAG, and closing it is a classifier repair
 		// (ADR-0021 §1c). The day it answers 47 this pin FAILS.
+		// THE SAME BOUNDARY WITH A CTE ON BOTH SIDES, which is what says the
+		// boundary is "the OUTER reference is UNALIASED" and not "there is no
+		// CTE". The outer CTE reference here is bare (`FROM u`), so `u.did` in
+		// the subquery names a scope the INNER `u` answers to as well and no
+		// collector can tell them apart: silent 0 for PostgreSQL's 47. One
+		// alias later — the control below — it answers 47 on every arm, which
+		// is what makes this the boundary of a NAME and not of the CTE fix.
+		{issue: "#535", name: "boundary_cte_on_both_sides_outer_unaliased_stays_silent",
+			sql: `WITH u AS (SELECT g AS did, id FROM typemx WHERE id < 50) ` +
+				`SELECT COUNT(*) AS n FROM u WHERE EXISTS (` +
+				`SELECT 1 FROM u b WHERE b.did = u.did AND b.id <> u.id)`,
+			want:           []string{"n=int64:0"},
+			wantErrLikeDAG: "SubqueryRunner",
+			pgSays:         "47"},
+		{issue: "#535", name: "control_cte_on_both_sides_outer_aliased",
+			sql: `WITH u AS (SELECT g AS did, id FROM typemx WHERE id < 50) ` +
+				`SELECT COUNT(*) AS n FROM u a WHERE EXISTS (` +
+				`SELECT 1 FROM u b WHERE b.did = a.did AND b.id <> a.id)`,
+			want: []string{"n=int64:47"}, wantCorrRoutes: 1},
 		{issue: "#535", name: "boundary_unaliased_base_table_correlation_stays_silent",
 			sql: `SELECT COUNT(*) AS c FROM typemx WHERE id < 50 AND EXISTS (` +
 				`SELECT 1 FROM typemx sub WHERE sub.g = typemx.g)`,
@@ -271,6 +296,27 @@ func arcD5TypedRerunCells() []arcD5Cell {
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_d4 AS k FROM numwidth GROUP BY w_d4) b WHERE a.w_d2 = b.k)`,
 			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+		// THE DOCUMENTED REFUSAL, end to end. `docs/sql-reference.md` and
+		// ADR-0021 §1e promise 0A000 for an outer value with no literal
+		// spelling; until this cell existed only the unit test exercised it,
+		// and a promise about a SQLSTATE that no query reaches is not a
+		// promise. The container columns live in typemx_nested.
+		arcD5Cell{issue: "#679", name: "container_outer_value_is_refused_with_0A000",
+			sql: `SELECT COUNT(*) AS n FROM typemx_nested a WHERE a.id < 5 AND EXISTS (` +
+				`SELECT 1 FROM (SELECT c_arr AS k, id FROM typemx_nested WHERE id < 3) b ` +
+				`WHERE b.k = a.c_arr)`,
+			wantErrLike:    "has no literal spelling that reads back as the same value",
+			wantSQLState:   "0A000",
+			wantCorrRoutes: 1,
+			pgSays:         "PostgreSQL compares arrays and answers; this engine has no literal for one"},
+		arcD5Cell{issue: "#679", name: "vector_outer_value_is_refused_with_0A000",
+			sql: `SELECT COUNT(*) AS n FROM typemx_nested a WHERE a.id < 5 AND EXISTS (` +
+				`SELECT 1 FROM (SELECT c_vec AS k, id FROM typemx_nested WHERE id < 3) b ` +
+				`WHERE b.k = a.c_vec)`,
+			wantErrLike:    "has no literal spelling that reads back as the same value",
+			wantSQLState:   "0A000",
+			wantCorrRoutes: 1,
+			pgSays:         "the refusal is this engine's own; PostgreSQL has no VECTOR type"},
 		arcD5Cell{issue: "#679", name: "control_base_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM numwidth b WHERE a.w_d2 = b.w_i64)`,
@@ -378,64 +424,166 @@ func arcD5NotInCells() []arcD5Cell {
 // over an empty input yields no row in PostgreSQL either.
 func arcD5LateralCells() []arcD5Cell {
 	const dagCarrier = "does not exist in the input schema"
+	const lat = `JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s `
+	const left = `LEFT ` + lat
 	return []arcD5Cell{
+		// --- ON true / no ON: the lateral yields a row for every outer row,
+		// and nothing filters it. Both spellings answer the same.
 		{issue: "#767", name: "inner_lateral_ungrouped_count_keeps_the_unmatched_row",
-			sql: `SELECT o.customer AS c, s.item_count AS n FROM lat_ord o JOIN LATERAL (` +
-				`SELECT COUNT(*) AS item_count FROM lat_item WHERE order_id = o.id) s ON true ` +
-				`ORDER BY o.customer`,
-			want: []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"}},
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON true ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
 		{issue: "#767", name: "left_lateral_ungrouped_count_reads_zero_not_null",
-			sql: `SELECT o.customer AS c, s.item_count AS n FROM lat_ord o LEFT JOIN LATERAL (` +
-				`SELECT COUNT(*) AS item_count FROM lat_item WHERE order_id = o.id) s ON true ` +
-				`ORDER BY o.customer`,
-			want: []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"}},
-		// The rewritten reference has to reach the WHERE too, or the row this
-		// commit restores is filtered back out by the predicate that selects
-		// it. PostgreSQL answers exactly Carol.
-		{issue: "#767", name: "lateral_count_default_reaches_the_where_clause",
-			sql: `SELECT o.customer AS c, s.item_count AS n FROM lat_ord o JOIN LATERAL (` +
-				`SELECT COUNT(*) AS item_count FROM lat_item WHERE order_id = o.id) s ON true ` +
-				`WHERE s.item_count = 0 ORDER BY o.customer`,
-			want: []string{"c=Carol|n=int64:0"}},
-		// The issue's own shape, COUNT and SUM together. Right on both
-		// single-process arms; LOUD on both DAG arms for a SECOND and older
-		// defect this commit does not touch — a BARE projection of a
-		// NULL-padded lateral aggregate's non-COUNT output is not carried by
-		// the join stage. #767 records it separately ("LEFT JOIN LATERAL
-		// (agg) fails on the stage DAG … pre-existing"), the COUNT column
-		// beside it runs on the DAG, and the day this cell answers there the
-		// pin fails.
-		{issue: "#767", name: "lateral_count_and_sum_together",
-			sql: `SELECT o.customer AS c, s.item_count AS n, s.total_amount AS t FROM lat_ord o ` +
-				`JOIN LATERAL (SELECT COUNT(*) AS item_count, SUM(amount) AS total_amount ` +
-				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.customer`,
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + left +
+				`ON true ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+
+		// --- THE `ON` MATRIX. The review found six PostgreSQL-correct answers
+		// turned wrong by a repair that forced LEFT and defaulted the COUNT
+		// without reading the join's own condition: `ON s.n > 5` answered
+		// three rows for PostgreSQL's none, printing 0 where the counts were
+		// 2. PostgreSQL evaluates the lateral per outer row and THEN applies
+		// the ON, so the ON has to keep deciding — see
+		// logical.lateralEmptyInputPlan for the three cases.
+		{issue: "#767", name: "inner_on_over_the_lateral_aggregate",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON s.n > 1 ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "inner_on_no_row_can_satisfy",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON s.n > 5 ORDER BY o.customer`,
+			want:                  []string{},
+			wantUnreachableRoutes: 1,
+			pgSays:                "no rows — and the repair printed three, with n=0 where the counts are 2"},
+		// The one the DECLINE alone would still get wrong, and the reason
+		// this is a pad-then-filter and not a decline: the DEFAULT row PASSES
+		// this ON, so PostgreSQL keeps the unmatched outer row.
+		{issue: "#767", name: "inner_on_the_default_row_satisfies",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON s.n = 0 ORDER BY o.customer`,
+			want:                  []string{"c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "Carol at 0 — the lateral's own empty-input row, kept by an ON it satisfies"},
+		{issue: "#767", name: "inner_on_names_only_the_outer_row",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON o.total > 100 ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "inner_on_constant_false",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON 1 = 0 ORDER BY o.customer`,
+			want:                  []string{},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "inner_on_over_a_non_count_aggregate",
+			sql: `SELECT o.customer AS c, s.mn AS mn FROM lat_ord o JOIN LATERAL (` +
+				`SELECT MIN(amount) AS mn FROM lat_item WHERE order_id = o.id) s ` +
+				`ON s.mn > 60 ORDER BY o.customer`,
+			want:                  []string{"c=Bob|mn=float:75"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "Bob 75 — MIN of nothing is NULL and NULL > 60 is UNKNOWN, so Carol is dropped"},
+		{issue: "#767", name: "inner_on_over_two_outputs",
+			sql: `SELECT o.customer AS c, s.n AS n, s.t AS t FROM lat_ord o JOIN LATERAL (` +
+				`SELECT COUNT(*) AS n, SUM(amount) AS t FROM lat_item WHERE order_id = o.id) s ` +
+				`ON s.n >= 0 ORDER BY o.customer`,
 			want: []string{
 				"c=Alice|n=int64:2|t=float:150", "c=Bob|n=int64:2|t=float:200",
 				"c=Carol|n=int64:0|t=NULL"},
-			wantErrLikeDAG: dagCarrier,
-			pgSays:         "the same three rows on every arm; the DAG's refusal is a carrier defect, not a value"},
-		// A SUM-only lateral: PostgreSQL's empty-input value IS NULL there,
-		// so the LEFT pad is already right and only the ROW had to be kept.
-		{issue: "#767", name: "lateral_sum_only_keeps_the_row_at_null",
-			sql: `SELECT o.customer AS c, s.t AS t FROM lat_ord o JOIN LATERAL (` +
-				`SELECT SUM(amount) AS t FROM lat_item WHERE order_id = o.id) s ON true ` +
-				`ORDER BY o.customer`,
-			want:                  []string{"c=Alice|t=float:150", "c=Bob|t=float:200", "c=Carol|t=NULL"},
 			wantUnreachableRoutes: 1},
-		// THE CONTROL that draws the line: a subquery the QUERY grouped
-		// yields NO row over an empty input in PostgreSQL either, so Carol's
-		// count is NULL and not 0. A fix that defaulted every lateral
-		// aggregate would answer 0 here and be wrong.
-		{issue: "#767", name: "control_user_grouped_lateral_pads_null",
-			sql: `SELECT o.customer AS c, s.n2 AS n FROM lat_ord o LEFT JOIN LATERAL (` +
+		{issue: "#767", name: "left_on_over_the_lateral_aggregate",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + left +
+				`ON s.n > 1 ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=NULL"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "Carol NULL — an OUTER join pads the pair its ON rejects"},
+		// THE BOUNDARY of the repair, pinned rather than described. An OUTER
+		// join whose ON the DEFAULT row would satisfy needs the lateral's
+		// columns NULLED per column for the pairs the ON rejects and KEPT for
+		// the one it accepts — a CASE per output over a schema this pass does
+		// not have — so the join is left exactly as written and Carol reads
+		// NULL where PostgreSQL reads 0. Alice and Bob are right, which is
+		// what says this is the one cell and not the class.
+		{issue: "#767", name: "boundary_left_on_the_default_row_satisfies_reads_null",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + left +
+				`ON s.n = 0 ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=NULL", "c=Bob|n=NULL", "c=Carol|n=NULL"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "Alice NULL, Bob NULL, Carol 0 — only Carol's cell diverges"},
+		// A subquery the QUERY grouped keeps the ordinary rule, ON and all.
+		{issue: "#767", name: "control_user_grouped_lateral_with_an_on",
+			sql: `SELECT o.customer AS c, s.n2 AS n FROM lat_ord o JOIN LATERAL (` +
 				`SELECT order_id, COUNT(*) AS n2 FROM lat_item WHERE order_id = o.id ` +
-				`GROUP BY order_id) s ON true ORDER BY o.customer`,
-			want:           []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=NULL"},
-			wantErrLikeDAG: dagCarrier,
-			pgSays:         "Alice 2, Bob 2, Carol NULL — a grouped empty input yields no row"},
-		// The NON-aggregated lateral, which this commit must not touch: an
-		// outer row with no match is correctly absent from an INNER join and
-		// NULL-padded by a LEFT one, on every arm.
+				`GROUP BY order_id) s ON s.n2 > 1 ORDER BY o.customer`,
+			want: []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"}},
+
+		// --- WHERE / HAVING / aggregate-argument / IN: every position the
+		// default has to reach. The walker's missing `InExpr` arm dropped the
+		// unmatched row from `WHERE s.n IN (0, 2)` in silence, and the
+		// aggregate-argument fields were not rewritten at all, so `SUM(s.n)`
+		// read the pad — NULL on the single-process arm and a hard
+		// `column "s.n" does not exist in the input schema` on both DAG arms.
+		{issue: "#767", name: "lateral_count_default_reaches_the_where_clause",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON true WHERE s.n = 0 ORDER BY o.customer`,
+			want:                  []string{"c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "lateral_count_default_reaches_an_in_list",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON true WHERE s.n IN (0, 2) ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "lateral_count_default_reaches_a_between",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON true WHERE s.n BETWEEN 0 AND 1 ORDER BY o.customer`,
+			want:                  []string{"c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "lateral_count_default_reaches_an_aggregate_argument",
+			sql: `SELECT o.customer AS c, SUM(s.n) AS t FROM lat_ord o ` + lat +
+				`ON true GROUP BY o.customer HAVING SUM(s.n) >= 0 ORDER BY c`,
+			want: []string{"c=Alice|t=int64:2", "c=Bob|t=int64:2", "c=Carol|t=int64:0"},
+			pgSays: "Carol 0 — this read NULL on the single-process arm and FAILED on both " +
+				"DAG arms until the aggregate-argument fields were rewritten too"},
+		{issue: "#767", name: "lateral_count_default_reaches_an_order_by",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON true ORDER BY s.n, o.customer`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+		// ARITHMETIC over the default. The VALUES are PostgreSQL's; the BOX is
+		// not, and the divergence is not this repair's — it is the
+		// polymorphic-declaration rung, reproducible with no lateral in
+		// sight: `SELECT COALESCE(o.id, 0) + 1 FROM lat_ord o` comes back
+		// float64 here and bigint in PostgreSQL, while `COALESCE(o.id, 0)`
+		// and `o.id + 1` each stay int64. The default this repair substitutes
+		// is a COALESCE, so it puts that rung under any expression written
+		// over a lateral COUNT. Pinned with the box it gives; the day the
+		// rung is fixed this fails and becomes int64.
+		{issue: "#767", name: "boundary_arithmetic_over_the_default_is_float_boxed",
+			sql: `SELECT o.customer AS c, s.n + 1 AS n FROM lat_ord o ` + lat +
+				`ON true ORDER BY o.customer`,
+			want:                  []string{"c=Alice|n=float:3", "c=Bob|n=float:3", "c=Carol|n=float:1"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "3, 3, 1 as BIGINT — the values agree, the declared type does not"},
+
+		// THE `SELECT *` BOUNDARY, pinned for real this time. A star expands
+		// in a later pass over the plan's own schema, so there is nothing in
+		// the SelectInfo for the rewrite to reach and the padded COUNT reads
+		// NULL where PostgreSQL reads 0 — and the decorrelation's injected
+		// join key (`order_id`) is in the star's output, which PostgreSQL's
+		// is not. On the DAG the shape is LOUD, and that is a shuffle
+		// name-consistency refusal (ADR-0010) rather than a value.
+		{issue: "#767", name: "boundary_select_star_over_an_aggregated_lateral",
+			sql: `SELECT * FROM lat_ord o ` + lat + `ON true ORDER BY o.customer`,
+			want: []string{
+				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|n=int64:2",
+				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|n=int64:2",
+				"id=int64:3|customer=Carol|total=float:0|order_id=NULL|n=NULL"},
+			wantErrLikeDAG: "where an earlier file of the same stage input named it",
+			pgSays: "three rows with columns (id, customer, total, n) and Carol at n = 0 — " +
+				"no order_id, and no refusal on any arm"},
+
+		// The NON-aggregated lateral, which none of this may touch.
 		{issue: "#767", name: "control_non_aggregated_lateral_inner",
 			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o JOIN LATERAL (` +
 				`SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
@@ -450,6 +598,18 @@ func arcD5LateralCells() []arcD5Cell {
 			want: []string{
 				"c=Alice|a=float:50", "c=Alice|a=float:100",
 				"c=Bob|a=float:75", "c=Bob|a=float:125", "c=Carol|a=NULL"}},
+		{issue: "#767", name: "control_non_aggregated_lateral_with_an_on",
+			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o JOIN LATERAL (` +
+				`SELECT amount FROM lat_item WHERE order_id = o.id) li ON li.amount > 60 ` +
+				`ORDER BY o.customer, li.amount`,
+			want: []string{
+				"c=Alice|a=float:100", "c=Bob|a=float:75", "c=Bob|a=float:125"}},
+		// A GROUPED outer query over the lateral, so the row Carol
+		// contributes is counted rather than only printed.
+		{issue: "#767", name: "control_grouped_outer_over_the_lateral",
+			sql: `SELECT o.customer AS c, COUNT(*) AS k FROM lat_ord o ` + lat +
+				`ON true GROUP BY o.customer ORDER BY c`,
+			want: []string{"c=Alice|k=int64:1", "c=Bob|k=int64:1", "c=Carol|k=int64:1"}},
 	}
 }
 
@@ -642,24 +802,56 @@ func arcD5MeasuredCells() []arcD5Cell {
 // the fixture.
 func arcD5FailedSubquerySetCells() []arcD5Cell {
 	return []arcD5Cell{
+		// The subquery has to PLAN and fail at RUN time, or `resolveSlow` —
+		// the function this issue is about — is never entered at all. A
+		// `LIMIT` is what keeps it a subquery: `tryDecorrelateInSubquery`
+		// declines a bounded set (#482), so the predicate stays an
+		// `expr.InSubquery` and the run's failure is raised exactly where
+		// `emptySet = true` used to be assigned.
+		//
+		// The first cells written for this issue used an aggregate in the
+		// subquery's WHERE, which commit 4 now refuses at PLAN time — so they
+		// asserted a refusal that never reached the code they were closing.
 		{issue: "#601", name: "failed_in_subquery_is_not_an_empty_set",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 IN (` +
-				`SELECT b.w_i32 FROM numwidth b WHERE SUM(b.w_i32) > 0)`,
-			wantErrLike: "aggregate functions are not allowed in WHERE",
-			pgSays: "42803 — and the rows this decided are numwidth's NULL-keyed ones, " +
-				"which `x IN (empty)` would have answered FALSE for"},
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key / 0 > 0 LIMIT 5)`,
+			wantErrLike:          "IN subquery could not be executed",
+			wantInSubqueryRoutes: 1,
+			pgSays: "division by zero — and the rows this used to decide are numwidth's " +
+				"NULL-keyed ones, which `x IN (empty)` would have answered FALSE for"},
 		{issue: "#601", name: "failed_not_in_subquery_is_not_an_empty_set",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
-				`SELECT b.w_i32 FROM numwidth b WHERE SUM(b.w_i32) > 0)`,
-			wantErrLike: "aggregate functions are not allowed in WHERE",
-			pgSays:      "42803 — `x NOT IN (empty)` would have answered TRUE for every one of them"},
-		// The control: a REAL empty set still decides those rows, which is
-		// the behaviour #550/#571 added and this must not undo.
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key / 0 > 0 LIMIT 5)`,
+			wantErrLike:          "IN subquery could not be executed",
+			wantInSubqueryRoutes: 1,
+			pgSays:               "division by zero — `x NOT IN (empty)` would have answered TRUE for every one"},
+		// The CORRELATED spelling reaches the same rule in the other
+		// evaluator, expr.CorrelatedInSubquery.EvalBoolNull, whose ordering
+		// this arc also changed (error, then empty set, then the probe's NULL).
+		{issue: "#601", name: "failed_correlated_not_in_subquery_is_not_an_empty_set",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.s NOT IN (` +
+				`SELECT b.s FROM mk_inner b WHERE b.n = a.n AND b.n / 0 > 0)`,
+			wantErrLike:    "IN subquery could not be executed",
+			wantCorrRoutes: 1,
+			pgSays:         "division by zero"},
+		// The controls. A REAL empty set still decides the NULL-keyed rows —
+		// the behaviour #550/#571 added and this must not undo — in the
+		// bounded spelling that reaches resolveSlow and in the decorrelated
+		// one; and a bounded set that RUNS, so "it errored" cannot pass as
+		// "the LIMIT spelling always errors".
+		{issue: "#601", name: "control_a_genuinely_empty_bounded_set_still_decides_null_keys",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 0 LIMIT 5)`,
+			want:   []string{"n=int64:10"},
+			pgSays: "10 — every row, NULL-keyed ones included, because the list is empty"},
 		{issue: "#601", name: "control_a_genuinely_empty_set_still_decides_null_keys",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
 				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 0)`,
-			want:   []string{"n=int64:10"},
-			pgSays: "10 — every row, NULL-keyed ones included, because the list is empty"},
+			want: []string{"n=int64:10"}},
+		{issue: "#601", name: "control_a_bounded_set_that_runs",
+			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i32 NOT IN (` +
+				`SELECT b.w_i32 FROM numwidth b WHERE b.w_key < 3 LIMIT 5)`,
+			want: []string{"n=int64:5"}},
 	}
 }
 
@@ -751,6 +943,19 @@ func arcD5AggregateArgumentCells() []arcD5Cell {
 		// UNCORRELATED subquery in an aggregate argument was never this
 		// defect, which is what says the CORRELATION and not the position was
 		// the trigger. It takes the SELECT-list route, not the correlated one.
+		// THE HAVING POSITION, pinned. The same expression in a HAVING is right
+		// on both single-process arms and LOUD on both DAG arms, and it was loud
+		// there at this arc's base too: the fix reaches buildAggregate's
+		// derived-INPUT compile, and a HAVING term is materialized by a second
+		// site that still compiles without the outer scope. Not a regression —
+		// recorded so the DAG failure is not left unpinned.
+		{issue: "#734", name: "boundary_exists_in_a_having_aggregate_is_loud_on_the_dag",
+			sql: `SELECT o.customer AS c FROM lat_ord o GROUP BY o.customer ` +
+				`HAVING SUM(CASE WHEN EXISTS (SELECT 1 FROM lat_item i WHERE i.order_id = o.id) ` +
+				`THEN 1 ELSE 0 END) > 0 ORDER BY c`,
+			want:           []string{"c=Alice", "c=Bob"},
+			wantErrLikeDAG: "SubqueryRunner",
+			pgSays:         "Alice and Bob on every arm; the DAG refuses at a second compile site"},
 		{issue: "#734", name: "control_uncorrelated_exists_in_an_aggregate_argument",
 			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM decpair y WHERE y.id = 2) ` +
 				`THEN 1 ELSE 0 END) AS v FROM decpair x`,
@@ -806,6 +1011,13 @@ func TestArcD5CorrelationMatchesPostgres(t *testing.T) {
 					if !strings.Contains(err.Error(), wantErr) {
 						t.Errorf("%s arm: error %v\n  want one containing %q\n  SQL: %s",
 							arm, err, wantErr, tc.sql)
+					}
+					if tc.wantSQLState != "" {
+						if got := sqlerr.StateOf(err); got != tc.wantSQLState {
+							t.Errorf("%s arm: SQLSTATE %q, want %q — a documented refusal is a "+
+								"promise about the CODE as much as the text\n  %v\n  SQL: %s",
+								arm, got, tc.wantSQLState, err, tc.sql)
+						}
 					}
 					return
 				}

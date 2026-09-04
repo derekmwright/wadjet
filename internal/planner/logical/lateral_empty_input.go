@@ -50,6 +50,92 @@ type lateralEmptyInput struct {
 	// countOutputs are the output names whose empty-input value is 0 rather
 	// than NULL — the COUNT family.
 	countOutputs []string
+	// correlationCond is the condition the DECORRELATION produced (the
+	// promoted correlated equalities), and onResidual / onResidualExpr are
+	// the `ON` the QUERY WROTE, `true` excluded. They are kept apart because
+	// the repair may make the join LEFT on the correlation ALONE and move the
+	// written ON somewhere the padded row still has to pass it.
+	correlationCond string
+	onResidual      string
+	onResidualExpr  plansql.Node
+}
+
+// lateralEmptyInputPlan is which of the three shapes this lateral join is, and
+// it exists because the join's OWN `ON` is part of the semantics rather than
+// decoration.
+//
+// PostgreSQL evaluates the lateral subquery ONCE PER OUTER ROW — an ungrouped
+// aggregate over an empty input still yields one row — and THEN applies the
+// join condition to that (outer row, lateral row) pair, with the join's kind
+// deciding what happens to a pair the condition rejects. Three cases follow:
+//
+//   - No written ON (or `ON true`): the condition rejects nothing, so making
+//     the join LEFT on the correlation and defaulting the COUNT outputs IS
+//     the semantics, for the INNER and the LEFT spelling alike.
+//     (lateralPadOnly)
+//
+//   - A written ON on an INNER join: the padded row must still be TESTED. An
+//     inner join's ON and a WHERE are the same filter, so the join becomes
+//     LEFT on the CORRELATION alone — giving every outer row its lateral row
+//     — and the ON moves into the enclosing WHERE, where the same default
+//     substitution reaches it. `ON s.n = 0` then keeps the unmatched row,
+//     which is what PostgreSQL does and what the decorrelation alone cannot.
+//     (lateralPadThenFilter)
+//
+//   - A written ON on an OUTER join: a pair the ON rejects must be KEPT with
+//     the lateral side NULL, which needs the lateral columns nulled per
+//     column rather than filtered — a CASE per output over a schema this pass
+//     does not have. NOT REPAIRED: the join is left exactly as it was written
+//     and answers what it answered before this repair existed, which for
+//     every ON that an unmatched outer row would fail is PostgreSQL's answer.
+//     The one shape it still gets wrong — an ON the DEFAULT row would pass,
+//     `LEFT JOIN LATERAL … ON s.n = 0` — is pinned in the census with
+//     PostgreSQL's answer beside it. (lateralNoRepair)
+//
+// A forced LEFT plus an unconditional default, with no case analysis at all,
+// is what turned six PostgreSQL-correct answers into wrong ones: `ON s.n > 5`
+// answered three rows for PostgreSQL's none, and printed 0 for counts of 2.
+type lateralEmptyInputCase int
+
+const (
+	lateralNoRepair lateralEmptyInputCase = iota
+	lateralPadOnly
+	lateralPadThenFilter
+)
+
+func lateralEmptyInputPlan(joinType string, empty lateralEmptyInput) lateralEmptyInputCase {
+	if !empty.ungroupedAggregate {
+		return lateralNoRepair
+	}
+	if empty.onResidual == "" {
+		return lateralPadOnly
+	}
+	// An INNER or CROSS join's ON is a filter; anything preserving a side is
+	// not, and this pass cannot express the null-fill that would need.
+	switch strings.ToLower(strings.TrimSpace(joinType)) {
+	case "join", "inner join", "inner", "cross join", "cross", "":
+		if empty.onResidualExpr == nil {
+			// No AST to move; leave the join as written rather than drop the
+			// condition.
+			return lateralNoRepair
+		}
+		return lateralPadThenFilter
+	}
+	return lateralNoRepair
+}
+
+// andIntoWhere conjoins one more predicate onto the enclosing query's WHERE.
+func andIntoWhere(info *plansql.SelectInfo, raw string, expr plansql.Node) {
+	if expr == nil {
+		return
+	}
+	if info.WhereExpr == nil {
+		info.WhereExpr = expr
+		info.Where = raw
+		return
+	}
+	info.WhereExpr = &plansql.AndNode{Left: info.WhereExpr, Right: expr}
+	info.Where = info.WhereExpr.String()
 }
 
 // lateralEmptyInputOf reads the subquery as WRITTEN, before the correlation
@@ -96,15 +182,37 @@ func applyLateralEmptyInputDefaults(info *plansql.SelectInfo, alias string, empt
 		return coalesceLateralCountRefs(n, alias, names)
 	}
 	for i := range info.Columns {
-		if info.Columns[i].ASTExpr == nil {
+		col := &info.Columns[i]
+		if col.ASTExpr != nil {
+			if rewritten := rewrite(col.ASTExpr); rewritten != col.ASTExpr {
+				col.ASTExpr = rewritten
+				col.Expr = rewritten.String()
+			}
+		}
+		// An AGGREGATE's argument is a SECOND place the column lives, and the
+		// one the builder reads for `SUM(s.n)`: SelectColumn.ASTExpr is the
+		// whole item, AggArgExpr / AggArgs / AggArg are what buildAggregate
+		// takes the input from. Rewriting only the first left `SUM(s.n)`
+		// reading the LEFT join's NULL pad — Carol at NULL for PostgreSQL's
+		// 0 on the single-process arm, and a hard `column "s.n" does not
+		// exist in the input schema` on both DAG arms.
+		if !col.IsAgg {
 			continue
 		}
-		rewritten := rewrite(info.Columns[i].ASTExpr)
-		if rewritten == info.Columns[i].ASTExpr {
-			continue
+		if col.AggArgExpr != nil {
+			if rewritten := rewrite(col.AggArgExpr); rewritten != col.AggArgExpr {
+				col.AggArgExpr = rewritten
+				col.AggArg = rewritten.String()
+			}
 		}
-		info.Columns[i].ASTExpr = rewritten
-		info.Columns[i].Expr = rewritten.String()
+		for j := range col.AggArgs {
+			if col.AggArgs[j] == nil {
+				continue
+			}
+			if rewritten := rewrite(col.AggArgs[j]); rewritten != col.AggArgs[j] {
+				col.AggArgs[j] = rewritten
+			}
+		}
 	}
 	if info.WhereExpr != nil {
 		info.WhereExpr = rewrite(info.WhereExpr)
@@ -130,6 +238,21 @@ func applyLateralEmptyInputDefaults(info *plansql.SelectInfo, alias string, empt
 // coalesceLateralCountRefs returns node with every reference to one of the
 // lateral's COUNT outputs wrapped in COALESCE(…, 0). It returns the SAME node
 // when nothing matched, so a caller can tell a rewrite from a no-op.
+//
+// The arm list is the whole contract, and a MISSING arm is silent: the
+// default case returns the node unwalked, so a reference under it keeps
+// reading the LEFT join's NULL. `WHERE s.n IN (0, 2)` dropped the unmatched
+// outer row for PostgreSQL's three, because InExpr had no arm while
+// BetweenExpr and IsExpr did.
+//
+// Every plansql node that can CONTAIN a column reference is here:
+// ColRef, ParenNode, NotNode, UnaryOp, AndNode, OrNode, BinaryOp, CmpExpr,
+// IsExpr, LikeExpr, BetweenExpr, InExpr, AnyAllExpr, CastNode, FuncCallNode,
+// CaseNode, ArrayLitNode, TupleNode and WindowFuncNode — every node type in
+// internal/planner/sql that holds another node, StarNode and the two
+// text-carrying ones excepted.
+// SubqueryNode and ExistsNode are deliberately NOT walked: they carry SQL
+// TEXT, not a tree, and a lateral output is not in their scope.
 func coalesceLateralCountRefs(node plansql.Node, alias string, names map[string]bool) plansql.Node {
 	if node == nil {
 		return nil
@@ -198,6 +321,58 @@ func coalesceLateralCountRefs(node plansql.Node, alias string, names map[string]
 				cn.Else = walk(e.Else)
 			}
 			return cn
+		case *plansql.InExpr:
+			vals := make([]plansql.Node, len(e.Values))
+			for i, v := range e.Values {
+				vals[i] = walk(v)
+			}
+			return &plansql.InExpr{Left: walk(e.Left), Not: e.Not, Values: vals}
+		case *plansql.AnyAllExpr:
+			out := *e
+			out.Left = walk(e.Left)
+			if e.Values != nil {
+				vals := make([]plansql.Node, len(e.Values))
+				for i, v := range e.Values {
+					vals[i] = walk(v)
+				}
+				out.Values = vals
+			}
+			return &out
+		case *plansql.ArrayLitNode:
+			els := make([]plansql.Node, len(e.Elements))
+			for i, v := range e.Elements {
+				els[i] = walk(v)
+			}
+			return &plansql.ArrayLitNode{Elements: els}
+		case *plansql.TupleNode:
+			els := make([]plansql.Node, len(e.Elements))
+			for i, v := range e.Elements {
+				els[i] = walk(v)
+			}
+			return &plansql.TupleNode{Elements: els}
+		case *plansql.WindowFuncNode:
+			out := *e
+			if e.Func != nil {
+				if fn, ok := walk(e.Func).(*plansql.FuncCallNode); ok {
+					out.Func = fn
+				}
+			}
+			if e.PartitionBy != nil {
+				pb := make([]plansql.Node, len(e.PartitionBy))
+				for i, v := range e.PartitionBy {
+					pb[i] = walk(v)
+				}
+				out.PartitionBy = pb
+			}
+			if e.OrderBy != nil {
+				ob := make([]plansql.WindowOrderBy, len(e.OrderBy))
+				copy(ob, e.OrderBy)
+				for i := range ob {
+					ob[i].Expr = walk(ob[i].Expr)
+				}
+				out.OrderBy = ob
+			}
+			return &out
 		}
 		return n
 	}

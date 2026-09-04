@@ -108,9 +108,30 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				// An UNGROUPED aggregate over an empty input still yields one
 				// row, so an outer row the lateral matches nothing for
 				// SURVIVES in PostgreSQL — see lateralEmptyInput (#767 part 1).
-				if empty.ungroupedAggregate {
+				//
+				// The join's OWN `ON` decides what happens to that row NEXT,
+				// and it has to keep deciding: PostgreSQL evaluates the
+				// lateral per outer row, THEN applies the join condition. A
+				// repair that forces LEFT and defaults the COUNT without
+				// looking at the ON keeps rows the ON rejects and prints 0
+				// for a count of 2. See lateralEmptyInputPlan for the three
+				// cases and which of them this can express.
+				switch lateralEmptyInputPlan(jt, empty) {
+				case lateralPadThenFilter:
+					// The lateral yields a row for every outer row (LEFT on
+					// the CORRELATION alone, defaults applied), and the
+					// written ON then filters — which for an INNER join is
+					// exactly a WHERE, so it moves there and is defaulted
+					// with everything else.
+					jt = "left"
+					joinCond = empty.correlationCond
+					andIntoWhere(info, empty.onResidual, empty.onResidualExpr)
+					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
+				case lateralPadOnly:
 					jt = "left"
 					applyLateralEmptyInputDefaults(info, join.RightAlias, empty)
+				case lateralNoRepair:
+					// Left as written. See lateralEmptyInputPlan.
 				}
 				items[idx] = NewJoin(left, right, jt, joinCond)
 			} else {
@@ -1703,13 +1724,25 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		correlatedParts[i] = normalizeCorrelatedEquality(part, leftAliases)
 	}
 
-	// Build the join condition from correlated predicates + original ON clause
-	var condParts []string
-	condParts = append(condParts, correlatedParts...)
+	// The correlation the DECORRELATION produced and the ON the QUERY WROTE
+	// are returned apart, because the empty-input repair may keep only the
+	// first as the join's condition and has to move the second (see
+	// lateralEmptyInput and the caller). Concatenating them is what discarded
+	// the written ON.
+	corrCond := strings.Join(correlatedParts, " AND ")
+	empty.onResidual = ""
 	if join.Condition != "" && !strings.EqualFold(strings.TrimSpace(join.Condition), "true") {
-		condParts = append(condParts, join.Condition)
+		empty.onResidual = join.Condition
+		empty.onResidualExpr = join.CondExpr
 	}
-	joinCond := strings.Join(condParts, " AND ")
+	joinCond := corrCond
+	if empty.onResidual != "" {
+		if joinCond != "" {
+			joinCond += " AND "
+		}
+		joinCond += empty.onResidual
+	}
+	empty.correlationCond = corrCond
 
 	return right, joinCond, empty, nil
 }
