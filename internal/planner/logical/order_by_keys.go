@@ -469,15 +469,41 @@ func selectOutputNames(info *plansql.SelectInfo) ([]string, []plansql.SelectColu
 	return out, items
 }
 
-// aggregateBelow finds the Aggregate the SELECT-list projection reads from,
-// descending only through nodes that pass its output along unchanged. Returns
-// nil when the projection reads rows rather than groups.
+// aggregateBelow finds the Aggregate THIS QUERY BLOCK's SELECT-list
+// projection reads from, descending only through nodes that pass its output
+// along unchanged. Returns nil when the projection reads rows rather than
+// groups.
+//
+// A NESTED SCOPE's root ends the walk. A derived table or a CTE is another
+// query block: its aggregate is not this block's, and its output is ROWS to
+// the block above however it was computed. Descending into one made an ORDER
+// BY over a derived table answer the question "is this term spellable over MY
+// grouping" about SOMEBODY ELSE's grouping, and refused shapes PostgreSQL
+// answers on every arm:
+//
+//	SELECT d.g, d.s FROM (SELECT g, SUM(h) AS s FROM collslot GROUP BY g) d
+//	ORDER BY d.s * 2
+//	-- PostgreSQL 3 rows; wadjet 0A000, loudly, single and DAG (#787)
+//
+// The marker is the one the rest of the planner already uses for a nested
+// scope: `Node.DerivedAlias` on a derived table's root and `Node.CTEName` on
+// a CTE's (physical.subtreeNamesRelation reads the same pair). It is asked of
+// every node the walk touches, the Aggregate included — a derived table whose
+// own root IS an Aggregate is still another block.
+//
+// This is the Project rule ADR-0026 §4's shared list deliberately leaves to
+// each walk (`AggScopePreservingWrapper` omits NodeProject, because what a
+// Project does to the schema is the caller's own question). The four wrapper
+// kinds keep the shared answer; the boundary is this walk's own.
 func aggregateBelow(project *Node) *Node {
 	if project == nil {
 		return nil
 	}
 	for _, n := range project.Children {
 		for n != nil {
+			if nestedScopeRoot(n) {
+				return nil
+			}
 			switch n.Type {
 			case NodeAggregate:
 				return n
@@ -492,6 +518,12 @@ func aggregateBelow(project *Node) *Node {
 		}
 	}
 	return nil
+}
+
+// nestedScopeRoot reports whether n is the root of another query block — a
+// derived table or a CTE body — as recorded by the builder that inlined it.
+func nestedScopeRoot(n *Node) bool {
+	return n != nil && (n.DerivedAlias != "" || n.CTEName != "")
 }
 
 // sortTermResolvesOverAggregate reports whether a materialized sort term reads

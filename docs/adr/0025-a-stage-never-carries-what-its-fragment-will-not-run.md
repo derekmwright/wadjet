@@ -326,6 +326,31 @@ the client as a hard error on `SELECT k, s FROM (SELECT id AS k, SUM(c) OVER ()
 + 1 AS s FROM t) x WHERE k > 0`, whose no-rename spelling the gather's own
 `OutputRename` already computes correctly.
 
+### A MATERIALIZED sort key has no later pass, so an unreachable one is refused (2026-09-04, #787)
+
+`assertSortKeysResolve` exempted every sort key carrying a `SourceExpr`, a
+`SourceColumn` or an `AliasSource`, on the grounds that a later pass —
+`resolveHiddenSortKeys`, `resolveDerivedAliasSortKeys` — materializes or
+renames it and owns the question. That is true of the two passes and false of
+the exemption: both run BEFORE the assertion, and `resolveHiddenSortKeys`
+DECLINES whenever the producer's fragment runs no `OpProject` — an
+aggregate-family stage, a union — which is exactly where
+`fuseSortIntoPredecessor` folds an ORDER BY over a derived table's aggregate.
+The key stayed spelled `__sortkey_N`, nothing computed it, and the task failed
+three dispatch attempts in with `sort: key column "__sortkey_0" does not exist
+in the input schema` on queries the single-process pipeline answers:
+
+    SELECT d.g, d.s FROM (SELECT g, SUM(id) AS s FROM t GROUP BY g) d ORDER BY d.s * 2
+    SELECT u.k FROM (SELECT DISTINCT id AS k, g AS v FROM t) u ORDER BY u.k * 2
+
+A key still spelled `__sortkey_N` at that point has no later pass by
+construction: either the term is on some producer's projection (and is in the
+carrier's input), or the key was renamed onto a real column (and is no longer
+spelled that way), or the passes declined. So the hidden family takes no
+exemption, and an unreachable one is `ErrUnreachableGatherOutput` — refused at
+PLAN time, where the coordinator routes the query to the pipeline that
+computes the term, which is what the rest of this ADR's refusals do.
+
 ## A name inside an EXPRESSION is a name (2026-08-30, #702, #694, #672)
 
 The convention above — every stream carries source column names and each

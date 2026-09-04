@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -290,7 +291,43 @@ func assertSortKeysResolve(stages []Stage) error {
 			}
 		}
 		for _, k := range s.SortKeys {
-			if k.Column == "" || k.SourceExpr != "" || k.SourceColumn != "" || k.AliasSource != "" {
+			if k.Column == "" {
+				continue
+			}
+			// A key still spelled `__sortkey_N` here has NO later pass. That
+			// slot is the planner's own materialization of an ORDER BY term,
+			// and both passes that settle one — resolveHiddenSortKeys and
+			// resolveDerivedAliasSortKeys — have already run: either the term
+			// is on some producer's OpProject (and is in `emitted`), or the
+			// key was renamed onto a real column (and is no longer spelled
+			// `__sortkey_N`), or the passes DECLINED. So the exemption below
+			// does not apply to it, and a hidden key nothing emits is
+			// unreachable however its Source fields are filled in.
+			//
+			// resolveHiddenSortKeys declines whenever the producer's fragment
+			// runs no OpProject — an aggregate-family stage, a union — which
+			// is exactly where fuseSortIntoPredecessor folds an ORDER BY over
+			// a derived table's aggregate:
+			//
+			//	SELECT d.g, d.s FROM (SELECT g, SUM(id) AS s FROM t GROUP BY g) d
+			//	ORDER BY d.s * 2
+			//	SELECT u.k FROM (SELECT DISTINCT id AS k, g AS v FROM t) u
+			//	ORDER BY u.k * 2
+			//	-- both: `sort: key column "__sortkey_0" does not exist in the
+			//	--   input schema`, three dispatch attempts in, on queries the
+			//	--   single-process pipeline answers (#787)
+			//
+			// Refusing here routes them to that pipeline instead of failing.
+			if logical.IsHiddenSortColumn(k.Column) {
+				if _, ok := lookupEmittedColumn(emitted, k.Column); ok {
+					continue
+				}
+				return fmt.Errorf("%w: stage %s (%s) orders on the materialized term %q and no "+
+					"fragment computes it, so the task would fail at dispatch for a query the "+
+					"engine can answer (#787); input: %v",
+					ErrUnreachableGatherOutput, s.ID, s.Type, k.Column, sortedEmittedNames(emitted))
+			}
+			if k.SourceExpr != "" || k.SourceColumn != "" || k.AliasSource != "" {
 				continue
 			}
 			if _, ok := lookupEmittedColumn(emitted, k.Column); ok {
