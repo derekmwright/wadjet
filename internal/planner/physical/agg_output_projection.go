@@ -118,7 +118,7 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 	if aggregatePublishesADuplicateName(groupKeys, aggOuts, stage) {
 		return nil
 	}
-	decls := aggregateStageDecls(stage)
+	decls := bareGroupKeyDecls(aggregateStageDecls(stage), stage, project)
 	// The identity indexes, built once. Each re-parses every published name,
 	// and the walk below asks them at every node of every SELECT item.
 	//
@@ -454,6 +454,71 @@ func aggregateStageOutputs(s *Stage) (groupKeys, aggOuts map[string]string) {
 
 // aggregateStageDecls is the declared type of every aggregate stage output,
 // for typing a projection written over them.
+// bareGroupKeyDecls adds the declared type of every BARE group key, which
+// aggregateStageDecls cannot supply: `Stage.GroupByTypes` holds the DERIVED
+// keys only — a bare key IS a column of the aggregate's input and carries no
+// plan-time type of its own — so an expression over one had no declaration and
+// took the STRING fallback.
+//
+// `SELECT x.g FROM (SELECT -g AS g, COUNT(*) FROM t WHERE id < 6 GROUP BY g) x
+// ORDER BY 1` is the shape: the absorbed projection declared `-g` STRING, the
+// sort key materialized into a text vector, and both DAG arms answered
+// `-1 -2 -3 -4 -5 0` — the BYTE order — where the single-process pipeline
+// answers PostgreSQL's `-5 … 0`. The binary spellings of the same value
+// (`g * -3`, `0 - g`) were already right, because their own arms consult
+// `decls` for each operand and reach the aggregate's INPUT through a different
+// route; the unary one had nothing to consult (#851 round 2).
+//
+// The type comes from the aggregate's own INPUT, which is where a bare key's
+// value comes from, and is added only for a name the stage does not already
+// declare — a derived key's entry is the authority for its own name.
+func bareGroupKeyDecls(decls colDecls, stage *Stage, project *logical.Node) colDecls {
+	if stage == nil || len(stage.GroupByCols) == 0 {
+		return decls
+	}
+	agg := logical.AggregateOverGroupRows(project)
+	if agg == nil || len(agg.Children) != 1 {
+		return decls
+	}
+	in := inputColDecls(agg.Children[0])
+	if len(in.types) == 0 {
+		return decls
+	}
+	var types map[string]parquet.TypeID
+	var dec map[string]logical.DecimalMeta
+	for _, k := range stage.GroupByCols {
+		key := strings.ToLower(strings.TrimSpace(k))
+		if key == "" {
+			continue
+		}
+		if _, have := decls.types[key]; have {
+			continue
+		}
+		t, ok := in.types[key]
+		if !ok {
+			continue
+		}
+		if types == nil {
+			types = make(map[string]parquet.TypeID, len(decls.types)+len(stage.GroupByCols))
+			for kk, vv := range decls.types {
+				types[kk] = vv
+			}
+			dec = make(map[string]logical.DecimalMeta, len(decls.dec))
+			for kk, vv := range decls.dec {
+				dec[kk] = vv
+			}
+		}
+		types[key] = t
+		if d, has := in.dec[key]; has {
+			dec[key] = d
+		}
+	}
+	if types == nil {
+		return decls
+	}
+	return colDecls{types: types, fields: decls.fields, dec: dec}
+}
+
 func aggregateStageDecls(s *Stage) colDecls {
 	types := make(map[string]parquet.TypeID, len(s.GroupByCols)+len(s.AggSpecs))
 	dec := map[string]logical.DecimalMeta{}

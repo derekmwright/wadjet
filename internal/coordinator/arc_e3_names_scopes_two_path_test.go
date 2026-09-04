@@ -329,21 +329,42 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 			sql:   "SELECT -g AS g, COUNT(*) AS n FROM typemx WHERE id < 6 GROUP BY g HAVING g > 2 ORDER BY 1",
 			want:  "g,n | -5,1 | -4,1 | -3,1",
 			route: (*Coordinator).UnreachableOutputLocalRoutes},
-		// PINNED on the DAG arms for the ORDER, not for the rows: the three
-		// values are PostgreSQL's, in the order "-3","-4","-5" — which is
-		// their BYTE order, not their numeric one. A unary minus over a
-		// column the stage publishes under a SHADOWING alias loses the
-		// column's declared type, the sort key falls back to STRING, and the
-		// comparison is lexical. Same family as the entry above and the same
-		// non-E3 mechanism; the rows are right on every arm.
+		// The DAG answered these three in their BYTE order until 2026-09-04:
+		// `Stage.GroupByTypes` holds the DERIVED keys only, so a projection
+		// over a BARE key had no declaration, `-g` took the STRING fallback,
+		// and the sort key materialized into a text vector. The rows were
+		// always PostgreSQL's; the SEQUENCE was not.
 		{name: "851/having-binds-the-input-column-in-a-derived-table",
 			sql: "SELECT x.g FROM (SELECT -g AS g, COUNT(*) AS n FROM typemx WHERE id < 6 " +
 				"GROUP BY g HAVING g > 2) x ORDER BY 1",
-			want: "g | -5 | -4 | -3",
-			pin: map[string]string{
-				"dag":     "g | -3 | -4 | -5",
-				"dagshuf": "g | -3 | -4 | -5",
-			}},
+			want: "g | -5 | -4 | -3"},
+		// The plain spelling of the same shape — a shadowing alias over a
+		// bare key, ordered from OUTSIDE the derived table. It was RIGHT on
+		// the DAG before this arc and the nested GROUP BY binding moved it
+		// onto the byte-ordered path, which is why it is driven here: a
+		// right-to-wrong move needs a cell of its own, not the sibling's pin.
+		{name: "851/derived-group-by-with-a-negated-shadowing-alias",
+			sql: "SELECT x.g FROM (SELECT -g AS g, COUNT(*) AS n FROM typemx WHERE id < 6 " +
+				"GROUP BY g) x ORDER BY 1",
+			want: "g | -5 | -4 | -3 | -2 | -1 | 0"},
+		// …and the same query whose alias shadows NOTHING, which was
+		// byte-ordered on the DAG at base too. Both spellings are one
+		// declaration.
+		{name: "851/derived-group-by-with-a-negated-alias",
+			sql: "SELECT x.k FROM (SELECT -g AS k, COUNT(*) AS n FROM typemx WHERE id < 6 " +
+				"GROUP BY g) x ORDER BY 1",
+			want: "k | -5 | -4 | -3 | -2 | -1 | 0"},
+		// The two binary spellings of the same value, which were already
+		// right: they are the control that says the declaration is what
+		// moved, not the sort.
+		{name: "851/ctl-derived-group-by-with-a-multiplied-alias",
+			sql: "SELECT x.g FROM (SELECT g*-3 AS g, COUNT(*) AS n FROM typemx WHERE id < 6 " +
+				"GROUP BY g) x ORDER BY 1",
+			want: "g | -15 | -12 | -9 | -6 | -3 | 0"},
+		{name: "851/ctl-derived-group-by-with-a-subtracted-alias",
+			sql: "SELECT x.g FROM (SELECT 0-g AS g, COUNT(*) AS n FROM typemx WHERE id < 6 " +
+				"GROUP BY g) x ORDER BY 1",
+			want: "g | -5 | -4 | -3 | -2 | -1 | 0"},
 		// The CONTROL that keeps the precedence from swallowing #739's own
 		// case: an alias that names NO input column still binds the alias,
 		// so this is ONE group over the six rows.

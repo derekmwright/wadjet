@@ -10422,8 +10422,25 @@ func inferProjectionDeclTypeConf(node plansql.Node, fallback parquet.TypeID,
 			}
 			inner = p.Inner
 		}
-		if bo, ok := inner.(*plansql.BinaryOp); ok && intArithAllInt(bo, strictInt, decls) {
-			return expr.Decl(parquet.TypeInt64), expr.Decided
+		// A UNARY ± belongs here beside the binary operators, and leaving it
+		// out is what made `ORDER BY` over a derived block's `-g` sort by
+		// BYTES on the stage DAG. The binary spellings of the same value —
+		// `g * -3`, `0 - g` — declare INT64 through this arm because
+		// `strictInt` names the column; `-g` fell past it, and over an
+		// AGGREGATE's output `decls` does not carry the group key either, so
+		// nodeDeclaredType answered Undecided and the STRING fallback stood.
+		// The sort key then materialized into a text vector and `-1` sorted
+		// before `-5`. `expr.UnaryOp.Eval` negates an int64 as an int64
+		// (#369), so the declaration this makes is the one the runtime keeps.
+		//
+		// Only an OPERATOR node: a bare `*plansql.ColRef` is deliberately
+		// withheld from this walk (below), because exec.Project types a copy
+		// from the column it copies.
+		switch inner.(type) {
+		case *plansql.BinaryOp, *plansql.UnaryOp:
+			if intArithAllInt(inner, strictInt, decls) {
+				return expr.Decl(parquet.TypeInt64), expr.Decided
+			}
 		}
 	}
 	_, bareRef := node.(*plansql.ColRef)
@@ -10476,6 +10493,16 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls
 			return false
 		}
 		return intArithAllInt(n.Left, strictInt, decls) && intArithAllInt(n.Right, strictInt, decls)
+	case *plansql.UnaryOp:
+		// Unary ± preserves an integer operand's integer-ness, exactly as
+		// nodeDeclaredType's own UnaryOp arm has it and as expr.UnaryOp.Eval
+		// computes it.
+		switch n.Op {
+		case "+", "-":
+		default:
+			return false
+		}
+		return intArithAllInt(n.Inner, strictInt, decls)
 	case *plansql.ParenNode:
 		return intArithAllInt(n.Inner, strictInt, decls)
 	case *plansql.ColRef:
