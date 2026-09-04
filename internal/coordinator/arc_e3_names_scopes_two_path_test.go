@@ -580,6 +580,36 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 					t.Fatalf("%s arm refused the query: %v\n  SQL: %s", arm.name, err, c.sql)
 				}
 				got := e3Render(cols, rows)
+				// checkRoutes asserts the routing counters, and it runs for a
+				// PINNED arm too. A pin says "these rows are not PostgreSQL's
+				// and here is why"; it cannot also say which pipeline produced
+				// them, and routing a pinned shape to the coordinator's local
+				// pipeline would make its rows RIGHT — the pin would fail with
+				// "it is fixed", naming a fix that never happened. So the
+				// counters are asserted on the same arms and in the same
+				// direction as for an unpinned cell: the pin holds a WRONG
+				// answer from the DAG, not the absence of one.
+				checkRoutes := func() {
+					if arm.coord == nil {
+						return
+					}
+					if c.route != nil {
+						if c.route(arm.coord) == before {
+							t.Errorf("%s arm did NOT route the query local, and the rows can no "+
+								"longer be attributed to the pipeline that produced them\n  SQL: %s",
+								arm.name, c.sql)
+						}
+						return
+					}
+					// Every counter, so a refusal widened by accident shows here
+					// rather than passing as "the rows are right".
+					for _, rc := range e3RouteCounters {
+						if rc.fn(arm.coord) != beforeAll[rc.name] {
+							t.Errorf("%s arm routed the query local on the %s counter — the DAG "+
+								"is refusing a shape it executes\n  SQL: %s", arm.name, rc.name, c.sql)
+						}
+					}
+				}
 				if c.pinOrder[arm.name] {
 					if got == c.want {
 						t.Errorf("the %s arm now answers PostgreSQL's rows IN ORDER for a "+
@@ -590,6 +620,7 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 							"different ORDER\n  got  %s\n  want %s\n  SQL: %s",
 							arm.name, sorted, e3SortLines(c.want), c.sql)
 					}
+					checkRoutes()
 					continue
 				}
 				if pinned, ok := c.pin[arm.name]; ok {
@@ -604,31 +635,14 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 							"right, which is a change the next fix has to account "+
 							"for\n  SQL: %s", arm.name, got, pinned, c.want, c.sql)
 					}
+					checkRoutes()
 					continue
 				}
 				if got != c.want {
 					t.Errorf("%s arm answered\n  %s\nPostgreSQL 17 answers\n  %s\n  SQL: %s",
 						arm.name, got, c.want, c.sql)
 				}
-				if arm.coord == nil {
-					continue
-				}
-				if c.route != nil {
-					if c.route(arm.coord) == before {
-						t.Errorf("%s arm did NOT route the query local, and the rows can no "+
-							"longer be attributed to the pipeline that produced them\n  SQL: %s",
-							arm.name, c.sql)
-					}
-					continue
-				}
-				// Every counter, so a refusal widened by accident shows here
-				// rather than passing as "the rows are right".
-				for _, rc := range e3RouteCounters {
-					if rc.fn(arm.coord) != beforeAll[rc.name] {
-						t.Errorf("%s arm routed the query local on the %s counter — the DAG "+
-							"is refusing a shape it executes\n  SQL: %s", arm.name, rc.name, c.sql)
-					}
-				}
+				checkRoutes()
 			}
 		})
 	}
