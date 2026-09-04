@@ -2389,6 +2389,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       OID does not, and closing that half is the literal `(p,s)` work in
       `expr`.
 
+      **Amended 2026-09-04 (#665, #683): the single-process path resolves it
+      too.** The set-operation adapter restates a literal column as the DECIMAL
+      its spelling names and replaces its box with the literal's plain decimal
+      TEXT before the arms meet, which is the shape every reader below already
+      expects from a DECIMAL — `batch.FromRowsChecked` parses it at the
+      resolved scale and `setOpCheckedDecimalText` range-checks it, so this
+      path also raises the 22003 the DAG raises for a literal the union's own
+      type cannot hold (item 7). `SELECT a FROM t UNION ALL SELECT
+      1234567890123456.78` came back exact from the DAG and
+      `1.2345678901234568e+15` here; both are exact now. What is still float8
+      is a literal typed by something OTHER than the arm — inside a DERIVED
+      TABLE, in arithmetic — which is the declared-type layer's rule and is
+      pinned in `coordinator.TestANumericLiteralSetOperationArmIsExactOnBothPaths`.
+
     **A computed DECIMAL expression does NOT reach the refusal**, and saying it
     did was wrong in both directions. `d + d` and `COALESCE(d, d)` are declared
     FLOAT64 by the arithmetic rule that has not landed yet, so the pair

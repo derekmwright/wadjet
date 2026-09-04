@@ -12435,9 +12435,98 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 		rightOps:    rightOps,
 		all:         node.UnionAll,
 		op:          op,
+		leftLits:    setOpArmLiterals(node.Children[0]),
+		rightLits:   setOpArmLiterals(node.Children[1]),
 	}
 
 	return src, nil, &exec.CollectSink{}, nil
+}
+
+// setOpArmLiterals reads one arm's SELECT list and records, per OUTPUT
+// POSITION, the exact DECIMAL a numeric LITERAL there names — the same
+// `setOpLitArm` answer the stage DAG builds its arm projection from. A nil
+// entry means "not a bare numeric literal", which is every other select item.
+//
+// PostgreSQL types a numeric constant `numeric` whenever it carries a decimal
+// point or an exponent, so `SELECT d FROM t UNION ALL SELECT 1.23456` is a
+// numeric union there (#665). The stage DAG resolves that; the single-process
+// path built the literal arm's vector from the declared-type layer, which
+// still answers float8 for a fractional literal everywhere, and the two paths
+// then answered one query two ways: 1234567890123456.78 came back exact from
+// the DAG and 1.2345678901234568e+15 from this one, and a join on the union's
+// column matched nothing here because a float8 column met a DECIMAL key (#683).
+func setOpArmLiterals(arm *logical.Node) []*setOpLitDecimal {
+	proj := findOutputProjectionNode(arm)
+	if proj == nil || len(proj.Projections) == 0 {
+		return nil
+	}
+	out := make([]*setOpLitDecimal, len(proj.Projections))
+	any := false
+	for i, pr := range proj.Projections {
+		if pr.ASTExpr == nil {
+			continue
+		}
+		if d, ok := setOpLitArm(pr.ASTExpr); ok {
+			lit := d
+			out[i] = &lit
+			any = true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
+// setOpApplyLiteralDecls restates a literal arm's column as the DECIMAL its
+// SPELLING names, so the arms reconcile through the ordinary ladder.
+//
+// Applied only when the arm's runtime schema has one column per select item:
+// anything else means the pipeline emitted columns this walk did not count,
+// and a position is only an address while the two lists line up.
+func setOpApplyLiteralDecls(schema []parquet.Column, lits []*setOpLitDecimal) []parquet.Column {
+	if len(lits) == 0 || len(lits) != len(schema) {
+		return schema
+	}
+	out := append([]parquet.Column(nil), schema...)
+	for i, lit := range lits {
+		if lit == nil {
+			continue
+		}
+		out[i].Type = parquet.TypeDecimal
+		out[i].Precision, out[i].Scale = lit.decl.Precision, lit.decl.Scale
+	}
+	return out
+}
+
+// setOpLiteralRows replaces a literal column's boxed value with the literal's
+// plain decimal TEXT, on every row.
+//
+// The text is not decoration: the evaluator folds a numeric literal into a
+// float64 box, so `1234567890123456.78` is already 1234567890123456.8 by the
+// time it reaches this adapter and declaring DECIMAL over that box would put
+// an exact type on a rounded number. A DECIMAL arrives here as its rendered
+// text anyway (Vector.GetValue), so the literal's own text is the shape every
+// reader below already expects — batch.FromRowsChecked parses it at the
+// resolved scale and setOpCheckedDecimalText range-checks it, which is what
+// gives this path the same 22003 the stage DAG raises for a literal the
+// union's own type cannot hold (ADR-0024 item 7).
+func setOpLiteralRows(rows []map[string]any, lits []*setOpLitDecimal) []map[string]any {
+	if len(lits) == 0 {
+		return rows
+	}
+	for i, lit := range lits {
+		if lit == nil {
+			continue
+		}
+		slot := setOpSlotName(i)
+		for _, row := range rows {
+			if _, ok := row[slot]; ok {
+				row[slot] = lit.text
+			}
+		}
+	}
+	return rows
 }
 
 // setOpSourceAdapter executes both child pipelines and applies the set operation
@@ -12449,6 +12538,11 @@ type setOpSourceAdapter struct {
 	rightOps    []exec.UnaryOperator
 	all         bool
 	op          string // "union", "intersect", "except"
+	// leftLits / rightLits carry the exact DECIMAL a numeric LITERAL select
+	// item names, per output position; nil where the arm has none. See
+	// setOpArmLiterals.
+	leftLits  []*setOpLitDecimal
+	rightLits []*setOpLitDecimal
 
 	batches     []*batch.RecordBatch
 	idx         int
@@ -12510,8 +12604,8 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		// membership by equality, so two values the comparator calls equal
 		// have to produce one key — which their BOXES alone cannot say, a
 		// DECIMAL being rendered text (#499).
-		leftSchema := leftSink.Schema()
-		rightSchema := rightSink.Schema()
+		leftSchema := setOpApplyLiteralDecls(leftSink.Schema(), u.leftLits)
+		rightSchema := setOpApplyLiteralDecls(rightSink.Schema(), u.rightLits)
 		schema := unifySetOpSchemas(leftSchema, rightSchema)
 
 		// The boxes are not uniform across types — a DECIMAL is its rendered
@@ -12543,12 +12637,14 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		// this function sees a slot name.
 		posResult := setOpSlotSchema(schema)
 		leftRows, err := coerceSetOpArmRows(
-			setOpArmRows(leftSink, leftSchema), setOpSlotSchema(leftSchema), posResult)
+			setOpLiteralRows(setOpArmRows(leftSink, leftSchema), u.leftLits),
+			setOpSlotSchema(leftSchema), posResult)
 		if err != nil {
 			return nil, fmt.Errorf("executing %s left side: %w", u.op, err)
 		}
 		rightRows, err := coerceSetOpArmRows(
-			setOpArmRows(rightSink, rightSchema), setOpSlotSchema(rightSchema), posResult)
+			setOpLiteralRows(setOpArmRows(rightSink, rightSchema), u.rightLits),
+			setOpSlotSchema(rightSchema), posResult)
 		if err != nil {
 			return nil, fmt.Errorf("executing %s right side: %w", u.op, err)
 		}

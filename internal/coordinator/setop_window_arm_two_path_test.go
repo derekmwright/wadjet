@@ -216,9 +216,12 @@ func setOpCanonValue(v any) string {
 	if !ok {
 		return s
 	}
-	// FloatString(10) then trimmed: exact for every value these fixtures hold,
-	// and it renders 12.7500 and 12.75 identically.
-	t := strings.TrimRight(rat.FloatString(10), "0")
+	// FloatString(40) then trimmed: exact for every value these fixtures hold
+	// — the widest is a DECIMAL(38,s) — and it renders 12.7500 and 12.75
+	// identically. Ten places was not enough: it silently rounded a scale-20
+	// literal to nine digits, which is the comparator hiding the very thing a
+	// literal-arm gate is about.
+	t := strings.TrimRight(rat.FloatString(40), "0")
 	t = strings.TrimSuffix(t, ".")
 	if t == "-0" {
 		return "0"
