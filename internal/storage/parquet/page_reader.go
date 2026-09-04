@@ -10,7 +10,7 @@ type PageData struct {
 	NumValues        int
 	NumRows          int
 	NumNulls         int
-	Skipped          bool // payload never decompressed (NextPageMaybeSkip); only NumValues is meaningful
+	Skipped          bool     // payload never decompressed (NextPageMaybeSkip); only NumValues is meaningful
 	Data             Values   // decoded column values (non-null values only)
 	Encoding         Encoding // value encoding of THIS page (pages in one chunk can differ)
 	DefinitionLevels []int32  // nil if column is required (no nulls)
@@ -81,14 +81,14 @@ type DictionaryData struct {
 //     copy-before-release contract PageData.Release already imposes
 //     per page (uncompressed pages alias the chunk buffer directly).
 type ColumnPageReader struct {
-	data       []byte          // raw column chunk bytes
-	off        int             // current read position
-	endOff     int             // end of column data
-	codec      CompressionCodec
-	physType   PhysicalType
-	typeLength int             // for FIXED_LEN_BYTE_ARRAY
-	maxDefLevel int            // 0 if column is required
-	maxRepLevel int            // 0 for flat schemas
+	data        []byte // raw column chunk bytes
+	off         int    // current read position
+	endOff      int    // end of column data
+	codec       CompressionCodec
+	physType    PhysicalType
+	typeLength  int // for FIXED_LEN_BYTE_ARRAY
+	maxDefLevel int // 0 if column is required
+	maxRepLevel int // 0 for flat schemas
 
 	// Staged mode (docs/design/scan-pread-reads.md): the chunk is read
 	// from src on first NextDictionary/NextPage instead of sliced from a
