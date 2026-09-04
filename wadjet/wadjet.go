@@ -304,9 +304,15 @@ type ColumnMeta struct {
 	// treats this the same as Precision <= 0 (FIX 2, #457/#458 fold-in).
 	WireUnconstrained bool
 	// StringLength is the declared CHARACTER count of a parameterized string
-	// destination — `CAST(x AS VARCHAR(4))` — and 0 for an unconstrained one.
-	// PostgreSQL carries it on the wire as atttypmod n+4 under OID 1043, and
-	// this engine declared `text` with no modifier for every string until #838.
+	// destination — `CAST(x AS VARCHAR(4))` — and 0 for a column that is not a
+	// string destination at all. PostgreSQL carries it on the wire as atttypmod
+	// n+4 under OID 1043, and this engine declared `text` with no modifier for
+	// every string until #838.
+	//
+	// parquet.StringLengthUnconstrainedVarchar (-1) is the third answer: the
+	// VARCHAR family spelled with NO length, which is `character varying` at
+	// typmod -1 — OID 1043 like the parameterized spelling, no modifier like
+	// text. Read it as "is this varchar", not as a length.
 	//
 	// A stored VARCHAR(n) COLUMN is NOT one: the catalog does not keep the
 	// length (parquet.ParseTypeID drops it), so a bare reference to one is

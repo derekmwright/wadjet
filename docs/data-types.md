@@ -117,12 +117,18 @@ folds an unquoted identifier to upper case before the type name is read, echoes
 a non-numeric modifier as `"ABC"` where the `CAST` door echoes `"abc"`. The
 code and the rule are the same on both.
 
-**The wire declares the length.** A `CAST` to a parameterized string type is
-described as `character varying(n)` — OID 1043, atttypmod n+4 — which is what
-PostgreSQL's own `\gdesc` reports for it. An unparameterized destination
-(`VARCHAR`, `TEXT`, `STRING`) and a bare column reference are described as
-unconstrained `text`, because the catalog does not store a `VARCHAR(n)`
-column's n.
+**The wire declares the type, and separately the length.** A `CAST` to the
+VARCHAR family is described as `character varying` — OID 1043 — with or
+without a length; the length rides in the atttypmod beside it, `n+4` when
+there is one and `-1` when there is not. That is what PostgreSQL's own
+`\gdesc` reports for both spellings: `CAST(x AS VARCHAR(4))` is `character
+varying(4)` and `CAST(x AS VARCHAR)` is `character varying`.
+
+`CAST(x AS TEXT)`, `CAST(x AS STRING)` and a bare column reference are
+described as unconstrained `text` (OID 25) — a different type name from
+`character varying`, holding the same bytes and compared the same way. A bare
+column reference is unconstrained even when the column was created
+`VARCHAR(n)`, because the catalog does not store the n.
 
 One difference from PostgreSQL to know about, and it is one fact wearing three
 hats: **wadjet has no blank-padded `bpchar`.**

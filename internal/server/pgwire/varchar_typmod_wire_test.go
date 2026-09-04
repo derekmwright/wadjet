@@ -15,6 +15,14 @@ package pgwire
 //	                                      atttypmod                     8
 //	SELECT CAST('abcdef' AS VARCHAR);     \gdesc  ->  character varying
 //	                                      atttypmod                    -1
+//	SELECT CAST('abcdef' AS TEXT);        \gdesc  ->  text
+//	                                      atttypmod                    -1
+//
+// The second and third lines are the pair P2 corrected: the OID follows the
+// destination NAME and the typmod follows the LENGTH, so an unparameterized
+// VARCHAR is 1043 with no modifier and only TEXT is 25. Sending 25 for a bare
+// VARCHAR made the same cast change its declared type when its modifier was
+// dropped.
 
 import "testing"
 
@@ -51,10 +59,19 @@ func TestVarcharCastDeclaresItsLengthOnTheWire(t *testing.T) {
 		// the same modifier.
 		{"varchar_n_over_a_number", `SELECT CAST(12345 AS VARCHAR(3)) AS v FROM users WHERE id = 1`,
 			1043, 7, "123"},
-		// The UNPARAMETERIZED spellings, which are the controls: they must stay
-		// text with no modifier, or the pair says nothing about the length.
+		// The UNPARAMETERIZED VARCHAR spellings. The measurement at the top of
+		// this file says `character varying`, atttypmod -1 — 1043 with NO
+		// modifier — and the first cut of #838 asserted 25 here, reading the
+		// LENGTH as what makes a column varchar. It is not: the length is a
+		// constraint ON a varchar, and dropping it changed the declared TYPE
+		// of the same cast (round-1 review, P2).
 		{"bare_varchar", `SELECT CAST('abcdef' AS VARCHAR) AS v FROM users WHERE id = 1`,
-			25, -1, "abcdef"},
+			1043, -1, "abcdef"},
+		{"bare_character_varying",
+			`SELECT CAST('abcdef' AS CHARACTER VARYING) AS v FROM users WHERE id = 1`,
+			1043, -1, "abcdef"},
+		// TEXT is the control that makes the pair mean something: PostgreSQL
+		// declares 25 for it, and it must NOT follow varchar.
 		{"text", `SELECT CAST('abcdef' AS TEXT) AS v FROM users WHERE id = 1`,
 			25, -1, "abcdef"},
 		// Bare CHAR is `character(1)` on the server — `CAST('abcdef' AS CHAR)`

@@ -414,10 +414,18 @@ func declaredStringLength(node plansql.Node, decls colDecls, computed map[string
 		return declaredStringLength(n.Inner, decls, computed)
 	case *plansql.CastNode:
 		n2, err, ok := parquet.StringTypeLength(n.TypeName)
-		if !ok || err != nil {
-			return 0, false
+		if ok && err == nil {
+			return n2, true
 		}
-		return n2, true
+		if !ok && parquet.VarcharNoLength(n.TypeName) {
+			// `CAST(x AS VARCHAR)` with no length is `character varying` at
+			// typmod -1 — OID 1043, not text's 25. It rides the same channel
+			// as the length because it is the same question (which string
+			// type does this column DECLARE), and the sentinel keeps the two
+			// answers distinguishable from "no string destination" (#838).
+			return parquet.StringLengthUnconstrainedVarchar, true
+		}
+		return 0, false
 	case *plansql.CaseNode:
 		arms := make([]plansql.Node, 0, len(n.Whens)+1)
 		for _, w := range n.Whens {

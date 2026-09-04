@@ -187,8 +187,14 @@ func TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration(t *testing.T) {
 			"abc", "abc", 4, "character varying(4)"},
 		// The UNPARAMETERIZED destinations carry no length, which is what makes
 		// the cells above a statement about the modifier and not about STRING.
+		//
+		// A bare VARCHAR carries parquet.StringLengthUnconstrainedVarchar (-1)
+		// rather than 0: it is not a length, it is the DECLARATION `character
+		// varying` at typmod -1, which is what the server describes it as
+		// (OID 1043) and what separates it from `text` below. 0 stays "not a
+		// string destination at all" (round-1 review, P2).
 		{"ctl_unparameterized", `SELECT CAST('abcdef' AS VARCHAR) AS v FROM decdecl WHERE id = 1`,
-			"abcdef", "abcdef", 0, "character varying"},
+			"abcdef", "abcdef", parquet.StringLengthUnconstrainedVarchar, "character varying"},
 		{"ctl_text", `SELECT CAST('abcdef' AS TEXT) AS v FROM decdecl WHERE id = 1`,
 			"abcdef", "abcdef", 0, "text"},
 		// A bare COLUMN of a VARCHAR(n) type carries none either: the catalog

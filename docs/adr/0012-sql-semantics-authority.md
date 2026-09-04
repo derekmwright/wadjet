@@ -930,6 +930,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      VARCHAR(4))` is `character varying(4)`, atttypmod 8 — PostgreSQL 17.11's
      own \gdesc.
 
+     The first cut of that read the LENGTH as what makes a column varchar, so
+     `CAST(x AS VARCHAR)` with no length declared `text` (25). It is 1043 at
+     atttypmod -1 on the server, measured: the OID follows the destination
+     NAME and the typmod follows the length, and conflating them made the same
+     cast change its declared TYPE when its modifier was dropped. The channel
+     carries all three answers now — a positive length, `character varying`
+     unconstrained (`parquet.StringLengthUnconstrainedVarchar`), and `text` —
+     and `parquet.VarcharNoLength` is the one place the family's spellings are
+     named (round-1 review, P2). Bare `CHAR` is deliberately not in it: the
+     server reads that as `character(1)` and TRUNCATES, which is part of the
+     bpchar residual below rather than a declaration question.
+
      **What stays**: the bpchar family, as ONE residual with one mechanism.
      `CAST(x AS CHAR(n))` declares `character varying(n)` and not `character(n)`
      (OID 1042), does not PAD a short value to n, and reads bare `CHAR` as the
@@ -947,8 +959,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      (the values, the declared length per destination, and the three bpchar
      consumers that assert the agreement padding would cost) and
      `pgwire.TestVarcharCastDeclaresItsLengthOnTheWire` (OID and atttypmod, with
-     the unparameterized spellings and a non-string column as the controls, and
-     a `residual_bare_char` cell). User-facing: `docs/data-types.md`
+     the unparameterized VARCHAR spellings asserted at 1043/-1, `TEXT` and a
+     non-string column as the controls, and a `residual_bare_char` cell). User-facing: `docs/data-types.md`
      §`VARCHAR(n)` and `CHAR(n)`, `docs/sql-reference.md` §Casts and errors.
 
    - **An integer result with no room in its declared type FAILS; it is never

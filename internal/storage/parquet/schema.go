@@ -260,6 +260,32 @@ func StringTypeLength(name string) (n int, err error, ok bool) {
 	return v, nil, true
 }
 
+// StringLengthUnconstrainedVarchar is what the string-modifier channel
+// carries for a VARCHAR destination spelled WITHOUT a length. It is not a
+// length — the wire typmod is -1, the same as for `text` — it is the
+// declaration `character varying`, which PostgreSQL sends as OID 1043 where
+// `text` is 25. Zero stays "not a string destination at all".
+const StringLengthUnconstrainedVarchar = -1
+
+// VarcharNoLength reports whether name is the VARCHAR family spelled without a
+// length modifier. `SELECT 'a'::varchar` describes as `character varying`
+// (1043) at typmod -1 on PostgreSQL 17.11, measured — a different DECLARATION
+// from `text` (25) even though the two hold the same bytes and compare the
+// same way, and a JDBC or ODBC client reads the OID to pick its column class.
+//
+// `CHAR` and `CHARACTER` without a length are deliberately NOT here.
+// PostgreSQL reads those as `character(1)` and TRUNCATES the value to one
+// character, which is a VALUE this engine does not produce; claiming 1043 for
+// them would publish a wrong length rule over a wrong value. They stay in
+// ADR-0012's bpchar residual.
+func VarcharNoLength(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "VARCHAR", "NVARCHAR", "CHARACTER VARYING":
+		return true
+	}
+	return false
+}
+
 // maxStringTypeLength is PostgreSQL's own cap on a varchar/bpchar modifier,
 // MaxAttrSize — 10485760, measured: `VARCHAR(10485760)` is accepted and
 // `VARCHAR(10485761)` is 22023.
