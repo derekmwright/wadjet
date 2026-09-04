@@ -227,7 +227,6 @@ func TestQ20Decorrelation(t *testing.T) {
 	}
 }
 
-
 func TestQ02Decorrelation(t *testing.T) {
 	q02 := `SELECT
 			s_acctbal, s_name, n_name, p_partkey, p_mfgr,

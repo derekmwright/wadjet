@@ -429,15 +429,15 @@ func TestExtractCommonORPredicates_ThreeBranches(t *testing.T) {
 	c2 := &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "instruct"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "DELIVER"}}
 
 	branch1 := &plansql.AndNode{
-		Left: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "A"}},
+		Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "A"}},
 		Right: &plansql.AndNode{Left: c1, Right: c2},
 	}
 	branch2 := &plansql.AndNode{
-		Left: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "B"}},
+		Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "B"}},
 		Right: &plansql.AndNode{Left: c1, Right: c2},
 	}
 	branch3 := &plansql.AndNode{
-		Left: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "C"}},
+		Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "C"}},
 		Right: &plansql.AndNode{Left: c1, Right: c2},
 	}
 
