@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -87,6 +88,16 @@ func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (r
 			err = exec.RecoverQueryPanic(ctx, "embedded statement", r)
 		}
 	}()
+
+	// ABAC, before any row is read or written. This is the one DML entry
+	// point, so every door carries it: a write needs an ActionWrite grant
+	// (42501 without one), a denied column does not exist inside the
+	// statement (42703), and a masked column reads as its mask — a DML
+	// predicate is compiled rather than planned (ADR-0031), so the security
+	// projection is applied to the statement's own expressions (#859).
+	if err := auth.EnforceDMLPolicies(ctx, db.authProvider, db.catalog, parsed, "embedded"); err != nil {
+		return nil, err
+	}
 
 	switch parsed.Type {
 	case plansql.QueryInsert:

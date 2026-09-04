@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // ErrColumnPolicyUnenforceable is returned when a column policy names a table
@@ -49,6 +51,46 @@ func ColumnPoliciesFromContext(ctx context.Context) TablePolicies {
 	}
 	tp, _ := ctx.Value(columnPolicyKey{}).(TablePolicies)
 	return tp
+}
+
+// SubstituteMaskedColumns rewrites every reference to a MASKED column of
+// `relation` with that column's mask expression, and returns the result.
+//
+// It is the security projection applied to an expression the planner never
+// sees. A DML predicate is COMPILED, not planned (ADR-0031): `DELETE FROM t
+// WHERE ssn = '<stored value>'` never meets a Scan, so no projection can sit
+// under it, and the comparison read the row as stored — a probe oracle for the
+// masked column, and a destructive one. Substituting the mask into the
+// expression is that projection, done where this statement can carry it: the
+// predicate then compares '***' and matches nothing, and `SET dept = ssn`
+// writes the mask.
+//
+// ok=false means the rewrite could not be done soundly (an aggregate output,
+// a subquery, a node the substituter cannot see through) and the caller must
+// refuse rather than run an expression that reads the stored row.
+func SubstituteMaskedColumns(expr plansql.Node, relation string, policies []ColumnPolicy) (plansql.Node, bool) {
+	if expr == nil || len(policies) == 0 {
+		return expr, true
+	}
+	outs := make(map[string]projOutput, len(policies))
+	for _, p := range policies {
+		if p.Denied || p.MaskExpr == "" {
+			continue
+		}
+		ast, err := plansql.ParseExpression(p.MaskExpr)
+		if err != nil {
+			return nil, false
+		}
+		outs[strings.ToLower(p.Column)] = projOutput{def: &plansql.ParenNode{Inner: ast}}
+	}
+	if len(outs) == 0 {
+		return expr, true
+	}
+	names := map[string]bool{}
+	if relation != "" {
+		names[strings.ToLower(relation)] = true
+	}
+	return substituteColRefs(expr, projRefs{outs: outs, names: names})
 }
 
 // PlanCarriesPolicyEnforcement reports whether this plan carries anything a
