@@ -222,6 +222,21 @@ func rwpWant() []rwpCase {
 		{"InCase", "(CASE WHEN r_key >= 0 THEN r_val ELSE r_other END) IN (3.1, 7.1)",
 			[]int64{3, 7}},
 		{"InNullif", "NULLIF(r_val, 0) IN (3.1, 7.1)", []int64{3, 7}},
+		// A numeric LITERAL arm is NEUTRAL — PostgreSQL coerces a constant of
+		// the numeric category INTO the common type rather than widening it,
+		// so every one of these is `real` there (pg_typeof, measured). These
+		// four are the spellings a BI tool writes, and the first version of
+		// #654's fix required EVERY arm to be real and so answered no rows for
+		// all four.
+		{"InCoalesceWithIntegerLiteral", "COALESCE(r_val, 0) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InGreatestWithIntegerLiteral", "GREATEST(r_val, 0) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InLeastWithIntegerLiteral", "LEAST(r_val, 100) IN (3.1, 7.1)", []int64{3, 7}},
+		{"InCaseWithIntegerElse",
+			"(CASE WHEN r_key >= 0 THEN r_val ELSE 0 END) IN (3.1, 7.1)", []int64{3, 7}},
+		// The control that says the neutrality is about CONSTANTS: an
+		// explicitly WIDER arm still widens, and PostgreSQL answers no rows.
+		{"InCoalesceWithADoubleCastWidens",
+			"COALESCE(r_val, CAST(0 AS DOUBLE PRECISION)) IN (3.1, 7.1)", nil},
 		// real OP real is real: the multiply by a REAL one narrows and the
 		// multiply by an INTEGER one does not. They are the pair that says
 		// this tests BOTH operands rather than following one down to a column

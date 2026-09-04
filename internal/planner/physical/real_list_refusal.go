@@ -192,25 +192,59 @@ func realTypedNode(node plansql.Node, decls colDecls) bool {
 	return false
 }
 
-// realTypedChoice reports whether every arm of a choice construct is real,
-// which is what makes the construct real: PostgreSQL resolves a CASE /
-// COALESCE / GREATEST / LEAST / NULLIF / IF to the common type of its
-// candidates, and `real` with `real` is `real` (pg_typeof, verified live for
-// all six).
+// realTypedChoice reports whether a choice construct resolves to real:
+// PostgreSQL resolves a CASE / COALESCE / GREATEST / LEAST / NULLIF / IF to
+// the common type of its candidates, and it needs at least one REAL candidate
+// and no candidate that forces a wider one.
 //
-// An arm that is not real — including one this walk cannot type — makes the
-// whole construct not-real, which is the conservative side: it leaves the list
-// widened exactly as it was before.
+// A numeric LITERAL is neither, and that is the correction the review forced.
+// The first version required EVERY arm to be real, which left the four
+// spellings a BI tool actually writes — `COALESCE(col, 0)`, `GREATEST(col, 0)`,
+// `LEAST(col, 100)`, `CASE … ELSE 0 END` — answering no rows. Measured with
+// pg_typeof on 17.11: all four are `real` there, and so is `COALESCE(r, 0.0)`
+// with a decimal literal; only an explicitly typed wider arm
+// (`COALESCE(r, CAST(0 AS DOUBLE PRECISION))`) is double precision. A constant
+// in the numeric category is coerced INTO the common type rather than
+// widening it — the same reason an untyped literal does not widen a comparison.
+//
+// A non-literal arm this walk cannot type still takes the whole construct
+// off real, which is the conservative side for the shapes nobody can point at.
 func realTypedChoice(arms []plansql.Node, decls colDecls) bool {
 	if len(arms) == 0 {
 		return false
 	}
+	sawReal := false
 	for _, a := range arms {
-		if a == nil || !realTypedNode(a, decls) {
+		if a == nil {
+			return false
+		}
+		switch {
+		case realTypedNode(a, decls):
+			sawReal = true
+		case isNumericLiteralNode(a):
+			// Neutral: it neither makes the construct real nor widens it.
+		default:
 			return false
 		}
 	}
-	return true
+	return sawReal
+}
+
+// isNumericLiteralNode reports whether a choice arm is a bare numeric constant
+// — a number, or one behind parentheses or a unary sign. It is deliberately
+// NOT `isConstNumericLitNode`'s job: this asks only "is this a constant of the
+// numeric category", which is the question PostgreSQL's common-type resolution
+// asks of a candidate before deciding it coerces rather than widens.
+func isNumericLiteralNode(node plansql.Node) bool {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return isNumericLiteralNode(n.Inner)
+	case *plansql.UnaryOp:
+		return (n.Op == "-" || n.Op == "+") && isNumericLiteralNode(n.Inner)
+	case *plansql.Lit:
+		return n.Kind == plansql.LitNumber
+	}
+	return false
 }
 
 // caseArmNodes is a CASE's candidate list: the THEN results and the ELSE. A

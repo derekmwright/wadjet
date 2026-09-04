@@ -121,6 +121,26 @@ func TestRealTypedNodeFollowsPostgresOperandType(t *testing.T) {
 		{"CaseOfReals", rlrCase(rlrCol("r_val"), rlrCol("r_other")), true},
 		{"CaseMixedWidth", rlrCase(rlrCol("r_val"), rlrCol("d_val")), false},
 		{"CaseWithNoElse", rlrCase(rlrCol("r_val"), nil), true},
+		// A numeric LITERAL arm is NEUTRAL: PostgreSQL coerces a constant of
+		// the numeric category INTO the common type rather than widening it,
+		// so all of these are `real` there (pg_typeof, measured). The first
+		// version of this walk required every arm to be real and so widened
+		// exactly the four spellings a BI tool writes.
+		{"CoalesceWithAnIntegerLiteral", rlrFn("coalesce", rlrCol("r_val"), rlrNum("0")), true},
+		{"GreatestWithAnIntegerLiteral", rlrFn("greatest", rlrCol("r_val"), rlrNum("0")), true},
+		{"LeastWithAnIntegerLiteral", rlrFn("least", rlrCol("r_val"), rlrNum("100")), true},
+		{"CaseWithAnIntegerElse", rlrCase(rlrCol("r_val"), rlrNum("0")), true},
+		{"CoalesceWithADecimalLiteral", rlrFn("coalesce", rlrCol("r_val"), rlrNum("0.0")), true},
+		{"CaseWithANegatedLiteralElse", rlrCase(rlrCol("r_val"), unary("-", rlrNum("1"))), true},
+		// An explicitly WIDER arm still widens — the control that says the
+		// neutrality is about CONSTANTS and not about "anything non-real".
+		{"CoalesceWithACastToDouble",
+			rlrFn("coalesce", rlrCol("r_val"), cast(rlrNum("0"), "DOUBLE PRECISION")), false},
+		{"CoalesceWithADoubleColumn", rlrFn("coalesce", rlrCol("r_val"), rlrCol("d_val")), false},
+		// Literals ALONE are not real: something has to make the construct
+		// real, or a list over `COALESCE(1, 2)` would narrow.
+		{"CoalesceOfLiteralsOnly", rlrFn("coalesce", rlrNum("1"), rlrNum("2")), false},
+		{"CaseOfLiteralsOnly", rlrCase(rlrNum("1"), rlrNum("2")), false},
 		// real OP real is real; real OP anything else widens. This pair is
 		// what says both sides are tested rather than one followed down.
 		{"RealTimesRealCast", &plansql.BinaryOp{Left: rlrCol("r_val"), Op: "*",

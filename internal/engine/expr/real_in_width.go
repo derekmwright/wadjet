@@ -383,25 +383,51 @@ func realTypedPair(l, r any, b *batch.RecordBatch) (real, settled bool) {
 	return lReal && rReal, lSettled && rSettled
 }
 
-// realTypedArms is a choice construct's candidate list: real only when EVERY
-// candidate is, which is what PostgreSQL's common-type resolution says for a
-// CASE / COALESCE / GREATEST / LEAST / NULLIF / IF over reals.
+// realTypedArms is a choice construct's candidate list: real when at least one
+// candidate is real and no candidate forces a wider type.
+//
+// A numeric LITERAL is neither, and is the correction the review forced — see
+// physical.realTypedChoice, this function's twin, for the pg_typeof
+// measurements. `COALESCE(r, 0)` is `real` on the server, so the four shapes a
+// BI tool writes must narrow like the all-real ones.
 func realTypedArms(arms []Expr, b *batch.RecordBatch) (real, settled bool) {
 	if len(arms) == 0 {
 		return false, true
 	}
 	settled = true
+	sawReal := false
 	for _, a := range arms {
 		if a == nil {
 			return false, settled
+		}
+		if isNumericLitExpr(a) {
+			continue // neutral: coerced into the common type, never widening it
 		}
 		r, s := realTypedOperand(a, b)
 		settled = settled && s
 		if !r {
 			return false, settled
 		}
+		sawReal = true
 	}
-	return true, settled
+	return sawReal, settled
+}
+
+// isNumericLitExpr is physical.isNumericLiteralNode over the COMPILED tree: a
+// numeric constant, or one behind a unary sign. Parentheses are folded away by
+// the compiler, so there is no Paren arm to walk.
+func isNumericLitExpr(e Expr) bool {
+	switch n := e.(type) {
+	case *UnaryOp:
+		return (n.Op == "-" || n.Op == "+") && isNumericLitExpr(n.Operand)
+	case *Lit:
+		if _, quoted := quotedLitText(n); quoted {
+			return false
+		}
+		_, ok := literalFloat64(n.Val)
+		return ok
+	}
+	return false
 }
 
 // realTypedFuncOperand is the FUNCTION half, and physical.realTypedFuncNode's
