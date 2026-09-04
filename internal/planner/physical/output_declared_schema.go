@@ -95,13 +95,39 @@ func setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 	if len(arms) < 2 {
 		return nil, false
 	}
-	out := make([]parquet.Column, len(arms[0]))
-	copy(out, arms[0])
+	// An UNKNOWN-typed literal arm declares STRING here, and it has no type of
+	// its own: PostgreSQL resolves the union to the OTHER arms' type
+	// (`SELECT '1.5' … UNION ALL SELECT a …` is numeric). Skipping those arms
+	// is what stops the fold declining on STRING-vs-DECIMAL and publishing the
+	// leftmost arm's STRING — the right value under OID 25, which is the exact
+	// divergence the wire arm exists for.
+	unknown := setOpArmUnknownLiteralSchemas(n, len(arms), len(arms[0]))
+	base := 0
+	for base < len(arms) && unknown[base] != nil && allTrue(unknown[base]) {
+		base++
+	}
+	if base == len(arms) {
+		base = 0 // every arm is unknown: PostgreSQL resolves text, which is what they declare
+	}
+	out := make([]parquet.Column, len(arms[base]))
+	copy(out, arms[base])
 	for i := range out {
+		if unknown[base] != nil && i < len(unknown[base]) && unknown[base][i] {
+			for a := range arms {
+				if (unknown[a] == nil || i >= len(unknown[a]) || !unknown[a][i]) && i < len(arms[a]) {
+					out[i].Type = arms[a][i].Type
+					out[i].Precision, out[i].Scale = arms[a][i].Precision, arms[a][i].Scale
+					break
+				}
+			}
+		}
 		metas := []batch.DecimalType{}
-		for _, arm := range arms {
+		for ai, arm := range arms {
 			if i >= len(arm) {
 				return nil, false
+			}
+			if unknown[ai] != nil && i < len(unknown[ai]) && unknown[ai][i] {
+				continue
 			}
 			t, ok := setOpWiden(out[i].Type, arm[i].Type)
 			if !ok {
@@ -152,6 +178,37 @@ func setOpRoot(n *logical.Node) *logical.Node {
 		}
 	}
 	return nil
+}
+
+// setOpArmUnknownLiteralSchemas marks, per ARM and per column, the select items
+// that are UNKNOWN-typed literals, flattened the way setOpArmSchemas flattens a
+// nested set operation.
+func setOpArmUnknownLiteralSchemas(n *logical.Node, arms, cols int) [][]bool {
+	out := make([][]bool, 0, arms)
+	var walk func(*logical.Node)
+	walk = func(m *logical.Node) {
+		for _, c := range m.Children {
+			if inner := setOpRoot(c); inner != nil {
+				walk(inner)
+				continue
+			}
+			out = append(out, setOpUnknownLiteralArms(c, cols))
+		}
+	}
+	walk(n)
+	for len(out) < arms {
+		out = append(out, nil)
+	}
+	return out[:arms]
+}
+
+func allTrue(b []bool) bool {
+	for _, v := range b {
+		if !v {
+			return false
+		}
+	}
+	return len(b) > 0
 }
 
 // setOpArmSchemas is the declared output schema of each arm of a set

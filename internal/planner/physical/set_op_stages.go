@@ -460,10 +460,42 @@ func setOpWireIntegerCarrier(t parquet.TypeID) bool {
 // types: IPV4 and IPV6 are both `inet` there, and it is the carriers that
 // cannot be concatenated.
 func setOpCarrierGap(column string, a, b parquet.TypeID) error {
-	return fmt.Errorf(
-		"result column %q is %s in one arm and %s in another, and this engine has no common "+
-			"carrier for that pair — PostgreSQL resolves it, wadjet does not yet; CAST both "+
-			"arms to one type", column, a, b)
+	// 0A000, feature_not_supported: PostgreSQL ANSWERS this query, so the
+	// refusal is this engine saying what it does not do yet — the class the
+	// order-by-unselected-aggregate refusal and ADR-0021 §1e's container
+	// refusals already use. Left unclassified, `sqlerr.StateOf` answered "" and
+	// the pgwire door fell back to XX000, which tells a driver the server
+	// BROKE on a query PostgreSQL runs.
+	return sqlerr.New("0A000",
+		"set operation not supported: result column %q is %s in one arm and %s in another, and "+
+			"this engine has no common carrier for that pair — PostgreSQL resolves it, wadjet "+
+			"does not yet; CAST both arms to one type", column, a, b)
+}
+
+// SetOpCarrierGapPairs is every ordered pair this engine refuses with
+// setOpCarrierGap: PostgreSQL resolves it and there is no carrier here. It is
+// COMPUTED from setOpNoCarrier over the whole type list rather than written
+// down, because the hand-written version of this list is what ADR-0012 and
+// docs/sql-reference.md described when the code refused twenty pairs and the
+// docs named two.
+func SetOpCarrierGapPairs() [][2]parquet.TypeID {
+	all := []parquet.TypeID{
+		parquet.TypeBool, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32,
+		parquet.TypeFloat64, parquet.TypeString, parquet.TypeBytes, parquet.TypeTimestamp,
+		parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC,
+		parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration, parquet.TypeUUID,
+		parquet.TypeDate, parquet.TypeDecimal, parquet.TypeArray, parquet.TypeRow,
+		parquet.TypeMap, parquet.TypeVector,
+	}
+	var out [][2]parquet.TypeID
+	for _, a := range all {
+		for _, b := range all {
+			if setOpNoCarrier(a, b) {
+				out = append(out, [2]parquet.TypeID{a, b})
+			}
+		}
+	}
+	return out
 }
 
 // setOpOversizeLiteralArms marks, per OUTPUT POSITION, the select items of one
@@ -1172,6 +1204,15 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, 
 			}
 			for i := range plans {
 				if setOpArmIsUnknownLit(unknown, i, col) {
+					// An UNKNOWN literal takes the resolved type, and the ARM'S
+					// OWN STAGE has to say so: the union arm's projection is
+					// what the worker builds the .wshf column from, and a
+					// literal left declared STRING wrote a STRING column into a
+					// file the next stage reads beside a DECIMAL one.
+					plans[i].specs[col].Type = want.typ
+					plans[i].specs[col].TypeKnown = true
+					plans[i].specs[col].Precision = want.dec.Precision
+					plans[i].specs[col].Scale = want.dec.Scale
 					continue
 				}
 				ct := plans[i].types[col]
@@ -1217,6 +1258,17 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, 
 		}
 		for i := range plans {
 			if setOpArmIsUnknownLit(unknown, i, col) {
+				// The resolved type, DECLARED on the arm's own projection, and
+				// no CAST: SetValueChecked parses the literal's text into
+				// whatever vector the spec names, which is what PostgreSQL
+				// means by an unknown literal taking the other arm's type. Left
+				// at STRING, the arm's .wshf file carried a STRING column and
+				// the consumer refused it — `column "v" is STRING … but IPV4 in
+				// an earlier file of the same stage input` (ADR-0010) — after
+				// doing the work, where the single-process path answered.
+				plans[i].specs[col].Type = want.typ
+				plans[i].specs[col].TypeKnown = true
+				plans[i].types[col] = want
 				continue
 			}
 			if plans[i].types[col].typ == want.typ {

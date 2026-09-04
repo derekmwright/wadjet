@@ -10,6 +10,8 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -36,9 +38,10 @@ import (
 //	                                               carrier message, and NEVER
 //	                                               with PostgreSQL's SQLSTATE
 //
-// The third class is exactly DATE ∪ TIMESTAMP and the IPv4/IPv6/CIDR family,
-// and it is listed here rather than derived, so a pair that leaves or joins it
-// fails this test.
+// The third class is `setOpPairNoCarrierPairs`, listed here rather than derived
+// so a pair that leaves or joins it fails this test — and checked against the
+// planner's own computed set by TestTheCarrierGapListIsTheCodes, so the list
+// and the code cannot drift apart the way this comment once had.
 func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -145,6 +148,17 @@ func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 							t.Errorf("%s arm claims PostgreSQL refuses a pair it resolves as %s\n"+
 								"  SQL: %s", arm.name, want, sql)
 						}
+						// What the CLIENT is told. PostgreSQL answers this
+						// query, so the refusal is feature_not_supported and
+						// not an internal error; unclassified, sqlerr.StateOf
+						// answers "" and the pgwire door sends XX000, which
+						// tells a driver the server broke.
+						if arm.co == nil {
+							if got := sqlerr.StateOf(err); got != "0A000" {
+								t.Errorf("the carrier refusal carries SQLSTATE %q, want 0A000 "+
+									"(feature_not_supported)\n  SQL: %s", got, sql)
+							}
+						}
 					}
 				}
 			})
@@ -214,6 +228,30 @@ func setOpPairRefRows(t *testing.T, run func(string) (*oracle.Result, error),
 	out := setOpCanonRows(res)
 	sort.Strings(out)
 	return out
+}
+
+// TestTheCarrierGapListIsTheCodes asserts that the list this file states and
+// the set the planner actually refuses are the same set. The round-2 review
+// found ADR-0012 and docs/sql-reference.md naming two carrier pairs where the
+// code refused twenty, and this file's own header naming a different set again
+// from the map eight lines below it — a list nobody checks drifts from the code
+// the moment the code moves.
+func TestTheCarrierGapListIsTheCodes(t *testing.T) {
+	code := map[[2]parquet.TypeID]bool{}
+	for _, p := range physical.SetOpCarrierGapPairs() {
+		code[p] = true
+	}
+	for p := range setOpPairNoCarrierPairs {
+		if !code[p] {
+			t.Errorf("%s ∪ %s is listed here and the planner does not refuse it", p[0], p[1])
+		}
+	}
+	for p := range code {
+		if !setOpPairNoCarrierPairs[p] {
+			t.Errorf("the planner refuses %s ∪ %s and this list does not say so — add it, and "+
+				"add it to ADR-0012 item 12's carrier list too", p[0], p[1])
+		}
+	}
 }
 
 func setOpPairClass(a, b parquet.TypeID, pgVerdict string) setOpPairDisposition {

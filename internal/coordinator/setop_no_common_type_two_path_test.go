@@ -26,13 +26,13 @@ import (
 //	SELECT a FROM decpair INTERSECT SELECT s FROM decpair
 //	  -> one row, from comparing decimals against text as text
 //
-// The refusal is deliberately NARROWER than "the numeric ladder declines the
-// pair". Wadjet has TypeIDs PostgreSQL does not — PORT and PROTOCOL declare
-// int4 on the wire, DURATION int8, IPv4/IPv6/CIDR all inet (#834) — and DATE ∪
-// TIMESTAMP resolves to timestamp there. Refusing those would claim PostgreSQL
-// rejects queries it answers, and would turn six shapes the single-process
-// path ANSWERS today into hard errors. They keep the disposition they have and
-// are pinned at the bottom of this file.
+// The question asked is PostgreSQL's ALGORITHM: same type → that type; an
+// UNKNOWN-typed literal takes the other arms'; different CATEGORIES → 42804;
+// within a category, the type every arm implicitly casts to. Two dispositions
+// come out of it, and only one of them is PostgreSQL's — a pair PostgreSQL
+// RESOLVES that this engine cannot CARRY (DATE ∪ TIMESTAMP, the inet family, a
+// wire-declared integer beside DECIMAL) is refused with 0A000 and a message
+// naming the two carriers, never with 42804.
 type setOpNoTypeCell struct {
 	issue, name, sql string
 	// wantErr is the substring of PostgreSQL's own message every arm's refusal
@@ -140,6 +140,17 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 			sql: `SELECT c_dur AS v FROM typemx UNION ALL SELECT c_i64 FROM typemx`, wantRows: 10000},
 		{issue: "#648", name: "duration_union_double_precision",
 			sql: `SELECT c_dur AS v FROM typemx UNION ALL SELECT c_f64 FROM typemx`, wantRows: 10000},
+		// The REAL rung carries them too, and refusing it was a right → loud
+		// move: these answered PostgreSQL's `real` rows at 2d4220c9.
+		{issue: "#648", name: "real_union_port",
+			sql:      `SELECT c_f32 AS v FROM typemx WHERE id < 3 UNION ALL SELECT c_port FROM typemx WHERE id < 3`,
+			wantRows: 6},
+		{issue: "#648", name: "real_union_protocol",
+			sql:      `SELECT c_f32 AS v FROM typemx WHERE id < 3 UNION ALL SELECT c_proto FROM typemx WHERE id < 3`,
+			wantRows: 6},
+		{issue: "#648", name: "real_union_duration",
+			sql:      `SELECT c_f32 AS v FROM typemx WHERE id < 3 UNION ALL SELECT c_dur FROM typemx WHERE id < 3`,
+			wantRows: 6},
 
 		// --- an UNKNOWN literal takes the other arm's type -----------------
 		//
@@ -148,36 +159,63 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 		// COLUMN's type and answers. Reading the literal as TEXT made all of
 		// them 42804 — a right → loud move on eight idioms, measured against
 		// 2d4220c9 and live 17.11.
+		//
+		// Every cell here gives the literal arm a FROM, so the stage DAG really
+		// PLANS it and the counters read `routes=none`. The ten cells this
+		// replaces were all TABLE-LESS, which routes to the coordinator-local
+		// pipeline — so their "three arms" were one engine, and the rule was
+		// not implemented on the DAG at all: the literal arm's .wshf file
+		// carried a STRING column beside the other arm's real type and the
+		// consumer refused it after doing the work.
 		{issue: "#648", name: "inet_and_an_unknown_literal",
-			sql:      `SELECT c_ipv4 AS v FROM typemx WHERE id < 3 UNION ALL SELECT '10.0.0.9'`,
-			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+			sql: `SELECT c_ipv4 AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '10.0.0.9' FROM typemx WHERE id < 1`,
+			wantRows: 4},
 		{issue: "#648", name: "macaddr_and_an_unknown_literal",
-			sql:      `SELECT c_mac AS v FROM typemx WHERE id < 3 UNION ALL SELECT 'aa:bb:cc:00:00:01'`,
-			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+			sql: `SELECT c_mac AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT 'aa:bb:cc:00:00:09' FROM typemx WHERE id < 1`,
+			wantRows: 4},
 		{issue: "#648", name: "date_and_an_unknown_literal",
-			sql:      `SELECT c_date AS v FROM typemx WHERE id < 3 UNION ALL SELECT '2010-01-01'`,
-			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+			sql: `SELECT c_date AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '2010-01-01' FROM typemx WHERE id < 1`,
+			wantRows: 4},
 		{issue: "#648", name: "uuid_and_an_unknown_literal",
 			sql: `SELECT c_uuid AS v FROM typemx WHERE id < 3 UNION ALL ` +
-				`SELECT '00000000-0000-0000-0000-000000000000'`,
-			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+				`SELECT '00000000-0000-0000-0000-000000000009' FROM typemx WHERE id < 1`,
+			wantRows: 4},
+		{issue: "#648", name: "bytea_and_an_unknown_literal",
+			sql: `SELECT c_bytes AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT 'zz' FROM typemx WHERE id < 1`,
+			wantRows: 4},
 		{issue: "#648", name: "numeric_and_an_unknown_literal",
-			sql:      `SELECT c_dec AS v FROM typemx WHERE id < 3 UNION ALL SELECT '0'`,
-			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+			sql: `SELECT c_dec AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '0' FROM typemx WHERE id < 1`,
+			wantRows: 4},
 		{issue: "#648", name: "inet_and_a_null_literal",
-			sql:      `SELECT c_ipv4 AS v FROM typemx WHERE id < 3 UNION ALL SELECT NULL`,
-			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+			sql: `SELECT c_ipv4 AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT NULL FROM typemx WHERE id < 1`,
+			wantRows: 4},
 		{issue: "#648", name: "port_and_an_integer_literal",
-			sql:      `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL SELECT 443`,
+			sql: `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT 443 FROM typemx WHERE id < 1`,
+			wantRows: 4},
+		// THREE arms, with the literal in the middle: the resolved type has to
+		// reach every arm's projection, not just the pair the fold started with.
+		{issue: "#648", name: "an_unknown_literal_between_two_typed_arms",
+			sql: `SELECT c_date AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '2010-01-01' FROM typemx WHERE id < 1 UNION ALL ` +
+				`SELECT c_date FROM typemx WHERE id < 3`,
+			wantRows: 7},
+		// The TABLE-LESS spelling, kept as one cell with its routing declared,
+		// because that is a real idiom and the counter is what says both DAG
+		// arms are the coordinator-local pipeline for it (#806).
+		{issue: "#648", name: "a_table_less_unknown_literal_arm_routes_local",
+			sql:      `SELECT c_ipv4 AS v FROM typemx WHERE id < 3 UNION ALL SELECT '10.0.0.9'`,
 			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
 		// The literal in the FIRST arm, with a FROM so the DAG plans it.
 		{issue: "#648", name: "an_unknown_literal_arm_first",
-			sql: `SELECT '1.5' AS v FROM decpair WHERE id = 1 UNION ALL SELECT a FROM decpair`,
-			// The DAG routes this to the coordinator-local pipeline on the
-			// unreachable-output refusal, which is a standing disposition for
-			// a literal-only arm and not this rule's business; the counter
-			// says so rather than the rows implying a second engine.
-			wantRows: 10, wantRoutes: a2Routes{UnreachableOutput: 1}},
+			sql:      `SELECT '1.5' AS v FROM decpair WHERE id = 1 UNION ALL SELECT a FROM decpair`,
+			wantRows: 10},
 		{issue: "#648", name: "two_unknown_literal_arms_are_text",
 			sql: `SELECT 'a' AS v FROM decpair WHERE id = 1 UNION ALL ` +
 				`SELECT 'b' FROM decpair WHERE id = 1`,

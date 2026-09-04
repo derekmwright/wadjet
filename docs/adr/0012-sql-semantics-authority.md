@@ -2269,9 +2269,26 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     that is not one. A declared-WIDTH divergence, listed here with the rest.
 
     **A pair PostgreSQL RESOLVES that this engine cannot CARRY is refused
-    LOUDLY, and never with 42804.** DATE beside TIMESTAMP, and two members of
-    the inet family, are one category — so PostgreSQL matches them — and wadjet
-    has no carrier that holds both arms' files. The single-process path used to
+    LOUDLY, with SQLSTATE 0A000 and never with 42804.** The refusal is this
+    engine saying what it does not do yet — `feature_not_supported`, the class
+    the order-by-unselected-aggregate refusal and ADR-0021 §1e's container
+    refusals already use — because PostgreSQL ANSWERS the query. Unclassified it
+    reached a client as XX000, which says the server broke.
+
+    The pairs, in full (there are EIGHT ordered ones, and the list is COMPUTED
+    from the predicate by `physical.SetOpCarrierGapPairs` and checked against
+    this paragraph's claim by `coordinator.TestTheCarrierGapListIsTheCodes` —
+    an earlier draft of this paragraph named two while the code refused twenty):
+
+    | pair | PostgreSQL resolves | why there is no carrier |
+    |---|---|---|
+    | DATE ∪ TIMESTAMP, both orders | timestamp | no DATE → TIMESTAMP promotion in the arm coercion |
+    | IPV4 ∪ IPV6, IPV4 ∪ CIDR, IPV6 ∪ CIDR, all orders | inet | no inet-family carrier that holds two of them |
+    | PORT ∪ DECIMAL, PROTOCOL ∪ DECIMAL, DURATION ∪ DECIMAL, both orders | numeric | DecimalCoercion reads an INT32/INT64 unscaled carrier and setOpDecimalTarget has no digit count for these |
+
+    The INTEGER and FLOAT rungs DO carry PORT, PROTOCOL and DURATION — an
+    earlier draft refused REAL beside them, which turned three shapes that
+    answered PostgreSQL's `real` rows into hard errors. The single-process path used to
     ANSWER them, and the answer was CORRUPT: measured, `c_date ∪ c_ts` rendered
     every timestamp as `-2207656-04-19`, and `c_ipv4 ∪ c_ipv6` and
     `c_ipv4 ∪ c_cidr` rendered every row of the second arm as `0.0.0.0`. Both
