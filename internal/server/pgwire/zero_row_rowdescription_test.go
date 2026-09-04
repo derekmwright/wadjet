@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -220,6 +223,80 @@ func TestZeroRowSelectAlwaysSendsARowDescription(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestZeroRowStarDescribesTheSameBeforeAndAfterExecute is pgJDBC's actual
+// shape: Parse, Describe(statement), Bind, Execute — and then the SAME
+// prepared statement described again, because a driver caches the statement
+// and re-uses it. The description must not depend on whether the portal has
+// run, and the DML in between must not disturb it either: a transaction that
+// wrote rows and then asked for the shape of an empty read is where a
+// describe cache goes stale.
+func TestZeroRowStarDescribesTheSameBeforeAndAfterExecute(t *testing.T) {
+	srv := zrSetup(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, fmt.Sprintf("postgres://wadjet@127.0.0.1:%s/wadjet?sslmode=disable",
+		srv.Addr()[len("127.0.0.1:"):]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+
+	const sql = "SELECT * FROM zrempty"
+	render := func(sd *pgconn.StatementDescription) string {
+		parts := make([]string, len(sd.Fields))
+		for i, f := range sd.Fields {
+			parts[i] = fmt.Sprintf("%s:%d:%d", f.Name, f.DataTypeOID, f.TypeModifier)
+		}
+		return strings.Join(parts, " ")
+	}
+
+	sd, err := conn.Prepare(ctx, "zrstar", sql)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	before := render(sd)
+	if before == "" {
+		t.Fatalf("Describe of a prepared %q returned no fields — pgJDBC ties its ResultSet to "+
+			"this Describe and throws \"No results were returned by the query\" (#846)", sql)
+	}
+
+	rows, err := conn.Query(ctx, "zrstar")
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	sd2, err := conn.Prepare(ctx, "zrstar2", sql)
+	if err != nil {
+		t.Fatalf("re-prepare: %v", err)
+	}
+	if after := render(sd2); after != before {
+		t.Errorf("the same statement describes differently after Execute:\n before %s\n after  %s",
+			before, after)
+	}
+
+	// The same read, in a transaction, after a write to the OTHER table.
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO zrfull VALUES (9, 'z', 9.5)"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	sd3, err := conn.Prepare(ctx, "zrstar3", sql)
+	if err != nil {
+		t.Fatalf("prepare after DML: %v", err)
+	}
+	if after := render(sd3); after != before {
+		t.Errorf("the same statement describes differently after a DML in a transaction:\n"+
+			" before %s\n after  %s", before, after)
+	}
+	tx.Rollback(ctx)
 }
 
 // TestCommandAndDMLStillDescribeAsNoData is the boundary from the other side
