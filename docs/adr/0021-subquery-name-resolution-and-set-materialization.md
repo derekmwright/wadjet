@@ -534,12 +534,31 @@ DELETED the manufactured row (2 rows for PostgreSQL's 3), and `ON true`
 printed `n = 0` in it where PostgreSQL prints NULL — both of them right at
 fd679ae9, which makes this the same right-to-wrong class as the forced-LEFT
 repair above, found by asking where else a rewrite's SCOPE and its WARRANT
-come apart. The decline costs the empty-input row in one shape (`ON true`
-with a following FULL join answers 3 for PostgreSQL's 4) and that is pinned;
-restoring it needs the default applied at the lateral's OWN output, before the
-later join sees it, which is a plan-level change rather than a SelectInfo
-rewrite. A LEFT join after the lateral cannot null-extend what is to its left,
-so it is not affected and its control says so.
+come apart.
+
+**What the decline costs is exactly the DEFAULT ROW, and nothing else.** That
+is a measured bound, not a hope, and it takes three pinned spellings to state.
+Where the later join drops the unmatched outer row anyway, the decline is free
+and PostgreSQL agrees. Where it does not, the empty-input row is missing or
+wrong:
+
+| the later join | PostgreSQL | declined | what is lost |
+|---|---|---|---|
+| `RIGHT … ON c2.id = o.id AND c2.id < 3` | 3 rows | 3 rows | nothing |
+| `FULL … ON c2.id = o.id AND c2.id < 3` | 4 rows | 3 rows | the default ROW |
+| `RIGHT … ON c2.id = o.id` (plain) | `Carol\|0\|Carol` | `NULL\|NULL\|Carol` | the default's VALUES |
+| `FULL … ON c2.id = o.id` (plain) | `Carol\|0\|Carol` | `NULL\|NULL\|Carol` | the default's VALUES |
+| `ON s.n > 1 RIGHT … ON c2.id = o.id` | `NULL\|NULL\|Carol` | `NULL\|NULL\|Carol` | nothing |
+
+The last row is the one that bounds the rest: with an `ON` the default row
+would FAIL, PostgreSQL null-extends the pair exactly as the un-repaired plan
+does, so no spelling of this shape diverges except through the default. All
+five are census cells. Restoring the two that lose it needs the default
+applied at the lateral's OWN output, before the later join sees it — a
+plan-level change rather than a SelectInfo rewrite.
+
+A LEFT join after the lateral cannot null-extend what is to its left, so it is
+not affected and its control says so.
 
 The default itself is `COALESCE(…, 0)` around references to the lateral's
 COUNT outputs. NULL is already right for every other aggregate — `SUM` of
