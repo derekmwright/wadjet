@@ -90,6 +90,8 @@ func TestConstArithLiftDecidesFromTheColumnType(t *testing.T) {
 			"proj{s isagg=false ast=__agg_0 * 2} agg{sum(w)->__agg_0}"},
 		{"int32_avg", "AVG(w + 3)", parquet.TypeInt32, nil, nil, million,
 			"proj{s isagg=false ast=__agg_0 + 3} agg{avg(w)->__agg_0}"},
+		{"int32_avg_minus", "AVG(w - 3)", parquet.TypeInt32, nil, nil, million,
+			"proj{s isagg=false ast=__agg_0 - 3} agg{avg(w)->__agg_0}"},
 		{"int32_min", "MIN(w + 3)", parquet.TypeInt32, nil, nil, million,
 			"proj{s isagg=false ast=__agg_0 + 3} agg{min(w)->__agg_0}"},
 		{"int32_max", "MAX(w * 2)", parquet.TypeInt32, nil, nil, million,
@@ -146,6 +148,14 @@ func TestConstArithLiftDecidesFromTheColumnType(t *testing.T) {
 		// A type the arithmetic does not apply to at all.
 		{"timestamp", "SUM(ts + 3)", parquet.TypeTimestamp, nil, nil, million,
 			"proj{s isagg=true ast=sum(ts + 3)} agg{sum(ts + 3)->s}"},
+		// AVG over a MULTIPLICATION declines: `AVG(col)` is a value rounded to
+		// four decimals, and multiplying it by k rounds before the multiply.
+		// PostgreSQL over 1, 2, 4: `avg(x*3)` is 7.0000000000000000 and
+		// `avg(x)*3` is 6.9999999999999999 (round-1 review, B2). `±` is exact
+		// and stays lifted, which is what makes this row a statement about the
+		// OPERATOR rather than about AVG.
+		{"int32_avg_times", "AVG(w * 3)", parquet.TypeInt32, nil, nil, million,
+			"proj{s isagg=true ast=avg(w * 3)} agg{avg(w * 3)->s}"},
 		// MIN/MAX over a multiplication is order-preserving only for k > 0,
 		// the bound the syntactic pass already carries.
 		{"min_times_negative", "MIN(w * -2)", parquet.TypeInt32, nil, nil, million,
