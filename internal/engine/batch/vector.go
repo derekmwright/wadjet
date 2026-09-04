@@ -46,6 +46,90 @@ func formatIPv4(v uint32) string {
 	return string(buf[:n])
 }
 
+// FormatIPv6 renders a 16-byte IPv6 address the way PostgreSQL's inet output
+// function does, which is NOT what net.IP.String() does for two families:
+//
+//	::ffff:10.0.0.1   Go collapses a v4-MAPPED address to its bare dotted quad
+//	                  (`10.0.0.1`), a value the engine itself says the column
+//	                  does not equal — `a = '10.0.0.1'` is false and
+//	                  `a = '::ffff:10.0.0.1'` is true, both correctly (#580).
+//	::1.2.3.4         Go renders a v4-COMPATIBLE address in hex (`::102:304`)
+//	                  where the server prints the embedded quad.
+//
+// PostgreSQL's rule, measured on 17.11 rather than remembered: take the FIRST
+// longest run of zero 16-bit words of length >= 2 and write it `::`; render
+// the trailing four bytes as a dotted quad when that run starts at word 0 and
+// is either six words long (`::a.b.c.d`) or five words long with word 5 equal
+// to 0xffff (`::ffff:a.b.c.d`). Everything else is lower-case hex groups. The
+// zero-run choice is Go's too, so only the dotted-quad rule differs.
+//
+// Measured cells (`SELECT '<lit>'::inet` on 17.11): `::ffff:10.0.0.1`,
+// `::ffff:0.0.0.0`, `::ffff:255.255.255.255`, `::1.2.3.4`, `::2`, `::1`, `::`,
+// `0:1::`, `1::`, `2001:db8::1:0:0:1`, `::ffff:0:102:304`, `64:ff9b::102:304`.
+//
+// The comparison and ordering value is untouched: this is the printed form
+// only, and `net.ParseIP` reads the text back to the same sixteen bytes, which
+// is what kernel.IPv6RowKey and exec.boxedIPv6Compare rely on.
+func FormatIPv6(raw []byte) string {
+	if len(raw) != 16 {
+		return ""
+	}
+	var words [8]uint16
+	for i := range words {
+		words[i] = uint16(raw[i*2])<<8 | uint16(raw[i*2+1])
+	}
+	bestBase, bestLen, curBase, curLen := -1, 0, -1, 0
+	for i := 0; i < 8; i++ {
+		if words[i] == 0 {
+			if curBase == -1 {
+				curBase, curLen = i, 1
+			} else {
+				curLen++
+			}
+			continue
+		}
+		if curBase != -1 {
+			if curLen > bestLen {
+				bestBase, bestLen = curBase, curLen
+			}
+			curBase = -1
+		}
+	}
+	if curBase != -1 && curLen > bestLen {
+		bestBase, bestLen = curBase, curLen
+	}
+	if bestLen < 2 {
+		bestBase = -1
+	}
+	// The dotted-quad tail fires at word 6 only, so a run of SEVEN zero words
+	// (`::2`) never reaches it — which is why the server prints `::2` and not
+	// `::0.0.0.2`.
+	quadTail := bestBase == 0 && (bestLen == 6 || (bestLen == 5 && words[5] == 0xffff))
+	var sb strings.Builder
+	sb.Grow(45)
+	for i := 0; i < 8; i++ {
+		if bestBase != -1 && i >= bestBase && i < bestBase+bestLen {
+			if i == bestBase {
+				sb.WriteByte(':')
+			}
+			continue
+		}
+		if i != 0 {
+			sb.WriteByte(':')
+		}
+		if i == 6 && quadTail {
+			sb.WriteString(formatIPv4(uint32(raw[12])<<24 | uint32(raw[13])<<16 |
+				uint32(raw[14])<<8 | uint32(raw[15])))
+			return sb.String()
+		}
+		sb.WriteString(strconv.FormatUint(uint64(words[i]), 16))
+	}
+	if bestBase != -1 && bestBase+bestLen == 8 {
+		sb.WriteByte(':')
+	}
+	return sb.String()
+}
+
 // formatMAC formats a uint64 (lower 48 bits) as a MAC address without allocating net.HardwareAddr.
 func formatMAC(v uint64) string {
 	const hex = "0123456789abcdef"
@@ -806,11 +890,7 @@ func (v *Vector) GetValue(i int) any {
 	case TypeIPv4:
 		return formatIPv4(uint32(v.Int64Data[i]))
 	case TypeIPv6:
-		raw := v.BytesData.Value(i)
-		if len(raw) == 16 {
-			return net.IP(raw).String()
-		}
-		return ""
+		return FormatIPv6(v.BytesData.Value(i))
 	case TypeCIDR:
 		return v.BytesData.StringValue(i)
 	case TypeMAC:

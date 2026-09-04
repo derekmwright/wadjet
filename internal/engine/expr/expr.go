@@ -5351,6 +5351,14 @@ func fnIPToString(args []any) any {
 	if ip == nil {
 		return nil
 	}
+	// A v6 SPELLING renders through the engine's one v6 renderer, so a
+	// v4-mapped address prints the way its column prints (#580). net.ParseIP
+	// stores a dotted quad in the same sixteen bytes, so the input's own
+	// spelling is what separates the two families — the test CidrSortKey
+	// makes as well.
+	if strings.Contains(s, ":") {
+		return batch.FormatIPv6(ip.To16())
+	}
 	return ip.String()
 }
 
@@ -9973,7 +9981,10 @@ func fnIPv6Compress(args []any) any {
 	if ip == nil {
 		return nil
 	}
-	return ip.String()
+	// The inverse of fnIPv6Expand, which already reads a dotted quad as the
+	// v4-MAPPED address it is: compressing one gives `::ffff:a.b.c.d`, not the
+	// bare quad net.IP.String() would hand back (#580).
+	return batch.FormatIPv6(ip.To16())
 }
 
 func fnIPv6ToEUI64(args []any) any {

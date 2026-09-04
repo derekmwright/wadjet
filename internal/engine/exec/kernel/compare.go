@@ -1972,13 +1972,11 @@ func likeTextRenderer(typ batch.TypeID) func(*batch.Vector, int) string {
 		// is the second one (#544).
 		return func(v *batch.Vector, i int) string { return batch.FormatTimestamp(v.Int64Data[i]) }
 	case batch.TypeIPv6:
-		return func(v *batch.Vector, i int) string {
-			raw := v.BytesData.Value(i)
-			if len(raw) != 16 {
-				return ""
-			}
-			return net.IP(raw).String()
-		}
+		// batch.FormatIPv6, not a local copy: PostgreSQL's v4-mapped and
+		// v4-compatible spellings are a real rule, not the trivial one-way
+		// re-encode the IPv4/MAC duplication below is for, and a LIKE pattern
+		// has to match the text the column PRINTS (#580).
+		return func(v *batch.Vector, i int) string { return batch.FormatIPv6(v.BytesData.Value(i)) }
 	case batch.TypeUUID:
 		return func(v *batch.Vector, i int) string {
 			raw := v.BytesData.Value(i)
