@@ -136,6 +136,31 @@ func TestIntegerMinimumIsLoudOnEveryArm(t *testing.T) {
 		{name: "unary_minus_widens_and_still_answers",
 			sql:  `SELECT -i32 AS a FROM intmin WHERE id = 1`,
 			want: []string{"a=int64:2147483648"}},
+
+		// THE PREDICATE POSITION, and it is a SUPERSET in the same direction:
+		// `WHERE ABS(i32) > …` at the int4 floor ANSWERS where PostgreSQL
+		// 17.11 raises `integer out of range` (measured live on both
+		// spellings, `> 0` and the one below). A predicate never crosses
+		// batch.SetValue — there is no int4-declared output column for the
+		// comparison's operand to be stored into — so the store's refusal
+		// does not reach here, and the comparison sees the widened int64 the
+		// kernel actually computed.
+		//
+		// Base-identical, and pinned rather than changed: refusing here would
+		// make wadjet reject rows it can evaluate exactly, which is the wrong
+		// direction, and it would be a RIGHT→LOUD regression against
+		// fd679ae9. The int8 twin DOES raise in this position (absKeepsDomain
+		// raises wherever it runs), so the two widths disagree here on
+		// purpose — an asymmetry this cell records rather than hides.
+		//
+		// The bound is `> 2147483646` and not `> 0` deliberately: only the
+		// widened 2147483648 satisfies it from row 1. A wrapped
+		// -2147483648 would not, so this cell fails if the predicate ever
+		// starts answering the wrapped number, and fails again if it starts
+		// refusing. Row 3 is NULL and drops out.
+		{name: "predicate_position_answers_the_widened_value",
+			sql:  `SELECT id AS k FROM intmin WHERE ABS(i32) > 2147483646 ORDER BY id`,
+			want: []string{"k=int64:1", "k=int64:2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {

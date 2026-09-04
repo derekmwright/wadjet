@@ -783,6 +783,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      this list's widening divergence, unchanged and now pinned in the same
      gate so the new refusal cannot swallow it silently.
 
+     **And the PREDICATE position**, which is the same superset reached a
+     different way: `WHERE ABS(<int4 column>) > 2147483646` at the floor
+     ANSWERS the row where PostgreSQL raises `integer out of range`
+     (measured). A predicate has no int4-declared output column for the
+     operand to be stored into, so it never crosses `batch.SetValue` and the
+     store's refusal cannot reach it; the comparison sees the widened int64
+     the kernel computed, which is the exact value. Base-identical, and
+     deliberately not changed — refusing there would reject a row wadjet can
+     evaluate exactly, the wrong direction for this list. The int8 twin DOES
+     raise in the predicate position, because `expr.absKeepsDomain` raises
+     wherever it runs, so the two widths disagree here on purpose. Pinned by
+     the same gate's `predicate_position_answers_the_widened_value` cell,
+     whose bound is chosen so a wrapped value fails it as loudly as a refusal
+     would.
+
      Gated by `coordinator.TestIntegerMinimumIsLoudOnEveryArm` (nine shapes ×
      five arms over the `intmin` fixture), `batch.TestInt32StoreKeepsTheNumberOrRefuses`
      (the seam with no plan) and `pgwire.TestIntegerOutOfRangeReaches22003OnTheWire`
