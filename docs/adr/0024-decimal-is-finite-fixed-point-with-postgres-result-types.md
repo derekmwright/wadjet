@@ -336,6 +336,21 @@ outside the column's range is a bound and orders above or below every stored
 value (#462). The value-producing callers of `DecimalTextAt` are the ones
 that must honour `Sat`.
 
+**"At every value-producing site" includes every POSITION the same expression
+can be written in.** (Added 2026-09-03, #841.) An expression has ONE
+disposition: `bigint * bigint` overflow is 22003 whether the product is
+projected, summed, averaged, taken as a MIN or a MAX, used as a GROUP BY key or
+computed inside a window — measured live on PostgreSQL 17.11 for all seven.
+`SUM(big * 2)` answered an exact 18446744073709551614 while the projected
+`big * 2` raised on the same row, and the cause was not a typing rule but an
+algebraic one: `logical.rewriteConstArithAggs` lifts a constant out of an
+aggregate — `SUM(x op k)` becomes `agg(x) op k` — which is an identity over
+VALUES and not over DISPOSITIONS, because the per-row form can raise and the
+lifted form cannot. A rewrite that moves an expression from one position to
+another may not move its disposition with it; that pass now declines for the
+operand pairs PostgreSQL computes in integers, and carries an `optswitch` kill
+switch so the invariance oracle can disable it.
+
 ### 5. On the wire, a DECIMAL carries the typmod its inputs AGREE on — `select_common_typmod`
 
 PostgreSQL does not gate on "computed". It runs `select_common_typmod` over

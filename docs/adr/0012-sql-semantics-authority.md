@@ -1087,18 +1087,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        worth doing it is RAISING `batch.AvgScaleIncrement` — a bigger fixed
        number of fractional digits, still fixed — and that is a benchmarked
        type-width change rather than a correctness fix.
-     - **A COMPUTED integer argument is declared BIGINT**, not numeric. Wadjet
-       declares every integer expression INT64 (ADR-0024's recorded
-       divergence), so a computed argument cannot tell int4 from int8; reading
-       them all as int8 would make `SUM(CASE WHEN … THEN 1 ELSE 0 END)` —
-       TPC-H Q12's shape and a BI staple — `numeric` where PostgreSQL says
-       `bigint`, on a sum of ones that cannot overflow anything. A bare column
-       is unaffected: it is typed from the column's real width.
-     - **The narrowing's residual is an ERROR, not a wrapped total**, by the
-       SUM-overflow rule three bullets up and for its exact reason. A computed
-       integer sum past 2^63 has no int64 to land in; PostgreSQL's numeric
-       answers it and wadjet's declared BIGINT cannot, so the query fails with
-       SQLSTATE 22003 naming the aggregate. It was silent until 2026-09-02:
+     - **A COMPUTED integer argument is declared by its own WIDTH**, the way a
+       bare column is. (Amended 2026-09-03, #841; this bullet used to read
+       "declared BIGINT, not numeric".) Wadjet declares every integer
+       expression INT64 (ADR-0024's recorded divergence), so the declared
+       TypeID cannot tell int4 from int8 — but the AST plus the column
+       declarations can, and `physical.aggInputIsWideInteger` reads them: an
+       expression that provably carries an int8-domain operand (an INT64
+       column, an INT64 ROW field, an integer literal outside int4's range, or
+       any of those inside arithmetic, a CASE arm or a choice function) gets
+       PostgreSQL's `sum(int8) → numeric`; everything else keeps `bigint`.
+       That keeps `SUM(CASE WHEN … THEN 1 ELSE 0 END)` — TPC-H Q12's shape and
+       a BI staple, `bigint` on the live server — where it was, and closes the
+       residual the next bullet used to record. A shape the walk cannot see
+       through keeps the int4 reading, so nothing moves on a shape nobody can
+       point at. A bare column is unaffected either way: it is typed from the
+       column's real width.
+     - **What is left of the narrowing's residual is an ERROR, not a wrapped
+       total**, by the SUM-overflow rule three bullets up and for its exact
+       reason. Since #841 the shapes whose width can be READ answer
+       PostgreSQL's exact numeric instead — `SUM(-int8_col)` and
+       `SUM(CASE … ELSE int8_col END)` were pinned as refusals and now answer
+       — so what remains is a computed integer sum past 2^63 that the width
+       walk could not see through. It has no int64 to land in; PostgreSQL's
+       numeric answers it and wadjet's declared BIGINT cannot, so the query
+       fails with SQLSTATE 22003 naming the aggregate. It was silent until 2026-09-02:
        over a column whose total is exactly 2^64, `SUM(b)` answered
        18446744073709551616 and `SUM(-b)` answered 0 — one question, two
        spellings, and no way to see which one was lying. Gated on all five

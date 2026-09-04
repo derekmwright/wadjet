@@ -821,6 +821,45 @@ with itself. A sub-second TIMESTAMP is padded to three fractional digits
 (`…20.5`). A DURATION renders its raw nanosecond count where PostgreSQL's
 `interval` prints `00:00:00.001`.
 
+### Casts and errors
+
+A conversion that cannot produce the value **raises**; it does not answer NULL
+and it does not answer a zero. The SQLSTATE is PostgreSQL's own, and the codes
+are different answers — a client branches on them:
+
+| Expression | SQLSTATE | Message |
+|---|---|---|
+| `CAST('not-a-date' AS DATE)` | `22007` | invalid input syntax for type date: "not-a-date" |
+| `CAST('2020-02-30' AS DATE)` | `22008` | date/time field value out of range: "2020-02-30" |
+| `CAST('x' AS TIMESTAMP)` | `22007` | invalid input syntax for type timestamp: "x" |
+| `CAST('2020-02-30 12:00' AS TIMESTAMP)` | `22008` | date/time field value out of range: … |
+| `CAST('abc' AS UUID)` | `22P02` | invalid input syntax for type uuid: "abc" |
+| `CAST('abc' AS INTEGER \| BIGINT \| REAL \| DOUBLE PRECISION \| NUMERIC \| BOOLEAN)` | `22P02` | invalid input syntax for type … |
+| `CAST('1e400' AS DOUBLE PRECISION)` | `22003` | "1e400" is out of range for type double precision |
+| `CAST(1e40 AS REAL)` | `22003` | … is out of range for type real |
+| `CAST('abcdef' AS VARCHAR(0))` | `22023` | length for type varchar must be at least 1 |
+| `CAST(x AS FLOAT(0))` / `FLOAT(54)` | `22023` | precision for type float must be at least 1 bit / less than 54 bits |
+| `CAST(x AS DECIMAL(p,s))` past the carrier | `22003` | numeric field overflow |
+| `bigint` arithmetic past its range | `22003` | bigint out of range |
+| `1/0`, `x % 0`, `MOD(x, 0)`, `LOG(1, x)` | `22012` | division by zero |
+| `LN(0)`, `LOG(0)`, `LOG2(0)` | `2201E` | cannot take logarithm of zero |
+| `LN(-1)`, `LOG(-1)` | `2201E` | cannot take logarithm of a negative number |
+| `SQRT(-1)` | `2201F` | cannot take square root of a negative number |
+| `POWER(0, -1)` | `2201F` | zero raised to a negative power is undefined |
+| `POWER(-1, 0.5)` | `2201F` | a negative number raised to a non-integer power yields a complex result |
+| `POWER(2, 10000)`, `EXP(1000)` | `22003` | value out of range: overflow |
+| `POWER(2, -10000)`, `EXP(-1000)` | `22003` | value out of range: underflow |
+| `ASIN(2)`, `ACOS(2)` | `22003` | input is out of range |
+
+NaN and the infinities are **values**, not failures, and pass through the way
+PostgreSQL passes them: `SQRT('NaN')` is NaN, `LN('Infinity')` is Infinity,
+`SQRT(-0.0)` is `-0`, and `ASIN('NaN')` is NaN.
+
+A `CAST` whose destination this engine does not recognise still returns its
+operand as text rather than raising `42704`; so does a cast of non-address text
+to `IPV4`, `IPV6`, `CIDR` or `MACADDR`. Both are recorded in ADR-0012's
+divergence list.
+
 ## Window Functions
 
 Window functions compute values across sets of rows related to the current row without collapsing them into groups.
