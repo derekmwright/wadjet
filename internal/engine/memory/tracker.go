@@ -89,17 +89,25 @@ func (t *Tracker) Reserve(n int64) error {
 // per tracker and the ledger-conservation gates assert the exact figure
 // (#823's over-release was found this way).
 func (t *Tracker) Release(n int64) {
-	newUsed := t.used.Add(-n)
-	if newUsed < 0 && t.underflowWarned.CompareAndSwap(false, true) {
-		slog.Warn("memory tracker released more than was reserved (accounting bug)",
-			"tracker", t.name,
-			"released", n,
-			"resulting_used", newUsed,
-		)
-	}
+	t.warnIfUnderflow(t.used.Add(-n), n)
 	if t.parent != nil {
 		t.parent.Release(n)
 	}
+}
+
+// warnIfUnderflow says, once per tracker, that a release drove `used` below
+// zero. Both release paths call it: an over-release is the same accounting bug
+// whichever counter it came off, and routing one of them around the warning
+// would leave the instrument blind to exactly the producer that used it.
+func (t *Tracker) warnIfUnderflow(newUsed, released int64) {
+	if newUsed >= 0 || !t.underflowWarned.CompareAndSwap(false, true) {
+		return
+	}
+	slog.Warn("memory tracker released more than was reserved (accounting bug)",
+		"tracker", t.name,
+		"released", released,
+		"resulting_used", newUsed,
+	)
 }
 
 // Transfer moves n bytes of accounting from one tracker to another. When `from`
@@ -207,7 +215,7 @@ func (t *Tracker) ReleaseForced(n int64, p ForcePurpose) {
 		p = ForceUnattributed
 	}
 	t.forced[p].Add(-n)
-	t.used.Add(-n)
+	t.warnIfUnderflow(t.used.Add(-n), n)
 	if t.parent != nil {
 		t.parent.ReleaseForced(n, p)
 	}

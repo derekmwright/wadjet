@@ -2,7 +2,10 @@ package memory
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,6 +63,73 @@ func TestAReservationTheBudgetCouldHoldStillWaits(t *testing.T) {
 			"that is momentarily full; a request the budget CAN hold is exactly the case "+
 			"the wait exists for", elapsed, budget/2, budget)
 	}
+}
+
+// BOTH release paths report an over-release. The WARN is the instrument a
+// query-level gate counts, and an over-release is the same accounting bug
+// whichever counter it came off — so routing one path around it would leave the
+// instrument blind to exactly the producer that used it. That is not
+// hypothetical: `SpillManager.ReleaseTracking` moved onto `ReleaseForced` in
+// this arc, and `HashAggregate.Close` releases its group memory through it.
+func TestBothReleasePathsReportAnOverRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		release func(tr *Tracker)
+	}{
+		{"Release", func(tr *Tracker) { tr.Release(4096) }},
+		{"ReleaseForced", func(tr *Tracker) { tr.ReleaseForced(4096, ForceSpillTracking) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var warned atomic.Int64
+			prev := slog.Default()
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			slog.SetDefault(slog.New(&underflowCounter{
+				inner: slog.NewTextHandler(io.Discard, nil), n: &warned,
+			}))
+
+			tr := NewTracker("query", 1<<20)
+			tc.release(tr) // nothing was ever reserved
+			if tr.Used() >= 0 {
+				t.Fatalf("used=%d; this cell did not reach an underflow at all", tr.Used())
+			}
+			if warned.Load() != 1 {
+				t.Errorf("%s drove used to %d and warned %d times; an over-release that "+
+					"says nothing is an over-release nobody finds", tc.name, tr.Used(),
+					warned.Load())
+			}
+			// Once per tracker: an over-release repeats on every batch after
+			// the first, and a line per batch is a line nobody reads.
+			tc.release(tr)
+			if warned.Load() != 1 {
+				t.Errorf("%s warned %d times; the WARN is once per tracker", tc.name,
+					warned.Load())
+			}
+		})
+	}
+}
+
+type underflowCounter struct {
+	inner slog.Handler
+	n     *atomic.Int64
+}
+
+func (h *underflowCounter) Enabled(ctx context.Context, l slog.Level) bool {
+	return h.inner.Enabled(ctx, l)
+}
+
+func (h *underflowCounter) Handle(ctx context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, "released more than was reserved") {
+		h.n.Add(1)
+	}
+	return h.inner.Handle(ctx, r)
+}
+
+func (h *underflowCounter) WithAttrs(a []slog.Attr) slog.Handler {
+	return &underflowCounter{inner: h.inner.WithAttrs(a), n: h.n}
+}
+
+func (h *underflowCounter) WithGroup(name string) slog.Handler {
+	return &underflowCounter{inner: h.inner.WithGroup(name), n: h.n}
 }
 
 // Every producer that can charge past the budget names what the charge is for,
