@@ -166,6 +166,45 @@ refusal survives the delegation.
 - **Three-part paths.** `rw.inner.k` and `t.rw.f` do not parse at all
   ("trailing input after the end of the statement"). That is a parser feature,
   and it fails loudly rather than answering wrongly.
+
+  **Amended 2026-09-04 (arc E3 round 3).** PostgreSQL's own spelling for a
+  field path is the PARENTHESISED one — it reads `c_row.b` as `table.column`
+  and only `(c_row).b` as the field — and wadjet parses it now:
+  `(c_row).b` produces the SAME `plansql.ColRef{Table: "c_row", Column: "b"}`
+  the bare spelling produces, so it is one reference with one resolver and one
+  `batch.RowFieldPath` question, not a second spelling for the seven sites of
+  rule 1 to disagree about. It composes: predicate, GROUP BY, ORDER BY, join
+  key, aggregate argument, cast, arithmetic. `a.b.c` is still a syntax error.
+
+  What does NOT work is a container the reference QUALIFIES — `(x.c_row).b`,
+  and by the same token the nested `((c_row).rw).k`, whose container is itself
+  a path. Both are REFUSED with `0A000` naming the workaround, and the refusal
+  is the decision: an earlier form of this change lowered them to a
+  three-part flat name and they answered **NULL on every arm, with no join in
+  the query at all**. The mechanism is that the identity is two-part —
+  `plansql.ColRef` is `{Table, Column}` and every resolver rule 1 binds
+  together reads exactly those two fields — while a qualified container needs
+  three: relation, container, field. Making it work means a THIRD part
+  carried through `inputColFields` (keyed by the bare container name),
+  `colScope.rowFields` (the same), `colDecls.field`/`isFieldPath`, the join's
+  carried-container set, and `cleanExpr`, which strips the qualifier before
+  the field is asked for. That is rule 1's list again, one part wider, and it
+  is its own change.
+
+  **The cost of not having it** is recorded here rather than left implicit:
+  `(x.c_row).b` is PostgreSQL's disambiguation for a container two relations
+  both publish, and that shape is refused 42702 (§the ambiguity, below). So
+  the only way to read such a field in wadjet today is a derived table that
+  renames the other arm's container away — which works, and is what
+  `docs/data-types.md` documents. Gated at
+  `internal/coordinator/derived_arm_join_chain_two_path_test.go`:
+  `parenthesised/unqualified-is-the-same-reference`,
+  `parenthesised/in-a-predicate-and-a-group-key`,
+  `parenthesised/unknown-field`,
+  `parenthesised/a-qualified-container-is-refused-not-answered`,
+  `parenthesised/a-qualified-container-is-refused-without-a-join` and
+  `parenthesised/a-nested-path-is-refused-not-answered`, plus the parser's own
+  spellings in `internal/planner/sql/paren_field_path_test.go`.
 - **The differential fuzzer** cannot generate field paths, because it
   qualifies references with the table alias and the parser accepts only a
   two-part reference. See the note in `internal/oracle/shapegen/typematrix.go`.

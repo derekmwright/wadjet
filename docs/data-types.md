@@ -324,13 +324,35 @@ SELECT n.id, c_row.b FROM nested n JOIN dims d ON n.id = d.id
 Two relations in scope carrying a container of the same name make the
 reference ambiguous, and it is refused — `column reference "c_row" is
 ambiguous`, SQLSTATE 42702, which is what PostgreSQL raises for `(c_row).b`
-over the same two relations. Qualify the OTHER arm's container away, or select
-the field through a derived table that renames it. A field the container does
-not declare is refused too, with PostgreSQL's wording (`could not identify
-column "x" in record data type`).
+over the same two relations. Select the field through a derived table that
+renames the other arm's container away:
 
-PostgreSQL requires the parenthesised spelling `(n.c_row).b` and reads the
-unparenthesised one as a missing FROM-clause entry; wadjet accepts both.
+```sql
+-- Both arms publish `c_row`, so `c_row.b` is refused. This spelling is not.
+SELECT x.id, x_row.b FROM nested x
+  JOIN (SELECT id, c_row AS y_row FROM nested) y ON x.id = y.id
+```
+
+A field the container does not declare is refused too, with PostgreSQL's
+wording (`could not identify column "x" in record data type`).
+
+**Which spellings are accepted.** PostgreSQL requires the parenthesised form
+and reads the unparenthesised one as a table qualifier; wadjet reads both,
+which is the deliberate superset ADR-0012 records:
+
+| spelling | wadjet | PostgreSQL 17 |
+|---|---|---|
+| `c_row.b` | the field | `missing FROM-clause entry for table "c_row"` (42P01) |
+| `(c_row).b` | the field | the field |
+| `(x.c_row).b` | `0A000`, not supported | the field |
+| `x.c_row.b` | syntax error | read as `catalog.schema.column`, refused |
+
+A container the reference QUALIFIES needs a three-part identity that this
+engine does not yet carry, so `(x.c_row).b` is REFUSED rather than answered —
+a loud `0A000` naming the derived-table workaround, never a silent value. That
+is the one spelling PostgreSQL offers for an ambiguous container and wadjet
+does not; the derived-table rename above is the way to write it today.
+ADR-0022 carries the mechanism and what closing it takes.
 
 **Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
 

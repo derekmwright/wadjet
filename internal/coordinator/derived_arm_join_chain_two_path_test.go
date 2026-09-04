@@ -784,6 +784,81 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			refuse: `column reference "c_row" is ambiguous`,
 		},
 		{
+			// PostgreSQL's own spelling for a ROW field path, which this
+			// engine now parses: `(c_row).b` is the SAME reference as the bare
+			// `c_row.b` — one node, one resolver, one `batch.RowFieldPath`
+			// question — rather than a second spelling with its own
+			// resolution. Same rows as `join-arm-publishes-the-field-name`
+			// above, which is the point: the two spellings agree.
+			name: "parenthesised/unqualified-is-the-same-reference",
+			sql: "SELECT n.id AS nid, (c_row).b AS fb FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id ORDER BY n.id",
+			cols: []string{"nid", "fb"},
+			want: "9 rows: 1|11;2|;3|;4|44;5|55;6|66;7|77;8|88;9|;",
+		},
+		{
+			// The same spelling in a PREDICATE and as a GROUP KEY, because the
+			// resolvers ADR-0022 binds together are per-CLAUSE and a spelling
+			// that arrived at only one of them would pass the projection cell
+			// alone.
+			name: "parenthesised/in-a-predicate-and-a-group-key",
+			sql: "SELECT (c_row).b AS fb, COUNT(*) AS n FROM " + nested +
+				" WHERE id < 5 AND (c_row).b IS NOT NULL GROUP BY (c_row).b " +
+				"ORDER BY (c_row).b",
+			cols: []string{"fb", "n"},
+			want: "3 rows: 0|1;11|1;44|1;",
+		},
+		{
+			// A field the container does not declare, through the
+			// parenthesised spelling: refused with the wording #604 settled,
+			// exactly as the bare spelling is. PostgreSQL 17 refuses it too
+			// (`column "nosuch" not found in data type …`).
+			name:   "parenthesised/unknown-field",
+			sql:    "SELECT (c_row).nosuch FROM " + nested,
+			cols:   []string{"nosuch"},
+			refuse: `could not identify column "nosuch" in record data type`,
+		},
+		{
+			// PostgreSQL's ESCAPE HATCH for the 42702 refusal above is to
+			// QUALIFY the container — `(x.c_row).b`, which answers
+			// `0,0 | 1,11 | 2, | 3, | 4,44` on PostgreSQL 17 over these rows.
+			// This engine parses it and REFUSES it, loudly, because a
+			// three-part identity is not something `plansql.ColRef`
+			// ({Table, Column}) can carry: measured on an attempt, the
+			// reference resolves to NULL on every arm with no join in the
+			// query at all, since each declaration site keys the container by
+			// its BARE name and the qualifier is stripped before the field is
+			// asked for.
+			//
+			// The refusal is the point. A silent NULL where PostgreSQL answers
+			// a value is the failure mode this whole arc exists to remove, and
+			// naming the workaround in the message is what keeps the 42702
+			// above from being a dead end. ADR-0022 carries the mechanism.
+			name: "parenthesised/a-qualified-container-is-refused-not-answered",
+			sql: "SELECT x.id AS xid, (x.c_row).b AS fb FROM " + nested + " x JOIN " + nested +
+				" y ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
+			cols:   []string{"xid", "fb"},
+			refuse: "a relation-qualified ROW field path (x.c_row).b is not supported",
+		},
+		{
+			// The same refusal with NO join anywhere, which is what says the
+			// gap is the three-part identity and not the ambiguity: the
+			// container is unambiguous here and the spelling is still refused.
+			name:   "parenthesised/a-qualified-container-is-refused-without-a-join",
+			sql:    "SELECT (x.c_row).b AS fb FROM " + nested + " x",
+			cols:   []string{"fb"},
+			refuse: "a relation-qualified ROW field path (x.c_row).b is not supported",
+		},
+		{
+			// The NESTED spelling reaches the same rule for the same reason —
+			// its container is itself a path — and is refused rather than
+			// silently answering the outer field.
+			name:   "parenthesised/a-nested-path-is-refused-not-answered",
+			sql:    "SELECT ((c_row).rw).k AS fk FROM " + nested,
+			cols:   []string{"fk"},
+			refuse: "a relation-qualified ROW field path (c_row.rw).k is not supported",
+		},
+		{
 			// The CONTROL that bounds the refusal: ONE arm publishes the
 			// container, so nothing is ambiguous and the field answers.
 			name: "ambiguous-container/ctl-one-arm-only",

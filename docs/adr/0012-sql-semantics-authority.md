@@ -299,6 +299,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      answers the same here, and the spelling PostgreSQL refuses is one it
      cannot mean anything else by.
 
+     **PostgreSQL's own spelling parses too** (2026-09-04 round 3):
+     `(c_row).b` becomes the SAME reference the bare form does, so the
+     superset is two spellings of one meaning rather than two meanings. The
+     one PostgreSQL spelling wadjet does NOT accept is a container the
+     reference QUALIFIES — `(x.c_row).b` — which needs a three-part identity
+     the engine does not carry and is REFUSED with `0A000` naming the
+     derived-table workaround. That is a divergence in the REFUSING direction
+     and it is listed here for that reason; ADR-0022 carries the mechanism.
+
      The boundary is what keeps it a superset rather than a second answer. A
      dotted reference is a field path ONLY where its qualifier names a ROW
      column of the stream **that declares the field** (`batch.RowFieldPath`,

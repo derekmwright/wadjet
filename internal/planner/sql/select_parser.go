@@ -2,9 +2,10 @@ package sql
 
 import (
 	"fmt"
-	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"strconv"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // selectParser is a recursive descent parser for SELECT statements.
@@ -1871,6 +1872,82 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				Name: "json_extract_scalar",
 				Args: []Node{expr, jsonPathArg(right)},
 			}
+		case TokenDot:
+			// PostgreSQL's ROW field path: `(container).field`.
+			//
+			// The PARENTHESES are the whole point. `c_row.b` is spelled like
+			// `table.column` and PostgreSQL reads it that way — it is a
+			// missing-FROM-clause error there — so the parenthesised form is
+			// the only spelling PostgreSQL reads as a field, and it is the
+			// only one that can carry a RELATION qualifier beside the
+			// container: `(x.c_row).b` says arm `x`, container `c_row`,
+			// field `b`, which the bare two-part form cannot say at all.
+			// That matters because a container two arms both publish is
+			// refused (42702, physical.colScope.resolveRef) and this is the
+			// escape hatch PostgreSQL offers for it.
+			//
+			// Only a PARENTHESISED expression takes a dot here. `a.b.c` is
+			// still a syntax error, which is ADR-0022's position and matches
+			// PostgreSQL's own reading of the unparenthesised three-part form
+			// (it takes the parts as catalog.schema.column and refuses).
+			//
+			// The container itself must be a BARE name. `(x.c_row).b` parses
+			// and is REFUSED (0A000) rather than answered, because a
+			// three-part identity is not something this engine's ColRef can
+			// carry — see below.
+			pn, ok := expr.(*ParenNode)
+			if !ok {
+				return expr, nil
+			}
+			inner, ok := pn.Inner.(*ColRef)
+			if !ok {
+				// PostgreSQL's own sentence, with the one substitution this
+				// layer can make: the parser knows the EXPRESSION but not its
+				// type, so it names the expression where PostgreSQL names the
+				// type. SQLSTATE 42809 is PostgreSQL's, measured on 17
+				// (`select (1+2).b` → `column notation .b applied to type
+				// integer, which is not a composite type`).
+				p.advance()
+				fname := "?"
+				if p.peek() == TokenIdent {
+					fname = p.cur.val
+				}
+				return nil, sqlerr.New("42809",
+					"column notation .%s applied to %s, which is not a composite type",
+					fname, pn.Inner.String())
+			}
+			p.advance() // consume .
+			fieldTok, err := p.expect(TokenIdent)
+			if err != nil {
+				return nil, fmt.Errorf("expected field name after '.'")
+			}
+			if inner.Table != "" {
+				// A container the reference QUALIFIES — `(x.c_row).b`, and by
+				// the same token the nested `((c_row).rw).k`, whose container
+				// is itself a path — needs a THREE-part identity, and this
+				// engine has a two-part one: `plansql.ColRef` is
+				// {Table, Column} and every resolver ADR-0022 binds together
+				// reads those two fields. Measured on an attempt: the
+				// reference resolves to NULL at every arm, with no join
+				// anywhere in the query, because the container's declaration
+				// is keyed by its BARE name at each declaration site and the
+				// qualifier is stripped before the field is asked for.
+				//
+				// A silent NULL is the one answer this must not give, so the
+				// spelling is REFUSED while the identity is two-part.
+				// ADR-0022 carries the mechanism and what closing it takes.
+				return nil, sqlerr.New("0A000",
+					"a relation-qualified ROW field path (%s.%s).%s is not supported; "+
+						"drop the qualifier, or rename the container through a derived "+
+						"table when two relations publish it",
+					inner.Table, inner.Column, fieldTok.val)
+			}
+			// The container becomes the QUALIFIER of an ordinary ColRef, which
+			// is the node the bare spelling already produces: `(c_row).b` and
+			// `c_row.b` are the SAME reference, so every resolver ADR-0022
+			// binds together goes on asking `batch.RowFieldPath` one question
+			// rather than acquiring a second spelling to disagree about.
+			expr = &ColRef{Table: inner.Column, Column: fieldTok.val}
 		default:
 			return expr, nil
 		}
