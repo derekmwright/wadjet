@@ -197,7 +197,8 @@ to be released.** So the decode half waited on #823's per-partition index
 state, and this ADR recorded it as deferred rather than bounded by something
 that measures worse. **That dependency is discharged (2026-09-04): a grace
 eviction now does release the join's index, so the admission-before-decode
-direction can be re-measured on a tree where what it waits on can be freed.** The earlier bounds this section carried — a headroom bound
+direction can be re-measured on a tree where what it waits on can be freed.**
+The earlier bounds this section carried — a headroom bound
 that inverted the result 17/20 -> 3/20, and a `budget/N` share whose value
 decided which shapes were deterministic — stay REJECTED; the headroom one was
 inverted by producer 1's granularity, which is the half now closed, and it is

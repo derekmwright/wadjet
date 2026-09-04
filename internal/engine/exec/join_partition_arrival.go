@@ -811,10 +811,13 @@ func (h *HashJoin) releaseStoreBytes(n int64) {
 	if rest := n - forced; rest > 0 {
 		h.MemTracker.Release(rest)
 	}
+	// NOT clamped at zero. The arrival reservation is reconciled to what the
+	// build kept, so what an eviction releases is exactly what that partition
+	// was charged and this cannot go negative — and if it ever does, the
+	// ledger-conservation gate's `used == trackedMem` assert is the place to
+	// find out, which a clamp would take away. The same argument the tracker's
+	// own Release makes, in the arc's own code.
 	h.trackedMem -= n
-	if h.trackedMem < 0 {
-		h.trackedMem = 0
-	}
 }
 
 // spillUntilCanReserve evicts in-memory partitions one at a time until either

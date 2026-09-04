@@ -1644,7 +1644,16 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 	h.buildRows = totalRows
 
 	// Adopt the largest table directly, merge others into it.
-	// A key-only build has one index part; adopt into it.
+	//
+	// A key-only build has ONE index part — Build never dispatches it to the
+	// grace path — so the adopted table becomes the whole index and the probe
+	// reaches it with partMask 0. That is an invariant, not a comment: adopting
+	// one table into part 0 while partMask routes elsewhere would find nothing,
+	// silently, so it is asserted where it is relied on.
+	if len(h.parts) != 1 || h.partMask != 0 {
+		return fmt.Errorf("key-only build adopted a local table into %d index parts "+
+			"(partMask=%d); it must have exactly one", len(h.parts), h.partMask)
+	}
 	pt := &h.parts[0]
 	if h.useIntKey || h.useDualIntKey {
 		pt.ints = locals[bestIdx].intIndex
