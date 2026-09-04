@@ -1313,6 +1313,15 @@ func (e *UnaryOp) Eval(b *batch.RecordBatch, row int) any {
 	switch e.Op {
 	case "-":
 		if i, ok := toInt64Safe(v); ok {
+			if i == math.MinInt64 {
+				// |MinInt64| has no int64 — two's complement has one more
+				// negative value than positive — so this WRAPPED to itself and
+				// `-bigint_min` answered a NEGATIVE number under a right type.
+				// PostgreSQL raises `bigint out of range`, measured. Same
+				// refusal as absKeepsDomain's, one operator over (review round
+				// 0, P2/P3).
+				raiseBigintOutOfRange()
+			}
 			return -i
 		}
 		return -ToFloat64(v)
@@ -6590,7 +6599,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 				}
 				raiseInvalidTextRepresentation(typ, s)
 			}
-			return castIntInRange(int64(math.Round(f)), dest)
+			return castIntInRange(castFloatToInt64(f, dest), dest)
 		}
 		// EVERY source gets the destination's range, integers included:
 		// `CAST(99999 AS SMALLINT)` answered 99999 because an integer box
@@ -6617,9 +6626,9 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// as a Lit, and covering only one made the two halves of one query
 		// disagree about their own type (#668's note).
 		if isConstNumericOperand(e.Operand) {
-			return castIntInRange(int64(math.Round(ToFloat64(v))), dest)
+			return castIntInRange(castFloatToInt64(ToFloat64(v), dest), dest)
 		}
-		return castIntInRange(int64(math.RoundToEven(ToFloat64(v))), dest)
+		return castIntInRange(castFloatToInt64Even(ToFloat64(v), dest), dest)
 	case "real", "float4":
 		// REAL is float4, a NARROWER type than the float64 every other
 		// numeric box in this engine carries — and this arm used to sit

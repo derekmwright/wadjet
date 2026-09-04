@@ -1449,11 +1449,6 @@ literally called `user` is referenced with the double-quoted spelling
 | `CARDINALITY(array)` | Number of elements; `0` for an empty array | `CARDINALITY(ARRAY[1,2,3])` → `3` |
 | `ARRAY_LENGTH(array, dim)` | Length along dimension `dim`, or NULL when that dimension does not exist | `ARRAY_LENGTH(ARRAY[1,2,3], 1)` → `3`; `ARRAY_LENGTH(ARRAY[1,2,3], 2)` → `NULL` |
 | `ARRAY_LENGTH(array)` | One-argument form (not in PostgreSQL): same as CARDINALITY | `ARRAY_LENGTH(tags)` |
-
-`ARRAY_LENGTH` and `CARDINALITY` differ on an EMPTY array, exactly as they do
-in PostgreSQL: `CARDINALITY(ARRAY[])` is `0` because there are no elements, and
-`ARRAY_LENGTH(ARRAY[], 1)` is `NULL` because there is no dimension 1. Wadjet's
-`ARRAY` is one-dimensional, so any `dim` other than `1` is `NULL`.
 | `ELEMENT_AT(array, index)` | 1-based element access (negative indexes from end) | `ELEMENT_AT(ips, 1)` → first element |
 | `ARRAY_CONTAINS(array, value)` | Test membership | `ARRAY_CONTAINS(tags, 'critical')` |
 | `ARRAY_JOIN(array, delimiter)` | Concatenate elements with delimiter | `ARRAY_JOIN(tags, ', ')` |
@@ -1461,6 +1456,11 @@ in PostgreSQL: `CARDINALITY(ARRAY[])` is `0` because there are no elements, and
 | `ARRAY_MAX(array)` | Maximum element | `ARRAY_MAX(scores)` |
 
 Array literal syntax: `ARRAY[1, 2, 3]`
+
+`ARRAY_LENGTH` and `CARDINALITY` differ on an EMPTY array, exactly as they do
+in PostgreSQL: `CARDINALITY(ARRAY[])` is `0` because there are no elements, and
+`ARRAY_LENGTH(ARRAY[], 1)` is `NULL` because there is no dimension 1. Wadjet's
+`ARRAY` is one-dimensional, so any `dim` other than `1` is `NULL`.
 
 ### ROW/STRUCT Functions
 

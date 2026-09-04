@@ -294,6 +294,79 @@ func TestUnknownCastTypeStillDeclaresString(t *testing.T) {
 	}
 }
 
+// TestIntegerConversionsRaiseInsteadOfWrapping is review round 0's P2 and P3:
+// three sites answered a WRAPPED number, which the arc's own commits call
+// worse than a NULL — a different number wearing the right type, and nothing
+// downstream can see it is wrong.
+//
+// `CAST(1e30 AS BIGINT)` is the sharpest, and it is this arc's own headline
+// shape in the file it rewrote: `CAST(1e30 AS INTEGER)` raised correctly on
+// the same tree, so ONE destination family had two answers. The cause is that
+// Go's float-to-integer conversion for an out-of-range operand is
+// implementation-defined — on amd64 it yields MinInt64 — and the range check
+// ran AFTER it, on a value already wrapped.
+//
+// The other two are two's complement's asymmetry: |MinInt64| has no int64 and
+// |MinInt32| no int32, so negating them wrapped to themselves. PostgreSQL
+// raises for all five cells, measured on 17.11.
+func TestIntegerConversionsRaiseInsteadOfWrapping(t *testing.T) {
+	b := castRefusalBatch(t)
+	for _, c := range []struct {
+		name string
+		expr Expr
+		msg  string
+	}{
+		{"a float past bigint's range", &Cast{Operand: &Lit{Val: 1e30}, DestType: "bigint"},
+			"bigint out of range"},
+		{"a negative float past bigint's range", &Cast{Operand: &Lit{Val: -1e30}, DestType: "bigint"},
+			"bigint out of range"},
+		{"a float past integer's range", &Cast{Operand: &Lit{Val: 1e30}, DestType: "integer"},
+			"integer out of range"},
+		{"ABS of bigint's minimum",
+			&FuncCall{Name: "abs", Args: []Expr{&Lit{Val: int64(math.MinInt64)}}},
+			"bigint out of range"},
+		{"ABS of integer's minimum",
+			&FuncCall{Name: "abs", Args: []Expr{&Lit{Val: int32(math.MinInt32)}}},
+			"integer out of range"},
+		{"negating bigint's minimum",
+			&UnaryOp{Op: "-", Operand: &Lit{Val: int64(math.MinInt64)}},
+			"bigint out of range"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state, msg := recoverFatalEvalForTest(t, func() { c.expr.Eval(b, 0) })
+			if state != "22003" || msg != c.msg {
+				t.Errorf("raised [%s] %s, want [22003] %s (live PostgreSQL 17.11)",
+					state, msg, c.msg)
+			}
+		})
+	}
+	// THE BOUNDARY: the values just inside the range still convert, so a
+	// repair that refused every large float or every negation could not pass.
+	for _, c := range []struct {
+		name string
+		expr Expr
+		want any
+	}{
+		{"bigint's maximum as a float rounds in",
+			&Cast{Operand: &Lit{Val: 9.2e18}, DestType: "bigint"}, int64(9200000000000000000)},
+		{"ABS of bigint's minimum plus one",
+			&FuncCall{Name: "abs", Args: []Expr{&Lit{Val: int64(math.MinInt64 + 1)}}},
+			int64(math.MaxInt64)},
+		{"negating bigint's maximum",
+			&UnaryOp{Op: "-", Operand: &Lit{Val: int64(math.MaxInt64)}},
+			int64(math.MinInt64 + 1)},
+		{"ABS of integer's minimum plus one",
+			&FuncCall{Name: "abs", Args: []Expr{&Lit{Val: int32(math.MinInt32 + 1)}}},
+			int32(math.MaxInt32)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.expr.Eval(b, 0); got != c.want {
+				t.Errorf("= %#v, want %#v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestCastToANetworkTypeStillPassesThrough(t *testing.T) {
 	b := castRefusalBatch(t)
 	for _, dest := range []string{"ipv4", "ipv6", "cidr", "macaddr", "mac"} {

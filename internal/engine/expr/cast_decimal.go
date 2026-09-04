@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -396,4 +397,38 @@ func castIntInRange(v int64, dest string) int64 {
 		}
 	}
 	return v
+}
+
+// castFloatToInt64 rounds a float to the int64 a cast produces, RAISING when
+// the value has none.
+//
+// This check has to happen at the CONVERSION and not in castIntInRange above,
+// which is why it is a separate function: by the time that one runs the value
+// is already an int64, and Go's float-to-integer conversion for an
+// out-of-range operand is implementation-defined — on amd64 it yields
+// MinInt64. So `CAST(1e30 AS BIGINT)` came back as -9223372036854775808, a
+// wrapped number wearing the right type, while `CAST(1e30 AS INTEGER)` raised
+// correctly on the same tree: ONE destination family with two answers, which
+// is this arc's headline defect, in the file it rewrote (review round 0, P2).
+//
+// PostgreSQL raises `bigint out of range` for it, measured, and the bound is
+// its own: a float64 cannot represent 2^63-1 exactly, so the comparison is
+// against the exact powers of two that bracket the range.
+func castFloatToInt64(f float64, dest string) int64 {
+	r := math.Round(f)
+	if math.IsNaN(r) || r >= 9223372036854775808.0 || r < -9223372036854775808.0 {
+		raiseIntegerOutOfRange(dest)
+	}
+	return int64(r)
+}
+
+// castFloatToInt64Even is castFloatToInt64 with PostgreSQL's rint() rounding —
+// half TO EVEN, which is what a FLOAT source gets (#768). The range check is
+// the same one and is shared rather than copied.
+func castFloatToInt64Even(f float64, dest string) int64 {
+	r := math.RoundToEven(f)
+	if math.IsNaN(r) || r >= 9223372036854775808.0 || r < -9223372036854775808.0 {
+		raiseIntegerOutOfRange(dest)
+	}
+	return int64(r)
 }

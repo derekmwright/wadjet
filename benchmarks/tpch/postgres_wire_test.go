@@ -1744,6 +1744,19 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		// of range rather than as a data exception (#652).
 		{name: "FloatPrecisionTooSmall", sql: `SELECT CAST(1.0 AS float(0))`},
 		{name: "FloatPrecisionTooLarge", sql: `SELECT CAST(1.0 AS float(54))`},
+		// A string type modifier the server refuses, on the CAST door. The
+		// DDL door gives the identical type name the identical code — one
+		// reading, `parquet.StringTypeLength` — which is what review round 0's
+		// B3 was about.
+		{name: "VarcharZeroLength", sql: `SELECT CAST('x' AS varchar(0))`},
+		{name: "CharZeroLength", sql: `SELECT CAST('x' AS char(0))`},
+		{name: "VarcharLengthTooLarge", sql: `SELECT CAST('x' AS varchar(10485761))`},
+		// A float past an integer type's range CONVERTED with a wrap before
+		// the range check ran, so `CAST(1e30 AS bigint)` answered
+		// -9223372036854775808 while the int4 spelling raised — one
+		// destination family, two answers (review round 0, P2).
+		{name: "CastFloatPastBigintRange", sql: `SELECT CAST(1e30 AS bigint)`},
+		{name: "CastFloatPastIntegerRange", sql: `SELECT CAST(1e30 AS integer)`},
 		// ADR-0024 item 4 at the DECIMAL arithmetic and CAST sites: a value
 		// with no carrier at its declared type is 22003 and a zero divisor is
 		// 22012, and the two must stay APART — a caller that branched on "did

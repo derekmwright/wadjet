@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // ABS and MOD answer in their argument's OWN integer or real domain (#768).
@@ -106,16 +107,32 @@ func absKeepsDomain(v any) (any, bool) {
 	switch x := v.(type) {
 	case int32:
 		if x < 0 {
+			if x == math.MinInt32 {
+				// |MinInt32| has no int32 and |MinInt64| no int64: two's
+				// complement has one more negative value than positive.
+				// Negating them WRAPPED to themselves, so `ABS(-2147483648)`
+				// answered a NEGATIVE number under a right type — the class
+				// ADR-0012 item 9 calls a different number wearing the right
+				// type. PostgreSQL raises `integer out of range` / `bigint out
+				// of range`, measured (review round 0, P2).
+				panic(fatalEval{sqlerr.New("22003", "integer out of range")})
+			}
 			return -x, true
 		}
 		return x, true
 	case int64:
 		if x < 0 {
+			if x == math.MinInt64 {
+				panic(fatalEval{sqlerr.New("22003", "bigint out of range")})
+			}
 			return -x, true
 		}
 		return x, true
 	case int:
 		if x < 0 {
+			if int64(x) == math.MinInt64 {
+				panic(fatalEval{sqlerr.New("22003", "bigint out of range")})
+			}
 			return int64(-x), true
 		}
 		return int64(x), true
@@ -179,7 +196,15 @@ func vecAbsDomain(src, out *batch.Vector, n int) bool {
 				out.Nulls.SetNull(i)
 				continue
 			}
-			if v := src.Int32Data[i]; v < 0 {
+			v := src.Int32Data[i]
+			if v == math.MinInt32 {
+				// The vectorized twin of absKeepsDomain's refusal: |MinInt32|
+				// has no int32, and a wrap HERE while the row path raised
+				// would make one expression answer two ways depending on which
+				// evaluator reached it.
+				panic(fatalEval{sqlerr.New("22003", "integer out of range")})
+			}
+			if v < 0 {
 				out.Int32Data[i] = -v
 			} else {
 				out.Int32Data[i] = v
@@ -195,7 +220,11 @@ func vecAbsDomain(src, out *batch.Vector, n int) bool {
 				out.Nulls.SetNull(i)
 				continue
 			}
-			if v := src.Int64Data[i]; v < 0 {
+			v := src.Int64Data[i]
+			if v == math.MinInt64 {
+				panic(fatalEval{sqlerr.New("22003", "bigint out of range")})
+			}
+			if v < 0 {
 				out.Int64Data[i] = -v
 			} else {
 				out.Int64Data[i] = v
