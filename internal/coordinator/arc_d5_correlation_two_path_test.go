@@ -603,9 +603,12 @@ func arcD5LateralCells() []arcD5Cell {
 		// fd679ae9 this answered two rows, dropping Carol.
 		//
 		// The VALUE is PostgreSQL's; the TYPE is not. `SUM` over a BIGINT is
-		// `numeric` in PostgreSQL and float here, which is ADR-0024's rung
-		// and the same box the arithmetic-over-the-default cell records. It
-		// is not this repair's doing and it has no lateral in its own repro.
+		// `numeric` in PostgreSQL and float HERE — while the very same sum
+		// over the very same column, spelled as a GROUP BY aggregate rather
+		// than a window, now comes back DECIMAL and agrees (see
+		// `lateral_count_default_reaches_an_aggregate_argument` above). One
+		// number, two spellings, two boxes: that is ADR-0024's rung, not this
+		// repair's doing, and it has no lateral in its own repro.
 		{issue: "#767", name: "window_over_the_default_reaches_the_dag_carrier_defect",
 			sql: `SELECT o.customer AS c, SUM(s.n) OVER (ORDER BY o.customer) AS running ` +
 				`FROM lat_ord o ` + lat + `ON true ORDER BY 1`,
@@ -724,12 +727,27 @@ func arcD5LateralCells() []arcD5Cell {
 				`ON true WHERE s.n BETWEEN 0 AND 1 ORDER BY o.customer`,
 			want:                  []string{"c=Carol|n=int64:0"},
 			wantUnreachableRoutes: 1},
+		// The BOX here is exact, and it changed under this branch at the
+		// landing rebase: `SUM` over a BIGINT used to come back int64 and now
+		// comes back a DECIMAL, which is what PostgreSQL declares
+		// (`pg_typeof(SUM(s.n))` = `numeric`). That is main's numeric work
+		// arriving, not this arc's, and it moves the cell TOWARD PostgreSQL —
+		// so the expectation follows the engine rather than pinning the box
+		// this arc happened to be written against.
+		//
+		// Worth reading beside `window_over_the_default_reaches_the_dag_
+		// carrier_defect` below, which is the SAME sum over the SAME column in
+		// a window frame and still comes back FLOAT. One spelling is now
+		// PostgreSQL's numeric and the other is not: an asymmetry inside
+		// ADR-0024's rung that these two cells now hold still, and neither of
+		// them is a correlation defect.
 		{issue: "#767", name: "lateral_count_default_reaches_an_aggregate_argument",
 			sql: `SELECT o.customer AS c, SUM(s.n) AS t FROM lat_ord o ` + lat +
 				`ON true GROUP BY o.customer HAVING SUM(s.n) >= 0 ORDER BY c`,
-			want: []string{"c=Alice|t=int64:2", "c=Bob|t=int64:2", "c=Carol|t=int64:0"},
-			pgSays: "Carol 0 — this read NULL on the single-process arm and FAILED on both " +
-				"DAG arms until the aggregate-argument fields were rewritten too"},
+			want: []string{"c=Alice|t=2", "c=Bob|t=2", "c=Carol|t=0"},
+			pgSays: "Alice 2, Bob 2, Carol 0 as NUMERIC — the values and now the box too. " +
+				"Carol read NULL on the single-process arm and FAILED on both DAG arms " +
+				"until the aggregate-argument fields were rewritten"},
 		{issue: "#767", name: "lateral_count_default_reaches_an_order_by",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON true ORDER BY s.n, o.customer`,
