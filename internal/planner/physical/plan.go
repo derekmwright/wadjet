@@ -1555,11 +1555,16 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// projection goes in before the optimizer, exactly as it does for the
 	// statement's own plan.
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
-		denied := pol.DeniedColumns()
-		if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
-			return denied[strings.ToLower(table)]
-		}); err != nil {
-			return nil, nil, nil, err
+		// The name-binding pass runs only when something is DENIED. A
+		// correlated subquery rebuilds this pipeline once per outer row, and
+		// a mask-only policy — the common case — has nothing for the binder
+		// to refuse.
+		if denied := pol.DeniedColumns(); len(denied) > 0 {
+			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
+				return denied[strings.ToLower(table)]
+			}); err != nil {
+				return nil, nil, nil, err
+			}
 		}
 		logicalPlan, err = p.applyContextColumnPolicies(ctx, logicalPlan)
 		if err != nil {
