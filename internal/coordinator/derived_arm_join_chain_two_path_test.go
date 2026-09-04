@@ -1048,52 +1048,45 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 			// PostgreSQL 17 (`(n.c_row).b`): nine rows, the one match at
 			// `decpair.b = 0.0000` carrying the field's 0.
 			//
-			// PINNED on the spilled arm, and the two controls below say why it
-			// is not this arc's mechanism: the CONTAINER PROJECTED under an
-			// ORDINARY residual — no field path anywhere in the query — is
-			// NULL on that arm too, while the same projection under a PLAIN
-			// key is right. What the spilled arm loses is a ROW column of the
-			// build payload once the join is KEYLESS, which is what an ON
-			// residual makes it (`routeOuterJoinOnResiduals` empties JoinCond
-			// and the join degenerates to one all-rows candidate chain — a
-			// CROSS join, ADR-0006's non-spilling shape). This gate's field
-			// path is a passenger.
+			// The spilled arm was PINNED here, and the two cells below said
+			// why it was not the E3 arc's mechanism: the CONTAINER PROJECTED
+			// with no field path anywhere in the query was NULL on that arm
+			// too. The pins are gone because #865 is fixed — a spill file's
+			// per-column header carried no nested declaration, so a ROW came
+			// back declared with no fields and every consumer that allocated
+			// from the schema minted an empty vector for it. This gate's
+			// field path was a passenger, and the three cells now assert the
+			// same rows on all four arms.
 			name: "outer-join/the-field-on-the-right-of-a-left-join",
 			sql: "SELECT d.id AS did, c_row.b AS fb FROM decpair d LEFT JOIN " + nested +
 				" n ON d.b = c_row.b ORDER BY d.id",
 			cols: []string{"did", "fb"},
 			want: "9 rows: 1|;2|;3|;4|;5|;6|0;7|;8|;9|;",
-			armWant: map[string]string{
-				spilledArm: "9 rows: 1|;2|;3|;4|;5|;6|;7|;8|;9|;",
-			},
 		},
 		{
-			// THE OWNERSHIP PIN. No field path, no parentheses, no ROW
+			// THE OWNERSHIP CELL. No field path, no parentheses, no ROW
 			// reference in the ON — just an ordinary expression residual and
-			// the CONTAINER in the select list. The spilled arm answers NULL
-			// for every container; the other three answer the rows. Whatever
-			// fixes the cell above must fix this one, and this one contains
-			// nothing of this arc's.
+			// the CONTAINER in the select list. It was the cell that said the
+			// defect belonged to the spilled join's payload rather than to a
+			// field path, and it answers on every arm since #865.
 			name: "outer-join/a-projected-container-under-an-ordinary-residual",
 			sql: "SELECT d.id AS did, n.c_row AS cr FROM decpair d LEFT JOIN " + nested +
 				" n ON d.id + 0 = n.id WHERE d.id < 3 ORDER BY d.id",
-			cols:    []string{"did", "cr"},
-			want:    "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
-			armWant: map[string]string{spilledArm: "2 rows: 1|;2|;"},
+			cols: []string{"did", "cr"},
+			want: "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
 		},
 		{
-			// …and it is not even the residual. A PLAIN EQUI KEY loses the
-			// projected container on the spilled arm too, so the trigger is
+			// …and it was not even the residual. A PLAIN EQUI KEY lost the
+			// projected container on the spilled arm too, so the trigger was
 			// LEFT JOIN + a memory budget + a ROW column in the select list,
 			// with no expression, no residual and no field path anywhere in
-			// the query. This is the narrowest spelling of the defect and it
-			// belongs to the spilled outer join's payload, not to ADR-0022.
+			// the query — the narrowest spelling of #865. It is the shape the
+			// spilled-join container gate next door replicates.
 			name: "outer-join/a-projected-container-under-a-plain-key",
 			sql: "SELECT d.id AS did, n.c_row AS cr FROM decpair d LEFT JOIN " + nested +
 				" n ON d.id = n.id WHERE d.id < 3 ORDER BY d.id",
-			cols:    []string{"did", "cr"},
-			want:    "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
-			armWant: map[string]string{spilledArm: "2 rows: 1|;2|;"},
+			cols: []string{"did", "cr"},
+			want: "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
 		},
 		{
 			// THE BOUNDING CONTROL: the same projection under an INNER join is

@@ -449,7 +449,9 @@ func (sr *spillBatchReader) Close() error {
 }
 
 // writeColumnarBatch writes a single RecordBatch in columnar binary format.
-// Format: [numRows:u32] [numCols:u32] per-column: [typeID:u8] [nameLen:u16] [name] [hasNulls:u8] [nullBitmap?] [data]
+// Format: [numRows:u32] [numCols:u32] per-column: [typeID:u8] [nameLen:u16] [name]
+// [decimal? scale:u8 precision:u8] [nullable:u8] [nested declaration] [hasNulls:u8]
+// [nullBitmap?] [data]
 func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 	var buf [8]byte
 	numRows := b.Len
@@ -486,6 +488,17 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 			w.WriteByte(0)
 		}
 
+		// The nested/parameterized part of the DECLARATION. The vector's own
+		// children ride in the data section, so this section exists for the
+		// SCHEMA the reader hands back: a consumer that allocates from it
+		// (batch.NewColumnVector, and every operator above the join that
+		// does) mints a ROW with no children or an ARRAY with no element
+		// from a declaration that lost them, and the values are dropped
+		// silently (#865).
+		if err := writeNestedDecl(w, b.Schema[i], buf[:]); err != nil {
+			return err
+		}
+
 		// Null bitmap
 		hasNulls := col.Nulls.HasNulls()
 		if hasNulls {
@@ -508,6 +521,146 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 		}
 	}
 	return nil
+}
+
+// A nested declaration is written by this process and read back by it in the
+// same query, so these bounds are not a defence against a hostile file: they
+// keep a corrupted or truncated run from being read as an unbounded recursion
+// or an unbounded allocation before the read fails.
+const (
+	maxNestedDeclDepth  = 16
+	maxNestedDeclFields = 1 << 16
+)
+
+// writeNestedDecl writes the part of a column DECLARATION that the flat
+// [type, name, scale, precision, nullable] header cannot carry: a VECTOR's
+// dimension, an ARRAY/MAP's element declaration and a ROW/MAP's field
+// declarations. `parquet.Column` holds nothing else.
+func writeNestedDecl(w *bufio.Writer, col parquet.Column, buf []byte) error {
+	switch col.Type {
+	case batch.TypeVector:
+		binary.LittleEndian.PutUint32(buf[:4], uint32(col.Dimension))
+		w.Write(buf[:4])
+	case batch.TypeArray, batch.TypeMap, batch.TypeRow:
+		// Both carriers are written for every container type rather than the
+		// one each is "supposed" to use: ARRAY declares its element in
+		// ElementType, ROW its fields in Fields, and MAP is spelled both ways
+		// in this tree (batch.newVectorFromColumn reads its ElementType,
+		// parquet.Column.Fields documents it as MAP's). A codec that picked
+		// one would silently drop the other spelling.
+		if col.ElementType != nil {
+			w.WriteByte(1)
+			if err := writeColumnDecl(w, *col.ElementType, buf); err != nil {
+				return err
+			}
+		} else {
+			w.WriteByte(0)
+		}
+		if len(col.Fields) > maxNestedDeclFields {
+			return fmt.Errorf("columnar spill: column %q has %d fields, over the %d limit",
+				col.Name, len(col.Fields), maxNestedDeclFields)
+		}
+		binary.LittleEndian.PutUint32(buf[:4], uint32(len(col.Fields)))
+		w.Write(buf[:4])
+		for _, f := range col.Fields {
+			if err := writeColumnDecl(w, f, buf); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// writeColumnDecl writes one whole column declaration — a container's element
+// or field. The top-level column header in writeColumnarBatch spells the same
+// facts in its own order (it is older) and calls writeNestedDecl directly.
+func writeColumnDecl(w *bufio.Writer, col parquet.Column, buf []byte) error {
+	w.WriteByte(byte(col.Type))
+	binary.LittleEndian.PutUint16(buf[:2], uint16(len(col.Name)))
+	w.Write(buf[:2])
+	w.WriteString(col.Name)
+	if col.Nullable {
+		w.WriteByte(1)
+	} else {
+		w.WriteByte(0)
+	}
+	w.WriteByte(byte(col.Scale))
+	w.WriteByte(byte(col.Precision))
+	return writeNestedDecl(w, col, buf)
+}
+
+// readNestedDecl mirrors writeNestedDecl, filling col's nested declaration.
+func readNestedDecl(r *bufio.Reader, col *parquet.Column, buf []byte, depth int) error {
+	if depth > maxNestedDeclDepth {
+		return fmt.Errorf("columnar spill: nested declaration deeper than %d", maxNestedDeclDepth)
+	}
+	switch col.Type {
+	case batch.TypeVector:
+		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+			return fmt.Errorf("reading vector dimension: %w", err)
+		}
+		col.Dimension = int(binary.LittleEndian.Uint32(buf[:4]))
+	case batch.TypeArray, batch.TypeMap, batch.TypeRow:
+		hasElem, err := r.ReadByte()
+		if err != nil {
+			return fmt.Errorf("reading element declaration flag: %w", err)
+		}
+		if hasElem == 1 {
+			elem, err := readColumnDecl(r, buf, depth+1)
+			if err != nil {
+				return err
+			}
+			col.ElementType = &elem
+		}
+		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+			return fmt.Errorf("reading field count: %w", err)
+		}
+		numFields := int(binary.LittleEndian.Uint32(buf[:4]))
+		if numFields > maxNestedDeclFields {
+			return fmt.Errorf("columnar spill: declaration claims %d fields, over the %d limit",
+				numFields, maxNestedDeclFields)
+		}
+		if numFields > 0 {
+			col.Fields = make([]parquet.Column, numFields)
+			for i := 0; i < numFields; i++ {
+				f, err := readColumnDecl(r, buf, depth+1)
+				if err != nil {
+					return err
+				}
+				col.Fields[i] = f
+			}
+		}
+	}
+	return nil
+}
+
+// readColumnDecl mirrors writeColumnDecl.
+func readColumnDecl(r *bufio.Reader, buf []byte, depth int) (parquet.Column, error) {
+	var col parquet.Column
+	typeByte, err := r.ReadByte()
+	if err != nil {
+		return col, fmt.Errorf("reading nested column type: %w", err)
+	}
+	col.Type = parquet.TypeID(typeByte)
+	if _, err := io.ReadFull(r, buf[:2]); err != nil {
+		return col, fmt.Errorf("reading nested column name length: %w", err)
+	}
+	nameBuf := make([]byte, int(binary.LittleEndian.Uint16(buf[:2])))
+	if _, err := io.ReadFull(r, nameBuf); err != nil {
+		return col, fmt.Errorf("reading nested column name: %w", err)
+	}
+	col.Name = string(nameBuf)
+	flags := buf[:3]
+	if _, err := io.ReadFull(r, flags); err != nil {
+		return col, fmt.Errorf("reading nested column flags: %w", err)
+	}
+	col.Nullable = flags[0] == 1
+	col.Scale = int(flags[1])
+	col.Precision = int(flags[2])
+	if err := readNestedDecl(r, &col, buf, depth); err != nil {
+		return col, err
+	}
+	return col, nil
 }
 
 func writeColumnData(w *bufio.Writer, v *batch.Vector, n int, buf []byte) error {
@@ -765,6 +918,14 @@ func readColumnarBatch(r *bufio.Reader) (*batch.RecordBatch, error) {
 			Nullable:  nullable == 1,
 			Scale:     scale,
 			Precision: precision,
+		}
+
+		// The nested half of the declaration (#865). Without it a container
+		// column comes back declared as a ROW with no fields or an ARRAY with
+		// no element, and every consumer that allocates from the schema mints
+		// an empty vector for it.
+		if err := readNestedDecl(r, &schema[i], buf[:], 0); err != nil {
+			return nil, fmt.Errorf("reading column %d declaration: %w", i, err)
 		}
 
 		// Create vector for this column
