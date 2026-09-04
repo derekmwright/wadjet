@@ -258,13 +258,15 @@ var nfBoxPins = map[string]string{
 	// OID on a rounded number. Only abs and mod: CEIL, FLOOR, ROUND, TRUNC,
 	// SIGN, SQRT, POWER, LN and EXP over an integer ARE double precision in
 	// PostgreSQL, measured, and still are here.
-	// A bare numeric LITERAL arm decides nothing here, so the column's own
-	// type answers and the literal is read at that type. ADR-0024 records
-	// the deferral for a fold of literals ALONE; against a typed integer
-	// operand PostgreSQL resolves the pair to numeric instead, and the
-	// difference is a truncated value, pinned below as well as here.
-	"CASE|n_i32|LITNUM": "int32", // PostgreSQL declares numeric
-	"CASE|n_i64|LITNUM": "int64", // PostgreSQL declares numeric
+	// The two LITNUM rows are GONE (#849, 2026-09-04). A bare numeric
+	// LITERAL arm used to decide nothing here, so the column's own type
+	// answered and `100.5` was read at it — declared int32/int64, valued 100.
+	// PostgreSQL resolves a FRACTIONAL literal against a typed integer
+	// operand to numeric, and both halves follow it now:
+	// expr.fractionalLitTriggersFold widens the declaration and its runtime
+	// twin expr.fracLitArmTriggersFold widens the fold, so the arms agree
+	// with the server outright. ADR-0024's deferral for a fold of literals
+	// ALONE is untouched — it takes a non-literal arm to trigger this.
 }
 
 // nfValuePins are entries whose VALUES this engine answers differently from
@@ -279,11 +281,12 @@ var nfBoxPins = map[string]string{
 // day the underlying defect is fixed these entries fail and the recorded
 // PostgreSQL answer is already there to assert instead (ADR-0013).
 var nfValuePins = map[string]string{
-	// The numeric-literal arm above, as a VALUE: declared at the integer
-	// column's type, 100.5 is stored as 100. PostgreSQL folds the pair to
-	// numeric and keeps the half.
-	"CASE|n_i32|LITNUM": "3|100|100|100",
-	"CASE|n_i64|LITNUM": "4|100|100|100",
+	// The two numeric-literal VALUE rows are GONE with their box pins (#849,
+	// 2026-09-04): `100.5` beside an integer column is numeric on the server
+	// and numeric here, so the half survives instead of being truncated to
+	// 100. It was the clearest case in this corpus of a wrong declared RUNG
+	// being a wrong NUMBER — the declaration decided the vector the value was
+	// stored into, and an int32 vector has nowhere to put a half.
 	// The float -> integer CAST rounding row is GONE (#768, 2026-09-03).
 	// PostgreSQL's float-to-integer cast is rint(), half to EVEN, and this
 	// engine rounded halves away from zero: -0.5 answered -1 where the
