@@ -10,9 +10,11 @@ builder. `worker.derivedGroupKeys` is retired to a compatibility fallback,
 `refuseUnstageableGroupKey` and all three of its conditions are deleted, and
 §4a's refusal is retired with them. What remains refused is a plan that carries
 the key's value nowhere — stated by a stream model (`stageStreamColumns`) that
-mirrors the join executor's own naming rule — and a key whose expression is an
-AGGREGATE or WINDOW call that no projection can evaluate, which a DISTINCT
-lowering produces and which the carrier cannot help.)
+mirrors the join executor's own naming rule.
+
+A key whose expression is an AGGREGATE or WINDOW call was refused there too,
+and that refusal is retired: the DISTINCT lowering was RECORDING one, and no
+query can write one. §3b.)
 
 ## Context
 
@@ -660,6 +662,32 @@ A duplicate OUTPUT name is not the defect and must not be refused:
 PostgreSQL accepts `SELECT COUNT(*) AS g, g AS x` and answers it. What must
 not stand is `ColumnIndex`'s first-match rule deciding which of two columns
 a query meant.
+
+#### 3b. A lowering records the SLOT the operator below publishes, never the call the query wrote (2026-09-04, #797)
+
+`SELECT DISTINCT g, COUNT(*) + 0 AS w FROM t GROUP BY g` lowers to an outer
+aggregate whose keys are the SELECT list's expressions
+(`logical.rewriteDistinctAsGroupBy`). One of those expressions holds an
+aggregate CALL, and a pre-aggregate projection cannot evaluate one: the value
+was computed by the operator BELOW and published under `__agg_0`.
+`physical.refuseUnevaluableGroupKey` said so and the coordinator answered on
+its local pipeline — right rows, both DAG arms routed, for a query the DAG can
+run.
+
+**The two names were already there and the lowering read the wrong one.** The
+builder rewrites a projection that WRAPS an aggregate or a window into a
+reference to that operator's own slot (`__agg_0 + 0`, `__win_0 + 0`) and
+stores the rewrite in `Projection.ASTExpr`; `Projection.Expr` keeps the text
+the query wrote. `projectionGroupKey` returned `p.Expr`. That is §2c and §2d
+one layer up — a key with two names that disagree, and a NAME re-read as
+structure — and the window spelling could not even round-trip through
+`ParseExpression`, because `WindowFuncNode.String()` renders `OVER (...)`.
+
+So a lowering that MINTS a group key records the spelling the operator below
+publishes. `exprReadsReservedSlot` is the test: a projection whose AST reads a
+column in the planner's own hidden-slot namespace was re-spelled by the
+builder, and its TEXT is stale. Both spellings run as stages now, and the two
+`routed=true` pins that recorded the refusal are deleted.
 
 ### 4. A WINDOW above the aggregate is spelled against what it publishes (2026-09-01, #737)
 

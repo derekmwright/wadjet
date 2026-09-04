@@ -232,14 +232,18 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
 		},
 		{
-			// STILL ROUTED, and by the DISTINCT lowering's own defect rather
-			// than by anything about the key's two names: making every SELECT
-			// item a GROUP BY key turns `SUM(a) OVER () + 0` into a key
-			// EXPRESSION, and a pre-aggregate projection cannot evaluate a
-			// window call — the value was computed by the window operator
-			// below and published under `__win_0`. `refuseUnevaluableGroupKey`
-			// says so and the local pipeline answers. Its aggregate twin is
-			// `781/an-aggregate-wrapped-alias-under-a-distinct` below.
+			// It ROUTED, by the DISTINCT lowering's own defect rather than by
+			// anything about the key's two names: making every SELECT item a
+			// GROUP BY key turned `SUM(a) OVER () + 0` into a key EXPRESSION,
+			// and a pre-aggregate projection cannot evaluate a window call.
+			//
+			// It runs on the DAG now. `rewriteDistinctAsGroupBy` records the
+			// SLOT the operator below publishes — the AST the builder had
+			// already re-spelled to `__win_0 + 0`, where the TEXT beside it
+			// still said `sum(a) OVER (...) + 0` — so the key is an expression
+			// over a column of the aggregate's input on both paths (#797).
+			// Its aggregate twin is `781/an-aggregate-wrapped-alias-under-a-
+			// distinct` below, and it moved for the same reason.
 			name: "a-distinct-between-the-window-and-the-alias",
 			sql: "SELECT x.id AS i, x.w AS w, COUNT(*) AS n FROM (SELECT DISTINCT id, " +
 				"SUM(a) OVER () + 0 AS w FROM " + tbl + ") x LEFT JOIN " + tbl +
@@ -247,7 +251,7 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			cols: []string{"i", "w", "n"},
 			want: "9 rows: 1|52.99|1;2|52.99|1;3|52.99|1;4|52.99|1;5|52.99|1;6|52.99|1;" +
 				"7|52.99|1;8|52.99|1;9|52.99|1;",
-			routed: true,
+			routed: false,
 		},
 		// --- ANSWERED RIGHT FOR THE WRONG REASON, and the whole reason the
 		// refusal is unconditional.
@@ -545,20 +549,24 @@ func TestWindowOutputAsAGroupKeyMatchesPostgres(t *testing.T) {
 			// all, and the value it names was computed by the operator below
 			// and published under `__agg_0`.
 			//
-			// `refuseUnevaluableGroupKey` says exactly that and the local
-			// pipeline answers PostgreSQL's rows. On base this shape was a
-			// silent `1 rows: |8;`. The real repair belongs to the DISTINCT
-			// lowering — record the SLOT the operator below publishes rather
-			// than the call the query wrote — and is the next lead in this
-			// family.
+			// `refuseUnevaluableGroupKey` said exactly that and the local
+			// pipeline answered PostgreSQL's rows; before the refusal existed
+			// this shape was a silent `1 rows: |8;`.
+			//
+			// The repair landed where that note said it belonged: the DISTINCT
+			// lowering records the SLOT the operator below publishes. The
+			// builder had ALREADY re-spelled this projection's AST to
+			// `__agg_0 + 0` for the nested-aggregate rewrite, and the lowering
+			// was reading the TEXT beside it — one projection, two names that
+			// disagreed (#797, ADR-0026 §2c/§2d). It runs on the DAG now, with
+			// the key an ordinary expression over a column of the aggregate's
+			// input.
 			name: "781/an-aggregate-wrapped-alias-under-a-distinct",
 			sql: "SELECT x.w AS w, COUNT(*) AS n FROM (SELECT DISTINCT g, COUNT(*) + 0 AS w " +
 				"FROM typemx GROUP BY g) x GROUP BY x.w ORDER BY w",
 			cols:   []string{"w", "n"},
 			want:   "3 rows: 384|1;659|4;660|3;",
-			routed: true,
-			why: "the DISTINCT lowering made an AGGREGATE CALL a group-key expression, and no " +
-				"projection can evaluate one",
+			routed: false,
 		},
 		{
 			// A LIMIT inside the derived table stops

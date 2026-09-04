@@ -214,5 +214,44 @@ func projectionGroupKey(p Projection) (string, plansql.Node, bool) {
 	if ref, ok := ast.(*plansql.ColRef); ok {
 		return ref.String(), ast, true
 	}
+	// A projection the builder RE-SPELLED against a hidden slot is recorded
+	// under the slot spelling, not under the text the query wrote.
+	//
+	// `SELECT DISTINCT g, COUNT(*) + 0 AS w FROM t GROUP BY g` reaches here
+	// with two names for one projection: `Projection.Expr` is still the
+	// query's own `count(*) + 0`, while `Projection.ASTExpr` is the rewrite
+	// the aggregate below already published a slot for — `__agg_0 + 0`. Only
+	// the second is evaluable: the DISTINCT lowers to an aggregate whose input
+	// is the operator below, and a pre-aggregate projection cannot evaluate an
+	// aggregate CALL over one row. Recording the text made the key an
+	// expression over a column nothing carries — refused and routed to the
+	// coordinator's local pipeline on both DAG arms, and the window spelling
+	// (`SUM(a) OVER () + 0`) does not even round-trip through
+	// ParseExpression, because WindowFuncNode.String() renders `OVER (...)`
+	// (#797).
+	//
+	// ADR-0026 §2c/§2d: a key has ONE identity, and a NAME is never re-read
+	// as structure. Two spellings for one key is the same defect the group-key
+	// arc closed one layer up.
+	if exprReadsReservedSlot(ast) {
+		return ast.String(), ast, true
+	}
 	return p.Expr, ast, true
+}
+
+// exprReadsReservedSlot reports whether an expression reads a column in the
+// planner's own hidden-slot namespace (`__agg_N`, `__win_N`, …), which is what
+// says the builder re-spelled it against an operator's output rather than
+// leaving the query's own text.
+func exprReadsReservedSlot(ast plansql.Node) bool {
+	refs, err := plansql.ColumnRefs(ast)
+	if err != nil {
+		return false
+	}
+	for _, r := range refs {
+		if r.Table == "" && plansql.ReservedSlotFamily(r.Column) != "" {
+			return true
+		}
+	}
+	return false
 }
