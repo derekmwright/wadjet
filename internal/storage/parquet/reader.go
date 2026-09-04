@@ -467,8 +467,64 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int, col Column) (leafColumnDa
 			}
 		}
 	}
+	// And the same point for a DECIMAL buried inside one. col carries the
+	// CATALOG's (p, s) here — leafColumnsFromCatalog put it there — so this is
+	// the nested twin of readColumnToAny's rescale, through one function so the
+	// flat and nested arms of one read cannot answer differently (round 0's B1,
+	// where a nested leaf answered 1275.00 for the 12.75 the flat column beside
+	// it answered correctly).
+	if typeID == TypeDecimal {
+		if err := rescaleDecimalBoxes(lcd.values, leaf, col); err != nil {
+			return lcd, fmt.Errorf("column %v: %w", leaf.Path, err)
+		}
+	}
 
 	return lcd, nil
+}
+
+// rescaleDecimalBoxes moves a decoded DECIMAL column from the scale its FILE
+// declares to the one the CATALOG does, and holds it to the catalog's
+// precision, in place.
+//
+// It handles BOTH of the row path's DECIMAL boxes, because decodeDecimalValues
+// chooses between them by the column's declared PRECISION: an int64 to 18
+// digits and a Decimal128 beyond. Rescaling only one of them would reconcile a
+// narrow column and silently leave a wide one — the #419 shape, one level up.
+//
+// A value that no longer fits the box the column's declared precision chose is
+// the same 22003 the carrier check raises: widening the box would hand a
+// consumer a Go type it does not expect for this column, which is a different
+// wrong answer.
+func rescaleDecimalBoxes(values []any, leaf *SchemaNode, col Column) error {
+	from, need := DecimalRescalePlan(leaf, col)
+	if !need {
+		return nil
+	}
+	for i, v := range values {
+		var d Decimal128
+		switch tv := v.(type) {
+		case int64:
+			d = Decimal128From(tv)
+		case Decimal128:
+			d = tv
+		default:
+			continue // NULL, or a box no decimal leaf produces
+		}
+		out, err := DecimalRescale(d, from, col.Scale, col.Precision)
+		if err != nil {
+			return err
+		}
+		if _, wide := v.(Decimal128); wide {
+			values[i] = out
+			continue
+		}
+		n, ok := out.Int64()
+		if !ok {
+			return decimalOverflow(decimalEffectivePrecision(col.Precision), col.Scale)
+		}
+		values[i] = n
+	}
+	return nil
 }
 
 // decodePageValues decodes a page's PRESENT values into a fresh []any, for
@@ -1078,48 +1134,17 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]
 			}
 		}
 	}
-	// A DECIMAL column whose FILE declares another SCALE is moved to the
-	// catalog's, which is the same reconciliation the native scan performs in
-	// scan.rescaleDecimalChunk and for the same reason: the chunk carries the
-	// unscaled integer and the declaration carries the scale, so a file read
-	// under a scale it was not written at is a different NUMBER (#707,
-	// ADR-0018). The two paths call one function so they cannot drift.
+	// A DECIMAL column whose FILE declares another (p, s) is moved to the
+	// catalog's — the same reconciliation the native scan performs in
+	// scan.rescaleDecimalChunk and the NESTED arm performs in readLeafColumn,
+	// and for the same reason: the chunk carries the unscaled integer and the
+	// declaration carries the scale, so a file read under a declaration it was
+	// not written under is a different NUMBER (#707, ADR-0018 §9). Every arm
+	// calls one function, so a flat column and a nested one cannot answer the
+	// same bytes differently.
 	if typeID == TypeDecimal && colIdx < len(leaves) {
-		if from, need := DecimalRescalePlan(leaves[colIdx], col); need {
-			// Both of this path's DECIMAL boxes, because decodeDecimalValues
-			// chooses between them by the column's PRECISION: an int64 to 18
-			// digits and a Decimal128 beyond. Rescaling only one of them would
-			// reconcile a narrow column and silently leave a wide one — the
-			// exact shape of #419, one level up.
-			for i, v := range values {
-				var d Decimal128
-				switch tv := v.(type) {
-				case int64:
-					d = Decimal128From(tv)
-				case Decimal128:
-					d = tv
-				default:
-					continue // NULL, or a box no decimal leaf produces
-				}
-				out, err := DecimalRescale(d, from, col.Scale, col.Precision)
-				if err != nil {
-					return nil, fmt.Errorf("column %s: %w", col.Name, err)
-				}
-				if _, wide := v.(Decimal128); wide {
-					values[i] = out
-					continue
-				}
-				n, ok := out.Int64()
-				if !ok {
-					// The moved value no longer fits the box this column's
-					// declared precision chose. Widening the box would hand a
-					// consumer a type it does not expect for this column, so
-					// this is the same 22003 the carrier check raises.
-					return nil, fmt.Errorf("column %s: %w", col.Name,
-						decimalOverflow(decimalEffectivePrecision(col.Precision), col.Scale))
-				}
-				values[i] = n
-			}
+		if err := rescaleDecimalBoxes(values, leaves[colIdx], col); err != nil {
+			return nil, fmt.Errorf("column %s: %w", col.Name, err)
 		}
 	}
 	if convert {

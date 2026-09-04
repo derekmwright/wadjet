@@ -505,7 +505,9 @@ to miss:
 - the row reader's decode, in BOTH of its DECIMAL boxes — an int64 to 18
   declared digits and a `Decimal128` beyond, because `decodeDecimalValues`
   chooses between them by precision and reconciling only one would repair a
-  narrow column and silently leave a wide one;
+  narrow column and silently leave a wide one — and in both of its ARMS, the
+  flat column and the per-leaf nested one, through one function
+  (`rescaleDecimalBoxes`);
 - `retypeFromCatalog`, which now adopts the catalog's `(p, s)` where it used to
   `continue` on a matching TypeID, so a stage's `.wshf` header declares the
   relation and not the file;
@@ -531,15 +533,36 @@ compaction DELETES its inputs —
 `compaction.TestCompactionReconcilesMixedDeclaredScales` is the gate, run three
 passes for §4's idempotence property.
 
-The boundary is a claim and the corpus attempts it from both sides: this
-reconciles a SCALE disagreement and nothing else. A file that agrees about the
-scale is read exactly as before, and its values are NOT held to the catalog's
-precision at read — a per-value band check on every DECIMAL column of every
-ordinary file is a different change with a different cost, and #647 already
-refuses such a value at the door it is written through. A catalog DECIMAL over
-a leaf carrying NO decimal annotation states no scale, so §4's
-already-unscaled rule stands there; both read paths refuse that pairing earlier
-anyway.
+**Depth is not part of the boundary.** A DECIMAL leaf inside a ROW, ARRAY or
+MAP is reconciled exactly as a top-level one is, and it has to be: the
+declaration is half of every DECIMAL value wherever the value sits. The first
+pass at this rule stopped at the top level, and the result was one row of one
+table rendering `12.75` for its flat column and `1275.00` for the same number
+inside a ROW beside it — with COMPACT then writing the wrong carrier under the
+catalog's declaration and deleting the input. `applyNestedLeafRetype` is the
+one place a nested leaf's declaration changes, so the Column tree a caller
+carries onward and the per-leaf array the nested decode reads cannot disagree,
+and `readLeafColumn` moves the carrier through the same `rescaleDecimalBoxes`
+the flat arm uses.
+
+The boundary that IS real is a claim, and the corpus attempts it from both
+sides: this fires on a DECLARATION disagreement, and a file that agrees with
+the catalog about BOTH halves is read exactly as before. The two halves are
+treated alike:
+
+- a SCALE disagreement moves the carrier;
+- a PRECISION disagreement moves nothing but holds the value to the catalog's
+  band, because a file declaring `(38,2)` under a catalog `(15,2)` column can
+  carry a value that column promises not to hold. The two read paths used to
+  disagree about exactly that — the native scan ANSWERED a twenty-digit value
+  in a column whose wire declaration says fifteen, while the row reader refused
+  the same bytes with a message of its own. PostgreSQL cannot reach the state
+  at all (`123456789012345678.00::numeric(15,2)` is 22003), so both now refuse
+  with that SQLSTATE and PostgreSQL's own wording (§3, ADR-0024).
+
+A catalog DECIMAL over a leaf carrying NO decimal annotation states no
+declaration to disagree with, so §4's already-unscaled rule stands there; both
+read paths refuse that pairing earlier anyway.
 
 ## Consequences
 

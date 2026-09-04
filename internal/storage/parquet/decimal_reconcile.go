@@ -63,6 +63,18 @@ func decimalFileScaleError(scale int) error {
 			"can represent (0..%d)", scale, MaxDecimalDigits)
 }
 
+// DecimalFileDeclaration reports the (precision, scale) a file's own leaf
+// declares for a DECIMAL column, and whether the leaf IS a decimal at all.
+func DecimalFileDeclaration(leaf *SchemaNode) (precision, scale int, ok bool) {
+	if leaf == nil || !leaf.IsLeaf() {
+		return 0, 0, false
+	}
+	if TypeIDFromSchemaNode(leaf) != TypeDecimal {
+		return 0, 0, false
+	}
+	return int(leaf.Precision), int(leaf.Scale), true
+}
+
 // DecimalFileScale reports the scale a file's own leaf declares for a DECIMAL
 // column, and whether the leaf IS a decimal at all.
 //
@@ -89,23 +101,38 @@ func DecimalFileScale(leaf *SchemaNode) (int, bool) {
 // file's DECIMAL declaration with the catalog's: the scale to move FROM and
 // whether any move is needed.
 //
-// need=false covers both no-op cases — the leaf is not a decimal, or it is one
-// at the catalog's own scale — so a caller writes one branch and the ordinary
-// file pays one integer comparison per column chunk.
+// need=false covers both no-op cases — the leaf is not a decimal, or it
+// declares the catalog's own (p, s) — so a caller writes one branch and the
+// ordinary file pays two integer comparisons per column chunk.
 //
 // The boundary, stated because it is a claim and the corpus attempts it from
-// both sides: this reconciles a SCALE disagreement and nothing else. A file
-// that agrees with the catalog about the scale is read exactly as before, and
-// its values are NOT held to the catalog's precision at read — that would be a
-// per-value band check on every DECIMAL column of every ordinary file, which is
-// a different change with a different cost, and #647 already refuses such a
-// value at the door it is written through.
+// both sides: this fires on a DECLARATION disagreement, and a file that agrees
+// with the catalog is read exactly as before. The two halves of the declaration
+// are treated alike and BOTH are reconciled, which is the round-0 review's P2:
+//
+//   - a SCALE disagreement moves the carrier (the file holds the right number
+//     under a different half of the declaration, so the number survives);
+//   - a PRECISION disagreement moves nothing, but the value is held to the
+//     catalog's band, because a file declaring `(38,2)` under a catalog column
+//     of `(15,2)` can carry a value that column promises not to hold. Before
+//     this, the native scan ANSWERED such a value — a 20-digit number in a
+//     column whose wire declaration says at most 15 digits, which PostgreSQL
+//     cannot reach (`…::numeric(15,2)` is 22003) — while the row reader
+//     refused the same bytes with a different message. One disposition on both
+//     paths, and it is PostgreSQL's (ADR-0013's two-path property, ADR-0024).
+//
+// The cost stays off the ordinary path: this writer writes the catalog's
+// declaration, so both halves match and the check is two comparisons per column
+// chunk. Only a file some other producer wrote pays anything per value.
 func DecimalRescalePlan(leaf *SchemaNode, want Column) (fromScale int, need bool) {
 	if want.Type != TypeDecimal {
 		return 0, false
 	}
-	fs, ok := DecimalFileScale(leaf)
-	if !ok || fs == want.Scale {
+	fp, fs, ok := DecimalFileDeclaration(leaf)
+	if !ok {
+		return 0, false
+	}
+	if fs == want.Scale && fp == want.Precision {
 		return 0, false
 	}
 	return fs, true

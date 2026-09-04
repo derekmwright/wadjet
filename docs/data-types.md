@@ -42,7 +42,11 @@ when the result does not fit the declared precision. Row-group statistics are
 moved the same way, so predicate pruning stays correct, and `COMPACT` rewrites
 such a file at the declared scale. This is what makes it safe to register
 files written by pyarrow, parquet-mr or Spark against an existing table whose
-DECIMAL columns were declared with different parameters. See
+DECIMAL columns were declared with different parameters. It applies at every
+depth — a DECIMAL inside a `ROW`, `ARRAY` or `MAP` is reconciled exactly as a
+top-level one is. A file that declares a **wider precision** at the same scale
+is likewise held to the column's band: a value the declared type cannot hold is
+`22003`, as it is in PostgreSQL, rather than being answered. See
 [ADR-0018 §9](adr/0018-parquet-file-numbers-are-input.md).
 
 ### String and Binary Types
@@ -97,6 +101,13 @@ instant it names — and this holds for a value being stored and for the same
 literal in a predicate, which read it through one accept-set. A literal whose
 fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
 text that is not a timestamp at all is 22007.
+
+**Where this accept-set applies:** the INGEST door (`COPY`, the Go ingester, a
+Bento-written table registered through Wadjet) and a DATE literal in
+`INSERT … VALUES`. `CAST(<text> AS DATE)` is a separate parser in the
+expression layer and does not yet agree with it — notably it still accepts
+`'0000-01-01'`, and it answers NULL where the doors above raise an error
+(tracked for the expression layer, not closed here).
 
 `Date` takes the unambiguous year-first spellings PostgreSQL's default
 `DateStyle` reads exactly one way: a four-or-more-digit leading year with a

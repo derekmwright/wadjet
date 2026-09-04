@@ -163,3 +163,100 @@ func assertEveryFileDeclaresScale(t *testing.T, cat *catalog.Catalog, store objs
 		}
 	}
 }
+
+// The nested half of the same property, and the one round 0's review called a
+// data-loss class: compaction DELETES its inputs, so a nested DECIMAL leaf read
+// under the wrong declaration is rewritten permanently and the evidence goes
+// with it. Before the fix this produced
+//
+//	AFTER: [{id:1 rw:{v:1275}} {id:2 rw:{v:127500}}]
+//
+// from two files that both mean 12.75, with the merged file declaring scale 2 —
+// so row 2 became 1275.00 forever.
+func TestCompactionReconcilesMixedDeclaredScalesInsideContainers(t *testing.T) {
+	ctx := context.Background()
+	cat, store := setupTestCatalog(t)
+	const table = "decmixedscalenest"
+
+	schemaAt := func(scale int) parquet.Schema {
+		elem := parquet.Column{Name: "element", Type: parquet.TypeDecimal,
+			Precision: 15, Scale: scale, Nullable: true}
+		return parquet.Schema{Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "flat", Type: parquet.TypeDecimal, Precision: 15, Scale: scale, Nullable: true},
+			{Name: "rw", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{
+				{Name: "v", Type: parquet.TypeDecimal, Precision: 15, Scale: scale, Nullable: true},
+			}},
+			{Name: "ar", Type: parquet.TypeArray, Nullable: true, ElementType: &elem},
+		}}
+	}
+	tableSchema := schemaAt(2)
+	if err := cat.CreateTable(ctx, table, tableSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	type spec struct {
+		schema   parquet.Schema
+		id       int64
+		unscaled int64
+	}
+	for i, s := range []spec{{schemaAt(2), 1, 1275}, {schemaAt(4), 2, 127500}} {
+		box := parquet.Decimal128{Lo: uint64(s.unscaled)}
+		rows := []map[string]any{{
+			"id": s.id, "flat": box,
+			"rw": map[string]any{"v": box},
+			"ar": []any{box},
+		}}
+		path := fmt.Sprintf("tables/%s/chunk_%04d.parquet", table, i)
+		size := writeTestFile(t, store, "test-bucket", path, s.schema, rows)
+		if err := cat.AddFiles(ctx, table, nil, "", []catalog.FileEntry{
+			{Path: path, SizeBytes: size, NumRows: int64(len(rows)), CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.MinFiles = 2
+	for pass := 1; pass <= 3; pass++ {
+		if _, err := New(cat, nil, cfg).CompactTable(ctx, table); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		rows := readTableRows(t, cat, store, table, tableSchema, false)
+		sort.Slice(rows, func(i, j int) bool { return idOf(rows[i]) < idOf(rows[j]) })
+		if len(rows) != 2 {
+			t.Fatalf("pass %d: %d rows, want 2", pass, len(rows))
+		}
+		for _, r := range rows {
+			id := idOf(r)
+			for path, v := range map[string]any{
+				"flat":  r["flat"],
+				"rw.v":  nestField(r["rw"], "v"),
+				"ar[0]": nestElem(r["ar"], 0),
+			} {
+				if got := decCarrier(t, v); got != "1275" {
+					t.Errorf("pass %d row %d %s carrier = %s, want 1275 at the catalog's "+
+						"scale 2 — a nested DECIMAL leaf declared at another scale was "+
+						"rewritten under the catalog's without moving its carrier, and "+
+						"compaction deleted the input (#707 one level down)",
+						pass, id, path, got)
+				}
+			}
+		}
+	}
+}
+
+func nestField(v any, name string) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return m[name]
+}
+
+func nestElem(v any, i int) any {
+	a, ok := v.([]any)
+	if !ok || i >= len(a) {
+		return nil
+	}
+	return a[i]
+}
