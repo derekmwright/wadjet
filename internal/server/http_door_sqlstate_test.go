@@ -144,6 +144,19 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 			"SELECT d * 1000000000000000000000000000000000000 FROM hd", "22003", http.StatusBadRequest},
 		{"0A000_unresolvable_sort_key", "SELECT * FROM hd ORDER BY nosuchcol", "0A000", http.StatusBadRequest},
 		{"0A000_unresolvable_group_key", "SELECT * FROM hd GROUP BY nosuchcol", "0A000", http.StatusBadRequest},
+		// EXPLAIN is a SEPARATE handler on the same door and it dropped the
+		// class after the first pass claimed "every refusal on this door now
+		// comes through here" — one handler too narrow, which is round-1 B2.
+		// Its own three refusal sites are here so the claim is gated rather
+		// than asserted.
+		{"explain_42703", "EXPLAIN SELECT nosuchcol FROM hd", "42703", http.StatusBadRequest},
+		{"explain_verbose_42703", "EXPLAIN VERBOSE SELECT nosuchcol FROM hd", "42703", http.StatusBadRequest},
+		{"explain_42P01", "EXPLAIN SELECT * FROM nosuchtable", "42P01", http.StatusBadRequest},
+		{"explain_42601", "EXPLAIN SELECT FROM", "42601", http.StatusBadRequest},
+		// The DDL sub-handlers are more separate handlers on the same door,
+		// reached from the same POST by statement type. This one put its
+		// class in the MESSAGE and nowhere a client could branch on it.
+		{"create_table_22023", "CREATE TABLE hd_bad (d DECIMAL(50,2))", "22023", http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, state, msg := hdPost(t, base, tc.sql)

@@ -94,8 +94,9 @@ Execute a SQL query and return results.
 }
 ```
 
-Every refusal this door reports carries the PostgreSQL SQLSTATE alongside the
-message, and the class decides the HTTP status:
+Every refusal a STATEMENT earns carries the PostgreSQL SQLSTATE alongside the
+message — from `SELECT`, from DML, from `EXPLAIN`, and from the DDL statements
+this same endpoint runs — and the class decides the HTTP status:
 
 | SQLSTATE class | Meaning | Status |
 |---|---|---|
@@ -107,8 +108,9 @@ message, and the class decides the HTTP status:
 
 A statement refused for what it *contains* is the client's error, not the
 server's, which is why those four classes answer `400 Bad Request`. An error
-that carries no SQLSTATE at all — a malformed request body, a missing `sql`
-field — answers with the `error` key alone.
+the statement did not cause — a malformed request body, a missing `sql` field,
+an authorization denial — carries no SQLSTATE and answers with the `error` key
+alone, under `400`, `401` or `403`.
 
 The message for a classified error is the engine's own, the same text the
 PostgreSQL wire protocol puts in its `ErrorResponse`:

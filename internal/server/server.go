@@ -756,6 +756,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // writeSQLError is writeError for a failure that may carry a SQLSTATE, and it
 // is the ONLY place this door decides an HTTP status from one.
 //
+// Every refusal a STATEMENT earns comes through here — handleQuery's own
+// paths, handleDML's, handleExplain's, and the DDL sub-handlers the same POST
+// reaches by statement type. What does not, and correctly does not, is a
+// failure the statement did not cause: a malformed request body, a missing
+// `sql` field, and an authorization denial, none of which carry a SQLSTATE to
+// report. The round-1 review blocked on this claim being written wider than
+// the code: handleExplain's name resolution still called writeError, so
+// `EXPLAIN SELECT nosuchcol FROM t` dropped the 42703 the same statement
+// reports without the EXPLAIN.
+//
 // A statement refused for what it CONTAINS is the client's error, not the
 // server's: a DECIMAL literal past the column's precision (22003) or text
 // naming no number (22P02) came back as 500 Internal Server Error with the
@@ -766,7 +776,10 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // and execution paths still called writeError. Every refusal on this door now
 // comes through here.
 //
-// The class → status table, which is also docs/api-reference.md's:
+// The class → status table, which is also docs/api-reference.md's. The class
+// decides the status even where the caller chose one: `EXPLAIN` and the DDL
+// sub-handlers pass 404 or 409 for a missing or existing table, and a 42P01 or
+// 42601 among them is still the client's own statement.
 //
 //	0A  feature not supported            400
 //	22  data exception                   400  (2201x, 22003, 22012, 22P02, …)
@@ -963,7 +976,7 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request, parsed *
 
 	table, err := s.catalog.GetTable(r.Context(), tableName)
 	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("table %q: %s", tableName, err.Error()))
+		writeSQLError(w, http.StatusNotFound, fmt.Sprintf("table %q: %s", tableName, err.Error()), err)
 		return
 	}
 
@@ -1003,7 +1016,7 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 	}
 	planner := s.newPlanner(r)
 	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 	planner.AnnotateScanColumns(r.Context(), logicalPlan)
@@ -1068,7 +1081,7 @@ func (s *Server) handleCreateFunction(w http.ResponseWriter, r *http.Request, pa
 	}
 
 	if err := expr.DefaultUDFs.Register(def, isAdmin); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 
@@ -1103,7 +1116,7 @@ func (s *Server) handleDropFunction(w http.ResponseWriter, r *http.Request, pars
 			})
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 
@@ -1157,12 +1170,12 @@ func (s *Server) handleCreateTableSQL(w http.ResponseWriter, r *http.Request, pa
 
 	schema, err := columnDefsToSchema(ct.Columns)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 
 	if err := s.catalog.CreateTable(r.Context(), ct.Name, schema, ct.PartitionKeys); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeSQLError(w, http.StatusConflict, err.Error(), err)
 		return
 	}
 
@@ -1190,7 +1203,7 @@ func (s *Server) handleAnalyzeTableSQL(w http.ResponseWriter, r *http.Request, p
 
 	n, err := s.catalog.AnalyzeTable(r.Context(), at.Name)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeSQLError(w, http.StatusNotFound, err.Error(), err)
 		return
 	}
 
@@ -1225,7 +1238,7 @@ func (s *Server) handleDropTableSQL(w http.ResponseWriter, r *http.Request, pars
 			})
 			return
 		}
-		writeError(w, http.StatusNotFound, err.Error())
+		writeSQLError(w, http.StatusNotFound, err.Error(), err)
 		return
 	}
 
