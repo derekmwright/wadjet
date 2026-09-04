@@ -70,6 +70,20 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 		return
 	}
 
+	// The NO-COMMON-TYPE refusal first, over EVERY result column, before any
+	// other disposition this lowering can reach. reconcileSetOpArmTypes below
+	// walks the columns in order and returns on the first one it cannot
+	// reconcile, and several of those refusals are about this engine's own
+	// carriers rather than about the query's meaning — so a query that is
+	// 42804 in PostgreSQL took whichever message the leftmost unreconcilable
+	// column happened to produce, and the single-process path (which calls
+	// this same walk from buildSetOp) took a different one. One query, one
+	// answer (#648).
+	if err := setOpArmTypeConflict(node); err != nil {
+		p.refuseSetOp(err)
+		return
+	}
+
 	// SQL takes the result column names from the FIRST arm; every arm is
 	// projected onto them so the arms' outputs are one schema and the
 	// concatenation is well defined.
@@ -376,9 +390,19 @@ func setOpArmTypeConflict(node *logical.Node) error {
 					return setOpTypeMismatch(op, outNames[col], want.typ, ct.typ)
 				}
 				// A pair PostgreSQL matches and this engine's ladder does not.
-				// Not this refusal's business: leaving it alone keeps the
-				// disposition each path already has.
-				return nil
+				// Not this refusal's business FOR THIS COLUMN — and it says
+				// nothing at all about the columns beside it. Abandoning the
+				// whole walk here (which is what this used to do) left #648's
+				// own filed symptom reachable one column to the left: over
+				// `SELECT c_date, c_dec … UNION ALL SELECT c_ts, c_str …` the
+				// date/timestamp pair in column 1 stopped the check and the
+				// numeric/text pair in column 2 was never seen, so the
+				// single-process path failed mid-execution with 22P02 on the
+				// first row of text that is not a number — the exact failure
+				// this check exists to replace — while the same query with its
+				// two columns SWAPPED refused at plan time. A disposition that
+				// depends on column ORDER is not a rule.
+				break
 			}
 			want = setOpColType{typ: widened, known: true}
 		}

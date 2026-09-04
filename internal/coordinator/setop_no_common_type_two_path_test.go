@@ -86,6 +86,24 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 			sql:     `SELECT c_str AS v FROM typemx UNION ALL SELECT c_bytes FROM typemx`,
 			wantErr: `UNION types text and bytea cannot be matched`},
 
+		// EVERY COLUMN is resolved before any disposition. The date/timestamp
+		// pair is one this engine has no carrier for and PostgreSQL matches,
+		// so it is exempt from the 42804 — and it used to abandon the check
+		// for the columns to its RIGHT, which left #648's own filed symptom
+		// reachable: the numeric/text pair in column 2 was never seen and the
+		// single-process path failed mid-execution with 22P02 on the first row
+		// of text that is not a number. The mirror, with the two columns
+		// swapped, refused at plan time all along — a disposition that depends
+		// on column ORDER is not a rule.
+		{issue: "#648", name: "an_exempt_column_left_of_a_refusable_one",
+			sql: `SELECT c_date AS d, c_dec AS v FROM typemx WHERE id < 3 ` +
+				`UNION ALL SELECT c_ts, c_str FROM typemx WHERE id < 3`,
+			wantErr: `UNION types numeric and text cannot be matched`},
+		{issue: "#648", name: "ctl_the_same_two_columns_swapped",
+			sql: `SELECT c_dec AS v, c_date AS d FROM typemx WHERE id < 3 ` +
+				`UNION ALL SELECT c_str, c_ts FROM typemx WHERE id < 3`,
+			wantErr: `UNION types numeric and text cannot be matched`},
+
 		// --- the ladder itself, which must keep answering -----------------
 		{issue: "#648", name: "ctl_text_union_text",
 			sql:      `SELECT c_str AS v FROM typemx UNION ALL SELECT c_str FROM typemx`,
