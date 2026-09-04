@@ -589,6 +589,23 @@ func censusShapes() []censusShape {
 			pg:  "tag=DELETE 0 table=[1:10:a 2:20:b 3:30:c]",
 			emb: "tag=DELETE 0 table=[1:10:a 2:20:b 3:30:c]"},
 
+		// THE #686 RULE, INSIDE A SUBQUERY. An alias hides the table name, so
+		// a subquery that spells the target by its table name names no
+		// relation in scope. Outside a subquery this door has refused it
+		// since #686 — `DELETE FROM pr AS a WHERE pr.id = 1` is 42P01, and
+		// checkDMLColumns says why: accepting both spellings would let one
+		// statement mean two things depending on which resolved. Putting BOTH
+		// into the subquery's outer scope held the rule outside and broke it
+		// inside, so this ANSWERED where PostgreSQL raises.
+		{name: "#688 delete AS alias, subquery names the target by table name", tbl: "pr",
+			sql: "DELETE FROM arcb_pr AS a WHERE EXISTS (SELECT 1 FROM arcb_src s WHERE s.id = arcb_pr.id)",
+			pg:  "state=42P01 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42P01 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#688 control delete AS alias, subquery names the ALIAS", tbl: "pr",
+			sql: "DELETE FROM arcb_pr AS a WHERE EXISTS (SELECT 1 FROM arcb_src s WHERE s.id = a.id)",
+			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
+
 		// STILL REFUSED, and pinned rather than described: a subquery in the
 		// SET LIST. It is a different site — ResolveDMLSetClauses, which
 		// resolves an assignment against the target column's declaration —

@@ -2119,6 +2119,25 @@ func checkDMLColumns(node plansql.Node, target plansql.DMLTarget, schema []parqu
 	if target.Alias != "" {
 		relation = target.Alias
 	}
+	// The #686 rule reaches INSIDE a subquery too. An alias hides the table
+	// name, so a subquery that spells the target by its table name while the
+	// statement declared an alias names no relation in scope — PostgreSQL
+	// raises 42P01 with a hint naming the alias, and the check has to live
+	// here because a subquery's own text is opaque to the ref walk above.
+	// Without it the reference reached the correlated evaluator's dangling
+	// guard, which is loud (0A000) but says something else entirely.
+	if target.Alias != "" {
+		for _, sub := range dmlSubquerySQLs(node) {
+			for _, d := range plansql.DanglingTableRefs(sub) {
+				if strings.EqualFold(d.Table, target.Table) {
+					return sqlerr.New("42P01",
+						"invalid reference to FROM-clause entry for table %q; "+
+							"perhaps you meant to reference the table alias %q",
+						target.Table, target.Alias)
+				}
+			}
+		}
+	}
 	for _, ref := range refs {
 		if ref.Table != "" && !strings.EqualFold(ref.Table, relation) {
 			// A ROW field path, not a relation: `rw.f` where rw is a ROW
@@ -2146,6 +2165,77 @@ func checkDMLColumns(node plansql.Node, target plansql.DMLTarget, schema []parqu
 		}
 	}
 	return nil
+}
+
+// dmlSubquerySQLs returns the SQL text of every subquery embedded in a DML
+// predicate, at this level. It does not descend into a subquery's own text:
+// plansql.DanglingTableRefs already walks nesting, so a two-deep reference
+// surfaces at the outermost subquery.
+func dmlSubquerySQLs(n plansql.Node) []string {
+	var out []string
+	var walk func(plansql.Node)
+	walk = func(n plansql.Node) {
+		switch e := n.(type) {
+		case nil:
+			return
+		case *plansql.SubqueryNode:
+			out = append(out, e.SQL)
+		case *plansql.ExistsNode:
+			out = append(out, e.SQL)
+		case *plansql.CmpExpr:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.BinaryOp:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.AndNode:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.OrNode:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.NotNode:
+			walk(e.Inner)
+		case *plansql.ParenNode:
+			walk(e.Inner)
+		case *plansql.UnaryOp:
+			walk(e.Inner)
+		case *plansql.CastNode:
+			walk(e.Inner)
+		case *plansql.IsExpr:
+			walk(e.Left)
+		case *plansql.LikeExpr:
+			walk(e.Left)
+			walk(e.Pattern)
+		case *plansql.BetweenExpr:
+			walk(e.Left)
+			walk(e.Low)
+			walk(e.High)
+		case *plansql.InExpr:
+			walk(e.Left)
+			for _, v := range e.Values {
+				walk(v)
+			}
+		case *plansql.AnyAllExpr:
+			walk(e.Left)
+			for _, v := range e.Values {
+				walk(v)
+			}
+		case *plansql.FuncCallNode:
+			for _, a := range e.Args {
+				walk(a)
+			}
+		case *plansql.CaseNode:
+			walk(e.Subject)
+			walk(e.Else)
+			for _, w := range e.Whens {
+				walk(w.Cond)
+				walk(w.Result)
+			}
+		}
+	}
+	walk(n)
+	return out
 }
 
 // refuseDMLLiteralPairs raises, BEFORE any row is read, for a comparison whose
@@ -2505,14 +2595,19 @@ func compileDMLPredicate(node plansql.Node, target plansql.DMLTarget,
 		return nil, sqlerr.New("0A000",
 			"a subquery in a DML predicate needs a query environment this caller did not provide")
 	}
+	// The ONE name the target answers to, and it IS one name: an ALIAS HIDES
+	// the table name. `DELETE FROM pr AS a WHERE pr.id = 1` is 42P01 in
+	// PostgreSQL and here — checkDMLColumns says so and says why: accepting
+	// both spellings would let one statement mean two things depending on
+	// which resolved (#686). Putting BOTH into the subquery's outer scope
+	// held that rule outside a subquery and broke it inside one, so
+	// `DELETE FROM pr AS a WHERE EXISTS (… WHERE s.id = pr.id)` answered
+	// where PostgreSQL raises 42P01 with a HINT naming the alias.
 	relation := target.Table
 	if target.Alias != "" {
 		relation = target.Alias
 	}
-	outerTables := map[string]bool{strings.ToLower(target.Table): true}
-	if target.Alias != "" {
-		outerTables[strings.ToLower(target.Alias)] = true
-	}
+	outerTables := map[string]bool{strings.ToLower(relation): true}
 	outerCols := make(map[string]string, len(schema))
 	for _, c := range schema {
 		outerCols[strings.ToLower(c.Name)] = relation
