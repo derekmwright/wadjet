@@ -1,12 +1,15 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // #842 end to end, through the BUILT binary and across PROCESSES, because
@@ -216,6 +219,204 @@ func TestTwoDataDirsDoNotShareACatalog(t *testing.T) {
 	}
 }
 
+// TestAServerOnAnotherDataDirIsNeverUsed is round-2 B1, and it is the negative
+// P1(r2) asks for: a server answering the dial ADDRESS whose catalog belongs to
+// another data directory must never be used — to read OR to write.
+//
+// Round 2 locked this deployment's catalog first and dialed only when the lock
+// was held, "because then the holder is by construction a wadjet process on
+// this catalog". It was not: it dialed `127.0.0.1:<--nats-port>`, a machine
+// address, so with a `serve` on data dir A and something holding B's catalog,
+// `--data-dir=B tables` listed A's table, `SELECT COUNT(*)` answered from A's
+// metadata, and `--data-dir=B create-table` WROTE INTO A's catalog. The write
+// is the worse half.
+//
+// A lock holder now publishes its own client URL in the lock file and a second
+// process dials THAT, so A's server is unreachable from B by construction. The
+// assertions are both directions: B sees only B, and A's catalog is unchanged
+// after B has tried to create a table in it.
+func TestAServerOnAnotherDataDirIsNeverUsed(t *testing.T) {
+	bin := e2eBin(t)
+	root := t.TempDir()
+	dirA := filepath.Join(root, "A")
+	dirB := filepath.Join(root, "B")
+
+	if out, err := e2eRunIn(t, bin, root, dirA, "create-table",
+		"CREATE TABLE ta (id BIGINT)"); err != nil {
+		t.Fatalf("create-table in A: %v\n%s", err, out)
+	}
+	if out, err := e2eRunIn(t, bin, root, dirB, "create-table",
+		"CREATE TABLE tb (id BIGINT)"); err != nil {
+		t.Fatalf("create-table in B: %v\n%s", err, out)
+	}
+
+	// A `serve` on data dir A, on the port every command below also carries,
+	// so the dial address resolves to A's server for anyone who trusts it.
+	const port = "45873"
+	serve := exec.Command(bin,
+		"--storage-type=file", "--data-dir="+dirA, "--bucket=wadjet",
+		"--nats-port="+port, "serve", "--mode=standalone",
+		"--pg-addr=127.0.0.1:45874", "--http-addr=127.0.0.1:45875")
+	serve.Env = append(os.Environ(), "HOME="+filepath.Join(root, "home"))
+	if err := serve.Start(); err != nil {
+		t.Fatalf("starting serve on A: %v", err)
+	}
+	defer func() {
+		serve.Process.Kill()
+		serve.Wait()
+	}()
+
+	// Wait for A's server to be the thing answering that port.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		out, err := e2eRunIn(t, bin, root, dirA, "--nats-port="+port, "tables")
+		if err == nil && strings.Contains(out, "ta") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("serve on A never came up: %v\n%s", err, out)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	// Something holds B's catalog, so a B command cannot take the lock and
+	// must reach B's HOLDER — never A's server on the dial address.
+	held := exec.Command(bin,
+		"--storage-type=file", "--data-dir="+dirB, "--bucket=wadjet",
+		"--nats-port="+port, "shell")
+	held.Env = append(os.Environ(), "HOME="+filepath.Join(root, "home"))
+	stdin, err := held.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := held.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	held.Stderr = held.Stdout
+	if err := held.Start(); err != nil {
+		t.Fatalf("starting the holding shell on B: %v", err)
+	}
+	defer func() {
+		stdin.Close()
+		held.Wait()
+	}()
+	waitForShellBanner(t, stdout)
+
+	// Every read in B must see B, and never A.
+	out, err := e2eRunIn(t, bin, root, dirB, "--nats-port="+port, "tables")
+	if err != nil {
+		t.Fatalf("`tables` in B while B's catalog is held: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "ta") {
+		t.Fatalf("`tables` in data dir B listed data dir A's table: %q\n"+
+			"A command that could not lock its own catalog dialed a machine address and "+
+			"trusted whoever answered (round-2 B1).", out)
+	}
+	if !strings.Contains(out, "tb") {
+		t.Errorf("`tables` in B does not list B's own table: %q", out)
+	}
+	if out, err := e2eRunIn(t, bin, root, dirB, "--nats-port="+port, "query", "--format=csv",
+		"SELECT COUNT(*) FROM ta"); err == nil {
+		t.Errorf("`SELECT COUNT(*) FROM ta` in data dir B ANSWERED from data dir A's "+
+			"catalog: %q", out)
+	}
+
+	// And no WRITE from B may land in A. This is the half that outlives the
+	// command: a read is wrong once, a DDL write is wrong forever.
+	beforeA, err := e2eRunIn(t, bin, root, dirA, "--nats-port="+port, "tables")
+	if err != nil {
+		t.Fatalf("`tables` in A: %v\n%s", err, beforeA)
+	}
+	e2eRunIn(t, bin, root, dirB, "--nats-port="+port, "create-table",
+		"CREATE TABLE from_b (q BIGINT)")
+	afterA, err := e2eRunIn(t, bin, root, dirA, "--nats-port="+port, "tables")
+	if err != nil {
+		t.Fatalf("`tables` in A after B's create-table: %v\n%s", err, afterA)
+	}
+	if afterA != beforeA {
+		t.Fatalf("a `create-table` against data dir B changed data dir A's catalog:\n"+
+			" before %q\n after  %q", beforeA, afterA)
+	}
+	if strings.Contains(afterA, "from_b") {
+		t.Fatalf("data dir B's DDL landed in data dir A's catalog: %q", afterA)
+	}
+}
+
+// TestAStaleCatalogLockIsRefused is the other side of B1(r2)'s mechanism: a
+// lock nobody is behind must be refused, naming the file, rather than sending
+// the command to whatever else is listening.
+func TestAStaleCatalogLockIsRefused(t *testing.T) {
+	bin := e2eBin(t)
+	root := t.TempDir()
+	dir := filepath.Join(root, "data")
+
+	if out, err := e2eRun(t, bin, root, "create-table", "CREATE TABLE t1 (a BIGINT)"); err != nil {
+		t.Fatalf("create-table: %v\n%s", err, out)
+	}
+
+	// A lock file held by a live process that publishes nothing — exactly what
+	// a holder killed between the flock and its first write leaves behind.
+	lockPath := filepath.Join(dir, "_catalog", "wadjet.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("opening the lock file: %v", err)
+	}
+	defer f.Close()
+	if err := f.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("taking the lock this test needs to hold: %v", err)
+	}
+	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+
+	out, err := e2eRun(t, bin, root, "tables")
+	if err == nil {
+		t.Fatalf("a command ran against a catalog whose lock names no reachable holder: %q\n"+
+			"With nothing published there is no way to know which catalog answered, which is "+
+			"the whole of round-2 B1.", out)
+	}
+	if !strings.Contains(out, "wadjet.lock") {
+		t.Errorf("the refusal does not name the lock file: %q", out)
+	}
+	if !strings.Contains(out, "--nats-url") {
+		t.Errorf("the refusal does not name the way out: %q", out)
+	}
+}
+
+// waitForShellBanner blocks until an interactive shell has printed its banner,
+// which it does only after openSharedDB returned — that is, after the catalog
+// lock was taken and its address published.
+func waitForShellBanner(t *testing.T, stdout io.Reader) {
+	t.Helper()
+	banner := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		var seen strings.Builder
+		for {
+			n, rerr := stdout.Read(buf)
+			seen.Write(buf[:n])
+			if strings.Contains(seen.String(), "Wadjet SQL Shell") {
+				banner <- seen.String()
+				return
+			}
+			if rerr != nil {
+				banner <- "shell exited before its banner: " + seen.String()
+				return
+			}
+		}
+	}()
+	select {
+	case line := <-banner:
+		if !strings.Contains(line, "Wadjet SQL Shell") {
+			t.Fatalf("the holding shell could not open the catalog: %s", line)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("the holding shell never started")
+	}
+}
+
 // TestCLIRefusesASecondProcessOnTheSameCatalogStore is the boundary, attempted
 // (rule 11): two commands that both fall back to an embedded catalog server
 // over one store directory must not both open it.
@@ -260,58 +461,38 @@ func TestCLIRefusesASecondProcessOnTheSameCatalogStore(t *testing.T) {
 		held.Wait()
 	}()
 
-	// Wait for the shell to hold the lock, deterministically rather than by
-	// sleeping: it prints its banner only after openSharedDB has returned,
-	// which is after lockCatalogStoreDir took the lock. The lock FILE is no
-	// signal — create-table above already made it.
-	banner := make(chan string, 1)
-	go func() {
-		buf := make([]byte, 4096)
-		var seen strings.Builder
-		for {
-			n, rerr := stdout.Read(buf)
-			seen.Write(buf[:n])
-			if strings.Contains(seen.String(), "Wadjet SQL Shell") {
-				banner <- seen.String()
-				return
-			}
-			if rerr != nil {
-				banner <- "shell exited before its banner: " + seen.String()
-				return
-			}
-		}
-	}()
-	select {
-	case line := <-banner:
-		if !strings.Contains(line, "Wadjet SQL Shell") {
-			t.Fatalf("the holding shell could not open the catalog: %s", line)
-		}
-	case <-time.After(60 * time.Second):
-		t.Fatal("the holding shell never started")
-	}
+	// Wait for the shell to hold the lock AND publish its address,
+	// deterministically rather than by sleeping: it prints its banner only
+	// after openSharedDB has returned, which is after lockCatalogStoreDir took
+	// the lock and the holder's URL was written. The lock FILE is no signal —
+	// create-table above already made it.
+	waitForShellBanner(t, stdout)
 
+	// The second process SHARES the holder's catalog rather than opening the
+	// store a second time, because the holder published where to reach it.
+	// Round 1 refused here, which was also safe; what must never happen — and
+	// did in round 2 — is reaching a DIFFERENT deployment's server, which
+	// TestAServerOnAnotherDataDirIsNeverUsed covers, and a lock with nothing
+	// published is still refused (TestAStaleCatalogLockIsRefused).
 	out, err := e2eRunIn(t, bin, root, filepath.Join(root, "data"), "--nats-port=45871", "tables")
-	if err == nil {
-		t.Fatalf("a second process opened the same catalog store directory while a shell held "+
-			"it; nats-server does not lock it, so both would write over each other's "+
-			"metadata:\n%s", out)
+	if err != nil {
+		t.Fatalf("a second process could not reach the catalog its holder published: %v\n%s",
+			err, out)
 	}
-	if !strings.Contains(out, "held by another process") {
-		t.Fatalf("the second process failed without saying why:\n%s", out)
-	}
-	if !strings.Contains(out, "--nats-url") {
-		t.Errorf("the refusal does not name the way out (--nats-url):\n%s", out)
+	if !strings.Contains(out, "e2e_held") {
+		t.Fatalf("the second process reached a catalog that is not the holder's: %q", out)
 	}
 
-	// The catalog survives the refusal.
+	// The store was never opened twice — the holder kept the flock throughout
+	// — and the catalog is intact once it exits.
 	stdin.Close()
 	held.Wait()
 	out, err = e2eRun(t, bin, root, "tables")
 	if err != nil {
-		t.Fatalf("`tables` after the refusal: %v\n%s", err, out)
+		t.Fatalf("`tables` after the holder exited: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "e2e_held") {
-		t.Fatalf("the catalog lost its table across the refusal: %q", out)
+		t.Fatalf("the catalog lost its table: %q", out)
 	}
 }
 

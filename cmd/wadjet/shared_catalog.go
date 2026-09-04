@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -85,32 +87,57 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 	// Ephemeral: nothing outside this process connects to it.
 	cfg.Port = -1
 
-	// LOCK FIRST, dial second, and only when THIS catalog is already held.
+	// LOCK FIRST, and when the lock is held reach the HOLDER — never an
+	// address.
 	//
-	// Dialing first asked the wrong question. With no --nats-url the address
-	// is the machine's default, so a `serve` on a DIFFERENT --data-dir — or
-	// any other cluster on the box — answered it, and the command read a
-	// catalog belonging to other data (round-1 B3). Taking the lock names the
-	// exact catalog this command's --data-dir owns; a failure to take it
-	// means a wadjet process already holds THAT catalog, and dialing is then
-	// the way to reach the holder rather than a guess about who answers.
-	unlock, lockErr := lockCatalogStoreDir(cfg.StoreDir)
+	// Round 1 dialed first, so with no --nats-url a `serve` on a DIFFERENT
+	// --data-dir answered the machine's default address and the command read
+	// another deployment's catalog. Round 2 locked first but still dialed
+	// `127.0.0.1:<--nats-port>` when the lock was held, which is the same
+	// mistake one step later: with a server on data dir A and a shell holding
+	// B's catalog, `--data-dir=B tables` listed A's table and `--data-dir=B
+	// create-table` WROTE INTO A's catalog (round-2 B1).
+	//
+	// A lock holder now records its own reachable client URL in the lock
+	// file, and a second process dials THAT and nothing else. No fixed port,
+	// no "whoever answers": the URL came from the process that holds this
+	// exact catalog. A lock whose URL is missing or unreachable — a stale
+	// lock, a holder that died — is refused, naming the file and the pid.
+	lock, lockErr := lockCatalogStoreDir(cfg.StoreDir)
 	if lockErr != nil {
-		kv, release, err := dialCatalogKV(natsAddr)
+		holder, readErr := awaitCatalogLockHolder(cfg.StoreDir)
+		if readErr != nil {
+			return nil, nil, fmt.Errorf("the catalog store directory %s is held by another process, "+
+				"and it published no address to reach it at (%w).\n"+
+				"If no wadjet process is running, %s is stale and can be removed; otherwise wait "+
+				"for that command to finish, or use --nats-url to name a server directly",
+				cfg.StoreDir, readErr, catalogLockPath(cfg.StoreDir))
+		}
+		kv, release, err := dialCatalogKV(holder.url)
 		if err != nil {
-			return nil, nil, fmt.Errorf("the catalog store directory %s is held by another process "+
-				"(%w) and no wadjet server answered at %s (%v).\n"+
-				"That is a `wadjet serve` on a different address, or another wadjet command "+
-				"running right now. Point this one at that server with --nats-url (or "+
-				"--nats-port), or wait for the other command to finish",
-				cfg.StoreDir, lockErr, natsAddr, err)
+			return nil, nil, fmt.Errorf("the catalog store directory %s is held by process %d, "+
+				"which is not answering at the address it published, %s (%w).\n"+
+				"If that process is gone, %s is stale and can be removed; otherwise wait for it "+
+				"to finish, or use --nats-url to name a server directly",
+				cfg.StoreDir, holder.pid, holder.url, err, catalogLockPath(cfg.StoreDir))
 		}
 		return kv, release, nil
 	}
+	unlock := lock.release
 	embedded, err := distributed.NewEmbeddedNATS(cfg, logger)
 	if err != nil {
 		unlock()
 		return nil, nil, fmt.Errorf("opening the catalog under %s: %w", cfg.StoreDir, err)
+	}
+	// Published BEFORE this command does any work, so a second process that
+	// loses the lock race has an address to reach as soon as there is one to
+	// reach. The port is ephemeral, which is exactly why it has to be
+	// written down: no other process could guess it.
+	if err := lock.publish(embedded.ClientURL()); err != nil {
+		embedded.Shutdown()
+		unlock()
+		return nil, nil, fmt.Errorf("recording the catalog holder in %s: %w",
+			catalogLockPath(cfg.StoreDir), err)
 	}
 	nc, err := distributed.ConnectInProcess(embedded.Server())
 	if err != nil {
@@ -171,11 +198,11 @@ func dialCatalogKV(natsAddr string) (catalog.MetaKV, func(), error) {
 // It is advisory (flock), so it binds only wadjet processes, and it is taken
 // by BOTH the CLI fallback and `serve` — a lock one of the two skipped would
 // be no lock at all.
-func lockCatalogStoreDir(dir string) (func(), error) {
+func lockCatalogStoreDir(dir string) (*catalogLock, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", dir, err)
 	}
-	path := filepath.Join(dir, "wadjet.lock")
+	path := catalogLockPath(dir)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
@@ -184,10 +211,82 @@ func lockCatalogStoreDir(dir string) (func(), error) {
 		f.Close()
 		return nil, fmt.Errorf("%s is locked: %w", path, err)
 	}
-	return func() {
+	// Any address a DEAD holder left is a lie the moment we take the lock,
+	// so clear it before anyone can read it as ours.
+	if err := f.Truncate(0); err != nil {
 		unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		f.Close()
-	}, nil
+		return nil, fmt.Errorf("clearing %s: %w", path, err)
+	}
+	return &catalogLock{f: f, path: path}, nil
+}
+
+// catalogLock is a held catalog-store lock, and the place its holder publishes
+// the address other processes can reach it at.
+type catalogLock struct {
+	f    *os.File
+	path string
+}
+
+// publish records this process's pid and the client URL of the catalog server
+// it is running, so a process that loses the lock race can reach THE HOLDER
+// rather than whatever answers a well-known port.
+func (l *catalogLock) publish(url string) error {
+	if _, err := l.f.WriteAt([]byte(fmt.Sprintf("%d\n%s\n", os.Getpid(), url)), 0); err != nil {
+		return err
+	}
+	return l.f.Sync()
+}
+
+// release clears the published address and drops the lock.
+//
+// It TRUNCATES rather than unlinks. Removing the file would break the flock
+// rendezvous itself: a third process would create a fresh inode, flock that,
+// and believe it held a lock the survivor also holds. An emptied file says
+// "nobody is publishing an address here", which is what a reader needs, and a
+// process killed outright leaves a stale address instead — which is why a
+// reader must dial before trusting it.
+func (l *catalogLock) release() {
+	l.f.Truncate(0)
+	unix.Flock(int(l.f.Fd()), unix.LOCK_UN)
+	l.f.Close()
+}
+
+func catalogLockPath(dir string) string { return filepath.Join(dir, "wadjet.lock") }
+
+// catalogLockHolder is what a lock file says about the process holding it.
+type catalogLockHolder struct {
+	pid int
+	url string
+}
+
+// awaitCatalogLockHolder reads the holder's published address, waiting briefly
+// for it to appear.
+//
+// The wait is not padding. A holder takes the flock and only then starts its
+// server and learns the ephemeral port it must publish, so a process that
+// loses the race by microseconds would otherwise read an empty file and refuse
+// a catalog that is about to be perfectly reachable. Bounded, because a file
+// that stays empty means the holder is not publishing one at all — a stale
+// lock, or a process killed between the flock and the write — and that is a
+// refusal, not something to wait out.
+func awaitCatalogLockHolder(dir string) (catalogLockHolder, error) {
+	path := catalogLockPath(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+			if len(lines) == 2 && strings.TrimSpace(lines[1]) != "" {
+				pid, _ := strconv.Atoi(strings.TrimSpace(lines[0]))
+				return catalogLockHolder{pid: pid, url: strings.TrimSpace(lines[1])}, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return catalogLockHolder{}, fmt.Errorf("%s names no reachable address", path)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // sharedCatalog is sharedCatalogKV with the Catalog built and INITIALIZED over

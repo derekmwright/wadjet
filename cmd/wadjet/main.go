@@ -1179,17 +1179,25 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	// one's catalog metadata — and since `tables`, `query`, `create-table`,
 	// `drop-table` and `shell` can now run an embedded server of their own,
 	// a lock only one side took would be no lock at all.
-	unlockStore, err := lockCatalogStoreDir(natsCfg.StoreDir)
+	storeLock, err := lockCatalogStoreDir(natsCfg.StoreDir)
 	if err != nil {
 		return fmt.Errorf("the catalog store directory %s is held by another wadjet process "+
 			"(%w); stop it, or give this one its own --nats-store-dir", natsCfg.StoreDir, err)
 	}
-	defer unlockStore()
+	defer storeLock.release()
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
 	}
 	defer embeddedNATS.Shutdown()
+	// Publish where this server can be reached, so a CLI command that loses
+	// the lock race reaches THIS catalog rather than whatever answers a
+	// well-known port — which, with two data directories in play, is how a
+	// command against one of them read and wrote the other's (round-2 B1).
+	if err := storeLock.publish(embeddedNATS.ClientURL()); err != nil {
+		return fmt.Errorf("recording the catalog holder in %s: %w",
+			catalogLockPath(natsCfg.StoreDir), err)
+	}
 
 	// Connect to NATS via in-process (zero-copy, no TCP overhead)
 	nc, err := distributed.ConnectInProcess(embeddedNATS.Server())

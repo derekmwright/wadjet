@@ -172,8 +172,11 @@ Usage: `wadjet query [flags] "SQL STATEMENT"`
 `query`, `create-table`, `drop-table`, `shell` and `tables` share ONE
 persisted catalog with `serve`. `--nats-url` names a server explicitly;
 otherwise the catalog is this deployment's own store directory, which the
-command opens itself, or connects to whichever wadjet process is already
-holding it. One process holds that directory at a time.
+command opens itself — or, when another wadjet process already holds it,
+connects to **that process**, at the address the holder records in
+`<store-dir>/wadjet.lock`. The address is never guessed from a port, so a
+server on a different `--data-dir` cannot answer for this one; a lock naming
+no reachable address is refused. One process opens that directory at a time.
 
 **The catalog store follows the data**: with `--storage-type=file
 --data-dir=D` it is `D/_catalog`, so two data directories never share a

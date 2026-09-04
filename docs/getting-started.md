@@ -227,7 +227,12 @@ mc mb local/wadjet
 >   command opens it itself for its own lifetime, so what it writes is there
 >   for the next command and for a `serve` started afterwards. If another
 >   wadjet process already holds that directory — a running `serve`, say —
->   the command connects to it instead.
+>   the command connects to **that process**: the holder records its own
+>   address in `<store-dir>/wadjet.lock`, and the command dials what it finds
+>   there and nothing else. It never guesses a port, so a server running on a
+>   *different* `--data-dir` can never answer for this one. A lock that names
+>   no reachable address — a stale one, left by a process that was killed — is
+>   refused with the lock file's path and the holder's pid.
 >
 > **The catalog store directory follows the data.** With
 > `--storage-type=file --data-dir=D` it is `D/_catalog`, so each data
@@ -242,9 +247,8 @@ mc mb local/wadjet
 > path — they read the object store directly; the HTTP and gRPC sections
 > below are how a remote client reaches a running server.
 >
-> One process at a time holds the catalog store directory. A second command
-> that finds it locked looks for the holder and, failing that, says so and
-> names `--nats-url` — rather than opening it a second time, because
+> One process at a time OPENS the catalog store directory; others reach it
+> through the holder. A second command never opens it a second time, because
 > `nats-server` does not lock its own store and two writers there would
 > overwrite each other's metadata.
 >
