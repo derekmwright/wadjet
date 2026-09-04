@@ -52,6 +52,11 @@ type arcD5Cell struct {
 	// that only the spilled path reaches is a real state the census has to be
 	// able to say — otherwise the shape has to be dropped, which is how one
 	// goes unrecorded.
+	//
+	// NO CELL SETS IT as of v0.18.31: the four #616 comma cells that did were
+	// promoted to controls when the per-partition index reclaim (#823) let the
+	// 512 KiB arm answer them. The field stays because the state it records is
+	// still reachable and a census that cannot say it drops the shape instead.
 	wantErrLikeSpilled string
 	// skipBudgetedArm drops the 512 KiB arm for this cell. EVERY cell that
 	// sets it states its own reason at the cell, because there are now two
@@ -64,7 +69,9 @@ type arcD5Cell struct {
 	//     memory floor sits ON the arm's budget rather than under or over it
 	//     and the cell both answered and refused across runs — pinning either
 	//     outcome would be pinning a coin flip (ADR-0027: which batch crosses
-	//     a budget is a CONDITION, not a shape).
+	//     a budget is a CONDITION, not a shape). RE-MEASURED on v0.18.31,
+	//     after the index reclaim: five replicates, 2 answered / 3 refused.
+	//     The reason it is dropped is unchanged.
 	//
 	// The generated cells' reason is measured, not assumed, and it is the same
 	// fact this arc is about:
@@ -1035,53 +1042,59 @@ func arcD5MeasuredCells() []arcD5Cell {
 		// condition that names two inner relations at once (#852 /
 		// logical.decorrelatedInnerPlan).
 		//
-		// WHAT THAT COSTS, pinned rather than described: the 512 KiB arm no
-		// longer answers these three. A re-run builds no hash table, and the
-		// join it is replaced by materialises a 5 000-row build whose INDEX
-		// entries a grace eviction cannot free (#823, "grace eviction frees
-		// build columns, not index entries") — so the operator refuses past
-		// the budget, which is ADR-0006's designed answer and not a wrong one.
-		// Measured: these answer at a 1 MiB budget and refuse at 512 KiB. The
-		// day the index becomes spillable, or the plan's floor drops, these
-		// three stop erroring and the pin fails.
+		// WHAT THAT COST, and what stopped costing it. Through v0.18.30 the
+		// 512 KiB arm did not answer these three: a re-run builds no hash
+		// table, and the join it is replaced by materialises a 5 000-row build
+		// whose INDEX entries a grace eviction could not free (#823, "grace
+		// eviction frees build columns, not index entries"), so the operator
+		// refused past the budget — ADR-0006's designed answer, not a wrong
+		// one. The pin said what would end it: "the day the index becomes
+		// spillable, or the plan's floor drops, these three stop erroring and
+		// the pin fails."
+		//
+		// v0.18.31's per-partition index reclaim is that day. All four now
+		// answer PostgreSQL's number on the 512 KiB arm as well, so they are
+		// controls: no `wantErrLikeSpilled`, the same `want` on every arm.
+		// The fourth was not a memory cell at all — it PANICKED in the hash
+		// join's dual-int-key probe against a spilled build — and it answers
+		// too, because the reclaim keeps that build unspilled at this size.
 		{issue: "#616", name: "comma_joined_correlated_inner_two_relations",
 			sql: `SELECT COUNT(*) AS n FROM typemx p WHERE p.id < 50 AND p.c_i32 = (` +
 				`SELECT MIN(b.c_i32) FROM typemx b, typemx_dim d WHERE b.g = d.k AND b.id = p.id)`,
-			want:               []string{"n=int64:46"},
-			wantErrLikeSpilled: "memory budget exceeded",
-			pgSays:             "46 on every unbudgeted arm; at 512 KiB the join's build does not fit"},
+			want:   []string{"n=int64:46"},
+			pgSays: "46 on every arm, the 512 KiB one included since v0.18.31"},
 		{issue: "#616", name: "comma_joined_correlated_inner_group_key",
 			sql: `SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 50 AND a.g = (` +
 				`SELECT MIN(b.g) FROM typemx b, typemx_dim d WHERE b.g = d.k AND b.id = a.id)`,
-			want:               []string{"n=int64:47"},
-			wantErrLikeSpilled: "memory budget exceeded",
-			pgSays:             "47 on every unbudgeted arm; at 512 KiB the join's build does not fit"},
-		// The 40-row fixture refuses at 512 KiB too, and its numbers say the
-		// cost is the PLAN's shape rather than any one relation's size:
-		// `build_rows=15` against `used=498058` of a 524288-byte budget — the
-		// join's own build is fifteen rows, and what fills the budget is the
-		// three scans, the aggregate and the second join a re-run never builds
-		// at all.
+			want:   []string{"n=int64:47"},
+			pgSays: "47 on every arm, the 512 KiB one included since v0.18.31"},
+		// The 40-row fixture used to refuse at 512 KiB too, and its numbers
+		// said the cost was the PLAN's shape rather than any one relation's
+		// size: `build_rows=15` against `used=498058` of a 524288-byte budget
+		// — the join's own build is fifteen rows, and what filled the budget
+		// was the three scans, the aggregate and the second join a re-run
+		// never builds at all. It answers now.
 		{issue: "#616", name: "comma_joined_correlated_inner_over_the_multikey_fixture",
 			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n = (` +
 				`SELECT MIN(b.n) FROM mk_inner b, mk_dim d WHERE b.g = d.k AND b.id = a.id)`,
-			want:               []string{"n=int64:21"},
-			wantErrLikeSpilled: "memory budget exceeded",
-			pgSays:             "21 on every unbudgeted arm; at 512 KiB the plan does not fit"},
-		// THE ONE THAT STILL FAILS, and it is not a correlation defect: the
-		// same table on BOTH sides of the inner comma join, under a MEMORY
-		// BUDGET, panics inside the hash join's dual-int-key probe —
-		// `exec.HashJoinProbe.lookupBuild` reads `h.buildBatches[0]` before
-		// walking the chain and a SPILLED build has no batch 0. Every other
-		// arm answers PostgreSQL's 9. Recorded here because #616's shape is
-		// how it was reached; it belongs to the join's spill path.
+			want:   []string{"n=int64:21"},
+			pgSays: "21 on every arm, the 512 KiB one included since v0.18.31"},
+		// The same table on BOTH sides of the inner comma join, under a
+		// MEMORY BUDGET. Through v0.18.30 this PANICKED inside the hash join's
+		// dual-int-key probe — `exec.HashJoinProbe.lookupBuild` reads
+		// `h.buildBatches[0]` before walking the chain and a SPILLED build has
+		// no batch 0 — while every other arm answered PostgreSQL's 9. It
+		// answers on every arm now, because the reclaim keeps this build off
+		// the spill path at this size. THE DEFECT IS NOT FIXED: `lookupBuild`
+		// still reads batch 0, and a build large enough to spill at any budget
+		// still reaches it. This cell no longer covers it, which is why the
+		// note stays: it belongs to the join's spill path, not to correlation.
 		{issue: "#616", name: "boundary_self_comma_joined_inner_panics_under_a_budget",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE a.w_i64 = (` +
 				`SELECT MIN(b.w_i64) FROM numwidth b, numwidth c ` +
 				`WHERE b.w_key = c.w_key AND b.w_key = a.w_key)`,
-			want:               []string{"n=int64:9"},
-			wantErrLikeSpilled: "internal error in operator chain",
-			pgSays:             "9 on every arm; the budgeted arm panics in exec/join.go's lookupBuild"},
+			want:   []string{"n=int64:9"},
+			pgSays: "9 on every arm; the budgeted one no longer reaches lookupBuild's batch 0"},
 
 		// #614 — a DERIVED TABLE inside a subquery's FROM that references the
 		// ENCLOSING query. MEASURED against live PostgreSQL 17, because the
@@ -1520,9 +1533,15 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 		// the measurement: across census runs it both answered and refused.
 		// Which batch crosses a budget is a CONDITION and not a shape
 		// (ADR-0027), so pinning either outcome here would be pinning a coin
-		// flip. It answers at 1 MiB, and the three #616 comma cells — which
-		// refuse at 512 KiB on every replicate — carry the same finding
-		// deterministically.
+		// flip. It answers at 1 MiB.
+		//
+		// RE-MEASURED on v0.18.31, after the per-partition index reclaim
+		// (#823) promoted the four #616 comma cells below: five replicates of
+		// this cell went 2 answered / 3 refused, with the refusal still
+		// `used=535822, requested=72, budget=524288, of which forced=535822 by
+		// "spill tracking"`. The reclaim did not move it, because what fills
+		// the budget here is the FORCED producer loads and not an index. The
+		// arm stays dropped, and the reason it is dropped is unchanged.
 		{issue: "#852", name: "correlated_scalar_over_a_derived_table",
 			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n = (` +
 				`SELECT MAX(b.n) FROM (SELECT s, n FROM mk_inner) b WHERE b.n = a.n)`,
