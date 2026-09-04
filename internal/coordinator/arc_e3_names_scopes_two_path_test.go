@@ -564,6 +564,41 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 				"GROUP BY g) u",
 			want: "c | 8"},
 
+		// --- #769, the JOIN KEY face -------------------------------------
+		// A ROW field path as a join KEY. `c_row.b` looks like a qualified
+		// column to the pass that decides which ON conjuncts the executor can
+		// represent, so it stayed in JoinCond as a key pair — and the
+		// executor matches on column NAMES, so `c_row.b` resolved to nothing
+		// and every probe row matched every build row. ~10,000 rows of
+		// `id, NULL` on single, spilled and broadcast, and
+		// `partitioned shuffle: key "c_row.b" not in schema` on the shuffled
+		// arm, where PostgreSQL 17 (spelled `ON (n.c_row).b = d.b`) answers
+		// ONE row. Silent on three of the four, and pre-existing at base.
+		{name: "769/a-field-path-as-a-join-key",
+			sql: "SELECT n.id AS nid, d.b AS db FROM typemx_nested n JOIN decpair d " +
+				"ON c_row.b = d.b ORDER BY n.id",
+			want: "nid,db | 0,0.0000"},
+		// PostgreSQL's own spelling of the same key.
+		{name: "769/a-field-path-as-a-join-key-parenthesised",
+			sql: "SELECT n.id AS nid, d.b AS db FROM typemx_nested n JOIN decpair d " +
+				"ON (c_row).b = d.b ORDER BY n.id",
+			want: "nid,db | 0,0.0000"},
+		// The INSTRUMENT that localised it, and now the CONTROL: the same
+		// path inside an ARITHMETIC operand was already right on every arm,
+		// because the arithmetic made the ON-conjunct pass decline and the
+		// residual route materialized the path. The fix is to decline the
+		// BARE path the same way, so these two must agree.
+		{name: "769/ctl-a-field-path-in-an-arithmetic-join-key",
+			sql: "SELECT n.id AS nid, d.b AS db FROM typemx_nested n JOIN decpair d " +
+				"ON c_row.b + 0 = d.b ORDER BY n.id",
+			want: "nid,db | 0,0.0000"},
+		// The CONTROL that bounds the decline: an ordinary QUALIFIED column as
+		// a join key is not a field path and must stay a key pair. `n.id` is
+		// not a container's field, and routing it to the residual path would
+		// turn every keyed join in the corpus into a cross product.
+		{name: "769/ctl-an-ordinary-qualified-join-key",
+			sql:  "SELECT COUNT(*) AS n FROM typemx_nested n JOIN decpair d ON n.id = d.id",
+			want: "n | 9"},
 		// --- #629 -------------------------------------------------------
 		// One output name referenced by TWO key references AND an aggregate.
 		// Asserted positionally: the DAG used to return TWO columns for this

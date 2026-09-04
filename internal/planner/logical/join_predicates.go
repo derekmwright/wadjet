@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // This file holds the two analyses that decide where a join's predicates may
@@ -268,6 +269,7 @@ func takeJoinCondResiduals(join *Node) []Predicate {
 	if len(parts) == 0 {
 		return nil
 	}
+	rowFields := subtreeRowFields(join)
 
 	var keyParts []string
 	var residuals []Predicate
@@ -277,7 +279,7 @@ func takeJoinCondResiduals(join *Node) []Predicate {
 			continue
 		}
 		expr := tryParseExpr(part)
-		if expr == nil || isJoinKeyEquality(expr) {
+		if expr == nil || isJoinKeyEquality(expr, rowFields) {
 			// An equality between two bare columns is what parseJoinKeys
 			// turns into a key pair, and an unparseable fragment is not
 			// something the filter path could evaluate either. Both stay
@@ -345,6 +347,7 @@ func routeOuterJoinOnResiduals(n *Node) *Node {
 	}
 
 	parts := splitOnAnd(n.JoinCond, strings.ToUpper(n.JoinCond))
+	rowFields := subtreeRowFields(n)
 	var keyParts, residuals []string
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -352,7 +355,7 @@ func routeOuterJoinOnResiduals(n *Node) *Node {
 			continue
 		}
 		expr := tryParseExpr(part)
-		if expr == nil || isJoinKeyEquality(expr) {
+		if expr == nil || isJoinKeyEquality(expr, rowFields) {
 			keyParts = append(keyParts, part)
 			continue
 		}
@@ -394,23 +397,69 @@ func routeOuterJoinOnResiduals(n *Node) *Node {
 // Which SIDE each column lives on is still decided later
 // (physical.parseJoinKeys, then FixKeyAssignment). The point here is only to
 // separate "the join can represent this" from "the join will mis-execute this".
-func isJoinKeyEquality(expr plansql.Node) bool {
+func isJoinKeyEquality(expr plansql.Node, rowFields map[string][]parquet.Column) bool {
 	if p, ok := expr.(*plansql.ParenNode); ok {
-		return isJoinKeyEquality(p.Inner)
+		return isJoinKeyEquality(p.Inner, rowFields)
 	}
 	cmp, ok := expr.(*plansql.CmpExpr)
 	if !ok || cmp.Op != "=" {
 		return false
 	}
-	return isBareColRef(cmp.Left) && isBareColRef(cmp.Right)
+	return isBareColRef(cmp.Left, rowFields) && isBareColRef(cmp.Right, rowFields)
 }
 
 // isBareColRef reports whether expr is a plain column reference, qualified or
 // not — the only operand physical.parseJoinKeys can turn into a key name.
-func isBareColRef(expr plansql.Node) bool {
+//
+// A ROW FIELD PATH is NOT one, and that is the whole of #769's join-key face.
+// `c_row.b` LOOKS like a qualified column here, so it stayed in JoinCond as a
+// key pair, and the executor — which matches on column NAMES — resolved
+// `c_row.b` to nothing: `ON c_row.b = d.b` answered ~10,000 rows of
+// `id, NULL` (every probe row against every build row, the silent cross
+// product #351 is written about) on the single, spilled and broadcast arms,
+// and `partitioned shuffle: key "c_row.b" not in schema` on the shuffled one,
+// where PostgreSQL answers ONE row. The instrument that localises it is
+// `ON c_row.b + 0 = d.b`, an EXPRESSION operand containing the same path: it
+// was already right on all four arms, because the arithmetic made this
+// function decline and the residual route materialized the path.
+//
+// Declining the bare path sends it down that same route, which is the one
+// ADR-0022 rule 1 prescribes anyway — a field path is materialized like a
+// computed expression, never passed on as a name.
+//
+// rowFields is `subtreeRowFields`, so this shares the pushdown's annotation
+// dependency: where nothing below is annotated the map is empty, no reference
+// reads as a field path, and the pre-#769 routing stands. That is the same
+// deliberate conservative answer, and
+// `TestRowFieldPathPushdownFollowsTheAnnotation` is the fixture for it.
+func isBareColRef(expr plansql.Node, rowFields map[string][]parquet.Column) bool {
 	if p, ok := expr.(*plansql.ParenNode); ok {
-		return isBareColRef(p.Inner)
+		return isBareColRef(p.Inner, rowFields)
 	}
-	_, ok := expr.(*plansql.ColRef)
-	return ok
+	ref, ok := expr.(*plansql.ColRef)
+	if !ok {
+		return false
+	}
+	return !isRowFieldPath(ref, rowFields)
+}
+
+// isRowFieldPath reports whether ref's QUALIFIER names a ROW container that
+// DECLARES the referenced field — ADR-0022 rule 1's test, asked with the
+// declarations a subtree carries. The container must declare the field, so an
+// ordinary qualified reference whose qualifier happens to name a container is
+// untouched (#604).
+func isRowFieldPath(ref *plansql.ColRef, rowFields map[string][]parquet.Column) bool {
+	if ref == nil || ref.Table == "" || len(rowFields) == 0 {
+		return false
+	}
+	fields, ok := rowFields[strings.ToLower(ref.Table)]
+	if !ok {
+		return false
+	}
+	for _, f := range fields {
+		if strings.EqualFold(f.Name, ref.Column) {
+			return true
+		}
+	}
+	return false
 }
