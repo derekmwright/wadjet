@@ -234,6 +234,21 @@ refusal survives the delegation.
   residual as the control) and `docs-example/*`, plus the parser's own
   spellings in `internal/planner/sql/paren_field_path_test.go`.
 
+  **Rule 1 binds NINE resolvers.** The ninth is the IN-SUBQUERY lowering
+  (2026-09-04 round 5): `logical.tryDecorrelateInSubquery` names the semi
+  join's outer key with `colRefName`, which returns a ColRef's Column and
+  DROPS the qualifier — right for `t.col`, wrong for `c_row.b`. The semi join
+  was built with `b` as its probe key, `b` is no column of the probe, and a key
+  that resolves to nothing hashes as a constant, so every probe row matched:
+  `WHERE c_row.b IN (SELECT b FROM decpair)` answered all 20 rows for
+  PostgreSQL's 1, and `NOT IN` 20 for its 13, silently on three arms and loudly
+  on the shuffled one. It DECLINES the rewrite now, which leaves the IN an
+  ordinary filter predicate — the route that already resolves a field path —
+  and is the same disposition #482 and #516 take for a shape the rewrite cannot
+  name. A literal list was always right, which is what localised it; an
+  ordinary column still decorrelates, which is the control that bounds the
+  decline. `EXISTS` correlated on a field path refuses loudly and always did.
+
   One residual is PINNED rather than fixed: a field path on BOTH sides of an
   INNER key fails on the DAG-SHUFFLED arm alone
   (`column "z.b" does not exist in the input schema`) where the other arms
@@ -243,6 +258,15 @@ refusal survives the delegation.
   `physical.rowContainersOf` answers for a join, asked of an exchange stage.
   Pre-existing, and LOUD where base was a silent cross product on every arm.
   Gated at `both-sides-field-path-key`.
+
+  **Ordering the two refusals is the same deferral as the paths themselves.**
+  A scalar qualifier under the parenthesised spelling — `(d.b).x` — could be
+  diagnosed 42809 rather than routed through the two-part container message,
+  and PostgreSQL does exactly that. The parser cannot: it has no types. The
+  BINDER has them, and it cannot see the reference, because refusing at the
+  binder means the parser must first BUILD a node for a three-part path — the
+  identity this ADR records as not-yet. So the ordering waits on the same
+  change, and the message names both readings in the meantime.
 - **The differential fuzzer** cannot generate field paths, because it
   qualifies references with the table alias and the parser accepts only a
   two-part reference. See the note in `internal/oracle/shapegen/typematrix.go`.

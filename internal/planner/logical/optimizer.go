@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // partitionKeys are the standard Hive-style partition key columns.
@@ -1483,7 +1484,8 @@ func decorrelateInSubqueries(n *Node, ctes []plansql.CTEDef, annotate func(*Node
 			continue
 		}
 
-		joinNode := tryDecorrelateInSubquery(inExpr, subq, outerTables, outerColMap, ctes, annotate)
+		joinNode := tryDecorrelateInSubquery(inExpr, subq, outerTables, outerColMap, ctes,
+			annotate, subtreeRowFields(n.Children[0]))
 		if joinNode == nil {
 			remainingPreds = append(remainingPreds, pred)
 			continue
@@ -1652,7 +1654,7 @@ func innerGroupKey(info *plansql.SelectInfo, term string) InnerKeyRef {
 // SemiJoin (IN) or AntiJoin (NOT IN) node. Handles uncorrelated IN with
 // optional GROUP BY + HAVING, and correlated IN with equality keys.
 // Returns nil if decorrelation is not possible.
-func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node)) *Node {
+func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node), rowFields map[string][]parquet.Column) *Node {
 	parsed, err := plansql.Parse(subq.SQL)
 	if err != nil {
 		return nil
@@ -1686,6 +1688,25 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	// correct answer for every shape this cannot name (#516).
 	innerSelectRef, ok := innerSemiJoinKey(info)
 	if !ok {
+		return nil
+	}
+
+	// A ROW FIELD PATH as the outer key. `colRefName` returns the ColRef's
+	// Column and DROPS the qualifier, which is right for `t.col` and wrong for
+	// `c_row.b`: the semi join was built with `b` as its probe key, `b` is no
+	// column of the probe, the executor resolved it to -1 — and a key that
+	// resolves to nothing hashes as a constant, so every probe row matched.
+	// `WHERE c_row.b IN (SELECT b FROM decpair)` answered all 20 rows for
+	// PostgreSQL's 1, and NOT IN answered 20 for its 13, silently, on three
+	// arms (the shuffled one failed loudly on the same missing key).
+	//
+	// Declining leaves the IN where it was — an ordinary filter predicate,
+	// which is the route that already resolves a field path correctly
+	// (ADR-0022 rule 1's four vectorized filters, #769). It is the same
+	// answer #482 and #516 take for a shape this rewrite cannot NAME, and the
+	// same one `logical.isBareColRef` takes for an ordinary join key: a field
+	// path is materialized, never passed on as a name.
+	if ref, ok := inExpr.Left.(*plansql.ColRef); ok && isRowFieldPath(ref, rowFields) {
 		return nil
 	}
 

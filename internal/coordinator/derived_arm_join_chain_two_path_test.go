@@ -969,6 +969,11 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 				"ORDER BY x.id",
 			cols: []string{"xid", "fb"},
 			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+			// The 512 KiB arm refuses this at PLAN time and always has: a join
+			// on an EXPRESSION is executed as a CROSS join, which does not
+			// spill (ADR-0006's routed-probe amendment, #832), so its build
+			// must fit the budget and refuses loudly when it does not.
+			// Pre-existing, unrelated to field paths, and LOUD.
 		},
 		{
 			// The same example in PostgreSQL's own spelling, because the docs
@@ -1006,6 +1011,74 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			sql:    "SELECT b.x AS bx FROM decpair",
 			cols:   []string{"bx"},
 			refuse: "column notation .x applied to type numeric, which is not a composite type",
+		},
+		{
+			// The field on the RIGHT of a LEFT join, which is where the
+			// SPILLED arm disagrees with the other three and with PostgreSQL.
+			// PostgreSQL 17 (`(n.c_row).b`): nine rows, the one match at
+			// `decpair.b = 0.0000` carrying the field's 0.
+			//
+			// PINNED on the spilled arm, and the two controls below say why it
+			// is not this arc's mechanism: the CONTAINER PROJECTED under an
+			// ORDINARY residual — no field path anywhere in the query — is
+			// NULL on that arm too, while the same projection under a PLAIN
+			// key is right. What the spilled arm loses is a ROW column of the
+			// build payload once the join is KEYLESS, which is what an ON
+			// residual makes it (`routeOuterJoinOnResiduals` empties JoinCond
+			// and the join degenerates to one all-rows candidate chain — a
+			// CROSS join, ADR-0006's non-spilling shape). This gate's field
+			// path is a passenger.
+			name: "in-subquery/a-field-path-as-the-outer-key",
+			sql: "SELECT n.id AS nid FROM " + nested + " n WHERE c_row.b IN " +
+				"(SELECT b FROM decpair) AND n.id < 20 ORDER BY n.id",
+			cols: []string{"nid"},
+			want: "1 rows: 0;",
+		},
+		{
+			// NOT IN takes the same route and answered every row too.
+			name: "in-subquery/a-field-path-under-not-in",
+			sql: "SELECT n.id AS nid FROM " + nested + " n WHERE c_row.b NOT IN " +
+				"(SELECT b FROM decpair WHERE b IS NOT NULL) AND n.id < 20 ORDER BY n.id",
+			cols: []string{"nid"},
+			want: "13 rows: 1;4;5;6;7;8;11;12;13;14;15;18;19;",
+		},
+		{
+			name: "in-subquery/a-field-path-as-the-outer-key-parenthesised",
+			sql: "SELECT n.id AS nid FROM " + nested + " n WHERE (c_row).b IN " +
+				"(SELECT b FROM decpair) AND n.id < 20 ORDER BY n.id",
+			cols: []string{"nid"},
+			want: "1 rows: 0;",
+		},
+		{
+			// The CONTROL that localised it: a LITERAL list is not a semi
+			// join, and it was right before and after.
+			name: "in-subquery/ctl-a-field-path-in-a-literal-list",
+			sql: "SELECT n.id AS nid FROM " + nested + " n WHERE c_row.b IN (0, 11, 44) " +
+				"AND n.id < 20 ORDER BY n.id",
+			cols: []string{"nid"},
+			want: "3 rows: 0;1;4;",
+		},
+		{
+			// …and the control that bounds the DECLINE: an ordinary column as
+			// the outer key still decorrelates into a semi join. Declining
+			// that would turn every IN-subquery in the corpus into a filter.
+			name: "in-subquery/ctl-an-ordinary-column-as-the-outer-key",
+			sql: "SELECT n.id AS nid FROM " + nested + " n WHERE n.id IN " +
+				"(SELECT id FROM decpair) AND n.id < 20 ORDER BY n.id",
+			cols: []string{"nid"},
+			want: "9 rows: 1;2;3;4;5;6;7;8;9;",
+		},
+		{
+			// EXISTS correlated on a field path is REFUSED, loudly, on every
+			// arm — the correlated-EXISTS lowering does not exist for this
+			// shape and says so. Driven because the review asked where else a
+			// field path can reach a subquery: it reaches EXISTS, and there it
+			// fails rather than answering.
+			name: "in-subquery/exists-correlated-on-a-field-path-refuses",
+			sql: "SELECT n.id AS nid FROM " + nested + " n WHERE EXISTS " +
+				"(SELECT 1 FROM decpair d WHERE d.b = c_row.b) AND n.id < 20 ORDER BY n.id",
+			cols:   []string{"nid"},
+			refuse: "c_row.b",
 		},
 		{
 			name: "join-with-a-dimension",
