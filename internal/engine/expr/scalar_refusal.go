@@ -68,6 +68,14 @@ func raiseChrNul() {
 	panic(fatalEval{sqlerr.New("54000", "null character not permitted")})
 }
 
+// raiseNegativeSubstringLength is PostgreSQL's 22011 (substring_error) for
+// SUBSTRING with a negative length. substrWindow's own doc recorded it as a
+// refusal this layer could not make; the per-row channel has existed since
+// #347 (#856).
+func raiseNegativeSubstringLength() {
+	panic(fatalEval{sqlerr.New("22011", "negative substring length not allowed")})
+}
+
 func raiseChrTooLarge(code int64) {
 	panic(fatalEval{sqlerr.New("54000",
 		"requested character too large for encoding: %d", code)})

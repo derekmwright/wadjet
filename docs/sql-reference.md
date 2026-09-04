@@ -1138,6 +1138,7 @@ are different answers — a client branches on them:
 | `CHR(0)` | `54000` | null character not permitted |
 | `CHR(<negative>)` | `22023` | character number must be positive |
 | `CHR(n)` above U+10FFFF | `54000` | requested character too large for encoding: n |
+| `SUBSTRING(s, start, len)` with `len < 0` | `22011` | negative substring length not allowed |
 | `1/0`, `x % 0`, `MOD(x, 0)`, `LOG(1, x)` | `22012` | division by zero |
 | `LN(0)`, `LOG(0)`, `LOG2(0)` | `2201E` | cannot take logarithm of zero |
 | `LN(-1)`, `LOG(-1)` | `2201E` | cannot take logarithm of a negative number |
@@ -1299,13 +1300,13 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `UPPER(s)` | Uppercase | `UPPER(protocol)` |
 | `LOWER(s)` | Lowercase | `LOWER(hostname)` |
 | `CONCAT(a, b, ...)` | Concatenate strings; **NULL arguments are ignored** (all-NULL gives `''`, never NULL) — `\|\|` propagates NULL instead | `CONCAT(src_ip, ':', src_port)` |
-| `LENGTH(s)` / `LEN(s)` | String length in **bytes** (use `CHAR_LENGTH` for characters) | `LENGTH(message)` |
-| `SUBSTR(s, start, len)` | Extract substring | `SUBSTR(message, 1, 50)` |
+| `LENGTH(s)` / `LEN(s)` | String length in **characters**, the synonym of `CHAR_LENGTH` (use `OCTET_LENGTH` for bytes) | `LENGTH(message)` |
+| `SUBSTR(s, start, len)` / `SUBSTRING` | Extract substring; `start` and `len` count **characters**, and a negative `len` is SQLSTATE 22011 | `SUBSTR(message, 1, 50)` |
 | `TRIM(s)` | Remove leading/trailing whitespace | `TRIM(hostname)` |
 | `LTRIM(s)` | Remove leading whitespace | `LTRIM(message)` |
 | `RTRIM(s)` | Remove trailing whitespace | `RTRIM(message)` |
 | `REPLACE(s, old, new)` | Replace occurrences | `REPLACE(message, 'error', 'ERROR')` |
-| `REVERSE(s)` | Reverse string | `REVERSE(hostname)` |
+| `REVERSE(s)` | Reverse string, by character | `REVERSE(hostname)` |
 | `LEFT(s, n)` | First n characters | `LEFT(hostname, 3)` |
 | `RIGHT(s, n)` | Last n characters | `RIGHT(hostname, 2)` |
 | `STARTS_WITH(s, prefix)` | Test if string starts with prefix | `STARTS_WITH(hostname, 'web')` |
@@ -1313,7 +1314,7 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `CONTAINS(s, sub)` | Test if string contains substring | `CONTAINS(message, 'error')` |
 | `REPEAT(s, n)` | Repeat string n times | `REPEAT('*', 10)` |
 | `SPLIT_PART(s, delim, n)` | Extract nth part from delimited string; 1-based, and a NEGATIVE n counts from the end. Position 0 is SQLSTATE 22023; a position past either end is the empty string | `SPLIT_PART(url, '/', 3)`, `SPLIT_PART(url, '/', -1)` |
-| `STRPOS(s, sub)` / `POSITION(sub IN s)` | Position of substring (1-based, 0 if not found) | `STRPOS(message, 'error')` |
+| `STRPOS(s, sub)` / `POSITION(sub IN s)` | Position of substring in **characters** (1-based, 0 if not found) | `STRPOS(message, 'error')` |
 | `REGEXP_LIKE(s, pattern)` | Test if string matches regex | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
 | `REGEXP_EXTRACT(s, pattern [, group])` | Extract regex match or capture group | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
 | `REGEXP_REPLACE(s, pattern, repl)` | Replace regex matches | `REGEXP_REPLACE(message, '\s+', ' ')` |
@@ -1321,12 +1322,12 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `REGEXP_EXTRACT_ALL(s, pattern)` | Extract all regex matches (JSON array) | `REGEXP_EXTRACT_ALL(log, '\d+')` → `'["123","456"]'` |
 | `REGEXP_SPLIT(s, pattern)` | Split by regex (JSON array) | `REGEXP_SPLIT(csv, ',\s*')` |
 | `SPLIT(s, delim)` | Split by delimiter (JSON array) | `SPLIT('a.b.c', '.')` → `'["a","b","c"]'` |
-| `LPAD(s, n [, pad])` | Left-pad to length n | `LPAD(port, 5, '0')` |
-| `RPAD(s, n [, pad])` | Right-pad to length n | `RPAD(name, 20)` |
+| `LPAD(s, n [, pad])` | Left-pad to n **characters**, truncating to n when longer | `LPAD(port, 5, '0')` |
+| `RPAD(s, n [, pad])` | Right-pad to n **characters**, truncating to n when longer | `RPAD(name, 20)` |
 | `CHR(n)` | Character from code point. `CHR(0)` is SQLSTATE 54000 (a NUL cannot travel in a text DataRow), a negative code is 22023, and a code past U+10FFFF is 54000 | `CHR(65)` → `'A'` |
 | `CODEPOINT(s)` | Code point of first character | `CODEPOINT('A')` → `65` |
 | `CONCAT_WS(sep, a, b, ...)` | Concatenate with separator (skips NULLs) | `CONCAT_WS(',', a, b, c)` |
-| `CHAR_LENGTH(s)` | Character length (Unicode-aware) | `CHAR_LENGTH('日本語')` → `3` |
+| `CHAR_LENGTH(s)` / `CHARACTER_LENGTH(s)` | Character length (Unicode-aware); the synonym of `LENGTH` | `CHAR_LENGTH('日本語')` → `3` |
 | `TRANSLATE(s, from, to)` | Character-by-character translation | `TRANSLATE('abc', 'abc', 'xyz')` |
 | `SOUNDEX(s)` | Phonetic code | `SOUNDEX('Robert')` → `'R163'` |
 | `LEVENSHTEIN_DISTANCE(a, b)` | Edit distance between strings | `LEVENSHTEIN_DISTANCE('kitten', 'sitting')` → `3` |

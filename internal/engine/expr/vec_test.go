@@ -89,7 +89,7 @@ func TestVecLength(t *testing.T) {
 	b := makeStringBatch(vals)
 	out := batch.NewVector(batch.TypeFloat64, len(vals))
 	args := []*batch.Vector{b.Columns[0]}
-	vecLength(args, out, len(vals))
+	vecCharLength(args, out, len(vals))
 
 	want := []float64{5, 2, 1}
 	for i, w := range want {

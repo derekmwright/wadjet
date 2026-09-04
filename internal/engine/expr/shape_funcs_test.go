@@ -80,7 +80,9 @@ func TestVecShapeLenParity(t *testing.T) {
 				fn   VecScalarFunc
 				want func(string) int32
 			}{
-				{"length", vecLength, func(s string) int32 { return int32(len(s)) }},
+				// `length` is CHARACTER_LENGTH's kernel now (#856), so it
+				// appears under char_length below rather than beside the two
+				// byte-counting spellings. There is no vecLength any more.
 				{"octet_length", vecOctetLength, func(s string) int32 { return int32(len(s)) }},
 				{"bit_length", vecBitLength, func(s string) int32 { return int32(8 * len(s)) }},
 				{"char_length", vecCharLength, func(s string) int32 {
@@ -112,34 +114,40 @@ func TestVecShapeLenParity(t *testing.T) {
 	}
 }
 
-// TestVecShapeLenMultibyteSemantics pins the finding that length() here is a
-// BYTE count, not PostgreSQL's character count, and that the offsets path
-// did not change it.
+// TestVecShapeLenMultibyteSemantics used to PIN the finding that length() here
+// was a BYTE count where PostgreSQL's is a character count. That was #856, and
+// the pin is the assertion now: LENGTH and CHARACTER_LENGTH are synonyms on the
+// server and are one kernel here, while OCTET_LENGTH keeps the byte count.
 func TestVecShapeLenMultibyteSemantics(t *testing.T) {
 	vals := []string{"日本", "é", "😀", "abc"}
 	nulls := make([]bool, len(vals))
 	b := shapeBatch(t, "s", parquet.TypeString, vals, nulls)
 
+	// live PostgreSQL 17.11: length('日本') 2, length('é') 1, length('😀') 1.
+	wantRunes := []int32{2, 1, 1, 3}
 	out := batch.NewVector(batch.TypeInt32, len(vals))
-	vecLength([]*batch.Vector{b.Columns[0]}, out, len(vals))
-	wantBytes := []int32{6, 2, 4, 3}
+	vecCharLength([]*batch.Vector{b.Columns[0]}, out, len(vals))
 	for i := range vals {
-		if out.Int32Data[i] != wantBytes[i] {
-			t.Fatalf("length(%q): got %v want %v (byte semantics)", vals[i], out.Int32Data[i], wantBytes[i])
+		if out.Int32Data[i] != wantRunes[i] {
+			t.Fatalf("length(%q): got %v want %v (character semantics)",
+				vals[i], out.Int32Data[i], wantRunes[i])
 		}
 		// The boxed scalar definition must agree — this is the invariant the
-		// offsets fast path is allowed to exist under.
-		if got := fnLength([]any{vals[i]}); got != any(wantBytes[i]) {
-			t.Fatalf("fnLength(%q): got %v (%T) want %v", vals[i], got, got, wantBytes[i])
+		// vectorized kernel is allowed to exist under.
+		if got := fnLength([]any{vals[i]}); got != any(wantRunes[i]) {
+			t.Fatalf("fnLength(%q): got %v (%T) want %v", vals[i], got, got, wantRunes[i])
 		}
 	}
 
-	outRunes := batch.NewVector(batch.TypeInt32, len(vals))
-	vecCharLength([]*batch.Vector{b.Columns[0]}, outRunes, len(vals))
-	wantRunes := []int32{2, 1, 1, 3}
+	// OCTET_LENGTH keeps the byte count, which is what makes the pair a
+	// statement about LENGTH rather than about this fixture.
+	outBytes := batch.NewVector(batch.TypeInt32, len(vals))
+	vecOctetLength([]*batch.Vector{b.Columns[0]}, outBytes, len(vals))
+	wantBytes := []int32{6, 2, 4, 3}
 	for i := range vals {
-		if outRunes.Int32Data[i] != wantRunes[i] {
-			t.Fatalf("char_length(%q): got %v want %v (rune semantics)", vals[i], outRunes.Int32Data[i], wantRunes[i])
+		if outBytes.Int32Data[i] != wantBytes[i] {
+			t.Fatalf("octet_length(%q): got %v want %v (byte semantics)",
+				vals[i], outBytes.Int32Data[i], wantBytes[i])
 		}
 	}
 }
@@ -154,9 +162,15 @@ func TestVecShapeLenNonByteArray(t *testing.T) {
 	b.Columns[0].Nulls.SetNull(2)
 
 	out := batch.NewVector(batch.TypeInt32, 3)
-	vecLength([]*batch.Vector{b.Columns[0]}, out, 3)
+	vecCharLength([]*batch.Vector{b.Columns[0]}, out, 3)
 	if out.Int32Data[0] != 1 || out.Int32Data[1] != 5 {
 		t.Fatalf("length(int) got %v %v want 1 5", out.Int32Data[0], out.Int32Data[1])
+	}
+	outOctets := batch.NewVector(batch.TypeInt32, 3)
+	vecOctetLength([]*batch.Vector{b.Columns[0]}, outOctets, 3)
+	if outOctets.Int32Data[0] != 1 || outOctets.Int32Data[1] != 5 {
+		t.Fatalf("octet_length(int) got %v %v want 1 5",
+			outOctets.Int32Data[0], outOctets.Int32Data[1])
 	}
 	if !out.Nulls.IsNull(2) {
 		t.Error("NULL int should yield NULL length")
@@ -170,7 +184,9 @@ func TestColShapeLenParityAgainstGeneric(t *testing.T) {
 	vals, nulls := shapeCorpus(t, n)
 	for _, typ := range []parquet.TypeID{parquet.TypeString, parquet.TypeBytes} {
 		b := shapeBatch(t, "s", typ, vals, nulls)
-		for name, mul := range map[string]int{"length": 1, "octet_length": 1, "bit_length": 8} {
+		// `length` is NOT here any more: it counts characters (#856) and so has
+		// no offsets fast path. The two byte-counting spellings still do.
+		for name, mul := range map[string]int{"octet_length": 1, "bit_length": 8} {
 			fast := &ColShapeLen{
 				Col:      &ColRef{Name: "s"},
 				Mul:      mul,
@@ -389,10 +405,11 @@ func TestCompileShapeSpecializations(t *testing.T) {
 		sql  string
 		want string
 	}{
-		{"SELECT length(s) FROM t", "*expr.ColShapeLen"},
 		{"SELECT octet_length(s) FROM t", "*expr.ColShapeLen"},
 		{"SELECT bit_length(s) FROM t", "*expr.ColShapeLen"},
-		// Rune counting keeps the generic call.
+		// Rune counting keeps the generic call, and `length` is rune counting
+		// now — the offsets fast path cannot serve a character count (#856).
+		{"SELECT length(s) FROM t", "*expr.numericFuncCall"},
 		{"SELECT char_length(s) FROM t", "*expr.numericFuncCall"},
 		// Non-column argument keeps the generic call.
 		{"SELECT length(upper(s)) FROM t", "*expr.numericFuncCall"},
@@ -445,7 +462,7 @@ func TestShapeLenKernelsSurviveMismatchedOutput(t *testing.T) {
 		t.Skip("string vectors carry Int32Data on this build")
 	}
 
-	vecLength([]*batch.Vector{src}, out, 3)
+	vecOctetLength([]*batch.Vector{src}, out, 3)
 	for i, want := range []int64{3, 2, 0} {
 		got := out.GetValue(i)
 		if !valueEqualsInt(got, want) {

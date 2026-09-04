@@ -42,11 +42,17 @@ import (
 // from an empty arena.
 
 // shapeLenFuncs are the function names whose result depends only on a
-// value's byte length. char_length/character_length are absent on purpose:
-// they count runes and must read the bytes.
+// value's byte length.
+//
+// length / len / char_length / character_length are all absent, and all four
+// for the same reason: they count RUNES, and a rune count is a scan of the
+// continuation bytes rather than a subtraction of two offsets. The first two
+// were here until #856, which is what made `LENGTH('éàü')` answer 6 where
+// PostgreSQL — and this engine's own CHARACTER_LENGTH — answer 3. The cost is
+// ClickBench Q28's shape-only decode, and it is the price of the right answer:
+// the optimization exists to skip materializing bytes a query does not read,
+// and a character count reads them.
 var shapeLenFuncs = map[string]bool{
-	"length":       true,
-	"len":          true,
 	"octet_length": true,
 	"bit_length":   true,
 }

@@ -1205,12 +1205,11 @@ func isBinaryFloatCast(e Expr) bool {
 	}
 }
 
-// shapeLenMul maps the byte-length family to its multiplier. char_length /
-// character_length are deliberately absent: they count runes and must read
-// the bytes.
+// shapeLenMul maps the byte-length family to its multiplier. length / len /
+// char_length / character_length are deliberately absent: all four count RUNES
+// and must read the bytes (#856 moved the first two here — they were byte
+// counts, which is what the defect was).
 var shapeLenMul = map[string]int{
-	"length":       1,
-	"len":          1,
 	"octet_length": 1,
 	"bit_length":   8,
 }

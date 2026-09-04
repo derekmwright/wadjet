@@ -4203,8 +4203,8 @@ func init() {
 	vecBuiltins := map[string]VecScalarFunc{
 		"upper":        vecUpper,
 		"lower":        vecLower,
-		"length":       vecLength,
-		"len":          vecLength,
+		"length":       vecCharLength,
+		"len":          vecCharLength,
 		"octet_length": vecOctetLength,
 		"bit_length":   vecBitLength,
 		// Rune counting needs the bytes — no offsets fast path exists.
@@ -4309,31 +4309,49 @@ func fnConcatOp(args []any) any {
 	return sb.String()
 }
 
+// fnLength is LENGTH / LEN, and it counts CHARACTERS.
+//
+// `length` and `character_length` are synonyms in PostgreSQL and disagreed
+// here: LENGTH('éàü') was 6 — a byte count — beside CHARACTER_LENGTH's 3 on
+// the same input (#856). OCTET_LENGTH and BIT_LENGTH are the byte-counting
+// spellings and are unchanged.
 func fnLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return int32Count(len(toString(args[0])))
+	return int32Count(utf8.RuneCountInString(toString(args[0])))
 }
 
+// fnSubstr is SUBSTRING / SUBSTR, and it indexes CHARACTERS.
+//
+// Byte indexing did not merely mislabel: `SUBSTR('éàü', 2, 2)` cut both
+// two-byte characters in half and produced a string that is not valid UTF-8
+// (#856). PostgreSQL answers `àü`.
 func fnSubstr(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	s := toString(args[0])
+	r := []rune(toString(args[0]))
 	start := int(ToFloat64(args[1])) - 1 // SQL is 1-indexed
 	if len(args) >= 3 && args[2] != nil {
 		length := int(ToFloat64(args[2]))
-		lo, hi := substrWindow(start, length, len(s))
-		return s[lo:hi]
+		// PostgreSQL refuses a NEGATIVE length with 22011 rather than
+		// answering the empty string, which is what substrWindow's own doc
+		// recorded as unreachable while the per-row error channel did not
+		// exist. It does (#347), so this refuses like the server.
+		if length < 0 {
+			raiseNegativeSubstringLength()
+		}
+		lo, hi := substrWindow(start, length, len(r))
+		return string(r[lo:hi])
 	}
 	if start < 0 {
 		start = 0
 	}
-	if start >= len(s) {
+	if start >= len(r) {
 		return ""
 	}
-	return s[start:]
+	return string(r[start:])
 }
 
 // substrWindow clamps SUBSTR's [start, start+length) character window (both
@@ -4341,8 +4359,9 @@ func fnSubstr(args []any) any {
 // rule is PostgreSQL's (#373): a start below position 1 consumes part of the
 // length before the string begins — SUBSTR('abcdef', 0, 3) selects positions
 // 0,1,2 of which only 1 and 2 exist, so 'ab' and not 'abc'. A non-positive
-// or overflowed window is empty rather than an error (PostgreSQL errors only
-// on a negative LENGTH, which this engine's scalar layer cannot raise).
+// or overflowed window is empty rather than an error; a NEGATIVE length is
+// SQLSTATE 22011 on the server and the callers raise it before reaching here
+// (#856). n is a CHARACTER count in every caller.
 func substrWindow(start, length, n int) (int, int) {
 	end := start + length
 	if length < 0 || end < start { // negative length or overflow
@@ -4406,30 +4425,36 @@ func fnLeft(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	s := toString(args[0])
+	// LEFT counts CHARACTERS (#856). It is not reachable from SQL today — the
+	// parser reserves LEFT and RIGHT for the join keywords — and it is fixed
+	// with the rest of the family anyway, because a byte-indexing sibling left
+	// behind is exactly the two-implementation drift this class keeps
+	// producing.
+	r := []rune(toString(args[0]))
 	n := int(ToFloat64(args[1]))
 	if n < 0 {
 		return ""
 	}
-	if n >= len(s) {
-		return s
+	if n >= len(r) {
+		return string(r)
 	}
-	return s[:n]
+	return string(r[:n])
 }
 
 func fnRight(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	s := toString(args[0])
+	// CHARACTERS, like LEFT above (#856).
+	r := []rune(toString(args[0]))
 	n := int(ToFloat64(args[1]))
 	if n < 0 {
 		return ""
 	}
-	if n >= len(s) {
-		return s
+	if n >= len(r) {
+		return string(r)
 	}
-	return s[len(s)-n:]
+	return string(r[len(r)-n:])
 }
 
 func fnStartsWith(args []any) any {
@@ -6952,11 +6977,17 @@ func fnStrPos(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	pos := strings.Index(toString(args[0]), toString(args[1]))
+	s := toString(args[0])
+	pos := strings.Index(s, toString(args[1]))
 	if pos < 0 {
 		return int32(0)
 	}
-	return int32(pos + 1) // 1-based
+	// The position is a CHARACTER position, as everywhere else in this family:
+	// POSITION('à' IN 'éàü') is 2 on the server and was 3 here, the byte offset
+	// (#856). The needle search itself stays bytewise — on valid UTF-8 a
+	// substring match is the same match either way — and only the answer is
+	// converted.
+	return int32Count(utf8.RuneCountInString(s[:pos]) + 1) // 1-based
 }
 
 func fnRegexpLike(args []any) any {
@@ -7220,62 +7251,57 @@ func fnLPad(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	s := toString(args[0])
+	// LPAD measures WIDTH in characters, and both the truncation and the fill
+	// used to measure bytes: LPAD('éàü', 5, 'x') answered two characters and
+	// half of a third — invalid UTF-8 — where PostgreSQL answers `xxéàü`
+	// (#856).
+	r := []rune(toString(args[0]))
 	n := int(ToFloat64(args[1]))
-	pad := " "
+	pad := []rune(" ")
 	if len(args) >= 3 && args[2] != nil {
-		pad = toString(args[2])
+		pad = []rune(toString(args[2]))
 	}
-	if len(pad) == 0 || n <= len(s) {
+	if len(pad) == 0 || n <= len(r) {
 		if n < 0 {
 			return ""
 		}
-		if n <= len(s) {
-			return s[:n]
+		if n <= len(r) {
+			return string(r[:n])
 		}
-		return s
+		return string(r)
 	}
-	var sb strings.Builder
-	for sb.Len()+len(s) < n {
-		sb.WriteString(pad)
+	fill := make([]rune, 0, n-len(r))
+	for len(fill) < n-len(r) {
+		fill = append(fill, pad...)
 	}
-	result := sb.String()
-	need := n - len(s)
-	if len(result) > need {
-		result = result[:need]
-	}
-	return result + s
+	return string(fill[:n-len(r)]) + string(r)
 }
 
 func fnRPad(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	s := toString(args[0])
+	// CHARACTERS, like LPAD above (#856).
+	r := []rune(toString(args[0]))
 	n := int(ToFloat64(args[1]))
-	pad := " "
+	pad := []rune(" ")
 	if len(args) >= 3 && args[2] != nil {
-		pad = toString(args[2])
+		pad = []rune(toString(args[2]))
 	}
-	if len(pad) == 0 || n <= len(s) {
+	if len(pad) == 0 || n <= len(r) {
 		if n < 0 {
 			return ""
 		}
-		if n <= len(s) {
-			return s[:n]
+		if n <= len(r) {
+			return string(r[:n])
 		}
-		return s
+		return string(r)
 	}
-	var sb strings.Builder
-	sb.WriteString(s)
-	for sb.Len() < n {
-		sb.WriteString(pad)
+	out := append([]rune(nil), r...)
+	for len(out) < n {
+		out = append(out, pad...)
 	}
-	result := sb.String()
-	if len(result) > n {
-		result = result[:n]
-	}
-	return result
+	return string(out[:n])
 }
 
 func fnChr(args []any) any {
@@ -11530,14 +11556,6 @@ func vecLower(args []*batch.Vector, out *batch.Vector, n int) {
 	}
 }
 
-// vecLength is the offsets-shape kernel for length()/len(): a byte count
-// read straight off the offsets array. Non-byte-array inputs (length() of a
-// numeric or temporal column, which used to index a nil Offsets slice and
-// panic) fall through to the boxed per-row definition. See shape_funcs.go.
-func vecLength(args []*batch.Vector, out *batch.Vector, n int) {
-	vecShapeLenScaled(args, out, n, 1)
-}
-
 func vecTrim(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
 	hasNulls := src.Nulls.HasNulls()
@@ -11607,22 +11625,29 @@ func vecSubstr(args []*batch.Vector, out *batch.Vector, n int) {
 			out.BytesData.Set(i, nil)
 			continue
 		}
-		b := src.BytesData.Value(i)
+		// CHARACTERS, matching fnSubstr — this kernel indexed BYTES and cut
+		// multi-byte characters in half (#856), and the two implementations
+		// have to agree or the answer depends on which evaluator ran.
+		r := []rune(string(src.BytesData.Value(i)))
 		start := int(vecReadFloat64(args[1], i)) - 1 // SQL is 1-indexed
 		if hasLen {
+			length := int(vecReadFloat64(args[2], i))
+			if length < 0 {
+				raiseNegativeSubstringLength()
+			}
 			// PostgreSQL's window rule; must match fnSubstr (#373).
-			lo, hi := substrWindow(start, int(vecReadFloat64(args[2], i)), len(b))
-			out.BytesData.Set(i, b[lo:hi])
+			lo, hi := substrWindow(start, length, len(r))
+			out.BytesData.Set(i, []byte(string(r[lo:hi])))
 			continue
 		}
 		if start < 0 {
 			start = 0
 		}
-		if start >= len(b) {
+		if start >= len(r) {
 			out.BytesData.Set(i, nil)
 			continue
 		}
-		out.BytesData.Set(i, b[start:])
+		out.BytesData.Set(i, []byte(string(r[start:])))
 	}
 }
 
@@ -11653,12 +11678,15 @@ func vecReverse(args []*batch.Vector, out *batch.Vector, n int) {
 			out.BytesData.Set(i, nil)
 			continue
 		}
-		b := src.BytesData.Value(i)
-		rev := make([]byte, len(b))
-		for j, k := 0, len(b)-1; j <= k; j, k = j+1, k-1 {
-			rev[j], rev[k] = b[k], b[j]
+		// RUNES, matching fnReverse, which has always reversed runes: this
+		// kernel reversed BYTES, so REVERSE('éàü') answered mojibake through
+		// the vectorized path and `üàé` through the boxed one — one function,
+		// two answers, decided by which evaluator the plan reached (#856).
+		rev := []rune(string(src.BytesData.Value(i)))
+		for j, k := 0, len(rev)-1; j < k; j, k = j+1, k-1 {
+			rev[j], rev[k] = rev[k], rev[j]
 		}
-		out.BytesData.Set(i, rev)
+		out.BytesData.Set(i, []byte(string(rev)))
 	}
 }
 

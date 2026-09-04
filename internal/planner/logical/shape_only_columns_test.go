@@ -48,20 +48,33 @@ func TestShapeOnlyColumnsMarked(t *testing.T) {
 		want string
 	}{
 		{
-			// The motivating shape: ClickBench Q28. url is used twice and
-			// neither use reads a byte.
+			// The motivating shape: ClickBench Q28, spelled with the
+			// BYTE-counting length. url is used twice and neither use reads a
+			// byte.
+			//
+			// The published Q28 spells it `LENGTH(URL)`, and that spelling no
+			// longer takes this path: #856 made LENGTH count CHARACTERS, as
+			// PostgreSQL and this engine's own CHARACTER_LENGTH do, and a
+			// character count is a scan of the continuation bytes rather than
+			// a subtraction of two offsets. The not-marked list below carries
+			// the LENGTH spelling as the boundary this states.
 			name: "clickbench-q28",
-			sql:  "SELECT counterid, AVG(LENGTH(url)) AS l, COUNT(*) AS c FROM hits WHERE url <> '' GROUP BY counterid HAVING COUNT(*) > 100 ORDER BY l DESC LIMIT 25",
+			sql:  "SELECT counterid, AVG(OCTET_LENGTH(url)) AS l, COUNT(*) AS c FROM hits WHERE url <> '' GROUP BY counterid HAVING COUNT(*) > 100 ORDER BY l DESC LIMIT 25",
 			want: "url",
 		},
 		{
-			name: "length-only-projection",
-			sql:  "SELECT k, LENGTH(url) AS l FROM hits",
+			name: "octet-length-only-projection",
+			sql:  "SELECT k, OCTET_LENGTH(url) AS l FROM hits",
 			want: "url",
 		},
 		{
 			name: "octet-length",
 			sql:  "SELECT k, octet_length(url) AS l FROM hits",
+			want: "url",
+		},
+		{
+			name: "bit-length",
+			sql:  "SELECT k, bit_length(url) AS l FROM hits",
 			want: "url",
 		},
 		{
@@ -81,14 +94,14 @@ func TestShapeOnlyColumnsMarked(t *testing.T) {
 		},
 		{
 			name: "sum-of-lengths",
-			sql:  "SELECT SUM(LENGTH(url)) AS s FROM hits",
+			sql:  "SELECT SUM(OCTET_LENGTH(url)) AS s FROM hits",
 			want: "url",
 		},
 		{
 			// DISTINCT is rewritten to GROUP BY the projected alias, so the
 			// column itself never reaches the aggregate.
 			name: "distinct-over-length",
-			sql:  "SELECT DISTINCT LENGTH(url) AS l FROM hits",
+			sql:  "SELECT DISTINCT OCTET_LENGTH(url) AS l FROM hits",
 			want: "url",
 		},
 		{
@@ -118,7 +131,7 @@ func TestShapeOnlyColumnsNotMarked(t *testing.T) {
 		{
 			// One value use anywhere disqualifies the column.
 			name: "mixed-shape-and-value",
-			sql:  "SELECT url, LENGTH(url) AS l FROM hits WHERE url <> ''",
+			sql:  "SELECT url, OCTET_LENGTH(url) AS l FROM hits WHERE url <> ''",
 			col:  "url",
 		},
 		{
@@ -128,17 +141,17 @@ func TestShapeOnlyColumnsNotMarked(t *testing.T) {
 		},
 		{
 			name: "ordered-by-the-column",
-			sql:  "SELECT k, LENGTH(url) AS l FROM hits ORDER BY url",
+			sql:  "SELECT k, OCTET_LENGTH(url) AS l FROM hits ORDER BY url",
 			col:  "url",
 		},
 		{
 			name: "like-filter",
-			sql:  "SELECT k, LENGTH(url) AS l FROM hits WHERE url LIKE '%x%'",
+			sql:  "SELECT k, OCTET_LENGTH(url) AS l FROM hits WHERE url LIKE '%x%'",
 			col:  "url",
 		},
 		{
 			name: "non-empty-literal-comparison",
-			sql:  "SELECT k, LENGTH(url) AS l FROM hits WHERE url = 'x'",
+			sql:  "SELECT k, OCTET_LENGTH(url) AS l FROM hits WHERE url = 'x'",
 			col:  "url",
 		},
 		{
@@ -148,8 +161,23 @@ func TestShapeOnlyColumnsNotMarked(t *testing.T) {
 			col:  "url",
 		},
 		{
+			// #856's boundary: LENGTH is char_length's synonym now, so the
+			// spelling ClickBench Q28 uses no longer takes the shape-only
+			// decode. This entry is the claim the marked list makes, attempted
+			// from the outside — without it, restoring `length` to
+			// shapeLenFuncs would silently pass every test in this file.
+			name: "length-is-a-character-count",
+			sql:  "SELECT k, LENGTH(url) AS l FROM hits",
+			col:  "url",
+		},
+		{
+			name: "length-inside-an-aggregate",
+			sql:  "SELECT SUM(LENGTH(url)) AS s FROM hits",
+			col:  "url",
+		},
+		{
 			name: "substr",
-			sql:  "SELECT k, LENGTH(url) AS l, substr(url, 1, 3) AS p FROM hits",
+			sql:  "SELECT k, OCTET_LENGTH(url) AS l, substr(url, 1, 3) AS p FROM hits",
 			col:  "url",
 		},
 		{
@@ -159,22 +187,22 @@ func TestShapeOnlyColumnsNotMarked(t *testing.T) {
 		},
 		{
 			name: "join",
-			sql:  "SELECT h.k, LENGTH(h.url) AS l FROM hits h JOIN other o ON h.k = o.k",
+			sql:  "SELECT h.k, OCTET_LENGTH(h.url) AS l FROM hits h JOIN other o ON h.k = o.k",
 			col:  "url",
 		},
 		{
 			name: "union",
-			sql:  "SELECT LENGTH(url) AS l FROM hits UNION ALL SELECT LENGTH(url) AS l FROM hits",
+			sql:  "SELECT OCTET_LENGTH(url) AS l FROM hits UNION ALL SELECT OCTET_LENGTH(url) AS l FROM hits",
 			col:  "url",
 		},
 		{
 			name: "window",
-			sql:  "SELECT k, LENGTH(url) AS l, ROW_NUMBER() OVER (PARTITION BY url) AS rn FROM hits",
+			sql:  "SELECT k, OCTET_LENGTH(url) AS l, ROW_NUMBER() OVER (PARTITION BY url) AS rn FROM hits",
 			col:  "url",
 		},
 		{
 			name: "in-subquery",
-			sql:  "SELECT k, LENGTH(url) AS l FROM hits WHERE url IN (SELECT url FROM other)",
+			sql:  "SELECT k, OCTET_LENGTH(url) AS l FROM hits WHERE url IN (SELECT url FROM other)",
 			col:  "url",
 		},
 		{
