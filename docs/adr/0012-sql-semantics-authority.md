@@ -2013,22 +2013,19 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     box for a projected TIMESTAMP: that is a third question — what the Go
     API hands back — bounded by the same five consumers, and not this one.
 
-    **A SUB-SECOND timestamp is PADDED to three digits, and that is a
-    recorded divergence.** (Added 2026-09-02 by the review of #544.)
-    PostgreSQL prints the MINIMAL fraction — verified live,
-    `('2023-11-14 22:13:20.500'::timestamp)::text` is
-    `2023-11-14 22:13:20.5` and `.250` prints `.25` — while
-    `batch.FormatTimestamp` always prints three. It is the same function
-    pgwire's send path calls, so the padding is what a CLIENT sees, not only
-    what CAST answers: the divergence is on the WIRE and the two are
-    consistent with each other, which is the property #544 was about.
-    Keeping it is a choice about a rendering, and it is recorded rather than
-    quietly true: every `c_ts` in the type-matrix fixture is a whole second,
-    so the sweep that claims "CAST agrees with PostgreSQL" never reaches the
-    branch where it does not. `wadjet.TestCastTimestampSubSecondIsPaddedToMilliseconds`
-    pins it on its own two-row fixture and fails the day the padding goes;
-    `pgTextOf` in the same file answers PostgreSQL's minimal form, so the
-    sweep's reference is PostgreSQL's rule and not the implementation's.
+    **A SUB-SECOND timestamp prints the MINIMAL fraction, as PostgreSQL
+    does.** (Recorded as a divergence 2026-09-02 by the review of #544;
+    CLOSED 2026-09-04.) The server prints `2023-11-14 22:13:20.5` for `.500`
+    and `.25` for `.250` — verified live — and `batch.FormatTimestamp` printed
+    three digits always. It is the same function pgwire's send path calls, so
+    the padding was what a CLIENT saw and not only what CAST answered; one
+    change to that one renderer closed both doors, which is the property #544
+    is about. `batch.TestFormatTimestamp` carries six fraction cells including
+    the ones a trim could break (`.001`, `.999`, and every whole second, so a
+    trim that left a bare point behind fails), and `pgTextOf` in
+    `wadjet/cast_string_rendering_test.go` still answers PostgreSQL's rule
+    written from the server rather than from this function, so the sweep's
+    reference stays independent of the implementation.
 
     **DURATION is NOT fixed, and the reason is a type-model gap rather than
     an omission.** `CAST(c_dur AS STRING)` answers the raw nanosecond count

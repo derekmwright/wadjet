@@ -831,21 +831,23 @@ func arcD5LateralCells() []arcD5Cell {
 				`ON true ORDER BY s.n, o.customer`,
 			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
 			wantUnreachableRoutes: 1},
-		// ARITHMETIC over the default. The VALUES are PostgreSQL's; the BOX is
-		// not, and the divergence is not this repair's — it is the
-		// polymorphic-declaration rung, reproducible with no lateral in
-		// sight: `SELECT COALESCE(o.id, 0) + 1 FROM lat_ord o` comes back
-		// float64 here and bigint in PostgreSQL, while `COALESCE(o.id, 0)`
-		// and `o.id + 1` each stay int64. The default this repair substitutes
-		// is a COALESCE, so it puts that rung under any expression written
-		// over a lateral COUNT. Pinned with the box it gives; the day the
-		// rung is fixed this fails and becomes int64.
+		// ARITHMETIC over the default. This was PINNED with a float64 box and
+		// the note "the day the rung is fixed this fails and becomes int64".
+		// #849 fixed that rung: the integer domain is a property of the
+		// expression's TYPE, so a choice construct over integer arms — which
+		// is what the substituted default IS, a COALESCE — types as integer
+		// and the arithmetic over it picks the checked int64 kernel. The
+		// reproduction the pin named, `SELECT COALESCE(o.id, 0) + 1 FROM
+		// lat_ord o`, is bigint on both engines now.
+		//
+		// The name is kept so the history is greppable; the cell asserts
+		// PostgreSQL's box.
 		{issue: "#767", name: "boundary_arithmetic_over_the_default_is_float_boxed",
 			sql: `SELECT o.customer AS c, s.n + 1 AS n FROM lat_ord o ` + lat +
 				`ON true ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=float:3", "c=Bob|n=float:3", "c=Carol|n=float:1"},
+			want:                  []string{"c=Alice|n=int64:3", "c=Bob|n=int64:3", "c=Carol|n=int64:1"},
 			wantUnreachableRoutes: 1,
-			pgSays:                "3, 3, 1 as BIGINT — the values agree, the declared type does not"},
+			pgSays:                "3, 3, 1 as BIGINT — the values and now the box too (#849)"},
 
 		// THE `SELECT *` BOUNDARY, pinned for real this time. A star expands
 		// in a later pass over the plan's own schema, so there is nothing in

@@ -181,16 +181,16 @@ func TestCastStringAgreesWithPostgresAcrossFixture(t *testing.T) {
 // what the fix calls, so calling it here would only prove the function is
 // deterministic.
 //
-// The TIMESTAMP arm is where that discipline actually bites. PostgreSQL
-// prints the MINIMAL fraction — `('…20.500'::timestamp)::text` is
-// `…20.5`, verified live — while `batch.FormatTimestamp` always prints
-// three digits. Writing the three-digit rule here would re-encode the
-// implementation as the reference in the one branch where the two differ,
-// which is exactly what made the OLD version of this sweep unable to fail
-// for #544. So this returns PostgreSQL's, and the divergence is pinned by
-// TestCastTimestampSubSecondIsPaddedToMilliseconds below (ADR-0012 item 11).
-// Every c_ts in the type-matrix fixture is a whole second, so the two rules
-// agree across this sweep and the divergence needs its own fixture.
+// The TIMESTAMP arm is where that discipline actually bites. PostgreSQL prints
+// the MINIMAL fraction — `('…20.500'::timestamp)::text` is `…20.5`, verified
+// live — and `batch.FormatTimestamp` printed three digits always until #544.
+// Writing the three-digit rule here would have re-encoded the implementation as
+// the reference in the one branch where the two differed, which is exactly what
+// made the OLD version of this sweep unable to fail for #544. It stays written
+// from the server now that the two agree, so the reference is independent of
+// the function it checks. Every c_ts in the type-matrix fixture is a whole
+// second, so the fractional branch needs its own fixture:
+// TestCastTimestampSubSecondPrintsTheMinimalFraction below.
 func pgTextOf(typ parquet.TypeID, v any) (string, bool) {
 	switch typ {
 	case parquet.TypeTimestamp:
@@ -275,14 +275,19 @@ func TestCastDurationIsPinnedToNanoseconds(t *testing.T) {
 //
 // PostgreSQL 17 prints the MINIMAL fraction (verified live:
 // `('2023-11-14 22:13:20.500'::timestamp)::text` is `2023-11-14 22:13:20.5`,
-// and `.250` prints `.25`). `batch.FormatTimestamp` always prints THREE
-// digits, and it is the same function pgwire's send path calls, so the
-// padding is what a client sees too — the divergence is on the WIRE, not
-// only in CAST. It is recorded in ADR-0012 item 11 and pinned here.
+// and `.250` prints `.25`). `batch.FormatTimestamp` printed THREE digits
+// always, and it is the same function pgwire's send path calls, so the padding
+// was what a client saw too — the divergence was on the WIRE, not only in
+// CAST.
 //
-// The day the padding goes this test fails, and the fix is to delete it, drop
-// the ADR entry, and take the TrimRight out of pgTextOf.
-func TestCastTimestampSubSecondIsPaddedToMilliseconds(t *testing.T) {
+// This was a PIN recording the padding, with the note that the day it went the
+// test should be deleted. It is an ASSERTION now (#544): every `c_ts` in the
+// type-matrix fixture is a whole second, so the sweep above never reaches the
+// fractional branch and this two-row fixture is the only thing that does.
+// `pgTextOf` above is unchanged and still writes PostgreSQL's rule from the
+// server rather than from `FormatTimestamp`, which is what keeps the sweep's
+// reference independent.
+func TestCastTimestampSubSecondPrintsTheMinimalFraction(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
 	if err != nil {
@@ -314,8 +319,8 @@ func TestCastTimestampSubSecondIsPaddedToMilliseconds(t *testing.T) {
 		id       int64
 		want, pg string
 	}{
-		{1, "2023-11-14 22:13:20.500", "2023-11-14 22:13:20.5"},
-		{2, "2023-11-14 22:13:20.250", "2023-11-14 22:13:20.25"},
+		{1, "2023-11-14 22:13:20.5", "2023-11-14 22:13:20.5"},
+		{2, "2023-11-14 22:13:20.25", "2023-11-14 22:13:20.25"},
 	} {
 		res, err := tmRun(ctx, db, fmt.Sprintf(
 			"SELECT CAST(ts AS STRING) AS v FROM subsec_ts WHERE id = %d", tc.id))
@@ -327,10 +332,9 @@ func TestCastTimestampSubSecondIsPaddedToMilliseconds(t *testing.T) {
 		}
 		got, _ := res.Rows[0]["v"].(string)
 		if got != tc.want {
-			t.Errorf("id %d: CAST(ts AS STRING) = %q, this pin records %q and PostgreSQL 17 "+
-				"renders %q.\nIf the padding is gone, delete this pin, drop ADR-0012 item 11's "+
-				"sub-second entry, and remove the TrimRight from pgTextOf — and check the WIRE "+
-				"moved with it, since pgwire's send path calls the same FormatTimestamp.",
+			t.Errorf("id %d: CAST(ts AS STRING) = %q, want %q — PostgreSQL 17 renders %q "+
+				"and batch.FormatTimestamp is what pgwire's send path calls, so a padded "+
+				"fraction here is a padded fraction on the wire (#544).",
 				tc.id, got, tc.want, tc.pg)
 		}
 	}
