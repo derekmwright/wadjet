@@ -54,7 +54,7 @@ func TestCTEBodyDoesNotSeeItsOwnName(t *testing.T) {
 		{name: "a self-reference with no base table is 42P01",
 			sql: "WITH nosuch AS (SELECT * FROM nosuch) SELECT * FROM nosuch", state: "42P01"},
 		{name: "a FORWARD reference to a later CTE is 42P01",
-			sql: "WITH c1 AS (SELECT x FROM c2), c2 AS (SELECT 1 AS x) SELECT * FROM c1",
+			sql:   "WITH c1 AS (SELECT x FROM c2), c2 AS (SELECT 1 AS x) SELECT * FROM c1",
 			state: "42P01"},
 		// The controls: everything else about CTE scope is unchanged.
 		{name: "a LATER CTE sees an EARLIER one",

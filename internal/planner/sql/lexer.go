@@ -902,6 +902,24 @@ func lexNumber(l *lexer) stateFn {
 			l.next()
 		}
 	}
+	// TRAILING JUNK. PostgreSQL refuses a numeric literal that runs straight
+	// into an identifier character — `SELECT 100_` and `SELECT 1__0` are
+	// 42601 `trailing junk after numeric literal` there. This lexer stopped
+	// the number at the underscore and handed the rest to the parser as an
+	// implicit ALIAS, so `100_` answered 100 under a column called `_` and
+	// `1__0` answered 1 under `__0` — which is also the shape of the reserved
+	// hidden-slot namespace.
+	if r := l.peek(); r == '_' || unicode.IsLetter(r) {
+		for {
+			c := l.peek()
+			if c == '_' || unicode.IsLetter(c) || (c >= '0' && c <= '9') {
+				l.next()
+				continue
+			}
+			break
+		}
+		return l.errorf("trailing junk after numeric literal at or near %q", l.input[l.start:l.pos])
+	}
 	// The token's VALUE carries no separators. Every consumer of a numeric
 	// literal downstream reads the text — the DECIMAL path reads its exact
 	// digits, ADR-0024 item 6 — and teaching each of them the separator rule

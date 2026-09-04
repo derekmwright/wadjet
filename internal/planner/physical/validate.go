@@ -75,6 +75,14 @@ type colScope struct {
 	// whose field shape this binder does not carry, is never in the map and so
 	// is never refused. Only ROW columns with a non-empty field list appear.
 	rowFields map[string][]parquet.Column
+	// exactQuals records the SPELLING each FROM source declared its qualifier
+	// under, for the same reason exact does it for columns: a DELIMITED alias
+	// is byte-exact. `FROM rvc t, rvd2 "T"` declares two relations, and
+	// `SELECT "T".k FROM rvc T` is 42P01 in PostgreSQL — the delimited alias
+	// is not reachable through the unquoted one. The maps below are keyed on
+	// the FOLDED qualifier, which is right for an unquoted reference because
+	// the lexer folded it (#731) and wrong for a quoted one.
+	exactQuals map[string]bool
 	// exact records the SPELLING each source published, so a DELIMITED
 	// reference can be held to the bytes PostgreSQL holds it to. Every other
 	// map here is keyed on the folded name, which is right for an unquoted
@@ -105,7 +113,8 @@ func (s *colScope) providesBareColumn(name string) bool {
 func newColScope() *colScope {
 	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
 		colTypes: map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
-		rowFields: map[string][]parquet.Column{}, exact: map[string]bool{}}
+		rowFields: map[string][]parquet.Column{}, exact: map[string]bool{},
+		exactQuals: map[string]bool{}}
 }
 
 func (s *colScope) addColumn(col string) {
@@ -137,6 +146,7 @@ func (s *colScope) addQualified(qual, col string) {
 		return
 	}
 	q := strings.ToLower(qual)
+	s.exactQuals[qual] = true
 	if s.quals[q] == nil {
 		s.quals[q] = map[string]bool{}
 	}
@@ -210,6 +220,9 @@ func (s *colScope) merge(o *colScope) {
 	}
 	for c := range o.exact {
 		s.exact[c] = true
+	}
+	for q := range o.exactQuals {
+		s.exactQuals[q] = true
 	}
 	for q, cs := range o.quals {
 		if s.quals[q] == nil {
@@ -295,6 +308,14 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 	}
 	col := strings.ToLower(ref.Column)
 	if ref.Table != "" {
+		// A DELIMITED qualifier is byte-exact, the way a delimited column is
+		// (#731 / round-0 B2). It fires only where the fold WOULD have
+		// resolved it and no FROM source declared those bytes, so a scope
+		// that lost a spelling cannot manufacture a refusal.
+		if plansql.FoldIdent(ref.Table) != ref.Table && !s.exactQuals[ref.Table] &&
+			s.quals[strings.ToLower(ref.Table)] != nil {
+			return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
+		}
 		q := strings.ToLower(ref.Table)
 		if cols, ok := s.quals[q]; ok {
 			// Qualifier is a known table/alias: a miss iff the column is absent.

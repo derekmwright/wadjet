@@ -6470,7 +6470,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Column:    resolveSortKeyColumn(ob.Column, sortChild),
 				Desc:      ob.Desc,
 				NullsLast: resolveNullsLast(ob),
-				SlotPos:   sortKeySlotPos(ob, node),
+				SlotPos:   sortKeySlotPosStage(ob, node),
 			}
 			// A projection absorbed onto the producer while this subtree was
 			// walked (absorbAggregateOutputProjection) MAKES the alias real
@@ -11840,6 +11840,57 @@ func (a *aggPreProject) hasVecDecimal() bool {
 }
 
 func (a *aggPreProject) Close() error { return nil }
+
+// sortKeySlotPosStage is sortKeySlotPos for the DAG, which needs a stricter
+// proof and gets one.
+//
+// The position addresses the SELECT LIST, so it may only be used where the
+// operator's input IS the select list. On the single-process path a Project
+// operator sits directly below the Sort and it is. On the DAG **no stage is
+// emitted for a Project**, so the sort stage reads the materialized output of
+// the PRODUCING stage — which is the select list only when that producer is a
+// single relation, narrowed to exactly those columns by the scan-output
+// pruning. Put a JOIN or a set operation under it and the stage emits both
+// arms' whole schemas: `SELECT clt1.c2, clt2.c1 FROM clt1, clt2 ORDER BY 2`
+// then sorted by column ONE on both DAG arms, right values in the wrong
+// sequence (round-0 B4 — the author's own self-flag).
+//
+// The producer's final column list is NOT available here: Stage.OutputColumns
+// is filled by pruneScanOutputColumns AFTER walkStages returns, so an exact
+// check against it cannot be made at this point. The subtree's SHAPE can be,
+// and it is the claim this bound rests on — asserted from both sides in
+// benchmarks/tpch/duplicate_name_dag_test.go and
+// internal/coordinator/collide_two_path_test.go: one relation uses the
+// position, a join declines it and resolves by name, and both answer
+// PostgreSQL's order.
+func sortKeySlotPosStage(ob logical.OrderExpr, sortNode *logical.Node) int {
+	pos := sortKeySlotPos(ob, sortNode)
+	if pos == 0 {
+		return 0
+	}
+	if subtreeJoinsRelations(sortNode) {
+		return 0
+	}
+	return pos
+}
+
+// subtreeJoinsRelations reports whether a node's subtree combines two
+// relations — a join or a set operation — anywhere below it.
+func subtreeJoinsRelations(n *logical.Node) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type {
+	case logical.NodeJoin, logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+		return true
+	}
+	for _, c := range n.Children {
+		if subtreeJoinsRelations(c) {
+			return true
+		}
+	}
+	return false
+}
 
 // sortKeySlotPos is the input column index (1-based) a sort key addresses, or
 // 0 to resolve it by name.

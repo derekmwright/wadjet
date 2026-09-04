@@ -4559,13 +4559,23 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 		}
 	}
 
+	// FOLDED, not byte-exact. Two relations may carry the same column name in
+	// different cases — a CamelCase parquet table joined against one whose
+	// column is lower case — and since an unquoted reference folds (#731)
+	// those two names ARE one name to every resolver above. Detecting the
+	// duplicate byte-exactly emitted both UNQUALIFIED side by side, and a
+	// qualified reference that missed then dropped its qualifier and bound
+	// the OTHER relation's column: `SELECT rvxa.MixedCol, rvxb.mixedcol FROM
+	// rvxa, rvxb` answered rvxb's value twice. The identity of an output
+	// column is (relation, folded name) and never the bare folded name
+	// alone (ADR-0026).
 	seen := make(map[string]bool, len(leftSchema))
 	for _, col := range leftSchema {
-		seen[col.Name] = true
+		seen[batch.FoldIdent(col.Name)] = true
 	}
 
 	for i, col := range buildSchema {
-		isDup := seen[col.Name]
+		isDup := seen[batch.FoldIdent(col.Name)]
 		// A build column that already carries a qualifier was named by a
 		// nested join INSIDE the build subtree (bushy shapes). The name is
 		// already unique and stable — re-qualifying would double-qualify
@@ -4576,7 +4586,7 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 			}
 			out = append(out, col)
 			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
-			seen[col.Name] = true
+			seen[batch.FoldIdent(col.Name)] = true
 			continue
 		}
 		// Qualification alias: the column's OWNING scan when the planner
@@ -4609,7 +4619,7 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 			}
 			out = append(out, col)
 			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
-			seen[col.Name] = true
+			seen[batch.FoldIdent(col.Name)] = true
 		}
 	}
 

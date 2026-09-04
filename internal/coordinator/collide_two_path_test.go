@@ -89,6 +89,102 @@ func TestCollidingBareNamesOnEveryArm(t *testing.T) {
 	}
 }
 
+// A duplicate output NAME must not collapse two columns, on ANY arm.
+//
+// `wadjet/collide_duplicate_names_test.go` reads these positionally through
+// QueryResult.Cells, which is exact — but it is single-process only, and that
+// is precisely the gap round 0's B4 lived in: the DAG's positional ORDER BY
+// over a join sorted by the wrong column and no gate looked. The DAG hands the
+// caller rows keyed by NAME, so this compares each duplicate spelling against
+// its DISTINCT-ALIAS reference, which is positional by construction and is the
+// same technique `benchmarks/tpch/duplicate_name_dag_test.go` uses.
+func TestCollidingDuplicateNamesOnEveryArm(t *testing.T) {
+	ctx := context.Background()
+	single := tmdStandalone(t, ctx)
+	spilled := na2Standalone(t, ctx, 512*1024)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+	infraB := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraB, nil)
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
+
+	arms := []struct {
+		name string
+		run  func(string) (*oracle.Result, error)
+	}{
+		{"single", func(sql string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
+		{"spilled", func(sql string) (*oracle.Result, error) { return tmdRunSingle(ctx, spilled, sql) }},
+		{"dag", func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
+		{"dag-shuffled", func(sql string) (*oracle.Result, error) { return tmdRunDAG(ctx, coordB, sql) }},
+	}
+	for _, c := range collide.DuplicateNameCorpus() {
+		if c.Ref == "" {
+			continue
+		}
+		t.Run(c.Name, func(t *testing.T) {
+			for _, arm := range arms {
+				ref, err := arm.run(c.Ref)
+				if err != nil {
+					t.Fatalf("%s arm refused the reference spelling: %v\n  SQL: %s", arm.name, err, c.Ref)
+				}
+				dup, err := arm.run(c.SQL)
+				if err != nil {
+					t.Fatalf("%s arm refused the duplicate spelling: %v\n  SQL: %s", arm.name, err, c.SQL)
+				}
+				if len(dup.Rows) != len(ref.Rows) {
+					t.Fatalf("%s arm: %d rows for the duplicate spelling, %d for the reference\n  SQL: %s",
+						arm.name, len(dup.Rows), len(ref.Rows), c.SQL)
+				}
+				// One column POSITION whose name is unique on both sides
+				// carries the ORDER. Comparing it row by row is what sees a
+				// sort that bound the wrong column, which is invisible to any
+				// unordered check. Read by the arm's OWN published name at
+				// that position, because the DAG publishes a set operation's
+				// columns under the join's qualified spellings where the
+				// single path publishes bare ones.
+				j := collideUniquePosition(dup.Columns, ref.Columns)
+				if j < 0 {
+					t.Fatalf("%s arm: neither spelling has a uniquely-named column to read the "+
+						"ORDER from (%v / %v)", arm.name, dup.Columns, ref.Columns)
+				}
+				for i := range dup.Rows {
+					got, want := dup.Rows[i][dup.Columns[j]], ref.Rows[i][ref.Columns[j]]
+					if fmt.Sprint(got) != fmt.Sprint(want) {
+						t.Errorf("%s arm row %d: the duplicate spelling has %s=%v where the "+
+							"reference has %s=%v — same multiset, different ORDER\n  SQL: %s",
+							arm.name, i, dup.Columns[j], got, ref.Columns[j], want, c.SQL)
+						break
+					}
+				}
+			}
+		})
+	}
+}
+
+// collideUniquePosition is the first column POSITION whose name is unique in
+// both lists, or -1.
+func collideUniquePosition(dup, ref []string) int {
+	if len(dup) != len(ref) {
+		return -1
+	}
+	count := func(list []string, name string) int {
+		n := 0
+		for _, c := range list {
+			if c == name {
+				n++
+			}
+		}
+		return n
+	}
+	for j := range dup {
+		if count(dup, dup[j]) == 1 && count(ref, ref[j]) == 1 {
+			return j
+		}
+	}
+	return -1
+}
+
 func collideEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -102,9 +198,14 @@ func collideEqual(a, b []string) bool {
 }
 
 // collideRender is one string per row, `col=value` in the result's own column
-// ORDER — which is what a corpus over colliding names needs: a map keyed by
-// name cannot hold two columns called c0, and the entry that projects two of
-// them is the #844 cell.
+// ORDER.
+//
+// It reads res.Rows, a map keyed by NAME, and is therefore exact only while
+// the result's names are unique — which every collide.Corpus() entry's are, by
+// construction. The entries whose names collide live in
+// collide.DuplicateNameCorpus() and are gated two other ways: positionally in
+// wadjet/collide_duplicate_names_test.go, and against a distinct-alias
+// reference on all four arms in TestCollidingDuplicateNamesOnEveryArm above.
 func collideRender(res *oracle.Result, ordered bool) []string {
 	out := make([]string, 0, len(res.Rows))
 	for i := range res.Rows {

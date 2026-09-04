@@ -26,7 +26,42 @@ const (
 	T0 = "clt0"
 	T1 = "clt1"
 	T2 = "clt2"
+	// T4 and T5 carry ONE column whose names differ only by CASE. Since an
+	// unquoted reference folds (#731) those two names are one name to every
+	// resolver, so a qualified reference to either is only resolvable through
+	// its RELATION — the identity is (relation, folded name) and never the
+	// bare folded name (ADR-0026). Without them nothing in any corpus made
+	// that distinction: the arc's round-0 review found `SELECT clt4.MixedCol,
+	// clt5.mixedcol FROM clt4, clt5` answering clt5's value TWICE on all four
+	// arms.
+	T4 = "clt4"
+	T5 = "clt5"
 )
+
+// CaseSchema is T4's and T5's, parameterized by the case-carrying column's
+// spelling: `MixedCol` in one relation, `mixedcol` in the other.
+func CaseSchema(col string) parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: col, Type: parquet.TypeInt64, Nullable: true},
+	}}
+}
+
+// CaseData is one case-colliding relation's rows. The two relations' value
+// ranges do not overlap, so a reference bound to the wrong one cannot answer
+// the right number by accident.
+func CaseData(table string) []map[string]any {
+	if table == T4 {
+		return []map[string]any{
+			{"k": int64(1), "MixedCol": int64(100)},
+			{"k": int64(2), "MixedCol": int64(200)},
+		}
+	}
+	return []map[string]any{
+		{"k": int64(1), "mixedcol": int64(900)},
+		{"k": int64(2), "mixedcol": int64(901)},
+	}
+}
 
 // Schema is shared by all three: bare names that mean a DIFFERENT column in
 // each table.
@@ -76,6 +111,8 @@ func Tables() []FixtureTable {
 		{T0, Schema(), Data(T0)},
 		{T1, Schema(), Data(T1)},
 		{T2, Schema(), Data(T2)},
+		{T4, CaseSchema("MixedCol"), CaseData(T4)},
+		{T5, CaseSchema("mixedcol"), CaseData(T5)},
 	}
 }
 
@@ -86,6 +123,12 @@ type Case struct {
 	SQL     string
 	Want    []string
 	Ordered bool
+	// Ref is the same question with DISTINCT output names, for the entries
+	// whose own names collide. A result read BY NAME cannot represent two
+	// columns of one name, so the duplicate spelling is compared against its
+	// reference — which is positional by construction and works on the DAG,
+	// where no positional accessor reaches the caller.
+	Ref string
 	// KnownBug pins a divergence from Want. The comparison still runs and
 	// Want stays exactly as PostgreSQL wrote it, so a pinned entry that
 	// starts AGREEING fails and deleting the pin is the proof of a fix
@@ -138,6 +181,81 @@ func Corpus() []Case {
 				" ON " + T0 + ".c0 = " + T1 + ".c0) x ORDER BY c",
 			Ordered: true,
 			Want:    []string{"c=t0-a", "c=t0-b"}},
+		// A qualified reference to a column two relations spell in DIFFERENT
+		// CASES. The fold makes them one NAME; only the relation tells them
+		// apart. Every one of these answered the OTHER relation's column
+		// until the join's duplicate detector was taught to fold and the
+		// resolver was taught to hold a QUALIFIER byte-exact (round-0 B1).
+		{Name: "case_colliding_columns_both_projected",
+			SQL: "SELECT " + T4 + ".MixedCol AS a, " + T5 + ".mixedcol AS b FROM " + T4 +
+				", " + T5 + " WHERE " + T4 + ".k = " + T5 + ".k ORDER BY a",
+			Ordered: true,
+			Want:    []string{"a=100 b=900", "a=200 b=901"}},
+		{Name: "case_colliding_columns_aggregated",
+			SQL: "SELECT SUM(" + T4 + ".MixedCol) AS s FROM " + T4 + ", " + T5 +
+				" WHERE " + T4 + ".k = " + T5 + ".k",
+			Want: []string{"s=300"}},
+		{Name: "case_colliding_columns_camel_side_only",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T4 + ", " + T5 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_lower_side_only",
+			SQL: "SELECT " + T5 + ".mixedcol AS m FROM " + T4 + ", " + T5 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=900", "m=901"}},
+		{Name: "case_colliding_columns_through_a_derived_table",
+			SQL: "SELECT x FROM (SELECT a.MixedCol AS x FROM " + T4 + " a, " + T5 +
+				" b WHERE a.k = b.k) s ORDER BY x",
+			Ordered: true,
+			Want:    []string{"x=100", "x=200"}},
+		{Name: "ctl_case_colliding_column_one_relation",
+			SQL:     "SELECT " + T4 + ".MixedCol AS m FROM " + T4 + " ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		// A DELIMITED table alias is byte-exact, so `t` and `"T"` are two
+		// relations. Folding the qualifier made them one and `t.c1` answered
+		// the other relation's column (round-0 B2).
+		{Name: "delimited_alias_beside_an_unquoted_one",
+			SQL:     `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T2 + ` "T" ORDER BY x, y`,
+			Ordered: true,
+			Want: []string{"x=7 y=-1968219095", "x=7 y=1737580880",
+				"x=9 y=-1968219095", "x=9 y=1737580880"}},
+		{Name: "delimited_alias_unquoted_side_only",
+			SQL:     `SELECT t.c1 AS x FROM ` + T1 + ` t, ` + T2 + ` "T" ORDER BY x`,
+			Ordered: true,
+			Want:    []string{"x=7", "x=7", "x=9", "x=9"}},
+		{Name: "delimited_alias_delimited_side_only",
+			SQL:     `SELECT "T".c1 AS y FROM ` + T1 + ` t, ` + T2 + ` "T" ORDER BY y`,
+			Ordered: true,
+			Want: []string{"y=-1968219095", "y=-1968219095",
+				"y=1737580880", "y=1737580880"}},
+		// A positional ORDER BY over a JOIN. On the DAG no stage is emitted
+		// for a Project, so the sort stage reads the join's whole output and
+		// a select-list POSITION is not a column index there — these sorted
+		// by column ONE on both DAG arms (round-0 B4).
+		{Name: "ordinal_over_a_comma_join",
+			SQL: "SELECT " + T1 + ".c2, " + T2 + ".c1 FROM " + T1 + ", " + T2 +
+				" ORDER BY 2, 1",
+			Ordered: true,
+			Want: []string{"c2=t1-a c1=-1968219095", "c2=t1-b c1=-1968219095",
+				"c2=t1-a c1=1737580880", "c2=t1-b c1=1737580880"}},
+		{Name: "ordinal_over_a_comma_join_descending",
+			SQL: "SELECT " + T1 + ".c2, " + T2 + ".c1 FROM " + T1 + ", " + T2 +
+				" ORDER BY 2 DESC, 1",
+			Ordered: true,
+			Want: []string{"c2=t1-a c1=1737580880", "c2=t1-b c1=1737580880",
+				"c2=t1-a c1=-1968219095", "c2=t1-b c1=-1968219095"}},
+		{Name: "ordinal_over_an_explicit_join",
+			SQL: "SELECT " + T1 + ".c2, " + T2 + ".c1 FROM " + T1 + " JOIN " + T2 +
+				" ON " + T1 + ".c0 = " + T2 + ".c0 ORDER BY 2, 1",
+			Ordered: true,
+			Want:    []string{"c2=t1-a c1=-1968219095", "c2=t1-b c1=1737580880"}},
+		{Name: "ctl_ordinal_over_one_relation",
+			SQL:     "SELECT " + T1 + ".c2, " + T1 + ".c1 FROM " + T1 + " ORDER BY 2, 1",
+			Ordered: true,
+			Want:    []string{"c2=t1-a c1=7", "c2=t1-b c1=9"}},
 		{Name: "nested_derived_tables",
 			SQL: "SELECT c FROM (SELECT c FROM (SELECT " + T0 + ".c2 AS c FROM " + T0 + ", " +
 				T2 + ") y) x ORDER BY c",
@@ -162,15 +280,29 @@ func DuplicateNameCorpus() []Case {
 		{Name: "two_same_named_columns_from_two_relations",
 			SQL: "SELECT " + T1 + ".c0, " + T2 + ".c1, " + T2 + ".c0 FROM " + T1 + ", " + T2 +
 				" ORDER BY 2, 1, 3",
+			Ref: "SELECT " + T1 + ".c0 AS a, " + T2 + ".c1 AS b, " + T2 + ".c0 AS c FROM " +
+				T1 + ", " + T2 + " ORDER BY 2, 1, 3",
 			Ordered: true,
 			Want: []string{
 				"false|-1968219095|true", "true|-1968219095|true",
 				"false|1737580880|false", "true|1737580880|false",
 			}},
+		// No Ref: BOTH of this entry's output columns are called c2, so no
+		// column of it is uniquely addressable by name and the reference
+		// technique cannot read it. It is gated positionally in
+		// wadjet/collide_duplicate_names_test.go instead.
+		{Name: "two_same_named_columns_ordered_positionally",
+			SQL:     "SELECT " + T1 + ".c2, " + T2 + ".c2 FROM " + T1 + ", " + T2 + " ORDER BY 2, 1",
+			Ordered: true,
+			Want: []string{"t1-a|t2-a", "t1-b|t2-a",
+				"t1-a|t2-b", "t1-b|t2-b"}},
 		{Name: "union_all_branch_with_two_same_named_outputs",
 			SQL: "SELECT " + T1 + ".c0, " + T2 + ".c1, " + T2 + ".c0 FROM " + T1 + ", " + T2 +
 				" UNION ALL SELECT " + T1 + ".c0, " + T2 + ".c1, " + T2 + ".c0 FROM " + T1 +
 				", " + T2 + " ORDER BY 2, 1, 3",
+			Ref: "SELECT " + T1 + ".c0 AS a, " + T2 + ".c1 AS b, " + T2 + ".c0 AS c FROM " +
+				T1 + ", " + T2 + " UNION ALL SELECT " + T1 + ".c0, " + T2 + ".c1, " + T2 +
+				".c0 FROM " + T1 + ", " + T2 + " ORDER BY 2, 1, 3",
 			Ordered: true,
 			Want: []string{
 				"false|-1968219095|true", "false|-1968219095|true",

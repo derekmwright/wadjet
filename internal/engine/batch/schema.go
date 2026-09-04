@@ -35,6 +35,24 @@ import "github.com/derekmwright/wadjet/internal/storage/parquet"
 //     byte-exact ONLY. That is what keeps `SELECT "G"` over a column `g` a
 //     miss — PostgreSQL's 42703 — rather than a silent read of `g`.
 
+// FoldIdent is the identifier fold, ASCII A-Z only — the same rule
+// `plansql.FoldIdent` applies at the lexer, restated here because the engine
+// cannot import the planner. Anything that has to decide whether two column
+// names are ONE name uses it, so the resolver and the join's duplicate
+// detector cannot disagree about that (#731).
+func FoldIdent(s string) string {
+	if asciiFolded(s) {
+		return s
+	}
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
 // IsFoldedIdent reports whether s carries no ASCII upper-case letter, i.e.
 // whether it is already in the form the lexer's identifier fold produces —
 // which is how a resolver tells an unquoted reference from a delimited one
@@ -120,7 +138,7 @@ func resolveFoldedIndex(schema []parquet.Column, name string) int {
 	}
 	found := -1
 	for i, col := range schema {
-		if asciiEqualFold(col.Name, name) {
+		if foldedNameMatches(col.Name, name) {
 			if found >= 0 {
 				return -1 // ambiguous — item 3
 			}
@@ -128,4 +146,36 @@ func resolveFoldedIndex(schema []parquet.Column, name string) int {
 		}
 	}
 	return found
+}
+
+// foldedNameMatches reports whether a folded REFERENCE names a schema column,
+// judging the two parts of a qualified name by different rules: the COLUMN
+// folds (item 2), the QUALIFIER is byte-exact.
+//
+// A qualifier is a RELATION's name or alias, and PostgreSQL matches those
+// byte-exactly against what the FROM clause declared — a delimited alias `"T"`
+// is not reachable as `t` there, and `SELECT "T".x FROM t` is 42P01. Folding
+// the whole string bound a reference to the WRONG RELATION: over `FROM rvc t,
+// rvd2 "T"` the join emits `g` and `T.g`, and `t.g` fold-matched `T.g` and
+// answered rvd2's row (5 → 7). The column half keeps the concession, which is
+// what a CamelCase schema needs; the qualifier half never had one.
+func foldedNameMatches(schemaName, ref string) bool {
+	sq, sc := splitQualifier(schemaName)
+	rq, rc := splitQualifier(ref)
+	if sq != rq {
+		return false
+	}
+	return asciiEqualFold(sc, rc)
+}
+
+// splitQualifier splits at the FIRST dot, which is what every other resolver
+// in the engine does (exec.columnIndexFallback). A name with no dot is all
+// column and no qualifier.
+func splitQualifier(name string) (qualifier, column string) {
+	for i := 0; i < len(name); i++ {
+		if name[i] == '.' {
+			return name[:i], name[i+1:]
+		}
+	}
+	return "", name
 }

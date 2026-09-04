@@ -148,6 +148,84 @@ func TestADelimitedIdentifierIsByteExact(t *testing.T) {
 	}
 }
 
+// A DELIMITED table alias is byte-exact too, and it names a DIFFERENT relation
+// from an unquoted one spelled the same way (round-0 B2).
+//
+// PostgreSQL 17, measured live over `FROM clt1 t, clt2 "T"`: `t.c1` reads
+// clt1's column, `"T".c1` reads clt2's, and `SELECT "T".k FROM clt1 T` — where
+// the FROM declares the UNQUOTED alias — is 42P01 `missing FROM-clause entry
+// for table "T"`. Wadjet folded the qualifier at both the binder and the
+// resolver, so `t.c1` answered clt2's column: a wrong VALUE, not a wrong name.
+func TestADelimitedQualifierIsByteExact(t *testing.T) {
+	ctx := context.Background()
+	db := identQualDB(t, ctx)
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		want  string
+		state string
+	}{
+		{name: "the unquoted alias reads its own relation",
+			sql: `SELECT t.g AS x FROM qa t, qb "T"`, want: "[5]"},
+		{name: "the delimited alias reads its own relation",
+			sql: `SELECT "T".g AS y FROM qa t, qb "T"`, want: "[7]"},
+		{name: "both, side by side",
+			sql: `SELECT t.g AS x, "T".g AS y FROM qa t, qb "T"`, want: "[5 7]"},
+		{name: "a delimited qualifier the FROM never declared",
+			sql: `SELECT "T".k AS x FROM qa T`, state: "42P01"},
+		{name: "ctl: two unquoted aliases",
+			sql: "SELECT t.g AS x, u.g AS y FROM qa t, qb u", want: "[5 7]"},
+		{name: "ctl: the delimited alias alone",
+			sql: `SELECT "T".g AS y FROM qb "T"`, want: "[7]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if tc.state != "" {
+				if err == nil {
+					t.Fatalf("%s: answered %d rows; want SQLSTATE %s", tc.sql, len(res.Rows), tc.state)
+				}
+				if got := sqlerr.StateOf(err); got != tc.state {
+					t.Fatalf("%s: SQLSTATE %q, want %q (err: %v)", tc.sql, got, tc.state, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.sql, err)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("%s: %d rows, want 1", tc.sql, len(res.Rows))
+			}
+			if got := fmt.Sprint(res.Cells(0)); got != tc.want {
+				t.Errorf("%s: %s, want %s", tc.sql, got, tc.want)
+			}
+		})
+	}
+}
+
+func identQualDB(t *testing.T, ctx context.Context) *DB {
+	t.Helper()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, ddl := range []string{
+		"CREATE TABLE qa (k INT64, g INT64)",
+		"CREATE TABLE qb (k INT64, g INT64)",
+	} {
+		if _, err := db.Query(ctx, ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Execute(ctx, "INSERT INTO qa VALUES (1,5)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Execute(ctx, "INSERT INTO qb VALUES (1,7)"); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
 // A DDL declaration takes the same rule end to end: an unquoted name is
 // stored folded, a delimited one keeps its bytes, and both are readable.
 // Before #731 `parquet.DeclaredColumn` lowercased every declaration, so the

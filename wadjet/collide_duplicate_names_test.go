@@ -51,11 +51,22 @@ func TestCollidingDuplicateOutputNamesKeepBothValues(t *testing.T) {
 						i, got[i], c.Want[i], c.SQL)
 				}
 			}
-			// The NAMES are duplicated too, which is what makes the map lossy
-			// and what PostgreSQL publishes.
-			if len(res.Columns) != 3 || res.Columns[0] != "c0" || res.Columns[2] != "c0" {
-				t.Errorf("published %v, want two columns called c0 around c1\n  SQL: %s",
-					res.Columns, c.SQL)
+			// The NAMES are duplicated, which is what makes the map lossy and
+			// what PostgreSQL publishes. Asserted as a PROPERTY rather than a
+			// literal list: every entry of this corpus is here because two of
+			// its output columns share a name, and a gate that stopped seeing
+			// one would stop testing what it exists for.
+			dupNames := false
+			for i := range res.Columns {
+				for j := i + 1; j < len(res.Columns); j++ {
+					if res.Columns[i] == res.Columns[j] {
+						dupNames = true
+					}
+				}
+			}
+			if !dupNames {
+				t.Errorf("published %v, which carries no duplicate name — this entry is in the "+
+					"DUPLICATE-name corpus\n  SQL: %s", res.Columns, c.SQL)
 			}
 			if res.RowValues == nil && len(res.Rows) > 0 {
 				t.Errorf("no positional form for a result with duplicate names; "+
