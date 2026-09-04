@@ -59,6 +59,25 @@ func TestConstArithLiftAnswersTheSameAsThePerRowForm(t *testing.T) {
 		// A derived table below the aggregate: the walk stops at the Project,
 		// so this declines — and must still answer the same thing.
 		`SELECT SUM(v + 3) AS s FROM (SELECT c_i32 AS v FROM ` + tbl + ` WHERE id < 100) x`,
+		// The aggregate's output read by something OTHER than the projection
+		// this pass rewrites. The pass RETIRES the slot the projection used and
+		// mints new ones, so any sibling reader is where a rewrite goes wrong —
+		// and these are the four readers there are.
+		`SELECT SUM(c_i32 + 3) AS s FROM ` + tbl + ` WHERE id < 100 HAVING SUM(c_i32 + 3) > 0`,
+		`SELECT g AS k, SUM(c_i32 + 3) AS s FROM ` + tbl + ` WHERE id < 40 GROUP BY g ` +
+			`HAVING SUM(c_i32 + 3) > 20 ORDER BY k`,
+		`SELECT g AS k, SUM(c_i32 + 3) AS s FROM ` + tbl + ` WHERE id < 40 GROUP BY g ` +
+			`ORDER BY SUM(c_i32 + 3) DESC, k`,
+		`SELECT SUM(c_i32 + 3) AS s FROM ` + tbl + ` WHERE id < 100 ORDER BY 1`,
+		// TWO projections reading one aggregate: the retire-then-sweep has to
+		// leave the second one reading something.
+		`SELECT SUM(c_i32 + 3) AS x, SUM(c_i32 + 3) AS y FROM ` + tbl + ` WHERE id < 100`,
+		// An expression AROUND the aggregate, which this pass does not rewrite
+		// (the projection is not IsAgg) and must not disturb.
+		`SELECT SUM(c_i32 + 3) + 1 AS s FROM ` + tbl + ` WHERE id < 100`,
+		// The aggregate read through a derived table by an outer filter.
+		`SELECT COUNT(*) AS n FROM (SELECT g, SUM(c_i32 + 3) AS s FROM ` + tbl +
+			` WHERE id < 40 GROUP BY g) x WHERE s > 20`,
 	} {
 		t.Run(sql, func(t *testing.T) {
 			lifted, err := db.Query(ctx, sql)
