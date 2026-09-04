@@ -362,7 +362,14 @@ func TestDateCastLeavesNonTemporalArithmeticAlone(t *testing.T) {
 		sql  string
 		want any
 	}{
-		{"SELECT CAST('1996' AS INT) - 1 AS x", float64(1995)},
+		// An INTEGER cast is an integer operand, so the arithmetic over it is
+		// integer: `SELECT pg_typeof(CAST('1996' AS INT) - 1)` is `integer` on
+		// PostgreSQL 17.11 and the value is 1995, measured. This cell wanted a
+		// float64 because `expr.operandIsInt` did not look through a CAST —
+		// the same blind spot that made `ABS(i) * <int8 max>` answer MinInt64
+		// (#849). The DOMAIN is what moved; the width is still this engine's
+		// standing int4/int8 divergence.
+		{"SELECT CAST('1996' AS INT) - 1 AS x", int64(1995)},
 		{"SELECT CAST('12.5' AS DOUBLE) + 1 AS x", 13.5},
 		{"SELECT CAST(1996 AS VARCHAR) AS x", "1996"},
 		// A time-of-day literal has no column type to become, so it keeps

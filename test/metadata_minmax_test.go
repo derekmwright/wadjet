@@ -228,26 +228,37 @@ func TestMetadataMinMax(t *testing.T) {
 			wantRows: []map[string]any{{"lo": 1.5}},
 		},
 		{
-			// The metadata path no longer fires here, and the ROWS are
-			// unchanged — this cell measures a SECOND cost of #841's decline,
-			// beside the ClickBench Q30 shape #850's text names.
+			// The metadata path fires here AGAIN, and the rows are unchanged.
 			//
-			// `rewriteConstArithAggs` used to turn MIN(x + k) into MIN(x) + k
-			// before the physical planner saw it, so the aggregate WAS a bare
-			// column by then and the manifest statistics could answer it
-			// without a scan. The lift is declined for an integer literal
-			// because the per-row form can raise 22003 and the lifted form
-			// cannot — `MIN(x + k)` exactly as `SUM(x + k)` — so the argument
-			// is no longer a bare column and the query SCANS.
+			// This cell recorded a SECOND cost of #841's decline: the
+			// syntactic `rewriteConstArithAggs` used to turn MIN(x + k) into
+			// MIN(x) + k before the physical planner saw it, so the aggregate
+			// WAS a bare column by then and the manifest statistics answered
+			// it without a scan. #841 declined the lift for an integer literal
+			// — the per-row form can raise 22003 and the lifted form cannot —
+			// so the argument stopped being a bare column and the query
+			// scanned.
 			//
-			// The recovery is real and belongs with #850's: this path HAS the
-			// column's min and max by construction, so it could fold
-			// `agg(col op const)` and reproduce the per-row refusal exactly by
-			// running the checked kernel on the two EXTREMES (the operation is
-			// monotone, so an overflow anywhere is an overflow at one end).
-			// That is planner work in the metadata-min/max module, not a
-			// review fix, and #850 carries it.
-			name: "constant arithmetic is no longer lifted out of the aggregate", wantFire: false,
+			// #850 restored the lift on the terms this cell's own text
+			// predicted: the TYPED pass runs after annotation, reads the
+			// column's declared type and its statistics, and lifts
+			// `agg(col op const)` only when the extremes prove the per-row
+			// form cannot refuse (|max| + |k| inside the carrier). The
+			// argument is a bare column by the time the physical planner
+			// looks, so the statistics answer it, exactly as before #841.
+			//
+			// wantFire is therefore TRUE, and it is the "answered from
+			// metadata" question it always was — the counter is
+			// physical.MetadataMinMaxPlanned, which counts the path being
+			// PLANNED for the query, not a statistics READ. The lift's own
+			// bound reads the manifest in the LOGICAL planner and never
+			// touches this counter. The two arms below are what makes the
+			// claim safe: the kill-switch-off run must produce the identical
+			// rows from a real scan.
+			//
+			// PostgreSQL 17.11: `SELECT pg_typeof(MIN(v + 1)) FROM t` with v
+			// bigint is bigint, and MIN(i64 + 1) over this fixture is 2.
+			name: "constant arithmetic is lifted out of the aggregate again", wantFire: true,
 			// bigint on PostgreSQL 17: `SELECT pg_typeof(MIN(v + 1)) FROM t`
 			// with v bigint answers bigint. This wanted float64 while the
 			// integer rule reached only the outermost node of a projection,

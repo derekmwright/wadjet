@@ -254,9 +254,18 @@ func TestDateTruncOverColumns(t *testing.T) {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
 	r := rows[0]
+	// date_trunc renders the instant the ONE way this engine renders one —
+	// batch.FormatTimestamp, the same text the TIMESTAMP column it read
+	// produces and the same text PostgreSQL produces. It answered RFC3339
+	// until #544's second pass, which is what these two cells recorded:
+	// `SELECT date_trunc('year', TIMESTAMP '1996-03-13 14:25:36')::text` is
+	// `1996-01-01 00:00:00` on 17.11, measured.
+	//
+	// `ld` is unchanged: last_day_of_month answers a calendar DATE, which has
+	// its own rendering and always had this one.
 	for col, want := range map[string]string{
-		"md":  "1996-03-01T00:00:00Z",
-		"yts": "1996-01-01T00:00:00Z",
+		"md":  "1996-03-01 00:00:00",
+		"yts": "1996-01-01 00:00:00",
 		"ld":  "1996-03-31",
 	} {
 		if got, _ := r[col].(string); got != want {

@@ -205,7 +205,23 @@ func TestShapeOnlyDecodeValuesAreCorrect(t *testing.T) {
 	if len(r.Rows) != 3 {
 		t.Fatalf("got %d groups, want 3: %v", len(r.Rows), r.Rows)
 	}
-	wantSum := []any{float64(9), float64(4), nil}
+	// LENGTH counts CHARACTERS, as PostgreSQL's does (#856). This fixture is
+	// deliberately not ASCII, so the two readings differ and the cell can tell
+	// them apart:
+	//
+	//	group 1  'abc' + '日本'  ->  3 + 2 = 5 characters,  3 + 6 = 9 bytes
+	//	group 2  ''    + '😀'    ->  0 + 1 = 1 character,   0 + 4 = 4 bytes
+	//
+	// PostgreSQL 17.11, measured: `length('abc')+length('日本')` is 5 and
+	// `octet_length('abc')+octet_length('日本')` is 9. The 9 and 4 this cell
+	// wanted are the BYTE counts LENGTH used to answer.
+	//
+	// It also means LENGTH no longer takes the shape-only decode — it left
+	// logical.shapeLenFuncs with #856, because a character count has to read
+	// the bytes. The lengths-only path is still what OCTET_LENGTH takes, and
+	// the sibling queries above still exercise it; what this cell now asserts
+	// is that turning the path ON does not change LENGTH's answer.
+	wantSum := []any{float64(5), float64(1), nil}
 	wantCount := []float64{2, 2, 0}
 	for i, row := range r.Rows {
 		if wantSum[i] == nil {
