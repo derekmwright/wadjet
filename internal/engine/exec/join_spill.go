@@ -45,13 +45,25 @@ func spillPartition(key int64) int {
 }
 
 // spillPartitionBytes returns the partition ID for a byte-serialized key.
+//
+// It takes the TOP bits of strHash — the same hash the string tables index by,
+// which takes their slot from the LOW bits — so a caller that needs both can
+// compute one hash and use strPartitionOf. That is the hash-once pattern
+// strHashTable.GetOrInsertRefAt already documents for the aggregate, and it
+// matters more here than it does there: the byte-at-a-time FNV-1a this
+// replaced walked the whole key a SECOND time on every string probe, on top of
+// the strHash the lookup was about to do anyway.
+//
+// strHash finishes with an avalanche (two xorshifts around a multiply), so its
+// top and low windows are independent and a key's partition tells you nothing
+// about its slot.
 func spillPartitionBytes(key []byte) int {
-	h := uint64(0xcbf29ce484222325)
-	for _, b := range key {
-		h ^= uint64(b)
-		h *= 0x100000001b3
-	}
-	return int((h >> 58) & spillPartMask)
+	return strPartitionOf(strHash(key))
+}
+
+// strPartitionOf is spillPartitionBytes for a caller that already has the hash.
+func strPartitionOf(hash uint64) int {
+	return int((hash >> 58) & spillPartMask)
 }
 
 // spillState tracks Grace Hash Join partition state during build and probe.

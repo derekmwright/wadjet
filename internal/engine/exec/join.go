@@ -747,14 +747,17 @@ func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 }
 
 func (h *HashJoin) arenaAppendStr(ref buildRef) {
-	pt := h.idxPartBytes(h.keyBuf)
+	// One pass over the key: the partition comes off the top of the hash the
+	// table indexes by (join_spill.go, spillPartitionBytes).
+	hash := strHash(h.keyBuf)
+	pt := h.idxPartAt(hash)
 	t := pt.strs
 	if t == nil {
 		t = h.strTable(pt, h.perPartHint())
 	}
 	idx := int32(len(pt.arena))
 	pt.arena = append(pt.arena, ref)
-	head, existed := t.PutNoGrow(h.keyBuf, idx)
+	head, existed := t.PutNoGrowAt(h.keyBuf, hash, idx)
 	if existed {
 		pt.next = append(pt.next, head)
 	} else {
@@ -820,11 +823,12 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return false
 	}
-	t := h.idxPartBytes(p.keyBuf).strs
+	hash := strHash(p.keyBuf)
+	t := h.idxPartAt(hash).strs
 	if t == nil {
 		return false
 	}
-	_, ok := t.Get(p.keyBuf)
+	_, ok := t.GetAt(p.keyBuf, hash)
 	return ok
 }
 
@@ -896,11 +900,12 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return p.lookupBuf
 	}
-	pt := h.idxPartBytes(p.keyBuf)
+	hash := strHash(p.keyBuf)
+	pt := h.idxPartAt(hash)
 	if pt.strs == nil {
 		return p.lookupBuf
 	}
-	head, ok := pt.strs.Get(p.keyBuf)
+	head, ok := pt.strs.GetAt(p.keyBuf, hash)
 	if !ok {
 		return p.lookupBuf
 	}
@@ -2784,11 +2789,12 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 		if !p.buildProbeKey(in, row) {
 			return // NULL key: matches nothing, so it marks nothing
 		}
-		pt := h.idxPartBytes(p.keyBuf)
+		hash := strHash(p.keyBuf)
+		pt := h.idxPartAt(hash)
 		if pt.strs == nil {
 			return
 		}
-		head, ok := pt.strs.Get(p.keyBuf)
+		head, ok := pt.strs.GetAt(p.keyBuf, hash)
 		if !ok {
 			return
 		}
@@ -4291,11 +4297,12 @@ func (p *HashJoinProbe) markKeyMatchedLocked(in *batch.RecordBatch, row int) {
 		if !p.buildProbeKey(in, row) {
 			return // NULL key: matches nothing, so it marks nothing
 		}
-		pt := h.idxPartBytes(p.keyBuf)
+		hash := strHash(p.keyBuf)
+		pt := h.idxPartAt(hash)
 		if pt.strs == nil {
 			return
 		}
-		head, ok := pt.strs.Get(p.keyBuf)
+		head, ok := pt.strs.GetAt(p.keyBuf, hash)
 		if !ok {
 			return
 		}

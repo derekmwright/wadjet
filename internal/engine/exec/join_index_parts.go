@@ -134,6 +134,14 @@ func (h *HashJoin) idxPartBytes(key []byte) *joinIndexPart {
 	return &h.parts[uint64(spillPartitionBytes(key))&h.partMask]
 }
 
+// idxPartAt is idxPartBytes for a caller that has already hashed the key. The
+// string probe and the string build both need the hash for the table lookup
+// anyway, so hashing once is the difference between one pass over the key bytes
+// and two (join_spill.go, spillPartitionBytes).
+func (h *HashJoin) idxPartAt(hash uint64) *joinIndexPart {
+	return &h.parts[uint64(strPartitionOf(hash))&h.partMask]
+}
+
 // arenaRows is the total number of build refs across every partition. It is
 // what `len(arena)` used to answer, and the only callers left are the ones
 // deciding whether a matched bitmap is needed at all.

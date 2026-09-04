@@ -301,6 +301,50 @@ func (h *strHashTable) GetOrInsertRefAt(key []byte, hash uint64, val int32) (int
 	}
 }
 
+// GetAt is Get with the key hash supplied by the caller, for the same reason
+// GetOrInsertRefAt exists: the partition router already ran strHash over these
+// bytes to pick this table's owner, and on a wide key that pass is the
+// expensive half of the probe. hash MUST be strHash(key).
+func (h *strHashTable) GetAt(key []byte, hash uint64) (int32, bool) {
+	tag := uint32(hash)
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.keyLen < 0 {
+			return 0, false
+		}
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.keyAt(*e), key) {
+			return e.val, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
+// PutNoGrowAt is PutNoGrow with the key hash supplied by the caller. Same
+// contract as GetAt.
+func (h *strHashTable) PutNoGrowAt(key []byte, hash uint64, val int32) (int32, bool) {
+	tag := uint32(hash)
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.keyLen < 0 {
+			ref, _ := h.storeKey(key)
+			e.ref = ref
+			e.keyLen = int32(len(key))
+			e.val = val
+			e.hashTag = tag
+			h.size++
+			return 0, false
+		}
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.keyAt(*e), key) {
+			old := e.val
+			e.val = val
+			return old, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
 // PutNoGrow inserts a key-value pair without checking the load factor.
 // The caller must call CheckGrow() after a batch of inserts. This variant
 // defers growth to reduce overhead in hot loops like hash join build.
