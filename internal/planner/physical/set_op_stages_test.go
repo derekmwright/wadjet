@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -174,6 +175,10 @@ func TestSetOpRefusals(t *testing.T) {
 		name string
 		sql  string
 		want []string // substrings the error must carry
+		// pg marks a refusal PostgreSQL also makes: it carries PostgreSQL's
+		// SQLSTATE and its message alone, with no distributed-planning
+		// preamble.
+		pg bool
 	}{
 		{
 			// The arm's aggregate stage names its own output; the union
@@ -184,10 +189,13 @@ func TestSetOpRefusals(t *testing.T) {
 		},
 		{
 			// Text and a number do not widen into one another, and coercing
-			// either would answer a different question.
+			// either would answer a different question. PostgreSQL refuses it
+			// too, so the refusal is ITS message and SQLSTATE and carries no
+			// distributed-planning preamble (#648).
 			name: "IrreconcilableTypes",
 			sql:  "SELECT r_name AS v FROM region UNION ALL SELECT n_nationkey AS v FROM nation",
-			want: []string{"disagree on the type", "\"v\""},
+			want: []string{"UNION types text and integer cannot be matched", "\"v\""},
+			pg:   true,
 		},
 	}
 	for _, tc := range cases {
@@ -201,6 +209,16 @@ func TestSetOpRefusals(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not mention %q", err, want)
 				}
+			}
+			if tc.pg {
+				if got := sqlerr.StateOf(err); got != "42804" {
+					t.Errorf("error %q carries SQLSTATE %q, want PostgreSQL's 42804", err, got)
+				}
+				if strings.Contains(err.Error(), "#346") {
+					t.Errorf("a refusal PostgreSQL also makes carries a distributed-planning "+
+						"preamble: %q", err)
+				}
+				return
 			}
 			if !strings.Contains(err.Error(), "#346") {
 				t.Errorf("error %q does not point at the issue", err)

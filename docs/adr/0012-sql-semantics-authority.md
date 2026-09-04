@@ -2208,6 +2208,40 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     outside the numeric family widens: rendering a number as text to make two
     arms line up would answer a different query.
 
+    **A pair with NO common type is REFUSED at PLAN time, with SQLSTATE
+    42804 and PostgreSQL's own sentence, on both execution paths and in
+    either arm order.** (Amended 2026-09-04, #648.)
+
+        UNION types numeric and text cannot be matched: result column "a"
+
+    `UNION` there whatever the `ALL`, and `INTERSECT` / `EXCEPT` under their
+    own names; measured live on 17.11 for numeric ∪ text, bigint ∪ text,
+    double precision ∪ text, boolean ∪ bigint, uuid ∪ text, timestamp ∪ text
+    and text ∪ bytea. Before this the DAG refused with a message of its own
+    carrying no SQLSTATE and the single-process path let the arms meet at
+    RUNTIME: `text UNION ALL numeric` answered a STRING column of rendered
+    decimals silently, the same pair the other way round failed mid-execution
+    with 22P02 on the first row of text that is not a number, and `numeric
+    INTERSECT text` answered one row by comparing decimals against text as
+    text. The column NAME rides after PostgreSQL's sentence rather than
+    inside it: a set operation's arms correspond by POSITION, and the
+    position is the localization PostgreSQL's own message does not carry.
+
+    **The refusal is NARROWER than "the numeric ladder declines the pair",
+    and deliberately.** Wadjet has TypeIDs PostgreSQL does not — PORT and
+    PROTOCOL declare int4 on the wire, DURATION int8, IPv4/IPv6/CIDR all
+    inet (#834) — so two of those meeting is ONE PostgreSQL type meeting
+    itself, and DATE ∪ TIMESTAMP resolves to timestamp there. Refusing them
+    would claim PostgreSQL rejects queries it answers, and would have turned
+    six shapes the single-process path ANSWERS into hard errors (measured:
+    date ∪ timestamp, port ∪ integer, protocol ∪ integer, duration ∪ bigint,
+    inet ∪ inet, inet ∪ cidr). Those keep the disposition they have — the
+    single-process path answers, the stage DAG refuses because it has no
+    common CARRIER for the two `.wshf` files, and says so in those words
+    rather than claiming PostgreSQL would refuse. The split is pinned in
+    `coordinator.TestASetOperationWithNoCommonTypeIsRefusedAtPlanTime`, whose
+    pins fail when it closes.
+
     **When the common type is DECIMAL, the (p,s) is:**
 
     - **scale = max over the arms.** The only choice that moves no value; a

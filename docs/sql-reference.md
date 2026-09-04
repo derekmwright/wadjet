@@ -950,6 +950,23 @@ UNQUALIFIED, otherwise the expression as written. `SELECT x.id, x.w FROM …
 UNION ALL …` publishes `id | w`, not `x.id | x.w`, and a delimited alias keeps
 its bytes.
 
+Corresponding columns must have a COMMON TYPE. The numeric types widen into
+one another (`integer` → `bigint` → `numeric` → `real` → `double precision`)
+and nothing else does, so a pair with no common type is refused at PLAN time
+with SQLSTATE `42804`, in either arm order and for `UNION`, `INTERSECT` and
+`EXCEPT` alike:
+
+```
+wadjet=> SELECT bytes_in FROM flow_logs UNION ALL SELECT proto_name FROM flow_logs;
+ERROR:  UNION types bigint and text cannot be matched: result column "bytes_in"
+```
+
+A few pairs PostgreSQL resolves are not yet carried by distributed execution —
+`DATE` beside `TIMESTAMP`, `PORT`/`PROTOCOL` beside an integer, `DURATION`
+beside a bigint, two members of the `IPV4`/`IPV6`/`CIDR` family. Those are
+answered in the embedded/single-process engine and refused on the stage DAG
+with a message naming the two carriers; `CAST` both arms to one type.
+
 An arm is read through what its OWN plan publishes, so an arm's SELECT list may
 name anything a standalone `SELECT` may — a window function included, aliased
 or not, and whether or not its alias also names a column of the arm's input:

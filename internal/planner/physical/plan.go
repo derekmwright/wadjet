@@ -12407,6 +12407,16 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 	if len(node.Children) < 2 {
 		return nil, nil, nil, fmt.Errorf("%s requires two children", op)
 	}
+	// Arms with NO COMMON TYPE are refused HERE, at plan time, with
+	// PostgreSQL's 42804 — the same refusal the stage DAG takes, from the same
+	// walk, so one query has one answer (#648). Left to the runtime, this path
+	// let the arms meet under the FIRST arm's box: `SELECT s FROM t UNION ALL
+	// SELECT d FROM t` came back as a STRING column holding rendered decimals,
+	// and the same pair the other way round failed mid-execution with 22P02 on
+	// the first row of text that is not a number.
+	if err := setOpArmTypeConflict(node); err != nil {
+		return nil, nil, nil, err
+	}
 
 	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {

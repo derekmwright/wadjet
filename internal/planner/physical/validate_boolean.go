@@ -17,7 +17,10 @@ import (
 //	WHERE c            42804  argument of WHERE must be type boolean, not type bigint
 //	WHERE NOT c        42804  argument of NOT must be type boolean, not type bigint
 //	WHERE 1            42804  ... not type integer
-//	WHERE s            42804  ... not type character varying
+//	WHERE s            42804  ... not type character varying   (s is varchar THERE;
+//	                          wadjet's STRING declares OID 25, and PostgreSQL says
+//	                          "text" for a text column, which is what pgTypeName
+//	                          answers)
 //	WHERE c AND b      42804  argument of AND must be type boolean, not type bigint
 //	WHERE b OR c       42804  argument of OR ...
 //	HAVING count(*)    42804  argument of HAVING must be type boolean, not type bigint
@@ -232,6 +235,8 @@ func subqueryItemType(sql string, scope *colScope) (parquet.TypeID, string, bool
 // 42804 message. Measured against `\gdesc` on postgres:17-alpine.
 func pgTypeName(t parquet.TypeID) string {
 	switch t {
+	case parquet.TypeBool:
+		return "boolean"
 	case parquet.TypeInt32:
 		return "integer"
 	case parquet.TypeInt64:
@@ -243,7 +248,14 @@ func pgTypeName(t parquet.TypeID) string {
 	case parquet.TypeDecimal:
 		return "numeric"
 	case parquet.TypeString:
-		return "character varying"
+		// `text`, which is what the WIRE declares for a STRING column (OID 25)
+		// and what pgFormatType reports for it in the catalog. It used to say
+		// "character varying" here, which contradicted both, and PostgreSQL's
+		// own message for a text column says "text" — measured live on 17.11
+		// for `WHERE txt` (42804 "argument of WHERE must be type boolean, not
+		// type text") and for `numeric UNION text` (42804 "UNION types numeric
+		// and text cannot be matched").
+		return "text"
 	case parquet.TypeBytes:
 		return "bytea"
 	case parquet.TypeTimestamp:
@@ -260,9 +272,17 @@ func pgTypeName(t parquet.TypeID) string {
 		return "array"
 	case parquet.TypeRow:
 		return "record"
+	case parquet.TypePort, parquet.TypeProtocol:
+		// What the WIRE declares for them since #834 — int4 — and what
+		// pgFormatType reports in the catalog. A message naming a type the
+		// same query's RowDescription does not is the contradiction #834 is
+		// about, one layer over.
+		return "integer"
+	case parquet.TypeDuration:
+		return "bigint"
 	}
-	// PORT, PROTOCOL, DURATION, MAP and VECTOR are wadjet-native: PostgreSQL
-	// has no such type and therefore no name for it. The refusal still fires
-	// — none of them is a boolean — and names what wadjet calls it.
+	// MAP and VECTOR are wadjet-native: PostgreSQL has no such type and
+	// therefore no name for it. The refusal still fires — neither is a boolean
+	// — and names what wadjet calls it.
 	return strings.ToLower(t.String())
 }

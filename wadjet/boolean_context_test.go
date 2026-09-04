@@ -41,8 +41,15 @@ func TestNonBooleanPredicateIsATypeError(t *testing.T) {
 			state: "42804", msg: "argument of WHERE must be type boolean, not type integer"},
 		{name: "a decimal literal", sql: "SELECT id FROM cb WHERE 1.5",
 			state: "42804", msg: "argument of WHERE must be type boolean, not type numeric"},
-		{name: "a varchar column", sql: "SELECT id FROM cb WHERE s",
-			state: "42804", msg: "argument of WHERE must be type boolean, not type character varying"},
+		// `text`, not `character varying`. The fixture sentence above was
+		// measured over a PostgreSQL table whose `s` is a varchar; wadjet's
+		// STRING column is not one — the wire declares OID 25 for it and
+		// pgFormatType reports `text` — and PostgreSQL over a TEXT column says
+		// "not type text" (measured live on 17.11). A message naming a type
+		// the same query's RowDescription does not is the contradiction #834
+		// is about, one layer over.
+		{name: "a text column", sql: "SELECT id FROM cb WHERE s",
+			state: "42804", msg: "argument of WHERE must be type boolean, not type text"},
 		{name: "a double column", sql: "SELECT id FROM cb WHERE f",
 			state: "42804", msg: "argument of WHERE must be type boolean, not type double precision"},
 		{name: "a numeric column", sql: "SELECT id FROM cb WHERE n",

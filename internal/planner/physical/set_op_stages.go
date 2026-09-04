@@ -6,6 +6,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -112,7 +113,14 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 		plans = append(plans, plan)
 		deps = append(deps, leaves[0])
 	}
-	if err := reconcileSetOpArmTypes(plans, outNames); err != nil {
+	if err := reconcileSetOpArmTypes(plans, outNames, setOpBaseName(node)); err != nil {
+		if sqlerr.StateOf(err) != "" {
+			// A refusal that already carries PostgreSQL's SQLSTATE and wording
+			// is the client's answer as written, with no distributed-planning
+			// preamble in front of it (#648).
+			p.refuseSetOp(err)
+			return
+		}
 		p.refuseSetOp(fmt.Errorf("%s: %w. See issue #346", setOpName(node), err))
 		return
 	}
@@ -238,17 +246,144 @@ func (p *Planner) refuseSetOp(err error) {
 }
 
 func setOpName(node *logical.Node) string {
-	base := "UNION"
+	if node.UnionAll {
+		return setOpBaseName(node) + " ALL"
+	}
+	return setOpBaseName(node)
+}
+
+// setOpBaseName is the operation without ALL, which is how PostgreSQL names it
+// in the 42804 message: `UNION ALL` of two incompatible arms is reported as
+// "UNION types … cannot be matched" (measured live on 17.11).
+func setOpBaseName(node *logical.Node) string {
 	switch node.Type {
 	case logical.NodeIntersect:
-		base = "INTERSECT"
+		return "INTERSECT"
 	case logical.NodeExcept:
-		base = "EXCEPT"
+		return "EXCEPT"
 	}
-	if node.UnionAll {
-		return base + " ALL"
+	return "UNION"
+}
+
+// setOpTypeMismatch is the refusal a set operation whose arms have NO COMMON
+// TYPE takes, on BOTH execution paths and at PLAN time, with PostgreSQL's own
+// SQLSTATE and wording (42804, measured live on 17.11 for every pair in
+// ADR-0012 item 12's family — numeric ∪ text, bigint ∪ text, double precision
+// ∪ text, boolean ∪ bigint, uuid ∪ text, timestamp ∪ text, in either arm
+// order and for UNION, INTERSECT and EXCEPT alike).
+//
+// Nothing outside the numeric family widens (ADR-0012 item 12), and before
+// this the two paths disagreed about what that meant. The DAG refused with a
+// message of its own carrying no SQLSTATE; the single-process path let the
+// arms meet at runtime and answered whatever the first arm's box happened to
+// allow — `SELECT s FROM t UNION ALL SELECT d FROM t` came back as a STRING
+// column holding rendered decimals, and the same pair the other way round
+// failed mid-execution with 22P02 on the first row of text that is not a
+// number (#648).
+//
+// The COLUMN is named after PostgreSQL's sentence rather than inside it: the
+// set operation's arms correspond by position and the position is the
+// localization a reader needs, which PostgreSQL's message does not carry.
+func setOpTypeMismatch(op, column string, a, b parquet.TypeID) error {
+	return sqlerr.New("42804", "%s types %s and %s cannot be matched: result column %q",
+		op, pgTypeName(a), pgTypeName(b), column)
+}
+
+// setOpNoCommonType reports whether PostgreSQL has NO common type for the two,
+// which is a STRICTER question than "setOpWiden declines them".
+//
+// setOpWiden is wadjet's ladder over the five numeric TypeIDs, and wadjet has
+// TypeIDs PostgreSQL does not: PORT and PROTOCOL declare int4 on the wire,
+// DURATION int8, and IPv4/IPv6/CIDR all inet (#834, ADR-0012). Two of those
+// meeting are ONE PostgreSQL type meeting itself, which PostgreSQL matches
+// without a thought — `SELECT c_port … UNION ALL SELECT c_i32 …` is an int4
+// union there — and DATE ∪ TIMESTAMP resolves to timestamp. Refusing those
+// with "cannot be matched" would claim PostgreSQL rejects a query it answers,
+// and would turn six shapes the single-process path ANSWERS today into hard
+// errors: measured, date ∪ timestamp, port ∪ integer, protocol ∪ integer,
+// duration ∪ bigint, inet ∪ inet and inet ∪ cidr all return their rows there.
+//
+// Those pairs keep exactly the disposition they have (the single-process path
+// answers, the stage DAG refuses with its own message, which is a standing
+// two-path split of its own and not this refusal's business). What this
+// predicate is for is the pairs PostgreSQL itself refuses with 42804 —
+// numeric ∪ text, bigint ∪ text, boolean ∪ bigint, uuid ∪ text, timestamp ∪
+// text, text ∪ bytea — measured live on 17.11, in either arm order and for
+// UNION, INTERSECT and EXCEPT alike.
+func setOpNoCommonType(a, b parquet.TypeID) bool {
+	if _, ok := setOpWiden(a, b); ok {
+		return false
 	}
-	return base
+	if pgTypeName(a) == pgTypeName(b) {
+		return false // one PostgreSQL type wearing two wadjet TypeIDs
+	}
+	if isDateTimePair(a, b) {
+		return false // PostgreSQL resolves date ∪ timestamp to timestamp
+	}
+	return true
+}
+
+func isDateTimePair(a, b parquet.TypeID) bool {
+	return (a == parquet.TypeDate && b == parquet.TypeTimestamp) ||
+		(a == parquet.TypeTimestamp && b == parquet.TypeDate)
+}
+
+// setOpArmTypeConflict is the no-common-type refusal, computed WITHOUT
+// emitting any stage, so the single-process path takes the same plan-time
+// answer the stage DAG does. It walks the same arm projections
+// reconcileSetOpArmTypes walks, and reports ONLY the type conflict: an arm the
+// walk cannot type is not a conflict, and every other refusal
+// reconcileSetOpArmTypes makes is about the DAG's own materialization rather
+// than about the query's meaning, so neither is raised here.
+func setOpArmTypeConflict(node *logical.Node) error {
+	if !isSetOpNode(node) || len(node.Children) < 2 {
+		return nil
+	}
+	for _, child := range node.Children {
+		if inner := setOpUnwrap(child); isSetOpNode(inner) {
+			if err := setOpArmTypeConflict(inner); err != nil {
+				return err
+			}
+		}
+	}
+	outNames := setOpOutputNames(node.Children[0])
+	if len(outNames) == 0 {
+		return nil
+	}
+	plans := make([]setOpArmPlan, 0, len(node.Children))
+	for _, child := range node.Children {
+		plan, err := setOpArmProjection(child, outNames)
+		if err != nil {
+			return nil // a shape this walk cannot read is not a conflict
+		}
+		plans = append(plans, plan)
+	}
+	op := setOpBaseName(node)
+	for col := range outNames {
+		var want setOpColType
+		for _, plan := range plans {
+			ct := plan.types[col]
+			if !ct.known {
+				continue
+			}
+			if !want.known {
+				want = ct
+				continue
+			}
+			widened, ok := setOpWiden(want.typ, ct.typ)
+			if !ok {
+				if setOpNoCommonType(want.typ, ct.typ) {
+					return setOpTypeMismatch(op, outNames[col], want.typ, ct.typ)
+				}
+				// A pair PostgreSQL matches and this engine's ladder does not.
+				// Not this refusal's business: leaving it alone keeps the
+				// disposition each path already has.
+				return nil
+			}
+			want = setOpColType{typ: widened, known: true}
+		}
+	}
+	return nil
 }
 
 func isSetOpNode(n *logical.Node) bool {
@@ -661,12 +796,12 @@ func setOpRefDecl(decls colDecls, resolved string, pr logical.Projection) (setOp
 // nothing was rewritten, each arm's file kept its own scale in its WSHF
 // header, and the reader of both files took the first one's. The unscaled
 // integer 127501 then rendered as 1275.01 instead of 12.7501.
-func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
+func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string) error {
 	if len(plans) < 2 {
 		return nil
 	}
 	for col := range outNames {
-		want, allKnown, err := setOpTargetType(plans, col, outNames[col])
+		want, allKnown, err := setOpTargetType(plans, col, outNames[col], op)
 		if err != nil {
 			return err
 		}
@@ -826,7 +961,7 @@ func setOpUnresolvedArmsDesc(plans []setOpArmPlan, col int) string {
 // setOpTargetType folds one result column's arms into the type they must all
 // emit. allKnown is false when some arm carries no type at all, which is the
 // caller's signal to leave the column alone.
-func setOpTargetType(plans []setOpArmPlan, col int, name string) (setOpColType, bool, error) {
+func setOpTargetType(plans []setOpArmPlan, col int, name, op string) (setOpColType, bool, error) {
 	var want setOpColType
 	allKnown := true
 	for _, plan := range plans {
@@ -841,9 +976,25 @@ func setOpTargetType(plans []setOpArmPlan, col int, name string) (setOpColType, 
 		}
 		widened, ok := setOpWiden(want.typ, ct.typ)
 		if !ok {
+			if setOpNoCommonType(want.typ, ct.typ) {
+				// PostgreSQL's own 42804. setOpArmTypeConflict raises the same
+				// refusal before any stage is emitted and the single-process
+				// path calls it too, so one query takes one answer; this is
+				// the backstop for a shape that reaches here without it.
+				return setOpColType{}, false, setOpTypeMismatch(op, name, want.typ, ct.typ)
+			}
+			// A pair PostgreSQL DOES match, on a ladder that does not reach it
+			// — PORT/PROTOCOL beside an integer, DURATION beside a bigint, two
+			// members of the inet family, DATE beside a TIMESTAMP. This engine
+			// cannot concatenate the two .wshf files, so the DAG still refuses;
+			// the message says so rather than claiming PostgreSQL would.
+			// Named by wadjet's own CARRIER, not by PostgreSQL's type: the two
+			// share the PostgreSQL name (IPV4 and IPV6 are both `inet`) and it
+			// is the carriers that cannot be concatenated.
 			return setOpColType{}, false, fmt.Errorf(
-				"the arms disagree on the type of result column %q (%s vs %s) and "+
-					"neither widens into the other; make the types match in the query",
+				"result column %q is %s in one arm and %s in another, and distributed (stage-DAG) "+
+					"execution has no common carrier for that pair — PostgreSQL resolves it, this "+
+					"engine does not yet; CAST both arms to one type",
 				name, want.typ, ct.typ)
 		}
 		want = setOpColType{typ: widened, known: true}
@@ -877,7 +1028,7 @@ func setOpNodeResultTypes(n *logical.Node) []setOpColType {
 	}
 	out := make([]setOpColType, len(names))
 	for col := range names {
-		want, allKnown, err := setOpTargetType(plans, col, names[col])
+		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n))
 		if err != nil || !allKnown {
 			continue
 		}
