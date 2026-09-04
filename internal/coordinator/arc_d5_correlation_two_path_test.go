@@ -22,11 +22,13 @@ import (
 //	dag-shuffled   the same with BroadcastBytesOverride = 1, so every build
 //	               side goes through a hash join and an exchange
 //
-// Every cell runs all four. The 18 GENERATED per-type rendering cells are the
-// one exception and they say so in the field that does it (skipBudgetedArm),
-// with the measurement behind the choice: a per-row re-run under a budget
-// spends seconds per row in forced-reservation backoff, and the rendering
-// those cells gate is decided before any budget exists.
+// Every cell runs all four unless it says otherwise in the field that does it
+// (skipBudgetedArm), and every cell that says otherwise gives its own reason
+// there. Two reasons exist: the 18 GENERATED per-type rendering cells, where a
+// per-row re-run under a budget spends seconds per row in forced-reservation
+// backoff and the rendering they gate is decided before any budget exists; and
+// one #852 cell whose plan's memory floor sits ON the arm's budget, where
+// either outcome would be a coin flip.
 //
 // Every DAG cell asserts the ROUTING COUNTERS beside the rows (protocol rule
 // 11). Rows alone cannot tell "the DAG executed this" from "the DAG refused
@@ -51,9 +53,21 @@ type arcD5Cell struct {
 	// able to say — otherwise the shape has to be dropped, which is how one
 	// goes unrecorded.
 	wantErrLikeSpilled string
-	// skipBudgetedArm drops the 512 KiB arm for this cell, and only the 18
-	// generated per-type rendering cells set it. The reason is measured, not
-	// assumed, and it is the same fact this arc is about:
+	// skipBudgetedArm drops the 512 KiB arm for this cell. EVERY cell that
+	// sets it states its own reason at the cell, because there are now two
+	// different reasons and a field whose doc names only one of them is how a
+	// cell ends up opting out silently:
+	//
+	//   - the 18 GENERATED per-type rendering cells, for the cost measured
+	//     below;
+	//   - `#852/correlated_scalar_over_a_derived_table`, because that plan's
+	//     memory floor sits ON the arm's budget rather than under or over it
+	//     and the cell both answered and refused across runs — pinning either
+	//     outcome would be pinning a coin flip (ADR-0027: which batch crosses
+	//     a budget is a CONDITION, not a shape).
+	//
+	// The generated cells' reason is measured, not assumed, and it is the same
+	// fact this arc is about:
 	//
 	// a correlated subquery the decorrelator cannot express is RE-RUN ONCE PER
 	// OUTER ROW, and each re-run scans the inner relation again — measured,
@@ -1528,9 +1542,8 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 			sql: `SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 30 AND EXISTS (` +
 				`SELECT 1 FROM (SELECT c_bool AS k FROM typemx WHERE id >= 15 AND id < 600 ` +
 				`GROUP BY c_bool) b WHERE a.c_bool = b.k)`,
-			want:            []string{"n=int64:29"},
-			skipBudgetedArm: true,
-			pgSays:          "29 - the same number the re-run spelling of this answers"},
+			want:   []string{"n=int64:29"},
+			pgSays: "29 — the same number the re-run spelling of this answers"},
 		{issue: "#852", name: "exists_over_a_comma_joined_inner",
 			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
 				`SELECT 1 FROM mk_inner b, mk_dim d WHERE b.g = d.k AND b.n = a.n)`,
