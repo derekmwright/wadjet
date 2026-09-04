@@ -174,8 +174,8 @@ refusal survives the delegation.
   the bare spelling produces, so it is one reference with one resolver and one
   `batch.RowFieldPath` question, not a second spelling for the seven sites of
   rule 1 to disagree about. It composes: predicate, GROUP BY, ORDER BY, join
-  key (INNER and OUTER, see below), aggregate argument, cast, arithmetic.
-  `a.b.c` is still a syntax error.
+  key (INNER and OUTER, see below), aggregate argument, cast, arithmetic, and
+  redundant parentheses (`((c_row)).b`). `a.b.c` is still a syntax error.
 
   **The join key needed TWO sites, and the second was found by a reviewer
   measuring the claim** (2026-09-04 round 4). An INNER join's field-path ON
@@ -191,6 +191,14 @@ refusal survives the delegation.
   12. The same rule-1 reorder fixes it, and the residual reads the field out of
   the container through the child vector. LEFT / RIGHT / FULL now answer
   PostgreSQL's 12 / 9 / 20 over the fixture rows, on every arm.
+
+  **A qualifier that is not a container at all** is refused with PostgreSQL's
+  42809 rather than answered: `(b).x` over a DECIMAL column, and its bare
+  spelling `b.x`, returned one NULL per row — #604's disposition for a
+  container that does not declare the field, reached by a qualifier that is not
+  a container. `physical.colScope.resolveRef` refuses it where the scope can
+  PROVE a scalar type (a base table's column); a derived table or CTE column
+  proves nothing and keeps today's answer, and ARRAY / MAP / ROW are left alone.
 
   What does NOT work is a container the reference QUALIFIES — `(x.c_row).b`,
   and by the same token the nested `((c_row).rw).k`, whose container is itself
@@ -220,8 +228,10 @@ refusal survives the delegation.
   `parenthesised/a-qualified-container-is-refused-not-answered`,
   `parenthesised/a-qualified-container-is-refused-without-a-join`,
   `parenthesised/a-nested-path-is-refused-not-answered`,
+  `parenthesised/redundant-parentheses-are-the-same-reference`,
+  `not-a-container/field-notation-on-a-scalar{,-unparenthesised}`,
   `outer-join/*` (LEFT, RIGHT, FULL, the arithmetic spelling and an ordinary
-  residual as the control), plus the parser's own
+  residual as the control) and `docs-example/*`, plus the parser's own
   spellings in `internal/planner/sql/paren_field_path_test.go`.
 
   One residual is PINNED rather than fixed: a field path on BOTH sides of an

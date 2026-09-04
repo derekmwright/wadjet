@@ -345,11 +345,17 @@ which is the deliberate superset ADR-0012 records:
 | `c_row.b` | the field | `missing FROM-clause entry for table "c_row"` (42P01) |
 | `(c_row).b` | the field | the field |
 | `(x.c_row).b` | `0A000`, not supported | the field |
-| `x.c_row.b` | syntax error | read as `catalog.schema.column`, refused |
+| `x.c_row.b` | syntax error | read as *schema.table.column*: `missing FROM-clause entry for table "c_row"` (42P01) |
+
+Redundant parentheses are redundant: `((c_row)).b` is the same reference.
+Field notation on something that is not composite is refused with PostgreSQL's
+own 42809 — `(1+2).b`, and `(b).x` over a scalar column, which answered one
+NULL per row until 2026-09-04.
 
 A container the reference QUALIFIES needs a three-part identity that this
-engine does not yet carry, so `(x.c_row).b` is REFUSED rather than answered —
-a loud `0A000` naming the derived-table workaround, never a silent value. That
+engine does not yet carry, so `(x.c_row).b` — and, for the same reason, the
+nested `((c_row).rw).k` — is REFUSED rather than answered: a loud `0A000`
+naming the derived-table workaround, never a silent value. That
 is the one spelling PostgreSQL offers for an ambiguous container and wadjet
 does not; the derived-table rename above is the way to write it today.
 ADR-0022 carries the mechanism and what closing it takes.

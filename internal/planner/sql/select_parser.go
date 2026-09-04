@@ -1899,7 +1899,20 @@ func (p *selectParser) parsePostfix() (Node, error) {
 			if !ok {
 				return expr, nil
 			}
-			inner, ok := pn.Inner.(*ColRef)
+			// Redundant parentheses are redundant: `((c_row)).b` is the same
+			// reference as `(c_row).b`, and PostgreSQL answers it. Peeling
+			// them here is what keeps "it composes" true one paren further
+			// out; refusing it said `(c_row)` "is not a composite type",
+			// which was false about a container.
+			node := pn.Inner
+			for {
+				inner, nested := node.(*ParenNode)
+				if !nested {
+					break
+				}
+				node = inner.Inner
+			}
+			inner, ok := node.(*ColRef)
 			if !ok {
 				// PostgreSQL's own sentence, with the one substitution this
 				// layer can make: the parser knows the EXPRESSION but not its
@@ -1914,7 +1927,7 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				}
 				return nil, sqlerr.New("42809",
 					"column notation .%s applied to %s, which is not a composite type",
-					fname, pn.Inner.String())
+					fname, node.String())
 			}
 			p.advance() // consume .
 			fieldTok, err := p.expect(TokenIdent)
@@ -1922,25 +1935,34 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				return nil, fmt.Errorf("expected field name after '.'")
 			}
 			if inner.Table != "" {
-				// A container the reference QUALIFIES — `(x.c_row).b`, and by
-				// the same token the nested `((c_row).rw).k`, whose container
-				// is itself a path — needs a THREE-part identity, and this
-				// engine has a two-part one: `plansql.ColRef` is
-				// {Table, Column} and every resolver ADR-0022 binds together
-				// reads those two fields. Measured on an attempt: the
-				// reference resolves to NULL at every arm, with no join
-				// anywhere in the query, because the container's declaration
-				// is keyed by its BARE name at each declaration site and the
-				// qualifier is stripped before the field is asked for.
+				// A TWO-PART container reference. Two spellings reach here and
+				// the message must fit both, because the parser cannot tell
+				// them apart: a relation-qualified container `(x.c_row).b`,
+				// and a nested path `((c_row).rw).k` whose container is itself
+				// a path. Calling either one "relation-qualified" was wrong
+				// about the other, and neither is necessarily a container at
+				// all — `(d.b).x` over a DECIMAL column has this shape too,
+				// and PostgreSQL answers it 42809.
+				//
+				// Both need a THREE-part identity, and this engine has a
+				// two-part one: `plansql.ColRef` is {Table, Column} and every
+				// resolver ADR-0022 binds together reads those two fields.
+				// Measured on an attempt: the reference resolves to NULL at
+				// every arm, with no join anywhere in the query, because the
+				// container's declaration is keyed by its BARE name at each
+				// declaration site and the qualifier is stripped before the
+				// field is asked for.
 				//
 				// A silent NULL is the one answer this must not give, so the
 				// spelling is REFUSED while the identity is two-part.
 				// ADR-0022 carries the mechanism and what closing it takes.
 				return nil, sqlerr.New("0A000",
-					"a relation-qualified ROW field path (%s.%s).%s is not supported; "+
-						"drop the qualifier, or rename the container through a derived "+
-						"table when two relations publish it",
-					inner.Table, inner.Column, fieldTok.val)
+					"(%s.%s).%s: a ROW field path names an UNQUALIFIED container here, "+
+						"so a two-part container reference — a relation-qualified "+
+						"container, or a nested path — is not supported. Write (%s).%s "+
+						"where that names the container; where two relations publish it, "+
+						"rename one through a derived table",
+					inner.Table, inner.Column, fieldTok.val, inner.Column, fieldTok.val)
 			}
 			// The container becomes the QUALIFIER of an ordinary ColRef, which
 			// is the node the bare spelling already produces: `(c_row).b` and

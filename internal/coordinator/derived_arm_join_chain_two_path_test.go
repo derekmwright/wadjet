@@ -844,7 +844,7 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			sql: "SELECT x.id AS xid, (x.c_row).b AS fb FROM " + nested + " x JOIN " + nested +
 				" y ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
 			cols:   []string{"xid", "fb"},
-			refuse: "a relation-qualified ROW field path (x.c_row).b is not supported",
+			refuse: "(x.c_row).b: a ROW field path names an UNQUALIFIED container here",
 		},
 		{
 			// The same refusal with NO join anywhere, which is what says the
@@ -853,7 +853,7 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			name:   "parenthesised/a-qualified-container-is-refused-without-a-join",
 			sql:    "SELECT (x.c_row).b AS fb FROM " + nested + " x",
 			cols:   []string{"fb"},
-			refuse: "a relation-qualified ROW field path (x.c_row).b is not supported",
+			refuse: "(x.c_row).b: a ROW field path names an UNQUALIFIED container here",
 		},
 		{
 			// The NESTED spelling reaches the same rule for the same reason —
@@ -862,7 +862,7 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			name:   "parenthesised/a-nested-path-is-refused-not-answered",
 			sql:    "SELECT ((c_row).rw).k AS fk FROM " + nested,
 			cols:   []string{"fk"},
-			refuse: "a relation-qualified ROW field path (c_row.rw).k is not supported",
+			refuse: "(c_row.rw).k: a ROW field path names an UNQUALIFIED container here",
 		},
 		{
 			// The CONTROL that bounds the refusal: ONE arm publishes the
@@ -945,6 +945,69 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			// field never reaches it. Closing it is the same
 			// carry-the-container question `rowContainersOf` answers for the
 			// join, asked of an exchange-repartition stage.
+			name: "both-sides-field-path-key",
+			sql: "SELECT x.id AS xid, z.b AS zb FROM " + nested + " x JOIN (SELECT id, " +
+				"c_row AS z FROM " + nested + " WHERE id < 12) y ON c_row.b = z.b " +
+				"WHERE x.id < 12 ORDER BY x.id",
+			cols: []string{"xid", "zb"},
+			want: "8 rows: 0|0;1|11;4|44;5|55;6|66;7|77;8|88;11|121;",
+			armErr: map[string]string{
+				"dag-shuffled": `column "z.b" does not exist in the input schema`,
+			},
+		},
+		{
+			// The WORKED EXAMPLE from docs/data-types.md — the escape hatch
+			// the 42702 refusal sends the reader to — driven as a gate so the
+			// documentation cannot drift from the engine again. An earlier
+			// text selected a name nothing published, and it failed on wadjet
+			// AND on PostgreSQL.
+			//
+			// PostgreSQL 17 over the same shape: `0,0 | 1,11 | 2, | 3, | 4,44`.
+			name: "docs-example/rename-the-other-arms-container-away",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN (SELECT id, " +
+				"c_row AS y_row FROM " + nested + ") y ON x.id = y.id WHERE x.id < 5 " +
+				"ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+		{
+			// The same example in PostgreSQL's own spelling, because the docs
+			// table says both are accepted.
+			name: "docs-example/rename-the-other-arms-container-away-parenthesised",
+			sql: "SELECT x.id AS xid, (c_row).b AS fb FROM " + nested + " x JOIN (SELECT id, " +
+				"c_row AS y_row FROM " + nested + ") y ON x.id = y.id WHERE x.id < 5 " +
+				"ORDER BY x.id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+		{
+			// Redundant parentheses are the same reference (P2, round 3):
+			// PostgreSQL answers `((c_row)).b` and this engine refused it as
+			// "not a composite type", which was false about a container.
+			name: "parenthesised/redundant-parentheses-are-the-same-reference",
+			sql:  "SELECT id AS xid, ((c_row)).b AS fb FROM " + nested + " WHERE id < 5 ORDER BY id",
+			cols: []string{"xid", "fb"},
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+		},
+		{
+			// Field notation on a SCALAR column. PostgreSQL 17 raises 42809
+			// `column notation .x applied to type numeric, which is not a
+			// composite type`; this engine answered one NULL per row, on every
+			// arm — #604's disposition for a container that does not declare
+			// the field, reached by a qualifier that is not a container at
+			// all. Both spellings, because they are one reference.
+			name:   "not-a-container/field-notation-on-a-scalar",
+			sql:    "SELECT (b).x AS bx FROM decpair",
+			cols:   []string{"bx"},
+			refuse: "column notation .x applied to type numeric, which is not a composite type",
+		},
+		{
+			name:   "not-a-container/field-notation-on-a-scalar-unparenthesised",
+			sql:    "SELECT b.x AS bx FROM decpair",
+			cols:   []string{"bx"},
+			refuse: "column notation .x applied to type numeric, which is not a composite type",
+		},
+		{
 			name: "join-with-a-dimension",
 			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " +
 				typematrix.Dim + " d ON x.id = d.k WHERE x.id < 5 ORDER BY x.id",

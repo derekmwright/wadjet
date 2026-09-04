@@ -30,6 +30,11 @@ func TestParenthesisedFieldPathIsTheSameReferenceAsTheBareOne(t *testing.T) {
 		{"in arithmetic", "SELECT (c_row).b + 1 FROM nested", "c_row.b + 1"},
 		{"under a cast", "SELECT (c_row).b::int FROM nested", "cast(c_row.b as int)"},
 		{"as an aggregate argument", "SELECT count((c_row).b) FROM nested", "count(c_row.b)"},
+		// Redundant parentheses are redundant. PostgreSQL answers this; the
+		// first cut of the arm refused it as "not a composite type", which was
+		// false about a container (round-3 review P2).
+		{"redundant parentheses", "SELECT ((c_row)).b FROM nested", "c_row.b"},
+		{"three parentheses", "SELECT (((c_row))).b FROM nested", "c_row.b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, err := Parse(tc.sql)
@@ -72,15 +77,22 @@ func TestParenthesisedFieldPathRefusesWhatItCannotResolve(t *testing.T) {
 			// gave NULL on every arm, so it is refused instead — with the
 			// derived-table workaround named, because this is PostgreSQL's own
 			// escape hatch for a container two relations both publish.
+			//
+			// The WORDING covers both spellings that reach the rule, because
+			// the parser cannot tell them apart and an earlier text called the
+			// nested one "relation-qualified" when there is no relation in it
+			// (round-3 review P3). It also does not assert the qualified half
+			// IS a container: `(d.b).x` over a DECIMAL column has this shape
+			// and is not one.
 			name:      "a relation-qualified container",
 			sql:       "SELECT (x.c_row).b FROM nested x",
-			wantMsg:   "a relation-qualified ROW field path (x.c_row).b is not supported",
+			wantMsg:   "(x.c_row).b: a ROW field path names an UNQUALIFIED container here",
 			wantState: "0A000",
 		},
 		{
 			name:      "a nested path, whose container is itself a path",
 			sql:       "SELECT ((c_row).rw).k FROM nested",
-			wantMsg:   "a relation-qualified ROW field path (c_row.rw).k is not supported",
+			wantMsg:   "(c_row.rw).k: a ROW field path names an UNQUALIFIED container here",
 			wantState: "0A000",
 		},
 		{

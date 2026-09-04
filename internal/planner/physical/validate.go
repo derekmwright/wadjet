@@ -370,6 +370,27 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 					return s.unknownField(ref, fields)
 				}
 			}
+			// A qualifier that PROVABLY names a column of a SCALAR type is
+			// not a container, and field notation does not apply to it at
+			// all: `SELECT (b).x FROM decpair` — or its bare spelling `b.x` —
+			// answered nine NULLs, one per row, where PostgreSQL 17 raises
+			// `column notation .x applied to type numeric, which is not a
+			// composite type` (42809, measured). #604 closed this for a
+			// container that does not declare the field; the qualifier that
+			// is not a container at all kept the NULL, and a NULL for a
+			// reference that cannot mean anything is the silent answer this
+			// arc exists to remove.
+			//
+			// Only base tables register a type, and only SCALAR types refuse:
+			// a derived table or CTE column proves nothing and keeps today's
+			// answer, and ARRAY / MAP / ROW are left alone so a container
+			// notation this engine may grow is not pre-refused here.
+			if t, known := s.colTypes[q]; known && t != typeAmbiguous &&
+				t != parquet.TypeRow && t != parquet.TypeMap && t != parquet.TypeArray {
+				return sqlerr.New("42809",
+					"column notation .%s applied to type %s, which is not a composite type",
+					ref.Column, pgTypeName(t))
+			}
 			return nil
 		}
 		if strings.Contains(q, ".") {
