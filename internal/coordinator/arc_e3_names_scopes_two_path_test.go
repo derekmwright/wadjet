@@ -401,6 +401,37 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 				"HAVING g + 1 > 2 ORDER BY k",
 			want: fmt.Sprintf("k,g + 1 | 3,%d | 4,%d | 5,%d | 6,%d | 7,%d",
 				gk[3], gk[4], gk[5], gk[6], gk[7])},
+		// NESTED. A wrapper — one derived table — turns an aggregate output
+		// into a plain column reference for the block above, and the gather
+		// pairs a duplicate source name with the column of its own CLASS. It
+		// was asking `OutputRename.IsAgg`, a property of the WRAPPER's item,
+		// so both DAG arms answered the KEY under the aggregate's name.
+		{name: "785/nested-in-a-derived-table",
+			sql: "SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x FROM collslot " +
+				"GROUP BY g HAVING COUNT(*) > 0) u ORDER BY u.x",
+			want: "g,x | 80,0 | 80,1 | 80,2"},
+		{name: "785/nested-in-a-derived-table-no-having",
+			sql: "SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x FROM collslot " +
+				"GROUP BY g) u ORDER BY u.x",
+			want: "g,x | 80,0 | 80,1 | 80,2"},
+		// The CTE spelling is PINNED, and it is a DIFFERENT mechanism from
+		// the two above: the gather never sees a duplicate there. Its
+		// columns are `[g, x]` — the fragment's OWN projection already
+		// applied the CTE's SELECT list — and that projection resolved `g`
+		// by NAME against the aggregate's output, where the key and the count
+		// both answer to it, and took the first. Closing it means addressing
+		// an aggregate's outputs by POSITION from a projection
+		// (`exec.ProjectColumn.SourceIdx` exists; nothing sets it for this
+		// shape), which is the same first-match rule one operator further in
+		// and its own change. Pre-existing: base answers the key here too.
+		{name: "785/nested-in-a-cte",
+			sql: "WITH u AS (SELECT COUNT(*) AS g, g AS x FROM collslot GROUP BY g " +
+				"HAVING COUNT(*) > 0) SELECT g, x FROM u ORDER BY x",
+			want: "g,x | 80,0 | 80,1 | 80,2",
+			pin: map[string]string{
+				"dag":     "g,x | 0,0 | 1,1 | 2,2",
+				"dagshuf": "g,x | 0,0 | 1,1 | 2,2",
+			}},
 		{name: "785/ctl-no-having",
 			sql:  "SELECT COUNT(*) AS g, g AS x FROM collslot GROUP BY g ORDER BY x",
 			want: "g,x | 80,0 | 80,1 | 80,2"},

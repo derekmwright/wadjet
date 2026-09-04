@@ -3977,7 +3977,19 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 		var astExpr plansql.Node
 		var declType expr.DeclType
 		declKnown := false
+		// The CLASS of what this item refers to, not of the item itself. A
+		// wrapper — one derived table or one CTE — makes an aggregate output
+		// a plain column reference to the block above, and the gather pairs a
+		// duplicate source name with the column of its own class (#575,
+		// #785). Asking `p.IsAgg` asked about the wrapper (#785 round 2).
 		isAgg := p.IsAgg
+		if !isAgg && renameScope != nil && len(renameScope.Children) == 1 {
+			src := p.Column
+			if src == "" {
+				src = strings.ToLower(strings.TrimSpace(p.Expr))
+			}
+			isAgg = renameIsAggregateOutput(src, renameScope.Children[0])
+		}
 		switch {
 		case p.IsAgg:
 			// AggSpec.OutputCol == alias; if no alias, fall back to expr.

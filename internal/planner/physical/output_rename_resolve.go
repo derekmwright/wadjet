@@ -85,6 +85,86 @@ func resolveOutputRenameSourceForGather(name string, child *logical.Node) string
 	return resolveRenameSource(name, child, true)
 }
 
+// renameIsAggregateOutput reports whether the SELECT item named `name` is,
+// after every rename between here and the operator that computes it, an
+// AGGREGATE OUTPUT rather than a group-key reference.
+//
+// `physical.OutputRename.IsAgg` is a property of the item the OUTER block
+// wrote, and the gather's duplicate-name pairing needs the class of what that
+// item REFERS to. One derived table is enough to separate them:
+//
+//	SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x FROM t
+//	                      GROUP BY g HAVING COUNT(*) > 0) u ORDER BY u.x
+//
+// `u.g` is a plain column reference — IsAgg false — while the value it names
+// is the COUNT, and the aggregate publishes its KEY under that same name. The
+// key branch of `classScopedMatch` then took the first column of the name,
+// which is the key, and both DAG arms answered 0,0 | 1,1 | 2,2 for
+// PostgreSQL's 80,0 | 80,1 | 80,2 (#785 round 2).
+//
+// It walks the same way resolveRenameSource does and stops where that stops,
+// so the two answers are about the same projection.
+func renameIsAggregateOutput(name string, child *logical.Node) bool {
+	resolved := name
+	for n, hops := child, 0; n != nil && hops < 64; hops++ {
+		switch {
+		case n.Type == logical.NodeProject:
+			bare := derivedScopeBareName(resolved, n)
+			proj := projectionForName(n.Projections, resolved, bare)
+			if proj == nil {
+				return false
+			}
+			if proj.IsAgg {
+				return true
+			}
+			if proj.Column == "" {
+				return false // a computed item is neither
+			}
+			// A Project whose INPUT is the aggregate's own output is where the
+			// two classes are separated, so the answer is this projection's
+			// own class and the walk stops. Descending past it re-asks by NAME
+			// at the aggregate — where the key and the output answer to the
+			// same name, which is the very collision being resolved — and
+			// `g AS x` over `COUNT(*) AS g` came back "aggregate" because the
+			// aggregate publishes a `g`.
+			if logical.AggregateOverGroupRows(n) != nil {
+				return false
+			}
+			next := proj.Column
+			if proj.Expr != "" {
+				next = strings.ToLower(proj.Expr)
+			}
+			if strings.EqualFold(next, resolved) {
+				return false
+			}
+			resolved = next
+		case n.Type == logical.NodeAggregate:
+			// The AGGREGATE itself answers nothing. Its output schema is
+			// exactly where a key and an output can share a name, so asking
+			// it by name is the collision, not its resolution — and asking it
+			// re-classified the block's OWN key reference as an aggregate
+			// (`SELECT COUNT(*) AS g, g AS x … GROUP BY g`: `x`'s source is
+			// `g`, which the aggregate does publish as an output). The class
+			// of an item in THIS block is the item's own `IsAgg`; this walk
+			// exists only to carry that class across a WRAPPER, and where
+			// there is no wrapper there is nothing to carry.
+			return false
+		case n.Type == logical.NodeJoin && len(n.Children) == 2:
+			if own := ownedJoinArm(n, resolved); own != nil {
+				return renameIsAggregateOutput(resolved, own)
+			}
+			return renameIsAggregateOutput(resolved, n.Children[0]) ||
+				renameIsAggregateOutput(resolved, n.Children[1])
+		}
+		if len(n.Children) == 1 {
+			n = n.Children[0]
+			continue
+		}
+		return false
+	}
+	return false
+}
+
 func resolveRenameSource(name string, child *logical.Node, forGather bool) string {
 	resolved := name
 	if child == nil || name == "" {

@@ -1103,11 +1103,25 @@ func classScopedMatch(names []string, r physical.OutputRename) (int, bool) {
 	if r.Expr != nil {
 		return 0, false
 	}
+	matchesOf := func(key string) []int {
+		var out []int
+		for i, n := range names {
+			if strings.EqualFold(strings.TrimSpace(n), key) {
+				out = append(out, i)
+			}
+		}
+		return out
+	}
 	key := strings.ToLower(strings.TrimSpace(r.From))
-	var matches []int
-	for i, n := range names {
-		if strings.EqualFold(strings.TrimSpace(n), key) {
-			matches = append(matches, i)
+	matches := matchesOf(key)
+	if len(matches) < 2 {
+		// The same qualified→bare fallback resolveRenameSource applies, and
+		// for the same reason: a SELECT item written through a derived
+		// table's alias arrives spelled `u.g` while the stream carries the
+		// bare `g` twice. Counting only the exact spelling found NO duplicate
+		// and handed the item the first `g`, which is the KEY (#785 round 2).
+		if dot := strings.IndexByte(key, '.'); dot >= 0 && dot < len(key)-1 {
+			matches = matchesOf(key[dot+1:])
 		}
 	}
 	if len(matches) < 2 {

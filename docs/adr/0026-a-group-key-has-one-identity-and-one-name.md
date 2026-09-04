@@ -675,7 +675,23 @@ its name, a key reference the FIRST, and with one column of the name both
 answers are that column.
 
 What must not stand is `ColumnIndex`'s first-match rule deciding which of two
-columns a query meant — and after this it no longer does on either engine.
+columns a query meant.
+
+**It still does, one operator further in, and the boundary is written down
+rather than claimed away** (2026-09-04 round 2). The gather's pairing is by
+CLASS and the class is now carried THROUGH a wrapper — `renameIsAggregateOutput`
+walks the renames to the projection that defines the name and stops where the
+two classes are separated, which is the Project whose input is the aggregate's
+own output — so a derived table over the collision answers PostgreSQL's rows on
+every arm. A CTE does not: there the fragment's OWN projection has already
+applied the block's SELECT list, so the gather sees no duplicate at all, and it
+is that projection which resolved the name against the aggregate's output and
+took the first match. Closing it means a projection addressing an aggregate's
+outputs by POSITION (`exec.ProjectColumn.SourceIdx` exists and nothing sets it
+for this shape), which is this rule one operator over and its own change. The
+shape is gated and pinned at
+`internal/coordinator/arc_e3_names_scopes_two_path_test.go`'s
+`785/nested-in-a-cte`.
 
 #### 3b. A lowering records the SLOT the operator below publishes, never the call the query wrote (2026-09-04, #797)
 
