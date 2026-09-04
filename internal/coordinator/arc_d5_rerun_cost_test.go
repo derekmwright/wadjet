@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -353,5 +354,170 @@ func TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs(t *testing.T) {
 	}
 	if got := fmt.Sprint(res.Rows[0][res.Columns[0]]); got != "5" {
 		t.Errorf("control answered %s, want 5", got)
+	}
+}
+
+// TestAFailedSharedScanDoesNotStrandItsOtherReaders is the gate for the second
+// deadlock this arc found, and the one it fixed.
+//
+// The shared scan cache is claimed in catalogScanSource.Init — the first
+// reader of a table creates `cache.ready` — and it USED to be released in
+// exactly one place: Next's end-of-table branch. So a claiming scan that
+// FAILED, or that was closed before the end of the table, left `ready` open
+// and every other reader of that table waited on a channel nobody would ever
+// close. Not slowly: forever.
+//
+// Reaching it needs two readers of one table where the first one fails, and
+// the LATERAL repair made that shape reachable — which is how this arc found
+// it. Two LATERALs over the same table, the second carrying a residual the
+// scan cannot compile:
+//
+//	fd679ae9   error in 0.9 s on every arm (the residual defect, older than
+//	           this arc, and not what is being tested here)
+//	this arc   single: the same error in 6 ms
+//	           DAG:    an unbounded block — measured at 20 s, 180 s, 360 s
+//	fixed      DAG: the same error in 4 ms
+//
+// A hang is worse than the error it replaced, so this asserts a BOUND on the
+// failure, not just its text: the query must fail, and it must fail fast. The
+// deadline is what makes it a gate rather than a description — revert the
+// release in abandonCache and this test does not fail with a wrong message, it
+// stops finishing.
+//
+// The second cell is the reason the fix is a release and not a decline. That
+// shape — the same two LATERALs, both compilable — ANSWERS PostgreSQL's values
+// including Carol's defaulted 0. Declining the repair whenever two LATERALs
+// appear would have traded this right answer for a wrong one to avoid a hang
+// in a query that is already broken by an unrelated defect.
+//
+// What this does NOT fix, and the difference is worth stating: a claiming scan
+// that is still RUNNING, blocked on a build that is itself blocked on that
+// scan's output, is a genuine CYCLE. Releasing on exit cannot help — nothing
+// has exited. That is #616's deadlock and
+// TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs still pins it,
+// still hanging, deliberately.
+func TestAFailedSharedScanDoesNotStrandItsOtherReaders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+
+	single := tmdStandalone(t, ctx)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+
+	const twoReadersFirstFails = `SELECT o.customer AS c, s.n AS n, s2.m AS m FROM lat_ord o ` +
+		`JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ` +
+		`JOIN LATERAL (SELECT COUNT(*) AS m FROM lat_item ` +
+		`WHERE order_id = o.id AND amount > 60) s2 ON true ORDER BY c`
+	const twoReadersBothClean = `SELECT o.customer AS c, s.n AS n, s2.m AS m FROM lat_ord o ` +
+		`JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ` +
+		`JOIN LATERAL (SELECT SUM(amount) AS m FROM lat_item WHERE order_id = o.id) s2 ON true ` +
+		`ORDER BY c`
+
+	// Generous enough that a slow machine does not flake it, and short enough
+	// that a re-stranded claim cannot be mistaken for slowness: the failure
+	// arrives in single-digit milliseconds and the block was unbounded.
+	const bound = 45 * time.Second
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		// wantErr / wantErrDAG: non-empty means the arm must FAIL inside
+		// bound, with this substring. The two arms fail for DIFFERENT reasons
+		// and that is the point of asserting them separately — the single arm
+		// never had the deadlock and reports the older residual defect, while
+		// the DAG arm is where the claim was stranded and now reports the
+		// RELEASE, with the reason the claiming scan stopped.
+		wantErr    string
+		wantErrDAG string
+		want       []string // otherwise: must ANSWER this
+	}{
+		{
+			name:       "the failing reader releases its claim, on the DAG",
+			sql:        twoReadersFirstFails,
+			wantErr:    `filter column "amount" does not exist`,
+			wantErrDAG: "shared scan of lat_item did not complete",
+		},
+		{
+			name: "two clean readers of one table still answer",
+			sql:  twoReadersBothClean,
+			want: []string{
+				"c=Alice|n=int64:2|m=float:150",
+				"c=Bob|n=int64:2|m=float:200",
+				"c=Carol|n=int64:0|m=NULL",
+			},
+		},
+	} {
+		for _, arm := range []struct {
+			name string
+			run  func(context.Context, string) ([]string, error)
+		}{
+			{"single", func(c context.Context, q string) ([]string, error) {
+				return na2Run(tmdRunSingle(c, single, q))
+			}},
+			{"dag", func(c context.Context, q string) ([]string, error) {
+				return na2Run(tmdRunDAG(c, coord, q))
+			}},
+		} {
+			wantErr := tc.wantErr
+			if arm.name == "dag" && tc.wantErrDAG != "" {
+				wantErr = tc.wantErrDAG
+			}
+			t.Run(tc.name+"/"+arm.name, func(t *testing.T) {
+				type outcome struct {
+					rows []string
+					err  error
+				}
+				done := make(chan outcome, 1)
+				cctx, cancel := context.WithTimeout(context.Background(), bound)
+				defer cancel()
+				start := time.Now()
+				go func() {
+					rows, err := arm.run(cctx, tc.sql)
+					done <- outcome{rows, err}
+				}()
+
+				var got outcome
+				select {
+				case got = <-done:
+				case <-time.After(bound + 10*time.Second):
+					t.Fatalf("query did not finish within %v — a shared scan claim is "+
+						"stranded again. The claiming scan must release cache.ready on "+
+						"EVERY exit (catalogScanSource.abandonCache), not only at the end "+
+						"of the table.\n  SQL: %s", bound, tc.sql)
+				}
+				elapsed := time.Since(start).Round(time.Millisecond)
+
+				if wantErr != "" {
+					if got.err == nil {
+						t.Fatalf("want a failure naming %q, got rows %v", wantErr, got.rows)
+					}
+					if !strings.Contains(got.err.Error(), wantErr) {
+						t.Errorf("error does not name %q: %v", wantErr, got.err)
+					}
+					if cctx.Err() != nil {
+						t.Errorf("the query only ended because its own deadline expired "+
+							"after %v; that is a timeout, not a refusal", elapsed)
+					}
+					t.Logf("failed in %v: %v", elapsed, got.err)
+					return
+				}
+				if got.err != nil {
+					t.Fatalf("want rows, got error after %v: %v", elapsed, got.err)
+				}
+				sort.Strings(got.rows)
+				want := append([]string(nil), tc.want...)
+				sort.Strings(want)
+				if len(got.rows) != len(want) {
+					t.Fatalf("got %d rows, want %d\n  got:  %v\n  want: %v",
+						len(got.rows), len(want), got.rows, want)
+				}
+				for i := range want {
+					if got.rows[i] != want[i] {
+						t.Errorf("row %d: got %q, want %q", i, got.rows[i], want[i])
+					}
+				}
+			})
+		}
 	}
 }

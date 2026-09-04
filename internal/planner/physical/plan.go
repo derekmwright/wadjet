@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1290,7 +1291,14 @@ type scanCached struct {
 	batches []*batch.RecordBatch
 	schema  []parquet.Column
 	done    bool          // true when the first scan is complete
-	ready   chan struct{} // closed when first scan completes; nil until first scan claims the cache
+	ready   chan struct{} // closed when the claiming scan FINISHES, successfully or not; nil until a scan claims the cache
+	// abandoned is set when the claiming scan finished WITHOUT filling the
+	// cache — it failed, or it was closed before reaching the end of the
+	// table. err carries why. Waiters must not replay a cache in this state:
+	// it holds only the batches read before the scan stopped, so replaying it
+	// would answer a query from a TRUNCATED table.
+	abandoned bool
+	err       error
 	// unionCols is the union of every consumer's RequiredColumns, in
 	// first-seen order. nil = full schema (some consumer needs all).
 	unionCols []string
@@ -12396,19 +12404,23 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 // non-deterministic Q02 row counts (4/5/6 rows depending on which goroutine
 // won the increment).
 type catalogScanSource struct {
-	catalog          *catalog.Catalog
-	tableName        string
-	partitionFilter  map[string]string
-	requiredCols     []string
-	scanPreds        []logical.Predicate
-	allowedFiles     []string // probe-split: only scan these files (nil = all)
-	inner            exec.Source
-	cache            *scanCached           // non-nil when this table is scanned multiple times
-	replayIdx        atomic.Int64          // position in cache replay (atomic for parallel pipeline)
-	projOnce         sync.Once             // guards projIdx/projSchema init (replay Next is concurrent)
-	projIdx          []int                 // cache-batch column indices for this consumer; nil = no projection
-	projSchema       []parquet.Column      // this consumer's projected schema
-	isReplay         bool                  // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
+	catalog         *catalog.Catalog
+	tableName       string
+	partitionFilter map[string]string
+	requiredCols    []string
+	scanPreds       []logical.Predicate
+	allowedFiles    []string // probe-split: only scan these files (nil = all)
+	inner           exec.Source
+	cache           *scanCached      // non-nil when this table is scanned multiple times
+	replayIdx       atomic.Int64     // position in cache replay (atomic for parallel pipeline)
+	projOnce        sync.Once        // guards projIdx/projSchema init (replay Next is concurrent)
+	projIdx         []int            // cache-batch column indices for this consumer; nil = no projection
+	projSchema      []parquet.Column // this consumer's projected schema
+	isReplay        bool             // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
+	// claimedCache is true when THIS source created cache.ready, i.e. it owes
+	// every other consumer a release. Written once in Init, before any worker
+	// goroutine exists, for the same reason isReplay is.
+	claimedCache     bool
 	bloomFilter      *exec.BloomScanFilter // bloom filter pushdown from hash join build side
 	dynamicFilter    []exec.DynamicRange   // dynamic min/max range filter from hash join build side
 	rowLimit         int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
@@ -12459,12 +12471,29 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+			// The claim is released on EVERY exit, not only on success, so
+			// waking up says the claiming scan is FINISHED — not that it
+			// filled the cache. Replaying an abandoned cache would answer
+			// from a truncated table, so this fails loudly with the reason
+			// the claiming scan stopped.
+			s.cache.mu.Lock()
+			if !s.cache.done {
+				err := s.cache.err
+				s.cache.mu.Unlock()
+				if err == nil {
+					err = errors.New("scan ended before the table did")
+				}
+				return fmt.Errorf("shared scan of %s did not complete: %w", s.tableName, err)
+			}
+			s.cache.mu.Unlock()
 			s.isReplay = true
 			s.replayIdx.Store(0)
 			return nil
 		}
-		// First scan claims the cache.
+		// First scan claims the cache. Whoever claims it OWES every other
+		// consumer a release — see abandonCache.
 		s.cache.ready = make(chan struct{})
+		s.claimedCache = true
 		s.cache.mu.Unlock()
 	}
 	// First scan (or no cache) — scan from storage. A cache-populating
@@ -12498,7 +12527,48 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		ses.shapeOnlyCols = s.shapeOnlyCols
 	}
 	s.inner = sc
-	return s.inner.Init(ctx)
+	if err := s.inner.Init(ctx); err != nil {
+		s.abandonCache(err)
+		return err
+	}
+	return nil
+}
+
+// abandonCache releases a claim this source took but will not fill, so the
+// consumers waiting on it fail with err instead of blocking forever.
+//
+// The claim used to be released in exactly one place — Next's end-of-table
+// branch — which made every other exit a permanent block: a scan that FAILED,
+// or was closed before the end of the table, left `ready` open and every other
+// reader of that table's cache waited on a channel nobody would ever close.
+// That is the deadlock #616 reports and it is reachable from any plan with two
+// readers of one table where the first one fails (measured: two LATERALs over
+// the same table, the second carrying a residual the scan cannot compile —
+// 6 ms to the error on the single-process arm, an unbounded block on both DAG
+// arms).
+//
+// Releasing is not enough on its own: a waiter that wakes on an abandoned
+// claim must NOT replay, because the cache holds only what was read before the
+// scan stopped. Init returns the error instead.
+func (s *catalogScanSource) abandonCache(err error) {
+	if s.cache == nil || !s.claimedCache {
+		return
+	}
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	s.abandonCacheLocked(err)
+}
+
+// abandonCacheLocked is abandonCache for callers already holding cache.mu.
+func (s *catalogScanSource) abandonCacheLocked(err error) {
+	if s.cache.done || s.cache.abandoned {
+		return
+	}
+	s.cache.abandoned = true
+	s.cache.err = err
+	if s.cache.ready != nil {
+		close(s.cache.ready)
+	}
 }
 
 func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
@@ -12544,6 +12614,8 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 		}
 		b, err := s.inner.Next(ctx)
 		if err != nil {
+			// This scan owns the claim and is not going to fill the cache.
+			s.abandonCacheLocked(err)
 			return nil, err
 		}
 		if b == nil {
@@ -12644,6 +12716,11 @@ func (s *catalogScanSource) Close() error {
 	if s.isReplay {
 		return nil
 	}
+	// A claiming scan torn down before the end of the table (a LIMIT upstream,
+	// a cancelled query, an operator that failed) owes the release just as
+	// much as one that errored — otherwise every other reader of this table
+	// waits on a channel nobody will close.
+	s.abandonCache(errors.New("scan closed before the end of the table"))
 	if s.inner != nil {
 		return s.inner.Close()
 	}
