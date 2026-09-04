@@ -2210,7 +2210,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   not resolved by the planner. Name the columns, or join with `ON`
 - `JOIN ... USING` that follows another join on the same `FROM` item —
   rejected (`0A000`); the column could come from either relation on the left
-- A SUBQUERY in an `UPDATE`'s `SET` list — `SET n = (SELECT max(n) FROM s)` — SQLSTATE 0A000. A subquery in a `DELETE` / `UPDATE` / `MERGE` PREDICATE is supported (see below); an assignment is a different site and is not.
+- A SUBQUERY in an `UPDATE`'s `SET` list — `SET n = (SELECT max(n) FROM s)` — SQLSTATE 0A000. A subquery in a `DELETE` / `UPDATE` / `MERGE` PREDICATE is supported — see [A subquery in a DML predicate](#a-subquery-in-a-dml-predicate) — and an assignment is a different site.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000. `BY TARGET` is PostgreSQL 17's spelling of the ordinary `NOT MATCHED`; `BY SOURCE` walks the target rows no source row matched, which is how a MERGE expresses the delete half of a full-sync upsert. Eleven cells in the DML census carry PostgreSQL 17's answer for both forms beside the refusal.
 - A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000
