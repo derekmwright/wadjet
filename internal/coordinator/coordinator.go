@@ -226,7 +226,12 @@ type queryMeta struct {
 	identityRole       string
 	trace              distributed.TraceContext // distributed tracing context
 	policyDecisionJSON json.RawMessage          // pre-evaluated ABAC decisions for worker enforcement
-	mergeInfo          *logical.MergeInfo       // non-nil for probe-split queries needing merge
+	// policyEnforced records that a row or column security policy shaped this
+	// query's plan. The SQL-text dispatch guard reads it through
+	// Scheduler.PolicedQuery, because a dispatcher may publish under a
+	// context that never carried the mark (#859 round 3).
+	policyEnforced bool
+	mergeInfo      *logical.MergeInfo // non-nil for probe-split queries needing merge
 	// prebuiltTasks, if non-nil for a given stage, supplies the publish loop's
 	// task list instead of calling createTasksForStage. Set by the shuffle path
 	// where each worker's task carries different PreScannedInputs.
@@ -415,6 +420,10 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	// Memory-aware gRPC placement: the scheduler bin-packs estimated task
 	// footprints against heartbeat pool stats. No-op on the NATS path.
 	c.scheduler.SetWorkerRegistry(c.workers)
+	// The SQL-text dispatch guard asks the coordinator's own per-query record
+	// rather than the dispatching context, which a dispatcher may have
+	// derived from context.Background() (#859 round 3).
+	c.scheduler.PolicedQuery = c.queryIsPoliced
 	// Input-locality placement rides the streaming-exchange hints; without
 	// them no task ever carries InputLocations and the tier is inert.
 	if cfg.LocalityPlacement && cfg.StreamingExchange {
@@ -3386,14 +3395,15 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		c.tracker.Start(queryID)
 		c.tracker.Complete(queryID)
 		c.mu.Lock()
-		c.queryMetas[queryID] = &queryMeta{planStr: planStr}
+		c.queryMetas[queryID] = &queryMeta{planStr: planStr, policyEnforced: logical.PolicyEnforced(ctx)}
 		c.mu.Unlock()
 		return queryID, planStr, nil
 	}
 
 	// Store metadata
 	c.mu.Lock()
-	c.queryMetas[queryID] = &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: probeSplitMergeInfo}
+	c.queryMetas[queryID] = &queryMeta{stages: physStages, planStr: planStr, sqlText: sql,
+		mergeInfo: probeSplitMergeInfo, policyEnforced: logical.PolicyEnforced(ctx)}
 	c.mu.Unlock()
 
 	// Register stages with tracker

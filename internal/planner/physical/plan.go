@@ -1581,7 +1581,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// enclosing SELECT list. The policies travel on the context; the
 	// projection goes in before the optimizer, exactly as it does for the
 	// statement's own plan.
-	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		// The name-binding pass runs only when something is DENIED. A
 		// correlated subquery rebuilds this pipeline once per outer row, and
 		// a mask-only policy — the common case — has nothing for the binder
@@ -1605,7 +1605,7 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 		p.AnnotateScanColumns(ctx, plan)
 	})
 	// The optimizer MINTS scans, after the policy went in above (#859).
-	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
 		if err != nil {
 			return nil, nil, nil, err
@@ -1951,7 +1951,7 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	// query, planned here, and it must carry the same column policy as its
 	// enclosing statement (#859). The barrier is absorbed into the scan stage
 	// by walkStages below, exactly as it is for the outer plan.
-	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		if denied := pol.DeniedColumns(); len(denied) > 0 {
 			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
@@ -1968,7 +1968,7 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		p.AnnotateScanColumns(ctx, plan)
 	})
-	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
 		if err != nil {
 			return "", err
@@ -9379,7 +9379,19 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	// evaluation, no materialization of filter-only columns) and only the
 	// residue compiles into exec filter ops. See scan_filter_pushdown.go.
 	preds := node.Predicates
-	if css, ok := source.(*catalogScanSource); ok && len(ops) == 0 {
+	if css, ok := source.(*catalogScanSource); ok && len(ops) == 0 &&
+		!node.PolicyFilter && !subtreeHasSecurityBarrier(node.Children[0]) {
+		// NOT below a security projection. Scan-level pushdown evaluates the
+		// predicate against the FILE, so pushing one that sits ABOVE a
+		// barrier makes it read the STORED column — the in-process twin of
+		// the DAG's single filter slot. `IN (SELECT id FROM t WHERE ssn =
+		// '***')` compared the stored SSN against the mask and answered no
+		// rows; `… WHERE bal > 300` over a masked `bal` answered exactly the
+		// rows above the threshold (#859 round 3).
+		//
+		// The POLICY's own filter is exempt for the reason it always is: it
+		// is supposed to read the row as stored, and it sits BELOW the
+		// barrier, so pushing it into the scan is the same evaluation.
 		preds = p.tryPushFilterIntoScan(ctx, node, css)
 	}
 

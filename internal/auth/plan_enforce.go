@@ -123,6 +123,12 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	if len(policies) > 0 || len(rowFilters) > 0 {
 		ctx = logical.ContextWithPolicyEnforced(ctx)
 	}
+	// The LOOKUP, always — even when nothing above was policed. The plan
+	// GROWS: a table named only inside `IN (SELECT … )` is SQL text here and
+	// becomes a Scan when the optimizer decorrelates it, and that scan came
+	// out with no projection and a predicate over the STORED column (#859
+	// round 3). Every later pass that meets a scan asks this.
+	ctx = logical.ContextWithPolicyLookup(ctx, r.lookup)
 	return ctx, plan, nil
 }
 
@@ -138,15 +144,16 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 // no policy.
 func EnforceOptimizedPlan(ctx context.Context, cat *catalog.Catalog, plan *logical.Node) (*logical.Node, error) {
 	pol := logical.ColumnPoliciesFromContext(ctx)
-	if len(pol) == 0 {
+	lookup := logical.PolicyLookupFromContext(ctx)
+	if len(pol) == 0 && lookup == nil {
 		return plan, nil
 	}
-	out, unprotected := pol.ApplyToNewScans(plan, func(table string) []string {
+	out, unprotected, err := pol.ApplyToNewScansWithLookup(plan, func(table string) []string {
 		if cat == nil {
 			return nil
 		}
-		meta, err := cat.GetTable(ctx, table)
-		if err != nil || meta == nil {
+		meta, cerr := cat.GetTable(ctx, table)
+		if cerr != nil || meta == nil {
 			return nil
 		}
 		cols := make([]string, len(meta.Schema.Columns))
@@ -154,9 +161,33 @@ func EnforceOptimizedPlan(ctx context.Context, cat *catalog.Catalog, plan *logic
 			cols[i] = c.Name
 		}
 		return cols
-	})
+	}, lookup)
+	if err != nil {
+		return nil, err
+	}
 	if unprotected > 0 {
 		return nil, logical.ErrColumnPolicyUnenforceable
+	}
+	// The invariant, on the FINAL logical plan and therefore on EVERY arm:
+	// every scan of a policed relation carries its projection, and no filter
+	// between that projection and the scan reads a policed column unless it
+	// is the policy's own. In-process is not exempt — the semi-join hole
+	// (#859 round 3) leaked there too, and a check that only ran on stages
+	// could not see it.
+	if err := logical.CheckPolicyPlanOrder(out, func(table string) []logical.ColumnPolicy {
+		if cols := pol.For(table); len(cols) > 0 {
+			return cols
+		}
+		if lookup == nil {
+			return nil
+		}
+		cols, _, lerr := lookup(table)
+		if lerr != nil {
+			return nil // an access denial is reported by the pass above
+		}
+		return cols
+	}); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -318,6 +349,27 @@ func (r *policyResolver) columnPolicies(table string) ([]logical.ColumnPolicy, e
 		out = append(out, logical.ColumnPolicy{Column: col.Column, MaskExpr: expr})
 	}
 	return out, nil
+}
+
+// lookup answers for ONE table, for the passes that meet a scan the resolved
+// set never saw. It is the same decision path EnforcePlanPolicies takes —
+// table access, then the column obligations, then the row filter — so a
+// relation discovered later is policed exactly as one discovered early.
+func (r *policyResolver) lookup(table string) ([]logical.ColumnPolicy, string, error) {
+	td := r.decide(table)
+	if !td.Allowed {
+		return nil, "", fmt.Errorf("access denied to table %q: %s", table, td.Reason)
+	}
+	cols, err := r.columnPolicies(table)
+	if err != nil {
+		return nil, "", err
+	}
+	if td.RowFilter != "" {
+		if err := r.checkRowFilterColumns(table, td.RowFilter); err != nil {
+			return nil, "", err
+		}
+	}
+	return cols, td.RowFilter, nil
 }
 
 // checkRowFilterColumns refuses a policy row filter that names a column the

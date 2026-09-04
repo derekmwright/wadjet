@@ -132,9 +132,12 @@ func (p *Planner) applyContextColumnPoliciesToNewScans(ctx context.Context, plan
 	if len(pol) == 0 {
 		return plan, nil
 	}
-	plan, unprotected := pol.ApplyToNewScans(plan, func(table string) []string {
+	plan, unprotected, err := pol.ApplyToNewScansWithLookup(plan, func(table string) []string {
 		return p.policyTableColumns(ctx, table)
-	})
+	}, logical.PolicyLookupFromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
 	if unprotected > 0 {
 		return nil, logical.ErrColumnPolicyUnenforceable
 	}

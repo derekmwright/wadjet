@@ -40,6 +40,15 @@ type Scheduler struct {
 	nc     *nats.Conn
 	logger *slog.Logger
 
+	// PolicedQuery answers, for a query ID, whether a row or column security
+	// policy shaped that query's plan. The SQL-text guard in PublishTasks
+	// asks it rather than the CONTEXT, because a dispatcher may publish under
+	// a context of its own: SubmitSQL's async publish runs on a ctx derived
+	// from context.Background(), which drops any mark set at planning time,
+	// so a ctx-based guard was inert exactly on the door it was written for
+	// (#859 round 3). Nil = nothing is policed.
+	PolicedQuery func(queryID string) bool
+
 	// dpSrv is the optional data-plane gRPC server. When set, PublishTasks
 	// pushes each task over a per-worker gRPC stream instead of NATS.
 	// Placement: bin-packed by estimated memory fit when the task carries
@@ -164,7 +173,8 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 	// leak (#859 round 2, review P2). A task a worker will RE-PLAN from its
 	// text carries none of the policy the coordinator applied.
 	for i := range tasks {
-		if err := refuseReplannedSQLText(ctx, "this dispatch path", tasks[i]); err != nil {
+		policed := s.PolicedQuery != nil && s.PolicedQuery(tasks[i].QueryID)
+		if err := refuseReplannedSQLText(policed, "this dispatch path", tasks[i]); err != nil {
 			return err
 		}
 	}

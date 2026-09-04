@@ -3,6 +3,7 @@ package logical
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -42,6 +43,44 @@ func ContextWithColumnPolicies(ctx context.Context, tp TablePolicies) context.Co
 		return ctx
 	}
 	return context.WithValue(ctx, columnPolicyKey{}, tp)
+}
+
+// PolicyLookup answers, for one base table, what this identity's policy does
+// to it: the column obligations, the row filter, and an error when the
+// identity may not read the table at all.
+//
+// It rides the context beside the RESOLVED policies because the resolved set
+// is only what the plan showed AT ENFORCEMENT TIME, and the plan grows. A
+// table named only inside an `IN (SELECT … )` is not in the plan when
+// auth.EnforcePlanPolicies runs — the subquery is still SQL TEXT — so it was
+// never policed at all, and when the optimizer decorrelated that subquery into
+// a semi-join the inner scan came out with NO security projection and its
+// predicate read the STORED column. `… IN (SELECT id FROM t WHERE bal > 300)`
+// over a `bal` masked to 0 returned exactly the rows above that threshold, and
+// the client picks the threshold (#859 round 3).
+//
+// A lookup makes the invariant reachable at every pass that can mint a scan:
+// EVERY scan of a policed relation in the FINAL plan carries that relation's
+// projection.
+type PolicyLookup func(table string) (cols []ColumnPolicy, rowFilter string, err error)
+
+type policyLookupKey struct{}
+
+// ContextWithPolicyLookup returns ctx carrying the per-table policy lookup.
+func ContextWithPolicyLookup(ctx context.Context, l PolicyLookup) context.Context {
+	if l == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, policyLookupKey{}, l)
+}
+
+// PolicyLookupFromContext returns the per-table policy lookup, or nil.
+func PolicyLookupFromContext(ctx context.Context) PolicyLookup {
+	if ctx == nil {
+		return nil
+	}
+	l, _ := ctx.Value(policyLookupKey{}).(PolicyLookup)
+	return l
 }
 
 type policyEnforcedKey struct{}
@@ -127,10 +166,27 @@ func SubstituteMaskedColumns(expr plansql.Node, relation string, policies []Colu
 // A scan already beneath a SecurityBarrier is skipped, so the pass is safe to
 // run after every Optimize.
 func (tp TablePolicies) ApplyToNewScans(plan *Node, columnsOf func(table string) []string) (*Node, int) {
-	if len(tp) == 0 || plan == nil {
-		return plan, 0
+	out, n, _ := tp.applyToNewScans(plan, columnsOf, nil)
+	return out, n
+}
+
+// ApplyToNewScansWithLookup is ApplyToNewScans for a plan that may name a
+// relation the resolved set never saw — the inner of a decorrelated semi-join,
+// whose table lived in SQL text when enforcement ran. `lookup`, when given,
+// answers for such a table; its row filter goes in BELOW the projection, the
+// order ADR-0033 decision 6 fixes.
+func (tp TablePolicies) ApplyToNewScansWithLookup(plan *Node, columnsOf func(table string) []string,
+	lookup PolicyLookup) (*Node, int, error) {
+	return tp.applyToNewScans(plan, columnsOf, lookup)
+}
+
+func (tp TablePolicies) applyToNewScans(plan *Node, columnsOf func(table string) []string,
+	lookup PolicyLookup) (*Node, int, error) {
+	if plan == nil || (len(tp) == 0 && lookup == nil) {
+		return plan, 0, nil
 	}
 	unprotected := 0
+	var firstErr error
 	var walk func(n *Node, covered bool) *Node
 	walk = func(n *Node, covered bool) *Node {
 		if n == nil {
@@ -144,7 +200,21 @@ func (tp TablePolicies) ApplyToNewScans(plan *Node, columnsOf func(table string)
 			return n
 		}
 		policies := tp.For(n.TableName)
+		rowFilter := ""
+		if len(policies) == 0 && lookup != nil {
+			cols, rf, err := lookup(n.TableName)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return n
+			}
+			policies, rowFilter = cols, rf
+		}
 		if len(policies) == 0 {
+			if rowFilter != "" {
+				return InjectRowFilter(n, n.TableName, rowFilter)
+			}
 			return n
 		}
 		// AFTER the optimizer, the authority is what THIS SCAN PRODUCES, not
@@ -161,11 +231,187 @@ func (tp TablePolicies) ApplyToNewScans(plan *Node, columnsOf func(table string)
 		if len(cols) == 0 && columnsOf != nil {
 			cols = columnsOf(n.TableName)
 		}
+		// Plus every MASKED column, whether or not this scan's pruned list
+		// names it. A mask is computed from a literal — the scan never reads
+		// the column — so publishing it costs nothing, and leaving it out is
+		// what turned a predicate above the projection into a read of a
+		// column the projection did not carry: `IN (SELECT id FROM t WHERE
+		// ssn = '***')` evaluated `ssn` to NULL and answered no rows at all,
+		// which is a wrong answer wearing the fix's clothes.
+		have := make(map[string]bool, len(cols))
+		for _, c := range cols {
+			have[strings.ToLower(c)] = true
+		}
+		for _, p := range policies {
+			if p.Denied || p.MaskExpr == "" {
+				continue
+			}
+			if !have[strings.ToLower(p.Column)] {
+				cols = append(cols, p.Column)
+			}
+		}
 		out, n2 := InjectColumnPolicies(n, n.TableName, policies, cols)
 		unprotected += n2
+		if rowFilter != "" {
+			// BELOW the projection it just got, directly above the scan:
+			// InjectRowFilter walks down to the Scan, so the order is
+			// barrier → filter → scan, ADR-0033 decision 6.
+			out = InjectRowFilter(out, n.TableName, rowFilter)
+		}
 		return out
 	}
-	return walk(plan, false), unprotected
+	out := walk(plan, false)
+	return out, unprotected, firstErr
+}
+
+// ErrPolicyOrderUnrepresentable is the refusal for a plan whose predicates
+// cannot be placed above the security projection they must read through.
+var ErrPolicyOrderUnrepresentable = errors.New(
+	"this query is not available for this identity: a column security policy applies and a " +
+		"predicate could not be placed above the security projection, where it must read the " +
+		"mask rather than the stored column")
+
+// CheckPolicyPlanOrder is the invariant every arm must satisfy, asserted on
+// the FINAL logical plan:
+//
+//  1. every Scan of a policed relation carries that relation's security
+//     projection directly above it; and
+//  2. no Filter between that projection and the scan references a policed
+//     column, unless it is the POLICY's own row filter.
+//
+// (1) is ADR-0033 decision 1 taken literally, and it is the question the
+// earlier stage-level check could not ask: a stage that scans a policed table
+// with NO projection at all was invisible to a check that only inspected
+// stages which HAVE one — which is exactly the shape a decorrelated
+// semi-join's inner side had (#859 round 3). (2) is decision 6.
+//
+// It refuses rather than repairs, because by this point the repair passes have
+// run: reaching here means a shape this planner cannot express safely, and the
+// branch's doctrine for that is 0A000, never a pin over a leak.
+func CheckPolicyPlanOrder(plan *Node, policed func(table string) []ColumnPolicy) error {
+	if plan == nil || policed == nil {
+		return nil
+	}
+	var walk func(n *Node, barrier *Node) error
+	walk = func(n *Node, barrier *Node) error {
+		if n == nil {
+			return nil
+		}
+		switch {
+		case n.Type == NodeProject && n.SecurityBarrier:
+			barrier = n
+		case n.Type == NodeScan && n.TableName != "" && !n.IsTableFunc:
+			cols := policed(n.TableName)
+			if len(cols) == 0 {
+				return nil
+			}
+			if barrier == nil {
+				return fmt.Errorf("%w (scan of %q carries no security projection)",
+					ErrPolicyOrderUnrepresentable, n.TableName)
+			}
+		case n.Type == NodeFilter && barrier != nil && !n.PolicyFilter:
+			// Between a barrier and its scan, and not the policy's own.
+			for _, scan := range PolicedScanTables(n) {
+				restricted := map[string]bool{}
+				for _, c := range policed(scan) {
+					restricted[strings.ToLower(c.Column)] = true
+				}
+				if len(restricted) == 0 {
+					continue
+				}
+				for _, pred := range n.Predicates {
+					if col, bad := predicateNamesRestricted(pred, restricted); bad {
+						return fmt.Errorf("%w (predicate over %q)",
+							ErrPolicyOrderUnrepresentable, col)
+					}
+				}
+			}
+		}
+		for _, c := range n.Children {
+			if err := walk(c, barrier); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(plan, nil)
+}
+
+// predicateNamesRestricted reports whether a predicate reads a policed column.
+// A predicate whose references cannot be read is treated as reading one: this
+// guard refuses on doubt, because the alternative is a disclosure.
+func predicateNamesRestricted(p Predicate, restricted map[string]bool) (string, bool) {
+	ast := p.ASTExpr
+	if ast == nil && p.Raw != "" {
+		var err error
+		if ast, err = plansql.ParseExpression(p.Raw); err != nil {
+			return p.Raw, true
+		}
+	}
+	if ast == nil {
+		return "", false
+	}
+	refs, err := plansql.ColumnRefs(ast)
+	if err != nil {
+		// A node the walker cannot see through — a subquery, most often. Fall
+		// back to the TEXT, with quoted literals removed first: a predicate
+		// already SUBSTITUTED to `('***') = (SELECT MIN('true-ssn-01') …)`
+		// reads no policed column, and refusing it would refuse a query the
+		// projection has already made safe. What is left after the literals
+		// go is identifiers, and a policed one among them is the doubt this
+		// guard refuses on.
+		return textNamesRestricted(ast.String(), restricted)
+	}
+	for _, ref := range refs {
+		if restricted[strings.ToLower(ref.Column)] {
+			return ref.Column, true
+		}
+	}
+	return "", false
+}
+
+// textNamesRestricted looks for a policed column among an expression's
+// identifier tokens, ignoring anything inside single quotes.
+// TextNamesRestricted is textNamesRestricted, exported for the stage-level
+// twin of this check in the physical planner.
+func TextNamesRestricted(text string, restricted map[string]bool) (string, bool) {
+	return textNamesRestricted(text, restricted)
+}
+
+func textNamesRestricted(text string, restricted map[string]bool) (string, bool) {
+	var word strings.Builder
+	inLit := false
+	check := func() (string, bool) {
+		w := word.String()
+		word.Reset()
+		if w == "" {
+			return "", false
+		}
+		return w, restricted[strings.ToLower(w)]
+	}
+	for _, r := range text {
+		if r == '\'' {
+			if w, bad := check(); bad {
+				return w, true
+			}
+			inLit = !inLit
+			continue
+		}
+		if inLit {
+			continue
+		}
+		if r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			word.WriteRune(r)
+			continue
+		}
+		if w, bad := check(); bad {
+			return w, true
+		}
+	}
+	if w, bad := check(); bad {
+		return w, true
+	}
+	return "", false
 }
 
 // PlanCarriesPolicyEnforcement reports whether this plan carries anything a

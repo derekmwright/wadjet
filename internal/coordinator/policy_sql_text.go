@@ -1,11 +1,9 @@
 package coordinator
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -21,12 +19,16 @@ import (
 // repartition orchestration), and a seventh added later would otherwise
 // inherit the leak in silence.
 //
+// `policed` comes from the coordinator's own per-query record, not from the
+// context: a dispatcher may publish under a context of its own, and SubmitSQL
+// does (#859 round 3).
+//
 // It fires on exactly the condition executePipeline triggers on — SQL text
 // with no Operators and no Inputs — so a task that carries an operator
 // fragment or reads upstream files, which is every task on the synchronous
 // DAG, is untouched.
-func refuseReplannedSQLText(ctx context.Context, site string, t distributed.Task) error {
-	if !logical.PolicyEnforced(ctx) {
+func refuseReplannedSQLText(policed bool, site string, t distributed.Task) error {
+	if !policed {
 		return nil
 	}
 	if t.SQLText == "" || len(t.Operators) > 0 || len(t.Inputs) > 0 {
@@ -36,4 +38,17 @@ func refuseReplannedSQLText(ctx context.Context, site string, t distributed.Task
 		"this query is not available for this identity on the distributed path: a row or "+
 			"column security policy applies, and %s dispatches the statement's TEXT to a "+
 			"worker that re-plans it where the policy is not in reach", site))
+}
+
+// queryIsPoliced reports whether a row or column security policy shaped the
+// plan of the query this ID names. Unknown IDs are unpoliced: a task with no
+// registered query carries no policy this coordinator applied.
+func (c *Coordinator) queryIsPoliced(queryID string) bool {
+	if c == nil || queryID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	qm, ok := c.queryMetas[queryID]
+	return ok && qm != nil && qm.policyEnforced
 }

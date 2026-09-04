@@ -49,6 +49,18 @@ func CheckSecurityFilterOrder(ctx context.Context, stages []Stage) error {
 	if len(restricted) == 0 {
 		return nil
 	}
+	// The STRONGER question review P2(r3) asks — "every stage that scans a
+	// policed relation carries the projection" — is asked, and asked where it
+	// is decidable: logical.CheckPolicyPlanOrder runs over the FINAL LOGICAL
+	// PLAN, which the DAG and the single-process pipeline both consume, so a
+	// scan of a policed relation with no projection refuses on every arm
+	// before stage generation begins. It cannot be asked HERE without false
+	// refusals: a stage may legitimately scan a policed table and carry no
+	// projection when it publishes none of the policed columns — the
+	// deferred-scalar producer for `(SELECT MIN('literal') FROM t)` reads
+	// nothing from the row and its passthroughs are pruned away. This
+	// stage-level check keeps the narrower question, as the second line
+	// behind the plan-level one.
 	for i := range stages {
 		s := &stages[i]
 		if len(s.SecurityProjectExprs) == 0 {
@@ -74,6 +86,24 @@ func CheckSecurityFilterOrder(ctx context.Context, stages []Stage) error {
 	return nil
 }
 
+// subtreeHasSecurityBarrier reports whether a security projection stands
+// anywhere below this node. It is the guard on scan-level filter pushdown: a
+// predicate above a barrier must not be evaluated against the file.
+func subtreeHasSecurityBarrier(n *logical.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == logical.NodeProject && n.SecurityBarrier {
+		return true
+	}
+	for _, c := range n.Children {
+		if subtreeHasSecurityBarrier(c) {
+			return true
+		}
+	}
+	return false
+}
+
 // predicateReadsRestricted reports whether a predicate names a policed column.
 // A predicate the parser or the ref walker cannot read is treated as reading
 // one: this guard refuses on doubt, because the alternative is a disclosure.
@@ -87,7 +117,11 @@ func predicateReadsRestricted(pred string, restricted map[string]bool) (string, 
 	}
 	refs, err := plansql.ColumnRefs(ast)
 	if err != nil {
-		return pred, true
+		// See logical.CheckPolicyPlanOrder: a node the walker cannot see
+		// through falls back to the identifier tokens, quoted literals
+		// removed, so an already-substituted predicate is not refused for
+		// carrying a subquery.
+		return logical.TextNamesRestricted(ast.String(), restricted)
 	}
 	for _, ref := range refs {
 		if restricted[strings.ToLower(ref.Column)] {

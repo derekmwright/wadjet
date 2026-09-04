@@ -908,6 +908,56 @@ func pmCells() []pmCell {
 			sql:  `SELECT SUM(bal) AS s, MIN(bal) AS lo, MAX(bal) AS hi FROM e7bal`,
 			want: []string{"hi=0|lo=0|s=0"}},
 
+		// ------------------------------------------------------------------
+		// The predicate INSIDE a subquery. The matrix's older IN/EXISTS cells
+		// put the inner predicate on an UNPOLICED column, so they passed with
+		// the inner scan's security projection missing entirely — and it was:
+		// a decorrelated semi-join's inner side was built with no projection,
+		// its predicate read the STORED column, and `… IN (SELECT id FROM t
+		// WHERE bal > 300)` returned exactly the rows above the threshold the
+		// CLIENT chose. Five such probes recover every hidden value
+		// (#859 round 3). Mixed signs are load-bearing: over a same-sign
+		// column a mask of 0 hides the defect.
+		{name: "inner_predicate_over_masked_gt_zero",
+			sql:  `SELECT id FROM e7bal WHERE id IN (SELECT id FROM e7bal WHERE bal > 0) ORDER BY id`,
+			want: nil},
+		{name: "inner_predicate_over_masked_lt_zero",
+			sql:  `SELECT id FROM e7bal WHERE id IN (SELECT id FROM e7bal WHERE bal < 0) ORDER BY id`,
+			want: nil},
+		{name: "inner_predicate_over_masked_threshold",
+			sql:  `SELECT id FROM e7bal WHERE id IN (SELECT id FROM e7bal WHERE bal > 300) ORDER BY id`,
+			want: nil},
+		{name: "inner_predicate_over_masked_not_in",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal WHERE id NOT IN (SELECT id FROM e7bal WHERE bal > 0)`,
+			want: []string{"c=8"}},
+		{name: "inner_predicate_over_masked_exists",
+			sql: `SELECT id FROM e7bal a WHERE EXISTS (` +
+				`SELECT 1 FROM e7bal b WHERE b.id = a.id AND b.bal > 0) ORDER BY id`,
+			want: nil},
+		{name: "inner_predicate_over_masked_not_exists",
+			sql: `SELECT COUNT(*) AS c FROM e7bal a WHERE NOT EXISTS (` +
+				`SELECT 1 FROM e7bal b WHERE b.id = a.id AND b.bal > 0)`,
+			want: []string{"c=8"}},
+		{name: "inner_predicate_over_masked_scalar_subquery",
+			sql: `SELECT id FROM e7bal WHERE bal > (` +
+				`SELECT MAX(bal) FROM e7bal WHERE bal > 0) ORDER BY id`,
+			want: nil},
+		// LATERAL's decorrelated inner keeps its predicate below the
+		// projection in a shape the planner cannot reorder, so the invariant
+		// REFUSES on every arm and every door rather than answer. That is the
+		// branch's doctrine for a shape it cannot express safely, and it is
+		// uniform — the same 0A000 everywhere, not an arm divergence.
+		{name: "inner_predicate_over_masked_lateral",
+			sql: `SELECT COUNT(*) AS c FROM e7bal a, LATERAL (` +
+				`SELECT bal FROM e7bal b WHERE b.id = a.id AND b.bal > 0) x`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "inner_predicate_over_masked_derived_table",
+			sql:  `SELECT id FROM (SELECT id, bal FROM e7bal WHERE bal > 0) t ORDER BY id`,
+			want: nil},
+		{name: "inner_predicate_over_masked_cte",
+			sql:  `WITH u AS (SELECT id, bal FROM e7bal WHERE bal > 0) SELECT id FROM u ORDER BY id`,
+			want: nil},
+
 		{name: "denied_in_order_by", sql: `SELECT id FROM e7emp ORDER BY salary`, deniedLike: "salary"},
 		{name: "denied_in_group_by",
 			sql: `SELECT salary, COUNT(*) AS c FROM e7emp GROUP BY salary`, deniedLike: "salary"},
