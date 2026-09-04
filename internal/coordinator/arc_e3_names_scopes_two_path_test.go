@@ -435,19 +435,46 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 			sql: "SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x FROM collslot " +
 				"GROUP BY g) u ORDER BY u.x",
 			want: "g,x | 80,0 | 80,1 | 80,2"},
-		// The CTE spelling is PINNED, and it is a DIFFERENT mechanism from
-		// the two above: the gather never sees a duplicate there. Its
-		// columns are `[g, x]` — the fragment's OWN projection already
-		// applied the CTE's SELECT list — and that projection resolved `g`
-		// by NAME against the aggregate's output, where the key and the count
-		// both answer to it, and took the first. Closing it means addressing
-		// an aggregate's outputs by POSITION from a projection
-		// (`exec.ProjectColumn.SourceIdx` exists; nothing sets it for this
-		// shape), which is the same first-match rule one operator further in
-		// and its own change. Pre-existing: base answers the key here too.
+		// The CTE FAMILY is PINNED, and it is a DIFFERENT mechanism from the
+		// two above: the gather never sees a duplicate there. Its columns are
+		// `[g, x]` — the fragment's OWN projection already applied the CTE's
+		// SELECT list — and that projection resolved `g` by NAME against the
+		// aggregate's output, where the key and the count both answer to it,
+		// and took the first. Closing it means addressing an aggregate's
+		// outputs by POSITION from a projection (`exec.ProjectColumn.SourceIdx`
+		// exists; nothing sets it for this shape), which is the same
+		// first-match rule one operator further in and its own change.
+		// Pre-existing: base answers the key here too.
+		//
+		// It is a FAMILY, not one spelling, and all three members are driven
+		// so the boundary cannot be read as narrower than it is: the CTE over
+		// the collision, a CTE over a DERIVED TABLE over it, and TWO derived
+		// tables over it with no CTE at all. The last is why "the CTE
+		// spelling" is the wrong name for this: what decides is whether a
+		// FRAGMENT projection stands between the aggregate and the gather,
+		// and a second wrapper puts one there just as a CTE does. ONE derived
+		// wrapper does not, which is the cell above and the control for all
+		// three of these.
 		{name: "785/nested-in-a-cte",
 			sql: "WITH u AS (SELECT COUNT(*) AS g, g AS x FROM collslot GROUP BY g " +
 				"HAVING COUNT(*) > 0) SELECT g, x FROM u ORDER BY x",
+			want: "g,x | 80,0 | 80,1 | 80,2",
+			pin: map[string]string{
+				"dag":     "g,x | 0,0 | 1,1 | 2,2",
+				"dagshuf": "g,x | 0,0 | 1,1 | 2,2",
+			}},
+		{name: "785/nested-in-a-derived-table-inside-a-cte",
+			sql: "WITH z AS (SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x " +
+				"FROM collslot GROUP BY g HAVING COUNT(*) > 0) u) " +
+				"SELECT g, x FROM z ORDER BY x",
+			want: "g,x | 80,0 | 80,1 | 80,2",
+			pin: map[string]string{
+				"dag":     "g,x | 0,0 | 1,1 | 2,2",
+				"dagshuf": "g,x | 0,0 | 1,1 | 2,2",
+			}},
+		{name: "785/nested-two-derived-tables-deep",
+			sql: "SELECT z.g, z.x FROM (SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, " +
+				"g AS x FROM collslot GROUP BY g HAVING COUNT(*) > 0) u) z ORDER BY z.x",
 			want: "g,x | 80,0 | 80,1 | 80,2",
 			pin: map[string]string{
 				"dag":     "g,x | 0,0 | 1,1 | 2,2",

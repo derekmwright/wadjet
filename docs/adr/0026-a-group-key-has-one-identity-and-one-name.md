@@ -688,10 +688,20 @@ applied the block's SELECT list, so the gather sees no duplicate at all, and it
 is that projection which resolved the name against the aggregate's output and
 took the first match. Closing it means a projection addressing an aggregate's
 outputs by POSITION (`exec.ProjectColumn.SourceIdx` exists and nothing sets it
-for this shape), which is this rule one operator over and its own change. The
-shape is gated and pinned at
-`internal/coordinator/arc_e3_names_scopes_two_path_test.go`'s
-`785/nested-in-a-cte`.
+for this shape), which is this rule one operator over and its own change.
+
+**The boundary is the FRAGMENT projection, not the CTE.** Calling the residual
+"the CTE spelling" reads narrower than it is, and three spellings are pinned
+rather than one, at
+`internal/coordinator/arc_e3_names_scopes_two_path_test.go`: `785/nested-in-a-cte`,
+`785/nested-in-a-derived-table-inside-a-cte`, and
+`785/nested-two-derived-tables-deep` — the last with no CTE anywhere in it. A
+SECOND wrapper puts a fragment projection between the aggregate and the gather
+exactly as a CTE does; ONE derived wrapper does not, which is why
+`785/nested-in-a-derived-table` is right on all four arms and is the control
+for all three. All three are pre-existing at base and assert `routes=none`
+beside their rows, so a pin that stops failing because the DAG began ROUTING
+the shape is not mistaken for a fix.
 
 #### 3b. A lowering records the SLOT the operator below publishes, never the call the query wrote (2026-09-04, #797)
 
