@@ -196,7 +196,7 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 // a bad request.
 func TestSQLStateClientFaultTable(t *testing.T) {
 	for _, state := range []string{
-		"0A000",          // feature not supported
+		"0A000",                                     // feature not supported
 		"22003", "22012", "22P02", "2201E", "22023", // data exception
 		"23502", "23505", // integrity constraint violation
 		"42601", "42703", "42P01", "42883", "42702", "42804", // syntax / access rule
