@@ -1075,9 +1075,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      nothing to be called from". That was wrong on its own terms: a function
      that formats its own text can be given the ONE formatter to call, and the
      twelve `date_trunc` arms plus the six other sites now call
-     `expr.formatInstant`, which is `batch.FormatTimestamp`. The VALUE is
-     PostgreSQL's at every site, and one renderer is exactly the property
-     #544 states.
+     `expr.formatInstant`, which is `batch.FormatTimestamp`. One renderer is
+     exactly the property #544 states, and for every function whose result is
+     derived from DATA — `date_trunc`, `from_unixtime`, `date_parse`,
+     `timezone`, interval arithmetic over a text operand — the VALUE is
+     PostgreSQL's byte for byte. The three CLOCK functions are the exception
+     and have their own entry below.
 
      Two functions deliberately keep an ISO 8601 rendering: `TO_ISO8601`,
      whose name is its format contract, and `AT_TIMEZONE`, whose result is a
@@ -1099,6 +1102,45 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      function-result value cells for the closed half, and the
      `residual_date_trunc_declares_string_not_timestamp` pin for the open one,
      which fails the day a timestamp-valued function declares TIMESTAMP.
+
+   - **`NOW`, `CURRENT_TIMESTAMP` and `PG_POSTMASTER_START_TIME` render a
+     ZONELESS instant at MILLISECOND resolution where PostgreSQL renders a
+     `timestamptz` with an offset at microsecond resolution.** (Added
+     2026-09-04, from #544's second pass; round-2 review, B2r2.)
+
+     Measured on PostgreSQL 17.11:
+
+     ```
+     SELECT now()::text                      2026-09-04 21:21:01.708284+00
+     SELECT pg_typeof(now())                 timestamp with time zone
+     SELECT pg_postmaster_start_time()::text 2026-08-31 20:43:01.076093+00
+     ```
+
+     and here: `2026-09-04 21:21:01.708`, declared `text`. Two facts differ,
+     and both are structural rather than a formatting choice.
+
+     **No `timestamptz`.** This engine has one TIMESTAMP type, an instant with
+     no zone, so there is no offset to print. PostgreSQL's `timestamptz` is
+     also an instant with no stored zone — it renders in the session's
+     `TimeZone` — so the two hold the SAME value and disagree about what the
+     text says about it.
+
+     **Millisecond carrier.** A wadjet instant is epoch milliseconds
+     (`batch.FormatTimestamp`), PostgreSQL's is microseconds. Three fractional
+     digits is the most any rendering here can carry; see `docs/data-types.md`
+     §Timestamp, "The resolution is the millisecond".
+
+     Before #544's second pass these three answered RFC3339
+     (`2026-09-04T21:01:38Z`), which named the zone and still was not
+     PostgreSQL's text. Routing them through the one renderer is what "one
+     rendering" requires — a second dialect for three functions is the thing
+     it forbids — and the offset it costs is recorded here rather than traded
+     for a second formatter. Closing it means a zone-aware timestamp type and
+     a microsecond carrier, which is its own change.
+
+     `expr.TestPgPostmasterStartTime` parses the engine's rendering and
+     `pgwire.startupTimeIsThisProcess` asserts the value through the DataGrip
+     opening sequence; neither pins the offset, because there is none to pin.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as

@@ -2,7 +2,9 @@ package wadjet
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -231,4 +233,50 @@ func TestTimestampHasOneRenderingAtEverySite(t *testing.T) {
 				"every timestamp-valued function", got)
 		}
 	})
+	// The CLOCK functions, pinned as a SHAPE because their value moves.
+	//
+	// They render through the same one renderer as everything above, and
+	// PostgreSQL does NOT: it types all three `timestamptz`, whose text
+	// carries a zone offset and six fractional digits —
+	// `2026-09-04 21:21:01.708284+00`, measured — where this engine says
+	// `2026-09-04 21:21:01.708`. Two structural gaps, not a formatting choice:
+	// there is no zone-aware timestamp type to print an offset from, and the
+	// instant is epoch MILLISECONDS, so three digits is the most any rendering
+	// here can carry.
+	//
+	// Before #544's second pass these answered RFC3339, which named the zone
+	// and still was not PostgreSQL's text; routing them through the one
+	// renderer is what that pass requires, and the offset it costs is recorded
+	// in ADR-0012's divergence list rather than traded for a second formatter.
+	//
+	// TODO(#544): delete this pin when the engine has a zone-aware timestamp
+	// and a microsecond carrier.
+	for _, fn := range []string{"NOW()", "CURRENT_TIMESTAMP()", "PG_POSTMASTER_START_TIME()"} {
+		t.Run("residual_clock_is_zoneless_at_ms/"+fn, func(t *testing.T) {
+			res, err := db.Query(ctx, `SELECT `+fn+` AS v FROM `+tbl+` WHERE id = 0`)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			got, _ := res.Rows[0]["v"].(string)
+			if got == "" {
+				t.Fatalf("%s = %#v, want text", fn, res.Rows[0]["v"])
+			}
+			// The engine's one rendering: `2006-01-02 15:04:05[.fff]`, a
+			// space and no `T`, no trailing zone, at most three fraction
+			// digits.
+			if _, err := time.Parse("2006-01-02 15:04:05.999", got); err != nil {
+				t.Errorf("%s = %q, which is not the engine's one instant rendering (%v). "+
+					"If a zone or a `T` came back, a second dialect did too (#544)", fn, got, err)
+			}
+			if strings.ContainsAny(got, "TZ+") {
+				t.Errorf("%s = %q carries a zone; this pin records that it does NOT, and "+
+					"PostgreSQL's timestamptz text does (`…+00`). If the engine grew a "+
+					"zone-aware timestamp, delete this pin and update ADR-0012", fn, got)
+			}
+			if i := strings.IndexByte(got, '.'); i >= 0 && len(got)-i-1 > 3 {
+				t.Errorf("%s = %q carries more than three fraction digits; the instant is "+
+					"epoch MILLISECONDS. PostgreSQL carries six", fn, got)
+			}
+		})
+	}
 }
