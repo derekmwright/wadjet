@@ -16,17 +16,36 @@ import "fmt"
 // completeness, instead of quietly letting an unresolvable column through.
 // The three nodes that carry RAW SQL rather than a parsed subtree
 // (SubqueryNode, ExistsNode, WindowFuncNode) are refused for the same reason —
-// their columns are not visible from here — and none of them is compilable in
-// a DML clause anyway.
+// their columns are not visible from here.
 func ColumnRefs(n Node) ([]*ColRef, error) {
 	var out []*ColRef
-	if err := walkColumnRefs(n, &out); err != nil {
+	if err := walkColumnRefs(n, &out, false); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func walkColumnRefs(n Node, out *[]*ColRef) error {
+// ColumnRefsOutsideSubqueries is ColumnRefs with SubqueryNode and ExistsNode
+// treated as OPAQUE leaves rather than refused.
+//
+// A DML predicate containing a subquery is compiled with a real subquery
+// runner and an outer scope (#688), so the names INSIDE the subquery are
+// resolved by the subquery's own planning and the names outside it are this
+// door's to check. Refusing the whole tree because one operand is a subquery
+// is what made `DELETE FROM t WHERE id IN (SELECT id FROM s)` a 0A000.
+//
+// WindowFuncNode stays refused: a window function is not legal in a WHERE
+// clause on any door, and letting one through here would only move the
+// failure later.
+func ColumnRefsOutsideSubqueries(n Node) ([]*ColRef, error) {
+	var out []*ColRef
+	if err := walkColumnRefs(n, &out, true); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func walkColumnRefs(n Node, out *[]*ColRef, opaqueSubqueries bool) error {
 	if n == nil {
 		return nil
 	}
@@ -40,47 +59,53 @@ func walkColumnRefs(n Node, out *[]*ColRef) error {
 		return nil
 
 	case *BinaryOp:
-		return walkAll(out, e.Left, e.Right)
+		return walkAll(out, opaqueSubqueries, e.Left, e.Right)
 	case *UnaryOp:
-		return walkAll(out, e.Inner)
+		return walkAll(out, opaqueSubqueries, e.Inner)
 	case *CmpExpr:
-		return walkAll(out, e.Left, e.Right)
+		return walkAll(out, opaqueSubqueries, e.Left, e.Right)
 	case *InExpr:
-		return walkAll(out, append([]Node{e.Left}, e.Values...)...)
+		return walkAll(out, opaqueSubqueries, append([]Node{e.Left}, e.Values...)...)
 	case *BetweenExpr:
-		return walkAll(out, e.Left, e.Low, e.High)
+		return walkAll(out, opaqueSubqueries, e.Left, e.Low, e.High)
 	case *LikeExpr:
-		return walkAll(out, e.Left, e.Pattern)
+		return walkAll(out, opaqueSubqueries, e.Left, e.Pattern)
 	case *IsExpr:
-		return walkAll(out, e.Left)
+		return walkAll(out, opaqueSubqueries, e.Left)
 	case *AndNode:
-		return walkAll(out, e.Left, e.Right)
+		return walkAll(out, opaqueSubqueries, e.Left, e.Right)
 	case *OrNode:
-		return walkAll(out, e.Left, e.Right)
+		return walkAll(out, opaqueSubqueries, e.Left, e.Right)
 	case *NotNode:
-		return walkAll(out, e.Inner)
+		return walkAll(out, opaqueSubqueries, e.Inner)
 	case *ParenNode:
-		return walkAll(out, e.Inner)
+		return walkAll(out, opaqueSubqueries, e.Inner)
 	case *FuncCallNode:
-		return walkAll(out, e.Args...)
+		return walkAll(out, opaqueSubqueries, e.Args...)
 	case *CaseNode:
 		nodes := []Node{e.Subject, e.Else}
 		for _, w := range e.Whens {
 			nodes = append(nodes, w.Cond, w.Result)
 		}
-		return walkAll(out, nodes...)
+		return walkAll(out, opaqueSubqueries, nodes...)
 	case *CastNode:
-		return walkAll(out, e.Inner)
+		return walkAll(out, opaqueSubqueries, e.Inner)
 	case *ArrayLitNode:
-		return walkAll(out, e.Elements...)
+		return walkAll(out, opaqueSubqueries, e.Elements...)
 	case *TupleNode:
-		return walkAll(out, e.Elements...)
+		return walkAll(out, opaqueSubqueries, e.Elements...)
 	case *AnyAllExpr:
-		return walkAll(out, append([]Node{e.Left}, e.Values...)...)
+		return walkAll(out, opaqueSubqueries, append([]Node{e.Left}, e.Values...)...)
 
 	case *SubqueryNode:
+		if opaqueSubqueries {
+			return nil
+		}
 		return fmt.Errorf("a subquery's columns cannot be resolved here")
 	case *ExistsNode:
+		if opaqueSubqueries {
+			return nil
+		}
 		return fmt.Errorf("an EXISTS subquery's columns cannot be resolved here")
 	case *WindowFuncNode:
 		return fmt.Errorf("a window function's columns cannot be resolved here")
@@ -90,9 +115,9 @@ func walkColumnRefs(n Node, out *[]*ColRef) error {
 	}
 }
 
-func walkAll(out *[]*ColRef, nodes ...Node) error {
+func walkAll(out *[]*ColRef, opaqueSubqueries bool, nodes ...Node) error {
 	for _, n := range nodes {
-		if err := walkColumnRefs(n, out); err != nil {
+		if err := walkColumnRefs(n, out, opaqueSubqueries); err != nil {
 			return err
 		}
 	}

@@ -466,39 +466,106 @@ func censusShapes() []censusShape {
 
 		// ---------------------------------------------------------------
 		// #688 — a subquery in a DML predicate.
+		//
+		// These five were the deferral's pins, each carrying PostgreSQL's
+		// answer beside an 0A000. They ANSWER now, and the pins are deleted
+		// rather than edited: a `bug:` entry that starts agreeing FAILS, so
+		// removing it is what the fix has to earn.
+		//
+		// The mechanism is one sentence: the predicate is still COMPILED and
+		// not planned (ADR-0031), but the compile is given a runner AND the
+		// outer scope a DML statement has — one relation, the target, under
+		// its alias or its name. The scope is what the bounded repair ADR-0031
+		// forbade was missing, and it is why the CORRELATED EXISTS below is
+		// here rather than still pinned.
 		// ---------------------------------------------------------------
 		{name: "#688 delete IN (SELECT …)", tbl: "pr",
 			sql: "DELETE FROM arcb_pr WHERE id IN (SELECT id FROM arcb_src)",
 			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
-			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#688"},
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
 		{name: "#688 delete correlated EXISTS", tbl: "pr",
 			sql: "DELETE FROM arcb_pr WHERE EXISTS (SELECT 1 FROM arcb_src s WHERE s.id = arcb_pr.id)",
 			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
-			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#688"},
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
 		{name: "#688 update IN (SELECT …)", tbl: "pr",
 			sql: "UPDATE arcb_pr SET n = 0 WHERE id IN (SELECT id FROM arcb_src)",
 			pg:  "tag=UPDATE 1 table=[1:0:a 2:20:b 3:30:c]",
-			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#688"},
+			emb: "tag=UPDATE 1 table=[1:0:a 2:20:b 3:30:c]"},
 		{name: "#688 delete NOT IN (SELECT …)", tbl: "pr",
 			sql: "DELETE FROM arcb_pr WHERE id NOT IN (SELECT id FROM arcb_src)",
 			pg:  "tag=DELETE 2 table=[1:10:a]",
-			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#688"},
+			emb: "tag=DELETE 2 table=[1:10:a]"},
 		{name: "#688 delete against a scalar subquery", tbl: "pr",
 			sql: "DELETE FROM arcb_pr WHERE n < (SELECT max(n) FROM arcb_src)",
 			pg:  "tag=DELETE 3 table=[]",
-			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#688"},
+			emb: "tag=DELETE 3 table=[]"},
 		// The MERGE spelling. docs/sql-reference.md's limitation bullet names
 		// it and the corpus did not, so the documented refusal set and the
-		// pinned one disagreed by one shape (review P3).
+		// pinned one disagreed by one shape (review P3). A WHEN condition is
+		// compiled by a second site (mergeEvaluator.compile), whose outer
+		// scope is the MERGED row rather than the target alone.
 		{name: "#688 merge WHEN MATCHED AND a subquery", tbl: "pr",
 			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
 				"WHEN MATCHED AND t.id IN (SELECT id FROM arcb_src) THEN DELETE",
 			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+
+		// The shapes the five pins did not reach, each measured on live
+		// PostgreSQL 17 for this fixture.
+		//
+		// THE SNAPSHOT, which is the one a merge-on-read engine can get wrong
+		// in a way no other cell would see: the subquery reads the TARGET
+		// TABLE, and PostgreSQL answers it from the PRE-STATEMENT state. Here
+		// `n > 15` selects rows 2 and 3 and both are deleted; an engine that
+		// let its own markers become visible mid-statement would delete
+		// fewer.
+		{name: "#688 delete IN a subquery over the TARGET table", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id IN (SELECT id FROM arcb_pr WHERE n > 15)",
+			pg:  "tag=DELETE 2 table=[1:10:a]",
+			emb: "tag=DELETE 2 table=[1:10:a]"},
+		{name: "#688 delete correlated NOT EXISTS", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE NOT EXISTS (SELECT 1 FROM arcb_src s WHERE s.id = arcb_pr.id)",
+			pg:  "tag=DELETE 2 table=[1:10:a]",
+			emb: "tag=DELETE 2 table=[1:10:a]"},
+		// The ALIASED correlation. An alias HIDES the table name on this door
+		// (`DELETE FROM pr AS a WHERE pr.id = 1` is 42P01), so the outer scope
+		// the compiler is given has to carry the alias or the correlation is
+		// not recognised at all.
+		{name: "#688 delete correlated EXISTS under an alias", tbl: "pr",
+			sql: "DELETE FROM arcb_pr AS a WHERE EXISTS (SELECT 1 FROM arcb_src s WHERE s.id = a.id)",
+			pg:  "tag=DELETE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=DELETE 1 table=[2:20:b 3:30:c]"},
+		// A correlated EXISTS whose subquery also carries an INNER-only
+		// predicate, so "the correlation was dropped" cannot pass as this: if
+		// it were, every row would match and the table would be emptied.
+		{name: "#688 delete correlated EXISTS with an inner predicate", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE EXISTS (SELECT 1 FROM arcb_src s " +
+				"WHERE s.id = arcb_pr.id AND s.n > 200)",
+			pg:  "tag=DELETE 0 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "tag=DELETE 0 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#688 update against a correlated scalar subquery", tbl: "pr",
+			sql: "UPDATE arcb_pr SET n = 0 WHERE n < (SELECT max(s.n) FROM arcb_src s WHERE s.id = arcb_pr.id)",
+			pg:  "tag=UPDATE 1 table=[1:0:a 2:20:b 3:30:c]",
+			emb: "tag=UPDATE 1 table=[1:0:a 2:20:b 3:30:c]"},
+		// A subquery that cannot RUN fails the STATEMENT and writes nothing.
+		// On a WRITE door that is the difference between refusing and deleting
+		// the wrong rows, and it is ADR-0021 §1c's rule reaching this door
+		// with everything else.
+		{name: "#688 delete IN a subquery over an unknown relation", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id IN (SELECT id FROM arcb_nosuch)",
+			pg:  "state=42P01 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42P01 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#688 delete IN a subquery that fails at run time", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id IN (SELECT id/0 FROM arcb_src)",
+			pg:  "state=22012 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=22012 table=[1:10:a 2:20:b 3:30:c]"},
+		// STILL REFUSED, and pinned rather than described: a subquery in the
+		// SET LIST. It is a different site — ResolveDMLSetClauses, which
+		// resolves an assignment against the target column's declaration —
+		// and this arc did not touch it.
+		{name: "#688 update SET from a subquery", tbl: "pr",
+			sql: "UPDATE arcb_pr SET n = (SELECT max(n) FROM arcb_src) WHERE id = 1",
+			pg:  "tag=UPDATE 1 table=[1:400:a 2:20:b 3:30:c]",
 			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
 			bug: "#688"},
 

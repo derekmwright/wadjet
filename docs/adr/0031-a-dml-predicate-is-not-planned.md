@@ -1,7 +1,11 @@
 # ADR-0031: A DML predicate is compiled, not planned — and closing that needs a projectable row identity
 
-Status: Accepted (2026-09-03, arc D3). Records the position and the DEFERRAL
-of #688, with the structural design measured rather than sketched.
+Status: Accepted (2026-09-03, arc D3), AMENDED 2026-09-04 (arc E6). The
+POSITION stands: a DML predicate is compiled, not planned, and the
+projectable-row-identity work below is still blocked and still unstarted. What
+the amendment changes is the CONCLUSION drawn from it — #688 is closed, because
+answering a subquery in a DML predicate never needed the predicate to be
+planned. See "What the deferral got wrong" at the end.
 
 ## Context
 
@@ -177,10 +181,70 @@ a projected identity can rest on it.
 
 ## Consequences
 
-- #688 stays open with its five census pins. The pins carry PostgreSQL's
-  answer, so the day the capability lands the census fails until they are
-  deleted — which is the fix's proof.
-- The bounded `CompileWithRunner` fix stays forbidden, and this record is why:
-  it closes four of the five pinned shapes and leaves correlated `EXISTS`,
-  which is the shape the issue was filed for.
+- #688's five census pins are DELETED, which is the fix's proof — a `bug:`
+  entry that starts agreeing fails. Eight further cells took their place,
+  covering the snapshot, the aliased correlation, an inner-only predicate
+  beside the correlation, and both ways a subquery can fail.
+- The bounded `CompileWithRunner` fix stays forbidden and this record is still
+  why. What shipped is not it: the difference is the outer scope, and the
+  amendment at the end of this record says what that buys.
 - `BuildDMLPredicate`'s doc comment names this record.
+
+## What the deferral got wrong (2026-09-04, arc E6)
+
+The blocked design above is for planning the STATEMENT — `SELECT <row identity>
+FROM t WHERE <pred>`, the door consuming a set of `(file, row)` identities. It
+is still blocked, still right, and still its own arc.
+
+#688 did not need it. The subquery is the only part that has to be planned, and
+it can be planned on its own, through the ordinary SELECT path, while the
+predicate stays compiled and evaluated per row exactly as this record
+describes. All five pinned shapes and the MERGE spelling now answer
+PostgreSQL's answer.
+
+**Why the bounded fix this record forbade was still the wrong one.** That fix
+was `expr.CompileWithRunner` — a runner and nothing else — and the objection
+was exact: it closes `IN`, `NOT IN` and the scalar subquery and leaves
+CORRELATED `EXISTS` refused, which is the shape #688 was filed for. The missing
+half was never the runner. It was the OUTER SCOPE: a compile site with no scope
+cannot classify a subquery as correlated in the first place, so the correlated
+evaluators are never built. A DML statement has the simplest outer scope there
+is — exactly ONE relation, the target, under its alias when it has one and its
+own name when it does not, with the columns of the schema `BuildDMLPredicate`
+was already handed. Given that scope, `expr.CompileWithScopeResolver` builds the
+same correlated evaluators the query path builds, and the headline shape
+answers. A MERGE `WHEN` condition gets the same treatment at its own compile
+site, with the MERGED row as the scope.
+
+**Three properties come with it, inherited from the query path rather than
+invented here**, and each is asserted in the DML census against live
+PostgreSQL 17:
+
+- The subquery runs through `DB.Query` — the same door a client's SELECT goes
+  through — and not through the planner's internal `executeSubquery`. The two
+  do not refuse the same things: `executeSubquery` builds a pipeline for a scan
+  of a table the catalog has never heard of, which yields ZERO BATCHES with no
+  error, so `DELETE … WHERE id IN (SELECT id FROM nosuchtable)` would have
+  answered `DELETE 0` where PostgreSQL raises 42P01 — and the `NOT IN` spelling
+  would have deleted every row. On a WRITE door that difference is the whole
+  point.
+- A subquery that cannot be RUN fails the STATEMENT and writes nothing
+  (ADR-0021 §1c). On a read door that rule prevents a wrong number; here it
+  prevents a wrong DELETE.
+- The SNAPSHOT is PostgreSQL's: a DML statement commits its markers at the end
+  (ADR-0030), so a subquery over the TARGET TABLE reads the pre-statement
+  state. `DELETE FROM t WHERE id IN (SELECT id FROM t WHERE n > 15)` deletes
+  the rows the subquery saw before the statement began.
+
+**What is still refused, and it is now stated rather than inherited.** A
+subquery in an UPDATE's SET LIST is 0A000. It used to be refused incidentally,
+because `plansql.ColumnRefs` declined to walk a subquery at all and every
+caller inherited that; the predicate path now walks past one, so the assignment
+path says no for itself. Without that, the UPDATE reported success and wrote
+nothing — an incidental refusal that stops refusing is a silent no-op. One
+census cell pins it with PostgreSQL's answer.
+
+**Cost.** An uncorrelated subquery runs once for the statement and memoizes; a
+correlated one runs once per candidate row, which is the query path's own cost
+model for a correlated subquery it cannot express as a join. The DML door does
+not decorrelate, and cannot: it has no join to lower into.

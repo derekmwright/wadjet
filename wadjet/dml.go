@@ -335,7 +335,7 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.DMLTarget, schema)
+	predicate, err := BuildDMLPredicate(info.DMLTarget, schema, db.dmlSubqueryEnv(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +412,7 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.DMLTarget, schema)
+	predicate, err := BuildDMLPredicate(info.DMLTarget, schema, db.dmlSubqueryEnv(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -1079,6 +1079,12 @@ type mergeEvaluator struct {
 	// sourceKnown, because inferring a type from a boxed value is how a
 	// DECIMAL or a DATE (both boxed as strings) gets silently mistyped.
 	sourceNamed bool
+	// sub is what a WHEN condition needs to ANSWER a subquery inside it
+	// rather than refuse one (#688). Its outer scope is the MERGED row —
+	// target and source together, which is what a WHEN condition names — so a
+	// subquery correlated to either side compiles as correlated. nil keeps
+	// the 0A000.
+	sub *DMLSubqueryEnv
 }
 
 // buildMergeEvaluator assembles the merged namespace from the two tables'
@@ -1101,6 +1107,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 		colByName:    make(map[string]parquet.Column, len(targetCols)),
 		srcByName:    map[string]parquet.Column{},
 		mergedByName: map[string]parquet.Column{},
+		sub:          db.dmlSubqueryEnv(ctx),
 	}
 	for _, c := range targetCols {
 		ev.colByName[strings.ToLower(c.Name)] = c
@@ -1312,7 +1319,11 @@ func (ev *mergeEvaluator) checkMergeColumns(node plansql.Node) error {
 // out false and the clause did not fire: a silent skip on a statement
 // PostgreSQL refuses (#686 R2-2).
 func (ev *mergeEvaluator) checkClauseColumns(node plansql.Node, matched bool) error {
-	refs, err := plansql.ColumnRefs(node)
+	// OUTSIDE the subqueries. A subquery's own names are resolved by its own
+	// planning, and a reference to the merged row from inside one is resolved
+	// by the correlated evaluator against the scope ev.compile hands the
+	// compiler (#688).
+	refs, err := plansql.ColumnRefsOutsideSubqueries(node)
 	if err != nil {
 		return sqlerr.Wrap("0A000", err)
 	}
@@ -1322,6 +1333,37 @@ func (ev *mergeEvaluator) checkClauseColumns(node plansql.Node, matched bool) er
 		}
 	}
 	return nil
+}
+
+// compile builds a MERGE expression, with the SUBQUERY support the statement
+// has when the database could build an environment for one (#688).
+//
+// An expression with no subquery compiles exactly as it always did, so nothing
+// about MERGE's existing behaviour depends on this. One WITH a subquery gets
+// the MERGED row as its outer scope — target and source together, under both
+// their names and their aliases, which is the namespace a WHEN condition
+// already resolves against — so `WHEN MATCHED AND t.id IN (SELECT …)` answers
+// and a subquery correlated to either side compiles as correlated.
+func (ev *mergeEvaluator) compile(node plansql.Node) (expr.Expr, error) {
+	if !dmlClauseHasSubquery(node) {
+		return expr.Compile(node)
+	}
+	if ev.sub == nil || ev.sub.Runner == nil {
+		return nil, sqlerr.New("0A000",
+			"a subquery in a MERGE clause needs a query environment this caller did not provide")
+	}
+	outerTables := map[string]bool{}
+	for _, n := range []string{ev.target, ev.source, ev.targetAlias, ev.sourceAlias} {
+		if n != "" {
+			outerTables[strings.ToLower(n)] = true
+		}
+	}
+	outerCols := make(map[string]string, len(ev.mergedCols))
+	for _, c := range ev.mergedCols {
+		outerCols[strings.ToLower(c.Name)] = strings.ToLower(ev.target)
+	}
+	return expr.CompileWithScopeResolver(node, ev.sub.Runner, outerTables, outerCols,
+		ev.sub.InnerCols, ev.sub.Opts...)
 }
 
 // targetColumn resolves a SET / INSERT target name against the target table.
@@ -1425,7 +1467,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 			"MERGE cannot evaluate %q: the source %q has no declared schema to resolve it against",
 			text, ev.source)
 	}
-	compiled, err := expr.Compile(node)
+	compiled, err := ev.compile(node)
 	if err != nil {
 		return nil, fmt.Errorf("compiling %q: %w", text, err)
 	}
@@ -1499,7 +1541,7 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any, matched boo
 			"MERGE cannot evaluate the WHEN condition %q: the source %q has no declared schema to resolve it against",
 			text, ev.source)
 	}
-	compiled, err := expr.Compile(node)
+	compiled, err := ev.compile(node)
 	if err != nil {
 		return false, fmt.Errorf("compiling WHEN condition %q: %w", text, err)
 	}
@@ -2057,7 +2099,13 @@ func CheckDMLQualifier(target plansql.DMLTarget) error {
 // 42P01 with the hint that `a` was meant. Accepting both spellings would let
 // the same statement mean two things depending on which one resolved (#686).
 func checkDMLColumns(node plansql.Node, target plansql.DMLTarget, schema []parquet.Column) error {
-	refs, err := plansql.ColumnRefs(node)
+	// OUTSIDE the subqueries. A subquery's own names are resolved by its own
+	// planning, and a correlated reference to the TARGET inside one is
+	// resolved by the correlated evaluator against the outer scope
+	// BuildDMLPredicate hands the compiler (#688). Refusing the whole tree
+	// because one operand is a subquery is what made every DML subquery an
+	// 0A000.
+	refs, err := plansql.ColumnRefsOutsideSubqueries(node)
 	if err != nil {
 		return sqlerr.Wrap("0A000", err)
 	}
@@ -2310,6 +2358,22 @@ func pgOperandTypeName(t parquet.TypeID) string {
 	}
 }
 
+// DMLSubqueryEnv is what a DML predicate needs in order to ANSWER a subquery
+// inside it rather than refuse one: the runner that executes the subquery as
+// an ordinary SELECT, the resolver for the subquery's own FROM columns, and
+// the compile options that carry a scalar subquery's declared output type.
+//
+// physical.(*Planner).SubqueryEnv builds all three from one planner, so the
+// DML door and the query path answer "what does this subquery mean" the same
+// way rather than twice. A nil *DMLSubqueryEnv keeps the old behaviour — a
+// subquery in the clause is refused — which is what a caller that has no
+// catalog to plan against must get.
+type DMLSubqueryEnv struct {
+	Runner    expr.SubqueryRunner
+	InnerCols plansql.TableColumns
+	Opts      []expr.CompileOption
+}
+
 // BuildDMLPredicate compiles a DML WHERE clause against a table's schema. An
 // empty clause compiles to nil — "every row".
 //
@@ -2324,37 +2388,47 @@ func pgOperandTypeName(t parquet.TypeID) string {
 // a second caller: since #815 it reaches the executors through
 // DB.ExecuteParsed like everything else.)
 //
-// DEFERRED — #688: A SUBQUERY IN A DML PREDICATE.
+// A SUBQUERY IN A DML PREDICATE (#688).
 //
 // `DELETE … WHERE id IN (SELECT …)`, `NOT IN (SELECT …)`, a scalar subquery
-// and a correlated EXISTS are all 0A000 here, and the reason is structural
-// rather than local: THIS FUNCTION IS NOT A PLANNER. It parses, resolves the
-// column names against the target's schema, and calls expr.Compile with a NIL
-// runner. Every planner-resident guarantee is therefore absent on this door —
-// the subquery runner, the decorrelation rewrites, the plan-time literal
-// refusals (#721's had to be re-implemented here for exactly that reason) and
-// node-coverage validation.
+// and a correlated `EXISTS` were all 0A000 here. The reason was structural:
+// this function is not a planner. It parsed, resolved the column names against
+// the target's schema, and called `expr.Compile` with a NIL runner and no
+// outer scope, so every planner-resident guarantee was absent on this door.
 //
-// The STRUCTURAL fix is to plan a DML predicate through the normal planner, so
-// that a DML WHERE is a WHERE. The BOUNDED one — handing
-// expr.CompileWithRunner a db.Query closure — is three lines, closes
-// `IN (SELECT …)`, `NOT IN (SELECT …)` and the scalar subquery, and leaves
-// CORRELATED EXISTS refused. Correlated EXISTS is the shape #688's own body
-// names first, so rule 11 of docs/design/correctness-fix-protocol.md forbids
-// shipping it: a fix bounded by a model that leaves the issue's headline shape
-// pinned is a surface repair standing where a structural one belongs, and the
-// disposition is to DEFER with the mechanism written down. The five #688
-// entries in the DML census (internal/server/pgwire/dml_census_test.go) are
-// its pin, each carrying PostgreSQL 17's answer beside the refusal.
+// It is answered now, and the shape of the answer is what makes it not the
+// bounded repair ADR-0031 forbade. That one was `expr.CompileWithRunner` — a
+// runner and nothing else — which closes `IN`, `NOT IN` and the scalar
+// subquery and leaves CORRELATED `EXISTS` refused, because a compile site with
+// no outer scope cannot classify a subquery as correlated in the first place.
+// The scope is the missing half, and a DML statement has the simplest one
+// there is: exactly ONE relation, the target, under its alias when it has one
+// and its own name when it does not, with the columns of the schema this
+// function was already handed. Given that scope,
+// `expr.CompileWithScopeResolver` builds the same correlated evaluators the
+// query path builds, and `EXISTS (SELECT 1 FROM s WHERE s.id = t.id)` — the
+// shape #688's own body names first — answers.
 //
-// ADR-0031 is where the structural design is written down, and it says what
-// BLOCKS it: a delete marker names (file, file-absolute row), the planner has
-// no way to PROJECT a column that is not in the table's schema, and the one
-// synthetic scan column that exists (`physical.RowLocColumn`) carries a
-// scan-instance-local ordinal and is fenced off from the very scan paths a DML
-// predicate must keep working on. Arc D3 measured that and deferred #688
-// again; the record lists the work, in dependency order, that its own arc
-// would do.
+// THE PREDICATE IS STILL COMPILED AND NOT PLANNED, which is ADR-0031's
+// position and is unchanged: the door still walks its files and evaluates the
+// clause per row, and the structural DELETE-as-a-planned-SELECT design that
+// record blocks on a projectable row identity is still blocked and still
+// unnecessary here. What is planned is the SUBQUERY, through the ordinary
+// SELECT path.
+//
+// TWO CONSEQUENCES ARE THE QUERY PATH'S, INHERITED RATHER THAN INVENTED.
+// An uncorrelated subquery is executed ONCE and memoized; a correlated one is
+// re-run per outer row with the outer values substituted as typed literals
+// (ADR-0021 §1e), so an outer value with no literal spelling is 0A000 there as
+// it is in a SELECT. And a subquery that cannot be RUN fails the statement
+// rather than deciding it (§1c) — which on a WRITE door is the difference
+// between refusing and deleting the wrong rows.
+//
+// THE SNAPSHOT. The subquery runs against the manifest the catalog holds while
+// the statement is scanning, and a DML statement commits its markers at the
+// end (ADR-0030), so a subquery over the TARGET TABLE reads the pre-statement
+// state — which is what PostgreSQL does. `DELETE FROM t WHERE id IN (SELECT id
+// FROM t WHERE …)` is in the census with PostgreSQL's answer beside it.
 //
 // THE EMPTY-PREDICATE BACKSTOP. A nil predicate is the widest answer this
 // function can give — every row of the table — so "the statement had no
@@ -2365,7 +2439,7 @@ func pgOperandTypeName(t parquet.TypeID) string {
 // makes the CLASS unreachable, so the next clause any parser path fails to
 // carry fails the STATEMENT instead of widening it (ADR-0019, correctness-fix
 // protocol item 8: loud beats plausible).
-func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column) (DMLPredicate, error) {
+func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *DMLSubqueryEnv) (DMLPredicate, error) {
 	whereSQL := strings.TrimSpace(target.WhereSQL)
 	if whereSQL == "" {
 		if plansql.HasTopLevelWhereToken(target.StmtSQL) {
@@ -2391,7 +2465,7 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column) (DMLPr
 		return nil, err
 	}
 
-	compiled, err := expr.Compile(node)
+	compiled, err := compileDMLPredicate(node, target, schema, sub)
 	if err != nil {
 		return nil, fmt.Errorf("compiling expression: %w", err)
 	}
@@ -2404,6 +2478,64 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column) (DMLPr
 		bv, ok := v.(bool)
 		return ok && bv
 	}, nil
+}
+
+// compileDMLPredicate compiles a resolved DML WHERE clause, with the SUBQUERY
+// support the door has when its caller could build one.
+//
+// A clause with no subquery in it compiles exactly as it always did — one
+// call, no scope, no runner — so the overwhelmingly common statement pays
+// nothing for this and cannot behave differently because of it.
+//
+// A clause WITH one compiles against the outer scope a DML statement has: one
+// relation, the target, under its alias when it has one and its own name when
+// it does not, carrying the columns of the schema this door was handed. That
+// scope is what separates this from the bounded repair ADR-0031 forbade — a
+// runner alone leaves a correlated EXISTS unrecognised as correlated, and a
+// correlated EXISTS is the shape #688 was filed for.
+//
+// A subquery with NO environment to run it stays 0A000, which is the answer
+// for a caller with no catalog to plan against.
+func compileDMLPredicate(node plansql.Node, target plansql.DMLTarget,
+	schema []parquet.Column, sub *DMLSubqueryEnv) (expr.Expr, error) {
+	if !dmlClauseHasSubquery(node) {
+		return expr.Compile(node)
+	}
+	if sub == nil || sub.Runner == nil {
+		return nil, sqlerr.New("0A000",
+			"a subquery in a DML predicate needs a query environment this caller did not provide")
+	}
+	relation := target.Table
+	if target.Alias != "" {
+		relation = target.Alias
+	}
+	outerTables := map[string]bool{strings.ToLower(target.Table): true}
+	if target.Alias != "" {
+		outerTables[strings.ToLower(target.Alias)] = true
+	}
+	outerCols := make(map[string]string, len(schema))
+	for _, c := range schema {
+		outerCols[strings.ToLower(c.Name)] = relation
+	}
+	return expr.CompileWithScopeResolver(node, sub.Runner, outerTables, outerCols,
+		sub.InnerCols, sub.Opts...)
+}
+
+// dmlClauseHasSubquery reports whether a resolved WHERE clause holds a
+// subquery of any kind. It is the switch between the compile this door has
+// always made and the scoped one: a clause without one must not change
+// behaviour because subqueries became possible.
+//
+// It asks plansql, not the tree: ColumnRefs REFUSES the three raw-SQL nodes
+// and ColumnRefsOutsideSubqueries walks past them, so the difference between
+// the two answers IS the question.
+func dmlClauseHasSubquery(node plansql.Node) bool {
+	if _, err := plansql.ColumnRefs(node); err != nil {
+		if _, err2 := plansql.ColumnRefsOutsideSubqueries(node); err2 == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // DMLAssignment is one resolved `SET column = ...`: the target column's full
@@ -2482,6 +2614,17 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		}
 		if err := checkDMLColumns(node, target, schema); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
+		}
+		// A SUBQUERY in the SET list is refused HERE and explicitly. It used
+		// to be refused incidentally, by checkDMLColumns declining to walk a
+		// subquery at all; that check now walks PAST one, because a DML
+		// PREDICATE answers subqueries (#688), and this site does not. An
+		// incidental refusal that stops refusing is a silent no-op — the
+		// UPDATE reported success and wrote nothing — so the refusal is
+		// stated rather than inherited.
+		if dmlClauseHasSubquery(node) {
+			return nil, sqlerr.New("0A000",
+				"SET %s: a subquery in an UPDATE's SET list is not supported", name)
 		}
 		compiled, err := expr.Compile(node)
 		if err != nil {
@@ -2899,5 +3042,44 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 		return convertTemporalValue(s, typ)
 	default:
 		return s, nil
+	}
+}
+
+// dmlSubqueryEnv builds the environment a DML predicate needs to ANSWER a
+// subquery inside it rather than refuse one (#688).
+//
+// It is a fresh planner per statement, for the same reason db.newPlanner is:
+// a Planner carries per-query mutable state. The predicate this environment is
+// compiled into is evaluated on every row of every file the statement scans,
+// so an UNCORRELATED subquery runs once and memoizes, while a CORRELATED one
+// re-runs per outer row with the outer values substituted as typed literals —
+// the query path's own cost model, not a new one.
+//
+// The subquery reads the catalog's current manifest, and a DML statement
+// commits its markers at the end (ADR-0030), so a subquery over the TARGET
+// TABLE sees the pre-statement state — which is PostgreSQL's rule.
+func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
+	_, innerCols, opts := db.newPlanner(ctx).SubqueryEnv(ctx)
+	return &DMLSubqueryEnv{Runner: db.dmlSubqueryRunner(ctx), InnerCols: innerCols, Opts: opts}
+}
+
+// dmlSubqueryRunner executes a DML predicate's subquery through DB.Query — the
+// SAME door a client's SELECT goes through — rather than through the planner's
+// internal executeSubquery.
+//
+// The two do not refuse the same things, and the difference is a WRITE door's
+// to care about: `executeSubquery` builds a pipeline for a scan of a table the
+// catalog has never heard of, which yields ZERO BATCHES with no error (the
+// #571 shape), so `DELETE FROM t WHERE id IN (SELECT id FROM nosuchtable)`
+// would answer `DELETE 0` where PostgreSQL raises 42P01 — and `NOT IN` would
+// have deleted every row. DB.Query validates the relation and raises. One
+// door, one answer to "what does this subquery mean".
+func (db *DB) dmlSubqueryRunner(ctx context.Context) expr.SubqueryRunner {
+	return func(sql string) ([]map[string]any, error) {
+		res, err := db.Query(ctx, sql)
+		if err != nil {
+			return nil, err
+		}
+		return res.Rows, nil
 	}
 }

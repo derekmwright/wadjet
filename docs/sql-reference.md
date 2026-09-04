@@ -2023,6 +2023,31 @@ DELETE FROM table_name [WHERE condition]
 
 Without WHERE, deletes all rows. Delete markers are stored in the table manifest and applied during scans.
 
+#### A subquery in a DML predicate
+
+`DELETE`, `UPDATE` and a `MERGE ... WHEN ... AND` condition all accept a
+subquery in the predicate — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar
+subquery, and `EXISTS` / `NOT EXISTS` correlated to the target:
+
+```sql
+DELETE FROM orders     WHERE id IN (SELECT order_id FROM cancelled);
+DELETE FROM orders o   WHERE EXISTS (SELECT 1 FROM cancelled c WHERE c.order_id = o.id);
+UPDATE orders SET n = 0 WHERE n < (SELECT max(n) FROM archive);
+```
+
+Three properties are worth knowing:
+
+- The subquery reads the table's state **as the statement found it**. A
+  subquery over the target table itself — `DELETE FROM t WHERE id IN (SELECT id
+  FROM t WHERE ...)` — sees no row this statement has removed, which is what
+  PostgreSQL does.
+- An UNCORRELATED subquery runs once for the statement. A CORRELATED one runs
+  once per candidate row, with the outer values substituted as literals, so an
+  outer column with no literal spelling (`ARRAY`, `ROW`, `MAP`, `VECTOR`) is
+  SQLSTATE `0A000`.
+- A subquery that cannot run **fails the statement and writes nothing** —
+  never a row set decided by a failure.
+
 ### UPDATE
 
 ```sql
@@ -2185,7 +2210,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
   not resolved by the planner. Name the columns, or join with `ON`
 - `JOIN ... USING` that follows another join on the same `FROM` item —
   rejected (`0A000`); the column could come from either relation on the left
-- A SUBQUERY in an `UPDATE` / `DELETE` / `MERGE` predicate — `IN (SELECT ...)`, `NOT IN (SELECT ...)`, a scalar subquery, `EXISTS`, and a `MERGE ... WHEN ... AND` carrying one — SQLSTATE 0A000. Subqueries work in a `SELECT`; the DML door compiles its predicate without a planner and so has no subquery runner. What closing it needs, and what blocks it today, is ADR-0031.
+- A SUBQUERY in an `UPDATE`'s `SET` list — `SET n = (SELECT max(n) FROM s)` — SQLSTATE 0A000. A subquery in a `DELETE` / `UPDATE` / `MERGE` PREDICATE is supported (see below); an assignment is a different site and is not.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000. `BY TARGET` is PostgreSQL 17's spelling of the ordinary `NOT MATCHED`; `BY SOURCE` walks the target rows no source row matched, which is how a MERGE expresses the delete half of a full-sync upsert. Eleven cells in the DML census carry PostgreSQL 17's answer for both forms beside the refusal.
 - A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000
