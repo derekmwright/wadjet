@@ -10,6 +10,75 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// setOpResolveUnknownLiteralArms gives an arm's UNKNOWN-typed literal column
+// the OTHER arm's type, before unifySetOpSchemas folds the two schemas.
+//
+// PostgreSQL's resolution algorithm has no type for a quoted literal or a bare
+// NULL of its own: step 3 gives such an input the type the other inputs
+// resolve to, so `SELECT '1.5' … UNION ALL SELECT a` (a numeric column) is
+// numeric and `SELECT '10.0.0.9' … UNION ALL SELECT c_ipv4` is inet. The arm's
+// PIPELINE, though, produces the literal in a STRING vector — that is what the
+// evaluator makes of a quoted constant — so the schema this path folds says
+// STRING for a column PostgreSQL says is numeric.
+//
+// Left unmasked the fold DECLINES that pair (STRING is not on the ladder) and
+// the result keeps the LEFTMOST arm's column, so a query whose literal is in
+// the first arm published OID 25 for a numeric column: the right value under a
+// wrong OID, which is the divergence the wire oracle exists to catch. The
+// stage DAG had already been taught the rule — reconcileSetOpArmTypes stamps
+// the resolved type on the literal arm's projection spec and
+// setOpDeclaredOutputSchema skips unknown arms in its fold — and a rule that
+// lands on one door only is a two-path split: measured, the same statement
+// declared STRING here and DECIMAL(9,2) there, rendering 1.5 against 1.50.
+//
+// The mask is the plan-time one, setOpUnknownLiteralArms, so both doors read
+// the same select items. Both arms unknown at a position is left alone:
+// PostgreSQL resolves that to text, which is what they already declare.
+func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
+	leftUnknown, rightUnknown []bool) ([]parquet.Column, []parquet.Column) {
+	if len(left) == 0 || len(left) != len(right) {
+		return left, right
+	}
+	// A mask is a list of POSITIONS, and a position is only an address while
+	// the mask and the runtime schema are the same length.
+	if (len(leftUnknown) != 0 && len(leftUnknown) != len(left)) ||
+		(len(rightUnknown) != 0 && len(rightUnknown) != len(right)) {
+		return left, right
+	}
+	at := func(mask []bool, i int) bool { return i < len(mask) && mask[i] }
+	var l2, r2 []parquet.Column
+	for i := range left {
+		lu, ru := at(leftUnknown, i), at(rightUnknown, i)
+		if lu == ru {
+			continue
+		}
+		if lu {
+			if l2 == nil {
+				l2 = append(l2, left...)
+			}
+			l2[i].Type = right[i].Type
+			l2[i].Precision, l2[i].Scale = right[i].Precision, right[i].Scale
+			// A bare NULL is one of the two unknown spellings, so the column
+			// this arm contributes is nullable whatever the other arm declares.
+			l2[i].Nullable = true
+			continue
+		}
+		if r2 == nil {
+			r2 = append(r2, right...)
+		}
+		r2[i].Type = left[i].Type
+		r2[i].Precision, r2[i].Scale = left[i].Precision, left[i].Scale
+		r2[i].Nullable = true
+	}
+	if l2 != nil {
+		left = l2
+	}
+	if r2 != nil {
+		right = r2
+	}
+	return left, right
+}
+
 // unifySetOpSchemas is the result type of a set operation: the first arm's
 // column NAMES — SQL says the result takes them — over the COMMON TYPE of the
 // two arms per position.

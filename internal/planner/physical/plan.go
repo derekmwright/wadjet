@@ -12429,14 +12429,16 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 	}
 
 	src := &setOpSourceAdapter{
-		leftSource:  leftSource,
-		leftOps:     leftOps,
-		rightSource: rightSource,
-		rightOps:    rightOps,
-		all:         node.UnionAll,
-		op:          op,
-		leftLits:    setOpArmLiterals(node.Children[0]),
-		rightLits:   setOpArmLiterals(node.Children[1]),
+		leftSource:   leftSource,
+		leftOps:      leftOps,
+		rightSource:  rightSource,
+		rightOps:     rightOps,
+		all:          node.UnionAll,
+		op:           op,
+		leftLits:     setOpArmLiterals(node.Children[0]),
+		rightLits:    setOpArmLiterals(node.Children[1]),
+		leftUnknown:  setOpArmUnknownLits(node.Children[0]),
+		rightUnknown: setOpArmUnknownLits(node.Children[1]),
 	}
 
 	return src, nil, &exec.CollectSink{}, nil
@@ -12476,6 +12478,19 @@ func setOpArmLiterals(arm *logical.Node) []*setOpLitDecimal {
 		return nil
 	}
 	return out
+}
+
+// setOpArmUnknownLits is setOpUnknownLiteralArms for the single-process path,
+// whose arms are a NESTED tree rather than the DAG's flattened list: the width
+// comes from this arm's own select list, and a nested set-operation arm has no
+// output projection of its own, so it contributes no mask (its columns are
+// already resolved by its own adapter).
+func setOpArmUnknownLits(arm *logical.Node) []bool {
+	proj := findOutputProjectionNode(arm)
+	if proj == nil {
+		return nil
+	}
+	return setOpUnknownLiteralArms(arm, len(proj.Projections))
 }
 
 // setOpApplyLiteralDecls restates a literal arm's column as the DECIMAL its
@@ -12543,6 +12558,11 @@ type setOpSourceAdapter struct {
 	// setOpArmLiterals.
 	leftLits  []*setOpLitDecimal
 	rightLits []*setOpLitDecimal
+	// leftUnknown / rightUnknown mark, per output position, the select items
+	// that are UNKNOWN-typed literals — a quoted string or a bare NULL, which
+	// PostgreSQL types from the OTHER arm. See setOpResolveUnknownLiteralArms.
+	leftUnknown  []bool
+	rightUnknown []bool
 
 	batches     []*batch.RecordBatch
 	idx         int
@@ -12606,6 +12626,8 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		// DECIMAL being rendered text (#499).
 		leftSchema := setOpApplyLiteralDecls(leftSink.Schema(), u.leftLits)
 		rightSchema := setOpApplyLiteralDecls(rightSink.Schema(), u.rightLits)
+		leftSchema, rightSchema = setOpResolveUnknownLiteralArms(
+			leftSchema, rightSchema, u.leftUnknown, u.rightUnknown)
 		schema := unifySetOpSchemas(leftSchema, rightSchema)
 
 		// The boxes are not uniform across types — a DECIMAL is its rendered

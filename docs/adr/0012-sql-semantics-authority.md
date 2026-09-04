@@ -2249,6 +2249,37 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        the statement is 42804 in either order and for the whole node;
     4. within a category the result is the type every arm implicitly casts to.
 
+    **The unknown-literal rule is applied at every door that DECLARES the
+    column, not only at the one that executes it.** (Amended 2026-09-04,
+    round-3 review of #648.) There are three: the stage DAG's arm projection
+    (`reconcileSetOpArmTypes` stamps the resolved type on the literal arm's
+    spec), the DAG's declared output schema (`setOpDeclaredOutputSchema` skips
+    unknown arms in its fold) and the single-process path's schema
+    reconciliation (`setOpResolveUnknownLiteralArms`, ahead of
+    `unifySetOpSchemas`). With the rule on the first two only, the same
+    statement declared two different types depending on which door answered —
+    which is the fast-path byte threshold, not anything the query says:
+
+        SELECT '1.5' AS v FROM decpair WHERE id = 1 UNION ALL SELECT a FROM decpair
+          single : STRING       (OID 25)    rendering 1.5
+          DAG    : DECIMAL(9,2) (OID 1700)  rendering 1.50
+          PostgreSQL 17.11: numeric
+
+    A fourth door types a NESTED set-operation arm
+    (`setOpNodeResultTypes`), which is what three arms with the literal FIRST
+    lower to: without the mask it counted the literal's STRING as a type of its
+    own, returned "unknown" for the whole inner node, and the DAG then REFUSED
+    a query the single-process path answered.
+
+    **The result's TYPMOD is the typed arm's, where PostgreSQL's is
+    unconstrained.** `'1.5' ∪ numeric(9,2)` is `numeric` with typmod −1 there,
+    so PostgreSQL renders the literal `1.5` beside the column's `2.00`; wadjet
+    declares DECIMAL(9,2) and renders `1.50`. A wadjet DECIMAL vector has ONE
+    scale — "unconstrained" is not a carrier it has — and the alternative,
+    resolving one arm's scale away, is #532's truncation. It is the same answer
+    `c_dec ∪ '0'` already gives with the typed arm on the LEFT. A declared-TYPMOD
+    divergence, listed here with the declared-WIDTH one below.
+
     **The category table**, wadjet's declared type to the category PostgreSQL
     puts its WIRE type in, measured live:
 

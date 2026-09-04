@@ -1408,16 +1408,25 @@ func setOpNodeResultTypes(n *logical.Node) []setOpColType {
 		return nil
 	}
 	plans := make([]setOpArmPlan, 0, len(n.Children))
+	unknown := make([][]bool, 0, len(n.Children))
 	for _, child := range n.Children {
 		plan, err := setOpArmProjection(child, names)
 		if err != nil {
 			return nil
 		}
 		plans = append(plans, plan)
+		// The UNKNOWN-literal mask travels into the nested node too. Without
+		// it this walk counted a quoted literal's STRING as a type of its own
+		// and returned "unknown" for the whole nested result — so
+		// `SELECT '1.5' … UNION ALL SELECT a … UNION ALL SELECT a …`, whose
+		// arms nest as (literal ∪ a) ∪ a, reached reconcileSetOpArmTypes with
+		// an untyped arm beside a DECIMAL one and was REFUSED, while the
+		// single-process path answered it. PostgreSQL answers it numeric.
+		unknown = append(unknown, setOpUnknownLiteralArms(child, len(names)))
 	}
 	out := make([]setOpColType, len(names))
 	for col := range names {
-		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n), nil)
+		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n), unknown)
 		if err != nil || !allKnown {
 			continue
 		}
