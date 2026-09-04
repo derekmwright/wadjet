@@ -1083,11 +1083,23 @@ func (c *pgConn) runSimpleStatement(sql string) bool {
 	// Coord-path results always carry columns when any batch exists (the
 	// gather receiver derives them from the first batch's schema), so an
 	// empty columns list means an empty result on both paths.
+	//
+	// EmptyQueryResponse is NOT the answer here, and sending it was half of
+	// #846. 'I' is PostgreSQL's reply to an empty query STRING, never to a
+	// statement that ran and returned nothing: psql prints nothing at all for
+	// it and pgJDBC's executeQuery throws "No results were returned by the
+	// query", because the client was handed no result set to be empty. A
+	// SELECT that produced no columns still gets a RowDescription — an empty
+	// one when the plan could declare nothing — and its CommandComplete, so
+	// the client sees an empty result set rather than no result set. The
+	// remaining zero-field shape is `SELECT *` over a JOIN, whose declared
+	// schema is deferred; this door is what keeps it a legal answer.
 	if len(columns) == 0 && len(result.Rows) == 0 {
 		if stream != nil {
 			stream.Close()
 		}
-		c.sendEmptyQuery()
+		c.sendRowDescription(nil, nil)
+		c.sendCommandComplete("SELECT 0")
 		return true
 	}
 	if len(result.ColumnMetas) > 0 {
@@ -1448,7 +1460,18 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 		c.sendRowDescription(result.Columns, fmtCodes)
 		c.described, c.describedFields = true, len(result.Columns)
 	} else {
-		c.sendNoData()
+		// A QUERY describes as a RowDescription, empty or not — the other
+		// two shapes that describe as NoData (a command, and DML without
+		// RETURNING) have already returned above. NoData here was the
+		// extended-protocol half of #846: pgJDBC's executeQuery ties itself
+		// to the Describe it sent, so a zero-column answer arrived as "No
+		// results were returned by the query" instead of an empty
+		// ResultSet. The only shape that still reaches this line is one
+		// whose declared schema the planner could not derive — `SELECT *`
+		// over a JOIN — and an empty RowDescription is a legal result set
+		// where NoData is not one at all.
+		c.sendRowDescription(nil, fmtCodes)
+		c.described, c.describedFields = true, 0
 	}
 }
 
