@@ -437,7 +437,11 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	// with a message that carries no SQLSTATE, so building first meant the
 	// two entry points answered the same statement with different errors
 	// (#590).
-	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
+	//
+	// It binds against the schema the CALLING IDENTITY can see: a column an
+	// ABAC policy denies is not in the table for this caller, so it is not in
+	// the "available:" hint either (#859).
+	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
 		return nil, err
 	}
 
@@ -449,8 +453,10 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	// Annotate scan columns before ABAC enforcement so column policies can resolve
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 
-	// ABAC enforcement: inject row filters and column policies at plan level
-	logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
+	// ABAC enforcement: inject the security projection and row filters at
+	// plan level. ctx is REBOUND: it now carries the column policies the
+	// physical planner needs for expression subqueries (#859).
+	ctx, logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
 	if err != nil {
 		return nil, err
 	}
@@ -529,8 +535,9 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 
 	planner := db.newPlanner(ctx)
 	// Before the build, for the reason Query's own call site records: the
-	// builder's own refusals carry no SQLSTATE (#590).
-	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
+	// builder's own refusals carry no SQLSTATE (#590). Under the calling
+	// identity's schema, for the reason it records too (#859).
+	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
 		return nil, err
 	}
 
@@ -540,8 +547,10 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	}
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 
-	// ABAC enforcement: inject row filters and column policies at plan level
-	logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
+	// ABAC enforcement: inject the security projection and row filters at
+	// plan level. ctx is REBOUND: it now carries the column policies the
+	// physical planner needs for expression subqueries (#859).
+	ctx, logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
 	if err != nil {
 		return nil, err
 	}
@@ -1194,12 +1203,16 @@ func (db *DB) SetAuthProvider(p *auth.Provider) {
 	db.authProvider = p
 }
 
-// enforceAccessPolicies applies ABAC (table denial, row filters, column
-// deny/mask) at plan level via the shared auth.EnforcePlanPolicies — the
-// same enforcement the coordinator's native-DAG path applies, so embedded
-// and distributed execution see identical policy behavior.
-func (db *DB) enforceAccessPolicies(ctx context.Context, selectInfo *plansql.SelectInfo, plan *logical.Node) (*logical.Node, error) {
-	return auth.EnforcePlanPolicies(ctx, db.authProvider, selectInfo, plan, "embedded")
+// enforceAccessPolicies applies ABAC (table denial, column deny/mask, row
+// filters) at plan level via the shared auth.EnforcePlanPolicies — the same
+// enforcement the coordinator's native-DAG path and the HTTP door apply, so
+// every door sees identical policy behavior.
+//
+// It returns the enriched CONTEXT as well as the plan: the policies ride the
+// context down to the physical planner, which plans expression subqueries on
+// its own and must apply the same projection to them (#859).
+func (db *DB) enforceAccessPolicies(ctx context.Context, selectInfo *plansql.SelectInfo, plan *logical.Node) (context.Context, *logical.Node, error) {
+	return auth.EnforcePlanPolicies(ctx, db.authProvider, db.catalog, selectInfo, plan, "embedded")
 }
 
 // Catalog returns the underlying catalog for advanced usage.

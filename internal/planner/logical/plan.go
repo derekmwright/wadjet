@@ -635,6 +635,13 @@ func (mi *MergeInfo) KeepRows() int {
 // InjectRowFilter walks the logical plan tree and wraps Scan nodes for the
 // given table with an additional Filter node containing the row filter predicate.
 // This is used by row-level security policies to restrict which rows a role can see.
+//
+// It goes on directly above the SCAN and therefore BELOW the security
+// projection a column policy adds (auth.EnforcePlanPolicies injects the
+// projection first for exactly this reason). That is PostgreSQL's RLS
+// ordering: the POLICY's predicate sees the row as stored, so a row filter
+// written against a masked column compares the TRUE value, while a predicate
+// the USER writes sits above the projection and compares the MASK.
 func InjectRowFilter(plan *Node, tableName, filterSQL string) *Node {
 	ast, err := plansql.ParseExpression(filterSQL)
 	if err != nil {
@@ -654,7 +661,7 @@ func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
 	}
 
 	// If this is a Scan for the target table, wrap it in a Filter
-	if n.Type == NodeScan && (n.TableName == tableName || n.TableAlias == tableName) {
+	if n.Type == NodeScan && policedScan(n, tableName) {
 		filterNode := NewFilter(n, []Predicate{{
 			Raw:     raw,
 			ASTExpr: ast,
@@ -665,6 +672,52 @@ func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
 	return n
 }
 
+// policedScan reports whether this scan is the relation a policy names.
+//
+// The comparison folds case because the name the policy carries comes from
+// the statement the client wrote while the scan's TableName has been
+// canonicalized to the catalog's own spelling (#731,
+// catalog.ResolveTableName). A policy that stopped matching because the
+// client wrote `E7EMP` would be a silent grant.
+func policedScan(n *Node, tableName string) bool {
+	if n == nil || tableName == "" {
+		return false
+	}
+	return strings.EqualFold(n.TableName, tableName) || strings.EqualFold(n.TableAlias, tableName)
+}
+
+// PolicedScanTables lists, once each, the base table every Scan in the plan
+// reads — the relations a policy has to decide about.
+//
+// This is the plan, not the statement: `plansql.SelectInfo.Tables` carries a
+// DERIVED table under its own subquery TEXT, a CTE reference under the CTE's
+// name, and nothing at all for the arms of a UNION, so a policy layer driven
+// by it polices none of those (#859) — and default-denies the two names that
+// are not tables. Every one of those shapes reaches the same base-table Scan
+// here.
+func PolicedScanTables(n *Node) []string {
+	var out []string
+	seen := map[string]bool{}
+	var walk func(*Node)
+	walk = func(x *Node) {
+		if x == nil {
+			return
+		}
+		if x.Type == NodeScan && x.TableName != "" && !x.IsTableFunc {
+			key := strings.ToLower(x.TableName)
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, x.TableName)
+			}
+		}
+		for _, c := range x.Children {
+			walk(c)
+		}
+	}
+	walk(n)
+	return out
+}
+
 // ColumnPolicy describes a column-level security policy for plan-level enforcement.
 type ColumnPolicy struct {
 	Column   string
@@ -673,56 +726,73 @@ type ColumnPolicy struct {
 }
 
 // InjectColumnPolicies walks the logical plan and inserts a security projection
-// above Scan nodes for the given table. Denied columns are removed and masked
-// columns are replaced with literal expressions. This ensures restricted data
-// never enters the execution pipeline.
-func InjectColumnPolicies(plan *Node, tableName string, policies []ColumnPolicy) *Node {
+// above every Scan of the given table. Denied columns are removed and masked
+// columns are replaced with their mask expression, so restricted data never
+// enters the execution pipeline — every consumer above the scan (WHERE, GROUP
+// BY, an aggregate, a join key, a window, a derived table, `SELECT *`) sees the
+// masked value and never the true one.
+//
+// schemaColumns is the TABLE's declared column list, from the catalog. It is
+// the authority, not the scan's ScanColumns: those carry whatever the builder
+// or a later pruning pass happens to have put there, and for `SELECT *`, an
+// aggregate-only SELECT list or a derived table they can be empty — which is
+// how #859's projection came to be skipped for exactly the queries that most
+// need it. A security control never degrades to a grant, so when neither the
+// catalog nor the scan can name the columns the scan is reported UNPROTECTED
+// (the second return value) and the caller refuses the query rather than
+// answering it unmasked.
+func InjectColumnPolicies(plan *Node, tableName string, policies []ColumnPolicy, schemaColumns []string) (*Node, int) {
 	if len(policies) == 0 {
-		return plan
+		return plan, 0
 	}
-	return injectColumnPolicies(plan, tableName, policies)
+	unprotected := 0
+	out := injectColumnPolicies(plan, tableName, policies, schemaColumns, &unprotected)
+	return out, unprotected
 }
 
-func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy) *Node {
+func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy, schemaColumns []string, unprotected *int) *Node {
 	if n == nil {
 		return nil
 	}
 
 	// Process children first (bottom-up)
 	for i, child := range n.Children {
-		n.Children[i] = injectColumnPolicies(child, tableName, policies)
+		n.Children[i] = injectColumnPolicies(child, tableName, policies, schemaColumns, unprotected)
 	}
 
 	// If this is a Scan for the target table, wrap in a security projection
-	if n.Type == NodeScan && (n.TableName == tableName || n.TableAlias == tableName) {
+	if n.Type == NodeScan && policedScan(n, tableName) {
 		denySet := make(map[string]bool)
 		maskMap := make(map[string]string)
 		for _, p := range policies {
 			if p.Denied {
-				denySet[p.Column] = true
+				denySet[strings.ToLower(p.Column)] = true
 			} else if p.MaskExpr != "" {
-				maskMap[p.Column] = p.MaskExpr
+				maskMap[strings.ToLower(p.Column)] = p.MaskExpr
 			}
 		}
 
-		// Build projection list from scan columns
-		// ScanColumns may not be populated yet, so we also check RequiredColumns
-		cols := n.ScanColumns
+		// The catalog's declared column list first; the scan's own lists only
+		// as a fallback for a caller that has no catalog to ask.
+		cols := schemaColumns
+		if len(cols) == 0 {
+			cols = n.ScanColumns
+		}
 		if len(cols) == 0 {
 			cols = n.RequiredColumns
 		}
 		if len(cols) == 0 {
-			// No column info yet — can't rewrite projection. The post-execution
-			// fallback in applyColumnPolicies will handle this case.
+			*unprotected++
 			return n
 		}
 
 		var projections []Projection
 		for _, col := range cols {
-			if denySet[col] {
+			folded := strings.ToLower(col)
+			if denySet[folded] {
 				continue // skip denied columns
 			}
-			if mask, ok := maskMap[col]; ok {
+			if mask, ok := maskMap[folded]; ok {
 				// Replace column with mask expression
 				maskAST, err := plansql.ParseExpression(mask)
 				if err != nil {
@@ -747,7 +817,10 @@ func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy) *N
 		}
 
 		if len(projections) == 0 {
-			return n // all columns denied — shouldn't happen (access denied upstream)
+			// Every column denied. Returning the bare scan here is a total
+			// grant, so it counts as UNPROTECTED and the caller refuses.
+			*unprotected++
+			return n
 		}
 
 		projectNode := &Node{

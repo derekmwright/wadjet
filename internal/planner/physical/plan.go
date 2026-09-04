@@ -1548,6 +1548,25 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// unqualified column references (needed for subquery decorrelation).
 	p.AnnotateScanColumns(ctx, logicalPlan)
 
+	// A subquery is a WHOLE SECOND QUERY, planned here and never through
+	// auth.EnforcePlanPolicies — so before #859 `(SELECT MAX(ssn) FROM t)`
+	// read the raw column on every door while the same column masked in the
+	// enclosing SELECT list. The policies travel on the context; the
+	// projection goes in before the optimizer, exactly as it does for the
+	// statement's own plan.
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+		denied := pol.DeniedColumns()
+		if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
+			return denied[strings.ToLower(table)]
+		}); err != nil {
+			return nil, nil, nil, err
+		}
+		logicalPlan, err = p.applyContextColumnPolicies(ctx, logicalPlan)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
 	// Optimize — pass scan annotator so new scans created by IN-to-SemiJoin
 	// conversion get column metadata for scalar subquery decorrelation.
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {

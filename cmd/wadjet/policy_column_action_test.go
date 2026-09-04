@@ -178,19 +178,36 @@ auth:
 		}
 	}
 
-	// Naming the denied column explicitly must not hand back its value. The
-	// security projection drops it, so the outer reference resolves to NULL
-	// rather than being rejected — that disposition is pre-existing and not
-	// what this issue is about, but the VALUE must never survive.
-	for i, row := range query(t, "reader-key", named) {
+	// Naming a MASKED column explicitly gets the mask.
+	for i, row := range query(t, "reader-key", "SELECT id, src_ip FROM flow_logs ORDER BY id") {
 		if got, ok := row["src_ip"]; !ok || got != "***" {
 			t.Errorf("reader row %d src_ip = %v (present=%v), want %q — `src_ip: mask` reached no query", i, got, ok, "***")
 		}
-		if got := row["payload"]; got != nil {
-			t.Errorf("reader row %d payload = %v, want no value; `payload: deny` reached no query", i, got)
+	}
+
+	// Naming a DENIED column is 42703: for this identity the column does not
+	// exist, so the reference resolves to nothing. It used to come back as a
+	// phantom all-NULL column — which this test recorded as "pre-existing and
+	// not what this issue is about" — and #859 settled it: a denied column is
+	// missing, not null.
+	id, err := provider.Authenticator().AuthenticateToken("reader-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerCtx := auth.ContextWithIdentity(ctx, id)
+	for _, sql := range []string{
+		named,
+		"SELECT payload FROM flow_logs",
+		"SELECT note FROM flow_logs",
+		"SELECT COUNT(*) AS c FROM flow_logs WHERE payload = 'secret-one'",
+	} {
+		res, err := db.Query(readerCtx, sql)
+		if err == nil {
+			t.Errorf("reader %q answered %v; a denied column must not resolve", sql, res.Rows)
+			continue
 		}
-		if got := row["note"]; got != nil {
-			t.Errorf("reader row %d note = %v, want no value; `note: DENY` reached no query", i, got)
+		if !strings.Contains(err.Error(), "payload") && !strings.Contains(err.Error(), "note") {
+			t.Errorf("reader %q: error %v does not name the denied column", sql, err)
 		}
 	}
 }

@@ -165,7 +165,11 @@ func sqlToStagesWithColumnPolicies(t *testing.T, cat *catalog.Catalog, ctx conte
 		NewPlanner(cat).AnnotateScanColumns(ctx, plan)
 	}
 	scanAnnotator(logicalPlan)
-	logicalPlan = logical.InjectColumnPolicies(logicalPlan, policyTable, policies)
+	var unprotected int
+	logicalPlan, unprotected = logical.InjectColumnPolicies(logicalPlan, policyTable, policies, nil)
+	if unprotected != 0 {
+		t.Fatalf("%d scans of %q left unprotected by the security projection", unprotected, policyTable)
+	}
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
 	planner := NewPlanner(cat)

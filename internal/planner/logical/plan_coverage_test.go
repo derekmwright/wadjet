@@ -112,7 +112,10 @@ func TestInjectRowFilter_DeepNested(t *testing.T) {
 
 func TestInjectColumnPolicies_EmptyPolicies(t *testing.T) {
 	scan := NewScan("events", "e")
-	result := InjectColumnPolicies(scan, "events", nil)
+	result, unprotected := InjectColumnPolicies(scan, "events", nil, nil)
+	if unprotected != 0 {
+		t.Fatalf("unprotected = %d, want 0 for an empty policy list", unprotected)
+	}
 	// No change
 	if result.Type != NodeScan {
 		t.Fatalf("expected unchanged scan for empty policies, got %s", result.Type)
@@ -120,7 +123,8 @@ func TestInjectColumnPolicies_EmptyPolicies(t *testing.T) {
 }
 
 func TestInjectColumnPolicies_NilNode(t *testing.T) {
-	result := injectColumnPolicies(nil, "events", []ColumnPolicy{{Column: "x", Denied: true}})
+	unprotected := 0
+	result := injectColumnPolicies(nil, "events", []ColumnPolicy{{Column: "x", Denied: true}}, nil, &unprotected)
 	if result != nil {
 		t.Error("expected nil for nil input")
 	}
@@ -130,7 +134,7 @@ func TestInjectColumnPolicies_NonMatchingTable(t *testing.T) {
 	scan := NewScan("events", "e")
 	scan.ScanColumns = []string{"id", "name", "secret"}
 	policies := []ColumnPolicy{{Column: "secret", Denied: true}}
-	result := InjectColumnPolicies(scan, "users", policies)
+	result, _ := InjectColumnPolicies(scan, "users", policies, nil)
 	if result.Type != NodeScan {
 		t.Fatalf("expected unchanged scan for non-matching table, got %s", result.Type)
 	}
@@ -140,7 +144,7 @@ func TestInjectColumnPolicies_DenyColumn(t *testing.T) {
 	scan := NewScan("events", "e")
 	scan.ScanColumns = []string{"id", "name", "secret"}
 	policies := []ColumnPolicy{{Column: "secret", Denied: true}}
-	result := InjectColumnPolicies(scan, "events", policies)
+	result, _ := InjectColumnPolicies(scan, "events", policies, nil)
 
 	if result.Type != NodeProject {
 		t.Fatalf("expected project wrapping scan, got %s", result.Type)
@@ -160,7 +164,7 @@ func TestInjectColumnPolicies_MaskColumn(t *testing.T) {
 	scan := NewScan("events", "e")
 	scan.ScanColumns = []string{"id", "name", "email"}
 	policies := []ColumnPolicy{{Column: "email", MaskExpr: "'***'"}}
-	result := InjectColumnPolicies(scan, "events", policies)
+	result, _ := InjectColumnPolicies(scan, "events", policies, nil)
 
 	if result.Type != NodeProject {
 		t.Fatalf("expected project wrapping scan, got %s", result.Type)
@@ -182,22 +186,71 @@ func TestInjectColumnPolicies_ByAlias(t *testing.T) {
 	scan := NewScan("events", "e")
 	scan.ScanColumns = []string{"id", "secret"}
 	policies := []ColumnPolicy{{Column: "secret", Denied: true}}
-	result := InjectColumnPolicies(scan, "e", policies)
+	result, _ := InjectColumnPolicies(scan, "e", policies, nil)
 
 	if result.Type != NodeProject {
 		t.Fatalf("expected project wrapping scan matched by alias, got %s", result.Type)
 	}
 }
 
+// TestInjectColumnPolicies_NoColumnsAvailable: a scan whose columns nobody can
+// name is reported UNPROTECTED so the caller refuses the query. Before #859 it
+// returned the plan unchanged — a silent, total grant on exactly the shapes
+// (`SELECT *`, an aggregate-only SELECT list, a derived table) whose scans can
+// carry no column list at the moment enforcement runs.
 func TestInjectColumnPolicies_NoColumnsAvailable(t *testing.T) {
 	scan := NewScan("events", "e")
-	// No ScanColumns or RequiredColumns set
+	// No schema columns, no ScanColumns and no RequiredColumns.
 	policies := []ColumnPolicy{{Column: "secret", Denied: true}}
-	result := InjectColumnPolicies(scan, "events", policies)
+	result, unprotected := InjectColumnPolicies(scan, "events", policies, nil)
 
-	// Should return unchanged when no column info available
 	if result.Type != NodeScan {
-		t.Fatalf("expected unchanged scan when no columns available, got %s", result.Type)
+		t.Fatalf("expected the scan back, got %s", result.Type)
+	}
+	if unprotected != 1 {
+		t.Fatalf("unprotected = %d, want 1: an unmaskable scan must be reported, not granted", unprotected)
+	}
+}
+
+// TestInjectColumnPolicies_SchemaColumnsBeatAnEmptyScan is #859's fix in one
+// assertion: the catalog's declared column list builds the projection even
+// when the scan carries no column annotation at all.
+func TestInjectColumnPolicies_SchemaColumnsBeatAnEmptyScan(t *testing.T) {
+	scan := NewScan("events", "e")
+	policies := []ColumnPolicy{{Column: "secret", Denied: true}, {Column: "email", MaskExpr: "'***'"}}
+	result, unprotected := InjectColumnPolicies(scan, "events", policies,
+		[]string{"id", "email", "secret"})
+
+	if unprotected != 0 {
+		t.Fatalf("unprotected = %d, want 0", unprotected)
+	}
+	if result.Type != NodeProject || !result.SecurityBarrier {
+		t.Fatalf("expected a security-barrier project, got %s barrier=%v", result.Type, result.SecurityBarrier)
+	}
+	if len(result.Projections) != 2 {
+		t.Fatalf("expected id + masked email, got %v", result.Projections)
+	}
+	for _, pr := range result.Projections {
+		if pr.Alias == "secret" || pr.Column == "secret" {
+			t.Error("denied column present in the security projection")
+		}
+		if pr.Alias == "email" && pr.Expr != "'***'" {
+			t.Errorf("email projection = %q, want the mask", pr.Expr)
+		}
+	}
+}
+
+// TestInjectColumnPolicies_AllColumnsDenied: nothing visible is not "no
+// policy" — it is unprotected, and the caller refuses.
+func TestInjectColumnPolicies_AllColumnsDenied(t *testing.T) {
+	scan := NewScan("events", "e")
+	policies := []ColumnPolicy{{Column: "id", Denied: true}, {Column: "secret", Denied: true}}
+	result, unprotected := InjectColumnPolicies(scan, "events", policies, []string{"id", "secret"})
+	if result.Type != NodeScan {
+		t.Fatalf("expected the scan back, got %s", result.Type)
+	}
+	if unprotected != 1 {
+		t.Fatalf("unprotected = %d, want 1", unprotected)
 	}
 }
 
@@ -205,7 +258,7 @@ func TestInjectColumnPolicies_UsesRequiredColumns(t *testing.T) {
 	scan := NewScan("events", "e")
 	scan.RequiredColumns = []string{"id", "secret"}
 	policies := []ColumnPolicy{{Column: "secret", Denied: true}}
-	result := InjectColumnPolicies(scan, "events", policies)
+	result, _ := InjectColumnPolicies(scan, "events", policies, nil)
 
 	if result.Type != NodeProject {
 		t.Fatalf("expected project from RequiredColumns, got %s", result.Type)

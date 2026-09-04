@@ -963,8 +963,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return nil, fmt.Errorf("extract: %w", err)
 	}
 
-	// Reject references to columns that resolve to no source (plan-time name binding).
-	if err := physical.NewPlannerForContext(ctx, c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
+	// Reject references to columns that resolve to no source (plan-time name
+	// binding), against the schema the CALLING IDENTITY can see — a column an
+	// ABAC policy denies is not in this caller's table, so it is not in the
+	// error's "available:" hint either (#859).
+	if err := auth.ValidateStatementColumns(ctx, c.authProvider, c.catalog, selectInfo, "coordinator"); err != nil {
 		return nil, err
 	}
 
@@ -987,7 +990,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// every downstream consumer (PlanDistributed and tryLocalFastPath)
 	// sees the enforced plan.
 	if c.EnforcesABAC() {
-		logicalPlan, err = auth.EnforcePlanPolicies(ctx, c.authProvider, selectInfo, logicalPlan, "coordinator")
+		// ctx is REBOUND: it carries the column policies onward so the
+		// physical planner applies the same projection to an expression
+		// subquery, which it plans on its own (#859).
+		ctx, logicalPlan, err = auth.EnforcePlanPolicies(ctx, c.authProvider, c.catalog, selectInfo, logicalPlan, "coordinator")
 		if err != nil {
 			return nil, err
 		}
@@ -3269,8 +3275,9 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		return "", "", fmt.Errorf("extract: %w", err)
 	}
 
-	// Reject references to columns that resolve to no source (plan-time name binding).
-	if err := physical.NewPlannerForContext(ctx, c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
+	// Reject references to columns that resolve to no source (plan-time name
+	// binding), under the calling identity's schema (#859).
+	if err := auth.ValidateStatementColumns(ctx, c.authProvider, c.catalog, selectInfo, "coordinator"); err != nil {
 		return "", "", err
 	}
 
