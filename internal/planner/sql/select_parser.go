@@ -107,7 +107,7 @@ func (p *selectParser) expectEndOfStatement() error {
 
 // parseSelectOrUnion parses a SELECT with optional set operations (UNION, INTERSECT, EXCEPT).
 func (p *selectParser) parseSelectOrUnion() (*SelectInfo, error) {
-	left, err := p.parseSingleSelect()
+	left, err := p.parseSetOpArm()
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func (p *selectParser) parseSelectOrUnion() (*SelectInfo, error) {
 			p.advance()
 			all = true
 		}
-		right, err := p.parseSingleSelect()
+		right, err := p.parseSetOpArm()
 		if err != nil {
 			return nil, fmt.Errorf("parsing %s right side: %w", op, err)
 		}
@@ -213,6 +213,41 @@ limitOffset:
 	}
 
 	return left, nil
+}
+
+// parseSetOpArm parses one arm of a set operation, which may be PARENTHESISED.
+//
+// PostgreSQL accepts `(SELECT …) UNION ALL (SELECT …)` and uses the
+// parentheses to SCOPE an arm's own ORDER BY and LIMIT — measured live,
+// `(SELECT id FROM t ORDER BY id LIMIT 1) UNION ALL (SELECT id FROM t ORDER BY
+// id DESC LIMIT 1)` answers two rows, one from each end. Every arm reached
+// parseSingleSelect here, which expects the token SELECT, so all four
+// spellings — the two arms, the whole operation in parentheses, and one
+// nested in a derived table — were `expected SELECT` (#693).
+//
+// The body inside the parentheses is a full parseSelectOrUnion, so a nested
+// set operation works and an arm's ORDER BY / LIMIT is parsed by the same
+// code that parses the outer one — which is what makes them arm-scoped
+// rather than a second grammar.
+func (p *selectParser) parseSetOpArm() (*SelectInfo, error) {
+	if p.peek() != TokenLParen {
+		return p.parseSingleSelect()
+	}
+	// `(` starting a VALUES list is a table constructor, not an arm, and
+	// anything but a SELECT or a further `(` after it is not one either —
+	// leave those to the caller's own error.
+	if n := p.peekN(1); n != TokenKWSelect && n != TokenLParen {
+		return p.parseSingleSelect()
+	}
+	p.advance() // consume (
+	inner, err := p.parseSelectOrUnion()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, fmt.Errorf("expected ) to close a parenthesised set-operation arm")
+	}
+	return inner, nil
 }
 
 func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {

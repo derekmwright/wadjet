@@ -814,6 +814,28 @@ body, or a forward reference to a later item — is SQLSTATE `42P01`
 (`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
 the exception: a recursive CTE's name IS visible inside its own body.
 
+## Set operations
+
+`UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` combine two queries. Either arm
+may be parenthesised, and the parentheses scope that arm's own `ORDER BY` and
+`LIMIT`:
+
+```sql
+(SELECT id FROM t ORDER BY id LIMIT 1)
+UNION ALL
+(SELECT id FROM t ORDER BY id DESC LIMIT 1)
+```
+
+A whole set operation may be parenthesised too, including as one arm of
+another one and as a derived table:
+
+```sql
+SELECT COUNT(*) FROM ((SELECT id FROM t) UNION ALL (SELECT id FROM t)) u
+```
+
+An `ORDER BY` or `LIMIT` written after the last arm without parentheses
+applies to the WHOLE result, as it does in PostgreSQL.
+
 ## Numeric literals
 
 Integer literals take PostgreSQL 16+'s grammar, unquoted and as text read into
