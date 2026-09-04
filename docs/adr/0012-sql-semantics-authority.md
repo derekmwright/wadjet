@@ -305,8 +305,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      the one place the engine asks); an ordinary qualified reference to a
      relation is untouched, and a qualifier naming a container that does not
      declare the field is refused with PostgreSQL's own wording (`could not
-     identify column "nosuch" in record data type`). Two arms spelling the
-     container alike decline rather than pick one.
+     identify column "nosuch" in record data type`).
+
+     **Two arms spelling the container alike are REFUSED, and there the
+     PARENTHESISED spelling is the anchor.** `SELECT x.id, (c_row).b FROM n x
+     JOIN n y ON x.id = y.id + 1` is `column reference "c_row" is ambiguous`,
+     42702, on PostgreSQL 17 — measured — so the ambiguity has an answer to
+     follow even though the unparenthesised spelling does not. Wadjet raises
+     the same class with the same wording, at plan time, and the message names
+     the QUALIFIER because a container is a column and the ambiguity is the
+     container's (`physical.colScope.check`). It answered ONE of the two arms
+     until 2026-09-04, and which one depended on the plan shape.
 
      Asking that question BEFORE stripping the qualifier is the whole of it,
      and asking it after was a wrong VALUE rather than a divergence: beside a

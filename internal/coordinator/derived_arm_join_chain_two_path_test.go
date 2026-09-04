@@ -712,11 +712,33 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
 		},
 		{
+			// A SELF-JOIN puts a container of the same name on BOTH arms, so
+			// the path names no one value and it is REFUSED. PostgreSQL says
+			// the same for the spelling it reads as a field path — measured:
+			//
+			//	SELECT x.id, (c_row).b FROM n x JOIN n y ON x.id = y.id + 1
+			//	ERROR:  column reference "c_row" is ambiguous      (42702)
+			//
+			// It answered ONE arm's container until 2026-09-04, and which one
+			// depended on the plan shape. A container is a column and the
+			// ambiguity is the container's, so the message names the
+			// QUALIFIER.
 			name: "self-join",
 			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " + nested +
 				" y ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
-			cols: []string{"xid", "fb"},
-			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+			cols:   []string{"xid", "fb"},
+			refuse: `column reference "c_row" is ambiguous`,
+		},
+		{
+			// The DISCRIMINATING spelling of the same shape: the second arm's
+			// rows are shifted by one id, so the two containers hold different
+			// values at every row and no pick could pass by accident. It picked
+			// the shifted arm's before.
+			name: "self-join/shifted-arm",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " + nested +
+				" y ON x.id = y.id + 1 WHERE x.id < 5 ORDER BY x.id",
+			cols:   []string{"xid", "fb"},
+			refuse: `column reference "c_row" is ambiguous`,
 		},
 		{
 			// The CONTROL for the two ambiguous entries below: the same rows
@@ -730,35 +752,45 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 		},
 		{
 			// AMBIGUOUS on purpose, and DISCRIMINATING: both arms carry a
-			// `c_row`, and the second arm's rows are SHIFTED by one id, so
-			// the two containers hold different values at every row and the
-			// entry cannot pass whichever one it picks. It picks the derived
-			// arm's — 0, 11, NULL, NULL against x's own 11, NULL, NULL, 44.
+			// `c_row`, and the derived arm's rows are SHIFTED by one id, so
+			// the two containers hold different values at every row and no
+			// pick could pass by accident. It picked the derived arm's — 0,
+			// 11, NULL, NULL against x's own 11, NULL, NULL, 44 — until
+			// 2026-09-04.
 			//
-			// PostgreSQL rejects the query outright (no FROM-clause entry for
-			// `c_row`), so this is the deliberate superset ADR-0012 records
-			// and the pick is written down as a FIXTURE rather than described
-			// as a refusal. An earlier commit body claimed "two ROW columns
-			// spelled alike decline rather than pick one"; the earlier fixture
-			// for the claim was byte-identical SQL to the self-join entry
-			// above, with the same values in both containers, and passed
-			// whichever way the resolver went.
+			// It is REFUSED now. The earlier note here read PostgreSQL's
+			// answer as "rejects the query outright (no FROM-clause entry for
+			// c_row)" and concluded there was nothing to follow; the
+			// PARENTHESISED spelling, which is the one PostgreSQL reads as a
+			// field path, says `column reference "c_row" is ambiguous` (42702)
+			// over exactly this shape. So there IS an answer to follow, and
+			// four documents that already claimed the refusal now describe the
+			// engine (#769 round 2).
 			name: "ambiguous-container/shifted-arm-is-the-build",
 			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " +
 				"(SELECT id + 1 AS id, c_row FROM " + nested + ") y ON x.id = y.id " +
 				"WHERE x.id < 5 ORDER BY x.id",
-			cols: []string{"xid", "fb"},
-			want: "4 rows: 1|0;2|11;3|;4|;",
+			cols:   []string{"xid", "fb"},
+			refuse: `column reference "c_row" is ambiguous`,
 		},
 		{
 			// The same query with the FROM order swapped, so the shifted arm
-			// is the PROBE. Same answer: the pick does not follow probe/build.
+			// is the PROBE. The refusal does not follow probe/build either.
 			name: "ambiguous-container/shifted-arm-is-the-probe",
 			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " +
 				"(SELECT id + 1 AS id, c_row FROM " + nested + ") y JOIN " + nested +
 				" x ON x.id = y.id WHERE x.id < 5 ORDER BY x.id",
+			cols:   []string{"xid", "fb"},
+			refuse: `column reference "c_row" is ambiguous`,
+		},
+		{
+			// The CONTROL that bounds the refusal: ONE arm publishes the
+			// container, so nothing is ambiguous and the field answers.
+			name: "ambiguous-container/ctl-one-arm-only",
+			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " +
+				typematrix.Dim + " d ON x.id = d.k WHERE x.id < 5 ORDER BY x.id",
 			cols: []string{"xid", "fb"},
-			want: "4 rows: 1|0;2|11;3|;4|;",
+			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
 		},
 		{
 			name: "join-with-a-dimension",
@@ -804,20 +836,48 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 	// fixture's 5000 rows have `c_row.b > 20`, so a dropped container (every
 	// row UNKNOWN, 0) and a bound-to-something-else reference are both
 	// visible.
+	//
+	// The SELF-JOIN spelling moved to a REFUSAL on 2026-09-04: both arms
+	// publish `c_row`, so the reference names no one container and
+	// PostgreSQL's own answer for the parenthesised form is 42702. The
+	// QUALIFIED spelling replaces it here, because the thing this loop is
+	// about — a container surviving a join's narrowing — still needs a join
+	// with two nested arms under it.
 	for _, tc := range []struct {
 		name, sql string
 		want      int64
+		refuse    string
 	}{
-		{"filter/no-join", "SELECT COUNT(*) AS n FROM " + nested + " WHERE c_row.b > 20", 3537},
-		{"filter/self-join", "SELECT COUNT(*) AS n FROM " + nested + " x JOIN " + nested +
-			" y ON x.id = y.id WHERE c_row.b > 20", 3537},
-		{"filter/dimension-join", "SELECT COUNT(*) AS n FROM " + nested + " x JOIN " +
-			typematrix.Dim + " d ON x.id = d.k WHERE c_row.b > 20", 4},
+		{name: "filter/no-join", want: 3537,
+			sql: "SELECT COUNT(*) AS n FROM " + nested + " WHERE c_row.b > 20"},
+		{name: "filter/self-join-is-ambiguous",
+			sql: "SELECT COUNT(*) AS n FROM " + nested + " x JOIN " + nested +
+				" y ON x.id = y.id WHERE c_row.b > 20",
+			refuse: `column reference "c_row" is ambiguous`},
+		// A three-part path does not parse (ADR-0022, "Not decided here"), so
+		// the unambiguous spelling of a two-nested-arm join renames the other
+		// arm's container away. The narrowing this loop is about is unchanged.
+		{name: "filter/self-join-one-container", want: 3537,
+			sql: "SELECT COUNT(*) AS n FROM " + nested + " x JOIN (SELECT id, c_row AS rw2 FROM " +
+				nested + ") y ON x.id = y.id WHERE c_row.b > 20"},
+		{name: "filter/dimension-join", want: 4,
+			sql: "SELECT COUNT(*) AS n FROM " + nested + " x JOIN " +
+				typematrix.Dim + " d ON x.id = d.k WHERE c_row.b > 20"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				res, err := arm.run(tc.sql)
+				if tc.refuse != "" {
+					if err == nil {
+						t.Errorf("%s arm answered; PostgreSQL refuses this shape and so does "+
+							"this engine\n  SQL: %s", arm.name, tc.sql)
+					} else if !strings.Contains(err.Error(), tc.refuse) {
+						t.Errorf("%s arm refused with %q, want a refusal carrying %q\n  SQL: %s",
+							arm.name, err.Error(), tc.refuse, tc.sql)
+					}
+					continue
+				}
 				if err != nil {
 					t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
 				}

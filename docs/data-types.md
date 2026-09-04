@@ -322,11 +322,15 @@ SELECT n.id, c_row.b FROM nested n JOIN dims d ON n.id = d.id
 ```
 
 Two relations in scope carrying a container of the same name make the
-reference ambiguous and it is refused rather than bound to one of them, and a
-field the container does not declare is refused with PostgreSQL's wording
-(`could not identify column "x" in record data type`). PostgreSQL itself
-requires the parenthesised spelling `(n.c_row).b` and reads the unparenthesised
-one as a missing FROM-clause entry; wadjet accepts both.
+reference ambiguous, and it is refused — `column reference "c_row" is
+ambiguous`, SQLSTATE 42702, which is what PostgreSQL raises for `(c_row).b`
+over the same two relations. Qualify the OTHER arm's container away, or select
+the field through a derived table that renames it. A field the container does
+not declare is refused too, with PostgreSQL's wording (`could not identify
+column "x" in record data type`).
+
+PostgreSQL requires the parenthesised spelling `(n.c_row).b` and reads the
+unparenthesised one as a missing FROM-clause entry; wadjet accepts both.
 
 **Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
 

@@ -211,7 +211,11 @@ func splitQualifier(name string) (qualifier, column string) {
 // The parent is looked up the way every other reference is: byte-exact under
 // the fold, then the ONE column spelled `<qualifier>.<name>` — a join
 // qualifies a colliding container, so `c_row.b` has to find `x.c_row`. Two
-// arms spelling it decline, which keeps the ambiguity loud.
+// arms spelling it decline HERE, and this function declining is not by itself
+// the refusal: the caller's later branches would still bind one of them. What
+// makes the ambiguity loud is the BINDER, which raises PostgreSQL's own
+// `column reference "c_row" is ambiguous` (42702) at plan time when two of a
+// block's sources publish the container (physical.colScope.check).
 func (b *RecordBatch) RowFieldPath(name string) (parent, field int, ok bool) {
 	dot := -1
 	for i := 0; i < len(name); i++ {

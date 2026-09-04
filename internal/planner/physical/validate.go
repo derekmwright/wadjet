@@ -341,6 +341,21 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 			return s.unknownColumn(ref)
 		}
 		if s.cols[q] {
+			// Two of this block's sources both publish the CONTAINER, so the
+			// path names no one value. PostgreSQL raises exactly this for the
+			// spelling it does read as a field path — measured:
+			//
+			//	SELECT x.id, (c_row).b FROM n x JOIN n y ON x.id = y.id + 1
+			//	ERROR:  column reference "c_row" is ambiguous          (42702)
+			//
+			// Wadjet answered ONE of the two arms' containers, and which one
+			// depended on the plan shape. That is the same silent pick the
+			// bare-column rule below refuses, one level down: a container is a
+			// column, and the ambiguity is the container's, not the field's —
+			// which is why the message names the QUALIFIER (#769 round 2).
+			if s.srcCount[q] > 1 {
+				return sqlerr.New("42702", "column reference %q is ambiguous", ref.Table)
+			}
 			// Qualifier is itself a column → dotted ROW/struct field access
 			// (e.g. attrs.score). When the qualifier is a ROW column whose
 			// fields are known (a base table), the FIELD must exist too:
