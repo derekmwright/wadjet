@@ -164,6 +164,21 @@ func TestASpilledJoinAnswersItsContainerColumns(t *testing.T) {
 			whyNot: "the build is decpair's nine rows, which no budget here evicts",
 		},
 		{
+			// #863, at the query level: a probe against a spilled build read
+			// `buildBatches[0]` unconditionally on the dual-int-key arm, and a
+			// grace eviction had nil'd it. The shape is a TWO-COLUMN int key
+			// under an outer join — the composite key is what selects that arm
+			// and the outer join is what routes through `genericProbe`, the
+			// only caller of `lookupBuild`. At base both budgets fail with
+			// `internal error in operator chain: ... nil pointer dereference`.
+			name: "dual-int-key/a-probe-against-a-spilled-build",
+			sql: "SELECT x.id AS xid, y.c_str AS s FROM " + typematrix.Table + " x LEFT JOIN " +
+				typematrix.Table + " y ON x.id = y.id AND x.c_i64 = y.c_i64 " +
+				"WHERE x.id < 4 ORDER BY x.id",
+			cols:      []string{"xid", "s"},
+			mustEvict: true,
+		},
+		{
 			// THE BOUNDING CONTROL. An INNER join agrees on every arm at base
 			// too — the defect is the OUTER payload's — so this cell is here
 			// to catch a fix that moves a right answer.

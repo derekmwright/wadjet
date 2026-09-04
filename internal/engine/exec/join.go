@@ -877,14 +877,28 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		if !ok {
 			return p.lookupBuf
 		}
-		// Traverse chain, verifying both keys match (composite hash may collide)
-		bcol0, bcol1 := h.buildBatches[0].Columns[h.buildKeyIdx[0]], h.buildBatches[0].Columns[h.buildKeyIdx[1]]
-		prevBatch := int32(0)
+		// Traverse chain, verifying both keys match (composite hash may collide).
+		//
+		// The key columns are resolved from the REF's OWN batch, never primed
+		// from batch 0: a grace eviction nils `buildBatches[i]` for every
+		// batch of the partition it wrote to disk, and slot 0 belongs to
+		// whichever partition happened to freeze first. Priming from it
+		// dereferenced nil for any build large enough to spill, whatever
+		// partition the probe row was actually in (#863). A ref whose own
+		// batch is gone is skipped for the same reason FlushMatched skips it —
+		// the spilled replay owns those rows.
+		var bcol0, bcol1 *batch.Vector
+		prevBatch := int32(-1)
 		for idx := head; idx >= 0; idx = pt.next[idx] {
 			ref := pt.arena[idx]
 			if ref.batchIdx != prevBatch {
-				bcol0 = h.buildBatches[ref.batchIdx].Columns[h.buildKeyIdx[0]]
-				bcol1 = h.buildBatches[ref.batchIdx].Columns[h.buildKeyIdx[1]]
+				bb := h.residentBuildBatch(ref)
+				if bb == nil {
+					prevBatch, bcol0, bcol1 = -1, nil, nil
+					continue
+				}
+				bcol0 = bb.Columns[h.buildKeyIdx[0]]
+				bcol1 = bb.Columns[h.buildKeyIdx[1]]
 				prevBatch = ref.batchIdx
 			}
 			ba, bb, _ := dualIntKeyFromVectors(bcol0, bcol1, int(ref.rowIdx))
