@@ -2,10 +2,12 @@ package test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -129,13 +131,6 @@ func TestDateCastOverEverySourceForm(t *testing.T) {
 		{"text column", "SELECT CAST(sd AS DATE) AS x FROM evt WHERE id = 1", "1996-01-10"},
 		{"text literal", "SELECT CAST('1996-01-10' AS DATE) AS x", "1996-01-10"},
 		{"typed literal is the same cast", "SELECT DATE '1996-01-10' AS x", "1996-01-10"},
-		// An operand that names no instant is NULL — the TRY_CAST rule.
-		// A pass-through of the original value is the one answer ruled out:
-		// that is the defect, and it is silent.
-		{"unparseable text is NULL", "SELECT CAST(bad AS DATE) AS x FROM evt WHERE id = 1", nil},
-		{"unparseable literal is NULL", "SELECT CAST('not-a-date' AS DATE) AS x", nil},
-		{"empty string is NULL", "SELECT CAST(bad AS DATE) AS x FROM evt WHERE id = 3", nil},
-		{"out-of-range date is NULL", "SELECT CAST(bad AS DATE) AS x FROM evt WHERE id = 4", nil},
 		// A cast through the other temporal type still lands on the day.
 		{"timestamp then date", "SELECT CAST(CAST(sd AS TIMESTAMP) AS DATE) AS x FROM evt WHERE id = 1", "1996-01-10"},
 	}
@@ -147,6 +142,50 @@ func TestDateCastOverEverySourceForm(t *testing.T) {
 			}
 			if got := rows[0]["x"]; got != c.want {
 				t.Errorf("%s = %v (%T), want %v", c.sql, got, got, c.want)
+			}
+		})
+	}
+}
+
+// TestDateCastRefusesTextThatNamesNoDay is the other half of the same door,
+// and it is the assertion the four cells deleted from the table above used to
+// make BACKWARDS.
+//
+// They pinned "an operand that names no instant is NULL — the TRY_CAST rule",
+// which is what #340 chose when the expression layer had no per-row error
+// channel. It has one (`expr.fatalEval`), the numeric casts have used it since
+// #367, and #836/#840 make the temporal casts use it too: PostgreSQL 17.11
+// raises 22007 for text that is not a date and 22008 for a well-formed date
+// naming no day, and a NULL is indistinguishable at every consumer from a cast
+// over a NULL input — `WHERE CAST(s AS DATE) IS NULL` counted every
+// unparseable row as if the column had been empty.
+func TestDateCastRefusesTextThatNamesNoDay(t *testing.T) {
+	ctx, db := dateCastDB(t)
+	for _, c := range []struct {
+		name, sql  string
+		state, msg string
+	}{
+		{"unparseable text column", "SELECT CAST(bad AS DATE) AS x FROM evt WHERE id = 1",
+			"22007", `invalid input syntax for type date: "not-a-date"`},
+		{"unparseable literal", "SELECT CAST('not-a-date' AS DATE) AS x",
+			"22007", `invalid input syntax for type date: "not-a-date"`},
+		{"empty string", "SELECT CAST(bad AS DATE) AS x FROM evt WHERE id = 3",
+			"22007", `invalid input syntax for type date: ""`},
+		{"a date the calendar does not have", "SELECT CAST(bad AS DATE) AS x FROM evt WHERE id = 4",
+			"22008", `date/time field value out of range: "1996-13-45"`},
+		{"text that is not a timestamp", "SELECT CAST('not-a-date' AS TIMESTAMP) AS x",
+			"22007", `invalid input syntax for type timestamp: "not-a-date"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := db.Query(ctx, c.sql)
+			if err == nil {
+				t.Fatalf("%s ANSWERED; PostgreSQL 17.11 raises [%s] %s", c.sql, c.state, c.msg)
+			}
+			if got := sqlerr.StateOf(err); got != c.state {
+				t.Errorf("%s raised SQLSTATE %s, want %s: %v", c.sql, got, c.state, err)
+			}
+			if !strings.Contains(err.Error(), c.msg) {
+				t.Errorf("%s: %v does not carry PostgreSQL's message %q", c.sql, err, c.msg)
 			}
 		})
 	}
@@ -190,11 +229,9 @@ func TestTimestampCastIsTheTimestampColumnRepresentation(t *testing.T) {
 		t.Errorf("CAST('1996-01-10' AS TIMESTAMP) renders %q, want %q", got, "1996-01-10 00:00:00")
 	}
 
-	// And the same NULL rule as DATE.
-	rows = dateCastRows(t, ctx, db, "SELECT CAST('not-a-date' AS TIMESTAMP) AS x")
-	if got := rows[0]["x"]; got != nil {
-		t.Errorf("CAST('not-a-date' AS TIMESTAMP) = %v, want NULL", got)
-	}
+	// And the same REFUSAL as DATE — this cell pinned a NULL until #836/#840;
+	// TestDateCastRefusesTextThatNamesNoDay carries it with the code and the
+	// message, beside its DATE twin.
 }
 
 // TestDateCastArithmetic exercises what a caller does with the result: it is a

@@ -228,10 +228,26 @@ func TestMetadataMinMax(t *testing.T) {
 			wantRows: []map[string]any{{"lo": 1.5}},
 		},
 		{
-			// rewriteConstArithAggs turns MIN(x + k) into MIN(x) + k before
-			// the physical planner sees it, so the aggregate IS a bare
-			// column by then and the metadata path is legitimately eligible.
-			name: "constant arithmetic is lifted out of the aggregate", wantFire: true,
+			// The metadata path no longer fires here, and the ROWS are
+			// unchanged — this cell measures a SECOND cost of #841's decline,
+			// beside the ClickBench Q30 shape #850's text names.
+			//
+			// `rewriteConstArithAggs` used to turn MIN(x + k) into MIN(x) + k
+			// before the physical planner saw it, so the aggregate WAS a bare
+			// column by then and the manifest statistics could answer it
+			// without a scan. The lift is declined for an integer literal
+			// because the per-row form can raise 22003 and the lifted form
+			// cannot — `MIN(x + k)` exactly as `SUM(x + k)` — so the argument
+			// is no longer a bare column and the query SCANS.
+			//
+			// The recovery is real and belongs with #850's: this path HAS the
+			// column's min and max by construction, so it could fold
+			// `agg(col op const)` and reproduce the per-row refusal exactly by
+			// running the checked kernel on the two EXTREMES (the operation is
+			// monotone, so an overflow anywhere is an overflow at one end).
+			// That is planner work in the metadata-min/max module, not a
+			// review fix, and #850 carries it.
+			name: "constant arithmetic is no longer lifted out of the aggregate", wantFire: false,
 			// bigint on PostgreSQL 17: `SELECT pg_typeof(MIN(v + 1)) FROM t`
 			// with v bigint answers bigint. This wanted float64 while the
 			// integer rule reached only the outermost node of a projection,
