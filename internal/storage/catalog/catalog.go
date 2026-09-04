@@ -477,6 +477,26 @@ func (c *Catalog) AmbiguousTableNames(name string) []string {
 	return matches
 }
 
+// AmbiguousTableError is the refusal BOTH doors raise for a reference that
+// matches two or more registered tables case-insensitively and none of them
+// byte-exact — the case ResolveTableName declines to answer.
+//
+// One builder, because the two doors are one statement class to a client and
+// the reader had the useful message while the WRITER got the bare "does not
+// exist": `wadjet/dml.go` called ResolveTableName and never asked which tables
+// the reference matched, so the candidate list the SELECT door prints was
+// dropped on INSERT, UPDATE, DELETE and MERGE (#858).
+//
+// Still 42P01, and the reason is in physical.validate's own comment: what is
+// true is that no unique relation has this name, and PostgreSQL has no
+// ambiguity class for relations at all — it cannot reach this state, because
+// it folds at the catalog.
+func AmbiguousTableError(name string, candidates []string) error {
+	return sqlerr.New("42P01",
+		"relation %q does not exist: %d tables match it case-insensitively (%s) — quote the one you mean",
+		name, len(candidates), strings.Join(candidates, ", "))
+}
+
 // GetTable returns the metadata for a table.
 func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
 	var meta TableMeta

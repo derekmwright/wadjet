@@ -164,8 +164,18 @@ func resolveInsertColumns(named []string, table string, schema []parquet.Column)
 // A transport failure is deliberately NOT 42P01: the table's existence is
 // unknown then, which is the same distinction physical.validate makes on the
 // read path.
-func dmlRelationError(name string, err error) error {
+//
+// AMBIGUITY is part of the same message. A reference matching two registered
+// tables case-insensitively and neither byte-exact is one ResolveTableName
+// declines to answer, so GetTable reports the plain miss — and the writer got
+// `relation "mytab" does not exist` while the reader got that plus the two
+// candidates and how to disambiguate. One statement class, two messages again.
+// catalog.AmbiguousTableError is the ONE builder both doors raise now (#858).
+func (db *DB) dmlRelationError(name string, err error) error {
 	if errors.Is(err, catalog.ErrTableNotFound) {
+		if cands := db.catalog.AmbiguousTableNames(name); len(cands) > 1 {
+			return catalog.AmbiguousTableError(name, cands)
+		}
 		return sqlerr.New("42P01", "relation %q does not exist", name)
 	}
 	return fmt.Errorf("table %q: %w", name, err)
@@ -183,7 +193,7 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 	info.Table = db.catalog.ResolveTableName(info.Table)
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
-		return nil, dmlRelationError(info.Table, err)
+		return nil, db.dmlRelationError(info.Table, err)
 	}
 
 	// RESOLVE the column list against the table, before a single value is
@@ -326,7 +336,7 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 	info.Table = db.catalog.ResolveTableName(info.Table)
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
-		return nil, dmlRelationError(info.Table, err)
+		return nil, db.dmlRelationError(info.Table, err)
 	}
 	schema := tableMeta.Schema.Columns
 
@@ -403,7 +413,7 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 	info.Table = db.catalog.ResolveTableName(info.Table)
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
-		return nil, dmlRelationError(info.Table, err)
+		return nil, db.dmlRelationError(info.Table, err)
 	}
 	schema := tableMeta.Schema.Columns
 
@@ -549,7 +559,7 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	info.Target = db.catalog.ResolveTableName(info.Target)
 	targetMeta, err := db.catalog.GetTable(ctx, info.Target)
 	if err != nil {
-		return nil, dmlRelationError(info.Target, err)
+		return nil, db.dmlRelationError(info.Target, err)
 	}
 
 	// Read all source rows via a query

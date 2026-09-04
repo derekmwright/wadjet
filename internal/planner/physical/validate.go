@@ -716,9 +716,9 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 	// relations at all (it cannot reach this state: it folds at the catalog).
 	if r, ok := b.src.(tableNameResolver); ok {
 		if cands := r.AmbiguousTableNames(tr.Name); len(cands) > 1 {
-			return sqlerr.New("42P01",
-				"relation %q does not exist: %d tables match it case-insensitively (%s) — quote the one you mean",
-				tr.Name, len(cands), strings.Join(cands, ", "))
+			// ONE builder for both doors — the DML door raises the same
+			// message field for field (#858).
+			return catalog.AmbiguousTableError(tr.Name, cands)
 		}
 	}
 	stored := resolveTableSpelling(b.src, tr.Name)

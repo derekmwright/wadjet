@@ -183,6 +183,71 @@ func TestADMLStatementWritesToTheTableItResolved(t *testing.T) {
 	}
 }
 
+// An AMBIGUOUS table name is refused with the SAME message on every door.
+//
+// `TcTwo` and `TCTWO` differ only by case, so an unquoted reference matches
+// both and resolves to neither. The SELECT door names the candidates and says
+// how to disambiguate; the DML doors called ResolveTableName and never asked
+// which tables the reference matched, so the writer got the bare
+// `relation "tctwo" does not exist` — same SQLSTATE, same disposition, less
+// message (#858). catalog.AmbiguousTableError is the one builder now, and this
+// asserts the two doors FIELD FOR FIELD rather than "both are 42P01".
+func TestAnAmbiguousTableNameRefusesTheSameWayOnEveryDoor(t *testing.T) {
+	ctx := context.Background()
+	db := tableCaseDB(t, ctx)
+
+	// The SELECT door's refusal is the reference; every other door must
+	// produce this string.
+	_, rerr := db.Query(ctx, "SELECT k FROM TcTwo")
+	if rerr == nil {
+		t.Fatal("the SELECT door answered an ambiguous table name")
+	}
+	want := rerr.Error()
+	if !strings.Contains(want, "case-insensitively") ||
+		!strings.Contains(want, "TCTWO") || !strings.Contains(want, "TcTwo") {
+		t.Fatalf("the SELECT door's refusal does not name both candidates: %s", want)
+	}
+	if got := sqlerr.StateOf(rerr); got != "42P01" {
+		t.Fatalf("the SELECT door answered SQLSTATE %q, want 42P01", got)
+	}
+
+	for _, c := range []struct{ name, sql string }{
+		{"insert", "INSERT INTO TcTwo (k) VALUES (1)"},
+		{"update", "UPDATE TcTwo SET k = 1 WHERE k = 2"},
+		{"delete", "DELETE FROM TcTwo WHERE k = 1"},
+		{"merge", "MERGE INTO TcTwo t USING tcplain s ON t.k = s.k " +
+			"WHEN MATCHED THEN UPDATE SET k = s.k"},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			_, err := db.Query(ctx, c.sql)
+			if err == nil {
+				t.Fatalf("the %s door answered an ambiguous table name\n  SQL: %s", c.name, c.sql)
+			}
+			if got := sqlerr.StateOf(err); got != "42P01" {
+				t.Errorf("the %s door answered SQLSTATE %q, want 42P01\n  SQL: %s", c.name, got, c.sql)
+			}
+			if err.Error() != want {
+				t.Errorf("the %s door's refusal is not the SELECT door's:\n  got  %s\n  want %s\n  SQL: %s",
+					c.name, err.Error(), want, c.sql)
+			}
+		})
+	}
+
+	// The CONTROL that bounds it: an ordinary miss keeps the plain message,
+	// so the candidate list is not printed where there are no candidates.
+	_, merr := db.Query(ctx, "INSERT INTO tcnosuch (k) VALUES (1)")
+	if merr == nil {
+		t.Fatal("INSERT into a table that does not exist was accepted")
+	}
+	if strings.Contains(merr.Error(), "case-insensitively") {
+		t.Errorf("an ordinary miss carries the ambiguity message: %s", merr.Error())
+	}
+	if got := sqlerr.StateOf(merr); got != "42P01" {
+		t.Errorf("an ordinary DML miss answered SQLSTATE %q, want 42P01", got)
+	}
+}
+
 func tableCaseDB(t *testing.T, ctx context.Context) *DB {
 	t.Helper()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
