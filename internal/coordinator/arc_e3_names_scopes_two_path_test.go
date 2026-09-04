@@ -63,19 +63,36 @@ func e3Arms(t *testing.T, ctx context.Context) []e3Arm {
 	spilled := e3BudgetedStandalone(t, ctx)
 	return []e3Arm{
 		{"single", func(sql string) ([]string, [][]any, error) { return e3PosSingle(ctx, single, sql) }, nil},
-		{"spilled", func(sql string) ([]string, [][]any, error) { return e3PosSingle(ctx, spilled, sql) }, nil},
+		{spilledArm, func(sql string) ([]string, [][]any, error) { return e3PosSingle(ctx, spilled, sql) }, nil},
 		{"dag", func(sql string) ([]string, [][]any, error) { return e3PosDAG(ctx, dag, sql) }, dag},
 		{"dagshuf", func(sql string) ([]string, [][]any, error) { return e3PosDAG(ctx, shuf, sql) }, shuf},
 	}
 }
 
-// e3BudgetedStandalone is the single-process engine under a 512 KiB budget,
-// over the same fixture tmdStandalone loads.
+// e3ArmBudget is the memory budget every SPILLED arm in this arc runs at, and
+// e3ArmBudgetName is how a gate spells it in an arm name or a pin.
+//
+// It is named rather than inlined because a pinned spilled answer is a claim
+// ABOUT the budget: a spill is a CONDITION, not a query shape (ADR-0027), so
+// raising this number makes the same query stop spilling and answer what the
+// other arms answer — which would read as a fix and delete a pin that still
+// holds. Anything that changes it has to change the pins with it.
+const (
+	e3ArmBudget     = 512 * 1024
+	e3ArmBudgetName = "512 KiB budget"
+)
+
+// spilledArm is the key a per-arm pin uses for that arm. It carries the budget
+// so the pin says at what the answer was measured.
+var spilledArm = "spilled (" + e3ArmBudgetName + ")"
+
+// e3BudgetedStandalone is the single-process engine under e3ArmBudget, over
+// the same fixture tmdStandalone loads.
 func e3BudgetedStandalone(t *testing.T, ctx context.Context) *wadjet.DB {
 	t.Helper()
 	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store: objstore.NewMemStore(), Bucket: "test",
-		MemoryBudget: 512 * 1024, SpillDir: t.TempDir(),
+		MemoryBudget: e3ArmBudget, SpillDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("open budgeted standalone: %v", err)

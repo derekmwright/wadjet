@@ -584,7 +584,10 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 	// payload the spilled build has to reconstruct. Three arms could not see
 	// that, and one shape below disagrees with the other three there today.
 	arms := append(dajArms(t, ctx), dajArm{
-		name: "spilled",
+		// The budget is `e3ArmBudget` — 512 KiB — and it is named here rather
+		// than left inside the helper because every `spilled` pin below is a
+		// claim ABOUT it: raise it and the query stops spilling.
+		name: "spilled (" + e3ArmBudgetName + ")",
 		run: func(q string) (*oracle.Result, error) {
 			return tmdRunSingle(ctx, e3BudgetedStandalone(t, ctx), q)
 		},
@@ -609,6 +612,15 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 		// `want`. Like armErr it is fail-on-agree — the day that arm answers
 		// `want` the entry is stale and must be deleted, which is the fix's
 		// proof.
+		//
+		// A `spilled` entry pins an answer AT A BUDGET, and the budget is part
+		// of the claim: this gate's spilled arm is `e3BudgetedStandalone`, the
+		// single-process engine at 512 KiB (`e3ArmBudget`). A spill is a
+		// CONDITION, not a query shape (ADR-0027), so "the spilled arm answers
+		// X" means nothing without the number that made it spill — raise the
+		// budget and the same query stops spilling and answers `want`, which
+		// would read as a fix. Every pin below that names `spilled` names the
+		// budget with it.
 		armWant map[string]string
 	}{
 		{
@@ -990,7 +1002,7 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 			// spill (ADR-0006's routed-probe amendment, #832), so its build
 			// must fit the budget and refuses loudly when it does not.
 			// Pre-existing, unrelated to field paths, and LOUD.
-			armErr: map[string]string{"spilled": "memory budget exceeded"},
+			armErr: map[string]string{spilledArm: "memory budget exceeded"},
 		},
 		{
 			// The same example in PostgreSQL's own spelling, because the docs
@@ -1001,7 +1013,7 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 				"ORDER BY x.id",
 			cols:   []string{"xid", "fb"},
 			want:   "5 rows: 0|0;1|11;2|;3|;4|44;",
-			armErr: map[string]string{"spilled": "memory budget exceeded"},
+			armErr: map[string]string{spilledArm: "memory budget exceeded"},
 		},
 		{
 			// Redundant parentheses are the same reference (P2, round 3):
@@ -1052,7 +1064,7 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 			cols: []string{"did", "fb"},
 			want: "9 rows: 1|;2|;3|;4|;5|;6|0;7|;8|;9|;",
 			armWant: map[string]string{
-				"spilled": "9 rows: 1|;2|;3|;4|;5|;6|;7|;8|;9|;",
+				spilledArm: "9 rows: 1|;2|;3|;4|;5|;6|;7|;8|;9|;",
 			},
 		},
 		{
@@ -1067,7 +1079,7 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 				" n ON d.id + 0 = n.id WHERE d.id < 3 ORDER BY d.id",
 			cols:    []string{"did", "cr"},
 			want:    "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
-			armWant: map[string]string{"spilled": "2 rows: 1|;2|;"},
+			armWant: map[string]string{spilledArm: "2 rows: 1|;2|;"},
 		},
 		{
 			// …and it is not even the residual. A PLAIN EQUI KEY loses the
@@ -1081,7 +1093,7 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 				" n ON d.id = n.id WHERE d.id < 3 ORDER BY d.id",
 			cols:    []string{"did", "cr"},
 			want:    "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
-			armWant: map[string]string{"spilled": "2 rows: 1|;2|;"},
+			armWant: map[string]string{spilledArm: "2 rows: 1|;2|;"},
 		},
 		{
 			// THE BOUNDING CONTROL: the same projection under an INNER join is
