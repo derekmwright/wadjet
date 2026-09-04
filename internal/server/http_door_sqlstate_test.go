@@ -162,6 +162,15 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 		// these to 400 would be a contract change no issue asked for —
 		// `DESCRIBE nope` has answered 404 since this door existed.
 		{"describe_missing_table_keeps_404", "DESCRIBE nope", "42P01", http.StatusNotFound},
+		// One missing table, one class, on every DDL statement that can name
+		// one — round-2 B2 and P3. These carried NO class at all until the
+		// catalog was given them: `DESCRIBE nope` answered 42P01 while `DROP
+		// TABLE nope` and `ANALYZE nope` answered nothing, for the same
+		// condition on the same endpoint, and a duplicate CREATE TABLE put
+		// "already exists" in the message and nowhere a client could branch.
+		{"drop_table_missing_42P01", "DROP TABLE nope", "42P01", http.StatusNotFound},
+		{"analyze_missing_42P01", "ANALYZE nope", "42P01", http.StatusNotFound},
+		{"create_table_duplicate_42P07", "CREATE TABLE hd (id BIGINT)", "42P07", http.StatusConflict},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, state, msg := hdPost(t, base, tc.sql)

@@ -306,7 +306,12 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 
 	for _, t := range meta.Tables {
 		if t == name {
-			return fmt.Errorf("table %q already exists", name)
+			// 42P07 duplicate_table, PostgreSQL's class for exactly this.
+			// Without it the message carried the fact and no door carried
+			// the CLASS: the HTTP door answered 409 and pgwire the blanket
+			// 42000, so a client could not branch on "already exists" the
+			// way it can on 42P01 (arc E2 round-2 B2).
+			return sqlerr.Wrap("42P07", fmt.Errorf("table %q already exists", name))
 		}
 	}
 
@@ -556,7 +561,7 @@ func (c *Catalog) manifestWithRevision(tableName string) (*PartitionManifest, ui
 	if rr, ok := c.kv.(RevisionReader); ok {
 		switch rev, err := rr.Revision(key); {
 		case err == ErrKeyNotFound:
-			return nil, 0, fmt.Errorf("manifest for table %q not found", tableName)
+			return nil, 0, sqlerr.Wrap("42P01", fmt.Errorf("manifest for table %q not found", tableName))
 		case err == nil:
 			if entry, hit := c.cachedManifest(tableName, rev); hit {
 				return entry, rev, nil
@@ -567,7 +572,7 @@ func (c *Catalog) manifestWithRevision(tableName string) (*PartitionManifest, ui
 	data, rev, err := c.kv.Get(key)
 	if err != nil {
 		if err == ErrKeyNotFound {
-			return nil, 0, fmt.Errorf("manifest for table %q not found", tableName)
+			return nil, 0, sqlerr.Wrap("42P01", fmt.Errorf("manifest for table %q not found", tableName))
 		}
 		return nil, 0, err
 	}
@@ -613,7 +618,7 @@ func (c *Catalog) loadManifest(tableName string) (*PartitionManifest, error) {
 	var manifest PartitionManifest
 	if err := c.getJSON(c.key("manifest."+tableName), &manifest); err != nil {
 		if err == ErrKeyNotFound {
-			return nil, fmt.Errorf("manifest for table %q not found", tableName)
+			return nil, sqlerr.Wrap("42P01", fmt.Errorf("manifest for table %q not found", tableName))
 		}
 		return nil, err
 	}
@@ -1220,7 +1225,10 @@ func (c *Catalog) DropTable(ctx context.Context, name string) error {
 		tables = append(tables, t)
 	}
 	if !found {
-		return fmt.Errorf("table %q not found", name)
+		// Same missing table GetTable already reports as 42P01; reporting
+		// it as a different thing here would make one condition answer two
+		// ways on one door (round-2 P3).
+		return sqlerr.Wrap("42P01", fmt.Errorf("table %q not found", name))
 	}
 
 	// Snapshot the data files this incarnation OWNS before its manifest
