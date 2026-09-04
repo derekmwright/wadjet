@@ -96,6 +96,36 @@ func decorrelatedInnerPlan(info *plansql.SelectInfo, innerOnly []plansql.Node,
 	if len(info.Tables)+len(info.Joins) > 1 && fromHasDerivedOrCTE(info, ctes) {
 		return nil, false
 	}
+	// A derived table or a CTE reference that COMPUTES one of the columns it
+	// publishes declines too, and this is the #516 rule reaching one level
+	// down rather than a new one.
+	//
+	// innerSemiJoinKey already refuses a COMPUTED select item as a semi-join
+	// key, because the key would name nothing the build side emits. A derived
+	// table HIDES that: from the subquery's side `SELECT b.m FROM (SELECT
+	// n + 1 AS m FROM t) b` is a plain column reference, and the computation
+	// is a level down where the guard never looks. The single-process arm
+	// evaluates it; the stage DAG carries `m` as if it were a scan column,
+	// finds none, and the semi join builds EMPTY:
+	//
+	//	SELECT COUNT(*) FROM mk_outer a WHERE a.n IN (
+	//	  SELECT b.m FROM (SELECT n + 1 AS m FROM mk_inner) b)
+	//	-- PostgreSQL 17 and single-process: 32.  Stage DAG: 0.
+	//
+	// The same body with `n AS m` — a RENAME rather than a computation —
+	// answers 40 on both arms, which is what says the trigger is the
+	// EXPRESSION and not the published name.
+	//
+	// Declining on ANY computed published column rather than only the one the
+	// key names is deliberate: the three call sites spell their key three
+	// different ways and none of them has resolved it yet when this runs, so
+	// a rule that needed the key would have to be written three times and
+	// would be checked against the un-repaired spelling. The cost is a
+	// derived inner that computes a column the query never keys on, which
+	// stays a per-row predicate — right, and slow.
+	if fromDerivedComputesAColumn(info, ctes) {
+		return nil, false
+	}
 
 	// buildFromClause reads the same info the caller has already classified,
 	// and the LATERAL arm REWRITES it (the empty-input default, ADR-0021
@@ -260,6 +290,67 @@ func fromHasDerivedOrCTE(info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
 	}
 	for _, j := range info.Joins {
 		if renames(j.RightTable) {
+			return true
+		}
+	}
+	return false
+}
+
+// fromDerivedComputesAColumn reports whether any derived table or CTE
+// reference in the FROM/JOIN list publishes a column that is not a plain
+// column reference of what it reads. See the call site for why.
+func fromDerivedComputesAColumn(info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
+	body := func(name string) (*plansql.SelectInfo, bool) {
+		name = strings.TrimSpace(name)
+		sql := ""
+		if strings.HasPrefix(name, "(") {
+			sql = name[1 : len(name)-1]
+		} else {
+			for _, c := range append(append([]plansql.CTEDef{}, ctes...), info.CTEs...) {
+				if strings.EqualFold(c.Name, name) {
+					sql = c.SQL
+					break
+				}
+			}
+		}
+		if sql == "" {
+			return nil, false
+		}
+		parsed, err := plansql.Parse(sql)
+		if err != nil {
+			return nil, true // unreadable: treat as computed and decline
+		}
+		sub, err := plansql.ExtractSelect(parsed)
+		if err != nil {
+			return nil, true
+		}
+		return sub, true
+	}
+	computes := func(name string) bool {
+		sub, isDerived := body(name)
+		if !isDerived {
+			return false // a base table publishes what it stores
+		}
+		if sub == nil {
+			return true
+		}
+		for _, c := range sub.Columns {
+			if c.Star {
+				continue // a star publishes the source columns unchanged
+			}
+			if _, ok := unwrapParens(c.ASTExpr).(*plansql.ColRef); !ok {
+				return true
+			}
+		}
+		return false
+	}
+	for _, t := range info.Tables {
+		if computes(t.Name) {
+			return true
+		}
+	}
+	for _, j := range info.Joins {
+		if computes(j.RightTable) {
 			return true
 		}
 	}

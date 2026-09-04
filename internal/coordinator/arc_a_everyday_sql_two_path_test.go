@@ -669,14 +669,20 @@ func arcACells() []arcACell {
 		// literal at the column's own scale — so `'2.00' = b.k` is gone and
 		// with it the 22P02 that made these loud. The per-type matrix that
 		// earns it is `TestArcD5CorrelationMatchesPostgres`'s #679 family.
+		//
+		// The ROUTE these four used to cost is gone (#852): a derived-table
+		// inner is BUILT into the semi/anti join's build side now instead of
+		// declining, so both DAG arms EXECUTE them. The VALUES are what these
+		// cells are for and they are unchanged; the counters moving from one
+		// to zero is the other fix's proof.
 		{issue: "#679", name: "exists_over_a_derived_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
-			want: []string{"n=int64:3"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:3"}},
 		{issue: "#679", name: "not_exists_over_a_derived_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE NOT EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_d2 = b.k)`,
-			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:7"}},
 		// #679's three controls, all of which ANSWER at base and must keep
 		// answering — the dossier's own point that three of the four widths
 		// would let a wrong fix pass. The trigger is DECIMAL outer against
@@ -684,11 +690,11 @@ func arcACells() []arcACell {
 		{issue: "#679", name: "control_exists_over_a_derived_table_same_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_i64 AS k FROM numwidth GROUP BY w_i64) b WHERE a.w_i64 = b.k)`,
-			want: []string{"n=int64:9"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:9"}},
 		{issue: "#679", name: "control_exists_over_a_derived_table_decimal_decimal",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT w_d4 AS k FROM numwidth GROUP BY w_d4) b WHERE a.w_d2 = b.k)`,
-			want: []string{"n=int64:7"}, wantCorrRoutes: 1},
+			want: []string{"n=int64:7"}},
 		{issue: "#679", name: "control_exists_over_a_base_table_cross_width",
 			sql: `SELECT COUNT(*) AS n FROM numwidth a WHERE EXISTS (` +
 				`SELECT 1 FROM numwidth b WHERE a.w_d2 = b.w_i64)`,

@@ -1586,6 +1586,40 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 			want:   []string{"n=int64:24"},
 			pgSays: "24 — mk_outer's n cycles 0..4 and the set is {0,1,2}"},
 
+		// THE SECOND BOUNDARY: a derived table that COMPUTES a column it
+		// publishes. This is innerSemiJoinKey's #516 rule one level down —
+		// that guard refuses a COMPUTED select item as a semi-join key, and a
+		// derived table hides the computation from it, because from the
+		// subquery's side `SELECT b.m FROM (SELECT n + 1 AS m FROM t) b` is a
+		// plain column reference.
+		//
+		// Measured: with the rewrite firing, the single-process arm evaluated
+		// `n + 1` and answered PostgreSQL's 32 while the stage DAG carried `m`
+		// as if it were a scan column, found none, built an EMPTY semi join
+		// and answered 0 — silently, on both DAG arms.
+		// `benchmarks/tpch.TestMultiKeyCorrelatedTwoPath/derived_in_computed`
+		// is the entry that caught it.
+		//
+		// The RENAME control one line down is what says the trigger is the
+		// EXPRESSION and not the published name: `n AS m` lowers and both arms
+		// answer 40.
+		{issue: "#852", name: "boundary_derived_inner_that_computes_its_key_still_routes",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
+				`SELECT 1 FROM (SELECT n + 1 AS m FROM mk_inner) b WHERE b.m = a.n)`,
+			want:           []string{"n=int64:32"},
+			wantCorrRoutes: 1,
+			pgSays:         "32 - mk_inner's n cycles 0..4, so m is 1..5 and mk_outer's 0 misses"},
+		{issue: "#852", name: "boundary_uncorrelated_in_over_a_computed_derived_inner_agrees",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n IN (` +
+				`SELECT b.m FROM (SELECT n + 1 AS m FROM mk_inner) b)`,
+			want:   []string{"n=int64:32"},
+			pgSays: "32 - the uncorrelated spelling takes the materialized-set route, no counter"},
+		{issue: "#852", name: "control_derived_inner_that_renames_its_key_lowers",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n IN (` +
+				`SELECT b.m FROM (SELECT n AS m FROM mk_inner) b)`,
+			want:   []string{"n=int64:40"},
+			pgSays: "40 - a RENAME publishes the scan's own values, so every outer row matches"},
+
 		// THE ONE RELATION THE BUILD SIDE STILL DECLINES, and the decline is
 		// what keeps the materialized-IN route's own refusal reachable: a
 		// RECURSIVE CTE reference is a tagged scan the physical planner
