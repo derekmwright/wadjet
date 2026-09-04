@@ -1,9 +1,66 @@
 package memory
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
+
+// #853: a reservation the budget cannot hold AT ALL spends the whole relief
+// wait reaching a fallback that was inevitable at the first comparison.
+//
+// The wall is the assertion, and it is a hard one on purpose: the wait is two
+// seconds in the caller that made this visible (physical.fileLoadReserveWait),
+// so a fix that leaves any part of the wait in place fails here rather than
+// being argued about.
+func TestAReservationLargerThanTheBudgetDoesNotWait(t *testing.T) {
+	const budget = 512 << 10
+	const wait = 2 * time.Second
+
+	tr := NewTracker("query", budget)
+	start := time.Now()
+	forced := ReserveOrForce(context.Background(), tr, nil, budget+1, wait, ForceScanFileLoad)
+	elapsed := time.Since(start)
+
+	if !forced {
+		t.Fatal("a request larger than the budget was admitted cleanly; the tracker's " +
+			"budget stopped meaning anything")
+	}
+	if elapsed > wait/4 {
+		t.Errorf("ReserveOrForce spent %v of a %v relief wait on a reservation of %d "+
+			"against a %d budget — no amount of relief makes that fit, so the wait can "+
+			"only reach the ForceReserve it was already going to do (#853)",
+			elapsed, wait, budget+1, budget)
+	}
+	if got := tr.ForcedFor(ForceScanFileLoad); got != budget+1 {
+		t.Errorf("the forced census reports %d for %q; the charge was %d",
+			got, ForceScanFileLoad, budget+1)
+	}
+}
+
+// The wait STAYS for a request the budget could hold: that is the case where
+// waiting can work, and #853's boundary is exactly "n > budget", not "the
+// tracker is full".
+func TestAReservationTheBudgetCouldHoldStillWaits(t *testing.T) {
+	const budget = 512 << 10
+	tr := NewTracker("query", budget)
+	tr.ForceReserveFor(budget, ForceScanDecodedBatch) // full, but not by this request
+
+	start := time.Now()
+	forced := ReserveOrForce(context.Background(), tr, nil, budget/2, 300*time.Millisecond,
+		ForceScanFileLoad)
+	elapsed := time.Since(start)
+
+	if !forced {
+		t.Fatal("the reservation succeeded; nothing released the room it needed")
+	}
+	if elapsed < 250*time.Millisecond {
+		t.Errorf("ReserveOrForce waited only %v for a request of %d against a %d budget "+
+			"that is momentarily full; a request the budget CAN hold is exactly the case "+
+			"the wait exists for", elapsed, budget/2, budget)
+	}
+}
 
 // Every producer that can charge past the budget names what the charge is for,
 // and every one of them gives it back under the same name. The census counts
