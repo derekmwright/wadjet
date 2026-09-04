@@ -72,6 +72,12 @@ func TestVarcharCastDeclaresItsLengthOnTheWire(t *testing.T) {
 		// A non-string column must not acquire a modifier from the map, which
 		// answers by NAME: the type gate is what stops that.
 		{"integer_column", `SELECT visits AS v FROM users WHERE id = 1`, 20, -1, "100"},
+		// A NULL VALUE under a parameterized destination still carries the
+		// declaration — the modifier describes the COLUMN, not the row.
+		// PostgreSQL's \gdesc for `CAST(NULL AS VARCHAR(3))` is
+		// `character varying(3)`, measured.
+		{"null_value_keeps_the_declaration",
+			`SELECT CAST(NULL AS VARCHAR(3)) AS v FROM users WHERE id = 1`, 1043, 7, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			conn := connectPgconn(t, srv.Addr())
@@ -90,9 +96,50 @@ func TestVarcharCastDeclaresItsLengthOnTheWire(t *testing.T) {
 				t.Errorf("declared atttypmod %d, want %d — PostgreSQL sends n+4 for a "+
 					"length modifier and -1 for none (#838)", f.TypeModifier, c.typmod)
 			}
-			if len(res.Rows) != 1 || string(res.Rows[0][0]) != c.value {
-				t.Errorf("sent %q, want %q", res.Rows, c.value)
+			if len(res.Rows) != 1 {
+				t.Fatalf("%d rows, want 1", len(res.Rows))
+			}
+			if res.Rows[0][0] == nil {
+				if c.value != "" {
+					t.Errorf("sent NULL, want %q", c.value)
+				}
+				return
+			}
+			if string(res.Rows[0][0]) != c.value {
+				t.Errorf("sent %q, want %q", res.Rows[0][0], c.value)
 			}
 		})
 	}
+	// The RESIDUAL: a length does NOT survive a derived-table boundary.
+	//
+	// PostgreSQL's \gdesc for `SELECT * FROM (SELECT CAST('abcdef' AS
+	// VARCHAR(4)) AS v) x` is `character varying(4)` — the modifier rides with
+	// the column through the sub-select. Here the OUTPUT projection is a bare
+	// reference to `v`, and a bare reference carries no length for the same
+	// reason a stored column does not: the only place a length lives is a
+	// CAST's own type name, which the boundary has already consumed.
+	//
+	// It is the same fact as the `bare_column` cell above rather than a second
+	// one, and closing it is the same change: a length the plan can carry
+	// through a projection, which today's colDecls has no field for.
+	//
+	// TODO(#838): delete this pin when a derived table propagates the modifier.
+	t.Run("residual_derived_table_loses_the_length", func(t *testing.T) {
+		conn := connectPgconn(t, srv.Addr())
+		const sql = `SELECT v FROM (SELECT CAST('abcdef' AS VARCHAR(4)) AS v FROM users WHERE id = 1) x`
+		res := conn.ExecParams(t.Context(), sql, nil, nil, nil, []int16{0}).Read()
+		if res.Err != nil {
+			t.Fatalf("%v", res.Err)
+		}
+		f := res.FieldDescriptions[0]
+		if f.DataTypeOID != 25 || f.TypeModifier != -1 {
+			t.Errorf("declared OID %d atttypmod %d; this pin records 25/-1 and PostgreSQL "+
+				"17.11 describes it as character varying(4). If the modifier now survives "+
+				"the boundary, delete this pin and the bare-column note in ADR-0012 item 5",
+				f.DataTypeOID, f.TypeModifier)
+		}
+		if len(res.Rows) != 1 || string(res.Rows[0][0]) != "abcd" {
+			t.Errorf("sent %q, want abcd — the VALUE crosses the boundary either way", res.Rows)
+		}
+	})
 }
