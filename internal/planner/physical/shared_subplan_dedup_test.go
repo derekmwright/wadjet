@@ -461,6 +461,14 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"MergeGroupCount": "hashed", "Distribution": "hashed",
 		"Exchange": "hashed", "ProjectExprs": "hashed",
 		"SecurityProjectExprs": "hashed", "QualifyAllBuildCols": "hashed",
+		// The predicates that run ABOVE the security projection change which
+		// rows the stage emits exactly as FilterExprs does, so two subtrees
+		// differing here are never interchangeable. PolicyFilterExprs rides
+		// with them: it names which FilterExprs entries may read a policed
+		// column, and merging a stage that carries one with a stage that does
+		// not would move that exemption onto a predicate that has no claim to
+		// it (#859).
+		"PostSecurityFilterExprs": "hashed", "PolicyFilterExprs": "hashed",
 	}
 	tp := reflect.TypeOf(Stage{})
 	for i := 0; i < tp.NumField(); i++ {
