@@ -157,6 +157,11 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 		// reached from the same POST by statement type. This one put its
 		// class in the MESSAGE and nowhere a client could branch on it.
 		{"create_table_22023", "CREATE TABLE hd_bad (d DECIMAL(50,2))", "22023", http.StatusBadRequest},
+		// And the boundary from the other side: a caller that chose a
+		// RESOURCE status keeps it, with the class now beside it. Promoting
+		// these to 400 would be a contract change no issue asked for —
+		// `DESCRIBE nope` has answered 404 since this door existed.
+		{"describe_missing_table_keeps_404", "DESCRIBE nope", "42P01", http.StatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, state, msg := hdPost(t, base, tc.sql)

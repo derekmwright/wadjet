@@ -106,6 +106,11 @@ this same endpoint runs — and the class decides the HTTP status:
 | `42` | syntax error or access rule violation (`42601`, `42703`, `42P01`, `42883`, …) | `400` |
 | anything else | server-side or transport failure (`XX000` internal, `58030` I/O) | `500` |
 
+The promotion to `400` replaces a `5xx` only. A response that names the
+*resource* keeps its status with the class beside it: `DESCRIBE nosuchtable` is
+`404` with `"sqlstate": "42P01"`, and a `CREATE TABLE` for a name already taken
+is `409`.
+
 A statement refused for what it *contains* is the client's error, not the
 server's, which is why those four classes answer `400 Bad Request`. An error
 the statement did not cause — a malformed request body, a missing `sql` field,

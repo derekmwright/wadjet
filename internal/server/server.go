@@ -776,10 +776,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // and execution paths still called writeError. Every refusal on this door now
 // comes through here.
 //
-// The class → status table, which is also docs/api-reference.md's. The class
-// decides the status even where the caller chose one: `EXPLAIN` and the DDL
-// sub-handlers pass 404 or 409 for a missing or existing table, and a 42P01 or
-// 42601 among them is still the client's own statement.
+// The class → status table, which is also docs/api-reference.md's:
 //
 //	0A  feature not supported            400
 //	22  data exception                   400  (2201x, 22003, 22012, 22P02, …)
@@ -788,6 +785,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 //	anything else                        the caller's status — 500 for XX
 //	                                     (internal), 58 (storage/system) and
 //	                                     any class this engine has not placed.
+//
+// The promotion applies to a SERVER status only: a caller that chose 5xx was
+// blaming the server for something the client's statement caused, which is
+// the whole defect. A caller that chose 404 or 409 made a considered
+// statement about the RESOURCE — `DESCRIBE nope` is 404 and a duplicate
+// CREATE TABLE is 409 — and that stands, with the class now beside it. The
+// first round-2 pass promoted those too and turned `DESCRIBE nope` from 404
+// into 400, which is a contract change no issue asked for.
 //
 // The MESSAGE for a classified error is err.Error() verbatim: the same bytes
 // the pgwire door puts in the ErrorResponse 'M' field for the same statement,
@@ -803,7 +808,7 @@ func writeSQLError(w http.ResponseWriter, status int, msg string, err error) {
 		writeError(w, status, msg)
 		return
 	}
-	if sqlStateIsClientFault(state) {
+	if status >= http.StatusInternalServerError && sqlStateIsClientFault(state) {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error(), "sqlstate": state})
