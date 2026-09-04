@@ -54,9 +54,9 @@ type Scanner struct {
 	fileIdx       int
 	stats         ScanStats
 	schema        []pqt.Column
-	useReaderAt   bool // true if store supports random access (column pruning)
+	useReaderAt   bool                      // true if store supports random access (column pruning)
 	deleteMarkers map[string]map[int64]bool // file path -> set of row indices to skip
-	scanPool      *batch.BatchPool // reuse batch allocations across files
+	scanPool      *batch.BatchPool          // reuse batch allocations across files
 
 	// Async prefetch: downloads files ahead while current is being decoded.
 	// Only used when NOT using ReaderAt path.
