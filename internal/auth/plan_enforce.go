@@ -59,14 +59,18 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(), Environment{Protocol: protocol})
 
 	policies := make(logical.TablePolicies)
-	rowFilters := make(map[string]string)
+	// A SLICE, not a map: the filters are injected below, and iterating a map
+	// would order the Filter nodes differently from run to run — which shows
+	// up in EXPLAIN output for any statement with two policed tables.
+	type tableFilter struct{ table, filter string }
+	var rowFilters []tableFilter
 	for _, tableName := range policedRelations(ctx, cat, selectInfo, plan) {
 		td := r.decide(tableName)
 		if !td.Allowed {
 			return ctx, nil, fmt.Errorf("access denied to table %q: %s", tableName, td.Reason)
 		}
 		if td.RowFilter != "" {
-			rowFilters[tableName] = td.RowFilter
+			rowFilters = append(rowFilters, tableFilter{tableName, td.RowFilter})
 		}
 		if cp := r.columnPolicies(tableName); len(cp) > 0 {
 			policies[strings.ToLower(tableName)] = cp
@@ -95,8 +99,8 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	// directly above the scan: the POLICY's predicate reads the row as
 	// stored, which is PostgreSQL's RLS ordering, while a predicate the USER
 	// writes stays above the projection and compares the mask.
-	for table, filter := range rowFilters {
-		plan = logical.InjectRowFilter(plan, table, filter)
+	for _, rf := range rowFilters {
+		plan = logical.InjectRowFilter(plan, rf.table, rf.filter)
 	}
 	return ctx, plan, nil
 }
