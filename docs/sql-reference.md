@@ -961,11 +961,15 @@ wadjet=> SELECT bytes_in FROM flow_logs UNION ALL SELECT proto_name FROM flow_lo
 ERROR:  UNION types bigint and text cannot be matched: result column "bytes_in"
 ```
 
-A few pairs PostgreSQL resolves are not yet carried by distributed execution —
-`DATE` beside `TIMESTAMP`, `PORT`/`PROTOCOL` beside an integer, `DURATION`
-beside a bigint, two members of the `IPV4`/`IPV6`/`CIDR` family. Those are
-answered in the embedded/single-process engine and refused on the stage DAG
-with a message naming the two carriers; `CAST` both arms to one type.
+"Common type" is PostgreSQL's rule, so a quoted literal or `NULL` has no type
+of its own and takes the other arm's — `SELECT addr FROM t UNION ALL SELECT
+'10.0.0.9'` is an `IPV4` union, not a type error — and `PORT`, `PROTOCOL` and
+`DURATION` are integers, which is what they declare on the wire.
+
+Two pairs PostgreSQL resolves are not yet CARRIED here: `DATE` beside
+`TIMESTAMP`, and two members of the `IPV4`/`IPV6`/`CIDR` family. Those are
+refused on every path with a message naming the two carriers — `CAST` both arms
+to one type.
 
 An arm is read through what its OWN plan publishes, so an arm's SELECT list may
 name anything a standalone `SELECT` may — a window function included, aliased

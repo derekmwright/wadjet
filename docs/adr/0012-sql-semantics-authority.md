@@ -2227,21 +2227,68 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     inside it: a set operation's arms correspond by POSITION, and the
     position is the localization PostgreSQL's own message does not carry.
 
-    **The refusal is NARROWER than "the numeric ladder declines the pair",
-    and deliberately.** Wadjet has TypeIDs PostgreSQL does not — PORT and
-    PROTOCOL declare int4 on the wire, DURATION int8, IPv4/IPv6/CIDR all
-    inet (#834) — so two of those meeting is ONE PostgreSQL type meeting
-    itself, and DATE ∪ TIMESTAMP resolves to timestamp there. Refusing them
-    would claim PostgreSQL rejects queries it answers, and would have turned
-    six shapes the single-process path ANSWERS into hard errors (measured:
-    date ∪ timestamp, port ∪ integer, protocol ∪ integer, duration ∪ bigint,
-    inet ∪ inet, inet ∪ cidr). Those keep the disposition they have — the
-    single-process path answers, the stage DAG refuses because it has no
-    common CARRIER for the two `.wshf` files, and says so in those words
-    rather than claiming PostgreSQL would refuse. The split is pinned in
-    `coordinator.TestASetOperationWithNoCommonTypeIsRefusedAtPlanTime`, whose
-    pins fail when it closes.
+    **The question asked is PostgreSQL's ALGORITHM, not a list of pairs.**
+    (Rewritten 2026-09-04, round-2 review of #648.) The first draft of this
+    refusal exempted a pair only when the numeric ladder widened it, when the
+    two mapped to the same `pgTypeName`, or when it was DATE/TIMESTAMP — and
+    that hand-written list refused pairs PostgreSQL MATCHES: thirteen ordered
+    column pairs and eight literal idioms that ANSWERED on the single-process
+    path (which is also the coordinator's local fast path, so the default for
+    a small query) became a plan-time 42804. The rule is the documented one
+    ("Type Conversion → UNION, CASE, and Related Constructs"):
 
+    1. every arm the same type → that type;
+    2. an arm whose select item is an UNKNOWN-typed literal — a quoted string
+       or `NULL` — has no type of its own and takes the others'. `SELECT
+       c_ipv4 … UNION ALL SELECT '10.0.0.9'` is inet, `c_mac ∪ 'aa:bb:…'`
+       macaddr, `c_date ∪ '2010-01-01'` date, `c_uuid ∪ '000…'` uuid,
+       `c_dec ∪ '0'` numeric, `'1.5' ∪ numeric` numeric, `c_ipv4 ∪ NULL`
+       inet, and two unknown literals resolve to text — all measured live on
+       17.11;
+    3. arms whose types are in different CATEGORIES have no common type, and
+       the statement is 42804 in either order and for the whole node;
+    4. within a category the result is the type every arm implicitly casts to.
+
+    **The category table**, wadjet's declared type to the category PostgreSQL
+    puts its WIRE type in, measured live:
+
+    | category | wadjet types | note |
+    |---|---|---|
+    | N numeric | INT32 INT64 FLOAT32 FLOAT64 DECIMAL **PORT PROTOCOL DURATION** | PORT/PROTOCOL declare int4 and DURATION int8 (#834), so `c_port ∪ c_i64` is bigint ∪ integer there and answers |
+    | S string | STRING | |
+    | B boolean | BOOL | |
+    | D datetime | DATE TIMESTAMP | `date ∪ timestamp` → timestamp, both orders |
+    | I network | IPV4 IPV6 CIDR | `inet ∪ inet` → inet, `inet ∪ cidr` → inet, both orders, values preserved |
+    | U other | BYTES UUID MAC ARRAY ROW MAP VECTOR | PostgreSQL puts bytea, uuid and macaddr in one category too, and with no implicit conversion between them its step 6 still fails — `uuid ∪ bytea` is "UNION could not convert type bytea to uuid" — so each matches only itself here |
+
+    Two members of the int4 family that are not the same TypeID (a PORT beside
+    an INT32, a PORT beside a PROTOCOL) resolve to **bigint** here where
+    PostgreSQL resolves int4. No value moves — no integer this engine stores in
+    an int4 carrier is outside int8 — and the engine has no CAST spelling that
+    produces an INT32 carrier, so declaring int4 would put the type on a box
+    that is not one. A declared-WIDTH divergence, listed here with the rest.
+
+    **A pair PostgreSQL RESOLVES that this engine cannot CARRY is refused
+    LOUDLY, and never with 42804.** DATE beside TIMESTAMP, and two members of
+    the inet family, are one category — so PostgreSQL matches them — and wadjet
+    has no carrier that holds both arms' files. The single-process path used to
+    ANSWER them, and the answer was CORRUPT: measured, `c_date ∪ c_ts` rendered
+    every timestamp as `-2207656-04-19`, and `c_ipv4 ∪ c_ipv6` and
+    `c_ipv4 ∪ c_cidr` rendered every row of the second arm as `0.0.0.0`. Both
+    paths refuse now, with a message naming the two CARRIERS and saying that
+    PostgreSQL resolves the pair and wadjet does not yet — silent wrong → loud,
+    and never PostgreSQL's SQLSTATE for a query PostgreSQL answers. Closing it
+    means a real DATE → TIMESTAMP promotion and an inet-family carrier, which
+    is a typing feature and not a repair.
+
+    **PostgreSQL's refusal wins over wadjet's, and every column is resolved
+    before either is reported.** A column with no common type is a fact about
+    the QUERY; a column whose common type this engine cannot carry is a fact
+    about this engine. Reporting whichever the walk met first made the
+    disposition depend on column ORDER — `SELECT c_date, c_dec … UNION ALL
+    SELECT c_ts, c_str …` failed mid-execution with 22P02 where PostgreSQL is
+    42804, while the same query with its two columns swapped refused at plan
+    time.
     **When the common type is DECIMAL, the (p,s) is:**
 
     - **scale = max over the arms.** The only choice that moves no value; a

@@ -127,7 +127,11 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 		plans = append(plans, plan)
 		deps = append(deps, leaves[0])
 	}
-	if err := reconcileSetOpArmTypes(plans, outNames, setOpBaseName(node)); err != nil {
+	unknownLits := make([][]bool, 0, len(node.Children))
+	for _, child := range node.Children {
+		unknownLits = append(unknownLits, setOpUnknownLiteralArms(child, len(outNames)))
+	}
+	if err := reconcileSetOpArmTypes(plans, outNames, setOpBaseName(node), unknownLits); err != nil {
 		if sqlerr.StateOf(err) != "" {
 			// A refusal that already carries PostgreSQL's SQLSTATE and wording
 			// is the client's answer as written, with no distributed-planning
@@ -303,43 +307,161 @@ func setOpTypeMismatch(op, column string, a, b parquet.TypeID) error {
 		op, pgTypeName(a), pgTypeName(b), column)
 }
 
-// setOpNoCommonType reports whether PostgreSQL has NO common type for the two,
-// which is a STRICTER question than "setOpWiden declines them".
+// setOpCategory is PostgreSQL's TYPE CATEGORY, which is what its
+// UNION/CASE type-resolution algorithm asks about ("Type Conversion → UNION,
+// CASE, and Related Constructs", step 4): arms whose types are in different
+// categories have no common type and the statement is refused; arms within one
+// category are resolved to the type they all implicitly cast to.
 //
-// setOpWiden is wadjet's ladder over the five numeric TypeIDs, and wadjet has
-// TypeIDs PostgreSQL does not: PORT and PROTOCOL declare int4 on the wire,
-// DURATION int8, and IPv4/IPv6/CIDR all inet (#834, ADR-0012). Two of those
-// meeting are ONE PostgreSQL type meeting itself, which PostgreSQL matches
-// without a thought — `SELECT c_port … UNION ALL SELECT c_i32 …` is an int4
-// union there — and DATE ∪ TIMESTAMP resolves to timestamp. Refusing those
-// with "cannot be matched" would claim PostgreSQL rejects a query it answers,
-// and would turn six shapes the single-process path ANSWERS today into hard
-// errors: measured, date ∪ timestamp, port ∪ integer, protocol ∪ integer,
-// duration ∪ bigint, inet ∪ inet and inet ∪ cidr all return their rows there.
+// The mapping is wadjet's declared type to the category PostgreSQL puts its
+// WIRE type in, and every row of it was measured live on 17.11:
 //
-// Those pairs keep exactly the disposition they have (the single-process path
-// answers, the stage DAG refuses with its own message, which is a standing
-// two-path split of its own and not this refusal's business). What this
-// predicate is for is the pairs PostgreSQL itself refuses with 42804 —
-// numeric ∪ text, bigint ∪ text, boolean ∪ bigint, uuid ∪ text, timestamp ∪
-// text, text ∪ bytea — measured live on 17.11, in either arm order and for
-// UNION, INTERSECT and EXCEPT alike.
+//	N numeric   INT32 INT64 FLOAT32 FLOAT64 DECIMAL — and PORT, PROTOCOL,
+//	            DURATION, which declare int4/int4/int8 on the wire (#834), so
+//	            `SELECT c_port … UNION ALL SELECT c_i64 …` is bigint ∪ integer
+//	            there and answers.
+//	S string    STRING (text).
+//	B boolean   BOOL.
+//	D datetime  DATE, TIMESTAMP. `date ∪ timestamp` → timestamp, both orders.
+//	I network   IPV4, IPV6, CIDR. `inet ∪ inet` → inet, `inet ∪ cidr` → inet,
+//	            both orders, values preserved.
+//	U other     BYTES, UUID, MAC, ARRAY, ROW, MAP, VECTOR. PostgreSQL puts
+//	            bytea, uuid and macaddr in one category too, and with no
+//	            implicit conversion between them its step 6 still fails —
+//	            `uuid ∪ bytea` is "UNION could not convert type bytea to uuid",
+//	            the same SQLSTATE — so each of these matches only itself here.
+type setOpCategory int
+
+const (
+	setOpCatOther setOpCategory = iota
+	setOpCatNumeric
+	setOpCatString
+	setOpCatBoolean
+	setOpCatDateTime
+	setOpCatNetwork
+)
+
+func setOpTypeCategory(t parquet.TypeID) setOpCategory {
+	switch t {
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64,
+		parquet.TypeDecimal, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
+		return setOpCatNumeric
+	case parquet.TypeString:
+		return setOpCatString
+	case parquet.TypeBool:
+		return setOpCatBoolean
+	case parquet.TypeDate, parquet.TypeTimestamp:
+		return setOpCatDateTime
+	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR:
+		return setOpCatNetwork
+	}
+	return setOpCatOther
+}
+
+// setOpNoCommonType is PostgreSQL's question, not "setOpWiden declines them".
+//
+// It used to be a hand-written exemption list — the ladder, plus "the two map
+// to the same pgTypeName", plus date/timestamp — and that list refused pairs
+// PostgreSQL MATCHES. Measured at that commit against 2d4220c9 and live
+// 17.11: thirteen ordered column pairs (`c_i64 ∪ c_port`, `c_i32 ∪ c_dur`,
+// `c_f64 ∪ c_proto` and their mirrors) and six literal idioms
+// (`c_ipv4 ∪ '10.0.0.9'`, `c_mac ∪ 'aa:bb:…'`, `c_date ∪ '2010-01-01'`,
+// `c_uuid ∪ '000…'`, `c_dec ∪ '0'`, `'1.5' ∪ numeric`) answered PostgreSQL's
+// exact rows on the single-process path and became a plan-time 42804 — a
+// right → loud move, and the single-process path is the coordinator's local
+// fast path, so it is the default for a small query.
+//
+// The rule is the documented algorithm instead: different CATEGORIES have no
+// common type; within a category, one exists. An UNKNOWN-typed literal has no
+// type of its own and takes the others' — that is the literal half, and it is
+// handled by the caller, which does not offer such an arm's type to this
+// function at all.
 func setOpNoCommonType(a, b parquet.TypeID) bool {
-	if _, ok := setOpWiden(a, b); ok {
+	if a == b {
 		return false
 	}
-	if pgTypeName(a) == pgTypeName(b) {
-		return false // one PostgreSQL type wearing two wadjet TypeIDs
+	ca, cb := setOpTypeCategory(a), setOpTypeCategory(b)
+	if ca != cb {
+		return true
 	}
-	if isDateTimePair(a, b) {
-		return false // PostgreSQL resolves date ∪ timestamp to timestamp
+	switch ca {
+	case setOpCatNumeric, setOpCatDateTime, setOpCatNetwork:
+		// The three categories with more than one member and an implicit
+		// conversion between them: the numeric ladder, date → timestamp, and
+		// the inet family.
+		return false
 	}
+	// One category, no implicit conversion — PostgreSQL's step 6 failure, and
+	// the same SQLSTATE.
 	return true
 }
 
-func isDateTimePair(a, b parquet.TypeID) bool {
-	return (a == parquet.TypeDate && b == parquet.TypeTimestamp) ||
-		(a == parquet.TypeTimestamp && b == parquet.TypeDate)
+// setOpNoCarrier reports a pair PostgreSQL RESOLVES and this engine cannot
+// carry: DATE beside TIMESTAMP, and two members of the inet family. The
+// numeric category is fully carried by the ladder, so this is exactly the
+// datetime and network cross-kind pairs.
+//
+// They are refused LOUDLY on both paths rather than answered, because the
+// single-process path's answer for all three is CORRUPT — measured at
+// febf0435: `c_date ∪ c_ts` renders the timestamps as `-2207656-04-19`, and
+// `c_ipv4 ∪ c_ipv6` and `c_ipv4 ∪ c_cidr` render every row of the second arm
+// as `0.0.0.0`. The refusal is NOT PostgreSQL's 42804, because PostgreSQL
+// matches these; it says what is true, which is that this engine has no common
+// carrier for the two arms' files. Closing it means a real DATE → TIMESTAMP
+// promotion and an inet-family carrier, which is a typing feature.
+func setOpNoCarrier(a, b parquet.TypeID) bool {
+	if a == b {
+		return false
+	}
+	if _, ok := setOpWiden(a, b); ok {
+		return false
+	}
+	return setOpTypeCategory(a) == setOpTypeCategory(b)
+}
+
+// setOpCarrierGap is the refusal for a pair PostgreSQL resolves and this
+// engine has no carrier for. It names wadjet's own CARRIERS, not PostgreSQL's
+// types: IPV4 and IPV6 are both `inet` there, and it is the carriers that
+// cannot be concatenated.
+func setOpCarrierGap(column string, a, b parquet.TypeID) error {
+	return fmt.Errorf(
+		"result column %q is %s in one arm and %s in another, and this engine has no common "+
+			"carrier for that pair — PostgreSQL resolves it, wadjet does not yet; CAST both "+
+			"arms to one type", column, a, b)
+}
+
+// setOpUnknownLiteralArms marks, per OUTPUT POSITION, the select items of one
+// arm that are UNKNOWN-typed literals — a quoted string or NULL, which
+// PostgreSQL gives no type of its own and resolves to the other arms' type
+// (algorithm steps 3 and 5).
+//
+// Without this, `SELECT c_ipv4 … UNION ALL SELECT '10.0.0.9'` read the literal
+// arm as TEXT and refused inet ∪ text, which PostgreSQL answers as inet; the
+// same for a mac, a date, a uuid and a numeric column beside a quoted literal,
+// and for a quoted literal in the FIRST arm.
+func setOpUnknownLiteralArms(arm *logical.Node, cols int) []bool {
+	proj := findOutputProjectionNode(arm)
+	if proj == nil || len(proj.Projections) != cols {
+		return nil
+	}
+	out := make([]bool, cols)
+	any := false
+	for i, pr := range proj.Projections {
+		if pr.ASTExpr == nil {
+			continue
+		}
+		lit, ok := plansql.Unparen(pr.ASTExpr).(*plansql.Lit)
+		if !ok {
+			continue
+		}
+		if lit.Kind == plansql.LitString || lit.Kind == plansql.LitNull {
+			out[i], any = true, true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
 }
 
 // setOpArmTypeConflict is the no-common-type refusal, computed WITHOUT
@@ -365,17 +487,33 @@ func setOpArmTypeConflict(node *logical.Node) error {
 		return nil
 	}
 	plans := make([]setOpArmPlan, 0, len(node.Children))
+	unknown := make([][]bool, 0, len(node.Children))
 	for _, child := range node.Children {
 		plan, err := setOpArmProjection(child, outNames)
 		if err != nil {
 			return nil // a shape this walk cannot read is not a conflict
 		}
 		plans = append(plans, plan)
+		unknown = append(unknown, setOpUnknownLiteralArms(child, len(outNames)))
 	}
 	op := setOpBaseName(node)
+	// PostgreSQL's refusal wins over wadjet's. A column with NO COMMON TYPE is
+	// a fact about the QUERY and is 42804 wherever it sits; a column whose
+	// common type this engine cannot carry is a fact about this engine. So
+	// every column is resolved first and the carrier gap is reported only when
+	// no column has a real type conflict — otherwise `SELECT c_date, c_dec …
+	// UNION ALL SELECT c_ts, c_str …` answered wadjet's carrier message where
+	// PostgreSQL says "UNION types numeric and text cannot be matched", and
+	// the same query with its columns swapped said something else again.
+	var carrierGap error
 	for col := range outNames {
 		var want setOpColType
-		for _, plan := range plans {
+		for i, plan := range plans {
+			if unknown[i] != nil && unknown[i][col] {
+				// An UNKNOWN-typed literal has no type of its own and takes
+				// the other arms' (PostgreSQL's algorithm, steps 3 and 5).
+				continue
+			}
 			ct := plan.types[col]
 			if !ct.known {
 				continue
@@ -389,7 +527,18 @@ func setOpArmTypeConflict(node *logical.Node) error {
 				if setOpNoCommonType(want.typ, ct.typ) {
 					return setOpTypeMismatch(op, outNames[col], want.typ, ct.typ)
 				}
-				// A pair PostgreSQL matches and this engine's ladder does not.
+				if setOpNoCarrier(want.typ, ct.typ) {
+					// PostgreSQL resolves this pair and wadjet has no carrier
+					// for it. Loud on both paths rather than the corrupt values
+					// the single-process path used to answer — a timestamp
+					// rendered `-2207656-04-19`, an IPv6 or CIDR row rendered
+					// `0.0.0.0` — but only once no column has a real type
+					// conflict to report first.
+					if carrierGap == nil {
+						carrierGap = setOpCarrierGap(outNames[col], want.typ, ct.typ)
+					}
+					break
+				}
 				// Not this refusal's business FOR THIS COLUMN — and it says
 				// nothing at all about the columns beside it. Abandoning the
 				// whole walk here (which is what this used to do) left #648's
@@ -407,7 +556,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 			want = setOpColType{typ: widened, known: true}
 		}
 	}
-	return nil
+	return carrierGap
 }
 
 func isSetOpNode(n *logical.Node) bool {
@@ -820,12 +969,17 @@ func setOpRefDecl(decls colDecls, resolved string, pr logical.Projection) (setOp
 // nothing was rewritten, each arm's file kept its own scale in its WSHF
 // header, and the reader of both files took the first one's. The unscaled
 // integer 127501 then rendered as 1275.01 instead of 12.7501.
-func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string) error {
+// unknown, when non-nil, marks per arm and per column the select items that
+// are UNKNOWN-typed literals. PostgreSQL gives those no type of their own: they
+// take the other arms' and are read AS that type, which is what leaving them
+// uncast does here — SetValueChecked parses the literal's text into whatever
+// vector the reconciled column builds (#648 round 2).
+func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string, unknown [][]bool) error {
 	if len(plans) < 2 {
 		return nil
 	}
 	for col := range outNames {
-		want, allKnown, err := setOpTargetType(plans, col, outNames[col], op)
+		want, allKnown, err := setOpTargetType(plans, col, outNames[col], op, unknown)
 		if err != nil {
 			return err
 		}
@@ -876,6 +1030,9 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string) 
 					outNames[col], setOpUnresolvedArmsDesc(plans, col))
 			}
 			for i := range plans {
+				if setOpArmIsUnknownLit(unknown, i, col) {
+					continue
+				}
 				ct := plans[i].types[col]
 				// The arm's DECLARED spec is the arm's OWN type, not the
 				// reconciled one, because it is what the worker builds this
@@ -918,6 +1075,9 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string) 
 			continue
 		}
 		for i := range plans {
+			if setOpArmIsUnknownLit(unknown, i, col) {
+				continue
+			}
 			if plans[i].types[col].typ == want.typ {
 				continue
 			}
@@ -940,6 +1100,13 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string, op string) 
 // shrug: two arms nothing typed are the pre-existing "leave it alone" case and
 // carry no scale to disagree about, while a typed DECIMAL beside an untyped
 // arm is the reinterpretation #551 is about.
+// setOpArmIsUnknownLit reports whether arm i's select item at this column is an
+// UNKNOWN-typed literal.
+func setOpArmIsUnknownLit(unknown [][]bool, i, col int) bool {
+	return unknown != nil && i < len(unknown) && unknown[i] != nil &&
+		col < len(unknown[i]) && unknown[i][col]
+}
+
 func setOpAnyDecimalArm(plans []setOpArmPlan, col int) bool {
 	for i := range plans {
 		if ct := plans[i].types[col]; ct.known && ct.typ == parquet.TypeDecimal {
@@ -985,10 +1152,13 @@ func setOpUnresolvedArmsDesc(plans []setOpArmPlan, col int) string {
 // setOpTargetType folds one result column's arms into the type they must all
 // emit. allKnown is false when some arm carries no type at all, which is the
 // caller's signal to leave the column alone.
-func setOpTargetType(plans []setOpArmPlan, col int, name, op string) (setOpColType, bool, error) {
+func setOpTargetType(plans []setOpArmPlan, col int, name, op string, unknown [][]bool) (setOpColType, bool, error) {
 	var want setOpColType
 	allKnown := true
-	for _, plan := range plans {
+	for i, plan := range plans {
+		if setOpArmIsUnknownLit(unknown, i, col) {
+			continue // an unknown literal takes the other arms' type
+		}
 		ct := plan.types[col]
 		if !ct.known {
 			allKnown = false
@@ -1012,20 +1182,22 @@ func setOpTargetType(plans []setOpArmPlan, col int, name, op string) (setOpColTy
 			// members of the inet family, DATE beside a TIMESTAMP. This engine
 			// cannot concatenate the two .wshf files, so the DAG still refuses;
 			// the message says so rather than claiming PostgreSQL would.
-			// Named by wadjet's own CARRIER, not by PostgreSQL's type: the two
-			// share the PostgreSQL name (IPV4 and IPV6 are both `inet`) and it
-			// is the carriers that cannot be concatenated.
-			return setOpColType{}, false, fmt.Errorf(
-				"result column %q is %s in one arm and %s in another, and distributed (stage-DAG) "+
-					"execution has no common carrier for that pair — PostgreSQL resolves it, this "+
-					"engine does not yet; CAST both arms to one type",
-				name, want.typ, ct.typ)
+			// The same carrier refusal setOpArmTypeConflict raises, which runs
+			// ahead of this walk on both paths; this is the backstop for a
+			// shape that reaches here without it.
+			return setOpColType{}, false, setOpCarrierGap(name, want.typ, ct.typ)
 		}
 		want = setOpColType{typ: widened, known: true}
 	}
 	if want.known && want.typ == parquet.TypeDecimal && allKnown {
 		arms := make([]setOpColType, 0, len(plans))
-		for _, plan := range plans {
+		for i, plan := range plans {
+			if setOpArmIsUnknownLit(unknown, i, col) {
+				// It contributes no type, so it contributes no (p,s) either;
+				// counting its STRING here made the target unresolvable and
+				// refused a union PostgreSQL answers as numeric.
+				continue
+			}
 			arms = append(arms, plan.types[col])
 		}
 		want.dec, want.decKnown = setOpDecimalTarget(arms)
@@ -1052,7 +1224,7 @@ func setOpNodeResultTypes(n *logical.Node) []setOpColType {
 	}
 	out := make([]setOpColType, len(names))
 	for col := range names {
-		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n))
+		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n), nil)
 		if err != nil || !allKnown {
 			continue
 		}
@@ -1089,9 +1261,13 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	}
 	rank := func(t parquet.TypeID) int {
 		switch t {
-		case parquet.TypeInt32:
+		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
+			// PORT and PROTOCOL declare int4 on the wire (#834), so
+			// PostgreSQL sees `c_port ∪ c_i32` as an int4 union and
+			// `c_port ∪ c_i64` as bigint. Measured live on 17.11.
 			return 1
-		case parquet.TypeInt64:
+		case parquet.TypeInt64, parquet.TypeDuration:
+			// DURATION declares int8.
 			return 2
 		case parquet.TypeDecimal:
 			return 3
@@ -1114,6 +1290,13 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	case ra == 3 || rb == 3:
 		return parquet.TypeDecimal, true
 	}
+	// Two members of the int4 family that are not the same type — a PORT
+	// beside an INT32, a PORT beside a PROTOCOL — resolve to INT64 here where
+	// PostgreSQL resolves int4. The VALUE is the same in either (no integer
+	// this engine stores in an int4 carrier is outside int8); what differs is
+	// the declared width, and this engine has no CAST spelling that produces
+	// an INT32 carrier, so declaring int4 would put the type on a box that is
+	// not one. Recorded in ADR-0012 item 12 as a width divergence.
 	return parquet.TypeInt64, true
 }
 

@@ -121,24 +121,91 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 			sql:      `SELECT r AS v FROM decpair UNION ALL SELECT a FROM decpair`,
 			wantRows: 18},
 
-		// --- PINNED: PostgreSQL matches the pair, this engine has no
-		// common CARRIER for it. The single-process path answers, the stage
-		// DAG refuses. Nothing here MOVED — the refusal above deliberately
-		// declines to fire on them, because doing so would have made six
-		// answered shapes hard errors — and each cell fails when the split
-		// closes, which is how these pins get deleted.
-		{issue: "#648", name: "pin_date_union_timestamp",
-			sql:        `SELECT c_date AS v FROM typemx UNION ALL SELECT c_ts FROM typemx`,
-			singleRows: 10000, dagErr: `is DATE in one arm and TIMESTAMP in another`},
-		{issue: "#648", name: "pin_port_union_integer",
-			sql:        `SELECT c_port AS v FROM typemx UNION ALL SELECT c_i32 FROM typemx`,
-			singleRows: 10000, dagErr: `is PORT in one arm and INT32 in another`},
-		{issue: "#648", name: "pin_duration_union_bigint",
-			sql:        `SELECT c_dur AS v FROM typemx UNION ALL SELECT c_i64 FROM typemx`,
-			singleRows: 10000, dagErr: `is DURATION in one arm and INT64 in another`},
-		{issue: "#648", name: "pin_ipv4_union_ipv6",
-			sql:        `SELECT c_ipv4 AS v FROM typemx UNION ALL SELECT c_ipv6 FROM typemx`,
-			singleRows: 10000, dagErr: `is IPV4 in one arm and IPV6 in another`},
+		// --- the numeric CATEGORY, which PostgreSQL resolves and so do we --
+		//
+		// PORT and PROTOCOL declare int4 on the wire and DURATION int8 (#834),
+		// so PostgreSQL sees these as ordinary integer unions and answers
+		// them. The first version of this refusal EXEMPTED them from the
+		// 42804 and left the stage DAG refusing; they are on the numeric
+		// ladder now and every arm answers.
+		{issue: "#648", name: "port_union_integer",
+			sql: `SELECT c_port AS v FROM typemx UNION ALL SELECT c_i32 FROM typemx`, wantRows: 10000},
+		{issue: "#648", name: "integer_union_port",
+			sql: `SELECT c_i32 AS v FROM typemx UNION ALL SELECT c_port FROM typemx`, wantRows: 10000},
+		{issue: "#648", name: "port_union_bigint",
+			sql: `SELECT c_port AS v FROM typemx UNION ALL SELECT c_i64 FROM typemx`, wantRows: 10000},
+		{issue: "#648", name: "protocol_union_integer",
+			sql: `SELECT c_proto AS v FROM typemx UNION ALL SELECT c_i32 FROM typemx`, wantRows: 10000},
+		{issue: "#648", name: "duration_union_bigint",
+			sql: `SELECT c_dur AS v FROM typemx UNION ALL SELECT c_i64 FROM typemx`, wantRows: 10000},
+		{issue: "#648", name: "duration_union_double_precision",
+			sql: `SELECT c_dur AS v FROM typemx UNION ALL SELECT c_f64 FROM typemx`, wantRows: 10000},
+
+		// --- an UNKNOWN literal takes the other arm's type -----------------
+		//
+		// PostgreSQL gives a quoted literal and NULL no type of their own
+		// (its algorithm's steps 3 and 5), so each of these resolves to the
+		// COLUMN's type and answers. Reading the literal as TEXT made all of
+		// them 42804 — a right → loud move on eight idioms, measured against
+		// 2d4220c9 and live 17.11.
+		{issue: "#648", name: "inet_and_an_unknown_literal",
+			sql:      `SELECT c_ipv4 AS v FROM typemx WHERE id < 3 UNION ALL SELECT '10.0.0.9'`,
+			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+		{issue: "#648", name: "macaddr_and_an_unknown_literal",
+			sql:      `SELECT c_mac AS v FROM typemx WHERE id < 3 UNION ALL SELECT 'aa:bb:cc:00:00:01'`,
+			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+		{issue: "#648", name: "date_and_an_unknown_literal",
+			sql:      `SELECT c_date AS v FROM typemx WHERE id < 3 UNION ALL SELECT '2010-01-01'`,
+			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+		{issue: "#648", name: "uuid_and_an_unknown_literal",
+			sql: `SELECT c_uuid AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '00000000-0000-0000-0000-000000000000'`,
+			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+		{issue: "#648", name: "numeric_and_an_unknown_literal",
+			sql:      `SELECT c_dec AS v FROM typemx WHERE id < 3 UNION ALL SELECT '0'`,
+			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+		{issue: "#648", name: "inet_and_a_null_literal",
+			sql:      `SELECT c_ipv4 AS v FROM typemx WHERE id < 3 UNION ALL SELECT NULL`,
+			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+		{issue: "#648", name: "port_and_an_integer_literal",
+			sql:      `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL SELECT 443`,
+			wantRows: 4, wantRoutes: a2Routes{TableLess: 1}},
+		// The literal in the FIRST arm, with a FROM so the DAG plans it.
+		{issue: "#648", name: "an_unknown_literal_arm_first",
+			sql: `SELECT '1.5' AS v FROM decpair WHERE id = 1 UNION ALL SELECT a FROM decpair`,
+			// The DAG routes this to the coordinator-local pipeline on the
+			// unreachable-output refusal, which is a standing disposition for
+			// a literal-only arm and not this rule's business; the counter
+			// says so rather than the rows implying a second engine.
+			wantRows: 10, wantRoutes: a2Routes{UnreachableOutput: 1}},
+		{issue: "#648", name: "two_unknown_literal_arms_are_text",
+			sql: `SELECT 'a' AS v FROM decpair WHERE id = 1 UNION ALL ` +
+				`SELECT 'b' FROM decpair WHERE id = 1`,
+			wantRows: 2},
+
+		// --- PostgreSQL matches the pair and this engine has NO CARRIER ----
+		//
+		// DATE beside TIMESTAMP and two members of the inet family are one
+		// PostgreSQL category, so they are NOT 42804 — and wadjet cannot
+		// concatenate the two arms' carriers. They were ANSWERED on the
+		// single-process path and the answer was CORRUPT: measured at
+		// febf0435, `c_date ∪ c_ts` rendered every timestamp as
+		// `-2207656-04-19` and `c_ipv4 ∪ c_ipv6` / `c_ipv4 ∪ c_cidr` rendered
+		// every row of the second arm as `0.0.0.0`. Silent wrong → loud, on
+		// every arm, with a message that says what is true rather than
+		// claiming PostgreSQL would refuse.
+		{issue: "#648", name: "date_union_timestamp_has_no_carrier",
+			sql:     `SELECT c_date AS v FROM typemx UNION ALL SELECT c_ts FROM typemx`,
+			wantErr: `is DATE in one arm and TIMESTAMP in another`},
+		{issue: "#648", name: "timestamp_union_date_has_no_carrier",
+			sql:     `SELECT c_ts AS v FROM typemx UNION ALL SELECT c_date FROM typemx`,
+			wantErr: `is TIMESTAMP in one arm and DATE in another`},
+		{issue: "#648", name: "ipv4_union_ipv6_has_no_carrier",
+			sql:     `SELECT c_ipv4 AS v FROM typemx UNION ALL SELECT c_ipv6 FROM typemx`,
+			wantErr: `is IPV4 in one arm and IPV6 in another`},
+		{issue: "#648", name: "ipv4_union_cidr_has_no_carrier",
+			sql:     `SELECT c_ipv4 AS v FROM typemx UNION ALL SELECT c_cidr FROM typemx`,
+			wantErr: `is IPV4 in one arm and CIDR in another`},
 	}
 }
 
@@ -199,8 +266,11 @@ func TestASetOperationWithNoCommonTypeIsRefusedAtPlanTime(t *testing.T) {
 					}
 					// The SQLSTATE travels on the single-process path, which is
 					// the door the wire oracle drives; the DAG's coordinator
-					// result carries the message as text.
-					if !isDAG {
+					// result carries the message as text. Only PostgreSQL's own
+					// refusals carry 42804 — a CARRIER gap is wadjet's, and
+					// saying 42804 there would claim PostgreSQL refuses a query
+					// it answers.
+					if !isDAG && strings.Contains(tc.wantErr, "cannot be matched") {
 						if got := sqlerr.StateOf(err); got != "42804" {
 							t.Errorf("the refusal carries SQLSTATE %q, want 42804 "+
 								"(PostgreSQL's datatype_mismatch)\n  SQL: %s", got, tc.sql)
