@@ -160,17 +160,27 @@ effect.
 | `--access-key` | S3 access key | required |
 | `--secret-key` | S3 secret key | required |
 | `--bucket` | S3 bucket name | `wadjet` |
+| `--storage-type` | `s3` or `file` | `s3` |
+| `--data-dir` | Local data directory (with `--storage-type=file`) | — |
+| `--nats-url` / `--nats-port` | Where to find the catalog, if a server is running | `nats://127.0.0.1:4222` |
+| `--nats-store-dir` | Catalog store directory when no server is running | `~/.wadjet/nats` |
 | `--format` | Output format: `json`, `table`, `csv` | `json` |
 
 Usage: `wadjet query [flags] "SQL STATEMENT"`
 
+`query`, `create-table`, `drop-table`, `shell` and `tables` share ONE
+persisted catalog with `serve`: they connect to a reachable server when there
+is one, and otherwise open `--nats-store-dir` themselves for the length of the
+command. One process holds that directory at a time; a second is refused with
+a message naming `--nats-url`. See [Getting Started](getting-started.md#start-the-server).
+
 ### `tables` Command
 
-Same S3 flags as `query`. Lists all tables in the catalog.
+Same flags as `query` (no `--format`). Lists all tables in the catalog.
 
 ### `shell` Command
 
-Same S3 flags as `query`. Opens an interactive SQL REPL.
+Same flags as `query`. Opens an interactive SQL REPL.
 
 | Flag | Description | Default |
 |------|-------------|---------|

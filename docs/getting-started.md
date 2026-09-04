@@ -215,16 +215,32 @@ mc mb local/wadjet
 
 ## Start the Server
 
-> **`query`, `create-table`, `shell`, and `tables` are standalone commands,
-> not clients of a running `serve` process.** Each opens the object store
-> and a catalog directly, the same way the embedded example above does —
-> none of them connect over the network to `serve` (the HTTP and gRPC
-> sections below are how a remote client reaches a running server). Each
-> `query` / `create-table` / `shell` invocation also starts from a fresh,
-> empty, in-memory catalog, so a table one invocation creates is not visible
-> to another; `tables` additionally fails outright today
-> (`Error: reading catalog meta: key not found`) regardless of what has been
-> created. Within a single `shell` session, statements do share one catalog.
+> **`query`, `create-table`, `drop-table`, `shell` and `tables` share one
+> persisted catalog with `serve`.** Each opens the object store the storage
+> flags name, and reaches the catalog the same way `compact` and `clusters`
+> always have:
+>
+> - if a wadjet server is reachable — a running `serve`, or a cluster named
+>   by `--nats-url` / `--nats-port` — the command talks to it, and sees
+>   exactly what that server sees, live;
+> - if none is, the command runs an embedded catalog server over
+>   `--nats-store-dir` (default `~/.wadjet/nats`) for its own lifetime, so
+>   what it writes is there for the next command and for a `serve` started
+>   afterwards.
+>
+> So `create-table` then `query` in two shells is one table, and `tables`
+> lists it. They are still not network clients of `serve` for the *data*
+> path — they read the object store directly; the HTTP and gRPC sections
+> below are how a remote client reaches a running server.
+>
+> One process at a time holds the catalog store directory. A second command
+> that finds it locked says so and names `--nats-url`, rather than opening
+> it a second time — `nats-server` does not lock its own store, and two
+> writers there would overwrite each other's metadata. Point the second one
+> at the server that holds it, or give it its own `--nats-store-dir`.
+>
+> A query whose every source is a table function (`read_parquet`,
+> `read_csv`, `read_json`) needs no catalog and opens none.
 
 ### Standalone Mode (Single Process)
 
@@ -274,6 +290,23 @@ Supports `--format` flag: `table` (default), `json`, or `csv`.
   --secret-key minioadmin \
   --bucket wadjet
 ```
+
+### The Same Flow With No S3 At All
+
+Local files for the data, the default `~/.wadjet/nats` for the catalog, no
+server running — each command is its own process, and they share one catalog:
+
+```bash
+./wadjet-bin --storage-type=file --data-dir=./wadjet-data create-table \
+  "CREATE TABLE flow_logs (ts TIMESTAMP, src_ip VARCHAR, bytes_in BIGINT)"
+./wadjet-bin --storage-type=file --data-dir=./wadjet-data tables
+# flow_logs
+./wadjet-bin --storage-type=file --data-dir=./wadjet-data query --format=table \
+  "SELECT * FROM flow_logs LIMIT 10"
+```
+
+Start `serve --storage-type=file --data-dir=./wadjet-data` afterwards and it
+opens the same catalog and the same files.
 
 ## Your First Query (HTTP API)
 

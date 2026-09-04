@@ -112,12 +112,20 @@ Managed tables live in an S3-compatible store (MinIO, AWS S3, R2). That is the d
 # Start standalone (embedded NATS + worker + coordinator)
 ./wadjet-bin serve --mode=standalone --endpoint=localhost:9000
 
-# Run a query against a managed table
+# Run a query against a managed table — the CLI shares the running server's catalog
 ./wadjet-bin query --endpoint=localhost:9000 "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
 
 # Interactive shell
 ./wadjet-bin shell --endpoint=localhost:9000
+
+# List the tables
+./wadjet-bin tables --endpoint=localhost:9000
 ```
+
+`query`, `create-table`, `drop-table`, `shell` and `tables` share one
+persisted catalog with `serve` — with a server running they read its catalog
+live, and without one they open the local catalog store themselves, so a table
+one command creates is there for the next.
 
 ## Native Functions
 

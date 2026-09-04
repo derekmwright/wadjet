@@ -88,9 +88,11 @@ wadjet serve --mode=coordinator \
    ```bash
    wadjet catalog snapshot --coord-addr=<coord-host>:5433
    ```
-4. Verify tables are accessible:
+4. Verify tables are accessible. `tables` reads the catalog of the running
+   coordinator, so point it at that coordinator's NATS:
    ```bash
-   wadjet tables --bucket wadjet --endpoint s3.us-east-2.amazonaws.com --ssl --region us-east-2
+   wadjet tables --bucket wadjet --endpoint s3.us-east-2.amazonaws.com --ssl --region us-east-2 \
+     --nats-url nats://<coord-host>:4222
    ```
 5. Start workers and verify query execution
 

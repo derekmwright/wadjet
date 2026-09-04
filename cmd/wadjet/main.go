@@ -612,27 +612,32 @@ func queryCmd() *cobra.Command {
 
 			// A statement whose every source is a catalog-free table
 			// function (read_json / read_csv / read_parquet over a local
-			// path or URL) needs no object store at all. Building one
-			// against the default endpoint is what made the first command
-			// a new user runs fail inside catalog init, before the SQL was
-			// ever parsed (#303). Anything else keeps the existing path.
-			var store objstore.Store
+			// path or URL) needs no object store at all — and no catalog
+			// either. Building one against the default endpoint is what
+			// made the first command a new user runs fail inside catalog
+			// init, before the SQL was ever parsed (#303). Anything else
+			// opens the SHARED catalog (#842), so a table `create-table`
+			// or `serve` wrote is a table this query can read.
 			if isCatalogFreeQuery(args[0]) {
-				store = objstore.NewMemStore()
-			} else {
-				store, err = newStore()
+				db, err := wadjet.Open(ctx, wadjet.Config{
+					Store: objstore.NewMemStore(), Bucket: bucket,
+				})
 				if err != nil {
-					store = objstore.NewMemStore()
+					return err
 				}
+				defer db.Close()
+				result, err := db.Query(ctx, args[0])
+				if err != nil {
+					return err
+				}
+				return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), result.Rows)
 			}
 
-			db, err := wadjet.Open(ctx, wadjet.Config{
-				Store:  store,
-				Bucket: bucket,
-			})
+			db, release, err := openSharedDB(ctx, logger)
 			if err != nil {
 				return err
 			}
+			defer release()
 
 			result, err := db.Query(ctx, args[0])
 			if err != nil {
@@ -653,13 +658,24 @@ func tablesCmd() *cobra.Command {
 		Short: "List all tables",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 			store, err := newStore()
 			if err != nil {
 				return err
 			}
 
-			cat := catalog.NewWithStore(store, bucket)
+			// The SHARED catalog, Init'd. Both halves are #842: this built a
+			// catalog.NewWithStore — an in-memory KV despite the name — and
+			// never called Init, so `wadjet tables` answered "reading catalog
+			// meta: key not found" on every invocation, including as the
+			// verification step of the disaster-recovery runbook.
+			cat, release, err := sharedCatalog(ctx, store, logger)
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			tables, err := cat.ListTables(ctx)
 			if err != nil {
 				return err
@@ -680,19 +696,14 @@ func createTableCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-			store, err := newStore()
-			if err != nil {
-				store = objstore.NewMemStore()
-			}
-
-			db, err := wadjet.Open(ctx, wadjet.Config{
-				Store:  store,
-				Bucket: bucket,
-			})
+			// The SHARED catalog, so the table survives this process (#842).
+			db, release, err := openSharedDB(ctx, logger)
 			if err != nil {
 				return err
 			}
+			defer release()
 
 			result, err := db.Query(ctx, args[0])
 			if err != nil {
@@ -716,19 +727,15 @@ func dropTableCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-			store, err := newStore()
-			if err != nil {
-				store = objstore.NewMemStore()
-			}
-
-			db, err := wadjet.Open(ctx, wadjet.Config{
-				Store:  store,
-				Bucket: bucket,
-			})
+			// The SHARED catalog: dropping a table out of a private in-memory
+			// one dropped nothing anybody else could see (#842).
+			db, release, err := openSharedDB(ctx, logger)
 			if err != nil {
 				return err
 			}
+			defer release()
 
 			if err := db.DropTable(ctx, args[0]); err != nil {
 				return err
@@ -930,18 +937,13 @@ func shellCmd() *cobra.Command {
 			}
 			defer geoip.Close()
 
-			store, err := newStore()
-			if err != nil {
-				store = objstore.NewMemStore()
-			}
-
-			db, err := wadjet.Open(ctx, wadjet.Config{
-				Store:  store,
-				Bucket: bucket,
-			})
+			// The SHARED catalog: a session's CREATE TABLE used to live only
+			// as long as the session did (#842).
+			db, release, err := openSharedDB(ctx, logger)
 			if err != nil {
 				return err
 			}
+			defer release()
 
 			return runShell(ctx, db, f)
 		},
@@ -1133,6 +1135,18 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := natsServerConfig()
+	// The same advisory lock the CLI's embedded fallback takes (#842).
+	// nats-server does not lock its own store directory, so without this a
+	// second process opening the same JetStream file store writes over this
+	// one's catalog metadata — and since `tables`, `query`, `create-table`,
+	// `drop-table` and `shell` can now run an embedded server of their own,
+	// a lock only one side took would be no lock at all.
+	unlockStore, err := lockCatalogStoreDir(natsCfg.StoreDir)
+	if err != nil {
+		return fmt.Errorf("the catalog store directory %s is held by another wadjet process "+
+			"(%w); stop it, or give this one its own --nats-store-dir", natsCfg.StoreDir, err)
+	}
+	defer unlockStore()
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
