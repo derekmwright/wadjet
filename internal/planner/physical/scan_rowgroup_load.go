@@ -385,12 +385,16 @@ func PoisonReusedSlabs(on bool) (prev bool) { return poisonReusedSlabs.Swap(on) 
 //
 // THE INVARIANT: a row group is CHARGED its own byte range, and HELD in a
 // buffer of at most twice that. The class is derived from the row group, so
-// there is no floor and no chosen number; rounding to a power of two is what
-// lets files of similar shape — which is what a table's files are — share a
-// bucket, so the buffers are reused instead of allocated. The slack between
-// the charge and the buffer is pool capacity, bounded by the row group itself
-// and reused across the scan; ADR-0006's producer row 2 records that the
-// row-group path does not reconcile the charge up to it, and why.
+// there is no floor and no chosen number, and it decides only WHICH BUCKET a
+// buffer is reused from — a buffer is always allocated at exactly the row
+// group's size. Both halves are load-bearing: without the bucket, another
+// file's shape serves this row group (319x); allocating AT the class instead
+// of at the row group rounds every fresh buffer up to a power of two, which
+// measured +10.9% suite heap. Two row groups in one class differ by less than
+// 2x, which is where the bound comes from. The slack between the charge and
+// the buffer is pool capacity, bounded by the row group itself and reused
+// across the scan; ADR-0006's producer row 2 records that the row-group path
+// does not reconcile the charge up to it, and why.
 //
 // Gated by TestARowGroupIsHeldInABufferAtMostTwiceItsSize (the invariant, over
 // sizes from one byte to a megabyte) and
@@ -427,12 +431,16 @@ func (inner *scanSourceInner) getSlab(n int) []byte {
 		}
 		p.Put(buf) // a bucket's buffers are one size; this one is not ours
 	}
-	return make([]byte, n, class)
+	// Exactly the row group's bytes: the CLASS decides which bucket the
+	// buffer is reused from, not how big it is. Allocating at the class would
+	// round every fresh buffer up to the next power of two, which measured
+	// +10.9% suite heap over TPC-H SF1 — the rounding, not the bucketing.
+	return make([]byte, n)
 }
 
 func (inner *scanSourceInner) putSlab(buf []byte) {
 	if cap(buf) > 0 {
-		inner.slabBucket(cap(buf)).Put(buf[:cap(buf)])
+		inner.slabBucket(slabClass(cap(buf))).Put(buf[:cap(buf)])
 	}
 }
 

@@ -403,15 +403,25 @@ func TestARowGroupIsHeldInABufferAtMostTwiceItsSize(t *testing.T) {
 // percent — which is what compression does to one table's files — must share a
 // bucket, or every row group allocates. Keying the bucket on the file's EXACT
 // largest row group did exactly that and cost +29.2% heap over TPC-H SF1.
+//
+// The property is "a row group no larger than one this scan has already read,
+// in its own size class, is served from the pool". A LARGER one allocates once
+// and then serves the rest, which is the pool converging on the biggest row
+// group the scan sees; one in a SMALLER class allocates rather than being held
+// in a buffer more than twice its size, which is the bound above. Buffers are
+// allocated at the row group's own size, not the class's, because rounding
+// every fresh allocation up to a power of two measured +10.9% suite heap.
 func TestSlabsAreReusedAcrossFilesOfSimilarShape(t *testing.T) {
 	inner := &scanSourceInner{}
+	// One file's row group, then another file's, a few percent smaller: same
+	// class, so the second is served from the first's buffer.
+	inner.putSlab(inner.getSlab(100_000))
 	before := RowGroupSlabReuses()
-	// One file's row groups, then another's, a few percent apart.
-	for _, n := range []int{100_000, 97_400, 103_100, 99_800} {
+	for _, n := range []int{97_400, 99_800, 70_000, 66_000} {
 		inner.putSlab(inner.getSlab(n))
 	}
-	if got := RowGroupSlabReuses() - before; got < 3 {
-		t.Fatalf("%d of 3 possible reuses across row groups within a few percent of each other — "+
+	if got := RowGroupSlabReuses() - before; got != 4 {
+		t.Fatalf("%d of 4 row groups no bigger than one already read were served from the pool — "+
 			"the bucket key is discriminating shapes that should share a buffer", got)
 	}
 }
