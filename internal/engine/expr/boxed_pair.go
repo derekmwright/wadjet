@@ -446,6 +446,13 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 			return boxQuoted, true
 		case int64, int32, int, float64, float32:
 			return boxNumber, true
+		case bool:
+			// TRUE and FALSE are boolean operands like any other. Left
+			// unclassified, they poisoned the join a boolean fold makes:
+			// `COALESCE(c_bool, false) = 'f'` answered 0 rows where
+			// PostgreSQL counts the false ones, because one boxUnknown arm
+			// takes the whole composite out of the boolean grammar (#628).
+			return boxBool, true
 		}
 		return boxUnknown, true
 	case *FuncCall:
@@ -471,6 +478,12 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 			if len(v.Args) > 0 {
 				return joinOperandKinds(v.Args[:1], b)
 			}
+		}
+		// A function DECLARED boolean is a boolean operand, and PostgreSQL's
+		// boolean input grammar applies to whatever it is compared against
+		// (#628) — the same rule a BOOL column gets from declaredBoxKind.
+		if DefaultRegistry.ReturnType(v.Name).Boolean() {
+			return boxBool, true
 		}
 		return boxUnknown, true
 	case *elementAtExpr:
@@ -574,7 +587,26 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		if k := castNumericKind(v); k != boxUnknown {
 			return k, true
 		}
+		if t, ok := castDestType(v.DestType); ok && t == batch.TypeBool {
+			return boxBool, true
+		}
 		return boxUnknown, true
+	}
+	// A COMPUTED boolean is a boolean operand. EvalBoolNull is the engine's
+	// three-valued boolean protocol (#370), so a node implementing it answers
+	// with a boolean by construction: NOT/AND/OR, every comparison node, IS
+	// NULL, IS TRUE, LIKE, IN, BETWEEN, IS DISTINCT FROM, the quantified and
+	// row comparisons, and the subquery predicates.
+	//
+	// Without this, only a bare BOOL *column* was classified (#574), so
+	// `WHERE (NOT c_bool) = 'yes'` fell to compare()'s toString rendering and
+	// matched the two spellings "true"/"false" alone — 0 rows where
+	// PostgreSQL answers the FALSE-row count, and a silent `false` where the
+	// server raises 22P02 for a string that is not a boolean at all. The
+	// grammar belongs to the OPERAND'S TYPE, not to how the operand was
+	// produced (#628).
+	if _, ok := e.(BoolNullExpr); ok {
+		return boxBool, true
 	}
 	return boxUnknown, true
 }

@@ -990,6 +990,15 @@ func (r Ret) Integer() bool {
 	return r.kind == retFixed && (r.typ == batch.TypeInt32 || r.typ == batch.TypeInt64)
 }
 
+// Boolean reports whether a function always returns a BOOLEAN. Only a FIXED
+// declaration answers, for Integer's reason: the operand-classification layer
+// reads it to apply PostgreSQL's boolean input grammar to whatever the result
+// is compared against (#628), and a wrong claim would apply that grammar to a
+// value that is not a boolean.
+func (r Ret) Boolean() bool {
+	return r.kind == retFixed && r.typ == batch.TypeBool
+}
+
 // FuncReturnsInteger reports whether a registered function always returns an
 // integer, for the planner's declared-type layer. It is the AST-side twin of
 // isIntNative's registry lookup, so the DECLARED type of `length(s) / 2` is
