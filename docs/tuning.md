@@ -308,15 +308,27 @@ and a budget below their sum makes queries refuse rather than run slowly:
 |---|---|---|
 | a scan's file load | one ROW GROUP's bytes at a time, or the whole file when the file's footer has not been decoded in this process yet (see below) | that row group has been decoded — the whole file's, when it is the whole file |
 | decoded read-ahead | **not bounded by the budget** — one decoded row group per scan worker, plus whatever is queued for the consumer | the consumer takes the batch |
-| a hash join's index | ~40 bytes per build row | the join closes — grace eviction frees the build's COLUMNS, not its index entries |
+| a hash join's index | ~40 bytes per build row while the rows are RESIDENT | the partition those rows belong to is evicted, or the join closes — the index is per grace partition, so an eviction frees its table, arena and chain with its columns |
+| a hash join's bloom filter | ~1.25 bytes per DISTINCT build key | the join closes — it covers spilled keys on purpose, so an eviction does not free it |
 | a CROSS join's whole build side | every build row's columns | the join closes — a cross join's probe reads every build row, so its build cannot be partitioned and evicted and does not spill at all |
 | an uncorrelated `IN (SELECT …)` membership set | ~24 bytes per inner row | the query's plan is torn down |
 
 So a per-task budget wants room for the largest ROW GROUP a scan will read,
-plus roughly `40 × build_rows` for the largest join, plus several decoded row
-groups of the widest column a scan projects, on top of whatever the spilling
-operators need. A join whose index alone does not fit refuses with
+plus roughly `40 × resident_build_rows` for the largest join, plus several
+decoded row groups of the widest column a scan projects, on top of whatever the
+spilling operators need. A join whose index alone does not fit refuses with
 `memory budget exceeded`, which is the right answer to a budget that small.
+
+A join that SPILLS no longer keeps the index for what it spilled: after evicting
+every partition, what it still holds is its bloom filter plus a few kilobytes of
+per-partition headers — 9,728 bytes on a 2,000-row build, against 106,320
+before. What a spilling join costs the budget is therefore its RESIDENT
+partitions, not its whole build side.
+
+A join that has spilled also stops publishing its bloom filter to the probe's
+scan, because a build that gave part of its key set to disk no longer knows that
+key set; the in-memory probe still uses it. Losing that pushdown costs
+probe-side row-group pruning on a join that is already under memory pressure.
 
 **A scan holds row groups, not files.** A scan reads its parquet files with one
 object GET each — the request count is unchanged — but lands the body into one
@@ -346,6 +358,20 @@ is the uncorrelated-subquery row above, and a `hash join build` refusal is the
 index row. A `hash join index overhead forced past budget` WARN in the log means
 a join's index crossed the budget on rows it had already accepted — the budget
 is below that join's floor.
+
+**A refusal also names what was FORCED past the budget**, which is the fastest
+way to tell a budget that is too small from an operator holding more than its
+share:
+
+```
+memory budget exceeded (used=465738, requested=61888, budget=524288,
+                        of which forced=412074 by "scan file load")
+```
+
+The purposes are `scan file load`, `scan decoded batch`, `scan pooled buffer`,
+`hash join index`, `hash join partition store` and `spill tracking`. When more
+than one is holding bytes the message reports the total and the largest. Nothing
+is appended when nothing was forced.
 
 **Monitoring spill behavior:**
 
