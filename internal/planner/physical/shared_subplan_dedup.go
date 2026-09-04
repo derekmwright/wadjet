@@ -217,9 +217,6 @@ func stageEdgeRefs(s *Stage) []string {
 	for i := range s.ConsumeDynamicFilters {
 		add(s.ConsumeDynamicFilters[i].SourceStageID)
 	}
-	for i := range s.UnionArms {
-		add(s.UnionArms[i].DepStage)
-	}
 	return refs
 }
 
@@ -256,15 +253,8 @@ func rewireEdges(s *Stage, from, to string) {
 			s.ConsumeDynamicFilters[i].SourceStageID = to
 		}
 	}
-	// A union stage dispatches arm i as task i reading Dependencies[i], so
-	// its arms must be rewired in lockstep with its Dependencies — leaving
-	// one behind runs an arm's projection over another arm's rows.
-	// ValidateNativeDAGShape asserts the alignment.
-	for i := range s.UnionArms {
-		if s.UnionArms[i].DepStage == from {
-			s.UnionArms[i].DepStage = to
-		}
-	}
+	// A union stage's arms need no rewiring of their own: arm i's producer IS
+	// Dependencies[i], rewired above (see UnionArm).
 }
 
 // sharedSubplanTypes are the stage types a fingerprintable subtree may

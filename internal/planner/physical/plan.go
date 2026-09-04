@@ -550,13 +550,24 @@ type ProjectExprSpec struct {
 	Scale     int
 }
 
-// UnionArm is one arm of a StageUnion: the stage producing it, and the
-// projection that puts its output under the set operation's result column
-// names. The projection is what makes the arms concatenable — without it
-// each arm reaches the union under its own names (and a raw-parquet
-// pass-through scan arm reaches it carrying every column of its table).
+// UnionArm is one arm of a StageUnion: the projection that puts its output
+// under the set operation's result column names. The projection is what makes
+// the arms concatenable — without it each arm reaches the union under its own
+// names (and a raw-parquet pass-through scan arm reaches it carrying every
+// column of its table).
+//
+// The arm's PRODUCER is not stored here. It is `Stage.Dependencies[i]`, read
+// through Stage.UnionArmDep, and there is exactly one record of it for the
+// reason #715 gives: the arm used to carry a `DepStage` copy written at
+// construction while `Dependencies` was rewritten by every later pass, and a
+// pass that moved one and not the other left the pair inconsistent.
+// ValidateNativeDAGShape then refused the plan — correctly, since nothing
+// could say which stream an arm's projection applied to — and the refusal
+// reached the client for queries the single-process path answers: a union over
+// two identical sorted producers, and a union over a twice-referenced CTE.
+// collapseRedundantFinalMergeSort was the pass that did it, and there were six
+// writers of the copy to keep in step.
 type UnionArm struct {
-	DepStage    string
 	Projections []ProjectExprSpec
 	// DecimalCoercions names the result columns this arm must MOVE into the
 	// set operation's output DECIMAL(p,s) — after the projection above has
@@ -570,6 +581,16 @@ type UnionArm struct {
 	// cast evaluator's DECIMAL destination produces a float64). See
 	// exec.DecimalCoerce and issue #533.
 	DecimalCoercions []DecimalCoercion
+}
+
+// UnionArmDep is the stage producing arm i of a StageUnion. Arm i is
+// dispatched as task i reading Dependencies[i], so the dependency list IS the
+// per-arm producer record; see UnionArm.
+func (s *Stage) UnionArmDep(i int) string {
+	if i < 0 || i >= len(s.Dependencies) {
+		return ""
+	}
+	return s.Dependencies[i]
 }
 
 // DecimalCoercion is one column that must arrive as DECIMAL(Precision, Scale).
@@ -2494,17 +2515,12 @@ func flattenCTEAliases(stages []Stage) []Stage {
 				s.ScalarDependencies[ph] = resolve(t)
 			}
 		}
-		// …and a set operation's per-arm producer. UnionArms[i].DepStage
-		// must stay equal to Dependencies[i] — ValidateNativeDAGShape checks
-		// exactly that — and this loop used to rewrite the second list
-		// without the first, so a UNION ALL over a CTE referenced twice
-		// refused the plan: `arm 1 names producer "cte-alias-1" but
-		// Dependencies[1] is "scan-0"` (#660).
-		for j, arm := range s.UnionArms {
-			if t, ok := aliasTarget[arm.DepStage]; ok {
-				s.UnionArms[j].DepStage = resolve(t)
-			}
-		}
+		// A set operation's per-arm producer needs no rewrite of its own: it
+		// IS Dependencies[i] (see UnionArm). It used to be a stored copy this
+		// loop rewrote separately, and one that rewrote the copy without the
+		// list refused a UNION ALL over a twice-referenced CTE outright —
+		// `arm 1 names producer "cte-alias-1" but Dependencies[1] is
+		// "scan-0"` (#660, #715).
 	}
 	// Drop alias stages.
 	out := make([]Stage, 0, len(stages))

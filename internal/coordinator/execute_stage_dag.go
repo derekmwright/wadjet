@@ -4162,9 +4162,13 @@ func buildUnionFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 		return nil, fmt.Errorf("union fragment: task %d has no arm (stage has %d)", armIdx, len(stage.UnionArms))
 	}
 	arm := stage.UnionArms[armIdx]
-	files, ok := taskInputs[arm.DepStage]
+	// The arm's producer is Dependencies[armIdx] — one record, read here
+	// rather than from a copy on the arm that a later pass could leave behind
+	// (physical.UnionArm, #715).
+	dep := stage.UnionArmDep(armIdx)
+	files, ok := taskInputs[dep]
 	if !ok {
-		return nil, fmt.Errorf("union fragment: arm %d input %q missing from task inputs", armIdx, arm.DepStage)
+		return nil, fmt.Errorf("union fragment: arm %d input %q missing from task inputs", armIdx, dep)
 	}
 	projectOp, ok := projectOpFromSpecs(arm.Projections)
 	if !ok {
@@ -4173,7 +4177,7 @@ func buildUnionFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 	ops := []distributed.OpSpec{
 		{
 			Type:        distributed.OpShuffleSource,
-			InputAlias:  arm.DepStage,
+			InputAlias:  dep,
 			InputFiles:  files,
 			InputBucket: t.DataBucket,
 		},
@@ -5141,7 +5145,7 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 			return nil, fmt.Errorf("union stage %s: task %d has no arm (stage has %d)",
 				stage.ID, workerIdx, len(stage.UnionArms))
 		}
-		dep := stage.UnionArms[workerIdx].DepStage
+		dep := stage.UnionArmDep(workerIdx)
 		inputs[dep] = flattenStageFiles(upstreams[dep])
 	default:
 		if len(stage.Dependencies) == 0 {
@@ -5267,8 +5271,8 @@ func stageInputDeps(stage physical.Stage) map[string]string {
 	case physical.StageUnion:
 		// Every arm, not just this task's: the alias IS the dep ID, so one
 		// map serves all tasks.
-		for _, arm := range stage.UnionArms {
-			put(arm.DepStage, arm.DepStage)
+		for i := range stage.UnionArms {
+			put(stage.UnionArmDep(i), stage.UnionArmDep(i))
 		}
 	default:
 		// The alias IS the dep ID on every non-join fragment, so every

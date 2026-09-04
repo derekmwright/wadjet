@@ -133,11 +133,6 @@ func elideCoPartitionedExchanges(stages []Stage) []Stage {
 				s.ChainedJoins[k].BuildDepStage = repl
 			}
 		}
-		for k := range s.UnionArms {
-			if repl, ok := elided[s.UnionArms[k].DepStage]; ok {
-				s.UnionArms[k].DepStage = repl
-			}
-		}
 		out = append(out, s)
 	}
 	return out

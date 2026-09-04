@@ -1272,13 +1272,6 @@ func TestSetOpDerivedTableArmsTwoPath(t *testing.T) {
 	// arm projection this test is about, and each fails the day it starts
 	// working.
 	for _, tc := range []struct{ name, issue, sql string }{
-		// #656's family: an ORDER BY inside a derived-table arm makes the arm
-		// a merge_sort producer, which the union stage's dependency list does
-		// not name. Distinct from the Filter/Project placement #656 fixed —
-		// this is the set-operation emitter's own arm→producer wiring.
-		{"an_order_by_inside_a_derived_table_arm", "#656",
-			"SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s) a UNION ALL " +
-				"SELECT y FROM (SELECT e4 AS y FROM %[1]s ORDER BY id LIMIT 3) b"},
 		// A field path whose ROW column was RENAMED by a derived table. The
 		// arm's stream carries `rd`, the SELECT list wrote `x.d`, and the
 		// rename resolver cannot map the two: `x` qualifies a ROW COLUMN, not
@@ -1302,6 +1295,31 @@ func TestSetOpDerivedTableArmsTwoPath(t *testing.T) {
 			}
 		})
 	}
+
+	// #656's family — an ORDER BY inside a derived-table arm, which makes that
+	// arm a merge_sort producer — was pinned above as a DAG refusal. It is
+	// EXECUTED now: collapseRedundantFinalMergeSort drops the trivial
+	// merge_sort and repoints its consumers, and a union arm's producer is
+	// `Dependencies[i]` rather than a copy that pass forgot to move (#715). The
+	// pin is deleted, as a pin that starts agreeing must be, and the two paths
+	// are held to one answer instead.
+	t.Run("an_order_by_inside_a_derived_table_arm", func(t *testing.T) {
+		sql := fmt.Sprintf("SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s) a UNION ALL "+
+			"SELECT y FROM (SELECT e4 AS y FROM %[1]s ORDER BY id LIMIT 3) b", sodTable)
+		sres, err := tmdRunSingle(ctx, single, sql)
+		if err != nil {
+			t.Fatalf("single: %v\n  SQL: %s", err, sql)
+		}
+		dres, err := tmdRunDAG(ctx, coord, sql)
+		if err != nil {
+			t.Fatalf("dag: %v\n  SQL: %s", err, sql)
+		}
+		got, want := setOpCanonRows(dres), setOpCanonRows(sres)
+		if strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("the two paths disagree\n  single %v\n  dag    %v\n  SQL: %s",
+				want, got, sql)
+		}
+	})
 }
 
 // TestSetOpNumericLiteralArmTwoPath holds a numeric LITERAL arm to the type

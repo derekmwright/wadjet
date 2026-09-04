@@ -59,11 +59,6 @@ func insertProjectStageAbove(stages []Stage, targetIdx int, specs []ProjectExprS
 				s.FusedJoins[j].BuildDepStage = id
 			}
 		}
-		for j := range s.UnionArms {
-			if s.UnionArms[j].DepStage == target {
-				s.UnionArms[j].DepStage = id
-			}
-		}
 	}
 	return append(stages, Stage{
 		ID:           id,

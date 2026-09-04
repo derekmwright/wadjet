@@ -171,8 +171,8 @@ func stageBuildDeps(s Stage) string {
 	for _, fj := range s.FusedJoins {
 		out = append(out, "fj:"+fj.BuildDepStage)
 	}
-	for _, ua := range s.UnionArms {
-		out = append(out, "ua:"+ua.DepStage)
+	for i := range s.UnionArms {
+		out = append(out, "ua:"+s.UnionArmDep(i))
 	}
 	return sortedList(out)
 }

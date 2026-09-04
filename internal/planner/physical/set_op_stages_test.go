@@ -88,8 +88,9 @@ func TestSetOpUnionAllEmitsMergeStage(t *testing.T) {
 			len(union.UnionArms), len(union.Dependencies))
 	}
 	for i, arm := range union.UnionArms {
-		if arm.DepStage != union.Dependencies[i] {
-			t.Errorf("arm %d names producer %q but Dependencies[%d] is %q", i, arm.DepStage, i, union.Dependencies[i])
+		if union.UnionArmDep(i) != union.Dependencies[i] {
+			t.Errorf("arm %d names producer %q but Dependencies[%d] is %q",
+				i, union.UnionArmDep(i), i, union.Dependencies[i])
 		}
 		// The projection is what stops the arm's raw parquet pass-through
 		// (r_regionkey, r_name, r_comment) reaching the client.
@@ -397,8 +398,10 @@ func TestSetOpFilterReachesUnionStage(t *testing.T) {
 }
 
 // TestValidateNativeDAGShapeUnion: dispatch pairs arm i with Dependencies[i],
-// so a pass that rewired one without the other would silently run an arm's
-// projection over another arm's rows. The validator has to catch that.
+// so the two lists have to be the same LENGTH. They can no longer disagree
+// about a producer — arm i's producer IS Dependencies[i], read through
+// Stage.UnionArmDep — which is why the "names producer" check is gone along
+// with the stored copy it checked (#715).
 func TestValidateNativeDAGShapeUnion(t *testing.T) {
 	base := func() []Stage {
 		return []Stage{
@@ -406,7 +409,7 @@ func TestValidateNativeDAGShapeUnion(t *testing.T) {
 			{ID: "scan-1", Type: StageScan},
 			{
 				ID: "union-2", Type: StageUnion, Dependencies: []string{"scan-0", "scan-1"},
-				UnionArms: []UnionArm{{DepStage: "scan-0"}, {DepStage: "scan-1"}},
+				UnionArms: []UnionArm{{}, {}},
 			},
 		}
 	}
@@ -414,10 +417,13 @@ func TestValidateNativeDAGShapeUnion(t *testing.T) {
 		t.Fatalf("a well-formed union plan was rejected: %v", err)
 	}
 
-	skewed := base()
-	skewed[2].Dependencies = []string{"scan-1", "scan-0"}
-	if err := ValidateNativeDAGShape(skewed); err == nil {
-		t.Error("arms and dependencies out of alignment accepted — each task would project the wrong arm")
+	// TWO ARMS READING ONE PRODUCER is legal and has to stay so: a CTE
+	// referenced twice, and two identical sorted subqueries, both lower to it
+	// (#660, #715).
+	shared := base()
+	shared[2].Dependencies = []string{"scan-0", "scan-0"}
+	if err := ValidateNativeDAGShape(shared); err != nil {
+		t.Errorf("two arms reading the same producer were rejected: %v", err)
 	}
 
 	short := base()

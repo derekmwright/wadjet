@@ -198,11 +198,6 @@ func fuseScanShuffle(stages []Stage) []Stage {
 				s.ChainedJoins[k].BuildDepStage = newDep
 			}
 		}
-		for k := range s.UnionArms {
-			if newDep, replaced := absorbed[s.UnionArms[k].DepStage]; replaced {
-				s.UnionArms[k].DepStage = newDep
-			}
-		}
 	}
 
 	// Drop the absorbed exchange stages.

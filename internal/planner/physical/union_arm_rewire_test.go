@@ -2,32 +2,29 @@ package physical
 
 import "testing"
 
-// A stage-deleting pass rewires EVERY reference to the stage it deletes, and
-// `UnionArm.DepStage` is one of them (METHOD 10).
+// A union stage keeps ONE record of each arm's producer (#715, METHOD 10).
 //
-// `ValidateNativeDAGShape` requires `UnionArms[i].DepStage == Dependencies[i]`
-// on every union stage, so a pass that rewires the dependency list and not the
-// arm builds a plan its own validator rejects at dispatch. Both
-// `fuseScanShuffle` and `elideCoPartitionedExchanges` were taught to rewire it
-// alongside `ChainedJoinSpec.BuildDepStage`, and the claim that the rewiring is
-// COMPLETE is what needs a fixture.
+// The arm used to carry a `DepStage` copy of `Dependencies[i]`, written at
+// construction, and six passes had to keep the two in step. Whichever one
+// moved a dependency without the copy left the pair inconsistent, and
+// ValidateNativeDAGShape then refused the plan with a plain error that reached
+// the client — for queries the single-process path answers. The copy is gone;
+// `Stage.UnionArmDep(i)` reads `Dependencies[i]`, and these tests drive the
+// three stage-rewriting passes directly to assert that a union's arms follow
+// the dependency list with no per-arm rewiring anywhere.
 //
-// An SQL fixture cannot supply one. A corpus of eight union shapes — unions of
-// joins, of grouped aggregates, of derived arms, UNION and UNION ALL, with and
-// without a join above — reaches NEITHER loop, verified by panicking inside
-// both of them and watching every shape pass. These two tests drive the passes
-// directly instead, and each one asserts a different thing:
-//
-//   - fuseScanShuffle DECLINES, and the reason is condition 4 rather than
-//     luck. A union stage lists its arms' producers in Dependencies (the
-//     invariant above), so it is one of the exchange's consumers, and
-//     condition 4 admits only hash_join, sort_merge_join and final_aggregate.
-//     The loop in that pass is unreachable BY CONSTRUCTION; this pins the
-//     construction, so a future widening of condition 4 that admits a union
-//     fails here rather than silently relying on a rewire nothing ever ran.
-//   - elideCoPartitionedExchanges has no consumer-type condition and IS
-//     reachable. This drives it and asserts the arm was rewired, which is the
-//     loop actually executing.
+// An SQL fixture cannot reach two of them: a corpus of eight union shapes —
+// unions of joins, of grouped aggregates, of derived arms, UNION and UNION
+// ALL, with and without a join above — reaches neither `fuseScanShuffle`'s nor
+// `elideCoPartitionedExchanges`' union path, verified by panicking inside both
+// and watching every shape pass. `collapseRedundantFinalMergeSort` IS reachable
+// from SQL, and it is the pass that broke #715.
+
+// fuseScanShuffle DECLINES to absorb an exchange a union reads, and the reason
+// is condition 4 rather than luck: a union stage lists its arms' producers in
+// Dependencies, so it is one of the exchange's consumers, and condition 4
+// admits only hash_join, sort_merge_join and final_aggregate. Pinning the
+// construction means a future widening that admits a union fails here.
 func TestFuseScanShuffleDeclinesAUnionArmsExchange(t *testing.T) {
 	stages := []Stage{
 		{
@@ -44,7 +41,7 @@ func TestFuseScanShuffleDeclinesAUnionArmsExchange(t *testing.T) {
 		{
 			ID: "union-2", Type: StageUnion,
 			Dependencies: []string{"exchange-repartition-1"},
-			UnionArms:    []UnionArm{{DepStage: "exchange-repartition-1"}},
+			UnionArms:    []UnionArm{{}},
 		},
 	}
 	out := fuseScanShuffle(stages)
@@ -52,23 +49,21 @@ func TestFuseScanShuffleDeclinesAUnionArmsExchange(t *testing.T) {
 		t.Fatalf("fuseScanShuffle absorbed the exchange a UNION reads: %d stages, want %d.\n"+
 			"Condition 4 admits only hash_join, sort_merge_join and final_aggregate, and a "+
 			"union stage lists its arm's producer in Dependencies — so it is a consumer and "+
-			"the fusion must decline. If this pass may now absorb it, the UnionArms rewiring "+
-			"in fuseScanShuffle has become REACHABLE and needs a test that exercises it.",
-			len(out), len(stages))
+			"the fusion must decline.", len(out), len(stages))
 	}
 	for _, s := range out {
 		if s.ID != "union-2" {
 			continue
 		}
-		if s.UnionArms[0].DepStage != "exchange-repartition-1" ||
-			s.Dependencies[0] != "exchange-repartition-1" {
-			t.Errorf("the union arm and its dependency disagree after a declined fusion: "+
-				"arm=%q dep=%q", s.UnionArms[0].DepStage, s.Dependencies[0])
+		if s.UnionArmDep(0) != "exchange-repartition-1" {
+			t.Errorf("the union arm's producer moved after a declined fusion: %q", s.UnionArmDep(0))
 		}
 	}
 }
 
-func TestElideCoPartitionedExchangeRewiresAUnionArm(t *testing.T) {
+// elideCoPartitionedExchanges has no consumer-type condition and IS reachable
+// by construction: it rewrites Dependencies, and the arm's producer follows.
+func TestElideCoPartitionedExchangeMovesAUnionArmsProducer(t *testing.T) {
 	// The producer is ALREADY hash-partitioned exactly as the exchange above
 	// it would partition it — the identity re-shuffle this pass removes.
 	stages := []Stage{
@@ -89,17 +84,13 @@ func TestElideCoPartitionedExchangeRewiresAUnionArm(t *testing.T) {
 		{
 			ID: "union-3", Type: StageUnion,
 			Dependencies: []string{"exchange-repartition-1", "scan-2"},
-			UnionArms: []UnionArm{
-				{DepStage: "exchange-repartition-1"},
-				{DepStage: "scan-2"},
-			},
+			UnionArms:    []UnionArm{{}, {}},
 		},
 	}
 	out := elideCoPartitionedExchanges(stages)
 	if len(out) != len(stages)-1 {
 		t.Fatalf("the identity exchange was not elided: %d stages, want %d — this test's "+
-			"premise is gone and the rewiring below is no longer exercised",
-			len(out), len(stages)-1)
+			"premise is gone", len(out), len(stages)-1)
 	}
 	var union *Stage
 	for i := range out {
@@ -110,18 +101,55 @@ func TestElideCoPartitionedExchangeRewiresAUnionArm(t *testing.T) {
 	if union == nil {
 		t.Fatal("the union stage disappeared")
 	}
-	// The whole point: Dependencies and UnionArms have to move TOGETHER, or
-	// ValidateNativeDAGShape refuses the plan at dispatch.
-	if union.Dependencies[0] != "join-0" {
-		t.Errorf("Dependencies[0] = %q, want join-0", union.Dependencies[0])
+	if union.UnionArmDep(0) != "join-0" {
+		t.Errorf("arm 0's producer is %q, want join-0 — the elision deleted the stage it "+
+			"named", union.UnionArmDep(0))
 	}
-	if union.UnionArms[0].DepStage != "join-0" {
-		t.Errorf("UnionArms[0].DepStage = %q, want join-0 — the elision rewired the "+
-			"dependency and left the arm naming a stage it had just deleted, which "+
-			"ValidateNativeDAGShape refuses at dispatch", union.UnionArms[0].DepStage)
+	if union.UnionArmDep(1) != "scan-2" {
+		t.Errorf("the untouched arm's producer moved: %q", union.UnionArmDep(1))
 	}
-	if union.UnionArms[1].DepStage != union.Dependencies[1] {
-		t.Errorf("the untouched arm drifted: arm=%q dep=%q",
-			union.UnionArms[1].DepStage, union.Dependencies[1])
+}
+
+// collapseRedundantFinalMergeSort is #715's own pass: it drops a trivial
+// merge_sort and repoints its consumers at the sort below. It rewrote
+// Dependencies, LeftDepStage and RightDepStage and NOT the arm's stored copy,
+// which is what made "arm 0 names producer merge_sort-2 but Dependencies[0] is
+// sort-1" reach the client for a union over two identical sorted producers.
+//
+// The two arms deliberately share ONE producer, which is the shape both #715
+// and #660 turn on: identical subplans are deduped, and a CTE referenced twice
+// is deduped by construction.
+func TestCollapseFinalMergeSortMovesEveryUnionArmsProducer(t *testing.T) {
+	stages := []Stage{
+		{ID: "sort-1", Type: StageSort, Distribution: Distribution{Kind: DistSingleton}},
+		{
+			ID: "merge_sort-2", Type: StageMergeSort,
+			Dependencies: []string{"sort-1"},
+			Distribution: Distribution{Kind: DistSingleton},
+		},
+		{
+			ID: "union-3", Type: StageUnion,
+			Dependencies: []string{"merge_sort-2", "merge_sort-2"},
+			UnionArms:    []UnionArm{{}, {}},
+		},
+	}
+	out := collapseRedundantFinalMergeSort(stages)
+	var union *Stage
+	for i := range out {
+		if out[i].ID == "union-3" {
+			union = &out[i]
+		}
+	}
+	if union == nil {
+		t.Fatal("the union stage disappeared")
+	}
+	for i := range union.UnionArms {
+		if got := union.UnionArmDep(i); got != "sort-1" {
+			t.Errorf("arm %d's producer is %q, want sort-1 — the collapse deleted merge_sort-2",
+				i, got)
+		}
+	}
+	if err := ValidateNativeDAGShape(out); err != nil {
+		t.Errorf("the collapsed plan does not validate: %v", err)
 	}
 }

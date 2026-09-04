@@ -390,11 +390,6 @@ func pruneEmptyProjectStages(stages []Stage) []Stage {
 				s.ScalarDependencies[ph] = resolve(prod)
 			}
 		}
-		for j, arm := range s.UnionArms {
-			if _, ok := drop[arm.DepStage]; ok {
-				s.UnionArms[j].DepStage = resolve(arm.DepStage)
-			}
-		}
 		out = append(out, s)
 	}
 	return out

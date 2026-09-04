@@ -1295,26 +1295,22 @@ func TestStageCarriesFilterAndProjectionTwoPath(t *testing.T) {
 			`SELECT COUNT(*) AS n FROM (SELECT g AS gk, COUNT(*) AS c FROM %s GROUP BY g `+
 				`HAVING g > 2) s`, tbl), "n", want)
 	})
-	t.Run("N3/UnionOverTwoIdenticalSortedProducersIsRefused", func(t *testing.T) {
-		// #715, pinned. Both arms lower to the same sorted producer and
-		// UnionArm.DepStage names the merge_sort while Dependencies[0] names
-		// the sort; the shape check refuses with a PLAIN error, so nothing
-		// routes it local. Pre-existing and byte-identical on the parent
-		// commit.
-		//
-		// TODO(#715): delete this pin when the two records agree.
+	t.Run("N3/UnionOverTwoIdenticalSortedProducers", func(t *testing.T) {
+		// #715, FIXED. Both arms lower to the same sorted producer, and this
+		// used to be refused because `UnionArm.DepStage` named the merge_sort
+		// while `Dependencies[0]` named the sort that survived
+		// collapseRedundantFinalMergeSort — a plain error, so nothing routed
+		// it local and it reached the client. The arm carries no producer of
+		// its own now; `Stage.UnionArmDep(i)` reads `Dependencies[i]`. The
+		// pin that asserted the refusal is gone, which is its proof, and both
+		// arms are held to the ten rows PostgreSQL 17 answers.
 		sql := fmt.Sprintf(`SELECT k FROM (SELECT id AS k FROM %[1]s WHERE id < 5 `+
 			`ORDER BY id) a UNION ALL SELECT k FROM (SELECT id AS k FROM %[1]s WHERE id < 5 `+
 			`ORDER BY id) b`, tbl)
-		arms := sfcArms(ctx, single, coord)
-		if res := sfcRun(t, arms[0], sql); len(res.Rows) != 10 {
-			t.Errorf("the single-process arm returned %d rows, want 10", len(res.Rows))
-		}
-		if _, err := arms[1].run(sql); err == nil {
-			t.Fatalf("the DAG now plans a union over two identical sorted producers — #715 " +
-				"is fixed, assert the ten rows and delete this pin")
-		} else if !strings.Contains(err.Error(), "names producer") {
-			t.Errorf("the DAG failed for a different reason than #715: %v", err)
+		for _, arm := range sfcArms(ctx, single, coord) {
+			if res := sfcRun(t, arm, sql); len(res.Rows) != 10 {
+				t.Errorf("the %s arm returned %d rows, want 10", arm.name, len(res.Rows))
+			}
 		}
 	})
 

@@ -120,7 +120,6 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	arms := make([]UnionArm, len(plans))
 	for i := range plans {
 		arms[i] = UnionArm{
-			DepStage:         deps[i],
 			Projections:      plans[i].specs,
 			DecimalCoercions: plans[i].coerce,
 		}
@@ -994,11 +993,7 @@ func respellUnionArmProjections(stages []Stage) {
 			continue
 		}
 		for a := range s.UnionArms {
-			dep := s.UnionArms[a].DepStage
-			if _, ok := idx[dep]; !ok && a < len(s.Dependencies) {
-				dep = s.Dependencies[a]
-			}
-			j, ok := idx[dep]
+			j, ok := idx[s.UnionArmDep(a)]
 			if !ok {
 				continue
 			}

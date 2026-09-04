@@ -123,25 +123,10 @@ func TestGatherRefusesANestedWrappedWindowPlanTime(t *testing.T) {
 	}
 }
 
-// TestUnionArmProducerAndDependencyDisagree pins #715, which is NOT this
-// class: two arms reading the same sorted producer leave UnionArm.DepStage
-// naming `merge_sort-2` while Dependencies[0] is `sort-1`, and the shape check
-// refuses with a plain error — so nothing routes it local and it reaches the
-// client. Pre-existing and byte-identical on the parent commit.
-//
-// TODO(#715): derive DepStage from Dependencies, or repoint both together.
-func TestUnionArmProducerAndDependencyDisagree(t *testing.T) {
-	sql := `SELECT k FROM (SELECT n_nationkey AS k FROM nation ORDER BY n_nationkey) a ` +
-		`UNION ALL SELECT k FROM (SELECT n_nationkey AS k FROM nation ORDER BY n_nationkey) b`
-	err := dspPlan(t, sql)
-	if err == nil {
-		t.Fatalf("this shape now plans — #715 is fixed, delete this pin")
-	}
-	if !strings.Contains(err.Error(), "names producer") {
-		t.Fatalf("refused for a different reason than #715's producer/dependency mismatch: %v", err)
-	}
-	if errors.Is(err, ErrUnreachableGatherOutput) {
-		t.Fatalf("this refusal now routes local, which ANSWERS the query — that is a fix, " +
-			"so update the pin to assert the answer instead")
-	}
-}
+// #715's pin lived here — two arms reading the same sorted producer left
+// UnionArm.DepStage naming `merge_sort-2` while Dependencies[0] was `sort-1`,
+// and the shape check refused the plan with a plain error that reached the
+// client. It is deleted because the arm no longer carries a producer of its
+// own: Stage.UnionArmDep reads Dependencies[i]. TestAUnionStageHasOneRecordOfEachArmsProducer
+// (union_arm_rewire_test.go) and the two-path gate over the shape are what
+// hold it now.

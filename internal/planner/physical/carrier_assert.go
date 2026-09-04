@@ -435,11 +435,7 @@ func assertUnionArmsAgreeOnTypes(stages []Stage) error {
 // bytes and indexed an empty slice (#656 R4).
 func armDeclarationsMatchTheirProducers(stages []Stage, idx map[string]int, s *Stage) error {
 	for a := range s.UnionArms {
-		dep := s.UnionArms[a].DepStage
-		if _, ok := idx[dep]; !ok && a < len(s.Dependencies) {
-			dep = s.Dependencies[a]
-		}
-		j, ok := idx[dep]
+		j, ok := idx[s.UnionArmDep(a)]
 		if !ok {
 			continue
 		}

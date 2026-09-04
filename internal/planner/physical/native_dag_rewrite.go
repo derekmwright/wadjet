@@ -147,12 +147,6 @@ func ValidateNativeDAGShape(stages []Stage) error {
 				return fmt.Errorf("native-DAG: union stage %s has %d arms, expected at least 2",
 					s.ID, len(s.UnionArms))
 			}
-			for i, arm := range s.UnionArms {
-				if arm.DepStage != s.Dependencies[i] {
-					return fmt.Errorf("native-DAG: union stage %s arm %d names producer %q but Dependencies[%d] is %q",
-						s.ID, i, arm.DepStage, i, s.Dependencies[i])
-				}
-			}
 		}
 		if s.MergeGroupCount > 0 {
 			return fmt.Errorf("native-DAG: stage %s has MergeGroupCount=%d (intermediate tier of a merge tree); collapseMergeTreesForNativeDAG should have flattened it",
@@ -421,9 +415,6 @@ func stageDependents(stages []Stage) map[string]bool {
 		}
 		for _, cj := range s.ChainedJoins {
 			mark(cj.BuildDepStage)
-		}
-		for _, arm := range s.UnionArms {
-			mark(arm.DepStage)
 		}
 		for _, prod := range s.ScalarDependencies {
 			mark(prod)
