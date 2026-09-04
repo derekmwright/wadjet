@@ -279,8 +279,32 @@ func setOpUnwrap(n *logical.Node) *logical.Node {
 // setOpOutputNames is the set operation's result column list, taken from the
 // first arm's SELECT list as SQL requires — through any nesting, since a
 // chain of unions takes its names from the leftmost arm of the whole chain.
-// Names are lowercased to match the convention the rest of the DAG's
-// projection plumbing uses.
+//
+// One SELECT item's output name is declaredProjectionName's — alias, else the
+// COLUMN's own name, else the rendered expression — which is the rule the
+// declared-output-schema layer already publishes for a query that is not a set
+// operation, and PostgreSQL's own (measured live on 17.11: `SELECT x.id` is
+// `id`, `SELECT rd.d` is `d`, `SELECT id AS "MyId"` is `MyId`).
+//
+// This function used to build a rule of its own — alias, else the rendered
+// EXPRESSION, lower-cased — and each of those two differences was a divergence
+// between the two execution paths, which publish one query's columns to one
+// client:
+//
+//   - the EXPRESSION of a plain reference is its QUALIFIED spelling, so a set
+//     operation over a join published `x.id | x.w` and over a comma join
+//     `clt1.c0 | clt2.c1 | clt2.c0` on the DAG where the single-process path
+//     and PostgreSQL publish `id | w` and `c0 | c1 | c0`. A client binding by
+//     name found neither (#743).
+//   - LOWER-CASING is what the LEXER does to an unquoted identifier since
+//     #731, and doing it again here can only damage a DELIMITED one: `AS
+//     "MyId"` arrived as `myid` on the DAG and `MyId` on the single path, and
+//     an unaliased expression as `sum(a) over (...) + 1` against the single
+//     path's `sum(a) OVER (...) + 1`.
+//
+// The `SELECT *` names keep the CATALOG's spelling for the same reason: that
+// is what the arm's own stream carries and what the single-process path
+// publishes.
 func setOpOutputNames(arm *logical.Node) []string {
 	inner := setOpUnwrap(arm)
 	if isSetOpNode(inner) && len(inner.Children) > 0 {
@@ -290,9 +314,7 @@ func setOpOutputNames(arm *logical.Node) []string {
 	// its output columns are the table's, in catalog order.
 	if inner != nil && inner.Type == logical.NodeScan && len(inner.ScanColumns) > 0 {
 		names := make([]string, len(inner.ScanColumns))
-		for i, c := range inner.ScanColumns {
-			names[i] = strings.ToLower(c)
-		}
+		copy(names, inner.ScanColumns)
 		return names
 	}
 	proj := findOutputProjectionNode(arm)
@@ -301,24 +323,17 @@ func setOpOutputNames(arm *logical.Node) []string {
 	}
 	names := make([]string, 0, len(proj.Projections))
 	for _, pr := range proj.Projections {
-		name := pr.Alias
-		if name == "" {
-			name = pr.Expr
-		}
-		if name == "" {
-			name = pr.Column
-		}
+		// Delimiters are not part of the name: a rendered reference to a
+		// delimited identifier re-quotes, so a set operation over
+		// `SELECT "g + 1"` published a result column literally called
+		// `"g + 1"`, quotes included (#725). cleanExpr strips them inside
+		// declaredProjectionName; NormalizeIdentRef is the same strip for the
+		// alias and column arms.
+		name := plansql.NormalizeIdentRef(strings.TrimSpace(declaredProjectionName(pr)))
 		if name == "" {
 			return nil
 		}
-		// Delimiters are not part of the name. A projection with no alias
-		// falls back to its rendered EXPRESSION, and for a delimited
-		// identifier that rendering re-quotes — so a set operation over
-		// `SELECT "g + 1"` published a result column literally called
-		// `"g + 1"`, quotes included, where PostgreSQL and the
-		// single-process path both say `g + 1` (#725).
-		names = append(names, strings.ToLower(
-			plansql.NormalizeIdentRef(strings.TrimSpace(name))))
+		names = append(names, name)
 	}
 	return names
 }

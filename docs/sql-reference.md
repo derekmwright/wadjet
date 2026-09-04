@@ -930,6 +930,12 @@ SELECT COUNT(*) FROM ((SELECT id FROM t) UNION ALL (SELECT id FROM t)) u
 An `ORDER BY` or `LIMIT` written after the last arm without parentheses
 applies to the WHOLE result, as it does in PostgreSQL.
 
+The result's column NAMES are the LEFTMOST arm's, and each one is that SELECT
+item's own output name: its alias if it has one, otherwise the column's name
+UNQUALIFIED, otherwise the expression as written. `SELECT x.id, x.w FROM …
+UNION ALL …` publishes `id | w`, not `x.id | x.w`, and a delimited alias keeps
+its bytes.
+
 An arm is read through what its OWN plan publishes, so an arm's SELECT list may
 name anything a standalone `SELECT` may — a window function included, aliased
 or not, and whether or not its alias also names a column of the arm's input:

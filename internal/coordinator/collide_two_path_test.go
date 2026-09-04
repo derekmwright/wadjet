@@ -141,9 +141,13 @@ func TestCollidingDuplicateNamesOnEveryArm(t *testing.T) {
 				// carries the ORDER. Comparing it row by row is what sees a
 				// sort that bound the wrong column, which is invisible to any
 				// unordered check. Read by the arm's OWN published name at
-				// that position, because the DAG publishes a set operation's
-				// columns under the join's qualified spellings where the
-				// single path publishes bare ones.
+				// that position, because the two spellings name their columns
+				// differently by construction. (Until #743 the two arms did
+				// not agree on the NAMES either — the DAG published a set
+				// operation's columns under the join's qualified spellings —
+				// and this reading is what read AROUND that rather than
+				// asserting it; TestASetOperationPublishesItsLeftmostArmsNames
+				// is the gate that asserts it now.)
 				j := collideUniquePosition(dup.Columns, ref.Columns)
 				if j < 0 {
 					t.Fatalf("%s arm: neither spelling has a uniquely-named column to read the "+
