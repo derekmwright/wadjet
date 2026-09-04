@@ -521,6 +521,41 @@ as structure rather than to special-case operators.
 
 **The grouped terms are read from their PARSED forms and from nothing else.**
 
+### 2e. A list that PRUNES columns is part of the identity (2026-09-04, #731 round 2)
+
+Every rule above is about how a name RESOLVES. There is a class of list that
+never resolves anything and decides something stronger: whether the column
+exists downstream at all. A join's `OutputFilter`, an exchange's payload
+manifest, a scan's read set — each is built from the names a consumer asked
+for and each drops what it does not recognise.
+
+Those lists were written as an optimization ("skip columns nothing needs") and
+so they compared BYTES. That is exact until two relations of one join carry
+the same column name in different cases, which they may, because an unquoted
+reference folds and a delimited one does not: `rvya("MixedCol")` joined to
+`rvyb(mixedcol)` publishes `[k mixedcol rvya.k rvya.MixedCol]`, qualifying the
+colliding build column by relation — §1's identity, applied to the SCHEMA.
+The consumer then asks for `rvya.mixedcol`, no byte-exact test matches
+`rvya.MixedCol`, the column is dropped, and the reference above falls back to
+the bare name and binds the OTHER relation's column.
+`SELECT rvya.MixedCol FROM rvyb, rvya WHERE rvya.k = rvyb.k` answered 900
+where PostgreSQL answers 100, on all four arms — and `SELECT rvya."MixedCol"`,
+which is the only spelling PostgreSQL itself can resolve, answered NULL.
+
+**A pruning list applies the same identity as a resolution: a column matches
+when its name FOLDS to a name the list asks for and the two agree on the
+RELATION — byte-exact when both spell one, since a delimited alias is
+byte-exact, and either side may leave it off.** A reference cannot resolve
+what the join did not ship, so a resolver that holds the identity perfectly is
+worth nothing while the list above it holds bytes. Keeping a column the list
+did not name exactly costs bytes; dropping one it did name costs an answer,
+and the asymmetry is the whole argument for matching permissively.
+
+The corollary for gates: a corpus that always writes the odd-spelled relation
+FIRST cannot see any of this. The first relation of a FROM list is the join's
+PROBE side, published unqualified, and the bare byte-exact test matches it.
+Every colliding-name shape belongs in the corpus in BOTH FROM orders.
+
 ## The impossibilities, and the fixtures that attempt them
 
 Method 10 of the correctness-fix protocol: a claim of the form *X cannot
@@ -536,6 +571,7 @@ the fixture that tries it.
 | two keys never share a slot | `TwoDerivedKeys`, `ReversedKeyOrder`, `ThreeDerivedKeys`, `WithHaving`, all with the stored slot present |
 | an arithmetic key and a delimited column of that text are different things | `ArithmeticKeyBesideADelimitedColumnOfThatText` — both directions, 5 rows against 9 |
 | a delimited term does not group what its name spells | `gcov` carries `"g + 1"` and `"g plus 1"`; `GroupingCoverageUnderADelimitedTerm` asserts the 42803 AND the answering direction, plus three controls that must keep refusing and one that must keep answering |
+| a pruning list can compare bytes because it only drops what nothing needs | `collide.Corpus()` carries `clt4("MixedCol")`, `clt5(mixedcol)` and `clt6("MIXEDCOL")` and names every two-relation shape in BOTH FROM orders — 21 entries fail on all four arms when the join's output filter is put back to byte-exact |
 | two SIBLING aggregates never share a slot | `SiblingAggregatesEachMintingASlot` — five spellings over `collslot`, whose stored slot columns make both aggregates allocate the same `__gb_expr_2`; joined, nested, two keys each, over the stored slots, and UNION ALL, asserted on both siblings' aggregate VALUES (#759) |
 
 ### 3. HAVING is spelled against what the aggregate publishes

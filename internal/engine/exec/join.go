@@ -4538,6 +4538,75 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 		p.join.BuildTableAlias, p.join.BuildColOrigins, p.join.QualifyAllBuildCols, p.OutputFilter)
 }
 
+// outputFilterMatcher answers "does the consumer need this join output column"
+// under the one identity a name has: a column matches when its NAME FOLDS to a
+// name the filter asks for and the two agree on the RELATION — byte-exact when
+// both spell one, and either side may leave it off.
+//
+// The three lists this replaces compared BYTES. That is right until two
+// relations of one join carry the same column name in different cases, which
+// they may: an unquoted reference folds to lower case and a delimited one does
+// not (#731), so `rvya("MixedCol")` joined to `rvyb(mixedcol)` publishes
+// `[k mixedcol rvya.k rvya.MixedCol]` — the join qualifies the colliding build
+// column by relation, which is ADR-0026's identity, (relation, folded name).
+// The consumer asks for the bare `mixedcol` (what the pruning pass records) or
+// for `rvya.mixedcol` (what the reference itself spells), and NEITHER matched
+// `rvya.MixedCol` byte for byte. The column was dropped, the reference above
+// fell back to the bare name, and `SELECT rvya.MixedCol FROM rvyb, rvya`
+// answered rvyb's 900 where PostgreSQL says 100 — a silent wrong answer, on
+// every arm, whenever the CamelCase relation was not written first.
+//
+// The fold belongs here and not only in the reference because this list is the
+// one that decides whether the column EXISTS downstream: a reference cannot
+// resolve what the join did not ship. Keeping a column the filter did not name
+// exactly costs bytes, never an answer, so the qualifier is matched
+// permissively in both directions — the asymmetry expr.ResolveColumnRef and
+// exec.columnIndexFallback already resolve.
+type outputFilterMatcher struct {
+	// folded bare name -> the relations that asked for it; "" = asked bare.
+	byFoldedName map[string][]string
+	exact        map[string]bool
+}
+
+func newOutputFilterMatcher(filter map[string]bool) outputFilterMatcher {
+	m := outputFilterMatcher{
+		byFoldedName: make(map[string][]string, len(filter)),
+		exact:        filter,
+	}
+	for name := range filter {
+		qual, bare := splitJoinQualifier(name)
+		folded := batch.FoldIdent(bare)
+		m.byFoldedName[folded] = append(m.byFoldedName[folded], qual)
+	}
+	return m
+}
+
+func (m outputFilterMatcher) wants(colName string) bool {
+	if m.exact[colName] {
+		return true
+	}
+	colQual, colBare := splitJoinQualifier(colName)
+	for _, filterQual := range m.byFoldedName[batch.FoldIdent(colBare)] {
+		// A qualifier only DISAGREES when both sides spell one and they
+		// differ; the relation name itself is compared byte-exact because a
+		// delimited alias is byte-exact (#740).
+		if filterQual == "" || colQual == "" || filterQual == colQual {
+			return true
+		}
+	}
+	return false
+}
+
+// splitJoinQualifier splits "rel.col" into its two halves, leaving a name with
+// no dot — or a leading/trailing one, which is a flat-JSON column name and not
+// a qualifier — alone as an unqualified name.
+func splitJoinQualifier(name string) (qual, bare string) {
+	if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
+		return name[:dot], name[dot+1:]
+	}
+	return "", name
+}
+
 // joinOutputSchemaWithMapping computes a join's output schema — probe columns
 // first, then build columns with duplicate-name qualification — and the
 // per-output-column source mapping. Shared by HashJoinProbe and SortMergeJoin
@@ -4627,44 +4696,11 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 	// This avoids allocating and gathering unneeded intermediate columns
 	// in multi-way join pipelines, reducing both CPU and memory pressure.
 	if len(outputFilter) > 0 {
-		// The filter's entries by their BARE part, for the mirror direction
-		// below. Built once: the filter is small and the loop is per column.
-		var bareWanted map[string]bool
-		for name := range outputFilter {
-			if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
-				if bareWanted == nil {
-					bareWanted = make(map[string]bool, len(outputFilter))
-				}
-				bareWanted[strings.ToLower(name[dot+1:])] = true
-			}
-		}
+		wanted := newOutputFilterMatcher(outputFilter)
 		var filteredSchema []parquet.Column
 		var filteredMapping []outColSource
 		for i, col := range out {
-			keep := outputFilter[col.Name]
-			// For qualified columns (e.g., "n2.n_name" from self-joins), also
-			// check if the unqualified base name is needed. Without this, the
-			// output filter would drop disambiguated self-join columns.
-			if !keep {
-				if dot := strings.IndexByte(col.Name, '.'); dot >= 0 {
-					keep = outputFilter[col.Name[dot+1:]]
-				}
-			}
-			// …and the MIRROR: the filter names a column QUALIFIED while this
-			// side ships it BARE. A derived arm publishes `w` unqualified when
-			// it is the PROBE, and the consumer above spells it `y.w` because
-			// that is how the query wrote it — the filter then matched
-			// nothing, the column was dropped, and the projection above failed
-			// with `column "y.w" does not exist in the input schema` on a
-			// query PostgreSQL answers. It is the same qualified/bare
-			// asymmetry expr.ResolveColumnRef and exec.columnIndexFallback
-			// resolve; this is the third list that carried only one half of
-			// it. Keeping a column the filter did not name exactly costs
-			// bytes, never an answer.
-			if !keep && bareWanted != nil && strings.IndexByte(col.Name, '.') < 0 {
-				keep = bareWanted[strings.ToLower(col.Name)]
-			}
-			if keep {
+			if wanted.wants(col.Name) {
 				filteredSchema = append(filteredSchema, col)
 				filteredMapping = append(filteredMapping, mapping[i])
 			}

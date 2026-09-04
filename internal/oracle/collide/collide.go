@@ -40,6 +40,11 @@ const (
 	// arms.
 	T4 = "clt4"
 	T5 = "clt5"
+	// T6 is the THIRD spelling of that one folded name, all upper case, so a
+	// query can name all three relations at once and each reference has two
+	// wrong answers available to it rather than one. Round 1's review found
+	// single and dag DISAGREEING on exactly that shape.
+	T6 = "clt6"
 	// TCam is a CamelCase SCHEMA — the shape a parquet-registered table has,
 	// and ClickBench's `hits` exactly. It is here because no DAG or worker
 	// gate put one through `batch.resolveFoldedIndex`'s case-insensitive arm:
@@ -77,19 +82,26 @@ func CaseSchema(col string) parquet.Schema {
 	}}
 }
 
-// CaseData is one case-colliding relation's rows. The two relations' value
+// CaseData is one case-colliding relation's rows. The three relations' value
 // ranges do not overlap, so a reference bound to the wrong one cannot answer
 // the right number by accident.
 func CaseData(table string) []map[string]any {
-	if table == T4 {
+	switch table {
+	case T4:
 		return []map[string]any{
 			{"k": int64(1), "MixedCol": int64(100)},
 			{"k": int64(2), "MixedCol": int64(200)},
 		}
-	}
-	return []map[string]any{
-		{"k": int64(1), "mixedcol": int64(900)},
-		{"k": int64(2), "mixedcol": int64(901)},
+	case T6:
+		return []map[string]any{
+			{"k": int64(1), "MIXEDCOL": int64(700)},
+			{"k": int64(2), "MIXEDCOL": int64(701)},
+		}
+	default:
+		return []map[string]any{
+			{"k": int64(1), "mixedcol": int64(900)},
+			{"k": int64(2), "mixedcol": int64(901)},
+		}
 	}
 }
 
@@ -143,6 +155,7 @@ func Tables() []FixtureTable {
 		{T2, Schema(), Data(T2)},
 		{T4, CaseSchema("MixedCol"), CaseData(T4)},
 		{T5, CaseSchema("mixedcol"), CaseData(T5)},
+		{T6, CaseSchema("MIXEDCOL"), CaseData(T6)},
 		{TCam, CamelSchema(), CamelData()},
 	}
 }
@@ -191,6 +204,7 @@ var camelColumns = []struct {
 	anyCase bool
 }{
 	{"MixedCol", false},
+	{"MIXEDCOL", false},
 	{"WatchID", true}, {"UserID", true}, {"EventDate", true}, {"SearchPhrase", true},
 }
 
@@ -289,6 +303,35 @@ func Corpus() []Case {
 			Ordered: true,
 			Want: []string{"a=t0-a b=t2-a", "a=t0-a b=t2-b",
 				"a=t0-b b=t2-a", "a=t0-b b=t2-b"}},
+		{Name: "both_relations_projected_mirrored",
+			SQL: "SELECT a, b FROM (SELECT " + T0 + ".c2 AS a, " + T2 + ".c2 AS b FROM " + T2 +
+				", " + T0 + ") x ORDER BY a, b",
+			Ordered: true,
+			Want: []string{"a=t0-a b=t2-a", "a=t0-a b=t2-b",
+				"a=t0-b b=t2-a", "a=t0-b b=t2-b"}},
+		{Name: "qualified_ref_no_derived_mirrored",
+			SQL:  "SELECT MIN(" + T0 + ".c1) AS m FROM " + T2 + ", " + T0,
+			Want: []string{"m=2145758213"}},
+		{Name: "qualified_ref_in_derived_two_relations_mirrored",
+			SQL: "SELECT agg0 FROM (SELECT MIN(" + T0 + ".c1) AS agg0 FROM " + T2 + ", " + T0 +
+				") AS asdf",
+			Want: []string{"agg0=2145758213"}},
+		{Name: "qualified_ref_in_derived_no_aggregate_mirrored",
+			SQL: "SELECT c FROM (SELECT " + T0 + ".c1 AS c FROM " + T1 + ", " + T2 + ", " + T0 +
+				" WHERE " + T0 + ".c1 IS NOT NULL) x ORDER BY c",
+			Ordered: true,
+			Want: []string{"c=2145758213", "c=2145758213", "c=2145758213",
+				"c=2145758213"}},
+		{Name: "predicate_on_the_other_relation_mirrored",
+			SQL: "SELECT c FROM (SELECT " + T0 + ".c2 AS c FROM " + T2 + ", " + T0 + " WHERE " +
+				T2 + ".c1 < 0) x ORDER BY c",
+			Ordered: true,
+			Want:    []string{"c=t0-a", "c=t0-b"}},
+		{Name: "join_on_colliding_bare_names_mirrored",
+			SQL: "SELECT c FROM (SELECT " + T0 + ".c2 AS c FROM " + T1 + " JOIN " + T0 +
+				" ON " + T0 + ".c0 = " + T1 + ".c0) x ORDER BY c",
+			Ordered: true,
+			Want:    []string{"c=t0-a", "c=t0-b"}},
 		{Name: "join_on_colliding_bare_names",
 			SQL: "SELECT c FROM (SELECT " + T0 + ".c2 AS c FROM " + T0 + " JOIN " + T1 +
 				" ON " + T0 + ".c0 = " + T1 + ".c0) x ORDER BY c",
@@ -327,6 +370,179 @@ func Corpus() []Case {
 			SQL:     "SELECT " + T4 + ".MixedCol AS m FROM " + T4 + " ORDER BY m",
 			Ordered: true,
 			Want:    []string{"m=100", "m=200"}},
+		{Name: "ctl_case_colliding_column_one_relation_upper",
+			SQL:     "SELECT " + T6 + ".MIXEDCOL AS m FROM " + T6 + " ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=700", "m=701"}},
+		// THE MIRROR. Every entry above names the CamelCase relation FIRST in
+		// the FROM list, which is the side a join PROBES and publishes
+		// UNQUALIFIED — the direction that was already right at the arc's
+		// base. Written the other way round the referenced relation is the
+		// BUILD side, the join publishes it QUALIFIED because the bare name
+		// collides, and the chain from the reference to that column has to
+		// carry the relation the whole way: through the join's output filter,
+		// which is the list that decides whether the column reaches the
+		// consumer at all. It did not, so the reference fell back to the bare
+		// name and answered the OTHER relation's value on all four arms
+		// (round-1 B1). Ten of these were RIGHT at the base commit.
+		{Name: "case_colliding_columns_both_projected_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS a, " + T5 + ".mixedcol AS b FROM " + T5 +
+				", " + T4 + " WHERE " + T4 + ".k = " + T5 + ".k ORDER BY a",
+			Ordered: true,
+			Want:    []string{"a=100 b=900", "a=200 b=901"}},
+		{Name: "case_colliding_columns_aggregated_mirrored",
+			SQL: "SELECT SUM(" + T4 + ".MixedCol) AS s FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k",
+			Want: []string{"s=300"}},
+		{Name: "case_colliding_columns_camel_side_only_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_lower_side_only_mirrored",
+			SQL: "SELECT " + T5 + ".mixedcol AS m FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=900", "m=901"}},
+		{Name: "case_colliding_columns_through_a_derived_table_mirrored",
+			SQL: "SELECT x FROM (SELECT a.MixedCol AS x FROM " + T5 + " b, " + T4 +
+				" a WHERE a.k = b.k) s ORDER BY x",
+			Ordered: true,
+			Want:    []string{"x=100", "x=200"}},
+		// PostgreSQL's OWN spelling of that reference. `clt4."MixedCol"` is
+		// the only way PostgreSQL can name the column at all, and it answered
+		// NULL — which is precisely what a bare `MixedCol` does against a
+		// schema that publishes the build side qualified.
+		{Name: "case_colliding_columns_delimited_reference_mirrored",
+			SQL: `SELECT ` + T4 + `."MixedCol" AS m FROM ` + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_delimited_reference",
+			SQL: `SELECT ` + T4 + `."MixedCol" AS m FROM ` + T4 + ", " + T5 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		// The reference in a GROUP BY, an aggregate argument and an ORDER BY
+		// — the other three places the identity rule has to hold, in the
+		// mirrored direction.
+		{Name: "case_colliding_columns_group_by_qualified_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS g, COUNT(*) AS n FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k GROUP BY " + T4 + ".MixedCol ORDER BY g",
+			Ordered: true,
+			Want:    []string{"g=100 n=1", "g=200 n=1"}},
+		{Name: "case_colliding_columns_order_by_qualified_mirrored",
+			SQL: "SELECT " + T5 + ".mixedcol AS m FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY " + T4 + ".MixedCol DESC",
+			Ordered: true,
+			Want:    []string{"m=901", "m=900"}},
+		// The explicit join spellings, both directions. USING collapses the
+		// key to one column, which changes what the join publishes.
+		{Name: "case_colliding_columns_using_join",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T4 + " JOIN " + T5 +
+				" USING (k) ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_using_join_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T5 + " JOIN " + T4 +
+				" USING (k) ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_left_join",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T4 + " LEFT JOIN " + T5 +
+				" ON " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_left_join_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T5 + " LEFT JOIN " + T4 +
+				" ON " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		// THREE relations spelling one folded name three ways. Each reference
+		// now has two wrong answers available to it, and the arms have to
+		// agree with each other as well as with PostgreSQL: round 1 found
+		// single answering `700|900|700` and the DAG `100|900|100` where
+		// PostgreSQL says `100|900|700`.
+		{Name: "case_colliding_columns_three_relations",
+			SQL: "SELECT " + T4 + ".MixedCol AS a, " + T5 + ".mixedcol AS b, " + T6 +
+				".MIXEDCOL AS c FROM " + T4 + ", " + T5 + ", " + T6 + " WHERE " + T4 +
+				".k = " + T5 + ".k AND " + T5 + ".k = " + T6 + ".k ORDER BY a",
+			Ordered: true,
+			Want:    []string{"a=100 b=900 c=700", "a=200 b=901 c=701"}},
+		{Name: "case_colliding_columns_three_relations_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS a, " + T5 + ".mixedcol AS b, " + T6 +
+				".MIXEDCOL AS c FROM " + T6 + ", " + T5 + ", " + T4 + " WHERE " + T4 +
+				".k = " + T5 + ".k AND " + T5 + ".k = " + T6 + ".k ORDER BY a",
+			Ordered: true,
+			Want:    []string{"a=100 b=900 c=700", "a=200 b=901 c=701"}},
+		{Name: "case_colliding_columns_three_relations_delimited",
+			SQL: `SELECT ` + T4 + `."MixedCol" AS a, ` + T5 + `."mixedcol" AS b, ` + T6 +
+				`."MIXEDCOL" AS c FROM ` + T6 + ", " + T5 + ", " + T4 + " WHERE " + T4 +
+				".k = " + T5 + ".k AND " + T5 + ".k = " + T6 + ".k ORDER BY a",
+			Ordered: true,
+			Want:    []string{"a=100 b=900 c=700", "a=200 b=901 c=701"}},
+		{Name: "case_colliding_columns_upper_side_only",
+			SQL: "SELECT " + T6 + ".MIXEDCOL AS m FROM " + T4 + ", " + T6 +
+				" WHERE " + T4 + ".k = " + T6 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=700", "m=701"}},
+		{Name: "case_colliding_columns_upper_side_only_mirrored",
+			SQL: "SELECT " + T6 + ".MIXEDCOL AS m FROM " + T6 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T6 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=700", "m=701"}},
+		{Name: "case_colliding_columns_camel_against_upper_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T6 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T6 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		// The remaining places a reference is read, all in the mirrored
+		// direction: the JOIN KEY itself, HAVING, DISTINCT, a window's
+		// ORDER BY, a CTE body, a set-operation arm, a scalar subquery and an
+		// arithmetic expression that reads BOTH colliding columns at once.
+		{Name: "case_colliding_columns_join_key_predicate_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T5 + " JOIN " + T4 +
+				" ON " + T4 + ".k = " + T5 + ".k AND " + T4 + ".MixedCol < " + T5 +
+				".mixedcol ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_having_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS g, COUNT(*) AS n FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k GROUP BY " + T4 + ".MixedCol HAVING SUM(" +
+				T4 + ".MixedCol) > 150 ORDER BY g",
+			Ordered: true,
+			Want:    []string{"g=200 n=1"}},
+		{Name: "case_colliding_columns_distinct_mirrored",
+			SQL: "SELECT DISTINCT " + T4 + ".MixedCol AS m FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200"}},
+		{Name: "case_colliding_columns_window_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS m, ROW_NUMBER() OVER (ORDER BY " + T4 +
+				".MixedCol) AS r FROM " + T5 + ", " + T4 + " WHERE " + T4 + ".k = " + T5 +
+				".k ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100 r=1", "m=200 r=2"}},
+		{Name: "case_colliding_columns_through_a_cte_mirrored",
+			SQL: "WITH s AS (SELECT " + T4 + ".MixedCol AS x FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k) SELECT x FROM s ORDER BY x",
+			Ordered: true,
+			Want:    []string{"x=100", "x=200"}},
+		{Name: "case_colliding_columns_set_op_arm_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol AS m FROM " + T5 + ", " + T4 + " WHERE " + T4 +
+				".k = " + T5 + ".k UNION ALL SELECT " + T6 + ".MIXEDCOL FROM " + T6 +
+				" ORDER BY m",
+			Ordered: true,
+			Want:    []string{"m=100", "m=200", "m=700", "m=701"}},
+		{Name: "case_colliding_columns_in_a_scalar_subquery_mirrored",
+			SQL: "SELECT (SELECT MAX(" + T4 + ".MixedCol) FROM " + T5 + ", " + T4 +
+				" WHERE " + T4 + ".k = " + T5 + ".k) AS m",
+			Want: []string{"m=200"}},
+		{Name: "case_colliding_columns_both_sides_in_one_expression_mirrored",
+			SQL: "SELECT " + T4 + ".MixedCol + " + T5 + ".mixedcol AS s FROM " + T5 + ", " +
+				T4 + " WHERE " + T4 + ".k = " + T5 + ".k ORDER BY s",
+			Ordered: true,
+			Want:    []string{"s=1000", "s=1101"}},
 		// A DELIMITED table alias is byte-exact, so `t` and `"T"` are two
 		// relations. Folding the qualifier made them one and `t.c1` answered
 		// the other relation's column (round-0 B2).
@@ -341,6 +557,20 @@ func Corpus() []Case {
 			Want:    []string{"x=7", "x=7", "x=9", "x=9"}},
 		{Name: "delimited_alias_delimited_side_only",
 			SQL:     `SELECT "T".c1 AS y FROM ` + T1 + ` t, ` + T2 + ` "T" ORDER BY y`,
+			Ordered: true,
+			Want: []string{"y=-1968219095", "y=-1968219095",
+				"y=1737580880", "y=1737580880"}},
+		{Name: "delimited_alias_beside_an_unquoted_one_mirrored",
+			SQL:     `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T2 + ` "T", ` + T1 + ` t ORDER BY x, y`,
+			Ordered: true,
+			Want: []string{"x=7 y=-1968219095", "x=7 y=1737580880",
+				"x=9 y=-1968219095", "x=9 y=1737580880"}},
+		{Name: "delimited_alias_unquoted_side_only_mirrored",
+			SQL:     `SELECT t.c1 AS x FROM ` + T2 + ` "T", ` + T1 + ` t ORDER BY x`,
+			Ordered: true,
+			Want:    []string{"x=7", "x=7", "x=9", "x=9"}},
+		{Name: "delimited_alias_delimited_side_only_mirrored",
+			SQL:     `SELECT "T".c1 AS y FROM ` + T2 + ` "T", ` + T1 + ` t ORDER BY y`,
 			Ordered: true,
 			Want: []string{"y=-1968219095", "y=-1968219095",
 				"y=1737580880", "y=1737580880"}},
@@ -404,6 +634,20 @@ func Corpus() []Case {
 		{Name: "camel_aggregate_input",
 			SQL:  "SELECT MAX(WatchID) AS mx, SUM(UserID) AS s FROM " + TCam,
 			Want: []string{"mx=3 s=31"}},
+		// …and the CamelCase schema JOINED, both directions. Every camel entry
+		// above names TCam alone, so no CamelCase column ever went through a
+		// join's duplicate detection or its output filter — the gate could
+		// not see round-1 B1 from this side either.
+		{Name: "camel_joined_as_the_build_side",
+			SQL: "SELECT h.WatchID AS w, " + T5 + ".mixedcol AS m FROM " + T5 + ", " + TCam +
+				" h WHERE h.WatchID = " + T5 + ".k ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1 m=900", "w=2 m=901"}},
+		{Name: "camel_joined_as_the_probe_side",
+			SQL: "SELECT h.WatchID AS w, " + T5 + ".mixedcol AS m FROM " + TCam + " h, " + T5 +
+				" WHERE h.WatchID = " + T5 + ".k ORDER BY w",
+			Ordered: true,
+			Want:    []string{"w=1 m=900", "w=2 m=901"}},
 		{Name: "camel_sort_key_not_projected",
 			SQL:     "SELECT UserID AS u FROM " + TCam + " ORDER BY WatchID DESC",
 			Ordered: true,
