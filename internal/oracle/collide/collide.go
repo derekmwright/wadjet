@@ -189,6 +189,36 @@ type Case struct {
 	// (ADR-0013 §Pins).
 	KnownBug string
 	Issue    string
+	// KnownBugArms narrows the pin to the EXECUTION ARMS that diverge, by
+	// the two-path gate's own names ("single", "spilled", "dag",
+	// "dag-shuffled"). Empty means every arm, which is what a pin meant
+	// before this existed.
+	//
+	// A divergence that is real on ONE arm is the most dangerous kind — two
+	// engines answering one query differently — and pinning it everywhere
+	// would stop asserting the arms that are RIGHT, which is how a fix on
+	// three arms silently regresses on the fourth. With the arms named, an
+	// unlisted arm is asserted normally and a listed one still fails the day
+	// it agrees. The single-process PostgreSQL oracle ignores an entry whose
+	// pin does not name "single": that comparison is not the divergent path.
+	KnownBugArms []string
+}
+
+// PinnedOn reports whether this entry's KnownBug applies to the named
+// execution arm.
+func (c Case) PinnedOn(arm string) bool {
+	if c.KnownBug == "" {
+		return false
+	}
+	if len(c.KnownBugArms) == 0 {
+		return true
+	}
+	for _, a := range c.KnownBugArms {
+		if a == arm {
+			return true
+		}
+	}
+	return false
 }
 
 // camelColumns are this fixture's stored names that are NOT their own folded
@@ -574,6 +604,92 @@ func Corpus() []Case {
 			Ordered: true,
 			Want: []string{"y=-1968219095", "y=-1968219095",
 				"y=1737580880", "y=1737580880"}},
+		// …and the same pair with a WHERE PREDICATE ACROSS them. Every entry
+		// above is a bare cross product, which is why the corpus could not
+		// see round-2 P1: the predicate pushdown attributed a reference to
+		// its relation by a FOLDED name, so `t` and `"T"` were one relation,
+		// `t.c0 = "T".c0` read as a single-relation predicate, and it was
+		// pushed onto ONE scan — where the qualifier is stripped and both
+		// sides bind that scan's own column. The equality then held for every
+		// row (the whole cross product) and the non-equi spelling for none.
+		{Name: "delimited_alias_with_a_where_equality",
+			SQL: `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T2 +
+				` "T" WHERE t.c0 = "T".c0 ORDER BY x, y`,
+			Ordered: true,
+			Want:    []string{"x=7 y=-1968219095", "x=9 y=1737580880"}},
+		{Name: "delimited_alias_with_a_where_equality_mirrored",
+			SQL: `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T2 + ` "T", ` + T1 +
+				` t WHERE t.c0 = "T".c0 ORDER BY x, y`,
+			Ordered: true,
+			Want:    []string{"x=7 y=-1968219095", "x=9 y=1737580880"}},
+		{Name: "delimited_alias_with_a_non_equi_where",
+			SQL: `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T2 +
+				` "T" WHERE t.c1 < "T".c1 ORDER BY x, y`,
+			Ordered:      true,
+			Want:         []string{"x=7 y=1737580880", "x=9 y=1737580880"},
+			KnownBug:     "the DAG binds a qualified projection to the WRONG arm when the two arms' aliases differ only by case and no join key orders them",
+			KnownBugArms: []string{"dag"},
+			Issue:        "#740-dag-arm"},
+		// The pinned shape with NOTHING else in it: a bare cross product of
+		// two relations aliased `t` and `"T"`. The single path answers
+		// `x=t.c1 y="T".c1` and the DAG answers them SWAPPED, at `fd679ae9`
+		// exactly as here — measured by reverting this branch's three
+		// touched files to the base commit — so it is not this arc's, and no
+		// hunk of this arc can move it. Distinct aliases (`t`, `u`), aliases
+		// differing by more than case (`t`, `tt`) and the same shape under an
+		// ORDER BY all agree on both paths, which is the boundary.
+		{Name: "delimited_alias_bare_cross_product_no_order",
+			SQL:          `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T2 + ` "T"`,
+			Want:         []string{"x=7 y=-1968219095", "x=7 y=1737580880", "x=9 y=-1968219095", "x=9 y=1737580880"},
+			KnownBug:     "the DAG binds a qualified projection to the WRONG arm when the two arms' aliases differ only by case",
+			KnownBugArms: []string{"dag", "dag-shuffled"},
+			Issue:        "#740-dag-arm"},
+		{Name: "ctl_distinct_aliases_bare_cross_product_no_order",
+			SQL:  `SELECT t.c1 AS x, u.c1 AS y FROM ` + T1 + ` t, ` + T2 + ` u`,
+			Want: []string{"x=7 y=-1968219095", "x=7 y=1737580880", "x=9 y=-1968219095", "x=9 y=1737580880"}},
+		{Name: "ctl_same_case_aliases_bare_cross_product_no_order",
+			SQL:  `SELECT t.c1 AS x, tt.c1 AS y FROM ` + T1 + ` t, ` + T2 + ` tt`,
+			Want: []string{"x=7 y=-1968219095", "x=7 y=1737580880", "x=9 y=-1968219095", "x=9 y=1737580880"}},
+		{Name: "ctl_distinct_aliases_with_a_non_equi_where",
+			SQL: `SELECT t.c1 AS x, u.c1 AS y FROM ` + T1 + ` t, ` + T2 +
+				` u WHERE t.c1 < u.c1 ORDER BY x, y`,
+			Ordered: true,
+			Want:    []string{"x=7 y=1737580880", "x=9 y=1737580880"}},
+		{Name: "delimited_alias_with_an_explicit_join_on",
+			SQL: `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t JOIN ` + T2 +
+				` "T" ON t.c0 = "T".c0 ORDER BY x, y`,
+			Ordered: true,
+			Want:    []string{"x=7 y=-1968219095", "x=9 y=1737580880"}},
+		{Name: "delimited_alias_where_unquoted_side_only",
+			SQL: `SELECT t.c1 AS x FROM ` + T1 + ` t, ` + T2 +
+				` "T" WHERE t.c0 = "T".c0 ORDER BY x`,
+			Ordered: true,
+			Want:    []string{"x=7", "x=9"}},
+		{Name: "delimited_alias_where_delimited_side_only",
+			SQL: `SELECT "T".c1 AS y FROM ` + T1 + ` t, ` + T2 +
+				` "T" WHERE t.c0 = "T".c0 ORDER BY y`,
+			Ordered: true,
+			Want:    []string{"y=-1968219095", "y=1737580880"}},
+		{Name: "delimited_alias_where_over_one_relation_twice",
+			SQL: `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T1 +
+				` "T" WHERE t.c0 = "T".c0 ORDER BY x, y`,
+			Ordered: true,
+			Want:    []string{"x=7 y=7", "x=9 y=9"}},
+		{Name: "delimited_alias_where_with_a_third_relation",
+			SQL: `SELECT t.c1 AS x, "T".c1 AS y, u.c2 AS z FROM ` + T1 + ` t, ` + T2 +
+				` "T", ` + T0 + ` u WHERE t.c0 = "T".c0 AND t.c0 = u.c0 ORDER BY x, y, z`,
+			Ordered: true,
+			Want:    []string{"x=7 y=-1968219095 z=t0-a", "x=9 y=1737580880 z=t0-b"}},
+		{Name: "delimited_alias_where_two_conjuncts",
+			SQL: `SELECT t.c1 AS x FROM ` + T1 + ` t, ` + T2 +
+				` "T" WHERE t.c0 = "T".c0 AND t.c1 > 7 ORDER BY x`,
+			Ordered: true,
+			Want:    []string{"x=9"}},
+		{Name: "ctl_distinct_aliases_with_a_where_equality",
+			SQL: `SELECT t.c1 AS x, u.c1 AS y FROM ` + T1 + ` t, ` + T2 +
+				` u WHERE t.c0 = u.c0 ORDER BY x, y`,
+			Ordered: true,
+			Want:    []string{"x=7 y=-1968219095", "x=9 y=1737580880"}},
 		// A positional ORDER BY over a JOIN. On the DAG no stage is emitted
 		// for a Project, so the sort stage reads the join's whole output and
 		// a select-list POSITION is not a column index there — these sorted

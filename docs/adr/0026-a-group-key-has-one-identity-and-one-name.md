@@ -551,6 +551,18 @@ worth nothing while the list above it holds bytes. Keeping a column the list
 did not name exactly costs bytes; dropping one it did name costs an answer,
 and the asymmetry is the whole argument for matching permissively.
 
+Where each of the three stands today, because the rule is stated for the class
+and only one of them implements it:
+
+| list | how it holds the identity |
+|---|---|
+| a join's `OutputFilter` | `exec.outputFilterMatcher` — the rule, in code. It covers BOTH paths: a join `Stage.Columns` on the DAG *is* the OutputFilter, and the worker's fragment passes it to the same `joinOutputSchemaWithMapping`. |
+| a scan's read set | by its OWN folding, not by that matcher: `logical.sanitizeScanNeeds` looks a needed name up in the scan's schema case-insensitively and attributes a QUALIFIED name to the matching relation only, so `needs=[k mixedcol rvya.k rvyb.k]` keeps `[MixedCol k]` from `rvya` and `[k mixedcol]` from `rvyb`. Correct today, by a second implementation of one rule. |
+| an exchange's payload manifest | NOT independently established. It is covered IN FACT for every shape in the colliding corpus — the two DAG arms run all of them, and the `BroadcastBytesOverride=1` arm forces every build through an `exchange-repartition`, so the manifest carries these columns under a shuffle as well as a broadcast — and it is widened from the same `NeededColumns` the join's filter is built from. It is the place to look first if a colliding-name shape ever diverges on a DAG arm alone. |
+
+Two implementations of one rule is a standing hazard, and the reason this
+table is here rather than a claim that the class is handled.
+
 The corollary for gates: a corpus that always writes the odd-spelled relation
 FIRST cannot see any of this. The first relation of a FROM list is the join's
 PROBE side, published unqualified, and the bare byte-exact test matches it.

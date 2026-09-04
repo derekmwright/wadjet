@@ -2663,10 +2663,27 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 		// table that is the derived alias — the only name visible from
 		// outside — which is what TableAlias used to be made to hold and
 		// what #489 stopped overwriting it with.
+		// BYTE-EXACT, because a RELATION name is byte-exact: an unquoted
+		// alias was folded by the lexer (#731) and a delimited one was not,
+		// so `t` and `"T"` are two relations exactly as PostgreSQL says.
+		// Folding them together made them ONE, and the pushdown below then
+		// read `t.k = "T".k` as a single-relation predicate and pushed it
+		// onto that relation's scan alone — where the qualifier is stripped
+		// and both sides bind the same column. `SELECT t.k FROM rvya t,
+		// rvyb "T" WHERE t.k = "T".k` returned the whole cross product where
+		// PostgreSQL returns the matches, and the non-equi spelling returned
+		// nothing at all. It is the identity rule the resolver and the join's
+		// output filter already hold: the column folds, the relation does not.
 		for _, name := range n.ScopeNames() {
-			tables[strings.ToLower(name)] = true
+			tables[name] = true
 		}
-		tableID := strings.ToLower(n.OuterTableID())
+		// The BARE-column map names its owner the same way, because its
+		// values are looked up in the set above: folding the owner while the
+		// set holds it exactly would attribute rvyb's bare `k` to rvya's
+		// alias `t` whenever rvyb is aliased `"T"` — the same collision one
+		// layer down. Every relation reachable unquoted already folds to
+		// itself, so only a DELIMITED name changes spelling here.
+		tableID := n.OuterTableID()
 		for _, col := range n.ScanColumns {
 			colToTable[strings.ToLower(col)] = tableID
 		}
@@ -2756,7 +2773,9 @@ func collectColTableRefs(expr plansql.Node, refs map[string]bool, colToTable map
 	switch e := expr.(type) {
 	case *plansql.ColRef:
 		if e.Table != "" {
-			refs[strings.ToLower(e.Table)] = true
+			// Byte-exact: see collectScanInfoRec. The lexer already folded an
+			// unquoted qualifier, so what survives here IS the relation name.
+			refs[e.Table] = true
 		} else {
 			table, ok := colToTable[strings.ToLower(e.Column)]
 			if ok {

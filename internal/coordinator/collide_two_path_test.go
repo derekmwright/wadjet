@@ -55,9 +55,10 @@ func TestCollidingBareNamesOnEveryArm(t *testing.T) {
 	for _, c := range collide.Corpus() {
 		t.Run(c.Name, func(t *testing.T) {
 			for _, arm := range arms {
+				pinned := c.PinnedOn(arm.name)
 				res, err := arm.run(c.SQL)
 				if err != nil {
-					if c.KnownBug != "" {
+					if pinned {
 						t.Logf("%s arm: pinned (%s %s): %v", arm.name, c.Issue, c.KnownBug, err)
 						continue
 					}
@@ -70,7 +71,7 @@ func TestCollidingBareNamesOnEveryArm(t *testing.T) {
 					sort.Strings(want)
 				}
 				if !collideEqual(got, want) {
-					if c.KnownBug != "" {
+					if pinned {
 						t.Logf("%s arm diverges as pinned (%s %s):\n  got  %v\n  want %v",
 							arm.name, c.Issue, c.KnownBug, got, want)
 						continue
@@ -79,10 +80,10 @@ func TestCollidingBareNamesOnEveryArm(t *testing.T) {
 						arm.name, got, want, c.SQL)
 					continue
 				}
-				if c.KnownBug != "" {
+				if pinned {
 					t.Errorf("%s arm now AGREES with PostgreSQL, so %s is fixed — delete the "+
-						"KnownBug on %s in collide.Corpus()\n  SQL: %s",
-						arm.name, c.Issue, c.Name, c.SQL)
+						"KnownBug (or drop %q from KnownBugArms) on %s in collide.Corpus()\n  SQL: %s",
+						arm.name, c.Issue, arm.name, c.Name, c.SQL)
 				}
 			}
 		})

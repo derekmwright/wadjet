@@ -189,7 +189,28 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      happen, because `catalog.checkDistinctColumnNames` already refuses a
      schema whose columns collide under `parquet.FoldName`, and across
      relations the planner refuses first with 42702 `column reference "g" is
-     ambiguous` — PostgreSQL's own answer to that shape.
+     ambiguous`.
+
+     **That 42702 is PostgreSQL's answer only when the two columns are
+     spelled the SAME.** Where they differ ONLY BY CASE, PostgreSQL has no
+     ambiguity to report and answers, because it never folded them together:
+     over `clt4("MixedCol")` and `clt5(mixedcol)`, `SELECT mixedcol FROM
+     clt4, clt5 WHERE clt4.k = clt5.k` is 900, 901 on postgres:17 (and so is
+     the delimited `SELECT "mixedcol"`), while `SELECT k`, where both
+     relations really do spell one name, is 42702 there exactly as it is
+     here — all four measured live. Wadjet refuses all three, because the
+     fold that makes `MixedCol` reachable as `mixedcol` also makes the two
+     columns one NAME, and one name across two relations is ambiguous.
+
+     So this is a divergence in the REFUSING direction, not a superset: the
+     bare reference is the one spelling the concession cannot serve, and the
+     QUALIFIED spelling is the one that works — `clt4.MixedCol` and
+     `clt5.mixedcol` each resolve to their own relation's column on every
+     arm, which is the identity rule ADR-0026 states and what
+     `internal/oracle/collide`'s `case_colliding_columns_*` entries assert
+     against live PostgreSQL in both FROM orders. A user who hits the 42702
+     qualifies the reference; PostgreSQL accepts that spelling too, so the
+     qualified form is portable and the bare one is not.
 
      The rule is one function, `batch.ResolveColumnIndex`
      (`internal/engine/batch/schema.go`), and the SCHEMA stays byte-exact:

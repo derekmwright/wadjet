@@ -234,16 +234,22 @@ func liftExposedColumns(n *Node) map[string]bool {
 }
 
 // colRefParts splits a column reference into its relation qualifier and its
-// column name, both lower-cased, or ("", "") when the node is not a bare
-// column reference. The qualifier has to come off the AST node: colRefName
-// returns ColRef.Column alone and DROPS ColRef.Table, which is exactly the
-// information that tells `n1.n_nationkey` from `n2.n_nationkey`.
+// column name, or ("", "") when the node is not a bare column reference. The
+// qualifier has to come off the AST node: colRefName returns ColRef.Column
+// alone and DROPS ColRef.Table, which is exactly the information that tells
+// `n1.n_nationkey` from `n2.n_nationkey`.
+//
+// The COLUMN folds and the QUALIFIER does not — the identity rule, here as
+// everywhere else. The lexer folded an unquoted qualifier already, so `t` and
+// `"T"` reach this point as two names and must stay two: folding them made
+// two relations one, and ownership then assigned both sides of
+// `t.k = "T".k` to the same relation.
 func colRefParts(node plansql.Node) (qual, col string) {
 	ref, ok := node.(*plansql.ColRef)
 	if !ok {
 		return "", ""
 	}
-	return strings.ToLower(ref.Table), strings.ToLower(ref.Column)
+	return ref.Table, strings.ToLower(ref.Column)
 }
 
 // liftRelationAliases returns the names a chain relation may be QUALIFIED by:
@@ -258,13 +264,18 @@ func liftRelationAliases(n *Node) map[string]bool {
 			return
 		}
 		if n.Type == NodeScan {
+			// Byte-exact, matching colRefParts' qualifier. A qualifier that
+			// names no relation of the chain falls through to the
+			// column-name rule in `owners`, which is the existing path for
+			// an outer-scope or un-annotated reference — so holding the
+			// relation exactly can lose an optimization, never an answer.
 			if n.TableAlias != "" {
-				out[strings.ToLower(n.TableAlias)] = true
+				out[n.TableAlias] = true
 			} else if n.TableName != "" {
-				out[strings.ToLower(n.TableName)] = true
+				out[n.TableName] = true
 			}
 			for _, d := range n.DerivedAliases {
-				out[strings.ToLower(d)] = true
+				out[d] = true
 			}
 		}
 		// A semi/anti join contributes only its probe side's names, matching

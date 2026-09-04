@@ -4934,7 +4934,10 @@ func collidingBareNameCases() []pgCase {
 	out := make([]pgCase, 0, 16)
 	for _, c := range collide.Corpus() {
 		pc := pgCase{name: "Collide_" + c.Name, sql: c.SQL, ordered: c.Ordered, pgSQL: c.PGSQL}
-		if c.KnownBug != "" {
+		// PinnedOn("single"): this arm runs the embedded single-process
+		// engine, so a pin that names only the DAG arms says nothing about it
+		// and must not suppress the comparison here.
+		if c.PinnedOn("single") {
 			pc.knownBug, pc.issue = pgBugWadjet+" "+c.KnownBug, c.Issue
 		}
 		out = append(out, pc)
