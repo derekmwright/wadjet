@@ -132,17 +132,17 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 				return h.buildKeyErr
 			}
 
-			// Pre-allocate arena and string index using BuildRowHint when set,
-			// bounded by the budget's room — this is unspillable state and
-			// pre-sizing it charged 191,072 bytes on a 20-row batch (#823).
-			// Hash tables for the int paths were sized by tryEnableIntKey.
-			if hint := h.preSizeRowHint(b); hint > 0 {
-				h.arena = make([]buildRef, 0, hint)
-				h.arenaNext = make([]int32, 0, hint)
-				if !h.useIntKey && !h.useDualIntKey {
-					h.strIndex = newStrHashTable(hint)
-				}
-			}
+			// This build can evict, so its index is PER PARTITION: evicting a
+			// partition then frees its table, arena and chain with its
+			// columns (#823, join_index_parts.go).
+			h.initIndexParts(numSpillPartitions)
+
+			// The pre-size hint is bounded by the budget's room — this is
+			// unspillable-until-eviction state and pre-sizing it charged
+			// 191,072 bytes on a 20-row batch (#823). Each partition takes
+			// its share (perPartHint); nothing is allocated until a key
+			// lands, so partitions that stay empty cost only their header.
+			h.indexHint = h.preSizeRowHint(b)
 
 			h.spillState = newSpillState(h.Spill.SpillDir(), b.Schema)
 		}
@@ -167,8 +167,9 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 
 	// Allocate matched bitmap for right/full outer join and right semi/anti tracking
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin ||
-		h.JoinType == RightSemiJoin || h.JoinType == RightAntiJoin) && len(h.arena) > 0 {
-		h.arenaMatched = make([]bool, len(h.arena))
+		h.JoinType == RightSemiJoin || h.JoinType == RightAntiJoin) && h.arenaRows() > 0 {
+		h.allocMatched()
+		h.matchedAlloc = true
 	}
 
 	// consolidateBuild() is a no-op when spillState != nil (check at the top
@@ -226,20 +227,20 @@ const minArrivalChunkRows = 32
 // of what partitionAndIndexBatch actually put into partMemory.
 //
 // It used to be neither of those. The spilled branch released
-// hashBuildBytes(compactBatchForRows(b, rows)) PER PARTITION - a figure
+// hashBuildBytes(compactBatchForRows(b, rows)) PER PARTITION — a figure
 // computed from a freshly minted batch, which pays the per-column fixed
 // overhead (null-bitmap words, a bytes column's len+1 offsets, capacity
 // rounding) once per partition against an arrival batch that paid it once.
 // Measured on this arc's fixture: an arrival batch of 256 rows charged 24,932
-// bytes released 30,372 across its 63 partitions - 1.22x, over-releasing 5,440
+// bytes released 30,372 across its 63 partitions — 1.22x, over-releasing 5,440
 // bytes EVERY BATCH. The in-memory branch was wrong in the other direction: it
 // charges partMemory the tight per-row data bytes, which is less than the
-// arrival share, so a build that never spilled leaked about 1,000 bytes per
-// batch upward. Which way a build drifted therefore followed how many
-// partitions had spilled by the time each batch arrived, i.e. pressure and
-// timing - the moving floor of #789 - and at 100,000 build rows `used` reached
-// MINUS 867,561 against a 1 MiB budget: a ledger that under-reports by 1.67 MB
-// and admits the next operator against room that does not exist.
+// arrival share, so a build that never spilled leaked ~1,000 bytes per batch
+// upward. Which way a build drifted therefore followed how many partitions had
+// spilled by the time each batch arrived, i.e. pressure and timing — the
+// moving floor of #789 — and at 100,000 build rows `used` reached MINUS 867,561
+// against a 1 MiB budget, a ledger that under-reports by 1.67 MB and admits the
+// next operator against room that does not exist.
 func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
 	cost := hashBuildBytes(b)
 	if err := h.MemTracker.Reserve(cost); err != nil {
@@ -368,7 +369,7 @@ func activeRowIndexes(b *batch.RecordBatch) []int {
 // indexBuildBatch helper used by the legacy partitioned-reload path.
 //
 // Caller must hold h.mu.
-// It returns the bytes this batch left RESIDENT - the sum of what it added to
+// It returns the bytes this batch left RESIDENT — the sum of what it added to
 // partMemory, which is what an eviction will release. Its caller reconciles the
 // arrival reservation against that figure.
 func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) (int64, error) {
@@ -403,7 +404,7 @@ func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) (int64, error) {
 			}
 			// These rows went to disk, so they are retained by nobody and add
 			// nothing to `retained`. The caller's reconcile is what gives their
-			// share of the arrival reservation back - releasing a figure
+			// share of the arrival reservation back — releasing a figure
 			// computed HERE, from a batch minted here, is what over-released
 			// (see absorbArrivalBatch).
 			continue
@@ -431,11 +432,11 @@ func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) (int64, error) {
 // released, byte for byte, when those partitions are evicted; the rest of the
 // reservation covered a copy that is over.
 //
-// The retained figure can EXCEED the reservation - 64 tightly-minted
-// per-partition batches carry the per-column fixed overhead 64 times over - and
+// The retained figure can EXCEED the reservation — 64 tightly-minted
+// per-partition batches carry the per-column fixed overhead 64 times over — and
 // then the difference is force-reserved, because that memory is resident
-// whether the ledger admits it or not. It is the accumulator excess's class and
-// carries the same purpose.
+// whether the ledger admits it or not. It is producer 6's class and it carries
+// producer 6's purpose.
 func (h *HashJoin) reconcileArrivalCharge(cost, retained int64) {
 	if h.MemTracker == nil {
 		return
@@ -585,27 +586,14 @@ func (h *HashJoin) registerFrozen(partID int, frozen *batch.RecordBatch) {
 	ss.batchPartID = append(ss.batchPartID, partID)
 	ss.partBuildBatches[partID] = append(ss.partBuildBatches[partID], frozen)
 
-	// Pre-grow the hash table for this batch's rows so PutNoGrow won't overflow
-	// during indexing. Mirrors the legacy flat path's EnsureCapacity+CheckGrow.
-	batchRows := frozen.ActiveLen()
-	if h.useIntKey || h.useDualIntKey {
-		if h.intIndex == nil {
-			h.intIndex = newIntHashTable(batchRows)
-		}
-		h.intIndex.EnsureCapacity(batchRows)
-	} else if h.strIndex != nil {
-		h.strIndex.EnsureCapacity(batchRows)
-	} else {
-		h.strIndex = newStrHashTable(batchRows)
-	}
-
+	// Pre-grow THIS partition's index for the batch's rows so PutNoGrow won't
+	// overflow during indexing. Every row of a frozen batch belongs to partID
+	// by construction (computeBuildPartitionRows scattered them), so the whole
+	// batch's growth lands on one part.
+	pt := &h.parts[partID]
+	h.growPartFor(pt, frozen.ActiveLen())
 	h.indexBuildBatch(frozen, batchIdx)
-
-	if h.useIntKey || h.useDualIntKey {
-		h.intIndex.CheckGrow()
-	} else if h.strIndex != nil {
-		h.strIndex.CheckGrow()
-	}
+	h.checkGrowPart(pt)
 }
 
 // freezeAllOpenAccums freezes every open per-partition accumulator. Called once
@@ -786,7 +774,14 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 	delete(ss.partMemory, partID)
 	JoinPartitionsEvicted.Add(1)
 
+	// The partition's index goes with its columns — that is the whole of #823.
+	// freeIndexPart drops the table, arena, chain and matched bitmap; the
+	// reconcile below turns the smaller indexBytes() into a tracker release
+	// under the purpose the growth was charged with.
+	h.freeIndexPart(partID)
+
 	h.releaseStoreBytes(freed)
+	h.reconcileHashMemory()
 	return freed, nil
 }
 
@@ -797,7 +792,7 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 // batches together weigh more than the arrival batch they were cut from forces
 // the difference once per arrival batch, and that excess is not attributable to
 // one partition. What the census reports is the OUTSTANDING forced total, and
-// that total is exact - every forced byte is released as forced, here or at
+// that total is exact — every forced byte is released as forced, here or at
 // Close. Which eviction returns it is not something the census claims.
 func (h *HashJoin) releaseStoreBytes(n int64) {
 	if h.MemTracker == nil || n <= 0 {

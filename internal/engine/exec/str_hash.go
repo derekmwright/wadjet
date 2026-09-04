@@ -44,6 +44,14 @@ type strHashTable struct {
 	// under a key slice handed to a caller.
 	chunks   [][]byte
 	arenaCap int64 // sum of cap(chunks[i]), maintained incrementally
+
+	// firstChunk is the size of chunk 0; the ramp doubles from it up to
+	// strArenaMaxChunk. It is strArenaFirstChunk for a table that is the only
+	// one of its kind, and a fraction of it for one of a set — the join's
+	// per-partition tables divide it by the partition count so the SUM of
+	// their first chunks is what one table used to take
+	// (join_index_parts.go). Zero means strArenaFirstChunk.
+	firstChunk int
 }
 
 // Key-arena geometry: 20 offset bits and 12 chunk-index bits, so chunks hold
@@ -55,11 +63,10 @@ const (
 	strArenaMaxChunk   = 1 << strArenaOffsetBits
 	strArenaOffsetMask = strArenaMaxChunk - 1
 	strArenaMaxChunks  = 1 << (32 - strArenaOffsetBits)
-	// Chunk sizes ramp 8 KiB → 1 MiB so a 4-group aggregate does not pay a
-	// megabyte up front and a 20M-group one does not pay thousands of
-	// allocations.
+	// Chunk sizes ramp from the table's firstChunk (8 KiB by default) up to
+	// 1 MiB so a 4-group aggregate does not pay a megabyte up front and a
+	// 20M-group one does not pay thousands of allocations.
 	strArenaFirstChunk = 8 << 10
-	strArenaRampSteps  = 7 // strArenaFirstChunk << 7 == strArenaMaxChunk
 )
 
 type strEntry struct {
@@ -73,16 +80,26 @@ type strEntry struct {
 // The key arena is not pre-sized: chunks are allocated on demand as keys arrive,
 // so an over-estimated n costs only the entries array.
 func newStrHashTable(n int) *strHashTable {
+	return newStrHashTableChunked(n, strArenaFirstChunk)
+}
+
+// newStrHashTableChunked is newStrHashTable with the key arena's first chunk
+// chosen by the caller. See strHashTable.firstChunk.
+func newStrHashTableChunked(n, firstChunk int) *strHashTable {
 	cap := 16
 	target := n + n/3
 	for cap < target {
 		cap <<= 1
 	}
+	if firstChunk < 1 {
+		firstChunk = strArenaFirstChunk
+	}
 	entries := make([]strEntry, cap)
 	fillEmptyStrEntries(entries)
 	return &strHashTable{
-		entries: entries,
-		mask:    uint64(cap - 1),
+		entries:    entries,
+		mask:       uint64(cap - 1),
+		firstChunk: firstChunk,
 	}
 }
 
@@ -154,9 +171,15 @@ func (h *strHashTable) addChunk(need int) {
 			"a single hash table cannot hold more than %d bytes of keys",
 			len(h.chunks), h.arenaCap, strArenaMaxChunks*strArenaMaxChunk))
 	}
+	first := h.firstChunk
+	if first < 1 {
+		first = strArenaFirstChunk
+	}
 	size := strArenaMaxChunk
-	if n := len(h.chunks); n < strArenaRampSteps {
-		size = strArenaFirstChunk << n
+	if n := len(h.chunks); n < 32 {
+		if ramped := first << n; ramped < strArenaMaxChunk && ramped > 0 {
+			size = ramped
+		}
 	}
 	if need > size {
 		size = need

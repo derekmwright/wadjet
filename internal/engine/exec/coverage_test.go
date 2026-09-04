@@ -1293,7 +1293,7 @@ func TestHashJoinPreSizedFromHint(t *testing.T) {
 	}
 	// Verify we can look up all keys
 	for i := 0; i < n; i++ {
-		_, ok := hj.intIndex.Get(int64(i))
+		_, ok := hj.idxPart(int64(i)).ints.Get(int64(i))
 		if !ok {
 			t.Fatalf("key %d not found", i)
 		}

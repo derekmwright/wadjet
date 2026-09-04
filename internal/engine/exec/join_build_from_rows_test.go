@@ -38,9 +38,9 @@ func TestBuildFromRowsIndexesATwoIntegerKey(t *testing.T) {
 	if !hj.useDualIntKey {
 		t.Fatal("two integer key columns did not enable the dual-int key path")
 	}
-	if hj.intIndex == nil || hj.intIndex.Len() == 0 {
+	if hj.parts[0].ints == nil || hj.parts[0].ints.Len() == 0 {
 		t.Fatalf("dual-int build populated no intIndex (len=%v) — the probe reads this one",
-			hj.intIndex)
+			hj.parts[0].ints)
 	}
 	if hj.BuildRows() != 3 {
 		t.Fatalf("BuildRows() = %d, want 3", hj.BuildRows())

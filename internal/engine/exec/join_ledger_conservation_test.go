@@ -55,7 +55,7 @@ func TestAGraceBuildsLedgerIsConserved(t *testing.T) {
 				partSum += m
 			}
 			t.Logf("rows=%6d evicted=%2d: used=%d trackedMem=%d partMemory=%d index=%d",
-				rows, evicted, tracker.Used(), hj.trackedMem, partSum, hj.hashTableOverhead())
+				rows, evicted, tracker.Used(), hj.trackedMem, partSum, hj.indexBytes())
 
 			// The ledger says what the join says it holds, and that is the sum
 			// of the two things it holds.

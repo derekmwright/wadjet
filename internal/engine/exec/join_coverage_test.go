@@ -114,7 +114,7 @@ func TestHashJoinIntKeyPath(t *testing.T) {
 	if !hj.useIntKey {
 		t.Fatal("expected int key fast path to be enabled for int64 column")
 	}
-	if hj.intIndex == nil {
+	if hj.parts[0].ints == nil {
 		t.Fatal("expected intIndex to be initialized")
 	}
 
@@ -917,15 +917,15 @@ func TestHashJoinReconcileHashMemory(t *testing.T) {
 	}
 
 	// Verify the hash table overhead method reports actual allocations.
-	overhead := hj.hashTableOverhead()
+	overhead := hj.indexBytes()
 	if overhead <= 0 {
-		t.Errorf("hashTableOverhead() = %d, expected > 0", overhead)
+		t.Errorf("indexBytes() = %d, expected > 0", overhead)
 	}
 	// intHashTable at 50K entries at 70% load: cap ~73K, 73K × 16 = 1.17 MB
 	// Plus arena (50K × 8 = 400 KB) + arenaNext (50K × 4 = 200 KB) + bloom
 	expectedMin := int64(nRows) * 12 // very conservative: 12 bytes/row minimum
 	if overhead < expectedMin {
-		t.Errorf("hashTableOverhead() = %d, expected >= %d", overhead, expectedMin)
+		t.Errorf("indexBytes() = %d, expected >= %d", overhead, expectedMin)
 	}
 }
 

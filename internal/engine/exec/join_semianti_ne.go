@@ -84,7 +84,9 @@ func (h *HashJoin) neTryEnable(b *batch.RecordBatch) {
 func (h *HashJoin) insertNEBatch(b *batch.RecordBatch) {
 	keyCol := b.Columns[h.buildKeyIdx[0]]
 	valCol := b.Columns[h.neValIdx]
-	h.intIndex.EnsureCapacity(b.ActiveLen())
+	// The NE build takes the flat path, so it has one index part.
+	intIdx := h.parts[0].intTable(b.ActiveLen())
+	intIdx.EnsureCapacity(b.ActiveLen())
 	insert := func(row int) {
 		key, ok := intKeyFromVector(keyCol, row)
 		if !ok {
@@ -94,7 +96,7 @@ func (h *HashJoin) insertNEBatch(b *batch.RecordBatch) {
 		if !ok {
 			return // NULL value never satisfies `<>`
 		}
-		slot, existed := h.intIndex.GetOrInsertNoGrow(key, int32(len(h.nePairs)))
+		slot, existed := intIdx.GetOrInsertNoGrow(key, int32(len(h.nePairs)))
 		if !existed {
 			h.nePairs = append(h.nePairs, nePair{v1: val, n: 1})
 			return
@@ -114,7 +116,7 @@ func (h *HashJoin) insertNEBatch(b *batch.RecordBatch) {
 			insert(i)
 		}
 	}
-	h.intIndex.CheckGrow()
+	intIdx.CheckGrow()
 }
 
 // probeNESemiAnti is the typed probe loop for the distinct-pair path.
@@ -123,7 +125,20 @@ func (h *HashJoin) insertNEBatch(b *batch.RecordBatch) {
 func (h *HashJoin) probeNESemiAnti(in *batch.RecordBatch, keyIdx, valIdx int, isSemi bool, sel []uint32) []uint32 {
 	keyCol := in.Columns[keyIdx]
 	valCol := in.Columns[valIdx]
-	intIdx := h.intIndex
+	intIdx := h.parts[0].ints
+	if intIdx == nil {
+		if isSemi {
+			return sel
+		}
+		// An anti join over an empty build emits every row.
+		if in.Sel != nil {
+			return append(sel, in.Sel...)
+		}
+		for i := 0; i < in.Len; i++ {
+			sel = append(sel, uint32(i))
+		}
+		return sel
+	}
 	hasBloom := h.bloom != nil
 	check := func(row int) {
 		key, ok := intKeyFromVector(keyCol, row)

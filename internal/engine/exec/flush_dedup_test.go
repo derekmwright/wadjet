@@ -14,8 +14,9 @@ import (
 // full Build() method handles this, but BuildFromRows is a test convenience.
 func buildWithArenaMatched(hj *HashJoin, schema []parquet.Column, rows []map[string]any) {
 	hj.BuildFromRows(schema, rows)
-	if (hj.JoinType == RightSemiJoin || hj.JoinType == RightAntiJoin) && len(hj.arena) > 0 {
-		hj.arenaMatched = make([]bool, len(hj.arena))
+	if (hj.JoinType == RightSemiJoin || hj.JoinType == RightAntiJoin) && hj.arenaRows() > 0 {
+		hj.allocMatched()
+		hj.matchedAlloc = true
 	}
 }
 

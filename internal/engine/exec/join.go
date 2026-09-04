@@ -56,14 +56,26 @@ type HashJoin struct {
 	// See join_key_width.go.
 	KeyTypes []batch.TypeID
 
-	mu            sync.Mutex
-	buildBatches  []*batch.RecordBatch // columnar storage of build side
-	strIndex      *strHashTable        // arena-based hash table for string keys (general path)
-	intIndex      *intHashTable        // fast path: single-column integer join key
-	arena         []buildRef           // flat storage for all build refs
-	arenaNext     []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
-	useIntKey     bool                 // true when single int32/int64 join key detected
-	useDualIntKey bool                 // true when exactly two int32/int64 join keys
+	mu           sync.Mutex
+	buildBatches []*batch.RecordBatch // columnar storage of build side
+
+	// parts is the hash index: one entry per GRACE PARTITION for a build that
+	// can evict, exactly one for every build that cannot. Each part holds its
+	// own table, its own arena of build refs and its own chain, so evicting a
+	// partition frees its index with its columns (#823). partMask selects the
+	// part from spillPartition(key) and is 0 when there is one part, which
+	// folds the selection to part 0. See join_index_parts.go.
+	parts    []joinIndexPart
+	partMask uint64
+	// indexHint is the per-JOIN row hint the pre-size was bounded to; a
+	// partition's table is sized from its share of it.
+	indexHint int
+	// matchedAlloc records that allocMatched has run — the question
+	// `arenaMatched != nil` used to answer.
+	matchedAlloc bool
+
+	useIntKey     bool // true when single int32/int64 join key detected
+	useDualIntKey bool // true when exactly two int32/int64 join keys
 	// probeKeyErr is checkProbeKeyTypes' verdict, set once under the same
 	// lock and published by probeResolved (#615). Non-nil means the two
 	// sides' key encodings disagree and nothing resolved them, which is a
@@ -86,10 +98,6 @@ type HashJoin struct {
 	// Spill-to-disk (optional). When set, build-side batches are spilled to disk
 	// when memory pressure exceeds 80% of budget using Grace Hash Join partitioning.
 	Spill *memory.SpillManager
-
-	// arenaMatched tracks which build-side arena entries have been matched during
-	// probing. Only allocated for RightJoin and FullOuterJoin.
-	arenaMatched []bool
 
 	// SemiAntiFilter is an optional predicate applied during semi/anti join probe.
 	// When set, each candidate build row is checked in addition to hash key equality.
@@ -573,6 +581,7 @@ func NewHashJoin(joinType JoinType, leftKeys, rightKeys []string) *HashJoin {
 		RightKeys: rightKeys,
 		keyBuf:    make([]byte, 0, 128),
 	}
+	hj.initIndexParts(1)
 	return hj
 }
 
@@ -615,12 +624,11 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	if n := h.preSizeRowHint(b); n > 0 {
 		hint = n
 	}
+	h.indexHint = hint
 	if len(h.buildKeyIdx) == 1 && h.buildKeyIdx[0] >= 0 {
 		col := b.Columns[h.buildKeyIdx[0]]
 		if joinKeyUsesIntPath(h.KeyTypes, 0, col.Type) {
 			h.useIntKey = true
-			h.intIndex = newIntHashTable(hint)
-			h.strIndex = nil
 			return
 		}
 	}
@@ -632,8 +640,6 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 		col1 := b.Columns[h.buildKeyIdx[1]]
 		if joinKeyUsesIntPath(h.KeyTypes, 0, col0.Type) && joinKeyUsesIntPath(h.KeyTypes, 1, col1.Type) {
 			h.useDualIntKey = true
-			h.intIndex = newIntHashTable(hint)
-			h.strIndex = nil
 		}
 	}
 }
@@ -670,8 +676,11 @@ func (h *HashJoin) nullBuildKey(ref buildRef) {
 	if !h.emitsUnmatchedBuildRows() {
 		return
 	}
-	h.arena = append(h.arena, ref)
-	h.arenaNext = append(h.arenaNext, -1)
+	// computeBuildPartitionRows sends a NULL-keyed row to partition 0, so its
+	// arena entry belongs there too — a chain of one that no bucket points at.
+	pt := &h.parts[0]
+	pt.arena = append(pt.arena, ref)
+	pt.next = append(pt.next, -1)
 }
 
 // nullBuildKeyOnly records a NULL build key on a build that stores no rows —
@@ -696,25 +705,41 @@ func (h *HashJoin) emitsUnmatchedBuildRows() bool {
 // Uses PutNoGrow to defer growth checks — caller must call intIndex.CheckGrow()
 // after each batch to maintain the load factor invariant.
 func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
-	idx := int32(len(h.arena))
-	h.arena = append(h.arena, ref)
-	old, existed := h.intIndex.PutNoGrow(key, idx)
+	pt := h.idxPart(key)
+	idx := int32(len(pt.arena))
+	pt.arena = append(pt.arena, ref)
+	old, existed := pt.intTable(h.perPartHint()).PutNoGrow(key, idx)
 	if existed {
-		h.arenaNext = append(h.arenaNext, old)
+		pt.next = append(pt.next, old)
 	} else {
-		h.arenaNext = append(h.arenaNext, -1)
+		pt.next = append(pt.next, -1)
 	}
 }
 
 func (h *HashJoin) arenaAppendStr(ref buildRef) {
-	idx := int32(len(h.arena))
-	h.arena = append(h.arena, ref)
-	head, existed := h.strIndex.PutNoGrow(h.keyBuf, idx)
+	pt := h.idxPartBytes(h.keyBuf)
+	idx := int32(len(pt.arena))
+	pt.arena = append(pt.arena, ref)
+	head, existed := h.strTable(pt, h.perPartHint()).PutNoGrow(h.keyBuf, idx)
 	if existed {
-		h.arenaNext = append(h.arenaNext, head)
+		pt.next = append(pt.next, head)
 	} else {
-		h.arenaNext = append(h.arenaNext, -1)
+		pt.next = append(pt.next, -1)
 	}
+}
+
+// perPartHint is one partition's share of the build-row hint the pre-size was
+// bounded to. A table minted for it grows on demand past the hint, so an
+// underestimate costs rehashes and an overestimate costs nothing at all when
+// the hint is 0 (no BuildRowHint, or no room for one).
+func (h *HashJoin) perPartHint() int {
+	if h.indexHint <= 0 {
+		return 1
+	}
+	if n := h.indexHint / len(h.parts); n > 1 {
+		return n
+	}
+	return 1
 }
 
 // existsInBuild checks if a probe row has any match in the build-side hash table.
@@ -730,7 +755,11 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(key)) {
 			return false
 		}
-		_, ok = h.intIndex.Get(key)
+		t := h.idxPart(key).ints
+		if t == nil {
+			return false
+		}
+		_, ok = t.Get(key)
 		return ok
 	}
 	if h.useDualIntKey {
@@ -744,11 +773,12 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(compositeKey)) {
 			return false
 		}
-		_, ok = h.intIndex.Get(compositeKey)
+		t := h.idxPart(compositeKey).ints
+		if t == nil {
+			return false
+		}
+		_, ok = t.Get(compositeKey)
 		return ok
-	}
-	if h.strIndex == nil {
-		return false
 	}
 	if !p.buildProbeKey(in, row) {
 		return false // NULL key: matches nothing, itself included
@@ -756,7 +786,11 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return false
 	}
-	_, ok := h.strIndex.Get(p.keyBuf)
+	t := h.idxPartBytes(p.keyBuf).strs
+	if t == nil {
+		return false
+	}
+	_, ok := t.Get(p.keyBuf)
 	return ok
 }
 
@@ -773,12 +807,16 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(key)) {
 			return p.lookupBuf
 		}
-		head, ok := h.intIndex.Get(key)
+		pt := h.idxPart(key)
+		if pt.ints == nil {
+			return p.lookupBuf
+		}
+		head, ok := pt.ints.Get(key)
 		if !ok {
 			return p.lookupBuf
 		}
-		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-			p.lookupBuf = append(p.lookupBuf, h.arena[idx])
+		for idx := head; idx >= 0; idx = pt.next[idx] {
+			p.lookupBuf = append(p.lookupBuf, pt.arena[idx])
 		}
 		return p.lookupBuf
 	}
@@ -793,15 +831,19 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(compositeKey)) {
 			return p.lookupBuf
 		}
-		head, ok := h.intIndex.Get(compositeKey)
+		pt := h.idxPart(compositeKey)
+		if pt.ints == nil {
+			return p.lookupBuf
+		}
+		head, ok := pt.ints.Get(compositeKey)
 		if !ok {
 			return p.lookupBuf
 		}
 		// Traverse chain, verifying both keys match (composite hash may collide)
 		bcol0, bcol1 := h.buildBatches[0].Columns[h.buildKeyIdx[0]], h.buildBatches[0].Columns[h.buildKeyIdx[1]]
 		prevBatch := int32(0)
-		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-			ref := h.arena[idx]
+		for idx := head; idx >= 0; idx = pt.next[idx] {
+			ref := pt.arena[idx]
 			if ref.batchIdx != prevBatch {
 				bcol0 = h.buildBatches[ref.batchIdx].Columns[h.buildKeyIdx[0]]
 				bcol1 = h.buildBatches[ref.batchIdx].Columns[h.buildKeyIdx[1]]
@@ -814,21 +856,22 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		}
 		return p.lookupBuf
 	}
-	if h.strIndex == nil {
-		return p.lookupBuf
-	}
 	if !p.buildProbeKey(in, row) {
 		return p.lookupBuf // NULL key: matches nothing, itself included
 	}
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return p.lookupBuf
 	}
-	head, ok := h.strIndex.Get(p.keyBuf)
+	pt := h.idxPartBytes(p.keyBuf)
+	if pt.strs == nil {
+		return p.lookupBuf
+	}
+	head, ok := pt.strs.Get(p.keyBuf)
 	if !ok {
 		return p.lookupBuf
 	}
-	for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-		p.lookupBuf = append(p.lookupBuf, h.arena[idx])
+	for idx := head; idx >= 0; idx = pt.next[idx] {
+		p.lookupBuf = append(p.lookupBuf, pt.arena[idx])
 	}
 	return p.lookupBuf
 }
@@ -848,29 +891,11 @@ func (h *HashJoin) intProbeKey(in *batch.RecordBatch, row int) (int64, bool) {
 	return intKeyFromVector(in.Columns[h.probeKeyIdx[0]], row)
 }
 
-// hashTableOverhead returns the actual heap bytes consumed by the hash table
-// index structures (entries, arenas, chains, bloom). This excludes build-side
-// batch data, which is tracked separately.
-func (h *HashJoin) hashTableOverhead() int64 {
-	var size int64
-	if h.intIndex != nil {
-		size += h.intIndex.MemoryUsage()
-	}
-	if h.strIndex != nil {
-		size += h.strIndex.MemoryUsage()
-	}
-	size += int64(cap(h.arena)) * 8     // buildRef = 8 bytes
-	size += int64(cap(h.arenaNext)) * 4 // int32 = 4 bytes
-	size += int64(cap(h.arenaMatched))  // bool = 1 byte
-	size += int64(len(h.bloom)) * 8     // uint64 = 8 bytes
-	return size
-}
-
-// joinIndexBytesPerRow is what ONE build row costs in hash-index state that
-// the grace path can never give back: 8 B of arena (buildRef), 4 B of
-// arenaNext, and its share of a hash slot at the tables' 70% target load
-// factor (16 B / 0.7 ≈ 23 B). Rounded to 40 to line up with hashBuildBytes'
-// own per-row hash charge, so the two figures are read in the same units.
+// joinIndexBytesPerRow is what ONE build row costs in hash-index state: 8 B of
+// arena (buildRef), 4 B of chain, and its share of a hash slot at the tables'
+// 70% target load factor (16 B / 0.7 ≈ 23 B). Rounded to 40 to line up with
+// hashBuildBytes' own per-row hash charge, so the two figures are read in the
+// same units.
 const joinIndexBytesPerRow = 40
 
 // preSizeRowHint is how many build rows the arena and hash index may be
@@ -897,12 +922,9 @@ const joinIndexBytesPerRow = 40
 // unbudgeted tracker, or any budget with headroom to spare, this returns the
 // hint unchanged and no pre-allocation changes.
 //
-// What it does NOT fix, and is recorded on #823 and in ADR-0027: the index
-// state this bounds is still UNRELEASABLE once the rows do arrive. The arena
-// is global across the 64 grace partitions, so evicting a partition frees its
-// column data and leaves its chain entries behind — the join's floor stays
-// proportional to TOTAL build rows however much it spills. Making that
-// reclaimable means per-partition index state, which is its own arc.
+// The other half of #823 — the index for rows that HAVE arrived being
+// unreleasable — is fixed by per-partition index state (join_index_parts.go),
+// so a build that spills does now give its index back.
 func (h *HashJoin) preSizeRowHint(b *batch.RecordBatch) int {
 	if h.BuildRowHint <= 0 {
 		return 0
@@ -925,25 +947,28 @@ func (h *HashJoin) preSizeRowHint(b *batch.RecordBatch) int {
 	return hint
 }
 
-// reconcileHashMemory checks if the hash table has grown beyond what
-// EstimateBatchBytes charged (40 bytes/row) and reserves the delta.
-// Called periodically during Build to keep the tracker accurate.
+// reconcileHashMemory brings the tracker to the index's CURRENT size, in both
+// directions. Called after every arrival batch and after every eviction.
 //
-// The delta goes through ForceReserve, which cannot fail: an index entry for a
-// row the build has already accepted is not optional, and refusing it here
-// would leave the tracker describing a table that exists. When that forced
-// charge is what takes the query PAST its budget the tracker stops being a
-// budget, so it says so once, naming the join, instead of leaving the next
-// operator's Reserve to fail against a floor nothing explains (#823). Of the
-// seven ForceReserve producers ADR-0006's 2026-09-03 census enumerates, this
-// and memory.ReserveOrForce are the two that report crossing the line; the
-// other five are silent, which is recorded there rather than fixed here.
+// Growth goes through ForceReserve, which cannot fail: an index entry for a row
+// the build has already accepted is not optional, and refusing it here would
+// leave the tracker describing a table that exists. When that forced charge is
+// what takes the query PAST its budget the tracker stops being a budget, so it
+// says so once, naming the join, instead of leaving the next operator's Reserve
+// to fail against a floor nothing explains (#823).
+//
+// SHRINKAGE is the reclaim. An evicted partition's table, arena, chain and
+// matched bitmap are dropped by freeIndexPart, so indexBytes falls, and the
+// difference goes back through ReleaseForced under the same purpose it was
+// charged with. Before per-partition index state there was no shrinkage to
+// report: the index was one global structure and an eviction freed none of it.
 func (h *HashJoin) reconcileHashMemory() {
 	if h.MemTracker == nil {
 		return
 	}
-	actual := h.hashTableOverhead()
-	if actual > h.trackedHashOverhead {
+	actual := h.indexBytes()
+	switch {
+	case actual > h.trackedHashOverhead:
 		delta := actual - h.trackedHashOverhead
 		before := h.MemTracker.Used()
 		h.MemTracker.ForceReserveFor(delta, memory.ForceJoinIndex) // always track; triggers ShouldSpill sooner
@@ -957,16 +982,22 @@ func (h *HashJoin) reconcileHashMemory() {
 				"build_rows", h.buildRows,
 				"used", before+delta,
 				"budget", budget,
-				"note", "grace eviction frees build columns, not index entries (#823)",
 			)
 		}
 		h.trackedHashOverhead = actual
 		h.trackedMem += delta
-		// Publish the true owned footprint for the drift-backstop. keyBuf is
-		// scratch we also own; fold it in so OwnedTotal is honest.
-		if h.accInstanceID != 0 {
-			h.MemTracker.PublishOwned(h.accInstanceID, h.trackedMem+int64(cap(h.keyBuf)))
-		}
+	case actual < h.trackedHashOverhead:
+		delta := h.trackedHashOverhead - actual
+		h.MemTracker.ReleaseForced(delta, memory.ForceJoinIndex)
+		h.trackedHashOverhead = actual
+		h.trackedMem -= delta
+	default:
+		return
+	}
+	// Publish the true owned footprint for the drift-backstop. keyBuf is
+	// scratch we also own; fold it in so OwnedTotal is honest.
+	if h.accInstanceID != 0 {
+		h.MemTracker.PublishOwned(h.accInstanceID, h.trackedMem+int64(cap(h.keyBuf)))
 	}
 }
 
@@ -1006,6 +1037,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// Build pulls directly from a Source (no pipeline loop in between) and
 	// stores or key-reads what it pulls — arriving view batches must be
 	// materialized at this boundary.
+	h.ensureIndexParts()
 	source = &flattenSource{inner: source}
 	if err := source.Init(ctx); err != nil {
 		return fmt.Errorf("build source init: %w", err)
@@ -1121,12 +1153,15 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			h.neTryEnable(b)
 
 			// Pre-allocate arena and index to avoid repeated slice growth.
+			// This path has one index part, so the whole hint is its share.
 			if hint := h.preSizeRowHint(b); hint > 0 && !h.SemiAntiKeyOnly && !h.neActive {
-				h.arena = make([]buildRef, 0, hint)
-				h.arenaNext = make([]int32, 0, hint)
-				// intIndex already pre-sized by tryEnableIntKey; only pre-size string table
-				if !h.useIntKey && !h.useDualIntKey {
-					h.strIndex = newStrHashTable(hint)
+				pt := &h.parts[0]
+				pt.arena = make([]buildRef, 0, hint)
+				pt.next = make([]int32, 0, hint)
+				if h.useIntKey || h.useDualIntKey {
+					pt.intTable(hint)
+				} else {
+					h.strTable(pt, hint)
 				}
 			}
 		}
@@ -1149,10 +1184,20 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			// Uses PutNoGrow/GetOrInsertNoGrow for deferred growth — one CheckGrow
 			// per batch instead of per row.
 			batchRows := b.ActiveLen()
+			// A key-only build has ONE index part (Build never dispatches it
+			// to the grace path), so every key lands in parts[0].
+			pt := &h.parts[0]
+			var intIdx *intHashTable
+			var strIdx *strHashTable
 			if h.useIntKey || h.useDualIntKey {
-				h.intIndex.EnsureCapacity(batchRows)
-			} else if h.strIndex != nil {
-				h.strIndex.EnsureCapacity(batchRows)
+				intIdx = pt.intTable(batchRows)
+				intIdx.EnsureCapacity(batchRows)
+			} else {
+				// Seed to this batch's row count: a 64-bucket seed would let
+				// the first batch fill the table mid-loop (GetOrInsertNoGrow
+				// spins forever on a full table).
+				strIdx = h.strTable(pt, batchRows)
+				strIdx.EnsureCapacity(batchRows)
 			}
 			if h.useIntKey {
 				col := b.Columns[h.buildKeyIdx[0]]
@@ -1163,19 +1208,19 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 							h.nullBuildKeyOnly()
 							continue
 						}
-						h.intIndex.PutNoGrow(key, 0)
+						intIdx.PutNoGrow(key, 0)
 					}
 				} else if !col.Nulls.HasNulls() {
 					switch col.Type {
 					case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 						data := col.Int32Data
 						for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-							h.intIndex.PutNoGrow(int64(data[rowIdx]), 0)
+							intIdx.PutNoGrow(int64(data[rowIdx]), 0)
 						}
 					default:
 						data := col.Int64Data
 						for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-							h.intIndex.PutNoGrow(data[rowIdx], 0)
+							intIdx.PutNoGrow(data[rowIdx], 0)
 						}
 					}
 				} else {
@@ -1185,10 +1230,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 							h.nullBuildKeyOnly()
 							continue
 						}
-						h.intIndex.PutNoGrow(key, 0)
+						intIdx.PutNoGrow(key, 0)
 					}
 				}
-				h.intIndex.CheckGrow()
+				intIdx.CheckGrow()
 			} else if h.useDualIntKey {
 				col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
 				if b.Sel != nil {
@@ -1198,7 +1243,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 							h.nullBuildKeyOnly()
 							continue
 						}
-						h.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
+						intIdx.PutNoGrow(dualIntHash(a, bb), 0)
 					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -1207,34 +1252,27 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 							h.nullBuildKeyOnly()
 							continue
 						}
-						h.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
+						intIdx.PutNoGrow(dualIntHash(a, bb), 0)
 					}
 				}
-				h.intIndex.CheckGrow()
+				intIdx.CheckGrow()
 			} else {
-				if h.strIndex == nil {
-					// Seed to this batch's row count: the EnsureCapacity
-					// above skipped a nil strIndex, and a 64-bucket seed
-					// would let the first batch fill the table mid-loop
-					// (GetOrInsertNoGrow spins forever on a full table).
-					h.strIndex = newStrHashTable(batchRows)
-				}
 				if b.Sel != nil {
 					for _, si := range b.Sel {
 						if !h.buildKeyFromBatch(b, int(si)) {
 							h.nullBuildKeyOnly()
 						}
-						h.strIndex.GetOrInsertNoGrow(h.keyBuf, 0)
+						strIdx.GetOrInsertNoGrow(h.keyBuf, 0)
 					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 						if !h.buildKeyFromBatch(b, rowIdx) {
 							h.nullBuildKeyOnly()
 						}
-						h.strIndex.GetOrInsertNoGrow(h.keyBuf, 0)
+						strIdx.GetOrInsertNoGrow(h.keyBuf, 0)
 					}
 				}
-				h.strIndex.CheckGrow()
+				strIdx.CheckGrow()
 			}
 			h.buildRows += int64(b.ActiveLen())
 			h.mu.Unlock()
@@ -1277,27 +1315,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		batchIdx := int32(len(h.buildBatches))
 		h.buildBatches = append(h.buildBatches, b)
 
-		// Pre-grow hash table for this batch so PutNoGrow won't overflow.
+		// Pre-grow the one index part for this batch so PutNoGrow won't
+		// overflow. This path never partitions, so every key lands in part 0.
 		batchRows := b.ActiveLen()
-		if h.useIntKey || h.useDualIntKey {
-			h.intIndex.EnsureCapacity(batchRows)
-		} else if h.strIndex != nil {
-			h.strIndex.EnsureCapacity(batchRows)
-		}
-		// Pre-grow the ref arena the same way: every inserted row appends
-		// one buildRef + one chain link, and the per-append doubling inside
-		// arenaAppend* re-memmoved both slices log2(buildRows) times per
-		// build (14% of worker growslice CPU, 2026-08-12 treatment profile).
-		if need := len(h.arena) + batchRows; cap(h.arena) < need {
-			grown := make([]buildRef, len(h.arena), need+need/2)
-			copy(grown, h.arena)
-			h.arena = grown
-		}
-		if need := len(h.arenaNext) + batchRows; cap(h.arenaNext) < need {
-			grown := make([]int32, len(h.arenaNext), need+need/2)
-			copy(grown, h.arenaNext)
-			h.arenaNext = grown
-		}
+		h.growPartFor(&h.parts[0], batchRows)
 
 		if h.useIntKey {
 			col := b.Columns[h.buildKeyIdx[0]]
@@ -1361,17 +1382,6 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				}
 			}
 		} else {
-			if h.strIndex == nil {
-				// Pre-size to this batch's row count so PutNoGrow has room
-				// for the inserts that follow. The earlier EnsureCapacity
-				// branch only fires when strIndex is non-nil; if we entered
-				// with strIndex==nil and seeded it at 64 buckets, PutNoGrow
-				// would loop forever once load exceeds 100%. Surfaced by
-				// TestPartitionOnArrival_StringKeySpill once pressure-aware
-				// routing started sending string-key builds through the
-				// legacy flat path under low pool pressure.
-				h.strIndex = newStrHashTable(b.ActiveLen())
-			}
 			if b.Sel != nil {
 				for _, si := range b.Sel {
 					if !h.buildKeyFromBatch(b, int(si)) {
@@ -1392,11 +1402,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 		// Deferred growth check: PutNoGrow skips per-row growth checks for
 		// inlineability. One check per batch (2048 rows) instead of per row.
-		if h.useIntKey || h.useDualIntKey {
-			h.intIndex.CheckGrow()
-		} else if h.strIndex != nil {
-			h.strIndex.CheckGrow()
-		}
+		h.checkGrowPart(&h.parts[0])
 
 		// Reconcile hash table memory: grow() may have doubled the entries
 		// array, consuming much more than EstimateBatchBytes predicted.
@@ -1410,8 +1416,9 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 
 	// Allocate matched bitmap for right/full outer join and right semi/anti tracking
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin ||
-		h.JoinType == RightSemiJoin || h.JoinType == RightAntiJoin) && len(h.arena) > 0 {
-		h.arenaMatched = make([]bool, len(h.arena))
+		h.JoinType == RightSemiJoin || h.JoinType == RightAntiJoin) && h.arenaRows() > 0 {
+		h.allocMatched()
+		h.matchedAlloc = true
 	}
 
 	// Consolidate build batches into a single contiguous batch to eliminate
@@ -1598,25 +1605,27 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 	h.buildRows = totalRows
 
 	// Adopt the largest table directly, merge others into it.
+	// A key-only build has one index part; adopt into it.
+	pt := &h.parts[0]
 	if h.useIntKey || h.useDualIntKey {
-		h.intIndex = locals[bestIdx].intIndex
+		pt.ints = locals[bestIdx].intIndex
 		for i, lb := range locals {
 			if i == bestIdx {
 				continue
 			}
 			lb.intIndex.ForEach(func(key int64, _ int32) {
-				h.intIndex.Put(key, 0)
+				pt.ints.Put(key, 0)
 			})
 		}
 	} else {
-		h.strIndex = locals[bestIdx].strIndex
+		pt.strs = locals[bestIdx].strIndex
 		for i, lb := range locals {
 			if i == bestIdx {
 				continue
 			}
 			if lb.strIndex != nil {
 				lb.strIndex.ForEach(func(key []byte) {
-					h.strIndex.GetOrInsert(key, 0)
+					pt.strs.GetOrInsert(key, 0)
 				})
 			}
 		}
@@ -1770,10 +1779,13 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 // chosen to give ~1% false positive rate for the number of distinct keys.
 func (h *HashJoin) buildBloom() {
 	var nKeys int
-	if h.useIntKey || h.useDualIntKey {
-		nKeys = h.intIndex.Len()
-	} else if h.strIndex != nil {
-		nKeys = h.strIndex.Len()
+	for i := range h.parts {
+		if t := h.parts[i].ints; t != nil {
+			nKeys += t.Len()
+		}
+		if t := h.parts[i].strs; t != nil {
+			nKeys += t.Len()
+		}
 	}
 	if nKeys == 0 {
 		return
@@ -1790,14 +1802,17 @@ func (h *HashJoin) buildBloom() {
 	h.bloom = make([]uint64, nSlots)
 	h.bloomMask = uint64(nSlots - 1)
 
-	if h.useIntKey || h.useDualIntKey {
-		h.intIndex.ForEach(func(key int64, _ int32) {
-			h.bloomSet(bloomHashInt(key))
-		})
-	} else if h.strIndex != nil {
-		h.strIndex.ForEach(func(key []byte) {
-			h.bloomSet(bloomHashBytes(key))
-		})
+	for i := range h.parts {
+		if t := h.parts[i].ints; t != nil {
+			t.ForEach(func(key int64, _ int32) {
+				h.bloomSet(bloomHashInt(key))
+			})
+		}
+		if t := h.parts[i].strs; t != nil {
+			t.ForEach(func(key []byte) {
+				h.bloomSet(bloomHashBytes(key))
+			})
+		}
 	}
 }
 
@@ -1921,9 +1936,12 @@ func (h *HashJoin) consolidateBuild() {
 	}
 
 	// Remap arena entries: all point to batch 0 with offset-adjusted row indices.
-	for i := range h.arena {
-		h.arena[i].rowIdx += int32(offsets[h.arena[i].batchIdx])
-		h.arena[i].batchIdx = 0
+	for pi := range h.parts {
+		arena := h.parts[pi].arena
+		for i := range arena {
+			arena[i].rowIdx += int32(offsets[arena[i].batchIdx])
+			arena[i].batchIdx = 0
+		}
 	}
 
 	h.buildBatches = []*batch.RecordBatch{consolidated}
@@ -2161,9 +2179,11 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 	// returned no rows at all (an anti join: every row). BuildFromRows is the
 	// worker's entry point, so that was reachable from the distributed path
 	// (#498).
+	h.ensureIndexParts()
+	pt := &h.parts[0]
+	h.growPartFor(pt, b.Len)
 	switch {
 	case h.useIntKey:
-		h.intIndex.EnsureCapacity(b.Len)
 		col := b.Columns[h.buildKeyIdx[0]]
 		for i := 0; i < b.Len; i++ {
 			key, ok := intKeyFromVector(col, i)
@@ -2174,9 +2194,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 			h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
-		h.intIndex.CheckGrow()
 	case h.useDualIntKey:
-		h.intIndex.EnsureCapacity(b.Len)
 		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
 		for i := 0; i < b.Len; i++ {
 			a, bb, ok := dualIntKeyFromVectors(col0, col1, i)
@@ -2187,12 +2205,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 			h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
-		h.intIndex.CheckGrow()
 	default:
-		if h.strIndex == nil {
-			h.strIndex = newStrHashTable(b.Len)
-		}
-		h.strIndex.EnsureCapacity(b.Len)
 		for i := 0; i < b.Len; i++ {
 			if !h.buildKeyFromBatch(b, i) {
 				h.buildHasNullKey = true
@@ -2200,10 +2213,11 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 			h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
-		h.strIndex.CheckGrow()
 	}
-	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
-		h.arenaMatched = make([]bool, len(h.arena))
+	h.checkGrowPart(pt)
+	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && h.arenaRows() > 0 {
+		h.allocMatched()
+		h.matchedAlloc = true
 	}
 	h.buildBloom()
 	h.warmBuildNullBitmaps()
@@ -2336,19 +2350,12 @@ func (h *HashJoin) FixKeyAssignment() bool {
 		for _, b := range h.buildBatches {
 			totalBuildRows += b.Len
 		}
-		// Pre-allocate arena and arenaNext to avoid slice growth during build
-		if cap(h.arena) < totalBuildRows {
-			h.arena = make([]buildRef, 0, totalBuildRows)
-		} else {
-			h.arena = h.arena[:0]
-		}
-		if cap(h.arenaNext) < totalBuildRows {
-			h.arenaNext = make([]int32, 0, totalBuildRows)
-		} else {
-			h.arenaNext = h.arenaNext[:0]
-		}
+		// The keys just changed sides, so the whole index is rebuilt from
+		// scratch: drop every part and pre-size the one this path uses.
+		h.parts = make([]joinIndexPart, len(h.parts))
+		pt := &h.parts[0]
+		h.growPartFor(pt, totalBuildRows)
 		if h.useIntKey {
-			h.intIndex = newIntHashTable(totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				col := b.Columns[h.buildKeyIdx[0]]
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -2360,10 +2367,9 @@ func (h *HashJoin) FixKeyAssignment() bool {
 					h.arenaAppendInt(key, buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
-				h.intIndex.CheckGrow()
+				h.checkGrowPart(pt)
 			}
 		} else if h.useDualIntKey {
-			h.intIndex = newIntHashTable(totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -2375,10 +2381,9 @@ func (h *HashJoin) FixKeyAssignment() bool {
 					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
-				h.intIndex.CheckGrow()
+				h.checkGrowPart(pt)
 			}
 		} else {
-			h.strIndex = newStrHashTable(totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					if !h.buildKeyFromBatch(b, rowIdx) {
@@ -2387,8 +2392,15 @@ func (h *HashJoin) FixKeyAssignment() bool {
 					h.arenaAppendStr(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
-				h.strIndex.CheckGrow()
+				h.checkGrowPart(pt)
 			}
+		}
+
+		// The arena was rebuilt from scratch, so a matched bitmap sized to
+		// the OLD arena would index out of range. Re-size it here rather
+		// than leaving it to whatever allocated it first.
+		if h.matchedAlloc {
+			h.allocMatched()
 		}
 
 		// Rebuild bloom filter with corrected keys.
@@ -2635,7 +2647,11 @@ type probeResume struct {
 	active bool               // more output is pending for in
 	pos    int                // next probe position (index into in.Sel, else row index)
 	ref    int32              // cursor within the current probe row's matches
-	mid    bool               // ref is live: resume inside pos's match chain
+	// part is the index partition ref addresses. An arena index means
+	// nothing without it, because every partition numbers its own arena
+	// from zero (join_index_parts.go).
+	part int32
+	mid  bool // ref is live: resume inside pos's match chain
 	// accepted carries, across a mid-chain suspension, whether the suspended
 	// probe row has had any candidate pass the Residual so far — the bit that
 	// decides whether a LEFT/FULL join owes the row a NULL-padded emission
@@ -2667,12 +2683,16 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 		if !ok {
 			return
 		}
-		head, ok := h.intIndex.Get(key)
+		pt := h.idxPart(key)
+		if pt.ints == nil {
+			return
+		}
+		head, ok := pt.ints.Get(key)
 		if !ok {
 			return
 		}
-		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-			h.arenaMatched[idx] = true
+		for idx := head; idx >= 0; idx = pt.next[idx] {
+			pt.matched[idx] = true
 		}
 	} else if h.useDualIntKey {
 		// The two-integer key had no arm here at all, and its index is never
@@ -2692,28 +2712,37 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 		if !ok {
 			return // NULL key: matches nothing, so it marks nothing
 		}
-		head, ok := h.intIndex.Get(dualIntHash(a, b))
+		ck := dualIntHash(a, b)
+		pt := h.idxPart(ck)
+		if pt.ints == nil {
+			return
+		}
+		head, ok := pt.ints.Get(ck)
 		if !ok {
 			return
 		}
-		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-			ref := h.arena[idx]
+		for idx := head; idx >= 0; idx = pt.next[idx] {
+			ref := pt.arena[idx]
 			bb := h.buildBatches[ref.batchIdx]
 			ba, bbv, bok := dualIntKeyFromVectors(bb.Columns[h.buildKeyIdx[0]], bb.Columns[h.buildKeyIdx[1]], int(ref.rowIdx))
 			if bok && ba == a && bbv == b {
-				h.arenaMatched[idx] = true
+				pt.matched[idx] = true
 			}
 		}
-	} else if h.strIndex != nil {
+	} else {
 		if !p.buildProbeKey(in, row) {
 			return // NULL key: matches nothing, so it marks nothing
 		}
-		head, ok := h.strIndex.Get(p.keyBuf)
+		pt := h.idxPartBytes(p.keyBuf)
+		if pt.strs == nil {
+			return
+		}
+		head, ok := pt.strs.Get(p.keyBuf)
 		if !ok {
 			return
 		}
-		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-			h.arenaMatched[idx] = true
+		for idx := head; idx >= 0; idx = pt.next[idx] {
+			pt.matched[idx] = true
 		}
 	}
 }
@@ -2911,8 +2940,8 @@ func (p *HashJoinProbe) nextProbeChunk(_ context.Context) (*batch.RecordBatch, e
 	// Fast path: single int key inner join without right/full outer tracking.
 	// Inlines hash table lookup + typed data access, eliminating 4 levels of
 	// per-row function calls (probeRow → lookupBuild → intProbeKey → intKeyFromVector).
-	inlineInt := h.useIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil && h.Residual == nil
-	inlineDual := !inlineInt && h.useDualIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil && h.Residual == nil
+	inlineInt := h.useIntKey && h.JoinType == InnerJoin && !h.matchedAlloc && h.Residual == nil
+	inlineDual := !inlineInt && h.useDualIntKey && h.JoinType == InnerJoin && !h.matchedAlloc && h.Residual == nil
 	if inlineInt || inlineDual {
 		h.resolveProbeKeyIdx(in)
 	}
@@ -3200,9 +3229,8 @@ func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parque
 // cap(pairs) >= limit.
 func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
 	h := p.join
-	arena := h.arena
-	arenaNext := h.arenaNext
-	idx := h.intIndex
+	parts := h.parts
+	mask := h.partMask
 
 	// Bloom filter is NOT checked here — it's already applied as a separate
 	// BloomFilterOp in the pipeline (InnerJoin always gets one). Checking
@@ -3226,13 +3254,20 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 				data := keyCol.Int32Data
 				for pos := p.res.pos; pos < len(sel); pos++ {
 					si := sel[pos]
-					head, ok := idx.Get(int64(data[si]))
+					key := int64(data[si])
+					pi := uint64(spillPartition(key)) & mask
+					pt := &parts[pi]
+					if pt.ints == nil {
+						continue
+					}
+					head, ok := pt.ints.Get(key)
 					if !ok {
 						continue
 					}
+					arena, arenaNext := pt.arena, pt.next
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = pos, ref, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = pos, ref, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(si), ref: arena[ref], matched: true}
@@ -3243,13 +3278,20 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 				data := keyCol.Int64Data
 				for pos := p.res.pos; pos < len(sel); pos++ {
 					si := sel[pos]
-					head, ok := idx.Get(data[si])
+					key := data[si]
+					pi := uint64(spillPartition(key)) & mask
+					pt := &parts[pi]
+					if pt.ints == nil {
+						continue
+					}
+					head, ok := pt.ints.Get(key)
 					if !ok {
 						continue
 					}
+					arena, arenaNext := pt.arena, pt.next
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = pos, ref, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = pos, ref, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(si), ref: arena[ref], matched: true}
@@ -3267,13 +3309,19 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 				if !ok {
 					continue
 				}
-				head, ok := idx.Get(key)
+				pi := uint64(spillPartition(key)) & mask
+				pt := &parts[pi]
+				if pt.ints == nil {
+					continue
+				}
+				head, ok := pt.ints.Get(key)
 				if !ok {
 					continue
 				}
+				arena, arenaNext := pt.arena, pt.next
 				for ref := head; ref >= 0; ref = arenaNext[ref] {
 					if n >= limit {
-						p.res.pos, p.res.ref, p.res.mid = pos, ref, true
+						p.res.pos, p.res.ref, p.res.part, p.res.mid = pos, ref, int32(pi), true
 						return buf[:n], false
 					}
 					buf[n] = matchPair{probeRow: int32(si), ref: arena[ref], matched: true}
@@ -3287,13 +3335,20 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 				data := keyCol.Int32Data
 				for i := p.res.pos; i < in.Len; i++ {
-					head, ok := idx.Get(int64(data[i]))
+					key := int64(data[i])
+					pi := uint64(spillPartition(key)) & mask
+					pt := &parts[pi]
+					if pt.ints == nil {
+						continue
+					}
+					head, ok := pt.ints.Get(key)
 					if !ok {
 						continue
 					}
+					arena, arenaNext := pt.arena, pt.next
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = i, ref, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = i, ref, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(i), ref: arena[ref], matched: true}
@@ -3303,13 +3358,20 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 			default:
 				data := keyCol.Int64Data
 				for i := p.res.pos; i < in.Len; i++ {
-					head, ok := idx.Get(data[i])
+					key := data[i]
+					pi := uint64(spillPartition(key)) & mask
+					pt := &parts[pi]
+					if pt.ints == nil {
+						continue
+					}
+					head, ok := pt.ints.Get(key)
 					if !ok {
 						continue
 					}
+					arena, arenaNext := pt.arena, pt.next
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = i, ref, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = i, ref, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(i), ref: arena[ref], matched: true}
@@ -3326,13 +3388,19 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 				if !ok {
 					continue
 				}
-				head, ok := idx.Get(key)
+				pi := uint64(spillPartition(key)) & mask
+				pt := &parts[pi]
+				if pt.ints == nil {
+					continue
+				}
+				head, ok := pt.ints.Get(key)
 				if !ok {
 					continue
 				}
+				arena, arenaNext := pt.arena, pt.next
 				for ref := head; ref >= 0; ref = arenaNext[ref] {
 					if n >= limit {
-						p.res.pos, p.res.ref, p.res.mid = i, ref, true
+						p.res.pos, p.res.ref, p.res.part, p.res.mid = i, ref, int32(pi), true
 						return buf[:n], false
 					}
 					buf[n] = matchPair{probeRow: int32(i), ref: arena[ref], matched: true}
@@ -3348,8 +3416,9 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 // inlineIntProbe call suspended, and advances the cursor to the next probe
 // row. done=false means the chain still did not fit in this call.
 func (p *HashJoinProbe) resumeIntChain(in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
-	arena := p.join.arena
-	arenaNext := p.join.arenaNext
+	pt := &p.join.parts[p.res.part]
+	arena := pt.arena
+	arenaNext := pt.next
 	row := p.res.pos
 	if in.Sel != nil {
 		row = int(in.Sel[p.res.pos])
@@ -3378,9 +3447,8 @@ func (p *HashJoinProbe) resumeIntChain(in *batch.RecordBatch, pairs []matchPair,
 // through the cursor.
 func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
 	h := p.join
-	arena := h.arena
-	arenaNext := h.arenaNext
-	idx := h.intIndex
+	parts := h.parts
+	mask := h.partMask
 	buildBatches := h.buildBatches
 	bkIdx0, bkIdx1 := h.buildKeyIdx[0], h.buildKeyIdx[1]
 
@@ -3461,10 +3529,16 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[si]
 				}
 				ck := dualIntHash(a, b)
-				head, ok := idx.Get(ck)
+				pi := uint64(spillPartition(ck)) & mask
+				pt := &parts[pi]
+				if pt.ints == nil {
+					continue
+				}
+				head, ok := pt.ints.Get(ck)
 				if !ok {
 					continue
 				}
+				arena, arenaNext := pt.arena, pt.next
 				for ri := head; ri >= 0; ri = arenaNext[ri] {
 					r := arena[ri]
 					if r.batchIdx != prevBatch {
@@ -3483,7 +3557,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					}
 					if ba == a && bb == b {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = pos, ri, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = pos, ri, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(si), ref: r, matched: true}
@@ -3509,10 +3583,16 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[si]
 				}
 				ck := dualIntHash(a, b)
-				head, ok := idx.Get(ck)
+				pi := uint64(spillPartition(ck)) & mask
+				pt := &parts[pi]
+				if pt.ints == nil {
+					continue
+				}
+				head, ok := pt.ints.Get(ck)
 				if !ok {
 					continue
 				}
+				arena, arenaNext := pt.arena, pt.next
 				for ri := head; ri >= 0; ri = arenaNext[ri] {
 					r := arena[ri]
 					if r.batchIdx != prevBatch {
@@ -3531,7 +3611,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					}
 					if ba == a && bb == b {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = pos, ri, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = pos, ri, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(si), ref: r, matched: true}
@@ -3555,10 +3635,16 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[i]
 				}
 				ck := dualIntHash(a, b)
-				head, ok := idx.Get(ck)
+				pi := uint64(spillPartition(ck)) & mask
+				pt := &parts[pi]
+				if pt.ints == nil {
+					continue
+				}
+				head, ok := pt.ints.Get(ck)
 				if !ok {
 					continue
 				}
+				arena, arenaNext := pt.arena, pt.next
 				for ri := head; ri >= 0; ri = arenaNext[ri] {
 					r := arena[ri]
 					if r.batchIdx != prevBatch {
@@ -3577,7 +3663,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					}
 					if ba == a && bb == b {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = i, ri, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = i, ri, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(i), ref: r, matched: true}
@@ -3602,10 +3688,16 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[i]
 				}
 				ck := dualIntHash(a, b)
-				head, ok := idx.Get(ck)
+				pi := uint64(spillPartition(ck)) & mask
+				pt := &parts[pi]
+				if pt.ints == nil {
+					continue
+				}
+				head, ok := pt.ints.Get(ck)
 				if !ok {
 					continue
 				}
+				arena, arenaNext := pt.arena, pt.next
 				for ri := head; ri >= 0; ri = arenaNext[ri] {
 					r := arena[ri]
 					if r.batchIdx != prevBatch {
@@ -3624,7 +3716,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					}
 					if ba == a && bb == b {
 						if n >= limit {
-							p.res.pos, p.res.ref, p.res.mid = i, ri, true
+							p.res.pos, p.res.ref, p.res.part, p.res.mid = i, ri, int32(pi), true
 							return buf[:n], false
 						}
 						buf[n] = matchPair{probeRow: int32(i), ref: r, matched: true}
@@ -3653,8 +3745,9 @@ func (p *HashJoinProbe) resumeDualIntChain(col0, col1 *batch.Vector, in *batch.R
 		p.res.pos++
 		return pairs, true
 	}
-	for ri := p.res.ref; ri >= 0; ri = h.arenaNext[ri] {
-		r := h.arena[ri]
+	pt := &h.parts[p.res.part]
+	for ri := p.res.ref; ri >= 0; ri = pt.next[ri] {
+		r := pt.arena[ri]
 		bb := h.buildBatches[r.batchIdx]
 		ba0, ba1, bok := dualIntKeyFromVectors(bb.Columns[h.buildKeyIdx[0]], bb.Columns[h.buildKeyIdx[1]], int(r.rowIdx))
 		if !bok || ba0 != a || ba1 != b {
@@ -3735,7 +3828,7 @@ func (p *HashJoinProbe) genericProbe(in *batch.RecordBatch, pairs []matchPair, l
 				}
 				pairs = append(pairs, matchPair{probeRow: int32(row), ref: ref, matched: true})
 				accepted = true
-				if h.arenaMatched != nil {
+				if h.matchedAlloc {
 					// RIGHT/FULL unmatched tracking is per accepted build ROW,
 					// not per key chain — see rowMatched.
 					h.mu.Lock()
@@ -3763,7 +3856,7 @@ func (p *HashJoinProbe) genericProbe(in *batch.RecordBatch, pairs []matchPair, l
 		}
 		start = 0
 
-		if h.arenaMatched != nil {
+		if h.matchedAlloc {
 			h.mu.Lock()
 			p.markKeyMatched(in, row)
 			h.mu.Unlock()
@@ -3875,22 +3968,21 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			isInt32 := keyCol.Type == batch.TypeInt32 || keyCol.Type == batch.TypePort ||
 				keyCol.Type == batch.TypeProtocol || keyCol.Type == batch.TypeDate
 			hasBloom := h.bloom != nil
-			intIdx := h.intIndex
 
 			// Dispatch to the tightest possible loop based on type/null/bloom/semi.
 			// Common case first: int64, no nulls, no bloom.
 			if !hasNulls && !hasBloom {
 				if isSemi {
 					if isInt32 {
-						sel = semiProbeInt32(intIdx, keyCol.Int32Data, in.Sel, in.Len, sel)
+						sel = semiProbeInt32(h, keyCol.Int32Data, in.Sel, in.Len, sel)
 					} else {
-						sel = semiProbeInt64(intIdx, keyCol.Int64Data, in.Sel, in.Len, sel)
+						sel = semiProbeInt64(h, keyCol.Int64Data, in.Sel, in.Len, sel)
 					}
 				} else {
 					if isInt32 {
-						sel = antiProbeInt32(intIdx, keyCol.Int32Data, in.Sel, in.Len, sel)
+						sel = antiProbeInt32(h, keyCol.Int32Data, in.Sel, in.Len, sel)
 					} else {
-						sel = antiProbeInt64(intIdx, keyCol.Int64Data, in.Sel, in.Len, sel)
+						sel = antiProbeInt64(h, keyCol.Int64Data, in.Sel, in.Len, sel)
 					}
 				}
 			} else {
@@ -3914,7 +4006,10 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 						}
 						return
 					}
-					_, exists := intIdx.Get(key)
+					exists := false
+					if t := h.idxPart(key).ints; t != nil {
+						_, exists = t.Get(key)
+					}
 					if (isSemi && exists) || (!isSemi && !exists) {
 						sel = append(sel, uint32(row))
 					}
@@ -3966,11 +4061,10 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 				keyCol.Type == batch.TypeProtocol || keyCol.Type == batch.TypeDate
 			hasBloom := h.bloom != nil
 
-			// Pre-cache hash table internals for inline lookup
-			htEntries := h.intIndex.entries
-			htMask := h.intIndex.mask
-			arena := h.arena
-			arenaNext := h.arenaNext
+			// Pre-cache the index parts for inline lookup; the table, arena
+			// and chain are the probed key's partition's.
+			parts := h.parts
+			pmask := h.partMask
 			buildBatches := h.buildBatches
 			filter := h.SemiAntiFilter
 
@@ -3993,7 +4087,17 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 					}
 					return
 				}
-				// Inline intIndex.Get: fibHash + linear probe (AoS layout)
+				pt := &parts[uint64(spillPartition(key))&pmask]
+				if pt.ints == nil {
+					// No key has landed in this partition — no match possible
+					if !isSemi {
+						sel = append(sel, uint32(row))
+					}
+					return
+				}
+				// Inline Get: fibHash + linear probe (AoS layout)
+				htEntries, htMask := pt.ints.entries, pt.ints.mask
+				arena, arenaNext := pt.arena, pt.next
 				htIdx := fibHash(key) & htMask
 				for {
 					e := &htEntries[htIdx]
@@ -4121,23 +4225,31 @@ func (p *HashJoinProbe) markKeyMatchedLocked(in *batch.RecordBatch, row int) {
 		if !ok {
 			return
 		}
-		head, ok := h.intIndex.Get(key)
+		pt := h.idxPart(key)
+		if pt.ints == nil {
+			return
+		}
+		head, ok := pt.ints.Get(key)
 		if !ok {
 			return
 		}
-		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-			h.arenaMatched[idx] = true
+		for idx := head; idx >= 0; idx = pt.next[idx] {
+			pt.matched[idx] = true
 		}
-	} else if h.strIndex != nil {
+	} else {
 		if !p.buildProbeKey(in, row) {
 			return // NULL key: matches nothing, so it marks nothing
 		}
-		head, ok := h.strIndex.Get(p.keyBuf)
+		pt := h.idxPartBytes(p.keyBuf)
+		if pt.strs == nil {
+			return
+		}
+		head, ok := pt.strs.Get(p.keyBuf)
 		if !ok {
 			return
 		}
-		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
-			h.arenaMatched[idx] = true
+		for idx := head; idx >= 0; idx = pt.next[idx] {
+			pt.matched[idx] = true
 		}
 	}
 }
@@ -4258,14 +4370,14 @@ func (p *HashJoinProbe) FlushMatched() *batch.RecordBatch {
 	}
 
 	var refs []buildRef
-	for i, ref := range p.join.arena {
-		if p.join.arenaMatched != nil && p.join.arenaMatched[i] {
+	p.join.forEachArenaEntry(func(pt *joinIndexPart, i int, ref buildRef) {
+		if pt.matched != nil && pt.matched[i] {
 			if p.join.residentBuildBatch(ref) == nil {
-				continue // evicted partition — the spilled replay emits it
+				return // evicted partition — the spilled replay emits it
 			}
 			refs = append(refs, ref)
 		}
-	}
+	})
 	if len(refs) == 0 {
 		return nil
 	}
@@ -4305,14 +4417,14 @@ func (p *HashJoinProbe) FlushAntiMatched() *batch.RecordBatch {
 	}
 
 	var refs []buildRef
-	for i, ref := range p.join.arena {
-		if p.join.arenaMatched == nil || !p.join.arenaMatched[i] {
+	p.join.forEachArenaEntry(func(pt *joinIndexPart, i int, ref buildRef) {
+		if pt.matched == nil || !pt.matched[i] {
 			if p.join.residentBuildBatch(ref) == nil {
-				continue // evicted partition — the spilled replay emits it
+				return // evicted partition — the spilled replay emits it
 			}
 			refs = append(refs, ref)
 		}
-	}
+	})
 	if len(refs) == 0 {
 		return nil
 	}
@@ -4398,25 +4510,25 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 	// individual chain candidates; without one it lives per arena entry.
 	var refs []buildRef
 	if p.join.Residual != nil {
-		for _, ref := range p.join.arena {
+		p.join.forEachArenaEntry(func(_ *joinIndexPart, _ int, ref buildRef) {
 			if p.join.refMatched(ref) {
-				continue
+				return
 			}
 			if p.join.residentBuildBatch(ref) == nil {
-				continue // evicted partition — the spilled replay emits it
+				return // evicted partition — the spilled replay emits it
 			}
 			refs = append(refs, ref)
-		}
+		})
 	} else {
-		for i, ref := range p.join.arena {
-			if p.join.arenaMatched != nil && p.join.arenaMatched[i] {
-				continue
+		p.join.forEachArenaEntry(func(pt *joinIndexPart, i int, ref buildRef) {
+			if pt.matched != nil && pt.matched[i] {
+				return
 			}
 			if p.join.residentBuildBatch(ref) == nil {
-				continue // evicted partition — the spilled replay emits it
+				return // evicted partition — the spilled replay emits it
 			}
 			refs = append(refs, ref)
-		}
+		})
 	}
 
 	if len(refs) == 0 {
@@ -4509,11 +4621,9 @@ func (h *HashJoin) Close() error {
 	h.trackedHashOverhead = 0
 	h.forcedStoreBytes = 0
 	h.buildBatches = nil
-	h.arena = nil
-	h.arenaNext = nil
+	h.parts = make([]joinIndexPart, len(h.parts))
+	h.matchedAlloc = false
 	h.rowMatched = nil
-	h.intIndex = nil
-	h.strIndex = nil
 	h.bloom = nil
 	h.bloomMask = 0
 	// The grace build's partition files are removed by the flush loop when
@@ -5222,178 +5332,153 @@ func setVectorNull(dst *batch.Vector, row int) {
 
 // semiProbeInt64 is the inlined semi-join probe for int64 keys without nulls or bloom.
 // Emits rows whose key EXISTS in the hash table.
-// Hash lookup is fully inlined (no idx.Get call) to eliminate per-row function overhead.
-func semiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
-	entries := idx.entries
-	mask := idx.mask
-	if inSel != nil {
-		for _, si := range inSel {
-			key := data[si]
-			htIdx := fibHash(key) & mask
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					sel = append(sel, si)
-					break
-				}
-				htIdx = (htIdx + 1) & mask
-			}
+// Hash lookup is fully inlined (no Get call) to eliminate per-row function overhead;
+// the partition selection is the same one the build's scatter used
+// (join_index_parts.go), and folds to part 0 for a build that cannot evict.
+func semiProbeInt64(h *HashJoin, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	parts, pmask := h.parts, h.partMask
+	probe := func(key int64) bool {
+		t := parts[uint64(spillPartition(key))&pmask].ints
+		if t == nil {
+			return false
 		}
-	} else {
-		for i := 0; i < inLen; i++ {
-			key := data[i]
-			htIdx := fibHash(key) & mask
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					sel = append(sel, uint32(i))
-					break
-				}
-				htIdx = (htIdx + 1) & mask
+		entries, mask := t.entries, t.mask
+		htIdx := fibHash(key) & mask
+		for {
+			e := &entries[htIdx]
+			if e.key == intHashEmpty {
+				return false
 			}
+			if e.key == key {
+				return true
+			}
+			htIdx = (htIdx + 1) & mask
 		}
 	}
-	return sel
-}
-
-// semiProbeInt32 is the inlined semi-join probe for int32 keys without nulls or bloom.
-func semiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
-	entries := idx.entries
-	mask := idx.mask
 	if inSel != nil {
 		for _, si := range inSel {
-			key := int64(data[si])
-			htIdx := fibHash(key) & mask
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					sel = append(sel, si)
-					break
-				}
-				htIdx = (htIdx + 1) & mask
-			}
-		}
-	} else {
-		for i := 0; i < inLen; i++ {
-			key := int64(data[i])
-			htIdx := fibHash(key) & mask
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					sel = append(sel, uint32(i))
-					break
-				}
-				htIdx = (htIdx + 1) & mask
-			}
-		}
-	}
-	return sel
-}
-
-// antiProbeInt64 is the inlined anti-join probe for int64 keys without nulls or bloom.
-// Emits rows whose key does NOT exist in the hash table.
-func antiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
-	entries := idx.entries
-	mask := idx.mask
-	if inSel != nil {
-		for _, si := range inSel {
-			key := data[si]
-			htIdx := fibHash(key) & mask
-			found := false
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					found = true
-					break
-				}
-				htIdx = (htIdx + 1) & mask
-			}
-			if !found {
+			if probe(data[si]) {
 				sel = append(sel, si)
 			}
 		}
-	} else {
-		for i := 0; i < inLen; i++ {
-			key := data[i]
-			htIdx := fibHash(key) & mask
-			found := false
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					found = true
-					break
-				}
-				htIdx = (htIdx + 1) & mask
-			}
-			if !found {
-				sel = append(sel, uint32(i))
-			}
+		return sel
+	}
+	for i := 0; i < inLen; i++ {
+		if probe(data[i]) {
+			sel = append(sel, uint32(i))
 		}
 	}
 	return sel
 }
 
-// antiProbeInt32 is the inlined anti-join probe for int32 keys without nulls or bloom.
-func antiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
-	entries := idx.entries
-	mask := idx.mask
+// semiProbeInt32 is semiProbeInt64 for int32-backed key columns.
+func semiProbeInt32(h *HashJoin, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	parts, pmask := h.parts, h.partMask
+	probe := func(key int64) bool {
+		t := parts[uint64(spillPartition(key))&pmask].ints
+		if t == nil {
+			return false
+		}
+		entries, mask := t.entries, t.mask
+		htIdx := fibHash(key) & mask
+		for {
+			e := &entries[htIdx]
+			if e.key == intHashEmpty {
+				return false
+			}
+			if e.key == key {
+				return true
+			}
+			htIdx = (htIdx + 1) & mask
+		}
+	}
 	if inSel != nil {
 		for _, si := range inSel {
-			key := int64(data[si])
-			htIdx := fibHash(key) & mask
-			found := false
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					found = true
-					break
-				}
-				htIdx = (htIdx + 1) & mask
-			}
-			if !found {
+			if probe(int64(data[si])) {
 				sel = append(sel, si)
 			}
 		}
-	} else {
-		for i := 0; i < inLen; i++ {
-			key := int64(data[i])
-			htIdx := fibHash(key) & mask
-			found := false
-			for {
-				e := &entries[htIdx]
-				if e.key == intHashEmpty {
-					break
-				}
-				if e.key == key {
-					found = true
-					break
-				}
-				htIdx = (htIdx + 1) & mask
+		return sel
+	}
+	for i := 0; i < inLen; i++ {
+		if probe(int64(data[i])) {
+			sel = append(sel, uint32(i))
+		}
+	}
+	return sel
+}
+
+// antiProbeInt64 is the inlined anti-join probe for int64 keys without nulls or
+// bloom: it emits rows whose key is ABSENT, and a partition with no table has
+// no keys at all, so every row routed to one is emitted.
+func antiProbeInt64(h *HashJoin, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	parts, pmask := h.parts, h.partMask
+	probe := func(key int64) bool {
+		t := parts[uint64(spillPartition(key))&pmask].ints
+		if t == nil {
+			return false
+		}
+		entries, mask := t.entries, t.mask
+		htIdx := fibHash(key) & mask
+		for {
+			e := &entries[htIdx]
+			if e.key == intHashEmpty {
+				return false
 			}
-			if !found {
-				sel = append(sel, uint32(i))
+			if e.key == key {
+				return true
 			}
+			htIdx = (htIdx + 1) & mask
+		}
+	}
+	if inSel != nil {
+		for _, si := range inSel {
+			if !probe(data[si]) {
+				sel = append(sel, si)
+			}
+		}
+		return sel
+	}
+	for i := 0; i < inLen; i++ {
+		if !probe(data[i]) {
+			sel = append(sel, uint32(i))
+		}
+	}
+	return sel
+}
+
+// antiProbeInt32 is antiProbeInt64 for int32-backed key columns.
+func antiProbeInt32(h *HashJoin, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	parts, pmask := h.parts, h.partMask
+	probe := func(key int64) bool {
+		t := parts[uint64(spillPartition(key))&pmask].ints
+		if t == nil {
+			return false
+		}
+		entries, mask := t.entries, t.mask
+		htIdx := fibHash(key) & mask
+		for {
+			e := &entries[htIdx]
+			if e.key == intHashEmpty {
+				return false
+			}
+			if e.key == key {
+				return true
+			}
+			htIdx = (htIdx + 1) & mask
+		}
+	}
+	if inSel != nil {
+		for _, si := range inSel {
+			if !probe(int64(data[si])) {
+				sel = append(sel, si)
+			}
+		}
+		return sel
+	}
+	for i := 0; i < inLen; i++ {
+		if !probe(int64(data[i])) {
+			sel = append(sel, uint32(i))
 		}
 	}
 	return sel

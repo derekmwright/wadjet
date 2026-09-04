@@ -67,7 +67,7 @@ func TestHashIndexIsNotPreSizedPastTheBudgetsRoom(t *testing.T) {
 	if err := hj.Build(context.Background(), arrivalSource(schema, rows, 0)); err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	overhead := hj.hashTableOverhead()
+	overhead := hj.indexBytes()
 	// The rule, asserted as the rule: unspillable index state may claim at most
 	// the room that was FREE when the build started. Sized by the hint instead,
 	// this is 8 MB of index against a 512 KiB budget.

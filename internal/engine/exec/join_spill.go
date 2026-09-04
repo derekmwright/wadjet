@@ -993,6 +993,10 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 	}
 	tmpJoin.BuildRowHint = int64(totalRows)
 
+	// The replay rebuilds ONE grace partition's rows and never evicts, so it
+	// takes a single index part (join_index_parts.go).
+	tmpJoin.initIndexParts(1)
+
 	tmpJoin.buildSchema = buildBatches[0].Schema
 	tmpJoin.buildKeyIdx = make([]int, len(tmpJoin.RightKeys))
 	for i, col := range tmpJoin.RightKeys {
@@ -1010,20 +1014,10 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		return nil, tmpJoin.buildKeyErr
 	}
 
-	if !tmpJoin.SemiAntiKeyOnly {
-		tmpJoin.arena = make([]buildRef, 0, totalRows)
-		tmpJoin.arenaNext = make([]int32, 0, totalRows)
-	}
-
-	// Pre-size the hash index to fit totalRows. tryEnableIntKey already sized
-	// the int path via BuildRowHint above; the string path needs an explicit
-	// pre-size here. Without it, indexBuildBatch's PutNoGrow on a 64-bucket
-	// default table loops forever once load exceeds 100% — the spilled-
-	// partition replay path used to silently bypass this for int keys but
-	// would deadlock for string keys.
-	if !tmpJoin.useIntKey && !tmpJoin.useDualIntKey {
-		tmpJoin.strIndex = newStrHashTable(totalRows)
-	}
+	// Pre-size the one index part to fit totalRows: PutNoGrow on a table with
+	// no headroom loops forever once load exceeds 100%, which this replay path
+	// used to reach for string keys.
+	tmpJoin.growPartFor(&tmpJoin.parts[0], totalRows)
 
 	for _, b := range buildBatches {
 		batchIdx := int32(len(tmpJoin.buildBatches))
@@ -1041,8 +1035,9 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 	// Without it FlushAntiMatched reads a nil arenaMatched as "nothing
 	// matched" and emits the partition's whole build side.
 	if (tmpJoin.JoinType == RightJoin || tmpJoin.JoinType == FullOuterJoin ||
-		tmpJoin.JoinType == RightSemiJoin || tmpJoin.JoinType == RightAntiJoin) && len(tmpJoin.arena) > 0 {
-		tmpJoin.arenaMatched = make([]bool, len(tmpJoin.arena))
+		tmpJoin.JoinType == RightSemiJoin || tmpJoin.JoinType == RightAntiJoin) && tmpJoin.arenaRows() > 0 {
+		tmpJoin.allocMatched()
+		tmpJoin.matchedAlloc = true
 	}
 	tmpJoin.buildBloom()
 	tmpJoin.warmBuildNullBitmaps()
@@ -1113,9 +1108,6 @@ func (h *HashJoin) indexBuildBatch(b *batch.RecordBatch, batchIdx int32) {
 			}
 		}
 	} else {
-		if h.strIndex == nil {
-			h.strIndex = newStrHashTable(64)
-		}
 		if b.Sel != nil {
 			for _, si := range b.Sel {
 				if !h.buildKeyFromBatch(b, int(si)) {
@@ -1147,19 +1139,19 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 					h.nullBuildKeyOnly()
 					continue
 				}
-				h.intIndex.Put(key, 0)
+				h.idxPart(key).intTable(64).Put(key, 0)
 			}
 		} else if !col.Nulls.HasNulls() {
 			switch col.Type {
 			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 				data := col.Int32Data
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					h.intIndex.Put(int64(data[rowIdx]), 0)
+					h.idxPart(int64(data[rowIdx])).intTable(64).Put(int64(data[rowIdx]), 0)
 				}
 			default:
 				data := col.Int64Data
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					h.intIndex.Put(data[rowIdx], 0)
+					h.idxPart(data[rowIdx]).intTable(64).Put(data[rowIdx], 0)
 				}
 			}
 		} else {
@@ -1169,7 +1161,7 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 					h.nullBuildKeyOnly()
 					continue
 				}
-				h.intIndex.Put(key, 0)
+				h.idxPart(key).intTable(64).Put(key, 0)
 			}
 		}
 	} else if h.useDualIntKey {
@@ -1181,7 +1173,8 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 					h.nullBuildKeyOnly()
 					continue
 				}
-				h.intIndex.Put(dualIntHash(a, bb), 0)
+				ck := dualIntHash(a, bb)
+				h.idxPart(ck).intTable(64).Put(ck, 0)
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -1190,26 +1183,24 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 					h.nullBuildKeyOnly()
 					continue
 				}
-				h.intIndex.Put(dualIntHash(a, bb), 0)
+				ck := dualIntHash(a, bb)
+				h.idxPart(ck).intTable(64).Put(ck, 0)
 			}
 		}
 	} else {
-		if h.strIndex == nil {
-			h.strIndex = newStrHashTable(64)
-		}
 		if b.Sel != nil {
 			for _, si := range b.Sel {
 				if !h.buildKeyFromBatch(b, int(si)) {
 					h.nullBuildKeyOnly()
 				}
-				h.strIndex.GetOrInsert(h.keyBuf, 0)
+				h.strTable(h.idxPartBytes(h.keyBuf), 64).GetOrInsert(h.keyBuf, 0)
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				if !h.buildKeyFromBatch(b, rowIdx) {
 					h.nullBuildKeyOnly()
 				}
-				h.strIndex.GetOrInsert(h.keyBuf, 0)
+				h.strTable(h.idxPartBytes(h.keyBuf), 64).GetOrInsert(h.keyBuf, 0)
 			}
 		}
 	}
@@ -1492,10 +1483,7 @@ func (p *HashJoinProbe) closeCurrentSpillPartition() {
 	}
 	if p.spillFlushTmpJoin != nil {
 		p.spillFlushTmpJoin.buildBatches = nil
-		p.spillFlushTmpJoin.arena = nil
-		p.spillFlushTmpJoin.arenaNext = nil
-		p.spillFlushTmpJoin.intIndex = nil
-		p.spillFlushTmpJoin.strIndex = nil
+		p.spillFlushTmpJoin.parts = nil
 		p.spillFlushTmpJoin = nil
 	}
 	p.spillFlushTmpProbe = nil

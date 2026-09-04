@@ -41,8 +41,14 @@ func TestHashJoin_DualIntKey(t *testing.T) {
 	if !hj.useDualIntKey {
 		t.Fatal("expected useDualIntKey=true")
 	}
-	if hj.intIndex.Len() != 3 {
-		t.Fatalf("expected 3 intIndex entries, got %d", hj.intIndex.Len())
+	keys := 0
+	for i := range hj.parts {
+		if t := hj.parts[i].ints; t != nil {
+			keys += t.Len()
+		}
+	}
+	if keys != 3 {
+		t.Fatalf("expected 3 index entries, got %d", keys)
 	}
 
 	probe := hj.Probe()
