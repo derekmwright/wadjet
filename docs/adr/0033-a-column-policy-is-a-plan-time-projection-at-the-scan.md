@@ -81,7 +81,7 @@ and now reaches the aggregate, the group key and the join key, which a
 result-row pass never could.
 
 **6. A row filter is BELOW the security projection; a user predicate is above
-it.**
+it — on every arm, including the DAG's fragment.**
 
 This is PostgreSQL's RLS ordering. The POLICY's predicate reads the row as
 stored, so a row filter written against a masked column compares the TRUE
@@ -89,7 +89,30 @@ value. A predicate the USER writes sits above the projection, so
 `WHERE ssn = '<true value>'` matches nothing and `WHERE ssn = '<mask>'` matches
 every visible row. `auth.EnforcePlanPolicies` injects the projection first and
 the row filter second for exactly this reason; `InjectRowFilter` lands directly
-above the Scan.
+above the Scan and marks its Filter `PolicyFilter`.
+
+The DAG's scan fragment carries the same two-slot order —
+`OpScan → OpFilter(policy) → SecurityProject → OpFilter(user)` — because ONE
+slot for both is a disclosure, not a detail. With one slot, a user predicate
+the plan left above the barrier (one substitution could not push down, which in
+practice means one carrying a subquery) was lowered into it and read the
+STORED column: `WHERE bal > (SELECT MIN(bal) FROM t)` over a `bal` masked to 0
+returned exactly the rows whose hidden value was positive, while the
+in-process pipeline returned none. The other operand is the policy's own mask,
+a constant the client knows, so each row's membership in that answer IS the
+hidden value.
+
+`physical.CheckSecurityFilterOrder` is the invariant, checked after every
+rewriting pass: **no predicate below a security projection may name a column
+that projection hides**, the policy's own filter excepted. It refuses `0A000`
+rather than trusting the routing, because a pass that copies `FilterExprs`
+without its `PostSecurityFilterExprs` companion fails as a disclosure, not as
+a wrong count. A pin is never the disposition for a leak.
+
+A row filter naming a column the table does not have refuses (42703): it would
+restrict no rows, which is the mask spellings' failure class said for the other
+half of a cell policy. It binds against the UNFILTERED schema, because a policy
+predicate is allowed to read a column the same policy denies.
 
 **7. An expression subquery is planned under the same policy.**
 
@@ -157,27 +180,19 @@ the coordinator's `ExecuteSQL` can present.
 
 - **A task that carries a statement's TEXT is re-planned where no policy is.**
   `TaskTypePipeline` carries `SQLText`, and `worker/executor.go`'s
-  `executePipeline` parses, builds and optimizes it again. Two consequences,
-  both open: the async door (`POST /v1/queries/async`) refuses a policed
-  statement outright rather than answer it unmasked, and a DEFERRED SCALAR
-  producer returns the stored value, which makes
-  `WHERE ssn = (SELECT MIN(ssn) FROM t)` answer 0 on the DAG where
-  single-process answers 12 (pinned in the matrix; no value escapes). The fix
-  is a pipeline task that carries the enforced PLAN rather than its text, or a
-  worker that reconstructs the projection from `PolicyDecisionJSON` — the
-  second is a SECOND enforcement path and decision 5 forbids it, so the first
-  is the direction. Its own arc.
+  `executePipeline` parses, builds and optimizes it again. Every dispatch site
+  that puts such a task on the wire is guarded at the one choke point they all
+  go through — `Scheduler.PublishTasks` refuses `0A000` when a policy shaped
+  the query and the task carries text with no operator fragment and no inputs —
+  so the consequence today is that the async door refuses rather than answers
+  unmasked. The fix is a pipeline task that carries the enforced PLAN rather
+  than its text; a worker that reconstructs the projection from
+  `PolicyDecisionJSON` is a SECOND enforcement path and decision 5 forbids it.
+  Its own arc.
 - **MERGE under a column policy is refused.** Its WHEN clauses carry raw
   SET/VALUES text that the DML rewriter does not decompose, so it cannot be
   shown to honour the policy. Refusing beats running those reads against the
   stored row.
-- **A row filter that names a column the same policy DENIES** is neither
-  rewritten nor refused: the filter sits below the barrier and reads the scan,
-  which is what a policy predicate is supposed to do, but nothing checks that
-  the column exists. A filter naming a column the table does not have at all
-  either errors at execution with no SQLSTATE or silently matches everything —
-  identical before this arc, so pre-existing. Closing it means binding the
-  injected predicate against the UNFILTERED schema at config load.
 - **A typed mask placeholder per type** (see the wire-type consequence above).
 - Per-row / per-cell labels (a visibility column, a `has_access` function
   family, dictionary-level evaluation) are a 0.19 arc, not this one.

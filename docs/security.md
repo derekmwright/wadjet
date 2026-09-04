@@ -378,7 +378,14 @@ ordering is PostgreSQL's row-level-security semantics: the *policy's* predicate
 reads the row as stored, so a `row_filter` written against a masked column
 compares the true value, while a predicate the *user* writes sits above the
 projection and compares the mask (`WHERE src_ip = '10.1.2.3'` returns nothing,
-`WHERE src_ip = '***'` returns every visible row).
+`WHERE src_ip = '***'` returns every visible row). The ordering holds on the
+distributed path too — the scan fragment carries a filter slot on each side of
+the projection.
+
+A `row_filter` naming a column the table does not have is **refused** (42703):
+it would restrict no rows, which is the same silent failure a mask that cannot
+be applied used to have. It may freely name a column the same policy denies —
+that is what a policy predicate is for.
 
 Both can be combined in a single policy. A policy with only `columns` applies masking without row filtering, and vice versa.
 
@@ -452,11 +459,16 @@ In distributed mode, identity context (name, role, and attributes) is propagated
 A column policy travels with the plan, not as a second decision the worker
 re-derives: the security projection is absorbed into the scan stage
 (`SecurityProjectExprs`) and the worker's scan fragment applies it as
-`OpScan → OpFilter → SecurityProject`, so the projection sits between the scan
-and everything that consumes rows — the aggregate, the join, the exchange.
-The FILTER runs first, and deliberately: that is the same order the
-single-process pipeline uses, and it is what makes a policy's own `row_filter`
-read the row as stored on both paths.
+
+    OpScan → OpFilter(the policy's row filter) → SecurityProject → OpFilter(the client's predicates)
+
+so the projection sits between the scan and everything that consumes rows —
+the aggregate, the join, the exchange. The two filter slots are the same
+ordering the single-process pipeline uses and the same one § Policy Evaluation
+Order describes: a policy's own `row_filter` reads the row as stored, and a
+predicate the client wrote reads the mask. The coordinator refuses the query
+(`0A000`) rather than dispatch it if any predicate below the projection names
+a column the projection hides.
 
 `worker/executor.go`'s `enforcePolicyDecision` re-checks the task against the
 serialized decision as defense in depth, rejecting a task whose requested
@@ -465,10 +477,13 @@ coordinator does not currently populate, so today it is a guard waiting for a
 producer rather than an active check — the enforcement that runs is the
 plan-time one above.
 
-**The asynchronous door does not carry a policy.** `POST /v1/queries/async`
-dispatches the statement to a worker as SQL TEXT, which the worker re-plans
-where no policy is in reach, so an identity carrying any row or column policy
-is refused there (`0A000`) and must use `POST /v1/queries`. See ADR-0033's
+**A task that carries a statement's TEXT is refused under a policy.** A worker
+re-plans such a task's SQL where no policy is in reach, so the coordinator
+refuses to dispatch one (`0A000`) whenever a row or column policy shaped the
+query — the check sits at the single point every dispatcher publishes through.
+In practice this is `POST /v1/queries/async`, which answers **403** with
+SQLSTATE `0A000` for a policed identity and names `POST /v1/queries` as the
+alternative; an identity with no obligations is unaffected. See ADR-0033's
 not-settled list.
 
 ## Security Configuration Example
