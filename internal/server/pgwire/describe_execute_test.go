@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -435,17 +434,17 @@ func TestDataGripOpeningSequenceSimpleProtocol(t *testing.T) {
 //
 // pg_postmaster_start_time formats expr.processStart through the engine's one
 // instant rendering, which carries MILLISECONDS — it was RFC3339, second
-// precision, until #544's second pass. The query ROUNDS that epoch, so a
-// process that started at .714 answers the NEXT second, and `int64(startup) ==
-// procStart.Unix()` would have failed for every start past the half second.
+// precision, until #544's second pass. The admissible answer did NOT move with
+// it, and the reason is worth writing down because the obvious reading is
+// wrong: the query's `extract(epoch from …)` is expr.fnEpoch, which is
+// `float64(t.Unix())` and TRUNCATES to the second. The fractional part never
+// reaches the `round()`, so this process's start is still exactly one second.
 //
-// The admissible answer is therefore the rounding of this process's start, not
-// its truncation: compare against the millisecond value and allow exactly the
-// half second round() can move it. That stays as tight as the old check — one
-// second late is still not this process — and does not depend on where in the
-// second the binary happened to launch.
+// Widening it to "that second or the next" was measured and FAILED — the
+// server answered 1788552675 for a start of 1788552675.714 — which is the
+// evidence for the paragraph above.
 func startupTimeIsThisProcess(startup float64, procStart time.Time) bool {
-	return math.Abs(startup-float64(procStart.UnixMilli())/1000) <= 0.5
+	return int64(startup) == procStart.Unix()
 }
 
 // TestStartupTimeIsThisProcess pins both spellings this replaces: the value
