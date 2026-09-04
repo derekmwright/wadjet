@@ -543,6 +543,51 @@ func arcD5LateralCells() []arcD5Cell {
 				"c=NULL|n=NULL|cid=Carol"},
 			wantUnreachableRoutes: 1},
 
+		// WHERE THE DEFAULT STOPS: inside a SUBQUERY or an EXISTS.
+		//
+		// The walk that applies the default covers every plansql node that can
+		// hold a column reference, and `SubqueryNode` / `ExistsNode` are the
+		// two it does not enter — they carry SQL TEXT rather than a tree.
+		// ADR-0021 §1h used to justify that by saying a lateral output is not
+		// in their scope. PostgreSQL refutes it: a subquery in the enclosing
+		// query CAN name the lateral's output, PostgreSQL resolves it, and it
+		// applies the empty-input default there like anywhere else.
+		//
+		// Here the outer row's `s.n` is substituted into the subquery's text
+		// per row by the re-run (§1e), and on the padded row it substitutes
+		// the LEFT join's NULL rather than 0 — so `amount > NULL` matches
+		// nothing and Carol's answer collapses. Not a regression: fd679ae9
+		// answers the same. Silent, on all four arms, which is why both are
+		// pinned rather than described.
+		//
+		// Closing it is not a bigger walk. The reference lives in TEXT, so
+		// reaching it means parsing the subquery, rewriting the tree and
+		// rendering it back — and the value that needs defaulting is an OUTER
+		// value substituted by the re-run, which is the correlation model's
+		// next layer rather than this rewrite's (report deferral D11). The day
+		// either cell answers PostgreSQL's row it FAILS, and that is the day
+		// the layer landed.
+		//
+		// The counters say the same thing from the other side: both route
+		// with CorrelatedLocalRoutes rather than UnreachableOutputLocalRoutes
+		// — the DAG declines these for the CORRELATED SUBQUERY in them, not
+		// for the lateral's projection, which is exactly the layer that owns
+		// the defect.
+		{issue: "#767", name: "boundary_scalar_subquery_reads_the_pad_not_the_default",
+			sql: `SELECT o.customer AS c, ` +
+				`(SELECT COUNT(*) FROM lat_item i WHERE i.amount > s.n * 40) AS k ` +
+				`FROM lat_ord o ` + lat + `ON true ORDER BY 1`,
+			want:           []string{"c=Alice|k=2", "c=Bob|k=2", "c=Carol|k=0"},
+			wantCorrRoutes: 1,
+			pgSays:         "Alice 2, Bob 2, Carol 4 — Carol's s.n is 0 there, not NULL"},
+		{issue: "#767", name: "boundary_exists_reads_the_pad_and_drops_the_row",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
+				`ON true WHERE EXISTS (` +
+				`SELECT 1 FROM lat_item i WHERE i.amount > s.n * 40) ORDER BY 1`,
+			want:           []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
+			wantCorrRoutes: 1,
+			pgSays:         "three rows — Carol survives at 0, because 0 * 40 admits every amount"},
+
 		// A WINDOW over a defaulted COUNT: a third query shape reaching the
 		// SAME carrier defect the `SELECT *` cell pins (report deferral D4).
 		// The single-process arm answers PostgreSQL's running total over all

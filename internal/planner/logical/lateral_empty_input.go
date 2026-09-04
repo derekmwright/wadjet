@@ -301,8 +301,15 @@ func applyLateralEmptyInputDefaults(info *plansql.SelectInfo, alias string, empt
 // CaseNode, ArrayLitNode, TupleNode and WindowFuncNode — every node type in
 // internal/planner/sql that holds another node, StarNode and the two
 // text-carrying ones excepted.
-// SubqueryNode and ExistsNode are deliberately NOT walked: they carry SQL
-// TEXT, not a tree, and a lateral output is not in their scope.
+// SubqueryNode and ExistsNode are NOT walked because they carry SQL TEXT
+// rather than a tree — and NOT because a lateral output is out of their scope.
+// It is not: PostgreSQL resolves `(SELECT … WHERE i.amount > s.n * 40)`
+// against the lateral and applies the default there, where this engine
+// substitutes the LEFT pad's NULL per row through the re-run and answers 0
+// for PostgreSQL's 4. Both spellings are pinned in the correlation census and
+// ADR-0021 §1h states the boundary positionally: every position in the
+// enclosing query's own expression trees, no position inside a subquery's
+// text.
 func coalesceLateralCountRefs(node plansql.Node, alias string, names map[string]bool) plansql.Node {
 	if node == nil {
 		return nil

@@ -3,6 +3,7 @@ package physical
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -200,5 +201,92 @@ func TestMergeDuplicateScansKeepsConsumerColumns(t *testing.T) {
 	p2.mergeDuplicateScans(root2)
 	if entry := p2.scanCache["items"]; entry == nil || entry.unionCols != nil {
 		t.Fatalf("unionCols = %v with a SELECT-* consumer, want nil (full schema)", entry.unionCols)
+	}
+}
+
+// TestAbandonedScanCacheIsNeverMarkedDone pins the interleaving the round-2
+// review found in the claim-release itself.
+//
+// Pipeline.runParallel calls Next on the SAME source from every worker
+// goroutine (the cache path's own comment in Next says so), so "worker A's
+// read failed, worker B then reached the end of the table" is a real
+// schedule. The end-of-table branch did not ask whether the claim had already
+// been abandoned, and ran anyway:
+//
+//   - close(cache.ready) on an already-closed channel — a panic. CatchQueryPanic
+//     turns it into XX000 rather than killing the process, which is why this is
+//     bounded, but XX000 is not the failure the query has;
+//   - and, the part that is not bounded, cache.done = true over a cache holding
+//     only the batches read BEFORE the failure. A later waiter sees done, takes
+//     the replay path, and answers the query from a TRUNCATED table with no
+//     error at all.
+//
+// The second is a wrong answer produced by an error path, which is the worst
+// shape a defect can have: the query that failed is not the query that gets
+// the wrong rows. So this test asserts all three properties directly on the
+// cache rather than through a query, because the interleaving is a schedule
+// and a query cannot be relied on to produce it.
+func TestAbandonedScanCacheIsNeverMarkedDone(t *testing.T) {
+	cat := scanCacheFixture(t, 100)
+	cache := &scanCached{unionCols: []string{"id"}}
+
+	// The claiming reader takes the claim and reads one batch.
+	claimer := &catalogScanSource{
+		catalog: cat, tableName: "items", requiredCols: []string{"id"}, cache: cache,
+	}
+	if err := claimer.Init(context.Background()); err != nil {
+		t.Fatalf("claimer init: %v", err)
+	}
+	if !claimer.claimedCache {
+		t.Fatal("claimer did not take the claim; the rest of this test proves nothing")
+	}
+	if _, err := claimer.Next(context.Background()); err != nil {
+		t.Fatalf("claimer first batch: %v", err)
+	}
+
+	// Worker A fails. The claim is released with A's reason.
+	wantCause := errors.New("read failed mid-file")
+	claimer.abandonCache(wantCause)
+	if !cache.abandoned {
+		t.Fatal("abandonCache did not mark the cache abandoned")
+	}
+	partial := len(cache.batches)
+
+	// Worker B, on the SAME source, now reaches the end of the table. It must
+	// report the claim's failure and touch nothing.
+	_, err := claimer.Next(context.Background()) // must not panic
+	if !errors.Is(err, wantCause) {
+		t.Errorf("end-of-table after an abandoned claim returned %v, want the "+
+			"claiming scan's own cause %v", err, wantCause)
+	}
+	if cache.done {
+		t.Error("end-of-table marked an ABANDONED cache done — a later reader will " +
+			"replay a truncated table and answer with no error")
+	}
+	if len(cache.batches) != partial {
+		t.Errorf("cache grew from %d to %d batches after being abandoned",
+			partial, len(cache.batches))
+	}
+
+	// And a waiter arriving afterwards fails rather than replaying the partial
+	// read. This is the property that keeps a released claim from becoming a
+	// wrong answer, and it is the reason the release could not be a bare
+	// close().
+	waiter := &catalogScanSource{
+		catalog: cat, tableName: "items", requiredCols: []string{"id"}, cache: cache,
+	}
+	err = waiter.Init(context.Background())
+	if err == nil {
+		t.Fatal("a waiter on an abandoned claim was allowed to proceed; if it " +
+			"replays it answers from a truncated table")
+	}
+	if !isAbandonedClaim(err) {
+		t.Errorf("waiter error is not an abandonedClaimError: %v", err)
+	}
+	if !errors.Is(err, wantCause) {
+		t.Errorf("waiter error does not carry the claiming scan's cause: %v", err)
+	}
+	if waiter.isReplay {
+		t.Error("waiter set isReplay on an abandoned cache")
 	}
 }

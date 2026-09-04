@@ -7907,6 +7907,17 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			close(buildStart)
 		}
 		<-buildDone // prevent goroutine leak
+		// The build and the probe are prepared CONCURRENTLY, so when the build
+		// fails the probe can fail too — on the shared scan claim the build's
+		// own teardown just released. Which of the two returns first is a
+		// scheduling race, and reporting the probe's would hand the client the
+		// consequence ("shared scan of lat_item did not complete") in place of
+		// the reason ("filter column \"amount\" does not exist"). A masked root
+		// cause is a diagnosis defect, so when both failed and the probe's is
+		// only an abandoned claim, the build's error is the answer.
+		if buildErr != nil && isAbandonedClaim(err) {
+			return nil, nil, nil, buildErr
+		}
 		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
 	}
 
@@ -12483,7 +12494,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 				if err == nil {
 					err = errors.New("scan ended before the table did")
 				}
-				return fmt.Errorf("shared scan of %s did not complete: %w", s.tableName, err)
+				return &abandonedClaimError{table: s.tableName, cause: err}
 			}
 			s.cache.mu.Unlock()
 			s.isReplay = true
@@ -12532,6 +12543,34 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// abandonedClaimError is what a waiter gets when the scan that claimed the
+// shared cache finished without filling it.
+//
+// It is never a ROOT CAUSE. The claiming scan stopped because something else
+// went wrong — its own read failed, or the query was already being torn down —
+// so this error is always downstream of the reason the client actually needs.
+// It carries that reason where the claiming scan knew it (Unwrap), and callers
+// that hold BOTH this and the real failure prefer the real one; see the probe
+// side of buildJoin.
+type abandonedClaimError struct {
+	table string
+	cause error
+}
+
+func (e *abandonedClaimError) Error() string {
+	return fmt.Sprintf("shared scan of %s did not complete: %v", e.table, e.cause)
+}
+
+func (e *abandonedClaimError) Unwrap() error { return e.cause }
+
+// isAbandonedClaim reports whether err is (or wraps) a waiter's abandoned-claim
+// failure — that is, whether it is a CONSEQUENCE of some other failure rather
+// than a reason of its own.
+func isAbandonedClaim(err error) bool {
+	var a *abandonedClaimError
+	return errors.As(err, &a)
 }
 
 // abandonCache releases a claim this source took but will not fill, so the
@@ -12619,6 +12658,16 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 			return nil, err
 		}
 		if b == nil {
+			// An ABANDONED claim is already released and its batches are a
+			// partial read. Pipeline.runParallel calls Next from every worker
+			// on this same source, so "worker A failed, worker B then reached
+			// the end of the table" is a real interleaving — and running this
+			// branch after it would close an already-closed channel (a panic)
+			// and, worse, mark a TRUNCATED cache done for the next waiter to
+			// replay as if it were the whole table.
+			if s.cache.abandoned {
+				return nil, s.cache.err
+			}
 			s.cache.done = true
 			if s.cache.ready != nil {
 				close(s.cache.ready)

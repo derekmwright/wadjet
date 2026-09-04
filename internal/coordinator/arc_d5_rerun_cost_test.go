@@ -384,6 +384,19 @@ func TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs(t *testing.T) {
 // release in abandonCache and this test does not fail with a wrong message, it
 // stops finishing.
 //
+// It also asserts that the client is told the REASON. Releasing the claim
+// makes the waiter fail, and for a while that failure was reported instead of
+// the real one: under `-race` this query answered "shared scan of lat_item did
+// not complete: scan closed before the end of the table", which names the
+// teardown rather than the uncompilable residual that caused it. The build and
+// the probe are prepared concurrently, so which of the two errors arrived
+// first was a scheduling race — and a masked root cause is a diagnosis defect
+// even when the query correctly fails. An abandoned claim is never a root
+// cause (abandonedClaimError says so in its own doc), so buildJoin prefers the
+// build's error over a probe that only failed on the claim, and BOTH arms now
+// report the residual deterministically. The invariant asserted below is that
+// the release's message never appears WITHOUT the reason.
+//
 // The second cell is the reason the fix is a release and not a decline. That
 // shape — the same two LATERALs, both compilable — ANSWERS PostgreSQL's values
 // including Carol's defaulted 0. Declining the repair whenever two LATERALs
@@ -422,21 +435,17 @@ func TestAFailedSharedScanDoesNotStrandItsOtherReaders(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sql  string
-		// wantErr / wantErrDAG: non-empty means the arm must FAIL inside
-		// bound, with this substring. The two arms fail for DIFFERENT reasons
-		// and that is the point of asserting them separately — the single arm
-		// never had the deadlock and reports the older residual defect, while
-		// the DAG arm is where the claim was stranded and now reports the
-		// RELEASE, with the reason the claiming scan stopped.
-		wantErr    string
-		wantErrDAG string
-		want       []string // otherwise: must ANSWER this
+		// wantErr: non-empty means the arm must FAIL inside bound, naming the
+		// query's REAL defect — the same substring on both arms, because the
+		// invariant is that the client is told the reason and never the
+		// consequence. See the release-message note above the table.
+		wantErr string
+		want    []string // otherwise: must ANSWER this
 	}{
 		{
-			name:       "the failing reader releases its claim, on the DAG",
-			sql:        twoReadersFirstFails,
-			wantErr:    `filter column "amount" does not exist`,
-			wantErrDAG: "shared scan of lat_item did not complete",
+			name:    "the failing reader releases its claim, and the cause survives",
+			sql:     twoReadersFirstFails,
+			wantErr: `filter column "amount" does not exist`,
 		},
 		{
 			name: "two clean readers of one table still answer",
@@ -460,9 +469,6 @@ func TestAFailedSharedScanDoesNotStrandItsOtherReaders(t *testing.T) {
 			}},
 		} {
 			wantErr := tc.wantErr
-			if arm.name == "dag" && tc.wantErrDAG != "" {
-				wantErr = tc.wantErrDAG
-			}
 			t.Run(tc.name+"/"+arm.name, func(t *testing.T) {
 				type outcome struct {
 					rows []string
@@ -494,6 +500,16 @@ func TestAFailedSharedScanDoesNotStrandItsOtherReaders(t *testing.T) {
 					}
 					if !strings.Contains(got.err.Error(), wantErr) {
 						t.Errorf("error does not name %q: %v", wantErr, got.err)
+					}
+					// The invariant that makes this a diagnosis gate and not
+					// a string check: the release's own message is a
+					// CONSEQUENCE of the failure, so it must never be all the
+					// client is told. It may appear in the chain; it may not
+					// appear alone.
+					if msg := got.err.Error(); strings.Contains(msg, "did not complete") &&
+						!strings.Contains(msg, wantErr) {
+						t.Errorf("the abandoned-claim message MASKED the real cause — the "+
+							"client is told the teardown, not the reason:\n  %v", msg)
 					}
 					if cctx.Err() != nil {
 						t.Errorf("the query only ended because its own deadline expired "+

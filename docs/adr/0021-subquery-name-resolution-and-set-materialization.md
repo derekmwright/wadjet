@@ -565,19 +565,47 @@ COUNT outputs. NULL is already right for every other aggregate — `SUM` of
 nothing IS NULL in PostgreSQL — so COUNT is the only family that needs one.
 
 **A default that reaches only some positions is a wrong answer in the
-others**, so the rewrite is a complete walk rather than a list of the places
-anyone thought of. It covers the enclosing SELECT list, WHERE, HAVING and
-ORDER BY, and inside those, every `plansql` node that can CONTAIN a column
-reference: ColRef, ParenNode, NotNode, UnaryOp, AndNode, OrNode, BinaryOp,
-CmpExpr, IsExpr, LikeExpr, BetweenExpr, InExpr, AnyAllExpr, CastNode,
-FuncCallNode, CaseNode, ArrayLitNode, TupleNode and WindowFuncNode — plus an
-aggregate's ARGUMENT (`AggArgExpr`, `AggArgs`, `AggArg`), which is a field of
-the select column rather than a node under it and was missed for exactly that
-reason. `SubqueryNode` and `ExistsNode` are deliberately not walked: they
-carry SQL TEXT, not a tree, and a lateral output is not in their scope. A
-missing arm is SILENT — the walker's default returns the node unwalked, so
-`WHERE s.n IN (0, 2)` dropped the unmatched outer row for PostgreSQL's three
-while `BETWEEN` and `IS` beside it were right.
+others**, so within the tree it walks, the rewrite is complete rather than a
+list of the places anyone thought of. It covers the enclosing SELECT list,
+WHERE, HAVING and ORDER BY, and inside those, every `plansql` node that can
+CONTAIN a column reference: ColRef, ParenNode, NotNode, UnaryOp, AndNode,
+OrNode, BinaryOp, CmpExpr, IsExpr, LikeExpr, BetweenExpr, InExpr, AnyAllExpr,
+CastNode, FuncCallNode, CaseNode, ArrayLitNode, TupleNode and WindowFuncNode —
+plus an aggregate's ARGUMENT (`AggArgExpr`, `AggArgs`, `AggArg`), which is a
+field of the select column rather than a node under it and was missed for
+exactly that reason. A missing arm is SILENT — the walker's default returns
+the node unwalked, so `WHERE s.n IN (0, 2)` dropped the unmatched outer row
+for PostgreSQL's three while `BETWEEN` and `IS` beside it were right.
+
+**Where it stops is inside a subquery, and the reason is not the one first
+given here.** `SubqueryNode` and `ExistsNode` are not walked because they hold
+SQL TEXT rather than a tree. This section used to add "and a lateral output is
+not in their scope", which is FALSE and PostgreSQL says so: a subquery in the
+enclosing query can name the lateral's output, PostgreSQL resolves it, and it
+applies the empty-input default there like anywhere else.
+
+```sql
+SELECT o.customer, (SELECT COUNT(*) FROM lat_item i WHERE i.amount > s.n * 40)
+  FROM lat_ord o JOIN LATERAL (SELECT COUNT(*) AS n FROM lat_item
+                                WHERE order_id = o.id) s ON true
+-- PostgreSQL 17  Alice 2, Bob 2, Carol 4
+-- this engine    Alice 2, Bob 2, Carol 0      (all four arms, silently)
+```
+
+The outer row's `s.n` is substituted into the subquery's TEXT per row by the
+re-run (§1e), and on the padded row it substitutes the LEFT join's NULL rather
+than 0, so `amount > NULL` matches nothing. The `EXISTS` spelling of the same
+reference drops the row outright — three rows for PostgreSQL, two here.
+
+Both are pinned (`boundary_scalar_subquery_reads_the_pad_not_the_default`,
+`boundary_exists_reads_the_pad_and_drops_the_row`) and neither is a
+regression; fd679ae9 answers the same. Closing them is not a bigger walk: the
+reference lives in text, so reaching it means parsing the subquery, rewriting
+its tree and rendering it back, and the value that needs defaulting is an
+OUTER value the re-run substitutes — which is §1c's layer, not this rewrite's.
+So the honest statement of the boundary is positional: **the default reaches
+every position in the enclosing query's own expression trees, and no position
+inside a subquery's text.**
 
 A subquery the QUERY grouped is untouched, and is the control: `GROUP BY x`
 over an empty input yields NO row in PostgreSQL either, so the unmatched outer
