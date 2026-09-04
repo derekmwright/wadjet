@@ -116,6 +116,17 @@ func (p *Planner) refuseCorrelated(err error) {
 	}
 }
 
+// refuseScalarRows parks a scalar subquery's cardinality violation found
+// during stage generation, for PlanDistributed to return. First one wins,
+// like refuseCorrelated — but this one is not a ROUTING refusal: SQLSTATE
+// 21000 is the query's answer on every path, so re-running it locally would
+// reach the same error after doing the work twice.
+func (p *Planner) refuseScalarRows(err error) {
+	if p.scalarRowsErr == nil {
+		p.scalarRowsErr = err
+	}
+}
+
 // visitExprSubqueries walks an expression AST and calls visit for every
 // embedded subquery, labelled by construct. It does not descend into the
 // subquery SQL itself: correlation analysis (FindCorrelatedRefsWithScope)

@@ -559,6 +559,20 @@ func censusShapes() []censusShape {
 			sql: "DELETE FROM arcb_pr WHERE id IN (SELECT id/0 FROM arcb_src)",
 			pg:  "state=22012 table=[1:10:a 2:20:b 3:30:c]",
 			emb: "state=22012 table=[1:10:a 2:20:b 3:30:c]"},
+		// A SCALAR SUBQUERY IS AT MOST ONE ROW, and the second row is 21000 —
+		// never the first row (ADR-0021 §5). This is the cell the `max(n)`
+		// spelling above could not be: that subquery is single-row by
+		// construction, so the corpus could not see what a multi-row one did.
+		// It took the first row the runner returned and DELETED THE WHOLE
+		// TABLE, on all three doors, where PostgreSQL raises and deletes
+		// nothing. The write door is where it mattered; the read doors had
+		// the same gap and are censused in
+		// coordinator.TestArcD5CorrelationMatchesPostgres.
+		{name: "#688 delete against a MULTI-ROW scalar subquery", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE n < (SELECT n FROM arcb_src)",
+			pg:  "state=21000 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=21000 table=[1:10:a 2:20:b 3:30:c]"},
+
 		// STILL REFUSED, and pinned rather than described: a subquery in the
 		// SET LIST. It is a different site — ResolveDMLSetClauses, which
 		// resolves an assignment against the target column's declaration —

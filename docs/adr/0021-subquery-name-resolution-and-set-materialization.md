@@ -11,7 +11,8 @@ the aggregate argument that asked for no outer scope (§1g), the LATERAL whose
 empty input still answers (§1h), and what that arc measured and did not move
 (§1i). §1j (2026-09-04) gives the answer §1a and §1b declined to give — the
 build side is the subquery's own FROM clause as a plan — and SUPERSEDES both
-declines for every relation but a recursive CTE (#852, #616).
+declines for every relation but a recursive CTE (#852, #616). §5 (2026-09-04)
+settles what "scalar" means: at most ONE row, and the second row is 21000.
 
 ## Context
 
@@ -955,6 +956,48 @@ class the invariance oracle enumerates, and the oracle would have reported
 - **Refusing every declined IN-subquery** (#524's cheaper option). Correct,
   but it sends the whole query single-process for a bounded subquery the DAG
   could otherwise run in full — the outer query is the expensive half.
+
+### 5. A scalar subquery is at most ONE row, and the second row is 21000
+
+(Added 2026-09-04, arc E6 round 1.)
+
+Every site in the engine that reduced a scalar subquery's result to a value
+took `rows[0]` and said nothing about the rest. There were four of them: the
+two expression evaluators (`expr.ScalarSubquery`, `expr.CorrelatedScalarSubquery`),
+the planner's plan-time substitution (`resolveSubqueryAST`), and the producer
+emission fallback beside it.
+
+**The rule, which is PostgreSQL's:**
+
+| rows | value |
+|---|---|
+| 0 | SQL NULL. An absent row is not an error, and every comparison against it is UNKNOWN. |
+| 1 | that row's value |
+| more | SQLSTATE **21000**, `more than one row returned by a subquery used as an expression`. Never the first row. |
+
+`expr.ScalarSubqueryValue` is the single function that decides it and every
+site calls it. The MULTI-COLUMN case is deliberately not decided there:
+PostgreSQL refuses it at analysis time with 42601 and this engine does not,
+which is a separate gap.
+
+**Why it is a rule and not a preference.** The row `rows[0]` names is whichever
+the runner or the producer emitted first — a partitioning and scheduling fact,
+not a property of the query — so the same statement answered differently on
+different paths. And this engine had just given the DML doors a subquery
+runner (ADR-0031's amendment), which took that gap through a WRITE door:
+`DELETE FROM t WHERE n < (SELECT n FROM src)` over a two-row `src` DELETED
+EVERY ROW, on all three doors, where PostgreSQL raises and deletes nothing.
+"Loud beats plausible" is exactly this case.
+
+**One consequence in the distributed planner is worth stating, because it
+moves a performance lever.** A scalar subquery is DEFERRED to a producer stage
+only when it yields one row BY CONSTRUCTION — an ungrouped aggregate, possibly
+wrapped (`SUM(…) * 0.0001`), which is what Q11 and Q22 are. Anything else is
+executed at plan time, where the whole result is in hand and the rule can be
+applied. It cannot be applied at the coordinator's end instead: a producer's
+rows are neither one per task nor one per file, and a SINGLE-row producer can
+surface in more than one file, so a count taken there is unsound in both
+directions. The lever the deferral exists for is untouched.
 
 ## Consequences
 

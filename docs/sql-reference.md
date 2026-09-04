@@ -2047,6 +2047,9 @@ Three properties are worth knowing:
   SQLSTATE `0A000`.
 - A subquery that cannot run **fails the statement and writes nothing** —
   never a row set decided by a failure.
+- A **scalar** subquery is at most ONE row. Zero rows is SQL `NULL`; more than
+  one is SQLSTATE `21000`, `more than one row returned by a subquery used as an
+  expression`, and nothing is written. The same rule applies in a `SELECT`.
 
 ### UPDATE
 

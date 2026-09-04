@@ -1069,6 +1069,14 @@ type Planner struct {
 	// into a literal set, for the same reason and by the same mechanism as
 	// correlatedErr. See in_subquery_set.go.
 	inSubqueryErr error
+	// scalarRowsErr records a SCALAR subquery this planner executed at plan
+	// time that returned more than one row. Parked rather than returned for
+	// the same reason as the three above — walkStages has no error return —
+	// and kept in its OWN field because it is not a routing refusal: it is
+	// the query's answer (SQLSTATE 21000), and routing it to the local
+	// pipeline would only reach the same error one layer down after doing
+	// the work twice. Reset at the start of generateStages.
+	scalarRowsErr error
 
 	// aggStageRenames maps a name an Aggregate node reads in the LOGICAL plan
 	// to the name the aggregate STAGE emits for it, for every group key
@@ -1606,6 +1614,38 @@ func (p *Planner) resolveFilterSubqueries(exprStr string, decls colDecls) (strin
 	return exprStr, deferred
 }
 
+// scalarSubqueryIsOneRow reports whether a subquery yields exactly one row for
+// reasons the TEXT can prove, without executing it.
+//
+// One shape qualifies: a single select item that CONTAINS an aggregate, with
+// no GROUP BY, no GROUPING SETS and no set operation. An ungrouped aggregate
+// over any input — including an empty one — is exactly one row, which is why
+// `SELECT MAX(x) FROM t` is a scalar subquery and `SELECT x FROM t` is a
+// cardinality violation waiting to happen. The item may WRAP the aggregate
+// (Q11's `SUM(…) * 0.0001`), which is why this asks for a nested aggregate
+// rather than an aggregate call at the top.
+//
+// Anything it cannot prove is false, and a false answer costs a plan-time
+// execution rather than a producer stage — the behaviour every scalar
+// subquery had before the deferral existed.
+func scalarSubqueryIsOneRow(sql string) bool {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return false
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return false
+	}
+	if info.Union != nil || len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 {
+		return false
+	}
+	if len(info.Columns) != 1 {
+		return false
+	}
+	return plansql.FindNestedAggregate(info.Columns[0].ASTExpr) != nil
+}
+
 // allocScalarPlaceholder returns the next unused placeholder name (no leading
 // colon) for this planner. Names are unique per Planner instance so that
 // multiple deferred subqueries in the same query can coexist.
@@ -1664,7 +1704,19 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		// defer regardless of the kill switch — eager evaluation over the
 		// cteCache floats-drifts vs the outer query's distributed
 		// aggregate (the Q15 SF0.1 0-row bug).
-		if scalarDeferAll || p.subqueryReferencesCTE(n.SQL) {
+		// A subquery is DEFERRED to a producer stage only when it yields ONE
+		// ROW BY CONSTRUCTION. Anything else has to be executed HERE, because
+		// this is the only place in the distributed path that sees the
+		// subquery's whole result and can therefore apply the one-row rule
+		// (ADR-0021 5): the coordinator's extractor reads the producer's
+		// OUTPUT, and a producer's rows are neither one-per-row nor
+		// one-file-per-task — a single-row producer can surface in more than
+		// one file, so a count taken there is unsound in both directions.
+		//
+		// The perf lever the deferral exists for is untouched: Q11's and
+		// Q22's subqueries are ungrouped aggregates, which is exactly the
+		// shape that still defers.
+		if scalarSubqueryIsOneRow(n.SQL) && (scalarDeferAll || p.subqueryReferencesCTE(n.SQL)) {
 			name := p.allocScalarPlaceholder()
 			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL})
 			return &plansql.LiteralPlaceholder{Name: name}
@@ -1674,15 +1726,33 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		slog.Info("plan-time scalar subquery executed on coordinator",
 			"duration", time.Since(start).Round(time.Millisecond),
 			"rows", len(rows), "error", err != nil)
-		if err != nil || len(rows) == 0 {
+		if err != nil {
 			return node
 		}
-		// Extract scalar value from first row, first column
-		for _, v := range rows[0] {
-			typ, typed := scalarColType(schema)
-			return scalarToLiteral(v, typ, typed)
+		// NO rows is not "no answer": a scalar subquery over an empty input
+		// IS SQL NULL, and every comparison against it is UNKNOWN. Leaving
+		// the subquery text in the filter instead — which is what this did —
+		// ships a predicate the worker's compiler cannot read, and the task
+		// fails. It was unreachable while every scalar subquery deferred to a
+		// producer stage; restricting the deferral to the provably-one-row
+		// shapes brought this path back.
+		//
+		// A SCALAR subquery is at most ONE row (ADR-0021 5). Substituting
+		// `rows[0]` of a multi-row result is a wrong answer wearing a
+		// plausible one, and which row it picks is whichever the producer
+		// emitted first — so the same query answers differently on different
+		// paths. PostgreSQL raises 21000 here and so does this; the refusal is
+		// PARKED because walkStages has no error return.
+		v, cardErr := expr.ScalarSubqueryValue(n.SQL, rows)
+		if cardErr != nil {
+			p.refuseScalarRows(cardErr)
+			return node
 		}
-		return node
+		if v == nil {
+			return &plansql.Lit{Kind: plansql.LitNull}
+		}
+		typ, typed := scalarColType(schema)
+		return scalarToLiteral(v, typ, typed)
 
 	case *plansql.InExpr:
 		// `x IN (SELECT …)` that reached here did NOT decorrelate into a
@@ -2850,6 +2920,9 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	}
 	if p.inSubqueryErr != nil {
 		return nil, p.inSubqueryErr
+	}
+	if p.scalarRowsErr != nil {
+		return nil, p.scalarRowsErr
 	}
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
@@ -4872,6 +4945,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.setOpErr = nil
 	p.joinCondErr = nil
 	p.correlatedErr = nil
+	p.scalarRowsErr = nil
 	p.inSubqueryErr = nil
 	p.aggStageRenames = nil
 	p.attachedFilterExprs = nil
@@ -7032,12 +7106,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 							"emit_error", err, "exec_error", sErr)
 						spliced := false
 						if sErr == nil && len(rows) > 0 {
-							typ, typed := scalarColType(schema)
-							for _, v := range rows[0] {
+							// Same one-row rule as the eager path above.
+							v, cardErr := expr.ScalarSubqueryValue(d.SubquerySQL, rows)
+							if cardErr != nil {
+								p.refuseScalarRows(cardErr)
+							} else {
+								typ, typed := scalarColType(schema)
 								lit := scalarToLiteral(v, typ, typed).String()
 								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, lit)
 								spliced = true
-								break
 							}
 						}
 						if !spliced {

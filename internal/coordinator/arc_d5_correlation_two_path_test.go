@@ -106,6 +106,7 @@ func arcD5Cells() []arcD5Cell {
 		arcD5FailedSubquerySetCells(),
 		arcD5MeasuredCells(),
 		arcD5DerivedInnerCells(),
+		arcD5ScalarCardinalityCells(),
 		arcD5AggregateArgumentCells(),
 	} {
 		out = append(out, group...)
@@ -1657,5 +1658,64 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 			want:                 []string{"n=int64:40"},
 			wantInSubqueryRoutes: 1,
 			pgSays:               "40 — every mk_outer row's n is in 0..4"},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A SCALAR SUBQUERY IS AT MOST ONE ROW, and the second row is 21000 — never
+// the first row (ADR-0021 5).
+//
+// Every evaluator in the engine took `rows[0]` and said nothing: the two
+// expression evaluators, the planner's plan-time substitution, and the
+// producer-stage fallback. The row it picked is whichever the runner or the
+// producer emitted first, so the same query answered differently on different
+// paths, and on the DML door it emptied a table where PostgreSQL raises and
+// deletes nothing.
+//
+// This group is the READ half — one cell per position a scalar subquery can
+// occupy, because each reaches a different site: a WHERE goes through the
+// planner's substitution on the DAG and the uncorrelated evaluator locally, a
+// SELECT-list item routes and reaches the evaluator, a HAVING reaches the
+// aggregate stage's substitution, and a CORRELATED one reaches the per-row
+// evaluator. The write half is in pgwire.TestDMLCensus.
+//
+// The two controls are what make the rule a rule rather than a refusal: ONE
+// row still answers, and ZERO rows is SQL NULL — an absent row is not an
+// error, and every comparison against it is UNKNOWN.
+func arcD5ScalarCardinalityCells() []arcD5Cell {
+	const many = "more than one row returned by a subquery used as an expression"
+	return []arcD5Cell{
+		{issue: "#B1", name: "multi_row_scalar_in_a_where",
+			sql:          `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n < (SELECT b.n FROM mk_inner b)`,
+			wantErrLike:  many,
+			wantSQLState: "21000",
+			pgSays:       "21000, and PostgreSQL returns no rows at all"},
+		{issue: "#B1", name: "multi_row_scalar_in_a_select_list",
+			sql:                  `SELECT (SELECT b.n FROM mk_inner b) AS x FROM mk_outer a WHERE a.id < 3 ORDER BY 1`,
+			wantErrLike:          many,
+			wantSQLState:         "21000",
+			wantScalarProjRoutes: 1,
+			pgSays:               "21000"},
+		{issue: "#B1", name: "multi_row_scalar_in_a_having",
+			sql: `SELECT a.n AS g, COUNT(*) AS c FROM mk_outer a GROUP BY a.n ` +
+				`HAVING COUNT(*) < (SELECT b.n FROM mk_inner b) ORDER BY 1`,
+			wantErrLike:  many,
+			wantSQLState: "21000",
+			pgSays:       "21000"},
+		{issue: "#B1", name: "multi_row_correlated_scalar",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n < (` +
+				`SELECT b.n FROM mk_inner b WHERE b.g = a.g)`,
+			wantErrLike:    many,
+			wantSQLState:   "21000",
+			wantCorrRoutes: 1,
+			pgSays:         "21000"},
+		{issue: "#B1", name: "control_one_row_scalar_still_answers",
+			sql:  `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n < (SELECT MAX(b.n) FROM mk_inner b)`,
+			want: []string{"n=int64:32"}},
+		{issue: "#B1", name: "control_zero_row_scalar_is_null_not_an_error",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n < (` +
+				`SELECT b.n FROM mk_inner b WHERE b.id = 999)`,
+			want:   []string{"n=int64:0"},
+			pgSays: "0 — an absent row is SQL NULL, and every comparison against it is UNKNOWN"},
 	}
 }

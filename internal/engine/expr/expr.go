@@ -5908,15 +5908,11 @@ func (e *ScalarSubquery) resolveSlow() {
 	if err != nil {
 		failEval(&SubqueryRunFailedError{Kind: "scalar", SQL: e.SQL, Err: err})
 	}
-	if len(rows) == 0 {
-		e.val = nil // a genuine empty result IS SQL NULL
-		return
+	v, cardErr := ScalarSubqueryValue(e.SQL, rows)
+	if cardErr != nil {
+		failEval(cardErr)
 	}
-	// Return first column of first row
-	for _, v := range rows[0] {
-		e.val = v
-		break
-	}
+	e.val = v
 }
 
 // MemoryAccountant is the minimal per-task memory-budget hook InSubquery

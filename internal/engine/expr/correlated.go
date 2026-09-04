@@ -45,13 +45,11 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 		// UNKNOWN and the row silently vanish.
 		failEval(&SubqueryRunFailedError{Kind: "scalar", SQL: sql, Err: runErr})
 	}
-	if len(rows) == 0 {
-		return nil // a genuine empty result IS SQL NULL
+	v, err := ScalarSubqueryValue(sql, rows)
+	if err != nil {
+		failEval(err)
 	}
-	for _, v := range rows[0] {
-		return v
-	}
-	return nil
+	return v
 }
 
 func (e *CorrelatedScalarSubquery) buildSQL(b *batch.RecordBatch, row int) (string, error) {
@@ -305,6 +303,77 @@ func failEval(err error) {
 // never a NULL"). They fail through failEval now — protocol item 8: loud
 // beats plausible, and an obviously-wrong 0 must not become a plausible wrong
 // number either (#734, #679, #535).
+
+// ScalarSubqueryValue reduces a scalar subquery's RESULT to the one value a
+// scalar subquery is, and is the single place in the engine that decides what
+// "one" means.
+//
+// PostgreSQL's rule, and now this engine's (ADR-0021 5):
+//
+//	NO rows      the value is SQL NULL. An absent row is not an error.
+//	ONE row      that row's value.
+//	MORE         SQLSTATE 21000, `more than one row returned by a subquery
+//	             used as an expression`. Never the first row.
+//
+// Every evaluator used to take `rows[0]` and say nothing. That is a WRONG
+// ANSWER wearing a plausible one — `WHERE n < (SELECT n FROM src)` over a
+// two-row `src` answered against whichever row the runner happened to return
+// first — and on the DML door it was worse than wrong: `DELETE FROM t WHERE
+// n < (SELECT n FROM src)` emptied the table where PostgreSQL raises and
+// deletes nothing.
+//
+// The MULTI-COLUMN case is deliberately not decided here. PostgreSQL refuses
+// it at analysis time with 42601 (`subquery must return only one column`) and
+// this engine does not; that is a separate gap, and picking a column out of a
+// Go map — which is what the loop below does — is arbitrary for it either
+// way. Nothing here makes that better or worse.
+func ScalarSubqueryValue(sql string, rows []map[string]any) (any, error) {
+	switch {
+	case len(rows) == 0:
+		return nil, nil // a genuine empty result IS SQL NULL
+	case len(rows) > 1:
+		return nil, &ScalarSubqueryRowsError{SQL: sql, Rows: len(rows)}
+	}
+	for _, v := range rows[0] {
+		return v, nil
+	}
+	return nil, nil
+}
+
+// ScalarSubqueryRowsError reports a scalar subquery that returned more than
+// one row.
+//
+// It is an ERROR and not a value because every value it could stand in for is
+// a lie about the data, and because the row it would otherwise pick is
+// whichever one the producer happened to emit first — a different answer on a
+// different execution path for the same query. PostgreSQL's own wording and
+// SQLSTATE, because a client branches on the code.
+type ScalarSubqueryRowsError struct {
+	SQL  string
+	Rows int
+}
+
+// Error is PostgreSQL's own sentence, with what this site knows appended.
+// Rows == 0 means the counter stopped as soon as it passed one — the DAG's
+// producer reader does that, because how many more there are does not change
+// the answer and reading on to find out costs a fetch per file.
+func (e *ScalarSubqueryRowsError) Error() string {
+	const pg = "more than one row returned by a subquery used as an expression"
+	switch {
+	case e.Rows > 0 && e.SQL != "":
+		return fmt.Sprintf("%s\n  subquery returned %d rows: %s", pg, e.Rows, e.SQL)
+	case e.SQL != "":
+		return fmt.Sprintf("%s\n  subquery: %s", pg, e.SQL)
+	}
+	return pg
+}
+
+// SQLState is PostgreSQL's 21000 (cardinality_violation).
+func (e *ScalarSubqueryRowsError) SQLState() string { return "21000" }
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on, so
+// this reaches the client as a query error rather than taking the process.
+func (e *ScalarSubqueryRowsError) FatalEvalError() error { return e }
 
 // SubqueryRunFailedError reports a subquery whose standalone execution
 // failed. It is a fatal evaluation error rather than a value because every
