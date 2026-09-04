@@ -55,7 +55,8 @@ func evictAll(t *testing.T, hj *HashJoin) int {
 // A join that has evicted every partition holds no build column data, and —
 // since the index is per partition — no index either, beyond the two structures
 // an eviction deliberately does not free: the partition HEADERS and the BLOOM
-// FILTER, which covers spilled keys on purpose.
+// FILTER, which is one structure over the whole join rather than a
+// per-partition one.
 //
 // The expected floor is DERIVED from the structure sizes, not measured. Two
 // build sizes an order of magnitude apart are run, and what must be IDENTICAL
@@ -64,8 +65,8 @@ func evictAll(t *testing.T, hj *HashJoin) int {
 //
 // The bloom does scale, deliberately and openly — it is ~10 bits per distinct
 // key by construction, it is the ONE structure an eviction must not free
-// (it covers spilled keys), and at 4% of what the index used to hold it is the
-// price of that. So it is named in the floor rather than hidden in it.
+// (it is one structure over the whole join, not a per-partition one), and at
+// 4% of what the index used to hold it is the price of that. So it is named in the floor rather than hidden in it.
 func TestEvictingEveryPartitionFreesTheIndex(t *testing.T) {
 	const budget = 1 << 20
 	headers := map[int]int64{}

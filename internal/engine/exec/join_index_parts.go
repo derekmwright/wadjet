@@ -35,9 +35,11 @@ import (
 // holds only keys k with spillPartition(k) == p, and p's arena holds only the
 // rows those keys chain through. Eviction frees the table, the arena, the
 // chain and the matched bitmap together with the columns. What must survive is
-// the BLOOM FILTER, which is built over every key the build ever saw — spilled
-// keys included, on purpose, because the probe consults it before routing — and
-// it is 4%.
+// the BLOOM FILTER, and it is 4%. It is built at the END of the build over the
+// keys the index then holds, which is exactly the key set the IN-MEMORY probe
+// asks about — the partition router has already sent the rest to disk. It is
+// NOT a filter over the whole build side, and that is why a build that spilled
+// does not publish it upstream of the router (BloomPushdownOp, join.go).
 //
 // # The floor is therefore DERIVED, not measured
 //
@@ -158,9 +160,9 @@ func (h *HashJoin) allocMatched() {
 // and the emit paths use.
 func (h *HashJoin) hasMatchedBitmaps() bool { return h.matchedAlloc }
 
-// freeIndexPart releases everything partition p's index holds. The bloom
-// filter is deliberately untouched: it covers spilled keys, which is why the
-// probe may consult it before it knows whether a partition is resident.
+// freeIndexPart releases everything partition p's index holds. The bloom filter
+// is deliberately untouched — it is one structure over the whole join, not a
+// per-partition one, and the in-memory probe still consults it.
 func (h *HashJoin) freeIndexPart(p int) {
 	if p < 0 || p >= len(h.parts) {
 		return
