@@ -97,7 +97,18 @@ func TestParseTypeID_AllTypes(t *testing.T) {
 		{"CHARACTER(4)", TypeString, false},
 		{"CHARACTER VARYING(10)", TypeString, false},
 		{"NVARCHAR(8)", TypeString, false},
-		{"TEXT(8)", TypeString, false},
+		{"VARCHAR(10485760)", TypeString, false}, // PostgreSQL's exact maximum
+		// The modifier is VALIDATED, with the same rule the CAST door reads.
+		// The first pass matched only the NAME, so DDL created a table for
+		// every one of these while `CAST(x AS VARCHAR(0))` raised 22023 — one
+		// type name, two dispositions across two doors.
+		{"VARCHAR(0)", 0, true},        // 22023 must be at least 1
+		{"CHAR(0)", 0, true},           // 22023
+		{"VARCHAR(-1)", 0, true},       // 42601 syntax error at or near "-"
+		{"VARCHAR(abc)", 0, true},      // 42601 syntax error at or near "abc"
+		{"VARCHAR(10485761)", 0, true}, // 22023 cannot exceed 10485760
+		{"TEXT(8)", 0, true},           // 42601 — PostgreSQL allows no modifier on text
+		{"CHARACTER VARYING(0)", 0, true},
 		// FLOAT(n) resolves by WIDTH, which is PostgreSQL's rule: float(1..24)
 		// is real and float(25..53) is double precision (pg_typeof, measured
 		// live). It failed the whole CREATE TABLE before, like VARCHAR(4).
@@ -134,6 +145,72 @@ func TestParseTypeID_AllTypes(t *testing.T) {
 				t.Fatalf("ParseTypeID(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestStringTypeLengthIsPostgresRule is the ONE reading of a parameterized
+// string type name, which the DDL door and the CAST door both take.
+//
+// The first pass of #838 had two: `expr.parseStringDest` refused `VARCHAR(0)`
+// with 22023 and `ParseTypeID` matched only the NAME, so `CREATE TABLE t (a
+// VARCHAR(0))` CREATED the table — one type name, two dispositions across two
+// doors, which is the defect class this arc exists to close, introduced by it.
+// It also said `character` where PostgreSQL says `char`, and passed
+// `VARCHAR(abc)` and `TEXT(5)` through in silence.
+//
+// Every code and message below is postgres:17.11's own, measured.
+func TestStringTypeLengthIsPostgresRule(t *testing.T) {
+	for _, c := range []struct {
+		in         string
+		want       int
+		state, msg string
+	}{
+		{in: "VARCHAR(255)", want: 255},
+		{in: "char(4)", want: 4},
+		{in: "CHARACTER VARYING(10)", want: 10},
+		{in: "VARCHAR(10485760)", want: 10485760},
+		{in: "VARCHAR(0)", state: "22023", msg: "length for type varchar must be at least 1"},
+		{in: "CHAR(0)", state: "22023", msg: "length for type char must be at least 1"},
+		{in: "CHARACTER(0)", state: "22023", msg: "length for type char must be at least 1"},
+		{in: "NCHAR(0)", state: "22023", msg: "length for type char must be at least 1"},
+		{in: "VARCHAR(10485761)", state: "22023",
+			msg: "length for type varchar cannot exceed 10485760"},
+		{in: "CHAR(100000000)", state: "22023",
+			msg: "length for type char cannot exceed 10485760"},
+		{in: "VARCHAR(abc)", state: "42601", msg: `syntax error at or near "abc"`},
+		{in: "VARCHAR(-1)", state: "42601", msg: `syntax error at or near "-"`},
+		{in: "TEXT(5)", state: "42601", msg: `type modifier is not allowed for type "text"`},
+	} {
+		t.Run(c.in, func(t *testing.T) {
+			n, err, ok := StringTypeLength(c.in)
+			if !ok {
+				t.Fatalf("StringTypeLength(%q) declined; it is a parameterized string type", c.in)
+			}
+			if c.state == "" {
+				if err != nil {
+					t.Fatalf("StringTypeLength(%q): %v, want %d", c.in, err, c.want)
+				}
+				if n != c.want {
+					t.Errorf("StringTypeLength(%q) = %d, want %d", c.in, n, c.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("StringTypeLength(%q) = %d, want [%s] %s (live PostgreSQL 17.11)",
+					c.in, n, c.state, c.msg)
+			}
+			if got := sqlerr.StateOf(err); got != c.state || err.Error() != c.msg {
+				t.Errorf("StringTypeLength(%q) = [%s] %v, want [%s] %s (live PostgreSQL 17.11)",
+					c.in, got, err, c.state, c.msg)
+			}
+		})
+	}
+	// The names that carry NO modifier decline, so the caller's own rules
+	// stand and an unparameterized VARCHAR is unchanged.
+	for _, in := range []string{"VARCHAR", "TEXT", "STRING", "INT64", "DECIMAL(9,2)"} {
+		if _, _, ok := StringTypeLength(in); ok {
+			t.Errorf("StringTypeLength(%q) claimed the name; it carries no string modifier", in)
+		}
 	}
 }
 

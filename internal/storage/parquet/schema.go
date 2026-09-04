@@ -116,9 +116,10 @@ func ParseTypeID(s string) (TypeID, error) {
 	// INSERT past n is accepted where PostgreSQL raises 22001: a SUPERSET,
 	// which ADR-0012 records as the acceptable direction, and a far smaller
 	// divergence than refusing the table (#838).
-	if base, ok := stripTypeParams(upper, "VARCHAR", "CHARACTER VARYING", "CHAR",
-		"CHARACTER", "NCHAR", "NVARCHAR", "TEXT"); ok {
-		_ = base
+	if _, err, ok := StringTypeLength(upper); ok {
+		if err != nil {
+			return 0, err
+		}
 		return TypeString, nil
 	}
 	// FLOAT(n) — the SQL-standard spelling of "a binary float with at least n
@@ -174,6 +175,77 @@ func ParseTypeID(s string) (TypeID, error) {
 	}
 }
 
+// StringTypeLength reads a PARAMETERIZED string type name — `VARCHAR(255)`,
+// `CHAR(4)`, `CHARACTER VARYING(10)` — and validates the parameter.
+//
+// It is ONE reading, and that is the whole point of it living here. The review
+// of #838's first pass found the CAST door refusing `VARCHAR(0)` with 22023
+// while the DDL door CREATED the table: one type name, two dispositions across
+// two doors, which is the defect class this arc exists to close. The refusal
+// has to be where both doors can read it, below the expression layer and below
+// the planner — the same argument `ParseDateDays` settles for dates.
+//
+// PostgreSQL 17.11's own rules and messages, measured:
+//
+//	VARCHAR(0), CHAR(0)        22023  length for type varchar|char must be at least 1
+//	VARCHAR(1e8), CHAR(1e8)    22023  length for type varchar|char cannot exceed 10485760
+//	VARCHAR(abc), VARCHAR(-1)  42601  syntax error at or near "abc"|"-"
+//	TEXT(5)                    42601  type modifier is not allowed for type "text"
+//	VARCHAR(10485760)          accepted — the exact maximum
+//
+// The type NAME in the 22023 message is PostgreSQL's internal one: `char` for
+// all of CHAR / CHARACTER / NCHAR, `varchar` for the varying spellings. TEXT
+// is deliberately NOT a length-carrying name here, because PostgreSQL allows
+// no modifier on it at all.
+//
+// ok=false means the name is not a parameterized string type and the caller's
+// own rules stand; a non-nil error is the refusal, which every caller must
+// PROPAGATE — it is the answer to the query.
+func StringTypeLength(name string) (n int, err error, ok bool) {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	base, isParam := stripTypeParams(upper,
+		"VARCHAR", "CHARACTER VARYING", "CHAR", "CHARACTER", "NCHAR", "NVARCHAR", "TEXT")
+	if !isParam {
+		return 0, nil, false
+	}
+	// The argument is read from the ORIGINAL spelling, not the uppercased
+	// one: PostgreSQL's syntax error names the offending token verbatim, so
+	// `VARCHAR(abc)` must say `"abc"` and not `"ABC"`.
+	orig := strings.TrimSpace(name)
+	open := strings.IndexByte(orig, '(')
+	arg := strings.TrimSpace(orig[open+1 : len(orig)-1])
+	if base == "TEXT" {
+		return 0, sqlerr.New("42601", `type modifier is not allowed for type "text"`), true
+	}
+	kind := "varchar"
+	if base == "CHAR" || base == "CHARACTER" || base == "NCHAR" {
+		kind = "char"
+	}
+	v, convErr := strconv.Atoi(arg)
+	if convErr != nil || v < 0 {
+		// A non-numeric modifier, or a negative one: PostgreSQL's GRAMMAR
+		// rejects both before any type lookup, naming the offending token.
+		tok := arg
+		if strings.HasPrefix(arg, "-") {
+			tok = "-"
+		}
+		return 0, sqlerr.New("42601", "syntax error at or near %q", tok), true
+	}
+	if v < 1 {
+		return 0, sqlerr.New("22023", "length for type %s must be at least 1", kind), true
+	}
+	if v > maxStringTypeLength {
+		return 0, sqlerr.New("22023", "length for type %s cannot exceed %d",
+			kind, maxStringTypeLength), true
+	}
+	return v, nil, true
+}
+
+// maxStringTypeLength is PostgreSQL's own cap on a varchar/bpchar modifier,
+// MaxAttrSize — 10485760, measured: `VARCHAR(10485760)` is accepted and
+// `VARCHAR(10485761)` is 22023.
+const maxStringTypeLength = 10485760
+
 // FloatTypePrecision reads `FLOAT(n)`, the SQL-standard spelling of a binary
 // float with at least n bits of mantissa (#652).
 //
@@ -195,11 +267,9 @@ func ParseTypeID(s string) (TypeID, error) {
 // `CAST(x AS FLOAT(1))` from disagreeing about what a float(1) is.
 func FloatTypePrecision(name string) (bits int, err error, ok bool) {
 	upper := strings.ToUpper(strings.TrimSpace(name))
-	base, isParam := stripTypeParams(upper, "FLOAT")
-	if !isParam {
+	if _, isParam := stripTypeParams(upper, "FLOAT"); !isParam {
 		return 0, nil, false
 	}
-	_ = base
 	open := strings.IndexByte(upper, '(')
 	n, convErr := strconv.Atoi(strings.TrimSpace(upper[open+1 : len(upper)-1]))
 	if convErr != nil {
@@ -405,8 +475,13 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 		}
 	}
 
-	// Simple type
-	tid, err := ParseTypeID(upper)
+	// Simple type. The ORIGINAL spelling, for the reason the ROW branch above
+	// gives: ParseTypeID upper-cases whatever it is handed for the name
+	// lookup, and it also has to QUOTE the offending token back in a syntax
+	// error — `VARCHAR(abc)` is `syntax error at or near "abc"` on the live
+	// server, not `"ABC"`. Handing it the upper-cased copy shouted the user's
+	// identifier back at them.
+	tid, err := ParseTypeID(trimmed)
 	if err != nil {
 		return Column{}, err
 	}

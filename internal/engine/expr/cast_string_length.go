@@ -1,12 +1,10 @@
 package expr
 
 import (
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"unicode/utf8"
 
-	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // `CAST(x AS VARCHAR(n))` and `CAST(x AS CHAR(n))` — the VALUE half of #838.
@@ -63,32 +61,24 @@ func (e *Cast) stringDestination() (int, bool) {
 	return n, ok
 }
 
-// parseStringDest reads `varchar(n)` / `char(n)` / `character varying(n)` /
-// `character(n)`. A zero or negative n is PostgreSQL's 22023 and is raised
-// from here — the destination is refused whether or not a row reaches it,
-// exactly as a refused literal is (invalidNumericLiteralError's reasoning).
+// parseStringDest resolves a length-carrying string destination through
+// `parquet.StringTypeLength`, the ONE reading of a parameterized string type
+// name that the DDL door reads too.
+//
+// It used to be a second, narrower reading, and that is exactly the defect
+// this arc keeps closing elsewhere: it had the `n < 1` refusal that
+// `ParseTypeID` lacked (so `CAST(x AS VARCHAR(0))` raised while
+// `CREATE TABLE t (a VARCHAR(0))` was accepted), it said `character` where
+// PostgreSQL says `char`, and it silently PASSED THROUGH `VARCHAR(abc)` and
+// `TEXT(5)`, which the server refuses with 42601. One function, both doors,
+// one disposition per type name.
 func parseStringDest(dest string) (int, bool) {
-	s := strings.ToLower(strings.TrimSpace(dest))
-	open := strings.IndexByte(s, '(')
-	if open < 0 || !strings.HasSuffix(s, ")") {
+	n, err, ok := parquet.StringTypeLength(dest)
+	if !ok {
 		return 0, false
 	}
-	name := strings.TrimSpace(s[:open])
-	switch name {
-	case "varchar", "char", "character varying", "character", "nchar", "nvarchar":
-	default:
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(s[open+1 : len(s)-1]))
 	if err != nil {
-		return 0, false
-	}
-	if n < 1 {
-		kind := "varchar"
-		if name == "char" || name == "character" || name == "nchar" {
-			kind = "character"
-		}
-		panic(fatalEval{sqlerr.New("22023", "length for type %s must be at least 1", kind)})
+		panic(fatalEval{err})
 	}
 	return n, true
 }

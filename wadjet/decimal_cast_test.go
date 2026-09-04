@@ -235,17 +235,62 @@ func TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration(t *testing.T) {
 		})
 	}
 	// The destination PostgreSQL refuses outright.
-	t.Run("zero_length_is_22023", func(t *testing.T) {
-		_, err := db.Query(context.Background(),
-			`SELECT CAST('abcdef' AS VARCHAR(0)) AS v FROM decdecl WHERE id = 1`)
-		if err == nil {
-			t.Fatal("answered; PostgreSQL 17.11 raises 22023")
+	// ONE type name, ONE disposition, on BOTH doors. The first pass of #838
+	// gave `CAST(x AS VARCHAR(0))` PostgreSQL's 22023 while the DDL spelling
+	// of the identical type name was ACCEPTED — the defect class this arc
+	// exists to close, introduced by it. Both doors now read
+	// `parquet.StringTypeLength`; every code and message is 17.11's own.
+	for _, c := range []struct {
+		typeName   string
+		state, msg string
+	}{
+		{"VARCHAR(0)", "22023", "length for type varchar must be at least 1"},
+		{"CHAR(0)", "22023", "length for type char must be at least 1"},
+		{"VARCHAR(10485761)", "22023", "length for type varchar cannot exceed 10485760"},
+		{"VARCHAR(abc)", "42601", `syntax error at or near "abc"`},
+		{"TEXT(5)", "42601", `type modifier is not allowed for type "text"`},
+	} {
+		t.Run("both_doors_refuse_"+c.typeName, func(t *testing.T) {
+			ctx := context.Background()
+			for _, d := range []struct{ door, sql string }{
+				{"CAST", `SELECT CAST('abcdef' AS ` + c.typeName + `) AS v FROM decdecl WHERE id = 1`},
+				{"DDL", `CREATE TABLE d1both (a ` + c.typeName + `)`},
+			} {
+				_, err := db.Query(ctx, d.sql)
+				if err == nil {
+					t.Errorf("the %s door ANSWERED; PostgreSQL 17.11 raises [%s] %s. One type "+
+						"name cannot have two dispositions across two doors.\n  SQL: %s",
+						d.door, c.state, c.msg, d.sql)
+					continue
+				}
+				if got := sqlerr.StateOf(err); got != c.state {
+					t.Errorf("the %s door raised SQLSTATE %s, want %s: %v", d.door, got, c.state, err)
+				}
+				// The message is compared case-INSENSITIVELY, and only
+				// because of the DDL door: the SQL lexer upper-cases an
+				// unquoted identifier before the type reader ever sees it, so
+				// `VARCHAR(abc)` echoes `"ABC"` there while the CAST door
+				// echoes `"abc"` as PostgreSQL does. That is a lexer property
+				// and not this rule's — the CODE, which is what a client
+				// branches on, is identical on both doors, and the exact
+				// spelling is asserted by parquet.TestStringTypeLengthIsPostgresRule.
+				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(c.msg)) {
+					t.Errorf("the %s door: %v does not carry PostgreSQL's message %q",
+						d.door, err, c.msg)
+				}
+			}
+		})
+	}
+	// The BOUNDARY: a valid modifier is accepted on both doors, so a repair
+	// that refused every parameterized spelling could not pass this.
+	t.Run("both_doors_accept_a_valid_length", func(t *testing.T) {
+		ctx := context.Background()
+		if _, err := db.Query(ctx,
+			`SELECT CAST('abcdef' AS VARCHAR(4)) AS v FROM decdecl WHERE id = 1`); err != nil {
+			t.Errorf("the CAST door refused a valid length: %v", err)
 		}
-		if got, want := sqlerr.StateOf(err), "22023"; got != want {
-			t.Errorf("SQLSTATE %s, want %s: %v", got, want, err)
-		}
-		if !strings.Contains(err.Error(), "length for type varchar must be at least 1") {
-			t.Errorf("%v does not carry PostgreSQL's message", err)
+		if _, err := db.Query(ctx, `CREATE TABLE d1ok (a VARCHAR(255), b CHAR(4))`); err != nil {
+			t.Errorf("the DDL door refused a valid length: %v", err)
 		}
 	})
 }
