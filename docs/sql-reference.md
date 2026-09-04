@@ -974,6 +974,12 @@ on every path with SQLSTATE `0A000` and a message naming the two carriers —
 - two members of the `IPV4` / `IPV6` / `CIDR` family;
 - `PORT`, `PROTOCOL` or `DURATION` beside a `DECIMAL`. Beside an integer or a
   float they resolve and answer.
+- a QUOTED literal whose resolved type is `BOOLEAN`, an integer, a float,
+  `TIMESTAMP`, `PORT`, `PROTOCOL` or `DURATION` — the literal arrives as text
+  and those columns are not built from text here. Write the literal unquoted,
+  or `CAST` it. `NULL` is unaffected, and the other types
+  (`TEXT`, `BYTEA`, the address types, `UUID`, `DATE`, `NUMERIC`) resolve and
+  answer.
 
 An arm is read through what its OWN plan publishes, so an arm's SELECT list may
 name anything a standalone `SELECT` may — a window function included, aliased

@@ -2271,6 +2271,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     own, returned "unknown" for the whole inner node, and the DAG then REFUSED
     a query the single-process path answered.
 
+    **A QUOTED literal whose resolved type cannot be built from TEXT is
+    refused at plan time with 0A000.** (Amended 2026-09-04, round-3 review of
+    #648.) PostgreSQL parses such a literal with the resolved type's own input
+    function, so `c_ts ∪ '2010-01-01 00:00:00'` is timestamp, `c_bool ∪ 'true'`
+    boolean and `c_port ∪ 'notaport'` is 22P02 — all measured live on 17.11.
+    Wadjet's literal arm produces the constant as a STRING box and that box
+    reaches the result column's vector unchanged, so this works for exactly the
+    types whose vector has a text arm. `batch.VectorAcceptsText` names them —
+    STRING, BYTES, IPV4, IPV6, CIDR, MAC, UUID, DATE, DECIMAL — and it is held
+    to what `SetValue` actually does by
+    `batch.TestVectorAcceptsTextIsWhatSetValueDoes`, which writes a string into
+    a vector of every one of the 22 types and compares; a list somebody keeps
+    by hand is what cost this rule a review round already.
+
+    The other nine — BOOL, INT32, INT64, FLOAT32, FLOAT64, TIMESTAMP, PORT,
+    PROTOCOL, DURATION — failed the #361 silent-write guard with NO SQLSTATE
+    ("batch: cannot store string into TIMESTAMP vector", which the pgwire door
+    reports as XX000, "the server broke") mid-execution on the single-process
+    path, and on the stage DAG after THREE retries of a deterministic parse
+    failure. They are refused at PLAN time now, with the 0A000 the carrier gap
+    takes and for the same reason: PostgreSQL answers the query and this engine
+    does not yet. A bare NULL is unaffected — it has no text to parse and every
+    vector takes one — and so is an UNQUOTED literal.
+
+    Closing it means giving the literal its resolved type at PLAN time rather
+    than at the vector: parse the text into the target type's own box in the
+    arm's rows (the single path, beside `setOpLiteralRows`) and rewrite the
+    arm's projection expression to the target's literal spelling (the DAG,
+    beside `reconcileSetOpArmTypes`' stamp) — which also makes unparseable text
+    22P02 the way PostgreSQL reports it, rather than a refusal of the whole
+    statement.
+
     **The result's TYPMOD is the typed arm's, where PostgreSQL's is
     unconstrained.** `'1.5' ∪ numeric(9,2)` is `numeric` with typmod −1 there,
     so PostgreSQL renders the literal `1.5` beside the column's `2.00`; wadjet

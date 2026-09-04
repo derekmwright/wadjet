@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -472,6 +473,70 @@ func setOpCarrierGap(column string, a, b parquet.TypeID) error {
 			"does not yet; CAST both arms to one type", column, a, b)
 }
 
+// setOpQuotedLiteralGap is the refusal for an UNKNOWN-typed literal — a
+// QUOTED string — whose resolved type this engine cannot build from text.
+//
+// PostgreSQL types such a literal from the other arms and coerces it with THAT
+// type's input function, so `SELECT c_ts … UNION ALL SELECT '2010-01-01
+// 00:00:00'` is timestamp, `c_bool ∪ 'true'` boolean and `c_port ∪ 'notaport'`
+// 22P02. Wadjet's literal arm produces a STRING box and that box reaches the
+// result column's vector unchanged, so the nine types batch.VectorAcceptsText
+// says no to — BOOL, the four numeric machine types, TIMESTAMP, PORT, PROTOCOL
+// and DURATION — failed with the #361 silent-write guard: no SQLSTATE at all
+// (the pgwire door then says XX000, "the server broke"), mid-execution on the
+// single-process path and after THREE retries of a deterministic parse failure
+// on the stage DAG.
+//
+// So it is refused at PLAN time instead, with the same 0A000 the carrier gap
+// takes and for the same reason: PostgreSQL answers the query and this engine
+// does not yet. A bare NULL is unaffected — a NULL has no text to parse and
+// every vector takes one — and so is an UNQUOTED literal, which the evaluator
+// already types.
+//
+// Closing it means giving the literal its resolved type at PLAN time rather
+// than at the vector: parse the text into the target type's own box in the
+// arm's rows (the single path, beside setOpLiteralRows) and rewrite the arm's
+// projection expression to the target's literal spelling (the DAG, beside
+// reconcileSetOpArmTypes' stamp), which also makes unparseable text 22P02 the
+// way PostgreSQL reports it. Recorded in ADR-0012 item 12.
+func setOpQuotedLiteralGap(column string, arm int, t parquet.TypeID) error {
+	return sqlerr.New("0A000",
+		"set operation not supported: result column %q resolves to %s and arm %d selects a "+
+			"QUOTED literal — PostgreSQL types an unknown literal from the other arms and parses "+
+			"it with that type's input function, and wadjet cannot yet build a %s value from a "+
+			"literal's text here; write the literal unquoted, or CAST it to the column's type",
+		column, t, arm+1, t)
+}
+
+// setOpQuotedLiteralArms marks, per OUTPUT POSITION, the select items of one
+// arm that are QUOTED string literals. It is setOpUnknownLiteralArms minus the
+// bare NULLs: both are UNKNOWN-typed to PostgreSQL and take the other arms'
+// type, but only a quoted one carries TEXT that has to reach a typed vector.
+func setOpQuotedLiteralArms(arm *logical.Node, cols int) []bool {
+	proj := findOutputProjectionNode(arm)
+	if proj == nil || len(proj.Projections) != cols {
+		return nil
+	}
+	out := make([]bool, cols)
+	any := false
+	for i, pr := range proj.Projections {
+		if pr.ASTExpr == nil {
+			continue
+		}
+		lit, ok := plansql.Unparen(pr.ASTExpr).(*plansql.Lit)
+		if !ok {
+			continue
+		}
+		if lit.Kind == plansql.LitString {
+			out[i], any = true, true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
 // SetOpCarrierGapPairs is every ordered pair this engine refuses with
 // setOpCarrierGap: PostgreSQL resolves it and there is no carrier here. It is
 // COMPUTED from setOpNoCarrier over the whole type list rather than written
@@ -627,6 +692,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 	}
 	plans := make([]setOpArmPlan, 0, len(node.Children))
 	unknown := make([][]bool, 0, len(node.Children))
+	quoted := make([][]bool, 0, len(node.Children))
 	oversize := make([][]bool, 0, len(node.Children))
 	for _, child := range node.Children {
 		plan, err := setOpArmProjection(child, outNames)
@@ -635,6 +701,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 		}
 		plans = append(plans, plan)
 		unknown = append(unknown, setOpUnknownLiteralArms(child, len(outNames)))
+		quoted = append(quoted, setOpQuotedLiteralArms(child, len(outNames)))
 		oversize = append(oversize, setOpOversizeLiteralArms(child, len(outNames)))
 	}
 	op := setOpBaseName(node)
@@ -710,6 +777,21 @@ func setOpArmTypeConflict(node *logical.Node) error {
 				break
 			}
 			want = setOpColType{typ: widened, known: true}
+		}
+		// A QUOTED literal whose resolved type cannot be built from text.
+		// Deferred like the carrier gap and for the same reason: it is a fact
+		// about this engine, and PostgreSQL's own 42804 for some other column
+		// outranks it.
+		if want.known && !batch.VectorAcceptsText(want.typ) {
+			for i := range plans {
+				if !setOpArmIsUnknownLit(quoted, i, col) {
+					continue
+				}
+				if carrierGap == nil {
+					carrierGap = setOpQuotedLiteralGap(outNames[col], i, want.typ)
+				}
+				break
+			}
 		}
 		// A numeric literal no DECIMAL this engine declares can hold, beside an
 		// arm whose values are EXACT. PostgreSQL's numeric is unbounded and

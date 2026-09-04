@@ -221,6 +221,59 @@ func setOpNoTypeCells() []setOpNoTypeCell {
 				`SELECT 'b' FROM decpair WHERE id = 1`,
 			wantRows: 2},
 
+		// --- an UNKNOWN literal whose resolved type cannot hold TEXT -------
+		//
+		// PostgreSQL answers all of these: it types the quoted literal from
+		// the other arm and parses it with that type's input function
+		// (measured live 17.11 — `timestamp ∪ '2010-01-01 00:00:00'` is
+		// timestamp, `boolean ∪ 'true'` boolean, `integer ∪ 'notaport'`
+		// 22P02). Wadjet's literal arm produces a STRING box, and nine of the
+		// 22 vector types have no text arm to store it in
+		// (batch.VectorAcceptsText, which is checked against SetValue itself):
+		// BOOL, INT32, INT64, FLOAT32, FLOAT64, TIMESTAMP, PORT, PROTOCOL,
+		// DURATION.
+		//
+		// Measured at ee778066, every one of them failed the #361 silent-write
+		// guard with NO SQLSTATE — "batch: cannot store string into TIMESTAMP
+		// vector", which pgwire reports as XX000, "the server broke" —
+		// mid-execution on the single-process path and after THREE retries of
+		// a deterministic parse failure on the DAG. They are refused at PLAN
+		// time now, with the same 0A000 the carrier gap takes. The mechanism
+		// for closing them is in setOpQuotedLiteralGap's comment and in
+		// ADR-0012 item 12; the CONTROLS below are the same shapes with a bare
+		// NULL and with an unquoted literal, both of which answer.
+		{issue: "#648", name: "a_quoted_literal_beside_a_timestamp",
+			sql: `SELECT c_ts AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '2010-01-01 00:00:00' FROM typemx WHERE id = 0`,
+			wantErr: `resolves to TIMESTAMP and arm 2 selects a QUOTED literal`},
+		{issue: "#648", name: "a_quoted_literal_beside_a_boolean",
+			sql: `SELECT c_bool AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT 'true' FROM typemx WHERE id = 0`,
+			wantErr: `resolves to BOOL and arm 2 selects a QUOTED literal`},
+		{issue: "#648", name: "a_quoted_literal_beside_a_port",
+			sql: `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '443' FROM typemx WHERE id = 0`,
+			wantErr: `resolves to PORT and arm 2 selects a QUOTED literal`},
+		{issue: "#648", name: "a_quoted_literal_beside_a_bigint",
+			sql: `SELECT c_i64 AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT '7' FROM typemx WHERE id = 0`,
+			wantErr: `resolves to INT64 and arm 2 selects a QUOTED literal`},
+		// FIRST arm too: the disposition cannot depend on which side the
+		// literal is on.
+		{issue: "#648", name: "a_quoted_literal_first_beside_a_timestamp",
+			sql: `SELECT '2010-01-01 00:00:00' AS v FROM typemx WHERE id = 0 UNION ALL ` +
+				`SELECT c_ts FROM typemx WHERE id < 3`,
+			wantErr: `resolves to TIMESTAMP and arm 1 selects a QUOTED literal`},
+		// The two controls that must keep ANSWERING.
+		{issue: "#648", name: "ctl_a_null_literal_beside_a_timestamp",
+			sql: `SELECT c_ts AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT NULL FROM typemx WHERE id = 0`,
+			wantRows: 4},
+		{issue: "#648", name: "ctl_an_unquoted_literal_beside_a_port",
+			sql: `SELECT c_port AS v FROM typemx WHERE id < 3 UNION ALL ` +
+				`SELECT 443 FROM typemx WHERE id = 0`,
+			wantRows: 4},
+
 		// --- PostgreSQL matches the pair and this engine has NO CARRIER ----
 		//
 		// DATE beside TIMESTAMP and two members of the inet family are one
@@ -312,6 +365,18 @@ func TestASetOperationWithNoCommonTypeIsRefusedAtPlanTime(t *testing.T) {
 						if got := sqlerr.StateOf(err); got != "42804" {
 							t.Errorf("the refusal carries SQLSTATE %q, want 42804 "+
 								"(PostgreSQL's datatype_mismatch)\n  SQL: %s", got, tc.sql)
+						}
+					}
+					// Everything else this gate refuses is a shape PostgreSQL
+					// ANSWERS: a carrier gap, or a quoted literal whose
+					// resolved type has no text arm. 0A000 is what says so.
+					// Unclassified, both reached a driver as XX000 — "the
+					// server broke" — on a query PostgreSQL runs.
+					if !isDAG && !strings.Contains(tc.wantErr, "cannot be matched") {
+						if got := sqlerr.StateOf(err); got != "0A000" {
+							t.Errorf("the refusal carries SQLSTATE %q, want 0A000 "+
+								"(feature_not_supported — PostgreSQL answers this query)\n  SQL: %s",
+								got, tc.sql)
 						}
 					}
 				default:
