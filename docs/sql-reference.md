@@ -893,6 +893,20 @@ body, or a forward reference to a later item — is SQLSTATE `42P01`
 (`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
 the exception: a recursive CTE's name IS visible inside its own body.
 
+A `WITH` may also be written INSIDE a nested query block — a derived table, a
+CTE body, a `LATERAL` subquery — and its items are in scope for that block; the
+enclosing query's items stay visible there too:
+
+```sql
+WITH o AS (SELECT id, dx FROM b)
+SELECT v FROM (WITH c AS (SELECT id, dx FROM o) SELECT dx AS v FROM c) t
+```
+
+One divergence: where a block's own item has the SAME NAME as one of the
+enclosing query's, PostgreSQL reads the inner definition and wadjet reads the
+outer one. A `WITH` written inside a scalar or `IN` subquery is not parsed at
+all (SQLSTATE `42601`).
+
 ## Duplicate output column names
 
 A result may carry two columns of the same name — `SELECT abs(a), abs(b)` is

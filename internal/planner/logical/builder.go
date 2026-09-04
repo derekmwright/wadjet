@@ -1429,6 +1429,45 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 	return plan, nil
 }
 
+// scopeCTEs is the CTE list in scope INSIDE a nested query block: the items the
+// enclosing scope offers, then the block's OWN WITH items.
+//
+// A block's own WITH used to be DROPPED at every door that re-parses its SQL —
+// a derived table, a CTE body, a LATERAL subquery — because the builder was
+// handed the ENCLOSING list and the parsed SelectInfo's `CTEs` field was never
+// read. `SELECT v FROM (WITH c AS (SELECT dx FROM setopdecjb) SELECT dx AS v
+// FROM c) t` therefore planned a SCAN of a table called `c`, and since no such
+// table exists the single-process path answered NO ROWS where PostgreSQL
+// answers four, and the stage DAG failed with "stage scan-0 has no
+// dependencies and no ScanFiles" (#684). It is a wrong answer on one path and
+// a plan the other cannot run.
+//
+// The block's own items come LAST, so `resolveTableOrCTE`'s first-match walk
+// keeps the ENCLOSING scope's precedence and — the reason that walk passes
+// `ctes[:i]` down — an item can still only see the items DEFINED BEFORE IT
+// (#771: handing a CTE the whole list let one that shadows a base table read
+// ITSELF, without bound, and took the process down with a stack overflow).
+//
+// That precedence is BACKWARDS for the one shape where the two scopes collide
+// — PostgreSQL reads a block's own item where this reads the enclosing one —
+// and it is deliberately left that way here, because reversing the search
+// fixes it on the stage DAG and NOT on the single-process path, which would
+// answer one query two ways. The single-process planner materializes CTEs into
+// `Planner.cteCache` keyed by NAME over the STATEMENT's top-level list, so a
+// shadowing item's subtree, tagged with the same CTEName, reads the enclosing
+// item's materialization whatever the logical builder resolved. Correct
+// shadowing is that cache becoming scope-aware as well as this search being
+// reversed, which is a change to the CTE identity itself and not to this list.
+// TestAWithInsideASubqueryBlockIsInScopeThere pins the divergence.
+func scopeCTEs(outer, own []plansql.CTEDef) []plansql.CTEDef {
+	if len(own) == 0 {
+		return outer
+	}
+	out := make([]plansql.CTEDef, 0, len(outer)+len(own))
+	out = append(out, outer...)
+	return append(out, own...)
+}
+
 // resolveTableOrCTE checks whether a table reference matches a CTE name.
 //
 // `table` and `ctes` are held by POINTER into the caller's own AST, not by
@@ -1472,7 +1511,7 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 			//
 			// LATER CTEs are excluded for the same reason: PostgreSQL refuses
 			// a forward reference rather than resolving it.
-			plan, err := BuildFromSelectWithCTEs(selectInfo, ctes[:i])
+			plan, err := BuildFromSelectWithCTEs(selectInfo, scopeCTEs(ctes[:i], selectInfo.CTEs))
 			if err != nil {
 				return nil, fmt.Errorf("building plan for CTE %q: %w", cte.Name, err)
 			}
@@ -1530,7 +1569,7 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 		if err := applyColumnAliases(selectInfo, table.ColumnAliases, aliasName, "table"); err != nil {
 			return nil, err
 		}
-		plan, err := BuildFromSelectWithCTEs(selectInfo, ctes)
+		plan, err := BuildFromSelectWithCTEs(selectInfo, scopeCTEs(ctes, selectInfo.CTEs))
 		if err != nil {
 			return nil, fmt.Errorf("building plan for derived table: %w", err)
 		}
@@ -1883,7 +1922,7 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		subInfo.Columns = append(injected, subInfo.Columns...)
 	}
 
-	right, err := BuildFromSelectWithCTEs(subInfo, ctes)
+	right, err := BuildFromSelectWithCTEs(subInfo, scopeCTEs(ctes, subInfo.CTEs))
 	if err != nil {
 		return nil, "", lateralEmptyInput{}, fmt.Errorf("building LATERAL subquery plan: %w", err)
 	}
