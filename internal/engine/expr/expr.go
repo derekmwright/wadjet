@@ -12110,9 +12110,16 @@ func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castT
 	if !ok {
 		src = v
 	}
+	// TEXT goes through the engine's ONE temporal accept-set, which answers
+	// the VALUE and the refusal from the same function — see
+	// castTemporalText. Every other box keeps parseDateArg's reading: a DATE
+	// column arrives as a civilDate, a TIMESTAMP one as a time.Time, and a
+	// bare number still reads as days since the epoch.
+	if out, isText := castTemporalText(src, kind); isText {
+		return out
+	}
 	t, _, ok := parseDateArg(src)
 	if !ok {
-		raiseTemporalCastRefusal(src, kind)
 		return nil
 	}
 	if kind == castToDateKind {

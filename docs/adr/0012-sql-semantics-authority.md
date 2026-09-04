@@ -246,14 +246,35 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `expr.TestCastToANetworkTypeStillPassesThrough`, which fails the day the
      cast starts refusing. UUID and the float family were the same shape and
      ARE fixed: both had a single unambiguous accept-set to read.
-   - **A DMY date spelling is 22007 here and 22008 in PostgreSQL.**
-     (Added 2026-09-03, #840; the accept-set is #639's.) Both engines REFUSE
-     `'31/12/1996'`. PostgreSQL's DateStyle ISO, MDY reads the leading field
-     as a month and calls month 31 a field-range failure; wadjet refuses every
-     spelling whose field ORDER DateStyle would decide, so it is "not a date"
-     and the code is 22007. One accept-set decision, the same at the ingest
-     boundary, the writer and the filter kernel — `parquet.ParseDateDays` is
-     the single classifier — now visible through CAST as well.
+   - **The CAST door reads the engine's ONE temporal accept-set, and inherits
+     its residuals.** (Added 2026-09-03, #840; the accept-set is #639's and
+     #641's.) `CAST(<text> AS DATE|TIMESTAMP)` takes both its VALUE and its
+     refusal from `parquet.ParseDateDays` / `ParseTimestampMillis` — the same
+     function the ingest boundary, the parquet writers, the row→batch builder
+     and the filter kernel read — so a literal that STORES is a literal a
+     predicate reads the same way and a CAST reads the same way. Three
+     consequences follow, and all three are the accept-set's rather than the
+     cast's:
+
+     - A DMY spelling is **22007 here and 22008 in PostgreSQL**. Both engines
+       REFUSE `'31/12/1996'`; PostgreSQL's DateStyle ISO, MDY reads the leading
+       field as a month and calls month 31 a field-range failure, while wadjet
+       refuses every spelling whose field ORDER DateStyle would decide, so it
+       is "not a date" and the class differs.
+     - `'0000-01-01'` and `'2024-001-01'` are **ACCEPTED** where PostgreSQL
+       raises 22008 and 22007: there is no year zero, and a three-digit month
+       is not a date. The accept-set is one function shared by five doors, so
+       the refusal belongs there and not inside the cast — a second reading
+       inside the cast is how the value and the code came to disagree in the
+       first place. The storage arc's **#641** is closing it in
+       `ParseDateDays`; this door inherits it with no further change. Pinned by
+       `expr.TestCastToDateInheritsTheSharedAcceptSetsResiduals`, which fires
+       when it lands.
+     - The compact 8-digit form `'20240101'` is ACCEPTED, as PostgreSQL accepts
+       it. It briefly RAISED — #836's first pass took only the error CODE from
+       the shared parser and left the value to a narrower reading — which is
+       the same two-answers-for-one-question defect pointing the other way: a
+       cast refusing what the ingest boundary stores.
    - **A TEXT value compared against a NUMBER.** (Added 2026-08-24, #504.)
      PostgreSQL refuses the pair outright — verified live, `WHERE s = 1.5`
      over a `text` column is 42883 "operator does not exist: text = numeric",

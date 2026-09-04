@@ -1705,6 +1705,13 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "CastTextToDateFieldOutOfRange", sql: `SELECT CAST('2020-02-30' AS date)`},
 		{name: "CastTextToTimestampInvalidSyntax", sql: `SELECT CAST('not-a-timestamp' AS timestamp)`},
 		{name: "CastTextToTimestampFieldOutOfRange", sql: `SELECT CAST('2020-02-30 12:00:00' AS timestamp)`},
+		// A zero month, a zero day and a negative year — the field-range and
+		// syntax classes over the same destination, so a client can tell "the
+		// literal is malformed" from "the calendar has no such day".
+		{name: "CastTextToDateMonthZero", sql: `SELECT CAST('2024-00-01' AS date)`},
+		{name: "CastTextToDateDayZero", sql: `SELECT CAST('2024-01-00' AS date)`},
+		{name: "CastTextToDateNegativeYear", sql: `SELECT CAST('-0001-01-01' AS date)`},
+		{name: "CastTextToTimestampThreeDigitMonth", sql: `SELECT CAST('2024-001-01' AS timestamp)`},
 		// The math DOMAIN refusals (#840). PostgreSQL uses four codes here and
 		// they are four different answers: 2201E for a logarithm's domain,
 		// 2201F for a square root's and for the two undefined powers, 22003

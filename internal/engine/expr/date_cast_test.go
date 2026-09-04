@@ -104,6 +104,16 @@ func TestCastToDateRaisesForTextThatNamesNoDay(t *testing.T) {
 		{"a DMY spelling wadjet's accept-set does not read as a date",
 			&Lit{Val: "31/12/1996"}, "22007",
 			`invalid input syntax for type date: "31/12/1996"`},
+		// A zero MONTH and a zero DAY, which the calendar has no more than it
+		// has a 30th of February.
+		{"month zero", &Lit{Val: "2024-00-01"}, "22008",
+			`date/time field value out of range: "2024-00-01"`},
+		{"day zero", &Lit{Val: "2024-01-00"}, "22008",
+			`date/time field value out of range: "2024-01-00"`},
+		// A NEGATIVE year: PostgreSQL spells BC dates `0001-01-01 BC`, not
+		// with a leading minus, so this is not a date at all in either engine.
+		{"a negative year", &Lit{Val: "-0001-01-01"}, "22007",
+			`invalid input syntax for type date: "-0001-01-01"`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			state, msg := recoverFatalEvalForTest(t, func() {
@@ -114,6 +124,87 @@ func TestCastToDateRaisesForTextThatNamesNoDay(t *testing.T) {
 					c.name, state, msg, c.state, c.msg)
 			}
 		})
+	}
+}
+
+// TestCastToDateReadsTheEngineAcceptSet is the other half of the same wiring:
+// the CAST door takes its VALUE from `parquet.ParseDateDays` too, not only its
+// error code.
+//
+// #836's first pass took only the CODE from there and left `parseDateArg` as
+// the value source, which made the two accept-sets show as a DIVERGENCE
+// instead of as one rule — `CAST('20240101' AS DATE)` is 2024-01-01 on the
+// live server and in the classifier, and the mismatch turned it into a
+// refusal. A cast that REFUSES what the ingest boundary STORES is the same
+// two-answers-for-one-question defect this arc is about, pointing the other
+// way.
+func TestCastToDateReadsTheEngineAcceptSet(t *testing.T) {
+	b := dateCastBatch(t)
+	const jan10 = int64(9505) // 1996-01-10
+	for _, c := range []struct {
+		in   string
+		want any
+	}{
+		// The compact 8-digit form, which ParseDateDays documents and
+		// PostgreSQL accepts. It RAISED between #836 and this change.
+		{"19960110", jan10},
+		{"1996-01-10", jan10},
+		{"1996/01/10", jan10},
+		{"1996.1.10", jan10},
+		{"  1996-01-10  ", jan10},
+		{"1996-01-10 13:45:30", jan10},
+		{"1996-01-10T13:45:30Z", jan10},
+	} {
+		if got := (&Cast{Operand: &Lit{Val: c.in}, DestType: "date"}).Eval(b, 0); got != c.want {
+			t.Errorf("CAST(%q AS DATE) = %v, want %v — the value comes from the same "+
+				"accept-set the ingest boundary and the filter kernel read", c.in, got, c.want)
+		}
+	}
+}
+
+// TestCastToDateInheritsTheSharedAcceptSetsResiduals is a DEFERRAL, pinned.
+//
+// Two spellings PostgreSQL 17.11 refuses are ACCEPTED by
+// `parquet.ParseDateDays`, and therefore by this cast:
+//
+//	'0000-01-01'    PG 22008 (there is no year zero)   here: 1970-01-01 − …
+//	'2024-001-01'   PG 22007 (a three-digit month)     here: 2024-01-01
+//
+// They are not fixed HERE on purpose. The accept-set is one function shared by
+// the ingest boundary, the parquet writers, the row→batch builder and the
+// filter kernel, and adding a second reading inside the cast would give the
+// engine two answers to "is this a date" — the exact failure that made the
+// value and the code disagree above. The refusal belongs in ParseDateDays, and
+// the storage arc's #641 is closing it there for the ingest and INSERT doors;
+// this door inherits it with no further change the day that lands.
+//
+// TODO(#641): delete this when ParseDateDays refuses a year zero and a
+// three-digit month. The pin fires then, which is the signal that the CAST
+// door inherited the fix.
+func TestCastToDateInheritsTheSharedAcceptSetsResiduals(t *testing.T) {
+	for _, c := range []struct {
+		in       string
+		pgSays   string
+		wantDays int64
+	}{
+		{"0000-01-01", `22008 date/time field value out of range`, -719528},
+		{"2024-001-01", `22007 invalid input syntax for type date`, 19723},
+	} {
+		b := dateCastBatch(t)
+		got := func() (v any) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("CAST(%q AS DATE) now raises %v — parquet.ParseDateDays has "+
+						"learned this refusal (#641) and the cast inherited it. Delete this "+
+						"pin and move the cell into the census above.", c.in, r)
+				}
+			}()
+			return (&Cast{Operand: &Lit{Val: c.in}, DestType: "date"}).Eval(b, 0)
+		}()
+		if got != c.wantDays {
+			t.Errorf("CAST(%q AS DATE) = %v, this pin records %d; PostgreSQL 17.11 says %s",
+				c.in, got, c.wantDays, c.pgSays)
+		}
 	}
 }
 
