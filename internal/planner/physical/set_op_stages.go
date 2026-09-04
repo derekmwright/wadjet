@@ -413,10 +413,43 @@ func setOpNoCarrier(a, b parquet.TypeID) bool {
 	if a == b {
 		return false
 	}
+	// A WIRE-DECLARED integer (PORT, PROTOCOL, DURATION) meeting DECIMAL or
+	// REAL. The ladder resolves the pair — PostgreSQL answers numeric and real
+	// — but this engine has no coercion that moves those carriers there: the
+	// DECIMAL rung's DecimalCoercion reads an INT32/INT64 unscaled carrier and
+	// setOpCastExpr's REAL spelling produces a float64 box the PORT vector
+	// refuses (#361's store guard). Measured: both paths failed, one with the
+	// guard and one with an unresolvable (p,s), for a query PostgreSQL answers.
+	// CAST(x AS BIGINT) beside a DOUBLE PRECISION arm carries, which is why the
+	// float8 rung is not here.
+	if setOpWireIntegerCarrier(a) && (b == parquet.TypeDecimal || b == parquet.TypeFloat32) {
+		return true
+	}
+	if setOpWireIntegerCarrier(b) && (a == parquet.TypeDecimal || a == parquet.TypeFloat32) {
+		return true
+	}
 	if _, ok := setOpWiden(a, b); ok {
 		return false
 	}
-	return setOpTypeCategory(a) == setOpTypeCategory(b)
+	if setOpTypeCategory(a) != setOpTypeCategory(b) {
+		return false // no common type at all: that is the 42804, not this
+	}
+	// Only the categories with an implicit conversion BETWEEN their members.
+	// The `other` category's members (BYTES, UUID, MAC, the containers) match
+	// only themselves in PostgreSQL too — `uuid ∪ bytea` is refused there — so
+	// a pair drawn from it has no common type and takes PostgreSQL's 42804
+	// rather than a claim that wadjet is the one missing a carrier.
+	switch setOpTypeCategory(a) {
+	case setOpCatDateTime, setOpCatNetwork:
+		return true
+	}
+	return false
+}
+
+// setOpWireIntegerCarrier names the three types whose WIRE declaration is an
+// integer (#834) but whose storage is a domain vector of its own.
+func setOpWireIntegerCarrier(t parquet.TypeID) bool {
+	return t == parquet.TypePort || t == parquet.TypeProtocol || t == parquet.TypeDuration
 }
 
 // setOpCarrierGap is the refusal for a pair PostgreSQL resolves and this
@@ -521,6 +554,12 @@ func setOpArmTypeConflict(node *logical.Node) error {
 			if !want.known {
 				want = ct
 				continue
+			}
+			if setOpNoCarrier(want.typ, ct.typ) {
+				if carrierGap == nil {
+					carrierGap = setOpCarrierGap(outNames[col], want.typ, ct.typ)
+				}
+				break
 			}
 			widened, ok := setOpWiden(want.typ, ct.typ)
 			if !ok {
