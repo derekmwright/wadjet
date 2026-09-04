@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -41,20 +42,43 @@ func e2eBin(t *testing.T) string {
 	return bin
 }
 
-// e2eRun runs one command with the storage and catalog flags pinned to dirs
-// under root, and returns its combined output.
+// e2eRun runs one command against a data directory under root, with the
+// STORAGE flags the guide documents and NO catalog flags at all, and returns
+// its combined output.
+//
+// The absent flags are the point (round-1 P3). The first pass pinned
+// --nats-store-dir and --nats-port on every invocation, so no gate ever ran
+// the command line docs/getting-started.md shows, and the default catalog
+// store — `~/.wadjet/nats`, which does not vary with --data-dir — was never
+// exercised. That is exactly where B3 lived: two data directories shared one
+// catalog, and a `SELECT *` returned half the rows the same invocation's
+// COUNT reported.
+//
+// HOME is redirected under root instead, so the default path is what runs
+// while a developer's real ~/.wadjet is never touched. --nats-port is passed
+// ONLY where a test needs the fallback dial address to be unreachable, and it
+// is a separate helper for that reason.
 func e2eRun(t *testing.T, bin, root string, args ...string) (string, error) {
+	t.Helper()
+	return e2eRunIn(t, bin, root, filepath.Join(root, "data"), args...)
+}
+
+// e2eRunIn is e2eRun against an explicit data directory, so one root can hold
+// two of them.
+func e2eRunIn(t *testing.T, bin, root, dataDir string, args ...string) (string, error) {
 	t.Helper()
 	full := append([]string{
 		"--storage-type=file",
-		"--data-dir=" + filepath.Join(root, "data"),
+		"--data-dir=" + dataDir,
 		"--bucket=wadjet",
-		"--nats-store-dir=" + filepath.Join(root, "nats"),
-		// A port nothing is listening on, so the embedded fallback is what
-		// runs and the test never reaches a developer's own server.
-		"--nats-port=45871",
 	}, args...)
-	out, err := exec.Command(bin, full...).CombinedOutput()
+	cmd := exec.Command(bin, full...)
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
@@ -123,6 +147,75 @@ func TestCLICommandsShareOnePersistedCatalog(t *testing.T) {
 	}
 }
 
+// TestTwoDataDirsDoNotShareACatalog is round-1 B3, and it is the census's
+// worst cell: loud → SILENT-WRONG on the flow the guide documents.
+//
+// The catalog store used to default to `~/.wadjet/nats` no matter what
+// `--data-dir` said, so two data directories shared one catalog while their
+// files stayed apart. A table created against A was listed against B; `SELECT
+// COUNT(*)` against B answered 1 from A's metadata; and `SELECT *` returned
+// half the rows the same invocation's COUNT reported, because the scan drops a
+// file it cannot read unless every file fails. Before the CLI reached a
+// persisted catalog at all, B answered `relation "ta" does not exist` — loud.
+//
+// The catalog now lives under the data directory it describes, so the two
+// cannot drift apart, and B is loud again. No catalog flags are given: this is
+// the documented command line.
+func TestTwoDataDirsDoNotShareACatalog(t *testing.T) {
+	bin := e2eBin(t)
+	root := t.TempDir()
+	dirA := filepath.Join(root, "A")
+	dirB := filepath.Join(root, "B")
+
+	if out, err := e2eRunIn(t, bin, root, dirA, "create-table",
+		"CREATE TABLE ta (id BIGINT, s VARCHAR)"); err != nil {
+		t.Fatalf("create-table in A: %v\n%s", err, out)
+	}
+	if out, err := e2eRunIn(t, bin, root, dirA, "query", "--format=csv",
+		"INSERT INTO ta VALUES (1,'x')"); err != nil {
+		t.Fatalf("insert into A: %v\n%s", err, out)
+	}
+
+	// B must know nothing about A's table.
+	out, err := e2eRunIn(t, bin, root, dirB, "tables")
+	if err != nil {
+		t.Fatalf("`tables` in B: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "ta") {
+		t.Fatalf("data dir B lists a table that belongs to data dir A: %q\n"+
+			"The catalog and the data have to be one thing; sharing a machine-global "+
+			"catalog across data dirs answers COUNT(*) from one and SELECT * from the "+
+			"other (round-1 B3).", out)
+	}
+	for _, sql := range []string{"SELECT * FROM ta", "SELECT COUNT(*) FROM ta"} {
+		out, err := e2eRunIn(t, bin, root, dirB, "query", "--format=csv", sql)
+		if err == nil {
+			t.Errorf("`%s` in data dir B ANSWERED, from data dir A's catalog: %q\n"+
+				"A relation whose files are not in this store must be refused, loudly.", sql, out)
+		}
+		if !strings.Contains(out, "does not exist") {
+			t.Errorf("`%s` in data dir B failed without saying the relation is unknown: %q", sql, out)
+		}
+	}
+
+	// A still answers its own, and answers it completely: the COUNT and the
+	// rows have to agree, which is the half that went silently wrong.
+	out, err = e2eRunIn(t, bin, root, dirA, "query", "--format=csv", "SELECT COUNT(*) FROM ta")
+	if err != nil || !strings.Contains(out, "1") {
+		t.Fatalf("COUNT in A: %v\n%s", err, out)
+	}
+	out, err = e2eRunIn(t, bin, root, dirA, "query", "--format=csv", "SELECT * FROM ta")
+	if err != nil || !strings.Contains(out, "x") {
+		t.Fatalf("`SELECT *` in A returned fewer rows than its own COUNT: %v\n%s", err, out)
+	}
+
+	// And the machine-global default was never touched.
+	if _, err := os.Stat(filepath.Join(root, "home", ".wadjet")); err == nil {
+		t.Errorf("a file-backed deployment wrote its catalog to ~/.wadjet, which does not vary " +
+			"with --data-dir")
+	}
+}
+
 // TestCLIRefusesASecondProcessOnTheSameCatalogStore is the boundary, attempted
 // (rule 11): two commands that both fall back to an embedded catalog server
 // over one store directory must not both open it.
@@ -141,9 +234,15 @@ func TestCLIRefusesASecondProcessOnTheSameCatalogStore(t *testing.T) {
 	}
 
 	// A shell holds the store for as long as its stdin stays open.
+	//
+	// --nats-port here and nowhere else: when the lock is held the command
+	// looks for the HOLDER at that address, and a port nothing listens on
+	// keeps the test off whatever a developer happens to be running on 4222.
+	// It does not change which catalog is chosen — only --nats-url does that.
 	held := exec.Command(bin,
 		"--storage-type=file", "--data-dir="+filepath.Join(root, "data"), "--bucket=wadjet",
-		"--nats-store-dir="+filepath.Join(root, "nats"), "--nats-port=45871", "shell")
+		"--nats-port=45871", "shell")
+	held.Env = append(os.Environ(), "HOME="+filepath.Join(root, "home"))
 	stdin, err := held.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +290,7 @@ func TestCLIRefusesASecondProcessOnTheSameCatalogStore(t *testing.T) {
 		t.Fatal("the holding shell never started")
 	}
 
-	out, err := e2eRun(t, bin, root, "tables")
+	out, err := e2eRunIn(t, bin, root, filepath.Join(root, "data"), "--nats-port=45871", "tables")
 	if err == nil {
 		t.Fatalf("a second process opened the same catalog store directory while a shell held "+
 			"it; nats-server does not lock it, so both would write over each other's "+

@@ -220,13 +220,22 @@ mc mb local/wadjet
 > flags name, and reaches the catalog the same way `compact` and `clusters`
 > always have:
 >
-> - if a wadjet server is reachable — a running `serve`, or a cluster named
->   by `--nats-url` / `--nats-port` — the command talks to it, and sees
->   exactly what that server sees, live;
-> - if none is, the command runs an embedded catalog server over
->   `--nats-store-dir` (default `~/.wadjet/nats`) for its own lifetime, so
->   what it writes is there for the next command and for a `serve` started
->   afterwards.
+> - `--nats-url` names a server explicitly: the command talks to that one and
+>   sees exactly what it sees, live. This is how you reach a
+>   `--mode=coordinator` deployment.
+> - otherwise the catalog is this deployment's own store directory, and the
+>   command opens it itself for its own lifetime, so what it writes is there
+>   for the next command and for a `serve` started afterwards. If another
+>   wadjet process already holds that directory — a running `serve`, say —
+>   the command connects to it instead.
+>
+> **The catalog store directory follows the data.** With
+> `--storage-type=file --data-dir=D` it is `D/_catalog`, so each data
+> directory carries its own catalog and the two can never describe different
+> tables. (`_catalog` cannot collide with a bucket: an object-store bucket
+> name may not begin with an underscore.) The S3 flow keeps `~/.wadjet/nats`,
+> a machine-wide catalog beside a shared bucket, and `--nats-store-dir`
+> overrides either.
 >
 > So `create-table` then `query` in two shells is one table, and `tables`
 > lists it. They are still not network clients of `serve` for the *data*
@@ -234,10 +243,10 @@ mc mb local/wadjet
 > below are how a remote client reaches a running server.
 >
 > One process at a time holds the catalog store directory. A second command
-> that finds it locked says so and names `--nats-url`, rather than opening
-> it a second time — `nats-server` does not lock its own store, and two
-> writers there would overwrite each other's metadata. Point the second one
-> at the server that holds it, or give it its own `--nats-store-dir`.
+> that finds it locked looks for the holder and, failing that, says so and
+> names `--nats-url` — rather than opening it a second time, because
+> `nats-server` does not lock its own store and two writers there would
+> overwrite each other's metadata.
 >
 > A query whose every source is a table function (`read_parquet`,
 > `read_csv`, `read_json`) needs no catalog and opens none.
@@ -293,7 +302,7 @@ Supports `--format` flag: `table` (default), `json`, or `csv`.
 
 ### The Same Flow With No S3 At All
 
-Local files for the data, the default `~/.wadjet/nats` for the catalog, no
+Local files for the data and `./wadjet-data/_catalog` for the catalog, no
 server running — each command is its own process, and they share one catalog:
 
 ```bash

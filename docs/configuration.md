@@ -162,17 +162,22 @@ effect.
 | `--bucket` | S3 bucket name | `wadjet` |
 | `--storage-type` | `s3` or `file` | `s3` |
 | `--data-dir` | Local data directory (with `--storage-type=file`) | — |
-| `--nats-url` / `--nats-port` | Where to find the catalog, if a server is running | `nats://127.0.0.1:4222` |
-| `--nats-store-dir` | Catalog store directory when no server is running | `~/.wadjet/nats` |
+| `--nats-url` | Talk to this catalog server explicitly | — |
+| `--nats-port` | Embedded NATS port; also where the holder of a locked catalog is looked for | `4222` |
+| `--nats-store-dir` | Catalog store directory | `<data-dir>/_catalog` with `--storage-type=file`, else `~/.wadjet/nats` |
 | `--format` | Output format: `json`, `table`, `csv` | `json` |
 
 Usage: `wadjet query [flags] "SQL STATEMENT"`
 
 `query`, `create-table`, `drop-table`, `shell` and `tables` share ONE
-persisted catalog with `serve`: they connect to a reachable server when there
-is one, and otherwise open `--nats-store-dir` themselves for the length of the
-command. One process holds that directory at a time; a second is refused with
-a message naming `--nats-url`. See [Getting Started](getting-started.md#start-the-server).
+persisted catalog with `serve`. `--nats-url` names a server explicitly;
+otherwise the catalog is this deployment's own store directory, which the
+command opens itself, or connects to whichever wadjet process is already
+holding it. One process holds that directory at a time.
+
+**The catalog store follows the data**: with `--storage-type=file
+--data-dir=D` it is `D/_catalog`, so two data directories never share a
+catalog. See [Getting Started](getting-started.md#start-the-server).
 
 ### `tables` Command
 

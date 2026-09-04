@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sys/unix"
 
+	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -37,56 +38,74 @@ import (
 // place the metadata actually lives is JetStream, which is what
 // `serve --mode=standalone` runs embedded.
 //
-// So the commands go there, two ways, in this order:
+// So the commands go there, and WHICH catalog is decided before who is
+// listening:
 //
-//  1. A NATS server is reachable (a running `serve`, or a cluster named by
-//     --nats-url / --nats-port): connect to it. The command then sees exactly
-//     what the server sees, live — `compact` and `clusters` have always
-//     worked this way.
-//  2. Nothing is reachable: run an embedded JetStream server over the SAME
-//     store directory (--nats-store-dir, default ~/.wadjet/nats) for the
-//     lifetime of the command. The metadata is written to that directory, so
-//     the next invocation — and a `serve` started afterwards — reads it back.
-//     The port is ephemeral and the connection is in-process: nothing binds
-//     4222, so this never collides with a server that is merely configured
-//     elsewhere.
+//  1. The operator NAMED a server (--nats-url or --nats-port at any tier):
+//     dial it, and report a failure rather than quietly opening a catalog of
+//     our own beside it. This is also the only route to a
+//     `--mode=coordinator` deployment, which runs no embedded server.
+//  2. Otherwise the catalog is this deployment's own directory
+//     (natsServerConfig's StoreDir — under --data-dir for a file-backed
+//     deployment, see derivedCatalogStoreDir; ~/.wadjet/nats for S3). Take
+//     its lock. Holding it means nobody else has this catalog, so run an
+//     embedded JetStream server over it for the lifetime of the command: the
+//     metadata lands on disk, and the next invocation — or a `serve` started
+//     afterwards — reads it back. The port is ephemeral and the connection is
+//     in-process, so nothing binds 4222.
+//  3. The lock is held: a wadjet process already has THIS catalog, so dial to
+//     reach it. Failing that, refuse, naming the directory, the holder and
+//     the flags that resolve it.
 //
-// The one case with no good answer is a server holding the store directory's
-// file lock while not being reachable at the configured URL, and it is
-// reported as exactly that, naming the flags that resolve it.
+// Step 2 before step 3 is load-bearing. Dialing first asked "who is listening
+// on the default address", which a `serve` on a DIFFERENT --data-dir answers
+// just as readily as the right one (round-1 B3).
 func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, func(), error) {
 	natsAddr := natsURL
 	if natsAddr == "" {
 		natsAddr = fmt.Sprintf("nats://127.0.0.1:%d", natsPort)
 	}
-	// A short, non-retrying dial: this is a probe for "is a server there",
-	// and distributed.Connect's reconnect options would make a miss cost
-	// seconds on every command run without one.
-	if nc, err := nats.Connect(natsAddr, nats.Timeout(2*time.Second), nats.MaxReconnects(0)); err == nil {
-		js, jsErr := distributed.NewJetStream(nc)
-		if jsErr != nil {
-			nc.Close()
-			return nil, nil, fmt.Errorf("creating JetStream on %s: %w", natsAddr, jsErr)
+	// --nats-url NAMES a server; --nats-port does not — its flag help is
+	// "Embedded NATS port", so it sets where a server of ours would listen
+	// and, below, where to look for the holder of a catalog we could not
+	// lock. Only the URL means "use that one".
+	if effectiveResolution().Source("nats.url") != config.SourceDefault {
+		// An operator who named a server means it: dial, and report the
+		// failure rather than quietly running a catalog of our own beside
+		// it. This is also the only way to reach a `--mode=coordinator`
+		// deployment, which runs no embedded server and locks no directory.
+		kv, release, err := dialCatalogKV(natsAddr)
+		if err != nil {
+			return nil, nil, err
 		}
-		kv, kvErr := catalog.NewNATSKV(js)
-		if kvErr != nil {
-			nc.Close()
-			return nil, nil, fmt.Errorf("opening the catalog on %s: %w", natsAddr, kvErr)
-		}
-		return kv, nc.Close, nil
+		return kv, release, nil
 	}
 
 	cfg := natsServerConfig()
 	// Ephemeral: nothing outside this process connects to it.
 	cfg.Port = -1
-	unlock, err := lockCatalogStoreDir(cfg.StoreDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("no wadjet server is reachable at %s, and the catalog store "+
-			"directory %s is held by another process (%w).\n"+
-			"That is a `wadjet serve` on a different address, or another wadjet command running "+
-			"right now. Point this one at that server with --nats-url (or --nats-port), or wait "+
-			"for the other command to finish",
-			natsAddr, cfg.StoreDir, err)
+
+	// LOCK FIRST, dial second, and only when THIS catalog is already held.
+	//
+	// Dialing first asked the wrong question. With no --nats-url the address
+	// is the machine's default, so a `serve` on a DIFFERENT --data-dir — or
+	// any other cluster on the box — answered it, and the command read a
+	// catalog belonging to other data (round-1 B3). Taking the lock names the
+	// exact catalog this command's --data-dir owns; a failure to take it
+	// means a wadjet process already holds THAT catalog, and dialing is then
+	// the way to reach the holder rather than a guess about who answers.
+	unlock, lockErr := lockCatalogStoreDir(cfg.StoreDir)
+	if lockErr != nil {
+		kv, release, err := dialCatalogKV(natsAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("the catalog store directory %s is held by another process "+
+				"(%w) and no wadjet server answered at %s (%v).\n"+
+				"That is a `wadjet serve` on a different address, or another wadjet command "+
+				"running right now. Point this one at that server with --nats-url (or "+
+				"--nats-port), or wait for the other command to finish",
+				cfg.StoreDir, lockErr, natsAddr, err)
+		}
+		return kv, release, nil
 	}
 	embedded, err := distributed.NewEmbeddedNATS(cfg, logger)
 	if err != nil {
@@ -114,6 +133,29 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 		return nil, nil, fmt.Errorf("opening the catalog under %s: %w", cfg.StoreDir, err)
 	}
 	return kv, func() { nc.Close(); embedded.Shutdown(); unlock() }, nil
+}
+
+// dialCatalogKV opens the catalog of a running server, and returns it with the
+// function that closes the connection.
+//
+// The dial is short and non-retrying: distributed.Connect's reconnect options
+// would make a miss cost seconds on every command run without a server.
+func dialCatalogKV(natsAddr string) (catalog.MetaKV, func(), error) {
+	nc, err := nats.Connect(natsAddr, nats.Timeout(2*time.Second), nats.MaxReconnects(0))
+	if err != nil {
+		return nil, nil, fmt.Errorf("connecting to the catalog server at %s: %w", natsAddr, err)
+	}
+	js, err := distributed.NewJetStream(nc)
+	if err != nil {
+		nc.Close()
+		return nil, nil, fmt.Errorf("creating JetStream on %s: %w", natsAddr, err)
+	}
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		nc.Close()
+		return nil, nil, fmt.Errorf("opening the catalog on %s: %w", natsAddr, err)
+	}
+	return kv, nc.Close, nil
 }
 
 // lockCatalogStoreDir takes an exclusive, non-blocking advisory lock on the

@@ -1116,7 +1116,45 @@ func natsServerConfig() distributed.NATSConfig {
 	if n.StoreDir != "" {
 		cfg.StoreDir = n.StoreDir
 	}
+	if dir := derivedCatalogStoreDir(); dir != "" {
+		cfg.StoreDir = dir
+	}
 	return cfg
+}
+
+// derivedCatalogStoreDir is the catalog store directory a LOCAL-FILE
+// deployment gets when nobody named one, or "" when the default stands.
+//
+// The catalog and the data have to be one thing. `~/.wadjet/nats` does not
+// vary with `--data-dir`, so two data directories shared one catalog: a table
+// created against A was listed against B, `SELECT COUNT(*)` answered from A's
+// metadata while the files were not in B's store, and `SELECT *` returned half
+// the rows the same invocation's COUNT reported — the scan drops a file it
+// cannot read unless every file fails. Before the CLI reached this catalog at
+// all, B answered `relation "ta" does not exist`, loudly. That is loud →
+// silent-wrong on the flow docs/getting-started.md documents, and it is
+// round-1 B3.
+//
+// So a file-backed deployment keeps its catalog UNDER its data directory, one
+// per `--data-dir`, and the two cannot drift apart. `_catalog` rather than
+// `catalog`: an object-store bucket cannot begin with an underscore (S3 names
+// must start alphanumeric), so this can never collide with `--bucket`.
+//
+// It applies only when nobody said otherwise: `--nats-store-dir` at any tier
+// wins (Source is not the default), and the S3 flow keeps `~/.wadjet/nats`,
+// where a shared machine-wide catalog beside a shared bucket is the right
+// default. Both `serve` and the CLI commands resolve through here, so the two
+// still meet — a lock only one side took would be no lock (#842).
+func derivedCatalogStoreDir() string {
+	res := effectiveResolution()
+	if res.Source("nats.store_dir") != config.SourceDefault {
+		return ""
+	}
+	cfg := res.Config()
+	if cfg.Storage.Type != "file" || cfg.Storage.DataDir == "" {
+		return ""
+	}
+	return filepath.Join(cfg.Storage.DataDir, "_catalog")
 }
 
 func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool, snapshotPrefix string, snapshotInterval time.Duration, forceRestoreTS string) error {
