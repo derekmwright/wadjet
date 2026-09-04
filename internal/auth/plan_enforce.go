@@ -8,6 +8,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -105,7 +106,22 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	// stored, which is PostgreSQL's RLS ordering, while a predicate the USER
 	// writes stays above the projection and compares the mask.
 	for _, rf := range rowFilters {
+		// A row filter naming a column the table does not have is injected
+		// and then matches EVERY row: `salary_typo IS NOT NULL` restricted
+		// nothing, silently, on a control written to restrict. The predicate
+		// is bound against the table's UNFILTERED schema — a policy may read
+		// a column it denies, that is what a policy predicate is for — and a
+		// name that resolves to nothing refuses, the same fail-closed
+		// doctrine the mask spellings follow.
+		if err := r.checkRowFilterColumns(rf.table, rf.filter); err != nil {
+			return ctx, nil, err
+		}
 		plan = logical.InjectRowFilter(plan, rf.table, rf.filter)
+	}
+	// One mark for "a policy shaped this plan", covering the row-filter-only
+	// case that carries no column policy for a dispatch site to find.
+	if len(policies) > 0 || len(rowFilters) > 0 {
+		ctx = logical.ContextWithPolicyEnforced(ctx)
 	}
 	return ctx, plan, nil
 }
@@ -302,6 +318,44 @@ func (r *policyResolver) columnPolicies(table string) ([]logical.ColumnPolicy, e
 		out = append(out, logical.ColumnPolicy{Column: col.Column, MaskExpr: expr})
 	}
 	return out, nil
+}
+
+// checkRowFilterColumns refuses a policy row filter that names a column the
+// table does not have. It binds against the table's FULL schema: the policy's
+// own predicate is allowed to read a column the same policy denies (that is
+// ADR-0033 decision 6), so only a name the TABLE does not carry is an error.
+//
+// Silent on a table the catalog cannot answer for, and on a predicate the ref
+// walker cannot see through — a false refusal breaks a working deployment,
+// and the shape this closes is the one that resolves to NOTHING.
+func (r *policyResolver) checkRowFilterColumns(table, filter string) error {
+	if r.cat == nil || strings.TrimSpace(filter) == "" {
+		return nil
+	}
+	cols := r.tableColumns(table)
+	if len(cols) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		have[strings.ToLower(c)] = true
+	}
+	ast, err := plansql.ParseExpression(filter)
+	if err != nil {
+		return sqlerr.New("42601", "row_filter on %q is not a SQL predicate: %q", table, filter)
+	}
+	refs, err := plansql.ColumnRefs(ast)
+	if err != nil {
+		return nil
+	}
+	for _, ref := range refs {
+		if !have[strings.ToLower(ref.Column)] {
+			return sqlerr.New("42703",
+				"row_filter on %q names column %q, which the table does not have: "+
+					"the filter would restrict no rows", table, ref.Column)
+		}
+	}
+	return nil
 }
 
 // tableColumns is the table's declared column list, from the catalog.

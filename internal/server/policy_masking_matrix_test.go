@@ -52,6 +52,32 @@ const (
 	pmMaskAcct = "0"
 )
 
+// pmBal is a third table with ONE masked numeric column whose stored values
+// have both signs. It exists to make a per-row disclosure VISIBLE: with `bal`
+// masked to 0, a predicate that reads the MASK answers the same for every row,
+// and one that reads the STORED column answers the SIGN of each row — so the
+// row set itself is arithmetic on the value the policy hides (#859 round 2).
+const pmBal = "e7bal"
+
+func pmBalSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "bal", Type: parquet.TypeInt64},
+	}}
+}
+
+func pmBalFixture() []map[string]any {
+	rows := make([]map[string]any, 0, 8)
+	for i := 1; i <= 8; i++ {
+		v := int64(100 * i)
+		if i%2 == 1 {
+			v = -v
+		}
+		rows = append(rows, map[string]any{"id": int64(i), "bal": v})
+	}
+	return rows
+}
+
 func pmOtherSchema() parquet.Schema {
 	return parquet.Schema{Columns: []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt64},
@@ -104,6 +130,9 @@ func pmTrueValues() []string {
 		out = append(out, fmt.Sprintf("%d", 900000+i))
 		out = append(out, fmt.Sprintf("%d", 700000+i))
 	}
+	for _, r := range pmBalFixture() {
+		out = append(out, fmt.Sprint(r["bal"]))
+	}
 	return out
 }
 
@@ -121,6 +150,15 @@ func pmProvider(t *testing.T) *auth.Provider {
 					{Type: "deny_column", Target: "salary"},
 					{Type: "mask_column", Target: "ssn", Value: "'" + pmMaskSSN + "'"},
 					{Type: "mask_column", Target: "acct", Value: pmMaskAcct},
+				},
+			},
+			{
+				ID: "analyst-bal", EffectStr: "allow", Priority: 10,
+				Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+				Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: pmBal}},
+				Actions:   []auth.Action{auth.ActionRead},
+				Obligations: []auth.Obligation{
+					{Type: "mask_column", Target: "bal", Value: "0"},
 				},
 			},
 			{
@@ -251,6 +289,7 @@ func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat
 	t.Helper()
 	pmWriteTable(t, ctx, store, cat, pmTable, pmSchema(), pmFixture())
 	pmWriteTable(t, ctx, store, cat, pmOther, pmOtherSchema(), pmOtherFixture())
+	pmWriteTable(t, ctx, store, cat, pmBal, pmBalSchema(), pmBalFixture())
 }
 
 func pmWriteTable(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog,
@@ -319,6 +358,7 @@ func pmEmbeddedDB(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 	}
 	ingest1(pmTable, pmSchema(), pmFixture())
 	ingest1(pmOther, pmOtherSchema(), pmOtherFixture())
+	ingest1(pmBal, pmBalSchema(), pmBalFixture())
 	return db
 }
 
@@ -611,10 +651,13 @@ type pmCell struct {
 	// wantErrLike, when set, is what the analyst identity must be REFUSED
 	// with instead of an answer.
 	wantErrLike string
-	// wantDAG, when non-nil, is what the DAG arms answer instead of want. It
-	// is a PIN, not an allowance: the cell that uses it names the mechanism,
-	// and if the two ever agree the pin FAILS and must be deleted.
-	wantDAG []string
+	// There is deliberately NO per-arm expectation here. Every cell asserts
+	// ONE answer on all eight runners. An earlier revision carried a
+	// `wantDAG` pin for a shape the DAG answered differently; the review
+	// measured that difference and it was a per-row disclosure, not a path
+	// quirk. A pin is never the disposition for a leak: the shape either
+	// answers what the in-process pipeline answers, or it refuses.
+	//
 	// deniedLike names the DENIED column in sql. The cell then asserts that
 	// the analyst is refused with exactly the error the SAME STATEMENT gets
 	// when that identifier names a column the table really does not have —
@@ -809,25 +852,61 @@ func pmCells() []pmCell {
 		{name: "group_by_an_expression_over_masked",
 			sql:  `SELECT SUBSTRING(ssn,1,4) AS g, COUNT(*) AS c FROM e7emp GROUP BY SUBSTRING(ssn,1,4)`,
 			want: []string{"c=12|g=" + pmMaskSSN}},
+		// The oracle probe goes THROUGH the deferred-scalar producer: a
+		// table-less `(SELECT 'true-ssn-01')` folds before planning and
+		// answers c=0 under every hypothesis, so it could not fail (round-2
+		// P1). Over the policed table it discriminates: if the outer column
+		// were read stored, `ssn = (SELECT MIN('true-ssn-01') FROM e7emp)`
+		// would match the one row whose stored ssn is that value.
 		{name: "scalar_subquery_oracle_probe",
-			sql:  `SELECT COUNT(*) AS c FROM e7emp WHERE ssn = (SELECT 'true-ssn-01')`,
+			sql:  `SELECT COUNT(*) AS c FROM e7emp WHERE ssn = (SELECT MIN('true-ssn-01') FROM e7emp)`,
 			want: []string{"c=0"}},
-		// PINNED DAG DIVERGENCE. Single-process answers 12 — both sides
-		// masked, '***' = '***'. The DAG answers 0: the deferred scalar
-		// PRODUCER hands its subquery to a worker as SQL TEXT, which re-plans
-		// it outside the policy and returns the STORED minimum, so the
-		// predicate — correctly above the barrier, comparing the mask —
-		// matches nothing. No value escapes: the producer's result only makes
-		// the comparison false, and scalar_subquery_oracle_probe above shows
-		// the predicate is not an oracle. But the ANSWER differs by path. It
-		// is the async door's mechanism in a second place (a task carrying a
-		// statement's TEXT is re-planned where no policy is), deferred with
-		// that mechanism in ADR-0033. The day the DAG answers 12 this pin
-		// FAILS and goes.
+		{name: "scalar_subquery_oracle_probe_numeric",
+			sql:  `SELECT COUNT(*) AS c FROM e7emp WHERE acct = (SELECT MIN(900001) FROM e7emp)`,
+			want: []string{"c=0"}},
 		{name: "scalar_subquery_in_where",
-			sql:     `SELECT COUNT(*) AS c FROM e7emp WHERE ssn = (SELECT MIN(ssn) FROM e7emp)`,
-			want:    []string{"c=12"},
-			wantDAG: []string{"c=0"}},
+			sql:  `SELECT COUNT(*) AS c FROM e7emp WHERE ssn = (SELECT MIN(ssn) FROM e7emp)`,
+			want: []string{"c=12"}},
+
+		// ------------------------------------------------------------------
+		// THE PER-ROW BIT. `bal` is masked to 0 and its stored values have
+		// both signs, so a predicate that reads the MASK answers the same for
+		// every row and one that reads the STORED column answers each row's
+		// SIGN — the row set IS the hidden value. On the DAG the scan
+		// fragment used to run OpScan → OpFilter → SecurityProject, one
+		// filter slot for the policy's row filter AND the user's predicate,
+		// so `WHERE bal > (SELECT MIN(bal) FROM e7bal)` returned exactly the
+		// rows whose stored balance was positive (ids 2 4 6 8) where the
+		// in-process pipeline returned none. Every cell below asserts the
+		// in-process answer on all eight runners.
+		{name: "per_row_bit_scalar_subquery_gt",
+			sql:  `SELECT id FROM e7bal WHERE bal > (SELECT MIN(bal) FROM e7bal) ORDER BY id`,
+			want: nil},
+		{name: "per_row_bit_scalar_subquery_lt",
+			sql:  `SELECT id FROM e7bal WHERE bal < (SELECT MIN(bal) FROM e7bal) ORDER BY id`,
+			want: nil},
+		{name: "per_row_bit_scalar_subquery_ge",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal WHERE bal >= (SELECT MIN(bal) FROM e7bal)`,
+			want: []string{"c=8"}},
+		{name: "per_row_bit_literal_predicate",
+			sql: `SELECT id FROM e7bal WHERE bal > 0 ORDER BY id`, want: nil},
+		{name: "per_row_bit_literal_predicate_negative",
+			sql: `SELECT id FROM e7bal WHERE bal < 0 ORDER BY id`, want: nil},
+		{name: "per_row_bit_in_subquery",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal WHERE bal IN (SELECT bal FROM e7bal)`,
+			want: []string{"c=8"}},
+		{name: "per_row_bit_in_list",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal WHERE bal IN (-100, 200, 0)`,
+			want: []string{"c=8"}},
+		{name: "per_row_bit_having",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal GROUP BY bal HAVING MIN(bal) < 0`,
+			want: nil},
+		{name: "per_row_bit_having_on_the_mask",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal GROUP BY bal HAVING MIN(bal) = 0`,
+			want: []string{"c=8"}},
+		{name: "per_row_bit_sum_and_min",
+			sql:  `SELECT SUM(bal) AS s, MIN(bal) AS lo, MAX(bal) AS hi FROM e7bal`,
+			want: []string{"hi=0|lo=0|s=0"}},
 
 		{name: "denied_in_order_by", sql: `SELECT id FROM e7emp ORDER BY salary`, deniedLike: "salary"},
 		{name: "denied_in_group_by",
@@ -956,9 +1035,6 @@ func TestPolicyMaskingIsPlanTimeOnEveryDoor(t *testing.T) {
 					}
 				}
 				want := append([]string(nil), cell.want...)
-				if cell.wantDAG != nil && strings.Contains(door.name, "dag") {
-					want = append([]string(nil), cell.wantDAG...)
-				}
 				sort.Strings(want)
 				gotRows := got.canon()
 				if len(gotRows) != len(want) {
@@ -1065,12 +1141,22 @@ func TestAsyncDoorRefusesAPolicedStatement(t *testing.T) {
 		`SELECT ssn, COUNT(*) AS c FROM e7emp GROUP BY ssn`,
 	} {
 		status, body := post("analyst-key", sql)
-		if status == http.StatusOK {
+		if status == http.StatusOK || status == http.StatusAccepted {
 			t.Errorf("async %q was ACCEPTED for a policed identity: %s", sql, body)
 			continue
 		}
 		if !strings.Contains(body, "security policy") {
 			t.Errorf("async %q refused with %d %s; want the policy refusal", sql, status, body)
+		}
+		// A POLICY refusal is 403 on this door, the status
+		// `access denied to table …` gets from POST /v1/queries. 400 said
+		// "your SQL is malformed", which a client cannot act on.
+		if status != http.StatusForbidden {
+			t.Errorf("async %q refused with %d; a policy refusal on this door is %d",
+				sql, status, http.StatusForbidden)
+		}
+		if !strings.Contains(body, `"sqlstate":"0A000"`) {
+			t.Errorf("async %q carries no 0A000: %s", sql, body)
 		}
 		for _, bad := range pmTrueValues() {
 			if strings.Contains(body, bad) {

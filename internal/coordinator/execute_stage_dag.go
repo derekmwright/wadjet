@@ -2640,11 +2640,23 @@ func (c *Coordinator) dispatchScanFilterStage(
 				ScanSchemaFilter: true,
 			})
 		}
-		// The ABAC security barrier projects FIRST (masks applied, denied
-		// columns dropped), then the SELECT-list projection computes over
-		// the policy-projected schema.
+		// The ABAC security barrier projects here (masks applied, denied
+		// columns dropped). The filter ABOVE it ran first and deliberately:
+		// that slot carries the POLICY's own row filter, which reads the row
+		// as stored — PostgreSQL's RLS ordering, and the same order the
+		// single-process pipeline uses.
 		if op, ok := projectOpFromSpecs(stage.SecurityProjectExprs); ok {
 			t.Operators = append(t.Operators, op)
+			// Then the predicates the USER wrote. They must see the mask, not
+			// the stored column: before #859 round 2 they shared the slot
+			// above and `WHERE bal > (SELECT MIN(bal) FROM t)` over a masked
+			// `bal` returned exactly the rows whose hidden value was positive.
+			if len(stage.PostSecurityFilterExprs) > 0 {
+				t.Operators = append(t.Operators, distributed.OpSpec{
+					Type:       distributed.OpFilter,
+					Predicates: append([]string(nil), stage.PostSecurityFilterExprs...),
+				})
+			}
 		}
 		if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
 			t.Operators = append(t.Operators, op)
@@ -4535,9 +4547,17 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 		})
 	}
 	// ABAC security barrier runs BEFORE the partial aggregate so grouping
-	// and aggregation see masked values and never see denied columns.
+	// and aggregation see masked values and never see denied columns — and
+	// the user's own predicates run above it, for the reason the scan
+	// fragment's copy of this records (#859 round 2).
 	if op, ok := projectOpFromSpecs(stage.SecurityProjectExprs); ok {
 		ops = append(ops, op)
+		if len(stage.PostSecurityFilterExprs) > 0 {
+			ops = append(ops, distributed.OpSpec{
+				Type:       distributed.OpFilter,
+				Predicates: append([]string(nil), stage.PostSecurityFilterExprs...),
+			})
+		}
 	}
 	ops = append(ops, distributed.OpSpec{
 		Type:           distributed.OpHashAggregate,

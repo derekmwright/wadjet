@@ -3,9 +3,12 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // AsyncQueryResponse is returned when a query is submitted asynchronously.
@@ -17,13 +20,13 @@ type AsyncQueryResponse struct {
 
 // QueryStatusResponse is returned when checking query status.
 type QueryStatusResponse struct {
-	QueryID   string              `json:"query_id"`
-	SQL       string              `json:"sql"`
-	State     string              `json:"state"`
-	Stages    []StageStatusView   `json:"stages,omitempty"`
-	Elapsed   string              `json:"elapsed"`
-	TotalRows int64               `json:"total_rows"`
-	Error     string              `json:"error,omitempty"`
+	QueryID   string            `json:"query_id"`
+	SQL       string            `json:"sql"`
+	State     string            `json:"state"`
+	Stages    []StageStatusView `json:"stages,omitempty"`
+	Elapsed   string            `json:"elapsed"`
+	TotalRows int64             `json:"total_rows"`
+	Error     string            `json:"error,omitempty"`
 }
 
 // StageStatusView is the JSON representation of a stage's progress.
@@ -55,7 +58,15 @@ func (s *Server) handleAsyncQuery(w http.ResponseWriter, r *http.Request) {
 
 	queryID, planStr, err := s.coord.SubmitSQL(r.Context(), req.SQL)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		// A POLICY refusal is 403 on this door — the same status
+		// `access denied to table …` gets from handleQuery. 400 said "your
+		// SQL is malformed", which a client cannot tell from a refusal it
+		// can act on by using POST /v1/queries instead (#859 round 2).
+		status := http.StatusBadRequest
+		if sqlerr.StateOf(err) == "0A000" && strings.Contains(err.Error(), "security policy") {
+			status = http.StatusForbidden
+		}
+		writeSQLError(w, status, err.Error(), err)
 		return
 	}
 

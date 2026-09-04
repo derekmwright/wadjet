@@ -295,6 +295,18 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		}
 		out.FilterExprs = newFE
 	}
+	// The same substitution for the predicates that run ABOVE the security
+	// projection. They are the slot a user predicate over a policed column
+	// lands in (#859 round 2), and a scalar subquery is exactly the kind of
+	// predicate that ends up there — substitution could not push it down, so
+	// it stayed above the barrier and carries a `:scalar_N` placeholder.
+	if len(out.PostSecurityFilterExprs) > 0 {
+		newPF := make([]string, len(out.PostSecurityFilterExprs))
+		for i, e := range out.PostSecurityFilterExprs {
+			newPF[i] = replacePlaceholders(e, literals)
+		}
+		out.PostSecurityFilterExprs = newPF
+	}
 	if len(out.AggSpecs) > 0 {
 		newAgg := make([]physical.AggSpec, len(out.AggSpecs))
 		for i, a := range out.AggSpecs {

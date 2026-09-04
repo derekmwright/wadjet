@@ -44,6 +44,25 @@ func ContextWithColumnPolicies(ctx context.Context, tp TablePolicies) context.Co
 	return context.WithValue(ctx, columnPolicyKey{}, tp)
 }
 
+type policyEnforcedKey struct{}
+
+// ContextWithPolicyEnforced marks a context whose query had ANY policy applied
+// — a column projection or a row filter. A column policy is discoverable from
+// ColumnPoliciesFromContext; a row-filter-only policy is not, and a dispatch
+// site that ships a statement's TEXT to a worker has to refuse for both.
+func ContextWithPolicyEnforced(ctx context.Context) context.Context {
+	return context.WithValue(ctx, policyEnforcedKey{}, true)
+}
+
+// PolicyEnforced reports whether any policy shaped this query's plan.
+func PolicyEnforced(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	on, _ := ctx.Value(policyEnforcedKey{}).(bool)
+	return on
+}
+
 // ColumnPoliciesFromContext returns the column policies in force, or nil.
 func ColumnPoliciesFromContext(ctx context.Context) TablePolicies {
 	if ctx == nil {

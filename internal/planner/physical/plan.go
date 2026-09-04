@@ -450,6 +450,33 @@ type Stage struct {
 	// before any aggregate — so restricted values never leave the worker.
 	SecurityProjectExprs []ProjectExprSpec
 
+	// PostSecurityFilterExprs are predicates the USER wrote that must run
+	// ABOVE the security projection, never in FilterExprs beside the
+	// policy's own row filter.
+	//
+	// The scan fragment used to run `OpScan → OpFilter → SecurityProject`,
+	// one filter slot for both kinds. A user predicate the logical plan
+	// deliberately left above the barrier — one predicate substitution could
+	// not push down, which in practice means one carrying a subquery — was
+	// lowered into that slot and read the STORED column:
+	// `WHERE bal > (SELECT MIN(bal) FROM t)` with `bal` masked to 0 returned
+	// exactly the rows whose hidden value is positive, per row, to a client
+	// that may not read the column. The in-process pipeline evaluated the
+	// same predicate above the projection and returned none.
+	//
+	// The two kinds are told apart by logical.Node.PolicyFilter, which
+	// InjectRowFilter sets: a POLICY predicate reads the row as stored
+	// (PostgreSQL's RLS ordering, ADR-0033 decision 6) and stays in
+	// FilterExprs; everything else goes here.
+	PostSecurityFilterExprs []string
+
+	// PolicyFilterExprs is the text of the FilterExprs entries that came from
+	// a POLICY (logical.Node.PolicyFilter), so the invariant check can tell
+	// the one predicate that is SUPPOSED to read the stored column from a
+	// user predicate that must not. Carried as text rather than as indices
+	// because the rewriting passes reorder and merge FilterExprs.
+	PolicyFilterExprs []string
+
 	// Dynamic filter (Trino-style semi-join pushdown) annotations.
 	// EmitDynamicFilters is set on a build-side leaf scan stage; each task
 	// computes a partial KeyRange+Bloom and uploads as a sideband artifact.
@@ -3379,6 +3406,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// merge-on-read DELETE state, replayed from the snapshot walkStages
 	// took rather than a second manifest read.
 	p.annotateScanDeletes(stages)
+	// LAST, after every rewriting pass: no predicate below a security
+	// projection may read a column that projection hides. A pass that copied
+	// FilterExprs without its PostSecurityFilterExprs companion would put one
+	// back, and the failure mode is a per-row disclosure rather than a wrong
+	// count (#859 round 2), so this refuses rather than trusting the routing.
+	if err := CheckSecurityFilterOrder(ctx, stages); err != nil {
+		return nil, err
+	}
 	return stages, nil
 }
 
@@ -7286,6 +7321,28 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 				// Re-index after any appends.
 				fs := &(*stages)[filterIdx]
+				// A USER predicate on a stage that carries a security
+				// projection runs ABOVE that projection, never in the slot
+				// beside the policy's own row filter — otherwise it reads the
+				// STORED column and its row set is arithmetic on the value the
+				// policy hides (#859 round 2). The barrier is absorbed by the
+				// time this runs: walkStages recurses children first, so the
+				// Project below this Filter has already set the field.
+				//
+				// A predicate that pushdown moved BELOW the barrier reaches
+				// this attach point earlier, while the field is still empty,
+				// and lands in FilterExprs — which is right: substitution
+				// replaced its policed references with the mask, so it names
+				// no policed column at all.
+				if !node.PolicyFilter && len(fs.SecurityProjectExprs) > 0 {
+					fs.PostSecurityFilterExprs = append(fs.PostSecurityFilterExprs, resolvedExpr)
+					p.attachedFilterExprs = append(p.attachedFilterExprs, resolvedExpr)
+					continue
+				}
+				if node.PolicyFilter {
+					// The one predicate that MAY read the stored column.
+					fs.PolicyFilterExprs = append(fs.PolicyFilterExprs, resolvedExpr)
+				}
 				fs.FilterExprs = append(fs.FilterExprs, resolvedExpr)
 				// Counted so a gate can assert CONSERVATION: every predicate
 				// stage emission attached has to survive every rewriting

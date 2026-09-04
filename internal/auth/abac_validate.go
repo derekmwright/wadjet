@@ -62,6 +62,19 @@ func validateObligation(policy, rule string, ob Obligation, restricted map[strin
 		if strings.TrimSpace(ob.Target) == "" {
 			return fmt.Errorf("%s: %s obligation names no target column", where, ob.Type)
 		}
+	case "row_filter":
+		// A row filter that is not a SQL predicate is injected and then
+		// silently does nothing: `InjectRowFilter` returns the plan unchanged
+		// when ParseExpression fails, so the policy that was supposed to
+		// restrict the rows restricted none of them. Same doctrine as the
+		// masks — a control that cannot be applied refuses to load.
+		if strings.TrimSpace(ob.Value) == "" {
+			return fmt.Errorf("%s: row_filter obligation carries no predicate", where)
+		}
+		if _, err := plansql.ParseExpression(ob.Value); err != nil {
+			return fmt.Errorf("%s: row_filter is not a SQL predicate: %q: %w",
+				where, ob.Value, err)
+		}
 	}
 	if ob.Type != "mask_column" {
 		return nil

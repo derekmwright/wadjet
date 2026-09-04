@@ -172,6 +172,57 @@ func TestEnforcePlanPoliciesRefusesWhenTheProjectionCannotBeBuilt(t *testing.T) 
 	}
 }
 
+// TestRowFilterNamingANonexistentColumnRefuses: a policy row filter that names
+// a column the table does not have was injected and then matched EVERY row —
+// a control written to restrict, restricting nothing, in silence. It is the
+// same failure class as a mask that cannot be applied, and it refuses the same
+// way (#859 round 2, review P3).
+func TestRowFilterNamingANonexistentColumnRefuses(t *testing.T) {
+	ctx := ContextWithIdentity(context.Background(),
+		&Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+	cat := peCatalog(t, ctx)
+
+	for _, tc := range []struct {
+		name, filter, want string
+	}{
+		{"nonexistent column", "salary_typo IS NOT NULL", "which the table does not have"},
+		{"nonexistent column in a comparison", "nosuchcol > 1", "which the table does not have"},
+		{"not a predicate", "IS NOT NULL", "not a SQL predicate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := peProvider(t, []Obligation{{Type: "row_filter", Value: tc.filter}})
+			_, err := peEnforce(t, ctx, provider, cat, `SELECT id FROM pe_emp`)
+			if err == nil {
+				t.Fatalf("a row filter over %q was injected; it restricts no rows", tc.filter)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %v\n  want one containing %q", err, tc.want)
+			}
+		})
+	}
+
+	// The controls that must keep working: a filter over a real column, and
+	// one over a column the SAME policy denies — a policy predicate is
+	// allowed to read what the policy hides (ADR-0033 decision 6).
+	for _, tc := range []struct {
+		name string
+		obs  []Obligation
+	}{
+		{"over a visible column", []Obligation{{Type: "row_filter", Value: "id > 1"}}},
+		{"over a column the same policy denies", []Obligation{
+			{Type: "deny_column", Target: "salary"},
+			{Type: "row_filter", Value: "salary > 1"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := peProvider(t, tc.obs)
+			if _, err := peEnforce(t, ctx, provider, cat, `SELECT id FROM pe_emp`); err != nil {
+				t.Fatalf("a working row filter was refused: %v", err)
+			}
+		})
+	}
+}
+
 // TestPolicedRelationsComeFromThePlanNotTheStatement: a derived table's
 // subquery TEXT and a CTE's name are not tables, and the arms of a UNION are
 // not in the statement's FROM list at all.

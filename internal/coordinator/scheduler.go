@@ -158,6 +158,17 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 		return nil
 	}
 
+	// THE choke point every dispatcher goes through, which is why the
+	// SQL-text guard lives here rather than at the six sites that build such
+	// a task: a seventh added later inherits it instead of inheriting the
+	// leak (#859 round 2, review P2). A task a worker will RE-PLAN from its
+	// text carries none of the policy the coordinator applied.
+	for i := range tasks {
+		if err := refuseReplannedSQLText(ctx, "this dispatch path", tasks[i]); err != nil {
+			return err
+		}
+	}
+
 	// Carry the query deadline to workers so a dispatched task is bounded by
 	// the same budget the coordinator enforces — a worker that wedges on a
 	// task then releases its slot at the deadline instead of holding it until
