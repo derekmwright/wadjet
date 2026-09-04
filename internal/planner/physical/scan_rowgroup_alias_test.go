@@ -12,29 +12,74 @@ import (
 
 // The lifetime contract, at the granularity the row-group read introduced.
 //
-// A row group's buffer goes back to readBufPool the moment that row group has
+// A row group's buffer goes back to the pool the moment THAT row group has
 // been decoded — not, as before, when the file's LAST row group has. So a
 // buffer is recycled while OTHER row groups of the same file are still being
 // decoded and while batches decoded from it are still travelling downstream.
-// If any decoded value aliased that buffer, the next file to take it out of
-// the pool would rewrite somebody's rows in place, and the query would return
-// wrong values with no error anywhere.
+// If any decoded value aliased that buffer, the next row group to take it out
+// of the pool would rewrite somebody's rows in place, and the query would
+// return wrong values with no error anywhere.
 //
 // It does not alias — every fixed-width and bytes payload is copied into the
 // vector's own arena — and `TestReadRowGroupNative_StagedNoAliasing` asserts
-// that for the staged path. This asserts it for THIS path, at this
-// granularity, which is the one where a recycle happens mid-file.
+// that for the staged path. This asserts it for THIS path, at the granularity
+// where the recycle happens MID-FILE.
+//
+// Two things make the assertion able to fail, and an earlier version of this
+// test had neither:
+//
+//   - The snapshot is taken AS EACH BATCH ARRIVES, not after the scan. A
+//     snapshot taken at the end records whatever a mid-scan recycle already
+//     did, and then compares it with itself.
+//   - The recycle happens inside ONE scan source. Buffers are pooled per
+//     source and per file shape, so a second source's scan can never be handed
+//     the first's buffers; an arm built that way is vacuous by type.
+//
+// And PoisonReusedSlabs makes the recycle visible: every buffer handed back
+// from the pool is overwritten first, so an aliased value becomes 0xEE rather
+// than "whatever the next row group happened to put there".
 
-// scanAllHolding runs a whole scan through the rg workers and returns every
-// batch, still held. Nothing releases them, which is the point: the buffers
-// they were decoded from are back in the pool by the time this returns.
-func scanAllHolding(t *testing.T, inner *scanSourceInner, slot *fileSlot, rgs int) []*batch.RecordBatch {
-	t.Helper()
+// fatRows makes row groups big enough to be worth pooling and gives every row
+// a distinct value, so one rewritten row is visible.
+func fatRows(n, base int, fill byte) []map[string]any {
+	const pad = 512
+	rows := make([]map[string]any, n)
+	for i := range rows {
+		v := make([]byte, pad)
+		for j := range v {
+			v[j] = fill
+		}
+		copy(v, fmt.Sprintf("%c%08d", fill, base+i))
+		rows[i] = map[string]any{"id": int64(base + i), "value": string(v)}
+	}
+	return rows
+}
+
+func TestABatchOutlivesItsRowGroupsBuffer(t *testing.T) {
+	const rgs, rowsPerRG = 8, 150
+	prevPoison := PoisonReusedSlabs(true)
+	defer PoisonReusedSlabs(prevPoison)
+
+	sets := make([][]map[string]any, rgs)
+	for i := range sets {
+		sets[i] = fatRows(rowsPerRG, i*rowsPerRG, 'a')
+	}
+	cat, entry := scanAccountingFixture(t, sets...)
+	tracker := memory.NewTracker("scan-alias", 1<<30)
+	inner := &scanSourceInner{
+		cat: cat, memTracker: tracker,
+		schema:  scanAccountingSchemaCols(),
+		batchCh: make(chan *batch.RecordBatch, 2), // small: batches queue behind the consumer
+		errCh:   make(chan error, 1),
+	}
+	slot := rowGroupSlot(t, inner, cat, entry, rgs)
+	reusesBefore := RowGroupSlabReuses()
+
 	var rowOff int64
 	for i := 0; i < rgs; i++ {
-		n := int64(200)
-		inner.rgUnits = append(inner.rgUnits, rgUnit{slot: slot, rgIndex: i, rgRowOffset: rowOff, numRows: n})
-		rowOff += n
+		inner.rgUnits = append(inner.rgUnits, rgUnit{
+			slot: slot, rgIndex: i, rgRowOffset: rowOff, numRows: rowsPerRG})
+		rowOff += rowsPerRG
 	}
 	inner.wg.Add(2)
 	go inner.rgWorker(context.Background())
@@ -44,7 +89,11 @@ func scanAllHolding(t *testing.T, inner *scanSourceInner, slot *fileSlot, rgs in
 		close(inner.batchCh)
 	}()
 
+	// Snapshot AS EACH BATCH ARRIVES, and hold the batch. Row groups later in
+	// the file are still loading — into buffers this batch's row group just
+	// returned to the pool, overwritten with 0xEE on the way out.
 	var held []*batch.RecordBatch
+	var want [][]string
 	ctx := context.Background()
 	for {
 		b, err := inner.next(ctx)
@@ -54,102 +103,66 @@ func scanAllHolding(t *testing.T, inner *scanSourceInner, slot *fileSlot, rgs in
 		if b == nil {
 			break
 		}
+		snap := make([]string, b.Len)
+		for r := 0; r < b.Len; r++ {
+			snap[r] = b.Columns[1].BytesData.StringValue(r)
+		}
 		held = append(held, b)
+		want = append(want, snap)
 	}
-	return held
-}
-
-// fatRows makes a row group big enough to be POOLED. putReadBuf keeps only
-// buffers of 64 KiB and up, so a fixture with small row groups would recycle
-// nothing and the aliasing assertion below would be vacuous.
-func fatRows(n, base int, fill byte) []map[string]any {
-	const pad = 512
-	rows := make([]map[string]any, n)
-	for i := range rows {
-		v := make([]byte, pad)
-		for j := range v {
-			v[j] = fill
-		}
-		// A distinct prefix per row, so a rewritten row is visible even when
-		// the fill byte matches.
-		copy(v, fmt.Sprintf("%c%08d", fill, base+i))
-		rows[i] = map[string]any{"id": int64(base + i), "value": string(v)}
+	if len(held) < rgs/2 {
+		t.Fatalf("%d batches for %d row groups — too few to have overlapped a recycle", len(held), rgs)
 	}
-	return rows
-}
-
-func TestABatchOutlivesItsRowGroupsBuffer(t *testing.T) {
-	const rgs, rowsPerRG = 4, 200
-
-	// File A, held. Every value is distinct so a rewritten byte shows up.
-	sets := make([][]map[string]any, rgs)
-	for i := range sets {
-		sets[i] = fatRows(rowsPerRG, i*rowsPerRG, 'a')
-	}
-	catA, entryA := scanAccountingFixture(t, sets...)
-	trackerA := memory.NewTracker("scan-a", 1<<30)
-	innerA := &scanSourceInner{
-		cat: catA, memTracker: trackerA,
-		schema:  scanAccountingSchemaCols(),
-		batchCh: make(chan *batch.RecordBatch, rgs+1),
-		errCh:   make(chan error, 1),
-	}
-	slotA := rowGroupSlot(t, innerA, catA, entryA, rgs)
-	if peak := peakRowGroupBytes(slotA.rgs.starts, slotA.rgs.ends); peak < 64*1024 {
-		t.Fatalf("the fixture's largest row group is %d bytes, under putReadBuf's 64 KiB floor — "+
-			"its buffers are never pooled, so nothing below could observe a recycle", peak)
-	}
-	held := scanAllHolding(t, innerA, slotA, rgs)
-	if len(held) == 0 {
-		t.Fatal("no batches")
-	}
-
-	// What A decoded, snapshotted as strings BEFORE anything else runs.
-	want := make([][]string, len(held))
-	for i, b := range held {
-		want[i] = make([]string, b.Len)
-		for r := 0; r < b.Len; r++ {
-			want[i][r] = b.Columns[1].BytesData.StringValue(r)
-		}
-	}
-
-	// File B: same shape and the same row-group byte sizes, DIFFERENT bytes.
-	// Scanning it hands its row groups buffers out of the pool — including
-	// the ones A's row groups were decoded from and released.
-	otherSets := make([][]map[string]any, rgs)
-	for i := range otherSets {
-		otherSets[i] = fatRows(rowsPerRG, i*rowsPerRG, 'Z')
-	}
-	for pass := 0; pass < 3; pass++ { // several passes: sync.Pool is per-P
-		catB, entryB := scanAccountingFixture(t, otherSets...)
-		trackerB := memory.NewTracker("scan-b", 1<<30)
-		innerB := &scanSourceInner{
-			cat: catB, memTracker: trackerB,
-			schema:  scanAccountingSchemaCols(),
-			batchCh: make(chan *batch.RecordBatch, rgs+1),
-			errCh:   make(chan error, 1),
-		}
-		slotB := rowGroupSlot(t, innerB, catB, entryB, rgs)
-		for _, b := range scanAllHolding(t, innerB, slotB, rgs) {
-			_ = b
-		}
+	if reuses := RowGroupSlabReuses() - reusesBefore; reuses == 0 {
+		t.Fatal("this scan never took a buffer back out of the pool, so no batch was ever live " +
+			"across a recycle and nothing below is being tested")
 	}
 
 	for i, b := range held {
 		for r := 0; r < b.Len; r++ {
-			if got := b.Columns[1].BytesData.StringValue(r); got != want[i][r] {
-				t.Fatalf("batch %d row %d read %q, decoded as %q: a row group's buffer was "+
-					"recycled while a batch decoded from it was still live",
+			got := b.Columns[1].BytesData.StringValue(r)
+			if got != want[i][r] {
+				t.Fatalf("batch %d row %d read %q, but decoded as %q: a row group's buffer was "+
+					"recycled — and overwritten — while a batch decoded from it was still live",
 					i, r, got, want[i][r])
+			}
+			if len(got) > 0 && got[0] == 0xEE {
+				t.Fatalf("batch %d row %d is poison: it aliases a recycled row-group buffer", i, r)
 			}
 		}
 	}
 }
 
-// TestARowGroupErrorMidDecodeLeavesNothingCharged: the decode of a row group
-// fails (its bytes are not the file's), and the slot must still give back
-// every buffer and every charge. An error path that leaks is a phantom
-// reservation on the worker-lifetime tracker.
+// TestAPoisonedSlabIsActuallyReused: the gate above proves nothing unless the
+// pool really hands a buffer back during that scan. This is its precondition,
+// asserted rather than assumed — with poisoning on, a reused buffer arrives
+// full of 0xEE, so a scan that never reuses one would leave this at zero.
+func TestAPoisonedSlabIsActuallyReused(t *testing.T) {
+	prevPoison := PoisonReusedSlabs(true)
+	defer PoisonReusedSlabs(prevPoison)
+	inner := &scanSourceInner{}
+	const n, peak = 4096, 8192
+	first := inner.getSlab(n, peak)
+	for i := range first[:cap(first)] {
+		first[:cap(first)][i] = 0x01
+	}
+	inner.putSlab(first, peak)
+	again := inner.getSlab(n, peak)
+	if cap(again) != cap(first) {
+		t.Fatalf("the pool did not hand the buffer back (cap %d then %d)", cap(first), cap(again))
+	}
+	for i, c := range again[:cap(again)] {
+		if c != 0xEE {
+			t.Fatalf("byte %d of a reused buffer is %#x, want the poison — PoisonReusedSlabs is not "+
+				"reaching the reuse path, so the aliasing gate cannot fail", i, c)
+		}
+	}
+}
+
+// TestARowGroupErrorMidDecodeLeavesNothingCharged: a row group demanded after
+// its release — the shape a decode error takes at this seam — must be an error,
+// and the slot must still give back every buffer and every charge. A leaking
+// error path is a phantom reservation on the worker-lifetime tracker.
 func TestARowGroupErrorMidDecodeLeavesNothingCharged(t *testing.T) {
 	cat, entry := scanAccountingFixture(t, testRows(200, 0), testRows(200, 200), testRows(200, 400))
 	tracker := memory.NewTracker("scan-test", 1<<30)
@@ -160,8 +173,6 @@ func TestARowGroupErrorMidDecodeLeavesNothingCharged(t *testing.T) {
 	if _, _, err := slot.rgs.RowGroupBytes(0); err != nil {
 		t.Fatalf("row group 0: %v", err)
 	}
-	// The loader's stream is now past row group 0. Ask for a row group it has
-	// already passed, which is the shape a decode error takes here.
 	slot.releaseRG(inner, 0)
 	if _, _, err := slot.rgs.RowGroupBytes(0); err == nil {
 		t.Fatal("a released row group was served again")
