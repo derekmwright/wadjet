@@ -98,6 +98,58 @@ func setOpNameCells() []setOpNameCell {
 	}
 }
 
+// Duplicate output NAMES keep their own VALUES, read POSITIONALLY.
+//
+// The names gate above compares column LISTS, and every row comparator in this
+// package reads a row through a map keyed by name — which holds ONE column of a
+// duplicated name, so neither can see the values of a result whose subject is
+// duplicate names. `wadjet.QueryResult.Cells` is the positional form and this
+// is the only reader of it here: `SELECT id AS n, a AS n …` publishes two
+// columns called `n`, and they carry decpair's id and its DECIMAL a, not one of
+// them twice (#556/#557, slot identity by POSITION).
+//
+// The stage DAG REFUSES this shape — the two arms' shuffle files collide on the
+// column name — and that split is pinned in TestKnownSetOperationTwoPathSplits
+// with its mechanism.
+func TestDuplicateSetOperationOutputNamesKeepTheirOwnValues(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	db := tmdStandalone(t, ctx)
+
+	const sql = `SELECT id AS n, a AS n FROM decpair WHERE id = 1 ` +
+		`UNION ALL SELECT id, b FROM decpair WHERE id = 1`
+	res, err := db.Query(ctx, sql)
+	if err != nil {
+		t.Fatalf("%v\n  SQL: %s", err, sql)
+	}
+	if strings.Join(res.Columns, ",") != "n,n" {
+		t.Fatalf("columns %v, want two columns called n", res.Columns)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("%d rows, want 2", len(res.Rows))
+	}
+	// PostgreSQL 17.11 answers (1, 12.75) and (1, 12.7500) — its numeric is
+	// unconstrained, so each arm keeps its own scale — where wadjet renders
+	// both at the union's resolved scale 4. The VALUES are what this compares,
+	// so what it asserts is that column 1 is the id and column 2 the DECIMAL,
+	// and not one of them twice.
+	for i, want := range [][2]string{{"1", "12.75"}, {"1", "12.75"}} {
+		cells := res.Cells(i)
+		if len(cells) != 2 {
+			t.Fatalf("row %d has %d cells, want 2 — the positional form is what makes a "+
+				"duplicate name readable at all", i, len(cells))
+		}
+		got := [2]string{setOpCanonValue(cells[0]), setOpCanonValue(cells[1])}
+		if got != want {
+			t.Errorf("row %d is %v, want %v — the two columns share a NAME and must not "+
+				"share a VALUE", i, got, want)
+		}
+	}
+}
+
 func TestASetOperationPublishesItsLeftmostArmsNames(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")

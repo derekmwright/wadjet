@@ -189,6 +189,15 @@ func TestAWindowInASetOperationArmIsTheArmsOwnOutput(t *testing.T) {
 
 // setOpCanonRows renders a result as one sorted canonical string per row.
 //
+// It reads each row through `map[string]any` keyed by column NAME, which
+// CANNOT see a duplicate output name: two columns called `n` are one map entry,
+// so a cell whose subject is duplicate names compares one column against
+// itself. Every caller here publishes distinct names on purpose; the
+// duplicate-name shapes are asserted POSITIONALLY instead —
+// `TestASetOperationPublishesItsLeftmostArmsNames`' own positional cell for the
+// single-process path, and `TestKnownSetOperationTwoPathSplits` for the DAG,
+// which refuses them.
+//
 // A numeric cell is normalised through big.Rat, so a DECIMAL rendered at the
 // set operation's resolved scale (52.9900 under a DECIMAL(18,4) sibling arm)
 // compares equal to PostgreSQL's unconstrained numeric (52.99). Anything that
