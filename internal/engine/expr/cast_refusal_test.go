@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -259,38 +261,69 @@ func TestCastToFloatPrecisionResolvesByWidth(t *testing.T) {
 // TestUnknownCastTypeStillDeclaresString is #652's SECOND half, DEFERRED and
 // pinned.
 //
-// `CAST(1 AS NOSUCHTYPE)` answers 1 declared STRING; PostgreSQL raises 42704
-// `type "nosuchtype" does not exist`. The fix is not a refusal bolted onto any
-// one of the four functions that read a destination name — expr.castDestType,
-// physical.inferCastType, expr.castTemporalKindLower and
-// parquet.ParseTypeID each accept a DIFFERENT subset, and a refusal built on
-// one alone would reject types the others accept. `CAST(x AS TIME)` is the
-// live example: parquet.ParseTypeID has no TIME, the cast layer passes its
-// text through on purpose, and PostgreSQL accepts it.
+// `CAST(1 AS NOSUCHTYPE)` answered 1 declared STRING; PostgreSQL raises 42704
+// `type "nosuchtype" does not exist`. This was a PIN with the instruction that
+// the fix must not be a refusal bolted onto any ONE of the four functions that
+// read a destination name — expr.castDestType, physical.inferCastType,
+// expr.castTemporalKindLower and parquet.ParseTypeID each accept a DIFFERENT
+// subset — and that `CAST(x AS TIME)` must still ANSWER, because PostgreSQL
+// accepts it and the cast layer passes its text through.
 //
-// TODO(#652): delete this when there is ONE list of accepted cast
-// destinations, the way parquet.ParseDateDays is the one date accept-set. This
-// pin fires the day the cast starts refusing an unknown name.
-func TestUnknownCastTypeStillDeclaresString(t *testing.T) {
+// #652 built that one list (expr.KnownCastDest) and the refusal reads it. The
+// first cut got the second half wrong: it refused `time`, `json` and `xml`
+// too, whose text this engine already returned EXACTLY as the server does —
+// a right value turned loud, which ADR-0012 does not permit. They are in
+// KnownCastDest's pass-through set now (round-1 review, B4).
+//
+// This test asserts BOTH halves through the door a query takes. It used to
+// call `Cast.Eval` directly, which is why it kept passing while the SQL door
+// refused: the refusal is raised at COMPILE time, and `Cast.Eval` is what
+// runs after a compile that never happened. A guard that cannot see the path
+// it guards is not a guard.
+func TestUnknownCastTypeIsRefusedAndKnownOnesStillAnswer(t *testing.T) {
 	b := castRefusalBatch(t)
-	got := func() (v any) {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Fatalf("CAST(1 AS NOSUCHTYPE) now raises %v — #652's unknown-type half has "+
-					"moved. Check that the refusal reads ONE accepted-destination list and "+
-					"that CAST(x AS TIME) still answers, then delete this pin.", r)
+	// The REFUSAL, through the compile the SQL door takes.
+	for _, name := range []string{"nosuchtype", "bogustype", "bytea", "money", "inet"} {
+		t.Run("refuses/"+name, func(t *testing.T) {
+			node, err := plansql.ParseExpressionComplete("CAST(1 AS " + name + ")")
+			if err != nil {
+				t.Fatalf("parse: %v", err)
 			}
-		}()
-		return (&Cast{Operand: &Lit{Val: int64(1)}, DestType: "nosuchtype"}).Eval(b, 0)
-	}()
-	if got != int64(1) {
-		t.Errorf("CAST(1 AS NOSUCHTYPE) = %#v, this pin records the operand passed through", got)
+			_, err = Compile(node)
+			if err == nil {
+				t.Fatalf("CAST(1 AS %s) compiled; PostgreSQL raises 42704 for a type that does "+
+					"not exist, and this engine's CREATE TABLE door refuses all five", name)
+			}
+			if got := sqlerr.StateOf(err); got != "42704" {
+				t.Errorf("SQLSTATE %s, want 42704: %v", got, err)
+			}
+		})
 	}
-	// The shape that makes the deferral a deferral rather than an omission:
-	// PostgreSQL ACCEPTS this one, and no list here knows the name.
-	if got := (&Cast{Operand: &Lit{Val: "10:00:00"}, DestType: "time"}).Eval(b, 0); got != "10:00:00" {
-		t.Errorf("CAST('10:00:00' AS TIME) = %#v, want the text unchanged — PostgreSQL accepts "+
-			"TIME and a refusal built on any single destination list here would reject it", got)
+	// And the half the pin existed to protect: a name PostgreSQL accepts whose
+	// text this engine hands back unchanged must still ANSWER, through the
+	// same door. `CAST('12:34:56' AS time)` is `12:34:56` on PostgreSQL 17.11
+	// and here; json and xml are the same shape, measured.
+	for _, c := range []struct{ name, dest, in string }{
+		{"time", "time", "12:34:56"},
+		{"json", "json", `{"a":1}`},
+		{"xml", "xml", "<a/>"},
+	} {
+		t.Run("answers/"+c.name, func(t *testing.T) {
+			node, err := plansql.ParseExpressionComplete(
+				"CAST('" + c.in + "' AS " + c.dest + ")")
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			e, err := Compile(node)
+			if err != nil {
+				t.Fatalf("CAST('%s' AS %s) was REFUSED: %v — PostgreSQL accepts it and this "+
+					"engine already returned the server's own bytes for it, so refusing turns "+
+					"a right answer loud (round-1 review, B4)", c.in, c.dest, err)
+			}
+			if got := e.Eval(b, 0); got != c.in {
+				t.Errorf("= %#v, want %q unchanged", got, c.in)
+			}
+		})
 	}
 }
 

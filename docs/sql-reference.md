@@ -1182,11 +1182,17 @@ raise `22003`, and wadjet has one float path, so this answers where an explicit
 
 A `CAST` whose destination names no type this engine has is SQLSTATE `42704`
 (`type "bogustype" does not exist`), the same code and message the `CREATE
-TABLE` door gives for the same name. That includes PostgreSQL type names this
-engine has no type for — `bytea`, `inet`, `json`, `money`, `xml`, `time` — so
-those are refused where the server answers; the alternative was returning the
-operand under a `text` declaration, which published a number as a string.
-Recorded in ADR-0012's divergence list.
+TABLE` door gives for the same name. That includes three PostgreSQL type names
+this engine has no type for and gets the VALUE wrong for — `bytea`, `money`,
+`inet` — so those are refused where the server answers; the alternative was
+returning the operand under a `text` declaration, and that text is not the
+server's (`abc` for `\x616263`, `1.5` for `$1.50`, `192.168.1.1` for
+`192.168.1.1/32`). Recorded in ADR-0012's divergence list.
+
+`time`, `json` and `xml` are accepted and pass their operand's text through
+unchanged, which is what PostgreSQL answers for each: `CAST('12:34:56' AS
+time)` is `12:34:56` on both. They are described as `text` on the wire where
+PostgreSQL describes them as their own types.
 
 A cast to a destination this engine HAS but does not convert — the network
 types, `DURATION`, `BYTES`, `VECTOR(n)`, the containers — still returns its

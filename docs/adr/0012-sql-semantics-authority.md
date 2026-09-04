@@ -1016,12 +1016,25 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `timestamptz`, …). One type name, one disposition, which is the property
      the length-modifier entry above already states.
 
-     **What diverges**: a PostgreSQL type name this engine has no type for —
-     `bytea`, `inet`, `json`, `money`, `xml`, `time` — is refused where the
-     server answers. The `CREATE TABLE` door has refused those all along (with
-     no SQLSTATE at all until this change; it carries 42704 now, from
-     `parquet.ParseTypeID`), and the alternative on the CAST door was the
-     wrong VALUE above. Loud beats plausible.
+     **What diverges**: three PostgreSQL type names this engine has no type
+     for AND renders differently — `bytea`, `money`, `inet` — are refused where
+     the server answers. The `CREATE TABLE` door has refused those all along
+     (with no SQLSTATE at all until this change; it carries 42704 now, from
+     `parquet.ParseTypeID`), and the alternative on the CAST door was a value
+     under a `text` declaration that is not the server's: `abc` for
+     `\x616263`, `1.5` for `$1.50`, `192.168.1.1` for `192.168.1.1/32`. Loud
+     beats plausible THERE, and only there.
+
+     **What does not**: `time`, `json` and `xml`. The first cut of this refused
+     them too, and their text is what the server answers byte for byte —
+     `CAST('12:34:56' AS time)` is `12:34:56` on both engines. Turning a right
+     answer loud is the direction this list does not permit, and
+     `expr.TestUnknownCastTypeIsRefusedAndKnownOnesStillAnswer` had been left
+     in the tree saying so; it was passing only because it called `Cast.Eval`
+     while the refusal had moved to the compile (round-1 review, B4). They are
+     accepted, pass their text through, and are declared `text` — a
+     DECLARATION divergence over a right value, the same class as every other
+     pass-through destination.
 
      **What stays a superset**: a destination this engine HAS but does not
      CONVERT still returns its operand unchanged — the network types,

@@ -44,14 +44,21 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 			`SELECT COUNT(*) AS n FROM ` + tbl + ` WHERE CAST(c_i64 AS bogustype) = '1'`, "bogustype"},
 		{"in_an_aggregate_argument",
 			`SELECT MAX(CAST(c_i64 AS bogustype)) AS v FROM ` + tbl, "bogustype"},
-		// PostgreSQL type names this engine has no type for. It refuses these
-		// where the server answers, and it has refused them on the CREATE
-		// TABLE door all along — the point of this pass is that ONE type name
-		// gets ONE disposition, and the alternative here is the wrong VALUE
-		// above. ADR-0012's divergence list records it.
+		// PostgreSQL type names this engine has no type for AND gets the VALUE
+		// wrong for. It refuses these where the server answers, and it has
+		// refused them on the CREATE TABLE door all along — the point of this
+		// pass is that ONE type name gets ONE disposition, and the alternative
+		// here is the wrong value under a text declaration: `abc` where the
+		// server says `\x616263`, `1.5` where it says `$1.50`, `192.168.1.1`
+		// where it says `192.168.1.1/32`. ADR-0012's list records it.
+		//
+		// `time`, `json` and `xml` are NOT here and must not be: this engine
+		// already returned the server's own bytes for those, so refusing them
+		// turned a right answer loud (round-1 review, B4). They are asserted
+		// as pass-throughs below.
 		{"bytea", `SELECT CAST(c_str AS bytea) AS v FROM ` + tbl + ` WHERE id = 1`, "bytea"},
 		{"inet", `SELECT CAST(c_str AS inet) AS v FROM ` + tbl + ` WHERE id = 1`, "inet"},
-		{"json", `SELECT CAST(c_str AS json) AS v FROM ` + tbl + ` WHERE id = 1`, "json"},
+		{"money", `SELECT CAST(c_str AS money) AS v FROM ` + tbl + ` WHERE id = 1`, "money"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := db.Query(ctx, c.sql)
@@ -123,6 +130,11 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 	// name nothing, not casts that are unimplemented, so these must still
 	// ANSWER exactly as they did before.
 	for _, sql := range []string{
+		// The three PostgreSQL names whose TEXT this engine already hands back
+		// exactly as the server does. Refusing them was B4.
+		`SELECT CAST('12:34:56' AS time) AS v FROM ` + tbl + ` WHERE id = 1`,
+		`SELECT CAST('{"a":1}' AS json) AS v FROM ` + tbl + ` WHERE id = 1`,
+		`SELECT CAST('<a/>' AS xml) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS IPV4) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS CIDR) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS MAC) AS v FROM ` + tbl + ` WHERE id = 1`,
