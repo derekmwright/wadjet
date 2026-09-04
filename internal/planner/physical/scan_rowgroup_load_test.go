@@ -414,10 +414,12 @@ func TestARowGroupIsHeldInABufferAtMostTwiceItsSize(t *testing.T) {
 //
 //  1. Row groups of similar size share a bucket, and one of a different
 //     magnitude does not.
-//  2. Every buffer in a bucket is allocated at the bucket's class, so ANY
-//     member serves ANY request of that class. Without this a bucket holds an
-//     82,000-byte buffer beside a 100,000-byte one, and two requests for
-//     99,800 are served by neither.
+//  2. A fresh buffer is allocated at the ROW GROUP's own size, not at the
+//     bucket's class. That is what keeps the heap flat, and it is why a
+//     bucket's members can differ in capacity — so one Get can draw a buffer
+//     too small and miss, which is the accepted cost recorded in getSlab:
+//     making every member serve every request means allocating at the class,
+//     measured at +6.6% suite heap.
 func TestSlabsAreReusedAcrossFilesOfSimilarShape(t *testing.T) {
 	// (1) the bucket key.
 	sameShape := []int{97_400, 99_800, 100_000, 70_000, 66_000}

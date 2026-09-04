@@ -111,14 +111,22 @@ group per row group in flight, which is stated here rather than hidden, and
 `physical.TestARowGroupIsHeldInABufferAtMostTwiceItsSize` is what holds the
 bound.
 
-Three other bucket rules were measured and are recorded so the next reader does
-not re-derive them: the process-wide `readBufPool` (whose only rule is "big
-enough") charged a 332-byte row group 105,900 bytes from a whole-file buffer —
-319x the row group and 53x its file; the parquet chunk pool's classes have a
-64 KiB FLOOR, which held a 5 KiB row group in 64 KiB; and keying the bucket on
-the file's exact largest row group removed both faults but keyed on a number
-compression makes unique per file, so nothing was reused and the TPC-H SF1
-suite allocated **+29.2%** more, separated across five base/tip pairs.
+FOUR other bucket rules were measured and are recorded so the next reader does
+not re-derive them. Each is refused by a number, not a preference:
+
+| rule | why it is refused | measured |
+|---|---|---|
+| the process-wide `readBufPool`, whose only rule is "big enough" | it also holds whole-FILE buffers, so a row group draws one | a 332-byte row group charged **105,900 bytes** — 319x the row group, 53x its file |
+| the parquet chunk pool's size classes | a 64 KiB FLOOR is a tuning constant with a pool's manners | a 5 KiB row group held in **64 KiB** |
+| bucket = the file's EXACT largest row group | compression makes that byte count unique per file, so no two files share a bucket and nothing is reused | TPC-H SF1 suite heap **+29.2%**, separated over five base/tip pairs |
+| bucket = a size class, with buffers ALLOCATED AT the class | it does make every member of a bucket serve every request in it — one Get, no miss — but `sync.Pool` sheds at every GC, so the rounding is paid again and again rather than once per class | TPC-H SF1 suite heap **+6.6%**, separated over five base/tip pairs (its +10.9% wall in the same run was an ordering artefact: alternating the arms gave −1.1%) |
+
+What ships is the fourth rule's bucket with the third's allocation: a
+power-of-two class OF THE ROW GROUP's own byte range decides which bucket a
+buffer is reused from, and a fresh buffer is allocated at the row group's own
+size. A bucket's members can therefore differ in capacity, so one Get can miss
+and allocate — the accepted cost, which is one allocation of exactly what the
+row group needs, against a fraction of every buffer forever.
 
 **#598's refusal of "reserve-and-overcommit" stands on the corrected count.**
 Deliberately reserving past the budget for an arrival batch would be an EIGHTH

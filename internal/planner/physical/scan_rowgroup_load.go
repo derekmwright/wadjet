@@ -423,7 +423,7 @@ func PoisonReleasedSlabs(on bool) (prev bool) { return poisonReleasedSlabs.Swap(
 // group's size. Both halves are load-bearing: without the bucket, another
 // file's shape serves this row group (319x); allocating AT the class instead
 // of at the row group rounds every fresh buffer up to a power of two, which
-// measured +10.9% suite heap. Two row groups in one class differ by less than
+// measured +6.6% suite heap (see getSlab). Two row groups in one class differ by less than
 // 2x, which is where the bound comes from. The slack between the charge and
 // the buffer is pool capacity, bounded by the row group itself and reused
 // across the scan; ADR-0006's producer row 2 records that the row-group path
@@ -462,9 +462,12 @@ func (inner *scanSourceInner) getSlab(n int) []byte {
 	// any request of the class — one Get, no miss — and costs **+6.6% suite
 	// heap over TPC-H SF1, separated across five base/tip pairs**, because
 	// sync.Pool sheds at every GC, so the rounding is paid again and again
-	// rather than once per class. The miss costs one allocation of exactly
-	// what the row group needs; the uniformity costs a fraction of every
-	// buffer forever. The cheaper of the two is the one that ships.
+	// rather than once per class. (Its wall reading in that run, +10.9%, is
+	// not a second cost: the arms were measured in one order, and alternating
+	// them gave −1.1%. Heap is the number that separated; wall did not.) The
+	// miss costs one allocation of exactly what the row group needs; the
+	// uniformity costs a fraction of every buffer forever. The cheaper of the
+	// two is the one that ships.
 	class := slabClass(n)
 	for _, c := range [2]int{class, 2 * class} {
 		p := slabBucket(c)
