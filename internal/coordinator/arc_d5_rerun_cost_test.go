@@ -1,0 +1,291 @@
+package coordinator
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
+)
+
+// arcD5CountingStore counts the object-store GETs whose key names one table.
+//
+// This is the timing-free way to ask "did the inner relation get read once, or
+// once per outer row". A wall-clock assertion on the same question would be a
+// flake; a fetch count is exact and it is the quantity the cost is linear in.
+type arcD5CountingStore struct {
+	objstore.Store
+	needle string
+	gets   atomic.Int64
+}
+
+func (s *arcD5CountingStore) Get(ctx context.Context, bucket, key string) (io.ReadCloser, objstore.ObjectInfo, error) {
+	if strings.Contains(key, s.needle) {
+		s.gets.Add(1)
+	}
+	return s.Store.Get(ctx, bucket, key)
+}
+
+// arcD5ForcedCounter counts memory.ReserveOrForce's give-up warning and keeps
+// the last reservation size it reported.
+type arcD5ForcedCounter struct {
+	forced atomic.Int64
+	bytes  atomic.Int64
+}
+
+func (h *arcD5ForcedCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (h *arcD5ForcedCounter) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *arcD5ForcedCounter) WithGroup(string) slog.Handler            { return h }
+func (h *arcD5ForcedCounter) Handle(_ context.Context, r slog.Record) error {
+	if r.Message != "memory reservation forced past budget" {
+		return nil
+	}
+	h.forced.Add(1)
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "bytes" {
+			h.bytes.Store(a.Value.Int64())
+		}
+		return true
+	})
+	return nil
+}
+
+// arcD5RerunFixture builds outer(k) and inner(k, pad) in a fresh database whose
+// store counts reads of the inner table's files. padWidth sets the inner file's
+// size, which is what decides whether a single load fits the budget.
+func arcD5RerunFixture(t *testing.T, ctx context.Context, budget int64, outerRows, innerRows, padWidth int) (*wadjet.DB, *arcD5CountingStore) {
+	t.Helper()
+	store := &arcD5CountingStore{Store: objstore.NewMemStore(), needle: "d5_inner"}
+	db, err := wadjet.Open(ctx, wadjet.Config{
+		Store: store, Bucket: "test",
+		MemoryBudget: budget, SpillDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	outerSchema := parquet.Schema{Columns: []parquet.Column{{Name: "k", Type: parquet.TypeInt64}}}
+	innerSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "pad", Type: parquet.TypeString},
+	}}
+	outerRowsData := make([]map[string]any, outerRows)
+	for i := range outerRowsData {
+		outerRowsData[i] = map[string]any{"k": int64(i)}
+	}
+	pad := strings.Repeat("x", padWidth)
+	innerRowsData := make([]map[string]any, innerRows)
+	for i := range innerRowsData {
+		innerRowsData[i] = map[string]any{"k": int64(i % 97), "pad": fmt.Sprintf("%s-%d", pad, i)}
+	}
+	for _, spec := range []struct {
+		name   string
+		schema parquet.Schema
+		rows   []map[string]any
+	}{
+		{"d5_outer", outerSchema, outerRowsData},
+		{"d5_inner", innerSchema, innerRowsData},
+	} {
+		if err := db.CreateTable(ctx, spec.name, spec.schema, nil); err != nil {
+			t.Fatalf("create %s: %v", spec.name, err)
+		}
+		ing := db.NewIngester(spec.name, spec.schema, nil, ingest.Config{MaxBufferRows: len(spec.rows) + 1})
+		if err := ing.Ingest(ctx, spec.rows); err != nil {
+			t.Fatalf("ingest %s: %v", spec.name, err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatalf("flush %s: %v", spec.name, err)
+		}
+	}
+	store.gets.Store(0) // ingest's own reads are not the measurement
+	return db, store
+}
+
+// The three spellings of one question: "is there a row of d5_inner matching
+// this outer row". Only the FROM differs.
+const (
+	arcD5RerunOverBase = `SELECT count(*) FROM d5_outer o
+	                        WHERE EXISTS (SELECT 1 FROM d5_inner i WHERE i.k = o.k)`
+	arcD5RerunOverDerived = `SELECT count(*) FROM d5_outer o
+	                           WHERE EXISTS (SELECT 1 FROM (SELECT k FROM d5_inner) d WHERE d.k = o.k)`
+	arcD5RerunOverCTE = `WITH d AS (SELECT k FROM d5_inner)
+	                     SELECT count(*) FROM d5_outer o
+	                       WHERE EXISTS (SELECT 1 FROM d WHERE d.k = o.k)`
+)
+
+// TestCorrelatedRerunReadsTheInnerOncePerOuterRow pins deferral D2: the arc's
+// decorrelators lower a correlated EXISTS whose FROM is a BASE TABLE, and only
+// that. Give the same subquery a DERIVED TABLE or a CTE REFERENCE and the
+// rewrite does not fire, so the re-run fallback answers it — reading the whole
+// inner relation once per outer row.
+//
+// Both halves are asserted, because the pair is the finding. The base-table
+// spelling is the property the arc bought (ONE read, flat in outer rows); the
+// other two are the boundary of what it bought, and the census cannot see them
+// because a census compares ANSWERS and all three answers are right.
+//
+// What flips this pin: teaching decorrelateExists (and its IN and scalar
+// siblings, internal/planner/logical/optimizer.go) to match a subquery whose
+// FROM is a derived table or a CTE reference rather than only NodeScan. When
+// that lands, the derived and CTE arms read the inner ONCE and the two
+// "want ... per outer row" assertions below fail — deleting them is the proof.
+//
+// The cost this bounds, measured (see REPORT.md, issue text 2): the SAME shape
+// under a 512 KiB budget with an inner file larger than the whole budget pays
+// physical.fileLoadReserveWait — 2 seconds — on EVERY one of those reads,
+// because memory.ReserveOrForce waits out a reservation that cannot succeed.
+// One outer row per 2 seconds is what took the round-0 census past its
+// 30-minute timeout. TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow
+// below reaches that, at the smallest size that reaches it.
+func TestCorrelatedRerunReadsTheInnerOncePerOuterRow(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		// perOuterRow says whether the inner relation is read once for the
+		// whole query or once for each row of d5_outer.
+		perOuterRow bool
+	}{
+		{"base table inner: decorrelated", arcD5RerunOverBase, false},
+		{"derived table inner: re-run", arcD5RerunOverDerived, true},
+		{"cte reference inner: re-run", arcD5RerunOverCTE, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Two outer sizes, because the SHAPE of the growth is the claim.
+			// A single count cannot tell a constant from a multiple.
+			counts := map[int]int64{}
+			for _, outerRows := range []int{8, 16} {
+				db, store := arcD5RerunFixture(t, ctx, 0, outerRows, 400, 8)
+				res, err := db.Query(ctx, tc.sql)
+				if err != nil {
+					t.Fatalf("outer=%d: %v", outerRows, err)
+				}
+				if got := fmt.Sprint(res.Rows[0][res.Columns[0]]); got != fmt.Sprint(outerRows) {
+					// Every spelling is right regardless of how it is executed;
+					// that is exactly why only a cost probe can see the gap.
+					t.Fatalf("outer=%d: count(*) = %s, want %d", outerRows, got, outerRows)
+				}
+				counts[outerRows] = store.gets.Load()
+			}
+			t.Logf("inner-file reads: outer=8 -> %d, outer=16 -> %d", counts[8], counts[16])
+
+			if tc.perOuterRow {
+				// Measured at this tip: 2N+1 reads for N outer rows (17 and 33).
+				// The assertion is "at least one per row" so that a re-run which
+				// reads its inner more cheaply still counts as the defect.
+				if counts[8] < 8 || counts[16] < 16 {
+					t.Errorf("re-run shape read the inner %d/%d times for 8/16 outer rows;\n"+
+						"  want at least one read per outer row. If the decorrelator now "+
+						"covers a derived-table or CTE inner, this pin has been fixed: "+
+						"delete it and say so (D5 deferral D2).",
+						counts[8], counts[16])
+				}
+				if counts[16] <= counts[8] {
+					t.Errorf("re-run shape read the inner %d times for 8 outer rows and %d "+
+						"for 16; the cost must grow with the outer row count or this is "+
+						"no longer the re-run fallback", counts[8], counts[16])
+				}
+				return
+			}
+			// The decorrelated shape: the inner relation is read for the join
+			// build, once, no matter how many outer rows probe it.
+			if counts[8] != counts[16] {
+				t.Errorf("decorrelated shape read the inner %d times for 8 outer rows and "+
+					"%d for 16; a decorrelated EXISTS reads its inner once", counts[8], counts[16])
+			}
+			// Measured at this tip: 3, and 3 for either outer size. The bound
+			// is deliberately a small constant rather than the exact number —
+			// what this pin defends is that the count is not a MULTIPLE of the
+			// outer rows, and a scan that splits its reads differently is not
+			// this defect coming back.
+			if counts[8] > 4 {
+				t.Errorf("decorrelated shape read the inner %d times for 8 outer rows; "+
+					"want a small constant (3 at the time of writing), not a per-row re-read",
+					counts[8])
+			}
+		})
+	}
+}
+
+// TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow reaches, end to end, the
+// condition the round-0 census hit as a 30-minute timeout, at the smallest size
+// that reaches it (protocol rule 10: a documented cost needs a fixture that
+// attempts it, or it is a story).
+//
+// The condition is the CONJUNCTION of two independent defects, and neither one
+// alone is expensive:
+//
+//  1. planner — the shape above: a derived-table inner is not decorrelated, so
+//     the inner file is loaded once per outer row.
+//  2. memory — internal/engine/memory.ReserveOrForce waits the caller's full
+//     relief timeout (physical.fileLoadReserveWait, 2s) for a reservation of n
+//     bytes against a budget SMALLER THAN n. That reservation cannot succeed:
+//     no amount of spilling makes a 912 KiB file fit a 512 KiB budget, so the
+//     wait is spent to reach the ForceReserve that was inevitable on entry.
+//
+// Together they cost 2 seconds per outer row. The measured shape at fd679ae9
+// and at this tip: forced == outer rows, one reservation of 933732 bytes
+// against a 524288-byte budget, wall == 2s x outer rows.
+//
+// What flips this pin: fixing EITHER defect. Decorrelating the derived-table
+// inner drops forced to 1; short-circuiting ReserveOrForce when n > budget
+// drops the wall to ~0 while forced stays at the outer row count. The pin
+// asserts the two separately so the failure names which one moved.
+//
+// Deliberately two outer rows. The defect is per-row and constant per row, so
+// two rows prove the multiplication that twenty would only prove more slowly.
+func TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("costs 2s per outer row by construction; that is the finding")
+	}
+	ctx := context.Background()
+	const budget = 512 * 1024
+	const outerRows = 2
+
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	counter := &arcD5ForcedCounter{}
+
+	// A 60000-row inner with a 120-byte pad makes ONE file that is larger than
+	// the whole budget. That is the trigger for defect 2 and it is a property
+	// of the file, not of the query.
+	db, store := arcD5RerunFixture(t, ctx, budget, outerRows, 60000, 120)
+	slog.SetDefault(slog.New(counter))
+	res, err := db.Query(ctx, arcD5RerunOverDerived)
+	slog.SetDefault(prev)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if got := fmt.Sprint(res.Rows[0][res.Columns[0]]); got != fmt.Sprint(outerRows) {
+		t.Fatalf("count(*) = %s, want %d", got, outerRows)
+	}
+
+	reads, forced, bytes := store.gets.Load(), counter.forced.Load(), counter.bytes.Load()
+	t.Logf("inner reads=%d forced reservations=%d reservation bytes=%d budget=%d",
+		reads, forced, bytes, budget)
+
+	// Defect 1: the inner file is read once per outer row.
+	if reads < outerRows {
+		t.Errorf("inner read %d times for %d outer rows; want one read per row "+
+			"(if the decorrelator now covers this shape, see the pin above)", reads, outerRows)
+	}
+	// Defect 2: each of those reads reserves more than the entire budget, so
+	// it burns the relief wait before forcing.
+	if forced < outerRows {
+		t.Errorf("%d forced reservations for %d per-row reads; want one per read", forced, outerRows)
+	}
+	if bytes <= budget {
+		t.Errorf("reservation was %d bytes against a %d-byte budget; this pin needs a "+
+			"single file LARGER than the budget to reach the futile wait — the "+
+			"fixture stopped reaching its own condition", bytes, budget)
+	}
+}
