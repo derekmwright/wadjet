@@ -275,9 +275,9 @@ Obligations are side-effects attached to **allow** rules. They constrain how dat
 
 | Type | Target | Value | Description |
 |------|--------|-------|-------------|
-| `row_filter` | table name | SQL predicate | Injected as WHERE clause before execution |
-| `mask_column` | column name | replacement string | Column values replaced with mask value |
-| `deny_column` | column name | — | Column excluded from results entirely |
+| `row_filter` | table name | SQL predicate | Filter node injected directly above the scan; the predicate reads the row as STORED |
+| `mask_column` | column name | SQL expression, e.g. `"'REDACTED'"` | Column replaced by the expression at the scan, for every consumer above it. Empty `value` means a placeholder chosen from the column's declared type |
+| `deny_column` | column name | — | The column does not exist for this identity: absent from `SELECT *`, and naming it is 42703 |
 | `query_limit` | — | row count | **Not enforced** — the policy evaluator skips this obligation. |
 
 #### Deny-Overrides Combining
@@ -305,7 +305,16 @@ This means existing RBAC configurations work unchanged — they get ABAC evaluat
 
 ## Cell-Level Policies
 
-Cell-level policies provide fine-grained data access control. Row filters are injected into the query plan **before** execution (pushed down to scan operators for distributed enforcement). Column masking is applied **after** execution but **before** results are returned.
+Cell-level policies provide fine-grained data access control. Both halves are
+enforced **at plan time, at the scan**: a row filter becomes a Filter node
+directly above the scan, and a column policy becomes a *security projection*
+above that filter, which replaces every masked column with its mask expression
+and omits every denied one. Nothing downstream of the scan — a WHERE clause, a
+GROUP BY key, an aggregate, `COUNT(DISTINCT)`, a join key, a window partition,
+a derived table, a CTE, a `UNION` arm, `SELECT *` — can see the raw value,
+because the raw value never leaves the scan. This holds identically on the
+embedded API, the PostgreSQL wire protocol and the HTTP API, and on
+single-process, spilled and distributed execution (ADR-0033).
 
 Each policy names a table/role pair. **`columns` maps a column name to an
 ACTION — `allow`, `mask` or `deny` — not to a replacement string.** The action
@@ -338,33 +347,71 @@ auth:
       row_filter: "environment = 'production'"
 ```
 
-**Column masking** (`columns: {<column>: mask}`): the value is replaced by a
-type-appropriate placeholder — `"***"` for strings, `0` for numbers, `false`
-for booleans. The replacement is **not configurable** through this section; use
-an ABAC `mask_column` obligation with a quoted SQL expression
-(`value: "'REDACTED'"`) when you need a specific value.
+**Column masking** (`columns: {<column>: mask}`): the column is replaced, at
+the scan, by a placeholder chosen from its **declared type** — `'***'` for
+strings and every other type, `0` for numerics, `false` for booleans. The
+replacement is **not configurable** through this section; use an ABAC
+`mask_column` obligation with a quoted SQL expression (`value: "'REDACTED'"`)
+when you need a specific value. The masked column keeps its declared type on
+the wire, so a client sees the same OID it would see without the policy.
 
-**Column denial** (`columns: {<column>: deny}`): the column is dropped from results.
+**Column denial** (`columns: {<column>: deny}`): for this identity the column
+**does not exist**. It is absent from `SELECT *` and from the result schema,
+and naming it anywhere in a statement — the SELECT list, a WHERE clause, an
+aggregate, a derived table, a CTE, a subquery — is
+`42703 unknown column "<name>"`, the same error the engine gives for a column
+the table really does not have. It is not returned as NULL, and a predicate on
+it is not quietly answered from the stored value.
 
-**Row filtering** (`row_filter`): A SQL predicate automatically injected into the query. Only rows matching the filter are returned to the role.
+**Row filtering** (`row_filter`): A SQL predicate automatically injected into
+the query, directly above the scan and **below** the security projection. That
+ordering is PostgreSQL's row-level-security semantics: the *policy's* predicate
+reads the row as stored, so a `row_filter` written against a masked column
+compares the true value, while a predicate the *user* writes sits above the
+projection and compares the mask (`WHERE src_ip = '10.1.2.3'` returns nothing,
+`WHERE src_ip = '***'` returns every visible row).
 
 Both can be combined in a single policy. A policy with only `columns` applies masking without row filtering, and vice versa.
 
+If a column policy cannot be applied to a plan — a scan whose columns cannot be
+resolved, or a table with every column denied — the query is **refused**. A
+security control never degrades to a grant.
+
 ### Policy Evaluation Order
 
-1. Row filter predicates are injected into the logical query plan as additional Filter nodes above scan operators
-2. The optimizer pushes these filters down to scan operators and through partition pruning
-3. In distributed mode, row filters propagate to worker tasks via the physical plan's `FilterExprs`
-4. Query executes — workers only scan rows matching the filter
-5. Column mask policies are applied to the results before returning to the client
+1. Column references are bound against the schema **this identity** can see, so
+   a denied column resolves to nothing (42703) before anything is planned
+2. Table access is decided for every base table the plan reads — including the
+   tables behind derived tables, CTE references and set-operation arms
+3. The security projection is injected above each policed scan: masked columns
+   become their mask expression, denied columns are gone
+4. Row filter predicates are injected as Filter nodes between the scan and that
+   projection
+5. The optimizer pushes filters down to scan operators and through partition
+   pruning; the security projection is a barrier the optimizer preserves
+6. In distributed mode the projection is absorbed into the scan stage
+   (`SecurityProjectExprs`) and applied on the worker before anything else
+   consumes rows; row filters propagate via the physical plan's `FilterExprs`
+7. Query executes — restricted values never leave the scan
 
-Admin roles are typically exempt from all policies (they see the raw data).
+An expression subquery (`(SELECT MAX(col) FROM t)`, an `IN` set, an `EXISTS`)
+is planned under the same policies as its enclosing statement.
+
+Admin roles are typically exempt from all policies (they see the raw data). An
+identity with no matching column obligations is unaffected, and an in-process
+embedded caller with no identity at all sees the raw table.
 
 ### Distributed Enforcement
 
 In distributed mode, identity context (name, role, and attributes) is propagated from the HTTP/pgwire/gRPC server to the coordinator and stamped on every worker task. Row filters are injected at plan time and flow naturally through distributed execution — workers never see rows outside the filter predicate.
 
-For ABAC, pre-evaluated policy decisions are serialized as JSON into the distributed task's `PolicyDecisionJSON` field. Workers enforce column denial, column masking, and row filters from these decisions without needing access to the full policy set.
+A column policy travels with the plan, not as a second decision the worker
+re-derives: the security projection is absorbed into the scan stage
+(`SecurityProjectExprs`) and the worker's scan fragment applies it before any
+filter, aggregate or join sees a row. Pre-evaluated policy decisions are also
+serialized as JSON into the distributed task's `PolicyDecisionJSON` field,
+where the worker uses them as defense in depth — a task that requests a denied
+column is rejected outright.
 
 ## Security Configuration Example
 

@@ -340,7 +340,11 @@ auth:
               value: "classification_level <= 2"
             - type: mask_column
               target: ssn
-              value: "***REDACTED***"
+              # A SQL EXPRESSION, so a literal string needs its quotes: the
+              # value replaces the column at the scan and every consumer
+              # above it — a WHERE clause, a GROUP BY key, an aggregate —
+              # evaluates it (docs/security.md, ADR-0033).
+              value: "'REDACTED'"
         - effect: deny
           conditions:
             - attribute: subject.role
