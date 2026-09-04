@@ -1199,9 +1199,17 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		}
 	}
 
+	declared := schemaOrDeclared(gatherSchema(gr.batches), physStages)
 	res = &SQLResult{
-		QueryID:   queryID,
-		Columns:   gr.columns,
+		QueryID: queryID,
+		// The plan's declaration names the columns too, when nothing else
+		// did. OutputRenames covers a zero-row result whose SELECT list is
+		// written out, but a bare `SELECT *` has no visible select items for
+		// extractOutputRenames to walk, so the gather produced a result with
+		// no columns AT ALL — no RowDescription through pgwire's coordinator
+		// path (#846). Same source as Schema below and in the same order, so
+		// the two cannot describe different columns.
+		Columns:   columnsOrDeclared(gr.columns, declared),
 		TotalRows: gr.totalRows,
 		Elapsed:   time.Since(start),
 		Plan:      planStr,
@@ -1209,7 +1217,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// which is exactly a zero-row result: OutputRenames already keeps
 		// the column NAMES in that case, and without this pgwire declares
 		// OID 25 (text) for every one of them (#416).
-		Schema: schemaOrDeclared(gatherSchema(gr.batches), physStages),
+		Schema: declared,
 		// A plan property, unlike Schema's fallback above: applies whether
 		// or not this result has rows (FIX 2, #457/#458 fold-in).
 		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(physStages),
@@ -3540,9 +3548,13 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		}
 	}
 
+	declared := schemaOrDeclared(gatherSchema(batches), meta.stages)
 	return &SQLResult{
-		QueryID:     queryID,
-		Columns:     columns,
+		QueryID: queryID,
+		// See the sibling construction in executeStageDAG: a bare `SELECT *`
+		// has no visible select items for extractOutputRenames to walk, so a
+		// zero-row one carried no column names either (#846).
+		Columns:     columnsOrDeclared(columns, declared),
 		Batches:     batches,
 		ResultFiles: info.ResultFiles,
 		TotalRows:   totalRows,
@@ -3552,7 +3564,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		// Stream() call detaches Batches, so a consumer that streams before
 		// it asks for the types would otherwise get none. A zero-row result
 		// has no batch to record, so the plan's declaration stands in (#416).
-		Schema: schemaOrDeclared(gatherSchema(batches), meta.stages),
+		Schema: declared,
 		// A plan property, unlike Schema's fallback above: applies whether
 		// or not this result has rows (FIX 2, #457/#458 fold-in).
 		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(meta.stages),
@@ -3568,6 +3580,30 @@ func schemaOrDeclared(gathered []parquet.Column, stages []physical.Stage) []parq
 		return gathered
 	}
 	return physical.GatherOutputSchema(stages)
+}
+
+// columnsOrDeclared is schemaOrDeclared for the column NAMES: the gather's own
+// list when it has one, and otherwise the names of the schema that list would
+// have described.
+//
+// Both come from the same resolved schema value at every call site, so a
+// result can never carry a Columns list and a Schema list of different
+// lengths — which pgwire would send as a RowDescription whose field count
+// disagrees with the DataRows it then writes.
+//
+// Only a zero-row result needs it, and only one whose column names came from
+// nowhere else: extractOutputRenames covers a written-out SELECT list, but a
+// bare `SELECT *` has no visible select items to walk, so its zero-row result
+// reached the client with no columns at all (#846).
+func columnsOrDeclared(gathered []string, schema []parquet.Column) []string {
+	if len(gathered) > 0 || len(schema) == 0 {
+		return gathered
+	}
+	out := make([]string, len(schema))
+	for i, c := range schema {
+		out[i] = c.Name
+	}
+	return out
 }
 
 // CancelQuery cancels a running query.

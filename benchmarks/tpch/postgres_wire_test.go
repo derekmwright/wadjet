@@ -1568,6 +1568,32 @@ func wireCorpus() []wireCase {
 					"(it IS the Aggregate node's OutputCol, which GROUP BY, HAVING and ORDER BY resolve " +
 					"against), so renaming it is its own change",
 			}},
+
+		// `SELECT *` with ZERO rows (#846). PostgreSQL always sends a
+		// RowDescription for a SELECT; wadjet sent none at all for these,
+		// because a bare star builds no Project node and the plan-declared
+		// output schema (#416) had nothing to read. psql printed nothing and
+		// pgJDBC's executeQuery threw "No results were returned by the query"
+		// — and `SELECT * FROM t` is how a BI tool opens a table, so this is
+		// the shape that matters most and the one no cell covered.
+		//
+		// dec_probe is the strong one: a star over it declares five columns
+		// including two constrained numerics, so it compares names, OIDs and
+		// TYPMODS across the whole row rather than one column at a time. The
+		// non-empty control beside it is what says the zero-row answer is the
+		// same answer, not merely a self-consistent one.
+		{name: "StarOverDecimalProbe",
+			sql: `SELECT * FROM dec_probe WHERE d_key IN (1, 2) ORDER BY d_key`},
+		{name: "StarOverDecimalProbeZeroRows",
+			sql: `SELECT * FROM dec_probe WHERE d_key = -1`},
+		{name: "StarZeroRows", sql: `SELECT * FROM nation WHERE n_nationkey < 0`},
+		{name: "StarZeroRowsOrdered",
+			sql: `SELECT * FROM nation WHERE n_nationkey < 0 ORDER BY n_nationkey`},
+		{name: "StarZeroRowsLimit", sql: `SELECT * FROM nation WHERE n_nationkey < 0 LIMIT 5`},
+		{name: "StarDistinctZeroRows", sql: `SELECT DISTINCT * FROM nation WHERE n_nationkey < 0`},
+		{name: "StarZeroRowsUnionAll",
+			sql: `SELECT * FROM nation WHERE n_nationkey < 0 UNION ALL ` +
+				`SELECT * FROM nation WHERE n_nationkey < 0`},
 	}
 	return append(base, decimalTPCHWireCorpus()...)
 }
