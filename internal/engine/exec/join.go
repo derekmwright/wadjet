@@ -322,6 +322,28 @@ func (h *HashJoin) BloomPushdownOp() *BloomFilterOp {
 	if h.bloom == nil {
 		return nil
 	}
+	// A build that SPILLED does not know its own key set any more, and this
+	// filter runs BEFORE the partition routing — so a probe row it rejects is
+	// a row that never reaches the join at all, not even to be written to its
+	// spilled partition's probe file.
+	//
+	// Two things take keys out of the index during a grace build: a row
+	// written straight to an already-spilled partition is never indexed at
+	// all, and (since #823's reclaim) an evicted partition's table is freed.
+	// The bloom is built at the END of the build, from what the index then
+	// holds, so in both cases it lacks keys the build side really has.
+	// Measured at the operator pair on a 40,000-row build at a 1 MiB budget,
+	// 60 partitions evicted: the filter rejected 25,262 of 40,000 probe rows
+	// whose key IS on the build side.
+	//
+	// The bloom stays valid for the IN-MEMORY probe path (lookupBuild,
+	// existsInBuild), which only ever asks about rows the partition router has
+	// already kept in memory, and whose key set is exactly what the index
+	// holds. It is only this pushdown — which runs upstream of the router —
+	// that has to decline.
+	if h.spillState != nil && len(h.spillState.spilledParts) > 0 {
+		return nil
+	}
 	// Only safe for join types where non-matching probe rows produce no output.
 	// LEFT/FULL OUTER: must preserve all probe rows (with NULLs for no match).
 	// ANTI: returns rows that don't match — bloom rejection would be inverted.
