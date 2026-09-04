@@ -100,8 +100,10 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 	defer exec.ForceSmallSpillRuns(4096)()
 
 	arms := map[int64]*DB{}
-	for _, b := range []int64{spillMxBudget, spillMxJoinBudget} {
-		arms[b] = spillMxOpen(t, b)
+	for _, cell := range spillMxCells() {
+		if arms[cell.budget()] == nil {
+			arms[cell.budget()] = spillMxOpen(t, cell.budget())
+		}
 	}
 	engagedCells, engagedTotal, cellsByFamily := map[string]int{}, map[string]int64{}, map[string]int{}
 
@@ -238,71 +240,11 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 						"fired here; the full-replication arm decides", answered)
 				} else {
 					t.Fatalf("marked budgetMayRefuse, but all %d budgeted runs ANSWERED at %d KiB — delete "+
-						"budgetMayRefuse from this cell, and if it also carries joinBudget move it back to "+
-						"spillMxBudget; that it answers is the fix's proof\n  SQL: %s",
+						"budgetMayRefuse from this cell; that it answers is the fix's proof\n  SQL: %s",
 						answered, budget/1024, cell.sql)
 				}
 			}
 		})
-	}
-
-	// The RATCHET on joinBudget, in the shape #824 gave budgetMayRefuse.
-	//
-	// joinBudget is the surviving half of the tolerance #824 retired: it is a
-	// per-family budget RAISE, and a raise nothing checks is indistinguishable
-	// from a raise nothing needs. So every cell that carries it is also run at
-	// spillMxBudget, and if EVERY one of them answers on EVERY run there, the
-	// raise has outlived its reason and the gate fails naming it.
-	//
-	// The ratchet is on the FAMILY, not the cell, because the raise is one
-	// decision for one family — and because a per-cell ratchet cannot be
-	// judged here. The shapes this guards are nondeterministic at
-	// spillMxBudget by a MINORITY of runs (c_uuid answered 19 of 20 in one
-	// sample of three and 20 of 20 in the others), so "this cell answered five
-	// times" is a coin toss, while "all eighteen answered every time" is not:
-	// it cannot happen while three of them refuse on nineteen runs in twenty.
-	// ADR-0027's rule for a condition-triggered pin is to bound the condition
-	// and never tolerate a split; the family is the granularity at which this
-	// condition can be bounded.
-	//
-	// Any error counts as "did not answer", not just a budget refusal. That is
-	// the correct direction for a ratchet that fires only on UNANIMOUS success:
-	// an unrelated breakage keeps it quiet rather than failing it, and the
-	// breakage is caught by the cell's own run above. It costs the sweep
-	// len(joinBudget cells) x spillMxRuns() extra queries, short-circuited at
-	// the first non-answer.
-	if smaller := arms[spillMxBudget]; smaller != nil {
-		joinCells, allAnswered := 0, true
-		for _, cell := range spillMxCells() {
-			// The FAMILY, not the flag. The crossjoin cells also carry
-			// joinBudget — a cross join cannot spill at all, so its build has
-			// to fit, and at spillMxBudget the scan's own 412 KiB file buffer
-			// leaves it too little (#832's recorded residual, pinned by
-			// join_computed_wide_refuses_under_the_smaller_budget). That is a
-			// different reason from #789's, and a ratchet that fires only on
-			// UNANIMOUS success would be silenced forever by mixing them.
-			if cell.family() != "join" {
-				continue
-			}
-			joinCells++
-			for run := 0; run < spillMxRuns() && allAnswered; run++ {
-				if _, err := tmRun(ctx, smaller, cell.sql); err != nil {
-					allAnswered = false
-				}
-			}
-			if !allAnswered {
-				break
-			}
-		}
-		t.Logf("joinBudget ratchet: %d cells probed at %d KiB", joinCells, spillMxBudget/1024)
-		if joinCells > 0 && allAnswered {
-			t.Fatalf("every one of the %d join-family cells answered on all %d runs at %d KiB — the "+
-				"budget raise has outlived its reason. #789's half of it is already gone (the "+
-				"join_group_by_* cells run at spillMxBudget since the scan stopped holding whole "+
-				"files); what is left is #832's, so drop joinBudget from the join_computed_* cells "+
-				"and close it — that they answer is the fix's proof",
-				joinCells, spillMxRuns(), spillMxBudget/1024)
-		}
 	}
 
 	// Per-family engagement. One counter for the whole file is not enough: the
@@ -349,20 +291,32 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 // The two budgets. spillMxBudget is where the arc's four defects live. The
 // join family needs its own: at 512 KiB the scan's whole-file buffer alone
 // holds ~460 KiB of it, and for the widest keys the build's demand lands on
-// the budget rather than under it — so whether the query answers follows how
-// far the scan decoded ahead, which is #789 and is OPEN. The raise is not a
-// tolerance: at spillMxJoinBudget every cell answers on every run and a
-// refusal fails, and the joinBudget ratchet at the end of
-// TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget fails the whole family if
-// the raise ever stops being needed.
+// the budget rather than under it. That was #789, and it is FIXED: the scan
+// holds a parquet file one ROW GROUP at a time now, so its whole-file buffer
+// no longer sits on the budget for the length of the scan, and every cell of
+// the join family answers at spillMxBudget on all three scheduler arms. The
+// family raise, and the ratchet that watched it, are gone with it.
+//
+// spillMxCrossJoinBudget is not a raise, it is a LOWER budget, and it is
+// derived rather than chosen. A cross join's build cannot be
+// grace-partitioned and cannot spill, so it must fit; the operator's own
+// refusal prices one 1,100-row arrival batch of this fixture at 61,599 bytes,
+// and the fixture is 5,000 rows — five such batches, ~308,000 bytes of build
+// before the hash index. 256 KiB is below that by construction, so the wide
+// computed-key cross join cannot fit it however the rest of the query is
+// accounted, and the invariant "a build that does not fit refuses loudly,
+// never spills" stays gated on the OPERATOR's property rather than on how
+// much of the budget the scan happened to be holding.
 const (
-	spillMxBudget     int64 = 512 * 1024
-	spillMxJoinBudget int64 = 1024 * 1024
+	spillMxBudget          int64 = 512 * 1024
+	spillMxCrossJoinBudget int64 = 256 * 1024
 )
 
+// budget is the memory budget this cell runs at: spillMxBudget unless the
+// cell names its own.
 func (c spillMxCell) budget() int64 {
-	if c.joinBudget {
-		return spillMxJoinBudget
+	if c.budgetBytes > 0 {
+		return c.budgetBytes
 	}
 	return spillMxBudget
 }
@@ -378,8 +332,10 @@ type spillMxCell struct {
 	// needs it (#824): every budgeted run ANSWERING fails the cell, because a
 	// tolerance that is never exercised is a tolerance nothing needs.
 	budgetMayRefuse bool
-	// joinBudget: run this cell at spillMxJoinBudget instead.
-	joinBudget bool
+	// budgetBytes: run this cell at this budget instead of spillMxBudget.
+	// A cell names its own budget only when the SHAPE needs one — see
+	// spillMxCrossJoinBudget, which is lower, not higher.
+	budgetBytes int64
 	// knownBug: the issue this cell's divergence is filed as. Compared and
 	// logged rather than failed; agreement on every run fails instead.
 	knownBug string
@@ -511,7 +467,7 @@ func spillMxCells() []spillMxCell {
 		// HashJoin grace partitioning BELOW the aggregate: the spilled probe
 		// partitions replay after the workers finish, which is #782 itself.
 		//
-		// This family ran at spillMxJoinBudget until #789's file half was
+		// This family ran at a DOUBLED budget until #789's file half was
 		// fixed. At 512 KiB the scan's whole-file buffer alone held ~412 KiB
 		// of the budget, and which side of it the build's first Reserve landed
 		// on followed how far the scan had decoded ahead: measured over 20 runs
@@ -520,12 +476,11 @@ func spillMxCells() []spillMxCell {
 		// c_bytes reached both dispositions inside one arm. The scan now holds
 		// its file one ROW GROUP at a time, charged and released per row group,
 		// and all eighteen columns answer 20/20 at spillMxBudget on all three
-		// scheduler arms (GOMAXPROCS 24, 2 and 1) — so the raise is gone from
-		// these cells, and this comment is what replaces it.
-		//
-		// The RAISE ITSELF and its ratchet stay, for the join_computed_* cells
-		// below: a cross join cannot spill at all, so its build has to fit,
-		// which is #832's residual and a different reason from #789's.
+		// scheduler arms (GOMAXPROCS 24, 2 and 1) — so the raise, and the
+		// ratchet that watched it, are gone, and this comment is what replaces
+		// them. #832's residual, which shared that raise for a different
+		// reason, is pinned on the operator's own property instead: see
+		// join_computed_wide_refuses_when_the_build_does_not_fit.
 		add(spillMxCell{name: "join_group_by_" + n, sql: fmt.Sprintf(
 			`SELECT z.%[1]s AS k, COUNT(*) AS n FROM %[2]s x JOIN %[2]s z ON x.id = z.id GROUP BY z.%[1]s`, n, tbl)})
 		// A COMPUTED join key, per type (#832). An ON clause that equates two
@@ -544,7 +499,7 @@ func spillMxCells() []spillMxCell {
 		// at 200x200: the pressure that triggered the eviction comes from the
 		// SCAN's charge, not from this build, which is why the filed shapes
 		// reproduce with a five-row build.
-		add(spillMxCell{name: "join_computed_key_" + n, joinBudget: true, sql: fmt.Sprintf(
+		add(spillMxCell{name: "join_computed_key_" + n, sql: fmt.Sprintf(
 			`SELECT COUNT(*) AS n, COUNT(a.%[1]s) AS nn FROM %[2]s a JOIN %[2]s b `+
 				`ON COALESCE(a.%[1]s, a.%[1]s) = COALESCE(b.%[1]s, b.%[1]s) `+
 				`WHERE a.id < 200 AND b.id < 200`, n, tbl)})
@@ -565,7 +520,7 @@ func spillMxCells() []spillMxCell {
 		// answer equals the unbudgeted one"; it belongs in a pin, and it has
 		// one: computed_group_key_over_a_cross_join_pin_test.go, which fails
 		// the moment the shape starts answering and says to add the cell here.
-		add(spillMxCell{name: "join_computed_value_" + n, joinBudget: true, ordered: true, sql: fmt.Sprintf(
+		add(spillMxCell{name: "join_computed_value_" + n, ordered: true, sql: fmt.Sprintf(
 			`SELECT COUNT(*) AS n, MIN(a.%[1]s) AS alo, MAX(a.%[1]s) AS ahi, `+
 				`MIN(b.%[1]s) AS blo, MAX(b.%[1]s) AS bhi, MIN(b.id) AS ilo, MAX(b.id) AS ihi `+
 				`FROM %[2]s a JOIN %[2]s b `+
@@ -613,25 +568,38 @@ func spillMxCells() []spillMxCell {
 		// small to evict" — this one is 5,000 rows against the same budget.
 		{"upper_wide", `UPPER(a.c_str) = UPPER(b.c_str)`, `TRUE`},
 	} {
-		add(spillMxCell{name: "join_computed_" + tc.name, joinBudget: true, sql: fmt.Sprintf(
+		add(spillMxCell{name: "join_computed_" + tc.name, sql: fmt.Sprintf(
 			`SELECT COUNT(*) AS n FROM %[1]s a JOIN %[1]s b ON %[2]s WHERE %[3]s`, tbl, tc.on, tc.where)})
 	}
-	// #832's RESIDUAL, pinned as the loud failure it is. A cross join cannot
-	// spill — that is the fix, and it is a property of the operator, not a
-	// bound on the fix — so its build must fit the budget. At spillMxBudget
-	// this one does not: the scan's whole-file buffer alone holds 412 KiB of
-	// the 512 KiB, and 5,000 rows of build do not go in what is left. The
-	// answer is ADR-0006's loud refusal, on every run, naming the reason.
+	// #832's RESIDUAL — a cross join's build cannot be grace-partitioned and
+	// cannot spill, so it must FIT — pinned on the operator's property rather
+	// than on how much of the budget something else was holding.
 	//
-	// Four of the per-type cells above are in the same position at that budget
-	// (c_i64, c_ts, c_ipv6, c_uuid — the wide keys), which is why the whole
-	// family runs at spillMxJoinBudget, where every one of them answers on
-	// every run. This cell is what keeps the residual visible rather than
-	// budgeted away: it FAILS if the shape ever answers here, which is what a
-	// blockwise nested-loop join with a spillable build would make it do.
-	add(spillMxCell{name: "join_computed_wide_refuses_under_the_smaller_budget",
-		knownBug:   "#832 residual: no spilling nested-loop join",
-		knownError: "cannot be grace-partitioned and cannot spill",
+	// It used to be pinned at spillMxBudget, where this shape refused because
+	// "the scan's whole-file buffer alone holds 412 KiB of the 512 KiB, and
+	// 5,000 rows of build do not go in what is left". That reason is gone:
+	// the scan holds one ROW GROUP at a time now (#789), the build fits, and
+	// the query ANSWERS at 512 KiB — 4,884 rows, which is what the fixture
+	// generator says independently of the engine (sum of n² over the distinct
+	// UPPER(c_str) keys, NULLs dropped) and what the unbudgeted arm returns.
+	// So the shape is a normal answering cell there, compared row for row like
+	// every other.
+	add(spillMxCell{name: "join_computed_wide_answers_at_the_smaller_budget", sql: fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %[1]s a JOIN %[1]s b ON UPPER(a.c_str) = UPPER(b.c_str)`, tbl)})
+	// And the invariant it was really guarding gets a budget the build CANNOT
+	// fit, derived from the build rather than tuned to the outcome: the
+	// operator's own refusal prices one 1,100-row arrival batch of this
+	// fixture at 61,599 bytes, and 5,000 rows are five such batches — about
+	// 308,000 bytes of build before the hash index. spillMxCrossJoinBudget
+	// (256 KiB = 262,144) is below that by construction.
+	//
+	// What must happen there is ADR-0006's loud refusal, on every run, naming
+	// the reason. If it ever ANSWERS, a nested-loop join has learned to spill
+	// its build and the pin is the proof — delete it.
+	add(spillMxCell{name: "join_computed_wide_refuses_when_the_build_does_not_fit",
+		budgetBytes: spillMxCrossJoinBudget,
+		knownBug:    "#832 residual: no spilling nested-loop join",
+		knownError:  "cannot be grace-partitioned and cannot spill",
 		sql: fmt.Sprintf(
 			`SELECT COUNT(*) AS n FROM %[1]s a JOIN %[1]s b ON UPPER(a.c_str) = UPPER(b.c_str)`, tbl)})
 	// Scalar (ungrouped) aggregates: no GROUP BY, so no external merge — the
