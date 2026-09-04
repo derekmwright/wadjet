@@ -292,9 +292,26 @@ func TestServerFailedUpdateAcrossFilesLeavesEveryFileIntact(t *testing.T) {
 		t.Fatal("UPDATE over a file holding a value the column cannot express succeeded")
 	}
 
-	all := nestServerAllRowsAfterUpdate(t, cat, "srv_multi", filePath, schema)
+	// Row survival is observed with the ORIGINAL file read through the table's
+	// schema — delete-marker aware, because "did a marker commit for file 1
+	// while file 2's rewrite failed" is the whole property — and every OTHER
+	// file read through the schema THAT FILE declares.
+	//
+	// The second part is not a convenience. This fixture deliberately writes a
+	// carrier the table's DECIMAL(9,2) cannot express, straight to the store,
+	// bypassing every write door, so that the UPDATE has something to fail on.
+	// Reading it back through the CATALOG's type would be asking the reader to
+	// answer a value that type promises not to hold — 9999999999999999.99 in a
+	// column whose wire declaration says < 10^7, which PostgreSQL cannot reach
+	// at all (`…::numeric(9,2)` is 22003) and which the reader now refuses on
+	// both paths (ADR-0018 §9, ADR-0024). The refusal is correct; asking for it
+	// here was the mistake. What this test needs to know is that the ROW is
+	// still there, and the file's own declaration is what can say so.
 	ids := map[int64]bool{}
-	for _, r := range all {
+	for _, r := range nestServerSurvivingRows(t, cat, "srv_multi", filePath, schema) {
+		ids[r["id"].(int64)] = true
+	}
+	for _, r := range srvMultiRowsUnderEachFilesOwnSchema(t, cat, "srv_multi", filePath) {
 		ids[r["id"].(int64)] = true
 	}
 	if !ids[1] || !ids[2] {
