@@ -1013,6 +1013,28 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      pass-throughs) and two `runWireErrors` entries. User-facing:
      `docs/sql-reference.md` §Casts and errors.
 
+   - **A timestamp-VALUED scalar function renders ISO 8601, not PostgreSQL's
+     timestamp text.** (Added 2026-09-04, from #544's residual.)
+
+     `DATE_TRUNC('day', ts)` answers `2023-11-14T00:00:00Z` where PostgreSQL
+     17.11 answers `2023-11-14 00:00:00` (measured), and the same holds for
+     `NOW`, `FROM_UNIXTIME`, `TO_ISO8601`'s siblings and the timezone family.
+
+     It is a different mechanism from the coercion rule #544 closed, and that
+     is why it is recorded rather than fixed with it: this engine has no
+     TIMESTAMP-valued function RESULT at all. Every timestamp-producing scalar
+     is declared `RetString` and formats its own text, so the format is a
+     per-function choice rather than a property of a type, and
+     `batch.FormatTimestamp` — the one renderer the coercion rule now reaches
+     at every site, pgwire's send path included — has nothing to be called
+     from. The structural fix is for those functions to return the engine's
+     TIMESTAMP box and take their declared type with it, which is ~14 registry
+     entries and their planner declarations.
+
+     Pinned by `wadjet.TestTimestampHasOneRenderingAtEverySite`'s
+     `residual_date_trunc_renders_rfc3339` cell, which fails the day any of
+     them moves.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`

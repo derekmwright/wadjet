@@ -188,6 +188,26 @@ literal in a predicate, which read it through one accept-set. A literal whose
 fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
 text that is not a timestamp at all is 22007.
 
+**One rendering.** A `Timestamp` coerced to text — `CAST(ts AS TEXT)`,
+`ts::text`, `ts || ''`, `CONCAT`, `UPPER` and every other string function,
+`LIKE`, `FORMAT('%s', ts)` — produces the same text the wire carries for the
+column: `1996-03-13 14:25:36`, UTC, space-separated, no zone suffix, and a
+fractional second with its trailing zeros trimmed as PostgreSQL trims them
+(`.5`, not `.500`). The instant, never the epoch-millisecond number the value
+is stored as. The same holds for a timestamp produced by an expression rather
+than read from a column, and for `Date` with its own `1996-03-13` form.
+
+`Duration` is the exception, and deliberately: it declares `int8` on the wire
+counting nanoseconds, so `CAST(d AS TEXT)` renders that integer — the text
+agrees with the declaration and with the projection.
+
+A timestamp-VALUED scalar function (`DATE_TRUNC`, `NOW`, `FROM_UNIXTIME`, the
+timezone family) still returns ISO 8601 with a `T` and a `Z`
+(`2023-11-14T00:00:00Z`) where PostgreSQL returns `2023-11-14 00:00:00`. Those
+functions return text they format themselves rather than a `Timestamp` value,
+so the rule above has no single renderer to reach; it is recorded in
+ADR-0012's divergence list.
+
 **Where this accept-set applies: everywhere.** The INGEST door (`COPY`, the Go
 ingester, a Bento-written table registered through Wadjet), a DATE literal in
 `INSERT … VALUES`, a literal in a predicate, and `CAST(<text> AS DATE)` all

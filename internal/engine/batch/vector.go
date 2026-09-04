@@ -1709,10 +1709,19 @@ func FormatDate(days int32) string {
 // rendered form into every compute path that shares that boxing.
 func FormatTimestamp(ms int64) string {
 	t := time.UnixMilli(ms).UTC()
-	if ms%1000 != 0 {
-		return t.Format("2006-01-02 15:04:05.000")
+	if ms%1000 == 0 {
+		return t.Format("2006-01-02 15:04:05")
 	}
-	return t.Format("2006-01-02 15:04:05")
+	// PostgreSQL TRIMS a fractional second's trailing zeros: `.5` and `.12`,
+	// never `.500` and `.120`. Measured live on 17.11 —
+	// `timestamp '1996-03-13 14:25:36.5'::text` is `1996-03-13 14:25:36.5`.
+	// This engine printed three digits always, on the wire as well as through
+	// every expression that renders an instant, because pgwire's send path
+	// calls this same function (#544).
+	//
+	// Go's `.9` verb does exactly that trimming and, unlike a hand-rolled
+	// strip, cannot leave a bare point behind.
+	return t.Format("2006-01-02 15:04:05.999")
 }
 
 // parseDateString parses a DATE string to days since epoch via the shared

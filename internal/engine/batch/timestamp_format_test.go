@@ -23,6 +23,20 @@ func TestFormatTimestamp(t *testing.T) {
 		{"one ms before epoch", -1, "1969-12-31 23:59:59.999"},
 		{"pre-epoch whole second", -14182940000, "1969-07-20 20:17:40"},
 		{"pre-epoch sub-second", -14182939877, "1969-07-20 20:17:40.123"},
+		// PostgreSQL TRIMS a fraction's trailing zeros — `.5` and `.12`, never
+		// `.500` and `.120` — and this printed three digits always, on the
+		// wire (pgwire's send path calls this function) as well as through
+		// every expression that renders an instant. Measured live on 17.11:
+		// `timestamp '1996-03-13 14:25:36.5'::text` is `…36.5` (#544).
+		{"half second", 826727136500, "1996-03-13 14:25:36.5"},
+		{"two-digit fraction", 826727136120, "1996-03-13 14:25:36.12"},
+		{"three-digit fraction", 826727136123, "1996-03-13 14:25:36.123"},
+		{"one centisecond", 826727136010, "1996-03-13 14:25:36.01"},
+		// A trimmed fraction must never leave a bare point behind, and the
+		// whole-second cells above are that assertion — this is the same rule
+		// one tick away from it.
+		{"nine hundred ms", 826727136900, "1996-03-13 14:25:36.9"},
+		{"pre-epoch half second", -14182939500, "1969-07-20 20:17:40.5"},
 	}
 	for _, tc := range cases {
 		if got := FormatTimestamp(tc.ms); got != tc.want {

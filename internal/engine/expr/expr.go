@@ -2621,6 +2621,14 @@ var stringInputFuncs = map[string]bool{
 	"left": true, "right": true, "starts_with": true, "ends_with": true,
 	"contains": true, "split_part": true, "strpos": true, "lpad": true,
 	"rpad": true, "cast_string": true,
+	// `format` renders its arguments, so a TIMESTAMP/DATE/IPv4/MAC column
+	// reaching it must arrive as the text the wire carries rather than as its
+	// raw box: `FORMAT('%s', c_ts)` answered `%!s(int64=1700000000000)` — the
+	// Go verb's own complaint about being handed an integer — where
+	// PostgreSQL renders the instant (#544). What this does NOT fix is that
+	// the format string is read with Go's verbs rather than PostgreSQL's
+	// %s/%I/%L, which is a separate and much wider divergence.
+	"format": true,
 }
 
 // typedArgPositions names, for a stringInputFuncs entry, the argument
@@ -2677,11 +2685,24 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 		// day a DATE column does, so it needs the same rendering, and typ
 		// names the CONTAINER (#568).
 		cr, ok := a.(*ColRef)
-		if !ok || cr.valueType() != batch.TypeDate {
+		if !ok {
 			continue
 		}
-		if v, ok := args[i].(int64); ok {
+		v, isInt := args[i].(int64)
+		if !isInt {
+			continue
+		}
+		switch cr.valueType() {
+		case batch.TypeDate:
 			args[i] = batch.FormatDate(int32(v))
+		case batch.TypeTimestamp:
+			// The TIMESTAMP twin of the DATE arm above, and it was missing:
+			// `c_ts || ''`, `CONCAT(c_ts, 'x')` and `UPPER(c_ts)` all read the
+			// raw epoch-millisecond box and answered "1700000000000" where
+			// pgwire renders the instant for the SAME column. One connection,
+			// one column, two answers — which is exactly what #544 is, reached
+			// through a string function instead of through CAST (#544).
+			args[i] = batch.FormatTimestamp(v)
 		}
 	}
 }
@@ -6885,6 +6906,26 @@ func castStringRender(b *batch.RecordBatch, row int, operand Expr, v any) string
 // starts boxing differently is a failing test rather than another quiet
 // divergence.
 func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
+	// A CAST to a temporal type boxes its result exactly as the matching
+	// COLUMN does (#340), so it needs the same undoing — and it did not get
+	// it, because this resolver took only a bare column reference:
+	// `CAST(CAST('1996-03-13 14:25:36' AS TIMESTAMP) AS TEXT)` answered
+	// "826727136000" on the wire while the same cast over a COLUMN answered
+	// the instant. FuncCall.formatTemporalArgs has had this arm since #273;
+	// this is the same rule at the other text site (#544).
+	if c, ok := operand.(*Cast); ok {
+		ms, isInt := v.(int64)
+		if !isInt {
+			return v
+		}
+		switch castTemporalKind(c.DestType) {
+		case castToDateKind:
+			return batch.FormatDate(int32(ms))
+		case castToTimestampKind:
+			return batch.FormatTimestamp(ms)
+		}
+		return v
+	}
 	cr, ok := operand.(*ColRef)
 	if !ok {
 		return v
