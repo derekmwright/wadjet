@@ -305,10 +305,12 @@ func scanAccountingTwoFiles(t *testing.T, big, small [][]map[string]any) (*catal
 // a bigger charge for one row group than the whole-file read it replaced made
 // for the entire file.
 //
-// The pool is bucketed by the FILE's largest row group, out of the footer, so
-// a row group is charged at most its own file's largest — which is what
-// ADR-0006's producer row 2 says. This asserts it with the big file drained
-// FIRST, so its buffers are in the source's pool when the small file loads.
+// The pool is bucketed by the power-of-two size CLASS of the row group's own
+// byte range, so a row group is charged its own bytes and held in at most
+// twice them — ADR-0006's producer row 2. A 332-byte row group and a 100 KiB
+// one are not in the same class, so neither can be served the other's buffer.
+// This asserts it with the big file drained FIRST, so its buffers are in the
+// pool when the small file loads.
 func TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes(t *testing.T) {
 	bigSets := make([][]map[string]any, 4)
 	for i := range bigSets {
@@ -351,8 +353,9 @@ func TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes(t *testing.
 
 	if charge > smallPeak {
 		t.Fatalf("one row group of a %d-byte file whose largest row group is %d bytes is charged "+
-			"%d — %.0fx the row group. A row group must be charged at most its own file's largest, "+
-			"which is what ADR-0006's producer row 2 says; this is another file's buffer",
+			"%d — %.0fx the row group. A row group is charged its OWN byte range and held in at "+
+			"most twice it (ADR-0006 producer row 2); a charge above that is another file's "+
+			"buffer, from a class this row group does not belong to",
 			smallEntry.SizeBytes, smallPeak, charge, float64(charge)/float64(smallPeak))
 	}
 	if charge > smallEntry.SizeBytes {
@@ -404,24 +407,44 @@ func TestARowGroupIsHeldInABufferAtMostTwiceItsSize(t *testing.T) {
 // bucket, or every row group allocates. Keying the bucket on the file's EXACT
 // largest row group did exactly that and cost +29.2% heap over TPC-H SF1.
 //
-// The property is "a row group no larger than one this scan has already read,
-// in its own size class, is served from the pool". A LARGER one allocates once
-// and then serves the rest, which is the pool converging on the biggest row
-// group the scan sees; one in a SMALLER class allocates rather than being held
-// in a buffer more than twice its size, which is the bound above. Buffers are
-// allocated at the row group's own size, not the class's, because rounding
-// every fresh allocation up to a power of two measured +10.9% suite heap.
+// What is asserted is the two properties that make reuse possible, both of
+// them deterministic. Whether sync.Pool actually hands a particular buffer
+// back is NOT asserted: it may decline at any GC, and a gate that waits for a
+// reuse is a gate that sometimes tests nothing.
+//
+//  1. Row groups of similar size share a bucket, and one of a different
+//     magnitude does not.
+//  2. Every buffer in a bucket is allocated at the bucket's class, so ANY
+//     member serves ANY request of that class. Without this a bucket holds an
+//     82,000-byte buffer beside a 100,000-byte one, and two requests for
+//     99,800 are served by neither.
 func TestSlabsAreReusedAcrossFilesOfSimilarShape(t *testing.T) {
-	inner := &scanSourceInner{}
-	// One file's row group, then another file's, a few percent smaller: same
-	// class, so the second is served from the first's buffer.
-	inner.putSlab(inner.getSlab(100_000))
-	before := RowGroupSlabReuses()
-	for _, n := range []int{97_400, 99_800, 70_000, 66_000} {
-		inner.putSlab(inner.getSlab(n))
+	// (1) the bucket key.
+	sameShape := []int{97_400, 99_800, 100_000, 70_000, 66_000}
+	want := slabClass(sameShape[0])
+	for _, n := range sameShape {
+		if got := slabClass(n); got != want {
+			t.Fatalf("row groups of %d and %d bytes are in different buckets (%d vs %d) — files of "+
+				"one table differ by that much from compression alone, and a key that separates "+
+				"them reuses nothing", sameShape[0], n, want, got)
+		}
 	}
-	if got := RowGroupSlabReuses() - before; got != 4 {
-		t.Fatalf("%d of 4 row groups no bigger than one already read were served from the pool — "+
-			"the bucket key is discriminating shapes that should share a buffer", got)
+	if slabClass(9_000) == want {
+		t.Fatalf("a 9,000-byte row group shares a bucket with a 100,000-byte one — it would be " +
+			"held in more than twice its size")
+	}
+
+	// (2) every buffer is allocated at its class, so any member fits any
+	// request in it.
+	ResetSlabPoolsForTest()
+	inner := &scanSourceInner{}
+	for _, n := range append(append([]int{}, sameShape...), 1, 4095, 1<<20) {
+		buf := inner.getSlab(n)
+		if cap(buf) != slabClass(n) {
+			t.Fatalf("a %d-byte row group was allocated with cap %d, want its class %d: a bucket "+
+				"whose members have different capacities cannot promise that one Get serves the "+
+				"request", n, cap(buf), slabClass(n))
+		}
+		inner.putSlab(buf)
 	}
 }

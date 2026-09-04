@@ -83,7 +83,35 @@ var (
 	// every buffer fresh never recycled one under a live batch, so it would
 	// have proved nothing.
 	rgSlabReuses atomic.Int64
+
+	// rgSlabAllocs counts row-group buffers allocated rather than reused.
+	rgSlabAllocs atomic.Int64
+
+	// rgSlabReleases counts row-group buffers returned to the pool — the
+	// moment a batch decoded from one becomes able to outlive it. The
+	// aliasing gate asserts this moved during its scan, which is a property
+	// of the SCAN and not of sync.Pool's willingness to hand a buffer back.
+	rgSlabReleases atomic.Int64
 )
+
+// RowGroupSlabReleases is how many row-group buffers this process has returned
+// to the pool. See rgSlabReleases.
+func RowGroupSlabReleases() int64 { return rgSlabReleases.Load() }
+
+// RowGroupSlabAllocs is how many row-group buffers this process has allocated
+// rather than taken from a pool. See rgSlabAllocs.
+func RowGroupSlabAllocs() int64 { return rgSlabAllocs.Load() }
+
+// ResetSlabPoolsForTest empties every size-class bucket. TEST-ONLY: the pool is
+// process-wide, so a gate that asserts an exact reuse or allocation count has
+// to start from a state it owns — otherwise it reads whatever the test before
+// it left in the bucket, which made the reuse gate fail two runs in three
+// under -race.
+func ResetSlabPoolsForTest() {
+	slabPoolMu.Lock()
+	defer slabPoolMu.Unlock()
+	slabPools = map[int]*sync.Pool{}
+}
 
 // RowGroupSlabReuses is how many row-group buffers this process has taken back
 // out of a pool. See rgSlabReuses.
@@ -345,17 +373,22 @@ func (s *rgSlabs) close() {
 	}
 }
 
-// poisonReusedSlabs makes getSlab overwrite every buffer it hands back from
-// the pool. TEST-ONLY: it is how a gate observes the hazard this design
-// introduces — a row group's buffer returns to the pool the moment THAT row
-// group has decoded, so it is reused while batches decoded from it are still
-// travelling downstream. If any decoded value aliased the buffer instead of
-// being copied out, the poison lands in a live batch.
-var poisonReusedSlabs atomic.Bool
+// poisonReleasedSlabs makes putSlab overwrite every buffer as it is RELEASED.
+// TEST-ONLY: it is how a gate observes the hazard this design introduces — a
+// row group's buffer goes back to the pool the moment THAT row group has
+// decoded, while batches decoded from it are still travelling downstream. If
+// any decoded value aliased the buffer instead of being copied out, the poison
+// lands in a live batch.
+//
+// On RELEASE rather than on reuse, deliberately: reuse depends on sync.Pool
+// choosing to hand the buffer back, which it may decline at any GC, so a gate
+// waiting for a reuse is a gate that sometimes tests nothing. A release
+// happens every time, so the hazard is observed every time.
+var poisonReleasedSlabs atomic.Bool
 
-// PoisonReusedSlabs turns that on and returns the previous setting. Test-only
-// in spirit; production never calls it.
-func PoisonReusedSlabs(on bool) (prev bool) { return poisonReusedSlabs.Swap(on) }
+// PoisonReleasedSlabs turns that on and returns the previous setting.
+// Test-only in spirit; production never calls it.
+func PoisonReleasedSlabs(on bool) (prev bool) { return poisonReleasedSlabs.Swap(on) }
 
 // getSlab and putSlab reuse row-group buffers within one scan source, in
 // buckets that are power-of-two size classes OF THE ROW GROUP'S OWN byte
@@ -415,41 +448,46 @@ func slabClass(n int) int {
 }
 
 func (inner *scanSourceInner) getSlab(n int) []byte {
-	// This class, then the one above it. A scan's row groups straddle a class
-	// boundary as soon as compression moves them a few percent across one, and
-	// looking only in this class then keeps two working sets alive where one
-	// would do — measured as the last 6% of a heap regression. The upper
-	// bucket is admitted only when the buffer still satisfies the bound, so
-	// probing it cannot hold a row group in more than twice its bytes.
-	class := slabClass(n)
-	for _, c := range [2]int{class, 2 * class} {
-		p := slabBucket(c)
-		if v := p.Get(); v != nil {
-			buf := v.([]byte)
-			if cap(buf) >= n && cap(buf) <= 2*n {
-				rgSlabReuses.Add(1)
-				if poisonReusedSlabs.Load() {
-					b := buf[:cap(buf)]
-					for i := range b {
-						b[i] = 0xEE
-					}
-				}
-				return buf[:n]
-			}
-			p.Put(buf) // not ours: too small, or bigger than the bound allows
+	p := slabBucket(slabClass(n))
+	if v := p.Get(); v != nil {
+		buf := v.([]byte)
+		// By construction this fits: every buffer in a bucket was allocated
+		// at the bucket's class, and n is in that class. The check is a
+		// belt-and-braces read of an invariant, not a probe — a bucket that
+		// could hand back a buffer too small for its own class would make one
+		// Get a lottery, which is what an earlier version was: buffers were
+		// allocated at the ROW GROUP's size, so a bucket held a 82,000-byte
+		// buffer beside a 100,000-byte one and two requests for 99,800 served
+		// zero of them and allocated twice.
+		if cap(buf) >= n {
+			rgSlabReuses.Add(1)
+			return buf[:n]
 		}
+		p.Put(buf)
 	}
-	// Exactly the row group's bytes: the CLASS decides which bucket the
-	// buffer is reused from, not how big it is. Allocating at the class would
-	// round every fresh buffer up to the next power of two, which measured
-	// +10.9% suite heap over TPC-H SF1 — the rounding, not the bucketing.
-	return make([]byte, n)
+	// Allocated at the CLASS, so every buffer in a bucket is interchangeable
+	// for every row group of that class. The rounding this costs — at most
+	// twice the row group, which is the invariant — is paid once per class per
+	// process, not once per buffer, because the pool below is process-wide and
+	// warm from the query before. (It was measured at +10.9% suite heap when
+	// the pool was per-SOURCE and therefore cold at every query; that is what
+	// made the pool process-wide, and what makes the rounding affordable now.)
+	rgSlabAllocs.Add(1)
+	return make([]byte, n, slabClass(n))
 }
 
 func (inner *scanSourceInner) putSlab(buf []byte) {
-	if cap(buf) > 0 {
-		slabBucket(slabClass(cap(buf))).Put(buf[:cap(buf)])
+	if cap(buf) == 0 {
+		return
 	}
+	b := buf[:cap(buf)]
+	if poisonReleasedSlabs.Load() {
+		for i := range b {
+			b[i] = 0xEE
+		}
+	}
+	rgSlabReleases.Add(1)
+	slabBucket(slabClass(cap(b))).Put(b)
 }
 
 // slabBucket returns the pool for a size class, creating it on first use.
