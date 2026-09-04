@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 )
 
@@ -79,15 +80,30 @@ import (
 // 0.07s at SF1). That is `internal/planner/physical`, which this arc does not
 // own, and it wants its own arc with its own A/B.
 //
-// # THE PIN BOUNDS THE CONDITION
+// # THE PIN RATCHETS ON UNANIMOUS CORRECTNESS
 //
-// It does not tolerate a split (ADR-0013, ADR-0027 decision 6). At defaults the
-// shape is wrong on 13 to 19 runs in 20; with the producer count forced above
-// one AND the scheduler pinned to a single P the interleaving is fixed and it
-// is wrong on ALL twenty. Both knobs are needed: eight workers alone still
-// leaves 1-7 runs in 20 right, and one P alone leaves 1-2 right for four of the
-// types. The FIRST correct run fails the test — that is the fix's proof and the
-// signal to delete this file.
+// It asserts that the shape is NOT RELIABLY RIGHT, and nothing stronger. An
+// entry fails only when ALL twenty runs answer correctly; anything less passes
+// with the observed count logged.
+//
+// The first draft asserted the opposite — wrong on all twenty — and that was a
+// TOLERANCE wearing a pin's clothes, of exactly the kind ADR-0027 decision 6
+// and ADR-0013 forbid: it demanded a particular outcome from an uncontrolled
+// coin. Two knobs make the defect fire on almost every run (eight producers, one
+// P), but "almost" is the operative word under load: seven full runs of this
+// file on an unchanged tree failed five times, each time with a DIFFERENT single
+// entry reporting "1 of 20 runs answered correctly" — c_cidr, then c_ipv6 and
+// c_dur, then c_ipv4, then a_g, then c_ts. The interleaving that produces the
+// wrong answer is scheduling-dependent, so one lucky run is not news, and a red
+// pin is worse than no pin: it tells the next engineer to delete this file and
+// close #847 on a defect that is still there.
+//
+// UNANIMITY is the stable signal, and it is the same ratchet
+// `spillMxRatchetMinRuns` applies in the spill sweep for the same reason:
+// agreement is a fix's proof at full replication and a coin toss at one. The
+// forcing knobs stay — they keep the pin from being vacuous by making the
+// defect fire on 19 or 20 runs out of 20 rather than 13 — but the ASSERTION no
+// longer rests on them.
 //
 // GOMAXPROCS is process-global, so it is restored on return; this package
 // declares no t.Parallel test, so it cannot leak into a sibling running at the
@@ -106,7 +122,7 @@ func TestAComputedGroupKeyOverACrossJoinIsPinnedWrong(t *testing.T) {
 			want := p847Truth(t, ctx, db, c)
 			right := 0
 			var lastDiff string
-			for run := 0; run < 20; run++ {
+			for run := 0; run < p847Runs; run++ {
 				got := p847Grouped(t, ctx, db, c)
 				if d := p847Diff(got, want); d == "" {
 					right++
@@ -114,13 +130,19 @@ func TestAComputedGroupKeyOverACrossJoinIsPinnedWrong(t *testing.T) {
 					lastDiff = d
 				}
 			}
-			if right > 0 {
-				t.Fatalf("#847 is pinned WRONG here, but %d of 20 runs answered correctly.\n"+
-					"If the computed-key path was fixed, DELETE this file, close #847, and add "+
-					"the shape to the sweep's crossjoin family as a value-and-GROUP-BY cell — "+
-					"that it answers is the fix's proof.\n  SQL: %s", right, p847GroupSQL(c))
+			// THE RATCHET. Only unanimity is evidence: a defect whose
+			// trigger is a scheduling interleaving answers correctly now and
+			// then, and failing on that would make this pin red on a tree
+			// where nothing changed.
+			if right == p847Runs {
+				t.Fatalf("the pin AGREES — all %d runs answered correctly, so #847 is fixed for "+
+					"this entry. Delete it from p847Cells (and this whole file once every entry "+
+					"agrees), close #847, and add the shape to the sweep's crossjoin family as a "+
+					"value-and-GROUP-BY cell; that it answers is the fix's proof.\n  SQL: %s",
+					p847Runs, p847GroupSQL(c))
 			}
-			t.Logf("wrong on all 20 runs (last divergence: %s)", lastDiff)
+			t.Logf("still wrong: %d of %d runs answered correctly (last divergence: %s)",
+				right, p847Runs, lastDiff)
 		})
 	}
 }
@@ -134,28 +156,81 @@ func TestAComputedGroupKeyOverACrossJoinIsPinnedWrong(t *testing.T) {
 // and nothing else.
 //
 // It is also half of the boundary claim: a fix must make the pinned entries
-// right WITHOUT making these wrong.
+// right WITHOUT making these wrong. A control tolerates nothing — it asserts
+// correctness on every one of p847Runs runs, and if it ever needed a ratchet
+// the pin would have stopped measuring the multi-producer path.
 func TestComputedGroupKeyOverACrossJoinIsRightWithOneScanWorker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short")
 	}
 	t.Setenv("WADJET_SCAN_WORKERS", "1")
+	p847ControlRun(t, "With ONE scan worker")
+}
 
+// TestComputedGroupKeyOverACrossJoinIsRightWithoutPartitionedAggregation is the
+// second control, and the pair of them is what gives the ratchet above its
+// meaning: they are what "fixed" looks like. Both kill switches make every
+// pinned entry right on EVERY run — no ratchet, no tolerance — so a fix is
+// expected to reach the same place at the default configuration, and the
+// ratchet fires when it does.
+//
+// The switch is flipped through optswitch rather than through the environment,
+// and that is not a shortcut: `optswitch.Register` reads its variable ONCE, at
+// package init, so a `t.Setenv("WADJET_PARTITIONED_AGG", "0")` here sets a
+// string nothing will read again and the control would silently assert the
+// DEFAULT configuration — passing only because the pinned shape happened to be
+// wrong, which is the opposite of what it claims. The toggle is looked up by
+// its registered name and restored on return.
+func TestComputedGroupKeyOverACrossJoinIsRightWithoutPartitionedAggregation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short")
+	}
+	tog := p847Toggle(t, "partitioned-agg")
+	defer tog.Set(tog.Set(false))
+	p847ControlRun(t, "With partitioned aggregation off")
+}
+
+// p847Toggle finds a registered optimization switch by name, failing rather
+// than skipping if it is gone: a control that quietly stops controlling
+// anything is worse than one that is red.
+func p847Toggle(t *testing.T, name string) *optswitch.Toggle {
+	t.Helper()
+	for _, tog := range optswitch.All() {
+		if tog.Name == name {
+			return tog
+		}
+	}
+	t.Fatalf("optimization switch %q is not registered — this control cannot set the "+
+		"condition it claims to, so it would assert the default configuration", name)
+	return nil
+}
+
+// p847ControlRun asserts every pinned entry answers its own pair list's counts
+// on all p847Runs runs, under whatever condition the caller has established. A
+// control tolerates nothing: if it ever needs a ratchet, the pin above has
+// stopped measuring the multi-producer path and is measuring something else.
+func p847ControlRun(t *testing.T, why string) {
+	t.Helper()
 	ctx := context.Background()
 	db := spillMxOpen(t, 0)
 	for _, c := range p847Cells() {
 		t.Run(c.name, func(t *testing.T) {
 			want := p847Truth(t, ctx, db, c)
-			for run := 0; run < 3; run++ {
+			for run := 0; run < p847Runs; run++ {
 				if d := p847Diff(p847Grouped(t, ctx, db, c), want); d != "" {
-					t.Fatalf("run %d: %s\n  With ONE scan worker this shape must answer what its "+
-						"own pair list says. If this fails, the pin above is measuring something "+
-						"other than the multi-producer path.\n  SQL: %s", run, d, p847GroupSQL(c))
+					t.Fatalf("run %d of %d: %s\n  %s this shape must answer what its own pair "+
+						"list says.\n  SQL: %s", run, p847Runs, d, why, p847GroupSQL(c))
 				}
 			}
 		})
 	}
 }
+
+// p847Runs is the replication count for both the pin and its controls. The pin
+// needs it high because its ratchet fires on unanimity and a short sample would
+// make "all of them agreed" cheap; the controls need it high because they
+// assert the opposite unanimity and one passing run would prove nothing.
+const p847Runs = 20
 
 // The other route that must keep answering: the expression materialized by an
 // inner projection, so the outer aggregate groups by a plain column and the
