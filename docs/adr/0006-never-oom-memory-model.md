@@ -84,7 +84,7 @@ tracker:**
 | # | producer | what | loud? | released |
 |---|---|---|---|---|
 | 1 | `memory.ReserveOrForce` (`memory/acquire.go:33`, `:50`) | a scan's file load — ONE ROW GROUP at a time where the footer is already decoded, the whole file otherwise | WARNs at `:50` | when THAT ROW GROUP is decoded (`fileSlot.releaseRG`), or, on the whole-file path, when the file's last one is |
-| 2 | the pool reconcile after (1)'s reservation (`planner/physical/util.go`, `scan_rowgroup_load.go`) | the pooled buffer's real capacity above what was reserved — bounded on the row-group path, which refuses a pooled buffer larger than the file's biggest row group | silent | with (1) |
+| 2 | the pool reconcile after (1)'s reservation (`planner/physical/util.go`) | the pooled buffer's real capacity above what was reserved — WHOLE-FILE path only; see the row-group note below | silent | with (1) |
 | 3 | `scanSourceInner.trackScanBatch` (`planner/physical/plan.go`) | every decoded row-group batch | silent | when the batch leaves through `next()` |
 | 4 | `scanSourceInner.trackPooledBuf` (same file) | the EAGER scan path's whole-file buffers, `cap(buf)`, no ceiling | silent | at scan close (`releasePooledBufs`) — coarser than (1) |
 | 5 | `HashJoin.reconcileHashMemory` (`engine/exec/join.go`) | the hash arena and index | WARNs once when it crosses the budget (this arc) | at join Close; a grace eviction does NOT free it (#823) |
@@ -95,6 +95,30 @@ Two more exist on OTHER ledgers and are not part of a query's floor: the
 worker's file cache (`worker/cached_store.go`) on the worker tracker, and
 `scan.DecodeAheadIter`'s delivery-cursor group (`engine/scan/decode_ahead.go`)
 on the decode window's ledger.
+
+**Producer 2 on the ROW-GROUP path: the charge is the row group, and the slack
+is bounded rather than reconciled.** The whole-file read reserves the file's
+size and then reconciles up to the pooled buffer's `cap()`, because that buffer
+is held for the file's whole decode and its excess is indistinguishable from
+the file's own bytes. The row-group read does not reconcile. It charges the row
+group's own byte range and holds it in a buffer from a pool bucketed by the
+POWER-OF-TWO SIZE CLASS of that range, so the buffer is at most twice the row
+group — no floor, no chosen number, the class derived from the row group
+itself. The slack between the two is pool capacity: bounded by the row group,
+handed to the next row group of the same class, and not this query's memory.
+The ledger therefore understates a scan's resident bytes by at most one row
+group per row group in flight, which is stated here rather than hidden, and
+`physical.TestARowGroupIsHeldInABufferAtMostTwiceItsSize` is what holds the
+bound.
+
+Three other bucket rules were measured and are recorded so the next reader does
+not re-derive them: the process-wide `readBufPool` (whose only rule is "big
+enough") charged a 332-byte row group 105,900 bytes from a whole-file buffer —
+319x the row group and 53x its file; the parquet chunk pool's classes have a
+64 KiB FLOOR, which held a 5 KiB row group in 64 KiB; and keying the bucket on
+the file's exact largest row group removed both faults but keyed on a number
+compression makes unique per file, so nothing was reused and the TPC-H SF1
+suite allocated **+29.2%** more, separated across five base/tip pairs.
 
 **#598's refusal of "reserve-and-overcommit" stands on the corrected count.**
 Deliberately reserving past the budget for an arrival batch would be an EIGHTH
