@@ -108,8 +108,20 @@ is unchanged — but they no longer hold the file in ONE buffer: the body of tha
 single GET is landed into one buffer per row group, charged and released as
 each row group decodes, so a scan's memory charge is the row groups it is
 decoding (#789, `internal/planner/physical/scan_rowgroup_load.go`, kill switch
-`WADJET_SCAN_RG_BUFFERS=0`). The request count, and the bytes fetched, are the
-same as before.
+`WADJET_SCAN_RG_BUFFERS=0`). The request count is the same as before, and the
+bytes fetched are the data region — the stream closes before the footer, so
+93-98% of the object, measured over four file shapes.
+
+One boundary that path does move, stated because it has not been measured on a
+real object store: the body is now held open for the file's whole decode
+(opened on the first row group, closed after the last), where the whole-file
+read did Get / read / Close in one span. At a tight memory budget the read is
+paced by admission — up to 2 s per row group — so a many-row-group file can
+hold a mostly idle connection open. `MemStore` and `FileStore` cannot show
+this; on S3 or MinIO a server-side idle reap would surface as a loud mid-file
+read error (`read <path> row group N: ...`), never a short answer. Re-issuing
+the GET from the stream position on a mid-stream error is the fix if it is ever
+observed.
 
 ## Engagement markers
 

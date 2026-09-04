@@ -19,8 +19,23 @@ import (
 //
 // Semantics match the old semaphore: a slot's bytes are held from load
 // admission until the file's last row group is consumed (releaseRG) or
-// the scan is torn down (drainAbandoned), because the admitted bytes ARE
-// the live heap of the loaded file, not just the download window.
+// the scan is torn down (drainAbandoned).
+//
+// What those bytes MEAN differs by read path, and the difference is not
+// silent:
+//
+//   - Whole-file read: the admitted bytes are the file, and they ARE the
+//     live heap of the loaded file, not just the download window.
+//   - Row-group read (scan_rowgroup_load.go): the admitted bytes are the
+//     file's LARGEST ROW GROUP, and the slot may hold several row groups
+//     at once — one per rg worker that has demanded one and not yet
+//     released it. Measured on a 24-row-group file with 4 workers: 3-4
+//     resident, 7.0x-9.1x the admitted bytes. So on this path the gate
+//     bounds concurrent LOADS by a row group each, not the live heap;
+//     what bounds the live heap is the per-row-group charge on the query's
+//     memory tracker, which is the bound #789 was about. `budget` here is
+//     therefore a download-concurrency ceiling on the row-group path and a
+//     heap ceiling on the whole-file one.
 //
 // Progress guarantee: a load is always admitted when nothing is inflight,
 // so a file larger than the whole budget still loads — alone.
