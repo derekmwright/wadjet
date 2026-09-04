@@ -299,6 +299,95 @@ func TestZeroRowStarDescribesTheSameBeforeAndAfterExecute(t *testing.T) {
 	tx.Rollback(ctx)
 }
 
+// TestParameterizedStarDescribesAndExecutes is the boundary the door's #846
+// guarantee cannot cross, attempted from both sides.
+//
+// A statement Describe of a PARAMETERIZED statement discovers its shape by
+// running it with NULL substituted for every parameter (substituteNullParams),
+// so it answers the wrong rows on purpose. For a statement whose schema the
+// planner declares, that costs nothing — the declaration is the answer. For
+// the one it does not declare, `SELECT *` over a JOIN, no rows means no
+// columns, and promising an empty RowDescription there promises something
+// that was never measured: the door described 0 fields, Execute produced 6,
+// and shapeAgrees refused the tuples with 42804 on a statement PostgreSQL 17
+// and this door's own base both answered with a row.
+//
+// So the cells are the two halves. A parameterized star over a TABLE must
+// describe its real columns (the declaration), zero rows or one. A
+// parameterized star over a JOIN must describe as NoData and still return its
+// rows, because ensureDescribed sends the real description at Execute, where
+// the portal's parameters are bound.
+func TestParameterizedStarDescribesAndExecutes(t *testing.T) {
+	srv := zrSetup(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name, sql string
+		arg       int32
+		wantRows  int
+		// wantDescribed is the field count a statement Describe promises, or
+		// -1 for "NoData: the shape is not knowable until Execute".
+		wantDescribed int
+		wantExecuted  int
+	}{
+		{"star_over_table_one_row", "SELECT * FROM zrfull WHERE c0 = $1", 1, 1, 3, 3},
+		{"star_over_table_zero_rows", "SELECT * FROM zrfull WHERE c0 = $1", 999, 0, 3, 3},
+		{"star_over_empty_table", "SELECT * FROM zrempty WHERE c0 = $1", 1, 0, 3, 3},
+		{"star_over_join_one_row",
+			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = $1", 1, 1, -1, 6},
+		{"star_over_join_zero_rows",
+			"SELECT * FROM zrfull a JOIN zrfull b ON a.c0 = b.c0 WHERE a.c0 = $1", 999, 0, -1, 0},
+		// The control: a written-out list is declared either way, so a
+		// regression that turned every parameterized Describe into NoData
+		// would not hide behind the join cell.
+		{"named_over_table", "SELECT c0, c2 FROM zrfull WHERE c0 = $1", 1, 1, 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := pgx.Connect(ctx,
+				fmt.Sprintf("postgres://wadjet@127.0.0.1:%s/wadjet?sslmode=disable",
+					srv.Addr()[len("127.0.0.1:"):]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close(ctx)
+
+			sd, err := conn.Prepare(ctx, "p", tc.sql)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if tc.wantDescribed < 0 {
+				if len(sd.Fields) != 0 {
+					t.Errorf("Describe promised %d fields for a statement whose shape is not "+
+						"knowable until its parameters are bound; a promise Execute cannot keep "+
+						"is refused with 42804 (#846 round-1 B1)", len(sd.Fields))
+				}
+			} else if len(sd.Fields) != tc.wantDescribed {
+				t.Errorf("Describe promised %d fields, want %d", len(sd.Fields), tc.wantDescribed)
+			}
+
+			// Execute, through pgx's default statement-cache mode — the same
+			// path pgJDBC's server-prepared statements take.
+			rows, err := conn.Query(ctx, tc.sql, tc.arg)
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			n := 0
+			for rows.Next() {
+				n++
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if n != tc.wantRows {
+				t.Errorf("got %d rows, want %d", n, tc.wantRows)
+			}
+			if got := len(rows.FieldDescriptions()); got != tc.wantExecuted {
+				t.Errorf("Execute produced %d fields, want %d", got, tc.wantExecuted)
+			}
+		})
+	}
+}
+
 // TestCommandAndDMLStillDescribeAsNoData is the boundary from the other side
 // (rule 11): the two statement classes that DO describe as NoData must keep
 // doing so. Turning every NoData into a RowDescription would tell a driver

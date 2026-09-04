@@ -1459,17 +1459,38 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	} else if len(result.Columns) > 0 {
 		c.sendRowDescription(result.Columns, fmtCodes)
 		c.described, c.describedFields = true, len(result.Columns)
+	} else if parameterized {
+		// ZERO COLUMNS HERE MEANS "UNKNOWN", NOT "KNOWN EMPTY".
+		//
+		// This shape was probed with NULL standing in for every parameter
+		// (substituteNullParams above), so it answered the wrong rows on
+		// purpose — and for a statement whose schema the planner does not
+		// declare, no rows means no columns to read one off. Promising an
+		// empty RowDescription here is promising something that was never
+		// measured: `SELECT * FROM a JOIN b ON … WHERE a.c0 = $1` described
+		// 0 fields, Execute produced 6, and shapeAgrees refused the tuples
+		// with 42804 — a statement PostgreSQL and this door's own base
+		// answered with a row. NoData keeps described=false, which is what
+		// lets ensureDescribed send the REAL description at Execute, where
+		// the portal's parameters are bound and the shape is knowable.
+		//
+		// The #846 guarantee is not weakened by this: a parameterized
+		// statement whose schema the planner CAN declare took the typed
+		// branch above with its real columns, zero rows or not. Only the
+		// deferred join star reaches here, and it is answered at Execute.
+		c.sendNoData()
 	} else {
 		// A QUERY describes as a RowDescription, empty or not — the other
 		// two shapes that describe as NoData (a command, and DML without
-		// RETURNING) have already returned above. NoData here was the
-		// extended-protocol half of #846: pgJDBC's executeQuery ties itself
-		// to the Describe it sent, so a zero-column answer arrived as "No
-		// results were returned by the query" instead of an empty
-		// ResultSet. The only shape that still reaches this line is one
-		// whose declared schema the planner could not derive — `SELECT *`
-		// over a JOIN — and an empty RowDescription is a legal result set
-		// where NoData is not one at all.
+		// RETURNING) have already returned above, and a parameterized probe
+		// just above. NoData here was the extended-protocol half of #846:
+		// pgJDBC's executeQuery ties itself to the Describe it sent, so a
+		// zero-column answer arrived as "No results were returned by the
+		// query" instead of an empty ResultSet. The only shape that still
+		// reaches this line is one whose declared schema the planner could
+		// not derive — `SELECT *` over a JOIN — run without parameters, so
+		// its emptiness was MEASURED rather than assumed, and an empty
+		// RowDescription is a legal result set where NoData is not one.
 		c.sendRowDescription(nil, fmtCodes)
 		c.described, c.describedFields = true, 0
 	}

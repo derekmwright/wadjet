@@ -1594,6 +1594,26 @@ func wireCorpus() []wireCase {
 		{name: "StarZeroRowsUnionAll",
 			sql: `SELECT * FROM nation WHERE n_nationkey < 0 UNION ALL ` +
 				`SELECT * FROM nation WHERE n_nationkey < 0`},
+
+		// A PARAMETERIZED star, which is where the extended protocol's
+		// Describe cannot measure the shape: this arm's Prepare is exactly
+		// that Describe, and wadjet answers it from the plan's declaration
+		// because running the statement with a NULL parameter would return
+		// the wrong rows. A star with no cell for $1 is how the door came to
+		// promise a RowDescription it could not keep (#846 round-1 B1), so
+		// the corpus carries both the matching and the non-matching bind.
+		{name: "StarParamMatching",
+			sql:       `SELECT * FROM nation WHERE n_nationkey = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(3)}},
+		{name: "StarParamZeroRows",
+			sql:       `SELECT * FROM nation WHERE n_nationkey = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(-1)}},
+		{name: "StarParamOverDecimalProbe",
+			sql:       `SELECT * FROM dec_probe WHERE d_key = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(1)}},
+		{name: "StarParamInferred",
+			sql:    `SELECT * FROM nation WHERE n_nationkey = $1`,
+			params: [][]byte{int4Text(3)}},
 	}
 	return append(base, decimalTPCHWireCorpus()...)
 }
