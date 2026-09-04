@@ -1685,16 +1685,25 @@ func duckdbCorpus() []duckdbCase {
 		// coverage here. Each variant below was verified against DuckDB to
 		// return byte-identical output to its explicit-JOIN original, so a
 		// divergence is wadjet's, never a transcription slip.
-		// Q2 has NO comma-join variant here, deliberately. Its subquery is
-		// CORRELATED and itself comma-joined, and #593/#594's predicate-
-		// lifting now lets that plan REACH a pre-existing #281-family defect
-		// in decorrelation over a comma-joined subquery: depending on the base
-		// it either errors (an unresolved join-key kernel) or deadlocks on the
-		// shared scan cache's ready channel (catalogScanSource.Init). Either
-		// way wadjet cannot yet answer it, so it is kept out of the corpus (a
-		// hang would wedge CI), and the pre-existing defect is tracked in its
-		// own issue (see #616) rather than only here. The lift is correct; the
-		// downstream decorrelation is what needs the fix.
+		// Q2's comma variant was DELIBERATELY ABSENT because it could not be
+		// answered: its subquery is CORRELATED and itself comma-joined, and
+		// the decorrelations built their build side out of
+		// `NewScan(info.Tables[0])`, which drops every inner relation past the
+		// first — so the plan either errored on an unresolved join-key kernel
+		// or deadlocked on the shared scan cache's ready channel (#616). A
+		// hang would have wedged CI.
+		//
+		// It answers now (ADR-0021 §1j lifts the inner comma FROM into a join
+		// tree before the correlation terms are classified), and it is gated
+		// two ways WITHOUT an entry here:
+		// TestQ2CommaSpellingAnswersTheSameAsTheExplicitJoin compares it to
+		// the explicit-JOIN Q2 cell for cell under a deadline, and the
+		// two-path corpus runs it on both distribution arms. Since the
+		// explicit spelling's values are pinned to DuckDB in this very file,
+		// that chain is a DuckDB comparison one step removed. Adding the entry
+		// HERE needs `WADJET_REGENERATE_DUCKDB_BASELINE=1` on a machine with
+		// duckdb installed, which is the one thing this arc could not do; it
+		// is the owed follow-up rather than a fabricated baseline row.
 		duckdbCase{name: "TPCH03CommaJoin", sql: `SELECT
 			l_orderkey,
 			SUM(l_extendedprice * (1 - l_discount)) as revenue,

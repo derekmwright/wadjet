@@ -789,6 +789,18 @@ func twoPathCorpus() []twoPathQuery {
 	// queries of coverage; the rest are the projection and name-resolution
 	// forms that broke alongside it. All stay cheap at SF0.01.
 	out = append(out,
+		// TPC-H Q2 in its OFFICIAL comma-join spelling — the shape the
+		// specification's own query text uses and every TPC-H-derived client
+		// therefore emits. It was out of every corpus because it could not be
+		// answered: the correlated scalar subquery's own FROM is a comma
+		// join, whose relations past the first the decorrelation dropped, so
+		// the plan either errored on an unresolved join key or deadlocked on
+		// the shared scan cache (#616). Its inner FROM is lifted into a join
+		// tree before the correlation terms are classified now, and it
+		// answers the explicit-JOIN Q2's rows byte for byte
+		// (TestQ2CommaSpellingAnswersTheSameAsTheExplicitJoin). Same float
+		// threshold relaxation as Q02 itself.
+		twoPathQuery{name: "TPCH02CommaJoin", sql: q2CommaSpelling, cmp: cmpCount, limit: 100, tolerance: 4},
 		// Bare LIMIT, the c5e77cf bug: no ORDER BY, so nothing in the plan
 		// but the limit itself bounds the result.
 		twoPathQuery{name: "BareLimit", sql: "SELECT l_orderkey FROM lineitem LIMIT 7", cmp: cmpCount, limit: 7, expectRows: true},

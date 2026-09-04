@@ -1473,7 +1473,7 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 		// walking what the subtree reads, so it projected `c_bool` over a root
 		// that has only `k` and the query failed at build time with `column
 		// "c_bool" does not exist in the input schema` on every arm.
-		// Attribution reads the EMITTED set now (ADR-0021 1j). Revert that
+		// Attribution reads the EMITTED set now (ADR-0021 §1j). Revert that
 		// one hunk and this cell is the one that fails.
 		{issue: "#852", name: "derived_inner_that_renames_its_key_column",
 			sql: `SELECT COUNT(*) AS n FROM typemx a WHERE a.id < 30 AND EXISTS (` +
