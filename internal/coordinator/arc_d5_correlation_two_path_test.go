@@ -107,6 +107,7 @@ func arcD5Cells() []arcD5Cell {
 		arcD5MeasuredCells(),
 		arcD5DerivedInnerCells(),
 		arcD5ScalarCardinalityCells(),
+		arcD5SelectListSubqueryCells(),
 		arcD5AggregateArgumentCells(),
 	} {
 		out = append(out, group...)
@@ -1717,5 +1718,56 @@ func arcD5ScalarCardinalityCells() []arcD5Cell {
 				`SELECT b.n FROM mk_inner b WHERE b.id = 999)`,
 			want:   []string{"n=int64:0"},
 			pgSays: "0 — an absent row is SQL NULL, and every comparison against it is UNKNOWN"},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #659 — a SELECT-LIST scalar subquery has no distributed lowering, of ANY
+// kind, and this is the deferral's fixture rather than its description.
+//
+// The filing reports `compile projection "(SELECT MAX(v) FROM c)": subqueries
+// require a SubqueryRunner` for a subquery over a CTE. That tree is gone: the
+// planner refuses the plan before stage generation
+// (physical.refuseScalarSubqueryProjections) and the coordinator routes it to
+// its local pipeline, which answers PostgreSQL's rows. Right, at the cost of
+// one ScalarProjectionLocalRoutes.
+//
+// The three cells are one claim each, and the claim is that the gap is the
+// POSITION and not the relation: a SELECT-list scalar subquery over a CTE, a
+// BASE TABLE and a DERIVED TABLE route identically. A deferral's boundary is a
+// claim and fixtures attempt it from both sides (protocol rule 11); this is
+// the side that says the shape is right today, so moving it must not be
+// allowed to make it wrong. The day the DAG lowers this position, all three
+// counters go to zero and these cells fail — which is the fix's proof.
+//
+// The control is the same subquery in a WHERE, which the DAG's deferral
+// machinery really does lower: zero routes, same fixture, same CTE.
+func arcD5SelectListSubqueryCells() []arcD5Cell {
+	const cte = `WITH c AS (SELECT id, c_i64 AS v FROM typemx) `
+	rows := []string{
+		"id=int64:0|mx=4999014997", "id=int64:1|mx=4999014997", "id=int64:2|mx=4999014997",
+	}
+	return []arcD5Cell{
+		{issue: "#659", name: "select_list_scalar_subquery_over_a_cte_routes",
+			sql:                  cte + `SELECT id, (SELECT MAX(v) FROM c) AS mx FROM c WHERE id<3 ORDER BY id`,
+			want:                 rows,
+			wantScalarProjRoutes: 1,
+			pgSays:               "three rows, all with the same max — the filing's own query"},
+		{issue: "#659", name: "select_list_scalar_subquery_over_a_base_table_routes",
+			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS mx FROM typemx ` +
+				`WHERE id<3 ORDER BY id`,
+			want:                 rows,
+			wantScalarProjRoutes: 1,
+			pgSays:               "the same route with no CTE in the query, which is what says the POSITION is the gap"},
+		{issue: "#659", name: "select_list_scalar_subquery_over_a_derived_table_routes",
+			sql: `SELECT id, (SELECT MAX(v) FROM (SELECT c_i64 AS v FROM typemx) d) AS mx ` +
+				`FROM typemx WHERE id<3 ORDER BY id`,
+			want:                 rows,
+			wantScalarProjRoutes: 1},
+		{issue: "#659", name: "control_the_same_subquery_in_a_where_lowers",
+			sql:  cte + `SELECT COUNT(*) AS n FROM c WHERE v < (SELECT MAX(v) FROM c)`,
+			want: []string{"n=int64:4838"},
+			pgSays: "4838, and ZERO routes — a scalar subquery in a WHERE has a distributed " +
+				"lowering, which is the half #659 does not describe"},
 	}
 }
