@@ -848,12 +848,20 @@ are different answers — a client branches on them:
 | `POWER(0, -1)` | `2201F` | zero raised to a negative power is undefined |
 | `POWER(-1, 0.5)` | `2201F` | a negative number raised to a non-integer power yields a complex result |
 | `POWER(2, 10000)`, `EXP(1000)` | `22003` | value out of range: overflow |
-| `POWER(2, -10000)`, `EXP(-1000)` | `22003` | value out of range: underflow |
+| `EXP(-1000)` | `22003` | value out of range: underflow |
 | `ASIN(2)`, `ACOS(2)` | `22003` | input is out of range |
 
 NaN and the infinities are **values**, not failures, and pass through the way
 PostgreSQL passes them: `SQRT('NaN')` is NaN, `LN('Infinity')` is Infinity,
-`SQRT(-0.0)` is `-0`, and `ASIN('NaN')` is NaN.
+`SQRT(-0.0)` is `-0`, `ASIN('NaN')` is NaN, `EXP('-Infinity')` is `0`,
+`EXP('Infinity')` is `Infinity`, and `POWER(2, 'Infinity')` is `Infinity`. An
+infinite operand is never an overflow — the value was already there.
+
+`POWER` that UNDERFLOWS to zero — `POWER(0.5, 2000)`, `POWER(1e-200, 3)` — is a
+**value**, `0`, not an error. PostgreSQL resolves that spelling to
+`power(numeric, numeric)`, which has no range check; its `float8` overload does
+raise `22003`, and wadjet has one float path, so this answers where an explicit
+`power(x::float8, y::float8)` would be refused on the server.
 
 A `CAST` whose destination this engine does not recognise still returns its
 operand as text rather than raising `42704`; so does a cast of non-address text

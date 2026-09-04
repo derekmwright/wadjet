@@ -4509,7 +4509,25 @@ func fnPow(args []any) any {
 	base, exp := ToFloat64(args[0]), ToFloat64(args[1])
 	raisePowerDomain(base, exp)
 	r := math.Pow(base, exp)
-	raiseFloatRangeResult(r, base, base != 0 && !math.IsInf(exp, 0))
+	// PostgreSQL's dpow overflow check, its own predicate: an infinite result
+	// is an overflow only when NEITHER operand was already infinite.
+	// `power(2, 'Infinity')` is Infinity there and `power('Infinity', 2)` is
+	// Infinity, both measured — the first version of this check passed only
+	// the BASE as the finite operand and so refused the first of that pair.
+	//
+	// There is NO underflow check, and that is a decision. PostgreSQL resolves
+	// `POWER(0.5, 2000)` — the spelling a user writes — to power(numeric,
+	// numeric), which has no range check and answers 0; only the float8
+	// overload underflows, and wadjet has one float path. Refusing would be
+	// ADR-0012 item 1's forbidden direction (refusing input PostgreSQL
+	// accepts) for the common spelling, in exchange for matching the explicit
+	// `::float8` one. Answering keeps the common spelling right and leaves a
+	// SUPERSET on the explicit one, which is the direction ADR-0012 records as
+	// acceptable. EXP is not the same case: its underflow raises under BOTH
+	// overloads on the live server, so it keeps the check.
+	if math.IsInf(r, 0) && !math.IsInf(base, 0) && !math.IsInf(exp, 0) {
+		raiseFloatOverflow()
+	}
 	return r
 }
 
@@ -4577,8 +4595,27 @@ func fnExp(args []any) any {
 		return nil
 	}
 	v := ToFloat64(args[0])
+	// PostgreSQL's dexp handles NaN and the infinities EXPLICITLY, before any
+	// range check, "to avoid needing to assume the platform's exp() conforms
+	// to POSIX for these cases" — and per POSIX exp(-Inf) is ZERO. The first
+	// version of this check tested `v != 0` for the underflow, which is true
+	// of -Infinity, so `EXP(CAST('-Infinity' AS DOUBLE PRECISION))` raised
+	// where the server answers 0. Only a FINITE argument is range-checked.
+	switch {
+	case math.IsNaN(v):
+		return v
+	case math.IsInf(v, 1):
+		return v
+	case math.IsInf(v, -1):
+		return 0.0
+	}
 	r := math.Exp(v)
-	raiseFloatRangeResult(r, v, v != 0)
+	if math.IsInf(r, 0) {
+		raiseFloatOverflow()
+	}
+	if r == 0 {
+		raiseFloatUnderflow()
+	}
 	return r
 }
 

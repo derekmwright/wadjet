@@ -309,7 +309,6 @@ func TestFnPow(t *testing.T) {
 		{"negative to a non-integer power", -1, 0.5, "2201F",
 			"a negative number raised to a non-integer power yields a complex result"},
 		{"overflow", 2, 10000, "22003", "value out of range: overflow"},
-		{"underflow", 2, -10000, "22003", "value out of range: underflow"},
 	} {
 		state, msg := recoverFatalEvalForTest(t, func() { fnPow([]any{c.base, c.exp}) })
 		if state != c.state || msg != c.msg {
@@ -317,14 +316,36 @@ func TestFnPow(t *testing.T) {
 				c.base, c.exp, c.name, state, msg, c.state, c.msg)
 		}
 	}
-	// The boundary, attempted from outside: PostgreSQL answers 1 for
-	// POWER(0,0), 0 for POWER(0,5) — a zero result whose BASE is zero has not
-	// underflowed — and -8 for POWER(-8, 3), an integer exponent.
+	// THE BOUNDARY, attempted from outside — and the INFINITE-argument cells
+	// are the ones the first version of this corpus lacked, which is why it
+	// stayed green while `POWER(2, 'Infinity')` raised. PostgreSQL's dpow
+	// suppresses the overflow when EITHER operand is already infinite, and it
+	// has no underflow refusal that reaches the spelling a user writes.
+	// Every value measured on 17.11.
+	inf, neginf := math.Inf(1), math.Inf(-1)
 	for _, c := range []struct {
+		name            string
 		base, exp, want float64
-	}{{0, 0, 1}, {0, 5, 0}, {-2, 3, -8}} {
+	}{
+		{"zero to the zero", 0, 0, 1},
+		{"zero to a positive power", 0, 5, 0},
+		{"a negative base, integer exponent", -2, 3, -8},
+		// An INFINITE operand: the result is infinite or zero and neither is
+		// an overflow, because the input was already there.
+		{"an infinite exponent", 2, inf, inf},
+		{"a negative infinite exponent", 2, neginf, 0},
+		{"an infinite base", inf, 2, inf},
+		{"a fraction to an infinite power", 0.5, inf, 0},
+		// UNDERFLOW to zero is a VALUE, not a refusal: PostgreSQL resolves
+		// `POWER(0.5, 2000)` to power(numeric, numeric), which answers 0.
+		// Refusing it would be ADR-0012 item 1's forbidden direction for the
+		// spelling users write; see fnPow.
+		{"a fraction to a large power underflows to zero", 0.5, 2000, 0},
+		{"a tiny base cubed underflows to zero", 1e-200, 3, 0},
+	} {
 		if got := fnPow([]any{c.base, c.exp}); got != c.want {
-			t.Errorf("POWER(%v, %v) = %v, want %v (PostgreSQL answers it)", c.base, c.exp, got, c.want)
+			t.Errorf("POWER(%v, %v) [%s] = %v, want %v (live PostgreSQL 17.11)",
+				c.base, c.exp, c.name, got, c.want)
 		}
 	}
 }
@@ -857,10 +878,26 @@ func TestFnExp(t *testing.T) {
 				c.arg, state, msg, c.msg)
 		}
 	}
-	// An INFINITE argument keeps its infinity: the overflow check is about a
-	// finite input producing an infinite result.
-	if got := fnExp([]any{math.Inf(1)}); got != math.Inf(1) {
-		t.Errorf("EXP(Infinity) = %v, want +Inf", got)
+	// THE BOUNDARY. PostgreSQL's dexp handles NaN and the infinities
+	// EXPLICITLY, before any range check — per POSIX `exp(-Inf)` is ZERO, not
+	// an underflow. The first version of this check tested `arg != 0` for the
+	// underflow, which is true of -Infinity, so `EXP(-Infinity)` RAISED where
+	// the server answers 0. Only a FINITE argument is range-checked.
+	for _, c := range []struct {
+		name string
+		arg  float64
+		want float64
+	}{
+		{"positive infinity keeps its infinity", math.Inf(1), math.Inf(1)},
+		{"negative infinity is ZERO, not an underflow", math.Inf(-1), 0},
+	} {
+		if got := fnExp([]any{c.arg}); got != c.want {
+			t.Errorf("EXP(%v) [%s] = %v, want %v (live PostgreSQL 17.11)",
+				c.arg, c.name, got, c.want)
+		}
+	}
+	if got := fnExp([]any{math.NaN()}); got == nil || !math.IsNaN(got.(float64)) {
+		t.Errorf("EXP(NaN) = %v, want NaN", got)
 	}
 }
 

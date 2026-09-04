@@ -102,17 +102,21 @@ func int32Count(n int) int32 {
 	return int32(n)
 }
 
-// raiseFloatRangeResult is PostgreSQL's float8 result check, the one every
-// libm-backed function in float.c runs after computing: an infinite result
-// from finite arguments OVERFLOWED, and a zero result from a non-zero
-// argument UNDERFLOWED. `finite` is the argument (or the argument that
-// decides), so `EXP('Infinity')` keeps its infinity and `POWER(0, 5)` keeps
-// its zero.
-func raiseFloatRangeResult(result, finite float64, nonZero bool) {
-	if math.IsInf(result, 0) && !math.IsInf(finite, 0) {
-		panic(fatalEval{sqlerr.New("22003", "value out of range: overflow")})
-	}
-	if result == 0 && nonZero {
-		panic(fatalEval{sqlerr.New("22003", "value out of range: underflow")})
-	}
+// raiseFloatOverflow and raiseFloatUnderflow are PostgreSQL's two float8 range
+// refusals, `float_overflow_error` and `float_underflow_error`.
+//
+// They are two bare raises rather than one "result check" helper, and that is
+// the correction the review forced: the helper took a single `finite` argument
+// and a `nonZero` bool, which read as though one predicate fitted every
+// caller. It does not. `dexp` excludes an INFINITE ARGUMENT from both checks
+// (per POSIX `exp(-Inf)` is zero, not an underflow), `dpow` excludes an
+// infinite EITHER operand from the overflow, and `dpow`'s underflow does not
+// apply here at all — see fnPow. Each caller states its own rule beside the
+// call, where the reader can compare it to float.c.
+func raiseFloatOverflow() {
+	panic(fatalEval{sqlerr.New("22003", "value out of range: overflow")})
+}
+
+func raiseFloatUnderflow() {
+	panic(fatalEval{sqlerr.New("22003", "value out of range: underflow")})
 }
