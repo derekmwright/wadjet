@@ -53,6 +53,7 @@ func TestACancelledQueryLeavesNoSpillScratch(t *testing.T) {
 		sql     string
 		workers string // WADJET_SCAN_WORKERS for this arm
 		drain   int64  // exec.ForceAggDrainEvery, 0 = leave it alone
+		budget  int64  // memory budget for this arm; 0 = cancelScratchBudget
 		engaged func() int64
 		what    string
 	}{
@@ -79,8 +80,18 @@ func TestACancelledQueryLeavesNoSpillScratch(t *testing.T) {
 			what:    "window run written to disk",
 		},
 		{
-			name:    "spilling_join",
-			sql:     "SELECT COUNT(*) AS n FROM " + cancelScratchTable + " x JOIN " + cancelScratchTable + " z ON x.id = z.id",
+			name: "spilling_join",
+			sql:  "SELECT COUNT(*) AS n FROM " + cancelScratchTable + " x JOIN " + cancelScratchTable + " z ON x.id = z.id",
+			// A join's build costs LESS than it did: its hash index is per
+			// grace partition, so 64 independently sized tables replace one
+			// grown to the whole build (16% fewer bytes), and its arrival
+			// reservation is reconciled to what it kept rather than drifting
+			// upward on every batch (#823, 2026-09-04). At this fixture's
+			// 4 MiB the build now fits and evicts nothing, which would make
+			// the cell vacuous — and the engagement assert below is what said
+			// so. The budget comes down to keep the CONDITION this cell is
+			// about; the shape and the claim are unchanged.
+			budget:  1 << 20,
 			workers: "1",
 			engaged: func() int64 { return exec.JoinPartitionsEvicted.Load() },
 			what:    "join partition evicted to disk",
@@ -98,7 +109,7 @@ func TestACancelledQueryLeavesNoSpillScratch(t *testing.T) {
 			// Control arm: the same query, run to completion. It establishes
 			// both that the shape SPILLS (so the cancel arm is not vacuous)
 			// and that a normal exit already reclaims everything.
-			dir, db := cancelScratchOpen(t)
+			dir, db := cancelScratchOpen(t, tc.budget)
 			before := tc.engaged()
 			if _, err := db.Query(context.Background(), tc.sql); err != nil {
 				t.Fatalf("control run: %v\n  SQL: %s", err, tc.sql)
@@ -116,7 +127,7 @@ func TestACancelledQueryLeavesNoSpillScratch(t *testing.T) {
 			// on a wall clock — a timer-based cancel either fires before the
 			// operator has written anything (proving nothing) or after it
 			// has finished (also proving nothing).
-			dir2, db2 := cancelScratchOpen(t)
+			dir2, db2 := cancelScratchOpen(t, tc.budget)
 			ctx, cancel := context.WithCancel(context.Background())
 			fired := make(chan int64, 1)
 			done := make(chan struct{})
@@ -164,14 +175,17 @@ func TestACancelledQueryLeavesNoSpillScratch(t *testing.T) {
 
 // cancelScratchOpen opens a DB whose spill directory is a fresh temp dir,
 // budgeted small enough that the fixture spills.
-func cancelScratchOpen(t *testing.T) (string, *DB) {
+func cancelScratchOpen(t *testing.T, budget int64) (string, *DB) {
 	t.Helper()
+	if budget == 0 {
+		budget = cancelScratchBudget
+	}
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := Open(ctx, Config{
 		Store:        objstore.NewMemStore(),
 		Bucket:       "test",
-		MemoryBudget: 4 << 20,
+		MemoryBudget: budget,
 		SpillDir:     dir,
 	})
 	if err != nil {
@@ -208,6 +222,7 @@ const (
 	// A fixture sized to spill every family at a 4 MiB budget: 20 000 rows
 	// of a 257-byte pad is ~5 MB of live column data, and the group count
 	// keeps the aggregate's state from collapsing to a handful of slots.
+	cancelScratchBudget = 4 << 20
 	cancelScratchTable  = "leaky"
 	cancelScratchRows   = 20000
 	cancelScratchGroups = 4000
