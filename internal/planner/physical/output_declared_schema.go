@@ -37,6 +37,9 @@ func declaredOutputSchema(root *logical.Node) []parquet.Column {
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
 		return cols
 	}
+	if cols, ok := starOnlyDeclaredOutputSchema(root); ok {
+		return cols
+	}
 	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
 	if !ok {
 		return nil
