@@ -573,6 +573,22 @@ func censusShapes() []censusShape {
 			pg:  "state=21000 table=[1:10:a 2:20:b 3:30:c]",
 			emb: "state=21000 table=[1:10:a 2:20:b 3:30:c]"},
 
+		// A CORRELATED subquery over the TARGET TABLE. It refused with 42P01
+		// naming a table that plainly exists, because the subquery reads the
+		// target under an ALIAS and the correlation analysis let that alias
+		// lend its table's name to the outer reference — so `arcb_pr.n` was
+		// read as the INNER relation's own column. An alias hides the table
+		// name now (plansql.collectInnerTables), which is ADR-0021 §5a's
+		// classifier repair; these two are its DML spelling.
+		{name: "#688 delete correlated EXISTS over the TARGET table", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE EXISTS (SELECT 1 FROM arcb_pr b WHERE b.n > arcb_pr.n)",
+			pg:  "tag=DELETE 2 table=[3:30:c]",
+			emb: "tag=DELETE 2 table=[3:30:c]"},
+		{name: "#688 delete correlated IN over the TARGET table", tbl: "pr",
+			sql: "DELETE FROM arcb_pr WHERE id IN (SELECT b.id FROM arcb_pr b WHERE b.n > arcb_pr.n)",
+			pg:  "tag=DELETE 0 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "tag=DELETE 0 table=[1:10:a 2:20:b 3:30:c]"},
+
 		// STILL REFUSED, and pinned rather than described: a subquery in the
 		// SET LIST. It is a different site — ResolveDMLSetClauses, which
 		// resolves an assignment against the target column's declaration —

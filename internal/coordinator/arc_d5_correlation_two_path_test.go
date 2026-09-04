@@ -189,40 +189,40 @@ func arcD5CTEScopeCells() []arcD5Cell {
 			sql: `WITH u AS (SELECT g AS did, id FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS c FROM u WHERE u.did IN (SELECT d.k FROM typemx_dim d)`,
 			want: []string{"c=int64:47"}},
-		// THE BOUNDARY, unchanged by this arc and pinned rather than
-		// described (rule 11). An outer table correlated BY ITS TABLE NAME
-		// where the inner relation reads the SAME table under an alias is
-		// invisible to plansql.DanglingTableRefs — `typemx.g` is not dangling,
-		// because the subquery's own FROM is `typemx sub`. The CTE fix does
-		// not reach it: there is no CTE here and no scope to record. It stays
-		// SILENTLY WRONG at 50 for PostgreSQL's 47 on the two single-process
-		// arms and LOUD on the DAG, and closing it is a classifier repair
-		// (ADR-0021 §1c). The day it answers 47 this pin FAILS.
-		// THE SAME BOUNDARY WITH A CTE ON BOTH SIDES, which is what says the
-		// boundary is "the OUTER reference is UNALIASED" and not "there is no
-		// CTE". The outer CTE reference here is bare (`FROM u`), so `u.did` in
-		// the subquery names a scope the INNER `u` answers to as well and no
-		// collector can tell them apart: silent 0 for PostgreSQL's 47. One
-		// alias later — the control below — it answers 47 on every arm, which
-		// is what makes this the boundary of a NAME and not of the CTE fix.
-		{issue: "#535", name: "boundary_cte_on_both_sides_outer_unaliased_stays_silent",
+		// THE BOUNDARY ADR-0021 §1c NAMED, NOW CLOSED — these two were pins
+		// on a SILENT WRONG ANSWER and they are controls now, which is the
+		// classifier repair's proof.
+		//
+		// An outer relation correlated BY ITS TABLE NAME, where the inner
+		// relation reads the SAME table under an ALIAS, used to be read as an
+		// INNER reference: `typemx.g` inside `SELECT 1 FROM typemx sub` was
+		// taken to name `sub`, so the subquery was not correlated at all and
+		// answered a constant TRUE — 50 for PostgreSQL's 47, in silence. §1c
+		// said closing it was "a classifier repair, not a scope one", and
+		// that is what it turned out to be: an ALIAS HIDES the table name, so
+		// `plansql.collectInnerTables` registers the alias and NOT the name.
+		// The CTE spelling one line down is the same rule through a different
+		// name space, and it moved with it: silent 0 for PostgreSQL's 47.
+		{issue: "#535", name: "control_cte_on_both_sides_outer_unaliased",
 			sql: `WITH u AS (SELECT g AS did, id FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS n FROM u WHERE EXISTS (` +
 				`SELECT 1 FROM u b WHERE b.did = u.did AND b.id <> u.id)`,
-			want:           []string{"n=int64:0"},
-			wantErrLikeDAG: "SubqueryRunner",
-			pgSays:         "47"},
+			want:           []string{"n=int64:47"},
+			wantCorrRoutes: 1,
+			pgSays: "47 — it answered 0 until an alias stopped hiding behind its table " +
+				"name; the DAG went from LOUD to routed-and-right with it"},
 		{issue: "#535", name: "control_cte_on_both_sides_outer_aliased",
 			sql: `WITH u AS (SELECT g AS did, id FROM typemx WHERE id < 50) ` +
 				`SELECT COUNT(*) AS n FROM u a WHERE EXISTS (` +
 				`SELECT 1 FROM u b WHERE b.did = a.did AND b.id <> a.id)`,
 			want: []string{"n=int64:47"}},
-		{issue: "#535", name: "boundary_unaliased_base_table_correlation_stays_silent",
+		{issue: "#535", name: "control_unaliased_base_table_correlation",
 			sql: `SELECT COUNT(*) AS c FROM typemx WHERE id < 50 AND EXISTS (` +
 				`SELECT 1 FROM typemx sub WHERE sub.g = typemx.g)`,
-			want:           []string{"c=int64:50"},
-			wantErrLikeDAG: "SubqueryRunner",
-			pgSays:         "47"},
+			want:           []string{"c=int64:47"},
+			wantCorrRoutes: 1,
+			pgSays: "47 — it answered 50, every row, until the alias `sub` stopped " +
+				"lending its table's name to the outer reference"},
 	}
 }
 

@@ -746,11 +746,19 @@ func arcACells() []arcACell {
 		// decides what is correlated — not a wider consumer guard: no
 		// scope-free predicate can tell this reference from a self-contained
 		// one. The day it starts failing or answering 47, this pin FAILS.
-		{issue: "#535", name: "boundary_unaliased_base_table_correlation_stays_silent",
+		// ADR-0021 §1c's named boundary, CLOSED: an outer relation correlated
+		// by its TABLE NAME where the inner reads the same table under an
+		// ALIAS used to be read as an inner reference, so the subquery was
+		// not correlated at all and answered a constant TRUE — 50, every row,
+		// for PostgreSQL's 47. An alias hides the table name now
+		// (plansql.collectInnerTables), which is the classifier repair §1c
+		// said it needed. A pin became a control, and the DAG went from LOUD
+		// to routed-and-right.
+		{issue: "#535", name: "control_unaliased_base_table_correlation",
 			sql: `SELECT COUNT(*) AS c FROM typemx WHERE id < 50 AND EXISTS (` +
 				`SELECT 1 FROM typemx sub WHERE sub.g = typemx.g)`,
-			want:           []string{"c=int64:50"},
-			wantErrLikeDAG: "SubqueryRunner",
+			want:           []string{"c=int64:47"},
+			wantCorrRoutes: 1,
 			pgSays:         "47"},
 		// #535's two controls, which ANSWER at base and must keep answering:
 		// the DERIVED-table spelling of the same query, and the ALIASED base

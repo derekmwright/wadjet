@@ -179,19 +179,30 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 }
 
 // collectInnerTables returns all table names and aliases from a SelectInfo.
+// An ALIAS HIDES the table name, which is SQL's rule and PostgreSQL's: inside
+// `SELECT 1 FROM t b WHERE …`, `t.x` names no relation this FROM provides, and
+// `DELETE FROM pr AS a WHERE pr.id = 1` is 42P01 for the same reason one level
+// up. Registering BOTH spellings made an OUTER reference spelled by its table
+// name look like an INNER one whenever the subquery read that table under an
+// alias — the shape ADR-0021 1c pins as
+// `boundary_unaliased_base_table_correlation_stays_silent`, where
+// `FROM typemx WHERE EXISTS (SELECT 1 FROM typemx sub WHERE sub.g = typemx.g)`
+// answered 50 for PostgreSQL's 47 in silence because `typemx.g` was read as
+// the INNER relation's own column.
 func collectInnerTables(info *SelectInfo) map[string]bool {
 	m := make(map[string]bool)
-	for _, t := range info.Tables {
-		m[strings.ToLower(t.Name)] = true
-		if t.Alias != "" {
-			m[strings.ToLower(t.Alias)] = true
+	add := func(name, alias string) {
+		if alias != "" {
+			m[strings.ToLower(alias)] = true
+			return
 		}
+		m[strings.ToLower(name)] = true
+	}
+	for _, t := range info.Tables {
+		add(t.Name, t.Alias)
 	}
 	for _, j := range info.Joins {
-		m[strings.ToLower(j.RightTable)] = true
-		if j.RightAlias != "" {
-			m[strings.ToLower(j.RightAlias)] = true
-		}
+		add(j.RightTable, j.RightAlias)
 	}
 	return m
 }

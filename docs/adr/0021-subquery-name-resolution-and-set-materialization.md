@@ -12,7 +12,8 @@ empty input still answers (§1h), and what that arc measured and did not move
 (§1i). §1j (2026-09-04) gives the answer §1a and §1b declined to give — the
 build side is the subquery's own FROM clause as a plan — and SUPERSEDES both
 declines for every relation but a recursive CTE (#852, #616). §5 (2026-09-04)
-settles what "scalar" means: at most ONE row, and the second row is 21000.
+settles what "scalar" means — at most ONE row, and the second row is 21000 —
+and §5a closes §1c's named boundary: an alias hides its table name.
 
 ## Context
 
@@ -998,6 +999,32 @@ applied. It cannot be applied at the coordinator's end instead: a producer's
 rows are neither one per task nor one per file, and a SINGLE-row producer can
 surface in more than one file, so a count taken there is unsound in both
 directions. The lever the deferral exists for is untouched.
+
+### 5a. An ALIAS hides its table name — §1c's boundary, closed
+
+§1c recorded a shape it could not close and said what closing it needed: *"No
+scope-free predicate can tell the two apart; closing it is a producer
+repair… a classifier repair, §1c's subject, not a scope one."* §1d restated
+the same boundary from the other side: *"the boundary is that the OUTER
+reference is UNALIASED."*
+
+It was a classifier repair, and it is one line of SQL's own rule.
+`plansql.collectInnerTables` registered a subquery's FROM items under BOTH
+their table name and their alias, so inside `SELECT 1 FROM typemx sub`, the
+reference `typemx.g` was read as naming the INNER relation. The subquery was
+therefore not correlated at all, ran once, and answered a constant TRUE — 50
+rows for PostgreSQL's 47, in silence. An alias HIDES the table name: only the
+alias is registered now, which is the same rule `checkDMLColumns` has enforced
+one level up since #686 (`DELETE FROM pr AS a WHERE pr.id = 1` is 42P01).
+
+Three pins became controls with it, and that is the repair's proof:
+`boundary_unaliased_base_table_correlation_stays_silent` (50 → 47, in two
+censuses) and `boundary_cte_on_both_sides_outer_unaliased_stays_silent` (0 →
+47), all now answering PostgreSQL's value. Both DAG arms went from LOUD
+("EXISTS subquery requires a SubqueryRunner") to routed-and-right, which the
+counters assert beside the rows. The DML door reached the same boundary as a
+42P01 naming a table that plainly exists, and it now answers PostgreSQL's
+`DELETE 2`.
 
 ## Consequences
 
