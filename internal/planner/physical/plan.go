@@ -1577,6 +1577,13 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		p.AnnotateScanColumns(ctx, plan)
 	})
+	// The optimizer MINTS scans, after the policy went in above (#859).
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
 
 	// Build physical pipeline
 	source, ops, sink, err := p.buildPipeline(ctx, logicalPlan)
@@ -1934,6 +1941,12 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		p.AnnotateScanColumns(ctx, plan)
 	})
+	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 {
+		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
+		if err != nil {
+			return "", err
+		}
+	}
 
 	before := len(*stages)
 	p.walkStages(logicalPlan, stages, nil)

@@ -77,6 +77,7 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 	if len(policies) == 0 {
 		return nil
 	}
+	auditColumnDecision(provider, identity, table, policies)
 	denied := map[string]bool{}
 	for _, p := range policies {
 		if p.Denied {

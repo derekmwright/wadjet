@@ -122,3 +122,36 @@ func (p *Planner) applyContextColumnPolicies(ctx context.Context, plan *logical.
 	}
 	return plan, nil
 }
+
+// applyContextColumnPoliciesToNewScans is applyContextColumnPolicies for the
+// scans the OPTIMIZER minted — decorrelation re-parses a subquery and builds a
+// fresh Scan, after the policy went in. A scan already under a security
+// barrier is skipped.
+func (p *Planner) applyContextColumnPoliciesToNewScans(ctx context.Context, plan *logical.Node) (*logical.Node, error) {
+	pol := logical.ColumnPoliciesFromContext(ctx)
+	if len(pol) == 0 {
+		return plan, nil
+	}
+	plan, unprotected := pol.ApplyToNewScans(plan, func(table string) []string {
+		return p.policyTableColumns(ctx, table)
+	})
+	if unprotected > 0 {
+		return nil, logical.ErrColumnPolicyUnenforceable
+	}
+	return plan, nil
+}
+
+func (p *Planner) policyTableColumns(ctx context.Context, table string) []string {
+	if p.catalog == nil {
+		return nil
+	}
+	meta, err := p.catalog.GetTable(ctx, table)
+	if err != nil || meta == nil {
+		return nil
+	}
+	cols := make([]string, len(meta.Schema.Columns))
+	for i, c := range meta.Schema.Columns {
+		cols[i] = c.Name
+	}
+	return cols
+}

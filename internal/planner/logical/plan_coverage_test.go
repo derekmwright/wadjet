@@ -267,6 +267,47 @@ func TestInjectColumnPolicies_SchemaColumnsBeatAnEmptyScan(t *testing.T) {
 	}
 }
 
+// TestInjectColumnPolicies_TheCatalogBeatsAPrunedScanList is ADR-0033 decision
+// 1 stated precisely: the projection is built from the TABLE's declared
+// schema, NEVER from the scan's own list. The empty-list case
+// (_SchemaColumnsBeatAnEmptyScan) only proves "at least one source" — a
+// version that preferred ScanColumns and fell back to the catalog passes it.
+// This is the case that separates them: the scan carries a NON-EMPTY list that
+// column pruning has already narrowed, and the projection must still publish
+// every column of the table.
+func TestInjectColumnPolicies_TheCatalogBeatsAPrunedScanList(t *testing.T) {
+	scan := NewScan("events", "e")
+	scan.ScanColumns = []string{"id"} // pruned: the SELECT list needs only id
+	policies := []ColumnPolicy{{Column: "email", MaskExpr: "'***'"}}
+	result, unprotected := InjectColumnPolicies(scan, "events", policies,
+		[]string{"id", "email", "note"})
+
+	if unprotected != 0 {
+		t.Fatalf("unprotected = %d, want 0", unprotected)
+	}
+	if result.Type != NodeProject {
+		t.Fatalf("expected a security projection, got %s", result.Type)
+	}
+	got := map[string]string{}
+	for _, p := range result.Projections {
+		name := p.Alias
+		if name == "" {
+			name = p.Column
+		}
+		got[name] = p.Expr
+	}
+	if len(got) != 3 {
+		t.Fatalf("projection publishes %v; the TABLE's three columns are the authority, "+
+			"not the scan's pruned list", got)
+	}
+	if got["email"] != "'***'" {
+		t.Errorf("email = %q, want the mask", got["email"])
+	}
+	if _, ok := got["note"]; !ok {
+		t.Error("note is missing: the projection was built from the pruned scan list")
+	}
+}
+
 // TestInjectColumnPolicies_AllColumnsDenied: nothing visible is not "no
 // policy" — it is unprotected, and the caller refuses.
 func TestInjectColumnPolicies_AllColumnsDenied(t *testing.T) {

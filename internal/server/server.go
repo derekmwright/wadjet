@@ -348,23 +348,10 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				tableDecisions[tableName] = td
-				// Audit the column policy at DECISION time. It used to be
-				// logged from applyColumnPolicies, over the result rows, so a
-				// query that returned nothing logged nothing even though the
-				// policy had shaped the plan (#859).
-				if s.audit != nil {
-					var masked, denied []string
-					for _, col := range td.Columns {
-						if !col.Allowed {
-							denied = append(denied, col.Column)
-						} else if col.MaskFunc != "" || col.MaskExpr != "" {
-							masked = append(masked, col.Column)
-						}
-					}
-					if len(masked) > 0 || len(denied) > 0 {
-						s.audit.LogColumnPolicy(identity, tableName, masked, denied)
-					}
-				}
+				// The column policy is audited by auth.EnforcePlanPolicies,
+				// at the moment it decides — one enforcement path, one audit
+				// point, so the embedded and pgwire doors record it too and a
+				// query that returns no rows still records it (#859).
 				if td.RowFilter != "" {
 					if rowFilters == nil {
 						rowFilters = make(auth.RowFilters)
@@ -515,6 +502,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		planner.AnnotateScanColumns(execCtx, plan)
 	})
+	// The optimizer MINTS scans; those are created after enforcement (#859).
+	logicalPlan, err = auth.EnforceOptimizedPlan(execCtx, s.catalog, logicalPlan)
+	if err != nil {
+		writeSQLError(w, http.StatusForbidden, err.Error(), err)
+		return
+	}
 
 	// Build physical plan
 	physPlan, err := planner.Plan(execCtx, logicalPlan)
@@ -951,14 +944,29 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
-	planner.AnnotateScanColumns(r.Context(), logicalPlan)
+	explainCtx := r.Context()
+	planner.AnnotateScanColumns(explainCtx, logicalPlan)
+	// EXPLAIN plans what the query would RUN, so it enforces what the query
+	// would run under: without this the plan text showed a bare scan where
+	// the statement itself would carry a security projection (#859).
+	explainCtx, logicalPlan, err = auth.EnforcePlanPolicies(explainCtx, s.provider, s.catalog,
+		selectInfo, logicalPlan, "http")
+	if err != nil {
+		writeSQLError(w, http.StatusForbidden, err.Error(), err)
+		return
+	}
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
-		planner.AnnotateScanColumns(r.Context(), plan)
+		planner.AnnotateScanColumns(explainCtx, plan)
 	})
+	logicalPlan, err = auth.EnforceOptimizedPlan(explainCtx, s.catalog, logicalPlan)
+	if err != nil {
+		writeSQLError(w, http.StatusForbidden, err.Error(), err)
+		return
+	}
 	planStr := logicalPlan.PrettyPrint(0)
 
 	if parsed.Explain.Verbose {
-		physPlan, err := planner.Plan(r.Context(), logicalPlan)
+		physPlan, err := planner.Plan(explainCtx, logicalPlan)
 		if err != nil {
 			writeSQLError(w, http.StatusInternalServerError, "physical plan error: "+err.Error(), err)
 			return

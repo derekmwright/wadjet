@@ -611,6 +611,10 @@ type pmCell struct {
 	// wantErrLike, when set, is what the analyst identity must be REFUSED
 	// with instead of an answer.
 	wantErrLike string
+	// wantDAG, when non-nil, is what the DAG arms answer instead of want. It
+	// is a PIN, not an allowance: the cell that uses it names the mechanism,
+	// and if the two ever agree the pin FAILS and must be deleted.
+	wantDAG []string
 	// deniedLike names the DENIED column in sql. The cell then asserts that
 	// the analyst is refused with exactly the error the SAME STATEMENT gets
 	// when that identifier names a column the table really does not have —
@@ -712,6 +716,130 @@ func pmCells() []pmCell {
 		{name: "the_policed_table_joined_to_an_unpoliced_one",
 			sql:  `SELECT o.note AS n, e.ssn AS s FROM e7other o JOIN e7emp e ON o.id = e.id ORDER BY o.id`,
 			want: []string{"n=n1|s=***", "n=n2|s=***", "n=n3|s=***"}},
+
+		// ------------------------------------------------------------------
+		// Round-1 review: the shapes the first matrix did not carry. Thirteen
+		// of them leaked at af6f18db on all eight runners — EXCEPT, INTERSECT
+		// and UNION-distinct over a masked column, and a correlated scalar
+		// subquery's OUTER reference, among them.
+		{name: "window_order_by_masked",
+			sql:  `SELECT id, SUM(amt) OVER (ORDER BY ssn) AS w FROM e7emp`,
+			want: all(func(i int) string { return fmt.Sprintf("id=%d|w=78", i) })},
+		{name: "window_lag_over_masked",
+			sql: `SELECT id, LAG(ssn) OVER (ORDER BY id) AS p FROM e7emp`,
+			want: all(func(i int) string {
+				if i == 1 {
+					return "id=1|p=NULL"
+				}
+				return fmt.Sprintf("id=%d|p=%s", i, pmMaskSSN)
+			})},
+		{name: "case_over_masked",
+			sql:  `SELECT id, CASE WHEN ssn = 'true-ssn-01' THEN 'HIT' ELSE ssn END AS c FROM e7emp WHERE id = 1`,
+			want: []string{"c=" + pmMaskSSN + "|id=1"}},
+		{name: "cast_of_masked",
+			sql: `SELECT CAST(ssn AS VARCHAR) AS c FROM e7emp WHERE id = 1`, want: []string{"c=" + pmMaskSSN}},
+		{name: "substring_of_masked",
+			sql: `SELECT SUBSTRING(ssn, 1, 8) AS c FROM e7emp WHERE id = 1`, want: []string{"c=" + pmMaskSSN}},
+		{name: "concat_of_masked",
+			sql: `SELECT ssn || '-x' AS c FROM e7emp WHERE id = 1`, want: []string{"c=" + pmMaskSSN + "-x"}},
+		{name: "having_on_masked",
+			sql:  `SELECT dept, MAX(ssn) AS m FROM e7emp GROUP BY dept HAVING MAX(ssn) = 'true-ssn-03'`,
+			want: nil},
+		{name: "having_on_masked_numeric",
+			sql:  `SELECT dept, SUM(acct) AS s FROM e7emp GROUP BY dept HAVING SUM(acct) > 0`,
+			want: nil},
+		{name: "in_subquery_masked",
+			sql:  `SELECT COUNT(*) AS c FROM e7emp a WHERE a.ssn IN (SELECT ssn FROM e7emp b WHERE b.id < 3)`,
+			want: []string{"c=12"}},
+		{name: "correlated_exists_masked",
+			sql:  `SELECT COUNT(*) AS c FROM e7emp a WHERE EXISTS (SELECT 1 FROM e7emp b WHERE b.ssn = a.ssn AND b.id = 1)`,
+			want: []string{"c=12"}},
+		{name: "correlated_scalar_outer_ref",
+			sql:  `SELECT a.id, (SELECT MIN(b.ssn) FROM e7emp b WHERE b.id = a.id) AS m FROM e7emp a WHERE a.id < 3`,
+			want: []string{"id=1|m=" + pmMaskSSN, "id=2|m=" + pmMaskSSN}},
+		{name: "distinct_masked", sql: `SELECT DISTINCT ssn FROM e7emp`, want: []string{"ssn=" + pmMaskSSN}},
+		{name: "mixed_conjunction_pushdown",
+			sql: `SELECT COUNT(*) AS c FROM e7emp WHERE dept = 'd1' AND ssn = 'true-ssn-01'`, want: []string{"c=0"}},
+		{name: "like_on_masked",
+			sql: `SELECT COUNT(*) AS c FROM e7emp WHERE ssn LIKE 'true%'`, want: []string{"c=0"}},
+		{name: "in_list_on_masked",
+			sql: `SELECT COUNT(*) AS c FROM e7emp WHERE ssn IN ('true-ssn-01','true-ssn-02')`, want: []string{"c=0"}},
+		{name: "numeric_eq_on_masked",
+			sql: `SELECT COUNT(*) AS c FROM e7emp WHERE acct = 900001`, want: []string{"c=0"}},
+		{name: "numeric_range_on_masked",
+			sql: `SELECT COUNT(*) AS c FROM e7emp WHERE acct > 500000`, want: []string{"c=0"}},
+		{name: "order_by_masked_limit",
+			sql:  `SELECT id, ssn FROM e7emp ORDER BY ssn DESC, id LIMIT 3`,
+			want: []string{"id=1|ssn=" + pmMaskSSN, "id=2|ssn=" + pmMaskSSN, "id=3|ssn=" + pmMaskSSN}},
+		{name: "top_n_on_masked_numeric",
+			// The VALUE, not which row won it: every key is the mask, so the
+			// tie is ADR-0013 legal nondeterminism.
+			sql: `SELECT acct FROM e7emp ORDER BY acct DESC LIMIT 1`, want: []string{"acct=0"}},
+		{name: "union_distinct_arm",
+			sql: `SELECT ssn FROM e7emp UNION SELECT ssn FROM e7emp`, want: []string{"ssn=" + pmMaskSSN}},
+		{name: "except_arm",
+			sql: `SELECT ssn FROM e7emp EXCEPT SELECT 'zzz'`, want: []string{"ssn=" + pmMaskSSN}},
+		{name: "intersect_arm",
+			sql: `SELECT ssn FROM e7emp INTERSECT SELECT ssn FROM e7emp`, want: []string{"ssn=" + pmMaskSSN}},
+		{name: "nested_derived_two_deep",
+			sql:  `SELECT x.s AS s FROM (SELECT d.ssn AS s FROM (SELECT ssn FROM e7emp) d) x`,
+			want: all(func(int) string { return "s=" + pmMaskSSN })},
+		{name: "cte_referenced_twice",
+			sql:  `WITH u AS (SELECT ssn FROM e7emp) SELECT COUNT(*) AS c FROM u a JOIN u b ON a.ssn = b.ssn`,
+			want: []string{"c=144"}},
+		{name: "join_masked_to_unmasked",
+			sql: `SELECT COUNT(*) AS c FROM e7emp a JOIN e7emp b ON a.ssn = b.dept`, want: []string{"c=0"}},
+		{name: "case_insensitive_table_name",
+			sql:  `SELECT ssn FROM E7EMP`,
+			want: all(func(int) string { return "ssn=" + pmMaskSSN })},
+		{name: "quoted_column",
+			sql:  `SELECT "ssn" FROM e7emp`,
+			want: all(func(int) string { return "ssn=" + pmMaskSSN })},
+		{name: "count_star_with_a_denied_column",
+			sql: `SELECT COUNT(*) AS c FROM e7emp`, want: []string{"c=12"}},
+		{name: "qualified_star", sql: `SELECT a.* FROM e7emp a`, noSalary: true,
+			want: all(func(i int) string {
+				return fmt.Sprintf("acct=0|amt=%d|dept=d%d|id=%d|ssn=%s", i, i%3, i, pmMaskSSN)
+			})},
+		{name: "aggregate_of_a_case_over_masked",
+			sql:  `SELECT SUM(CASE WHEN ssn = 'true-ssn-01' THEN 1 ELSE 0 END) AS c FROM e7emp`,
+			want: []string{"c=0"}},
+		{name: "coalesce_masked",
+			sql: `SELECT COALESCE(ssn, 'x') AS c FROM e7emp WHERE id = 1`, want: []string{"c=" + pmMaskSSN}},
+		{name: "group_by_an_expression_over_masked",
+			sql:  `SELECT SUBSTRING(ssn,1,4) AS g, COUNT(*) AS c FROM e7emp GROUP BY SUBSTRING(ssn,1,4)`,
+			want: []string{"c=12|g=" + pmMaskSSN}},
+		{name: "scalar_subquery_oracle_probe",
+			sql:  `SELECT COUNT(*) AS c FROM e7emp WHERE ssn = (SELECT 'true-ssn-01')`,
+			want: []string{"c=0"}},
+		// PINNED DAG DIVERGENCE. Single-process answers 12 — both sides
+		// masked, '***' = '***'. The DAG answers 0: the deferred scalar
+		// PRODUCER hands its subquery to a worker as SQL TEXT, which re-plans
+		// it outside the policy and returns the STORED minimum, so the
+		// predicate — correctly above the barrier, comparing the mask —
+		// matches nothing. No value escapes: the producer's result only makes
+		// the comparison false, and scalar_subquery_oracle_probe above shows
+		// the predicate is not an oracle. But the ANSWER differs by path. It
+		// is the async door's mechanism in a second place (a task carrying a
+		// statement's TEXT is re-planned where no policy is), deferred with
+		// that mechanism in ADR-0033. The day the DAG answers 12 this pin
+		// FAILS and goes.
+		{name: "scalar_subquery_in_where",
+			sql:     `SELECT COUNT(*) AS c FROM e7emp WHERE ssn = (SELECT MIN(ssn) FROM e7emp)`,
+			want:    []string{"c=12"},
+			wantDAG: []string{"c=0"}},
+
+		{name: "denied_in_order_by", sql: `SELECT id FROM e7emp ORDER BY salary`, deniedLike: "salary"},
+		{name: "denied_in_group_by",
+			sql: `SELECT salary, COUNT(*) AS c FROM e7emp GROUP BY salary`, deniedLike: "salary"},
+		{name: "denied_in_having",
+			sql: `SELECT dept FROM e7emp GROUP BY dept HAVING MAX(salary) > 0`, deniedLike: "salary"},
+		{name: "denied_in_case",
+			sql: `SELECT CASE WHEN salary > 0 THEN 1 ELSE 0 END AS c FROM e7emp`, deniedLike: "salary"},
+		{name: "denied_in_join_on",
+			sql: `SELECT COUNT(*) AS c FROM e7emp a JOIN e7emp b ON a.salary = b.salary`, deniedLike: "salary"},
+		{name: "denied_in_an_aggregate_argument",
+			sql: `SELECT COUNT(salary) AS c FROM e7emp`, deniedLike: "salary"},
 	}
 }
 
@@ -828,6 +956,9 @@ func TestPolicyMaskingIsPlanTimeOnEveryDoor(t *testing.T) {
 					}
 				}
 				want := append([]string(nil), cell.want...)
+				if cell.wantDAG != nil && strings.Contains(door.name, "dag") {
+					want = append([]string(nil), cell.wantDAG...)
+				}
 				sort.Strings(want)
 				gotRows := got.canon()
 				if len(gotRows) != len(want) {

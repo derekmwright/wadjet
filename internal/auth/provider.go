@@ -19,6 +19,21 @@ type authState struct {
 type Provider struct {
 	state  atomic.Pointer[authState]
 	logger *slog.Logger
+	// audit records what a policy DECIDED. It lives here, beside the
+	// evaluator, so the one enforcement path carries the one audit point:
+	// LogColumnPolicy used to be called from internal/server's HTTP handler
+	// alone, over the result ROWS, so the embedded and pgwire doors — which
+	// enforce through exactly the same call — recorded nothing, and a query
+	// that returned no rows recorded nothing on any door (#859).
+	audit *AuditLogger
+}
+
+// Audit returns the provider's audit logger. Never nil.
+func (p *Provider) Audit() *AuditLogger {
+	if p == nil {
+		return nil
+	}
+	return p.audit
 }
 
 // NewProvider creates a Provider from initial auth components.
@@ -27,7 +42,7 @@ func NewProvider(authn *Authenticator, authz *Authorizer, policies *PolicySet, l
 	if logger == nil {
 		logger = slog.Default()
 	}
-	p := &Provider{logger: logger}
+	p := &Provider{logger: logger, audit: NewAuditLogger(logger)}
 	enabled := authn != nil && authn.Enabled()
 	p.state.Store(&authState{
 		authn:    authn,

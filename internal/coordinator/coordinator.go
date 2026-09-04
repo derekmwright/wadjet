@@ -1008,6 +1008,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}
 
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+	// The optimizer MINTS scans; those are created after enforcement (#859).
+	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, c.catalog, logicalPlan)
+	if err != nil {
+		return nil, err
+	}
 	planStr := logicalPlan.PrettyPrint(0)
 
 	// Small-query fast path: when the plan's total post-pruning scan bytes
@@ -3310,6 +3315,10 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	}
 
 	logicalPlan = logical.Optimize(logicalPlan, explainAnnotator)
+	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, c.catalog, logicalPlan)
+	if err != nil {
+		return "", "", err
+	}
 	planStr = logicalPlan.PrettyPrint(0)
 
 	// The async door dispatches ONE pipeline task carrying the SQL TEXT, and

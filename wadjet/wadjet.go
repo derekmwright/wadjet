@@ -463,6 +463,12 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		planner.AnnotateScanColumns(ctx, plan)
 	})
+	// The optimizer MINTS scans (decorrelation re-parses a subquery and
+	// builds one), and those are created after enforcement ran (#859).
+	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, db.catalog, logicalPlan)
+	if err != nil {
+		return nil, err
+	}
 	planStr := logicalPlan.PrettyPrint(0)
 
 	physPlan, err := planner.Plan(ctx, logicalPlan)
@@ -557,6 +563,10 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		planner.AnnotateScanColumns(ctx, plan)
 	})
+	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, db.catalog, logicalPlan)
+	if err != nil {
+		return nil, err
+	}
 	plan := logicalPlan.PrettyPrint(0)
 
 	if parsed.Explain.Analyze {

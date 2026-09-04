@@ -78,6 +78,7 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		}
 		if len(cp) > 0 {
 			policies[strings.ToLower(tableName)] = cp
+			auditColumnDecision(provider, identity, tableName, cp)
 		}
 	}
 
@@ -107,6 +108,41 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		plan = logical.InjectRowFilter(plan, rf.table, rf.filter)
 	}
 	return ctx, plan, nil
+}
+
+// EnforceOptimizedPlan re-applies the column policies the context carries to
+// any policed scan the OPTIMIZER minted. Call it immediately after
+// logical.Optimize, at every entry point that optimizes a plan.
+//
+// The decorrelation passes re-parse a subquery from its SQL text and build a
+// fresh Scan for it, after enforcement has run. Those scans read the stored
+// column: `WHERE a.ssn IN (SELECT ssn FROM t b)` compared the outer's mask
+// against the inner's stored value and answered 0 where both sides masked
+// answer every row. It is a no-op — one tree walk — when the context carries
+// no policy.
+func EnforceOptimizedPlan(ctx context.Context, cat *catalog.Catalog, plan *logical.Node) (*logical.Node, error) {
+	pol := logical.ColumnPoliciesFromContext(ctx)
+	if len(pol) == 0 {
+		return plan, nil
+	}
+	out, unprotected := pol.ApplyToNewScans(plan, func(table string) []string {
+		if cat == nil {
+			return nil
+		}
+		meta, err := cat.GetTable(ctx, table)
+		if err != nil || meta == nil {
+			return nil
+		}
+		cols := make([]string, len(meta.Schema.Columns))
+		for i, c := range meta.Schema.Columns {
+			cols[i] = c.Name
+		}
+		return cols
+	})
+	if unprotected > 0 {
+		return nil, logical.ErrColumnPolicyUnenforceable
+	}
+	return out, nil
 }
 
 // ValidateStatementColumns is the plan-time name binding every query entry
@@ -139,6 +175,25 @@ func ValidateStatementColumns(ctx context.Context, provider *Provider, cat *cata
 		}
 	}
 	return physical.ValidateColumnsUnderPolicy(ctx, cat, info, deniedFor)
+}
+
+// auditColumnDecision records what a column policy DECIDED, at the moment it
+// decides, from the ONE enforcement path — so every door records it and a
+// query that returns no rows records it too.
+func auditColumnDecision(provider *Provider, identity *Identity, table string, cp []logical.ColumnPolicy) {
+	audit := provider.Audit()
+	if audit == nil || identity == nil {
+		return
+	}
+	var masked, denied []string
+	for _, p := range cp {
+		if p.Denied {
+			denied = append(denied, p.Column)
+		} else {
+			masked = append(masked, p.Column)
+		}
+	}
+	audit.LogColumnPolicy(identity, table, masked, denied)
 }
 
 // policyResolver evaluates one identity's table decisions on demand and

@@ -93,6 +93,62 @@ func SubstituteMaskedColumns(expr plansql.Node, relation string, policies []Colu
 	return substituteColRefs(expr, projRefs{outs: outs, names: names})
 }
 
+// ApplyToNewScans injects the security projection over any policed scan that
+// is NOT already under one.
+//
+// The optimizer MINTS SCANS. `decorrelateInSubqueries`, `decorrelateExists`
+// and `decorrelateScalarSubqueries` re-parse a subquery from its SQL text and
+// build a fresh Scan for its FROM item, and those scans are created AFTER
+// enforcement has run — so before this pass a decorrelated
+// `WHERE a.ssn IN (SELECT ssn FROM t b)` compared the outer's MASK against the
+// inner's STORED column and answered 0 where both sides masked answer every
+// row. No value escaped (a semi-join emits only outer columns), but the answer
+// was wrong, and the same seam is the one a future rewrite could make leak.
+//
+// A scan already beneath a SecurityBarrier is skipped, so the pass is safe to
+// run after every Optimize.
+func (tp TablePolicies) ApplyToNewScans(plan *Node, columnsOf func(table string) []string) (*Node, int) {
+	if len(tp) == 0 || plan == nil {
+		return plan, 0
+	}
+	unprotected := 0
+	var walk func(n *Node, covered bool) *Node
+	walk = func(n *Node, covered bool) *Node {
+		if n == nil {
+			return nil
+		}
+		childCovered := covered || (n.Type == NodeProject && n.SecurityBarrier)
+		for i, c := range n.Children {
+			n.Children[i] = walk(c, childCovered)
+		}
+		if covered || n.Type != NodeScan || n.TableName == "" || n.IsTableFunc {
+			return n
+		}
+		policies := tp.For(n.TableName)
+		if len(policies) == 0 {
+			return n
+		}
+		// AFTER the optimizer, the authority is what THIS SCAN PRODUCES, not
+		// the table's full schema: column pruning has already narrowed it,
+		// and a projection that passed through a column the scan no longer
+		// reads fails to build ("column %q does not exist in the input
+		// schema"). Before the optimizer the opposite is true and the catalog
+		// is the authority — that is decision 1, and it is why the two passes
+		// choose differently rather than sharing one rule.
+		cols := n.RequiredColumns
+		if len(cols) == 0 {
+			cols = n.ScanColumns
+		}
+		if len(cols) == 0 && columnsOf != nil {
+			cols = columnsOf(n.TableName)
+		}
+		out, n2 := InjectColumnPolicies(n, n.TableName, policies, cols)
+		unprotected += n2
+		return out
+	}
+	return walk(plan, false), unprotected
+}
+
 // PlanCarriesPolicyEnforcement reports whether this plan carries anything a
 // policy put there: a security projection, or a row filter injected by
 // row-level security.
