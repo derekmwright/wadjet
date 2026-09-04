@@ -20,28 +20,41 @@ import (
 //
 // The order of those two conditions is the whole of #857. The loop this
 // replaces exited on `NumPending == 0 && NumAckPending == 0` and only THEN
-// read Delivered, and that predicate is equally true of a consumer that has
-// not seen anything yet — a fact TestAnIdleConsumerSatisfiesTheOldDrainTest
-// asserts directly, and exactly the state CI reported on run 33872290777
-// ("consumer delivered 0 < published 50", pending and ack-pending both zero,
-// 0.06 s in). On a 2-core runner the first poll can land in the window before
-// the consumer has accounted for the burst, so the test declared the drain
-// finished and then failed on its own premise.
+// read Delivered — and that predicate is not a drain test at all: it is true
+// of a consumer that has been handed NOTHING as readily as of one that has
+// finished, which TestAnIdleConsumerSatisfiesTheOldDrainTest shows directly.
+// CI run 33872290777 exited on it with delivered=0 and reported "consumer
+// delivered 0 < published 50".
 //
-// Engagement first inverts that: a consumer that has seen nothing keeps
-// waiting, and a burst that is genuinely never delivered still fails — at the
-// deadline, with the same numbers. No retry, no widened timeout; the
-// PREDICATE was wrong, not the budget.
+// WHY the counters read that way on that run is NOT established, and the
+// round-1 review is what established that it is not: the same triple comes out
+// of GENUINE loss (switch WADJET_TASKS to InterestPolicy and
+// TestTaskIntakeDeliversTasksPublishedBeforeItBinds fails with
+// "delivered=0 of 50, pending=0 ack_pending=0"), so the numbers alone do not
+// separate "the consumer had not accounted for the burst yet" from "the burst
+// was gone". What carries the wrong-test reading is the PROGRAM-side argument
+// below, not the numbers. The failure path prints the STREAM's own state for
+// exactly that reason: whether the messages are still in the stream is what
+// discriminates the two, and a future occurrence now says which it is instead
+// of leaving it to be argued.
 //
-// What makes this a test defect rather than a production one is that the
-// intake CANNOT lose a task published before its iterator binds:
+// Engagement first inverts the predicate: a consumer that has seen nothing
+// keeps waiting, and a burst that is genuinely never delivered still fails —
+// at the deadline, naming how many of it arrived. No retry, no widened
+// timeout; the PREDICATE was wrong, not the budget, and that much is true
+// whichever way the CI run is read.
+//
+// The program-side argument, which holds under the configuration in the tree:
+// the intake cannot lose a task published before its iterator binds.
 // Worker.Start creates the durable consumer synchronously (worker.go's
-// CreateOrUpdateConsumer, whose error aborts Start) before it returns, the
-// consumer's DeliverPolicy is the zero value DeliverAllPolicy, and
-// WADJET_TASKS is a WorkQueuePolicy stream with MaxAge 1h — so such a task is
-// PENDING, not dropped. TestTaskIntakeDeliversTasksPublishedBeforeItBinds is
-// the fixture for that claim.
-func waitForIntakeToDrain(t *testing.T, ctx context.Context, consumer jetstream.Consumer, burst uint64, lane string) {
+// CreateOrUpdateConsumer, whose error aborts Start) before it returns; the
+// consumer's DeliverPolicy is the zero value DeliverAllPolicy, and on a
+// WorkQueuePolicy stream nats-server REFUSES anything else ("consumer must be
+// deliver all on workqueue stream"); and WADJET_TASKS retains an undelivered
+// message for MaxAge. So such a task is PENDING, not dropped.
+// TestTaskIntakeDeliversTasksPublishedBeforeItBinds is the fixture for that
+// claim, and it is the one that fails loudly if it ever stops holding.
+func waitForIntakeToDrain(t *testing.T, ctx context.Context, js jetstream.JetStream, consumer jetstream.Consumer, burst uint64, lane string) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -50,18 +63,49 @@ func waitForIntakeToDrain(t *testing.T, ctx context.Context, consumer jetstream.
 			t.Fatalf("%s consumer info: %v", lane, err)
 		}
 		if info.NumRedelivered != 0 {
-			t.Fatalf("%s intake redelivered %d messages — a first delivery was dropped unacked",
-				lane, info.NumRedelivered)
+			t.Fatalf("%s intake redelivered %d messages — a first delivery was dropped unacked%s",
+				lane, info.NumRedelivered, streamStateNote(ctx, js, consumer))
 		}
 		if info.Delivered.Consumer >= burst && info.NumPending == 0 && info.NumAckPending == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s intake did not drain: delivered=%d of %d, pending=%d ack_pending=%d redelivered=%d",
-				lane, info.Delivered.Consumer, burst, info.NumPending, info.NumAckPending, info.NumRedelivered)
+			t.Fatalf("%s intake did not drain: delivered=%d of %d, pending=%d ack_pending=%d "+
+				"redelivered=%d%s",
+				lane, info.Delivered.Consumer, burst, info.NumPending, info.NumAckPending,
+				info.NumRedelivered, streamStateNote(ctx, js, consumer))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// streamStateNote renders what the consumer's counters cannot say: whether the
+// messages are still IN the stream.
+//
+// It is the discriminator #857 lacked. A drain-shaped triple over a stream
+// that still holds the burst is a consumer that has not accounted for it; the
+// same triple over an EMPTY stream is a burst that is gone — real loss, which
+// is what an InterestPolicy stream produces. The counters are identical in
+// both cases, so a failure that prints only them leaves the reading to be
+// argued rather than measured.
+func streamStateNote(ctx context.Context, js jetstream.JetStream, consumer jetstream.Consumer) string {
+	info, err := consumer.Info(ctx)
+	if err != nil {
+		return fmt.Sprintf("\n  (consumer info unavailable: %v)", err)
+	}
+	st, err := js.Stream(ctx, info.Stream)
+	if err != nil {
+		return fmt.Sprintf("\n  (stream %s unavailable: %v)", info.Stream, err)
+	}
+	si, err := st.Info(ctx)
+	if err != nil {
+		return fmt.Sprintf("\n  (stream %s info unavailable: %v)", info.Stream, err)
+	}
+	return fmt.Sprintf("\n  stream %s holds %d messages (first=%d last=%d). "+
+		"Messages still IN the stream means the consumer had not accounted for them; an "+
+		"EMPTY stream with nothing delivered means they are gone — the counters alone do "+
+		"not tell the two apart (#857).",
+		info.Stream, si.State.Msgs, si.State.FirstSeq, si.State.LastSeq)
 }
 
 // TestTaskIntakeDeliversAllWithoutLoss is the regression test for the Q08
@@ -133,7 +177,7 @@ func TestTaskIntakeDeliversAllWithoutLoss(t *testing.T) {
 		t.Fatalf("lookup consumer: %v", err)
 	}
 
-	waitForIntakeToDrain(t, ctx, consumer, burst, "main")
+	waitForIntakeToDrain(t, ctx, js, consumer, burst, "main")
 }
 
 // TestTaskIntakeDeliversTasksPublishedBeforeItBinds is the fixture for the
@@ -208,7 +252,7 @@ func TestTaskIntakeDeliversTasksPublishedBeforeItBinds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup consumer: %v", err)
 	}
-	waitForIntakeToDrain(t, ctx, consumer, burst, "main")
+	waitForIntakeToDrain(t, ctx, js, consumer, burst, "main")
 }
 
 // TestAnIdleConsumerSatisfiesTheOldDrainTest is #857's evidence, and it needs
@@ -217,12 +261,22 @@ func TestTaskIntakeDeliversTasksPublishedBeforeItBinds(t *testing.T) {
 // of a consumer that has never been handed anything.
 //
 // So that predicate never meant "the intake drained"; it meant "the intake
-// holds nothing right now", which is also the state before it starts. CI hit
-// the second reading and the test reported the first one's failure
-// ("delivered 0 < published 50"). Locally it never fires — 100 runs with
-// -race and 100 pinned to a single contended core all passed — because the
-// window is a scheduling one, which is why the fix is the predicate rather
-// than a reproduction.
+// holds nothing right now", which is also the state before it starts. That is
+// all this fixture claims, and it is enough to condemn the predicate.
+//
+// It does NOT establish what happened on CI run 33872290777, and the round-1
+// review is what made that plain: an InterestPolicy stream — genuine loss —
+// produces the same three numbers. The state here differs from real loss in
+// one respect the counters do not carry, so the fixture asserts it: the STREAM
+// IS EMPTY. A drain-shaped triple over a stream that still HOLDS the burst is
+// a consumer that has not accounted for it; over an empty stream it is a burst
+// that is gone. waitForIntakeToDrain prints that number on every failure now,
+// so the next occurrence reports which one it is.
+//
+// Locally the flake never fires — 100 runs with -race and 100 pinned to a
+// single contended core all passed, plus 350 first-Info samples across two
+// probe designs — so the fix is the predicate, which is wrong either way,
+// rather than a reproduction of a mechanism that was not reproduced.
 func TestAnIdleConsumerSatisfiesTheOldDrainTest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -271,10 +325,28 @@ func TestAnIdleConsumerSatisfiesTheOldDrainTest(t *testing.T) {
 	if info.Delivered.Consumer != 0 {
 		t.Fatalf("an idle consumer reports Delivered.Consumer = %d", info.Delivered.Consumer)
 	}
+	// The one thing that separates this state from REAL loss, which the
+	// consumer's own counters do not carry: the stream is empty because
+	// nothing was ever published, not because something took the messages
+	// away. Asserting it here is what stops this fixture from being read as
+	// evidence about the CI run, whose stream state nobody recorded.
+	st, err := js.Stream(ctx, distributed.StreamTasks)
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	si, err := st.Info(ctx)
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	if si.State.Msgs != 0 {
+		t.Fatalf("the stream holds %d messages; this fixture publishes none, and the whole "+
+			"point of it is the state BEFORE anything is published", si.State.Msgs)
+	}
 	// Which is to say: the old loop would have exited HERE, on a consumer
 	// that had been handed nothing, and reported "consumer delivered 0 <
-	// published 50" — the CI failure, verbatim. waitForIntakeToDrain waits
-	// for delivery FIRST, so this state keeps it waiting.
+	// published 50". waitForIntakeToDrain waits for delivery FIRST, so this
+	// state keeps it waiting — and when it does give up, it prints the stream
+	// count that says which of the two states it gave up in.
 }
 
 // TestPriorityLaneDrains proves the latency-critical lane is live end to
@@ -341,5 +413,5 @@ func TestPriorityLaneDrains(t *testing.T) {
 
 	// Same wait, same reason: this loop carried the identical predicate and
 	// so the identical false exit (#857).
-	waitForIntakeToDrain(t, ctx, consumer, burst, "pri-leaf")
+	waitForIntakeToDrain(t, ctx, js, consumer, burst, "pri-leaf")
 }
