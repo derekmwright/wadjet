@@ -320,7 +320,7 @@ func failEval(err error) {
 // scalar subquery is, and is the single place in the engine that decides what
 // "one" means.
 //
-// PostgreSQL's rule, and now this engine's (ADR-0021 5):
+// PostgreSQL's rule, and now this engine's (ADR-0021 §5):
 //
 //	NO rows      the value is SQL NULL. An absent row is not an error.
 //	ONE row      that row's value.
@@ -366,9 +366,9 @@ type ScalarSubqueryRowsError struct {
 }
 
 // Error is PostgreSQL's own sentence, with what this site knows appended.
-// Rows == 0 means the counter stopped as soon as it passed one — the DAG's
-// producer reader does that, because how many more there are does not change
-// the answer and reading on to find out costs a fetch per file.
+// Rows == 0 is for a caller that knows only "more than one" — it stopped
+// counting, or never had the whole result — and the sentence stands on its own
+// there, which is the part a client reads.
 func (e *ScalarSubqueryRowsError) Error() string {
 	const pg = "more than one row returned by a subquery used as an expression"
 	switch {

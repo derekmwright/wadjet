@@ -1708,7 +1708,7 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		// ROW BY CONSTRUCTION. Anything else has to be executed HERE, because
 		// this is the only place in the distributed path that sees the
 		// subquery's whole result and can therefore apply the one-row rule
-		// (ADR-0021 5): the coordinator's extractor reads the producer's
+		// (ADR-0021 §5): the coordinator's extractor reads the producer's
 		// OUTPUT, and a producer's rows are neither one-per-row nor
 		// one-file-per-task — a single-row producer can surface in more than
 		// one file, so a count taken there is unsound in both directions.
@@ -1737,7 +1737,7 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		// producer stage; restricting the deferral to the provably-one-row
 		// shapes brought this path back.
 		//
-		// A SCALAR subquery is at most ONE row (ADR-0021 5). Substituting
+		// A SCALAR subquery is at most ONE row (ADR-0021 §5). Substituting
 		// `rows[0]` of a multi-row result is a wrong answer wearing a
 		// plausible one, and which row it picks is whichever the producer
 		// emitted first — so the same query answers differently on different

@@ -1677,7 +1677,7 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 
 // ---------------------------------------------------------------------------
 // A SCALAR SUBQUERY IS AT MOST ONE ROW, and the second row is 21000 — never
-// the first row (ADR-0021 5).
+// the first row (ADR-0021 §5).
 //
 // Every evaluator in the engine took `rows[0]` and said nothing: the two
 // expression evaluators, the planner's plan-time substitution, and the

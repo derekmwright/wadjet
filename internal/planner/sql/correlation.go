@@ -184,7 +184,7 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 // `DELETE FROM pr AS a WHERE pr.id = 1` is 42P01 for the same reason one level
 // up. Registering BOTH spellings made an OUTER reference spelled by its table
 // name look like an INNER one whenever the subquery read that table under an
-// alias — the shape ADR-0021 1c pins as
+// alias — the shape ADR-0021 §1c pins as
 // `boundary_unaliased_base_table_correlation_stays_silent`, where
 // `FROM typemx WHERE EXISTS (SELECT 1 FROM typemx sub WHERE sub.g = typemx.g)`
 // answered 50 for PostgreSQL's 47 in silence because `typemx.g` was read as
