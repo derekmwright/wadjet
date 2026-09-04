@@ -98,7 +98,26 @@ func ensureJoinCarriesEvaluatedColumns(stages []Stage) {
 		// so `ensureJoinCarriesGatherOutputs` widened with the definition's
 		// columns), and since the published name IS the query's own alias
 		// there is no rename to carry it (ADR-0026 §2, #794 round 2).
-		ownRefs = append(ownRefs, groupKeyResolutionRefs(stages, idx, s)...)
+		// A group key the aggregate above is about to COMPUTE reads its
+		// CONTAINER when it is a ROW FIELD PATH, and that expansion cannot go
+		// through withRowContainers below: that helper declines when the
+		// dotted name is itself "produced", and the aggregate PUBLISHES its
+		// key under exactly that name — `GROUP BY c_row.b` makes `c_row.b`
+		// look produced by the very stage that has yet to evaluate it. The
+		// container was then narrowed out of the join's payload and the
+		// fragment evaluated the field against a stream with no container:
+		// ONE NULL group over the whole table where the join's other arm has
+		// no column of the field's name, and — where it has one — the arm's
+		// column, which #361's silent-write guard turned into a task failure
+		// once the DECLARATION started coming from the field (#769 round 1).
+		ownRefs = append(ownRefs, rowContainersOf(groupKeyResolutionRefs(stages, idx, s), computed)...)
+		// …and what an AGGREGATE ARGUMENT over this join reads. Same rule,
+		// same reason: `MIN(c_row.b)` is materialized by a pre-aggregate
+		// projection inside the fragment, so the CONTAINER has to survive the
+		// join's OutputFilter. Only the field paths are added — an ordinary
+		// argument names a column the payload already carries because the
+		// aggregate reads it.
+		ownRefs = append(ownRefs, rowContainerRefsOnly(aggregateInputRefs(stages, s), computed)...)
 		chainRefs := probeSideChainRefs(stages, idx, s)
 		// A ROW FIELD PATH names no column, so carrying `c_row.b` carries
 		// nothing: what the fragment reads is the CONTAINER, and the
@@ -608,6 +627,79 @@ func chainedFilterTexts(s *Stage) []string {
 // qualifier — the ROW column a field path actually reads. See ADR-0022 and
 // the scan sanitizer's own arm ("what the scan must read is the BASE
 // column"), which makes the same substitution one level down.
+// aggregateInputRefs lists the column references the AGGREGATE ARGUMENTS
+// computed over this join's output read — the specs on the stage itself and on
+// any stage that reads it, the same two places groupKeyResolutionRefs looks.
+func aggregateInputRefs(stages []Stage, s *Stage) []string {
+	var texts []string
+	add := func(c *Stage) {
+		specs := append(append([]AggSpec(nil), c.AggSpecs...), c.FusedAggSpecs...)
+		specs = append(specs, c.ChainedAggSpecs...)
+		for _, a := range specs {
+			read := a.InputExpr
+			if read == "" {
+				read = a.InputCol
+			}
+			if read != "" && read != "*" {
+				texts = append(texts, read)
+			}
+		}
+	}
+	add(s)
+	for i := range stages {
+		c := &stages[i]
+		if len(c.Dependencies) == 1 && c.Dependencies[0] == s.ID {
+			add(c)
+		}
+	}
+	if len(texts) == 0 {
+		return nil
+	}
+	return exprColumnRefs(texts)
+}
+
+// rowContainerRefsOnly is rowContainersOf keeping ONLY the containers it adds.
+// The references themselves are already in the payload wherever they name a
+// column; adding them back would widen a manifest with dotted names no file
+// carries, which is what ADR-0025 calls a phantom.
+func rowContainerRefsOnly(refs []string, avail map[string]string) []string {
+	expanded := rowContainersOf(refs, avail)
+	if len(expanded) == len(refs) {
+		return nil
+	}
+	return expanded[len(refs):]
+}
+
+// rowContainersOf returns the CONTAINERS of the field paths among refs, plus
+// refs themselves. It is withRowContainers without the "already produced"
+// escape: a group-key resolution is a spelling the fragment will EVALUATE, so
+// a stage publishing that same name is the computation's OUTPUT and says
+// nothing about what its INPUT must carry.
+func rowContainersOf(refs []string, avail map[string]string) []string {
+	if len(refs) == 0 || len(avail) == 0 {
+		return refs
+	}
+	out := refs
+	seen := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		seen[strings.ToLower(r)] = true
+	}
+	for _, r := range refs {
+		dot := strings.IndexByte(r, '.')
+		if dot <= 0 || dot == len(r)-1 {
+			continue
+		}
+		qual := strings.ToLower(r[:dot])
+		name, ok := avail[qual]
+		if !ok || seen[qual] {
+			continue
+		}
+		seen[qual] = true
+		out = append(append([]string(nil), out...), name)
+	}
+	return out
+}
+
 func withRowContainers(refs []string, avail map[string]string) []string {
 	if len(refs) == 0 || len(avail) == 0 {
 		return refs

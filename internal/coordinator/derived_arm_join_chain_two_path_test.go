@@ -655,6 +655,56 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			refuse: "could not identify column",
 		},
 		{
+			// The GROUP KEY spelling, and the seventh resolver.
+			//
+			// A field path used as a group key is MATERIALIZED by the fragment
+			// (ADR-0022 rule 2), so the CONTAINER has to survive the join's
+			// OutputFilter — and it did not: `ensureJoinCarriesEvaluatedColumns`
+			// declines to expand `c_row.b` into `c_row` when the dotted name
+			// looks "produced", and the aggregate PUBLISHES its key under
+			// exactly that name. The fragment then evaluated the field against
+			// a stream with no container: one NULL group where the other arm
+			// has no column of the field's name, and the ARM's column where it
+			// has one — which #361's silent-write guard turned into a task
+			// failure once the DECLARATION started coming from the field.
+			name: "join-arm-publishes-the-field-name/as-a-group-key",
+			sql: "SELECT c_row.b AS k, COUNT(*) AS n FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id GROUP BY c_row.b ORDER BY 1",
+			cols: []string{"k", "n"},
+			want: "7 rows: 11|1;44|1;55|1;66|1;77|1;88|1;|3;",
+		},
+		{
+			// The AGGREGATE-ARGUMENT spelling of the same rule, with a HAVING
+			// over it so the value is read twice.
+			name: "join-arm-publishes-the-field-name/as-an-aggregate-argument",
+			sql: "SELECT n.id AS i, MIN(c_row.b) AS m FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id GROUP BY n.id " +
+				"HAVING MIN(c_row.b) IS NOT NULL ORDER BY 1",
+			cols: []string{"i", "m"},
+			want: "6 rows: 1|11;4|44;5|55;6|66;7|77;8|88;",
+		},
+		{
+			// The same group key over an arm that has NO column of the field's
+			// name. Nothing can be bound by accident here, so a missing
+			// container shows as ONE NULL group rather than as another
+			// relation's values — the shape that says the container really is
+			// the thing the payload has to carry.
+			name: "join-arm-publishes-the-field-name/group-key-over-an-arm-without-the-name",
+			sql: "SELECT c_row.b AS k, COUNT(*) AS n FROM " + nested +
+				" x JOIN " + typematrix.Dim + " d ON x.id = d.k GROUP BY c_row.b ORDER BY 1",
+			cols: []string{"k", "n"},
+			want: "7 rows: 0|1;11|1;44|1;55|1;66|1;77|1;|2;",
+		},
+		{
+			// The CONTROL that bounds it: no join, right on every arm before
+			// and after.
+			name: "join-arm-publishes-the-field-name/ctl-group-key-with-no-join",
+			sql: "SELECT c_row.b AS k, COUNT(*) AS n FROM " + nested +
+				" WHERE id < 5 GROUP BY c_row.b ORDER BY 1",
+			cols: []string{"k", "n"},
+			want: "4 rows: 0|1;11|1;44|1;|2;",
+		},
+		{
 			// The CONTROL that bounds it: no join, correct on 376b2cac.
 			name: "no-join",
 			sql:  "SELECT id AS xid, c_row.b AS fb FROM " + nested + " WHERE id < 5 ORDER BY id",

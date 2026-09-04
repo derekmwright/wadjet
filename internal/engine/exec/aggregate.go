@@ -1547,6 +1547,25 @@ func columnIndexFallback(b *batch.RecordBatch, name string) int {
 	if idx := b.ResolveColumnIndex(name); idx >= 0 {
 		return idx
 	}
+	// A ROW FIELD PATH is not a column and this resolver cannot serve one:
+	// its callers want an INDEX, and a field has none — the container's index
+	// would hand them the whole ROW. ADR-0022 rule 2 says such a reference is
+	// MATERIALIZED by the planner, so reaching here with one means the plan
+	// did not, and -1 is the honest answer: the caller's own miss error names
+	// the column and the class, where stripping the qualifier bound the
+	// reference to whatever OTHER relation in the stream publishes a column of
+	// the FIELD's name.
+	//
+	// `GROUP BY c_row.b` beside a join arm publishing `b` is the shape: the
+	// key took that arm's DECIMAL while the DECLARATION said INT64, and #361's
+	// silent-write guard — a guard about something else entirely — was all
+	// that stood between it and a wrong number (#769 round 1). This is the
+	// SEVENTH resolver of the six the field-path reorder reached, and the one
+	// the group keys, the aggregate inputs, the sort keys and the join keys
+	// all come through.
+	if _, _, ok := b.RowFieldPath(name); ok {
+		return -1
+	}
 	bare := name
 	if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
 		bare = name[dotIdx+1:]
