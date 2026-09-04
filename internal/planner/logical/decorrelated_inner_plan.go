@@ -3,6 +3,7 @@ package logical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -51,6 +52,14 @@ import (
 //     join, because a qualified residual there names a column the join emits
 //     bare, which is a wrong answer and not an error.
 
+// decorrelatedInnerToggle is #852's kill switch. See the check in
+// decorrelatedInnerPlan for what turning it off restores.
+var decorrelatedInnerToggle = optswitch.Register("decorrelated-inner-plan",
+	"WADJET_DECORRELATED_INNER_PLAN",
+	"build a decorrelated subquery's inner from its own FROM clause, so a derived "+
+		"table, a CTE reference and a comma list lower into the join instead of "+
+		"staying a per-row subquery")
+
 // decorrelatedInnerPlan builds a decorrelated subquery's build side: its FROM
 // clause as a plan, with its inner-only WHERE conditions applied above it.
 //
@@ -64,6 +73,23 @@ import (
 func decorrelatedInnerPlan(info *plansql.SelectInfo, innerOnly []plansql.Node,
 	ctes []plansql.CTEDef, annotate func(*Node)) (*Node, bool) {
 	if info == nil || len(info.Tables) == 0 {
+		return nil, false
+	}
+	// The #287 kill switch. This pass CHANGES THE ROW SET when it is wrong,
+	// and it did so twice during its own development — 3 against 10 on a
+	// joined derived inner, 32 against 0 on a computed one, both silent and
+	// both on the DAG only — which is exactly the class the invariance oracle
+	// enumerates. Registering it runs every corpus query with the new build
+	// side disabled, for free.
+	//
+	// OFF declines the three relations this pass added and nothing else: a
+	// derived table, a CTE reference, and a comma list. A base-table inner —
+	// single or explicitly joined — lowers exactly as it did before #852, so
+	// the switch restores the PRE-#852 behaviour for every shape but the
+	// comma one, which used to build only its first relation and is a decline
+	// here rather than that wrong answer.
+	if !decorrelatedInnerToggle.On() &&
+		(fromHasDerivedOrCTE(info, ctes) || (len(info.Joins) == 0 && len(info.Tables) > 1)) {
 		return nil, false
 	}
 	if !innerRelationsAreBuildable(info, ctes) {
