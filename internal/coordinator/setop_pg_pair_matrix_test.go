@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // Every ORDERED PAIR of the type matrix, against PostgreSQL's verdict (#648,
@@ -53,6 +54,9 @@ func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 	infra := tmdInfra(t, ctx)
 	tmdWriteTables(t, ctx, infra, nil)
 	coord := tmdCoordinator(t, ctx, infra)
+	infraB := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infraB, nil)
+	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
 	flat := make([]typematrix.Col, 0, 18)
 	for _, c := range typematrix.Columns() {
@@ -79,19 +83,36 @@ func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 					"SELECT %s AS v FROM typemx WHERE id < 3 UNION ALL SELECT %s FROM typemx WHERE id < 3",
 					a.Name, b.Name)
 				class := setOpPairClass(a.Type, b.Type, want)
+				// The DECLARED type of the union's column, per arm. A value
+				// comparison cannot see it, and a wrong one is a wrong OID on
+				// the wire for a right value — the divergence the oracle's
+				// wire arm exists for. Collected here and compared across the
+				// arms below.
+				decls := map[string]string{}
 				for _, arm := range []struct {
 					name string
-					run  func(string) (*oracle.Result, error)
+					run  func(string) (string, *oracle.Result, error)
 					co   *Coordinator
 				}{
-					{"single", func(q string) (*oracle.Result, error) { return tmdRunSingle(ctx, single, q) }, nil},
-					{"dag", func(q string) (*oracle.Result, error) { return tmdRunDAG(ctx, coord, q) }, coord},
+					{"single", func(q string) (string, *oracle.Result, error) {
+						return tmdRunSingleDecl(ctx, single, q)
+					}, nil},
+					{"dag", func(q string) (string, *oracle.Result, error) {
+						return tmdRunDAGDecl(ctx, coord, q)
+					}, coord},
+					{"dag-shuffled", func(q string) (string, *oracle.Result, error) {
+						return tmdRunDAGDecl(ctx, coordB, q)
+					}, coordB},
 				} {
+					rows := func(q string) (*oracle.Result, error) {
+						_, r, err := arm.run(q)
+						return r, err
+					}
 					var before a2Routes
 					if arm.co != nil {
 						before = a2ReadRoutes(arm.co)
 					}
-					res, err := arm.run(sql)
+					decl, res, err := arm.run(sql)
 					if arm.co != nil {
 						a2CheckRoutes(t, arm.name, before, a2ReadRoutes(arm.co), a2Routes{}, sql)
 					}
@@ -102,6 +123,7 @@ func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 								arm.name, want, err, sql)
 							continue
 						}
+						decls[arm.name] = decl
 						// The VALUES, not the row count. A count cannot see a
 						// column materialised in the FIRST arm's carrier —
 						// `c_port ∪ 4000000000` came back as -294967296 with
@@ -113,8 +135,8 @@ func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 						// FLOAT the move is LOSSY by design (real ∪ bigint is
 						// real in PostgreSQL too), so the reference is put
 						// through the same width before comparing.
-						refA := setOpPairRefRows(t, arm.run, a.Name, want)
-						refB := setOpPairRefRows(t, arm.run, b.Name, want)
+						refA := setOpPairRefRows(t, rows, a.Name, want)
+						refB := setOpPairRefRows(t, rows, b.Name, want)
 						ref := append(append([]string(nil), refA...), refB...)
 						sort.Strings(ref)
 						got := setOpCanonRows(res)
@@ -161,6 +183,17 @@ func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 						}
 					}
 				}
+				// One query, one declared type. Two doors that agree on every
+				// VALUE and disagree on the type publish the same rows under
+				// two different OIDs, which a row comparison cannot see: it is
+				// how the leftmost-unknown-literal split survived a review
+				// round with every cell of this matrix green.
+				for _, arm := range []string{"dag", "dag-shuffled"} {
+					if got, ok := decls[arm]; ok && got != decls["single"] {
+						t.Errorf("the %s arm DECLARES %s where the single-process path declares %s "+
+							"(PostgreSQL: %s)\n  SQL: %s", arm, got, decls["single"], want, sql)
+					}
+				}
 			})
 		}
 	}
@@ -198,6 +231,60 @@ var setOpPairNoCarrierPairs = map[[2]parquet.TypeID]bool{
 	{parquet.TypeDecimal, parquet.TypeProtocol}: true,
 	{parquet.TypeDuration, parquet.TypeDecimal}: true,
 	{parquet.TypeDecimal, parquet.TypeDuration}: true,
+}
+
+// tmdRunSingleDecl / tmdRunDAGDecl are tmdRunSingle / tmdRunDAG with the
+// result column's DECLARED type beside the rows — `v:DECIMAL(9,2)`, the same
+// spelling on both doors, so the two are comparable as strings.
+//
+// A matrix that compares only VALUES cannot see a right value under a wrong
+// OID, and that is not hypothetical here: the leftmost-unknown-literal split
+// (round-3 blocker) had the single-process path publishing OID 25 for a column
+// the DAG published as numeric, with every one of these 324 cells green.
+func tmdRunSingleDecl(ctx context.Context, db *wadjet.DB, sql string) (
+	decl string, res *oracle.Result, err error,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			decl, res, err = "", nil, fmt.Errorf("PANIC: %v", r)
+		}
+	}()
+	out, qerr := db.Query(ctx, sql)
+	if qerr != nil {
+		return "", nil, qerr
+	}
+	if len(out.ColumnMetas) > 0 {
+		m := out.ColumnMetas[0]
+		decl = sudDecl(m.Name, m.TypeID, m.Precision, m.Scale)
+	}
+	return decl, &oracle.Result{Columns: out.Columns, Rows: out.Rows}, nil
+}
+
+func tmdRunDAGDecl(ctx context.Context, coord *Coordinator, sql string) (
+	decl string, res *oracle.Result, err error,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			decl, res, err = "", nil, fmt.Errorf("PANIC: %v", r)
+		}
+	}()
+	out, qerr := coord.ExecuteSQL(ctx, sql)
+	if qerr != nil {
+		return "", nil, qerr
+	}
+	if out.Error != "" {
+		return "", nil, fmt.Errorf("%s", out.Error)
+	}
+	// Before Rows(): materializing the result detaches the batches the schema
+	// would otherwise be read from.
+	if schema := out.OutputSchema(); len(schema) > 0 {
+		decl = sudDecl(schema[0].Name, schema[0].Type, schema[0].Precision, schema[0].Scale)
+	}
+	rows, rerr := out.Rows()
+	if rerr != nil {
+		return "", nil, fmt.Errorf("materializing distributed rows: %w", rerr)
+	}
+	return decl, &oracle.Result{Columns: out.Columns, Rows: rows}, nil
 }
 
 // setOpPairRefRows is one arm's own values, alone, rendered at the COMMON type
