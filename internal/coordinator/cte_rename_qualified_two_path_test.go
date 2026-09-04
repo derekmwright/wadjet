@@ -275,26 +275,37 @@ func TestRowFieldPathThroughRenamedColumnTwoPath(t *testing.T) {
 	})
 
 	// The SAME spelling where the projection ALSO outputs a column named `b`.
-	// ADR-0022 §1 fixes the order — the bare column after dropping the
-	// qualifier is tried BEFORE the qualifier is read as a ROW container — so
-	// `rw.b` is `id` here, not the field. That is what expr.ResolveColumnRef
-	// does at run time, which is why the single-process engine answers it
-	// that way; a resolver that skipped step 2 made the DAG answer the FIELD
-	// and moved the derived-table spelling on BOTH paths, so one query
-	// answered two ways by spelling.
 	//
-	// PostgreSQL 17 has no answer to follow: it rejects the unparenthesised
-	// form outright (`missing FROM-clause entry for table "rw"`, 42P01) for
-	// every spelling here, and reads `(rw).b` as the field. Answering at all
-	// is the documented superset; the ADR fixes WHICH answer.
-	t.Run("ColumnWinsOverFieldWhenBothExist", func(t *testing.T) {
-		var want int64
+	// The FIELD wins, and it is PostgreSQL's only anchored reading. PG rejects
+	// the unparenthesised form outright — `missing FROM-clause entry for table
+	// "rw"`, 42P01, for every spelling here — and reads `(rw).b` as the FIELD;
+	// measured over the same shape:
+	//
+	//	WITH c AS (SELECT c_row AS rw, id AS b FROM n)
+	//	SELECT COUNT(*) FROM c WHERE (rw).b > 100   -- the field
+	//	SELECT COUNT(*) FROM c WHERE b > 100        -- the column, a different number
+	//
+	// Answering the bare spelling at all is the superset ADR-0012 records;
+	// WHICH answer is ADR-0022 §1's order, and this subtest asserted the
+	// opposite of it until 2026-09-04. The old order — strip the qualifier
+	// and take the bare column BEFORE reading the qualifier as a container —
+	// is what made `c_row.b` beside a join arm publishing `b` answer THAT
+	// ARM's column, on every arm and in silence (#769). The strip exists to
+	// resolve `t.col` where the stream carries only `col`; it is a fallback
+	// for a RELATION qualifier and never a reading of a container.
+	//
+	// So the order is: the whole dotted spelling as a column of its own, then
+	// the qualifier as a ROW column THAT DECLARES the field, and only then the
+	// strip.
+	t.Run("FieldWinsOverColumnWhenBothExist", func(t *testing.T) {
+		var wantColumn int64
 		for _, r := range typematrix.NestedData(typematrix.Rows) {
 			if r["id"].(int64) > 100 {
-				want++
+				wantColumn++
 			}
 		}
-		if want == int64(len(wantIDs)) {
+		want := int64(len(wantIDs)) // the FIELD's rows, computed by the caller
+		if want == wantColumn {
 			t.Fatalf("the column and the field select the same rows (%d), so this gate "+
 				"cannot tell them apart", want)
 		}
@@ -304,5 +315,20 @@ func TestRowFieldPathThroughRenamedColumnTwoPath(t *testing.T) {
 		} {
 			ctrCheckCount(t, ctx, single, coord, fmt.Sprintf(tmpl, typematrix.Nested), want)
 		}
+	})
+	// The CONTROL that keeps the reorder off an ordinary qualified reference:
+	// `rw` here is NOT a container, so the strip is the only reading and the
+	// column answers.
+	t.Run("ctl/a-qualifier-that-is-not-a-container-still-strips", func(t *testing.T) {
+		var want int64
+		for _, r := range typematrix.NestedData(typematrix.Rows) {
+			if r["id"].(int64) > 100 {
+				want++
+			}
+		}
+		sql := fmt.Sprintf(
+			`WITH c AS (SELECT id AS rw, id AS b FROM %s) SELECT COUNT(*) AS n FROM c WHERE rw.b > 100`,
+			typematrix.Nested)
+		ctrCheckCount(t, ctx, single, coord, sql, want)
 	})
 }

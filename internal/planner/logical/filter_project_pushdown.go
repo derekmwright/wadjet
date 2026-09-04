@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // #384: pushdownPredicates' Filter-Project swap used to be unconditional. A
@@ -289,15 +290,72 @@ type projRefs struct {
 	// (#656 shape f, through a derived table).
 	overAgg  bool
 	groupBys map[string]bool
+	// rowFields maps a lower-cased column name BELOW this Project to the
+	// fields it declares, when it is a ROW. It is what tells a candidate ROW
+	// FIELD PATH from an ordinary qualified reference whose qualifier happens
+	// to name one of this Project's outputs (ADR-0022, #769).
+	rowFields map[string][]parquet.Column
 }
 
 func newProjRefs(n *Node) projRefs {
 	return projRefs{
-		outs:     projectSubstitutions(n.Projections),
-		names:    nodeScopeNames(n),
-		overAgg:  readsAnAggregate(n),
-		groupBys: aggregateGroupKeys(n),
+		outs:      projectSubstitutions(n.Projections),
+		names:     nodeScopeNames(n),
+		overAgg:   readsAnAggregate(n),
+		groupBys:  aggregateGroupKeys(n),
+		rowFields: subtreeRowFields(n),
 	}
+}
+
+// subtreeRowFields collects the declared ROW fields of every scan below n
+// (Node.ScanColFields, populated by physical.AnnotateScanColumns), keyed by
+// the column's lower-cased name. Empty when nothing below is annotated, which
+// is the conservative answer: no reference is then read as a field path here
+// and the resolution below keeps the pre-#769 order.
+func subtreeRowFields(n *Node) map[string][]parquet.Column {
+	var out map[string][]parquet.Column
+	var walk func(*Node)
+	walk = func(cur *Node) {
+		if cur == nil {
+			return
+		}
+		for name, fields := range cur.ScanColFields {
+			if len(fields) == 0 {
+				continue
+			}
+			if out == nil {
+				out = make(map[string][]parquet.Column, len(cur.ScanColFields))
+			}
+			out[strings.ToLower(name)] = fields
+		}
+		for _, c := range cur.Children {
+			walk(c)
+		}
+	}
+	walk(n)
+	return out
+}
+
+// declaresField reports whether the container output's DEFINITION names a ROW
+// column below this Project that declares `field`. It is the guard that keeps
+// the field-path arm off an ordinary qualified reference: `rw.b` over
+// `SELECT id AS rw, id AS b` names no container, so the bare-column arm
+// answers for it exactly as before.
+func (p projRefs) declaresField(o projOutput, container, field string) bool {
+	name := strings.ToLower(container)
+	if o.def != nil {
+		ref := simpleColRef(o.def)
+		if ref == nil || ref.Table != "" {
+			return false
+		}
+		name = strings.ToLower(ref.Column)
+	}
+	for _, f := range p.rowFields[name] {
+		if strings.EqualFold(f.Name, field) {
+			return true
+		}
+	}
+	return false
 }
 
 // readsAnAggregate reports whether this Project's input is an Aggregate's
@@ -402,18 +460,23 @@ func (p projRefs) touches(bare string) bool {
 //
 // The order is ADR-0022 §1's, which is expr.ResolveColumnRef's, which is what
 // actually resolves the name at RUN time: the spelling as written, then the
-// BARE column after dropping the qualifier, and only then the qualifier read
-// as a ROW column with the name as its field. Resolving in a different order
-// describes a different column — `rw.b` over
-// `SELECT c_row AS rw, id AS b` is `id`, because `b` is a column of the
-// projection and the run-time lookup finds it before it ever considers a
-// field. Skipping step 2 for a qualified reference made the DAG answer the
-// FIELD where the single-process engine answered the COLUMN, and moved the
-// derived-table spelling on BOTH paths, so one query answered two ways by
-// spelling. (PostgreSQL 17 rejects the unparenthesised form outright —
-// `missing FROM-clause entry for table "rw"`, 42P01 — so it has no answer to
-// follow here; `(rw).b` is its field spelling. Answering at all is the
-// documented superset, and the ADR fixes which answer.)
+// qualifier read as a ROW column THAT DECLARES the name as its field, and only
+// then the BARE column after dropping the qualifier. Resolving in a different
+// order describes a different column.
+//
+// The two middle steps were the other way round until 2026-09-04, and the
+// strip is a fallback for a RELATION qualifier — it exists so `t.col`
+// resolves where the stream carries only `col` — so taking it first made
+// `rw.b` over `SELECT c_row AS rw, id AS b` mean `id`. PostgreSQL 17 rejects
+// the unparenthesised form outright (`missing FROM-clause entry for table
+// "rw"`, 42P01) and reads `(rw).b` as the FIELD, which is its only anchored
+// answer and now this engine's; answering the bare spelling at all is the
+// superset ADR-0012 records (#769).
+//
+// declaresField is what keeps the field arm off an ordinary qualified
+// reference: a qualifier naming an output that is not a ROW container, or a
+// container that does not declare the field, falls through to the strip
+// exactly as before.
 func (p projRefs) resolve(ref *plansql.ColRef) (plansql.Node, bool) {
 	if ref.Table == "" {
 		o, ok := p.outs[strings.ToLower(ref.Column)]
@@ -434,6 +497,9 @@ func (p projRefs) resolve(ref *plansql.ColRef) (plansql.Node, bool) {
 	container, isContainer := p.outs[strings.ToLower(ref.Table)]
 	if !p.inScope(ref.Table) && !isContainer {
 		return nil, true
+	}
+	if isContainer && p.declaresField(container, ref.Table, ref.Column) {
+		return p.apply(container, ref.Table, ref.Column)
 	}
 	if o, ok := p.outs[strings.ToLower(ref.Column)]; ok {
 		return p.apply(o, ref.Column, "")

@@ -10961,10 +10961,22 @@ func (d colDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 			return c, true
 		}
 	}
+	// A ROW FIELD PATH, asked BEFORE the qualifier is stripped, because the
+	// runtime asks it there now (ADR-0022 rule 1: a declaration resolved in a
+	// different order than the value describes a different column).
+	//
+	// `SELECT n.id, c_row.b FROM typemx_nested n JOIN decpair d ON n.id = d.id`
+	// took the join arm's DECIMAL(18,4) `b` as the declaration for an INT64
+	// field, so even after the value came back right the column described
+	// itself — and declared itself on the WIRE — as somebody else's type
+	// (#769).
+	if c, ok := d.field(n); ok {
+		return c, true
+	}
 	if c, ok := at(strings.ToLower(n.Column)); ok {
 		return c, true
 	}
-	return d.field(n)
+	return parquet.Column{}, false
 }
 
 // field resolves n as a ROW field path and returns the field's full
@@ -10996,12 +11008,14 @@ func (d colDecls) isFieldPath(n *plansql.ColRef) bool {
 	if n == nil || n.Table == "" {
 		return false
 	}
+	// A column of the whole dotted spelling — a flat Zeek `id.orig_h` — is
+	// that column and not a path into anything.
 	if _, ok := d.types[strings.ToLower(n.Table+"."+n.Column)]; ok {
 		return false
 	}
-	if _, ok := d.types[strings.ToLower(n.Column)]; ok {
-		return false
-	}
+	// The BARE decline is gone, in the same order colDecl now uses: a join arm
+	// publishing a column of the FIELD's name does not stop `c_row.b` being a
+	// field path, and asking the bare name first is what made it stop (#769).
 	_, ok := d.field(n)
 	return ok
 }

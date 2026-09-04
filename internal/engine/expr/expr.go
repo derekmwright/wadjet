@@ -124,9 +124,10 @@ type ColRef struct {
 // column index (-1 when the name names nothing) and, for a ROW field path,
 // the field name within it.
 //
-// Three spellings resolve, in order: the name exactly as written, the bare
-// column after dropping a table qualifier, and a `row.field` path whose first
-// part is a ROW column of the batch.
+// Four spellings resolve, in order: the name exactly as written; the bare
+// reference the stream spells qualified; a `row.field` path whose qualifier
+// names a ROW column of the batch THAT DECLARES THE FIELD; and only then the
+// bare column left after dropping a table qualifier.
 func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField string) {
 	// ResolveColumnIndex, not ColumnIndex: the reference arrives FOLDED from
 	// the lexer (#731) and the batch may carry the catalog's own CamelCase
@@ -160,17 +161,35 @@ func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField s
 		return uniqueQualifiedColumn(b, name), ""
 	}
 	parts := strings.SplitN(name, ".", 2)
+	// A `row.field` path, asked BEFORE the qualifier is stripped (ADR-0022:
+	// a ROW field path is not a column reference).
+	//
+	// Stripping first answers with whatever OTHER relation in the stream
+	// publishes a column of the FIELD's name, which is a different column's
+	// values under the reference the query wrote:
+	//
+	//	SELECT n.id, c_row.b FROM typemx_nested n JOIN decpair d ON n.id = d.id
+	//	-- the field's values 11, NULL, NULL, 44, … ; wadjet answered
+	//	--   decpair.b's DECIMALs on all four arms, in silence (#769)
+	//
+	// The container is looked up with the same qualified fallback the scalar
+	// branches use, because a JOIN qualifies a colliding column and `c_row.b`
+	// then has to find `x.c_row`.
+	//
+	// The container must DECLARE the field. That is what keeps the reorder
+	// off an ordinary qualified reference whose qualifier happens to name a
+	// ROW column of the stream: a relation aliased like a container is still
+	// read as a relation, exactly as before, and a field path naming no field
+	// keeps the answer it had (#604 is untouched).
+	if pi, _, ok := b.RowFieldPath(name); ok {
+		return pi, parts[1]
+	}
 	// Try unqualified (strip table prefix)
 	if idx = b.ResolveColumnIndex(parts[1]); idx >= 0 {
 		return idx, ""
 	}
-	// Try as struct field access: parts[0] is a ROW column, parts[1] is field
-	// name. The container is looked up with the same qualified fallback the
-	// scalar branches use, because a JOIN qualifies a colliding column and
-	// `c_row.b` then has to find `x.c_row` — asking only for the exact
-	// spelling left the path unresolved and the branch below bound the FIELD
-	// name to whatever scalar column happened to end in `.b`, which is
-	// ADR-0022's violation exactly.
+	// A ROW container that does not declare the field: the path still names
+	// the container, and #604's NULL is what answers for it — unchanged.
 	parentIdx := b.ResolveColumnIndex(parts[0])
 	if parentIdx < 0 {
 		parentIdx = uniqueQualifiedColumn(b, parts[0])

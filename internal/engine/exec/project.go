@@ -55,9 +55,12 @@ type lazyFieldIdx struct {
 
 // get resolves name against b on first use. The order mirrors
 // expr.ColRef.resolveSlow exactly — the whole dotted spelling names a column
-// of its own first (a flat Zeek "id.orig_h"), then the bare name, and only
-// then is the qualifier read as a ROW column — so the two evaluators can
-// never disagree about WHICH value a name denotes.
+// of its own first (a flat Zeek "id.orig_h"), then a ROW FIELD PATH the
+// container declares (batch.RowFieldPath, the one place that question is
+// asked), and only then the bare name left after dropping a qualifier — so
+// the two evaluators can never disagree about WHICH value a name denotes.
+// Asking for the bare name FIRST is what made this evaluator answer a JOIN
+// arm's own `b` for `c_row.b` (#769).
 func (c *lazyFieldIdx) get(b *batch.RecordBatch, name string) (int, int) {
 	if c.resolved.Load() {
 		return c.idx, c.field
@@ -70,18 +73,10 @@ func (c *lazyFieldIdx) get(b *batch.RecordBatch, name string) (int, int) {
 	c.field = -1
 	c.idx = b.ResolveColumnIndex(name)
 	if c.idx < 0 {
-		if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
+		if pi, fj, ok := b.RowFieldPath(name); ok {
+			c.idx, c.field = pi, fj
+		} else if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
 			c.idx = b.ResolveColumnIndex(name[dot+1:])
-			if c.idx < 0 {
-				if pi := b.ResolveColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
-					for j, fn := range b.Columns[pi].FieldNames {
-						if strings.EqualFold(fn, name[dot+1:]) && j < len(b.Columns[pi].Children) {
-							c.idx, c.field = pi, j
-							break
-						}
-					}
-				}
-			}
 		}
 	}
 	c.resolved.Store(true)
@@ -286,6 +281,29 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if srcIdx < 0 && proj.DirectCopy != "" {
 				srcIdx, _ = resolvePlainColumn(in, proj.DirectCopy)
 			}
+			// A ROW FIELD PATH resolves to no column INDEX at all — the
+			// value comes out of a container, not out of a column — and the
+			// planner's placeholder for it is STRING. An INT64 field came
+			// back as the string "9", a CIDR field sorted by its stored
+			// text, and pgwire declared OID 25 for both (#568). The parent
+			// ROW carries the field's whole declaration; take it wholesale,
+			// so a DECIMAL field keeps its (p,s) and a nested field its own
+			// Fields.
+			//
+			// Asked BEFORE the name-based resolutions below, because
+			// columnIndexFallback STRIPS the qualifier: beside a join arm
+			// publishing a column of the FIELD's name, `c_row.b` resolved to
+			// that arm's `b` and an INT64 field described itself — and
+			// declared itself on the wire — as the arm's DECIMAL(18,4)
+			// (#769). batch.RowFieldPath is where the question is answered,
+			// for every resolver in the engine.
+			if srcIdx < 0 {
+				if fc, ok := fieldPathColumn(in, projSourceName(proj)); ok {
+					fc.Name, fc.Nullable = proj.Name, true
+					schema[i] = fc
+					continue
+				}
+			}
 			if srcIdx < 0 && proj.SourceCol != "" {
 				// Resolve the source the way the value paths do, so a
 				// renamed reference that only matches after qualifier
@@ -316,22 +334,6 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				Name:     proj.Name,
 				Type:     typ,
 				Nullable: true,
-			}
-			// A ROW FIELD PATH resolves to no column INDEX at all — the
-			// value comes out of a container, not out of a column — so
-			// every resolution above leaves the planner's placeholder
-			// standing, and that placeholder is STRING. An INT64 field
-			// then came back as the string "9", a CIDR field sorted by
-			// its stored text, and pgwire declared OID 25 for both
-			// (#568). The parent ROW carries the field's whole
-			// declaration; take it wholesale, so a DECIMAL field keeps
-			// its (p,s) and a nested field its own Fields.
-			if srcIdx < 0 {
-				if fc, ok := fieldPathColumn(in, projSourceName(proj)); ok {
-					fc.Name, fc.Nullable = proj.Name, true
-					schema[i] = fc
-					continue
-				}
 			}
 			// Preserve type metadata for parameterized types — including
 			// nested structure: without Fields/ElementType the pooled
@@ -588,31 +590,17 @@ func projSourceName(proj ProjectColumn) string {
 // field's (p,s), a nested field's own Fields — and the child VECTOR is the
 // fallback for a batch whose schema lost that metadata.
 func fieldPathColumn(b *batch.RecordBatch, name string) (parquet.Column, bool) {
-	dot := strings.IndexByte(name, '.')
-	if dot <= 0 || dot == len(name)-1 {
+	pi, fj, ok := b.RowFieldPath(name)
+	if !ok {
 		return parquet.Column{}, false
 	}
-	if b.ResolveColumnIndex(name) >= 0 || b.ResolveColumnIndex(name[dot+1:]) >= 0 {
-		return parquet.Column{}, false
-	}
-	pi := b.ResolveColumnIndex(name[:dot])
-	if pi < 0 || pi >= len(b.Columns) || b.Columns[pi].Type != batch.TypeRow {
-		return parquet.Column{}, false
-	}
-	field := name[dot+1:]
+	field := name[strings.IndexByte(name, '.')+1:]
 	if pi < len(b.Schema) {
 		if fc, ok := b.Schema[pi].Field(field); ok {
 			return fc, true
 		}
 	}
-	parent := b.Columns[pi]
-	for j, fn := range parent.FieldNames {
-		if !strings.EqualFold(fn, field) || j >= len(parent.Children) {
-			continue
-		}
-		return vectorColumn(field, parent.Children[j]), true
-	}
-	return parquet.Column{}, false
+	return vectorColumn(field, b.Columns[pi].Children[fj]), true
 }
 
 // vectorColumn reconstructs a declaration from a VECTOR, for the fallback

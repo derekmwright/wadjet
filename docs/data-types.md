@@ -311,6 +311,23 @@ SELECT map_keys(headers) AS header_names,
 FROM http_logs
 ```
 
+A `container.field` reference is a FIELD PATH, not a table-qualified column,
+and it is read that way wherever the container declares the field — even when
+some other relation in the query publishes a column of the field's own name:
+
+```sql
+-- `c_row` is a ROW column of nested and `d` publishes a scalar column `b`.
+-- `c_row.b` is the ROW's field, not d.b.
+SELECT n.id, c_row.b FROM nested n JOIN dims d ON n.id = d.id
+```
+
+Two relations in scope carrying a container of the same name make the
+reference ambiguous and it is refused rather than bound to one of them, and a
+field the container does not declare is refused with PostgreSQL's wording
+(`could not identify column "x" in record data type`). PostgreSQL itself
+requires the parenthesised spelling `(n.c_row).b` and reads the unparenthesised
+one as a missing FROM-clause entry; wadjet accepts both.
+
 **Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
 
 **Map functions:** `map_keys`, `map_values`, `map_entries`, `map_from_entries`

@@ -997,6 +997,28 @@ func floatConstError(typ batch.TypeID, value any, litText string) error {
 	return sqlerr.New("22003", "%s is out of range for type real", sqlerr.Quote(kernel.RealOverflowText(text)))
 }
 
+// rowFieldParent is the ROW container a dotted reference reads a field out of,
+// or -1 when the reference is not a field path here.
+//
+// It is asked BEFORE the qualifier is stripped. Stripping first binds the
+// reference to whatever OTHER relation in the stream publishes a column of the
+// FIELD's name — `WHERE c_row.b IS NULL` beside a join arm publishing `b`
+// counted that arm's NULLs (#769) — which is ADR-0022's violation in a filter.
+// batch.RowFieldPath is where the question is answered; a container that does
+// not DECLARE the field still owns the path, and the delegation below is what
+// answers for it.
+func rowFieldParent(in *batch.RecordBatch, name string) int {
+	if pi, _, ok := in.RowFieldPath(name); ok {
+		return pi
+	}
+	if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
+		if pi := in.ResolveColumnIndex(name[:dot]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+			return pi
+		}
+	}
+	return -1
+}
+
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
 
 func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -1005,12 +1027,15 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			// Strip table alias qualifier (e.g. "n1.n_name" → "n_name")
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ResolveColumnIndex(parts[1])
+			rowParent := rowFieldParent(in, f.ColName)
+			if rowParent < 0 {
+				f.colIdx = in.ResolveColumnIndex(parts[1])
+			}
 			if f.colIdx < 0 && f.RowFallback != nil {
 				// ROW-field access: the qualifier names a ROW column whose
 				// field the typed kernel cannot reach — delegate to the
 				// row-at-a-time predicate.
-				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+				if pi := rowParent; pi >= 0 {
 					// The literal is still checked against the FIELD's
 					// declared type first — every check the resolved-column
 					// path below makes. Delegating without them is how
@@ -1169,12 +1194,13 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 		f.colIdx = in.ResolveColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ResolveColumnIndex(parts[1])
-			if f.colIdx < 0 && f.RowFallback != nil {
-				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
-					f.useFallback = true
-					f.inner = NewFilter(f.RowFallback)
-				}
+			rowParent := rowFieldParent(in, f.ColName)
+			if rowParent < 0 {
+				f.colIdx = in.ResolveColumnIndex(parts[1])
+			}
+			if f.colIdx < 0 && f.RowFallback != nil && rowParent >= 0 {
+				f.useFallback = true
+				f.inner = NewFilter(f.RowFallback)
 			}
 		}
 		if f.colIdx >= 0 {
@@ -1322,16 +1348,17 @@ func (f *LikeFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch
 		f.colIdx = in.ResolveColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ResolveColumnIndex(parts[1])
-			if f.colIdx < 0 && f.RowFallback != nil {
+			rowParent := rowFieldParent(in, f.ColName)
+			if rowParent < 0 {
+				f.colIdx = in.ResolveColumnIndex(parts[1])
+			}
+			if f.colIdx < 0 && f.RowFallback != nil && rowParent >= 0 {
 				// A ROW FIELD PATH the LIKE kernel cannot reach — same
 				// delegation KernelFilter makes, and for the same reason:
 				// without it the name resolved to nothing and every row was
 				// dropped silently (#568).
-				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
-					f.useFallback = true
-					f.inner = NewFilter(f.RowFallback)
-				}
+				f.useFallback = true
+				f.inner = NewFilter(f.RowFallback)
 			}
 		}
 		if f.colIdx >= 0 {
@@ -1431,12 +1458,13 @@ func (f *NullCheckFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*
 		f.colIdx = in.ResolveColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
-			f.colIdx = in.ResolveColumnIndex(parts[1])
-			if f.colIdx < 0 && f.RowFallback != nil {
-				if pi := in.ResolveColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
-					f.useFallback = true
-					f.inner = NewFilter(f.RowFallback)
-				}
+			rowParent := rowFieldParent(in, f.ColName)
+			if rowParent < 0 {
+				f.colIdx = in.ResolveColumnIndex(parts[1])
+			}
+			if f.colIdx < 0 && f.RowFallback != nil && rowParent >= 0 {
+				f.useFallback = true
+				f.inner = NewFilter(f.RowFallback)
 			}
 		}
 		f.outSel = make([]uint32, 0, in.Len)
@@ -1809,12 +1837,14 @@ func (f *ColColFilter) Init(_ context.Context) error { return nil }
 func (f *ColColFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.leftIdx = in.ResolveColumnIndex(f.LeftCol)
-		if f.leftIdx < 0 && strings.Contains(f.LeftCol, ".") {
+		if f.leftIdx < 0 && strings.Contains(f.LeftCol, ".") &&
+			rowFieldParent(in, f.LeftCol) < 0 {
 			parts := strings.SplitN(f.LeftCol, ".", 2)
 			f.leftIdx = in.ResolveColumnIndex(parts[1])
 		}
 		f.rightIdx = in.ResolveColumnIndex(f.RightCol)
-		if f.rightIdx < 0 && strings.Contains(f.RightCol, ".") {
+		if f.rightIdx < 0 && strings.Contains(f.RightCol, ".") &&
+			rowFieldParent(in, f.RightCol) < 0 {
 			parts := strings.SplitN(f.RightCol, ".", 2)
 			f.rightIdx = in.ResolveColumnIndex(parts[1])
 		}

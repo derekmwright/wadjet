@@ -179,3 +179,85 @@ func splitQualifier(name string) (qualifier, column string) {
 	}
 	return "", name
 }
+
+// RowFieldPath answers ADR-0022's question for one dotted reference, and it
+// is the ONE place the question is asked: does the reference's QUALIFIER name
+// a ROW column of this batch that DECLARES the field? It returns the parent
+// column's index and the field's position among that container's children.
+//
+// Every consumer of a column reference asks this BEFORE stripping the
+// qualifier, because stripping first answers with whatever OTHER relation in
+// the stream publishes a column of the FIELD's name:
+//
+//	SELECT n.id, c_row.b FROM typemx_nested n JOIN decpair d ON n.id = d.id
+//	-- PostgreSQL 17 (spelled `(n.c_row).b`) answers the field: 11, NULL,
+//	--   NULL, 44, 55, 66, 77, 88, NULL. wadjet answered decpair.b's DECIMALs
+//	--   on all four arms, in silence (#769).
+//
+// Four resolvers had to agree about which value `c_row.b` denotes — the
+// single-process evaluator (expr.ColRef), the stage DAG's projection
+// (exec.lazyFieldIdx), the DECLARATION half that types it
+// (exec.fieldPathColumn) and the vectorized filters' ROW delegation — and
+// each spelled the order for itself. That is the shape ADR-0022 was written
+// about, one level down: a field path LOOKS like a qualified column
+// reference, so every site invents the same three-way order and one of them
+// gets it wrong.
+//
+// The container must DECLARE the field. Without that test the reorder would
+// capture an ordinary qualified reference whose qualifier happens to name a
+// ROW column of the stream, and a field path naming NO field would stop
+// answering the way it does today (#604).
+//
+// The parent is looked up the way every other reference is: byte-exact under
+// the fold, then the ONE column spelled `<qualifier>.<name>` — a join
+// qualifies a colliding container, so `c_row.b` has to find `x.c_row`. Two
+// arms spelling it decline, which keeps the ambiguity loud.
+func (b *RecordBatch) RowFieldPath(name string) (parent, field int, ok bool) {
+	dot := -1
+	for i := 0; i < len(name); i++ {
+		if name[i] == '.' {
+			dot = i
+			break
+		}
+	}
+	if dot <= 0 || dot == len(name)-1 {
+		return -1, -1, false
+	}
+	// A flat column literally called `a.b` (a Zeek `id.orig_h`) is that
+	// column and not a path into anything.
+	if b.ResolveColumnIndex(name) >= 0 {
+		return -1, -1, false
+	}
+	qual, fieldName := name[:dot], name[dot+1:]
+	pi := b.ResolveColumnIndex(qual)
+	if pi < 0 {
+		pi = b.uniqueQualifiedColumn(qual)
+	}
+	if pi < 0 || pi >= len(b.Columns) || b.Columns[pi] == nil || b.Columns[pi].Type != TypeRow {
+		return -1, -1, false
+	}
+	v := b.Columns[pi]
+	for j, fn := range v.FieldNames {
+		if j < len(v.Children) && asciiEqualFold(fn, fieldName) {
+			return pi, j, true
+		}
+	}
+	return -1, -1, false
+}
+
+// uniqueQualifiedColumn returns the index of the ONE column of b spelled
+// `<qualifier>.<bare>`, or -1 when none or more than one matches.
+func (b *RecordBatch) uniqueQualifiedColumn(bare string) int {
+	found := -1
+	for i := range b.Schema {
+		_, c := splitQualifier(b.Schema[i].Name)
+		if c == b.Schema[i].Name || !asciiEqualFold(c, bare) {
+			continue
+		}
+		if found >= 0 {
+			return -1
+		}
+		found = i
+	}
+	return found
+}

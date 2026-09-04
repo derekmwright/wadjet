@@ -289,6 +289,33 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      declaration before, so the one spelling PostgreSQL guarantees was the one
      that could not be stored).
 
+   - **An UNPARENTHESISED `container.field` is a ROW FIELD PATH, where
+     PostgreSQL requires `(container).field`.** (Added 2026-09-04, #769;
+     ADR-0022.) PostgreSQL reads a bare `c_row.b` as *table* `c_row`, *column*
+     `b`, and raises 42P01 `missing FROM-clause entry for table "c_row"` — the
+     parenthesised `(n.c_row).b` is the only spelling it accepts. Wadjet
+     ANSWERS the bare one, resolving the field out of its container, and that
+     is a superset in the accepting direction: every query PostgreSQL answers
+     answers the same here, and the spelling PostgreSQL refuses is one it
+     cannot mean anything else by.
+
+     The boundary is what keeps it a superset rather than a second answer. A
+     dotted reference is a field path ONLY where its qualifier names a ROW
+     column of the stream **that declares the field** (`batch.RowFieldPath`,
+     the one place the engine asks); an ordinary qualified reference to a
+     relation is untouched, and a qualifier naming a container that does not
+     declare the field is refused with PostgreSQL's own wording (`could not
+     identify column "nosuch" in record data type`). Two arms spelling the
+     container alike decline rather than pick one.
+
+     Asking that question BEFORE stripping the qualifier is the whole of it,
+     and asking it after was a wrong VALUE rather than a divergence: beside a
+     join arm publishing a column of the FIELD's name, `c_row.b` answered
+     THAT arm's column on every arm and declared its type on the wire.
+     Gated at `internal/coordinator/derived_arm_join_chain_two_path_test.go`
+     (`join-arm-publishes-the-field-name*`) and
+     `internal/engine/batch/row_field_path_test.go`.
+
    - **TIMESTAMP is `timestamp without time zone`, and a literal's offset is
      DISCARDED.** (Added 2026-09-03, #692; this entry records a divergence
      CLOSED, not one kept.) Wadjet declares TIMESTAMP as PostgreSQL's

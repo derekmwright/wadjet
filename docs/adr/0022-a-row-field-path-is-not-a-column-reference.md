@@ -1,6 +1,6 @@
 # ADR-0022: A ROW field path is not a column reference
 
-Status: Accepted (2026-08-25)
+Status: Accepted (2026-08-25; amended 2026-09-04 by arc E3 for #769 — rule 1's ORDER is stated the other way round and asked in ONE place)
 
 ## Context
 
@@ -43,9 +43,32 @@ order the runtime resolves the value.**
 among them, their fields (`logical.Node.ScanColFields`, populated by
 `AnnotateScanColumns`). Resolution mirrors `expr.ColRef.resolveSlow` step for
 step: the full dotted spelling names a column of its own first (a flat Zeek
-`"id.orig_h"`), then the bare name, and only then is the qualifier read as a
-ROW column and the name as its field. A declaration resolved in a different
-order than the value would describe a different column.
+`"id.orig_h"`), **then the qualifier is read as a ROW column that DECLARES the
+name as its field**, and only then is the qualifier stripped and the bare name
+resolved. A declaration resolved in a different order than the value would
+describe a different column.
+
+**The field-path step comes BEFORE the strip, and it is asked in ONE place**
+(2026-09-04, #769). The order in the paragraph above was the other way round
+until then, and it made the reference mean whatever OTHER relation in the
+stream published a column of the FIELD's name:
+
+    SELECT n.id, c_row.b FROM typemx_nested n JOIN decpair d ON n.id = d.id
+    -- the field is INT64 (11, NULL, NULL, 44, …); wadjet answered decpair's
+    --   DECIMAL(18,4) `b` on all four arms, in silence
+
+Six resolvers had grown their own copy of the three-way order —
+`expr.ResolveColumnRef`, `exec.lazyFieldIdx.get`, `exec.fieldPathColumn`,
+`exec.Project`'s schema pass, the four vectorized filters' ROW delegation, and
+`physical.colDecls.colDecl`/`isFieldPath` — and they did not agree: the
+PREDICATE spelling `WHERE c_row.b IS NULL` counted the ARM's NULLs on the
+single-process path and the FIELD's on the DAG. `batch.RowFieldPath` is the
+one place the question is answered now, and every one of those sites asks it.
+
+The step is gated on the container DECLARING the field, which is what keeps
+the reorder off an ordinary qualified reference whose qualifier happens to
+name a ROW column of the stream, and what leaves the "field path naming no
+field" disposition (#604) exactly where it was.
 
 **2. Wherever the planner asks "is this a bare column reference?", the answer
 for a field path is NO.** `isPlainGroupKey`, `isSimpleColRef` and
@@ -101,7 +124,10 @@ the answer is advisory metadata rather than a vector.
 
 - A new consumer of a column reference must ask whether it can serve a field
   path. If it resolves by NAME against a batch or a stage's column list, it
-  cannot, and the planner must materialize the value for it.
+  cannot, and the planner must materialize the value for it. When it asks
+  whether a dotted reference IS one, it asks `batch.RecordBatch.RowFieldPath`
+  and asks it before stripping the qualifier — a private copy of the order is
+  how six sites came to disagree (#769).
 - `wadjet.TestRowFieldPathCarriesTheFieldsDeclaredType` is the gate: every
   field type must answer exactly what the same value in a flat column answers,
   compared with `reflect.DeepEqual` so a Go-type divergence is visible. The

@@ -585,7 +585,75 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 		name, sql string
 		cols      []string
 		want      string
+		// refuse, when set, is a substring of the refusal every arm must
+		// raise instead of answering — the shape PostgreSQL refuses too.
+		refuse string
 	}{
+		{
+			// #769: a join arm that publishes a column of the FIELD's own
+			// name. `decpair.b` is a DECIMAL and `c_row.b` is an INT64 field,
+			// so the two values can never be confused for one another — every
+			// arm answered decpair's, silently, because every resolver in the
+			// engine STRIPPED the qualifier before asking whether `c_row`
+			// names a ROW column of the batch.
+			//
+			// PostgreSQL 17 refuses the unparenthesised spelling outright
+			// (`missing FROM-clause entry for table "c_row"`, 42P01) and
+			// requires `(n.c_row).b`; wadjet ANSWERS it, which is the
+			// deliberate superset ADR-0012 records. The Want here is what
+			// PostgreSQL answers for the PARENTHESISED spelling over the same
+			// rows — the field, not the arm's column.
+			name: "join-arm-publishes-the-field-name",
+			sql: "SELECT n.id AS nid, c_row.b AS fb FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id ORDER BY n.id",
+			cols: []string{"nid", "fb"},
+			want: "9 rows: 1|11;2|;3|;4|44;5|55;6|66;7|77;8|88;9|;",
+		},
+		{
+			// The same collision with BOTH columns selected, so a resolver
+			// that answered the arm's `b` for the field path cannot pass by
+			// returning one plausible column: the two must differ per row.
+			name: "join-arm-publishes-the-field-name/both-selected",
+			sql: "SELECT n.id AS nid, c_row.b AS fb, d.b AS db FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id ORDER BY n.id",
+			cols: []string{"nid", "fb", "db"},
+			want: "9 rows: 1|11|12.7500;2||12.7501;3||12.7499;4|44|-0.0100;5|55|10.0000;" +
+				"6|66|0.0000;7|77|1.0000;8|88|;9||;",
+		},
+		{
+			// And the same field path in a PREDICATE. The vectorized filters
+			// resolve a dotted name for themselves, and they stripped the
+			// qualifier too: `WHERE c_row.b IS NULL` counted the ARM's NULLs
+			// (2) where the field has three.
+			name: "join-arm-publishes-the-field-name/in-a-predicate",
+			sql: "SELECT COUNT(*) AS n FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id WHERE c_row.b IS NULL",
+			cols: []string{"n"},
+			want: "1 rows: 3;",
+		},
+		{
+			// The CONTROL that bounds the reorder: a QUALIFIED reference whose
+			// qualifier names a relation and not a container still resolves
+			// against the relation. `d.b` and `n.id` are ordinary columns and
+			// must be unaffected by the field-path rule running first.
+			name: "join-arm-publishes-the-field-name/ctl-ordinary-qualified-refs",
+			sql: "SELECT n.id AS nid, d.b AS db FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id WHERE d.b > 1 ORDER BY n.id",
+			cols: []string{"nid", "db"},
+			want: "4 rows: 1|12.7500;2|12.7501;3|12.7499;5|10.0000;",
+		},
+		{
+			// And a field the container does NOT declare is REFUSED, the way
+			// PostgreSQL 17 refuses `(n.c_row).nosuch` — `column "nosuch" not
+			// found in data type e3_rowt`. The reorder is gated on the
+			// container DECLARING the field, so this disposition is the one
+			// the shape already had and the gate says so.
+			name: "join-arm-publishes-the-field-name/ctl-a-field-the-row-does-not-declare",
+			sql: "SELECT n.id AS nid, c_row.nosuch AS fb FROM " + nested +
+				" n JOIN decpair d ON n.id = d.id WHERE n.id < 3 ORDER BY n.id",
+			cols:   []string{"nid", "fb"},
+			refuse: "could not identify column",
+		},
 		{
 			// The CONTROL that bounds it: no join, correct on 376b2cac.
 			name: "no-join",
@@ -654,6 +722,16 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				res, err := arm.run(tc.sql)
+				if tc.refuse != "" {
+					if err == nil {
+						t.Errorf("%s arm answered %d rows; PostgreSQL 17 refuses this shape "+
+							"and so does this engine\n  SQL: %s", arm.name, len(res.Rows), tc.sql)
+					} else if !strings.Contains(err.Error(), tc.refuse) {
+						t.Errorf("%s arm refused with %q, want a refusal carrying %q\n  SQL: %s",
+							arm.name, err.Error(), tc.refuse, tc.sql)
+					}
+					continue
+				}
 				if err != nil {
 					t.Fatalf("%s arm refused: %v\n  SQL: %s", arm.name, err, tc.sql)
 				}
