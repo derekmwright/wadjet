@@ -1377,7 +1377,7 @@ the same ids beside them as the control that tells the two containers apart.
 
 Wadjet answers these queries where PostgreSQL rejects them (`c_row` is not a
 FROM-clause entry). That is the deliberate superset ADR-0012 records, and it is
-gated as such: `TestRowFieldPathSurvivesAJoinThreeArms` asserts the field's own
+gated as such: `TestRowFieldPathSurvivesAJoinFourArms` asserts the field's own
 values, with the join-free spelling beside it as the control the join must
 agree with.
 

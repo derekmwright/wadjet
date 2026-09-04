@@ -572,13 +572,23 @@ func TestCTEChainPositionCarriesItsFilterThreeArms(t *testing.T) {
 //
 // The same query with NO join answers correctly on 376b2cac, because nothing
 // narrows there — which is what says the join's lists are the site.
-func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
+func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up two embedded NATS clusters")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	t.Cleanup(cancel)
-	arms := dajArms(t, ctx)
+	// FOUR arms. The SPILLED one is the fourth and it is why this gate was
+	// renamed: a spill is a CONDITION, not a query shape (ADR-0027), and this
+	// gate's own subject — a ROW container carried through a join — is
+	// payload the spilled build has to reconstruct. Three arms could not see
+	// that, and one shape below disagrees with the other three there today.
+	arms := append(dajArms(t, ctx), dajArm{
+		name: "spilled",
+		run: func(q string) (*oracle.Result, error) {
+			return tmdRunSingle(ctx, e3BudgetedStandalone(t, ctx), q)
+		},
+	})
 
 	nested := typematrix.Nested
 	for _, tc := range []struct {
@@ -594,6 +604,12 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 		// including the day it answers PostgreSQL's rows, which is the fix
 		// and wants the entry deleted rather than kept.
 		armErr map[string]string
+		// armWant pins ONE arm's WRONG ANSWER where the others are right: the
+		// named arm must render exactly this, every other arm must give
+		// `want`. Like armErr it is fail-on-agree — the day that arm answers
+		// `want` the entry is stale and must be deleted, which is the fix's
+		// proof.
+		armWant map[string]string
 	}{
 		{
 			// #769: a join arm that publishes a column of the FIELD's own
@@ -974,6 +990,7 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			// spill (ADR-0006's routed-probe amendment, #832), so its build
 			// must fit the budget and refuses loudly when it does not.
 			// Pre-existing, unrelated to field paths, and LOUD.
+			armErr: map[string]string{"spilled": "memory budget exceeded"},
 		},
 		{
 			// The same example in PostgreSQL's own spelling, because the docs
@@ -982,8 +999,9 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			sql: "SELECT x.id AS xid, (c_row).b AS fb FROM " + nested + " x JOIN (SELECT id, " +
 				"c_row AS y_row FROM " + nested + ") y ON x.id = y.id WHERE x.id < 5 " +
 				"ORDER BY x.id",
-			cols: []string{"xid", "fb"},
-			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
+			cols:   []string{"xid", "fb"},
+			want:   "5 rows: 0|0;1|11;2|;3|;4|44;",
+			armErr: map[string]string{"spilled": "memory budget exceeded"},
 		},
 		{
 			// Redundant parentheses are the same reference (P2, round 3):
@@ -1028,6 +1046,74 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			// and the join degenerates to one all-rows candidate chain — a
 			// CROSS join, ADR-0006's non-spilling shape). This gate's field
 			// path is a passenger.
+			name: "outer-join/the-field-on-the-right-of-a-left-join",
+			sql: "SELECT d.id AS did, c_row.b AS fb FROM decpair d LEFT JOIN " + nested +
+				" n ON d.b = c_row.b ORDER BY d.id",
+			cols: []string{"did", "fb"},
+			want: "9 rows: 1|;2|;3|;4|;5|;6|0;7|;8|;9|;",
+			armWant: map[string]string{
+				"spilled": "9 rows: 1|;2|;3|;4|;5|;6|;7|;8|;9|;",
+			},
+		},
+		{
+			// THE OWNERSHIP PIN. No field path, no parentheses, no ROW
+			// reference in the ON — just an ordinary expression residual and
+			// the CONTAINER in the select list. The spilled arm answers NULL
+			// for every container; the other three answer the rows. Whatever
+			// fixes the cell above must fix this one, and this one contains
+			// nothing of this arc's.
+			name: "outer-join/a-projected-container-under-an-ordinary-residual",
+			sql: "SELECT d.id AS did, n.c_row AS cr FROM decpair d LEFT JOIN " + nested +
+				" n ON d.id + 0 = n.id WHERE d.id < 3 ORDER BY d.id",
+			cols:    []string{"did", "cr"},
+			want:    "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
+			armWant: map[string]string{"spilled": "2 rows: 1|;2|;"},
+		},
+		{
+			// …and it is not even the residual. A PLAIN EQUI KEY loses the
+			// projected container on the spilled arm too, so the trigger is
+			// LEFT JOIN + a memory budget + a ROW column in the select list,
+			// with no expression, no residual and no field path anywhere in
+			// the query. This is the narrowest spelling of the defect and it
+			// belongs to the spilled outer join's payload, not to ADR-0022.
+			name: "outer-join/a-projected-container-under-a-plain-key",
+			sql: "SELECT d.id AS did, n.c_row AS cr FROM decpair d LEFT JOIN " + nested +
+				" n ON d.id = n.id WHERE d.id < 3 ORDER BY d.id",
+			cols:    []string{"did", "cr"},
+			want:    "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
+			armWant: map[string]string{"spilled": "2 rows: 1|;2|;"},
+		},
+		{
+			// THE BOUNDING CONTROL: the same projection under an INNER join is
+			// right on all four arms. So it is the OUTER join's payload that
+			// loses the container under a budget — the NULL-padding path — and
+			// not containers, not joins, and not this arc.
+			name: "outer-join/ctl-a-projected-container-under-an-inner-join",
+			sql: "SELECT d.id AS did, n.c_row AS cr FROM decpair d JOIN " + nested +
+				" n ON d.id = n.id WHERE d.id < 3 ORDER BY d.id",
+			cols: []string{"did", "cr"},
+			want: "2 rows: 1|map[a:<nil> b:11 cd:192.168.0.2/24 dc:1.0001 dt:2011-02-02 ip:10.0.0.1 mc:aa:bb:cc:00:00:01];2|map[a:r-00002 b:<nil> cd:10.0.0.2/8 dc:2.0002 dt:2012-03-03 ip:10.0.0.2 mc:aa:bb:cc:00:00:02];",
+		},
+		{
+			// #769's DECLARATION face for the right-of-join spelling. Every
+			// arm answers the FIELD's value; the DAG arm renders it under
+			// `decpair.b`'s DECIMAL(18,4) declaration — `0.0000` where the
+			// field is an INT64 and PostgreSQL answers `0`. The value is
+			// right, the TYPE is the join arm's, and that is the half of #769
+			// that only became visible once the values stopped being wrong.
+			name: "declared-type/a-field-path-through-a-join",
+			sql: "SELECT d.id AS did, c_row.b AS fb FROM decpair d JOIN " + nested +
+				" n ON d.b = c_row.b ORDER BY d.id",
+			cols:    []string{"did", "fb"},
+			want:    "1 rows: 6|0;",
+			armWant: map[string]string{"dag": "1 rows: 6|0.0000;"},
+		},
+		{
+			// The NINTH resolver: a field path as the outer key of an
+			// IN-SUBQUERY. `colRefName` drops the qualifier, so the semi join
+			// was built with `b` as its probe key — no column of the probe —
+			// and a key that resolves to nothing hashes as a constant, so
+			// EVERY probe row matched. PostgreSQL 17 answers one row.
 			name: "in-subquery/a-field-path-as-the-outer-key",
 			sql: "SELECT n.id AS nid FROM " + nested + " n WHERE c_row.b IN " +
 				"(SELECT b FROM decpair) AND n.id < 20 ORDER BY n.id",
@@ -1099,6 +1185,24 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 					} else if !strings.Contains(err.Error(), tc.refuse) {
 						t.Errorf("%s arm refused with %q, want a refusal carrying %q\n  SQL: %s",
 							arm.name, err.Error(), tc.refuse, tc.sql)
+					}
+					continue
+				}
+				if pinned, ok := tc.armWant[arm.name]; ok {
+					if err != nil {
+						t.Errorf("the %s arm REFUSED a shape this gate pins as a wrong "+
+							"answer: %v\n  SQL: %s", arm.name, err, tc.sql)
+						continue
+					}
+					switch got := dajDigest(res, tc.cols); {
+					case got == tc.want:
+						t.Errorf("the %s arm now answers PostgreSQL's rows for a shape this "+
+							"gate PINS as divergent. It is fixed: delete the entry\n  %s\n  SQL: %s",
+							arm.name, got, tc.sql)
+					case got != pinned:
+						t.Errorf("the %s arm answered\n  %s\nthis pin records\n  %s\nand "+
+							"PostgreSQL 17 answers\n  %s\nThe answer MOVED without becoming "+
+							"right\n  SQL: %s", arm.name, got, pinned, tc.want, tc.sql)
 					}
 					continue
 				}

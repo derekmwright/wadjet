@@ -259,6 +259,26 @@ refusal survives the delegation.
   Pre-existing, and LOUD where base was a silent cross product on every arm.
   Gated at `both-sides-field-path-key`.
 
+  **Two more are pinned, and neither is this rule's** (round 5). A SPILLED
+  LEFT JOIN loses a PROJECTED ROW CONTAINER: `SELECT d.id, n.c_row FROM d LEFT
+  JOIN n ON d.id = n.id` answers NULL for every container on the 512 KiB arm
+  and the rows on the other three — a plain equi key, no expression, no
+  residual and no field path anywhere in the query. The field-path spelling
+  (`… LEFT JOIN n ON d.b = c_row.b`, the field selected) rides the same defect
+  and is pinned beside it, with an INNER join over the same projection as the
+  bounding control: it is the OUTER join's NULL-padding payload under a budget,
+  not containers, not joins and not this rule. Gated at
+  `outer-join/a-projected-container-under-a-plain-key`,
+  `…-under-an-ordinary-residual`,
+  `outer-join/the-field-on-the-right-of-a-left-join` and
+  `outer-join/ctl-a-projected-container-under-an-inner-join`.
+
+  **The DECLARATION face survives for one spelling on one arm**: a field path
+  read through a join renders under the join ARM's declaration on the DAG —
+  `0.0000` for an INT64 field beside a DECIMAL(18,4) column — where every other
+  arm and PostgreSQL give `0`. The VALUE is the field's everywhere; only the
+  type is borrowed. Pinned at `declared-type/a-field-path-through-a-join`.
+
   **Ordering the two refusals is the same deferral as the paths themselves.**
   A scalar qualifier under the parenthesised spelling — `(d.b).x` — could be
   diagnosed 42809 rather than routed through the two-part container message,
