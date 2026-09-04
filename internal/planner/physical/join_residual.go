@@ -51,18 +51,40 @@ func BuildJoinResidualFilter(filter, buildAlias string) func(probe *batch.Record
 	type colBinding struct {
 		fromBuild bool
 		idx       int
+		// field is the CHILD index when idx names a ROW CONTAINER and the
+		// reference is a field path into it, or -1 for a plain column.
+		field int
 	}
 	bindings := map[*plansql.ColRef]*colBinding{}
 	collectResidualColRefs(expr, func(c *plansql.ColRef) {
-		bindings[c] = &colBinding{}
+		bindings[c] = &colBinding{field: -1}
 	})
 	var resolveOnce sync.Once
 
 	resolve := func(probe, build *batch.RecordBatch) {
 		for c, b := range bindings {
 			col := strings.ToLower(c.Column)
+			b.field = -1
 			if c.Table != "" {
 				qual := strings.ToLower(c.Table) + "." + col
+				// ADR-0022 rule 1, at this resolver: ask whether the dotted
+				// reference is a ROW FIELD PATH *before* the qualifier is
+				// stripped. Stripping first bound `c_row.b` to whatever OTHER
+				// side published a column of the FIELD's name — under
+				// `LEFT JOIN decpair d ON c_row.b = d.b` the build's own `b`
+				// answered for the field, so the residual read `d.b = d.b`,
+				// was TRUE for every candidate, and the join returned the full
+				// cross product on all four arms where PostgreSQL returns 12
+				// rows. That is #769's silent-wrong-value one operator over,
+				// arriving as a silent wrong ROW SET.
+				if pi, fj, ok := probe.RowFieldPath(qual); ok {
+					b.fromBuild, b.idx, b.field = false, pi, fj
+					continue
+				}
+				if pi, fj, ok := build.RowFieldPath(qual); ok {
+					b.fromBuild, b.idx, b.field = true, pi, fj
+					continue
+				}
 				if idx := probe.ColumnIndex(qual); idx >= 0 {
 					b.fromBuild, b.idx = false, idx
 					continue
@@ -98,10 +120,19 @@ func BuildJoinResidualFilter(filter, buildAlias string) func(probe *batch.Record
 			if b == nil || b.idx < 0 {
 				return resNull
 			}
+			src, row := probe, probeRow
 			if b.fromBuild {
-				return residualValue(build.Columns[b.idx], buildRow)
+				src, row = build, buildRow
 			}
-			return residualValue(probe.Columns[b.idx], probeRow)
+			v := src.Columns[b.idx]
+			if b.field >= 0 {
+				fv, frow, ok := residualFieldVector(v, b.field, row)
+				if !ok {
+					return resNull
+				}
+				return residualValue(fv, frow)
+			}
+			return residualValue(v, row)
 		case *plansql.Lit:
 			switch e.Kind {
 			case plansql.LitNull:
@@ -256,6 +287,33 @@ var resNull = resVal{kind: resNullKind}
 // residualValue reads one cell as a resVal. GetValue already resolves views
 // and NULL bitmaps; DATE boxes as its ISO string, which compares correctly
 // against both another DATE and a date literal.
+// residualFieldVector follows a container vector's views down to its base and
+// returns the child vector for field j together with the row index THAT base
+// is addressed by, so residualValue can box a field exactly as it boxes a
+// column — the DECIMAL branch reads the vector's own Type, so the child has to
+// be the thing passed in rather than a pre-boxed value.
+//
+// A view's children are not addressable by the view's own row index, which is
+// the walk exec.rowFieldValue makes for the same reason. A NULL container has
+// no field, so it answers "not ok" and the residual sees NULL — which rejects
+// the candidate, as SQL's ON semantics require.
+func residualFieldVector(v *batch.Vector, field, row int) (*batch.Vector, int, bool) {
+	for {
+		if v == nil || v.Nulls.IsNullFast(row) {
+			return nil, 0, false
+		}
+		if v.Base == nil {
+			break
+		}
+		row = int(v.Indices[row])
+		v = v.Base
+	}
+	if field < 0 || field >= len(v.Children) || v.Children[field] == nil {
+		return nil, 0, false
+	}
+	return v.Children[field], row, true
+}
+
 func residualValue(v *batch.Vector, row int) resVal {
 	switch x := v.GetValue(row).(type) {
 	case nil:

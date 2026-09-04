@@ -174,7 +174,23 @@ refusal survives the delegation.
   the bare spelling produces, so it is one reference with one resolver and one
   `batch.RowFieldPath` question, not a second spelling for the seven sites of
   rule 1 to disagree about. It composes: predicate, GROUP BY, ORDER BY, join
-  key, aggregate argument, cast, arithmetic. `a.b.c` is still a syntax error.
+  key (INNER and OUTER, see below), aggregate argument, cast, arithmetic.
+  `a.b.c` is still a syntax error.
+
+  **The join key needed TWO sites, and the second was found by a reviewer
+  measuring the claim** (2026-09-04 round 4). An INNER join's field-path ON
+  conjunct is declined as a key pair and lifted into a filter above the join,
+  which MATERIALIZES the path — that is `logical.isBareColRef`. An OUTER join
+  cannot use that placement (a residual above the join deletes the rows the
+  join preserves), so `routeOuterJoinOnResiduals` sends it to `JoinFilter`
+  instead, and `physical.BuildJoinResidualFilter` — an EIGHTH resolver, and one
+  rule 1 had not reached — stripped the qualifier before asking. It bound
+  `c_row.b` to the build side's own `b`, so `LEFT JOIN decpair d ON
+  c_row.b = d.b` evaluated `d.b = d.b`, accepted every candidate and returned
+  the full cross product (84 rows) on all four arms where PostgreSQL returns
+  12. The same rule-1 reorder fixes it, and the residual reads the field out of
+  the container through the child vector. LEFT / RIGHT / FULL now answer
+  PostgreSQL's 12 / 9 / 20 over the fixture rows, on every arm.
 
   What does NOT work is a container the reference QUALIFIES — `(x.c_row).b`,
   and by the same token the nested `((c_row).rw).k`, whose container is itself
@@ -202,9 +218,21 @@ refusal survives the delegation.
   `parenthesised/in-a-predicate-and-a-group-key`,
   `parenthesised/unknown-field`,
   `parenthesised/a-qualified-container-is-refused-not-answered`,
-  `parenthesised/a-qualified-container-is-refused-without-a-join` and
-  `parenthesised/a-nested-path-is-refused-not-answered`, plus the parser's own
+  `parenthesised/a-qualified-container-is-refused-without-a-join`,
+  `parenthesised/a-nested-path-is-refused-not-answered`,
+  `outer-join/*` (LEFT, RIGHT, FULL, the arithmetic spelling and an ordinary
+  residual as the control), plus the parser's own
   spellings in `internal/planner/sql/paren_field_path_test.go`.
+
+  One residual is PINNED rather than fixed: a field path on BOTH sides of an
+  INNER key fails on the DAG-SHUFFLED arm alone
+  (`column "z.b" does not exist in the input schema`) where the other arms
+  answer PostgreSQL's eight rows. The mechanism is the exchange-repartition
+  stage's own projection, which carries columns by name and never sees the
+  materialized field — the same carry-the-container question
+  `physical.rowContainersOf` answers for a join, asked of an exchange stage.
+  Pre-existing, and LOUD where base was a silent cross product on every arm.
+  Gated at `both-sides-field-path-key`.
 - **The differential fuzzer** cannot generate field paths, because it
   qualifies references with the table alias and the parser accepts only a
   two-part reference. See the note in `internal/oracle/shapegen/typematrix.go`.

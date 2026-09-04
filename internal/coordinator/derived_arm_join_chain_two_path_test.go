@@ -588,6 +588,12 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 		// refuse, when set, is a substring of the refusal every arm must
 		// raise instead of answering — the shape PostgreSQL refuses too.
 		refuse string
+		// armErr pins ONE arm's loud failure where the others answer: the
+		// named arm must fail with this substring and every other arm must
+		// give `want`. It is a pin, so it FAILS the day that arm answers —
+		// including the day it answers PostgreSQL's rows, which is the fix
+		// and wants the entry deleted rather than kept.
+		armErr map[string]string
 	}{
 		{
 			// #769: a join arm that publishes a column of the FIELD's own
@@ -868,6 +874,77 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 			want: "5 rows: 0|0;1|11;2|;3|;4|44;",
 		},
 		{
+			// The OUTER-join face of the field-path join key. An outer join's
+			// ON cannot be lifted above the join (that deletes the preserved
+			// rows), so `routeOuterJoinOnResiduals` moves it to JoinFilter and
+			// the executor evaluates it per candidate — and THAT resolver
+			// stripped the qualifier, binding `c_row.b` to the build's own
+			// `b`. The residual read `d.b = d.b`, was true for every
+			// candidate, and the join returned the full cross product (84
+			// rows) on all four arms where PostgreSQL returns 12. Silent, and
+			// pre-existing at base in both spellings.
+			//
+			// PostgreSQL 17, measured over these exact rows: 12 / 9 / 20 for
+			// LEFT / RIGHT / FULL, with the single match at `c_row.b = 0`
+			// against `decpair.b = 0.0000`.
+			name: "outer-join/left-with-a-field-path-key",
+			sql: "SELECT n.id AS nid, d.b AS db FROM " + nested + " n LEFT JOIN decpair d " +
+				"ON c_row.b = d.b WHERE n.id < 12 ORDER BY n.id",
+			cols: []string{"nid", "db"},
+			want: "12 rows: 0|0.0000;1|;2|;3|;4|;5|;6|;7|;8|;9|;10|;11|;",
+		},
+		{
+			name: "outer-join/right-with-a-field-path-key",
+			sql: "SELECT n.id AS nid, d.b AS db FROM " + nested + " n RIGHT JOIN decpair d " +
+				"ON c_row.b = d.b ORDER BY d.id",
+			cols: []string{"nid", "db"},
+			want: "9 rows: |12.7500;|12.7501;|12.7499;|-0.0100;|10.0000;0|0.0000;|1.0000;|;|;",
+		},
+		{
+			name: "outer-join/full-with-a-field-path-key",
+			sql: "SELECT n.id AS nid, d.b AS db FROM " + nested + " n FULL JOIN decpair d " +
+				"ON c_row.b = d.b WHERE n.id < 12 OR n.id IS NULL ORDER BY n.id, d.id",
+			cols: []string{"nid", "db"},
+			want: "20 rows: 0|0.0000;1|;2|;3|;4|;5|;6|;7|;8|;9|;10|;11|;" +
+				"|12.7500;|12.7501;|12.7499;|-0.0100;|10.0000;|1.0000;|;|;",
+		},
+		{
+			// The ARITHMETIC spelling under an outer join. It was NOT right at
+			// base — the round-3 commit body said it was, on the strength of
+			// the INNER measurement — and it is the one that shows the defect
+			// is the residual RESOLVER and not the key extraction: this
+			// spelling never was a key pair on any join kind.
+			name: "outer-join/left-with-a-field-path-in-arithmetic",
+			sql: "SELECT n.id AS nid, d.b AS db FROM " + nested + " n LEFT JOIN decpair d " +
+				"ON c_row.b + 0 = d.b WHERE n.id < 12 ORDER BY n.id",
+			cols: []string{"nid", "db"},
+			want: "12 rows: 0|0.0000;1|;2|;3|;4|;5|;6|;7|;8|;9|;10|;11|;",
+		},
+		{
+			// The CONTROL that says the mechanism is the FIELD PATH and not
+			// outer joins with residuals in general: an ordinary residual
+			// under the same join kind, right on every arm before and after.
+			name: "outer-join/ctl-left-with-an-ordinary-residual",
+			sql: "SELECT n.id AS nid, d.b AS db FROM " + nested + " n LEFT JOIN decpair d " +
+				"ON n.id + 0 = d.id WHERE n.id < 12 ORDER BY n.id",
+			cols: []string{"nid", "db"},
+			want: "12 rows: 0|;1|12.7500;2|12.7501;3|12.7499;4|-0.0100;5|10.0000;" +
+				"6|0.0000;7|1.0000;8|;9|;10|;11|;",
+		},
+		{
+			// A field path on BOTH sides of an INNER key. Right on the
+			// single-process and broadcast arms — PostgreSQL's eight rows —
+			// and PINNED on the shuffled one, where the repartition's own
+			// projection asks for `z.b` as a column name. It is LOUD there,
+			// which is the difference from base: at base all three arms
+			// answered a cross product, silently.
+			//
+			// The mechanism is the shuffle's projection, not this arc's
+			// resolver: `z` is the derived arm's renamed CONTAINER and the
+			// exchange stage carries columns by name, so the materialized
+			// field never reaches it. Closing it is the same
+			// carry-the-container question `rowContainersOf` answers for the
+			// join, asked of an exchange-repartition stage.
 			name: "join-with-a-dimension",
 			sql: "SELECT x.id AS xid, c_row.b AS fb FROM " + nested + " x JOIN " +
 				typematrix.Dim + " d ON x.id = d.k WHERE x.id < 5 ORDER BY x.id",
@@ -886,6 +963,20 @@ func TestRowFieldPathSurvivesAJoinThreeArms(t *testing.T) {
 					} else if !strings.Contains(err.Error(), tc.refuse) {
 						t.Errorf("%s arm refused with %q, want a refusal carrying %q\n  SQL: %s",
 							arm.name, err.Error(), tc.refuse, tc.sql)
+					}
+					continue
+				}
+				if pinned, ok := tc.armErr[arm.name]; ok {
+					switch {
+					case err == nil:
+						t.Errorf("the %s arm ANSWERED a shape this gate pins as a loud "+
+							"failure (%d rows). Whatever it answers now, the pin is stale: "+
+							"assert the rows and delete the entry\n  SQL: %s",
+							arm.name, len(res.Rows), tc.sql)
+					case !strings.Contains(err.Error(), pinned):
+						t.Errorf("the %s arm failed with %q; this pin records a failure "+
+							"carrying %q. The failure MOVED, which the next fix has to "+
+							"account for\n  SQL: %s", arm.name, err.Error(), pinned, tc.sql)
 					}
 					continue
 				}
