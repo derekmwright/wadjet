@@ -119,10 +119,10 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 	}
 }
 
-// TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration is #838, one half
-// closed and one half pinned — in the ORDER ADR-0012 item 5 sets down, because
-// declaring `character varying(4)` while returning six characters is a worse
-// lie than declaring nothing.
+// TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration is #838, and both
+// halves are closed now — in the ORDER ADR-0012 item 5 sets down, because
+// declaring `character varying(4)` while returning six characters would have
+// been a worse lie than declaring nothing.
 //
 // The VALUE half is FIXED. `expr.Cast.Eval`'s switch matches the lowered type
 // name exactly, so `varchar(4)` matched no case label at all and the whole
@@ -132,58 +132,76 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 // `CAST('éàüxyz' AS VARCHAR(3))` is `éàü`, six octets), and `VARCHAR(0)` is
 // 22023 as it is on the server.
 //
-// The DECLARATION half is still pinned below: `physical.declaredTypmod`
-// answers only for DECIMAL and `pgwire.TypeMod` has no string arm, so
-// RowDescription says unconstrained `text` where PostgreSQL 17.11's \gdesc
-// says `character varying(4)` with atttypmod 8. It is the half #708 named when
-// it shipped DECIMAL's modifier and left the string family.
+// The DECLARATION half closed with it: `physical.declaredStringLength` answers
+// for the string family, the length rides to the wire through
+// `ColumnMeta.StringLength` on both paths, and `pgwire.TypeMod` sends n+4 under
+// OID 1043 — `character varying(4)`, atttypmod 8, which is PostgreSQL 17.11's
+// own \gdesc for this cast. It is the half #708 named when it shipped
+// DECIMAL's modifier and left the string family.
 //
-// CHAR(n) truncates and does NOT pad, which is a decision. PostgreSQL's bpchar
-// pads the stored value but strips trailing blanks for `length()`, for `||`
-// and for every comparison — all three verified live — and this engine has one
-// TypeString and no bpchar. Padding would leak blanks into GROUP BY keys, join
-// keys and equality where PostgreSQL strips them: a WRONG ROW SET in exchange
-// for a right rendering. The residual is the rendered value of a SHORT CHAR(n)
-// and ADR-0012's list records it.
+// CHAR(n) truncates and does NOT pad, which is a decision, and it is why the
+// declaration says `character varying(n)` for that spelling too rather than
+// `character(n)` (OID 1042). PostgreSQL's bpchar pads the stored value but
+// strips trailing blanks for `length()`, for `||` and for every comparison —
+// all three verified live — and this engine has one TypeString and no bpchar.
+// Padding would leak blanks into GROUP BY keys, join keys and equality where
+// PostgreSQL strips them: a WRONG ROW SET in exchange for a right rendering.
+// The residual is the rendered value of a SHORT CHAR(n), the OID that goes with
+// it, and ADR-0012's list records both.
 func TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration(t *testing.T) {
 	db := ddrOpen(t)
 	for _, tc := range []struct {
 		name, sql string
-		// want is now PostgreSQL 17.11's own answer, measured live: the value
-		// half agrees. pgSays is kept beside it so a cell that ever diverges
-		// again names what the server said.
+		// want is PostgreSQL 17.11's own answer, measured live: the value half
+		// agrees. pgSays is kept beside it so a cell that ever diverges again
+		// names what the server said.
 		want, pgSays string
+		// wantLen is the length the DECLARATION carries — n for a
+		// parameterized destination, 0 for an unconstrained one — and pgDesc
+		// is what the server's \gdesc calls that column.
+		wantLen int
+		pgDesc  string
 	}{
 		// A FOLDED literal, and the same question over a real STRING VECTOR:
 		// the length was dropped in the compiler and in the kernel, so a fix
 		// to either alone would leave the other cell failing.
 		{"literal_varchar", `SELECT CAST('abcdef' AS VARCHAR(4)) AS v FROM decdecl WHERE id = 1`,
-			"abcd", "abcd"},
+			"abcd", "abcd", 4, "character varying(4)"},
 		{"literal_char", `SELECT CAST('abcdef' AS CHAR(4)) AS v FROM decdecl WHERE id = 1`,
-			"abcd", "abcd"},
+			"abcd", "abcd", 4, "character(4)"},
 		{"column_varchar", `SELECT CAST(s AS VARCHAR(4)) AS v FROM decdecl WHERE id = 2`,
-			"12.7", "12.7"},
+			"12.7", "12.7", 4, "character varying(4)"},
 		// The multi-byte cell, which is the one that tells CHARACTERS from
 		// BYTES: three characters, six octets. Truncating bytes would cut a
 		// rune in half and put invalid UTF-8 on the wire.
 		{"multibyte_counts_characters",
 			`SELECT CAST('éàüxyz' AS VARCHAR(3)) AS v FROM decdecl WHERE id = 1`,
-			"éàü", "éàü"},
+			"éàü", "éàü", 3, "character varying(3)"},
 		// A non-string operand: PostgreSQL truncates the RENDERING.
 		{"number_renders_then_truncates",
-			`SELECT CAST(12345 AS VARCHAR(3)) AS v FROM decdecl WHERE id = 1`, "123", "123"},
+			`SELECT CAST(12345 AS VARCHAR(3)) AS v FROM decdecl WHERE id = 1`, "123", "123", 3, "character varying(3)"},
 		// Two controls that the fix must NOT change: a value already within n,
 		// and the unparameterized destination. They fail if a repair truncates
 		// everything rather than truncating to n.
 		{"ctl_within_length", `SELECT CAST(s AS VARCHAR(4)) AS v FROM decdecl WHERE id = 3`,
-			"abc", "abc"},
+			"abc", "abc", 4, "character varying(4)"},
+		// The UNPARAMETERIZED destinations carry no length, which is what makes
+		// the cells above a statement about the modifier and not about STRING.
 		{"ctl_unparameterized", `SELECT CAST('abcdef' AS VARCHAR) AS v FROM decdecl WHERE id = 1`,
-			"abcdef", "abcdef"},
+			"abcdef", "abcdef", 0, "character varying"},
+		{"ctl_text", `SELECT CAST('abcdef' AS TEXT) AS v FROM decdecl WHERE id = 1`,
+			"abcdef", "abcdef", 0, "text"},
+		// A bare COLUMN of a VARCHAR(n) type carries none either: the catalog
+		// does not store the length (parquet.ParseTypeID drops it), so the
+		// engine is unconstrained there and says so. PostgreSQL keeps it, and
+		// ADR-0012 item 5 records the divergence.
+		{"ctl_bare_column", `SELECT s AS v FROM decdecl WHERE id = 3`,
+			"abc", "abc", 0, "character varying(16) on the server"},
 		// The bpchar RESIDUAL, pinned: PostgreSQL pads a short CHAR(n) to n on
 		// the wire and this does not. Its three consumers agree with the
 		// server BECAUSE it does not pad — the cells below assert that.
 		{"residual_short_char_is_not_padded",
-			`SELECT CAST('ab' AS CHAR(4)) AS v FROM decdecl WHERE id = 1`, "ab", "ab  "},
+			`SELECT CAST('ab' AS CHAR(4)) AS v FROM decdecl WHERE id = 1`, "ab", "ab  ", 4, "character(4)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)
@@ -197,16 +215,16 @@ func TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration(t *testing.T) {
 			if len(res.ColumnMetas) != 1 {
 				t.Fatalf("%d column metas, want 1", len(res.ColumnMetas))
 			}
-			// The DECLARATION half, still pinned: every string destination is
-			// one unparameterized STRING here, and PostgreSQL describes
-			// `CAST(x AS VARCHAR(4))` as character varying(4), atttypmod 8,
-			// OID 1043. The day this carries the length, delete the pin and
-			// move the \gdesc assertion into the wire corpus.
-			if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeString || m.Precision != 0 {
-				t.Errorf("declared %s(%d) — this pin records an unconstrained STRING. If the "+
-					"length is now carried, #838's METADATA half has moved: check that "+
-					"pgwire.TypeMod sends n+4 and that the OID moved to 1043/1042 with it, "+
-					"then delete this pin", m.TypeID, m.Precision)
+			// The DECLARATION half. A parameterized destination carries its
+			// length; an unparameterized one carries none, which is what makes
+			// the pair a statement about the modifier rather than about the
+			// type. pgwire.TestVarcharCastDeclaresItsLengthOnTheWire asserts
+			// what the WIRE then sends (OID 1043, atttypmod n+4).
+			if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeString {
+				t.Errorf("declared %s, want STRING", m.TypeID)
+			} else if m.StringLength != tc.wantLen {
+				t.Errorf("declared length %d, want %d (PostgreSQL 17.11 describes this as %s)",
+					m.StringLength, tc.wantLen, tc.pgDesc)
 			}
 		})
 	}

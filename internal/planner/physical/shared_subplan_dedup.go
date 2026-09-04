@@ -310,6 +310,7 @@ func (d *subplanDeduper) fingerprintAs(id, joinTypeOverride string) (string, boo
 	// fingerprintable set ever widens.
 	if len(s.ScalarDependencies) > 0 || len(s.OutputRenames) > 0 ||
 		len(s.OutputSchema) > 0 || len(s.OutputWireUnconstrainedDecimal) > 0 ||
+		len(s.OutputStringLength) > 0 ||
 		len(s.EmitDynamicFilters) > 0 || len(s.ConsumeDynamicFilters) > 0 ||
 		len(s.PreComputedAggregates) > 0 || len(s.BuildCachePreScans) > 0 ||
 		len(s.UnionArms) > 0 {

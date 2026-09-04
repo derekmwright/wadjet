@@ -1126,6 +1126,11 @@ type CollectSink struct {
 	// which columns are aggregate output is a property of the PLAN, not of
 	// whether Consume ever ran (FIX 2, #457/#458 fold-in).
 	SchemaHintWireUnconstrainedDecimal map[string]bool
+	// SchemaHintStringLength names the output columns whose declaration
+	// carries a string LENGTH — `CAST(x AS VARCHAR(4))` — and what it is.
+	// Consulted on every result for the same reason as the field above: which
+	// columns a CAST bounds is a property of the PLAN (#838).
+	SchemaHintStringLength map[string]int
 }
 
 func (s *CollectSink) Init(_ context.Context) error {

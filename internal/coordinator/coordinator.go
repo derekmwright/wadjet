@@ -770,6 +770,11 @@ type SQLResult struct {
 	// result (FIX 2, #457/#458 fold-in; see
 	// physical.declaredWireUnconstrainedDecimal).
 	WireUnconstrainedDecimal map[string]bool
+	// StringLength names the output columns in Schema whose declaration
+	// carries a string LENGTH — `CAST(x AS VARCHAR(4))` — and what it is, so
+	// the wire can send PostgreSQL's `character varying(n)` rather than an
+	// unconstrained text (#838). Plan-time, like the map above.
+	StringLength map[string]int
 
 	// stream is the lazy form: set (and Batches nil) when the gather
 	// result is partially on local scratch. Accessed via Stream().
@@ -1221,6 +1226,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// A plan property, unlike Schema's fallback above: applies whether
 		// or not this result has rows (FIX 2, #457/#458 fold-in).
 		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(physStages),
+		StringLength:             physical.GatherOutputStringLength(physStages),
 	}
 	if gr.spillPath != "" {
 		// Over-budget result: the in-memory prefix plus raw frames on
@@ -3568,6 +3574,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		// A plan property, unlike Schema's fallback above: applies whether
 		// or not this result has rows (FIX 2, #457/#458 fold-in).
 		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(meta.stages),
+		StringLength:             physical.GatherOutputStringLength(meta.stages),
 	}, nil
 }
 

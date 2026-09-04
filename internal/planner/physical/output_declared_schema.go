@@ -323,17 +323,13 @@ func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map
 // those anywhere in the fold makes the whole result -1.
 //
 // That last class is a DIVERGENCE from PostgreSQL, not a match, and the first
-// version of this comment read the other way. Only DECIMAL reaches
-// pgwire.TypeMod today, so `CAST(c AS VARCHAR(4))` is -1 here and -1 on the
-// wire — the two wadjet layers agree with EACH OTHER, and PostgreSQL 17.11
-// describes that cast as `character varying(4)`. The VALUE diverges too and
-// that is the sharper half: PostgreSQL truncates to n (`abcdef` becomes
-// `abcd`) and wadjet returns the whole string, because expr.castTargetType
-// maps CHAR / VARCHAR / TEXT / STRING onto one unparameterized TypeString.
-// Both halves are pinned by wadjet.TestStringCastDropsItsLengthParameter and
-// recorded in ADR-0012 item 5, where the ORDER is written down: the length is
-// ENFORCED before it is DECLARED, since declaring a bound nothing enforces is
-// the first of two lies rather than the end of one.
+// version of this comment read the other way.
+//
+// The STRING family is no longer in it. `CAST(c AS VARCHAR(4))` truncates to
+// four characters (the VALUE half of #838, closed first because ADR-0012 item
+// 5 sets the order: a bound is ENFORCED before it is DECLARED) and now
+// declares its length too — see declaredStringLength below, which is this
+// function's twin for a modifier that is a LENGTH rather than a (p,s).
 func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool) (int, int, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
@@ -393,6 +389,113 @@ func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool)
 		return foldTypmod(arms, decls, computed)
 	}
 	return 0, 0, false
+}
+
+// declaredStringLength is declaredTypmod for the string family: the CHARACTER
+// count `CAST(x AS VARCHAR(n))` and `CAST(x AS CHAR(n))` impose on their
+// result, which PostgreSQL carries on the wire as atttypmod n+4 (#838).
+//
+// It is a separate function rather than a third return value because the two
+// modifiers are different things that happen to share a wire field: a DECIMAL's
+// is a (precision, scale) pair the value is ROUNDED into, and a string's is a
+// length the value is TRUNCATED to. Folding them together would let a CASE over
+// a numeric(9,2) and a varchar(4) agree with itself.
+//
+// The fold is select_common_typmod, the same rule declaredTypmod uses: a choice
+// keeps the length only when every branch carries the same one, and a NULL
+// branch carries none. A bare column reference carries none either — the
+// catalog does not store a VARCHAR(n) column's n (parquet.ParseTypeID drops
+// it), so a stored column is unconstrained here exactly as it is in the engine.
+//
+// ok=false means "no length", which is the unconstrained answer.
+func declaredStringLength(node plansql.Node, decls colDecls, computed map[string]bool) (int, bool) {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return declaredStringLength(n.Inner, decls, computed)
+	case *plansql.CastNode:
+		n2, err, ok := parquet.StringTypeLength(n.TypeName)
+		if !ok || err != nil {
+			return 0, false
+		}
+		return n2, true
+	case *plansql.CaseNode:
+		arms := make([]plansql.Node, 0, len(n.Whens)+1)
+		for _, w := range n.Whens {
+			arms = append(arms, w.Result)
+		}
+		arms = append(arms, n.Else)
+		return foldStringLength(arms, decls, computed)
+	case *plansql.FuncCallNode:
+		idx, poly := expr.DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args))
+		if !poly {
+			return 0, false
+		}
+		arms := make([]plansql.Node, 0, len(idx))
+		for _, i := range idx {
+			if i >= 0 && i < len(n.Args) {
+				arms = append(arms, n.Args[i])
+			}
+		}
+		return foldStringLength(arms, decls, computed)
+	}
+	return 0, false
+}
+
+// foldStringLength is foldTypmod for a length: every alternative carries the
+// same one, or the result carries none.
+func foldStringLength(arms []plansql.Node, decls colDecls, computed map[string]bool) (int, bool) {
+	first, have := 0, false
+	for _, a := range arms {
+		if a == nil {
+			// An untyped NULL branch coerces into the common type at typmod
+			// -1, exactly as it does for a numeric modifier.
+			return 0, false
+		}
+		n, ok := declaredStringLength(a, decls, computed)
+		if !ok {
+			return 0, false
+		}
+		if !have {
+			first, have = n, true
+			continue
+		}
+		if n != first {
+			return 0, false
+		}
+	}
+	return first, have
+}
+
+// DeclaredStringLengths names the output columns whose declaration carries a
+// string LENGTH, and what it is. It is the string family's answer to
+// declaredWireUnconstrainedDecimal: wire metadata only, computed at plan time,
+// and empty for every query that casts to no parameterized string type.
+func DeclaredStringLengths(root *logical.Node) map[string]int {
+	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
+	if !ok {
+		return nil
+	}
+	_ = strictInt
+	var computed map[string]bool
+	if pn := findOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
+		computed = emittedComputedCols(pn.Children[0])
+	}
+	var out map[string]int
+	for _, proj := range projs {
+		name := declaredProjectionName(proj)
+		if name == "" || proj.ASTExpr == nil {
+			continue
+		}
+		n, ok := declaredStringLength(proj.ASTExpr, childTypes, computed)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]int, len(projs))
+		}
+		out[name] = n
+	}
+	return out
 }
 
 // foldTypmod is select_common_typmod over a set of alternatives: they all

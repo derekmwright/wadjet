@@ -426,6 +426,10 @@ type Stage struct {
 	// consulted for every result (FIX 2, #457/#458 fold-in; see
 	// declaredWireUnconstrainedDecimal).
 	OutputWireUnconstrainedDecimal map[string]bool
+	// OutputStringLength names the output columns whose declaration carries a
+	// string LENGTH, and what it is — the DAG's copy of the single-process
+	// path's SchemaHintStringLength (#838).
+	OutputStringLength map[string]int
 
 	// ProjectExprs, set on a leaf scan stage whose output feeds the gather
 	// directly, makes the scan fragment compute the SELECT list (worker-side
@@ -2803,6 +2807,9 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// not: which DECIMAL columns are aggregate output is a property of
 		// the PLAN, not of whether a batch arrived (FIX 2, #457/#458 fold-in).
 		cs.SchemaHintWireUnconstrainedDecimal = declaredWireUnconstrainedDecimal(node)
+		// And the string family's modifier, which is a LENGTH rather than a
+		// (p,s) — same lifecycle, same reason (#838).
+		cs.SchemaHintStringLength = DeclaredStringLengths(node)
 	}
 
 	// Attach spill file cleanup. CTE collectors and the scan cache
@@ -3151,6 +3158,17 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 			}
 		}
 	}
+	// The string family's modifier, on the same stage and for the same reason
+	// (#838). Both paths read the same plan-time answer, so a CAST's declared
+	// length cannot depend on which one ran.
+	if lengths := DeclaredStringLengths(node); len(lengths) > 0 {
+		for i := range stages {
+			if stages[i].Type == StageExchangeGather {
+				stages[i].OutputStringLength = lengths
+				break
+			}
+		}
+	}
 	// The catalog's declared columns, BEFORE the resolution passes rather
 	// than after them. `Stage.Columns` on a scan is a READ SET — names
 	// ancestors asked for — and every model of "what does this stage emit"
@@ -3286,6 +3304,18 @@ func GatherOutputWireUnconstrainedDecimal(stages []Stage) map[string]bool {
 	for i := range stages {
 		if stages[i].Type == StageExchangeGather {
 			return stages[i].OutputWireUnconstrainedDecimal
+		}
+	}
+	return nil
+}
+
+// GatherOutputStringLength is the same companion for the string family's
+// modifier: the declared LENGTH of each output column a parameterized string
+// cast bounds (#838; see DeclaredStringLengths).
+func GatherOutputStringLength(stages []Stage) map[string]int {
+	for i := range stages {
+		if stages[i].Type == StageExchangeGather {
+			return stages[i].OutputStringLength
 		}
 	}
 	return nil

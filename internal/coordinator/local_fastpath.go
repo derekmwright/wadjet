@@ -254,5 +254,6 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		// A plan property, applies whether or not this result has rows
 		// (FIX 2, #457/#458 fold-in).
 		WireUnconstrainedDecimal: sink.SchemaHintWireUnconstrainedDecimal,
+		StringLength:             sink.SchemaHintStringLength,
 	}, true, nil
 }

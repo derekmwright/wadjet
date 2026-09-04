@@ -2323,6 +2323,26 @@ func tableOID(name string) int {
 }
 
 // pgTypeOID maps Wadjet types to PostgreSQL type OIDs.
+// pgColumnOID is pgTypeOID with the whole column meta in hand, for the one
+// type whose OID depends on more than its name: a STRING that carries a
+// declared LENGTH is PostgreSQL's `character varying(n)` (1043) rather than
+// unconstrained `text` (25), and the length rides in the type modifier beside
+// it (#838).
+//
+// `character(n)` (1042) is deliberately NOT sent for `CAST(x AS CHAR(n))`.
+// PostgreSQL's bpchar PADS a short value to n and then strips the blanks again
+// for length(), for `||` and for every comparison; this engine has one
+// TypeString and none of that, so declaring 1042 would name a type whose three
+// defining behaviours it does not implement. `character varying(n)` states
+// exactly what the value IS — at most n characters, compared by bytes — and
+// the padding residual is recorded in ADR-0012 item 5.
+func pgColumnOID(m wadjet.ColumnMeta) int {
+	if m.TypeID == parquet.TypeString && m.StringLength > 0 {
+		return oidVarchar
+	}
+	return pgTypeOID(m.TypeName)
+}
+
 func pgTypeOID(typeName string) int {
 	switch strings.ToUpper(typeName) {
 	case "INT32":
@@ -3194,7 +3214,7 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []i
 		// Column attr number (int16) = 0
 		c.buf = appendInt16(c.buf, 0)
 		// Data type OID
-		oid := pgTypeOID(m.TypeName)
+		oid := pgColumnOID(m)
 		c.buf = appendInt32(c.buf, int32(oid))
 		// Data type size
 		c.buf = appendInt16(c.buf, pgTypeSize(oid))
@@ -3244,6 +3264,15 @@ func TypeMod(m wadjet.ColumnMeta) int32 {
 			return -1
 		}
 		return int32((m.Precision<<16)|(m.Scale&0xFFFF)) + pgVarHdrSz
+	case parquet.TypeString:
+		// A parameterized string destination's LENGTH, which PostgreSQL sends
+		// as n + VARHDRSZ under `character varying(n)`. 0 means the engine's
+		// unconstrained TypeString, which every unparameterized spelling and
+		// every stored column still is (#838).
+		if m.StringLength <= 0 {
+			return -1
+		}
+		return int32(m.StringLength) + pgVarHdrSz
 	default:
 		return -1
 	}

@@ -371,8 +371,11 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// Inputs gate in declaredWireUnconstrainedDecimal, whenever
 		// OutputSchema itself is set (FIX 2, #457/#458 fold-in).
 		"OutputWireUnconstrainedDecimal": "refused",
-		"EmitDynamicFilters":             "refused",
-		"PreComputedAggregates":          "refused", "BuildCachePreScans": "refused",
+		// And the string family's modifier, set on the same terminal gather
+		// and refused for the same reason (#838).
+		"OutputStringLength":    "refused",
+		"EmitDynamicFilters":    "refused",
+		"PreComputedAggregates": "refused", "BuildCachePreScans": "refused",
 		// Everything else is hashed structurally via the JSON serialization.
 		"Type": "hashed", "ClusterID": "hashed", "Tasks": "hashed",
 		"TableName": "hashed", "PartitionFilter": "hashed", "ScanFiles": "hashed",

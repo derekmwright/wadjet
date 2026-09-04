@@ -117,17 +117,29 @@ folds an unquoted identifier to upper case before the type name is read, echoes
 a non-numeric modifier as `"ABC"` where the `CAST` door echoes `"abc"`. The
 code and the rule are the same on both.
 
-Two differences from PostgreSQL to know about:
+**The wire declares the length.** A `CAST` to a parameterized string type is
+described as `character varying(n)` — OID 1043, atttypmod n+4 — which is what
+PostgreSQL's own `\gdesc` reports for it. An unparameterized destination
+(`VARCHAR`, `TEXT`, `STRING`) and a bare column reference are described as
+unconstrained `text`, because the catalog does not store a `VARCHAR(n)`
+column's n.
 
-- **`CHAR(n)` truncates but does not pad.** PostgreSQL stores a short `CHAR(n)`
-  padded to n and then strips the trailing blanks again for `length()`, `||`
-  and every comparison. Wadjet has one unparameterized string type, so it
-  stores what you gave it: `CAST('ab' AS CHAR(4))` renders `ab` where
-  PostgreSQL renders `ab  `, and `length`, `||` and `=` agree with PostgreSQL
-  exactly because nothing was padded.
-- **The wire does not declare the length.** `RowDescription` reports an
-  unconstrained `text` where PostgreSQL reports `character varying(4)`. The
-  VALUE is bounded; the description is not.
+One difference from PostgreSQL to know about, and it is one fact wearing three
+hats: **wadjet has no blank-padded `bpchar`.**
+
+- `CAST('ab' AS CHAR(4))` renders `ab` where PostgreSQL renders `ab  `.
+- The same cast is described as `character varying(4)`, not `character(4)`.
+- Bare `CHAR` is the unparameterized string, where PostgreSQL reads
+  `character(1)` — so `CAST('abcdef' AS CHAR)` is `abcdef` here and `a` there,
+  and `CREATE TABLE t (c CHAR)` is an unbounded string on both doors.
+
+PostgreSQL pads a short `bpchar` to n and then strips the trailing blanks again
+for `length()`, for `||` and for every comparison. Wadjet has one string type
+and none of that, so padding alone would move `length`, `||` and `=` AWAY from
+PostgreSQL — a wrong row set in exchange for a right rendering — and declaring
+`character(n)` would name a type whose defining behaviours are not implemented.
+As it stands those three consumers agree with the server exactly. Recorded in
+ADR-0012's divergence list.
 
 ### Network Types
 

@@ -921,13 +921,35 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      the same; only the echoed token's case differs, and moving it would mean
      changing when the lexer folds.
 
-     Pinned by `wadjet.TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration`:
-     the value cells now assert PostgreSQL's own answers, the declaration cell
-     asserts the unconstrained STRING and fires the day it carries a length,
-     and the three bpchar consumers assert the agreement that padding would
-     cost. The divergence is filed as **#838**. User-facing:
-     `docs/data-types.md` §`VARCHAR(n)` and `CHAR(n)`, `docs/sql-reference.md`
-     §Casts and errors.
+     **The DECLARATION half closed on 2026-09-04.** `physical.declaredStringLength`
+     is `declaredTypmod`'s twin for a modifier that is a LENGTH rather than a
+     (p,s), the answer rides to the wire through `ColumnMeta.StringLength` on
+     both the single-process and the DAG path (`CollectSink.SchemaHintStringLength`
+     and `Stage.OutputStringLength`, exactly as the unconstrained-DECIMAL map
+     does), and `pgwire.TypeMod` sends n+4 under OID 1043. `CAST(x AS
+     VARCHAR(4))` is `character varying(4)`, atttypmod 8 — PostgreSQL 17.11's
+     own \gdesc.
+
+     **What stays**: the bpchar family, as ONE residual with one mechanism.
+     `CAST(x AS CHAR(n))` declares `character varying(n)` and not `character(n)`
+     (OID 1042), does not PAD a short value to n, and reads bare `CHAR` as the
+     unparameterized string where the server reads `character(1)`. All three are
+     the same fact: this engine has one `TypeString` and no bpchar, and
+     PostgreSQL's bpchar pads the stored value and then strips the blanks again
+     for `length()`, for `||` and for every comparison — all three measured
+     live. Padding without the stripping would move those three cells AWAY from
+     the server (a wrong ROW SET for a right rendering), and declaring 1042
+     would name a type whose defining behaviours are not implemented. The
+     structural fix is a distinct blank-padded string type the comparison,
+     length and concatenation kernels dispatch on; it is its own change.
+
+     Pinned by `wadjet.TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration`
+     (the values, the declared length per destination, and the three bpchar
+     consumers that assert the agreement padding would cost) and
+     `pgwire.TestVarcharCastDeclaresItsLengthOnTheWire` (OID and atttypmod, with
+     the unparameterized spellings and a non-string column as the controls, and
+     a `residual_bare_char` cell). User-facing: `docs/data-types.md`
+     §`VARCHAR(n)` and `CHAR(n)`, `docs/sql-reference.md` §Casts and errors.
 
    - **An integer result with no room in its declared type FAILS; it is never
      a wrapped number — and the check is at the STORE, not in the kernel.**

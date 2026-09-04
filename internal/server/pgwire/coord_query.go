@@ -166,6 +166,7 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 			// output — so the gate is applied here, keeping the field's
 			// documented DECIMAL meaning.
 			WireUnconstrained: col.Type == parquet.TypeDecimal && res.WireUnconstrainedDecimal[name],
+			StringLength:      coordStringLength(col, res.StringLength[name]),
 		}
 	}
 	return metas
@@ -252,4 +253,15 @@ func (c *pgConn) closeDescribeCache() {
 	c.describeCancel = ""
 	c.describeSynth = nil
 	c.describedSQL = ""
+}
+
+// coordStringLength is the coord path's gate on a string modifier: the plan's
+// map answers by NAME without a type gate, and only the resolved column type
+// says whether the answer applies. wadjet.deriveColumnMetas makes the same
+// check for the same reason (#838).
+func coordStringLength(col parquet.Column, n int) int {
+	if col.Type != parquet.TypeString {
+		return 0
+	}
+	return n
 }

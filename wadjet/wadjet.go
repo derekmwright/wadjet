@@ -303,6 +303,15 @@ type ColumnMeta struct {
 	// keeps a real typmod only for a BARE column reference. pgTypeMod
 	// treats this the same as Precision <= 0 (FIX 2, #457/#458 fold-in).
 	WireUnconstrained bool
+	// StringLength is the declared CHARACTER count of a parameterized string
+	// destination — `CAST(x AS VARCHAR(4))` — and 0 for an unconstrained one.
+	// PostgreSQL carries it on the wire as atttypmod n+4 under OID 1043, and
+	// this engine declared `text` with no modifier for every string until #838.
+	//
+	// A stored VARCHAR(n) COLUMN is NOT one: the catalog does not keep the
+	// length (parquet.ParseTypeID drops it), so a bare reference to one is
+	// unconstrained here exactly as it is in the engine.
+	StringLength int
 }
 
 // QueryResult contains the result of a SQL query.
@@ -481,18 +490,20 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	// the projection list names no columns of its own.
 	var outSchema []parquet.Column
 	var wireUnconstrained map[string]bool
+	var stringLength map[string]int
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		outSchema = collectSink.Schema()
 		// Plan-time, not row-count-dependent (FIX 2, #457/#458 fold-in) —
 		// consulted whether or not Consume ever ran.
 		wireUnconstrained = collectSink.SchemaHintWireUnconstrainedDecimal
+		stringLength = collectSink.SchemaHintStringLength
 	}
 	columns := deriveColumns(selectInfo, rows, outSchema)
 
 	// Derive typed column metadata
 	var metas []ColumnMeta
 	if len(columns) > 0 {
-		metas = deriveColumnMetas(columns, rows, outSchema, db.catalog, wireUnconstrained)
+		metas = deriveColumnMetas(columns, rows, outSchema, db.catalog, wireUnconstrained, stringLength)
 	}
 
 	return &QueryResult{
@@ -820,7 +831,7 @@ func reconcileColumnName(name string, rows []map[string]any) string {
 // Scale this function resolves for them below — an aggregate function
 // call, on live PostgreSQL, never keeps its argument's typmod (FIX 2,
 // #457/#458 fold-in). May be nil.
-func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog, wireUnconstrainedDecimal map[string]bool) []ColumnMeta {
+func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog, wireUnconstrainedDecimal map[string]bool, stringLength map[string]int) []ColumnMeta {
 	metas := make([]ColumnMeta, len(columns))
 
 	// The executed output schema, keyed by column name. The whole Column,
@@ -848,7 +859,9 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 	}
 
 	for i, name := range columns {
-		metas[i] = ColumnMeta{Name: name, Nullable: true, WireUnconstrained: wireUnconstrainedDecimal[name]}
+		metas[i] = ColumnMeta{Name: name, Nullable: true,
+			WireUnconstrained: wireUnconstrainedDecimal[name],
+			StringLength:      stringLength[name]}
 
 		// The executed plan's output schema first — it is per-result rather
 		// than a cross-table name match, and it sees computed columns.
@@ -912,6 +925,12 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 	for i := range metas {
 		if metas[i].TypeID != parquet.TypeDecimal {
 			metas[i].WireUnconstrained = false
+		}
+		// The same gate for the string family's modifier, and for the same
+		// reason: the plan's map answers the length question without a type
+		// gate, and only here is the resolved type finally known (#838).
+		if metas[i].TypeID != parquet.TypeString {
+			metas[i].StringLength = 0
 		}
 	}
 	return metas
