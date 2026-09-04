@@ -458,6 +458,11 @@ func tmdTables() []tmdTable {
 		// items is the row every one of #767's shapes turns on.
 		{latOrdTable, latOrdSchema(), latOrdData()},
 		{latItemTable, latItemSchema(), latItemData()},
+		// The MIXED-CASE RELATION fixture. Every other table name in every
+		// two-path corpus is already its own folded form, so the case
+		// concession for a RELATION name (ADR-0012) had no fixture on the DAG
+		// or on the worker at all. See table_name_case_two_path_test.go.
+		{tncTable, tncSchema(), tncData()},
 	}, append(multikeyTables(), collideTables()...)...)
 }
 

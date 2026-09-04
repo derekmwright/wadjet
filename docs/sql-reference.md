@@ -62,8 +62,36 @@ for byte, in either case. A delimited alias `"T"` and an unquoted `t` are two
 different relations, and `SELECT "T".x FROM t` is SQLSTATE `42P01`
 (`missing FROM-clause entry for table "T"`), as it is in PostgreSQL.
 
-Table names, table aliases, CTE names and function names follow the same rule.
-`SELECT * FROM t` publishes each column under the schema's own spelling.
+A **table name** takes the same concession a column name does, and for the same
+reason: wadjet's tables come from parquet and ingest, where a user-chosen
+mixed-case name is ordinary and nothing quoted it at creation. An unquoted
+reference folds, and if the folded name matches no table byte for byte it
+resolves to the one registered table that matches it case-insensitively — so
+`SELECT * FROM MyTab`, `FROM mytab` and `FROM MYTAB` all read a table stored as
+`MyTab`. PostgreSQL answers `42P01` for the first and third, because it matches
+its catalog exactly after folding; this is the relation-name half of the same
+recorded divergence (ADR-0012).
+
+The boundary is the same too:
+
+- a **delimited** reference carrying an upper-case letter takes no concession —
+  `FROM "MYTAB"` is `42P01` here as in PostgreSQL, and `FROM "MyTab"` is
+  byte-exact;
+- a **byte-exact match always wins**, so with both `MyTab` and `mytab`
+  registered, `FROM MyTab` folds to `mytab` and reads `mytab` — which is what
+  PostgreSQL does as well;
+- **two tables differing only by case** and neither matching byte-exact resolve
+  to NOTHING. The refusal is `42P01` and names both candidates, because
+  choosing one would be a silently wrong table;
+- **CREATE TABLE does not concede.** Minting a name is not referencing one, so
+  creating `mytab` beside `MyTab` makes a second table. Every statement that
+  REFERENCES an existing table — `SELECT`, `INSERT`, `UPDATE`, `DELETE`,
+  `MERGE`, `COPY` — resolves it the same way, and the write lands on the table
+  the read resolved.
+
+Table **aliases**, CTE names and function names are matched byte for byte, as
+qualifiers are. `SELECT * FROM t` publishes each column under the schema's own
+spelling.
 
 ## SELECT Statement
 

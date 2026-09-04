@@ -173,6 +173,14 @@ func dmlRelationError(name string, err error) error {
 
 // executeInsert handles INSERT INTO table [(cols)] VALUES (v1, v2), ...
 func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*ExecResult, error) {
+	// A DML statement REFERENCES an existing table, so it takes the same READ
+	// concession a SELECT does (catalog.ResolveTableName): a mixed-case name
+	// created through parquet or ingest stays reachable unquoted. Rewriting
+	// info.Table in place is what makes the WRITE land on the table the read
+	// resolved — a door that conceded on the lookup and then keyed the
+	// manifest byte-exact would write somewhere else. CreateTable does NOT
+	// concede: minting a name is not referencing one.
+	info.Table = db.catalog.ResolveTableName(info.Table)
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
 		return nil, dmlRelationError(info.Table, err)
@@ -308,6 +316,14 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 	if err := CheckDMLQualifier(info.DMLTarget); err != nil {
 		return nil, err
 	}
+	// A DML statement REFERENCES an existing table, so it takes the same READ
+	// concession a SELECT does (catalog.ResolveTableName): a mixed-case name
+	// created through parquet or ingest stays reachable unquoted. Rewriting
+	// info.Table in place is what makes the WRITE land on the table the read
+	// resolved — a door that conceded on the lookup and then keyed the
+	// manifest byte-exact would write somewhere else. CreateTable does NOT
+	// concede: minting a name is not referencing one.
+	info.Table = db.catalog.ResolveTableName(info.Table)
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
 		return nil, dmlRelationError(info.Table, err)
@@ -377,6 +393,14 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 	if err := CheckDMLQualifier(info.DMLTarget); err != nil {
 		return nil, err
 	}
+	// A DML statement REFERENCES an existing table, so it takes the same READ
+	// concession a SELECT does (catalog.ResolveTableName): a mixed-case name
+	// created through parquet or ingest stays reachable unquoted. Rewriting
+	// info.Table in place is what makes the WRITE land on the table the read
+	// resolved — a door that conceded on the lookup and then keyed the
+	// manifest byte-exact would write somewhere else. CreateTable does NOT
+	// concede: minting a name is not referencing one.
+	info.Table = db.catalog.ResolveTableName(info.Table)
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
 		return nil, dmlRelationError(info.Table, err)
@@ -515,6 +539,14 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	}); err != nil {
 		return nil, err
 	}
+	// A DML statement REFERENCES an existing table, so it takes the same READ
+	// concession a SELECT does (catalog.ResolveTableName): a mixed-case name
+	// created through parquet or ingest stays reachable unquoted. Rewriting
+	// info.Target in place is what makes the WRITE land on the table the read
+	// resolved — a door that conceded on the lookup and then keyed the
+	// manifest byte-exact would write somewhere else. CreateTable does NOT
+	// concede: minting a name is not referencing one.
+	info.Target = db.catalog.ResolveTableName(info.Target)
 	targetMeta, err := db.catalog.GetTable(ctx, info.Target)
 	if err != nil {
 		return nil, dmlRelationError(info.Target, err)
@@ -1075,6 +1107,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	}
 
 	var sourceCols []parquet.Column
+	info.Source = db.catalog.ResolveTableName(info.Source)
 	if srcMeta, err := db.catalog.GetTable(ctx, info.Source); err == nil {
 		sourceCols = srcMeta.Schema.Columns
 		ev.sourceKnown = true

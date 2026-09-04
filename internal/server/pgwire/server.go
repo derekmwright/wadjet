@@ -652,7 +652,11 @@ func (c *pgConn) handleCopyIn(sql string) {
 
 	tableName, copyColumns, delimiter := parseCopySQL(sql)
 
-	// Look up table schema
+	// Look up table schema. COPY REFERENCES an existing table, so it takes
+	// the same READ concession every other reference does — a mixed-case name
+	// stays reachable unquoted (catalog.ResolveTableName) — and the resolved
+	// spelling is what the rows are written under.
+	tableName = c.db.Catalog().ResolveTableName(tableName)
 	tableMeta, err := c.db.Catalog().GetTable(ctx, tableName)
 	if err != nil {
 		c.sendError("ERROR", "42P01", fmt.Sprintf("table %q does not exist", tableName))

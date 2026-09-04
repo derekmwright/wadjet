@@ -1860,6 +1860,14 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 		return
 	}
 	if node.Type == logical.NodeScan && node.TableName != "" && !node.IsTableFunc {
+		// CANONICALIZE first, once, in place: everything below this pass keys
+		// off Node.TableName — the manifest lookup, the pruner, the worker's
+		// scan — so conceding at each door would be a different name at each
+		// door. Resolving here means a reference that named the table in
+		// another case becomes the catalog's own spelling for the whole plan.
+		if p.catalog != nil {
+			node.TableName = p.catalog.ResolveTableName(node.TableName)
+		}
 		table, err := p.catalog.GetTable(ctx, node.TableName)
 		if err == nil {
 			cols := make([]string, len(table.Schema.Columns))

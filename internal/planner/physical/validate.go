@@ -22,6 +22,22 @@ type tableColumnSource interface {
 	GetTable(ctx context.Context, name string) (*catalog.TableMeta, error)
 }
 
+// tableNameResolver is the READ-side case concession for a RELATION name,
+// optional so a fake source keeps working without it. *catalog.Catalog has it.
+type tableNameResolver interface {
+	ResolveTableName(name string) string
+	AmbiguousTableNames(name string) []string
+}
+
+// resolveTableSpelling is the catalog's own spelling of a table name, or the
+// name unchanged when the source cannot answer. See catalog.ResolveTableName.
+func resolveTableSpelling(src tableColumnSource, name string) string {
+	if r, ok := src.(tableNameResolver); ok {
+		return r.ResolveTableName(name)
+	}
+	return name
+}
+
 // ValidateColumns checks that every column reference in a SELECT statement
 // resolves to a column available in its scope, returning an error naming the
 // first unresolvable reference. This is plan-time name binding: it runs over the
@@ -688,7 +704,21 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 	// matching rows" (#367). A transport failure keeps the old open-scope
 	// stance: the table's existence is unknown, and a false rejection breaks
 	// a working query.
-	meta, err := b.src.GetTable(ctx, tr.Name)
+	// The case concession for a RELATION name, and the one shape it declines:
+	// two registered tables matching the reference case-insensitively and
+	// neither byte-exact. Picking one would be a silent wrong table, so the
+	// refusal names both — it is still 42P01, because what is true is that no
+	// unique relation has that name, and PostgreSQL has no ambiguity class for
+	// relations at all (it cannot reach this state: it folds at the catalog).
+	if r, ok := b.src.(tableNameResolver); ok {
+		if cands := r.AmbiguousTableNames(tr.Name); len(cands) > 1 {
+			return sqlerr.New("42P01",
+				"relation %q does not exist: %d tables match it case-insensitively (%s) — quote the one you mean",
+				tr.Name, len(cands), strings.Join(cands, ", "))
+		}
+	}
+	stored := resolveTableSpelling(b.src, tr.Name)
+	meta, err := b.src.GetTable(ctx, stored)
 	if err != nil {
 		if errors.Is(err, catalog.ErrTableNotFound) {
 			return sqlerr.New("42P01", "relation %q does not exist", tr.Name)

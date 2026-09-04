@@ -297,7 +297,7 @@ func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nes
 		if !containsIdentWord(lowerSQL, strings.ToLower(table)) {
 			continue
 		}
-		tm, err := c.db.Catalog().GetTable(ctx, table)
+		tm, err := c.db.Catalog().GetTable(ctx, c.db.Catalog().ResolveTableName(table))
 		if err != nil || tm == nil {
 			continue
 		}

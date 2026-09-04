@@ -212,6 +212,37 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      qualifies the reference; PostgreSQL accepts that spelling too, so the
      qualified form is portable and the bare one is not.
 
+     **A TABLE name takes the same concession**, and it has to: the fold this
+     arc put in the lexer applies to a relation reference as much as to a
+     column one, and wadjet's table names come from parquet and ingest where a
+     mixed-case name is ordinary. Without it `FROM MyTab` is 42P01 against a
+     table this engine itself created — PostgreSQL's rule, but a BREAKING
+     change for every catalog written before the fold rather than a semantic
+     improvement, and the catalogs are the user's data. So a relation
+     reference resolves byte-exact first and then to the one registered table
+     matching it case-insensitively (`catalog.ResolveTableName`), with the
+     same three boundaries the column rule has:
+
+     - a DELIMITED reference carrying an upper-case letter takes no
+       concession, so `FROM "MYTAB"` is 42P01 here as in PostgreSQL;
+     - a byte-exact match always wins, so `MyTab` beside `mytab` behaves
+       exactly as PostgreSQL does (the folded reference reads `mytab`);
+     - TWO tables differing only by case resolve to NOTHING, and the 42P01
+       names both candidates. PostgreSQL has no ambiguity class for relations
+       and cannot reach this state — it folds at the catalog — so inventing a
+       SQLSTATE it never emits would be a second divergence; what is true is
+       that no unique relation has that name, which is what 42P01 says.
+
+     The concession is READ-ONLY. `CreateTable` and the DDL door key
+     byte-exact, because minting a name is not referencing one and creating
+     `mytab` when `MyTab` exists must make a second table rather than
+     silently open the first. The doors that reference an EXISTING table —
+     the planner's scan annotation, the column binder, and the INSERT /
+     UPDATE / DELETE / MERGE / COPY paths — canonicalize the name ONCE to the
+     catalog's spelling, so the write lands on the table the read resolved; a
+     door that conceded on the lookup and then keyed the manifest byte-exact
+     would write somewhere else in silence.
+
      The rule is one function, `batch.ResolveColumnIndex`
      (`internal/engine/batch/schema.go`), and the SCHEMA stays byte-exact:
      `batch.ColumnIndex` still compares `col.Name == name`, `SELECT *` still

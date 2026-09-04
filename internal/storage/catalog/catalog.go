@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -367,6 +368,109 @@ func checkDistinctColumnNames(schema parquet.Schema) error {
 // transport failure, where the table's existence is unknown — the planner
 // rejects a query on the former (42P01) and stays conservative on the latter.
 var ErrTableNotFound = errors.New("not found")
+
+// isFoldedTableName reports whether a name is its OWN folded form — no ASCII
+// upper-case letter. PostgreSQL folds only A-Z in a UTF8 database, so this is
+// the same test batch.IsFoldedIdent applies to a column reference.
+func isFoldedTableName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= 'A' && name[i] <= 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveTableName is the READ-side spelling of a table name: the catalog's
+// own, for a reference that named it in a different case.
+//
+// It is `batch.ResolveColumnIndex`'s rule one level up (ADR-0012): byte-exact
+// first, and only on a miss a UNIQUE ASCII-case-insensitive match among the
+// registered tables. Two matches resolve to NOTHING and the caller reports the
+// miss, exactly as two columns do — picking one would be a silent wrong table.
+//
+// It exists because an unquoted reference FOLDS at the lexer (#731) while
+// wadjet's table names come from parquet and ingest, where a user-chosen
+// mixed-case name is ordinary. Without it `FROM MyTab` is 42P01 against a
+// table this engine itself created, which is PostgreSQL's rule but breaks
+// every catalog written before the fold.
+//
+// READ ONLY. Every write door — CreateTable, the DML paths, DropTable — keys
+// byte-exact, because creating or writing `MyTab` when `mytab` exists must
+// land on the name the caller wrote and never on its case-twin.
+func (c *Catalog) ResolveTableName(name string) string {
+	if name == "" {
+		return name
+	}
+	meta, err := c.getMeta()
+	if err != nil {
+		return name
+	}
+	for _, t := range meta.Tables {
+		if t == name {
+			return name
+		}
+	}
+	if !isFoldedTableName(name) {
+		// A reference carrying an UPPER-CASE letter can only have been written
+		// between double quotes — an unquoted one was folded at the lexer
+		// (#731) — and a delimited name is byte-exact. So it gets no
+		// concession, which is the same boundary ADR-0012 draws for a
+		// delimited COLUMN reference. `FROM "MYTAB"` is 42P01 here exactly as
+		// in PostgreSQL; `FROM MyTab` reaches `MyTab`, because by this point
+		// it is the folded `mytab`.
+		return name
+	}
+	found := ""
+	for _, t := range meta.Tables {
+		if !strings.EqualFold(t, name) {
+			continue
+		}
+		if found != "" {
+			return name // two matches: no unique answer, report the miss
+		}
+		found = t
+	}
+	if found != "" {
+		return found
+	}
+	return name
+}
+
+// AmbiguousTableNames returns the registered tables a reference matches
+// case-insensitively when there are TWO OR MORE of them and none is a
+// byte-exact match — the case ResolveTableName declines to answer. Nil
+// otherwise, including for an ordinary miss.
+//
+// The caller turns it into a refusal that names the candidates. Without it the
+// refusal is the plain "does not exist", which is true (no unique relation has
+// that name) but tells the user nothing about the two tables that do.
+func (c *Catalog) AmbiguousTableNames(name string) []string {
+	if name == "" {
+		return nil
+	}
+	meta, err := c.getMeta()
+	if err != nil {
+		return nil
+	}
+	if !isFoldedTableName(name) {
+		return nil // a delimited reference takes no concession, so none is declined
+	}
+	var matches []string
+	for _, t := range meta.Tables {
+		if t == name {
+			return nil
+		}
+		if strings.EqualFold(t, name) {
+			matches = append(matches, t)
+		}
+	}
+	if len(matches) < 2 {
+		return nil
+	}
+	sort.Strings(matches)
+	return matches
+}
 
 // GetTable returns the metadata for a table.
 func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
