@@ -283,6 +283,13 @@ type HashJoin struct {
 	// actual hash table grows beyond this (e.g., string arenas, grow() doubling),
 	// the delta is reserved so spill triggers at the right threshold.
 	trackedHashOverhead int64
+	// forcedStoreBytes is the part of the build-side storage charge that was
+	// taken PAST the budget (memory.ForceJoinPartitionStore): a per-partition
+	// accumulator's fixed-capacity excess, and the excess of an arrival
+	// batch's per-partition pieces over the batch itself. Released as forced,
+	// here or at Close, so the forced census returns to zero.
+	forcedStoreBytes int64
+
 	// hashOverheadWarned keeps reconcileHashMemory's over-budget WARN to one
 	// line per join: the reconcile runs on every arrival batch, and a build
 	// that has crossed the budget once crosses it on every batch after.
@@ -939,12 +946,12 @@ func (h *HashJoin) reconcileHashMemory() {
 	if actual > h.trackedHashOverhead {
 		delta := actual - h.trackedHashOverhead
 		before := h.MemTracker.Used()
-		h.MemTracker.ForceReserve(delta) // always track; triggers ShouldSpill sooner
+		h.MemTracker.ForceReserveFor(delta, memory.ForceJoinIndex) // always track; triggers ShouldSpill sooner
 		if budget := h.MemTracker.Budget(); budget > 0 && before <= budget && before+delta > budget && !h.hashOverheadWarned {
 			h.hashOverheadWarned = true
 			slog.Warn("hash join index overhead forced past budget",
 				"tracker", h.MemTracker.Name(),
-				"purpose", "hash join index",
+				"purpose", memory.ForceJoinIndex.String(),
 				"bytes", delta,
 				"index_total", actual,
 				"build_rows", h.buildRows,
@@ -4485,10 +4492,22 @@ func (p *HashJoinProbe) Close() error {
 // TPC-H Q02), phantom reservations accumulate query-over-query.
 func (h *HashJoin) Close() error {
 	if h.MemTracker != nil && h.trackedMem > 0 {
-		h.MemTracker.Release(h.trackedMem)
+		// Give each bucket back under the purpose it was charged with, so the
+		// forced census returns to zero rather than describing memory that is
+		// gone (memory/forced.go).
+		if h.trackedHashOverhead > 0 {
+			h.MemTracker.ReleaseForced(h.trackedHashOverhead, memory.ForceJoinIndex)
+		}
+		if h.forcedStoreBytes > 0 {
+			h.MemTracker.ReleaseForced(h.forcedStoreBytes, memory.ForceJoinPartitionStore)
+		}
+		if rest := h.trackedMem - h.trackedHashOverhead - h.forcedStoreBytes; rest > 0 {
+			h.MemTracker.Release(rest)
+		}
 		h.trackedMem = 0
 	}
 	h.trackedHashOverhead = 0
+	h.forcedStoreBytes = 0
 	h.buildBatches = nil
 	h.arena = nil
 	h.arenaNext = nil

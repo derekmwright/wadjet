@@ -210,13 +210,36 @@ const minArrivalChunkRows = 32
 // batch per row group, so a fat row group is a fat arrival batch.
 //
 // Splitting and not overcommitting is deliberate. The filing's other direction
-// - reserve past the budget for the first batch - would be an EIGHTH
-// unceilinged ForceReserve producer on a query tracker (ADR-0006's 2026-09-03
-// census enumerates the seven that exist, two of them in this file's own
-// operator), and the overcommitted bytes would join the floor every DOWNSTREAM
-// operator's Reserve is measured against, with the join's own index share
-// provably unreleasable (#823). Seven producers is a reason to add none, not a
-// reason the next one is cheap. Splitting adds no new overcommit.
+// - reserve past the budget for the first batch - would be another unceilinged
+// ForceReserve producer on a query tracker (ADR-0006's 2026-09-03 census
+// enumerates the ones that exist, two of them in this file's own operator), and
+// the overcommitted bytes would join the floor every DOWNSTREAM operator's
+// Reserve is measured against. Splitting adds no new overcommit.
+//
+// # The reservation is RECONCILED to what the build kept
+//
+// One arrival batch is charged ONCE, as hashBuildBytes(b). What happens to its
+// rows afterwards is one of two things: they are appended to an in-memory
+// partition (retained, and released when that partition is evicted) or written
+// straight to an already-spilled partition (retained by nobody). So the release
+// owed at the end of this call is `cost - retained`, and `retained` is the sum
+// of what partitionAndIndexBatch actually put into partMemory.
+//
+// It used to be neither of those. The spilled branch released
+// hashBuildBytes(compactBatchForRows(b, rows)) PER PARTITION - a figure
+// computed from a freshly minted batch, which pays the per-column fixed
+// overhead (null-bitmap words, a bytes column's len+1 offsets, capacity
+// rounding) once per partition against an arrival batch that paid it once.
+// Measured on this arc's fixture: an arrival batch of 256 rows charged 24,932
+// bytes released 30,372 across its 63 partitions - 1.22x, over-releasing 5,440
+// bytes EVERY BATCH. The in-memory branch was wrong in the other direction: it
+// charges partMemory the tight per-row data bytes, which is less than the
+// arrival share, so a build that never spilled leaked about 1,000 bytes per
+// batch upward. Which way a build drifted therefore followed how many
+// partitions had spilled by the time each batch arrived, i.e. pressure and
+// timing - the moving floor of #789 - and at 100,000 build rows `used` reached
+// MINUS 867,561 against a 1 MiB budget: a ledger that under-reports by 1.67 MB
+// and admits the next operator against room that does not exist.
 func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
 	cost := hashBuildBytes(b)
 	if err := h.MemTracker.Reserve(cost); err != nil {
@@ -238,9 +261,11 @@ func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
 	// pushdowns use these for ALL keys, including those that later spill.
 	h.updateKeyMinMax(b)
 
-	if err := h.partitionAndIndexBatch(b); err != nil {
+	retained, err := h.partitionAndIndexBatch(b)
+	if err != nil {
 		return fmt.Errorf("partition+index: %w", err)
 	}
+	h.reconcileArrivalCharge(cost, retained)
 
 	// Reactive spill if pool pressure is over the spill-cheap threshold
 	// (60% of budget) - release one partition's bytes before the next
@@ -343,7 +368,11 @@ func activeRowIndexes(b *batch.RecordBatch) []int {
 // indexBuildBatch helper used by the legacy partitioned-reload path.
 //
 // Caller must hold h.mu.
-func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) error {
+// It returns the bytes this batch left RESIDENT - the sum of what it added to
+// partMemory, which is what an eviction will release. Its caller reconciles the
+// arrival reservation against that figure.
+func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) (int64, error) {
+	var retained int64
 	ss := h.spillState
 
 	if !ss.accumChecked {
@@ -369,25 +398,14 @@ func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) error {
 		// no live ref and no accumulator involved.
 		if ss.spilledParts[partID] {
 			partBatch := compactBatchForRows(b, rows)
-			partBytes := hashBuildBytes(partBatch)
 			if err := ss.writeBuildBatch(partID, partBatch); err != nil {
-				return fmt.Errorf("writing build batch for spilled partition %d: %w", partID, err)
+				return retained, fmt.Errorf("writing build batch for spilled partition %d: %w", partID, err)
 			}
-			// Release the cost portion that these rows contributed to the
-			// arrival batch's Reserve(cost). They just went to disk, so the
-			// corresponding bytes are no longer charged against the in-memory
-			// budget, and there's no in-memory partition to spill later that
-			// would otherwise release them. Without this, every arrival batch
-			// processed after partitions start spilling drifts the tracker
-			// upward by the to-disk fraction — the failure mode
-			// TestPartitionOnArrival_BasicSpill exposed before this release.
-			if h.MemTracker != nil && partBytes > 0 {
-				h.MemTracker.Release(partBytes)
-				h.trackedMem -= partBytes
-				if h.trackedMem < 0 {
-					h.trackedMem = 0
-				}
-			}
+			// These rows went to disk, so they are retained by nobody and add
+			// nothing to `retained`. The caller's reconcile is what gives their
+			// share of the arrival reservation back - releasing a figure
+			// computed HERE, from a batch minted here, is what over-released
+			// (see absorbArrivalBatch).
 			continue
 		}
 
@@ -396,14 +414,43 @@ func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) error {
 		// schemas index one tightly-sized batch per arrival (append-grow can't
 		// extend nested element storage).
 		if ss.accumEligible {
-			if err := h.appendToAccum(b, partID, rows); err != nil {
-				return err
+			n, err := h.appendToAccum(b, partID, rows)
+			if err != nil {
+				return retained, err
 			}
+			retained += n
 		} else {
-			h.freezeTightForPartition(partID, b, rows)
+			retained += h.freezeTightForPartition(partID, b, rows)
 		}
 	}
-	return nil
+	return retained, nil
+}
+
+// reconcileArrivalCharge brings the arrival batch's single reservation to what
+// the build actually kept. `retained` is what went into partMemory and will be
+// released, byte for byte, when those partitions are evicted; the rest of the
+// reservation covered a copy that is over.
+//
+// The retained figure can EXCEED the reservation - 64 tightly-minted
+// per-partition batches carry the per-column fixed overhead 64 times over - and
+// then the difference is force-reserved, because that memory is resident
+// whether the ledger admits it or not. It is the accumulator excess's class and
+// carries the same purpose.
+func (h *HashJoin) reconcileArrivalCharge(cost, retained int64) {
+	if h.MemTracker == nil {
+		return
+	}
+	switch {
+	case retained < cost:
+		give := cost - retained
+		h.MemTracker.Release(give)
+		h.trackedMem -= give
+	case retained > cost:
+		take := retained - cost
+		h.MemTracker.ForceReserveFor(take, memory.ForceJoinPartitionStore)
+		h.forcedStoreBytes += take
+		h.trackedMem += take
+	}
 }
 
 // accumEligibleSchema reports whether every column of b can be grown in place by
@@ -424,12 +471,14 @@ func accumEligibleSchema(b *batch.RecordBatch) bool {
 // for nested-column schemas and oversized arrival contributions. partMemory is
 // charged the batch's true MemBytes (its capacity equals its row count).
 // Caller must hold h.mu.
-func (h *HashJoin) freezeTightForPartition(partID int, b *batch.RecordBatch, rows []int) {
+func (h *HashJoin) freezeTightForPartition(partID int, b *batch.RecordBatch, rows []int) int64 {
 	ss := h.spillState
 	tight := compactBatchForRows(b, rows)
 	tight.Detach()
-	ss.partMemory[partID] += tight.MemBytes() + int64(len(rows))*40
+	kept := tight.MemBytes() + int64(len(rows))*40
+	ss.partMemory[partID] += kept
 	h.registerFrozen(partID, tight)
+	return kept
 }
 
 // appendToAccum appends b's selected rows for an in-memory partition into that
@@ -440,7 +489,7 @@ func (h *HashJoin) freezeTightForPartition(partID int, b *batch.RecordBatch, row
 // making an open accumulator's rows visible to spill selection before freeze.
 //
 // Caller must hold h.mu.
-func (h *HashJoin) appendToAccum(b *batch.RecordBatch, partID int, rows []int) error {
+func (h *HashJoin) appendToAccum(b *batch.RecordBatch, partID int, rows []int) (int64, error) {
 	ss := h.spillState
 
 	// Defensive: an arrival batch never exceeds DefaultBatchSize, so a fresh
@@ -450,16 +499,15 @@ func (h *HashJoin) appendToAccum(b *batch.RecordBatch, partID int, rows []int) e
 	// slice as one tight batch rather than overflowing the freeze bound.
 	if len(rows) > accumFlushRows {
 		if err := h.freezeAccum(partID); err != nil {
-			return err
+			return 0, err
 		}
-		h.freezeTightForPartition(partID, b, rows)
-		return nil
+		return h.freezeTightForPartition(partID, b, rows), nil
 	}
 
 	acc := ss.openAccum[partID]
 	if acc != nil && acc.Len+len(rows) > accumFlushRows {
 		if err := h.freezeAccum(partID); err != nil {
-			return err
+			return 0, err
 		}
 		acc = nil
 	}
@@ -475,9 +523,10 @@ func (h *HashJoin) appendToAccum(b *batch.RecordBatch, partID int, rows []int) e
 	dstStart := acc.Len
 	acc.EnsureCapacity(dstStart + len(rows)) // grows backing arrays; sets acc.Len
 	dataBytes := appendRows(acc, b, rows, dstStart)
-	ss.partMemory[partID] += dataBytes + int64(len(rows))*40
+	kept := dataBytes + int64(len(rows))*40
+	ss.partMemory[partID] += kept
 	ss.openAccumData[partID] += dataBytes
-	return nil
+	return kept, nil
 }
 
 // freezeAccum finalizes partID's open accumulator: it sets the batch's logical
@@ -514,7 +563,8 @@ func (h *HashJoin) freezeAccum(partID int) error {
 	if excess := acc.MemBytes() - ss.openAccumData[partID]; excess > 0 {
 		ss.partMemory[partID] += excess
 		if h.MemTracker != nil {
-			h.MemTracker.ForceReserve(excess)
+			h.MemTracker.ForceReserveFor(excess, memory.ForceJoinPartitionStore)
+			h.forcedStoreBytes += excess
 			h.trackedMem += excess
 		}
 	}
@@ -736,14 +786,35 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 	delete(ss.partMemory, partID)
 	JoinPartitionsEvicted.Add(1)
 
-	if h.MemTracker != nil && freed > 0 {
-		h.MemTracker.Release(freed)
-		h.trackedMem -= freed
-		if h.trackedMem < 0 {
-			h.trackedMem = 0
-		}
-	}
+	h.releaseStoreBytes(freed)
 	return freed, nil
+}
+
+// releaseStoreBytes gives back n bytes of build-side storage, taking the FORCED
+// portion off the forced census first.
+//
+// The split is aggregate, not per partition: a build whose per-partition
+// batches together weigh more than the arrival batch they were cut from forces
+// the difference once per arrival batch, and that excess is not attributable to
+// one partition. What the census reports is the OUTSTANDING forced total, and
+// that total is exact - every forced byte is released as forced, here or at
+// Close. Which eviction returns it is not something the census claims.
+func (h *HashJoin) releaseStoreBytes(n int64) {
+	if h.MemTracker == nil || n <= 0 {
+		return
+	}
+	forced := min(n, h.forcedStoreBytes)
+	if forced > 0 {
+		h.MemTracker.ReleaseForced(forced, memory.ForceJoinPartitionStore)
+		h.forcedStoreBytes -= forced
+	}
+	if rest := n - forced; rest > 0 {
+		h.MemTracker.Release(rest)
+	}
+	h.trackedMem -= n
+	if h.trackedMem < 0 {
+		h.trackedMem = 0
+	}
 }
 
 // spillUntilCanReserve evicts in-memory partitions one at a time until either
