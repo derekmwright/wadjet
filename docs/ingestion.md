@@ -415,6 +415,12 @@ which is deliberately *not* trimmed to the base tag — that build is a commit
 build hash follows the version whenever the toolchain recorded one, with
 `-dirty` appended if the tree had uncommitted changes.
 
+One caveat if you build inside a **git worktree**: Go reads the VCS stamp from
+the repository's common git directory, so the hash names the *main* checkout's
+HEAD rather than the worktree's — and reports the tree as clean even when the
+worktree is not. Build from a plain checkout (as CI does) when the hash has to
+be trustworthy.
+
 This is what lets a migration enumerate the *files* affected by a fixed writer
 defect instead of guessing at *ingest dates*. Files written before Wadjet
 v0.18.23 carry the constant `wadjet (native writer)` and cannot be attributed

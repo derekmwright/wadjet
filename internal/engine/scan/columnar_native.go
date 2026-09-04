@@ -542,12 +542,22 @@ func rescaleTimestampChunk(vec *batch.Vector, leaves []*pqt.SchemaNode, colIdx, 
 // scale may need digits the carrier has no room for, and the answer then is
 // PostgreSQL's 22003 rather than a wrapped number (#707).
 //
-// NULL slots are rescaled along with the rest, deliberately. A null cell's
-// carrier is not a value — nothing reads it — so branching per row to skip it
-// would buy a per-row test on the repair path to avoid work on cells whose
-// content is already unspecified, and a rescale that FAILS on one would refuse
-// a file over a number no query can see. Zero is the only carrier the batch
-// allocator puts there and zero rescales to zero at every scale.
+// NULL slots are SKIPPED, and the per-row test that costs is the point.
+//
+// The first version of this rescaled them, on the argument that a null cell's
+// carrier is not a value and that "zero is the only carrier the batch allocator
+// puts there". That argument is FALSE: the scan reuses batches through a
+// BatchPool, and a reused batch hands back the previous file's carriers in
+// slots the new file marks NULL. So a file whose every VISIBLE value is fine
+// was refused — one file holding the widest DECIMAL(15,2) carrier followed by
+// an all-NULL file declared at scale 0 raises 22003 on the 0-to-2 multiply of a
+// number no query can see. Round 0's review flagged the premise as ungated and
+// could not break it end to end; asserting it directly
+// (TestPooledBatchesHandBackZeroedDecimalSlots) showed it never held.
+//
+// A null cell's carrier is unspecified, so it must not decide whether a file
+// reads. The branch runs only on the repair path, which by definition is a file
+// this writer did not produce.
 //
 // Non-inlined for the frame-size reason columnDecodePlan's comment gives: this
 // sits on the stack of every per-column errgroup goroutine.
@@ -569,9 +579,12 @@ func rescaleDecimalChunk(vec *batch.Vector, leaves []*pqt.SchemaNode, colIdx, of
 	}
 	to := vec.DecimalData.Scale
 	for i := 0; i < n; i++ {
+		if vec.Nulls.IsNull(i) {
+			continue // unspecified content; it must not decide whether a file reads
+		}
 		v := vec.DecimalData.Data[i]
 		if v.Hi == 0 && v.Lo == 0 {
-			continue // zero at every scale; the common NULL-slot carrier
+			continue // zero at every scale
 		}
 		out, err := pqt.DecimalRescale(pqt.Decimal128{Hi: v.Hi, Lo: v.Lo}, from, to, precision)
 		if err != nil {
