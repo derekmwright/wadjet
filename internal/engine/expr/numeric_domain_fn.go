@@ -184,6 +184,21 @@ func domainInt(v any) (int64, bool) {
 // vecAbsDomain writes ABS into an output vector of the argument's own type.
 // ok=false means the output is a float64 vector and the caller's existing loop
 // runs unchanged.
+//
+// WHAT REACHES IT, measured (round-1 review, P1): not a projected ABS over an
+// int4, int8 or real column. The registry declares `abs` float64
+// (RetFloat64), and FuncCall.EvalVec's vecOutputHolds guard compares that
+// DECLARATION against the output vector the planner allocated — which is the
+// argument's own domain, by NumericDomainResult. The two disagree for exactly
+// the three types below, so every such call takes the per-row path and this
+// kernel's typed arms are unreachable from a projection.
+//
+// That is why the int4 refusal is at the STORE (batch.IntegerRangeError) and
+// not here: a check in this function would have been dead code for the shape
+// it was written for. The arms stay because they are correct and because the
+// declaration is a typing question with its own blast radius, not this arc's;
+// what does not stay is any claim that a cell passing through here proves the
+// projected path.
 func vecAbsDomain(src, out *batch.Vector, n int) bool {
 	hasNulls := src.Nulls.HasNulls()
 	switch out.Type {

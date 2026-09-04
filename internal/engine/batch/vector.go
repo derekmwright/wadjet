@@ -915,11 +915,15 @@ func (v *Vector) SetValue(i int, val any) {
 		case int32:
 			v.Int32Data[i] = tv
 		case int:
-			v.Int32Data[i] = int32(tv)
+			// A widened box narrowing back into an int4 column. It wrapped
+			// silently until #841's review: `ABS(<int32 column>)` at the int4
+			// minimum answered -2147483648 because the kernel's correct int64
+			// 2147483648 had no int32 here. See IntegerRangeError.
+			v.Int32Data[i] = v.int32OrRaise(int64(tv))
 		case int64:
-			v.Int32Data[i] = int32(tv)
+			v.Int32Data[i] = v.int32OrRaise(tv)
 		case float64:
-			v.Int32Data[i] = int32(tv)
+			v.Int32Data[i] = v.int32FromFloatOrRaise(tv)
 		default:
 			v.mismatch(val)
 		}

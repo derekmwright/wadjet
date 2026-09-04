@@ -105,6 +105,17 @@ func TestVecFuncsSurviveEveryOutputType(t *testing.T) {
 				if _, ok := r.(*batch.TypeMismatchError); ok {
 					return
 				}
+				// batch.IntegerRangeError is the SIBLING guard on the same
+				// seam (round-1 review, P1): the Go type converts, the NUMBER
+				// does not fit. It carries the identical contract — a 22003
+				// query error every pipeline driver converts, the server
+				// intact — so it is sanctioned here for the identical reason.
+				// It fires on this sweep because the sweep deliberately hands
+				// an INT32 output vector to kernels whose probe values are
+				// far past int32; refusing them is the point.
+				if _, ok := r.(*batch.IntegerRangeError); ok {
+					return
+				}
 				msg = fmt.Sprint(r)
 			}
 		}()

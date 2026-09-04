@@ -389,6 +389,12 @@ func tmdTables() []tmdTable {
 		// correctly by luck.
 		{bsumTable, bsumSchema(), bsumData()},
 		{i32wideTable, i32wideSchema(), i32wideData()},
+		// The INTEGER-MINIMUM fixture (round-1 review, P1). Rides along for
+		// the reason the fixtures above do: only TestIntegerMinimumIsLoudOnEveryArm
+		// names it, and no type-matrix corpus entry does. Neither bigsum nor
+		// i32wide can stand in — both hold values whose absolute value fits,
+		// which is the one thing this fixture's first row does not.
+		{iminTable, iminSchema(), iminData()},
 		// The DUPLICATE-SPREAD fixture (#703 review F1). It has to be big
 		// enough to CLONE: Pipeline.runParallel returns serially when the
 		// source is exhausted after one warm-up batch, so every 9-row and

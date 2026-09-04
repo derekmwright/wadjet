@@ -309,6 +309,19 @@ func TestUnknownCastTypeStillDeclaresString(t *testing.T) {
 // The other two are two's complement's asymmetry: |MinInt64| has no int64 and
 // |MinInt32| no int32, so negating them wrapped to themselves. PostgreSQL
 // raises for all five cells, measured on 17.11.
+//
+// WHAT THESE CELLS DO NOT COVER, and cf7d3ae0's body wrongly claimed they did
+// (round-1 review, P1): every argument here is a boxed LITERAL, and the
+// "ABS of integer's minimum" cell is the only place an int32 BOX reaches
+// absKeepsDomain at all. A COLUMN does not — ColRef.Eval widens an INT32
+// column to an int64 box on purpose (ADR-0012's "every integer spelling is
+// INT64"), so ABS over an int4 column takes the int64 arm, answers 2147483648
+// correctly, and it is the STORE into the int4-declared output that used to
+// wrap it. That refusal lives in batch.SetValue and is gated where a column
+// can reach it: coordinator.TestIntegerMinimumIsLoudOnEveryArm (five arms),
+// pgwire.TestIntegerOutOfRangeReaches22003OnTheWire (the wire) and
+// batch.TestInt32StoreKeepsTheNumberOrRefuses (the seam itself). Keep this
+// note if these cells are ever read as covering the column shape.
 func TestIntegerConversionsRaiseInsteadOfWrapping(t *testing.T) {
 	b := castRefusalBatch(t)
 	for _, c := range []struct {
