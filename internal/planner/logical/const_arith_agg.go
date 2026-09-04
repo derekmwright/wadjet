@@ -72,18 +72,25 @@ var constArithAggToggle = optswitch.Register("const-arith-agg", "WADJET_CONST_AR
 // without it, ~45×. Ninety per-row expression passes and ninety accumulators
 // instead of a SUM and a COUNT.
 //
-// It ships anyway, and the reason is a standing rule rather than a judgement
-// call: a correctness fix is never gated on a perf A/B, and PostgreSQL decides
-// what is an error (ADR-0012 item 1). The loss is confined to one shape family
-// and is fully recoverable — every ClickBench column here is int4-domain, read
-// as int64 by this engine, so `col + k` CANNOT leave int64's range and the
-// lift is provably safe for exactly those. What the recovery needs is the
-// operand's TYPE, and this pass runs in the syntactic BUILDER, before
-// physical.AnnotateScanColumns has put any type on a scan. The follow-up is
-// therefore to run the lift where types are known — after annotation, over the
-// built Aggregate and the Project above it — and lift only where the width
-// walk (physical.aggInputIsWideInteger's sibling question) says the per-row
-// form cannot refuse. That is a planner-layer change and it is filed as one.
+// It shipped anyway, and the reason was a standing rule rather than a
+// judgement call: a correctness fix is never gated on a perf A/B, and
+// PostgreSQL decides what is an error (ADR-0012 item 1).
+//
+// # The recovery, and where it lives (#850)
+//
+// The loss was confined to one shape family and fully recoverable, because the
+// decline above is SYNTACTIC — this pass runs in the builder, before
+// physical.AnnotateScanColumns has put any type on a scan, so "the literal is
+// an integer" is the most it can know. The lift is SAFE exactly when the
+// per-row arithmetic cannot refuse, and that is decidable from the column's
+// declared type and the manifest's min/max.
+//
+// const_arith_agg_typed.go is that pass. It runs inside logical.Optimize,
+// after the annotators, over the built Aggregate and the Project above it, and
+// it takes exactly the aggregates this one declined. This pass is left as it
+// is: it is the answer for everything the second one cannot see (a derived
+// table, a join, a set operation below the aggregate), and its decline is the
+// safe default the typed pass narrows rather than replaces.
 func rewriteConstArithAggs(node plansql.Node) plansql.Node {
 	if !constArithAggToggle.On() {
 		return nil

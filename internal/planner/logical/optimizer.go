@@ -111,6 +111,12 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	for _, annotate := range annotators {
 		annotate(plan)
 	}
+	// AFTER the annotators and BEFORE computeRequiredColumns: this pass reads
+	// the Scan's ScanColTypes / ScanColStats / ScanRowEstimate, which only an
+	// annotator puts there, and it CHANGES which columns the aggregate reads —
+	// `SUM(col + k)` becomes `SUM(col)` plus `COUNT(col)`, so the required-column
+	// walk must run over the rewritten tree (const_arith_agg_typed.go, #850).
+	liftConstArithAggsWithTypes(plan)
 	computeRequiredColumns(plan)
 	attachScanPredicates(plan)
 	// After attachScanPredicates so scan-attached conjuncts are visible to
