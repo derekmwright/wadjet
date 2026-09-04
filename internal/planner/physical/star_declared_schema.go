@@ -28,6 +28,16 @@ import (
 // them. Same source, same order, so the declared answer and the executed one
 // describe one result.
 //
+// It is NOT only a description. declaredOutputSchema also feeds
+// subqueryOutputColumn (plan.go, #696), which picks the COMPARISON RULE for a
+// scalar subquery on every row — so `d = (SELECT * FROM one_row)` over two
+// DECIMALs of different scale answered ZERO rows without a declaration, where
+// PostgreSQL 17 and the named spelling `(SELECT v FROM one_row)` both answer
+// one. Declaring the star hands that call the same column the named spelling
+// has always handed it, which is why an approximation here would not be free
+// and why the walk DECLINES rather than guesses
+// (wadjet.TestStarScalarSubqueryComparesLikeItsNamedSpelling, round-1 P2).
+//
 // What it declines, and why the boundary is exactly here:
 //
 //   - Anything with a Project below the pass-through nodes. Not this
