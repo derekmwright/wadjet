@@ -1128,7 +1128,7 @@ are different answers — a client branches on them:
 | `CAST('abcdef' AS TEXT(5))` | `42601` | type modifier is not allowed for type "text" |
 | `CAST(x AS FLOAT(0))` / `FLOAT(54)` | `22023` | precision for type float must be at least 1 bit / less than 54 bits |
 | `CAST(x AS DECIMAL(p,s))` past the carrier | `22003` | numeric field overflow |
-| `bigint` arithmetic past its range | `22003` | bigint out of range |
+| `bigint` arithmetic past its range — including under a `CAST`, `ABS`/`MOD`, or a `CASE`/`COALESCE`/`NULLIF`/`GREATEST`/`LEAST` over integer branches | `22003` | bigint out of range |
 | `ABS(<int4 column>)` at `-2147483648` | `22003` | integer out of range |
 | `ABS(<int8 column>)` at `-9223372036854775808` | `22003` | bigint out of range |
 | `1/0`, `x % 0`, `MOD(x, 0)`, `LOG(1, x)` | `22012` | division by zero |

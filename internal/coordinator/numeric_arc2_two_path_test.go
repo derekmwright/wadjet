@@ -784,42 +784,120 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 	// pair numeric there and `SUM(a*2.0)` over bigint's maximum ANSWERS
 	// 18446744073709551614.0 on the server. A decline that swallowed this
 	// shape too would be a refusal PostgreSQL does not make.
-	// #849, PINNED — the shape #841's census does NOT cover, and until this it
-	// had no fixture anywhere in the tree (review round 0, P4).
+	// #849 — the integer DOMAIN under a CAST, a function or a choice operand,
+	// on the same five arms. This block was a PIN through v0.18.30: it recorded
+	// that `CAST(c_i64 AS BIGINT) * <int8 max>` ANSWERED a float64 where
+	// PostgreSQL 17.11 raises 22003 `bigint out of range`, and it is a census
+	// now because the domain is kept.
 	//
-	// Integer arithmetic loses its DOMAIN under a CAST, a function or a choice
-	// operand: `CAST(c_i64 AS BIGINT) * <int8 max>` is computed in float64 and
-	// answers ~8.5e37 where PostgreSQL raises 22003 `bigint out of range`. It
-	// is ONE disposition — projected and aggregated agree — so #841's rule is
-	// satisfied and this is outside it; it is a wrong VALUE in both positions,
-	// which is what #849 is for. Mechanism: physical.intArithAllInt has no
-	// CastNode arm, and its FuncCallNode arm asks expr.FuncReturnsInteger,
-	// which is false for ABS.
+	// The mechanism was the NODE CHOICE, at two sites that had to move together.
+	// expr.compileBinOp builds the typed BinOpNumeric only for operands that
+	// satisfy Float64Expr AND Int64Expr, and *Cast, *Case, *Coalesce,
+	// *decimalScalarFn and a polymorphic *FuncCall satisfy neither — so all of
+	// them fell to the generic BinOp, which read both sides through ToFloat64.
+	// physical.intArithAllInt had no arm for any of those AST kinds either, so
+	// the projection DECLARED float64 to match. Moving only the planner is worse
+	// than moving neither: the first cut of this fix declared INT64 while the
+	// kernel still computed in float, and `ABS(i) * <int8 max>` then STORED
+	// 9.2e24 into the INT64 vector and answered MinInt64 — a wrapped number
+	// wearing the right type.
 	//
-	// Base-identical. The pin exists so the day the integer domain is kept
-	// something FAILS and says so — rule 11's "a shape just outside a rule
-	// this branch states must carry a fixture", applied where the branch's
-	// own #796 pin already applies it.
-	//
-	// TODO(#849): delete when integer arithmetic keeps its domain under a
-	// CAST / function / choice operand.
+	// The arms are what makes this a gate rather than a unit test: the
+	// declaration is a planner fact and the kernel is a worker fact, and only the
+	// DAG arms run them in two processes.
 	for _, tc := range []struct{ name, sql string }{
 		{"cast_operand_projected", `SELECT CAST(c_i64 AS BIGINT) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
 		{"cast_operand_summed", `SELECT SUM(CAST(c_i64 AS BIGINT) * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"cast_operand_avg", `SELECT AVG(CAST(c_i64 AS BIGINT) * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"cast_operand_grouped", `SELECT COUNT(*) AS n FROM typemx WHERE id = 1 GROUP BY CAST(c_i64 AS BIGINT) * 9223372036854775807`},
+		{"cast_operand_windowed", `SELECT MAX(CAST(c_i64 AS BIGINT) * 9223372036854775807) OVER () AS v FROM typemx WHERE id = 1`},
+		{"cast_operand_filtered", `SELECT COUNT(*) AS n FROM typemx WHERE id = 1 AND CAST(c_i64 AS BIGINT) * 9223372036854775807 > 0`},
 		{"abs_operand_projected", `SELECT ABS(c_i64) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
 		{"abs_operand_summed", `SELECT SUM(ABS(c_i64) * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"case_operand_projected", `SELECT (CASE WHEN c_i64 > 0 THEN c_i64 ELSE 1 END) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"case_operand_summed", `SELECT SUM((CASE WHEN c_i64 > 0 THEN c_i64 ELSE 1 END) * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"coalesce_operand_projected", `SELECT COALESCE(c_i64, 1) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"coalesce_operand_summed", `SELECT SUM(COALESCE(c_i64, 1) * 9223372036854775807) AS v FROM typemx WHERE id = 1`},
+		{"greatest_operand_projected", `SELECT GREATEST(c_i64, 1) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"least_operand_projected", `SELECT LEAST(c_i64, 9223372036854775807) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"nullif_operand_projected", `SELECT NULLIF(c_i64, 1) * 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"cast_operand_added", `SELECT CAST(c_i64 AS BIGINT) + 9223372036854775807 AS v FROM typemx WHERE id = 1`},
+		{"cast_operand_subtracted", `SELECT -9223372036854775807 - CAST(c_i64 AS BIGINT) AS v FROM typemx WHERE id = 1`},
 	} {
 		t.Run("#849/"+tc.name, func(t *testing.T) {
-			got, err := na2Run(tmdRunSingle(ctx, single, tc.sql))
-			if err != nil {
-				t.Fatalf("this pin records an ANSWER; a refusal means #849 has moved — "+
-					"re-measure both positions and move the shape into the #841 census: %v"+
-					"\n  SQL: %s", err, tc.sql)
+			for _, arm := range []struct {
+				name string
+				run  func(string) ([]string, error)
+			}{
+				{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
+				{"single+budget", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, spilled, sql)) }},
+				{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
+				{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+				{"dag+morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
+			} {
+				got, err := arm.run(tc.sql)
+				if err == nil {
+					t.Errorf("%s arm ANSWERED %v; PostgreSQL 17.11 raises 22003 `bigint out of "+
+						"range` for this expression whatever produced its operand — a CAST, a "+
+						"function and a choice construct all TYPE integer (#849, ADR-0024 item 2)."+
+						"\n  SQL: %s", arm.name, got, tc.sql)
+					continue
+				}
+				if state := sqlerr.StateOf(err); state != "22003" {
+					t.Errorf("%s arm raised SQLSTATE %s, want 22003\n  err: %v\n  SQL: %s",
+						arm.name, state, err, tc.sql)
+				}
+				if !strings.Contains(err.Error(), "bigint out of range") {
+					t.Errorf("%s arm: %q does not carry PostgreSQL's message `bigint out of range`"+
+						"\n  SQL: %s", arm.name, err, tc.sql)
+				}
 			}
-			if len(got) != 1 || !strings.HasPrefix(got[0], "v=float:") {
-				t.Errorf("got %v, this pin records a float64 box; PostgreSQL 17.11 raises 22003 "+
-					"`bigint out of range` for this expression in BOTH positions\n  SQL: %s",
-					got, tc.sql)
+		})
+	}
+	// The CONTROL per operand kind: the SAME producer with a constant that does
+	// not overflow. Every one of these answered the right number in a FLOAT box
+	// on v0.18.30 — the half only the wire sees, and the reason a value-only
+	// assertion would have called the defect fixed while OID 701 still described
+	// a bigint. `int64:` is what na2Run prints for an int64 box; a float would
+	// print `float:`.
+	for _, tc := range []struct{ name, sql, want string }{
+		{"cast", `SELECT CAST(c_i64 AS BIGINT) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"abs", `SELECT ABS(c_i64) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"case", `SELECT (CASE WHEN c_i64 > 0 THEN c_i64 ELSE 1 END) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"coalesce", `SELECT COALESCE(c_i64, 1) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"greatest", `SELECT GREATEST(c_i64, 1) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"least", `SELECT LEAST(c_i64, 9223372036854775807) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"nullif", `SELECT NULLIF(c_i64, 1) * 2 AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"summed_cast", `SELECT SUM(CAST(c_i64 AS BIGINT) * 2) AS v FROM typemx WHERE id = 1`, "v=int64:2000006"},
+		{"added_cast", `SELECT CAST(c_i64 AS BIGINT) + 2 AS v FROM typemx WHERE id = 1`, "v=int64:1000005"},
+		// The BOUNDARY, from the outside: a FLOAT operand under the same
+		// producers is double precision on the server and must stay float here.
+		// A fix that claimed the integer domain for these would TRUNCATE.
+		{"ctl_abs_of_a_float", `SELECT ABS(c_f64) * 2 AS v FROM typemx WHERE id = 1`, "v=float:0.666667"},
+		{"ctl_coalesce_of_a_float", `SELECT COALESCE(c_f64, 1) * 2 AS v FROM typemx WHERE id = 1`, "v=float:0.666667"},
+		{"ctl_floor_of_an_integer", `SELECT FLOOR(c_i64) * 2 AS v FROM typemx WHERE id = 1`, "v=float:2.00001e+06"},
+	} {
+		t.Run("#849/control_"+tc.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				name string
+				run  func(string) ([]string, error)
+			}{
+				{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
+				{"single+budget", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, spilled, sql)) }},
+				{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
+				{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+				{"dag+morsel4", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordM, sql)) }},
+			} {
+				got, err := arm.run(tc.sql)
+				if err != nil {
+					t.Errorf("%s arm: %v — this shape does NOT overflow and PostgreSQL 17.11 "+
+						"answers it\n  SQL: %s", arm.name, err, tc.sql)
+					continue
+				}
+				if len(got) != 1 || got[0] != tc.want {
+					t.Errorf("%s arm: got %v, want [%s] (live PostgreSQL 17.11, and the BOX is "+
+						"part of the answer — #849)\n  SQL: %s", arm.name, got, tc.want, tc.sql)
+				}
 			}
 		})
 	}

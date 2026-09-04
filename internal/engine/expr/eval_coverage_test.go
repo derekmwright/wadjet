@@ -222,11 +222,20 @@ func TestBinOpAllOps(t *testing.T) {
 	}
 }
 
+// The remainder of two INTEGERS is an integer: `SELECT 10 % 3` is 1 under OID
+// 23 on PostgreSQL 17.11, not 1.0 under OID 701.
+//
+// This node used to answer float64(1) here, and only here: compileBinOp routes
+// two integer literals to BinOpInt64, which has always answered int64, so the
+// float box was reachable only by building the generic node by hand — or by
+// putting a CAST, a function or a choice construct on either side, which is
+// what #849 is. The generic node takes the same integer arm now, so both
+// spellings of one expression answer with one type.
 func TestBinOpModulo(t *testing.T) {
 	binop := &BinOp{Left: &Lit{Val: int64(10)}, Right: &Lit{Val: int64(3)}, Op: "%"}
 	result := binop.Eval(nil, 0)
-	if result != float64(1) {
-		t.Errorf("expected 1, got %v", result)
+	if result != int64(1) {
+		t.Errorf("expected int64 1, got %T %v", result, result)
 	}
 }
 

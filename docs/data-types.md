@@ -377,6 +377,15 @@ The expression compiler handles implicit type promotion in arithmetic and compar
 | Int32 / Int64 | Decimal(p,s) | Decimal — the integer contributes its whole range at scale 0 (10 digits for Int32, 19 for Int64) |
 | Decimal(p1,s1) | Decimal(p2,s2) | Decimal(min(38, max(p-s) + max(s)), max(s1,s2)); a value with no 128-bit carrier at that type is SQLSTATE 22003 |
 
+The integer domain belongs to the expression's TYPE, not to the syntax that
+produced its operands. `CAST(x AS BIGINT)`, a function whose result is an
+integer (`ABS`, `MOD`), and a choice expression over integer branches (`CASE`,
+`COALESCE`, `NULLIF`, `GREATEST`, `LEAST`) all type as integer, so arithmetic
+over them is integer arithmetic: it answers `bigint`, and a result outside
+int64's range is SQLSTATE 22003. One non-integer branch — a float column in a
+`CASE` arm, a `FLOOR`/`ROUND`/`SIGN` result, a fractional literal — makes the
+whole expression double precision, as it does in PostgreSQL.
+
 Integer division truncates toward zero, following PostgreSQL. Aggregates over
 integers are exact types, not float64: `SUM(int4)` is `bigint`, `SUM(int8)` is
 `numeric(38,0)`, and `AVG` over any integer is `numeric(38,4)`. `SUM` over a

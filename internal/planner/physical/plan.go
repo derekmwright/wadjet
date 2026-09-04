@@ -10426,7 +10426,9 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls
 		// expr.isIntNative reads the same declaration off the same registry,
 		// which is what keeps this a strict mirror of the runtime rather than
 		// a second hand-maintained name list drifting away from it.
-		return expr.FuncReturnsInteger(n.Name)
+		if expr.FuncReturnsInteger(n.Name) {
+			return true
+		}
 	case *plansql.Lit:
 		if n.Kind != plansql.LitNumber {
 			return false
@@ -10434,7 +10436,28 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls
 		_, err := strconv.ParseInt(n.Value, 10, 64)
 		return err == nil
 	}
-	return false
+	// Everything else asks the DECLARED-TYPE walk, which is the same question
+	// one clause up: a CAST to an integer type, a POLYMORPHIC function over
+	// integer arguments (abs, coalesce, nullif, greatest, least), and a CASE
+	// whose arms all resolve integer are integer expressions, so arithmetic
+	// over them is integer arithmetic with its 22003 (#849, ADR-0024 item 2).
+	//
+	// The arms above are kept rather than folded into this one because they
+	// answer WITHOUT decls — the scan-level strictInt set, an integer literal,
+	// a FIXED registry declaration — and they are the hot path. This is the
+	// tail: the node kinds nodeDeclaredType knows and the switch above does
+	// not, which before #849 all fell through to `return false` and pinned the
+	// whole expression to float64.
+	//
+	// Only a DECIDED answer counts. A GUESS is a polymorphic declaration's
+	// fallback over arguments nothing resolved, and a wrong int claim here
+	// declares an INT64 vector for a float the kernel will produce.
+	// expr.binOpIntOperand is the runtime mirror and reads the same Ret.
+	t, c := nodeDeclaredType(node, decls)
+	if c != expr.Decided {
+		return false
+	}
+	return t.ID == parquet.TypeInt64 || t.ID == parquet.TypeInt32
 }
 
 // strictIntArithCols resolves the strictly-int column set feeding a node,

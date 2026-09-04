@@ -823,6 +823,11 @@ type BinOp struct {
 	// it satisfies Float64Expr for compileBinOp to see. Resolved once, against
 	// the first batch. See binop_decimal.go.
 	dec decArm
+	// ints is the INTEGER arm, resolved the same way and for the same reason:
+	// this node is also where a CAST, a function and a choice construct meet,
+	// and an integer expression under one of those keeps its domain and its
+	// 22003 rather than being read through a double (#849, int_domain.go).
+	ints intArm
 }
 
 func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
@@ -860,6 +865,19 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 		}
 	}
 
+	// The INTEGER domain, ahead of the ToFloat64 pair below and for the same
+	// reason the decimal arm is: this node is where a CAST, a function and a
+	// choice construct meet, and PostgreSQL types every one of those integer
+	// when its operands are. Reading them through a double answered
+	// 9.223399706970886e+24 for a product the server refuses with 22003, and
+	// answered the non-overflowing shapes under float8 where the server
+	// declares bigint (#849, ADR-0024 item 2). `/` is not here: its own arm
+	// below has carried the integer rule since #369.
+	if e.intMode(b) {
+		if v, ok := e.intArith(lv, rv); ok {
+			return v
+		}
+	}
 	lf := ToFloat64(lv)
 	rf := ToFloat64(rv)
 	switch e.Op {

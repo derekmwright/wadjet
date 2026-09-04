@@ -96,9 +96,16 @@ type BinOpNumeric struct {
 }
 
 // operandIsInt reports whether one operand is integer-preserving against
-// this batch: a plain-integer column, an integer literal, or a nested
-// int-mode arithmetic node. Timestamps/dates/network types keep the float
-// path — their arithmetic semantics are handled elsewhere and unchanged.
+// this batch: a plain-integer column, an integer literal, a nested int-mode
+// arithmetic node, or any of the value PRODUCERS int_domain.go enumerates —
+// a CAST to an integer type, a polymorphic function over integer arguments,
+// a choice construct whose branches are all integer (#849).
+// Timestamps/dates/network types keep the float path — their arithmetic
+// semantics are handled elsewhere and unchanged.
+//
+// The concrete node cases come BEFORE the intModer interface case on purpose:
+// *BinOp implements intMode too now, and a type switch takes the first case
+// that matches.
 func operandIsInt(e Expr, b *batch.RecordBatch) bool {
 	switch v := e.(type) {
 	case *ColRef:
@@ -117,6 +124,20 @@ func operandIsInt(e Expr, b *batch.RecordBatch) bool {
 			return true
 		}
 		return false
+	case *Cast:
+		return castIsInt(v)
+	case *Case:
+		return caseIsInt(v, b)
+	case *Coalesce:
+		return coalesceIsInt(v, b)
+	case *decimalScalarFn:
+		return decimalScalarFnIsInt(v, b)
+	case *numericFuncCall:
+		return funcCallIsInt(v.FuncCall, b)
+	case *FuncCall:
+		return funcCallIsInt(v, b)
+	case *UnaryOp:
+		return (v.Op == "-" || v.Op == "+") && operandIsInt(v.Operand, b)
 	case intModer:
 		return v.intMode(b)
 	default:
