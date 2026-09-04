@@ -230,9 +230,12 @@ mc mb local/wadjet
 >   the command connects to **that process**: the holder records its own
 >   address in `<store-dir>/wadjet.lock`, and the command dials what it finds
 >   there and nothing else. It never guesses a port, so a server running on a
->   *different* `--data-dir` can never answer for this one. A lock that names
->   no reachable address — a stale one, left by a process that was killed — is
->   refused with the lock file's path and the holder's pid.
+>   *different* `--data-dir` can never answer for this one. Two commands
+>   started at once both succeed: one serves the catalog and the other reaches
+>   it. A lock held by a live process that has not published an address is
+>   refused, naming the lock file — wait for that process, or use
+>   `--nats-url`. The lock never needs deleting: it clears itself when the
+>   holder exits, and the kernel releases it even if the holder is killed.
 >
 > **The catalog store directory follows the data.** With
 > `--storage-type=file --data-dir=D` it is `D/_catalog`, so each data

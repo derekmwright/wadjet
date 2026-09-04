@@ -383,6 +383,64 @@ func TestAStaleCatalogLockIsRefused(t *testing.T) {
 	if !strings.Contains(out, "--nats-url") {
 		t.Errorf("the refusal does not name the way out: %q", out)
 	}
+	// Round-3 P2: the refusal must not advise deleting the lock file. The
+	// kernel releases a dead holder's flock on its own, so removal is never
+	// needed — and doing it in the state this message actually appears in, a
+	// LIVE holder that has not published, is what catalogLock.release's own
+	// comment warns about: a third process creates a fresh inode, flocks
+	// that, and two writers end up on one JetStream store.
+	if strings.Contains(out, "can be removed") || strings.Contains(out, "is stale and") {
+		t.Errorf("the refusal advises removing the lock file, which is the one act that breaks "+
+			"the flock rendezvous it exists for: %q", out)
+	}
+	if !strings.Contains(out, "clears itself") {
+		t.Errorf("the refusal does not say the lock clears itself when the holder exits: %q", out)
+	}
+}
+
+// TestConcurrentCLICommandsAllSucceed is round-3 P1: two commands started at
+// once against one data directory must BOTH answer.
+//
+// One of them wins the lock and serves the catalog; the other has to reach it.
+// The loser used to read the lock file once and give up five seconds later,
+// which lost every race whose winner was a short-lived command — it finished,
+// truncating the file or leaving an address nobody answers, while the loser
+// waited for it. Ten pairs produced ten failures. Retrying the flock on every
+// pass fixes it, because "the file is empty" and "the published address is
+// dead" both mean the holder is gone, which is when taking the lock is right.
+func TestConcurrentCLICommandsAllSucceed(t *testing.T) {
+	bin := e2eBin(t)
+	root := t.TempDir()
+
+	if out, err := e2eRun(t, bin, root, "create-table", "CREATE TABLE race (a BIGINT)"); err != nil {
+		t.Fatalf("create-table: %v\n%s", err, out)
+	}
+
+	const pairs = 10
+	type result struct {
+		out string
+		err error
+	}
+	for i := 0; i < pairs; i++ {
+		results := make(chan result, 2)
+		for j := 0; j < 2; j++ {
+			go func() {
+				out, err := e2eRun(t, bin, root, "tables")
+				results <- result{out, err}
+			}()
+		}
+		for j := 0; j < 2; j++ {
+			r := <-results
+			if r.err != nil {
+				t.Fatalf("pair %d: a concurrent `tables` failed: %v\n%s\n"+
+					"Both commands want the same catalog; one serves it and the other must "+
+					"reach it, so neither may refuse (round-3 P1).", i, r.err, r.out)
+			}
+			if !strings.Contains(r.out, "race") {
+				t.Fatalf("pair %d: a concurrent `tables` did not list the table: %q", i, r.out)
+			}
+		}
+	}
 }
 
 // waitForShellBanner blocks until an interactive shell has printed its banner,

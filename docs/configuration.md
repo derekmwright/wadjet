@@ -175,8 +175,12 @@ otherwise the catalog is this deployment's own store directory, which the
 command opens itself — or, when another wadjet process already holds it,
 connects to **that process**, at the address the holder records in
 `<store-dir>/wadjet.lock`. The address is never guessed from a port, so a
-server on a different `--data-dir` cannot answer for this one; a lock naming
-no reachable address is refused. One process opens that directory at a time.
+server on a different `--data-dir` cannot answer for this one. One process
+opens that directory at a time and the others reach it through the holder, so
+concurrent commands all succeed; a lock held by a live process that has not
+published an address is refused. The lock file never needs deleting — it
+clears itself when the holder exits, and the kernel releases it if the holder
+is killed.
 
 **The catalog store follows the data**: with `--storage-type=file
 --data-dir=D` it is `D/_catalog`, so two data directories never share a

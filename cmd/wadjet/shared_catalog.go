@@ -103,25 +103,54 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 	// no "whoever answers": the URL came from the process that holds this
 	// exact catalog. A lock whose URL is missing or unreachable — a stale
 	// lock, a holder that died — is refused, naming the file and the pid.
-	lock, lockErr := lockCatalogStoreDir(cfg.StoreDir)
-	if lockErr != nil {
-		holder, readErr := awaitCatalogLockHolder(cfg.StoreDir)
-		if readErr != nil {
-			return nil, nil, fmt.Errorf("the catalog store directory %s is held by another process, "+
-				"and it published no address to reach it at (%w).\n"+
-				"If no wadjet process is running, %s is stale and can be removed; otherwise wait "+
-				"for that command to finish, or use --nats-url to name a server directly",
-				cfg.StoreDir, readErr, catalogLockPath(cfg.StoreDir))
+	// The lock and the holder's address are ONE question asked repeatedly,
+	// not two asked once (round-3 P1). A holder that is a short-lived command
+	// finishes while a loser waits: the file is truncated, or the address it
+	// published stops answering. Both mean the holder is GONE, which is
+	// exactly when taking the lock is the right move — so every pass tries
+	// the flock first. Ten concurrent pairs of `wadjet tables` failed 10 out
+	// of 20 without this, each loser waiting five seconds for an address a
+	// finished holder had taken with it.
+	//
+	// The refusal is unchanged for the case that is genuinely contended: a
+	// LIVE holder that has not published. There the flock keeps failing and
+	// the file keeps being empty, and the deadline is reached.
+	var lock *catalogLock
+	var lastHolder catalogLockHolder
+	var lastDialErr error
+	deadline := time.Now().Add(catalogLockWait)
+	for {
+		l, lockErr := lockCatalogStoreDir(cfg.StoreDir)
+		if lockErr == nil {
+			lock = l
+			break
 		}
-		kv, release, err := dialCatalogKV(holder.url)
-		if err != nil {
-			return nil, nil, fmt.Errorf("the catalog store directory %s is held by process %d, "+
-				"which is not answering at the address it published, %s (%w).\n"+
-				"If that process is gone, %s is stale and can be removed; otherwise wait for it "+
-				"to finish, or use --nats-url to name a server directly",
-				cfg.StoreDir, holder.pid, holder.url, err, catalogLockPath(cfg.StoreDir))
+		if holder, ok := readCatalogLockHolder(cfg.StoreDir); ok {
+			kv, release, dialErr := dialCatalogKV(holder.url)
+			if dialErr == nil {
+				return kv, release, nil
+			}
+			// Published, but nobody is there: the holder exited between the
+			// write and this dial. Loop — the flock is probably free now.
+			lastHolder, lastDialErr = holder, dialErr
 		}
-		return kv, release, nil
+		if time.Now().After(deadline) {
+			if lastDialErr != nil {
+				return nil, nil, fmt.Errorf("the catalog store directory %s is held by process %d, "+
+					"which is not answering at the address it published, %s (%w).\n"+
+					"Wait for that process to finish — the lock clears itself when it exits — or "+
+					"use --nats-url to name a server directly",
+					cfg.StoreDir, lastHolder.pid, lastHolder.url, lastDialErr)
+			}
+			return nil, nil, fmt.Errorf("the catalog store directory %s is held by another wadjet "+
+				"process that has not published an address to reach it at (%s is empty).\n"+
+				"Wait for that process to finish — the lock clears itself when it exits, and the "+
+				"kernel releases it even if the process is killed — or use --nats-url to name a "+
+				"server directly. Do NOT delete the lock file: a second process would then open "+
+				"the same JetStream store, which is what the lock exists to prevent",
+				cfg.StoreDir, catalogLockPath(cfg.StoreDir))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	unlock := lock.release
 	embedded, err := distributed.NewEmbeddedNATS(cfg, logger)
@@ -260,33 +289,32 @@ type catalogLockHolder struct {
 	url string
 }
 
-// awaitCatalogLockHolder reads the holder's published address, waiting briefly
-// for it to appear.
+// catalogLockWait bounds how long a process that lost the lock race keeps
+// trying, alternating between taking the flock and reaching the holder.
 //
-// The wait is not padding. A holder takes the flock and only then starts its
-// server and learns the ephemeral port it must publish, so a process that
-// loses the race by microseconds would otherwise read an empty file and refuse
-// a catalog that is about to be perfectly reachable. Bounded, because a file
-// that stays empty means the holder is not publishing one at all — a stale
-// lock, or a process killed between the flock and the write — and that is a
-// refusal, not something to wait out.
-func awaitCatalogLockHolder(dir string) (catalogLockHolder, error) {
-	path := catalogLockPath(dir)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
-			if len(lines) == 2 && strings.TrimSpace(lines[1]) != "" {
-				pid, _ := strconv.Atoi(strings.TrimSpace(lines[0]))
-				return catalogLockHolder{pid: pid, url: strings.TrimSpace(lines[1])}, nil
-			}
-		}
-		if time.Now().After(deadline) {
-			return catalogLockHolder{}, fmt.Errorf("%s names no reachable address", path)
-		}
-		time.Sleep(50 * time.Millisecond)
+// It is not padding. A holder takes the flock and only then starts its server
+// and learns the ephemeral port it must publish, so a process that loses by
+// microseconds must wait for an address that is about to exist. Bounded,
+// because a file that STAYS empty under a lock that stays held means a live
+// holder that is not publishing one, and that is a refusal rather than
+// something to wait out.
+const catalogLockWait = 5 * time.Second
+
+// readCatalogLockHolder reads the address a holder published, if it has.
+// ok=false means the file is absent, empty or half-written — all of which say
+// "no address to dial right now", which the caller answers by trying the flock
+// again rather than by giving up.
+func readCatalogLockHolder(dir string) (catalogLockHolder, bool) {
+	data, err := os.ReadFile(catalogLockPath(dir))
+	if err != nil {
+		return catalogLockHolder{}, false
 	}
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	if len(lines) != 2 || strings.TrimSpace(lines[1]) == "" {
+		return catalogLockHolder{}, false
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(lines[0]))
+	return catalogLockHolder{pid: pid, url: strings.TrimSpace(lines[1])}, true
 }
 
 // sharedCatalog is sharedCatalogKV with the Catalog built and INITIALIZED over
