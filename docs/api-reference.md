@@ -96,14 +96,16 @@ Execute a SQL query and return results.
 
 Every refusal a STATEMENT earns carries the PostgreSQL SQLSTATE alongside the
 message — from `SELECT`, from DML, from `EXPLAIN`, and from the DDL statements
-this same endpoint runs — and the class decides the HTTP status:
+this same endpoint runs, including an unknown type name (`42704`), a missing
+function (`42883`), a missing table (`42P01`) and a duplicate one (`42P07`) —
+and the class decides the HTTP status:
 
 | SQLSTATE class | Meaning | Status |
 |---|---|---|
 | `0A` | feature not supported (`0A000`) | `400` |
 | `22` | data exception (`22003`, `22012`, `22P02`, `2201E`, …) | `400` |
 | `23` | integrity constraint violation (`23502`, `23505`) | `400` |
-| `42` | syntax error or access rule violation (`42601`, `42703`, `42P01`, `42P07`, `42883`, …) | `400` |
+| `42` | syntax error or access rule violation (`42601`, `42703`, `42704`, `42P01`, `42P07`, `42883`, …) | `400` |
 | anything else | server-side or transport failure (`XX000` internal, `58030` I/O) | `500` |
 
 The promotion to `400` replaces a `5xx` only. A response that names the

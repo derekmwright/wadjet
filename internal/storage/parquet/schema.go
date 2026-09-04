@@ -171,7 +171,11 @@ func ParseTypeID(s string) (TypeID, error) {
 	case "DATE":
 		return TypeDate, nil
 	default:
-		return 0, fmt.Errorf("unknown type: %s", s)
+		// 42704 undefined_object, PostgreSQL's class for a type name that
+		// names nothing. Every door reported this with the message alone,
+		// including `CREATE TABLE t (a NOSUCHTYPE)` over HTTP while the API
+		// reference promised a class (arc E2 round-3 B1).
+		return 0, sqlerr.New("42704", "unknown type: %s", s)
 	}
 }
 

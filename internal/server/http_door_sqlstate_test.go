@@ -171,6 +171,13 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 		{"drop_table_missing_42P01", "DROP TABLE nope", "42P01", http.StatusNotFound},
 		{"analyze_missing_42P01", "ANALYZE nope", "42P01", http.StatusNotFound},
 		{"create_table_duplicate_42P07", "CREATE TABLE hd (id BIGINT)", "42P07", http.StatusConflict},
+		// The last two statement refusals on this endpoint that carried no
+		// class (round-3 B1). One docs sentence has now been wider than the
+		// code three rounds running, so the corpus enumerates rather than the
+		// prose generalizes.
+		{"drop_function_missing_42883", "DROP FUNCTION nosuchfn", "42883", http.StatusBadRequest},
+		{"create_table_unknown_type_42704", "CREATE TABLE hd3 (a NOSUCHTYPE)", "42704",
+			http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, state, msg := hdPost(t, base, tc.sql)

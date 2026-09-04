@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	sqlerr "github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // UDFDef defines a user-defined function.
@@ -199,7 +200,11 @@ func (s *UDFStore) Unregister(name, caller string, isAdmin bool) error {
 	existing, ok := s.udfs[name]
 	if !ok {
 		s.mu.Unlock()
-		return fmt.Errorf("function %q does not exist", name)
+		// 42883 undefined_function, PostgreSQL's class for DROP FUNCTION
+		// over a name that is not there. Without it `DROP FUNCTION nosuchfn`
+		// answered with the message alone on every door while the API
+		// reference promised a class (arc E2 round-3 B1).
+		return sqlerr.New("42883", "function %q does not exist", name)
 	}
 	if existing.def.Locked && existing.def.Owner != "" &&
 		existing.def.Owner != caller && !isAdmin {
