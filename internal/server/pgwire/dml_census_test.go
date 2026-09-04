@@ -595,17 +595,17 @@ func censusShapes() []censusShape {
 			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
 			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]"},
 		// A DELIMITED alias does NOT fold, so it does not collide — PostgreSQL
-		// runs this one (measured: MERGE 1). Wadjet refuses it, because its
-		// MERGE parser lower-cases delimited identifiers too and the two names
-		// are identical by the time the rule sees them. The refusal is loud
-		// and writes nothing; the residual is identifier folding, which Arc D4
-		// owns. Pinned so it fails the day folding preserves quoting
-		// (review P2).
+		// runs this one (measured: MERGE 1) and so does wadjet, on all three
+		// doors. This cell was PINNED `#837-folding` and the pin said it would
+		// fail the day folding preserved quoting; Arc D4 made the lexer fold
+		// unquoted identifiers and leave delimited ones alone (#731), the
+		// MERGE parser stopped lower-casing its target, source and alias
+		// reads, and the pin started agreeing. Deleting it is that fix's
+		// proof, and the cell is promoted to PostgreSQL's own answer.
 		{name: "#837 a delimited alias does not fold and is legal", tbl: "pr",
 			sql: `MERGE INTO arcb_pr USING arcb_src AS "ARCB_PR" ON arcb_pr.id = "ARCB_PR".id WHEN MATCHED THEN DELETE`,
 			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
-			emb: "state=42712 table=[1:10:a 2:20:b 3:30:c]",
-			bug: "#837-folding"},
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
 		{name: "#837 the UPDATE arm is refused before it writes", tbl: "pr",
 			sql: "MERGE INTO arcb_pr USING arcb_src AS arcb_pr ON arcb_pr.id = arcb_pr.id WHEN MATCHED THEN UPDATE SET n = 0",
 			pg:  "state=42712 table=[1:10:a 2:20:b 3:30:c]",
