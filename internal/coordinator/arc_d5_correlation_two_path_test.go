@@ -1586,6 +1586,32 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 			want:   []string{"n=int64:24"},
 			pgSays: "24 — mk_outer's n cycles 0..4 and the set is {0,1,2}"},
 
+		// THE THREE DERIVED BODIES A BUILD SIDE HAD NEVER HELD, measured
+		// rather than declined on suspicion. Building the inner from the
+		// subquery's own plan means a semi-join build side can now be a SET
+		// OPERATION, a bounded relation or a DISTINCT — three subtrees no
+		// corpus had ever put there, and each of them a shape a distributed
+		// build could plausibly get wrong (a per-task LIMIT most of all).
+		// All three agree on all four arms.
+		//
+		// The LIMIT cell is deterministic despite its ties: `ORDER BY n LIMIT
+		// 3` over mk_inner takes three rows whose n is 0 however the tie
+		// breaks, so the membership set is {0} either way and the answer is
+		// mk_outer's eight n = 0 rows.
+		{issue: "#852", name: "control_derived_inner_is_a_set_operation",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (SELECT 1 FROM (` +
+				`SELECT n FROM mk_inner UNION SELECT n FROM mk_wide) d WHERE d.n = a.n)`,
+			want: []string{"n=int64:40"}},
+		{issue: "#852", name: "control_derived_inner_carries_a_limit",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (SELECT 1 FROM (` +
+				`SELECT n FROM mk_inner ORDER BY n LIMIT 3) d WHERE d.n = a.n)`,
+			want:   []string{"n=int64:8"},
+			pgSays: "8 - the three smallest n are all 0, so the set is {0}"},
+		{issue: "#852", name: "control_derived_inner_is_distinct",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (SELECT 1 FROM (` +
+				`SELECT DISTINCT n FROM mk_inner) d WHERE d.n = a.n)`,
+			want: []string{"n=int64:40"}},
+
 		// THE SECOND BOUNDARY: a derived table that COMPUTES a column it
 		// publishes. This is innerSemiJoinKey's #516 rule one level down —
 		// that guard refuses a COMPUTED select item as a semi-join key, and a
