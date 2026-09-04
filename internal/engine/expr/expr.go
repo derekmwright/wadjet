@@ -4853,7 +4853,26 @@ func fnDateTrunc(args []any) any {
 		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location()).Format(time.RFC3339)
 	case "second":
 		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location()).Format(time.RFC3339)
+	case "decade":
+		return time.Date(t.Year()/10*10, 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+	case "century":
+		// PostgreSQL's centuries START at year 1: date_trunc('century',
+		// '2023-05-17') is 2001-01-01, not 2000-01-01. Measured live.
+		return time.Date((t.Year()-1)/100*100+1, 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+	case "millennium":
+		return time.Date((t.Year()-1)/1000*1000+1, 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+	case "milliseconds", "microseconds":
+		// This engine's instants are epoch MILLISECONDS, so both of these are
+		// the identity here. PostgreSQL truncates a microsecond value to the
+		// millisecond for the first and answers the value itself for the
+		// second; over a millisecond-resolution instant those coincide.
+		return t.Format(time.RFC3339)
 	default:
+		// PostgreSQL refuses a unit its timestamp functions do not know rather
+		// than answering NULL, and the accepted set is exactly the thirteen
+		// above — `epoch`, `doy` and `dow` are EXTRACT's fields and are refused
+		// here on the server too, measured live (#855).
+		raiseUnitNotRecognized(unit)
 		return nil
 	}
 }
@@ -6909,7 +6928,20 @@ func fnSplitPart(args []any) any {
 		return nil
 	}
 	parts := strings.Split(toString(args[0]), toString(args[1]))
-	idx := int(ToFloat64(args[2])) - 1 // SQL is 1-indexed
+	pos := int(ToFloat64(args[2]))
+	// PostgreSQL 14 and later count a NEGATIVE position from the END:
+	// SPLIT_PART('a,b,c', ',', -1) is `c`, -2 is `b`, and a magnitude past the
+	// field count answers the empty string exactly as a too-large positive one
+	// does. Zero names nothing and is 22023, not the empty string this used to
+	// answer for every non-positive position alike (#855). All measured live
+	// on 17.11.
+	if pos == 0 {
+		raiseFieldPositionZero()
+	}
+	idx := pos - 1 // SQL is 1-indexed
+	if pos < 0 {
+		idx = len(parts) + pos
+	}
 	if idx < 0 || idx >= len(parts) {
 		return ""
 	}
@@ -7250,9 +7282,18 @@ func fnChr(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	code := int(ToFloat64(args[0]))
-	if code < 0 || code > 0x10FFFF {
-		return nil
+	code := int64(ToFloat64(args[0]))
+	// PostgreSQL's three refusals, each with its own SQLSTATE (#855). Zero is
+	// the one that matters most: a NUL cannot travel in a text-format DataRow
+	// and libpq truncates at one, so `CHR(0)` answered a one-character string
+	// here and an empty one to psql — #570's shape reached through a function.
+	switch {
+	case code < 0:
+		raiseChrNotPositive()
+	case code == 0:
+		raiseChrNul()
+	case code > 0x10FFFF:
+		raiseChrTooLarge(code)
 	}
 	return string(rune(code))
 }
@@ -7877,8 +7918,15 @@ func fnWidthBucket(args []any) any {
 	bound1 := ToFloat64(args[1])
 	bound2 := ToFloat64(args[2])
 	n := int(ToFloat64(args[3]))
-	if n <= 0 || bound1 == bound2 {
-		return nil
+	// PostgreSQL refuses both of these with 2201G rather than answering NULL:
+	// a non-positive count names no buckets, and equal bounds leave the width
+	// zero (#855). The two messages are distinct on the server and are kept
+	// distinct here.
+	if n <= 0 {
+		raiseWidthBucketCount()
+	}
+	if bound1 == bound2 {
+		raiseWidthBucketBounds()
 	}
 	if value < bound1 {
 		return int32(0)

@@ -1164,9 +1164,15 @@ func TestFnDateTrunc(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil")
 	}
-	// Unknown unit
-	if fnDateTrunc([]any{"unknown", "2024-06-15T10:30:00Z"}) != nil {
-		t.Error("expected nil for unknown unit")
+	// Unknown unit: PostgreSQL 17.11 raises 22023 `unit "unknown" not
+	// recognized for type timestamp without time zone` rather than answering
+	// NULL, which is what this used to assert (#855). The full accept-set and
+	// the message live in scalar_refusal_test.go.
+	state, _ := recoverFatalEvalForTest(t, func() {
+		fnDateTrunc([]any{"unknown", "2024-06-15T10:30:00Z"})
+	})
+	if state != "22023" {
+		t.Errorf("unknown unit raised [%s], want [22023]", state)
 	}
 }
 

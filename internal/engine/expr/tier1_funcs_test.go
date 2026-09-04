@@ -21,8 +21,12 @@ func TestSplitPart(t *testing.T) {
 		{[]any{"a-b-c", "-", float64(1)}, "a"},
 		{[]any{"a-b-c", "-", float64(2)}, "b"},
 		{[]any{"a-b-c", "-", float64(3)}, "c"},
-		{[]any{"a-b-c", "-", float64(4)}, ""},  // out of range
-		{[]any{"a-b-c", "-", float64(0)}, ""},   // 0 index (1-based, so 0-1=-1, out of range)
+		{[]any{"a-b-c", "-", float64(4)}, ""}, // past the end
+		// NEGATIVE positions count from the END on PostgreSQL 14 and later,
+		// and every one of them used to answer "" here (#855).
+		{[]any{"a-b-c", "-", float64(-1)}, "c"},
+		{[]any{"a-b-c", "-", float64(-3)}, "a"},
+		{[]any{"a-b-c", "-", float64(-4)}, ""}, // past the start
 		{[]any{"hello", ",", float64(1)}, "hello"},
 		{[]any{nil, "-", float64(1)}, nil},
 	}
@@ -31,6 +35,12 @@ func TestSplitPart(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("split_part(%v) = %v, want %v", tt.args, got, tt.want)
 		}
+	}
+	// Position 0 names no field at all and is SQLSTATE 22023 on the server,
+	// not the empty string this used to answer (#855).
+	state, _ := recoverFatalEvalForTest(t, func() { fn([]any{"a-b-c", "-", float64(0)}) })
+	if state != "22023" {
+		t.Errorf("split_part(…, 0) raised [%s], want [22023] field position must not be zero", state)
 	}
 }
 

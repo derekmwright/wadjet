@@ -1131,6 +1131,13 @@ are different answers — a client branches on them:
 | `bigint` arithmetic past its range — including under a `CAST`, `ABS`/`MOD`, or a `CASE`/`COALESCE`/`NULLIF`/`GREATEST`/`LEAST` over integer branches | `22003` | bigint out of range |
 | `ABS(<int4 column>)` at `-2147483648` | `22003` | integer out of range |
 | `ABS(<int8 column>)` at `-9223372036854775808` | `22003` | bigint out of range |
+| `DATE_TRUNC('<unrecognized>', ts)` | `22023` | unit "…" not recognized for type timestamp without time zone |
+| `SPLIT_PART(s, d, 0)` | `22023` | field position must not be zero |
+| `WIDTH_BUCKET(v, lo, hi, n)` with `n <= 0` | `2201G` | count must be greater than zero |
+| `WIDTH_BUCKET(v, b, b, n)` | `2201G` | lower bound cannot equal upper bound |
+| `CHR(0)` | `54000` | null character not permitted |
+| `CHR(<negative>)` | `22023` | character number must be positive |
+| `CHR(n)` above U+10FFFF | `54000` | requested character too large for encoding: n |
 | `1/0`, `x % 0`, `MOD(x, 0)`, `LOG(1, x)` | `22012` | division by zero |
 | `LN(0)`, `LOG(0)`, `LOG2(0)` | `2201E` | cannot take logarithm of zero |
 | `LN(-1)`, `LOG(-1)` | `2201E` | cannot take logarithm of a negative number |
@@ -1305,7 +1312,7 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `ENDS_WITH(s, suffix)` | Test if string ends with suffix | `ENDS_WITH(hostname, '.com')` |
 | `CONTAINS(s, sub)` | Test if string contains substring | `CONTAINS(message, 'error')` |
 | `REPEAT(s, n)` | Repeat string n times | `REPEAT('*', 10)` |
-| `SPLIT_PART(s, delim, n)` | Extract nth part from delimited string (1-based) | `SPLIT_PART(url, '/', 3)` |
+| `SPLIT_PART(s, delim, n)` | Extract nth part from delimited string; 1-based, and a NEGATIVE n counts from the end. Position 0 is SQLSTATE 22023; a position past either end is the empty string | `SPLIT_PART(url, '/', 3)`, `SPLIT_PART(url, '/', -1)` |
 | `STRPOS(s, sub)` / `POSITION(sub IN s)` | Position of substring (1-based, 0 if not found) | `STRPOS(message, 'error')` |
 | `REGEXP_LIKE(s, pattern)` | Test if string matches regex | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
 | `REGEXP_EXTRACT(s, pattern [, group])` | Extract regex match or capture group | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
@@ -1316,7 +1323,7 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `SPLIT(s, delim)` | Split by delimiter (JSON array) | `SPLIT('a.b.c', '.')` → `'["a","b","c"]'` |
 | `LPAD(s, n [, pad])` | Left-pad to length n | `LPAD(port, 5, '0')` |
 | `RPAD(s, n [, pad])` | Right-pad to length n | `RPAD(name, 20)` |
-| `CHR(n)` | Character from code point | `CHR(65)` → `'A'` |
+| `CHR(n)` | Character from code point. `CHR(0)` is SQLSTATE 54000 (a NUL cannot travel in a text DataRow), a negative code is 22023, and a code past U+10FFFF is 54000 | `CHR(65)` → `'A'` |
 | `CODEPOINT(s)` | Code point of first character | `CODEPOINT('A')` → `65` |
 | `CONCAT_WS(sep, a, b, ...)` | Concatenate with separator (skips NULLs) | `CONCAT_WS(',', a, b, c)` |
 | `CHAR_LENGTH(s)` | Character length (Unicode-aware) | `CHAR_LENGTH('日本語')` → `3` |
@@ -1375,7 +1382,7 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `IS_NAN(n)` | Test if value is NaN | `IS_NAN(result)` |
 | `IS_FINITE(n)` | Test if value is finite | `IS_FINITE(result)` |
 | `IS_INFINITE(n)` | Test if value is infinite | `IS_INFINITE(result)` |
-| `WIDTH_BUCKET(val, min, max, buckets)` | Assign value to histogram bucket | `WIDTH_BUCKET(latency, 0, 100, 10)` |
+| `WIDTH_BUCKET(val, min, max, buckets)` | Assign value to histogram bucket. A bucket count of zero or less, and equal bounds, are SQLSTATE 2201G | `WIDTH_BUCKET(latency, 0, 100, 10)` |
 | `FROM_BASE(s, base)` | Convert string in given base to int | `FROM_BASE('ff', 16)` → `255` |
 | `TO_BASE(n, base)` | Convert int to string in given base | `TO_BASE(255, 16)` → `'ff'` |
 | `BIT_COUNT(n)` | Count set bits (popcount) | `BIT_COUNT(255)` → `8` |
@@ -1649,7 +1656,7 @@ LIMIT 10
 | `MINUTE(ts)` | Extract minute | `MINUTE(timestamp)` |
 | `SECOND(ts)` | Extract second | `SECOND(timestamp)` |
 | `EXTRACT(part FROM ts)` | Extract date part | `EXTRACT(hour FROM timestamp)` |
-| `DATE_TRUNC(part, ts)` | Truncate to precision | `DATE_TRUNC('hour', timestamp)` |
+| `DATE_TRUNC(part, ts)` | Truncate to precision. `part` is one of `microseconds`, `milliseconds`, `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`, `decade`, `century`, `millennium` (case-insensitive); anything else is SQLSTATE 22023 | `DATE_TRUNC('hour', timestamp)` |
 | `DATE_DIFF(a, b)` | Whole days between two instants (a - b), truncated toward the past | `DATE_DIFF(end_ts, start_ts)` |
 | `DATE_ADD(ts, n)` / `DATE_ADD(ts, INTERVAL)` | Add n **days**, or an INTERVAL in its own unit, preserving time-of-day | `DATE_ADD(ts, 7)` |
 | `TO_DATE(s)` | Parse string to date | `TO_DATE('2026-03-15')` |

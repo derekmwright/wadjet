@@ -2061,6 +2061,27 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 				"min(boolean). wadjet supports both as an extension over a type whose order it " +
 				"defines anyway — bytewise, which is what every bytea comparison uses. Not a " +
 				"position against a PostgreSQL answer, because there is none"},
+		// #855: four scalar functions that MANUFACTURED a value where
+		// PostgreSQL raises. Each entry is here rather than in the value arm
+		// because a NULL — which is what three of them answered — is an
+		// ordinary row to a value oracle, and because the SQLSTATEs are three
+		// different answers to a client: 22023 says the argument names
+		// nothing, 2201G is width_bucket's own condition, 54000 says the
+		// request exceeds a program limit.
+		{name: "DateTruncUnrecognizedUnit",
+			sql: `SELECT DATE_TRUNC('bogus', CAST('2023-01-02 03:04:05' AS timestamp))`},
+		{name: "WidthBucketZeroCount", sql: `SELECT WIDTH_BUCKET(1.0, 0.0, 10.0, 0)`},
+		{name: "WidthBucketNegativeCount", sql: `SELECT WIDTH_BUCKET(1.0, 0.0, 10.0, -1)`},
+		{name: "WidthBucketEqualBounds", sql: `SELECT WIDTH_BUCKET(1.0, 5.0, 5.0, 3)`},
+		{name: "SplitPartZeroPosition", sql: `SELECT SPLIT_PART('a,b,c', ',', 0)`},
+		// CHR's three, which carry TWO different SQLSTATEs on the server. The
+		// zero is the operationally sharpest of the four functions: a NUL
+		// cannot travel in a text-format DataRow and libpq truncates at one,
+		// so before this the same query answered two lengths to two clients —
+		// #570's shape reached through a function.
+		{name: "ChrNul", sql: `SELECT CHR(0)`},
+		{name: "ChrNegative", sql: `SELECT CHR(-1)`},
+		{name: "ChrPastUnicodeRange", sql: `SELECT CHR(1114112)`},
 		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
 		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
 		// #367 fixed the no-GROUP-BY shape above. With a GROUP BY present

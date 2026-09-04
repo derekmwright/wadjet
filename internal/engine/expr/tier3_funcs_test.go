@@ -289,16 +289,26 @@ func TestTier3WidthBucket(t *testing.T) {
 		{[]any{float64(10), float64(0), float64(10), float64(5)}, int32(6)},
 		// Edge: first bucket
 		{[]any{float64(0), float64(0), float64(10), float64(5)}, int32(1)},
-		// Invalid: 0 buckets
-		{[]any{float64(5), float64(0), float64(10), float64(0)}, nil},
-		// Invalid: equal bounds
-		{[]any{float64(5), float64(5), float64(5), float64(4)}, nil},
 		{[]any{nil, float64(0), float64(10), float64(5)}, nil},
 	}
 	for _, tt := range tests {
 		got := fn(tt.args)
 		if got != tt.want {
 			t.Errorf("width_bucket(%v) = %v, want %v", tt.args, got, tt.want)
+		}
+	}
+	// The two invalid argument sets used to answer NULL and are SQLSTATE
+	// 2201G on the server, with two DIFFERENT messages (#855).
+	for _, c := range []struct {
+		args []any
+		msg  string
+	}{
+		{[]any{float64(5), float64(0), float64(10), float64(0)}, "count must be greater than zero"},
+		{[]any{float64(5), float64(5), float64(5), float64(4)}, "lower bound cannot equal upper bound"},
+	} {
+		state, msg := recoverFatalEvalForTest(t, func() { fn(c.args) })
+		if state != "2201G" || msg != c.msg {
+			t.Errorf("width_bucket(%v) raised [%s] %s, want [2201G] %s", c.args, state, msg, c.msg)
 		}
 	}
 }
