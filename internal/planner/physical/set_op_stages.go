@@ -413,19 +413,22 @@ func setOpNoCarrier(a, b parquet.TypeID) bool {
 	if a == b {
 		return false
 	}
-	// A WIRE-DECLARED integer (PORT, PROTOCOL, DURATION) meeting DECIMAL or
-	// REAL. The ladder resolves the pair — PostgreSQL answers numeric and real
-	// — but this engine has no coercion that moves those carriers there: the
-	// DECIMAL rung's DecimalCoercion reads an INT32/INT64 unscaled carrier and
-	// setOpCastExpr's REAL spelling produces a float64 box the PORT vector
-	// refuses (#361's store guard). Measured: both paths failed, one with the
-	// guard and one with an unresolvable (p,s), for a query PostgreSQL answers.
-	// CAST(x AS BIGINT) beside a DOUBLE PRECISION arm carries, which is why the
-	// float8 rung is not here.
-	if setOpWireIntegerCarrier(a) && (b == parquet.TypeDecimal || b == parquet.TypeFloat32) {
+	// A WIRE-DECLARED integer (PORT, PROTOCOL, DURATION) meeting DECIMAL. The
+	// ladder resolves the pair — PostgreSQL answers numeric — and this engine
+	// has no coercion that moves those carriers there: the DECIMAL rung's
+	// DecimalCoercion reads an INT32/INT64 unscaled carrier and knows nothing
+	// of a PORT vector, and setOpDecimalTarget has no digit count for one.
+	//
+	// REAL is NOT here, and was, wrongly: `SELECT c_f32 … UNION ALL SELECT
+	// c_port …` and its PROTOCOL and DURATION siblings ANSWERED PostgreSQL's
+	// `real` rows at 2d4220c9, and refusing them was a right → loud move. The
+	// float rungs carry these boxes — setOpMoveValue converts an int32 or int64
+	// to the float, and the arm's declared spec is the reconciled FLOAT32 — so
+	// the pair resolves and answers on both paths.
+	if setOpWireIntegerCarrier(a) && b == parquet.TypeDecimal {
 		return true
 	}
-	if setOpWireIntegerCarrier(b) && (a == parquet.TypeDecimal || a == parquet.TypeFloat32) {
+	if setOpWireIntegerCarrier(b) && a == parquet.TypeDecimal {
 		return true
 	}
 	if _, ok := setOpWiden(a, b); ok {

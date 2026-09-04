@@ -195,6 +195,15 @@ func setOpColTypeFromColumn(c parquet.Column) (setOpColType, bool) {
 		}, true
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64:
 		return setOpColType{typ: c.Type, known: true}, true
+	case parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
+		// The three types whose WIRE declaration is an integer (#834). They are
+		// on setOpWiden's ladder, so the stage DAG resolves `PORT ∪ INT64` to
+		// bigint and builds the column as one — and this path used to decline
+		// them here, leave the column at the FIRST arm's type, and materialise
+		// the union in a PORT vector: `SELECT c_port … UNION ALL SELECT
+		// 4000000000` came back as -294967296 on this path and 4000000000 on
+		// the DAG, one query answered two ways by the fast-path threshold.
+		return setOpColType{typ: c.Type, known: true}, true
 	default:
 		return setOpColType{}, false
 	}
@@ -300,16 +309,25 @@ func setOpArmNeedsMove(src, dst parquet.Column) bool {
 		}
 	case parquet.TypeFloat64:
 		switch src.Type {
-		case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32:
+		case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32,
+			parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
 			return true
 		}
 	case parquet.TypeFloat32:
 		switch src.Type {
-		case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat64:
+		case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat64,
+			parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
 			return true
 		}
 	case parquet.TypeInt64:
-		return src.Type == parquet.TypeInt32
+		// PORT and PROTOCOL box as an int32 and DURATION as an int64, so the
+		// move is the same widening an INT32 arm takes. Without it the boxes
+		// reached a bigint column as int32s and the column was built at the
+		// first arm's width, which WRAPS (#834's types on the numeric ladder).
+		switch src.Type {
+		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
+			return true
+		}
 	}
 	return false
 }
@@ -346,6 +364,8 @@ func setOpMoveValue(v any, src, dst parquet.Column) (any, error) {
 			return int64(iv), nil
 		case int:
 			return int64(iv), nil
+		case int64:
+			return iv, nil
 		}
 	}
 	return v, nil

@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -98,9 +99,26 @@ func TestEverySetOperationTypePairTakesPostgresVerdict(t *testing.T) {
 								arm.name, want, err, sql)
 							continue
 						}
-						if len(res.Rows) != 6 {
-							t.Errorf("%s arm returned %d rows, want 6\n  SQL: %s",
-								arm.name, len(res.Rows), sql)
+						// The VALUES, not the row count. A count cannot see a
+						// column materialised in the FIRST arm's carrier —
+						// `c_port ∪ 4000000000` came back as -294967296 with
+						// six rows — which is exactly what hid the wrap.
+						//
+						// The reference is each arm's OWN spelling, run alone
+						// and concatenated: UNION ALL is that multiset, moved
+						// into the common type. Where the common type is a
+						// FLOAT the move is LOSSY by design (real ∪ bigint is
+						// real in PostgreSQL too), so the reference is put
+						// through the same width before comparing.
+						refA := setOpPairRefRows(t, arm.run, a.Name, want)
+						refB := setOpPairRefRows(t, arm.run, b.Name, want)
+						ref := append(append([]string(nil), refA...), refB...)
+						sort.Strings(ref)
+						got := setOpCanonRows(res)
+						if strings.Join(got, " ") != strings.Join(ref, " ") {
+							t.Errorf("%s arm's union is not its two arms' values\n  got  %v\n"+
+								"  want %v (each arm alone, at the common type %s)\n  SQL: %s",
+								arm.name, got, ref, want, sql)
 						}
 					case setOpPairRefused:
 						if err == nil {
@@ -155,22 +173,47 @@ var setOpPairNoCarrierPairs = map[[2]parquet.TypeID]bool{
 	{parquet.TypeCIDR, parquet.TypeIPv4}:      true,
 	{parquet.TypeIPv6, parquet.TypeCIDR}:      true,
 	{parquet.TypeCIDR, parquet.TypeIPv6}:      true,
-	// A wire-declared integer meeting DECIMAL or REAL: PostgreSQL resolves
-	// numeric and real, and this engine has no coercion that moves a PORT,
-	// PROTOCOL or DURATION vector into either. Against BIGINT and DOUBLE
-	// PRECISION it does, which is why those pairs are not here.
+	// A wire-declared integer meeting DECIMAL: PostgreSQL resolves numeric, and
+	// this engine has no coercion that moves a PORT, PROTOCOL or DURATION
+	// vector there — the DECIMAL rung reads an INT32/INT64 unscaled carrier.
+	// The INTEGER and FLOAT rungs DO carry them, which is why only DECIMAL is
+	// here.
 	{parquet.TypePort, parquet.TypeDecimal}:     true,
 	{parquet.TypeDecimal, parquet.TypePort}:     true,
-	{parquet.TypePort, parquet.TypeFloat32}:     true,
-	{parquet.TypeFloat32, parquet.TypePort}:     true,
 	{parquet.TypeProtocol, parquet.TypeDecimal}: true,
 	{parquet.TypeDecimal, parquet.TypeProtocol}: true,
-	{parquet.TypeProtocol, parquet.TypeFloat32}: true,
-	{parquet.TypeFloat32, parquet.TypeProtocol}: true,
 	{parquet.TypeDuration, parquet.TypeDecimal}: true,
 	{parquet.TypeDecimal, parquet.TypeDuration}: true,
-	{parquet.TypeDuration, parquet.TypeFloat32}: true,
-	{parquet.TypeFloat32, parquet.TypeDuration}: true,
+}
+
+// setOpPairRefRows is one arm's own values, alone, rendered at the COMMON type
+// the pair resolves to. `pgVerdict` is PostgreSQL's name for that type, from
+// the measured table, so the width the reference is narrowed to is not read
+// from the code under test.
+func setOpPairRefRows(t *testing.T, run func(string) (*oracle.Result, error),
+	col, pgVerdict string,
+) []string {
+	t.Helper()
+	// A FLOAT common type is LOSSY by design — `real ∪ bigint` is real in
+	// PostgreSQL too, and a real widened to double precision renders its own
+	// float32 value at float64 precision (0.1 becomes 0.10000000149011612,
+	// ADR-0012 item 12's own example). So the reference is CAST to the common
+	// type, which is an independent spelling of "this arm's values at that
+	// width" and not the union under test.
+	expr := col
+	switch pgVerdict {
+	case "real":
+		expr = fmt.Sprintf("CAST(%s AS REAL)", col)
+	case "double precision":
+		expr = fmt.Sprintf("CAST(%s AS DOUBLE)", col)
+	}
+	res, err := run(fmt.Sprintf("SELECT %s AS v FROM typemx WHERE id < 3", expr))
+	if err != nil {
+		t.Fatalf("the reference spelling for %s refused: %v", expr, err)
+	}
+	out := setOpCanonRows(res)
+	sort.Strings(out)
+	return out
 }
 
 func setOpPairClass(a, b parquet.TypeID, pgVerdict string) setOpPairDisposition {
