@@ -109,11 +109,19 @@ func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacP
 
 	var evaluator *PolicyEvaluator
 	if len(abacPolicies) > 0 {
+		// An obligation that cannot be enforced as written refuses here, the
+		// way an unreadable `columns:` action already does (#802, #859).
+		if err := ValidateABACPolicies(abacPolicies); err != nil {
+			return err
+		}
 		evaluator = NewPolicyEvaluator(abacPolicies)
 	} else if len(cfg.Roles) > 0 {
 		// Auto-migrate RBAC to ABAC
 		migrated, err := MigrateRBACToABAC(cfg.Roles, policyCfgs)
 		if err != nil {
+			return err
+		}
+		if err := ValidateABACPolicies(migrated); err != nil {
 			return err
 		}
 		evaluator = NewPolicyEvaluator(migrated)

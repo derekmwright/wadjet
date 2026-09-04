@@ -72,7 +72,11 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		if td.RowFilter != "" {
 			rowFilters = append(rowFilters, tableFilter{tableName, td.RowFilter})
 		}
-		if cp := r.columnPolicies(tableName); len(cp) > 0 {
+		cp, cperr := r.columnPolicies(tableName)
+		if cperr != nil {
+			return ctx, nil, cperr
+		}
+		if len(cp) > 0 {
 			policies[strings.ToLower(tableName)] = cp
 		}
 	}
@@ -191,11 +195,28 @@ func (r *policyResolver) deniedColumns(table string) map[string]bool {
 }
 
 // columnPolicies is the table's deny/mask list in the form the plan takes.
-func (r *policyResolver) columnPolicies(table string) []logical.ColumnPolicy {
+//
+// A mask obligation carrying NEITHER a value nor a mask func is an ERROR, not
+// a skip. It used to `continue`, so the obligation vanished and the column
+// came back in the clear on every door — the exact shape ADR-0033 decision 4
+// forbids, a control that cannot be applied degrading silently to a grant.
+// Configuration cannot reach this any more (ValidateABACPolicies refuses it at
+// load), so this is the guard for a provider built in process.
+func (r *policyResolver) columnPolicies(table string) ([]logical.ColumnPolicy, error) {
 	td := r.decide(table)
 	if !td.Allowed {
-		return nil
+		return nil, nil
 	}
+	// The columns this decision takes away, for the mask-expression check
+	// below: a mask runs against the row AS STORED, so one that reads a
+	// policed column publishes the value the policy hides.
+	restricted := make(map[string]bool, len(td.Columns))
+	for _, col := range td.Columns {
+		if !col.Allowed || col.MaskFunc != "" || col.MaskExpr != "" {
+			restricted[strings.ToLower(col.Column)] = true
+		}
+	}
+
 	var out []logical.ColumnPolicy
 	for _, col := range td.Columns {
 		if !col.Allowed {
@@ -203,14 +224,29 @@ func (r *policyResolver) columnPolicies(table string) []logical.ColumnPolicy {
 			continue
 		}
 		if col.MaskFunc == "" && col.MaskExpr == "" {
-			continue
+			return nil, fmt.Errorf("%w: mask_column on %q.%q names neither a value nor a mask_func",
+				logical.ErrColumnPolicyUnenforceable, table, col.Column)
 		}
-		out = append(out, logical.ColumnPolicy{
-			Column:   col.Column,
-			MaskExpr: r.maskExpression(col.MaskExpr, table, col.Column),
-		})
+		expr := r.maskExpression(col.MaskExpr, table, col.Column)
+		ast, perr := plansql.ParseExpression(expr)
+		if perr != nil {
+			// Not a SQL expression. The projection's fallback would quote it
+			// and carry on, which is a mask silently redefining itself.
+			return nil, fmt.Errorf("%w: the mask for %q.%q is not a SQL expression: %q "+
+				"(a literal string needs its quotes)",
+				logical.ErrColumnPolicyUnenforceable, table, col.Column, expr)
+		}
+		if lost, ok := maskExpressionLosesText(expr, ast); !ok {
+			return nil, fmt.Errorf("%w: the mask for %q.%q is not read as written: %q loses %q",
+				logical.ErrColumnPolicyUnenforceable, table, col.Column, expr, lost)
+		}
+		if read, bad := maskReadsRestricted(ast, restricted); bad {
+			return nil, fmt.Errorf("%w: the mask for %q.%q reads %q, which the same policy "+
+				"restricts", logical.ErrColumnPolicyUnenforceable, table, col.Column, read)
+		}
+		out = append(out, logical.ColumnPolicy{Column: col.Column, MaskExpr: expr})
 	}
-	return out
+	return out, nil
 }
 
 // tableColumns is the table's declared column list, from the catalog.
