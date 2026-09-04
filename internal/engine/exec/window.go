@@ -439,6 +439,9 @@ type Window struct {
 	accState            atomic.Int32
 	unregisterAccounted func()
 	finalized           bool
+	// consumesSinceSpill counts Consumes for the TEST-ONLY spill forcing knob
+	// (window_force_spill.go). Untouched when the knob is disarmed.
+	consumesSinceSpill int64
 }
 
 // NewWindow creates a new window operator.
@@ -537,10 +540,22 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// accumulates at least minSortRunBytes before flushing (merge-friendly
 	// runs); the legacy row path keeps the old flush-on-pressure behavior.
 	// Peer relief (SpillSome) bypasses the floor.
-	if w.Spill != nil && w.Spill.ShouldSpillFor(memory.SpillCheap) && len(w.batches) > 0 {
-		if w.trackedMem >= minSortRunBytes {
-			if _, err := w.flushSpillLocked(); err != nil {
-				return err
+	if w.Spill != nil && len(w.batches) > 0 {
+		// The TEST-ONLY knob takes the same branch pressure would have taken,
+		// and skips the minSortRunBytes floor: that floor is a merge-economy
+		// heuristic sized against real pressure, and there is none here. See
+		// window_force_spill.go for why the pressure trigger alone cannot be
+		// relied on to fire.
+		forced := w.forcedSpillDue()
+		if forced || w.Spill.ShouldSpillFor(memory.SpillCheap) {
+			if forced || w.trackedMem >= minSortRunBytes {
+				freed, err := w.flushSpillLocked()
+				if err != nil {
+					return err
+				}
+				if forced && freed > 0 {
+					ForcedWindowSpills.Add(1)
+				}
 			}
 		}
 	}

@@ -37,6 +37,25 @@ import (
 // end-to-end gate at the SQL layer can arm it, and settable from Go for exec
 // level gates. It is never set on any production path: the only cost when unset
 // is one relaxed atomic load per Consume, next to a batch of work.
+//
+// # DO NOT arm this at the SQL layer until #864 is fixed
+//
+// Arming it around a whole query DROPS ROWS — 1,100 / 2,800 / 3,300 of 5,000
+// on the type-matrix sweep's ORDER BY cells, 44% to 78% gone, every count a
+// whole number of input batches. The Sort OPERATOR is not what loses them:
+// TestEverySortedTypeSurvivesAForcedRun drives five forced runs through one
+// Sort for every flat type and gets every row back in exact id order. They are
+// lost ABOVE it, where a morsel-parallel clone's run files reach the merge —
+// #790's shape, on the Sort instead of the HashAggregate. That is #864.
+//
+// What keeps production safe from the same path is not this knob's absence: it
+// is memory.SpillManager's TrackingOnlyView, which makes ShouldSpillFor answer
+// false for the clones, so a clone never writes the runs that would be
+// orphaned. Arming the knob here bypasses ShouldSpillFor entirely and therefore
+// bypasses that guard, which is exactly how #864 was found.
+//
+// So: exec-level gates that drive ONE operator, yes. A gate that arms it around
+// wadjet.DB.Query, not until #864 closes.
 var forceSortSpillEvery atomic.Int64
 
 func init() {

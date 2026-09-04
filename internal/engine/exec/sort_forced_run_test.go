@@ -24,10 +24,19 @@ import (
 // relied on to fire, which is the shape CLAUDE.md already names.
 //
 // So the trigger moves to exec.ForceSortSpillEvery — the sort's analogue of
-// ForceAggDrainEvery (ADR-0027 decision 6) — and the coverage gets STRONGER
-// rather than weaker: every flat type goes through the run writer, the run
-// reader and the k-way merge on every run and every core count, where the sweep
-// asserted only that SOME cell of the family had spilled.
+// ForceAggDrainEvery (ADR-0027 decision 6). This covers more TYPES than the
+// assertion it replaces, and it covers them deterministically: every flat type
+// through the run writer, the run reader and the k-way merge, on every run and
+// every core count, where the sweep asserted only that SOME cell of the family
+// had spilled.
+//
+// It is NOT strictly more, and the difference is owed. This drives ONE Sort. The
+// sweep's assertion, on the runs where it fired, said something this cannot:
+// that a spilled sort answers END TO END what an unspilled one answers, through
+// the planner, the pipeline and the clone merge. That claim is blocked on #864
+// — arming this knob around a whole query drops 44% to 78% of the rows in the
+// clone merge — and it comes back the day #864 closes, as a sweep arm that arms
+// the knob per cell.
 //
 // Revert the knob and this fails: nothing writes a run, so the merge never runs
 // and the engagement assert fires.

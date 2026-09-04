@@ -263,7 +263,7 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 	for _, fam := range []string{"aggregate", "sort", "window", "rawrow", "join", "crossjoin"} {
 		t.Logf("engagement: %-9s %2d of %2d cells engaged, %d events",
 			fam, engagedCells[fam], cellsByFamily[fam], engagedTotal[fam])
-		if fam == "sort" {
+		if fam == "sort" || fam == "window" {
 			// RECORDED, not asserted, and the reason is measured. Instrumenting
 			// the sort's own spill check over these 18 cells:
 			//
@@ -278,13 +278,45 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 			// these 18 cells, and a 2-vCPU CI runner engaged 0 and turned this
 			// gate red on a tree where nothing about the sort had changed.
 			//
-			// So the sort family's spill evidence is
-			// exec.TestEverySortedTypeSurvivesAForcedRun, which arms
-			// exec.ForceSortSpillEvery and puts EVERY flat type through the run
-			// writer, the run reader and the k-way merge on every run and every
-			// core count — strictly more than "some ORDER BY cell spilled".
-			// What these cells still gate is the ANSWER under a budget, which
-			// is asserted per run above.
+			// The WINDOW family is the same variable read through the same
+			// call: exec.Window.Consume spills on the identical
+			// ShouldSpillFor(SpillCheap) line. It engaged 22 and 23 of 36 on a
+			// 24-core box and 0 of 36 on ONE core with one scan worker
+			// (GOMAXPROCS=1 WADJET_SCAN_WORKERS=1) — 0 in all six runs
+			// measured there, base and this tree alike, so on a thin runner it
+			// is not even a coin toss: the window simply never reaches the
+			// threshold, and this gate was red on every one of those runs with
+			// nothing about the window changed.
+			//
+			// Both families' spill evidence now lives at the operator:
+			// exec.TestEverySortedTypeSurvivesAForcedRun and
+			// exec.TestEveryWindowedTypeSurvivesAForcedRun arm
+			// exec.ForceSortSpillEvery / exec.ForceWindowSpillEvery and put
+			// EVERY flat type through the run writer, the run reader and the
+			// merge, on every run and every core count. Those gates cover more
+			// TYPES than the assertion removed here, and they do it
+			// deterministically — but they are per-OPERATOR, so the END-TO-END
+			// claim "a spilled sort/window answers what an unspilled one
+			// answers, through the planner and the pipeline" is OWED and is
+			// blocked on #864: arming either knob around a whole query drops
+			// 44% to 78% of the rows through the clone merge, which is a
+			// defect to fix, not a gate to write around.
+			//
+			// What these cells still gate meanwhile is the ANSWER under a
+			// budget, asserted per run above, on whatever spilling the box
+			// happens to produce.
+			//
+			// The AGGREGATE family is deliberately still asserted. Its drain
+			// does not hang on this reading: past ShouldSpillFor it must clear
+			// drainIsProductive (#325), which is
+			// `trackedGroupMem - lastDrainFootprint >= floor` — the
+			// aggregate's OWN new state — and the clone bound drains on
+			// trackedGroupMem against PartialDrainBytes with no tracker
+			// reading at all. Neither can be starved by the scan running
+			// slower, and the measured floor is nowhere near zero and barely
+			// moves: 48 of 84 on CI's 2-vCPU runner, 43 on 24 cores, and 28
+			// with 80 to 82 drain events on ONE core — the same 28 in all six
+			// one-core runs.
 			continue
 		}
 		if engagedCells[fam] == 0 {
