@@ -451,7 +451,7 @@ func setOpFloatValue(v any, name, typeName string) (any, error) {
 					"numeric field overflow: %s is out of range for %s, the type this "+
 						"set operation's arms agree on for column %q", fv, typeName, name)
 			}
-			return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %q", typeName, fv)
+			return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %s", typeName, sqlerr.Quote(fv))
 		}
 		return f, nil
 	}

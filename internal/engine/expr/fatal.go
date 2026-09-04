@@ -37,7 +37,7 @@ func raiseDivisionByZero() {
 // PostgreSQL's invalid_text_representation, for a string that cannot be read
 // as a value of the destination type.
 func raiseInvalidTextRepresentation(destType, input string) {
-	panic(fatalEval{sqlerr.New("22P02", "invalid input syntax for type %s: %q", destType, input)})
+	panic(fatalEval{sqlerr.New("22P02", "invalid input syntax for type %s: %s", destType, sqlerr.Quote(input))})
 }
 
 // raiseNoLikeOperator aborts the query with SQLSTATE 42883,
@@ -71,7 +71,7 @@ type InvalidLiteralError struct {
 }
 
 func (e *InvalidLiteralError) Error() string {
-	return fmt.Sprintf("invalid input syntax for type %s: %q", e.DestType, e.Input)
+	return fmt.Sprintf("invalid input syntax for type %s: %s", e.DestType, sqlerr.Quote(e.Input))
 }
 
 // SQLState returns PostgreSQL's invalid_text_representation code, the same one
@@ -128,7 +128,7 @@ func (e *NumericRangeError) Error() string {
 	case "bigint", "integer", "smallint", "port", "protocol", "duration":
 		return fmt.Sprintf("value %q is out of range for type %s", e.Input, e.DestType)
 	}
-	return fmt.Sprintf("%q is out of range for type %s", e.Input, e.DestType)
+	return fmt.Sprintf("%s is out of range for type %s", sqlerr.Quote(e.Input), e.DestType)
 }
 
 // SQLState returns PostgreSQL's numeric_value_out_of_range code, the same one
@@ -197,8 +197,8 @@ func raiseRealConversionError(operand Expr, f float64, fit kernel.Float32Fit) {
 		if text == "" {
 			text = toString(lit.Val)
 		}
-		panic(fatalEval{sqlerr.New("22003", "%q is out of range for type real",
-			kernel.RealOverflowText(text))})
+		panic(fatalEval{sqlerr.New("22003", "%s is out of range for type real",
+			sqlerr.Quote(kernel.RealOverflowText(text)))})
 	}
 	kind := "overflow"
 	if fit == kernel.Float32Underflows {

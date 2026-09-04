@@ -122,8 +122,8 @@ func refuseRealInList(n *plansql.InExpr, decls colDecls) error {
 		if text == "" || !kernel.RealLitTextUnrepresentable(text) {
 			continue
 		}
-		return sqlerr.New("22003", "%q is out of range for type real",
-			kernel.RealOverflowText(text))
+		return sqlerr.New("22003", "%s is out of range for type real",
+			sqlerr.Quote(kernel.RealOverflowText(text)))
 	}
 	return nil
 }

@@ -814,6 +814,26 @@ body, or a forward reference to a later item — is SQLSTATE `42P01`
 (`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
 the exception: a recursive CTE's name IS visible inside its own body.
 
+## Numeric literals
+
+Integer literals take PostgreSQL 16+'s grammar, unquoted and as text read into
+an integer type alike:
+
+```sql
+SELECT 0x1A, 0o17, 0b101, 1_000, 007   -- 26, 15, 5, 1000, 7
+SELECT CAST('0x1A' AS BIGINT)          -- 26
+SELECT id FROM t WHERE k = '1_000'     -- the same grammar in a predicate
+```
+
+`0x`/`0X`, `0o`/`0O` and `0b`/`0B` are radix prefixes; `_` separates digits and
+must sit between them (`_100`, `100_` and `1__0` are SQLSTATE `22P02`, though
+`0x_1A` is legal because the prefix stands in front of the underscore); and a
+leading zero is DECIMAL, so `017` is seventeen. A value outside the target
+type's range is SQLSTATE `22003`, never a wrapped number.
+
+An error message quotes the offending text byte for byte, as PostgreSQL does —
+a literal containing a non-ASCII byte is echoed, not escaped.
+
 ## Predicates must be boolean
 
 `WHERE`, `HAVING`, a `JOIN ... ON` condition, the operands of `NOT`/`AND`/`OR`

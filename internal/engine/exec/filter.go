@@ -739,7 +739,7 @@ func intTypeName(typ batch.TypeID) (string, bool) {
 func intStatusError(st kernel.IntConstStatus, name, text string) error {
 	switch st {
 	case kernel.IntConstSyntax:
-		return sqlerr.New("22P02", "invalid input syntax for type %s: %q", name, text)
+		return sqlerr.New("22P02", "invalid input syntax for type %s: %s", name, sqlerr.Quote(text))
 	case kernel.IntConstRange:
 		return sqlerr.New("22003", `value "%s" is out of range for type %s`, text, name)
 	}
@@ -974,9 +974,9 @@ func floatConstError(typ batch.TypeID, value any, litText string) error {
 	if text, quoted := kernel.QuotedConstText(value); quoted {
 		switch _, st := kernel.FloatLitText(text, bits); st {
 		case kernel.NumConstSyntax:
-			return sqlerr.New("22P02", "invalid input syntax for type %s: %q", name, text)
+			return sqlerr.New("22P02", "invalid input syntax for type %s: %s", name, sqlerr.Quote(text))
 		case kernel.NumConstRange:
-			return sqlerr.New("22003", "%q is out of range for type %s", text, name)
+			return sqlerr.New("22003", "%s is out of range for type %s", sqlerr.Quote(text), name)
 		}
 		return nil
 	}
@@ -994,7 +994,7 @@ func floatConstError(typ batch.TypeID, value any, litText string) error {
 	if text == "" {
 		text = fmt.Sprint(value)
 	}
-	return sqlerr.New("22003", "%q is out of range for type real", kernel.RealOverflowText(text))
+	return sqlerr.New("22003", "%s is out of range for type real", sqlerr.Quote(kernel.RealOverflowText(text)))
 }
 
 func (f *KernelFilter) Init(_ context.Context) error { return nil }

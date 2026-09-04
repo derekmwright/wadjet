@@ -1800,7 +1800,7 @@ func assignFloatValue(v any, col parquet.Column) (any, error) {
 	}
 	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil {
-		return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %q", col.Type, s)
+		return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %s", col.Type, sqlerr.Quote(s))
 	}
 	return f, nil
 }

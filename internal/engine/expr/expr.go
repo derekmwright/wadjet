@@ -6596,12 +6596,28 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 			return i
 		}
 		if s, ok := stringOperand(v); ok {
+			typ := "integer"
+			if dest == "bigint" || dest == "int8" || dest == "signed" {
+				typ = "bigint"
+			}
+			// PostgreSQL's INTEGER input grammar FIRST, which is a strict
+			// superset of Go's base-10 one: `'0x1A'::integer` is 26 there,
+			// `'0o17'` 15, `'0b101'` 5, `'1_000'` 1000 and `'017'` decimal
+			// seventeen. kernel.IntLitText is the one reader the comparison
+			// kernels, the row path and the plan-time refusal already share,
+			// so the CAST door cannot disagree with them about which strings
+			// name an integer (#634).
+			switch n, st := kernel.IntLitText(s); st {
+			case kernel.NumConstOK:
+				return castIntInRange(n, dest)
+			case kernel.NumConstRange:
+				raiseNumericOutOfRange(typ, s)
+			}
+			// Not an integer under that grammar. A FRACTIONAL string still
+			// casts — PostgreSQL rounds `'26.7'::integer` to 27 — so the
+			// float reader is the fallback, not the first try.
 			f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 			if err != nil {
-				typ := "integer"
-				if dest == "bigint" {
-					typ = "bigint"
-				}
 				raiseInvalidTextRepresentation(typ, s)
 			}
 			return castIntInRange(castFloatToInt64(f, dest), dest)

@@ -474,6 +474,6 @@ func (r *realLitSet) contains(f float32) bool {
 // type the comparison casts it to. It is the row path's spelling of the
 // refusal exec.floatConstError makes for the vectorized kernel (#549).
 func raiseNumericOutOfRange(destType, input string) {
-	panic(fatalEval{sqlerr.New("22003", "%q is out of range for type %s",
-		kernel.RealOverflowText(input), destType)})
+	panic(fatalEval{sqlerr.New("22003", "%s is out of range for type %s",
+		sqlerr.Quote(kernel.RealOverflowText(input)), destType)})
 }

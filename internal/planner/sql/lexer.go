@@ -2,6 +2,8 @@ package sql
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -375,6 +377,16 @@ func (l *lexer) peek() rune {
 	l.backup()
 	l.width = savedWidth
 	return r
+}
+
+// peekAt returns the BYTE n positions ahead of the current one, or 0 past the
+// end. Byte, not rune: its callers ask whether the next character is an ASCII
+// digit, and a multi-byte rune is not one.
+func (l *lexer) peekAt(n int) byte {
+	if l.pos+n >= len(l.input) {
+		return 0
+	}
+	return l.input[l.pos+n]
 }
 
 // emit produces a token from start..pos with the given type.
@@ -841,9 +853,35 @@ func lexNumber(l *lexer) stateFn {
 	// one ends the number: `.5.5` lexes as `.5` then `.5`, which the parser
 	// then refuses as it refuses `1.5.5`.
 	seenDot := l.pos > l.start && l.input[l.start] == '.'
+	// A RADIX PREFIX — 0x, 0o, 0b, either case. PostgreSQL 16+ reads these in
+	// its lexer, not only in the integer type's input function, so `SELECT
+	// 0x1A` is 26 there and was a syntax error here (#634). The digits are
+	// scanned in the prefix's own base; anything else ends the token and the
+	// parser refuses what follows.
+	if !seenDot && l.input[l.start] == '0' && l.pos == l.start+1 {
+		if base := radixBase(l.peek()); base > 0 {
+			l.next() // consume x/o/b
+			for {
+				r := l.peek()
+				if r == '_' || (r < 0x80 && digitInBase(byte(r), base)) {
+					l.next()
+					continue
+				}
+				break
+			}
+			return emitRadixNumber(l, base)
+		}
+	}
 	for {
 		r := l.peek()
 		if r >= '0' && r <= '9' {
+			l.next()
+			continue
+		}
+		// An UNDERSCORE separator, PostgreSQL's own rule: it must sit
+		// BETWEEN digits, so the next character decides whether it is part of
+		// this number or the start of an identifier.
+		if r == '_' && l.pos > l.start && isDigitByte(l.peekAt(1)) {
 			l.next()
 			continue
 		}
@@ -864,7 +902,86 @@ func lexNumber(l *lexer) stateFn {
 			l.next()
 		}
 	}
+	// The token's VALUE carries no separators. Every consumer of a numeric
+	// literal downstream reads the text — the DECIMAL path reads its exact
+	// digits, ADR-0024 item 6 — and teaching each of them the separator rule
+	// is how they would come to disagree about it.
+	text := l.input[l.start:l.pos]
+	if strings.ContainsRune(text, '_') {
+		l.emitVal(TokenNumber, strings.ReplaceAll(text, "_", ""))
+		return nil
+	}
 	l.emit(TokenNumber)
+	return nil
+}
+
+// radixBase maps a prefix letter to its base, or 0 for anything else.
+func radixBase(r rune) int {
+	switch r {
+	case 'x', 'X':
+		return 16
+	case 'o', 'O':
+		return 8
+	case 'b', 'B':
+		return 2
+	}
+	return 0
+}
+
+func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
+
+func digitInBase(c byte, base int) bool {
+	var v int
+	switch {
+	case c >= '0' && c <= '9':
+		v = int(c - '0')
+	case c >= 'a' && c <= 'f':
+		v = int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		v = int(c-'A') + 10
+	default:
+		return false
+	}
+	return v < base
+}
+
+// emitRadixNumber converts a radix-prefixed literal to the DECIMAL text every
+// downstream consumer already reads. PostgreSQL's own answer for `0x1A` is the
+// integer 26, and normalizing here means the parser, the planner, the DECIMAL
+// path and the wire all keep exactly one numeric-literal grammar.
+func emitRadixNumber(l *lexer, base int) stateFn {
+	raw := l.input[l.start:l.pos]
+	digits := strings.ReplaceAll(raw[2:], "_", "")
+	if digits == "" {
+		return l.errorf("invalid integer literal %q: no digits after the radix prefix", raw)
+	}
+	// An underscore must be FOLLOWED by a digit, as it must in the decimal
+	// form. It MAY come first here — `0x_1A` is 26 in PostgreSQL — because the
+	// prefix already stands in front of it.
+	body := raw[2:]
+	for i := 0; i < len(body); i++ {
+		if body[i] == '_' && (i+1 >= len(body) || !digitInBase(body[i+1], base)) {
+			return l.errorf("invalid integer literal %q: an underscore must separate digits", raw)
+		}
+	}
+	var acc int64
+	for i := 0; i < len(digits); i++ {
+		c := digits[i]
+		var v int64
+		switch {
+		case c >= '0' && c <= '9':
+			v = int64(c - '0')
+		case c >= 'a' && c <= 'f':
+			v = int64(c-'a') + 10
+		default:
+			v = int64(c-'A') + 10
+		}
+		if acc > (math.MaxInt64-v)/int64(base) {
+			return l.errorf("value %q is out of range for type bigint", raw)
+		}
+		acc = acc*int64(base) + v
+	}
+	l.emitVal(TokenNumber, strconv.FormatInt(acc, 10))
 	return nil
 }
 

@@ -31,6 +31,16 @@ func (e *Error) Error() string { return e.Message }
 func (e *Error) SQLState() string { return e.Code }
 
 // New builds an Error with the given SQLSTATE and formatted message.
+// Quote renders a value's SOURCE TEXT the way PostgreSQL renders it inside an
+// error message: between plain double quotes, BYTE for byte.
+//
+// Go's %q is not that. It escapes every non-ASCII byte, so a literal holding a
+// NBSP came out as `"\u00a042"` where PostgreSQL emits the two characters
+// themselves, and a client comparing the message — or a person reading it —
+// sees text nobody typed (#638). PostgreSQL quotes with a bare
+// `"%s"` and lets the bytes through, including an embedded quote character.
+func Quote(s string) string { return `"` + s + `"` }
+
 func New(code, format string, args ...any) *Error {
 	return &Error{Code: code, Message: fmt.Sprintf(format, args...)}
 }
