@@ -263,6 +263,30 @@ func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
 	for _, fam := range []string{"aggregate", "sort", "window", "rawrow", "join", "crossjoin"} {
 		t.Logf("engagement: %-9s %2d of %2d cells engaged, %d events",
 			fam, engagedCells[fam], cellsByFamily[fam], engagedTotal[fam])
+		if fam == "sort" {
+			// RECORDED, not asserted, and the reason is measured. Instrumenting
+			// the sort's own spill check over these 18 cells:
+			//
+			//	293 checks per run, every configuration measured
+			//	median used 165,152 B   threshold 209,715 B (40% of 512 KiB)
+			//	above threshold: 13 of 293 on 2 cores, 8 of 293 on 12
+			//
+			// The sort is BELOW the line here; what carries it over on the runs
+			// where it spills is a transient in the SCAN's read-ahead, which is
+			// ADR-0013 class-4 nondeterminism and not a property of this query.
+			// Across six runs of unchanged code the family engaged 7 to 14 of
+			// these 18 cells, and a 2-vCPU CI runner engaged 0 and turned this
+			// gate red on a tree where nothing about the sort had changed.
+			//
+			// So the sort family's spill evidence is
+			// exec.TestEverySortedTypeSurvivesAForcedRun, which arms
+			// exec.ForceSortSpillEvery and puts EVERY flat type through the run
+			// writer, the run reader and the k-way merge on every run and every
+			// core count — strictly more than "some ORDER BY cell spilled".
+			// What these cells still gate is the ANSWER under a budget, which
+			// is asserted per run above.
+			continue
+		}
 		if engagedCells[fam] == 0 {
 			t.Errorf("the %s family spilled NOTHING across %d cells — every one of them compared "+
 				"two in-memory runs and would pass with that spill path deleted",

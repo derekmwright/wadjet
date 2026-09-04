@@ -88,6 +88,9 @@ type Sort struct {
 	// finalized is set once finalize begins; after
 	// that the input batches are gone and there is nothing left to spill.
 	finalized bool
+	// consumesSinceSpill counts Consumes for the TEST-ONLY spill forcing knob
+	// (sort_force_spill.go). Untouched when the knob is disarmed.
+	consumesSinceSpill int64
 }
 
 func NewSort(keys []SortKey) *Sort {
@@ -183,10 +186,22 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// Spill to disk if memory pressure is high. The columnar run path
 	// accumulates at least minSortRunBytes before flushing so runs stay
 	// merge-friendly. Peer relief (SpillSome) bypasses the floor.
-	if s.Spill != nil && s.Spill.ShouldSpillFor(memory.SpillCheap) && len(s.batches) > 0 {
-		if s.trackedMem >= minSortRunBytes {
-			if _, err := s.flushSpillLocked(); err != nil {
-				return err
+	if s.Spill != nil && len(s.batches) > 0 {
+		// The TEST-ONLY knob takes the same branch pressure would have taken,
+		// and skips the minSortRunBytes floor: that floor is a merge-economy
+		// heuristic sized against real pressure, and there is none here. See
+		// sort_force_spill.go for why the pressure trigger alone cannot be
+		// relied on to fire.
+		forced := s.forcedSpillDue()
+		if forced || s.Spill.ShouldSpillFor(memory.SpillCheap) {
+			if forced || s.trackedMem >= minSortRunBytes {
+				freed, err := s.flushSpillLocked()
+				if err != nil {
+					return err
+				}
+				if forced && freed > 0 {
+					ForcedSortSpills.Add(1)
+				}
 			}
 		}
 	}
