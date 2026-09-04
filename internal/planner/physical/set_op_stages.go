@@ -463,6 +463,77 @@ func setOpCarrierGap(column string, a, b parquet.TypeID) error {
 			"arms to one type", column, a, b)
 }
 
+// setOpOversizeLiteralArms marks, per OUTPUT POSITION, the select items of one
+// arm that are numeric LITERALS whose spelling no DECIMAL this engine declares
+// can hold — more than 38 digits, or a scale past the carrier's.
+//
+// litDeclType declines those, which left the arm on the float8 rung and
+// answered `1.2345678901234568e+38` for
+// `SELECT a FROM t UNION ALL SELECT 123456789012345678901234567890123456789.5`
+// where PostgreSQL answers the exact numeric — a silently rounded number under
+// an exact type, on both paths, while ADR-0024 item 4 and ADR-0012 item 12 both
+// say a value with no exact carrier is 22003 and never the nearest storable
+// one. The caller raises that where the other arms make the union's type
+// EXACT; beside a float arm PostgreSQL resolves double precision and the
+// float8 the literal folds to is that type's own answer.
+func setOpOversizeLiteralArms(arm *logical.Node, cols int) []bool {
+	proj := findOutputProjectionNode(arm)
+	if proj == nil || len(proj.Projections) != cols {
+		return nil
+	}
+	out := make([]bool, cols)
+	any := false
+	for i, pr := range proj.Projections {
+		if pr.ASTExpr == nil {
+			continue
+		}
+		if _, ok := setOpLitArm(pr.ASTExpr); ok {
+			continue // a literal this engine CAN hold exactly
+		}
+		if !setOpIsNumericLiteral(pr.ASTExpr) {
+			continue
+		}
+		out[i], any = true, true
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
+// setOpIsNumericLiteral reports a select item that is a numeric literal with a
+// decimal point or an exponent — PostgreSQL's `numeric` constant — parentheses
+// and a leading sign included, the same shapes setOpLitArm reads.
+func setOpIsNumericLiteral(e plansql.Node) bool {
+	for {
+		switch n := e.(type) {
+		case *plansql.Lit:
+			return n.Kind == plansql.LitNumber && strings.ContainsAny(n.Value, ".eE")
+		case *plansql.ParenNode:
+			e = n.Inner
+		case *plansql.UnaryOp:
+			if n.Op != "-" && n.Op != "+" {
+				return false
+			}
+			e = n.Inner
+		default:
+			return false
+		}
+	}
+}
+
+// setOpExactNumeric names the types whose values this engine holds EXACTLY, so
+// a union of one with a numeric literal is `numeric` in PostgreSQL and must be
+// exact here too.
+func setOpExactNumeric(t parquet.TypeID) bool {
+	switch t {
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeDecimal,
+		parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
+		return true
+	}
+	return false
+}
+
 // setOpUnknownLiteralArms marks, per OUTPUT POSITION, the select items of one
 // arm that are UNKNOWN-typed literals — a quoted string or NULL, which
 // PostgreSQL gives no type of its own and resolves to the other arms' type
@@ -521,6 +592,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 	}
 	plans := make([]setOpArmPlan, 0, len(node.Children))
 	unknown := make([][]bool, 0, len(node.Children))
+	oversize := make([][]bool, 0, len(node.Children))
 	for _, child := range node.Children {
 		plan, err := setOpArmProjection(child, outNames)
 		if err != nil {
@@ -528,6 +600,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 		}
 		plans = append(plans, plan)
 		unknown = append(unknown, setOpUnknownLiteralArms(child, len(outNames)))
+		oversize = append(oversize, setOpOversizeLiteralArms(child, len(outNames)))
 	}
 	op := setOpBaseName(node)
 	// PostgreSQL's refusal wins over wadjet's. A column with NO COMMON TYPE is
@@ -545,6 +618,15 @@ func setOpArmTypeConflict(node *logical.Node) error {
 			if unknown[i] != nil && unknown[i][col] {
 				// An UNKNOWN-typed literal has no type of its own and takes
 				// the other arms' (PostgreSQL's algorithm, steps 3 and 5).
+				continue
+			}
+			if setOpArmIsUnknownLit(oversize, i, col) {
+				// A numeric literal wider than any DECIMAL this engine
+				// declares. PostgreSQL types it `numeric`, not float8, so it
+				// must not drag the union onto the float rung — the arm walk
+				// gave it FLOAT64 only because litDeclType declined it. Its
+				// own disposition is decided below, once the OTHER arms have
+				// said whether the result is exact.
 				continue
 			}
 			ct := plan.types[col]
@@ -593,6 +675,23 @@ func setOpArmTypeConflict(node *logical.Node) error {
 				break
 			}
 			want = setOpColType{typ: widened, known: true}
+		}
+		// A numeric literal no DECIMAL this engine declares can hold, beside an
+		// arm whose values are EXACT. PostgreSQL's numeric is unbounded and
+		// answers it; wadjet's carrier is 38 digits, and the honest answer is
+		// the overflow error, never the float8 the literal silently folded to
+		// (ADR-0024 items 1 and 4).
+		if want.known && setOpExactNumeric(want.typ) {
+			for i := range plans {
+				if !setOpArmIsUnknownLit(oversize, i, col) {
+					continue
+				}
+				return sqlerr.New("22003",
+					"numeric field overflow: the literal in arm %d of this %s has more digits than "+
+						"a DECIMAL can hold, and result column %q is exact — wadjet's numeric "+
+						"carrier is 38 digits where PostgreSQL's is unbounded",
+					i+1, op, outNames[col])
+			}
 		}
 	}
 	return carrierGap

@@ -37,6 +37,8 @@ import (
 type setOpLitCell struct {
 	issue, name, sql string
 	want             []string
+	// wantErr, when set, is a substring of the refusal every arm must give.
+	wantErr string
 	// pin records a divergence from PostgreSQL that this fix does NOT close,
 	// with what wadjet answers instead. A cell that starts agreeing FAILS.
 	pin        []string
@@ -107,6 +109,30 @@ func setOpLitCells() []setOpLitCell {
 			want:       dec("1234567890123456.78"),
 			wantRoutes: a2Routes{TableLess: 1}},
 
+		// A literal NO DECIMAL this engine declares can hold, beside an EXACT
+		// arm. PostgreSQL's numeric is unbounded and answers it; wadjet's
+		// carrier is 38 digits, and the honest answer is the overflow error —
+		// which is what ADR-0024 item 4 and ADR-0012 item 12 both say, and what
+		// this path did NOT do: it fell back to float8 and answered
+		// `1.2345678901234568e+38`, a silently rounded number under an exact
+		// type, on both paths.
+		{issue: "#683", name: "a_literal_wider_than_any_decimal_is_22003",
+			sql: `SELECT a AS v FROM decpair UNION ALL ` +
+				`SELECT 123456789012345678901234567890123456789.5 FROM decpair WHERE id = 1`,
+			wantErr: "numeric field overflow"},
+		{issue: "#683", name: "the_same_literal_beside_a_bigint_arm",
+			sql: `SELECT id AS v FROM decpair UNION ALL ` +
+				`SELECT 123456789012345678901234567890123456789.5 FROM decpair WHERE id = 1`,
+			wantErr: "numeric field overflow"},
+		// The control: beside a FLOAT arm PostgreSQL resolves double precision,
+		// and the float8 the literal folds to IS that type's own answer.
+		{issue: "#683", name: "ctl_the_same_literal_beside_a_double_precision_arm",
+			sql: `SELECT f AS v FROM decpair UNION ALL ` +
+				`SELECT 123456789012345678901234567890123456789.5 FROM decpair WHERE id = 1`,
+			// float8's own value for that literal, which is what PostgreSQL
+			// answers for a double precision union too.
+			want: flt("123456789012345680000000000000000000000")},
+
 		// --- what this fix does NOT reach --------------------------------
 		{issue: "#683", name: "a_literal_inside_a_derived_table_arm_is_still_float8",
 			sql:  `SELECT a AS v FROM decpair UNION ALL SELECT y FROM (SELECT 1234567890123456.78 AS y FROM decpair WHERE id = 1) d`,
@@ -144,6 +170,17 @@ func TestANumericLiteralSetOperationArmIsExactOnBothPaths(t *testing.T) {
 			sort.Strings(pin)
 			check := func(arm string, res *oracle.Result, err error) {
 				t.Helper()
+				if tc.wantErr != "" {
+					if err == nil {
+						t.Fatalf("%s arm ANSWERED %d rows where the literal has no exact carrier\n"+
+							"  SQL: %s", arm, len(res.Rows), tc.sql)
+					}
+					if !strings.Contains(err.Error(), tc.wantErr) {
+						t.Errorf("%s arm refused with %q, want a refusal containing %q\n  SQL: %s",
+							arm, err.Error(), tc.wantErr, tc.sql)
+					}
+					return
+				}
 				if err != nil {
 					t.Fatalf("%s arm: %v\n  SQL: %s", arm, err, tc.sql)
 				}

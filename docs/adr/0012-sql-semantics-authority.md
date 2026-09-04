@@ -2449,6 +2449,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       is a literal typed by something OTHER than the arm — inside a DERIVED
       TABLE, in arithmetic — which is the declared-type layer's rule and is
       pinned in `coordinator.TestANumericLiteralSetOperationArmIsExactOnBothPaths`.
+      A literal NO DECIMAL this engine declares can hold — more than 38 digits
+      — is **22003** beside an arm whose values are exact, and not the float8
+      it used to silently fold to: `SELECT a FROM t UNION ALL SELECT
+      123456789012345678901234567890123456789.5` answered
+      `1.2345678901234568e+38`, a rounded number under an exact type, on both
+      paths. Beside a FLOAT arm PostgreSQL resolves double precision and that
+      float8 IS the answer, so the refusal is scoped to an exact result
+      (round-2 review of #683).
 
     **A computed DECIMAL expression does NOT reach the refusal**, and saying it
     did was wrong in both directions. `d + d` and `COALESCE(d, d)` are declared
