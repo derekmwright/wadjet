@@ -798,6 +798,28 @@ only the one measured: which arm goes where is `reorderJoins`' decision from
 row counts, so a cut drawn there would move under the fixture. Closing it is
 `physical/join_carried_columns.go`, not this rewrite.
 
+**The second boundary, and it is §1's own rule one level down.** A derived
+table or a CTE reference that COMPUTES a column it publishes is DECLINED.
+`innerSemiJoinKey` already refuses a computed select item as a semi-join key
+(#516) — the key would name nothing the build side emits — and a derived table
+hides the computation from it, because from the subquery's side
+`SELECT b.m FROM (SELECT n + 1 AS m FROM t) b` is a plain column reference.
+
+```sql
+SELECT COUNT(*) FROM mk_outer a WHERE a.n IN (
+  SELECT b.m FROM (SELECT n + 1 AS m FROM mk_inner) b)
+-- PostgreSQL 17 and the single-process arm: 32.  Stage DAG: 0.
+```
+
+The single-process arm evaluates `n + 1`; the stage carries `m` as if it were a
+scan column of `mk_inner`, finds none, and the semi join builds EMPTY. The same
+body with `n AS m` — a RENAME rather than a computation — answers 40 on both
+arms, which is what says the trigger is the EXPRESSION and not the published
+name. `coordinator.TestMultiKeyCorrelatedTwoPath/derived_in_computed` is the
+entry that caught it. The decline is on ANY computed published column rather
+than only the one the key names, because the three call sites spell their key
+three different ways and none has resolved it when the build side is assembled.
+
 **What it costs, measured rather than assumed.** A re-run builds no hash
 table; the join that replaces it does. Under the correlation census's 512 KiB
 arm three comma-inner cells that answered before now REFUSE past the budget —
