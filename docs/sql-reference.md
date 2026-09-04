@@ -487,13 +487,27 @@ columns are NULL for a reason of its own, and those NULLs are left alone
 rather than defaulted. The rest of the join behaves normally. A `LEFT` join
 after the lateral is unaffected.
 
-One case is not yet right: a written `ON` on a `LEFT JOIN LATERAL` where the
-DEFAULT row would PASS the condition — `LEFT JOIN LATERAL (…) s ON s.n = 0` —
-drops the unmatched outer row where PostgreSQL keeps it with the lateral
-columns NULL. Every other combination of join kind and `ON` matches
-PostgreSQL. `SELECT *` over an aggregated lateral is a second gap: the star
-expands after the default is applied, so a `COUNT` column reached through it
-reads NULL rather than 0. Name the columns to get the default.
+One case is not yet right, and it is a VALUE rather than a row: a written `ON`
+on a `LEFT JOIN LATERAL` that the DEFAULT row would PASS —
+`LEFT JOIN LATERAL (…) s ON s.item_count = 0`. Every outer row is kept, as
+PostgreSQL keeps them, and the `ON` correctly nulls the lateral's columns for
+the rows it rejects; what differs is the row the `ON` ACCEPTS. For the order
+with no line items, PostgreSQL reads `item_count = 0` and this engine reads
+NULL:
+
+```
+LEFT JOIN LATERAL (SELECT COUNT(*) AS item_count FROM line_items
+                    WHERE order_id = o.id) s ON s.item_count = 0
+
+PostgreSQL   Alice NULL, Bob NULL, Carol 0
+this engine  Alice NULL, Bob NULL, Carol NULL      <- one cell differs
+```
+
+Every other combination of join kind and `ON` matches PostgreSQL.
+
+`SELECT *` over an aggregated lateral is a second gap of the same kind: the
+star expands after the default is applied, so a `COUNT` column reached through
+it reads NULL rather than 0. Name the columns to get the default.
 
 ## Aggregate Functions
 

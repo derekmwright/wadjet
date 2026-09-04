@@ -462,6 +462,12 @@ func arcD5LateralCells() []arcD5Cell {
 		// null-extend, and these four cells are what says the decline holds.
 		// The join is `c2.id = o.id AND c2.id < 3`, so `lat_ord`'s row 3 has
 		// no partner and is the manufactured row in every one of them.
+		//
+		// READ THESE FOUR WITH THE THREE AFTER THEM. The `AND c2.id < 3` is
+		// what makes PostgreSQL drop Carol too, so these cells show the
+		// decline being SAFE and say nothing about what it COSTS. The plain
+		// spelling — `ON c2.id = o.id`, every outer row matching — is where
+		// the decline is visible as a divergence, and it is pinned below.
 		{issue: "#767", name: "boundary_right_join_after_lateral_on_true_keeps_null_not_zero",
 			sql: `SELECT o.customer AS c, s.n AS n, c2.id AS cid FROM lat_ord o ` + lat +
 				`ON true RIGHT JOIN lat_ord c2 ON c2.id = o.id AND c2.id < 3 ORDER BY 3`,
@@ -495,6 +501,74 @@ func arcD5LateralCells() []arcD5Cell {
 				"c=NULL|n=NULL|cid=int64:3"},
 			wantUnreachableRoutes: 1,
 			pgSays:                "four rows — Carol's defaulted [Carol, 0, NULL] as well"},
+		// WHAT THE DECLINE COSTS, in the spelling that shows it. With every
+		// outer row matching, PostgreSQL's `Carol|0|Carol` is a row the
+		// lateral's empty-input default produced and the null-extending join
+		// then kept; declining the repair means Carol's lateral columns are
+		// never defaulted, so the pair reads NULL and the row survives with
+		// the wrong values rather than being dropped. Same cardinality, one
+		// row wrong, NO error and NO route — a silent divergence, which is
+		// why it is pinned as filed rather than described in a comment.
+		//
+		// The day either of these answers PostgreSQL's row, the cell FAILS
+		// and the decline has been closed — which is D10's mechanism: the
+		// default applied at the LATERAL's own output, before any later join
+		// sees it.
+		{issue: "#767", name: "boundary_right_join_after_lateral_plain_spelling_loses_the_default",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.customer AS cid FROM lat_ord o ` + lat +
+				`ON true RIGHT JOIN lat_ord c2 ON c2.id = o.id ORDER BY 3`,
+			want: []string{"c=Alice|n=int64:2|cid=Alice", "c=Bob|n=int64:2|cid=Bob",
+				"c=NULL|n=NULL|cid=Carol"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "Alice|2|Alice, Bob|2|Bob, Carol|0|Carol — only Carol's pair diverges"},
+		{issue: "#767", name: "boundary_full_join_after_lateral_plain_spelling_loses_the_default",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.customer AS cid FROM lat_ord o ` + lat +
+				`ON true FULL JOIN lat_ord c2 ON c2.id = o.id ORDER BY 3`,
+			want: []string{"c=Alice|n=int64:2|cid=Alice", "c=Bob|n=int64:2|cid=Bob",
+				"c=NULL|n=NULL|cid=Carol"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "Alice|2|Alice, Bob|2|Bob, Carol|0|Carol — the FULL spelling diverges the same way"},
+		// AND THE ONE THAT AGREES, which is what bounds the cost to the
+		// DEFAULT row. Round 1's review reported this spelling as diverging
+		// too; measured against live PostgreSQL 17 it does not. With
+		// `ON s.n > 1` the lateral row Carol would have had is rejected by
+		// the lateral join's own condition, so PostgreSQL null-extends the
+		// pair exactly as the un-repaired plan does and both read
+		// `NULL|NULL|Carol`. The decline costs the DEFAULT row and nothing
+		// else — a claim this cell makes and the two above bound.
+		{issue: "#767", name: "control_right_join_after_lateral_with_an_on_agrees",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.customer AS cid FROM lat_ord o ` + lat +
+				`ON s.n > 1 RIGHT JOIN lat_ord c2 ON c2.id = o.id ORDER BY 3`,
+			want: []string{"c=Alice|n=int64:2|cid=Alice", "c=Bob|n=int64:2|cid=Bob",
+				"c=NULL|n=NULL|cid=Carol"},
+			wantUnreachableRoutes: 1},
+
+		// A WINDOW over a defaulted COUNT: a third query shape reaching the
+		// SAME carrier defect the `SELECT *` cell pins (report deferral D4).
+		// The single-process arm answers PostgreSQL's running total over all
+		// three rows — Carol's defaulted 0 contributing nothing to it, which
+		// is the repair working — and both DAG arms fail in the shuffle with
+		// ADR-0010's name-consistency check, because the join stage carries
+		// `s.id` where an earlier file of the same stage input named the
+		// column `order_id`.
+		//
+		// Three distinct shapes now reach one message, which is what says the
+		// defect is the stage model's carried-column derivation and not any
+		// of the three spellings. Wrong-to-loud is the allowed direction: at
+		// fd679ae9 this answered two rows, dropping Carol.
+		//
+		// The VALUE is PostgreSQL's; the TYPE is not. `SUM` over a BIGINT is
+		// `numeric` in PostgreSQL and float here, which is ADR-0024's rung
+		// and the same box the arithmetic-over-the-default cell records. It
+		// is not this repair's doing and it has no lateral in its own repro.
+		{issue: "#767", name: "window_over_the_default_reaches_the_dag_carrier_defect",
+			sql: `SELECT o.customer AS c, SUM(s.n) OVER (ORDER BY o.customer) AS running ` +
+				`FROM lat_ord o ` + lat + `ON true ORDER BY 1`,
+			want: []string{"c=Alice|running=float:2", "c=Bob|running=float:4",
+				"c=Carol|running=float:4"},
+			wantErrLikeDAG: `names column 2 "s.id"`,
+			pgSays:         "2, 4, 4 as NUMERIC — the values agree, the box does not (ADR-0024)"},
+
 		// The control that says the decline is CONDITIONAL on null-extension
 		// and not on "any join after the lateral": a LEFT join cannot null-
 		// extend what is to its left, so the repair still applies and Carol
