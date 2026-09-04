@@ -180,6 +180,23 @@ func (s *countingStore) reset() {
 	s.gets, s.readers = map[string]int{}, map[string]int{}
 }
 
+// dataFiles lists every parquet object in the table, for a fixture with more
+// than one file.
+func (s *countingStore) dataFiles(t *testing.T) []string {
+	t.Helper()
+	objs, err := s.Store.List(context.Background(), "test", objstore.ListOptions{Prefix: "tables/"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var out []string
+	for _, o := range objs {
+		if strings.HasSuffix(o.Key, ".parquet") {
+			out = append(out, o.Key)
+		}
+	}
+	return out
+}
+
 func (s *countingStore) dataFile(t *testing.T) string {
 	t.Helper()
 	objs, err := s.Store.List(context.Background(), "test", objstore.ListOptions{Prefix: "tables/"})
@@ -316,5 +333,62 @@ func TestNoQueryLeavesARowGroupBufferBehind(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestAScanOverMixedRowGroupShapesIssuesOneGetEachAndChargesEachFile.
+//
+// A table's files do not share a row-group size: a compacted file beside a
+// freshly ingested one is ordinary, and one scan source reads both out of one
+// buffer pool. This is that table, end to end — two ingests into one table
+// with row-group sizes two orders of magnitude apart — asserting the two
+// things a shared pool can break: the request count stays one Get per file,
+// and no row-group buffer is left behind (which is where a charge for another
+// file's buffer would show up as a live one).
+func TestAScanOverMixedRowGroupShapesIssuesOneGetEachAndChargesEachFile(t *testing.T) {
+	ctx := context.Background()
+	st := newCountingStore()
+	db, err := Open(ctx, Config{Store: st, Bucket: "test"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	schema := typematrix.Schema()
+	if err := db.CreateTable(ctx, typematrix.Table, schema, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Two files in one table: 1,200 rows in row groups of 1,200 (one fat row
+	// group) and 40 rows in row groups of 4 (ten tiny ones).
+	for _, sh := range []struct{ rows, rowGroup int }{{1200, 1200}, {40, 4}} {
+		ing := db.NewIngester(typematrix.Table, schema, nil, ingest.Config{
+			MaxBufferRows: sh.rows + 1, RowGroupSize: sh.rowGroup,
+		})
+		if err := ing.Ingest(ctx, typematrix.Data(sh.rows)); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+	}
+	keys := st.dataFiles(t)
+	if len(keys) != 2 {
+		t.Fatalf("%d files in the table, want 2 — the fixture did not produce mixed shapes", len(keys))
+	}
+
+	st.reset()
+	rgBefore, _ := physical.RowGroupLoadStats()
+	if _, err := tmRun(ctx, db, `SELECT COUNT(*) AS n, MIN(c_str) AS m FROM `+typematrix.Table); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if rgAfter, _ := physical.RowGroupLoadStats(); rgAfter-rgBefore < 2 {
+		t.Fatalf("%d files read row group at a time, want both", rgAfter-rgBefore)
+	}
+	for _, k := range keys {
+		if gets, _ := st.count(k); gets != 1 {
+			t.Fatalf("%s took %d Get calls, want exactly 1", k, gets)
+		}
+	}
+	if n := physical.RowGroupBuffersResident(); n != 0 {
+		t.Fatalf("%d row-group buffer(s) still held after a scan over mixed shapes", n)
 	}
 }

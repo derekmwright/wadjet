@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -253,5 +254,115 @@ func TestAnAbandonedRowGroupScanLeavesNothingOnTheTracker(t *testing.T) {
 	inner.drainSlotCharges()
 	if used := tracker.Used(); used != 0 {
 		t.Fatalf("used = %d after drainSlotCharges, want 0 (phantom reservation)", used)
+	}
+}
+
+// scanAccountingTwoFiles puts TWO files with different row-group SIZES in one
+// table, which is what a table looks like after a compaction lands beside a
+// fresh ingest. One scan source reads both.
+func scanAccountingTwoFiles(t *testing.T, big, small [][]map[string]any) (*catalog.Catalog, catalog.FileEntry, catalog.FileEntry) {
+	t.Helper()
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "value", Type: parquet.TypeString},
+	}}
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog init: %v", err)
+	}
+	if err := cat.CreateTable(ctx, "items", schema, nil); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	put := func(name string, sets [][]map[string]any) catalog.FileEntry {
+		data := writeTestParquetMultiRG(t, schema, sets...)
+		path := "tables/items/" + name
+		if _, err := store.Put(ctx, cat.Bucket(), path, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+			t.Fatalf("put %s: %v", name, err)
+		}
+		var rows int64
+		for _, rs := range sets {
+			rows += int64(len(rs))
+		}
+		e := catalog.FileEntry{Path: path, SizeBytes: int64(len(data)), NumRows: rows}
+		if err := cat.AddFiles(ctx, "items", map[string]string{}, "tables/items/", []catalog.FileEntry{e}); err != nil {
+			t.Fatalf("add %s: %v", name, err)
+		}
+		return e
+	}
+	return cat, put("chunk_big.parquet", big), put("chunk_small.parquet", small)
+}
+
+// TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes.
+//
+// A scan source reads a TABLE, not a file, and a table's files do not share a
+// row-group size — a compacted file beside a freshly ingested one is the
+// ordinary case. A buffer pool over one source with a single "big enough" rule
+// therefore hands the small file's row group a buffer the big file left
+// behind, and cap() is what this path charges: measured at 105,900 bytes for a
+// 332-byte row group, 319x the row group and 53x the whole small file. That is
+// a bigger charge for one row group than the whole-file read it replaced made
+// for the entire file.
+//
+// The pool is bucketed by the FILE's largest row group, out of the footer, so
+// a row group is charged at most its own file's largest — which is what
+// ADR-0006's producer row 2 says. This asserts it with the big file drained
+// FIRST, so its buffers are in the source's pool when the small file loads.
+func TestOneSourceWithTwoRowGroupSizesChargesEachRowGroupItsOwnBytes(t *testing.T) {
+	bigSets := make([][]map[string]any, 4)
+	for i := range bigSets {
+		bigSets[i] = fatRows(200, i*200, 'b') // ~100 KB of row group
+	}
+	smallSets := make([][]map[string]any, 4)
+	for i := range smallSets {
+		rows := make([]map[string]any, 4)
+		for r := range rows {
+			rows[r] = map[string]any{"id": int64(i*4 + r), "value": "s"}
+		}
+		smallSets[i] = rows // a few hundred bytes of row group
+	}
+	cat, bigEntry, smallEntry := scanAccountingTwoFiles(t, bigSets, smallSets)
+
+	tracker := memory.NewTracker("scan-test", 1<<30)
+	inner := &scanSourceInner{cat: cat, memTracker: tracker}
+
+	// Drain the big file first: its buffers end up in the source's pool.
+	bigSlot := rowGroupSlot(t, inner, cat, bigEntry, 4)
+	for rg := 0; rg < 4; rg++ {
+		if _, _, err := bigSlot.rgs.RowGroupBytes(rg); err != nil {
+			t.Fatalf("big row group %d: %v", rg, err)
+		}
+		bigSlot.releaseRG(inner, rg)
+	}
+	if used := tracker.Used(); used != 0 {
+		t.Fatalf("used = %d after the big file drained, want 0", used)
+	}
+
+	// Now the small file, through the SAME scan source and the same pool.
+	smallSlot := rowGroupSlot(t, inner, cat, smallEntry, 4)
+	smallPeak := peakRowGroupBytes(smallSlot.rgs.starts, smallSlot.rgs.ends)
+	if _, _, err := smallSlot.rgs.RowGroupBytes(0); err != nil {
+		t.Fatalf("small row group 0: %v", err)
+	}
+	charge := tracker.Used()
+	t.Logf("small file: %d bytes, largest row group %d, charge for one resident row group %d",
+		smallEntry.SizeBytes, smallPeak, charge)
+
+	if charge > smallPeak {
+		t.Fatalf("one row group of a %d-byte file whose largest row group is %d bytes is charged "+
+			"%d — %.0fx the row group. A row group must be charged at most its own file's largest, "+
+			"which is what ADR-0006's producer row 2 says; this is another file's buffer",
+			smallEntry.SizeBytes, smallPeak, charge, float64(charge)/float64(smallPeak))
+	}
+	if charge > smallEntry.SizeBytes {
+		t.Fatalf("one row group is charged %d for a %d-byte file — more than the whole-file read "+
+			"this replaced charged for the entire file", charge, smallEntry.SizeBytes)
+	}
+	for rg := 0; rg < 4; rg++ {
+		smallSlot.releaseRG(inner, rg)
+	}
+	if used := tracker.Used(); used != 0 {
+		t.Fatalf("used = %d after both files drained, want 0", used)
 	}
 }
