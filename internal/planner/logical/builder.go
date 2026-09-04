@@ -1250,8 +1250,11 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 		// pair resolves against neither and the query answers zero rows with
 		// no error (#594).
 		items := make([]*Node, len(info.Tables))
-		for i, t := range info.Tables {
-			item, err := resolveTableOrCTE(t, ctes)
+		for i := range info.Tables {
+			// &info.Tables[i], not the range VALUE: the sub-block parse is
+			// memoized on the TableRef the parser owns (ADR-0032), and a copy
+			// carries the memo nowhere.
+			item, err := resolveTableOrCTE(&info.Tables[i], ctes)
 			if err != nil {
 				return nil, err
 			}
@@ -1329,12 +1332,12 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				}
 				items[idx] = NewJoin(left, right, jt, joinCond)
 			} else {
-				rightRef := plansql.TableRef{
+				rightRef := &plansql.TableRef{
 					Name:  join.RightTable,
 					Alias: join.RightAlias,
 				}
 				if join.RightTableRef != nil {
-					rightRef = *join.RightTableRef
+					rightRef = join.RightTableRef
 				}
 				right, err := resolveTableOrCTE(rightRef, ctes)
 				if err != nil {
@@ -1383,13 +1386,13 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 		}
 	} else if len(info.Tables) > 0 {
 		var err error
-		plan, err = resolveTableOrCTE(info.Tables[0], ctes)
+		plan, err = resolveTableOrCTE(&info.Tables[0], ctes)
 		if err != nil {
 			return nil, err
 		}
 		// Comma-join FROM list (see the explicit-join branch above).
-		for _, t := range info.Tables[1:] {
-			right, err := resolveTableOrCTE(t, ctes)
+		for i := 1; i < len(info.Tables); i++ {
+			right, err := resolveTableOrCTE(&info.Tables[i], ctes)
 			if err != nil {
 				return nil, err
 			}
@@ -1405,9 +1408,17 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 }
 
 // resolveTableOrCTE checks whether a table reference matches a CTE name.
-func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, error) {
+//
+// `table` and `ctes` are held by POINTER into the caller's own AST, not by
+// value, because a nested block's parse is MEMOIZED on the reference: the
+// binder validated that very tree and may have rewritten its terms — a bare
+// GROUP BY name it bound to an input column rather than to a SELECT alias
+// (#851) — and a copy would be planned from a tree that never heard the
+// answer. See plansql's sub_block.go.
+func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, error) {
 	nameLower := strings.ToLower(table.Name)
-	for i, cte := range ctes {
+	for i := range ctes {
+		cte := &ctes[i]
 		if cte.Name == nameLower {
 			// Recursive CTEs are materialized by the physical planner via
 			// fixed-point iteration (materializeRecursiveCTE). Don't expand
@@ -1420,14 +1431,10 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 				return node, nil
 			}
 
-			// Parse the CTE body SQL
-			parsed, err := plansql.Parse(cte.SQL)
+			// The CTE body, from the memo the binder validated.
+			selectInfo, err := cte.BodySelect()
 			if err != nil {
 				return nil, fmt.Errorf("parsing CTE %q: %w", cte.Name, err)
-			}
-			selectInfo, err := plansql.ExtractSelect(parsed)
-			if err != nil {
-				return nil, fmt.Errorf("extracting SELECT from CTE %q: %w", cte.Name, err)
 			}
 			// EARLIER CTEs only. A non-recursive CTE's own name is NOT in
 			// scope inside its own body — PostgreSQL's rule and the SQL
@@ -1484,15 +1491,10 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 	}
 	// Check for derived table (subquery in FROM): name starts with "("
 	if strings.HasPrefix(table.Name, "(") {
-		// Strip outer parens to get inner SQL
-		inner := table.Name[1 : len(table.Name)-1]
-		parsed, err := plansql.Parse(inner)
+		// The derived body, from the memo the binder validated.
+		selectInfo, err := table.SubSelect()
 		if err != nil {
 			return nil, fmt.Errorf("parsing derived table: %w", err)
-		}
-		selectInfo, err := plansql.ExtractSelect(parsed)
-		if err != nil {
-			return nil, fmt.Errorf("extracting SELECT from derived table: %w", err)
 		}
 		// The COLUMN-ALIAS LIST renames the derived table's columns
 		// positionally: `(SELECT s, n FROM t) AS b(kk, nn)` publishes kk and

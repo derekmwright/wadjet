@@ -441,7 +441,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// reference them. CTEs accumulate on the binder (additive scoping is only
 	// ever more lenient, never a source of false positives).
 	for i := range info.CTEs {
-		if err := b.registerCTE(ctx, info.CTEs[i]); err != nil {
+		if err := b.registerCTE(ctx, &info.CTEs[i]); err != nil {
 			return err
 		}
 	}
@@ -474,12 +474,12 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// Build the FROM scope from base tables, joins, derived tables and CTE refs.
 	from := newColScope()
 	for i := range info.Tables {
-		if err := b.resolveSource(ctx, info.Tables[i], nil, from); err != nil {
+		if err := b.resolveSource(ctx, &info.Tables[i], nil, from); err != nil {
 			return err
 		}
 	}
 	for i := range info.Joins {
-		ref := joinRightRef(info.Joins[i])
+		ref := joinRightRef(&info.Joins[i])
 		var lateralOuter *colScope
 		if info.Joins[i].Lateral {
 			// A LATERAL right side may reference columns from sources to its
@@ -635,7 +635,7 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 // resolveSource resolves one FROM source into `into`. lateralOuter is the scope a
 // LATERAL derived table may reference (nil otherwise). It returns an error only
 // when a confirmed miss is found while validating a derived table's internals.
-func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateralOuter *colScope, into *colScope) error {
+func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, lateralOuter *colScope, into *colScope) error {
 	qual := tr.Alias
 	if qual == "" {
 		qual = tr.Name
@@ -649,8 +649,12 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 
 	// Derived table: FROM (SELECT ...) alias.
 	if strings.HasPrefix(tr.Name, "(") {
-		inner := parseSelect(strings.TrimSuffix(strings.TrimPrefix(tr.Name, "("), ")"))
-		if inner == nil {
+		// The MEMOIZED parse, not a private one. What this block decides
+		// about the derived body — PostgreSQL's GROUP BY precedence, below —
+		// is recorded by rewriting that body's terms, and the logical builder
+		// plans the very tree validated here (#851).
+		inner, perr := tr.SubSelect()
+		if perr != nil || inner == nil {
 			into.open = true
 			return nil
 		}
@@ -764,7 +768,7 @@ func (s *colScope) addRowColumn(c parquet.Column) {
 
 // registerCTE parses, validates and records a CTE's output columns so later
 // references resolve. Any uncertainty registers it as open.
-func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
+func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 	name := strings.ToLower(cte.Name)
 	if _, exists := b.ctes[name]; exists {
 		return nil
@@ -775,8 +779,8 @@ func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
 		b.ctes[name] = cteEntry{open: true}
 		return nil
 	}
-	body := parseSelect(cte.SQL)
-	if body == nil {
+	body, perr := cte.BodySelect()
+	if perr != nil || body == nil {
 		b.ctes[name] = cteEntry{open: true}
 		return nil
 	}
@@ -1295,11 +1299,14 @@ func blockOutputs(info *plansql.SelectInfo) ([]string, bool) {
 }
 
 // joinRightRef extracts the right-hand table reference of a join.
-func joinRightRef(j plansql.JoinInfo) plansql.TableRef {
+// joinRightRef is the join's right-hand source, by POINTER into the AST: a
+// derived table there memoizes its parsed body on the reference, and the
+// logical builder plans the very tree this binder validated (#851).
+func joinRightRef(j *plansql.JoinInfo) *plansql.TableRef {
 	if j.RightTableRef != nil {
-		return *j.RightTableRef
+		return j.RightTableRef
 	}
-	return plansql.TableRef{Name: j.RightTable, Alias: j.RightAlias}
+	return &plansql.TableRef{Name: j.RightTable, Alias: j.RightAlias}
 }
 
 // parseSelect parses a SQL string into a SelectInfo, returning nil on any error

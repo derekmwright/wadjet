@@ -662,6 +662,34 @@ SELECT src_ip, dst_port, COUNT(*) FROM flow_logs GROUP BY src_ip, dst_port
 SELECT src_ip, dst_port, COUNT(*) FROM flow_logs GROUP BY 1, 2
 ```
 
+### Which name a bare GROUP BY, HAVING or ORDER BY term binds
+
+A bare name in these three clauses can mean an INPUT column of the FROM
+sources or an OUTPUT column of the SELECT list, and the three clauses answer
+differently — PostgreSQL's rules, which wadjet follows:
+
+| clause | a name that is BOTH an input column and an output alias binds |
+|---|---|
+| `GROUP BY` | the **input column** |
+| `HAVING` | the **input column** (an output alias is not visible at all: `HAVING k > 2` over `SELECT g*0 AS k` is `42703`) |
+| `ORDER BY` | the **output column** |
+
+```sql
+-- `g` is a column of t AND the alias of `g*0`.
+SELECT g*0 AS g, COUNT(*) AS n FROM t WHERE id < 6 GROUP BY g
+-- 6 rows: GROUP BY binds the input column, and the alias is projected per group.
+
+SELECT -g AS g, COUNT(*) AS n FROM t WHERE id < 6 GROUP BY g ORDER BY g
+-- 6 rows ordered -5, -4, -3, -2, -1, 0: ORDER BY binds the OUTPUT column.
+
+SELECT -g AS g, COUNT(*) AS n FROM t WHERE id < 6 GROUP BY g HAVING g > 2
+-- 3 rows: HAVING binds the input column, so the groups kept are input g = 3, 4, 5.
+```
+
+A name that is NOT an input column still binds the output alias in `GROUP BY`:
+`SELECT g*0 AS kk, COUNT(*) FROM t GROUP BY kk` is one group. The rules apply
+inside a derived table and a CTE exactly as at the top level.
+
 ### GROUPING SETS
 
 Generate multiple levels of aggregation in a single query:

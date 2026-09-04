@@ -871,7 +871,7 @@ func TestExtractPartitionFilters_WithFilter(t *testing.T) {
 
 func TestResolveTableOrCTE_SimpleScan(t *testing.T) {
 	table := plansql.TableRef{Name: "events", Alias: "e"}
-	node, err := resolveTableOrCTE(table, nil)
+	node, err := resolveTableOrCTE(&table, nil)
 	if err != nil {
 		t.Fatalf("resolveTableOrCTE: %v", err)
 	}
@@ -890,7 +890,7 @@ func TestResolveTableOrCTE_TableFunc(t *testing.T) {
 		IsFunction: true,
 		FuncArgs:   []string{"data.json"},
 	}
-	node, err := resolveTableOrCTE(table, nil)
+	node, err := resolveTableOrCTE(&table, nil)
 	if err != nil {
 		t.Fatalf("resolveTableOrCTE: %v", err)
 	}
@@ -907,7 +907,7 @@ func TestResolveTableOrCTE_WithCTE(t *testing.T) {
 		{Name: "active", SQL: "SELECT id FROM events WHERE status = 'active'"},
 	}
 	table := plansql.TableRef{Name: "active", Alias: "a"}
-	node, err := resolveTableOrCTE(table, ctes)
+	node, err := resolveTableOrCTE(&table, ctes)
 	if err != nil {
 		t.Fatalf("resolveTableOrCTE: %v", err)
 	}
@@ -921,7 +921,7 @@ func TestResolveTableOrCTE_DerivedTable(t *testing.T) {
 		Name:  "(SELECT id FROM events)",
 		Alias: "sub",
 	}
-	node, err := resolveTableOrCTE(table, nil)
+	node, err := resolveTableOrCTE(&table, nil)
 	if err != nil {
 		t.Fatalf("resolveTableOrCTE: %v", err)
 	}

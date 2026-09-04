@@ -49,3 +49,4 @@ Conventions:
 | [0029](0029-configuration-precedence.md) | Configuration precedence: explicit flag > env > file > default, resolved once from one registry | Accepted |
 | [0030](0030-a-dml-statement-commits-against-the-manifest-it-read.md) | A DML statement commits its files and its delete markers in one CAS, validated against the manifest it read | Accepted |
 | [0031](0031-a-dml-predicate-is-not-planned.md) | A DML predicate is compiled, not planned; closing that needs a row identity the planner can project | Accepted |
+| [0032](0032-a-query-block-is-parsed-once.md) | A query block is parsed once, and every layer reasons about the same tree | Accepted |

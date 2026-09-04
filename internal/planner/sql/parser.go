@@ -100,6 +100,11 @@ type CTEDef struct {
 	SQL       string   // the CTE body SQL (the SELECT inside the parentheses)
 	Columns   []string // optional column name list
 	Recursive bool     // WITH RECURSIVE
+
+	// The CTE body, parsed at most once per definition — see sub_block.go.
+	body     *SelectInfo
+	bodyErr  error
+	bodyDone bool
 }
 
 // ExplainInfo holds details for an EXPLAIN statement.
@@ -483,6 +488,13 @@ type TableRef struct {
 	ColumnAliases  []string          // AS alias(col1, col2, ...)
 	SampleMethod   string            // TABLESAMPLE method: BERNOULLI, SYSTEM
 	SamplePercent  string            // percentage for TABLESAMPLE
+
+	// The DERIVED TABLE body, parsed at most once per reference. See
+	// sub_block.go: a nested block is parsed once so the binder and the
+	// logical builder reason about the same tree (#851).
+	sub     *SelectInfo
+	subErr  error
+	subDone bool
 }
 
 // SelectColumn describes a column in a SELECT clause.

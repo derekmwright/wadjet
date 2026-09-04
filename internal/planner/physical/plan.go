@@ -1480,6 +1480,16 @@ func (p *Planner) buildSubqueryPipelineScoped(ctx context.Context, sql string,
 	return p.buildSubqueryPipeline(ctx, sql)
 }
 
+// buildSubqueryPipelineScopedFor is buildSubqueryPipelineScoped over an
+// already-parsed block — see buildSubqueryPipelineFor.
+func (p *Planner) buildSubqueryPipelineScopedFor(ctx context.Context, info *plansql.SelectInfo,
+	ctes []plansql.CTEDef) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	saved := p.ctes
+	p.ctes = ctes
+	defer func() { p.ctes = saved }()
+	return p.buildSubqueryPipelineFor(ctx, info)
+}
+
 func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// Parse using our SQL parser
 	pq, err := plansql.Parse(sql)
@@ -1490,6 +1500,15 @@ func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.S
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("subquery extract error: %w", err)
 	}
+	return p.buildSubqueryPipelineFor(ctx, info)
+}
+
+// buildSubqueryPipelineFor is buildSubqueryPipeline over an ALREADY-PARSED
+// block. A CTE body is planned from the tree the binder validated, so a
+// decision recorded there — PostgreSQL's GROUP BY precedence, which needs a
+// schema the parser does not have — reaches this path too (#851).
+func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.SelectInfo) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	var err error
 
 	// Build logical plan — merge outer CTEs so subqueries can reference
 	// CTE tables defined in the enclosing WITH clause.
@@ -2064,9 +2083,10 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 
 	p.cteCache = make(map[string]*cteMaterialized)
 
-	for i, cte := range root.CTEs {
+	for i := range root.CTEs {
+		cte := &root.CTEs[i]
 		if cte.Recursive {
-			p.materializeRecursiveCTE(ctx, cte)
+			p.materializeRecursiveCTE(ctx, *cte)
 			continue
 		}
 		if refCounts[cte.Name] < 2 {
@@ -2079,7 +2099,12 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 		// CollectSink.ToRows (one map[string]any per row, entirely outside
 		// the budget/spill machinery) — `WITH x AS (SELECT * FROM lineitem)`
 		// held the full table in coordinator-process heap.
-		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, root.CTEs[:i])
+		// The MEMOIZED body, so this materialization plans the tree the
+		// binder validated rather than a private re-parse of the same text
+		// (#851). BodySelect answers nil on a parse error, and the sql
+		// argument keeps the old path's message for that case.
+		body, _ := cte.BodySelect()
+		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, body, root.CTEs[:i])
 		if err != nil {
 			continue // fall back to inline expansion
 		}
@@ -2096,8 +2121,15 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 // cteMaterializingSink); the caller owns the collector and must Release it —
 // normally via PhysicalPlan.Cleanup through releaseCTECache.
 func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string,
-	scope []plansql.CTEDef) (*exec.SpillableBatchCollector, []parquet.Column, error) {
-	source, ops, _, err := p.buildSubqueryPipelineScoped(ctx, sql, scope)
+	body *plansql.SelectInfo, scope []plansql.CTEDef) (*exec.SpillableBatchCollector, []parquet.Column, error) {
+	var source exec.Source
+	var ops []exec.UnaryOperator
+	var err error
+	if body != nil {
+		source, ops, _, err = p.buildSubqueryPipelineScopedFor(ctx, body, scope)
+	} else {
+		source, ops, _, err = p.buildSubqueryPipelineScoped(ctx, sql, scope)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2279,7 +2311,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 		// materialization.
 		// A RECURSIVE CTE's name IS in scope inside its own body, which is
 		// what makes it recursive, so this one keeps the whole list.
-		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, p.ctes)
+		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL, nil, p.ctes)
 		if err != nil {
 			return
 		}
