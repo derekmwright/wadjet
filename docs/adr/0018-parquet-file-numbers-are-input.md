@@ -556,9 +556,15 @@ treated alike:
   carry a value that column promises not to hold. The two read paths used to
   disagree about exactly that — the native scan ANSWERED a twenty-digit value
   in a column whose wire declaration says fifteen, while the row reader refused
-  the same bytes with a message of its own. PostgreSQL cannot reach the state
-  at all (`123456789012345678.00::numeric(15,2)` is 22003), so both now refuse
-  with that SQLSTATE and PostgreSQL's own wording (§3, ADR-0024).
+  the same bytes with a message of its own that carried NO SQLSTATE — so a
+  client saw the blanket 42000 for a value error (#673's shape). PostgreSQL
+  cannot reach the state at all (`123456789012345678.00::numeric(15,2)` is
+  22003), so both now refuse with that SQLSTATE and PostgreSQL's own wording.
+  On the row path the refusal comes from whichever check reaches the value
+  first — the box check in `decodeDecimalValues`, for a value with no int64
+  under a column the declared precision boxed as one, or `rescaleDecimalBoxes`
+  otherwise — and both now raise it through `decimalOverflow`, so the
+  DISPOSITION does not depend on which one fired (§3, ADR-0024).
 
 A catalog DECIMAL over a leaf carrying NO decimal annotation states no
 declaration to disagree with, so §4's already-unscaled rule stands there; both

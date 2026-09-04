@@ -236,8 +236,15 @@ func TestNarrowDecimalRefusesAValueItCannotHold(t *testing.T) {
 	if err == nil {
 		t.Fatal("a 16-byte value read as DECIMAL(18,10) was accepted; it should be refused")
 	}
-	if !strings.Contains(err.Error(), "does not fit") {
+	// The refusal names the problem in PostgreSQL's own words and carries its
+	// SQLSTATE. It used to be a bare fmt.Errorf with no code at all, so a
+	// client saw the blanket 42000 for a value error while the NATIVE path
+	// raised 22003 over the same bytes (round 1 review; #673's shape).
+	if !strings.Contains(err.Error(), "must round to an absolute value less than") {
 		t.Fatalf("error does not name the problem: %v", err)
+	}
+	if got := sqlerr.StateOf(err); got != "22003" {
+		t.Fatalf("SQLSTATE %q, want 22003: %v", got, err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -182,9 +183,17 @@ func TestBothReadPathsHoldAWiderDeclaredPrecisionToTheCatalogsBand(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Both paths refuse, and both refuse the SAME WAY: PostgreSQL's 22003
+		// with its own wording. The row reader used to raise a bare error
+		// carrying no SQLSTATE, so a client saw the blanket 42000 for a value
+		// error while the native path over the same bytes raised 22003 —
+		// ADR-0013's two-path property broken on the DISPOSITION rather than
+		// on the value (round 1 review).
 		if b, err := ReadRowGroupNative(fr, 0, catalog, nil); err == nil {
 			t.Errorf("the native path answered {%d,%d} for a value past the catalog's band",
 				b.Columns[0].DecimalData.Data[0].Hi, b.Columns[0].DecimalData.Data[0].Lo)
+		} else if got := sqlerr.StateOf(err); got != "22003" {
+			t.Errorf("native path SQLSTATE %q, want 22003: %v", got, err)
 		}
 		r, err := pqt.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
@@ -193,6 +202,9 @@ func TestBothReadPathsHoldAWiderDeclaredPrecisionToTheCatalogsBand(t *testing.T)
 		if rows, err := r.ReadRowsAs(catalog, nil); err == nil {
 			t.Errorf("the row path answered %#v for the same bytes — the two paths must "+
 				"dispose of this the same way (ADR-0013)", rows[0]["a"])
+		} else if got := sqlerr.StateOf(err); got != "22003" {
+			t.Errorf("row path SQLSTATE %q, want 22003 (the native path raises it over the "+
+				"same bytes): %v", got, err)
 		}
 	})
 

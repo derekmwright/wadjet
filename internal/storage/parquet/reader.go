@@ -1440,8 +1440,21 @@ func decodeDecimalValues(dst []any, data Values, n int, col Column) error {
 			}
 			v, ok := d.Int64()
 			if !ok {
-				return fmt.Errorf("column %q: DECIMAL(%d,%d) value %s at entry %d does not fit "+
-					"the 64 bits its declared precision allows", col.Name, col.Precision, col.Scale, d, i)
+				// A value with no int64 is at least 2^63 — nineteen digits —
+				// so a column whose declared precision chose the int64 box
+				// (18 digits or fewer, decimalNeeds128) cannot hold it, and
+				// PostgreSQL's answer for that is 22003 with the "must round
+				// to an absolute value less than 10^(p-s)" wording. This used
+				// to be a bare fmt.Errorf carrying no SQLSTATE at all, so a
+				// client saw the blanket 42000 for a value error (#673's
+				// shape) — and the NATIVE path raised 22003 over the same
+				// bytes, which is ADR-0013's two-path property broken on the
+				// DISPOSITION rather than on the value. The entry index and
+				// the carrier stay in the wrapper: they are the diagnosis,
+				// and sqlerr.StateOf reads the code through it.
+				return fmt.Errorf("column %q, entry %d (unscaled %s): %w",
+					col.Name, i, d, decimalOverflow(
+						decimalEffectivePrecision(col.Precision), col.Scale))
 			}
 			dst[i] = v
 		}
