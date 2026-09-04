@@ -348,12 +348,21 @@ auth:
 ```
 
 **Column masking** (`columns: {<column>: mask}`): the column is replaced, at
-the scan, by a placeholder chosen from its **declared type** — `'***'` for
-strings and every other type, `0` for numerics, `false` for booleans. The
+the scan, by a placeholder chosen from its **declared type** — `0` for
+numerics, `false` for booleans, `'***'` for strings and every other type. This
+type-derived placeholder is specific to THIS legacy form; an ABAC
+`mask_column` obligation must say what it means with `value:` (see below). The
 replacement is **not configurable** through this section; use an ABAC
-`mask_column` obligation with a quoted SQL expression (`value: "'REDACTED'"`)
-when you need a specific value. The masked column keeps its declared type on
-the wire, so a client sees the same OID it would see without the policy.
+obligation with a quoted SQL expression (`value: "'REDACTED'"`) when you need a
+specific value.
+
+The masked column declares the **mask expression's** type on the wire, which
+is what PostgreSQL declares for any expression in a SELECT list. `'***'` over
+a text column and `0` over a numeric one keep the column's own declaration; a
+mask of a different type moves it, so a `TIMESTAMP` masked with `'***'`
+arrives as text and `WHERE ts > '2000-01-01'` returns no rows. Write a mask of
+the column's own type (`value: "TIMESTAMP '1970-01-01'"`) when a client
+depends on the declaration.
 
 **Column denial** (`columns: {<column>: deny}`): for this identity the column
 **does not exist**. It is absent from `SELECT *` and from the result schema,
@@ -376,6 +385,41 @@ Both can be combined in a single policy. A policy with only `columns` applies ma
 If a column policy cannot be applied to a plan — a scan whose columns cannot be
 resolved, or a table with every column denied — the query is **refused**. A
 security control never degrades to a grant.
+
+A policy binds to a **relation**, never to an alias: `FROM other AS employees`
+is a scan of `other` and no policy on `employees` touches it.
+
+### A mask is a SQL expression, and it must say what it means
+
+An ABAC `mask_column` obligation is refused **at config load and at hot
+reload** — keeping the previous policy set in place — when it:
+
+- gives neither a `value` nor a `mask_func`. The type-derived placeholder is
+  the legacy `columns: {col: mask}` form's rule, not this one;
+- gives a `value` the SQL parser does not read as written. `value:
+  "***REDACTED***"` parses as the expression `* * *` — the word is dropped and
+  every masked column answers `0` — and `value: "[MASKED]"` does not parse at
+  all. A literal string needs its quotes: `value: "'REDACTED'"`;
+- gives a `value` that reads a column the same rule masks or denies. **A mask
+  expression is evaluated against the row AS STORED**, below the security
+  projection, so `value: "ssn"` on a masked `ssn` would publish exactly the
+  value the rule hides. An expression over an unrestricted column
+  (`value: "'redacted-' || dept"`) is allowed, and sees the stored row.
+
+### DML under a policy
+
+An `INSERT`, `UPDATE`, `DELETE` or `MERGE` is a **write**: an identity whose
+policies grant it no write on the table is refused with `42501 permission
+denied for table "…"` before any row is read or written.
+
+When the write is allowed, the statement's own reads see what a `SELECT` would
+see. A **denied** column does not exist inside the statement — naming it in a
+predicate, as a `SET` or `INSERT` target, or inside a `SET` expression is
+`42703` — and a **masked** column reads as its mask, so
+`WHERE ssn = '<stored value>'` matches nothing and `SET dept = ssn` writes the
+mask rather than copying the stored value into a column the identity may read.
+`MERGE` against a table carrying a column policy is refused (`0A000`): its
+`WHEN` clauses carry raw text the rewriter does not decompose.
 
 ### Policy Evaluation Order
 
@@ -407,11 +451,25 @@ In distributed mode, identity context (name, role, and attributes) is propagated
 
 A column policy travels with the plan, not as a second decision the worker
 re-derives: the security projection is absorbed into the scan stage
-(`SecurityProjectExprs`) and the worker's scan fragment applies it before any
-filter, aggregate or join sees a row. Pre-evaluated policy decisions are also
-serialized as JSON into the distributed task's `PolicyDecisionJSON` field,
-where the worker uses them as defense in depth — a task that requests a denied
-column is rejected outright.
+(`SecurityProjectExprs`) and the worker's scan fragment applies it as
+`OpScan → OpFilter → SecurityProject`, so the projection sits between the scan
+and everything that consumes rows — the aggregate, the join, the exchange.
+The FILTER runs first, and deliberately: that is the same order the
+single-process pipeline uses, and it is what makes a policy's own `row_filter`
+read the row as stored on both paths.
+
+`worker/executor.go`'s `enforcePolicyDecision` re-checks the task against the
+serialized decision as defense in depth, rejecting a task whose requested
+columns include a denied one. It reads `PolicyDecisionJSON`, which the
+coordinator does not currently populate, so today it is a guard waiting for a
+producer rather than an active check — the enforcement that runs is the
+plan-time one above.
+
+**The asynchronous door does not carry a policy.** `POST /v1/queries/async`
+dispatches the statement to a worker as SQL TEXT, which the worker re-plans
+where no policy is in reach, so an identity carrying any row or column policy
+is refused there (`0A000`) and must use `POST /v1/queries`. See ADR-0033's
+not-settled list.
 
 ## Security Configuration Example
 

@@ -366,7 +366,7 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 
 - API key, JWT (HMAC/RSA), and mTLS authentication — enforced on HTTP, pgwire, and gRPC
 - RBAC (role-based) and ABAC (attribute-based) access control with deny-overrides combining
-- Cell-level policies: column masking, column denial and row filtering via ABAC obligations, enforced in the query plan at the scan — a masked column is masked for aggregates, GROUP BY, join keys and windows too, and a denied column does not exist for that identity
+- Cell-level policies: column masking, column denial and row filtering via ABAC obligations, enforced in the query plan at the scan — a masked column is masked for aggregates, GROUP BY, join keys and windows too, a denied column does not exist for that identity, and the same rules apply inside an INSERT/UPDATE/DELETE (`POST /v1/queries/async` refuses a policed statement; use `POST /v1/queries`)
 - Identity enrichment from JWT claims, mTLS cert fields, and API key attributes
 - Hot-reloadable configuration (including ABAC policies)
 

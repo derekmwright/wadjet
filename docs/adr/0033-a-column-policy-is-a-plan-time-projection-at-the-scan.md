@@ -100,7 +100,18 @@ the CONTEXT (`logical.ContextWithColumnPolicies`), which is the only carrier
 both planning paths already share, and that path applies the same projection
 and the same 42703 binding.
 
-**8. An unpoliced identity is unchanged.**
+**8. A DML statement is a write, and its reads see what a SELECT sees.**
+
+An identity whose policies grant no `ActionWrite` on the table is refused with
+42501 before anything is read or written. When the write IS allowed, a DENIED
+column does not exist inside the statement — in a predicate, as a SET or
+INSERT target, or inside a SET expression — and a MASKED column reads as its
+mask, so `WHERE ssn = '<stored>'` matches nothing and `SET dept = ssn` writes
+the mask. It is a SUBSTITUTION into the statement's own expressions rather
+than a projection because a DML predicate is compiled and never planned
+(ADR-0031); where the rewrite cannot be done soundly the statement is refused.
+
+**9. An unpoliced identity is unchanged.**
 
 An admin identity, and an in-process caller with no identity at all, see the
 raw table. `EnforcePlanPolicies` still no-ops with no provider, no identity or
@@ -115,14 +126,61 @@ the coordinator's `ExecuteSQL` can present.
   type of a result value. A plan-time projection has to type-check, so a bare
   `'***'` over a BIGINT column would make `SUM(col)` an error. This is the
   same table the deleted row-side `defaultMaskValue` used.
-- The declared wire type of a masked column does not move: `ssn` stays `text`,
-  `acct` stays `bigint`, and `SELECT *` under a deny policy omits the column
-  from the RowDescription.
+- **A masked column declares the MASK EXPRESSION's type on the wire**, which is
+  what PostgreSQL declares for any expression in a SELECT list. Where the mask
+  is written in the column's own type — `'***'` over `text`, `0` over
+  `bigint` — the declaration does not move, and those are the two the
+  type-derived default produces. Where it is not, it moves and the client sees
+  the mask's type: a `TIMESTAMP` masked with the default `'***'` arrives as
+  `text`, `MAX(ts)` is `'***'`, and `WHERE ts > '2000-01-01'` returns no rows.
+  That is the honest consequence of a mask being an expression, and the
+  remedy is to write a mask of the column's own type
+  (`value: "TIMESTAMP '1970-01-01'"`); a typed placeholder for every one of the
+  22 types is NOT settled here. `SELECT *` under a deny policy omits the
+  column from the RowDescription on every door.
 - The projection is one plan node per POLICED scan. A query by an identity with
   no column obligations gets no node and no cost.
-- What is NOT settled here: per-row / per-cell labels (a visibility column, a
-  `has_access` function family, dictionary-level evaluation) are a 0.19 arc,
-  not this one.
+- A policy binds to a RELATION — the catalog table a scan reads — and never to
+  an alias. `FROM other AS policed_name` is a scan of `other` and is untouched.
+- The optimizer MINTS scans: the decorrelation passes re-parse a subquery from
+  its text and build a fresh Scan after enforcement ran. The projection is
+  re-applied to any uncovered policed scan immediately after every
+  `logical.Optimize`. That pass takes its column list from the SCAN, because
+  after pruning the authority is what the scan produces; before the optimizer
+  the catalog is the authority, which is decision 1.
+- A mask expression is evaluated BELOW the barrier, against the row as stored.
+  One that reads a column the same rule masks or denies is refused at load and
+  at enforcement, because it would publish exactly what the rule takes away. An
+  expression over an unrestricted column is allowed and sees the stored row.
+
+### Not settled
+
+- **A task that carries a statement's TEXT is re-planned where no policy is.**
+  `TaskTypePipeline` carries `SQLText`, and `worker/executor.go`'s
+  `executePipeline` parses, builds and optimizes it again. Two consequences,
+  both open: the async door (`POST /v1/queries/async`) refuses a policed
+  statement outright rather than answer it unmasked, and a DEFERRED SCALAR
+  producer returns the stored value, which makes
+  `WHERE ssn = (SELECT MIN(ssn) FROM t)` answer 0 on the DAG where
+  single-process answers 12 (pinned in the matrix; no value escapes). The fix
+  is a pipeline task that carries the enforced PLAN rather than its text, or a
+  worker that reconstructs the projection from `PolicyDecisionJSON` — the
+  second is a SECOND enforcement path and decision 5 forbids it, so the first
+  is the direction. Its own arc.
+- **MERGE under a column policy is refused.** Its WHEN clauses carry raw
+  SET/VALUES text that the DML rewriter does not decompose, so it cannot be
+  shown to honour the policy. Refusing beats running those reads against the
+  stored row.
+- **A row filter that names a column the same policy DENIES** is neither
+  rewritten nor refused: the filter sits below the barrier and reads the scan,
+  which is what a policy predicate is supposed to do, but nothing checks that
+  the column exists. A filter naming a column the table does not have at all
+  either errors at execution with no SQLSTATE or silently matches everything —
+  identical before this arc, so pre-existing. Closing it means binding the
+  injected predicate against the UNFILTERED schema at config load.
+- **A typed mask placeholder per type** (see the wire-type consequence above).
+- Per-row / per-cell labels (a visibility column, a `has_access` function
+  family, dictionary-level evaluation) are a 0.19 arc, not this one.
 
 ## Gate
 

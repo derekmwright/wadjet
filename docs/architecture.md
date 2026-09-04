@@ -461,6 +461,6 @@ See [Security](security.md) for full details.
 - **Authentication**: API keys, JWT (HMAC-SHA256 / RSA), mTLS — enforced on HTTP, pgwire, and gRPC
 - **Authorization**: RBAC (role-based) and ABAC (attribute-based) with deny-overrides combining
 - **Identity enrichment**: JWT claims, mTLS cert fields, API key attributes flow into ABAC evaluation
-- **Cell-level policies**: Column masking, column denial and row filtering via ABAC obligations, enforced at PLAN time at the scan on every door — a masked column is masked for every consumer above the scan (WHERE, GROUP BY, aggregates, joins, windows), and a denied column does not exist (ADR-0033)
+- **Cell-level policies**: Column masking, column denial and row filtering via ABAC obligations, enforced at PLAN time at the scan on every synchronous door — a masked column is masked for every consumer above the scan (WHERE, GROUP BY, aggregates, joins, windows), a denied column does not exist, DML carries the same rules, and the asynchronous HTTP door refuses a policed statement rather than answer it unmasked (ADR-0033)
 - **Distributed enforcement**: Pre-evaluated policy decisions serialized into worker tasks
 - **Hot-reloadable**: Auth config changes (including ABAC policies) are picked up without restart
