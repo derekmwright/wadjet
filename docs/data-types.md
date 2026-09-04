@@ -328,10 +328,16 @@ over the same two relations. Select the field through a derived table that
 renames the other arm's container away:
 
 ```sql
--- Both arms publish `c_row`, so `c_row.b` is refused. This spelling is not.
-SELECT x.id, x_row.b FROM nested x
+-- Both arms publish `c_row`, so `c_row.b` is refused. Rename the OTHER arm's
+-- container and `c_row` names one thing again.
+SELECT x.id, c_row.b FROM nested x
   JOIN (SELECT id, c_row AS y_row FROM nested) y ON x.id = y.id
 ```
+
+That query is driven as a gate — `docs-example/*` in
+`internal/coordinator/derived_arm_join_chain_two_path_test.go` — on every
+execution arm and in both spellings, so this page cannot drift from the engine.
+
 
 A field the container does not declare is refused too, with PostgreSQL's
 wording (`could not identify column "x" in record data type`).
