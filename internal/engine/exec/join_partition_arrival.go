@@ -243,6 +243,11 @@ const minArrivalChunkRows = 32
 // next operator against room that does not exist.
 func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
 	cost := hashBuildBytes(b)
+	if joinFloorArmed.Load() {
+		// One relaxed load per arrival batch, disarmed in production. It is
+		// the instant #789 is a question about (join_floor_probe.go).
+		noteJoinFloor(h.MemTracker)
+	}
 	if err := h.MemTracker.Reserve(cost); err != nil {
 		if spillErr := h.spillUntilCanReserve(cost); spillErr != nil {
 			return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
