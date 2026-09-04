@@ -822,6 +822,10 @@ func materializeAliasColumns(producer *Stage, cols []aliasColumn) bool {
 		source = producer.Columns
 	}
 	specs := make([]ProjectExprSpec, 0, len(source)+len(cols))
+	// passThrough[lower] is the index in specs of a spec that merely FORWARDS
+	// the producer's own column of that name. An alias that SHADOWS one
+	// replaces it; an alias that collides with anything else does not.
+	passThrough := make(map[string]int, len(source))
 	seen := make(map[string]bool, len(source))
 	for _, c := range source {
 		lower := strings.ToLower(c)
@@ -832,6 +836,7 @@ func materializeAliasColumns(producer *Stage, cols []aliasColumn) bool {
 			continue
 		}
 		seen[lower] = true
+		passThrough[lower] = len(specs)
 		specs = append(specs, ProjectExprSpec{Expr: c, Name: c})
 	}
 	if len(specs) == 0 {
@@ -839,18 +844,43 @@ func materializeAliasColumns(producer *Stage, cols []aliasColumn) bool {
 	}
 	added := false
 	for _, c := range cols {
-		if c.Name == "" || c.Expr == "" || seen[strings.ToLower(c.Name)] {
-			// A producer that already emits a column of that name is not a
-			// producer this pass may write over: the name is either the real
-			// relation's, which the key would then be reading correctly, or
-			// one another pass materialized (#807's own boundary).
+		if c.Name == "" || c.Expr == "" {
 			continue
 		}
-		seen[strings.ToLower(c.Name)] = true
-		specs = append(specs, ProjectExprSpec{
+		lower := strings.ToLower(c.Name)
+		spec := ProjectExprSpec{
 			Expr: c.Expr, Name: c.Name, Type: c.Type,
 			TypeKnown: c.TypeKnown, Precision: c.Precision, Scale: c.Scale,
-		})
+		}
+		if seen[lower] {
+			// The producer already emits a column of that name, and which of
+			// two things that means decides the answer.
+			//
+			// A derived table that REDEFINES the name — `(SELECT g*0 AS g …)`
+			// read by `PARTITION BY z.g` — publishes a COMPUTED alias, which
+			// is the only reason `derivedAliasDefinition` answered at all. The
+			// producer's own `g` is then the WRONG column, and forwarding it
+			// is a silent wrong answer: the window partitioned by the base `g`
+			// and every row got its own partition where the single-process
+			// path has one. So the alias REPLACES the pass-through. The
+			// projection's inputs are its INPUT batch, not its own outputs, so
+			// `g * 0` still reads the base column while emitting the alias —
+			// which is exactly how `SELECT g*0 AS g` works on the other engine.
+			//
+			// Anything else — a name another pass materialized, or a second
+			// alias of the same name — is left alone: this pass is not the one
+			// that put it there.
+			idx, isForwarded := passThrough[lower]
+			if !isForwarded {
+				continue
+			}
+			specs[idx] = spec
+			delete(passThrough, lower)
+			added = true
+			continue
+		}
+		seen[lower] = true
+		specs = append(specs, spec)
 		added = true
 	}
 	if !added {

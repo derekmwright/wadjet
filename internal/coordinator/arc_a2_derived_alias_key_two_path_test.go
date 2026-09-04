@@ -138,6 +138,65 @@ func a2AliasKeyCells() []a2AliasKeyCell {
 				"id=int64:2|gk=int64:4|s=float:2", "id=int64:3|gk=int64:6|s=float:3",
 				"id=int64:4|gk=int64:8|s=float:4", "id=int64:5|gk=int64:10|s=float:5"},
 			pgSays: "6 rows, each its own partition"},
+		// The alias that SHADOWS a base column, which is what
+		// `materializeAliasColumns`' collision branch is really about.
+		// `(SELECT id, g*0 AS g, id AS v …) z` publishes a computed `g` over a
+		// relation that has its own; the producer already emits `g`, the pass
+		// used to DECLINE on that, and the window partitioned by the BASE
+		// column — every row its own partition where PostgreSQL and the
+		// single-process path have one. Silent, on both DAG arms, and
+		// identical at `fd679ae9`.
+		//
+		// The decline is now split by WHAT the colliding name is. A column the
+		// pass itself forwarded from the producer is REPLACED, because a
+		// COMPUTED alias of that name is the derived table redefining it and
+		// the producer's own column is the wrong one; anything else — a name
+		// another pass materialized — is still left alone.
+		{issue: "#658", name: "window_partition_by_an_alias_that_shadows_a_base_column",
+			sql: `SELECT z.id, SUM(z.v) OVER (PARTITION BY z.g) AS s ` +
+				`FROM (SELECT id, g*0 AS g, id AS v FROM typemx WHERE id<6) z ORDER BY z.id`,
+			want: []string{
+				"id=int64:0|s=float:15", "id=int64:1|s=float:15", "id=int64:2|s=float:15",
+				"id=int64:3|s=float:15", "id=int64:4|s=float:15", "id=int64:5|s=float:15"},
+			pgSays: "6 rows, s=15 on each — ONE partition, because g*0 is 0 for every row"},
+		{issue: "#658", name: "window_order_by_an_alias_that_shadows_a_base_column",
+			sql: `SELECT z.id, SUM(z.v) OVER (ORDER BY z.g) AS s ` +
+				`FROM (SELECT id, g*0 AS g, id AS v FROM typemx WHERE id<6) z ORDER BY z.id`,
+			want: []string{
+				"id=int64:0|s=float:15", "id=int64:1|s=float:15", "id=int64:2|s=float:15",
+				"id=int64:3|s=float:15", "id=int64:4|s=float:15", "id=int64:5|s=float:15"},
+			pgSays: "6 rows, s=15 on each — one peer group, so the running total is the total"},
+		// The other side of that boundary: the SAME query with the alias NOT
+		// shadowing anything. It was right before and must stay right, and it
+		// is what says the replacement is keyed on the collision rather than
+		// applied to every alias.
+		{issue: "#658", name: "ctl_window_partition_by_a_non_shadowing_computed_alias",
+			sql: `SELECT z.id, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
+				`FROM (SELECT id, g*0 AS gk, id AS v FROM typemx WHERE id<6) z ORDER BY z.id`,
+			want: []string{
+				"id=int64:0|s=float:15", "id=int64:1|s=float:15", "id=int64:2|s=float:15",
+				"id=int64:3|s=float:15", "id=int64:4|s=float:15", "id=int64:5|s=float:15"},
+			pgSays: "the same 6 rows"},
+		// THE DECLINE PATH. `materializeAliasColumns` refuses a producer that
+		// already carries a projection — `materializeSortKey`'s own rule: those
+		// specs were written by a pass that knows the query's output shape, and
+		// appending to them would widen a result the gather does not expect.
+		// Both of these reach it, are REFUSED at plan time and answered on the
+		// coordinator-local pipeline, and the counter is the only thing that
+		// can see that. Without them the branch is live code with no fixture.
+		{issue: "#807", name: "decline_outer_expression_over_an_inner_sorted_alias",
+			sql:         `SELECT x.w + 1 AS q FROM (SELECT g*3 AS w FROM typemx ORDER BY w LIMIT 5) x ORDER BY q`,
+			want:        []string{"q=int64:1", "q=int64:1", "q=int64:1", "q=int64:1", "q=int64:1"},
+			wantUnreach: 1,
+			pgSays:      "5 rows of 1"},
+		{issue: "#807", name: "decline_two_computed_aliases_one_sorted_inside",
+			sql: `SELECT x.w, x.d FROM (SELECT g*3 AS w, g*2 AS d FROM typemx ORDER BY w LIMIT 5) x ` +
+				`ORDER BY x.d`,
+			want: []string{
+				"w=int64:0|d=int64:0", "w=int64:0|d=int64:0", "w=int64:0|d=int64:0",
+				"w=int64:0|d=int64:0", "w=int64:0|d=int64:0"},
+			wantUnreach: 1,
+			pgSays:      "5 rows of 0|0"},
 		{issue: "#658", name: "ctl_window_partition_by_plain_rename",
 			sql: `SELECT z.id, z.gk, SUM(z.v) OVER (PARTITION BY z.gk) AS s ` +
 				`FROM (SELECT id, g AS gk, id AS v FROM typemx WHERE id < 6) z ORDER BY z.id`,
@@ -197,6 +256,81 @@ func TestADerivedTablesComputedAliasIsNotASortOrWindowKeyOnTheDAG(t *testing.T) 
 						"coordinator-local pipeline answered)\n  SQL: %s",
 						arm.name, d, tc.wantUnreach, tc.sql)
 				}
+			}
+		})
+	}
+}
+
+// AN ALIAS THAT SHADOWS A BASE COLUMN IS STILL WRONG IN THE OUTER SELECT LIST.
+//
+// `SELECT x.id FROM (SELECT g*3 AS id FROM typemx …) x` publishes a computed
+// `id` over a relation that has its own, and both DAG arms answer the BASE
+// column's values where PostgreSQL and the single-process path answer `g*3`.
+// Silent, and identical at `fd679ae9`.
+//
+// It is a DIFFERENT SITE from the window/sort keys this arc fixed, and the two
+// spellings here say which: with an outer ORDER BY on the alias the shape is
+// REFUSED and answered locally (the sort-key path, which now materializes), and
+// without one it runs and is wrong (the gather's rename resolving `x.id`
+// through `resolveOutputRenameSource`, which answers the SOURCE column for a
+// name the derived table redefines). The read set is clean either way — this is
+// not #776's phantom.
+//
+// Pinned rather than fixed because the repair is in the rename resolution's own
+// walk, which every derived-alias consumer shares; an issue carries the
+// measurement.
+func TestAnAliasThatShadowsABaseColumnIsStillWrongInTheOuterSelectList(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+
+	single := tmdStandalone(t, ctx)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	coord := tmdCoordinator(t, ctx, infra)
+
+	for _, tc := range []struct {
+		name, sql string
+		want      []string // PostgreSQL's, and the single-process arm's
+		wantDAG   []string // what both DAG arms answer today
+	}{
+		{"no_outer_order_by",
+			`SELECT x.id FROM (SELECT g*3 AS id FROM typemx WHERE id<6) x`,
+			[]string{"id=int64:0", "id=int64:12", "id=int64:15", "id=int64:3", "id=int64:6", "id=int64:9"},
+			[]string{"id=int64:0", "id=int64:1", "id=int64:2", "id=int64:3", "id=int64:4", "id=int64:5"}},
+		{"inner_order_by",
+			`SELECT x.id FROM (SELECT g*3 AS id FROM typemx WHERE id<6 ORDER BY id) x`,
+			[]string{"id=int64:0", "id=int64:12", "id=int64:15", "id=int64:3", "id=int64:6", "id=int64:9"},
+			[]string{"id=int64:0", "id=int64:1", "id=int64:2", "id=int64:3", "id=int64:4", "id=int64:5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := na2Run(tmdRunSingle(ctx, single, tc.sql))
+			if err != nil {
+				t.Fatalf("single arm: %v", err)
+			}
+			want := append([]string(nil), tc.want...)
+			sort.Strings(want)
+			if strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("single arm\n  got  %v\n  want %v (live PostgreSQL 17)", got, want)
+			}
+			dgot, derr := na2Run(tmdRunDAG(ctx, coord, tc.sql))
+			if derr != nil {
+				t.Fatalf("dag arm: %v", derr)
+			}
+			wantDAG := append([]string(nil), tc.wantDAG...)
+			sort.Strings(wantDAG)
+			if strings.Join(dgot, "\n") == strings.Join(want, "\n") {
+				t.Errorf("dag arm now AGREES with PostgreSQL — the outer SELECT list's "+
+					"derived-alias resolution is fixed. Delete this pin and assert one answer "+
+					"on every arm.\n  SQL: %s", tc.sql)
+				return
+			}
+			if strings.Join(dgot, "\n") != strings.Join(wantDAG, "\n") {
+				t.Errorf("dag arm\n  got  %v\n  want the PINNED wrong answer %v — it moved "+
+					"without becoming right, which is a change nobody recorded\n  SQL: %s",
+					dgot, wantDAG, tc.sql)
 			}
 		})
 	}
