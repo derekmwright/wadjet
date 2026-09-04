@@ -41,11 +41,31 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	pmTable    = "e7emp"
+	pmTable = "e7emp"
+	// pmOther is a SECOND, UNPOLICED table, present so the matrix can attack
+	// the policy's own targeting: a policy binds to a RELATION, and a scan of
+	// e7other must be untouched however the statement names it — including
+	// when the statement aliases it to the policed table's own name.
+	pmOther    = "e7other"
 	pmRows     = 12
 	pmMaskSSN  = "***"
 	pmMaskAcct = "0"
 )
+
+func pmOtherSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "note", Type: parquet.TypeString},
+	}}
+}
+
+func pmOtherFixture() []map[string]any {
+	rows := make([]map[string]any, 0, 3)
+	for i := 1; i <= 3; i++ {
+		rows = append(rows, map[string]any{"id": int64(i), "note": fmt.Sprintf("n%d", i)})
+	}
+	return rows
+}
 
 func pmSchema() parquet.Schema {
 	return parquet.Schema{Columns: []parquet.Column{
@@ -102,6 +122,14 @@ func pmProvider(t *testing.T) *auth.Provider {
 					{Type: "mask_column", Target: "ssn", Value: "'" + pmMaskSSN + "'"},
 					{Type: "mask_column", Target: "acct", Value: pmMaskAcct},
 				},
+			},
+			{
+				// e7other is readable and carries NO obligation. It is the
+				// control for the policy's targeting.
+				ID: "analyst-other-open", EffectStr: "allow", Priority: 10,
+				Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+				Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: pmOther}},
+				Actions:   []auth.Action{auth.ActionRead},
 			},
 			{
 				ID: "admin-raw", EffectStr: "allow", Priority: 10,
@@ -218,11 +246,16 @@ type pmRig struct {
 
 func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog) {
 	t.Helper()
-	sch := pmSchema()
-	if err := cat.CreateTable(ctx, pmTable, sch, nil); err != nil {
-		t.Fatalf("create %s: %v", pmTable, err)
+	pmWriteTable(t, ctx, store, cat, pmTable, pmSchema(), pmFixture())
+	pmWriteTable(t, ctx, store, cat, pmOther, pmOtherSchema(), pmOtherFixture())
+}
+
+func pmWriteTable(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog,
+	table string, sch parquet.Schema, rows []map[string]any) {
+	t.Helper()
+	if err := cat.CreateTable(ctx, table, sch, nil); err != nil {
+		t.Fatalf("create %s: %v", table, err)
 	}
-	rows := pmFixture()
 	const chunks = 3
 	per := (len(rows) + chunks - 1) / chunks
 	var entries []catalog.FileEntry
@@ -242,7 +275,7 @@ func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat
 		if err := pw.Close(); err != nil {
 			t.Fatal(err)
 		}
-		path := fmt.Sprintf("tables/%s/chunk_%04d.parquet", pmTable, c)
+		path := fmt.Sprintf("tables/%s/chunk_%04d.parquet", table, c)
 		payload := buf.Bytes()
 		if _, err := store.Put(ctx, "test", path, bytes.NewReader(payload),
 			int64(len(payload)), "application/octet-stream"); err != nil {
@@ -253,7 +286,7 @@ func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat
 			NumRows: int64(hi - lo), CreatedAt: time.Now(),
 		})
 	}
-	if err := cat.AddFiles(ctx, pmTable, map[string]string{}, "tables/"+pmTable+"/", entries); err != nil {
+	if err := cat.AddFiles(ctx, table, map[string]string{}, "tables/"+table+"/", entries); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -269,17 +302,20 @@ func pmEmbeddedDB(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 		t.Fatalf("open embedded: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	sch := pmSchema()
-	if err := db.CreateTable(ctx, pmTable, sch, nil); err != nil {
-		t.Fatal(err)
+	ingest1 := func(table string, sch parquet.Schema, rows []map[string]any) {
+		if err := db.CreateTable(ctx, table, sch, nil); err != nil {
+			t.Fatal(err)
+		}
+		ing := db.NewIngester(table, sch, nil, ingest.Config{MaxBufferRows: len(rows) + 1, RowGroupSize: 4})
+		if err := ing.Ingest(ctx, rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatal(err)
+		}
 	}
-	ing := db.NewIngester(pmTable, sch, nil, ingest.Config{MaxBufferRows: pmRows + 1, RowGroupSize: 4})
-	if err := ing.Ingest(ctx, pmFixture()); err != nil {
-		t.Fatal(err)
-	}
-	if err := ing.FlushAll(ctx); err != nil {
-		t.Fatal(err)
-	}
+	ingest1(pmTable, pmSchema(), pmFixture())
+	ingest1(pmOther, pmOtherSchema(), pmOtherFixture())
 	return db
 }
 
@@ -647,6 +683,32 @@ func pmCells() []pmCell {
 			deniedLike: "salary"},
 		{name: "denied_column_in_a_union_arm",
 			sql: `SELECT id FROM e7emp UNION ALL SELECT salary FROM e7emp`, deniedLike: "salary"},
+
+		// ------------------------------------------------------------------
+		// The policy's TARGETING. A policy binds to a RELATION — the catalog
+		// table the scan reads — and never to a name the statement minted.
+		// Matching an alias made `FROM e7other AS e7emp` get e7emp's schema
+		// projected over a scan of e7other: its own `note` column vanished
+		// and every row came back NULL, a silently wrong answer for a query
+		// that does not read the policed table at all.
+		{name: "unpoliced_table_aliased_to_the_policed_name",
+			sql:  `SELECT e7emp.id, e7emp.note FROM e7other AS e7emp ORDER BY e7emp.id`,
+			want: []string{"id=1|note=n1", "id=2|note=n2", "id=3|note=n3"}},
+		{name: "unpoliced_table_aliased_to_the_policed_name_beside_it",
+			sql:  `SELECT e7emp.id, e7emp.note FROM e7other AS e7emp, e7emp AS z WHERE z.id = 1 ORDER BY e7emp.id`,
+			want: []string{"id=1|note=n1", "id=2|note=n2", "id=3|note=n3"}},
+		{name: "unpoliced_table_aliased_to_the_policed_name_case_folded",
+			sql:  `SELECT e7emp.note AS n FROM e7other AS E7EMP ORDER BY e7emp.id`,
+			want: []string{"n=n1", "n=n2", "n=n3"}},
+		{name: "a_cte_named_like_the_policed_table",
+			sql:  `WITH e7emp AS (SELECT id, note FROM e7other) SELECT note FROM e7emp ORDER BY id`,
+			want: []string{"note=n1", "note=n2", "note=n3"}},
+		{name: "the_policed_table_under_two_aliases",
+			sql:  `SELECT a.ssn AS x, b.ssn AS y FROM e7emp a JOIN e7emp b ON a.id = b.id WHERE a.id = 1`,
+			want: []string{"x=***|y=***"}},
+		{name: "the_policed_table_joined_to_an_unpoliced_one",
+			sql:  `SELECT o.note AS n, e.ssn AS s FROM e7other o JOIN e7emp e ON o.id = e.id ORDER BY o.id`,
+			want: []string{"n=n1|s=***", "n=n2|s=***", "n=n3|s=***"}},
 	}
 }
 
@@ -689,8 +751,13 @@ func TestPolicyMaskingIsPlanTimeOnEveryDoor(t *testing.T) {
 				if err == nil {
 					for _, row := range got.rows {
 						for c, v := range row {
+							// CONTAINS, not equality: a PARTIAL disclosure —
+							// `SUBSTRING(ssn,1,8)`, a concatenation, a
+							// timestamp rendered inside a longer string — is
+							// the same defect, and an exact-match predicate
+							// reads stronger than it is.
 							for _, bad := range leaks {
-								if v == bad {
+								if strings.Contains(v, bad) {
 									leaked = fmt.Sprintf("%s=%s", c, v)
 								}
 							}

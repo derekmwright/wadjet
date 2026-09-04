@@ -56,12 +56,18 @@ func TestInjectRowFilter_MatchingTable(t *testing.T) {
 	}
 }
 
-func TestInjectRowFilter_MatchingAlias(t *testing.T) {
+// TestInjectRowFilter_NotByTheAliasAlone: the filter's target is a RELATION.
+// An alias is a name the statement minted, and a policy that fired on it would
+// restrict — or, for a column policy, corrupt — a scan of a different table
+// that happens to carry that alias.
+func TestInjectRowFilter_NotByTheAliasAlone(t *testing.T) {
 	scan := NewScan("events", "e")
-	result := InjectRowFilter(scan, "e", "year = '2026'")
-
-	if result.Type != NodeFilter {
-		t.Fatalf("expected Filter node wrapping scan, got %s", result.Type)
+	if result := InjectRowFilter(scan, "e", "year = '2026'"); result.Type != NodeScan {
+		t.Fatalf("a filter for the ALIAS %q was injected; want the scan untouched, got %s",
+			"e", result.Type)
+	}
+	if result := InjectRowFilter(NewScan("events", "e"), "events", "year = '2026'"); result.Type != NodeFilter {
+		t.Fatalf("a filter for the relation's own name must still be injected, got %s", result.Type)
 	}
 }
 
@@ -182,14 +188,35 @@ func TestInjectColumnPolicies_MaskColumn(t *testing.T) {
 	}
 }
 
-func TestInjectColumnPolicies_ByAlias(t *testing.T) {
-	scan := NewScan("events", "e")
-	scan.ScanColumns = []string{"id", "secret"}
+// TestInjectColumnPolicies_NeverByAlias: a policy binds to the RELATION, never
+// to a name the statement minted. Matching an alias meant `FROM other AS
+// events` got `events`'s schema projected over a scan of `other` — the other
+// table's own columns came back NULL, a silently wrong answer for a query that
+// does not touch the policed table at all.
+func TestInjectColumnPolicies_NeverByAlias(t *testing.T) {
+	scan := NewScan("other", "events")
+	scan.ScanColumns = []string{"id", "note"}
 	policies := []ColumnPolicy{{Column: "secret", Denied: true}}
-	result, _ := InjectColumnPolicies(scan, "e", policies, nil)
+	result, unprotected := InjectColumnPolicies(scan, "events", policies, []string{"id", "secret"})
 
-	if result.Type != NodeProject {
-		t.Fatalf("expected project wrapping scan matched by alias, got %s", result.Type)
+	if result.Type != NodeScan {
+		t.Fatalf("a scan of %q aliased to the policed name was wrapped: got %s",
+			scan.TableName, result.Type)
+	}
+	if unprotected != 0 {
+		t.Fatalf("unprotected = %d, want 0: this scan is not the policed relation", unprotected)
+	}
+}
+
+// TestInjectRowFilter_NeverByAlias is the same rule for the other injector.
+func TestInjectRowFilter_NeverByAlias(t *testing.T) {
+	scan := NewScan("other", "events")
+	if got := InjectRowFilter(scan, "events", "id > 1"); got.Type != NodeScan {
+		t.Fatalf("a row filter for %q was injected over a scan of %q (matched by alias)",
+			"events", scan.TableName)
+	}
+	if got := InjectRowFilter(NewScan("events", "e"), "EVENTS", "id > 1"); got.Type != NodeFilter {
+		t.Fatal("a row filter must still match its own relation case-insensitively")
 	}
 }
 

@@ -674,16 +674,23 @@ func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
 
 // policedScan reports whether this scan is the relation a policy names.
 //
-// The comparison folds case because the name the policy carries comes from
-// the statement the client wrote while the scan's TableName has been
-// canonicalized to the catalog's own spelling (#731,
-// catalog.ResolveTableName). A policy that stopped matching because the
-// client wrote `E7EMP` would be a silent grant.
+// A policy binds to the RELATION IDENTITY — the catalog table the scan
+// actually reads — and never to an ALIAS. `n.TableAlias` used to count too,
+// which meant `FROM e7other AS e7emp` was matched by a policy on `e7emp` and
+// got e7emp's schema projected over a scan of a different table: its own
+// columns became NULL and the client got a silently wrong answer, on every
+// door, for a query that has nothing to do with the policed table. An alias is
+// a name the STATEMENT mints; the policy is about the DATA.
+//
+// The comparison folds case because the name the policy carries comes from the
+// statement the client wrote while the scan's TableName has been canonicalized
+// to the catalog's own spelling (#731, catalog.ResolveTableName). A policy that
+// stopped matching because the client wrote `E7EMP` would be a silent grant.
 func policedScan(n *Node, tableName string) bool {
-	if n == nil || tableName == "" {
+	if n == nil || tableName == "" || n.IsTableFunc {
 		return false
 	}
-	return strings.EqualFold(n.TableName, tableName) || strings.EqualFold(n.TableAlias, tableName)
+	return strings.EqualFold(n.TableName, tableName)
 }
 
 // PolicedScanTables lists, once each, the base table every Scan in the plan
