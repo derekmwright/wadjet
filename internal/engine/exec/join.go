@@ -2385,8 +2385,25 @@ func (h *HashJoin) FixKeyAssignment() bool {
 			totalBuildRows += b.Len
 		}
 		// The keys just changed sides, so the whole index is rebuilt from
-		// scratch: drop every part and pre-size the one this path uses.
-		h.parts = make([]joinIndexPart, len(h.parts))
+		// scratch — and FLAT, into ONE part, because this path re-indexes
+		// every build batch in one pass rather than partition by partition.
+		// initIndexParts(1) puts partMask back to 0 so the probe reads the
+		// part the rebuild wrote; leaving 64 parts here would route keys into
+		// 63 tables that nothing pre-grew, and PutNoGrow on a table with no
+		// headroom does not return.
+		//
+		// It cannot be reached by a build that EVICTED, and the guard that
+		// makes that true is the nil-slot scan 30 lines above, which RETURNS
+		// on the first nil entry. (The totalBuildRows loop below it would
+		// dereference the same nil, but a crash is not a guard.) So
+		// collapsing to one part cannot strand a spilled partition's probe
+		// routing, and a partitioned build with nothing evicted — which does
+		// reach here — is exactly what the gate covers.
+		// Assigned rather than initIndexParts: that is idempotent for a join
+		// that ALREADY has one part, and this rebuild has to start from an
+		// empty index or every key is indexed twice.
+		h.parts = make([]joinIndexPart, 1)
+		h.partMask = 0
 		pt := &h.parts[0]
 		h.growPartFor(pt, totalBuildRows)
 		if h.useIntKey {
