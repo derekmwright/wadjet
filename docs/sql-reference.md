@@ -797,10 +797,12 @@ GROUP BY src_ip
 HAVING COUNT(*) > 1000
 ```
 
-An aggregate a `HAVING` names is computed once and shared with the SELECT
-list, even when the SELECT list ALIASES it like one of the group keys —
-`SELECT COUNT(*) AS g, g AS x FROM t GROUP BY g HAVING COUNT(*) > 0` filters on
-the COUNT, not on the key that shares its name.
+An aggregate a `HAVING` names is normally computed once and shared with the
+SELECT list. Where the SELECT list ALIASES that aggregate like one of the group
+keys the sharing is DECLINED and the predicate gets its own copy, because the
+shared name would answer to two columns: `SELECT COUNT(*) AS g, g AS x FROM t
+GROUP BY g HAVING COUNT(*) > 0` filters on the COUNT, not on the key that
+shares its name.
 
 ## ORDER BY
 

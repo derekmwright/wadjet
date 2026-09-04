@@ -59,11 +59,18 @@ stream published a column of the FIELD's name:
 
 Six resolvers had grown their own copy of the three-way order —
 `expr.ResolveColumnRef`, `exec.lazyFieldIdx.get`, `exec.fieldPathColumn`,
-`exec.Project`'s schema pass, the four vectorized filters' ROW delegation, and
-`physical.colDecls.colDecl`/`isFieldPath` — and they did not agree: the
-PREDICATE spelling `WHERE c_row.b IS NULL` counted the ARM's NULLs on the
-single-process path and the FIELD's on the DAG. `batch.RowFieldPath` is the
-one place the question is answered now, and every one of those sites asks it.
+`exec.Project`'s schema pass, the four vectorized filters' ROW delegation,
+`physical.colDecls.colDecl`/`isFieldPath` and `exec.columnIndexFallback` (the
+one the group keys, the aggregate inputs, the sort keys and the join keys all
+come through). `batch.RowFieldPath` is the one place the question is answered
+now, and every one of those sites asks it.
+
+The PREDICATE spelling is the one that shows the class rather than the count:
+`WHERE c_row.b IS NULL` beside a join arm publishing `b` counted the ARM's
+NULLs — 2 where the field has 3 — on all four arms, and it counts 3 on all four
+now. An earlier draft of this paragraph said the two engines disagreed about it
+(2 against 3); they did not, and the number is corrected here rather than left
+standing (round-2 review, P3).
 
 The step is gated on the container DECLARING the field, which is what keeps
 the reorder off an ordinary qualified reference whose qualifier happens to
