@@ -56,14 +56,16 @@ type arcD5Cell struct {
 	// assumed, and it is the same fact this arc is about:
 	//
 	// a correlated subquery the decorrelator cannot express is RE-RUN ONCE PER
-	// OUTER ROW, and each re-run scans the inner relation again. Those re-runs
-	// execute inside the OUTER query's memory tracker, and their scan
-	// reservations are not released as they go — over one such query `used`
-	// climbs to ~1.7× the budget and stays there, so every later `scan file
-	// load` is FORCED past the budget (ADR-0006's escape hatch) and pays about
-	// two seconds. Measured on this fixture: 295 forced reservations in ten
-	// minutes, one cell per five minutes, against 0.71 s for the same cell
-	// with no budget.
+	// OUTER ROW, and each re-run scans the inner relation again — measured,
+	// 2N+1 reads of the inner file for N outer rows against a flat 3 for the
+	// spelling that decorrelates. Under this arm's 512 KiB budget each of
+	// those loads reserves more than the WHOLE budget, which no relief can
+	// admit, and memory.ReserveOrForce waits out its full two seconds before
+	// forcing anyway. So the arm costs two seconds per outer row: 295 forced
+	// reservations in ten minutes here, one cell per five minutes, against
+	// 0.71 s for the same cell with no budget. Both halves are pinned in
+	// TestCorrelatedRerunReadsTheInnerOncePerOuterRow and its budgeted
+	// sibling, with the numbers; neither is a leak — `used` is flat.
 	//
 	// What that arm would add here is nothing: the literal these cells gate is
 	// built in expr.readOuterValues from the VECTOR's own TypeID, before any
@@ -438,6 +440,70 @@ func arcD5LateralCells() []arcD5Cell {
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + left +
 				`ON true ORDER BY o.customer`,
 			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+
+		// --- A LATER RIGHT OR FULL JOIN NULL-EXTENDS THE LATERAL'S COLUMNS,
+		// and that is where BOTH halves of the repair stop being entitled to
+		// speak. The COALESCE and the moved ON live in the ENCLOSING query,
+		// so they see the whole FROM clause's result; what they are about is
+		// the LATERAL's own output. A RIGHT or FULL join to the right of the
+		// lateral is exactly what separates those two relations — it
+		// MANUFACTURES rows whose `s.n` is NULL, and neither rewrite can tell
+		// one of those from a row the lateral produced.
+		//
+		// Measured before the bound was added, against these same inputs:
+		// the moved `ON s.n > 1` DELETED the manufactured row (2 rows for
+		// PostgreSQL's 3), and `ON true` printed `n=0` in it where PostgreSQL
+		// prints NULL. Both were RIGHT at fd679ae9 — the same right-to-wrong
+		// class as the review's B1, found by asking where else the rewrite's
+		// scope and its warrant come apart.
+		//
+		// So `lateralEmptyInputPlan` declines entirely when a later join can
+		// null-extend, and these four cells are what says the decline holds.
+		// The join is `c2.id = o.id AND c2.id < 3`, so `lat_ord`'s row 3 has
+		// no partner and is the manufactured row in every one of them.
+		{issue: "#767", name: "boundary_right_join_after_lateral_on_true_keeps_null_not_zero",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.id AS cid FROM lat_ord o ` + lat +
+				`ON true RIGHT JOIN lat_ord c2 ON c2.id = o.id AND c2.id < 3 ORDER BY 3`,
+			want: []string{"c=Alice|n=int64:2|cid=int64:1", "c=Bob|n=int64:2|cid=int64:2",
+				"c=NULL|n=NULL|cid=int64:3"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "boundary_right_join_after_lateral_with_on_keeps_the_row",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.id AS cid FROM lat_ord o ` + lat +
+				`ON s.n > 1 RIGHT JOIN lat_ord c2 ON c2.id = o.id AND c2.id < 3 ORDER BY 3`,
+			want: []string{"c=Alice|n=int64:2|cid=int64:1", "c=Bob|n=int64:2|cid=int64:2",
+				"c=NULL|n=NULL|cid=int64:3"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "boundary_full_join_after_lateral_with_on_agrees",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.id AS cid FROM lat_ord o ` + lat +
+				`ON s.n > 1 FULL JOIN lat_ord c2 ON c2.id = o.id AND c2.id < 3 ORDER BY 3`,
+			want: []string{"c=Alice|n=int64:2|cid=int64:1", "c=Bob|n=int64:2|cid=int64:2",
+				"c=NULL|n=NULL|cid=int64:3"},
+			wantUnreachableRoutes: 1},
+		// THE COST OF THE DECLINE, pinned rather than described: with a FULL
+		// join after it, the ungrouped empty-input row is NOT restored, so
+		// Carol's `[Carol, 0, NULL]` is missing and this answers 3 for
+		// PostgreSQL's 4. That is what fd679ae9 answered too — the decline
+		// keeps the old answer rather than trading it for a different wrong
+		// one. Restoring it needs the default applied at the LATERAL's own
+		// output, before the later join sees it, which is a plan-level change
+		// and not a SelectInfo rewrite (report deferral D5).
+		{issue: "#767", name: "boundary_full_join_after_lateral_loses_the_empty_input_row",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.id AS cid FROM lat_ord o ` + lat +
+				`ON true FULL JOIN lat_ord c2 ON c2.id = o.id AND c2.id < 3 ORDER BY 3`,
+			want: []string{"c=Alice|n=int64:2|cid=int64:1", "c=Bob|n=int64:2|cid=int64:2",
+				"c=NULL|n=NULL|cid=int64:3"},
+			wantUnreachableRoutes: 1,
+			pgSays:                "four rows — Carol's defaulted [Carol, 0, NULL] as well"},
+		// The control that says the decline is CONDITIONAL on null-extension
+		// and not on "any join after the lateral": a LEFT join cannot null-
+		// extend what is to its left, so the repair still applies and Carol
+		// still reads 0.
+		{issue: "#767", name: "control_left_join_after_lateral_still_defaults",
+			sql: `SELECT o.customer AS c, s.n AS n, c2.id AS cid FROM lat_ord o ` + lat +
+				`ON true LEFT JOIN lat_ord c2 ON c2.id = o.id AND c2.id < 3 ORDER BY 1`,
+			want: []string{"c=Alice|n=int64:2|cid=int64:1", "c=Bob|n=int64:2|cid=int64:2",
+				"c=Carol|n=int64:0|cid=NULL"},
 			wantUnreachableRoutes: 1},
 
 		// --- THE `ON` MATRIX. The review found six PostgreSQL-correct answers

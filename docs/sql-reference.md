@@ -481,6 +481,12 @@ empty order and `ON s.item_count = 0` keeps only the empty ones. Writing
 `ON true` is what makes the empty-input row unconditional; it is not the only
 supported spelling.
 
+A `RIGHT` or `FULL` join written after the lateral turns the empty-input rule
+off for that query: such a join can produce rows in which the lateral's
+columns are NULL for a reason of its own, and those NULLs are left alone
+rather than defaulted. The rest of the join behaves normally. A `LEFT` join
+after the lateral is unaffected.
+
 One case is not yet right: a written `ON` on a `LEFT JOIN LATERAL` where the
 DEFAULT row would PASS the condition — `LEFT JOIN LATERAL (…) s ON s.n = 0` —
 drops the unmatched outer row where PostgreSQL keeps it with the lateral

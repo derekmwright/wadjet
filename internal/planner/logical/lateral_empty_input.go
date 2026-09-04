@@ -92,6 +92,12 @@ type lateralEmptyInput struct {
 //     `LEFT JOIN LATERAL … ON s.n = 0` — is pinned in the census with
 //     PostgreSQL's answer beside it. (lateralNoRepair)
 //
+// A fourth condition cuts across all three and is checked first: if any join
+// LATER in the FROM clause is a RIGHT or a FULL join, nothing is repaired at
+// all. Such a join manufactures rows in which the lateral's columns are NULL,
+// and neither the COALESCE nor the moved ON can tell those from rows the
+// lateral produced. See the comment on that branch.
+//
 // A forced LEFT plus an unconditional default, with no case analysis at all,
 // is what turned six PostgreSQL-correct answers into wrong ones: `ON s.n > 5`
 // answered three rows for PostgreSQL's none, and printed 0 for counts of 2.
@@ -103,8 +109,34 @@ const (
 	lateralPadThenFilter
 )
 
-func lateralEmptyInputPlan(joinType string, empty lateralEmptyInput) lateralEmptyInputCase {
+func lateralEmptyInputPlan(joinType string, empty lateralEmptyInput, laterNullExtends bool) lateralEmptyInputCase {
 	if !empty.ungroupedAggregate {
+		return lateralNoRepair
+	}
+	if laterNullExtends {
+		// A RIGHT or FULL join further along the FROM clause MANUFACTURES
+		// rows in which the lateral's columns are NULL. Neither half of this
+		// repair can tell such a row from one the lateral itself produced:
+		// the COALESCE would read a manufactured NULL as 0, and an ON moved
+		// into the enclosing WHERE would DELETE the manufactured row instead
+		// of leaving it alone. Both are wrong, and both were measured wrong
+		// (`... JOIN LATERAL (…) s ON s.n > 1 RIGHT JOIN c ON …` lost the
+		// unmatched right row; `… ON true RIGHT JOIN …` printed n=0 where
+		// PostgreSQL prints NULL).
+		//
+		// The repair's rewrites live in the ENCLOSING query — the SELECT
+		// list, the WHERE — and so they see the whole FROM clause's result,
+		// while what they are entitled to speak about is the LATERAL's own
+		// output. While those two are the same relation the repair is sound;
+		// a later RIGHT or FULL join is exactly what separates them.
+		// Expressing it would need the default applied at the lateral's own
+		// output, before the later join sees it, which is a plan-level change
+		// rather than a SelectInfo rewrite.
+		//
+		// So: decline, and leave the query exactly as written. That is what
+		// this engine answered before the repair existed, and it is
+		// PostgreSQL's answer for every one of these shapes but the ungrouped
+		// empty-input row itself, which is pinned as the boundary.
 		return lateralNoRepair
 	}
 	if empty.onResidual == "" {
@@ -122,6 +154,24 @@ func lateralEmptyInputPlan(joinType string, empty lateralEmptyInput) lateralEmpt
 		return lateralPadThenFilter
 	}
 	return lateralNoRepair
+}
+
+// lateralJoinNullExtendsAfter reports whether any join AFTER position ji in
+// the flat, left-deep join list can NULL-EXTEND what is produced to its left.
+// A RIGHT or FULL join is exactly that and nothing else is: an INNER join
+// only filters, a LEFT join only extends the side it is joining ON.
+func lateralJoinNullExtendsAfter(joins []plansql.JoinInfo, ji int) bool {
+	if ji < 0 || ji+1 > len(joins) {
+		return false
+	}
+	for _, j := range joins[ji+1:] {
+		switch strings.ToLower(strings.TrimSpace(j.Type)) {
+		case "right", "right join", "right outer", "right outer join",
+			"full", "full join", "full outer", "full outer join":
+			return true
+		}
+	}
+	return false
 }
 
 // andIntoWhere conjoins one more predicate onto the enclosing query's WHERE.

@@ -84,7 +84,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			return acc
 		}
 
-		for _, join := range info.Joins {
+		for joinIdx, join := range info.Joins {
 			// FromItem is non-decreasing across Joins, so the slot a join
 			// names is never one an earlier crossFold emptied.
 			idx := join.FromItem
@@ -116,7 +116,8 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				// looking at the ON keeps rows the ON rejects and prints 0
 				// for a count of 2. See lateralEmptyInputPlan for the three
 				// cases and which of them this can express.
-				switch lateralEmptyInputPlan(jt, empty) {
+				switch lateralEmptyInputPlan(jt, empty,
+					lateralJoinNullExtendsAfter(info.Joins, joinIdx)) {
 				case lateralPadThenFilter:
 					// The lateral yields a row for every outer row (LEFT on
 					// the CORRELATION alone, defaults applied), and the

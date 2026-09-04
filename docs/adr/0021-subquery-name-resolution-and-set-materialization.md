@@ -350,18 +350,26 @@ scan. Decorrelating THROUGH one is a producer repair — build the inner plan
 from the derived table's own SQL and let `repairDecorrelatedSpelling` model
 what that subtree emits — and it is not attempted here.
 
-**What the fallback costs, measured while building this gate.** A re-run
-scans the inner relation again for every outer row, and those re-runs execute
-inside the OUTER query's memory tracker without releasing their scan
-reservations. Under a 512 KiB budget `used` climbs to about 1.7× the budget
-and STAYS there, so every subsequent `scan file load` is FORCED past the
-budget (ADR-0006's escape hatch) and pays roughly two seconds — 295 forced
-reservations in ten minutes over the type-matrix fixture, about five minutes
-for one per-type cell against 0.71 s for the same cell with no budget. The
-fallback is not merely slower than a join; under a memory budget it degrades
-superlinearly, and that is the strongest argument for the repair above. The
-tracker half of it belongs to the re-run's memory lifetime, not to the
-correlation model.
+**What the fallback costs, measured — and the first reading of this was
+wrong.** A re-run scans the inner relation again for every outer row: `2N+1`
+object-store reads of the inner file for `N` outer rows, against a flat 3 for
+the base-table spelling that DOES decorrelate. That is LINEAR, not
+superlinear, and the tracker's `used` is FLAT across the re-runs — the scan
+charge is released each time and nothing leaks. The 295 forced-reservation
+warnings that took the round-0 census past a thirty-minute timeout were 295
+RE-RUNS, not 295 leaks.
+
+Two seconds of each re-run is a SECOND and independent defect, in
+`memory.ReserveOrForce`: it spends the caller's full relief wait on a
+reservation of `n` bytes against a budget SMALLER than `n` (measured:
+`bytes=933732`, `budget=524288`). Nothing can admit that reservation — relief
+cannot free negative memory — so the wait buys the `ForceReserve` that was
+inevitable on entry. It costs any query whose scan touches a file larger than
+its budget, with no subquery involved; the re-run only multiplies it by the
+outer row count. Both are pinned in
+`coordinator.TestCorrelatedRerunReadsTheInnerOncePerOuterRow` and
+`…PaysTheFullReserveWaitPerOuterRow`, and the memory half belongs to
+ADR-0006's territory, not to the correlation model.
 
 ### 1f. A correlated NOT IN is not an anti join
 
@@ -512,6 +520,25 @@ subquery and the join AS WRITTEN, before the key injection:
   the one shape it still gets wrong is an ON the DEFAULT row would PASS —
   `LEFT JOIN LATERAL … ON s.n = 0` — and that is pinned in the census with
   PostgreSQL's answer beside it. (`lateralNoRepair`)
+
+**A fourth condition cuts across all three and is checked first: a RIGHT or
+FULL join LATER in the FROM clause declines the repair entirely.** Both halves
+of it — the `COALESCE` and the moved `ON` — are rewrites of the ENCLOSING
+query, so they see the whole FROM clause's result; what they are entitled to
+speak about is the LATERAL's own output. A join that null-extends is exactly
+what separates those two relations: it MANUFACTURES rows in which `s.n` is
+NULL, and neither rewrite can tell one of those from a row the lateral
+produced. Measured before the condition was added: the moved `ON s.n > 1`
+DELETED the manufactured row (2 rows for PostgreSQL's 3), and `ON true`
+printed `n = 0` in it where PostgreSQL prints NULL — both of them right at
+fd679ae9, which makes this the same right-to-wrong class as the forced-LEFT
+repair above, found by asking where else a rewrite's SCOPE and its WARRANT
+come apart. The decline costs the empty-input row in one shape (`ON true`
+with a following FULL join answers 3 for PostgreSQL's 4) and that is pinned;
+restoring it needs the default applied at the lateral's OWN output, before the
+later join sees it, which is a plan-level change rather than a SelectInfo
+rewrite. A LEFT join after the lateral cannot null-extend what is to its left,
+so it is not affected and its control says so.
 
 The default itself is `COALESCE(…, 0)` around references to the lateral's
 COUNT outputs. NULL is already right for every other aggregate — `SUM` of
