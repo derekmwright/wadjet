@@ -394,14 +394,8 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 	info.CTEs = cteDefs
 
 	// Collect window specs from parsed columns (populated by parseSelectColumn
-	// when it encounters WindowFuncNode).
-	var windowSpecs []WindowSpec
-	for i := range info.Columns {
-		if info.Columns[i].IsWindow && info.Columns[i].WindowSpec != nil {
-			windowSpecs = append(windowSpecs, *info.Columns[i].WindowSpec)
-		}
-	}
-	info.Windows = windowSpecs
+	// when it encounters WindowFuncNode), at EVERY level of the statement.
+	windowSpecs := collectWindowSpecs(info)
 
 	pq := &ParsedQuery{
 		Type:       QuerySelect,
@@ -412,6 +406,49 @@ func parseDispatch(sql string) (*ParsedQuery, error) {
 	}
 
 	return pq, nil
+}
+
+// collectWindowSpecs records each SelectInfo's own window columns on that
+// SelectInfo, through the whole set-operation tree, and returns the statement's
+// specs for the ParsedQuery.
+//
+// A SET OPERATION's arms are SelectInfos of their own, and this pass used to
+// read `info.Columns` at the OUTERMOST level only — which for a set operation
+// is empty, since the columns live on the arms. `SelectInfo.Windows` was
+// therefore always nil for an arm, and it is the flag the logical builder
+// gates window planning on: an arm whose SELECT list is a BARE window
+// (`SUM(a) OVER () AS s`) got NO Window node, its projection was left reading
+// `s` off the arm's INPUT, and the query answered the input column of that
+// name (`decpair.s`, a TEXT column, #733), or failed with `column "s2" does
+// not exist in the input schema` when the input had no such column (#746), on
+// every path. A window nested inside a larger expression
+// (`SUM(a) OVER () + 1`) was unaffected, because the builder extracts those
+// from the column's own AST rather than from this list — which is why the
+// class was invisible to the arithmetic shapes in the corpus.
+//
+// The two other post-parse passes over a set operation already descend into
+// the arms (CoerceBooleanLiterals recursively, resolvePositionalRefs through
+// resolveSetOpOrderBy). This one is the omission.
+func collectWindowSpecs(info *SelectInfo) []WindowSpec {
+	if info == nil {
+		return nil
+	}
+	var specs []WindowSpec
+	if info.Union != nil {
+		specs = append(specs, collectWindowSpecs(info.Union.Left)...)
+		specs = append(specs, collectWindowSpecs(info.Union.Right)...)
+	}
+	own := make([]WindowSpec, 0, len(info.Columns))
+	for i := range info.Columns {
+		if info.Columns[i].IsWindow && info.Columns[i].WindowSpec != nil {
+			own = append(own, *info.Columns[i].WindowSpec)
+		}
+	}
+	if len(own) == 0 {
+		own = nil
+	}
+	info.Windows = own
+	return append(specs, own...)
 }
 
 // ExtractSelect returns the SelectInfo from a parsed query.

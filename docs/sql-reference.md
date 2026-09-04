@@ -930,6 +930,17 @@ SELECT COUNT(*) FROM ((SELECT id FROM t) UNION ALL (SELECT id FROM t)) u
 An `ORDER BY` or `LIMIT` written after the last arm without parentheses
 applies to the WHOLE result, as it does in PostgreSQL.
 
+An arm is read through what its OWN plan publishes, so an arm's SELECT list may
+name anything a standalone `SELECT` may — a window function included, aliased
+or not, and whether or not its alias also names a column of the arm's input:
+
+```sql
+-- `s` here is the window's value, not the `s` column of decpair
+SELECT id, SUM(a) OVER () AS s FROM decpair
+UNION ALL
+SELECT id, b AS s FROM decpair
+```
+
 ## Numeric literals
 
 Integer literals take PostgreSQL 16+'s grammar, unquoted and as text read into
