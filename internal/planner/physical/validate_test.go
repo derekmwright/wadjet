@@ -30,7 +30,29 @@ func (f *fakeCatalog) GetTable(_ context.Context, name string) (*catalog.TableMe
 	}
 	schema := parquet.Schema{}
 	for _, c := range cols {
-		schema.Columns = append(schema.Columns, parquet.Column{Name: c})
+		col := parquet.Column{Name: c}
+		// `attrs` is this fixture's ROW CONTAINER — the dotted-access cases
+		// are about a FIELD PATH — and it has to SAY so. A column whose type
+		// nobody sets reads as the zero TypeID, which is TypeBool, and the
+		// binder now refuses field notation on a qualifier it can prove is
+		// not composite (PostgreSQL's 42809). An untyped stub schema is not a
+		// proof of anything, and letting one stand in for a container made
+		// this fixture assert the opposite of what it says.
+		// `amount` carries a real SCALAR type, so the fixture can drive the
+		// refusal that says field notation does not apply to one — PostgreSQL's
+		// 42809, whose message names the type.
+		if strings.EqualFold(c, "amount") {
+			col.Type = parquet.TypeDecimal
+			col.Precision, col.Scale = 18, 4
+		}
+		if strings.EqualFold(c, "attrs") {
+			col.Type = parquet.TypeRow
+			col.Fields = []parquet.Column{
+				{Name: "score", Type: parquet.TypeInt64, Nullable: true},
+				{Name: "label", Type: parquet.TypeString, Nullable: true},
+			}
+		}
+		schema.Columns = append(schema.Columns, col)
 	}
 	return &catalog.TableMeta{Name: name, Schema: schema}, nil
 }
@@ -178,6 +200,13 @@ func TestValidateRejections(t *testing.T) {
 		// #380 lookalikes that must keep validating:
 		{"delimited dotted name", `SELECT "id.orig_h" FROM zeek`, "", ""},
 		{"row field path", "SELECT attrs.score FROM events", "", ""},
+		// --- round-4 review P1: field notation on a qualifier that is
+		// PROVABLY not composite is 42809, not one NULL per row ---
+		{"field notation on a scalar", "SELECT amount.x FROM events", "42809", "not a composite type"},
+		{"field notation on a scalar in where", "SELECT id FROM events WHERE amount.x > 1", "42809", "numeric"},
+		// …and the container beside it still resolves, which is what says the
+		// refusal reads the DECLARATION rather than the spelling.
+		{"row field path beside it", "SELECT attrs.score, amount FROM events", "", ""},
 		{"row field in where", "SELECT id FROM events WHERE attrs.score > 1", "", ""},
 		{"correlated outer alias", "SELECT id FROM events e WHERE EXISTS (SELECT 1 FROM other o WHERE o.eid = e.id)", "", ""},
 		{"correlated outer alias two deep", "SELECT id FROM events e WHERE EXISTS (SELECT 1 FROM other o WHERE EXISTS (SELECT 1 FROM dup d WHERE d.id = e.id AND d.score = o.val))", "", ""},
