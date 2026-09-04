@@ -22,9 +22,13 @@ import (
 // same counter without stopping the world.
 type taskPeakHeapTracker struct {
 	peakBytes atomic.Uint64
-	stop      chan struct{}
-	done      chan struct{}
-	sample    []metrics.Sample
+	// ticks counts completed ticker-driven samples. Tests use it to wait
+	// deterministically for the next sample instead of sleeping a fixed
+	// duration and hoping it outlasts the 50ms ticker under CPU load.
+	ticks  atomic.Uint64
+	stop   chan struct{}
+	done   chan struct{}
+	sample []metrics.Sample
 }
 
 // heapAllocMetric is the runtime/metrics equivalent of
@@ -57,22 +61,31 @@ func (t *taskPeakHeapTracker) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			alloc := t.heapAlloc()
-			for {
-				cur := t.peakBytes.Load()
-				if alloc <= cur {
-					break
-				}
-				if t.peakBytes.CompareAndSwap(cur, alloc) {
-					break
-				}
-			}
+			t.observe()
 		case <-t.stop:
 			return
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// observe takes one heap reading and raises the peak if it grew. It is
+// factored out of run()'s ticker case so tests can count completed
+// samples (via ticks) and wait for one deterministically, rather than
+// depending on the ticker's wall-clock cadence under load.
+func (t *taskPeakHeapTracker) observe() {
+	alloc := t.heapAlloc()
+	for {
+		cur := t.peakBytes.Load()
+		if alloc <= cur {
+			break
+		}
+		if t.peakBytes.CompareAndSwap(cur, alloc) {
+			break
+		}
+	}
+	t.ticks.Add(1)
 }
 
 // Stop halts sampling and waits for the goroutine to exit.
