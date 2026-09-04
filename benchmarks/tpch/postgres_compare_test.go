@@ -5040,22 +5040,20 @@ func postgresBytesCases() []pgCase {
 		pgCase{name: "BytesLikePrefix", sql: `SELECT b_key FROM bytea_probe WHERE b_val LIKE 'h%' ORDER BY b_key`},
 		pgCase{name: "BytesNotLike", sql: `SELECT b_key FROM bytea_probe WHERE b_val NOT LIKE '%A%' ORDER BY b_key`},
 
-		// The remaining half of #570, on the way IN. An unknown-typed
-		// literal beside a bytea column is read by byteain in PostgreSQL, so
-		// the HEX spelling names the same two bytes `'hi'` does. wadjet has
-		// no BYTES literal — the lexer produces a string and nothing
-		// re-types it from the column's declaration — so the six characters
-		// are compared against two bytes and match nothing. Pinned, not
-		// exempted: the day a bytea literal lands, this entry fails.
+		// The remaining half of #570, on the way IN, and no longer a pin: an
+		// unknown-typed literal beside a bytea column is read by byteain, so
+		// the HEX spelling names the same two bytes `'hi'` does — on both
+		// engines since #582. The escape spelling and the inequalities are
+		// beside it, because "strip a \x prefix" would pass the first entry
+		// and fail the second.
 		pgCase{name: "BytesEqHexSpelledLiteral",
-			sql: `SELECT b_key FROM bytea_probe WHERE b_val = '\x6869' ORDER BY b_key`,
-			knownBug: pgBugWadjet + " PostgreSQL's byteain reads an unknown-typed literal beside a " +
-				"bytea column, so '\\x6869' is the two bytes 0x68 0x69 and this finds the row. wadjet " +
-				"has no BYTES literal at all: the lexer produces a string, nothing re-types it from the " +
-				"column's declaration, and the SIX characters match nothing. The bytea Bind PARAMETER " +
-				"path does decode both spellings (it has the declared OID to decode against); a " +
-				"hand-written literal has no declaration to consult",
-			issue: "#582"},
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val = '\x6869' ORDER BY b_key`},
+		pgCase{name: "BytesEqEscapeSpelledLiteral",
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val = '\377\376\000A' ORDER BY b_key`},
+		pgCase{name: "BytesNeHexSpelledLiteral",
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val <> '\x6869' ORDER BY b_key`},
+		pgCase{name: "BytesGtHexSpelledLiteral",
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val > '\x6869' ORDER BY b_key`},
 	}
 }
 

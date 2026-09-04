@@ -174,7 +174,14 @@ func renderTextParam(s string, oid uint32) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return quoteLiteral(string(raw)), nil
+		// Written back in byteain's HEX form rather than as the raw bytes.
+		// Since #582 the engine reads a literal beside a BYTES column through
+		// byteain too, so raw bytes carrying a backslash would be decoded a
+		// SECOND time here — `\` would collapse to one byte and a lone
+		// backslash would become a refusal. The hex form round-trips exactly,
+		// whatever the bytes are, and is the spelling the server itself
+		// produces.
+		return `'\x` + hex.EncodeToString(raw) + `'`, nil
 	case oid == oidBool:
 		switch strings.ToLower(strings.TrimSpace(s)) {
 		case "t", "true", "y", "yes", "on", "1":

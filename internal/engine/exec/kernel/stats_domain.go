@@ -153,11 +153,15 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		return parquet.CidrInetBound{Key: key}, true
 
 	// BYTES compares by bytes and a []byte literal has to become the string
-	// the stats decode to.
+	// the stats decode to. A SQL literal goes through byteain first, the same
+	// reading the filter kernel makes (#582): the prune and the filter have to
+	// agree on what the literal IS, or the prune drops the row group holding
+	// the row the filter would keep — which is how `b = '\x6869'` answered
+	// zero rows while `b <> '\x6869'` answered the right one.
 	case batch.TypeBytes:
 		switch tv := v.(type) {
 		case string:
-			return tv, true
+			return ByteaConstText(tv), true
 		case []byte:
 			return string(tv), true
 		}

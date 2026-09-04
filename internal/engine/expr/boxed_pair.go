@@ -125,6 +125,14 @@ const (
 	// from.
 	boxTimestamp
 	boxDate
+	// boxBytes: values from here are BYTES, which is PostgreSQL's bytea. The
+	// column boxes as a raw []byte and a QUOTED literal beside it is read by
+	// byteain — `b = '\x6869'` names the two bytes 0x68 0x69, the way the
+	// server reads it, and not the six characters of its own spelling (#582).
+	// Like every other kind here the reading comes from the DECLARATION: a
+	// STRING column against the same literal still compares the spelling,
+	// because that is what a text column's input function does with it.
+	boxBytes
 )
 
 // castNumericKind is the kind a CAST to a non-DECIMAL numeric type produces.
@@ -364,6 +372,8 @@ func declaredBoxKind(t batch.TypeID) (boxKind, bool) {
 		return boxIPv6, true
 	case batch.TypeBool:
 		return boxBool, true
+	case batch.TypeBytes:
+		return boxBytes, true
 	case batch.TypeTimestamp:
 		return boxTimestamp, true
 	case batch.TypeDate:
@@ -923,6 +933,15 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 		return true
 	case (rk == boxCidr || rk == boxIPv6) && lk == boxQuoted && lText != "":
 		return true
+	// A BYTES column against a QUOTED literal, or against another BYTES
+	// operand: the literal goes through byteain, so its hex spelling names
+	// the bytes it denotes (#582).
+	case lk == boxBytes && rk == boxQuoted && rText != "":
+		return true
+	case rk == boxBytes && lk == boxQuoted && lText != "":
+		return true
+	case lk == boxBytes && rk == boxBytes:
+		return true
 	// A BOOL column against a QUOTED literal: the literal is parsed through
 	// PostgreSQL's boolean input grammar, not string-matched against the
 	// bool rendered as "true"/"false" (#574). A bool LITERAL is boxUnknown,
@@ -1053,6 +1072,19 @@ func netOrder(lKey, rKey func(string) (string, bool), lv, rv any) (c int, ok, un
 		return 0, true, true
 	}
 	return strings.Compare(lk, rk), true, false
+}
+
+// bytesBoxValue reads a BYTES box as the string of its bytes. A BYTES column
+// boxes as []byte through Vector.GetValue and as a string through the paths
+// that render it, and both are the same bytes.
+func bytesBoxValue(v any) (string, bool) {
+	switch tv := v.(type) {
+	case []byte:
+		return string(tv), true
+	case string:
+		return tv, true
+	}
+	return "", false
 }
 
 // netKeyFor is the re-key function one operand's kind selects, and the side it
@@ -1221,6 +1253,23 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 	// literal that names no boolean is 22P02, raised by boolFromText — never
 	// a fallthrough to a text comparison that would silently miss, which is
 	// the same refusal the vectorized kernel makes (exec.boolConstError).
+	// A BYTES column against a QUOTED literal, by BYTES, with the literal
+	// read through byteain (#582). Both sides end up as the bytes they name,
+	// so the comparison is the same byte order the vectorized kernel makes.
+	case lk == boxBytes && rk == boxQuoted && rText != "":
+		if lb, ok := bytesBoxValue(lv); ok {
+			return strings.Compare(lb, kernel.ByteaConstText(rText)), true, false
+		}
+	case rk == boxBytes && lk == boxQuoted && lText != "":
+		if rb, ok := bytesBoxValue(rv); ok {
+			return strings.Compare(kernel.ByteaConstText(lText), rb), true, false
+		}
+	case lk == boxBytes && rk == boxBytes:
+		lb, lok := bytesBoxValue(lv)
+		rb, rok := bytesBoxValue(rv)
+		if lok && rok {
+			return strings.Compare(lb, rb), true, false
+		}
 	case lk == boxBool && rk == boxQuoted:
 		if lb, ok := lv.(bool); ok {
 			return boolOrder(lb, boolFromText(rText)), true, false

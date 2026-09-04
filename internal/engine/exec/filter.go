@@ -399,7 +399,9 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 func bytesFilterVal(value any) string {
 	switch tv := value.(type) {
 	case string:
-		return tv
+		// byteain, the same reading kernel.toBytesString makes for the
+		// vectorized arm — one predicate, two paths (#582).
+		return kernel.ByteaConstText(tv)
 	case []byte:
 		return string(tv)
 	default:

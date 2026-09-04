@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -227,9 +228,18 @@ func makeRowPred(colName string, typ parquet.TypeID, sc logical.Predicate) (scan
 		if v, ok := sc.Value.(int64); ok {
 			return scan.RowPred{Col: colName, Op: sc.Op, Value: v}, true
 		}
-	case parquet.TypeString, parquet.TypeBytes:
+	case parquet.TypeString:
 		if v, ok := sc.Value.(string); ok {
 			return scan.RowPred{Col: colName, Op: sc.Op, Value: v}, true
+		}
+	case parquet.TypeBytes:
+		// The literal is read by byteain, PostgreSQL's own bytea input
+		// function, so `b = '\x6869'` pushes down the two bytes it names and
+		// not the six characters of its spelling (#582). The two runtime arms
+		// (kernel.toBytesString, exec.bytesFilterVal) read the same function,
+		// so the three sites cannot disagree about what the literal is.
+		if v, ok := sc.Value.(string); ok {
+			return scan.RowPred{Col: colName, Op: sc.Op, Value: kernel.ByteaConstText(v)}, true
 		}
 	}
 	return scan.RowPred{}, false

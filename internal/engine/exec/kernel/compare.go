@@ -551,7 +551,10 @@ func matchNothingKernel(_ *batch.Vector, _ []uint32, _ int, outSel []uint32) []u
 func toBytesString(v any) string {
 	switch tv := v.(type) {
 	case string:
-		return tv
+		// A SQL literal beside a bytea column goes through byteain on the
+		// server, so `b = '\x6869'` names two bytes and not six characters
+		// (#582). A parameter arrives as []byte below and needs no reading.
+		return ByteaConstText(tv)
 	case []byte:
 		return string(tv)
 	default:
