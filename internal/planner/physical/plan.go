@@ -11430,7 +11430,12 @@ func inferCastType(typeName string) parquet.TypeID {
 		return parquet.TypeFloat64
 	}
 	switch strings.ToUpper(strings.TrimSpace(typeName)) {
-	case "INTEGER", "INT", "INT4", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2":
+	// SIGNED is here because expr.IsIntegerCastDest lists it and Cast.Eval's
+	// integer arm takes it: without it the evaluator produced an int64 and the
+	// projection declared STRING, so `CAST(x AS SIGNED)` published the number
+	// as text — the same disagreement between the two layers that #652 is
+	// about, one spelling over.
+	case "INTEGER", "INT", "INT4", "BIGINT", "INT8", "INT64", "SMALLINT", "INT2", "SIGNED":
 		// Every integer spelling lands on INT64: the engine has no int16
 		// and reads an INT32 column as an int64 everywhere else. The cast
 		// evaluator still enforces each spelling's own RANGE (22003 past
@@ -11464,6 +11469,13 @@ func inferCastType(typeName string) parquet.TypeID {
 		// branches on the OID (pgx's UUID scanner, pgJDBC's) never saw one.
 		return parquet.TypeUUID
 	default:
+		// What is LEFT here is the destinations Cast.Eval does not implement
+		// and passes its operand through — the network types, the containers,
+		// DURATION, BYTES, VECTOR. A name that answers to NO type at all no
+		// longer reaches this arm: expr.KnownCastDest refuses it at compile
+		// with 42704, because declaring STRING for it made the two layers
+		// agree with each other about a column PostgreSQL says cannot be
+		// described (#652).
 		return parquet.TypeString
 	}
 }

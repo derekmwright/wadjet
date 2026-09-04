@@ -975,6 +975,44 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      (the seam with no plan) and `pgwire.TestIntegerOutOfRangeReaches22003OnTheWire`
      (the wire).
 
+   - **A CAST to a type name this engine does not have is 42704, on both
+     doors — including PostgreSQL type names it has no type for.** (Added
+     2026-09-04, from #652.)
+
+     `CAST(1 AS bogustype)` answered the string "1" under OID 25 and
+     `CAST(<float column> AS bogustype)` answered its digits the same way:
+     `expr.Cast.Eval`'s switch fell to `default: return v` and
+     `physical.inferCastType`'s to `default: return TypeString`, so the two
+     layers agreed with EACH OTHER about a column PostgreSQL 17.11 says cannot
+     be described at all (`type "bogustype" does not exist`). That is item 9's
+     class reached through the type system: a measurement published as text.
+
+     `expr.KnownCastDest` is the accept-set, and it is the UNION of the two
+     doors — every name `parquet.ParseTypeID` takes as a column type, plus the
+     PostgreSQL spellings `Cast.Eval` implements that no column type answers
+     to (`int4`, `smallint`, `real`, `double precision`, `signed`,
+     `timestamptz`, …). One type name, one disposition, which is the property
+     the length-modifier entry above already states.
+
+     **What diverges**: a PostgreSQL type name this engine has no type for —
+     `bytea`, `inet`, `json`, `money`, `xml`, `time` — is refused where the
+     server answers. The `CREATE TABLE` door has refused those all along (with
+     no SQLSTATE at all until this change; it carries 42704 now, from
+     `parquet.ParseTypeID`), and the alternative on the CAST door was the
+     wrong VALUE above. Loud beats plausible.
+
+     **What stays a superset**: a destination this engine HAS but does not
+     CONVERT still returns its operand unchanged — the network types,
+     `DURATION`, `BYTES`, `VECTOR(n)`, the containers, and non-address text
+     cast to `IPV4`/`IPV6`/`CIDR`/`MACADDR`. This pass refuses names that name
+     NOTHING, not casts that are unimplemented, and the boundary is asserted
+     in both directions.
+
+     Gated by `wadjet.TestUnknownCastDestinationIsUndefinedObject` (the
+     refusals, 24 destination controls, and the unimplemented-but-named
+     pass-throughs) and two `runWireErrors` entries. User-facing:
+     `docs/sql-reference.md` §Casts and errors.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`

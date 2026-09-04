@@ -2082,6 +2082,14 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "ChrNul", sql: `SELECT CHR(0)`},
 		{name: "ChrNegative", sql: `SELECT CHR(-1)`},
 		{name: "ChrPastUnicodeRange", sql: `SELECT CHR(1114112)`},
+		// #652's second half: a CAST to a name no type answers to. It declared
+		// a STRING column over the operand and published a number as text
+		// (the #310/#443 shape), which is a value a client treats as the
+		// truth; PostgreSQL says 42704 `type "bogustype" does not exist`.
+		// Both spellings, because the FLOAT operand is the one whose
+		// pass-through published a MEASUREMENT.
+		{name: "CastToUndefinedType", sql: `SELECT CAST(1 AS bogustype)`},
+		{name: "CastFloatToUndefinedType", sql: `SELECT CAST(1.5 AS bogustype)`},
 		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
 		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
 		// #367 fixed the no-GROUP-BY shape above. With a GROUP BY present

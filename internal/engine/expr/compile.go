@@ -569,6 +569,15 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return compileCaseNode(n, ctx)
 
 	case *plansql.CastNode:
+		// The destination NAMES a type, or the cast is 42704 — before the
+		// operand is compiled, because a name that describes nothing cannot
+		// describe this expression either. Without it the cast fell to
+		// `default: return v` and the planner's inferCastType to `default:
+		// return TypeString`, so `CAST(1 AS bogustype)` published a number
+		// under a STRING declaration (#652, cast_dest.go).
+		if !KnownCastDest(n.TypeName) {
+			return nil, &UnknownTypeError{Name: n.TypeName}
+		}
 		operand, err := compileWithCtx(n.Inner, ctx)
 		if err != nil {
 			return nil, err

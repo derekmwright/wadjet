@@ -1180,10 +1180,18 @@ infinite operand is never an overflow — the value was already there.
 raise `22003`, and wadjet has one float path, so this answers where an explicit
 `power(x::float8, y::float8)` would be refused on the server.
 
-A `CAST` whose destination this engine does not recognise still returns its
-operand as text rather than raising `42704`; so does a cast of non-address text
-to `IPV4`, `IPV6`, `CIDR` or `MACADDR`. Both are recorded in ADR-0012's
-divergence list.
+A `CAST` whose destination names no type this engine has is SQLSTATE `42704`
+(`type "bogustype" does not exist`), the same code and message the `CREATE
+TABLE` door gives for the same name. That includes PostgreSQL type names this
+engine has no type for — `bytea`, `inet`, `json`, `money`, `xml`, `time` — so
+those are refused where the server answers; the alternative was returning the
+operand under a `text` declaration, which published a number as a string.
+Recorded in ADR-0012's divergence list.
+
+A cast to a destination this engine HAS but does not convert — the network
+types, `DURATION`, `BYTES`, `VECTOR(n)`, the containers — still returns its
+operand unchanged, and a cast of non-address text to `IPV4`, `IPV6`, `CIDR` or
+`MACADDR` does the same rather than raising. Also in that list.
 
 ## Window Functions
 

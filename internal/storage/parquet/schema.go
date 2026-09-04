@@ -171,12 +171,27 @@ func ParseTypeID(s string) (TypeID, error) {
 	case "DATE":
 		return TypeDate, nil
 	default:
-		// 42704 undefined_object, PostgreSQL's class for a type name that
-		// names nothing. Every door reported this with the message alone,
-		// including `CREATE TABLE t (a NOSUCHTYPE)` over HTTP while the API
-		// reference promised a class (arc E2 round-3 B1).
-		return 0, sqlerr.New("42704", "unknown type: %s", s)
+		// PostgreSQL's undefined_object for a type name that names nothing:
+		// `type "bogustype" does not exist`, SQLSTATE 42704, measured live on
+		// 17.11. It used to be a bare error carrying no class, so the wire
+		// reported the blanket 42000 (#366's shape) — and the CAST door did
+		// not consult this at all, declaring a STRING column over the operand
+		// instead (#652).
+		//
+		// The CLASS is what every door reports, not only the message: arc E2
+		// found `CREATE TABLE t (a NOSUCHTYPE)` answering over HTTP with the
+		// text alone while the API reference promised a SQLSTATE, and this is
+		// the one place that class is decided for all of them.
+		return 0, sqlerr.New("42704", "type %s does not exist", sqlerr.Quote(strings.TrimSpace(s)))
 	}
+}
+
+// KnownTypeName reports whether this engine has a type by this name, for the
+// callers that need the QUESTION without the answer — expr's CAST door, which
+// has its own wider accept-set of PostgreSQL spellings on top of this one.
+func KnownTypeName(s string) bool {
+	_, err := ParseTypeID(s)
+	return err == nil
 }
 
 // StringTypeLength reads a PARAMETERIZED string type name — `VARCHAR(255)`,
