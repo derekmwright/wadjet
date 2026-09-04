@@ -729,6 +729,36 @@ func wireCorpus() []wireCase {
 		// OID, and the VALUE moves too: float(1) of 1/3 is 0.33333334.
 		{name: "FloatPrecisionNarrow", sql: `SELECT CAST(1.0/3 AS float(1)) AS f`},
 		{name: "FloatPrecisionWide", sql: `SELECT CAST(1.0/3 AS float(25)) AS f`},
+		// PORT / PROTOCOL / DURATION declare integer OIDs since #834: 23 with
+		// size 4 for the first two, 20 with size 8 for the third. The TEXT is
+		// unchanged — all three already rendered as plain integers — so this
+		// entry exists precisely because a VALUE oracle cannot see the change
+		// and a driver can: under OID 25 pgx handed the application a String
+		// for a column the engine compares numerically.
+		{name: "NetworkIntegerTypes",
+			sql: `SELECT n_port, n_proto, n_dur FROM net_probe WHERE n_key < 6 ORDER BY n_key`},
+		// The BINARY form under those OIDs. A PORT boxes as an int32 and a
+		// DURATION as an int64, so appendBinaryValue's own arms already write
+		// the 4 and 8 bytes the OIDs promise — this entry is what says so,
+		// the way binary_decode caught the UUID text under OID 2950.
+		{name: "NetworkIntegerTypesOrdered",
+			sql: `SELECT n_port FROM net_probe WHERE n_port IS NOT NULL ORDER BY n_port LIMIT 4`},
+		// An INTEGER BOUND PARAMETER against a PORT column, which is the shape
+		// declaring OID 23 invites a client to send: a driver that reads int4
+		// from RowDescription binds `WHERE n_port = $1` as an int4, and
+		// bindparams' numericOID has to render it as a bare SQL number rather
+		// than a quoted string — `port_col = '443'` matches nothing. The
+		// inferred twin is DataGrip's shape, where the client lets the server
+		// decide the parameter's type.
+		{name: "NetworkPortParamDeclared",
+			sql:       `SELECT n_key FROM net_probe WHERE n_port = $1 ORDER BY n_key`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(631)}},
+		{name: "NetworkPortParamInferred",
+			sql:    `SELECT n_key FROM net_probe WHERE n_port = $1 ORDER BY n_key`,
+			params: [][]byte{int4Text(631)}},
+		{name: "NetworkDurationParamDeclared",
+			sql:       `SELECT n_key FROM net_probe WHERE n_dur = $1 ORDER BY n_key`,
+			paramOIDs: []uint32{20}, params: [][]byte{[]byte("1000000007")}},
 		// A boolean expression, whose PostgreSQL text form is 't'/'f' and
 		// whose binary form is one byte (#364).
 		{name: "BooleanExpression", sql: `SELECT (n_regionkey = 1) AS is_one FROM nation ORDER BY n_nationkey LIMIT 4`},

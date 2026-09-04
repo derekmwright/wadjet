@@ -2309,6 +2309,28 @@ func pgTypeOID(typeName string) int {
 		// (#570). oidBytea in bindparams.go is the same number, used for
 		// inbound Bind parameters and the pg_type catalog row.
 		return 17 // bytea
+	case "PORT", "PROTOCOL":
+		// PostgreSQL's int4. A PORT is a uint16 and a PROTOCOL a uint8, both
+		// stored in Int32Data and boxed as an int32, and both already RENDER
+		// as a plain integer on the wire ("443", "6") — so the text a client
+		// reads does not change at all. What changes is that it is now told
+		// so: under OID 25 the engine declared `text` for a column it
+		// compares NUMERICALLY, which is ADR-0012 item 2's exact shape — one
+		// type declared, another behaved as — and `port > 5` is legal
+		// PostgreSQL under int4 while it is 42883 under text (#834).
+		//
+		// appendBinaryValue's int32 arm already writes the 4 bytes OID 23
+		// promises, so no encoder arm is needed the way date/numeric/uuid
+		// needed one: those box as TEXT and this boxes as the number.
+		return 23 // int4
+	case "DURATION":
+		// PostgreSQL's int8, counting NANOSECONDS — the unit schema.go
+		// defines and Vector.GetValue reads back. Deliberately NOT `interval`
+		// (OID 1186): PostgreSQL's interval is microsecond-precision and has
+		// its own text and binary forms, so declaring it would change the
+		// rendering as well as the type. ADR-0012 records that as the open
+		// alternative.
+		return 20 // int8
 	case "UUID":
 		// PostgreSQL's uuid. The engine boxes a UUID as its canonical text —
 		// the same 36 characters OID 2950's TEXT format carries — so the text
@@ -2887,6 +2909,14 @@ func pgFormatType(typeName string) string {
 		return "bytea"
 	case "UUID":
 		return "uuid"
+	case "PORT", "PROTOCOL":
+		// The catalog must agree with the wire: pgTypeOID declares OID 23 for
+		// these, and an introspecting client (DataGrip, Superset, SQLAlchemy)
+		// reads BOTH — a pg_attribute row saying `text` beside a
+		// RowDescription saying int4 is the contradiction #834 is about.
+		return "integer"
+	case "DURATION":
+		return "bigint"
 	default:
 		return "text"
 	}

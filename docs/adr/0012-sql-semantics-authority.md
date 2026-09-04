@@ -182,6 +182,47 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      millisecond the column stores — `.123456` reads back `.123` — which is a
      declared-type property of TIMESTAMP here and a stored-value divergence
      from PostgreSQL's microseconds.
+   - **PORT and PROTOCOL are `int4` on the wire; DURATION is `int8`
+     NANOSECONDS.** (Decided 2026-09-03, #834.) All three declared OID 25
+     (`text`) while the engine compared them NUMERICALLY, which is item 2's
+     exact shape: one type declared, another behaved as. Under `text`,
+     `port > 5` is the operand pair #721 refuses and PostgreSQL rejects with
+     42883 — yet wadjet answered it, and refusing would have broken a
+     legitimate wadjet-native comparison. Declaring the numeric OID dissolves
+     the asymmetry instead of choosing a side of it.
+
+     The TEXT on the wire does not change: a PORT is a uint16 and a PROTOCOL a
+     uint8, both stored in `Int32Data` and boxed as an int32, and a DURATION is
+     an int64 — all three already rendered as plain integers (`443`, `6`,
+     `1500000000`), which is exactly int4's and int8's text form.
+     `appendBinaryValue`'s own int32/int64 arms already write the 4 and 8 bytes
+     the OIDs promise, so no encoder arm was needed the way `date`, `numeric`
+     and `uuid` needed one — those box as TEXT and these box as the number.
+     `numericOID` in bindparams already covers int4 and int8, so an inbound
+     `WHERE port_col = $1` binds as a bare SQL number rather than a quoted
+     string.
+
+     **DURATION is int8 and not `interval`, and that is the open alternative.**
+     PostgreSQL's `interval` (OID 1186) is MICROSECOND precision with its own
+     text and binary forms, so declaring it would change the RENDERING as well
+     as the type — a wadjet DURATION counts nanoseconds, which is the unit
+     `schema.go` defines and `Vector.GetValue` reads back. Moving to `interval`
+     would need a unit decision first and is recorded here as the way out, not
+     taken.
+
+     The SQLSTATE messages moved with the declaration:
+     `kernel.NumericTypeName` renders `integer` and `bigint` for these types,
+     so `port_col = 'abc'` is `invalid input syntax for type integer: "abc"` —
+     the name a client can look up in `pg_type`, where it used to say `port`,
+     a type name nothing resolves. `pgFormatType` follows for the synthetic
+     `pg_attribute` rows, because an introspecting client reads BOTH and a
+     catalog saying `text` beside a RowDescription saying int4 is the same
+     contradiction one layer down.
+
+     Gated by the wire arm over `net_probe`, whose PostgreSQL twin declares
+     `integer` / `integer` / `bigint`: the OIDs, the sizes, the text, the
+     binary bytes, and an integer bound parameter against a PORT column in
+     both the declared and the inferred spellings.
    - **A temporal CAST over a box with no temporal reading keeps NULL.**
      (Added 2026-09-03, #836/#840.) `CAST(<text> AS DATE|TIMESTAMP)` raises
      22007/22008 for text naming no instant. Every OTHER box that fails to

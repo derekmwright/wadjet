@@ -759,6 +759,16 @@ func oracleTables() map[string]parquet.Schema {
 		{Name: "n_v4", Type: parquet.TypeIPv4, Nullable: true},
 		{Name: "n_v6", Type: parquet.TypeIPv6, Nullable: true},
 		{Name: "n_cidr", Type: parquet.TypeCIDR, Nullable: true},
+		// PORT, PROTOCOL and DURATION, which declare integer OIDs since #834.
+		// They are here because the wire arm is the ONLY one that can see the
+		// declaration: all three already RENDERED as plain integers under
+		// OID 25, so a value oracle read them as agreeing text while a driver
+		// was being handed a String for a column the engine compares
+		// numerically. Their PostgreSQL twins are integer / integer / bigint,
+		// which is what postgresColumnType maps them to.
+		{Name: "n_port", Type: parquet.TypePort, Nullable: true},
+		{Name: "n_proto", Type: parquet.TypeProtocol, Nullable: true},
+		{Name: "n_dur", Type: parquet.TypeDuration, Nullable: true},
 	}}
 	return out
 }
@@ -895,6 +905,15 @@ func pgNetRows() []map[string]any {
 			default:
 				r["n_cidr"] = fmt.Sprintf("2001:db8:%x::/48", i)
 			}
+		}
+		// The three integer-domain network types (#834). The values walk the
+		// whole of each type's range rather than sitting in one decade: a
+		// PORT past 32767 is the one an int2 declaration would have wrapped,
+		// and a DURATION past 2^31 is the one an int4 declaration would have.
+		if i%7 != 0 {
+			r["n_port"] = int32((i * 631) % 65536)
+			r["n_proto"] = int32(i % 256)
+			r["n_dur"] = int64(i) * 1_000_000_007
 		}
 		rows[i] = r
 	}
@@ -1057,6 +1076,16 @@ func postgresColumnType(t *testing.T, c parquet.Column) string {
 		// bytea, which is byte-ordered and byte-compared in every collation:
 		// no COLLATE clause applies to it and none is needed (#570).
 		return "bytea"
+	case parquet.TypePort, parquet.TypeProtocol:
+		// int4, which is the OID these declare since #834: a PORT is a uint16
+		// and a PROTOCOL a uint8, both stored in Int32Data, both rendered as
+		// a plain integer, and both compared numerically by the engine.
+		return "integer"
+	case parquet.TypeDuration:
+		// int8 counting NANOSECONDS — deliberately not `interval`, whose
+		// precision is microseconds and whose text form is different (see
+		// pgwire.pgTypeOID and ADR-0012).
+		return "bigint"
 	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR:
 		// One PostgreSQL type for three Wadjet ones. `inet` carries an
 		// address of either family with an optional prefix length, which is

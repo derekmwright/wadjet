@@ -119,6 +119,21 @@ Two differences from PostgreSQL to know about:
 
 IPv4, IPv6, MAC, Port and Protocol are stored in compact binary representations rather than as text, enabling efficient comparison and aggregation while keeping human-readable input/output formats. CIDR is the exception: it stores its text form directly.
 
+**What a PostgreSQL client sees.** `Port` and `Protocol` declare `integer`
+(OID 23) on the wire and `Duration` declares `bigint` (OID 20, counting
+nanoseconds), because that is what the engine compares them as. The bytes on
+the wire are unchanged — all three have always rendered as plain integers
+(`443`, `6`, `1500000000`) — so a driver that used to hand your application a
+`String` now hands it an `Integer` or a `Long`, and `WHERE port_col = $1` binds
+an integer parameter. The remaining network types declare `text`:
+
+| Type | Wire type | OID |
+|------|-----------|-----|
+| `Port`, `Protocol` | `integer` | 23 |
+| `Duration` | `bigint` (nanoseconds) | 20 |
+| `IPv4`, `IPv6`, `CIDR`, `MAC` | `text` | 25 |
+| `UUID` | `uuid` | 2950 |
+
 **Literal spellings in a comparison.** A `MAC` or `UUID` literal compared
 against a column is read in every spelling PostgreSQL accepts, at every site
 (`=`, `IN`, `CASE`, `IS DISTINCT FROM`, `GREATEST`, `LEAST`):

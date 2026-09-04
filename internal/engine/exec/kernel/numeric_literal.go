@@ -95,12 +95,16 @@ func NumericTypeName(typ batch.TypeID) (string, bool) {
 		return "bigint", true
 	case batch.TypeInt32:
 		return "integer", true
-	case batch.TypePort:
-		return "port", true
-	case batch.TypeProtocol:
-		return "protocol", true
+	case batch.TypePort, batch.TypeProtocol:
+		// The DECLARED wire type, not the internal one. These columns declare
+		// OID 23 (int4) since #834, so `port_col = 'abc'` has to say
+		// "integer" — the name a client can look up in pg_type and the name
+		// PostgreSQL itself uses for the same refusal against an int4 column.
+		// It said "port", a type name no client can resolve.
+		return "integer", true
 	case batch.TypeDuration:
-		return "duration", true
+		// OID 20 (int8), nanoseconds — see pgwire.pgTypeOID and ADR-0012.
+		return "bigint", true
 	case batch.TypeFloat32:
 		return "real", true
 	case batch.TypeFloat64:
