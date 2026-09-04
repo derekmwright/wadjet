@@ -396,6 +396,13 @@ security control never degrades to a grant.
 A policy binds to a **relation**, never to an alias: `FROM other AS employees`
 is a scan of `other` and no policy on `employees` touches it.
 
+The projection covers **every** read of the relation in the executed plan, not
+only the ones the statement's FROM clause names: a table referenced only inside
+an `IN`/`EXISTS`/`LATERAL` subquery is policed too, so a predicate written
+inside that subquery reads the mask like any other. Where the engine cannot
+place a predicate above the projection — `LATERAL` over a policed table is the
+case that reaches it — the query is refused (`0A000`) rather than answered.
+
 ### A mask is a SQL expression, and it must say what it means
 
 An ABAC `mask_column` obligation is refused **at config load and at hot

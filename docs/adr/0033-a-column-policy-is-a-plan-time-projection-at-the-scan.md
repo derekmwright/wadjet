@@ -170,7 +170,28 @@ the coordinator's `ExecuteSQL` can present.
   re-applied to any uncovered policed scan immediately after every
   `logical.Optimize`. That pass takes its column list from the SCAN, because
   after pruning the authority is what the scan produces; before the optimizer
-  the catalog is the authority, which is decision 1.
+  the catalog is the authority, which is decision 1. It adds every MASKED
+  column to that list whether the scan's pruned list names it or not — a mask
+  is computed from a literal, so publishing it costs nothing, and leaving it
+  out turns a predicate above the projection into a read of a column the
+  projection does not carry.
+- **The relation may not exist yet when enforcement runs.** A table named only
+  inside an `IN (SELECT … )` is SQL TEXT at that moment — no Scan, no FROM
+  entry — so it was never policed at all, and the semi-join the optimizer
+  later built from it had no projection and a predicate over the STORED
+  column. `logical.PolicyLookup` rides the context so any pass that meets a
+  scan can ask what the policy does to ITS table, taking the same decision
+  path (table access, column obligations, row filter) as the first pass.
+- **The invariant is asserted, not assumed.** `logical.CheckPolicyPlanOrder`
+  runs on the FINAL logical plan, which every arm consumes: a scan of a policed
+  relation with NO projection is `0A000`, and so is a non-policy filter between
+  a projection and its scan that reads a policed column. Asking only "no
+  predicate below an EXISTING projection" is unfalsifiable exactly where the
+  projection is missing.
+- **Scan-level filter pushdown stops at a security projection.** It evaluates
+  against the FILE, so pushing a predicate that sits above the projection makes
+  it read the stored column — the in-process twin of a single filter slot on
+  the DAG.
 - A mask expression is evaluated BELOW the barrier, against the row as stored.
   One that reads a column the same rule masks or denies is refused at load and
   at enforcement, because it would publish exactly what the rule takes away. An
@@ -194,6 +215,16 @@ the coordinator's `ExecuteSQL` can present.
   shown to honour the policy. Refusing beats running those reads against the
   stored row.
 - **A typed mask placeholder per type** (see the wire-type consequence above).
+- **`LATERAL` over a policed relation refuses.** Its decorrelated inner keeps
+  its predicate in a shape the planner cannot reorder above the projection, so
+  the invariant refuses `0A000` uniformly on every arm rather than answer.
+- **One two-path divergence with no disclosure**: an inner predicate written
+  against the MASK itself — `id IN (SELECT id FROM t WHERE ssn = '***')` —
+  answers 0 in process and 12 on the DAG. Nothing is learned either way (the
+  spelling naming the stored value answers 0 too, so the two are
+  indistinguishable to the client), but the arms disagree. The in-process
+  semi-join build reads its inner through a path the projection does not reach
+  even though the logical plan carries it; localizing that is its own work.
 - Per-row / per-cell labels (a visibility column, a `has_access` function
   family, dictionary-level evaluation) are a 0.19 arc, not this one.
 
