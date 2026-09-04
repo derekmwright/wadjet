@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -287,5 +288,70 @@ func TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow(t *testing.T) {
 		t.Errorf("reservation was %d bytes against a %d-byte budget; this pin needs a "+
 			"single file LARGER than the budget to reach the futile wait — the "+
 			"fixture stopped reaching its own condition", bytes, budget)
+	}
+}
+
+// TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs pins the hang the
+// #616 deferral's mechanism did not cover, with the discriminator that says
+// what the trigger actually is.
+//
+// #616's record attributed this hang class to TPC-H Q2's comma spelling and to
+// a shared scan cache reached through a comma join. It is broader than that,
+// and it is SHARPER: this repro has NO comma join and NO correlation. What it
+// has is a scalar subquery reading THE SAME TABLE that the enclosing IN's
+// semi-join is at that moment scanning to build its hash table. The build
+// waits on the scan, the scan's slot is held for the build, `source init`
+// never returns, and the query hangs until something cancels it.
+//
+// The control is the whole argument. Change ONLY the scalar subquery's table —
+// same nesting, same operators, same shapes — and it answers in milliseconds.
+// Each level ALONE also answers in milliseconds. So the trigger is neither the
+// nesting nor either subquery: it is the RE-ENTRANT read of a table from
+// inside a build that the same table's scan is feeding.
+//
+// Not fixed here. It belongs to the scan cache and the join's build, which is
+// where #616's remaining half already sits (ADR-0021 §1i); this pin exists so
+// the deferral's mechanism names the real condition instead of a spelling.
+//
+// The deadline is short and deliberate: a hang pinned with a long timeout is a
+// slow test, and a hang pinned with a short one is a fact. The day this shape
+// answers, the deadline error stops arriving and the pin fails.
+func TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs(t *testing.T) {
+	ctx := context.Background()
+	db, _ := arcD5RerunFixture(t, ctx, 0, 10, 10, 4)
+
+	const hangs = `SELECT COUNT(*) FROM d5_inner a WHERE a.k IN (
+	                 SELECT b.k FROM d5_inner b
+	                  WHERE b.k > (SELECT AVG(c.k) FROM d5_inner c))`
+	// Identical but for the scalar subquery's table.
+	const control = `SELECT COUNT(*) FROM d5_inner a WHERE a.k IN (
+	                   SELECT b.k FROM d5_inner b
+	                    WHERE b.k > (SELECT AVG(o.k) FROM d5_outer o))`
+
+	deadline, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if _, err := db.Query(deadline, hangs); err == nil {
+		t.Errorf("the same-table nesting answered; it hung at fd679ae9 and at the "+
+			"tip of this arc. If the scan cache no longer deadlocks against a build "+
+			"reading the same table, delete this pin and say so (#616).\n  SQL: %s", hangs)
+	} else if deadline.Err() == nil {
+		t.Errorf("wanted the query to hang until the deadline; it failed early with %v", err)
+	}
+
+	// The control must answer, and quickly, or the pin is measuring the
+	// fixture rather than the condition.
+	quick, cancel2 := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel2()
+	start := time.Now()
+	res, err := db.Query(quick, control)
+	if err != nil {
+		t.Fatalf("control (scalar subquery over the OTHER table) failed: %v", err)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Errorf("control took %v; it answers in milliseconds when the hang is the "+
+			"same-table read, so the discriminator has stopped discriminating", el)
+	}
+	if got := fmt.Sprint(res.Rows[0][res.Columns[0]]); got != "5" {
+		t.Errorf("control answered %s, want 5", got)
 	}
 }

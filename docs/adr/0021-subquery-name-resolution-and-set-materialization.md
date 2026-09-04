@@ -274,9 +274,18 @@ Both DAG arms now EXECUTE these shapes (`CorrelatedLocalRoutes` delta 0)
 rather than routing them to the coordinator-local pipeline, which is asserted
 beside the rows in `coordinator.TestArcD5CorrelationMatchesPostgres`.
 
-The §1c boundary is unchanged: an outer table correlated by its own TABLE NAME
-against an inner relation reading the same table under an alias has no CTE and
-no scope to record, so it stays silent and stays pinned.
+The boundary is unchanged, and stating it precisely matters because the
+obvious statement is wrong: it is not "there is no CTE". **The boundary is
+that the OUTER reference is UNALIASED.** An outer relation named bare — a
+table by its own name, or a CTE by its own name — correlated against an inner
+relation reading that same name under an alias gives `u.did` a scope the
+INNER `u` answers to as well, and no collector can tell the two apart. Both
+spellings are pinned, with the alias as the control that separates them:
+`boundary_cte_on_both_sides_outer_unaliased_stays_silent` (silent 0 for
+PostgreSQL's 47) against `control_cte_on_both_sides_outer_aliased` (47 on
+every arm, one alias later), and
+`boundary_unaliased_base_table_correlation_stays_silent` (silent 50 for 47).
+Closing it is a classifier repair, §1c's subject, not a scope one.
 
 ### 1e. The re-run's outer values are TYPED, and a type with no literal is a refusal
 
@@ -476,25 +485,65 @@ dropped the unmatched outer row (2 for PostgreSQL's 3, in silence) and the
 LEFT spelling kept it with `COUNT = NULL`, which is a different wrong answer
 to the same question.
 
-Two things restore it, both decided in the builder from the subquery AS
-WRITTEN (`logical.lateralEmptyInput`), before the key injection:
+Restoring it needs the ORDER right, and the order is PostgreSQL's: the
+lateral produces its row, THEN the join's ON tests the pair, and the join's
+KIND decides what happens to a pair the ON rejects. A repair that forces a
+LEFT join and defaults unconditionally has thrown the ON away, and that is
+not a smaller fix — it turned six PostgreSQL-correct answers wrong, `ON s.n
+> 5` answering three rows for PostgreSQL's none and printing 0 for counts of
+2. So `logical.lateralEmptyInputPlan` decides between three cases from the
+subquery and the join AS WRITTEN, before the key injection:
 
-- the join is a LEFT join whatever the query wrote, because the lateral side
-  produces a row for every outer row and only the decorrelation made that
-  conditional;
-- references to the lateral's COUNT outputs are wrapped in `COALESCE(…, 0)` in
-  the enclosing SELECT list, WHERE, HAVING and ORDER BY. NULL is already right
-  for every other aggregate — `SUM` of nothing IS NULL in PostgreSQL — so
-  COUNT is the only family that needs one.
+- **No written `ON`, or `ON true`** — the condition rejects nothing, so making
+  the join LEFT on the correlation and defaulting the COUNT outputs IS the
+  semantics, for the INNER and the LEFT spelling alike. (`lateralPadOnly`)
+- **A written `ON` on an INNER join** — the padded row must still be TESTED.
+  An inner join's ON and a WHERE are the same filter, so the join goes LEFT on
+  the CORRELATION alone, giving every outer row its lateral row, and the ON
+  moves into the enclosing WHERE where the same default substitution reaches
+  it. `ON s.n = 0` then KEEPS the unmatched row, which is PostgreSQL's answer
+  and the one the decorrelation alone cannot reach.
+  (`lateralPadThenFilter`)
+- **A written `ON` on an OUTER join** — a pair the ON rejects must be kept
+  with the lateral side NULL, which needs the lateral's columns nulled per
+  column rather than filtered: a CASE per output over a schema this pass does
+  not have. **NOT REPAIRED.** The join is left exactly as written, which for
+  every ON an unmatched outer row would FAIL is already PostgreSQL's answer;
+  the one shape it still gets wrong is an ON the DEFAULT row would PASS —
+  `LEFT JOIN LATERAL … ON s.n = 0` — and that is pinned in the census with
+  PostgreSQL's answer beside it. (`lateralNoRepair`)
+
+The default itself is `COALESCE(…, 0)` around references to the lateral's
+COUNT outputs. NULL is already right for every other aggregate — `SUM` of
+nothing IS NULL in PostgreSQL — so COUNT is the only family that needs one.
+
+**A default that reaches only some positions is a wrong answer in the
+others**, so the rewrite is a complete walk rather than a list of the places
+anyone thought of. It covers the enclosing SELECT list, WHERE, HAVING and
+ORDER BY, and inside those, every `plansql` node that can CONTAIN a column
+reference: ColRef, ParenNode, NotNode, UnaryOp, AndNode, OrNode, BinaryOp,
+CmpExpr, IsExpr, LikeExpr, BetweenExpr, InExpr, AnyAllExpr, CastNode,
+FuncCallNode, CaseNode, ArrayLitNode, TupleNode and WindowFuncNode — plus an
+aggregate's ARGUMENT (`AggArgExpr`, `AggArgs`, `AggArg`), which is a field of
+the select column rather than a node under it and was missed for exactly that
+reason. `SubqueryNode` and `ExistsNode` are deliberately not walked: they
+carry SQL TEXT, not a tree, and a lateral output is not in their scope. A
+missing arm is SILENT — the walker's default returns the node unwalked, so
+`WHERE s.n IN (0, 2)` dropped the unmatched outer row for PostgreSQL's three
+while `BETWEEN` and `IS` beside it were right.
 
 A subquery the QUERY grouped is untouched, and is the control: `GROUP BY x`
 over an empty input yields NO row in PostgreSQL either, so the unmatched outer
 row is correctly NULL-padded there and not defaulted.
 
-**`SELECT *` is the boundary**, pinned rather than described: a star expands
-in a later pass over the plan's own schema, so there is nothing in the
-SelectInfo to rewrite and the padded COUNT reads NULL where PostgreSQL reads
-0.
+**`SELECT *` is the boundary**, and it is pinned rather than described:
+`boundary_select_star_over_an_aggregated_lateral` in
+`coordinator.TestArcD5CorrelationMatchesPostgres`. A star expands in a later
+pass over the plan's own schema, so there is nothing in the SelectInfo to
+rewrite and the padded COUNT reads NULL where PostgreSQL reads 0. A second
+boundary is pinned beside it and is not a lateral defect at all:
+`COALESCE(x, 0) + 1` over the default boxes float64 where PostgreSQL says
+bigint, and it reproduces with no lateral in the query.
 
 **The DAG carries the COUNT column and not its siblings, and that is a
 SECOND, older defect this does not touch.** A BARE projection of a NULL-padded
@@ -526,6 +575,17 @@ the record is a fixture rather than a memory.
   minute test timeout with no rows), which is the deadlock the issue reports.
   Both belong to the join — the spill path and the shared scan cache — not to
   the correlation model.
+
+  The hang's condition is **narrower than a comma join and wider than TPC-H
+  Q2**, and the round-1 review's second repro is what says so: `a.k IN (SELECT
+  b.k FROM t b WHERE b.k > (SELECT AVG(c.k) FROM t c))` hangs with no comma
+  join and no correlation anywhere in it. The discriminator is a control that
+  changes ONE thing — the scalar subquery's TABLE — and answers in
+  milliseconds, as does each level of the nesting alone. So the trigger is a
+  RE-ENTRANT read of a table from inside a build that the same table's scan is
+  feeding: the build waits on the scan, the scan's slot is held for the build,
+  and `source init` never returns. Pinned with a three-second deadline and its
+  control in `coordinator.TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs`.
 
 - **#614 — a derived table in a subquery's FROM referencing the enclosing
   query.** MEASURED, because the question was open: it is LEGAL WITHOUT

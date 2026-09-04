@@ -474,6 +474,21 @@ subquery that writes its own `GROUP BY` follows the ordinary rule instead: an
 empty input yields no row, and the outer row is dropped by an inner join and
 NULL-padded by a `LEFT JOIN LATERAL`.
 
+**The join's own `ON` still decides.** The lateral produces its row first —
+including the defaulted one for an outer row it matched nothing for — and the
+`ON` is applied to that pair afterwards, so `ON s.item_count > 0` drops the
+empty order and `ON s.item_count = 0` keeps only the empty ones. Writing
+`ON true` is what makes the empty-input row unconditional; it is not the only
+supported spelling.
+
+One case is not yet right: a written `ON` on a `LEFT JOIN LATERAL` where the
+DEFAULT row would PASS the condition — `LEFT JOIN LATERAL (…) s ON s.n = 0` —
+drops the unmatched outer row where PostgreSQL keeps it with the lateral
+columns NULL. Every other combination of join kind and `ON` matches
+PostgreSQL. `SELECT *` over an aggregated lateral is a second gap: the star
+expands after the default is applied, so a `COUNT` column reached through it
+reads NULL rather than 0. Name the columns to get the default.
+
 ## Aggregate Functions
 
 | Function | Description | Null Handling |
