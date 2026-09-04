@@ -1316,9 +1316,9 @@ level away from.
     a derived arm with an inner `ORDER BY … LIMIT` read through a join, where
     no fragment in the plan carries either the alias or its definition.
 
-    Also still open in the family: **#785**, an aggregate aliased like the key
-    BESIDE a HAVING on it, which answers zero rows on every arm and is
-    therefore not the DAG's.
+    CLOSED in the family since: **#785**, an aggregate aliased like the key
+    BESIDE a HAVING on it, which answered zero rows on every arm and was
+    therefore not the DAG's. §3a has it.
 
 A related naming rule, settled here because two of the four review findings
 turned on it: **an ALIAS is a name, and its case is part of it.** A
