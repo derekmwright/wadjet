@@ -144,18 +144,12 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					continue
 				}
 
-				// Algebraic constant-arithmetic rewrite: SUM(x+k) →
-				// SUM(x)+k*COUNT(x), AVG(x+k) → AVG(x)+k, MIN/MAX(x±k) →
-				// MIN/MAX(x)±k, etc. Turns N expression-aggregates over one
-				// column into one shared aggregate plus post-projection
-				// arithmetic — ClickBench Q30 (90 × SUM(col + k)) went from
-				// evaluating 90 full-column expression passes per batch to
-				// a single SUM + COUNT.
-				if col.ASTExpr != nil {
-					if rw := rewriteConstArithAggs(col.ASTExpr); rw != nil {
-						col.ASTExpr = rw
-					}
-				}
+				// The constant-arithmetic aggregate lift used to run HERE,
+				// and it is gone: it ran before any type was known, so the
+				// most it could see was the literal's SPELLING, and lifting on
+				// that alone is not an identity over a float column. It lives
+				// in const_arith_agg_typed.go now, inside logical.Optimize,
+				// where the column's type is on the scan (#850, round-1 B1).
 
 				// Find all aggregates in this expression (handles multi-aggregate
 				// expressions like MAX(x) - MIN(x)).

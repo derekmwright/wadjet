@@ -97,15 +97,19 @@ func TestConstArithLiftDecidesFromTheColumnType(t *testing.T) {
 		// MIN(k - x) is k - MAX(x): the inner aggregate FLIPS.
 		{"int32_min_const_minus", "MIN(3 - w)", parquet.TypeInt32, nil, nil, million,
 			"proj{s isagg=false ast=3 - __agg_0} agg{max(w)->__agg_0}"},
-		// A DOUBLE column: float arithmetic never refuses, so there is no
-		// disposition for the lift to move and no bound to prove.
+		// A DOUBLE column DECLINES, and a VALUE says so rather than a
+		// disposition: IEEE addition is not associative, so `SUM(f + k)` and
+		// `SUM(f) + k*COUNT(f)` are different numbers as soon as the summands
+		// span enough magnitude to cancel. Over `1e16, 1, 1, 1, 1` PostgreSQL
+		// 17.11 answers 1.0000000000000008e+16 and the lifted form answers
+		// …004e+16 (round-1 review, B1).
+		// wadjet.TestConstArithLiftIsNotAppliedToFloatColumns is that fixture.
 		{"float64", "SUM(f + 3)", parquet.TypeFloat64, nil, nil, million,
-			"proj{s isagg=false ast=__agg_0 + 3 * __agg_1} agg{sum(f)->__agg_0} agg{count(f)->__agg_1}"},
-		// A REAL column DECLINES, and a VALUE says so: the per-row
-		// multiplication widens each value to a double before accumulating and
-		// the lifted SUM accumulates at float4's width — a different
-		// accumulator, not a last-ulp reordering. wadjet.TestConstArithLift
-		// AnswersTheSameAsThePerRowForm's c_f32 row is where it was measured.
+			"proj{s isagg=true ast=sum(f + 3)} agg{sum(f + 3)->s}"},
+		// A REAL column declines for a sharper version of the same thing: the
+		// per-row multiplication widens each value to a double before
+		// accumulating while the lifted SUM accumulates at float4's width — a
+		// different ACCUMULATOR, not a last-ulp reordering.
 		{"float32", "SUM(r + 3)", parquet.TypeFloat32, nil, nil, million,
 			"proj{s isagg=true ast=sum(r + 3)} agg{sum(r + 3)->s}"},
 		// An INT64 column WITH statistics that bound it.

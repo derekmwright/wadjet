@@ -380,28 +380,31 @@ func caaLiftIsSafe(c caaCandidate, f caaColumnFacts) bool {
 		return false
 	}
 	switch f.typ {
-	case parquet.TypeFloat64:
-		// Float arithmetic never refuses, so the per-row form has no
-		// disposition to preserve and the lifted form has none to invent.
-		// This is the shape the #841 decline swallowed for no reason at all:
-		// PostgreSQL types `double + integer` double precision and raises for
-		// neither form, and the syntactic pass has lifted `SUM(f * 2.0)` over
-		// the same column all along.
-		return true
-	case parquet.TypeFloat32:
-		// A REAL column declines, and it is a VALUE that says so rather than a
-		// disposition. `SUM(c_f32 * 2)` answered 1383.1428577005863 per-row
-		// and 1383.142822265625 lifted, over the type matrix's 100 rows: the
-		// per-row multiplication widens each value to a double before it is
-		// accumulated, and `SUM(c_f32)` accumulates at the column's own float4
-		// width and multiplies once at the end. That is not a last-ulp
-		// reordering, it is a different accumulator, so the lift is not an
-		// identity over values here and does not apply (measured; the gate's
-		// c_f32 row is the fixture).
-		return false
 	case parquet.TypeInt32, parquet.TypeInt64:
 	default:
-		// DECIMAL and everything else: unchanged from #841's decline.
+		// EVERY non-integer column declines, and the reason is not a
+		// disposition — it is a VALUE.
+		//
+		// IEEE addition is not associative, so `SUM(f + k)` and
+		// `SUM(f) + k*COUNT(f)` are different numbers whenever the summands
+		// span enough magnitude to cancel. Over `f = 1e16, 1, 1, 1, 1`,
+		// PostgreSQL 17.11 answers 1.0000000000000008e+16 for `SUM(f+1)` and
+		// 3.0000000000000016e+16 for `SUM(f*3)`; the lifted forms answer
+		// …004e+16 and 3e+16. The first cut of this pass lifted FLOAT64 on the
+		// grounds that "float arithmetic never refuses" — true of this engine,
+		// and beside the point: the lift is an identity over VALUES or it is
+		// not applied, and over a float it is not (round-1 review, B1).
+		//
+		// FLOAT32 declines for a sharper version of the same thing: the
+		// per-row multiplication widens each value to a double before it is
+		// accumulated while `SUM(c_f32)` accumulates at float4's width, so the
+		// two forms use a different ACCUMULATOR — `SUM(c_f32 * 2)` answered
+		// 1383.1428577005863 per-row and 1383.142822265625 lifted over the
+		// type matrix's 100 rows.
+		//
+		// DECIMAL declines too, unchanged from #841: the engine's 128-bit
+		// carrier can refuse where PostgreSQL answers, and the lifted and
+		// per-row forms round at different scales.
 		return false
 	}
 	if f.lo == nil || f.hi == nil || f.rows == nil {

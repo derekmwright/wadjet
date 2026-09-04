@@ -80,8 +80,13 @@ func BenchmarkConstArithLiftQ30Shape(b *testing.B) {
 	ctx := context.Background()
 	for _, c := range []struct{ name, sql string }{
 		// The lifted shapes: an int32 column bounds itself, so no ANALYZE is
-		// needed; a float column can never refuse.
+		// needed. Q30's own columns are integers, which is why the recovery
+		// this measures survives B1's decline.
 		{"int32_x90", caaQ30SQL("w", 90)},
+		// A DOUBLE column is the DECLINED control now, and it is the one that
+		// says the lift is for exact arithmetic: it stays at the per-row cost
+		// on purpose, because the rewrite is not an identity over a float
+		// (round-1 review, B1).
 		{"float64_x90", caaQ30SQL("f", 90)},
 		// An INT64 column, which needs a min/max to be bounded — and gets one
 		// from the MANIFEST's footer statistics without any ANALYZE, which is

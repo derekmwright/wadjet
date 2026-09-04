@@ -35,6 +35,11 @@ func TestConstArithLiftAnswersTheSameAsThePerRowForm(t *testing.T) {
 		`SELECT MIN(c_i32 * 2) AS a, MAX(c_i32 * 2) AS b FROM ` + tbl + ` WHERE id < 100`,
 		`SELECT MIN(3 - c_i32) AS a, MAX(3 - c_i32) AS b FROM ` + tbl + ` WHERE id < 100`,
 		`SELECT SUM(c_i64 + 3) AS s FROM ` + tbl + ` WHERE id < 100`,
+		// The float columns are here as shapes the lift must LEAVE ALONE, not
+		// as evidence about it: `c_f64 = i/3` spans 0…333, so the lifted and
+		// per-row forms are bit identical whatever the rewrite does and these
+		// cells cannot fail. TestConstArithLiftIsNotAppliedToFloatColumns
+		// carries the fixture that separates them (round-1 review, B1).
 		`SELECT SUM(c_f64 + 3) AS s FROM ` + tbl + ` WHERE id < 100`,
 		`SELECT SUM(c_f32 * 2) AS s FROM ` + tbl + ` WHERE id < 100`,
 		// A DECIMAL column, which still declines — the pair must agree anyway.
