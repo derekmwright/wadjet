@@ -877,7 +877,23 @@ func CidrSortKey(s string) (string, bool) {
 	}
 	ip, ipnet, err := net.ParseCIDR(t)
 	if err != nil || ipnet == nil {
-		return "", false
+		// PostgreSQL's ABBREVIATED v4 forms, which Go's parser does not read:
+		// '10/8', '192.168', '192.168/16' (#627). The canonical spelling goes
+		// back through the same key builder, so an abbreviated literal and the
+		// address it names produce one key — which is what makes `cd = '10/8'`
+		// find the row holding '10.0.0.0/8', as it does on the server.
+		a, ones, pok := parquet.PgIPv4Pton(s)
+		if !pok {
+			return "", false
+		}
+		full := net.IP(a[:])
+		masked := full.Mask(net.CIDRMask(ones, 32))
+		buf := make([]byte, 0, 2+2*net.IPv4len)
+		buf = append(buf, 0x04)
+		buf = append(buf, masked...)
+		buf = append(buf, byte(ones))
+		buf = append(buf, full...)
+		return string(buf), true
 	}
 	ones, bits := ipnet.Mask.Size()
 	var full, masked net.IP
@@ -947,6 +963,15 @@ func CidrOrderKey(s string) string {
 // ok is false for a literal that is no address at all; the caller raises the
 // query error, the same as CidrSortKey's.
 func IPv6LitKey(s string) (key string, ok bool) {
+	// A /128 prefix is the address itself on the server, and a TypeIPv6 column
+	// is exactly that (#627). A narrower prefix names a network this type
+	// cannot hold and is refused by the caller with the reason.
+	if body, mask, cut := strings.Cut(s, "/"); cut {
+		if mask != "128" {
+			return "", false
+		}
+		s = body
+	}
 	ip := net.ParseIP(s)
 	if ip == nil {
 		return "", false
@@ -2523,8 +2548,28 @@ func toString(v any) string {
 // exec.networkConstError), never read it as the address 0.0.0.0 the way this
 // used to (#519: `WHERE c_ipv4 = 'garbage'` matched every row holding
 // 0.0.0.0, the CIDR/IPv6 shape #492 already fixed one type over).
+// A HOST-width prefix is accepted with the address it decorates:
+// `'10.0.0.1/32'::inet` equals `'10.0.0.1'::inet` on the server, and a
+// TypeIPv4 column is exactly that — an address with an implicit /32 — so this
+// spelling is representable here without any loss (#627). A NARROWER prefix
+// names a NETWORK, which this type has no room to hold: it is refused, and the
+// refusal says so rather than calling PostgreSQL-valid text a syntax error
+// (see exec.networkConstError).
 func parseIPv4ToInt64(s string) (int64, bool) {
-	ip := net.ParseIP(s)
+	body := s
+	if addr, bits, ok := parquet.PgIPv4Pton(s); ok && strings.ContainsRune(s, '/') {
+		if bits != 32 {
+			return 0, false
+		}
+		return int64(binary.BigEndian.Uint32(addr[:])), true
+	} else if ok && !strings.ContainsRune(s, '/') {
+		// An abbreviated form with no prefix — '10', '192.168' — is a cidr
+		// spelling; PostgreSQL's inet refuses it, and so does this.
+		if strings.Count(s, ".") != 3 {
+			return 0, false
+		}
+	}
+	ip := net.ParseIP(body)
 	if ip == nil {
 		return 0, false
 	}
@@ -2533,6 +2578,25 @@ func parseIPv4ToInt64(s string) (int64, bool) {
 		return 0, false
 	}
 	return int64(binary.BigEndian.Uint32(ip4)), true
+}
+
+// IPv4PrefixLiteral reports whether s is PostgreSQL-valid inet text that names
+// a NETWORK rather than a host — the one family this engine's bare-address
+// types cannot represent, which is what separates a refusal that is a defect
+// from one that is a deferral (#627).
+func IPv4PrefixLiteral(s string) bool {
+	_, bits, ok := parquet.PgIPv4Pton(s)
+	return ok && bits != 32
+}
+
+// IPv6PrefixLiteral is IPv4PrefixLiteral for the v6 spellings: an address with
+// a prefix narrower than /128.
+func IPv6PrefixLiteral(s string) bool {
+	body, mask, cut := strings.Cut(s, "/")
+	if !cut || net.ParseIP(body) == nil {
+		return false
+	}
+	return mask != "128"
 }
 
 // IPv4LitKey exports parseIPv4ToInt64 for exec.networkConstError, which needs

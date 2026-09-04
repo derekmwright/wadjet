@@ -872,10 +872,16 @@ func networkConstError(typ batch.TypeID, value any) error {
 		if _, ok := kernel.IPv6LitKey(fmt.Sprint(value)); ok {
 			return nil
 		}
+		if kernel.IPv6PrefixLiteral(fmt.Sprint(value)) {
+			return networkPrefixUnsupported("IPV6", fmt.Sprint(value))
+		}
 		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))
 	case batch.TypeIPv4:
 		if _, ok := kernel.IPv4LitKey(fmt.Sprint(value)); ok {
 			return nil
+		}
+		if kernel.IPv4PrefixLiteral(fmt.Sprint(value)) {
+			return networkPrefixUnsupported("IPV4", fmt.Sprint(value))
 		}
 		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))
 	case batch.TypeMAC:
@@ -890,6 +896,23 @@ func networkConstError(typ batch.TypeID, value any) error {
 		return sqlerr.New("22P02", "invalid input syntax for type uuid: %q", fmt.Sprint(value))
 	}
 	return nil
+}
+
+// networkPrefixUnsupported is the refusal for text PostgreSQL ACCEPTS and this
+// engine cannot represent: an inet literal carrying a prefix narrower than the
+// host width, met by an IPV4 or IPV6 column, which hold a bare address and have
+// no room for a prefix (`'10/8'::inet` is the network 10.0.0.0/8, and the
+// server answers FALSE against every /32 host row rather than erroring).
+//
+// It is 0A000, not 22P02: the text is valid, the engine's TYPE is the limit.
+// Saying "invalid input syntax" about PostgreSQL-valid text is the wrong claim
+// even when the disposition is the same, and 22P02 is what a client retries
+// with a corrected literal. The CIDR type carries a prefix and answers these
+// literals exactly (#627); the deferral is recorded in ADR-0012's list.
+func networkPrefixUnsupported(typeName, text string) error {
+	return sqlerr.New("0A000", "a network prefix is not representable in a %s column: %q "+
+		"(PostgreSQL reads it as a network; use a CIDR column, or compare against the "+
+		"address alone)", typeName, text)
 }
 
 // dateConstError is decimalConstError's counterpart for a DATE value whose

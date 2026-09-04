@@ -111,6 +111,12 @@ func NumericTypeName(typ batch.TypeID) (string, bool) {
 		return "double precision", true
 	case batch.TypeDecimal:
 		return "numeric", true
+	case batch.TypeCIDR:
+		return "cidr", true
+	case batch.TypeMAC:
+		return "macaddr", true
+	case batch.TypeUUID:
+		return "uuid", true
 	}
 	return "", false
 }
@@ -151,6 +157,35 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 		// order rather than erroring (#462). One reader, so the plan-time and
 		// runtime refusals cannot disagree.
 		if NewDecimalLiteral(text).Numeric() {
+			return NumConstOK, true
+		}
+		return NumConstSyntax, true
+	case batch.TypeCIDR:
+		// The network arm #579 deferred and #627 asks for. It can be wired
+		// now for exactly the three types whose accept-set is a SUPERSET of
+		// PostgreSQL's — the rule #579 named: a refusal built on a parser
+		// stricter than the server's refuses valid input, so the parser has
+		// to be widened first. CIDR reads PostgreSQL's abbreviated grammar
+		// (pgIPv4Pton), MAC its six spellings (pgMACGroupedHex) and UUID the
+		// brace/no-dash/uppercase forms.
+		//
+		// IPv4 and IPv6 are deliberately absent: their accept-set is not yet a
+		// superset, because a prefix narrower than the host width names a
+		// NETWORK and those types hold a bare address. Their refusal stays at
+		// runtime, where TestPlanTimeNeverRefusesPGValidNetworkLiteral's
+		// `{v4, 10/8}` boundary cannot be turned into a plan-time refusal of
+		// PostgreSQL-valid text.
+		if _, ok := CidrSortKey(text); ok {
+			return NumConstOK, true
+		}
+		return NumConstSyntax, true
+	case batch.TypeMAC:
+		if _, ok := MACLitKey(text); ok {
+			return NumConstOK, true
+		}
+		return NumConstSyntax, true
+	case batch.TypeUUID:
+		if _, ok := UUIDLiteralToRaw(text); ok {
 			return NumConstOK, true
 		}
 		return NumConstSyntax, true

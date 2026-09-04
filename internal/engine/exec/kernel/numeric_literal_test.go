@@ -124,15 +124,20 @@ func TestQuotedLitStatusMatchesPostgresInputGrammar(t *testing.T) {
 
 // TestQuotedLitStatusHasNoRuleForTheRest is the other direction: a type with
 // no rule must answer ok=false, so no site can refuse a literal against it by
-// accident. The network types are the ones this matters for — their parsers
-// are STRICTER than PostgreSQL's grammar, so wiring them here would refuse
-// PG-valid input (#627).
+// accident.
+//
+// The network types were ALL on this list until #627: a refusal is only ever
+// safe on a parser whose accept-set is a SUPERSET of PostgreSQL's, and theirs
+// were stricter. CIDR, MAC and UUID have left it — CIDR reads the abbreviated
+// grammar, MAC the six spellings, UUID the brace/no-dash/uppercase forms —
+// and TestNetworkLiteralRefusalIsOnePredicate is where their rule is asserted.
+// IPv4 and IPv6 stay, because a prefix narrower than the host width is
+// PostgreSQL-valid text a bare-address column cannot hold.
 func TestQuotedLitStatusHasNoRuleForTheRest(t *testing.T) {
 	for _, typ := range []batch.TypeID{
 		batch.TypeBool, batch.TypeString, batch.TypeBytes, batch.TypeTimestamp,
-		batch.TypeDate, batch.TypeIPv4, batch.TypeIPv6, batch.TypeCIDR,
-		batch.TypeMAC, batch.TypeUUID, batch.TypeArray, batch.TypeRow,
-		batch.TypeMap, batch.TypeVector,
+		batch.TypeDate, batch.TypeIPv4, batch.TypeIPv6, batch.TypeArray,
+		batch.TypeRow, batch.TypeMap, batch.TypeVector,
 	} {
 		if _, ok := QuotedLitStatus(typ, "definitely not a number"); ok {
 			t.Errorf("%v claims a numeric literal rule it must not have", typ)
