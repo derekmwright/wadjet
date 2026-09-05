@@ -1943,19 +1943,14 @@ func (lb *leafBuffer) buildStats() *Statistics {
 
 // --- Type conversion helpers ---
 
-func toBool(v any) bool {
-	switch t := v.(type) {
-	case bool:
-		return t
-	default:
-		return false
-	}
-}
-
-// toInt32 and toInt64 used to live here. They narrowed with a bare Go
-// conversion and answered every box they did not name with a zero; the leaves
-// they fed now resolve their box through int32LeafValue / int64LeafValue,
-// which refuse what they cannot store instead. See int_leaf_value.go.
+// toBool, toInt32, toInt64, toFloat32, toFloat64, toBytes and
+// convertStringToInt64 used to live in this file. Each narrowed or rendered
+// with a bare Go conversion and answered every box it did not name with a ZERO
+// VALUE — false, 0, an empty byte slice, 0.0.0.0. Every leaf now resolves its
+// box through leaf_value.go, which refuses what it cannot store, so the last
+// four were left with no callers at all; ADR-0018 §10 says "there is no
+// `default:` arm that produces a value", and four dead functions one call away
+// from making that untrue is not the same as it being true (round-1 review N1).
 
 // decimalFLBABytes renders an unscaled DECIMAL value as the sixteen-byte
 // big-endian two's-complement integer a FIXED_LEN_BYTE_ARRAY DECIMAL leaf
@@ -1978,68 +1973,6 @@ func decimalFLBABytes(d Decimal128) []byte {
 		b[decimalFLBAWidth-9-i] = byte(uint64(d.Hi) >> (8 * i))
 	}
 	return b
-}
-
-func toFloat32(v any) float32 {
-	switch t := v.(type) {
-	case float32:
-		return t
-	case float64:
-		return float32(t)
-	case int:
-		return float32(t)
-	default:
-		return 0
-	}
-}
-
-func toFloat64(v any) float64 {
-	switch t := v.(type) {
-	case float64:
-		return t
-	case float32:
-		return float64(t)
-	case int:
-		return float64(t)
-	case int64:
-		return float64(t)
-	default:
-		return 0
-	}
-}
-
-func toBytes(v any, colType TypeID) []byte {
-	switch t := v.(type) {
-	case []byte:
-		return t
-	case string:
-		return convertStringToBytes(t, colType)
-	case []float32:
-		// VECTOR type: encode as little-endian float32 bytes
-		buf := make([]byte, len(t)*4)
-		for i, f := range t {
-			binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
-		}
-		return buf
-	default:
-		return nil
-	}
-}
-
-// convertStringToInt64 handles network type string-to-int64 conversion.
-// decomposeLeaf converts and validates these literals before the value ever
-// reaches a leaf buffer, so an unparseable one cannot arrive here.
-func convertStringToInt64(s string, colType TypeID) int64 {
-	switch colType {
-	case TypeIPv4:
-		n, _ := ipv4StringToInt64(s)
-		return n
-	case TypeMAC:
-		n, _ := macStringToInt64(s)
-		return n
-	default:
-		return 0
-	}
 }
 
 // convertStringToBytes handles network type string-to-bytes conversion.

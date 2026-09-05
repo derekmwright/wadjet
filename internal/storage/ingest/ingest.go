@@ -182,47 +182,44 @@ func (ing *Ingester) validateRow(row map[string]any) error {
 }
 
 // checkType validates that a value is compatible with the column type.
+//
+// The Go-TYPE half is here, because the message a caller wants for a bool in a
+// number column names the type it handed over. The VALUE half is the WRITER's,
+// asked through parquet.CheckLeafBox — one function, so the two boundaries
+// cannot answer differently.
+//
+// They used to. The round-1 review of the writer-boundary arc measured 21 boxes
+// this door refused and the writer stored (`uint` and `uint64` into
+// INT32/PORT/PROTOCOL, int8/int16/uint* into FLOAT32/FLOAT64 — every one a
+// value the leaf holds exactly), and the agreement gate beside this file then
+// found 43 in the other and more expensive direction: a malformed address,
+// timestamp or duration LITERAL was admitted here, because only the Go type was
+// checked, and refused at the FLUSH. A flush happens per BUFFER, so one such
+// row takes a batch of good ones with it and reports against a partition rather
+// than against the INSERT that carried it — the argument #647 already made for
+// DECIMAL and #560 for DATE, now applied to every type.
 func checkType(col parquet.Column, v any) error {
 	switch col.Type {
 	case parquet.TypeBool:
 		if _, ok := v.(bool); !ok {
 			return fmt.Errorf("column %q: expected bool, got %T", col.Name, v)
 		}
-	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeInt64:
 		switch v.(type) {
-		case int, int8, int16, int32, int64, uint8, uint16, uint32:
-			// Refuse a value no INT32 leaf holds HERE, at the ingest boundary,
-			// rather than at the flush that eventually writes it — the same
-			// reason DECIMAL is checked here below. The writer refuses it too
-			// (parquet.int32LeafValue is the one rule), but a flush happens per
-			// BUFFER, so one bad row failing there takes a batch of good ones
-			// with it and reports against a partition rather than against the
-			// row that carried it. PostgreSQL's SQLSTATE for the same
-			// assignment is 22003, which is what the writer's error carries.
-			if err := parquet.CheckInt32LeafValue(col.Type, v); err != nil {
-				return fmt.Errorf("column %q: %w", col.Name, err)
-			}
+		case int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			float32, float64:
+			// The VALUE check is below, for every type at once. A float box is
+			// admitted here and held to a WHOLE number there, which is what
+			// the leaf stores.
 		default:
 			return fmt.Errorf("column %q: expected integer, got %T", col.Name, v)
 		}
-	case parquet.TypeInt64:
+	case parquet.TypeFloat32, parquet.TypeFloat64:
 		switch v.(type) {
-		case int, int8, int16, int32, int64, uint8, uint16, uint32, uint64:
-			// ok
-		default:
-			return fmt.Errorf("column %q: expected integer, got %T", col.Name, v)
-		}
-	case parquet.TypeFloat32:
-		switch v.(type) {
-		case float32, float64, int, int32, int64:
-			// ok
-		default:
-			return fmt.Errorf("column %q: expected float, got %T", col.Name, v)
-		}
-	case parquet.TypeFloat64:
-		switch v.(type) {
-		case float32, float64, int, int32, int64:
-			// ok
+		case float32, float64,
+			int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64:
 		default:
 			return fmt.Errorf("column %q: expected float, got %T", col.Name, v)
 		}
@@ -245,17 +242,9 @@ func checkType(col parquet.Column, v any) error {
 			return fmt.Errorf("column %q: expected timestamp (time.Time, int64, or string), got %T", col.Name, v)
 		}
 	case parquet.TypeDate:
-		switch tv := v.(type) {
-		case time.Time, int32, int64:
+		switch v.(type) {
+		case time.Time, int, int32, int64, string:
 			// ok
-		case string:
-			// Reject an unparseable or nonexistent calendar date at the
-			// ingest boundary, before the writer turns it into the epoch
-			// (day 0 = 1970-01-01) — silent data corruption, since the
-			// original text is then gone (#560).
-			if err := parquet.ValidateDateString(tv); err != nil {
-				return fmt.Errorf("column %q: %w", col.Name, err)
-			}
 		default:
 			return fmt.Errorf("column %q: expected date (time.Time, int, or string), got %T", col.Name, v)
 		}
@@ -266,37 +255,21 @@ func checkType(col parquet.Column, v any) error {
 		default:
 			return fmt.Errorf("column %q: expected duration (time.Duration, int64, or string), got %T", col.Name, v)
 		}
-	case parquet.TypeDecimal:
-		// Refuse a value with no DECIMAL at this column's (p, s) HERE, at the
-		// ingest boundary, rather than at the flush that eventually writes it.
-		// The writer refuses it too — DecimalValueFromBox is the same function
-		// on both sides — but the flush happens per BUFFER, so a single bad
-		// row failing there takes a batch of good ones with it and reports
-		// against a partition rather than against the INSERT that carried it
-		// (#647). Nothing is rewritten: the box the writer receives is the box
-		// this row already holds.
-		if _, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); err != nil {
-			return fmt.Errorf("column %q: %w", col.Name, err)
-		}
-	case parquet.TypeVector:
-		// This case did not exist: a VECTOR column's value reached the writer
-		// unchecked, and the FIXED_LEN_BYTE_ARRAY leaf then appended whatever
-		// width it was given, moving every later value's boundary (#886). The
-		// writer holds the width now; asking the same rule here fails the ROW
-		// that carries it.
-		if err := parquet.CheckVectorLeafValue(col, v); err != nil {
-			return fmt.Errorf("column %q: %w", col.Name, err)
-		}
 	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap:
-		// Reject a value no leaf of this container's declaration can hold at
-		// the ingest boundary, before the writer's leaf turns it into the
-		// epoch (DATE, #560) or refuses it at the flush (DECIMAL, #647) --
-		// the flush is per BUFFER, so a bad row failing there takes the
-		// already-accepted rows beside it with it. The top-level checks never
-		// saw either one.
+		// A container is walked rather than resolved as one value: reject a
+		// value no LEAF of this declaration can hold, before the writer's leaf
+		// refuses it at the flush. The top-level checks never saw either one.
 		if err := parquet.ValidateNestedLeaves(col, v); err != nil {
 			return fmt.Errorf("column %q: %w", col.Name, err)
 		}
+		return nil
+	}
+	// The VALUE, asked of the writer itself: an out-of-range number, a
+	// fractional float in an integer leaf, a wrong-width VECTOR, a DECIMAL with
+	// no room at this (p, s), and a malformed address / timestamp / duration /
+	// date literal. One rule, one place.
+	if err := parquet.CheckLeafBox(col, v); err != nil {
+		return fmt.Errorf("column %q: %w", col.Name, err)
 	}
 	return nil
 }

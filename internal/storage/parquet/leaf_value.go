@@ -71,13 +71,89 @@ func int32LeafValue(colType TypeID, v any) (int32, error) {
 	return 0, leafBoxError(colType, v)
 }
 
-// CheckInt32LeafValue is int32LeafValue's refusal without its value, for a
-// boundary above the writer that wants to fail the ROW that carries a bad
-// value rather than the buffer flush that eventually writes it
-// (ingest.checkType). One rule, asked twice.
+// CheckInt32LeafValue is int32LeafValue's refusal without its value, for the
+// one caller that has a TypeID and no Column: Writer.prepareRows, which must
+// not mangle a PORT/PROTOCOL box on the way past. Everything with a Column asks
+// CheckLeafBox.
 func CheckInt32LeafValue(colType TypeID, v any) error {
 	_, err := int32LeafValue(colType, v)
 	return err
+}
+
+// CheckLeafBox reports whether this writer can store this box in this column,
+// without writing anything. It is decomposeLeaf's own sequence of questions,
+// in decomposeLeaf's own order, so the answer is the answer the write will
+// give.
+//
+// It exists so the boundary ABOVE the writer can ask ONE question instead of
+// reimplementing the list. ingest.checkType used to ask six of its own, and
+// they were narrower in one direction and wider in the other: it refused
+// `uint(42)` and `int8(42)` for numeric columns (values the leaf holds
+// exactly), and it ADMITTED a malformed address or timestamp text for
+// IPv4/IPv6/MAC/UUID/TIMESTAMP/DURATION because it checked only the Go TYPE.
+// The second half is the one that costs: a bad literal admitted at the door
+// fails at the FLUSH instead, which happens per BUFFER, so one bad row takes a
+// batch of good ones with it and reports against a partition rather than
+// against the row that carried it — the argument #647 already made for DECIMAL
+// and #560 for DATE (round-1 review P2).
+//
+// A nil is not this function's business: presence is the schema's rule and
+// decomposeLeaf's, and the caller checks it first.
+func CheckLeafBox(col Column, v any) error {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok && hasNetworkLiteralForm(col.Type) {
+		_, err := convertNetworkLiteral(col.Type, s)
+		return err
+	}
+	if _, _, err := normalizeTemporalBox(col.Type, v); err != nil {
+		return err
+	} else if _, ok, _ := normalizeTemporalBox(col.Type, v); ok {
+		// A normalised temporal box is stored as the int32/int64 the
+		// normalisation produced; there is nothing left for the leaf to
+		// refuse.
+		return nil
+	}
+	switch col.Type {
+	case TypeDecimal:
+		d, err := DecimalValueFromBox(v, col.Precision, col.Scale)
+		if err != nil {
+			return err
+		}
+		if columnPhysical(col) == PhysicalInt64 {
+			if _, fits := d.Int64(); !fits {
+				return sqlerr.New("22003",
+					"DECIMAL unscaled value %s needs more than 64 bits, "+
+						"which this writer's INT64 encoding cannot store", d)
+			}
+		}
+		return nil
+	case TypeVector:
+		_, err := vectorLeafValue(col, v)
+		return err
+	}
+	switch columnPhysical(col) {
+	case PhysicalBoolean:
+		_, err := boolLeafValue(col.Type, v)
+		return err
+	case PhysicalInt32:
+		_, err := int32LeafValue(col.Type, v)
+		return err
+	case PhysicalInt64:
+		_, err := int64LeafValue(col.Type, v)
+		return err
+	case PhysicalFloat:
+		_, err := float32LeafValue(col.Type, v)
+		return err
+	case PhysicalDouble:
+		_, err := float64LeafValue(col.Type, v)
+		return err
+	case PhysicalByteArray:
+		_, err := bytesLeafValue(col, v)
+		return err
+	}
+	return nil
 }
 
 func int64LeafValue(colType TypeID, v any) (int64, error) {
@@ -361,13 +437,6 @@ func vectorLeafValue(col Column, v any) ([]byte, error) {
 		return t, nil
 	}
 	return nil, leafBoxError(col.Type, v)
-}
-
-// CheckVectorLeafValue is vectorLeafValue's refusal without its bytes, for the
-// boundary above the writer (ingest.checkType). One rule, asked twice.
-func CheckVectorLeafValue(col Column, v any) error {
-	_, err := vectorLeafValue(col, v)
-	return err
 }
 
 func vectorWidthError(col Column, got int) error {

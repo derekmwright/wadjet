@@ -661,6 +661,28 @@ at the flush that would otherwise fail a whole buffer of good rows — the same
 argument §4 makes for DECIMAL. What changes is that those checks are now
 convenience, not the guarantee.
 
+**And they are the same rule, not a second one.** `checkType` used to keep its
+own six lists, and the round-1 review of this arc measured them disagreeing
+with the writer on 64 cells in both directions: 21 boxes it refused and the
+writer stores (`uint` and `uint64` into INT32/PORT/PROTOCOL, `int8`/`int16`/
+`uint*` into FLOAT32/FLOAT64 — every one a value the leaf holds exactly), and
+43 it ADMITTED and the writer refuses, because it checked only the Go TYPE and
+so let a malformed address, timestamp or duration LITERAL through to the flush.
+The second direction is the expensive one: a flush happens per BUFFER, so one
+such row takes a batch of good ones with it and reports against a partition
+rather than against the INSERT that carried it. It now asks `CheckLeafBox` —
+`decomposeLeaf`'s own sequence of questions, in `decomposeLeaf`'s own order —
+so the answer it gives is the answer the write will give.
+
+What remains a deliberate SUPERSET, and is asserted as one rather than left to
+drift: the writer takes a `net.IP`, a `net.HardwareAddr` and a raw `[]byte` for
+an address column where the ingest door takes only text, because a caller of
+the exported `NativeWriter` is not obliged to come through ingest at all. The
+direction that matters is gated:
+`ingest.TestTheIngestBoundaryNeverAdmitsWhatTheWriterRefuses` asserts that
+everything the door admits, the writer can store, over every column shape ×
+every box class.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

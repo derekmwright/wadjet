@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -154,7 +155,7 @@ func TestFlushAll_MultiplePartitions(t *testing.T) {
 func TestIngest_AutoFlushByRowCount(t *testing.T) {
 	cat, store := setupCatalog(t)
 	cfg := Config{
-		MaxBufferRows: 5, // very small threshold
+		MaxBufferRows: 5,                  // very small threshold
 		MaxBufferSize: 1024 * 1024 * 1024, // large so row count triggers first
 		FlushInterval: 1 * time.Hour,
 		RowGroupSize:  100,
@@ -289,8 +290,18 @@ func TestCheckType_Int32(t *testing.T) {
 	if err := checkType(col, "not-int"); err == nil {
 		t.Fatal("expected error for string in int32 column")
 	}
-	if err := checkType(col, float64(1.0)); err == nil {
-		t.Fatal("expected error for float in int32 column")
+	// A WHOLE float is stored by the leaf, so this door admits it too: the
+	// two boundaries are one rule now, and the writer's answer for float64(1)
+	// is 1. A float with a fraction, a NaN or a magnitude no int32 holds is
+	// still refused here, which is what changed (the old rule refused all four
+	// at the door and the writer TRUNCATED the first two).
+	if err := checkType(col, float64(1.0)); err != nil {
+		t.Errorf("checkType(Int32, float64(1.0)): %v — the leaf stores 1", err)
+	}
+	for _, bad := range []any{float64(1.5), math.NaN(), float64(1e10)} {
+		if err := checkType(col, bad); err == nil {
+			t.Errorf("checkType(Int32, %v): accepted; no int32 holds it exactly", bad)
+		}
 	}
 }
 
@@ -410,8 +421,17 @@ func TestCheckType_Duration(t *testing.T) {
 	if err := checkType(col, int64(1000)); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkType(col, "1h"); err != nil {
+	// "1h" is NOT a DURATION literal here and never was: the type is
+	// nanoseconds stored as an int64, and ParseDurationNanos accepts a plain
+	// integer count and nothing else, deliberately (#673 — accepting Go's
+	// "1h30m" would invent a grammar the SQL literal path does not have). This
+	// door used to admit it and the WRITER then refused it at the flush; both
+	// now answer the same way.
+	if err := checkType(col, "3600000000000"); err != nil {
 		t.Fatal(err)
+	}
+	if err := checkType(col, "1h"); err == nil {
+		t.Fatal("expected error for a Go duration spelling in a duration column")
 	}
 	if err := checkType(col, 123); err == nil {
 		t.Fatal("expected error for int in duration column")
