@@ -120,10 +120,18 @@ column l_orderkey: the row group holds 4096 rows but its column chunk
 ```
 
 These are not query errors. The reader has proved the file's bytes disagree
-with the file's own metadata — a page whose stored bytes do not hash to the
-checksum the page header carries, or a column chunk that stops before the rows
-its row group declares. The usual causes are a truncated upload, a partial
-range read, or storage-level bit rot.
+with the file's own metadata. The full set of refusals in this family:
+
+| refusal | what it means |
+|---|---|
+| `fails its own checksum` | the page's stored bytes do not hash to the checksum its own header carries |
+| `the chunk ends before its declared rows` | a column chunk delivers fewer (or more) rows than its row group declares |
+| `carries no chunk for it` | a row group has no data at all for a column of the file's own schema |
+| `which this reader cannot decode` | a page of an unknown type sits inside a column chunk, so its rows cannot be accounted for |
+| `data page v2 declares ...` | a v2 page's row, value, null or level-length counts contradict each other or its levels |
+
+The usual causes are a truncated upload, a partial range read, or
+storage-level bit rot.
 
 The refusal is deliberate: the alternative is a query answering out of the
 corrupt bytes, or filling the missing rows with NULLs, without saying so.
