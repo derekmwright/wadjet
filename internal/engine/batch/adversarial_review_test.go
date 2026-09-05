@@ -235,6 +235,100 @@ func TestTheVetoDoesNotCostReuseWhenNobodyRetains(t *testing.T) {
 	}
 }
 
+// Checked value conversion reaches every leaf, however deeply nested (#898).
+// SetValueChecked used to handle only a vector whose OWN type is DECIMAL and
+// delegate a container to SetValue, which reinterprets an integer as a raw
+// unscaled carrier, saturates an over-wide text and stores 0.00 for text that
+// names no number — all with no error.
+func TestCheckedConversionRefusesTheSameDecimalBoxAtEveryNestingDepth(t *testing.T) {
+	d := parquet.Column{Name: "d", Type: parquet.TypeDecimal, Precision: 18, Scale: 2}
+	dval := parquet.Column{Name: "value", Type: parquet.TypeDecimal, Precision: 18, Scale: 2}
+	mapEntry := parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+		{Name: "key", Type: parquet.TypeString}, dval,
+	}}
+
+	shapes := []struct {
+		name string
+		col  parquet.Column
+		wrap func(any) any
+		// path is the fragment the error must name so the failing leaf can be
+		// found inside the container.
+		path string
+	}{
+		{
+			name: "scalar",
+			col:  d,
+			wrap: func(v any) any { return v },
+		},
+		{
+			name: "row",
+			col:  parquet.Column{Name: "x", Type: parquet.TypeRow, Fields: []parquet.Column{d}},
+			wrap: func(v any) any { return map[string]any{"d": v} },
+			path: `in "d"`,
+		},
+		{
+			name: "array",
+			col:  parquet.Column{Name: "x", Type: parquet.TypeArray, ElementType: &d},
+			wrap: func(v any) any { return []any{v} },
+			path: `in "[0]"`,
+		},
+		{
+			name: "map",
+			col:  parquet.Column{Name: "x", Type: parquet.TypeMap, ElementType: &mapEntry},
+			wrap: func(v any) any { return map[string]any{"a": v} },
+			path: `in "[0].value"`,
+		},
+		{
+			name: "row-of-array",
+			col: parquet.Column{Name: "x", Type: parquet.TypeRow, Fields: []parquet.Column{
+				{Name: "a", Type: parquet.TypeArray, ElementType: &d},
+			}},
+			wrap: func(v any) any { return map[string]any{"a": []any{v}} },
+			path: `in "a[0]"`,
+		},
+	}
+
+	bad := []struct {
+		name string
+		val  any
+		want string // a fragment of the refusal, so the REASON is asserted too
+	}{
+		{"invalid-text", "not-a-number", "invalid input syntax"},
+		{"raw-int-carrier", int64(42), "raw unscaled carrier"},
+		{"overflow", "99999999999999999999999999999999999999999999999999999", "numeric field overflow"},
+	}
+
+	for _, sh := range shapes {
+		for _, b := range bad {
+			t.Run(sh.name+"/"+b.name, func(t *testing.T) {
+				rows := []map[string]any{{sh.col.Name: sh.wrap(b.val)}}
+				out, err := batch.FromRowsChecked([]parquet.Column{sh.col}, rows)
+				if err == nil {
+					t.Fatalf("checked write accepted %v (%T) and stored %v", b.val, b.val, out.ToRows())
+				}
+				if !contains(err.Error(), b.want) {
+					t.Errorf("error %q does not name the reason %q", err, b.want)
+				}
+				if sh.path != "" && !contains(err.Error(), sh.path) {
+					t.Errorf("error %q does not name the leaf path %q", err, sh.path)
+				}
+			})
+		}
+		// The control: a valid decimal text stores the exact value at every
+		// nesting, so the fix refuses without also refusing the good case.
+		t.Run(sh.name+"/valid", func(t *testing.T) {
+			rows := []map[string]any{{sh.col.Name: sh.wrap("12.34")}}
+			out, err := batch.FromRowsChecked([]parquet.Column{sh.col}, rows)
+			if err != nil {
+				t.Fatalf("checked write refused a valid decimal: %v", err)
+			}
+			if got := out.Columns[0].GetValue(0); !contains(renderAny(got), "12.34") {
+				t.Errorf("stored %v; want a 12.34 somewhere in it", got)
+			}
+		})
+	}
+}
+
 // --- helpers ---
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }

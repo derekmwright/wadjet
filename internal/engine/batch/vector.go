@@ -1360,38 +1360,7 @@ func (v *Vector) SetValue(i int, val any) {
 		if v.Child == nil {
 			return
 		}
-		var elems []any
-		switch tv := val.(type) {
-		case []any:
-			elems = tv
-		case []map[string]any:
-			// parquet-go returns []map[string]any for repeated groups
-			elems = make([]any, len(tv))
-			for j, m := range tv {
-				// Unwrap single-key maps (LIST element wrapper: {"element": value})
-				if len(m) == 1 {
-					for _, v := range m {
-						elems[j] = v
-						break
-					}
-				} else {
-					elems[j] = m
-				}
-			}
-		default:
-			// The guard matters doubly here: the old silent `return` did
-			// not even advance Offsets, so every LATER row of the column
-			// read back shifted — the wrong value became someone else's.
-			//
-			// A bare map[string]any is refused too, MAP vector or not. It
-			// is the row-level shape of a MAP AND the box of a ROW, and
-			// this function cannot tell them apart: batch.FromRows converts
-			// the first at the boundary where the context IS known, and
-			// what reaches here is a ROW written into a mis-derived MAP
-			// vector — a live stage-DAG defect (#397) whose only current
-			// report is this guard.
-			v.mismatch(val)
-		}
+		elems := v.arrayElements(val)
 		start := v.Child.Len
 		for _, elem := range elems {
 			appendToVector(v.Child, elem)
@@ -1418,6 +1387,43 @@ func (v *Vector) SetValue(i int, val any) {
 	}
 }
 
+// arrayElements normalizes an ARRAY/MAP row's Go box into its element list.
+// Shared by SetValue and the checked walker so the two cannot drift over what
+// an element IS.
+func (v *Vector) arrayElements(val any) []any {
+	switch tv := val.(type) {
+	case []any:
+		return tv
+	case []map[string]any:
+		// parquet-go returns []map[string]any for repeated groups
+		elems := make([]any, len(tv))
+		for j, m := range tv {
+			// Unwrap single-key maps (LIST element wrapper: {"element": value})
+			if len(m) == 1 {
+				for _, e := range m {
+					elems[j] = e
+					break
+				}
+			} else {
+				elems[j] = m
+			}
+		}
+		return elems
+	}
+	// The guard matters doubly here: the old silent `return` did not even
+	// advance Offsets, so every LATER row of the column read back shifted —
+	// the wrong value became someone else's.
+	//
+	// A bare map[string]any is refused too, MAP vector or not. It is the
+	// row-level shape of a MAP AND the box of a ROW, and this function cannot
+	// tell them apart: batch.FromRows converts the first at the boundary where
+	// the context IS known, and what reaches here is a ROW written into a
+	// mis-derived MAP vector — a live stage-DAG defect (#397) whose only
+	// current report is this guard.
+	v.mismatch(val)
+	return nil
+}
+
 // SetValueChecked is SetValue for a caller producing a stored VALUE rather
 // than ingesting an already-encoded one.
 //
@@ -1441,11 +1447,100 @@ func (v *Vector) SetValue(i int, val any) {
 // that names no number (ADR-0024 item 4).
 //
 // Every other type, and every other box, delegates to SetValue unchanged.
+//
+// "Every other type" once included the CONTAINERS, and that was #898: a
+// DECIMAL leaf inside a ROW, an ARRAY or a MAP was written by SetValue's
+// recursion (child.SetValue, appendToVector) and got the unchecked contract
+// back — `not-a-number` stored 0.00, an integer 42 stored 0.42, a 53-digit
+// decimal stored a saturated Int128 — with no error, in the same call whose
+// scalar form refuses all three. So the walk descends: a container is
+// traversed HERE and every leaf takes the checked writer, with the field and
+// element path carried into the message so the refusal names WHICH leaf.
 func (v *Vector) SetValueChecked(i int, val any) error {
-	if v == nil || v.Type != TypeDecimal || val == nil {
+	return v.setValueChecked(i, val, "")
+}
+
+// setValueChecked is SetValueChecked carrying the path of the value being
+// written, rooted at the column: "d", "[0]", "a[0]", "[0].value".
+func (v *Vector) setValueChecked(i int, val any, path string) error {
+	if v == nil || val == nil {
 		v.SetValue(i, val)
 		return nil
 	}
+	if _, shapeOnly := val.(ShapeOnlyLen); shapeOnly {
+		// A shape-only box carries a LENGTH, not a value (#791). It is the
+		// unchecked writer's shape and reaches every type, containers
+		// included, so it keeps its own path rather than meeting a container
+		// arm that expects a Go map.
+		v.SetValue(i, val)
+		return nil
+	}
+	switch v.Type {
+	case TypeRow:
+		if v.Children == nil {
+			v.SetValue(i, val)
+			return nil
+		}
+		row, ok := val.(map[string]any)
+		if !ok {
+			// Same double stake as SetValue's arm: a silent return would skip
+			// every child's slot for this row.
+			v.mismatch(val)
+		}
+		v.Nulls.SetValid(i)
+		for j, child := range v.Children {
+			name := ""
+			if j < len(v.FieldNames) {
+				name = v.FieldNames[j]
+			}
+			if err := child.setValueChecked(i, row[name], joinFieldPath(path, name)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case TypeArray, TypeMap:
+		if v.Child == nil {
+			v.SetValue(i, val)
+			return nil
+		}
+		v.Nulls.SetValid(i)
+		elems := v.arrayElements(val)
+		start := v.Child.Len
+		for j, elem := range elems {
+			if err := appendToVectorChecked(v.Child, elem, fmt.Sprintf("%s[%d]", path, j)); err != nil {
+				return err
+			}
+		}
+		v.Offsets[i] = int32(start)
+		v.Offsets[i+1] = int32(v.Child.Len)
+		return nil
+	case TypeDecimal:
+		return withPath(path, v.setCheckedDecimal(i, val))
+	}
+	v.SetValue(i, val)
+	return nil
+}
+
+// joinFieldPath appends a ROW field to a path: "" + "d" = "d", "a" + "b" =
+// "a.b". An ARRAY element appends "[j]" instead, which needs no separator.
+func joinFieldPath(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return path + "." + name
+}
+
+// withPath names the failing leaf inside a container. The chain is preserved,
+// so the SQLSTATE the checked writer chose still reaches the wire.
+func withPath(path string, err error) error {
+	if err == nil || path == "" {
+		return err
+	}
+	return fmt.Errorf("in %q: %w", path, err)
+}
+
+// setCheckedDecimal is the scalar DECIMAL half: exact or an error.
+func (v *Vector) setCheckedDecimal(i int, val any) error {
 	switch tv := val.(type) {
 	case string:
 		d, err := ParseDecimalStringChecked(tv, v.DecimalData.Scale)
@@ -1574,7 +1669,28 @@ func mapKeyValue(child *Vector, k string) any {
 // appendToVector appends a single value to a vector, growing its backing storage.
 // Used by ARRAY/MAP SetValue to build up the child vector.
 func appendToVector(v *Vector, val any) {
-	idx := v.Len
+	if idx, hasValue := growForAppend(v, val); hasValue {
+		v.SetValue(idx, val)
+	}
+}
+
+// appendToVectorChecked is appendToVector for the checked walker: the SAME row
+// of storage, then the checked writer for the element. Sharing growForAppend
+// is what keeps the two append paths from disagreeing about how much storage a
+// logical row costs — the disagreement that was #899.
+func appendToVectorChecked(v *Vector, val any, path string) error {
+	idx, hasValue := growForAppend(v, val)
+	if !hasValue {
+		return nil
+	}
+	return v.setValueChecked(idx, val, path)
+}
+
+// growForAppend adds one logical row of storage to v and reports the index it
+// occupies. hasValue is false for a NULL, whose storage is reserved (so later
+// rows keep their indexes) and whose null bit is set here.
+func growForAppend(v *Vector, val any) (idx int, hasValue bool) {
+	idx = v.Len
 	v.Len++
 	v.Nulls = v.Nulls.Grow(v.Len)
 
@@ -1604,9 +1720,9 @@ func appendToVector(v *Vector, val any) {
 
 	if val == nil {
 		v.Nulls.SetNull(idx)
-		return
+		return idx, false
 	}
-	v.SetValue(idx, val)
+	return idx, true
 }
 
 // --- Typed accessors (zero-allocation hot path) ---
