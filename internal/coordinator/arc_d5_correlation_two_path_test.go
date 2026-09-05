@@ -1170,19 +1170,25 @@ func arcD5MeasuredCells() []arcD5Cell {
 		// sub-SELECT's derived table needs none. #614's own text is right and
 		// the "PostgreSQL rejects this" reading is wrong.
 		//
-		// This engine refuses it on all four arms with 42P01 `missing
-		// FROM-clause entry for table "a"` — a message that asserts the SQL
-		// is invalid, which it is not. The refusal comes from the PHYSICAL
-		// column-scope validator, whose scope for a derived table inside a
-		// subquery does not merge the enclosing query's aliases. Loud, not
-		// wrong; pinned with PostgreSQL's answer so the day it changes this
-		// fires.
+		// This engine still REFUSES it on all four arms, and since arc F4 the
+		// refusal says what is true: 0A000, an UNSUPPORTED shape, naming two
+		// workarounds. It used to be 42P01 `missing FROM-clause entry for
+		// table "a"`, which asserts the SQL is invalid.
+		//
+		// The refusal is not a gap waiting to be opened. Merging the enclosing
+		// scope into the derived body's — which is what the filing asks for —
+		// was measured: the reference then binds INSIDE the body, because the
+		// logical builder plans that body as its own query block and the
+		// correlation analysis never reads its terms. Over the type matrix the
+		// EXISTS spelling answered every row of the outer table and the
+		// scalar-subquery spelling one constant per outer row. Supporting the
+		// shape is a dependent join (ADR-0021 §1c), not a scope widening.
 		{issue: "#614", name: "boundary_derived_table_in_a_subquery_from_references_the_outer_query",
 			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE EXISTS (` +
 				`SELECT 1 FROM (SELECT s, n FROM mk_inner WHERE mk_inner.n = a.n) d)`,
-			wantErrLike: `missing FROM-clause entry for table "a"`,
-			pgSays: "40 — this is legal SQL and needs no LATERAL; the refusal's message " +
-				"says the reference is invalid, and it is not"},
+			wantErrLike: `is not supported`,
+			pgSays: "40 — this is legal SQL and needs no LATERAL; the refusal now says " +
+				"the engine does not implement it, which is what is true"},
 
 		// #714 — an aggregate argument containing a SCALAR SUBQUERY. The
 		// issue's headline is "refused on the stage DAG (subqueries require a

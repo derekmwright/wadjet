@@ -28,11 +28,14 @@ import (
 // two different result sets.
 //
 // `pgName` records PostgreSQL 17's own name for the same statement, measured
-// live. Wadjet does not send it (that is #732, a naming RULE and a product
-// decision — PostgreSQL names an unaliased expression `?column?`), and this
-// gate deliberately does not assert it: what it asserts is that the two
-// wadjet paths agree, which is true today and independent of whichever rule
-// #732 settles on.
+// live. Since #732 (arc F4) wadjet SENDS it: an unaliased item takes
+// PostgreSQL's `FigureColname` — `?column?` for an expression, the function's
+// name for a call, the ARGUMENT's name for a cast — so every `want` here is now
+// its cell's `pgName`. The two are kept as separate fields on purpose: what
+// this gate asserts is still that the TWO WADJET PATHS agree, which is a
+// different claim from agreeing with PostgreSQL and which was the defect #744
+// found. The day the two claims come apart again, the cell says which one
+// broke.
 type a2NameCell struct {
 	issue, name, sql string
 	// want is the full ordered column-name list BOTH paths must send.
@@ -56,15 +59,15 @@ func a2NameCells() []a2NameCell {
 		// agreed (#694's `WindowOutputName`) and must keep agreeing.
 		{issue: "#744", name: "window_plus_one",
 			sql:    `SELECT id, SUM(a) OVER () + 1 FROM decpair ORDER BY id`,
-			want:   []string{"id", "sum(a) OVER (...) + 1"},
+			want:   []string{"id", "?column?"},
 			pgName: []string{"id", "?column?"}},
 		{issue: "#744", name: "window_partition_times_two",
 			sql:    `SELECT id, SUM(a) OVER (PARTITION BY id) * 2 FROM decpair ORDER BY id`,
-			want:   []string{"id", "sum(a) OVER (...) * 2"},
+			want:   []string{"id", "?column?"},
 			pgName: []string{"id", "?column?"}},
 		{issue: "#744", name: "cast_over_window",
 			sql:    `SELECT id, CAST(SUM(a) OVER () AS BIGINT) FROM decpair ORDER BY id`,
-			want:   []string{"id", "cast(sum(a) OVER (...) as bigint)"},
+			want:   []string{"id", "sum"},
 			pgName: []string{"id", "sum"}},
 		{issue: "#744", name: "ctl_bare_window",
 			sql:    `SELECT id, SUM(a) OVER () FROM decpair ORDER BY id`,
@@ -78,11 +81,11 @@ func a2NameCells() []a2NameCell {
 		// and a computed column with no aggregate anywhere.
 		{issue: "#744", name: "ctl_bare_aggregate",
 			sql:    `SELECT g, COUNT(*) FROM typemx GROUP BY g ORDER BY g`,
-			want:   []string{"g", "count(*)"},
+			want:   []string{"g", "count"},
 			pgName: []string{"g", "count"}},
 		{issue: "#744", name: "ctl_aggregate_in_expression",
 			sql:    `SELECT g, SUM(id) + 1 FROM typemx GROUP BY g ORDER BY g`,
-			want:   []string{"g", "sum(id) + 1"},
+			want:   []string{"g", "?column?"},
 			pgName: []string{"g", "?column?"}},
 		// An UNQUOTED alias folds, so both paths now send PostgreSQL's own
 		// name for it; the delimited spelling beside it keeps its bytes
@@ -115,7 +118,7 @@ func a2NameCells() []a2NameCell {
 			pgName: []string{"g"}},
 		{issue: "#744", name: "ctl_computed_no_aggregate",
 			sql:    `SELECT g + 1 FROM typemx WHERE id < 3 ORDER BY 1`,
-			want:   []string{"g + 1"},
+			want:   []string{"?column?"},
 			pgName: []string{"?column?"}},
 		{issue: "#744", name: "ctl_bare_column",
 			sql:    `SELECT g FROM typemx WHERE id < 3 ORDER BY g`,
