@@ -149,6 +149,13 @@ func TestGCRewriteOutputIsMarkedEngineWritten(t *testing.T) {
 	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{old}); err != nil {
 		t.Fatal(err)
 	}
+	// The swap validates that the rewrite applied exactly the markers the
+	// manifest holds (#894), so the file has to carry the one being applied.
+	if err := cat.AddDeleteMarkers(ctx, "events", []DeleteMarker{
+		{FilePath: old.Path, RowIndices: []int64{0}, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	rewritten := &FileEntry{Path: "tables/events/rewrite_0198ff00-0000-7000-8000-000000000002.parquet", SizeBytes: 2, NumRows: 1, CreatedAt: time.Now().UTC()}
 	if err := cat.SwapFileForGC(ctx, "events", old.Path, rewritten, nil, "tables/events", map[int64]bool{0: true}); err != nil {
 		t.Fatal(err)

@@ -2,7 +2,10 @@ package compaction
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"testing"
 	"time"
 
@@ -644,7 +647,18 @@ func TestAddDeleteMarkers_PreservesCreatedAt(t *testing.T) {
 
 // TestForceCompactFile_ConcurrentDeletePreserved verifies that delete markers
 // added concurrently between GC scan and ForceCompactFile are not lost.
-// This is the TOCTOU regression test Sara flagged.
+// TestForceCompactFile_ConcurrentDeletePreserved is #894's rule at the GC
+// door: a DELETE that commits after the GC scan is APPLIED by the rewrite,
+// not left behind it.
+//
+// The test this replaced asserted the opposite, and asserted it on the
+// metadata rather than on the rows: it required the concurrent marker to
+// SURVIVE the swap, still naming the old file path. That is the shape #894
+// reproduced. A marker pointing at a file that no longer exists is a marker
+// no reader can apply — the rewrite output already contains the row — and the
+// next GC sweep removes it as an orphan, so the deleted row comes back for
+// good. "Preserved" has to mean the deleted ROW stays deleted, which is what
+// this asserts.
 func TestForceCompactFile_ConcurrentDeletePreserved(t *testing.T) {
 	cat, store := setupTestCatalog(t)
 	ctx := context.Background()
@@ -685,16 +699,14 @@ func TestForceCompactFile_ConcurrentDeletePreserved(t *testing.T) {
 		t.Fatalf("expected 1 rewrite target, got %d", len(rewrite))
 	}
 
-	// CONCURRENT DELETE: add a new marker for row 3 (dave) AFTER GC scan
-	// This simulates a DELETE happening between GC and ForceCompactFile
+	// CONCURRENT DELETE: a new marker for row 3 (dave), committed AFTER the
+	// GC scan and before the rewrite reads the manifest.
 	if err := cat.AddDeleteMarkers(ctx, "events", []catalog.DeleteMarker{
 		{FilePath: path, RowIndices: []int64{3}, CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// ForceCompactFile should apply the aged marker (row 1) but preserve
-	// the concurrent marker (row 3)
 	c := New(cat, nil, DefaultConfig())
 	for fp, indices := range rewrite {
 		gcSet := make(map[int64]bool, len(indices))
@@ -711,15 +723,51 @@ func TestForceCompactFile_ConcurrentDeletePreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The concurrent delete marker for row 3 should still be present
-	// (pointing at the OLD file path since the new file has different rows)
-	if len(manifest.DeleteMarkers) != 1 {
-		t.Fatalf("expected 1 remaining marker (concurrent delete), got %d", len(manifest.DeleteMarkers))
+	// The rewrite applied BOTH markers, so nothing is left dangling.
+	if len(manifest.DeleteMarkers) != 0 {
+		t.Fatalf("a rewrite applies all of a file's markers or none: got %+v", manifest.DeleteMarkers)
 	}
-	dm := manifest.DeleteMarkers[0]
-	if len(dm.RowIndices) != 1 || dm.RowIndices[0] != 3 {
-		t.Errorf("expected remaining marker for row 3, got %v", dm.RowIndices)
+	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 1 {
+		t.Fatalf("expected one replacement file, got %+v", manifest.Partitions)
 	}
+	newPath := manifest.Partitions[0].Files[0].Path
+	if newPath == path {
+		t.Fatal("the file was not rewritten")
+	}
+
+	// And the rows: bob and dave are gone, alice and carol survive.
+	got := readTestFileNames(t, store, "test-bucket", newPath, schema)
+	want := []string{"alice", "carol"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rewritten rows = %v; want %v (a committed DELETE must not be resurrected)", got, want)
+	}
+}
+
+// readTestFileNames reads a rewritten file's name column, in row order.
+func readTestFileNames(t *testing.T, store objstore.Store, bucket, path string, schema parquet.Schema) []string {
+	t.Helper()
+	rc, _, err := store.Get(context.Background(), bucket, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := parquet.NewReaderFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := r.ReadRowsAs(schema.Columns, schema.ColumnNames())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row["name"].(string))
+	}
+	return out
 }
 
 // TestGCDeleteMarkers_ZeroCreatedAtBackfill verifies that pre-existing markers
@@ -999,8 +1047,15 @@ func TestGCDeleteMarkers_OrphanCASRetry(t *testing.T) {
 	}
 }
 
-// TestSwapFileForGC_AtomicSwap verifies that SwapFileForGC atomically removes
-// the old file, adds the new file, and removes only applied markers.
+// TestSwapFileForGC_AtomicSwap verifies the swap's two halves: it publishes
+// the removal, the replacement and the marker cleanup in one transaction, and
+// it REFUSES a partial application.
+//
+// The refusal half is #894. This test used to assert the opposite — swap with
+// three of the file's four marked indices "applied" and expect the fourth to
+// survive — and that surviving marker is the defect: it names a row of a file
+// the swap just removed, so no reader can apply it, and the replacement
+// carries the row forever.
 func TestSwapFileForGC_AtomicSwap(t *testing.T) {
 	cat, _ := setupTestCatalog(t)
 	ctx := context.Background()
@@ -1018,7 +1073,6 @@ func TestSwapFileForGC_AtomicSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Add markers: indices 0,1,2 are "applied", index 3 is "concurrent"
 	if err := cat.AddDeleteMarkers(ctx, "events", []catalog.DeleteMarker{
 		{FilePath: oldPath, RowIndices: []int64{0, 1, 2, 3}, CreatedAt: time.Now().Add(-20 * time.Minute)},
 	}); err != nil {
@@ -1032,18 +1086,34 @@ func TestSwapFileForGC_AtomicSwap(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}
 
-	// Swap: applied indices are 0,1,2 — index 3 should survive
-	applied := map[int64]bool{0: true, 1: true, 2: true}
-	if err := cat.SwapFileForGC(ctx, "events", oldPath, &newEntry, nil, partPath, applied); err != nil {
-		t.Fatal(err)
+	// A rewrite that applied only 0,1,2 does not reflect the marker on 3.
+	// Publishing it would put row 3 back.
+	partial := map[int64]bool{0: true, 1: true, 2: true}
+	err := cat.SwapFileForGC(ctx, "events", oldPath, &newEntry, nil, partPath, partial)
+	if !errors.Is(err, catalog.ErrCompactionDeletesAdvanced) {
+		t.Fatalf("a partially-applied rewrite must be refused, got %v", err)
 	}
-
 	manifest, err := cat.GetManifest(ctx, "events")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(manifest.Partitions[0].Files) != 1 || manifest.Partitions[0].Files[0].Path != oldPath {
+		t.Fatalf("a refused swap must leave the old file in place, got %+v", manifest.Partitions)
+	}
+	if len(manifest.DeleteMarkers) != 1 || len(manifest.DeleteMarkers[0].RowIndices) != 4 {
+		t.Fatalf("a refused swap must leave the markers alone, got %+v", manifest.DeleteMarkers)
+	}
 
-	// Old file gone, new file present
+	// The whole set: removal, addition and marker cleanup, in one transaction.
+	full := map[int64]bool{0: true, 1: true, 2: true, 3: true}
+	if err := cat.SwapFileForGC(ctx, "events", oldPath, &newEntry, nil, partPath, full); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err = cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
 	files := manifest.Partitions[0].Files
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file, got %d", len(files))
@@ -1051,13 +1121,7 @@ func TestSwapFileForGC_AtomicSwap(t *testing.T) {
 	if files[0].Path != newEntry.Path {
 		t.Errorf("expected new file path %q, got %q", newEntry.Path, files[0].Path)
 	}
-
-	// Only the non-applied index (3) should remain
-	if len(manifest.DeleteMarkers) != 1 {
-		t.Fatalf("expected 1 remaining marker, got %d", len(manifest.DeleteMarkers))
-	}
-	dm := manifest.DeleteMarkers[0]
-	if len(dm.RowIndices) != 1 || dm.RowIndices[0] != 3 {
-		t.Errorf("expected remaining index [3], got %v", dm.RowIndices)
+	if len(manifest.DeleteMarkers) != 0 {
+		t.Fatalf("every applied marker must be gone, got %+v", manifest.DeleteMarkers)
 	}
 }

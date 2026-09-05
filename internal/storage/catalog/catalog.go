@@ -1077,114 +1077,44 @@ func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge ti
 	return nil, nil, fmt.Errorf("GC delete markers failed after %d CAS retries (table %q)", maxRetries, tableName)
 }
 
-// SwapFileForGC atomically replaces an old file with a rewritten file in the
-// manifest. In a single CAS operation it: (1) removes the old file from the
-// partition, (2) adds the new file entry, and (3) removes only the specific
-// delete marker row indices that were applied during the rewrite. Any row
-// indices added concurrently (by a DELETE after GC started) are preserved.
+// SwapFileForGC publishes a delete-marker GC rewrite: the old file leaves the
+// partition, the rewritten replacement arrives, and the markers the rewrite
+// applied go away — all in the one conditional transaction CommitCompaction
+// runs, validated against the same two preconditions every compaction
+// publication is (input identity, and the delete-marker snapshot the output
+// was cut from).
 //
-// NOTE: Surviving concurrent markers still reference the old file path after
-// the swap. These become dangling markers since the old file no longer exists.
-// This is by design — the next GC sweep detects them as orphans and cleans
-// them up. The deleted rows they reference will be visible in query results
-// for at most one GC cycle (~5 min default). Remapping marker paths and row
-// indices inside the CAS loop was rejected due to complexity and increased
-// CAS conflict surface (see security review, 2026-04-05).
+// It used to be its own CAS loop with its own rule, and the rule was wrong in
+// two directions #894 and #895 reproduced:
+//
+//   - It appended the rewrite output without requiring that oldPath was still
+//     a member of the partition, so two GC sweeps over the same file each
+//     published a rewrite and the surviving rows appeared twice.
+//   - It removed only the row indices the rewrite APPLIED and left any that
+//     had arrived since, under the OLD file's path — where no reader can
+//     apply them, because that file is gone. The comment here used to say
+//     those rows stayed visible "for at most one GC cycle". They did not:
+//     the next sweep removes the dangling marker as an orphan, and the
+//     replacement carries the row forever. Removing a marker cannot remove a
+//     row from a file that already contains it.
+//
+// So a rewrite now applies ALL of a file's current markers or none of them:
+// if the marker set moved between the manifest read the rewrite was cut from
+// and this commit, the swap is refused with ErrCompactionDeletesAdvanced and
+// the caller re-reads and rewrites against the newer set. appliedIndices is
+// therefore a PRECONDITION, not just a cleanup list — it says which markers
+// the output reflects, and the commit checks it.
 //
 // If newFile is nil, the old file is simply removed (all rows were deleted).
-func (c *Catalog) SwapFileForGC(_ context.Context, tableName string, oldPath string, newFile *FileEntry, partValues map[string]string, partPath string, appliedIndices map[int64]bool) error {
-	c.invalidateManifestCache(tableName)
-	key := c.key("manifest." + tableName)
-	const maxRetries = 10
-
-	// The rewrite output is an object the GC sweep itself just wrote, so it
-	// carries the same ownership marker AddNewFiles stamps — this is the
-	// third of the three engine write paths (#494). Copied, not mutated in
-	// place: newFile belongs to the caller.
-	if newFile != nil {
-		owned := *newFile
-		owned.EngineWritten = true
-		newFile = &owned
-	}
-
-	for retry := 0; retry < maxRetries; retry++ {
-		raw, rev, err := c.kv.Get(key)
-		if err != nil {
-			return fmt.Errorf("reading manifest for %q: %w", tableName, err)
-		}
-
-		var manifest PartitionManifest
-		if err := json.Unmarshal(raw, &manifest); err != nil {
-			return fmt.Errorf("decoding manifest: %w", err)
-		}
-
-		// Remove old file from partition and add new file
-		for i := range manifest.Partitions {
-			if manifest.Partitions[i].Path != partPath {
-				continue
-			}
-			// newFile's path is a freshly minted rewrite_<uuid> (#494) — it
-			// must not already name a file this partition still carries.
-			// Checked before the in-place filter below mutates the slice.
-			if newFile != nil {
-				for _, f := range manifest.Partitions[i].Files {
-					if f.Path != oldPath && f.Path == newFile.Path {
-						return fmt.Errorf("file path %q already exists in partition %q: refusing to add a duplicate GC-rewrite output (#494)", newFile.Path, partPath)
-					}
-				}
-			}
-			filtered := manifest.Partitions[i].Files[:0]
-			for _, f := range manifest.Partitions[i].Files {
-				if f.Path != oldPath {
-					filtered = append(filtered, f)
-				}
-			}
-			if newFile != nil {
-				filtered = append(filtered, *newFile)
-			}
-			manifest.Partitions[i].Files = filtered
-			break
-		}
-
-		// Remove only the applied row indices from delete markers.
-		// If concurrent DELETEs added new indices, those survive.
-		var updatedMarkers []DeleteMarker
-		for _, dm := range manifest.DeleteMarkers {
-			if dm.FilePath != oldPath {
-				updatedMarkers = append(updatedMarkers, dm)
-				continue
-			}
-			// Keep only indices that were NOT applied
-			var remaining []int64
-			for _, idx := range dm.RowIndices {
-				if !appliedIndices[idx] {
-					remaining = append(remaining, idx)
-				}
-			}
-			if len(remaining) > 0 {
-				updatedMarkers = append(updatedMarkers, DeleteMarker{
-					FilePath:   dm.FilePath,
-					RowIndices: remaining,
-					CreatedAt:  dm.CreatedAt,
-				})
-			}
-		}
-		manifest.DeleteMarkers = updatedMarkers
-		manifest.UpdatedAt = time.Now().UTC()
-
-		updated, err := json.Marshal(manifest)
-		if err != nil {
-			return fmt.Errorf("marshaling manifest: %w", err)
-		}
-
-		_, err = c.kv.Update(key, updated, rev)
-		if err == ErrRevisionMismatch {
-			casBackoff(retry)
-			continue
-		}
-		return err
-	}
-	return fmt.Errorf("file swap for GC failed after %d CAS retries (table %q)", maxRetries, tableName)
+func (c *Catalog) SwapFileForGC(ctx context.Context, tableName string, oldPath string, newFile *FileEntry, partValues map[string]string, partPath string, appliedIndices map[int64]bool) error {
+	return c.CommitCompaction(ctx, CompactionCommit{
+		Table:          tableName,
+		PartPath:       partPath,
+		PartValues:     partValues,
+		Inputs:         []string{oldPath},
+		Output:         newFile,
+		AppliedDeletes: map[string]map[int64]bool{oldPath: appliedIndices},
+	})
 }
 
 // UDFDef mirrors expr.UDFDef for persistence without import cycles.

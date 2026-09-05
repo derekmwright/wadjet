@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -118,12 +119,30 @@ type Compactor struct {
 	// store-side reasoning elsewhere in this package already treats as safe.
 	delMu          sync.Mutex
 	pendingDeletes []pendingDelete
+
+	// publicationConflicts counts replacements this compactor wrote and then
+	// could NOT publish because another writer had moved the partition's
+	// files or its delete markers first (catalog.ErrCompactionConflict).
+	//
+	// It is observable state, not a log line, for the reason the DAG's
+	// routing counters are: the row set after a lost race is the SAME row
+	// set as after a race nobody entered, so rows alone cannot tell "the
+	// loser detected the conflict and discarded its output" from "the loser
+	// silently did nothing". #894's and #895's gates assert it.
+	publicationConflicts atomic.Int64
 }
 
 type pendingDelete struct {
 	path string
 	at   time.Time
 }
+
+func (c *Compactor) countPublicationConflict() { c.publicationConflicts.Add(1) }
+
+// PublicationConflicts reports how many compaction replacements this
+// compactor wrote and then had REFUSED at publication because the snapshot
+// they were cut from was no longer the table's state. See the field.
+func (c *Compactor) PublicationConflicts() int64 { return c.publicationConflicts.Load() }
 
 // New creates a compactor.
 func New(cat *catalog.Catalog, logger *slog.Logger, cfg Config) *Compactor {
@@ -174,6 +193,21 @@ type Result struct {
 	BytesBefore         int64
 	BytesAfter          int64
 	Failed              []PartitionFailure
+
+	// PublicationConflicts counts merges whose replacement could not be
+	// published because another writer had moved the partition's files or
+	// its delete markers since the manifest was read
+	// (catalog.ErrCompactionConflict). It is a counter on a SUCCESSFUL
+	// result, not a failure: nothing was written, the output object was
+	// deleted, and the pass loop replanned from the manifest that replaced
+	// the one it read.
+	//
+	// It is here because rows alone cannot tell "this compaction ran and
+	// changed nothing" from "this compaction was refused and something else
+	// did the work" — the same reason the DAG's routing counters sit beside
+	// the rows. A gate for #894/#895 asserts this, not just the final row
+	// set.
+	PublicationConflicts int
 
 	// PassLimitReached reports that the multi-pass loop stopped at
 	// maxCompactionPasses with the table still shrinking. It is a flag on a
@@ -265,6 +299,10 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 	// read the same bytes and fail identically, once per pass.
 	failed := make(map[string]bool)
 
+	// replans counts passes that did nothing but lose a publication race.
+	// Separate from `pass` because such a pass has no progress to measure.
+	replans := 0
+
 	// Multi-pass loop: re-read manifest after each pass to pick up changes,
 	// and continue until no partitions need compaction.
 	//
@@ -300,6 +338,7 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 		deleteSet := buildDeleteSet(manifest.DeleteMarkers)
 
 		compactedAny := false
+		conflicted := false
 		for _, part := range manifest.Partitions {
 			if failed[part.Path] || !c.shouldCompact(part) {
 				continue
@@ -312,7 +351,8 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 
 			err := c.mergeGroup(ctx, tableName, tableMeta.Schema, part, files, deleteSet, result)
 			var me *mergeError
-			if errors.As(err, &me) {
+			switch {
+			case errors.As(err, &me):
 				// The merge is the step that READS and REWRITES the data, and
 				// it is the only failure here scoped to one partition: no data
 				// is lost, because the inputs are removed only after a
@@ -323,8 +363,19 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 				result.Failed = append(result.Failed, PartitionFailure{Partition: part.Path, Err: me.err})
 				failed[part.Path] = true
 				continue
-			}
-			if err != nil {
+			case errors.Is(err, catalog.ErrCompactionConflict):
+				// Another writer moved this partition's files or its delete
+				// markers between the read at the top of this pass and the
+				// publication. Nothing was written and the output object is
+				// already gone; the next pass re-reads the manifest and
+				// replans against what the table actually holds now, which is
+				// what makes a concurrent DELETE survive (#894) and a losing
+				// compactor add nothing (#895).
+				c.logger.Info("compaction replanning: the partition moved under this pass",
+					"table", tableName, "partition", part.Path, "pass", pass, "reason", err)
+				conflicted = true
+				continue
+			case err != nil:
 				return result, err
 			}
 			compactedAny = true
@@ -338,6 +389,14 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 		}
 
 		if !compactedAny {
+			if conflicted && replans < maxPublicationReplans {
+				// A pass that ONLY conflicted made no progress to measure, so
+				// the progress rule below cannot judge it; bound the replans
+				// separately, or a table under continuous DML would spin here
+				// uploading and discarding outputs.
+				replans++
+				continue
+			}
 			break // no partitions needed compaction — done
 		}
 		if removed, created := result.FilesRemoved-removedBefore, result.FilesCreated-createdBefore; removed <= created {
@@ -407,6 +466,7 @@ func (c *Compactor) RewriteTable(ctx context.Context, tableName string) (*Result
 		groupSize := max(c.adaptivePassSize(part), 1)
 
 		rewroteAny := false
+	groups:
 		for start := 0; start < len(part.Files); start += groupSize {
 			if ctx.Err() != nil {
 				return result, ctx.Err()
@@ -415,16 +475,29 @@ func (c *Compactor) RewriteTable(ctx context.Context, tableName string) (*Result
 
 			err := c.mergeGroup(ctx, tableName, tableMeta.Schema, part, group, deleteSet, result)
 			var me *mergeError
-			if errors.As(err, &me) {
+			switch {
+			case errors.As(err, &me):
 				c.logger.Error("rewrite failed for partition",
 					"table", tableName, "partition", part.Path, "error", me.err)
 				result.Failed = append(result.Failed, PartitionFailure{Partition: part.Path, Err: me.err})
 				// The groups after this one in the same partition are left as
 				// they are: a partial partition is still readable, and a
-				// re-run picks up what is still in the old format.
-				break
-			}
-			if err != nil {
+				// re-run picks up what is still in the old format. Labelled:
+				// a bare break inside this switch would leave the switch and
+				// go on to the next group.
+				break groups
+			case errors.Is(err, catalog.ErrCompactionConflict):
+				// This group's files or their delete markers moved under the
+				// one manifest read this call makes. Nothing was written, the
+				// output is already discarded, and — unlike CompactTable —
+				// there is no later pass to replan in, because a rewrite reads
+				// the file list exactly once by construction. Counted and
+				// skipped; a re-run rewrites what is still in the old format,
+				// which is the same recovery a failed group already has.
+				c.logger.Info("rewrite skipped a group: the partition moved under this call",
+					"table", tableName, "partition", part.Path, "reason", err)
+				continue
+			case err != nil:
 				return result, err
 			}
 			rewroteAny = true
@@ -446,12 +519,30 @@ func (c *Compactor) RewriteTable(ctx context.Context, tableName string) (*Result
 }
 
 // mergeGroup merges one group of a partition's files into a single new file
-// and swaps the manifest, folding the outcome into result.
+// and publishes the replacement, folding the outcome into result.
 //
-// The caller classifies the error rather than the position: *mergeError is the
-// read-and-rewrite step failing on THIS partition's bytes, with its inputs
-// untouched; anything else is the manifest or the object store, which is not a
-// per-partition condition and ends the call.
+// The publication is ONE conditional manifest transaction
+// (catalog.CommitCompaction): the inputs leave, their delete markers leave
+// with them, and the replacement arrives — or none of it does, and the
+// snapshot the table already had is exactly the one it keeps. It used to be
+// RemoveFiles followed by AddNewFiles, two CAS writes whose PAIR was not
+// atomic: a failure between them emptied the table irrecoverably (#893), and
+// neither call checked that the inputs were still the table's or that the
+// delete markers were still the ones the output applied (#894, #895).
+//
+// The caller classifies the error rather than the position:
+//
+//   - *mergeError is the read-and-rewrite step failing on THIS partition's
+//     bytes, with its inputs untouched.
+//   - catalog.ErrCompactionConflict is another writer having moved this
+//     partition's files or its delete markers since the manifest was read.
+//     Nothing was written; the output object is deleted here, because a
+//     conflict is decided BEFORE the CAS and so is proof that no publication
+//     happened. The caller replans from the manifest that replaced ours.
+//   - anything else is the manifest or the object store — not a per-partition
+//     condition, and the output object is KEPT, because a publication error
+//     says nothing about whether the write landed and deleting the bytes on a
+//     maybe is the one mistake that is not recoverable.
 func (c *Compactor) mergeGroup(ctx context.Context, tableName string, schema parquet.Schema,
 	part catalog.PartitionEntry, files []catalog.FileEntry,
 	deleteSet map[string]map[int64]bool, result *Result) error {
@@ -465,43 +556,74 @@ func (c *Compactor) mergeGroup(ctx context.Context, tableName string, schema par
 		return &mergeError{err: err}
 	}
 
-	// Write-before-delete: mergeAndWriteFiles has already uploaded newPath (or
-	// written nothing, when every row was delete-filtered away).
+	// The marker snapshot the output was CUT FROM, per input, which is what
+	// mergeAndWriteFiles applied. It is the commit's precondition, not a
+	// cleanup list: a marker that arrived since names a row this output still
+	// carries.
 	oldPaths := filePaths(files)
-	if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
-		return fmt.Errorf("removing old files from manifest: %w", err)
+	applied := make(map[string]map[int64]bool, len(oldPaths))
+	for _, p := range oldPaths {
+		applied[p] = deleteSet[p]
 	}
 
-	if written.rowsWritten == 0 {
-		c.deleteFromStore(ctx, oldPaths)
-		result.FilesRemoved += len(files)
-		result.PartitionsCompacted++
-		return nil
+	commit := catalog.CompactionCommit{
+		Table:          tableName,
+		PartPath:       part.Path,
+		PartValues:     part.Values,
+		Inputs:         oldPaths,
+		AppliedDeletes: applied,
+	}
+	if written.rowsWritten > 0 {
+		commit.Output = &catalog.FileEntry{
+			Path:        newPath,
+			SizeBytes:   written.size,
+			NumRows:     written.rowsWritten,
+			CreatedAt:   time.Now().UTC(),
+			ColumnStats: written.columnStats,
+		}
 	}
 
-	newEntry := catalog.FileEntry{
-		Path:        newPath,
-		SizeBytes:   written.size,
-		NumRows:     written.rowsWritten,
-		CreatedAt:   time.Now().UTC(),
-		ColumnStats: written.columnStats,
-	}
-	// AddNewFiles, not AddFiles: newPath is a freshly minted UUIDv7 (#494),
-	// so a collision with an existing entry should be refused loudly
-	// rather than silently replacing it.
-	if err := c.catalog.AddNewFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
-		return fmt.Errorf("adding merged file to manifest: %w", err)
+	if err := c.catalog.CommitCompaction(ctx, commit); err != nil {
+		if errors.Is(err, catalog.ErrCompactionConflict) {
+			c.discardUnpublishedOutput(ctx, newPath, written.rowsWritten)
+			result.PublicationConflicts++
+			c.countPublicationConflict()
+			return err
+		}
+		return fmt.Errorf("publishing the compaction replacement: %w", err)
 	}
 
 	c.deleteFromStore(ctx, oldPaths)
 
 	result.PartitionsCompacted++
 	result.FilesRemoved += len(files)
+	if written.rowsWritten == 0 {
+		return nil
+	}
 	result.FilesCreated++
 	result.RowsMerged += written.rowsWritten
 	result.BytesBefore += written.bytesBefore
 	result.BytesAfter += written.size
 	return nil
+}
+
+// discardUnpublishedOutput deletes an output object whose publication was
+// REFUSED — never one whose publication merely errored.
+//
+// The distinction is the whole safety argument. A conflict is computed from
+// the manifest the commit read, before any write is attempted, so "nothing
+// was published" is a fact and the bytes are unreachable garbage. An error
+// from the KV is not: an update that times out may still have been applied,
+// and deleting the object then would delete a file the manifest names. Doubt
+// preserves bytes; the orphan sweep is the answer for the other case.
+func (c *Compactor) discardUnpublishedOutput(ctx context.Context, path string, rowsWritten int64) {
+	if rowsWritten == 0 {
+		return // nothing was uploaded
+	}
+	if err := c.catalog.Store().Delete(ctx, c.catalog.Bucket(), path); err != nil {
+		c.logger.Warn("could not delete the refused compaction output; it is an orphan",
+			"path", path, "error", err)
+	}
 }
 
 // maxCompactionPasses bounds the pass loop absolutely. Each pass merges at
@@ -512,6 +634,13 @@ func (c *Compactor) mergeGroup(ctx context.Context, tableName string, schema par
 // Reaching it is reported as Result.PassLimitReached, not as an error: see
 // that field for why 1024 passes of committed work is not a failure.
 const maxCompactionPasses = 1024
+
+// maxPublicationReplans bounds how many times one CompactTable call will
+// redo a pass that produced nothing but a lost publication race. A conflict
+// means another writer got there first, so the work is being done — just not
+// by us; spinning on it under continuous DML would upload and discard an
+// output per lap for no gain. The next background sweep picks the table up.
+const maxPublicationReplans = 3
 
 // partitionLabel names the unpartitioned partition in an error message, where
 // an empty string reads as a missing value.
@@ -884,20 +1013,39 @@ func filePaths(files []catalog.FileEntry) []string {
 	return paths
 }
 
-// ForceCompactFile rewrites a single data file, applying any pending delete
-// markers for that file. Used by delete marker GC to physically purge deleted
-// rows from files whose markers have aged out.
+// ForceCompactFile rewrites a single data file, applying the delete markers
+// the manifest holds for it. Used by delete-marker GC to physically purge
+// deleted rows from files whose markers have aged out.
 //
 // Safety invariants:
 //   - Write-before-delete: the new file is written to the object store before
-//     the old file is removed. On partial failure, the old file may become an
-//     orphan in S3, but data is never lost.
-//   - Scoped marker removal: only the specific row indices that were applied
-//     during the rewrite are removed from the manifest. Concurrent DELETEs
-//     that add new indices between GC scan and rewrite are preserved.
-//   - Atomic manifest swap: old file removal, new file addition, and marker
-//     cleanup happen in a single CAS operation via SwapFileForGC.
-//   - Per-file lock: prevents double GC rewrite if two sweeps overlap.
+//     the old file leaves the manifest. On partial failure the new file may
+//     become an orphan in S3, but data is never lost.
+//   - ALL of the file's markers or none. The rewrite applies exactly the
+//     marker set the manifest held when it was read, and the publication
+//     (catalog.CommitCompaction, via SwapFileForGC) refuses if that set has
+//     moved since. The old contract — apply the GC-scanned indices, leave any
+//     that arrived since — was #894: a surviving marker names a row in a file
+//     that no longer exists, so no reader can apply it, the next sweep drops
+//     it as an orphan, and the replacement carries the deleted row for good.
+//     Removing a marker cannot remove a row from a file that already has it.
+//   - One conditional publication: the old file's removal, the replacement's
+//     addition, and the marker cleanup are a single validated CAS.
+//   - Per-file lock: prevents a double GC rewrite when two sweeps of THIS
+//     compactor overlap. It cannot exclude an independent compactor — that is
+//     what the commit-time input check is for (#895).
+//
+// gcIndices is the GC scan's trigger, not the authority: it says this file has
+// aged markers worth rewriting. What actually gets applied is the manifest's
+// current marker set for the file, which is a superset when a DELETE landed
+// since the scan — and applying that newer delete is the right answer, not a
+// TOCTOU hazard.
+//
+// A conflict is not an error to the caller: another writer got to this file
+// first, or a DELETE committed while the rewrite was being written. The
+// output is discarded and the rewrite is retried against the newer snapshot;
+// past maxGCRewriteAttempts it is left for the next GC sweep, which re-scans
+// from scratch. Compactor.PublicationConflicts counts those.
 func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, filePath string, gcIndices map[int64]bool) error {
 	if !c.tryAcquireGCLock(filePath) {
 		c.logger.Info("force compact: skipping, GC already in progress",
@@ -911,9 +1059,37 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		return fmt.Errorf("getting table metadata: %w", err)
 	}
 
+	for attempt := 0; attempt < maxGCRewriteAttempts; attempt++ {
+		done, err := c.forceCompactFileOnce(ctx, tableName, tableMeta.Schema, filePath, gcIndices)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+		// Refused: the snapshot moved. Re-read and rewrite against what the
+		// table holds now.
+	}
+	c.logger.Warn("force compact: gave up after losing the publication race repeatedly; "+
+		"the next GC sweep will re-scan this file",
+		"table", tableName, "file", filePath, "attempts", maxGCRewriteAttempts)
+	return nil
+}
+
+// maxGCRewriteAttempts bounds ForceCompactFile's replans. Each costs one
+// rewrite upload that is then discarded, so a file under continuous DELETE
+// traffic is left to the next sweep rather than spun on.
+const maxGCRewriteAttempts = 3
+
+// forceCompactFileOnce is one attempt: read the manifest, rewrite the file
+// against the markers it holds, publish. done is false when the publication
+// was REFUSED because the snapshot moved — the caller re-reads and retries.
+func (c *Compactor) forceCompactFileOnce(ctx context.Context, tableName string, schema parquet.Schema,
+	filePath string, gcIndices map[int64]bool) (done bool, err error) {
+
 	manifest, err := c.catalog.GetManifest(ctx, tableName)
 	if err != nil {
-		return fmt.Errorf("getting manifest: %w", err)
+		return false, fmt.Errorf("getting manifest: %w", err)
 	}
 
 	// Find the file entry and its partition
@@ -934,18 +1110,19 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		}
 	}
 	if targetFile == nil {
-		return nil // file no longer exists, nothing to do
+		return true, nil // file no longer exists, nothing to do
 	}
 
-	// Use the GC-scanned indices as the authoritative set of what to apply.
-	// This prevents TOCTOU: concurrent DELETEs that add new indices between
-	// the GC scan and this rewrite are NOT included and will survive the swap.
-	appliedIndices := gcIndices
-	if len(appliedIndices) == 0 {
-		return nil // no delete markers for this file, nothing to do
-	}
-
+	// The markers the manifest holds for this file RIGHT NOW are what the
+	// rewrite applies and what its publication is validated against. See the
+	// doc comment for why this, and not gcIndices, is the authority.
 	deleteSet := buildDeleteSet(manifest.DeleteMarkers)
+	appliedIndices := deleteSet[filePath]
+	if len(appliedIndices) == 0 {
+		// Either the GC scan had nothing for this file, or another sweep has
+		// already applied what it saw. Nothing to do.
+		return true, nil
+	}
 
 	// Write-before-delete: the streaming merge uploads the new file FIRST
 	// (inside mergeAndWriteFiles), so on failure nothing in the manifest has
@@ -955,43 +1132,47 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 
 	// Merge the single file (applies delete markers internally; uploads to
 	// newPath unless every row was deleted).
-	written, err := c.mergeAndWriteFiles(ctx, []catalog.FileEntry{*targetFile}, tableMeta.Schema, deleteSet, newPath)
+	written, err := c.mergeAndWriteFiles(ctx, []catalog.FileEntry{*targetFile}, schema, deleteSet, newPath)
 	if err != nil {
-		return fmt.Errorf("rewriting file: %w", err)
+		return false, fmt.Errorf("rewriting file: %w", err)
 	}
 
-	// If all rows were deleted, nothing was uploaded — atomically remove the
-	// old file + applied markers.
-	if written.rowsWritten == 0 {
-		if err := c.catalog.SwapFileForGC(ctx, tableName, filePath, nil, partValues, partPath, appliedIndices); err != nil {
-			return fmt.Errorf("removing fully-deleted file: %w", err)
+	var newEntry *catalog.FileEntry
+	if written.rowsWritten > 0 {
+		newEntry = &catalog.FileEntry{
+			Path:        newPath,
+			SizeBytes:   written.size,
+			NumRows:     written.rowsWritten,
+			CreatedAt:   time.Now().UTC(),
+			ColumnStats: written.columnStats,
 		}
-		// Best-effort cleanup of old file from object store (orphan is safe)
-		c.deleteFromStore(ctx, []string{filePath})
-		c.logger.Info("force compact: file fully deleted",
-			"table", tableName, "file", filePath)
-		return nil
 	}
 
-	newEntry := catalog.FileEntry{
-		Path:        newPath,
-		SizeBytes:   written.size,
-		NumRows:     written.rowsWritten,
-		CreatedAt:   time.Now().UTC(),
-		ColumnStats: written.columnStats,
-	}
-
-	// Atomic manifest swap: remove old file + add new file + remove applied markers
-	if err := c.catalog.SwapFileForGC(ctx, tableName, filePath, &newEntry, partValues, partPath, appliedIndices); err != nil {
-		// New file is orphaned in S3 — safe, data not lost. Log for cleanup.
+	// One conditional publication: remove the old file, add the replacement,
+	// drop the markers it applied — validated against both.
+	if err := c.catalog.SwapFileForGC(ctx, tableName, filePath, newEntry, partValues, partPath, appliedIndices); err != nil {
+		if errors.Is(err, catalog.ErrCompactionConflict) {
+			c.discardUnpublishedOutput(ctx, newPath, written.rowsWritten)
+			c.countPublicationConflict()
+			c.logger.Info("force compact: replanning, the file moved under this rewrite",
+				"table", tableName, "file", filePath, "reason", err)
+			return false, nil
+		}
+		// The new file is orphaned in S3 — safe, data not lost. Kept rather
+		// than deleted: a publication ERROR does not prove nothing landed.
 		c.logger.Warn("force compact: manifest swap failed, orphaned new file",
 			"table", tableName, "new_file", newPath, "error", err)
-		return fmt.Errorf("swapping file in manifest: %w", err)
+		return false, fmt.Errorf("swapping file in manifest: %w", err)
 	}
 
 	// Best-effort cleanup of old file from object store
 	c.deleteFromStore(ctx, []string{filePath})
 
+	if newEntry == nil {
+		c.logger.Info("force compact: file fully deleted",
+			"table", tableName, "file", filePath)
+		return true, nil
+	}
 	c.logger.Info("force compact: file rewritten",
 		"table", tableName,
 		"old_file", filePath,
@@ -999,7 +1180,7 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		"rows_before", targetFile.NumRows,
 		"rows_after", written.rowsWritten,
 	)
-	return nil
+	return true, nil
 }
 
 func buildDeleteSet(markers []catalog.DeleteMarker) map[string]map[int64]bool {

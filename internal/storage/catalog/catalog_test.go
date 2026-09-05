@@ -793,12 +793,23 @@ func TestSwapFileForGCRefusesDuplicatePath(t *testing.T) {
 	if err := cat.AddFiles(ctx, "events", nil, partPath, []FileEntry{a, b}); err != nil {
 		t.Fatal(err)
 	}
+	// The marker the rewrite applies has to be the one the manifest holds, so
+	// that the DUPLICATE-PATH branch is what refuses this swap and not the
+	// marker-snapshot check (#894).
+	if err := cat.AddDeleteMarkers(ctx, "events", []DeleteMarker{
+		{FilePath: a.Path, RowIndices: []int64{0}, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Rewrite of `a` collides with the already-present `b`.
 	newFile := &FileEntry{Path: b.Path, SizeBytes: 1, NumRows: 1, CreatedAt: time.Now().UTC()}
 	err := cat.SwapFileForGC(ctx, "events", a.Path, newFile, nil, partPath, map[int64]bool{0: true})
 	if err == nil {
 		t.Fatal("expected SwapFileForGC to refuse a duplicate path, got nil error")
+	}
+	if !strings.Contains(err.Error(), "already exists in partition") {
+		t.Fatalf("expected the duplicate-path refusal, got %v", err)
 	}
 
 	manifest, gErr := cat.GetManifest(ctx, "events")
