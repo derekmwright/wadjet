@@ -509,13 +509,19 @@ Nested types round-trip through Parquet in both directions — written as the st
 `VECTOR(N)` stores fixed-dimension float32 vectors for embedding-based workflows. Each row occupies exactly N x 4 bytes with zero overhead.
 
 A `VECTOR(N)` value has exactly N components. Write one in PostgreSQL's
-`vector` spelling — `'[1,2,3]'` — and a value of any other width is refused
-with SQLSTATE `22000` and the message `expected N dimensions, not M`, never
-padded with zeros and never truncated. That is the answer PostgreSQL's `vector`
-extension gives for `'[1]'::vector(2)`, and it is the answer at every write
-door: `INSERT`, `UPDATE`, `MERGE`, `COPY` and the embedded write API. Text that
-is not a vector — no brackets, a component that is not a number, `NaN` or an
-infinity — is `22P02`, `invalid input syntax for type vector`.
+`vector` spelling — `'[1,2,3]'` — and a value of any other width is refused at
+every write door, never padded with zeros and never truncated. Text that is not
+a vector — no brackets, a component that is not a number, `NaN` or an infinity
+— is refused too.
+
+| door | off-width value | malformed text |
+|---|---|---|
+| `INSERT`, `UPDATE`, `MERGE`, `COPY` | `22000`, `expected N dimensions, not M` | `22P02`, `invalid input syntax for type vector` |
+| embedded ingest API | `22023`, `column "v" is VECTOR(N); the value has M components` | — (it takes Go values, not text) |
+
+`22000` with pgvector's wording is what PostgreSQL's `vector` extension answers
+for `'[1]'::vector(2)`, and it is the class this engine means; the ingest API's
+`22023` is the same rule under a second name and is expected to converge on it.
 
 ```sql
 INSERT INTO doc_embeddings (doc_id, embedding) VALUES (1, '[0.1,0.2,0.3]')

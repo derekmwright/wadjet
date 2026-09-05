@@ -71,11 +71,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      query answered, which is the one disposition neither engine allows.
 
      `INTERSECT` and `EXCEPT` are unaffected and answer, and that is not an
-     inconsistency: both emit values from the LEFT arm only, so nothing is
-     ever materialized at a foreign width — and their rows AGREE with what
-     PostgreSQL returns, because two vectors of different widths are never
-     equal there either. Making them refuse for symmetry would move a
-     PostgreSQL-agreeing answer to an error.
+     inconsistency: both emit values from the LEFT arm only, so nothing is ever
+     materialized at a foreign width. Measured on this engine, in both arm
+     orders: `EXCEPT` returns the left arm's row, `INTERSECT` returns no rows,
+     and `UNION`/`UNION ALL` refuse with the arm-appropriate width.
+
+     **What PostgreSQL answers for those two is NOT measured.** The shared
+     oracle server carries no `vector` extension (`pg_available_extensions`
+     lists none), so the comparison cannot be made here, and pgvector's
+     comparison operators are documented to RAISE on differing dimensions
+     rather than report "not equal" — which would make PostgreSQL error where
+     wadjet answers, the opposite of a first reading. Nothing is claimed about
+     agreement until it is measured against an image carrying the extension.
+     What IS settled is the disposition above: refusing a materialization at a
+     foreign width beats truncating it, and refusing INTERSECT/EXCEPT for
+     symmetry would turn an answer into an error for no measured reason.
 
      Closing it means a set-op type ladder that carries a VECTOR's width
      (`setOpColType` in `internal/planner/physical/set_op_schema.go` holds a

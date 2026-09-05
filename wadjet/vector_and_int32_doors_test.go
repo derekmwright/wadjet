@@ -188,6 +188,7 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 		{`SELECT (-2147483649)::DATE`, "22003"},
 		{`SELECT 3000000000::DATE`, "22003"},
 		{`SELECT 1000000000000::DATE`, "22003"},
+		{`SELECT 1000000000000000::DATE`, "22003"},
 	} {
 		t.Run(c.sql, func(t *testing.T) {
 			r, err := db.Query(ctx, c.sql)
@@ -209,23 +210,25 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 		})
 	}
 
-	// PIN — delete this cell when it starts refusing, which is the proof the
-	// cast path was fixed.
+	// PIN — delete a cell when it starts refusing, which is the proof the cast
+	// path was fixed.
 	//
-	// The int64 EXTREMES escape the guard: 9223372036854775807::DATE answers
-	// 1969-12-31 and 9223372036854775806::DATE answers 1969-12-30, which is
-	// day -1 and day -2 — the low 32 bits of each value read as an int32
-	// (0xFFFFFFFF, 0xFFFFFFFE), and (-9223372036854775808)::DATE answers day
-	// 0 the same way. Everything between 2^31 and 10^12 refuses, so the value
-	// is being narrowed BEFORE it reaches batch.Vector.SetValue for these
-	// three and arrives already an int32, where the store has nothing left to
-	// check. That is a cast-path defect in the expression layer, not this
-	// arc's seam, and it is recorded here rather than left for the next
-	// census to rediscover.
+	// Large magnitudes escape the guard, and the escape starts well below the
+	// int64 extremes: 2^62 answers 1970-01-01, and so do two literals that are
+	// not int64 values at all. Where the value IS narrowed on the way through,
+	// what survives is the low 32 bits read as an int32 —
+	// 9223372036854775807 is 0xFFFFFFFF there, which is day -1. Everything
+	// from 2^31 up to 10^15 refuses, so the narrowing happens BEFORE
+	// batch.Vector.SetValue for these and the store has nothing left to check.
+	// That is a cast-path defect in the expression layer, not this arc's seam
+	// (round-2 review N1 widened the bracket this pin records).
 	for _, c := range []struct{ sql, answers string }{
 		{`SELECT 9223372036854775807::DATE`, "1969-12-31"},
 		{`SELECT 9223372036854775806::DATE`, "1969-12-30"},
 		{`SELECT (-9223372036854775808)::DATE`, "1970-01-01"},
+		{`SELECT 4611686018427387904::DATE`, "1970-01-01"},
+		{`SELECT 9223372036854775808::DATE`, "1970-01-01"},
+		{`SELECT (-9223372036854775809)::DATE`, "1970-01-01"},
 	} {
 		t.Run("pin/"+c.sql, func(t *testing.T) {
 			r, err := db.Query(ctx, c.sql)
@@ -270,13 +273,16 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 //
 // INTERSECT and EXCEPT answer, and that is not an inconsistency: they emit
 // values from the LEFT arm only, so no value is ever materialized at a width it
-// does not have. It is also what PostgreSQL answers — pgvector makes vector(2)
-// and vector(3) one type with a typmod, so `v2 EXCEPT v3` returns v2's row
-// there too. UNION is the divergence: PostgreSQL drops the typmod and returns
-// both rows, and wadjet has no mixed-width VECTOR carrier to return them in, so
-// it is loud instead. Round-2 review P1; the pgvector comparison is reasoned
-// from the extension's typmod rule and NOT measured, because the oracle server
-// carries no vector extension.
+// does not have. UNION is the divergence in intent: PostgreSQL's vector is one
+// type with a width typmod, so its union drops the typmod, and wadjet has no
+// mixed-width VECTOR carrier to return that in.
+//
+// What PostgreSQL answers for any of these is NOT measured and is not claimed:
+// the shared oracle server carries no vector extension, and pgvector's
+// comparison operators are documented to RAISE on differing dimensions rather
+// than compare unequal — which would make it error where this engine answers.
+// The cells below assert THIS engine's behaviour only. Round-2 review P1,
+// round-3 review P4; ADR-0012 item 5 carries the same caveat.
 func TestASetOperationOverTwoVectorWidths(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "s4"})
