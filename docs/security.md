@@ -396,12 +396,20 @@ security control never degrades to a grant.
 A policy binds to a **relation**, never to an alias: `FROM other AS employees`
 is a scan of `other` and no policy on `employees` touches it.
 
-The projection covers **every** read of the relation in the executed plan, not
-only the ones the statement's FROM clause names: a table referenced only inside
-an `IN`/`EXISTS`/`LATERAL` subquery is policed too, so a predicate written
-inside that subquery reads the mask like any other. Where the engine cannot
-place a predicate above the projection — `LATERAL` over a policed table is the
-case that reaches it — the query is refused (`0A000`) rather than answered.
+The projection covers **every** read of the relation in the plan that executes,
+not only the ones the statement's FROM clause names: a table referenced inside
+an `IN`/`EXISTS` subquery is policed too, so a predicate written inside that
+subquery reads the mask like any other.
+
+Where the engine cannot show that a plan keeps its predicates above the
+projection, the query is **refused** (`0A000`) rather than answered. Two shapes
+reach that today, both loud on every door and every execution path:
+
+- a policed table read **only** inside subquery text — `… IN (SELECT … FROM
+  (SELECT … FROM policed) t WHERE …)`, the same with a set operation, or a
+  correlated scalar subquery over it. A subquery over a table the outer
+  statement also reads is unaffected and answers normally;
+- `LATERAL` over a policed table.
 
 ### A mask is a SQL expression, and it must say what it means
 

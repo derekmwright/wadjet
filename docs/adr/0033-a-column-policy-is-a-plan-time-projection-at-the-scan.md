@@ -182,12 +182,18 @@ the coordinator's `ExecuteSQL` can present.
   column. `logical.PolicyLookup` rides the context so any pass that meets a
   scan can ask what the policy does to ITS table, taking the same decision
   path (table access, column obligations, row filter) as the first pass.
-- **The invariant is asserted, not assumed.** `logical.CheckPolicyPlanOrder`
-  runs on the FINAL logical plan, which every arm consumes: a scan of a policed
-  relation with NO projection is `0A000`, and so is a non-policy filter between
-  a projection and its scan that reads a policed column. Asking only "no
-  predicate below an EXISTING projection" is unfalsifiable exactly where the
-  projection is missing.
+- **The invariant is asserted, not assumed, over EVERY plan the query builds.**
+  `logical.CheckPolicyPlanOrder` runs on the statement's final logical plan AND
+  on each plan the physical planner builds for itself — every subquery pipeline
+  (which every subquery runner and IN-set materializer reaches) and the DAG's
+  scalar producer. A scan of a policed relation with NO projection is `0A000`,
+  and so is a non-policy filter between a projection and its scan that reads a
+  policed column. Asking only about the STATEMENT's plan is unfalsifiable for a
+  relation named only inside subquery TEXT, and what that text contains — a
+  derived table, a set operation, a correlation — is the client's choice, so no
+  per-shape enumeration can cover it. Where the policed relation is also read
+  by the outer statement the projection is applied and the query ANSWERS; where
+  the whole policed read lives inside subquery text the query REFUSES.
 - **Scan-level filter pushdown stops at a security projection.** It evaluates
   against the FILE, so pushing a predicate that sits above the projection makes
   it read the stored column — the in-process twin of a single filter slot on
@@ -218,13 +224,18 @@ the coordinator's `ExecuteSQL` can present.
 - **`LATERAL` over a policed relation refuses.** Its decorrelated inner keeps
   its predicate in a shape the planner cannot reorder above the projection, so
   the invariant refuses `0A000` uniformly on every arm rather than answer.
-- **One two-path divergence with no disclosure**: an inner predicate written
-  against the MASK itself — `id IN (SELECT id FROM t WHERE ssn = '***')` —
-  answers 0 in process and 12 on the DAG. Nothing is learned either way (the
-  spelling naming the stored value answers 0 too, so the two are
-  indistinguishable to the client), but the arms disagree. The in-process
-  semi-join build reads its inner through a path the projection does not reach
-  even though the logical plan carries it; localizing that is its own work.
+- **A self-referencing `IN`/`EXISTS` whose inner predicate names the MASK
+  itself** — `id IN (SELECT id FROM t WHERE ssn = '<the mask>')` — answers 0
+  in process and 12 on the DAG. **The DAG is right**: under masking every row's
+  value IS the mask, so `mask = mask` holds on every row. The in-process answer
+  is a WRONG ANSWER on the primary arm, not a neutral path difference, and this
+  entry says so. It discloses nothing — the round-4 review built a fixture whose
+  rows STORE exactly the mask, for a numeric and a string mask, with and without
+  a denied column beside it, and every arm answered identically — so the row set
+  varies with nothing the policy hides. Mechanism: the in-process semi-join's
+  build side yields no rows for a predicate over a COMPUTED projection output
+  (a predicate over a passthrough column of the same barrier is correct), which
+  is below the logical plan the invariant walks. Its own work.
 - Per-row / per-cell labels (a visibility column, a `has_access` function
   family, dictionary-level evaluation) are a 0.19 arc, not this one.
 
