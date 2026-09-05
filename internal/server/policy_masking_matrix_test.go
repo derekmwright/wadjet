@@ -980,31 +980,46 @@ func pmCells() []pmCell {
 
 		// The inner predicate names the MASK ITSELF. Under masking every row's
 		// value IS the mask, so `mask = mask` holds on every row and the
-		// answer is every row. This was the arc's one arm split: in process
-		// the semi-join's build side yielded NOTHING for a predicate over a
-		// COMPUTED projection output — a predicate over a PASSTHROUGH column
-		// of the same barrier was already right — so the outer answered 0
-		// while the DAG answered the full count (#859 round 5, P2).
-		{name: "semi_join_inner_predicate_names_the_mask",
+		// answer is every row.
+		//
+		// This was the arc's one arm split, and what it measures is ROW-GROUP
+		// PRUNING BY THE STORED RANGE. `attachScanPredicates` copies a
+		// filter's `col <op> literal` conjuncts onto the scan directly beneath
+		// it, and the inner scan of a decorrelated IN/EXISTS is minted by the
+		// optimizer — so the copy happens while the scan is still bare and the
+		// security projection arrives above a scan already carrying the
+		// predicate. The scanner then pruned every row group whose STORED ssn
+		// range excluded '***' and the query answered no rows, where the DAG,
+		// which attaches nothing there, answered every row. A client who moves
+		// the constant reads the stored range off the answer, so this is a
+		// disclosure at row-group granularity (#859 round 5, P2).
+		//
+		// `e7bal` is the control: its stored values BRACKET its mask
+		// (-800..800 around 0), so nothing was prunable and the same defect
+		// answered correctly there. A gate over that fixture alone could not
+		// have seen it, which is why the string mask over `e7emp` leads.
+		{name: "mask_predicate_survives_the_stored_range_prune_in",
 			sql: `SELECT COUNT(*) AS c FROM e7emp a WHERE a.id IN (` +
 				`SELECT b.id FROM e7emp b WHERE b.ssn = '***')`,
 			want: []string{"c=12"}},
-		{name: "semi_join_inner_predicate_names_the_mask_exists",
+		{name: "mask_predicate_survives_the_stored_range_prune_exists",
 			sql: `SELECT COUNT(*) AS c FROM e7emp a WHERE EXISTS (` +
 				`SELECT 1 FROM e7emp b WHERE b.id = a.id AND b.ssn = '***')`,
 			want: []string{"c=12"}},
-		{name: "semi_join_inner_predicate_names_the_mask_not_in",
+		{name: "mask_predicate_survives_the_stored_range_prune_not_in",
 			sql: `SELECT COUNT(*) AS c FROM e7emp a WHERE a.id NOT IN (` +
 				`SELECT b.id FROM e7emp b WHERE b.ssn = '***')`,
 			want: []string{"c=0"}},
-		{name: "semi_join_inner_predicate_names_the_numeric_mask",
+		{name: "mask_predicate_survives_the_stored_range_prune_numeric",
 			sql: `SELECT COUNT(*) AS c FROM e7bal a WHERE a.id IN (` +
 				`SELECT b.id FROM e7bal b WHERE b.bal = 0)`,
 			want: []string{"c=8"}},
-		// The passthrough twin, so the pair LOCALIZES the defect rather than
-		// merely detecting it: same shape, inner predicate over an unpoliced
-		// column of the same barrier.
-		{name: "semi_join_inner_predicate_names_a_passthrough_column",
+		// The unpoliced twin, so the pair LOCALIZES the defect rather than
+		// merely detecting it: same shape, same barrier, inner predicate over
+		// a column the policy does not touch. That predicate is still copied
+		// onto the scan and still prunes — which is correct, and is what the
+		// repair must not break: only a policed column's attachment comes off.
+		{name: "unpoliced_predicate_still_prunes_below_the_barrier",
 			sql: `SELECT COUNT(*) AS c FROM e7emp a WHERE a.id IN (` +
 				`SELECT b.id FROM e7emp b WHERE b.dept = 'd1')`,
 			want: []string{"c=4"}},
