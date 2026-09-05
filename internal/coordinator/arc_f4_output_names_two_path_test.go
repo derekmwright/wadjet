@@ -149,14 +149,14 @@ func TestArcF4OutputColumnNamesTwoPath(t *testing.T) {
 		{name: "row-field-path",
 			sql:  "SELECT (c_row).b FROM typemx_nested WHERE id < 2 ORDER BY 1",
 			want: "b | 0 | 11"},
-		// The DAG has no stage lowering for a SELECT-list scalar subquery and
-		// answers it on the coordinator's local pipeline (#659's route), so
-		// this cell's DAG arms are that pipeline. Declared, not hidden: what
-		// it still proves is that the two engines' naming agrees.
+		// A SELECT-list scalar subquery is a producer stage on the DAG since
+		// #659 (v0.18.40), so this cell's DAG arms execute it as stages and
+		// the naming AND the value are compared across all four arms with
+		// no route counter moving. (Before #659 the DAG routed the shape to
+		// the coordinator's local pipeline and this cell declared that.)
 		{name: "scalar-subquery",
-			sql:       "SELECT (SELECT MAX(g) FROM typemx) FROM typemx WHERE id < 2",
-			want:      "max | 6 | 6",
-			wantRoute: "scalar projection"},
+			sql:  "SELECT (SELECT MAX(g) FROM typemx) FROM typemx WHERE id < 2",
+			want: "max | 6 | 6"},
 
 		// --- through a derived table -------------------------------------
 		// `SELECT *` over a block whose item has no name publishes that
