@@ -1756,52 +1756,138 @@ func arcD5ScalarCardinalityCells() []arcD5Cell {
 }
 
 // ---------------------------------------------------------------------------
-// #659 — a SELECT-LIST scalar subquery has no distributed lowering, of ANY
-// kind, and this is the deferral's fixture rather than its description.
+// #659 — a SELECT-LIST scalar subquery LOWERS to the same producer stage a
+// predicate's does, and the cells that still route say exactly which shapes do
+// not.
 //
 // The filing reports `compile projection "(SELECT MAX(v) FROM c)": subqueries
-// require a SubqueryRunner` for a subquery over a CTE. That tree is gone: the
-// planner refuses the plan before stage generation
-// (physical.refuseScalarSubqueryProjections) and the coordinator routes it to
-// its local pipeline, which answers PostgreSQL's rows. Right, at the cost of
-// one ScalarProjectionLocalRoutes.
+// require a SubqueryRunner`. That tree went first: the planner refused the
+// plan and the coordinator routed it to its local pipeline, which answered
+// PostgreSQL's rows at the cost of one ScalarProjectionLocalRoutes — right,
+// single-process, for a query the DAG could otherwise run in full.
 //
-// The three cells are one claim each, and the claim is that the gap is the
-// POSITION and not the relation: a SELECT-list scalar subquery over a CTE, a
-// BASE TABLE and a DERIVED TABLE route identically. A deferral's boundary is a
-// claim and fixtures attempt it from both sides (protocol rule 11); this is
-// the side that says the shape is right today, so moving it must not be
-// allowed to make it wrong. The day the DAG lowers this position, all three
-// counters go to zero and these cells fail — which is the fix's proof.
+// It is now lowered. `attachScanSelectProjections` puts the item through the
+// SAME `resolveFilterSubqueries` the WHERE clause uses, emits the producer
+// stage, and the coordinator substitutes the producer's value into the
+// projection before dispatch. The spec keeps the ITEM's name (which is what
+// the gather's renames map to the alias) and declares the PRODUCER's type
+// (which is what keeps `MAX(c_i64)` an int64 rather than the float8 a bare
+// numeric literal would be, ADR-0024).
 //
-// The control is the same subquery in a WHERE, which the DAG's deferral
-// machinery really does lower: zero routes, same fixture, same CTE.
+// The group is paired on purpose. Two cells LOWER — over a base table and over
+// a derived table, zero routes on both DAG arms — and every remaining cell is
+// a boundary with its own mechanism, so the claim "this is what still routes"
+// is falsifiable from both sides.
 func arcD5SelectListSubqueryCells() []arcD5Cell {
 	const cte = `WITH c AS (SELECT id, c_i64 AS v FROM typemx) `
 	rows := []string{
 		"id=int64:0|mx=4999014997", "id=int64:1|mx=4999014997", "id=int64:2|mx=4999014997",
 	}
 	return []arcD5Cell{
-		{issue: "#659", name: "select_list_scalar_subquery_over_a_cte_routes",
+		// THE TWO THAT LOWER. Zero routes is the whole assertion: the answers
+		// were never wrong, so only the counter can see the change — and the
+		// VALUE's Go box is the second half of it, because a substituted
+		// literal that carried no declared type came back `bool:true` (the
+		// zero TypeID) in the first cut of this lowering.
+		{issue: "#659", name: "select_list_scalar_subquery_over_a_base_table_lowers",
+			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS mx FROM typemx ` +
+				`WHERE id<3 ORDER BY id`,
+			want:   rows,
+			pgSays: "three rows, all with the same max, and the DAG computes it in a producer stage"},
+		{issue: "#659", name: "select_list_scalar_subquery_over_a_derived_table_lowers",
+			sql: `SELECT id, (SELECT MAX(v) FROM (SELECT c_i64 AS v FROM typemx) d) AS mx ` +
+				`FROM typemx WHERE id<3 ORDER BY id`,
+			want: rows},
+		// A WRAPPED subquery — the shape Q11's threshold has — is arithmetic
+		// over the placeholder and lowers with it.
+		{issue: "#659", name: "select_list_scalar_subquery_wrapped_in_arithmetic_lowers",
+			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) + 1 AS mx FROM typemx ` +
+				`WHERE id<3 ORDER BY id`,
+			want: []string{"id=int64:0|mx=float:4.99901e+09", "id=int64:1|mx=float:4.99901e+09",
+				"id=int64:2|mx=float:4.99901e+09"},
+			pgSays: "4999014998 three times as BIGINT. The value agrees on every arm; the BOX " +
+				"does not, and it did not before this lowering either - a scalar subquery " +
+				"declares no type to the const-arith fold, so `<subquery> + 1` folds float8. " +
+				"That is ADR-0024's rung (#714's third box), not this lowering's doing, and " +
+				"the four arms agree with each other"},
+		// TWO subqueries in one SELECT list: two producers, two placeholders,
+		// and the substitution has to keep them apart.
+		{issue: "#659", name: "two_select_list_scalar_subqueries_lower",
+			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS hi, ` +
+				`(SELECT MIN(c_i64) FROM typemx) AS lo FROM typemx WHERE id<2 ORDER BY id`,
+			want: []string{"id=int64:0|hi=4999014997|lo=0", "id=int64:1|hi=4999014997|lo=0"}},
+
+		// THE BOUNDARIES, each with its own mechanism.
+		//
+		// A CTE the OUTER query also reads AND FILTERS. The producer takes the
+		// CTE body's stage (that dedup is what keeps a CTE from being computed
+		// twice), and the outer WHERE is attached to the same stage — so the
+		// producer would take its MAX over the three rows the outer query kept.
+		// The invariant that already knows this shape
+		// (assertNoConsumerScopedFilterOnSharedStage) is asked at lowering
+		// time, and the query routes instead.
+		{issue: "#659", name: "boundary_select_list_subquery_over_a_shared_cte_routes",
 			sql:                  cte + `SELECT id, (SELECT MAX(v) FROM c) AS mx FROM c WHERE id<3 ORDER BY id`,
 			want:                 rows,
 			wantScalarProjRoutes: 1,
-			pgSays:               "three rows, all with the same max — the filing's own query"},
-		{issue: "#659", name: "select_list_scalar_subquery_over_a_base_table_routes",
-			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS mx FROM typemx ` +
-				`WHERE id<3 ORDER BY id`,
-			want:                 rows,
+			pgSays: "three rows, all with the same max — the filing's own query, right at " +
+				"one route because the producer would read the very stage that awaits it"},
+		{issue: "#659", name: "boundary_select_list_subquery_over_a_shared_cte_no_filter_routes",
+			sql: `WITH c AS (SELECT id, c_i64 AS v FROM typemx WHERE id<3) ` +
+				`SELECT id, (SELECT MAX(v) FROM c) AS mx FROM c ORDER BY id`,
+			want: []string{"id=int64:0|mx=2000006", "id=int64:1|mx=2000006",
+				"id=int64:2|mx=2000006"},
 			wantScalarProjRoutes: 1,
-			pgSays:               "the same route with no CTE in the query, which is what says the POSITION is the gap"},
-		{issue: "#659", name: "select_list_scalar_subquery_over_a_derived_table_routes",
-			sql: `SELECT id, (SELECT MAX(v) FROM (SELECT c_i64 AS v FROM typemx) d) AS mx ` +
+			pgSays: "2000006 three times - the CTE keeps three rows, so its MAX is the third's. " +
+				"The cycle is the SHARING, not the filter: this spelling HUNG on the DAG " +
+				"until the reachability check declined it"},
+		// The control that says the boundary is the SHARED CTE and not the
+		// CTE: a CTE the outer query does not read has no shared stage, so
+		// the producer is an ordinary upstream and the item lowers.
+		{issue: "#659", name: "control_select_list_subquery_over_an_unshared_cte_lowers",
+			sql:    cte + `SELECT id, (SELECT MAX(v) FROM c) AS mx FROM typemx WHERE id<3 ORDER BY id`,
+			want:   rows,
+			pgSays: "the same three rows, zero routes — the outer query reads typemx, not c"},
+		// A subquery inside a CASE arm. resolveSubqueryAST's walk does not
+		// descend into a CaseNode, so the item is declined and keeps its own
+		// typed refusal rather than reaching a worker that cannot compile it.
+		{issue: "#659", name: "boundary_select_list_subquery_inside_a_case_arm_routes",
+			sql: `SELECT id, CASE WHEN id > 1 THEN (SELECT MAX(c_i64) FROM typemx) ELSE 0 END AS mx ` +
 				`FROM typemx WHERE id<3 ORDER BY id`,
-			want:                 rows,
-			wantScalarProjRoutes: 1},
+			want: []string{"id=int64:0|mx=int64:0", "id=int64:1|mx=int64:0",
+				"id=int64:2|mx=int64:4999014997"},
+			wantScalarProjRoutes: 1,
+			pgSays:               "0, 0, 4999014997 — right on every arm, at one route"},
+		// A CORRELATED SELECT-list subquery is not lowered by anything here:
+		// it needs a re-run per outer row, which only the coordinator-local
+		// pipeline has. It routes on the CORRELATED counter, not this one.
+		{issue: "#659", name: "boundary_correlated_select_list_subquery_routes_as_correlated",
+			sql: `SELECT a.id AS id, (SELECT MAX(b.c_i64) FROM typemx b WHERE b.id = a.id) AS mx ` +
+				`FROM typemx a WHERE a.id<3 ORDER BY id`,
+			want:           []string{"id=int64:0|mx=0", "id=int64:1|mx=1000003", "id=int64:2|mx=2000006"},
+			wantCorrRoutes: 1},
+		// A SELECT-list subquery that is NOT provably one row is executed at
+		// plan time rather than deferred (ADR-0021 §5 can only be applied
+		// where the whole result is in hand), and a second row is 21000 on
+		// every arm — the DAG through its local route, which is where the
+		// value is computed.
+		{issue: "#659", name: "boundary_multi_row_select_list_subquery_is_21000",
+			sql: `SELECT id, (SELECT v FROM (SELECT c_i64 AS v FROM typemx) d) AS mx ` +
+				`FROM typemx WHERE id<3 ORDER BY id`,
+			wantErrLike:          "more than one row returned by a subquery used as an expression",
+			wantSQLState:         "21000",
+			wantScalarProjRoutes: 1,
+			pgSays: "21000, on every arm and every door. The DAG routes FIRST - a subquery " +
+				"that is not provably one row is not deferred to a producer, so the item is " +
+				"not lowered and the refusal fires - and the local pipeline then raises it"},
+
+		// The control that was here before the lowering and still is: the
+		// same subquery in a WHERE, which the deferral machinery has always
+		// lowered. It is the pair that says the POSITION is no longer the gap.
 		{issue: "#659", name: "control_the_same_subquery_in_a_where_lowers",
 			sql:  cte + `SELECT COUNT(*) AS n FROM c WHERE v < (SELECT MAX(v) FROM c)`,
 			want: []string{"n=int64:4838"},
-			pgSays: "4838, and ZERO routes — a scalar subquery in a WHERE has a distributed " +
-				"lowering, which is the half #659 does not describe"},
+			pgSays: "4838, and ZERO routes — a scalar subquery in a WHERE has had a " +
+				"distributed lowering since Q11"},
 	}
 }

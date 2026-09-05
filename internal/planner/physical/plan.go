@@ -1053,6 +1053,19 @@ type Planner struct {
 	// referencing subqueries for late coordinator-side substitution.
 	scalarPlaceholderSeq int
 
+	// projScalarProducers maps a SELECT-list placeholder to the producer
+	// stage that computes it and the type that producer declares (#659).
+	// The predicate path records its edges directly on the filter-carrying
+	// stage; a projection's carrier is not known until every attach and
+	// respell pass has run, so the edges are collected here and wired at the
+	// end (attachProjectionScalarDependencies).
+	projScalarProducers map[string]projScalarProducer
+
+	// loweredScalarProjExprs is the set of SELECT-list item texts the
+	// lowering above rewrote, so refuseScalarSubqueryProjections refuses only
+	// the items no stage will compute.
+	loweredScalarProjExprs map[string]bool
+
 	// ctePlannedTerminal caches the terminal stage ID emitted while walking
 	// a CTE's subtree, keyed by `cteName + "|" + structuralHash(subtree)`.
 	// On a second walk of a structurally-identical CTE clone, walkStages
@@ -1929,13 +1942,27 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 // resolve :CTE references. The terminal stage is forced to Tasks=1 so its
 // output is a single unpartitioned WSHF file suitable for scalar extraction.
 func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) (string, error) {
+	id, _, _, err := p.emitScalarProducerStagesTyped(stages, subquerySQL)
+	return id, err
+}
+
+// emitScalarProducerStagesTyped is emitScalarProducerStages with the DECLARED
+// TYPE of the producer's single output column.
+//
+// The predicate path does not need it — a substituted literal is compared
+// against a column whose type decides the kernel — but a PROJECTION's declared
+// type IS the output column's type, and a bare numeric literal is float8 in
+// this dialect (ADR-0024). Without the declaration `SELECT (SELECT MAX(c_i64)
+// FROM t)` comes back float64 on the DAG where the single path answers int64.
+func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL string) (string, expr.DeclType, bool, error) {
+	var decl expr.DeclType
 	pq, err := plansql.Parse(subquerySQL)
 	if err != nil {
-		return "", fmt.Errorf("parse subquery: %w", err)
+		return "", decl, false, fmt.Errorf("parse subquery: %w", err)
 	}
 	info, err := plansql.ExtractSelect(pq)
 	if err != nil {
-		return "", fmt.Errorf("extract subquery: %w", err)
+		return "", decl, false, fmt.Errorf("extract subquery: %w", err)
 	}
 	var logicalPlan *logical.Node
 	if len(p.ctes) > 0 {
@@ -1946,7 +1973,7 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 		logicalPlan, err = logical.BuildFromSelect(info)
 	}
 	if err != nil {
-		return "", fmt.Errorf("build subquery plan: %w", err)
+		return "", decl, false, fmt.Errorf("build subquery plan: %w", err)
 	}
 	ctx := p.planCtx
 	if ctx == nil {
@@ -1963,12 +1990,12 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
 			}); err != nil {
-				return "", err
+				return "", decl, false, err
 			}
 		}
 		logicalPlan, err = p.applyContextColumnPolicies(ctx, logicalPlan)
 		if err != nil {
-			return "", err
+			return "", decl, false, err
 		}
 	}
 
@@ -1978,17 +2005,17 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
 		if err != nil {
-			return "", err
+			return "", decl, false, err
 		}
 		if err := p.checkPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
-			return "", err
+			return "", decl, false, err
 		}
 	}
 
 	before := len(*stages)
 	p.walkStages(logicalPlan, stages, nil)
 	if len(*stages) == before {
-		return "", fmt.Errorf("subquery emitted no stages")
+		return "", decl, false, fmt.Errorf("subquery emitted no stages")
 	}
 	terminal := &(*stages)[len(*stages)-1]
 	// Force Singleton: a scalar producer emits exactly one row. Tasks>1
@@ -2005,7 +2032,24 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	if renames := extractOutputRenames(logicalPlan); len(renames) > 0 {
 		terminal.OutputRenames = renames
 	}
-	return terminal.ID, nil
+	// The producer's own plan is the authority on the value's type. One
+	// output column is the whole shape a scalar producer has (the deferral
+	// fires only for a single provably-one-row select item), so a plan that
+	// emits anything else declares nothing and the caller types the item
+	// the way it types every other expression.
+	declKnown := false
+	if types := inputColTypes(logicalPlan); len(types) == 1 {
+		for name, id := range types {
+			decl = expr.DeclType{ID: id}
+			if id == parquet.TypeDecimal {
+				if d, ok := inputColDecimal(logicalPlan)[name]; ok {
+					decl.Precision, decl.Scale, decl.DecKnown = d.Precision, d.Scale, true
+				}
+			}
+			declKnown = true
+		}
+	}
+	return terminal.ID, decl, declKnown, nil
 }
 
 // scalarToLiteral converts a Go value to an AST literal node.
@@ -3040,14 +3084,6 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := refuseUnrepresentableRealInList(node); err != nil {
 		return nil, err
 	}
-	// A subquery in the SELECT list has no distributed lowering either — the
-	// scalar-producer machinery covers predicates only, and the worker's
-	// compiler has no SubqueryRunner (#659). Refuse before stage generation
-	// so the coordinator routes the query onto its local engine instead of
-	// failing every task three times.
-	if err := refuseScalarSubqueryProjections(node); err != nil {
-		return nil, err
-	}
 	// A SELECT with no FROM emits a `dual` stage with no dependencies and no
 	// scan files, which the dispatcher cannot build task inputs for — so the
 	// query FAILED on the DAG rather than answering (#806). Refuse before
@@ -3325,7 +3361,29 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// reads a bare leaf scan, the expressions would never be computed —
 	// applyOutputRenames can rename/drop but not evaluate. Attach the
 	// SELECT list to the scan so its fragment projects it worker-side.
-	stages = attachScanSelectProjections(node, stages)
+	stages = p.attachScanSelectProjections(node, stages)
+	// A SELECT-list subquery the lowering above did not rewrite has no
+	// distributed lowering: the worker's expression compiler has no
+	// SubqueryRunner, so every task fails (#659). It is asked HERE rather
+	// than before stage generation because whether an item is lowered is
+	// decided by attachScanSelectProjections, which needs the stages — and a
+	// refusal that fired for an item the DAG can now compute would keep a
+	// distributable query single-process. It is asked BEFORE the assert
+	// battery so this shape keeps earning ITS OWN typed refusal rather than
+	// the unreachable-gather-output one, which routes to the same engine but
+	// records a different cost.
+	if err := refuseScalarSubqueryProjections(node, p.loweredScalarProjExprs); err != nil {
+		return nil, err
+	}
+	// A correlated subquery parked while the SELECT list was lowered: the
+	// pre-pass ran before stage generation, and this is the only site that
+	// can see one found after it.
+	if p.correlatedErr != nil {
+		return nil, p.correlatedErr
+	}
+	if p.scalarRowsErr != nil {
+		return nil, p.scalarRowsErr
+	}
 	// #424: a synthetic ORDER BY key (__sortkey_N) that the pass above did
 	// not materialize — every sort but the outermost query's — still names
 	// no column on the DAG. Point it at one. Runs last because the repair
@@ -3416,6 +3474,17 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// merge-on-read DELETE state, replayed from the snapshot walkStages
 	// took rather than a second manifest read.
 	p.annotateScanDeletes(stages)
+	// A SELECT-list subquery the projection lowering did not rewrite has no
+	// distributed lowering: the worker's expression compiler has no
+	// SubqueryRunner, so every task fails (#659). It is asked HERE rather
+	// than before stage generation because whether an item is lowered is
+	// decided by attachScanSelectProjections, which needs the stages — and a
+	// refusal that fires for an item the DAG can now compute would keep a
+	// distributable query single-process. The coordinator routes on it either
+	// way.
+	if err := p.attachProjectionScalarDependencies(stages); err != nil {
+		return nil, err
+	}
 	// LAST, after every rewriting pass: no predicate below a security
 	// projection may read a column that projection hides. A pass that copied
 	// FilterExprs without its PostSecurityFilterExprs companion would put one
@@ -3489,7 +3558,7 @@ func GatherOutputStringLength(stages []Stage) map[string]int {
 // naming is decided here rather than in resolveSortKeyColumn precisely because
 // this pass owns it: it runs last, and only it knows whether the producing
 // fragment will carry an alias-naming OpProject.
-func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
+func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 	projNode := findOutputProjectionNode(root)
 	if projNode == nil {
 		return stages
@@ -3523,18 +3592,18 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 	// a select item does so by position.
 	slotPassThrough := make([]bool, len(proj))
 	var extraSlots []string
-	for j, p := range proj {
-		if p.IsAgg {
+	for j, it := range proj {
+		if it.IsAgg {
 			return stages // aggregates compute in their own fragments
 		}
-		expr := p.Expr
-		if expr == "" {
-			expr = p.Column
+		itemExpr := it.Expr
+		if itemExpr == "" {
+			itemExpr = it.Column
 		}
-		if expr == "" {
+		if itemExpr == "" {
 			return stages
 		}
-		name := strings.ToLower(expr)
+		name := strings.ToLower(itemExpr)
 		var typ parquet.TypeID
 		var typeKnown bool
 		var prec, scale int
@@ -3543,8 +3612,8 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 		// to COMPUTE it, and its type has to be declared here — nothing
 		// downstream can correct a spec the way exec.Project corrects a
 		// placeholder (#568).
-		if p.ASTExpr != nil && (!isSimpleColRefForRename(p.ASTExpr) || astIsFieldPath(p.ASTExpr, colTypes)) {
-			if referencesSyntheticAgg(p.ASTExpr) || referencesSyntheticWindow(p.ASTExpr) {
+		if it.ASTExpr != nil && (!isSimpleColRefForRename(it.ASTExpr) || astIsFieldPath(it.ASTExpr, colTypes)) {
+			if referencesSyntheticAgg(it.ASTExpr) || referencesSyntheticWindow(it.ASTExpr) {
 				// A wrapped aggregate or window (`SUM(x) OVER (…) + 1`) is
 				// evaluated at the GATHER, from an OutputRename.Expr written
 				// against the synthetic output column. Its Expr text is the
@@ -3568,7 +3637,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 				// the slot (aliasedSpecsFor / anyRenamed skip it): the
 				// gather's own rename carries the alias, and its Expr is
 				// what produces the value.
-				slots, complete := syntheticSlotRefs(p.ASTExpr)
+				slots, complete := syntheticSlotRefs(it.ASTExpr)
 				if !complete || len(slots) == 0 {
 					// A node kind the walk does not descend into may hide a
 					// second slot, and a pass-through that names fewer slots
@@ -3582,12 +3651,33 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) []Stage {
 				continue
 			}
 			hasExpr = true
-			decl := inferProjectionDeclType(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			// A SELECT-list scalar subquery lowers to the SAME producer
+			// stage a predicate's does (#659): the spec carries `:scalar_N`
+			// and the coordinator substitutes the producer's value before
+			// dispatch. The spec's NAME stays the item's own text, because
+			// extractOutputRenames reads the untouched logical projection.
+			// An item this cannot rewrite keeps the whole SELECT list off
+			// the DAG, which is the refusal that routes it local.
+			if exprCarriesSubquery(it.ASTExpr) {
+				lowered, ldecl, ldeclKnown, ok := p.lowerProjectionSubquery(&stages, &proj[j], colTypes)
+				if !ok {
+					return stages
+				}
+				if p.loweredScalarProjExprs == nil {
+					p.loweredScalarProjExprs = map[string]bool{}
+				}
+				p.loweredScalarProjExprs[itemExpr] = true
+				specs = append(specs, ProjectExprSpec{Expr: lowered, Name: name,
+					Type: ldecl.ID, TypeKnown: ldeclKnown,
+					Precision: ldecl.Precision, Scale: ldecl.Scale})
+				continue
+			}
+			decl := inferProjectionDeclType(it.ASTExpr, parquet.TypeString, strictInt, colTypes)
 			typ = decl.ID
 			prec, scale = decl.Precision, decl.Scale
 			typeKnown = true
 		}
-		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ,
+		specs = append(specs, ProjectExprSpec{Expr: itemExpr, Name: name, Type: typ,
 			TypeKnown: typeKnown, Precision: prec, Scale: scale})
 	}
 	// A wrapped item reading TWO slots needs both on the stream, and only the

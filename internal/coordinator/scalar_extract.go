@@ -307,6 +307,19 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		}
 		out.PostSecurityFilterExprs = newPF
 	}
+	// The SELECT LIST. A scalar subquery in a projection lowers to the same
+	// producer stage a predicate's does (#659), and this is where its value
+	// arrives. Only Expr is rewritten: the spec's NAME is the item's own
+	// text, which is what the gather's OutputRenames map to the user's alias
+	// — substituting there would rename the column out from under them.
+	if len(out.ProjectExprs) > 0 {
+		newPE := make([]physical.ProjectExprSpec, len(out.ProjectExprs))
+		copy(newPE, out.ProjectExprs)
+		for i := range newPE {
+			newPE[i].Expr = replacePlaceholders(newPE[i].Expr, literals)
+		}
+		out.ProjectExprs = newPE
+	}
 	if len(out.AggSpecs) > 0 {
 		newAgg := make([]physical.AggSpec, len(out.AggSpecs))
 		for i, a := range out.AggSpecs {

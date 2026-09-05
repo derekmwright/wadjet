@@ -37,8 +37,14 @@ var ErrScalarSubqueryProjectionDistributed = errors.New(
 	"scalar subquery in a SELECT-list item has no distributed lowering")
 
 // refuseScalarSubqueryProjections returns ErrScalarSubqueryProjectionDistributed
-// when any Project in the plan carries a subquery in one of its items.
-func refuseScalarSubqueryProjections(root *logical.Node) error {
+// when a Project carries a subquery in an item the SELECT-list lowering did
+// NOT rewrite into a producer stage.
+//
+// `lowered` is the set of item texts that lowering handled
+// (scalar_projection_lowering.go). Everything else still refuses: an item the
+// resolver's walk does not descend into (a CASE arm, a function argument), a
+// correlated subquery, and every projection position the attach pass declines.
+func refuseScalarSubqueryProjections(root *logical.Node, lowered map[string]bool) error {
 	var found error
 	var walk func(*logical.Node)
 	walk = func(n *logical.Node) {
@@ -48,7 +54,7 @@ func refuseScalarSubqueryProjections(root *logical.Node) error {
 		if n.Type == logical.NodeProject {
 			for i := range n.Projections {
 				p := &n.Projections[i]
-				if p.ASTExpr == nil {
+				if p.ASTExpr == nil || lowered[p.Expr] {
 					continue
 				}
 				visitExprSubqueries(p.ASTExpr, func(sql, construct string) {
