@@ -1269,6 +1269,75 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `pgwire.startupTimeIsThisProcess` asserts the value through the DataGrip
      opening sequence; neither pins the offset, because there is none to pin.
 
+     The DECLARATION half closed in #868: all three declare `timestamp` (OID
+     1114) now, as do `date_trunc`, `from_unixtime`, `date_parse` and
+     `timezone`. What stays divergent is only what this entry is about — the
+     zone and the sixth fractional digit, which the server's `timestamptz`
+     carries and this engine's instant cannot.
+   - **A network PREFIX has no place in an IPV4 or IPV6 column.** (Added
+     2026-09-05, #627.) `'10/8'`, `'192.168/16'` and `'2001:db8::/64'` are
+     ordinary `inet` values on the server — a NETWORK, which it compares
+     FALSE against every host address and orders just below its own network
+     address. This engine's IPV4 and IPV6 hold a bare address with no room
+     for a prefix, so such a literal is refused with `0A000` and a message
+     naming the type as the limit, rather than with the `22P02` that would
+     call PostgreSQL-valid text an input-syntax error.
+
+     Reproducing the server exactly would mean rewriting the OPERATOR per
+     literal (`=` becomes never-true, `>` becomes `>= network`) at every
+     comparison site, or carrying a prefix beside the address in the vector —
+     which is what the CIDR type already is, and CIDR answers these literals
+     exactly. A HOST-width prefix (`'10.0.0.1/32'`, `'::1/128'`) IS the
+     address on the server and is accepted here.
+
+     It is also why IPV4 and IPV6 are absent from the PLAN-TIME literal
+     refusal that CIDR, MAC and UUID now have: a refusal is only safe on a
+     parser whose accept-set is a superset of the server's.
+     `kernel.TestNetworkLiteralRefusalIsOnePredicate` asserts that boundary
+     from both sides, and
+     `physical.TestPlanTimeNeverRefusesPGValidNetworkLiteral` is the guard
+     it exists for.
+   - **A text-only function over a BYTES argument answers where PostgreSQL
+     raises 42883.** (Added 2026-09-05, #583.) `upper(b)`, `lower(b)`,
+     `trim(b)`, `reverse(b)` and `strpos(bytea, bytea)` have no bytea
+     overload on the server — `function upper(bytea) does not exist` — and
+     this engine answers the text those bytes spell.
+
+     The functions the server DOES have over bytea agree since #583:
+     `length` is the byte count, `substring` is bytea indexed by bytes, and
+     `||` is bytea under OID 17. Closing the rest needs a PLAN-TIME
+     argument-type check every compile site reaches — the argument's declared
+     type is available to `expr.CompileWithColumnTypes` and not to
+     `expr.Compile` — and a per-row refusal would be the data-dependent shape
+     #627 just closed. The model is `exec.likeConstError`, which refuses at
+     kernel-resolution time from the column's declared type.
+
+     One value divergence rides with it, pinned by
+     `wadjet.TestByteaFunctionsAnswerInBytes`'s
+     `residual_concat_hex_spelled_literal`: an unknown-typed LITERAL beside a
+     bytea operand of `||` contributes its own SPELLING, so `b || '\x41'`
+     appends four characters where the server appends one byte. That is
+     #582's rule at a function ARGUMENT rather than at a comparison.
+   - **A DECIMAL composite renders every row at the FOLD's scale, not at each
+     value's own.** (Added 2026-09-05, #764 — measured and DEFERRED, not
+     fixed.) `COALESCE(numeric(15,2), 12.3456789012345)` prints
+     `12.7500000000000` for the column's rows where the server prints
+     `12.75`. Every cell is the same NUMBER; only the trailing zeros differ,
+     and the WIRE already declares typmod −1 for these composites (ADR-0024
+     item 5), so a client is told nothing about a scale it did not get.
+
+     PostgreSQL's unconstrained `numeric` carries a per-VALUE scale;
+     `batch.DecimalColumn` carries one scale for the whole column (ADR-0018
+     §4). A per-ROW rendering annotation would close it on the single-process
+     arm and NOT on the DAG: a stage's output materializes to parquet, whose
+     DECIMAL leaf carries one scale, so the annotation is lost at the stage
+     boundary and the two arms would print differently. Trimming trailing
+     zeros is not the rule either — the server prints `1.00` for a scale-2
+     column row — so it would move a right cell to a wrong one. The
+     structural fix is a per-value scale in the representation that survives
+     the parquet leaf. Pinned by
+     `coordinator.TestLiteralScaleInADecimalFold`.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`

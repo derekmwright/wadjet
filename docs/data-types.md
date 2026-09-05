@@ -58,6 +58,40 @@ is likewise held to the column's band: a value the declared type cannot hold is
 
 Variable-length types use an **offset/data** columnar layout: a contiguous data buffer with a parallel offset array indexing into it. This avoids per-row heap allocation.
 
+#### `Bytes` is PostgreSQL's `bytea`
+
+It declares OID 17 on the wire and renders as `\x` hex in the text format.
+
+**A literal beside a `BYTES` column is read by `byteain`**, PostgreSQL's own
+bytea input function, in both of its spellings — so all three of these name the
+same two bytes:
+
+```sql
+SELECT b FROM t WHERE b = 'hi';        -- the escape form: no backslash, its own bytes
+SELECT b FROM t WHERE b = '\x6869';    -- the hex form, which is what the wire prints
+SELECT b FROM t WHERE b = '\150\151';  -- octal escapes
+```
+
+`\\` is one backslash and `\ooo` one octal byte; anything else after a
+backslash is `22P02`, as it is on the server.
+
+**Functions over `BYTES` follow PostgreSQL's catalog**, which means BYTES, not
+characters:
+
+| Expression | Result | Note |
+|---|---|---|
+| `length(b)` | `integer` | the BYTE count — bytea has no characters, so this is `octet_length` |
+| `substring(b, from, for)` | `BYTES` | indexed by bytes; a negative length is `22011` |
+| `b \|\| b`, `b \|\| 'x'` | `BYTES` | OID 17, rendered `\x` hex |
+| `md5(b)` | `text` | as on the server |
+| `CAST(b AS STRING)` | `text` | the `\x` hex form |
+
+Two divergences remain and are recorded in ADR-0012's list: a TEXT-ONLY
+function over a `BYTES` argument (`upper(b)`) still ANSWERS where PostgreSQL
+raises `42883 function upper(bytea) does not exist`, and an unknown-typed
+LITERAL beside a bytea operand of `||` contributes its own spelling
+(`b || '\x41'` appends four characters where the server appends one byte).
+
 #### `FLOAT(n)`
 
 `FLOAT(n)` is the SQL-standard spelling of "a binary float with at least n bits
@@ -184,11 +218,43 @@ against a column is read in every spelling PostgreSQL accepts, at every site
 | `MAC` | `08:00:2b:01:02:03`, `08-00-2b-01-02-03`, `0800.2b01.0203`, `08002b010203`, `08002b:010203`, `08002b-010203`, `0800-2b01-0203`, and the same in upper case. A grouped-hex spelling must split the twelve digits `6+6` or `4+4+4`; any other regrouping is `22P02`, as it is in PostgreSQL |
 | `UUID` | dashed, undashed, braced (`{...}`), and any case |
 
-An abbreviated `CIDR` (`'10'`, `'192.168/16'`) is **not** accepted: PostgreSQL
-infers the mask from the address CLASS there, and wadjet does not implement
-that inference. `INSERT` and the `mac_*` formatting functions read only the
-spellings Go's parser takes (colon, hyphen, dotted, and the bare twelve
-digits), not the three grouped-hex forms above.
+An abbreviated `CIDR` **is** accepted, with PostgreSQL's own classful
+inference (measured on 17.11, not remembered):
+
+| Literal | Value | Literal | Value |
+|---|---|---|---|
+| `'10'` | `10.0.0.0/8` | `'10/8'` | `10.0.0.0/8` |
+| `'10.1'` | `10.1.0.0/16` | `'192.168/16'` | `192.168.0.0/16` |
+| `'128'` | `128.0.0.0/16` | `'192.168'` | `192.168.0.0/24` |
+| `'224'` | `224.0.0.0/4` | `'240'` | `240.0.0.0/32` |
+
+The mask comes from an explicit `/bits` when one is written; otherwise from the
+CLASS of the first octet, widened to cover the octets that were written from
+the second octet on. `'010.1'` is decimal, not octal. `'10.'`, `'10..1'`,
+`'256.1'`, `'10.1.2.3.4'`, `'0x0a.1'`, `'10/33'` and any surrounding or
+embedded whitespace are `22P02`, as they are on the server.
+
+An `IPv4` or `IPv6` literal follows PostgreSQL's `inet` rather than its `cidr`:
+an abbreviated form needs an explicit mask there (`'192.168'::inet` is an error
+on the server too), and a HOST-width prefix is the address itself
+(`'10.0.0.1/32'` equals `'10.0.0.1'`). A prefix NARROWER than the host width
+names a network, which those two types have no room for — they hold a bare
+address — so it is refused with `0A000` and a message saying so. Use a `CIDR`
+column for a value that carries a prefix.
+
+A literal that names no address at all is refused when the query is PLANNED for
+`CIDR`, `MAC` and `UUID`, so the same query cannot answer over one file and
+error over another. `IPv4` and `IPv6` still refuse at runtime, because their
+accept-set is not yet a superset of the server's.
+
+`INSERT` and the `mac_*` formatting functions read only the spellings Go's
+parser takes (colon, hyphen, dotted, and the bare twelve digits), not the three
+grouped-hex forms above.
+
+**The printed form of an IPv6 value is PostgreSQL's `inet` output**, which
+differs from Go's for two families: a v4-MAPPED address prints
+`::ffff:10.0.0.1` and not the bare `10.0.0.1`, and a v4-COMPATIBLE one prints
+`::1.2.3.4` and not `::102:304`. That text is also what `LIKE` matches against.
 
 ### Temporal Types
 
@@ -220,6 +286,14 @@ The rule covers timestamp-VALUED functions too — `DATE_TRUNC`,
 operand all render this way, and it is PostgreSQL's text for each.
 `DATE_TRUNC('day', ts)` is `2023-11-14 00:00:00`, the same text the column it
 read produces.
+
+Those functions also DECLARE `timestamp` (OID 1114), which is what a driver
+reads to pick a column class — `DATE_TRUNC`, `FROM_UNIXTIME`, `DATE_PARSE`,
+`TIMEZONE`, `NOW`, `CURRENT_TIMESTAMP` and `PG_POSTMASTER_START_TIME`. Three
+temporal functions deliberately declare `text` instead, because text is what
+they produce: `DATE_FORMAT` (the caller's format string), `TO_ISO8601` (its
+name is its contract) and `AT_TIMEZONE` (a wall clock in another zone, whose
+offset is load-bearing).
 
 `NOW`, `CURRENT_TIMESTAMP` and `PG_POSTMASTER_START_TIME` render the same way
 and PostgreSQL does not: it types all three `timestamptz`, whose text carries a

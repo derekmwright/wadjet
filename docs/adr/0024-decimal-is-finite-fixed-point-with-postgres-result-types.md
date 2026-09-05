@@ -351,6 +351,36 @@ another may not move its disposition with it; that pass now declines for the
 operand pairs PostgreSQL computes in integers, and carries an `optswitch` kill
 switch so the invariance oracle can disable it.
 
+**"Its declared type" means a precision somebody DECLARED, not one a fold
+inferred.** (Added 2026-09-05, #712 — measured, and the recorded position is
+the opposite of what that issue asked for.) The proposal was to carry the
+declared precision on `batch.DecimalColumn` and refuse past `10^p` at
+`SetValueChecked` / `SetComputedChecked`. Implemented, it turns
+
+```
+SELECT GREATEST(numeric(38,30) column, 100000000)
+```
+
+into a 22003, and PostgreSQL 17.11 answers `100000000` under a bare `numeric`
+(`pg_typeof` measured on the server): a GREATEST/LEAST/COALESCE/CASE fold is
+UNCONSTRAINED there, so there is no `10^p` for the value to exceed. A right
+answer turned loud is the one direction ADR-0012 does not permit.
+
+Every site where a precision IS a constraint somebody wrote already enforces it
+and already agrees with the server: `CAST(100000000 AS DECIMAL(38,30))` and
+`CAST(12.75 AS DECIMAL(3,2))` are both 22003 on both engines,
+`exec.DecimalCoerce` enforces the set-operation unified type, and
+`parquet.DecimalValueFromBox` enforces the stored column's at ingest.
+
+What is actually wrong is a DECLARATION: the fold caps its result at
+DECIMAL(38,30) internally while item 5 already declares typmod −1 for it on the
+wire, so the vector carries a bound nothing intends to enforce. The fix worth
+making is for a composite's vector to carry NO precision — unconstrained,
+matching its own wire declaration — and for the writers to enforce one only
+where a CAST, a set-operation unified type or a stored column named it. That is
+a change to what `exec.ProjectColumn.Precision` MEANS (a cap, or a hint), and
+it is not made here.
+
 ### 5. On the wire, a DECIMAL carries the typmod its inputs AGREE on — `select_common_typmod`
 
 PostgreSQL does not gate on "computed". It runs `select_common_typmod` over

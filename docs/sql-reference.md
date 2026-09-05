@@ -1125,6 +1125,21 @@ the planner carries, a numeric literal, arithmetic, or `COUNT`. A predicate
 whose type the planner cannot prove (a scalar function's result, a column of a
 derived table or CTE) is not refused.
 
+The same input function applies when a boolean is COMPARED against a quoted
+literal, and it applies to a boolean the query COMPUTED, not only to a boolean
+column:
+
+```sql
+SELECT count(*) FROM t WHERE (NOT flag) = 'yes';        -- the FALSE-flag rows
+SELECT count(*) FROM t WHERE (bytes_in > 1) = 'on';     -- a comparison is a boolean
+SELECT count(*) FROM t WHERE COALESCE(flag, FALSE) = 'f';
+SELECT count(*) FROM t WHERE (NOT flag) = 'bogus';      -- ERROR 22P02
+```
+
+`NOT`/`AND`/`OR`, every comparison, `IS NULL`, `IS TRUE`, `LIKE`, `IN`,
+`BETWEEN`, `IS DISTINCT FROM`, a `CAST(... AS BOOLEAN)`, a `CASE` or `COALESCE`
+over booleans, and a function declared boolean are all boolean operands here.
+
 ## LIMIT and OFFSET
 
 ```sql
@@ -1489,8 +1504,8 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `UPPER(s)` | Uppercase | `UPPER(protocol)` |
 | `LOWER(s)` | Lowercase | `LOWER(hostname)` |
 | `CONCAT(a, b, ...)` | Concatenate strings; **NULL arguments are ignored** (all-NULL gives `''`, never NULL) — `\|\|` propagates NULL instead | `CONCAT(src_ip, ':', src_port)` |
-| `LENGTH(s)` / `LEN(s)` | String length in **characters**, the synonym of `CHAR_LENGTH` (use `OCTET_LENGTH` for bytes) | `LENGTH(message)` |
-| `SUBSTR(s, start, len)` / `SUBSTRING` | Extract substring; `start` and `len` count **characters**, and a negative `len` is SQLSTATE 22011 | `SUBSTR(message, 1, 50)` |
+| `LENGTH(s)` / `LEN(s)` | String length in **characters**, the synonym of `CHAR_LENGTH` (use `OCTET_LENGTH` for bytes). Over a `BYTES` argument it is the **byte** count, as `length(bytea)` is on the server | `LENGTH(message)` |
+| `SUBSTR(s, start, len)` / `SUBSTRING` | Extract substring; `start` and `len` count **characters**, and a negative `len` is SQLSTATE 22011. Over a `BYTES` argument it returns `BYTES` and counts **bytes** | `SUBSTR(message, 1, 50)` |
 | `TRIM(s)` | Remove leading/trailing whitespace | `TRIM(hostname)` |
 | `LTRIM(s)` | Remove leading whitespace | `LTRIM(message)` |
 | `RTRIM(s)` | Remove trailing whitespace | `RTRIM(message)` |
