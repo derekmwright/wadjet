@@ -7525,6 +7525,15 @@ func fnCharLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
+	// bytea has no characters, so this is its BYTE count — the same answer
+	// `length` gives, which is what keeps the two synonyms from disagreeing
+	// over one value. PostgreSQL has no `char_length(bytea)` at all (42883,
+	// measured), so answering is the superset ADR-0012 records for the
+	// text-only family; answering two different numbers for two spellings of
+	// one function is not (#583 round 2, B4).
+	if raw, ok := args[0].([]byte); ok {
+		return int32Count(len(raw))
+	}
 	return int32Count(len([]rune(toString(args[0]))))
 }
 

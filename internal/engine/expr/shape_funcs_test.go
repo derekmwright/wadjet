@@ -85,7 +85,19 @@ func TestVecShapeLenParity(t *testing.T) {
 				// byte-counting spellings. There is no vecLength any more.
 				{"octet_length", vecOctetLength, func(s string) int32 { return int32(len(s)) }},
 				{"bit_length", vecBitLength, func(s string) int32 { return int32(8 * len(s)) }},
+				// CHARACTERS over a STRING column and BYTES over a BYTES one:
+				// bytea has no characters, so `char_length` answers there
+				// what `length` and `octet_length` answer, and answering a
+				// rune count for one spelling and a byte count for the other
+				// was the engine disagreeing with itself over one value
+				// (#583 round 2, B4). PostgreSQL has neither function over
+				// bytea — `char_length(bytea)` is 42883 — so this is the
+				// text-only family's recorded superset, and a superset owes
+				// consistency.
 				{"char_length", vecCharLength, func(s string) int32 {
+					if tc.typ == parquet.TypeBytes {
+						return int32(len(s))
+					}
 					return int32(utf8.RuneCountInString(s))
 				}},
 			} {
