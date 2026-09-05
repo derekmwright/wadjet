@@ -116,6 +116,16 @@ func (e *VectorWidthError) SQLState() string { return "22000" }
 // never a process exit.
 func (e *VectorWidthError) FatalEvalError() error { return e }
 
+// raiseVectorWidth raises the guard. SetVector is one call per ROW and was
+// small enough for the inliner before the check; the error's construction is
+// what would push it over the budget, so this is NOT inlined and SetVector
+// keeps a compare-and-branch where it used to have nothing.
+//
+//go:noinline
+func (v *Vector) raiseVectorWidth(got int) {
+	panic(&VectorWidthError{Dim: v.VectorDim, Got: got})
+}
+
 // int32OrRaise narrows an integer box into an int32 or refuses.
 func (v *Vector) int32OrRaise(n int64) int32 {
 	if n < math.MinInt32 || n > math.MaxInt32 {

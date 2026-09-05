@@ -107,3 +107,57 @@ func BenchmarkColumnIndex(b *testing.B) {
 		_ = bb.ColumnIndex("c")
 	}
 }
+
+// The pool cycle is the hot path the #897 retention veto sits on: one walk of
+// the batch's columns per Release. Flat and nested, so the recursion into ROW
+// children is measured and not only the flat loop.
+func BenchmarkBatchPoolGetPut(b *testing.B) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "name", Type: parquet.TypeString},
+		{Name: "amount", Type: parquet.TypeFloat64},
+		{Name: "ts", Type: parquet.TypeTimestamp},
+	}
+	pool := NewBatchPool(schema, 2048)
+	pool.PreWarm(1)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pool.Get().Release()
+	}
+}
+
+func BenchmarkBatchPoolGetPutNested(b *testing.B) {
+	elem := parquet.Column{Name: "element", Type: parquet.TypeInt64}
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "r", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "a", Type: parquet.TypeInt64},
+			{Name: "b", Type: parquet.TypeString},
+			{Name: "c", Type: parquet.TypeRow, Fields: []parquet.Column{
+				{Name: "d", Type: parquet.TypeFloat64},
+			}},
+		}},
+		{Name: "arr", Type: parquet.TypeArray, ElementType: &elem},
+	}
+	pool := NewBatchPool(schema, 2048)
+	pool.PreWarm(1)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pool.Get().Release()
+	}
+}
+
+// SetVector gained a width check in #900; it runs once per row.
+func BenchmarkVectorSetVector(b *testing.B) {
+	v := NewVectorVector(2048, 8)
+	val := []float32{1, 2, 3, 4, 5, 6, 7, 8}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 2048; j++ {
+			v.SetVector(j, val)
+		}
+	}
+}

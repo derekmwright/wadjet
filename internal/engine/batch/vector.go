@@ -849,14 +849,33 @@ func (v *Vector) VectorAt(i int) []float32 {
 // the two agree and the wrong one: the caller declared the column's width, and
 // PostgreSQL's vector extension refuses `'[1]'::vector(2)` for the same reason.
 func (v *Vector) SetVector(i int, vals []float32) {
-	if v.VectorDim <= 0 {
+	dim := v.VectorDim
+	if dim <= 0 || len(vals) != dim {
+		v.setVectorOffWidth(vals)
 		return
 	}
-	if len(vals) != v.VectorDim {
-		panic(&VectorWidthError{Dim: v.VectorDim, Got: len(vals)})
-	}
-	copy(v.Float32Data[i*v.VectorDim:(i+1)*v.VectorDim], vals)
+	copy(v.Float32Data[i*dim:(i+1)*dim], vals)
 	v.Nulls.SetValid(i)
+}
+
+// setVectorOffWidth carries everything that is not an exact-width write.
+//
+// The check costs SetVector its inlining and there is no arrangement that
+// does not: the inliner's budget is 80 and a call node alone is 57, so ANY
+// in-function refusal exceeds it (measured: cost 137). Splitting the cold
+// path out still buys back most of the difference — building the error in the
+// body cost ~37% of a 2048-row VECTOR write loop, this shape ~29% — and what
+// remains is one compare plus a call that never fires, on VECTOR columns
+// only. That is the price of not storing a value nobody wrote.
+//
+//go:noinline
+func (v *Vector) setVectorOffWidth(vals []float32) {
+	if v.VectorDim <= 0 {
+		// A column with no declared dimension stores nothing per row, which
+		// is what every VECTOR arm in this file does with one.
+		return
+	}
+	v.raiseVectorWidth(len(vals))
 }
 
 // NewArrayVector creates a new ARRAY vector with the given length and element type.

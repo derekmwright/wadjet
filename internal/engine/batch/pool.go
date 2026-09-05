@@ -175,8 +175,20 @@ func retainsClaimedStorage(b *RecordBatch) bool {
 		return true
 	}
 	for _, c := range b.Columns {
-		if claimedAnywhere(c) {
+		if c == nil {
+			continue
+		}
+		if c.claimed {
 			return true
+		}
+		// The flat majority ends here: one field load per column, no call.
+		// Descending unconditionally cost ~40% of a Get/Put cycle on a
+		// four-column flat batch, all of it call overhead for vectors that
+		// alias nothing.
+		if c.Base != nil || c.Child != nil || len(c.Children) > 0 {
+			if claimedAnywhere(c) {
+				return true
+			}
 		}
 	}
 	return false
