@@ -27,6 +27,13 @@ import (
 // transcripts), or — where the claim is "one value, two spellings" — the other
 // spelling of the same query, which cannot inherit a wrong number from a wrong
 // engine because a divergence between the two IS the failure.
+//
+// Two exceptions, both marked where they sit and both recorded in ADR-0012:
+// the `f3SplitOnTheDAG` / `f3ArmsDisagree` / `f3SpellingsDisagree` cells pin
+// PRE-EXISTING disagreements and fail when they close, and the refusal census
+// refuses two literals at the GREATEST and COALESCE sites that the server
+// folds there (it reads a fold's literal with the cidr parser and a
+// comparison's with inet's; this engine reads one grammar everywhere).
 func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
