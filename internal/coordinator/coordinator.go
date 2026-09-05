@@ -2678,11 +2678,14 @@ func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow in
 // true of the re-aggregating path and of no other. Every distributed result
 // whose ORDER BY is applied ONLY at this merge — no sort stage in the plan,
 // no aggregate and no DISTINCT to collapse the input — therefore came back in
-// whatever order the tasks happened to finish in, silently. A keyless join
-// over two grouped subqueries is one such plan, which is how the arc that
-// made those plans runnable exposed it; an equi-join over a scan is another,
-// and it looked right only because the rows arrive in scan order and the
-// query asked for scan order.
+// whatever order the tasks happened to finish in, silently. The shape
+// measured to do that is a KEYLESS join whose probe is split across tasks —
+// which is how the arc that made those plans runnable exposed it, and it is
+// the shape the gates carry (`TestF1AKeylessJoinAsksForWhatItNeeds`,
+// `TestMergeOrdersAcrossBatches`). Which other plans reach this function with
+// more than one batch has not been enumerated; do not read the sentence above
+// as a claim about any particular join or scan, only about what this function
+// must do when it is handed more than one.
 //
 // Returns the batch slice to use, which is a NEW single-batch slice whenever
 // it had to coalesce.
