@@ -1280,6 +1280,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      decide which RULE applies — only to decide which side of the chosen rule
      holds this row's value, which is what item 8's boxed-value rule requires
      generally.
+
+     **The classification covers BOTH arithmetic nodes, not only the typed
+     one.** (Amended 2026-09-04, #849 round-3 residual / #555.) Exact
+     fixed-point arithmetic boxes its result exactly as a DECIMAL COLUMN
+     boxes one — the value's rendered text — so an arithmetic node is a
+     `boxDecimal` operand whenever its exact arm resolved. `expr.BinOpNumeric`
+     answered that from its mode; the GENERIC `expr.BinOp` did not, and it is
+     the node that needed to, because it is where every operand with no typed
+     protocol arrives: a negated column, a CAST, a scalar function, and a
+     CHOOSING construct, none of which satisfies `Float64Expr` for
+     `compileBinOp` to build the typed node from. So `(COALESCE(a, 0) + 1) > 1`
+     compared `"1.00"` against `"1"` by BYTES and admitted the rows whose
+     value is exactly 1 — 8 rows where PostgreSQL 17.11 answers 5 — and
+     `GREATEST(COALESCE(a, 0) + 1, 2)` picked 2 over 13.75. Every boxed
+     consumer was affected alike (`IN`, `BETWEEN`, `IS DISTINCT FROM`, a
+     simple CASE, GREATEST/LEAST), and every producer that reaches this node:
+     `-a + 1`, `CAST(a AS DECIMAL(9,2)) + 1` and `ABS(a) + 1` had the exact
+     arm since #555 and were wrong at those sites for as long; the choosing
+     constructs joined them when `0214d48b` gave them the exact kernel.
+     The node's INT mode answers `boxNumber` for the same reason its typed
+     sibling does, and its remaining modes stay unclassified on purpose: this
+     node also evaluates date ± interval, and a shifted date is not a number,
+     so declaring one would be a WRONG declaration rather than a missing one.
    - **A constant that is not a number is a query ERROR, never a value.**
      (Added 2026-08-24, #463.) The conversion used to answer ZERO for
      anything it could not parse, so `WHERE d = 'abc'` — and `WHERE d = 1e400`,
