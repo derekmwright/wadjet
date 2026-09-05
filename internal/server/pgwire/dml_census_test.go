@@ -510,6 +510,119 @@ func censusShapes() []censusShape {
 			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
 			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
 
+		// ---------------------------------------------------------------
+		// MERGE's subquery surface, one cell per construct and per position.
+		//
+		// ONE cell above was the whole of it, and one cell is thinner
+		// coverage than the DELETE/UPDATE side got — E6's own self-flag says
+		// so ("MERGE is the door with the most history and one cell is
+		// thinner coverage than I would like"). These twelve are what makes
+		// "MERGE takes a subquery predicate" a claim rather than a sample:
+		// every construct (IN, NOT IN, EXISTS, NOT EXISTS, a scalar), every
+		// position a subquery can occupy in a MERGE (a WHEN MATCHED
+		// condition, a WHEN NOT MATCHED condition, a SET assignment, an
+		// INSERT VALUES item, the ON condition), the pre-statement snapshot,
+		// and both ways a subquery can fail. Every `pg` string was measured
+		// on PostgreSQL 17 over this fixture.
+		//
+		// Two of them are worth naming because they say something the
+		// DELETE/UPDATE cells cannot:
+		//
+		//   - a subquery in a MERGE's SET list ANSWERS, where the same
+		//     subquery in an UPDATE's SET list is still 0A000 (the pinned
+		//     "#688 update SET from a subquery" below). Two write doors, two
+		//     dispositions for one construct: mergeEvaluator resolves an
+		//     assignment through its own compile site, and
+		//     ResolveDMLSetClauses refuses one. The pair is the record.
+		//   - the ON condition is the one MERGE shape that still refuses,
+		//     and it refuses for a reason that has nothing to do with
+		//     subqueries: parseOnKeys accepts only equality between the
+		//     target and the source, because the merge executor KEYS on
+		//     those equalities to find the matching row. PostgreSQL's ON is
+		//     an arbitrary join condition. Pinned with PostgreSQL's answer.
+		// ---------------------------------------------------------------
+		{name: "#688 merge WHEN MATCHED AND NOT IN a subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.id NOT IN (SELECT id FROM arcb_src) THEN DELETE",
+			pg:  "tag=MERGE 0 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "tag=MERGE 0 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#688 merge WHEN MATCHED AND a correlated EXISTS on the target", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND EXISTS (SELECT 1 FROM arcb_src z WHERE z.id = t.id) THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+		{name: "#688 merge WHEN MATCHED AND a correlated NOT EXISTS", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND NOT EXISTS (SELECT 1 FROM arcb_src z WHERE z.id = t.id) THEN DELETE",
+			pg:  "tag=MERGE 0 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "tag=MERGE 0 table=[1:10:a 2:20:b 3:30:c]"},
+		// The correlation on the SOURCE side, which is what says the WHEN
+		// condition's outer scope is the MERGED row and not the target alone.
+		{name: "#688 merge WHEN MATCHED AND a correlated EXISTS on the SOURCE", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND EXISTS (SELECT 1 FROM arcb_src z WHERE z.n = s.n) THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+		{name: "#688 merge WHEN MATCHED AND a scalar subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.n < (SELECT max(n) FROM arcb_src) THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+		// ADR-0021 §5 through the MERGE door: the second row is 21000, never
+		// the first row's value.
+		{name: "#688 merge WHEN MATCHED AND a MULTI-ROW scalar subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.n < (SELECT n FROM arcb_src) THEN DELETE",
+			pg:  "state=21000 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=21000 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#688 merge WHEN NOT MATCHED AND a scalar subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN NOT MATCHED AND s.n > (SELECT min(n) FROM arcb_pr) THEN " +
+				"INSERT (id, n, name) VALUES (s.id, s.n, s.name)",
+			pg:  "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:400:y]",
+			emb: "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:400:y]"},
+		// The snapshot, through the MERGE door: the subquery reads the TARGET
+		// and PostgreSQL answers it from the pre-statement state.
+		{name: "#688 merge WHEN MATCHED AND a subquery over the TARGET table", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.n <= (SELECT min(n) FROM arcb_pr) THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[2:20:b 3:30:c]"},
+		{name: "#688 merge SET from a subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED THEN UPDATE SET n = (SELECT max(n) FROM arcb_src)",
+			pg:  "tag=MERGE 1 table=[1:400:a 2:20:b 3:30:c]",
+			emb: "tag=MERGE 1 table=[1:400:a 2:20:b 3:30:c]"},
+		{name: "#688 merge INSERT VALUES from a subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN NOT MATCHED THEN INSERT (id, n, name) VALUES " +
+				"(s.id, (SELECT max(n) FROM arcb_src), s.name)",
+			pg:  "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:400:y]",
+			emb: "tag=MERGE 1 table=[1:10:a 2:20:b 3:30:c 4:400:y]"},
+		{name: "#688 merge WHEN MATCHED AND a subquery over an unknown relation", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.id IN (SELECT id FROM arcb_nosuch) THEN DELETE",
+			pg:  "state=42P01 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=42P01 table=[1:10:a 2:20:b 3:30:c]"},
+		{name: "#688 merge WHEN MATCHED AND a subquery that fails at run time", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"WHEN MATCHED AND t.n < (SELECT max(n / 0) FROM arcb_src) THEN DELETE",
+			pg:  "state=22012 table=[1:10:a 2:20:b 3:30:c]",
+			emb: "state=22012 table=[1:10:a 2:20:b 3:30:c]"},
+		// THE ONE THAT STILL REFUSES, pinned with PostgreSQL's answer. It is
+		// not a subquery limitation: parseOnKeys accepts only equality
+		// between the target and the source because the merge executor keys
+		// the match on those equalities, so ANY non-key ON term refuses —
+		// `ON t.id = s.id AND t.n > 5` as much as this one. Closing it means
+		// the ON becomes a JOIN CONDITION and the match becomes a join, which
+		// is where #718's clause kinds live too.
+		{name: "#688 merge ON carrying a subquery", tbl: "pr",
+			sql: "MERGE INTO arcb_pr AS t USING arcb_src AS s ON t.id = s.id " +
+				"AND t.id IN (SELECT id FROM arcb_src) WHEN MATCHED THEN DELETE",
+			pg:  "tag=MERGE 1 table=[2:20:b 3:30:c]",
+			emb: "state=0A000 table=[1:10:a 2:20:b 3:30:c]",
+			bug: "#688"},
+
 		// The shapes the five pins did not reach, each measured on live
 		// PostgreSQL 17 for this fixture.
 		//
