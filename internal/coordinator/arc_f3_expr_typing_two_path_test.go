@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -28,12 +30,11 @@ import (
 // spelling of the same query, which cannot inherit a wrong number from a wrong
 // engine because a divergence between the two IS the failure.
 //
-// Two exceptions, both marked where they sit and both recorded in ADR-0012:
-// the `f3SplitOnTheDAG` / `f3ArmsDisagree` / `f3SpellingsDisagree` cells pin
-// PRE-EXISTING disagreements and fail when they close, and the refusal census
-// refuses two literals at the GREATEST and COALESCE sites that the server
-// folds there (it reads a fold's literal with the cidr parser and a
-// comparison's with inet's; this engine reads one grammar everywhere).
+// The ACCEPTED literals carry PostgreSQL's own COUNT for every site
+// (f3PGCounts), measured over this fixture rebuilt on the server with the type
+// mapping the differential oracle uses — comparing the arms only to each other
+// is what let a value all of them got wrong pass this census (round-3 review
+// P-A).
 func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -49,6 +50,13 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 	tmdWriteTables(t, ctx, infraB, nil)
 	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
 
+	// The FOURTH arm is the spilled one, and it is a condition rather than a
+	// shape (ADR-0027): a 512 KiB budget alone moves no engagement counter on
+	// a COUNT(*) over 5000 rows, so the DRAIN is forced on this arm and left
+	// disarmed on every other — arming both sides cancels a defect that lives
+	// in the drain (#790). It is the arm this census owed since round 2's P-7.
+	spilled := na2Standalone(t, ctx, 512*1024)
+	var f3Drains int
 	arms := []struct {
 		name string
 		run  func(string) ([]string, error)
@@ -56,7 +64,44 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		{"single", func(sql string) ([]string, error) { return na2Run(tmdRunSingle(ctx, single, sql)) }},
 		{"dag", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coord, sql)) }},
 		{"dag-shuffled", func(sql string) ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, sql)) }},
+		{"spilled", func(sql string) ([]string, error) {
+			before := exec.ForcedAggDrains.Load()
+			restore := exec.ForceAggDrainEvery(1)
+			restoreRuns := exec.ForceSmallSpillRuns(512)
+			out, err := na2Run(tmdRunSingle(ctx, spilled, sql))
+			restoreRuns()
+			exec.ForceAggDrainEvery(restore)
+			if exec.ForcedAggDrains.Load() > before {
+				f3Drains++
+			}
+			return out, err
+		}},
 	}
+	t.Cleanup(func() {
+		// Every census cell is a `COUNT(*)` — one group, no hash table — so
+		// the drain knob has nothing to drain on the cells themselves, and
+		// claiming per-cell engagement for them would be false. What IS
+		// asserted is that this arm's DB and knob really do spill: one probe
+		// with a real hash aggregate, run through the same door with the same
+		// knob armed. Without it the arm would be a second copy of `single`
+		// and would prove nothing (ADR-0027 §6).
+		before := exec.ForcedAggDrains.Load()
+		restore := exec.ForceAggDrainEvery(1)
+		restoreRuns := exec.ForceSmallSpillRuns(512)
+		_, err := na2Run(tmdRunSingle(ctx, spilled,
+			`SELECT c_str, COUNT(*) AS n FROM typemx GROUP BY c_str`))
+		restoreRuns()
+		exec.ForceAggDrainEvery(restore)
+		if err != nil {
+			t.Errorf("the spilled arm's engagement probe failed: %v", err)
+		}
+		if exec.ForcedAggDrains.Load() == before {
+			t.Errorf("the spilled arm forced no drain even on a hash aggregate: " +
+				"the arm is a second copy of `single` and proves nothing")
+		}
+		t.Logf("spilled arm: engagement probe drained; %d census cells drained on their own",
+			f3Drains)
+	})
 
 	// ---------------------------------------------------------------- #867
 	// Arithmetic over an aggregate whose ARGUMENT is computed. The value is
@@ -117,9 +162,13 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 	// The refusal is decided at PLAN time now, so it fires over a scan the
 	// filter never reaches a row of. `id < 0` is what makes that the claim:
 	// a data-dependent refusal answers zero rows here.
+	// `inet`, not `cidr`: the server reads a literal beside a network column
+	// with inet's parser and its own message names that type, and a wadjet
+	// CIDR column IS an inet — it holds host bits under a mask, which
+	// PostgreSQL's cidr refuses (round-3 review P-E).
 	f3RefuseOnEveryArm(t, arms, "cidr_garbage_literal_over_an_empty_scan",
 		`SELECT COUNT(*) AS n FROM typemx WHERE id < 0 AND c_cidr = 'zzz'`,
-		"invalid input syntax for type cidr")
+		"invalid input syntax for type inet")
 	f3RefuseOnEveryArm(t, arms, "uuid_garbage_literal_over_an_empty_scan",
 		`SELECT COUNT(*) AS n FROM typemx WHERE id < 0 AND c_uuid = 'nope'`,
 		"invalid input syntax for type uuid")
@@ -162,6 +211,21 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		{"c_ipv4", "zzz", "22P02"},
 		{"c_ipv6", "zzz", "22P02"},
 		{"c_cidr", "zzz", "22P02"},
+		// The v6 MASK grammar, which round 3 did not have: the prefix
+		// predicate answered `mask != "128"` without parsing the mask or
+		// checking the family. `'10.0.0.1/128'` then had its mask stripped
+		// and ANSWERED 0 rows where the base and the server both raise
+		// (128 does not fit a v4 address), and `/129`, `/abc`, `/0128` were
+		// refused with 0A000 — a class that asserts the text IS
+		// PostgreSQL-valid and only the TYPE is the limit, which none of them
+		// is. Measured: PostgreSQL's inet6 mask takes decimal digits with NO
+		// leading zeros, 0-128 (round-3 review B3-3).
+		{"c_ipv6", "10.0.0.1/128", "22P02"},
+		{"c_ipv6", "2001:db8::1/129", "22P02"},
+		{"c_ipv6", "2001:db8::1/abc", "22P02"},
+		{"c_ipv6", "2001:db8::1/0128", "22P02"},
+		{"c_ipv6", "2001:db8::1/064", "22P02"},
+		{"c_ipv6", "2001:db8::1/", "22P02"},
 		// The literals the CIDR TYPE accepts and no COMPARISON does. `cidr`
 		// carries no operators of its own, so `c_cidr = '<literal>'` resolves
 		// through `=(inet, inet)` and the literal is read by inet's parser,
@@ -184,17 +248,15 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		// value and '10/16' is 22P02, measured over all four octet counts.
 		{"c_cidr", "10/16", "22P02"},
 		{"c_cidr", "192.168/24", "22P02"},
-		// KNOWN DIVERGENCE, recorded in ADR-0012 and asserted here so it
-		// cannot drift silently: the server's TWO fold sites — `GREATEST`,
-		// `LEAST` and `COALESCE` — do not resolve the literal through an
-		// operator at all. They UNIFY types, so the literal is read by the
-		// cidr type's own parser and `GREATEST(cd, '239')` is 239.0.0.0/8
-		// there while `cd = '239'` is 22P02 (both measured). This engine
-		// reads one grammar at every site, so those two cells refuse where
-		// the server folds. One grammar refusing loudly beats two grammars
-		// half-built: the alternative is a second measured accept-set plus a
-		// site classification every evaluator must agree on, which is the
-		// model, not a patch — filed, and ADR-0012 carries the mechanism.
+		// The FOLD sites refuse these too, and that is AGREEMENT rather than
+		// the divergence round 3 recorded. `GREATEST`/`LEAST`/`COALESCE`
+		// unify their arguments' types, so beside a PostgreSQL `cidr` column
+		// they read the CIDR parser — but a wadjet CIDR column is not one and
+		// cannot be: it holds host bits under a mask, and
+		// `'192.168.5.7/24'::cidr` is 22P02 while `::inet` is a value. This
+		// repository's own oracle maps IPV4/IPV6/CIDR to `inet` for exactly
+		// that reason, and over an inet column every fold site refuses '239',
+		// '192.168' and 'zzz' as this engine does (measured; ADR-0012).
 	} {
 		for _, site := range f3NetSites(tc.col, tc.lit) {
 			f3RefuseOnEveryArmWithState(t, arms,
@@ -211,6 +273,15 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		{"c_ipv6", "2001:db8::1/128"},
 		{"c_cidr", "10/8"},
 		{"c_cidr", "192.168.0/24"},
+		// The two WHOLE-QUAD spellings Go's parser refuses and PostgreSQL's
+		// reads: a leading zero and a trailing dot. Round 3 widened the
+		// PARSER for them and left the type-blind gate in front of it on
+		// net.ParseCIDR, so the same literal answered on the single arm at
+		// `=`, refused inside a CASE on that same arm, and refused on both
+		// DAG arms — three dispositions for one literal, which is the class
+		// the census was built to forbid (round-3 review B3-1).
+		{"c_cidr", "010.1.2.3"},
+		{"c_cidr", "10.1.2.3."},
 		// The four literals the round-2 review read as a regression. Every
 		// one is a value on the server — inet KEEPS the bits to the right of
 		// the mask, which is the check the CIDR type makes and inet does not
@@ -228,48 +299,41 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		{"c_cidr", "172.31/12"},
 	} {
 		for _, site := range f3NetSites(tc.col, tc.lit) {
-			// PRE-EXISTING, pinned fail-on-agree: `c_ipv4 IN (<any host
-			// literal>)` answers on the single arm and ZERO on both DAG arms.
-			// Measured identically at dea4e795 with none of this arc's
-			// commits — `IN ('10.0.0.1')` is single 1 / dag 0 there — so it is
-			// not #627's, and the `=` spelling of the same predicate agrees on
-			// every arm. Filed with the arc's report; the cell stays here
-			// because this census is where the split is visible, and it FAILS
-			// when the two arms start agreeing.
-			if tc.col == "c_ipv4" && site.name == "in" {
-				f3SplitOnTheDAG(t, arms,
-					"network_literal_ok/"+tc.col+"/"+tc.lit+"/"+site.name, site.sql)
-				continue
-			}
-			f3AnswersOnEveryArm(t, arms,
-				"network_literal_ok/"+tc.col+"/"+tc.lit+"/"+site.name, site.sql)
+			f3AnswersPGCountOnEveryArm(t, arms,
+				"network_literal_ok/"+tc.col+"/"+tc.lit+"/"+site.name, site.sql,
+				f3PGCount(t, tc.col, tc.lit, site.name))
 		}
 	}
 
-	// The PRE-EXISTING two-path split around an IN list over a network column,
-	// pinned in the three shapes and the second TYPE the round-2 review found
-	// beyond the one cell above. Measured identically at dea4e795 with none of
-	// this arc's commits, so none of it is #627's; PostgreSQL agrees with the
-	// SINGLE arm on the first three, which is what makes the DAG the wrong one.
+	// The IN-list family, which was a PRE-EXISTING two-path split until this
+	// round and is anchored to PostgreSQL now rather than pinned. Measured on
+	// the reconstructed fixture (f3PGCounts' transcript):
 	//
-	//	c_ipv4 IN ('10.0.0.1')       PG 1     single 1  dag 0     dag-shuf 0
-	//	c_mac  IN ('aa:bb:cc:…:01')  PG 1     single 1  dag 0     dag-shuf 0
-	//	c_ipv4 BETWEEN x AND x       PG 1     single 1  dag 0     dag-shuf 0
-	//	c_ipv4 NOT IN ('10.0.0.1')   PG 4915  single 4915  dag 4916  dag-shuf 4916
-	//	CASE WHEN c_ipv4 IN (…)      PG 1     single 0  dag 0     dag-shuf 0
+	//	                                        PG   base   round 3   now
+	//	c_ipv4 IN ('10.0.0.1')                   1    dag 0   dag 0     1
+	//	c_mac  IN ('aa:bb:cc:00:00:01')          1    dag 0   dag 0     1
+	//	c_ipv4 BETWEEN '10.0.0.1' AND same       1    dag 0   dag 0     1
+	//	c_ipv4 NOT IN ('10.0.0.1')            4915    dag 4916 dag 4916 4915
+	//	CASE WHEN c_ipv4 IN (...) THEN 1 ...     1    all 0    all 0    1
 	//
-	// The last is not a two-path split at all: every arm answers 0 where the
-	// `=` spelling of the same predicate answers 1, so it is pinned against
-	// that spelling rather than against an arm.
-	f3SplitOnTheDAG(t, arms, "in_split/c_mac",
-		`SELECT COUNT(*) AS n FROM typemx WHERE c_mac IN ('aa:bb:cc:00:00:01')`)
-	f3SplitOnTheDAG(t, arms, "in_split/between",
-		`SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 BETWEEN '10.0.0.1' AND '10.0.0.1'`)
-	f3ArmsDisagree(t, arms, "in_split/not_in",
-		`SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 NOT IN ('10.0.0.1')`)
-	f3SpellingsDisagree(t, arms, "in_split/inside_a_case",
-		`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN c_ipv4 IN ('10.0.0.1') THEN 1 ELSE 0 END = 1`,
-		`SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 = '10.0.0.1'`)
+	// One mechanism closed all five: an IPV4 column boxes as the RAW int64 it
+	// stores on the paths these take, so comparing it against a quoted literal
+	// fell to compare(), which reads a dotted quad as the number ZERO. The
+	// boxed-pair layer has a boxIPv4 kind now, the way CIDR and IPv6 have had
+	// one since #565, and the pins that recorded the split are deleted — which
+	// is the proof.
+	for _, tc := range []struct {
+		name, sql string
+		want      int64
+	}{
+		{"in_family/mac_in", `SELECT COUNT(*) AS n FROM typemx WHERE c_mac IN ('aa:bb:cc:00:00:01')`, 1},
+		{"in_family/between", `SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 BETWEEN '10.0.0.1' AND '10.0.0.1'`, 1},
+		{"in_family/not_in", `SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 NOT IN ('10.0.0.1')`, 4915},
+		{"in_family/inside_a_case",
+			`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN c_ipv4 IN ('10.0.0.1') THEN 1 ELSE 0 END = 1`, 1},
+	} {
+		f3AnswersPGCountOnEveryArm(t, arms, tc.name, tc.sql, tc.want)
+	}
 
 	// ---------------------------------------------------------------- #582
 	// A bytea literal in both of byteain's spellings, against the same row.
@@ -347,10 +411,194 @@ func f3NetSites(col, lit string) []struct{ name, sql string } {
 		{"in", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s IN (%s)`, col, q)},
 		{"case", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN %s = %s THEN 1 ELSE 0 END = 1`, col, q)},
 		{"greatest", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE GREATEST(%s, %s) = %s`, col, q, col)},
+		{"least", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE LEAST(%s, %s) = %s`, col, q, col)},
 		{"coalesce", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE COALESCE(%s, %s) = %s`, col, q, col)},
 		{"projection", fmt.Sprintf(`SELECT COUNT(*) AS n FROM (SELECT %s = %s AS b FROM typemx) x WHERE b`, col, q)},
+		// The two ORDERINGS of the same conjunction. `id < 0` reaches no row,
+		// so a refusal that fires there is a PLAN-time one; the other
+		// ordering reaches every row, so a refusal that fires only there is
+		// per-ROW. A literal whose disposition depends on which one you write
+		// is the data-dependent refusal this census exists to forbid, and
+		// round 3 shipped exactly that for '010.1.2.3' (review B3-2).
 		{"empty_scan", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE id < 0 AND %s = %s`, col, q)},
+		{"row_reaching", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s = %s AND id >= 0`, col, q)},
 	}
+}
+
+// f3PGCounts is `SELECT COUNT(*)` on PostgreSQL 17.11 for every accepted
+// literal at every site — the number this engine has to produce, not merely
+// the number its other arms produce.
+//
+// It exists because `f3AnswersOnEveryArm` compares the arms TO EACH OTHER: a
+// value all four get wrong passes it silently, and one did. `GREATEST(c_ipv4,
+// '10.0.0.1') = c_ipv4` counted 4916 here and 4915 there, and `LEAST` counted
+// 0 where the server counts 2 — an IPV4 column boxes as its RENDERED dotted
+// quad, whose byte order is not the address's (round-3 review P-A).
+//
+// The fixture is `internal/oracle/typematrix`'s 5000 rows rebuilt in
+// PostgreSQL with the SAME type mapping the differential oracle uses for these
+// columns: IPV4, IPV6 and CIDR all map to `inet`, because inet is the only
+// PostgreSQL type that holds what this fixture carries — `'192.168.5.7/24'`
+// (host bits under a mask) is 22P02 for `cidr` and a value for `inet`
+// (`benchmarks/tpch/postgres_oracle_test.go`'s postgresType, re-measured
+// here). Transcript: scratchpad/arcs8/f3_expr_typing3/r4/mkfixture.sql and
+// anchor.sql.
+var f3PGCounts = map[string]int64{
+	"c_cidr|010.1.2.3|case":               0,
+	"c_cidr|010.1.2.3|coalesce":           4926,
+	"c_cidr|010.1.2.3|empty_scan":         0,
+	"c_cidr|010.1.2.3|eq":                 0,
+	"c_cidr|010.1.2.3|greatest":           3696,
+	"c_cidr|010.1.2.3|gt":                 3696,
+	"c_cidr|010.1.2.3|in":                 0,
+	"c_cidr|010.1.2.3|least":              1230,
+	"c_cidr|010.1.2.3|lt":                 1230,
+	"c_cidr|010.1.2.3|ne":                 4926,
+	"c_cidr|010.1.2.3|projection":         0,
+	"c_cidr|010.1.2.3|row_reaching":       0,
+	"c_cidr|1/0|case":                     0,
+	"c_cidr|1/0|coalesce":                 4926,
+	"c_cidr|1/0|empty_scan":               0,
+	"c_cidr|1/0|eq":                       0,
+	"c_cidr|1/0|greatest":                 4926,
+	"c_cidr|1/0|gt":                       4926,
+	"c_cidr|1/0|in":                       0,
+	"c_cidr|1/0|least":                    0,
+	"c_cidr|1/0|lt":                       0,
+	"c_cidr|1/0|ne":                       4926,
+	"c_cidr|1/0|projection":               0,
+	"c_cidr|1/0|row_reaching":             0,
+	"c_cidr|10.1.2.3.|case":               0,
+	"c_cidr|10.1.2.3.|coalesce":           4926,
+	"c_cidr|10.1.2.3.|empty_scan":         0,
+	"c_cidr|10.1.2.3.|eq":                 0,
+	"c_cidr|10.1.2.3.|greatest":           3696,
+	"c_cidr|10.1.2.3.|gt":                 3696,
+	"c_cidr|10.1.2.3.|in":                 0,
+	"c_cidr|10.1.2.3.|least":              1230,
+	"c_cidr|10.1.2.3.|lt":                 1230,
+	"c_cidr|10.1.2.3.|ne":                 4926,
+	"c_cidr|10.1.2.3.|projection":         0,
+	"c_cidr|10.1.2.3.|row_reaching":       0,
+	"c_cidr|10.1/8|case":                  0,
+	"c_cidr|10.1/8|coalesce":              4926,
+	"c_cidr|10.1/8|empty_scan":            0,
+	"c_cidr|10.1/8|eq":                    0,
+	"c_cidr|10.1/8|greatest":              4863,
+	"c_cidr|10.1/8|gt":                    4863,
+	"c_cidr|10.1/8|in":                    0,
+	"c_cidr|10.1/8|least":                 63,
+	"c_cidr|10.1/8|lt":                    63,
+	"c_cidr|10.1/8|ne":                    4926,
+	"c_cidr|10.1/8|projection":            0,
+	"c_cidr|10.1/8|row_reaching":          0,
+	"c_cidr|10/8|case":                    0,
+	"c_cidr|10/8|coalesce":                4926,
+	"c_cidr|10/8|empty_scan":              0,
+	"c_cidr|10/8|eq":                      0,
+	"c_cidr|10/8|greatest":                4926,
+	"c_cidr|10/8|gt":                      4926,
+	"c_cidr|10/8|in":                      0,
+	"c_cidr|10/8|least":                   0,
+	"c_cidr|10/8|lt":                      0,
+	"c_cidr|10/8|ne":                      4926,
+	"c_cidr|10/8|projection":              0,
+	"c_cidr|10/8|row_reaching":            0,
+	"c_cidr|172.31/12|case":               0,
+	"c_cidr|172.31/12|coalesce":           4926,
+	"c_cidr|172.31/12|empty_scan":         0,
+	"c_cidr|172.31/12|eq":                 0,
+	"c_cidr|172.31/12|greatest":           3696,
+	"c_cidr|172.31/12|gt":                 3696,
+	"c_cidr|172.31/12|in":                 0,
+	"c_cidr|172.31/12|least":              1230,
+	"c_cidr|172.31/12|lt":                 1230,
+	"c_cidr|172.31/12|ne":                 4926,
+	"c_cidr|172.31/12|projection":         0,
+	"c_cidr|172.31/12|row_reaching":       0,
+	"c_cidr|192.168.0/24|case":            20,
+	"c_cidr|192.168.0/24|coalesce":        4926,
+	"c_cidr|192.168.0/24|empty_scan":      0,
+	"c_cidr|192.168.0/24|eq":              20,
+	"c_cidr|192.168.0/24|greatest":        2463,
+	"c_cidr|192.168.0/24|gt":              2443,
+	"c_cidr|192.168.0/24|in":              20,
+	"c_cidr|192.168.0/24|least":           2483,
+	"c_cidr|192.168.0/24|lt":              2463,
+	"c_cidr|192.168.0/24|ne":              4906,
+	"c_cidr|192.168.0/24|projection":      20,
+	"c_cidr|192.168.0/24|row_reaching":    20,
+	"c_cidr|255/1|case":                   0,
+	"c_cidr|255/1|coalesce":               4926,
+	"c_cidr|255/1|empty_scan":             0,
+	"c_cidr|255/1|eq":                     0,
+	"c_cidr|255/1|greatest":               3696,
+	"c_cidr|255/1|gt":                     3696,
+	"c_cidr|255/1|in":                     0,
+	"c_cidr|255/1|least":                  1230,
+	"c_cidr|255/1|lt":                     1230,
+	"c_cidr|255/1|ne":                     4926,
+	"c_cidr|255/1|projection":             0,
+	"c_cidr|255/1|row_reaching":           0,
+	"c_ipv4|10.0.0.1|case":                1,
+	"c_ipv4|10.0.0.1|coalesce":            4916,
+	"c_ipv4|10.0.0.1|empty_scan":          0,
+	"c_ipv4|10.0.0.1|eq":                  1,
+	"c_ipv4|10.0.0.1|greatest":            4915,
+	"c_ipv4|10.0.0.1|gt":                  4914,
+	"c_ipv4|10.0.0.1|in":                  1,
+	"c_ipv4|10.0.0.1|least":               2,
+	"c_ipv4|10.0.0.1|lt":                  1,
+	"c_ipv4|10.0.0.1|ne":                  4915,
+	"c_ipv4|10.0.0.1|projection":          1,
+	"c_ipv4|10.0.0.1|row_reaching":        1,
+	"c_ipv4|10.0.0.1/32|case":             1,
+	"c_ipv4|10.0.0.1/32|coalesce":         4916,
+	"c_ipv4|10.0.0.1/32|empty_scan":       0,
+	"c_ipv4|10.0.0.1/32|eq":               1,
+	"c_ipv4|10.0.0.1/32|greatest":         4915,
+	"c_ipv4|10.0.0.1/32|gt":               4914,
+	"c_ipv4|10.0.0.1/32|in":               1,
+	"c_ipv4|10.0.0.1/32|least":            2,
+	"c_ipv4|10.0.0.1/32|lt":               1,
+	"c_ipv4|10.0.0.1/32|ne":               4915,
+	"c_ipv4|10.0.0.1/32|projection":       1,
+	"c_ipv4|10.0.0.1/32|row_reaching":     1,
+	"c_ipv6|2001:db8::1|case":             1,
+	"c_ipv6|2001:db8::1|coalesce":         4919,
+	"c_ipv6|2001:db8::1|empty_scan":       0,
+	"c_ipv6|2001:db8::1|eq":               1,
+	"c_ipv6|2001:db8::1|greatest":         4918,
+	"c_ipv6|2001:db8::1|gt":               4917,
+	"c_ipv6|2001:db8::1|in":               1,
+	"c_ipv6|2001:db8::1|least":            2,
+	"c_ipv6|2001:db8::1|lt":               1,
+	"c_ipv6|2001:db8::1|ne":               4918,
+	"c_ipv6|2001:db8::1|projection":       1,
+	"c_ipv6|2001:db8::1|row_reaching":     1,
+	"c_ipv6|2001:db8::1/128|case":         1,
+	"c_ipv6|2001:db8::1/128|coalesce":     4919,
+	"c_ipv6|2001:db8::1/128|empty_scan":   0,
+	"c_ipv6|2001:db8::1/128|eq":           1,
+	"c_ipv6|2001:db8::1/128|greatest":     4918,
+	"c_ipv6|2001:db8::1/128|gt":           4917,
+	"c_ipv6|2001:db8::1/128|in":           1,
+	"c_ipv6|2001:db8::1/128|least":        2,
+	"c_ipv6|2001:db8::1/128|lt":           1,
+	"c_ipv6|2001:db8::1/128|ne":           4918,
+	"c_ipv6|2001:db8::1/128|projection":   1,
+	"c_ipv6|2001:db8::1/128|row_reaching": 1,
+}
+
+// f3PGCount returns the measured PostgreSQL count for one census cell.
+func f3PGCount(t *testing.T, col, lit, site string) int64 {
+	t.Helper()
+	n, ok := f3PGCounts[col+"|"+lit+"|"+site]
+	if !ok {
+		t.Fatalf("no PostgreSQL count measured for %s / %q / %s — a census cell "+
+			"without an anchor compares the arms only to each other", col, lit, site)
+	}
+	return n
 }
 
 // f3RefuseOnEveryArmWithState asserts a refusal AND its SQLSTATE on every arm:
@@ -376,6 +624,30 @@ func f3RefuseOnEveryArmWithState(t *testing.T, arms []struct {
 
 // f3AnswersOnEveryArm asserts a query is NOT refused, and that every arm
 // agrees on the number.
+// f3AnswersPGCountOnEveryArm asserts the number PostgreSQL 17.11 answers, on
+// every arm — not merely that the arms agree with each other. Four arms
+// agreeing on a wrong number is what let `GREATEST(c_ipv4, '10.0.0.1')` count
+// 4916 rows through this census (round-3 review P-A).
+func f3AnswersPGCountOnEveryArm(t *testing.T, arms []struct {
+	name string
+	run  func(string) ([]string, error)
+}, name, sql string, want int64) {
+	t.Helper()
+	wantRow := "n=int64:" + strconv.FormatInt(want, 10)
+	for _, arm := range arms {
+		t.Run(name+"/"+arm.name, func(t *testing.T) {
+			got, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("REFUSED a literal this column can hold: %v\n  SQL: %s", err, sql)
+			}
+			if j := strings.Join(got, ";"); j != wantRow {
+				t.Errorf("%s answers %s, PostgreSQL 17.11 answers %s\n  SQL: %s",
+					arm.name, j, wantRow, sql)
+			}
+		})
+	}
+}
+
 func f3AnswersOnEveryArm(t *testing.T, arms []struct {
 	name string
 	run  func(string) ([]string, error)
