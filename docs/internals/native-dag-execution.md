@@ -1271,12 +1271,15 @@ item.
 Two details are the projection's own. The spec's `Name` stays the ITEM's text,
 because `extractOutputRenames` maps that to the user's alias and it reads the
 untouched logical projection; only `Expr` carries the placeholder and only
-`Expr` is substituted. And the spec DECLARES the producer's type, because a
-projection's declared type is the output column's: a bare numeric literal is
-float8 in this dialect (ADR-0024), so an undeclared spec answered `true` (type
-ID zero) where the single path answers a bigint.
+`Expr` is substituted. And the spec is typed the way the SINGLE PATH types the
+item rather than from the producer: declaring the producer's type is available
+and closer to PostgreSQL, but the single-process pipeline answers a text box
+for a scalar subquery and a lowering that made the two paths disagree about a
+column's type would trade a cost for a divergence. What the spec must not do is
+claim a type it does not know — `TypeKnown` with no type is TypeID zero, which
+is BOOLEAN.
 
-Three shapes decline and keep the old disposition — refused with
+Four shapes decline and keep the old disposition — refused with
 `ErrScalarSubqueryProjectionDistributed` (`physical/scalar_projection_refusal.go`)
 and routed to the local pipeline (`runScalarProjectionLocal`, counter
 `ScalarProjectionLocalRoutes()`), the same route the correlated, DISTINCT and
@@ -1292,7 +1295,13 @@ IN-set refusals take:
   carrying the SELECT list is that body's consumer — so the carrier would await
   a producer that depends on the carrier, and the query HANGS on the stage
   barrier. `attachProjectionScalarDependencies` walks the dependency closure
-  and declines rather than wiring that edge.
+  and declines rather than wiring that edge;
+- a producer whose VALUE has no lossless literal spelling
+  (`scalarProducerValueIsLiteralSafe`). The value reaches the worker as TEXT
+  and is re-parsed there, so a type whose literal does not carry its own scale
+  or width comes back as something else: `AVG(a)` over a `DECIMAL(p,2)` emits
+  scale 6, substitutes `7.570000`, and is read back at the column's scale as
+  `7.57`. It is ADR-0021 §1e's rule at the other end of the same round trip.
 
 The refusal is asked AFTER `attachScanSelectProjections` rather than before
 stage generation, because that pass is what decides whether an item is lowered,

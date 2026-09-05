@@ -993,24 +993,44 @@ Two things a predicate does not need:
   `extractOutputRenames` maps to the user's alias, and that pass reads the
   logical projection, which the lowering does not touch. Only `Expr` carries
   the placeholder and only `Expr` is substituted.
-- **The spec declares the PRODUCER's type.** A projection's declared type IS
-  the output column's type, and a bare numeric literal is float8 in this
-  dialect (§ADR-0024). Without the declaration
-  `SELECT (SELECT MAX(c_i64) FROM t)` came back as the zero TypeID — boolean
-  `true` — where the single path answers a bigint. `emitScalarProducerStagesTyped`
-  reads it off the producer's own optimized plan.
+- **The spec is typed the way the SINGLE PATH types the item, and deliberately
+  NOT from the producer.** The producer's plan knows the value's type and the
+  projection could declare it — measured, that makes `SELECT (SELECT
+  MAX(c_i64) FROM t)` a bigint on the DAG, which is PostgreSQL's answer. The
+  single-process pipeline answers a TEXT box for the same query
+  (`expr.ScalarSubquery` declares nothing, so the item falls to the
+  projection's string fallback), and a lowering that made the two paths
+  disagree about a column's TYPE would trade a cost for a divergence. The box
+  defect is on both paths, is older than this section, and is filed. The one
+  thing the spec must NOT do is claim a type it does not know: an undeclared
+  spec that sets `TypeKnown` takes TypeID zero, which is BOOLEAN, and the
+  first cut of this answered `true` for that query.
 
-**Three declines, each with a mechanism.** An item whose subquery survives
+**FOUR declines, each with a mechanism.** An item whose subquery survives
 `resolveSubqueryAST` — a `CASE` arm, a function argument, anywhere the walk's
 `default:` returns the node unwalked. A CORRELATED subquery, which needs a
-re-run per outer row and routes on the correlated counter. And a subquery
-sharing a CTE BODY with the outer query, which is a CYCLE rather than a
-preference: `ctePlannedTerminal` hands the producer the stage the outer walk
-already emitted, the stage carrying the SELECT list is that body's consumer, so
-the carrier would await a producer that depends on the carrier. Measured:
+re-run per outer row and routes on the correlated counter. A subquery sharing a
+CTE BODY with the outer query, which is a CYCLE rather than a preference:
+`ctePlannedTerminal` hands the producer the stage the outer walk already
+emitted, the stage carrying the SELECT list is that body's consumer, so the
+carrier would await a producer that depends on the carrier. Measured:
 `WITH c AS (…) SELECT id, (SELECT MAX(v) FROM c) FROM c` HUNG on the
 coordinator's stage barrier until a twenty-minute test deadline.
 `attachProjectionScalarDependencies` walks the dependency closure and declines.
+
+And the fourth is **§1e's rule at the other end of the same round trip**. A
+producer's value reaches the worker as TEXT and is re-parsed there, exactly as
+a correlated re-run's outer values do, so a type whose literal does not carry
+its own scale or width is read back as something else: `AVG(a)` over a
+`DECIMAL(p,2)` emits scale 6, substitutes `7.570000` — the right digits — and
+comes back `7.57`, because the enclosing projection is declared from the
+subquery's SOURCE COLUMN rather than from its aggregate. The integer family,
+BOOL and STRING have no second parameter and lower; everything else declines
+and routes, where the value is never rendered at all. Lifting it needs a
+producer that declares its own (p,s) — or its own width, or its own instant —
+to the projection that reads it, which is a stage-model change rather than a
+rewrite. `coordinator.TestNumericArc2ShapesMatchPostgres` found it on the run
+after the lowering first landed.
 
 The refusal moves from before stage generation to after the attach pass,
 because that pass is what decides whether an item is lowered; it is asked
@@ -1018,7 +1038,7 @@ before the assert battery so a declined item keeps earning its OWN typed
 refusal rather than the unreachable-gather-output one — the same engine, a
 different recorded cost.
 
-Twelve cells in `coordinator.TestArcD5CorrelationMatchesPostgres` are the
+Thirteen cells in `coordinator.TestArcD5CorrelationMatchesPostgres` are the
 gate, and the three `wantScalarProjRoutes: 1` pins #659 shipped with are
 deleted, which is the proof. One divergence is recorded rather than fixed and
 is not this section's: `(SELECT MAX(bigint)) + 1` boxes float64 where
