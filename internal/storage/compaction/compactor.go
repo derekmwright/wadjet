@@ -763,21 +763,28 @@ func extractColumnStatsAt(ra io.ReaderAt, size int64) map[string]catalog.FileCol
 	return merged
 }
 
-// deleteFromStore schedules paths for physical deletion after DeleteGrace.
+// deleteFromStore schedules paths for physical retirement after DeleteGrace.
 // The manifest entries are already gone, so no NEW query can see them; the
 // grace keeps the bytes readable for queries dispatched against the old
-// manifest. A non-positive grace deletes immediately (tests).
+// manifest. A non-positive grace retires immediately (tests).
+//
+// "Retirement", not "deletion": removing a file from THIS table's manifest is
+// not proof that nothing references the object, and until #896 that was the
+// only thing either path checked. Both go through
+// catalog.Catalog.RetireObjects, which deletes only what no live manifest in
+// the catalog names.
 func (c *Compactor) deleteFromStore(ctx context.Context, paths []string) {
 	grace := c.config.DeleteGrace
 	if grace == 0 {
 		grace = DefaultDeleteGrace
 	}
 	if grace < 0 {
-		for _, p := range paths {
-			if err := c.catalog.Store().Delete(ctx, c.catalog.Bucket(), p); err != nil {
-				c.logger.Warn("failed to delete old file", "path", p, "error", err)
-			}
+		now := time.Now()
+		reqs := make([]catalog.RetireRequest, len(paths))
+		for i, p := range paths {
+			reqs[i] = catalog.RetireRequest{Path: p, NotModifiedAfter: now}
 		}
+		c.retire(ctx, reqs)
 		return
 	}
 	now := time.Now()
@@ -791,9 +798,25 @@ func (c *Compactor) deleteFromStore(ctx context.Context, paths []string) {
 		"files", len(paths), "grace", grace, "pending_total", n)
 }
 
-// FlushDeferredDeletes physically deletes every pending file older than
+// FlushDeferredDeletes physically retires every pending file older than
 // DeleteGrace. Called from the background sweep; safe to call any time.
 // Returns the number of files deleted.
+//
+// The queue is a list of paths THIS table stopped referencing, which is not
+// the same claim as "nothing references these bytes" — #896 is the gap
+// between the two. Its only guard used to be the object's LastModified, and
+// registering an unchanged object into ANOTHER live table does not move
+// LastModified: `archive` registered one of `events`'s compacted-away sources
+// during the grace, the queue deleted it, and `archive`'s manifest was left
+// naming an object that no longer exists.
+//
+// So eligibility is established by catalog.Catalog.RetireObjects instead: a
+// live-manifest reference check across every table, taken under a retirement
+// mark that refuses a racing registration, with the recreated-object check
+// folded in. A path it cannot prove anything about goes BACK on the queue —
+// doubt preserves bytes. A path some live table references is dropped from
+// the queue, because that reference is not going to go away because we
+// waited.
 func (c *Compactor) FlushDeferredDeletes(ctx context.Context) int {
 	grace := c.config.DeleteGrace
 	if grace <= 0 {
@@ -812,30 +835,43 @@ func (c *Compactor) FlushDeferredDeletes(ctx context.Context) int {
 	}
 	c.pendingDeletes = keep
 	c.delMu.Unlock()
-
-	deleted := 0
-	for _, pd := range due {
-		// Recreated-object guard: if the object at this path is NEWER than
-		// the deferral, it is not the file we compacted away — someone
-		// recreated the path (re-ingest, test datagen with deterministic
-		// names). Deleting it would destroy live data: a stale compactor
-		// surviving its harness (orphaned container, 2026-06-11 edge rig)
-		// silently consumed a freshly regenerated dataset through exactly
-		// this hole. Skip and drop the entry; the new object has its own
-		// manifest entry and lifecycle.
-		if info, err := c.catalog.Store().Head(ctx, c.catalog.Bucket(), pd.path); err == nil && info.LastModified.After(pd.at) {
-			c.logger.Warn("skipping deferred deletion: object recreated since deferral",
-				"path", pd.path, "deferred_at", pd.at, "object_modified", info.LastModified)
-			continue
-		}
-		if err := c.catalog.Store().Delete(ctx, c.catalog.Bucket(), pd.path); err != nil {
-			c.logger.Warn("failed to delete old file", "path", pd.path, "error", err)
-			continue
-		}
-		deleted++
+	if len(due) == 0 {
+		return 0
 	}
+
+	reqs := make([]catalog.RetireRequest, len(due))
+	for i, pd := range due {
+		reqs[i] = catalog.RetireRequest{Path: pd.path, NotModifiedAfter: pd.at}
+	}
+	deleted := c.retire(ctx, reqs)
 	if deleted > 0 {
 		c.logger.Info("flushed deferred deletions", "files", deleted)
+	}
+	return deleted
+}
+
+// retire runs one retirement batch and requeues whatever could not be proven
+// safe this round. Returns the number of objects actually deleted.
+func (c *Compactor) retire(ctx context.Context, reqs []catalog.RetireRequest) int {
+	outcomes := c.catalog.RetireObjects(ctx, reqs)
+	deleted, requeued := 0, 0
+	for _, r := range reqs {
+		switch outcomes[r.Path] {
+		case catalog.Retired:
+			deleted++
+		case catalog.RetireUnproven:
+			// An absence of information, not a decision: put it back rather
+			// than leak a whole pass's originals on one transient KV error.
+			c.delMu.Lock()
+			c.pendingDeletes = append([]pendingDelete{{path: r.Path, at: r.NotModifiedAfter}}, c.pendingDeletes...)
+			c.delMu.Unlock()
+			requeued++
+		}
+		// catalog.RetireReferenced: a decision. Drop the entry.
+	}
+	if requeued > 0 {
+		c.logger.Warn("deferred retirement could not be proven safe this round; requeued",
+			"files", requeued)
 	}
 	return deleted
 }

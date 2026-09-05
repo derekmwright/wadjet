@@ -120,9 +120,19 @@ func (c *Catalog) CommitDML(_ context.Context, tableName string, newFiles []Pend
 	// the ownership marker AddNewFiles stamps (#494, ADR-0020 layer 0).
 	owned := make([]PendingFile, len(newFiles))
 	copy(owned, newFiles)
+	registered := make([]string, len(owned))
 	for i := range owned {
 		owned[i].Entry.EngineWritten = true
+		registered[i] = owned[i].Entry.Path
 	}
+
+	// The registration side of the object-retirement interlock (#896,
+	// retire.go), the same one addFiles takes: no cleanup sweep may retire
+	// the bytes at a path this statement is registering.
+	if err := c.beginRegistration(registered); err != nil {
+		return err
+	}
+	defer c.endRegistration(registered)
 
 	for retry := 0; retry < maxRetries; retry++ {
 		raw, rev, err := c.kv.Get(key)

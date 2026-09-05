@@ -90,6 +90,18 @@ type Catalog struct {
 	pendingDrops     []pendingTableDrop
 	pendingDropPaths int
 	dropReclaimWired bool
+
+	// retiring / registering are the two halves of the object-retirement
+	// interlock (#896, retire.go): a path a retirement sweep has marked
+	// refuses a registration, and a path a registration is mid-flight on is
+	// not a retirement candidate this round. Both are counted rather than
+	// boolean because two sweeps, or two registrations, can name the same
+	// path at once. Both are IN-PROCESS, which is the right scope for what
+	// they guard — the deferred-delete queue they serve is itself
+	// process-local.
+	retireMu    sync.Mutex
+	retiring    map[string]int
+	registering map[string]int
 }
 
 // aggStatsCacheEntry is a memoized AggregateColumnStats result, valid for
@@ -725,6 +737,18 @@ func mergeNewFileEntries(existing, incoming []FileEntry) ([]FileEntry, error) {
 // resolved.
 func (c *Catalog) addFiles(tableName string, partValues map[string]string, partPath string, files []FileEntry,
 	merge func(existing, incoming []FileEntry) ([]FileEntry, error)) error {
+	// Declared BEFORE the manifest write, released after it: a retirement
+	// sweep must not be able to delete the bytes at a path this call is in
+	// the middle of registering, and must not be able to start deciding
+	// about one either (#896, retire.go). This is the registration side of
+	// that interlock; ErrPathRetiring comes back when a sweep got there
+	// first, and the caller retries.
+	registered := filePathsOf(files)
+	if err := c.beginRegistration(registered); err != nil {
+		return err
+	}
+	defer c.endRegistration(registered)
+
 	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
 
