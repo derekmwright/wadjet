@@ -1923,6 +1923,34 @@ is the arc #770 needs. Pinned fail-on-agree on the shuffled arm in
 is stale (it reports 2 rows with a NULL on BOTH DAG arms; on `18f3660e` the
 broadcast arm is right and only the shuffled arm is loud).
 
+**The third residual is `SELECT *` over a materialized arm, and it is a COLUMN
+COUNT, not a value.** (2026-09-05, #780's round-2 review.) Both DAG arms
+publish **10** columns where PostgreSQL and the single-process path publish
+**8**: the arm's stage passes its whole inner stream through and APPENDS the
+computed alias, so the arm's join partner rides out with it —
+`SELECT * FROM decpair t JOIN (SELECT g.id AS id, g.a*3 AS a FROM decpair g
+JOIN decpair h ON g.id=h.id) m ON t.id=m.id` ships `h.a` and `h.id` between
+`m.id` and `m.a`. Every VALUE in the eight shared columns agrees, and the
+declared types agree; only the star's width does not.
+
+The passthrough is deliberate and is why the fix works at all: every DAG
+resolver — `resolveShuffleKey`, `resolveAggInputName`, the needed-column
+propagation — reads the arm's SOURCE names off that stream, and narrowing the
+passthrough to the arm's SELECT list takes those names away from resolvers this
+arc does not move (which is the same wall #770 hit, from the other side). So
+this section's doctrine, one column per SELECT item, is a statement about what
+an arm PUBLISHES and not about what its stage SHIPS; a star expansion is the
+one consumer that can tell the difference, because it asks the stage rather
+than the arm.
+
+The mechanism a repair needs is therefore the same one #770 needs — an arm's
+published name list carried separately from its stage's stream, so the star can
+expand against the former while the resolvers keep reading the latter — and it
+is deferred to that arc for the same reason. Pinned fail-on-agree on BOTH DAG
+arms in `coordinator.TestF1AJoinArmPublishesTheColumnsItSelects`, cell
+`780 PINNED: SELECT * over a materialized arm ships the arm's inner columns`:
+the day the DAG publishes 8, that cell fails and deleting it is the proof.
+
 **A pass that ABSORBS a stage must not absorb away its projection.**
 (2026-09-05, #780's round-1 review.) The materialization above puts the arm's
 computed column on the stage that terminates the arm — and `fuseJoinStages`
