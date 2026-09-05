@@ -716,10 +716,10 @@ container cells individually so a regression says which shape came back.
 
 §1 bounds a number before it sizes an allocation. §2 refuses a claim another
 part of the same file contradicts. §10 is where the WRITER's guarantee stops.
-§11 is about the checks the format supplies for its own benefit: **every self-describing check a file
-carries is performed before a value derived from it is returned, and a failure
-is an error naming the location — never a fabricated NULL and never a shifted
-value.**
+§11 is about the checks the format supplies for its own
+benefit: **every self-describing check a file carries is performed before a
+value derived from it is returned, and a failure is an error naming the
+location — never a fabricated NULL and never a shifted value.**
 
 Four families of such check exist, and none of them was being made.
 
@@ -776,6 +776,35 @@ reachable through the body:
   (`compressed[off:off+repLen]`, then `compressed[off:]`). A negative one
   panicked the decode with `slice bounds out of range [-1:]`. §1's rule had
   simply never been applied to those two fields.
+
+Bounding those two lengths was not enough, and the first sweep could not see
+why: every arm of it was written from a Go struct whose leaves are REQUIRED
+and FLAT, so every v2 page in it had `definition_levels_byte_length == 0` and
+the whole class was unreachable. On an OPTIONAL leaf it is reachable with one
+flipped bit. A v2 level length does TWO jobs — it sizes the level section and
+it PLACES the value section — and a v1 page gets the second checked for free,
+because its sections are length-prefixed and the decoder reports what it
+consumed. So:
+
+- a leaf with a definition (repetition) level must carry those levels: zero is
+  the one length bounding cannot catch, and it skips the level decode
+  entirely, leaving every value in the page read `defLen` bytes early with all
+  three v2 count cross-checks vacuous (`num_nulls` is 0, `defLevels` is nil,
+  `num_rows` equals `num_values`);
+- the levels must decode to exactly `num_values`, and must consume exactly the
+  declared bytes — short by one byte starts the values early, long by one
+  starts them late;
+- and a level run that declares more bytes than its section holds is refused
+  rather than clamped. The RLE decoder clamped a bit-packed run to the bytes
+  available, which decodes a TRUNCATED level section as a complete one — the
+  consumed-bytes check then agrees with the shortened length and the value
+  section still moves. The clamp is kept for dictionary indices, whose length
+  places nothing.
+
+The corpus is the other half of the fix: the sweep now carries OPTIONAL leaves
+(parquet-go) and OPTIONAL + NESTED ones (pyarrow LIST/MAP/STRUCT with null and
+empty containers, `testdata/v2_nested*.parquet`), because a property measured
+against a corpus that cannot contain its counterexample is not measured.
 
 **Level consistency.** A nested leaf's rows are its repetition levels'
 level-0 entries, and nothing else. `PageData.NumRows` reported `NumValues` for
@@ -855,7 +884,7 @@ is not settled here.
   one read path) to 735 cells across PLAIN and dictionary pages and all three
   columnar read paths, because "the paths agree" is only a property if the
   paths are all exercised.
-- Files that were read before and are refused now, from §10: a page whose
+- Files that were read before and are refused now, from §11: a page whose
   stored body does not hash to the checksum its own header declares; a column
   chunk whose pages deliver fewer (or more) rows than its row group says it
   holds; a row group carrying no chunk at all for a leaf of its own schema; a
@@ -863,9 +892,19 @@ is not settled here.
   page v2 whose declared `num_rows` disagrees with its repetition levels, or
   whose `num_rows` and `num_values` disagree on a flat leaf, or whose
   `num_nulls` has no definition levels to place it with or disagrees with the
-  levels it has, or whose level byte lengths do not fit the page. Each of
-  these previously produced a value, a NULL, a whole column of NULLs, or a
+  levels it has, or whose level byte lengths do not fit the page, are zero on
+  a leaf that has levels, or are not the length those levels encode in. Each
+  of these previously produced a value, a NULL, a whole column of NULLs, or a
   panic, without saying so.
+- What §11 does NOT reach, and cannot: a row-group prune reads the FOOTER's
+  statistics, and parquet gives the footer no checksum at any level — `crc` is
+  a page-header field. A corrupt statistic is a wrong prune that no
+  self-describing check in this section can see;
+  `wadjet.TestARowGroupTheReadNeverOpensIsNeverChecked` gates the boundary (a
+  pruned row group is not reconciled, the same file read whole refuses) and
+  that is the whole of what is available. The page INDEX (ColumnIndex /
+  OffsetIndex) would give per-page counts to cross-check without decoding;
+  wadjet neither writes nor reads it, so every check here is page-local.
 - The refusals are cross-implementation facts, not round trips: the checksum
   cells run over files written by parquet-go and by pyarrow
   (`testdata/page_crc.parquet`, `page_crc_v2.parquet`), and the multi-page
