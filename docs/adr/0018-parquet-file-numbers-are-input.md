@@ -712,14 +712,15 @@ width or a scale: `ingest.TestTheIngestBoundaryNeverAdmitsWhatTheWriterRefuses`
 (1770 cells) asserts that everything the door admits, the writer can store, and
 `ingest.TestTheIngestBoundaryRefusesABadValueInsideAContainer` names the
 container cells individually so a regression says which shape came back.
+
 ### 11. The reader trusts nothing it can verify
 
 §1 bounds a number before it sizes an allocation. §2 refuses a claim another
 part of the same file contradicts. §10 is where the WRITER's guarantee stops.
-§11 is about the checks the format supplies for its own
-benefit: **every self-describing check a file carries is performed before a
-value derived from it is returned, and a failure is an error naming the
-location — never a fabricated NULL and never a shifted value.**
+§11 is about the checks the format supplies for its own benefit: **every
+self-describing check a file carries is performed before a value derived from
+it is returned, and a failure is an error naming the location — never a
+fabricated NULL and never a shifted value.**
 
 Four families of such check exist, and none of them was being made.
 
@@ -754,10 +755,11 @@ tidy cut, exactly at a page boundary, was silent.
 **The page header itself, which no checksum covers.** `crc` is computed over
 the page BODY, so every number the reader navigates by — the page type, the
 value and null and row counts, the v2 level byte lengths — is unprotected by
-construction. The exhaustive header bit-flip sweep written to establish that
-weaker property ("a flipped header bit either refuses, or decodes to exactly
-what the unmutated file decodes") found three violations at once, none of them
-reachable through the body:
+construction. A header bit-flip sweep was written to establish that weaker
+property ("a flipped header bit either refuses, or decodes to exactly what the
+unmutated file decodes"). Its first corpus was four parquet-go arms whose every
+leaf is REQUIRED and FLAT, and over those it found three violations at once,
+none of them reachable through the body:
 
 - A page whose `type` decoded to something the reader does not handle was
   `continue`d past — while `chargeRows` had already CHARGED its rows. The
@@ -777,11 +779,12 @@ reachable through the body:
   panicked the decode with `slice bounds out of range [-1:]`. §1's rule had
   simply never been applied to those two fields.
 
-Bounding those two lengths was not enough, and the first sweep could not see
-why: every arm of it was written from a Go struct whose leaves are REQUIRED
-and FLAT, so every v2 page in it had `definition_levels_byte_length == 0` and
-the whole class was unreachable. On an OPTIONAL leaf it is reachable with one
-flipped bit. A v2 level length does TWO jobs — it sizes the level section and
+Bounding those two lengths was not enough, and that first corpus could not
+show why — which is the point worth recording. Because every leaf in it was
+REQUIRED and FLAT, every v2 page had `definition_levels_byte_length == 0`, so
+the whole class "a level byte length that is wrong" was unreachable and the
+sweep's clean result said nothing about it. On an OPTIONAL leaf it is
+reachable with one flipped bit. A v2 level length does TWO jobs — it sizes the level section and
 it PLACES the value section — and a v1 page gets the second checked for free,
 because its sections are length-prefixed and the decoder reports what it
 consumed. So:
@@ -801,10 +804,13 @@ consumed. So:
   section still moves. The clamp is kept for dictionary indices, whose length
   places nothing.
 
-The corpus is the other half of the fix: the sweep now carries OPTIONAL leaves
-(parquet-go) and OPTIONAL + NESTED ones (pyarrow LIST/MAP/STRUCT with null and
-empty containers, `testdata/v2_nested*.parquet`), because a property measured
-against a corpus that cannot contain its counterexample is not measured.
+The corpus is the other half of the fix, and the sweep is only "exhaustive"
+with respect to the one it runs on: nine arms now, carrying OPTIONAL leaves
+(parquet-go, v1 and v2, uncompressed and snappy) and OPTIONAL + NESTED ones
+(pyarrow LIST/MAP/STRUCT with null and empty containers,
+`testdata/v2_nested*.parquet`), 9831 header bit flips. A property measured
+against a corpus that cannot contain its counterexample is not measured, and
+the sweep's verdict has to be read together with the corpus it was taken over.
 
 **Level consistency.** A nested leaf's rows are its repetition levels'
 level-0 entries, and nothing else. `PageData.NumRows` reported `NumValues` for
@@ -900,11 +906,19 @@ is not settled here.
   statistics, and parquet gives the footer no checksum at any level — `crc` is
   a page-header field. A corrupt statistic is a wrong prune that no
   self-describing check in this section can see;
-  `wadjet.TestARowGroupTheReadNeverOpensIsNeverChecked` gates the boundary (a
+  `parquet.TestARowGroupTheReadNeverOpensIsNeverChecked` gates the boundary (a
   pruned row group is not reconciled, the same file read whole refuses) and
   that is the whole of what is available. The page INDEX (ColumnIndex /
   OffsetIndex) would give per-page counts to cross-check without decoding;
   wadjet neither writes nor reads it, so every check here is page-local.
+  A truncated DICTIONARY-INDEX run is also out of reach, and deliberately so:
+  the strict decode above is scoped to level sections, because a level
+  length places the value section and an index payload's does not. The
+  tolerance that remains there is not harmless — a bit-packed index run that
+  declares more bytes than it has decodes the missing entries as index 0,
+  which is a VALID dictionary index, so no downstream bound can see it — it is
+  simply a different defect, in a payload whose length nothing else depends
+  on, and it is not what this section settles.
 - The refusals are cross-implementation facts, not round trips: the checksum
   cells run over files written by parquet-go and by pyarrow
   (`testdata/page_crc.parquet`, `page_crc_v2.parquet`), and the multi-page

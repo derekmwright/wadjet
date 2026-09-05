@@ -265,9 +265,14 @@ func (d *RLEDecoder) decodeAllBatch(dst []int32) (int, error) {
 				// accepted as a complete decode: the caller then places the
 				// value section by the header's (short) length and every
 				// value in the page moves. A dictionary-index payload keeps
-				// the old tolerance — its length is not load-bearing for
-				// anything else's position, and the index bound catches a
-				// bad value downstream.
+				// the old tolerance, and the reason is the LENGTH, not the
+				// values: an index payload's length places nothing, so a
+				// truncated one moves no other section. It is not that the
+				// missing entries are caught downstream — they decode as
+				// index 0, which is a valid dictionary index that no bound
+				// can see. That is a separate defect in a separate payload,
+				// recorded as a deferral in ADR-0018 §11 rather than fixed
+				// by widening this flag.
 				if d.strict {
 					return pos, fmt.Errorf("rle: bit-packed run needs %d bytes at offset %d "+
 						"but only %d remain", byteCount, d.off, len(d.data)-d.off)

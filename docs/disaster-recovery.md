@@ -129,6 +129,7 @@ with the file's own metadata. The full set of refusals in this family:
 | `carries no chunk for it` | a row group has no data at all for a column of the file's own schema |
 | `which this reader cannot decode` | a page of an unknown type sits inside a column chunk, so its rows cannot be accounted for |
 | `data page v2 declares ...` | a v2 page's row, value, null or level-length counts contradict each other or its levels |
+| `carries no definition levels` / `carries no repetition levels` | a v2 page on a column that can hold NULLs, or that holds a list or map, arrived with the section that says which values are absent removed |
 
 The usual causes are a truncated upload, a partial range read, or
 storage-level bit rot.
