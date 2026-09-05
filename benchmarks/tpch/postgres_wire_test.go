@@ -100,17 +100,20 @@ type wireCase struct {
 	// unparameterized statement.
 	paramOIDs []uint32
 	params    [][]byte
-	// binaryParams sends every parameter under format code 1 instead of 0.
+	// paramFormats is the format code PER PARAMETER, as Bind carries it: 0
+	// text, 1 binary. Nil means all text, which is what every entry sent
+	// before #486 — readOne hard-coded a zero-filled slice, so pgwire's whole
+	// binary parameter decoder (renderBinaryParam: fifteen OIDs of big-endian
+	// integers, IEEE floats, 2000-epoch date/time, raw bytea and PostgreSQL's
+	// base-10000 numeric) was reachable from no gate at all, while pgx sends
+	// binary by DEFAULT.
 	//
-	// This arm sent every parameter as TEXT for as long as it has existed
-	// (readOne hard-coded a zero-filled format slice), so pgwire's whole
-	// binary parameter decoder — renderBinaryParam, thirteen OIDs' worth of
-	// big-endian integers, IEEE floats, 2000-epoch date/time, raw bytea and
-	// PostgreSQL's base-10000 numeric — was reachable from no gate (#486).
-	// It is the ORDINARY path for a Go client: pgx sends binary by default.
-	// The bytes below are what a driver puts on the wire, and a value decoded
-	// wrong under a right OID is exactly the class this arm exists for.
-	binaryParams bool
+	// It is a per-parameter SLICE and not a per-case bool because Bind's is:
+	// a driver that pre-encoded one value and left another as text sends
+	// {1, 0}, and a server that reads one format code and applies it to every
+	// parameter answers that Bind wrong. binaryFormats(n) is the all-binary
+	// spelling.
+	paramFormats []int16
 	// minRows is the number of rows the ORACLE must return for this entry to
 	// be worth comparing. A parameterized statement whose bind matches
 	// nothing agrees with any other implementation that also matches nothing,
@@ -480,11 +483,9 @@ func describeCell(b []byte) string {
 }
 
 func readOne(ctx context.Context, conn *pgconn.PgConn, c wireCase, sql string, resultFormats []int16) *pgconn.Result {
-	paramFormats := make([]int16, len(c.params)) // text (0) unless the case says binary
-	if c.binaryParams {
-		for i := range paramFormats {
-			paramFormats[i] = 1
-		}
+	paramFormats := c.paramFormats
+	if paramFormats == nil {
+		paramFormats = make([]int16, len(c.params)) // all text
 	}
 	return conn.ExecParams(ctx, sql, c.params, c.paramOIDs, paramFormats, resultFormats).Read()
 }
@@ -512,6 +513,23 @@ func int8Bin(v int64) []byte {
 
 func float8Bin(v float64) []byte {
 	return binary.BigEndian.AppendUint64(nil, math.Float64bits(v))
+}
+
+func float4Bin(v float32) []byte {
+	return binary.BigEndian.AppendUint32(nil, math.Float32bits(v))
+}
+
+// timestampBin is MICROSECONDS from 2000-01-01 UTC, PostgreSQL's timestamp
+// epoch — the conversion pgx performs for every time.Time it binds.
+func timestampBin(y int, m time.Month, d, hh, mm, ss int) []byte {
+	base := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	micros := time.Date(y, m, d, hh, mm, ss, 0, time.UTC).Sub(base).Microseconds()
+	return int8Bin(micros)
+}
+
+// timeBin is microseconds since midnight.
+func timeBin(hh, mm, ss int) []byte {
+	return int8Bin(int64(hh)*3600e6 + int64(mm)*60e6 + int64(ss)*1e6)
 }
 
 func boolBin(v bool) []byte {
@@ -1724,52 +1742,89 @@ func wireCorpus() []wireCase {
 		// The answer must be identical, on both servers: a parameter is a
 		// value, and the format code is how it travelled.
 		{name: "ParamInt4Binary", sql: `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey = $1`,
-			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(7)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(7)}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamInt2Binary", sql: `SELECT n_nationkey FROM nation WHERE n_regionkey = $1 ORDER BY n_nationkey`,
-			paramOIDs: []uint32{21}, params: [][]byte{int2Bin(1)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{21}, params: [][]byte{int2Bin(1)}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamInt8Binary", sql: `SELECT n_key FROM net_probe WHERE n_dur = $1 ORDER BY n_key`,
-			paramOIDs: []uint32{20}, params: [][]byte{int8Bin(1000000007)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{20}, params: [][]byte{int8Bin(1000000007)}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamTextBinary", sql: `SELECT n_nationkey FROM nation WHERE n_name = $1`,
-			paramOIDs: []uint32{25}, params: [][]byte{[]byte("BRAZIL")}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{25}, params: [][]byte{[]byte("BRAZIL")}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamBoolBinary", sql: `SELECT n_nationkey FROM nation WHERE (n_regionkey = 1) = $1 ORDER BY n_nationkey`,
-			paramOIDs: []uint32{16}, params: [][]byte{boolBin(true)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{16}, params: [][]byte{boolBin(true)}, paramFormats: binaryFormats(1), minRows: 1},
 		// bytea, whose binary form IS the value's bytes — the shape #570
 		// closed on the way in, now asked in the format that carries it.
 		{name: "ParamByteaBinary", sql: `SELECT b_key FROM bytea_probe WHERE b_val = $1 ORDER BY b_key`,
-			paramOIDs: []uint32{17}, params: [][]byte{{0x68, 0x69}}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{17}, params: [][]byte{{0x68, 0x69}}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamByteaBinaryHighBytes",
 			sql:       `SELECT b_key FROM bytea_probe WHERE b_val = $1 ORDER BY b_key`,
-			paramOIDs: []uint32{17}, params: [][]byte{{0xff, 0xfe, 0x00, 0x41}}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{17}, params: [][]byte{{0xff, 0xfe, 0x00, 0x41}}, paramFormats: binaryFormats(1), minRows: 1},
 		// The NETWORK types, which declare int4 / int4 / int8 since #834 — so
 		// a driver binds them as integers, in binary, and this is the only arm
 		// that can see whether the value survived the declaration.
 		{name: "ParamPortBinary", sql: `SELECT n_key FROM net_probe WHERE n_port = $1 ORDER BY n_key`,
-			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(631)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(631)}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamProtocolBinary", sql: `SELECT n_key FROM net_probe WHERE n_proto = $1 ORDER BY n_key`,
-			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(6)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(6)}, paramFormats: binaryFormats(1), minRows: 1},
 		// float8 and numeric: IEEE 754 and PostgreSQL's base-10000 digits.
 		{name: "ParamFloat8Binary", sql: `SELECT r_key FROM real_probe WHERE d_val = $1 ORDER BY r_key`,
-			paramOIDs: []uint32{701}, params: [][]byte{float8Bin(0.5)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{701}, params: [][]byte{float8Bin(0.5)}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamNumericBinary", sql: `SELECT d_key FROM dec_probe WHERE d_2 = $1 ORDER BY d_key`,
-			paramOIDs: []uint32{1700}, params: [][]byte{numericBin("1.25")}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{1700}, params: [][]byte{numericBin("1.25")}, paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamNumericBinaryNegative", sql: `SELECT d_key FROM dec_probe WHERE d_2 = $1 ORDER BY d_key`,
-			paramOIDs: []uint32{1700}, params: [][]byte{numericBin("-1.25")}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{1700}, params: [][]byte{numericBin("-1.25")}, paramFormats: binaryFormats(1), minRows: 1},
 		// date and uuid, over the multi-key fixture — the only tables in this
 		// oracle carrying a real DATE and a real UUID column.
 		{name: "ParamDateBinary", sql: `SELECT id FROM mk_outer WHERE dt = $1 ORDER BY id LIMIT 5`,
 			paramOIDs: []uint32{1082}, params: [][]byte{dateBin(2024, time.January, 3)},
-			binaryParams: true, minRows: 1},
+			paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamUUIDBinary", sql: `SELECT id FROM mk_outer WHERE u = $1 ORDER BY id LIMIT 5`,
 			paramOIDs:    []uint32{2950},
 			params:       [][]byte{uuidBin("2c5f39cb-3fb2-11d2-883f-0016d3cca427")},
-			binaryParams: true, minRows: 1},
+			paramFormats: binaryFormats(1), minRows: 1},
 		// A binary parameter that reaches a PLAN rather than a scan predicate.
 		{name: "ParamInt4BinaryInAggregate", sql: `SELECT COUNT(*) AS c FROM nation WHERE n_regionkey = $1`,
-			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(1)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(1)}, paramFormats: binaryFormats(1), minRows: 1},
 		// A binary parameter under SELECT *, so RowDescription is promised
 		// before the bind is read (#846's shape, in the other format).
 		{name: "StarParamBinary", sql: `SELECT * FROM nation WHERE n_nationkey = $1`,
-			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(3)}, binaryParams: true, minRows: 1},
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(3)}, paramFormats: binaryFormats(1), minRows: 1},
+		// The five OIDs the first pass left ungated (round-1 P1). `timestamp`
+		// is the one that matters most: it is what pgx binds a time.Time to
+		// by default, and its decode is the 2000-epoch MICROSECOND conversion
+		// — the most error-prone arm in renderBinaryParam. None of the three
+		// temporal ones has a column in this fixture, so each is compared
+		// against the literal of its own type, which is the question anyway:
+		// did the eight bytes become the instant they encode.
+		{name: "ParamFloat4Binary", sql: `SELECT r_key FROM real_probe WHERE r_val = $1 ORDER BY r_key`,
+			paramOIDs: []uint32{700}, params: [][]byte{float4Bin(1.5)},
+			paramFormats: binaryFormats(1), minRows: 1},
+		{name: "ParamOIDBinary", sql: `SELECT COUNT(*) AS c FROM nation WHERE $1 = $1`,
+			paramOIDs: []uint32{26}, params: [][]byte{int4Bin(2)},
+			paramFormats: binaryFormats(1), minRows: 1},
+		{name: "ParamTimestampBinary",
+			sql:       `SELECT COUNT(*) AS c FROM nation WHERE CAST('1996-01-10 12:34:56' AS timestamp) = $1`,
+			paramOIDs: []uint32{1114}, params: [][]byte{timestampBin(1996, time.January, 10, 12, 34, 56)},
+			paramFormats: binaryFormats(1), minRows: 1},
+		{name: "ParamTimestampTZBinary",
+			sql:       `SELECT COUNT(*) AS c FROM nation WHERE CAST('1996-01-10 12:34:56' AS timestamp) = $1`,
+			paramOIDs: []uint32{1184}, params: [][]byte{timestampBin(1996, time.January, 10, 12, 34, 56)},
+			paramFormats: binaryFormats(1), minRows: 1},
+		{name: "ParamTimeBinary",
+			sql:       `SELECT COUNT(*) AS c FROM nation WHERE CAST('12:34:56' AS time) = $1`,
+			paramOIDs: []uint32{1083}, params: [][]byte{timeBin(12, 34, 56)},
+			paramFormats: binaryFormats(1), minRows: 1},
+		// A MIXED Bind (round-1 P2): one parameter binary, one text, in the
+		// format array Bind actually carries. A server that reads the FIRST
+		// format code and applies it to every parameter answers this wrong,
+		// and no all-binary or all-text cell can see that.
+		{name: "ParamMixedFormatsBinaryThenText",
+			sql:       `SELECT n_nationkey FROM nation WHERE n_regionkey = $1 AND n_name = $2`,
+			paramOIDs: []uint32{23, 25}, params: [][]byte{int4Bin(1), []byte("BRAZIL")},
+			paramFormats: []int16{1, 0}, minRows: 1},
+		{name: "ParamMixedFormatsTextThenBinary",
+			sql:       `SELECT n_nationkey FROM nation WHERE n_name = $1 AND n_regionkey = $2`,
+			paramOIDs: []uint32{25, 23}, params: [][]byte{[]byte("BRAZIL"), int4Bin(1)},
+			paramFormats: []int16{0, 1}, minRows: 1},
 	}
 	return append(base, decimalTPCHWireCorpus()...)
 }
