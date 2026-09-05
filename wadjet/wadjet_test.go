@@ -350,6 +350,11 @@ func TestCurrentDateNotNull(t *testing.T) {
 	}
 
 	today := time.Now().Format("2006-01-02")
+	// NOW() and CURRENT_TIMESTAMP render the instant zoneless in UTC (ADR-0012), so
+	// after 20:00 local in a UTC-4 zone their date is already tomorrow's; compare
+	// them against the UTC date. CURRENT_DATE still answers the local date — see
+	// the timezone issue filed with this change.
+	todayUTC := time.Now().UTC().Format("2006-01-02")
 
 	tests := []struct {
 		sql    string
@@ -366,7 +371,7 @@ func TestCurrentDateNotNull(t *testing.T) {
 			colKey: "current_timestamp",
 			check: func(val any) bool {
 				s, ok := val.(string)
-				return ok && strings.HasPrefix(s, today[:10])
+				return ok && strings.HasPrefix(s, todayUTC)
 			},
 		},
 		{
@@ -374,7 +379,7 @@ func TestCurrentDateNotNull(t *testing.T) {
 			colKey: "now",
 			check: func(val any) bool {
 				s, ok := val.(string)
-				return ok && strings.HasPrefix(s, today[:10])
+				return ok && strings.HasPrefix(s, todayUTC)
 			},
 		},
 		{
