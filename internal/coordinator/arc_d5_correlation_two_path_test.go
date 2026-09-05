@@ -65,13 +65,26 @@ type arcD5Cell struct {
 	//
 	//   - the 18 GENERATED per-type rendering cells, for the cost measured
 	//     below;
-	//   - `#852/correlated_scalar_over_a_derived_table`, because that plan's
-	//     memory floor sits ON the arm's budget rather than under or over it
-	//     and the cell both answered and refused across runs — pinning either
-	//     outcome would be pinning a coin flip (ADR-0027: which batch crosses
-	//     a budget is a CONDITION, not a shape). RE-MEASURED on v0.18.31,
-	//     after the index reclaim: five replicates, 2 answered / 3 refused.
-	//     The reason it is dropped is unchanged.
+	//   - `#852/correlated_scalar_over_a_derived_table`, whose plan's memory
+	//     floor sits ON the arm's budget rather than under or over it: five
+	//     replicates went 2 answered / 3 refused on v0.18.31 and 4 / 1 here,
+	//     and pinning either outcome would be pinning a coin flip (ADR-0027:
+	//     which batch crosses a budget is a CONDITION, not a shape).
+	//
+	//     WHAT MAKES IT A COIN FLIP IS NOW KNOWN, and it is not this shape's
+	//     doing. Five HashAggregate units charge the tracker, not one: the
+	//     primary plus FOUR morsel clones on a TrackingOnlyView, each paying
+	//     its hash table's presized CAPACITY (~107 KB) for a forty-row input,
+	//     which is the whole 535,822 the refusal reports as
+	//     `forced=… by "spill tracking"`. Each unit releases at
+	//     HashAggregate.Close, which the parallel emit runs on that unit's own
+	//     goroutine as it finishes draining — concurrently with the hash
+	//     join's first arrival reservation. So the floor the join is admitted
+	//     against is how many units have finished draining, a scheduling fact.
+	//     TestAMorselFannedAggregateIsWhatPutsTheCorrelatedScalarPastItsBudget
+	//     holds the measurement and asserts the half that IS deterministic:
+	//     with the fan-out off, five replicates out of five answer. Re-arm
+	//     this arm the day that gate's ON arm stops refusing.
 	//
 	// The generated cells' reason is measured, not assumed, and it is the same
 	// fact this arc is about:
