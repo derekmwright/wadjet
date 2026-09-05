@@ -221,6 +221,27 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 			return RequiredDistribution{Kind: RequiredClusteredOn,
 				Keys: stage.JoinLeftKeys, KeyTypes: stage.JoinKeyTypes}
 		case 1:
+			// A NULL-AWARE ANTI JOIN'S BUILD IS NOT PARTITIONABLE (#539).
+			//
+			// `NOT IN` is three-valued, and the third value is read off the
+			// WHOLE build side: "did any row have a NULL key". A
+			// hash-partitioned build splits that fact — the task holding the
+			// NULL partition emits nothing while every other task emits its
+			// probe rows, so `NOT IN` over a NULL-carrying list comes back
+			// with the rows a two-valued anti join would keep (#507).
+			//
+			// walkStages already forces such a join onto the broadcast path,
+			// where slot 1 is RequiredBroadcast by stage TYPE. This says the
+			// same thing as a PROPERTY of the join rather than of the type it
+			// happens to have been emitted as, so a pass that re-types a
+			// null-aware anti join back to a hash join gets a replicate
+			// exchange from EnsureDistribution instead of a shuffle that
+			// silently answers the two-valued question. Every such pass is
+			// guarded today; this is what makes the next one safe by
+			// construction rather than by remembering.
+			if stage.NullAwareAnti {
+				return RequiredDistribution{Kind: RequiredBroadcast}
+			}
 			return RequiredDistribution{Kind: RequiredClusteredOn,
 				Keys: stage.JoinRightKeys, KeyTypes: stage.JoinKeyTypes}
 		default:

@@ -3485,6 +3485,13 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := p.attachProjectionScalarDependencies(stages); err != nil {
 		return nil, err
 	}
+	// LAST, after every rewriting pass, for the reason the security-filter
+	// order check below is asked last: a null-aware anti join whose build is
+	// partitioned answers its NOT EXISTS twin, and no operator downstream can
+	// notice (#539/#507).
+	if err := assertNullAwareAntiBuildsAreReplicated(stages); err != nil {
+		return nil, err
+	}
 	// LAST, after every rewriting pass: no predicate below a security
 	// projection may read a column that projection hides. A pass that copied
 	// FilterExprs without its PostSecurityFilterExprs companion would put one
