@@ -1301,7 +1301,12 @@ IN-set refusals take:
   and is re-parsed there, so a type whose literal does not carry its own scale
   or width comes back as something else: `AVG(a)` over a `DECIMAL(p,2)` emits
   scale 6, substitutes `7.570000`, and is read back at the column's scale as
-  `7.57`. It is ADR-0021 §1e's rule at the other end of the same round trip.
+  `7.57`. It is ADR-0021 §1e's rule at the other end of the same round trip;
+- an item where any subquery did NOT become a producer. `resolveSubqueryAST`
+  executes a not-provably-one-row subquery at plan time and splices its value
+  as a literal, which meets no literal-safety check at all — and
+  `WADJET_SCALAR_DEFER=0` puts every shape on that path. The lowering counts:
+  as many producers as the item had subqueries, or nothing is lowered.
 
 The refusal is asked AFTER `attachScanSelectProjections` rather than before
 stage generation, because that pass is what decides whether an item is lowered,
@@ -1337,9 +1342,11 @@ and three things say so at three layers:
   emitted as a `hash_join`.
 - `assertNullAwareAntiBuildsAreReplicated` is asked on the FINAL stage list,
   after every rewriting pass. A plan that cannot be shown to give every task
-  the whole build is refused `0A000` and routed to the coordinator-local
-  pipeline. Fusion declines such a join separately (`fuse_stage_chains.go`,
-  twice) because `ChainedJoinSpec` has no field for the flag.
+  the whole build is refused `0A000` (`sqlerr.Wrap`, so a client sees the
+  class) and routed to the coordinator-local pipeline
+  (`runNullAwareAntiLocal`, counter `NullAwareAntiLocalRoutes`). Fusion
+  declines such a join separately (`fuse_stage_chains.go`, twice) because
+  `ChainedJoinSpec` has no field for the flag.
 
 What #539 itself asks for — a lowering that does not NEED a replicated build,
 so a large `NOT IN` can shuffle — is not this. ADR-0021 §1f records the

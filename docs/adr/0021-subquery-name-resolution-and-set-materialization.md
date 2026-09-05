@@ -429,6 +429,17 @@ FINAL stage list that every such join reads a build every task sees whole,
 refusing `0A000` and routing local rather than dispatching a plan whose tasks
 would each answer a different question.
 
+The refusal is `0A000` and the coordinator ROUTES it
+(`runNullAwareAntiLocal`, counter `NullAwareAntiLocalRoutes`), because the
+coordinator-local pipeline's single hash join holds the whole build by
+construction. That sentence was written here before it was true: the error was
+a bare `errors.New` with no coder and the coordinator had no arm for it, so a
+plan that tripped the invariant would have reached the client with no class.
+The gate takes the two production hunks away one at a time — with only the
+forcing off the distribution property still splices a replicate exchange and
+nothing is refused; with both off the build really is partitioned and the
+invariant refuses and routes.
+
 What #539 asks for beyond that — a lowering that does not need a replicated
 build, so a large `NOT IN` can shuffle — is the two-join identity above, and
 it is still blocked on the same thing: `physical.BuildSemiAntiFilter` reads a
@@ -1031,6 +1042,38 @@ producer that declares its own (p,s) — or its own width, or its own instant �
 to the projection that reads it, which is a stage-model change rather than a
 rewrite. `coordinator.TestNumericArc2ShapesMatchPostgres` found it on the run
 after the lowering first landed.
+
+**"Everything else declines" is a claim about EVERY PATH that renders a value,
+and the first cut of it was false.** `resolveSubqueryAST` has two exits and
+only one is a producer: a subquery that is not provably one row is EXECUTED on
+the coordinator at plan time and its value spliced in as a literal, which never
+meets the check above. Measured — `(SELECT b FROM t ORDER BY id LIMIT 1)` over
+a `DECIMAL(18,4)` reached a worker as `1` where PostgreSQL answers `12.7500`,
+and a TIMESTAMP, a FLOAT64 and a DURATION came back int64-boxed where the
+single path answers text. `WADJET_SCALAR_DEFER=0` is the same door for EVERY
+shape, because with the switch off nothing defers at all.
+
+So the rule is counted rather than inspected: **as many producers as the item
+had subqueries, or the item is not lowered.** "No subquery left in the tree" is
+true both when every one became a producer and when one was replaced by a
+literal, and those are not the same disposition.
+
+A fifth decline stands beside it, for a hard failure rather than a wrong value:
+a producer that REUSES a CTE body somebody already planned emits a `cte-alias`
+phantom, and `flattenCTEAliases` runs inside `generateStages`, before this
+lowering exists. The phantom reached dispatch and the stage failed three times
+with `empty Operators on task … (StageType="cte-alias")` and no SQLSTATE — two
+SELECT-list subqueries over one CTE, and a SELECT-list subquery beside a WHERE
+one. Re-running the alias flattening after every producer is emitted would
+renumber stages the surrounding passes have already bound references into, so
+the shape keeps what it had before the lowering: refused, routed, right.
+
+`WADJET_SCALAR_DEFER` is a registered `optswitch` toggle (`scalar-defer`)
+rather than a bare env read, because it decides which ENGINE answers a query.
+A CTE-referencing subquery defers whatever it says — eager evaluation over the
+cteCache float-drifts against the outer query's distributed aggregate, which is
+Q15's zero-row root cause — so the two-path cells state which of them lower
+both ways.
 
 The refusal moves from before stage generation to after the attach pass,
 because that pass is what decides whether an item is lowered; it is asked
