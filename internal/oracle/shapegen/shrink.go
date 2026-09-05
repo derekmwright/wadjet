@@ -89,7 +89,6 @@ func candidates(s *Schema, q *Query) []*Query {
 			if len(c.Order) == 0 {
 				c.Limit = 0
 				c.LimitZero = false
-				c.LimitZero = false
 			}
 			add(c)
 		}
@@ -126,7 +125,6 @@ func candidates(s *Schema, q *Query) []*Query {
 			}
 			if len(c.Order) == 0 {
 				c.Limit = 0
-				c.LimitZero = false
 				c.LimitZero = false
 				c.TotalOrder = false
 			}

@@ -100,7 +100,6 @@ func candidates(s *Schema, q *Query) []*Query {
 				c.OrderBy = nil
 				c.Limit = 0
 				c.LimitZero = false
-				c.LimitZero = false
 			}
 			add(c)
 		}

@@ -229,10 +229,18 @@ func releaseOnSignal(release func()) func() {
 		case <-done:
 		}
 	}()
+	var stop sync.Once
 	return func() {
-		close(done)
-		signal.Stop(sigs)
-		once.Do(release)
+		// The whole closure is once-guarded, not just `release`: `close(done)`
+		// panics on a second call, and a release function is exactly the kind
+		// of thing a caller ends up invoking twice (a `defer` plus an explicit
+		// one on an error path). Every current caller calls it once; this is
+		// so the next one does not have to (round-1 N1).
+		stop.Do(func() {
+			close(done)
+			signal.Stop(sigs)
+			once.Do(release)
+		})
 	}
 }
 
