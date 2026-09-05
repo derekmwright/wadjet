@@ -32,7 +32,11 @@ func TestCurrentDateMinusInterval(t *testing.T) {
 	val := result.Rows[0][colName]
 	t.Logf("CURRENT_DATE - INTERVAL '30 days' = %v (type: %T)", val, val)
 
-	expected := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+	// UTC, the one zone every clock function reads (#870). This computed the
+	// machine's LOCAL date, which agreed with CURRENT_DATE only because
+	// CURRENT_DATE had the same defect — west of Greenwich the two named
+	// different days for the hours between local midnight and UTC midnight.
+	expected := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
 	valStr := fmt.Sprintf("%v", val)
 	if valStr != expected {
 		t.Errorf("got %q, want %q", valStr, expected)
@@ -45,7 +49,7 @@ func TestCurrentDateMinusInterval(t *testing.T) {
 	}
 	col2 := result2.Columns[0]
 	val2 := fmt.Sprintf("%v", result2.Rows[0][col2])
-	expected2 := time.Now().AddDate(0, 0, 7).Format("2006-01-02")
+	expected2 := time.Now().UTC().AddDate(0, 0, 7).Format("2006-01-02")
 	if val2 != expected2 {
 		t.Errorf("CURRENT_DATE + INTERVAL '7 days': got %q, want %q", val2, expected2)
 	}
