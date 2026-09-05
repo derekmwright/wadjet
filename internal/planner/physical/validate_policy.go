@@ -158,3 +158,35 @@ func (p *Planner) policyTableColumns(ctx context.Context, table string) []string
 	}
 	return cols
 }
+
+// checkPolicyPlanOrderFromContext runs logical.CheckPolicyPlanOrder over a
+// plan this planner built for itself — a subquery pipeline, a scalar producer
+// — using the context's policies and per-table lookup.
+//
+// The invariant has to be asked about EVERY plan the query builds, not only
+// the statement's own. A subquery is planned here, optimized here, and its
+// predicates are pushed here; a predicate that ends up between a security
+// projection and its scan reads the stored column just as surely as one in the
+// outer plan, and the shape that does it — a derived table, a set operation or
+// a correlation inside the subquery — is one no per-shape teaching can
+// enumerate (#859 round 4).
+func (p *Planner) checkPolicyPlanOrderFromContext(ctx context.Context, plan *logical.Node) error {
+	pol := logical.ColumnPoliciesFromContext(ctx)
+	lookup := logical.PolicyLookupFromContext(ctx)
+	if len(pol) == 0 && lookup == nil {
+		return nil
+	}
+	return logical.CheckPolicyPlanOrder(plan, func(table string) []logical.ColumnPolicy {
+		if cols := pol.For(table); len(cols) > 0 {
+			return cols
+		}
+		if lookup == nil {
+			return nil
+		}
+		cols, _, err := lookup(table)
+		if err != nil {
+			return nil
+		}
+		return cols
+	})
+}

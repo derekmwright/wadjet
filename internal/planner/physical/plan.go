@@ -1610,6 +1610,13 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		// The invariant over THIS plan too. A subquery's predicates are
+		// pushed here, and one that ends up between a security projection and
+		// its scan reads the stored column exactly as it would in the outer
+		// plan (#859 round 4).
+		if err := p.checkPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 
 	// Build physical pipeline
@@ -1971,6 +1978,9 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
 		if err != nil {
+			return "", err
+		}
+		if err := p.checkPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
 			return "", err
 		}
 	}
