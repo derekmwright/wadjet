@@ -605,11 +605,14 @@ func TestVectorWriteIsExactlyTheDeclaredWidth(t *testing.T) {
 }
 
 // The O(1) pool check reads ONE flag, and it is only sound while every vector
-// under a pooled batch shares that batch's claim state. A pooled batch OWNS
-// its columns — resetVectorForReuse has always assumed it, and since the
-// round-2 O(1) check the assumption decides whether a claim is SEEN. Assert
-// it at mint and after a reuse cycle, on a nested schema, so an operator that
-// starts replacing a pooled batch's column breaks a test rather than a query.
+// under a pooled batch carries that batch's claim state. This asserts THAT —
+// the invariant the test is named for — and not merely that a well-formed
+// batch vetoes, which is what its first version checked (round-2 review P1).
+//
+// Three parts: the invariant holds on a batch out of the pool; a claim at any
+// depth vetoes; and a FOREIGN vector — one minted somewhere else, which is the
+// only way to break the invariant — is adopted by SetColumn and vetoes like any
+// other, from all three origins the codebase actually mints.
 func TestAPooledBatchOwnsItsColumns(t *testing.T) {
 	elem := parquet.Column{Name: "element", Type: parquet.TypeInt64}
 	schema := []parquet.Column{
@@ -622,10 +625,24 @@ func TestAPooledBatchOwnsItsColumns(t *testing.T) {
 	}
 	pool := batch.NewBatchPool(schema, 4)
 
+	// The invariant itself, at mint and after a reuse cycle.
+	t.Run("invariant", func(t *testing.T) {
+		b := pool.Get()
+		if !b.OwnsItsColumns() {
+			t.Fatalf("a freshly minted pooled batch does not own its columns")
+		}
+		b.Release()
+		again := pool.Get()
+		if !again.OwnsItsColumns() {
+			t.Errorf("a recycled pooled batch does not own its columns")
+		}
+		again.Release()
+	})
+
 	// A claim on ANY vector under the batch — however deep — has to reach the
 	// batch's own check, which is what the flag is for.
 	for _, at := range []string{"column", "row-child", "row-grandchild", "array-child"} {
-		t.Run(at, func(t *testing.T) {
+		t.Run("claim-at/"+at, func(t *testing.T) {
 			b := pool.Get()
 			target := b.Columns[0]
 			switch at {
@@ -652,6 +669,61 @@ func TestAPooledBatchOwnsItsColumns(t *testing.T) {
 			next.Release()
 		})
 	}
+
+	// A FOREIGN column. Each of these is a shape the tree already mints, and
+	// each carries a claim state that is not this batch's — so before SetColumn
+	// existed, a claim on one set somebody else's flag and the batch was
+	// recycled underneath it. Both orders: claimed before joining, and claimed
+	// after.
+	flat := []parquet.Column{{Name: "c", Type: parquet.TypeInt64}}
+	foreigners := map[string]func() *batch.Vector{
+		"NewVectorLike":   func() *batch.Vector { return batch.NewVectorLike(batch.NewRecordBatch(flat, 4).Columns[0]) },
+		"NewColumnVector": func() *batch.Vector { return batch.NewColumnVector(flat[0], 4) },
+		"another-pooled-batch": func() *batch.Vector {
+			return batch.NewBatchPool(flat, 4).Get().Columns[0]
+		},
+	}
+	for name, mint := range foreigners {
+		for _, order := range []string{"claim-after-join", "claim-before-join"} {
+			t.Run("foreign/"+name+"/"+order, func(t *testing.T) {
+				p := batch.NewBatchPool(flat, 4)
+				b := p.Get()
+				alien := mint()
+				if order == "claim-before-join" {
+					alien.Claim()
+				}
+				b.SetColumn(0, alien)
+				if !b.OwnsItsColumns() {
+					t.Fatalf("SetColumn did not adopt the %s vector", name)
+				}
+				if order == "claim-after-join" {
+					alien.Claim()
+				}
+				vetoes := batch.PoolRetentionVetoes()
+				b.Release()
+				if batch.PoolRetentionVetoes() == vetoes {
+					t.Errorf("a claim on an adopted %s vector did not veto", name)
+				}
+				if next := p.Get(); next == b {
+					t.Errorf("the pool handed back a batch whose adopted %s column is claimed", name)
+				}
+			})
+		}
+	}
+
+	// And the hazard SetColumn exists to prevent, stated as a measurement: a
+	// raw assignment leaves the batch not owning its columns, which is exactly
+	// what OwnsItsColumns reports and what a future operator pooling a
+	// column-swapping accumulator would have to answer for.
+	t.Run("raw-assignment-breaks-the-invariant", func(t *testing.T) {
+		p := batch.NewBatchPool(flat, 4)
+		b := p.Get()
+		b.Columns[0] = batch.NewColumnVector(flat[0], 4)
+		if b.OwnsItsColumns() {
+			t.Errorf("a raw assignment of a foreign column went undetected; " +
+				"OwnsItsColumns can no longer catch the hazard SetColumn exists for")
+		}
+	})
 }
 
 // A batch built by hand over another batch's vectors carries no claim state of

@@ -123,9 +123,16 @@ func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 }
 
 // stampClaimState gives a vector and everything beneath it the batch's claim
-// state, at mint. Base is deliberately NOT stamped: a view's base belongs to
-// whatever batch minted it, and Claim already propagates through Base to set
-// THAT batch's flag. resetVectorForReuse re-stamps on every pooled reuse.
+// state. Base is deliberately NOT stamped: a view's base belongs to whatever
+// batch minted it, and Claim already propagates through Base to set THAT
+// batch's flag.
+//
+// It runs at MINT and at SetColumn, and nowhere else — in particular NOT on
+// every pooled reuse, which is where it was and what it cost: re-stamping a
+// nested schema's whole tree on each Reset measured +18% on the nested pool
+// cycle (round-2 review P2) to re-establish something the mint had already
+// established. A column is stamped when it JOINS the batch, which is the only
+// moment its state can be wrong.
 func stampClaimState(v *Vector, cs *claimState) {
 	if v == nil {
 		return
@@ -170,6 +177,72 @@ func newVectorFromColumn(col parquet.Column, numRows int) *Vector {
 		}
 	}
 	return v
+}
+
+// SetColumn replaces column i, adopting the vector into this batch's claim
+// state so the pool boundary can still see a claim on it.
+//
+// Assigning `b.Columns[i] = v` directly is what every operator that swaps a
+// column does today, and it is correct for all of them because none of those
+// batches is pooled — they are hand-built shells or NewRecordBatch batches
+// with no pool, which Release never admits anywhere. On a POOLED batch it is
+// not correct: the claim flag hangs off the vectors (see claimState), so a
+// vector minted elsewhere carries a different flag — or none — and a consumer
+// claiming it would set somebody else's while THIS batch is the one Reset
+// recycles. Round-2 review P1 measured that hole for all three ways a foreign
+// vector is minted (NewVectorLike, another pooled batch's column,
+// NewColumnVector).
+//
+// So the swap has a supported form. It stamps the incoming vector and its
+// children, and if the vector is ALREADY claimed it trips the flag at once,
+// because a claim taken before the vector joined the batch is still a claim on
+// storage this batch would otherwise recycle.
+func (b *RecordBatch) SetColumn(i int, v *Vector) {
+	b.Columns[i] = v
+	if b.claims == nil {
+		return
+	}
+	stampClaimState(v, b.claims)
+	if claimedAnywhere(v) {
+		b.claims.any.Store(true)
+	}
+}
+
+// OwnsItsColumns reports whether every vector under this batch carries the
+// batch's own claim state — the invariant the O(1) pool check rests on.
+//
+// It exists for the gate that asserts it (TestAPooledBatchOwnsItsColumns) and
+// for anyone debugging a claim that did not veto: a false answer means some
+// column was assigned rather than SetColumn'd, and a claim on it will be
+// invisible to Release. It walks the whole tree and is not for a hot path.
+func (b *RecordBatch) OwnsItsColumns() bool {
+	if b.claims == nil {
+		return true // no state to own; the pool boundary takes the walk
+	}
+	for _, c := range b.Columns {
+		if !ownsClaimState(c, b.claims) {
+			return false
+		}
+	}
+	return true
+}
+
+func ownsClaimState(v *Vector, cs *claimState) bool {
+	if v == nil {
+		return true
+	}
+	if v.claims != cs {
+		return false
+	}
+	if !ownsClaimState(v.Child, cs) {
+		return false
+	}
+	for _, ch := range v.Children {
+		if !ownsClaimState(ch, cs) {
+			return false
+		}
+	}
+	return true
 }
 
 // ActiveLen returns the number of active rows (respecting selection vector).
@@ -239,6 +312,11 @@ func (b *RecordBatch) Release() {
 // batch: ColumnPrune and the set-op emitter mint a NEW RecordBatch over the
 // same *Vector pointers, so a consumer that detaches the derived batch would
 // otherwise leave the producer of the original believing nobody kept it.
+// ORDER MATTERS and always has: Detach BEFORE the producer releases the batch.
+// A claim taken afterwards is a claim on storage the pool has already taken
+// back, and neither the per-column walk nor the claim flag can help — the next
+// Get resets it and writes over the value. The O(1) flag makes the check look
+// more authoritative than the contract is; the contract is unchanged.
 func (b *RecordBatch) Detach() {
 	b.pool = nil
 	b.retained = true
@@ -299,15 +377,18 @@ func (b *RecordBatch) Reset(numRows int) {
 	// back: clear the stamp so a late release from the previous producer finds
 	// it foreign rather than handing one buffer to two owners.
 	b.mint = MintStamp{}
-	if b.claims != nil {
-		// A claimed batch never reaches a pool (retainsClaimedStorage vetoes
-		// it), so this is clearing a flag that is already false — except on
-		// the first Reset of a freshly minted batch, and except for a column
-		// that was replaced mid-cycle, which the re-stamp below re-adopts.
+	if b.claims != nil && b.claims.any.Load() {
+		// Clearing a flag that is already false, in every case a pool
+		// produces: Put refuses a batch whose flag is set, so nothing in the
+		// free list carries one, and a freshly minted batch has none either.
+		// The clear stays for a caller that Resets a batch of its own, and it
+		// is READ first because the read is a plain load where the store is a
+		// locked exchange — on a nested schema the unconditional store was
+		// most of what was left of this check's cost.
 		b.claims.any.Store(false)
 	}
 	for _, col := range b.Columns {
-		resetVectorForReuse(col, numRows, b.claims)
+		resetVectorForReuse(col, numRows)
 	}
 }
 
@@ -316,18 +397,11 @@ func (b *RecordBatch) Reset(numRows int) {
 // column kept its previous cycle's child arenas, offsets and null bits —
 // the first reused row read back the prior batch's data concatenated with
 // the new value, and child arenas grew monotonically per reuse cycle.
-func resetVectorForReuse(col *Vector, numRows int, claims *claimState) {
+func resetVectorForReuse(col *Vector, numRows int) {
 	// Views must never survive into a pooled reuse cycle; drop the
 	// indirection so the batch is a plain (empty) owned batch again.
 	col.Base = nil
 	col.Indices = nil
-	// Re-adopt the vector into the batch's claim state. It is already stamped
-	// unless somebody replaced this column since the last cycle, and this walk
-	// is writing to the same cache lines anyway, so the store costs nothing
-	// and the O(1) pool check cannot be fooled by a swapped-in column.
-	if claims != nil {
-		col.claims = claims
-	}
 	// A batch only reaches a pool when nobody claimed it — Detach severs the
 	// pool link, and since #897 retainsClaimedStorage vetoes the derived-batch
 	// case Detach cannot sever — so a recycled vector starts unclaimed again.
@@ -342,14 +416,14 @@ func resetVectorForReuse(col *Vector, numRows int, claims *claimState) {
 			col.Offsets[i] = 0
 		}
 		if col.Child != nil {
-			resetVectorForReuse(col.Child, 0, claims)
+			resetVectorForReuse(col.Child, 0)
 			// Child element storage is append-built; truncate the arenas so
 			// CopyValueFrom/AppendFrom start from a zero-length child.
 			truncateVectorStorage(col.Child)
 		}
 	case TypeRow:
 		for _, ch := range col.Children {
-			resetVectorForReuse(ch, numRows, claims)
+			resetVectorForReuse(ch, numRows)
 		}
 	}
 }
