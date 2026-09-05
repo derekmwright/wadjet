@@ -10,6 +10,16 @@ on:
     # `if` gate skips CI while the PR is still draft.
     types: [opened, synchronize, reopened, ready_for_review]
 
+# Least privilege for the GITHUB_TOKEN, the way pr-review.yml and
+# issue-worker.yml already declare theirs. Neither job below writes anything
+# back to the repository: `test` builds and runs the suite, `benchmark` runs
+# TPC-H SF1 and appends to $GITHUB_STEP_SUMMARY, which is a file the runner
+# provides and needs no token scope. Without this block both jobs ran with the
+# repository default, which for a repository configured for write access is a
+# token that can push (CodeQL actions/missing-workflow-permissions #1, #2).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
