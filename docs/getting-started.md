@@ -230,6 +230,11 @@ mc mb local/wadjet
 >   refused, naming the lock file — wait for that process, or use
 >   `--nats-url`. The lock never needs deleting: it clears itself when the
 >   holder exits, and the kernel releases it even if the holder is killed.
+>   A command holding the catalog shuts it down cleanly on `SIGINT` and
+>   `SIGTERM` — closing the connection, stopping the embedded server and
+>   releasing the lock — and exits `128+signal`, so the next command opens the
+>   store without a JetStream rebuild. Inside `shell`, Ctrl-C still aborts the
+>   line you are typing rather than ending the session.
 >
 > **The catalog store directory follows the data.** With
 > `--storage-type=file --data-dir=D` it is `D/_catalog`, so each data

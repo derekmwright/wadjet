@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -188,7 +190,50 @@ func sharedCatalogKV(ctx context.Context, logger *slog.Logger) (catalog.MetaKV, 
 		unlock()
 		return nil, nil, fmt.Errorf("opening the catalog under %s: %w", cfg.StoreDir, err)
 	}
-	return kv, func() { nc.Close(); embedded.Shutdown(); unlock() }, nil
+	return kv, releaseOnSignal(func() { nc.Close(); embedded.Shutdown(); unlock() }), nil
+}
+
+// releaseOnSignal runs release exactly once — on the caller's `defer`, or on
+// SIGINT/SIGTERM if one arrives first — and then exits with the conventional
+// 128+signal status.
+//
+// A CLI command holding the shared catalog is running an embedded NATS server
+// over a JetStream FILE store, and a process killed outright skips every
+// `defer`: the store is left unclean and the next open logs
+// `Filestore ... will rebuild`. JetStream does recover, so nothing was lost —
+// but the CLI running a file-backed JetStream at all is new, so this path is
+// newly reachable, and a recovery on every start is a cost and a log line
+// nobody can explain (arc E2's follow-up 8).
+//
+// SIGINT is handled as well as SIGTERM. The interactive `shell` reads its
+// prompt in raw mode, where ^C arrives as a BYTE and liner's SetCtrlCAborts
+// turns it into "abort this line" without any signal — so this handler does
+// not take the shell's abort key away. It fires for the ^C that arrives while
+// a QUERY is running, when the terminal is back in cooked mode and today the
+// process dies where it stands.
+func releaseOnSignal(release func()) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, unix.SIGTERM)
+	go func() {
+		select {
+		case s := <-sigs:
+			once.Do(release)
+			signal.Stop(sigs)
+			code := 130 // 128 + SIGINT, the fallback
+			if us, ok := s.(unix.Signal); ok {
+				code = 128 + int(us)
+			}
+			os.Exit(code)
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+		signal.Stop(sigs)
+		once.Do(release)
+	}
 }
 
 // dialCatalogKV opens the catalog of a running server, and returns it with the
