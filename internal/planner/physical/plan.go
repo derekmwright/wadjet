@@ -1061,10 +1061,12 @@ type Planner struct {
 	// end (attachProjectionScalarDependencies).
 	projScalarProducers map[string]projScalarProducer
 
-	// loweredScalarProjExprs is the set of SELECT-list item texts the
-	// lowering above rewrote, so refuseScalarSubqueryProjections refuses only
-	// the items no stage will compute.
-	loweredScalarProjExprs map[string]bool
+	// loweredScalarProjExprs is the set of SELECT-list items the lowering
+	// above rewrote, keyed by the projection's own ADDRESS so that two items
+	// which merely spell the same expression cannot share a verdict —
+	// refuseScalarSubqueryProjections then refuses exactly the items no stage
+	// will compute.
+	loweredScalarProjExprs map[*logical.Projection]bool
 
 	// ctePlannedTerminal caches the terminal stage ID emitted while walking
 	// a CTE's subtree, keyed by `cteName + "|" + structuralHash(subtree)`.
@@ -1680,12 +1682,25 @@ func (p *Planner) executeSubquerySchema(ctx context.Context, sql string) ([]map[
 	return collectSink.ToRows(), schema, nil
 }
 
-// scalarDeferAll gates deferring ALL uncorrelated scalar filter subqueries
-// to distributed producer stages (not only CTE-referencing ones).
-// Kill switch: WADJET_SCALAR_DEFER=0 reverts non-CTE subqueries to eager
-// plan-time execution on the coordinator's single-process pipeline
-// (mirrors WADJET_EXCHANGE_ELIDE / WADJET_SCAN_COL_SANITIZE).
-var scalarDeferAll = os.Getenv("WADJET_SCALAR_DEFER") != "0"
+// ScalarDeferToggle gates deferring ALL uncorrelated scalar subqueries to
+// distributed producer stages (not only CTE-referencing ones). Off
+// (WADJET_SCALAR_DEFER=0) reverts them to eager plan-time execution on the
+// coordinator's single-process pipeline.
+//
+// REGISTERED rather than read with a bare os.Getenv since #659: the switch
+// decides whether a SELECT-list item becomes a producer stage or is left to
+// the coordinator-local route, so it changes which ENGINE answers a query --
+// and the rule is that a switch which can change the row set extends the
+// invariance oracle. Reading it off the registry also lets a gate flip it
+// without an env round trip.
+var ScalarDeferToggle = optswitch.Register("scalar-defer", "WADJET_SCALAR_DEFER",
+	"defer every uncorrelated scalar subquery to a distributed producer stage")
+
+// ScalarSubqueriesAreDeferred reports whether the toggle above is on. Exported
+// for the two-path gates, which must expect a lowered SELECT-list item to
+// DECLINE when it is off: with no deferral there is no producer, and the
+// lowering refuses to render a value it did not get from one.
+func ScalarSubqueriesAreDeferred() bool { return ScalarDeferToggle.On() }
 
 // deferredScalar carries a single CTE-referencing subquery whose resolution
 // has been deferred until coordinator dispatch. The placeholder is a colon-
@@ -1838,7 +1853,7 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		// The perf lever the deferral exists for is untouched: Q11's and
 		// Q22's subqueries are ungrouped aggregates, which is exactly the
 		// shape that still defers.
-		if scalarSubqueryIsOneRow(n.SQL) && (scalarDeferAll || p.subqueryReferencesCTE(n.SQL)) {
+		if scalarSubqueryIsOneRow(n.SQL) && (ScalarDeferToggle.On() || p.subqueryReferencesCTE(n.SQL)) {
 			name := p.allocScalarPlaceholder()
 			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL})
 			return &plansql.LiteralPlaceholder{Name: name}
@@ -3663,9 +3678,9 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 					return stages
 				}
 				if p.loweredScalarProjExprs == nil {
-					p.loweredScalarProjExprs = map[string]bool{}
+					p.loweredScalarProjExprs = map[*logical.Projection]bool{}
 				}
-				p.loweredScalarProjExprs[itemExpr] = true
+				p.loweredScalarProjExprs[&proj[j]] = true
 				specs = append(specs, ProjectExprSpec{Expr: lowered, Name: name,
 					Type: ldecl.ID, TypeKnown: ldeclKnown,
 					Precision: ldecl.Precision, Scale: ldecl.Scale})
@@ -7039,7 +7054,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// build the threshold would have refused is replicating N× across the
 		// cluster, and #539 is where the shape that removes the trade is
 		// tracked.
-		if node.NullAwareAnti && !preservesBuildSide(jt) && !isBroadcast {
+		if node.NullAwareAnti && !preservesBuildSide(jt) && !isBroadcast && !nullAwareAntiForcingDisabled {
 			isBroadcast = true
 			NullAwareAntiForcedBroadcasts.Add(1)
 			bytes, known := p.estimateSubtreeBytes(node.Children[1])

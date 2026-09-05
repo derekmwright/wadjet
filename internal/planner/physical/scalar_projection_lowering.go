@@ -78,10 +78,30 @@ func (p *Planner) lowerProjectionSubquery(stages *[]Stage, item *logical.Project
 	if item.ASTExpr == nil || p.planCtx == nil {
 		return "", decl, false, false
 	}
+	// EVERY subquery in the item must become a PRODUCER, and counting them
+	// first is what makes that checkable. resolveSubqueryAST has a second
+	// exit: a subquery that is not provably one row is not deferred at all —
+	// it is EXECUTED on the coordinator at plan time and its value spliced in
+	// as a literal (plan.go's `scalarToLiteral` arm). That literal never meets
+	// scalarProducerValueIsLiteralSafe, so `(SELECT b FROM t ORDER BY id LIMIT
+	// 1)` over a DECIMAL(18,4) reached a worker as `1` where PostgreSQL and
+	// the single path answer 12.7500 — a wrong VALUE — and a TIMESTAMP, a
+	// FLOAT64 and a DURATION came back int64-boxed where the single path
+	// answers text. It is also the whole of `WADJET_SCALAR_DEFER=0`, under
+	// which NOTHING defers and every one of those shapes took the splice.
+	//
+	// So the rule is counted, not inspected: as many producers as the item had
+	// subqueries, or the item is not lowered at all.
+	want := countExprSubqueries(item.ASTExpr)
 	var deferred []deferredScalar
 	before := p.scalarPlaceholderSeq
+	stagesBefore := len(*stages)
 	resolved := p.resolveSubqueryAST(p.planCtx, item.ASTExpr, &deferred, decls)
 	if resolved == nil {
+		p.scalarPlaceholderSeq = before
+		return "", decl, false, false
+	}
+	if len(deferred) != want {
 		p.scalarPlaceholderSeq = before
 		return "", decl, false, false
 	}
@@ -102,6 +122,25 @@ func (p *Planner) lowerProjectionSubquery(stages *[]Stage, item *logical.Project
 		}
 		if !typeKnown || !scalarProducerValueIsLiteralSafe(valueType) {
 			return "", decl, false, false
+		}
+		// A producer that REUSED a CTE body somebody already planned emits a
+		// `cte-alias` phantom, and the pass that resolves those
+		// (flattenCTEAliases) runs inside generateStages — before this
+		// lowering exists. The phantom therefore reaches dispatch, where it
+		// carries no operators and the stage fails three times with no
+		// SQLSTATE: `empty Operators on task … (StageType="cte-alias")`. Two
+		// SELECT-list subqueries over one CTE, and a SELECT-list subquery
+		// beside a WHERE one over the same CTE, both do it.
+		//
+		// Declining is the honest disposition and not a smaller fix: the
+		// alternative is to re-run the alias flattening after every producer
+		// is emitted, which renumbers stages the surrounding passes have
+		// already bound references into. The shape keeps what it had at base —
+		// refused, routed, right.
+		for i := stagesBefore; i < len(*stages); i++ {
+			if (*stages)[i].Type == stageTypeCTEAlias {
+				return "", decl, false, false
+			}
 		}
 		if p.projScalarProducers == nil {
 			p.projScalarProducers = map[string]projScalarProducer{}
@@ -149,9 +188,17 @@ func scalarProducerValueIsLiteralSafe(t parquet.TypeID) bool {
 
 // exprCarriesSubquery reports whether any subquery construct survives in n.
 func exprCarriesSubquery(n plansql.Node) bool {
-	found := false
-	visitExprSubqueries(n, func(string, string) { found = true })
-	return found
+	return countExprSubqueries(n) > 0
+}
+
+// countExprSubqueries counts the subquery constructs in n. The LOWERING needs
+// the count rather than the boolean: "no subquery left in the tree" is true
+// both when every one became a producer and when one was executed at plan time
+// and replaced by a literal, and those two are not the same disposition.
+func countExprSubqueries(n plansql.Node) int {
+	count := 0
+	visitExprSubqueries(n, func(string, string) { count++ })
+	return count
 }
 
 // attachProjectionScalarDependencies wires each lowered SELECT-list

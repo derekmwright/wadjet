@@ -96,9 +96,8 @@ func TestScalarDeferAll_Q11_Q22(t *testing.T) {
 // legacy eager path for non-CTE subqueries (no ScalarDependencies emitted;
 // the filter carries an inlined literal or the original subquery text).
 func TestScalarDeferAll_KillSwitch(t *testing.T) {
-	old := scalarDeferAll
-	scalarDeferAll = false
-	defer func() { scalarDeferAll = old }()
+	old := ScalarDeferToggle.Set(false)
+	defer func() { ScalarDeferToggle.Set(old) }()
 
 	cat, ctx := setupTPCHCatalog(t)
 	sql := tpchPlanQueryMap[22]

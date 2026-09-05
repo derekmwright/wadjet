@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -72,11 +73,14 @@ type arcD5Cell struct {
 	//     which batch crosses a budget is a CONDITION, not a shape).
 	//
 	//     WHAT MAKES IT A COIN FLIP IS NOW KNOWN, and it is not this shape's
-	//     doing. Five HashAggregate units charge the tracker, not one: the
-	//     primary plus FOUR morsel clones on a TrackingOnlyView, each paying
-	//     its hash table's presized CAPACITY (~107 KB) for a forty-row input,
-	//     which is the whole 535,822 the refusal reports as
-	//     `forced=… by "spill tracking"`. Each unit releases at
+	//     doing. Several HashAggregate units charge the tracker, not one: the
+	//     primary plus one morsel clone per key-space partition, on a
+	//     TrackingOnlyView, each paying its hash table's presized CAPACITY
+	//     (~107 KB) for a forty-row input. The charge per unit is constant and
+	//     the COUNT follows the budget — 5 / 4 / 3 units at 512 / 384 / 256
+	//     KiB, i.e. `used` of 535822 / 428725 / 321628 — so the 535,822 the
+	//     refusal reports as `forced=… by "spill tracking"` is this budget's
+	//     number rather than the shape's. Each unit releases at
 	//     HashAggregate.Close, which the parallel emit runs on that unit's own
 	//     goroutine as it finishes draining — concurrently with the hash
 	//     join's first arrival reservation. So the floor the join is admitted
@@ -115,6 +119,16 @@ type arcD5Cell struct {
 	// wantDAG, when set, is what the two DAG arms must answer INSTEAD of
 	// `want`.
 	wantDAG []string
+	// loweredOnlyWhenDeferred marks a cell whose SELECT-list subquery becomes
+	// a PRODUCER STAGE, and therefore lowers only while the deferral toggle is
+	// on. `WADJET_SCALAR_DEFER=0` leaves every scalar subquery to plan-time
+	// execution, so there is no producer for the item to read and the lowering
+	// DECLINES — the query routes and answers, which is what the switch is
+	// for. The optimization-invariance oracle compares RESULTS, and those do
+	// not move; this field is what keeps the ROUTE assertion honest under the
+	// switch instead of pinning a number that only holds one way (#659,
+	// round-1 review P2).
+	loweredOnlyWhenDeferred bool
 	// The per-DAG-arm counter deltas. 0 = the DAG executed the shape.
 	wantCorrRoutes        int64
 	wantScalarProjRoutes  int64
@@ -1483,9 +1497,13 @@ func TestArcD5CorrelationMatchesPostgres(t *testing.T) {
 				// Rule 11: the counters travel beside the rows, and ALL of
 				// them are read on EVERY cell — a right-to-routed move is
 				// exactly what a row assertion cannot see.
+				wantScalarProj := tc.wantScalarProjRoutes
+				if tc.loweredOnlyWhenDeferred && !physical.ScalarSubqueriesAreDeferred() {
+					wantScalarProj = 1
+				}
 				for i, d := range arcD5RouteDelta(before, arcD5Routes(arm.c)) {
 					wantRoute := [4]int64{
-						tc.wantCorrRoutes, tc.wantScalarProjRoutes,
+						tc.wantCorrRoutes, wantScalarProj,
 						tc.wantInSubqueryRoutes, tc.wantUnreachableRoutes,
 					}[i]
 					if d != wantRoute {
@@ -1840,6 +1858,7 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		// literal that carried no declared type came back `bool:true` (the
 		// zero TypeID) in the first cut of this lowering.
 		{issue: "#659", name: "select_list_scalar_subquery_over_a_base_table_lowers",
+			loweredOnlyWhenDeferred: true,
 			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS mx FROM typemx ` +
 				`WHERE id<3 ORDER BY id`,
 			want: rows,
@@ -1850,12 +1869,14 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 				"base and on the single-process path, and the lowering deliberately does not " +
 				"fix it on ONE path: filed"},
 		{issue: "#659", name: "select_list_scalar_subquery_over_a_derived_table_lowers",
+			loweredOnlyWhenDeferred: true,
 			sql: `SELECT id, (SELECT MAX(v) FROM (SELECT c_i64 AS v FROM typemx) d) AS mx ` +
 				`FROM typemx WHERE id<3 ORDER BY id`,
 			want: rows},
 		// A WRAPPED subquery — the shape Q11's threshold has — is arithmetic
 		// over the placeholder and lowers with it.
 		{issue: "#659", name: "select_list_scalar_subquery_wrapped_in_arithmetic_lowers",
+			loweredOnlyWhenDeferred: true,
 			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) + 1 AS mx FROM typemx ` +
 				`WHERE id<3 ORDER BY id`,
 			want: []string{"id=int64:0|mx=float:4.99901e+09", "id=int64:1|mx=float:4.99901e+09",
@@ -1868,6 +1889,7 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		// TWO subqueries in one SELECT list: two producers, two placeholders,
 		// and the substitution has to keep them apart.
 		{issue: "#659", name: "two_select_list_scalar_subqueries_lower",
+			loweredOnlyWhenDeferred: true,
 			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS hi, ` +
 				`(SELECT MIN(c_i64) FROM typemx) AS lo FROM typemx WHERE id<2 ORDER BY id`,
 			want: []string{"id=int64:0|hi=4999014997|lo=0", "id=int64:1|hi=4999014997|lo=0"}},
@@ -1899,6 +1921,10 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		// The control that says the boundary is the SHARED CTE and not the
 		// CTE: a CTE the outer query does not read has no shared stage, so
 		// the producer is an ordinary upstream and the item lowers.
+		// No loweredOnlyWhenDeferred here: a CTE-REFERENCING subquery defers
+		// whatever the switch says (eager evaluation over the cteCache
+		// float-drifts against the outer query's distributed aggregate -- the
+		// Q15 SF0.1 zero-row root cause), so this cell lowers both ways.
 		{issue: "#659", name: "control_select_list_subquery_over_an_unshared_cte_lowers",
 			sql:    cte + `SELECT id, (SELECT MAX(v) FROM c) AS mx FROM typemx WHERE id<3 ORDER BY id`,
 			want:   rows,
