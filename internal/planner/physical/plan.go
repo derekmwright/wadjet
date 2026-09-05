@@ -3474,14 +3474,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// merge-on-read DELETE state, replayed from the snapshot walkStages
 	// took rather than a second manifest read.
 	p.annotateScanDeletes(stages)
-	// A SELECT-list subquery the projection lowering did not rewrite has no
-	// distributed lowering: the worker's expression compiler has no
-	// SubqueryRunner, so every task fails (#659). It is asked HERE rather
-	// than before stage generation because whether an item is lowered is
-	// decided by attachScanSelectProjections, which needs the stages — and a
-	// refusal that fires for an item the DAG can now compute would keep a
-	// distributable query single-process. The coordinator routes on it either
-	// way.
+	// LAST, after every pass that can move or drop a projection: wire each
+	// lowered SELECT-list placeholder to the stage that carries it, so the
+	// coordinator awaits that producer and substitutes its value before
+	// dispatch (#659). A placeholder no stage carries, and a producer that
+	// would be awaited by a stage it READS, are both refusals the coordinator
+	// routes on rather than a `:scalar_N` shipped to a worker.
 	if err := p.attachProjectionScalarDependencies(stages); err != nil {
 		return nil, err
 	}
