@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/config"
 )
 
 // A `query_limit` obligation was accepted by the policy loader and then
@@ -180,39 +181,143 @@ func TestAQueryLimitObligationThatCannotBeEnforcedRefusesToLoad(t *testing.T) {
 }
 
 // TestTheTighterOfTheTwoCeilingsWins — the deployment's guard and the
-// identity's meet in one place, and a policy can only NARROW: an obligation
-// naming a bigger number does not widen `query_limits:`.
+// identity's meet in ONE place, and a policy can only NARROW.
+//
+// The round-1 review found the first version of this test installing no
+// deployment `query_limits:` at all, so it showed only that a wide obligation
+// does not refuse a cheap query — the arc's headline sentence ("an obligation
+// naming a bigger number than the deployment allows does not widen the
+// deployment's guard") had no fixture. It does now: one DB with a deployment
+// ceiling, four identities, and the four corners of the merge.
 func TestTheTighterOfTheTwoCeilingsWins(t *testing.T) {
-	if testing.Short() {
-		t.Skip("stands up embedded NATS and three workers")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	t.Cleanup(cancel)
 
-	// A policy whose ceiling is far ABOVE anything this fixture reaches.
+	rule := func(role, value string) auth.PolicyRule {
+		r := auth.PolicyRule{
+			ID: role, EffectStr: "allow", Priority: 10,
+			Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: role}},
+			Actions:  []auth.Action{auth.ActionRead},
+		}
+		if value != "" {
+			r.Obligations = []auth.Obligation{{Type: "query_limit", Value: value}}
+		}
+		return r
+	}
 	evaluator := auth.NewPolicyEvaluator([]auth.AccessControlPolicy{{
-		Name: "f5-wide", Version: 1, Enabled: true,
-		Rules: []auth.PolicyRule{{
-			ID: "wide", EffectStr: "allow", Priority: 10,
-			Subjects:    []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "wide"}},
-			Actions:     []auth.Action{auth.ActionRead},
-			Obligations: []auth.Obligation{{Type: "query_limit", Value: "1000000000"}},
-		}},
+		Name: "f5-two-ceilings", Version: 1, Enabled: true,
+		Rules: []auth.PolicyRule{
+			// Far above anything this twelve-row fixture reaches.
+			rule("wide", "1000000000"),
+			// Below it.
+			rule("narrow", "1"),
+			// No obligation at all: the deployment's guard is the only one.
+			rule("none", ""),
+		},
 	}})
-	authn, authz := auth.New(auth.Config{
-		Enabled: true,
-		APIKeys: []auth.APIKeyDef{{Key: "wide-key", Name: "wide", Role: "wide"}},
-		Roles:   []auth.RoleConfig{{Name: "wide", Tables: []string{"*"}, Allow: []string{"read"}}},
-	})
+	keys := []auth.APIKeyDef{
+		{Key: "wide-key", Name: "wide", Role: "wide"},
+		{Key: "narrow-key", Name: "narrow", Role: "narrow"},
+		{Key: "none-key", Name: "none", Role: "none"},
+	}
+	roles := []auth.RoleConfig{
+		{Name: "wide", Tables: []string{"*"}, Allow: []string{"read"}},
+		{Name: "narrow", Tables: []string{"*"}, Allow: []string{"read"}},
+		{Name: "none", Tables: []string{"*"}, Allow: []string{"read"}},
+	}
+	authn, authz := auth.New(auth.Config{Enabled: true, APIKeys: keys, Roles: roles})
 	provider := auth.NewProvider(authn, authz, nil, nil)
 	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
 
-	rig := pmRigUpWith(t, ctx, provider)
-	for _, door := range rig.doors {
-		t.Run(door.name, func(t *testing.T) {
-			if _, err := door.run(t, "wide-key", `SELECT id FROM e7emp`); err != nil {
-				t.Errorf("a query_limit obligation ABOVE the query's cost refused it: %v", err)
+	idCtx := func(key string) context.Context {
+		id, err := provider.Authenticator().AuthenticateToken(key)
+		if err != nil {
+			t.Fatalf("authenticate %q: %v", key, err)
+		}
+		return auth.ContextWithIdentity(ctx, id)
+	}
+
+	// Two DBs over the same fixture: one with a deployment ceiling the fixture
+	// exceeds, one with none. Four corners, and the pair on the same identity
+	// is what shows which ceiling decided.
+	const sql = `SELECT id FROM e7emp`
+	for _, dep := range []struct {
+		name   string
+		limits *config.QueryLimits
+		// refuses lists the identities this deployment refuses.
+		refuses map[string]bool
+	}{
+		{name: "no_deployment_guard", limits: nil,
+			// Only the policy can refuse, and only the narrow one does.
+			refuses: map[string]bool{"narrow-key": true}},
+		{name: "deployment_guard_of_one_row",
+			limits: &config.QueryLimits{MaxScanRows: 1},
+			// The deployment refuses everyone, INCLUDING the identity whose
+			// obligation names a billion rows: a policy cannot widen.
+			refuses: map[string]bool{"wide-key": true, "narrow-key": true, "none-key": true}},
+	} {
+		t.Run(dep.name, func(t *testing.T) {
+			db := pmEmbeddedDB(t, ctx, 0)
+			db.SetAuthProvider(provider)
+			db.SetQueryLimits(dep.limits, nil)
+			for _, key := range []string{"wide-key", "narrow-key", "none-key"} {
+				t.Run(key, func(t *testing.T) {
+					_, err := db.Query(idCtx(key), sql)
+					if dep.refuses[key] {
+						if err == nil {
+							t.Fatalf("%s answered for %s; the tighter of the deployment's "+
+								"ceiling and the identity's must apply", sql, key)
+						}
+						if !strings.Contains(err.Error(), "exceeding limit of 1 rows") {
+							t.Errorf("%s refused with %v; want the cost guard's own refusal", key, err)
+						}
+						return
+					}
+					if err != nil {
+						t.Errorf("%s was refused %s: %v — neither ceiling is below its cost",
+							key, sql, err)
+					}
+				})
 			}
 		})
+	}
+}
+
+// TestAPolicyCeilingCannotWidenTheDeploymentsGuard states the merge directly,
+// without a query. tightestLimits lives in internal/planner/physical and has
+// its own unit test there; this is the auth-side half — that
+// NarrowQueryLimits keeps the SMALLER of every ceiling and mutates neither
+// argument, which is what makes two policed relations in one statement safe.
+func TestAPolicyCeilingCannotWidenTheDeploymentsGuard(t *testing.T) {
+	tight := &config.QueryLimits{MaxScanRows: 50, MaxScanBytes: 100, MaxScanFiles: 2}
+	wide := &config.QueryLimits{MaxScanRows: 1e9, MaxScanBytes: 1 << 40, MaxScanFiles: 9999}
+
+	for _, tc := range []struct {
+		name string
+		a, b *config.QueryLimits
+	}{
+		{"tight_then_wide", tight, wide},
+		{"wide_then_tight", wide, tight},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beforeA, beforeB := *tc.a, *tc.b
+			got := auth.NarrowQueryLimits(tc.a, tc.b)
+			if got.MaxScanRows != 50 || got.MaxScanBytes != 100 || got.MaxScanFiles != 2 {
+				t.Errorf("narrowed to rows=%d bytes=%d files=%d, want 50/100/2 — the SMALLER "+
+					"of every ceiling either side sets", got.MaxScanRows, got.MaxScanBytes,
+					got.MaxScanFiles)
+			}
+			if *tc.a != beforeA || *tc.b != beforeB {
+				t.Error("NarrowQueryLimits mutated an argument; a decision is cached per " +
+					"statement and a mutated one leaks its ceiling to the next relation")
+			}
+		})
+	}
+	// A nil side contributes nothing and is not dereferenced.
+	if got := auth.NarrowQueryLimits(nil, tight); got == nil || got.MaxScanRows != 50 {
+		t.Errorf("NarrowQueryLimits(nil, tight) = %+v", got)
+	}
+	if got := auth.NarrowQueryLimits(tight, nil); got != tight {
+		t.Errorf("NarrowQueryLimits(tight, nil) = %+v, want the first argument unchanged", got)
 	}
 }
