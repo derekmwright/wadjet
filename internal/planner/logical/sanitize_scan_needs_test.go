@@ -142,9 +142,8 @@ func TestSanitizeScanNeeds(t *testing.T) {
 }
 
 func TestSanitizeScanNeedsKillSwitch(t *testing.T) {
-	old := scanColSanitize
-	scanColSanitize = false
-	defer func() { scanColSanitize = old }()
+	old := scanColSanitizeToggle.Set(false)
+	defer scanColSanitizeToggle.Set(old)
 	n := &Node{Type: NodeScan, TableName: "lineitem", ScanColumns: []string{"l_orderkey"}}
 	got := sanitizeScanNeeds(n, map[string]bool{"s_suppkey": true, "l_orderkey": true})
 	if len(got) != 2 {

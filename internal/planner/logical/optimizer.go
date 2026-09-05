@@ -4,12 +4,12 @@ import (
 	"log/slog"
 	"math"
 	"math/bits"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -341,12 +341,22 @@ func computeRequiredColumns(n *Node) {
 // width (safe) if it ever reaches that path.
 const RowCountOnlyColumn = "__rowcount_only__"
 
-// scanColSanitize gates the DROPPING half of sanitizeScanNeeds
-// (WADJET_SCAN_COL_SANITIZE=0 restores the pre-2026-07 polluted lists for
-// A/B). Default on. It deliberately does NOT gate the schema-spelling half —
-// see the comment on that arm for why an optimization switch must not decide
-// which columns a scan reads.
-var scanColSanitize = os.Getenv("WADJET_SCAN_COL_SANITIZE") != "0"
+// scanColSanitizeToggle gates the DROPPING half of sanitizeScanNeeds — the
+// pollution A/B, and nothing else. It deliberately does NOT gate the
+// schema-spelling half; see the comment on that arm for why an optimization
+// switch must not decide which columns a scan reads.
+//
+// It is REGISTERED, which is what puts it under the optimization-invariance
+// oracle: the oracle runs the corpus with each switch individually disabled
+// and requires identical results, and that is exactly the property this switch
+// lacked. Until #731's follow-up it changed 30 of the CamelCase battery's 63
+// cells when disabled — a switch load-bearing for correctness, which inverts
+// the doctrine registration exists to enforce. Registering it is how the
+// property stays true rather than being true today.
+var scanColSanitizeToggle = optswitch.Register("scan-col-sanitize", "WADJET_SCAN_COL_SANITIZE",
+	"drop alias-qualified and foreign-relation names from a scan's required-column list")
+
+func scanColSanitizeOn() bool { return scanColSanitizeToggle.On() }
 
 // sanitizeScanNeeds turns the ancestor-accumulated needs set into a clean
 // RequiredColumns list for one scan. The accumulated set carries junk the
@@ -383,7 +393,7 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 	for _, c := range n.ScanColumns {
 		inSchema[strings.ToLower(c)] = c
 	}
-	if !scanColSanitize {
+	if !scanColSanitizeOn() {
 		// The switch is a POLLUTION A/B and nothing else. It restores the
 		// pre-2026-07 list — every accumulated need, junk included — but it
 		// does NOT restore the pre-2026-07 SPELLING, because the spelling is

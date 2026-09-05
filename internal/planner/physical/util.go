@@ -1409,9 +1409,25 @@ func buildReadSchema(schema []parquet.Column, requiredCols []string) []parquet.C
 			prefixNeeded[c[:dot]] = true
 		}
 	}
+	// The read set is normally already spelled the way the SCHEMA spells it
+	// — `logical.sanitizeScanNeeds` rewrites it, and since #731 that rewrite
+	// happens on both arms of its switch. But it can only do that when the
+	// plan carried the table's columns (`n.ScanColumns`); with none it leaves
+	// the names FOLDED, and a folded name byte-compared against a CamelCase
+	// schema matches nothing. A TOTAL miss is harmless — `len(filtered) == 0`
+	// falls through to the full schema below — and a PARTIAL one is not: on a
+	// mixed-case schema the already-folded columns match and the CamelCase
+	// ones are dropped from the read set, so the scan returns a batch missing
+	// exactly the columns a downstream key needs. Resolve, so the read set
+	// selects the same columns whatever spelling it arrived in.
 	filtered := make([]parquet.Column, 0, len(requiredCols))
 	for _, col := range schema {
 		if needed[col.Name] || (prefixNeeded[col.Name] && col.Type == parquet.TypeRow) {
+			filtered = append(filtered, col)
+			continue
+		}
+		if batch.NameSetNames(needed, col.Name) ||
+			(col.Type == parquet.TypeRow && batch.NameSetNames(prefixNeeded, col.Name)) {
 			filtered = append(filtered, col)
 		}
 	}

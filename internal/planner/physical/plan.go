@@ -13792,7 +13792,7 @@ func (s *catalogScanSource) projectForConsumer(b *batch.RecordBatch) *batch.Reco
 		schema := make([]parquet.Column, 0, len(s.requiredCols))
 		found := 0
 		for i, col := range b.Schema {
-			if want[col.Name] {
+			if want[col.Name] || batch.NameSetNames(want, col.Name) {
 				idx = append(idx, i)
 				schema = append(schema, col)
 				found++

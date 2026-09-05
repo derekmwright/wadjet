@@ -131,6 +131,28 @@ func ResolveSchemaIndex(schema []parquet.Column, name string) int {
 	return resolveFoldedIndex(schema, name)
 }
 
+// NameSetNames reports whether a set of column REFERENCES names the schema
+// column spelled schemaName — the resolver's rule read in the other direction,
+// for the consumers that hold a SET of wanted names and walk the schema rather
+// than the reverse (a read-set projection, a keep-set prune).
+//
+// The rule is the same one `ResolveSchemaIndex` applies: byte-exact, or a
+// reference that is ITSELF folded matching case-insensitively. Ambiguity
+// cannot arise within one schema — `catalog.checkDistinctColumnNames` refuses
+// a schema whose columns collide under the fold — so a folded reference names
+// at most one column of it.
+func NameSetNames(set map[string]bool, schemaName string) bool {
+	if set[schemaName] {
+		return true
+	}
+	for ref := range set {
+		if asciiFolded(ref) && asciiEqualFold(ref, schemaName) {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveFoldedIndex(schema []parquet.Column, name string) int {
 	if !asciiFolded(name) {
 		// A delimited identifier. Byte-exact only — item 4.
