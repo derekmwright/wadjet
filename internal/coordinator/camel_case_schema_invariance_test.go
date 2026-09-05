@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -47,6 +48,52 @@ import (
 // and only a mixed schema produces one.
 //
 // A divergence here names the shape and the arm; that is the localization.
+
+// The battery runs BOTH states of the scan-col-sanitize kill switch in one
+// process. The switch is registered (`WADJET_SCAN_COL_SANITIZE`), so
+// `TestTPCHOptimizationInvariance` sweeps it — but that oracle's corpus is
+// TPC-H, every column lower case, where the folded reference and the schema
+// spelling are the SAME STRING, so disabling the switch there cannot change a
+// row by construction.
+//
+// Measured, with the OFF arm made to emit a read set no consumer can resolve
+// (upper-casing the already-folded schema names, which is the PARTIAL read-set
+// miss the pre-#731 off arm had): this battery fails 41 cells — 9 single,
+// 16 dag, 16 dagshuf — plus a spilled shape, every one of them under
+// `sanitize=off`, while `TestTPCHOptimizationInvariance/scan-col-sanitize`
+// still PASSES. Reverting the spelling respell in `sanitizeScanNeeds` by
+// itself diverges on nothing now: `physical.buildReadSchema` resolves the
+// folded names it then gets, so the property is owned by producer and
+// consumers jointly and this dimension is what keeps a consumer regression
+// visible.
+//
+// Reading the toggle from the environment leaves CI running whichever state it
+// happens to pick, which makes the property true today rather than permanent;
+// driving both states from here covers them in every run, and the arm label
+// carries the state so a divergence names it.
+
+var ccsSwitchStates = []struct {
+	name string
+	on   bool
+}{
+	{"sanitize=on", true},
+	{"sanitize=off", false},
+}
+
+// ccsWithSwitch runs fn once per switch state, restoring what the process had
+// on the way out. The fixtures are rebuilt inside fn, per state, so no cache a
+// worker or a coordinator filled under one state can answer under the other.
+func ccsWithSwitch(t *testing.T, fn func(t *testing.T, state string)) {
+	t.Helper()
+	prev := logical.ScanColSanitizeSwitch.On()
+	t.Cleanup(func() { logical.ScanColSanitizeSwitch.Set(prev) })
+	for _, sw := range ccsSwitchStates {
+		t.Run(sw.name, func(t *testing.T) {
+			logical.ScanColSanitizeSwitch.Set(sw.on)
+			fn(t, sw.name)
+		})
+	}
+}
 
 func ccsName(camel bool, s string) string {
 	if camel {
@@ -226,64 +273,66 @@ func ccsLower(sql string) string {
 // TestCamelCaseSchemaAnswersWhatALowerCaseSchemaAnswers compares a MIXED-case schema against the identical
 // all-lower one on the single-process arm and both DAG arms.
 func TestCamelCaseSchemaAnswersWhatALowerCaseSchemaAnswers(t *testing.T) {
-	ctx := context.Background()
+	ccsWithSwitch(t, func(t *testing.T, state string) {
+		ctx := context.Background()
 
-	camelInfra := tmdInfra(t, ctx)
-	ccsWrite(t, ctx, camelInfra, true)
-	lowerInfra := tmdInfra(t, ctx)
-	ccsWrite(t, ctx, lowerInfra, false)
+		camelInfra := tmdInfra(t, ctx)
+		ccsWrite(t, ctx, camelInfra, true)
+		lowerInfra := tmdInfra(t, ctx)
+		ccsWrite(t, ctx, lowerInfra, false)
 
-	camelDAG := tmdCoordinator(t, ctx, camelInfra)
-	lowerDAG := tmdCoordinator(t, ctx, lowerInfra)
-	camelShuf := tmdCoordinator(t, ctx, camelInfra, func(c *Config) { c.BroadcastBytesOverride = 1 })
-	lowerShuf := tmdCoordinator(t, ctx, lowerInfra, func(c *Config) { c.BroadcastBytesOverride = 1 })
-	camelSingle := ccsStandalone(t, ctx, true)
-	lowerSingle := ccsStandalone(t, ctx, false)
+		camelDAG := tmdCoordinator(t, ctx, camelInfra)
+		lowerDAG := tmdCoordinator(t, ctx, lowerInfra)
+		camelShuf := tmdCoordinator(t, ctx, camelInfra, func(c *Config) { c.BroadcastBytesOverride = 1 })
+		lowerShuf := tmdCoordinator(t, ctx, lowerInfra, func(c *Config) { c.BroadcastBytesOverride = 1 })
+		camelSingle := ccsStandalone(t, ctx, true)
+		lowerSingle := ccsStandalone(t, ctx, false)
 
-	type arm struct {
-		name         string
-		camel, lower func(string) ([]string, [][]any, error)
-	}
-	arms := []arm{
-		{"single",
-			func(s string) ([]string, [][]any, error) { return e3PosSingle(ctx, camelSingle, s) },
-			func(s string) ([]string, [][]any, error) { return e3PosSingle(ctx, lowerSingle, s) }},
-		{"dag",
-			func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, camelDAG, s) },
-			func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, lowerDAG, s) }},
-		{"dagshuf",
-			func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, camelShuf, s) },
-			func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, lowerShuf, s) }},
-	}
+		type arm struct {
+			name         string
+			camel, lower func(string) ([]string, [][]any, error)
+		}
+		arms := []arm{
+			{"single",
+				func(s string) ([]string, [][]any, error) { return e3PosSingle(ctx, camelSingle, s) },
+				func(s string) ([]string, [][]any, error) { return e3PosSingle(ctx, lowerSingle, s) }},
+			{"dag",
+				func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, camelDAG, s) },
+				func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, lowerDAG, s) }},
+			{"dagshuf",
+				func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, camelShuf, s) },
+				func(s string) ([]string, [][]any, error) { return e3PosDAG(ctx, lowerShuf, s) }},
+		}
 
-	for _, a := range arms {
-		for _, sql := range ccsShapes {
-			low := ccsLower(sql)
-			_, crows, cerr := a.camel(sql)
-			_, lrows, lerr := a.lower(low)
-			if (cerr == nil) != (lerr == nil) {
-				t.Errorf("[%s] ERR DIVERGENCE\n  sql: %s\n  camel: %v\n  lower: %v", a.name, sql, cerr, lerr)
-				continue
-			}
-			// A shape that errors on BOTH arms, or answers zero rows on both,
-			// AGREES — and proves nothing. An agreement gate that accepts
-			// those is one bad shape away from passing vacuously, so both are
-			// failures here rather than a `continue`.
-			if cerr != nil {
-				t.Errorf("[%s] BOTH ARMS ERRORED, so this shape asserts nothing\n  sql: %s\n  err: %v",
-					a.name, sql, cerr)
-				continue
-			}
-			if len(crows) == 0 {
-				t.Errorf("[%s] BOTH ARMS RETURNED NO ROWS, so this shape asserts nothing\n  sql: %s",
-					a.name, sql)
-				continue
-			}
-			if got, want := ccsRender(crows), ccsRender(lrows); got != want {
-				t.Errorf("[%s] VALUE DIVERGENCE\n  sql: %s\n  camel: %s  lower: %s", a.name, sql, got, want)
+		for _, a := range arms {
+			for _, sql := range ccsShapes {
+				low := ccsLower(sql)
+				_, crows, cerr := a.camel(sql)
+				_, lrows, lerr := a.lower(low)
+				if (cerr == nil) != (lerr == nil) {
+					t.Errorf("[%s %s] ERR DIVERGENCE\n  sql: %s\n  camel: %v\n  lower: %v", state, a.name, sql, cerr, lerr)
+					continue
+				}
+				// A shape that errors on BOTH arms, or answers zero rows on both,
+				// AGREES — and proves nothing. An agreement gate that accepts
+				// those is one bad shape away from passing vacuously, so both are
+				// failures here rather than a `continue`.
+				if cerr != nil {
+					t.Errorf("[%s %s] BOTH ARMS ERRORED, so this shape asserts nothing\n  sql: %s\n  err: %v",
+						state, a.name, sql, cerr)
+					continue
+				}
+				if len(crows) == 0 {
+					t.Errorf("[%s %s] BOTH ARMS RETURNED NO ROWS, so this shape asserts nothing\n  sql: %s",
+						state, a.name, sql)
+					continue
+				}
+				if got, want := ccsRender(crows), ccsRender(lrows); got != want {
+					t.Errorf("[%s %s] VALUE DIVERGENCE\n  sql: %s\n  camel: %s  lower: %s", state, a.name, sql, got, want)
+				}
 			}
 		}
-	}
+	})
 }
 
 func ccsRender(rows [][]any) string {
@@ -311,34 +360,36 @@ func ccsRender(rows [][]any) string {
 // point: arming one side only would compare a spilled answer against an
 // in-memory one and read the difference as a fold defect (#790).
 func TestCamelCaseGroupKeysAgreeThroughASpill(t *testing.T) {
-	ctx := context.Background()
-	restore := exec.ForceAggDrainEvery(int64(1))
-	t.Cleanup(func() { exec.ForceAggDrainEvery(restore) })
+	ccsWithSwitch(t, func(t *testing.T, state string) {
+		ctx := context.Background()
+		restore := exec.ForceAggDrainEvery(int64(1))
+		t.Cleanup(func() { exec.ForceAggDrainEvery(restore) })
 
-	camel := ccsStandalone(t, ctx, true)
-	lower := ccsStandalone(t, ctx, false)
-	for _, sql := range []string{
-		`SELECT UserAgent, COUNT(*) AS c, SUM(counterid) AS s FROM hits GROUP BY UserAgent ORDER BY UserAgent`,
-		`SELECT RegionID, UserAgent, COUNT(*) AS c FROM hits GROUP BY RegionID, UserAgent ORDER BY RegionID, UserAgent`,
-		`SELECT UserAgent, MAX(WatchID) AS m, MIN(WatchID) AS n FROM hits GROUP BY UserAgent ORDER BY UserAgent`,
-		`SELECT RegionID, COUNT(DISTINCT UserAgent) AS d FROM hits GROUP BY RegionID ORDER BY RegionID`,
-	} {
-		_, crows, cerr := e3PosSingle(ctx, camel, sql)
-		_, lrows, lerr := e3PosSingle(ctx, lower, ccsLower(sql))
-		if (cerr == nil) != (lerr == nil) {
-			t.Errorf("ERR DIVERGENCE\n  sql: %s\n  camel: %v\n  lower: %v", sql, cerr, lerr)
-			continue
+		camel := ccsStandalone(t, ctx, true)
+		lower := ccsStandalone(t, ctx, false)
+		for _, sql := range []string{
+			`SELECT UserAgent, COUNT(*) AS c, SUM(counterid) AS s FROM hits GROUP BY UserAgent ORDER BY UserAgent`,
+			`SELECT RegionID, UserAgent, COUNT(*) AS c FROM hits GROUP BY RegionID, UserAgent ORDER BY RegionID, UserAgent`,
+			`SELECT UserAgent, MAX(WatchID) AS m, MIN(WatchID) AS n FROM hits GROUP BY UserAgent ORDER BY UserAgent`,
+			`SELECT RegionID, COUNT(DISTINCT UserAgent) AS d FROM hits GROUP BY RegionID ORDER BY RegionID`,
+		} {
+			_, crows, cerr := e3PosSingle(ctx, camel, sql)
+			_, lrows, lerr := e3PosSingle(ctx, lower, ccsLower(sql))
+			if (cerr == nil) != (lerr == nil) {
+				t.Errorf("[%s] ERR DIVERGENCE\n  sql: %s\n  camel: %v\n  lower: %v", state, sql, cerr, lerr)
+				continue
+			}
+			if cerr != nil {
+				t.Errorf("[%s] BOTH ARMS ERRORED, so this shape asserts nothing\n  sql: %s\n  err: %v", state, sql, cerr)
+				continue
+			}
+			if len(crows) == 0 {
+				t.Errorf("[%s] BOTH ARMS RETURNED NO ROWS, so this shape asserts nothing\n  sql: %s", state, sql)
+				continue
+			}
+			if got, want := ccsRender(crows), ccsRender(lrows); got != want {
+				t.Errorf("[%s] SPILLED VALUE DIVERGENCE\n  sql: %s\n  camel: %s  lower: %s", state, sql, got, want)
+			}
 		}
-		if cerr != nil {
-			t.Errorf("BOTH ARMS ERRORED, so this shape asserts nothing\n  sql: %s\n  err: %v", sql, cerr)
-			continue
-		}
-		if len(crows) == 0 {
-			t.Errorf("BOTH ARMS RETURNED NO ROWS, so this shape asserts nothing\n  sql: %s", sql)
-			continue
-		}
-		if got, want := ccsRender(crows), ccsRender(lrows); got != want {
-			t.Errorf("SPILLED VALUE DIVERGENCE\n  sql: %s\n  camel: %s  lower: %s", sql, got, want)
-		}
-	}
+	})
 }

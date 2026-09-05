@@ -341,7 +341,7 @@ func computeRequiredColumns(n *Node) {
 // width (safe) if it ever reaches that path.
 const RowCountOnlyColumn = "__rowcount_only__"
 
-// scanColSanitizeToggle gates the DROPPING half of sanitizeScanNeeds — the
+// ScanColSanitizeSwitch gates the DROPPING half of sanitizeScanNeeds — the
 // pollution A/B, and nothing else. It deliberately does NOT gate the
 // schema-spelling half; see the comment on that arm for why an optimization
 // switch must not decide which columns a scan reads.
@@ -353,10 +353,19 @@ const RowCountOnlyColumn = "__rowcount_only__"
 // cells when disabled — a switch load-bearing for correctness, which inverts
 // the doctrine registration exists to enforce. Registering it is how the
 // property stays true rather than being true today.
-var scanColSanitizeToggle = optswitch.Register("scan-col-sanitize", "WADJET_SCAN_COL_SANITIZE",
+//
+// It is EXPORTED because the gate that can actually see it lives in another
+// package: the optimization-invariance oracle sweeps every registered switch
+// over TPC-H, whose columns are all lower case, and there the folded reference
+// and the schema spelling are the SAME STRING — disabling this switch on that
+// corpus cannot change a row by construction. The corpus that can see it is
+// the CamelCase invariance battery in internal/coordinator, and it drives both
+// states through this handle rather than reading the env var, so one run
+// covers both.
+var ScanColSanitizeSwitch = optswitch.Register("scan-col-sanitize", "WADJET_SCAN_COL_SANITIZE",
 	"drop alias-qualified and foreign-relation names from a scan's required-column list")
 
-func scanColSanitizeOn() bool { return scanColSanitizeToggle.On() }
+func scanColSanitizeOn() bool { return ScanColSanitizeSwitch.On() }
 
 // sanitizeScanNeeds turns the ancestor-accumulated needs set into a clean
 // RequiredColumns list for one scan. The accumulated set carries junk the
@@ -414,10 +423,14 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 		// GROUP BY key, the join key and the ORDER BY key. That arm answered
 		// 30 of the battery's 63 cells differently from the identical
 		// all-lower fixture. With every downstream consumer of this list
-		// separately taught to RESOLVE rather than byte-compare, the spelling
-		// still owns 7 — every remaining cell, all on the single-process arm,
-		// which is buildReadSchema's own path and the one no fix outside this
-		// function reaches.
+		// separately taught to RESOLVE rather than byte-compare, the property
+		// is now owned JOINTLY: reverting this respelling alone diverges on NO
+		// cell, because physical.buildReadSchema resolves the folded names it
+		// then receives. The respelling stays here anyway — this is where the
+		// schema's spelling is known — and the CamelCase battery drives BOTH
+		// switch states, so a consumer that stops resolving is caught with the
+		// arm and the state named rather than waiting for the next corpus that
+		// happens to carry a mixed-case schema.
 		cols := make([]string, 0, len(needs))
 		seen := make(map[string]bool, len(needs))
 		for col := range needs {
