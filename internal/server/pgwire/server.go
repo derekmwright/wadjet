@@ -666,7 +666,24 @@ func (c *pgConn) handleCopyIn(sql string) {
 	// Determine column ordering
 	var columns []string
 	if len(copyColumns) > 0 {
-		columns = copyColumns
+		// A COPY column list is a list of REFERENCES, and an unquoted
+		// identifier folds to lower case at the lexer (#731) while the
+		// catalog keeps the parquet file's spelling. The list is used twice
+		// below and BOTH uses are byte-exact against that schema: as the key
+		// into `colByName`, where a miss yields the ZERO parquet.Column and
+		// so parses every field as a BOOL, and as the key of the row map the
+		// ingester reads back with `row[col.Name]`, where a miss writes NULL.
+		// The TABLE name two lines above already takes this concession; the
+		// column list had none, so `COPY hits (watchid, useragent)` — the
+		// spelling a fold-aware client sends — silently filled the table with
+		// NULLs. Resolve each name and carry the SCHEMA's spelling forward.
+		columns = make([]string, len(copyColumns))
+		for i, name := range copyColumns {
+			columns[i] = name
+			if j := batch.ResolveSchemaIndex(tableMeta.Schema.Columns, name); j >= 0 {
+				columns[i] = tableMeta.Schema.Columns[j].Name
+			}
+		}
 	} else {
 		columns = make([]string, len(tableMeta.Schema.Columns))
 		for i, col := range tableMeta.Schema.Columns {
