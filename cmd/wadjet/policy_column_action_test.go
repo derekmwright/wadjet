@@ -101,10 +101,15 @@ auth:
 		t.Fatalf("building provider: %v", err)
 	}
 
+	// The provider is attached AFTER the relation exists, which is the order
+	// #882 makes mandatory: attaching a policy set to a catalog binds its
+	// names, and a policy naming a relation the catalog does not hold yet is
+	// refused there (docs/security.md, "A policy names relations and columns
+	// the catalog holds"). Passing it in Config.AuthProvider here would refuse
+	// to open, correctly — `flow_logs` does not exist until three lines down.
 	db, err := wadjet.Open(ctx, wadjet.Config{
-		Store:        objstore.NewMemStore(),
-		Bucket:       "test",
-		AuthProvider: provider,
+		Store:  objstore.NewMemStore(),
+		Bucket: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -129,6 +134,9 @@ auth:
 	}
 	if err := ing.FlushAll(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if err := db.SetAuthProvider(provider); err != nil {
+		t.Fatalf("attaching the policy set: %v", err)
 	}
 
 	query := func(t *testing.T, key, sql string) []map[string]any {
