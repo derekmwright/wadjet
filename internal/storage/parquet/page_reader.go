@@ -134,9 +134,17 @@ type ColumnPageReader struct {
 
 	// Row budget (SetRowBudget): how many rows the ROW GROUP says this
 	// chunk holds, and how many the pages walked so far have claimed. Zero
-	// means the caller did not say, and nothing is enforced. See chargeRows.
-	rowBudget int
-	rowsSeen  int
+	// means the caller did not say, and nothing is enforced. See chargeRows
+	// for the per-page upper bound and checkColumnComplete for the
+	// end-of-column reconciliation.
+	//
+	// rowsSeen counts a FLAT leaf's rows, charged from the page header
+	// before decode (one value per row, skipped pages included). nestedRows
+	// counts a nested leaf's rows the only way they can be counted — from
+	// the repetition levels, after decode, one row per level-0 entry.
+	rowBudget  int
+	rowsSeen   int
+	nestedRows int
 }
 
 // SetRowBudget tells the reader how many rows the row group holds, so a page
@@ -177,6 +185,61 @@ func (r *ColumnPageReader) chargeRows(ph *PageHeader) error {
 	}
 	r.rowsSeen += n
 	return nil
+}
+
+// noteRows records a NESTED leaf's delivered rows. A nested leaf has more
+// values than rows, so its header value counts say nothing about rows; the
+// row boundaries are the repetition levels, one row per level-0 entry, and
+// they are only knowable after the page is decoded. Flat leaves are already
+// counted by chargeRows, before decode, and are not counted twice here.
+func (r *ColumnPageReader) noteRows(p *PageData) {
+	if r.rowBudget <= 0 || r.maxRepLevel == 0 || p == nil {
+		return
+	}
+	r.nestedRows += p.NumRows
+}
+
+// checkColumnComplete reconciles what a chunk DELIVERED against what the row
+// group says it holds, at the point the chunk runs out of pages.
+//
+// chargeRows already refuses a chunk that claims MORE rows than the row group
+// has. The other direction was not checked at all, and it is the one a
+// truncation produces: the page loop reaches the end of the chunk's byte
+// range, returns a clean EOF, and every row the chunk never delivered is left
+// at whatever the destination was allocated as — a NULL. A required INT64
+// column of [11, 22] whose chunk length was cut to its first page read
+// [{x:11}, {}] with a nil error (#892). The row group, the chunk metadata and
+// the schema all said there were two non-null values; the reader invented the
+// second's absence rather than saying the file could not supply it.
+//
+// This is checked once per chunk, when the pages are exhausted. A reader the
+// caller abandons early is not reconciled — the caller asked for fewer pages,
+// which is not the file contradicting itself. A page the caller SKIPS is
+// counted, because chargeRows charges it from the header before the skip
+// decision: a skipped page's rows are accounted for, not missing.
+func (r *ColumnPageReader) checkColumnComplete() error {
+	if r.rowBudget <= 0 {
+		return nil
+	}
+	got := r.rowsSeen
+	if r.maxRepLevel > 0 {
+		got = r.nestedRows
+	}
+	if got == r.rowBudget {
+		return nil
+	}
+	return columnShortErr(r.columnLabel(), got, r.rowBudget)
+}
+
+//go:noinline
+func columnShortErr(col string, got, want int) error {
+	verb := "delivers only"
+	if got > want {
+		verb = "delivers"
+	}
+	return fmt.Errorf("column %s: the row group holds %d rows but its column chunk %s %d "+
+		"(the chunk ends before its declared rows: truncated data or contradictory metadata)",
+		col, want, verb, got)
 }
 
 // DeferDictIndices stops dictionary-encoded data pages from expanding
@@ -587,7 +650,12 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 			if err := r.verifyPageCRC(bodyOff, ph, compressedData); err != nil {
 				return nil, err
 			}
-			return r.decodeDataPageV1(ph, compressedData)
+			p, err := r.decodeDataPageV1(ph, compressedData)
+			if err != nil {
+				return nil, err
+			}
+			r.noteRows(p)
+			return p, nil
 		case PageDataV2:
 			if shouldSkip != nil && ph.DataPageHeaderV2 != nil &&
 				ph.DataPageHeaderV2.NumValues > 0 && shouldSkip(int(ph.DataPageHeaderV2.NumValues)) {
@@ -596,7 +664,12 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 			if err := r.verifyPageCRC(bodyOff, ph, compressedData); err != nil {
 				return nil, err
 			}
-			return r.decodeDataPageV2(ph, compressedData)
+			p, err := r.decodeDataPageV2(ph, compressedData)
+			if err != nil {
+				return nil, err
+			}
+			r.noteRows(p)
+			return p, nil
 		case PageDictionary:
 			// Dictionary pages are handled separately via NextDictionary.
 			// Skip for now — caller should call NextDictionary first.
@@ -606,7 +679,13 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 			continue
 		}
 	}
-	return nil, nil // end of column
+	// End of column: the chunk has no more pages. Before reporting that as a
+	// clean stop, the rows it delivered have to be the rows the row group
+	// says it holds.
+	if err := r.checkColumnComplete(); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 // NextDictionary reads the dictionary page if present.
@@ -804,8 +883,16 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 		return nil, fmt.Errorf("decoding v1 data: %w", err)
 	}
 
-	// Estimate numRows from numValues for flat schemas (no repetition levels).
+	// Rows, not values. A flat leaf stores one value per row, so the two are
+	// the same number. A NESTED leaf does not, and a v1 header carries no
+	// row count at all — the row boundaries are in the repetition levels,
+	// one row per level-0 entry. This used to report numValues for both,
+	// which made PageData.NumRows a lie for every nested page and left the
+	// chunk's rows uncountable (#892).
 	numRows := numValues
+	if r.maxRepLevel > 0 && repLevels != nil {
+		numRows = countRowStarts(repLevels)
+	}
 
 	return &PageData{
 		NumValues:         numValues,
@@ -884,6 +971,20 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 		rawBuf = decompressed
 	}
 
+	// A v2 header DECLARES num_rows. That declaration is the writer's claim,
+	// and the repetition levels are the fact: a row starts at every level-0
+	// entry. Where both exist they must agree, and a disagreement is the
+	// file contradicting itself about how many rows this page carries — the
+	// same class of self-contradiction the chunk-length truncation in #892
+	// belongs to, and one the reader can settle without leaving the page.
+	if r.maxRepLevel > 0 && repLevels != nil {
+		if fromLevels := countRowStarts(repLevels); fromLevels != numRows {
+			ReleaseDecompressed(r.codec, rawBuf)
+			return nil, fmt.Errorf("column %s: data page v2 declares %d rows but its repetition "+
+				"levels start %d", r.columnLabel(), numRows, fromLevels)
+		}
+	}
+
 	nonNullCount := numValues - numNulls
 	vals, err := r.decodeValues(dataSection, nonNullCount, dph.Encoding)
 	if err != nil {
@@ -908,6 +1009,20 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 		rawBuf:          rawBuf,
 		codec:           r.codec,
 	}, nil
+}
+
+// countRowStarts counts the rows a nested leaf's repetition levels describe.
+// Level 0 means "a new row starts here"; every higher level continues the row
+// before it. A row may span pages, and summing per page still totals right:
+// the continuation page opens with a level above zero.
+func countRowStarts(rep []int32) int {
+	n := 0
+	for _, rl := range rep {
+		if rl == 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // decodeValues decodes column values using the specified encoding.

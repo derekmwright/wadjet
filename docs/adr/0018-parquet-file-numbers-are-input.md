@@ -26,7 +26,9 @@ shifted a column, a mis-shaped container became NULL, and a mid-row-group
 output failure produced a valid file with a column missing — every one of them
 with `WriteRows` and `Close` returning nil. Amended 2026-09-05 with §11, "the
 reader trusts nothing it can verify", after a page checksum the file carried
-and the reader decoded was found to be consulted by nothing (#891).
+and the reader decoded was found to be consulted by nothing (#891) and a
+column chunk that ended before its declared rows was found to read as NULLs
+under a REQUIRED schema (#892).
 
 ## Context
 
@@ -716,44 +718,74 @@ is an error naming the location — never a fabricated NULL and never a shifted
 value.**
 
 **The page checksum.** `PageHeader.crc` is a CRC-32 (IEEE polynomial) over a
-page's serialized body exactly as stored — after compression, levels included
-for a v2 page, header excluded. The thrift decoder had been reading it into
-`PageHeader.CRC` since the package was written and no read path ever looked at
-it. A parquet-go-written uncompressed PLAIN INT64 page holding `[42, 43]`,
-with one payload bit flipped, read as `[43, 43]` with a nil error; parquet-go
-refused the identical bytes (#891). The file contained everything needed to
-know its own bytes were wrong, and the reader answered the query out of them
-anyway.
+page's serialized body exactly as stored — after compression, levels
+included for a v2 page, header excluded. The thrift decoder had been reading
+it into `PageHeader.CRC` since the package was written and no read path ever
+looked at it. A parquet-go-written uncompressed PLAIN INT64 page holding
+`[42, 43]`, with one payload bit flipped, read as `[43, 43]` with a nil
+error; parquet-go refused the identical bytes (#891). The file contained
+everything needed to know its own bytes were wrong, and the reader answered
+the query out of them anyway.
 
-Presence is tracked as PRESENCE. `crc` is an optional thrift field and zero is
-a legal checksum, so `CRC != 0` — which is what parquet-go's own reader tests
-— cannot separate "this writer emits no checksums" from "this body hashes to
-zero", and skips verification on the second. `PageHeader.CRCSet` records the
-field, and that is what the check gates on.
+Presence is tracked as PRESENCE. `crc` is an optional thrift field and zero
+is a legal checksum, so `CRC != 0` — which is what parquet-go's own reader
+tests — cannot separate "this writer emits no checksums" from "this body
+hashes to zero", and skips verification on the second. `PageHeader.CRCSet`
+records the field, and that is what the check gates on.
 
-*One place, every path.* The check is in `ColumnPageReader`, which is the
+**The declared row count.** A column chunk's pages must deliver the rows the
+row group says the chunk holds. `chargeRows` already refused a chunk claiming
+MORE; the other direction was checked nowhere. A required INT64 column of
+`[11, 22]` whose `total_compressed_size` was cut to its first complete page —
+with `num_values` and the row group's `num_rows` still saying two — read
+`[{x:11}, {}]` with a nil error. The row reader preallocated a slot per row
+and left the one the file never supplied at nil, which renders as a NULL in a
+column whose schema says NULL is impossible; the native scan left the same
+slot at whatever the vector was allocated as (#892). A truncation INSIDE a
+page had always been refused, which is what kept the shape hidden: only the
+tidy cut, exactly at a page boundary, was silent.
+
+**Level consistency.** A nested leaf's rows are its repetition levels'
+level-0 entries, and nothing else. `PageData.NumRows` reported `NumValues` for
+every v1 page including nested ones, which made a nested chunk's rows
+uncountable and the reconciliation above impossible to state for containers.
+It is now derived from the levels, and where a v2 header ALSO declares
+`num_rows`, the declaration and the levels must agree.
+
+Three consequences follow from where the checks live.
+
+*One place, every path.* All three are in `ColumnPageReader`, which is the
 single object the row reader, the native columnar scan, the selection-aware
 decode, the lengths-only decode, the row filter and the dictionary prune all
 walk. That is §3 discharged structurally rather than by repetition: there is
-no path that reads a page without it, so no two paths can disagree about
+no path that reads a page without them, so no two paths can disagree about
 whether a file is readable.
 
-*Verify what you use.* It runs on every page body the reader DECODES — data
-pages v1 and v2, the dictionary page, and the dictionary page a row-group
-prune is decided from. It does not run on a page `NextPageMaybeSkip` skips: no
-value comes out of those bytes, so nothing the reader returns can depend on
-them, and checksumming a payload the skip exists to avoid touching would spend
-the optimization to no end. Both halves of that boundary are asserted — a
-corrupt page a projection skips reads clean, the same file read whole refuses.
+*Verify what you use.* The checksum runs on every page body the reader
+DECODES — data pages v1 and v2, the dictionary page, and the dictionary page
+a row-group prune is decided from. It does not run on a page
+`NextPageMaybeSkip` skips: no value comes out of those bytes, so nothing the
+reader returns can depend on them, and checksumming a payload the skip exists
+to avoid touching would spend the optimization to no end. Both halves of that
+boundary are asserted — a corrupt page a projection skips reads clean, the
+same file read whole refuses.
 
-The rewrite paths inherit it. Compaction reads with the row reader and writes
-what it read, so before this check a flipped bit became the durable value and
-the file that could still prove itself wrong was deleted.
+*Reconcile at the end, not at the abandonment.* The row count is reconciled
+when a chunk runs OUT of pages. A caller that stops early is not reconciled,
+because reading fewer pages is a caller's choice and not the file
+contradicting itself. A page the caller SKIPS is counted, because
+`chargeRows` charges it from the header before the skip decision.
 
-This is about a checksum the file already carries. It does not require writers
-to emit one, and wadjet's own writer still does not — a file it wrote carries
-no page checksum, so the check costs one predictable branch per page on
-wadjet's own data and on every pyarrow file measured (pyarrow's
+The rewrite paths inherit all of it. Compaction reads with the row reader and
+writes what it read, so before these checks a flipped bit or a fabricated
+NULL became the durable value and the file that could still prove itself
+wrong was deleted. A corrupt input now fails the merge with the manifest
+unchanged and every input still in the store.
+
+This is about a checksum the file already carries. It does not require
+writers to emit one, and wadjet's own writer still does not — a file it wrote
+carries no page checksum, so the check costs one predictable branch per page
+on wadjet's own data and on every pyarrow file measured (pyarrow's
 `write_page_checksum` defaults off; the 122 MB ClickBench `hits_0.parquet`
 carries none in any of its 728 pages). Emitting them is a writer decision and
 is not settled here.
@@ -792,12 +824,18 @@ is not settled here.
   columnar read paths, because "the paths agree" is only a property if the
   paths are all exercised.
 - Files that were read before and are refused now, from §10: a page whose
-  stored body does not hash to the checksum its own header declares. That
-  previously produced a value, without saying so.
-- The refusal is a cross-implementation fact, not a round trip: the checksum
+  stored body does not hash to the checksum its own header declares; a column
+  chunk whose pages deliver fewer (or more) rows than its row group says it
+  holds; a row group carrying no chunk at all for a leaf of its own schema; a
+  data page v2 whose declared `num_rows` disagrees with its repetition levels.
+  Each of these previously produced a value, a NULL, or a whole column of
+  NULLs, without saying so.
+- The refusals are cross-implementation facts, not round trips: the checksum
   cells run over files written by parquet-go and by pyarrow
-  (`testdata/page_crc.parquet`, `page_crc_v2.parquet`), because wadjet's own
-  writer emits no checksum and cannot produce the shape.
+  (`testdata/page_crc.parquet`, `page_crc_v2.parquet`), and the multi-page
+  nested chunk the row reconciliation needs comes from pyarrow too
+  (`testdata/nested_pages.parquet`), because wadjet's writer emits one page
+  per nested leaf per row group and cannot produce the shape.
 
 ## Compatibility note, 2026-08-23: files this writer produced before #409
 

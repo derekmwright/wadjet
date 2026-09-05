@@ -400,7 +400,11 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int, col Column) (leafColumnDa
 
 	pr := fr.ColumnPages(rgIdx, colIdx)
 	if pr == nil {
-		return lcd, nil
+		// Same refusal as readColumnToAny's: a leaf of the file's own schema
+		// with no chunk in this row group. Returning the zero leafColumnData
+		// handed the assembler no levels and no values, and the container
+		// came out empty rather than absent.
+		return lcd, fmt.Errorf("leaf %v: row group %d carries no chunk for it", leaf.Path, rgIdx)
 	}
 	defer pr.Close()
 
@@ -1041,7 +1045,15 @@ func filterSchemaColumns(cols []Column, selected []string) []Column {
 func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]any, error) {
 	pr := fr.ColumnPages(rgIdx, colIdx)
 	if pr == nil {
-		return make([]any, numRows), nil
+		// colIdx is a leaf of the FILE's own schema, so a row group with no
+		// chunk for it is the file contradicting itself. This used to hand
+		// back numRows nil slots, which the row assembler renders as a
+		// column of NULLs — the same fabrication #892 is about, one layer
+		// up. A column the catalog knows and the file does not is a
+		// different thing entirely, and never reaches here: the name lookup
+		// in readRowsFlat misses and fills nulls before this is called.
+		return nil, fmt.Errorf("column %s: row group %d declares %d rows but carries no chunk for it",
+			col.Name, rgIdx, numRows)
 	}
 	defer pr.Close()
 

@@ -105,6 +105,47 @@ If S3 data files are lost, snapshots alone cannot recover the data — they only
 
 **Recommendation**: Enable S3 versioning and cross-region replication on the data bucket for production deployments.
 
+### Scenario 5: A Data File Fails Its Own Checks
+
+A query can fail naming a specific parquet file and column, for example:
+
+```
+column l_orderkey: the data page v1 at offset 4127 fails its own checksum:
+  header declares crc32 0x506d6c2f, the 512 stored bytes hash to 0x401fb707
+  (corrupt parquet page)
+
+column l_orderkey: the row group holds 4096 rows but its column chunk
+  delivers only 2048 (the chunk ends before its declared rows: truncated data
+  or contradictory metadata)
+```
+
+These are not query errors. The reader has proved the file's bytes disagree
+with the file's own metadata — a page whose stored bytes do not hash to the
+checksum the page header carries, or a column chunk that stops before the rows
+its row group declares. The usual causes are a truncated upload, a partial
+range read, or storage-level bit rot.
+
+The refusal is deliberate: the alternative is a query answering out of the
+corrupt bytes, or filling the missing rows with NULLs, without saying so.
+Compaction refuses the same file rather than merging it, so the damaged file
+is never silently replaced by one that has the wrong values baked in — the
+manifest is left unchanged and every input stays in the store.
+
+To recover:
+
+1. Identify the file. The scan wraps the refusal as `reading file <object
+   key>: ...`, and compaction as `reading row group N from <object key>: ...`,
+   so the failing object is named in the error.
+2. Restore that object from S3 versioning, if enabled on the data bucket.
+3. Otherwise re-ingest the affected range from source and `DELETE` the rows
+   the damaged file covered.
+
+Note that only files written by a producer that emits page checksums can fail
+the first check. Wadjet's own writer does not emit them, and pyarrow does not
+by default (`write_page_checksum=True` turns them on) — so a wadjet-written
+file is covered by the row-count and metadata checks but not by a per-page
+checksum.
+
 ## Monitoring Snapshot Health
 
 ### Logs and S3
@@ -147,3 +188,4 @@ interval ticker and an explicit `CREATE SNAPSHOT` over gRPC.
 | NATS KV corruption | ~2 min (restore + restart) | ≤5 min (snapshot interval, once `--catalog-snapshot-s3-prefix` is set) |
 | Full cluster rebuild | ~10 min (deploy + restore) | ≤5 min |
 | S3 data loss | Depends on re-ingestion | Data since last S3 backup |
+| Single corrupt data file | Minutes (restore object version), else re-ingest | Data in that file since last backup |
