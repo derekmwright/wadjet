@@ -70,8 +70,15 @@ func (x *QueryRequest) GetSql() string {
 
 // Row represents a single result row as a map of column name to value.
 type Row struct {
-	state         protoimpl.MessageState     `protogen:"open.v1"`
-	Fields        map[string]*structpb.Value `protobuf:"bytes,1,rep,name=fields,proto3" json:"fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state  protoimpl.MessageState     `protogen:"open.v1"`
+	Fields map[string]*structpb.Value `protobuf:"bytes,1,rep,name=fields,proto3" json:"fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The same row POSITIONALLY, aligned with QueryResponse.columns. A map
+	// cannot represent two output columns that publish ONE NAME, which is an
+	// ordinary result since PostgreSQL's naming rule was adopted:
+	// `SELECT g + 1, g + 2, g + 3` is three columns called `?column?`, and
+	// `fields` carries one key for the three of them. Sent whenever the result's
+	// column names are not unique; a client that needs every value reads this.
+	Values        []*structpb.Value `protobuf:"bytes,2,rep,name=values,proto3" json:"values,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -109,6 +116,13 @@ func (*Row) Descriptor() ([]byte, []int) {
 func (x *Row) GetFields() map[string]*structpb.Value {
 	if x != nil {
 		return x.Fields
+	}
+	return nil
+}
+
+func (x *Row) GetValues() []*structpb.Value {
+	if x != nil {
+		return x.Values
 	}
 	return nil
 }
@@ -1198,9 +1212,10 @@ const file_wadjet_v1_wadjet_proto_rawDesc = "" +
 	"\n" +
 	"\x16wadjet/v1/wadjet.proto\x12\twadjet.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\" \n" +
 	"\fQueryRequest\x12\x10\n" +
-	"\x03sql\x18\x01 \x01(\tR\x03sql\"\x8c\x01\n" +
+	"\x03sql\x18\x01 \x01(\tR\x03sql\"\xbc\x01\n" +
 	"\x03Row\x122\n" +
-	"\x06fields\x18\x01 \x03(\v2\x1a.wadjet.v1.Row.FieldsEntryR\x06fields\x1aQ\n" +
+	"\x06fields\x18\x01 \x03(\v2\x1a.wadjet.v1.Row.FieldsEntryR\x06fields\x12.\n" +
+	"\x06values\x18\x02 \x03(\v2\x16.google.protobuf.ValueR\x06values\x1aQ\n" +
 	"\vFieldsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12,\n" +
 	"\x05value\x18\x02 \x01(\v2\x16.google.protobuf.ValueR\x05value:\x028\x01\"t\n" +
@@ -1325,44 +1340,45 @@ var file_wadjet_v1_wadjet_proto_goTypes = []any{
 	(*DropTableRequest)(nil),       // 19: wadjet.v1.DropTableRequest
 	(*DropTableResponse)(nil),      // 20: wadjet.v1.DropTableResponse
 	nil,                            // 21: wadjet.v1.Row.FieldsEntry
-	(*durationpb.Duration)(nil),    // 22: google.protobuf.Duration
-	(*structpb.Value)(nil),         // 23: google.protobuf.Value
+	(*structpb.Value)(nil),         // 22: google.protobuf.Value
+	(*durationpb.Duration)(nil),    // 23: google.protobuf.Duration
 }
 var file_wadjet_v1_wadjet_proto_depIdxs = []int32{
 	21, // 0: wadjet.v1.Row.fields:type_name -> wadjet.v1.Row.FieldsEntry
-	22, // 1: wadjet.v1.QueryStats.elapsed:type_name -> google.protobuf.Duration
-	1,  // 2: wadjet.v1.QueryResponse.rows:type_name -> wadjet.v1.Row
-	2,  // 3: wadjet.v1.QueryResponse.stats:type_name -> wadjet.v1.QueryStats
-	1,  // 4: wadjet.v1.QueryStreamResponse.rows:type_name -> wadjet.v1.Row
-	2,  // 5: wadjet.v1.QueryStreamResponse.stats:type_name -> wadjet.v1.QueryStats
-	7,  // 6: wadjet.v1.GetQueryStatusResponse.stages:type_name -> wadjet.v1.StageStatus
-	22, // 7: wadjet.v1.GetQueryStatusResponse.elapsed:type_name -> google.protobuf.Duration
-	14, // 8: wadjet.v1.DescribeTableResponse.columns:type_name -> wadjet.v1.ColumnInfo
-	17, // 9: wadjet.v1.CreateTableRequest.columns:type_name -> wadjet.v1.ColumnDef
-	23, // 10: wadjet.v1.Row.FieldsEntry.value:type_name -> google.protobuf.Value
-	0,  // 11: wadjet.v1.WadjetService.Query:input_type -> wadjet.v1.QueryRequest
-	0,  // 12: wadjet.v1.WadjetService.QueryStream:input_type -> wadjet.v1.QueryRequest
-	0,  // 13: wadjet.v1.WadjetService.SubmitQuery:input_type -> wadjet.v1.QueryRequest
-	6,  // 14: wadjet.v1.WadjetService.GetQueryStatus:input_type -> wadjet.v1.GetQueryStatusRequest
-	9,  // 15: wadjet.v1.WadjetService.CancelQuery:input_type -> wadjet.v1.CancelQueryRequest
-	11, // 16: wadjet.v1.WadjetService.ListTables:input_type -> wadjet.v1.ListTablesRequest
-	13, // 17: wadjet.v1.WadjetService.DescribeTable:input_type -> wadjet.v1.DescribeTableRequest
-	16, // 18: wadjet.v1.WadjetService.CreateTable:input_type -> wadjet.v1.CreateTableRequest
-	19, // 19: wadjet.v1.WadjetService.DropTable:input_type -> wadjet.v1.DropTableRequest
-	3,  // 20: wadjet.v1.WadjetService.Query:output_type -> wadjet.v1.QueryResponse
-	4,  // 21: wadjet.v1.WadjetService.QueryStream:output_type -> wadjet.v1.QueryStreamResponse
-	5,  // 22: wadjet.v1.WadjetService.SubmitQuery:output_type -> wadjet.v1.SubmitQueryResponse
-	8,  // 23: wadjet.v1.WadjetService.GetQueryStatus:output_type -> wadjet.v1.GetQueryStatusResponse
-	10, // 24: wadjet.v1.WadjetService.CancelQuery:output_type -> wadjet.v1.CancelQueryResponse
-	12, // 25: wadjet.v1.WadjetService.ListTables:output_type -> wadjet.v1.ListTablesResponse
-	15, // 26: wadjet.v1.WadjetService.DescribeTable:output_type -> wadjet.v1.DescribeTableResponse
-	18, // 27: wadjet.v1.WadjetService.CreateTable:output_type -> wadjet.v1.CreateTableResponse
-	20, // 28: wadjet.v1.WadjetService.DropTable:output_type -> wadjet.v1.DropTableResponse
-	20, // [20:29] is the sub-list for method output_type
-	11, // [11:20] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	22, // 1: wadjet.v1.Row.values:type_name -> google.protobuf.Value
+	23, // 2: wadjet.v1.QueryStats.elapsed:type_name -> google.protobuf.Duration
+	1,  // 3: wadjet.v1.QueryResponse.rows:type_name -> wadjet.v1.Row
+	2,  // 4: wadjet.v1.QueryResponse.stats:type_name -> wadjet.v1.QueryStats
+	1,  // 5: wadjet.v1.QueryStreamResponse.rows:type_name -> wadjet.v1.Row
+	2,  // 6: wadjet.v1.QueryStreamResponse.stats:type_name -> wadjet.v1.QueryStats
+	7,  // 7: wadjet.v1.GetQueryStatusResponse.stages:type_name -> wadjet.v1.StageStatus
+	23, // 8: wadjet.v1.GetQueryStatusResponse.elapsed:type_name -> google.protobuf.Duration
+	14, // 9: wadjet.v1.DescribeTableResponse.columns:type_name -> wadjet.v1.ColumnInfo
+	17, // 10: wadjet.v1.CreateTableRequest.columns:type_name -> wadjet.v1.ColumnDef
+	22, // 11: wadjet.v1.Row.FieldsEntry.value:type_name -> google.protobuf.Value
+	0,  // 12: wadjet.v1.WadjetService.Query:input_type -> wadjet.v1.QueryRequest
+	0,  // 13: wadjet.v1.WadjetService.QueryStream:input_type -> wadjet.v1.QueryRequest
+	0,  // 14: wadjet.v1.WadjetService.SubmitQuery:input_type -> wadjet.v1.QueryRequest
+	6,  // 15: wadjet.v1.WadjetService.GetQueryStatus:input_type -> wadjet.v1.GetQueryStatusRequest
+	9,  // 16: wadjet.v1.WadjetService.CancelQuery:input_type -> wadjet.v1.CancelQueryRequest
+	11, // 17: wadjet.v1.WadjetService.ListTables:input_type -> wadjet.v1.ListTablesRequest
+	13, // 18: wadjet.v1.WadjetService.DescribeTable:input_type -> wadjet.v1.DescribeTableRequest
+	16, // 19: wadjet.v1.WadjetService.CreateTable:input_type -> wadjet.v1.CreateTableRequest
+	19, // 20: wadjet.v1.WadjetService.DropTable:input_type -> wadjet.v1.DropTableRequest
+	3,  // 21: wadjet.v1.WadjetService.Query:output_type -> wadjet.v1.QueryResponse
+	4,  // 22: wadjet.v1.WadjetService.QueryStream:output_type -> wadjet.v1.QueryStreamResponse
+	5,  // 23: wadjet.v1.WadjetService.SubmitQuery:output_type -> wadjet.v1.SubmitQueryResponse
+	8,  // 24: wadjet.v1.WadjetService.GetQueryStatus:output_type -> wadjet.v1.GetQueryStatusResponse
+	10, // 25: wadjet.v1.WadjetService.CancelQuery:output_type -> wadjet.v1.CancelQueryResponse
+	12, // 26: wadjet.v1.WadjetService.ListTables:output_type -> wadjet.v1.ListTablesResponse
+	15, // 27: wadjet.v1.WadjetService.DescribeTable:output_type -> wadjet.v1.DescribeTableResponse
+	18, // 28: wadjet.v1.WadjetService.CreateTable:output_type -> wadjet.v1.CreateTableResponse
+	20, // 29: wadjet.v1.WadjetService.DropTable:output_type -> wadjet.v1.DropTableResponse
+	21, // [21:30] is the sub-list for method output_type
+	12, // [12:21] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_wadjet_v1_wadjet_proto_init() }

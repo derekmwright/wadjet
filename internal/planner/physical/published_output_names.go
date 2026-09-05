@@ -112,3 +112,55 @@ func republishDeclaredSchema(projNode *logical.Node, cols []parquet.Column) []pa
 	}
 	return cols
 }
+
+// publishedOutputDecls is the POSITIONAL form of the two plan-time declaration
+// maps — which DECIMAL outputs declare an unconstrained wire typmod, and what
+// LENGTH each string output declares.
+//
+// Both are keyed by output-column NAME, and a name stopped being an address the
+// moment `SELECT CAST(s AS VARCHAR(4)), CAST(s AS VARCHAR(9))` became two
+// columns called `s` (#732). The map gave both the LAST one's modifier, and the
+// same for a DECIMAL aggregate beside a bare DECIMAL column. The lists are read
+// off the SAME projections in the SAME order the schema is built from, so two
+// items publishing one name each keep their own answer.
+//
+// Both are nil when nothing in the list has an answer, which is the ordinary
+// case and costs nothing.
+func publishedOutputDecls(projNode *logical.Node, wire map[string]bool,
+	lens map[string]int) ([]bool, []int) {
+	if projNode == nil || projNode.Type != logical.NodeProject {
+		return nil, nil
+	}
+	if len(wire) == 0 && len(lens) == 0 {
+		return nil, nil
+	}
+	visible := logical.VisibleProjections(projNode.Projections)
+	if len(visible) == 0 {
+		return nil, nil
+	}
+	w := make([]bool, len(visible))
+	l := make([]int, len(visible))
+	anyW, anyL := false, false
+	for i := range visible {
+		// The key the maps were BUILT with — declaredProjectionName, before
+		// any republishing — because that is what declaredWireUnconstrained-
+		// Decimal and DeclaredStringLengths filed each entry under.
+		k := declaredProjectionName(visible[i])
+		if k == "" {
+			continue
+		}
+		if wire[k] {
+			w[i], anyW = true, true
+		}
+		if n := lens[k]; n > 0 {
+			l[i], anyL = n, true
+		}
+	}
+	if !anyW {
+		w = nil
+	}
+	if !anyL {
+		l = nil
+	}
+	return w, l
+}

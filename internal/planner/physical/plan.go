@@ -3033,12 +3033,15 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// PUBLISHED one (#732): filed under the resolution spelling they miss,
 		// and an unaliased `s_acctbal + 1` goes out with a DECIMAL typmod
 		// PostgreSQL sends -1 for.
-		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(
-			p.outputProjection, declaredWireUnconstrainedDecimal(node))
+		rawWire, rawLens := declaredWireUnconstrainedDecimal(node), DeclaredStringLengths(node)
+		// POSITIONAL first, and it is the authority: a name is not an address
+		// when two output columns publish one (#732, round-1 review B2).
+		cs.SchemaHintWireUnconstrainedPos, cs.SchemaHintStringLengthPos =
+			publishedOutputDecls(p.outputProjection, rawWire, rawLens)
+		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(p.outputProjection, rawWire)
 		// And the string family's modifier, which is a LENGTH rather than a
 		// (p,s) — same lifecycle, same reason (#838).
-		cs.SchemaHintStringLength = republishDeclaredNames(
-			p.outputProjection, DeclaredStringLengths(node))
+		cs.SchemaHintStringLength = republishDeclaredNames(p.outputProjection, rawLens)
 	}
 
 	// Attach spill file cleanup. CTE collectors and the scan cache

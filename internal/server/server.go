@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -211,8 +212,16 @@ type QueryResponse struct {
 	QueryID string           `json:"query_id"`
 	Columns []string         `json:"columns"`
 	Rows    []map[string]any `json:"rows"`
-	Stats   QueryStats       `json:"stats"`
-	Error   string           `json:"error,omitempty"`
+	// Values is the same rows POSITIONALLY, one slice per row aligned with
+	// Columns. It is sent whenever two output columns publish ONE NAME, which
+	// a JSON object cannot represent: `SELECT g + 1, g + 2, g + 3` is three
+	// columns called `?column?` in PostgreSQL and here (#732), and `rows`
+	// carries one key for the three of them. `columns` is always the full
+	// positional list; a client that needs every value reads `values` when it
+	// is present (round-1 review B1).
+	Values [][]any    `json:"values,omitempty"`
+	Stats  QueryStats `json:"stats"`
+	Error  string     `json:"error,omitempty"`
 }
 
 // QueryStats contains execution statistics.
@@ -542,16 +551,29 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Collect results
 	var rows []map[string]any
+	var values [][]any
+	var columns []string
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		rows = collectSink.ToRows()
+		// The column list comes from the SINK'S SCHEMA, in order — never from
+		// a row map's KEYS. Go map iteration is unordered, and since #732 two
+		// output columns legally publish one name (`SELECT g + 1, g + 2` is
+		// two `?column?`), so the key set answered ONE column for three and
+		// dropped two values with it. The positional form rides along for
+		// exactly that case (round-1 review B1).
+		for _, c := range collectSink.Schema() {
+			columns = append(columns, c.Name)
+		}
+		values = collectSink.ToRowValues()
 	}
-
-	// Extract column names
-	var columns []string
-	if len(rows) > 0 {
+	if len(columns) == 0 && len(rows) > 0 {
+		// No schema at all — a synthetic answer with no batch behind it. The
+		// keys are the only list there is; sort them so the order is at least
+		// deterministic.
 		for k := range rows[0] {
 			columns = append(columns, k)
 		}
+		sort.Strings(columns)
 	}
 
 	// Extract actual rows scanned from the pipeline source
@@ -567,6 +589,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
 		Columns: columns,
 		Rows:    rows,
+		Values:  values,
 		Stats: QueryStats{
 			Elapsed:     time.Since(start).String(),
 			RowsScanned: rowsScanned,

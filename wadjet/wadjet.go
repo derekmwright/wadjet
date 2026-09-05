@@ -519,19 +519,27 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	var outSchema []parquet.Column
 	var wireUnconstrained map[string]bool
 	var stringLength map[string]int
+	// The POSITIONAL form of the same two answers (round-1 review B2).
+	var wireUnconstrainedPos []bool
+	var stringLengthPos []int
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		outSchema = collectSink.Schema()
 		// Plan-time, not row-count-dependent (FIX 2, #457/#458 fold-in) —
 		// consulted whether or not Consume ever ran.
 		wireUnconstrained = collectSink.SchemaHintWireUnconstrainedDecimal
 		stringLength = collectSink.SchemaHintStringLength
+		// The POSITIONAL form of the same two answers, which is the authority:
+		// two output columns may publish one name (round-1 review B2).
+		wireUnconstrainedPos = collectSink.SchemaHintWireUnconstrainedPos
+		stringLengthPos = collectSink.SchemaHintStringLengthPos
 	}
 	columns := deriveColumns(selectInfo, rows, outSchema)
 
 	// Derive typed column metadata
 	var metas []ColumnMeta
 	if len(columns) > 0 {
-		metas = deriveColumnMetas(columns, rows, outSchema, db.catalog, wireUnconstrained, stringLength)
+		metas = deriveColumnMetas(columns, rows, outSchema, db.catalog, wireUnconstrained, stringLength,
+			wireUnconstrainedPos, stringLengthPos)
 	}
 
 	return &QueryResult{
@@ -787,11 +795,13 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any, schema []par
 					// PostgreSQL's name for an unaliased item: `?column?` for
 					// an operator expression or a literal, the function's own
 					// name for a call, the ARGUMENT's name for a cast (#732).
-					// The output projection publishes exactly this — the
-					// physical planner's buildProject reads the same
-					// logical.Projection.PublishedName — so the sink's schema
-					// and this list agree and the name-keyed row map still
-					// resolves. An unaliased `SUM(a) OVER ()` is `sum` under
+					// The SINK publishes exactly this —
+					// CollectSink.applyOutputNames renames the collected
+					// batches' schemas before ToRows() boxes them, from the
+					// same positional list the planner derived from this same
+					// rule — so this list and the name-keyed row map agree.
+					// (buildProject does NOT read PublishedName; an earlier
+					// version of this comment said it did — round-1 review N1.) An unaliased `SUM(a) OVER ()` is `sum` under
 					// both rules; naming it from the expression TEXT asked the
 					// result schema for a column the projection does not emit,
 					// and every row came back NULL.
@@ -878,8 +888,19 @@ func reconcileColumnName(name string, rows []map[string]any) string {
 // Scale this function resolves for them below — an aggregate function
 // call, on live PostgreSQL, never keeps its argument's typmod (FIX 2,
 // #457/#458 fold-in). May be nil.
-func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog, wireUnconstrainedDecimal map[string]bool, stringLength map[string]int) []ColumnMeta {
+func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog, wireUnconstrainedDecimal map[string]bool, stringLength map[string]int, wireUnconstrainedPos []bool, stringLengthPos []int) []ColumnMeta {
 	metas := make([]ColumnMeta, len(columns))
+
+	// POSITIONAL resolution, and it is the authority whenever the arities
+	// line up. A name stopped being an address the moment PostgreSQL's naming
+	// rule made `SELECT g + 1, s || 'x'` two columns called `?column?`
+	// (#732): the name-keyed lookups below then gave column 0 the LAST
+	// column's declaration — a bigint declared TEXT on the wire, and both
+	// halves of `CAST(s AS VARCHAR(4)), CAST(s AS VARCHAR(9))` at modifier 13.
+	// The schema is positional and was built from the same list in the same
+	// order, which is what makes this exact rather than a heuristic
+	// (round-1 review B2).
+	positional := len(outSchema) == len(columns)
 
 	// The executed output schema, keyed by column name. The whole Column,
 	// not just its TypeID: a DECIMAL's precision and scale are part of the
@@ -909,6 +930,23 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 		metas[i] = ColumnMeta{Name: name, Nullable: true,
 			WireUnconstrained: wireUnconstrainedDecimal[name],
 			StringLength:      stringLength[name]}
+		if i < len(wireUnconstrainedPos) {
+			metas[i].WireUnconstrained = wireUnconstrainedPos[i]
+		}
+		if i < len(stringLengthPos) && stringLengthPos[i] > 0 {
+			metas[i].StringLength = stringLengthPos[i]
+		}
+
+		// The executed plan's output schema, BY POSITION. Same list, same
+		// order, so column i's declaration is outSchema[i] whatever it is
+		// called.
+		if positional {
+			col := outSchema[i]
+			metas[i].TypeID = col.Type
+			metas[i].TypeName = col.Type.String()
+			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
+			continue
+		}
 
 		// The executed plan's output schema first — it is per-result rather
 		// than a cross-table name match, and it sees computed columns.

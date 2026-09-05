@@ -151,7 +151,9 @@ func (g *GRPCServer) Query(ctx context.Context, req *wadjetv1.QueryRequest) (*wa
 		}
 		return &wadjetv1.QueryResponse{
 			Columns: result.Columns,
-			Rows:    rowsToProto(result.Rows),
+			// The positional form rides along whenever the engine built one,
+			// which is exactly when two columns share a name (B1).
+			Rows: rowsToProtoWithValues(result.Rows, result.RowValues),
 			Stats: &wadjetv1.QueryStats{
 				TotalRows: int64(len(result.Rows)),
 				Plan:      result.Plan,
@@ -528,13 +530,34 @@ func (s *authServerStream) Context() context.Context { return s.ctx }
 
 // rowsToProto converts Go row maps to protobuf Row messages.
 func rowsToProto(rows []map[string]any) []*wadjetv1.Row {
+	return rowsToProtoWithValues(rows, nil)
+}
+
+// rowsToProtoWithValues is rowsToProto with the POSITIONAL form beside the map.
+//
+// A `map<string, Value>` cannot represent two output columns that publish ONE
+// NAME, and since #732 that is an ordinary result: `SELECT g + 1, g + 2` is two
+// columns called `?column?`, so `fields` carries one key while `columns` names
+// two — a client zipping the two got the LAST value under the FIRST name and
+// nothing under the second. `values` is sent whenever the caller has the
+// positional form, which the engine materialises exactly when the names are not
+// unique (`CollectSink.ToRowValues`, #513). Nil elsewhere, so an ordinary
+// response is byte-identical to before (round-1 review B1).
+func rowsToProtoWithValues(rows []map[string]any, values [][]any) []*wadjetv1.Row {
 	result := make([]*wadjetv1.Row, len(rows))
 	for i, row := range rows {
 		fields := make(map[string]*structpb.Value, len(row))
 		for k, v := range row {
 			fields[k] = anyToProtoValue(v)
 		}
-		result[i] = &wadjetv1.Row{Fields: fields}
+		r := &wadjetv1.Row{Fields: fields}
+		if i < len(values) {
+			r.Values = make([]*structpb.Value, len(values[i]))
+			for j, v := range values[i] {
+				r.Values[j] = anyToProtoValue(v)
+			}
+		}
+		result[i] = r
 	}
 	return result
 }

@@ -1121,11 +1121,30 @@ type CollectSink struct {
 	SchemaHint []parquet.Column
 	// OutputNames is the PLAN's published name per output column, positional
 	// (plansql.OutputColumnName, #732). Empty means "the names the pipeline
-	// emitted", which is every caller but the top-level query planner: a
-	// worker fragment's sink publishes the names the NEXT stage resolves
-	// against, not the ones a client reads.
+	// emitted".
+	//
+	// It is set by `physical.Planner.Plan` for every caller of that entry,
+	// which includes the WORKER task executor — a fragment there plans the
+	// whole statement's logical tree, so its sink is renamed too. That is
+	// sound and not merely tolerated: the rename is applied positionally and
+	// only when the arity matches, the names come from the statement's own
+	// OUTPUT projection, and a fragment sink whose schema is not that list is
+	// left alone by the arity guard. An earlier version of this comment
+	// claimed the worker path never set it, which was not true of the code
+	// (round-1 review P3).
 	OutputNames []string
 	namesDone   bool
+	// SchemaHintWireUnconstrainedPos and SchemaHintStringLengthPos are the
+	// POSITIONAL form of the two maps below, and they are the authority when
+	// they are set.
+	//
+	// A map keyed by output-column NAME cannot answer for two columns that
+	// publish one name, and since #732 that is an ordinary result:
+	// `SELECT CAST(s AS VARCHAR(4)), CAST(s AS VARCHAR(9))` is two columns
+	// called `s`, and the map gave both the LAST one's modifier. The schema is
+	// positional and so is this.
+	SchemaHintWireUnconstrainedPos []bool
+	SchemaHintStringLengthPos      []int
 	// SchemaHintWireUnconstrainedDecimal names the DECIMAL output columns
 	// whose PostgreSQL wire typmod must say "unconstrained" (-1) — an
 	// aggregate function call, never a bare column reference. Unlike
@@ -1146,6 +1165,10 @@ func (s *CollectSink) Init(_ context.Context) error {
 	s.batches = nil
 	s.schema = nil
 	s.rowsDone = false
+	// The published-name rename is per-RUN state like everything above it: a
+	// sink re-Init'd for a second plan would otherwise keep the first run's
+	// latch and publish the resolution spelling (#732, round-1 review P4).
+	s.namesDone = false
 	return nil
 }
 
@@ -1312,7 +1335,14 @@ func (s *CollectSink) applyOutputNames() {
 	if len(s.OutputNames) == 0 || s.namesDone {
 		return
 	}
-	s.namesDone = true
+	// Latched only once the BATCHES have been renamed, which is the rename a
+	// row map is built from. Schema() is reachable before any batch arrives
+	// (the plan-declared answer for a zero-row result), and latching there
+	// left convert() returning the resolution spelling for a result that then
+	// did have rows (round-1 review P4).
+	if s.schema != nil || len(s.batches) > 0 {
+		s.namesDone = true
+	}
 	rename := func(schema []parquet.Column) []parquet.Column {
 		if len(schema) != len(s.OutputNames) {
 			return schema

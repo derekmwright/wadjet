@@ -45,6 +45,13 @@ message QueryRequest {
 // Row represents a single result row as a map of column name to value.
 message Row {
   map<string, google.protobuf.Value> fields = 1;
+  // The same row POSITIONALLY, aligned with QueryResponse.columns. A map
+  // cannot represent two output columns that publish ONE NAME, which is an
+  // ordinary result since PostgreSQL's naming rule was adopted:
+  // `SELECT g + 1, g + 2, g + 3` is three columns called `?column?`, and
+  // `fields` carries one key for the three of them. Sent whenever the result's
+  // column names are not unique; a client that needs every value reads this.
+  repeated google.protobuf.Value values = 2;
 }
 
 // QueryStats contains execution statistics.
