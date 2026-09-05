@@ -267,6 +267,22 @@ no ceiling to compare it against; `query_limit` is a read control.
   SET/VALUES text that the DML rewriter does not decompose, so it cannot be
   shown to honour the policy. Refusing beats running those reads against the
   stored row.
+
+  The structural fix, measured: `MergeWhenClause.SQL` is the raw text of a
+  `SET a = …, b = …` or `(cols) VALUES (…)` clause, and the ONE thing that
+  decomposes it is `wadjet/dml.go`'s `applySetClauses` / `buildInsertRow`,
+  which split it with `strings.Index("=")` and `splitSetClauses` at EXECUTION
+  time. Rewriting the clause in `internal/auth` means a SECOND string splitter
+  over the same text, and the two would have to agree about every spelling
+  forever or the policy rewrite would cover a different set of expressions
+  than the executor evaluates — decision 5's second enforcement path, in the
+  place it does the most damage. The fix is for the PARSER to decompose a WHEN
+  clause into typed assignments the way it already decomposes `UPDATE ... SET`
+  into `UpdateInfo.SetClauses`, so one decomposition exists and both the
+  rewriter and the executor read it. That is a parser change plus an executor
+  rewrite: its own arc. The refusal is pinned by
+  `internal/server.TestMergeUnderAColumnPolicyIsRefusedOnEveryDoor`, which
+  fails the day MERGE answers.
 - **A typed mask placeholder per type** (see the wire-type consequence above).
 - **`LATERAL` over a policed relation refuses.** Its decorrelated inner keeps
   its predicate in a shape the planner cannot reorder above the projection, so
