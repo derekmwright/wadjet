@@ -645,8 +645,6 @@ func TestAddDeleteMarkers_PreservesCreatedAt(t *testing.T) {
 	}
 }
 
-// TestForceCompactFile_ConcurrentDeletePreserved verifies that delete markers
-// added concurrently between GC scan and ForceCompactFile are not lost.
 // TestForceCompactFile_ConcurrentDeletePreserved is #894's rule at the GC
 // door: a DELETE that commits after the GC scan is APPLIED by the rewrite,
 // not left behind it.

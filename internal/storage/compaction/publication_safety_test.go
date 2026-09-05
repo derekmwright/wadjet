@@ -343,3 +343,118 @@ func TestCompetingCompactorsPublishEachRowExactlyOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestALostPublicationRaceIsReportedToTheOperator is the reporting half of
+// #895/#894, and it is a gate on a LINE rather than on a row set for the
+// reason the counter exists at all: a run that lost a publication race leaves
+// the same rows behind as a run that had nothing to do, so the only thing that
+// can tell an operator the two apart is what the run SAYS.
+//
+// The shape the round-1 review reproduced: `wadjet compact --rewrite` whose
+// only group loses the race returns a nil error with an empty Failed, and the
+// CLI printed "0 merges, 0 files removed, 0 created, 0 rows, 0 -> 0 bytes" —
+// character for character what an already-migrated table prints. A rewrite
+// reads its file list exactly once, so the skipped group is not retried inside
+// the call; the operator has to run it again and nothing said so.
+//
+// The race here is real, not a hand-built Result: a second compactor commits
+// from inside the first's output Put, exactly as the competing-writers cell
+// drives it. Result.Summary is the function cmd/wadjet prints, and
+// TestPrintCompactResultPrintsEverySummaryLine (cmd/wadjet) closes the other
+// half of the chain.
+func TestALostPublicationRaceIsReportedToTheOperator(t *testing.T) {
+	for _, mode := range []string{"rewrite", "ordinary"} {
+		t.Run(mode, func(t *testing.T) {
+			f := pubSetup(t, 2)
+			ctx := context.Background()
+
+			second := f.compactor()
+			f.store.afterPut = func() {
+				if _, e := second.CompactTable(ctx, "events"); e != nil {
+					t.Fatal(e)
+				}
+			}
+			first := f.compactor()
+			var result *Result
+			var err error
+			if mode == "rewrite" {
+				result, err = first.RewriteTable(ctx, "events")
+			} else {
+				result, err = first.CompactTable(ctx, "events")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.PublicationConflicts == 0 {
+				t.Fatal("the schedule did not produce a refused publication")
+			}
+
+			lines := result.Summary()
+			joined := strings.Join(lines, "\n")
+			if len(lines) < 2 {
+				t.Fatalf("a run that lost a publication race must say so; got only %q", joined)
+			}
+			if !strings.Contains(joined, "refused because another writer changed the same files first") {
+				t.Errorf("the summary does not name the refusal: %q", joined)
+			}
+			if result.PartitionsCompacted == 0 && !strings.Contains(joined, "run again") {
+				t.Errorf("a run that published nothing must tell the operator to run again: %q", joined)
+			}
+			t.Logf("%s summary:\n%s", mode, joined)
+		})
+	}
+}
+
+// TestASuccessfulRunDoesNotTellTheOperatorToRunAgain is the boundary of the
+// cell above, attempted from the other side: CompactTable REPLANS after a
+// refusal, so a run that conflicted once and then compacted the partition has
+// finished its work. Conditioning the advice on the conflict count alone would
+// send an operator round a loop that has nothing left to do.
+func TestASuccessfulRunDoesNotTellTheOperatorToRunAgain(t *testing.T) {
+	f := pubSetup(t, 2)
+	ctx := context.Background()
+
+	// A DELETE from inside the output's Put refuses the first publication;
+	// the pass loop then replans and compacts for real.
+	f.store.afterPut = func() {
+		if e := f.cat.CommitDML(ctx, "events", nil,
+			[]catalog.DeleteMarker{{FilePath: f.paths[0], RowIndices: []int64{1}}}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	c := f.compactor()
+	result, err := c.CompactTable(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PublicationConflicts == 0 {
+		t.Fatal("the schedule did not produce a refused publication")
+	}
+	if result.PartitionsCompacted == 0 {
+		t.Fatal("the replan did not compact the partition")
+	}
+	joined := strings.Join(result.Summary(), "\n")
+	if !strings.Contains(joined, "refused because another writer changed the same files first") {
+		t.Errorf("the refusal is still worth reporting: %q", joined)
+	}
+	if strings.Contains(joined, "run again") {
+		t.Errorf("this run finished its work; it must not ask for a re-run: %q", joined)
+	}
+	t.Logf("summary:\n%s", joined)
+}
+
+// TestAnUneventfulRunSaysOnlyWhatItDid keeps the note off the ordinary path —
+// a line that appears every time is a line an operator stops reading.
+func TestAnUneventfulRunSaysOnlyWhatItDid(t *testing.T) {
+	f := pubSetup(t, 2)
+	result, err := f.compactor().CompactTable(context.Background(), "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PublicationConflicts != 0 {
+		t.Fatalf("nothing raced this run, got %d conflicts", result.PublicationConflicts)
+	}
+	if lines := result.Summary(); len(lines) != 1 {
+		t.Errorf("an uneventful run prints one line, got %q", lines)
+	}
+}

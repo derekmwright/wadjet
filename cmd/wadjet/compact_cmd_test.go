@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/storage/compaction"
 )
 
 // TestCompactCommandExposesRewrite pins the migration entry point.
@@ -61,5 +65,62 @@ func TestCompactCommandIsRegistered(t *testing.T) {
 	out, _ = exec.Command(bin, "run", ".", "--help").CombinedOutput()
 	if !strings.Contains(string(out), "compact") {
 		t.Fatalf("`wadjet --help` does not list compact: %s", out)
+	}
+}
+
+// TestPrintCompactResultPrintsEverySummaryLine closes the reporting chain the
+// round-1 review opened. `internal/storage/compaction` gates that a run which
+// LOST a publication race produces a Summary saying so; this gates that the
+// CLI prints every line of it.
+//
+// The two halves are separate on purpose. Summary lives beside the Result it
+// describes and beside the fixture that can drive a real losing race; this
+// side only has to prove that nothing is dropped in the printing, which is
+// exactly how PublicationConflicts went unreported when it was added — the
+// printer named its fields one at a time, so a new field was invisible by
+// omission. Asserting equality against Summary is what makes that
+// unrepeatable: a field the Result reports cannot be silently left out here.
+func TestPrintCompactResultPrintsEverySummaryLine(t *testing.T) {
+	result := &compaction.Result{
+		Table:                "events",
+		PublicationConflicts: 2,
+		Failed: []compaction.PartitionFailure{
+			{Partition: "dt=2026-09-05", Err: errors.New("boom")},
+		},
+	}
+
+	var out, errOut bytes.Buffer
+	printCompactResult(&out, &errOut, result)
+
+	want := strings.Join(result.Summary(), "\n") + "\n"
+	if out.String() != want {
+		t.Errorf("stdout = %q, want every Summary line: %q", out.String(), want)
+	}
+	// The specific line the review found missing, spelled out so a future
+	// Summary rewrite that drops it fails here too and not only upstream.
+	if !strings.Contains(out.String(), "refused because another writer changed the same files first") {
+		t.Errorf("the CLI does not report a lost publication race: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "run again") {
+		t.Errorf("a run that published nothing must tell the operator to run again: %q", out.String())
+	}
+
+	// Failures stay on stderr: one stream per audience.
+	if !strings.Contains(errOut.String(), "dt=2026-09-05 FAILED") {
+		t.Errorf("stderr = %q, want the partition failure", errOut.String())
+	}
+	if strings.Contains(out.String(), "FAILED") {
+		t.Errorf("a partition failure must not reach stdout: %q", out.String())
+	}
+}
+
+// TestPrintCompactResultToleratesNoResult: CompactTable can return a nil
+// Result alongside an error (a bad table name), and the error itself is what
+// the command reports then.
+func TestPrintCompactResultToleratesNoResult(t *testing.T) {
+	var out, errOut bytes.Buffer
+	printCompactResult(&out, &errOut, nil)
+	if out.Len() != 0 || errOut.Len() != 0 {
+		t.Errorf("a nil result printed %q / %q", out.String(), errOut.String())
 	}
 }

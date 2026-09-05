@@ -828,17 +828,7 @@ func compactCmd() *cobra.Command {
 			} else {
 				result, err = c.CompactTable(ctx, table)
 			}
-			if result != nil {
-				fmt.Printf("table %s: %d merges, %d files removed, %d created, %d rows, %d -> %d bytes\n",
-					result.Table, result.PartitionsCompacted, result.FilesRemoved,
-					result.FilesCreated, result.RowsMerged, result.BytesBefore, result.BytesAfter)
-				if result.PassLimitReached {
-					fmt.Println("note: the pass limit was reached with work outstanding — run again")
-				}
-				for _, f := range result.Failed {
-					fmt.Fprintf(os.Stderr, "partition %s FAILED: %v\n", f.Partition, f.Err)
-				}
-			}
+			printCompactResult(os.Stdout, os.Stderr, result)
 			return err
 		},
 	}
@@ -850,6 +840,22 @@ func compactCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&maxFileSize, "max-file-size", 0,
 		"override the average file size below which compaction triggers, in bytes (ignored with --rewrite)")
 	return cmd
+}
+
+// printCompactResult reports one compaction run. Every stdout line comes from
+// Result.Summary, so a counter the Result reports cannot be dropped here by
+// omission — which is how PublicationConflicts went unprinted when it was
+// added. Failures go to stderr, one per partition.
+func printCompactResult(out, errOut io.Writer, result *compaction.Result) {
+	if result == nil {
+		return
+	}
+	for _, line := range result.Summary() {
+		fmt.Fprintln(out, line)
+	}
+	for _, f := range result.Failed {
+		fmt.Fprintf(errOut, "partition %s FAILED: %v\n", f.Partition, f.Err)
+	}
 }
 
 func clustersCmd() *cobra.Command {
