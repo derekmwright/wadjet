@@ -19,7 +19,13 @@ import (
 // handed back TEXT under OID 25, which is #570's own embedded-NUL hazard coming
 // back through a derived value.
 //
-// Every expectation is live PostgreSQL 17.11 over the same bytes.
+// Every expectation is live PostgreSQL 17.11 over the same bytes, EXCEPT the
+// cells named `residual_*`: those record what THIS engine answers where it
+// does not agree with the server, each with the server's own answer beside it
+// in the comment, and each fails the day the two start agreeing. A gate whose
+// header claims live PostgreSQL for a value the server does not produce is a
+// false record, which is what round 2 of this arc shipped for the three
+// `text || bytea` cells.
 func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 	ctx := context.Background()
 	db := f3ByteaOpen(t)
@@ -43,7 +49,14 @@ func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 		{"length_multibyte_column", `LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
 		{"length_multibyte_derived", `LENGTH(b || CAST('' AS BYTES))`, 6, int32(2), parquet.TypeInt32},
 		{"octet_length_multibyte", `OCTET_LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
-		{"char_length_multibyte_is_bytes_too", `CHAR_LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
+		// RESIDUAL: the server has no `char_length(bytea)` at all —
+		// `function char_length(bytea) does not exist`, 42883, measured — so
+		// this cell records an ANSWER where PostgreSQL raises. It answers the
+		// BYTE count because `length` and `char_length` share one kernel and
+		// a rune count here would make one expression give two numbers; the
+		// refusal is the text-only-function family's, deferred with it in
+		// ADR-0012. Delete this cell when that plan-time check lands.
+		{"residual_char_length_answers_where_pg_raises", `CHAR_LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
 		{"length_multibyte_word", `LENGTH(b)`, 7, int32(6), parquet.TypeInt32},
 		{"octet_length_multibyte_word", `OCTET_LENGTH(b)`, 7, int32(6), parquet.TypeInt32},
 		// The TEXT family keeps CHARACTERS over the same bytes, which is the
@@ -76,12 +89,28 @@ func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 		// `text || anynonarray`, which RENDERS the bytea and concatenates as
 		// text — while `bytea || bytea` and `bytea || <unknown literal>` are
 		// bytea. Declaring bytea for the text pair moved a right class to a
-		// wrong one (round 2, B3). The VALUE is a separate, older divergence
-		// (this engine concatenates the raw bytes where PostgreSQL renders
-		// `\x6869`), recorded in ADR-0012 and unchanged here.
-		{"concat_text_column_is_text", `CAST('AB' AS STRING) || b`, 1, "ABhi", parquet.TypeString},
-		{"concat_text_column_right", `b || CAST('AB' AS STRING)`, 1, "hiAB", parquet.TypeString},
-		{"concat_text_function_is_text", `UPPER(CAST('ab' AS STRING)) || b`, 1, "ABhi", parquet.TypeString},
+		// wrong one (round 2, B3), and the CLASS these three assert is the
+		// server's.
+		//
+		// The VALUE is not, and these are RESIDUAL pins for it. Measured on
+		// 17.11 with b = '\x6869':
+		//
+		//	'AB'::text || b   ->  AB\x6869   (8 chars)   here: ABhi
+		//	b || 'AB'::text   ->  \x6869AB              here: hiAB
+		//	upper('ab') || b  ->  AB\x6869              here: ABhi
+		//
+		// The server renders the bytea through bytea_out; this engine splices
+		// the raw bytes, which on the wire puts non-UTF-8 (and, for '\x00',
+		// a NUL) inside an OID-25 value — #570's hazard through a derived
+		// value. Recorded in ADR-0012's #583 entry with the mechanism: the
+		// value needs the operand's DECLARED type at the evaluator, and
+		// deciding it from the Go box cannot separate a text COLUMN from an
+		// unknown LITERAL, which is the `b || 'x'` cell above. Delete these
+		// three when the plan-time argument-type check lands; they FAIL when
+		// they start agreeing with the server.
+		{"residual_text_concat_bytea_value_left", `CAST('AB' AS STRING) || b`, 1, "ABhi", parquet.TypeString},
+		{"residual_text_concat_bytea_value_right", `b || CAST('AB' AS STRING)`, 1, "hiAB", parquet.TypeString},
+		{"residual_text_concat_bytea_value_fn", `UPPER(CAST('ab' AS STRING)) || b`, 1, "ABhi", parquet.TypeString},
 		// The two that were already right, as the controls: md5(bytea) is
 		// text on the server too, and a CAST renders the \x form.
 		{"md5", `MD5(b)`, 1, "49f68a5c8493ec2c0bf489821c21fc3b", parquet.TypeString},
