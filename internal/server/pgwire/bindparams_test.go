@@ -64,12 +64,19 @@ func TestRenderParamText(t *testing.T) {
 		// same BYTES. The literal carries the value's bytes, not the
 		// spelling — `\x6869` is a two-byte value, and quoting the six
 		// characters compares a string against a BYTES column (#570).
-		{"bytea hex", `\x6869`, oidBytea, "'hi'"},
-		{"bytea hex empty", `\x`, oidBytea, "''"},
-		{"bytea hex uppercase digits", `\x4869`, oidBytea, "'Hi'"},
-		{"bytea escape form", "hi", oidBytea, "'hi'"},
-		{"bytea escape octal", `\150\151`, oidBytea, "'hi'"},
-		{"bytea escape doubled backslash", `a\\b`, oidBytea, `'a\b'`},
+		//
+		// It is written back in byteain's HEX form since #582. The engine
+		// reads a literal beside a BYTES column through byteain too now, so
+		// raw bytes would be decoded a SECOND time: the last cell is the one
+		// that says so — under the old splice `a\b` went out as `'a\b'`, a
+		// lone backslash, which byteain refuses. The hex form round-trips
+		// whatever the bytes are.
+		{"bytea hex", `\x6869`, oidBytea, `'\x6869'`},
+		{"bytea hex empty", `\x`, oidBytea, `'\x'`},
+		{"bytea hex uppercase digits", `\x4869`, oidBytea, `'\x4869'`},
+		{"bytea escape form", "hi", oidBytea, `'\x6869'`},
+		{"bytea escape octal", `\150\151`, oidBytea, `'\x6869'`},
+		{"bytea escape doubled backslash", `a\\b`, oidBytea, `'\x615c62'`},
 
 		// Quoting is by doubling, the only escape this lexer reads.
 		{"embedded quote", "it's", oidText, "'it''s'"},
