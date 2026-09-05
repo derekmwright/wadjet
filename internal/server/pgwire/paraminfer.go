@@ -328,15 +328,39 @@ func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nes
 	// as an alias so a folded reference finds its declaration; a byte-exact
 	// entry is never shadowed, and the `conflicting` rule above has already
 	// removed the names two tables spell differently.
+	//
+	// TWO catalog names that fold to ONE key are AMBIGUOUS and must resolve to
+	// nothing — batch/schema.go item 3's rule, which the hand-rolled map here
+	// has to carry itself. The `conflicting` pass above cannot see this case:
+	// it keys by the CATALOG spelling, so `Attrs` and `ATTRS` are two distinct
+	// entries that are never compared, and both are TypeRow anyway. Without
+	// the guard both are "untaken" and the winner is whichever Go's map
+	// iteration wrote last: over `nsa.Attrs ROW(zeta,alpha)` joined to
+	// `nsb.ATTRS`, 25 identical runs of
+	// `SELECT a.Attrs FROM nsa a JOIN nsb b ON a.id = b.id` rendered `(9,A)`
+	// twice and `(A,9)` 23 times — the WIRE BYTES changing run to run for one
+	// query over one fixture, which is not one of ADR-0013's eight legal
+	// classes of nondeterminism. Dropping the ambiguous alias renders the
+	// declaration-less way, which is the miss it is, and the same way every
+	// time.
 	aliases := make(map[string]parquet.Column)
+	ambiguous := make(map[string]bool)
 	for name, col := range out {
 		f := batch.FoldIdent(name)
 		if f == name {
 			continue
 		}
-		if _, taken := out[f]; !taken {
-			aliases[f] = col
+		if _, taken := out[f]; taken {
+			continue
 		}
+		if _, dup := aliases[f]; dup {
+			ambiguous[f] = true
+			continue
+		}
+		aliases[f] = col
+	}
+	for f := range ambiguous {
+		delete(aliases, f)
 	}
 	for f, col := range aliases {
 		out[f] = col
