@@ -229,13 +229,28 @@ func canonicalCells(res *wadjet.QueryResult, dCols []string) [][]string {
 		row := make([]string, len(perm))
 		for j, src := range perm {
 			if src < len(cells) {
-				row[j] = canonCell(cells[src])
+				row[j] = canonTypedCell(res, src, cells[src])
 			}
 		}
 		out[i] = row
 	}
 	sortCanon(out)
 	return out
+}
+
+// canonTypedCell canonicalizes a cell by its DECLARED type before its Go box.
+// A TIMESTAMP-declared column reaches the embedded door as epoch milliseconds
+// (batch.FormatTimestamp's input; `wadjet.TestTimestampHasOneRenderingAtEverySite`),
+// and since v0.18.44 that includes DATE_TRUNC, which answered text before. DuckDB
+// prints the same instant as `2013-07-15 12:40:00`; the hits schema has no
+// TIMESTAMP column of its own, so the Go-box switch alone never saw one (Q43).
+func canonTypedCell(res *wadjet.QueryResult, col int, v any) string {
+	if col < len(res.ColumnMetas) && res.ColumnMetas[col].TypeName == "TIMESTAMP" {
+		if ms, ok := v.(int64); ok {
+			return canonString(time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05"))
+		}
+	}
+	return canonCell(v)
 }
 
 // canonicalStringRows canonicalizes DuckDB CSV rows (already positional).
