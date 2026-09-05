@@ -24,7 +24,9 @@ converter named was stored as a zero, an out-of-range integer was wrapped, a
 wrong-width VECTOR moved components between rows, a missing required value
 shifted a column, a mis-shaped container became NULL, and a mid-row-group
 output failure produced a valid file with a column missing — every one of them
-with `WriteRows` and `Close` returning nil.
+with `WriteRows` and `Close` returning nil. Amended 2026-09-05 with §11, "the
+reader trusts nothing it can verify", after a page checksum the file carried
+and the reader decoded was found to be consulted by nothing (#891).
 
 ## Context
 
@@ -704,6 +706,58 @@ width or a scale: `ingest.TestTheIngestBoundaryNeverAdmitsWhatTheWriterRefuses`
 (1770 cells) asserts that everything the door admits, the writer can store, and
 `ingest.TestTheIngestBoundaryRefusesABadValueInsideAContainer` names the
 container cells individually so a regression says which shape came back.
+### 11. The reader trusts nothing it can verify
+
+§1 bounds a number before it sizes an allocation. §2 refuses a claim another
+part of the same file contradicts. §10 is where the WRITER's guarantee stops. §11 is about the checks
+the format supplies for its own benefit: **every self-describing check a file
+carries is performed before a value derived from it is returned, and a failure
+is an error naming the location — never a fabricated NULL and never a shifted
+value.**
+
+**The page checksum.** `PageHeader.crc` is a CRC-32 (IEEE polynomial) over a
+page's serialized body exactly as stored — after compression, levels included
+for a v2 page, header excluded. The thrift decoder had been reading it into
+`PageHeader.CRC` since the package was written and no read path ever looked at
+it. A parquet-go-written uncompressed PLAIN INT64 page holding `[42, 43]`,
+with one payload bit flipped, read as `[43, 43]` with a nil error; parquet-go
+refused the identical bytes (#891). The file contained everything needed to
+know its own bytes were wrong, and the reader answered the query out of them
+anyway.
+
+Presence is tracked as PRESENCE. `crc` is an optional thrift field and zero is
+a legal checksum, so `CRC != 0` — which is what parquet-go's own reader tests
+— cannot separate "this writer emits no checksums" from "this body hashes to
+zero", and skips verification on the second. `PageHeader.CRCSet` records the
+field, and that is what the check gates on.
+
+*One place, every path.* The check is in `ColumnPageReader`, which is the
+single object the row reader, the native columnar scan, the selection-aware
+decode, the lengths-only decode, the row filter and the dictionary prune all
+walk. That is §3 discharged structurally rather than by repetition: there is
+no path that reads a page without it, so no two paths can disagree about
+whether a file is readable.
+
+*Verify what you use.* It runs on every page body the reader DECODES — data
+pages v1 and v2, the dictionary page, and the dictionary page a row-group
+prune is decided from. It does not run on a page `NextPageMaybeSkip` skips: no
+value comes out of those bytes, so nothing the reader returns can depend on
+them, and checksumming a payload the skip exists to avoid touching would spend
+the optimization to no end. Both halves of that boundary are asserted — a
+corrupt page a projection skips reads clean, the same file read whole refuses.
+
+The rewrite paths inherit it. Compaction reads with the row reader and writes
+what it read, so before this check a flipped bit became the durable value and
+the file that could still prove itself wrong was deleted.
+
+This is about a checksum the file already carries. It does not require writers
+to emit one, and wadjet's own writer still does not — a file it wrote carries
+no page checksum, so the check costs one predictable branch per page on
+wadjet's own data and on every pyarrow file measured (pyarrow's
+`write_page_checksum` defaults off; the 122 MB ClickBench `hits_0.parquet`
+carries none in any of its 728 pages). Emitting them is a writer decision and
+is not settled here.
+
 
 ## Consequences
 
@@ -737,6 +791,13 @@ container cells individually so a regression says which shape came back.
   one read path) to 735 cells across PLAIN and dictionary pages and all three
   columnar read paths, because "the paths agree" is only a property if the
   paths are all exercised.
+- Files that were read before and are refused now, from §10: a page whose
+  stored body does not hash to the checksum its own header declares. That
+  previously produced a value, without saying so.
+- The refusal is a cross-implementation fact, not a round trip: the checksum
+  cells run over files written by parquet-go and by pyarrow
+  (`testdata/page_crc.parquet`, `page_crc_v2.parquet`), because wadjet's own
+  writer emits no checksum and cannot produce the shape.
 
 ## Compatibility note, 2026-08-23: files this writer produced before #409
 

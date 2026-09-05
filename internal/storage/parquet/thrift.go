@@ -1191,6 +1191,7 @@ func DecodePageHeader(data []byte) (*PageHeader, int, error) {
 				return nil, 0, err
 			}
 			ph.CRC = v
+			ph.CRCSet = true
 		case 5: // data_page_header: DataPageHeader (struct)
 			ph.DataPageHeader = &DataPageHeader{}
 			if err := d.decodeDataPageHeader(ph.DataPageHeader); err != nil {

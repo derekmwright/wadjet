@@ -1,5 +1,7 @@
 package parquet
 
+import "fmt"
+
 // Parquet format constants and types.
 // These mirror the Apache Parquet format specification (Thrift definitions)
 // and replace the dependency on github.com/parquet-go/parquet-go/format.
@@ -147,6 +149,24 @@ const (
 	PageDictionary PageType = 2
 	PageDataV2     PageType = 3
 )
+
+// String names the page type in a refusal. A reader's error about a page is
+// read by a person holding a file, and "data page v1" locates it; the thrift
+// enum's 0 does not.
+func (p PageType) String() string {
+	switch p {
+	case PageDataV1:
+		return "data page v1"
+	case PageIndex:
+		return "index page"
+	case PageDictionary:
+		return "dictionary page"
+	case PageDataV2:
+		return "data page v2"
+	default:
+		return fmt.Sprintf("page type %d", int32(p))
+	}
+}
 
 // FieldRepetitionType defines the repetition of a schema element.
 type FieldRepetitionType int32

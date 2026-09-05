@@ -2,7 +2,9 @@ package parquet
 
 import (
 	"fmt"
+	"hash/crc32"
 	"io"
+	"strings"
 )
 
 // PageData holds the decoded contents of a single Parquet data page.
@@ -89,6 +91,11 @@ type ColumnPageReader struct {
 	typeLength  int // for FIXED_LEN_BYTE_ARRAY
 	maxDefLevel int // 0 if column is required
 	maxRepLevel int // 0 for flat schemas
+
+	// path is the chunk's column path out of the footer, carried only so a
+	// refusal can name the column it is about. A reader's caller knows a
+	// leaf INDEX; a person reading the error wants the name.
+	path []string
 
 	// Staged mode (docs/design/scan-pread-reads.md): the chunk is read
 	// from src on first NextDictionary/NextPage instead of sliced from a
@@ -317,6 +324,60 @@ func (r *ColumnPageReader) pageBody(off int, ph *PageHeader) ([]byte, int, error
 	return r.data[off : off+size : off+size], off + size, nil
 }
 
+// columnLabel names the chunk in a refusal. The footer's path is
+// dot-joined, the way every other parquet tool prints a leaf.
+func (r *ColumnPageReader) columnLabel() string {
+	if len(r.path) == 0 {
+		return "?"
+	}
+	return strings.Join(r.path, ".")
+}
+
+// verifyPageCRC holds a page body to the checksum its own header carries.
+//
+// parquet.thrift makes PageHeader.crc a CRC-32 over the page's serialized
+// body EXACTLY as stored — after compression, the header excluded, and for
+// a v2 page the uncompressed level sections included — using the standard
+// (IEEE, GZip) polynomial. A file that carries one has told the reader how
+// to know its own bytes are intact; decoding the body anyway answers the
+// query out of data the file itself says is wrong. That is what happened:
+// a single flipped payload bit in a parquet-go-written INT64 page turned
+// [42, 43] into [43, 43] with a nil error, while parquet-go refused the
+// identical bytes (#891).
+//
+// PRESENCE, not value: ph.CRCSet. See PageHeader.CRCSet for why zero is not
+// the absence test.
+//
+// The check runs on every body this reader DECODES — data pages v1 and v2,
+// the dictionary page, in both the row reader's and the native scan's
+// walks, and on the dictionary page DictionaryIfPure prunes a row group
+// from. It deliberately does not run on a page NextPageMaybeSkip skips: no
+// value comes out of those bytes, so nothing the reader returns can depend
+// on them, and paying a full-body checksum for a payload the skip exists to
+// avoid touching would spend the optimization. A skipped page whose bytes
+// are corrupt reads clean; the same file read whole refuses. Both halves
+// are gated.
+func (r *ColumnPageReader) verifyPageCRC(off int, ph *PageHeader, body []byte) error {
+	if !ph.CRCSet {
+		return nil
+	}
+	if got := crc32.ChecksumIEEE(body); got != uint32(ph.CRC) {
+		return pageCRCErr(r.columnLabel(), off, ph, got)
+	}
+	return nil
+}
+
+// pageCRCErr names the column, the page and both checksums. The offset is
+// the page BODY's, in the same frame the reader is reading in: file-absolute
+// in slice mode, chunk-relative in staged mode.
+//
+//go:noinline
+func pageCRCErr(col string, off int, ph *PageHeader, got uint32) error {
+	return fmt.Errorf("column %s: the %v at offset %d fails its own checksum: "+
+		"header declares crc32 %#08x, the %d stored bytes hash to %#08x (corrupt parquet page)",
+		col, ph.Type, off, uint32(ph.CRC), ph.CompressedPageSize, got)
+}
+
 // nextHeader decodes the page header at off and returns it with the offset
 // its body starts at. A header that does not fit inside the chunk is refused
 // rather than advanced past.
@@ -346,7 +407,7 @@ func NewColumnPageReader(fileData []byte, cm *ColumnMetaData, maxDefLevel, maxRe
 	start, end, err := chunkRange(cm, int64(len(fileData)))
 	if err != nil {
 		return &ColumnPageReader{openErr: err, codec: cm.Codec, physType: cm.Type,
-			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel}
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel, path: cm.PathInSchema}
 	}
 	startOff, endOff := int(start), int(end)
 
@@ -367,6 +428,7 @@ func NewColumnPageReader(fileData []byte, cm *ColumnMetaData, maxDefLevel, maxRe
 		typeLength:  typeLength,
 		maxDefLevel: maxDefLevel,
 		maxRepLevel: maxRepLevel,
+		path:        cm.PathInSchema,
 	}
 }
 
@@ -385,7 +447,7 @@ func NewColumnPageReaderAt(src io.ReaderAt, fileSize int64, cm *ColumnMetaData, 
 	startOff, endOff, err := chunkRange(cm, fileSize)
 	if err != nil {
 		return &ColumnPageReader{openErr: err, codec: cm.Codec, physType: cm.Type,
-			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel}
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel, path: cm.PathInSchema}
 	}
 	srcLen := int(endOff - startOff)
 
@@ -399,6 +461,7 @@ func NewColumnPageReaderAt(src io.ReaderAt, fileSize int64, cm *ColumnMetaData, 
 		typeLength:  typeLength,
 		maxDefLevel: maxDefLevel,
 		maxRepLevel: maxRepLevel,
+		path:        cm.PathInSchema,
 		src:         src,
 		srcOff:      startOff,
 		srcLen:      srcLen,
@@ -420,7 +483,7 @@ func NewColumnPageReaderIn(buf []byte, base, fileSize int64, cm *ColumnMetaData,
 	start, end, err := chunkRange(cm, fileSize)
 	if err != nil {
 		return &ColumnPageReader{openErr: err, codec: cm.Codec, physType: cm.Type,
-			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel}
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel, path: cm.PathInSchema}
 	}
 	if end == start {
 		// An EMPTY chunk has no bytes to read and its offset is whatever the
@@ -431,6 +494,7 @@ func NewColumnPageReaderIn(buf []byte, base, fileSize int64, cm *ColumnMetaData,
 		return &ColumnPageReader{
 			codec: cm.Codec, physType: cm.Type,
 			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel,
+			path: cm.PathInSchema,
 		}
 	}
 	off, endOff := start-base, end-base
@@ -440,6 +504,7 @@ func NewColumnPageReaderIn(buf []byte, base, fileSize int64, cm *ColumnMetaData,
 				"%d bytes this row group holds at offset %d", start, end, len(buf), base),
 			codec: cm.Codec, physType: cm.Type,
 			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel,
+			path: cm.PathInSchema,
 		}
 	}
 	return &ColumnPageReader{
@@ -450,6 +515,7 @@ func NewColumnPageReaderIn(buf []byte, base, fileSize int64, cm *ColumnMetaData,
 		physType:    cm.Type,
 		maxDefLevel: maxDefLevel,
 		maxRepLevel: maxRepLevel,
+		path:        cm.PathInSchema,
 	}
 }
 
@@ -518,11 +584,17 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 				ph.DataPageHeader.NumValues > 0 && shouldSkip(int(ph.DataPageHeader.NumValues)) {
 				return &PageData{NumValues: int(ph.DataPageHeader.NumValues), Skipped: true}, nil
 			}
+			if err := r.verifyPageCRC(bodyOff, ph, compressedData); err != nil {
+				return nil, err
+			}
 			return r.decodeDataPageV1(ph, compressedData)
 		case PageDataV2:
 			if shouldSkip != nil && ph.DataPageHeaderV2 != nil &&
 				ph.DataPageHeaderV2.NumValues > 0 && shouldSkip(int(ph.DataPageHeaderV2.NumValues)) {
 				return &PageData{NumValues: int(ph.DataPageHeaderV2.NumValues), Skipped: true}, nil
+			}
+			if err := r.verifyPageCRC(bodyOff, ph, compressedData); err != nil {
+				return nil, err
 			}
 			return r.decodeDataPageV2(ph, compressedData)
 		case PageDictionary:
@@ -562,6 +634,10 @@ func (r *ColumnPageReader) NextDictionary() (*DictionaryData, error) {
 		return nil, err
 	}
 	r.off = next
+
+	if err := r.verifyPageCRC(bodyOff, ph, compressedData); err != nil {
+		return nil, err
+	}
 
 	// Decompress.
 	pageData, err := Decompress(r.codec, compressedData, int(ph.UncompressedPageSize))
@@ -618,6 +694,12 @@ func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
 		case PageDictionary:
 			if dict != nil {
 				return nil, false, nil // second dictionary page: malformed, be conservative
+			}
+			// A row group is PRUNED from these values. A corrupt dictionary
+			// prunes rows that belong in the answer, so this page's checksum
+			// is verified exactly as the decoding walk verifies it.
+			if err := r.verifyPageCRC(bodyOff, ph, body); err != nil {
+				return nil, false, err
 			}
 			pageData, err := Decompress(r.codec, body, int(ph.UncompressedPageSize))
 			if err != nil {

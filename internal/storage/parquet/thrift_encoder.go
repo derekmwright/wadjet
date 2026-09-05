@@ -480,6 +480,15 @@ func EncodePageHeader(ph *PageHeader) []byte {
 	e.writeFieldHeader(3, thriftI32, &lastFieldID)
 	e.writeI32(ph.CompressedPageSize)
 
+	// field 4: crc (optional). Emitted only when the header CARRIES one, so
+	// a header that came out of DecodePageHeader re-encodes with its
+	// checksum intact. Nothing in the writer sets CRCSet, so a page wadjet
+	// writes is byte-identical to what it was before this field existed.
+	if ph.CRCSet {
+		e.writeFieldHeader(4, thriftI32, &lastFieldID)
+		e.writeI32(ph.CRC)
+	}
+
 	// field 5: data_page_header (optional)
 	if ph.DataPageHeader != nil {
 		e.writeFieldHeader(5, thriftStruct, &lastFieldID)

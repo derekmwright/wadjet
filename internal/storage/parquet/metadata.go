@@ -72,7 +72,16 @@ type PageHeader struct {
 	Type                 PageType              // field 1: page type
 	UncompressedPageSize int32                 // field 2: uncompressed byte size
 	CompressedPageSize   int32                 // field 3: compressed byte size
-	CRC                  int32                 // field 4: CRC32 checksum (0 if not set)
+	CRC                  int32                 // field 4: CRC32 checksum of the page body
+	// CRCSet records whether field 4 was PRESENT, which is not the same
+	// question as whether CRC is zero. crc is an optional thrift field and
+	// zero is a legal checksum: a body that hashes to zero written by a
+	// writer that emits checksums is indistinguishable, by value alone,
+	// from a body written by one that does not. Readers that test
+	// `CRC != 0` (parquet-go's own does) therefore skip verification on
+	// one page in four billion. The presence flag is what verifyPageCRC
+	// gates on.
+	CRCSet               bool
 	DataPageHeader       *DataPageHeader       // field 5: data page v1 header
 	IndexPageHeader      *IndexPageHeader      // field 6: index page header
 	DictionaryPageHeader *DictionaryPageHeader // field 7: dictionary page header
