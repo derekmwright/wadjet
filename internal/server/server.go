@@ -99,12 +99,7 @@ func New(cfg Config, logger *slog.Logger) *Server {
 	// than run the unbound set. A set that names a relation the catalog does
 	// not hold therefore refuses the query instead of matching nothing, which
 	// beside a broad allow is a grant (#882).
-	if s.provider != nil && s.catalog != nil {
-		if err := s.provider.BindToCatalog(context.Background(), s.catalog); err != nil {
-			logger.Error("auth policy set REFUSED: it names a relation or column the catalog "+
-				"does not hold; every query will be refused until it is corrected", "error", err)
-		}
-	}
+	auth.AttachProvider(context.Background(), s.provider, s.catalog, logger)
 
 	// Middleware BEFORE routes: chi v5 panics ("all middlewares must be
 	// defined before routes on a mux") when Use runs after the first route
@@ -698,6 +693,14 @@ func (s *Server) dml() *wadjet.DB {
 	// `DELETE FROM e7emp WHERE salary > 0` was answered from a DENIED column.
 	// The other two doors have carried it since #859 round 1; this one was
 	// built from a bare catalog and never given it.
+	//
+	// The attach is per statement because the DB is: `wadjet.Attach` builds a
+	// fresh one each time. It is not a per-statement BIND — this provider is
+	// already bound to this catalog (server.New attached it), and
+	// BindToCatalog is idempotent against exactly that, so it writes nothing.
+	// It used to rewrite the state, and a hot reload landing inside that
+	// read-modify-write was overwritten by the older snapshot: a retired
+	// policy set coming back on the next statement.
 	db.SetAuthProvider(s.provider)
 	// The cost guard #803 installed on this server's SELECT path. MERGE reads
 	// its source through db.Query — an arbitrary SELECT — so a door that

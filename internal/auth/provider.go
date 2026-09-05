@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 
@@ -39,7 +40,26 @@ type Provider struct {
 	cat atomic.Pointer[catalog.Catalog]
 	// bindErr is the last bind refusal, or nil. See BindError.
 	bindErr atomic.Pointer[error]
+	// bound is the authState that IS bound to cat, so a re-attach of a set
+	// already bound to the same catalog writes NOTHING. That matters twice:
+	// the HTTP DML door re-attaches on every statement (Server.dml), and a
+	// re-attach that rewrites state is a lost update waiting for a hot reload
+	// to land inside it.
+	bound atomic.Pointer[authState]
 }
+
+// bindSwapAttempts bounds the CAS retry in BindToCatalog. A retry happens only
+// when a policy set is installed WHILE a bind is in flight; exhausting this
+// many is not a contended lock, it is a caller reinstalling in a loop, and the
+// answer to that is a refusal rather than an unbounded spin on a security
+// decision.
+const bindSwapAttempts = 32
+
+// bindSwapTestHook runs between the bind and the swap. Tests set it to widen
+// the window a lost update would need (the knob pattern of
+// exec.ForceAggDrainEvery: a defect whose trigger is a SCHEDULE cannot be
+// gated by hoping the scheduler cooperates). Nil in every non-test build.
+var bindSwapTestHook func()
 
 // BindToCatalog attaches the catalog a policy's names are resolved against and
 // binds the CURRENT policy set to it.
@@ -52,41 +72,89 @@ type Provider struct {
 // A failure returns the error and swaps NOTHING — the caller decides whether
 // that is fatal (it is, at startup) — and the provider keeps running on the
 // policy set it already had.
+//
+// It is IDEMPOTENT: attaching a set that is already bound to this catalog
+// writes nothing at all. The HTTP DML door re-attaches per statement, so that
+// is a request-path property, not an optimization.
+//
+// The swap is a CAS, not a store. BindToCatalog reads the running set, binds a
+// COPY of it, and installs the copy; a set installed between the read and the
+// install would otherwise be OVERWRITTEN by the older snapshot — a retired
+// policy set coming back, which is a security control silently reverting. On a
+// lost CAS the newly installed set is bound instead.
 func (p *Provider) BindToCatalog(ctx context.Context, cat *catalog.Catalog) error {
 	if p == nil || cat == nil {
 		return nil
 	}
-	st := p.state.Load()
-	var abac []AccessControlPolicy
-	if st.evaluator != nil {
-		abac = st.evaluator.policies
+	for attempt := 0; attempt < bindSwapAttempts; attempt++ {
+		st := p.state.Load()
+		if p.cat.Load() == cat && p.bound.Load() == st {
+			return nil // already bound to this catalog: nothing to rewrite
+		}
+		var abac []AccessControlPolicy
+		if st.evaluator != nil {
+			abac = st.evaluator.policies
+		}
+		boundABAC, boundLegacy, err := BindPoliciesToCatalog(ctx, cat, abac, st.policies)
+		if err != nil {
+			// An unbindable set is not installed and not enforced. It is also
+			// REMEMBERED: a caller that ignores this error must not end up
+			// enforcing the unbound set, so every enforcement entry point asks
+			// BindError() first and refuses. Fail closed, loudly, rather than
+			// quietly on the floor.
+			p.cat.Store(cat)
+			p.bindErr.Store(&err)
+			return err
+		}
+		var evaluator *PolicyEvaluator
+		if st.evaluator != nil {
+			evaluator = &PolicyEvaluator{policies: boundABAC}
+		}
+		next := &authState{
+			authn:     st.authn,
+			authz:     st.authz,
+			policies:  boundLegacy,
+			evaluator: evaluator,
+			enabled:   st.enabled,
+		}
+		if bindSwapTestHook != nil {
+			bindSwapTestHook()
+		}
+		// The set that was running keeps running until this line; nothing
+		// observes a half-rewritten policy, and nothing observes an older set
+		// after a newer install.
+		if !p.state.CompareAndSwap(st, next) {
+			continue
+		}
+		p.bound.Store(next)
+		p.cat.Store(cat)
+		p.bindErr.Store(nil)
+		return nil
 	}
-	boundABAC, boundLegacy, err := BindPoliciesToCatalog(ctx, cat, abac, st.policies)
-	if err != nil {
-		// An unbindable set is not installed and not enforced. It is also
-		// REMEMBERED: a caller that ignores this error must not end up
-		// enforcing the unbound set, so every enforcement entry point asks
-		// BindError() first and refuses. Fail closed, loudly, rather than
-		// quietly on the floor.
-		p.bindErr.Store(&err)
-		return err
-	}
-	p.bindErr.Store(nil)
+	err := fmt.Errorf("binding the policy set to the catalog: the set was replaced %d times "+
+		"while binding", bindSwapAttempts)
 	p.cat.Store(cat)
-	// Swap the BOUND copy in atomically. The set that was running keeps
-	// running until this line; nothing observes a half-rewritten policy.
-	var evaluator *PolicyEvaluator
-	if st.evaluator != nil {
-		evaluator = &PolicyEvaluator{policies: boundABAC}
+	p.bindErr.Store(&err)
+	return err
+}
+
+// AttachProvider binds p to cat from a constructor that has no error return.
+//
+// It is BindToCatalog for the three doors whose constructors predate the bind
+// (`server.New`, `pgwire.NewServer`, `NewGRPCServer`): the refusal is logged
+// and, more importantly, REMEMBERED, so `Provider.BindError` refuses every
+// statement rather than letting an unbound set enforce nothing. Attaching a
+// provider to a catalog goes through this or through BindToCatalog and through
+// nothing else — `TestEveryProviderFieldIsAttachedThroughTheBindingFunction`
+// fails when a site appears that does neither.
+func AttachProvider(ctx context.Context, p *Provider, cat *catalog.Catalog, logger *slog.Logger) {
+	if p == nil || cat == nil {
+		return
 	}
-	p.state.Store(&authState{
-		authn:     st.authn,
-		authz:     st.authz,
-		policies:  boundLegacy,
-		evaluator: evaluator,
-		enabled:   st.enabled,
-	})
-	return nil
+	if err := p.BindToCatalog(ctx, cat); err != nil && logger != nil {
+		logger.Error("auth policy set REFUSED: it names a relation or column the catalog "+
+			"does not hold; every query will be refused until it is corrected", "error", err)
+	}
 }
 
 // BindError reports why the attached policy set could not be bound to the
@@ -158,28 +226,94 @@ func (p *Provider) Enabled() bool {
 	return p.state.Load().enabled
 }
 
-// Update atomically replaces all auth components.
+// installState binds st to the attached catalog and makes it the running set.
+//
+// Every path that installs a policy set goes through here, which is what makes
+// ADR-0033 rule 2 — a set that reaches a catalog is bound to it — hold by
+// CONSTRUCTION rather than by each caller remembering. `Update` and
+// `UpdateWithEvaluator` used to store a new set and touch neither the binding
+// nor `bindErr`, so on an already-bound provider the new, UNBOUND set was
+// enforced with `BindError()` still nil: a policy naming `HITS` against a
+// catalog `Hits` matched nothing, and beside a broad allow a rule that matches
+// nothing is a grant (#882).
+//
+// With no catalog attached there is nothing to bind against and the set is
+// installed as it is. That is ADR-0033 rule 4's floor — the fold-aware
+// comparison covers the catalog spelling and the folded one — and it is
+// deliberately NOT a refusal: a provider built with an evaluator and never
+// attached to a catalog is the documented embedded shape, and refusing there
+// would take a working deployment down rather than close a hole.
+func (p *Provider) installState(st *authState) error {
+	cat := p.cat.Load()
+	if cat == nil {
+		p.state.Store(st)
+		return nil
+	}
+	var abac []AccessControlPolicy
+	if st.evaluator != nil {
+		abac = st.evaluator.policies
+	}
+	boundABAC, boundLegacy, err := BindPoliciesToCatalog(context.Background(), cat, abac, st.policies)
+	if err != nil {
+		// #802's contract: a set that cannot be installed installs nothing and
+		// the previous one keeps running — and the refusal is REMEMBERED, so a
+		// caller with no error return does not enforce the unbound set.
+		p.bindErr.Store(&err)
+		return err
+	}
+	var evaluator *PolicyEvaluator
+	if st.evaluator != nil {
+		evaluator = &PolicyEvaluator{policies: boundABAC}
+	}
+	next := &authState{
+		authn:     st.authn,
+		authz:     st.authz,
+		policies:  boundLegacy,
+		evaluator: evaluator,
+		enabled:   st.enabled,
+	}
+	p.state.Store(next)
+	p.bound.Store(next)
+	p.bindErr.Store(nil)
+	return nil
+}
+
+// Update atomically replaces all auth components, binding them to the attached
+// catalog (installState). A set that cannot be bound is NOT installed, the
+// previous one keeps running, and the refusal is remembered: every statement is
+// refused until a bindable set is installed.
 func (p *Provider) Update(authn *Authenticator, authz *Authorizer, policies *PolicySet) {
 	enabled := authn != nil && authn.Enabled()
-	p.state.Store(&authState{
+	if err := p.installState(&authState{
 		authn:    authn,
 		authz:    authz,
 		policies: policies,
 		enabled:  enabled,
-	})
+	}); err != nil {
+		p.logger.Error("auth policy set REFUSED: it names a relation or column the catalog "+
+			"does not hold; the previous set keeps running and every query is refused until "+
+			"it is corrected", "error", err)
+		return
+	}
 	p.logger.Info("auth provider updated", "enabled", enabled)
 }
 
-// UpdateWithEvaluator atomically replaces all auth components including the ABAC evaluator.
+// UpdateWithEvaluator atomically replaces all auth components including the
+// ABAC evaluator, binding them to the attached catalog (see Update).
 func (p *Provider) UpdateWithEvaluator(authn *Authenticator, authz *Authorizer, policies *PolicySet, evaluator *PolicyEvaluator) {
 	enabled := authn != nil && authn.Enabled()
-	p.state.Store(&authState{
+	if err := p.installState(&authState{
 		authn:     authn,
 		authz:     authz,
 		policies:  policies,
 		evaluator: evaluator,
 		enabled:   enabled,
-	})
+	}); err != nil {
+		p.logger.Error("auth policy set REFUSED: it names a relation or column the catalog "+
+			"does not hold; the previous set keeps running and every query is refused until "+
+			"it is corrected", "error", err)
+		return
+	}
 	p.logger.Info("auth provider updated", "enabled", enabled, "abac", evaluator != nil)
 }
 
@@ -202,14 +336,6 @@ func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacP
 		}
 	}
 
-	// The names a policy uses bind ONCE, here, against the catalog: every
-	// relation and every policed column is rewritten to the catalog's own
-	// spelling, and one that does not resolve REFUSES the load. Refusing
-	// returns before the swap, so a hot reload keeps the set already running
-	// rather than installing one whose scoped rules would silently never
-	// match (#882, #802's contract applied to names).
-	cat := p.cat.Load()
-
 	var evaluator *PolicyEvaluator
 	if len(abacPolicies) > 0 {
 		// An obligation that cannot be enforced as written refuses here, the
@@ -230,22 +356,22 @@ func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacP
 		evaluator = NewPolicyEvaluator(migrated)
 	}
 
-	if cat != nil {
-		var abac []AccessControlPolicy
-		if evaluator != nil {
-			abac = evaluator.policies
-		}
-		boundABAC, boundLegacy, err := BindPoliciesToCatalog(context.Background(), cat, abac, legacyPolicies)
-		if err != nil {
-			return err
-		}
-		legacyPolicies = boundLegacy
-		if evaluator != nil {
-			evaluator = &PolicyEvaluator{policies: boundABAC}
-		}
+	// The names a policy uses bind ONCE, in installState, against the attached
+	// catalog: every relation and every policed column is rewritten to the
+	// catalog's own spelling, and one that does not resolve REFUSES the load.
+	// Refusing returns before the swap, so a hot reload keeps the set already
+	// running rather than installing one whose scoped rules would silently
+	// never match (#882, #802's contract applied to names).
+	enabled := authn != nil && authn.Enabled()
+	if err := p.installState(&authState{
+		authn:     authn,
+		authz:     authz,
+		policies:  legacyPolicies,
+		evaluator: evaluator,
+		enabled:   enabled,
+	}); err != nil {
+		return err
 	}
-
-	p.bindErr.Store(nil)
-	p.UpdateWithEvaluator(authn, authz, legacyPolicies, evaluator)
+	p.logger.Info("auth provider updated", "enabled", enabled, "abac", evaluator != nil)
 	return nil
 }
