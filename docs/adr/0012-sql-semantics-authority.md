@@ -1274,6 +1274,26 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `timezone`. What stays divergent is only what this entry is about — the
      zone and the sixth fractional digit, which the server's `timestamptz`
      carries and this engine's instant cannot.
+
+     **One clock zone for every clock function: UTC.** (Added 2026-09-05,
+     #870.) `NOW()` and `CURRENT_TIMESTAMP` render through
+     `expr.formatInstant`, which normalizes to UTC because a wadjet TIMESTAMP
+     is a zoneless instant with no offset to print. `CURRENT_DATE` formatted
+     `time.Now()` in the MACHINE'S LOCAL zone, so on a host west of Greenwich
+     the two named different DAYS for the hours between local midnight and UTC
+     midnight — a landing battery at 20:00 ET had `CURRENT_DATE` on 2026-09-04
+     and `NOW()` on 2026-09-05.
+
+     PostgreSQL keeps them consistent through the SESSION's TimeZone
+     (`current_date = now()::date` is TRUE there, measured under
+     `TimeZone = UTC`), and this engine has no session zone to consult. UTC is
+     the zone its rendering already commits to, so it is the zone its clock
+     reads in; if a session TimeZone is ever implemented, both move together
+     and this paragraph goes with the rest of the entry. `expr.clockNow` is the
+     one clock, and `expr.SetClockForTest` exists because the defect is a
+     CONDITION — the two functions agree for most of the day — so
+     `wadjet.TestEveryClockFunctionReadsOneZone` mocks an instant straddling
+     midnight UTC rather than trusting the machine's own hour.
    - **A network PREFIX has no place in an IPV4 or IPV6 column.** (Added
      2026-09-05, #627.) `'10/8'`, `'192.168/16'` and `'2001:db8::/64'` are
      ordinary `inet` values on the server — a NETWORK, which it compares

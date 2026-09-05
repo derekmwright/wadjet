@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -349,12 +350,12 @@ func TestCurrentDateNotNull(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	today := time.Now().Format("2006-01-02")
-	// NOW() and CURRENT_TIMESTAMP render the instant zoneless in UTC (ADR-0012), so
-	// after 20:00 local in a UTC-4 zone their date is already tomorrow's; compare
-	// them against the UTC date. CURRENT_DATE still answers the local date — see
-	// the timezone issue filed with this change.
-	todayUTC := time.Now().UTC().Format("2006-01-02")
+	// UTC, the one zone every clock function reads and renders in (#870).
+	// This read the machine's LOCAL date, and the two instants needed a
+	// `todayUTC` of their own because CURRENT_DATE did not agree with them —
+	// which is the defect itself, not a property to compare around. One date
+	// now, for all three.
+	today := time.Now().UTC().Format("2006-01-02")
 
 	tests := []struct {
 		sql    string
@@ -366,20 +367,23 @@ func TestCurrentDateNotNull(t *testing.T) {
 			colKey: "current_date",
 			check:  func(val any) bool { return val == today },
 		},
+		// The two instants come back as the epoch milliseconds a TIMESTAMP
+		// column comes back as, since #868 gave them PostgreSQL's own
+		// declaration; batch.FormatTimestamp renders them at the output.
 		{
 			sql:    "SELECT CURRENT_TIMESTAMP",
 			colKey: "current_timestamp",
 			check: func(val any) bool {
-				s, ok := val.(string)
-				return ok && strings.HasPrefix(s, todayUTC)
+				ms, ok := val.(int64)
+				return ok && strings.HasPrefix(batch.FormatTimestamp(ms), today)
 			},
 		},
 		{
 			sql:    "SELECT NOW()",
 			colKey: "now",
 			check: func(val any) bool {
-				s, ok := val.(string)
-				return ok && strings.HasPrefix(s, todayUTC)
+				ms, ok := val.(int64)
+				return ok && strings.HasPrefix(batch.FormatTimestamp(ms), today)
 			},
 		},
 		{

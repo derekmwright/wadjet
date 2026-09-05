@@ -295,6 +295,12 @@ they produce: `DATE_FORMAT` (the caller's format string), `TO_ISO8601` (its
 name is its contract) and `AT_TIMEZONE` (a wall clock in another zone, whose
 offset is load-bearing).
 
+`CURRENT_DATE` is the UTC date of the same clock — one zone for every clock
+function, which is what makes `CURRENT_DATE = CAST(NOW() AS DATE)` true here as
+it is on the server. It read the machine's LOCAL date until #870, so west of
+Greenwich the two disagreed by a day for the hours between local midnight and
+UTC midnight.
+
 `NOW`, `CURRENT_TIMESTAMP` and `PG_POSTMASTER_START_TIME` render the same way
 and PostgreSQL does not: it types all three `timestamptz`, whose text carries a
 **zone offset** and **six** fractional digits — `2026-09-04 21:21:01.708284+00`

@@ -4901,7 +4901,7 @@ func fnCastString(args []any) any {
 // --- Date/time functions ---
 
 func fnNow(args []any) any {
-	return formatInstant(time.Now())
+	return formatInstant(clockNow())
 }
 
 func fnYear(args []any) any {
@@ -5049,7 +5049,11 @@ func fnExtract(args []any) any {
 }
 
 func fnCurrentDate(args []any) any {
-	return time.Now().Format("2006-01-02")
+	// UTC, the zone every other clock function renders in (clock.go). It read
+	// the machine's LOCAL date, so `CURRENT_DATE` and `CAST(NOW() AS DATE)`
+	// named two different days for the hours between local midnight and UTC
+	// midnight — #870.
+	return clockNow().UTC().Format("2006-01-02")
 }
 
 // --- Session / catalog information functions ---
@@ -8252,7 +8256,7 @@ func fnLastDayOfMonth(args []any) any {
 }
 
 func fnCurrentTimestamp(args []any) any {
-	return formatInstant(time.Now())
+	return formatInstant(clockNow())
 }
 
 func fnAtTimezone(args []any) any {
