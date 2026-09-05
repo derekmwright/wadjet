@@ -22,13 +22,22 @@ import (
 // `used=535822, requested=72, budget=524288, of which forced=535822 by "spill
 // tracking"`, with `build_rows=0, batches=0`, so the hash join has built
 // nothing and the whole floor is somebody else's. A stack probe on
-// memory.SpillManager.TrackBatch names that somebody: FIVE HashAggregate units
-// charge ~107 KB each — the primary, and FOUR morsel CLONES on a
-// TrackingOnlyView of the same tracker, one per partition of the key space
-// Pipeline.runParallel hands out. Forty rows of input; the 107 KB is the
-// hash table's presized CAPACITY, which every clone pays in full because
-// groupMemoryUsage counts cap() and a clone presizes like the primary.
-// 5 x 107 KB = 535,822 against a 512 KiB budget.
+// memory.SpillManager.TrackBatch names that somebody: HashAggregate units on a
+// TrackingOnlyView of the same tracker — the primary plus one morsel CLONE per
+// partition of the key space Pipeline.runParallel hands out — each charging
+// ~107 KB for a FORTY-ROW input, because groupMemoryUsage counts the hash
+// table's presized CAPACITY and a clone presizes like the primary.
+//
+// The CHARGE PER UNIT is the constant; the NUMBER OF UNITS follows the budget,
+// and the round-1 review measured all three (10 replicates each):
+//
+//	512 KiB  used=535822  = 5 x 107097   6 answered / 4 refused
+//	384 KiB  used=428725  = 4 x 107097   1 answered / 9 refused
+//	256 KiB  used=321628  = 3 x 107097   0 answered / 10 refused
+//
+// So "five units" is this budget's number and not the shape's property. What
+// is the shape's property is that the floor is N x one hash table for an input
+// of forty rows.
 //
 // Each unit releases its charge at HashAggregate.Close, which the parallel
 // emit runs on that unit's OWN goroutine as it finishes draining —
@@ -74,18 +83,20 @@ func TestAMorselFannedAggregateIsWhatPutsTheCorrelatedScalarPastItsBudget(t *tes
 	// replicate. Five, because one passing budgeted run proves nothing
 	// (ADR-0027 §5).
 	prev := partitioned.Set(false)
+	// t.Cleanup, not a paired Set at the end: na2Standalone and na2Run both
+	// t.Fatalf on their own errors, and every one of those paths used to leave
+	// the fan-out OFF for the rest of the package binary (round-1 review P1).
+	t.Cleanup(func() { partitioned.Set(prev) })
 	db := na2Standalone(t, ctx, 512*1024)
 	for i := 0; i < 5; i++ {
 		got, err := na2Run(tmdRunSingle(ctx, db, sql))
 		if err != nil {
-			partitioned.Set(prev)
 			t.Fatalf("replicate %d refused with the fan-out OFF: %v\n"+
 				"  the serial plan's floor was under 512 KiB when this was written, so either\n"+
 				"  the floor moved or the fan-out is no longer what puts it over\n  SQL: %s",
 				i, err, sql)
 		}
 		if len(got) != 1 || got[0] != want {
-			partitioned.Set(prev)
 			t.Fatalf("replicate %d: %v, want [%s] (live PostgreSQL 17)", i, got, want)
 		}
 	}
