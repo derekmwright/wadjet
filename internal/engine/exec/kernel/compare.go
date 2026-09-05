@@ -952,6 +952,17 @@ func CidrSortKey(s string) (string, bool) {
 // IN set, the row-group bound, the boxed-pair key and the plan-time refusal
 // all know the column is a cidr, and `cd = '10/8'` finds its row through them.
 func CidrAddressText(s string) bool {
+	// A WHOLE dotted quad, in PostgreSQL's own inet grammar: it reads the
+	// leading zeros in '010.1.2.3' and the trailing dot in '10.1.2.3.' that
+	// Go's parser refuses, and both are addresses at any site — no numeric
+	// grammar accepts them, so classifying them needs no column type. Asking
+	// net.ParseCIDR alone made the same literal an address to the KERNEL and
+	// garbage to this gate: `c_cidr = '010.1.2.3'` answered on the single arm
+	// and raised 22P02 on both DAG arms, and refused inside a CASE on the
+	// single arm too — one literal, three dispositions (round-3 review B3-1).
+	if _, _, ok := parquet.PgIPv4PtonQuad(s); ok {
+		return true
+	}
 	t := s
 	if !strings.ContainsRune(t, '/') {
 		if strings.ContainsRune(t, ':') {
@@ -1017,7 +1028,18 @@ func IPv6LitKey(s string) (key string, ok bool) {
 	// is exactly that (#627). A narrower prefix names a network this type
 	// cannot hold and is refused by the caller with the reason.
 	if body, mask, cut := strings.Cut(s, "/"); cut {
-		if mask != "128" {
+		// The mask belongs to the body's FAMILY. A v4-shaped body takes the
+		// v4 grammar — which refuses `'10.0.0.1/128'`, as the server does,
+		// rather than stripping a mask no v4 address can carry and answering
+		// zero rows (round-3 review B3-3) — and any v4 literal keys as the
+		// family sentinel below.
+		if !strings.ContainsRune(body, ':') {
+			if _, bits, ok := parquet.PgIPv4Pton(s); !ok || bits != 32 {
+				return "", false
+			}
+			return "", true
+		}
+		if bits, ok := pgInet6MaskBits(mask); !ok || bits != 128 {
 			return "", false
 		}
 		s = body
@@ -1040,7 +1062,9 @@ func IPv6LitKey(s string) (key string, ok bool) {
 // It exists because the two evaluation sites read the column through different
 // doors. The kernel has the vector and reads the 16 bytes; the row-at-a-time
 // evaluator has ColRef.Eval's BOX, which for TypeIPv6 is the address's TEXT
-// (Vector.GetValue renders `net.IP(raw).String()`). Comparing that text
+// (Vector.GetValue renders it through batch.FormatIPv6, PostgreSQL's inet
+// output rather than Go's — a v4-mapped address prints `::ffff:10.0.0.1`
+// there and `10.0.0.1` in Go, #580). Comparing that text
 // lexically is not the address's order — "2001:db8::9" sorts ABOVE
 // "2001:db8::10" as text and BELOW it as an address — so `WHERE a < z`
 // answered one thing through the scan and the opposite through a projection
@@ -2662,13 +2686,84 @@ func NetworkPrefixLiteral(typ batch.TypeID, text string) bool {
 }
 
 // IPv6PrefixLiteral is IPv4PrefixLiteral for the v6 spellings: an address with
-// a prefix narrower than /128.
+// a prefix narrower than /128 — and, like its twin, it answers only for text
+// PostgreSQL itself accepts, because the 0A000 its answer produces is a claim
+// that the text IS valid and this engine's TYPE is the limit.
+//
+// The first version answered `mask != "128"` without parsing the mask or
+// looking at the family, so `'2001:db8::1/129'`, `'/abc'` and `'/0128'` — all
+// 22P02 on the server — were called networks and refused with 0A000, telling a
+// client to use a CIDR column for text no column can hold. The same literal
+// was 22P02 at an IPV4 column and 0A000 at an IPV6 one (round-3 review B3-3).
 func IPv6PrefixLiteral(s string) bool {
 	body, mask, cut := strings.Cut(s, "/")
-	if !cut || net.ParseIP(body) == nil {
+	if !cut {
 		return false
 	}
-	return mask != "128"
+	// A v4-shaped body is the v4 grammar's question, mask and all:
+	// `'10.0.0.1/128'` is 22P02 on the server because 128 does not fit a v4
+	// address, and answering "network" here would make it 0A000 instead.
+	if !strings.ContainsRune(body, ':') {
+		return false
+	}
+	if ip := net.ParseIP(body); ip == nil || ip.To16() == nil {
+		return false
+	}
+	bits, ok := pgInet6MaskBits(mask)
+	return ok && bits != 128
+}
+
+// pgInet6MaskBits reads the `/bits` of an inet6 literal exactly as
+// PostgreSQL's inet6 input does — and its rule is NOT the v4 one. Measured on
+// 17.11:
+//
+//	'::1/0'    ::1/0        '::1/00'    22P02   no leading zeros, ever
+//	'::1/64'   ::1/64       '::1/064'   22P02
+//	'::1/128'  ::1/128      '::1/0128'  22P02
+//	                        '::1/129'   22P02   0-128 only
+//	                        '::1/abc'   22P02   digits only
+//	                        '::1/'      22P02
+//
+// while the v4 side takes `'10.0.0.1/031'` as /31 and `'10/008'` as /8. Two
+// parsers, two rules; this one is v6's.
+func pgInet6MaskBits(mask string) (int, bool) {
+	if mask == "" || len(mask) > 3 {
+		return 0, false
+	}
+	if len(mask) > 1 && mask[0] == '0' {
+		return 0, false // '/00', '/01', '/064' are all 22P02 on the server
+	}
+	bits := 0
+	for i := 0; i < len(mask); i++ {
+		if mask[i] < '0' || mask[i] > '9' {
+			return 0, false
+		}
+		bits = bits*10 + int(mask[i]-'0')
+	}
+	if bits > 128 {
+		return 0, false
+	}
+	return bits, true
+}
+
+// IPv4SortKey re-keys an IPv4 literal or a rendered IPV4 column value into
+// four big-endian bytes, so a BYTE comparison of two keys is the address's own
+// order. It is CidrSortKey's shape for the bare-address type, and it exists
+// because the rendered dotted quad's byte order is NOT the address's:
+// "10.9.0.0" sorts above "10.10.0.0" as text and below it as an address, so a
+// boxed fold over an IPV4 column counted 4916 rows where PostgreSQL's inet
+// counts 4915 (round-3 review P-A).
+//
+// ok is false for text that names no v4 address; the caller falls through, and
+// the plan-time refusal has already turned real garbage into 22P02.
+func IPv4SortKey(s string) (string, bool) {
+	v, ok := parseIPv4ToInt64(s)
+	if !ok {
+		return "", false
+	}
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], uint32(v))
+	return string(buf[:]), true
 }
 
 // IPv4LitKey exports parseIPv4ToInt64 for exec.networkConstError, which needs

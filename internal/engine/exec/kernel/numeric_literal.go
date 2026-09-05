@@ -118,7 +118,16 @@ func NumericTypeName(typ batch.TypeID) (string, bool) {
 	case batch.TypeBytes:
 		return "bytea", true
 	case batch.TypeCIDR:
-		return "cidr", true
+		// `inet`, not `cidr`, and for the same reason the two bare-address
+		// types answer `inet`: it is the type PostgreSQL reads the literal
+		// with, and its own message says so — `cd = '239'` there is
+		// `invalid input syntax for type inet: "239"`. It is also the type a
+		// wadjet CIDR column IS: this engine's differential oracle maps it to
+		// `inet` because a wadjet CIDR holds host bits under a mask
+		// (`'192.168.5.7/24'`), which PostgreSQL's `cidr` refuses outright.
+		// Naming `cidr` sent a client to a type whose grammar would not
+		// explain the refusal (round-3 review P-E).
+		return "inet", true
 	case batch.TypeMAC:
 		return "macaddr", true
 	case batch.TypeUUID:

@@ -309,6 +309,50 @@ func TestNetworkLiteralRefusalIsOnePredicate(t *testing.T) {
 		})
 	}
 
+	// The v6 MASK is its own grammar, and NOT the v4 one. Measured on
+	// 17.11: v6 takes decimal digits with no leading zeros, 0-128, while v4
+	// takes `'10.0.0.1/031'` as /31 and `'10/008'` as /8. The first version
+	// of IPv6PrefixLiteral compared the mask TEXT to "128" and looked at
+	// neither the family nor the digits, so a v4 body with `/128` had its
+	// mask stripped and ANSWERED, and `/129`, `/abc` and `/0128` were called
+	// networks — 0A000, a class that asserts the text is PostgreSQL-VALID
+	// (round-3 review B3-3).
+	for _, c := range []struct {
+		text    string
+		prefix  bool // NetworkPrefixLiteral: 0A000, the text is PG-valid
+		address bool // IPv6LitKey: a value this column can hold
+	}{
+		{"2001:db8::1/128", false, true},
+		{"2001:db8::1/64", true, false},
+		{"2001:db8::1/0", true, false},
+		{"2001:db8::1/129", false, false},
+		{"2001:db8::1/abc", false, false},
+		{"2001:db8::1/0128", false, false},
+		{"2001:db8::1/064", false, false},
+		{"2001:db8::1/01", false, false},
+		{"2001:db8::1/", false, false},
+		{"2001:db8::1/-1", false, false},
+		{"2001:db8::1/+8", false, false},
+		// A v4-shaped body is the v4 grammar's question, mask and all.
+		{"10.0.0.1/128", false, false}, // 128 does not fit a v4 address: 22P02
+		{"10.0.0.1/32", false, true},   // a v4 host: below every v6 row, by family
+		{"10.0.0.1", false, true},
+	} {
+		t.Run("v6_mask/"+c.text, func(t *testing.T) {
+			if got := IPv6PrefixLiteral(c.text); got != c.prefix {
+				t.Errorf("IPv6PrefixLiteral(%q) = %v, want %v", c.text, got, c.prefix)
+			}
+			if _, ok := IPv6LitKey(c.text); ok != c.address {
+				t.Errorf("IPv6LitKey(%q) ok = %v, want %v", c.text, ok, c.address)
+			}
+			// And the two classes cannot both fire: a literal is a network
+			// (0A000) or a value or garbage (22P02), never two of them.
+			if c.prefix && c.address {
+				t.Fatalf("fixture %q claims both classes", c.text)
+			}
+		})
+	}
+
 	// A HOST-width prefix is the address itself on the server, and it is
 	// representable here.
 	if _, ok := IPv4LitKey("10.0.0.1/32"); !ok {

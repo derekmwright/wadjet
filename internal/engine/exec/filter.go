@@ -884,7 +884,10 @@ func networkConstError(typ batch.TypeID, value any) error {
 		if _, ok := kernel.CidrSortKey(fmt.Sprint(value)); ok {
 			return nil
 		}
-		return sqlerr.New("22P02", "invalid input syntax for type cidr: %q", fmt.Sprint(value))
+		// `inet` is the type PostgreSQL reads this literal with and the one
+		// it names in the same refusal; it is also the type a wadjet CIDR
+		// column IS (host bits under a mask, which `cidr` refuses).
+		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))
 	case batch.TypeIPv6:
 		if _, ok := kernel.IPv6LitKey(fmt.Sprint(value)); ok {
 			return nil
@@ -927,7 +930,7 @@ func networkConstError(typ batch.TypeID, value any) error {
 // with a corrected literal. The CIDR type carries a prefix and answers these
 // literals exactly (#627); the deferral is recorded in ADR-0012's list.
 func networkPrefixUnsupported(typeName, text string) error {
-	return sqlerr.New("0A000", "a network prefix is not representable in a %s column: %q "+
+	return sqlerr.New("0A000", "a network prefix is not representable in an %s column: %q "+
 		"(PostgreSQL reads it as a network; use a CIDR column, or compare against the "+
 		"address alone)", typeName, text)
 }

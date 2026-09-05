@@ -161,7 +161,7 @@ func RefuseNetworkPrefixLiteral(typ batch.TypeID, text string) error {
 	if !kernel.NetworkPrefixLiteral(typ, text) {
 		return nil
 	}
-	return sqlerr.New("0A000", "a network prefix is not representable in a %s column: %q "+
+	return sqlerr.New("0A000", "a network prefix is not representable in an %s column: %q "+
 		"(PostgreSQL reads it as a network; use a CIDR column, or compare against the "+
 		"address alone)", typ.String(), text)
 }
