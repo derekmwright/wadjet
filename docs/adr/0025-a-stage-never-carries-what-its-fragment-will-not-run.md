@@ -1710,7 +1710,10 @@ mechanism was:
   column on both DAG arms — two rows with a NULL where PostgreSQL and the
   single-process path have five (#770). Identical on `376b2cac` and here; the
   UNION spelling of the same dedup takes a different path, which is where the
-  localization starts.
+  localization starts. **STILL OPEN** (re-measured 2026-09-04) — and the shape
+  had moved: on `18f3660e` the broadcast arm is right and the shuffled arm is
+  LOUD. Its mechanism, and the repair that was built and withdrawn for it, are
+  in "A join arm publishes the columns it SELECTS" above.
 
 **The loud→silent census on this tip is ONE arm-row, and it is the GROUP-BY
 residual above.** That is the number this section has to carry, and it has been
@@ -1826,6 +1829,130 @@ alias to decline on, so `joinArmSoleName` answers with the arm's name on both
 engines and only one of them has a column that is it. Pinned per entry beside
 the arm-is-a-join family, with the rename body and the distinct alias as the
 controls that place the cell at COMPUTED × SHARED BARE NAME.
+
+**#780 is CLOSED as of 2026-09-04** — see "A join arm publishes the columns it
+SELECTS" below, which takes the step this paragraph declines to take: it
+MATERIALIZES the arm's Project. #770, the same limit in the RENAME spelling, is
+NOT closed: the repair that follows from the same doctrine was built and
+withdrawn, and the section below says why.
+
+### A join arm publishes the columns it SELECTS (2026-09-04, #780)
+
+The paragraph above states the limit exactly and then stops one move short of
+it. "The arm's Project would have to be MATERIALIZED for the arm's name to
+describe anything on the DAG" is true, and it is also a thing the planner can
+do: `absorbComputedSubqueryProjection` already materializes a derived arm's
+computed column onto the SCAN that produces its rows (#383) and onto the WINDOW
+that produces them (#742). What it declined was an arm whose body root is a
+JOIN — and that is #780's whole shape, because with two scans inside the arm
+there is no single scan to attach to and the value is computed over the JOINED
+stream anyway.
+
+So `absorbJoinArmProjection` attaches it to the stage that TERMINATES the arm.
+A join fragment's OpProject runs above the join, which is where the arm's own
+SELECT list is evaluable and the only place it is. Three things follow, and all
+three are the same rule:
+
+- **The passthrough is written from the stage-stream model, not from a column
+  list.** A join's output is neither side's list — the executor qualifies a
+  duplicate build column with its owning alias and DROPS one it cannot qualify —
+  and `stageStreamColumns` mirrors `joinOutputSchemaWithMapping` line for line,
+  so what is passed through is what the fragment really ships.
+
+- **The arm's own aliases are EXCLUDED from that passthrough.** A raw `a` beside
+  a computed `a` is one name and two values, and the one the arm PUBLISHES is
+  the computed one. This is the doctrine applied to the STREAM rather than to
+  the name: after it, the arm's stage really does carry one column per SELECT
+  item, so there is something for the arm's name to describe.
+
+- **`stageBuildTableAlias` is the RAW answer only while the stream is raw.** The
+  two-answer split above (`joinArmAlias` materialized, `stageBuildTableAlias`
+  raw) is a statement about which STREAM the join receives, not about which
+  ENGINE it is. An arm whose SELECT list was just materialized is one stream
+  with one name, so the DAG takes the materialized answer and the materialized
+  per-column origins — the same two the local pipeline takes. Qualifying a
+  materialized arm's stream by an inner scan's alias named columns the arm does
+  not publish, and the enclosing `m.a` then bound the PROBE arm's `a`.
+
+Measured on four arms against live postgres:17-alpine: #780's `ma` was 12.75 on
+both DAG arms where PostgreSQL and the single-process path answer 38.25, and
+declared DECIMAL(9,2) for its DECIMAL(11,2) — a SILENT wrong value on a shipped
+path. TPC-H stage shapes are unchanged.
+
+**The RENAME spelling of the same limit is #770, and it is NOT closed here.**
+A rename normally needs no column of its own — every DAG resolver walks back to
+the SOURCE name the stream carries — but that walk is by SPELLING, and when the
+join's other arm publishes the same bare name there are two sources and the
+spelling names neither. The repair the doctrine implies is the obvious one:
+materialize a CONTESTED rename too, and stop `resolveShuffleKey` /
+`resolveAggInputName` at a join whose arms contest the name instead of letting
+them descend into whichever answers first.
+
+**It was built and WITHDRAWN**, and what it cost is the record worth keeping.
+It closes #770's own cell and moves **THREE** shapes in
+`TestAWindowBetweenTheSelectListAndItsJoinThreeArms` from right to wrong — two
+answer NULL for a qualified reference resolved in the OTHER arm, and one
+refuses with `sort: key column "q.xid" does not exist in the input schema` —
+because a resolver returning the QUALIFIED name and the stream's own spelling
+stop agreeing: the needed-column list becomes `y.w` where the probe ships bare
+`w`, and the join's output filter drops it.
+
+Three is the number, measured four ways, and every statement of this census
+says three:
+
+| configuration | that test | whole `internal/coordinator` |
+|---|---|---|
+| without the repair (shipped) | 0 | 0 |
+| the materialization alone | 10 | — |
+| the resolver stops alone | 4 | — |
+| both, contested = every published name | 4 | 15 |
+| both, contested narrowed to what the pass can materialize | **3** | — |
+
+The narrowing (excluding a bare column, and an alias over an aggregate or
+window slot, from the contested set) removes the rest and not those three; they
+are #770's own arm pair wrapped — under an outer derived table, and with a
+window over it.
+
+So the two halves of one doctrine part company here, and the reason is
+structural rather than a missing case: MATERIALIZING an arm's column is a change
+the stage layer can make on its own, while making the whole needed-column
+propagation ask for a column by the name its ARM publishes — rather than by the
+source name it resolves back to — is a change to what a needed column IS. That
+is the arc #770 needs. Pinned fail-on-agree on the shuffled arm in
+`coordinator.TestF1AJoinArmPublishesTheColumnsItSelects`; the filing's own tree
+is stale (it reports 2 rows with a NULL on BOTH DAG arms; on `18f3660e` the
+broadcast arm is right and only the shuffled arm is loud).
+
+**A pass that ABSORBS a stage must not absorb away its projection.**
+(2026-09-05, #780's round-1 review.) The materialization above puts the arm's
+computed column on the stage that terminates the arm — and `fuseJoinStages`
+then absorbed that stage into its consumer, dropping the `ProjectExprs` with
+it, because `FusedJoinSpec` has no field for a projection. The arm's column was
+un-computed one pass after it was computed, and the enclosing `m.a` bound the
+arm's raw inner `a` again: 12.75 for PostgreSQL's 38.25, on the broadcast arm
+only, with the two DAG arms then disagreeing with each other in value AND in
+declared type. Visible only with the arm on the side that pass fuses, which is
+why the first cut of the fix — gated build-side — did not see it.
+
+The pass now declines a candidate carrying a projection. That is the call the
+`NullAwareAnti` check three lines above already makes for a flag the spec has
+no field for, and it is the same rule this ADR is named after, pointing the
+other way: a pass must not delete what a fragment was told to compute.
+`FusedJoinSpec` can grow a projection field, and the worker an ordering for it,
+the day a shape needs the fusion more than the answer.
+
+**What was NOT done, and why.** The arc's brief asked for
+`findScanAlias`'s raw-column fallback to be removed, or narrowed to an arm that
+IS a bare scan with no Project at all. It is untouched; the fix is a
+conditional at one call site (`walkStages`' join arm) plus this fusion guard.
+The reason is that `findScanAlias` has four callers with three different
+questions — `joinArmAlias`'s bare-arm fallback, `stageBuildTableAlias`'s,
+`joinArmSoleName`'s one-scan qualifier, and its own recursion — and narrowing
+the function changes all of them at once, including the declared-schema
+publisher that has nothing to do with a stage's stream. Narrowing the ANSWER at
+the site that asks about a MATERIALIZED arm is the same repair with a boundary
+the fixtures can attempt. Recorded rather than silently skipped, because the
+brief named the other shape.
 
 ### A window key guard asks provenance (2026-09-04, #745)
 

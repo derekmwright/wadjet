@@ -50,7 +50,7 @@ import (
 // attachScanSelectProjections, which projects exactly the SELECT list under
 // its final names for the gather. A join input is never the output
 // projection, so the join hook passes false.
-func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, requireEnclosing bool) {
+func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, requireEnclosing bool) bool {
 	// Find the COMPUTING Project: descend through stage-less Filters and
 	// rename-only Projects (an outer `SELECT rk2 FROM (…) t` wraps the
 	// computing subquery in a bare Project — both are passthroughs on the
@@ -64,12 +64,12 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			continue
 		}
 		if n.Type != logical.NodeProject || n.SecurityBarrier || len(n.Children) != 1 {
-			return
+			return false
 		}
 		computes := false
 		for _, pr := range n.Projections {
 			if pr.IsAgg {
-				return
+				return false
 			}
 			if pr.Column == "" && pr.Alias != "" && pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
 				computes = true
@@ -77,7 +77,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		}
 		if computes {
 			if requireEnclosing && enclosing == 0 {
-				return
+				return false
 			}
 			proj = n
 			break
@@ -86,7 +86,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		n = n.Children[0]
 	}
 	if proj == nil {
-		return
+		return false
 	}
 	// Below it: a chain of stage-less nodes ending at a SCAN or at a WINDOW.
 	//
@@ -114,14 +114,26 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			(below.Type == logical.NodeProject && !below.SecurityBarrier)) {
 		below = below.Children[0]
 	}
-	if below == nil || (below.Type != logical.NodeScan && below.Type != logical.NodeWindow) {
-		return
+	// A JOIN is the third producer this pass materializes onto, and it is
+	// what #780 is: `(SELECT g.id AS id, g.a * 3 AS a FROM t g JOIN t h ON
+	// g.id = h.id) m` publishes a COMPUTED column, the arm's Project emits
+	// no stage (ADR-0025), and no stage in the plan computes it — so the
+	// enclosing `m.a` resolved through the arm's RAW stream and answered
+	// `g.a` unmultiplied, on both DAG arms and in silence. The scan branch
+	// below cannot reach it (the arm has TWO scans, and the value is
+	// computed over the joined stream), and neither can the window branch.
+	// A join fragment's OpProject runs above the join, which is where the
+	// arm's own SELECT list is evaluable and the only place it is.
+	if below == nil || (below.Type != logical.NodeScan && below.Type != logical.NodeWindow &&
+		below.Type != logical.NodeJoin) {
+		return false
 	}
 
 	// Collect the COMPUTED projections. Renames and bare passthroughs are
 	// none of this pass's business; an aggregate projection means the
 	// SELECT list is not a row-wise computation at all.
 	windowArm := below.Type == logical.NodeWindow
+	joinArm := below.Type == logical.NodeJoin
 	var computed []ProjectExprSpec
 	needCols := map[string]bool{}
 	var colTypes colDecls
@@ -129,16 +141,30 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 	haveTypes := false
 	for _, pr := range proj.Projections {
 		if pr.IsAgg {
-			return
+			return false
 		}
 		if pr.Column != "" || pr.Alias == "" || pr.ASTExpr == nil || isSimpleColRefForRename(pr.ASTExpr) {
 			continue
 		}
 		if referencesSyntheticAgg(pr.ASTExpr) {
-			return
+			return false
 		}
 		if !haveTypes {
 			colTypes = inputColDecls(proj.Children[0])
+			if joinArm {
+				// A JOIN arm's declarations have to be read the way the
+				// EXECUTOR spells that stream: `inputColDecls` merges the two
+				// sides and DROPS a name they declare differently, which is
+				// the honest answer to a bare reference and no answer at all
+				// to `h.d92 * 2` over two tables that both have a `d92`. The
+				// undecided answer falls to the FLOAT rule, and the fragment
+				// then tried to store a DECIMAL's rendering into a float
+				// vector — the #361 guard, on a query PostgreSQL answers.
+				// `emittedColDecls` publishes the per-arm QUALIFIED entries
+				// beside the merged bare ones (withJoinArmQualifiers), which
+				// is exactly the spelling the arm's own SELECT list wrote.
+				colTypes = emittedColDecls(proj.Children[0])
+			}
 			// Same integer-preserving-arithmetic hint as
 			// attachScanSelectProjections (#297, #445): without it, `id + 1`
 			// over a strict-int column declares (and computes) FLOAT64 here.
@@ -169,7 +195,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			// `sum(a) OVER (...) + 0`, which no parser accepts (ADR-0025).
 			// The AST is the spelling the fragment can compile.
 			if !referencesSyntheticWindow(ast) {
-				return
+				return false
 			}
 			expr = ast.String()
 		}
@@ -218,7 +244,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		collectASTCols(ast, needCols)
 	}
 	if len(computed) == 0 {
-		return
+		return false
 	}
 
 	alias := make(map[string]bool, len(computed))
@@ -228,7 +254,10 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 
 	if windowArm {
 		absorbWindowArmProjection(childStages, computed, needCols, alias)
-		return
+		return false
+	}
+	if joinArm {
+		return absorbJoinArmProjection(childStages, computed, needCols, alias)
 	}
 
 	// Target: the single scan stage this subtree emitted. Scalar-producer
@@ -241,15 +270,15 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			continue
 		}
 		if target != nil {
-			return
+			return false
 		}
 		target = s
 	}
 	if target == nil || !strings.EqualFold(target.TableName, below.TableName) {
-		return
+		return false
 	}
 	if len(target.ProjectExprs) > 0 || len(target.FusedAggSpecs) > 0 || len(target.FusedAggGroupBy) > 0 {
-		return
+		return false
 	}
 	// Every column the (possibly rewritten) expressions read has to be one
 	// the SCAN can supply. A rename chain the substitution could not resolve
@@ -257,7 +286,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 	// NULL where the query means a value — decline instead, which keeps the
 	// behaviour this pass had before it walked through Projects at all.
 	if !armExprColumnsAvailable(needCols, alias, scanReadableColumns(target)) {
-		return
+		return false
 	}
 
 	// The read set carries the computed alias as a phantom column (needed-
@@ -292,6 +321,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 	}
 	specs = append(specs, computed...)
 	target.ProjectExprs = specs
+	return false
 }
 
 // scanReadableColumns is what a scan stage's fragment can put on its output:
@@ -390,6 +420,85 @@ func absorbWindowArmProjection(childStages []Stage, computed []ProjectExprSpec,
 	}
 	specs = append(specs, computed...)
 	target.ProjectExprs = specs
+}
+
+// absorbJoinArmProjection materializes a derived arm's computed SELECT list
+// onto the JOIN stage that produces its rows (#780).
+//
+// Neither branch above can reach this shape. The scan branch needs the arm to
+// emit exactly one scan stage, and an arm that is itself a join emits two or
+// more; the value is computed over the JOINED stream anyway, which no single
+// scan carries. So on the DAG the column existed nowhere — `walkStages` emits
+// no stage for the arm's Project, and every consumer above it re-resolved the
+// bare name against the arm's RAW inner columns, where `a` is the scan's
+// column and not `g.a * 3`. That is a WRONG VALUE, silently, on both DAG arms.
+//
+// The target is the arm's TERMINAL stage, which is the one stream the
+// enclosing query sees. The passthrough is written from the stage-stream
+// model (stage_stream_model.go), not from the stage's column lists: a join's
+// output is neither side's list — the executor qualifies a duplicate build
+// column with its owning alias and DROPS one it cannot qualify — and the
+// model mirrors `joinOutputSchemaWithMapping` line for line, so what is
+// passed through is what the fragment really ships.
+//
+// The arm's own aliases are EXCLUDED from the passthrough, exactly as the
+// scan branch strips them from the read set: `g.a * 3 AS a` over an arm that
+// also carries a raw `a` is one name and two values, and the one the arm
+// PUBLISHES is the computed one. That is the whole of ADR-0025's arm
+// doctrine, applied to the stream rather than to the name.
+func absorbJoinArmProjection(childStages []Stage, computed []ProjectExprSpec,
+	needCols map[string]bool, alias map[string]bool) bool {
+	leaves := leafStages(childStages)
+	if len(leaves) != 1 {
+		return false // more than one stream: not the shape this pass models
+	}
+	target, ti := (*Stage)(nil), -1
+	for i := range childStages {
+		if childStages[i].ID == leaves[0] {
+			target, ti = &childStages[i], i
+			break
+		}
+	}
+	if target == nil || !isJoinStage(target.Type) || len(target.ProjectExprs) > 0 {
+		return false
+	}
+	idx := make(map[string]int, len(childStages))
+	for i := range childStages {
+		idx[childStages[i].ID] = i
+	}
+	stream := make(map[string]string, len(childStages))
+	var names []string
+	for _, c := range stageStreamColumns(childStages, idx, target, passThroughDepth) {
+		if c.Dropped || c.Name == "" {
+			continue
+		}
+		lc := strings.ToLower(c.Name)
+		if alias[lc] {
+			continue // an OUTPUT of this projection, never an input to it
+		}
+		if _, dup := stream[lc]; dup {
+			continue
+		}
+		stream[lc] = c.Name
+		names = append(names, c.Name)
+	}
+	if len(names) == 0 || !armExprColumnsAvailable(needCols, alias, stream) {
+		return false
+	}
+	specs := make([]ProjectExprSpec, 0, len(names)+len(computed))
+	for _, n := range names {
+		specs = append(specs, ProjectExprSpec{Expr: n, Name: n})
+	}
+	specs = append(specs, computed...)
+	// Nothing is attached that the join's own output cannot evaluate: an arm
+	// whose expression names a spelling the joined stream does not carry
+	// keeps today's behaviour rather than computing NULL under the right
+	// name, which would trade a wrong value for a different wrong value.
+	if !specsResolveAgainstStageOutput(childStages, ti, specs) {
+		return false
+	}
+	target.ProjectExprs = specs
+	return true
 }
 
 // stripArmFilters descends past the FILTER nodes an arm's rename chain may be

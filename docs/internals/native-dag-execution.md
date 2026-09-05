@@ -369,6 +369,28 @@ Because a Project emits no stage, **a derived table's rename happens nowhere
 on the DAG**: every stream carries SOURCE column names, and each consumer
 resolves the alias back through the logical plan.
 
+Three exceptions, all of them "the convention has no answer here, so the column
+is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
+
+- a derived arm's COMPUTED column belongs to no scan, so there is no source
+  name to resolve back to. `absorbComputedSubqueryProjection` attaches it to
+  the stage that produces the arm's rows — the SCAN (#383), the WINDOW (#742),
+  or, since 2026-09-04, the JOIN (`absorbJoinArmProjection`, #780). A pass that
+  ABSORBS such a stage must decline while it has nowhere to put the
+  projection: `fuseJoinStages` skips a candidate carrying `ProjectExprs`,
+  because `FusedJoinSpec` has no field for one and dropping it un-computes the
+  arm's column one pass after it was computed.
+- a RENAME whose bare name the join's OTHER arm also publishes has TWO sources,
+  so the spelling names neither. That one is NOT materialized — the repair was
+  built and withdrawn, because a resolver that returns the qualified name and a
+  stream that ships the probe's copy bare stop agreeing (#770; ADR-0025's
+  section names the four shapes it moved from right to wrong).
+- once an arm's SELECT list is materialized its stream is the arm's OUTPUT, so
+  the join names it with `joinArmAlias` and `materializedBuildColOrigins` — the
+  MATERIALIZED answers — rather than `stageBuildTableAlias`'s raw one. The
+  split between those two is about which STREAM the join receives, not about
+  which engine is running.
+
 | consumer | resolver | file |
 |---|---|---|
 | join key / shuffle partition key | `resolveShuffleKey` | `plan.go` |

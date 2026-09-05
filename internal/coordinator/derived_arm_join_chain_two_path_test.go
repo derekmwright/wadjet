@@ -1725,10 +1725,14 @@ func TestAWindowBetweenTheSelectListAndItsJoinThreeArms(t *testing.T) {
 			// column is a different cell. `joinArmSoleName` finds no inner
 			// derived alias to decline on, the arm's name is the only one
 			// there is on either engine, and the DAG — where the arm's Project
-			// emits no stage — has nothing that IS `m.a`, so the bare name
-			// wins and the PROBE's column answers. Pinned as #780: the SINGLE
-			// path is fixed (this arc's materialized half) and both DAG arms
-			// are byte-identical to de95b3b5.
+			// emitted no stage — had nothing that IS `m.a`, so the bare name
+			// won and the PROBE's column answered.
+			//
+			// The DAG pin is DELETED (#780, 2026-09-04): the arm's Project is
+			// now MATERIALIZED onto the stage that terminates it, so the arm
+			// really does publish `a` and the join names that stream by the
+			// arm rather than by an inner scan. All arms answer PostgreSQL's
+			// rows and the entry is a plain Want.
 			name: "arm-is-a-join/pin780-bare-scans-computed-column",
 			sql: "SELECT t.a AS tw, m.a AS mw FROM " + tbl + " t JOIN " +
 				"(SELECT g.id AS id, g.a * 3 AS a FROM " + tbl + " g JOIN " + tbl +
@@ -1736,19 +1740,17 @@ func TestAWindowBetweenTheSelectListAndItsJoinThreeArms(t *testing.T) {
 			cols: []string{"tw", "mw"},
 			want: "9 rows: 12.75|38.25;12.75|38.25;12.75|38.25;-0.01|-0.03;2.00|6.00;" +
 				"0.00|0.00;|;12.75|38.25;|;",
-			dagPinned: "9 rows: 12.75|12.75;12.75|12.75;12.75|12.75;-0.01|-0.01;2.00|2.00;" +
-				"0.00|0.00;|;12.75|12.75;|;",
 		},
 		{
 			// The same edge over two DIFFERENT tables, so the contested name
-			// is not a self-join's doing.
+			// is not a self-join's doing. Its DAG pin is deleted with the
+			// entry above's, and for the same reason.
 			name: "arm-is-a-join/pin780-different-tables",
 			sql: "SELECT t.d92 AS tw, m.d92 AS mw FROM zzp t JOIN " +
 				"(SELECT g.id AS id, h.d92 * 2 AS d92 FROM zzp g JOIN zzj h ON g.id = h.id) m " +
 				"ON t.id = m.id ORDER BY t.id",
-			cols:      []string{"tw", "mw"},
-			want:      "3 rows: -3.50|2.2222;0.00|24691356.2468;12.75|6.6666;",
-			dagPinned: "3 rows: -3.50|-3.50;0.00|0.00;12.75|12.75;",
+			cols: []string{"tw", "mw"},
+			want: "3 rows: -3.50|2.2222;0.00|24691356.2468;12.75|6.6666;",
 		},
 		{
 			// #780's controls, both correct on every arm and both needed. The

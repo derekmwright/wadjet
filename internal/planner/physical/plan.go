@@ -5558,6 +5558,23 @@ func fuseJoinStages(stages []Stage) []Stage {
 		if s.NullAwareAnti || consumer.NullAwareAnti {
 			continue
 		}
+		// Absorbing a stage DELETES it, and `FusedJoinSpec` has no field for
+		// a projection — so a candidate carrying one has its OpProject
+		// dropped on the floor along with the stage. That is not a lost
+		// optimization: `absorbJoinArmProjection` puts a derived arm's
+		// COMPUTED SELECT list on exactly this stage (#780), so fusing it
+		// away un-computes the arm's column and the enclosing reference
+		// binds the arm's raw inner one again — the same silent wrong value
+		// #780 is about, reintroduced one pass later, and visible only when
+		// the arm lands on the side this pass fuses.
+		//
+		// Not fusing is the honest alternative to carrying it silently, the
+		// same call the NullAwareAnti check above makes: `FusedJoinSpec` can
+		// grow a projection field, and the worker an ordering for it, the
+		// day a shape needs the fusion more than the correctness.
+		if len(s.ProjectExprs) > 0 {
+			continue
+		}
 		// The candidate's output must feed the consumer's PROBE side.
 		// Fusion replays the absorbed join as a broadcast-probe step on the
 		// consumer's probe STREAM — valid only when the absorbed output IS
@@ -6999,7 +7016,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// correct left (probe) and right (build) dependencies — even
 		// when a child is itself a multi-stage subtree (e.g., nested join).
 		var childLeaves [][]string
-		for _, child := range node.Children {
+		// armMaterialized[i] is true when the arm's own SELECT list was
+		// materialized onto the stage that terminates it, so the stream the
+		// join receives IS the arm's published output rather than its raw
+		// inner columns (#780). It decides which of the two answers below
+		// names the build arm.
+		armMaterialized := make([]bool, len(node.Children))
+		for ci, child := range node.Children {
 			childStart := len(*stages)
 			p.walkStages(child, stages, nil)
 			// A join input that is a subquery with a COMPUTED projection
@@ -7007,7 +7030,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// fragment, or the build/probe files never carry it and every
 			// downstream read — the ON residual, the projected output —
 			// sees NULL (#383).
-			absorbComputedSubqueryProjection(child, (*stages)[childStart:], false)
+			armMaterialized[ci] = absorbComputedSubqueryProjection(child, (*stages)[childStart:], false)
 			// …and the same materialization for a join input that is a
 			// SELECT list over an AGGREGATE: `(SELECT g, COUNT(*)+1 AS k …
 			// GROUP BY g) b` joined ON b.k names a column the aggregate
@@ -7268,13 +7291,30 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// stageBuildTableAlias, not joinArmAlias: the DAG's build stream is
 			// the arm's RAW columns, because a Project emits no stage. See
 			// joinArmAlias' comment for the two answers and why they differ.
-			if alias := stageBuildTableAlias(node.Children[1]); alias != "" {
-				stage.BuildTableAlias = alias
+			//
+			// UNLESS the arm's own SELECT list was just materialized onto the
+			// stage that terminates it (#780). Then the stream is not raw: it
+			// is exactly what the arm publishes, one column per SELECT item,
+			// and the one name the enclosing query writes describes all of
+			// them — which is the MATERIALIZED answer, `joinArmAlias`, and
+			// with it the materialized per-column origins. Qualifying that
+			// stream by an inner scan's alias instead named columns the arm
+			// does not publish, and the enclosing `m.a` then bound the PROBE
+			// arm's `a` by the qualifier strip: a silent wrong value.
+			if armMaterialized[1] {
+				if alias := joinArmAlias(node.Children[1]); alias != "" {
+					stage.BuildTableAlias = alias
+				}
+				stage.BuildColOrigins = buildNaming.materializedBuildColOrigins()
+			} else {
+				if alias := stageBuildTableAlias(node.Children[1]); alias != "" {
+					stage.BuildTableAlias = alias
+				}
+				// Multi-table build subtrees additionally carry per-column origin
+				// aliases so the executor qualifies each duplicate with its OWNING
+				// scan, not the (arbitrary) first one. Nil for single-scan builds.
+				stage.BuildColOrigins = buildNaming.buildColOrigins()
 			}
-			// Multi-table build subtrees additionally carry per-column origin
-			// aliases so the executor qualifies each duplicate with its OWNING
-			// scan, not the (arbitrary) first one. Nil for single-scan builds.
-			stage.BuildColOrigins = buildNaming.buildColOrigins()
 		}
 		// Propagate semi/anti join inequality filters
 		if node.JoinFilter != "" {

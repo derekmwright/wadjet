@@ -15,6 +15,195 @@ const spillRefusal = "ERR building physical plan: building hash table: hash join
 	"(a cross join's probe reads every build row, so its build cannot be grace-partitioned " +
 	"and cannot spill; the build must fit the budget)"
 
+// TestF1AJoinArmPublishesTheColumnsItSelects is #780 and #770: what a join arm
+// PUBLISHES is its own SELECT list, on every path.
+//
+// On the single-process pipeline the arm's Project is a real operator, so the
+// build side the join receives IS the arm's output and nothing else can answer
+// to its names. On the stage DAG a Project emits no stage (ADR-0025), so the
+// stream was the arm's RAW inner columns — and the two defects here are the
+// two ways that goes wrong: a COMPUTED column belongs to no scan, so the bare
+// name bound the arm's raw column of that name (#780, a wrong VALUE in
+// silence: 12.75 for PostgreSQL's 38.25), and a RENAME whose name the sibling
+// arm also publishes has two sources, so the resolve-back-by-spelling
+// convention named neither (#770, a GROUP BY key nothing emits).
+//
+// The controls are the other half of the claim, and they are what makes the
+// fix's BOUNDARY a measurement rather than an assertion: an arm publishing a
+// DISTINCT alias, an arm whose contested column is a plain RENAME with a
+// source to resolve to, an UNCONTESTED rename, and an arm that is a bare
+// relation must all answer exactly what they answered before.
+func TestF1AJoinArmPublishesTheColumnsItSelects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := f1Arms(t, ctx)
+
+	f1Run(t, arms, []f1Case{
+		{
+			name: "780 a computed column over an arm of bare scans",
+			sql: "SELECT t.a AS ta, m.a AS ma FROM decpair t " +
+				"JOIN (SELECT g.id AS id, g.a * 3 AS a FROM decpair g JOIN decpair h ON g.id = h.id) m " +
+				"ON t.id = m.id ORDER BY t.id",
+			want: "cols=[ta:DECIMAL(9,2) ma:DECIMAL(11,2)] rows=9 | 12.75,38.25 | 12.75,38.25 | " +
+				"12.75,38.25 | -0.01,-0.03 | 2.00,6.00 | 0.00,0.00 | NULL,NULL | 12.75,38.25 | NULL,NULL",
+		},
+		{
+			// The SAME cell with the arm on the PROBE side. #780's first fix
+			// was build-side only and this shape stayed silently wrong on the
+			// broadcast arm alone — the two DAG arms disagreeing with each
+			// other, in value AND in declared type, which is a state that did
+			// not exist before the fix. The arm's stage was ABSORBED by
+			// `fuseJoinStages`, which has no field for a projection and drops
+			// it, so the arm's column was un-computed one pass after it was
+			// computed (round-1 review, B1).
+			name: "780 the arm on the PROBE side",
+			sql: "SELECT m.a AS ma, t.a AS ta FROM " +
+				"(SELECT g.id AS id, g.a * 3 AS a FROM decpair g JOIN decpair h ON g.id = h.id) m " +
+				"JOIN decpair t ON m.id = t.id ORDER BY m.id",
+			want: "cols=[ma:DECIMAL(11,2) ta:DECIMAL(9,2)] rows=9 | 38.25,12.75 | 38.25,12.75 | " +
+				"38.25,12.75 | -0.03,-0.01 | 6.00,2.00 | 0.00,0.00 | NULL,NULL | 38.25,12.75 | NULL,NULL",
+		},
+		{
+			// The same face under an aggregate, where a wrong column is one
+			// number rather than nine and nothing renders the difference.
+			name: "780 the arm on the PROBE side, under SUM",
+			sql: "SELECT SUM(m.a) AS s FROM " +
+				"(SELECT g.id AS id, g.a * 3 AS a FROM decpair g JOIN decpair h ON g.id = h.id) m " +
+				"JOIN decpair t ON m.id = t.id",
+			want: "cols=[s:DECIMAL(38,2)] rows=1 | 158.97",
+		},
+		{
+			// The probe-side distinct-alias control: nothing is contested, so
+			// the arm's column is found by its own name whatever the fusion
+			// does, and it was right before the fix too.
+			name: "780 control: the PROBE-side arm publishing a DISTINCT alias",
+			sql: "SELECT m.z AS mz, t.a AS ta FROM " +
+				"(SELECT g.id AS id, g.a * 3 AS z FROM decpair g JOIN decpair h ON g.id = h.id) m " +
+				"JOIN decpair t ON m.id = t.id ORDER BY m.id",
+			want: "cols=[mz:DECIMAL(11,2) ta:DECIMAL(9,2)] rows=9 | 38.25,12.75 | 38.25,12.75 | " +
+				"38.25,12.75 | -0.03,-0.01 | 6.00,2.00 | 0.00,0.00 | NULL,NULL | 38.25,12.75 | NULL,NULL",
+			routed: map[string]string{
+				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
+		},
+		{
+			// PINNED, and pre-existing: `SELECT *` over a materialized arm
+			// publishes the arm's INNER columns as well as the ones it
+			// selects — 10 where PostgreSQL and the single path have 8. The
+			// arm's stage passes its whole stream through and appends the
+			// computed alias, deliberately: every DAG resolver reads those
+			// source names, and narrowing the passthrough to the arm's SELECT
+			// list would take them away from resolvers this arc does not
+			// move. So the section's doctrine — one column per SELECT item —
+			// is true of what the arm PUBLISHES and not of what its stage
+			// SHIPS, and `SELECT *` is where the difference is visible.
+			// Fail-on-agree: the day the DAG publishes 8, delete this.
+			name: "780 PINNED: SELECT * over a materialized arm ships the arm's inner columns",
+			sql: "SELECT * FROM decpair t JOIN " +
+				"(SELECT g.id AS id, g.a * 3 AS a FROM decpair g JOIN decpair h ON g.id = h.id) m " +
+				"ON t.id = m.id ORDER BY t.id",
+			want: "cols=[id:INT64 a:DECIMAL(9,2) b:DECIMAL(18,4) s:STRING f:FLOAT64 r:FLOAT32 " +
+				"m.id:INT64 m.a:DECIMAL(11,2)] rows=9 | 1,12.75,12.7500,1.50,1.5,1.5,1,38.25 | " +
+				"2,12.75,12.7501,1.5,100,100,2,38.25 | 3,12.75,12.7499,abc,-3.5,-3.5,3,38.25 | " +
+				"4,-0.01,-0.0100,10,0.5,0.5,4,-0.03 | 5,2.00,10.0000,9,9.5,9.5,5,6.00 | " +
+				"6,0.00,0.0000,1.500,20,20,6,0.00 | 7,NULL,1.0000,0,7.25,7.25,7,NULL | " +
+				"8,12.75,NULL,-1,NULL,NULL,8,38.25 | 9,NULL,NULL,1.5,3.5,3.5,9,NULL",
+			pin: map[string]string{
+				"dag": "cols=[id:INT64 a:DECIMAL(9,2) b:DECIMAL(18,4) s:STRING f:FLOAT64 r:FLOAT32 " +
+					"m.id:INT64 h.a:DECIMAL(9,2) h.id:INT64 m.a:DECIMAL(11,2)] rows=9 | " +
+					"1,12.75,12.7500,1.50,1.5,1.5,1,12.75,1,38.25 | " +
+					"2,12.75,12.7501,1.5,100,100,2,12.75,2,38.25 | " +
+					"3,12.75,12.7499,abc,-3.5,-3.5,3,12.75,3,38.25 | " +
+					"4,-0.01,-0.0100,10,0.5,0.5,4,-0.01,4,-0.03 | " +
+					"5,2.00,10.0000,9,9.5,9.5,5,2.00,5,6.00 | " +
+					"6,0.00,0.0000,1.500,20,20,6,0.00,6,0.00 | " +
+					"7,NULL,1.0000,0,7.25,7.25,7,NULL,7,NULL | " +
+					"8,12.75,NULL,-1,NULL,NULL,8,12.75,8,38.25 | " +
+					"9,NULL,NULL,1.5,3.5,3.5,9,NULL,9,NULL",
+				"dagshuf": "cols=[id:INT64 a:DECIMAL(9,2) b:DECIMAL(18,4) s:STRING f:FLOAT64 r:FLOAT32 " +
+					"m.id:INT64 h.a:DECIMAL(9,2) h.id:INT64 m.a:DECIMAL(11,2)] rows=9 | " +
+					"1,12.75,12.7500,1.50,1.5,1.5,1,12.75,1,38.25 | " +
+					"2,12.75,12.7501,1.5,100,100,2,12.75,2,38.25 | " +
+					"3,12.75,12.7499,abc,-3.5,-3.5,3,12.75,3,38.25 | " +
+					"4,-0.01,-0.0100,10,0.5,0.5,4,-0.01,4,-0.03 | " +
+					"5,2.00,10.0000,9,9.5,9.5,5,2.00,5,6.00 | " +
+					"6,0.00,0.0000,1.500,20,20,6,0.00,6,0.00 | " +
+					"7,NULL,1.0000,0,7.25,7.25,7,NULL,7,NULL | " +
+					"8,12.75,NULL,-1,NULL,NULL,8,12.75,8,38.25 | " +
+					"9,NULL,NULL,1.5,3.5,3.5,9,NULL,9,NULL",
+			},
+			why: "the arm's stage ships its whole stream so every DAG resolver keeps the " +
+				"source names it reads; pre-existing, base ships 10 too",
+		},
+		{
+			name: "780 control: the same arm publishing a DISTINCT alias",
+			sql: "SELECT t.a AS ta, m.z AS mz FROM decpair t " +
+				"JOIN (SELECT g.id AS id, g.a * 3 AS z FROM decpair g JOIN decpair h ON g.id = h.id) m " +
+				"ON t.id = m.id ORDER BY t.id",
+			want: "cols=[ta:DECIMAL(9,2) mz:DECIMAL(11,2)] rows=9 | 12.75,38.25 | 12.75,38.25 | " +
+				"12.75,38.25 | -0.01,-0.03 | 2.00,6.00 | 0.00,0.00 | NULL,NULL | 12.75,38.25 | NULL,NULL",
+			routed: map[string]string{
+				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
+		},
+		{
+			name: "780 control: the contested column is a RENAME, not computed",
+			sql: "SELECT t.a AS ta, m.a AS ma FROM decpair t " +
+				"JOIN (SELECT g.id AS id, g.b AS a FROM decpair g JOIN decpair h ON g.id = h.id) m " +
+				"ON t.id = m.id ORDER BY t.id",
+			want: "cols=[ta:DECIMAL(9,2) ma:DECIMAL(18,4)] rows=9 | 12.75,12.7500 | 12.75,12.7501 | " +
+				"12.75,12.7499 | -0.01,-0.0100 | 2.00,10.0000 | 0.00,0.0000 | NULL,1.0000 | " +
+				"12.75,NULL | NULL,NULL",
+		},
+		{
+			// #770, PINNED on the shuffled arm and DEFERRED. The filing says
+			// both DAG arms return 2 rows with a NULL; on this base the
+			// broadcast arm is RIGHT and the shuffled arm is LOUD, so the
+			// tree moved and the shape is no longer silent.
+			//
+			// The mechanism is the one above — two arms publish `w`, so the
+			// resolve-back-to-the-source-name convention has two sources and
+			// names neither — and materializing a CONTESTED rename is the
+			// repair that follows from it. It was built and WITHDRAWN: it
+			// closes this cell and moves THREE shapes in
+			// `TestAWindowBetweenTheSelectListAndItsJoinThreeArms` from right
+			// to wrong (two answer NULL for a qualified reference resolved in
+			// the other arm; one refuses with a sort key that no longer
+			// exists), because the needed-column lists and the stream's
+			// spelling stop agreeing the moment a resolver returns the
+			// qualified name. Right → wrong is a blocker; ADR-0025 carries
+			// the four-configuration census.
+			//
+			// Fail-on-agree: the day the shuffled arm answers, this pin is
+			// stale and must be deleted rather than kept.
+			name: "770 PINNED: DISTINCT over a join whose two arms publish one alias",
+			sql: "SELECT DISTINCT x.w AS xw, y.w AS yw FROM (SELECT id, a AS w FROM decpair) x " +
+				"JOIN (SELECT id, b*100 AS w FROM decpair) y ON x.id = y.id " +
+				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yw",
+			want: "cols=[xw:DECIMAL(9,2) yw:DECIMAL(22,4)] rows=5 | 2.00,1000.0000 | " +
+				"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
+			pin: map[string]string{"dagshuf": `ERR native DAG: stage join-8 (hash_join)`},
+			why: "two arms publish `w` and neither is materialized; see the arc report's " +
+				"DEFERRED item for the repair that was built and withdrawn",
+		},
+		{
+			name: "770 control: two arms whose aliases are DISTINCT",
+			sql: "SELECT DISTINCT x.w AS xw, y.v AS yv FROM (SELECT id, a AS w FROM decpair) x " +
+				"JOIN (SELECT id, b*100 AS v FROM decpair) y ON x.id = y.id " +
+				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, yv",
+			want: "cols=[xw:DECIMAL(9,2) yv:DECIMAL(22,4)] rows=5 | 2.00,1000.0000 | " +
+				"12.75,1274.9900 | 12.75,1275.0000 | 12.75,1275.0100 | 12.75,NULL",
+		},
+		{
+			name: "770 control: one derived arm, one BARE relation — the rename is UNCONTESTED",
+			sql: "SELECT DISTINCT x.w AS xw, u.a AS ua FROM (SELECT id, a AS w FROM decpair) x " +
+				"JOIN decpair u ON x.id = u.id WHERE x.w > 1 ORDER BY xw, ua",
+			want: "cols=[xw:DECIMAL(9,2) ua:DECIMAL(9,2)] rows=2 | 2.00,2.00 | 12.75,12.75",
+		},
+	})
+}
+
 // TestF1AWindowKeyGuardReadsProvenanceNotSpelling is #745: `__winkey_N` is the
 // name the planner MINTS for a materialized window key, and a table written
 // before that namespace was reserved can STORE a column of that name. The
@@ -55,6 +244,54 @@ func TestF1AWindowKeyGuardReadsProvenanceNotSpelling(t *testing.T) {
 			name: "745 control: the same stored column as a GROUP BY key",
 			sql:  "SELECT __winkey_1 AS k, COUNT(*) AS n FROM oldtab GROUP BY __winkey_1 ORDER BY k",
 			want: "cols=[k:INT64 n:INT64] rows=4 | 10,1 | 20,1 | 30,1 | 40,1",
+		},
+	})
+}
+
+// TestF1JoinKeysThroughDerivedRenamesAndAggregates is the RATCHET for #681 and
+// #730: a join key that is a computed aggregate alias, and a join key naming a
+// derived table's rename reaching that arm's scan fragment. Both were loud
+// stage-DAG failures for queries PostgreSQL answers; both answer on all four
+// arms at this arc's base, and neither is re-fixed here.
+//
+// They are gated rather than closed silently because this arc rewrites the two
+// resolvers they live in (`resolveShuffleKey`'s and `resolveAggInputName`'s
+// join arms), and a shape that is right by accident today is one nothing would
+// notice going wrong tomorrow.
+func TestF1JoinKeysThroughDerivedRenamesAndAggregates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := f1Arms(t, ctx)
+
+	f1Run(t, arms, []f1Case{
+		{
+			name: "681 the join key is a computed aggregate alias",
+			sql: "SELECT COUNT(*) AS n FROM numwidth a " +
+				"JOIN (SELECT w_key AS g, COUNT(*)+1 AS k FROM numwidth GROUP BY w_key) b " +
+				"ON a.w_i64 = b.k",
+			want: "cols=[n:INT64] rows=1 | 10",
+		},
+		{
+			name: "730 the RIGHT arm's key is a derived rename",
+			sql: "SELECT SUM(CASE WHEN x.s = '1.50' THEN y.w ELSE 0 END) AS v " +
+				"FROM (SELECT s, a AS v FROM decpair) x " +
+				"JOIN (SELECT s AS ss, b * 2 AS w FROM decpair) y ON x.s = y.ss",
+			want: "cols=[v:DECIMAL(38,4)] rows=1 | 25.5000",
+		},
+		{
+			name: "730 the LEFT arm's key is a derived rename",
+			sql: "SELECT COUNT(*) AS n FROM (SELECT s AS ss, a FROM decpair) x " +
+				"JOIN decpair y ON x.ss = y.s",
+			want: "cols=[n:INT64] rows=1 | 11",
+		},
+		{
+			name: "730 BOTH arms' keys are derived renames",
+			sql: "SELECT COUNT(*) AS n FROM (SELECT s AS l FROM decpair) x " +
+				"JOIN (SELECT s AS r FROM decpair) y ON x.l = y.r",
+			want: "cols=[n:INT64] rows=1 | 11",
 		},
 	})
 }
