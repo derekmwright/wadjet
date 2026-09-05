@@ -157,28 +157,29 @@ func (w *Writer) prepareRows(rows []map[string]any) error {
 					}
 				}
 			case TypePort, TypeProtocol:
-				switch tv := val.(type) {
-				case int:
-					row[col.Name] = int32(tv)
-				case int64:
-					row[col.Name] = int32(tv)
-				case float64:
-					row[col.Name] = int32(tv)
+				// This used to narrow int / int64 / float64 to an int32 HERE,
+				// with a bare Go conversion, on the CALLER's map — so
+				// int64(4294967297) became 1 before the native writer ever saw
+				// the number it was asked to store, and the leaf's own range
+				// check could not see it either (#890). The narrowing belongs
+				// at the leaf, where a refusal names the column and the row;
+				// int32LeafValue is that one rule, so this arm only has to
+				// stop mangling the value on the way past.
+				if err := CheckInt32LeafValue(col.Type, val); err != nil {
+					return fmt.Errorf("column %q: %w", col.Name, err)
 				}
 			case TypeDuration:
-				switch tv := val.(type) {
-				case int:
-					row[col.Name] = int64(tv)
-				case int32:
-					row[col.Name] = int64(tv)
-				case float64:
-					row[col.Name] = int64(tv)
-				default:
-					if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {
-						return fmt.Errorf("column %q: %w", col.Name, err)
-					} else if ok {
-						row[col.Name] = norm
-					}
+				// Same rule as PORT/PROTOCOL above: the numeric arms used to
+				// widen here with a bare conversion — float64 included, which
+				// is implementation-defined for a NaN — and int64LeafValue is
+				// the one checked rule. What stays is the TEMPORAL
+				// normalisation, which the leaf cannot do because a
+				// time.Duration and a text literal need this column's own
+				// accept-set.
+				if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {
+					return fmt.Errorf("column %q: %w", col.Name, err)
+				} else if ok {
+					row[col.Name] = norm
 				}
 			case TypeTimestamp:
 				if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {

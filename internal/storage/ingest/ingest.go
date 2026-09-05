@@ -191,7 +191,17 @@ func checkType(col parquet.Column, v any) error {
 	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
 		switch v.(type) {
 		case int, int8, int16, int32, int64, uint8, uint16, uint32:
-			// ok
+			// Refuse a value no INT32 leaf holds HERE, at the ingest boundary,
+			// rather than at the flush that eventually writes it — the same
+			// reason DECIMAL is checked here below. The writer refuses it too
+			// (parquet.int32LeafValue is the one rule), but a flush happens per
+			// BUFFER, so one bad row failing there takes a batch of good ones
+			// with it and reports against a partition rather than against the
+			// row that carried it. PostgreSQL's SQLSTATE for the same
+			// assignment is 22003, which is what the writer's error carries.
+			if err := parquet.CheckInt32LeafValue(col.Type, v); err != nil {
+				return fmt.Errorf("column %q: %w", col.Name, err)
+			}
 		default:
 			return fmt.Errorf("column %q: expected integer, got %T", col.Name, v)
 		}

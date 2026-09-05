@@ -10,7 +10,6 @@ import (
 	"net"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/snappy"
@@ -518,7 +517,16 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		return
 	}
 	// Value is present — def level is maxDefLevel.
-	lb.appendEntryWithValue(lb.maxDefLevel, repLevel, val)
+	//
+	// An INT32 or INT64 leaf's box is resolved inside, and a value it cannot
+	// hold fails the write HERE, where the column and the row are still known
+	// — the same rule and the same shape as the DECIMAL block above. Before
+	// this, an out-of-range integer WRAPPED into the file and a NaN wrote
+	// whatever Go's implementation-defined float→int conversion produced.
+	if err := lb.appendEntryWithValue(lb.maxDefLevel, repLevel, val); err != nil {
+		nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
+		lb.appendEntry(defLevel, repLevel)
+	}
 }
 
 // hasNetworkLiteralForm reports whether a column of this type stores BINARY
@@ -1478,33 +1486,66 @@ func (lb *leafBuffer) appendEntry(defLevel, repLevel int32) {
 }
 
 // appendEntryWithValue appends a value entry with the given def/rep levels.
-func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
+//
+// It returns an error rather than storing a value the leaf cannot hold, and
+// the integer leaves resolve their box FIRST, before a single level is
+// appended: a refused value must leave the buffer exactly as it found it so
+// the caller can append the NULL entry that keeps this leaf aligned with its
+// siblings.
+func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) error {
+	var (
+		b    bool
+		i32  int32
+		i64  int64
+		f32  float32
+		f64  float64
+		raw  []byte
+		err  error
+		phys = lb.physical
+	)
+	switch phys {
+	case PhysicalBoolean:
+		b, err = boolLeafValue(lb.col.Type, val)
+	case PhysicalInt32:
+		i32, err = int32LeafValue(lb.col.Type, val)
+	case PhysicalInt64:
+		// DECIMAL is the other INT64 leaf and never arrives here:
+		// decomposeLeaf resolves it through DecimalValueFromBox and returns.
+		i64, err = int64LeafValue(lb.col.Type, val)
+	case PhysicalFloat:
+		f32, err = float32LeafValue(lb.col.Type, val)
+	case PhysicalDouble:
+		f64, err = float64LeafValue(lb.col.Type, val)
+	case PhysicalByteArray:
+		raw, err = bytesLeafValue(lb.col, val)
+	case PhysicalFixedLenByteArray:
+		raw = toBytes(val, lb.col.Type)
+	}
+	if err != nil {
+		return err
+	}
+
 	lb.defLevels = append(lb.defLevels, defLevel)
 	lb.repLevels = append(lb.repLevels, repLevel)
 	lb.count++
 
-	switch lb.physical {
+	switch phys {
 	case PhysicalBoolean:
-		b := toBool(val)
 		lb.appendBool(b)
 	case PhysicalInt32:
-		v := toInt32(val, lb.col.Type)
-		lb.appendInt32(v)
+		lb.appendInt32(i32)
 	case PhysicalInt64:
-		lb.appendInt64(toInt64(val, lb.col.Type))
+		lb.appendInt64(i64)
 	case PhysicalFloat:
-		v := toFloat32(val)
-		lb.appendFloat32(v)
+		lb.appendFloat32(f32)
 	case PhysicalDouble:
-		v := toFloat64(val)
-		lb.appendFloat64(v)
+		lb.appendFloat64(f64)
 	case PhysicalByteArray:
-		b := toBytes(val, lb.col.Type)
-		lb.appendByteArray(b)
+		lb.appendByteArray(raw)
 	case PhysicalFixedLenByteArray:
-		b := toBytes(val, lb.col.Type)
-		lb.data = append(lb.data, b...)
+		lb.data = append(lb.data, raw...)
 	}
+	return nil
 }
 
 // appendDecimalEntry appends a DECIMAL value entry.
@@ -1816,25 +1857,10 @@ func toBool(v any) bool {
 	}
 }
 
-func toInt32(v any, colType TypeID) int32 {
-	switch t := v.(type) {
-	case int:
-		return int32(t)
-	case int32:
-		return t
-	case int64:
-		return int32(t)
-	case float64:
-		return int32(t)
-	case string:
-		if colType == TypeDate {
-			return parseDateForWrite(t)
-		}
-		return 0
-	default:
-		return 0
-	}
-}
+// toInt32 and toInt64 used to live here. They narrowed with a bare Go
+// conversion and answered every box they did not name with a zero; the leaves
+// they fed now resolve their box through int32LeafValue / int64LeafValue,
+// which refuse what they cannot store instead. See int_leaf_value.go.
 
 // decimalFLBABytes renders an unscaled DECIMAL value as the sixteen-byte
 // big-endian two's-complement integer a FIXED_LEN_BYTE_ARRAY DECIMAL leaf
@@ -1857,33 +1883,6 @@ func decimalFLBABytes(d Decimal128) []byte {
 		b[decimalFLBAWidth-9-i] = byte(uint64(d.Hi) >> (8 * i))
 	}
 	return b
-}
-
-func toInt64(v any, colType TypeID) int64 {
-	switch t := v.(type) {
-	case int:
-		return int64(t)
-	case int32:
-		return int64(t)
-	case int64:
-		return t
-	case float64:
-		return int64(t)
-	case string:
-		return convertStringToInt64(t, colType)
-	case time.Time:
-		// TypeTimestamp / TypeDuration land here when ingest hands a time.Time
-		// directly. The parquet schema declares TypeTimestamp as
-		// TimestampMillis (file_writer.go:813), so encode in milliseconds —
-		// otherwise the row group stores 0 from the default branch and every
-		// query against the column reads zeros (TestTimestampStringComparison
-		// surfaced this: `event_time >= '<literal>'` returned 0 rows because
-		// every column value was 0). TypeDate has its own pre-converter in
-		// writer.go::prepareRows; it never reaches this fall-through.
-		return t.UnixMilli()
-	default:
-		return 0
-	}
 }
 
 func toFloat32(v any) float32 {
