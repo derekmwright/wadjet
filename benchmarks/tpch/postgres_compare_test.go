@@ -471,6 +471,7 @@ func postgresCorpus() []pgCase {
 		out = append(out, c)
 	}
 
+	out = append(out, postgresCamelCaseNameCases()...)
 	out = append(out, postgresRowFieldCases()...)
 	out = append(out, postgresSemanticsCases()...)
 	out = append(out, postgresConstArgAggCases()...)
@@ -5099,3 +5100,39 @@ const pgFloatRows = `
 	UNION ALL SELECT 6, CAST(1.0 AS DOUBLE PRECISION)
 	UNION ALL SELECT 7, CAST(2.0 AS DOUBLE PRECISION)
 	UNION ALL SELECT 8, CAST(NULL AS DOUBLE PRECISION)`
+
+// postgresCamelCaseNameCases reads a relation whose catalog schema is
+// MIXED-case, which no other entry in this corpus does.
+//
+// Every fixture the oracle carried before `case_probe` spells its columns
+// lower case, and there the reference an unquoted identifier folds to and the
+// name the catalog holds are the SAME STRING — so a site that compares one
+// against the other byte-exactly answers correctly for the wrong reason, and
+// the oracle cannot tell. `case_probe` alternates `WatchID` / `counterid`
+// deliberately: a PARTIAL miss, which drops one column and keeps its
+// neighbour, is the shape that survives every "all-miss falls back to keeping
+// everything" valve in the engine.
+//
+// The references here are DELIMITED, because that is the only spelling
+// PostgreSQL can answer for a CamelCase catalog column: unquoted `WatchID`
+// folds to `watchid` and PostgreSQL raises 42703, while wadjet resolves it
+// (the recorded ADR-0012 concession that keeps ClickBench-shaped parquet
+// queryable). That divergence is deliberate and is gated in
+// `wadjet/identifier_case_test.go`; spelling it here would only ask the oracle
+// to confirm a difference it is not the authority on.
+func postgresCamelCaseNameCases() []pgCase {
+	return []pgCase{
+		{name: "CamelCaseStar",
+			sql: `SELECT * FROM case_probe ORDER BY k`},
+		{name: "CamelCaseNamedColumns",
+			sql: `SELECT k, "WatchID", "UserAgent", counterid FROM case_probe ORDER BY k`},
+		{name: "CamelCaseAliased",
+			sql: `SELECT "WatchID" AS "Foo", counterid AS bar FROM case_probe ORDER BY "WatchID"`},
+		{name: "CamelCaseNullPredicate",
+			sql: `SELECT COUNT(*) AS n FROM case_probe WHERE "UserAgent" IS NULL`},
+		{name: "CamelCaseSelfJoinOnACamelCaseKey",
+			sql: `SELECT a."WatchID" FROM case_probe a JOIN case_probe b ON a."WatchID" = b."WatchID" ORDER BY 1`},
+		{name: "CamelCaseGroupByAMixedPair",
+			sql: `SELECT counterid, COUNT(*) AS n FROM case_probe GROUP BY counterid ORDER BY counterid`},
+	}
+}

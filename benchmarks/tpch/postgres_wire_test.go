@@ -748,6 +748,19 @@ func wireCorpus() []wireCase {
 			sql: `SELECT n_name AS Desc FROM nation ORDER BY n_nationkey LIMIT 1`},
 		{name: "IdentifierCaseQualifiedReference",
 			sql: `SELECT N.N_NAME FROM nation N ORDER BY 1 LIMIT 1`},
+		// The entries above all read `nation`, whose columns are lower case,
+		// so the reference and the catalog name are the same string and
+		// `wirePropFieldNames` cannot see whether RowDescription carried the
+		// CATALOG's spelling or the reference's. `case_probe` is mixed-case,
+		// which is what puts that property under the oracle at all — and it is
+		// the coverage the two pgwire fixes in this arc (the COPY column list
+		// and the nested container's declaration) otherwise had none of.
+		{name: "IdentifierCaseCamelCaseStar",
+			sql: `SELECT * FROM case_probe ORDER BY k LIMIT 3`},
+		{name: "IdentifierCaseCamelCaseDelimitedReference",
+			sql: `SELECT "WatchID", "UserAgent" FROM case_probe ORDER BY k LIMIT 3`},
+		{name: "IdentifierCaseCamelCaseMixedList",
+			sql: `SELECT counterid, "WatchID" FROM case_probe ORDER BY k LIMIT 3`},
 		// A float column, where the declared OID and the text spelling of the
 		// value are separate questions.
 		{name: "Float8Column", sql: `SELECT o_orderkey, o_totalprice FROM orders ORDER BY o_orderkey LIMIT 3`},

@@ -388,6 +388,9 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 	if err := sink(pgRowTable, pgRowRowsData()); err != nil {
 		t.Fatalf("%v", err)
 	}
+	if err := sink(pgCaseTable, pgCaseRows()); err != nil {
+		t.Fatalf("%v", err)
+	}
 	for name, ing := range ingesters {
 		if err := ing.FlushAll(ctx); err != nil {
 			t.Fatalf("wadjet flush %s: %v", name, err)
@@ -700,6 +703,58 @@ func pgRowRowsData() []map[string]any {
 	return rows
 }
 
+// The CAMELCASE-NAME fixture. Every other table this oracle carries is lower
+// case throughout, so nothing in the corpus could ask what a column's CASE
+// means — and createPostgresSchema's own note ("Every fixture but the
+// CamelCase one is lower case already … that one is here precisely because its
+// names are not") described a table that did not exist.
+//
+// What it is for is the WIRE arm. `wirePropFieldNames` compares
+// RowDescription name for name against PostgreSQL, with no pin, and a name is
+// exactly what an identifier's case is: wadjet's tables come from parquet and
+// ingest, where CamelCase columns are ordinary (ClickBench's `hits` has
+// `WatchID`, `UserID`, `EventTime`), and a fold applied on the wrong side of
+// the wire changes what a client SHOWS and BINDS BY. Two of this class's
+// defects were wire-visible and neither could be seen from here: a COPY column
+// list resolved after its quotes were stripped, and a nested column's declared
+// structure looked up under the catalog's spelling by a folded reference.
+//
+// The columns are deliberately MIXED. `k` and `counterid` are already folded,
+// `WatchID` and `UserAgent` are not, and they alternate — the dangerous shape
+// is the partial miss, where the folded columns of a row survive and the
+// CamelCase ones come back NULL, which reads as data rather than as an error.
+// Two names that fold to ONE name are absent on purpose: `catalog.CreateTable`
+// refuses such a schema outright, so a fixture carrying them would not load.
+//
+// PostgreSQL holds the same spellings because createPostgresSchema declares
+// every column DELIMITED. That is not a nicety: an unquoted `WatchID` in a
+// CREATE TABLE folds to `watchid`, the two engines would then hold two
+// different schemas, and the COPY that loads this fixture would not find its
+// own columns.
+const pgCaseTable = "case_probe"
+
+// pgCaseRows is small on purpose: this fixture exists to be NAMED, not to be
+// aggregated over. The values are distinct per row and per column so a cell
+// that arrived from the wrong column is visible, and one row is NULL in the
+// CamelCase text column so the folded and unfolded halves of a row can be told
+// apart when one of them goes missing.
+func pgCaseRows() []map[string]any {
+	rows := make([]map[string]any, 0, 6)
+	for i := 0; i < 6; i++ {
+		r := map[string]any{
+			"k":         int64(i),
+			"WatchID":   int64(100 + i),
+			"UserAgent": fmt.Sprintf("agent-%d", i),
+			"counterid": int64(200 + i),
+		}
+		if i == 3 {
+			r["UserAgent"] = nil
+		}
+		rows = append(rows, r)
+	}
+	return rows
+}
+
 // oracleTables is the fixture both engines are loaded with: the TPC-H tables
 // plus the probe tables that exist only for this oracle.
 //
@@ -718,6 +773,12 @@ func oracleTables() map[string]parquet.Schema {
 	out[pgRowTable] = parquet.Schema{Columns: []parquet.Column{
 		{Name: "k", Type: parquet.TypeInt64},
 		{Name: "rw", Type: parquet.TypeRow, Nullable: true, Fields: pgRowFields()},
+	}}
+	out[pgCaseTable] = parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "WatchID", Type: parquet.TypeInt64},
+		{Name: "UserAgent", Type: parquet.TypeString, Nullable: true},
+		{Name: "counterid", Type: parquet.TypeInt64},
 	}}
 	out[pgDecimalTable] = parquet.Schema{Columns: []parquet.Column{
 		{Name: "d_key", Type: parquet.TypeInt64},
