@@ -176,26 +176,41 @@ func TestEveryUnsupportedStatementRefusesTheSameWayOnEveryDoor(t *testing.T) {
 				// guard must NOT be what answers there. Asserted, not assumed:
 				// the round-1 review found this branch returning here, which
 				// is how a false claim about CREATE SNAPSHOT survived.
+				// Each door reports its SQLSTATE its own way, so the check
+				// takes both the CLASS and the message rather than matching
+				// the message's shape. A suffix test was the first spelling
+				// and pgconn defeated it: its Error() ends
+				// `… (SQLSTATE 0A000)`, so only the embedded door was ever
+				// checked (round-2 P8).
 				for _, d := range []struct {
 					name string
-					run  func(string) error
+					run  func(string) (state string, err error)
 				}{
-					{"pgwire", func(sql string) error {
+					{"pgwire", func(sql string) (string, error) {
 						res := conn.ExecParams(ctx, sql, nil, nil, nil, nil).Read()
-						return res.Err
+						if pe, ok := res.Err.(*pgconn.PgError); ok {
+							return pe.Code, res.Err
+						}
+						return "", res.Err
 					}},
-					{"embedded", func(sql string) error {
+					{"embedded", func(sql string) (string, error) {
 						_, err := db.Query(ctx, sql)
-						return err
+						return sqlerr.StateOf(err), err
 					}},
 				} {
-					err := d.run(tc.sql)
+					state, err := d.run(tc.sql)
 					if err == nil {
 						continue // the handler ran it; that is the claim too
 					}
-					if strings.HasSuffix(err.Error(), "is not supported") {
-						t.Errorf("the %s door answers %q with the DISPATCH refusal (%v); "+
-							"this cell claims that door has a handler for it", d.name, tc.sql, err)
+					// The dispatch refusal is 0A000 carrying this statement's
+					// name and that phrasing — `CREATE SNAPSHOT is not
+					// supported`. A handler's own refusal may be 0A000 too
+					// (`alerts are disabled`), which is why the message half
+					// is the STATEMENT NAME and not just the class.
+					if state == "0A000" && strings.Contains(err.Error(), tc.httpRefusal) {
+						t.Errorf("the %s door answers %q with the DISPATCH refusal (%s %v); "+
+							"this cell claims that door has a handler for it",
+							d.name, tc.sql, state, err)
 					}
 					if !strings.Contains(err.Error(), tc.otherDoorsSay) {
 						t.Errorf("the %s door answers %q with %v; want its handler's own "+
