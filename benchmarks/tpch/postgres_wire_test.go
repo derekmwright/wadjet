@@ -1637,7 +1637,7 @@ func wireCorpus() []wireCase {
 		// it is here because it was the one whose VALUE moved: read as text
 		// it produced the UTF-8 replacement character.
 		{name: "ByteaConcat", sql: `SELECT b_key, b_val || b_other AS c FROM bytea_probe WHERE b_key IN (2, 3) ORDER BY b_key`},
-		{name: "ByteaSubstring", sql: `SELECT b_key, substring(b_val from 1 for 1) AS c FROM bytea_probe ORDER BY b_key`},
+		{name: "ByteaSubstring", sql: `SELECT b_key, substring(b_val, 1, 1) AS c FROM bytea_probe ORDER BY b_key`},
 		{name: "ByteaLength", sql: `SELECT b_key, length(b_val) AS c FROM bytea_probe ORDER BY b_key`},
 		// --- The SHAPE of a grouped answer (#591) ---------------------------
 		//

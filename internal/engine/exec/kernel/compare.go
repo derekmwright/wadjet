@@ -885,6 +885,11 @@ func CidrSortKey(s string) (string, bool) {
 		// back through the same key builder, so an abbreviated literal and the
 		// address it names produce one key — which is what makes `cd = '10/8'`
 		// find the row holding '10.0.0.0/8', as it does on the server.
+		//
+		// This arm is why CidrAddressText exists beside this function: the
+		// abbreviated grammar reads a BARE NUMBER as an address, which is
+		// right when the column IS a cidr and wrong for a site that is asking
+		// whether an untyped literal could be an address at all.
 		a, ones, pok := parquet.PgIPv4Pton(s)
 		if !pok {
 			return "", false
@@ -915,6 +920,39 @@ func CidrSortKey(s string) (string, bool) {
 	buf = append(buf, byte(ones))
 	buf = append(buf, full...)
 	return string(buf), true
+}
+
+// CidrAddressText reports whether s names an address WITHOUT PostgreSQL's
+// abbreviated cidr grammar — the question a site asks when it does NOT know
+// the column's type, and the accept-set CidrSortKey had before #627 widened it.
+//
+// The two callers are `expr.tryNetworkLit` and `expr.firstNonAddressLit`, and
+// both are type-blind by construction: the column's declared type is not known
+// at compile time, so they ask "could this literal be an address in ANY
+// family" and let the column's real type pick the branch at eval time.
+//
+// Handing them the widened grammar was a silent wrong answer, caught by the
+// PostgreSQL oracle: `'3.1'` and `'2'` ARE addresses under the abbreviated
+// rule (3.1.0.0/16 and 2.0.0.0/8), so `CASE WHEN d_val < '3.1' THEN 1 ELSE 0
+// END = 1` compiled to a network comparison over a DOUBLE column and answered
+// 15 rows where PostgreSQL answers 8 — the literal ordered as an ADDRESS where
+// the column wanted a number. PostgreSQL reads `'3.1'` as a cidr only when the
+// target IS a cidr, which is exactly the knowledge these two sites lack.
+//
+// Every CIDR-TYPED site keeps the wide grammar: the kernel's TypeCIDR arm, the
+// IN set, the row-group bound, the boxed-pair key and the plan-time refusal
+// all know the column is a cidr, and `cd = '10/8'` finds its row through them.
+func CidrAddressText(s string) bool {
+	t := s
+	if !strings.ContainsRune(t, '/') {
+		if strings.ContainsRune(t, ':') {
+			t += "/128"
+		} else {
+			t += "/32"
+		}
+	}
+	_, ipnet, err := net.ParseCIDR(t)
+	return err == nil && ipnet != nil
 }
 
 // CidrOrderKey is CidrSortKey for every CIDR consumer that needs a definite

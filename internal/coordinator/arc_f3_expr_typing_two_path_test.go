@@ -105,6 +105,19 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		`SELECT COUNT(*) AS n FROM typemx WHERE id < 0 AND c_mac = 'nope'`,
 		"invalid input syntax for type macaddr")
 
+	// The literal that is NOT an address, even though PostgreSQL's abbreviated
+	// cidr grammar would read it as one. A site that does not know the
+	// column's type must read `'3.1'` and `'2'` as numbers; reading them as
+	// 3.1.0.0/16 and 2.0.0.0/8 ordered a DOUBLE column's rows as addresses.
+	// The bare predicate goes through the KERNEL and the CASE-wrapped one
+	// through the compiled comparison, which is why both spellings are here.
+	f3AgreeOnEveryArm(t, arms, "quoted_number_is_not_an_address_float",
+		`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN c_f64 < '3.1' THEN 1 ELSE 0 END = 1`,
+		`SELECT COUNT(*) AS n FROM typemx WHERE c_f64 < '3.1'`)
+	f3AgreeOnEveryArm(t, arms, "quoted_number_is_not_an_address_int",
+		`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN c_i64 > '2' THEN 1 ELSE 0 END = 1`,
+		`SELECT COUNT(*) AS n FROM typemx WHERE c_i64 > '2'`)
+
 	// ---------------------------------------------------------------- #582
 	// A bytea literal in both of byteain's spellings, against the same row.
 	// The hex form is computed from the fixture's own value rather than

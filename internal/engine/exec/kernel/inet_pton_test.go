@@ -95,6 +95,45 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
+// A site that does NOT know the column's type must not read the abbreviated
+// grammar, because under it every bare number is an address (#627 regression,
+// caught by the PostgreSQL oracle before it reached anyone).
+//
+// `expr.tryNetworkLit` wraps a comparison in a CmpNetworkLit whenever the
+// literal parses as an address in ANY family, and lets the column's real type
+// pick the branch at eval time — so handing it `'3.1'` as 3.1.0.0/16 made
+// `CASE WHEN d_val < '3.1' THEN 1 ELSE 0 END = 1` order a DOUBLE column's rows
+// as ADDRESSES: 15 rows where PostgreSQL 17.11 answers 8. PostgreSQL reads
+// `'3.1'` as a cidr only when the target IS a cidr, which is exactly what
+// these type-blind sites cannot know.
+func TestAnUntypedLiteralIsNotAnAddressJustBecauseCidrWouldReadIt(t *testing.T) {
+	// Numbers, which are what the regression turned into addresses.
+	for _, s := range []string{"3.1", "2", "10", "192.168", "10.1", "0", "1_0", "0x0A", "3"} {
+		if CidrAddressText(s) {
+			t.Errorf("CidrAddressText(%q) says address; a site that does not know the "+
+				"column's type must read this as a number", s)
+		}
+	}
+	// Real addresses, which must keep reaching the network comparison.
+	for _, s := range []string{
+		"10.0.0.1", "10.0.0.0/8", "192.168.1.5/24", "2001:db8::1", "::1", "::ffff:10.0.0.1",
+	} {
+		if !CidrAddressText(s) {
+			t.Errorf("CidrAddressText(%q) says not-an-address", s)
+		}
+	}
+	// And the CIDR-TYPED sites keep the wide grammar: the same abbreviated
+	// spellings still key as the addresses they name, which is what makes
+	// `c_cidr = '10/8'` find its row.
+	for _, c := range [][2]string{{"10/8", "10.0.0.0/8"}, {"192.168", "192.168.0.0/24"}} {
+		a, aok := CidrSortKey(c[0])
+		b, bok := CidrSortKey(c[1])
+		if !aok || !bok || a != b {
+			t.Errorf("CidrSortKey(%q) and CidrSortKey(%q) are two keys for one value", c[0], c[1])
+		}
+	}
+}
+
 // The plan-time refusal and the runtime one read ONE predicate, so a query
 // refused at one site cannot be answered at the other (#627, #579). The three
 // types wired here are the ones whose accept-set is now a superset of

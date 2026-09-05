@@ -2,9 +2,11 @@ package test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -261,6 +263,12 @@ func TestDateTruncOverColumns(t *testing.T) {
 	// `SELECT date_trunc('year', TIMESTAMP '1996-03-13 14:25:36')::text` is
 	// `1996-01-01 00:00:00` on 17.11, measured.
 	//
+	// Since #868 date_trunc DECLARES timestamp (OID 1114) as it does on the
+	// server, so the embedded door hands back the instant — the epoch
+	// milliseconds a TIMESTAMP column hands back — and the rendering happens
+	// at the output. dtRendered renders whichever box arrives, so these cells
+	// assert the TEXT a client reads on either side of that change.
+	//
 	// `ld` is unchanged: last_day_of_month answers a calendar DATE, which has
 	// its own rendering and always had this one.
 	for col, want := range map[string]string{
@@ -268,8 +276,22 @@ func TestDateTruncOverColumns(t *testing.T) {
 		"yts": "1996-01-01 00:00:00",
 		"ld":  "1996-03-31",
 	} {
-		if got, _ := r[col].(string); got != want {
+		if got := dtRendered(r[col]); got != want {
 			t.Errorf("column %q: got %v, want %q", col, r[col], want)
 		}
 	}
+}
+
+// dtRendered renders whatever box a timestamp-valued expression handed back as
+// the text a client reads: epoch milliseconds through batch.FormatTimestamp,
+// which is what a TIMESTAMP-declared column produces through the embedded
+// door, or the text itself for an expression that is text on purpose.
+func dtRendered(v any) string {
+	switch tv := v.(type) {
+	case int64:
+		return batch.FormatTimestamp(tv)
+	case string:
+		return tv
+	}
+	return fmt.Sprint(v)
 }

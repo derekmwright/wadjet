@@ -862,7 +862,18 @@ func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit 
 	ipv4, ipv4ok := ipv4LitToInt64(s)
 	mac, macok := macLitToInt64(s)
 	ipv6, ipv6ok := kernel.IPv6LitKey(s)
-	cidr, cidrok := kernel.CidrSortKey(s)
+	// kernel.CidrAddressText, not CidrSortKey: this site does not know the
+	// column's type, and since #627 CidrSortKey reads PostgreSQL's ABBREVIATED
+	// grammar, under which `'3.1'` and `'2'` are addresses. Wrapping a numeric
+	// comparison in a CmpNetworkLit on that basis ordered `d_val < '3.1'` as an
+	// ADDRESS over a DOUBLE column. The KEY still comes from the wide function,
+	// because a literal that reaches a real CIDR column must key the way that
+	// column's other sites key it.
+	cidrok := kernel.CidrAddressText(s)
+	cidr := ""
+	if cidrok {
+		cidr, cidrok = kernel.CidrSortKey(s)
+	}
 	if !ipv4ok && !macok && !ipv6ok && !cidrok {
 		return nil
 	}

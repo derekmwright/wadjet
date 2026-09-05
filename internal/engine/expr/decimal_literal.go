@@ -852,6 +852,11 @@ func firstNonAddressLit(operands []Expr) (string, bool) {
 		if !ok {
 			continue
 		}
+		// The WIDE grammar here, unlike tryNetworkLit's: this walk feeds a
+		// REFUSAL against a column whose type the binding already knows, so
+		// an abbreviated-but-valid cidr literal (`'192.168'`, `'10/8'`) must
+		// be recognised as the address it is or the refusal fires on input
+		// PostgreSQL accepts — which is the whole of #627.
 		if _, ok := kernel.CidrSortKey(s); ok {
 			continue
 		}
