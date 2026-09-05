@@ -2094,11 +2094,13 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 // checkValueForColumn is ConvertValueForColumn's half for a value that is
 // already a Go box rather than literal text: it validates and returns nothing,
 // because there is nothing to convert.
+//
+// It asks the SAME question columnChecked asks, through the same code, so the
+// two halves cannot answer differently — it had its own copy of the DECIMAL
+// rule and therefore missed the VECTOR one when that arrived, which is the
+// shape of defect a second copy always produces.
 func checkValueForColumn(v any, col parquet.Column) error {
-	if v == nil || col.Type != parquet.TypeDecimal {
-		return nil
-	}
-	_, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale)
+	_, err := columnChecked(v, nil)(col)
 	return err
 }
 
@@ -3148,7 +3150,7 @@ func convertTemporalValue(s string, typ parquet.TypeID) (any, error) {
 // resolved Decimal128 instead would change the box a DECIMAL partition key is
 // formatted from, and the check costs one parse per literal, not per row.
 func ConvertValueForColumn(s string, col parquet.Column) (any, error) {
-	return decimalChecked(convertValue(s, col.Type))(col)
+	return columnChecked(convertValue(s, col.Type))(col)
 }
 
 // ConvertTextForColumn converts RAW TEXT — not a SQL literal — to the box a
@@ -3167,19 +3169,47 @@ func ConvertTextForColumn(s string, col parquet.Column) (any, error) {
 	// `  spaced  ` — while a field into a numeric column still parses. Trimming
 	// here was the third literal rule the commit meant to remove and did not
 	// (review P7).
-	return decimalChecked(convertUnquoted(s, col.Type))(col)
+	return columnChecked(convertUnquoted(s, col.Type))(col)
 }
 
-// decimalChecked is the shared tail of the two converters: a DECIMAL value is
-// judged against the column's declared (p, s) HERE, before the caller commits
-// anything destructive.
-func decimalChecked(v any, err error) func(parquet.Column) (any, error) {
+// columnChecked is the shared tail of the two converters: a value whose
+// admissibility depends on the column's DECLARATION rather than its type alone
+// is judged HERE, before the caller commits anything destructive.
+//
+// Two rules live here because two declarations carry a bound the TypeID does
+// not: a DECIMAL's (p, s) and a VECTOR's dimension. It was named
+// decimalChecked while it had one.
+func columnChecked(v any, err error) func(parquet.Column) (any, error) {
 	return func(col parquet.Column) (any, error) {
-		if err != nil || v == nil || col.Type != parquet.TypeDecimal {
+		if err != nil || v == nil {
 			return v, err
 		}
-		if _, derr := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); derr != nil {
-			return nil, derr
+		switch col.Type {
+		case parquet.TypeDecimal:
+			if _, derr := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); derr != nil {
+				return nil, derr
+			}
+		case parquet.TypeVector:
+			// A VECTOR(N) value has exactly N components — the same rule
+			// batch.Vector.SetVector enforces on the in-memory write path
+			// (#900), raised with the SAME error type so the door and the
+			// vector cannot answer differently. Before this the door had NO
+			// vector rule at all: convertValue's default arm handed the
+			// literal's raw TEXT through, the writer wrote those bytes into a
+			// FIXED_LEN_BYTE_ARRAY(N*4) leaf, and the table became
+			// unreadable — for a RIGHT-width literal as much as a wrong one.
+			if col.Dimension <= 0 {
+				return nil, sqlerr.New("22000",
+					"column %q declares VECTOR with no dimension, which has no fixed width", col.Name)
+			}
+			vec, ok := v.([]float32)
+			if !ok {
+				return nil, sqlerr.New("22P02",
+					"invalid input syntax for type vector: %s", sqlerr.Quote(fmt.Sprint(v)))
+			}
+			if len(vec) != col.Dimension {
+				return nil, &batch.VectorWidthError{Dim: col.Dimension, Got: len(vec)}
+			}
 		}
 		return v, nil
 	}
@@ -3227,13 +3257,20 @@ func decimalChecked(v any, err error) func(parquet.Column) (any, error) {
 // (int/int32/int64/...) and TypeDuration's schema.go contract ("nanoseconds,
 // stored as int64").
 //
-// TypeArray, TypeRow, TypeMap, TypeVector have no case and are not
-// "mechanical": the INSERT VALUES parser itself (dml_parser.go's
-// insertValueText) accepts only a single literal token per value — an
-// array/row/map/vector literal is a composite expression it explicitly
-// refuses ("Anything else is an EXPRESSION, and this path has no
-// evaluator"), so convertValue never even receives one today. Supporting
-// them would start at the parser grammar, not here.
+// TypeArray, TypeRow and TypeMap have no case: the INSERT VALUES parser
+// itself (dml_parser.go's insertValueText) accepts only a single literal
+// token per value — an array/row/map literal is a composite expression it
+// explicitly refuses ("Anything else is an EXPRESSION, and this path has no
+// evaluator"), so convertValue never receives one. Supporting them would
+// start at the parser grammar, not here.
+//
+// TypeVector was in that list and did not belong: a vector literal's text
+// form is `'[1,2]'`, a single QUOTED STRING token, which the parser accepts
+// like any other. So convertValue did receive one, the default arm passed the
+// text through, and the writer wrote the string's bytes into a fixed-width
+// leaf — a corrupt page for every VECTOR insert, right width or wrong. It has
+// a case now (parseVectorLiteral), and the width is checked in
+// columnChecked where the declaration is.
 func convertValue(s string, typ parquet.TypeID) (any, error) {
 	s = strings.TrimSpace(s)
 
@@ -3345,9 +3382,58 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 		// formats a temporal PARTITION KEY from that box and an integer there
 		// would rename every partition directory.
 		return convertTemporalValue(s, typ)
+	case parquet.TypeVector:
+		// pgvector's text form, which is the spelling a client already knows
+		// and the one docs/data-types.md documents. The WIDTH is not checked
+		// here — this function is handed a TypeID and nothing else, so it
+		// cannot know N; columnChecked does it where the declaration is.
+		return parseVectorLiteral(s)
 	default:
 		return s, nil
 	}
+}
+
+// parseVectorLiteral reads pgvector's text form — `[1,2,3]` — into the
+// []float32 box the writer, the ingest boundary and batch.Vector all store.
+//
+// Without it a VECTOR literal fell to convertUnquoted's default arm and was
+// passed through as a STRING, which nothing downstream converts: the writer's
+// FIXED_LEN_BYTE_ARRAY leaf took the string's own bytes, so
+// `INSERT INTO t (v) VALUES ('[1,2]')` into a VECTOR(2) reported success and
+// left a page whose body is 5 bytes where the header promises 8 — the table
+// unreadable, for a value of the RIGHT width. The file's own comment claimed
+// this could not happen ("an array/row/map/vector literal is a composite
+// expression the parser refuses, so convertValue never receives one"), and a
+// quoted vector literal is a single string token the parser accepts.
+//
+// PostgreSQL's vector input function is the model: brackets required, a
+// comma-separated list of numbers inside, whitespace ignorable, and anything
+// else 22P02 with the literal quoted back.
+func parseVectorLiteral(s string) ([]float32, error) {
+	bad := func() error {
+		return sqlerr.New("22P02", "invalid input syntax for type vector: %s", sqlerr.Quote(s))
+	}
+	t := strings.TrimSpace(s)
+	if len(t) < 2 || t[0] != '[' || t[len(t)-1] != ']' {
+		return nil, bad()
+	}
+	inner := strings.TrimSpace(t[1 : len(t)-1])
+	if inner == "" {
+		// `[]` is a zero-component vector. It parses; columnChecked refuses it
+		// against any declared dimension, which is where the width lives.
+		return []float32{}, nil
+	}
+	parts := strings.Split(inner, ",")
+	out := make([]float32, len(parts))
+	for i, p := range parts {
+		f, err := strconv.ParseFloat(strings.TrimSpace(p), 32)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			// NaN and the infinities have no vector value in pgvector either.
+			return nil, bad()
+		}
+		out[i] = float32(f)
+	}
+	return out, nil
 }
 
 // dmlSubqueryEnv builds the environment a DML predicate needs to ANSWER a

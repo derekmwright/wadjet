@@ -508,10 +508,18 @@ Nested types round-trip through Parquet in both directions — written as the st
 
 `VECTOR(N)` stores fixed-dimension float32 vectors for embedding-based workflows. Each row occupies exactly N x 4 bytes with zero overhead.
 
-A `VECTOR(N)` value has exactly N components. A value of any other width is
-refused with SQLSTATE `22000` and the message `expected N dimensions, not M` —
-never padded with zeros and never truncated, the same answer PostgreSQL's
-`vector` extension gives for `'[1]'::vector(2)`.
+A `VECTOR(N)` value has exactly N components. Write one in PostgreSQL's
+`vector` spelling — `'[1,2,3]'` — and a value of any other width is refused
+with SQLSTATE `22000` and the message `expected N dimensions, not M`, never
+padded with zeros and never truncated. That is the answer PostgreSQL's `vector`
+extension gives for `'[1]'::vector(2)`, and it is the answer at every write
+door: `INSERT`, `UPDATE`, `MERGE`, `COPY` and the embedded write API. Text that
+is not a vector — no brackets, a component that is not a number, `NaN` or an
+infinity — is `22P02`, `invalid input syntax for type vector`.
+
+```sql
+INSERT INTO doc_embeddings (doc_id, embedding) VALUES (1, '[0.1,0.2,0.3]')
+```
 
 ```sql
 -- Create a table with embedding column
