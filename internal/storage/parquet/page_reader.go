@@ -976,14 +976,40 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 			r.columnLabel(), dph.RepetitionLevelsByteLength, dph.DefinitionLevelsByteLength,
 			len(compressed))
 	}
+	// A leaf that HAS levels must carry them. Zero is the one length that
+	// bounding cannot catch and that costs the most: the decode below is
+	// guarded on `> 0`, so a zeroed length skips the level decode entirely,
+	// `off` never advances, and every value in the page is read defLen bytes
+	// early — a whole page of shifted values, nil error, and all three of the
+	// v2 count cross-checks vacuous (num_nulls is 0, defLevels is nil,
+	// num_rows equals num_values). One flipped bit in the header does it.
+	if r.maxRepLevel > 0 && repLen <= 0 {
+		return nil, fmt.Errorf("column %s: data page v2 on a leaf with repetition level %d "+
+			"carries no repetition levels", r.columnLabel(), r.maxRepLevel)
+	}
+	if r.maxDefLevel > 0 && defLen <= 0 {
+		return nil, fmt.Errorf("column %s: data page v2 on a leaf with definition level %d "+
+			"carries no definition levels", r.columnLabel(), r.maxDefLevel)
+	}
 
 	// Decode repetition levels (uncompressed).
+	//
+	// Each section is held to BOTH of the things its declared length claims:
+	// that it encodes num_values levels, and that it is exactly that many
+	// bytes long. A v1 page gets the second for free — its sections are
+	// length-prefixed, so the decoder derives the extent from the bytes and
+	// reports what it consumed. A v2 page's extent comes from the header and
+	// also PLACES the value section, so a length that disagrees with the
+	// encoding moves every value after it. decodeLevelsConsumed reports both.
 	var repLevels []int32
 	if repLen > 0 && r.maxRepLevel > 0 {
-		bitWidth := bitsRequired(r.maxRepLevel)
-		decoded, err := DecodeRLEInt32(compressed[off:off+repLen], bitWidth, numValues)
+		decoded, used, err := decodeLevelsConsumed(nil, compressed[off:off+repLen],
+			bitsRequired(r.maxRepLevel), numValues)
 		if err != nil {
 			return nil, fmt.Errorf("decoding v2 repetition levels: %w", err)
+		}
+		if err := r.checkV2LevelSection("repetition", repLen, used, len(decoded), numValues); err != nil {
+			return nil, err
 		}
 		repLevels = decoded
 	}
@@ -992,17 +1018,20 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 	// Decode definition levels (uncompressed).
 	var defLevels []int32
 	if defLen > 0 && r.maxDefLevel > 0 {
-		bitWidth := bitsRequired(r.maxDefLevel)
 		var scratch []int32
 		if r.scratchOn {
 			scratch = r.defScratch
 		}
-		decoded, err := DecodeRLEInt32Into(scratch, compressed[off:off+defLen], bitWidth, numValues)
+		decoded, used, err := decodeLevelsConsumed(scratch, compressed[off:off+defLen],
+			bitsRequired(r.maxDefLevel), numValues)
 		if err != nil {
 			return nil, fmt.Errorf("decoding v2 definition levels: %w", err)
 		}
 		if r.scratchOn {
 			r.defScratch = decoded
+		}
+		if err := r.checkV2LevelSection("definition", defLen, used, len(decoded), numValues); err != nil {
+			return nil, err
 		}
 		defLevels = decoded
 	}
@@ -1088,6 +1117,25 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 		rawBuf:          rawBuf,
 		codec:           r.codec,
 	}, nil
+}
+
+// checkV2LevelSection holds a data page v2 level section to what its declared
+// byte length claims. Measured across 89 v2 pages written by parquet-go and
+// pyarrow — nested, flat, required, optional, all-null, split-row, both
+// codecs — the decoder consumes the declared length EXACTLY and produces
+// exactly num_values levels, with no exceptions: there is no writer slack to
+// tolerate here.
+func (r *ColumnPageReader) checkV2LevelSection(kind string, declared, used, got, want int) error {
+	if used != declared {
+		return fmt.Errorf("column %s: data page v2 declares %d %s-level bytes but the levels "+
+			"encode in %d, so the value section does not start where the header says",
+			r.columnLabel(), declared, kind, used)
+	}
+	if got != want {
+		return fmt.Errorf("column %s: data page v2 declares %d values but its %s levels "+
+			"decode to %d", r.columnLabel(), want, kind, got)
+	}
+	return nil
 }
 
 // countRowStarts counts the rows a nested leaf's repetition levels describe.

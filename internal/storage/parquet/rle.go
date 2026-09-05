@@ -27,6 +27,11 @@ type RLEDecoder struct {
 	off      int
 	bitWidth int
 	count    int // total values expected
+
+	// strict refuses a run whose declared bytes run past the buffer instead
+	// of decoding whatever is there. See decodeAllBatch's bit-packed clamp
+	// and decodeLevelsConsumed.
+	strict bool
 }
 
 // NewRLEDecoder creates an RLE decoder for data with the given bit width.
@@ -254,6 +259,19 @@ func (d *RLEDecoder) decodeAllBatch(dst []int32) (int, error) {
 				return pos, fmt.Errorf("rle: bit-packed byte count overflow")
 			}
 			if d.off+byteCount > len(d.data) {
+				// The run says it occupies more bytes than the buffer holds.
+				// Clamping decodes whatever is present and reports success,
+				// which for a data page v2 LEVEL section is a truncation
+				// accepted as a complete decode: the caller then places the
+				// value section by the header's (short) length and every
+				// value in the page moves. A dictionary-index payload keeps
+				// the old tolerance — its length is not load-bearing for
+				// anything else's position, and the index bound catches a
+				// bad value downstream.
+				if d.strict {
+					return pos, fmt.Errorf("rle: bit-packed run needs %d bytes at offset %d "+
+						"but only %d remain", byteCount, d.off, len(d.data)-d.off)
+				}
 				byteCount = len(d.data) - d.off
 			}
 			decoded := DecodeBitPacked(d.data[d.off:d.off+byteCount], d.bitWidth, numValues)
@@ -351,4 +369,39 @@ func DecodeRLEInt32WithLengthInto(dst []int32, data []byte, bitWidth, count int)
 		return nil, 0, err
 	}
 	return dst[:n], 4 + length, nil
+}
+
+// decodeLevelsConsumed decodes a data page v2 LEVEL section and reports how
+// many bytes of it the decoder actually read.
+//
+// A v1 page length-prefixes its level sections, so `DecodeRLEInt32WithLength`
+// derives the section's extent from the bytes themselves and hands back
+// `consumed`; the caller then places the value section after it. A v2 page
+// has no prefix — the extent comes from the page HEADER
+// (`definition_levels_byte_length`, `repetition_levels_byte_length`), which
+// is thrift the reader has parsed and nothing more, and which ALSO places the
+// value section. Nothing reconciled the two, so a header that understates the
+// section moved every value in the page (#891's gate found it; see
+// decodeDataPageV2).
+//
+// The count is not clamped away either: `DecodeRLEInt32Into` returns however
+// many values it managed, so a truncated section silently yields fewer levels
+// than the page declares. Both facts — the values decoded and the bytes read
+// — come back here so the caller can hold the header to them.
+func decodeLevelsConsumed(dst []int32, data []byte, bitWidth, count int) ([]int32, int, error) {
+	if err := checkRLECount(count); err != nil {
+		return nil, 0, err
+	}
+	if cap(dst) < count {
+		dst = make([]int32, count)
+	} else {
+		dst = dst[:count]
+	}
+	dec := NewRLEDecoder(data, bitWidth, count)
+	dec.strict = true
+	n, err := dec.decodeAllBatch(dst)
+	if err != nil {
+		return nil, dec.off, err
+	}
+	return dst[:n], dec.off, nil
 }
