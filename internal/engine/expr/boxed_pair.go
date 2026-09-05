@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -83,6 +84,25 @@ const (
 	// "2001:db8::10" as text and below it as an address, so the two sites
 	// answered `a < z` opposite ways (#565).
 	boxIPv6
+	// boxIPv4: values from here are IPV4. The column stores a 32-bit address
+	// and ColRef.Eval boxes its RENDERED dotted quad, whose byte order is not
+	// the address's: "10.9.0.0" sorts ABOVE "10.10.0.0" as text and below it
+	// as an address. Without this kind the fold sites compared that text —
+	// `GREATEST(c_ipv4, '10.0.0.1') = c_ipv4` counted 4916 rows where
+	// PostgreSQL's inet counts 4915, and `LEAST` counted 0 where it counts 2
+	// (round-3 review P-A). CIDR and IPv6 had their kinds since #565; MAC
+	// needs none, because its rendered form is fixed-width zero-padded hex,
+	// whose byte order IS its numeric one.
+	boxIPv4
+	// boxMAC: values from here are MAC. Like IPV4 it is a fixed-width number
+	// the column stores as an int64 and ColRef.Eval boxes RAW, so a quoted
+	// literal beside it fell to compare(), which reads "aa:bb:cc:00:00:01" as
+	// the number ZERO — `c_mac IN (<any address>)` answered 0 on both DAG
+	// arms where the server and the single arm answer 1 (round-2 review P-2,
+	// round-3 review P-A's family). Its RENDERED form is fixed-width
+	// zero-padded hex, whose byte order IS its numeric one, so only the raw
+	// box needed a rule.
+	boxMAC
 	// boxBool: values from here are BOOL. A BOOL column against a QUOTED
 	// literal reads the literal through PostgreSQL's boolean input grammar
 	// (parse_bool: t/f/true/false/yes/no/y/n/on/off/1/0 and word prefixes),
@@ -370,6 +390,10 @@ func declaredBoxKind(t batch.TypeID) (boxKind, bool) {
 		return boxCidr, true
 	case batch.TypeIPv6:
 		return boxIPv6, true
+	case batch.TypeIPv4:
+		return boxIPv4, true
+	case batch.TypeMAC:
+		return boxMAC, true
 	case batch.TypeBool:
 		return boxBool, true
 	case batch.TypeBytes:
@@ -927,11 +951,12 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	// of its own type or against a quoted literal. Two of them, or one and a
 	// literal, is the pair no box can tell from two strings — the shape
 	// ADR-0012 item 8 says must be answered from the DECLARATIONS (#565).
-	case lk == boxCidr && rk == boxCidr, lk == boxIPv6 && rk == boxIPv6:
+	case lk == boxCidr && rk == boxCidr, lk == boxIPv6 && rk == boxIPv6,
+		lk == boxIPv4 && rk == boxIPv4, lk == boxMAC && rk == boxMAC:
 		return true
-	case (lk == boxCidr || lk == boxIPv6) && rk == boxQuoted && rText != "":
+	case (lk == boxCidr || lk == boxIPv6 || lk == boxIPv4 || lk == boxMAC) && rk == boxQuoted && rText != "":
 		return true
-	case (rk == boxCidr || rk == boxIPv6) && lk == boxQuoted && lText != "":
+	case (rk == boxCidr || rk == boxIPv6 || rk == boxIPv4 || rk == boxMAC) && lk == boxQuoted && lText != "":
 		return true
 	// A BYTES column against a QUOTED literal, or against another BYTES
 	// operand: the literal goes through byteain, so its hex spelling names
@@ -1112,6 +1137,79 @@ func netKeyFor(k boxKind, literal bool) func(string) (string, bool) {
 	return nil
 }
 
+// ipv4BoxKey reads an IPV4 box as the four big-endian bytes whose BYTE order
+// is the address's own.
+//
+// Two shapes reach it. `ColRef.Eval` hands GREATEST/LEAST the column's RAW
+// int64 — which is why comparing it against a quoted literal through
+// compare() read the literal as the address ZERO and counted 4916 rows where
+// PostgreSQL counts 4915 (round-3 review P-A) — while the paths that format
+// their arguments first (FuncCall's wantsNetworkText rewrite) hand it the
+// rendered dotted quad. Both are the same address and both key the same way.
+func ipv4BoxKey(v any) (key string, shaped, parsed bool) {
+	var raw uint32
+	switch tv := v.(type) {
+	case int64:
+		raw = uint32(tv)
+	case int32:
+		raw = uint32(tv)
+	case string:
+		k, ok := kernel.IPv4SortKey(tv)
+		return k, true, ok
+	default:
+		return "", false, false
+	}
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], raw)
+	return string(buf[:]), true, true
+}
+
+// ipv4Order compares two IPV4 boxes, or one against a quoted literal, in the
+// address's order.
+func macBoxKey(v any) (key string, shaped, parsed bool) {
+	var raw uint64
+	switch tv := v.(type) {
+	case int64:
+		raw = uint64(tv)
+	case string:
+		n, ok := kernel.MACLitKey(tv)
+		if !ok {
+			return "", true, false
+		}
+		raw = uint64(n)
+	default:
+		return "", false, false
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], raw)
+	return string(buf[2:]), true, true // the low 48 bits, big-endian
+}
+
+// macOrder is ipv4Order for the MAC family.
+func macOrder(lv, rv any) (c int, ok, unknown bool) {
+	lk, lShaped, lParsed := macBoxKey(lv)
+	rk, rShaped, rParsed := macBoxKey(rv)
+	if !lShaped || !rShaped {
+		return 0, false, false
+	}
+	if !lParsed || !rParsed {
+		return 0, true, true
+	}
+	return strings.Compare(lk, rk), true, false
+}
+
+func ipv4Order(lv, rv any) (c int, ok, unknown bool) {
+	lk, lShaped, lParsed := ipv4BoxKey(lv)
+	rk, rShaped, rParsed := ipv4BoxKey(rv)
+	if !lShaped || !rShaped {
+		return 0, false, false
+	}
+	if !lParsed || !rParsed {
+		return 0, true, true
+	}
+	return strings.Compare(lk, rk), true, false
+}
+
 // order compares two boxed values under the rule their DECLARATIONS select,
 // returning -1, 0 or +1, or ok=false when no such rule applies and the caller
 // must fall through to compare().
@@ -1247,6 +1345,20 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 	// literal's key comes from its own SIDE, which is what puts a dotted-quad
 	// literal below every IPv6 row while a v4-MAPPED stored value stays among
 	// them (netKeyFor).
+	case lk == boxIPv4 && rk == boxIPv4:
+		return ipv4Order(lv, rv)
+	case lk == boxIPv4 && rk == boxQuoted:
+		return ipv4Order(lv, rText)
+	case rk == boxIPv4 && lk == boxQuoted:
+		c, ok, unknown := ipv4Order(rv, lText)
+		return -c, ok, unknown
+	case lk == boxMAC && rk == boxMAC:
+		return macOrder(lv, rv)
+	case lk == boxMAC && rk == boxQuoted:
+		return macOrder(lv, rText)
+	case rk == boxMAC && lk == boxQuoted:
+		c, ok, unknown := macOrder(rv, lText)
+		return -c, ok, unknown
 	case lk == boxCidr && rk == boxCidr, lk == boxIPv6 && rk == boxIPv6:
 		return netOrder(netKeyFor(lk, false), netKeyFor(rk, false), lv, rv)
 	case (lk == boxCidr || lk == boxIPv6) && rk == boxQuoted:
