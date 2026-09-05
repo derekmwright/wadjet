@@ -1506,6 +1506,28 @@ func wireCorpus() []wireCase {
 		// this is where a rule that de-duplicates the name shows.
 		{name: "UnaliasedArithmeticTwice",
 			sql: `SELECT supplier.s_acctbal + 1, supplier.s_acctbal + 2 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
+		// …and two of DIFFERENT TYPES, which is the cell this corpus did not
+		// have. Every other duplicate-name entry here pairs two columns of one
+		// type, so a declaration resolved by NAME — giving column 0 the LAST
+		// column's OID — passed all of them while declaring an integer as TEXT
+		// (round-1 review B2).
+		{name: "UnaliasedDuplicateNamesOfDifferentTypes",
+			sql: `SELECT supplier.s_suppkey + 1, supplier.s_name || 'x' FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "int4 + an integer literal widens to int8 (OID 20) here where " +
+					"PostgreSQL stays int4 (23). Not this cell's subject and not #732's: what it " +
+					"asserts is that the TWO columns declare DIFFERENT types, which they do — a " +
+					"name-keyed declaration gave both the LAST one's. The same integer-width " +
+					"divergence is pinned on UnaliasedLiteral and belongs to the literal typing " +
+					"layer",
+				wirePropTypeSizes: "the size that follows that OID (8, not 4). Same mechanism; a " +
+					"size pin without the OID pin would be the wrong half",
+			}},
+		// The MODIFIER half of the same question: two VARCHAR casts of
+		// different lengths both publish `s_name`, and a name-keyed typmod
+		// sent the second one's for both.
+		{name: "DuplicateNamesOfDifferentModifiers",
+			sql: `SELECT CAST(s_name AS VARCHAR(4)), CAST(s_name AS VARCHAR(9)) FROM supplier ORDER BY s_suppkey LIMIT 2`},
 		// A literal and a predicate, the other two `?column?` families.
 		{name: "UnaliasedLiteral",
 			sql: `SELECT 1 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`,
