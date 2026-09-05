@@ -1,6 +1,7 @@
 package parquet
 
 import (
+	"encoding/binary"
 	"math"
 	"net"
 	"time"
@@ -309,6 +310,70 @@ func bytesLeafValue(col Column, v any) ([]byte, error) {
 		}
 	}
 	return b, nil
+}
+
+// vectorLeafValue resolves the FIXED_LEN_BYTE_ARRAY leaf, which for this
+// writer is VECTOR(N) and nothing else — a DECIMAL wide enough to need an FLBA
+// is resolved in decomposeLeaf and appended through appendDecimalEntry.
+//
+// The WIDTH is the whole point (#886). An FLBA leaf carries no per-value
+// length: the column chunk is one run of bytes cut every TypeLength bytes on
+// the way back. Appending a value of the wrong width therefore does not
+// produce a short value, it MOVES THE BOUNDARY for every value after it — a
+// VECTOR(2) fed [1] and then [2,3,4] read back as [1,2] and [3,4], with write,
+// Close and read all returning nil, because the two errors cancelled in the
+// byte total. No read-side length check can see that, which is why the width
+// is enforced here, on the way in.
+func vectorLeafValue(col Column, v any) ([]byte, error) {
+	if col.Dimension <= 0 {
+		return nil, sqlerr.New("22023",
+			"column %q declares VECTOR with no dimension, which has no fixed width", col.Name)
+	}
+	switch t := v.(type) {
+	case []float32:
+		if len(t) != col.Dimension {
+			return nil, vectorWidthError(col, len(t))
+		}
+		buf := make([]byte, len(t)*4)
+		for i, f := range t {
+			binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+		}
+		return buf, nil
+	case []float64:
+		if len(t) != col.Dimension {
+			return nil, vectorWidthError(col, len(t))
+		}
+		buf := make([]byte, len(t)*4)
+		for i, f := range t {
+			buf32, err := float32LeafValue(col.Type, f)
+			if err != nil {
+				return nil, err
+			}
+			binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(buf32))
+		}
+		return buf, nil
+	case []byte:
+		if len(t) != col.Dimension*4 {
+			return nil, sqlerr.New("22023",
+				"column %q is VECTOR(%d), which is %d bytes; the value is %d bytes",
+				col.Name, col.Dimension, col.Dimension*4, len(t))
+		}
+		return t, nil
+	}
+	return nil, leafBoxError(col.Type, v)
+}
+
+// CheckVectorLeafValue is vectorLeafValue's refusal without its bytes, for the
+// boundary above the writer (ingest.checkType). One rule, asked twice.
+func CheckVectorLeafValue(col Column, v any) error {
+	_, err := vectorLeafValue(col, v)
+	return err
+}
+
+func vectorWidthError(col Column, got int) error {
+	return sqlerr.New("22023",
+		"column %q is VECTOR(%d); the value has %d components",
+		col.Name, col.Dimension, got)
 }
 
 // leafRangeError is PostgreSQL's numeric_value_out_of_range, the SQLSTATE it

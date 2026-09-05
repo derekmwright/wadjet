@@ -1573,7 +1573,7 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) er
 	case PhysicalByteArray:
 		raw, err = bytesLeafValue(lb.col, val)
 	case PhysicalFixedLenByteArray:
-		raw = toBytes(val, lb.col.Type)
+		raw, err = vectorLeafValue(lb.col, val)
 	}
 	if err != nil {
 		return err

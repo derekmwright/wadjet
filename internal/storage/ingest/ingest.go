@@ -278,6 +278,15 @@ func checkType(col parquet.Column, v any) error {
 		if _, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); err != nil {
 			return fmt.Errorf("column %q: %w", col.Name, err)
 		}
+	case parquet.TypeVector:
+		// This case did not exist: a VECTOR column's value reached the writer
+		// unchecked, and the FIXED_LEN_BYTE_ARRAY leaf then appended whatever
+		// width it was given, moving every later value's boundary (#886). The
+		// writer holds the width now; asking the same rule here fails the ROW
+		// that carries it.
+		if err := parquet.CheckVectorLeafValue(col, v); err != nil {
+			return fmt.Errorf("column %q: %w", col.Name, err)
+		}
 	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap:
 		// Reject a value no leaf of this container's declaration can hold at
 		// the ingest boundary, before the writer's leaf turns it into the
