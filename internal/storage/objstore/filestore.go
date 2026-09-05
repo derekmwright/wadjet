@@ -50,11 +50,39 @@ func (f *FileStore) bucketDir(bucket string) string {
 	return filepath.Join(f.rootDir, bucket)
 }
 
-func (f *FileStore) objectPath(bucket, key string) string {
-	return filepath.Join(f.rootDir, bucket, filepath.FromSlash(key))
+// objectPath maps a bucket and an object key to a path under the store root,
+// and REFUSES a key that would leave it.
+//
+// filepath.Join CLEANS its result, so `filepath.Join(root, bucket, "../../x")`
+// is a path outside the root with no error and no ".." left to see. Every
+// caller below therefore has to be able to fail: `CREATE TABLE "../../../tmp/x"`
+// put an arbitrary path here — the table prefix is built from the identifier
+// and a double-quoted identifier is taken verbatim — and on the supported
+// `storage.type: file` deployment that was Get's open, Put's temp file and
+// Put's rename writing wherever the process could reach (CodeQL #23, #24, #25).
+//
+// The rule is ValidateObjectKey's, so it is the same rule the other stores
+// apply; the containment check below is belt to that braces and costs one
+// string comparison on a path that is about to be opened anyway.
+func (f *FileStore) objectPath(bucket, key string) (string, error) {
+	if err := ValidateBucketName(bucket); err != nil {
+		return "", err
+	}
+	if err := ValidateObjectKey(key); err != nil {
+		return "", err
+	}
+	root := f.bucketDir(bucket)
+	path := filepath.Join(root, filepath.FromSlash(key))
+	if path != root && !strings.HasPrefix(path, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("object key %q resolves outside its bucket", key)
+	}
+	return path, nil
 }
 
 func (f *FileStore) MakeBucket(_ context.Context, bucket string) error {
+	if err := ValidateBucketName(bucket); err != nil {
+		return err
+	}
 	return os.MkdirAll(f.bucketDir(bucket), 0o755)
 }
 
@@ -72,7 +100,10 @@ func (f *FileStore) BucketExists(_ context.Context, bucket string) (bool, error)
 func (f *FileStore) Put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string) (string, error) {
 	_ = contentType // filesystem doesn't store content type metadata
 
-	path := f.objectPath(bucket, key)
+	path, err := f.objectPath(bucket, key)
+	if err != nil {
+		return "", err
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -118,7 +149,10 @@ func (f *FileStore) PutIfMatch(_ context.Context, bucket, key string, r io.Reade
 		return "", fmt.Errorf("reading data: %w", err)
 	}
 
-	path := f.objectPath(bucket, key)
+	path, perr := f.objectPath(bucket, key)
+	if perr != nil {
+		return "", perr
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -152,7 +186,10 @@ func (f *FileStore) PutIfMatch(_ context.Context, bucket, key string, r io.Reade
 }
 
 func (f *FileStore) Get(_ context.Context, bucket, key string) (io.ReadCloser, ObjectInfo, error) {
-	path := f.objectPath(bucket, key)
+	path, err := f.objectPath(bucket, key)
+	if err != nil {
+		return nil, ObjectInfo{}, err
+	}
 
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -188,7 +225,10 @@ func (f *FileStore) Get(_ context.Context, bucket, key string) (io.ReadCloser, O
 }
 
 func (f *FileStore) GetReaderAt(_ context.Context, bucket, key string) (ReaderAtCloser, int64, error) {
-	path := f.objectPath(bucket, key)
+	path, err := f.objectPath(bucket, key)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	file, err := os.Open(path)
 	if err != nil {
@@ -208,7 +248,10 @@ func (f *FileStore) GetReaderAt(_ context.Context, bucket, key string) (ReaderAt
 }
 
 func (f *FileStore) Head(_ context.Context, bucket, key string) (ObjectInfo, error) {
-	path := f.objectPath(bucket, key)
+	path, err := f.objectPath(bucket, key)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -295,12 +338,15 @@ func (f *FileStore) List(_ context.Context, bucket string, opts ListOptions) ([]
 }
 
 func (f *FileStore) Delete(_ context.Context, bucket, key string) error {
-	path := f.objectPath(bucket, key)
+	path, err := f.objectPath(bucket, key)
+	if err != nil {
+		return err
+	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	err := os.Remove(path)
+	err = os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("deleting file: %w", err)
 	}

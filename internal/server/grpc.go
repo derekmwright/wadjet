@@ -475,7 +475,13 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 
 	schema := parquet.Schema{Columns: columns}
 	if err := g.catalog.CreateTable(ctx, req.Name, schema, req.PartitionKeys); err != nil {
-		return nil, status.Errorf(codes.Internal, "creating table: %v", err)
+		// sqlErrorText for the same reason the column arm above gives: the
+		// catalog's refusals carry a class (42P07 for a duplicate, 42701 for a
+		// duplicate column, 42602 for a name the object store cannot hold) and
+		// status.Errorf("%v") drops it. This is also the ONLY door where a
+		// relation name arrives without passing the lexer, so it is the one
+		// where the class is load-bearing.
+		return nil, status.Errorf(codes.Internal, "creating table: %s", sqlErrorText(err))
 	}
 
 	return &wadjetv1.CreateTableResponse{Name: req.Name}, nil

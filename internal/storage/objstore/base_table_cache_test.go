@@ -112,9 +112,21 @@ func TestBaseTableCacheEligibility(t *testing.T) {
 	}{
 		{"non-parquet", "data", "tables/t/chunk.wshf"},
 		{"query scratch", "data", "queries/q1/stage-2/part.parquet"},
-		{"dot-dot segment", "data", "tables/../escape.parquet"},
-		{"empty segment", "data", "tables//x.parquet"},
 		{"bucket with slash", "da/ta", "tables/t/x.parquet"},
+	}
+	// The traversal-shaped keys are no longer STORABLE: every store now
+	// applies ValidateObjectKey, so an object under such a key can only come
+	// from a foreign writer into the same bucket. The cache's own eligibility
+	// rule is the second line and is still asserted, on the predicate rather
+	// than through an object nothing here can create.
+	for _, key := range []string{"tables/../escape.parquet", "tables//x.parquet"} {
+		if _, err := inner.Store.Put(context.Background(), "data", key,
+			bytes.NewReader([]byte("payload")), 7, "application/octet-stream"); err == nil {
+			t.Errorf("the store accepted the traversal-shaped key %q", key)
+		}
+		if c.eligibleKey("data", key) {
+			t.Errorf("the cache would admit the traversal-shaped key %q", key)
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

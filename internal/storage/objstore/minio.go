@@ -164,6 +164,12 @@ func (s *MinIOStore) BucketExists(ctx context.Context, bucket string) (bool, err
 }
 
 func (s *MinIOStore) Put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) (string, error) {
+	// The same key rule the other two stores apply, so a key is legal
+	// everywhere or nowhere. S3 itself would take "a/../b" and keep it
+	// LITERALLY, which is a third meaning for one string.
+	if err := ValidateObjectKey(key); err != nil {
+		return "", err
+	}
 	release, err := s.acquireUpload(ctx)
 	if err != nil {
 		return "", fmt.Errorf("acquiring upload slot: %w", err)
@@ -181,6 +187,9 @@ func (s *MinIOStore) Put(ctx context.Context, bucket, key string, r io.Reader, s
 }
 
 func (s *MinIOStore) PutIfMatch(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string, expectedETag string) (string, error) {
+	if err := ValidateObjectKey(key); err != nil {
+		return "", err
+	}
 	release, err := s.acquireUpload(ctx)
 	if err != nil {
 		return "", fmt.Errorf("acquiring upload slot: %w", err)

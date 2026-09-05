@@ -302,6 +302,14 @@ func (c *Catalog) ListTables(_ context.Context) ([]string, error) {
 
 // CreateTable creates a new table with the given schema and partition keys.
 func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Schema, partitionKeys []string) error {
+	if err := CheckStorableName("table", name); err != nil {
+		return err
+	}
+	for _, col := range schema.Columns {
+		if err := CheckStorableName("column", col.Name); err != nil {
+			return err
+		}
+	}
 	if err := checkDistinctColumnNames(schema); err != nil {
 		return fmt.Errorf("creating table %q: %w", name, err)
 	}

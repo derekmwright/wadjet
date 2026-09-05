@@ -124,6 +124,27 @@ Table **aliases**, CTE names and function names are matched byte for byte, as
 qualifiers are. `SELECT * FROM t` publishes each column under the schema's own
 spelling.
 
+### A relation or column name is also a storage location
+
+A table's data lives at `tables/<name>/…` in the object store, and a partition
+key's column name becomes a `<col>=<value>/` component below it. A name that
+cannot be one component of an object key is therefore refused at `CREATE`, on
+every door, with SQLSTATE `42602`:
+
+| Refused | Why |
+|---|---|
+| `"a/b"`, `"../../tmp/x"` | contains `/` |
+| `"a\b"` | contains `\` |
+| `".."`, `"."` | is a path component with a meaning of its own |
+| `".hidden"` | begins with `.` |
+| a name containing a NUL byte | cannot be a path component |
+
+Everything else PostgreSQL accepts inside double quotes is still accepted,
+including spaces, embedded quotes and a `..` inside a name (`"x..y"`). This is
+a deliberate divergence from PostgreSQL, which has no such restriction because
+its relations are rows in `pg_class` rather than locations; it is recorded in
+`docs/adr/0012-sql-semantics-authority.md`.
+
 ## SELECT Statement
 
 ```sql

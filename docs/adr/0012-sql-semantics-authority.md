@@ -80,6 +80,39 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      resolve is an error, never a different column. Gated at
      `coordinator.TestAnUnnamedDerivedColumnCannotBeReferencedByItsPublishedName`,
      with the block's own spelling beside it as the control.
+   - **A relation or column name must be one component of an object key.**
+     (Added 2026-09-05, CodeQL go/path-injection #23/#24/#25.) PostgreSQL
+     accepts almost anything inside a double-quoted identifier —
+     `CREATE TABLE "../../../tmp/x"`, `"a/b"`, `".hidden"` and `".."` are all
+     legal relation names there — because a PostgreSQL relation is a row in
+     `pg_class` and never a filename. A wadjet relation IS a location: its data
+     lives at `tables/<name>/…` in the object store, and a partition key's
+     column name becomes a `<col>=<value>/` component below it.
+
+     Wadjet therefore refuses, at CREATE and on every door, a relation or
+     column name that contains `/`, `\` or a NUL byte, that IS `.` or `..`, or
+     that begins with `.` — SQLSTATE 42602 `invalid_name`. A `..` INSIDE a
+     component (`"x..y"`) is accepted, because it names a real directory; the
+     danger is a component that IS `..`, not the two characters. Everything
+     else PostgreSQL accepts is still accepted, spaces and embedded quotes
+     included.
+
+     The refusal is name-only and LOUD: no query answers differently, nothing
+     is silently rewritten, and no name that IS accepted behaves differently
+     from PostgreSQL. The alternative is a table whose data has no home — and,
+     measured, worse than that: with `storage.type: file` the lexer's verbatim
+     delimited identifier reached `filepath.Join`, which CLEANS its result, so
+     `CREATE TABLE "../../../tmp/x"` wrote parquet files anywhere the process
+     could reach. The store enforces the same rule at the key
+     (`objstore.ValidateObjectKey`, applied by FileStore, MemStore and the S3
+     store alike), because a store cannot know what its keys were made of; the
+     catalog's check is the one that can tell a person what is wrong.
+
+     Gated at `server.TestNoDoorCreatesARelationWhoseNameIsNotStorable` (three
+     doors, refused and accepted names beside each other),
+     `server.TestNoDoorCreatesAColumnWhoseNameIsNotStorable`, and
+     `objstore.TestNoStoreAcceptsAKeyThatCanLeaveItsBucket` /
+     `TestATableNamedWithATraversalCannotWriteOutsideTheStore`.
    - **A SET OPERATION does not take PostgreSQL's output-column names.**
      (Added 2026-09-05, #732 round 2.) The naming rule is applied at the two
      places a query's values leave the engine — the collecting sink and the

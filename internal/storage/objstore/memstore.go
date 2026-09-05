@@ -69,6 +69,13 @@ func (m *MemStore) getBucket(bucket string) (map[string]*memObject, error) {
 }
 
 func (m *MemStore) Put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string) (string, error) {
+	// The same key rule FileStore applies. A MemStore cannot be escaped — its
+	// keys are map keys — but a key one store accepts and another refuses is a
+	// table that works in a test and fails in production, which is the shape
+	// this whole class of defect takes.
+	if err := ValidateObjectKey(key); err != nil {
+		return "", err
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return "", fmt.Errorf("reading data: %w", err)
@@ -93,6 +100,9 @@ func (m *MemStore) Put(_ context.Context, bucket, key string, r io.Reader, _ int
 }
 
 func (m *MemStore) PutIfMatch(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string, expectedETag string) (string, error) {
+	if err := ValidateObjectKey(key); err != nil {
+		return "", err
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return "", fmt.Errorf("reading data: %w", err)
