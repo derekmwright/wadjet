@@ -420,7 +420,11 @@ policy file that loads clean and enforces nothing.
   floor cannot reach (`HITS`, `hItS`, `Hitz`) refuse on all three doors, read
   and write, with a control that a bindable set still answers and masks. Its
   harness attaches through `SetAuthProvider` exactly as a door does, which is
-  what lets it see (2).
+  what lets it see (2). One provider reaches all three doors, so that matrix
+  cannot attribute a bind to a call site: `TestTheEmbeddedAttachBindsOnItsOwn`
+  builds only the embedded DB and `TestTheHTTPServerAttachBindsOnItsOwn` only
+  the HTTP server, so in each exactly one attach could have bound — and with
+  that attach's bind removed the door DISCLOSES while the matrix still passes.
 
 Every fixture in this arc registers its relation through the CATALOG, because
 the DDL door folds a name it MINTS: a CamelCase relation is one a dataset

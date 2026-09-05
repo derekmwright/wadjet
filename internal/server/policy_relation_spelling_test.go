@@ -590,3 +590,96 @@ func TestTheEmbeddedAttachBindsOnItsOwn(t *testing.T) {
 		t.Fatal("the embedded door PERMITTED a write under a policy set that could not be bound")
 	}
 }
+
+// TestTheHTTPServerAttachBindsOnItsOwn isolates the OTHER attach site.
+//
+// `prsUp` installs ONE provider through three entry points —
+// `wadjet.DB.SetAuthProvider`, `pgwire.NewServer` and `server.New` — so a bind
+// performed at any of them marks it bound for all three doors, and the matrix
+// above therefore cannot attribute its result to a call site.
+// `TestTheEmbeddedAttachBindsOnItsOwn` pins the embedded attach; this pins
+// `server.New`, which is what a caller standing the HTTP door up over a
+// catalog it already holds uses. The DB here NEVER sees the provider, so the
+// constructor is the only attach that could have bound: revert its bind and
+// the unbindable cells below disclose while the matrix above still passes.
+//
+// The READ half is the isolating one — `handleQuery` enforces with this
+// server's own provider. The write half is asserted because that is where the
+// disclosure was measured, but it does not attribute: the DML door attaches
+// its own `wadjet.Attach`ed DB to the same provider, so it binds by the same
+// rule at a different call site.
+func TestTheHTTPServerAttachBindsOnItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name, resource string
+		bindable       bool
+	}{
+		{"the catalog spelling binds", prsTable, true},
+		{"the folded spelling binds", "hits", true},
+		{"an upper-case spelling of the relation refuses at attach", "HITS", false},
+		{"a mixed-case spelling that is neither refuses at attach", "hItS", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"})
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			t.Cleanup(func() { db.Close() })
+			if err := db.Catalog().CreateTable(ctx, prsTable, prsSchema(), nil); err != nil {
+				t.Fatal(err)
+			}
+			ing := db.NewIngester(prsTable, prsSchema(), nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 3})
+			if err := ing.Ingest(ctx, prsRows()); err != nil {
+				t.Fatal(err)
+			}
+			if err := ing.FlushAll(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			provider := prsProvider(t, tc.resource)
+			// Deliberately NOT db.SetAuthProvider: this cell is about the
+			// constructor.
+			h := New(Config{Addr: ":0", Catalog: db.Catalog(), Provider: provider}, logger)
+			hs := httptest.NewServer(h.Mux())
+			t.Cleanup(hs.Close)
+
+			// Errorf, not Fatalf: when the constructor does not bind, the
+			// interesting failure is the one the doors report next.
+			if bound := provider.BindError() == nil; bound != tc.bindable {
+				t.Errorf("after server.New the set is bound=%v, want %v (bind error: %v)",
+					bound, tc.bindable, provider.BindError())
+			}
+			r := prsRig{httpBase: hs.URL}
+
+			got := prsHTTP(ctx, r, `SELECT * FROM Hits ORDER BY WatchID`)
+			if strings.Contains(got, prsSecret) {
+				t.Errorf("the HTTP door DISCLOSED the masked column in plaintext:\n  %s", got)
+			}
+			if strings.Contains(got, "700001") {
+				t.Errorf("the HTTP door returned the DENIED column:\n  %s", got)
+			}
+			if tc.bindable {
+				if !strings.Contains(got, "***") {
+					t.Errorf("a bindable set attached at server.New did not mask:\n  %s", got)
+				}
+			} else if !strings.Contains(got, "[4") {
+				t.Errorf("the HTTP door ANSWERED under a policy set that could not be bound:\n  %s", got)
+			}
+
+			for _, sql := range []string{
+				`UPDATE Hits SET Salary = 1 WHERE WatchID = 1`,
+				`DELETE FROM Hits WHERE Salary = 700001`,
+			} {
+				if w := prsHTTP(ctx, r, sql); strings.HasPrefix(w, "[200") {
+					t.Errorf("the HTTP door PERMITTED %s on a denied column:\n  %s", sql, w)
+				}
+			}
+			oracle := prsHTTP(ctx, r, `UPDATE Hits SET Region = 'zz' WHERE Secret = '`+prsSecret+`'`)
+			if strings.Contains(oracle, "UPDATE 1") {
+				t.Errorf("a masked column matched its STORED value through the HTTP door — "+
+					"the mask is a working oracle:\n  %s", oracle)
+			}
+		})
+	}
+}
