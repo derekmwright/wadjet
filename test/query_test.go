@@ -688,10 +688,12 @@ func TestABACRowFilterAtPlanLevel(t *testing.T) {
 	evaluator := auth.NewPolicyEvaluator(policies)
 	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
 
+	// The provider is attached AFTER the relation exists: attaching a policy
+	// set to a catalog binds its names, and a policy naming a relation the
+	// catalog does not hold yet is refused there (#882, docs/security.md).
 	db, err := wadjet.Open(ctx, wadjet.Config{
-		Store:        store,
-		Bucket:       "test",
-		AuthProvider: provider,
+		Store:  store,
+		Bucket: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -721,6 +723,9 @@ func TestABACRowFilterAtPlanLevel(t *testing.T) {
 	}
 	if err := ing.FlushAll(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if err := db.SetAuthProvider(provider); err != nil {
+		t.Fatalf("attaching the policy set: %v", err)
 	}
 
 	// Query WITHOUT identity — should see all rows
@@ -791,10 +796,12 @@ func TestABACColumnDenialAtPlanLevel(t *testing.T) {
 	evaluator := auth.NewPolicyEvaluator(policies)
 	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
 
+	// The provider is attached AFTER the relation exists: attaching a policy
+	// set to a catalog binds its names, and a policy naming a relation the
+	// catalog does not hold yet is refused there (#882, docs/security.md).
 	db, err := wadjet.Open(ctx, wadjet.Config{
-		Store:        store,
-		Bucket:       "test",
-		AuthProvider: provider,
+		Store:  store,
+		Bucket: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -821,6 +828,9 @@ func TestABACColumnDenialAtPlanLevel(t *testing.T) {
 	}
 	if err := ing.FlushAll(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if err := db.SetAuthProvider(provider); err != nil {
+		t.Fatalf("attaching the policy set: %v", err)
 	}
 
 	// Query as viewer — ssn should be absent, salary should be masked
@@ -878,10 +888,12 @@ func TestABACAccessDenied(t *testing.T) {
 	evaluator := auth.NewPolicyEvaluator(policies)
 	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
 
+	// The provider is attached AFTER the relation exists: attaching a policy
+	// set to a catalog binds its names, and a policy naming a relation the
+	// catalog does not hold yet is refused there (#882, docs/security.md).
 	db, err := wadjet.Open(ctx, wadjet.Config{
-		Store:        store,
-		Bucket:       "test",
-		AuthProvider: provider,
+		Store:  store,
+		Bucket: "test",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -893,6 +905,16 @@ func TestABACAccessDenied(t *testing.T) {
 		},
 	}
 	db.CreateTable(ctx, "classified", schema, nil)
+	// The relation the policy GRANTS has to exist too: a policy naming a
+	// relation the catalog does not hold is a configuration error and is
+	// refused at the attach (#882). The deployment this models has both
+	// tables — the intern may read one of them.
+	if err := db.CreateTable(ctx, "public_data", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetAuthProvider(provider); err != nil {
+		t.Fatalf("attaching the policy set: %v", err)
+	}
 
 	id, err := authn.AuthenticateToken("intern-key")
 	if err != nil {
