@@ -253,7 +253,7 @@ query:
 
 # The `parquet:` section is DEFERRED and REFUSED. It has no runtime
 # consumer: every ingest writer is built from ingest.DefaultConfig(), and
-# reaching the writer needs wadjet.Config -> ingest.Config ->
+# reaching the writer needs wadjet.Config -> wadjet.IngestConfig ->
 # parquet.WriterConfig plumbing at seven call sites. Setting any of these
 # keys stops the process naming the key, rather than accepting a value
 # nothing reads. They stay in the schema (and in GET /v1/admin/config, with

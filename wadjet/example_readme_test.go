@@ -3,7 +3,6 @@ package wadjet_test
 import (
 	"context"
 
-	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -13,10 +12,14 @@ import (
 // gate so the three lines a reader copies cannot drift from the API the way
 // the pre-2026-09-02 README example did (it named a Config field and a
 // constructor arity that no longer existed).
+//
+// It imports ONLY github.com/derekmwright/wadjet/wadjet, the way a reader's
+// program does; test/embed/ is the same claim from a module that is not this
+// one (#805).
 func ExampleOpen() {
 	ctx := context.Background()
 
-	store, _ := objstore.NewFileStore("/var/lib/wadjet") // or NewMinIOStore(...) for S3
+	store, _ := wadjet.NewFileStore("/var/lib/wadjet") // or NewS3Store(...) for S3
 	db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "analytics"})
 	res, _ := db.Query(ctx, "SELECT src_ip, SUM(bytes_in) FROM flow_logs GROUP BY 1")
 

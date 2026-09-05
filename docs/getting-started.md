@@ -43,10 +43,11 @@ go build -o wadjet-bin ./cmd/wadjet
 go get github.com/derekmwright/wadjet/wadjet
 ```
 
-`go get` succeeds, but calling `wadjet.Open` needs types (`objstore.Store`,
-`parquet.Schema`, `ingest.Config`) that today live under `internal/...` and
-so are only importable from code inside this repository — see
-[Embedding](embedding.md) before writing an out-of-tree program against it.
+Everything the program below needs is in that one package: `wadjet.Open`,
+`wadjet.NewFileStore` / `NewMemStore` / `NewS3Store`, `wadjet.Schema` and
+`wadjet.Column` with the `wadjet.Type*` constants, and `wadjet.IngestConfig`.
+See [Embedding](embedding.md) for what the package deliberately does not
+expose.
 
 ## Your First Query (No Setup)
 
@@ -73,14 +74,9 @@ Wadjet's `wadjet` package is also a Go library, used by `cmd/wadjet` itself
 — no server process required. Point it at local disk or an S3-compatible
 store; the rest of the API is identical either way.
 
-> **Not consumable from an out-of-tree Go module today.** `wadjet.Config.Store`
-> is `objstore.Store`, `CreateTable` takes `parquet.Schema` and `NewIngester`
-> takes `ingest.Config` — all three from
-> `github.com/derekmwright/wadjet/internal/...`, which Go forbids external
-> modules from importing (`use of internal package ... not allowed`). The
-> program below therefore lives inside this repository (`cmd/<yourtool>/`,
-> for example), not in a separate module you `go get` it into. See
-> [Embedding](embedding.md) for the full picture.
+This program is compiled and run on every test pass from a module that is
+*not* this repository — `test/embed/`, which has its own `go.mod` — so the
+promise that it works from your own module is a build, not a claim.
 
 ```go
 package main
@@ -91,19 +87,16 @@ import (
     "log"
     "time"
 
-    "github.com/derekmwright/wadjet/internal/storage/ingest"
-    "github.com/derekmwright/wadjet/internal/storage/objstore"
-    "github.com/derekmwright/wadjet/internal/storage/parquet"
     "github.com/derekmwright/wadjet/wadjet"
 )
 
 func main() {
     ctx := context.Background()
 
-    // Local disk needs no server. Swap in objstore.NewMinIOStore(...) to
-    // point at an S3-compatible store instead — the rest of this program
-    // is unchanged either way.
-    store, err := objstore.NewFileStore("./wadjet-data")
+    // Local disk needs no server. Swap in wadjet.NewS3Store(...) to point
+    // at an S3-compatible store instead — the rest of this program is
+    // unchanged either way.
+    store, err := wadjet.NewFileStore("./wadjet-data")
     if err != nil {
         log.Fatal(err)
     }
@@ -117,17 +110,17 @@ func main() {
     }
 
     // Define a schema for network flow logs
-    schema := parquet.Schema{
-        Columns: []parquet.Column{
-            {Name: "timestamp",  Type: parquet.TypeTimestamp},
-            {Name: "src_ip",    Type: parquet.TypeIPv4},
-            {Name: "dst_ip",    Type: parquet.TypeIPv4},
-            {Name: "src_port",  Type: parquet.TypeInt32},
-            {Name: "dst_port",  Type: parquet.TypeInt32},
-            {Name: "protocol",  Type: parquet.TypeString},
-            {Name: "bytes_in",  Type: parquet.TypeInt64},
-            {Name: "bytes_out", Type: parquet.TypeInt64},
-            {Name: "date",      Type: parquet.TypeDate},
+    schema := wadjet.Schema{
+        Columns: []wadjet.Column{
+            {Name: "timestamp", Type: wadjet.TypeTimestamp},
+            {Name: "src_ip",    Type: wadjet.TypeIPv4},
+            {Name: "dst_ip",    Type: wadjet.TypeIPv4},
+            {Name: "src_port",  Type: wadjet.TypeInt32},
+            {Name: "dst_port",  Type: wadjet.TypeInt32},
+            {Name: "protocol",  Type: wadjet.TypeString},
+            {Name: "bytes_in",  Type: wadjet.TypeInt64},
+            {Name: "bytes_out", Type: wadjet.TypeInt64},
+            {Name: "date",      Type: wadjet.TypeDate},
         },
     }
 
@@ -137,8 +130,8 @@ func main() {
         log.Fatal(err)
     }
 
-    // Set up an ingester — returns *ingest.Ingester (no error)
-    ingester := db.NewIngester("flow_logs", schema, []string{"date"}, ingest.Config{
+    // Set up an ingester (no error return)
+    ingester := db.NewIngester("flow_logs", schema, []string{"date"}, wadjet.IngestConfig{
         FlushInterval: 10 * time.Second,
         MaxBufferRows: 100000,
     })
@@ -186,7 +179,8 @@ This table's catalog registration lives only in this one process:
 that dies with the process — running the program a second time starts from
 an empty catalog again (the Parquet data itself does land under
 `./wadjet-data/wadjet/tables/flow_logs/...` and simply accumulates). A
-persistent catalog needs `Config.MetaKV` built from NATS JetStream; see
+persistent catalog needs `Config.MetaKV`, which is built from NATS JetStream
+and is one of the two settings with no out-of-tree constructor; see
 [Embedding](embedding.md).
 
 The rest of this guide covers the **server** deployment — the same engine

@@ -24,7 +24,7 @@ gates that assert the same answers on both.
 **Embedded — a Go library.** Open a store, open a database, query it:
 
 ```go
-store, _ := objstore.NewFileStore("/var/lib/wadjet")  // or NewMinIOStore(...) for S3
+store, _ := wadjet.NewFileStore("/var/lib/wadjet")  // or NewS3Store(...) for S3
 db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "analytics"})
 res, _ := db.Query(ctx, "SELECT src_ip, SUM(bytes_in) FROM flow_logs GROUP BY 1")
 ```
@@ -618,13 +618,14 @@ AI agents automatically understand network-typed columns (IPv4, CIDR, MAC, Port,
 
 Use Wadjet as a Go library:
 
-```go
-import (
-    "github.com/derekmwright/wadjet/internal/storage/objstore"
-    "github.com/derekmwright/wadjet/wadjet"
-)
+```bash
+go get github.com/derekmwright/wadjet/wadjet
+```
 
-store, _ := objstore.NewMinIOStore(objstore.MinIOConfig{
+```go
+import "github.com/derekmwright/wadjet/wadjet"
+
+store, _ := wadjet.NewS3Store(wadjet.S3Config{
     Endpoint:  "localhost:9000",
     AccessKey: "minioadmin",
     SecretKey: "minioadmin",
@@ -638,10 +639,11 @@ defer db.Close()
 result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_ip LIMIT 10")
 ```
 
-`wadjet.Config` is typed in terms of `internal/` packages (`objstore.Store`,
-`parquet.Schema`, `ingest.Config`), which Go forbids an out-of-tree module from
-importing. Embedding code therefore lives inside this repository today — see
-[Embedding](docs/embedding.md).
+That one import is the whole surface: the store constructors,
+`wadjet.Schema` / `wadjet.Column` / the `Type*` constants, and
+`wadjet.IngestConfig`. A catalog shared with a running server
+(`Config.MetaKV`) and in-process ABAC (`Config.AuthProvider`) are the two
+settings that stay in-repo — see [Embedding](docs/embedding.md).
 
 ## Documentation
 

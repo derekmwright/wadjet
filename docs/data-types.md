@@ -431,34 +431,34 @@ Null handling in expressions:
 ### In Go (Embedded API)
 
 ```go
-import "github.com/derekmwright/wadjet/internal/storage/parquet"
+import "github.com/derekmwright/wadjet/wadjet"
 
-schema := parquet.Schema{
-    Columns: []parquet.Column{
-        {Name: "timestamp",    Type: parquet.TypeTimestamp},
-        {Name: "src_ip",      Type: parquet.TypeIPv4},
-        {Name: "dst_ip",      Type: parquet.TypeIPv4},
-        {Name: "src_port",    Type: parquet.TypePort},
-        {Name: "dst_port",    Type: parquet.TypePort},
-        {Name: "protocol",    Type: parquet.TypeProtocol},
-        {Name: "bytes_in",    Type: parquet.TypeInt64},
-        {Name: "bytes_out",   Type: parquet.TypeInt64},
-        {Name: "src_mac",     Type: parquet.TypeMAC},
-        {Name: "vlan_id",     Type: parquet.TypeInt32},
-        {Name: "is_encrypted", Type: parquet.TypeBool},
-        {Name: "flow_id",     Type: parquet.TypeUUID},
-        {Name: "duration",    Type: parquet.TypeDuration},
+schema := wadjet.Schema{
+    Columns: []wadjet.Column{
+        {Name: "timestamp",    Type: wadjet.TypeTimestamp},
+        {Name: "src_ip",      Type: wadjet.TypeIPv4},
+        {Name: "dst_ip",      Type: wadjet.TypeIPv4},
+        {Name: "src_port",    Type: wadjet.TypePort},
+        {Name: "dst_port",    Type: wadjet.TypePort},
+        {Name: "protocol",    Type: wadjet.TypeProtocol},
+        {Name: "bytes_in",    Type: wadjet.TypeInt64},
+        {Name: "bytes_out",   Type: wadjet.TypeInt64},
+        {Name: "src_mac",     Type: wadjet.TypeMAC},
+        {Name: "vlan_id",     Type: wadjet.TypeInt32},
+        {Name: "is_encrypted", Type: wadjet.TypeBool},
+        {Name: "flow_id",     Type: wadjet.TypeUUID},
+        {Name: "duration",    Type: wadjet.TypeDuration},
     },
 }
 ```
 
-Column types are referenced as `parquet.TypeXxx` constants (e.g., `parquet.TypeIPv4`, `parquet.TypeTimestamp`). The `Nullable` field on `Column` defaults to `false`; set it to `true` to allow nulls.
+Column types are referenced as `wadjet.TypeXxx` constants (e.g., `wadjet.TypeIPv4`, `wadjet.TypeTimestamp`). The `Nullable` field on `Column` defaults to `false`; set it to `true` to allow nulls.
 
-`parquet.Schema` lives in an internal package, so this constructor form is
-available only to code inside the Wadjet module. Everything else creates tables
-with the `CREATE TABLE` DDL through `db.Query(...)`, which resolves the same
-declarations — including parameterized `DECIMAL(p,s)`, `ARRAY(T)`, `ROW(...)`,
-`MAP(K,V)` and `VECTOR(N)` — through the one checked converter.
+`wadjet.Schema` and `wadjet.Column` are usable from any module. The
+`CREATE TABLE` DDL through `db.Query(...)` resolves the same declarations —
+including parameterized `DECIMAL(p,s)`, `ARRAY(T)`, `ROW(...)`, `MAP(K,V)` and
+`VECTOR(N)` — through the one checked converter, and is the shorter route for
+anything a literal makes verbose.
 
 ### In Parquet (Automatic Mapping)
 

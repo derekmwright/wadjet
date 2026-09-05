@@ -325,19 +325,15 @@ output:
 
 After Bento starts writing data, register the tables so Wadjet can query them.
 
-> **Registration is not a supported out-of-tree workflow at this commit.**
-> Three constraints apply, and all three are load-bearing:
+> **Registration still needs code inside this repository**, for one reason
+> rather than the three that used to apply:
 >
-> 1. `wadjet.Config.Store` is `objstore.Store` and `CreateTable` takes
->    `parquet.Schema`, both from `internal/...` packages. Go forbids importing
->    those from outside `github.com/derekmwright/wadjet` — the program below
->    fails to build with `use of internal package ... not allowed`.
->    Registration code must live inside this repository (`cmd/`) today.
-> 2. `wadjet.Open` with no `MetaKV` gets an in-memory catalog. Anything it
+> 1. `wadjet.Open` with no `MetaKV` gets an in-memory catalog. Anything it
 >    registers dies with the process and is invisible to `wadjet serve`, whose
 >    catalog is NATS-backed. Pass `Config.MetaKV` built from the same NATS
->    JetStream the server uses.
-> 3. `CreateTable` writes an EMPTY manifest. Queries resolve data files from
+>    JetStream the server uses — and `MetaKV` has no out-of-tree constructor,
+>    which is what keeps this program in-repo.
+> 2. `CreateTable` writes an EMPTY manifest. Queries resolve data files from
 >    the manifest only — there is no prefix discovery — so Bento-written
 >    objects must additionally be registered with `catalog.AddFiles`.
 >    Registered paths must sit under `tables/<name>/`.
@@ -350,15 +346,13 @@ import (
     "context"
     "log"
 
-    "github.com/derekmwright/wadjet/internal/storage/objstore"
-    "github.com/derekmwright/wadjet/internal/storage/parquet"
     "github.com/derekmwright/wadjet/wadjet"
 )
 
 func main() {
     ctx := context.Background()
 
-    store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
+    store, err := wadjet.NewS3Store(wadjet.S3Config{
         Endpoint:  "localhost:9000",
         AccessKey: "minioadmin",
         SecretKey: "minioadmin",
@@ -376,57 +370,57 @@ func main() {
     }
 
     // Firewall logs
-    db.CreateTable(ctx, "firewall_logs", parquet.Schema{
-        Columns: []parquet.Column{
-            {Name: "timestamp", Type: parquet.TypeTimestamp},
-            {Name: "device", Type: parquet.TypeString},
-            {Name: "severity", Type: parquet.TypeString},
-            {Name: "src_ip", Type: parquet.TypeString},
-            {Name: "dst_ip", Type: parquet.TypeString},
-            {Name: "protocol", Type: parquet.TypeString},
-            {Name: "src_port", Type: parquet.TypeInt32},
-            {Name: "dst_port", Type: parquet.TypeInt32},
-            {Name: "action", Type: parquet.TypeString},
-            {Name: "traffic_class", Type: parquet.TypeString},
-            {Name: "raw_message", Type: parquet.TypeString},
+    db.CreateTable(ctx, "firewall_logs", wadjet.Schema{
+        Columns: []wadjet.Column{
+            {Name: "timestamp", Type: wadjet.TypeTimestamp},
+            {Name: "device", Type: wadjet.TypeString},
+            {Name: "severity", Type: wadjet.TypeString},
+            {Name: "src_ip", Type: wadjet.TypeString},
+            {Name: "dst_ip", Type: wadjet.TypeString},
+            {Name: "protocol", Type: wadjet.TypeString},
+            {Name: "src_port", Type: wadjet.TypeInt32},
+            {Name: "dst_port", Type: wadjet.TypeInt32},
+            {Name: "action", Type: wadjet.TypeString},
+            {Name: "traffic_class", Type: wadjet.TypeString},
+            {Name: "raw_message", Type: wadjet.TypeString},
         },
     }, []string{"day", "device"})
 
     // NetFlow
-    db.CreateTable(ctx, "netflow", parquet.Schema{
-        Columns: []parquet.Column{
-            {Name: "timestamp", Type: parquet.TypeTimestamp},
-            {Name: "src_ip", Type: parquet.TypeString},
-            {Name: "dst_ip", Type: parquet.TypeString},
-            {Name: "src_port", Type: parquet.TypeInt32},
-            {Name: "dst_port", Type: parquet.TypeInt32},
-            {Name: "protocol", Type: parquet.TypeString},
-            {Name: "bytes", Type: parquet.TypeInt64},
-            {Name: "packets", Type: parquet.TypeInt64},
-            {Name: "tcp_flags", Type: parquet.TypeInt32},
-            {Name: "tos", Type: parquet.TypeInt32},
-            {Name: "input_snmp", Type: parquet.TypeInt32},
-            {Name: "output_snmp", Type: parquet.TypeInt32},
-            {Name: "exporter", Type: parquet.TypeString},
-            {Name: "next_hop", Type: parquet.TypeString},
-            {Name: "src_as", Type: parquet.TypeInt64},
-            {Name: "dst_as", Type: parquet.TypeInt64},
+    db.CreateTable(ctx, "netflow", wadjet.Schema{
+        Columns: []wadjet.Column{
+            {Name: "timestamp", Type: wadjet.TypeTimestamp},
+            {Name: "src_ip", Type: wadjet.TypeString},
+            {Name: "dst_ip", Type: wadjet.TypeString},
+            {Name: "src_port", Type: wadjet.TypeInt32},
+            {Name: "dst_port", Type: wadjet.TypeInt32},
+            {Name: "protocol", Type: wadjet.TypeString},
+            {Name: "bytes", Type: wadjet.TypeInt64},
+            {Name: "packets", Type: wadjet.TypeInt64},
+            {Name: "tcp_flags", Type: wadjet.TypeInt32},
+            {Name: "tos", Type: wadjet.TypeInt32},
+            {Name: "input_snmp", Type: wadjet.TypeInt32},
+            {Name: "output_snmp", Type: wadjet.TypeInt32},
+            {Name: "exporter", Type: wadjet.TypeString},
+            {Name: "next_hop", Type: wadjet.TypeString},
+            {Name: "src_as", Type: wadjet.TypeInt64},
+            {Name: "dst_as", Type: wadjet.TypeInt64},
         },
     }, []string{"day", "exporter"})
 
     // Device inventory
-    db.CreateTable(ctx, "device_inventory", parquet.Schema{
-        Columns: []parquet.Column{
-            {Name: "ip_address", Type: parquet.TypeString},
-            {Name: "hostname", Type: parquet.TypeString},
-            {Name: "vendor", Type: parquet.TypeString},
-            {Name: "model", Type: parquet.TypeString},
-            {Name: "os_version", Type: parquet.TypeString},
-            {Name: "location", Type: parquet.TypeString},
-            {Name: "role", Type: parquet.TypeString},
-            {Name: "region", Type: parquet.TypeString},
-            {Name: "environment", Type: parquet.TypeString},
-            {Name: "last_seen", Type: parquet.TypeTimestamp},
+    db.CreateTable(ctx, "device_inventory", wadjet.Schema{
+        Columns: []wadjet.Column{
+            {Name: "ip_address", Type: wadjet.TypeString},
+            {Name: "hostname", Type: wadjet.TypeString},
+            {Name: "vendor", Type: wadjet.TypeString},
+            {Name: "model", Type: wadjet.TypeString},
+            {Name: "os_version", Type: wadjet.TypeString},
+            {Name: "location", Type: wadjet.TypeString},
+            {Name: "role", Type: wadjet.TypeString},
+            {Name: "region", Type: wadjet.TypeString},
+            {Name: "environment", Type: wadjet.TypeString},
+            {Name: "last_seen", Type: wadjet.TypeTimestamp},
         },
     }, nil)
 
@@ -570,7 +564,6 @@ import (
     "log"
     "time"
 
-    "github.com/derekmwright/wadjet/internal/storage/objstore"
     "github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -583,7 +576,7 @@ type Alert struct {
 
 func main() {
     ctx := context.Background()
-    store, _ := objstore.NewMinIOStore(objstore.MinIOConfig{
+    store, _ := wadjet.NewS3Store(wadjet.S3Config{
         Endpoint:  "localhost:9000",
         AccessKey: "minioadmin",
         SecretKey: "minioadmin",

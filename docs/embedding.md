@@ -4,14 +4,30 @@ Wadjet's `wadjet` package is the in-process query engine used by `cmd/wadjet`
 and by the test suites in this repository, giving a programmatic analytical
 query engine without running a separate server.
 
-> **Not consumable from an out-of-tree Go module today.** `wadjet.Config.Store`
-> is `objstore.Store`, `CreateTable` takes `parquet.Schema` and `NewIngester`
-> takes `ingest.Config` — all three from
-> `github.com/derekmwright/wadjet/internal/...`, which Go forbids external
-> modules from importing (`use of internal package ... not allowed`). The
-> examples below therefore describe code that lives INSIDE this repository
-> (`cmd/<yourtool>/`, for example). Embedding from your own module needs those
-> three types re-exported from the `wadjet` package first.
+## What the `wadjet` package exposes
+
+One import — `github.com/derekmwright/wadjet/wadjet` — is everything an
+out-of-tree program needs to open a database, declare a table, ingest rows and
+query them:
+
+| Name | What it is |
+|---|---|
+| `Open`, `Config`, `DB` | the database |
+| `NewMemStore()`, `NewFileStore(dir)`, `NewS3Store(S3Config)` | the object store `Config.Store` takes |
+| `Schema`, `Column`, `ColumnType`, the 22 `Type*` constants | a table's columns |
+| `IngestConfig`, `DefaultIngestConfig()` | the ingester's flush policy |
+| `QueryResult`, `ColumnMeta`, `ExecResult` | what a query and a DML statement return |
+
+`test/embed/` in this repository is a separate Go module that imports only
+that package and runs the guide's program; the test suite builds and runs it,
+so this table is checked rather than asserted.
+
+**Deliberately not exposed.** `Config.MetaKV` (a catalog shared with a
+`wadjet serve` process, built from NATS JetStream) and `Config.AuthProvider`
+(in-process ABAC) name types under `internal/` and have no public
+constructor. A program needing either has to live inside this repository, or
+reach the engine through a server door — the PostgreSQL wire protocol, HTTP or
+gRPC — instead of embedding it.
 
 ## Installation
 
@@ -24,13 +40,10 @@ go get github.com/derekmwright/wadjet/wadjet
 ### Opening a Database
 
 ```go
-import (
-    "github.com/derekmwright/wadjet/internal/storage/objstore"
-    "github.com/derekmwright/wadjet/wadjet"
-)
+import "github.com/derekmwright/wadjet/wadjet"
 
 // First create an object store client
-store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
+store, err := wadjet.NewS3Store(wadjet.S3Config{
     Endpoint:  "localhost:9000",
     AccessKey: "minioadmin",
     SecretKey: "minioadmin",
@@ -47,7 +60,7 @@ db, err := wadjet.Open(ctx, wadjet.Config{
 ```
 
 The `Config` struct accepts:
-- `Store` — An `objstore.Store` implementation (MinIOStore for production, FileStore for local dev, MemStore for testing)
+- `Store` — the object store, from `wadjet.NewS3Store` (production), `wadjet.NewFileStore` (local dev) or `wadjet.NewMemStore` (testing)
 - `Bucket` — S3 bucket name
 - `MetaKV` — catalog KV. **nil means an in-memory catalog**: every table you create is process-local and gone at exit, and a `wadjet serve` process cannot see it. Pass `catalog.NewNATSKV(js)` to share the catalog with a server.
 - `Logger` — Optional `*slog.Logger` (defaults to slog.Default)
@@ -60,7 +73,7 @@ The `Config` struct accepts:
 ### Table Management
 
 ```go
-// Create a table (schema uses parquet.Schema from internal/storage/parquet)
+// Create a table (schema is wadjet.Schema)
 // A partition key must ALSO appear in schema.Columns to be referenceable in
 // SQL, and only the names year/month/day/hour are pruned by the planner.
 err := db.CreateTable(ctx, "flow_logs", schema, []string{"day"})
@@ -80,10 +93,8 @@ store := db.Store()
 ### Ingestion
 
 ```go
-import "github.com/derekmwright/wadjet/internal/storage/ingest"
-
-// NewIngester returns *ingest.Ingester (no error return)
-ingester := db.NewIngester("flow_logs", schema, []string{"day"}, ingest.Config{
+// NewIngester returns an ingester (no error return)
+ingester := db.NewIngester("flow_logs", schema, []string{"day"}, wadjet.IngestConfig{
     FlushInterval: 30 * time.Second,
     MaxBufferRows: 500000,
 })
@@ -160,8 +171,6 @@ import (
     "net/http"
     "time"
 
-    "github.com/derekmwright/wadjet/internal/storage/objstore"
-    "github.com/derekmwright/wadjet/internal/storage/parquet"
     "github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -170,7 +179,7 @@ var db *wadjet.DB
 func main() {
     ctx := context.Background()
 
-    store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
+    store, err := wadjet.NewS3Store(wadjet.S3Config{
         Endpoint:  "minio.internal:9000",
         AccessKey: "prod-access-key",
         SecretKey: "prod-secret-key",
@@ -211,17 +220,17 @@ func ensureTables(ctx context.Context) {
     }
 
     if !tableSet["flow_logs"] {
-        db.CreateTable(ctx, "flow_logs", parquet.Schema{
-            Columns: []parquet.Column{
-                {Name: "timestamp", Type: parquet.TypeTimestamp},
-                {Name: "src_ip", Type: parquet.TypeIPv4},
-                {Name: "dst_ip", Type: parquet.TypeIPv4},
-                {Name: "src_port", Type: parquet.TypeInt32},
-                {Name: "dst_port", Type: parquet.TypeInt32},
-                {Name: "protocol", Type: parquet.TypeString},
-                {Name: "bytes_in", Type: parquet.TypeInt64},
-                {Name: "bytes_out", Type: parquet.TypeInt64},
-                {Name: "day", Type: parquet.TypeString},
+        db.CreateTable(ctx, "flow_logs", wadjet.Schema{
+            Columns: []wadjet.Column{
+                {Name: "timestamp", Type: wadjet.TypeTimestamp},
+                {Name: "src_ip", Type: wadjet.TypeIPv4},
+                {Name: "dst_ip", Type: wadjet.TypeIPv4},
+                {Name: "src_port", Type: wadjet.TypeInt32},
+                {Name: "dst_port", Type: wadjet.TypeInt32},
+                {Name: "protocol", Type: wadjet.TypeString},
+                {Name: "bytes_in", Type: wadjet.TypeInt64},
+                {Name: "bytes_out", Type: wadjet.TypeInt64},
+                {Name: "day", Type: wadjet.TypeString},
             },
         }, []string{"day"})
     }

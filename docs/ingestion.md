@@ -34,7 +34,7 @@ the table:
 | Row count | 1,000,000 | One partition's buffered row count (`MaxBufferRows`) |
 | Time | 60 seconds | Background ticker (`FlushInterval`). It flushes only partitions holding at least `MinFlushRows` rows — default 100 — so a trickling partition is not flushed into tiny files. |
 
-Two further `ingest.Config` fields carry defaults: `RowGroupSize` (128 K rows
+Two further `wadjet.IngestConfig` fields carry defaults: `RowGroupSize` (128 K rows
 per Parquet row group) and `MinFlushRows` (100). `FlushAll` ignores the
 size/row thresholds and `MinFlushRows` and writes everything buffered.
 
@@ -42,22 +42,20 @@ size/row thresholds and `MinFlushRows` and writes everything buffered.
 
 ```go
 import (
-    "github.com/derekmwright/wadjet/internal/storage/ingest"
-    "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-schema := parquet.Schema{
-    Columns: []parquet.Column{
-        {Name: "timestamp", Type: parquet.TypeTimestamp},
-        {Name: "device",    Type: parquet.TypeString},
-        {Name: "severity",  Type: parquet.TypeString},
-        {Name: "message",   Type: parquet.TypeString},
-        {Name: "src_ip",    Type: parquet.TypeIPv4},
+schema := wadjet.Schema{
+    Columns: []wadjet.Column{
+        {Name: "timestamp", Type: wadjet.TypeTimestamp},
+        {Name: "device",    Type: wadjet.TypeString},
+        {Name: "severity",  Type: wadjet.TypeString},
+        {Name: "message",   Type: wadjet.TypeString},
+        {Name: "src_ip",    Type: wadjet.TypeIPv4},
     },
 }
 
 // NewIngester returns *ingest.Ingester (no error)
-ingester := db.NewIngester("syslog", schema, []string{"day", "device"}, ingest.Config{
+ingester := db.NewIngester("syslog", schema, []string{"day", "device"}, wadjet.IngestConfig{
     FlushInterval: 30 * time.Second,
     MaxBufferRows: 500000,
 })
@@ -347,42 +345,40 @@ After Bento starts writing Parquet files to S3, register the table schema in Wad
 
 ```go
 import (
-    "github.com/derekmwright/wadjet/internal/storage/objstore"
-    "github.com/derekmwright/wadjet/internal/storage/parquet"
     "github.com/derekmwright/wadjet/wadjet"
 )
 
-store, _ := objstore.NewMinIOStore(objstore.MinIOConfig{
+store, _ := wadjet.NewS3Store(wadjet.S3Config{
     Endpoint: "localhost:9000", AccessKey: "minioadmin", SecretKey: "minioadmin",
 })
 db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "wadjet"})
 
 // Register the syslog table
-db.CreateTable(ctx, "syslog", parquet.Schema{
-    Columns: []parquet.Column{
-        {Name: "timestamp", Type: parquet.TypeTimestamp},
-        {Name: "hostname",  Type: parquet.TypeString},
-        {Name: "app_name",  Type: parquet.TypeString},
-        {Name: "severity",  Type: parquet.TypeString},
-        {Name: "facility",  Type: parquet.TypeString},
-        {Name: "message",   Type: parquet.TypeString},
-        {Name: "src_ip",    Type: parquet.TypeString},  // String since Bento writes UTF8
+db.CreateTable(ctx, "syslog", wadjet.Schema{
+    Columns: []wadjet.Column{
+        {Name: "timestamp", Type: wadjet.TypeTimestamp},
+        {Name: "hostname",  Type: wadjet.TypeString},
+        {Name: "app_name",  Type: wadjet.TypeString},
+        {Name: "severity",  Type: wadjet.TypeString},
+        {Name: "facility",  Type: wadjet.TypeString},
+        {Name: "message",   Type: wadjet.TypeString},
+        {Name: "src_ip",    Type: wadjet.TypeString},  // String since Bento writes UTF8
     },
 }, []string{"day"})
 
 // Register the netflow table
-db.CreateTable(ctx, "netflow", parquet.Schema{
-    Columns: []parquet.Column{
-        {Name: "timestamp", Type: parquet.TypeTimestamp},
-        {Name: "src_ip",    Type: parquet.TypeString},
-        {Name: "dst_ip",    Type: parquet.TypeString},
-        {Name: "src_port",  Type: parquet.TypeInt32},
-        {Name: "dst_port",  Type: parquet.TypeInt32},
-        {Name: "protocol",  Type: parquet.TypeString},
-        {Name: "bytes",     Type: parquet.TypeInt64},
-        {Name: "packets",   Type: parquet.TypeInt64},
-        {Name: "tcp_flags", Type: parquet.TypeInt32},
-        {Name: "exporter",  Type: parquet.TypeString},
+db.CreateTable(ctx, "netflow", wadjet.Schema{
+    Columns: []wadjet.Column{
+        {Name: "timestamp", Type: wadjet.TypeTimestamp},
+        {Name: "src_ip",    Type: wadjet.TypeString},
+        {Name: "dst_ip",    Type: wadjet.TypeString},
+        {Name: "src_port",  Type: wadjet.TypeInt32},
+        {Name: "dst_port",  Type: wadjet.TypeInt32},
+        {Name: "protocol",  Type: wadjet.TypeString},
+        {Name: "bytes",     Type: wadjet.TypeInt64},
+        {Name: "packets",   Type: wadjet.TypeInt64},
+        {Name: "tcp_flags", Type: wadjet.TypeInt32},
+        {Name: "exporter",  Type: wadjet.TypeString},
     },
 }, []string{"day"})
 ```
