@@ -65,6 +65,15 @@ func dmlProvider(t *testing.T) *auth.Provider {
 			rule("reader", "reader", []auth.Action{auth.ActionRead}),
 			rule("writer", "writer", []auth.Action{auth.ActionRead, auth.ActionWrite}),
 			{
+				// e7other carries NO obligation, and the writer may write it.
+				// It is the UNPOLICED target a MERGE can aim at while reading
+				// a policed SOURCE — the topology round-1 P5 found missing.
+				ID: "writer-other", EffectStr: "allow", Priority: 10,
+				Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "writer"}},
+				Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: pmOther}},
+				Actions:   []auth.Action{auth.ActionRead, auth.ActionWrite},
+			},
+			{
 				ID: "admin", EffectStr: "allow", Priority: 10,
 				Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "admin"}},
 				Actions: []auth.Action{auth.ActionRead, auth.ActionWrite, auth.ActionAdmin,
