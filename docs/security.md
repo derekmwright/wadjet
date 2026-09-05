@@ -455,10 +455,23 @@ claims the column is policed on both, so its obligation target must resolve in
 each of them; a rule scoped to no relation at all — the broad `allow` — has no
 schema to resolve against and its targets are not checked here.
 
+**Every entry that hands a policy set to a catalog does this**, not only
+`wadjet serve`. `wadjet mcp` refuses to start the same way, and the embedded
+API refuses at the call that attaches: `wadjet.Open` returns the error when the
+policy set arrives in `Config.AuthProvider`, and `DB.SetAuthProvider` returns
+it when the set is attached later. A caller that discards that error does not
+get the unbound set enforced quietly — the refusal is remembered, and every
+query and every write is refused (SQLSTATE `42501`) until a policy set that
+binds is installed. Installing a set through the provider's own setters is an
+attach too, and binds or refuses identically.
+
 For an operator this means **a policy cannot be pre-provisioned for a table
 that does not exist yet**. A config carrying a policy for a relation an ingest
 creates later does not start: create the relation first, then add the policy,
-which a hot reload installs without downtime.
+which a hot reload installs without downtime. In an embedded program the same
+rule decides an ORDER: create the tables a policy names, then attach the
+provider (`DB.SetAuthProvider`) — or open with `Config.AuthProvider` against a
+catalog that already holds them.
 
 The refusal is fail-closed and that is the point. Before it, such a policy
 loaded quietly and its scoped rule simply never matched — and a rule that never

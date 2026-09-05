@@ -62,6 +62,12 @@ func NewGRPCServer(cfg GRPCConfig, logger *slog.Logger) *GRPCServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Same attach rule as every other door: a policy set installed against a
+	// catalog is BOUND to it here (ADR-0033 rule 2). This door executes
+	// through the coordinator or the DB, so it would inherit a set they
+	// bound — but "somebody else attached first" is caller discipline, not a
+	// property, and #882 is what that costs.
+	auth.AttachProvider(context.Background(), cfg.AuthProvider, cfg.Catalog, logger)
 	return &GRPCServer{
 		catalog:      cfg.Catalog,
 		coord:        cfg.Coord,

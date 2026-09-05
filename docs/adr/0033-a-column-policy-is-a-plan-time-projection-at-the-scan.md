@@ -355,11 +355,22 @@ model rather than a configuration error.
    spelling, so evaluation compares two names that came from the same place
    rather than two spellings of an idea. Binding is a property of the ATTACH,
    not of any particular caller: every entry that installs a provider against
-   a catalog binds — `wadjet.DB.SetAuthProvider`, `Coordinator.SetAuthProvider`,
-   `server.New`, `pgwire.NewServer`, and the hot-reload path. Wiring it into
-   two `serve` functions instead left the embedded API and any caller standing
-   up its own doors on the floor alone, which is how #882 survived its first
-   fix.
+   a catalog binds — `wadjet.Open(Config{AuthProvider})`,
+   `wadjet.DB.SetAuthProvider`, `Coordinator.SetAuthProvider`, `server.New`,
+   `pgwire.NewServer`, `NewGRPCServer`, the provider's own `Update` /
+   `UpdateWithEvaluator` setters, and the hot-reload path. Wiring it into two
+   `serve` functions instead left the embedded API and any caller standing up
+   its own doors on the floor alone, which is how #882 survived its first fix;
+   wiring it into five left `wadjet.Open` — the entry `wadjet mcp` uses — which
+   is how it survived its second.
+
+   The list is not the mechanism, because a list is what was wrong twice.
+   Installing a set goes through ONE function (`Provider.installState`, or
+   `BindToCatalog` / `AttachProvider` for an attach), and
+   `TestEveryProviderFieldIsAttachedThroughTheBindingFunction` reads the source:
+   it enumerates every field that holds an `*auth.Provider` and fails when a
+   function assigns one without binding in that same function. A new door
+   cannot be added and forget.
 3. **A policy that names a relation or a column that does not resolve is
    REFUSED AT ATTACH.** This is ADR-0033's existing rule — a policy that cannot
    be enforced does not load (#802) — applied to names. Without it a typo is
@@ -382,11 +393,17 @@ model rather than a configuration error.
    first written claimed more than `relationEq` can give, and the arc's own
    gate could not see the gap because its harness did not attach the way
    production attaches.
-5. **The bind rewrites a COPY and swaps it in.** The evaluator it would
-   otherwise rewrite is being read by every decision in flight, so an in-place
-   rewrite is a data race on a live security decision; and a bind that fails
-   partway would leave the RUNNING set half-rewritten, which is the opposite of
-   what (3) promises.
+5. **The bind rewrites a COPY and swaps it in with a CAS, and is idempotent.**
+   The evaluator it would otherwise rewrite is being read by every decision in
+   flight, so an in-place rewrite is a data race on a live security decision;
+   and a bind that fails partway would leave the RUNNING set half-rewritten,
+   which is the opposite of what (3) promises. The swap is a compare-and-swap
+   because a bind reads the running set and installs a bound copy of it: a
+   store would overwrite a set installed inside that window, so a policy set
+   the operator RETIRED would come back. A lost CAS re-binds the set that won.
+   And a set already bound to the same catalog re-attaches for free — the HTTP
+   DML door re-attaches on every statement, which is what made a microsecond
+   window a live one.
 6. **Only the attributes that carry an IDENTIFIER get the identifier rule.**
    `eq` stays byte-exact for every other attribute: folding it generally would
    make `classification eq "SECRET"` match `"secret"` and quietly widen every
@@ -397,7 +414,11 @@ model rather than a configuration error.
 A policy may not name a relation the catalog does not hold. Startup refuses
 with the policy, rule and name; a hot reload refuses and keeps the running set.
 This is deliberate and it is the fail-closed direction: the alternative is a
-policy file that loads clean and enforces nothing.
+policy file that loads clean and enforces nothing. It reaches every door, not
+only `wadjet serve`: `wadjet mcp` refuses to start, `wadjet.Open` returns the
+error, and a caller that discards it still gets every statement refused
+(42501). In an embedded program this decides an ORDER — create the tables a
+policy names, then attach the provider.
 
 ### Gates
 
@@ -413,8 +434,19 @@ policy file that loads clean and enforces nothing.
   `TestPolicyNamesBindToTheCatalogAtLoad` (binding, refusal, the delimited
   wrong-case column, the `tables: ["*"]` wildcard, the legacy set),
   `TestPolicyBindFailureKeepsThePreviousSet` (the hot-reload contract),
-  `TestBindToCatalogDoesNotMutateTheRunningSet` (run under `-race`) and
-  `TestAFailedBindLeavesTheRunningSetIntact` for (5).
+  `TestBindToCatalogDoesNotMutateTheRunningSet` (run under `-race`),
+  `TestAFailedBindLeavesTheRunningSetIntact`,
+  `TestAReattachOfABoundSetWritesNothing` and
+  `TestARebindNeverResurrectsARetiredPolicySet` (the CAS, measured on a
+  deliberately widened window) for (5), and
+  `TestASetInstalledOnABoundProviderIsBoundToo` for the setters — including
+  the case that must NOT refuse: with no catalog attached the set installs and
+  the floor of (4) applies.
+- `internal/auth/attach_sites_test.go` —
+  `TestEveryProviderFieldIsAttachedThroughTheBindingFunction`, the source
+  census behind (2): every `*auth.Provider` field is enumerated and every
+  function that assigns one must bind. Its exception list carries a reason per
+  entry and is asserted in both directions.
 - `internal/server/policy_relation_spelling_test.go` —
   `TestAnAttachedPolicySetThatCannotBindRefusesEveryQuery`: the spellings the
   floor cannot reach (`HITS`, `hItS`, `Hitz`) refuse on all three doors, read
@@ -422,9 +454,14 @@ policy file that loads clean and enforces nothing.
   harness attaches through `SetAuthProvider` exactly as a door does, which is
   what lets it see (2). One provider reaches all three doors, so that matrix
   cannot attribute a bind to a call site: `TestTheEmbeddedAttachBindsOnItsOwn`
-  builds only the embedded DB and `TestTheHTTPServerAttachBindsOnItsOwn` only
-  the HTTP server, so in each exactly one attach could have bound — and with
-  that attach's bind removed the door DISCLOSES while the matrix still passes.
+  builds only the embedded DB, `TestTheHTTPServerAttachBindsOnItsOwn` only the
+  HTTP server, and `TestTheOpenAttachBindsOnItsOwn` passes the provider in
+  `wadjet.Config` and builds nothing else, so in each exactly one attach could
+  have bound — and with that attach's bind removed the door DISCLOSES while
+  the matrix still passes.
+- `internal/server/mcp/policy_attach_test.go` —
+  `TestTheMCPDoorEnforcesThePolicyItsOpenAttached`: the `wadjet mcp` shape,
+  built the way `runMCP` builds it, driving the query tool an agent calls.
 
 Every fixture in this arc registers its relation through the CATALOG, because
 the DDL door folds a name it MINTS: a CamelCase relation is one a dataset

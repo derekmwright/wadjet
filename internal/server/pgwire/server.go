@@ -100,11 +100,8 @@ func NewServer(db *wadjet.DB, cfg Config, logger *slog.Logger) *Server {
 	// installed against a DB that has a catalog is BOUND to it here, and an
 	// unbindable one is remembered so enforcement refuses rather than running
 	// on the fold-aware floor alone (ADR-0033 rule 3, #882).
-	if s.authProvider != nil && db != nil && db.Catalog() != nil {
-		if err := s.authProvider.BindToCatalog(context.Background(), db.Catalog()); err != nil {
-			logger.Error("auth policy set REFUSED: it names a relation or column the catalog "+
-				"does not hold; every query will be refused until it is corrected", "error", err)
-		}
+	if db != nil {
+		auth.AttachProvider(context.Background(), s.authProvider, db.Catalog(), logger)
 	}
 	return s
 }

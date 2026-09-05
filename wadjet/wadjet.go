@@ -121,6 +121,18 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		lateMaterialization: cfg.LateMaterialization,
 	}
 
+	// Attaching a policy set to a catalog is what BINDS its names to that
+	// catalog, and Config.AuthProvider is an attach: this constructor holds
+	// both halves the moment cat.Init returns. It was the sixth attach point
+	// and the only one left unbound — the entry `wadjet mcp` uses — so a
+	// policy spelled `HITS` against a catalog `Hits` matched nothing and
+	// returned the masked column in plaintext, with BindError() nil (#882).
+	// A policy that names a relation the catalog does not hold refuses to
+	// open, exactly as it refuses to start under `wadjet serve`.
+	if err := db.authProvider.BindToCatalog(ctx, cat); err != nil {
+		return nil, fmt.Errorf("attaching the auth policy set: %w", err)
+	}
+
 	if cfg.BushyJoinReorder {
 		// Process-wide planner knob — see the Config field doc.
 		logical.BushyJoinReorder.Store(true)
