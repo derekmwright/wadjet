@@ -15167,7 +15167,18 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	// (`MIN(rw.f_i64) OVER ()`) resolves the field's type here instead of
 	// defaulting to float64 (#568). A field path of a parameterized type
 	// still declines and rides the same runtime correction as a column.
-	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColDecls(node.Children[0]))
+	// emittedColDecls, not inputColDecls: the walk that CROSSES a derived
+	// table's Project instead of stopping at it (#529's walk, ADR-0026 §5).
+	// A window one nesting level above its scan —
+	// `SUM(a) OVER () FROM (SELECT id, a FROM t) u` — resolved NOTHING here
+	// and fell to the float64 fallback, so the same window that declares
+	// numeric directly over the table declared float8 through a derived
+	// table, and an aggregate reading it inherited the float box on every
+	// arm where PostgreSQL answers numeric (#796). It is the same walk the
+	// aggregate's own argument (aggInputDecls) and declaredOutputSchema
+	// already use, which is what makes the window's declaration, the
+	// aggregate's above it and the wire's agree through a nesting level.
+	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, emittedColDecls(node.Children[0]))
 	if conf != expr.Decided {
 		return expr.Decl(windowOutputType(fn))
 	}

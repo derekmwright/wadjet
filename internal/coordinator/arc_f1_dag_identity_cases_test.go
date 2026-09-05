@@ -343,6 +343,67 @@ func TestF1AKeylessJoinAsksForWhatItNeeds(t *testing.T) {
 	})
 }
 
+// TestF1AWindowDeclaresTheSameTypeThroughADerivedTable is #796: the typing
+// walk that resolves a window's input column stopped at a derived table's
+// Project, so a window ONE nesting level above its scan declared float8 where
+// the same window directly over the table declares numeric — and the aggregate
+// reading it inherited the float box, on every arm, where PostgreSQL answers
+// numeric.
+//
+// The last cell is #813's surviving half, PINNED rather than fixed: PostgreSQL
+// declares `sum(int8) over ()` numeric and `sum(int4) over ()` bigint, and
+// every arm here declares float8. It is a DECLARATION divergence with the
+// right digits, it is uniform across the four arms, and closing it is an exact
+// integer accumulator in the window operator (exec.windowAccOutputType) —
+// recorded in this arc's report and in ADR-0012's divergence list. The pin
+// fails the day the declaration moves, which is what makes it a proof.
+func TestF1AWindowDeclaresTheSameTypeThroughADerivedTable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := f1Arms(t, ctx)
+
+	f1Run(t, arms, []f1Case{
+		{
+			name: "796 a computed aggregate argument over a window whose INPUT is a derived table",
+			sql: "SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w " +
+				"FROM (SELECT id, a FROM decpair) t) x",
+			want: "cols=[s:DECIMAL(38,2)] rows=1 | 953.82",
+			routed: map[string]string{
+				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
+		},
+		{
+			name: "796 control: the same window DIRECTLY over the scan",
+			sql:  "SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w FROM decpair) x",
+			want: "cols=[s:DECIMAL(38,2)] rows=1 | 953.82",
+			routed: map[string]string{
+				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
+		},
+		{
+			name: "796 the derived table RENAMES the window's input column",
+			sql: "SELECT SUM(w*2) AS s FROM (SELECT id, SUM(v) OVER () AS w " +
+				"FROM (SELECT id, a AS v FROM decpair) t) x",
+			want: "cols=[s:DECIMAL(38,2)] rows=1 | 953.82",
+			routed: map[string]string{
+				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
+		},
+		{
+			name: "796 MIN over a derived table keeps the input's own declaration",
+			sql:  "SELECT MIN(a) OVER () AS m FROM (SELECT id, a FROM decpair) t ORDER BY 1 LIMIT 1",
+			want: "cols=[m:DECIMAL(9,2)] rows=1 | -0.01",
+		},
+		{
+			name: "813 a CAST declares its target on every path",
+			sql:  "SELECT CAST(SUM(id) OVER () AS BIGINT) AS c FROM decpair ORDER BY 1 LIMIT 1",
+			want: "cols=[c:INT64] rows=1 | 45",
+			routed: map[string]string{
+				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
+		},
+	})
+}
+
 // TestF1JoinKeysThroughDerivedRenamesAndAggregates is the RATCHET for #681 and
 // #730: a join key that is a computed aggregate alias, and a join key naming a
 // derived table's rename reaching that arm's scan fragment. Both were loud

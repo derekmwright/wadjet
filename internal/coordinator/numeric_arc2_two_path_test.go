@@ -643,56 +643,35 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 			}
 		})
 	}
-	// #796 — the boundary of the walk that closes #775, pinned rather than
-	// described. §5's rule types a name where it was RE-SPELLED TO, and the six
-	// #775 entries above are a window over a SCAN. Put ONE derived table between
-	// the window and the scan and the same shape is LOUD on both DAG arms, at
-	// the same site and with the same error text:
+	// #796 — CLOSED (2026-09-04, arc F1), and kept as an ENTRY rather than
+	// deleted: it is the shape one derived-table level outside §5's six #775
+	// entries, and the day it drifts back this is what notices.
 	//
 	//	SELECT SUM(w*2) FROM (SELECT id, SUM(a) OVER () AS w
 	//	                      FROM (SELECT id, a FROM decpair) t) x
-	//	  PG 17:             numeric 953.82
-	//	  single:            953.82 in a FLOAT box
-	//	  dag, dag-shuffled, dag+morsel4:
-	//	                     final_aggregate-3 … post-breaker exec:
-	//	                     cannot store string into FLOAT64 vector
+	//	  PostgreSQL 17: numeric 953.82
+	//	  every arm:     953.82, exact
 	//
-	// The single arm's BOX is part of the pin and was measured here rather than
-	// assumed: the six #775 entries above answer `s=953.82` — an exact DECIMAL —
-	// and one derived-table level between the window and the scan costs the
-	// SINGLE path that too, leaving the right value under float64 where
-	// PostgreSQL says numeric. So the nesting loses the declaration on every
-	// arm; the DAG arms are merely the ones where losing it is LOUD.
+	// The pin this replaces had two halves and they went separately. The LOUD
+	// half — `cannot store string into FLOAT64 vector` on the DAG arms — went
+	// with #841's declined const-arith lift. What was left was the
+	// DECLARATION, the same on every arm: the right value in a float64 box
+	// where PostgreSQL says numeric, because one derived-table level between
+	// the window and the scan lost the exact type. That was NOT §5's walk (the
+	// one this file's #775 entries exercise) but the window's own input
+	// resolution one level up: `windowSpecOutputType` read `inputColDecls`,
+	// which stops at a Project. It reads `emittedColDecls` now, the walk that
+	// crosses one.
 	//
-	// Base-identical on 10fad851, so this is neither a regression nor a wrong
-	// ANSWER — but it is a shape just outside a rule this branch states, which
-	// protocol rule 11 says must carry a fixture. The nesting is the trigger and
-	// not a name collision: the review measured the same failure with the inner
-	// table rebinding `w`, with a distinct inner alias, and with the minimal
-	// pass-through below.
-	//
-	// The LOUD half of that pin is GONE since #841. The const-arith aggregate
-	// lift was rewriting this `SUM(w*2)` into `SUM(w)*2`, and it was the LIFTED
-	// form that met the store guard: `SUM(w)` over the derived-table window
-	// slot declared FLOAT64 while the value arrived as a DECIMAL's text. With
-	// the lift declined (it may not move a per-row refusal — see
-	// logical.rewriteConstArithAggs) the multiplication happens in the
-	// projection and every arm answers the same thing the single arm always
-	// did. Measured on all five: `s=float:953.82`.
-	//
-	// What is LEFT is the declaration, and it is now the SAME on every arm,
-	// which is what makes the remaining pin a one-line statement instead of an
-	// arm-by-arm one: PostgreSQL 17 says numeric 953.82, wadjet says the right
-	// value in a float64 box, because one derived-table level between the
-	// window and the scan loses the exact declaration the six #775 entries
-	// above keep.
-	//
-	// TODO(#796): delete this when a window over a DERIVED TABLE types like a
-	// window over a scan. The pin fails the day any arm's box becomes exact.
+	// The nesting was the trigger and not a name collision — the arc measured
+	// the same declaration with the inner table rebinding `w`, with a distinct
+	// inner alias, and with the minimal pass-through — and those variants are
+	// cells in `TestF1AWindowDeclaresTheSameTypeThroughADerivedTable` beside
+	// the one-level control.
 	t.Run("#796/computed_agg_arg_over_a_window_whose_input_is_a_derived_table", func(t *testing.T) {
 		const sql = `SELECT SUM(w*2) AS s FROM (SELECT id, SUM(a) OVER () AS w ` +
 			`FROM (SELECT id, a FROM decpair) t) x`
-		const want = "s=float:953.82"
+		const want = "s=953.82"
 		for _, arm := range []struct {
 			name string
 			run  func(string) ([]string, error)
@@ -704,14 +683,15 @@ func TestNumericArc2ShapesMatchPostgres(t *testing.T) {
 		} {
 			got, err := arm.run(sql)
 			if err != nil {
-				t.Errorf("%s arm: %v — this shape ANSWERS on every arm since #841; a failure here "+
-					"is a regression, not the old pin\n  SQL: %s", arm.name, err, sql)
+				t.Errorf("%s arm: %v — this shape ANSWERS on every arm since #841 and declares an "+
+					"exact numeric since #796; a failure here is a regression\n  SQL: %s",
+					arm.name, err, sql)
 				continue
 			}
 			if len(got) != 1 || got[0] != want {
-				t.Errorf("%s arm: %v, this pin records [%s] and PostgreSQL 17 says numeric 953.82. "+
-					"If the box is now exact, #796 is fixed: re-measure every arm and delete this "+
-					"pin\n  SQL: %s", arm.name, got, want, sql)
+				t.Errorf("%s arm: %v, want [%s] — PostgreSQL 17 says numeric 953.82 and every arm "+
+					"has declared it exactly since #796. A `float:` box here is that fix "+
+					"regressing\n  SQL: %s", arm.name, got, want, sql)
 			}
 		}
 	})

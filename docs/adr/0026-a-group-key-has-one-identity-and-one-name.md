@@ -1185,6 +1185,21 @@ protocol is why it carries a fixture instead of a sentence: **#796**, pinned in
 `TestNumericArc2ShapesMatchPostgres` beside the six shapes it is one nesting
 level away from.
 
+**#796 is CLOSED as of 2026-09-04 (arc F1), and it was not this walk.** The
+LOUD half described above is already gone on `18f3660e`; what survived was the
+DECLARATION, on every arm. The defect was one level up from the walk this
+section is about: `windowSpecOutputType` resolved the WINDOW's own input column
+through `inputColDecls`, which STOPS at a Project, so a window one nesting level
+above its scan resolved nothing and fell to the float64 name-list fallback. The
+aggregate above it then inherited a float box for a number PostgreSQL calls
+numeric. It now reads `emittedColDecls` — the walk that crosses a derived
+table's Project (#529), and the one the aggregate's own argument and
+`declaredOutputSchema` already use — so the window's declaration, the
+aggregate's above it and the wire's read one map through a nesting level. Gate:
+`coordinator.TestF1AWindowDeclaresTheSameTypeThroughADerivedTable`, four arms,
+with the one-level spelling and a renaming derived table as the controls.
+
+
 ## Consequences
 
 - A site that has to ask "is this the same expression as that group key"
