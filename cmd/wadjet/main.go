@@ -2688,9 +2688,12 @@ the resolved identity governs every query for the session. If auth is
 configured but no valid credential is supplied, the server refuses to start
 (fail closed) rather than serving unfiltered data.
 
-Without --config (or with auth disabled), MCP runs unauthenticated against a
-direct-to-store DB — appropriate only for local/dev use, where the operator
-already holds the store credentials.
+Without --config (or with auth disabled), MCP runs unauthenticated —
+appropriate only for local/dev use, where the operator already holds the store
+credentials.
+
+The catalog is the SHARED one every other CLI command uses, so a table
+create-table, shell or a running serve wrote is a table an agent can query.
 
 Configure in Claude Desktop's claude_desktop_config.json:
 
@@ -2740,19 +2743,24 @@ Configure in Claude Desktop's claude_desktop_config.json:
 					"use --config with an auth block for secured deployments")
 			}
 
-			store, err := newStore()
+			// The SHARED catalog, the way `query`, `shell`, `create-table`
+			// and `drop-table` open it (#842). Opening with no MetaKV gave
+			// this command a private in-memory catalog that started EMPTY on
+			// every invocation, so an agent saw no table `create-table` or
+			// `serve` had written while their parquet files sat in the store
+			// — and, since a policy set binds to the catalog it is attached
+			// to (#882), a config carrying any policy could not start here at
+			// all: the catalog it bound against held nothing.
+			db, release, err := openSharedDB(ctx, logger)
 			if err != nil {
-				return fmt.Errorf("initializing storage: %w", err)
+				return err
 			}
-
-			db, err := wadjet.Open(ctx, wadjet.Config{
-				Store:        store,
-				Bucket:       bucket,
-				Logger:       logger,
-				AuthProvider: provider,
-			})
-			if err != nil {
-				return fmt.Errorf("opening database: %w", err)
+			defer release()
+			// Attach AFTER the catalog is open, which is the order the rule
+			// makes mandatory and docs/security.md states: the policy's names
+			// are resolved against the relations the catalog holds.
+			if err := db.SetAuthProvider(provider); err != nil {
+				return fmt.Errorf("attaching the auth policy set: %w", err)
 			}
 
 			srv := mcp.NewServerWithIdentity(db, logger, identity)
