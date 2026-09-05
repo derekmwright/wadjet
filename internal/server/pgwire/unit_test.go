@@ -96,6 +96,45 @@ func TestIntegerReturningScalarsWireInt4(t *testing.T) {
 	}
 }
 
+// TestInstantReturningScalarsWireTimestamp is TestIntegerReturningScalarsWireInt4
+// one type family over, for #868: a function whose RESULT is an instant
+// declares `timestamp` on the wire (OID 1114, size 8), which is what pgJDBC,
+// psycopg and DataGrip read to pick a column class. Every one of them declared
+// `text` (25) before, so getTimestamp() on the column either failed or
+// reparsed a string.
+//
+// The three that deliberately answer TEXT are asserted beside them: date_format
+// takes the caller's format string, to_iso8601's name is its contract, and
+// at_timezone's result is a wall clock in another zone whose offset is
+// load-bearing. A rule that swept them up with the rest would be the wrong
+// claim about what those functions return.
+func TestInstantReturningScalarsWireTimestamp(t *testing.T) {
+	for _, name := range []string{
+		"now", "current_timestamp", "pg_postmaster_start_time",
+		"date_trunc", "from_unixtime", "date_parse", "timezone",
+	} {
+		typ, conf := expr.DefaultRegistry.ReturnType(name).Resolve(1, nil)
+		if conf != expr.Decided {
+			t.Errorf("%s: return type not DECIDED (%v)", name, conf)
+			continue
+		}
+		oid := pgTypeOID(typ.ID.String())
+		if oid != 1114 {
+			t.Errorf("%s: wire OID %d (from type %s), want 1114 (timestamp)", name, oid, typ)
+		}
+		if sz := pgTypeSize(oid); sz != 8 {
+			t.Errorf("%s: wire size %d, want 8", name, sz)
+		}
+	}
+	for _, name := range []string{"date_format", "to_iso8601", "at_timezone"} {
+		typ, _ := expr.DefaultRegistry.ReturnType(name).Resolve(1, nil)
+		if oid := pgTypeOID(typ.ID.String()); oid != 25 {
+			t.Errorf("%s: wire OID %d, want 25 (text) — this function produces TEXT on "+
+				"purpose and must not join the instant family", name, oid)
+		}
+	}
+}
+
 func TestPgTypeSize(t *testing.T) {
 	tests := []struct {
 		oid  int

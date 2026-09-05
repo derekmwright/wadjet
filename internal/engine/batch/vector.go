@@ -1007,7 +1007,7 @@ func (v *Vector) SetValue(i int, val any) {
 		default:
 			v.mismatch(val)
 		}
-	case TypeInt64, TypeTimestamp:
+	case TypeInt64:
 		switch tv := val.(type) {
 		case int64:
 			v.Int64Data[i] = tv
@@ -1017,6 +1017,40 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Int64Data[i] = int64(tv)
 		case float64:
 			v.Int64Data[i] = int64(tv)
+		default:
+			v.mismatch(val)
+		}
+	case TypeTimestamp:
+		switch tv := val.(type) {
+		case int64:
+			v.Int64Data[i] = tv
+		case int:
+			v.Int64Data[i] = int64(tv)
+		case int32:
+			v.Int64Data[i] = int64(tv)
+		case float64:
+			v.Int64Data[i] = int64(tv)
+		case string:
+			// A TIMESTAMP written as its own WALL-CLOCK TEXT. This arm is what
+			// lets a timestamp-valued FUNCTION declare timestamp (#868): the
+			// scalar registry has one Go result per entry and every
+			// instant-valued function produces expr.formatInstant's text —
+			// PostgreSQL's own spelling for the instant — so the projection
+			// materializes that text back into the epoch milliseconds this
+			// type is. The round trip is exact: FormatTimestamp writes at
+			// millisecond resolution and this reads it back at the same one.
+			//
+			// TypeInt64 keeps its own arm above and does NOT take a string:
+			// an integer column has no text form to read, and the two shared
+			// this switch only because they share the storage.
+			ms, ok := timestampTextMillis(tv)
+			if !ok {
+				v.mismatch(val)
+				return
+			}
+			v.Int64Data[i] = ms
+		case time.Time:
+			v.Int64Data[i] = tv.UTC().UnixMilli()
 		default:
 			v.mismatch(val)
 		}
@@ -1770,6 +1804,19 @@ func FormatDate(days int32) string {
 	// Delegates so the scan's DATE→STRING coercion and the parquet row
 	// reader's cannot drift apart (parquet.CoercibleTo).
 	return parquet.FormatDateDays(days)
+}
+
+// timestampTextMillis reads a TIMESTAMP's wall-clock text into the epoch
+// milliseconds the engine's TIMESTAMP is. It is FormatTimestamp's inverse and
+// accepts every spelling parquet.ParseTimestampWallClock does, which is the
+// accept-set a stored value already goes through — one reading of a timestamp
+// text, not two.
+func timestampTextMillis(s string) (int64, bool) {
+	t, ok := parquet.ParseTimestampWallClock(s)
+	if !ok {
+		return 0, false
+	}
+	return t.UTC().UnixMilli(), true
 }
 
 // FormatTimestamp renders epoch MILLISECONDS — the engine's one timestamp

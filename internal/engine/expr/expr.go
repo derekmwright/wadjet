@@ -3859,13 +3859,13 @@ func init() {
 		"ip_netmask":    {fnIPNetmask, RetString},
 
 		// Date/time functions
-		"now":          {fnNow, RetString},
+		"now":          {fnNow, RetTimestamp},
 		"year":         {fnYear, RetFloat64},
 		"month":        {fnMonth, RetFloat64},
 		"day":          {fnDay, RetFloat64},
 		"hour":         {fnHour, RetFloat64},
 		"minute":       {fnMinute, RetFloat64},
-		"date_trunc":   {fnDateTrunc, RetString},
+		"date_trunc":   {fnDateTrunc, RetTimestamp},
 		"extract":      {fnExtract, RetFloat64},
 		"current_date": {fnCurrentDate, RetString},
 		"date_diff":    {fnDateDiff, RetFloat64},
@@ -3918,10 +3918,10 @@ func init() {
 		"from_base64": {fnFromBase64, RetString},
 
 		// Date/time conversion
-		"from_unixtime": {fnFromUnixtime, RetString},
+		"from_unixtime": {fnFromUnixtime, RetTimestamp},
 		"to_unixtime":   {fnToUnixtime, RetFloat64},
 		"date_format":   {fnDateFormat, RetString},
-		"date_parse":    {fnDateParse, RetString},
+		"date_parse":    {fnDateParse, RetTimestamp},
 
 		// Hash
 		"md5":    {fnMD5, RetString},
@@ -4014,14 +4014,14 @@ func init() {
 		"day_of_week":       {fnDayOfWeek, RetFloat64},
 		"day_of_year":       {fnDayOfYear, RetFloat64},
 		"last_day_of_month": {fnLastDayOfMonth, RetString},
-		"current_timestamp": {fnCurrentTimestamp, RetString},
+		"current_timestamp": {fnCurrentTimestamp, RetTimestamp},
 		"at_timezone":       {fnAtTimezone, RetString},
 		// epoch: the rewrite target of EXTRACT(EPOCH FROM ts).
 		// timezone: the rewrite target of `ts AT TIME ZONE zone`, zone first,
 		// matching PostgreSQL's own canonical form.
 		"epoch":                    {fnEpoch, RetFloat64},
-		"timezone":                 {fnTimezone, RetString},
-		"pg_postmaster_start_time": {fnPgPostmasterStartTime, RetString},
+		"timezone":                 {fnTimezone, RetTimestamp},
+		"pg_postmaster_start_time": {fnPgPostmasterStartTime, RetTimestamp},
 		"human_readable_seconds":   {fnHumanReadableSeconds, RetString},
 
 		// Network: analytics

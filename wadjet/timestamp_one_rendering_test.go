@@ -2,10 +2,12 @@ package wadjet
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -167,6 +169,14 @@ func TestTimestampHasOneRenderingAtEverySite(t *testing.T) {
 	// batch.FormatTimestamp — the renderer the cast, the sort key and pgwire's
 	// send path already share. Each cell below was measured on live PostgreSQL
 	// 17.11.
+	//
+	// Since #868 a timestamp-valued FUNCTION declares TIMESTAMP, so the
+	// embedded door hands back the epoch milliseconds a TIMESTAMP COLUMN hands
+	// back — which is what "one rendering" means here: the value is the
+	// instant and batch.FormatTimestamp renders it at the OUTPUT, exactly as
+	// it does for `SELECT c_ts`. tsRendered below renders whichever of the two
+	// boxes arrives, so these cells assert the TEXT a client reads on either
+	// side of that change.
 	for _, c := range []struct{ name, sql, want string }{
 		{"date_trunc_day", `SELECT DATE_TRUNC('day', c_ts) AS v FROM ` + tbl +
 			` WHERE id = 0`, "2023-11-14 00:00:00"},
@@ -193,7 +203,7 @@ func TestTimestampHasOneRenderingAtEverySite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%v\n  SQL: %s", err, c.sql)
 			}
-			if len(res.Rows) != 1 || res.Rows[0]["v"] != c.want {
+			if len(res.Rows) != 1 || tsRendered(res.Rows[0]["v"]) != c.want {
 				t.Errorf("= %#v, want %q (live PostgreSQL 17.11). Every instant-valued "+
 					"expression renders through expr.formatInstant; a `T` and a `Z` here "+
 					"mean a second renderer came back (#544)\n  SQL: %s",
@@ -201,38 +211,63 @@ func TestTimestampHasOneRenderingAtEverySite(t *testing.T) {
 			}
 		})
 	}
-	// The RESIDUAL that survives, pinned rather than described. The VALUE is
-	// PostgreSQL's now; the DECLARED TYPE is not. `date_trunc` RETURNS
-	// `timestamp` on the server (OID 1114) and this engine declares its result
-	// STRING, because the scalar registry is `func([]any) any` with a single
-	// static Ret per entry and no TIMESTAMP-valued function result exists.
+	// The DECLARATION, which was this test's pinned residual until #868. A
+	// client that asks what the column IS gets `timestamp` now, the way the
+	// server answers: `date_trunc` RETURNS timestamp there (OID 1114) and this
+	// engine declared its result STRING, because the scalar registry carried
+	// one static Ret per entry and no TIMESTAMP-valued function result
+	// existed. expr.RetTimestamp was declared and unused.
 	//
-	// That is a different mechanism from the rendering — a client that asks
-	// what the column IS still gets `text`, and no amount of formatting fixes
-	// it — so it is recorded, not bandaged (correctness-fix protocol rule 11).
-	// The structural fix is for ~14 registry entries to return the engine's
-	// TIMESTAMP box and carry parquet.TypeTimestamp in their declaration,
-	// which is a change to the registry's type channel, not to these
-	// functions.
-	//
-	// TODO(#544): delete this pin when a timestamp-valued function declares
-	// TIMESTAMP.
-	t.Run("residual_date_trunc_declares_string_not_timestamp", func(t *testing.T) {
-		res, err := db.Query(ctx,
-			`SELECT DATE_TRUNC('day', c_ts) AS v FROM `+tbl+` WHERE id = 0`)
-		if err != nil {
-			t.Fatalf("%v", err)
-		}
-		if len(res.ColumnMetas) != 1 {
-			t.Fatalf("want one column meta, got %d", len(res.ColumnMetas))
-		}
-		if got := res.ColumnMetas[0].TypeID; got != parquet.TypeString {
-			t.Errorf("DATE_TRUNC declares %v; this pin records STRING, and PostgreSQL "+
-				"declares timestamp (OID 1114). If it has moved, #544's declaration "+
-				"residual is closed: delete this pin and re-measure the wire OID of "+
-				"every timestamp-valued function", got)
-		}
-	})
+	// The VALUE half is unchanged and is the cells above: every instant-valued
+	// function still produces expr.formatInstant's text, and the projection
+	// materializes that text into the TIMESTAMP vector its declaration names
+	// (batch.Vector.SetValue's TypeTimestamp string arm). One renderer, one
+	// reading, and the wire now carries the OID a pgJDBC or psycopg client
+	// reads to pick a column class.
+	for _, c := range []struct {
+		name, sql string
+		want      parquet.TypeID
+	}{
+		{"date_trunc", `SELECT DATE_TRUNC('day', c_ts) AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeTimestamp},
+		{"from_unixtime", `SELECT FROM_UNIXTIME(1699999999) AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeTimestamp},
+		{"timezone", `SELECT TIMEZONE('UTC', c_ts) AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeTimestamp},
+		{"now", `SELECT NOW() AS v FROM ` + tbl + ` WHERE id = 0`, parquet.TypeTimestamp},
+		{"current_timestamp", `SELECT CURRENT_TIMESTAMP() AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeTimestamp},
+		{"pg_postmaster_start_time",
+			`SELECT PG_POSTMASTER_START_TIME() AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeTimestamp},
+		// The column itself, as the control: the function and the column
+		// declare the same thing now.
+		{"column", `SELECT c_ts AS v FROM ` + tbl + ` WHERE id = 0`, parquet.TypeTimestamp},
+		// The boundary from the other side. These three PRODUCE text on
+		// purpose and must keep declaring it: date_format's format string is
+		// the caller's, to_iso8601's NAME is its contract, and at_timezone's
+		// result is a wall clock in another zone whose offset is load-bearing.
+		{"date_format", `SELECT DATE_FORMAT(c_ts, '%Y') AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeString},
+		{"to_iso8601", `SELECT TO_ISO8601(c_ts) AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeString},
+		{"at_timezone", `SELECT AT_TIMEZONE(c_ts, 'UTC') AS v FROM ` + tbl + ` WHERE id = 0`,
+			parquet.TypeString},
+	} {
+		t.Run("declares_"+c.name, func(t *testing.T) {
+			res, err := db.Query(ctx, c.sql)
+			if err != nil {
+				t.Fatalf("%v\n  SQL: %s", err, c.sql)
+			}
+			if len(res.ColumnMetas) != 1 {
+				t.Fatalf("want one column meta, got %d", len(res.ColumnMetas))
+			}
+			if got := res.ColumnMetas[0].TypeID; got != c.want {
+				t.Errorf("declares %v, want %v (PostgreSQL 17.11)\n  SQL: %s", got, c.want, c.sql)
+			}
+		})
+	}
+
 	// The CLOCK functions, pinned as a SHAPE because their value moves.
 	//
 	// They render through the same one renderer as everything above, and
@@ -257,9 +292,13 @@ func TestTimestampHasOneRenderingAtEverySite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%v", err)
 			}
-			got, _ := res.Rows[0]["v"].(string)
+			// Rendered from the box the door hands back, which is the
+			// instant since #868 — the same one a TIMESTAMP column hands
+			// back. What this pin is about is the TEXT a client reads, and
+			// that text is unchanged.
+			got := tsRendered(res.Rows[0]["v"])
 			if got == "" {
-				t.Fatalf("%s = %#v, want text", fn, res.Rows[0]["v"])
+				t.Fatalf("%s = %#v, want an instant", fn, res.Rows[0]["v"])
 			}
 			// The engine's one rendering: `2006-01-02 15:04:05[.fff]`, a
 			// space and no `T`, no trailing zone, at most three fraction
@@ -279,4 +318,18 @@ func TestTimestampHasOneRenderingAtEverySite(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tsRendered renders whatever box a timestamp-valued expression handed back as
+// the text a client reads: epoch milliseconds through batch.FormatTimestamp —
+// which is what a TIMESTAMP-declared column produces through the embedded door
+// — or the text itself for the expressions that are text on purpose.
+func tsRendered(v any) string {
+	switch tv := v.(type) {
+	case int64:
+		return batch.FormatTimestamp(tv)
+	case string:
+		return tv
+	}
+	return fmt.Sprint(v)
 }
