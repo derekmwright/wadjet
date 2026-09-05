@@ -1798,8 +1798,21 @@ func wireCorpus() []wireCase {
 		{name: "ParamFloat4Binary", sql: `SELECT r_key FROM real_probe WHERE r_val = $1 ORDER BY r_key`,
 			paramOIDs: []uint32{700}, params: [][]byte{float4Bin(1.5)},
 			paramFormats: binaryFormats(1), minRows: 1},
-		{name: "ParamOIDBinary", sql: `SELECT COUNT(*) AS c FROM nation WHERE $1 = $1`,
-			paramOIDs: []uint32{26}, params: [][]byte{int4Bin(2)},
+		// The ANSWER has to depend on the decoded value, or the cell gates
+		// nothing. `WHERE $1 = $1` — the first spelling here — is true under
+		// every decoding and `COUNT(*)` always returns one row, so a wrong
+		// endianness passed it (round-2 B3). PostgreSQL resolves
+		// `integer = oid` and `integer < oid` through its implicit int4→oid
+		// cast, verified live, so the column comparison works on both sides.
+		{name: "ParamOIDBinary",
+			sql:       `SELECT n_nationkey FROM nation WHERE n_nationkey = $1`,
+			paramOIDs: []uint32{26}, params: [][]byte{int4Bin(7)},
+			paramFormats: binaryFormats(1), minRows: 1},
+		// And a RANGE, so a decode that is merely off rather than byte-swapped
+		// changes the row COUNT rather than only missing an equality.
+		{name: "ParamOIDBinaryRange",
+			sql:       `SELECT n_nationkey FROM nation WHERE n_nationkey < $1 ORDER BY n_nationkey`,
+			paramOIDs: []uint32{26}, params: [][]byte{int4Bin(3)},
 			paramFormats: binaryFormats(1), minRows: 1},
 		{name: "ParamTimestampBinary",
 			sql:       `SELECT COUNT(*) AS c FROM nation WHERE CAST('1996-01-10 12:34:56' AS timestamp) = $1`,
