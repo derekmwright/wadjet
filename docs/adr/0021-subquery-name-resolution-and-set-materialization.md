@@ -712,13 +712,34 @@ the record is a fixture rather than a memory.
   query.** MEASURED, because the question was open: it is LEGAL WITHOUT
   LATERAL and PostgreSQL 17 ANSWERS it (40 rows over the multikey fixture).
   LATERAL governs references to same-level FROM siblings; a reference to an
-  OUTER-QUERY column from inside a sub-SELECT's derived table needs none. This
-  engine refuses it on all four arms with 42P01 `missing FROM-clause entry for
-  table "a"` — a message that asserts the SQL is invalid, which it is not. The
-  refusal comes from the PHYSICAL column-scope validator, whose scope for a
-  derived table inside a subquery does not merge the enclosing query's
-  aliases. Loud, not wrong; supporting the shape is a dependent join and is
-  what §1c calls the thing that removes the class.
+  OUTER-QUERY column from inside a sub-SELECT's derived table needs none.
+
+  **The REFUSAL stands and its CLASS is corrected** (2026-09-04, arc F4). It
+  was 42P01 `missing FROM-clause entry for table "a"` on all four arms — a
+  message that asserts the SQL is invalid, which it is not, and which a user
+  cannot act on. It is now 0A000 naming the two workarounds (lift the
+  correlated predicate above the derived table, or write it as a LATERAL join),
+  and `colScope.outerDiag` — the enclosing query levels, carried for DIAGNOSIS
+  and never for resolution — is what tells the two apart. The SIBLING spelling
+  (`FROM o a, (SELECT … WHERE n = a.n) d`) keeps 42P01, which is PostgreSQL's
+  own disposition for it.
+
+  **Opening the binder's scope instead was tried and WITHDRAWN, and the
+  measurement is the reason this stays a refusal.** With the enclosing scope
+  merged into the derived body's, the shape plans — and the reference binds
+  INSIDE the body, because the logical builder plans that body as its own query
+  block and the correlation analysis never sees its terms. Measured over the
+  type matrix: `EXISTS (SELECT 1 FROM (SELECT id, g FROM t b WHERE b.g = a.g)
+  d)` answered 5000 of 5000 rows where 4616 match, and the scalar-subquery
+  spelling answered one constant for every outer row. A loud refusal became a
+  silent wrong answer on every arm. Supporting the shape is a dependent join —
+  what §1c calls the thing that removes the class — and it is that change, not
+  a scope widening.
+
+  Gated at `coordinator.TestArcF4DerivedTableCorrelationIsRefusedNotMisread`:
+  the two legal spellings refused 0A000 on four arms, the sibling spelling
+  refused 42P01, and the shape that DOES work — the correlated predicate
+  written ABOVE the derived table — answering PostgreSQL's rows beside them.
 
 - **#714 — an aggregate argument containing a scalar subquery.** The headline
   ("refused on the stage DAG") is gone: it ANSWERS on all four arms, the DAG

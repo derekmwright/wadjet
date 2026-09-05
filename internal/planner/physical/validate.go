@@ -63,6 +63,25 @@ func validateColumns(ctx context.Context, src tableColumnSource, info *plansql.S
 	return b.validateBlock(ctx, info, nil)
 }
 
+// outerDiagScope accumulates the enclosing query levels a DERIVED TABLE's body
+// sits under, for the diagnosis in colScope.resolveRef. It is never used for
+// resolution — a name in it is out of scope, which is the point; it only tells
+// "this reference names a relation of an OUTER QUERY LEVEL, which is legal SQL
+// this engine does not support" apart from "this reference names nothing".
+func outerDiagScope(prev, outer *colScope) *colScope {
+	if prev == nil && outer == nil {
+		return nil
+	}
+	d := newColScope()
+	d.merge(prev)
+	d.merge(outer)
+	// `open` must not travel: an enclosing block with an unenumerable source
+	// would then claim to know every qualifier, and the diagnosis has to be
+	// certain or it is not made.
+	d.open = false
+	return d
+}
+
 // colScope is the set of columns visible at a point in a query. `cols` holds
 // every bare (unqualified) column name; `quals` maps a qualifier (table name or
 // alias) to its column set for qualified resolution; `srcCount` counts how many
@@ -106,6 +125,13 @@ type colScope struct {
 	// quoted one: `SELECT "G"` over a column `g` is 42703 in PostgreSQL, not
 	// a read of `g`.
 	exact map[string]bool
+	// outerDiag is the ENCLOSING QUERY LEVELS this scope sits under, when this
+	// scope is a plain derived table's body. It is consulted only to CLASSIFY
+	// a reference this scope cannot resolve: one that names a relation of an
+	// outer level is legal SQL PostgreSQL answers and this engine does not
+	// support (0A000), where one that names nothing at all is malformed
+	// (42P01). It never resolves anything (#614).
+	outerDiag *colScope
 }
 
 // typeAmbiguous marks a bare column name that two FROM sources declare with
@@ -280,6 +306,7 @@ func (s *colScope) clone() *colScope {
 	for col, n := range s.srcCount {
 		c.srcCount[col] = n
 	}
+	c.outerDiag = s.outerDiag
 	return c
 }
 
@@ -401,6 +428,9 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 		// and outer aliases arrive via merge — so an unmatched qualifier in a
 		// closed scope provably names no FROM entry. Answering such a query
 		// with rows was #380's silent-empty-result defect.
+		if err := s.refuseOuterLevelReference(ref); err != nil {
+			return err
+		}
 		return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
 	}
 	if !s.cols[col] {
@@ -466,6 +496,10 @@ type cteEntry struct {
 type binder struct {
 	src  tableColumnSource
 	ctes map[string]cteEntry
+	// outerDiag is the enclosing query levels a DERIVED TABLE's body sits
+	// under, carried for DIAGNOSIS and never for resolution (#614). See
+	// outerDiagScope. Nil everywhere but inside a plain derived table's block.
+	outerDiag *colScope
 }
 
 func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, outer *colScope) error {
@@ -509,23 +543,38 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 
 	// Build the FROM scope from base tables, joins, derived tables and CTE refs.
 	from := newColScope()
-	for i := range info.Tables {
-		if err := b.resolveSource(ctx, &info.Tables[i], nil, from); err != nil {
-			return err
+	// This block's OWN scope carries the diagnosis its caller set; the SOURCES
+	// it is about to resolve carry this block's enclosing levels, because a
+	// derived table's body sits one level further in (#614). A SIBLING is
+	// deliberately absent from both: PostgreSQL refuses a sibling reference
+	// without LATERAL too, so that spelling keeps 42P01.
+	from.outerDiag = b.outerDiag
+	callerDiag := b.outerDiag
+	b.outerDiag = outerDiagScope(callerDiag, outer)
+	err := func() error {
+		for i := range info.Tables {
+			if err := b.resolveSource(ctx, &info.Tables[i], nil, from); err != nil {
+				return err
+			}
 		}
-	}
-	for i := range info.Joins {
-		ref := joinRightRef(&info.Joins[i])
-		var lateralOuter *colScope
-		if info.Joins[i].Lateral {
-			// A LATERAL right side may reference columns from sources to its
-			// left (and any outer scope).
-			lateralOuter = from.clone()
-			lateralOuter.merge(outer)
+		for i := range info.Joins {
+			ref := joinRightRef(&info.Joins[i])
+			var lateralOuter *colScope
+			if info.Joins[i].Lateral {
+				// A LATERAL right side may reference columns from sources to
+				// its left (and any outer scope).
+				lateralOuter = from.clone()
+				lateralOuter.merge(outer)
+			}
+			if err := b.resolveSource(ctx, ref, lateralOuter, from); err != nil {
+				return err
+			}
 		}
-		if err := b.resolveSource(ctx, ref, lateralOuter, from); err != nil {
-			return err
-		}
+		return nil
+	}()
+	b.outerDiag = callerDiag
+	if err != nil {
+		return err
 	}
 
 	// Resolution scope for WHERE and SELECT: FROM sources plus any outer scope
@@ -694,8 +743,14 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			into.open = true
 			return nil
 		}
-		// Validate the derived block's internals. Non-LATERAL derived tables
-		// cannot see the enclosing query; LATERAL ones can.
+		// Validate the derived block's internals. A LATERAL derived table
+		// resolves against the sources to its left; a plain one resolves
+		// against nothing outside itself.
+		//
+		// `b.outerDiag` — the ENCLOSING QUERY LEVELS, set by the caller — is
+		// already in place here, and it is what lets the body's scope tell a
+		// reference to an outer level (legal SQL, 0A000) from one that names
+		// nothing (42P01). See refuseOuterLevelReference (#614).
 		if err := b.validateBlock(ctx, inner, lateralOuter); err != nil {
 			return err
 		}
