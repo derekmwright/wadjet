@@ -68,7 +68,12 @@ The `Config` struct accepts:
 - `SpillDir` — directory for spill-to-disk files (empty = OS temp dir)
 - `AuthProvider` — optional `*auth.Provider`, enables ABAC enforcement at query level
 - `SortMergeJoinBytes`, `LateMaterialization`, `BushyJoinReorder` — planner knobs (0/false = off)
-- `EnableAlerts` — turns on the CREATE ALERT scheduler; call `db.Close()` to stop it
+- `EnableAlerts` — turns on the CREATE ALERT scheduler; call `db.Close()` to stop it.
+  It also gates the alert DDL: `CREATE`/`ALTER`/`DROP ALERT` are refused on a `DB`
+  that does not carry a scheduler. That coupling is why `wadjet serve` does not give
+  its PostgreSQL wire door the alert statements — the coordinator in that process
+  already runs a scheduler, and a second one would fire every alert twice. See
+  [SQL reference](sql-reference.md#parsed-and-not-executed).
 
 ### Table Management
 
