@@ -262,6 +262,86 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 	}
 }
 
+// A set operation over two VECTOR columns of different declared widths.
+//
+// At de5bc970 `v2 UNION ALL v3` SILENTLY TRUNCATED the wider arm's [1,2,3] to
+// [1,2] and answered. It refuses now, because the output column is declared
+// with the first arm's width and a value of another width has nowhere to go.
+//
+// INTERSECT and EXCEPT answer, and that is not an inconsistency: they emit
+// values from the LEFT arm only, so no value is ever materialized at a width it
+// does not have. It is also what PostgreSQL answers — pgvector makes vector(2)
+// and vector(3) one type with a typmod, so `v2 EXCEPT v3` returns v2's row
+// there too. UNION is the divergence: PostgreSQL drops the typmod and returns
+// both rows, and wadjet has no mixed-width VECTOR carrier to return them in, so
+// it is loud instead. Round-2 review P1; the pgvector comparison is reasoned
+// from the extension's typmod rule and NOT measured, because the oracle server
+// carries no vector extension.
+func TestASetOperationOverTwoVectorWidths(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "s4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for name, dim := range map[string]int{"sv2": 2, "sv3": 3} {
+		sc := parquet.Schema{Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "v", Type: parquet.TypeVector, Dimension: dim, Nullable: true},
+		}}
+		if err := db.CreateTable(ctx, name, sc, nil); err != nil {
+			t.Fatal(err)
+		}
+		val := []float32{1, 2}
+		if dim == 3 {
+			val = []float32{1, 2, 3}
+		}
+		ing := db.NewIngester(name, sc, nil, ingest.Config{MaxBufferRows: 8, RowGroupSize: 4})
+		if err := ing.Ingest(ctx, []map[string]any{{"id": int64(1), "v": val}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, c := range []struct {
+		sql  string
+		want string // a SQLSTATE, or the rows it must answer
+	}{
+		{`SELECT v FROM sv2 UNION ALL SELECT v FROM sv3`, "22000"},
+		{`SELECT v FROM sv3 UNION ALL SELECT v FROM sv2`, "22000"},
+		{`SELECT v FROM sv2 UNION SELECT v FROM sv3`, "22000"},
+		{`SELECT v FROM sv3 UNION SELECT v FROM sv2`, "22000"},
+		{`SELECT v FROM sv2 EXCEPT SELECT v FROM sv3`, "[map[v:[1 2]]]"},
+		{`SELECT v FROM sv3 EXCEPT SELECT v FROM sv2`, "[map[v:[1 2 3]]]"},
+		{`SELECT v FROM sv2 INTERSECT SELECT v FROM sv3`, "[]"},
+		{`SELECT v FROM sv3 INTERSECT SELECT v FROM sv2`, "[]"},
+	} {
+		t.Run(c.sql, func(t *testing.T) {
+			r, err := db.Query(ctx, c.sql)
+			if strings.HasPrefix(c.want, "2") {
+				if err == nil {
+					t.Fatalf("answered %v where the two arms' widths differ", r.Rows)
+				}
+				if got := sqlerr.StateOf(err); got != c.want {
+					t.Errorf("SQLSTATE %q; want %q (%v)", got, c.want, err)
+				}
+				if !strings.Contains(err.Error(), "dimensions") {
+					t.Errorf("refusal %q does not name the dimension", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("refused a set operation that emits only left-arm values: %v", err)
+			}
+			if got := fmt.Sprint(r.Rows); got != c.want {
+				t.Errorf("answered %s; want %s", got, c.want)
+			}
+		})
+	}
+}
+
 // s4IngestVector ingests one row carrying v into a fresh VECTOR(2) table and
 // returns whatever the door said, flush included — a width the door admits but
 // the writer refuses is still a refusal, and it is the FLUSH that reports it.

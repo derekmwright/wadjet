@@ -521,6 +521,14 @@ infinity — is `22P02`, `invalid input syntax for type vector`.
 INSERT INTO doc_embeddings (doc_id, embedding) VALUES (1, '[0.1,0.2,0.3]')
 ```
 
+A set operation between two columns of DIFFERENT declared widths is refused
+where it would have to carry both in one column: `VECTOR(2) UNION VECTOR(3)`
+raises `22000` rather than truncating the wider arm. `INTERSECT` and `EXCEPT`
+emit values from the left arm only and are unaffected. PostgreSQL answers the
+`UNION` (its `vector` is one type with a width typmod, which the union drops);
+wadjet's storage is fixed-width per column and has no carrier for a mixed-width
+result, so it says so instead of answering something else.
+
 ```sql
 -- Create a table with embedding column
 CREATE TABLE doc_embeddings (

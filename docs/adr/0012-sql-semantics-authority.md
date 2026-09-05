@@ -59,6 +59,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    to begin with, and are recorded here so a future gate does not mistake
    them for undecided.)
 
+   - **A set operation over two VECTOR columns of different declared widths
+     is REFUSED, where PostgreSQL answers.** (Added 2026-09-05, #900's
+     round-2 review.) PostgreSQL's `vector` extension makes `vector(2)` and
+     `vector(3)` ONE type carrying a width typmod, so a union of the two drops
+     the typmod and returns both rows. Wadjet's VECTOR storage is fixed-width
+     PER COLUMN and has no carrier for a mixed-width result, so a value that
+     would have to be materialized at another arm's width raises 22000
+     (`expected N dimensions, not M`) instead. Before that refusal the wider
+     arm's value was silently TRUNCATED into the first arm's width and the
+     query answered, which is the one disposition neither engine allows.
+
+     `INTERSECT` and `EXCEPT` are unaffected and answer, and that is not an
+     inconsistency: both emit values from the LEFT arm only, so nothing is
+     ever materialized at a foreign width — and their rows AGREE with what
+     PostgreSQL returns, because two vectors of different widths are never
+     equal there either. Making them refuse for symmetry would move a
+     PostgreSQL-agreeing answer to an error.
+
+     Closing it means a set-op type ladder that carries a VECTOR's width
+     (`setOpColType` in `internal/planner/physical/set_op_schema.go` holds a
+     TypeID and a DECIMAL's (p,s) and nothing else) plus a mixed-width carrier
+     to resolve the pair INTO. Until then the refusal is the honest answer.
+     Gate: `wadjet.TestASetOperationOverTwoVectorWidths`, both arm orders,
+     all four operators.
+
    - **An unnamed derived column is referenced by the BLOCK's spelling, not
      by its published name.** (Added 2026-09-04, #732.) An output column with
      no alias is PUBLISHED under PostgreSQL's `FigureColname` — `?column?` for
