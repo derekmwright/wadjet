@@ -112,20 +112,24 @@ func TestBaseTableCacheEligibility(t *testing.T) {
 	}{
 		{"non-parquet", "data", "tables/t/chunk.wshf"},
 		{"query scratch", "data", "queries/q1/stage-2/part.parquet"},
-		{"bucket with slash", "da/ta", "tables/t/x.parquet"},
 	}
-	// The traversal-shaped keys are no longer STORABLE: every store now
-	// applies ValidateObjectKey, so an object under such a key can only come
-	// from a foreign writer into the same bucket. The cache's own eligibility
-	// rule is the second line and is still asserted, on the predicate rather
-	// than through an object nothing here can create.
-	for _, key := range []string{"tables/../escape.parquet", "tables//x.parquet"} {
-		if _, err := inner.Store.Put(context.Background(), "data", key,
+	// The traversal-shaped keys and the multi-component bucket are no longer
+	// STORABLE: every store now applies the key and bucket rules on every
+	// operation, so an object under such a name can only come from a foreign
+	// writer into the same bucket. The cache's own eligibility rule is the
+	// second line and is still asserted, on the predicate rather than through
+	// an object nothing here can create.
+	for _, bad := range []struct{ bucket, key string }{
+		{"data", "tables/../escape.parquet"},
+		{"data", "tables//x.parquet"},
+		{"da/ta", "tables/t/x.parquet"},
+	} {
+		if _, err := inner.Store.Put(context.Background(), bad.bucket, bad.key,
 			bytes.NewReader([]byte("payload")), 7, "application/octet-stream"); err == nil {
-			t.Errorf("the store accepted the traversal-shaped key %q", key)
+			t.Errorf("the store accepted %q/%q", bad.bucket, bad.key)
 		}
-		if c.eligibleKey("data", key) {
-			t.Errorf("the cache would admit the traversal-shaped key %q", key)
+		if c.eligibleKey(bad.bucket, bad.key) {
+			t.Errorf("the cache would admit %q/%q", bad.bucket, bad.key)
 		}
 	}
 	for _, tc := range cases {

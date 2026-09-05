@@ -45,6 +45,9 @@ func computeETag(data []byte) string {
 }
 
 func (m *MemStore) MakeBucket(_ context.Context, bucket string) error {
+	if err := ValidateBucketName(bucket); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.buckets[bucket]; !ok {
@@ -54,6 +57,9 @@ func (m *MemStore) MakeBucket(_ context.Context, bucket string) error {
 }
 
 func (m *MemStore) BucketExists(_ context.Context, bucket string) (bool, error) {
+	if err := ValidateBucketName(bucket); err != nil {
+		return false, err
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	_, ok := m.buckets[bucket]
@@ -69,11 +75,11 @@ func (m *MemStore) getBucket(bucket string) (map[string]*memObject, error) {
 }
 
 func (m *MemStore) Put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string) (string, error) {
-	// The same key rule FileStore applies. A MemStore cannot be escaped — its
-	// keys are map keys — but a key one store accepts and another refuses is a
-	// table that works in a test and fails in production, which is the shape
-	// this whole class of defect takes.
-	if err := ValidateObjectKey(key); err != nil {
+	// The same rule FileStore applies, on every operation and not only this
+	// one. A MemStore cannot be escaped — its keys are map keys — but a key one
+	// store accepts and another refuses is a table that works in a test and
+	// fails in production, which is the shape this whole class of defect takes.
+	if err := CheckObjectAccess(bucket, key); err != nil {
 		return "", err
 	}
 	data, err := io.ReadAll(r)
@@ -100,7 +106,7 @@ func (m *MemStore) Put(_ context.Context, bucket, key string, r io.Reader, _ int
 }
 
 func (m *MemStore) PutIfMatch(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string, expectedETag string) (string, error) {
-	if err := ValidateObjectKey(key); err != nil {
+	if err := CheckObjectAccess(bucket, key); err != nil {
 		return "", err
 	}
 	data, err := io.ReadAll(r)
@@ -139,6 +145,9 @@ func (m *MemStore) PutIfMatch(_ context.Context, bucket, key string, r io.Reader
 }
 
 func (m *MemStore) Get(_ context.Context, bucket, key string) (io.ReadCloser, ObjectInfo, error) {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return nil, ObjectInfo{}, err
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -170,6 +179,9 @@ type nopReaderAtCloser struct {
 func (nopReaderAtCloser) Close() error { return nil }
 
 func (m *MemStore) GetReaderAt(_ context.Context, bucket, key string) (ReaderAtCloser, int64, error) {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return nil, 0, err
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -185,6 +197,9 @@ func (m *MemStore) GetReaderAt(_ context.Context, bucket, key string) (ReaderAtC
 }
 
 func (m *MemStore) Head(_ context.Context, bucket, key string) (ObjectInfo, error) {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return ObjectInfo{}, err
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -208,6 +223,9 @@ func (m *MemStore) Head(_ context.Context, bucket, key string) (ObjectInfo, erro
 }
 
 func (m *MemStore) List(_ context.Context, bucket string, opts ListOptions) ([]ObjectInfo, error) {
+	if err := ValidateBucketName(bucket); err != nil {
+		return nil, err
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -260,6 +278,9 @@ func (m *MemStore) List(_ context.Context, bucket string, opts ListOptions) ([]O
 }
 
 func (m *MemStore) Delete(_ context.Context, bucket, key string) error {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

@@ -107,9 +107,11 @@ func CheckLeafBox(col Column, v any) error {
 		_, err := convertNetworkLiteral(col.Type, s)
 		return err
 	}
-	if _, _, err := normalizeTemporalBox(col.Type, v); err != nil {
+	// One call, not two: this runs per value per column on the ingest path, and
+	// a TIMESTAMP or DATE literal is parsed inside it.
+	if _, ok, err := normalizeTemporalBox(col.Type, v); err != nil {
 		return err
-	} else if _, ok, _ := normalizeTemporalBox(col.Type, v); ok {
+	} else if ok {
 		// A normalised temporal box is stored as the int32/int64 the
 		// normalisation produced; there is nothing left for the leaf to
 		// refuse.

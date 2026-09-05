@@ -97,6 +97,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      else PostgreSQL accepts is still accepted, spaces and embedded quotes
      included.
 
+     A name over **63 bytes** is refused too, with SQLSTATE 42622
+     `name_too_long`. PostgreSQL TRUNCATES rather than refusing — measured
+     live, an 80-byte name becomes 63 bytes with
+     `NOTICE 42622 identifier "…" will be truncated to "…"` — and wadjet
+     cannot, because two names truncated to one would be two tables at ONE
+     storage location. 63 is PostgreSQL's own effective length
+     (`NAMEDATALEN - 1`), which is what makes the sentence below exact: at or
+     under it the two engines agree byte for byte, and over it PostgreSQL's own
+     answer is already lossy. Without the bound a 300-byte name was accepted at
+     CREATE and then failed every write with `ENAMETOOLONG` — a table whose
+     data has no home, the failure this whole entry exists to prevent.
+
      The refusal is name-only and LOUD: no query answers differently, nothing
      is silently rewritten, and no name that IS accepted behaves differently
      from PostgreSQL. The alternative is a table whose data has no home — and,
@@ -104,15 +116,24 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      delimited identifier reached `filepath.Join`, which CLEANS its result, so
      `CREATE TABLE "../../../tmp/x"` wrote parquet files anywhere the process
      could reach. The store enforces the same rule at the key
-     (`objstore.ValidateObjectKey`, applied by FileStore, MemStore and the S3
-     store alike), because a store cannot know what its keys were made of; the
-     catalog's check is the one that can tell a person what is wrong.
+     (`objstore.CheckObjectAccess`, which every store calls on EVERY operation
+     — read, write, head, delete and list — not only on the write), because a
+     store cannot know what its keys were made of; the catalog's check is the
+     one that can tell a person what is wrong. Both halves are literal: a key
+     one store refuses is a key all three refuse, and on the same operations,
+     so a table cannot work against `MemStore` in a test and fail against a
+     filesystem or S3 store in production.
 
      Gated at `server.TestNoDoorCreatesARelationWhoseNameIsNotStorable` (three
      doors, refused and accepted names beside each other),
-     `server.TestNoDoorCreatesAColumnWhoseNameIsNotStorable`, and
+     `server.TestNoDoorCreatesARelationWhoseNameIsTooLong` (the 63/64-byte
+     boundary from both sides, three doors),
+     `server.TestNoDoorCreatesAColumnWhoseNameIsNotStorable`,
      `objstore.TestNoStoreAcceptsAKeyThatCanLeaveItsBucket` /
-     `TestATableNamedWithATraversalCannotWriteOutsideTheStore`.
+     `TestATableNamedWithATraversalCannotWriteOutsideTheStore`, and
+     `objstore.TestEveryStoreRefusesABadKeyOnEveryOperation` (every store ×
+     every keyed operation, plus the bucket on `List` / `BucketExists` /
+     `MakeBucket`).
    - **A SET OPERATION does not take PostgreSQL's output-column names.**
      (Added 2026-09-05, #732 round 2.) The naming rule is applied at the two
      places a query's values leave the engine — the collecting sink and the

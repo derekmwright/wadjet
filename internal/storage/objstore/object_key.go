@@ -69,3 +69,19 @@ func ValidateBucketName(bucket string) error {
 	}
 	return nil
 }
+
+// CheckObjectAccess is the pair of checks every store makes before it touches a
+// named object, on EVERY operation and not only on the write.
+//
+// FileStore has always had to, because its key becomes a path; MemStore and the
+// S3 store validated on Put and PutIfMatch only, so `Get("../escape")` was a
+// key error on one store and "object not found" on the others. ADR-0012's
+// entry says the rule is applied by all three "alike", and a rule that answers
+// differently per store is how a table that works in a test fails in
+// production — this arc's own argument (round-1 review P3).
+func CheckObjectAccess(bucket, key string) error {
+	if err := ValidateBucketName(bucket); err != nil {
+		return err
+	}
+	return ValidateObjectKey(key)
+}

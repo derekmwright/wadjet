@@ -87,6 +87,9 @@ func (f *FileStore) MakeBucket(_ context.Context, bucket string) error {
 }
 
 func (f *FileStore) BucketExists(_ context.Context, bucket string) (bool, error) {
+	if err := ValidateBucketName(bucket); err != nil {
+		return false, err
+	}
 	info, err := os.Stat(f.bucketDir(bucket))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -275,6 +278,13 @@ func (f *FileStore) Head(_ context.Context, bucket, key string) (ObjectInfo, err
 }
 
 func (f *FileStore) List(_ context.Context, bucket string, opts ListOptions) ([]ObjectInfo, error) {
+	// The bucket is a directory name directly under the root, so it takes the
+	// same rule objectPath applies to a key. List and BucketExists reached
+	// bucketDir without it, so `List(ctx, "../..")` WALKED outside the store
+	// root and returned what it found there (round-1 review P4).
+	if err := ValidateBucketName(bucket); err != nil {
+		return nil, err
+	}
 	bucketPath := f.bucketDir(bucket)
 	if _, err := os.Stat(bucketPath); os.IsNotExist(err) {
 		return nil, ErrBucketNotFound

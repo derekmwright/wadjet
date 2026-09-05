@@ -138,11 +138,14 @@ every door, with SQLSTATE `42602`:
 | `".."`, `"."` | is a path component with a meaning of its own |
 | `".hidden"` | begins with `.` |
 | a name containing a NUL byte | cannot be a path component |
+| a name over 63 bytes (`42622`) | PostgreSQL truncates to 63; a location cannot be truncated |
 
 Everything else PostgreSQL accepts inside double quotes is still accepted,
-including spaces, embedded quotes and a `..` inside a name (`"x..y"`). This is
-a deliberate divergence from PostgreSQL, which has no such restriction because
-its relations are rows in `pg_class` rather than locations; it is recorded in
+including spaces, embedded quotes and a `..` inside a name (`"x..y"`). 63 bytes
+is PostgreSQL's own identifier length, so every name this engine accepts is a
+name PostgreSQL stores unchanged. This is a deliberate divergence from
+PostgreSQL, which has no such restriction because its relations are rows in
+`pg_class` rather than locations; it is recorded in
 `docs/adr/0012-sql-semantics-authority.md`.
 
 ## SELECT Statement

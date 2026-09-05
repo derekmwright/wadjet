@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http/httptest"
 	"os"
@@ -60,6 +61,39 @@ func TestNoDoorCreatesARelationWhoseNameIsNotStorable(t *testing.T) {
 			for door, got := range createTableStates(t, name) {
 				if got != "<ok>" {
 					t.Errorf("%s door: CREATE TABLE %q answered %s, want success", door, name, got)
+				}
+			}
+		})
+	}
+}
+
+// A name longer than PostgreSQL's own identifier length is refused, on every
+// door, with 42622.
+//
+// PostgreSQL TRUNCATES: measured live on postgres:17-alpine, an 80-byte name
+// becomes 63 bytes with `NOTICE 42622 identifier "…" will be truncated to
+// "…"`. Wadjet cannot, because the name is a component of the object key its
+// data is stored under and two names truncated to one would be two tables at
+// ONE location. Before this a 300-byte name was accepted at CREATE and then
+// failed every write with ENAMETOOLONG — "a table whose data has no home",
+// which is the failure ADR-0012's entry says the rule exists to prevent.
+func TestNoDoorCreatesARelationWhoseNameIsTooLong(t *testing.T) {
+	for _, tc := range []struct {
+		n     int
+		state string
+	}{
+		{1, "<ok>"},
+		{62, "<ok>"},
+		{catalog.MaxNameBytes, "<ok>"}, // exactly PostgreSQL's own length
+		{catalog.MaxNameBytes + 1, "42622"},
+		{300, "42622"},
+	} {
+		name := strings.Repeat("a", tc.n)
+		t.Run(fmt.Sprintf("%d_bytes", tc.n), func(t *testing.T) {
+			for door, got := range createTableStates(t, name) {
+				if got != tc.state {
+					t.Errorf("%s door: a %d-byte name answered %s, want %s",
+						door, tc.n, got, tc.state)
 				}
 			}
 		})
@@ -140,13 +174,25 @@ func createTableStates(t *testing.T, name string) map[string]string {
 		Name:    name,
 		Columns: []*wadjetv1.ColumnDef{{Name: "a", Type: "INT64", Nullable: true}},
 	}); err != nil {
-		if strings.Contains(err.Error(), "42602") {
-			out["gRPC"] = "42602"
-		} else {
-			out["gRPC"] = doorStateOrNone(err)
-		}
+		out["gRPC"] = grpcSQLState(err)
 	} else {
 		out["gRPC"] = "<ok>"
 	}
 	return out
+}
+
+// grpcSQLState reads the class out of a gRPC status message. That door renders
+// it as text — `sqlErrorText` appends "(SQLSTATE 42602)" — rather than
+// attaching it to the error, so `sqlerr.StateOf` cannot see it through the
+// status wrapper.
+func grpcSQLState(err error) string {
+	msg := err.Error()
+	const marker = "(SQLSTATE "
+	if i := strings.Index(msg, marker); i >= 0 {
+		rest := msg[i+len(marker):]
+		if j := strings.IndexByte(rest, ')'); j == 5 {
+			return rest[:5]
+		}
+	}
+	return doorStateOrNone(err)
 }

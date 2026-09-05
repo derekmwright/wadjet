@@ -64,11 +64,11 @@ func s3Transport(secure bool) *http.Transport {
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12}, //nolint:gosec // TLS always verified
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12}, //nolint:gosec // TLS always verified
 		ExpectContinueTimeout: 1 * time.Second,
 		// ResponseHeaderTimeout fires when the server hasn't sent response
 		// headers by the deadline. For PUT, the server only sends headers
@@ -149,6 +149,9 @@ func (s *MinIOStore) acquireUpload(ctx context.Context) (func(), error) {
 }
 
 func (s *MinIOStore) MakeBucket(ctx context.Context, bucket string) error {
+	if err := ValidateBucketName(bucket); err != nil {
+		return err
+	}
 	exists, err := s.client.BucketExists(ctx, bucket)
 	if err != nil {
 		return fmt.Errorf("checking bucket: %w", err)
@@ -160,14 +163,17 @@ func (s *MinIOStore) MakeBucket(ctx context.Context, bucket string) error {
 }
 
 func (s *MinIOStore) BucketExists(ctx context.Context, bucket string) (bool, error) {
+	if err := ValidateBucketName(bucket); err != nil {
+		return false, err
+	}
 	return s.client.BucketExists(ctx, bucket)
 }
 
 func (s *MinIOStore) Put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) (string, error) {
-	// The same key rule the other two stores apply, so a key is legal
-	// everywhere or nowhere. S3 itself would take "a/../b" and keep it
-	// LITERALLY, which is a third meaning for one string.
-	if err := ValidateObjectKey(key); err != nil {
+	// The same rule the other two stores apply, on every operation. S3 itself
+	// would take "a/../b" and keep it LITERALLY, which is a third meaning for
+	// one string.
+	if err := CheckObjectAccess(bucket, key); err != nil {
 		return "", err
 	}
 	release, err := s.acquireUpload(ctx)
@@ -187,7 +193,7 @@ func (s *MinIOStore) Put(ctx context.Context, bucket, key string, r io.Reader, s
 }
 
 func (s *MinIOStore) PutIfMatch(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string, expectedETag string) (string, error) {
-	if err := ValidateObjectKey(key); err != nil {
+	if err := CheckObjectAccess(bucket, key); err != nil {
 		return "", err
 	}
 	release, err := s.acquireUpload(ctx)
@@ -235,6 +241,9 @@ func (s *MinIOStore) PutIfMatch(ctx context.Context, bucket, key string, r io.Re
 }
 
 func (s *MinIOStore) Get(ctx context.Context, bucket, key string) (io.ReadCloser, ObjectInfo, error) {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return nil, ObjectInfo{}, err
+	}
 	obj, err := s.client.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, ObjectInfo{}, fmt.Errorf("getting object: %w", err)
@@ -274,6 +283,9 @@ func (m *minioReaderAt) Close() error {
 }
 
 func (s *MinIOStore) GetReaderAt(ctx context.Context, bucket, key string) (ReaderAtCloser, int64, error) {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return nil, 0, err
+	}
 	obj, err := s.client.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, 0, fmt.Errorf("getting object: %w", err)
@@ -293,6 +305,9 @@ func (s *MinIOStore) GetReaderAt(ctx context.Context, bucket, key string) (Reade
 }
 
 func (s *MinIOStore) Head(ctx context.Context, bucket, key string) (ObjectInfo, error) {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return ObjectInfo{}, err
+	}
 	info, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		resp := minio.ToErrorResponse(err)
@@ -312,6 +327,9 @@ func (s *MinIOStore) Head(ctx context.Context, bucket, key string) (ObjectInfo, 
 }
 
 func (s *MinIOStore) List(ctx context.Context, bucket string, opts ListOptions) ([]ObjectInfo, error) {
+	if err := ValidateBucketName(bucket); err != nil {
+		return nil, err
+	}
 	listOpts := minio.ListObjectsOptions{
 		Prefix:    opts.Prefix,
 		Recursive: opts.Delimiter == "",
@@ -338,6 +356,9 @@ func (s *MinIOStore) List(ctx context.Context, bucket string, opts ListOptions) 
 }
 
 func (s *MinIOStore) Delete(ctx context.Context, bucket, key string) error {
+	if err := CheckObjectAccess(bucket, key); err != nil {
+		return err
+	}
 	err := s.client.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("deleting object: %w", err)
