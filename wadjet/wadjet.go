@@ -21,6 +21,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -985,8 +986,8 @@ func (db *DB) createFunction(cf *plansql.CreateFunctionInfo) (*QueryResult, erro
 	}
 
 	if !cf.Replace {
-		if _, exists := expr.DefaultUDFs.Get(def.Name); exists {
-			return nil, fmt.Errorf("function %q already exists (use CREATE OR REPLACE to overwrite)", cf.Name)
+		if err := expr.DefaultUDFs.RefuseIfDefined(cf.Name); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1133,7 +1134,7 @@ func (db *DB) alertEvalDecorator() alerts.EvalContextFunc {
 // createAlertSQL handles CREATE ALERT DDL in embedded mode.
 func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo, _ string) (*QueryResult, error) {
 	if db.alertScheduler == nil {
-		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+		return nil, sqlerr.New("0A000", "alerts are disabled; set Config.EnableAlerts=true")
 	}
 	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
 		return nil, err
@@ -1169,7 +1170,7 @@ func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo,
 // dropAlertSQL handles DROP ALERT [IF EXISTS] DDL in embedded mode.
 func (db *DB) dropAlertSQL(ctx context.Context, info *plansql.DropAlertInfo) (*QueryResult, error) {
 	if db.alertScheduler == nil {
-		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+		return nil, sqlerr.New("0A000", "alerts are disabled; set Config.EnableAlerts=true")
 	}
 	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
 		return nil, err
@@ -1195,7 +1196,7 @@ func (db *DB) dropAlertSQL(ctx context.Context, info *plansql.DropAlertInfo) (*Q
 // alterAlertSQL handles ALTER ALERT DDL in embedded mode.
 func (db *DB) alterAlertSQL(ctx context.Context, info *plansql.AlterAlertInfo) (*QueryResult, error) {
 	if db.alertScheduler == nil {
-		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+		return nil, sqlerr.New("0A000", "alerts are disabled; set Config.EnableAlerts=true")
 	}
 	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
 		return nil, err

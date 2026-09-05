@@ -1030,9 +1030,8 @@ func (s *Server) handleCreateFunction(w http.ResponseWriter, r *http.Request, pa
 
 	// Check if function exists and this is not OR REPLACE
 	if !cf.Replace {
-		if _, exists := expr.DefaultUDFs.Get(def.Name); exists {
-			writeError(w, http.StatusConflict,
-				fmt.Sprintf("function %q already exists (use CREATE OR REPLACE to overwrite)", cf.Name))
+		if err := expr.DefaultUDFs.RefuseIfDefined(cf.Name); err != nil {
+			writeSQLError(w, http.StatusConflict, err.Error(), err)
 			return
 		}
 	}
@@ -1132,7 +1131,15 @@ func (s *Server) handleCreateTableSQL(w http.ResponseWriter, r *http.Request, pa
 	}
 
 	if err := s.catalog.CreateTable(r.Context(), ct.Name, schema, ct.PartitionKeys); err != nil {
-		writeSQLError(w, http.StatusConflict, err.Error(), err)
+		// 409 is for the NAME being taken (42P07). Every other refusal here
+		// is something the statement CONTAINS — a column named twice (42701)
+		// — and that is a 400, the status this door gives every other
+		// statement it refuses for its content.
+		status := http.StatusBadRequest
+		if sqlerr.StateOf(err) == "42P07" {
+			status = http.StatusConflict
+		}
+		writeSQLError(w, status, err.Error(), err)
 		return
 	}
 

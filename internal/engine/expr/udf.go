@@ -179,6 +179,23 @@ func (s *UDFStore) Register(def UDFDef, isAdmin bool) error {
 	return nil
 }
 
+// RefuseIfDefined is CREATE FUNCTION's duplicate-name refusal, raised where
+// the store knows the answer rather than at each door that asks.
+//
+// 42723 duplicate_function is PostgreSQL's class for a second CREATE FUNCTION
+// on a name already taken. Both doors that run CREATE FUNCTION — the embedded
+// API and the HTTP query endpoint — did this Get-then-refuse themselves and
+// neither attached a class, so the refusal crossed pgwire as the blanket 42000
+// and the HTTP door reported none (arc E2's api-reference caveat). A third
+// door gets the class by calling this.
+func (s *UDFStore) RefuseIfDefined(name string) error {
+	if _, exists := s.Get(name); exists {
+		return sqlerr.New("42723",
+			"function %q already exists (use CREATE OR REPLACE to overwrite)", name)
+	}
+	return nil
+}
+
 // isBuiltinFunc checks if a function name is a builtin.
 var builtinFuncNames map[string]bool
 

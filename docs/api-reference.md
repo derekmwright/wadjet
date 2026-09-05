@@ -94,17 +94,12 @@ Execute a SQL query and return results.
 }
 ```
 
-Almost every refusal a STATEMENT earns carries the PostgreSQL SQLSTATE
-alongside the message — from `SELECT`, from DML, from `EXPLAIN`, and from the
-DDL statements this same endpoint runs, including an unknown type name
-(`42704`), a missing function (`42883`), a missing table (`42P01`) and a
-duplicate one (`42P07`) — and the class decides the HTTP status.
-
-Two refusals still answer with the message alone, because the engine raises no
-class for them: a duplicate **function** name (PostgreSQL's `42723`) and a
-duplicate **column** in `CREATE TABLE` (`42701`). They are the exception the
-sentence above allows for, and they are the same on the PostgreSQL wire
-protocol.
+Every refusal a STATEMENT earns carries the PostgreSQL SQLSTATE alongside the
+message — from `SELECT`, from DML, from `EXPLAIN`, and from the DDL statements
+this same endpoint runs, including an unknown type name (`42704`), a missing
+function (`42883`), a missing table (`42P01`), a duplicate one (`42P07`), a
+duplicate **function** name (`42723`) and a **column named twice** in
+`CREATE TABLE` (`42701`) — and the class decides the HTTP status.
 
 A statement this engine parses and does not run is refused `0A000`
 (`feature_not_supported`) with a message naming the statement:

@@ -9,13 +9,14 @@ import (
 	"github.com/derekmwright/wadjet/internal/alerts"
 	"github.com/derekmwright/wadjet/internal/auth"
 	sql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // handleCreateAlertSQL parses a CREATE ALERT statement and persists the AlertMeta.
 func (c *Coordinator) handleCreateAlertSQL(ctx context.Context, sqlText string) error {
 	if !c.alertsEnabled {
-		return fmt.Errorf("alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
+		return sqlerr.New("0A000", "alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
 	}
 	// An alert is a persistent server-side job that runs arbitrary SQL on a
 	// cadence under its creator's identity — a privileged management action.
@@ -68,7 +69,7 @@ func (c *Coordinator) handleCreateAlertSQL(ctx context.Context, sqlText string) 
 // handleDropAlertSQL parses DROP ALERT [IF EXISTS] and removes the entry.
 func (c *Coordinator) handleDropAlertSQL(ctx context.Context, sqlText string) error {
 	if !c.alertsEnabled {
-		return fmt.Errorf("alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
+		return sqlerr.New("0A000", "alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
 	}
 	if err := auth.RequirePermission(c.authProvider, ctx, "admin"); err != nil {
 		return err
@@ -92,7 +93,7 @@ func (c *Coordinator) handleDropAlertSQL(ctx context.Context, sqlText string) er
 // handleAlterAlertSQL parses ALTER ALERT and toggles Enabled.
 func (c *Coordinator) handleAlterAlertSQL(ctx context.Context, sqlText string) error {
 	if !c.alertsEnabled {
-		return fmt.Errorf("alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
+		return sqlerr.New("0A000", "alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
 	}
 	if err := auth.RequirePermission(c.authProvider, ctx, "admin"); err != nil {
 		return err

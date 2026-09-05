@@ -358,7 +358,12 @@ func checkDistinctColumnNames(schema parquet.Schema) error {
 	for _, col := range schema.Columns {
 		k := parquet.FoldName(col.Name)
 		if prev, dup := seen[k]; dup {
-			return fmt.Errorf(
+			// 42701 duplicate_column, PostgreSQL's class for
+			// `CREATE TABLE t (a int, a int)`. It is raised here, where the
+			// collision is decided, so every door reports it: without it
+			// `CREATE TABLE` answered with the message alone on all three
+			// while docs/api-reference.md promised a class (arc E2's caveat).
+			return sqlerr.New("42701",
 				"schema columns %q and %q both answer to the name %q: the schema names "+
 					"one column twice under this package's identity rule",
 				prev, col.Name, k)

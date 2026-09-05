@@ -130,6 +130,14 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 	base, conn := hdSetup(t)
 	ctx := context.Background()
 
+	// One function, so the duplicate-name cell below has something to
+	// collide with. expr.DefaultUDFs is process-global, hence the distinctive
+	// name and the cleanup.
+	if status, _, msg := hdPost(t, base, "CREATE FUNCTION hdsqlstatefn(x) AS (x + 1)"); status != 200 {
+		t.Fatalf("setting up the duplicate-function cell: %d %s", status, msg)
+	}
+	t.Cleanup(func() { hdPost(t, base, "DROP FUNCTION IF EXISTS hdsqlstatefn") })
+
 	for _, tc := range []struct {
 		name, sql, state string
 		status           int
@@ -186,6 +194,15 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 		{"drop_function_missing_42883", "DROP FUNCTION nosuchfn", "42883", http.StatusBadRequest},
 		{"create_table_unknown_type_42704", "CREATE TABLE hd3 (a NOSUCHTYPE)", "42704",
 			http.StatusBadRequest},
+		// The two the round-3 caveat had to name because the engine raised no
+		// class for them. Both are now raised where the fact is decided —
+		// expr.UDFStore.RefuseIfDefined and catalog.checkDistinctColumnNames —
+		// so every door reports them, and docs/api-reference.md no longer
+		// carries an exception clause (#860's E2-R rider).
+		{"create_function_duplicate_42723", "CREATE FUNCTION hdsqlstatefn(x) AS (x + 2)",
+			"42723", http.StatusConflict},
+		{"create_table_duplicate_column_42701", "CREATE TABLE hd_dupcol (a BIGINT, a BIGINT)",
+			"42701", http.StatusBadRequest},
 		// #860: a statement the parser reads and no door runs.
 		{"alter_table_0A000", "ALTER TABLE hd ADD COLUMN z BIGINT", "0A000", http.StatusBadRequest},
 		{"create_view_0A000", "CREATE VIEW hd_v AS SELECT id FROM hd", "0A000", http.StatusBadRequest},
