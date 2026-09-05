@@ -526,3 +526,149 @@ func TestARowGroupTheReadNeverOpensIsNeverChecked(t *testing.T) {
 		t.Fatal("the whole file read a short chunk with no error")
 	}
 }
+
+// TestARowGroupWithNoChunkForALeafIsRefused is the shape self-flag 4 said was
+// not driven by a cell: a row group with fewer column chunks than the file's
+// own schema has leaves. It is constructible from the footer — drop the last
+// `ColumnChunk` and re-encode — and at base it was the third silent
+// fabrication of this family: the whole column vanished and the read returned
+// the remaining ones with a nil error.
+//
+// Both refusals are here because they are two different call sites reached by
+// two different readers: `readColumnToAny` for a flat file, `readLeafColumn`
+// for a container one.
+func TestARowGroupWithNoChunkForALeafIsRefused(t *testing.T) {
+	dropLastChunk := func(t *testing.T, data []byte) []byte {
+		t.Helper()
+		md, err := ReadFileMetaData(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rg := &md.RowGroups[0]
+		if len(rg.Columns) < 2 {
+			t.Fatalf("fixture has %d chunks", len(rg.Columns))
+		}
+		rg.Columns = rg.Columns[:len(rg.Columns)-1]
+		footerLen := binary.LittleEndian.Uint32(data[len(data)-8:])
+		out := append([]byte(nil), data[:len(data)-8-int(footerLen)]...)
+		footer := EncodeFileMetaData(md)
+		out = append(out, footer...)
+		out = binary.LittleEndian.AppendUint32(out, uint32(len(footer)))
+		return append(out, "PAR1"...)
+	}
+
+	t.Run("flat/readColumnToAny", func(t *testing.T) {
+		rows := make([]map[string]any, 8)
+		for i := range rows {
+			rows[i] = map[string]any{"x": int64(i), "s": fmt.Sprintf("v%d", i)}
+		}
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, Schema{Columns: []Column{
+			{Name: "x", Type: TypeInt64}, {Name: "s", Type: TypeString},
+		}}, WriterConfig{Compression: CompressionNone})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := readEveryRow(buf.Bytes()); err != nil || len(got) != 8 {
+			t.Fatalf("unmutated: rows=%d err=%v", len(got), err)
+		}
+		got, err := readEveryRow(dropLastChunk(t, buf.Bytes()))
+		if err == nil {
+			t.Fatalf("a row group with no chunk for column s read %d rows with no error: %v",
+				len(got), got)
+		}
+		if !strings.Contains(err.Error(), "carries no chunk for it") ||
+			!strings.Contains(err.Error(), "s") {
+			t.Fatalf("refused, but not as a missing chunk naming the column: %v", err)
+		}
+	})
+
+	t.Run("nested/readLeafColumn", func(t *testing.T) {
+		data := testdataFile(t, "testdata/nested_pages.parquet")
+		if got, err := readEveryRow(data); err != nil || len(got) == 0 {
+			t.Fatalf("unmutated: rows=%d err=%v", len(got), err)
+		}
+		got, err := readEveryRow(dropLastChunk(t, data))
+		if err == nil {
+			t.Fatalf("a row group with no chunk for a container leaf read %d rows with no error",
+				len(got))
+		}
+		if !strings.Contains(err.Error(), "carries no chunk for it") {
+			t.Fatalf("refused, but not as a missing chunk: %v", err)
+		}
+	})
+}
+
+// TestAV2PageWhoseRowCountContradictsItsLevelsIsRefused gates the third
+// ungated hunk: a nested v2 header declares num_rows, the repetition levels
+// say how many rows the page actually opens, and the two must agree. The
+// corpus had no nested data-page-v2 file at all until testdata/v2_nested.parquet
+// (data_page_version="2.0"), so the check rested on nothing.
+func TestAV2PageWhoseRowCountContradictsItsLevelsIsRefused(t *testing.T) {
+	data := testdataFile(t, "testdata/v2_nested_small.parquet")
+	fr := mustFileReader(t, data)
+	leafIdx := leafIndexByPath(t, fr, "tags.list.element")
+
+	checked := 0
+	for _, p := range walkPages(t, data) {
+		if p.kind != PageDataV2 || p.column != "tags.list.element" {
+			continue
+		}
+		ph, _, err := DecodePageHeader(data[p.headerAt:])
+		if err != nil || ph.DataPageHeaderV2 == nil {
+			continue
+		}
+		body := data[p.bodyAt : p.bodyAt+p.bodyLen]
+
+		pr := fr.ColumnPages(0, leafIdx)
+		if pr == nil {
+			t.Fatal("no chunk")
+		}
+		ref, err := pr.decodeDataPageV2(ph, body)
+		pr.Close()
+		if err != nil {
+			t.Fatalf("unmutated page at %d: %v", p.headerAt, err)
+		}
+		if ref.NumRows == ref.NumValues {
+			// A page whose rows and values coincide cannot tell the row check
+			// from the flat num_rows == num_values pairing.
+			ref.Release()
+			continue
+		}
+		ref.Release()
+
+		for _, delta := range []int32{-1, 1} {
+			m := *ph
+			h := *ph.DataPageHeaderV2
+			m.DataPageHeaderV2 = &h
+			h.NumRows += delta
+			pr2 := fr.ColumnPages(0, leafIdx)
+			if pr2 == nil {
+				t.Fatal("no chunk")
+			}
+			got, err := pr2.decodeDataPageV2(&m, body)
+			pr2.Close()
+			checked++
+			if err == nil {
+				got.Release()
+				t.Fatalf("page at %d: num_rows %d -> %d decoded with no error",
+					p.headerAt, h.NumRows-delta, h.NumRows)
+			}
+			if !strings.Contains(err.Error(), "repetition\nlevels start") &&
+				!strings.Contains(err.Error(), "repetition levels start") {
+				t.Fatalf("page at %d: num_rows %d -> %d refused, but not against its levels: %v",
+					p.headerAt, h.NumRows-delta, h.NumRows, err)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no nested v2 page with rows != values; the cell proves nothing")
+	}
+	t.Logf("%d num_rows perturbations, all refused against the repetition levels", checked)
+}
