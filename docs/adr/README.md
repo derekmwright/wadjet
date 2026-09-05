@@ -37,7 +37,7 @@ Conventions:
 | [0017](0017-stage-sinks-copy-outside-the-lock.md) | Stage sinks copy outside the lock; the lock covers handoff only | Accepted |
 | [0018](0018-parquet-file-numbers-are-input.md) | A parquet file's own numbers are input, not fact | Accepted |
 | [0019](0019-query-scoped-panic-boundary.md) | A panic fails the query, not the server — and the gate is what keeps that honest | Accepted |
-| [0020](0020-drop-table-reclaim-is-opt-in.md) | DROP TABLE's physical reclaim is guarded and opt-in | Accepted |
+| [0020](0020-drop-table-reclaim-is-opt-in.md) | DROP TABLE's physical reclaim is guarded and opt-in; a compaction publication is one validated transaction and an object is retired only with proof (2026-09-05 amendment) | Accepted |
 | [0021](0021-subquery-name-resolution-and-set-materialization.md) | A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized | Accepted |
 | [0022](0022-a-row-field-path-is-not-a-column-reference.md) | A ROW field path is not a column reference: it is resolved from its parent's declaration and materialized like a computed expression | Accepted |
 | [0023](0023-group-key-and-group-value-are-two-encodings.md) | A group's KEY and its VALUE are two encodings; never decode one out of the other | Accepted |

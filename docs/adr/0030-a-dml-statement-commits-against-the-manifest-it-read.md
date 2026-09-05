@@ -25,10 +25,15 @@ whole statement. And it never looked at `manifest.Partitions` at all: the
 incoming `FilePath` was a map key and nothing else, so a marker naming a
 file the table no longer had was merged in without a word.
 
-Compaction lands in exactly that window and removes exactly those files.
-`compaction.mergeGroup` is `RemoveFiles` (which strips the markers for the
-paths it removes) followed by `AddNewFiles`. Reproduced deterministically
-on all three doors, with the real compactor inside a real `db.Execute`:
+Compaction lands in exactly that window and removes exactly those files. At
+the time, `compaction.mergeGroup` was `RemoveFiles` (which strips the markers
+for the paths it removes) followed by `AddNewFiles` — two CAS writes whose
+pair was not one. (Since 2026-09-05 it is a single validated transaction,
+`catalog.CommitCompaction`; see ADR-0020's amendment. That closes the mirror
+image of this record's defect — DML committing first and compaction then
+publishing a stale rewrite — which this record's DML-side validation could
+not reach.) Reproduced deterministically on all three doors, with the real
+compactor inside a real `db.Execute`:
 
 | statement, with a compaction inside it | reported | table afterwards |
 |---|---|---|
@@ -85,7 +90,8 @@ it is the only one the DML executors use.
 
 `AddDeleteMarkers` keeps its old, unvalidated behaviour and its doc now
 says what it is: the low-level primitive for a caller holding a manifest
-right now (the GC, compaction, and their tests). It is not a DML entry
+right now (the GC and their tests; compaction publishes through
+`CommitCompaction` since ADR-0020's 2026-09-05 amendment). It is not a DML entry
 point, and since #815 there is exactly one DML implementation, so no door
 can reach the old shape by accident.
 

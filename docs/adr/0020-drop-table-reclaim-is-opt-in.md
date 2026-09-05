@@ -8,6 +8,11 @@ time-of-check/time-of-use check, and that a failed DROP bricked reclaim
 catalog-wide. Every layer below has a regression test confirmed to fail
 with its own fix backed out.)
 
+Amended 2026-09-05: this record now also governs COMPACTION's two physical
+schedules — its manifest publication and its deferred-delete queue — after an
+adversarial review reproduced four losses there (#893, #894, #895, #896). See
+"Amendment, 2026-09-05" below for the rule and what it does not close.
+
 ## Context
 
 `DropTable` has always been metadata-only: it removes a table's name and
@@ -253,6 +258,180 @@ Every clause is load-bearing, and two qualifiers are not decoration:
 - *"was written by this engine"* is what the invariant leans on when
   timing gives out, which is why ownership, not the live-manifest guard,
   is the layer described first.
+
+## Amendment, 2026-09-05: compaction publication is one validated transaction, and retirement needs proof
+
+Status: Accepted (landed 2026-09-05, following an adversarial review of the
+compaction publication path that reproduced four losses 5/5 with no sleeps and
+no probabilistic race: #893, #894, #895, #896. Every rule below has a
+regression test confirmed to fail with its own hunk backed out — eleven
+single-hunk reverts, each turning its named gate red.)
+
+This record already governed one physical-deletion schedule, `DROP TABLE`'s.
+Compaction has two more — its own deferred-delete queue and its manifest
+publication — and neither was held to the same standard. The review found
+that the publication was not a transaction at all and that the queue's
+eligibility test did not mean what its name said.
+
+### The rule
+
+> **A compaction commit is ONE conditional manifest transaction, validated
+> against the input file identities and the delete-marker snapshot it was cut
+> from. It either publishes a replacement that reflects every committed
+> delete, or it fails leaving the previous snapshot intact. An object is
+> physically retired only with proof that no live manifest references it, and
+> doubt preserves bytes.**
+
+Four sentences, and each one was a reproduced loss:
+
+1. **One transaction.** `mergeGroup` uploaded the replacement, committed
+   `RemoveFiles`, and then separately committed `AddNewFiles`. Each is a CAS;
+   the pair is not. A failure at the second left the table with the inputs
+   gone and the replacement unpublished — **zero visible rows**, and
+   unrecoverable by retrying, because the compactor selects its inputs from
+   the manifest it just emptied (#893). Even with both writes succeeding, a
+   reader landing between them answered from the missing-file manifest.
+   `catalog.CommitCompaction` is now the single write, and `SwapFileForGC` is
+   a thin wrapper over it so the GC rewrite and the ordinary merge cannot
+   drift apart.
+
+2. **Validated against the input identities.** `RemoveFiles` treats an input
+   that is already gone as success, and `AddNewFiles` accepts a second
+   distinct UUID output beside the first, so two compactors publishing
+   replacements for the same originals both succeeded and the next pass merged
+   both copies: **every row twice** (#895). Atomicity alone does not fix this
+   — a single atomic write of a stale plan is still wrong. The commit now
+   refuses (`ErrCompactionInputMoved`) unless every input is still in the
+   partition. `gcInProgress` was never a substitute: it is one Compactor
+   instance's map, it guards only `ForceCompactFile`, and it cannot exclude an
+   independent compactor or the CLI.
+
+3. **Validated against the delete-marker snapshot.** A DELETE that committed
+   after the output was written and before it was published was undone by the
+   publication, both operations reporting success (#894). Two shapes of the
+   same missing check: ordinary compaction's `RemoveFiles` strips ALL of a
+   path's markers including ones the output never applied; forced GC's
+   `SwapFileForGC` kept the unapplied ones under the OLD path, where no reader
+   can apply them because that file no longer exists — and the next sweep
+   removed them as orphans, making the loss permanent. The comment there
+   claimed the rows stayed visible "for at most one GC cycle"; that claim was
+   wrong, and **removing a marker cannot remove a row from a file that already
+   contains it**. The commit now refuses (`ErrCompactionDeletesAdvanced`)
+   unless the manifest's marker set for each input is exactly the set the
+   output was cut from, and a GC rewrite applies **all** of a file's current
+   markers or none — which also means applying a DELETE that landed after the
+   GC scan, because that is the right answer and not a TOCTOU hazard.
+
+   Both predicates are exact, not conservative. A concurrent write that did
+   not touch this partition's files leaves the commit valid; a "the revision
+   moved" test would fail on any unrelated ingest. This is the same shape
+   ADR-0030 settled for DML, in the other direction: #691 gave the DML side
+   its validation, and the compaction side had none, so the inverse
+   interleaving — DML commits first, compaction commits a stale rewrite — was
+   still open. It is now closed on both sides.
+
+4. **A refusal is not a failure, and the loser cleans up after itself.** The
+   refused writer deletes its own output and replans from the manifest that
+   replaced the one it read. Deleting is safe there and ONLY there: a conflict
+   is computed before the CAS is attempted, so "nothing was published" is a
+   fact. A publication ERROR is not — an update that times out may still have
+   been applied — so those bytes are kept and left to the orphan sweep. The
+   replan is bounded, so a table under continuous DML is left to the next
+   sweep rather than spun on.
+
+   `Result.PublicationConflicts` and `Compactor.PublicationConflicts()` make
+   the refusal observable, because the row set after a lost race is the same
+   row set as after a race nobody entered. Rows alone cannot tell "the loser
+   detected the conflict and discarded its output" from "the loser silently
+   did nothing", so the gates assert the counter beside the rows.
+
+5. **Retirement needs proof.** Compaction's deferred-delete queue holds the
+   paths ONE table stopped referencing and deleted their bytes on that alone.
+   That is not the same claim as "nothing references this object": compact
+   `events`, register one of its unchanged originals into a live `archive`
+   through `AddFiles` during the grace, flush — and `archive`'s manifest is
+   left naming an object the store no longer has (#896). The queue's only
+   guard was the object's `LastModified`, and registering unchanged bytes does
+   not move it. No `DROP`, no overwrite, no second process and no race is
+   needed; the immediate-delete path had no check at all.
+
+   `catalog.Catalog.RetireObjects` is now the only way an object leaves the
+   bucket on a compaction schedule, and it establishes eligibility in this
+   order:
+
+   - the **retirement mark**, taken before anything is read. A registration
+     naming a marked path is refused with `ErrPathRetiring`; a path with a
+     registration already in flight is not marked at all and is reported
+     unproven. This is the half a reference check cannot cover alone — a
+     check is a read, and a read cannot exclude a write that lands after it.
+     `AddFiles`, `AddNewFiles` and `CommitDML` take the other end of it.
+   - the **live-manifest reference check** across every table
+     (`liveCatalogState`, layer 1 above), taken while the mark is held.
+   - the **recreated-object check** the queue already had.
+
+   Anything unproven deletes nothing and is requeued. A path a live manifest
+   names is reported as such and dropped from the queue, since that reference
+   will not go away by waiting.
+
+### What this does NOT close
+
+- **The retirement mark is in-process**, and that is the honest scope for
+  what it guards: the deferred-delete queue it serves is itself process-local,
+  so no other process's compactor ever holds these paths. It closes the
+  window against a registration through this same `*Catalog` — the one #896
+  reproduced, and the one an embedder running a `BackgroundCompactor` beside
+  its own `AddFiles` calls reaches. A cross-process registration into a shared
+  catalog racing a physical delete would need a catalog-side lease, and that
+  is a bigger design than this one.
+- **`FlushDroppedTableFiles` still has its own guards** rather than sharing
+  `RetireObjects`. Consolidating the two lifecycle checks is the obvious next
+  step and is deliberately not taken here: the DROP path's residual is
+  documented above and unchanged, and folding two schedules together is a
+  change with its own failure modes. Its TOCTOU residual (layer 1's
+  qualifier) is exactly what the retirement mark now closes for compaction's
+  queue, so the consolidation would narrow it there too.
+- **`RemoveFiles` keeps its old, unvalidated behaviour** and stays what its
+  doc says it is: the low-level primitive, no longer the compaction
+  publication path.
+
+### What changes for an operator
+
+The shared-bucket caution in the Consequences below is narrower than it was.
+Compaction's deferred deletes can no longer remove an object that **another
+live table in the same catalog** references — that is now checked, not
+assumed. What is unchanged is the rest of that bullet: compaction still
+consumes registered originals it merged into an engine-written replacement,
+and a `DROP` with reclaim enabled still removes that replacement. The operator
+rule stands.
+
+### Gates
+
+- `internal/storage/compaction/publication_safety_test.go` —
+  `TestAFailedReplacementPublicationLeavesTheOldSnapshotQueryable` (ordinary,
+  rewrite, all-rows-deleted), `TestNoReaderEverSeesAPartialCompactionPublication`
+  (every manifest revision written during a compaction is read as a reader at
+  that revision would read it), `TestACommittedDeleteSurvivesTheCompactionThatRacedIt`
+  (ordinary, rewrite, forced GC, plus the next-GC orphan check and the
+  conflict counter), `TestCompetingCompactorsPublishEachRowExactlyOnce` (six
+  arms, plus "the loser left no output in the store").
+- `internal/storage/compaction/retire_safety_test.go` —
+  `TestADeferredRetirementNeverDeletesAnObjectALiveTableReferences`: the
+  filing's four-step schedule, the immediate-grace path, a registration racing
+  the flush from inside the flush's own catalog read, and DROP reclamation
+  unchanged.
+- `internal/storage/catalog/compaction_commit_test.go` and `retire_test.go` —
+  the two preconditions in both directions, the exactness claim (an unrelated
+  write must NOT refuse), the mark/in-flight interlock, and the
+  recreated-object guard.
+- Two existing tests were rewritten because they asserted the defective
+  contract: `TestForceCompactFile_ConcurrentDeletePreserved` required the
+  concurrent marker to SURVIVE the swap (which is #894, asserted on the
+  metadata rather than on the rows), and `TestSwapFileForGC_AtomicSwap`
+  required a partial marker application to succeed.
+
+Every schedule is deterministic — a second operation runs from inside the
+object store's `Put` or the KV's `Get`, at the instant the defect needs — so
+there are no sleeps and nothing probabilistic to replicate away.
 
 ## Two limitations an operator has to know about
 

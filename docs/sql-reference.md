@@ -2378,6 +2378,18 @@ whose row a concurrent `DELETE` removed reports `UPDATE 0`. Statements over
 *different* rows never conflict — the rule is over rows, not over files or
 tables — so concurrent writers to one table proceed in parallel.
 
+**Background compaction plays by the same rule, in the other direction.** A
+compaction reads the manifest, writes a merged replacement, and publishes the
+removal of its inputs, the addition of the replacement and the delete-marker
+change as a single conditional write. It is refused if the files it merged are
+no longer the table's files, or if a `DELETE` committed against those files
+after its output was written — so **a committed `DELETE` is never undone by
+the compaction it raced**, and two compactors over the same files never leave
+you two copies of every row. The refused compactor discards its output and
+replans; nothing about the refusal is visible to a client. A compaction whose
+publication FAILS leaves the table exactly as it was, fully queryable, rather
+than partly rewritten.
+
 A statement that keeps losing the race reports SQLSTATE **40001**
 (`serialization_failure`), which a client is expected to retry; the table is
 unchanged when it does. A statement redoes itself at most five times, so 40001

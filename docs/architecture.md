@@ -302,6 +302,33 @@ The ingester is a micro-batch accumulator that:
    - **Time**: 60 seconds default
 5. Updates the catalog manifest atomically
 
+### Compaction
+
+A background sweep (`--background-compaction`, on by default, every 5 minutes)
+merges a partition's small files into one larger file and applies aged delete
+markers by rewriting the files that carry them. Compaction REPLACES its
+inputs, so its commit rule is the load-bearing part:
+
+- **One conditional transaction.** The inputs leaving the manifest, the
+  replacement arriving, and the delete-marker change are a single
+  compare-and-swap. A publication that fails leaves the previous snapshot
+  fully queryable, and no reader ever observes a manifest that is missing the
+  inputs and does not yet have the replacement.
+- **Validated against what it read.** The commit is refused unless every input
+  file is still in the partition, and unless the delete markers on those
+  inputs are exactly the ones the replacement was written against. So a
+  `DELETE` that commits while a merge is being written is never undone by it,
+  and two compactors over the same files never publish two copies of the same
+  rows. The refused compactor discards its output and replans against the
+  manifest that replaced the one it read.
+- **Retirement needs proof.** A compacted-away object's bytes stay readable
+  for `DeleteGrace` (30 minutes by default), so queries dispatched against the
+  old manifest finish, and are then deleted only if no live table's manifest
+  references them. Anything unprovable is kept.
+
+See [ADR-0020](adr/0020-drop-table-reclaim-is-opt-in.md) for the full rule and
+its residuals.
+
 ### Parquet I/O
 
 - **Writer**: Configurable row group size (128K rows), page buffer (256KB), compression codec
