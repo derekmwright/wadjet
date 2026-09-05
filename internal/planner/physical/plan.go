@@ -11918,6 +11918,21 @@ func isSimpleColRef(node plansql.Node) bool {
 // aggregate projection — cannot narrow the batch, since the window's output
 // is every input column plus its own.
 func NewComputedColumnsOp(cols []exec.ProjectColumn) exec.UnaryOperator {
+	return NewComputedColumnsOpWithMeta(cols, nil)
+}
+
+// NewComputedColumnsOpWithMeta is NewComputedColumnsOp plus the full
+// declaration of each computed column, for a caller that has one.
+//
+// exec.ProjectColumn carries a bare TypeID plus (p,s) and a VECTOR dimension,
+// which is enough for the arithmetic these columns were built for and not
+// enough for a ROW FIELD PATH of a container type: without Fields/ElementType
+// the computed vector is minted with nil Children/Child and every value
+// written into it is dropped (#568 for the aggregate's pre-projection, #618
+// for the window's keys). A nil meta is the pre-#568 contract — "Name/Type is
+// the whole declaration" — and is what NewComputedColumnsOp's other caller,
+// the worker's fragment builder, passes.
+func NewComputedColumnsOpWithMeta(cols []exec.ProjectColumn, meta []parquet.Column) exec.UnaryOperator {
 	// shareOutputs, which here means per-CALL computed vectors rather than
 	// the pooled ones. The aggregate consumes each batch's values before the
 	// next Execute overwrites them; the window RETAINS every batch it is
@@ -11926,7 +11941,7 @@ func NewComputedColumnsOp(cols []exec.ProjectColumn) exec.UnaryOperator {
 	// constant key column, and a window over one partition. That is #585's
 	// symptom produced by its own fix, and it showed up the moment the
 	// window's input was an aggregate emitting a batch per group.
-	return &aggPreProject{computed: cols, shareOutputs: true}
+	return &aggPreProject{computed: cols, meta: meta, shareOutputs: true}
 }
 
 // aggPreProject is a UnaryOperator that passes through all input columns
@@ -11955,14 +11970,51 @@ type aggPreProject struct {
 	shareOutputs      bool               // per-call vector allocation (partitioned-agg sharing)
 }
 
+// rowFieldDecl resolves name as a ROW FIELD PATH against b and returns the
+// FIELD's declaration. It answers only when the qualifier really names a ROW
+// column of the batch — `batch.RowFieldPath` is the one place that question is
+// settled for the whole engine — so a qualified reference to a PLAIN column
+// (`p.g`) falls through untouched.
+//
+// The batch's own schema is the source, not the vector: a worker's input comes
+// from a scan, which carries the declaration. A batch whose schema lost it is
+// left to the caller's fallback rather than reconstructed here, because the
+// only producer that loses it is a spill file, and that is fixed at the file
+// (#865).
+func rowFieldDecl(b *batch.RecordBatch, name string) (parquet.Column, bool) {
+	dot := strings.IndexByte(name, '.')
+	if dot < 0 {
+		return parquet.Column{}, false
+	}
+	pi, _, ok := b.RowFieldPath(name)
+	if !ok || pi >= len(b.Schema) {
+		return parquet.Column{}, false
+	}
+	return b.Schema[pi].Field(name[dot+1:])
+}
+
 // columnMeta is the declaration of computed column k: the full parquet.Column
-// when the builder supplied one, else the Name/Type pair every caller before
+// when the builder supplied one, else the field's own when the column names a
+// ROW FIELD PATH it computed from, else the Name/Type pair every caller before
 // #568 relied on.
-func (a *aggPreProject) columnMeta(k int, c exec.ProjectColumn) parquet.Column {
+func (a *aggPreProject) columnMeta(in *batch.RecordBatch, k int, c exec.ProjectColumn) parquet.Column {
 	if k < len(a.meta) && a.meta[k].Name != "" {
 		m := a.meta[k]
 		m.Name, m.Nullable = c.Name, true
 		return m
+	}
+	// A builder with no catalog cannot supply meta: the DAG's worker has the
+	// stage spec's TEXT and nothing else. It names the SOURCE it computed
+	// from instead, and the field's declaration is read off the parent ROW in
+	// the batch — the same ladder exec.Project walks for the same reason
+	// (#568). Without it a windowed container field path on a worker got an
+	// output vector with no children and dropped every value, while the
+	// single-process pipeline (which does have meta) answered (#618).
+	if in != nil && c.SourceCol != "" {
+		if fc, ok := rowFieldDecl(in, c.SourceCol); ok {
+			fc.Name, fc.Nullable = c.Name, true
+			return fc
+		}
 	}
 	col := parquet.Column{Name: c.Name, Type: c.Type, Nullable: true}
 	if c.Type == parquet.TypeVector {
@@ -12048,7 +12100,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		schema := make([]parquet.Column, 0, len(in.Schema)+len(a.computed))
 		schema = append(schema, in.Schema...)
 		for k, c := range a.computed {
-			schema = append(schema, a.columnMeta(k, c))
+			schema = append(schema, a.columnMeta(in, k, c))
 		}
 		a.cachedSchema = schema
 	}
@@ -12071,7 +12123,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	if a.shareOutputs || a.computedVectors == nil || in.Len > a.computedCap {
 		a.computedVectors = make([]*batch.Vector, len(a.computed))
 		for k, c := range a.computed {
-			a.computedVectors[k] = batch.NewColumnVector(a.columnMeta(k, c), in.Len)
+			a.computedVectors[k] = batch.NewColumnVector(a.columnMeta(in, k, c), in.Len)
 		}
 		a.computedCap = in.Len
 	} else {
@@ -12475,7 +12527,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	winKeys := resolveWindowKeys(node)
-	keyProjections, err := p.windowKeyProjections(winKeys)
+	keyProjections, keyMeta, err := p.windowKeyProjections(winKeys)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -12484,7 +12536,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 		// projection that keeps every input column and appends the computed
 		// PARTITION BY / ORDER BY keys, so exec.Window resolves them by name
 		// like any other column (#585).
-		childOps = append(childOps, NewComputedColumnsOp(keyProjections))
+		childOps = append(childOps, NewComputedColumnsOpWithMeta(keyProjections, keyMeta))
 	}
 
 	var winCols []exec.WindowColumn

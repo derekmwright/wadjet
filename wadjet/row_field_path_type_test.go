@@ -280,25 +280,13 @@ func TestRowFieldPathCarriesTheFieldsDeclaredType(t *testing.T) {
 		t.Run(f.Name, func(t *testing.T) {
 			for _, sh := range append(append([]struct{ name, sql string }{}, shapes...), typed[f.Name]...) {
 				t.Run(sh.name, func(t *testing.T) {
-					// A windowed MIN/MAX over a field path of a PARAMETERIZED
-					// or CONTAINER type does not yet carry the field's (p,s)
-					// or shape through fix-585's window materialization: the
-					// DECIMAL comes back scale-stripped ("1" for 1.2500) and a
-					// ROW/ARRAY field comes back NULL, while the flat column of
-					// the same type is correct. It is the window counterpart
-					// of the parameterized-field aggregate residual, and it is
-					// fix-585's territory (window keys), filed as #618. Every
-					// SCALAR type passes every window shape.
-					if strings.HasPrefix(sh.name, "win_") {
-						switch f.Type {
-						case parquet.TypeRow, parquet.TypeArray, parquet.TypeMap, parquet.TypeVector:
-							t.Skipf("not gated (#618): a window over a container field path drops it")
-						case parquet.TypeDecimal:
-							if sh.name == "win_min" || sh.name == "win_max" {
-								t.Skipf("not gated (#618): a windowed MIN/MAX over a DECIMAL field path loses scale")
-							}
-						}
-					}
+					// The window shapes were SKIPPED here for the parameterized
+					// and container field types until #618: the materialized
+					// window key carried a bare TypeID, so a DECIMAL field came
+					// back scale-stripped and a ROW/ARRAY field came back NULL.
+					// The skips are deleted, which is the fix's proof — every
+					// field type now runs every window shape against the same
+					// value in a flat column.
 					flatSQL := strings.ReplaceAll(fmt.Sprintf(sh.sql, flatName(f.Name)),
 						"SELECT rw FROM rowfld", "SELECT "+flatName(f.Name)+" FROM rowfld")
 					pathSQL := fmt.Sprintf(sh.sql, "rw."+f.Name)

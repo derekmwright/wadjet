@@ -71,6 +71,21 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 		if ve, ok := compiled.(expr.VecExpr); ok {
 			pc.VecEval = ve.EvalVec
 		}
+		// A QUALIFIED reference names the source it is computed from, so the
+		// pre-projection can read a ROW FIELD's whole declaration off the
+		// batch. This side has no catalog, so `spec.Type` is all the
+		// coordinator could send and a bare TypeID has no room for a
+		// container's Fields/ElementType: the computed vector came out with
+		// nil children and dropped every value, on the DAG only, while the
+		// single-process pipeline answered (#618, #568's rule).
+		//
+		// Only a qualified reference, and only when the qualifier really
+		// names a ROW column of the batch — `rowFieldDecl` settles that at
+		// runtime — so `PARTITION BY p.g` over a plain column is untouched.
+		if ref, isRef := node.(*plansql.ColRef); isRef && ref.Table != "" {
+			pc.SourceCol = spec.Expr
+			pc.VecEval = nil
+		}
 		cols = append(cols, pc)
 	}
 	if len(cols) == 0 {

@@ -486,10 +486,15 @@ func windowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 // exec.Window back where #585 found it, resolving a name nothing produces.
 // The refusal is the planner's, where the expression text is still available
 // to name in the message.
-func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.ProjectColumn, error) {
+// The second return is the DECLARATION of each projection, aligned with the
+// first: `exec.ProjectColumn` carries a bare TypeID plus (p,s), which has no
+// room for a container's Fields / ElementType or a VECTOR's dimension, and the
+// pre-window operator builds its output vector from whichever of the two it is
+// given (#568's `meta`, plan.go's aggPreProject).
+func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.ProjectColumn, []parquet.Column, error) {
 	specs := windowKeySpecs(keys)
 	if len(specs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	byName := make(map[string]windowKey, len(keys))
 	for _, k := range keys {
@@ -498,11 +503,12 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.Projec
 		}
 	}
 	cols := make([]exec.ProjectColumn, 0, len(specs))
+	meta := make([]parquet.Column, 0, len(specs))
 	for _, spec := range specs {
 		k := byName[spec.Name]
 		compiled, err := expr.CompileWithRunner(k.Expr, p.subqueryRunner, p.subqueryBudgetOption())
 		if err != nil {
-			return nil, windowKeyCompileError(k.Text, err)
+			return nil, nil, windowKeyCompileError(k.Text, err)
 		}
 		pc := exec.ProjectColumn{
 			Name:      k.Name,
@@ -515,9 +521,31 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.Projec
 		if ve, ok := compiled.(expr.VecExpr); ok {
 			pc.VecEval = ve.EvalVec
 		}
+		// A ROW FIELD PATH declares the WHOLE field, which is the repair #568
+		// made for the aggregate's pre-projection (plan.go, `meta = fc`) and
+		// the one this pass never got. Without it the materialized key's
+		// output vector was minted with nil Children / nil Child, and every
+		// value written into it was dropped: `MIN(rw.row_field) OVER ()`
+		// answered NULL where the flat column answers the row, and
+		// `COUNT(*) OVER (PARTITION BY rw.arr_field)` put every row in ONE
+		// partition because every key came out empty (#618).
+		//
+		// The value takes the BOXED route for the reason the aggregate's
+		// does: a vectorized kernel over a container writes into a vector
+		// shape it does not have, and a NULL field has to stay NULL.
+		m := parquet.Column{Name: k.Name, Type: k.Type, Nullable: true,
+			Precision: k.Precision, Scale: k.Scale}
+		if k.Field != nil {
+			m = *k.Field
+			m.Name, m.Nullable = k.Name, true
+			pc.Type = k.Field.Type
+			pc.Dimension = k.Field.Dimension
+			pc.VecEval = nil
+		}
 		cols = append(cols, pc)
+		meta = append(meta, m)
 	}
-	return cols, nil
+	return cols, meta, nil
 }
 
 // windowKeyCompileError reports a window key the engine cannot evaluate. A
