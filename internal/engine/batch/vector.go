@@ -111,6 +111,22 @@ func FormatIPv6(raw []byte) string {
 	if bestLen < 2 {
 		bestBase = -1
 	}
+	// The V4-MAPPED fast path, which is the family this function exists for and
+	// the one `net.IP.String` detects in a few compares before its own quad
+	// printer. words[0..4] are zero and words[5] is 0xffff, so the longest
+	// zero run is exactly five and starts at word 0 — the general loop below
+	// would reach the same answer after scanning eight words and writing
+	// seven of them one branch at a time. Round-3 review P-C measured this
+	// family +25.9 % against the base renderer; roughly two-thirds of that
+	// was the scan, and the rest is the longer string PostgreSQL's spelling
+	// requires (`::ffff:10.0.0.1` is 15 bytes where Go prints `10.0.0.1`).
+	if words[0]|words[1]|words[2]|words[3]|words[4] == 0 && words[5] == 0xffff {
+		var quad [23]byte // "::ffff:" + "255.255.255.255"
+		n := copy(quad[:], "::ffff:")
+		n += putIPv4(quad[n:], uint32(raw[12])<<24|uint32(raw[13])<<16|
+			uint32(raw[14])<<8|uint32(raw[15]))
+		return string(quad[:n])
+	}
 	// The dotted-quad tail fires at word 6 only, so a run of SEVEN zero words
 	// (`::2`) never reaches it — which is why the server prints `::2` and not
 	// `::0.0.0.2`.
