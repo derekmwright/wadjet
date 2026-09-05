@@ -3,6 +3,7 @@ package batch
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -118,13 +119,86 @@ func (p *BatchPool) GetForSize(numRows int) *RecordBatch {
 	return b
 }
 
-// Put returns a batch to the pool for reuse.
+// Put returns a batch to the pool for reuse, unless the batch still aliases
+// storage a consumer claimed — see retainsClaimedStorage.
 func (p *BatchPool) Put(b *RecordBatch) {
+	if retainsClaimedStorage(b) {
+		poolRetentionVetoes.Add(1)
+		return
+	}
 	p.mu.Lock()
 	if len(p.pool) < p.maxPool {
 		p.pool = append(p.pool, b)
 	}
 	p.mu.Unlock()
+}
+
+// poolRetentionVetoes counts batches a claim kept out of a BatchPool. A gate
+// that asserts a retained value survived a pool cycle proves nothing if no
+// veto ever fired during it — the same reason the poison gate reports how
+// many batches it scribbled.
+var poolRetentionVetoes atomic.Uint64
+
+// PoolRetentionVetoes returns the running count of pool admissions refused
+// because a consumer had claimed storage the batch aliases.
+func PoolRetentionVetoes() uint64 { return poolRetentionVetoes.Load() }
+
+// retainsClaimedStorage reports whether returning b to a pool would hand out
+// storage somebody still reads.
+//
+// The claim rides the VECTOR, not the batch shell, because the batch a
+// retaining consumer holds is not always the batch the producer emitted:
+// ColumnPrune, the set-op emitter and partitioned aggregation's per-partition
+// views all mint a DERIVED RecordBatch over the same *Vector pointers. Detach
+// on the derived batch severs only that shell's pool link and claims the
+// shared vectors; the ORIGINAL pooled batch still points at them and is still
+// released by whoever produced it (ChainDriver.ReleaseInputs, the shared-batch
+// refcount). Until #897 the pool ignored the claims: Get reset those same
+// vectors, cleared claimed, and overwrote storage the consumer was holding —
+// a retained [11 22] read back as [22 22].
+//
+// So the pool is the boundary the claim has to hold at, and it holds WHOLE:
+// one claimed column vetoes the batch, exactly as the scan's BackingPool
+// already does (internal/engine/scan/backing_pool.go, "the backing is
+// surrendered whole or not at all"). Partial admission would mean minting
+// replacement vectors for the claimed columns, which is an allocation on the
+// release path to save an allocation on the next Get.
+//
+// The walk descends into nested children and view bases: Claim propagates
+// DOWN (Base, Child, Children), so a view over a ROW column's child claims
+// that child while the top-level column stays unclaimed.
+func retainsClaimedStorage(b *RecordBatch) bool {
+	if b == nil {
+		return false
+	}
+	if b.retained {
+		return true
+	}
+	for _, c := range b.Columns {
+		if claimedAnywhere(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// claimedAnywhere reports whether v or anything it aliases carries a claim.
+func claimedAnywhere(v *Vector) bool {
+	if v == nil {
+		return false
+	}
+	if v.claimed {
+		return true
+	}
+	if claimedAnywhere(v.Base) || claimedAnywhere(v.Child) {
+		return true
+	}
+	for _, ch := range v.Children {
+		if claimedAnywhere(ch) {
+			return true
+		}
+	}
+	return false
 }
 
 // GlobalPool provides shared batch pooling across operators with the same schema.

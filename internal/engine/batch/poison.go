@@ -33,16 +33,14 @@ import "sync/atomic"
 //   - Only the VALUE arenas. Offsets, null bitmaps and nested shape metadata
 //     are rewritten wholesale by Reset/resetVectorForReuse, so scribbling them
 //     would model a recycle that cannot happen.
-//
-// A per-VECTOR claim (Vector.Claim) does NOT exempt a column, deliberately.
-// Nothing in the pool honours it: resetVectorForReuse clears claimed and writes
-// over the arena on the next Get, on the stated assumption that "a batch only
-// reaches a pool when nobody claimed it". That assumption does not hold —
-// partitioned aggregation's selView calls Detach (which claims every shared
-// column) on a view whose underlying pooled batch sharedBatch.release() then
-// returns to the pool. Exempting claimed columns would model the invariant the
-// engine documents; poisoning them models what the allocator actually does,
-// which is the behaviour a gate has to be able to see.
+//   - Never a batch carrying a claim. Until #897 a per-VECTOR claim exempted
+//     nothing, because nothing in the pool honoured one: resetVectorForReuse
+//     cleared claimed and wrote over the arena on the next Get, on the stated
+//     assumption that "a batch only reaches a pool when nobody claimed it" —
+//     which the derived-batch cases (ColumnPrune, the set-op emitter,
+//     partitioned aggregation's selView) broke. Now retainsClaimedStorage
+//     vetoes such a batch at Release, so it is neither pooled nor poisoned,
+//     and poison still writes exactly where a real recycle may write.
 //
 // Cost when off: one relaxed atomic load per batch — per 2048 rows, not per
 // row — and no writes. It is a correctness instrument, not a debug build:
@@ -75,8 +73,9 @@ var poisonedBatches atomic.Uint64
 // PoisonedBatches returns the running count of batches poisoned on release.
 func PoisonedBatches() uint64 { return poisonedBatches.Load() }
 
-// poisonBatch overwrites every unclaimed column's value storage. Called from
-// Release, before the batch reaches the pool.
+// poisonBatch overwrites the batch's column value storage. Called from
+// Release, before the batch reaches the pool, and only for a batch that
+// carries no claim at all — Release vetoes the claimed ones before here.
 func poisonBatch(b *RecordBatch) {
 	poisonedBatches.Add(1)
 	for _, col := range b.Columns {
@@ -86,8 +85,8 @@ func poisonBatch(b *RecordBatch) {
 
 // poisonVector scribbles one vector's value arenas, recursing into nested
 // children. A view (Base != nil) owns no storage — poisoning through it would
-// hit whoever the base belongs to — so views are skipped, as are vectors a
-// consumer has claimed.
+// hit whoever the base belongs to — so views are skipped. Claimed vectors
+// never reach here: the veto is whole-batch, one step up.
 func poisonVector(v *Vector) {
 	if v == nil || v.Base != nil {
 		return

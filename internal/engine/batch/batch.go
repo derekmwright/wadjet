@@ -177,13 +177,23 @@ func (b *RecordBatch) ColumnIndex(name string) int {
 // Poison mode (see poison.go) makes that undefinedness observable by
 // scribbling the arenas here, which is what the batch-reuse gate compares
 // against a clean run.
+//
+// "Undefined" stops at a CLAIM. A batch carrying storage a consumer claimed
+// is vetoed here — neither poisoned nor pooled — because the alias the
+// consumer holds is the same memory the next Get would reset and write over.
+// See retainsClaimedStorage.
 func (b *RecordBatch) Release() {
-	if b.pool != nil {
-		if poisonOnRelease.Load() {
-			poisonBatch(b)
-		}
-		b.pool.Put(b)
+	if b.pool == nil {
+		return
 	}
+	if retainsClaimedStorage(b) {
+		poolRetentionVetoes.Add(1)
+		return
+	}
+	if poisonOnRelease.Load() {
+		poisonBatch(b)
+	}
+	b.pool.Put(b)
 }
 
 // Detach claims ownership of the batch: Release() becomes a no-op so no pool
@@ -273,8 +283,9 @@ func resetVectorForReuse(col *Vector, numRows int) {
 	// indirection so the batch is a plain (empty) owned batch again.
 	col.Base = nil
 	col.Indices = nil
-	// A batch only reaches a pool when nobody claimed it (Detach severs the
-	// pool link), so a recycled vector starts unclaimed again.
+	// A batch only reaches a pool when nobody claimed it — Detach severs the
+	// pool link, and since #897 retainsClaimedStorage vetoes the derived-batch
+	// case Detach cannot sever — so a recycled vector starts unclaimed again.
 	col.claimed = false
 	col.Len = numRows
 	col.Nulls.ResetNonNull(numRows)
