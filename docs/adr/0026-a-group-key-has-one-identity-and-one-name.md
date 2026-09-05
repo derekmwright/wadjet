@@ -1199,6 +1199,16 @@ aggregate's above it and the wire's read one map through a nesting level. Gate:
 `coordinator.TestF1AWindowDeclaresTheSameTypeThroughADerivedTable`, four arms,
 with the one-level spelling and a renaming derived table as the controls.
 
+One residual is left where #796 sat and is a DIFFERENT rule: an integer SUM/AVG
+OVER a window is accumulated in FLOAT64 (#813). It declares float8 where
+PostgreSQL declares bigint or numeric — and past 2^53 it also answers different
+DIGITS from the grouped spelling and from PostgreSQL, which the first statement
+of this paragraph asserted otherwise without measuring (ADR-0012's entry carries
+the numbers). The integer-exactness rule reached the grouped aggregate in #784
+and not the window, and it cannot reach the window's declaration alone:
+`exec.windowAccOutputType` gives an integer input a float64 accumulator, so
+declaring the exact type without moving the carrier is the #361 silent-write
+class. DEFERRED with that mechanism; pinned on the VALUE in the same gate.
 
 ## Consequences
 

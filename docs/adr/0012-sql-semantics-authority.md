@@ -141,6 +141,44 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      same rule; a boxed comparator that reads a rendered address or a
      formatted decimal is not that order (`internal/engine/exec/
      compare_boxed.go`).
+   - **A window SUM/AVG over an INTEGER column answers in float64 — wrong
+     DIGITS, not only a wrong declaration.** (Added 2026-09-04, #813, arc F1;
+     CORRECTED 2026-09-05 after the arc's round-1 review, which measured what
+     the first version of this entry asserted without measuring.) PostgreSQL
+     declares `sum(int4) over ()` bigint and `sum(int8) over ()` /
+     `avg(int) over ()` numeric, and since #784 the GROUPED spelling of each
+     answers exactly that — so wadjet's two spellings of one question
+     disagree, which is the thing `windowSpecOutputType`'s own comment says
+     must not happen.
+
+     The disagreement is not confined to the type. `exec.windowAccOutputType`
+     gives an integer input a FLOAT64 accumulator, so past 2^53 the window
+     spelling loses digits the grouped spelling keeps. Measured over the
+     `numwidth` fixture, whose `w_i64` deliberately carries values past that
+     range, against live postgres:17-alpine:
+
+     | query | wadjet, all arms | PostgreSQL 17 |
+     |---|---|---|
+     | `AVG(w_i64) OVER ()` | `1000800157666874.2` float8 | `1000800157666874.2222` numeric |
+     | `AVG(w_i64)` (grouped control) | `1000800157666874.2222` DECIMAL(38,4) | the same |
+     | `SUM(w_i64) OVER (ORDER BY … ROWS …)`, row 4 | `9007199271518226` | `9007199271518227` |
+     | `SUM(w_i64)` (grouped control) | `9007201419001868` DECIMAL(38,0) | the same |
+
+     A VALUE divergence is never allowed by this ADR, and this one is not
+     being allowed — it is RECORDED, pinned fail-on-agree, and deferred with
+     its mechanism, because the repair is an exact integer accumulator in the
+     window operator (`decimalFrameAcc` reads `DecimalData` directly and needs
+     a per-type cell reader; `windowAccOutputType` and `windowOutputColumn`
+     need the integer rules; `SUM(int4) → bigint` needs an INT64 output path
+     neither frame has) and not a declaration. Declaring the exact type over
+     today's carrier would be the #361 silent-write class on top of it.
+
+     Pinned on the VALUE, not on the declaration, in
+     `coordinator.TestF1AWindowDeclaresTheSameTypeThroughADerivedTable`: the
+     cell asserts the float64 digits wadjet answers and names PostgreSQL's, so
+     it fails the day the accumulator becomes exact. The CAST spelling
+     (`CAST(SUM(x) OVER () AS BIGINT)`) already declares its target on every
+     path and is a cell there.
    - **A column-alias list over a `SELECT *` is not applied.** (Added
      2026-09-04, #613.) `(…) AS b(kk, nn)` renames a derived table's columns
      positionally, and PostgreSQL applies it whatever the subquery's SELECT

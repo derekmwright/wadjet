@@ -401,6 +401,42 @@ func TestF1AWindowDeclaresTheSameTypeThroughADerivedTable(t *testing.T) {
 			routed: map[string]string{
 				"dag": "unreachable output +1", "dagshuf": "unreachable output +1"},
 		},
+		{
+			// #813 pinned on the VALUE, which is what it actually is. The
+			// first version of this pin, and ADR-0012's entry with it, said
+			// "the digits are right"; over `numwidth`, whose `w_i64` carries
+			// values past 2^53 on purpose, they are not. The window's float64
+			// accumulator loses them where the GROUPED spelling below keeps
+			// them exactly — one question, two spellings, two numbers.
+			// Fail-on-agree: the day the accumulator is exact this reads
+			// 1000800157666874.2222 and the cell must be deleted.
+			name: "813 PINNED VALUE: AVG(int8) OVER () loses digits the grouped spelling keeps",
+			sql:  "SELECT AVG(w_i64) OVER () AS w FROM numwidth ORDER BY 1 LIMIT 1",
+			want: "cols=[w:FLOAT64] rows=1 | 1.0008001576668742e+15",
+			why: "PostgreSQL 17 and the grouped spelling both answer " +
+				"1000800157666874.2222 numeric; exec.windowAccOutputType gives an integer " +
+				"input a float64 accumulator. DEFERRED with mechanism (ADR-0012).",
+		},
+		{
+			// The control that makes the cell above a divergence rather than
+			// a rendering: the same aggregate, not windowed, is exact.
+			name: "813 control: the GROUPED spelling of the same aggregate is exact",
+			sql:  "SELECT AVG(w_i64) AS w FROM numwidth",
+			want: "cols=[w:DECIMAL(38,4)] rows=1 | 1000800157666874.2222",
+		},
+		{
+			name: "813 control: the GROUPED integer SUM is exact",
+			sql:  "SELECT SUM(w_i64) AS w FROM numwidth",
+			want: "cols=[w:DECIMAL(38,0)] rows=1 | 9007201419001868",
+		},
+		{
+			name: "813 PINNED: SUM(int8) OVER () declares float8 where PostgreSQL declares numeric",
+			sql:  "SELECT SUM(id) OVER () AS w FROM decpair ORDER BY 1 LIMIT 1",
+			want: "cols=[w:FLOAT64] rows=1 | 45",
+			why: "the window accumulator is float64 for an integer input " +
+				"(exec.windowAccOutputType); declaring the exact type without moving " +
+				"the carrier is the #361 silent-write class. DEFERRED with mechanism.",
+		},
 	})
 }
 
