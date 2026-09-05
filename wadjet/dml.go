@@ -121,11 +121,28 @@ func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (r
 // judged against the declared (p, s) here rather than at the flush, which is
 // what names the row that carried it — #647).
 //
-// The message and the class are PostgreSQL's, and the lookup is
-// case-insensitive for the same reason ResolveDMLSetClauses' is: INSERT was
-// the one DML clause that resolved case-SENSITIVELY, so `INSERT INTO t (ID)`
-// failed on a table whose column is `id` while `UPDATE t SET ID = …`
-// succeeded.
+// The message and the class are PostgreSQL's, and the reference RESOLVES for
+// the same reason ResolveDMLSetClauses' does: INSERT was the one DML clause
+// that resolved case-SENSITIVELY, so `INSERT INTO t (ID)` failed on a table
+// whose column is `id` while `UPDATE t SET ID = …` succeeded.
+//
+// Through batch.ResolveSchemaIndex, though, not through a map keyed by the
+// fold. This was the FIFTH site of the class ResolveDMLSetClauses, checkOnKeys
+// and checkDMLColumns were rewritten out of: `strings.ToLower(raw)` into a
+// fold-keyed map throws away the only evidence there is. The lexer has already
+// preserved the distinction here — `parseInsert` stores `colTok.val`, so an
+// unquoted name arrives FOLDED and a delimited one keeps its bytes — and
+// lowercasing both answers them the same. Measured over
+// `hits(WatchID, counterid, UserAgent)`:
+//
+//	INSERT INTO hits ("WATCHID", counterid, "USERAGENT") VALUES (9, 9, 'x')
+//	  before: INSERT 1, the row STORED     after: 42703   (PostgreSQL: 42703)
+//	INSERT INTO hits ("WatchID", counterid, "UserAgent") VALUES (9, 9, 'x')
+//	  before: INSERT 1                     after: INSERT 1   (PostgreSQL: ok)
+//
+// The write LANDED under a name PostgreSQL says does not exist — the same
+// disposition `SET "USERAGENT" = 'X'` had one door over. A FOLDED
+// `(watchid, counterid, useragent)` still resolves.
 func resolveInsertColumns(named []string, table string, schema []parquet.Column) ([]string, []parquet.Column, error) {
 	if len(named) == 0 {
 		// No explicit list: schema order, every column.
@@ -136,26 +153,26 @@ func resolveInsertColumns(named []string, table string, schema []parquet.Column)
 		}
 		return names, cols, nil
 	}
-	byName := make(map[string]parquet.Column, len(schema))
-	for _, col := range schema {
-		byName[strings.ToLower(col.Name)] = col
-	}
 	names := make([]string, len(named))
 	cols := make([]parquet.Column, len(named))
 	seen := make(map[string]bool, len(named))
 	for i, raw := range named {
-		name := strings.ToLower(strings.TrimSpace(raw))
-		col, ok := byName[name]
-		if !ok {
+		name := strings.TrimSpace(raw)
+		idx := batch.ResolveSchemaIndex(schema, name)
+		if idx < 0 {
 			return nil, nil, sqlerr.New("42703", "column %q of relation %q does not exist", name, table)
 		}
-		if seen[name] {
-			// PostgreSQL: 42701, `column "x" specified more than once`.
-			// Without this the second value silently overwrote the first in
-			// the row map and the statement reported success.
+		col := schema[idx]
+		// PostgreSQL: 42701, `column "x" specified more than once`. Without
+		// this the second value silently overwrote the first in the row map
+		// and the statement reported success. Keyed on the RESOLVED column,
+		// not on the reference: two spellings of one column are one column,
+		// and `("WatchID", watchid)` has to be caught the same way `(a, a)`
+		// is.
+		if seen[col.Name] {
 			return nil, nil, sqlerr.New("42701", "column %q specified more than once", name)
 		}
-		seen[name] = true
+		seen[col.Name] = true
 		names[i], cols[i] = col.Name, col
 	}
 	return names, cols, nil
@@ -1024,6 +1041,11 @@ func applySetClauses(row map[string]any, setSQL string, merged map[string]any, e
 		if dotIdx := strings.LastIndex(col, "."); dotIdx >= 0 {
 			col = col[dotIdx+1:]
 		}
+		// And then do what the LEXER would have done to it, because this
+		// clause never went past the lexer: `scanMergeClauseUntil` hands back
+		// `l.input[start:l.pos]`, the source bytes, so a delimited target
+		// still carries its QUOTES and an unquoted one is still UNFOLDED.
+		col = dmlIdent(col)
 		valExpr := strings.TrimSpace(part[eqIdx+1:])
 
 		// The target column must EXIST. It used to be looked up in a map whose
@@ -1093,6 +1115,46 @@ func splitSetClauses(s string) []string {
 		parts = append(parts, strings.TrimSpace(s[start:]))
 	}
 	return parts
+}
+
+// dmlIdent is the lexer's identifier step, applied to a name that never went
+// through the lexer — pgwire's `copyIdent` for the same reason, at the other
+// hand-split site. An unquoted name FOLDS; a delimited one keeps its bytes and
+// loses only its quotes, `""` inside meaning one quote.
+//
+// A MERGE's SET list and its NOT-MATCHED INSERT column list are raw SQL TEXT:
+// `scanMergeClauseUntil` returns `l.input[start:l.pos]`. So the target reached
+// `ev.targetColumn` with the double quotes still ATTACHED and they became part
+// of the name. Measured over `hits(WatchID, counterid, UserAgent)`:
+//
+//	MERGE ... WHEN MATCHED THEN UPDATE SET "UserAgent" = 'X'
+//	  before: applying SET: column "\"UserAgent\"" of relation "hits"
+//	          does not exist
+//	  after:  MERGE 1, the value written
+//	MERGE ... WHEN NOT MATCHED THEN INSERT ("WATCHID", ...)
+//	  before: building INSERT row: column "\"WATCHID\"" of relation "hits"
+//	          does not exist
+//	  after:  42703, naming WATCHID
+//
+// The first was a WRONG REFUSAL and the loud kind: PostgreSQL accepts
+// `SET "UserAgent"` for a column named `UserAgent`, and `UPDATE hits SET
+// "UserAgent" = 'X'` succeeds ONE DOOR OVER — the two statements disagreed
+// about the same assignment, which is the asymmetry ResolveDMLSetClauses'
+// rewrite exists to remove.
+//
+// Doing this BEFORE `batch.ResolveSchemaIndex` rather than instead of it is
+// the load-bearing order. The resolver's rule keys on whether the reference is
+// itself folded, and a raw `SET UserAgent` is not — it would be read as a
+// DELIMITED name and refused against a schema column `UserAgent`… which it
+// happens to byte-match, but `SET USERAGENT` would not, and that form is
+// ordinary SQL. Fold first, then resolve.
+func dmlIdent(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		// Delimited: the bytes are the name. `""` inside is one quote.
+		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+	}
+	return batch.FoldIdent(s)
 }
 
 // mergeEvaluator resolves a MERGE's SET / INSERT VALUES expressions against
@@ -1447,13 +1509,25 @@ func (ev *mergeEvaluator) compile(node plansql.Node) (expr.Expr, error) {
 }
 
 // targetColumn resolves a SET / INSERT target name against the target table.
+//
+// Through batch.ResolveSchemaIndex, not through a map keyed by the fold, for
+// checkOnKeys' reason one function over: the fold is only half the rule. By
+// the time a name reaches here it has been through dmlIdent, so an unquoted
+// target is folded and a target still carrying an upper-case letter can only
+// have been DELIMITED. A lowercasing lookup answers both the same, so
+// `SET "USERAGENT" = 'X'` would bind to `UserAgent` and WRITE, where
+// PostgreSQL raises 42703 for a delimited name that is not the column's own
+// bytes — the disposition ResolveDMLSetClauses already gives the UPDATE door.
+// A FOLDED `useragent` still resolves: that is the concession a parquet-born
+// CamelCase schema needs, and the only one (batch/schema.go items 1-4).
 func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
-	col, ok := ev.colByName[strings.ToLower(strings.TrimSpace(name))]
-	if !ok {
+	name = strings.TrimSpace(name)
+	idx := batch.ResolveSchemaIndex(ev.targetCols, name)
+	if idx < 0 {
 		return parquet.Column{}, sqlerr.New("42703",
 			"column %q of relation %q does not exist", name, ev.target)
 	}
-	return col, nil
+	return ev.targetCols[idx], nil
 }
 
 // dmlSourceIsFloat reports whether a SET expression's DECLARED family is a
@@ -2043,7 +2117,10 @@ func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, ev
 	colList := sql[colStart+1 : colEnd]
 	columns := splitSetClauses(colList)
 	for i := range columns {
-		columns[i] = strings.TrimSpace(columns[i])
+		// dmlIdent, not TrimSpace: this list is raw SQL text for the reason
+		// applySetClauses gives, so `("WatchID", ...)` arrived here as the
+		// eleven bytes including the quotes and matched no column at all.
+		columns[i] = dmlIdent(columns[i])
 	}
 
 	// Parse VALUES

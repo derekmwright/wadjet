@@ -454,3 +454,269 @@ func TestDelimitedDMLReferenceStaysByteExact(t *testing.T) {
 		}, "delimited right-case")
 	})
 }
+
+// TestMergeTargetIdentifierFollowsTheQuotingRule is the regression gate for a
+// MERGE whose SET / INSERT target reaches the resolver WITH ITS QUOTES.
+//
+// `applySetClauses` and `buildInsertRow` split the clause's RAW SQL TEXT —
+// `scanMergeClauseUntil` returns `l.input[start:l.pos]`, the source bytes —
+// so neither the lexer's identifier fold nor its quote stripping has run on
+// the target by the time it reaches `ev.targetColumn`. The quotes were
+// literally part of the name. Measured over
+// `hits(WatchID, counterid, UserAgent)`:
+//
+//	MERGE ... WHEN MATCHED THEN UPDATE SET "UserAgent" = 'X'
+//	  before: applying SET: column "\"UserAgent\"" of relation "hits"
+//	          does not exist
+//	  after:  MERGE 1, the value written
+//	MERGE ... WHEN NOT MATCHED THEN INSERT ("WATCHID", ...)
+//	  before: building INSERT row: column "\"WATCHID\"" of relation "hits"
+//	          does not exist
+//	  after:  42703 naming WATCHID
+//
+// The first was a WRONG REFUSAL, and the loud kind: PostgreSQL accepts
+// `SET "UserAgent"` for a column named `UserAgent`, and the equivalent
+// `UPDATE hits SET "UserAgent" = 'X'` succeeds ONE DOOR OVER — so the two
+// statements disagreed about the same assignment, which is the asymmetry
+// TestDelimitedDMLReferenceStaysByteExact's fix exists to remove.
+//
+// The fix is `dmlIdent` — pgwire's `copyIdent` for the same reason: a raw
+// clause is hand-split rather than lexed, so the step the lexer would have
+// done has to be done here. A naive `batch.ResolveSchemaIndex` on the raw
+// text would REGRESS the unquoted upper-case form, because `SET UserAgent`
+// arrives here UNFOLDED and would then be read as a delimited name.
+func TestMergeTargetIdentifierFollowsTheQuotingRule(t *testing.T) {
+	t.Run("delimited right-case SET target writes", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		res, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET "UserAgent" = 'X'`)
+		if err != nil {
+			t.Fatalf("delimited right-case SET target: %v", err)
+		}
+		if res.RowsAffected != 1 {
+			t.Fatalf("RowsAffected = %d, want 1", res.RowsAffected)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "X"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+		}, "delimited right-case SET target")
+	})
+
+	t.Run("the two doors agree about the same assignment", func(t *testing.T) {
+		// The asymmetry itself, asserted as one property rather than as two
+		// separate expectations: whatever `UPDATE ... SET "UserAgent"` does
+		// to row 2, `MERGE ... SET "UserAgent"` does to row 1.
+		db, ctx := dfrMixedFixture(t)
+		if _, err := db.Execute(ctx, `UPDATE hits SET "UserAgent" = 'SAME' WHERE WatchID = 2`); err != nil {
+			t.Fatalf("UPDATE door: %v", err)
+		}
+		if _, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET "UserAgent" = 'SAME'`); err != nil {
+			t.Fatalf("MERGE door: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "SAME"},
+			{int64(2), int64(20), "SAME"},
+			{int64(3), int64(30), "old-3"},
+		}, "both doors")
+	})
+
+	t.Run("unquoted upper-case SET target folds", func(t *testing.T) {
+		// The cell a naive ResolveSchemaIndex on the raw text would take
+		// down: the raw clause never went past the lexer, so `UserAgent`
+		// still carries its upper-case letters and is NOT a delimited name.
+		db, ctx := dfrMixedFixture(t)
+		if _, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET UserAgent = 'UNQ'`); err != nil {
+			t.Fatalf("unquoted upper-case SET target: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "UNQ"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+		}, "unquoted upper-case SET target")
+	})
+
+	t.Run("folded SET target still resolves", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		if _, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET useragent = 'FLD'`); err != nil {
+			t.Fatalf("folded SET target: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "FLD"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+		}, "folded SET target")
+	})
+
+	t.Run("delimited wrong-case SET target is 42703", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		_, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET "USERAGENT" = 'X'`)
+		dfrRefused(t, err, "42703", "USERAGENT", "delimited wrong-case MERGE SET target")
+		if strings.Contains(err.Error(), `\"`) {
+			t.Fatalf("the message still carries the quotes: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "old-1"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+		}, "refused MERGE SET wrote nothing")
+	})
+
+	t.Run("delimited right-case INSERT column list stores every column", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		res, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 42 AS k) s ON hits.WatchID = s.k `+
+			`WHEN NOT MATCHED THEN INSERT ("WatchID", counterid, "UserAgent") VALUES (42, 7, 'INS')`)
+		if err != nil {
+			t.Fatalf("delimited right-case INSERT list: %v", err)
+		}
+		if res.RowsAffected != 1 {
+			t.Fatalf("RowsAffected = %d, want 1", res.RowsAffected)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "old-1"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+			{int64(42), int64(7), "INS"},
+		}, "delimited right-case INSERT list")
+	})
+
+	t.Run("delimited wrong-case INSERT column is 42703", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		_, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 42 AS k) s ON hits.WatchID = s.k `+
+			`WHEN NOT MATCHED THEN INSERT ("WATCHID", counterid, "UserAgent") VALUES (42, 7, 'INS')`)
+		dfrRefused(t, err, "42703", "WATCHID", "delimited wrong-case MERGE INSERT column")
+		if strings.Contains(err.Error(), `\"`) {
+			t.Fatalf("the message still carries the quotes: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "old-1"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+		}, "refused MERGE INSERT stored nothing")
+	})
+
+	t.Run("a delimited ALL-LOWER-CASE target takes the folded concession", func(t *testing.T) {
+		// ADR-0012's recorded boundary, pinned here so a fix in this area
+		// cannot quietly move it: once the quotes are off, `"useragent"` is
+		// the same string an unquoted `useragent` produces, and nothing
+		// downstream can tell them apart. It resolves — which is what the
+		// READ door does, and the two have to agree.
+		db, ctx := dfrMixedFixture(t)
+		if _, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET "useragent" = 'LOW'`); err != nil {
+			t.Fatalf("delimited lower-case SET target: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "LOW"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+		}, "delimited lower-case SET target")
+	})
+}
+
+// TestInsertColumnListStaysByteExactForDelimitedNames is the regression gate
+// for the fifth site of the class TestDelimitedDMLReferenceStaysByteExact
+// covers at four: `resolveInsertColumns`.
+//
+// It did `strings.ToLower(strings.TrimSpace(raw))` into a map keyed by the
+// fold — the pattern `ResolveDMLSetClauses`, `checkOnKeys` and
+// `checkDMLColumns` were already rewritten out of. Here the lexer HAS
+// preserved the distinction (`parseInsert` stores `colTok.val`: an unquoted
+// name arrives already folded, a delimited one keeps its bytes), so a
+// lowercasing lookup threw away the only evidence there was. Measured over
+// `hits(WatchID, counterid, UserAgent)`:
+//
+//	INSERT INTO hits ("WATCHID", counterid, "USERAGENT") VALUES (9, 9, 'x')
+//	  before: INSERT 1, the row STORED   after: 42703   (PostgreSQL: 42703)
+//	INSERT INTO hits ("WatchID", counterid, "UserAgent") VALUES (9, 9, 'x')
+//	  before: INSERT 1                   after: INSERT 1  (PostgreSQL: ok)
+//
+// The write LANDED under a name PostgreSQL says does not exist, which is the
+// same disposition `SET "USERAGENT" = 'X'` had one door over before the
+// delimited-reference fix.
+func TestInsertColumnListStaysByteExactForDelimitedNames(t *testing.T) {
+	t.Run("delimited wrong-case INSERT column is 42703", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		_, err := db.Execute(ctx, `INSERT INTO hits ("WATCHID", counterid, "USERAGENT") VALUES (9, 9, 'x')`)
+		dfrRefused(t, err, "42703", "WATCHID", "delimited wrong-case INSERT column")
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "old-1"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+		}, "refused INSERT stored nothing")
+	})
+
+	t.Run("the wrong-case column is the one named", func(t *testing.T) {
+		// Only the LAST column is misspelled, so a message naming anything
+		// else would be pointing the reader at a correct name.
+		db, ctx := dfrMixedFixture(t)
+		_, err := db.Execute(ctx, `INSERT INTO hits ("WatchID", counterid, "USERAGENT") VALUES (9, 9, 'x')`)
+		dfrRefused(t, err, "42703", "USERAGENT", "delimited wrong-case INSERT column, last position")
+	})
+
+	t.Run("delimited right-case INSERT column list stores", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		if _, err := db.Execute(ctx, `INSERT INTO hits ("WatchID", counterid, "UserAgent") VALUES (9, 9, 'x')`); err != nil {
+			t.Fatalf("delimited right-case INSERT list: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "old-1"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+			{int64(9), int64(9), "x"},
+		}, "delimited right-case INSERT list")
+	})
+
+	t.Run("a folded INSERT column list still stores", func(t *testing.T) {
+		// The concession a parquet-born CamelCase schema needs, and the
+		// reason `resolveInsertColumns` was case-insensitive in the first
+		// place. It has to survive the fix.
+		db, ctx := dfrMixedFixture(t)
+		if _, err := db.Execute(ctx, `INSERT INTO hits (watchid, counterid, useragent) VALUES (9, 9, 'x')`); err != nil {
+			t.Fatalf("folded INSERT list: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "old-1"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+			{int64(9), int64(9), "x"},
+		}, "folded INSERT list")
+	})
+
+	t.Run("an unquoted upper-case INSERT column list still stores", func(t *testing.T) {
+		// The lexer folded it before it ever reached the resolver, so this
+		// is the folded cell again by another spelling — asserted because it
+		// is the spelling a user actually types.
+		db, ctx := dfrMixedFixture(t)
+		if _, err := db.Execute(ctx, `INSERT INTO hits (WATCHID, CounterID, UserAgent) VALUES (9, 9, 'x')`); err != nil {
+			t.Fatalf("unquoted upper-case INSERT list: %v", err)
+		}
+		dfrWant3(t, dfrRead3(t, db, ctx), [][3]any{
+			{int64(1), int64(10), "old-1"},
+			{int64(2), int64(20), "old-2"},
+			{int64(3), int64(30), "old-3"},
+			{int64(9), int64(9), "x"},
+		}, "unquoted upper-case INSERT list")
+	})
+
+	t.Run("two spellings of one column are still 42701", func(t *testing.T) {
+		// The duplicate check keyed on the LOWERCASED reference, which the
+		// fix removes. It has to key on the RESOLVED column instead, or
+		// `("WatchID", watchid)` would pass the check and the second value
+		// would silently overwrite the first in the row map — the defect
+		// 42701 exists to stop, reintroduced by the fix for another one.
+		db, ctx := dfrMixedFixture(t)
+		_, err := db.Execute(ctx, `INSERT INTO hits ("WatchID", watchid, counterid) VALUES (9, 8, 9)`)
+		dfrRefused(t, err, "42701", "watchid", "two spellings of one INSERT column")
+	})
+
+	t.Run("an absent INSERT column is refused the same way", func(t *testing.T) {
+		db, ctx := dfrMixedFixture(t)
+		_, err := db.Execute(ctx, `INSERT INTO hits (nosuchcol) VALUES (1)`)
+		dfrRefused(t, err, "42703", "nosuchcol", "absent INSERT column")
+	})
+}
