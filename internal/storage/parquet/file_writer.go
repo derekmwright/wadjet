@@ -988,16 +988,41 @@ func (nw *NativeWriter) Close() error {
 	}
 
 	// Build and write footer.
-	return nw.writeFooter()
+	if err := nw.writeFooter(); err != nil {
+		nw.fail(err)
+		return nw.err
+	}
+	return nil
 }
 
+// writeBytes is the ONE seam every byte of the file leaves through, so it is
+// where an output failure is LATCHED.
+//
+// A row group is emitted column by column and each leaf buffer is reset the
+// moment its chunk is written, so a failure on the fourth Write of a two-column
+// group leaves the first column's values already discarded and numRows still
+// standing. Nothing can rebuild that. Before this, neither the failure nor the
+// flush that carried it reached nw.err: WriteRows reported the I/O error,
+// Close then RETRIED the inconsistent state, wrote a footer over it and
+// returned nil, and the reader opened a perfectly valid file with one column
+// simply gone (#888).
 func (nw *NativeWriter) writeBytes(b []byte) error {
+	if nw.err != nil {
+		return nw.err
+	}
 	n, err := nw.w.Write(b)
 	nw.written += int64(n)
-	return err
+	if err != nil {
+		nw.fail(fmt.Errorf("writing to the output stream: %w", err))
+		return nw.err
+	}
+	return nil
 }
 
 func (nw *NativeWriter) flushRowGroup() error {
+	if nw.err != nil {
+		return nw.err
+	}
 	// Write magic header on first flush.
 	if nw.written == 0 {
 		if err := nw.writeBytes([]byte("PAR1")); err != nil {
@@ -1016,7 +1041,11 @@ func (nw *NativeWriter) flushRowGroup() error {
 
 		uncompressed, compressed, err := nw.writeColumnChunk(lb)
 		if err != nil {
-			return fmt.Errorf("writing column %s: %w", lb.path, err)
+			// Latched, not merely returned: the leaves written before this
+			// one have already been reset, so this row group can never be
+			// completed and no later call may act as though it could.
+			nw.fail(fmt.Errorf("writing column %s: %w", lb.path, err))
+			return nw.err
 		}
 		totalSize += uncompressed
 		totalCompressed += compressed
