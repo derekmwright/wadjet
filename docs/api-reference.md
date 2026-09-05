@@ -107,10 +107,13 @@ A statement this engine parses and does not run is refused `0A000`
 `CREATE SNAPSHOT` — no door runs those four.
 
 `CREATE ALERT`, `DROP ALERT` and `ALTER ALERT` answer the same way *on this
-endpoint*, which has no handler for them. They run on the embedded API and the
-PostgreSQL wire protocol when `Config.EnableAlerts` is set, and on a
-coordinator started with `--enable-alerts`; where the feature is off those
-doors say so (`alerts are disabled`, also `0A000`).
+endpoint*, which has no handler for them. On a server they run through the
+gRPC `Query` RPC against a coordinator started with `--enable-alerts`; `psql`
+does not reach that handler either, and answers `alerts are disabled on this
+connection` (also `0A000`). An embedding program runs them on its own `DB`
+with `Config.EnableAlerts`. See
+[SQL reference](sql-reference.md#parsed-and-not-executed) for why the door
+decides.
 
 Every one of these classes is the same on every door.
 

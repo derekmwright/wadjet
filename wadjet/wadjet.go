@@ -1134,7 +1134,7 @@ func (db *DB) alertEvalDecorator() alerts.EvalContextFunc {
 // createAlertSQL handles CREATE ALERT DDL in embedded mode.
 func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo, _ string) (*QueryResult, error) {
 	if db.alertScheduler == nil {
-		return nil, sqlerr.New("0A000", "alerts are disabled; set Config.EnableAlerts=true")
+		return nil, sqlerr.New("0A000", "alerts are disabled on this connection; set Config.EnableAlerts when opening the embedded engine, or run the statement against a coordinator started with --enable-alerts (the gRPC Query RPC)")
 	}
 	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
 		return nil, err
@@ -1170,7 +1170,7 @@ func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo,
 // dropAlertSQL handles DROP ALERT [IF EXISTS] DDL in embedded mode.
 func (db *DB) dropAlertSQL(ctx context.Context, info *plansql.DropAlertInfo) (*QueryResult, error) {
 	if db.alertScheduler == nil {
-		return nil, sqlerr.New("0A000", "alerts are disabled; set Config.EnableAlerts=true")
+		return nil, sqlerr.New("0A000", "alerts are disabled on this connection; set Config.EnableAlerts when opening the embedded engine, or run the statement against a coordinator started with --enable-alerts (the gRPC Query RPC)")
 	}
 	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
 		return nil, err
@@ -1196,7 +1196,7 @@ func (db *DB) dropAlertSQL(ctx context.Context, info *plansql.DropAlertInfo) (*Q
 // alterAlertSQL handles ALTER ALERT DDL in embedded mode.
 func (db *DB) alterAlertSQL(ctx context.Context, info *plansql.AlterAlertInfo) (*QueryResult, error) {
 	if db.alertScheduler == nil {
-		return nil, sqlerr.New("0A000", "alerts are disabled; set Config.EnableAlerts=true")
+		return nil, sqlerr.New("0A000", "alerts are disabled on this connection; set Config.EnableAlerts when opening the embedded engine, or run the statement against a coordinator started with --enable-alerts (the gRPC Query RPC)")
 	}
 	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
 		return nil, err

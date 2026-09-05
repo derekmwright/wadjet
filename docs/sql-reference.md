@@ -19,7 +19,7 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
 | `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; target and source must have different exposed names (SQLSTATE 42712 otherwise); `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
 | `ANALYZE [TABLE] table_name` | Collect column statistics for the cost-based planner |
-| `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions. Runs on the embedded API and the PostgreSQL wire protocol with `Config.EnableAlerts`, and on a coordinator with `--enable-alerts`; the HTTP query endpoint has no handler and refuses them |
+| `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions. Runs on the embedded API with `Config.EnableAlerts`; on a server, through the gRPC `Query` RPC against a coordinator started with `--enable-alerts`. `psql` and the HTTP query endpoint do not reach a handler — see below |
 
 ### Parsed and not executed
 
@@ -37,6 +37,17 @@ for it. So `psql`, `POST /v1/queries` and the embedded API all refuse it
 coordinator. Take a snapshot on a cadence instead
 (`--catalog-snapshot-interval`; see
 [Disaster recovery](disaster-recovery.md)).
+
+**The `ALERT` statements are reachable the same way on a server.** The routing
+above is per statement and not per deployment: the wire protocol sends only
+`SELECT` and `WITH` to the coordinator, so a `CREATE ALERT` typed into `psql`
+goes to the embedded engine behind that door — which `wadjet serve` opens
+WITHOUT `EnableAlerts`, because in standalone mode the coordinator owns the
+alert scheduler and a second one in the same process would evaluate and fire
+every alert twice. So `--enable-alerts` makes the three statements reachable
+through the gRPC `Query` RPC, and `psql` answers `alerts are disabled on this
+connection`. Embedding the engine directly, `Config.EnableAlerts` makes them
+run on that `DB`, scheduler included.
 `EXPLAIN` over one of them is refused the same way (`EXPLAIN ALTER TABLE is not
 supported`); PostgreSQL refuses that spelling as a syntax error (`42601`)
 because its grammar does not accept it at all.
