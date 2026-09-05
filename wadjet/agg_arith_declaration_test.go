@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
@@ -227,6 +228,78 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 			}
 			if d := res.ColumnMetas[0].TypeID; d != parquet.TypeDecimal {
 				t.Errorf("declares %v, want DECIMAL (PostgreSQL: numeric)\n  SQL: %s", d, c.sql)
+			}
+		})
+	}
+
+	// The BOUNDARY of that arm, pinned fail-on-agree. The set-operation walk
+	// types a column only when EVERY arm declares it identically; an arm that
+	// disagrees leaves the name out of the map, and "left out" is not neutral
+	// — `nodeDeclaredType` over a map without it takes its float
+	// fall-through, exactly the "not undecided, it actively declares FLOAT64"
+	// correction #867 needed one node-kind over. So the observable result is
+	// float8/OID 701 where PostgreSQL sends numeric/OID 1700, with the outer
+	// `+ 1` lost at int8 magnitude:
+	//
+	//	… c_i64 UNION ALL SELECT NULL     PG 36280278840510000001 (numeric)
+	//	                                  here 3.628027884050994e+19 (float8)
+	//	… c_i32 UNION ALL c_i64           PG exact numeric; here float8
+	//	… DECIMAL(18,4) ∪ DECIMAL(20,6)   PG 49500246.529600; here float8,
+	//	                                  and a hard DAG failure (#361 guard)
+	//
+	// `UNION ALL SELECT NULL` is the commonest set-op spelling there is, so
+	// this boundary is not an edge case; it is pre-existing (identical at
+	// dea4e795, where the SAME-typed shapes were float8 too) and filed with
+	// the arc's report. Closing it means reconciling arms of differing type
+	// the way select_common_type does — an unknown/NULL arm contributing
+	// nothing rather than poisoning the column — which is a rule this walk
+	// does not have and must not guess.
+	//
+	// These cells FAIL when the value or the declaration moves: deleting them
+	// is the proof.
+	//
+	// The VALUE is pinned by MAGNITUDE, not to the last digit: a float sum's
+	// last ulp moves with the order the arms are aggregated in, which is
+	// ADR-0013's legal nondeterminism and not the defect. What IS the defect
+	// is that the box is a float64 at all — an exact answer arrives as its
+	// decimal TEXT — so `isFloat` is the fail-on-agree condition and the
+	// declaration is asserted beside it.
+	for _, c := range []struct {
+		name, sql, pgAnswer string
+		near                float64
+	}{
+		{"residual_setop_null_arm",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
+				` UNION ALL SELECT NULL) x`, "36280278840510000001", 3.628027884051e+19},
+		{"residual_setop_int32_and_int64_arms",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i32 AS v FROM ` + tbl +
+				` UNION ALL SELECT c_i64 FROM ` + tbl + `) x`, "an exact numeric", 3.6280387436400e+19},
+		{"residual_setop_decimal_and_null_arms",
+			`SELECT SUM(v * 2) + 1 AS v FROM (SELECT c_dec AS v FROM ` + tbl +
+				` UNION ALL SELECT NULL) x`, "24750123.7648", 2.47501237648e+07},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := db.Query(ctx, c.sql)
+			if err != nil {
+				t.Fatalf("%v\n  SQL: %s", err, c.sql)
+			}
+			got, isFloat := res.Rows[0]["v"].(float64)
+			if !isFloat {
+				t.Errorf("= %#v, no longer a float64; PostgreSQL answers %s and this pin "+
+					"records the float8 approximation. The set-operation walk reconciles "+
+					"arms of DIFFERING type now: re-measure this family, delete these "+
+					"three cells and close the issue\n  SQL: %s",
+					res.Rows[0]["v"], c.pgAnswer, c.sql)
+				return
+			}
+			if d := math.Abs(got-c.near) / c.near; d > 1e-9 {
+				t.Errorf("= %v, %g away from the magnitude this pin records (%v) — that is "+
+					"more than a float sum's ordering can move it, so the ANSWER changed"+
+					"\n  SQL: %s", got, d, c.near, c.sql)
+			}
+			if d := res.ColumnMetas[0].TypeID; d != parquet.TypeFloat64 {
+				t.Errorf("declares %v; this pin records FLOAT64, which is wire OID 701 "+
+					"where PostgreSQL sends 1700 (numeric)\n  SQL: %s", d, c.sql)
 			}
 		})
 	}

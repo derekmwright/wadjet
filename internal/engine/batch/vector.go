@@ -114,12 +114,17 @@ func FormatIPv6(raw []byte) string {
 	// The V4-MAPPED fast path, which is the family this function exists for and
 	// the one `net.IP.String` detects in a few compares before its own quad
 	// printer. words[0..4] are zero and words[5] is 0xffff, so the longest
-	// zero run is exactly five and starts at word 0 — the general loop below
-	// would reach the same answer after scanning eight words and writing
-	// seven of them one branch at a time. Round-3 review P-C measured this
-	// family +25.9 % against the base renderer; roughly two-thirds of that
-	// was the scan, and the rest is the longer string PostgreSQL's spelling
-	// requires (`::ffff:10.0.0.1` is 15 bytes where Go prints `10.0.0.1`).
+	// zero run is exactly five and starts at word 0 — the loop below would
+	// reach the same answer after eight iterations of skip/colon/hex
+	// branching.
+	//
+	// It elides the RENDER LOOP and nothing else: this sits AFTER the words[]
+	// fill and AFTER the zero-run scan, both of which still run for every
+	// address. Reverting just this hunk costs 11.1 % on the family
+	// (round-4 review, p=0.001), which is what the render loop alone is
+	// worth; the rest of its gap against `net.IP.String` is the longer string
+	// PostgreSQL's spelling requires — `::ffff:10.0.0.1` is 15 bytes where Go
+	// prints `10.0.0.1`.
 	if words[0]|words[1]|words[2]|words[3]|words[4] == 0 && words[5] == 0xffff {
 		var quad [23]byte // "::ffff:" + "255.255.255.255"
 		n := copy(quad[:], "::ffff:")
