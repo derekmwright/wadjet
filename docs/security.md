@@ -421,6 +421,52 @@ A refusal is the answer to "this shape cannot be ordered safely", so it does
 not vary with the data or with the identity's row filter: the same statement is
 refused for every identity the policy covers.
 
+### A policy names relations and columns the catalog holds
+
+Every relation a policy names — a `policies:` entry's `table:`, an ABAC
+condition on `resource.name` or `resource.table` — and every column a
+`mask_column` or `deny_column` obligation targets is resolved against the
+catalog **when the policy set loads**, and rewritten to the spelling the
+catalog holds. A `*` wildcard names no relation and is left alone.
+
+**Two spellings are one relation.** A policy may spell a relation, and a
+policed column, either the way the catalog holds it or **folded**: an unquoted
+SQL identifier folds to lower case (#731), while a catalog keeps the spelling
+the parquet file or the Iceberg import gave it, where CamelCase is ordinary.
+Against a catalog table `Hits`, both `table: Hits` and `table: hits` name that
+relation and police it identically — the rule that resolves a query's own
+identifiers, applied to the policy's.
+
+**A third spelling is a typo.** A name that is neither the catalog's nor the
+folded one names nothing. `HITS` and `hItS` against a catalog table `Hits` each
+carry upper case, so each is a distinct delimited name, and a delimited name is
+byte-exact here as everywhere else in the engine: both are refused exactly as
+the plain typo `Hitz` is. So is a name that matches two catalog tables
+case-insensitively and neither of them exactly — that refusal names the
+candidates.
+
+**Naming what the catalog does not hold refuses the load.** A relation the
+catalog has no table for, or a policed column the relation's schema does not
+have, is a configuration error: the load fails naming the policy, the rule and
+the name it could not resolve, and the server **refuses to start**. On hot
+reload the same refusal keeps the previous policy set in place rather than
+installing one whose rules would not bind. A rule scoped to two relations
+claims the column is policed on both, so its obligation target must resolve in
+each of them; a rule scoped to no relation at all — the broad `allow` — has no
+schema to resolve against and its targets are not checked here.
+
+For an operator this means **a policy cannot be pre-provisioned for a table
+that does not exist yet**. A config carrying a policy for a relation an ingest
+creates later does not start: create the relation first, then add the policy,
+which a hot reload installs without downtime.
+
+The refusal is fail-closed and that is the point. Before it, such a policy
+loaded quietly and its scoped rule simply never matched — and a rule that never
+matches is not a denial. Beside the broad `allow` an RBAC-to-ABAC migration
+emits (see *RBAC Auto-Migration*), the broad rule authorizes the statement
+while the scoped rule contributes no obligation, so the masked column came back
+in plaintext (#882). A policy that cannot be enforced does not load.
+
 ### A mask is a SQL expression, and it must say what it means
 
 An ABAC `mask_column` obligation is refused **at config load and at hot
