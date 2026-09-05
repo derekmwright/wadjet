@@ -999,11 +999,17 @@ func pmCells() []pmCell {
 		// Every one of them REFUSES 0A000, uniformly on all eight runners: the
 		// planner cannot show that the subquery's own plan keeps its
 		// predicates above the projection, and the branch's doctrine for a
-		// shape it cannot order safely is to refuse. The narrowness is the
-		// point — the ten `inner_predicate_over_masked_*` cells above, where
-		// the policed relation is also the outer one, still ANSWER. What
-		// refuses is the case where the entire policed read lives inside
-		// subquery text.
+		// shape it cannot order safely is to refuse.
+		//
+		// The line is drawn by the INNER PLAN, not by the outer statement's
+		// FROM list. A subquery the optimizer folds into the outer plan — a
+		// plain `IN (SELECT col FROM policed WHERE …)`, an `EXISTS`, a
+		// derived table or CTE in the FROM clause — is one plan, ordered and
+		// answered: that is the ten `inner_predicate_over_masked_*` cells
+		// above. A subquery that keeps a plan of its own refuses, and it
+		// refuses whether or not the outer statement reads the same relation
+		// — the three `*_outer_reads_it` cells below are the same three
+		// spellings with `e7bal` on both sides, and they refuse identically.
 		{name: "hidden_relation_derived_table_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
 				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 300) ORDER BY d.id`,
@@ -1042,6 +1048,23 @@ func pmCells() []pmCell {
 		{name: "hidden_relation_correlated_scalar_over_a_cte",
 			sql: `WITH u AS (SELECT id, bal FROM e7bal) SELECT d.id FROM e7other d WHERE d.id = (` +
 				`SELECT u.id FROM u WHERE u.id = d.id AND u.bal > 300) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		// The same three spellings with the POLICED relation on BOTH sides.
+		// An earlier revision of docs/security.md drew the boundary at the
+		// outer statement's FROM list — "a subquery over a table the outer
+		// statement also reads answers normally" — and these cells are why
+		// that sentence is gone (#859 round 5, review P1).
+		{name: "hidden_relation_derived_inside_in_outer_reads_it",
+			sql: `SELECT id FROM e7bal WHERE id IN (` +
+				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 300) ORDER BY id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_union_all_inside_in_outer_reads_it",
+			sql: `SELECT id FROM e7bal WHERE id IN (` +
+				`SELECT id FROM e7bal WHERE bal > 300 UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_correlated_scalar_outer_reads_it",
+			sql: `SELECT a.id FROM e7bal a WHERE a.id = (` +
+				`SELECT b.id FROM e7bal b WHERE b.id = a.id AND b.bal > 300) ORDER BY a.id`,
 			wantErrLike: "could not be placed above the security projection"},
 
 		{name: "denied_in_order_by", sql: `SELECT id FROM e7emp ORDER BY salary`, deniedLike: "salary"},

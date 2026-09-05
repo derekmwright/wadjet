@@ -402,14 +402,24 @@ an `IN`/`EXISTS` subquery is policed too, so a predicate written inside that
 subquery reads the mask like any other.
 
 Where the engine cannot show that a plan keeps its predicates above the
-projection, the query is **refused** (`0A000`) rather than answered. Two shapes
-reach that today, both loud on every door and every execution path:
+projection, the query is **refused** (`0A000`) rather than answered, loud on
+every door and every execution path. What decides it is the **inner plan**,
+not which tables the outer statement names:
 
-- a policed table read **only** inside subquery text — `… IN (SELECT … FROM
-  (SELECT … FROM policed) t WHERE …)`, the same with a set operation, or a
-  correlated scalar subquery over it. A subquery over a table the outer
-  statement also reads is unaffected and answers normally;
-- `LATERAL` over a policed table.
+- a subquery the planner folds into the outer plan is one plan, and it answers
+  — `… IN (SELECT col FROM policed WHERE …)`, `EXISTS (…)`, `NOT IN`, a
+  derived table or a CTE in the `FROM` clause, a non-correlated scalar
+  subquery;
+- a subquery that keeps a plan of its own is refused: a **derived table** or a
+  **set operation** written inside an `IN`/`EXISTS` list, a **correlated
+  scalar** subquery, and `LATERAL`. This holds whether or not the outer
+  statement reads the same relation — `SELECT id FROM t WHERE id IN (SELECT
+  x.id FROM (SELECT id, c FROM t) x WHERE x.c > 300)` is refused exactly like
+  the same subquery under an unpoliced outer.
+
+A refusal is the answer to "this shape cannot be ordered safely", so it does
+not vary with the data or with the identity's row filter: the same statement is
+refused for every identity the policy covers.
 
 ### A mask is a SQL expression, and it must say what it means
 

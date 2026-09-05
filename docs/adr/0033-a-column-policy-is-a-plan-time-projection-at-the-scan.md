@@ -191,13 +191,34 @@ the coordinator's `ExecuteSQL` can present.
   policed column. Asking only about the STATEMENT's plan is unfalsifiable for a
   relation named only inside subquery TEXT, and what that text contains — a
   derived table, a set operation, a correlation — is the client's choice, so no
-  per-shape enumeration can cover it. Where the policed relation is also read
-  by the outer statement the projection is applied and the query ANSWERS; where
-  the whole policed read lives inside subquery text the query REFUSES.
+  per-shape enumeration can cover it. The line is drawn by the INNER PLAN: a
+  subquery the planner folds into the outer plan is ordered with it and
+  ANSWERS; a subquery that keeps a plan of its own — a derived table or a set
+  operation inside an `IN`/`EXISTS` list, a correlated scalar, `LATERAL` —
+  REFUSES, whether or not the outer statement reads the same relation.
 - **Scan-level filter pushdown stops at a security projection.** It evaluates
   against the FILE, so pushing a predicate that sits above the projection makes
   it read the stored column — the in-process twin of a single filter slot on
   the DAG.
+- **A policed scan carries no predicate but the policy's own.** Node order
+  above a scan says nothing about what is ATTACHED to it: `attachScanPredicates`
+  copies a filter's `col <op> literal` conjuncts onto the scan directly beneath
+  it for row-group pruning, and the scans the post-optimize pass covers are
+  minted by that same optimizer — the inner of a decorrelated `IN`/`EXISTS` is a
+  Filter over a bare Scan when the copy happens, and the projection arrives
+  afterwards. The scanner then prunes by the STORED column's statistics: `… IN
+  (SELECT id FROM emp WHERE ssn = '<the mask>')` skipped every row group whose
+  stored range excluded the mask and answered NO ROWS in process, where the DAG,
+  which attaches nothing there, answered every row. That was this arc's one arm
+  split, and it was a DISCLOSURE — the row set is arithmetic on statistics of
+  the hidden column, so a client moving the constant reads its range off the
+  answer — not the neutral path difference an earlier revision of this ADR
+  recorded on a mis-localized diagnosis. The pass that injects the projection
+  now strips the policed attachments (scan predicates, node predicates,
+  partition filters) from the scan it covers; `Predicate.FromPolicy` exempts
+  the row filter, which reads the row as stored by design (decision 6); and
+  `CheckPolicyPlanOrder` asserts it structurally, so an attachment made by a
+  future pass refuses rather than prunes.
 - A mask expression is evaluated BELOW the barrier, against the row as stored.
   One that reads a column the same rule masks or denies is refused at load and
   at enforcement, because it would publish exactly what the rule takes away. An
@@ -224,18 +245,6 @@ the coordinator's `ExecuteSQL` can present.
 - **`LATERAL` over a policed relation refuses.** Its decorrelated inner keeps
   its predicate in a shape the planner cannot reorder above the projection, so
   the invariant refuses `0A000` uniformly on every arm rather than answer.
-- **A self-referencing `IN`/`EXISTS` whose inner predicate names the MASK
-  itself** — `id IN (SELECT id FROM t WHERE ssn = '<the mask>')` — answers 0
-  in process and 12 on the DAG. **The DAG is right**: under masking every row's
-  value IS the mask, so `mask = mask` holds on every row. The in-process answer
-  is a WRONG ANSWER on the primary arm, not a neutral path difference, and this
-  entry says so. It discloses nothing — the round-4 review built a fixture whose
-  rows STORE exactly the mask, for a numeric and a string mask, with and without
-  a denied column beside it, and every arm answered identically — so the row set
-  varies with nothing the policy hides. Mechanism: the in-process semi-join's
-  build side yields no rows for a predicate over a COMPUTED projection output
-  (a predicate over a passthrough column of the same barrier is correct), which
-  is below the logical plan the invariant walks. Its own work.
 - Per-row / per-cell labels (a visibility column, a `has_access` function
   family, dictionary-level evaluation) are a 0.19 arc, not this one.
 
