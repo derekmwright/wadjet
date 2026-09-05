@@ -1257,29 +1257,85 @@ The real distributed algorithm for this shape is a dependent join / general
 non-equi decorrelation — a separate feature, exactly as #346 grew
 INTERSECT/EXCEPT stages after their refusal landed.
 
-## SELECT-list subqueries (refused → routed local)
+## SELECT-list subqueries (producer stage, with three declines)
 
-An UNCORRELATED subquery has a distributed lowering in a PREDICATE and none in
-a PROJECTION. `resolveFilterSubqueries` replaces it with a `:scalar_N`
-placeholder, `emitScalarProducerStages` emits a producer stage for it,
-`Stage.ScalarDependencies` records the edge and
-`substituteScalarDependencies` splices the value into the filter text before
-dispatch. Nothing does any of that for a SELECT-list item:
-`attachScanSelectProjections` attaches the list verbatim and the worker's
-compiler has no `SubqueryRunner`, so every task failed three times with
-`compile projection "(SELECT MAX(v) FROM c)": subqueries require a
-SubqueryRunner` — for a query PostgreSQL and the single-process pipeline both
-answer (#659). Loud, but a legal query with no answer.
+An UNCORRELATED scalar subquery takes the SAME producer path in a PROJECTION
+as it does in a PREDICATE. `resolveFilterSubqueries` replaces it with a
+`:scalar_N` placeholder, `emitScalarProducerStagesTyped` emits a producer stage
+for it and hands back the type its plan declares,
+`Stage.ScalarDependencies` records the edge, and
+`substituteScalarDependencies` splices the value in before dispatch — into
+`FilterExprs` for a predicate and into `ProjectExprs[i].Expr` for a SELECT-list
+item.
 
-`refuseScalarSubqueryProjections` (`physical/scalar_projection_refusal.go`)
-refuses it before stage generation with
-`ErrScalarSubqueryProjectionDistributed`, and the coordinator routes it to the
-local pipeline (`runScalarProjectionLocal`, counter
-`ScalarProjectionLocalRoutes()`) — the same route the correlated, DISTINCT and
-IN-set refusals take. It is not CTE-specific: the same failure reproduced over
-a base table and a dimension, so a CTE-narrow refusal would have left the
-commoner spelling failing. A subquery in a WHERE or a HAVING is untouched and
-still runs on the DAG.
+Two details are the projection's own. The spec's `Name` stays the ITEM's text,
+because `extractOutputRenames` maps that to the user's alias and it reads the
+untouched logical projection; only `Expr` carries the placeholder and only
+`Expr` is substituted. And the spec DECLARES the producer's type, because a
+projection's declared type is the output column's: a bare numeric literal is
+float8 in this dialect (ADR-0024), so an undeclared spec answered `true` (type
+ID zero) where the single path answers a bigint.
+
+Three shapes decline and keep the old disposition — refused with
+`ErrScalarSubqueryProjectionDistributed` (`physical/scalar_projection_refusal.go`)
+and routed to the local pipeline (`runScalarProjectionLocal`, counter
+`ScalarProjectionLocalRoutes()`), the same route the correlated, DISTINCT and
+IN-set refusals take:
+
+- an item whose subquery survives `resolveSubqueryAST` — a `CASE` arm, a
+  function argument, anywhere the walk's `default:` returns the node unwalked;
+- a CORRELATED subquery, which `resolveSubqueryAST` parks as
+  `ErrCorrelatedSubqueryDistributed`: only the local pipeline can re-run one
+  per outer row, so it routes on the CORRELATED counter;
+- a subquery sharing a CTE BODY with the outer query. `ctePlannedTerminal`
+  hands the producer the stage the outer walk already emitted, and the stage
+  carrying the SELECT list is that body's consumer — so the carrier would await
+  a producer that depends on the carrier, and the query HANGS on the stage
+  barrier. `attachProjectionScalarDependencies` walks the dependency closure
+  and declines rather than wiring that edge.
+
+The refusal is asked AFTER `attachScanSelectProjections` rather than before
+stage generation, because that pass is what decides whether an item is lowered,
+and before the assert battery so a declined item earns its own typed refusal
+rather than the unreachable-gather-output one.
+
+A subquery that is not provably ONE ROW is not deferred at all (ADR-0021 §5's
+lever: only an ungrouped aggregate defers), so it is executed at plan time
+where the whole result is in hand and the second row is `21000`.
+
+## A null-aware anti join replicates its build (#507 / #539)
+
+`x NOT IN (SELECT y FROM t)` lowers to an anti join carrying
+`Node.NullAwareAnti`, and that flag makes the join's answer depend on a fact
+about its WHOLE build side: did any row have a NULL key. `exec.HashJoin` reads
+it once and emits nothing when it is set, which is NOT IN's three-valued rule.
+
+A hash-partitioned build splits that fact. The task holding the NULL partition
+emits nothing, every other task emits its probe rows, and the query comes back
+with the row set its `NOT EXISTS` twin would give — silently, because every
+task behaved correctly for the rows it held. So the build must be REPLICATED,
+and three things say so at three layers:
+
+- `walkStages` forces `broadcast_join` for such a node past the size decision
+  and past an explicit `BroadcastBytesThreshold < 0`, logs a WARN naming the
+  build's estimated bytes, and counts it in
+  `physical.NullAwareAntiForcedBroadcasts` — the only way to see the trade from
+  outside, since the answers are right either way and what changes is that a
+  build the threshold refused is now on every task.
+- `RequiredChildDistribution` returns `RequiredBroadcast` for slot 1 of a
+  null-aware anti join whatever stage type it carries, so `EnsureDistribution`
+  splices a replicate exchange rather than a shuffle if such a stage is ever
+  emitted as a `hash_join`.
+- `assertNullAwareAntiBuildsAreReplicated` is asked on the FINAL stage list,
+  after every rewriting pass. A plan that cannot be shown to give every task
+  the whole build is refused `0A000` and routed to the coordinator-local
+  pipeline. Fusion declines such a join separately (`fuse_stage_chains.go`,
+  twice) because `ChainedJoinSpec` has no field for the flag.
+
+What #539 itself asks for — a lowering that does not NEED a replicated build,
+so a large `NOT IN` can shuffle — is not this. ADR-0021 §1f records the
+two-anti-join identity that would do it, why it was built and measured and not
+shipped, and what it needs first.
 
 ## IN-subqueries the semi-join rewrite declines (materialized → set literal)
 

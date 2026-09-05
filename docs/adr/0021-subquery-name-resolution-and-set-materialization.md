@@ -14,6 +14,9 @@ build side is the subquery's own FROM clause as a plan — and SUPERSEDES both
 declines for every relation but a recursive CTE (#852, #616). §5 (2026-09-04)
 settles what "scalar" means — at most ONE row, and the second row is 21000 —
 and §5a closes §1c's named boundary: an alias hides its table name.
+§2a (2026-09-04) gives a SELECT-LIST scalar subquery the producer stage a
+predicate's has had since Q11 (#659), and §1f gains the other half of #539:
+where a null-aware anti join's replicated build is DECLARED.
 
 ## Context
 
@@ -410,6 +413,26 @@ stays a subquery predicate, where `expr.CorrelatedInSubquery.EvalBoolNull`
 carries the exact rule per outer row. The uncorrelated form is unchanged and
 keeps #507's null-aware anti join; so does a correlated `IN`, which needs no
 third value.
+
+**Where the uncorrelated form's rule LIVES was the other half, and it is
+settled here** (2026-09-04, #539). `walkStages` forces a `NullAwareAnti` join
+onto the broadcast path past the size decision, counts it in
+`physical.NullAwareAntiForcedBroadcasts` and logs the build's estimated bytes.
+That was one place remembering one rule, carried by the stage TYPE: a
+`StageHashJoin`'s build slot asked for `RequiredClusteredOn` whatever the join
+MEANT, so every later pass that could re-type, fuse or split such a stage had
+to remember not to (`fuse_stage_chains.go` does, in two functions), and nothing
+read the counter. So the requirement is now a property of the JOIN —
+`RequiredChildDistribution` returns `RequiredBroadcast` for a null-aware anti
+join's build — and `assertNullAwareAntiBuildsAreReplicated` asserts on the
+FINAL stage list that every such join reads a build every task sees whole,
+refusing `0A000` and routing local rather than dispatching a plan whose tasks
+would each answer a different question.
+
+What #539 asks for beyond that — a lowering that does not need a replicated
+build, so a large `NOT IN` can shuffle — is the two-join identity above, and
+it is still blocked on the same thing: `physical.BuildSemiAntiFilter` reads a
+semi/anti residual as TEXT.
 
 That evaluator had the same empty-set defect the operator guards against, and
 it is fixed here: `x NOT IN ()` is TRUE for EVERY row INCLUDING a NULL-keyed
@@ -938,7 +961,72 @@ join answers nothing, an anti join answers everything — which is exactly the
 class the invariance oracle enumerates, and the oracle would have reported
 #562 as a divergence the first time a two-key correlation entered any corpus.
 
-### 4. What was rejected
+#### 2a. A SELECT-LIST scalar subquery takes the same producer stage
+
+(Added 2026-09-04, #659.)
+
+§2 gave the stage DAG a way to execute an IN-subquery it could not join. This
+is the same question one clause over, and the answer is the machinery that was
+already there rather than a second one.
+
+A scalar subquery in a PREDICATE has had a distributed lowering since Q11:
+`resolveFilterSubqueries` replaces it with a `:scalar_N` placeholder,
+`emitScalarProducerStages` emits a producer stage, `Stage.ScalarDependencies`
+records the edge and the coordinator substitutes the producer's single row into
+the filter text before dispatch. The same subquery in the SELECT LIST had none.
+`attachScanSelectProjections` attached it verbatim, the worker's compiler has
+no `SubqueryRunner`, and every task failed — so the planner refused the plan
+and the coordinator ran the WHOLE query single-process (#659). Right, and the
+route fired identically over a CTE, a base table and a derived table: the gap
+was the POSITION, not the relation.
+
+**A SELECT-list item's subquery is deferred to a producer stage on the same
+terms a predicate's is**, and the alternative is the one this project already
+rejected: executing the subquery at plan time and splicing a literal is what
+`scalarDeferAll` moved AWAY from, because a value accumulated on the
+coordinator's single-process pipeline and one accumulated across stages differ
+in float order — the Q15 SF0.1 zero-row root cause.
+
+Two things a predicate does not need:
+
+- **The spec keeps the ITEM's name.** `ProjectExprSpec.Name` is what
+  `extractOutputRenames` maps to the user's alias, and that pass reads the
+  logical projection, which the lowering does not touch. Only `Expr` carries
+  the placeholder and only `Expr` is substituted.
+- **The spec declares the PRODUCER's type.** A projection's declared type IS
+  the output column's type, and a bare numeric literal is float8 in this
+  dialect (§ADR-0024). Without the declaration
+  `SELECT (SELECT MAX(c_i64) FROM t)` came back as the zero TypeID — boolean
+  `true` — where the single path answers a bigint. `emitScalarProducerStagesTyped`
+  reads it off the producer's own optimized plan.
+
+**Three declines, each with a mechanism.** An item whose subquery survives
+`resolveSubqueryAST` — a `CASE` arm, a function argument, anywhere the walk's
+`default:` returns the node unwalked. A CORRELATED subquery, which needs a
+re-run per outer row and routes on the correlated counter. And a subquery
+sharing a CTE BODY with the outer query, which is a CYCLE rather than a
+preference: `ctePlannedTerminal` hands the producer the stage the outer walk
+already emitted, the stage carrying the SELECT list is that body's consumer, so
+the carrier would await a producer that depends on the carrier. Measured:
+`WITH c AS (…) SELECT id, (SELECT MAX(v) FROM c) FROM c` HUNG on the
+coordinator's stage barrier until a twenty-minute test deadline.
+`attachProjectionScalarDependencies` walks the dependency closure and declines.
+
+The refusal moves from before stage generation to after the attach pass,
+because that pass is what decides whether an item is lowered; it is asked
+before the assert battery so a declined item keeps earning its OWN typed
+refusal rather than the unreachable-gather-output one — the same engine, a
+different recorded cost.
+
+Twelve cells in `coordinator.TestArcD5CorrelationMatchesPostgres` are the
+gate, and the three `wantScalarProjRoutes: 1` pins #659 shipped with are
+deleted, which is the proof. One divergence is recorded rather than fixed and
+is not this section's: `(SELECT MAX(bigint)) + 1` boxes float64 where
+PostgreSQL says bigint, on every arm and at this arc's base — a scalar
+subquery declares no type to the const-arith fold, which is ADR-0024's rung
+(#714's third box).
+
+## 4. What was rejected
 
 - **Projecting the inner plan explicitly** so the build side has a schema the
   rewrite chose. It moves the problem rather than solving it: the Project's

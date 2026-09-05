@@ -2164,6 +2164,20 @@ DELETE FROM orders o   WHERE EXISTS (SELECT 1 FROM cancelled c WHERE c.order_id 
 UPDATE orders SET n = 0 WHERE n < (SELECT max(n) FROM archive);
 ```
 
+A `MERGE` takes one in every position it has: a `WHEN MATCHED AND` condition, a
+`WHEN NOT MATCHED AND` condition, a `SET` assignment and an `INSERT ... VALUES`
+item. A condition's subquery may be correlated to the TARGET or to the SOURCE —
+its scope is the merged row. The `ON` condition is the one place a `MERGE`
+takes none, and not because of the subquery: `ON` accepts only equality between
+a target column and a source column (see the unsupported list), so any non-key
+term refuses.
+
+```sql
+MERGE INTO orders t USING batch s ON t.id = s.id
+  WHEN MATCHED AND EXISTS (SELECT 1 FROM cancelled c WHERE c.order_id = t.id) THEN DELETE
+  WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, (SELECT max(n) FROM archive));
+```
+
 Three properties are worth knowing:
 
 - The subquery reads the table's state **as the statement found it**. A
@@ -2354,7 +2368,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
 - A SUBQUERY in an `UPDATE`'s `SET` list — `SET n = (SELECT max(n) FROM s)` — SQLSTATE 0A000. A subquery in a `DELETE` / `UPDATE` / `MERGE` PREDICATE is supported — see [A subquery in a DML predicate](#a-subquery-in-a-dml-predicate) — and an assignment is a different site.
 - `RETURNING` on INSERT/UPDATE/DELETE/MERGE — SQLSTATE 0A000
 - `MERGE ... WHEN NOT MATCHED BY SOURCE` / `BY TARGET` — SQLSTATE 0A000. `BY TARGET` is PostgreSQL 17's spelling of the ordinary `NOT MATCHED`; `BY SOURCE` walks the target rows no source row matched, which is how a MERGE expresses the delete half of a full-sync upsert. Eleven cells in the DML census carry PostgreSQL 17's answer for both forms beside the refusal.
-- A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000
+- A `MERGE ... ON` condition that is not equality between a target column and a source column — SQLSTATE 0A000. That covers `ON t.id = s.id AND t.n > 5` and `ON t.id = s.id AND t.id IN (SELECT ...)` alike; PostgreSQL's `ON` is an arbitrary join condition and answers both. The merge executor keys the match on the ON equalities, so lifting this makes the match a join.
 - `RANGE` window frames with a value offset, and the `GROUPS` frame mode
 - `SELECT DISTINCT ON (...)`
 - `ORDER BY <expression over an aggregate>` — `ORDER BY COUNT(*) * 2` — SQLSTATE
