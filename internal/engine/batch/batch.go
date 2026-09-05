@@ -32,6 +32,11 @@ type RecordBatch struct {
 	ownerID uint64
 	// mint is the producing free list's identity stamp — see MintStamp.
 	mint MintStamp
+	// claims is shared with every vector under this batch; see claimState.
+	// Nil for a batch assembled by hand rather than by NewRecordBatch (the
+	// derived shells ColumnPrune and the set-op emitter mint), and the pool
+	// boundary falls back to walking the columns for one of those.
+	claims *claimState
 }
 
 // MintStamp records WHICH producer minted a batch's storage and WHICH issue of
@@ -94,15 +99,41 @@ func (b *RecordBatch) Mint() MintStamp { return b.mint }
 func (b *RecordBatch) SetMint(m MintStamp) { b.mint = m }
 
 // NewRecordBatch creates a new record batch with the given schema and row count.
+//
+// The batch and every vector under it share ONE claimState, which is what lets
+// the pool boundary answer "does a consumer still hold anything here" with a
+// single atomic load — see claimState and retainsClaimedStorage. A pooled
+// batch OWNS its columns: nothing may replace b.Columns[i] with a vector
+// minted elsewhere and then release the batch to a pool, an invariant
+// resetVectorForReuse has always relied on and TestAPooledBatchOwnsItsColumns
+// now asserts.
 func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 	cols := make([]*Vector, len(schema))
+	claims := &claimState{}
 	for i, col := range schema {
 		cols[i] = newVectorFromColumn(col, numRows)
+		stampClaimState(cols[i], claims)
 	}
 	return &RecordBatch{
 		Columns: cols,
 		Schema:  schema,
 		Len:     numRows,
+		claims:  claims,
+	}
+}
+
+// stampClaimState gives a vector and everything beneath it the batch's claim
+// state, at mint. Base is deliberately NOT stamped: a view's base belongs to
+// whatever batch minted it, and Claim already propagates through Base to set
+// THAT batch's flag. resetVectorForReuse re-stamps on every pooled reuse.
+func stampClaimState(v *Vector, cs *claimState) {
+	if v == nil {
+		return
+	}
+	v.claims = cs
+	stampClaimState(v.Child, cs)
+	for _, ch := range v.Children {
+		stampClaimState(ch, cs)
 	}
 }
 
@@ -268,8 +299,15 @@ func (b *RecordBatch) Reset(numRows int) {
 	// back: clear the stamp so a late release from the previous producer finds
 	// it foreign rather than handing one buffer to two owners.
 	b.mint = MintStamp{}
+	if b.claims != nil {
+		// A claimed batch never reaches a pool (retainsClaimedStorage vetoes
+		// it), so this is clearing a flag that is already false — except on
+		// the first Reset of a freshly minted batch, and except for a column
+		// that was replaced mid-cycle, which the re-stamp below re-adopts.
+		b.claims.any.Store(false)
+	}
 	for _, col := range b.Columns {
-		resetVectorForReuse(col, numRows)
+		resetVectorForReuse(col, numRows, b.claims)
 	}
 }
 
@@ -278,11 +316,18 @@ func (b *RecordBatch) Reset(numRows int) {
 // column kept its previous cycle's child arenas, offsets and null bits —
 // the first reused row read back the prior batch's data concatenated with
 // the new value, and child arenas grew monotonically per reuse cycle.
-func resetVectorForReuse(col *Vector, numRows int) {
+func resetVectorForReuse(col *Vector, numRows int, claims *claimState) {
 	// Views must never survive into a pooled reuse cycle; drop the
 	// indirection so the batch is a plain (empty) owned batch again.
 	col.Base = nil
 	col.Indices = nil
+	// Re-adopt the vector into the batch's claim state. It is already stamped
+	// unless somebody replaced this column since the last cycle, and this walk
+	// is writing to the same cache lines anyway, so the store costs nothing
+	// and the O(1) pool check cannot be fooled by a swapped-in column.
+	if claims != nil {
+		col.claims = claims
+	}
 	// A batch only reaches a pool when nobody claimed it — Detach severs the
 	// pool link, and since #897 retainsClaimedStorage vetoes the derived-batch
 	// case Detach cannot sever — so a recycled vector starts unclaimed again.
@@ -297,14 +342,14 @@ func resetVectorForReuse(col *Vector, numRows int) {
 			col.Offsets[i] = 0
 		}
 		if col.Child != nil {
-			resetVectorForReuse(col.Child, 0)
+			resetVectorForReuse(col.Child, 0, claims)
 			// Child element storage is append-built; truncate the arenas so
 			// CopyValueFrom/AppendFrom start from a zero-length child.
 			truncateVectorStorage(col.Child)
 		}
 	case TypeRow:
 		for _, ch := range col.Children {
-			resetVectorForReuse(ch, numRows)
+			resetVectorForReuse(ch, numRows, claims)
 		}
 	}
 }

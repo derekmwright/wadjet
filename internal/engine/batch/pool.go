@@ -164,6 +164,19 @@ func PoolRetentionVetoes() uint64 { return poolRetentionVetoes.Load() }
 // replacement vectors for the claimed columns, which is an allocation on the
 // release path to save an allocation on the next Get.
 //
+// It is O(1) on every batch NewRecordBatch minted. Walking the columns —
+// let alone their bases and nested children — is per-Release work on a path
+// that does nothing else but a mutex and a slice append, and it MEASURED:
+// the first shape of this check cost 14-21% of a flat Get/Put cycle and
+// 15-31% of a nested one (round-1 review P4). So the claim is recorded where
+// both ends can reach it instead: every vector under a batch carries that
+// batch's claimState, Claim sets its flag, and this reads the flag.
+//
+// The walk survives for a batch NewRecordBatch did not mint — a derived shell
+// (ColumnPrune, the set-op emitter) has no claimState of its own. Those are
+// never pooled, so the walk is off the hot path; keeping it is what makes the
+// predicate total rather than conditional on how a batch was built.
+//
 // The walk descends into nested children and view bases: Claim propagates
 // DOWN (Base, Child, Children), so a view over a ROW column's child claims
 // that child while the top-level column stays unclaimed.
@@ -174,21 +187,12 @@ func retainsClaimedStorage(b *RecordBatch) bool {
 	if b.retained {
 		return true
 	}
+	if b.claims != nil {
+		return b.claims.any.Load()
+	}
 	for _, c := range b.Columns {
-		if c == nil {
-			continue
-		}
-		if c.claimed {
+		if claimedAnywhere(c) {
 			return true
-		}
-		// The flat majority ends here: one field load per column, no call.
-		// Descending unconditionally cost ~40% of a Get/Put cycle on a
-		// four-column flat batch, all of it call overhead for vectors that
-		// alias nothing.
-		if c.Base != nil || c.Child != nil || len(c.Children) > 0 {
-			if claimedAnywhere(c) {
-				return true
-			}
 		}
 	}
 	return false

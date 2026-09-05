@@ -604,6 +604,80 @@ func TestVectorWriteIsExactlyTheDeclaredWidth(t *testing.T) {
 	})
 }
 
+// The O(1) pool check reads ONE flag, and it is only sound while every vector
+// under a pooled batch shares that batch's claim state. A pooled batch OWNS
+// its columns — resetVectorForReuse has always assumed it, and since the
+// round-2 O(1) check the assumption decides whether a claim is SEEN. Assert
+// it at mint and after a reuse cycle, on a nested schema, so an operator that
+// starts replacing a pooled batch's column breaks a test rather than a query.
+func TestAPooledBatchOwnsItsColumns(t *testing.T) {
+	elem := parquet.Column{Name: "element", Type: parquet.TypeInt64}
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "r", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "a", Type: parquet.TypeInt64},
+			{Name: "c", Type: parquet.TypeRow, Fields: []parquet.Column{{Name: "d", Type: parquet.TypeFloat64}}},
+		}},
+		{Name: "arr", Type: parquet.TypeArray, ElementType: &elem},
+	}
+	pool := batch.NewBatchPool(schema, 4)
+
+	// A claim on ANY vector under the batch — however deep — has to reach the
+	// batch's own check, which is what the flag is for.
+	for _, at := range []string{"column", "row-child", "row-grandchild", "array-child"} {
+		t.Run(at, func(t *testing.T) {
+			b := pool.Get()
+			target := b.Columns[0]
+			switch at {
+			case "row-child":
+				target = b.Columns[1].Children[0]
+			case "row-grandchild":
+				target = b.Columns[1].Children[1].Children[0]
+			case "array-child":
+				target = b.Columns[2].Child
+			}
+			if target == nil {
+				t.Fatalf("schema did not produce the %s vector", at)
+			}
+			vetoes := batch.PoolRetentionVetoes()
+			target.Claim()
+			b.Release()
+			if batch.PoolRetentionVetoes() == vetoes {
+				t.Errorf("a claim on the %s did not veto the batch's pool admission", at)
+			}
+			next := pool.Get()
+			if next == b {
+				t.Errorf("the pool handed back a batch whose %s a consumer claimed", at)
+			}
+			next.Release()
+		})
+	}
+}
+
+// A batch built by hand over another batch's vectors carries no claim state of
+// its own, so the predicate has to fall back to the walk rather than answer
+// "unclaimed" because a pointer is nil.
+func TestADerivedShellStillSeesAClaimThroughTheWalk(t *testing.T) {
+	schema := []parquet.Column{{Name: "c", Type: parquet.TypeInt64}}
+	pool := batch.NewBatchPool(schema, 1)
+	src := pool.Get()
+	src.Columns[0].SetValue(0, int64(7))
+
+	// The shape ColumnPrune and the set-op emitter mint: a fresh shell over
+	// the same *Vector pointers, with a pool of its own attached.
+	derived := &batch.RecordBatch{
+		Schema:  schema,
+		Columns: []*batch.Vector{src.Columns[0]},
+		Len:     1,
+	}
+	vetoes := batch.PoolRetentionVetoes()
+	src.Columns[0].Claim()
+	pool.Put(derived)
+	if batch.PoolRetentionVetoes() == vetoes {
+		t.Errorf("a hand-built shell over a claimed vector was admitted to the pool")
+	}
+}
+
 // --- helpers ---
 
 // failOnPanic turns a panic inside a subtest into that subtest's failure, so

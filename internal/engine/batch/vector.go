@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -578,7 +579,31 @@ type Vector struct {
 	// partitioned aggregation's per-partition views all mint a derived
 	// RecordBatch over the SAME *Vector pointers.
 	claimed bool
+
+	// claims is the claim state of the batch this vector was minted into —
+	// one object shared by every column of that batch and by every nested
+	// child under them (see newVectorFromColumn). Claim sets its flag, so the
+	// pool boundary can ask "did anything under this batch get claimed" with
+	// ONE atomic load instead of walking columns, bases and children on every
+	// Release. Nil for a vector minted outside a RecordBatch (NewVector,
+	// NewVectorLike, NewViewVector), which is why the walk still exists.
+	claims *claimState
 }
+
+// claimState is one batch's "somebody claimed storage under me" flag.
+//
+// It is a separate object rather than a field on RecordBatch because the
+// vectors have to reach it and a batch SHELL does not survive the trip: the
+// batch a retaining consumer Detaches is a DERIVED shell over the same
+// *Vector pointers (ColumnPrune, the set-op emitter, partitioned
+// aggregation's selView), while the shell the producer releases is the
+// original. What both reach is the VECTORS, so the flag hangs off the vectors
+// and the original batch reads it.
+//
+// Atomic because Release runs on whatever goroutine finished with the batch
+// while another may still be claiming through a view; the pool's own mutex
+// does not order that pair.
+type claimState struct{ any atomic.Bool }
 
 // Claim marks this vector's storage as retained by a consumer, recursively
 // through the view base it reads from and its nested children. Once claimed a
@@ -590,6 +615,11 @@ func (v *Vector) Claim() {
 		return
 	}
 	v.claimed = true
+	if v.claims != nil {
+		// The batch this vector belongs to can now refuse recycling with one
+		// load — see claimState and retainsClaimedStorage.
+		v.claims.any.Store(true)
+	}
 	if v.Base != nil {
 		v.Base.Claim()
 	}
