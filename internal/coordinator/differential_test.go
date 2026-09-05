@@ -222,21 +222,56 @@ func diffOneQuery(ctx context.Context, t *testing.T, sdb *wadjet.DB, coord *Coor
 	sCanon := oracle.Canonicalize(&oracle.Result{Columns: cols, Rows: sres.Rows})
 	dCanon := oracle.Canonicalize(&oracle.Result{Columns: cols, Rows: dRows})
 
-	// LIMIT boundary ties make limited output legitimately nondeterministic
-	// (any tie-group member is admissible), so a LIMIT-ed query compares by
-	// row count and its stripped form compares the full multiset — the same
-	// scheme as the kill-switch oracle's ExpandLimits.
-	oq := oracle.Query{Name: "gen", CountOnly: q.Limit > 0}
+	// A row-window clause makes the output legitimately nondeterministic
+	// unless the ORDER BY is TOTAL, which this generator does not model: any
+	// member of a tie group is an admissible answer, so which rows a LIMIT
+	// keeps and which an OFFSET skips are both scheduling-dependent. Such a
+	// query therefore compares by row COUNT, and its stripped form — the same
+	// query with every window clause and the ORDER BY removed — compares the
+	// full multiset. Same scheme as the kill-switch oracle's ExpandLimits.
+	oq := oracle.Query{Name: "gen", CountOnly: windowsTheRowSet(q)}
 	if diff := sCanon.Diff(dCanon, oq); diff != "" {
 		return true, fmt.Sprintf("(%d standalone rows vs %d distributed)\n%s", sCanon.Rows(), dCanon.Rows(), diff)
 	}
-	if q.Limit > 0 {
-		stripped := q.Clone()
-		stripped.Limit = 0
-		stripped.OrderBy = nil
-		return diffOneQuery(ctx, t, sdb, coord, stripped)
+	if windowsTheRowSet(q) {
+		return diffOneQuery(ctx, t, sdb, coord, strippedOfRowWindow(q))
 	}
 	return false, ""
+}
+
+// windowsTheRowSet reports whether q keeps only part of its input's rows, and
+// therefore whether SQL leaves WHICH rows undetermined without a total order.
+//
+// #487 gave the generator two shapes this question had never been asked
+// about. `OFFSET n` is exactly LIMIT's problem from the other end — it drops
+// an arbitrary n of a tie group — and `LIMIT 0` keeps none. Before them the
+// test asked `q.Limit > 0` in two places, and a bare OFFSET slipped through
+// both: `SELECT o_custkey, o_shippriority FROM orders OFFSET 3` compared 14997
+// rows against 14997 rows as an exact multiset and reported the first
+// differing row, on a query whose row set SQL does not pin down.
+//
+// The other option was to emit OFFSET only under a total ORDER BY, which is
+// what shapegen does — it tracks Query.TotalOrder and appends a uniqueness
+// tiebreaker. sqlgen models neither, so the same guard here would be a guess
+// about a fixture's key columns rather than a fact; the comparison is where
+// this generator has always answered the question (`CountOnly: q.Limit > 0`
+// predates #487), so it is where the two new shapes are answered too.
+func windowsTheRowSet(q *sqlgen.Query) bool {
+	return q.Limit > 0 || q.Offset > 0 || q.LimitZero
+}
+
+// strippedOfRowWindow is q with every row-window clause and the ORDER BY
+// removed, so the result is the FULL multiset and is compared as one.
+//
+// TestEveryQueryFieldIsClassifiedForRowWindowing is what keeps this in step
+// with the struct.
+func strippedOfRowWindow(q *sqlgen.Query) *sqlgen.Query {
+	stripped := q.Clone()
+	stripped.Limit = 0
+	stripped.Offset = 0
+	stripped.LimitZero = false
+	stripped.OrderBy = nil
+	return stripped
 }
 
 func envInt(name string, def int) int {
