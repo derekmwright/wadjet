@@ -154,6 +154,114 @@ func TestAVectorLiteralIsExactlyTheDeclaredWidthAtEveryDoor(t *testing.T) {
 	})
 }
 
+// A number with no int32 is refused at the DOOR, not wrapped into a plausible
+// value.
+//
+// The arc's own record said "no SQL door reaches this seam today", and that was
+// measured on a STRING literal (`'2147483648'::date`). The reachable shape is
+// an INTEGER literal cast: at de5bc970 `SELECT 3000000000::DATE` answered
+// -3543531-12-19, and -2147483649::DATE and 2147483647::DATE answered the SAME
+// date. Round-2 review B1.
+//
+// PostgreSQL has no int-to-date cast at all (42846, "cannot cast type bigint to
+// date"), so wadjet's cast is a deliberate superset (ADR-0012 item 5); inside a
+// superset the rule is that a value it cannot represent is LOUD with the class
+// PostgreSQL uses for the same magnitude reaching an int4, and never a
+// different number. The four-arm version of this is arc S1's
+// coordinator.TestAnInt32DomainRefusalHoldsOnEveryArm; this is the door and
+// the SQLSTATE.
+func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "s4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, c := range []struct {
+		sql  string
+		want string // "" = must answer
+	}{
+		{`SELECT 2147483647::DATE`, ""},
+		{`SELECT (-2147483648)::DATE`, ""},
+		{`SELECT 2147483648::DATE`, "22003"},
+		{`SELECT (-2147483649)::DATE`, "22003"},
+		{`SELECT 3000000000::DATE`, "22003"},
+		{`SELECT 1000000000000::DATE`, "22003"},
+	} {
+		t.Run(c.sql, func(t *testing.T) {
+			r, err := db.Query(ctx, c.sql)
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("an in-range cast was refused: %v", err)
+				}
+				if len(r.Rows) != 1 {
+					t.Errorf("got %d rows; want 1", len(r.Rows))
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("answered %v where the value has no int32", r.Rows)
+			}
+			if got := sqlerr.StateOf(err); got != c.want {
+				t.Errorf("SQLSTATE %q; want %q (%v)", got, c.want, err)
+			}
+		})
+	}
+
+	// PIN — delete this cell when it starts refusing, which is the proof the
+	// cast path was fixed.
+	//
+	// The int64 EXTREMES escape the guard: 9223372036854775807::DATE answers
+	// 1969-12-31 and 9223372036854775806::DATE answers 1969-12-30, which is
+	// day -1 and day -2 — the low 32 bits of each value read as an int32
+	// (0xFFFFFFFF, 0xFFFFFFFE), and (-9223372036854775808)::DATE answers day
+	// 0 the same way. Everything between 2^31 and 10^12 refuses, so the value
+	// is being narrowed BEFORE it reaches batch.Vector.SetValue for these
+	// three and arrives already an int32, where the store has nothing left to
+	// check. That is a cast-path defect in the expression layer, not this
+	// arc's seam, and it is recorded here rather than left for the next
+	// census to rediscover.
+	for _, c := range []struct{ sql, answers string }{
+		{`SELECT 9223372036854775807::DATE`, "1969-12-31"},
+		{`SELECT 9223372036854775806::DATE`, "1969-12-30"},
+		{`SELECT (-9223372036854775808)::DATE`, "1970-01-01"},
+	} {
+		t.Run("pin/"+c.sql, func(t *testing.T) {
+			r, err := db.Query(ctx, c.sql)
+			if err != nil {
+				t.Fatalf("this now refuses (%v) — the cast path was fixed; "+
+					"delete this pin and move the case into the table above", err)
+			}
+			if got := fmt.Sprint(r.Rows); !strings.Contains(got, c.answers) {
+				t.Errorf("answered %s; the pin recorded %s", got, c.answers)
+			}
+		})
+	}
+
+	// The two CodeQL siblings, recorded rather than asserted-by-analogy: a
+	// PORT or PROTOCOL cast does NOT reach the narrowing seam, because the
+	// cast never declares the result PORT. Measured, so the record cannot
+	// drift again in either direction.
+	for _, sql := range []string{`SELECT 3000000000::PORT`, `SELECT 3000000000::PROTOCOL`} {
+		t.Run(sql+"/does-not-reach-the-seam", func(t *testing.T) {
+			r, err := db.Query(ctx, sql)
+			if err != nil {
+				t.Skipf("this cast now refuses (%v) — if that is deliberate, "+
+					"move it into the table above", err)
+			}
+			if len(r.Rows) != 1 {
+				t.Fatalf("got %d rows; want 1", len(r.Rows))
+			}
+			// It answers the widened number: no PORT vector is written, so
+			// batch.Vector's int4 guard is never asked. The domain question
+			// ("is 3000000000 a port") is a different defect and not this
+			// arc's; the seam gate in internal/engine/batch covers the store.
+			t.Logf("%s answers %v — the seam is unreached from this door", sql, r.Rows)
+		})
+	}
+}
+
 // s4IngestVector ingests one row carrying v into a fresh VECTOR(2) table and
 // returns whatever the door said, flush included — a width the door admits but
 // the writer refuses is still a refusal, and it is the FLUSH that reports it.
