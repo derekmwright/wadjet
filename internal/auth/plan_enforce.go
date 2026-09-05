@@ -429,7 +429,14 @@ func (r *policyResolver) tableColumns(table string) []string {
 	}
 	var cols []string
 	if r.cat != nil {
-		if meta, err := r.cat.GetTable(r.ctx, table); err == nil && meta != nil {
+		// `GetTable` keys BYTE-EXACTLY, and the name here is whichever
+		// spelling the statement carried — folded, for an unquoted reference
+		// (#731) — while the catalog holds the parquet file's spelling. A
+		// miss returned an EMPTY column list, and an empty list is not a
+		// refusal: `checkRowFilterColumns` returns nil on it and
+		// `maskExpression` falls through, so a policy stopped being checked
+		// against the relation it names. Resolve the way every read door does.
+		if meta, err := r.cat.GetTable(r.ctx, r.cat.ResolveTableName(table)); err == nil && meta != nil {
 			cols = make([]string, len(meta.Schema.Columns))
 			for i, c := range meta.Schema.Columns {
 				cols[i] = c.Name
@@ -494,7 +501,12 @@ func StatementBaseTables(ctx context.Context, cat *catalog.Catalog, info *plansq
 		if cat == nil {
 			return true
 		}
-		_, err := cat.GetTable(ctx, name)
+		// Same concession the read doors take: a CamelCase catalog table is
+		// reachable under its folded spelling. This is the union arm whose
+		// whole job is that a relation the plan carries no Scan for is STILL
+		// access-checked; byte-exact, it dropped such a table from the list
+		// entirely, so that safety net did not exist for it.
+		_, err := cat.GetTable(ctx, cat.ResolveTableName(name))
 		return err == nil
 	}
 	var out []string

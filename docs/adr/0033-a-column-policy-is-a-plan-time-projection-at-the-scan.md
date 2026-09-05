@@ -307,3 +307,92 @@ no ceiling to compare it against; `query_limit` is a read control.
 - `internal/planner/logical/plan_coverage_test.go` —
   `TestInjectColumnPolicies_SchemaColumnsBeatAnEmptyScan`,
   `_NoColumnsAvailable`, `_AllColumnsDenied` for decisions 1 and 4.
+
+---
+
+## Amendment 2026-09-05 — a policy binds to the RELATION, not to a spelling of it (#882)
+
+**Status:** accepted, supersedes nothing; extends the invariant to the NAMES a
+policy is written with.
+
+An unquoted SQL identifier is folded to lower case by the lexer (#731), while a
+catalog keeps the spelling the parquet file or the Iceberg import gave it —
+where CamelCase is ordinary (`Hits`, `WatchID`, `EventDate`). So one relation
+has two legitimate spellings, and the engine already reconciles them with one
+rule: `catalog.ResolveTableName` for a relation, `batch.ResolveSchemaIndex` for
+a column — byte-exact first, then a unique ASCII-case-insensitive match for a
+name that is itself folded, with a delimited name staying byte-exact
+(ADR-0012 item 4).
+
+The policy layer did not use that rule, and it failed OPEN in both directions
+at once:
+
+- ABAC compared `resource.name` through the generic attribute comparator
+  (`compareEq`, `fmt.Sprintf("%v")` — byte-exact). With catalog `Hits` and a
+  rule scoped `resource.name eq "hits"`, the scoped rule did not match. **An
+  unmatched scoped rule is not a refusal**: the broad `allow` that every
+  `roles:`-to-ABAC migration emits still matched, so the decision came back
+  Allowed with NO obligations — the masked column in plaintext, the denied
+  column present, and a DML predicate on the masked column a working oracle for
+  its own stored value, which is exactly the disclosure rule 2 exists to close.
+- the legacy `PolicySet` keyed its map by the YAML's bytes and looked it up
+  with the statement's folded name, so `table: Hits` bound to nothing and the
+  row filter was silently absent.
+
+The two directions are opposite, so on a CamelCase relation **there was no
+single spelling an operator could write that bound on both paths**. Whichever
+they chose, one path was open. That is what makes this a defect in the policy
+model rather than a configuration error.
+
+### The position
+
+1. **A policy's relation and column names resolve through the SAME rule the
+   query planner uses for identifiers.** `catalog.ResolveTableName` and
+   `batch.ResolveSchemaIndex`; a delimited name stays byte-exact, so a policy is
+   never more permissive about names than the queries it polices.
+2. **The binding happens ONCE, at policy load, against the catalog.** Every
+   relation and every policed column is rewritten to the catalog's own
+   spelling, so evaluation compares two names that came from the same place
+   rather than two spellings of an idea.
+3. **A policy that names a relation or a column that does not resolve is
+   REFUSED AT LOAD.** This is ADR-0033's existing rule — a policy that cannot
+   be enforced does not load (#802) — applied to names. Without it a typo is
+   indistinguishable from a relation that does not exist yet, and the rule
+   carrying the obligations silently never matches, which beside a broad allow
+   is a grant. A hot reload that cannot be bound **keeps the previous set**.
+4. **There is no code path where a spelling mismatch yields "no policy
+   applies".** The load-time binding is the mechanism; the fold-aware
+   comparison (`relationEq` for `resource.name`, `policyKey` for the legacy
+   set) is the FLOOR that holds when no catalog was attached — an embedded
+   deployment that constructs an evaluator directly, for instance.
+5. **Only the attributes that carry an IDENTIFIER get the identifier rule.**
+   `eq` stays byte-exact for every other attribute: folding it generally would
+   make `classification eq "SECRET"` match `"secret"` and quietly widen every
+   clearance in the file. `resource.name` and `resource.table` are the list.
+
+### Consequence an operator must know
+
+A policy may not name a relation the catalog does not hold. Startup refuses
+with the policy, rule and name; a hot reload refuses and keeps the running set.
+This is deliberate and it is the fail-closed direction: the alternative is a
+policy file that loads clean and enforces nothing.
+
+### Gates
+
+- `internal/server/policy_relation_spelling_test.go` —
+  `TestPolicyBindsToTheRelationNotToASpellingOfIt`: both policy spellings ×
+  both statement spellings × three doors (embedded, pgwire, HTTP) × read
+  (mask + deny) and write (UPDATE / DELETE / INSERT / MERGE on a denied
+  column), plus the mask-as-oracle cell and the counter-cell that a policy
+  scoped to a DIFFERENT relation still does not bind.
+  `TestLegacyPolicySetBindsToTheRelationNotToASpellingOfIt` covers the
+  non-ABAC path, whose failure pointed the other way.
+- `internal/auth/policy_bind_test.go` —
+  `TestPolicyNamesBindToTheCatalogAtLoad` (binding, refusal, the delimited
+  wrong-case column, the `tables: ["*"]` wildcard, the legacy set) and
+  `TestPolicyBindFailureKeepsThePreviousSet` (the hot-reload contract).
+
+Every fixture in this arc registers its relation through the CATALOG, because
+the DDL door folds a name it MINTS: a CamelCase relation is one a dataset
+brought, which is the only way the two spellings can differ at all — and the
+reason every previous policy fixture, all lower case, was blind to this.

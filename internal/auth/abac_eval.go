@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // PolicyEvaluator evaluates access control policies using deny-overrides.
@@ -233,9 +235,54 @@ func (pe *PolicyEvaluator) ruleMatches(rule PolicyRule, attrs map[string]any, ac
 	return true
 }
 
+// relationAttributes are the attributes whose value is a RELATION NAME rather
+// than an opaque string, and so are compared under the engine's IDENTIFIER
+// rule instead of byte-exactly.
+//
+// A relation name has two legitimate spellings for one relation: the catalog's
+// (`Hits`, the spelling a parquet dataset or an Iceberg import brings) and the
+// one an unquoted reference arrives in, which the lexer folded (#731). The
+// query planner reconciles them with `catalog.ResolveTableName`, so a
+// statement naming `Hits` and a statement naming `hits` read the SAME table —
+// and a policy scoped to that relation has to bind to both, or it binds to
+// neither door consistently.
+//
+// It did not. `resource.name` went through the generic attribute comparator
+// (`compareEq`, `fmt.Sprintf("%v")`), which is byte-exact, so with a catalog
+// table `Hits` and a rule scoped `resource.name eq "hits"` the rule did not
+// match — and an unmatched scoped rule is not a REFUSAL. The broad allow that
+// every `roles:`-to-ABAC migration emits still matched, so `Evaluate` returned
+// Allowed with NO obligations: the masked column came back in plaintext, the
+// denied column came back at all, and a DML predicate on the masked column
+// became a working oracle for its own stored value (#882, ADR-0033 rule 2).
+// The legacy `PolicySet` had the same hole in the opposite direction, so on a
+// CamelCase table there was no single spelling an operator could write that
+// bound on both paths.
+//
+// The fix is not to fold `compareEq` — `eq` must stay byte-exact for ordinary
+// attributes, or a rule reading `classification eq "SECRET"` would start
+// matching `"secret"` and quietly widen every clearance in the file. Only the
+// attributes that carry an IDENTIFIER get the identifier rule.
+var relationAttributes = map[string]bool{
+	"resource.name":  true,
+	"resource.table": true,
+}
+
 // matchCondition evaluates a single condition against the attribute map.
 func matchCondition(cond Condition, attrs map[string]any) bool {
 	val, exists := attrs[cond.Attribute]
+	if relationAttributes[cond.Attribute] {
+		switch cond.Op {
+		case "eq":
+			return exists && relationEq(val, cond.Value)
+		case "neq":
+			return !exists || !relationEq(val, cond.Value)
+		case "in":
+			return exists && relationIn(val, cond.Value)
+		case "not_in":
+			return !exists || !relationIn(val, cond.Value)
+		}
+	}
 
 	switch cond.Op {
 	case "exists":
@@ -269,6 +316,52 @@ func matchCondition(cond Condition, attrs map[string]any) bool {
 
 func compareEq(a, b any) bool {
 	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+// relationEq compares two RELATION names the way the engine resolves one:
+// byte-exact, or — when at least one side is already FOLDED, i.e. carries no
+// ASCII upper-case letter and so is the spelling an unquoted reference
+// arrives in — equal ignoring ASCII case.
+//
+// The "at least one side is folded" test is what keeps this from being a
+// blanket case-insensitive compare. Two spellings that BOTH carry upper case
+// (`Hits` vs `HITS`) are two delimited names, and a delimited name is
+// byte-exact everywhere else in the engine (ADR-0012 item 4,
+// `catalog.ResolveTableName`), so they stay distinct here too.
+//
+// A policy is fail-closed under this rule: it can only ever bind to MORE
+// spellings of the relation it names, never to a different relation — and
+// `catalog.CreateTable` already refuses two tables whose names are case-twins,
+// so "more spellings" cannot reach a second table.
+func relationEq(a, b any) bool {
+	as, bs := fmt.Sprintf("%v", a), fmt.Sprintf("%v", b)
+	if as == bs {
+		return true
+	}
+	if !batch.IsFoldedIdent(as) && !batch.IsFoldedIdent(bs) {
+		return false
+	}
+	return batch.EqualFoldIdent(as, bs)
+}
+
+// relationIn is relationEq over a set — what `MigrateRBACToABAC` emits for a
+// role's `tables:` list.
+func relationIn(val, set any) bool {
+	switch s := set.(type) {
+	case []any:
+		for _, item := range s {
+			if relationEq(val, item) {
+				return true
+			}
+		}
+	case []string:
+		for _, item := range s {
+			if relationEq(val, item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func compareIn(val, set any) bool {

@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"context"
 	"log/slog"
 	"sync/atomic"
+
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // authState holds an immutable snapshot of auth components.
@@ -26,6 +29,41 @@ type Provider struct {
 	// enforce through exactly the same call — recorded nothing, and a query
 	// that returned no rows recorded nothing on any door (#859).
 	audit *AuditLogger
+	// cat is the catalog a policy's NAMES are bound against, once, at load
+	// (BindPoliciesToCatalog). It is set after the catalog exists — the
+	// provider is built from the config file, which is read before anything
+	// connects — so the first bind happens in BindToCatalog and every
+	// subsequent one inside UpdateFromConfig, which is the hot-reload path.
+	// nil means no catalog was ever attached, and then nothing is bound: the
+	// fold-aware comparison in relationEq / policyKey is the floor either way.
+	cat atomic.Pointer[catalog.Catalog]
+}
+
+// BindToCatalog attaches the catalog a policy's names are resolved against and
+// binds the CURRENT policy set to it.
+//
+// It is separate from NewProvider because of startup order: the provider is
+// built from the config file, and the catalog does not exist yet at that
+// point. Calling this is what turns "a policy that names no relation" from a
+// rule that silently never matches into a startup refusal.
+//
+// A failure returns the error and swaps NOTHING — the caller decides whether
+// that is fatal (it is, at startup) — and the provider keeps running on the
+// policy set it already had.
+func (p *Provider) BindToCatalog(ctx context.Context, cat *catalog.Catalog) error {
+	if p == nil || cat == nil {
+		return nil
+	}
+	st := p.state.Load()
+	var abac []AccessControlPolicy
+	if st.evaluator != nil {
+		abac = st.evaluator.policies
+	}
+	if err := BindPoliciesToCatalog(ctx, cat, abac, st.policies); err != nil {
+		return err
+	}
+	p.cat.Store(cat)
+	return nil
 }
 
 // Audit returns the provider's audit logger. Never nil.
@@ -122,6 +160,14 @@ func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacP
 		}
 	}
 
+	// The names a policy uses bind ONCE, here, against the catalog: every
+	// relation and every policed column is rewritten to the catalog's own
+	// spelling, and one that does not resolve REFUSES the load. Refusing
+	// returns before the swap, so a hot reload keeps the set already running
+	// rather than installing one whose scoped rules would silently never
+	// match (#882, #802's contract applied to names).
+	cat := p.cat.Load()
+
 	var evaluator *PolicyEvaluator
 	if len(abacPolicies) > 0 {
 		// An obligation that cannot be enforced as written refuses here, the
@@ -140,6 +186,16 @@ func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacP
 			return err
 		}
 		evaluator = NewPolicyEvaluator(migrated)
+	}
+
+	if cat != nil {
+		var abac []AccessControlPolicy
+		if evaluator != nil {
+			abac = evaluator.policies
+		}
+		if err := BindPoliciesToCatalog(context.Background(), cat, abac, legacyPolicies); err != nil {
+			return err
+		}
 	}
 
 	p.UpdateWithEvaluator(authn, authz, legacyPolicies, evaluator)

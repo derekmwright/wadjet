@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // ColumnPolicy defines how a column is handled for a given role.
@@ -42,10 +44,29 @@ func NewPolicySet() *PolicySet {
 	return &PolicySet{policies: make(map[string]*AccessPolicy)}
 }
 
+// policyKey is the map key for one (relation, role) pair.
+//
+// The RELATION half is keyed under the identifier fold, because a relation has
+// two legitimate spellings for one table — the catalog's, and the folded one
+// an unquoted reference arrives in (#731) — and this set is written from YAML
+// by an operator while it is read with whichever spelling the statement's
+// FROM list carried. Keyed byte-exactly it bound to one and not the other:
+// with a catalog table `Hits`, `table: Hits` in the YAML matched NOTHING at
+// the door, so `SELECT WatchID, Region FROM Hits` came back with every row and
+// no Filter node at all — the row filter silently absent, fail-OPEN (#882).
+// `table: hits` bound. The ABAC path had the same hole pointing the other way,
+// so on a CamelCase table there was no single spelling an operator could write
+// that bound on both paths; that is why both are keyed through one rule now.
+//
+// The ROLE half stays byte-exact: a role is not an SQL identifier, nothing
+// folds it, and two roles differing only in case are two roles.
+func policyKey(table, role string) string {
+	return batch.FoldIdent(table) + ":" + role
+}
+
 // Add registers an access policy.
 func (ps *PolicySet) Add(p *AccessPolicy) {
-	key := p.Table + ":" + p.Role
-	ps.policies[key] = p
+	ps.policies[policyKey(p.Table, p.Role)] = p
 }
 
 // Lookup returns the policy for a given table and role, or nil if none exists.
@@ -54,7 +75,7 @@ func (ps *PolicySet) Lookup(table, role string) *AccessPolicy {
 		return nil
 	}
 	// Try exact match
-	if p, ok := ps.policies[table+":"+role]; ok {
+	if p, ok := ps.policies[policyKey(table, role)]; ok {
 		return p
 	}
 	// Try wildcard table

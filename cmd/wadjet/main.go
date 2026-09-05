@@ -1424,6 +1424,15 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		}
 		cfgMgr, provider = mgr, prov
 		srvCfg.Provider = provider
+		// Bind the policy set's NAMES to the catalog, once, now that it
+		// exists. A relation or a policed column that does not resolve
+		// refuses STARTUP: before #882 such a policy loaded quietly and its
+		// scoped rules simply never matched, which beside a broad allow is a
+		// grant, not a refusal. ADR-0033: a policy that cannot be enforced
+		// does not load.
+		if err := provider.BindToCatalog(ctx, cat); err != nil {
+			return fmt.Errorf("binding auth policies to the catalog: %w", err)
+		}
 
 		if fileCfg.Auth.MTLS.Enabled {
 			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)
@@ -1696,6 +1705,15 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		}
 		cfgMgr, provider = mgr, prov
 		srvCfg.Provider = provider
+		// Bind the policy set's NAMES to the catalog, once, now that it
+		// exists. A relation or a policed column that does not resolve
+		// refuses STARTUP: before #882 such a policy loaded quietly and its
+		// scoped rules simply never matched, which beside a broad allow is a
+		// grant, not a refusal. ADR-0033: a policy that cannot be enforced
+		// does not load.
+		if err := provider.BindToCatalog(ctx, cat); err != nil {
+			return fmt.Errorf("binding auth policies to the catalog: %w", err)
+		}
 
 		if fileCfg.Auth.MTLS.Enabled {
 			tlsCfg, err := buildTLSConfig(fileCfg.Auth.MTLS)
