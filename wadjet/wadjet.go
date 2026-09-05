@@ -1269,8 +1269,29 @@ func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
 
 // SetAuthProvider sets the auth provider for ABAC enforcement.
 // This allows wiring auth after DB creation (e.g., when the provider depends on config reload).
-func (db *DB) SetAuthProvider(p *auth.Provider) {
+// Binding is a property of ATTACHING a policy set to a catalog, not of the
+// two `serve` modes that happened to call it first. Every door that installs
+// a provider against a DB holds both halves here, so this is where the names
+// a policy uses are resolved against the catalog and where an unresolvable
+// one is refused (ADR-0033 rule 3).
+//
+// Without it the embedded API, and anything standing up pgwire or HTTP for
+// itself, ran on the fold-aware COMPARISON alone — and that floor reconciles
+// exactly one pair of spellings, the catalog's and the folded one. A policy
+// naming `HITS` or `hItS` against a catalog `Hits` matched nothing, and a
+// scoped rule that matches nothing is a grant beside the broad allow every
+// `roles:`-to-ABAC migration emits: the masked column came back in plaintext
+// and the denied column was writable, on all three doors (#882 round 2).
+//
+// The error is returned AND remembered. A caller that ignores it does not get
+// the unbound set enforced quietly: `Provider.BindError` makes every
+// enforcement entry point refuse instead.
+func (db *DB) SetAuthProvider(p *auth.Provider) error {
 	db.authProvider = p
+	if p == nil || db.catalog == nil {
+		return nil
+	}
+	return p.BindToCatalog(context.Background(), db.catalog)
 }
 
 // enforceAccessPolicies applies ABAC (table denial, column deny/mask, row

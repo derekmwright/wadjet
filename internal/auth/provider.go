@@ -37,6 +37,8 @@ type Provider struct {
 	// nil means no catalog was ever attached, and then nothing is bound: the
 	// fold-aware comparison in relationEq / policyKey is the floor either way.
 	cat atomic.Pointer[catalog.Catalog]
+	// bindErr is the last bind refusal, or nil. See BindError.
+	bindErr atomic.Pointer[error]
 }
 
 // BindToCatalog attaches the catalog a policy's names are resolved against and
@@ -59,10 +61,50 @@ func (p *Provider) BindToCatalog(ctx context.Context, cat *catalog.Catalog) erro
 	if st.evaluator != nil {
 		abac = st.evaluator.policies
 	}
-	if err := BindPoliciesToCatalog(ctx, cat, abac, st.policies); err != nil {
+	boundABAC, boundLegacy, err := BindPoliciesToCatalog(ctx, cat, abac, st.policies)
+	if err != nil {
+		// An unbindable set is not installed and not enforced. It is also
+		// REMEMBERED: a caller that ignores this error must not end up
+		// enforcing the unbound set, so every enforcement entry point asks
+		// BindError() first and refuses. Fail closed, loudly, rather than
+		// quietly on the floor.
+		p.bindErr.Store(&err)
 		return err
 	}
+	p.bindErr.Store(nil)
 	p.cat.Store(cat)
+	// Swap the BOUND copy in atomically. The set that was running keeps
+	// running until this line; nothing observes a half-rewritten policy.
+	var evaluator *PolicyEvaluator
+	if st.evaluator != nil {
+		evaluator = &PolicyEvaluator{policies: boundABAC}
+	}
+	p.state.Store(&authState{
+		authn:     st.authn,
+		authz:     st.authz,
+		policies:  boundLegacy,
+		evaluator: evaluator,
+		enabled:   st.enabled,
+	})
+	return nil
+}
+
+// BindError reports why the attached policy set could not be bound to the
+// catalog, or nil.
+//
+// A non-nil value is a REFUSAL, not a warning: `EnforcePlanPolicies` and
+// `EnforceDMLPolicies` both return it rather than run, so a set that names a
+// relation the catalog does not hold cannot be attached and then silently
+// enforce nothing. That is ADR-0033 rule 3 read the way an attach has to
+// implement it — the alternative is a policy file that loads clean, matches
+// nothing, and beside a broad allow is a grant (#882).
+func (p *Provider) BindError() error {
+	if p == nil {
+		return nil
+	}
+	if e := p.bindErr.Load(); e != nil {
+		return *e
+	}
 	return nil
 }
 
@@ -193,11 +235,17 @@ func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacP
 		if evaluator != nil {
 			abac = evaluator.policies
 		}
-		if err := BindPoliciesToCatalog(context.Background(), cat, abac, legacyPolicies); err != nil {
+		boundABAC, boundLegacy, err := BindPoliciesToCatalog(context.Background(), cat, abac, legacyPolicies)
+		if err != nil {
 			return err
+		}
+		legacyPolicies = boundLegacy
+		if evaluator != nil {
+			evaluator = &PolicyEvaluator{policies: boundABAC}
 		}
 	}
 
+	p.bindErr.Store(nil)
 	p.UpdateWithEvaluator(authn, authz, legacyPolicies, evaluator)
 	return nil
 }

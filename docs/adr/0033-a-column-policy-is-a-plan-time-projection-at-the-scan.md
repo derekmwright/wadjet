@@ -350,22 +350,44 @@ model rather than a configuration error.
    query planner uses for identifiers.** `catalog.ResolveTableName` and
    `batch.ResolveSchemaIndex`; a delimited name stays byte-exact, so a policy is
    never more permissive about names than the queries it polices.
-2. **The binding happens ONCE, at policy load, against the catalog.** Every
-   relation and every policed column is rewritten to the catalog's own
+2. **The binding happens ONCE, when the policy set is ATTACHED to a catalog.**
+   Every relation and every policed column is rewritten to the catalog's own
    spelling, so evaluation compares two names that came from the same place
-   rather than two spellings of an idea.
+   rather than two spellings of an idea. Binding is a property of the ATTACH,
+   not of any particular caller: every entry that installs a provider against
+   a catalog binds — `wadjet.DB.SetAuthProvider`, `Coordinator.SetAuthProvider`,
+   `server.New`, `pgwire.NewServer`, and the hot-reload path. Wiring it into
+   two `serve` functions instead left the embedded API and any caller standing
+   up its own doors on the floor alone, which is how #882 survived its first
+   fix.
 3. **A policy that names a relation or a column that does not resolve is
-   REFUSED AT LOAD.** This is ADR-0033's existing rule — a policy that cannot
+   REFUSED AT ATTACH.** This is ADR-0033's existing rule — a policy that cannot
    be enforced does not load (#802) — applied to names. Without it a typo is
    indistinguishable from a relation that does not exist yet, and the rule
    carrying the obligations silently never matches, which beside a broad allow
-   is a grant. A hot reload that cannot be bound **keeps the previous set**.
-4. **There is no code path where a spelling mismatch yields "no policy
-   applies".** The load-time binding is the mechanism; the fold-aware
-   comparison (`relationEq` for `resource.name`, `policyKey` for the legacy
-   set) is the FLOOR that holds when no catalog was attached — an embedded
-   deployment that constructs an evaluator directly, for instance.
-5. **Only the attributes that carry an IDENTIFIER get the identifier rule.**
+   is a grant. A hot reload that cannot be bound **keeps the previous set**, and
+   an attach that cannot bind is REMEMBERED: `Provider.BindError` makes every
+   enforcement entry point refuse the statement, so a caller that ignores the
+   error does not get the unbound set enforced quietly.
+4. **A policy set that has been bound cannot yield "no policy applies" through
+   a spelling mismatch, and one that could not be bound does not enforce at
+   all.** Be precise about the floor, because it is narrower than it sounds:
+   the fold-aware comparison (`relationEq` for `resource.name`, `policyKey` for
+   the legacy set) reconciles exactly ONE pair of spellings — the catalog's and
+   the folded one — because a name carrying an upper-case letter can only have
+   been delimited and a delimited name is byte-exact. `HITS` and `hItS` against
+   a catalog `Hits` are neither of that pair, and the floor does not reach them;
+   the BIND does, by refusing them the way it refuses a typo. Where no catalog
+   is attached the floor is all there is, and it covers the one pair. Rule 4 as
+   first written claimed more than `relationEq` can give, and the arc's own
+   gate could not see the gap because its harness did not attach the way
+   production attaches.
+5. **The bind rewrites a COPY and swaps it in.** The evaluator it would
+   otherwise rewrite is being read by every decision in flight, so an in-place
+   rewrite is a data race on a live security decision; and a bind that fails
+   partway would leave the RUNNING set half-rewritten, which is the opposite of
+   what (3) promises.
+6. **Only the attributes that carry an IDENTIFIER get the identifier rule.**
    `eq` stays byte-exact for every other attribute: folding it generally would
    make `classification eq "SECRET"` match `"secret"` and quietly widen every
    clearance in the file. `resource.name` and `resource.table` are the list.
@@ -389,8 +411,16 @@ policy file that loads clean and enforces nothing.
   non-ABAC path, whose failure pointed the other way.
 - `internal/auth/policy_bind_test.go` —
   `TestPolicyNamesBindToTheCatalogAtLoad` (binding, refusal, the delimited
-  wrong-case column, the `tables: ["*"]` wildcard, the legacy set) and
-  `TestPolicyBindFailureKeepsThePreviousSet` (the hot-reload contract).
+  wrong-case column, the `tables: ["*"]` wildcard, the legacy set),
+  `TestPolicyBindFailureKeepsThePreviousSet` (the hot-reload contract),
+  `TestBindToCatalogDoesNotMutateTheRunningSet` (run under `-race`) and
+  `TestAFailedBindLeavesTheRunningSetIntact` for (5).
+- `internal/server/policy_relation_spelling_test.go` —
+  `TestAnAttachedPolicySetThatCannotBindRefusesEveryQuery`: the spellings the
+  floor cannot reach (`HITS`, `hItS`, `Hitz`) refuse on all three doors, read
+  and write, with a control that a bindable set still answers and masks. Its
+  harness attaches through `SetAuthProvider` exactly as a door does, which is
+  what lets it see (2).
 
 Every fixture in this arc registers its relation through the CATALOG, because
 the DDL door folds a name it MINTS: a CamelCase relation is one a dataset

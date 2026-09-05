@@ -49,6 +49,12 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	if provider == nil || !provider.Enabled() {
 		return ctx, plan, nil
 	}
+	// A policy set that could not be BOUND to the catalog does not enforce,
+	// and a query does not run beside it — see Provider.BindError and the
+	// same guard on the DML door.
+	if err := provider.BindError(); err != nil {
+		return ctx, plan, sqlerr.Wrap("42501", err)
+	}
 	identity := IdentityFromContext(ctx)
 	if identity == nil {
 		return ctx, plan, nil

@@ -50,17 +50,77 @@ import (
 // running (#802's contract, applied to names).
 
 // BindPoliciesToCatalog resolves every relation and column a policy set names
-// against cat, REWRITING each to the catalog's own spelling, and returns an
-// error naming the first that does not resolve.
+// against cat and returns the BOUND COPY — each name rewritten to the
+// catalog's own spelling — or an error naming the first that does not resolve.
 //
-// Both arguments are optional: a deployment may run ABAC only, legacy
-// `policies:` only, or both. Passing a nil catalog is a no-op — the caller has
-// no catalog to bind against, and the fold-aware comparison is still the floor.
+// It binds a COPY and never touches its inputs. Two reasons, and both are
+// contracts this package already makes elsewhere. The evaluator it would
+// otherwise rewrite is being READ by every query in flight
+// (`PolicyEvaluator.ruleMatches`), so rewriting in place is a data race on a
+// live security decision. And a bind that fails partway would leave the
+// RUNNING set half-rewritten, which is the opposite of the promise
+// `UpdateFromConfig` makes: a policy set that cannot be installed installs
+// nothing and the previous one keeps running (#802).
+//
+// All arguments are optional: a deployment may run ABAC only, legacy
+// `policies:` only, or both. A nil catalog binds nothing and returns the
+// inputs unchanged — the caller has no catalog to resolve against, and the
+// fold-aware comparison in relationEq / policyKey is the floor there.
 func BindPoliciesToCatalog(ctx context.Context, cat *catalog.Catalog,
-	abac []AccessControlPolicy, legacy *PolicySet) error {
+	abacIn []AccessControlPolicy, legacyIn *PolicySet) ([]AccessControlPolicy, *PolicySet, error) {
 	if cat == nil {
+		return abacIn, legacyIn, nil
+	}
+	abac, legacy := clonePolicies(abacIn), clonePolicySet(legacyIn)
+	if err := bindPoliciesInPlace(ctx, cat, abac, legacy); err != nil {
+		return nil, nil, err
+	}
+	return abac, legacy, nil
+}
+
+// clonePolicies deep-copies the parts bindPoliciesInPlace writes: the rules,
+// their resource conditions and their obligations. Everything else is shared
+// with the original, which is safe because nothing here mutates it.
+func clonePolicies(in []AccessControlPolicy) []AccessControlPolicy {
+	if in == nil {
 		return nil
 	}
+	out := make([]AccessControlPolicy, len(in))
+	copy(out, in)
+	for i := range out {
+		rules := make([]PolicyRule, len(in[i].Rules))
+		copy(rules, in[i].Rules)
+		for j := range rules {
+			rules[j].Resources = append([]Condition(nil), in[i].Rules[j].Resources...)
+			rules[j].Obligations = append([]Obligation(nil), in[i].Rules[j].Obligations...)
+		}
+		out[i].Rules = rules
+	}
+	return out
+}
+
+// clonePolicySet copies the map and each AccessPolicy value bindLegacyPolicies
+// rewrites (its Table and its Columns map).
+func clonePolicySet(in *PolicySet) *PolicySet {
+	if in == nil {
+		return nil
+	}
+	out := &PolicySet{policies: make(map[string]*AccessPolicy, len(in.policies))}
+	for k, p := range in.policies {
+		cp := *p
+		if p.Columns != nil {
+			cp.Columns = make(map[string]ColumnPolicy, len(p.Columns))
+			for c, a := range p.Columns {
+				cp.Columns[c] = a
+			}
+		}
+		out.policies[k] = &cp
+	}
+	return out
+}
+
+func bindPoliciesInPlace(ctx context.Context, cat *catalog.Catalog,
+	abac []AccessControlPolicy, legacy *PolicySet) error {
 	for pi := range abac {
 		for ri := range abac[pi].Rules {
 			rule := &abac[pi].Rules[ri]

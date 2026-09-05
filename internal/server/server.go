@@ -91,6 +91,21 @@ func New(cfg Config, logger *slog.Logger) *Server {
 		audit:    auth.NewAuditLogger(logger),
 	}
 
+	// Attaching a policy set to a catalog is what BINDS its names to that
+	// catalog (ADR-0033 rule 3), and this constructor holds both halves. The
+	// error is not returned — New has never had an error return and every
+	// caller would have to change — but it is REMEMBERED on the provider, so
+	// `Provider.BindError` makes every enforcement entry point refuse rather
+	// than run the unbound set. A set that names a relation the catalog does
+	// not hold therefore refuses the query instead of matching nothing, which
+	// beside a broad allow is a grant (#882).
+	if s.provider != nil && s.catalog != nil {
+		if err := s.provider.BindToCatalog(context.Background(), s.catalog); err != nil {
+			logger.Error("auth policy set REFUSED: it names a relation or column the catalog "+
+				"does not hold; every query will be refused until it is corrected", "error", err)
+		}
+	}
+
 	// Middleware BEFORE routes: chi v5 panics ("all middlewares must be
 	// defined before routes on a mux") when Use runs after the first route
 	// is registered, so the auth middleware cannot be installed in Start()

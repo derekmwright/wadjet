@@ -66,26 +66,32 @@ func TestPolicyNamesBindToTheCatalogAtLoad(t *testing.T) {
 		// This is the spelling an operator copies out of their own query,
 		// because an unquoted reference IS the folded one.
 		pols := pbPolicies("hits", "secret")
-		if err := BindPoliciesToCatalog(ctx, cat, pols, nil); err != nil {
+		bound, _, err := BindPoliciesToCatalog(ctx, cat, pols, nil)
+		if err != nil {
 			t.Fatalf("a folded spelling of an existing relation was refused: %v", err)
 		}
-		if got := pols[0].Rules[0].Resources[0].Value; got != "Hits" {
+		// The bind returns a COPY: the caller's set is untouched, and the
+		// rewrite is visible only on what it hands back (P1(r2)).
+		if got := pols[0].Rules[0].Resources[0].Value; got != "hits" {
+			t.Errorf("the bind rewrote the caller's set in place: %v", got)
+		}
+		if got := bound[0].Rules[0].Resources[0].Value; got != "Hits" {
 			t.Errorf("relation bound to %q, want the catalog's spelling %q", got, "Hits")
 		}
-		if got := pols[0].Rules[0].Obligations[0].Target; got != "Secret" {
+		if got := bound[0].Rules[0].Obligations[0].Target; got != "Secret" {
 			t.Errorf("column bound to %q, want the schema's spelling %q", got, "Secret")
 		}
 	})
 
 	t.Run("the catalog's own spelling binds unchanged", func(t *testing.T) {
 		pols := pbPolicies("Hits", "Secret")
-		if err := BindPoliciesToCatalog(ctx, cat, pols, nil); err != nil {
+		if _, _, err := BindPoliciesToCatalog(ctx, cat, pols, nil); err != nil {
 			t.Fatalf("the catalog's own spelling was refused: %v", err)
 		}
 	})
 
 	t.Run("a relation the catalog does not hold refuses the load", func(t *testing.T) {
-		err := BindPoliciesToCatalog(ctx, cat, pbPolicies("hitz", "Secret"), nil)
+		_, _, err := BindPoliciesToCatalog(ctx, cat, pbPolicies("hitz", "Secret"), nil)
 		if err == nil {
 			t.Fatal("a policy naming a relation that does not exist LOADED — its scoped " +
 				"rule would never match, and beside a broad allow that is a grant")
@@ -96,7 +102,7 @@ func TestPolicyNamesBindToTheCatalogAtLoad(t *testing.T) {
 	})
 
 	t.Run("a column the relation does not have refuses the load", func(t *testing.T) {
-		err := BindPoliciesToCatalog(ctx, cat, pbPolicies("Hits", "sekret"), nil)
+		_, _, err := BindPoliciesToCatalog(ctx, cat, pbPolicies("Hits", "sekret"), nil)
 		if err == nil {
 			t.Fatal("a policy masking a column that does not exist LOADED — nothing would be masked")
 		}
@@ -109,7 +115,7 @@ func TestPolicyNamesBindToTheCatalogAtLoad(t *testing.T) {
 		// `SECRET` carries upper case, so it can only have been written
 		// delimited, and a delimited name is byte-exact everywhere else in the
 		// engine. A policy is not more permissive than the queries it polices.
-		if err := BindPoliciesToCatalog(ctx, cat, pbPolicies("Hits", "SECRET"), nil); err == nil {
+		if _, _, err := BindPoliciesToCatalog(ctx, cat, pbPolicies("Hits", "SECRET"), nil); err == nil {
 			t.Fatal("a delimited wrong-case column resolved; a delimited name is byte-exact")
 		}
 	})
@@ -126,7 +132,7 @@ func TestPolicyNamesBindToTheCatalogAtLoad(t *testing.T) {
 				Actions:   []Action{ActionRead},
 			}},
 		}}
-		if err := BindPoliciesToCatalog(ctx, cat, pols, nil); err != nil {
+		if _, _, err := BindPoliciesToCatalog(ctx, cat, pols, nil); err != nil {
 			t.Fatalf("a wildcard tables list was refused: %v", err)
 		}
 	})
@@ -139,10 +145,11 @@ func TestPolicyNamesBindToTheCatalogAtLoad(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := BindPoliciesToCatalog(ctx, cat, nil, ps); err != nil {
+		_, boundPS, err := BindPoliciesToCatalog(ctx, cat, nil, ps)
+		if err != nil {
 			t.Fatalf("a folded legacy policy was refused: %v", err)
 		}
-		p := ps.Lookup("Hits", "analyst")
+		p := boundPS.Lookup("Hits", "analyst")
 		if p == nil {
 			t.Fatal("the bound legacy policy is not reachable under the catalog's spelling")
 		}
@@ -159,7 +166,7 @@ func TestPolicyNamesBindToTheCatalogAtLoad(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := BindPoliciesToCatalog(ctx, cat, nil, ps); err == nil {
+		if _, _, err := BindPoliciesToCatalog(ctx, cat, nil, ps); err == nil {
 			t.Fatal("a legacy policy naming a relation that does not exist LOADED")
 		}
 	})
@@ -199,5 +206,116 @@ func TestPolicyBindFailureKeepsThePreviousSet(t *testing.T) {
 	if p.Evaluator() != before {
 		t.Fatal("the refused reload replaced the running policy set — #802's contract is " +
 			"that a policy that cannot be read swaps nothing")
+	}
+}
+
+// TestBindToCatalogDoesNotMutateTheRunningSet is P1(r2)'s gate: the bind
+// rewrites a COPY and swaps it in, so a decision in flight never reads a
+// half-rewritten rule.
+//
+// It used to rewrite `cond.Value` inside the rules the LIVE evaluator was
+// reading, which the race detector reports as four races between
+// `bindRuleResources` and `PolicyEvaluator.ruleMatches`. The two shipped
+// `serve` modes bound before their listeners started, so the shipped path was
+// safe — but `BindToCatalog` is exported, it is the only API an embedded
+// caller has for ADR-0033 rule 3, and wiring the bind into every ATTACH (which
+// is what #882 round 2 required) puts it exactly where the race is live.
+//
+// Run this package with -race; without it the test still asserts the other
+// half, which is that a FAILED bind leaves the running set untouched rather
+// than partially rewritten.
+func TestBindToCatalogDoesNotMutateTheRunningSet(t *testing.T) {
+	ctx := context.Background()
+	cat := pbCatalog(t, ctx)
+
+	authn, authz := New(Config{
+		Enabled: true,
+		APIKeys: []APIKeyDef{{Key: "k", Name: "analyst", Role: "analyst"}},
+	})
+	p := NewProvider(authn, authz, nil, nil)
+	p.UpdateWithEvaluator(authn, authz, nil, NewPolicyEvaluator(pbPolicies("hits", "secret")))
+
+	subj := Subject{Attributes: Attributes{"role": "analyst"}}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// A decision in flight, reading the very rules the bind rewrites.
+			if ev := p.Evaluator(); ev != nil {
+				ev.EvaluateTableAccess(subj, "Hits", ActionRead, Environment{})
+			}
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		if err := p.BindToCatalog(ctx, cat); err != nil {
+			close(stop)
+			<-done
+			t.Fatalf("bind %d: %v", i, err)
+		}
+	}
+	close(stop)
+	<-done
+
+	// The bound set is the one now running, and it carries the catalog's
+	// spelling — so the swap happened rather than the copy being discarded.
+	td := p.Evaluator().EvaluateTableAccess(subj, "Hits", ActionRead, Environment{})
+	if len(td.Columns) != 1 || td.Columns[0].Column != "Secret" {
+		t.Fatalf("the bound set is not the running one: %+v", td.Columns)
+	}
+}
+
+// TestAFailedBindLeavesTheRunningSetIntact is the other half of P1(r2): a bind
+// that fails partway used to return mid-loop having already rewritten the
+// rules it had reached, so the running set was left half-bound. #802's
+// contract — a policy set that cannot be installed installs nothing — has to
+// hold for a bind exactly as it holds for a reload.
+func TestAFailedBindLeavesTheRunningSetIntact(t *testing.T) {
+	ctx := context.Background()
+	cat := pbCatalog(t, ctx)
+
+	// Two rules: the first resolves, the second does not. A bind that mutated
+	// in place would leave the first rewritten.
+	pols := []AccessControlPolicy{{
+		Name: "pb", Version: 1, Enabled: true,
+		Rules: []PolicyRule{
+			{
+				ID: "good", EffectStr: "allow", Priority: 10,
+				Resources:   []Condition{{Attribute: "resource.name", Op: "eq", Value: "hits"}},
+				Actions:     []Action{ActionRead},
+				Obligations: []Obligation{{Type: "mask_column", Target: "secret", Value: "'***'"}},
+			},
+			{
+				ID: "bad", EffectStr: "allow", Priority: 10,
+				Resources: []Condition{{Attribute: "resource.name", Op: "eq", Value: "nosuchrelation"}},
+				Actions:   []Action{ActionRead},
+			},
+		},
+	}}
+	authn, authz := New(Config{
+		Enabled: true,
+		APIKeys: []APIKeyDef{{Key: "k", Name: "analyst", Role: "analyst"}},
+	})
+	p := NewProvider(authn, authz, nil, nil)
+	p.UpdateWithEvaluator(authn, authz, nil, NewPolicyEvaluator(pols))
+
+	if err := p.BindToCatalog(ctx, cat); err == nil {
+		t.Fatal("a set naming a relation that does not exist was bound")
+	}
+	if pols[0].Rules[0].Resources[0].Value != "hits" {
+		t.Errorf("the failed bind rewrote the caller's rule in place: %v",
+			pols[0].Rules[0].Resources[0].Value)
+	}
+	if pols[0].Rules[0].Obligations[0].Target != "secret" {
+		t.Errorf("the failed bind rewrote the caller's obligation in place: %v",
+			pols[0].Rules[0].Obligations[0].Target)
+	}
+	if p.BindError() == nil {
+		t.Error("a failed bind is not remembered, so enforcement would run on the unbound set")
 	}
 }

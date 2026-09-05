@@ -45,6 +45,15 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 	if provider == nil || !provider.Enabled() || parsed == nil {
 		return nil
 	}
+	// A policy set that could not be BOUND to the catalog does not enforce,
+	// and a statement does not run beside it. See Provider.BindError: an
+	// attach that could not resolve a relation or a policed column is a
+	// refusal, and the alternative — carrying on with the unbound set — is
+	// a rule that matches nothing, which beside a broad allow is a grant
+	// (#882, ADR-0033 rule 3).
+	if err := provider.BindError(); err != nil {
+		return sqlerr.Wrap("42501", err)
+	}
 	identity := IdentityFromContext(ctx)
 	if identity == nil {
 		return nil

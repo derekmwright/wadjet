@@ -58,6 +58,14 @@ import (
 
 const prsTable = "Hits"
 
+// prsOther is a second, real relation — see prsUp.
+const prsOther = "Other"
+
+// prsExpectBindRefusal reports whether this provider is one the unbindable
+// cells deliberately built, so prsUp can attach it and let the DOORS report
+// the refusal rather than failing the fixture.
+func prsExpectBindRefusal(p *auth.Provider) bool { return p.BindError() != nil }
+
 func prsSchema() parquet.Schema {
 	return parquet.Schema{Columns: []parquet.Column{
 		{Name: "WatchID", Type: parquet.TypeInt64},
@@ -153,7 +161,27 @@ func prsUp(t *testing.T, ctx context.Context, provider *auth.Provider, legacy *a
 	if err := ing.FlushAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	db.SetAuthProvider(provider)
+	// A SECOND, real relation. The counter-cell needs a policy scoped
+	// somewhere that EXISTS: since the bind refuses a name the catalog does
+	// not hold, "scoped to another relation" can only be tested against a
+	// relation there actually is.
+	if err := db.Catalog().CreateTable(ctx, prsOther, prsSchema(), nil); err != nil {
+		t.Fatalf("create %s: %v", prsOther, err)
+	}
+	oing := db.NewIngester(prsOther, prsSchema(), nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 3})
+	if err := oing.Ingest(ctx, prsRows()); err != nil {
+		t.Fatal(err)
+	}
+	if err := oing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Attaching the provider is what BINDS its names to this catalog. The
+	// harness does it exactly the way a door does, which is the half round 2
+	// found missing: a gate whose harness does not attach the way production
+	// attaches cannot see what production does.
+	if err := db.SetAuthProvider(provider); err != nil && !prsExpectBindRefusal(provider) {
+		t.Fatalf("attaching the policy set: %v", err)
+	}
 
 	id, err := provider.Authenticator().AuthenticateToken("analyst-key")
 	if err != nil {
@@ -281,6 +309,25 @@ var prsSpellings = []struct{ name, resource string }{
 	{"policy names the folded spelling", "hits"},
 }
 
+// prsUnbindableSpellings are the spellings that name NO relation. Each is
+// neither the catalog's nor the folded one, so the fold-aware comparison — the
+// floor, which reconciles exactly that one pair — cannot reach them; they are
+// the bind's job, and the bind must REFUSE them.
+//
+// This is the shape #882 round 2 found still open: with binding wired into two
+// `serve` call sites and nowhere else, a policy set installed through the
+// embedded API or through a server the caller stands up itself kept only the
+// floor, and every spelling below yielded "no policy applies" — which beside
+// the broad allow is a grant. `HITS` and `hItS` are delimited-looking names
+// that a reasonable operator writes; `Hitz` is the plain typo. All three must
+// be refused, and refused the same way, because to the catalog they are the
+// same thing: a name it does not hold.
+var prsUnbindableSpellings = []struct{ name, resource string }{
+	{"an upper-case spelling of the relation", "HITS"},
+	{"a mixed-case spelling that is neither", "hItS"},
+	{"a plain typo", "Hitz"},
+}
+
 // TestPolicyBindsToTheRelationNotToASpellingOfIt is #882's gate.
 func TestPolicyBindsToTheRelationNotToASpellingOfIt(t *testing.T) {
 	for _, sp := range prsSpellings {
@@ -355,15 +402,24 @@ func TestPolicyBindsToTheRelationNotToASpellingOfIt(t *testing.T) {
 	}
 
 	// The counter-cell. The concession is CASE, not spelling: a rule scoped to
-	// some other relation must stay unbound, or the fix would have made every
-	// policy global — which would read as "all the gates pass" while meaning
-	// the enforcement no longer targets anything.
-	t.Run("a policy scoped to a different relation does not bind", func(t *testing.T) {
+	// a DIFFERENT relation — one that exists, so the set binds — must not
+	// reach this one, or the fix would have made every policy global, which
+	// would read as "all the gates pass" while meaning the enforcement no
+	// longer targets anything.
+	t.Run("a policy scoped to a different relation does not reach this one", func(t *testing.T) {
 		ctx := context.Background()
-		r := prsUp(t, ctx, prsProvider(t, "SomeOtherTable"), nil)
+		r := prsUp(t, ctx, prsProvider(t, prsOther), nil)
 		got := prsEmbedded(r, `SELECT * FROM Hits ORDER BY WatchID`)
+		if strings.Contains(got, "ERR") {
+			t.Fatalf("a policy scoped to another EXISTING relation refused this query: %s", got)
+		}
 		if !strings.Contains(got, prsSecret) {
-			t.Fatalf("a policy naming ANOTHER relation bound to this one: %s", got)
+			t.Fatalf("a policy naming ANOTHER relation was applied to this one: %s", got)
+		}
+		// ...and it DOES reach the relation it names.
+		other := prsEmbedded(r, `SELECT * FROM Other ORDER BY WatchID`)
+		if strings.Contains(other, prsSecret) {
+			t.Fatalf("the policy did not apply to the relation it names: %s", other)
 		}
 	})
 }
@@ -402,5 +458,135 @@ func TestLegacyPolicySetBindsToTheRelationNotToASpellingOfIt(t *testing.T) {
 				t.Fatalf("the plan carries no Filter node, so no row filter bound:\n  %s", got)
 			}
 		})
+	}
+}
+
+// TestAnAttachedPolicySetThatCannotBindRefusesEveryQuery is B1(r2)'s gate.
+//
+// ADR-0033 rule 3 says a policy naming a relation that does not resolve is
+// refused AT LOAD, and rule 4 that there is no code path where a spelling
+// mismatch yields "no policy applies". Round 2 measured otherwise: the bind
+// was wired into `runStandalone` and `runCoordinator` and nowhere else, so an
+// embedded caller — and this file's own harness — ran on the fold-aware
+// comparison alone. That floor reconciles the catalog spelling with the folded
+// one and NOTHING else, so a policy spelled `HITS` or `hItS` against a catalog
+// `Hits` matched nothing and returned the masked column in plaintext with the
+// denied column writable, on all three doors.
+//
+// Binding is now a property of ATTACHING a set to a catalog, so this harness
+// binds exactly as production does — which is the other half of the finding:
+// a gate whose harness does not attach the way production attaches cannot see
+// what production does.
+func TestAnAttachedPolicySetThatCannotBindRefusesEveryQuery(t *testing.T) {
+	for _, sp := range prsUnbindableSpellings {
+		t.Run(sp.name, func(t *testing.T) {
+			ctx := context.Background()
+			r := prsUp(t, ctx, prsProvider(t, sp.resource), nil)
+
+			// Every door refuses, and nothing leaks on the way to refusing.
+			for _, sql := range []string{
+				`SELECT * FROM Hits ORDER BY WatchID`,
+				`SELECT Salary FROM Hits`,
+			} {
+				for door, got := range prsDoors(ctx, r, sql, false) {
+					if strings.Contains(got, prsSecret) {
+						t.Errorf("[%s] %s DISCLOSED the masked column in plaintext under an "+
+							"unbindable policy:\n  %s", door, sql, got)
+					}
+					if strings.Contains(got, "700001") {
+						t.Errorf("[%s] %s returned the DENIED column under an unbindable "+
+							"policy:\n  %s", door, sql, got)
+					}
+					if !strings.Contains(got, "ERR") && !strings.Contains(got, "[4") {
+						t.Errorf("[%s] %s was ANSWERED under a policy set that could not be "+
+							"bound:\n  %s", door, sql, got)
+					}
+				}
+			}
+			for _, sql := range []string{
+				`UPDATE Hits SET Salary = 1 WHERE WatchID = 1`,
+				`UPDATE Hits SET Region = 'zz' WHERE Secret = '` + prsSecret + `'`,
+				`DELETE FROM hits WHERE Salary = 700001`,
+			} {
+				for door, got := range prsDoors(ctx, r, sql, true) {
+					if strings.HasPrefix(got, "OK") || strings.HasPrefix(got, "[200") {
+						t.Errorf("[%s] %s was PERMITTED under a policy set that could not be "+
+							"bound:\n  %s", door, sql, got)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("the refusal names the relation it could not resolve", func(t *testing.T) {
+		ctx := context.Background()
+		r := prsUp(t, ctx, prsProvider(t, "Hitz"), nil)
+		got := prsEmbedded(r, `SELECT WatchID FROM Hits`)
+		if !strings.Contains(got, "Hitz") {
+			t.Fatalf("the refusal does not name the unresolvable relation: %s", got)
+		}
+	})
+
+	t.Run("a bindable set still answers", func(t *testing.T) {
+		// The control: the refusal must be caused by the unbindable NAME and
+		// not by the guard refusing everything.
+		ctx := context.Background()
+		r := prsUp(t, ctx, prsProvider(t, "hits"), nil)
+		got := prsEmbedded(r, `SELECT * FROM Hits ORDER BY WatchID`)
+		if strings.Contains(got, "ERR") {
+			t.Fatalf("a bindable policy set refused the query: %s", got)
+		}
+		if !strings.Contains(got, "***") {
+			t.Fatalf("a bindable policy set did not mask: %s", got)
+		}
+	})
+}
+
+// TestTheEmbeddedAttachBindsOnItsOwn isolates ONE attach site.
+//
+// The three doors share one *auth.Provider, so a bind performed at any of them
+// marks it bound for all — good defence in depth, and it means the matrix
+// above cannot attribute its result to a single call site. This cell builds
+// only the embedded DB: no pgwire server, no HTTP server, so
+// `wadjet.DB.SetAuthProvider` is the only attach that could have bound. Revert
+// its bind and this fails while the matrix above still passes.
+func TestTheEmbeddedAttachBindsOnItsOwn(t *testing.T) {
+	ctx := context.Background()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Catalog().CreateTable(ctx, prsTable, prsSchema(), nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester(prsTable, prsSchema(), nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 3})
+	if err := ing.Ingest(ctx, prsRows()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := prsProvider(t, "HITS") // neither the catalog spelling nor the folded one
+	attachErr := db.SetAuthProvider(provider)
+	if attachErr == nil {
+		t.Fatal("attaching a policy set that names no relation returned no error — " +
+			"the attach did not bind")
+	}
+	if provider.BindError() == nil {
+		t.Fatal("the failed attach was not remembered, so enforcement would run unbound")
+	}
+
+	id, err := provider.Authenticator().AuthenticateToken("analyst-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actx := auth.ContextWithIdentity(ctx, id)
+	if _, err := db.Query(actx, `SELECT * FROM Hits ORDER BY WatchID`); err == nil {
+		t.Fatal("the embedded door ANSWERED under a policy set that could not be bound")
+	}
+	if _, err := db.Execute(actx, `UPDATE Hits SET Salary = 1 WHERE WatchID = 1`); err == nil {
+		t.Fatal("the embedded door PERMITTED a write under a policy set that could not be bound")
 	}
 }

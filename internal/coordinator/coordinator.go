@@ -159,8 +159,17 @@ type Config struct {
 // filters, column deny/mask) for the identity in the request context — the
 // same auth.EnforcePlanPolicies the embedded engine applies. Call before
 // serving traffic (same contract as the other Set<X>-before-Start setters).
-func (c *Coordinator) SetAuthProvider(p *auth.Provider) {
+// It also BINDS the policy set's names to the catalog, because attaching a
+// set to a catalog is exactly what this call is — see wadjet.DB.SetAuthProvider
+// for why binding belongs at the attach and not at two `serve` call sites.
+// The error is returned and remembered; an ignored one still refuses at
+// enforcement through Provider.BindError.
+func (c *Coordinator) SetAuthProvider(p *auth.Provider) error {
 	c.authProvider = p
+	if p == nil || c.catalog == nil {
+		return nil
+	}
+	return p.BindToCatalog(context.Background(), c.catalog)
 }
 
 // SetQueryLimits wires the configured cost guard into every plan the
