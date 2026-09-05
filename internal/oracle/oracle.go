@@ -41,6 +41,20 @@ type Query struct {
 type Result struct {
 	Columns []string
 	Rows    []map[string]any
+	// RowValues is the same rows POSITIONALLY, cells aligned with Columns,
+	// and it mirrors wadjet.QueryResult.RowValues: non-nil only when two
+	// output columns share a name and the map therefore cannot hold both.
+	// canonRowsWith reads it in preference to Rows when it is set.
+	//
+	// Without it a duplicate name silently SHRINKS the comparison: the
+	// ClickBench corpus's Q30 is ninety columns all named `sum` — the map
+	// holds one — so an oracle arm that moved eighty-nine of them would
+	// have compared eighty-nine copies of the same surviving cell and
+	// agreed with itself. Duplicate names became ordinary at 042f9852,
+	// where an unaliased column started carrying the name PostgreSQL gives
+	// it, and const-arith-agg and int-arith are exactly the toggles those
+	// columns exercise.
+	RowValues [][]any
 }
 
 // RunFunc executes one SQL query under the currently-set toggles.
@@ -193,12 +207,24 @@ func canonRowsWith(res *Result, cell func(any) (string, string)) *Canon {
 	for i, row := range res.Rows {
 		sb.Reset()
 		csb.Reset()
+		var positional []any
+		if i < len(res.RowValues) {
+			positional = res.RowValues[i]
+		}
 		for j, col := range res.Columns {
 			if j > 0 {
 				sb.WriteByte('|')
 				csb.WriteByte('|')
 			}
-			fine, rough := cell(row[col])
+			var v any
+			if positional != nil {
+				if j < len(positional) {
+					v = positional[j]
+				}
+			} else {
+				v = row[col]
+			}
+			fine, rough := cell(v)
 			sb.WriteString(fine)
 			csb.WriteString(rough)
 		}

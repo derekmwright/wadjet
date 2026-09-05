@@ -36,7 +36,7 @@ func TestHitsOptimizationInvariance(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return &oracle.Result{Columns: res.Columns, Rows: res.Rows}, nil
+		return &oracle.Result{Columns: res.Columns, Rows: res.Rows, RowValues: res.RowValues}, nil
 	})
 	// Engagement check: Q01 is a bare COUNT(*), so the metadata-count
 	// rewrite must fire somewhere in the run or its oracle arm is dormant.

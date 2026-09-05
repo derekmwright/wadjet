@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 const (
@@ -34,8 +36,32 @@ const (
 // ClickBench defines the workload.
 //
 // Comparison is positional (column i ↔ column i; names differ per dialect)
-// over canonicalized cells, with rows sorted canonically so intra-result
-// tie order between engines can't flake the gate.
+// over canonicalized cells read through QueryResult.Cells, with rows sorted
+// canonically so intra-result tie order between engines can't flake the
+// gate. It is positional for a reason — see canonicalCells.
+//
+// Two drifts this gate reported were the GATE and the DIALECT FILE, not the
+// engine, and both are recorded here so the next reader does not re-derive
+// them (ADR-0013: a gate's own reading of a legal result is not a class of
+// nondeterminism, it is a defect in the gate):
+//
+//   - Q23, Q30, Q36 drifted at 042f9852 (v0.18.43), which made an unaliased
+//     output column carry the name PostgreSQL gives it. That is correct, and
+//     it made duplicate output names ordinary: Q30's ninety sums are ninety
+//     columns called `sum`, Q36's three offsets are three called `?column?`,
+//     Q23's two MINs are two called `min`. The gate read QueryResult.Rows,
+//     which is keyed by name and holds one of each, so it compared the same
+//     cell repeatedly against a correct engine. Fixed by reading Cells.
+//
+//   - Q28, Q29 drifted at 311c79eb (v0.18.34), which made LENGTH count
+//     CHARACTERS as PostgreSQL does. The workload's reference semantics are
+//     ClickHouse's, where `length` counts BYTES — which is why the DuckDB
+//     dialect says STRLEN and not DuckDB's character-counting `length`. The
+//     wadjet dialect's LENGTH silently stopped being the paired spelling
+//     (Q28's AVG reads 76.4367 in bytes and 73.9680 in characters over
+//     hits_0, where 137578 of 1M URLs are multi-byte),
+//     so queries.sql now says OCTET_LENGTH, which is what ClickHouse's
+//     `length` means here. The stored baseline stays valid.
 //
 // Modes (mirrors benchmarks/tpch/duckdb_compare_test.go):
 //
@@ -107,13 +133,7 @@ func TestHitsCorrectness(t *testing.T) {
 					t.Errorf("duckdb error: %v", err)
 					return
 				}
-				// Wadjet orders SELECT * output alphabetically, DuckDB in
-				// file order; align wadjet's columns to DuckDB's by name
-				// where the name exists, positionally otherwise (expression
-				// columns are named differently per dialect but appear in
-				// the same select-list position).
-				wCols := alignColumns(res.Columns, dCols)
-				wRows := canonicalRows(res.Rows, wCols)
+				wRows := canonicalCells(res, dCols)
 				dCanon := canonicalStringRows(dRows)
 				if regenerate {
 					updated[qNum] = clickbenchBaselineEntry{
@@ -136,7 +156,7 @@ func TestHitsCorrectness(t *testing.T) {
 				return
 			}
 
-			wRows := canonicalRows(res.Rows, res.Columns)
+			wRows := canonicalCells(res, nil)
 			want, ok := stored[qNum]
 			if !ok {
 				t.Errorf("no stored baseline (rows=%d). Regenerate with WADJET_REGENERATE_CLICKBENCH_BASELINE=1", len(wRows))
@@ -183,16 +203,36 @@ func loadQueriesFile(tb testing.TB, name string) []string {
 	return queries
 }
 
-// canonicalRows converts wadjet's typed rows into canonical positional cell
+// canonicalCells converts a wadjet result into canonical positional cell
 // slices, sorted canonically (see canonCell for the normalization rules).
-func canonicalRows(rows []map[string]any, cols []string) [][]string {
-	out := make([][]string, len(rows))
-	for i, row := range rows {
-		cells := make([]string, len(cols))
-		for j, c := range cols {
-			cells[j] = canonCell(row[c])
+//
+// It reads POSITIONALLY, through QueryResult.Cells, and never through the
+// name-keyed Rows map. A legal result may carry two columns of the same
+// name — PostgreSQL names both columns of `SELECT MIN(a), MIN(b)` `min`
+// and both of `SELECT a+1, a+2` `?column?`, and #513 plus the E3 naming
+// arc made this engine agree — and a map cannot hold both, so a map read
+// silently answers the LAST one for every colliding position. That read is
+// what failed Q23, Q30 and Q36 against a correct engine: Q30's ninety
+// `SUM(ResolutionWidth + k)` columns are all named `sum`, so the map held
+// one of them and the gate compared ninety copies of `SUM(… + 89)`.
+//
+// dCols, when non-nil, is DuckDB's header: wadjet emits SELECT * output
+// alphabetically and DuckDB in file order, so the cells are permuted into
+// DuckDB's order when — and only when — every wadjet column name is unique
+// and present there. Expression columns are named differently per dialect
+// and stay positional, which is already their alignment.
+func canonicalCells(res *wadjet.QueryResult, dCols []string) [][]string {
+	perm := columnPermutation(res.Columns, dCols)
+	out := make([][]string, len(res.Rows))
+	for i := range res.Rows {
+		cells := res.Cells(i)
+		row := make([]string, len(perm))
+		for j, src := range perm {
+			if src < len(cells) {
+				row[j] = canonCell(cells[src])
+			}
 		}
-		out[i] = cells
+		out[i] = row
 	}
 	sortCanon(out)
 	return out
@@ -404,27 +444,37 @@ func stripLimit(q string) string {
 	return limitRe.ReplaceAllString(q, ";")
 }
 
-// alignColumns maps DuckDB's column order onto wadjet's result columns:
-// same-named columns align by name (wadjet emits SELECT * alphabetically,
-// DuckDB in file order), the rest positionally (expression columns are
-// named differently per dialect but sit at the same select-list position).
-func alignColumns(wCols, dCols []string) []string {
-	if len(wCols) != len(dCols) {
-		return wCols
+// columnPermutation returns, for each of DuckDB's column positions, the
+// index of the wadjet cell that belongs there. It permutes by NAME only
+// when the names can carry the mapping — every wadjet name unique and every
+// DuckDB name present — which is the `SELECT *` case (wadjet emits those
+// alphabetically, DuckDB in file order). Otherwise it is the identity: the
+// two dialect files write the same select list, so position IS alignment,
+// and a duplicate name means the names cannot align anything.
+func columnPermutation(wCols, dCols []string) []int {
+	identity := make([]int, len(wCols))
+	for i := range identity {
+		identity[i] = i
 	}
-	byName := make(map[string]bool, len(wCols))
-	for _, c := range wCols {
-		byName[c] = true
+	if len(dCols) != len(wCols) {
+		return identity
 	}
-	out := make([]string, len(dCols))
-	for j, dc := range dCols {
-		if byName[dc] {
-			out[j] = dc
-		} else {
-			out[j] = wCols[j]
+	at := make(map[string]int, len(wCols))
+	for i, c := range wCols {
+		if _, dup := at[c]; dup {
+			return identity
 		}
+		at[c] = i
 	}
-	return out
+	perm := make([]int, len(dCols))
+	for j, dc := range dCols {
+		i, ok := at[dc]
+		if !ok {
+			return identity
+		}
+		perm[j] = i
+	}
+	return perm
 }
 
 // checksumRowsUnordered hashes rows with cells sorted WITHIN each row, so

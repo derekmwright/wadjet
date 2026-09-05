@@ -86,7 +86,7 @@ func TestTPCHOptimizationInvariance(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return &oracle.Result{Columns: res.Columns, Rows: res.Rows}, nil
+		return &oracle.Result{Columns: res.Columns, Rows: res.Rows, RowValues: res.RowValues}, nil
 	})
 	// Engagement check: the corpus must actually exercise scan-filter
 	// pushdown, or the scan-filter arm proves nothing.
