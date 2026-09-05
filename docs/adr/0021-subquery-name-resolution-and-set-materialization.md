@@ -1038,7 +1038,7 @@ before the assert battery so a declined item keeps earning its OWN typed
 refusal rather than the unreachable-gather-output one — the same engine, a
 different recorded cost.
 
-Thirteen cells in `coordinator.TestArcD5CorrelationMatchesPostgres` are the
+Twelve cells in `coordinator.TestArcD5CorrelationMatchesPostgres` are the
 gate, and the three `wantScalarProjRoutes: 1` pins #659 shipped with are
 deleted, which is the proof. One divergence is recorded rather than fixed and
 is not this section's: `(SELECT MAX(bigint)) + 1` boxes float64 where
