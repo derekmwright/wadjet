@@ -544,16 +544,29 @@ func duckdbCorpus() []duckdbCase {
 			FROM nation ORDER BY n_nationkey`},
 		// The constraint that ruled out fixing the above by flipping those
 		// declarations to String: the same functions over numeric columns
-		// stay numeric. mixed_literal is the debatable case — an int column
-		// beside a string literal — where wadjet follows the first argument
-		// that decides, which is the column. DuckDB agrees:
-		// typeof(COALESCE(42, 'text')) is INTEGER.
+		// stay numeric. mixed_literal is an int column beside an
+		// UNKNOWN-TYPED literal, where wadjet follows the first argument that
+		// decides — the column — and reads the literal as that type. DuckDB
+		// agrees: typeof(COALESCE(42, '7')) is INTEGER.
+		//
+		// The literal was `'text'` until 2026-09-05, and that spelling asks a
+		// question PostgreSQL REFUSES: a COALESCE folds its arguments to one
+		// type at parse analysis, so the unknown literal is coerced and
+		// `COALESCE(1::bigint, 'text')` is `22P02 invalid input syntax for
+		// type bigint: "text"` (measured on 17.11). DuckDB answers it, and on
+		// a PostgreSQL/DuckDB semantic disagreement PostgreSQL decides
+		// (ADR-0012). The entry keeps its question — does the COLUMN decide
+		// the type — with a literal all three engines read; the refusal is
+		// gated by `test.TestPolymorphicFunctionsOverColumns`, which asserts
+		// it for COALESCE, NULLIF, GREATEST and LEAST alike. The stored
+		// fingerprint is unchanged because `n_regionkey` is never NULL, so
+		// this column's VALUES were never the literal's.
 		duckdbCase{name: "PolymorphicOverNumericColumns", sql: `SELECT n_nationkey,
 			NULLIF(n_nationkey, 1) AS nullif_int,
 			COALESCE(n_regionkey, 0) AS coalesce_int,
 			GREATEST(n_nationkey, n_regionkey) AS greatest_int,
 			LEAST(n_nationkey, n_regionkey) AS least_int,
-			COALESCE(n_regionkey, 'text') AS mixed_literal
+			COALESCE(n_regionkey, '7') AS mixed_literal
 			FROM nation ORDER BY n_nationkey`},
 		// A float column must keep its float, and the fractions are the
 		// point: COALESCE(ps_supplycost, 0) answered 771 for 771.64, because

@@ -201,9 +201,13 @@ func TestNodeDeclaredTypeFromColumnTypes(t *testing.T) {
 		{"a date column keeps its date", "COALESCE(n_createdate, n_createdate)",
 			parquet.TypeDate, expr.Decided},
 
-		// Mixed types: the first argument that decides wins, which is
-		// DuckDB's answer for COALESCE(int_col, 'text') — INTEGER, the
-		// string literal cast to it.
+		// Mixed types: the first argument that decides wins. That is
+		// PostgreSQL's declaration too — a COALESCE folds to one type at
+		// parse analysis, so the unknown literal is coerced to the column's —
+		// and it is why `COALESCE(int_col, 'text')` is 22P02 THERE and here:
+		// the type is decided, the VALUE cannot be read as it. This asserts
+		// the declaration; `validateColumns` raises on the same pair, and
+		// `test.TestPolymorphicFunctionsOverColumns` asserts that.
 		{"mixed int column and string literal follows the column",
 			"COALESCE(n_nationkey, 'text')", parquet.TypeInt64, expr.Decided},
 		{"mixed string column and int literal follows the column",
