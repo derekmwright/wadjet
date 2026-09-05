@@ -2,6 +2,8 @@ package tpch
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +100,23 @@ type wireCase struct {
 	// unparameterized statement.
 	paramOIDs []uint32
 	params    [][]byte
+	// binaryParams sends every parameter under format code 1 instead of 0.
+	//
+	// This arm sent every parameter as TEXT for as long as it has existed
+	// (readOne hard-coded a zero-filled format slice), so pgwire's whole
+	// binary parameter decoder — renderBinaryParam, thirteen OIDs' worth of
+	// big-endian integers, IEEE floats, 2000-epoch date/time, raw bytea and
+	// PostgreSQL's base-10000 numeric — was reachable from no gate (#486).
+	// It is the ORDINARY path for a Go client: pgx sends binary by default.
+	// The bytes below are what a driver puts on the wire, and a value decoded
+	// wrong under a right OID is exactly the class this arm exists for.
+	binaryParams bool
+	// minRows is the number of rows the ORACLE must return for this entry to
+	// be worth comparing. A parameterized statement whose bind matches
+	// nothing agrees with any other implementation that also matches nothing,
+	// so a corpus of them would pass however the parameter was decoded. Every
+	// binary-parameter entry declares it; PostgreSQL decides the number.
+	minRows int
 	// pins maps a PROPERTY name (one of the wireProp* constants) to the reason
 	// it is not gated. Every other property of the same statement stays gated,
 	// and a pinned property that starts AGREEING fails the subtest — deleting
@@ -152,6 +172,11 @@ func runWireMetadata(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgC
 			if wText.Err != nil {
 				cmp.diverged(wirePropValuesText, fmt.Sprintf("wadjet cannot execute the statement: %v", wText.Err))
 				return
+			}
+			if c.minRows > 0 && len(pText.Rows) < c.minRows {
+				t.Fatalf("the ORACLE returned %d rows and this entry needs at least %d: "+
+					"a bind that matches nothing agrees with every decoding of it, so the "+
+					"cell would prove nothing\n  SQL: %s", len(pText.Rows), c.minRows, c.oracleSQL())
 			}
 			cmp.compareFormats(wirePropTextFormat, wText.FieldDescriptions, 0)
 			cmp.compareCells(wText, pText)
@@ -455,8 +480,78 @@ func describeCell(b []byte) string {
 }
 
 func readOne(ctx context.Context, conn *pgconn.PgConn, c wireCase, sql string, resultFormats []int16) *pgconn.Result {
-	paramFormats := make([]int16, len(c.params)) // all text unless a case says otherwise
+	paramFormats := make([]int16, len(c.params)) // text (0) unless the case says binary
+	if c.binaryParams {
+		for i := range paramFormats {
+			paramFormats[i] = 1
+		}
+	}
 	return conn.ExecParams(ctx, sql, c.params, c.paramOIDs, paramFormats, resultFormats).Read()
+}
+
+// --- binary parameter encoders -------------------------------------------
+//
+// PostgreSQL's network representation, which is what a driver sends: big
+// endian throughout, integers two's complement, floats IEEE 754, date and
+// timestamp counted from 2000-01-01 UTC, bytea as its own bytes, uuid as its
+// sixteen bytes, bool as one byte. These are the inputs pgwire's
+// renderBinaryParam reads; writing them here rather than through a driver
+// helper is deliberate — the bytes are the thing under test.
+
+func int2Bin(v int16) []byte {
+	return binary.BigEndian.AppendUint16(nil, uint16(v))
+}
+
+func int4Bin(v int32) []byte {
+	return binary.BigEndian.AppendUint32(nil, uint32(v))
+}
+
+func int8Bin(v int64) []byte {
+	return binary.BigEndian.AppendUint64(nil, uint64(v))
+}
+
+func float8Bin(v float64) []byte {
+	return binary.BigEndian.AppendUint64(nil, math.Float64bits(v))
+}
+
+func boolBin(v bool) []byte {
+	if v {
+		return []byte{1}
+	}
+	return []byte{0}
+}
+
+// dateBin is the day count from 2000-01-01, PostgreSQL's date epoch.
+func dateBin(y int, m time.Month, d int) []byte {
+	base := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	days := time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Sub(base) / (24 * time.Hour)
+	return int4Bin(int32(days))
+}
+
+// uuidBin is a canonical UUID string as its sixteen bytes. It panics on a
+// malformed literal: every caller is a constant in the corpus below, so a bad
+// one is a typo to fix and not a condition to report.
+func uuidBin(s string) []byte {
+	b, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
+	if err != nil || len(b) != 16 {
+		panic(fmt.Sprintf("bad uuid literal %q: %v", s, err))
+	}
+	return b
+}
+
+// numericBin encodes a decimal string in PostgreSQL's base-10000 `numeric`
+// wire form, through pgtype — the same encoder a driver uses, so the bytes
+// are a driver's bytes and not this file's idea of them.
+func numericBin(s string) []byte {
+	var n pgtype.Numeric
+	if err := n.Scan(s); err != nil {
+		panic(fmt.Sprintf("numeric %q: %v", s, err))
+	}
+	out, err := pgtype.NewMap().Encode(pgtype.NumericOID, pgtype.BinaryFormatCode, n, nil)
+	if err != nil {
+		panic(fmt.Sprintf("encoding numeric %q: %v", s, err))
+	}
+	return out
 }
 
 // oracleSQL is the spelling to send to PostgreSQL: the entry's own, unless it
@@ -1614,6 +1709,67 @@ func wireCorpus() []wireCase {
 		{name: "StarParamInferred",
 			sql:    `SELECT * FROM nation WHERE n_nationkey = $1`,
 			params: [][]byte{int4Text(3)}},
+
+		// --- BINARY parameter format (#486) --------------------------------
+		//
+		// Every entry above sends its parameters as TEXT, because readOne
+		// hard-coded a zero-filled format slice. pgx — and therefore every Go
+		// program, and by default several other drivers — sends BINARY, so
+		// pgwire's whole renderBinaryParam decoder was reachable from no
+		// gate: thirteen OIDs of big-endian integers, IEEE floats, a
+		// 2000-epoch date, raw bytea bytes, sixteen uuid bytes and
+		// PostgreSQL's base-10000 numeric.
+		//
+		// Each of these is the TEXT entry it sits beside, re-sent as bytes.
+		// The answer must be identical, on both servers: a parameter is a
+		// value, and the format code is how it travelled.
+		{name: "ParamInt4Binary", sql: `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(7)}, binaryParams: true, minRows: 1},
+		{name: "ParamInt2Binary", sql: `SELECT n_nationkey FROM nation WHERE n_regionkey = $1 ORDER BY n_nationkey`,
+			paramOIDs: []uint32{21}, params: [][]byte{int2Bin(1)}, binaryParams: true, minRows: 1},
+		{name: "ParamInt8Binary", sql: `SELECT n_key FROM net_probe WHERE n_dur = $1 ORDER BY n_key`,
+			paramOIDs: []uint32{20}, params: [][]byte{int8Bin(1000000007)}, binaryParams: true, minRows: 1},
+		{name: "ParamTextBinary", sql: `SELECT n_nationkey FROM nation WHERE n_name = $1`,
+			paramOIDs: []uint32{25}, params: [][]byte{[]byte("BRAZIL")}, binaryParams: true, minRows: 1},
+		{name: "ParamBoolBinary", sql: `SELECT n_nationkey FROM nation WHERE (n_regionkey = 1) = $1 ORDER BY n_nationkey`,
+			paramOIDs: []uint32{16}, params: [][]byte{boolBin(true)}, binaryParams: true, minRows: 1},
+		// bytea, whose binary form IS the value's bytes — the shape #570
+		// closed on the way in, now asked in the format that carries it.
+		{name: "ParamByteaBinary", sql: `SELECT b_key FROM bytea_probe WHERE b_val = $1 ORDER BY b_key`,
+			paramOIDs: []uint32{17}, params: [][]byte{{0x68, 0x69}}, binaryParams: true, minRows: 1},
+		{name: "ParamByteaBinaryHighBytes",
+			sql:       `SELECT b_key FROM bytea_probe WHERE b_val = $1 ORDER BY b_key`,
+			paramOIDs: []uint32{17}, params: [][]byte{{0xff, 0xfe, 0x00, 0x41}}, binaryParams: true, minRows: 1},
+		// The NETWORK types, which declare int4 / int4 / int8 since #834 — so
+		// a driver binds them as integers, in binary, and this is the only arm
+		// that can see whether the value survived the declaration.
+		{name: "ParamPortBinary", sql: `SELECT n_key FROM net_probe WHERE n_port = $1 ORDER BY n_key`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(631)}, binaryParams: true, minRows: 1},
+		{name: "ParamProtocolBinary", sql: `SELECT n_key FROM net_probe WHERE n_proto = $1 ORDER BY n_key`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(6)}, binaryParams: true, minRows: 1},
+		// float8 and numeric: IEEE 754 and PostgreSQL's base-10000 digits.
+		{name: "ParamFloat8Binary", sql: `SELECT r_key FROM real_probe WHERE d_val = $1 ORDER BY r_key`,
+			paramOIDs: []uint32{701}, params: [][]byte{float8Bin(0.5)}, binaryParams: true, minRows: 1},
+		{name: "ParamNumericBinary", sql: `SELECT d_key FROM dec_probe WHERE d_2 = $1 ORDER BY d_key`,
+			paramOIDs: []uint32{1700}, params: [][]byte{numericBin("1.25")}, binaryParams: true, minRows: 1},
+		{name: "ParamNumericBinaryNegative", sql: `SELECT d_key FROM dec_probe WHERE d_2 = $1 ORDER BY d_key`,
+			paramOIDs: []uint32{1700}, params: [][]byte{numericBin("-1.25")}, binaryParams: true, minRows: 1},
+		// date and uuid, over the multi-key fixture — the only tables in this
+		// oracle carrying a real DATE and a real UUID column.
+		{name: "ParamDateBinary", sql: `SELECT id FROM mk_outer WHERE dt = $1 ORDER BY id LIMIT 5`,
+			paramOIDs: []uint32{1082}, params: [][]byte{dateBin(2024, time.January, 3)},
+			binaryParams: true, minRows: 1},
+		{name: "ParamUUIDBinary", sql: `SELECT id FROM mk_outer WHERE u = $1 ORDER BY id LIMIT 5`,
+			paramOIDs:    []uint32{2950},
+			params:       [][]byte{uuidBin("2c5f39cb-3fb2-11d2-883f-0016d3cca427")},
+			binaryParams: true, minRows: 1},
+		// A binary parameter that reaches a PLAN rather than a scan predicate.
+		{name: "ParamInt4BinaryInAggregate", sql: `SELECT COUNT(*) AS c FROM nation WHERE n_regionkey = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(1)}, binaryParams: true, minRows: 1},
+		// A binary parameter under SELECT *, so RowDescription is promised
+		// before the bind is read (#846's shape, in the other format).
+		{name: "StarParamBinary", sql: `SELECT * FROM nation WHERE n_nationkey = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(3)}, binaryParams: true, minRows: 1},
 	}
 	return append(base, decimalTPCHWireCorpus()...)
 }
