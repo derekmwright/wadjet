@@ -1878,10 +1878,10 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 	// below, which handles it correctly.
 	keep := mi.KeepRows()
 	if len(mi.OrderBy) > 0 && keep > 0 && len(batches) == 1 && batches[0].Len > keep*4 {
-		c.topKBatches(batches, columns, colIdx, mi.OrderBy, keep)
+		batches = c.topKBatches(batches, columns, colIdx, mi.OrderBy, keep)
 	} else {
 		if len(mi.OrderBy) > 0 {
-			c.sortBatches(batches, columns, colIdx, mi.OrderBy)
+			batches = c.sortBatches(batches, columns, colIdx, mi.OrderBy)
 		}
 		if keep >= 0 {
 			batches = limitBatches(batches, keep)
@@ -1930,7 +1930,7 @@ func (c *Coordinator) dedupGatherResult(gr *gatherResult, mi *logical.MergeInfo)
 			colIdx[col] = i
 		}
 		if len(mi.OrderBy) > 0 {
-			c.sortBatches(gr.batches, gr.columns, colIdx, mi.OrderBy)
+			gr.batches = c.sortBatches(gr.batches, gr.columns, colIdx, mi.OrderBy)
 		}
 		// Truncate to limit+offset, not limit: the caller applies the OFFSET
 		// after this, so the rows it skips must still be here. >= 0, not
@@ -2670,14 +2670,31 @@ func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow in
 
 // sortBatches performs a simple in-memory sort of batches by the given order keys.
 // Used for merging probe-split partial results (typically <100K rows).
-func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr) {
+//
+// It COALESCES first, and that is the whole of #480's round-1 review. A
+// selection vector reorders rows WITHIN one batch and cannot express an order
+// that crosses two, so this function used to return outright on a multi-batch
+// input — with the comment "reAggregatePartials produces a single batch",
+// true of the re-aggregating path and of no other. Every distributed result
+// whose ORDER BY is applied ONLY at this merge — no sort stage in the plan,
+// no aggregate and no DISTINCT to collapse the input — therefore came back in
+// whatever order the tasks happened to finish in, silently. A keyless join
+// over two grouped subqueries is one such plan, which is how the arc that
+// made those plans runnable exposed it; an equi-join over a scan is another,
+// and it looked right only because the rows arrive in scan order and the
+// query asked for scan order.
+//
+// Returns the batch slice to use, which is a NEW single-batch slice whenever
+// it had to coalesce.
+func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr) []*batch.RecordBatch {
+	batches = coalesceForOrdering(batches)
 	if len(batches) != 1 {
-		return // reAggregatePartials produces a single batch
+		return batches // a shape coalesceForOrdering declined to flatten
 	}
 	b := batches[0]
 	nRows := b.Len
 	if nRows <= 1 {
-		return
+		return batches
 	}
 
 	schema := b.Schema
@@ -2698,18 +2715,78 @@ func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string
 		sel[i] = uint32(idx)
 	}
 	b.Sel = sel
+	return batches
+}
+
+// coalesceForOrdering flattens N batches into ONE so an ordering can be
+// applied ACROSS them, and returns its input untouched when there is nothing
+// to do or nothing it can honestly do.
+//
+// It declines — rather than guesses — on a schema that is not identical across
+// the input, because the alternative to declining is a batch whose columns
+// mean different things in different row ranges. A decline keeps the old
+// behaviour (the ordering is not applied), which is the answer this function
+// exists to improve on, not a new failure mode.
+//
+// Rows are copied in order through copyVectorValue, the same typed copier
+// reAggregatePartials' finalize step uses, so a DECIMAL keeps its Int128 and a
+// nested value keeps its shape; a variable-length column is written
+// sequentially, which is what its offset array requires.
+func coalesceForOrdering(batches []*batch.RecordBatch) []*batch.RecordBatch {
+	if len(batches) <= 1 {
+		return batches
+	}
+	schema := batches[0].Schema
+	total := 0
+	for _, b := range batches {
+		if len(b.Schema) != len(schema) {
+			return batches
+		}
+		for i := range schema {
+			if b.Schema[i].Name != schema[i].Name || b.Schema[i].Type != schema[i].Type {
+				return batches
+			}
+		}
+		total += b.ActiveLen()
+	}
+	if total == 0 {
+		return batches
+	}
+	out := batch.NewRecordBatch(schema, total)
+	ri := 0
+	for _, b := range batches {
+		n := b.ActiveLen()
+		for i := 0; i < n; i++ {
+			src := i
+			if b.Sel != nil {
+				src = int(b.Sel[i])
+			}
+			for ci := range schema {
+				out.Columns[ci].Nulls.SetValid(ri)
+				if b.Columns[ci].Nulls.IsNullFast(src) {
+					out.Columns[ci].Nulls.SetNull(ri)
+					continue
+				}
+				copyVectorValue(out.Columns[ci], ri, b.Columns[ci], src, schema[ci].Type)
+			}
+			ri++
+		}
+	}
+	out.Len = total
+	return []*batch.RecordBatch{out}
 }
 
 // topKBatches selects the top-k rows by order-by keys using a min-heap,
 // avoiding O(n log n) full sort when only k << n results are needed.
-func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr, k int) {
+func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr, k int) []*batch.RecordBatch {
+	batches = coalesceForOrdering(batches)
 	if len(batches) != 1 {
-		return
+		return batches
 	}
 	b := batches[0]
 	nRows := b.Len
 	if nRows <= k {
-		return
+		return batches
 	}
 
 	schema := b.Schema
@@ -2771,6 +2848,7 @@ func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, columns []string
 	}
 	b.Sel = sel
 	b.Len = k
+	return batches
 }
 
 // compareBatchRows compares two rows in a batch by the order-by keys.
@@ -2890,6 +2968,24 @@ func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.Order
 					// float rounding, no text render (the engine's own decimal
 					// comparison, per the task's Int128 mandate).
 					cmp = col.DecimalData.Data[a].Cmp(col.DecimalData.Data[bIdx])
+				case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+					// #644: the containers and VECTOR match no arm above, so
+					// before this they left cmp at 0 — a TIE on every row —
+					// and slices.SortFunc is not stable, so a distributed
+					// `ORDER BY <container column>` came back in an
+					// ARBITRARY order where the single-process sort orders it
+					// element-wise. Silent, and a wrong ORDER is a wrong
+					// answer for a query that asked for one.
+					//
+					// kernel.CompareValuesAt is that same single-process
+					// comparator, not a second implementation of it: the sort
+					// kernels, the ARRAY/ROW/MAP/VECTOR element rules
+					// (PostgreSQL's composite and array order, NULL elements
+					// last, shorter-prefix-first on unequal lengths) and the
+					// injective container keying of ADR-0023 all read it, so
+					// the gather cannot come to a different conclusion about
+					// two values than the operator that produced them.
+					cmp = kernel.CompareValuesAt(col, a, col, bIdx)
 				}
 			}
 		}

@@ -4,6 +4,10 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // spillRefusal is what the arc's 512 KiB spilled arm answers to every cross
@@ -385,4 +389,195 @@ func TestF1JoinKeysThroughDerivedRenamesAndAggregates(t *testing.T) {
 			want: "cols=[n:INT64] rows=1 | 11",
 		},
 	})
+}
+
+// TestF1ADistributedOrderByOrdersEveryContainerType is #644: the gather's
+// comparator had an arm for every scalar type after #548 and #642 and none for
+// ARRAY, MAP, ROW or VECTOR, so those fell through to `extractFloat64`, which
+// answers 0 for both rows — a TIE on every row. `slices.SortFunc` is not
+// stable, so a merged `ORDER BY <container column>` came back in an ARBITRARY
+// order where the single-process sort orders it element-wise. Silent.
+//
+// It drives `Coordinator.sortBatches` directly, which is what
+// `TestSortBatchesOrdersMissingTypes` (#548) and `TestSortBatchesOrdersInt64Carriers`
+// (#642) do for the same comparator and for the same reason: the SQL shapes
+// that reach it are narrow — the DISTINCT gather (`dedupGatherResult`) and the
+// async door's merge (`GetQueryResult`) — and a gate whose trigger is a plan
+// SHAPE cannot be relied on to fire. Measured: every `SELECT DISTINCT <container>
+// ... ORDER BY` shape tried on this base is lowered to an aggregate and a sort
+// STAGE and never reaches this function at all, so a query-level cell would
+// have passed with the arm deleted.
+//
+// The expected orders are the single-process engine's own
+// (`kernel.CompareValuesAt` — element-wise, an empty container first, a NULL
+// element last, a shorter prefix before its extension), which PostgreSQL 17's
+// array order was re-measured against for the ARRAY cases. NULL placement is
+// asserted with them and is absolute: NULLS LAST for ASC, NULLS FIRST for
+// DESC, and it must not flip with the direction.
+func TestF1ADistributedOrderByOrdersEveryContainerType(t *testing.T) {
+	strElem := &parquet.Column{Name: "element", Type: parquet.TypeString, Nullable: true}
+	mapElem := &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+		{Name: "key", Type: parquet.TypeString},
+		{Name: "value", Type: parquet.TypeInt64, Nullable: true},
+	}}
+
+	for _, tc := range []struct {
+		name    string
+		col     parquet.Column
+		rows    []map[string]any
+		orderBy logical.OrderExpr
+		want    []int64
+	}{
+		{
+			name: "array asc",
+			col:  parquet.Column{Name: "k", Type: parquet.TypeArray, Nullable: true, ElementType: strElem},
+			rows: []map[string]any{
+				{"id": int64(1), "k": []any{"b"}},
+				{"id": int64(2), "k": []any{}},
+				{"id": int64(3), "k": nil},
+				{"id": int64(4), "k": []any{"a", "z"}},
+				{"id": int64(5), "k": []any{"a"}},
+			},
+			orderBy: logical.OrderExpr{Column: "k"},
+			// [] < [a] < [a z] < [b], NULL last.
+			want: []int64{2, 5, 4, 1, 3},
+		},
+		{
+			name: "array desc",
+			col:  parquet.Column{Name: "k", Type: parquet.TypeArray, Nullable: true, ElementType: strElem},
+			rows: []map[string]any{
+				{"id": int64(1), "k": []any{"b"}},
+				{"id": int64(2), "k": []any{}},
+				{"id": int64(3), "k": nil},
+				{"id": int64(4), "k": []any{"a", "z"}},
+				{"id": int64(5), "k": []any{"a"}},
+			},
+			orderBy: logical.OrderExpr{Column: "k", Desc: true},
+			want:    []int64{3, 1, 4, 5, 2},
+		},
+		{
+			// PostgreSQL 17, measured: `{a} < {a,b} < {a,NULL} < {NULL,a}`.
+			// A NULL ELEMENT sorts after any non-NULL one and a shorter
+			// prefix sorts before its extension — which is `compareElemAt`'s
+			// in-container rule, and NOT the column-level NULL rule (that one
+			// is absolute and resolved before this comparator's type switch).
+			name: "array with NULL elements, PostgreSQL's in-container rule",
+			col:  parquet.Column{Name: "k", Type: parquet.TypeArray, Nullable: true, ElementType: strElem},
+			rows: []map[string]any{
+				{"id": int64(1), "k": []any{nil, "a"}},
+				{"id": int64(2), "k": []any{"a", "b"}},
+				{"id": int64(3), "k": []any{"a", nil}},
+				{"id": int64(4), "k": []any{"a"}},
+			},
+			orderBy: logical.OrderExpr{Column: "k"},
+			want:    []int64{4, 2, 3, 1},
+		},
+		{
+			name: "row asc, field by field",
+			col: parquet.Column{Name: "k", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{
+				{Name: "a", Type: parquet.TypeString, Nullable: true},
+				{Name: "b", Type: parquet.TypeInt64, Nullable: true},
+			}},
+			rows: []map[string]any{
+				{"id": int64(1), "k": map[string]any{"a": "m", "b": int64(2)}},
+				{"id": int64(2), "k": map[string]any{"a": "m", "b": int64(1)}},
+				{"id": int64(3), "k": map[string]any{"a": "a", "b": int64(9)}},
+				{"id": int64(4), "k": nil},
+			},
+			orderBy: logical.OrderExpr{Column: "k"},
+			want:    []int64{3, 2, 1, 4},
+		},
+		{
+			name: "map asc",
+			col:  parquet.Column{Name: "k", Type: parquet.TypeMap, Nullable: true, ElementType: mapElem},
+			rows: []map[string]any{
+				{"id": int64(1), "k": []any{map[string]any{"key": "k1", "value": int64(1)}}},
+				{"id": int64(2), "k": []any{map[string]any{"key": "k0", "value": int64(9)}}},
+				{"id": int64(3), "k": nil},
+				{"id": int64(4), "k": []any{map[string]any{"key": "k0", "value": int64(1)}}},
+			},
+			orderBy: logical.OrderExpr{Column: "k"},
+			want:    []int64{4, 2, 1, 3},
+		},
+		{
+			name: "vector asc",
+			col:  parquet.Column{Name: "k", Type: parquet.TypeVector, Nullable: true, Dimension: 2},
+			rows: []map[string]any{
+				{"id": int64(1), "k": []float32{1, 5}},
+				{"id": int64(2), "k": []float32{1, 2}},
+				{"id": int64(3), "k": nil},
+				{"id": int64(4), "k": []float32{0, 9}},
+			},
+			orderBy: logical.OrderExpr{Column: "k"},
+			want:    []int64{4, 2, 1, 3},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := []parquet.Column{{Name: "id", Type: parquet.TypeInt64}, tc.col}
+			b := batch.FromRows(schema, tc.rows)
+			// The premise: without a container arm every pair ties, and a
+			// comparator that ties is only VISIBLE when the input order is
+			// not already the answer. These rows are deliberately shuffled.
+			c := &Coordinator{}
+			c.sortBatches([]*batch.RecordBatch{b}, []string{"id", "k"},
+				map[string]int{"id": 0, "k": 1}, []logical.OrderExpr{tc.orderBy})
+			var got []int64
+			for i := 0; i < b.ActiveLen(); i++ {
+				row := i
+				if b.Sel != nil {
+					row = int(b.Sel[i])
+				}
+				got = append(got, b.Columns[0].Int64Data[row])
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("sortBatches produced %d rows, want %d", len(got), len(tc.want))
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("id order = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestF1AContainerOrderAgreesOnEveryArm is the query-level RATCHET beside it:
+// the same ORDER BY through the four execution arms, asserted as an ORDER and
+// not as a row set. It does not reach `compareBatchRows` on this base — the
+// DISTINCT is lowered to an aggregate and the ORDER BY to a sort stage — and
+// that is exactly why it is a ratchet and not the gate: the day a plan change
+// routes one of these through the gather's merge, this is what notices.
+func TestF1AContainerOrderAgreesOnEveryArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := f1Arms(t, ctx)
+
+	for _, col := range []string{"c_arr", "c_row", "c_map", "c_vec"} {
+		for _, dir := range []string{"", " DESC"} {
+			t.Run(col+dir, func(t *testing.T) {
+				sql := "SELECT DISTINCT " + col + " FROM typemx_nested WHERE id < 400 ORDER BY " + col + dir
+				var want string
+				for _, arm := range arms {
+					got, err := arm.run(sql)
+					if err != nil {
+						t.Fatalf("%s\n  arm %s: %v", sql, arm.name, err)
+					}
+					if arm.name == "single" {
+						want = got
+						continue
+					}
+					if got != want {
+						t.Errorf("%s\n  arm  %s disagrees with the single-process order\n"+
+							"  got  %s\n  want %s", sql, arm.name, got, want)
+					}
+				}
+				if want == "" {
+					t.Fatalf("%s: the single arm produced no answer", sql)
+				}
+			})
+		}
+	}
 }

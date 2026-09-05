@@ -1995,6 +1995,15 @@ label) is a cell in `physical.TestOutputDistribution`, and the #480 gate
 asserts ORDERED VALUES on both DAG arms rather than the `COUNT(*)` that could
 not see it.
 
+Beside it, and pre-existing: `Coordinator.sortBatches` and `topKBatches`
+declined a multi-batch input outright — "reAggregatePartials produces a single
+batch", true of that path and of no other — so any merge with no aggregate and
+no DISTINCT to collapse its input dropped the ordering silently. They coalesce
+first now (`coalesceForOrdering`), and decline only a schema they cannot
+honestly flatten. Gated directly in
+`coordinator.TestMergeOrdersAcrossBatches`, for the reason #644's own gate is
+driven directly: the plan shapes that reach that function are narrow.
+
 ### A window key guard asks provenance (2026-09-04, #745)
 
 `resolveWindowKeys` classes a PARTITION BY / ORDER BY term as either a BOUND
