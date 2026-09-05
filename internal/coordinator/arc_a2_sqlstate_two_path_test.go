@@ -57,8 +57,12 @@ func a2StateCells() []a2StateCell {
 		{issue: "#649", name: "division_by_zero_22012", runtime: true,
 			sql:  `SELECT c_i64 / (c_i64 - c_i64) AS v FROM typemx WHERE id < 3`,
 			want: "22012"},
+		// `'zzz'`, not `'192.168/16'`: the second is a PostgreSQL-VALID cidr
+		// (192.168.0.0/16, measured on 17.11) and this cell passed only
+		// because wadjet refused it too — the same premise the UUID comment
+		// below records, one type over. #627 made it visible by answering it.
 		{issue: "#649", name: "bad_cidr_literal_22P02", runtime: true,
-			sql:  `SELECT COUNT(*) FROM typemx WHERE c_cidr = '192.168/16'`,
+			sql:  `SELECT COUNT(*) FROM typemx WHERE c_cidr = 'zzz'`,
 			want: "22P02"},
 		// The literals here have to be ones PostgreSQL ACTUALLY refuses. The
 		// first version of these three cells used the BRACED UUID

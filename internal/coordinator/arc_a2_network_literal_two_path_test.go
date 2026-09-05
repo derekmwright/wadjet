@@ -66,6 +66,23 @@ func a2NetSites(col, lit string) []struct{ name, sql string } {
 	}
 }
 
+// a2AllNetSites is every site a2NetSites builds, and it is what a refusal
+// covers since #627 wired the network arm into kernel.QuotedLitStatus: the
+// refusal is decided when the query is PLANNED, so it does not depend on which
+// layer meets the literal first or on whether any row reaches the comparison.
+//
+// These entries used to name `eq` and `in` alone, and #579's own residual was
+// the other five — a literal refused in a WHERE and answered inside a CASE, a
+// GREATEST or a scan no row survives. That is closed for CIDR, MAC and UUID,
+// which are the three types whose parser is now a superset of PostgreSQL's;
+// IPv4 and IPv6 are not in this list for that reason (ADR-0012 item 5).
+func a2AllNetSites() map[string]bool {
+	return map[string]bool{
+		"eq": true, "in": true, "case": true, "is_distinct": true,
+		"greatest": true, "least": true, "empty_scan": true,
+	}
+}
+
 func TestANetworkLiteralHasOneDispositionAtEverySite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -175,11 +192,16 @@ func TestANetworkLiteralHasOneDispositionAtEverySite(t *testing.T) {
 		// disposition, so closing it is visible.
 		singleOnly map[string]bool
 	}{
-		{"c_mac", "zzz", map[string]bool{"eq": true, "in": true}, nil},
-		{"c_uuid", "not-a-uuid", map[string]bool{"eq": true, "in": true}, nil},
-		{"c_cidr", "zzz", map[string]bool{"eq": true, "in": true}, nil},
-		{"c_mac", "not-a-mac-at-all", nil,
-			map[string]bool{"eq": true, "in": true}},
+		{"c_mac", "zzz", a2AllNetSites(), nil},
+		{"c_uuid", "not-a-uuid", a2AllNetSites(), nil},
+		{"c_cidr", "zzz", a2AllNetSites(), nil},
+		// This one had an EMPTY refusedAt and a singleOnly split — the single
+		// path refused and both DAG arms answered 0, because the scan's
+		// row-group prune withheld a domain it could not build and the
+		// fragment never evaluated the predicate. The refusal is decided at
+		// PLAN time now, before any prune exists to withhold anything, so the
+		// split is closed with the rest (#627).
+		{"c_mac", "not-a-mac-at-all", a2AllNetSites(), nil},
 		// The five REGROUPINGS. Twelve hex digits with one or two separators
 		// ANYWHERE parsed while the widening counted separators instead of
 		// GROUP SIZES, so wadjet accepted five spellings PostgreSQL 17
@@ -191,15 +213,15 @@ func TestANetworkLiteralHasOneDispositionAtEverySite(t *testing.T) {
 		// with no fixture is the shape this arc keeps finding: the accepted
 		// half had ten literals x seven sites and the refused half had none
 		// of these.
-		{"c_mac", "0-8-002b010203", map[string]bool{"eq": true, "in": true}, nil},
-		{"c_mac", "0:8002b010203", map[string]bool{"eq": true, "in": true}, nil},
-		{"c_mac", "08-002b010203", map[string]bool{"eq": true, "in": true}, nil},
-		{"c_mac", "08002b:01:0203", map[string]bool{"eq": true, "in": true}, nil},
-		{"c_mac", "08:002b:010203", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_mac", "0-8-002b010203", a2AllNetSites(), nil},
+		{"c_mac", "0:8002b010203", a2AllNetSites(), nil},
+		{"c_mac", "08-002b010203", a2AllNetSites(), nil},
+		{"c_mac", "08002b:01:0203", a2AllNetSites(), nil},
+		{"c_mac", "08:002b:010203", a2AllNetSites(), nil},
 		// A sixth regrouping, added because the five above all keep 12
 		// digits in 2 or 3 groups: this one is 6+4+2, which the SIZE check
 		// refuses and a COUNT check would not.
-		{"c_mac", "08002b:0102:03", map[string]bool{"eq": true, "in": true}, nil},
+		{"c_mac", "08002b:0102:03", a2AllNetSites(), nil},
 	} {
 		t.Run("#579/pin_refused_at_some_sites/"+tc.col+"/"+tc.lit, func(t *testing.T) {
 			for _, site := range a2NetSites(tc.col, tc.lit) {
