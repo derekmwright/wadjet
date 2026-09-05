@@ -329,7 +329,137 @@ func TestCheckedConversionRefusesTheSameDecimalBoxAtEveryNestingDepth(t *testing
 	}
 }
 
+// Every append helper reserves a VECTOR row's components, NULL rows included
+// (#899). appendToVector had no TypeVector arm, so a nested vector leaf and a
+// null-through-a-view append both left the component storage short and the
+// next read sliced past it.
+func TestVectorComponentsAreReservedByEveryAppendPath(t *testing.T) {
+	t.Run("array-of-vector", func(t *testing.T) {
+		defer failOnPanic(t)
+		elem := parquet.Column{Name: "element", Type: parquet.TypeVector, Dimension: 2}
+		col := parquet.Column{Name: "x", Type: parquet.TypeArray, ElementType: &elem}
+		value := []any{[]float32{1, 2}, []float32{3, 4}}
+		b := batch.FromRows([]parquet.Column{col}, []map[string]any{{"x": value}})
+		if got := b.Columns[0].GetValue(0); !reflect.DeepEqual(got, value) {
+			t.Errorf("ARRAY<VECTOR(2)> = %v; want %v", got, value)
+		}
+	})
+
+	t.Run("array-of-vector-with-null-element", func(t *testing.T) {
+		defer failOnPanic(t)
+		elem := parquet.Column{Name: "element", Type: parquet.TypeVector, Dimension: 2}
+		col := parquet.Column{Name: "x", Type: parquet.TypeArray, ElementType: &elem}
+		value := []any{nil, []float32{3, 4}}
+		b := batch.FromRows([]parquet.Column{col}, []map[string]any{{"x": value}})
+		if got := b.Columns[0].GetValue(0); !reflect.DeepEqual(got, value) {
+			t.Errorf("ARRAY<VECTOR(2)> with a NULL element = %v; want %v", got, value)
+		}
+	})
+
+	t.Run("row-of-vector", func(t *testing.T) {
+		defer failOnPanic(t)
+		col := parquet.Column{Name: "r", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "v", Type: parquet.TypeVector, Dimension: 3},
+		}}
+		want := map[string]any{"v": []float32{1, 2, 3}}
+		b := batch.FromRows([]parquet.Column{col}, []map[string]any{{"r": want}})
+		if got := b.Columns[0].GetValue(0); !reflect.DeepEqual(got, want) {
+			t.Errorf("ROW{VECTOR(3)} = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("map-to-vector", func(t *testing.T) {
+		defer failOnPanic(t)
+		entry := parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "key", Type: parquet.TypeString},
+			{Name: "value", Type: parquet.TypeVector, Dimension: 2},
+		}}
+		col := parquet.Column{Name: "m", Type: parquet.TypeMap, ElementType: &entry}
+		b := batch.FromRows([]parquet.Column{col}, []map[string]any{{"m": map[string]any{"a": []float32{5, 6}}}})
+		got := b.Columns[0].GetValue(0)
+		if !contains(renderAny(got), "[5 6]") {
+			t.Errorf("MAP<STRING,VECTOR(2)> = %v; want a [5 6] value", got)
+		}
+	})
+
+	t.Run("null-view-append-then-value", func(t *testing.T) {
+		defer failOnPanic(t)
+		src := batch.NewVectorVector(2, 2)
+		src.SetVector(0, []float32{1, 2})
+		src.SetVector(1, []float32{3, 4})
+		view := batch.NewViewVector(src, []uint32{0, 1})
+		view.Nulls.SetNull(0)
+		dst := batch.NewVectorLike(src)
+		dst.AppendFrom(view, 0)
+		dst.AppendFrom(view, 1)
+		got := []any{dst.GetValue(0), dst.GetValue(1)}
+		if !reflect.DeepEqual(got, []any{nil, []float32{3, 4}}) {
+			t.Errorf("view append = %v; want [<nil> [3 4]]", got)
+		}
+	})
+
+	t.Run("present-before-null", func(t *testing.T) {
+		defer failOnPanic(t)
+		src := batch.NewVectorVector(2, 2)
+		src.SetVector(0, []float32{1, 2})
+		src.Nulls.SetNull(1)
+		dst := batch.NewVectorLike(src)
+		dst.AppendFrom(src, 0)
+		dst.AppendFrom(src, 1)
+		dst.AppendFrom(src, 0)
+		got := []any{dst.GetValue(0), dst.GetValue(1), dst.GetValue(2)}
+		want := []any{[]float32{1, 2}, nil, []float32{1, 2}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("append = %v; want %v", got, want)
+		}
+	})
+
+	// The reservation is per DIMENSION, so the narrowest and a wide one both
+	// have to keep row i at [i*dim, (i+1)*dim).
+	for _, dim := range []int{1, 1024} {
+		t.Run(fmt.Sprintf("dim-%d-through-an-array", dim), func(t *testing.T) {
+			defer failOnPanic(t)
+			elem := parquet.Column{Name: "element", Type: parquet.TypeVector, Dimension: dim}
+			col := parquet.Column{Name: "x", Type: parquet.TypeArray, ElementType: &elem}
+			first := make([]float32, dim)
+			second := make([]float32, dim)
+			for j := range first {
+				first[j] = float32(j)
+				second[j] = float32(j) + 0.5
+			}
+			value := []any{first, nil, second}
+			b := batch.FromRows([]parquet.Column{col}, []map[string]any{{"x": value}})
+			if got := b.Columns[0].GetValue(0); !reflect.DeepEqual(got, value) {
+				t.Errorf("ARRAY<VECTOR(%d)> round trip lost values", dim)
+			}
+		})
+	}
+
+	t.Run("owned-null-append-then-value", func(t *testing.T) {
+		defer failOnPanic(t)
+		src := batch.NewVectorVector(2, 2)
+		src.Nulls.SetNull(0)
+		src.SetVector(1, []float32{3, 4})
+		dst := batch.NewVectorLike(src)
+		dst.AppendFrom(src, 0)
+		dst.AppendFrom(src, 1)
+		got := []any{dst.GetValue(0), dst.GetValue(1)}
+		if !reflect.DeepEqual(got, []any{nil, []float32{3, 4}}) {
+			t.Errorf("owned append = %v; want [<nil> [3 4]]", got)
+		}
+	})
+}
+
 // --- helpers ---
+
+// failOnPanic turns a panic inside a subtest into that subtest's failure, so
+// one broken cell reports instead of taking the whole binary down with it.
+func failOnPanic(t *testing.T) {
+	t.Helper()
+	if r := recover(); r != nil {
+		t.Errorf("panicked: %v", r)
+	}
+}
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 

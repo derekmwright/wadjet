@@ -1710,6 +1710,18 @@ func growForAppend(v *Vector, val any) (idx int, hasValue bool) {
 		v.BytesData.Offsets = append(v.BytesData.Offsets, v.BytesData.Offsets[len(v.BytesData.Offsets)-1])
 	case TypeDecimal:
 		v.DecimalData.Data = append(v.DecimalData.Data, Int128{})
+	case TypeVector:
+		// A VECTOR row occupies VectorDim components, so a logical row costs
+		// VectorDim slots here — a NULL placeholder included. Without this arm
+		// the length advanced and the storage did not, so every LATER row's
+		// [i*dim, (i+1)*dim) window pointed past the end: an ARRAY<VECTOR(2)>
+		// panicked on the first element and a null-then-present append read
+		// the second row out of a two-float slice (#899). A column with no
+		// declared dimension stores nothing per row, which is what
+		// AppendFrom's own VECTOR arm already does.
+		if v.VectorDim > 0 {
+			v.Float32Data = append(v.Float32Data, make([]float32, v.VectorDim)...)
+		}
 	case TypeArray, TypeMap:
 		v.Offsets = append(v.Offsets, v.Offsets[len(v.Offsets)-1])
 	case TypeRow:
