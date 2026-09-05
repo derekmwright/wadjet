@@ -958,6 +958,61 @@ func pmCells() []pmCell {
 			sql:  `WITH u AS (SELECT id, bal FROM e7bal WHERE bal > 0) SELECT id FROM u ORDER BY id`,
 			want: nil},
 
+		// ------------------------------------------------------------------
+		// The relation named ONLY inside a subquery, in the spellings a client
+		// chooses. Each of these reached the stored column on every arm until
+		// the invariant was asked over the subquery's OWN plan: the inner
+		// query is SQL TEXT when enforcement runs, so what it contains — a
+		// derived table, a set operation, a correlation — is the client's
+		// choice and no per-shape teaching can enumerate it (#859 round 4).
+		// Every one of them REFUSES 0A000, uniformly on all eight runners: the
+		// planner cannot show that the subquery's own plan keeps its
+		// predicates above the projection, and the branch's doctrine for a
+		// shape it cannot order safely is to refuse. The narrowness is the
+		// point — the ten `inner_predicate_over_masked_*` cells above, where
+		// the policed relation is also the outer one, still ANSWER. What
+		// refuses is the case where the entire policed read lives inside
+		// subquery text.
+		{name: "hidden_relation_derived_table_inside_in",
+			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
+				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 300) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_union_all_inside_in",
+			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
+				`SELECT id FROM e7bal WHERE bal > 300 UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		// UNION-distinct inside the subquery. Spelled with IN rather than
+		// EXISTS: an EXISTS over a set operation is refused on the DAG arms
+		// for a pre-existing reason of its own ("EXISTS subquery requires a
+		// SubqueryRunner"), so that spelling cannot assert ONE disposition on
+		// all eight runners — and a cell that accepts two messages asserts
+		// neither.
+		{name: "hidden_relation_union_distinct_inside_in",
+			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
+				`SELECT id FROM e7bal WHERE bal > 300 UNION SELECT id FROM e7bal WHERE bal > 500) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_intersect_inside_in",
+			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
+				`SELECT id FROM e7bal WHERE bal > 300 INTERSECT SELECT id FROM e7bal) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_except_inside_in",
+			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
+				`SELECT id FROM e7bal EXCEPT SELECT id FROM e7bal WHERE bal > 300) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_correlated_scalar",
+			sql: `SELECT d.id FROM e7other d WHERE d.id = (` +
+				`SELECT b.id FROM e7bal b WHERE b.id = d.id AND b.bal > 300) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_derived_inside_union_inside_in",
+			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
+				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 300 ` +
+				`UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+		{name: "hidden_relation_correlated_scalar_over_a_cte",
+			sql: `WITH u AS (SELECT id, bal FROM e7bal) SELECT d.id FROM e7other d WHERE d.id = (` +
+				`SELECT u.id FROM u WHERE u.id = d.id AND u.bal > 300) ORDER BY d.id`,
+			wantErrLike: "could not be placed above the security projection"},
+
 		{name: "denied_in_order_by", sql: `SELECT id FROM e7emp ORDER BY salary`, deniedLike: "salary"},
 		{name: "denied_in_group_by",
 			sql: `SELECT salary, COUNT(*) AS c FROM e7emp GROUP BY salary`, deniedLike: "salary"},
