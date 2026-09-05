@@ -193,9 +193,12 @@ the coordinator's `ExecuteSQL` can present.
   derived table, a set operation, a correlation — is the client's choice, so no
   per-shape enumeration can cover it. The line is drawn by the INNER PLAN: a
   subquery the planner folds into the outer plan is ordered with it and
-  ANSWERS; a subquery that keeps a plan of its own — a derived table or a set
-  operation inside an `IN`/`EXISTS` list, a correlated scalar, `LATERAL` —
-  REFUSES, whether or not the outer statement reads the same relation.
+  ANSWERS; a subquery that keeps a plan of its own — a set operation inside an
+  `IN`/`EXISTS` list, a correlated scalar, `LATERAL` — REFUSES, whether or not
+  the outer statement reads the same relation. Which shapes fold is the
+  PLANNER's business and moves with it: a derived table inside an `IN` list
+  refused until v0.18.36's set-operation work and answers now, correctly, on
+  every arm.
 - **Scan-level filter pushdown stops at a security projection.** It evaluates
   against the FILE, so pushing a predicate that sits above the projection makes
   it read the stored column — the in-process twin of a single filter slot on

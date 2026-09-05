@@ -958,6 +958,26 @@ func pmCells() []pmCell {
 			sql:  `WITH u AS (SELECT id, bal FROM e7bal WHERE bal > 0) SELECT id FROM u ORDER BY id`,
 			want: nil},
 
+		// A DERIVED TABLE inside an `IN` list. The planner folds it into the
+		// outer plan, so there is one plan to order and the predicate reads
+		// the mask: `t.bal > 0` is false on every row where the stored column
+		// would answer the row's SIGN. Both constants discriminate — a stored
+		// read answers `id=2` under the unpoliced outer and `2 4 6 8` under
+		// the policed one, and the empty answer is the mask's.
+		//
+		// This spelling REFUSED until v0.18.36's set-operation work changed
+		// how a derived table inside an IN list is planned; the refusal is
+		// recorded in the round-5 report because a shape moving from 0A000 to
+		// an answer is a change in what the branch promises.
+		{name: "derived_table_inside_in_reads_the_mask",
+			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
+				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 0) ORDER BY d.id`,
+			want: nil},
+		{name: "derived_table_inside_in_outer_reads_it",
+			sql: `SELECT id FROM e7bal WHERE id IN (` +
+				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 0) ORDER BY id`,
+			want: nil},
+
 		// The inner predicate names the MASK ITSELF. Under masking every row's
 		// value IS the mask, so `mask = mask` holds on every row and the
 		// answer is every row. This was the arc's one arm split: in process
@@ -1010,10 +1030,6 @@ func pmCells() []pmCell {
 		// refuses whether or not the outer statement reads the same relation
 		// — the three `*_outer_reads_it` cells below are the same three
 		// spellings with `e7bal` on both sides, and they refuse identically.
-		{name: "hidden_relation_derived_table_inside_in",
-			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
-				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 300) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
 		{name: "hidden_relation_union_all_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
 				`SELECT id FROM e7bal WHERE bal > 300 UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY d.id`,
@@ -1049,15 +1065,11 @@ func pmCells() []pmCell {
 			sql: `WITH u AS (SELECT id, bal FROM e7bal) SELECT d.id FROM e7other d WHERE d.id = (` +
 				`SELECT u.id FROM u WHERE u.id = d.id AND u.bal > 300) ORDER BY d.id`,
 			wantErrLike: "could not be placed above the security projection"},
-		// The same three spellings with the POLICED relation on BOTH sides.
-		// An earlier revision of docs/security.md drew the boundary at the
-		// outer statement's FROM list — "a subquery over a table the outer
-		// statement also reads answers normally" — and these cells are why
-		// that sentence is gone (#859 round 5, review P1).
-		{name: "hidden_relation_derived_inside_in_outer_reads_it",
-			sql: `SELECT id FROM e7bal WHERE id IN (` +
-				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 300) ORDER BY id`,
-			wantErrLike: "could not be placed above the security projection"},
+		// The same spellings with the POLICED relation on BOTH sides. An
+		// earlier revision of docs/security.md drew the boundary at the outer
+		// statement's FROM list — "a subquery over a table the outer statement
+		// also reads answers normally" — and these cells are why that sentence
+		// is gone (#859 round 5, review P1).
 		{name: "hidden_relation_union_all_inside_in_outer_reads_it",
 			sql: `SELECT id FROM e7bal WHERE id IN (` +
 				`SELECT id FROM e7bal WHERE bal > 300 UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY id`,
