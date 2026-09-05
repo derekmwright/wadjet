@@ -451,3 +451,82 @@ func TestAFlippedBitInAPageHeaderIsNeverASilentWrongAnswer(t *testing.T) {
 		})
 	}
 }
+
+// TestTheDictionaryPrunePathChecksTheDictionaryItPrunesFrom.
+//
+// DictionaryIfPure walks a chunk's page HEADERS without decompressing any
+// data page, and decodes only the dictionary — the scan then decides whether
+// a whole row group can be pruned from those values. That makes the
+// dictionary page the one page in the chunk whose corruption drops rows that
+// belong in the answer rather than producing a wrong one, so it is verified
+// on this path exactly as it is on the decoding path. The header walk itself
+// stays a header walk: the data pages' bodies are not hashed, because nothing
+// is decoded from them here.
+func TestTheDictionaryPrunePathChecksTheDictionaryItPrunesFrom(t *testing.T) {
+	data := parquetGoFile(t, 1, gp.Compression(&gp.Uncompressed), true, 300)
+
+	var dictPage crcPage
+	pages := walkPages(t, data)
+	for _, p := range pages {
+		if p.kind == PageDictionary && p.bodyLen > 0 {
+			dictPage = p
+			break
+		}
+	}
+	if dictPage.bodyLen == 0 {
+		t.Fatal("fixture has no dictionary page")
+	}
+
+	// Clean: the chunk is provably pure-dictionary and the walk says so.
+	fr := mustFileReader(t, data)
+	leafIdx := leafIndexByPath(t, fr, "s")
+	pr := fr.ColumnPages(0, leafIdx)
+	if pr == nil {
+		t.Fatal("no chunk")
+	}
+	dict, ok, err := pr.DictionaryIfPure()
+	pr.Close()
+	if err != nil {
+		t.Fatalf("unmutated: %v", err)
+	}
+	if !ok || dict == nil {
+		t.Fatalf("fixture is not pure-dictionary (ok=%v dict=%v); the cell would prove nothing", ok, dict)
+	}
+
+	// Corrupt the dictionary page's body: the prune walk must refuse.
+	mutated := append([]byte(nil), data...)
+	mutated[dictPage.bodyAt+dictPage.bodyLen/2] ^= 0x20
+	fr2 := mustFileReader(t, mutated)
+	pr2 := fr2.ColumnPages(0, leafIdx)
+	if pr2 == nil {
+		t.Fatal("no chunk")
+	}
+	_, ok2, err2 := pr2.DictionaryIfPure()
+	pr2.Close()
+	if err2 == nil {
+		t.Fatalf("the prune walk accepted a dictionary page that fails its checksum (ok=%v)", ok2)
+	}
+	if !strings.Contains(err2.Error(), "fails its own checksum") {
+		t.Fatalf("refused, but not for the checksum: %v", err2)
+	}
+}
+
+func mustFileReader(t *testing.T, data []byte) *FileReader {
+	t.Helper()
+	r, err := NewReaderFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.FileReader()
+}
+
+func leafIndexByPath(t *testing.T, fr *FileReader, path string) int {
+	t.Helper()
+	for i, l := range fr.Leaves() {
+		if strings.Join(l.Path, ".") == path {
+			return i
+		}
+	}
+	t.Fatalf("no leaf %q", path)
+	return -1
+}
