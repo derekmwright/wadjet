@@ -663,9 +663,11 @@ func (nw *NativeWriter) decomposeArray(col Column, val any, defLevel, repLevel, 
 		return
 	}
 
-	arr, ok := val.([]any)
-	if !ok {
-		// Try to handle as a typed slice — shouldn't normally happen.
+	arr, err := arrayElements(col, val)
+	if err != nil {
+		// A box with no reading as an array used to become an absent
+		// subtree — a NULL nobody wrote (#889).
+		nw.fail(fmt.Errorf("row %d of this write: %w", nw.rowsSeen, err))
 		nw.emitNullForSubtree(elemCol, defLevel, repLevel, leafIdx)
 		return
 	}
@@ -774,9 +776,18 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel, re
 		}
 	}
 	if !ok {
-		nw.emitNullForSubtree(keyCol, defLevel, repLevel, leafIdx)
-		nw.emitNullForSubtree(valCol, defLevel, repLevel, leafIdx)
-		return
+		// Neither the native map nor the storage shape. A string-keyed map of
+		// some other value type is the same value spelled differently and is
+		// normalised; anything else has no reading as a map at all and fails
+		// the write rather than becoming a NULL (#889).
+		conv, err := rowFields(col, val, "a MAP")
+		if err != nil {
+			nw.fail(fmt.Errorf("row %d of this write: %w", nw.rowsSeen, err))
+			nw.emitNullForSubtree(keyCol, defLevel, repLevel, leafIdx)
+			nw.emitNullForSubtree(valCol, defLevel, repLevel, leafIdx)
+			return
+		}
+		m = conv
 	}
 
 	innerDef := defLevel
@@ -848,8 +859,9 @@ func (nw *NativeWriter) decomposeRow(col Column, val any, defLevel, repLevel, re
 		return
 	}
 
-	m, ok := val.(map[string]any)
-	if !ok {
+	m, err := rowFields(col, val, "a ROW")
+	if err != nil {
+		nw.fail(fmt.Errorf("row %d of this write: %w", nw.rowsSeen, err))
 		for _, field := range col.Fields {
 			nw.emitNullForSubtree(field, defLevel, repLevel, leafIdx)
 		}

@@ -323,19 +323,28 @@ func ValidateNestedLeaves(col Column, val any) error {
 		if col.ElementType == nil {
 			return nil
 		}
-		if arr, ok := val.([]any); ok {
-			for _, e := range arr {
-				if err := ValidateNestedLeaves(*col.ElementType, e); err != nil {
-					return err
-				}
+		// arrayElements, not a bare []any assertion: it normalises a typed
+		// slice and REFUSES a box with no reading as an array, so this
+		// boundary admits exactly what the writer stores. The assertion form
+		// walked only the shapes that asserted, which is why a box the writer
+		// turned into a NULL was one this function said nothing about (#889).
+		arr, err := arrayElements(col, val)
+		if err != nil {
+			return err
+		}
+		for _, e := range arr {
+			if err := ValidateNestedLeaves(*col.ElementType, e); err != nil {
+				return err
 			}
 		}
 	case TypeRow:
-		if m, ok := val.(map[string]any); ok {
-			for _, f := range col.Fields {
-				if err := ValidateNestedLeaves(f, m[f.Name]); err != nil {
-					return err
-				}
+		m, err := rowFields(col, val, "a ROW")
+		if err != nil {
+			return err
+		}
+		for _, f := range col.Fields {
+			if err := ValidateNestedLeaves(f, m[f.Name]); err != nil {
+				return err
 			}
 		}
 	case TypeMap:
@@ -356,6 +365,13 @@ func ValidateNestedLeaves(col Column, val any) error {
 			// the flush instead (#647 re-review). Mirroring the writer's
 			// fallback is the point: the two must accept the same shapes.
 			m, ok = mapFromStorageShapeEntries(val, keyCol.Name, valCol.Name)
+		}
+		if !ok {
+			conv, err := rowFields(col, val, "a MAP")
+			if err != nil {
+				return err
+			}
+			m, ok = conv, true
 		}
 		if ok {
 			for k, v := range m {

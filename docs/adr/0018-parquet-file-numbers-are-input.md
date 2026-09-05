@@ -16,7 +16,15 @@ or MAP read back as the empty string while the flat column read correctly
 value, so the CATALOG's is the one that counts", after two files of one table
 declaring one column at two scales were found to answer a plain projection
 100x wrong on the single-process engine and 100x wrong the OTHER way on the
-stage DAG (#707).
+stage DAG (#707). Amended 2026-09-05 with §10, "the exported writer is the
+guarantee, not the boundary above it", after six defects (#885 #886 #887 #888
+#889 #890) and two CodeQL alerts (#36, #37) found the WRITE side believing its
+caller the way §1–§9 stopped the read side believing its file: a box no
+converter named was stored as a zero, an out-of-range integer was wrapped, a
+wrong-width VECTOR moved components between rows, a missing required value
+shifted a column, a mis-shaped container became NULL, and a mid-row-group
+output failure produced a valid file with a column missing — every one of them
+with `WriteRows` and `Close` returning nil.
 
 ## Context
 
@@ -569,6 +577,89 @@ treated alike:
 A catalog DECIMAL over a leaf carrying NO decimal annotation states no
 declaration to disagree with, so §4's already-unscaled rule stands there; both
 read paths refuse that pairing earlier anyway.
+
+### 10. The exported writer is the guarantee, not the boundary above it
+
+(Added 2026-09-05, #885 #886 #887 #888 #889 #890 and CodeQL alerts #36/#37.)
+
+§1 through §9 are all about the READ: a file's own numbers are input. The
+write side had an unstated assumption doing the same job the other way round —
+that whatever reached a leaf had already been checked by somebody. It had not,
+and there was no somebody. `NativeWriter` and `Writer` are exported; the
+`ingest` boundary is one caller of them and not a gate on them; and every
+converter below `decomposeLeaf` answered a box it did not recognise with a
+zero value and no way to report anything. Measured at `de5bc970`, all with
+`WriteRows` and `Close` returning nil:
+
+| what was written | what the file held |
+|---|---|
+| `int8(42)` into INT32 | 0 |
+| `uint32(42)` into INT64 | 0 |
+| `int64(42)` into FLOAT32 | 0 |
+| `int32(42)` into FLOAT64 | 0 |
+| `int64(3000000000)` into INT32 | -1294967296 |
+| `math.NaN()` into INT32 | -2147483648 (implementation-defined) |
+| `float64(2.5)` into INT32 | 2 |
+| `net.ParseIP("10.0.0.5")` into IPV4 | 0.0.0.0 |
+| `[]float32{1}` then `{2,3,4}` into VECTOR(2) | `[1,2]` then `[3,4]` |
+| `nil` into a REQUIRED BOOL, then `true` | `true`, then `false` |
+| `[]int64{1,2,3}` into a nullable ARRAY(INT64) | NULL |
+| an output error on the 4th write of a 2-column row group | one column silently missing |
+
+The first four are boxes `ingest.checkType` explicitly ADMITS, so the one
+boundary anybody could point at was not covering the gap; the rest never had a
+boundary at all.
+
+**The position: the writer validates every value at the decomposition
+boundary — TYPE, WIDTH, PRESENCE and RANGE — and the first violation is an
+error returned from `WriteRows` and latched so that every later call,
+`Close` included, returns it. A file is never finalized with data that was
+lost, shifted, zeroed or wrapped.**
+
+Four consequences follow, and each names the failure mode it closes:
+
+- **Type.** Every box a leaf can store is named by one total resolver per
+  physical type (`leaf_value.go`), and a box it does not name is
+  `42804 datatype_mismatch`, never a zero. There is no `default:` arm that
+  produces a value.
+- **Range.** An integer box is widened to an int64 and range-checked against
+  the leaf, and a float box is checked as a FLOAT — Go's float→int conversion
+  is implementation-defined outside the destination's range and for a NaN, so
+  checking the result cannot work. The SQLSTATE is PostgreSQL's `22003`, the
+  one it raises for `INSERT INTO t(int4col) VALUES (3000000000)` and the one
+  `batch.IntegerRangeError` already carries for the engine's own narrowing
+  seam. A fractional float is refused rather than truncated: rounding is the
+  CAST's job (PostgreSQL rounds float8→int4 half-to-even and numeric→int4
+  half-away-from-zero, both implemented in wadjet's DML door), and by the time
+  a value reaches a leaf the cast has happened.
+- **Width.** A FIXED_LEN_BYTE_ARRAY leaf carries no per-value length: the
+  chunk is one run of bytes cut every `TypeLength` bytes on the way back. A
+  value of the wrong width therefore does not produce a short value, it MOVES
+  THE BOUNDARY for every value after it, and two opposite errors cancel in the
+  byte total so no read-side length check can see them. VECTOR(N) is held to
+  exactly N components on the way in. IPv6 and UUID are sixteen-byte values in
+  a variable-length leaf and are held to sixteen bytes, with zero kept as the
+  legacy absence form already on disk.
+- **Presence.** A REQUIRED leaf's definition level cannot express absence: the
+  level appended for a missing value is the PRESENT level, so the counts
+  advance with no value behind them and every later value in that column
+  shifts by one. A missing required value — a leaf, a container, or a required
+  child of a present struct — is `23502 not_null_violation` at the
+  decomposition boundary. An absent OPTIONAL ancestor is not a violation of
+  its required children, because they are not there to be absent.
+
+**Latching.** A partially emitted row group cannot be repaired, so the first
+output or flush failure is latched and every later `WriteRows` and the `Close`
+return it. The alternative was measured: an injected error on one column's
+page header left the earlier columns' leaf buffers already reset, `numRows`
+retained, and `Close` returning nil over a file the reader opened happily with
+one column simply gone.
+
+None of this replaces the checks above the writer. `ingest.checkType` still
+refuses a bad row where the INSERT that carried it can be named, rather than
+at the flush that would otherwise fail a whole buffer of good rows — the same
+argument §4 makes for DECIMAL. What changes is that those checks are now
+convenience, not the guarantee.
 
 ## Consequences
 
