@@ -508,6 +508,11 @@ Nested types round-trip through Parquet in both directions — written as the st
 
 `VECTOR(N)` stores fixed-dimension float32 vectors for embedding-based workflows. Each row occupies exactly N x 4 bytes with zero overhead.
 
+A `VECTOR(N)` value has exactly N components. A value of any other width is
+refused with SQLSTATE `22000` and the message `expected N dimensions, not M` —
+never padded with zeros and never truncated, the same answer PostgreSQL's
+`vector` extension gives for `'[1]'::vector(2)`.
+
 ```sql
 -- Create a table with embedding column
 CREATE TABLE doc_embeddings (

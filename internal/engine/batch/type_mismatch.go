@@ -83,6 +83,39 @@ func (e *IntegerRangeError) SQLState() string { return "22003" }
 // TypeMismatchError takes: a query error, never a process exit.
 func (e *IntegerRangeError) FatalEvalError() error { return e }
 
+// VectorWidthError reports a write of a VECTOR value whose component count is
+// not the column's declared dimension — the third member of this file's family
+// and the one that is neither a wrong Go type nor a number out of range: the
+// box is right and every component is storable, there is just the wrong NUMBER
+// of them.
+//
+// Until #900 a short write copied what fit and left the remaining slots
+// holding whatever the storage carried, which on a pooled batch is a PREVIOUS
+// batch's components: `SetVector(0, []float32{1})` into a VECTOR(2) answered
+// [1 0] on a fresh batch and [1 8] on a reused one. Same input, two answers,
+// decided by pool history — and no error either way.
+//
+// Refusing rather than padding is the choice PostgreSQL's vector extension
+// makes ('[1]'::vector(2) is an error), and it is the only one that keeps a
+// declared width meaningful: a padded value is a DIFFERENT vector, and every
+// distance function would then answer about a value nobody wrote.
+type VectorWidthError struct {
+	Dim int // the column's declared dimension
+	Got int // components the writer supplied
+}
+
+// Error is pgvector's wording, so a client sees the message it would see there.
+func (e *VectorWidthError) Error() string {
+	return fmt.Sprintf("expected %d dimensions, not %d", e.Dim, e.Got)
+}
+
+// SQLState is PostgreSQL's data_exception, what pgvector raises for this.
+func (e *VectorWidthError) SQLState() string { return "22000" }
+
+// FatalEvalError implements the exec.FatalEvalPanic contract: a query error,
+// never a process exit.
+func (e *VectorWidthError) FatalEvalError() error { return e }
+
 // int32OrRaise narrows an integer box into an int32 or refuses.
 func (v *Vector) int32OrRaise(n int64) int32 {
 	if n < math.MinInt32 || n > math.MaxInt32 {

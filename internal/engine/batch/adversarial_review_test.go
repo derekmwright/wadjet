@@ -450,6 +450,160 @@ func TestVectorComponentsAreReservedByEveryAppendPath(t *testing.T) {
 	})
 }
 
+// A VECTOR(N) value has exactly N components, and pool reuse can never show a
+// previous batch's (#900). SetVector copied however many components fit and
+// initialized nothing, so the same input answered [1 0] on a fresh batch and
+// [1 8] on one that had held [7 8] — no error either way.
+func TestVectorWriteIsExactlyTheDeclaredWidth(t *testing.T) {
+	schema := []parquet.Column{{Name: "x", Type: parquet.TypeVector, Dimension: 2}}
+
+	// The headline: identical input, identical output, whatever the pool has
+	// been carrying. Compared component for component, not row for row.
+	t.Run("fresh-and-reused-agree", func(t *testing.T) {
+		fresh := batch.NewRecordBatch(schema, 1)
+		fresh.Columns[0].SetVector(0, []float32{1, 9})
+
+		pool := batch.NewBatchPool(schema, 1)
+		prior := pool.Get()
+		prior.Columns[0].SetVector(0, []float32{7, 8})
+		prior.Release()
+		reused := pool.Get()
+		if reused != prior {
+			t.Skip("the pool minted new storage; this cell needs the same batch back")
+		}
+		reused.Columns[0].SetVector(0, []float32{1, 9})
+
+		if got, want := reused.Columns[0].GetValue(0), fresh.Columns[0].GetValue(0); !reflect.DeepEqual(got, want) {
+			t.Errorf("same input: reused=%v fresh=%v", got, want)
+		}
+		if got, want := reused.Columns[0].Float32Data, fresh.Columns[0].Float32Data; !reflect.DeepEqual(got, want) {
+			t.Errorf("component storage: reused=%v fresh=%v", got, want)
+		}
+	})
+
+	// Every write path that reaches a VECTOR row, fresh against reused.
+	t.Run("every-write-path-agrees-fresh-and-reused", func(t *testing.T) {
+		writes := map[string]func(*batch.Vector){
+			"SetVector": func(v *batch.Vector) { v.SetVector(0, []float32{3, 4}) },
+			"SetValue":  func(v *batch.Vector) { v.SetValue(0, []float32{3, 4}) },
+			"SetValueAny": func(v *batch.Vector) {
+				v.SetValue(0, []any{float64(3), float64(4)})
+			},
+			"AppendFrom": func(v *batch.Vector) {
+				src := batch.NewVectorVector(1, 2)
+				src.SetVector(0, []float32{3, 4})
+				v.Len = 0
+				v.Float32Data = v.Float32Data[:0]
+				v.AppendFrom(src, 0)
+			},
+		}
+		for name, write := range writes {
+			t.Run(name, func(t *testing.T) {
+				fresh := batch.NewRecordBatch(schema, 1)
+				write(fresh.Columns[0])
+
+				pool := batch.NewBatchPool(schema, 1)
+				prior := pool.Get()
+				prior.Columns[0].SetVector(0, []float32{7, 8})
+				prior.Release()
+				reused := pool.Get()
+				if reused != prior {
+					t.Skip("the pool minted new storage; this cell needs the same batch back")
+				}
+				write(reused.Columns[0])
+
+				if got, want := reused.Columns[0].GetValue(0), fresh.Columns[0].GetValue(0); !reflect.DeepEqual(got, want) {
+					t.Errorf("%s: reused=%v fresh=%v", name, got, want)
+				}
+			})
+		}
+	})
+
+	t.Run("null-then-write-leaves-no-stale-component", func(t *testing.T) {
+		v := batch.NewVectorVector(1, 3)
+		v.SetVector(0, []float32{7, 8, 9})
+		v.Nulls.SetNull(0)
+		v.SetVector(0, []float32{1, 2, 3})
+		if got := v.GetValue(0); !reflect.DeepEqual(got, []float32{1, 2, 3}) {
+			t.Errorf("rewritten row=%v; want [1 2 3]", got)
+		}
+	})
+
+	// A short or long write is refused at the API — never padded, never
+	// truncated — and the refused write leaves the row as it was.
+	for _, bad := range [][]float32{{}, {1}, {1, 2, 3}, {1, 2, 3, 4}} {
+		t.Run(fmt.Sprintf("refuses-%d-components", len(bad)), func(t *testing.T) {
+			v := batch.NewVectorVector(1, 2)
+			v.SetVector(0, []float32{7, 8})
+			err := recoverVectorWrite(func() { v.SetVector(0, bad) })
+			if err == nil {
+				t.Fatalf("SetVector accepted %d components into a VECTOR(2) and stored %v",
+					len(bad), v.GetValue(0))
+			}
+			if !contains(err.Error(), "dimensions") {
+				t.Errorf("refusal %q does not name the dimension", err)
+			}
+			if got := sqlStateOf(err); got != "22000" {
+				t.Errorf("refusal SQLSTATE %q; want 22000 (data_exception, what pgvector raises)", got)
+			}
+			if got := v.GetValue(0); !reflect.DeepEqual(got, []float32{7, 8}) {
+				t.Errorf("row after a refused write=%v; want the old [7 8]", got)
+			}
+		})
+	}
+
+	t.Run("setvalue-arms-refuse-the-same-widths", func(t *testing.T) {
+		for _, box := range []any{
+			[]float32{1},
+			[]float32{1, 2, 3},
+			[]any{float32(1)},
+			[]any{float64(1), float64(2), float64(3)},
+		} {
+			v := batch.NewVectorVector(1, 2)
+			if err := recoverVectorWrite(func() { v.SetValue(0, box) }); err == nil {
+				t.Errorf("SetValue accepted %v into a VECTOR(2), storing %v", box, v.GetValue(0))
+			}
+		}
+	})
+
+	// An []any component box the arm does not recognize used to leave the slot
+	// holding whatever was there; it is a type mismatch like any other now.
+	t.Run("setvalue-refuses-an-unconvertible-component", func(t *testing.T) {
+		v := batch.NewVectorVector(1, 2)
+		v.SetVector(0, []float32{7, 8})
+		if err := recoverVectorWrite(func() { v.SetValue(0, []any{float64(1), "two"}) }); err == nil {
+			t.Errorf("SetValue accepted a string component, storing %v", v.GetValue(0))
+		}
+	})
+
+	t.Run("nested-arms-refuse-the-same-widths", func(t *testing.T) {
+		elem := parquet.Column{Name: "element", Type: parquet.TypeVector, Dimension: 2}
+		arr := parquet.Column{Name: "x", Type: parquet.TypeArray, ElementType: &elem}
+		if err := recoverVectorWrite(func() {
+			batch.FromRows([]parquet.Column{arr}, []map[string]any{{"x": []any{[]float32{1}}}})
+		}); err == nil {
+			t.Errorf("a short vector inside an ARRAY was accepted")
+		}
+		row := parquet.Column{Name: "r", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "v", Type: parquet.TypeVector, Dimension: 2},
+		}}
+		if err := recoverVectorWrite(func() {
+			batch.FromRows([]parquet.Column{row}, []map[string]any{{"r": map[string]any{"v": []float32{1, 2, 3}}}})
+		}); err == nil {
+			t.Errorf("a long vector inside a ROW was accepted")
+		}
+		key := parquet.Column{Name: "key", Type: parquet.TypeString}
+		val := parquet.Column{Name: "value", Type: parquet.TypeVector, Dimension: 2}
+		entry := parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{key, val}}
+		m := parquet.Column{Name: "m", Type: parquet.TypeMap, ElementType: &entry}
+		if err := recoverVectorWrite(func() {
+			batch.FromRows([]parquet.Column{m}, []map[string]any{{"m": map[string]any{"a": []float32{1}}}})
+		}); err == nil {
+			t.Errorf("a short vector inside a MAP was accepted")
+		}
+	})
+}
+
 // --- helpers ---
 
 // failOnPanic turns a panic inside a subtest into that subtest's failure, so

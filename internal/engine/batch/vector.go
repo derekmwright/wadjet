@@ -838,9 +838,22 @@ func (v *Vector) VectorAt(i int) []float32 {
 }
 
 // SetVector sets the float32 values for row i of a VECTOR column.
+//
+// A VECTOR(N) value has exactly N components. A shorter or longer write is
+// refused (see VectorWidthError) rather than padded: it used to copy however
+// many components fit and leave the rest holding whatever was in the slots,
+// so on a pooled batch `SetVector(0, []float32{1})` into a VECTOR(2) read back
+// as [1 8] — the 8 belonging to a previous, unrelated batch — while the same
+// write into a fresh batch read [1 0]. Identical input, two answers, decided
+// by pool history (#900). Padding a short value would be the other way to make
+// the two agree and the wrong one: the caller declared the column's width, and
+// PostgreSQL's vector extension refuses `'[1]'::vector(2)` for the same reason.
 func (v *Vector) SetVector(i int, vals []float32) {
 	if v.VectorDim <= 0 {
 		return
+	}
+	if len(vals) != v.VectorDim {
+		panic(&VectorWidthError{Dim: v.VectorDim, Got: len(vals)})
 	}
 	copy(v.Float32Data[i*v.VectorDim:(i+1)*v.VectorDim], vals)
 	v.Nulls.SetValid(i)
@@ -1342,8 +1355,16 @@ func (v *Vector) SetValue(i int, val any) {
 		case []float32:
 			v.SetVector(i, tv)
 		case []any:
+			// Same width rule as SetVector, and for the same reason: this arm
+			// used to write only the components it recognized and leave every
+			// other slot holding the previous batch's value (#900). Every
+			// component is converted or the whole write is refused, so a row
+			// is never half this value and half somebody else's.
+			if len(tv) != v.VectorDim {
+				panic(&VectorWidthError{Dim: v.VectorDim, Got: len(tv)})
+			}
 			off := i * v.VectorDim
-			for j := 0; j < v.VectorDim && j < len(tv); j++ {
+			for j := 0; j < v.VectorDim; j++ {
 				switch fv := tv[j].(type) {
 				case float32:
 					v.Float32Data[off+j] = fv
@@ -1351,8 +1372,15 @@ func (v *Vector) SetValue(i int, val any) {
 					v.Float32Data[off+j] = float32(fv)
 				case int64:
 					v.Float32Data[off+j] = float32(fv)
+				case int:
+					v.Float32Data[off+j] = float32(fv)
+				case int32:
+					v.Float32Data[off+j] = float32(fv)
+				default:
+					v.mismatch(val)
 				}
 			}
+			v.Nulls.SetValid(i)
 		default:
 			v.mismatch(val)
 		}
