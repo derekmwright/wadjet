@@ -1827,6 +1827,22 @@ engines and only one of them has a column that is it. Pinned per entry beside
 the arm-is-a-join family, with the rename body and the distinct alias as the
 controls that place the cell at COMPUTED × SHARED BARE NAME.
 
+### A window key guard asks provenance (2026-09-04, #745)
+
+`resolveWindowKeys` classes a PARTITION BY / ORDER BY term as either a BOUND
+reference or a MATERIALIZED expression the fragment computes into a
+`__winkey_N` slot, and only the second owes a `WindowKeyExprs` entry.
+`validateWindowKeyExprs` told them apart by reading the NAME, which cannot: a
+table written before the namespace was reserved really can STORE a column
+called `__winkey_1`, and windowing on it was refused on both DAG arms for a
+query the single-process path answers. The guard now asks the producing stage
+what it emits before refusing. #585's own shape — a key spelled `__winkey_N`
+that no `WindowKeyExprs` entry computes and no input supplies — still refuses,
+and both sides of the narrowing are cells in
+`physical.TestWindowKeyGuardStillRefusesWhatNothingSupplies`: the refusal, the
+same slot WITH its expression, the stored column that is a bound reference, and
+an ordinary name.
+
 ### A qualified reference is DECLARED by its own side (2026-09-01, #706, #754)
 
 `mergeJoinSides` drops a name the two sides declare differently, which is the

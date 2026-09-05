@@ -35,6 +35,10 @@ func init() {
 //     should have flattened it; if it slipped through, dispatch creates the
 //     SF10 N-stage thrash.
 func ValidateNativeDAGShape(stages []Stage) error {
+	stageIdx := make(map[string]int, len(stages))
+	for i := range stages {
+		stageIdx[stages[i].ID] = i
+	}
 	for _, s := range stages {
 		switch s.Type {
 		case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
@@ -75,7 +79,7 @@ func ValidateNativeDAGShape(stages []Stage) error {
 			// without the expression ships a window that will refuse its own
 			// key at the worker — the #349 precedent again: fail where the
 			// shape is visible, not three dispatch attempts later (#585).
-			if err := validateWindowKeyExprs(s); err != nil {
+			if err := validateWindowKeyExprs(stages, stageIdx, s); err != nil {
 				return err
 			}
 		case StageLimit:
