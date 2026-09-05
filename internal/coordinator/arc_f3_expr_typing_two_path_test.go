@@ -75,6 +75,16 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		// aggregate and not in its own output.
 		{"agg_alone", `SELECT SUM(c_i64 * 3000000) AS v FROM typemx`, "v=36280278840510000000"},
 		{"agg_bare_argument", `SELECT SUM(c_i64) + 1 AS v FROM typemx`, "v=12093426280171"},
+		// The DERIVED-TABLE spellings. The DAG answered these exactly all
+		// along and the single arm did not, so before the fix this was a
+		// two-path split as well as a wrong number; the cells are here
+		// because that is the shape only these arms can show.
+		{"agg_under_a_derived_rename",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM typemx) x`,
+			"v=36280278840510000001"},
+		{"agg_under_a_cte",
+			`WITH c AS (SELECT c_i64 AS v FROM typemx) SELECT SUM(v * 3000000) + 1 AS v FROM c`,
+			"v=36280278840510000001"},
 	} {
 		f3RunOnEveryArm(t, arms, tc.name, tc.sql, []string{tc.want})
 	}
