@@ -1038,7 +1038,28 @@ func applySetClauses(row map[string]any, setSQL string, merged map[string]any, e
 		if err != nil {
 			return fmt.Errorf("SET %s: %w", col, err)
 		}
-		row[col] = val
+		// Under the SCHEMA's spelling, which is what `target` carries — not
+		// under the reference's. `row` is a copy of `readMergeTarget`'s
+		// `batch.RecordBatch.RowAt`, keyed by the catalog schema, while `col`
+		// is the name the statement wrote, and an unquoted identifier reaches
+		// a SET list FOLDED (#731) where a parquet-born schema keeps
+		// `UserAgent`. Writing `row[col]` added a SECOND key `useragent`
+		// beside an untouched `UserAgent`; the ingester's byte-exact
+		// `row[col.Name]` then re-wrote the OLD value while the delete marker
+		// and the replacement row were committed anyway. Measured over
+		// `hits(WatchID, counterid, UserAgent)`:
+		//
+		//	MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k
+		//	  WHEN MATCHED THEN UPDATE SET useragent = 'MERGED'
+		//	before: MERGE 1, table [1 10 old-1] [2 20 old-2] [3 30 old-3]
+		//	after:  MERGE 1, table [1 10 MERGED] [2 20 old-2] [3 30 old-3]
+		//
+		// The COUNT was the lie: the MATCHED branch ran, the statement
+		// reported one affected row, and nothing changed. This is
+		// ResolveDMLSetClauses' fix one door over — UPDATE already carries
+		// `col.Name`, and the two statements have to agree about what one
+		// assignment does.
+		row[target.Name] = val
 	}
 	return nil
 }
@@ -1084,12 +1105,19 @@ func splitSetClauses(s string) []string {
 // twelve characters "UPPER(s.name)" (#678). PostgreSQL evaluates it, and so
 // does this.
 type mergeEvaluator struct {
-	target       string
-	source       string
-	targetAlias  string
-	sourceAlias  string
-	colByName    map[string]parquet.Column // the TARGET's columns, by lowercase name
-	srcByName    map[string]parquet.Column // the SOURCE's columns, by lowercase name
+	target      string
+	source      string
+	targetAlias string
+	sourceAlias string
+	colByName   map[string]parquet.Column // the TARGET's columns, by lowercase name
+	srcByName   map[string]parquet.Column // the SOURCE's columns, by lowercase name
+	// targetCols and srcCols are those two schemas UNFOLDED — the spellings
+	// the catalog stores, in order. A map keyed by the fold cannot tell a
+	// folded reference from a delimited one, because building it threw the
+	// distinction away; batch.ResolveSchemaIndex decides that from the
+	// reference and the schema, so it needs the schema.
+	targetCols   []parquet.Column
+	srcCols      []parquet.Column
 	mergedCols   []parquet.Column          // the merged row's batch schema
 	mergedByName map[string]parquet.Column // the same, by the spelling it is keyed on
 	sourceKnown  bool                      // false when the source's declared schema is unavailable
@@ -1130,6 +1158,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 		mergedByName: map[string]parquet.Column{},
 		sub:          db.dmlSubqueryEnv(ctx),
 	}
+	ev.targetCols = targetCols
 	for _, c := range targetCols {
 		ev.colByName[strings.ToLower(c.Name)] = c
 	}
@@ -1139,6 +1168,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	if srcMeta, err := db.catalog.GetTable(ctx, info.Source); err == nil {
 		sourceCols = srcMeta.Schema.Columns
 		ev.sourceKnown = true
+		ev.srcCols = sourceCols
 		for _, c := range sourceCols {
 			ev.srcByName[strings.ToLower(c.Name)] = c
 		}
@@ -1158,6 +1188,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 		ev.sourceNamed = true
 		for _, n := range sourceColNames {
 			ev.srcByName[strings.ToLower(n)] = parquet.Column{Name: n}
+			ev.srcCols = append(ev.srcCols, parquet.Column{Name: n})
 		}
 	}
 
@@ -1200,21 +1231,32 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 // `ON hits.WatchID = s.k` matched NOTHING: every WHEN MATCHED clause was
 // skipped and the source row fell through to WHEN NOT MATCHED, which
 // INSERTED a duplicate instead of updating the row that was already there.
+//
+// The rewrite goes through batch.ResolveSchemaIndex rather than through a map
+// keyed by the fold, because the fold is only half the rule. A key column
+// arrives here from the ON condition's PARSE, so it carries the lexer's
+// verdict: unquoted names are already folded, and a name still carrying an
+// upper-case letter can only have been DELIMITED. A lowercasing lookup
+// resolves both alike, so `ON hits."WATCHID" = s.k` bound to `WatchID` and
+// the MATCHED branch fired, where PostgreSQL raises 42703 for a delimited
+// name that is not the column's own bytes. It is 42703 here now, and a
+// FOLDED `hits.watchid` still resolves — the concession a parquet-born
+// CamelCase schema needs, and the only one (batch/schema.go items 1-4).
 func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
 	for i := range keys {
 		k := &keys[i]
-		c, ok := ev.colByName[strings.ToLower(k.TargetCol)]
-		if !ok {
+		ti := batch.ResolveSchemaIndex(ev.targetCols, k.TargetCol)
+		if ti < 0 {
 			return sqlerr.New("42703", "column %s.%s does not exist", ev.targetAlias, k.TargetCol)
 		}
-		k.TargetCol = c.Name
+		k.TargetCol = ev.targetCols[ti].Name
 		if ev.sourceKnown || ev.sourceNamed {
-			sc, ok := ev.srcByName[strings.ToLower(k.SourceCol)]
-			if !ok {
+			si := batch.ResolveSchemaIndex(ev.srcCols, k.SourceCol)
+			if si < 0 {
 				return sqlerr.New("42703", "column %s.%s does not exist", ev.sourceAlias, k.SourceCol)
 			}
-			if sc.Name != "" {
-				k.SourceCol = sc.Name
+			if n := ev.srcCols[si].Name; n != "" {
+				k.SourceCol = n
 			}
 		}
 	}
@@ -2032,7 +2074,23 @@ func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, ev
 		if err != nil {
 			return nil, fmt.Errorf("column %q: %w", col, err)
 		}
-		row[col] = val
+		// The SCHEMA's spelling, for the reason applySetClauses gives: this
+		// row is INGESTED, and the writer reads `row[col.Name]` byte-exactly.
+		// Here the miss is PER COLUMN, so a mixed-case schema loses exactly
+		// the columns whose spelling the reference does not match. Measured
+		// over `hits(WatchID, counterid, UserAgent)`:
+		//
+		//	WHEN NOT MATCHED THEN INSERT (watchid, counterid, useragent)
+		//	  VALUES (42, 7, 'INSERTED')
+		//	before: MERGE 1, row stored as [<nil> 7 <nil>]
+		//	after:  MERGE 1, row stored as [42 7 INSERTED]
+		//
+		// `counterid` — the one column this schema already spells folded —
+		// survived; the two CamelCase columns became NULL. Under a NOT NULL
+		// schema the same statement was refused instead, with a
+		// `null value in column "WatchID" violates not-null constraint` that
+		// names a column the statement did supply a value for.
+		row[target.Name] = val
 	}
 	return row, nil
 }
@@ -2190,7 +2248,25 @@ func checkDMLColumns(node plansql.Node, target plansql.DMLTarget, schema []parqu
 			}
 			return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
 		}
-		if _, ok := byName[strings.ToLower(ref.Column)]; !ok {
+		// RESOLVED, not lowercased. `ref.Column` comes from the WHERE
+		// clause's parse, so it carries the lexer's verdict — folded when it
+		// was written unquoted, its own bytes when it was delimited — and a
+		// map keyed by the fold cannot see the difference. So a delimited
+		// wrong-case name was ACCEPTED here and then failed to resolve
+		// against the batch at evaluation time, where the resolver does apply
+		// the rule: the predicate answered false for every row and the
+		// statement reported a truthful-looking no-op.
+		//
+		//	UPDATE hits SET UserAgent = 'Z' WHERE "WATCHID" = 1
+		//	before: OK, rows=0        after: 42703, column "WATCHID" ...
+		//	DELETE FROM hits WHERE "WATCHID" = 3
+		//	before: OK, rows=0        after: 42703
+		//
+		// A column that is genuinely absent was already refused, so the two
+		// spellings of "this column is not here" now answer alike — which is
+		// PostgreSQL's disposition for both. An unquoted `watchid` resolves
+		// case-insensitively against a CamelCase schema, as everywhere else.
+		if batch.ResolveSchemaIndex(schema, ref.Column) < 0 {
 			// PostgreSQL's system columns resolve to NULL here rather than to
 			// an address this engine cannot honour, which is what makes a
 			// client's `DELETE ... WHERE ctid = '(0,1)'` match nothing instead
@@ -2710,10 +2786,6 @@ type DMLAssignment struct {
 // `UPDATE pr AS a SET n = a.n + 1` reads a.n and `SET n = pr.n` under that
 // alias is 42P01 — PostgreSQL's answer for both (#686).
 func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget, schema []parquet.Column) ([]DMLAssignment, error) {
-	byName := make(map[string]parquet.Column, len(schema))
-	for _, c := range schema {
-		byName[strings.ToLower(c.Name)] = c
-	}
 	out := make([]DMLAssignment, 0, len(clauses))
 	for _, sc := range clauses {
 		// A QUALIFIED target (`SET t.n = 1`) never arrives here: the UPDATE
@@ -2733,14 +2805,26 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// byte-exact `row[col.Name]` read the OLD value, and the statement
 		// reported `UPDATE 1` having changed nothing. Carry the schema's
 		// spelling, the way the statistics path does (#881).
-		name := strings.ToLower(strings.TrimSpace(sc.Column))
-		col, ok := byName[name]
-		if !ok {
+		//
+		// And RESOLVE, rather than lowercase-and-look-up. The two halves of
+		// the rule are separable only at the reference: `sc.Column` comes
+		// from the UPDATE parser, so an unquoted name is already folded and a
+		// name still carrying an upper-case letter can only have been
+		// DELIMITED. A map keyed by the fold answers both the same, so
+		// `SET "USERAGENT" = 'X'` WROTE to `UserAgent` — the write landed,
+		// `UPDATE 1`, the value changed — where PostgreSQL raises 42703 for a
+		// delimited name that is not the column's own bytes. The refusal is
+		// the one a genuinely absent column already gets, same class and same
+		// wording, and `SET useragent = 'X'` still resolves.
+		name := strings.TrimSpace(sc.Column)
+		idx := batch.ResolveSchemaIndex(schema, name)
+		if idx < 0 {
 			// The RELATION is named, not the alias: PostgreSQL reports
 			// `column "nosuch" of relation "pr" does not exist` for
 			// `UPDATE pr AS a SET nosuch = 1` (verified on 17.11).
 			return nil, sqlerr.New("42703", "column %q of relation %q does not exist", name, target.Table)
 		}
+		col := schema[idx]
 
 		// COMPLETE, for the reason BuildDMLPredicate gives: a SET value that
 		// parses to a prefix stored the prefix's value and reported success.
