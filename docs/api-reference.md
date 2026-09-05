@@ -100,11 +100,19 @@ DDL statements this same endpoint runs, including an unknown type name
 (`42704`), a missing function (`42883`), a missing table (`42P01`) and a
 duplicate one (`42P07`) — and the class decides the HTTP status.
 
-Three refusals still answer with the message alone, because the engine raises
-no class for them: a duplicate **function** name (PostgreSQL's `42723`), a
-duplicate **column** in `CREATE TABLE` (`42701`), and `ALTER TABLE`, which this
-engine does not support. They are the exception the sentence above allows for,
-and they are the same on the PostgreSQL wire protocol.
+Two refusals still answer with the message alone, because the engine raises no
+class for them: a duplicate **function** name (PostgreSQL's `42723`) and a
+duplicate **column** in `CREATE TABLE` (`42701`). They are the exception the
+sentence above allows for, and they are the same on the PostgreSQL wire
+protocol.
+
+A statement this engine parses and does not run is refused `0A000`
+(`feature_not_supported`) with a message naming the statement:
+`ALTER TABLE is not supported`, and likewise `CREATE VIEW` and `DROP VIEW`.
+`CREATE ALERT`, `DROP ALERT`, `ALTER ALERT` and `CREATE SNAPSHOT` answer the
+same way *on this endpoint*, which has no handler for them; they run on the
+embedded API and the PostgreSQL wire protocol. Every one of these classes is
+the same on every door.
 
 | SQLSTATE class | Meaning | Status |
 |---|---|---|

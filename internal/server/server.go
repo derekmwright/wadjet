@@ -312,6 +312,17 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One dispatch point per door (#860). Everything above is a statement type
+	// this door executes; a parsed statement that is not a query and matched
+	// none of them refuses 0A000 naming the statement, instead of falling into
+	// ExtractSelect and answering `SQL extraction error: no SELECT info in
+	// parsed query` — an internal invariant's wording, with no `sqlstate` for
+	// a client to branch on.
+	if err := plansql.RefuseUnsupportedStatement(parsed); err != nil {
+		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
+		return
+	}
+
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		writeSQLError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error(), err)
@@ -928,6 +939,12 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request, parsed *
 }
 
 func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	// EXPLAIN of a statement this door cannot run is that statement's refusal,
+	// named (#860).
+	if err := plansql.RefuseUnsupportedStatement(parsed); err != nil {
+		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
+		return
+	}
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		writeSQLError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error(), err)

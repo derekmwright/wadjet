@@ -263,7 +263,7 @@ Full signatures for every function: [SQL Reference § Built-in Functions](docs/s
 Full analytical SQL via a custom recursive descent parser:
 
 - SELECT, INSERT, UPDATE, DELETE, MERGE, EXPLAIN, DESCRIBE, SHOW, ANALYZE
-- CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE VIEW, CREATE/ALTER/DROP ALERT, ALTER TABLE
+- CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE/ALTER/DROP ALERT
 - CTEs (`WITH ... AS`), UNION / INTERSECT / EXCEPT (with ALL variants)
 - INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs, with `ON` or `USING (col, ...)`
 - Subqueries: scalar, IN, EXISTS, correlated subqueries (over a base table, a derived table or a CTE), and `LATERAL` joins

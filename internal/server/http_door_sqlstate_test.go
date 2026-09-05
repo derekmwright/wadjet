@@ -39,6 +39,14 @@ import (
 
 func hdSetup(t *testing.T) (httpURL string, pgConn *pgconn.PgConn) {
 	t.Helper()
+	base, conn, _ := hdSetupWithDB(t)
+	return base, conn
+}
+
+// hdSetupWithDB is hdSetup plus the embedded DB the other two doors are built
+// over, so a census can ask all THREE doors the same statement.
+func hdSetupWithDB(t *testing.T) (httpURL string, pgConn *pgconn.PgConn, embedded *wadjet.DB) {
+	t.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 	if err := store.MakeBucket(ctx, "test"); err != nil {
@@ -80,7 +88,7 @@ func hdSetup(t *testing.T) (httpURL string, pgConn *pgconn.PgConn) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close(context.Background()) })
-	return hs.URL, conn
+	return hs.URL, conn, db
 }
 
 // hdPost runs one statement through the HTTP door and returns its status, its
@@ -178,6 +186,10 @@ func TestHTTPDoorCarriesEverySQLStateClass(t *testing.T) {
 		{"drop_function_missing_42883", "DROP FUNCTION nosuchfn", "42883", http.StatusBadRequest},
 		{"create_table_unknown_type_42704", "CREATE TABLE hd3 (a NOSUCHTYPE)", "42704",
 			http.StatusBadRequest},
+		// #860: a statement the parser reads and no door runs.
+		{"alter_table_0A000", "ALTER TABLE hd ADD COLUMN z BIGINT", "0A000", http.StatusBadRequest},
+		{"create_view_0A000", "CREATE VIEW hd_v AS SELECT id FROM hd", "0A000", http.StatusBadRequest},
+		{"drop_view_0A000", "DROP VIEW hd_v", "0A000", http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, state, msg := hdPost(t, base, tc.sql)

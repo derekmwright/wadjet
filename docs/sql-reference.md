@@ -19,9 +19,20 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
 | `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; target and source must have different exposed names (SQLSTATE 42712 otherwise); `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
 | `ANALYZE [TABLE] table_name` | Collect column statistics for the cost-based planner |
-| `ALTER TABLE ... ADD \| DROP \| RENAME COLUMN` | Schema evolution |
-| `CREATE SNAPSHOT` | Capture a point-in-time snapshot of the catalog |
-| `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions (coordinator mode) |
+| `CREATE SNAPSHOT` | Capture a point-in-time snapshot of the catalog (coordinator mode; the HTTP query endpoint refuses it) |
+| `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions (the embedded API and the PostgreSQL wire protocol; the HTTP query endpoint refuses them) |
+
+### Parsed and not executed
+
+`ALTER TABLE`, `CREATE VIEW` and `DROP VIEW` are read by the parser and run by
+nothing. Each is refused with SQLSTATE `0A000` (`feature_not_supported`) and a
+message naming the statement — `ALTER TABLE is not supported` — on every door:
+the embedded API, the PostgreSQL wire protocol and the HTTP query endpoint.
+`EXPLAIN` over one of them is refused the same way (`EXPLAIN ALTER TABLE is not
+supported`); PostgreSQL refuses that spelling as a syntax error (`42601`)
+because its grammar does not accept it at all.
+
+There is no schema evolution: change a table's columns by creating a new table.
 
 ## Identifiers
 

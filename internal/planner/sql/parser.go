@@ -112,6 +112,10 @@ type ExplainInfo struct {
 	Verbose  bool
 	Analyze  bool
 	InnerSQL string
+	// InnerType is the statement type EXPLAIN was asked about. EXPLAIN
+	// carries the inner statement's SelectInfo and nothing else, so without
+	// this a door cannot say WHICH statement it cannot explain.
+	InnerType QueryType
 }
 
 // DescribeInfo holds details for a DESCRIBE/SHOW COLUMNS statement.
@@ -639,9 +643,10 @@ func lexParseExplain(sql string, l *lexer) (*ParsedQuery, error) {
 		SQL:        sql,
 		SelectInfo: inner.SelectInfo,
 		Explain: &ExplainInfo{
-			Verbose:  verbose,
-			Analyze:  analyze,
-			InnerSQL: rest,
+			Verbose:   verbose,
+			Analyze:   analyze,
+			InnerSQL:  rest,
+			InnerType: inner.Type,
 		},
 	}, nil
 }

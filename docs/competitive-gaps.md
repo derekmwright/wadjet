@@ -247,10 +247,13 @@ in the logical builder, which covers the "top-N per group" patterns common in
 security analytics. `WITH RECURSIVE` parses and is executed by fixed-point
 iteration in the physical planner.
 
-### ~~Gap 13: No Schema Evolution / ALTER TABLE~~ — SHIPPED
+### Gap 13: No Schema Evolution / ALTER TABLE
 
-`ALTER TABLE ... ADD | DROP | RENAME COLUMN` is implemented. DROP + CREATE is
-no longer required to add an enrichment field to a long-lived table.
+`ALTER TABLE ... ADD | DROP | RENAME COLUMN` is read by the parser and executed
+by no door: every one of them refuses it with SQLSTATE `0A000`
+(`ALTER TABLE is not supported`). Adding an enrichment field to a long-lived
+table still means CREATE + copy. `CREATE VIEW` and `DROP VIEW` are in the same
+position.
 
 ### ~~Gap 14: No OpenTelemetry / Distributed Tracing~~ — SHIPPED
 

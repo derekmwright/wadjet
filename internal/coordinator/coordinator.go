@@ -974,6 +974,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return nil, c.handleAlterAlertSQL(ctx, sql)
 	}
 
+	// One dispatch point per door (#860): a statement type none of the
+	// branches above handles refuses 0A000 by name, rather than reaching
+	// ExtractSelect and reporting `extract: no SELECT info in parsed query`
+	// — which crossed the wire as the blanket 42000.
+	if err := plansql.RefuseUnsupportedStatement(parsed); err != nil {
+		return nil, err
+	}
+
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		return nil, fmt.Errorf("extract: %w", err)
@@ -3397,6 +3405,12 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		return "", "", fmt.Errorf("parse: %w", err)
+	}
+
+	// One dispatch point per door (#860). The async door runs queries only, so
+	// every statement that is not one is refused here by name.
+	if err := plansql.RefuseUnsupportedStatement(parsed); err != nil {
+		return "", "", err
 	}
 
 	selectInfo, err := plansql.ExtractSelect(parsed)

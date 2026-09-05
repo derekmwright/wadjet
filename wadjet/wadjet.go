@@ -421,6 +421,15 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 		}, nil
 	}
 
+	// One dispatch point per door (#860): the switch above is every statement
+	// type this door executes, so anything left that is not a query is a
+	// statement this door has no handler for and refuses 0A000 by name —
+	// rather than falling into ExtractSelect and reporting an internal
+	// invariant's wording (`no SELECT info in parsed query`) with no class.
+	if err := plansql.RefuseUnsupportedStatement(parsed); err != nil {
+		return nil, err
+	}
+
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		return nil, fmt.Errorf("extracting SELECT: %w", err)
@@ -534,6 +543,12 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 }
 
 func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryResult, error) {
+	// EXPLAIN of a statement this door cannot run is that statement's refusal,
+	// named (#860): `EXPLAIN ALTER TABLE …` is `EXPLAIN ALTER TABLE is not
+	// supported`, not `no SELECT info in parsed query`.
+	if err := plansql.RefuseUnsupportedStatement(parsed); err != nil {
+		return nil, err
+	}
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		return nil, fmt.Errorf("extracting SELECT: %w", err)
