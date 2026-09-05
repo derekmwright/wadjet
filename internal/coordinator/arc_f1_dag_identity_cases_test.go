@@ -248,6 +248,97 @@ func TestF1AWindowKeyGuardReadsProvenanceNotSpelling(t *testing.T) {
 	})
 }
 
+// TestF1AKeylessJoinAsksForWhatItNeeds is #480: a join with NO KEYS — a cross
+// join, and every non-equi join, whose whole condition is lifted into a
+// residual filter — was asked for a co-location it does not need and refused
+// at plan time for a query PostgreSQL answers.
+//
+// Both halves of the repair are asserted here and the second is why the first
+// is not enough. Dropping the probe's requirement alone lets the plan build
+// and answers 0 for PostgreSQL's 12 and 1625 for its 38632, because each task
+// then meets only its own slice of the build. What such a consumer needs is
+// the BUILD replicated, which is the broadcast-join rule, and the CROSS JOIN
+// cell is the one that measures it: its answer is the full product.
+//
+// The equi-join control is the boundary from the other side — a join WITH keys
+// keeps the co-location requirement it had, and must not gain a replicate.
+func TestF1AKeylessJoinAsksForWhatItNeeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := f1Arms(t, ctx)
+
+	f1Run(t, arms, []f1Case{
+		{
+			name: "480 a non-equi join fed by two GROUP BY aggregates",
+			sql: "SELECT COUNT(*) AS c FROM (SELECT c_i32 FROM typemx GROUP BY c_i32) u " +
+				"JOIN (SELECT k FROM typemx_dim GROUP BY k) v ON u.c_i32 < v.k",
+			want: "cols=[c:INT64] rows=1 | 12",
+		},
+		{
+			name: "480 the same shape spelled DISTINCT",
+			sql: "SELECT COUNT(*) AS c FROM (SELECT DISTINCT c_i32 FROM typemx) u " +
+				"JOIN (SELECT DISTINCT k FROM typemx_dim) v ON u.c_i32 < v.k",
+			want: "cols=[c:INT64] rows=1 | 12",
+			pin:  map[string]string{spilledArm: spillRefusal},
+			why:  "ADR-0006's cross-join build budget (#832), not this arc's",
+		},
+		{
+			name: "480 an explicit CROSS JOIN — the cell that measures the full product",
+			sql: "SELECT COUNT(*) AS c FROM (SELECT c_i32 FROM typemx GROUP BY c_i32) u " +
+				"CROSS JOIN (SELECT k FROM typemx_dim GROUP BY k) v",
+			want: "cols=[c:INT64] rows=1 | 38632",
+		},
+		{
+			// #480 with the rows PROJECTED and ORDERED. The COUNT(*) cells
+			// above cannot see a wrong ORDER, and a wrong order is what the
+			// first cut of this fix produced: a sort fused into the keyless
+			// join was applied per PARTITION, because the join inherited its
+			// probe's hash-partitioned label while running one task
+			// (round-1 review, B2). `6,7` came back before `3,4`,
+			// deterministically, on both DAG arms.
+			name: "480 the same join with its rows ORDERED",
+			sql: "SELECT u.c_i32 AS uc, v.k AS vk FROM (SELECT DISTINCT c_i32 FROM typemx) u " +
+				"JOIN (SELECT DISTINCT k FROM typemx_dim) v ON u.c_i32 < v.k ORDER BY uc, vk",
+			want: "cols=[uc:INT32 vk:INT32] rows=12 | 0,1 | 0,2 | 0,3 | 0,4 | 0,5 | 0,6 | 0,7 | " +
+				"3,4 | 3,5 | 3,6 | 3,7 | 6,7",
+			pin: map[string]string{spilledArm: spillRefusal},
+			why: "ADR-0006's cross-join build budget (#832), not this arc's",
+		},
+		{
+			name: "480 the same rows DESCENDING",
+			sql: "SELECT u.c_i32 AS uc, v.k AS vk FROM (SELECT DISTINCT c_i32 FROM typemx) u " +
+				"JOIN (SELECT DISTINCT k FROM typemx_dim) v ON u.c_i32 < v.k ORDER BY uc DESC, vk DESC",
+			want: "cols=[uc:INT32 vk:INT32] rows=12 | 6,7 | 3,7 | 3,6 | 3,5 | 3,4 | 0,7 | 0,6 | " +
+				"0,5 | 0,4 | 0,3 | 0,2 | 0,1",
+			pin: map[string]string{spilledArm: spillRefusal},
+			why: "ADR-0006's cross-join build budget (#832), not this arc's",
+		},
+		{
+			// One key, because the wrong order the review found leads with
+			// the `0` group and a single-key spelling still has to place the
+			// `3` and `6` groups after it.
+			name: "480 the same rows on a SINGLE ordering key",
+			sql: "SELECT u.c_i32 AS uc, v.k AS vk FROM (SELECT DISTINCT c_i32 FROM typemx) u " +
+				"JOIN (SELECT DISTINCT k FROM typemx_dim) v ON u.c_i32 < v.k ORDER BY uc, vk LIMIT 9",
+			want: "cols=[uc:INT32 vk:INT32] rows=9 | 0,1 | 0,2 | 0,3 | 0,4 | 0,5 | 0,6 | 0,7 | 3,4 | 3,5",
+			pin:  map[string]string{spilledArm: spillRefusal},
+			why:  "ADR-0006's cross-join build budget (#832), not this arc's",
+		},
+		{
+			name: "480 control: the EQUI-join twin keeps its co-location",
+			sql: "SELECT COUNT(*) AS c FROM (SELECT DISTINCT c_i32 AS a FROM typemx) x " +
+				"JOIN (SELECT DISTINCT k AS b FROM typemx_dim) y ON x.a = y.b",
+			want: "cols=[c:INT64] rows=1 | 3",
+			pin: map[string]string{spilledArm: "ERR building physical plan: building hash table: " +
+				"hash join build: query: memory budget exceeded"},
+			why: "the 512 KiB build budget, not this arc's",
+		},
+	})
+}
+
 // TestF1JoinKeysThroughDerivedRenamesAndAggregates is the RATCHET for #681 and
 // #730: a join key that is a computed aggregate alias, and a join key naming a
 // derived table's rename reaching that arm's scan fragment. Both were loud

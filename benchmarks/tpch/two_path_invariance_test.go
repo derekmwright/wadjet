@@ -4095,15 +4095,18 @@ func twoPathCorpus() []twoPathQuery {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 4)
 			}},
-		// #480, repro A: a non-equi join has no join keys, so its build side
-		// requires clustered_on[] — an empty key list only a singleton or a
-		// broadcast satisfies — and the derived aggregate feeding it is
-		// hash-partitioned on its group keys. No exchange reconciles them.
+		// #480, repro A, FIXED and both arms gated again. A non-equi join has
+		// no join keys, and `clustered_on[]` — the empty key list — is not
+		// "no constraint": Satisfies reads it as broadcast, singleton, or
+		// hash-partitioned on NOTHING, so the derived aggregate feeding it,
+		// hash-partitioned on its group keys, failed it and the plan was
+		// refused. Such a consumer needs the BROADCAST-JOIN rule instead —
+		// its build replicated and nothing asked of its probe — because a
+		// keyless join is a broadcast join on the DAG.
 		twoPathQuery{name: "DerivedAggregateNonEquiJoin", cmp: cmpUnordered, expectRows: true,
 			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s_nationkey FROM supplier) u
 				JOIN (SELECT DISTINCT n_nationkey FROM nation) v ON u.s_nationkey < v.n_nationkey`,
 			wantCols: []string{"c"}, wantRows: 1,
-			dagPin: "requires clustered_on[]", dagPinIssue: "#480",
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				tb.Helper()
 				supp := distinctKeys(tb, "supplier", "s_nationkey")

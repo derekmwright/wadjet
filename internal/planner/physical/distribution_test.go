@@ -322,17 +322,61 @@ func TestOutputDistribution(t *testing.T) {
 			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
 		},
 		{
+			// A join WITH KEYS: the shuffle put co-located rows together and
+			// the join does not re-partition them. The keys are part of the
+			// fixture because a join without them is a different stage — see
+			// the two cells below.
 			name: "hash_join inherits probe distribution",
 			stage: Stage{
 				ID: "join-0", Type: "hash_join",
 				LeftDepStage: "shuffle-l", RightDepStage: "shuffle-r",
-				Dependencies: []string{"shuffle-l", "shuffle-r"},
+				Dependencies:  []string{"shuffle-l", "shuffle-r"},
+				JoinLeftKeys:  []string{"l_orderkey"},
+				JoinRightKeys: []string{"o_orderkey"},
+				Tasks:         16,
 			},
 			deps: map[string]Distribution{
 				"shuffle-l": {Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
 				"shuffle-r": {Kind: DistHashPartitioned, Keys: []string{"o_orderkey"}, Count: 16},
 			},
 			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+		{
+			// A join with NO KEYS running ONE task reads every file of both
+			// inputs and emits ONE stream, whatever its probe was partitioned
+			// on. Inheriting the probe's label there is a statement the plan
+			// contradicts, and a sort fused into the stage is then applied
+			// per partition — `ORDER BY` ordered inside each shard and
+			// unordered across them (#480's round-1 review).
+			name: "keyless single-task join emits one stream",
+			stage: Stage{
+				ID: "join-0", Type: "hash_join",
+				LeftDepStage: "final-l", RightDepStage: "replicate-r",
+				Dependencies: []string{"final-l", "replicate-r"},
+				Tasks:        1,
+			},
+			deps: map[string]Distribution{
+				"final-l":     {Kind: DistHashPartitioned, Keys: []string{"c_i32"}, Count: 32},
+				"replicate-r": {Kind: DistBroadcast},
+			},
+			want: Distribution{Kind: DistSingleton},
+		},
+		{
+			// …and a keyless join that really does fan out keeps the probe's
+			// label: the narrowing is on TASK COUNT, not on the key list, and
+			// the boundary is attempted from both sides.
+			name: "keyless multi-task join keeps the probe's distribution",
+			stage: Stage{
+				ID: "join-0", Type: "hash_join",
+				LeftDepStage: "final-l", RightDepStage: "replicate-r",
+				Dependencies: []string{"final-l", "replicate-r"},
+				Tasks:        8,
+			},
+			deps: map[string]Distribution{
+				"final-l":     {Kind: DistHashPartitioned, Keys: []string{"c_i32"}, Count: 32},
+				"replicate-r": {Kind: DistBroadcast},
+			},
+			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"c_i32"}, Count: 32},
 		},
 		{
 			name: "broadcast_join inherits probe distribution",

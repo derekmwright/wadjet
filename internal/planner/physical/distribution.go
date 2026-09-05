@@ -216,6 +216,30 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		// Exchange-repartition accepts any input and re-partitions.
 		return RequiredDistribution{Kind: RequiredAny}
 	case StageHashJoin, StageSortMergeJoin:
+		// A join with NO KEYS — a cross join, and every non-equi join, whose
+		// whole condition `takeJoinCondResiduals` lifts into a residual
+		// filter above it — has no co-location to ask for. `clustered_on[]`
+		// is not "no constraint": Satisfies reads it as broadcast, singleton,
+		// or hash-partitioned on NOTHING, so a producer partitioned on its
+		// own group keys fails it and a query PostgreSQL answers is refused
+		// at plan time (#480).
+		//
+		// What such a consumer NEEDS is the BROADCAST-JOIN rule, because a
+		// keyless join IS a broadcast join on the DAG: every probe row must
+		// meet every build row, so the build has to be replicated and the
+		// probe is then free to be split any way at all. Asking that of the
+		// PROBE instead is what refused #480; asking nothing of the BUILD is
+		// worse — measured, it answers 0 for PostgreSQL's 12 and 1625 for
+		// its 38632, because each task meets only its own slice of the
+		// build. The requirement is stated unconditionally rather than
+		// against the producer's current label so it does not depend on
+		// which of the two `assignStageDistributions` passes has run.
+		if len(stage.JoinLeftKeys) == 0 && len(stage.JoinRightKeys) == 0 {
+			if slot == 1 {
+				return RequiredDistribution{Kind: RequiredBroadcast}
+			}
+			return RequiredDistribution{Kind: RequiredAny}
+		}
 		switch slot {
 		case 0:
 			return RequiredDistribution{Kind: RequiredClusteredOn,
@@ -411,8 +435,21 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 	case StageExchangeGather:
 		return Distribution{Kind: DistSingleton}
 	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
-		// The join inherits the probe (left) input's distribution — the
-		// join itself does not re-partition the joined output, it just
+		// A join with NO KEYS running ONE task is ONE stream: it reads every
+		// file of both inputs and emits a single output. Inheriting the
+		// probe's hash-partitioning there states something the plan
+		// contradicts, and the label is not cosmetic — a sort FUSED into such
+		// a stage is applied per partition by everything downstream that
+		// reads it, so `ORDER BY` came back ordered inside each shard and
+		// unordered across them, silently (#480's round-1 review). The
+		// mislabel was unreachable while a keyless join over partitioned
+		// producers was refused outright, which is why it arrives with the
+		// commit that stopped refusing it.
+		if len(stage.JoinLeftKeys) == 0 && len(stage.JoinRightKeys) == 0 && stage.Tasks <= 1 {
+			return Distribution{Kind: DistSingleton}
+		}
+		// Otherwise the join inherits the probe (left) input's distribution —
+		// the join itself does not re-partition the joined output, it just
 		// pairs probe rows with matching build rows.
 		if probe, ok := deps[stage.LeftDepStage]; ok {
 			return probe

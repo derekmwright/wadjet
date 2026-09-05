@@ -1954,6 +1954,47 @@ the site that asks about a MATERIALIZED arm is the same repair with a boundary
 the fixtures can attempt. Recorded rather than silently skipped, because the
 brief named the other shape.
 
+### A keyless join asks for the build it needs (2026-09-04, #480)
+
+`RequiredChildDistribution` asked a hash join's two slots for
+`RequiredClusteredOn` on the join's keys, with no guard for an EMPTY key list —
+which every non-equi join has, because `takeJoinCondResiduals` lifts the whole
+condition into a residual filter and the stage keeps no keys. `clustered_on[]`
+is not "no constraint": `Satisfies` reads it as broadcast, singleton, or
+hash-partitioned on NOTHING, so a producer partitioned on its own group keys
+failed it and the plan was refused before dispatch for a query PostgreSQL
+answers.
+
+What such a consumer NEEDS is the broadcast-join rule, because a keyless join
+IS a broadcast join on the DAG: every probe row must meet every build row, so
+the build is replicated and the probe is then free to be split any way at all.
+Requiring nothing of either side was tried first and is WORSE than the refusal —
+measured, it answers 0 for PostgreSQL's 12 and 1625 for its 38632, because each
+task then meets only its own slice of the build. The requirement is stated
+unconditionally rather than against the producer's current label, so it does not
+depend on which of the two `assignStageDistributions` passes has run; that
+ordering is the hole that let the violation survive `EnsureDistribution` in the
+first place.
+
+Repro B of that filing — a partitioned shuffle key naming a derived alias —
+answers on all four arms at this base and is ratcheted rather than re-fixed.
+
+**A stage that runs ONE task emits ONE stream, whatever its input was
+partitioned on.** (2026-09-05, #480's round-1 review.) Making these plans
+runnable made a mislabel reachable that had never had a plan to be wrong in: a
+join inherits its PROBE's distribution, and a keyless join running a single
+task reads every file of both inputs and emits one output — so inheriting
+`DistHashPartitioned` there states something the plan contradicts. The label is
+not cosmetic. A sort FUSED into the stage is applied per partition by
+everything downstream that reads it, and `ORDER BY` came back ordered inside
+each shard and unordered across them, deterministically, on both DAG arms —
+loud → silent-wrong, the one direction this ADR's own "loud beats plausible"
+forbids. `OutputDistribution` now answers Singleton for a keyless single-task
+join; the boundary (a keyless join that really does fan out keeps its probe's
+label) is a cell in `physical.TestOutputDistribution`, and the #480 gate
+asserts ORDERED VALUES on both DAG arms rather than the `COUNT(*)` that could
+not see it.
+
 ### A window key guard asks provenance (2026-09-04, #745)
 
 `resolveWindowKeys` classes a PARTITION BY / ORDER BY term as either a BOUND

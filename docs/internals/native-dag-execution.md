@@ -104,6 +104,26 @@ the embedded engine per policy shape.
 4. Collapse/fuse passes: `collapseMergeTreesForNativeDAG`, `fuseSortIntoPredecessor`, `fuseScanAggregateShuffle` (`plan.go:1601-1659`).
 5. `applyDynamicFilters`, `AssertExchangeConsistency`, attach SELECT aliases to the terminal `exchange-gather`.
 
+`OutputDistribution` (`distribution.go`) is the other half, and its labels are
+read by more than the exchange checker: a sort FUSED into a stage is applied
+per partition by everything downstream that reads the label, so a stage whose
+label says "hash-partitioned" while it runs ONE task returns rows ordered
+inside each shard and unordered across them. A join with no keys running one
+task emits a SINGLETON, whatever its probe was partitioned on (#480's round-1
+review).
+
+`RequiredChildDistribution` (`distribution.go`) is what step 3 asks of each
+input slot, and it is recomputed rather than stored — step 5 asks it again over
+the FINAL labels. A requirement therefore has to be derived from what the
+consumer NEEDS, not from what its producer currently happens to be: a hash join
+with NO KEYS (a cross join, and every non-equi join, whose condition
+`takeJoinCondResiduals` lifts into a residual filter) needs its BUILD replicated
+and asks nothing of its probe, because every probe row must meet every build
+row. Asking `clustered_on[]` there — the empty key list, which `Satisfies`
+reads as "hash-partitioned on nothing" — refused plans the DAG can run (#480),
+and asking nothing of either side answers a WRONG COUNT, because each task then
+meets only its own slice of the build.
+
 ### `walkStages` per-node behavior (`plan.go:2919`)
 
 | Logical node | Emits | Notes |
