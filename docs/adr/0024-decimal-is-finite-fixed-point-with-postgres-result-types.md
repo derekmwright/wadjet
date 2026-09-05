@@ -336,22 +336,43 @@ outside the column's range is a bound and orders above or below every stored
 value (#462). The value-producing callers of `DecimalTextAt` are the ones
 that must honour `Sat`.
 
-**Arithmetic over an aggregate carries the aggregate's declaration only as far
-as the aggregate's ARGUMENT can be typed.** (Added 2026-09-05, #867 round 2.)
-`physical.aggComputedInputDecl` types a computed argument through the SCAN
-columns below the aggregate. A derived table or CTE that RENAMES those columns
-leaves it undecided, so `SUM(v * 3000000) + 1` over
-`(SELECT c_i64 AS v FROM t) x` is float8 and the outer operand is lost at int8
-magnitude — three of the five spellings of #867's own shape, while the DAG
-answers all five exactly, so the two arms disagree.
+**Arithmetic over an aggregate carries the aggregate's declaration, and a
+derived table is not a boundary it stops at.** (Added 2026-09-05, #867;
+mechanism CORRECTED 2026-09-05 in round 3 — the first version of this
+paragraph, written when the shape was still deferred, named a cause the code
+does not have. See the correction note below.)
 
-Asking the child's EMITTED columns second does not close it: the derived
-Project carries no declaration for the renamed column either, so the gap is
-upstream, in the walk that types a derived table's output from its own
-projection list. Pinned fail-on-agree by
-`wadjet.TestArithmeticOverAComputedAggregateCarriesTheAggregatesType`'s three
-`residual_*` cells, with the `SELECT *` spelling beside them as the control
-that says the defect is the RENAME and not derived tables as such.
+`physical.aggComputedInputDecl` types a computed argument by asking what the
+aggregate's child declares. It asked `inputColDecls` — a walk with no
+`NodeProject` arm, which therefore stops at ANY projection list and answers nil
+for the whole subtree — and `nodeDeclaredType` over that empty map does not
+report `Undecided`: its arithmetic arm falls through to `Decl(FLOAT64),
+Decided`. So the function actively DECLARED float8 for every aggregate whose
+argument was computed under a derived table or a CTE, and `SUM(v * 3000000) + 1`
+came back 3.6280278840509997e+19 where PostgreSQL answers 36280278840510000001
+— the outer operand lost at int8 magnitude, on all five spellings of #867's
+shape.
+
+The fix is to ask the walk that already types a derived table's output from its
+own projection list: `emittedColTypes`, whose `NodeProject` arm types each item
+against the child's emitted types, whose `NodeJoin`/`NodeWindow`/`NodeAggregate`
+arms cross those nodes, and whose default arm is `inputColTypes` itself — so it
+is a strict superset and consulting it when the scan walk answered NOTHING can
+only add an answer, never change one. Gated by
+`wadjet.TestArithmeticOverAComputedAggregateCarriesTheAggregatesType`, which
+asserts PostgreSQL's exact value and a numeric declaration for all five
+spellings plus the `SELECT *` control.
+
+> **Correction to the round-2 text.** It said the trigger was a RENAME, that
+> the walk was left "undecided", and that the child's emitted columns carry no
+> declaration for the renamed column. All three are false, measured at the same
+> commit: `SELECT SUM(c_i64 * 3000000) + 1 FROM (SELECT c_i64 FROM t) x` has no
+> rename and was float8 too (the discriminator is whether a `Project` survives
+> at all — `SELECT *` is elided to a `Scan`); the empty map yields DECIDED
+> FLOAT64, so the documented `ok=false` guard never fired; and
+> `emittedColDecls` returns `{v: INT64}` for exactly the shape the paragraph
+> said it could not type. An ADR may not describe a mechanism the code does not
+> have — the same standard round 1 applied to the #764 entry.
 
 **"At every value-producing site" includes every POSITION the same expression
 can be written in.** (Added 2026-09-03, #841.) An expression has ONE

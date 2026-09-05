@@ -138,62 +138,50 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 		})
 	}
 
-	// The BOUNDARY, pinned fail-on-agree, and the reason #867 is PROGRESS and
-	// not closed (round 2, B6).
+	// The DERIVED-TABLE boundary, which was #867's own headline shape and is
+	// where round 2 of this arc stopped (its pins are deleted here, which is
+	// this fix's proof).
 	//
-	// `aggComputedInputDecl` types the aggregate's argument through
-	// `inputColDecls(node.Children[0])`, which reads the SCAN columns below
-	// the aggregate. A derived table or CTE renames those away, so
-	// `SUM(v * 3000000)` over `(SELECT c_i64 AS v FROM typemx) x` finds no
-	// declaration for `v` and the whole term falls to float8 — with the outer
-	// `+ 1` lost at that magnitude, which is the defect #867 was filed for,
-	// through three of its five spellings.
+	// `aggComputedInputDecl` typed the aggregate's argument through
+	// `inputColDecls(node.Children[0])`, a walk that has no Project arm at
+	// all: it stops dead at ANY projection list — renamed or not — and
+	// answers nil for the whole subtree. `nodeDeclaredType` over that empty
+	// map does not report Undecided; its arithmetic arm falls through to
+	// `Decl(FLOAT64), Decided`, so the function actively DECLARED float8 and
+	// the outer `+ 1` was lost at int8 magnitude.
 	//
-	// It is NOT closed by asking the child's EMITTED columns second: measured,
-	// the derived Project does not carry the type there either, so the gap is
-	// upstream of this function — in the walk that types a derived table's
-	// output columns from its own projection list. That is a different layer
-	// (F1's #796 territory) and its own arc; bounding the fix here would leave
-	// the issue's own headline shape wrong while the issue read closed, which
-	// rule 11 forbids.
-	//
-	// The DAG answers these exactly, so the two arms disagree — recorded in
-	// ADR-0024 item 2. Delete these cells when the derived-boundary walk
-	// lands; they FAIL when they start agreeing.
+	// The walk that types a derived table's output from its own projection
+	// list already exists — `emittedColTypes`, whose NodeProject arm types
+	// each item against the child's emitted types and whose default arm is
+	// `inputColTypes` itself, so it is a strict superset. Asking it when the
+	// scan walk answered nothing is the whole fix, and it makes all five
+	// spellings answer PostgreSQL's exact value under numeric.
 	for _, c := range []struct{ name, sql string }{
-		{"residual_derived_rename",
+		{"derived_rename",
 			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl + `) x`},
-		{"residual_derived_projection",
+		{"derived_projection",
 			`SELECT SUM(c_i64 * 3000000) + 1 AS v FROM (SELECT c_i64 FROM ` + tbl + `) x`},
-		{"residual_cte_rename",
+		{"derived_two_columns",
+			`SELECT SUM(c_i64 * 3000000) + 1 AS v FROM (SELECT c_i64, id FROM ` + tbl + `) x`},
+		{"cte_rename",
 			`WITH c AS (SELECT c_i64 AS v FROM ` + tbl + `) SELECT SUM(v * 3000000) + 1 AS v FROM c`},
+		{"cte_no_rename",
+			`WITH c AS (SELECT c_i64 FROM ` + tbl + `) SELECT SUM(c_i64 * 3000000) + 1 AS v FROM c`},
+		{"select_star",
+			`SELECT SUM(c_i64 * 3000000) + 1 AS v FROM (SELECT * FROM ` + tbl + `) x`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			res, err := db.Query(ctx, c.sql)
 			if err != nil {
 				t.Fatalf("%v\n  SQL: %s", err, c.sql)
 			}
-			got, isFloat := res.Rows[0]["v"].(float64)
-			if !isFloat || got != 3.6280278840509997e+19 {
-				t.Errorf("= %#v; this pin records the float64 3.6280278840509997e+19 and "+
-					"PostgreSQL 17.11 says 36280278840510000001. If it has moved, the "+
-					"derived-table boundary carries the aggregate's declaration now: "+
-					"re-measure this family, delete these three cells and close #867"+
-					"\n  SQL: %s", res.Rows, c.sql)
+			if got := res.Rows[0]["v"]; got != "36280278840510000001" {
+				t.Errorf("= %#v, PostgreSQL 17.11 says 36280278840510000001 — the "+
+					"aggregate's declaration is not crossing the derived boundary"+
+					"\n  SQL: %s", got, c.sql)
 			}
-			if d := res.ColumnMetas[0].TypeID; d != parquet.TypeFloat64 {
-				t.Errorf("declares %v; this pin records FLOAT64\n  SQL: %s", d, c.sql)
-			}
-			// The SELECT * spelling is the control that says the defect is
-			// the RENAME and not derived tables as such.
-			ctl := `SELECT SUM(c_i64 * 3000000) + 1 AS v FROM (SELECT * FROM ` + tbl + `) x`
-			cres, err := db.Query(ctx, ctl)
-			if err != nil {
-				t.Fatalf("%v\n  SQL: %s", err, ctl)
-			}
-			if cres.Rows[0]["v"] != "36280278840510000001" {
-				t.Errorf("the SELECT * control = %#v, want the exact value — the boundary "+
-					"this pin describes has moved", cres.Rows)
+			if d := res.ColumnMetas[0].TypeID; d != parquet.TypeDecimal {
+				t.Errorf("declares %v, want DECIMAL (PostgreSQL: numeric)\n  SQL: %s", d, c.sql)
 			}
 		})
 	}

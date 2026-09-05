@@ -15624,6 +15624,9 @@ func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.Type
 		return 0, 0, 0, false
 	}
 	decls := inputColDecls(node.Children[0])
+	if len(decls.types) == 0 {
+		decls = emittedColDecls(node.Children[0])
+	}
 	d, c := nodeDeclaredType(agg.InputExpr, decls)
 	if c == expr.Undecided {
 		return 0, 0, 0, false
