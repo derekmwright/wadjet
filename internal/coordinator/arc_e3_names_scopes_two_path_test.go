@@ -516,6 +516,19 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 		// (#557) and nothing sets it here. Pre-existing: base answers the
 		// same. The non-colliding control beside it is right on every arm,
 		// which is what says the collision is the trigger.
+		//
+		// ARC F4 measured the shape and WITHDREW a fix. A positional ORDER BY
+		// addresses the SELECT LIST; a stage's sort addresses its PRODUCER's
+		// output; over an aggregate those are `[group keys…, aggregate
+		// outputs…]` and not the same list, so a late pass was written to map
+		// one onto the other from the producer's finished output. It moved the
+		// sibling cell below from one wrong sequence to another — the DAG then
+		// ordered by the LAST key alone — which says the sort these keys reach
+		// is not the one the mapping assumed, and neither coordinate system
+		// alone explains the answer. Finding WHICH operator applies them (the
+		// stage dump emits no sort stage for either shape: the ordering rides
+		// the aggregate stage, and the coordinator merges partial results
+		// above it) is the first step of that fix, and it is its own change.
 		{name: "785/order-by-the-aggregate-under-a-colliding-alias",
 			sql: "SELECT COUNT(*) AS g, g AS x FROM typemx GROUP BY g " +
 				"ORDER BY COUNT(*) DESC, x",
@@ -637,6 +650,10 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 		// child is the projection itself, and the DAG's sort stage reads a
 		// STAGE's output instead, which is the residual the naming arc
 		// self-flagged (#557's own note). One key (the entry above) is right.
+		//
+		// See the note on `785/order-by-the-aggregate-under-a-colliding-alias`
+		// for what arc F4 measured here and why the mapping it wrote was
+		// withdrawn rather than shipped.
 		{name: "629/cross-class-duplicate-name-two-keys",
 			sql: "SELECT COUNT(*) AS c, g AS c, g AS c, h AS c FROM collslot " +
 				"GROUP BY g, h ORDER BY 2, 4",
