@@ -58,6 +58,23 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 	if table == "" {
 		return nil
 	}
+	// The RELATION is named as the statement spelled it, and an unquoted
+	// identifier folds to lower case at the lexer (#731). A catalog table
+	// keeps the spelling it was registered under, and a mixed-case one is
+	// ordinary — a parquet dataset or an Iceberg import brings its own name.
+	// `catalog.ResolveTableName` is the concession that makes such a table
+	// reachable unquoted, and the DML executors apply it (wadjet/dml.go's
+	// `info.Table = db.catalog.ResolveTableName(info.Table)`) — but AFTER
+	// this door had already decided. So one relation was policed under
+	// `hits` here and read under `Hits` by EnforcePlanPolicies, and a rule
+	// scoped `resource.name eq "Hits"` bound to the SELECT and not to the
+	// write. Where a broader rule grants the identity access — which is what
+	// every `roles:`-to-ABAC migration emits — the obligations simply
+	// vanished: the write was permitted and the masked columns were not
+	// masked. Decide on the same name the read decides on.
+	if cat != nil {
+		table = cat.ResolveTableName(table)
+	}
 	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(), Environment{Protocol: protocol})
 
 	// 1. The write itself.
