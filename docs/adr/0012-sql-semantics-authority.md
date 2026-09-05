@@ -940,12 +940,59 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      entry (`logical.RefuseUnresolvedOrdinalSortKeys`); the refusal itself did
      not change.
 
-   - **Abbreviated CIDR and inet literals.** (Added 2026-09-03, #627.)
-     PostgreSQL reads `'10'::cidr` as 10.0.0.0/8 and `'192.168'::cidr` as
-     192.168.0.0/24 — CLASSFUL address inference, and a `cidr`-only grammar:
-     `'192.168'::inet` is 22P02 there. Wadjet refuses every abbreviated form
-     with 22P02. Reproducing `inet_net_pton`'s legacy class inference
-     bit-exactly is its own decision with its own oracle corpus.
+   - **Abbreviated CIDR and inet literals.** (Added 2026-09-03, #627. CLOSED
+     and RE-SCOPED 2026-09-05: the divergence was real, and half of what this
+     entry described was the wrong grammar.)
+     PostgreSQL has TWO v4 literal parsers and they are not the same language:
+
+       inet (inet_net_pton_ipv4)   '10'        22P02
+                                   '10/8'      10.0.0.0/8   host bits KEPT
+                                   '10.1/8'    10.1.0.0/8
+                                   '10/16'     22P02        mask past the octets
+                                   '0x0a'      22P02
+       cidr (inet_cidr_pton_ipv4)  '10'        10.0.0.0/8   CLASSFUL inference
+                                   '10.1/8'    22P02        bits right of mask
+                                   '0x0a'      10.0.0.0/8
+
+     A comparison reads the INET one, even beside a `cidr` column: `cidr`
+     carries no operators of its own, so `cd = '<literal>'` resolves through
+     `=(inet, inet)` and the server's own message names the type it used —
+     `invalid input syntax for type inet: "239"`. The cidr grammar is
+     reachable only through an explicit cast, which this engine does not
+     implement (`CAST(<text> AS CIDR)` passes its text through — the entry
+     above), so nothing here reads it and `parquet.PgIPv4Pton` implements
+     inet's grammar alone, measured cell by cell: all 256 one-octet values
+     maskless (0 accepted), the 4×34 octet-count-by-mask grid, and the
+     leading-zero and trailing-dot forms.
+
+     **The server's FOLD sites are the exception, and this engine does not
+     reproduce them.** `GREATEST`, `LEAST` and `COALESCE` resolve no operator:
+     they UNIFY their arguments' types at parse analysis, so the literal is
+     read by the cidr type's own parser there. Measured:
+
+       GREATEST(cd, '239')   239.0.0.0/8      cd = '239'    22P02
+       GREATEST(cd, '1/0')   22P02            cd = '1/0'    1.0.0.0/0
+       COALESCE(cd, 'zzz')   22P02            cd = 'zzz'    22P02
+
+     This engine reads ONE grammar at every site, so a maskless abbreviation
+     beside a fold is refused where the server folds it — a REFUSAL of
+     PG-valid text, recorded here because the alternative is worse: a second
+     accept-set (classful inference, `0x` hex, and the bits-right-of-mask
+     check the fold's own parser makes) plus a site classification that every
+     plan-time and runtime evaluator has to agree on. Half of that is the
+     "one literal, two dispositions" defect this same arc closed. The refusal
+     is loud, names the literal, and the canonical spelling
+     (`GREATEST(cd, '239.0.0.0/8')`) answers.
+
+     The engine agreed with neither parser before: it refused `'10/8'`, which
+     inet accepts, and (for one commit of this arc) it accepted `'239'`, which
+     no comparison on the server accepts. Both directions are closed by the
+     one grammar; `kernel.TestNetworkLiteralGrammarIsPostgresInet`,
+     `kernel.TestEveryFirstOctetFollowsPostgresInet`,
+     `kernel.TestMaskMayNotNameAByteTheLiteralDidNotWrite` and the census in
+     `coordinator.TestArcF3ExprTypingOnEveryArm` assert both sides. When
+     `CAST(<text> AS CIDR)` is implemented, the classful table belongs THERE,
+     beside its own measured domain — not in the comparison path.
 
      The MAC and UUID halves of the same issue are NOT divergences: every
      spelling PostgreSQL accepts is accepted, at every comparison site, and
@@ -1339,9 +1386,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      on three arms across nine sites.
    - **A text-only function over a BYTES argument answers where PostgreSQL
      raises 42883.** (Added 2026-09-05, #583.) `upper(b)`, `lower(b)`,
-     `trim(b)`, `reverse(b)` and `strpos(bytea, bytea)` have no bytea
-     overload on the server — `function upper(bytea) does not exist` — and
-     this engine answers the text those bytes spell.
+     `trim(b)`, `reverse(b)`, `char_length(b)` / `character_length(b)` and
+     `strpos(bytea, bytea)` have no bytea overload on the server —
+     `function upper(bytea) does not exist` — and this engine answers the text
+     those bytes spell. `char_length` joined that list when `length(b)` was
+     given the byte count: the two spellings have one kernel, and a
+     `char_length` that kept counting runes would have made one expression
+     answer two numbers. It answers the byte count now, where the server
+     answers nothing at all.
 
      The functions the server DOES have over bytea agree since #583:
      `length` is the byte count — over a bare column as well as a derived
@@ -1358,12 +1410,36 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      #627 just closed. The model is `exec.likeConstError`, which refuses at
      kernel-resolution time from the column's declared type.
 
-     One value divergence rides with it, pinned by
-     `wadjet.TestByteaFunctionsAnswerInBytes`'s
+     TWO value divergences ride with it, both pinned by
+     `wadjet.TestByteaFunctionsAnswerInBytes`.
+
      `residual_concat_hex_spelled_literal`: an unknown-typed LITERAL beside a
      bytea operand of `||` contributes its own SPELLING, so `b || '\x41'`
      appends four characters where the server appends one byte. That is
      #582's rule at a function ARGUMENT rather than at a comparison.
+
+     `residual_text_concat_bytea_value` (×3, added 2026-09-05 in round 3 —
+     the round-2 cells asserted these values as PostgreSQL's, which they are
+     not): where the pair is TEXT, the server RENDERS the bytea operand
+     through `bytea_out` and concatenates the `\x` hex text, and this engine
+     splices the raw bytes.
+
+       t = 'hi', b = '\x6869'      PostgreSQL        wadjet
+       t || b                      hi\x6869          hihi
+       b || t                      \x6869hi          hihi
+       length(t || b)              8                 4
+
+     The CLASS is right on both engines (text, OID 25) — that half was fixed
+     in this arc. The VALUE needs the operand's DECLARED type at the
+     EVALUATOR, and the only carrier is `expr.compileContext.colTypes`, which
+     is nil at every compile site with no schema: deciding there would give
+     one `||` expression two answers depending on which site compiled it,
+     which is the defect the #627 census closed. It is the same plan-time
+     argument-type check the 42883 family above is deferred for, and it should
+     land with it. On the WIRE the raw bytes go out under OID 25, so a
+     non-UTF-8 or NUL-bearing value reaches a text field — #570's hazard
+     through a derived value, which is why this is recorded loudly rather than
+     left as a footnote.
    - **A DECIMAL composite renders every row at the FOLD's scale, not at each
      value's own.** (Added 2026-09-05, #764 — measured and DEFERRED, not
      fixed.) `COALESCE(numeric(15,2), 12.3456789012345)` prints

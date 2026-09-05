@@ -91,14 +91,20 @@ characters:
 | `CAST(b AS STRING)` | `text` | the `\x` hex form |
 
 `text || bytea` is TEXT, not bytea: the server resolves that pair through
-`text || anynonarray`, which renders the bytea and concatenates as text. Only
-`bytea || bytea` and `bytea || <unknown literal>` are bytea.
+`text || anynonarray`. Only `bytea || bytea` and `bytea || <unknown literal>`
+are bytea.
 
-Two divergences remain and are recorded in ADR-0012's list: a TEXT-ONLY
-function over a `BYTES` argument (`upper(b)`) still ANSWERS where PostgreSQL
-raises `42883 function upper(bytea) does not exist`, and an unknown-typed
-LITERAL beside a bytea operand of `||` contributes its own spelling
-(`b || '\x41'` appends four characters where the server appends one byte).
+Three divergences remain and are recorded in ADR-0012's list:
+
+* a TEXT-ONLY function over a `BYTES` argument (`upper(b)`, `char_length(b)`)
+  still ANSWERS where PostgreSQL raises
+  `42883 function upper(bytea) does not exist`;
+* an unknown-typed LITERAL beside a bytea operand of `||` contributes its own
+  spelling (`b || '\x41'` appends four characters where the server appends one
+  byte);
+* where the pair is TEXT, the server RENDERS the bytea operand as its `\x` hex
+  text and this engine splices the raw bytes — with `b = '\x6869'`,
+  `'hi' || b` is `hi\x6869` there and `hihi` here.
 
 #### `FLOAT(n)`
 
@@ -226,42 +232,55 @@ against a column is read in every spelling PostgreSQL accepts, at every site
 | `MAC` | `08:00:2b:01:02:03`, `08-00-2b-01-02-03`, `0800.2b01.0203`, `08002b010203`, `08002b:010203`, `08002b-010203`, `0800-2b01-0203`, and the same in upper case. A grouped-hex spelling must split the twelve digits `6+6` or `4+4+4`; any other regrouping is `22P02`, as it is in PostgreSQL |
 | `UUID` | dashed, undashed, braced (`{...}`), and any case |
 
-An abbreviated `CIDR` **is** accepted, with PostgreSQL's own classful
-inference (measured on 17.11, not remembered):
+An abbreviated address **is** accepted beside a `CIDR` column, in the grammar
+PostgreSQL itself uses there — `inet`'s, not `cidr`'s. That distinction is the
+whole rule: `cidr` has no comparison operators of its own, so the server
+resolves `cidr_col = '<literal>'` through `=(inet, inet)` and reads the literal
+with inet's parser (its error message names the type it used,
+`invalid input syntax for type inet: "239"`). The classful inference people
+associate with `'10'::cidr` belongs to the `cidr` TYPE and reaches no
+comparison.
 
 | Literal | Value | Literal | Value |
 |---|---|---|---|
-| `'10'` | `10.0.0.0/8` | `'10/8'` | `10.0.0.0/8` |
-| `'10.1'` | `10.1.0.0/16` | `'192.168/16'` | `192.168.0.0/16` |
-| `'128'` | `128.0.0.0/16` | `'192.168'` | `192.168.0.0/24` |
-| `'224'` | `224.0.0.0/4` | `'225'` | `225.0.0.0/8` |
-| `'239'` | `239.0.0.0/8` | `'240'` | `240.0.0.0/32` |
+| `'10/8'` | `10.0.0.0/8` | `'10'` | `22P02` |
+| `'192.168/16'` | `192.168.0.0/16` | `'192.168'` | `22P02` |
+| `'10.1/8'` | `10.1.0.0/8` | `'239'` | `22P02` |
+| `'1/0'` | `1.0.0.0/0` | `'10/16'` | `22P02` |
+| `'172.31/12'` | `172.31.0.0/12` | `'0x0a'` | `22P02` |
+| `'010.1.2.3'` | `10.1.2.3/32` | `'10.1.2.3'` | `10.1.2.3/32` |
 
-The mask comes from an explicit `/bits` when one is written; otherwise from the
-first octet, widened to cover the octets that were written from the second
-octet on. The first-octet table is the server's, measured over all 256 values
-rather than derived from the classful rule it half-follows: `0-127` → /8,
-`128-191` → /16, `192-223` → /24, **`224` alone** → /4, `225-239` → /8,
-`240-255` → /32. `'010.1'` and `'00010'` are decimal, not octal, and leading
-zeros are digits. `'10.'`, `'10..1'`,
-`'256.1'`, `'10.1.2.3.4'`, `'0x0a.1'`, `'10/33'` and any surrounding or
-embedded whitespace are `22P02`, as they are on the server.
+Three rules, each measured on 17.11 over its whole domain rather than sampled:
+a literal with **no mask** must name all four octets (all 256 one-octet values
+are `22P02`); a **mask** may not name a byte the literal did not write
+(`'10/15'` is a value and `'10/16'` is `22P02`, over every octet count from one
+to four); and the bits to the RIGHT of the mask are **kept**, not zeroed —
+`'10.1/8'` is `10.1.0.0/8` and `'255/1'` is `255.0.0.0/1`, both of which the
+`cidr` type itself refuses. Leading zeros are digits and decimal, not octal
+(`'010.1.2.3'`, `'10/008'`), and one trailing dot is ignored (`'10./8'`).
+`'10.'`, `'10..1'`, `'256.1'`, `'10.1.2.3.4'`, `'0x0a'`, `'10/33'`, `'10/'` and
+any surrounding or embedded whitespace are `22P02`, as they are on the server.
 
-An `IPv4` or `IPv6` literal follows PostgreSQL's `inet` rather than its `cidr`:
-an abbreviated form needs an explicit mask there (`'192.168'::inet` is an error
-on the server too), and a HOST-width prefix is the address itself
-(`'10.0.0.1/32'` equals `'10.0.0.1'`). A prefix NARROWER than the host width
+An `IPv4` or `IPv6` literal reads the same grammar, and a HOST-width prefix is
+the address itself (`'10.0.0.1/32'` equals `'10.0.0.1'`). A prefix NARROWER than the host width
 names a network, which those two types have no room for — they hold a bare
 address — so it is refused with `0A000` and a message saying so. Use a `CIDR`
 column for a value that carries a prefix.
 
 **Every network literal is classified once, when the query is PLANNED**, for
 all five types and at every site — `=`, `<>`, `<`, `>`, `IN`, a `CASE`, a
-`GREATEST`, a projection, and a scan no row survives. So the same query cannot
-answer over one file and error over another, and cannot refuse in a `WHERE`
-clause while answering inside a `CASE`. Two classes, and they are different
-answers: text that names no address is `22P02`, and PostgreSQL-valid text this
-engine's type cannot hold is `0A000`.
+`GREATEST`, a `COALESCE`, a projection, and a scan no row survives. So the same
+query cannot answer over one file and error over another, and cannot refuse in
+a `WHERE` clause while answering inside a `CASE`. Two classes, and they are
+different answers: text that names no address is `22P02`, and
+PostgreSQL-valid text this engine's type cannot hold is `0A000`.
+
+One consequence is recorded in ADR-0012 rather than reproduced: PostgreSQL's
+`GREATEST`, `LEAST` and `COALESCE` resolve no operator — they unify their
+arguments' types — so a maskless abbreviation is valid THERE
+(`GREATEST(cidr_col, '239')` is `239.0.0.0/8` on the server) and invalid in the
+comparison beside it. One grammar at every site means this engine refuses that
+fold; the canonical spelling answers.
 
 `INSERT` and the `mac_*` formatting functions read only the spellings Go's
 parser takes (colon, hyphen, dotted, and the bare twelve digits), not the three
