@@ -96,6 +96,24 @@ worker's file cache (`worker/cached_store.go`) on the worker tracker, and
 `scan.DecodeAheadIter`'s delivery-cursor group (`engine/scan/decode_ahead.go`)
 on the decode window's ledger.
 
+**Producer 7's "released by the caller's own `ReleaseTracking`" is a PAIRING,
+and one caller released without charging** (#862, fixed 2026-09-04). The
+HashAggregate's legacy raw-row buffer accumulated `spillBufferBytes` at its
+append site and never called `TrackBatch`, while THREE sites released it —
+`flushSpillBuffer`, `Finalize`'s drain of the unflushed tail, and `Close`. So
+every query that took that branch gave the tracker back bytes it never took;
+measured at 931,840 released against zero charged, `used` at -165,652. A
+negative ledger is not cosmetic: from there every admission is measured against
+a floor below the memory that exists, which is the one thing this ADR's model
+cannot survive. The rows are the operator's (`ToRows` copies them out of a
+batch the pipeline releases immediately), so the missing half was the charge,
+and adding it also makes the buffer visible to the spill trigger — which is
+what the release sites' own comments already assumed. Gated by
+`exec.TestTheRawRowBufferChargesWhatItReleases`, which asserts conservation and
+that a reservation the budget cannot hold is still REFUSED after the operator
+closes, and by the aggregate cells `wadjet.TestNoQueryOverReleasesItsMemoryLedger`
+could not carry while the defect was open.
+
 **Producer 2 on the ROW-GROUP path: the charge is the row group, and the slack
 is bounded rather than reconciled.** The whole-file read reserves the file's
 size and then reconciles up to the pooled buffer's `cap()`, because that buffer
