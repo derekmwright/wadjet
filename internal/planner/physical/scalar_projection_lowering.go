@@ -38,29 +38,34 @@ import (
 //     what `extractOutputRenames` maps to the user's alias, and that pass reads
 //     the LOGICAL projection, which this lowering does not touch. So the spec's
 //     Expr carries `:scalar_N` and its Name carries the item's own text.
-//   - **The spec must declare a TYPE.** A projection's declared type IS the
-//     output column's type, and a bare numeric literal is float8 in this
-//     dialect (ADR-0024) — so a substituted `4999014997` would come back
-//     float64 where the single path answers int64. The producer's own plan
-//     knows the answer, so `emitScalarProducerStages` hands it back and the
-//     spec declares it.
+//   - **The spec is typed the way the SINGLE PATH types the item, and
+//     deliberately not from the producer.** The producer's plan knows the
+//     value's type and the projection could declare it — measured, that makes
+//     `SELECT (SELECT MAX(c_i64) FROM t)` a bigint on the DAG, which is
+//     PostgreSQL's answer. The single-process pipeline answers a STRING for
+//     the same query (`expr.ScalarSubquery` declares nothing, so the item
+//     falls to the projection's string fallback), and a lowering that made
+//     the two paths disagree about a column's TYPE would be trading a cost
+//     for a divergence. So the item is typed exactly as it is typed today and
+//     the box defect is recorded and filed instead. The one thing this must
+//     NOT do is declare a type it does not know: an undeclared spec that
+//     claims TypeKnown takes TypeID zero, which is BOOLEAN, and the first cut
+//     of this returned `true` for that query.
 //
-// The boundary is drawn at the shape the resolver can rewrite: an item whose
-// subquery survives `resolveSubqueryAST` (a CASE arm, a function argument — the
-// walker's `default:` returns the node unwalked) is DECLINED here and reaches
-// the refusal exactly as it did before. A CORRELATED subquery is declined by
-// `resolveSubqueryAST` itself (it parks `ErrCorrelatedSubqueryDistributed` on
-// the planner) and routes to the local pipeline, which is the only engine in
-// this process that can re-run one per outer row.
+// FOUR declines, and each one is a mechanism rather than a shape on a list.
+// An item whose subquery survives `resolveSubqueryAST` — a CASE arm, a
+// function argument, anywhere the walker's `default:` returns the node
+// unwalked. A CORRELATED subquery, which `resolveSubqueryAST` itself parks as
+// `ErrCorrelatedSubqueryDistributed`: only the local pipeline can re-run one
+// per outer row. A producer whose value has no lossless literal spelling
+// (scalarProducerValueIsLiteralSafe). And a producer that would be awaited by
+// a stage it READS (attachProjectionScalarDependencies). All four keep today's
+// disposition: refused, routed local, right.
 
 // projScalarProducer is one lowered SELECT-list subquery: the producer stage
-// that computes it and the type that stage's single column declares.
+// that computes it.
 type projScalarProducer struct {
 	producerID string
-	typ        parquet.TypeID
-	typeKnown  bool
-	prec       int
-	scale      int
 }
 
 // lowerProjectionSubquery rewrites one SELECT-list item that carries a scalar
@@ -91,60 +96,55 @@ func (p *Planner) lowerProjectionSubquery(stages *[]Stage, item *logical.Project
 	// decline, not a fallback to plan-time execution: the whole point of the
 	// producer is that the value accumulates the way the outer query's does.
 	for _, d := range deferred {
-		producerID, typ, typeKnown, err := p.emitScalarProducerStagesTyped(stages, d.SubquerySQL)
+		producerID, valueType, typeKnown, err := p.emitScalarProducerStagesTyped(stages, d.SubquerySQL)
 		if err != nil {
+			return "", decl, false, false
+		}
+		if !typeKnown || !scalarProducerValueIsLiteralSafe(valueType) {
 			return "", decl, false, false
 		}
 		if p.projScalarProducers == nil {
 			p.projScalarProducers = map[string]projScalarProducer{}
 		}
-		p.projScalarProducers[d.Placeholder] = projScalarProducer{
-			producerID: producerID, typ: typ.ID, typeKnown: typeKnown,
-			prec: typ.Precision, scale: typ.Scale,
-		}
+		p.projScalarProducers[d.Placeholder] = projScalarProducer{producerID: producerID}
 	}
-	// The item's own type. When the item IS the subquery, that is the
-	// producer's declared type; anything wrapping it goes through the
-	// ordinary projection inference with the placeholder's type supplied, so
-	// `(SELECT MAX(v) FROM c) + 1` is typed like any other arithmetic.
-	decl, declKnown = p.placeholderDeclType(resolved, decls)
-	return resolved.String(), decl, declKnown, true
+	// The item's own type, taken from the ordinary projection inference over
+	// a tree whose subqueries are now placeholders: a bare placeholder falls
+	// to the string fallback, which is what the single path answers, and
+	// `(SELECT …) + 1` folds float8, which is also what the single path
+	// answers. Both are what PostgreSQL does NOT say (bigint in each case),
+	// and that is a box defect this lowering neither introduces nor is
+	// allowed to fix on one path only.
+	decl = inferProjectionDeclType(resolved, parquet.TypeString, nil, decls)
+	return resolved.String(), decl, true, true
 }
 
-// placeholderDeclType types an item whose subqueries are now placeholders.
-// A bare placeholder declares its producer's type; anything else is inferred
-// with the placeholders' types folded into the column declarations, which is
-// how `inferProjectionDeclType` already learns a column's type.
-func (p *Planner) placeholderDeclType(n plansql.Node, decls colDecls) (expr.DeclType, bool) {
-	if ph, isPH := n.(*plansql.LiteralPlaceholder); isPH {
-		if prod, seen := p.projScalarProducers[ph.Name]; seen && prod.typeKnown {
-			return expr.DeclType{ID: prod.typ, Precision: prod.prec, Scale: prod.scale,
-				DecKnown: prod.typ == parquet.TypeDecimal}, true
-		}
-		return expr.DeclType{}, false
+// scalarProducerValueIsLiteralSafe reports whether a producer's value can
+// travel to a worker AS A LITERAL and be read back as the same value at the
+// same type.
+//
+// This is ADR-0021 §1e's rule — the one the correlated re-run applies to an
+// outer row's values — asked at the other end of the same round trip. The
+// producer's value is rendered to TEXT by the coordinator and re-parsed by the
+// worker's expression compiler, and for a type whose literal does not carry
+// its own scale or width that round trip is lossy: `(SELECT AVG(a) FROM t)`
+// over a `DECIMAL(p,2)` column substitutes `7.570000`, which is the right
+// digits, and comes back `7.57` — the enclosing projection is declared from
+// the subquery's SOURCE column rather than from its aggregate, so the value is
+// read at the column's scale and not the producer's.
+//
+// The integer family, BOOL and STRING have no such second parameter, so their
+// literal is the value. Everything else DECLINES and keeps routing to the
+// coordinator-local pipeline, which never renders the value at all. Lifting
+// the decline needs a producer that declares its own (p,s) — or its own width,
+// or its own instant — to the projection that reads it, which is a stage-model
+// change rather than a rewrite.
+func scalarProducerValueIsLiteralSafe(t parquet.TypeID) bool {
+	switch t {
+	case parquet.TypeBool, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeString:
+		return true
 	}
-	// A wrapped placeholder: give the inference the placeholder's type under
-	// its own spelling, which is how it reads a column reference.
-	if len(p.projScalarProducers) > 0 {
-		merged := colDecls{types: map[string]parquet.TypeID{}, fields: decls.fields, dec: map[string]logical.DecimalMeta{}}
-		for k, v := range decls.types {
-			merged.types[k] = v
-		}
-		for k, v := range decls.dec {
-			merged.dec[k] = v
-		}
-		for name, prod := range p.projScalarProducers {
-			if !prod.typeKnown {
-				continue
-			}
-			merged.types[":"+name] = prod.typ
-			if prod.typ == parquet.TypeDecimal {
-				merged.dec[":"+name] = logical.DecimalMeta{Precision: prod.prec, Scale: prod.scale}
-			}
-		}
-		decls = merged
-	}
-	return inferProjectionDeclType(n, parquet.TypeString, nil, decls), true
+	return false
 }
 
 // exprCarriesSubquery reports whether any subquery construct survives in n.

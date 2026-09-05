@@ -1842,8 +1842,13 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		{issue: "#659", name: "select_list_scalar_subquery_over_a_base_table_lowers",
 			sql: `SELECT id, (SELECT MAX(c_i64) FROM typemx) AS mx FROM typemx ` +
 				`WHERE id<3 ORDER BY id`,
-			want:   rows,
-			pgSays: "three rows, all with the same max, and the DAG computes it in a producer stage"},
+			want: rows,
+			pgSays: "three rows, all with the same max, and the DAG computes it in a producer " +
+				"stage. The BOX is a text one on every arm (na2Run prints no Go type for it) " +
+				"where PostgreSQL says bigint - expr.ScalarSubquery declares nothing, so the " +
+				"item falls to the projection's string fallback. That is true at this arc's " +
+				"base and on the single-process path, and the lowering deliberately does not " +
+				"fix it on ONE path: filed"},
 		{issue: "#659", name: "select_list_scalar_subquery_over_a_derived_table_lowers",
 			sql: `SELECT id, (SELECT MAX(v) FROM (SELECT c_i64 AS v FROM typemx) d) AS mx ` +
 				`FROM typemx WHERE id<3 ORDER BY id`,
@@ -1898,6 +1903,28 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 			sql:    cte + `SELECT id, (SELECT MAX(v) FROM c) AS mx FROM typemx WHERE id<3 ORDER BY id`,
 			want:   rows,
 			pgSays: "the same three rows, zero routes — the outer query reads typemx, not c"},
+		// THE LITERAL ROUND TRIP. A producer's value reaches the worker as
+		// TEXT and is re-parsed there, so a type whose literal does not carry
+		// its own scale or width comes back as something else: `AVG(a)` over a
+		// DECIMAL(p,2) column emits scale 6, substitutes `7.570000` — the
+		// right digits — and is read back at the column's scale as `7.57`,
+		// because the enclosing projection is declared from the subquery's
+		// SOURCE column and not from its aggregate. It is ADR-0021 §1e's rule
+		// at the other end of the same round trip, and it declines: the
+		// integer family, BOOL and STRING have no second parameter and lower;
+		// everything else routes, where the value is never rendered at all.
+		//
+		// This cell and the base-table one above are the pair. Found by
+		// coordinator.TestNumericArc2ShapesMatchPostgres on the run after the
+		// lowering first landed, which is the two-path oracle earning its keep
+		// for the third arc running.
+		{issue: "#659", name: "boundary_select_list_subquery_whose_value_is_a_decimal_routes",
+			sql:                  `SELECT (SELECT AVG(a) FROM decpair) AS av FROM decpair WHERE id = 1`,
+			want:                 []string{"av=7.570000"},
+			wantScalarProjRoutes: 1,
+			pgSays: "7.5700000000000000 at PostgreSQL's own division scale; wadjet's AVG scale " +
+				"is s+4, so this is the same number to the digits both keep (ADR-0012 item 9)"},
+
 		// A subquery inside a CASE arm. resolveSubqueryAST's walk does not
 		// descend into a CaseNode, so the item is declined and keeps its own
 		// typed refusal rather than reaching a worker that cannot compile it.

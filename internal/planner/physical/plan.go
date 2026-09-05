@@ -1946,23 +1946,23 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	return id, err
 }
 
-// emitScalarProducerStagesTyped is emitScalarProducerStages with the DECLARED
-// TYPE of the producer's single output column.
+// emitScalarProducerStagesTyped is emitScalarProducerStages with the TYPE the
+// producer's own plan says its single output column emits, and whether that
+// plan named one at all.
 //
-// The predicate path does not need it — a substituted literal is compared
-// against a column whose type decides the kernel — but a PROJECTION's declared
-// type IS the output column's type, and a bare numeric literal is float8 in
-// this dialect (ADR-0024). Without the declaration `SELECT (SELECT MAX(c_i64)
-// FROM t)` comes back float64 on the DAG where the single path answers int64.
-func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL string) (string, expr.DeclType, bool, error) {
-	var decl expr.DeclType
+// The predicate path has no use for it — a substituted literal is compared
+// against a column whose declaration decides the kernel. The SELECT-list path
+// uses it to DECIDE, not to declare: a value whose literal spelling does not
+// read back at the same type is not lowered at all (see
+// scalarProducerValueIsLiteralSafe).
+func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL string) (string, parquet.TypeID, bool, error) {
 	pq, err := plansql.Parse(subquerySQL)
 	if err != nil {
-		return "", decl, false, fmt.Errorf("parse subquery: %w", err)
+		return "", 0, false, fmt.Errorf("parse subquery: %w", err)
 	}
 	info, err := plansql.ExtractSelect(pq)
 	if err != nil {
-		return "", decl, false, fmt.Errorf("extract subquery: %w", err)
+		return "", 0, false, fmt.Errorf("extract subquery: %w", err)
 	}
 	var logicalPlan *logical.Node
 	if len(p.ctes) > 0 {
@@ -1973,7 +1973,7 @@ func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL str
 		logicalPlan, err = logical.BuildFromSelect(info)
 	}
 	if err != nil {
-		return "", decl, false, fmt.Errorf("build subquery plan: %w", err)
+		return "", 0, false, fmt.Errorf("build subquery plan: %w", err)
 	}
 	ctx := p.planCtx
 	if ctx == nil {
@@ -1990,12 +1990,12 @@ func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL str
 			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
 			}); err != nil {
-				return "", decl, false, err
+				return "", 0, false, err
 			}
 		}
 		logicalPlan, err = p.applyContextColumnPolicies(ctx, logicalPlan)
 		if err != nil {
-			return "", decl, false, err
+			return "", 0, false, err
 		}
 	}
 
@@ -2005,17 +2005,17 @@ func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL str
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		logicalPlan, err = p.applyContextColumnPoliciesToNewScans(ctx, logicalPlan)
 		if err != nil {
-			return "", decl, false, err
+			return "", 0, false, err
 		}
 		if err := p.checkPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
-			return "", decl, false, err
+			return "", 0, false, err
 		}
 	}
 
 	before := len(*stages)
 	p.walkStages(logicalPlan, stages, nil)
 	if len(*stages) == before {
-		return "", decl, false, fmt.Errorf("subquery emitted no stages")
+		return "", 0, false, fmt.Errorf("subquery emitted no stages")
 	}
 	terminal := &(*stages)[len(*stages)-1]
 	// Force Singleton: a scalar producer emits exactly one row. Tasks>1
@@ -2032,24 +2032,18 @@ func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL str
 	if renames := extractOutputRenames(logicalPlan); len(renames) > 0 {
 		terminal.OutputRenames = renames
 	}
-	// The producer's own plan is the authority on the value's type. One
+	// The producer's own plan is the authority on the value's TYPE. One
 	// output column is the whole shape a scalar producer has (the deferral
-	// fires only for a single provably-one-row select item), so a plan that
-	// emits anything else declares nothing and the caller types the item
-	// the way it types every other expression.
-	declKnown := false
-	if types := inputColTypes(logicalPlan); len(types) == 1 {
-		for name, id := range types {
-			decl = expr.DeclType{ID: id}
-			if id == parquet.TypeDecimal {
-				if d, ok := inputColDecimal(logicalPlan)[name]; ok {
-					decl.Precision, decl.Scale, decl.DecKnown = d.Precision, d.Scale, true
-				}
-			}
-			declKnown = true
+	// fires only for a single provably-one-row select item); a plan that
+	// emits anything else names nothing, and the caller declines.
+	var valueType parquet.TypeID
+	typeKnown := false
+	if emitted := emittedColTypes(logicalPlan); len(emitted) == 1 {
+		for _, id := range emitted {
+			valueType, typeKnown = id, true
 		}
 	}
-	return terminal.ID, decl, declKnown, nil
+	return terminal.ID, valueType, typeKnown, nil
 }
 
 // scalarToLiteral converts a Go value to an AST literal node.
