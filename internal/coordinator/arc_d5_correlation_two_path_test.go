@@ -927,6 +927,43 @@ func arcD5LateralCells() []arcD5Cell {
 			wantUnreachableRoutes: 1,
 			pgSays: "Alice 2 2, Bob 2 2, Carol 0 0 — the second lateral's " +
 				"`amount > s.n * 10` is dropped from the plan here"},
+		// CROSS JOIN LATERAL, the spelling the corpus had none of. It is
+		// PostgreSQL's own synonym for `JOIN LATERAL ... ON true` and it takes
+		// the same repair, so the four cells here are what says the repair
+		// keys on the LATERAL rather than on the JOIN keyword: aggregated
+		// (Carol survives at 0), non-aggregated (Carol has no row at all),
+		// grouped INSIDE the lateral (the user's own GROUP BY, which yields
+		// no row for an empty input in PostgreSQL either) and over a derived
+		// table. Every want is live PostgreSQL 17's.
+		{issue: "#767", name: "cross_join_lateral_aggregated_keeps_the_unmatched_row",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o CROSS JOIN LATERAL (` +
+				`SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ORDER BY 1`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+		{issue: "#767", name: "cross_join_lateral_not_aggregated_drops_it",
+			sql: `SELECT o.customer AS c, s.product AS p FROM lat_ord o CROSS JOIN LATERAL (` +
+				`SELECT product FROM lat_item WHERE order_id = o.id) s ORDER BY 1, 2`,
+			want: []string{"c=Alice|p=Gadget", "c=Alice|p=Widget",
+				"c=Bob|p=Doohickey", "c=Bob|p=Widget"},
+			pgSays: "four rows and no Carol - nothing to default, because the lateral " +
+				"yields no row rather than one empty aggregate row"},
+		{issue: "#767", name: "cross_join_lateral_grouped_inside",
+			sql: `SELECT o.customer AS c, s.p AS p, s.n AS n FROM lat_ord o CROSS JOIN LATERAL (` +
+				`SELECT product AS p, COUNT(*) AS n FROM lat_item WHERE order_id = o.id ` +
+				`GROUP BY product) s ORDER BY 1, 2`,
+			want: []string{"c=Alice|p=Gadget|n=int64:1", "c=Alice|p=Widget|n=int64:1",
+				"c=Bob|p=Doohickey|n=int64:1", "c=Bob|p=Widget|n=int64:1"},
+			wantUnreachableRoutes: 1,
+			pgSays: "four rows - a subquery the QUERY grouped yields NO row for an empty " +
+				"input, so the default must not reach it. The route is the bare-projection " +
+				"carrier gap the SELECT-star cell pins, not this shape's own"},
+		{issue: "#767", name: "cross_join_lateral_over_a_derived_table",
+			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o CROSS JOIN LATERAL (` +
+				`SELECT COUNT(*) AS n FROM (SELECT order_id FROM lat_item) d ` +
+				`WHERE d.order_id = o.id) s ORDER BY 1`,
+			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantUnreachableRoutes: 1},
+
 		{issue: "#767", name: "control_non_aggregated_lateral_inner",
 			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o JOIN LATERAL (` +
 				`SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
