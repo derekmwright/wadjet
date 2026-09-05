@@ -381,6 +381,14 @@ matches and a cast converts — same value, same refusal, same SQLSTATE. The
 raised and accepted `'0000-01-01'`; it now takes both its value and its
 refusal from the shared accept-set.
 
+A DATE, a PORT and a PROTOCOL are all stored in a signed 32-bit field, and a
+number with no room in one is `22003 integer out of range` — never a wrapped
+value. `3000000000::DATE` used to answer `-3543531-12-19`, a date rendered
+like any other; it is now an error on every execution path. (PostgreSQL has no
+integer-to-date cast at all — `3000000000::date` is `42846` there — so this
+cast is a wadjet superset, and inside a superset a value it cannot represent is
+loud.)
+
 `Date` takes the unambiguous year-first spellings PostgreSQL's default
 `DateStyle` reads exactly one way: a four-or-more-digit leading year with a
 `-`, `/` or `.` separator (`2026-01-02`, `2026-1-2`, `2026/01/02`,

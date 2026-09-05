@@ -1223,11 +1223,16 @@ func (v *Vector) SetValue(i int, val any) {
 		case int32:
 			v.Int32Data[i] = tv
 		case int:
-			v.Int32Data[i] = int32(tv)
+			// The same guard TypeInt32 takes above, for the same reason: PORT
+			// and PROTOCOL are int4-backed, a widened box narrows back here,
+			// and these three arms WRAPPED — `3000000000::PORT` stored
+			// -1294967296 with no error anywhere. #841 converted TypeInt32 and
+			// left its three int4-backed siblings behind (CodeQL #32/#33).
+			v.Int32Data[i] = v.int32OrRaise(int64(tv))
 		case int64:
-			v.Int32Data[i] = int32(tv)
+			v.Int32Data[i] = v.int32OrRaise(tv)
 		case float64:
-			v.Int32Data[i] = int32(tv)
+			v.Int32Data[i] = v.int32FromFloatOrRaise(tv)
 		default:
 			v.mismatch(val)
 		}
@@ -1259,9 +1264,13 @@ func (v *Vector) SetValue(i int, val any) {
 		case int32:
 			v.Int32Data[i] = tv
 		case int:
-			v.Int32Data[i] = int32(tv)
+			// A DATE is a day count in an int4, so it takes the same guard.
+			// `3000000000::DATE` used to store -1294967296 days and read back
+			// as -3543531-12-19 — a date, plausibly rendered, that nobody
+			// wrote (CodeQL #34).
+			v.Int32Data[i] = v.int32OrRaise(int64(tv))
 		case int64:
-			v.Int32Data[i] = int32(tv)
+			v.Int32Data[i] = v.int32OrRaise(tv)
 		case string:
 			days, ok := parseDateString(tv)
 			if !ok {
