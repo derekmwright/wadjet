@@ -171,11 +171,22 @@ func int64LeafValue(colType TypeID, v any) (int64, error) {
 	case float64:
 		return floatToInt64Leaf(colType, t, v)
 	case time.Time:
-		// TypeTimestamp when ingest hands a time.Time directly. The parquet
-		// schema declares TypeTimestamp as TimestampMillis, so encode in
-		// milliseconds — otherwise the row group stores 0 from the default
-		// arm and every query against the column reads zeros
-		// (TestTimestampStringComparison surfaced this).
+		// TypeTimestamp ONLY, when ingest hands a time.Time directly. The
+		// parquet schema declares TypeTimestamp as TimestampMillis, so encode
+		// in milliseconds — otherwise the row group stores 0 and every query
+		// against the column reads zeros (TestTimestampStringComparison
+		// surfaced this).
+		//
+		// The colType test is what keeps the two boundaries agreeing: INT64,
+		// IPV4, MAC and DURATION are INT64 leaves too, and this arm used to
+		// take a time.Time for any of them and store a millisecond count
+		// nobody asked for. ingest.checkType admits a time.Time for TIMESTAMP
+		// and DATE and for nothing else, and it is right to — a BIGINT column
+		// is a number, not an instant (round-2 review, the agreement gate's
+		// last numeric cell).
+		if colType != TypeTimestamp {
+			return 0, leafBoxError(colType, v)
+		}
 		return t.UnixMilli(), nil
 	case string:
 		// IPv4 and MAC text is converted by convertNetworkLiteral before a

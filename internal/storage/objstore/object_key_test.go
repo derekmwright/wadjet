@@ -3,6 +3,7 @@ package objstore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,8 +151,20 @@ func TestEveryStoreRefusesABadKeyOnEveryOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	mem := NewMemStore()
-	stores := map[string]Store{"FileStore": fs, "MemStore": mem}
-	for _, s := range stores {
+	// The S3 store too, pointed at a dead endpoint. It needs no server: the key
+	// rule runs BEFORE the first network call, so a KEY error rather than a
+	// dial error is itself the assertion that the guard is in front. Without
+	// this arm nothing held the third store to ADR-0012's "every store, every
+	// operation" (round-2 review P1).
+	s3, err := NewMinIOStore(MinIOConfig{Endpoint: "127.0.0.1:1", AccessKey: "x", SecretKey: "y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := map[string]Store{"FileStore": fs, "MemStore": mem, "S3": s3}
+	for name, s := range stores {
+		if name == "S3" {
+			continue // no server; only the refusals below are asked of it
+		}
 		if err := s.MakeBucket(ctx, "data"); err != nil {
 			t.Fatal(err)
 		}
@@ -181,9 +194,10 @@ func TestEveryStoreRefusesABadKeyOnEveryOperation(t *testing.T) {
 				GetReaderAt(context.Context, string, string) (ReaderAtCloser, int64, error)
 			})
 			if !ok {
-				// Not "skip": a store that loses GetReaderAt loses a checked
-				// operation, and this gate must say so rather than pass.
-				return nil
+				// Not "skip" and NOT nil: a store that loses GetReaderAt loses
+				// a checked operation, and this gate has to say so. Returning
+				// nil read as "refused" and hid it (round-2 review N1).
+				return fmt.Errorf("store %T has no GetReaderAt, so this gate no longer checks that operation", s)
 			}
 			rc, _, err := ra.GetReaderAt(ctx, b, k)
 			if rc != nil {
@@ -201,8 +215,15 @@ func TestEveryStoreRefusesABadKeyOnEveryOperation(t *testing.T) {
 	for _, key := range refusedObjectKeys {
 		for storeName, s := range stores {
 			for _, op := range ops {
-				if err := op.run(s, "data", key); err == nil {
-					t.Errorf("%s.%s accepted the key %q", storeName, op.name, key)
+				err := op.run(s, "data", key)
+				// NOT merely "some error". A store where a missing object
+				// already errors satisfies `err != nil` with its own "object
+				// not found", so this gate passed with three of MemStore's six
+				// key checks removed — it could not see the rule disappearing
+				// from an entire read path (round-2 review B2). The error has
+				// to BE the key refusal.
+				if !isKeyRefusal(err) {
+					t.Errorf("%s.%s did not REFUSE the key %q: %v", storeName, op.name, key, err)
 				}
 			}
 		}
@@ -214,14 +235,14 @@ func TestEveryStoreRefusesABadKeyOnEveryOperation(t *testing.T) {
 	// found there (round-1 review P4).
 	for _, bucket := range []string{"", "..", "../..", "a/b", `a\b`, "a\x00b"} {
 		for storeName, s := range stores {
-			if _, err := s.List(ctx, bucket, ListOptions{}); err == nil {
-				t.Errorf("%s.List accepted the bucket %q", storeName, bucket)
+			if _, err := s.List(ctx, bucket, ListOptions{}); !isBucketRefusal(err) {
+				t.Errorf("%s.List did not REFUSE the bucket %q: %v", storeName, bucket, err)
 			}
-			if _, err := s.BucketExists(ctx, bucket); err == nil {
-				t.Errorf("%s.BucketExists accepted the bucket %q", storeName, bucket)
+			if _, err := s.BucketExists(ctx, bucket); !isBucketRefusal(err) {
+				t.Errorf("%s.BucketExists did not REFUSE the bucket %q: %v", storeName, bucket, err)
 			}
-			if err := s.MakeBucket(ctx, bucket); err == nil {
-				t.Errorf("%s.MakeBucket accepted the bucket %q", storeName, bucket)
+			if err := s.MakeBucket(ctx, bucket); !isBucketRefusal(err) {
+				t.Errorf("%s.MakeBucket did not REFUSE the bucket %q: %v", storeName, bucket, err)
 			}
 		}
 	}
@@ -230,6 +251,15 @@ func TestEveryStoreRefusesABadKeyOnEveryOperation(t *testing.T) {
 	// what it means to refuse and nothing else.
 	const good = "tables/t/chunk_0.parquet"
 	for storeName, s := range stores {
+		if storeName == "S3" {
+			// No server behind this one, so an ordinary key reaches the
+			// network and fails there. What this asserts is that it does NOT
+			// fail as a key refusal: the guard let it past.
+			if err := s.Delete(ctx, "data", good); isKeyRefusal(err) {
+				t.Errorf("S3 refused an ordinary key as a key error: %v", err)
+			}
+			continue
+		}
 		if _, err := s.Put(ctx, "data", good, bytes.NewReader([]byte("x")), 1, ""); err != nil {
 			t.Fatalf("%s.Put refused an ordinary key: %v", storeName, err)
 		}
@@ -239,4 +269,18 @@ func TestEveryStoreRefusesABadKeyOnEveryOperation(t *testing.T) {
 			}
 		}
 	}
+}
+
+// isKeyRefusal reports whether err is ValidateObjectKey's refusal rather than
+// some other failure — a missing object, a dial error, a closed file. Matching
+// the phrase every one of those messages opens with is what lets the gate tell
+// "the RULE refused this" from "something else went wrong", and that difference
+// is the whole gate: without it, removing MemStore's key check from Get, Head
+// and GetReaderAt left "object not found" behind and the gate still passed.
+func isKeyRefusal(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "object key")
+}
+
+func isBucketRefusal(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "bucket name")
 }

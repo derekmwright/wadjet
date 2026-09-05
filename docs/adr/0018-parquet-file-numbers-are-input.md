@@ -674,14 +674,36 @@ rather than against the INSERT that carried it. It now asks `CheckLeafBox` —
 `decomposeLeaf`'s own sequence of questions, in `decomposeLeaf`'s own order —
 so the answer it gives is the answer the write will give.
 
+**Including inside a container.** The first cut of this asked `CheckLeafBox`
+for a flat column and left the container arm returning early into a four-case
+switch (DATE, TIMESTAMP, DURATION, DECIMAL, `return nil` for the rest), so a
+leaf inside an ARRAY, ROW or MAP got no range check, no box check and no VECTOR
+width check. Over 28 column shapes × 52 boxes that was 19 values the door
+admitted and the writer refuses, and every one was a container — an
+out-of-range INT32 in an `ARRAY(INT32)`, a short VECTOR in an
+`ARRAY(VECTOR(2))`, a `[]float32` where an INT64 belongs. Measured, one such
+row behind 99 good ones lost all 99 at the flush, with the error naming
+`column "element", row 99 of this write` inside a partition flush — the exact
+failure the paragraph above says the door exists to prevent, surviving in the
+three types the first gate's corpus omitted. `validateNestedLeaf` asks
+`CheckLeafBox` too now, so a leaf is held to one rule at every depth.
+
 What remains a deliberate SUPERSET, and is asserted as one rather than left to
 drift: the writer takes a `net.IP`, a `net.HardwareAddr` and a raw `[]byte` for
-an address column where the ingest door takes only text, because a caller of
-the exported `NativeWriter` is not obliged to come through ingest at all. The
-direction that matters is gated:
-`ingest.TestTheIngestBoundaryNeverAdmitsWhatTheWriterRefuses` asserts that
-everything the door admits, the writer can store, over every column shape ×
-every box class.
+an address column where the ingest door takes only text, and an `int` for a
+DURATION, because a caller of the exported `NativeWriter` is not obliged to
+come through ingest at all. A `time.Time` is NOT in that superset: the INT64
+leaf's `time.Time` arm now applies only to TIMESTAMP, because INT64, IPV4, MAC
+and DURATION are INT64 leaves too and storing a millisecond count into a
+BIGINT column is a value nobody asked for.
+
+The direction that matters is gated over EVERY column shape — all 22 types, the
+parameterized DECIMALs and VECTOR, the three containers, containers nested in
+containers, and the container-of-parameterized shapes whose leaf carries a
+width or a scale: `ingest.TestTheIngestBoundaryNeverAdmitsWhatTheWriterRefuses`
+(1770 cells) asserts that everything the door admits, the writer can store, and
+`ingest.TestTheIngestBoundaryRefusesABadValueInsideAContainer` names the
+container cells individually so a regression says which shape came back.
 
 ## Consequences
 
