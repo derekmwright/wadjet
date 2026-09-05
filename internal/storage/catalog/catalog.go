@@ -913,8 +913,17 @@ func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers 
 	return fmt.Errorf("delete marker update failed after %d CAS retries (table %q)", maxRetries, tableName)
 }
 
-// RemoveFiles removes data files and their delete markers from the manifest.
-// Used after compaction to clean up rewritten files.
+// RemoveFiles removes data files and their delete markers from the manifest,
+// unconditionally: it does not check that the paths are still there, and it
+// strips EVERY marker naming them whether or not anything applied them.
+//
+// It is no longer compaction's publication path, and both of those properties
+// are why. Compaction commits through CommitCompaction, which validates the
+// inputs (#895) and the marker snapshot (#894) and does the removal, the
+// addition and the marker change in one write (#893). This stays as the
+// low-level primitive for a caller that already knows what it is removing —
+// the type-matrix gate, the ANALYZE and torn-view tests — the same role
+// AddDeleteMarkers keeps beside CommitDML (ADR-0030).
 func (c *Catalog) RemoveFiles(_ context.Context, tableName string, filePaths []string) error {
 	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
