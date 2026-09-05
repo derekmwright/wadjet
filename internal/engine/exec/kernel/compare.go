@@ -2626,8 +2626,31 @@ func parseIPv4ToInt64(s string) (int64, bool) {
 // types cannot represent, which is what separates a refusal that is a defect
 // from one that is a deferral (#627).
 func IPv4PrefixLiteral(s string) bool {
+	// An explicit `/mask` is required, and that is PostgreSQL's own rule
+	// rather than a convenience: `'10/8'::inet` is the network 10.0.0.0/8 and
+	// `'192.168'::inet` is a 22P02 — the abbreviation without a mask is a
+	// CIDR-only grammar there. So a maskless abbreviation is a SYNTAX refusal
+	// (QuotedLitStatus's arm), not a representability one, and the two classes
+	// stay apart.
+	if !strings.ContainsRune(s, '/') {
+		return false
+	}
 	_, bits, ok := parquet.PgIPv4Pton(s)
 	return ok && bits != 32
+}
+
+// NetworkPrefixLiteral reports whether text is a PostgreSQL-VALID literal that
+// names a NETWORK rather than a host, for a bare-address column type. It is the
+// ONE predicate the plan-time refusal and the runtime one both read, so a
+// literal cannot be a network at one site and garbage at another.
+func NetworkPrefixLiteral(typ batch.TypeID, text string) bool {
+	switch typ {
+	case batch.TypeIPv4:
+		return IPv4PrefixLiteral(text)
+	case batch.TypeIPv6:
+		return IPv6PrefixLiteral(text)
+	}
+	return false
 }
 
 // IPv6PrefixLiteral is IPv4PrefixLiteral for the v6 spellings: an address with

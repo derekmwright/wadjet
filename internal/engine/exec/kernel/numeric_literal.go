@@ -111,6 +111,10 @@ func NumericTypeName(typ batch.TypeID) (string, bool) {
 		return "double precision", true
 	case batch.TypeDecimal:
 		return "numeric", true
+	case batch.TypeIPv4, batch.TypeIPv6:
+		// PostgreSQL's own name for both: it has one `inet` where this engine
+		// has two bare-address types, and a client can look `inet` up.
+		return "inet", true
 	case batch.TypeCIDR:
 		return "cidr", true
 	case batch.TypeMAC:
@@ -157,6 +161,33 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 		// order rather than erroring (#462). One reader, so the plan-time and
 		// runtime refusals cannot disagree.
 		if NewDecimalLiteral(text).Numeric() {
+			return NumConstOK, true
+		}
+		return NumConstSyntax, true
+	case batch.TypeIPv4, batch.TypeIPv6:
+		// The bare-address types. Their literal has TWO ways of not being a
+		// value this column can hold, and they are different answers:
+		//
+		//   'zzz'      names no address at all               22P02
+		//   '10/8'     names a NETWORK, which PostgreSQL accepts and a
+		//              bare-address column has no room for  0A000
+		//
+		// The second is NetworkPrefixLiteral's, not this function's — but the
+		// arm has to exist here so a literal reaches a decision at PLAN time
+		// at all. Without it the refusal lived in ONE evaluator
+		// (exec.networkConstError, reachable only when the vectorized filter
+		// declines to build a kernel), so the same query refused in a WHERE,
+		// answered inside a CASE, and on the DAG answered a WRONG NUMBER —
+		// the widened parser's zero reading. One classification, at typing
+		// time, for every arm and every site (#627 round 2, B1).
+		if NetworkPrefixLiteral(typ, text) {
+			return NumConstOK, true // NOT a syntax error; see RefuseNetworkPrefixLiteral
+		}
+		if typ == batch.TypeIPv4 {
+			if _, ok := IPv4LitKey(text); ok {
+				return NumConstOK, true
+			}
+		} else if _, ok := IPv6LitKey(text); ok {
 			return NumConstOK, true
 		}
 		return NumConstSyntax, true

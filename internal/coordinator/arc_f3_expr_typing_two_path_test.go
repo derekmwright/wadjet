@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // Arc F3's shapes on the DISTRIBUTED arms.
@@ -118,6 +120,65 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN c_i64 > '2' THEN 1 ELSE 0 END = 1`,
 		`SELECT COUNT(*) AS n FROM typemx WHERE c_i64 > '2'`)
 
+	// The NETWORK-LITERAL CENSUS (#627 round 2, B1). A literal's
+	// classification happens ONCE, at typing time, and every arm and every
+	// SITE gets the same answer. Before this the 0A000 lived in one evaluator
+	// — reachable only when the vectorized filter declined to build a kernel —
+	// so `c_ipv4 = '10/8'` refused in a WHERE clause on the single arm,
+	// ANSWERED 0 inside a CASE on that same arm, and on the DAG answered
+	// 4916 for `>` because the widened parser read the prefix as the address
+	// ZERO. Three dispositions for one query.
+	//
+	// Two classes, and they are different answers:
+	//   a network PREFIX on a bare-address column   0A000  (valid text, the
+	//                                                       TYPE is the limit)
+	//   text that names no address at all           22P02  (PostgreSQL's own)
+	for _, tc := range []struct{ col, lit, state string }{
+		{"c_ipv4", "10/8", "0A000"},
+		{"c_ipv4", "10.0.1/24", "0A000"},
+		{"c_ipv4", "192.168/16", "0A000"},
+		{"c_ipv6", "::1/64", "0A000"},
+		{"c_ipv6", "2001:db8::/32", "0A000"},
+		{"c_ipv4", "zzz", "22P02"},
+		{"c_ipv6", "zzz", "22P02"},
+		{"c_cidr", "zzz", "22P02"},
+	} {
+		for _, site := range f3NetSites(tc.col, tc.lit) {
+			f3RefuseOnEveryArmWithState(t, arms,
+				"network_literal/"+tc.col+"/"+tc.lit+"/"+site.name, site.sql, tc.state)
+		}
+	}
+	// The other side of that boundary: a literal the column CAN hold answers,
+	// at every site and on every arm. A refusal that swallowed these would be
+	// the ADR-0012 item 1 violation the census exists to prevent.
+	for _, tc := range []struct{ col, lit string }{
+		{"c_ipv4", "10.0.0.1"},
+		{"c_ipv4", "10.0.0.1/32"},
+		{"c_ipv6", "2001:db8::1"},
+		{"c_ipv6", "2001:db8::1/128"},
+		{"c_cidr", "10/8"},
+		{"c_cidr", "192.168"},
+		{"c_cidr", "239"},
+	} {
+		for _, site := range f3NetSites(tc.col, tc.lit) {
+			// PRE-EXISTING, pinned fail-on-agree: `c_ipv4 IN (<any host
+			// literal>)` answers on the single arm and ZERO on both DAG arms.
+			// Measured identically at dea4e795 with none of this arc's
+			// commits — `IN ('10.0.0.1')` is single 1 / dag 0 there — so it is
+			// not #627's, and the `=` spelling of the same predicate agrees on
+			// every arm. Filed with the arc's report; the cell stays here
+			// because this census is where the split is visible, and it FAILS
+			// when the two arms start agreeing.
+			if tc.col == "c_ipv4" && site.name == "in" {
+				f3SplitOnTheDAG(t, arms,
+					"network_literal_ok/"+tc.col+"/"+tc.lit+"/"+site.name, site.sql)
+				continue
+			}
+			f3AnswersOnEveryArm(t, arms,
+				"network_literal_ok/"+tc.col+"/"+tc.lit+"/"+site.name, site.sql)
+		}
+	}
+
 	// ---------------------------------------------------------------- #582
 	// A bytea literal in both of byteain's spellings, against the same row.
 	// The hex form is computed from the fixture's own value rather than
@@ -172,6 +233,104 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 	f3RunOnEveryArm(t, arms, "date_trunc_rendered",
 		`SELECT CAST(DATE_TRUNC('day', c_ts) AS STRING) AS v FROM typemx WHERE id = 1`,
 		[]string{"v=2023-11-14 00:00:00"})
+}
+
+// f3NetSites is the site list a network literal has to be classified the same
+// way at: the two the pre-round-2 refusal reached, the four it did not, and the
+// EMPTY-SCAN shape, which is the one that separates a plan-time decision from a
+// per-row one.
+func f3NetSites(col, lit string) []struct{ name, sql string } {
+	q := "'" + lit + "'"
+	return []struct{ name, sql string }{
+		{"eq", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s = %s`, col, q)},
+		{"ne", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s <> %s`, col, q)},
+		{"gt", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s > %s`, col, q)},
+		{"lt", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s < %s`, col, q)},
+		{"in", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s IN (%s)`, col, q)},
+		{"case", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN %s = %s THEN 1 ELSE 0 END = 1`, col, q)},
+		{"greatest", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE GREATEST(%s, %s) = %s`, col, q, col)},
+		{"projection", fmt.Sprintf(`SELECT COUNT(*) AS n FROM (SELECT %s = %s AS b FROM typemx) x WHERE b`, col, q)},
+		{"empty_scan", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE id < 0 AND %s = %s`, col, q)},
+	}
+}
+
+// f3RefuseOnEveryArmWithState asserts a refusal AND its SQLSTATE on every arm:
+// two arms refusing with two different classes is the same defect as one
+// refusing and one answering.
+func f3RefuseOnEveryArmWithState(t *testing.T, arms []struct {
+	name string
+	run  func(string) ([]string, error)
+}, name, sql, state string) {
+	t.Helper()
+	for _, arm := range arms {
+		t.Run(name+"/"+arm.name, func(t *testing.T) {
+			rows, err := arm.run(sql)
+			if err == nil {
+				t.Fatalf("answered %v; want %s\n  SQL: %s", rows, state, sql)
+			}
+			if got := sqlerr.StateOf(err); got != state {
+				t.Errorf("SQLSTATE %q, want %q\n  err: %v\n  SQL: %s", got, state, err, sql)
+			}
+		})
+	}
+}
+
+// f3AnswersOnEveryArm asserts a query is NOT refused, and that every arm
+// agrees on the number.
+func f3AnswersOnEveryArm(t *testing.T, arms []struct {
+	name string
+	run  func(string) ([]string, error)
+}, name, sql string) {
+	t.Helper()
+	var first string
+	for i, arm := range arms {
+		t.Run(name+"/"+arm.name, func(t *testing.T) {
+			got, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("REFUSED a literal this column can hold: %v\n  SQL: %s", err, sql)
+			}
+			j := strings.Join(got, ";")
+			if i == 0 {
+				first = j
+			} else if j != first {
+				t.Errorf("%s answers %s where the single arm answers %s\n  SQL: %s",
+					arm.name, j, first, sql)
+			}
+		})
+	}
+}
+
+// f3SplitOnTheDAG pins a PRE-EXISTING two-path split: the single arm answers
+// and both DAG arms answer ZERO. It fails when they agree, which is what makes
+// deleting it the proof that whoever owns the defect closed it.
+func f3SplitOnTheDAG(t *testing.T, arms []struct {
+	name string
+	run  func(string) ([]string, error)
+}, name, sql string) {
+	t.Helper()
+	t.Run(name+"/pinned_dag_split", func(t *testing.T) {
+		var single string
+		for _, arm := range arms {
+			got, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s REFUSED: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			j := strings.Join(got, ";")
+			if arm.name == "single" {
+				single = j
+				if j == "n=int64:0" {
+					t.Errorf("the single arm answers 0 too; this pin records that it "+
+						"answers and the DAG does not\n  SQL: %s", sql)
+				}
+				continue
+			}
+			if j != "n=int64:0" {
+				t.Errorf("%s answers %s where this pin records 0 — the split is CLOSED, "+
+					"so delete the pin and let the census assert agreement (single=%s)"+
+					"\n  SQL: %s", arm.name, j, single, sql)
+			}
+		}
+	})
 }
 
 // f3RunOnEveryArm asserts one query's rows on all three arms.

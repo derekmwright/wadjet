@@ -2,7 +2,6 @@ package exec
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"strings"
@@ -409,15 +408,25 @@ func bytesFilterVal(value any) string {
 	}
 }
 
+// parseIPv4FilterVal is the row-at-a-time path's IPv4 literal, and it
+// DELEGATES to the kernel's one parser for the reason parseMACFilterVal's
+// comment gives one type over: it carried a second copy of the grammar, so
+// `c_ipv4 = '10.0.0.1/32'` — which PostgreSQL reads as the address itself —
+// was the address on the vectorized arm and the ZERO here, and the DAG (which
+// reaches this copy) answered 0 rows where the single arm answered 1. The same
+// zero reading turned #627's network-prefix refusal into a wrong NUMBER on the
+// DAG (round 2, B1).
+//
+// ok=false still yields 0, and that is safe now for the reason it was not
+// before: the literal has already been classified at PLAN time
+// (kernel.QuotedLitStatus's IPv4 arm plus expr.RefuseNetworkPrefixLiteral), so
+// a literal this function cannot read never reaches a row.
 func parseIPv4FilterVal(value any) int64 {
-	s := fmt.Sprint(value)
-	ip := net.ParseIP(s)
-	if ip != nil {
-		if ip4 := ip.To4(); ip4 != nil {
-			return int64(binary.BigEndian.Uint32(ip4))
-		}
+	n, ok := kernel.IPv4LitKey(fmt.Sprint(value))
+	if !ok {
+		return 0
 	}
-	return 0
+	return n
 }
 
 // parseMACFilterVal is the row-at-a-time path's MAC literal, and it DELEGATES
@@ -437,8 +446,14 @@ func parseMACFilterVal(value any) int64 {
 	return n
 }
 
+// parseIPv6FilterVal delegates for parseIPv4FilterVal's reason: `'::1/128'` is
+// the address on the server and on the vectorized arm, and was the empty key
+// here.
 func parseIPv6FilterVal(value any) string {
 	s := fmt.Sprint(value)
+	if key, ok := kernel.IPv6LitKey(s); ok && key != "" {
+		return key
+	}
 	ip := net.ParseIP(s)
 	if ip != nil {
 		return string(ip.To16())
@@ -874,7 +889,7 @@ func networkConstError(typ batch.TypeID, value any) error {
 		if _, ok := kernel.IPv6LitKey(fmt.Sprint(value)); ok {
 			return nil
 		}
-		if kernel.IPv6PrefixLiteral(fmt.Sprint(value)) {
+		if kernel.NetworkPrefixLiteral(batch.TypeIPv6, fmt.Sprint(value)) {
 			return networkPrefixUnsupported("IPV6", fmt.Sprint(value))
 		}
 		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))
@@ -882,7 +897,7 @@ func networkConstError(typ batch.TypeID, value any) error {
 		if _, ok := kernel.IPv4LitKey(fmt.Sprint(value)); ok {
 			return nil
 		}
-		if kernel.IPv4PrefixLiteral(fmt.Sprint(value)) {
+		if kernel.NetworkPrefixLiteral(batch.TypeIPv4, fmt.Sprint(value)) {
 			return networkPrefixUnsupported("IPV4", fmt.Sprint(value))
 		}
 		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))

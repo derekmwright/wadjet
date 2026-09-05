@@ -5384,16 +5384,15 @@ func parseUUIDHex(s string) []byte {
 // writer.go's prepareRows agree on this: the address's big-endian uint32
 // widened to int64. ok is false for anything that isn't a valid IPv4 text
 // form (including an IPv6 literal — To4 refuses it).
+// ipv4LitToInt64 DELEGATES to the kernel's one parser, for the reason
+// macLitToInt64 below already does: a third copy of the grammar is a third
+// accept-set, and this one is the copy the COMPILED comparison node reads —
+// which is the evaluator the DAG reaches. `c_ipv4 = '10.0.0.1/32'` is the
+// address itself on the server and on the vectorized arm, and this copy read
+// it as no address at all, so the DAG answered 0 rows where the single arm
+// answered 1 (#627 round 2, B1).
 func ipv4LitToInt64(s string) (int64, bool) {
-	ip := net.ParseIP(s)
-	if ip == nil {
-		return 0, false
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return 0, false
-	}
-	return int64(binary.BigEndian.Uint32(ip4)), true
+	return kernel.IPv4LitKey(s)
 }
 
 // macLitToInt64 parses a MAC literal into the int64 encoding TypeMAC columns

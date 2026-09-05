@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // This file is the expression layer's half of the one literal-vs-numeric-column
@@ -141,6 +142,28 @@ func RefuseNumericLiteral(typ batch.TypeID, text string) error {
 		return nil
 	}
 	return numericLitError(typ, text, st)
+}
+
+// RefuseNetworkPrefixLiteral is the OTHER way a network literal can fail to be
+// a value its column can hold, and it is a different answer from a syntax
+// error: `'10/8'` and `'::1/64'` are ordinary `inet` values on the server —
+// NETWORKS — and an IPV4/IPV6 column holds a bare address with no room for a
+// prefix. 0A000 (feature_not_supported), never 22P02, because the text is
+// valid and the engine's TYPE is the limit.
+//
+// It is asked at PLAN time beside RefuseNumericLiteral and at runtime by
+// exec.networkConstError, and both read kernel.NetworkPrefixLiteral, so one
+// literal cannot be a network at one site and garbage at another. Before #627
+// round 2 the 0A000 existed at ONE evaluator: the same query refused in a
+// WHERE clause, answered inside a CASE, and on the DAG answered a WRONG NUMBER
+// (the widened parser read the prefix as the address zero).
+func RefuseNetworkPrefixLiteral(typ batch.TypeID, text string) error {
+	if !kernel.NetworkPrefixLiteral(typ, text) {
+		return nil
+	}
+	return sqlerr.New("0A000", "a network prefix is not representable in a %s column: %q "+
+		"(PostgreSQL reads it as a network; use a CIDR column, or compare against the "+
+		"address alone)", typ.String(), text)
 }
 
 func numericLitError(typ batch.TypeID, text string, st kernel.NumConstStatus) error {

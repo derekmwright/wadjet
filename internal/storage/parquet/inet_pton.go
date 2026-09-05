@@ -56,8 +56,8 @@ func PgIPv4Pton(s string) (addr [4]byte, bits int, ok bool) {
 			}
 			i++
 		}
-		if i == start || i-start > 3 {
-			return addr, 0, false // an empty octet, or more than three digits
+		if i == start {
+			return addr, 0, false // an empty octet
 		}
 		addr[octets] = byte(v)
 		octets++
@@ -89,20 +89,43 @@ func PgIPv4Pton(s string) (addr [4]byte, bits int, ok bool) {
 		}
 		return addr, bits, true
 	}
-	switch {
-	case addr[0] >= 240:
-		bits = 32
-	case addr[0] >= 224:
-		bits = 4
-	case addr[0] >= 192:
-		bits = 24
-	case addr[0] >= 128:
-		bits = 16
-	default:
-		bits = 8
-	}
+	bits = pgClassfulBits(addr[0])
 	if octets > 1 && bits < octets*8 {
 		bits = octets * 8
 	}
 	return addr, bits, true
+}
+
+// pgClassfulBits is the prefix length PostgreSQL infers for a one-octet cidr
+// input, as MEASURED over all 256 values rather than derived from the classful
+// rule it half-follows:
+//
+//	SELECT i, (i::text)::cidr FROM generate_series(0,255) i
+//
+//	0-127  /8      192-223  /24     225-239  /8
+//	128-191 /16    224      /4      240-255  /32
+//
+// 224 is the whole of the /4 band and 225-239 are /8, which no reading of "the
+// class of the first octet" predicts — the class-D default is 4 and the widen
+// step that would take it to 8 fires for every value in the band except 224
+// itself. The table is the authority; the transcript is
+// scratchpad/arcs8/f3_expr_typing3/pg_octets.txt.
+//
+// Reading the whole 224-239 band as /4 was #627's own defect: `WHERE cd = '239'`
+// answered ZERO rows where the server finds 239.0.0.0/8, for every abbreviated
+// multicast literal a user writes, and the base refused those literals loudly.
+func pgClassfulBits(first byte) int {
+	switch {
+	case first >= 240:
+		return 32
+	case first == 224:
+		return 4
+	case first >= 224:
+		return 8
+	case first >= 192:
+		return 24
+	case first >= 128:
+		return 16
+	}
+	return 8
 }

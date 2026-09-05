@@ -126,17 +126,23 @@ func TestQuotedLitStatusMatchesPostgresInputGrammar(t *testing.T) {
 // no rule must answer ok=false, so no site can refuse a literal against it by
 // accident.
 //
-// The network types were ALL on this list until #627: a refusal is only ever
-// safe on a parser whose accept-set is a SUPERSET of PostgreSQL's, and theirs
-// were stricter. CIDR, MAC and UUID have left it — CIDR reads the abbreviated
-// grammar, MAC the six spellings, UUID the brace/no-dash/uppercase forms —
-// and TestNetworkLiteralRefusalIsOnePredicate is where their rule is asserted.
-// IPv4 and IPv6 stay, because a prefix narrower than the host width is
-// PostgreSQL-valid text a bare-address column cannot hold.
+// Every NETWORK type has left this list. CIDR, MAC and UUID left it in #627
+// because their parsers became supersets of PostgreSQL's; IPv4 and IPv6 left
+// it in round 2, and their arm answers a different question — "does this text
+// name a value THIS COLUMN can hold" — which has two failure modes and needs
+// both classified in one place:
+//
+//	'zzz'    names no address at all              22P02, this function
+//	'10/8'   names a NETWORK a bare address type
+//	         has no room for                      0A000, RefuseNetworkPrefixLiteral
+//
+// Leaving them off the list is what confined the second answer to ONE
+// evaluator, so the same query refused in a WHERE clause, answered inside a
+// CASE, and answered a wrong NUMBER on the DAG (B1).
 func TestQuotedLitStatusHasNoRuleForTheRest(t *testing.T) {
 	for _, typ := range []batch.TypeID{
 		batch.TypeBool, batch.TypeString, batch.TypeBytes, batch.TypeTimestamp,
-		batch.TypeDate, batch.TypeIPv4, batch.TypeIPv6, batch.TypeArray,
+		batch.TypeDate, batch.TypeArray,
 		batch.TypeRow, batch.TypeMap, batch.TypeVector,
 	} {
 		if _, ok := QuotedLitStatus(typ, "definitely not a number"); ok {

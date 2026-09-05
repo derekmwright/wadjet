@@ -406,6 +406,13 @@ func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) 
 // Types with no rule return nil: a legal comparison must still work, and the
 // binder refuses only what PostgreSQL refuses.
 func refuseLiteralForType(typ parquet.TypeID, text string) error {
+	// A network PREFIX met by a bare-address column is 0A000 and not a syntax
+	// error, so it is asked first: `'10/8'` IS valid inet text, and calling it
+	// invalid input would be the wrong claim about PostgreSQL's own grammar
+	// (#627 round 2, B1).
+	if err := expr.RefuseNetworkPrefixLiteral(typ, text); err != nil {
+		return err
+	}
 	return expr.RefuseNumericLiteral(typ, text)
 }
 

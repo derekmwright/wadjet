@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"net"
+	"strconv"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -78,6 +79,72 @@ func TestAbbreviatedInetGrammarMatchesPostgres(t *testing.T) {
 				t.Errorf("parquet.PgIPv4Pton(%q) accepted; PostgreSQL 17.11 raises 22P02", in)
 			}
 		})
+	}
+}
+
+// Every one of the 256 first-octet values, measured on live PostgreSQL 17.11
+// with `SELECT i, (i::text)::cidr FROM generate_series(0,255) i` (transcript:
+// scratchpad/arcs8/f3_expr_typing3/pg_octets.txt).
+//
+// The single-cell table above could not see this: reading the whole 224-239
+// band as /4 agrees with the server for 224 and disagrees for the other
+// fifteen, so `WHERE cd = '239'` answered ZERO rows where PostgreSQL finds
+// 239.0.0.0/8 — silently wrong where the base refused loudly. A rule sampled
+// at one point per band is a rule not measured; this asserts the whole domain.
+func TestEveryFirstOctetMaskMatchesPostgres(t *testing.T) {
+	want := func(i int) int {
+		switch {
+		case i >= 240:
+			return 32
+		case i == 224:
+			return 4
+		case i >= 224:
+			return 8
+		case i >= 192:
+			return 24
+		case i >= 128:
+			return 16
+		}
+		return 8
+	}
+	for i := 0; i < 256; i++ {
+		in := strconv.Itoa(i)
+		addr, bits, ok := parquet.PgIPv4Pton(in)
+		if !ok {
+			t.Errorf("PgIPv4Pton(%q) refused; PostgreSQL reads it as %d.0.0.0/%d", in, i, want(i))
+			continue
+		}
+		if int(addr[0]) != i || addr[1] != 0 || addr[2] != 0 || addr[3] != 0 {
+			t.Errorf("PgIPv4Pton(%q) = %v, want %d.0.0.0", in, addr, i)
+		}
+		if bits != want(i) {
+			t.Errorf("PgIPv4Pton(%q) masks /%d, PostgreSQL 17.11 masks /%d", in, bits, want(i))
+		}
+	}
+	// The two-octet band is unaffected by the correction — the widen step
+	// covers it — and it is asserted here so a future edit to the table cannot
+	// move it without saying so.
+	for _, c := range []struct {
+		in   string
+		bits int
+	}{{"224.1", 16}, {"225.1", 16}, {"239.1", 16}, {"240.1", 32}, {"224.0.0", 24}} {
+		if _, bits, ok := parquet.PgIPv4Pton(c.in); !ok || bits != c.bits {
+			t.Errorf("PgIPv4Pton(%q) masks /%d (ok=%v), PostgreSQL masks /%d", c.in, bits, ok, c.bits)
+		}
+	}
+	// LEADING ZEROS are digits, not a separate form: `'00010'::cidr` is
+	// 10.0.0.0/8 on the server, and a three-digit cap refused it (ADR-0012
+	// item 1 — never refuse what PostgreSQL accepts).
+	for _, in := range []string{"00010", "010", "0000000010", "010.001"} {
+		if _, _, ok := parquet.PgIPv4Pton(in); !ok {
+			t.Errorf("PgIPv4Pton(%q) refused; PostgreSQL accepts it", in)
+		}
+	}
+	// An octet past 255 is still refused however it is spelled.
+	for _, in := range []string{"256", "0256", "00000256", "10.256"} {
+		if _, _, ok := parquet.PgIPv4Pton(in); ok {
+			t.Errorf("PgIPv4Pton(%q) accepted; PostgreSQL raises 22P02", in)
+		}
 	}
 }
 
@@ -171,16 +238,40 @@ func TestNetworkLiteralRefusalIsOnePredicate(t *testing.T) {
 		})
 	}
 
-	// The BOUNDARY, attempted from both sides: IPv4 and IPv6 have no
-	// plan-time rule at all, because a prefix narrower than the host width is
-	// PostgreSQL-valid text this engine's bare-address types cannot hold, and
-	// a refusal built on that parser would refuse valid input at plan time.
-	for _, typ := range []batch.TypeID{batch.TypeIPv4, batch.TypeIPv6} {
-		if _, have := QuotedLitStatus(typ, "10/8"); have {
-			t.Errorf("%v has a plan-time literal rule; it must not until a prefix is "+
-				"representable in it, or TestPlanTimeNeverRefusesPGValidNetworkLiteral's "+
-				"`{v4, 10/8}` boundary becomes a refusal of PostgreSQL-valid text", typ)
-		}
+	// IPv4 and IPv6 have a plan-time rule too since round 2, and it answers
+	// with TWO classes — the split QuotedLitStatus alone cannot express, so
+	// the network-prefix half is NetworkPrefixLiteral's. Both are asked at the
+	// same plan-time site, so a literal cannot be garbage at one evaluator and
+	// a network at another.
+	for _, c := range []struct {
+		typ     batch.TypeID
+		text    string
+		refused bool // by QuotedLitStatus, i.e. 22P02
+		prefix  bool // by NetworkPrefixLiteral, i.e. 0A000
+	}{
+		{batch.TypeIPv4, "10.0.0.1", false, false},
+		{batch.TypeIPv4, "10.0.0.1/32", false, false},
+		{batch.TypeIPv4, "10/8", false, true},
+		{batch.TypeIPv4, "10.0.1/24", false, true},
+		{batch.TypeIPv4, "zzz", true, false},
+		{batch.TypeIPv4, "192.168", true, false}, // PG's inet refuses it too
+		{batch.TypeIPv6, "2001:db8::1", false, false},
+		{batch.TypeIPv6, "2001:db8::1/128", false, false},
+		{batch.TypeIPv6, "::1/64", false, true},
+		{batch.TypeIPv6, "zzz", true, false},
+	} {
+		t.Run("bare_address/"+c.typ.String()+"_"+c.text, func(t *testing.T) {
+			st, have := QuotedLitStatus(c.typ, c.text)
+			if !have {
+				t.Fatalf("%v has no plan-time rule; the refusal cannot be decided once", c.typ)
+			}
+			if refused := st != NumConstOK; refused != c.refused {
+				t.Errorf("QuotedLitStatus(%v, %q) refused=%v, want %v", c.typ, c.text, refused, c.refused)
+			}
+			if got := NetworkPrefixLiteral(c.typ, c.text); got != c.prefix {
+				t.Errorf("NetworkPrefixLiteral(%v, %q) = %v, want %v", c.typ, c.text, got, c.prefix)
+			}
+		})
 	}
 
 	// A HOST-width prefix is the address itself on the server, and it is

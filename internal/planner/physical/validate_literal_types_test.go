@@ -126,7 +126,13 @@ func TestPlanTimeNeverRefusesPGValidNetworkLiteral(t *testing.T) {
 		// explicit mask, `'10/8'::inet` — and this entry asserted the
 		// opposite, so the guard was holding the plan-time validator to a
 		// claim the server does not make. Measured live on 17 (#627).
-		{"v4", "10/8"},
+		// `{"v4", "10/8"}` moved to the representability list below. It is
+		// PG-valid text and it IS refused now — with 0A000, because an IPV4
+		// column holds a bare address and `'10/8'` is a NETWORK, not because
+		// the parser could not read it. The distinction is the whole point of
+		// this guard: a SYNTAX refusal may never eat PG-valid text, and a
+		// TYPE that cannot hold a value must say so in one class, at one
+		// place, on every arm (#627 round 2, B1).
 		{"v6", "::ffff:1.2.3.4"},
 		// macaddr notations PostgreSQL accepts.
 		{"m", "08002b:010203"},
@@ -157,6 +163,58 @@ func TestPlanTimeNeverRefusesPGValidNetworkLiteral(t *testing.T) {
 				info := mustExtract(t, sql)
 				if err := validateColumns(context.Background(), cat, info); err != nil {
 					t.Fatalf("plan-time refused PG-valid literal %q at %q: %v", b.lit, sql, err)
+				}
+			})
+		}
+	}
+
+	// The OTHER half of the same rule: a literal PostgreSQL accepts that this
+	// engine's TYPE cannot hold is refused HERE, at plan time, with 0A000 —
+	// one class, before any row, so every arm and every site agree. It used to
+	// be refused at ONE evaluator, which made the same query refuse in a WHERE
+	// clause, answer inside a CASE, and answer a WRONG NUMBER on the DAG.
+	//
+	// 0A000 and never 22P02: calling `'10/8'` invalid input syntax would be a
+	// false claim about PostgreSQL's grammar, and a client retrying with a
+	// "corrected" literal would have nothing to correct.
+	for _, b := range []struct{ col, lit string }{
+		{"v4", "10/8"},
+		{"v4", "10.0.1/24"},
+		{"v4", "192.168/16"},
+		{"v6", "::1/64"},
+		{"v6", "2001:db8::/32"},
+	} {
+		for _, s := range sites {
+			t.Run("prefix_"+s.name+"_"+b.col+"_"+b.lit, func(t *testing.T) {
+				sql := strings.NewReplacer("@c", b.col, "@l", "'"+b.lit+"'").Replace(s.tmpl)
+				info := mustExtract(t, sql)
+				err := validateColumns(context.Background(), cat, info)
+				if err == nil {
+					t.Fatalf("plan-time ANSWERED %q at %q; a network prefix has no value in "+
+						"a bare-address column and the refusal must be decided here", b.lit, sql)
+				}
+				if got := sqlerr.StateOf(err); got != "0A000" {
+					t.Errorf("SQLSTATE %q, want 0A000 — %q is PostgreSQL-VALID text and the "+
+						"engine's TYPE is the limit\n  err: %v\n  SQL: %s", got, b.lit, err, sql)
+				}
+			})
+		}
+	}
+
+	// And the host-width spellings, which ARE representable, still validate:
+	// the refusal must not widen into them.
+	for _, b := range []struct{ col, lit string }{
+		{"v4", "10.0.0.1"},
+		{"v4", "10.0.0.1/32"},
+		{"v6", "2001:db8::1"},
+		{"v6", "2001:db8::1/128"},
+	} {
+		for _, s := range sites {
+			t.Run("host_"+s.name+"_"+b.col+"_"+b.lit, func(t *testing.T) {
+				sql := strings.NewReplacer("@c", b.col, "@l", "'"+b.lit+"'").Replace(s.tmpl)
+				info := mustExtract(t, sql)
+				if err := validateColumns(context.Background(), cat, info); err != nil {
+					t.Fatalf("plan-time refused a host literal %q at %q: %v", b.lit, sql, err)
 				}
 			})
 		}
