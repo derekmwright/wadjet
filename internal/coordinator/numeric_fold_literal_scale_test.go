@@ -199,21 +199,29 @@ func TestLiteralScaleInADecimalFold(t *testing.T) {
 				}
 				// And the TEXT is pinned where it differs, so the rendering
 				// residual cannot drift or be fixed unnoticed (#764).
-				want := c.render
-				if want == "" {
-					want = c.want
-				}
-				if got == want {
-					continue
-				}
-				if got == c.want {
+				//
+				// The "this residual has CLOSED" branch is asked FIRST, and
+				// the order is load-bearing: with the equality tested first,
+				// an entry whose `render` had been edited to equal `want`
+				// would go on passing the day the engine started printing
+				// PostgreSQL's own text, and the pin would quietly stop being
+				// one (round-2 review, N). Keyed on `c.render != ""` rather
+				// than on the two strings, it cannot be edited away without
+				// deleting the pin outright — which is the fix's proof anyway.
+				if c.render != "" && got == c.want {
 					t.Errorf("%s: %s now prints PostgreSQL's own text (%s) — the fold "+
 						"renders each value at its own scale, so drop this entry's "+
 						"`render` pin", arm.name, sql, got)
 					continue
 				}
-				t.Errorf("%s: %s\n  printed %s\n  pinned  %s\n  PostgreSQL 17.11: %s",
-					arm.name, sql, got, want, c.want)
+				want := c.render
+				if want == "" {
+					want = c.want
+				}
+				if got != want {
+					t.Errorf("%s: %s\n  printed %s\n  pinned  %s\n  PostgreSQL 17.11: %s",
+						arm.name, sql, got, want, c.want)
+				}
 			}
 		})
 	}

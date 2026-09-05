@@ -16,7 +16,13 @@ import (
 //	MAP(DECIMAL(18,4), STRING) key 12.75        -> "127500.0000"  scaled twice
 //	MAP(DECIMAL(9,2),  STRING) key 12.75        -> "1275.00"      the same, x10^2
 //	MAP(DECIMAL(18,0), STRING) key 13           -> "13"           right (10^0)
-//	MAP(DATE, STRING)          key 2023-11-14   -> NULL           the key is LOST
+//
+// The DATE and TIMESTAMP faces of "a map key is handed to the child as text"
+// are NOT gated here and this file makes no claim about them: a probe found
+// `MAP(DATE, STRING)` losing its key, but it is lost in `batch.FromRows`,
+// BEFORE parquet — a different layer from the one this test pins, and one
+// whose in-memory control is the thing that fails. Naming them here without a
+// cell would be a claim with no fixture; they are in the arc report as a lead.
 //
 // while the DECIMAL map VALUE, a ROW field, an ARRAY-of-ROW field and an ARRAY
 // of ARRAY all round-trip correctly. The defect is every family whose map key
