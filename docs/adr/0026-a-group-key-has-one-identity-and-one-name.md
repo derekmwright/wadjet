@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is CLOSED, and it was TWO defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT.
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -729,6 +729,21 @@ three apart is what closed them, because they are TWO defects:
   and the CLASS the gather's renames already carry; a producer whose output is
   not that shape gets no slot and keeps the name path, because a slot read off
   a model that does not hold is worse than the name it replaces.
+
+**TWO SPELLINGS ARE NOT CLOSED, and the residual stays open for them**
+(2026-09-05, round-1 review B3). The collision under a SET-OP wrapper
+(`SELECT u.g, u.x FROM (…collision…) u UNION ALL SELECT 99, 99 …`) and under a
+DISTINCT over the same derived wrapper both answer the group KEY under both
+names on `dag` and `dagshuf`, at base and at tip. One mechanism explains them
+and the naming exception ADR-0012 now records:
+`physical.findOutputProjectionNode` answers nil for any root that is not
+Project / Sort / Limit / Filter / Distinct, so a SET-OP root emits no gather
+`OutputRenames` at all — the class walk never runs and there is nothing for
+`pinProjectSpecSlots` to pin — and `aggregateEmittedSlots` independently
+declines any producer carrying `UnionArms`. Closing them is the union stage
+publishing its leftmost arm's output identity, not a widening of the two sites
+above. Pinned fail-on-agree at `coordinator.TestArcF4BoundariesArePinned`
+(`785/under-a-set-op-wrapper`, `785/under-a-distinct`).
 
 `785/nested-in-a-derived-table` — ONE wrapper, right on all four arms before —
 remains the control, and two cells were added to attempt the boundary from both

@@ -53,6 +53,11 @@ func TestOutputColumnNameMatchesPostgres(t *testing.T) {
 		{"SELECT NULLIF(g, 0) FROM t", "nullif"},
 		{"SELECT GREATEST(g, 0) FROM t", "greatest"},
 		{"SELECT EXTRACT(YEAR FROM d) FROM t", "extract"},
+		// The other two constructs this parser REWRITES: PostgreSQL names the
+		// column after what the query wrote, not after `strpos` / `element_at`.
+		{"SELECT POSITION('a' IN s) FROM t", "position"},
+		{"SELECT arr[1] FROM t", "arr"},
+		{"SELECT t.arr[1] FROM t", "arr"},
 		// CASE, EXISTS and an array literal are named after the construct.
 		{"SELECT CASE WHEN g > 1 THEN 1 ELSE 0 END FROM t", "case"},
 		{"SELECT EXISTS (SELECT 1) FROM t", "exists"},

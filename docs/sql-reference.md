@@ -956,8 +956,18 @@ item WITHOUT one takes PostgreSQL's name for it:
 | a scalar subquery — `(SELECT g FROM t LIMIT 1)` | `g` |
 | anything with no natural name — `g + 1`, `-g`, `1`, `g IS NULL`, `g IN (1,2)` | `?column?` |
 
+**One exception: a SET OPERATION.** `SELECT g + 1 FROM t UNION ALL SELECT g + 2
+FROM t` publishes `g + 1` here where PostgreSQL publishes `?column?`, on every
+execution path and both doors. A set operation's output columns are named by its
+LEFTMOST arm in PostgreSQL; this engine names them from the arm's own resolution
+spelling, and the rule above is not applied there. Alias the arm's items to
+choose the name.
+
 Several columns may be called `?column?`, or `count`, in one result — a slot's
-identity is its POSITION (see below), so that is not a collision.
+identity is its POSITION (see below), so that is not a collision. A JSON result object cannot represent two
+such columns, so the HTTP door sends a positional `values` array beside `rows`
+whenever the names are not unique, and the gRPC door fills `Row.values` for the
+same case.
 
 The name a query publishes is not the name it RESOLVES by, and one place shows
 the difference. An enclosing query refers to an unnamed derived column by the

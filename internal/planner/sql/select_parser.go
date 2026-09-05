@@ -1854,9 +1854,14 @@ func (p *selectParser) parsePostfix() (Node, error) {
 			if _, err := p.expect(TokenRBracket); err != nil {
 				return nil, fmt.Errorf("expected ] after subscript")
 			}
+			// PostgreSQL names an unaliased subscript after the CONTAINER —
+			// `SELECT arr[1]` is `arr` — not after the function this parser
+			// lowers it to (#732). The label is the container's own published
+			// name, which is the same question one level down.
 			expr = &FuncCallNode{
-				Name: "element_at",
-				Args: []Node{expr, index},
+				Name:        "element_at",
+				Args:        []Node{expr, index},
+				OutputLabel: exprOutputName(expr),
 			}
 		case TokenJSONArrow:
 			// JSON field access: expr -> key → json_extract(expr, key)
@@ -2757,7 +2762,11 @@ func (p *selectParser) parsePositionExpr() (Node, error) {
 	if _, err := p.expect(TokenRParen); err != nil {
 		return nil, fmt.Errorf("expected ) after POSITION")
 	}
-	return &FuncCallNode{Name: "strpos", Args: []Node{haystack, needle}}, nil
+	// PostgreSQL labels an unaliased POSITION after the CONSTRUCT — `position`
+	// — not after the function this parser rewrites it to (#732; the same
+	// class as EXTRACT and TRIM).
+	return &FuncCallNode{Name: "strpos", Args: []Node{haystack, needle},
+		OutputLabel: "position"}, nil
 }
 
 // parseTrimExpr parses TRIM with optional LEADING/TRAILING/BOTH syntax.

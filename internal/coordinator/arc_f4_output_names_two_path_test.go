@@ -23,6 +23,14 @@ import (
 // that passes on one arm and not the other is the expected failure mode and is
 // why every cell drives all four.
 //
+// This gate, `sql.TestOutputColumnNameMatchesPostgres` and the wire arm's
+// `Unaliased*` entries are the EVIDENCE for this arc. The TPC-H stage-dump
+// golden is not: it records a stage's ID, type, column lists, deps and op
+// counts — not `OutputRename.To`, not `ProjectExprSpec.SourceSlot` — and every
+// computed TPC-H item is aliased, so it is structurally blind to both
+// mechanisms. That it is unchanged says no plan SHAPE moved, which is a
+// different and smaller claim (round-1 review P5).
+//
 // The name is a SECOND name and not a rewrite of the engine's own spelling: an
 // aggregate's output column IS `logical.AggExpr.OutputCol`, which GROUP BY,
 // HAVING and ORDER BY resolve against, and `SELECT COUNT(*), COUNT(g)` legally
@@ -43,6 +51,13 @@ func TestArcF4OutputColumnNamesTwoPath(t *testing.T) {
 		// pin records what an arm answers today where that is not
 		// PostgreSQL's answer. A pin that starts agreeing FAILS.
 		pin map[string]string
+		// wantRoute names the local-route counter a DAG arm MUST move for this
+		// shape, or "" when the DAG must EXECUTE it. Declaring it is the point:
+		// a routed cell's name was published by the coordinator's own
+		// single-process pipeline, so it proves nothing about the gather's
+		// OutputRename.To, and a cell that silently started routing would look
+		// like coverage it is not (COMMON's routing rule; review P2).
+		wantRoute string
 	}{
 		// --- no natural name: `?column?` ---------------------------------
 		{name: "arithmetic",
@@ -90,6 +105,10 @@ func TestArcF4OutputColumnNamesTwoPath(t *testing.T) {
 		{name: "trim-is-btrim",
 			sql:  "SELECT TRIM(' a ') FROM typemx WHERE id < 2",
 			want: "btrim | a | a"},
+		// …and so does POSITION, which this parser lowers to `strpos`.
+		{name: "position-is-position",
+			sql:  "SELECT POSITION('-' IN c_str) FROM typemx WHERE id < 2 ORDER BY 1",
+			want: "position | 2 | 2"},
 
 		// --- an AGGREGATE takes the function's name too -------------------
 		{name: "aggregate",
@@ -130,9 +149,14 @@ func TestArcF4OutputColumnNamesTwoPath(t *testing.T) {
 		{name: "row-field-path",
 			sql:  "SELECT (c_row).b FROM typemx_nested WHERE id < 2 ORDER BY 1",
 			want: "b | 0 | 11"},
+		// The DAG has no stage lowering for a SELECT-list scalar subquery and
+		// answers it on the coordinator's local pipeline (#659's route), so
+		// this cell's DAG arms are that pipeline. Declared, not hidden: what
+		// it still proves is that the two engines' naming agrees.
 		{name: "scalar-subquery",
-			sql:  "SELECT (SELECT MAX(g) FROM typemx) FROM typemx WHERE id < 2",
-			want: "max | 6 | 6"},
+			sql:       "SELECT (SELECT MAX(g) FROM typemx) FROM typemx WHERE id < 2",
+			want:      "max | 6 | 6",
+			wantRoute: "scalar projection"},
 
 		// --- through a derived table -------------------------------------
 		// `SELECT *` over a block whose item has no name publishes that
@@ -146,9 +170,41 @@ func TestArcF4OutputColumnNamesTwoPath(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			for _, arm := range arms {
+				// The routing counters, taken around the run. Rows alone
+				// cannot tell "the DAG executed this" from "the DAG refused it
+				// and the coordinator answered on its local pipeline", and a
+				// routed cell proves NOTHING about the gather's
+				// OutputRename.To — which is one of this arc's two application
+				// sites (COMMON's rule; round-1 review P2).
+				before := map[string]int64{}
+				if arm.coord != nil {
+					for _, rc := range e3RouteCounters {
+						before[rc.name] = rc.fn(arm.coord)
+					}
+				}
 				cols, rows, err := arm.run(c.sql)
 				if err != nil {
 					t.Fatalf("%s arm refused the query: %v\n  SQL: %s", arm.name, err, c.sql)
+				}
+				if arm.coord != nil {
+					for _, rc := range e3RouteCounters {
+						d := rc.fn(arm.coord) - before[rc.name]
+						if rc.name == c.wantRoute {
+							if d == 0 {
+								t.Fatalf("%s arm did NOT route this shape, which the cell "+
+									"declares it does (%s): if the DAG now executes it, the "+
+									"cell proves more than it claims — drop wantRoute\n"+
+									"  SQL: %s", arm.name, rc.name, c.sql)
+							}
+							continue
+						}
+						if d != 0 {
+							t.Fatalf("%s arm ROUTED this shape to the coordinator's local "+
+								"pipeline (%s +%d): the name it published is the "+
+								"single-process one, so this cell proves nothing about the "+
+								"gather's rename\n  SQL: %s", arm.name, rc.name, d, c.sql)
+						}
+					}
 				}
 				got := e3SortLines(e3Render(cols, rows))
 				want := e3SortLines(c.want)

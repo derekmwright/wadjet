@@ -80,12 +80,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      resolve is an error, never a different column. Gated at
      `coordinator.TestAnUnnamedDerivedColumnCannotBeReferencedByItsPublishedName`,
      with the block's own spelling beside it as the control.
-   - **A call PostgreSQL rewrites keeps the name the query wrote, except for
-     TRIM.** (Added 2026-09-04, #732.) PostgreSQL labels an unaliased call
-     after the function it RESOLVED to: `trim(' a ')` is `btrim`, which wadjet
-     matches, and `SUBSTRING(s FROM 2 FOR 3)` — which wadjet's grammar does not
-     accept at all — would be `substring`. A second such rewrite belongs on
-     this list only with the measurement beside it.
+   - **A SET OPERATION does not take PostgreSQL's output-column names.**
+     (Added 2026-09-05, #732 round 2.) The naming rule is applied at the two
+     places a query's values leave the engine — the collecting sink and the
+     gather's rename target — and both are reached through the statement's
+     OUTPUT PROJECTION. A set-op root has none (`findOutputProjectionNode`
+     answers nil for it), so `SELECT g + 1 FROM t UNION ALL SELECT g + 2 FROM t`
+     publishes `g + 1` where PostgreSQL publishes `?column?`, and
+     `SELECT CAST(g AS BIGINT) … UNION ALL …` publishes the cast's text where
+     PostgreSQL publishes `g`. Every arm and both doors agree with each other,
+     so it is a uniform divergence rather than a two-path split. Closing it
+     means the set operation publishing its LEFTMOST arm's names — PostgreSQL's
+     own rule — on both engines at once, which is a change to what a union
+     stage's output identity IS. Pinned fail-on-agree at
+     `coordinator.TestArcF4BoundariesArePinned` (`732/set-op-*`).
+   - **A call PostgreSQL rewrites keeps the name the query wrote, except where
+     the rewrite is measured.** (Added 2026-09-04, #732; amended 2026-09-05.)
+     PostgreSQL labels an unaliased call after the function it RESOLVED to, and
+     three of this parser's own rewrites now carry that label: `trim(' a ')` is
+     `btrim`, `POSITION(x IN y)` is `position` (not the `strpos` it lowers to),
+     and an ARRAY SUBSCRIPT `arr[1]` is `arr` (not `element_at`).
+     `SUBSTRING(s FROM 2 FOR 3)` — which wadjet's grammar does not accept at
+     all — would be `substring`. A further such rewrite belongs on this list
+     only with the measurement beside it.
    - **A multi-statement simple-query string is not one transaction.**
      (Added 2026-09-03, #711.) PostgreSQL's simple query protocol wraps a
      string carrying several statements in an IMPLICIT TRANSACTION, so a
