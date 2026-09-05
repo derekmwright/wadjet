@@ -165,6 +165,14 @@ type Query struct {
 	Order    []Order
 	Limit    int
 	Offset   int
+	// LimitZero renders `LIMIT 0`, the boundary Limit cannot carry: zero is
+	// how every other field here spells "no LIMIT", so the generator could
+	// not emit the one value with a rule of its own (#487). `LIMIT 0` returns
+	// no rows whatever the ORDER BY, on every engine, so it is the shape that
+	// separates "the limit bound" from "the limit was ignored" — and it is
+	// also the shape a paginating client sends to fetch a result's SHAPE
+	// without its rows.
+	LimitZero bool
 	// TotalOrder records that the generator appended a uniqueness tiebreaker,
 	// so no two output rows tie on the full ORDER BY list.
 	TotalOrder bool
@@ -242,11 +250,22 @@ func (q *Query) SQL() string {
 			}
 		}
 	}
-	if q.Limit > 0 {
+	switch {
+	case q.LimitZero:
+		sb.WriteString(" LIMIT 0")
+		if q.Offset > 0 {
+			fmt.Fprintf(&sb, " OFFSET %d", q.Offset)
+		}
+	case q.Limit > 0:
 		fmt.Fprintf(&sb, " LIMIT %d", q.Limit)
 		if q.Offset > 0 {
 			fmt.Fprintf(&sb, " OFFSET %d", q.Offset)
 		}
+	case q.Offset > 0:
+		// A BARE OFFSET, which SQL allows and this generator never wrote: it
+		// only ever attached one to a LIMIT, so "skip n and return the rest"
+		// — a paginating client's last page — was outside the corpus.
+		fmt.Fprintf(&sb, " OFFSET %d", q.Offset)
 	}
 	return sb.String()
 }
@@ -255,6 +274,12 @@ func (q *Query) SQL() string {
 // harness's trust boundary: a mismatch under the returned spec is always a
 // defect, never an artifact of SQL's under-determination.
 func (q *Query) CompareSpec() oracle.CompareSpec {
+	if q.LimitZero {
+		// `LIMIT 0` has ONE right answer — no rows — under every ORDER BY,
+		// every tie and every inexact key, so it is compared exactly and the
+		// under-determination rules below do not apply to it.
+		return oracle.CompareSpec{Mode: oracle.CmpOrdered}
+	}
 	spec := oracle.CompareSpec{Limit: q.Limit}
 	if len(q.Order) == 0 {
 		// No ORDER BY: the row sequence carries no meaning. A LIMIT on top of
@@ -1685,6 +1710,14 @@ func (g *Gen) genOrderLimit(q *Query) {
 		}
 	} else if g.chance(0.2) {
 		q.Limit = 1 + g.pick(40)
+	}
+	// `LIMIT 0` and a BARE `OFFSET n`: the two boundaries of this clause the
+	// generator could not reach (#487). LIMIT 0 replaces whatever limit was
+	// chosen, since the two cannot both be written.
+	if g.chance(0.04) {
+		q.LimitZero = true
+	} else if q.Limit == 0 && q.Offset == 0 && q.TotalOrder && g.chance(0.08) {
+		q.Offset = 1 + g.pick(9)
 	}
 }
 

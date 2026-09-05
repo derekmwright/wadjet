@@ -109,6 +109,13 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		bump("order-desc", orderDesc(q))
 		bump("limit", q.Limit > 0)
 		bump("offset", q.Offset > 0)
+		// The two boundaries of this clause the generator could not reach
+		// (#487). `LIMIT 0` has one right answer under every ordering, and a
+		// BARE `OFFSET n` — no LIMIT beside it — is the last-page shape a
+		// paginating client sends.
+		bump("limit-zero", q.LimitZero)
+		bump("limit-zero-sql", strings.HasSuffix(sql, " LIMIT 0"))
+		bump("bare-offset", q.Offset > 0 && q.Limit == 0 && !q.LimitZero)
 		bump("total-order", q.TotalOrder)
 		bump("date-extract", strings.Contains(sql, "EXTRACT("))
 		bump("date-cast", strings.Contains(sql, "AS DATE)"))
@@ -135,6 +142,7 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		"order-by-expr", "order-by-hidden", "order-desc", "limit", "offset", "total-order",
 		"date-extract", "date-cast", "is-null", "like", "between", "in-list", "case-when",
 		"coalesce", "cmp-unordered", "cmp-ordered", "cmp-count",
+		"limit-zero", "limit-zero-sql", "bare-offset",
 		"exists-multikey", "exists-threekey", "not-exists-multikey",
 		"exists-multikey-distinct-names",
 	} {
@@ -146,6 +154,57 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		for k, v := range counts {
 			fmt.Printf("%-24s %d\n", k, v)
 		}
+	}
+}
+
+// TestLimitZeroAndBareOffsetRender is #487's gate: the SQL for the two
+// boundary shapes, and the comparison LIMIT 0 earns.
+//
+// `LIMIT 0` is the one limit whose answer does not depend on the ordering —
+// no rows, on every engine — so it is compared row-for-row even when the
+// query has no total order, which every other LIMIT drops to a count for. A
+// query that returned rows for it would otherwise be judged only by a count
+// the generator had already given up on.
+func TestLimitZeroAndBareOffsetRender(t *testing.T) {
+	q := &Query{
+		Items:     []Item{{Expr: "id", Alias: "id"}},
+		From:      []From{{Table: "t0", Alias: "t0"}},
+		LimitZero: true,
+	}
+	if got := q.SQL(); !strings.HasSuffix(got, " LIMIT 0") {
+		t.Errorf("LimitZero rendered %q, want a trailing LIMIT 0", got)
+	}
+	if mode := q.CompareSpec().Mode; mode != oracle.CmpOrdered {
+		t.Errorf("LIMIT 0 compares as %v; it has ONE right answer under every "+
+			"ordering, so it must be compared exactly", mode)
+	}
+	if lim := q.CompareSpec().Limit; lim != 0 {
+		t.Errorf("LIMIT 0 set spec.Limit = %d; Compare treats a positive Limit as a "+
+			"row-count ceiling, and 0 is not one", lim)
+	}
+
+	q.LimitZero, q.Offset = false, 5
+	if got := q.SQL(); !strings.HasSuffix(got, " OFFSET 5") {
+		t.Errorf("a bare Offset rendered %q, want a trailing OFFSET 5", got)
+	}
+	q.LimitZero = true
+	if got := q.SQL(); !strings.HasSuffix(got, " LIMIT 0 OFFSET 5") {
+		t.Errorf("LimitZero with an Offset rendered %q", got)
+	}
+
+	// The shrinker offers removing the LIMIT 0, and every candidate that
+	// clears Limit clears it too — otherwise a shrink step meant to drop the
+	// clause would leave `LIMIT 0` in the "reduced" query.
+	q.Offset = 0
+	sawWithout := false
+	for _, c := range candidates(TPCH(), q) {
+		if !c.LimitZero {
+			sawWithout = true
+		}
+	}
+	if !sawWithout {
+		t.Error("the shrinker offers no candidate without the LIMIT 0, so a repro that " +
+			"does not need it cannot be reduced past it")
 	}
 }
 

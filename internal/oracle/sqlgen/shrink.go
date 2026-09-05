@@ -44,15 +44,27 @@ func candidates(s *Schema, q *Query) []*Query {
 	var out []*Query
 	add := func(c *Query) { out = append(out, c) }
 
+	if q.LimitZero {
+		c := q.clone()
+		c.LimitZero = false
+		add(c)
+	}
+	if q.Offset > 0 {
+		c := q.clone()
+		c.Offset = 0
+		add(c)
+	}
 	if q.Limit > 0 {
 		c := q.clone()
 		c.Limit = 0
+		c.LimitZero = false
 		add(c)
 	}
 	if len(q.OrderBy) > 0 {
 		c := q.clone()
 		c.OrderBy = nil
 		c.Limit = 0 // LIMIT without ORDER BY is never part of a minimal repro
+		c.LimitZero = false
 		add(c)
 	}
 	if q.Having != "" {
@@ -87,6 +99,8 @@ func candidates(s *Schema, q *Query) []*Query {
 			if orderByReferencesRemoved(c, item) {
 				c.OrderBy = nil
 				c.Limit = 0
+				c.LimitZero = false
+				c.LimitZero = false
 			}
 			add(c)
 		}

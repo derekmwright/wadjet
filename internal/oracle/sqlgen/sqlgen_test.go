@@ -1,6 +1,9 @@
 package sqlgen
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func testSchema() *Schema {
 	return &Schema{
@@ -35,9 +38,24 @@ func TestGeneratorDeterministic(t *testing.T) {
 
 func TestGeneratorCoversTargetShapes(t *testing.T) {
 	s := testSchema()
-	var aggFree, distinct, havingSub, joined int
+	var aggFree, distinct, havingSub, joined, limitZero, offset int
 	for seed := int64(0); seed < 300; seed++ {
 		q := New(seed, s).Query()
+		// #487: `LIMIT 0` and `OFFSET n`, neither of which this generator
+		// could produce — zero was how Limit spelled "no LIMIT", and there
+		// was no Offset field at all.
+		if q.LimitZero {
+			limitZero++
+			if !strings.HasSuffix(q.SQL(), " LIMIT 0") {
+				t.Fatalf("LimitZero did not render: %s", q.SQL())
+			}
+		}
+		if q.Offset > 0 {
+			offset++
+			if !strings.Contains(q.SQL(), " OFFSET ") {
+				t.Fatalf("Offset did not render: %s", q.SQL())
+			}
+		}
 		if len(q.GroupBy) > 0 && len(q.Select) == len(q.GroupBy) {
 			aggFree++
 		}
@@ -54,6 +72,10 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 	if aggFree == 0 || distinct == 0 || havingSub == 0 || joined == 0 {
 		t.Fatalf("historical-breaker shapes not covered in 300 seeds: aggFree=%d distinct=%d havingSub=%d joined=%d",
 			aggFree, distinct, havingSub, joined)
+	}
+	if limitZero == 0 || offset == 0 {
+		t.Fatalf("the LIMIT/OFFSET boundaries are not covered in 300 seeds: "+
+			"limitZero=%d offset=%d", limitZero, offset)
 	}
 }
 

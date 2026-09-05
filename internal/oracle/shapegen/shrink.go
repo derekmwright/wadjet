@@ -58,9 +58,15 @@ func candidates(s *Schema, q *Query) []*Query {
 		c.Offset = 0
 		add(c)
 	}
+	if q.LimitZero {
+		c := q.Clone()
+		c.LimitZero = false
+		add(c)
+	}
 	if q.Limit > 0 {
 		c := q.Clone()
 		c.Limit = 0
+		c.LimitZero = false
 		add(c)
 	}
 	if len(q.Order) > 0 {
@@ -69,6 +75,7 @@ func candidates(s *Schema, q *Query) []*Query {
 		c := q.Clone()
 		c.Order = nil
 		c.Limit = 0 // a LIMIT without ORDER BY is never part of a minimal repro
+		c.LimitZero = false
 		c.TotalOrder = false
 		add(c)
 		for i := range q.Order {
@@ -81,6 +88,8 @@ func candidates(s *Schema, q *Query) []*Query {
 			c.TotalOrder = false
 			if len(c.Order) == 0 {
 				c.Limit = 0
+				c.LimitZero = false
+				c.LimitZero = false
 			}
 			add(c)
 		}
@@ -117,6 +126,8 @@ func candidates(s *Schema, q *Query) []*Query {
 			}
 			if len(c.Order) == 0 {
 				c.Limit = 0
+				c.LimitZero = false
+				c.LimitZero = false
 				c.TotalOrder = false
 			}
 			if len(c.GroupBy) == 0 && hasAgg(c.Items) && anyNonAgg(c.Items) {

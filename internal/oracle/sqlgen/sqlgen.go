@@ -77,6 +77,10 @@ type Query struct {
 	Having   string
 	OrderBy  []string
 	Limit    int
+	Offset   int
+	// LimitZero renders `LIMIT 0`. Zero is how Limit spells "no LIMIT", so
+	// the one value with a rule of its own needed a field of its own (#487).
+	LimitZero bool
 }
 
 // SQL renders the query.
@@ -111,8 +115,14 @@ func (q *Query) SQL() string {
 		sb.WriteString(" ORDER BY ")
 		sb.WriteString(strings.Join(q.OrderBy, ", "))
 	}
-	if q.Limit > 0 {
+	switch {
+	case q.LimitZero:
+		sb.WriteString(" LIMIT 0")
+	case q.Limit > 0:
 		fmt.Fprintf(&sb, " LIMIT %d", q.Limit)
+	}
+	if q.Offset > 0 {
+		fmt.Fprintf(&sb, " OFFSET %d", q.Offset)
 	}
 	return sb.String()
 }
@@ -427,5 +437,13 @@ func (g *Gen) genOrderLimit(q *Query) {
 	}
 	if g.chance(0.5) {
 		q.Limit = 1 + g.pick(50)
+	}
+	// The two boundaries this generator never wrote (#487): `LIMIT 0`, whose
+	// answer is no rows under every order, and an OFFSET, which it had no
+	// field for at all.
+	if g.chance(0.04) {
+		q.LimitZero, q.Limit = true, 0
+	} else if g.chance(0.1) {
+		q.Offset = 1 + g.pick(9)
 	}
 }
