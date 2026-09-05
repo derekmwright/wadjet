@@ -147,6 +147,24 @@ func completenessFixtures() []completenessFixture {
 			wantRows: 4000,
 			leaf:     "x",
 		},
+		{
+			name:     "nested_map_key",
+			file:     "testdata/nested_pages.parquet",
+			wantRows: 4000,
+			leaf:     "props.key_value.key",
+		},
+		{
+			name:     "nested_map_value",
+			file:     "testdata/nested_pages.parquet",
+			wantRows: 4000,
+			leaf:     "props.key_value.value",
+		},
+		{
+			name:     "nested_row_field",
+			file:     "testdata/nested_pages.parquet",
+			wantRows: 4000,
+			leaf:     "rec.b",
+		},
 	}
 }
 
@@ -390,5 +408,121 @@ func TestANestedLeafCountsRowsFromItsRepetitionLevels(t *testing.T) {
 	}
 	if values == rows {
 		t.Fatal("the fixture has one element per row; it cannot tell values from rows")
+	}
+}
+
+// TestAChunkThatDeliversMoreRowsThanDeclaredIsRefused is the other direction.
+//
+// A flat leaf is bounded page by page before decode (chargeRows), so it
+// cannot over-deliver: the first page past the budget is refused. A NESTED
+// leaf has no such per-page bound — values are not rows there — so the only
+// thing that can catch it is the end-of-column reconciliation, and it has to
+// catch BOTH inequalities or "the chunk delivers what the row group declares"
+// is only half a claim.
+func TestAChunkThatDeliversMoreRowsThanDeclaredIsRefused(t *testing.T) {
+	data, err := os.ReadFile("testdata/nested_pages.parquet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Understate the row group's rows. Every chunk in it now delivers more
+	// than it declares; reading only the nested column keeps the flat
+	// column's per-page bound (which would fire first, for a different
+	// reason) out of the way.
+	md, err := ReadFileMetaData(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(md.RowGroups) != 1 {
+		t.Skipf("fixture has %d row groups; the cell aims at one", len(md.RowGroups))
+	}
+	md.RowGroups[0].NumRows--
+	md.NumRows--
+	footerLen := binary.LittleEndian.Uint32(data[len(data)-8:])
+	mutated := append([]byte(nil), data[:len(data)-8-int(footerLen)]...)
+	footer := EncodeFileMetaData(md)
+	mutated = append(mutated, footer...)
+	mutated = binary.LittleEndian.AppendUint32(mutated, uint32(len(footer)))
+	mutated = append(mutated, "PAR1"...)
+
+	r, err := NewReaderFromBytes(mutated)
+	if err != nil {
+		return // refused at open: also a refusal
+	}
+	rows, err := r.ReadRows([]string{"tags"})
+	if err == nil {
+		t.Fatalf("a nested chunk that delivers more rows than its row group declares "+
+			"read %d rows with no error", len(rows))
+	}
+	if !strings.Contains(err.Error(), "the chunk ends before its declared rows") {
+		t.Fatalf("refused, but not as a row-count disagreement: %v", err)
+	}
+	if !strings.Contains(err.Error(), "delivers 4000") {
+		t.Fatalf("refusal does not report what the chunk actually delivered: %v", err)
+	}
+}
+
+// TestARowGroupTheReadNeverOpensIsNeverChecked is the prune boundary.
+//
+// A row-group prune — the statistics one the scan performs, and the explicit
+// row-group range ReadRowGroup takes — does not READ the pruned chunk at all.
+// The completeness check fires when a chunk runs out of pages, so a chunk
+// nobody opened contributes nothing to it, and a corrupt row group at the end
+// of a file must not break a query whose predicate excludes it. Reading the
+// same file whole refuses.
+func TestARowGroupTheReadNeverOpensIsNeverChecked(t *testing.T) {
+	// Two row groups; truncate a chunk in the SECOND.
+	rows := make([]map[string]any, 400)
+	for i := range rows {
+		rows[i] = map[string]any{"x": int64(i), "s": fmt.Sprintf("s-%03d", i)}
+	}
+	var b bytes.Buffer
+	w, err := NewWriter(&b, Schema{Columns: []Column{
+		{Name: "x", Type: TypeInt64},
+		{Name: "s", Type: TypeString},
+	}}, WriterConfig{PageBufferSize: 64, RowGroupSize: 200, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRows(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := b.Bytes()
+
+	md, err := ReadFileMetaData(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(md.RowGroups) < 2 {
+		t.Fatalf("fixture wrote %d row groups; the cell needs two", len(md.RowGroups))
+	}
+	_, frames := chunkFrames(t, md, data, 1, "x")
+	if len(frames) < 2 {
+		t.Fatalf("row group 1's x chunk has %d pages", len(frames))
+	}
+	mutated := cutChunkTo(t, data, 1, "x", int64(frames[0].hdrLen+frames[0].bodyLen))
+
+	r, err := NewReaderFromBytes(mutated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Row group 0 alone: untouched, and it reads.
+	got, err := r.ReadRowGroup(0, nil)
+	if err != nil {
+		t.Fatalf("a row group the corruption is not in must still read: %v", err)
+	}
+	if len(got) != 200 {
+		t.Fatalf("row group 0 read %d rows, want 200", len(got))
+	}
+	for i, row := range got {
+		if row["x"] != int64(i) {
+			t.Fatalf("row %d: x=%v, want %d", i, row["x"], i)
+		}
+	}
+	// The whole file: refused.
+	if _, err := r.ReadRows(nil); err == nil {
+		t.Fatal("the whole file read a short chunk with no error")
 	}
 }

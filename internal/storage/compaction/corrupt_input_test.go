@@ -237,3 +237,57 @@ func TestCompactionRefusesACorruptInputAndPersistsNothing(t *testing.T) {
 		})
 	}
 }
+
+// TestAnalyzeRefusesACorruptInput. ANALYZE reads the same files a query
+// does, and writes what it read into the manifest as a sketch the PLANNER
+// then trusts. A file the reader can prove wrong must not become a
+// cardinality estimate: the estimate would be built out of a value the file
+// itself says is not there, and unlike a query result nobody ever looks at it
+// again.
+func TestAnalyzeRefusesACorruptInput(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		build   func(t *testing.T) []byte
+		corrupt func(t *testing.T, data []byte) []byte
+		want    string
+	}{
+		{"flipped_bit_under_a_page_checksum",
+			func(t *testing.T) []byte { return checksummedParquet(t, 400) },
+			flipFirstDataPageBit, "fails its own checksum"},
+		{"chunk_ends_before_its_declared_rows",
+			func(t *testing.T) []byte { return wadjetParquet(t, 400) },
+			cutFirstChunkAfterFirstPage, "the chunk ends before its declared rows"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cat, store := setupTestCatalog(t)
+			const table = "corrupt_analyze"
+			if err := cat.CreateTable(ctx, table, corruptInputSchema(), nil); err != nil {
+				t.Fatal(err)
+			}
+			data := tc.corrupt(t, tc.build(t))
+			path := "tables/" + table + "/chunk_0000.parquet"
+			if _, err := store.Put(ctx, "test-bucket", path,
+				bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+				t.Fatal(err)
+			}
+			if err := cat.AddFiles(ctx, table, nil, "", []catalog.FileEntry{
+				{Path: path, SizeBytes: int64(len(data)), NumRows: 400, CreatedAt: time.Now().UTC()},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			n, err := cat.AnalyzeTable(ctx, table)
+			if err == nil {
+				t.Fatalf("ANALYZE sketched %d files out of one the reader can prove wrong", n)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ANALYZE failed, but not for the corruption: %v", err)
+			}
+			stats, serr := cat.AggregateColumnStats(ctx, table)
+			if serr == nil && len(stats) > 0 {
+				t.Fatalf("ANALYZE left %d column sketches behind: %v", len(stats), stats)
+			}
+		})
+	}
+}
