@@ -335,6 +335,15 @@ type Predicate struct {
 	// broadcast off a 0.33^n selectivity guess the moment they appeared).
 	// Estimate-visible attachment is a separate, SF100-validated change.
 	PruneOnly bool
+	// FromPolicy marks a predicate the POLICY itself put there — a column
+	// policy's row filter, which reads the row AS STORED by design (ADR-0033
+	// decision 6). It is the one predicate allowed to sit on a policed scan
+	// below the security projection, and CheckPolicyPlanOrder refuses every
+	// other one: a scan predicate feeds row-group PRUNING against the stored
+	// column's statistics, so a user predicate that reaches the scan answers
+	// "is there a row whose STORED value satisfies this" however the plan
+	// above it is ordered.
+	FromPolicy bool
 }
 
 // Projection is a column expression in a SELECT.
@@ -669,8 +678,9 @@ func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
 	// If this is a Scan for the target table, wrap it in a Filter
 	if n.Type == NodeScan && policedScan(n, tableName) {
 		filterNode := NewFilter(n, []Predicate{{
-			Raw:     raw,
-			ASTExpr: ast,
+			Raw:        raw,
+			ASTExpr:    ast,
+			FromPolicy: true,
 		}})
 		filterNode.PolicyFilter = true
 		return filterNode
@@ -837,6 +847,29 @@ func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy, sc
 			return n
 		}
 
+		// The barrier now stands between this scan and everything above it,
+		// so nothing from above it may stay attached BELOW it. The optimizer
+		// copies a filter's `col <op> literal` conjuncts onto the scan it
+		// sits directly over (attachScanPredicates) for row-group pruning,
+		// and the scans this pass covers are MINTED BY THAT OPTIMIZER: the
+		// inner of a decorrelated IN/EXISTS is a Filter directly over a fresh
+		// Scan when the copy happens, and the projection arrives afterwards.
+		// The copy then prunes by the STORED column's statistics — `… IN
+		// (SELECT id FROM e7emp WHERE ssn = '***')` pruned every row group
+		// whose stored ssn range excluded the mask and answered NO ROWS,
+		// where the DAG, which does not attach there, answered every row. The
+		// row set is arithmetic on the stored statistics, so a client that
+		// moves the constant reads the hidden column's range off it: a
+		// disclosure, not a path quirk (#859 round 5).
+		restricted := make(map[string]bool, len(denySet)+len(maskMap))
+		for col := range denySet {
+			restricted[col] = true
+		}
+		for col := range maskMap {
+			restricted[col] = true
+		}
+		stripRestrictedScanPredicates(n, restricted)
+
 		projectNode := &Node{
 			Type:            NodeProject,
 			Children:        []*Node{n},
@@ -847,6 +880,50 @@ func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy, sc
 	}
 
 	return n
+}
+
+// stripRestrictedScanPredicates removes from a scan every attached predicate
+// and partition filter that names a MASKED or DENIED column of the relation.
+//
+// A predicate the policy itself put there (FromPolicy) stays: a row filter
+// reads the row as stored, which is the ordering ADR-0033 decision 6 fixes.
+// Everything else naming a policed column is a read of the stored value under
+// the very projection that exists to hide it.
+func stripRestrictedScanPredicates(n *Node, restricted map[string]bool) {
+	if n == nil || n.Type != NodeScan || len(restricted) == 0 {
+		return
+	}
+	keep := func(preds []Predicate) []Predicate {
+		out := preds[:0:0]
+		for _, pred := range preds {
+			if !pred.FromPolicy && ScanPredicateIsRestricted(pred, restricted) {
+				continue
+			}
+			out = append(out, pred)
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	n.ScanPredicates = keep(n.ScanPredicates)
+	n.Predicates = keep(n.Predicates)
+	for col := range n.PartitionFilter {
+		if restricted[strings.ToLower(col)] {
+			delete(n.PartitionFilter, col)
+		}
+	}
+}
+
+// ScanPredicateIsRestricted reports whether a predicate attached to a scan
+// reads a policed column — its structured column, or any identifier its
+// expression names.
+func ScanPredicateIsRestricted(pred Predicate, restricted map[string]bool) bool {
+	if pred.Column != "" && restricted[strings.ToLower(pred.Column)] {
+		return true
+	}
+	_, bad := predicateNamesRestricted(pred, restricted)
+	return bad
 }
 
 // NewScan creates a scan node.

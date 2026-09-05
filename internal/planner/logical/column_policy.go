@@ -309,6 +309,31 @@ func CheckPolicyPlanOrder(plan *Node, policed func(table string) []ColumnPolicy)
 				return fmt.Errorf("%w (scan of %q carries no security projection)",
 					ErrPolicyOrderUnrepresentable, n.TableName)
 			}
+			// A predicate ATTACHED to the scan is below the projection
+			// whatever the node order above it says, and a scan predicate
+			// prunes row groups by the stored column's own statistics. Only
+			// the policy's own row filter may read the row as stored.
+			restricted := make(map[string]bool, len(cols))
+			for _, c := range cols {
+				restricted[strings.ToLower(c.Column)] = true
+			}
+			for _, group := range [][]Predicate{n.ScanPredicates, n.Predicates} {
+				for _, pred := range group {
+					if pred.FromPolicy {
+						continue
+					}
+					if ScanPredicateIsRestricted(pred, restricted) {
+						return fmt.Errorf("%w (predicate over a policed column attached to the scan of %q)",
+							ErrPolicyOrderUnrepresentable, n.TableName)
+					}
+				}
+			}
+			for col := range n.PartitionFilter {
+				if restricted[strings.ToLower(col)] {
+					return fmt.Errorf("%w (partition filter over %q on the scan of %q)",
+						ErrPolicyOrderUnrepresentable, col, n.TableName)
+				}
+			}
 		case n.Type == NodeFilter && barrier != nil && !n.PolicyFilter:
 			// Between a barrier and its scan, and not the policy's own.
 			for _, scan := range PolicedScanTables(n) {

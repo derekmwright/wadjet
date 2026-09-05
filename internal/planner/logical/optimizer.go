@@ -152,13 +152,27 @@ func attachScanPredicates(n *Node) {
 	if child.Type != NodeScan {
 		return
 	}
+	// A conjunct copied off the POLICY's own row filter stays marked as the
+	// policy's: it reads the row as stored by design, and it is the one
+	// predicate CheckPolicyPlanOrder lets sit on a policed scan.
+	mark := func(preds []Predicate) []Predicate {
+		if !n.PolicyFilter {
+			return preds
+		}
+		for i := range preds {
+			preds[i].FromPolicy = true
+		}
+		return preds
+	}
 	for _, pred := range n.Predicates {
 		if pred.Column != "" && pred.Op != "" && pred.Value != nil {
+			pred.FromPolicy = pred.FromPolicy || n.PolicyFilter
 			child.ScanPredicates = append(child.ScanPredicates, pred)
 			continue
 		}
 		if pred.ASTExpr != nil {
-			child.ScanPredicates = append(child.ScanPredicates, structuredConjuncts(pred.ASTExpr)...)
+			child.ScanPredicates = append(child.ScanPredicates,
+				mark(structuredConjuncts(pred.ASTExpr))...)
 		}
 	}
 }
