@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -129,14 +130,23 @@ func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 			if len(res.Rows) != 1 {
 				t.Fatalf("%d rows\n  SQL: %s", len(res.Rows), sql)
 			}
+			// A `residual_*` cell's `want` is what THIS engine answers, not
+			// the server's — the whole point of the rename — so the shared
+			// message must not label it live PostgreSQL. Saying so for every
+			// row was the same false record in the failure text that the
+			// cells themselves had in their values (round-3 review P-F).
+			source := "live PostgreSQL 17.11"
+			if strings.HasPrefix(c.name, "residual_") {
+				source = "this engine's PINNED value; PostgreSQL disagrees — see the cell's comment"
+			}
 			got := res.Rows[0]["v"]
 			if wb, ok := c.want.([]byte); ok {
 				gb, isBytes := got.([]byte)
 				if !isBytes || !bytes.Equal(gb, wb) {
-					t.Errorf("= %#v, want %#v (live PostgreSQL 17.11)\n  SQL: %s", got, wb, sql)
+					t.Errorf("= %#v, want %#v (%s)\n  SQL: %s", got, wb, source, sql)
 				}
 			} else if got != c.want {
-				t.Errorf("= %#v, want %#v (live PostgreSQL 17.11)\n  SQL: %s", got, c.want, sql)
+				t.Errorf("= %#v, want %#v (%s)\n  SQL: %s", got, c.want, source, sql)
 			}
 			if len(res.ColumnMetas) != 1 {
 				t.Fatalf("%d column metas\n  SQL: %s", len(res.ColumnMetas), sql)

@@ -275,12 +275,15 @@ a `WHERE` clause while answering inside a `CASE`. Two classes, and they are
 different answers: text that names no address is `22P02`, and
 PostgreSQL-valid text this engine's type cannot hold is `0A000`.
 
-One consequence is recorded in ADR-0012 rather than reproduced: PostgreSQL's
-`GREATEST`, `LEAST` and `COALESCE` resolve no operator — they unify their
-arguments' types — so a maskless abbreviation is valid THERE
-(`GREATEST(cidr_col, '239')` is `239.0.0.0/8` on the server) and invalid in the
-comparison beside it. One grammar at every site means this engine refuses that
-fold; the canonical spelling answers.
+The fold sites — `GREATEST`, `LEAST`, `COALESCE` — take the same grammar, and
+that is the server's answer too for the type a wadjet `CIDR` column actually
+is. Those functions unify their arguments' types rather than resolving an
+operator, so beside a PostgreSQL `cidr` column they would read the CIDR
+parser; but a wadjet `CIDR` column holds host bits under a mask
+(`192.168.5.7/24`), which `cidr` refuses and `inet` accepts, so `inet` is what
+this engine's differential oracle maps it to — and over an `inet` column
+PostgreSQL refuses `'239'`, `'192.168'` and `'zzz'` at every fold, exactly as
+this engine does.
 
 `INSERT` and the `mac_*` formatting functions read only the spellings Go's
 parser takes (colon, hyphen, dotted, and the bare twelve digits), not the three

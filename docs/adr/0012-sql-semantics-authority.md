@@ -965,24 +965,34 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      maskless (0 accepted), the 4×34 octet-count-by-mask grid, and the
      leading-zero and trailing-dot forms.
 
-     **The server's FOLD sites are the exception, and this engine does not
-     reproduce them.** `GREATEST`, `LEAST` and `COALESCE` resolve no operator:
-     they UNIFY their arguments' types at parse analysis, so the literal is
-     read by the cidr type's own parser there. Measured:
+     **The FOLD sites agree too, and the round-3 entry that said otherwise
+     compared this engine against a PostgreSQL type it cannot be.** (Corrected
+     2026-09-05 in round 4.) `GREATEST`, `LEAST` and `COALESCE` resolve no
+     operator — they UNIFY their arguments' types — so beside a `cidr` column
+     the literal is read by the CIDR parser, and round 3 recorded wadjet's
+     refusal of `GREATEST(cidr_col, '239')` as a divergence on that basis.
 
-       GREATEST(cd, '239')   239.0.0.0/8      cd = '239'    22P02
-       GREATEST(cd, '1/0')   22P02            cd = '1/0'    1.0.0.0/0
-       COALESCE(cd, 'zzz')   22P02            cd = 'zzz'    22P02
+     It is not one, because a wadjet CIDR column is not a PostgreSQL `cidr`
+     column and cannot be: it holds host bits under a mask, and
+     `'192.168.5.7/24'::cidr` is `22P02 invalid cidr value` — the type-matrix
+     fixture's own values do not fit. This repository's differential oracle
+     already says so and maps IPV4, IPV6 and CIDR alike to **`inet`**
+     (`benchmarks/tpch/postgres_oracle_test.go`'s postgresType: "inet (unlike
+     cidr) also accepts host bits, which the net fixture deliberately
+     carries"). Measured against that type, on the same server:
 
-     This engine reads ONE grammar at every site, so a maskless abbreviation
-     beside a fold is refused where the server folds it — a REFUSAL of
-     PG-valid text, recorded here because the alternative is worse: a second
-     accept-set (classful inference, `0x` hex, and the bits-right-of-mask
-     check the fold's own parser makes) plus a site classification that every
-     plan-time and runtime evaluator has to agree on. Half of that is the
-     "one literal, two dispositions" defect this same arc closed. The refusal
-     is loud, names the literal, and the canonical spelling
-     (`GREATEST(cd, '239.0.0.0/8')`) answers.
+       column type `inet`      GREATEST(c,'239')     22P02   (wadjet 22P02)
+                               LEAST(c,'239')        22P02   (wadjet 22P02)
+                               COALESCE(c,'239')     22P02   (wadjet 22P02)
+                               GREATEST(c,'192.168') 22P02   (wadjet 22P02)
+                               GREATEST(c,'1/0')     answers (wadjet answers)
+                               COALESCE(c,'zzz')     22P02   (wadjet 22P02)
+
+     So ONE grammar at every site is not an approximation of the server here —
+     it is what the server does for the type this engine's columns actually
+     are. The classful reading belongs to `cidr`, a type nothing in this
+     engine maps onto, and the census asserts the agreement at the fold sites
+     rather than recording a divergence there.
 
      The engine agreed with neither parser before: it refused `'10/8'`, which
      inet accepts, and (for one commit of this arc) it accepted `'239'`, which
@@ -2451,11 +2461,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     because it has a declared parameter OID to decode against. And the
     scalar function layer has no BYTES notion at all — every function reads
     its operand through `expr.toString`, so `UPPER(b)` ANSWERS where
-    PostgreSQL raises 42883, and `b || b` returns TEXT where PostgreSQL
-    returns bytea, which puts the raw-bytes-under-OID-25 hazard back in
-    through a derived value (#583, `ByteaTextFunctionOverBytes` and
-    `ByteaConcat`). `OCTET_LENGTH` over bytea declares float8 for #530's
-    reason, unrelated to this type.
+    PostgreSQL raises 42883 (#583, `ByteaTextFunctionOverBytes`).
+
+    (Corrected 2026-09-05, #583's second pass.) Two claims in this paragraph
+    are no longer true and were stale when the fix landed: `b || b` returns
+    **bytea under OID 17** now, not TEXT, and `OCTET_LENGTH(b)` declares
+    **OID 23** (integer), not float8 — both measured at the tip on the wire.
+    The raw-bytes-under-OID-25 hazard survives one shape over, `text || bytea`,
+    which IS text on both engines and whose VALUE differs; that is recorded
+    with its own measured table in the #583 entry above.
 
     **A TIMESTAMP renders its INSTANT through CAST and LIKE.** (Amended
     2026-09-02, #544.) The paragraph above says the text is "the value's own
