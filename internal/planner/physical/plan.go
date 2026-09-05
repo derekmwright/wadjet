@@ -17023,20 +17023,30 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	// than pushed down raw (#442, #438). kernel.StatsDomainValue is the same
 	// conversion the filter kernel applies to the literal, so the prune and
 	// the filter cannot disagree about what the predicate means.
-	statsCols := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
-	for _, c := range tableMeta.Schema.Columns {
-		statsCols[c.Name] = c
-	}
 	var sp []scanPredicate
 	var eqProbes []scan.EqProbe
 	for _, pred := range s.scanPreds {
 		if pred.Column == "" || pred.Op == "" || pred.Value == nil {
 			continue
 		}
-		col, known := statsCols[pred.Column]
-		if !known {
+		// The predicate's column arrives as a REFERENCE — an unquoted
+		// identifier folds to lower case at the lexer (#731) — while the
+		// schema keeps the spelling the parquet file gave it, and CamelCase
+		// column names are ordinary there (ClickBench's `hits` has
+		// `EventDate`, `UserAgent`, `ResolutionWidth`). A byte-exact lookup
+		// missed every column of every such table, so neither the row-group
+		// statistics prune nor the dictionary probe was ever built for it:
+		// the answer stayed right and the whole table was read. Resolve the
+		// way the engine resolves every other reference, and carry the
+		// SCHEMA's spelling forward — that name keys the row group's
+		// per-column statistics (`scan.CanPruneRowGroup`) and matches the
+		// file's own leaves (`scan.CanDictPruneRowGroup`), neither of which
+		// has ever seen the folded spelling.
+		ci := batch.ResolveSchemaIndex(tableMeta.Schema.Columns, pred.Column)
+		if ci < 0 {
 			continue
 		}
+		col := tableMeta.Schema.Columns[ci]
 		// A DECIMAL bound is converted from the literal's TEXT: the float64
 		// box has already dropped the digits past a double, and a bound that
 		// is off by a fraction of the last place prunes the row group the
@@ -17049,13 +17059,13 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		sp = append(sp, scanPredicate{Column: pred.Column, Op: pred.Op, Value: val})
+		sp = append(sp, scanPredicate{Column: col.Name, Op: pred.Op, Value: val})
 		// Equality conjuncts also feed the dictionary probe — the
 		// precise prune where zonemaps are blind (point filters on
 		// high-cardinality columns). Dictionary entries are raw file
 		// values too, so they take the same converted literal.
 		if pred.Op == "=" && scan.DictPrune.On() {
-			eqProbes = append(eqProbes, scan.EqProbe{ColName: pred.Column, Value: val})
+			eqProbes = append(eqProbes, scan.EqProbe{ColName: col.Name, Value: val})
 		}
 	}
 
