@@ -355,9 +355,9 @@ func TestArrayVectorNull(t *testing.T) {
 
 func TestResolveColumn(t *testing.T) {
 	tests := []struct {
-		typeStr string
-		wantType parquet.TypeID
-		wantElem bool
+		typeStr    string
+		wantType   parquet.TypeID
+		wantElem   bool
 		wantFields int
 	}{
 		{"INT64", parquet.TypeInt64, false, 0},

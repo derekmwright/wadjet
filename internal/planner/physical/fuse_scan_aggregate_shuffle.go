@@ -6,16 +6,18 @@ package physical
 // collapsing pipeline-breaker (final_aggregate / merge_aggregate).
 //
 // Today's flow:  scan-aggregate → exchange-repartition → final_aggregate
-//   The scan-aggregate task emits a single unpartitioned WSHF; coord
-//   dispatches a separate exchange-repartition task that reads it back
-//   and writes hash-partitioned output; final_aggregate reads the
-//   partitions.
+//
+//	The scan-aggregate task emits a single unpartitioned WSHF; coord
+//	dispatches a separate exchange-repartition task that reads it back
+//	and writes hash-partitioned output; final_aggregate reads the
+//	partitions.
 //
 // After fusion:  scan-aggregate(with shuffle metadata) → final_aggregate
-//   Each scan-aggregate task hash-partitions its K aggregate rows
-//   directly via the worker's executeFragment path:
-//   [OpScan, OpFilter?, OpHashAggregate(partial), OpExchangeSender].
-//   Saves one S3 PUT, one S3 GET, one NATS round-trip per fused pair.
+//
+//	Each scan-aggregate task hash-partitions its K aggregate rows
+//	directly via the worker's executeFragment path:
+//	[OpScan, OpFilter?, OpHashAggregate(partial), OpExchangeSender].
+//	Saves one S3 PUT, one S3 GET, one NATS round-trip per fused pair.
 //
 // **Why this is safe (no fan-out amplification):** scan tasks run with
 // task count = workerCount (or close to it via scanFanOutTaskCount).

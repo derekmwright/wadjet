@@ -31,7 +31,7 @@ var FirewallSchema = parquet.Schema{
 		{Name: "src_port", Type: parquet.TypePort},
 		{Name: "dst_port", Type: parquet.TypePort},
 		{Name: "protocol", Type: parquet.TypeProtocol},
-		{Name: "action", Type: parquet.TypeString},  // allow, deny, drop
+		{Name: "action", Type: parquet.TypeString}, // allow, deny, drop
 		{Name: "rule_id", Type: parquet.TypeString},
 		{Name: "zone_src", Type: parquet.TypeString}, // internal, dmz, external
 		{Name: "zone_dst", Type: parquet.TypeString},
@@ -46,7 +46,7 @@ var DNSSchema = parquet.Schema{
 		{Name: "client_ip", Type: parquet.TypeIPv4},
 		{Name: "server_ip", Type: parquet.TypeIPv4},
 		{Name: "query_name", Type: parquet.TypeString},
-		{Name: "query_type", Type: parquet.TypeString}, // A, AAAA, MX, TXT, CNAME, PTR
+		{Name: "query_type", Type: parquet.TypeString},    // A, AAAA, MX, TXT, CNAME, PTR
 		{Name: "response_code", Type: parquet.TypeString}, // NOERROR, NXDOMAIN, SERVFAIL, REFUSED
 		{Name: "answer_ip", Type: parquet.TypeIPv4, Nullable: true},
 		{Name: "latency_ns", Type: parquet.TypeDuration},
@@ -59,8 +59,8 @@ var AuthSchema = parquet.Schema{
 		{Name: "ts", Type: parquet.TypeTimestamp},
 		{Name: "src_ip", Type: parquet.TypeIPv4},
 		{Name: "username", Type: parquet.TypeString},
-		{Name: "action", Type: parquet.TypeString}, // login_success, login_failure, logout, privilege_escalation
-		{Name: "method", Type: parquet.TypeString}, // password, mfa, certificate, sso
+		{Name: "action", Type: parquet.TypeString},  // login_success, login_failure, logout, privilege_escalation
+		{Name: "method", Type: parquet.TypeString},  // password, mfa, certificate, sso
 		{Name: "service", Type: parquet.TypeString}, // ssh, rdp, vpn, web, ldap
 		{Name: "device", Type: parquet.TypeString},
 		{Name: "user_agent", Type: parquet.TypeString, Nullable: true},

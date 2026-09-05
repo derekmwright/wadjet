@@ -11,15 +11,17 @@ var fuseJoinShuffleEnabled = os.Getenv("WADJET_FUSE_JOIN_SHUFFLE") != "0"
 // writing+re-reading an unpartitioned WSHF between the join and the shuffle.
 //
 // Today's flow:  join → exchange-repartition → consumer
-//   join writes unpartitioned WSHF; coord dispatches a separate shuffle task
-//   that reads it back and writes partitioned WSHF; the consumer reads the
-//   partitions.
+//
+//	join writes unpartitioned WSHF; coord dispatches a separate shuffle task
+//	that reads it back and writes partitioned WSHF; the consumer reads the
+//	partitions.
 //
 // After fusion:  join(with shuffle metadata) → consumer
-//   The join task hash-partitions its probe-side output directly via the
-//   worker's executeFragment path: [ShuffleSource probe, HashJoinProbe(s),
-//   ExchangeSender]. Saves one S3 PUT, one S3 GET, one NATS round-trip per
-//   fused pair.
+//
+//	The join task hash-partitions its probe-side output directly via the
+//	worker's executeFragment path: [ShuffleSource probe, HashJoinProbe(s),
+//	ExchangeSender]. Saves one S3 PUT, one S3 GET, one NATS round-trip per
+//	fused pair.
 //
 // Run AFTER fuseScanShuffle so that any scan-fused exchanges have already
 // been absorbed; the remaining repartition stages are the ones whose upstream

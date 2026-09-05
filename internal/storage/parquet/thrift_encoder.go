@@ -305,7 +305,7 @@ func (e *thriftEncoder) encodeLogicalType(lt *LogicalType) {
 func (e *thriftEncoder) encodeTimeType(lt *LogicalType) {
 	var lastFieldID int16
 	e.writeBoolField(1, lt.IsAdjustedToUTC, &lastFieldID) // isAdjustedToUTC
-	e.writeFieldHeader(2, thriftStruct, &lastFieldID)      // unit
+	e.writeFieldHeader(2, thriftStruct, &lastFieldID)     // unit
 	var unitLast int16
 	switch lt.Type {
 	case LogicalTimeMillis:
@@ -322,7 +322,7 @@ func (e *thriftEncoder) encodeTimeType(lt *LogicalType) {
 func (e *thriftEncoder) encodeTimestampType(lt *LogicalType) {
 	var lastFieldID int16
 	e.writeBoolField(1, lt.IsAdjustedToUTC, &lastFieldID) // isAdjustedToUTC
-	e.writeFieldHeader(2, thriftStruct, &lastFieldID)      // unit
+	e.writeFieldHeader(2, thriftStruct, &lastFieldID)     // unit
 	var unitLast int16
 	switch lt.Type {
 	case LogicalTimestampMillis:

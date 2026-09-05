@@ -40,8 +40,8 @@ func TestHashJoin_StateRetentionAcrossQueries(t *testing.T) {
 	if os.Getenv("WADJET_Q17_REPRO") != "1" {
 		t.Skip("set WADJET_Q17_REPRO=1 to enable")
 	}
-	const queries = 8     // simulate Q01-Q08
-	const concurrent = 3  // mc=3 per query
+	const queries = 8    // simulate Q01-Q08
+	const concurrent = 3 // mc=3 per query
 	const buildN = 500_000
 
 	budget := int64(60 * 1024 * 1024)

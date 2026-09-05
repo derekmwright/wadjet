@@ -12,7 +12,7 @@ import (
 // for a constant value. Used to build expression trees in tests.
 type constFloat64 struct{ val float64 }
 
-func (c *constFloat64) Eval(*batch.RecordBatch, int) any              { return c.val }
+func (c *constFloat64) Eval(*batch.RecordBatch, int) any                        { return c.val }
 func (c *constFloat64) EvalFloat64(_ *batch.RecordBatch, _ int) (float64, bool) { return c.val, true }
 func (c *constFloat64) EvalFloat64Vec(_ *batch.RecordBatch, dst []float64, n int) bool {
 	for i := 0; i < n; i++ {
@@ -52,12 +52,12 @@ func TestBinOpFloat64_CloneVec_ParallelSafety(t *testing.T) {
 	b1 := batch.NewRecordBatch(schema, n)
 	b2 := batch.NewRecordBatch(schema, n)
 	for i := 0; i < n; i++ {
-		b1.Columns[0].Float64Data[i] = 100.0           // a = 100
-		b1.Columns[1].Float64Data[i] = 0.1             // b = 0.1
-		b1.Columns[2].Float64Data[i] = 0.05            // c = 0.05
-		b2.Columns[0].Float64Data[i] = 200.0           // a = 200
-		b2.Columns[1].Float64Data[i] = 0.2             // b = 0.2
-		b2.Columns[2].Float64Data[i] = 0.1             // c = 0.1
+		b1.Columns[0].Float64Data[i] = 100.0 // a = 100
+		b1.Columns[1].Float64Data[i] = 0.1   // b = 0.1
+		b1.Columns[2].Float64Data[i] = 0.05  // c = 0.05
+		b2.Columns[0].Float64Data[i] = 200.0 // a = 200
+		b2.Columns[1].Float64Data[i] = 0.2   // b = 0.2
+		b2.Columns[2].Float64Data[i] = 0.1   // c = 0.1
 	}
 	// Resolve column refs
 	colA.EvalFloat64Vec(b1, make([]float64, n), n)

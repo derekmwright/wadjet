@@ -445,4 +445,3 @@ func (s *Server) SendTaskDispatch(workerID, taskID, queryID, stageID string, tas
 	}
 	return nil
 }
-

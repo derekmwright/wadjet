@@ -28,6 +28,7 @@ var scanOutputPrune = optswitch.Register("scan-output-prune", "WADJET_SCAN_OUTPU
 //     path, not stage outputs, and carry their own widening rules);
 //   - the union of consumer Columns (plus every consumer's Exchange
 //     keys, defensively) is a strict subset of the scan's read set.
+//
 // Anything else keeps the full output — correct, just wider.
 func pruneScanOutputColumns(stages []Stage) {
 	if !scanOutputPrune.On() {

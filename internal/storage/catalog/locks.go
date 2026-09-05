@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	lockTTL        = 30 * time.Second
+	lockTTL          = 30 * time.Second
 	lockPollInterval = 500 * time.Millisecond
-	lockBucket     = "wadjet_catalog_locks"
+	lockBucket       = "wadjet_catalog_locks"
 )
 
 // LockManager provides distributed read-write locks via NATS KV.

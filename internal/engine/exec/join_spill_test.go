@@ -464,8 +464,8 @@ func TestGraceHashJoinSpill_Parallel(t *testing.T) {
 	sink := &CollectSink{}
 	pipe := &Pipeline{
 		Source:  source,
-		Ops:    []UnaryOperator{probe},
-		Sink:   sink,
+		Ops:     []UnaryOperator{probe},
+		Sink:    sink,
 		Workers: 4, // Force parallel — exercises concurrent probe spill writes
 	}
 	if err := pipe.Run(context.Background()); err != nil {

@@ -679,9 +679,9 @@ func inferUnnestType(vals []string) parquet.TypeID {
 // BERNOULLI: row-level — each row independently included with probability p.
 // SYSTEM: batch-level — each batch included/excluded as a whole with probability p.
 type sampleOperator struct {
-	method  string  // "BERNOULLI" or "SYSTEM"
-	pct     float64 // 0-100
-	rng     *rand.Rand
+	method string  // "BERNOULLI" or "SYSTEM"
+	pct    float64 // 0-100
+	rng    *rand.Rand
 }
 
 func newSampleOperator(method string, pct float64) *sampleOperator {
@@ -723,4 +723,3 @@ func (s *sampleOperator) Execute(_ context.Context, b *batch.RecordBatch) (*batc
 }
 
 func (s *sampleOperator) Close() error { return nil }
-

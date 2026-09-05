@@ -9,8 +9,8 @@ import (
 type AlertFire struct {
 	AlertName   string           `json:"alert"`
 	EvaluatedAt time.Time        `json:"evaluated_at"`
-	RowCount    int64            `json:"row_count"`          // true count, pre-truncation
-	Rows        []map[string]any `json:"rows"`               // capped at MaxRowsPerFire
+	RowCount    int64            `json:"row_count"` // true count, pre-truncation
+	Rows        []map[string]any `json:"rows"`      // capped at MaxRowsPerFire
 	Truncated   bool             `json:"truncated"`
 	Schema      []ColumnMeta     `json:"schema"`
 }

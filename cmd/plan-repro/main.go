@@ -5,7 +5,8 @@
 // production stage shapes locally.
 //
 // Usage: eval "$(aws configure export-credentials --profile citc --format env)"
-//        go run ./cmd/plan-repro -q 5
+//
+//	go run ./cmd/plan-repro -q 5
 package main
 
 import (
@@ -18,8 +19,8 @@ import (
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
-	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )

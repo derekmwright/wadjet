@@ -179,7 +179,7 @@ func TestThriftListHeader(t *testing.T) {
 		wantType thriftType
 		wantSize int
 	}{
-		{"small", []byte{0x35}, thriftI32, 3},       // size=3, type=5(I32)
+		{"small", []byte{0x35}, thriftI32, 3},        // size=3, type=5(I32)
 		{"zero", []byte{0x05}, thriftI32, 0},         // size=0, type=5(I32)
 		{"large", []byte{0xF5, 0x10}, thriftI32, 16}, // size≥15, varint 16 follows
 	}
@@ -209,13 +209,13 @@ func TestThriftSkipField(t *testing.T) {
 		{"bool_true", thriftBoolTrue, nil},
 		{"bool_false", thriftBoolFalse, nil},
 		{"byte", thriftByte, []byte{0x42}},
-		{"i16", thriftI16, []byte{0x04}},          // zigzag(2)
-		{"i32", thriftI32, []byte{0x08}},          // zigzag(4)
-		{"i64", thriftI64, []byte{0x10}},          // zigzag(8)
+		{"i16", thriftI16, []byte{0x04}}, // zigzag(2)
+		{"i32", thriftI32, []byte{0x08}}, // zigzag(4)
+		{"i64", thriftI64, []byte{0x10}}, // zigzag(8)
 		{"double", thriftDouble, make([]byte, 8)},
 		{"binary", thriftBinary, []byte{0x03, 'a', 'b', 'c'}},
-		{"empty_list", thriftList, []byte{0x05}},                    // 0 elements, type I32
-		{"struct", thriftStruct, []byte{0x00}},                      // empty struct (stop byte)
+		{"empty_list", thriftList, []byte{0x05}}, // 0 elements, type I32
+		{"struct", thriftStruct, []byte{0x00}},   // empty struct (stop byte)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -472,10 +472,10 @@ func TestDecodeStatistics(t *testing.T) {
 	buf.WriteByte(buildFieldHeader(1, thriftI64)) // field 4: distinct_count = 100
 	buf.Write(buildThriftI64(100))
 	buf.WriteByte(buildFieldHeader(1, thriftBinary)) // field 5: max_value
-	buf.Write([]byte{0x04, 0x00, 0x00, 0x00, 0x64}) // length 4, then int32 LE 100
+	buf.Write([]byte{0x04, 0x00, 0x00, 0x00, 0x64})  // length 4, then int32 LE 100
 	buf.WriteByte(buildFieldHeader(1, thriftBinary)) // field 6: min_value
-	buf.Write([]byte{0x04, 0x00, 0x00, 0x00, 0x01}) // length 4, then int32 LE 1
-	buf.WriteByte(0x00)                               // stop
+	buf.Write([]byte{0x04, 0x00, 0x00, 0x00, 0x01})  // length 4, then int32 LE 1
+	buf.WriteByte(0x00)                              // stop
 
 	d := newThriftDecoder(buf.Bytes())
 	s := &Statistics{}

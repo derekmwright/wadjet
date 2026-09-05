@@ -1143,9 +1143,9 @@ func TestPartialDrain_IntKeyMultiSpill(t *testing.T) {
 // drain-rebuild loop that cooperative spill caused on Q17.
 //
 // Asserts:
-//   1. Self-spill fires (freeGroupIDs populated post-Consume) on int-keyed path.
-//   2. Final aggregate result matches no-spill reference row-for-row.
-//   3. Tracker.Used() lands below the 60% SpillCheap trigger after spill.
+//  1. Self-spill fires (freeGroupIDs populated post-Consume) on int-keyed path.
+//  2. Final aggregate result matches no-spill reference row-for-row.
+//  3. Tracker.Used() lands below the 60% SpillCheap trigger after spill.
 func TestPartialDrain_SelfSpill(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "k", Type: parquet.TypeInt64},

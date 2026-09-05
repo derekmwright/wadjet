@@ -21,10 +21,10 @@ import (
 // bytes. Merge is byte-wise max across two sketches.
 
 const (
-	hllPrecision  = 14
-	hllRegisters  = 1 << hllPrecision // 16384
-	hllMask       = hllRegisters - 1
-	hllVersion    = 1
+	hllPrecision = 14
+	hllRegisters = 1 << hllPrecision // 16384
+	hllMask      = hllRegisters - 1
+	hllVersion   = 1
 )
 
 // HLL is a fixed-size HyperLogLog++ sketch. Zero value is a valid empty

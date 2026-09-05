@@ -582,14 +582,34 @@ func TestFileReaderStatsToNative(t *testing.T) {
 			want:     int64(100),
 		},
 		{
-			name:     "float",
-			data:     func() []byte { b := make([]byte, 4); v := math.Float32bits(3.14); b[0] = byte(v); b[1] = byte(v >> 8); b[2] = byte(v >> 16); b[3] = byte(v >> 24); return b }(),
+			name: "float",
+			data: func() []byte {
+				b := make([]byte, 4)
+				v := math.Float32bits(3.14)
+				b[0] = byte(v)
+				b[1] = byte(v >> 8)
+				b[2] = byte(v >> 16)
+				b[3] = byte(v >> 24)
+				return b
+			}(),
 			physType: PhysicalFloat,
 			want:     float64(float32(3.14)),
 		},
 		{
-			name:     "double",
-			data:     func() []byte { b := make([]byte, 8); v := math.Float64bits(2.718); b[0] = byte(v); b[1] = byte(v >> 8); b[2] = byte(v >> 16); b[3] = byte(v >> 24); b[4] = byte(v >> 32); b[5] = byte(v >> 40); b[6] = byte(v >> 48); b[7] = byte(v >> 56); return b }(),
+			name: "double",
+			data: func() []byte {
+				b := make([]byte, 8)
+				v := math.Float64bits(2.718)
+				b[0] = byte(v)
+				b[1] = byte(v >> 8)
+				b[2] = byte(v >> 16)
+				b[3] = byte(v >> 24)
+				b[4] = byte(v >> 32)
+				b[5] = byte(v >> 40)
+				b[6] = byte(v >> 48)
+				b[7] = byte(v >> 56)
+				return b
+			}(),
 			physType: PhysicalDouble,
 			want:     2.718,
 		},
@@ -633,12 +653,12 @@ func TestFileReaderStatsToNative(t *testing.T) {
 // TestFileReaderSchemaTypes verifies type mapping for common Parquet logical/physical types.
 func TestFileReaderSchemaTypes(t *testing.T) {
 	type Record struct {
-		B    bool    `parquet:"b"`
-		I32  int32   `parquet:"i32"`
-		I64  int64   `parquet:"i64"`
-		F32  float32 `parquet:"f32"`
-		F64  float64 `parquet:"f64"`
-		Str  string  `parquet:"str"`
+		B   bool    `parquet:"b"`
+		I32 int32   `parquet:"i32"`
+		I64 int64   `parquet:"i64"`
+		F32 float32 `parquet:"f32"`
+		F64 float64 `parquet:"f64"`
+		Str string  `parquet:"str"`
 	}
 
 	var buf bytes.Buffer

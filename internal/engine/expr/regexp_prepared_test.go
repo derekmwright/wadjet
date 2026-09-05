@@ -12,17 +12,17 @@ import (
 // pattern/replacement/input combination.
 func TestPreparedReplaceMatchesGeneric(t *testing.T) {
 	cases := []struct{ pattern, repl string }{
-		{`^https?://(?:www\.)?([^/]+)/.*$`, `\1`},          // ClickBench Q29
-		{`(\w+)@(\w+)`, `\2 at \1`},                        // multiple groups, reordered
-		{`a+`, `X`},                                        // no groups, multiple matches
-		{`(b)?c`, `[\1]`},                                  // optional group (unmatched → empty)
-		{`x*`, `<>`},                                       // empty matches (advancement rules)
-		{`(\d+)`, `n=\1$`},                                 // literal dollar in template
-		{`(.)(.)`, `\2\1`},                                 // swap pairs
-		{`\\`, `/`},                                        // escaped backslash pattern
-		{`(a)(b)(c)(d)(e)(f)(g)(h)(i)`, `\9\1`},            // high group numbers
-		{`q`, `\\1`},                                       // escaped backslash then digit → literal \1
-		{`(z)`, `pre\1post\7`},                             // out-of-range group → empty
+		{`^https?://(?:www\.)?([^/]+)/.*$`, `\1`}, // ClickBench Q29
+		{`(\w+)@(\w+)`, `\2 at \1`},               // multiple groups, reordered
+		{`a+`, `X`},                               // no groups, multiple matches
+		{`(b)?c`, `[\1]`},                         // optional group (unmatched → empty)
+		{`x*`, `<>`},                              // empty matches (advancement rules)
+		{`(\d+)`, `n=\1$`},                        // literal dollar in template
+		{`(.)(.)`, `\2\1`},                        // swap pairs
+		{`\\`, `/`},                               // escaped backslash pattern
+		{`(a)(b)(c)(d)(e)(f)(g)(h)(i)`, `\9\1`},   // high group numbers
+		{`q`, `\\1`},                              // escaped backslash then digit → literal \1
+		{`(z)`, `pre\1post\7`},                    // out-of-range group → empty
 	}
 	inputs := []string{
 		"",
@@ -112,18 +112,18 @@ func TestAnchoredAtTextStart(t *testing.T) {
 // only one match is ever consulted.
 func TestPreparedReplaceAnchoredPathParity(t *testing.T) {
 	cases := []struct{ pattern, repl string }{
-		{`^https?://(?:www\.)?([^/]+)/.*$`, `\1`},   // ClickBench Q29
-		{`^(\w+)`, `[\1]`},                          // anchored, match is a prefix only
-		{`^a*`, `<>`},                               // anchored empty matches
-		{`^(a)|^(b)`, `\1\2`},                       // anchored alternation, one group unmatched
-		{`(?m)^(\w+)`, `<\1>`},                      // multiline: several matches, NOT anchored
-		{`^`, `X`},                                  // pure anchor, empty match
-		{`^(.*)$`, `\1`},                            // whole-subject extract
-		{`^(\w+)@(\w+)$`, `\2/\1`},                  // multi-group whole-subject
-		{`^(z)`, `pre\1post\7`},                     // out-of-range group
-		{`^(?:(a)|(b))c`, `\1\2!`},                  // unmatched optional group
-		{`\A(\d+)`, `n=\1`},                         // \A form
-		{`^x(y)?z`, `[\1]`},                         // optional group inside anchored match
+		{`^https?://(?:www\.)?([^/]+)/.*$`, `\1`}, // ClickBench Q29
+		{`^(\w+)`, `[\1]`},                        // anchored, match is a prefix only
+		{`^a*`, `<>`},                             // anchored empty matches
+		{`^(a)|^(b)`, `\1\2`},                     // anchored alternation, one group unmatched
+		{`(?m)^(\w+)`, `<\1>`},                    // multiline: several matches, NOT anchored
+		{`^`, `X`},                                // pure anchor, empty match
+		{`^(.*)$`, `\1`},                          // whole-subject extract
+		{`^(\w+)@(\w+)$`, `\2/\1`},                // multi-group whole-subject
+		{`^(z)`, `pre\1post\7`},                   // out-of-range group
+		{`^(?:(a)|(b))c`, `\1\2!`},                // unmatched optional group
+		{`\A(\d+)`, `n=\1`},                       // \A form
+		{`^x(y)?z`, `[\1]`},                       // optional group inside anchored match
 	}
 	inputs := []string{
 		"", "a", "aaa", "abc", "xz", "xyz", "zzz",

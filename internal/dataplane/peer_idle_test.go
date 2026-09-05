@@ -22,8 +22,8 @@ import (
 // wedged peer looks like to gRPC without keepalive.
 type wedgedStream struct {
 	grpc.ClientStream // unused methods panic if called; Read only calls Recv
-	ctx    context.Context
-	chunks [][]byte
+	ctx               context.Context
+	chunks            [][]byte
 }
 
 func (s *wedgedStream) Recv() (*dpv1.ShuffleChunk, error) {

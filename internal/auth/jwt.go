@@ -19,7 +19,7 @@ import (
 // JWTConfig holds JWT verification configuration.
 type JWTConfig struct {
 	Enabled       bool   `yaml:"enabled"`
-	Secret        string `yaml:"secret"`         // HMAC-SHA256 secret
+	Secret        string `yaml:"secret"`          // HMAC-SHA256 secret
 	PublicKeyFile string `yaml:"public_key_file"` // PEM file path for RSA verification
 	RoleClaim     string `yaml:"role_claim"`      // JWT claim containing role (default: "role")
 	Issuer        string `yaml:"issuer"`          // expected issuer (optional)

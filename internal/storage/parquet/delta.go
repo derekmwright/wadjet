@@ -173,7 +173,7 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 				}
 			} else {
 				// Bit-packed deltas.
-				bytesNeeded := (miniblockSize * bw + 7) / 8
+				bytesNeeded := (miniblockSize*bw + 7) / 8
 				if off+bytesNeeded > len(data) {
 					return nil, fmt.Errorf("delta: not enough data for miniblock")
 				}
@@ -317,7 +317,7 @@ func findDeltaDataEnd(data []byte, n int) int {
 				valsInMiniblock = remaining
 			}
 			if bw > 0 {
-				bytesNeeded := (miniblockSize * bw + 7) / 8
+				bytesNeeded := (miniblockSize*bw + 7) / 8
 				off += bytesNeeded
 			}
 			remaining -= valsInMiniblock

@@ -187,10 +187,10 @@ func (s *HTTPStore) GetReaderAt(ctx context.Context, bucket, key string) (Reader
 		return nil, 0, fmt.Errorf("http get reader at: server did not report Content-Length")
 	}
 	return &httpReaderAt{
-		store:  s,
-		url:    s.url(bucket, key),
-		ctx:    ctx,
-		size:   info.Size,
+		store: s,
+		url:   s.url(bucket, key),
+		ctx:   ctx,
+		size:  info.Size,
 	}, info.Size, nil
 }
 

@@ -214,9 +214,9 @@ func TestWrapPipeline(t *testing.T) {
 
 func TestFormatAnalyzeStats(t *testing.T) {
 	stats := []*ProfileStats{
-		{Name: "ScanSource", RowsIn: 0, RowsOut: 1000, WallTime: 5_500_000, Calls: 2},  // 5.5ms
+		{Name: "ScanSource", RowsIn: 0, RowsOut: 1000, WallTime: 5_500_000, Calls: 2},   // 5.5ms
 		{Name: "KernelFilter", RowsIn: 1000, RowsOut: 100, WallTime: 800_000, Calls: 2}, // 800µs
-		{Name: "CollectSink", RowsIn: 100, RowsOut: 0, WallTime: 200_000_000, Calls: 2},  // 200ms
+		{Name: "CollectSink", RowsIn: 100, RowsOut: 0, WallTime: 200_000_000, Calls: 2}, // 200ms
 	}
 
 	lines := FormatAnalyzeStats(stats)

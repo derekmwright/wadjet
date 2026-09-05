@@ -300,38 +300,38 @@ func buildTestClientHello() []byte {
 	var exts bytes.Buffer
 
 	// SNI extension (type 0)
-	binary.Write(&exts, binary.BigEndian, uint16(0))    // extension type: SNI
+	binary.Write(&exts, binary.BigEndian, uint16(0)) // extension type: SNI
 	sniName := []byte("test.example.com")
 	sniListLen := 1 + 2 + len(sniName)
 	binary.Write(&exts, binary.BigEndian, uint16(2+sniListLen)) // ext data len
 	binary.Write(&exts, binary.BigEndian, uint16(sniListLen))   // SNI list len
-	exts.WriteByte(0)                                            // host name type
+	exts.WriteByte(0)                                           // host name type
 	binary.Write(&exts, binary.BigEndian, uint16(len(sniName))) // name length
 	exts.Write(sniName)
 
 	// Supported Groups extension (type 10) with curves 0x0017, 0x0018
-	binary.Write(&exts, binary.BigEndian, uint16(10))  // extension type
-	binary.Write(&exts, binary.BigEndian, uint16(6))   // extension data length: 2 (list len) + 4 (2 curves)
-	binary.Write(&exts, binary.BigEndian, uint16(4))   // named curve list length
+	binary.Write(&exts, binary.BigEndian, uint16(10))     // extension type
+	binary.Write(&exts, binary.BigEndian, uint16(6))      // extension data length: 2 (list len) + 4 (2 curves)
+	binary.Write(&exts, binary.BigEndian, uint16(4))      // named curve list length
 	binary.Write(&exts, binary.BigEndian, uint16(0x0017)) // secp256r1
 	binary.Write(&exts, binary.BigEndian, uint16(0x0018)) // secp384r1
 
 	// EC Point Formats extension (type 11) with format 0
-	binary.Write(&exts, binary.BigEndian, uint16(11))  // extension type
-	binary.Write(&exts, binary.BigEndian, uint16(2))   // extension data length
-	exts.WriteByte(1)                                   // format list length
-	exts.WriteByte(0)                                   // uncompressed
+	binary.Write(&exts, binary.BigEndian, uint16(11)) // extension type
+	binary.Write(&exts, binary.BigEndian, uint16(2))  // extension data length
+	exts.WriteByte(1)                                 // format list length
+	exts.WriteByte(0)                                 // uncompressed
 
 	// Build ClientHello body
 	var ch bytes.Buffer
-	binary.Write(&ch, binary.BigEndian, uint16(0x0303)) // version TLS 1.2
-	ch.Write(make([]byte, 32))                           // random
-	ch.WriteByte(0)                                      // session_id_len = 0
-	binary.Write(&ch, binary.BigEndian, uint16(4))       // cipher_suites_len = 4 (2 suites)
-	binary.Write(&ch, binary.BigEndian, uint16(0xC02C))  // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-	binary.Write(&ch, binary.BigEndian, uint16(0xC02B))  // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-	ch.WriteByte(1)                                      // compression methods length = 1
-	ch.WriteByte(0)                                      // null compression
+	binary.Write(&ch, binary.BigEndian, uint16(0x0303))     // version TLS 1.2
+	ch.Write(make([]byte, 32))                              // random
+	ch.WriteByte(0)                                         // session_id_len = 0
+	binary.Write(&ch, binary.BigEndian, uint16(4))          // cipher_suites_len = 4 (2 suites)
+	binary.Write(&ch, binary.BigEndian, uint16(0xC02C))     // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+	binary.Write(&ch, binary.BigEndian, uint16(0xC02B))     // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+	ch.WriteByte(1)                                         // compression methods length = 1
+	ch.WriteByte(0)                                         // null compression
 	binary.Write(&ch, binary.BigEndian, uint16(exts.Len())) // extensions length
 	ch.Write(exts.Bytes())
 
@@ -358,10 +358,10 @@ func buildTestServerHello() []byte {
 	// Build ServerHello body
 	var sh bytes.Buffer
 	binary.Write(&sh, binary.BigEndian, uint16(0x0303)) // version TLS 1.2
-	sh.Write(make([]byte, 32))                           // random
-	sh.WriteByte(0)                                      // session_id_len = 0
-	binary.Write(&sh, binary.BigEndian, uint16(0xC02C))  // selected cipher
-	sh.WriteByte(0)                                      // compression = null
+	sh.Write(make([]byte, 32))                          // random
+	sh.WriteByte(0)                                     // session_id_len = 0
+	binary.Write(&sh, binary.BigEndian, uint16(0xC02C)) // selected cipher
+	sh.WriteByte(0)                                     // compression = null
 	// No extensions
 
 	// Handshake header

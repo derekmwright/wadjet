@@ -20,10 +20,10 @@ func TestRegisteredDomain(t *testing.T) {
 		{"a.b.c.evil.com", "evil.com"},
 		{"example.com", "example.com"},
 		{"deep.sub.domain.amazon.co.jp", "amazon.co.jp"},
-		{"MAIL.GOOGLE.COM", "google.com"},        // case insensitive
-		{"mail.google.com.", "google.com"},        // trailing dot
-		{"crypto-mine.evil.org", "evil.org"},      // hyphens
-		{"localhost", ""},                          // single label → nil
+		{"MAIL.GOOGLE.COM", "google.com"},    // case insensitive
+		{"mail.google.com.", "google.com"},   // trailing dot
+		{"crypto-mine.evil.org", "evil.org"}, // hyphens
+		{"localhost", ""},                    // single label → nil
 	}
 	for _, tt := range tests {
 		got := fn([]any{tt.input})
@@ -56,8 +56,8 @@ func TestTLD(t *testing.T) {
 		{"sub.example.co.uk", "co.uk"},
 		{"example.org", "org"},
 		{"deep.sub.amazon.co.jp", "co.jp"},
-		{"example.com.", "com"},                 // trailing dot
-		{"EXAMPLE.COM", "com"},                  // case insensitive
+		{"example.com.", "com"}, // trailing dot
+		{"EXAMPLE.COM", "com"},  // case insensitive
 	}
 	for _, tt := range tests {
 		got := fn([]any{tt.input})
@@ -85,9 +85,9 @@ func TestSubdomain(t *testing.T) {
 		{"a.b.c.evil.com", "a.b.c"},
 		{"sub.example.co.uk", "sub"},
 		{"a.b.c.example.co.uk", "a.b.c"},
-		{"example.com", ""},                     // no subdomain
-		{"google.co.uk", ""},                    // no subdomain
-		{"DEEP.SUB.EXAMPLE.COM", "deep.sub"},    // case insensitive
+		{"example.com", ""},                  // no subdomain
+		{"google.co.uk", ""},                 // no subdomain
+		{"DEEP.SUB.EXAMPLE.COM", "deep.sub"}, // case insensitive
 	}
 	for _, tt := range tests {
 		got := fn([]any{tt.input})
@@ -115,7 +115,7 @@ func TestDomainDepth(t *testing.T) {
 		{"example.com", 2},
 		{"mail.google.com", 3},
 		{"a.b.c.evil.com", 5},
-		{"a.b.c.d.e.f.g.com", 8},    // DGA-like depth
+		{"a.b.c.d.e.f.g.com", 8}, // DGA-like depth
 	}
 	for _, tt := range tests {
 		got := fn([]any{tt.input})
@@ -181,10 +181,10 @@ func TestEntropy(t *testing.T) {
 		min   float64
 		max   float64
 	}{
-		{"aaaa", 0.0, 0.01},           // zero entropy — single repeated char
-		{"ab", 0.99, 1.01},            // 1 bit — two equally likely chars
-		{"hello world", 2.5, 3.5},     // natural language — moderate entropy
-		{"a3f8b2c9e1d7", 3.0, 4.0},    // hex string — higher entropy
+		{"aaaa", 0.0, 0.01},                              // zero entropy — single repeated char
+		{"ab", 0.99, 1.01},                               // 1 bit — two equally likely chars
+		{"hello world", 2.5, 3.5},                        // natural language — moderate entropy
+		{"a3f8b2c9e1d7", 3.0, 4.0},                       // hex string — higher entropy
 		{"ABCDEFGHabcdefgh12345678!@#$%^&*()", 4.0, 5.5}, // high entropy
 	}
 	for _, tt := range tests {

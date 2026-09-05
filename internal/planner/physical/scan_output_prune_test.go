@@ -38,10 +38,10 @@ func TestPruneScanOutputColumns(t *testing.T) {
 
 	// Ineligible consumers keep the full output.
 	for _, mut := range []func(s *Stage){
-		func(s *Stage) { s.Columns = nil },                                        // undeclared exchange columns
-		func(s *Stage) { s.Type = StageAggregate },                                // non-exchange consumer
-		func(s *Stage) { s.Exchange.ComputedCols = []ComputedCol{{Name: "f"}} },   // computed-col machinery
-		func(s *Stage) { s.Exchange.ExtraReadCols = []string{"x"} },               // widened reads
+		func(s *Stage) { s.Columns = nil },                                      // undeclared exchange columns
+		func(s *Stage) { s.Type = StageAggregate },                              // non-exchange consumer
+		func(s *Stage) { s.Exchange.ComputedCols = []ComputedCol{{Name: "f"}} }, // computed-col machinery
+		func(s *Stage) { s.Exchange.ExtraReadCols = []string{"x"} },             // widened reads
 	} {
 		st := []Stage{stages[0], stages[1]}
 		st[0].OutputColumns = nil

@@ -169,12 +169,12 @@ func TestAssignJoinKeySides(t *testing.T) {
 		"c_nationkey = n1.n_nationkey")
 
 	tests := []struct {
-		name       string
-		leftKeys   []string
-		rightKeys  []string
-		build      *logical.Node
-		wantLeft   []string
-		wantRight  []string
+		name      string
+		leftKeys  []string
+		rightKeys []string
+		build     *logical.Node
+		wantLeft  []string
+		wantRight []string
 	}{
 		{
 			name:      "correct order kept",

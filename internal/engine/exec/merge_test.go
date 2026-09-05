@@ -163,8 +163,8 @@ func TestMergeableSinkParallelPipeline(t *testing.T) {
 
 	pipe := &Pipeline{
 		Source:  source,
-		Ops:    nil,
-		Sink:   agg,
+		Ops:     nil,
+		Sink:    agg,
 		Workers: 4, // Force parallel
 	}
 
@@ -253,8 +253,8 @@ func TestMergeableSinkCompactGroupKey(t *testing.T) {
 	source := NewSliceSource(schema, rows)
 	pipe := &Pipeline{
 		Source:  source,
-		Ops:    nil,
-		Sink:   agg,
+		Ops:     nil,
+		Sink:    agg,
 		Workers: 4,
 	}
 
@@ -327,8 +327,8 @@ func TestMergeableSinkSort(t *testing.T) {
 
 	pipe := &Pipeline{
 		Source:  NewSliceSource(schema, rows),
-		Ops:    nil,
-		Sink:   sortOp,
+		Ops:     nil,
+		Sink:    sortOp,
 		Workers: 4,
 	}
 
@@ -386,8 +386,8 @@ func TestMergeableSinkSortWithLimit(t *testing.T) {
 
 	pipe := &Pipeline{
 		Source:  NewSliceSource(schema, rows),
-		Ops:    nil,
-		Sink:   sortOp,
+		Ops:     nil,
+		Sink:    sortOp,
 		Workers: 4,
 	}
 

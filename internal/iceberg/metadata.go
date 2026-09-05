@@ -13,19 +13,19 @@ import (
 
 // TableMetadata represents an Iceberg table metadata file (v1 or v2).
 type TableMetadata struct {
-	FormatVersion int              `json:"format-version"`
-	TableUUID     string           `json:"table-uuid"`
-	Location      string           `json:"location"`
-	Schema        Schema           `json:"schema"`
-	Schemas       []Schema         `json:"schemas"`
-	CurrentSchema int              `json:"current-schema-id"`
-	PartitionSpec []PartitionField `json:"partition-spec"`
-	PartitionSpecs []PartitionSpec `json:"partition-specs"`
-	DefaultSpecID  int             `json:"default-spec-id"`
-	Properties    map[string]string `json:"properties"`
-	Snapshots     []Snapshot       `json:"snapshots"`
-	CurrentSnapshotID *int64       `json:"current-snapshot-id"`
-	SortOrders    []SortOrder      `json:"sort-orders"`
+	FormatVersion     int               `json:"format-version"`
+	TableUUID         string            `json:"table-uuid"`
+	Location          string            `json:"location"`
+	Schema            Schema            `json:"schema"`
+	Schemas           []Schema          `json:"schemas"`
+	CurrentSchema     int               `json:"current-schema-id"`
+	PartitionSpec     []PartitionField  `json:"partition-spec"`
+	PartitionSpecs    []PartitionSpec   `json:"partition-specs"`
+	DefaultSpecID     int               `json:"default-spec-id"`
+	Properties        map[string]string `json:"properties"`
+	Snapshots         []Snapshot        `json:"snapshots"`
+	CurrentSnapshotID *int64            `json:"current-snapshot-id"`
+	SortOrders        []SortOrder       `json:"sort-orders"`
 }
 
 // Schema represents an Iceberg table schema.
@@ -75,10 +75,10 @@ type SortOrder struct {
 
 // SortField defines a sort column and direction.
 type SortField struct {
-	Transform  string `json:"transform"`
-	SourceID   int    `json:"source-id"`
-	Direction  string `json:"direction"`
-	NullOrder  string `json:"null-order"`
+	Transform string `json:"transform"`
+	SourceID  int    `json:"source-id"`
+	Direction string `json:"direction"`
+	NullOrder string `json:"null-order"`
 }
 
 // ManifestList is a list of manifest file entries.
@@ -88,11 +88,11 @@ type ManifestList struct {
 
 // ManifestEntry points to a manifest file.
 type ManifestEntry struct {
-	ManifestPath   string `json:"manifest_path"`
-	ManifestLength int64  `json:"manifest_length"`
-	PartitionSpecID int   `json:"partition_spec_id"`
-	AddedSnapshotID int64 `json:"added_snapshot_id"`
-	Content         int   `json:"content"` // 0 = data, 1 = deletes
+	ManifestPath    string `json:"manifest_path"`
+	ManifestLength  int64  `json:"manifest_length"`
+	PartitionSpecID int    `json:"partition_spec_id"`
+	AddedSnapshotID int64  `json:"added_snapshot_id"`
+	Content         int    `json:"content"` // 0 = data, 1 = deletes
 }
 
 // ManifestFile contains data file entries.
@@ -102,16 +102,16 @@ type ManifestFile struct {
 
 // DataFileEntry describes a single data file in an Iceberg table.
 type DataFileEntry struct {
-	FilePath    string            `json:"file_path"`
-	FileFormat  string            `json:"file_format"` // PARQUET, ORC, AVRO
-	RecordCount int64             `json:"record_count"`
-	FileSizeBytes int64           `json:"file_size_in_bytes"`
-	Partition   map[string]any    `json:"partition"`
-	ColumnSizes map[int]int64     `json:"column_sizes"`
-	ValueCounts map[int]int64     `json:"value_counts"`
-	NullCounts  map[int]int64     `json:"null_value_counts"`
-	LowerBounds map[int]string    `json:"lower_bounds"`
-	UpperBounds map[int]string    `json:"upper_bounds"`
+	FilePath      string         `json:"file_path"`
+	FileFormat    string         `json:"file_format"` // PARQUET, ORC, AVRO
+	RecordCount   int64          `json:"record_count"`
+	FileSizeBytes int64          `json:"file_size_in_bytes"`
+	Partition     map[string]any `json:"partition"`
+	ColumnSizes   map[int]int64  `json:"column_sizes"`
+	ValueCounts   map[int]int64  `json:"value_counts"`
+	NullCounts    map[int]int64  `json:"null_value_counts"`
+	LowerBounds   map[int]string `json:"lower_bounds"`
+	UpperBounds   map[int]string `json:"upper_bounds"`
 }
 
 // ParseTableMetadata parses an Iceberg table metadata JSON file.

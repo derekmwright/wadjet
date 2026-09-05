@@ -41,7 +41,7 @@ import (
 //   - float64: 8 bytes LE (math.Float64bits) per value
 //   - bytes: uint16 length prefix + raw bytes per value
 const (
-	histVersion       = 1
+	histVersion        = 1
 	HistDefaultBuckets = 64
 
 	histTypeInt64   = 0

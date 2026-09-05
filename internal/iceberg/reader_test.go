@@ -215,10 +215,10 @@ func TestTableReaderSkipsDeleteManifests(t *testing.T) {
 
 	snapID := int64(1)
 	meta := TableMetadata{
-		FormatVersion: 1,
-		Location:      "warehouse/t",
-		Schema:        Schema{Fields: []Field{{ID: 1, Name: "id", Type: "long"}}},
-		Snapshots:     []Snapshot{{SnapshotID: 1, ManifestList: "metadata/snap-1-ml.json"}},
+		FormatVersion:     1,
+		Location:          "warehouse/t",
+		Schema:            Schema{Fields: []Field{{ID: 1, Name: "id", Type: "long"}}},
+		Snapshots:         []Snapshot{{SnapshotID: 1, ManifestList: "metadata/snap-1-ml.json"}},
 		CurrentSnapshotID: &snapID,
 	}
 	putObj(t, store, bucket, "warehouse/t/metadata/v1.metadata.json", meta)

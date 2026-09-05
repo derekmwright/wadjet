@@ -18,8 +18,8 @@ import (
 // custom Thrift decoder and verify the metadata matches exactly.
 func TestReadFileMetaDataAgainstParquetGo(t *testing.T) {
 	type Record struct {
-		ID   int64  `parquet:"id"`
-		Name string `parquet:"name"`
+		ID   int64   `parquet:"id"`
+		Name string  `parquet:"name"`
 		Val  float64 `parquet:"val"`
 	}
 
@@ -310,8 +310,8 @@ func TestReadFileMetaDataTolerantOfEOFGreedyReader(t *testing.T) {
 func TestReadFileMetaDataBadMagic(t *testing.T) {
 	data := make([]byte, 20)
 	copy(data[:4], "PAR1")
-	binary.LittleEndian.PutUint32(data[len(data)-8:], 4)     // footer length
-	copy(data[len(data)-4:], "NOPE")                          // wrong magic
+	binary.LittleEndian.PutUint32(data[len(data)-8:], 4) // footer length
+	copy(data[len(data)-4:], "NOPE")                     // wrong magic
 	r := bytes.NewReader(data)
 	_, err := ReadFileMetaData(r, int64(len(data)))
 	if err == nil {

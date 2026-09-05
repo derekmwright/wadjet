@@ -10,10 +10,10 @@ import (
 
 // MTLSConfig holds mTLS authentication configuration.
 type MTLSConfig struct {
-	Enabled    bool              `yaml:"enabled"`
-	CAFile     string            `yaml:"ca_file"`     // CA certificate PEM file for verifying client certs
-	RoleMap    map[string]string `yaml:"role_map"`     // CN or SAN -> role mapping
-	DefaultRole string           `yaml:"default_role"` // role for valid certs not in role_map
+	Enabled     bool              `yaml:"enabled"`
+	CAFile      string            `yaml:"ca_file"`      // CA certificate PEM file for verifying client certs
+	RoleMap     map[string]string `yaml:"role_map"`     // CN or SAN -> role mapping
+	DefaultRole string            `yaml:"default_role"` // role for valid certs not in role_map
 }
 
 // MTLSVerifier authenticates clients via TLS client certificates.

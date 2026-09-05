@@ -109,4 +109,3 @@ func TestQ15_ScalarDependenciesWiring(t *testing.T) {
 		}
 	}
 }
-

@@ -42,9 +42,9 @@ func TestExtractOutputRenames_TableQualifier(t *testing.T) {
 
 	renames := extractOutputRenames(logicalPlan)
 	want := map[string]string{
-		"n1.n_name":                 "supp_nation",
-		"n2.n_name":                 "cust_nation",
-		"substr(l_shipdate, 1, 4)":  "l_year",
+		"n1.n_name":                "supp_nation",
+		"n2.n_name":                "cust_nation",
+		"substr(l_shipdate, 1, 4)": "l_year",
 	}
 	got := map[string]string{}
 	for _, r := range renames {

@@ -108,8 +108,8 @@ func TestInFilterBoolReadsGrammarAndRefuses(t *testing.T) {
 // spellings PostgreSQL's parse_bool accepts and the one prefix it refuses.
 func TestParseBoolTextGrammar(t *testing.T) {
 	for _, tc := range []struct {
-		in       string
-		val, ok  bool
+		in      string
+		val, ok bool
 	}{
 		{"t", true, true}, {"true", true, true}, {"TrUe", true, true},
 		{"tr", true, true}, {"yes", true, true}, {"y", true, true},

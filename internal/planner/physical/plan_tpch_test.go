@@ -418,9 +418,9 @@ func TestTPCHSelfJoinAliases(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
 	tests := []struct {
-		name     string
-		sql      string
-		aliases  []string
+		name    string
+		sql     string
+		aliases []string
 	}{
 		{
 			name:    "Q07_nation_self_join",
@@ -444,15 +444,15 @@ func TestTPCHSelfJoinAliases(t *testing.T) {
 
 // tpchPlanQueryMap contains all 22 TPC-H queries for routing validation.
 var tpchPlanQueryMap = map[int]string{
-	1: `SELECT l_returnflag, l_linestatus, SUM(l_quantity) as sum_qty, SUM(l_extendedprice) as sum_base_price, SUM(l_extendedprice * (1 - l_discount)) as sum_disc_price, SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge, AVG(l_quantity) as avg_qty, AVG(l_extendedprice) as avg_price, AVG(l_discount) as avg_disc, COUNT(*) as count_order FROM lineitem WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag, l_linestatus ORDER BY l_returnflag, l_linestatus`,
-	2: tpchPlanQueries["Q02"],
-	3: `SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) as revenue, o_orderdate, o_shippriority FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey WHERE c_mktsegment = 'BUILDING' AND o_orderdate < '1995-03-15' AND l_shipdate > '1995-03-15' GROUP BY l_orderkey, o_orderdate, o_shippriority ORDER BY revenue DESC, o_orderdate LIMIT 10`,
-	4: `SELECT o_orderpriority, COUNT(*) as order_count FROM orders WHERE o_orderdate >= '1993-07-01' AND o_orderdate < '1993-10-01' AND EXISTS (SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey AND l_commitdate < l_receiptdate) GROUP BY o_orderpriority ORDER BY o_orderpriority`,
-	5: `SELECT n_name, SUM(l_extendedprice * (1 - l_discount)) as revenue FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey JOIN supplier ON l_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey JOIN region ON n_regionkey = r_regionkey WHERE c_nationkey = s_nationkey AND r_name = 'ASIA' AND o_orderdate >= '1994-01-01' AND o_orderdate < '1995-01-01' GROUP BY n_name ORDER BY revenue DESC`,
-	6: `SELECT SUM(l_extendedprice * l_discount) as revenue FROM lineitem WHERE l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24`,
-	7: tpchPlanQueries["Q07"],
-	8: tpchPlanQueries["Q08"],
-	9: `SELECT n_name as nation, SUBSTR(o_orderdate, 1, 4) as o_year, SUM(l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity) as sum_profit FROM part JOIN lineitem ON p_partkey = l_partkey JOIN supplier ON s_suppkey = l_suppkey JOIN partsupp ON ps_suppkey = l_suppkey AND ps_partkey = l_partkey JOIN orders ON o_orderkey = l_orderkey JOIN nation ON s_nationkey = n_nationkey WHERE p_name LIKE '%green%' GROUP BY n_name, SUBSTR(o_orderdate, 1, 4) ORDER BY nation, o_year DESC`,
+	1:  `SELECT l_returnflag, l_linestatus, SUM(l_quantity) as sum_qty, SUM(l_extendedprice) as sum_base_price, SUM(l_extendedprice * (1 - l_discount)) as sum_disc_price, SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge, AVG(l_quantity) as avg_qty, AVG(l_extendedprice) as avg_price, AVG(l_discount) as avg_disc, COUNT(*) as count_order FROM lineitem WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag, l_linestatus ORDER BY l_returnflag, l_linestatus`,
+	2:  tpchPlanQueries["Q02"],
+	3:  `SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) as revenue, o_orderdate, o_shippriority FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey WHERE c_mktsegment = 'BUILDING' AND o_orderdate < '1995-03-15' AND l_shipdate > '1995-03-15' GROUP BY l_orderkey, o_orderdate, o_shippriority ORDER BY revenue DESC, o_orderdate LIMIT 10`,
+	4:  `SELECT o_orderpriority, COUNT(*) as order_count FROM orders WHERE o_orderdate >= '1993-07-01' AND o_orderdate < '1993-10-01' AND EXISTS (SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey AND l_commitdate < l_receiptdate) GROUP BY o_orderpriority ORDER BY o_orderpriority`,
+	5:  `SELECT n_name, SUM(l_extendedprice * (1 - l_discount)) as revenue FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey JOIN supplier ON l_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey JOIN region ON n_regionkey = r_regionkey WHERE c_nationkey = s_nationkey AND r_name = 'ASIA' AND o_orderdate >= '1994-01-01' AND o_orderdate < '1995-01-01' GROUP BY n_name ORDER BY revenue DESC`,
+	6:  `SELECT SUM(l_extendedprice * l_discount) as revenue FROM lineitem WHERE l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24`,
+	7:  tpchPlanQueries["Q07"],
+	8:  tpchPlanQueries["Q08"],
+	9:  `SELECT n_name as nation, SUBSTR(o_orderdate, 1, 4) as o_year, SUM(l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity) as sum_profit FROM part JOIN lineitem ON p_partkey = l_partkey JOIN supplier ON s_suppkey = l_suppkey JOIN partsupp ON ps_suppkey = l_suppkey AND ps_partkey = l_partkey JOIN orders ON o_orderkey = l_orderkey JOIN nation ON s_nationkey = n_nationkey WHERE p_name LIKE '%green%' GROUP BY n_name, SUBSTR(o_orderdate, 1, 4) ORDER BY nation, o_year DESC`,
 	10: `SELECT c_custkey, c_name, SUM(l_extendedprice * (1 - l_discount)) as revenue, c_acctbal, n_name, c_address, c_phone, c_comment FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey JOIN nation ON c_nationkey = n_nationkey WHERE o_orderdate >= '1993-10-01' AND o_orderdate < '1994-01-01' AND l_returnflag = 'R' GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment ORDER BY revenue DESC LIMIT 20`,
 	11: `SELECT ps_partkey, SUM(ps_supplycost * ps_availqty) as value FROM partsupp JOIN supplier ON ps_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey WHERE n_name = 'GERMANY' GROUP BY ps_partkey HAVING SUM(ps_supplycost * ps_availqty) > (SELECT SUM(ps_supplycost * ps_availqty) * 0.0001 FROM partsupp JOIN supplier ON ps_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey WHERE n_name = 'GERMANY') ORDER BY value DESC`,
 	12: `SELECT l_shipmode, SUM(CASE WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END) as high_line_count, SUM(CASE WHEN o_orderpriority != '1-URGENT' AND o_orderpriority != '2-HIGH' THEN 1 ELSE 0 END) as low_line_count FROM orders JOIN lineitem ON o_orderkey = l_orderkey WHERE l_shipmode IN ('MAIL', 'SHIP') AND l_commitdate < l_receiptdate AND l_shipdate < l_commitdate AND l_receiptdate >= '1994-01-01' AND l_receiptdate < '1995-01-01' GROUP BY l_shipmode ORDER BY l_shipmode`,
@@ -475,9 +475,9 @@ var tpchPlanQueryMap = map[int]string{
 //
 // The test generates physical stages for each query and simulates the
 // coordinator's three-way routing decision:
-//   1. Probe-split pipeline (preferred for join-heavy queries)
-//   2. Single-worker pipeline (small data or high shuffle overhead)
-//   3. Full distributed multi-stage (large data with shuffles)
+//  1. Probe-split pipeline (preferred for join-heavy queries)
+//  2. Single-worker pipeline (small data or high shuffle overhead)
+//  3. Full distributed multi-stage (large data with shuffles)
 func TestTPCHRoutingDecisions(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	workerCount := 3

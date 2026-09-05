@@ -18,19 +18,19 @@ import (
 type thriftType byte
 
 const (
-	thriftStop        thriftType = 0
-	thriftBoolTrue    thriftType = 1
-	thriftBoolFalse   thriftType = 2
-	thriftByte        thriftType = 3
-	thriftI16         thriftType = 4
-	thriftI32         thriftType = 5
-	thriftI64         thriftType = 6
-	thriftDouble      thriftType = 7
-	thriftBinary      thriftType = 8
-	thriftList        thriftType = 9
-	thriftSet         thriftType = 10
-	thriftMap         thriftType = 11
-	thriftStruct      thriftType = 12
+	thriftStop      thriftType = 0
+	thriftBoolTrue  thriftType = 1
+	thriftBoolFalse thriftType = 2
+	thriftByte      thriftType = 3
+	thriftI16       thriftType = 4
+	thriftI32       thriftType = 5
+	thriftI64       thriftType = 6
+	thriftDouble    thriftType = 7
+	thriftBinary    thriftType = 8
+	thriftList      thriftType = 9
+	thriftSet       thriftType = 10
+	thriftMap       thriftType = 11
+	thriftStruct    thriftType = 12
 )
 
 // thriftDecoder reads Thrift compact protocol data from a byte slice.

@@ -181,29 +181,29 @@ const (
 type ConvertedType int32
 
 const (
-	ConvertedUTF8             ConvertedType = 0
-	ConvertedMap              ConvertedType = 1
-	ConvertedMapKeyValue      ConvertedType = 2
-	ConvertedList             ConvertedType = 3
-	ConvertedEnum             ConvertedType = 4
-	ConvertedDecimal          ConvertedType = 5
-	ConvertedDate             ConvertedType = 6
-	ConvertedTimeMillis       ConvertedType = 7
-	ConvertedTimeMicros       ConvertedType = 8
-	ConvertedTimestampMillis  ConvertedType = 9
-	ConvertedTimestampMicros  ConvertedType = 10
-	ConvertedUint8            ConvertedType = 11
-	ConvertedUint16           ConvertedType = 12
-	ConvertedUint32           ConvertedType = 13
-	ConvertedUint64           ConvertedType = 14
-	ConvertedInt8             ConvertedType = 15
-	ConvertedInt16            ConvertedType = 16
-	ConvertedInt32            ConvertedType = 17
-	ConvertedInt64            ConvertedType = 18
-	ConvertedJSON             ConvertedType = 19
-	ConvertedBSON             ConvertedType = 20
-	ConvertedInterval         ConvertedType = 21
-	ConvertedNone             ConvertedType = -1
+	ConvertedUTF8            ConvertedType = 0
+	ConvertedMap             ConvertedType = 1
+	ConvertedMapKeyValue     ConvertedType = 2
+	ConvertedList            ConvertedType = 3
+	ConvertedEnum            ConvertedType = 4
+	ConvertedDecimal         ConvertedType = 5
+	ConvertedDate            ConvertedType = 6
+	ConvertedTimeMillis      ConvertedType = 7
+	ConvertedTimeMicros      ConvertedType = 8
+	ConvertedTimestampMillis ConvertedType = 9
+	ConvertedTimestampMicros ConvertedType = 10
+	ConvertedUint8           ConvertedType = 11
+	ConvertedUint16          ConvertedType = 12
+	ConvertedUint32          ConvertedType = 13
+	ConvertedUint64          ConvertedType = 14
+	ConvertedInt8            ConvertedType = 15
+	ConvertedInt16           ConvertedType = 16
+	ConvertedInt32           ConvertedType = 17
+	ConvertedInt64           ConvertedType = 18
+	ConvertedJSON            ConvertedType = 19
+	ConvertedBSON            ConvertedType = 20
+	ConvertedInterval        ConvertedType = 21
+	ConvertedNone            ConvertedType = -1
 )
 
 // LogicalTypeID identifies the new-style logical type.
@@ -233,11 +233,11 @@ const (
 
 // LogicalType carries the new-style logical type with parameters.
 type LogicalType struct {
-	Type      LogicalTypeID
-	BitWidth  int  // for INTEGER: 8, 16, 32, 64
-	IsSigned  bool // for INTEGER
-	Precision int  // for DECIMAL
-	Scale     int  // for DECIMAL
+	Type            LogicalTypeID
+	BitWidth        int  // for INTEGER: 8, 16, 32, 64
+	IsSigned        bool // for INTEGER
+	Precision       int  // for DECIMAL
+	Scale           int  // for DECIMAL
 	IsAdjustedToUTC bool // for TIMESTAMP/TIME
-	Dimension int  // for VECTOR: number of float32 elements
+	Dimension       int  // for VECTOR: number of float32 elements
 }

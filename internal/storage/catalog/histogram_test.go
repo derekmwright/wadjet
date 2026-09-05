@@ -97,8 +97,8 @@ func TestHistogramTPCHDateRange(t *testing.T) {
 	}
 	h := BuildHistogramFromSamples(sample, 64)
 
-	q4lo := int64(547)  // ~year 1.5
-	q4hi := int64(639)  // ~year 1.75
+	q4lo := int64(547) // ~year 1.5
+	q4hi := int64(639) // ~year 1.75
 	sel := h.SelectivityRange(q4lo, q4hi)
 	t.Logf("Q04-style date range %d-%d: sel=%.4f (expect ~0.036)", q4lo, q4hi, sel)
 	if sel < 0.02 || sel > 0.05 {

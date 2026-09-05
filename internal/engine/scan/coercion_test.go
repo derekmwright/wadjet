@@ -188,11 +188,11 @@ func TestTypeCoercionDateToString(t *testing.T) {
 	rows := make([]map[string]any, len(testDates)*2)
 	for i, td := range testDates {
 		rows[i*2] = map[string]any{
-			"event_date":   td.dateStr,
+			"event_date":    td.dateStr,
 			"nullable_date": td.dateStr,
 		}
 		rows[i*2+1] = map[string]any{
-			"event_date":   td.dateStr,
+			"event_date":    td.dateStr,
 			"nullable_date": nil,
 		}
 	}

@@ -49,7 +49,7 @@ func setupMergeDB(t *testing.T) *wadjet.DB {
 	}
 	uing := db.NewIngester("updates", schema, nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 100})
 	if err := uing.Ingest(ctx, []map[string]any{
-		{"id": int64(2), "name": "Gadget Pro", "price": 25.0}, // existing: update
+		{"id": int64(2), "name": "Gadget Pro", "price": 25.0},  // existing: update
 		{"id": int64(4), "name": "Thingamajig", "price": 40.0}, // new: insert
 	}); err != nil {
 		t.Fatal(err)

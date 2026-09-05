@@ -4,7 +4,7 @@ import "testing"
 
 func TestPickShuffleCandidate_PicksLargestBuildAboveThreshold(t *testing.T) {
 	stages := []Stage{
-		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 8 << 30},      // 8 GB - above
+		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 8 << 30},       // 8 GB - above
 		{ID: "scan-customer", Type: "scan", ScanAlias: "customer", EstimatedBytes: 100 << 20}, // 100 MB - below
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 80 << 30},  // 80 GB - probe
 		// join-1: lineitem (probe, left) JOIN orders (build, right).
@@ -154,9 +154,9 @@ func TestPickShuffleCandidate_Q03Shape(t *testing.T) {
 		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 75 << 30},
 		{
 			ID: "join-1", Type: "broadcast_join",
-			BuildTableAlias: "lineitem",                    // planner's label; NOT what we shuffle
-			LeftDepStage:    "scan-orders",                 // orders is the runtime broadcast build
-			RightDepStage:   "scan-lineitem",               // lineitem is the probe (probe-split)
+			BuildTableAlias: "lineitem",      // planner's label; NOT what we shuffle
+			LeftDepStage:    "scan-orders",   // orders is the runtime broadcast build
+			RightDepStage:   "scan-lineitem", // lineitem is the probe (probe-split)
 			JoinLeftKeys:    []string{"o_orderkey"},
 			JoinRightKeys:   []string{"l_orderkey"},
 			FusedJoins: []FusedJoinSpec{

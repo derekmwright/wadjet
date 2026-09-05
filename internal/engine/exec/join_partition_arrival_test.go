@@ -425,8 +425,8 @@ func TestPartitionOnArrival_MultiBatchAccumulatorFill(t *testing.T) {
 	}
 	const (
 		buildN       = 6000 // > accumFlushRows (2048): accumulators freeze and refill
-		dupKeys      = 200   // ids 0..dupKeys-1 appear twice with distinct payloads
-		arrivalBatch = 37    // tiny: forces many partial per-partition appends
+		dupKeys      = 200  // ids 0..dupKeys-1 appear twice with distinct payloads
+		arrivalBatch = 37   // tiny: forces many partial per-partition appends
 	)
 
 	rightRows := make([]map[string]any, 0, buildN+dupKeys)
@@ -551,4 +551,3 @@ func TestPartitionOnArrival_MultiBatchAccumulatorFill(t *testing.T) {
 		})
 	}
 }
-

@@ -56,10 +56,14 @@ func newNATSSlogLogger(base *slog.Logger) *natsSlogLogger {
 
 func (n *natsSlogLogger) Noticef(format string, v ...any) { n.l.Info(fmt.Sprintf(format, v...)) }
 func (n *natsSlogLogger) Warnf(format string, v ...any)   { n.l.Warn(fmt.Sprintf(format, v...)) }
-func (n *natsSlogLogger) Fatalf(format string, v ...any)  { n.l.Error(fmt.Sprintf(format, v...), "level", "fatal") }
-func (n *natsSlogLogger) Errorf(format string, v ...any)  { n.l.Error(fmt.Sprintf(format, v...)) }
-func (n *natsSlogLogger) Debugf(format string, v ...any)  { n.l.Debug(fmt.Sprintf(format, v...)) }
-func (n *natsSlogLogger) Tracef(format string, v ...any)  { n.l.Debug(fmt.Sprintf(format, v...), "trace", true) }
+func (n *natsSlogLogger) Fatalf(format string, v ...any) {
+	n.l.Error(fmt.Sprintf(format, v...), "level", "fatal")
+}
+func (n *natsSlogLogger) Errorf(format string, v ...any) { n.l.Error(fmt.Sprintf(format, v...)) }
+func (n *natsSlogLogger) Debugf(format string, v ...any) { n.l.Debug(fmt.Sprintf(format, v...)) }
+func (n *natsSlogLogger) Tracef(format string, v ...any) {
+	n.l.Debug(fmt.Sprintf(format, v...), "trace", true)
+}
 
 // EmbeddedNATS manages an embedded NATS server with JetStream.
 type EmbeddedNATS struct {
@@ -80,20 +84,20 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 	}
 
 	opts := &natsserver.Options{
-		Host:           cfg.Host,
-		Port:           cfg.Port,
+		Host: cfg.Host,
+		Port: cfg.Port,
 		// NoLog=false so we can install a custom logger after Start(). The
 		// SF10 mass-reap pattern (5 workers across 3 hosts going silent
 		// within 7s) is consistent with NATS server-side slow-consumer
 		// drops, and we historically had NoLog=true so the server's drop
 		// warnings were invisible. With this off + the SetLogger call
 		// below, slow-consumer events surface in the coord log.
-		NoLog:          false,
-		NoSigs:         true,
-		MaxPayload:     cfg.MaxPayload,
-		JetStream:      true,
-		StoreDir:       cfg.StoreDir,
-		ServerName:     cfg.ClusterID,
+		NoLog:      false,
+		NoSigs:     true,
+		MaxPayload: cfg.MaxPayload,
+		JetStream:  true,
+		StoreDir:   cfg.StoreDir,
+		ServerName: cfg.ClusterID,
 	}
 
 	// Configure mTLS on the NATS server if cert/key/CA are provided.
@@ -120,7 +124,7 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 		}
 		opts.TLS = true
 		opts.TLSVerify = true // require client certs
-		opts.TLSTimeout = 5  // seconds
+		opts.TLSTimeout = 5   // seconds
 	}
 
 	// Configure leaf node connections to remote clusters

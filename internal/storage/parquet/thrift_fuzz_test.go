@@ -15,7 +15,7 @@ func FuzzDecodeFileMetaData(f *testing.F) {
 		0x19, 0x00, // field 2 (schema): empty list
 		0x16, 0x00, // field 3 (num_rows): i64 zigzag = 0
 		0x19, 0x00, // field 4 (row_groups): empty list
-		0x00,       // stop byte
+		0x00, // stop byte
 	})
 
 	// Seed with truncated data.
@@ -44,7 +44,7 @@ func FuzzDecodePageHeader(f *testing.F) {
 		0x15, 0x00, // field 1 (type): i32 = 0 (DATA_PAGE)
 		0x15, 0x14, // field 2 (uncompressed_page_size): i32 = 10
 		0x15, 0x14, // field 3 (compressed_page_size): i32 = 10
-		0x00,       // stop byte
+		0x00, // stop byte
 	})
 
 	f.Add([]byte{0x00})

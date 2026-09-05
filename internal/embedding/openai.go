@@ -52,8 +52,8 @@ func NewOpenAI(cfg OpenAIConfig, cache *Cache) *OpenAI {
 	}
 }
 
-func (o *OpenAI) Model() string    { return o.config.Model }
-func (o *OpenAI) Dimension() int   { return o.dim }
+func (o *OpenAI) Model() string  { return o.config.Model }
+func (o *OpenAI) Dimension() int { return o.dim }
 
 // Embed returns embeddings for the given texts, using cache where possible.
 // Uncached texts are batched into a single API call.

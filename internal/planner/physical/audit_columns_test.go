@@ -19,8 +19,9 @@ import (
 // project_perf_pass_planner_column_pruning_2026-05-03.md for the full audit.
 //
 // Run:
-//   go test -v -run TestAuditStageColumns ./internal/planner/physical/
-//   go test -v -run TestAuditFusedJoinChains ./internal/planner/physical/
+//
+//	go test -v -run TestAuditStageColumns ./internal/planner/physical/
+//	go test -v -run TestAuditFusedJoinChains ./internal/planner/physical/
 func TestAuditStageColumns(t *testing.T) {
 	const q18 = `SELECT
 		c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice,

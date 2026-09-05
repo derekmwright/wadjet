@@ -183,11 +183,11 @@ func TestHashAggregateCountDistinct(t *testing.T) {
 
 	rows := []map[string]any{
 		{"group": "a", "status": "active"},
-		{"group": "a", "status": "active"},   // duplicate
+		{"group": "a", "status": "active"}, // duplicate
 		{"group": "a", "status": "inactive"},
 		{"group": "b", "status": "active"},
-		{"group": "b", "status": "active"},   // duplicate
-		{"group": "b", "status": "active"},   // duplicate
+		{"group": "b", "status": "active"}, // duplicate
+		{"group": "b", "status": "active"}, // duplicate
 		{"group": "b", "status": "pending"},
 	}
 
@@ -510,7 +510,7 @@ func TestColumnLike(t *testing.T) {
 		not      bool
 		expected int
 	}{
-		{"prefix", "al%", false, 3},      // alice, alex, ali
+		{"prefix", "al%", false, 3},       // alice, alex, ali
 		{"suffix", "%ob", false, 1},       // bob
 		{"contains", "%li%", false, 2},    // alice, ali
 		{"single char", "al_x", false, 1}, // alex

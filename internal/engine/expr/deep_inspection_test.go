@@ -152,11 +152,11 @@ func TestDPIFlowDirection(t *testing.T) {
 		args []any
 		want any
 	}{
-		{[]any{"192.168.1.1", "8.8.8.8"}, "outbound"},    // private → public
-		{[]any{"8.8.8.8", "192.168.1.1"}, "inbound"},     // public → private
-		{[]any{"192.168.1.1", "10.0.0.1"}, "internal"},   // private → private
-		{[]any{"8.8.8.8", "1.1.1.1"}, "transit"},         // public → public
-		{[]any{"127.0.0.1", "8.8.8.8"}, "outbound"},     // loopback treated as private
+		{[]any{"192.168.1.1", "8.8.8.8"}, "outbound"},  // private → public
+		{[]any{"8.8.8.8", "192.168.1.1"}, "inbound"},   // public → private
+		{[]any{"192.168.1.1", "10.0.0.1"}, "internal"}, // private → private
+		{[]any{"8.8.8.8", "1.1.1.1"}, "transit"},       // public → public
+		{[]any{"127.0.0.1", "8.8.8.8"}, "outbound"},    // loopback treated as private
 		{[]any{nil, "8.8.8.8"}, nil},
 		{[]any{"8.8.8.8", nil}, nil},
 	}
@@ -308,9 +308,9 @@ func TestDPIDNSTransactionID(t *testing.T) {
 func buildTLSClientHello(sni string) []byte {
 	// Build the SNI extension
 	var sniExt bytes.Buffer
-	binary.Write(&sniExt, binary.BigEndian, uint16(0))          // extension type: SNI (0x0000)
+	binary.Write(&sniExt, binary.BigEndian, uint16(0)) // extension type: SNI (0x0000)
 	sniName := []byte(sni)
-	sniListLen := 1 + 2 + len(sniName) // type(1) + nameLen(2) + name
+	sniListLen := 1 + 2 + len(sniName)                            // type(1) + nameLen(2) + name
 	binary.Write(&sniExt, binary.BigEndian, uint16(2+sniListLen)) // extension data length
 	binary.Write(&sniExt, binary.BigEndian, uint16(sniListLen))   // SNI list length
 	sniExt.WriteByte(0)                                           // host name type
@@ -319,15 +319,15 @@ func buildTLSClientHello(sni string) []byte {
 
 	// Build ClientHello body
 	var ch bytes.Buffer
-	binary.Write(&ch, binary.BigEndian, uint16(0x0303)) // client version: TLS 1.2
-	ch.Write(make([]byte, 32))                          // random (32 bytes of zeros)
-	ch.WriteByte(0)                                     // session_id_len = 0
-	binary.Write(&ch, binary.BigEndian, uint16(2))      // cipher_suites_len = 2
-	binary.Write(&ch, binary.BigEndian, uint16(0x00FF)) // one cipher suite (TLS_EMPTY_RENEGOTIATION_INFO_SCSV)
-	ch.WriteByte(1)                                     // compression methods length = 1
-	ch.WriteByte(0)                                     // null compression
+	binary.Write(&ch, binary.BigEndian, uint16(0x0303))       // client version: TLS 1.2
+	ch.Write(make([]byte, 32))                                // random (32 bytes of zeros)
+	ch.WriteByte(0)                                           // session_id_len = 0
+	binary.Write(&ch, binary.BigEndian, uint16(2))            // cipher_suites_len = 2
+	binary.Write(&ch, binary.BigEndian, uint16(0x00FF))       // one cipher suite (TLS_EMPTY_RENEGOTIATION_INFO_SCSV)
+	ch.WriteByte(1)                                           // compression methods length = 1
+	ch.WriteByte(0)                                           // null compression
 	binary.Write(&ch, binary.BigEndian, uint16(sniExt.Len())) // extensions length
-	ch.Write(sniExt.Bytes())                                   // extensions data
+	ch.Write(sniExt.Bytes())                                  // extensions data
 
 	// Build Handshake header: type(1) + length(3)
 	var hs bytes.Buffer
@@ -340,9 +340,9 @@ func buildTLSClientHello(sni string) []byte {
 
 	// Build TLS record: type(1) + version(2) + length(2) + payload
 	var rec bytes.Buffer
-	rec.WriteByte(22)                                            // content type: Handshake
-	binary.Write(&rec, binary.BigEndian, uint16(0x0301))         // record version: TLS 1.0
-	binary.Write(&rec, binary.BigEndian, uint16(hs.Len()))       // record length
+	rec.WriteByte(22)                                      // content type: Handshake
+	binary.Write(&rec, binary.BigEndian, uint16(0x0301))   // record version: TLS 1.0
+	binary.Write(&rec, binary.BigEndian, uint16(hs.Len())) // record length
 	rec.Write(hs.Bytes())
 
 	return rec.Bytes()

@@ -34,20 +34,20 @@ type SchemaElement struct {
 
 // RowGroup contains metadata for a horizontal partition of rows.
 type RowGroup struct {
-	Columns       []ColumnChunk // field 1: column chunk metadata
-	TotalByteSize int64         // field 2: uncompressed size of all column data
-	NumRows       int64         // field 3: number of rows in this row group
-	SortingColumns []SortingColumn // field 4: sort order of rows (v2)
-	FileOffset    int64         // field 5: byte offset of row group in file
-	TotalCompressedSize int64   // field 6: compressed size of all column data
-	Ordinal       int16         // field 7: row group ordinal in file
+	Columns             []ColumnChunk   // field 1: column chunk metadata
+	TotalByteSize       int64           // field 2: uncompressed size of all column data
+	NumRows             int64           // field 3: number of rows in this row group
+	SortingColumns      []SortingColumn // field 4: sort order of rows (v2)
+	FileOffset          int64           // field 5: byte offset of row group in file
+	TotalCompressedSize int64           // field 6: compressed size of all column data
+	Ordinal             int16           // field 7: row group ordinal in file
 }
 
 // ColumnChunk contains metadata for a single column within a row group.
 type ColumnChunk struct {
-	FilePath string          // field 1: relative path (nil if same file)
-	FileOffset int64         // field 2: byte offset of column chunk in file
-	MetaData *ColumnMetaData // field 3: inline column metadata (always present in practice)
+	FilePath   string          // field 1: relative path (nil if same file)
+	FileOffset int64           // field 2: byte offset of column chunk in file
+	MetaData   *ColumnMetaData // field 3: inline column metadata (always present in practice)
 }
 
 // ColumnMetaData describes the encoding, compression, and location of column data.
@@ -60,11 +60,11 @@ type ColumnMetaData struct {
 	TotalUncompressedSize int64            // field 6: uncompressed byte size
 	TotalCompressedSize   int64            // field 7: compressed byte size
 	// field 8: key_value_metadata (skipped during decode)
-	DataPageOffset        int64            // field 9: byte offset of first data page
-	IndexPageOffset       int64            // field 10: byte offset of index page (0 if none)
-	DictionaryPageOffset  int64            // field 11: byte offset of dictionary page (0 if none)
-	Statistics            *Statistics      // field 12: column statistics
-	EncodingStats         []PageEncodingStats // field 13: per-encoding page counts
+	DataPageOffset       int64               // field 9: byte offset of first data page
+	IndexPageOffset      int64               // field 10: byte offset of index page (0 if none)
+	DictionaryPageOffset int64               // field 11: byte offset of dictionary page (0 if none)
+	Statistics           *Statistics         // field 12: column statistics
+	EncodingStats        []PageEncodingStats // field 13: per-encoding page counts
 }
 
 // PageHeader is the header prepended to every Parquet page.
@@ -90,23 +90,23 @@ type PageHeader struct {
 
 // DataPageHeader is the header for a data page (format v1).
 type DataPageHeader struct {
-	NumValues              int32    // field 1: number of values in page
-	Encoding               Encoding // field 2: encoding of values
-	DefinitionLevelEncoding Encoding // field 3: encoding of definition levels
-	RepetitionLevelEncoding Encoding // field 4: encoding of repetition levels
-	Statistics             *Statistics // field 5: page-level statistics
+	NumValues               int32       // field 1: number of values in page
+	Encoding                Encoding    // field 2: encoding of values
+	DefinitionLevelEncoding Encoding    // field 3: encoding of definition levels
+	RepetitionLevelEncoding Encoding    // field 4: encoding of repetition levels
+	Statistics              *Statistics // field 5: page-level statistics
 }
 
 // DataPageHeaderV2 is the header for a data page (format v2).
 type DataPageHeaderV2 struct {
-	NumValues              int32    // field 1: number of values
-	NumNulls               int32    // field 2: number of null values
-	NumRows                int32    // field 3: number of rows
-	Encoding               Encoding // field 4: encoding of values
-	DefinitionLevelsByteLength int32 // field 5: byte length of definition levels
-	RepetitionLevelsByteLength int32 // field 6: byte length of repetition levels
-	IsCompressed           bool     // field 7: whether data section is compressed (default true)
-	Statistics             *Statistics // field 8: page-level statistics
+	NumValues                  int32       // field 1: number of values
+	NumNulls                   int32       // field 2: number of null values
+	NumRows                    int32       // field 3: number of rows
+	Encoding                   Encoding    // field 4: encoding of values
+	DefinitionLevelsByteLength int32       // field 5: byte length of definition levels
+	RepetitionLevelsByteLength int32       // field 6: byte length of repetition levels
+	IsCompressed               bool        // field 7: whether data section is compressed (default true)
+	Statistics                 *Statistics // field 8: page-level statistics
 }
 
 // DictionaryPageHeader is the header for a dictionary page.
@@ -121,14 +121,14 @@ type IndexPageHeader struct{}
 
 // Statistics holds optional min/max/null statistics for a column or page.
 type Statistics struct {
-	Max       []byte // field 1: deprecated max value (not order-aware)
-	Min       []byte // field 2: deprecated min value (not order-aware)
-	NullCount int64  // field 3: number of null values
-	DistinctCount int64  // field 4: approximate distinct count
-	MaxValue  []byte // field 5: max value (order-aware, v2)
-	MinValue  []byte // field 6: min value (order-aware, v2)
-	IsMaxValueExact bool // field 7: whether MaxValue is exact
-	IsMinValueExact bool // field 8: whether MinValue is exact
+	Max             []byte // field 1: deprecated max value (not order-aware)
+	Min             []byte // field 2: deprecated min value (not order-aware)
+	NullCount       int64  // field 3: number of null values
+	DistinctCount   int64  // field 4: approximate distinct count
+	MaxValue        []byte // field 5: max value (order-aware, v2)
+	MinValue        []byte // field 6: min value (order-aware, v2)
+	IsMaxValueExact bool   // field 7: whether MaxValue is exact
+	IsMinValueExact bool   // field 8: whether MinValue is exact
 }
 
 // KeyValue is a key-value pair for user metadata.

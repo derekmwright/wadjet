@@ -27,7 +27,7 @@ func zstdEncode(t testing.TB, src []byte) []byte {
 // class. Mirrors the round-trip invariant validated for PR #103's s2 pool.
 func TestZstdBufPool_RoundTrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	sizes := []int{0, 1, 32, 1024, 4096, 64*1024, 256*1024, 1024*1024}
+	sizes := []int{0, 1, 32, 1024, 4096, 64 * 1024, 256 * 1024, 1024 * 1024}
 
 	for _, size := range sizes {
 		src := make([]byte, size)

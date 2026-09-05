@@ -308,11 +308,11 @@ func TestNetworkIsReservedIP(t *testing.T) {
 		args []any
 		want any
 	}{
-		{[]any{"127.0.0.1"}, true},         // loopback
-		{[]any{"192.168.1.1"}, true},        // private
-		{[]any{"224.0.0.1"}, true},          // multicast
-		{[]any{"169.254.1.1"}, true},        // link-local
-		{[]any{"8.8.8.8"}, false},           // public
+		{[]any{"127.0.0.1"}, true},   // loopback
+		{[]any{"192.168.1.1"}, true}, // private
+		{[]any{"224.0.0.1"}, true},   // multicast
+		{[]any{"169.254.1.1"}, true}, // link-local
+		{[]any{"8.8.8.8"}, false},    // public
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -370,10 +370,10 @@ func TestNetworkMACIsUnicast(t *testing.T) {
 		args []any
 		want any
 	}{
-		{[]any{"00:11:22:33:44:55"}, true},    // bit 0 of first byte = 0 → unicast
-		{[]any{"01:11:22:33:44:55"}, false},   // bit 0 of first byte = 1 → multicast
-		{[]any{"02:11:22:33:44:55"}, true},    // locally administered but still unicast
-		{[]any{"ff:ff:ff:ff:ff:ff"}, false},   // broadcast (multicast bit set)
+		{[]any{"00:11:22:33:44:55"}, true},  // bit 0 of first byte = 0 → unicast
+		{[]any{"01:11:22:33:44:55"}, false}, // bit 0 of first byte = 1 → multicast
+		{[]any{"02:11:22:33:44:55"}, true},  // locally administered but still unicast
+		{[]any{"ff:ff:ff:ff:ff:ff"}, false}, // broadcast (multicast bit set)
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -390,9 +390,9 @@ func TestNetworkMACIsLocal(t *testing.T) {
 		args []any
 		want any
 	}{
-		{[]any{"02:11:22:33:44:55"}, true},    // bit 1 of first byte = 1 → locally administered
-		{[]any{"00:11:22:33:44:55"}, false},   // bit 1 of first byte = 0 → globally unique
-		{[]any{"06:11:22:33:44:55"}, true},    // 0x06 & 0x02 = 0x02 → local
+		{[]any{"02:11:22:33:44:55"}, true},  // bit 1 of first byte = 1 → locally administered
+		{[]any{"00:11:22:33:44:55"}, false}, // bit 1 of first byte = 0 → globally unique
+		{[]any{"06:11:22:33:44:55"}, true},  // 0x06 & 0x02 = 0x02 → local
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -525,7 +525,7 @@ func TestNetworkPortClass(t *testing.T) {
 		{[]any{int64(3306)}, "registered"},
 		{[]any{int64(50000)}, "ephemeral"},
 		{[]any{int64(0)}, "well-known"},
-		{[]any{int64(70000)}, nil},  // out of range
+		{[]any{int64(70000)}, nil}, // out of range
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -568,7 +568,7 @@ func TestNetworkProtocolNumber(t *testing.T) {
 		{[]any{"tcp"}, int64(6)},
 		{[]any{"udp"}, int64(17)},
 		{[]any{"icmp"}, int64(1)},
-		{[]any{"TCP"}, int64(6)},  // case-insensitive
+		{[]any{"TCP"}, int64(6)}, // case-insensitive
 		{[]any{"sctp"}, int64(132)},
 		{[]any{"unknown"}, nil},
 		{[]any{nil}, nil},

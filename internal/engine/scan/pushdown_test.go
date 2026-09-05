@@ -33,9 +33,9 @@ func TestCanPruneRowGroup(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		pred   StatsPredicate
-		prune  bool
+		name  string
+		pred  StatsPredicate
+		prune bool
 	}{
 		// age range [18, 65]
 		{"age > 100 (above max)", StatsPredicate{"age", exec.OpGt, int64(100)}, true},

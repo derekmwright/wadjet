@@ -70,7 +70,7 @@ func TestStreamReader_MatchesEagerAcrossChunkBoundaries(t *testing.T) {
 		"jsonl_flat": `{"a":1,"b":"x"}
 {"a":2,"b":"y"}
 {"a":3,"b":null}`,
-		"array_flat": `[{"a":1,"b":"x"},{"a":2,"b":"y"},{"a":3}]`,
+		"array_flat":         `[{"a":1,"b":"x"},{"a":2,"b":"y"},{"a":3}]`,
 		"nested_null_corpus": `[{"meta":{"name":"alpha"}},{"meta":null},{"meta":{"name":"beta"}},{"other":1}]`,
 		"arrays_and_escapes": `[{"tags":["a","b"],"s":"he said \"hi\\\" there"},{"tags":[],"s":","},{"tags":null,"s":"}{"}]`,
 		"deep_nesting":       `{"r":{"x":{"y":[1,2,{"z":"w"}]}}}` + "\n" + `{"r":null}`,

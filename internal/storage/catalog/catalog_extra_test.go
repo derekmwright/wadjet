@@ -459,4 +459,3 @@ func TestCreateTable_MultiplePartitionKeys(t *testing.T) {
 		t.Fatalf("expected 2 partition keys, got %d", len(meta.PartitionKeys))
 	}
 }
-

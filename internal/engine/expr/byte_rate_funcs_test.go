@@ -130,11 +130,11 @@ func TestFormatRate(t *testing.T) {
 	}{
 		// Default: bits per second
 		{"zero", []any{float64(0)}, "0 bps"},
-		{"1 Gbps", []any{float64(125000000)}, "1.00 Gbps"},       // 125M bytes/s = 1 Gbps
-		{"100 Mbps", []any{float64(12500000)}, "100 Mbps"},        // 12.5M bytes/s = 100 Mbps
-		{"10 Mbps", []any{float64(1250000)}, "10.0 Mbps"},         // 1.25M bytes/s = 10 Mbps
-		{"1 Kbps", []any{float64(125)}, "1.00 Kbps"},              // 125 bytes/s = 1 Kbps
-		{"1.5 Gbps", []any{float64(187500000)}, "1.50 Gbps"},      // 187.5M bytes/s = 1.5 Gbps
+		{"1 Gbps", []any{float64(125000000)}, "1.00 Gbps"},   // 125M bytes/s = 1 Gbps
+		{"100 Mbps", []any{float64(12500000)}, "100 Mbps"},   // 12.5M bytes/s = 100 Mbps
+		{"10 Mbps", []any{float64(1250000)}, "10.0 Mbps"},    // 1.25M bytes/s = 10 Mbps
+		{"1 Kbps", []any{float64(125)}, "1.00 Kbps"},         // 125 bytes/s = 1 Kbps
+		{"1.5 Gbps", []any{float64(187500000)}, "1.50 Gbps"}, // 187.5M bytes/s = 1.5 Gbps
 
 		// Bytes mode
 		{"bytes mode", []any{float64(1048576), "bytes"}, "1.00 MiB/s"},

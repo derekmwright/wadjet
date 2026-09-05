@@ -100,4 +100,3 @@ func dumpHeap(logger *slog.Logger, dir string, pid, seq int) {
 		"heap_mb", heapMB, "sys_mb", sysMB,
 		"num_gc", ms.NumGC, "goroutines", runtime.NumGoroutine())
 }
-

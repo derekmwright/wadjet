@@ -14,7 +14,7 @@ func TestTrackerHonesty_AccumulatorVsActual(t *testing.T) {
 	tr := NewTracker("audit", 100*1024*1024) // 100 MB budget
 
 	const itemBytes = 1 << 16 // 64 KB
-	const items = 256          // 16 MB total
+	const items = 256         // 16 MB total
 	var actual atomic.Int64
 
 	for i := 0; i < items; i++ {
