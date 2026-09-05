@@ -14,6 +14,8 @@ import (
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/snappy"
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // NativeWriter writes Parquet files without depending on parquet-go.
@@ -430,7 +432,7 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 	*leafIdx++
 
 	if val == nil {
-		lb.appendEntry(defLevel, repLevel)
+		nw.appendAbsentLeaf(lb, col, defLevel, repLevel)
 		return
 	}
 	// A text literal for a binary network type is converted HERE, where the
@@ -444,8 +446,10 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 			return
 		}
 		if conv == nil {
-			// The empty literal is an absence, and absence is NULL.
-			lb.appendEntry(defLevel, repLevel)
+			// The empty literal is an absence, and absence is NULL — which a
+			// REQUIRED column cannot express, so it takes the same refusal a
+			// literal nil does.
+			nw.appendAbsentLeaf(lb, col, defLevel, repLevel)
 			return
 		}
 		val = conv
@@ -527,6 +531,37 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
 		lb.appendEntry(defLevel, repLevel)
 	}
+}
+
+// appendAbsentLeaf records that this leaf has no value at this position, or
+// refuses when the position cannot say so.
+//
+// A definition level says how many of a leaf's optional ancestors are present;
+// the leaf's own maxDefLevel is the level at which the VALUE itself is
+// present. A REQUIRED leaf has no level below that to spend on absence, so
+// appending one for a nil wrote the PRESENT level and advanced the count with
+// nothing behind it: every later value in that column shifted by one. For a
+// required BOOLEAN, `[nil, true]` read back as `[true, false]` — the bit
+// padding hid the mismatch — and for a required INT64, `[nil, 42]` produced a
+// file the decoder could not finish, two values declared over eight data bytes
+// (#887).
+//
+// The test is the LEVEL, not the column's Nullable flag, and that is what makes
+// it right at depth: a required field of a PRESENT optional struct has
+// defLevel == maxDefLevel here and is refused, while the same field under an
+// ABSENT optional ancestor never reaches this function at all (its subtree goes
+// through emitNullForSubtree at the ancestor's own lower level), which is
+// exactly the case that must stay legal.
+//
+// The SQLSTATE is PostgreSQL's 23502 not_null_violation, the one
+// ingest.validateRow already raises for a missing non-nullable column.
+func (nw *NativeWriter) appendAbsentLeaf(lb *leafBuffer, col Column, defLevel, repLevel int32) {
+	if defLevel >= lb.maxDefLevel {
+		nw.fail(sqlerr.New("23502",
+			"column %q, row %d of this write: null value in column %q violates not-null constraint",
+			col.Name, nw.rowsSeen, col.Name))
+	}
+	lb.appendEntry(defLevel, repLevel)
 }
 
 // hasNetworkLiteralForm reports whether a column of this type stores BINARY
@@ -612,6 +647,16 @@ func (nw *NativeWriter) decomposeArray(col Column, val any, defLevel, repLevel, 
 	elemCol.Nullable = true
 
 	if val == nil {
+		if !col.Nullable {
+			// A required ARRAY has no encoding for NULL, exactly as a
+			// required MAP has none: level 0 already means "list present, no
+			// entries" — the EMPTY array — so writing a null here produced a
+			// file whose own schema says the value cannot be null and whose
+			// reader is right to read {} back. Refuse it at the source (#887).
+			nw.fail(sqlerr.New("23502",
+				"column %q, row %d of this write: ARRAY is not nullable, cannot write a NULL array "+
+					"(an empty array is []any{}, which is a different value)", col.Name, nw.rowsSeen))
+		}
 		// Entire array is null. Emit null at current def level for all leaves.
 		curDef := defLevel // outer group absent
 		nw.emitNullForSubtree(elemCol, curDef, repLevel, leafIdx)
@@ -787,6 +832,15 @@ func (nw *NativeWriter) decomposeRow(col Column, val any, defLevel, repLevel, re
 	}
 
 	if val == nil {
+		if !col.Nullable {
+			// A required ROW has no encoding for NULL either: with no
+			// optional group of its own, defLevel is already the level at
+			// which the struct is present, so the fields' null entries land
+			// on a level the footer says means "present" (#887).
+			nw.fail(sqlerr.New("23502",
+				"column %q, row %d of this write: ROW is not nullable, cannot write a NULL struct",
+				col.Name, nw.rowsSeen))
+		}
 		// Entire struct is null — emit null for each field.
 		for _, field := range col.Fields {
 			nw.emitNullForSubtree(field, defLevel, repLevel, leafIdx)
