@@ -27,12 +27,6 @@ tasks:
       - mkdir -p {{.DIST}}
       - go build -o {{.DIST}}/ ./cmd/...
 
-  build-ingest:
-    desc: Build the unifi-ingest binary into dist/
-    cmds:
-      - mkdir -p {{.DIST}}
-      - go build -o {{.DIST}}/unifi-ingest ./cmd/unifi-ingest
-
   clean:
     desc: Remove built binaries
     cmds:
