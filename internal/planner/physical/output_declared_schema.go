@@ -1109,6 +1109,39 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			return nil
 		}
 		return emittedColTypes(n.Children[0])
+	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+		// A set operation emits the columns its ARMS agree on, and the arms'
+		// own schemas are already computed by declaredOutputSchema — the same
+		// walk `setOpArmSchemas` reads for the wire's typmod reconciliation.
+		//
+		// Without this arm the walk answered nil for everything above a set
+		// operation, which is #867's failure mode one node-kind over:
+		// `SUM(v * 2) + 1` over a `UNION ALL` found no declaration for `v`,
+		// fell to `nodeDeclaredType`'s float rule, and went out as OID 701
+		// where PostgreSQL sends 1700 (round-3 review P-B).
+		//
+		// A column the arms declare DIFFERENTLY is left untyped rather than
+		// reconciled here: unifying them is select_common_type's job, the
+		// wire path does it separately, and naming a type this walk did not
+		// verify is the direction that corrupts.
+		arms := setOpArmSchemas(n)
+		if len(arms) == 0 {
+			return nil
+		}
+		out := make(map[string]parquet.TypeID, len(arms[0]))
+		for i, col := range arms[0] {
+			agree := true
+			for _, other := range arms {
+				if i >= len(other) || other[i].Type != col.Type {
+					agree = false
+					break
+				}
+			}
+			if agree {
+				out[strings.ToLower(col.Name)] = col.Type
+			}
+		}
+		return out
 	case logical.NodeWindow:
 		// Window appends its output columns to the input batch in place — it
 		// drops nothing — so every input column passes through at its input
@@ -1375,6 +1408,42 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return nil
 		}
 		return emittedColDecimal(n.Children[0])
+	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+		// The (p,s) companion to emittedColTypes' set-operation arm, and
+		// bound by the same rule the WIRE's reconciliation uses: a DECIMAL
+		// result keeps a typmod only when every arm carries the SAME one
+		// (setOpArmDecimalDisagreements, ADR-0012 item 12). An arm that
+		// disagrees contributes nothing, which leaves the column DECIMAL with
+		// no scale — exactly what the wire declares for it.
+		//
+		// Without it `SUM(v * 2) + 1` over a `UNION ALL` of DECIMAL columns
+		// had a TYPE and no scale, so binOpDecimalType declined and the term
+		// fell to float8 with the exact value rendered through a float64
+		// (round-3 review P-B).
+		arms := setOpArmSchemas(n)
+		if len(arms) == 0 {
+			return nil
+		}
+		out := make(map[string]logical.DecimalMeta, len(arms[0]))
+		for i, col := range arms[0] {
+			if col.Type != parquet.TypeDecimal {
+				continue
+			}
+			agree := true
+			for _, other := range arms {
+				if i >= len(other) || other[i].Type != parquet.TypeDecimal ||
+					other[i].Precision != col.Precision || other[i].Scale != col.Scale {
+					agree = false
+					break
+				}
+			}
+			if agree {
+				out[strings.ToLower(col.Name)] = logical.DecimalMeta{
+					Precision: col.Precision, Scale: col.Scale,
+				}
+			}
+		}
+		return out
 	case logical.NodeWindow:
 		if len(n.Children) != 1 {
 			return nil

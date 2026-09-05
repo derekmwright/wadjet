@@ -186,6 +186,51 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 		})
 	}
 
+	// The SET-OPERATION face of the same walk, which round 3 left open one
+	// node-kind over: `emittedColTypes` and `emittedColDecimal` had no
+	// NodeUnion/Intersect/Except arm either, so `SUM(v * 2) + 1` over a
+	// `UNION ALL` found no declaration for `v`, fell to the float rule, and
+	// went out as OID 701 where PostgreSQL sends 1700 (round-3 review P-B).
+	//
+	// Both arms read the schemas `setOpArmSchemas` already computes for the
+	// wire's typmod reconciliation, and both take the same rule the wire
+	// takes: a column the arms declare DIFFERENTLY is left untyped, because
+	// unifying them is select_common_type's job and naming a type this walk
+	// did not verify is the direction that corrupts.
+	//
+	// The values are arithmetic over the single-table answers above — two
+	// copies of the same table through UNION ALL — so no number here is
+	// transcribed from a run.
+	for _, c := range []struct{ name, sql, want string }{
+		{"setop_int_product",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
+				` UNION ALL SELECT c_i64 FROM ` + tbl + `) x`, "72560557681020000001"},
+		{"setop_split_arms",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
+				` WHERE id < 10 UNION ALL SELECT c_i64 FROM ` + tbl +
+				` WHERE id >= 10) x`, "36280278840510000001"},
+		{"setop_decimal_product",
+			`SELECT SUM(v * 2) + 1 AS v FROM (SELECT c_dec AS v FROM ` + tbl +
+				` UNION ALL SELECT c_dec FROM ` + tbl + `) x`, "49500246.5296"},
+		{"setop_bare_argument",
+			`SELECT SUM(v) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl +
+				` UNION ALL SELECT c_i64 FROM ` + tbl + `) x`, "24186852560341"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := db.Query(ctx, c.sql)
+			if err != nil {
+				t.Fatalf("%v\n  SQL: %s", err, c.sql)
+			}
+			if got := res.Rows[0]["v"]; got != c.want {
+				t.Errorf("= %#v, want %q — the aggregate's declaration is not crossing "+
+					"the set operation\n  SQL: %s", got, c.want, c.sql)
+			}
+			if d := res.ColumnMetas[0].TypeID; d != parquet.TypeDecimal {
+				t.Errorf("declares %v, want DECIMAL (PostgreSQL: numeric)\n  SQL: %s", d, c.sql)
+			}
+		})
+	}
+
 	// The float row's DECLARATION, which is the half that is a claim: a float
 	// aggregate stays float8 and must not be dragged into the exact family by
 	// the computed-argument rule.
