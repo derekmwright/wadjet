@@ -551,13 +551,25 @@ func (s *Server) toolQuery(ctx context.Context, args map[string]any) callToolRes
 	}
 
 	// Convert rows to compact array-of-arrays format (not array-of-objects)
-	// This is 2-5x more token-efficient for LLMs
+	// This is 2-5x more token-efficient for LLMs.
+	//
+	// Positionally, through QueryResult.Cells — NOT `row[col]` over
+	// result.Columns. A result may legally carry two columns of ONE name:
+	// PostgreSQL answers `SELECT abs(a), abs(b)` with two columns called
+	// `abs`, and #513 made this engine agree. The row MAP can hold only one
+	// of them, so keying the compact array by name reported column 1's value
+	// in BOTH cells — `SELECT abs(a), abs(b)` over a = -1, b = -2 rendered
+	// `"rows":[[2,2]]` where `[[1,2]]` is the answer. Cells reads RowValues,
+	// which the engine materialises exactly when the names are not unique,
+	// and falls back to the map lookup when they are (so an ordinary result
+	// is byte-identical to before). The gRPC and HTTP doors were closed
+	// against the same class in v0.18.43; this is the MCP one.
 	compactRows := make([][]any, len(rows))
-	for i, row := range rows {
+	for i := range rows {
+		// One slot per DECLARED column, whatever Cells hands back: the JSON
+		// contract is that rows[i] zips with columns.
 		vals := make([]any, len(result.Columns))
-		for j, col := range result.Columns {
-			vals[j] = row[col]
-		}
+		copy(vals, result.Cells(i))
 		compactRows[i] = vals
 	}
 	output["rows"] = compactRows
@@ -627,7 +639,7 @@ func (s *Server) toolListFunctions(ctx context.Context) callToolResult {
 	}
 
 	out := map[string]any{
-		"functions":       udfs,
+		"functions":        udfs,
 		"ddl_capabilities": ddlCaps,
 	}
 	data, err := json.Marshal(out)
