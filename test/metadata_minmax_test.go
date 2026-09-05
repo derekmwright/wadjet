@@ -169,9 +169,14 @@ func TestMetadataMinMax(t *testing.T) {
 			wantRows: []map[string]any{{"lo": int64(1), "hi": int64(16), "lo2": int64(1)}},
 		},
 		{
-			name: "unaliased output keeps the scan's column names", wantFire: true,
+			// PostgreSQL names an unaliased aggregate after the FUNCTION —
+			// `min`, `max`, not the call's text (#732). What this entry
+			// asserts is that the metadata path answers the same VALUES the
+			// scan does for an unaliased list; the names moved with the
+			// naming rule and are measured against postgres:17-alpine.
+			name: "unaliased output takes PostgreSQL's function names", wantFire: true,
 			sql:      "SELECT MIN(i64), MAX(d) FROM events",
-			wantRows: []map[string]any{{"min(i64)": int64(1), "max(d)": "2026-03-16"}},
+			wantRows: []map[string]any{{"min": int64(1), "max": "2026-03-16"}},
 		},
 		{
 			name: "table-qualified column reference", wantFire: true,

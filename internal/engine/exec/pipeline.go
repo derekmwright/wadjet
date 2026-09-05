@@ -1119,6 +1119,13 @@ type CollectSink struct {
 	// deliberately does not clear it — it is configuration the planner
 	// attaches once, not per-run state.
 	SchemaHint []parquet.Column
+	// OutputNames is the PLAN's published name per output column, positional
+	// (plansql.OutputColumnName, #732). Empty means "the names the pipeline
+	// emitted", which is every caller but the top-level query planner: a
+	// worker fragment's sink publishes the names the NEXT stage resolves
+	// against, not the ones a client reads.
+	OutputNames []string
+	namesDone   bool
 	// SchemaHintWireUnconstrainedDecimal names the DECIMAL output columns
 	// whose PostgreSQL wire typmod must say "unconstrained" (-1) — an
 	// aggregate function call, never a bare column reference. Unlike
@@ -1237,6 +1244,7 @@ func (s *CollectSink) convert() {
 		return
 	}
 	s.rowsDone = true
+	s.applyOutputNames()
 	positional := hasDuplicateColumnName(s.Schema())
 	for i, b := range s.batches {
 		s.Rows = append(s.Rows, b.ToRows()...)
@@ -1274,10 +1282,56 @@ func (s *CollectSink) Batches() []*batch.RecordBatch {
 // SchemaHint when no batch was consumed. Unlike Batches()[0].Schema, it
 // remains available after ToRows releases the batches.
 func (s *CollectSink) Schema() []parquet.Column {
+	s.applyOutputNames()
 	if s.schema == nil {
 		return s.SchemaHint
 	}
 	return s.schema
+}
+
+// applyOutputNames renames this sink's output columns to the names the CLIENT
+// is owed, positionally.
+//
+// PostgreSQL names an unaliased SELECT item by its own rule — `?column?` for an
+// operator expression, the function's name for a call, the ARGUMENT's name for
+// a cast (plansql.OutputColumnName, #732) — and that name is not always the one
+// the engine RESOLVES the value by. An aggregate's output column IS its
+// `AggExpr.OutputCol`, which GROUP BY, HAVING, ORDER BY and the stage's rename
+// source all spell against, and two unaliased aggregates legally publish ONE
+// name (`SELECT COUNT(*), COUNT(g)` is two columns called `count`). So the
+// published name is applied HERE, at the boundary where the values leave the
+// engine and nothing resolves by name any more — not inside the plan, where an
+// earlier attempt broke a sort key that named the column the projection had
+// just renamed away.
+//
+// Positional, and only when the arity matches: the sink's schema is what the
+// pipeline actually emitted, and a plan that emits a different number of
+// columns from the SELECT list (a hidden ORDER BY term that outlived its trim)
+// is one this rename must not reorder names across.
+func (s *CollectSink) applyOutputNames() {
+	if len(s.OutputNames) == 0 || s.namesDone {
+		return
+	}
+	s.namesDone = true
+	rename := func(schema []parquet.Column) []parquet.Column {
+		if len(schema) != len(s.OutputNames) {
+			return schema
+		}
+		out := append([]parquet.Column(nil), schema...)
+		for i := range out {
+			if s.OutputNames[i] != "" {
+				out[i].Name = s.OutputNames[i]
+			}
+		}
+		return out
+	}
+	s.schema = rename(s.schema)
+	s.SchemaHint = rename(s.SchemaHint)
+	for _, b := range s.batches {
+		if b != nil {
+			b.Schema = rename(b.Schema)
+		}
+	}
 }
 
 func (s *CollectSink) Close() error { return nil }

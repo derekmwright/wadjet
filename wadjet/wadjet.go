@@ -784,21 +784,27 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any, schema []par
 			for _, col := range info.Columns {
 				name := col.Alias
 				if name == "" {
-					switch {
-					case col.IsWindow:
-						// The name the logical builder's projection really
-						// publishes. PostgreSQL calls an unaliased
-						// `SUM(a) OVER ()` "sum"; naming it from the
-						// expression TEXT here asked the result schema for a
-						// column the projection does not emit, and every row
-						// came back NULL.
-						name = plansql.WindowOutputName(col)
-					case col.IsAgg:
-						name = col.Expr
-					case col.ColumnRef != "":
-						name = col.ColumnRef
-					default:
-						name = col.Expr
+					// PostgreSQL's name for an unaliased item: `?column?` for
+					// an operator expression or a literal, the function's own
+					// name for a call, the ARGUMENT's name for a cast (#732).
+					// The output projection publishes exactly this — the
+					// physical planner's buildProject reads the same
+					// logical.Projection.PublishedName — so the sink's schema
+					// and this list agree and the name-keyed row map still
+					// resolves. An unaliased `SUM(a) OVER ()` is `sum` under
+					// both rules; naming it from the expression TEXT asked the
+					// result schema for a column the projection does not emit,
+					// and every row came back NULL.
+					name = plansql.OutputColumnName(col)
+					if name == "" {
+						switch {
+						case col.IsWindow:
+							name = plansql.WindowOutputName(col)
+						case col.ColumnRef != "":
+							name = col.ColumnRef
+						default:
+							name = col.Expr
+						}
 					}
 				}
 				cols = append(cols, reconcileColumnName(name, rows))

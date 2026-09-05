@@ -962,8 +962,13 @@ type Planner struct {
 	subqueryRunner expr.SubqueryRunner
 	planCtx        context.Context  // context from the current Plan() call, used by subquery runner
 	ctes           []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
-	MemoryBudget   int64            // per-query memory budget in bytes (0 = unlimited)
-	SpillDir       string           // directory for spill files (empty = os temp dir)
+	// outputProjection is the Project whose names LEAVE the engine, resolved
+	// once per Plan() call. Only that projection publishes PostgreSQL's
+	// FigureColname (Projection.PublishedName, #732): a nested block's names
+	// are what the block above resolves against.
+	outputProjection *logical.Node
+	MemoryBudget     int64  // per-query memory budget in bytes (0 = unlimited)
+	SpillDir         string // directory for spill files (empty = os temp dir)
 
 	// ManifestSnapshot pins each table's manifest to one catalog read for
 	// this statement (#502). NewPlanner sets a fresh one; forSubquery's
@@ -2949,6 +2954,9 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		return nil, err
 	}
 
+	// The projection whose names the CLIENT reads, resolved once (#732).
+	p.outputProjection = findOutputProjectionNode(node)
+
 	// Materialize CTEs referenced multiple times. Each CTE is computed once
 	// and cached so that all references (main query + subqueries) see the
 	// exact same data. This prevents float64 accumulation-order divergence
@@ -3011,13 +3019,26 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// tell it: a zero-row result. It is consulted only then (#416).
 	if cs, ok := sink.(*exec.CollectSink); ok {
 		cs.SchemaHint = plan.OutputSchema
+		// The names the CLIENT is owed, positionally: PostgreSQL's
+		// FigureColname for every unaliased item (#732). Applied at the sink
+		// rather than inside the plan, because inside the plan a name is also
+		// a HANDLE — a sort key, a HAVING reference, an aggregate's OutputCol
+		// — and the two are not the same string.
+		cs.OutputNames = publishedOutputNames(p.outputProjection)
 		// Unlike SchemaHint, this is consulted on EVERY result, zero-row or
 		// not: which DECIMAL columns are aggregate output is a property of
 		// the PLAN, not of whether a batch arrived (FIX 2, #457/#458 fold-in).
-		cs.SchemaHintWireUnconstrainedDecimal = declaredWireUnconstrainedDecimal(node)
+		//
+		// Both maps are keyed by the name the CLIENT reads, which is the
+		// PUBLISHED one (#732): filed under the resolution spelling they miss,
+		// and an unaliased `s_acctbal + 1` goes out with a DECIMAL typmod
+		// PostgreSQL sends -1 for.
+		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(
+			p.outputProjection, declaredWireUnconstrainedDecimal(node))
 		// And the string family's modifier, which is a LENGTH rather than a
 		// (p,s) — same lifecycle, same reason (#838).
-		cs.SchemaHintStringLength = DeclaredStringLengths(node)
+		cs.SchemaHintStringLength = republishDeclaredNames(
+			p.outputProjection, DeclaredStringLengths(node))
 	}
 
 	// Attach spill file cleanup. CTE collectors and the scan cache
@@ -3333,12 +3354,17 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 			}
 		}
 	}
+	// The projection whose names the CLIENT reads: the three plan-time
+	// declarations below are all looked up by that name (#732).
+	outputProj := findOutputProjectionNode(node)
+
 	// The gather also carries the PLAN's answer for the output schema, which
 	// is what a zero-row DAG result has instead of a batch to read it off:
 	// OutputRenames already gave such a result its column NAMES, and this
 	// gives it their TYPES, so pgwire declares the same OIDs for an empty
 	// result as for a full one (#416).
-	if outSchema := declaredOutputSchema(node); len(outSchema) > 0 {
+	if outSchema := republishDeclaredSchema(outputProj,
+		declaredOutputSchema(node)); len(outSchema) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputSchema = outSchema
@@ -3350,7 +3376,8 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// SchemaHintWireUnconstrainedDecimal (FIX 2, #457/#458 fold-in):
 	// unlike OutputSchema above, consulted on every result, not only a
 	// zero-row one.
-	if wireUnconstrained := declaredWireUnconstrainedDecimal(node); len(wireUnconstrained) > 0 {
+	if wireUnconstrained := republishDeclaredNames(outputProj,
+		declaredWireUnconstrainedDecimal(node)); len(wireUnconstrained) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputWireUnconstrainedDecimal = wireUnconstrained
@@ -3361,7 +3388,8 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// The string family's modifier, on the same stage and for the same reason
 	// (#838). Both paths read the same plan-time answer, so a CAST's declared
 	// length cannot depend on which one ran.
-	if lengths := DeclaredStringLengths(node); len(lengths) > 0 {
+	if lengths := republishDeclaredNames(outputProj,
+		DeclaredStringLengths(node)); len(lengths) > 0 {
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputStringLength = lengths
@@ -4322,6 +4350,16 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			target = src
 		default:
 			continue
+		}
+		// The TARGET is the name the CLIENT is told, and PostgreSQL's name for
+		// an unaliased item is not its text: `SELECT g + 1` is `?column?`,
+		// `SELECT COUNT(*)` is `count`, `SELECT CAST(g AS bigint)` is `g`
+		// (#732). The SOURCE is untouched — it is how the gather FINDS the
+		// column in the stage's stream, and that is still the resolution
+		// spelling. This is the DAG's half of the split; the single-process
+		// half is CollectSink.OutputNames.
+		if p.PublishedName != "" {
+			target = p.PublishedName
 		}
 		renames = append(renames, OutputRename{
 			From: src, To: target, Expr: astExpr, IsAgg: isAgg,

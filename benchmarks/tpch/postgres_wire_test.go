@@ -1496,18 +1496,31 @@ func wireCorpus() []wireCase {
 		// of the second is a divergence of its own, found by this entry.
 		{name: "UnaliasedFuncTwice",
 			sql: `SELECT UPPER(s_name), LENGTH(s_name) FROM supplier ORDER BY s_suppkey LIMIT 2`},
-		// The two shapes the same change deliberately does NOT touch, pinned
-		// so the remaining divergence is recorded rather than forgotten.
+		// The two shapes #513 deliberately left alone, both closed by #732:
+		// an operator expression with no natural name is `?column?` and a cast
+		// takes its ARGUMENT's name. The pins are GONE; these entries announce
+		// a regression by failing.
 		{name: "UnaliasedArithmetic",
-			sql: `SELECT supplier.s_acctbal + 1 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`,
+			sql: `SELECT supplier.s_acctbal + 1 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
+		// TWO unnamed items in one list: PostgreSQL calls both `?column?`, so
+		// this is where a rule that de-duplicates the name shows.
+		{name: "UnaliasedArithmeticTwice",
+			sql: `SELECT supplier.s_acctbal + 1, supplier.s_acctbal + 2 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
+		// A literal and a predicate, the other two `?column?` families.
+		{name: "UnaliasedLiteral",
+			sql: `SELECT 1 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`,
 			pins: map[string]string{
-				wirePropFieldNames: "#513, not fixed: PostgreSQL labels an operator expression with " +
-					"no natural name `?column?`; wadjet uses the expression's own text " +
-					"(`supplier.s_acctbal + 1`). Both arms of this engine now agree with each other, " +
-					"which they did not before — the single-process path answered `s_acctbal + 1` and " +
-					"the stage DAG the full text. Adopting `?column?` is a separate change: it names " +
-					"every such column the same thing, which the result-row map cannot represent",
+				wirePropTypeOIDs: "an integer LITERAL in a SELECT list declares int8 (OID 20) where " +
+					"PostgreSQL declares int4 (OID 23). Not #732's: the NAME is `?column?` on both " +
+					"sides, which is what this entry was added for. The declaration is the literal " +
+					"typing layer's — a bare integer literal is carried as int64 with no narrowing " +
+					"to the smallest type that holds it — and found by this cell because no other " +
+					"wire entry selects a bare literal",
+				wirePropTypeSizes: "the size that follows that OID (8, not 4). Same mechanism; a " +
+					"size pin without the OID pin would be the wrong half",
 			}},
+		{name: "UnaliasedPredicate",
+			sql: `SELECT supplier.s_acctbal > 0 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
 		// --- DUPLICATE output names, values compared cell by cell ----------
 		//
 		// PostgreSQL answers `SELECT abs(a), abs(b)` with two columns both
@@ -1543,18 +1556,14 @@ func wireCorpus() []wireCase {
 		// one, filed as #530, came along with them.
 		{name: "DuplicateNameIntegerFuncs",
 			sql: `SELECT ABS(n_nationkey), ABS(n_regionkey) FROM nation ORDER BY n_nationkey LIMIT 6`},
-		// CAST's label, pinned rather than changed: PostgreSQL names a cast
-		// after its ARGUMENT (`n_nationkey`), and only after the target type
-		// when the argument has no name of its own.
+		// CAST's label: PostgreSQL names a cast after its ARGUMENT
+		// (`n_nationkey`), and only after the target TYPE when the argument
+		// has no name of its own. Both halves are driven, because a rule that
+		// reached for the type first would pass the second and fail the first.
 		{name: "UnaliasedCast",
-			sql: `SELECT CAST(n_nationkey AS BIGINT) FROM nation ORDER BY n_nationkey LIMIT 2`,
-			pins: map[string]string{
-				wirePropFieldNames: "#513, deliberately out of scope: PostgreSQL labels `CAST(x AS t)` " +
-					"after the ARGUMENT (`n_nationkey`) and only after the TYPE when the argument is " +
-					"itself computed. Wadjet uses the expression text (`cast(n_nationkey as bigint)`). " +
-					"Unlike the function case this is not a mangled fragment, and getting it right " +
-					"means implementing FigureColname's recursion, not a one-line rule",
-			}},
+			sql: `SELECT CAST(n_nationkey AS BIGINT) FROM nation ORDER BY n_nationkey LIMIT 2`},
+		{name: "UnaliasedCastOfALiteral",
+			sql: `SELECT CAST(1 AS BIGINT) FROM nation ORDER BY n_nationkey LIMIT 2`},
 
 		// --- BYTES is bytea (#570) -----------------------------------------
 		//
@@ -1672,15 +1681,23 @@ func wireCorpus() []wireCase {
 		{name: "MinOverRowField",
 			sql:   `SELECT MIN(rw.b) AS lo, MAX(rw.a) AS hi FROM row_probe`,
 			pgSQL: `SELECT MIN((rw).b) AS lo, MAX((rw).a) AS hi FROM row_probe`},
+		// An aggregate call is labelled after the FUNCTION (#732). Its output
+		// name is still load-bearing INSIDE the planner — it IS the Aggregate
+		// node's OutputCol, which GROUP BY, HAVING and ORDER BY resolve
+		// against — which is why the published name is a second name applied
+		// where the values leave the engine, not a rewrite of that one.
 		{name: "UnaliasedAggregate",
-			sql: `SELECT COUNT(supplier.s_name) FROM supplier`,
-			pins: map[string]string{
-				wirePropFieldNames: "#513, deliberately out of scope: PostgreSQL labels an aggregate " +
-					"call `count`, wadjet `count(supplier.s_name)`. Unlike the scalar case this is not " +
-					"a mangled name, and an aggregate's output name is load-bearing inside the planner " +
-					"(it IS the Aggregate node's OutputCol, which GROUP BY, HAVING and ORDER BY resolve " +
-					"against), so renaming it is its own change",
-			}},
+			sql: `SELECT COUNT(supplier.s_name) FROM supplier`},
+		// TWO unaliased aggregates: PostgreSQL publishes ONE name for both,
+		// which is exactly the collapse the resolution spelling may not take.
+		{name: "UnaliasedAggregateTwice",
+			sql: `SELECT COUNT(supplier.s_name), COUNT(supplier.s_acctbal) FROM supplier`},
+		// An unaliased aggregate BESIDE a GROUP BY key, so the published name
+		// is compared where a HAVING and an ORDER BY resolve against the
+		// planner's own spelling for the same column.
+		{name: "UnaliasedAggregateGrouped",
+			sql: `SELECT n_regionkey, COUNT(*) FROM nation GROUP BY n_regionkey ` +
+				`HAVING COUNT(*) > 0 ORDER BY n_regionkey LIMIT 3`},
 
 		// `SELECT *` with ZERO rows (#846). PostgreSQL always sends a
 		// RowDescription for a SELECT; wadjet sent none at all for these,

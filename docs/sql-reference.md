@@ -938,6 +938,40 @@ enclosing query's, PostgreSQL reads the inner definition and wadjet reads the
 outer one. A `WITH` written inside a scalar or `IN` subquery is not parsed at
 all (SQLSTATE `42601`).
 
+## Output column names
+
+An item with an explicit `AS` alias is published under it, byte for byte. An
+item WITHOUT one takes PostgreSQL's name for it:
+
+| the item | the column's name |
+|---|---|
+| a column reference — `g`, `t.g`, `(g)` | `g` (unqualified) |
+| a ROW field path — `(c_row).b` | `b` (the field) |
+| a function or aggregate call — `abs(g)`, `count(*)`, `sum(g) OVER ()` | `abs`, `count`, `sum` |
+| `CASE`, `COALESCE`, `NULLIF`, `GREATEST` | `case`, `coalesce`, `nullif`, `greatest` |
+| `EXISTS (…)`, `ARRAY[…]`, `EXTRACT(…)` | `exists`, `array`, `extract` |
+| `TRIM(x)` | `btrim` — PostgreSQL names the column after the function it RESOLVED to |
+| `CAST(g AS bigint)`, `g::int` | `g` — a cast is named after its ARGUMENT |
+| `CAST('2020-01-01' AS date)` | `date` — the TYPE, and only when the argument has no name |
+| a scalar subquery — `(SELECT g FROM t LIMIT 1)` | `g` |
+| anything with no natural name — `g + 1`, `-g`, `1`, `g IS NULL`, `g IN (1,2)` | `?column?` |
+
+Several columns may be called `?column?`, or `count`, in one result — a slot's
+identity is its POSITION (see below), so that is not a collision.
+
+The name a query publishes is not the name it RESOLVES by, and one place shows
+the difference. An enclosing query refers to an unnamed derived column by the
+inner block's own spelling, not by `?column?`:
+
+```sql
+SELECT "g + 1" FROM (SELECT g + 1 FROM t) s   -- answers
+SELECT "?column?" FROM (SELECT g + 1 FROM t) s -- 42703, naming the column that exists
+```
+
+PostgreSQL is the other way round on both lines. It is a name-only divergence
+and it is loud in the direction that matters: a reference wadjet cannot resolve
+is an error, never a different column.
+
 ## Duplicate output column names
 
 A result may carry two columns of the same name — `SELECT abs(a), abs(b)` is

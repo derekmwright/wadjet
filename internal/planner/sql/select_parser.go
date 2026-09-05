@@ -536,6 +536,14 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 		}
 	}
 
+	// PostgreSQL's name for the column, decided HERE — on the item as the
+	// query wrote it — because the planner rewrites items and a name derived
+	// from the rewritten tree is a name for something the user did not write
+	// (#732).
+	if col.Alias == "" && !col.Star {
+		col.PublishedName = OutputColumnName(col)
+	}
+
 	return col, nil
 }
 
@@ -2218,7 +2226,15 @@ func funcCallLabel(expr Node) string {
 		case *ParenNode:
 			expr = e.Inner
 		case *FuncCallNode:
-			return e.Name
+			// A call the parser REWROTE keeps PostgreSQL's label for the
+			// construct the query wrote: `EXTRACT(YEAR FROM d)` is `year(d)`
+			// in this AST and `extract` on the wire (#732).
+			if e.OutputLabel != "" {
+				return e.OutputLabel
+			}
+			// …and a call PostgreSQL itself resolves to another function is
+			// labelled after that one: `TRIM(x)` is `btrim`.
+			return funcOutputLabel(e.Name)
 		default:
 			return ""
 		}
@@ -2709,7 +2725,10 @@ func (p *selectParser) parseExtractExpr() (Node, error) {
 	case "doy":
 		field = "day_of_year"
 	}
-	return &FuncCallNode{Name: field, Args: []Node{source}}, nil
+	// PostgreSQL labels an unaliased EXTRACT `extract`, after the construct
+	// rather than after the field: this rewrite is wadjet's, not the query's
+	// (#732).
+	return &FuncCallNode{Name: field, Args: []Node{source}, OutputLabel: "extract"}, nil
 }
 
 // parsePositionExpr parses POSITION(needle IN haystack) and rewrites it to

@@ -554,6 +554,15 @@ type SelectColumn struct {
 	ColumnRef   string
 	TableRef    string
 	ASTExpr     Node // our AST expression node
+	// PublishedName is PostgreSQL's name for this output column when the
+	// SELECT list wrote no alias — its `FigureColname` (#732). It is stamped
+	// at PARSE time, on the item AS WRITTEN, because the planner REWRITES
+	// items: the LATERAL empty-input restoration turns `s.item_count` into
+	// `COALESCE(s.item_count, 0)`, and deriving the name from the rewritten
+	// AST published `coalesce` for a column PostgreSQL calls `item_count`.
+	// Empty for a synthetically built column, where OutputColumnName derives
+	// it from the AST instead.
+	PublishedName string
 }
 
 // JoinInfo describes a JOIN clause.

@@ -361,6 +361,25 @@ type Projection struct {
 	// that renumbers the slot past the stored column (physical.
 	// renameCollidingSlots) must move exactly one of them.
 	SlotSource string
+	// PublishedName is the name the CLIENT is told this column has, where
+	// that differs from Alias — PostgreSQL's `FigureColname`
+	// (plansql.OutputColumnName, #732). `SELECT g + 1` publishes `?column?`,
+	// `SELECT COUNT(*)` publishes `count`, `SELECT CAST(g AS bigint)`
+	// publishes `g`.
+	//
+	// It is a SECOND name and not a rewrite of Alias, for the reason ADR-0026
+	// §2 gives group keys a pair: an aggregate's `OutputCol` IS its Alias and
+	// every consumer inside the planner — GROUP BY, HAVING, ORDER BY, the
+	// stage's rename source — resolves against it, while two unaliased
+	// aggregates legally publish ONE name (`SELECT COUNT(*), COUNT(g)` is two
+	// columns called `count`). Collapsing the two would make the resolution
+	// spelling ambiguous to fix a name.
+	//
+	// Empty means "the same as Alias", which is every projection the planner
+	// itself mints. Only the OUTPUT projection's copy is consumed: it names
+	// what leaves the engine, and a nested block's names are what the block
+	// above resolves against.
+	PublishedName string
 	// Hidden marks a projection the planner added for its own use rather
 	// than one the user selected: the materialized value of an ORDER BY term
 	// the SELECT list does not carry (#320). It computes and sorts like any

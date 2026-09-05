@@ -59,6 +59,33 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    to begin with, and are recorded here so a future gate does not mistake
    them for undecided.)
 
+   - **An unnamed derived column is referenced by the BLOCK's spelling, not
+     by its published name.** (Added 2026-09-04, #732.) An output column with
+     no alias is PUBLISHED under PostgreSQL's `FigureColname` — `?column?` for
+     an operator expression, the function's name for a call, the ARGUMENT's
+     name for a cast — on every door and both engines. That is the name a
+     client reads out of RowDescription, and it agrees with PostgreSQL.
+
+     What does not is the name an ENCLOSING query may use for such a column of
+     a derived table. PostgreSQL takes `"?column?"`; wadjet takes the inner
+     block's own spelling (`"g + 1"`) and refuses `"?column?"` with 42703,
+     naming the column that does exist. The two names are deliberately not one
+     string: inside the plan a name is a HANDLE that a sort key, a HAVING and
+     an aggregate's `OutputCol` all resolve against, and two unnamed items in
+     one block would then answer to one handle. PostgreSQL has that ambiguity
+     too and REFUSES it (42702); every resolver here would silently take the
+     first, which is the trade this whole territory exists to avoid.
+
+     Both halves are name-only and both are LOUD: a reference wadjet cannot
+     resolve is an error, never a different column. Gated at
+     `coordinator.TestAnUnnamedDerivedColumnCannotBeReferencedByItsPublishedName`,
+     with the block's own spelling beside it as the control.
+   - **A call PostgreSQL rewrites keeps the name the query wrote, except for
+     TRIM.** (Added 2026-09-04, #732.) PostgreSQL labels an unaliased call
+     after the function it RESOLVED to: `trim(' a ')` is `btrim`, which wadjet
+     matches, and `SUBSTRING(s FROM 2 FOR 3)` — which wadjet's grammar does not
+     accept at all — would be `substring`. A second such rewrite belongs on
+     this list only with the measurement beside it.
    - **A multi-statement simple-query string is not one transaction.**
      (Added 2026-09-03, #711.) PostgreSQL's simple query protocol wraps a
      string carrying several statements in an IMPLICIT TRANSACTION, so a

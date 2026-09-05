@@ -380,6 +380,12 @@ type FuncCallNode struct {
 	Args     []Node
 	Distinct bool // COUNT(DISTINCT col)
 	Star     bool // COUNT(*)
+	// OutputLabel is the name PostgreSQL publishes this call under when the
+	// SELECT list wrote no alias, for the calls the parser REWRITES into a
+	// different function: `EXTRACT(YEAR FROM d)` becomes `year(d)` here and
+	// PostgreSQL still labels the column `extract`. Empty means Name is the
+	// label, which is the ordinary case (OutputColumnName, #732).
+	OutputLabel string
 }
 
 func (*FuncCallNode) nodeTag() {}

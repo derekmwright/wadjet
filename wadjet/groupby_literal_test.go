@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -75,7 +76,10 @@ func TestGroupByLiteralKeyElision(t *testing.T) {
 		if s != wantS[k] {
 			t.Fatalf("k=%s sum=%d want %d (row %v)", k, s, wantS[k], r)
 		}
-		if v, ok := r["1"]; !ok || v == nil {
+		// PostgreSQL publishes an unaliased literal as `?column?`, not as its
+		// own text (#732). The elision this test is about is unchanged; the
+		// NAME the constant column arrives under moved with the naming rule.
+		if v, ok := r[plansql.UnnamedOutputColumn]; !ok || v == nil {
 			t.Fatalf("constant column missing/null in %v", r)
 		}
 	}

@@ -634,10 +634,11 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					src = name
 				}
 				projections = append(projections, Projection{
-					Expr:       src,
-					Alias:      name,
-					Column:     src,
-					SlotSource: src,
+					Expr:          src,
+					Alias:         name,
+					Column:        src,
+					SlotSource:    src,
+					PublishedName: plansql.OutputColumnName(col),
 				})
 				continue
 			}
@@ -658,6 +659,9 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				Alias:   col.Alias,
 				IsAgg:   col.IsAgg,
 				ASTExpr: col.ASTExpr,
+				// PostgreSQL's name for the column, which is not always the
+				// name the planner resolves it by (#732).
+				PublishedName: plansql.OutputColumnName(col),
 			}
 			// For nested aggregates, use the rewritten AST that references
 			// the synthetic aggregate output column. The projection is no
