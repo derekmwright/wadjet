@@ -1,8 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +119,10 @@ func dmlRig(t *testing.T, ctx context.Context) (*wadjet.DB, *auth.Provider, []dm
 	}
 	t.Cleanup(pg.Shutdown)
 
+	srv := New(Config{Addr: ":0", Catalog: db.Catalog(), Provider: provider}, nil)
+	hs := httptest.NewServer(srv.Mux())
+	t.Cleanup(hs.Close)
+
 	stored := func(t *testing.T, id int, col string) string {
 		t.Helper()
 		res, err := db.Query(idCtx("admin-key"), fmt.Sprintf(
@@ -153,6 +162,52 @@ func dmlRig(t *testing.T, ctx context.Context) (*wadjet.DB, *auth.Provider, []dm
 					return "", err
 				}
 				return tag.String(), nil
+			},
+			read: stored,
+		},
+		{
+			// The THIRD door. It reaches the same wadjet.DB.ExecuteParsed
+			// through Server.handleDML, so it should carry the same
+			// enforcement — and a census with two doors cannot say so.
+			name: "http",
+			exec: func(t *testing.T, key, sql string) (string, error) {
+				body, err := json.Marshal(map[string]string{"sql": sql})
+				if err != nil {
+					return "", err
+				}
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+					hs.URL+"/v1/queries", bytes.NewReader(body))
+				if err != nil {
+					return "", err
+				}
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+key)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					return "", err
+				}
+				defer resp.Body.Close()
+				raw, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return "", err
+				}
+				var out struct {
+					Rows  []map[string]any `json:"rows"`
+					Error string           `json:"error"`
+				}
+				if uerr := json.Unmarshal(raw, &out); uerr != nil {
+					return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
+				}
+				if out.Error != "" {
+					return "", fmt.Errorf("%s", out.Error)
+				}
+				if resp.StatusCode != http.StatusOK {
+					return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
+				}
+				if len(out.Rows) == 0 {
+					return "", fmt.Errorf("HTTP door returned no command tag")
+				}
+				return fmt.Sprint(out.Rows[0]["result"]), nil
 			},
 			read: stored,
 		},

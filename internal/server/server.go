@@ -590,12 +590,21 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, start time.Time) {
 	ctx := r.Context()
 
-	// Authorization: check write permission
+	// Authorization. When an ABAC evaluator is configured it is the whole
+	// answer — auth.EnforceDMLPolicies inside the DML door decides the write
+	// (ActionWrite -> 42501) and the statement's own reads, per table — and
+	// this door's legacy blanket check would otherwise answer FIRST, with a
+	// message and a status no other door gives the same statement. That is
+	// the shape handleQuery already has (ABAC, else the legacy authorizer).
+	//
+	// The legacy check remains the only write control in a static (non-ABAC)
+	// deployment, and it now carries 42501, PostgreSQL's class for exactly
+	// this refusal, so a client branches the same way on every door.
 	identity := auth.IdentityFromContext(ctx)
-	authz := s.getAuthz()
-	if identity != nil && authz != nil {
-		if !authz.HasPermission(identity, "write") {
-			writeError(w, http.StatusForbidden, "insufficient permissions for DML operation")
+	if identity != nil && s.getEvaluator() == nil {
+		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
+			err := sqlerr.New("42501", "permission denied: this identity may not write")
+			writeSQLError(w, http.StatusForbidden, err.Error(), err)
 			return
 		}
 	}
@@ -643,6 +652,15 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 // client as a SQLSTATE rather than as a dropped connection.
 func (s *Server) dml() *wadjet.DB {
 	db := wadjet.Attach(s.catalog)
+	// ABAC, the same provider the SELECT path enforces with. Without it
+	// wadjet.Attach built a DB with no provider, EnforceDMLPolicies returned
+	// immediately, and this door ran INSERT / UPDATE / DELETE / MERGE with no
+	// column policy at all: `UPDATE e7emp SET dept = ssn` copied the STORED
+	// value of a masked column into a column the identity may read, and
+	// `DELETE FROM e7emp WHERE salary > 0` was answered from a DENIED column.
+	// The other two doors have carried it since #859 round 1; this one was
+	// built from a bare catalog and never given it.
+	db.SetAuthProvider(s.provider)
 	// The cost guard #803 installed on this server's SELECT path. MERGE reads
 	// its source through db.Query — an arbitrary SELECT — so a door that
 	// gained MERGE here would otherwise run one with no limit at all, on the
