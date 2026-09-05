@@ -86,10 +86,13 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		"invalid input syntax for type boolean")
 
 	// ---------------------------------------------------------------- #627
-	// PostgreSQL's abbreviated cidr spelling names the same value as the
-	// canonical one, so the two queries are one query.
+	// PostgreSQL's abbreviated INET spelling names the same value as the
+	// canonical one, so the two queries are one query. The mask is not
+	// optional: `'192.168'` beside a cidr column is 22P02 on the server (the
+	// pair resolves through `=(inet, inet)` and inet has no classful
+	// inference), and it is in the refusal census below for that reason.
 	f3AgreeOnEveryArm(t, arms, "cidr_abbreviated_spelling",
-		`SELECT COUNT(*) AS n FROM typemx WHERE c_cidr = '192.168'`,
+		`SELECT COUNT(*) AS n FROM typemx WHERE c_cidr = '192.168.0/24'`,
 		`SELECT COUNT(*) AS n FROM typemx WHERE c_cidr = '192.168.0.0/24'`)
 	f3AgreeOnEveryArm(t, arms, "cidr_abbreviated_with_mask",
 		`SELECT COUNT(*) AS n FROM typemx WHERE c_cidr = '192.168.4/24'`,
@@ -142,6 +145,39 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		{"c_ipv4", "zzz", "22P02"},
 		{"c_ipv6", "zzz", "22P02"},
 		{"c_cidr", "zzz", "22P02"},
+		// The literals the CIDR TYPE accepts and no COMPARISON does. `cidr`
+		// carries no operators of its own, so `c_cidr = '<literal>'` resolves
+		// through `=(inet, inet)` and the literal is read by inet's parser,
+		// which has no classful inference and no hex input:
+		//
+		//	SELECT '239'::cidr                      -> 239.0.0.0/8
+		//	SELECT ... WHERE c_cidr = '239'
+		//	   ERROR: invalid input syntax for type inet: "239"
+		//
+		// Round 2 of this arc read the cidr grammar at these sites and
+		// answered a row here — an undeclared accept-where-PostgreSQL-rejects
+		// superset (round-2 review P-6), and the same reading is what made
+		// `'1/0'` look like a regression when it is the server's own answer.
+		{"c_cidr", "192.168", "22P02"},
+		{"c_cidr", "239", "22P02"},
+		{"c_cidr", "10", "22P02"},
+		{"c_cidr", "224", "22P02"},
+		{"c_cidr", "0x10", "22P02"},
+		// A mask may not name a byte the literal never wrote: '10/15' is a
+		// value and '10/16' is 22P02, measured over all four octet counts.
+		{"c_cidr", "10/16", "22P02"},
+		{"c_cidr", "192.168/24", "22P02"},
+		// KNOWN DIVERGENCE, recorded in ADR-0012 and asserted here so it
+		// cannot drift silently: the server's TWO fold sites — `GREATEST`,
+		// `LEAST` and `COALESCE` — do not resolve the literal through an
+		// operator at all. They UNIFY types, so the literal is read by the
+		// cidr type's own parser and `GREATEST(cd, '239')` is 239.0.0.0/8
+		// there while `cd = '239'` is 22P02 (both measured). This engine
+		// reads one grammar at every site, so those two cells refuse where
+		// the server folds. One grammar refusing loudly beats two grammars
+		// half-built: the alternative is a second measured accept-set plus a
+		// site classification every evaluator must agree on, which is the
+		// model, not a patch — filed, and ADR-0012 carries the mechanism.
 	} {
 		for _, site := range f3NetSites(tc.col, tc.lit) {
 			f3RefuseOnEveryArmWithState(t, arms,
@@ -157,8 +193,22 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 		{"c_ipv6", "2001:db8::1"},
 		{"c_ipv6", "2001:db8::1/128"},
 		{"c_cidr", "10/8"},
-		{"c_cidr", "192.168"},
-		{"c_cidr", "239"},
+		{"c_cidr", "192.168.0/24"},
+		// The four literals the round-2 review read as a regression. Every
+		// one is a value on the server — inet KEEPS the bits to the right of
+		// the mask, which is the check the CIDR type makes and inet does not
+		// — and every one answers zero rows both there and here:
+		//
+		//	'1/0'::inet 1.0.0.0/0   '255/1'::inet 255.0.0.0/1
+		//	'10.1/8'    10.1.0.0/8  '172.31/12'   172.31.0.0/12
+		//
+		// The base refused all four with 22P02, which is the disagreement
+		// this arc closed; the census carries them so a return to the CIDR
+		// grammar's `addressOK` check fails here.
+		{"c_cidr", "1/0"},
+		{"c_cidr", "255/1"},
+		{"c_cidr", "10.1/8"},
+		{"c_cidr", "172.31/12"},
 	} {
 		for _, site := range f3NetSites(tc.col, tc.lit) {
 			// PRE-EXISTING, pinned fail-on-agree: `c_ipv4 IN (<any host
@@ -178,6 +228,31 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 				"network_literal_ok/"+tc.col+"/"+tc.lit+"/"+site.name, site.sql)
 		}
 	}
+
+	// The PRE-EXISTING two-path split around an IN list over a network column,
+	// pinned in the three shapes and the second TYPE the round-2 review found
+	// beyond the one cell above. Measured identically at dea4e795 with none of
+	// this arc's commits, so none of it is #627's; PostgreSQL agrees with the
+	// SINGLE arm on the first three, which is what makes the DAG the wrong one.
+	//
+	//	c_ipv4 IN ('10.0.0.1')       PG 1     single 1  dag 0     dag-shuf 0
+	//	c_mac  IN ('aa:bb:cc:…:01')  PG 1     single 1  dag 0     dag-shuf 0
+	//	c_ipv4 BETWEEN x AND x       PG 1     single 1  dag 0     dag-shuf 0
+	//	c_ipv4 NOT IN ('10.0.0.1')   PG 4915  single 4915  dag 4916  dag-shuf 4916
+	//	CASE WHEN c_ipv4 IN (…)      PG 1     single 0  dag 0     dag-shuf 0
+	//
+	// The last is not a two-path split at all: every arm answers 0 where the
+	// `=` spelling of the same predicate answers 1, so it is pinned against
+	// that spelling rather than against an arm.
+	f3SplitOnTheDAG(t, arms, "in_split/c_mac",
+		`SELECT COUNT(*) AS n FROM typemx WHERE c_mac IN ('aa:bb:cc:00:00:01')`)
+	f3SplitOnTheDAG(t, arms, "in_split/between",
+		`SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 BETWEEN '10.0.0.1' AND '10.0.0.1'`)
+	f3ArmsDisagree(t, arms, "in_split/not_in",
+		`SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 NOT IN ('10.0.0.1')`)
+	f3SpellingsDisagree(t, arms, "in_split/inside_a_case",
+		`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN c_ipv4 IN ('10.0.0.1') THEN 1 ELSE 0 END = 1`,
+		`SELECT COUNT(*) AS n FROM typemx WHERE c_ipv4 = '10.0.0.1'`)
 
 	// ---------------------------------------------------------------- #582
 	// A bytea literal in both of byteain's spellings, against the same row.
@@ -236,9 +311,15 @@ func TestArcF3ExprTypingOnEveryArm(t *testing.T) {
 }
 
 // f3NetSites is the site list a network literal has to be classified the same
-// way at: the two the pre-round-2 refusal reached, the four it did not, and the
+// way at: the two the pre-round-2 refusal reached, the five it did not, and the
 // EMPTY-SCAN shape, which is the one that separates a plan-time decision from a
 // per-row one.
+//
+// COALESCE joined the list in round 3. It was the last site outside the claim
+// — `COALESCE(<network col>, 'zzz')` ANSWERED on every arm for all five types
+// where PostgreSQL raises 22P02, because COALESCE folds its arguments to one
+// type at parse analysis and the plan-time validator did not treat it as a
+// fold.
 func f3NetSites(col, lit string) []struct{ name, sql string } {
 	q := "'" + lit + "'"
 	return []struct{ name, sql string }{
@@ -249,6 +330,7 @@ func f3NetSites(col, lit string) []struct{ name, sql string } {
 		{"in", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE %s IN (%s)`, col, q)},
 		{"case", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE CASE WHEN %s = %s THEN 1 ELSE 0 END = 1`, col, q)},
 		{"greatest", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE GREATEST(%s, %s) = %s`, col, q, col)},
+		{"coalesce", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE COALESCE(%s, %s) = %s`, col, q, col)},
 		{"projection", fmt.Sprintf(`SELECT COUNT(*) AS n FROM (SELECT %s = %s AS b FROM typemx) x WHERE b`, col, q)},
 		{"empty_scan", fmt.Sprintf(`SELECT COUNT(*) AS n FROM typemx WHERE id < 0 AND %s = %s`, col, q)},
 	}
@@ -328,6 +410,61 @@ func f3SplitOnTheDAG(t *testing.T, arms []struct {
 				t.Errorf("%s answers %s where this pin records 0 — the split is CLOSED, "+
 					"so delete the pin and let the census assert agreement (single=%s)"+
 					"\n  SQL: %s", arm.name, j, single, sql)
+			}
+		}
+	})
+}
+
+// f3ArmsDisagree pins a PRE-EXISTING two-path split whose DAG answer is not
+// zero: the single arm and both DAG arms answer, and they answer DIFFERENTLY.
+// It fails when they agree, which is what makes deleting it the fix's proof.
+func f3ArmsDisagree(t *testing.T, arms []struct {
+	name string
+	run  func(string) ([]string, error)
+}, name, sql string) {
+	t.Helper()
+	t.Run(name+"/pinned_arm_disagreement", func(t *testing.T) {
+		var single string
+		for _, arm := range arms {
+			got, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s REFUSED: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			j := strings.Join(got, ";")
+			if arm.name == "single" {
+				single = j
+				continue
+			}
+			if j == single {
+				t.Errorf("%s answers %s, the same as the single arm — the split is "+
+					"CLOSED, so delete this pin\n  SQL: %s", arm.name, j, sql)
+			}
+		}
+	})
+}
+
+// f3SpellingsDisagree pins a PRE-EXISTING disagreement between two spellings of
+// ONE predicate, on every arm. Nothing about it is distributed: it is the same
+// "one predicate, two dispositions" class the census closed for the refusal,
+// still open for the IN list's VALUE.
+func f3SpellingsDisagree(t *testing.T, arms []struct {
+	name string
+	run  func(string) ([]string, error)
+}, name, a, b string) {
+	t.Helper()
+	t.Run(name+"/pinned_spelling_disagreement", func(t *testing.T) {
+		for _, arm := range arms {
+			ga, err := arm.run(a)
+			if err != nil {
+				t.Fatalf("%s REFUSED: %v\n  SQL: %s", arm.name, err, a)
+			}
+			gb, err := arm.run(b)
+			if err != nil {
+				t.Fatalf("%s REFUSED: %v\n  SQL: %s", arm.name, err, b)
+			}
+			if strings.Join(ga, ";") == strings.Join(gb, ";") {
+				t.Errorf("%s answers %v for both spellings — the disagreement is CLOSED, "+
+					"so delete this pin\n  A: %s\n  B: %s", arm.name, ga, a, b)
 			}
 		}
 	})

@@ -124,7 +124,15 @@ func checkLiteralTypes(node plansql.Node, scope *colScope) error {
 			return err
 		}
 		switch strings.ToLower(n.Name) {
-		case "greatest", "least":
+		case "greatest", "least", "coalesce", "ifnull":
+			// COALESCE folds its arguments to ONE type at parse analysis, the
+			// same select_common_type GREATEST/LEAST fold through, so a quoted
+			// literal beside a column whose type cannot read it is 22P02 on
+			// the server before any row: `COALESCE(cidr_col, 'zzz')`,
+			// `COALESCE(numeric_col, 'abc')` and the macaddr/uuid/inet forms
+			// all raise there (measured 17.11). It ANSWERED here for all five
+			// network types on every arm — the last site outside the "one
+			// classification, every site" claim (round-2 review P-7).
 			if err := refuseLiteralAmong(scope, n.Args); err != nil {
 				return err
 			}

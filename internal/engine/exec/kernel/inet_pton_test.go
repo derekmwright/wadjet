@@ -9,37 +9,47 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// #627: every cell measured on live PostgreSQL 17.11 (`SELECT '<in>'::cidr`).
-// The abbreviated grammar is an address INFERENCE, not a notation widening,
-// which is why it needs a measured table rather than a remembered rule.
-func TestAbbreviatedInetGrammarMatchesPostgres(t *testing.T) {
+// #627: every cell measured on live PostgreSQL 17.11.
+//
+// The literal beside a network column is read by the INET parser — including
+// beside a `cidr` column, because cidr has no operators of its own and the
+// server resolves the pair through `=(inet, inet)`. So the table below is
+// `SELECT '<in>'::inet`, not `::cidr`: the two grammars disagree about half of
+// these inputs, and taking the cidr one made `cd = '239'` answer a row where
+// the server raises 22P02 (round-2 review P-6) while `cd = '1/0'` refused
+// where the server answers.
+func TestNetworkLiteralGrammarIsPostgresInet(t *testing.T) {
 	for _, c := range []struct {
 		in   string
-		want string // PostgreSQL's canonical cidr output
+		want string // PostgreSQL's own `::inet` output
 	}{
-		{"10", "10.0.0.0/8"},
-		{"10.1", "10.1.0.0/16"},
-		{"128", "128.0.0.0/16"},
-		{"128.1", "128.1.0.0/16"},
-		{"192", "192.0.0.0/24"},
-		{"192.1", "192.1.0.0/24"},
-		{"192.168", "192.168.0.0/24"},
-		{"192.168.0", "192.168.0.0/24"},
-		{"192.168.1", "192.168.1.0/24"},
-		// The one cell that separates the two readings of the widening rule:
-		// a bare class-D octet keeps /4 and does not widen to /8.
-		{"224", "224.0.0.0/4"},
-		{"224.1", "224.1.0.0/16"},
-		{"224.1.2.3", "224.1.2.3/32"},
-		{"240", "240.0.0.0/32"},
-		{"240.1", "240.1.0.0/32"},
-		{"10/8", "10.0.0.0/8"},
-		{"10/16", "10.0.0.0/16"},
-		{"192.168/16", "192.168.0.0/16"},
-		{"0/0", "0.0.0.0/0"},
-		{"010.1", "10.1.0.0/16"},
 		{"10.1.2.3", "10.1.2.3/32"},
+		{"010.1.2.3", "10.1.2.3/32"},
+		{"0010.0020.0030.0040", "10.20.30.40/32"},
+		{"10.1.2.3.", "10.1.2.3/32"},
+		// With a mask, an abbreviation is a value — and the HOST BITS ARE
+		// KEPT, which is the half of this the cidr grammar would refuse.
+		{"10/8", "10.0.0.0/8"},
+		{"10/15", "10.0.0.0/15"},
+		{"010/8", "10.0.0.0/8"},
+		{"192.168/16", "192.168.0.0/16"},
+		{"10.1/8", "10.1.0.0/8"},
+		{"10.1/23", "10.1.0.0/23"},
+		{"1/0", "1.0.0.0/0"},
+		{"255/1", "255.0.0.0/1"},
+		{"172.31/12", "172.31.0.0/12"},
+		{"10.1.2/24", "10.1.2.0/24"},
 		{"10.0.0.1/8", "10.0.0.1/8"},
+		{"0/0", "0.0.0.0/0"},
+		{"224/4", "224.0.0.0/4"},
+		{"239/8", "239.0.0.0/8"},
+		// Mask digits are digits, however many there are, and one trailing
+		// dot on the body is ignored.
+		{"10/008", "10.0.0.0/8"},
+		{"10/0008", "10.0.0.0/8"},
+		{"1.2.3.4/00", "1.2.3.4/0"},
+		{"10./8", "10.0.0.0/8"},
+		{"10.1./16", "10.1.0.0/16"},
 	} {
 		t.Run(c.in, func(t *testing.T) {
 			addr, bits, ok := parquet.PgIPv4Pton(c.in)
@@ -47,15 +57,7 @@ func TestAbbreviatedInetGrammarMatchesPostgres(t *testing.T) {
 				t.Fatalf("parquet.PgIPv4Pton(%q) refused; PostgreSQL 17.11 reads it as %s", c.in, c.want)
 			}
 			got := net.IP(addr[:]).String() + "/" + itoa(bits)
-			// PostgreSQL prints the MASKED network for cidr; the parser keeps
-			// the host bits, which is what wadjet's CIDR column stores, so the
-			// comparison is against the address it names either way.
-			wantIP, wantNet, err := net.ParseCIDR(c.want)
-			if err != nil {
-				t.Fatalf("fixture %q: %v", c.want, err)
-			}
-			wantOnes, _ := wantNet.Mask.Size()
-			if bits != wantOnes || !net.IP(addr[:]).Equal(wantIP) {
+			if got != c.want {
 				t.Errorf("parquet.PgIPv4Pton(%q) = %s, PostgreSQL 17.11 says %s", c.in, got, c.want)
 			}
 			// One key for one value: the abbreviated spelling and the address
@@ -69,10 +71,20 @@ func TestAbbreviatedInetGrammarMatchesPostgres(t *testing.T) {
 		})
 	}
 
-	// Refused on the server too, measured the same way.
+	// Refused on the server too, measured the same way. The first group is
+	// the ABBREVIATION WITHOUT A MASK — the cidr type's address inference,
+	// which inet does not have and which no comparison in this engine
+	// resolves through. It is the round-2 P-6 superset, and it is the half
+	// that made these four accepts look like a regression.
 	for _, in := range []string{
+		"10", "10.1", "10.1.2", "192.168", "239", "224", "0", "255", "010.1", "00010",
+		// A mask that names a byte the literal never wrote.
+		"10/16", "10/32", "10.1/24", "10.1.2/32", "10/016",
+		// The cidr-only notations: hex input is `inet_cidr_pton_ipv4`'s.
+		"0x10", "0x0a", "0xc0a80001", "0x10/8",
+		// And the shapes both parsers refuse.
 		"10.", "10..1", "256.1", "10.1.2.3.4", "0x0a.1", "10/33", " 10/8", "10 /8", "10/8 ",
-		"", "/8", "zzz", "10.1.2.-3", "1e2",
+		"", "/8", "zzz", "10.1.2.-3", "1e2", "10/", "10/x", "10/+8", "+10/8",
 	} {
 		t.Run("refused_"+in, func(t *testing.T) {
 			if _, _, ok := parquet.PgIPv4Pton(in); ok {
@@ -82,68 +94,78 @@ func TestAbbreviatedInetGrammarMatchesPostgres(t *testing.T) {
 	}
 }
 
-// Every one of the 256 first-octet values, measured on live PostgreSQL 17.11
-// with `SELECT i, (i::text)::cidr FROM generate_series(0,255) i` (transcript:
-// scratchpad/arcs8/f3_expr_typing3/pg_octets.txt).
+// The whole domain, not samples. Two claims, each measured over every value
+// rather than at a point:
 //
-// The single-cell table above could not see this: reading the whole 224-239
-// band as /4 agrees with the server for 224 and disagrees for the other
-// fifteen, so `WHERE cd = '239'` answered ZERO rows where PostgreSQL finds
-// 239.0.0.0/8 — silently wrong where the base refused loudly. A rule sampled
-// at one point per band is a rule not measured; this asserts the whole domain.
-func TestEveryFirstOctetMaskMatchesPostgres(t *testing.T) {
-	want := func(i int) int {
-		switch {
-		case i >= 240:
-			return 32
-		case i == 224:
-			return 4
-		case i >= 224:
-			return 8
-		case i >= 192:
-			return 24
-		case i >= 128:
-			return 16
-		}
-		return 8
-	}
+//	SELECT count(*) FROM generate_series(0,255) i
+//	 WHERE (i::text)::inet IS NOT NULL                      -> 0 accepted
+//	SELECT i, (i::text || '/8')::inet FROM generate_series(0,255) i
+//	                                                        -> i.0.0.0/8, all 256
+//
+// The maskless half is what round 1 got backwards: it read the CIDR type's
+// classful table (`'239'::cidr` is 239.0.0.0/8) as the grammar of a
+// comparison, and no comparison resolves through it. All 256 are 22P02 on
+// inet, and this asserts every one of them.
+func TestEveryFirstOctetFollowsPostgresInet(t *testing.T) {
 	for i := 0; i < 256; i++ {
 		in := strconv.Itoa(i)
-		addr, bits, ok := parquet.PgIPv4Pton(in)
-		if !ok {
-			t.Errorf("PgIPv4Pton(%q) refused; PostgreSQL reads it as %d.0.0.0/%d", in, i, want(i))
-			continue
-		}
-		if int(addr[0]) != i || addr[1] != 0 || addr[2] != 0 || addr[3] != 0 {
-			t.Errorf("PgIPv4Pton(%q) = %v, want %d.0.0.0", in, addr, i)
-		}
-		if bits != want(i) {
-			t.Errorf("PgIPv4Pton(%q) masks /%d, PostgreSQL 17.11 masks /%d", in, bits, want(i))
-		}
-	}
-	// The two-octet band is unaffected by the correction — the widen step
-	// covers it — and it is asserted here so a future edit to the table cannot
-	// move it without saying so.
-	for _, c := range []struct {
-		in   string
-		bits int
-	}{{"224.1", 16}, {"225.1", 16}, {"239.1", 16}, {"240.1", 32}, {"224.0.0", 24}} {
-		if _, bits, ok := parquet.PgIPv4Pton(c.in); !ok || bits != c.bits {
-			t.Errorf("PgIPv4Pton(%q) masks /%d (ok=%v), PostgreSQL masks /%d", c.in, bits, ok, c.bits)
-		}
-	}
-	// LEADING ZEROS are digits, not a separate form: `'00010'::cidr` is
-	// 10.0.0.0/8 on the server, and a three-digit cap refused it (ADR-0012
-	// item 1 — never refuse what PostgreSQL accepts).
-	for _, in := range []string{"00010", "010", "0000000010", "010.001"} {
-		if _, _, ok := parquet.PgIPv4Pton(in); !ok {
-			t.Errorf("PgIPv4Pton(%q) refused; PostgreSQL accepts it", in)
-		}
-	}
-	// An octet past 255 is still refused however it is spelled.
-	for _, in := range []string{"256", "0256", "00000256", "10.256"} {
 		if _, _, ok := parquet.PgIPv4Pton(in); ok {
-			t.Errorf("PgIPv4Pton(%q) accepted; PostgreSQL raises 22P02", in)
+			t.Errorf("PgIPv4Pton(%q) accepted; PostgreSQL 17.11 raises "+
+				"`invalid input syntax for type inet: %q`", in, in)
+		}
+		// With a mask the same octet is a value, and the mask is kept as
+		// written — no classful inference in either direction.
+		addr, bits, ok := parquet.PgIPv4Pton(in + "/8")
+		if !ok || int(addr[0]) != i || addr[1] != 0 || addr[2] != 0 || addr[3] != 0 || bits != 8 {
+			t.Errorf("PgIPv4Pton(%q) = %v/%d (ok=%v), PostgreSQL says %d.0.0.0/8",
+				in+"/8", addr, bits, ok, i)
+		}
+		if _, bits, ok := parquet.PgIPv4Pton(in + "/15"); !ok || bits != 15 {
+			t.Errorf("PgIPv4Pton(%q) refused or masked /%d; PostgreSQL says %d.0.0.0/15",
+				in+"/15", bits, i)
+		}
+		if _, _, ok := parquet.PgIPv4Pton(in + "/16"); ok {
+			t.Errorf("PgIPv4Pton(%q) accepted; PostgreSQL raises 22P02 — one octet "+
+				"cannot carry a /16", in+"/16")
+		}
+		if _, bits, ok := parquet.PgIPv4Pton("10." + in + "/23"); !ok || bits != 23 {
+			t.Errorf("PgIPv4Pton(%q) refused or masked /%d; PostgreSQL says 10.%d.0.0/23",
+				"10."+in+"/23", bits, i)
+		}
+		if _, _, ok := parquet.PgIPv4Pton("10." + in + "/24"); ok {
+			t.Errorf("PgIPv4Pton(%q) accepted; PostgreSQL raises 22P02", "10."+in+"/24")
+		}
+	}
+}
+
+// The octet-count × mask grid, transcribed from
+//
+//	SELECT (b || '/' || bits)::inet FROM (VALUES (1,'10'),(2,'10.1'),
+//	       (3,'10.1.2'),(4,'10.1.2.3')) body(k,b), generate_series(0,33) bits
+//
+// 136 cells. The boundary moves by exactly eight bits per written octet and
+// stops at 32, and it is a REFUSAL boundary in the direction that matters: a
+// parser that ignored it would read `'10/32'` as 10.0.0.0/32, which the server
+// does not accept at all.
+func TestMaskMayNotNameAByteTheLiteralDidNotWrite(t *testing.T) {
+	// One row per octet count; the string is masks 0..33, 'y' = accepted.
+	for _, c := range []struct {
+		body string
+		want string
+	}{
+		{"10", "yyyyyyyyyyyyyyyynnnnnnnnnnnnnnnnnn"},
+		{"10.1", "yyyyyyyyyyyyyyyyyyyyyyyynnnnnnnnnn"},
+		{"10.1.2", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyynn"},
+		{"10.1.2.3", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyn"},
+	} {
+		for m := 0; m <= 33; m++ {
+			in := c.body + "/" + strconv.Itoa(m)
+			_, bits, ok := parquet.PgIPv4Pton(in)
+			if want := c.want[m] == 'y'; ok != want {
+				t.Errorf("PgIPv4Pton(%q) accepted=%v, PostgreSQL 17.11 accepted=%v", in, ok, want)
+			} else if ok && bits != m {
+				t.Errorf("PgIPv4Pton(%q) masks /%d, PostgreSQL masks /%d", in, bits, m)
+			}
 		}
 	}
 }
@@ -162,20 +184,23 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
-// A site that does NOT know the column's type must not read the abbreviated
-// grammar, because under it every bare number is an address (#627 regression,
-// caught by the PostgreSQL oracle before it reached anyone).
+// A site that does NOT know the column's type must not read a MASKED
+// abbreviation as an address, because under PostgreSQL's own rules the same
+// text is a number, a syntax error, or a network depending on the type it
+// lands beside (#627 regression, caught by the PostgreSQL oracle before it
+// reached anyone).
 //
 // `expr.tryNetworkLit` wraps a comparison in a CmpNetworkLit whenever the
 // literal parses as an address in ANY family, and lets the column's real type
-// pick the branch at eval time — so handing it `'3.1'` as 3.1.0.0/16 made
-// `CASE WHEN d_val < '3.1' THEN 1 ELSE 0 END = 1` order a DOUBLE column's rows
-// as ADDRESSES: 15 rows where PostgreSQL 17.11 answers 8. PostgreSQL reads
-// `'3.1'` as a cidr only when the target IS a cidr, which is exactly what
-// these type-blind sites cannot know.
+// pick the branch at eval time. `SELECT 1.0 < '10/8'` is 22P02 on the server
+// (the literal resolves through NUMERIC there, not inet), so a type-blind site
+// that read '10/8' as 10.0.0.0/8 would order a DOUBLE column's rows as
+// addresses — which is what the first version of this fix did with '3.1'.
 func TestAnUntypedLiteralIsNotAnAddressJustBecauseCidrWouldReadIt(t *testing.T) {
-	// Numbers, which are what the regression turned into addresses.
-	for _, s := range []string{"3.1", "2", "10", "192.168", "10.1", "0", "1_0", "0x0A", "3"} {
+	// Numbers and masked abbreviations, which are what a type-blind site must
+	// not turn into addresses.
+	for _, s := range []string{"3.1", "2", "10", "192.168", "10.1", "0", "1_0", "0x0A", "3",
+		"10/8", "192.168/16", "1/0"} {
 		if CidrAddressText(s) {
 			t.Errorf("CidrAddressText(%q) says address; a site that does not know the "+
 				"column's type must read this as a number", s)
@@ -189,14 +214,22 @@ func TestAnUntypedLiteralIsNotAnAddressJustBecauseCidrWouldReadIt(t *testing.T) 
 			t.Errorf("CidrAddressText(%q) says not-an-address", s)
 		}
 	}
-	// And the CIDR-TYPED sites keep the wide grammar: the same abbreviated
-	// spellings still key as the addresses they name, which is what makes
+	// And the CIDR-TYPED sites keep the wide grammar: a masked abbreviation
+	// still keys as the address it names, which is what makes
 	// `c_cidr = '10/8'` find its row.
-	for _, c := range [][2]string{{"10/8", "10.0.0.0/8"}, {"192.168", "192.168.0.0/24"}} {
+	for _, c := range [][2]string{{"10/8", "10.0.0.0/8"}, {"192.168/16", "192.168.0.0/16"}} {
 		a, aok := CidrSortKey(c[0])
 		b, bok := CidrSortKey(c[1])
 		if !aok || !bok || a != b {
 			t.Errorf("CidrSortKey(%q) and CidrSortKey(%q) are two keys for one value", c[0], c[1])
+		}
+	}
+	// A maskless abbreviation is not an address at ANY site now, typed or
+	// not: the classful reading belongs to the cidr type's input function.
+	for _, s := range []string{"239", "192.168", "10", "224"} {
+		if _, ok := CidrSortKey(s); ok {
+			t.Errorf("CidrSortKey(%q) keyed it as an address; PostgreSQL raises "+
+				"`invalid input syntax for type inet: %q` beside a cidr column", s, s)
 		}
 	}
 }
@@ -213,7 +246,9 @@ func TestNetworkLiteralRefusalIsOnePredicate(t *testing.T) {
 		refused bool
 	}{
 		{batch.TypeCIDR, "10/8", false},
-		{batch.TypeCIDR, "192.168", false},
+		{batch.TypeCIDR, "192.168/16", false},
+		{batch.TypeCIDR, "192.168", true}, // PG's inet refuses it beside a cidr column
+		{batch.TypeCIDR, "239", true},
 		{batch.TypeCIDR, "10.0.0.0/8", false},
 		{batch.TypeCIDR, "::ffff:10.0.0.1", false},
 		{batch.TypeCIDR, "zzz", true},

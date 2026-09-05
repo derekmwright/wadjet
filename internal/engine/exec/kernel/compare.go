@@ -881,15 +881,21 @@ func CidrSortKey(s string) (string, bool) {
 	ip, ipnet, err := net.ParseCIDR(t)
 	if err != nil || ipnet == nil {
 		// PostgreSQL's ABBREVIATED v4 forms, which Go's parser does not read:
-		// '10/8', '192.168', '192.168/16' (#627). The canonical spelling goes
-		// back through the same key builder, so an abbreviated literal and the
-		// address it names produce one key — which is what makes `cd = '10/8'`
-		// find the row holding '10.0.0.0/8', as it does on the server.
+		// '10/8', '192.168/16', '10.1/8', and the leading zeros in
+		// '010.1.2.3' (#627). The canonical spelling goes back through the
+		// same key builder, so an abbreviated literal and the address it names
+		// produce one key — which is what makes `cd = '10/8'` find the row
+		// holding '10.0.0.0/8', as it does on the server.
 		//
-		// This arm is why CidrAddressText exists beside this function: the
-		// abbreviated grammar reads a BARE NUMBER as an address, which is
-		// right when the column IS a cidr and wrong for a site that is asking
-		// whether an untyped literal could be an address at all.
+		// The grammar is INET's, not cidr's, because that is the type the
+		// server resolves `cd = '<literal>'` through — see PgIPv4Pton's own
+		// doc. A maskless abbreviation ('239', '192.168') is 22P02 here for
+		// the same reason it is there.
+		//
+		// This arm is why CidrAddressText exists beside this function: a
+		// MASKED abbreviation is an address here and a syntax error beside a
+		// numeric column, so a site that does not know the column's type must
+		// not read it as one.
 		a, ones, pok := parquet.PgIPv4Pton(s)
 		if !pok {
 			return "", false
@@ -932,12 +938,15 @@ func CidrSortKey(s string) (string, bool) {
 // family" and let the column's real type pick the branch at eval time.
 //
 // Handing them the widened grammar was a silent wrong answer, caught by the
-// PostgreSQL oracle: `'3.1'` and `'2'` ARE addresses under the abbreviated
-// rule (3.1.0.0/16 and 2.0.0.0/8), so `CASE WHEN d_val < '3.1' THEN 1 ELSE 0
-// END = 1` compiled to a network comparison over a DOUBLE column and answered
-// 15 rows where PostgreSQL answers 8 — the literal ordered as an ADDRESS where
-// the column wanted a number. PostgreSQL reads `'3.1'` as a cidr only when the
-// target IS a cidr, which is exactly the knowledge these two sites lack.
+// PostgreSQL oracle: the first version of #627's fix read the CIDR type's
+// grammar, under which `'3.1'` and `'2'` ARE addresses (3.1.0.0/16 and
+// 2.0.0.0/8), so `CASE WHEN d_val < '3.1' THEN 1 ELSE 0 END = 1` compiled to a
+// network comparison over a DOUBLE column and answered 15 rows where
+// PostgreSQL answers 8 — the literal ordered as an ADDRESS where the column
+// wanted a number. The grammar is inet's now and no bare number reaches this
+// question, but the MASKED abbreviations still do: `'10/8'` is an address
+// beside a cidr column and a 22P02 beside a numeric one, which is exactly the
+// knowledge these two sites lack.
 //
 // Every CIDR-TYPED site keeps the wide grammar: the kernel's TypeCIDR arm, the
 // IN set, the row-group bound, the boxed-pair key and the plan-time refusal
@@ -2598,17 +2607,16 @@ func toString(v any) string {
 // (see exec.networkConstError).
 func parseIPv4ToInt64(s string) (int64, bool) {
 	body := s
-	if addr, bits, ok := parquet.PgIPv4Pton(s); ok && strings.ContainsRune(s, '/') {
+	// PostgreSQL's own inet grammar first: it reads the leading zeros in
+	// '010.1.2.3' and the trailing dot in '10.1.2.3.' that Go's parser
+	// refuses, and it refuses the maskless abbreviations ('10', '192.168')
+	// that the cidr type's parser would read as networks. A prefix narrower
+	// than /32 names a network this type cannot hold.
+	if addr, bits, ok := parquet.PgIPv4Pton(s); ok {
 		if bits != 32 {
 			return 0, false
 		}
 		return int64(binary.BigEndian.Uint32(addr[:])), true
-	} else if ok && !strings.ContainsRune(s, '/') {
-		// An abbreviated form with no prefix — '10', '192.168' — is a cidr
-		// spelling; PostgreSQL's inet refuses it, and so does this.
-		if strings.Count(s, ".") != 3 {
-			return 0, false
-		}
 	}
 	ip := net.ParseIP(body)
 	if ip == nil {

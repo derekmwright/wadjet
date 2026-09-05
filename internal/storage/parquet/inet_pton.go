@@ -2,36 +2,52 @@ package parquet
 
 import "strings"
 
-// PostgreSQL's ABBREVIATED IPv4 input grammar — the half of #627 that is not a
-// notation widening but an address INFERENCE, which is why #579 deferred it.
+// PostgreSQL's IPv4 literal grammar — the INET one, which is the type an
+// unquoted literal beside a network column resolves through on the server.
 //
-// `'10/8'::cidr` is 10.0.0.0/8 and `'192.168'::cidr` is 192.168.0.0/24: the
-// missing octets are zero and, when no prefix is written, the length comes
-// from the CLASS of the first octet, then widens to cover the octets that were
-// written. Go's net.ParseCIDR and net.ParseIP accept none of it, so every
-// refusal built on them refused input PostgreSQL accepts — ADR-0012 item 1's
-// one rule about the direction a divergence may point.
+// This is the half of #627 that is a notation widening rather than an address
+// inference, and the distinction is the whole rule. PostgreSQL has TWO v4
+// parsers, and they are not the same grammar:
 //
-// The table below is measured on live PostgreSQL 17.11, not read from the
-// source, and pgIPv4PtonTable in the test carries every cell:
+//	inet (inet_net_pton_ipv4)   the type EVERY comparison resolves through
+//	cidr (inet_cidr_pton_ipv4)  the cidr TYPE's own input function
 //
-//	'10'        10.0.0.0/8       '10.1'      10.1.0.0/16
-//	'128'       128.0.0.0/16     '128.1'     128.1.0.0/16
-//	'192'       192.0.0.0/24     '192.168'   192.168.0.0/24
-//	'224'       224.0.0.0/4      '224.1'     224.1.0.0/16
-//	'240'       240.0.0.0/32     '240.1'     240.1.0.0/32
-//	'10/8'      10.0.0.0/8       '192.168/16'  192.168.0.0/16
-//	'010.1'     10.1.0.0/16      '10.1.2.3'  10.1.2.3/32
+// `cd = '<literal>'` is not read by the cidr parser even when `cd` IS a cidr
+// column: cidr carries no operators of its own, so the server resolves the
+// pair through `=(inet, inet)` and reads the literal with inet's parser — the
+// error text says so (`invalid input syntax for type inet: "239"` beside a
+// cidr column). The cidr grammar's extras (a classful address INFERENCE for a
+// maskless abbreviation, `0x`-hex input, and the refusal of bits set to the
+// right of the mask) are reachable only through an explicit cast, which this
+// engine does not implement, so this function does not carry them. When
+// `CAST(<text> AS CIDR)` is implemented, THAT is where the cidr grammar goes,
+// beside its own measured table — not here.
 //
-// The widening to 8×octets applies from the second octet on: a bare '224' is
-// /4 where the class-D default alone would say /4 and an 8×1 widening would
-// say /8, and the server prints /4. That single cell is the whole difference
-// between the two readings of the rule, which is why it is in the table.
+// The grammar below is measured on live PostgreSQL 17.11, cell by cell, and
+// inet_pton_test.go carries the whole domain rather than samples:
 //
-// Refused, also measured: '10.' , '10..1', '256.1', '10.1.2.3.4', '0x0a.1',
-// '10/33', and any leading, trailing or embedded whitespace. IPv6 has no
-// abbreviation at all — `'2001:db8'::inet` is an error — so this is the v4
-// grammar only.
+//	'10.1.2.3'    10.1.2.3/32     a maskless address must be a whole quad
+//	'10'          22P02           …so every abbreviation without a mask fails
+//	'192.168'     22P02           (all 256 one-octet values, measured)
+//	'10/8'        10.0.0.0/8      with a mask, 1-4 octets are enough
+//	'192.168/16'  192.168.0.0/16
+//	'10.1/8'      10.1.0.0/8      HOST BITS ARE KEPT — inet does not mask
+//	'1/0'         1.0.0.0/0       …so these four are values, not errors
+//	'255/1'       255.0.0.0/1
+//	'172.31/12'   172.31.0.0/12
+//	'10/15'       10.0.0.0/15     the mask may not name a byte not written:
+//	'10/16'       22P02           bits/8 > octets is 22P02, measured 4x34
+//	'10/008'      10.0.0.0/8      mask digits are digits, any number of them
+//	'010.1.2.3'   10.1.2.3/32     and so are an octet's leading zeros
+//	'10.1.2.3.'   10.1.2.3/32     one trailing dot is ignored
+//	'10./8'       10.0.0.0/8
+//
+// Refused, also measured: '10.', '10..1', '256.1', '10.1.2.3.4', '0x0a',
+// '0x10/8' (hex is cidr-only), '10/33', '10/', '/8', '10/+8', and any leading,
+// trailing or embedded whitespace. IPv6 has no abbreviation at all —
+// `'2001:db8'::inet` is an error — so this is the v4 grammar only, and the v6
+// literals go through net.ParseCIDR unchanged.
+//
 // Exported so kernel.CidrSortKey and this package's CidrStatsSortKey read ONE
 // implementation: those two keys must agree byte for byte or a row-group prune
 // drops rows the filter keeps (kernel.TestCidrStatsSortKeyMatchesKernel), and a
@@ -39,6 +55,11 @@ import "strings"
 // duplicated.
 func PgIPv4Pton(s string) (addr [4]byte, bits int, ok bool) {
 	body, maskText, hasMask := strings.Cut(s, "/")
+	// One trailing dot is ignored by the server's parser — '10.1.2.3.' is
+	// 10.1.2.3/32 and '10.1./16' is 10.1.0.0/16 — while an EMPTY octet
+	// ('10..1') is refused. Trimming it here keeps the octet loop's rule
+	// ("a dot must be followed by a digit") exactly as strict as PostgreSQL's.
+	body = strings.TrimSuffix(body, ".")
 	if body == "" {
 		return addr, 0, false
 	}
@@ -67,65 +88,37 @@ func PgIPv4Pton(s string) (addr [4]byte, bits int, ok bool) {
 			}
 			i++
 			if i == len(body) {
-				return addr, 0, false // a trailing dot
+				return addr, 0, false // a SECOND trailing dot
 			}
 		}
 	}
-	if octets == 0 {
-		return addr, 0, false
-	}
-	if hasMask {
-		if maskText == "" || len(maskText) > 2 {
+	if !hasMask {
+		// inet performs no address inference: a maskless literal must name
+		// every octet. This is the line that keeps `cd = '239'` a 22P02 here
+		// exactly as it is there — the classful reading belongs to the cidr
+		// TYPE, and nothing in this engine resolves a comparison through it.
+		if octets != 4 {
 			return addr, 0, false
 		}
-		for i := 0; i < len(maskText); i++ {
-			if maskText[i] < '0' || maskText[i] > '9' {
-				return addr, 0, false
-			}
-			bits = bits*10 + int(maskText[i]-'0')
+		return addr, 32, true
+	}
+	if maskText == "" {
+		return addr, 0, false
+	}
+	for i := 0; i < len(maskText); i++ {
+		if maskText[i] < '0' || maskText[i] > '9' {
+			return addr, 0, false
 		}
+		bits = bits*10 + int(maskText[i]-'0')
 		if bits > 32 {
 			return addr, 0, false
 		}
-		return addr, bits, true
 	}
-	bits = pgClassfulBits(addr[0])
-	if octets > 1 && bits < octets*8 {
-		bits = octets * 8
+	// The mask may not reach past the bytes the literal actually wrote:
+	// '10/15' is 10.0.0.0/15 and '10/16' is 22P02. Measured over all four
+	// octet counts × every mask 0-33.
+	if bits/8 > octets {
+		return addr, 0, false
 	}
 	return addr, bits, true
-}
-
-// pgClassfulBits is the prefix length PostgreSQL infers for a one-octet cidr
-// input, as MEASURED over all 256 values rather than derived from the classful
-// rule it half-follows:
-//
-//	SELECT i, (i::text)::cidr FROM generate_series(0,255) i
-//
-//	0-127  /8      192-223  /24     225-239  /8
-//	128-191 /16    224      /4      240-255  /32
-//
-// 224 is the whole of the /4 band and 225-239 are /8, which no reading of "the
-// class of the first octet" predicts — the class-D default is 4 and the widen
-// step that would take it to 8 fires for every value in the band except 224
-// itself. The table is the authority; the transcript is
-// scratchpad/arcs8/f3_expr_typing3/pg_octets.txt.
-//
-// Reading the whole 224-239 band as /4 was #627's own defect: `WHERE cd = '239'`
-// answered ZERO rows where the server finds 239.0.0.0/8, for every abbreviated
-// multicast literal a user writes, and the base refused those literals loudly.
-func pgClassfulBits(first byte) int {
-	switch {
-	case first >= 240:
-		return 32
-	case first == 224:
-		return 4
-	case first >= 224:
-		return 8
-	case first >= 192:
-		return 24
-	case first >= 128:
-		return 16
-	}
-	return 8
 }

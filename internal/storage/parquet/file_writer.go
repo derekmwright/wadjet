@@ -1736,9 +1736,10 @@ func CidrStatsSortKey(s string) (string, bool) {
 	}
 	ip, ipnet, err := net.ParseCIDR(t)
 	if err != nil || ipnet == nil {
-		// PostgreSQL's abbreviated v4 forms, read by the ONE parser this
-		// package and kernel share (#627). Mirrors kernel.CidrSortKey's own
-		// fallback exactly, which is what the duplication gate requires.
+		// PostgreSQL's abbreviated v4 forms in its INET grammar, read by the
+		// ONE parser this package and kernel share (#627). Mirrors
+		// kernel.CidrSortKey's own fallback exactly, which is what the
+		// duplication gate requires.
 		a, ones, pok := PgIPv4Pton(s)
 		if !pok {
 			return "", false

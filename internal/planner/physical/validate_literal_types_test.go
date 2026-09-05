@@ -114,12 +114,19 @@ func TestPlanTimeNeverRefusesPGValidNetworkLiteral(t *testing.T) {
 
 	// column + a PG-valid literal that wadjet's own network parser rejects.
 	boundary := []struct{ col, lit string }{
-		// Abbreviated cidr/inet — PostgreSQL infers the octets/mask.
-		{"c", "192.168"},
-		{"c", "10"},
-		{"c", "192.168.1"},
+		// Abbreviated inet — PostgreSQL fills the missing octets with zero
+		// and KEEPS the host bits. Every one of these needs the explicit
+		// mask: see the refusal list below for the maskless spellings, which
+		// belong to the cidr type's own input function and reach no
+		// comparison.
 		{"c", "10/8"},
 		{"c", "192.168/16"},
+		{"c", "10.1/8"},
+		{"c", "1/0"},
+		{"c", "255/1"},
+		{"c", "172.31/12"},
+		{"c", "10/008"},
+		{"c", "010.1.2.3"},
 		// `{"v4", "192.168"}` was here and is WRONG: PostgreSQL REFUSES
 		// `'192.168'::inet` with 22P02. The abbreviation is a CIDR-only
 		// grammar there — `inet` takes an abbreviated form only WITH an
@@ -196,6 +203,46 @@ func TestPlanTimeNeverRefusesPGValidNetworkLiteral(t *testing.T) {
 				if got := sqlerr.StateOf(err); got != "0A000" {
 					t.Errorf("SQLSTATE %q, want 0A000 — %q is PostgreSQL-VALID text and the "+
 						"engine's TYPE is the limit\n  err: %v\n  SQL: %s", got, b.lit, err, sql)
+				}
+			})
+		}
+	}
+
+	// The THIRD class, and the one round 2 of this arc got backwards: text
+	// that is valid for the cidr TYPE and invalid beside a cidr COLUMN.
+	// `cidr` carries no operators of its own, so `c = '239'` resolves through
+	// `=(inet, inet)` and the literal is read by inet's parser, which has no
+	// classful inference — the server's own message names the type it used:
+	//
+	//	SELECT '239'::cidr            -> 239.0.0.0/8
+	//	SELECT count(*) ... WHERE c = '239'
+	//	   ERROR: invalid input syntax for type inet: "239"   (22P02)
+	//
+	// So these must be refused HERE, with 22P02, exactly as the server does.
+	// Accepting them was an undeclared accept-where-PG-rejects superset
+	// (round-2 review P-6) that also made the arc's census assert agreement
+	// over queries the server will not run.
+	for _, b := range []struct{ col, lit string }{
+		{"c", "192.168"},
+		{"c", "10"},
+		{"c", "192.168.1"},
+		{"c", "239"},
+		{"c", "224"},
+		{"c", "0x10"},  // hex input is the cidr parser's too
+		{"c", "10/16"}, // a mask past the octets the literal wrote
+		{"c", "10.1/24"},
+	} {
+		for _, s := range sites {
+			t.Run("inet_refuses_"+s.name+"_"+b.col+"_"+b.lit, func(t *testing.T) {
+				sql := strings.NewReplacer("@c", b.col, "@l", "'"+b.lit+"'").Replace(s.tmpl)
+				info := mustExtract(t, sql)
+				err := validateColumns(context.Background(), cat, info)
+				if err == nil {
+					t.Fatalf("plan-time ANSWERED %q at %q; PostgreSQL raises "+
+						"`invalid input syntax for type inet: %q`", b.lit, sql, b.lit)
+				}
+				if got := sqlerr.StateOf(err); got != "22P02" {
+					t.Errorf("SQLSTATE %q, want 22P02\n  err: %v\n  SQL: %s", got, err, sql)
 				}
 			})
 		}
