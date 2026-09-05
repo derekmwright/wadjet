@@ -21,6 +21,7 @@ import (
 	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -202,7 +203,7 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 				Plan:      result.Plan,
 			},
 		}
-		if err := cs.pushRows(result.Rows); err != nil {
+		if err := cs.pushRows(result.Rows, result.RowValues); err != nil {
 			return err
 		}
 		return cs.finish()
@@ -232,11 +233,40 @@ func streamResultBatches(cs *chunkStreamer, result *coordinator.SQLResult) error
 		if b == nil {
 			break
 		}
-		if err := cs.pushRows(b.ToRows()); err != nil {
+		// The batch's own positional form, boxed from the same batch so the
+		// two are index-aligned by construction (B1) — and boxed ONLY when
+		// the schema publishes a name twice, because that is the only case a
+		// map-boxed row loses a value and this path's peak boxed residency is
+		// deliberately one batch (see this function's own comment).
+		var vals [][]any
+		if batchNeedsPositionalRows(b) {
+			vals = b.ToRowValues()
+		}
+		if err := cs.pushRows(b.ToRows(), vals); err != nil {
 			return err
 		}
 	}
 	return cs.finish()
+}
+
+// batchNeedsPositionalRows reports whether a batch's schema publishes one name
+// TWICE, which is exactly when boxing its rows into a `map<string, Value>`
+// loses a value — `SELECT g + 1, g + 2, g + 3` is three columns called
+// `?column?` since #732. It mirrors `exec.hasDuplicateColumnName`, which the
+// collecting sink asks for the same reason; the two cannot share a helper
+// because that one is unexported and keyed on the sink's own schema.
+func batchNeedsPositionalRows(b *batch.RecordBatch) bool {
+	if b == nil || len(b.Schema) < 2 {
+		return false
+	}
+	seen := make(map[string]bool, len(b.Schema))
+	for _, c := range b.Schema {
+		if seen[c.Name] {
+			return true
+		}
+		seen[c.Name] = true
+	}
+	return false
 }
 
 // chunkStreamer sends row chunks of at most streamBatchSize, holding back
@@ -252,7 +282,18 @@ type chunkStreamer struct {
 	sentColumns bool
 }
 
-func (cs *chunkStreamer) pushRows(rows []map[string]any) error {
+// pushRows chunks one boxed batch of rows onto the stream.
+//
+// `values` is the same rows POSITIONALLY, index-aligned with `rows`, and it is
+// carried for the reason the unary RPC carries it: a `map<string, Value>`
+// cannot hold two output columns that publish ONE NAME, and since #732
+// `SELECT g + 1, g + 2, g + 3` is three columns called `?column?`. Passing nil
+// here is what left the STREAMING RPC sending three column names beside a
+// one-key map with the LAST value in it, while the unary RPC sent all three
+// (round-2 review B1). It may be nil or short — the engine materialises the
+// positional form only when the names are not unique — and rowsToProtoWithValues
+// leaves `Row.values` empty for every row it does not cover.
+func (cs *chunkStreamer) pushRows(rows []map[string]any, values [][]any) error {
 	for i := 0; i < len(rows); i += streamBatchSize {
 		end := i + streamBatchSize
 		if end > len(rows) {
@@ -263,7 +304,15 @@ func (cs *chunkStreamer) pushRows(rows []map[string]any) error {
 				return err
 			}
 		}
-		cs.pending = rowsToProto(rows[i:end])
+		var chunkVals [][]any
+		if i < len(values) {
+			vend := end
+			if vend > len(values) {
+				vend = len(values)
+			}
+			chunkVals = values[i:vend]
+		}
+		cs.pending = rowsToProtoWithValues(rows[i:end], chunkVals)
 		cs.havePending = true
 	}
 	return nil

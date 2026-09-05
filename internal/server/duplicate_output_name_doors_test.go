@@ -6,10 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"google.golang.org/grpc"
+
+	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // TWO OUTPUT COLUMNS OF ONE NAME, on every door (#732 round-2, review B1/B2).
@@ -23,7 +31,9 @@ import (
 //   - the HTTP door derived its `columns` list from the row map's KEYS, so
 //     three columns became one and two of the three VALUES were dropped;
 //   - the gRPC door sent the full `columns` list beside a one-key map, so a
-//     client zipping them read the last value under the first name;
+//     client zipping them read the last value under the first name — on BOTH
+//     its RPCs, and the streaming one survived the first patch because no cell
+//     reached it (round-2 review B1/P2);
 //   - pgwire is positional and was right about the VALUES, but
 //     `deriveColumnMetas` resolved each column's DECLARATION by NAME, so
 //     `SELECT g + 1, s || 'x'` declared a bigint as TEXT and
@@ -71,6 +81,40 @@ func TestDuplicateOutputNamesOnTheHTTPAndWireDoors(t *testing.T) {
 	})
 
 	// A DIFFERENTLY TYPED pair, which is what the wire corpus could not see.
+	// The gRPC door, BOTH RPCs. `Query` and `QueryStream` box the same rows
+	// through different code — `rowsToProtoWithValues` directly, and
+	// `chunkStreamer.pushRows` — and only the first was fixed by the round-1
+	// patch, which is what left the streaming RPC sending three column names
+	// beside one value (review B1). A cell per RPC is what makes "every door"
+	// mean every RPC.
+	t.Run("grpc/unary-three-unnamed-columns", func(t *testing.T) {
+		g := grpcOverDB(t)
+		resp, err := g.Query(context.Background(),
+			&wadjetv1.QueryRequest{Sql: "SELECT id + 1, id + 2, id + 3 FROM hd"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertThreeUnnamed(t, resp.Columns, protoRowValues(resp.Rows))
+	})
+
+	t.Run("grpc/streaming-three-unnamed-columns", func(t *testing.T) {
+		g := grpcOverDB(t)
+		fs := &dupNameStream{}
+		if err := g.QueryStream(
+			&wadjetv1.QueryRequest{Sql: "SELECT id + 1, id + 2, id + 3 FROM hd"}, fs); err != nil {
+			t.Fatal(err)
+		}
+		var cols []string
+		var rows []*wadjetv1.Row
+		for _, r := range fs.sent {
+			if len(r.Columns) > 0 {
+				cols = r.Columns
+			}
+			rows = append(rows, r.Rows...)
+		}
+		assertThreeUnnamed(t, cols, protoRowValues(rows))
+	})
+
 	t.Run("wire/duplicate-names-of-different-types", func(t *testing.T) {
 		fields := wireFields(t, pg, "SELECT id + 1, s || 'x' FROM hd")
 		if len(fields) != 2 {
@@ -159,4 +203,88 @@ func wireFields(t *testing.T, conn *pgconn.PgConn, sql string) []wireField {
 	}
 	_ = fmt.Sprint
 	return out
+}
+
+// dupNameStream is fakeQueryStream with a Context: the embedded-DB arm of
+// QueryStream asks the stream for one, and the shared fake embeds a nil
+// grpc.ServerStream.
+type dupNameStream struct {
+	grpc.ServerStream
+	sent []*wadjetv1.QueryStreamResponse
+}
+
+func (d *dupNameStream) Send(resp *wadjetv1.QueryStreamResponse) error {
+	d.sent = append(d.sent, resp)
+	return nil
+}
+
+func (d *dupNameStream) Context() context.Context { return context.Background() }
+
+// grpcOverDB builds a gRPC door over the same one-row `hd` fixture hdSetup
+// loads, so a cell here compares against the HTTP and wire cells above.
+func grpcOverDB(t *testing.T) *GRPCServer {
+	t.Helper()
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	sch := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "s", Type: parquet.TypeString},
+	}}
+	if err := db.CreateTable(ctx, "hd", sch, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester("hd", sch, nil, ingest.Config{MaxBufferRows: 8, RowGroupSize: 8})
+	if err := ing.Ingest(ctx, []map[string]any{{"id": int64(1), "s": "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return NewGRPCServer(GRPCConfig{DB: db}, slog.Default())
+}
+
+// protoRowValues is the POSITIONAL form of one gRPC result, or nil when the
+// door sent none.
+func protoRowValues(rows []*wadjetv1.Row) [][]float64 {
+	out := make([][]float64, 0, len(rows))
+	for _, r := range rows {
+		row := make([]float64, 0, len(r.Values))
+		for _, v := range r.Values {
+			row = append(row, v.GetNumberValue())
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// assertThreeUnnamed is the shared claim of the two gRPC cells: three columns
+// all called `?column?`, and all three VALUES reachable.
+func assertThreeUnnamed(t *testing.T, cols []string, values [][]float64) {
+	t.Helper()
+	if len(cols) != 3 {
+		t.Fatalf("columns = %v, want three (PostgreSQL sends three `?column?`)", cols)
+	}
+	for i, c := range cols {
+		if c != "?column?" {
+			t.Errorf("column %d = %q, want %q", i, c, "?column?")
+		}
+	}
+	if len(values) != 1 || len(values[0]) != 3 {
+		t.Fatalf("Row.values = %v, want one row of three: a protobuf map carries ONE "+
+			"key for three columns of one name, so the positional form is the only "+
+			"place two of the three values exist", values)
+	}
+	for i, want := range []float64{2, 3, 4} {
+		if values[0][i] != want {
+			t.Errorf("value %d = %v, want %v", i, values[0][i], want)
+		}
+	}
 }

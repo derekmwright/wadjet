@@ -109,9 +109,36 @@ func TestArcF4BoundariesArePinned(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			for _, arm := range arms {
+				// The routing counters, asserted on PINNED arms too, and that
+				// is the point here rather than a formality. A pin on `dag`
+				// says "this arm answers the group KEY"; if the coordinator
+				// ever started REFUSING the shape and answering it on its own
+				// single-process pipeline, the arm would return the CORRECT
+				// rows, the fail-on-agree branch would fire "It is fixed", and
+				// the message would invite deleting the exception from three
+				// documents for a fix that never happened. Rows cannot tell
+				// "executed and wrong" from "refused and right"; the counter
+				// can (COMMON's routing rule; round-2 review P1).
+				before := map[string]int64{}
+				if arm.coord != nil {
+					for _, rc := range e3RouteCounters {
+						before[rc.name] = rc.fn(arm.coord)
+					}
+				}
 				cols, rows, err := arm.run(c.sql)
 				if err != nil {
 					t.Fatalf("%s arm refused the query: %v\n  SQL: %s", arm.name, err, c.sql)
+				}
+				if arm.coord != nil {
+					for _, rc := range e3RouteCounters {
+						if d := rc.fn(arm.coord) - before[rc.name]; d != 0 {
+							t.Fatalf("%s arm ROUTED this shape to the coordinator's local "+
+								"pipeline (%s +%d). Whatever it answered came from the "+
+								"single-process engine, so this cell says nothing about the "+
+								"DAG — and a pin that agrees for THAT reason is not a fix\n"+
+								"  SQL: %s", arm.name, rc.name, d, c.sql)
+						}
+					}
 				}
 				got := e3SortLines(e3Render(cols, rows))
 				want := e3SortLines(c.want)
