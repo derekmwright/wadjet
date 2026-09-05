@@ -10,8 +10,19 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A DECIMAL MAP KEY is scaled TWICE through the parquet round trip: 12.75
-// written into a MAP(DECIMAL(18,4), STRING) reads back as 127500.0000.
+// A MAP KEY is corrupted by the parquet round trip, and the axis is the KEY
+// POSITION rather than the DECIMAL type (rescoped 2026-09-05 after review, P5).
+//
+//	MAP(DECIMAL(18,4), STRING) key 12.75        -> "127500.0000"  scaled twice
+//	MAP(DECIMAL(9,2),  STRING) key 12.75        -> "1275.00"      the same, x10^2
+//	MAP(DECIMAL(18,0), STRING) key 13           -> "13"           right (10^0)
+//	MAP(DATE, STRING)          key 2023-11-14   -> NULL           the key is LOST
+//
+// while the DECIMAL map VALUE, a ROW field, an ARRAY-of-ROW field and an ARRAY
+// of ARRAY all round-trip correctly. The defect is every family whose map key
+// is handed to the child as its own TEXT (batch.mapKeyValue: "every other
+// family parses its own string form already") and something below reads that
+// text as an already-scaled carrier.
 //
 // Found while fixing #669, whose decimal-keyed-map lookup had to be gated at
 // the expr layer over a constructed batch because of this — an end-to-end
@@ -101,6 +112,58 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 			}
 		})
 	}
+
+	// The SCALE is what the corruption is proportional to, so a second scale
+	// is a second cell: at (9,2) the same 12.75 reads back 1275.00, and at
+	// (18,0) — where 10^0 is 1 — it is right. Two of the three would agree
+	// with a fix that only moved the (18,4) case.
+	t.Run("residual_scale_is_the_multiplier", func(t *testing.T) {
+		sc2 := parquet.Schema{Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "mk92", Type: parquet.TypeMap, Nullable: true,
+				ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+					{Name: "key", Type: parquet.TypeDecimal, Precision: 9, Scale: 2},
+					{Name: "value", Type: parquet.TypeString, Nullable: true},
+				}}},
+			{Name: "mk180", Type: parquet.TypeMap, Nullable: true,
+				ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+					{Name: "key", Type: parquet.TypeDecimal, Precision: 18, Scale: 0},
+					{Name: "value", Type: parquet.TypeString, Nullable: true},
+				}}},
+		}}
+		if err := db.CreateTable(ctx, "decmapkey2", sc2, nil); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		ing := db.NewIngester("decmapkey2", sc2, nil, ingest.Config{MaxBufferRows: 8, RowGroupSize: 4})
+		if err := ing.Ingest(ctx, []map[string]any{{
+			"id":    int64(1),
+			"mk92":  map[string]any{"12.75": "a"},
+			"mk180": map[string]any{"13": "b"},
+		}}); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		for _, c := range []struct{ col, want string }{
+			{"mk92", "1275.00"}, // 12.75 x 10^2 — the pin
+			{"mk180", "13"},     // scale 0, so the multiplier is 1 — right
+		} {
+			res, err := db.Query(ctx, `SELECT `+c.col+` AS v FROM decmapkey2 WHERE id = 1`)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			got, _ := res.Rows[0]["v"].([]any)
+			if len(got) != 1 {
+				t.Fatalf("%s came back as %#v", c.col, res.Rows[0]["v"])
+			}
+			entry, _ := got[0].(map[string]any)
+			if key, _ := entry["key"].(string); key != c.want {
+				t.Errorf("%s key reads back %q, this pin records %q — the multiplier is the "+
+					"column's SCALE, so re-measure the whole family", c.col, key, c.want)
+			}
+		}
+	})
 
 	// The RESIDUAL, pinned fail-on-agree.
 	t.Run("residual_map_key_is_scaled_twice", func(t *testing.T) {

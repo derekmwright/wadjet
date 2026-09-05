@@ -1310,13 +1310,33 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      exactly. A HOST-width prefix (`'10.0.0.1/32'`, `'::1/128'`) IS the
      address on the server and is accepted here.
 
-     It is also why IPV4 and IPV6 are absent from the PLAN-TIME literal
-     refusal that CIDR, MAC and UUID now have: a refusal is only safe on a
-     parser whose accept-set is a superset of the server's.
-     `kernel.TestNetworkLiteralRefusalIsOnePredicate` asserts that boundary
-     from both sides, and
-     `physical.TestPlanTimeNeverRefusesPGValidNetworkLiteral` is the guard
-     it exists for.
+     (Amended 2026-09-05 after review.) The refusal is decided at TYPING time,
+     for every type and every site. The first version of this arc put the
+     0A000 in one evaluator — `exec.networkConstError`, which fires only when
+     the vectorized filter declines to build a kernel — and left every other
+     evaluator reading the widened accept-set, so the same query refused in a
+     WHERE clause, ANSWERED inside a CASE, and on the DAG answered a WRONG
+     NUMBER: `c_ipv4 > '10.0.1/24'` gave every non-null row, because the
+     prefix was read as the address zero. A disposition that depends on which
+     evaluator a plan happens to choose is not a disposition.
+
+     So `kernel.QuotedLitStatus` has an IPv4/IPv6 arm too, and the two classes
+     are separated where the literal is classified rather than where it is
+     compared:
+
+       'zzz'        names no address at all                   22P02
+       '10/8'       names a NETWORK a bare-address type
+                    has no room for                           0A000
+
+     A maskless abbreviation (`'192.168'`) is the SYNTAX class, because
+     `'192.168'::inet` is a 22P02 on the server — the abbreviation without a
+     mask is a cidr-only grammar there.
+     `kernel.TestNetworkLiteralRefusalIsOnePredicate` asserts both classes,
+     `physical.TestPlanTimeNeverRefusesPGValidNetworkLiteral` asserts that a
+     SYNTAX refusal never eats PG-valid text AND that a representability
+     refusal is 0A000 at all six sites, and
+     `coordinator.TestArcF3ExprTypingOnEveryArm`'s census asserts the SQLSTATE
+     on three arms across nine sites.
    - **A text-only function over a BYTES argument answers where PostgreSQL
      raises 42883.** (Added 2026-09-05, #583.) `upper(b)`, `lower(b)`,
      `trim(b)`, `reverse(b)` and `strpos(bytea, bytea)` have no bytea
@@ -1324,8 +1344,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      this engine answers the text those bytes spell.
 
      The functions the server DOES have over bytea agree since #583:
-     `length` is the byte count, `substring` is bytea indexed by bytes, and
-     `||` is bytea under OID 17. Closing the rest needs a PLAN-TIME
+     `length` is the byte count — over a bare column as well as a derived
+     value, which took a second pass (the vectorized `vecCharLength` counted
+     runes while the scalar arm counted bytes) — `substring` is bytea indexed
+     by bytes, and `bytea || bytea` is bytea under OID 17. `text || bytea` is
+     TEXT there and here: the server resolves that pair through
+     `text || anynonarray`, and declaring it bytea was a wrong class this arc
+     briefly introduced and its review caught. Closing the rest needs a
+     PLAN-TIME
      argument-type check every compile site reaches — the argument's declared
      type is available to `expr.CompileWithColumnTypes` and not to
      `expr.Compile` — and a per-row refusal would be the data-dependent shape
@@ -1348,15 +1374,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
      PostgreSQL's unconstrained `numeric` carries a per-VALUE scale;
      `batch.DecimalColumn` carries one scale for the whole column (ADR-0018
-     §4). A per-ROW rendering annotation would close it on the single-process
-     arm and NOT on the DAG: a stage's output materializes to parquet, whose
-     DECIMAL leaf carries one scale, so the annotation is lost at the stage
-     boundary and the two arms would print differently. Trimming trailing
-     zeros is not the rule either — the server prints `1.00` for a scale-2
-     column row — so it would move a right cell to a wrong one. The
-     structural fix is a per-value scale in the representation that survives
-     the parquet leaf. Pinned by
-     `coordinator.TestLiteralScaleInADecimalFold`.
+     §4). The scale is discarded in the PROJECTION, at
+     `expr.EvalDecimalInto` → `batch.Vector.SetComputedChecked`, which parses
+     the box's text at the vector's single `DecimalData.Scale` — long before
+     any stage boundary.
+
+     (Corrected 2026-09-05 after review. The first version of this entry named
+     the stage boundary as the seam and said a stage's output materializes to
+     PARQUET, whose DECIMAL leaf carries one scale. Both halves are wrong: a
+     stage's output is `.wshf`, wadjet's own versioned exchange format, whose
+     schema header already carries per-column DECIMAL `Scale` and `Precision`
+     — and the per-row scale demonstrably DOES cross that boundary today when
+     it rides in a value's text, since
+     `CAST(COALESCE(d152, 12.3456789012345) AS VARCHAR)` prints PostgreSQL's
+     exact per-row text on the single, dag and dag-shuffled arms alike. An ADR
+     may not describe a mechanism the code does not have.)
+
+     The deferral stands on COST, which is the honest reason: a per-value
+     dscale touches 74 non-test `DecimalData.Scale` sites across more than
+     thirty files — the group-key encoder, the sort keys, the spill format,
+     the WSHF writer, the container codec and the gather among them — and a
+     widened declared scale cannot produce both `12.75` and `12.3456789012345`
+     in one column, while trimming trailing zeros would move a right cell to a
+     wrong one (the server prints `1.00` for a scale-2 column row). It is its
+     own arc. Pinned by `coordinator.TestLiteralScaleInADecimalFold`.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as

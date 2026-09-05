@@ -336,6 +336,23 @@ outside the column's range is a bound and orders above or below every stored
 value (#462). The value-producing callers of `DecimalTextAt` are the ones
 that must honour `Sat`.
 
+**Arithmetic over an aggregate carries the aggregate's declaration only as far
+as the aggregate's ARGUMENT can be typed.** (Added 2026-09-05, #867 round 2.)
+`physical.aggComputedInputDecl` types a computed argument through the SCAN
+columns below the aggregate. A derived table or CTE that RENAMES those columns
+leaves it undecided, so `SUM(v * 3000000) + 1` over
+`(SELECT c_i64 AS v FROM t) x` is float8 and the outer operand is lost at int8
+magnitude — three of the five spellings of #867's own shape, while the DAG
+answers all five exactly, so the two arms disagree.
+
+Asking the child's EMITTED columns second does not close it: the derived
+Project carries no declaration for the renamed column either, so the gap is
+upstream, in the walk that types a derived table's output from its own
+projection list. Pinned fail-on-agree by
+`wadjet.TestArithmeticOverAComputedAggregateCarriesTheAggregatesType`'s three
+`residual_*` cells, with the `SELECT *` spelling beside them as the control
+that says the defect is the RENAME and not derived tables as such.
+
 **"At every value-producing site" includes every POSITION the same expression
 can be written in.** (Added 2026-09-03, #841.) An expression has ONE
 disposition: `bigint * bigint` overflow is 22003 whether the product is
@@ -364,7 +381,12 @@ SELECT GREATEST(numeric(38,30) column, 100000000)
 into a 22003, and PostgreSQL 17.11 answers `100000000` under a bare `numeric`
 (`pg_typeof` measured on the server): a GREATEST/LEAST/COALESCE/CASE fold is
 UNCONSTRAINED there, so there is no `10^p` for the value to exceed. A right
-answer turned loud is the one direction ADR-0012 does not permit.
+answer turned loud is the direction ADR-0012 does not permit WITHOUT a recorded
+reason — this ADR's own list below carries three shapes where this engine does
+raise where PostgreSQL answers (`a + 1e8` and `SUM(a) + 1e8` past the carrier,
+and a `UNION ALL` over a DECIMAL fold), each because the exact value has no
+128-bit representation. #712 is not one of those: the value FITS, and the
+refusal would come from a bound the fold invented.
 
 Every site where a precision IS a constraint somebody wrote already enforces it
 and already agrees with the server: `CAST(100000000 AS DECIMAL(38,30))` and

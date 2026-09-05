@@ -73,18 +73,26 @@ SELECT b FROM t WHERE b = '\150\151';  -- octal escapes
 ```
 
 `\\` is one backslash and `\ooo` one octal byte; anything else after a
-backslash is `22P02`, as it is on the server.
+backslash is `22P02`, as it is on the server — and so are an odd number of hex
+digits, a non-hex digit, and the UPPERCASE `\X` form, which `byteain` does not
+take. Whitespace inside the hex digits IS taken (`'\x68 69'`), because
+`hex_decode` skips it. The refusal is decided when the query is planned, like
+every other type's.
 
 **Functions over `BYTES` follow PostgreSQL's catalog**, which means BYTES, not
 characters:
 
 | Expression | Result | Note |
 |---|---|---|
-| `length(b)` | `integer` | the BYTE count — bytea has no characters, so this is `octet_length` |
+| `length(b)` | `integer` | the BYTE count — bytea has no characters, so this is `octet_length`, over a bare column and a derived value alike |
 | `substring(b, from, for)` | `BYTES` | indexed by bytes; a negative length is `22011` |
 | `b \|\| b`, `b \|\| 'x'` | `BYTES` | OID 17, rendered `\x` hex |
 | `md5(b)` | `text` | as on the server |
 | `CAST(b AS STRING)` | `text` | the `\x` hex form |
+
+`text || bytea` is TEXT, not bytea: the server resolves that pair through
+`text || anynonarray`, which renders the bytea and concatenates as text. Only
+`bytea || bytea` and `bytea || <unknown literal>` are bytea.
 
 Two divergences remain and are recorded in ADR-0012's list: a TEXT-ONLY
 function over a `BYTES` argument (`upper(b)`) still ANSWERS where PostgreSQL
@@ -226,11 +234,16 @@ inference (measured on 17.11, not remembered):
 | `'10'` | `10.0.0.0/8` | `'10/8'` | `10.0.0.0/8` |
 | `'10.1'` | `10.1.0.0/16` | `'192.168/16'` | `192.168.0.0/16` |
 | `'128'` | `128.0.0.0/16` | `'192.168'` | `192.168.0.0/24` |
-| `'224'` | `224.0.0.0/4` | `'240'` | `240.0.0.0/32` |
+| `'224'` | `224.0.0.0/4` | `'225'` | `225.0.0.0/8` |
+| `'239'` | `239.0.0.0/8` | `'240'` | `240.0.0.0/32` |
 
 The mask comes from an explicit `/bits` when one is written; otherwise from the
-CLASS of the first octet, widened to cover the octets that were written from
-the second octet on. `'010.1'` is decimal, not octal. `'10.'`, `'10..1'`,
+first octet, widened to cover the octets that were written from the second
+octet on. The first-octet table is the server's, measured over all 256 values
+rather than derived from the classful rule it half-follows: `0-127` → /8,
+`128-191` → /16, `192-223` → /24, **`224` alone** → /4, `225-239` → /8,
+`240-255` → /32. `'010.1'` and `'00010'` are decimal, not octal, and leading
+zeros are digits. `'10.'`, `'10..1'`,
 `'256.1'`, `'10.1.2.3.4'`, `'0x0a.1'`, `'10/33'` and any surrounding or
 embedded whitespace are `22P02`, as they are on the server.
 
@@ -242,10 +255,13 @@ names a network, which those two types have no room for — they hold a bare
 address — so it is refused with `0A000` and a message saying so. Use a `CIDR`
 column for a value that carries a prefix.
 
-A literal that names no address at all is refused when the query is PLANNED for
-`CIDR`, `MAC` and `UUID`, so the same query cannot answer over one file and
-error over another. `IPv4` and `IPv6` still refuse at runtime, because their
-accept-set is not yet a superset of the server's.
+**Every network literal is classified once, when the query is PLANNED**, for
+all five types and at every site — `=`, `<>`, `<`, `>`, `IN`, a `CASE`, a
+`GREATEST`, a projection, and a scan no row survives. So the same query cannot
+answer over one file and error over another, and cannot refuse in a `WHERE`
+clause while answering inside a `CASE`. Two classes, and they are different
+answers: text that names no address is `22P02`, and PostgreSQL-valid text this
+engine's type cannot hold is `0A000`.
 
 `INSERT` and the `mac_*` formatting functions read only the spellings Go's
 parser takes (colon, hyphen, dotted, and the bare twelve digits), not the three

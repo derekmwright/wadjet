@@ -1139,6 +1139,8 @@ SELECT count(*) FROM t WHERE (NOT flag) = 'bogus';      -- ERROR 22P02
 `NOT`/`AND`/`OR`, every comparison, `IS NULL`, `IS TRUE`, `LIKE`, `IN`,
 `BETWEEN`, `IS DISTINCT FROM`, a `CAST(... AS BOOLEAN)`, a `CASE` or `COALESCE`
 over booleans, and a function declared boolean are all boolean operands here.
+The EMPTY string is included: `= ''` is `22P02`, which is the one unparseable
+spelling PostgreSQL names in its own error text.
 
 ## LIMIT and OFFSET
 
@@ -1504,7 +1506,7 @@ Wadjet includes 359 built-in scalar functions across several categories.
 | `UPPER(s)` | Uppercase | `UPPER(protocol)` |
 | `LOWER(s)` | Lowercase | `LOWER(hostname)` |
 | `CONCAT(a, b, ...)` | Concatenate strings; **NULL arguments are ignored** (all-NULL gives `''`, never NULL) — `\|\|` propagates NULL instead | `CONCAT(src_ip, ':', src_port)` |
-| `LENGTH(s)` / `LEN(s)` | String length in **characters**, the synonym of `CHAR_LENGTH` (use `OCTET_LENGTH` for bytes). Over a `BYTES` argument it is the **byte** count, as `length(bytea)` is on the server | `LENGTH(message)` |
+| `LENGTH(s)` / `LEN(s)` | String length in **characters**, the synonym of `CHAR_LENGTH` (use `OCTET_LENGTH` for bytes). Over a `BYTES` argument it is the **byte** count, as `length(bytea)` is on the server — for a bare column and a derived value alike | `LENGTH(message)` |
 | `SUBSTR(s, start, len)` / `SUBSTRING` | Extract substring; `start` and `len` count **characters**, and a negative `len` is SQLSTATE 22011. Over a `BYTES` argument it returns `BYTES` and counts **bytes** | `SUBSTR(message, 1, 50)` |
 | `TRIM(s)` | Remove leading/trailing whitespace | `TRIM(hostname)` |
 | `LTRIM(s)` | Remove leading whitespace | `LTRIM(message)` |
