@@ -344,30 +344,39 @@ func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node
 			if colName == "" || outName == "" {
 				return nil, false
 			}
+			// The reference arrives FOLDED — an unquoted identifier lower-
+			// cases at the lexer (#731) — while a catalog schema keeps the
+			// spelling the parquet file gave it, and CamelCase column names
+			// are ordinary there: ClickBench's `hits` has `EventDate`,
+			// `UserID`, `ResolutionWidth`. A byte-exact lookup therefore
+			// missed every column of every such table and this path stood
+			// down on all of them, silently, since the fold. Resolve the
+			// reference the way the engine resolves every other one
+			// (batch.ResolveSchemaIndex: byte-exact, then a unique
+			// case-insensitive match for a folded reference only), so the
+			// statistics path accepts exactly the references the scan does.
+			si := batch.ResolveSchemaIndex(tableMeta.Schema.Columns, colName)
+			if si < 0 {
+				return nil, false
+			}
+			schemaCol := &tableMeta.Schema.Columns[si]
+			// Carry the SCHEMA's spelling forward, not the reference's: it
+			// is what keys the footer's per-chunk statistics map and what
+			// mmFileUsable matches against the file's own leaves.
 			idx := -1
 			for i := range cols {
-				if cols[i].name == colName {
+				if cols[i].name == schemaCol.Name {
 					idx = i
 					break
 				}
 			}
 			if idx < 0 {
-				var schemaCol *parquet.Column
-				for i := range tableMeta.Schema.Columns {
-					if tableMeta.Schema.Columns[i].Name == colName {
-						schemaCol = &tableMeta.Schema.Columns[i]
-						break
-					}
-				}
-				if schemaCol == nil {
-					return nil, false
-				}
 				kind, outType, ok := mmTypeFor(schemaCol.Type)
 				if !ok {
 					return nil, false
 				}
 				cols = append(cols, mmColumn{
-					name: colName, kind: kind, colType: schemaCol.Type, outType: outType,
+					name: schemaCol.Name, kind: kind, colType: schemaCol.Type, outType: outType,
 				})
 				idx = len(cols) - 1
 			}

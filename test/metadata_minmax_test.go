@@ -339,3 +339,115 @@ func TestMetadataMinMaxDeleteMarkers(t *testing.T) {
 		t.Errorf("min after delete = %#v, want 2", got)
 	}
 }
+
+// mmCamelFixture registers a table whose catalog schema carries the CamelCase
+// column names a parquet dataset gives it — `hits` is the standing example:
+// `WatchID`, `EventDate`, `ResolutionWidth`. Every other fixture in this file
+// spells its columns lower case, which is precisely why none of them could
+// see the defect this gate exists for.
+func mmCamelFixture(tb testing.TB) (*wadjet.DB, context.Context) {
+	tb.Helper()
+	ctx := context.Background()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		tb.Fatalf("open: %v", err)
+	}
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "WatchID", Type: parquet.TypeInt64},
+		{Name: "EventDate", Type: parquet.TypeDate},
+		{Name: "ResolutionWidth", Type: parquet.TypeInt32},
+	}}
+	if err := db.CreateTable(ctx, "hits", schema, nil); err != nil {
+		tb.Fatalf("create hits: %v", err)
+	}
+	rows := make([]map[string]any, 0, 6)
+	for i := 1; i <= 6; i++ {
+		rows = append(rows, map[string]any{
+			"WatchID":         int64(i),
+			"EventDate":       fmt.Sprintf("2013-07-%02d", i),
+			"ResolutionWidth": int32(i * 100),
+		})
+	}
+	ing := db.NewIngester("hits", schema, nil, ingest.Config{MaxBufferRows: 1000, RowGroupSize: 2})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		tb.Fatalf("ingest: %v", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		tb.Fatalf("flush: %v", err)
+	}
+	return db, ctx
+}
+
+// TestMetadataMinMaxResolvesFoldedReferences is the regression gate for the
+// statistics path standing down on every CamelCase schema.
+//
+// An unquoted identifier folds to lower case at the lexer (#731), so
+// `MIN(EventDate)` reaches the physical planner as `eventdate` while the
+// catalog schema still says `EventDate`. The rewrite looked its column up
+// byte-exactly, missed, and declined — silently, because the answer a scan
+// produces is the same answer, only a whole table scan slower. That is what
+// made the ClickBench oracle arm's own engagement assertion start failing
+// ("metadata MIN/MAX rewrite never engaged across the corpus"): Q07 is
+// `SELECT MIN(EventDate), MAX(EventDate) FROM hits`, the one shape the
+// rewrite exists for, and it stopped taking it.
+//
+// This gate runs without a data part, deliberately: the ClickBench oracle
+// skips when WADJET_HITS_PART is unset, so it is not the gate that can hold
+// this. Reverting the resolver to a byte-exact lookup fails the first two
+// cells below.
+func TestMetadataMinMaxResolvesFoldedReferences(t *testing.T) {
+	db, ctx := mmCamelFixture(t)
+
+	tests := []struct {
+		name     string
+		sql      string
+		wantRows []map[string]any
+	}{
+		{
+			// ClickBench Q07's shape verbatim: two aggregates over ONE
+			// CamelCase column, which also exercises the accumulator dedup
+			// now keyed by the schema's spelling rather than the folded one.
+			name:     "ClickBench Q07 shape: unquoted CamelCase DATE column",
+			sql:      "SELECT MIN(EventDate) AS lo, MAX(EventDate) AS hi FROM hits",
+			wantRows: []map[string]any{{"lo": "2013-07-01", "hi": "2013-07-06"}},
+		},
+		{
+			name:     "two different CamelCase columns",
+			sql:      "SELECT MIN(WatchID) AS lo, MAX(ResolutionWidth) AS hi FROM hits",
+			wantRows: []map[string]any{{"lo": int64(1), "hi": int64(600)}},
+		},
+		{
+			// A delimited reference keeps its case and resolves byte-exact,
+			// which is the arm that worked before and must keep working.
+			name:     "delimited reference in the schema's own case",
+			sql:      `SELECT MIN("EventDate") AS lo FROM hits`,
+			wantRows: []map[string]any{{"lo": "2013-07-01"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, fired := mmRun(t, db, ctx, tt.sql, true)
+			if fired == 0 {
+				t.Fatalf("the statistics path never engaged: a folded reference "+
+					"must resolve against a CamelCase catalog schema\n  SQL: %s", tt.sql)
+			}
+			if !reflect.DeepEqual(got.Rows, tt.wantRows) {
+				t.Fatalf("rows = %#v, want %#v", got.Rows, tt.wantRows)
+			}
+
+			// The answer has to be the scan's answer, as everywhere else in
+			// this file: engaging is only safe when it changes nothing.
+			scanned, firedOff := mmRun(t, db, ctx, tt.sql, false)
+			if firedOff != 0 {
+				t.Fatalf("metadata path fired %d times with the kill switch off", firedOff)
+			}
+			if !reflect.DeepEqual(got.Columns, scanned.Columns) {
+				t.Errorf("columns diverge: metadata %v, scan %v", got.Columns, scanned.Columns)
+			}
+			if !reflect.DeepEqual(got.Rows, scanned.Rows) {
+				t.Errorf("rows diverge:\n  metadata %#v\n  scan     %#v", got.Rows, scanned.Rows)
+			}
+		})
+	}
+}
