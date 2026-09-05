@@ -368,9 +368,17 @@ model rather than a configuration error.
    Installing a set goes through ONE function (`Provider.installState`, or
    `BindToCatalog` / `AttachProvider` for an attach), and
    `TestEveryProviderFieldIsAttachedThroughTheBindingFunction` reads the source:
-   it enumerates every field that holds an `*auth.Provider` and fails when a
-   function assigns one without binding in that same function. A new door
-   cannot be added and forget.
+   it enumerates every field whose declared type MENTIONS `*auth.Provider` at
+   any depth — plain, embedded, in a slice, map, channel, anonymous struct or
+   generic type argument, or behind an interface a provider satisfies — and
+   fails when a function assigns one without binding THAT provider in the same
+   function (a bind on another value, or one parked in a dead branch, does not
+   count). **A new door that holds a provider in a field cannot be added and
+   forget.** That is the claim, and it is the claim the gate proves: the census
+   is syntactic, so a provider reached through a named type declared elsewhere,
+   through an interface from another module, or through reflection is outside
+   it. Ten shapes that defeated the first version are its negative controls
+   (`TestTheCensusCatchesTheShapesThatDefeatedIt`).
 3. **A policy that names a relation or a column that does not resolve is
    REFUSED AT ATTACH.** This is ADR-0033's existing rule — a policy that cannot
    be enforced does not load (#802) — applied to names. Without it a typo is
@@ -444,9 +452,15 @@ policy names, then attach the provider.
   the floor of (4) applies.
 - `internal/auth/attach_sites_test.go` —
   `TestEveryProviderFieldIsAttachedThroughTheBindingFunction`, the source
-  census behind (2): every `*auth.Provider` field is enumerated and every
-  function that assigns one must bind. Its exception list carries a reason per
-  entry and is asserted in both directions.
+  census behind (2): every field whose type mentions `*auth.Provider` at any
+  depth is enumerated and every function that assigns one must bind that
+  provider. Its exception list carries a reason per entry, its config-type
+  exemption is an exact type set, and both are asserted in both directions.
+  `TestTheCensusCatchesTheShapesThatDefeatedIt` runs it over ten shapes that
+  slipped past its first version — embedded, slice, map, interface, generic,
+  a func literal in a package-level var, a bind on an unrelated receiver, a
+  bind in a dead branch — each of which must now be caught, beside a control
+  that a constructor which does bind is not flagged.
 - `internal/server/policy_relation_spelling_test.go` —
   `TestAnAttachedPolicySetThatCannotBindRefusesEveryQuery`: the spellings the
   floor cannot reach (`HITS`, `hItS`, `Hitz`) refuse on all three doors, read
