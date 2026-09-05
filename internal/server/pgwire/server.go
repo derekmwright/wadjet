@@ -589,6 +589,35 @@ func (c *pgConn) handleSet(sql string) {
 
 // parseCopySQL extracts the table name and optional column list from a
 // COPY table [(col1, col2, ...)] FROM STDIN statement.
+// copyIdent reads ONE identifier out of a COPY statement the way the lexer
+// reads every other identifier: an unquoted one FOLDS, a delimited one keeps
+// its bytes and loses only its quotes (#731).
+//
+// COPY is hand-parsed rather than lexed, and this step used to be
+// `strings.Trim(col, "\"")` — which strips the quotes and folds nothing, so by
+// the time the name reached a resolver an unquoted `WatchID` and a delimited
+// `"WatchID"` were the same string and the rule that distinguishes them
+// ("byte-exact, then a unique case-insensitive match FOR A REFERENCE THAT IS
+// ITSELF FOLDED") had nothing left to key on. Measured over a LOWER-case
+// schema `lhits(watchid, useragent)` — so this was never a CamelCase-only
+// problem:
+//
+//	COPY lhits (watchid, useragent)  ACCEPTED
+//	COPY lhits (WatchID, UserAgent)  REFUSED, and PostgreSQL accepts it
+//	COPY lhits (WATCHID, USERAGENT)  REFUSED, and PostgreSQL accepts it
+//
+// and over a CamelCase one it went the other way: `COPY hits ("useragent")`
+// was ACCEPTED against a column spelled `UserAgent`, where PostgreSQL raises
+// 42703 for the delimited name.
+func copyIdent(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		// Delimited: the bytes are the name. `""` inside is one quote.
+		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+	}
+	return batch.FoldIdent(s)
+}
+
 func parseCopySQL(sql string) (table string, columns []string, delimiter rune) {
 	delimiter = '\t' // PostgreSQL default
 	upper := strings.ToUpper(sql)
@@ -605,7 +634,7 @@ func parseCopySQL(sql string) (table string, columns []string, delimiter rune) {
 		tableName = rest
 		rest = ""
 	}
-	table = strings.Trim(tableName, "\"")
+	table = copyIdent(tableName)
 
 	// Parse optional column list
 	if len(rest) > 0 && rest[0] == '(' {
@@ -613,9 +642,7 @@ func parseCopySQL(sql string) (table string, columns []string, delimiter rune) {
 		if end > 0 {
 			colStr := rest[1:end]
 			for _, c := range strings.Split(colStr, ",") {
-				col := strings.TrimSpace(c)
-				col = strings.Trim(col, "\"")
-				if col != "" {
+				if col := copyIdent(strings.TrimSpace(c)); col != "" {
 					columns = append(columns, col)
 				}
 			}
@@ -679,10 +706,21 @@ func (c *pgConn) handleCopyIn(sql string) {
 		// NULLs. Resolve each name and carry the SCHEMA's spelling forward.
 		columns = make([]string, len(copyColumns))
 		for i, name := range copyColumns {
-			columns[i] = name
-			if j := batch.ResolveSchemaIndex(tableMeta.Schema.Columns, name); j >= 0 {
-				columns[i] = tableMeta.Schema.Columns[j].Name
+			j := batch.ResolveSchemaIndex(tableMeta.Schema.Columns, name)
+			if j < 0 {
+				// A name that resolves to nothing is 42703 HERE, naming the
+				// column, which is what PostgreSQL answers at parse time. It
+				// used to fall through to `colByName`, where a miss yields the
+				// ZERO parquet.Column — whose Type is TypeBool, the zero of the
+				// TypeID iota — so the client got `strconv.ParseBool: parsing
+				// "7": invalid syntax` on the first data row: a type error
+				// naming the wrong problem, for a column that simply is not
+				// there.
+				c.sendError("ERROR", "42703",
+					fmt.Sprintf("column %q of relation %q does not exist", name, tableName))
+				return
 			}
+			columns[i] = tableMeta.Schema.Columns[j].Name
 		}
 	} else {
 		columns = make([]string, len(tableMeta.Schema.Columns))
