@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -183,6 +184,36 @@ var ccsShapes = []string{
 	// window + sort
 	`SELECT WatchID, ROW_NUMBER() OVER (PARTITION BY RegionID ORDER BY WatchID DESC) AS rn FROM hits ORDER BY WatchID`,
 	`SELECT WatchID, RANK() OVER (ORDER BY counterid) AS rk FROM hits ORDER BY WatchID`,
+	// window over a CamelCase PARTITION key, which is a different resolver
+	// from the ORDER BY one and spills through its own run format
+	`SELECT WatchID, SUM(counterid) OVER (PARTITION BY UserAgent ORDER BY WatchID) AS s FROM hits ORDER BY WatchID`,
+	`SELECT WatchID, LAG(WatchID) OVER (PARTITION BY RegionID ORDER BY WatchID) AS p FROM hits ORDER BY WatchID`,
+	`SELECT UserAgent, COUNT(*) OVER (PARTITION BY UserAgent) AS c FROM hits ORDER BY UserAgent, c`,
+	// a CTE self-join on a CamelCase key, and a CTE feeding a join
+	// The two sides are ALIASED apart on purpose. Spelled `SELECT a.WatchID,
+	// b.WatchID ... ORDER BY a.WatchID, b.WatchID` the statement has two
+	// output columns of one name, and the second sort key does not bind on
+	// EITHER spelling — so the row order within an equal first key is
+	// arbitrary and the shape flaps between agreeing and not. That is #629's
+	// duplicate-output-name class, it reproduces on the lower-case fixture
+	// too, and it is therefore not something this gate can attribute to the
+	// fold. Aliasing makes the sort deterministic so the cell measures what it
+	// is for; the underlying ordering defect is filed separately.
+	`WITH t AS (SELECT WatchID, RegionID FROM hits WHERE counterid > 0) ` +
+		`SELECT a.WatchID AS aw, b.WatchID AS bw FROM t a JOIN t b ` +
+		`ON a.RegionID = b.RegionID AND a.WatchID < b.WatchID ORDER BY aw, bw`,
+	`WITH t AS (SELECT RegionID, COUNT(*) AS c FROM hits GROUP BY RegionID) ` +
+		`SELECT t.RegionID, t.c, r.RegionName FROM t JOIN regions r ON t.RegionID = r.RegionID ORDER BY t.RegionID`,
+	// GROUP BY + HAVING, and a distinct-inside-aggregate over a CamelCase key
+	`SELECT UserAgent, RegionID, COUNT(*) AS c FROM hits GROUP BY UserAgent, RegionID HAVING COUNT(*) > 0 ORDER BY UserAgent, RegionID`,
+	`SELECT RegionID, COUNT(DISTINCT UserAgent) AS d FROM hits GROUP BY RegionID ORDER BY RegionID`,
+	// set operations, whose column identity is positional but whose sort is not
+	`SELECT WatchID FROM hits WHERE RegionID = 1 UNION SELECT WatchID FROM hits WHERE RegionID = 2 ORDER BY WatchID`,
+	`SELECT RegionID FROM hits EXCEPT SELECT RegionID FROM regions ORDER BY RegionID`,
+	// a correlated scalar subquery on a CamelCase key
+	`SELECT WatchID, (SELECT RegionName FROM regions r WHERE r.RegionID = h.RegionID) AS rn FROM hits h ORDER BY WatchID`,
+	// ORDER BY + LIMIT/OFFSET, where a dropped sort key changes WHICH rows come back
+	`SELECT WatchID, UserAgent FROM hits ORDER BY UserAgent DESC, WatchID ASC LIMIT 5 OFFSET 2`,
 }
 
 func ccsLower(sql string) string {
@@ -234,7 +265,18 @@ func TestCamelCaseSchemaAnswersWhatALowerCaseSchemaAnswers(t *testing.T) {
 				t.Errorf("[%s] ERR DIVERGENCE\n  sql: %s\n  camel: %v\n  lower: %v", a.name, sql, cerr, lerr)
 				continue
 			}
+			// A shape that errors on BOTH arms, or answers zero rows on both,
+			// AGREES — and proves nothing. An agreement gate that accepts
+			// those is one bad shape away from passing vacuously, so both are
+			// failures here rather than a `continue`.
 			if cerr != nil {
+				t.Errorf("[%s] BOTH ARMS ERRORED, so this shape asserts nothing\n  sql: %s\n  err: %v",
+					a.name, sql, cerr)
+				continue
+			}
+			if len(crows) == 0 {
+				t.Errorf("[%s] BOTH ARMS RETURNED NO ROWS, so this shape asserts nothing\n  sql: %s",
+					a.name, sql)
 				continue
 			}
 			if got, want := ccsRender(crows), ccsRender(lrows); got != want {
@@ -253,4 +295,50 @@ func ccsRender(rows [][]any) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// TestCamelCaseGroupKeysAgreeThroughASpill is the fourth arm the battery above
+// cannot reach: a spill is a CONDITION, not a query shape (ADR-0027), so no
+// corpus of shapes engages one on purpose.
+//
+// It matters here specifically because a group key's SPELLING is written into
+// the merge key when partial state drains, and read back by a different
+// producer on the way out (ADR-0023 item 8). A key resolved from a folded
+// reference on one side of that seam and from the schema on the other is a
+// defect no in-memory run can see.
+//
+// The drain is FORCED on the camel arm and the lower arm alike, which is the
+// point: arming one side only would compare a spilled answer against an
+// in-memory one and read the difference as a fold defect (#790).
+func TestCamelCaseGroupKeysAgreeThroughASpill(t *testing.T) {
+	ctx := context.Background()
+	restore := exec.ForceAggDrainEvery(int64(1))
+	t.Cleanup(func() { exec.ForceAggDrainEvery(restore) })
+
+	camel := ccsStandalone(t, ctx, true)
+	lower := ccsStandalone(t, ctx, false)
+	for _, sql := range []string{
+		`SELECT UserAgent, COUNT(*) AS c, SUM(counterid) AS s FROM hits GROUP BY UserAgent ORDER BY UserAgent`,
+		`SELECT RegionID, UserAgent, COUNT(*) AS c FROM hits GROUP BY RegionID, UserAgent ORDER BY RegionID, UserAgent`,
+		`SELECT UserAgent, MAX(WatchID) AS m, MIN(WatchID) AS n FROM hits GROUP BY UserAgent ORDER BY UserAgent`,
+		`SELECT RegionID, COUNT(DISTINCT UserAgent) AS d FROM hits GROUP BY RegionID ORDER BY RegionID`,
+	} {
+		_, crows, cerr := e3PosSingle(ctx, camel, sql)
+		_, lrows, lerr := e3PosSingle(ctx, lower, ccsLower(sql))
+		if (cerr == nil) != (lerr == nil) {
+			t.Errorf("ERR DIVERGENCE\n  sql: %s\n  camel: %v\n  lower: %v", sql, cerr, lerr)
+			continue
+		}
+		if cerr != nil {
+			t.Errorf("BOTH ARMS ERRORED, so this shape asserts nothing\n  sql: %s\n  err: %v", sql, cerr)
+			continue
+		}
+		if len(crows) == 0 {
+			t.Errorf("BOTH ARMS RETURNED NO ROWS, so this shape asserts nothing\n  sql: %s", sql)
+			continue
+		}
+		if got, want := ccsRender(crows), ccsRender(lrows); got != want {
+			t.Errorf("SPILLED VALUE DIVERGENCE\n  sql: %s\n  camel: %s  lower: %s", sql, got, want)
+		}
+	}
 }
