@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is CLOSED, and it was TWO defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT.
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -691,17 +691,51 @@ outputs by POSITION (`exec.ProjectColumn.SourceIdx` exists and nothing sets it
 for this shape), which is this rule one operator over and its own change.
 
 **The boundary is the FRAGMENT projection, not the CTE.** Calling the residual
-"the CTE spelling" reads narrower than it is, and three spellings are pinned
+"the CTE spelling" reads narrower than it is, and three spellings were pinned
 rather than one, at
 `internal/coordinator/arc_e3_names_scopes_two_path_test.go`: `785/nested-in-a-cte`,
 `785/nested-in-a-derived-table-inside-a-cte`, and
-`785/nested-two-derived-tables-deep` — the last with no CTE anywhere in it. A
-SECOND wrapper puts a fragment projection between the aggregate and the gather
-exactly as a CTE does; ONE derived wrapper does not, which is why
-`785/nested-in-a-derived-table` is right on all four arms and is the control
-for all three. All three are pre-existing at base and assert `routes=none`
-beside their rows, so a pin that stops failing because the DAG began ROUTING
-the shape is not mistaken for a fix.
+`785/nested-two-derived-tables-deep` — the last with no CTE anywhere in it.
+
+**CLOSED 2026-09-04 (arc F4), and the paragraph above was right about the
+boundary and wrong about the mechanism at one of the three.** Measuring the
+three apart is what closed them, because they are TWO defects:
+
+- **Two derived tables put NO fragment projection anywhere.** The stage list
+  for `SELECT z.g, z.x FROM (SELECT u.g, u.x FROM (…collision…) u) z` is
+  `scan → final_aggregate → gather`, measured, so "a SECOND wrapper puts a
+  fragment projection between the aggregate and the gather exactly as a CTE
+  does" was not true. What was wrong is the CLASS. `renameIsAggregateOutput`
+  walks to the projection that defines the name, and the lookup it used —
+  `projectionForName` — matches on `Projection.Alias` only. A SELECT item
+  written with no alias (`SELECT u.g, u.x`) has none, so the walk found no
+  item at all, returned "not an aggregate output", and `classScopedMatch`
+  paired both renames with the first column of the name: the group KEY.
+  `projectionPublishingName` widens the lookup to an unaliased item's own bare
+  column name, for the CLASS walk alone. The name-RESOLVING walks keep the
+  narrow lookup deliberately: for them an unaliased qualified item resolves to
+  ITSELF (`u.x` → `u.x`), a fixpoint that stops the walk one Project short of
+  the answer — widening `projectionForName` itself was measured and made
+  `SELECT u.g, u.x FROM (…) u ORDER BY u.x` refuse its whole plan, because the
+  sort key stopped resolving to the column the aggregate emits.
+- **A CTE really does put a fragment projection there**, and that projection
+  resolved `g` by NAME against the aggregate's output — where the key and the
+  count both answer to it — and took the first. It addresses the SLOT now:
+  `ProjectExprSpec.SourceSlot` carries the position the planner chose,
+  `distributed.ProjectSpec.SourceIdx` carries it on the wire, and both fragment
+  builders turn it into `exec.ProjectColumn.SourceIdx` — the same addressing
+  the single-process projection has applied since #575. The slot is decided
+  from the producer's own output order (`[group keys…, aggregate outputs…]`)
+  and the CLASS the gather's renames already carry; a producer whose output is
+  not that shape gets no slot and keeps the name path, because a slot read off
+  a model that does not hold is worse than the name it replaces.
+
+`785/nested-in-a-derived-table` — ONE wrapper, right on all four arms before —
+remains the control, and two cells were added to attempt the boundary from both
+sides: `785/nested-three-derived-tables-deep` and `785/nested-in-a-cte-key-first`
+(the two classes in the other order in the SELECT list). All five assert
+`routes=none` beside their rows, so a shape that started ROUTING rather than
+answering is not mistaken for a fix.
 
 #### 3b. A lowering records the SLOT the operator below publishes, never the call the query wrote (2026-09-04, #797)
 

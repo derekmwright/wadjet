@@ -575,6 +575,20 @@ type ProjectExprSpec struct {
 	// a hundredfold out (ADR-0024 item 2; #529, #555).
 	Precision int
 	Scale     int
+	// SourceSlot names the input column by POSITION rather than by name, for
+	// a projection whose input publishes the name TWICE. It is
+	// exec.ProjectColumn.SourceIdx on the wire, and it exists for the same
+	// reason that field does: `batch.RecordBatch.ColumnIndex` answers with the
+	// FIRST match, so two specs reading one name read one column and the
+	// other's value is unreachable (#575, #785).
+	//
+	// The producer that can publish a name twice is an AGGREGATE — a group
+	// key and an aggregate output may share it (ADR-0026 §3a) — and the class
+	// of each spec is what says which of the two it means.
+	//
+	// SourceSlotSet is required because 0 is a valid slot.
+	SourceSlot    int
+	SourceSlotSet bool
 }
 
 // UnionArm is one arm of a StageUnion: the projection that puts its output
@@ -3851,6 +3865,18 @@ func (p *Planner) attachScanSelectProjections(root *logical.Node, stages []Stage
 			aliased, ok := respellSpecsOverProducerOutput(stages, i,
 				aliasedSpecsFor(proj, specs, slotPassThrough))
 			if ok && specsResolveAgainstStageOutput(stages, i, aliased) {
+				// A name the producer publishes TWICE — a group key beside an
+				// aggregate output aliased like it — is addressed by SLOT
+				// here, or both specs read the first column of the name and
+				// the second value is unreachable (ADR-0026 §3a, #785). The
+				// gather's renames already carry the class of each item,
+				// resolved through however many wrappers stand between.
+				pinProjectSpecSlots(&stages[i], aliased, func(j int) (bool, bool) {
+					if j >= len(gather.OutputRenames) {
+						return false, false
+					}
+					return gather.OutputRenames[j].IsAgg, true
+				})
 				keys := stages[i].SortKeys
 				stages = insertProjectStageAbove(stages, i, aliased)
 				carryOrderingOntoProjectStage(stages, len(stages)-1, keys)
@@ -9754,7 +9780,6 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		if name == "" {
 			name = colRef // use unqualified column name
 		}
-
 		// When projecting over an aggregate, aggregate columns should reference
 		// their output column name (the alias), not the raw expression.
 		if isOverAggregate && proj.IsAgg && proj.Alias != "" {

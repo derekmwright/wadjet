@@ -452,51 +452,57 @@ func TestArcE3NamesAndScopesTwoPath(t *testing.T) {
 			sql: "SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x FROM collslot " +
 				"GROUP BY g) u ORDER BY u.x",
 			want: "g,x | 80,0 | 80,1 | 80,2"},
-		// The CTE FAMILY is PINNED, and it is a DIFFERENT mechanism from the
-		// two above: the gather never sees a duplicate there. Its columns are
-		// `[g, x]` — the fragment's OWN projection already applied the CTE's
-		// SELECT list — and that projection resolved `g` by NAME against the
-		// aggregate's output, where the key and the count both answer to it,
-		// and took the first. Closing it means addressing an aggregate's
-		// outputs by POSITION from a projection (`exec.ProjectColumn.SourceIdx`
-		// exists; nothing sets it for this shape), which is the same
-		// first-match rule one operator further in and its own change.
-		// Pre-existing: base answers the key here too.
+		// The WRAPPED family, PINNED until arc F4 and now asserted. Two
+		// different mechanisms wore one name here, and measuring them apart
+		// is what closed them:
 		//
-		// It is a FAMILY, not one spelling, and all three members are driven
-		// so the boundary cannot be read as narrower than it is: the CTE over
-		// the collision, a CTE over a DERIVED TABLE over it, and TWO derived
-		// tables over it with no CTE at all. The last is why "the CTE
-		// spelling" is the wrong name for this: what decides is whether a
-		// FRAGMENT projection stands between the aggregate and the gather,
-		// and a second wrapper puts one there just as a CTE does. ONE derived
-		// wrapper does not, which is the cell above and the control for all
-		// three of these.
+		//   - TWO DERIVED TABLES put no fragment projection anywhere. The
+		//     stage list is scan → final_aggregate → gather, measured, so
+		//     ADR-0026 §3a's "a second wrapper puts one there just as a CTE
+		//     does" was not the mechanism. What was wrong is the CLASS:
+		//     `renameIsAggregateOutput` walks to the projection that defines
+		//     the name, and a SELECT item written with NO ALIAS — `SELECT
+		//     u.g, u.x` — was invisible to the lookup, which asked only about
+		//     `Alias`. The walk answered "not an aggregate output" and the
+		//     gather paired both renames with the first column of the name,
+		//     which is the KEY.
+		//   - A CTE really does put a fragment projection there, and that
+		//     projection resolved `g` by NAME against the aggregate's output,
+		//     where the key and the count both answer to it, and took the
+		//     first. It addresses the SLOT now (ProjectExprSpec.SourceSlot →
+		//     exec.ProjectColumn.SourceIdx), which is the addressing the
+		//     single-process projection has applied since #575.
+		//
+		// All three members stay driven, because keeping the whole family is
+		// what tells the two mechanisms apart: the CTE over the collision, a
+		// CTE over a DERIVED TABLE over it, and TWO derived tables over it
+		// with no CTE at all. ONE derived wrapper — the cell above — was right
+		// before and is the control for all three.
 		{name: "785/nested-in-a-cte",
 			sql: "WITH u AS (SELECT COUNT(*) AS g, g AS x FROM collslot GROUP BY g " +
 				"HAVING COUNT(*) > 0) SELECT g, x FROM u ORDER BY x",
-			want: "g,x | 80,0 | 80,1 | 80,2",
-			pin: map[string]string{
-				"dag":     "g,x | 0,0 | 1,1 | 2,2",
-				"dagshuf": "g,x | 0,0 | 1,1 | 2,2",
-			}},
+			want: "g,x | 80,0 | 80,1 | 80,2"},
 		{name: "785/nested-in-a-derived-table-inside-a-cte",
 			sql: "WITH z AS (SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, g AS x " +
 				"FROM collslot GROUP BY g HAVING COUNT(*) > 0) u) " +
 				"SELECT g, x FROM z ORDER BY x",
-			want: "g,x | 80,0 | 80,1 | 80,2",
-			pin: map[string]string{
-				"dag":     "g,x | 0,0 | 1,1 | 2,2",
-				"dagshuf": "g,x | 0,0 | 1,1 | 2,2",
-			}},
+			want: "g,x | 80,0 | 80,1 | 80,2"},
 		{name: "785/nested-two-derived-tables-deep",
 			sql: "SELECT z.g, z.x FROM (SELECT u.g, u.x FROM (SELECT COUNT(*) AS g, " +
 				"g AS x FROM collslot GROUP BY g HAVING COUNT(*) > 0) u) z ORDER BY z.x",
-			want: "g,x | 80,0 | 80,1 | 80,2",
-			pin: map[string]string{
-				"dag":     "g,x | 0,0 | 1,1 | 2,2",
-				"dagshuf": "g,x | 0,0 | 1,1 | 2,2",
-			}},
+			want: "g,x | 80,0 | 80,1 | 80,2"},
+		// The boundary attempted from both sides, so neither "one more
+		// wrapper" nor "the two classes in the other order" is the next
+		// spelling that is silently wrong. Both measured on PostgreSQL 17.
+		{name: "785/nested-three-derived-tables-deep",
+			sql: "SELECT y.g, y.x FROM (SELECT z.g, z.x FROM (SELECT u.g, u.x FROM " +
+				"(SELECT COUNT(*) AS g, g AS x FROM collslot GROUP BY g " +
+				"HAVING COUNT(*) > 0) u) z) y ORDER BY y.x",
+			want: "g,x | 80,0 | 80,1 | 80,2"},
+		{name: "785/nested-in-a-cte-key-first",
+			sql: "WITH u AS (SELECT g AS x, COUNT(*) AS g FROM collslot GROUP BY g " +
+				"HAVING COUNT(*) > 0) SELECT x, g FROM u ORDER BY x",
+			want: "x,g | 0,80 | 1,80 | 2,80"},
 		// The ORDER BY face of the same collision, PINNED. `ORDER BY COUNT(*)`
 		// over an aggregate aliased `g` resolves the sort key to what the
 		// aggregate PUBLISHES — the name `g` — and the stage then sorts by

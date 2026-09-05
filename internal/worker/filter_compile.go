@@ -517,12 +517,19 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 			if ref.Table != "" {
 				src = ref.Table + "." + ref.Column
 			}
-			projCols = append(projCols, exec.ProjectColumn{
+			pc := exec.ProjectColumn{
 				Name:       p.Name,
 				DirectCopy: src,
 				SourceCol:  src,
 				Expr:       exec.ColumnRef(src),
-			})
+			}
+			// The planner's SLOT beats the name, and it is set exactly where
+			// the name is ambiguous: an aggregate publishing a group key and
+			// an aggregate output under one name (ADR-0026 section 3a, #785).
+			if p.SourceIdx != nil && *p.SourceIdx >= 0 {
+				pc.SourceIdx, pc.SourceIdxSet = *p.SourceIdx, true
+			}
+			projCols = append(projCols, pc)
 			continue
 		}
 		compiled, err := expr.Compile(node)

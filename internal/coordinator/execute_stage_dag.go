@@ -4487,6 +4487,12 @@ func projectOpFromSpecs(specs []physical.ProjectExprSpec) (distributed.OpSpec, b
 		// A DECIMAL's (p,s) travels with its TypeID or the worker's output
 		// vector comes out at scale 0 (ADR-0024 item 2).
 		projections[i].Precision, projections[i].Scale = p.Precision, p.Scale
+		// The SLOT, where the producer publishes this name twice: a name is
+		// not a handle when two columns answer to it (ADR-0026 section 3a).
+		if p.SourceSlotSet {
+			slot := p.SourceSlot
+			projections[i].SourceIdx = &slot
+		}
 	}
 	return distributed.OpSpec{Type: distributed.OpProject, Projections: projections}, true
 }

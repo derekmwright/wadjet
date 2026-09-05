@@ -110,7 +110,7 @@ func renameIsAggregateOutput(name string, child *logical.Node) bool {
 		switch {
 		case n.Type == logical.NodeProject:
 			bare := derivedScopeBareName(resolved, n)
-			proj := projectionForName(n.Projections, resolved, bare)
+			proj := projectionPublishingName(n.Projections, resolved, bare)
 			if proj == nil {
 				return false
 			}

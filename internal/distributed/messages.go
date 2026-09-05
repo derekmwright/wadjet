@@ -803,6 +803,14 @@ type ProjectSpec struct {
 	// planner could not resolve one" — the #458 unconstrained sentinel.
 	Precision int `json:"precision,omitempty"`
 	Scale     int `json:"scale,omitempty"`
+	// SourceIdx names the input column by POSITION instead of by name, for a
+	// projection whose input publishes the name twice — a GROUP BY key beside
+	// an aggregate output aliased like it (ADR-0026 section 3a). A pointer
+	// because 0 is a valid slot, exactly as Type is a pointer because TypeBool
+	// is the zero TypeID. The worker copies it onto
+	// exec.ProjectColumn.SourceIdx, which is the same addressing the
+	// single-process projection already applies (#575, #785).
+	SourceIdx *int `json:"source_idx,omitempty"`
 }
 
 // DecimalMeta is a DECIMAL's declared (precision, scale) on the wire — the
