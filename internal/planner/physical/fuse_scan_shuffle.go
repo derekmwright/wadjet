@@ -11,16 +11,18 @@ var fuseScanShuffleEnabled = os.Getenv("WADJET_FUSE_SCAN_SHUFFLE") != "0"
 // unpartitioned WSHF between scan and shuffle.
 //
 // Today's flow:  scan → exchange-repartition → consumer
-//   scan emits unpartitioned WSHF; coord dispatches a separate shuffle task
-//   that reads it and writes partitioned WSHF; consumer reads the partitions.
+//
+//	scan emits unpartitioned WSHF; coord dispatches a separate shuffle task
+//	that reads it and writes partitioned WSHF; consumer reads the partitions.
 //
 // After fusion: scan(with shuffle metadata) → consumer
-//   scan task hash-partitions its filtered output directly
-//   (runStageScanPartitionedStreaming + partitionedShuffleSink in the
-//   worker) — saves one full write+read of the scan's output (2026-08-02
-//   SF100 accounting: Q03 10.0 GB, Q21 6.8 GB, Q13 2.4 GB duplicated per
-//   cold run on scan legs alone), one S3 PUT+GET cycle, and one NATS
-//   round-trip per fused pair.
+//
+//	scan task hash-partitions its filtered output directly
+//	(runStageScanPartitionedStreaming + partitionedShuffleSink in the
+//	worker) — saves one full write+read of the scan's output (2026-08-02
+//	SF100 accounting: Q03 10.0 GB, Q21 6.8 GB, Q13 2.4 GB duplicated per
+//	cold run on scan legs alone), one S3 PUT+GET cycle, and one NATS
+//	round-trip per fused pair.
 //
 // Safety conditions:
 //  1. Exchange has exactly one dependency (the scan).
