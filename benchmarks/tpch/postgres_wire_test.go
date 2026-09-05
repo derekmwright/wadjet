@@ -1629,21 +1629,16 @@ func wireCorpus() []wireCase {
 			paramOIDs: []uint32{17}, params: [][]byte{[]byte("hi")}},
 		{name: "ByteaParamHexSpelling", sql: `SELECT b_key FROM bytea_probe WHERE b_val = $1`,
 			paramOIDs: []uint32{17}, params: [][]byte{[]byte(`\x6869`)}},
-		// A DERIVED bytea value. PostgreSQL has `bytea || bytea` and it
-		// returns bytea; wadjet's expr layer has no BYTES return type, so
-		// every scalar function reads the value through toString and the
-		// result is TEXT. Pinned per property so the row COUNT, the field
-		// names and the format handling of the same statement stay gated.
-		{name: "ByteaConcat", sql: `SELECT b_key, b_val || b_other AS c FROM bytea_probe WHERE b_key IN (2, 3) ORDER BY b_key`,
-			pins: map[string]string{
-				wirePropTypeOIDs: "#583: `bytea || bytea` is bytea (OID 17) in PostgreSQL and wadjet " +
-					"declares text (25), because expr has no BYTES return type — every scalar function " +
-					"reads its operand through toString",
-				wirePropValuesText: "#583, the same cause seen as bytes: PostgreSQL renders the derived " +
-					"bytea as \\x hex and wadjet sends the RAW bytes under OID 25 — which puts #570's " +
-					"own hazard back in through a derived value, since those bytes are invalid UTF-8 " +
-					"and hold an embedded NUL that libpq truncates at",
-			}},
+		// A DERIVED bytea value, and no longer a pin: `bytea || bytea` is
+		// bytea on both engines since #583, so the wire carries OID 17 and
+		// PostgreSQL's own \x rendering rather than the raw bytes under
+		// text's 25 — which is where #570's embedded-NUL hazard came back in
+		// through a derived value. `substring(bytea, …)` is the sibling, and
+		// it is here because it was the one whose VALUE moved: read as text
+		// it produced the UTF-8 replacement character.
+		{name: "ByteaConcat", sql: `SELECT b_key, b_val || b_other AS c FROM bytea_probe WHERE b_key IN (2, 3) ORDER BY b_key`},
+		{name: "ByteaSubstring", sql: `SELECT b_key, substring(b_val from 1 for 1) AS c FROM bytea_probe ORDER BY b_key`},
+		{name: "ByteaLength", sql: `SELECT b_key, length(b_val) AS c FROM bytea_probe ORDER BY b_key`},
 		// --- The SHAPE of a grouped answer (#591) ---------------------------
 		//
 		// A HAVING over an aggregate the SELECT list does not carry adds a

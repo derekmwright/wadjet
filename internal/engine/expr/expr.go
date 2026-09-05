@@ -4340,6 +4340,32 @@ func fnConcat(args []any) any {
 // the operator and the function cannot be confused for one another by a
 // query — compile.go lowers `||` to it (#609).
 func fnConcatOp(args []any) any {
+	// `bytea || bytea` is BYTEA on the server, and an unknown-typed literal
+	// beside one is read as bytea too — so `b || 'x'` is the bytes of b
+	// followed by 0x78, under OID 17 rather than under text's 25 (#583). The
+	// raw bytes of a non-UTF-8 value under a declared `text` is exactly the
+	// embedded-NUL field #570 removed for the column itself.
+	bytesResult := false
+	for _, a := range args {
+		if _, ok := a.([]byte); ok {
+			bytesResult = true
+			break
+		}
+	}
+	if bytesResult {
+		out := make([]byte, 0, 16)
+		for _, a := range args {
+			if a == nil {
+				return nil
+			}
+			if raw, ok := a.([]byte); ok {
+				out = append(out, raw...)
+				continue
+			}
+			out = append(out, toString(a)...)
+		}
+		return out
+	}
 	var sb strings.Builder
 	for _, a := range args {
 		if a == nil {
@@ -4348,6 +4374,32 @@ func fnConcatOp(args []any) any {
 		sb.WriteString(toString(a))
 	}
 	return sb.String()
+}
+
+// substrBytes is fnSubstr's bytea arm: PostgreSQL's substring over bytea takes
+// the same window rule and the same 22011 refusal for a negative length, over
+// BYTES rather than characters.
+func substrBytes(raw []byte, args []any) any {
+	start := int(ToFloat64(args[1])) - 1
+	if len(args) >= 3 && args[2] != nil {
+		length := int(ToFloat64(args[2]))
+		if length < 0 {
+			raiseNegativeSubstringLength()
+		}
+		lo, hi := substrWindow(start, length, len(raw))
+		out := make([]byte, hi-lo)
+		copy(out, raw[lo:hi])
+		return out
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(raw) {
+		return []byte{}
+	}
+	out := make([]byte, len(raw)-start)
+	copy(out, raw[start:])
+	return out
 }
 
 // fnLength is LENGTH / LEN, and it counts CHARACTERS.
@@ -4360,6 +4412,12 @@ func fnLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
+	// bytea has no characters, so `length(bytea)` is its BYTE count on the
+	// server — the same number octet_length gives — and reading its bytes as
+	// UTF-8 answered 1 for the two bytes of an encoded 'e' (#583).
+	if raw, ok := args[0].([]byte); ok {
+		return int32Count(len(raw))
+	}
 	return int32Count(utf8.RuneCountInString(toString(args[0])))
 }
 
@@ -4371,6 +4429,13 @@ func fnLength(args []any) any {
 func fnSubstr(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
+	}
+	// `substring(bytea, ...)` exists on the server and returns BYTEA, indexed
+	// by BYTES: `substring('\xff\xfe\x00A' from 1 for 1)` is `\xff`. Read
+	// as text it produced the UTF-8 replacement character instead — #570's own
+	// hazard coming back through a derived value (#583).
+	if raw, ok := args[0].([]byte); ok {
+		return substrBytes(raw, args)
 	}
 	r := []rune(toString(args[0]))
 	start := int(ToFloat64(args[1])) - 1 // SQL is 1-indexed
@@ -11765,6 +11830,39 @@ func vecSubstr(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
 	hasNulls := src.Nulls.HasNulls()
 	hasLen := len(args) >= 3
+	// bytea has no characters: substring over it indexes BYTES on the server,
+	// and reading its bytes as UTF-8 replaced every invalid one with U+FFFD —
+	// a value the column does not hold (#583). Same rule as fnSubstr's bytea
+	// arm, because the two evaluators must not answer differently.
+	if src.Type == batch.TypeBytes {
+		for i := 0; i < n; i++ {
+			if hasNulls && src.Nulls.IsNullFast(i) {
+				out.Nulls.SetNull(i)
+				out.BytesData.Set(i, nil)
+				continue
+			}
+			raw := src.BytesData.Value(i)
+			start := int(vecReadFloat64(args[1], i)) - 1
+			if hasLen {
+				length := int(vecReadFloat64(args[2], i))
+				if length < 0 {
+					raiseNegativeSubstringLength()
+				}
+				lo, hi := substrWindow(start, length, len(raw))
+				out.BytesData.Set(i, raw[lo:hi])
+				continue
+			}
+			if start < 0 {
+				start = 0
+			}
+			if start >= len(raw) {
+				out.BytesData.Set(i, nil)
+				continue
+			}
+			out.BytesData.Set(i, raw[start:])
+		}
+		return
+	}
 
 	for i := 0; i < n; i++ {
 		if hasNulls && src.Nulls.IsNullFast(i) {

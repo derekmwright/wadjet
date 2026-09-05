@@ -11616,6 +11616,13 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		return colRefDeclaredType(n, decls)
 	case *plansql.BinaryOp:
 		if n.Op == "||" {
+			// `bytea || bytea` is BYTEA on the server, and an unknown-typed
+			// literal beside one takes bytea too — so the result declares
+			// OID 17 and its bytes go out as \x hex rather than raw under
+			// text's 25 (#583). Everything else is string concatenation.
+			if bytesOperand(n.Left, decls) || bytesOperand(n.Right, decls) {
+				return expr.Decl(parquet.TypeBytes), expr.Decided
+			}
 			// String concatenation, not arithmetic. Declaring it Float64
 			// handed the concat kernel an output vector with no BytesData,
 			// so every row came back NULL (#328).
@@ -11856,6 +11863,39 @@ func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (expr.DeclType, expr.
 // CALLING function still holding a candidate of its own must prefer that one —
 // which is the whole of #331, where coalesce took a nested nullif's numeric
 // fallback for fact and never asked the string literal beside it.
+// bytesOperand reports whether a node is DECLARED bytea. It is deliberately a
+// declaration test and not a value one: the box for a BYTES column and for a
+// STRING column are both readable as bytes, and ADR-0012 item 8 says which of
+// the two a site is looking at comes from the declaration.
+func bytesOperand(n plansql.Node, decls colDecls) bool {
+	d, c := nodeDeclaredType(n, decls)
+	return c != expr.Undecided && d.ID == parquet.TypeBytes
+}
+
+// bytesPreservingReturn declares the result of a function PostgreSQL has over
+// bytea and which answers in bytea. The set is the server's own catalog, not
+// every function that happens to accept bytes:
+//
+//	substring(bytea, int [, int])   bytea
+//	overlay(bytea placing bytea …)  bytea
+//
+// A text-only function over a bytea argument is 42883 on the server and still
+// ANSWERS here — the other half of #583, deferred with its mechanism in the
+// arc report: refusing it needs a plan-time argument-type check that every
+// compile site reaches, and a per-row refusal would be the data-dependent
+// shape #627 just closed.
+func bytesPreservingReturn(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, bool) {
+	switch strings.ToLower(strings.TrimSpace(n.Name)) {
+	case "substr", "substring", "overlay":
+	default:
+		return expr.DeclType{}, false
+	}
+	if len(n.Args) == 0 || !bytesOperand(n.Args[0], decls) {
+		return expr.DeclType{}, false
+	}
+	return expr.Decl(parquet.TypeBytes), true
+}
+
 func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, expr.Confidence) {
 	// The scalar math functions that answer in their argument's OWN domain
 	// take their type from that argument, which the registry's fixed
@@ -11867,6 +11907,15 @@ func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (expr.DeclType, exp
 	// alone — every other member of that family IS double precision over an
 	// integer in PostgreSQL (#768).
 	if t, ok := scalarFnDeclaredNumericDomain(n, decls); ok {
+		return t, expr.Decided
+	}
+	// The functions PostgreSQL DOES have over bytea and which answer IN bytea:
+	// substring keeps its argument's type, so `substring(b from 1 for 1)` is
+	// bytea and not the text those bytes spell (#583). The registry's fixed
+	// RetString cannot express it, and RetSameAsArg would mirror EVERY
+	// argument type — including a DECIMAL one, which substring does not
+	// return.
+	if t, ok := bytesPreservingReturn(n, decls); ok {
 		return t, expr.Decided
 	}
 	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (expr.DeclType, expr.Confidence) {
