@@ -132,9 +132,11 @@ func checksummedFixtures(tb testing.TB) []checksummedFixture {
 		{"parquet-go/v1/uncompressed/dict", parquetGoFile(tb, 1, gp.Compression(&gp.Uncompressed), true, 300)},
 		{"parquet-go/v1/snappy/dict", parquetGoFile(tb, 1, gp.Compression(&gp.Snappy), true, 300)},
 		{"parquet-go/v1/zstd/plain", parquetGoFile(tb, 1, gp.Compression(&gp.Zstd), false, 300)},
+		{"parquet-go/v1/gzip/plain", parquetGoFile(tb, 1, gp.Compression(&gp.Gzip), false, 300)},
 		{"parquet-go/v2/uncompressed/plain", parquetGoFile(tb, 2, gp.Compression(&gp.Uncompressed), false, 300)},
 		{"parquet-go/v2/snappy/dict", parquetGoFile(tb, 2, gp.Compression(&gp.Snappy), true, 300)},
 		{"parquet-go/v2/zstd/plain", parquetGoFile(tb, 2, gp.Compression(&gp.Zstd), false, 300)},
+		{"parquet-go/v2/gzip/dict", parquetGoFile(tb, 2, gp.Compression(&gp.Gzip), true, 300)},
 	}
 	for _, f := range []string{"testdata/page_crc.parquet", "testdata/page_crc_v2.parquet"} {
 		data, err := os.ReadFile(f)
@@ -388,4 +390,64 @@ func FuzzPageBodyMutation(f *testing.F) {
 				p.kind, p.headerAt, byteIdx%p.bodyLen, mask, got, want)
 		}
 	})
+}
+
+// TestAFlippedBitInAPageHeaderIsNeverASilentWrongAnswer covers what the
+// checksum does NOT cover.
+//
+// parquet.thrift computes crc over the page BODY, excluding the header, so a
+// header the reader parses is never checksummed and cannot be. The header is
+// where the value counts, sizes and encodings live — every number §1 bounds
+// and §2 reconciles — so the property that has to hold there is the weaker
+// one: a flipped header bit either refuses, or decodes to exactly what the
+// unmutated file decodes. A third outcome, a different answer with no error,
+// is the defect this arc is about, one field over.
+func TestAFlippedBitInAPageHeaderIsNeverASilentWrongAnswer(t *testing.T) {
+	for _, arm := range []struct {
+		name string
+		data []byte
+	}{
+		{"v1/plain", parquetGoFile(t, 1, gp.Compression(&gp.Uncompressed), false, 300)},
+		{"v1/dict", parquetGoFile(t, 1, gp.Compression(&gp.Uncompressed), true, 300)},
+		{"v2/plain", parquetGoFile(t, 2, gp.Compression(&gp.Uncompressed), false, 300)},
+		{"v2/dict", parquetGoFile(t, 2, gp.Compression(&gp.Snappy), true, 300)},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			want, err := readEveryRow(arm.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStr := fmt.Sprint(want)
+
+			pages := walkPages(t, arm.data)
+			if len(pages) == 0 {
+				t.Fatal("no pages")
+			}
+			checked, refused := 0, 0
+			for i, p := range pages {
+				hdrLen := p.bodyAt - p.headerAt
+				for byteIdx := 0; byteIdx < hdrLen; byteIdx++ {
+					for _, bit := range []uint{0, 3, 7} {
+						mutated := append([]byte(nil), arm.data...)
+						mutated[p.headerAt+byteIdx] ^= 1 << bit
+						got, err := readEveryRow(mutated)
+						checked++
+						if err != nil {
+							refused++
+							continue // refused: admissible
+						}
+						if fmt.Sprint(got) != wantStr {
+							t.Fatalf("page %d: flipping bit %d of header byte %d changed the "+
+								"answer with no error:\n got %v\nwant %v", i, bit, byteIdx, got, want)
+						}
+					}
+				}
+			}
+			if checked == 0 {
+				t.Fatal("no header bits were exercised")
+			}
+			t.Logf("%d header bit flips, %d refused, none produced a silent wrong answer",
+				checked, refused)
+		})
+	}
 }

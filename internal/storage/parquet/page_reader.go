@@ -232,6 +232,12 @@ func (r *ColumnPageReader) checkColumnComplete() error {
 }
 
 //go:noinline
+func unknownPageTypeErr(col string, off int, t PageType) error {
+	return fmt.Errorf("column %s: the page at offset %d declares %v, which this reader "+
+		"cannot decode; its rows cannot be accounted for", col, off, t)
+}
+
+//go:noinline
 func columnShortErr(col string, got, want int) error {
 	verb := "delivers only"
 	if got > want {
@@ -671,12 +677,23 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 			r.noteRows(p)
 			return p, nil
 		case PageDictionary:
-			// Dictionary pages are handled separately via NextDictionary.
-			// Skip for now — caller should call NextDictionary first.
+			// Dictionary pages are handled separately via NextDictionary,
+			// and carry no rows, so passing over one accounts for nothing.
 			continue
 		default:
-			// Skip unknown page types (e.g., index pages).
-			continue
+			// A page type this reader does not decode, in the middle of a
+			// column chunk. This used to `continue`, and that was a silent
+			// wrong answer: the page's rows are already CHARGED by
+			// chargeRows above, so the chunk still reconciled against the
+			// row group while the values of a whole page were never
+			// produced — and every later page's values landed at the
+			// skipped page's offsets. Found by the header bit-flip cell:
+			// flipping one bit of the page header's `type` field turned a
+			// DATA_PAGE into type -1, and a required INT64 column of
+			// [0..299] read back as [128..299] followed by NULLs, nil
+			// error. The checksum cannot catch it — crc covers the page
+			// BODY, not the header — so the disposition has to.
+			return nil, unknownPageTypeErr(r.columnLabel(), bodyOff, ph.Type)
 		}
 	}
 	// End of column: the chunk has no more pages. Before reporting that as a
@@ -923,12 +940,45 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 	numNulls := int(dph.NumNulls)
 	off := 0
 
+	// num_nulls is the one v2 count with no v1 counterpart, and the decode
+	// sizes the VALUE section from it: nonNullCount = num_values - num_nulls.
+	// It was taken at its word. A page claiming nulls it cannot have — a
+	// REQUIRED leaf has no definition levels, so nothing can say WHICH value
+	// is absent — then decoded fewer values than the page holds, and the
+	// caller filled the shortfall with NULLs: a required INT64 column read
+	// back with four holes in the middle, nil error, found by the header
+	// bit-flip cell over a v2 fixture.
+	if numNulls < 0 || numNulls > numValues {
+		return nil, fmt.Errorf("column %s: data page v2 declares %d nulls of %d values",
+			r.columnLabel(), numNulls, numValues)
+	}
+	if numNulls > 0 && (r.maxDefLevel == 0 || dph.DefinitionLevelsByteLength <= 0) {
+		return nil, fmt.Errorf("column %s: data page v2 declares %d nulls but carries no "+
+			"definition levels to place them (max definition level %d, %d level bytes)",
+			r.columnLabel(), numNulls, r.maxDefLevel, dph.DefinitionLevelsByteLength)
+	}
+
 	// In v2, repetition and definition levels are stored uncompressed
 	// before the (optionally compressed) data section.
+	//
+	// Both lengths are thrift i32 out of the page header, and both are used
+	// as slice bounds before anything has looked at the bytes they describe:
+	// `compressed[off:off+repLen]`, then `compressed[off:]`. A negative one
+	// made `off` negative and the decode panicked with
+	// "slice bounds out of range [-1:]"; one larger than the page ran into
+	// the next page's bytes. §1's rule — bound it before it indexes anything
+	// — had never been applied to these two fields.
+	repLen := int(dph.RepetitionLevelsByteLength)
+	defLen := int(dph.DefinitionLevelsByteLength)
+	if repLen < 0 || defLen < 0 || repLen > len(compressed) || defLen > len(compressed)-repLen {
+		return nil, fmt.Errorf("column %s: data page v2 declares %d repetition-level bytes and "+
+			"%d definition-level bytes in a %d-byte page",
+			r.columnLabel(), dph.RepetitionLevelsByteLength, dph.DefinitionLevelsByteLength,
+			len(compressed))
+	}
 
 	// Decode repetition levels (uncompressed).
 	var repLevels []int32
-	repLen := int(dph.RepetitionLevelsByteLength)
 	if repLen > 0 && r.maxRepLevel > 0 {
 		bitWidth := bitsRequired(r.maxRepLevel)
 		decoded, err := DecodeRLEInt32(compressed[off:off+repLen], bitWidth, numValues)
@@ -941,7 +991,6 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 
 	// Decode definition levels (uncompressed).
 	var defLevels []int32
-	defLen := int(dph.DefinitionLevelsByteLength)
 	if defLen > 0 && r.maxDefLevel > 0 {
 		bitWidth := bitsRequired(r.maxDefLevel)
 		var scratch []int32
@@ -977,11 +1026,41 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 	// file contradicting itself about how many rows this page carries — the
 	// same class of self-contradiction the chunk-length truncation in #892
 	// belongs to, and one the reader can settle without leaving the page.
-	if r.maxRepLevel > 0 && repLevels != nil {
+	switch {
+	case r.maxRepLevel > 0 && repLevels != nil:
 		if fromLevels := countRowStarts(repLevels); fromLevels != numRows {
 			ReleaseDecompressed(r.codec, rawBuf)
 			return nil, fmt.Errorf("column %s: data page v2 declares %d rows but its repetition "+
 				"levels start %d", r.columnLabel(), numRows, fromLevels)
+		}
+	case r.maxRepLevel == 0:
+		// A flat leaf stores one value per row — nulls included, which is
+		// what the definition levels are for — so a v2 header's two counts
+		// have exactly one consistent pairing. Measured across parquet-go
+		// and pyarrow v2 output: every flat page of both writers has
+		// num_rows == num_values, no exceptions.
+		if numRows != numValues {
+			ReleaseDecompressed(r.codec, rawBuf)
+			return nil, fmt.Errorf("column %s: data page v2 on a flat column declares %d rows "+
+				"and %d values, which cannot both be true", r.columnLabel(), numRows, numValues)
+		}
+	}
+
+	// And the null count against the levels that place them. The header's
+	// number sizes the value section; the levels say which entries are
+	// absent. A disagreement shifts every value after the first divergence,
+	// so it is settled here rather than discovered as a wrong answer.
+	if defLevels != nil {
+		counted := 0
+		for _, dl := range defLevels {
+			if dl < int32(r.maxDefLevel) {
+				counted++
+			}
+		}
+		if counted != numNulls {
+			ReleaseDecompressed(r.codec, rawBuf)
+			return nil, fmt.Errorf("column %s: data page v2 declares %d nulls but its definition "+
+				"levels mark %d", r.columnLabel(), numNulls, counted)
 		}
 	}
 

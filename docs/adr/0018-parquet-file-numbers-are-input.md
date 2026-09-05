@@ -29,6 +29,10 @@ reader trusts nothing it can verify", after a page checksum the file carried
 and the reader decoded was found to be consulted by nothing (#891) and a
 column chunk that ended before its declared rows was found to read as NULLs
 under a REQUIRED schema (#892).
+The gate written for §11 then found three more of its own in the page HEADER,
+which no checksum covers: an undecodable page type silently skipped, a v2
+null count taken on trust, and two v2 level lengths used as slice bounds
+unchecked.
 
 ## Context
 
@@ -745,6 +749,32 @@ slot at whatever the vector was allocated as (#892). A truncation INSIDE a
 page had always been refused, which is what kept the shape hidden: only the
 tidy cut, exactly at a page boundary, was silent.
 
+**The page header itself, which no checksum covers.** `crc` is computed over
+the page BODY, so every number the reader navigates by — the page type, the
+value and null and row counts, the v2 level byte lengths — is unprotected by
+construction. The exhaustive header bit-flip sweep written to establish that
+weaker property ("a flipped header bit either refuses, or decodes to exactly
+what the unmutated file decodes") found three violations at once, none of them
+reachable through the body:
+
+- A page whose `type` decoded to something the reader does not handle was
+  `continue`d past — while `chargeRows` had already CHARGED its rows. The
+  chunk still reconciled against the row group, the page's values were never
+  produced, and every later page's values landed at the skipped page's
+  offsets: `[0..299]` read back as `[128..299]` followed by NULLs, nil error.
+  An undecodable page inside a column chunk is now a refusal, because its rows
+  cannot be accounted for.
+- A v2 header's `num_nulls` sizes the value section (`num_values - num_nulls`)
+  and was taken at its word. A page claiming nulls on a leaf with no
+  definition levels — a REQUIRED column, where nothing can say WHICH value is
+  absent — decoded fewer values than the page held and the caller filled the
+  shortfall with NULLs. The count is now refused when there is nothing to
+  place it with, and cross-checked against the levels when there is.
+- The v2 level byte lengths are thrift i32 used directly as slice bounds
+  (`compressed[off:off+repLen]`, then `compressed[off:]`). A negative one
+  panicked the decode with `slice bounds out of range [-1:]`. §1's rule had
+  simply never been applied to those two fields.
+
 **Level consistency.** A nested leaf's rows are its repetition levels'
 level-0 entries, and nothing else. `PageData.NumRows` reported `NumValues` for
 every v1 page including nested ones, which made a nested chunk's rows
@@ -827,9 +857,13 @@ is not settled here.
   stored body does not hash to the checksum its own header declares; a column
   chunk whose pages deliver fewer (or more) rows than its row group says it
   holds; a row group carrying no chunk at all for a leaf of its own schema; a
-  data page v2 whose declared `num_rows` disagrees with its repetition levels.
-  Each of these previously produced a value, a NULL, or a whole column of
-  NULLs, without saying so.
+  page of a type this reader does not decode, inside a column chunk; a data
+  page v2 whose declared `num_rows` disagrees with its repetition levels, or
+  whose `num_rows` and `num_values` disagree on a flat leaf, or whose
+  `num_nulls` has no definition levels to place it with or disagrees with the
+  levels it has, or whose level byte lengths do not fit the page. Each of
+  these previously produced a value, a NULL, a whole column of NULLs, or a
+  panic, without saying so.
 - The refusals are cross-implementation facts, not round trips: the checksum
   cells run over files written by parquet-go and by pyarrow
   (`testdata/page_crc.parquet`, `page_crc_v2.parquet`), and the multi-page
