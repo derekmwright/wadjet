@@ -18,32 +18,42 @@ import (
 // formatIPv4 formats a uint32 IPv4 address as a string without allocating net.IP.
 func formatIPv4(v uint32) string {
 	var buf [15]byte // max "255.255.255.255"
+	n := putIPv4(buf[:], v)
+	return string(buf[:n])
+}
+
+// putIPv4 writes v's dotted quad into dst (which must hold 15 bytes) and
+// returns how many bytes it wrote. Split out of formatIPv4 so FormatIPv6's
+// v4-mapped tail can render into its OWN stack buffer instead of building a
+// string it immediately copies. dst is written and never retained, so the
+// caller's array stays on the stack.
+func putIPv4(dst []byte, v uint32) int {
 	n := 0
 	for i := 3; i >= 0; i-- {
 		if i < 3 {
-			buf[n] = '.'
+			dst[n] = '.'
 			n++
 		}
 		octet := v >> (uint(i) * 8) & 0xFF
 		if octet >= 100 {
-			buf[n] = '0' + byte(octet/100)
+			dst[n] = '0' + byte(octet/100)
 			n++
 			octet %= 100
-			buf[n] = '0' + byte(octet/10)
+			dst[n] = '0' + byte(octet/10)
 			n++
-			buf[n] = '0' + byte(octet%10)
+			dst[n] = '0' + byte(octet%10)
 			n++
 		} else if octet >= 10 {
-			buf[n] = '0' + byte(octet/10)
+			dst[n] = '0' + byte(octet/10)
 			n++
-			buf[n] = '0' + byte(octet%10)
+			dst[n] = '0' + byte(octet%10)
 			n++
 		} else {
-			buf[n] = '0' + byte(octet)
+			dst[n] = '0' + byte(octet)
 			n++
 		}
 	}
-	return string(buf[:n])
+	return n
 }
 
 // FormatIPv6 renders a 16-byte IPv6 address the way PostgreSQL's inet output
@@ -105,29 +115,52 @@ func FormatIPv6(raw []byte) string {
 	// (`::2`) never reaches it — which is why the server prints `::2` and not
 	// `::0.0.0.2`.
 	quadTail := bestBase == 0 && (bestLen == 6 || (bestLen == 5 && words[5] == 0xffff))
-	var sb strings.Builder
-	sb.Grow(45)
+	// One stack buffer and one allocation, the way formatMAC does it: the
+	// strings.Builder plus a strconv.FormatUint per non-zero hextet this
+	// replaces cost up to nine heap strings per address, on a path every
+	// IPv6 value goes through (round-2 review B2-4). 45 = the longest form,
+	// "0000:0000:0000:0000:0000:ffff:255.255.255.255".
+	const hexd = "0123456789abcdef"
+	var buf [45]byte
+	n := 0
 	for i := 0; i < 8; i++ {
 		if bestBase != -1 && i >= bestBase && i < bestBase+bestLen {
 			if i == bestBase {
-				sb.WriteByte(':')
+				buf[n] = ':'
+				n++
 			}
 			continue
 		}
 		if i != 0 {
-			sb.WriteByte(':')
+			buf[n] = ':'
+			n++
 		}
 		if i == 6 && quadTail {
-			sb.WriteString(formatIPv4(uint32(raw[12])<<24 | uint32(raw[13])<<16 |
-				uint32(raw[14])<<8 | uint32(raw[15])))
-			return sb.String()
+			n += putIPv4(buf[n:], uint32(raw[12])<<24|uint32(raw[13])<<16|
+				uint32(raw[14])<<8|uint32(raw[15]))
+			return string(buf[:n])
 		}
-		sb.WriteString(strconv.FormatUint(uint64(words[i]), 16))
+		w := words[i]
+		if w >= 0x1000 {
+			buf[n] = hexd[w>>12]
+			n++
+		}
+		if w >= 0x100 {
+			buf[n] = hexd[(w>>8)&0xf]
+			n++
+		}
+		if w >= 0x10 {
+			buf[n] = hexd[(w>>4)&0xf]
+			n++
+		}
+		buf[n] = hexd[w&0xf]
+		n++
 	}
 	if bestBase != -1 && bestBase+bestLen == 8 {
-		sb.WriteByte(':')
+		buf[n] = ':'
+		n++
 	}
-	return sb.String()
+	return string(buf[:n])
 }
 
 // formatMAC formats a uint64 (lower 48 bits) as a MAC address without allocating net.HardwareAddr.
