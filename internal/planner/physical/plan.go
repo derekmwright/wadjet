@@ -3035,7 +3035,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// Generate distributed stages for coordinator dispatch
 	plan.Stages = p.generateStages(node)
 
-	if err := p.enforceQueryLimits(plan.Stages, node); err != nil {
+	if err := p.enforceQueryLimits(ctx, plan.Stages, node); err != nil {
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()
@@ -3117,7 +3117,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if p.scalarRowsErr != nil {
 		return nil, p.scalarRowsErr
 	}
-	if err := p.enforceQueryLimits(stages, node); err != nil {
+	if err := p.enforceQueryLimits(ctx, stages, node); err != nil {
 		return nil, err
 	}
 	// Phase 1 distribution-property pass: populate Stage.Distribution for
@@ -5074,12 +5074,16 @@ func hasLimit(n *logical.Node) bool {
 // this" apart from a syntax or type error and stop retrying (#803).
 const QueryLimitSQLState = "53400"
 
-// enforceQueryLimits checks estimated query cost against configured limits.
-func (p *Planner) enforceQueryLimits(stages []Stage, node *logical.Node) error {
-	if p.QueryLimits == nil {
+// enforceQueryLimits checks estimated query cost against the limits in force:
+// the deployment's (Planner.QueryLimits, from `query_limits:` and its per-role
+// overrides) narrowed by the calling identity's, which an ABAC `query_limit`
+// obligation puts on the context. See identity_limits.go for why the two
+// arrive by different routes and meet here.
+func (p *Planner) enforceQueryLimits(ctx context.Context, stages []Stage, node *logical.Node) error {
+	limits := tightestLimits(p.QueryLimits, IdentityQueryLimitsFromContext(ctx))
+	if limits == nil {
 		return nil
 	}
-	limits := p.QueryLimits
 	cost := EstimateCost(stages, node)
 
 	if limits.MaxScanBytes > 0 && cost.TotalBytes > limits.MaxScanBytes {

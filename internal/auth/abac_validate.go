@@ -75,6 +75,16 @@ func validateObligation(policy, rule string, ob Obligation, restricted map[strin
 			return fmt.Errorf("%s: row_filter is not a SQL predicate: %q: %w",
 				where, ob.Value, err)
 		}
+	case "query_limit":
+		// The obligation was accepted and then dropped by the evaluator for
+		// as long as it has existed: docs/security.md said "Not enforced" in
+		// the table of obligation types, and an operator who wrote one
+		// believed a ceiling was in place that was not. It is enforced now
+		// (through the same cost guard `query_limits:` uses), so the two
+		// spellings it can get wrong have to refuse rather than be dropped.
+		if _, _, err := QueryLimitObligation(ob); err != nil {
+			return fmt.Errorf("%s: %w", where, err)
+		}
 	}
 	if ob.Type != "mask_column" {
 		return nil

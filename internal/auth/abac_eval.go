@@ -144,7 +144,11 @@ func (pe *PolicyEvaluator) EvaluateTableAccess(subject Subject, tableName string
 				MaskExpr: ob.Value,
 			})
 		case "query_limit":
-			// handled externally via SerializedDecision
+			// The cost ceiling this identity is held to on this relation.
+			// EnforcePlanPolicies narrows the statement's guard with it; the
+			// obligation used to be dropped here, so docs/security.md said
+			// "Not enforced" and a policy that named a ceiling had none.
+			td.QueryLimits = applyQueryLimit(td.QueryLimits, ob)
 		}
 	}
 

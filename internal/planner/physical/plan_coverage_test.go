@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -189,7 +190,7 @@ func TestEnforceQueryLimits_NilLimits(t *testing.T) {
 	cat, _ := setupCatalog(t)
 	planner := NewPlanner(cat)
 	// No query limits — should pass
-	err := planner.enforceQueryLimits(nil, nil)
+	err := planner.enforceQueryLimits(context.Background(), nil, nil)
 	if err != nil {
 		t.Errorf("expected nil error with nil limits, got %v", err)
 	}
@@ -203,7 +204,7 @@ func TestEnforceQueryLimits_MaxScanBytes(t *testing.T) {
 	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 10}}
 	scan := logical.NewScan("t", "")
 
-	err := planner.enforceQueryLimits(stages, scan)
+	err := planner.enforceQueryLimits(context.Background(), stages, scan)
 	if err == nil {
 		t.Error("expected error for exceeding MaxScanBytes")
 	}
@@ -217,7 +218,7 @@ func TestEnforceQueryLimits_MaxScanRows(t *testing.T) {
 	stages := []Stage{{Type: "scan", EstimatedBytes: 100, EstimatedRows: 100}}
 	scan := logical.NewScan("t", "")
 
-	err := planner.enforceQueryLimits(stages, scan)
+	err := planner.enforceQueryLimits(context.Background(), stages, scan)
 	if err == nil {
 		t.Error("expected error for exceeding MaxScanRows")
 	}
@@ -231,7 +232,7 @@ func TestEnforceQueryLimits_MaxScanFiles(t *testing.T) {
 	stages := []Stage{{Type: "scan", ScanFiles: []string{"a", "b", "c"}}}
 	scan := logical.NewScan("t", "")
 
-	err := planner.enforceQueryLimits(stages, scan)
+	err := planner.enforceQueryLimits(context.Background(), stages, scan)
 	if err == nil {
 		t.Error("expected error for exceeding MaxScanFiles")
 	}
@@ -245,14 +246,14 @@ func TestEnforceQueryLimits_RequireFilterAboveBytes(t *testing.T) {
 	stages := []Stage{{Type: "scan", EstimatedBytes: 200}}
 	scan := logical.NewScan("t", "") // no filter
 
-	err := planner.enforceQueryLimits(stages, scan)
+	err := planner.enforceQueryLimits(context.Background(), stages, scan)
 	if err == nil {
 		t.Error("expected error for missing filter above byte threshold")
 	}
 
 	// With filter should pass
 	filter := logical.NewFilter(scan, []logical.Predicate{{Raw: "x=1"}})
-	err = planner.enforceQueryLimits(stages, filter)
+	err = planner.enforceQueryLimits(context.Background(), stages, filter)
 	if err != nil {
 		t.Errorf("expected no error with filter, got %v", err)
 	}
@@ -266,14 +267,14 @@ func TestEnforceQueryLimits_RequireLimitAboveRows(t *testing.T) {
 	stages := []Stage{{Type: "scan", EstimatedRows: 100}}
 	scan := logical.NewScan("t", "") // no limit
 
-	err := planner.enforceQueryLimits(stages, scan)
+	err := planner.enforceQueryLimits(context.Background(), stages, scan)
 	if err == nil {
 		t.Error("expected error for missing limit above row threshold")
 	}
 
 	// With limit should pass
 	limit := logical.NewLimit(scan, 10, 0)
-	err = planner.enforceQueryLimits(stages, limit)
+	err = planner.enforceQueryLimits(context.Background(), stages, limit)
 	if err != nil {
 		t.Errorf("expected no error with limit, got %v", err)
 	}
@@ -291,7 +292,7 @@ func TestEnforceQueryLimits_UnderLimits(t *testing.T) {
 	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100, ScanFiles: []string{"a"}}}
 	scan := logical.NewScan("t", "")
 
-	err := planner.enforceQueryLimits(stages, scan)
+	err := planner.enforceQueryLimits(context.Background(), stages, scan)
 	if err != nil {
 		t.Errorf("expected nil error under all limits, got %v", err)
 	}

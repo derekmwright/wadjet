@@ -278,7 +278,7 @@ Obligations are side-effects attached to **allow** rules. They constrain how dat
 | `row_filter` | table name | SQL predicate | Filter node injected directly above the scan; the predicate reads the row as STORED |
 | `mask_column` | column name | SQL expression, e.g. `"'REDACTED'"` | Column replaced by the expression at the scan, for every consumer above it. Empty `value` means a placeholder chosen from the column's declared type |
 | `deny_column` | column name | — | The column does not exist for this identity: absent from `SELECT *`, and naming it is 42703 |
-| `query_limit` | — | row count | **Not enforced** — the policy evaluator skips this obligation. |
+| `query_limit` | one of `max_scan_rows` (the default when empty), `max_scan_bytes`, `max_scan_files` | a positive integer | A cost ceiling for this identity on this relation, merged into the same guard `query_limits:` uses. A policy can only NARROW: the tighter of the two applies, and a statement reading two policed relations is held to the tighter of theirs. An obligation whose value is not a positive integer, or whose target is not one of the three, refuses at config load. |
 
 #### Deny-Overrides Combining
 
@@ -620,6 +620,11 @@ journalctl -u wadjet | grep 'component=audit'
 ## Query Cost Estimation and Guards
 
 Wadjet estimates query cost at plan time using manifest metadata (file sizes, row counts) before any I/O occurs. Cost-based guards can reject expensive queries before they execute.
+
+An ABAC `query_limit` obligation narrows these same ceilings for one
+identity on one relation; see the obligation table above. The two meet at one
+enforcement point — the guard below — so a policy ceiling applies on every door
+and on the distributed path, and the tighter of the two always wins.
 
 `query_limits:` in the config file is enforced on **every** plan a served query
 can meet. Each planner-construction site installs the limits in its

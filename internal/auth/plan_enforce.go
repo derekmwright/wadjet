@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -65,6 +66,7 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	// up in EXPLAIN output for any statement with two policed tables.
 	type tableFilter struct{ table, filter string }
 	var rowFilters []tableFilter
+	var limits *config.QueryLimits
 	for _, tableName := range policedRelations(ctx, cat, selectInfo, plan) {
 		td := r.decide(tableName)
 		if !td.Allowed {
@@ -73,6 +75,10 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		if td.RowFilter != "" {
 			rowFilters = append(rowFilters, tableFilter{tableName, td.RowFilter})
 		}
+		// Two policed relations in one statement each bring their own
+		// ceiling; the statement is held to the tighter of them, and to the
+		// deployment's, which the planner already carries.
+		limits = NarrowQueryLimits(limits, td.QueryLimits)
 		cp, cperr := r.columnPolicies(tableName)
 		if cperr != nil {
 			return ctx, nil, cperr
@@ -129,6 +135,11 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	// out with no projection and a predicate over the STORED column (#859
 	// round 3). Every later pass that meets a scan asks this.
 	ctx = logical.ContextWithPolicyLookup(ctx, r.lookup)
+	// The `query_limit` obligations, as one ceiling on the context. The
+	// planner merges it with the deployment's guard where that guard runs, so
+	// there is one enforcement point for both and every door carries it —
+	// including the DAG, which plans through the same Planner.
+	ctx = physical.WithIdentityQueryLimits(ctx, limits)
 	return ctx, plan, nil
 }
 

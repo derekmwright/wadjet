@@ -227,6 +227,29 @@ the coordinator's `ExecuteSQL` can present.
   at enforcement, because it would publish exactly what the rule takes away. An
   expression over an unrestricted column is allowed and sees the stored row.
 
+### A `query_limit` obligation is a cost ceiling, enforced where the config's is
+
+The obligation was read by the loader and dropped by the evaluator, so
+docs/security.md's obligation table said "Not enforced" beside a security
+control. It now narrows the SAME cost guard `query_limits:` uses:
+`target` names the ceiling (`max_scan_rows` — the default when empty and the
+only reading the docs ever gave it — `max_scan_bytes` or `max_scan_files`),
+`value` is a positive integer, and anything else refuses at config load and at
+hot reload, keeping the previous policy set (decision 4's doctrine).
+
+The two ceilings arrive by different routes because they are decided at
+different times: the deployment's is on `Planner.QueryLimits`, set at each
+door's one planner-construction site; the identity's is decided while the
+policies are evaluated, which is after every planner has been built, so
+`EnforcePlanPolicies` puts it on the context and
+`Planner.enforceQueryLimits` — the one place the guard runs — takes the
+tighter of the two. A policy can only NARROW: an obligation naming a larger
+number than the deployment allows does not widen the deployment's guard, and a
+statement reading two policed relations is held to the tighter of theirs.
+
+A DML statement is not planned (ADR-0031), so it has no scan-cost estimate and
+no ceiling to compare it against; `query_limit` is a read control.
+
 ### Not settled
 
 - **A task that carries a statement's TEXT is re-planned where no policy is.**
