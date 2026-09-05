@@ -118,6 +118,37 @@ func TestUpdateResolvesFoldedReferences(t *testing.T) {
 		}, "computed SET")
 	})
 
+	t.Run("MERGE matches its target on an unquoted CamelCase key", func(t *testing.T) {
+		// A MERGE's ON condition is parsed as an EXPRESSION, so its column
+		// names arrive folded while the target row is keyed by the catalog
+		// schema. `ON hits.WatchID = s.k` therefore matched NOTHING: every
+		// WHEN MATCHED clause was skipped and the source row fell through to
+		// WHEN NOT MATCHED, which INSERTED a duplicate of a row that was
+		// already there. The row count is not the tell — one row was written
+		// either way.
+		db, ctx := dfrFixture(t)
+		if _, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 1 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET UserAgent = 'MERGED' `+
+			`WHEN NOT MATCHED THEN INSERT (WatchID, UserAgent) VALUES (9, 'INSERTED')`); err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		dfrWant(t, dfrRead(t, db, ctx), [][2]any{
+			{int64(1), "MERGED"}, {int64(2), "old-2"}, {int64(3), "old-3"},
+		}, "MERGE matched")
+	})
+
+	t.Run("MERGE inserts under the schema's column names", func(t *testing.T) {
+		db, ctx := dfrFixture(t)
+		if _, err := db.Execute(ctx, `MERGE INTO hits USING (SELECT 42 AS k) s ON hits.WatchID = s.k `+
+			`WHEN MATCHED THEN UPDATE SET UserAgent = 'MERGED' `+
+			`WHEN NOT MATCHED THEN INSERT (WatchID, UserAgent) VALUES (s.k, 'INSERTED')`); err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		dfrWant(t, dfrRead(t, db, ctx), [][2]any{
+			{int64(1), "old-1"}, {int64(2), "old-2"}, {int64(3), "old-3"}, {int64(42), "INSERTED"},
+		}, "MERGE not matched")
+	})
+
 	t.Run("delimited SET target in the schema's own case", func(t *testing.T) {
 		db, ctx := dfrFixture(t)
 		if _, err := db.Execute(ctx, `UPDATE hits SET "UserAgent" = 'Q' WHERE WatchID = 3`); err != nil {

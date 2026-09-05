@@ -1190,14 +1190,31 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 // nothing and the MERGE reported success with zero rows affected — a wrong
 // answer dressed as a no-op, where PostgreSQL raises 42703 naming
 // `t.nosuchcol` (#678 review, residual 3).
+// It also REWRITES each key to the spelling its relation stores, which is
+// what makes `matchByKeys` able to find the value. The ON condition is parsed
+// as an expression, so its column names arrive FOLDED — an unquoted
+// identifier lower-cases at the lexer (#731) — while the target row is
+// `readMergeTarget`'s `batch.RecordBatch.RowAt`, keyed by the catalog
+// schema's spelling, and CamelCase column names are ordinary there. Comparing
+// the folded name against that map read nil for every row, so
+// `ON hits.WatchID = s.k` matched NOTHING: every WHEN MATCHED clause was
+// skipped and the source row fell through to WHEN NOT MATCHED, which
+// INSERTED a duplicate instead of updating the row that was already there.
 func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
-	for _, k := range keys {
-		if _, ok := ev.colByName[strings.ToLower(k.TargetCol)]; !ok {
+	for i := range keys {
+		k := &keys[i]
+		c, ok := ev.colByName[strings.ToLower(k.TargetCol)]
+		if !ok {
 			return sqlerr.New("42703", "column %s.%s does not exist", ev.targetAlias, k.TargetCol)
 		}
+		k.TargetCol = c.Name
 		if ev.sourceKnown || ev.sourceNamed {
-			if _, ok := ev.srcByName[strings.ToLower(k.SourceCol)]; !ok {
+			sc, ok := ev.srcByName[strings.ToLower(k.SourceCol)]
+			if !ok {
 				return sqlerr.New("42703", "column %s.%s does not exist", ev.sourceAlias, k.SourceCol)
+			}
+			if sc.Name != "" {
+				k.SourceCol = sc.Name
 			}
 		}
 	}
