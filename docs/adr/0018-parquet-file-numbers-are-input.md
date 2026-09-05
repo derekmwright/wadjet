@@ -715,11 +715,13 @@ container cells individually so a regression says which shape came back.
 ### 11. The reader trusts nothing it can verify
 
 §1 bounds a number before it sizes an allocation. §2 refuses a claim another
-part of the same file contradicts. §10 is where the WRITER's guarantee stops. §11 is about the checks
-the format supplies for its own benefit: **every self-describing check a file
+part of the same file contradicts. §10 is where the WRITER's guarantee stops.
+§11 is about the checks the format supplies for its own benefit: **every self-describing check a file
 carries is performed before a value derived from it is returned, and a failure
 is an error naming the location — never a fabricated NULL and never a shifted
 value.**
+
+Four families of such check exist, and none of them was being made.
 
 **The page checksum.** `PageHeader.crc` is a CRC-32 (IEEE polynomial) over a
 page's serialized body exactly as stored — after compression, levels
@@ -784,7 +786,7 @@ It is now derived from the levels, and where a v2 header ALSO declares
 
 Three consequences follow from where the checks live.
 
-*One place, every path.* All three are in `ColumnPageReader`, which is the
+*One place, every path.* Every one of them is in `ColumnPageReader`, which is the
 single object the row reader, the native columnar scan, the selection-aware
 decode, the lengths-only decode, the row filter and the dictionary prune all
 walk. That is §3 discharged structurally rather than by repetition: there is
