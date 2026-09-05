@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
@@ -314,6 +315,31 @@ func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nes
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	// This map is keyed by the CATALOG's spelling and looked up by an OUTPUT
+	// column name — a reference, which an unquoted identifier folds to lower
+	// case at the lexer (#731). CamelCase column names are ordinary in a
+	// catalog, so `SELECT Attrs FROM t` over a column declared `Attrs` missed
+	// here; `ordered` is deliberately nil on this path, so the positional
+	// fallback could not save it either. The consequence is wire-visible and
+	// silent: `formatPgValueTyped(val, nil)` renders a ROW in SORTED-KEY
+	// order rather than declared field order, and loses the ARRAY/MAP
+	// distinction — `(9,A)` came back as `(A,9)`. Publish the folded spelling
+	// as an alias so a folded reference finds its declaration; a byte-exact
+	// entry is never shadowed, and the `conflicting` rule above has already
+	// removed the names two tables spell differently.
+	aliases := make(map[string]parquet.Column)
+	for name, col := range out {
+		f := batch.FoldIdent(name)
+		if f == name {
+			continue
+		}
+		if _, taken := out[f]; !taken {
+			aliases[f] = col
+		}
+	}
+	for f, col := range aliases {
+		out[f] = col
 	}
 	return &nestedFieldSchema{byName: out}
 }
