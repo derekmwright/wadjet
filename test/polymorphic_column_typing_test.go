@@ -69,14 +69,14 @@ func TestPolymorphicFunctionsOverColumns(t *testing.T) {
 		{"greatest over a float and an int column", "SELECT GREATEST(n_ratio, n_nationkey) AS x FROM nation ORDER BY n_nationkey",
 			[]any{1.5, 2.5, 3.5}},
 
-		// Mixed types, where the SQL answer is genuinely debatable. Wadjet
-		// takes the FIRST argument that decides — the column here, since a
-		// literal is consulted only after it. That is DuckDB's answer too:
-		// SELECT typeof(COALESCE(42, 'text')) is INTEGER, the string cast to
-		// the column's type rather than the column widened to text.
-		{"int column beside a string literal follows the column",
-			"SELECT COALESCE(n_nationkey, 'text') AS x FROM nation ORDER BY n_nationkey",
-			[]any{int64(0), int64(1), int64(2)}},
+		// Mixed types. Wadjet takes the FIRST argument that decides — the
+		// column — and reads the literal as that column's type, which is
+		// PostgreSQL's own rule for a COALESCE: it folds its arguments to one
+		// type at parse analysis, so the unknown literal is coerced to
+		// bigint. `COALESCE(n_nationkey, 'text')` is therefore a REFUSAL
+		// there, asserted below rather than here; DuckDB's `typeof(COALESCE(
+		// 42, 'text')) = INTEGER` is not the authority on a refusal (ADR-0012
+		// item 1).
 		{"string column beside an int literal follows the column",
 			"SELECT COALESCE(n_name, 0) AS x FROM nation ORDER BY n_nationkey",
 			[]any{"ALGERIA", "ARGENTINA", "BRAZIL"}},
@@ -93,6 +93,35 @@ func TestPolymorphicFunctionsOverColumns(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assertColumn(t, ctx, db, tc.sql, "x", tc.want)
+		})
+	}
+	// A quoted literal a fold's own type cannot read is 22P02 on the server,
+	// with this exact message, before any row — measured on 17.11:
+	//
+	//	SELECT COALESCE(1::bigint, 'text')
+	//	  ERROR:  invalid input syntax for type bigint: "text"
+	//
+	// COALESCE reached that refusal only in round 3 of arc F3; before it the
+	// three folds disagreed with each other — GREATEST, LEAST and NULLIF
+	// refused while COALESCE answered — and this file recorded the answer.
+	// One fold rule, one disposition.
+	//
+	// `COALESCE(n_name, 0)` above is the OTHER mixed pair and is NOT this
+	// rule: PostgreSQL raises 42804 "COALESCE types text and integer cannot
+	// be matched" for it, because that literal is not unknown-typed at all.
+	// Refusing it needs a type-UNIFICATION check rather than a literal
+	// accept-set, so it stays as it is.
+	for _, sql := range []string{
+		"SELECT COALESCE(n_nationkey, 'text') AS x FROM nation",
+		"SELECT NULLIF(n_nationkey, 'text') AS x FROM nation",
+		"SELECT GREATEST(n_nationkey, 'text') AS x FROM nation",
+		"SELECT LEAST(n_nationkey, 'text') AS x FROM nation",
+	} {
+		t.Run("a literal the fold's type cannot read is refused/"+sql, func(t *testing.T) {
+			if _, err := db.Query(ctx, sql); err == nil {
+				t.Errorf("ANSWERED; PostgreSQL 17.11 raises 22P02 "+
+					`invalid input syntax for type bigint: "text"`+"\n  SQL: %s", sql)
+			}
 		})
 	}
 }
