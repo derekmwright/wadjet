@@ -103,6 +103,31 @@ func (c *Coordinator) runScalarProjectionLocal(ctx context.Context, queryID stri
 		"SELECT-list subquery with no distributed stage", &c.localScalarProjection)
 }
 
+// runNullAwareAntiLocal executes a query the stage DAG refused
+// (physical.ErrNullAwareAntiBuildNotReplicated) on the coordinator-local
+// single-process pipeline, whose single HashJoin sees the whole build side by
+// construction.
+//
+// `x NOT IN (SELECT y FROM t)` is three-valued and its third value is a fact
+// about the WHOLE build — did any row have a NULL key — which exec.HashJoin
+// reads once and answers no rows on. A hash-partitioned build splits that
+// fact: the task holding the NULL partition emits nothing and every other
+// task emits its probe rows, so the query answers what its two-valued
+// `NOT EXISTS` twin would, silently (#507). walkStages forces such a join
+// onto the broadcast path; the invariant is what says the forcing survived
+// every later pass, and this is where a plan that cannot show it goes.
+func (c *Coordinator) runNullAwareAntiLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"null-aware anti join whose build is not replicated", &c.localNullAwareAnti)
+}
+
+// NullAwareAntiLocalRoutes reports how many plans were refused because a
+// null-aware anti join's build could not be shown to reach every task whole,
+// and answered on the coordinator-local pipeline instead.
+func (c *Coordinator) NullAwareAntiLocalRoutes() int64 {
+	return c.localNullAwareAnti.Load()
+}
+
 // runUnreachableOutputLocal executes a query the stage DAG refused
 // (physical.ErrUnreachableGatherOutput) on the coordinator-local
 // single-process pipeline, where every Project is a real operator.

@@ -3,6 +3,8 @@ package physical
 import (
 	"errors"
 	"fmt"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // ErrNullAwareAntiBuildNotReplicated marks a plan whose null-aware anti join
@@ -26,6 +28,15 @@ import (
 // loudness: a plan this cannot show to be right is routed to the
 // coordinator-local pipeline, which answers it, instead of being dispatched to
 // workers that would each answer a different question.
+//
+// The refusal carries SQLSTATE 0A000 and the coordinator has an `errors.Is`
+// arm for it (`runNullAwareAntiLocal`, counter
+// `NullAwareAntiLocalRoutes`) — round 1 of this arc's review found all three
+// of those claims written down and none of them implemented: a bare
+// `errors.New` with no coder, and no routing arm, so a plan that tripped the
+// invariant would have reached the client as `physical plan: …` with no
+// class. A promise a document makes and the code does not keep is worse than
+// no promise.
 var ErrNullAwareAntiBuildNotReplicated = errors.New(
 	"a null-aware anti join's build side is not replicated")
 
@@ -71,11 +82,11 @@ func assertNullAwareAntiBuildsAreReplicated(stages []Stage) error {
 				continue
 			}
 		}
-		return fmt.Errorf("%w: stage %s (%s) reads build %q, which is %v — NOT IN's"+
-			" three-valued rule reads one fact off the WHOLE build side (#507), and a"+
-			" partitioned build splits it, so the query would answer its NOT EXISTS twin;"+
-			" the coordinator runs this query single-process",
-			ErrNullAwareAntiBuildNotReplicated, s.ID, s.Type, build, buildDistKind(byID, build))
+		return sqlerr.Wrap("0A000", fmt.Errorf("%w: stage %s (%s) reads build %q, which is %v"+
+			" — NOT IN's three-valued rule reads one fact off the WHOLE build side (#507),"+
+			" and a partitioned build splits it, so the query would answer its NOT EXISTS"+
+			" twin; the coordinator runs this query single-process",
+			ErrNullAwareAntiBuildNotReplicated, s.ID, s.Type, build, buildDistKind(byID, build)))
 	}
 	return nil
 }
@@ -96,4 +107,43 @@ func buildDistKind(byID map[string]*Stage, id string) string {
 		return "round-robin"
 	}
 	return "unknown"
+}
+
+// nullAwareAntiForcingDisabled disarms walkStages' forced broadcast for a
+// null-aware anti join. TEST-ONLY, and it exists because the invariant below
+// cannot otherwise be reached from SQL: the forcing is what keeps every plan
+// this engine emits correct, so the only way to ask "does the invariant refuse,
+// with its class, and does the coordinator route it" is to put the planner in
+// the state a future pass that re-typed such a stage would leave it in.
+var nullAwareAntiForcingDisabled bool
+
+// DisableNullAwareAntiBroadcastForcingForTest turns the forcing off and returns
+// the function that turns it back on.
+func DisableNullAwareAntiBroadcastForcingForTest() func() {
+	nullAwareAntiForcingDisabled = true
+	return func() { nullAwareAntiForcingDisabled = false }
+}
+
+// AssertNullAwareAntiBuildsAreReplicatedForTest exports the invariant so a gate
+// in another package can ask it about a hand-built plan — the class the
+// refusal carries is a promise three documents make, and it needs an assertion
+// that does not depend on standing a cluster up.
+func AssertNullAwareAntiBuildsAreReplicatedForTest(stages []Stage) error {
+	return assertNullAwareAntiBuildsAreReplicated(stages)
+}
+
+// nullAwareAntiRequiredBroadcastDisabled disarms the DISTRIBUTION PROPERTY —
+// the second of the two production hunks. TEST-ONLY, and paired with the one
+// above because the two are layers: with only the forcing off, the property
+// still makes EnsureDistribution splice a replicate exchange and the answer
+// stays right, which is the property hunk earning its keep; with both off the
+// build really is hash-partitioned and the INVARIANT is what stands between a
+// client and NOT IN's two-valued twin.
+var nullAwareAntiRequiredBroadcastDisabled bool
+
+// DisableNullAwareAntiRequiredBroadcastForTest turns the property off and
+// returns the function that turns it back on.
+func DisableNullAwareAntiRequiredBroadcastForTest() func() {
+	nullAwareAntiRequiredBroadcastDisabled = true
+	return func() { nullAwareAntiRequiredBroadcastDisabled = false }
 }

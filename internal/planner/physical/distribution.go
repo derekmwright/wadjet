@@ -239,7 +239,7 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 			// silently answers the two-valued question. Every such pass is
 			// guarded today; this is what makes the next one safe by
 			// construction rather than by remembering.
-			if stage.NullAwareAnti {
+			if stage.NullAwareAnti && !nullAwareAntiRequiredBroadcastDisabled {
 				return RequiredDistribution{Kind: RequiredBroadcast}
 			}
 			return RequiredDistribution{Kind: RequiredClusteredOn,

@@ -291,6 +291,12 @@ type Coordinator struct {
 	// for a subquery in the SELECT list, and which ran on the
 	// coordinator-local pipeline instead (#659).
 	localScalarProjection atomic.Int64
+
+	// localNullAwareAnti counts queries whose plan the stage DAG refused
+	// because a null-aware anti join's build could not be shown to reach
+	// every task whole (#539/#507), and which the coordinator-local
+	// single-process pipeline answered instead.
+	localNullAwareAnti atomic.Int64
 	// localUnreachableOutput counts queries whose plan the stage DAG refused
 	// because no stage computed the SELECT list, and which ran on the
 	// coordinator-local pipeline instead (#656 F2).
@@ -1063,6 +1069,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// the DISTINCT is not silently DROPPED (#466) — but the query has
 		// an answer, and the single-process pipeline applies a Distinct
 		// wherever it sits, so route it there rather than erroring.
+		// And a null-aware anti join whose build the plan cannot show every
+		// task sees whole. A partitioned build splits NOT IN's three-valued
+		// fact and the query silently answers its NOT EXISTS twin (#507), so
+		// the invariant refuses rather than dispatch — and the single-process
+		// pipeline, whose one join holds the whole build by construction,
+		// answers it (#539).
+		if errors.Is(err, physical.ErrNullAwareAntiBuildNotReplicated) {
+			return c.runNullAwareAntiLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
 		if errors.Is(err, physical.ErrDistinctDistributed) {
 			return c.runDistinctLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
