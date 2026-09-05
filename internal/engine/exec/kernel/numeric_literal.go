@@ -115,6 +115,8 @@ func NumericTypeName(typ batch.TypeID) (string, bool) {
 		// PostgreSQL's own name for both: it has one `inet` where this engine
 		// has two bare-address types, and a client can look `inet` up.
 		return "inet", true
+	case batch.TypeBytes:
+		return "bytea", true
 	case batch.TypeCIDR:
 		return "cidr", true
 	case batch.TypeMAC:
@@ -188,6 +190,16 @@ func QuotedLitStatus(typ batch.TypeID, text string) (NumConstStatus, bool) {
 				return NumConstOK, true
 			}
 		} else if _, ok := IPv6LitKey(text); ok {
+			return NumConstOK, true
+		}
+		return NumConstSyntax, true
+	case batch.TypeBytes:
+		// byteain's accept-set, asked where every other type's is asked. The
+		// four sites that read a bytea literal all fell back to its RAW
+		// SPELLING when it could not be decoded and none of them raised, so
+		// `b = '\x6'` and `b <> '\xzz'` ANSWERED where the server refuses
+		// (round 2, P7). One predicate, at plan time, like the rest.
+		if _, ok := ByteaLiteral(text); ok {
 			return NumConstOK, true
 		}
 		return NumConstSyntax, true

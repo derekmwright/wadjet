@@ -11619,9 +11619,20 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			// `bytea || bytea` is BYTEA on the server, and an unknown-typed
 			// literal beside one takes bytea too — so the result declares
 			// OID 17 and its bytes go out as \x hex rather than raw under
-			// text's 25 (#583). Everything else is string concatenation.
+			// text's 25 (#583).
+			//
+			// `text || bytea` is TEXT there, and that is not a detail: the
+			// server resolves that pair through `text || anynonarray`, which
+			// renders the bytea and concatenates as text —
+			// `'AB'::text || '\x6869'::bytea` is `AB\x6869` with pg_typeof
+			// text, measured on 17.11. Declaring bytea for it moved a RIGHT
+			// declared class to a wrong one (round 2, B3). So bytea only when
+			// no operand is DECLARED text; an unknown literal declares
+			// nothing and is the case that takes bytea.
 			if bytesOperand(n.Left, decls) || bytesOperand(n.Right, decls) {
-				return expr.Decl(parquet.TypeBytes), expr.Decided
+				if !stringOperand(n.Left, decls) && !stringOperand(n.Right, decls) {
+					return expr.Decl(parquet.TypeBytes), expr.Decided
+				}
 			}
 			// String concatenation, not arithmetic. Declaring it Float64
 			// handed the concat kernel an output vector with no BytesData,
@@ -11867,6 +11878,18 @@ func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (expr.DeclType, expr.
 // declaration test and not a value one: the box for a BYTES column and for a
 // STRING column are both readable as bytes, and ADR-0012 item 8 says which of
 // the two a site is looking at comes from the declaration.
+// stringOperand is bytesOperand's twin for TEXT, and the pair is what
+// separates `bytea || bytea` and `bytea || <unknown literal>` — both bytea on
+// the server — from `text || bytea`, which is text there.
+//
+// A QUOTED literal declares TypeString at this layer and is `unknown` on the
+// server, so it is deliberately NOT a string operand here: that is the case
+// PostgreSQL resolves to bytea.
+func stringOperand(n plansql.Node, decls colDecls) bool {
+	d, c := nodeDeclaredType(n, decls)
+	return c != expr.Undecided && d.ID == parquet.TypeString && !d.Quoted
+}
+
 func bytesOperand(n plansql.Node, decls colDecls) bool {
 	d, c := nodeDeclaredType(n, decls)
 	return c != expr.Undecided && d.ID == parquet.TypeBytes

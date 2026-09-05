@@ -139,9 +139,14 @@ func TestQuotedLitStatusMatchesPostgresInputGrammar(t *testing.T) {
 // Leaving them off the list is what confined the second answer to ONE
 // evaluator, so the same query refused in a WHERE clause, answered inside a
 // CASE, and answered a wrong NUMBER on the DAG (B1).
+//
+// BYTES left it too, for the same shape one type family over: the four sites
+// that read a bytea literal fell back to its RAW SPELLING when byteain could
+// not decode it and none of them raised, so `b = '\x6'` answered where the
+// server refuses (P7).
 func TestQuotedLitStatusHasNoRuleForTheRest(t *testing.T) {
 	for _, typ := range []batch.TypeID{
-		batch.TypeBool, batch.TypeString, batch.TypeBytes, batch.TypeTimestamp,
+		batch.TypeBool, batch.TypeString, batch.TypeTimestamp,
 		batch.TypeDate, batch.TypeArray,
 		batch.TypeRow, batch.TypeMap, batch.TypeVector,
 	} {

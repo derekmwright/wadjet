@@ -946,9 +946,15 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	// PostgreSQL's boolean input grammar, not string-matched against the
 	// bool rendered as "true"/"false" (#574). A bool LITERAL is boxUnknown,
 	// so `s = TRUE` never reaches here.
-	case lk == boxBool && rk == boxQuoted && rText != "":
+	//
+	// The EMPTY literal is included, and the `rText != ""` guard the numeric
+	// arms carry is deliberately absent here: `''` is the one unparseable
+	// string PostgreSQL names in its own error text
+	// (`invalid input syntax for type boolean: ""`), and guarding it out made
+	// `(k > 1) = ''` answer FALSE where the server raises 22P02 (round 2, P8).
+	case lk == boxBool && rk == boxQuoted:
 		return true
-	case rk == boxBool && lk == boxQuoted && lText != "":
+	case rk == boxBool && lk == boxQuoted:
 		return true
 	// A TEMPORAL operand meeting anything whose values can arrive as text.
 	// The domain (epoch days vs epoch milliseconds) is the declaration's to

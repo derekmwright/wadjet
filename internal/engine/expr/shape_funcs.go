@@ -149,8 +149,21 @@ func vecShapeLenAny(src *batch.Vector, out *batch.Vector, n int, mul int) {
 
 // vecCharLength counts runes. This is the one member of the length family
 // that genuinely needs the bytes — no offsets fast path exists for it.
+//
+// Except over BYTES, where it counts BYTES: bytea has no characters, so
+// `length(bytea)` is the byte count on the server and the same number
+// octet_length gives. `fnLength` took that arm in #583 and this kernel did
+// not, and THIS is the evaluator a projection over a bare column reaches — so
+// `LENGTH(b)` answered 1 for the two bytes of an encoded 'é' while
+// `LENGTH(b || b)` answered 4 and `OCTET_LENGTH(b)` answered 2: the engine
+// disagreeing with itself three ways over one value, with three docs and an
+// ADR asserting it fixed (round 2, B4).
 func vecCharLength(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
+	if src.Type == batch.TypeBytes {
+		vecOctetLength(args, out, n)
+		return
+	}
 	if len(out.Int32Data) < n {
 		// Non-int32 output vector: see vecShapeLenScaled.
 		for i := 0; i < n; i++ {

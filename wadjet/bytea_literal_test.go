@@ -3,6 +3,7 @@ package wadjet
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -49,6 +50,12 @@ func f3ByteaOpen(t *testing.T) *DB {
 		// escape spelling is built out of: it is the one that says the reading
 		// is byteain and not "strip a prefix".
 		{"k": int64(5), "b": []byte{'a', '\\', 'b'}},
+		// The two bytes of an encoded 'é' — VALID UTF-8, so one rune and two
+		// bytes. It is the only shape that separates a byte count from a
+		// character count, and #583's first pass had it in the file's header
+		// comment and in no LENGTH cell (round 2, B4).
+		{"k": int64(6), "b": []byte{0xc3, 0xa9}},
+		{"k": int64(7), "b": []byte("héllo")},
 	}
 	ing := db.NewIngester("byteapr", sc, nil, ingest.Config{MaxBufferRows: 16, RowGroupSize: 8})
 	if err := ing.Ingest(ctx, rows); err != nil {
@@ -58,6 +65,54 @@ func f3ByteaOpen(t *testing.T) *DB {
 		t.Fatalf("flush: %v", err)
 	}
 	return db
+}
+
+// byteain's REFUSALS, which the four sites that read a bytea literal used to
+// answer around: each fell back to the literal's raw SPELLING when the decode
+// failed and none of them raised, so `b = '\x6'` and `b <> '\xzz'` ANSWERED
+// where PostgreSQL refuses (round 2, P7). The accept-side edges are here too —
+// uppercase `\X` is a refusal on the server and whitespace inside the hex
+// digits is NOT.
+func TestByteaLiteralRefusalsFollowByteain(t *testing.T) {
+	ctx := context.Background()
+	db := f3ByteaOpen(t)
+
+	for _, c := range []struct{ name, lit, state string }{
+		{"odd_hex_digits", `\x6`, "22P02"},
+		{"bad_hex_digit", `\xzz`, "22P02"},
+		{"lone_backslash", `a\b`, "22P02"},
+		{"uppercase_x_is_not_the_hex_form", `\X6869`, "22P02"},
+		{"trailing_backslash", `abc\`, "22P02"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, sql := range []string{
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM byteapr WHERE b = '%s'`, c.lit),
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM byteapr WHERE b <> '%s'`, c.lit),
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM byteapr WHERE b IN ('%s')`, c.lit),
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM byteapr WHERE k < 0 AND b = '%s'`, c.lit),
+			} {
+				_, err := db.Query(ctx, sql)
+				if err == nil {
+					t.Errorf("answered; PostgreSQL 17.11 refuses with %s\n  SQL: %s", c.state, sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), "bytea") {
+					t.Errorf("%v — want a bytea input refusal\n  SQL: %s", err, sql)
+				}
+			}
+		})
+	}
+
+	// hex_decode SKIPS whitespace, so this is the same two bytes as
+	// `'\x6869'` on the server — and refusing it would be refusing what
+	// PostgreSQL accepts.
+	res, err := db.Query(ctx, `SELECT k FROM byteapr WHERE b = '\x68 69'`)
+	if err != nil {
+		t.Fatalf("whitespace inside the hex digits was refused: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf(`b = '\x68 69' matched %d rows, want the row holding 0x68 0x69`, len(res.Rows))
+	}
 }
 
 func TestByteaLiteralIsReadByByteain(t *testing.T) {
@@ -80,8 +135,8 @@ func TestByteaLiteralIsReadByByteain(t *testing.T) {
 		{"escape_octal", `b = '\377\376\000A'`, []int64{2}},
 		{"escape_backslash", `b = 'a\\b'`, []int64{5}},
 		// Ordering and inequality read the same literal the same way.
-		{"ne", `b <> '\x6869'`, []int64{2, 3, 5}},
-		{"gt", `b > '\x6869'`, []int64{2}},
+		{"ne", `b <> '\x6869'`, []int64{2, 3, 5, 6, 7}},
+		{"gt", `b > '\x6869'`, []int64{2, 6, 7}},
 		{"lt", `b < '\x6869'`, []int64{3, 5}},
 		{"in", `b IN ('\x6869', '\xfffe0041')`, []int64{1, 2}},
 		// A STRING column is not a bytea column: nothing here changes what a

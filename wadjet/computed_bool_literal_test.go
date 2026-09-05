@@ -101,6 +101,14 @@ func TestComputedBooleanTakesThePostgresBooleanGrammar(t *testing.T) {
 	for _, sql := range []string{
 		`SELECT COUNT(*) AS n FROM ` + tbl + ` WHERE (NOT c_bool) = 'bogus'`,
 		`SELECT COUNT(*) AS n FROM ` + tbl + ` WHERE (c_bool AND c_bool) = 'o'`,
+		// The EMPTY literal, which is the one unparseable string PostgreSQL
+		// names in its own error text — `invalid input syntax for type
+		// boolean: ""`. It answered FALSE here, because pairApplies guarded
+		// the two boxBool arms with `rText != ""` (round 2, P8).
+		`SELECT COUNT(*) AS n FROM ` + tbl + ` WHERE (NOT c_bool) = ''`,
+		`SELECT COUNT(*) AS n FROM ` + tbl + ` WHERE (id > 1) = ''`,
+		`SELECT COUNT(*) AS n FROM ` + tbl + ` WHERE c_bool = ''`,
+		`SELECT COUNT(*) AS n FROM (SELECT (id > 1) = '' AS v FROM ` + tbl + `) x WHERE v`,
 	} {
 		_, err := tmRun(ctx, db, sql)
 		if err == nil {

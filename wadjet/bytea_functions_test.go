@@ -35,6 +35,22 @@ func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 		{"length_ascii", `LENGTH(b)`, 1, int32(2), parquet.TypeInt32},
 		{"length_non_utf8", `LENGTH(b)`, 2, int32(4), parquet.TypeInt32},
 		{"length_backslash", `LENGTH(b)`, 5, int32(3), parquet.TypeInt32},
+		// The cells that separate BYTES from characters. A bare column takes
+		// the VECTORIZED kernel and a derived value takes the scalar one, so
+		// both spellings are here: #583's first pass gave the scalar arm the
+		// byte count and left the kernel counting runes, which is the
+		// evaluator a projection over a bare column reaches (round 2, B4).
+		{"length_multibyte_column", `LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
+		{"length_multibyte_derived", `LENGTH(b || CAST('' AS BYTES))`, 6, int32(2), parquet.TypeInt32},
+		{"octet_length_multibyte", `OCTET_LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
+		{"char_length_multibyte_is_bytes_too", `CHAR_LENGTH(b)`, 6, int32(2), parquet.TypeInt32},
+		{"length_multibyte_word", `LENGTH(b)`, 7, int32(6), parquet.TypeInt32},
+		{"octet_length_multibyte_word", `OCTET_LENGTH(b)`, 7, int32(6), parquet.TypeInt32},
+		// The TEXT family keeps CHARACTERS over the same bytes, which is the
+		// boundary from the other side.
+		{"string_length_multibyte", `LENGTH('é')`, 6, int32(1), parquet.TypeInt32},
+		{"string_char_length_multibyte", `CHAR_LENGTH('héllo')`, 6, int32(5), parquet.TypeInt32},
+		{"string_octet_length_multibyte", `OCTET_LENGTH('héllo')`, 6, int32(6), parquet.TypeInt32},
 		{"octet_length", `OCTET_LENGTH(b)`, 2, int32(4), parquet.TypeInt32},
 		// substring(bytea, …) is bytea, indexed by bytes. The second cell is
 		// the one that was U+FFFD.
@@ -56,6 +72,16 @@ func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 		// filed for. Delete this pin when the argument rule lands.
 		{"residual_concat_hex_spelled_literal", `b || '\x41'`, 2,
 			[]byte{0xff, 0xfe, 0x00, 0x41, 0x5c, 0x78, 0x34, 0x31}, parquet.TypeBytes},
+		// `text || bytea` is TEXT on the server — it resolves through
+		// `text || anynonarray`, which RENDERS the bytea and concatenates as
+		// text — while `bytea || bytea` and `bytea || <unknown literal>` are
+		// bytea. Declaring bytea for the text pair moved a right class to a
+		// wrong one (round 2, B3). The VALUE is a separate, older divergence
+		// (this engine concatenates the raw bytes where PostgreSQL renders
+		// `\x6869`), recorded in ADR-0012 and unchanged here.
+		{"concat_text_column_is_text", `CAST('AB' AS STRING) || b`, 1, "ABhi", parquet.TypeString},
+		{"concat_text_column_right", `b || CAST('AB' AS STRING)`, 1, "hiAB", parquet.TypeString},
+		{"concat_text_function_is_text", `UPPER(CAST('ab' AS STRING)) || b`, 1, "ABhi", parquet.TypeString},
 		// The two that were already right, as the controls: md5(bytea) is
 		// text on the server too, and a CAST renders the \x form.
 		{"md5", `MD5(b)`, 1, "49f68a5c8493ec2c0bf489821c21fc3b", parquet.TypeString},

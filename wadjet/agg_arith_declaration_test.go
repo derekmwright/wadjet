@@ -8,8 +8,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// Arithmetic OVER an aggregate carries the AGGREGATE'S declared type, whatever
-// its argument is (#867, ADR-0024 item 2).
+// Arithmetic OVER an aggregate carries the AGGREGATE'S declared type when the
+// aggregate's argument is computed over columns the SCAN below it carries
+// (#867, ADR-0024 item 2).
+//
+// Not when a derived table or CTE has RENAMED those columns: three spellings
+// are still float8 with the outer operand lost, they are pinned fail-on-agree
+// at the end of this file, and #867 stays open for them.
 //
 // It used to carry it only when the argument was a BARE COLUMN. Give the
 // aggregate an expression and the whole term fell to float8 — and at int8
@@ -97,6 +102,12 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 	// that says the two ways of writing one query answer one thing — and it
 	// cannot inherit a wrong value from a wrong engine, because a divergence
 	// between the two spellings is itself the failure.
+	// FLOAT is deliberately absent from this list and asserted on its
+	// DECLARATION alone below: float addition is not associative, so two
+	// spellings that aggregate in a different order may differ in the last
+	// ulp — ADR-0013's legal nondeterminism, not a divergence. The EXACT
+	// types are where "one query, two values" is a defect, and they are what
+	// this asserts.
 	for _, c := range []struct {
 		name, agg string
 		decl      parquet.TypeID
@@ -105,7 +116,6 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 		{"computed_max_of_a_decimal_product", `MAX(c_dec * 2)`, parquet.TypeDecimal},
 		{"computed_avg_of_an_int_product", `AVG(c_i32 * 2)`, parquet.TypeDecimal},
 		{"computed_avg_of_a_decimal_product", `AVG(c_dec * 2)`, parquet.TypeDecimal},
-		{"computed_sum_of_a_float_product", `SUM(c_f64 * 2)`, parquet.TypeFloat64},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			direct := `SELECT ` + c.agg + ` + 1 AS v FROM ` + tbl
@@ -126,5 +136,76 @@ func TestArithmeticOverAComputedAggregateCarriesTheAggregatesType(t *testing.T) 
 				t.Errorf("%s + 1 declares %v, want %v", c.agg, got, c.decl)
 			}
 		})
+	}
+
+	// The BOUNDARY, pinned fail-on-agree, and the reason #867 is PROGRESS and
+	// not closed (round 2, B6).
+	//
+	// `aggComputedInputDecl` types the aggregate's argument through
+	// `inputColDecls(node.Children[0])`, which reads the SCAN columns below
+	// the aggregate. A derived table or CTE renames those away, so
+	// `SUM(v * 3000000)` over `(SELECT c_i64 AS v FROM typemx) x` finds no
+	// declaration for `v` and the whole term falls to float8 — with the outer
+	// `+ 1` lost at that magnitude, which is the defect #867 was filed for,
+	// through three of its five spellings.
+	//
+	// It is NOT closed by asking the child's EMITTED columns second: measured,
+	// the derived Project does not carry the type there either, so the gap is
+	// upstream of this function — in the walk that types a derived table's
+	// output columns from its own projection list. That is a different layer
+	// (F1's #796 territory) and its own arc; bounding the fix here would leave
+	// the issue's own headline shape wrong while the issue read closed, which
+	// rule 11 forbids.
+	//
+	// The DAG answers these exactly, so the two arms disagree — recorded in
+	// ADR-0024 item 2. Delete these cells when the derived-boundary walk
+	// lands; they FAIL when they start agreeing.
+	for _, c := range []struct{ name, sql string }{
+		{"residual_derived_rename",
+			`SELECT SUM(v * 3000000) + 1 AS v FROM (SELECT c_i64 AS v FROM ` + tbl + `) x`},
+		{"residual_derived_projection",
+			`SELECT SUM(c_i64 * 3000000) + 1 AS v FROM (SELECT c_i64 FROM ` + tbl + `) x`},
+		{"residual_cte_rename",
+			`WITH c AS (SELECT c_i64 AS v FROM ` + tbl + `) SELECT SUM(v * 3000000) + 1 AS v FROM c`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := db.Query(ctx, c.sql)
+			if err != nil {
+				t.Fatalf("%v\n  SQL: %s", err, c.sql)
+			}
+			got, isFloat := res.Rows[0]["v"].(float64)
+			if !isFloat || got != 3.6280278840509997e+19 {
+				t.Errorf("= %#v; this pin records the float64 3.6280278840509997e+19 and "+
+					"PostgreSQL 17.11 says 36280278840510000001. If it has moved, the "+
+					"derived-table boundary carries the aggregate's declaration now: "+
+					"re-measure this family, delete these three cells and close #867"+
+					"\n  SQL: %s", res.Rows, c.sql)
+			}
+			if d := res.ColumnMetas[0].TypeID; d != parquet.TypeFloat64 {
+				t.Errorf("declares %v; this pin records FLOAT64\n  SQL: %s", d, c.sql)
+			}
+			// The SELECT * spelling is the control that says the defect is
+			// the RENAME and not derived tables as such.
+			ctl := `SELECT SUM(c_i64 * 3000000) + 1 AS v FROM (SELECT * FROM ` + tbl + `) x`
+			cres, err := db.Query(ctx, ctl)
+			if err != nil {
+				t.Fatalf("%v\n  SQL: %s", err, ctl)
+			}
+			if cres.Rows[0]["v"] != "36280278840510000001" {
+				t.Errorf("the SELECT * control = %#v, want the exact value — the boundary "+
+					"this pin describes has moved", cres.Rows)
+			}
+		})
+	}
+
+	// The float row's DECLARATION, which is the half that is a claim: a float
+	// aggregate stays float8 and must not be dragged into the exact family by
+	// the computed-argument rule.
+	fres, err := db.Query(ctx, `SELECT SUM(c_f64 * 2) + 1 AS v FROM `+tbl)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if got := fres.ColumnMetas[0].TypeID; got != parquet.TypeFloat64 {
+		t.Errorf("SUM(c_f64 * 2) + 1 declares %v, want FLOAT64", got)
 	}
 }

@@ -22,8 +22,22 @@ import "encoding/hex"
 // an octal escape past one byte). PostgreSQL raises 22P02 for those, and the
 // caller decides whether it can.
 func ByteaLiteral(s string) ([]byte, bool) {
-	if len(s) >= 2 && s[0] == '\\' && (s[1] == 'x' || s[1] == 'X') {
-		raw, err := hex.DecodeString(s[2:])
+	// LOWERCASE `\x` only: `'\X6869'::bytea` is a 22P02 on the server
+	// (byteain tests `s[1] == 'x'`), and accepting it was a superset nobody
+	// recorded (round 2, P7).
+	if len(s) >= 2 && s[0] == '\\' && s[1] == 'x' {
+		// hex_decode SKIPS whitespace inside the digits: `'\x68 69'::bytea`
+		// is the two bytes 0x68 0x69 on the server, and refusing it was
+		// refusing what PostgreSQL accepts.
+		body := make([]byte, 0, len(s)-2)
+		for i := 2; i < len(s); i++ {
+			switch s[i] {
+			case ' ', '\t', '\n', '\v', '\f', '\r':
+				continue
+			}
+			body = append(body, s[i])
+		}
+		raw, err := hex.DecodeString(string(body))
 		if err != nil {
 			return nil, false
 		}
