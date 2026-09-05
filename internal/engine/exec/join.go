@@ -2171,9 +2171,25 @@ func (h *HashJoin) PruneBuildColumns(keepCols []string) {
 		}
 	}
 
-	// Build new pruned schema
-	var newSchema []parquet.Column
-	var colIdx []int
+	// Build new pruned schema.
+	//
+	// keepCols are column REFERENCES off the plan and arrive folded from the
+	// lexer (#731); h.buildSchema carries the catalog's own spelling, which
+	// for a parquet-registered table is `RegionName`. The byte-exact map
+	// probes above therefore answer NO for every CamelCase build column, and
+	// this prune is not the harmless memory optimization its comment claims
+	// when that happens — it DELETES the column the filter above it then
+	// cannot resolve. The resolve pass below is ADDITIVE (it can only mark a
+	// column kept that the map probes did not), so a build schema carrying
+	// two columns of one name still keeps both, and ambiguity declines to
+	// resolve rather than guessing an arm.
+	//
+	// The camel-case invariance battery does not yet distinguish this site:
+	// measured with every other fix in place and this one reverted, it owns 0
+	// of its cells, because the semi/anti shapes there keep a build column the
+	// fixture spells folded. The pass is the hazard closed, not a cell
+	// recovered.
+	keptIdx := make([]bool, len(h.buildSchema))
 	for i, col := range h.buildSchema {
 		kept := keep[col.Name]
 		if !kept {
@@ -2181,7 +2197,17 @@ func (h *HashJoin) PruneBuildColumns(keepCols []string) {
 				kept = keep[col.Name[dot+1:]]
 			}
 		}
-		if kept {
+		keptIdx[i] = kept
+	}
+	for name := range keep {
+		if i := batch.ResolveSchemaIndex(h.buildSchema, name); i >= 0 {
+			keptIdx[i] = true
+		}
+	}
+	var newSchema []parquet.Column
+	var colIdx []int
+	for i, col := range h.buildSchema {
+		if keptIdx[i] {
 			newSchema = append(newSchema, col)
 			colIdx = append(colIdx, i)
 		}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -142,6 +143,20 @@ func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID stri
 //
 // Returns nil on any catalog lookup error or when stage.Columns is empty,
 // which causes the caller to fall back to SELECT *.
+//
+// The intersection RESOLVES rather than byte-compares, and emits the SCHEMA's
+// spelling. stage.Columns is a plan-side list, so a name in it can still be a
+// reference in the lexer's folded spelling (#731) while the catalog keeps what
+// the parquet file gave it — `RegionID`. Byte-exact, that is not an
+// over-approximation this function filters out but a real column it DROPS: a
+// mixed-case schema (`RegionID` beside an already-folded `tier`) keeps the
+// names that happen to match and loses the rest, and the pre-scan task then
+// materializes a build side missing its join key. A total miss returns an
+// empty list, which the caller reads as SELECT * — the safe end.
+//
+// Measured on the camel-case invariance battery with
+// WADJET_SCAN_COL_SANITIZE=0 and every other site fixed: reverting this
+// resolution alone costs 9 cells, all on the two DAG arms.
 func (c *Coordinator) prunedScanColumns(ctx context.Context, stage physical.Stage) []string {
 	if len(stage.Columns) == 0 {
 		return nil
@@ -150,22 +165,21 @@ func (c *Coordinator) prunedScanColumns(ctx context.Context, stage physical.Stag
 	if err != nil || tbl == nil {
 		return nil
 	}
-	valid := make(map[string]bool, len(tbl.Schema.Columns))
-	for _, col := range tbl.Schema.Columns {
-		valid[col.Name] = true
-	}
 	// Walk stage.Columns in order so the SELECT list is deterministic
 	// regardless of map iteration order, and dedupe along the way.
 	seen := make(map[string]bool, len(stage.Columns))
 	out := make([]string, 0, len(stage.Columns))
 	for _, c := range stage.Columns {
-		if seen[c] {
+		idx := batch.ResolveSchemaIndex(tbl.Schema.Columns, c)
+		if idx < 0 {
 			continue
 		}
-		seen[c] = true
-		if valid[c] {
-			out = append(out, c)
+		name := tbl.Schema.Columns[idx].Name
+		if seen[name] {
+			continue
 		}
+		seen[name] = true
+		out = append(out, name)
 	}
 	return out
 }

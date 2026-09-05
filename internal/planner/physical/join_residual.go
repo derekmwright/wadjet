@@ -30,12 +30,29 @@ import (
 // previously refused outright — no existing plan shape gains this code path.
 //
 // Column resolution against the two sides is by name, decided lazily on the
-// first evaluated pair and cached: a qualified name is looked up verbatim in
-// the probe then the build schema (self-join chains carry qualified columns);
-// a qualifier equal to buildAlias forces the build side; otherwise the bare
-// name resolves probe-first. An unresolvable column makes every evaluation
-// UNKNOWN (candidate rejected) and logs once — the planner ships JoinFilter
-// columns through NeededColumns, so a miss here is a plan bug, not user error.
+// first evaluated pair and cached: a qualified name is looked up in the probe
+// then the build schema (self-join chains carry qualified columns); a
+// qualifier equal to buildAlias forces the build side; otherwise the bare
+// name resolves probe-first. Every one of those lookups is
+// ResolveColumnIndex, not ColumnIndex: the names here are REFERENCES off the
+// ON clause, so they arrive folded from the lexer (#731), while the batch
+// carries the catalog's own spelling — `RegionName`, not `regionname`, for a
+// parquet-registered table. A byte-exact probe misses every CamelCase column,
+// and because an unresolvable column makes the residual UNKNOWN the failure
+// mode is not a loud one: the join rejects every candidate and NULL-pads each
+// preserved row, so a LEFT JOIN whose ON carries a residual answers all-NULL
+// on the null-supplying side. The rule the resolver applies (fold only a
+// reference that is itself folded; a delimited name stays byte-exact) is in
+// internal/engine/batch/schema.go.
+//
+// The camel-case invariance battery does not yet distinguish this site — its
+// residual conjuncts name `tier` and `counterid`, which the fixture spells
+// folded, so the byte-exact probe happened to answer. Measured with every
+// other fix in place and this one reverted, it owns 0 of the battery's cells;
+// the change is the hazard closed, not a cell recovered. An unresolvable
+// column still makes every evaluation UNKNOWN (candidate rejected) and logs
+// once — the planner ships JoinFilter columns through NeededColumns, so a
+// miss here is a plan bug, not user error.
 //
 // Returns nil when the expression contains a shape the interpreter does not
 // support; the caller must then refuse the plan loudly rather than drop the
@@ -85,24 +102,24 @@ func BuildJoinResidualFilter(filter, buildAlias string) func(probe *batch.Record
 					b.fromBuild, b.idx, b.field = true, pi, fj
 					continue
 				}
-				if idx := probe.ColumnIndex(qual); idx >= 0 {
+				if idx := probe.ResolveColumnIndex(qual); idx >= 0 {
 					b.fromBuild, b.idx = false, idx
 					continue
 				}
-				if idx := build.ColumnIndex(qual); idx >= 0 {
+				if idx := build.ResolveColumnIndex(qual); idx >= 0 {
 					b.fromBuild, b.idx = true, idx
 					continue
 				}
 				if strings.ToLower(c.Table) == buildAlias {
-					b.fromBuild, b.idx = true, build.ColumnIndex(col)
+					b.fromBuild, b.idx = true, build.ResolveColumnIndex(col)
 					continue
 				}
 			}
-			if idx := probe.ColumnIndex(col); idx >= 0 {
+			if idx := probe.ResolveColumnIndex(col); idx >= 0 {
 				b.fromBuild, b.idx = false, idx
 				continue
 			}
-			b.fromBuild, b.idx = true, build.ColumnIndex(col)
+			b.fromBuild, b.idx = true, build.ResolveColumnIndex(col)
 			if b.idx < 0 {
 				slog.Warn("join residual column resolves on neither side — every candidate will be rejected",
 					"column", c.String(), "filter", filter)

@@ -341,8 +341,11 @@ func computeRequiredColumns(n *Node) {
 // width (safe) if it ever reaches that path.
 const RowCountOnlyColumn = "__rowcount_only__"
 
-// scanColSanitize gates sanitizeScanNeeds (WADJET_SCAN_COL_SANITIZE=0
-// restores the pre-2026-07 polluted lists for A/B). Default on.
+// scanColSanitize gates the DROPPING half of sanitizeScanNeeds
+// (WADJET_SCAN_COL_SANITIZE=0 restores the pre-2026-07 polluted lists for
+// A/B). Default on. It deliberately does NOT gate the schema-spelling half —
+// see the comment on that arm for why an optimization switch must not decide
+// which columns a scan reads.
 var scanColSanitize = os.Getenv("WADJET_SCAN_COL_SANITIZE") != "0"
 
 // sanitizeScanNeeds turns the ancestor-accumulated needs set into a clean
@@ -369,14 +372,6 @@ var scanColSanitize = os.Getenv("WADJET_SCAN_COL_SANITIZE") != "0"
 //
 // Output is sorted for deterministic plans.
 func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
-	if !scanColSanitize {
-		cols := make([]string, 0, len(needs))
-		for col := range needs {
-			cols = append(cols, col)
-		}
-		sort.Strings(cols)
-		return cols
-	}
 	// lower → canonical schema spelling. Refs arrive lowercased from
 	// collectASTColumnRefs; downstream projection (buildReadSchema and the
 	// scan readers) matches column names case-SENSITIVELY, so the kept
@@ -387,6 +382,46 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 	inSchema := make(map[string]string, len(n.ScanColumns))
 	for _, c := range n.ScanColumns {
 		inSchema[strings.ToLower(c)] = c
+	}
+	if !scanColSanitize {
+		// The switch is a POLLUTION A/B and nothing else. It restores the
+		// pre-2026-07 list — every accumulated need, junk included — but it
+		// does NOT restore the pre-2026-07 SPELLING, because the spelling is
+		// not an optimization: RequiredColumns is a scan's read set, it names
+		// columns OF THIS TABLE, and every consumer of it byte-compares
+		// against the table's schema (physical.buildReadSchema, the
+		// scan-cache projection, worker cachedFileStreamSource.projectColumns
+		// via Stage.Columns, coordinator.prunedScanColumns).
+		//
+		// Bundling the two behind one switch made an optimization knob
+		// load-bearing for CORRECTNESS, which is the one thing a kill switch
+		// must never be. The mechanism, measured on the camel-case invariance
+		// battery with WADJET_SCAN_COL_SANITIZE=0: a MIXED-case schema
+		// (`RegionID` beside an already-folded `counterid`) made the folded
+		// needs match the folded columns and miss the CamelCase ones, so
+		// buildReadSchema returned a PARTIAL projection — not the full-width
+		// fallback a TOTAL miss reaches — and the scan silently dropped the
+		// GROUP BY key, the join key and the ORDER BY key. That arm answered
+		// 30 of the battery's 63 cells differently from the identical
+		// all-lower fixture. With every downstream consumer of this list
+		// separately taught to RESOLVE rather than byte-compare, the spelling
+		// still owns 7 — every remaining cell, all on the single-process arm,
+		// which is buildReadSchema's own path and the one no fix outside this
+		// function reaches.
+		cols := make([]string, 0, len(needs))
+		seen := make(map[string]bool, len(needs))
+		for col := range needs {
+			if canon, ok := inSchema[strings.ToLower(col)]; ok {
+				col = canon
+			}
+			if seen[col] {
+				continue
+			}
+			seen[col] = true
+			cols = append(cols, col)
+		}
+		sort.Strings(cols)
+		return cols
 	}
 	keep := make(map[string]bool, len(needs))
 	for name := range needs {

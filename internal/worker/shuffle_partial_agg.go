@@ -128,22 +128,44 @@ func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, 
 
 // resolveAgainst intersects the configured keys/specs with the actual
 // batch schema (see the type comment). Called once, on the first batch.
+//
+// Presence is decided by batch.ResolveSchemaIndex, not by a byte-exact set
+// probe, and a name that resolves is REWRITTEN to the schema's spelling. The
+// declared keys and specs are plan-side names, so they can arrive in the
+// lexer's folded spelling (#731) while the stream carries the catalog's own —
+// `RegionID`. Byte-exact, a MIXED-case schema (`RegionID` beside an
+// already-folded `counterid`) is the case that hurts: the folded names are
+// present, the CamelCase ones are not, so the intersection drops PART of the
+// grouping and this operator pre-combines rows belonging to DIFFERENT groups
+// — a wrong number the consumer cannot detect, where a total miss merely
+// disables the pre-combine. Carrying the schema's spelling forward keeps the
+// flushed WSHF payload in the same spelling as the raw one it replaces, which
+// is the contract the type comment states (specs are name-preserving) and
+// what the downstream by-name resolution assumes.
+//
+// The camel-case invariance battery does not yet distinguish this site:
+// measured with every other fix in place and this one reverted, it owns 0 of
+// its cells, because its aggregate shapes reach the exchange with keys the
+// scan already spelled the schema's way. The change is the hazard closed, not
+// a cell recovered.
 func (p *cappedPartialAgg) resolveAgainst(b *batch.RecordBatch) {
 	p.resolved = true
-	present := make(map[string]bool, len(b.Schema))
-	for _, c := range b.Schema {
-		present[c.Name] = true
+	resolve := func(name string) (string, bool) {
+		if i := batch.ResolveSchemaIndex(b.Schema, name); i >= 0 {
+			return b.Schema[i].Name, true
+		}
+		return name, false
 	}
 	for _, k := range p.partitionKeys {
-		if !present[k] {
+		if _, ok := resolve(k); !ok {
 			p.disabled = true
 			return
 		}
 	}
 	keptKeys := p.groupBy[:0]
 	for _, k := range p.groupBy {
-		if present[k] {
-			keptKeys = append(keptKeys, k)
+		if name, ok := resolve(k); ok {
+			keptKeys = append(keptKeys, name)
 		} else {
 			p.droppedKeys++
 		}
@@ -151,9 +173,19 @@ func (p *cappedPartialAgg) resolveAgainst(b *batch.RecordBatch) {
 	p.groupBy = keptKeys
 	keptAggs := p.aggs[:0]
 	for _, a := range p.aggs {
-		if present[a.InputCol] {
-			keptAggs = append(keptAggs, a)
+		name, ok := resolve(a.InputCol)
+		if !ok {
+			continue
 		}
+		// Name-preserving specs (OutputCol == InputCol, which is what the
+		// planner's eligibility pass emits) move to the schema's spelling
+		// together, so the flushed column keeps the name the raw payload
+		// had. A spec that renames is left exactly as declared.
+		if a.OutputCol == a.InputCol {
+			a.OutputCol = name
+		}
+		a.InputCol = name
+		keptAggs = append(keptAggs, a)
 	}
 	p.aggs = keptAggs
 	// Nothing combinable, or grouping degenerated to zero keys (which

@@ -1829,10 +1829,7 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 	defer in.Close()
 
 	// Build column name → index mapping
-	colIdx := make(map[string]int, len(columns))
-	for i, col := range columns {
-		colIdx[col] = i
-	}
+	colIdx := mergeColIdx(columns)
 
 	var batches []*batch.RecordBatch
 	if mi.HasAggregate {
@@ -1933,10 +1930,7 @@ func (c *Coordinator) dedupGatherResult(gr *gatherResult, mi *logical.MergeInfo)
 	gr.renamer = nil
 
 	if len(mi.OrderBy) > 0 || mi.HasLimit {
-		colIdx := make(map[string]int, len(gr.columns))
-		for i, col := range gr.columns {
-			colIdx[col] = i
-		}
+		colIdx := mergeColIdx(gr.columns)
 		if len(mi.OrderBy) > 0 {
 			gr.batches = c.sortBatches(gr.batches, gr.columns, colIdx, mi.OrderBy)
 		}
@@ -2238,6 +2232,56 @@ func compareAnyValues(a, b any, typ parquet.TypeID) int {
 		return 0
 	}
 	return 0
+}
+
+// mergeColIdx maps a partial result's column names to their positions for the
+// coordinator's merge stages (re-aggregation, scalar-aggregate folding, sort
+// and top-N), and adds the FOLDED spelling of each name as an alias.
+//
+// The two spellings are two different strings for one column. `columns` comes
+// off the WIRE, so it carries the catalog's own spelling (`RegionID` for a
+// parquet-registered table); every lookup into this map is a name off the
+// LOGICAL plan's MergeInfo — a GROUP BY key, an aggregate's output column, an
+// ORDER BY key — which arrives folded from the lexer (#731). A byte-exact map
+// alone therefore missed, and each of the three consumers failed its own
+// silent way: reAggregatePartials REFUSES the query on a GROUP BY miss
+// (loud), drops the aggregate from the merge on an agg miss (partials
+// returned unmerged, so a group appears once per worker), and compareBatchRows
+// SKIPS an unresolvable ORDER BY key (rows come back in arrival order under an
+// ORDER BY the client asked for).
+//
+// The alias is added only when batch.ResolveSchemaIndex — the one resolver
+// that owns this rule, see internal/engine/batch/schema.go — agrees the
+// folded spelling names THIS column and no other, so an ambiguous fold and a
+// qualifier whose case differs both keep the byte-exact miss.
+//
+// The camel-case invariance battery does not yet distinguish this site:
+// measured with every other fix in place and this one reverted, it owns 0 of
+// its cells, because its probe-split shapes reach the merge with names the
+// scan already spelled the schema's way. The alias is the hazard closed, not
+// a cell recovered.
+func mergeColIdx(columns []string) map[string]int {
+	m := make(map[string]int, len(columns)*2)
+	for i, col := range columns {
+		m[col] = i
+	}
+	schema := make([]parquet.Column, len(columns))
+	for i, col := range columns {
+		schema[i] = parquet.Column{Name: col}
+	}
+	for i, col := range columns {
+		folded := batch.FoldIdent(col)
+		if folded == col {
+			continue
+		}
+		if _, taken := m[folded]; taken {
+			continue
+		}
+		if batch.ResolveSchemaIndex(schema, folded) == i {
+			m[folded] = i
+		}
+	}
+	return m
 }
 
 func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, mi *logical.MergeInfo) ([]*batch.RecordBatch, error) {

@@ -1389,15 +1389,34 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 	// needed name), so the intersection here is safe; if that upstream
 	// guarantee ever regresses, TestTPCHQueries/TestTPCHOptimizationInvariance
 	// will show wrong aggregates, not just a slow scan.
+	//
+	// A requested name is matched by batch.ResolveSchemaIndex, not by a
+	// byte-exact set probe. projectColumns is a plan-side list, so a name in
+	// it can still be a column REFERENCE in the lexer's folded spelling
+	// (#731) while the parquet file carries the spelling it was written with
+	// — `RegionID`. Byte-exact, the intersection above turns a MIXED-case
+	// schema into the one shape it was written to avoid: the already-folded
+	// names (`tier`, `counterid`) match, the CamelCase ones do not, and the
+	// scan reads a strict subset of the columns the query references — the
+	// join key among them. That is not a slow scan, it is a wrong answer,
+	// and unlike a total miss it does not reach the full-width fallback
+	// below. Measured on the camel-case invariance battery with
+	// WADJET_SCAN_COL_SANITIZE=0 and every other site fixed, reverting this
+	// resolution alone costs 12 cells — the largest single contributor on
+	// the DAG arms.
 	if len(s.projectColumns) > 0 {
-		schemaSet := make(map[string]bool, len(projCols))
-		for _, c := range projCols {
-			schemaSet[c.Name] = true
-		}
+		resolved := make([]int, 0, len(s.projectColumns))
+		wantIdx := make([]bool, len(projCols))
 		var missing []string
 		for _, name := range s.projectColumns {
-			if !schemaSet[name] {
+			i := batch.ResolveSchemaIndex(projCols, name)
+			if i < 0 {
 				missing = append(missing, name)
+				continue
+			}
+			if !wantIdx[i] {
+				wantIdx[i] = true
+				resolved = append(resolved, i)
 			}
 		}
 		if len(missing) > 0 && !s.projectionSkipWarned {
@@ -1411,13 +1430,11 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 				"query_id", s.queryID, "missing", strings.Join(missing, ","),
 				"requested", len(s.projectColumns))
 		}
-		wanted := make(map[string]bool, len(s.projectColumns))
-		for _, c := range s.projectColumns {
-			wanted[c] = true
-		}
-		filtered := make([]parquet.Column, 0, len(s.projectColumns))
-		for _, c := range projCols {
-			if wanted[c.Name] {
+		// Schema order, not request order: the reader's projection is a
+		// subset of the file schema and every consumer indexes it that way.
+		filtered := make([]parquet.Column, 0, len(resolved))
+		for i, c := range projCols {
+			if wantIdx[i] {
 				filtered = append(filtered, c)
 			}
 		}
