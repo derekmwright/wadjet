@@ -19,8 +19,7 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
 | `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; target and source must have different exposed names (SQLSTATE 42712 otherwise); `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
 | `ANALYZE [TABLE] table_name` | Collect column statistics for the cost-based planner |
-| `CREATE SNAPSHOT` | Capture a point-in-time snapshot of the catalog (coordinator mode; the HTTP query endpoint refuses it) |
-| `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions (the embedded API and the PostgreSQL wire protocol; the HTTP query endpoint refuses them) |
+| `CREATE ALERT` / `ALTER ALERT` / `DROP ALERT` | Manage saved alert definitions. Runs on the embedded API and the PostgreSQL wire protocol with `Config.EnableAlerts`, and on a coordinator with `--enable-alerts`; the HTTP query endpoint has no handler and refuses them |
 
 ### Parsed and not executed
 
@@ -28,6 +27,16 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 nothing. Each is refused with SQLSTATE `0A000` (`feature_not_supported`) and a
 message naming the statement — `ALTER TABLE is not supported` — on every door:
 the embedded API, the PostgreSQL wire protocol and the HTTP query endpoint.
+
+`CREATE SNAPSHOT` is in the same position on every door a person types SQL
+into. Its one handler is `Coordinator.ExecuteSQL`, and the two doors a client
+reaches — the PostgreSQL wire protocol and the HTTP query endpoint — both send
+a DDL statement to the embedded engine instead, whose type switch has no case
+for it. So `psql`, `POST /v1/queries` and the embedded API all refuse it
+`0A000`. It reaches its handler only through the gRPC `Query` RPC against a
+coordinator. Take a snapshot on a cadence instead
+(`--catalog-snapshot-interval`; see
+[Disaster recovery](disaster-recovery.md)).
 `EXPLAIN` over one of them is refused the same way (`EXPLAIN ALTER TABLE is not
 supported`); PostgreSQL refuses that spelling as a syntax error (`42601`)
 because its grammar does not accept it at all.

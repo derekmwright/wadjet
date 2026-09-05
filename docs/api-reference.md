@@ -103,11 +103,16 @@ duplicate **function** name (`42723`) and a **column named twice** in
 
 A statement this engine parses and does not run is refused `0A000`
 (`feature_not_supported`) with a message naming the statement:
-`ALTER TABLE is not supported`, and likewise `CREATE VIEW` and `DROP VIEW`.
-`CREATE ALERT`, `DROP ALERT`, `ALTER ALERT` and `CREATE SNAPSHOT` answer the
-same way *on this endpoint*, which has no handler for them; they run on the
-embedded API and the PostgreSQL wire protocol. Every one of these classes is
-the same on every door.
+`ALTER TABLE is not supported`, and likewise `CREATE VIEW`, `DROP VIEW` and
+`CREATE SNAPSHOT` — no door runs those four.
+
+`CREATE ALERT`, `DROP ALERT` and `ALTER ALERT` answer the same way *on this
+endpoint*, which has no handler for them. They run on the embedded API and the
+PostgreSQL wire protocol when `Config.EnableAlerts` is set, and on a
+coordinator started with `--enable-alerts`; where the feature is off those
+doors say so (`alerts are disabled`, also `0A000`).
+
+Every one of these classes is the same on every door.
 
 | SQLSTATE class | Meaning | Status |
 |---|---|---|

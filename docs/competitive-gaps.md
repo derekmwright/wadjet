@@ -208,8 +208,10 @@ the dictionary alone. `contains()` has a vectorized kernel, and `regexp_like` /
 **Current state**: Data lives on S3 (inherently durable). Catalog metadata is
 snapshotted to object storage on a timer once `--catalog-snapshot-s3-prefix` is
 set, retaining the 10 newest snapshots plus everything under 24h, taken by the
-elected leader only. `CREATE SNAPSHOT` forces one on demand, and the restore
-procedure is documented in [Disaster Recovery](disaster-recovery.md).
+elected leader only. `CREATE SNAPSHOT` forces one on demand — over the gRPC
+`Query` RPC against a coordinator; the wire protocol and the HTTP endpoint
+refuse the statement — and the restore procedure is documented in
+[Disaster Recovery](disaster-recovery.md).
 
 **What's still needed**:
 - `BACKUP DATABASE TO 's3://backup-bucket/'` / `RESTORE DATABASE FROM ... AS OF '...'` as first-class statements

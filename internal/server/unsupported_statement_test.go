@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -42,9 +44,14 @@ type doorCensusEntry struct {
 	// refusal is the exact message every door must answer with, or "" when
 	// the statement is one the doors execute (a control cell).
 	refusal string
-	// httpOnly marks a statement the embedded and pgwire doors DO handle and
-	// the HTTP door does not: it has no alert or snapshot handler at all.
-	httpOnly string
+	// httpRefusal is the HTTP door's message for a statement the OTHER two
+	// doors have a handler for. otherDoorsSay is a substring their answer must
+	// carry — the reason their handler declined in this rig — and it is what
+	// makes the claim "those doors handle it" an assertion rather than a
+	// comment: the dispatch refusal would say "is not supported", and a
+	// handler that declined for its own reason says something else.
+	httpRefusal   string
+	otherDoorsSay string
 }
 
 func statementDoorCensus() []doorCensusEntry {
@@ -67,19 +74,32 @@ func statementDoorCensus() []doorCensusEntry {
 		{name: "explain_drop_table", sql: "EXPLAIN DROP TABLE hd",
 			typ: plansql.QueryExplain, refusal: "EXPLAIN DROP TABLE is not supported"},
 
-		// ---- refused on the HTTP door only: it has no such handler --------
-		// The other two doors run these (through wadjet.DB), and refuse them
-		// for a DIFFERENT reason when the feature is switched off — same
-		// class, its own message, which is why they are separated out.
+		// CREATE SNAPSHOT has exactly ONE handler in the tree —
+		// Coordinator.ExecuteSQL — and neither wadjet.DB.Query nor this door
+		// is it, so all three refuse it like any other unhandled type. It sat
+		// in the httpOnly group below for a round, under a comment saying the
+		// other two doors run it; they do not. Measured on the embedded door:
+		// 0A000 `CREATE SNAPSHOT is not supported`, with EnableAlerts on or
+		// off (round-1 B2).
 		{name: "create_snapshot", sql: "CREATE SNAPSHOT",
-			typ: plansql.QueryCreateSnapshot, httpOnly: "CREATE SNAPSHOT is not supported"},
+			typ: plansql.QueryCreateSnapshot, refusal: "CREATE SNAPSHOT is not supported"},
+
+		// ---- refused on the HTTP door only: it has no such handler --------
+		// The embedded API and pgwire DO have alert handlers — they run these
+		// statements when Config.EnableAlerts is set, which
+		// TestTheAlertStatementsRunOnTheDoorsThatHandleThem asserts. This rig
+		// leaves alerts off, so those two doors decline for their own reason,
+		// and the cells below assert that reason rather than assuming it.
 		{name: "drop_alert", sql: "DROP ALERT a1",
-			typ: plansql.QueryDropAlert, httpOnly: "DROP ALERT is not supported"},
+			typ: plansql.QueryDropAlert, httpRefusal: "DROP ALERT is not supported",
+			otherDoorsSay: "alerts are disabled"},
 		{name: "alter_alert", sql: "ALTER ALERT a1 DISABLE",
-			typ: plansql.QueryAlterAlert, httpOnly: "ALTER ALERT is not supported"},
+			typ: plansql.QueryAlterAlert, httpRefusal: "ALTER ALERT is not supported",
+			otherDoorsSay: "alerts are disabled"},
 		{name: "create_alert",
 			sql: "CREATE ALERT a1 AS SELECT id FROM hd EVERY 5 MINUTES WEBHOOK 'https://x.invalid'",
-			typ: plansql.QueryCreateAlert, httpOnly: "CREATE ALERT is not supported"},
+			typ: plansql.QueryCreateAlert, httpRefusal: "CREATE ALERT is not supported",
+			otherDoorsSay: "alerts are disabled"},
 
 		// ---- controls: statements every door DOES execute -----------------
 		// Their presence is what makes this a census rather than a list of
@@ -125,7 +145,7 @@ func TestEveryUnsupportedStatementRefusesTheSameWayOnEveryDoor(t *testing.T) {
 				t.Fatalf("%q parses as %s, the census says %s", tc.sql, parsed.Type, tc.typ)
 			}
 
-			if tc.refusal == "" && tc.httpOnly == "" {
+			if tc.refusal == "" && tc.httpRefusal == "" {
 				// Control: a statement every door executes. It may still
 				// fail for its own reasons (a name already taken on the
 				// second door to run it), but never with the dispatch
@@ -137,7 +157,7 @@ func TestEveryUnsupportedStatementRefusesTheSameWayOnEveryDoor(t *testing.T) {
 			// --- the HTTP door ------------------------------------------
 			want := tc.refusal
 			if want == "" {
-				want = tc.httpOnly
+				want = tc.httpRefusal
 			}
 			status, state, msg := hdPost(t, base, tc.sql)
 			if state != "0A000" {
@@ -151,9 +171,37 @@ func TestEveryUnsupportedStatementRefusesTheSameWayOnEveryDoor(t *testing.T) {
 				t.Errorf("HTTP door answered %d for %q, want 400", status, tc.sql)
 			}
 
-			if tc.httpOnly != "" {
-				// The other two doors HANDLE this statement; the dispatch
-				// guard must not be what answers there.
+			if tc.httpRefusal != "" {
+				// The other two doors HANDLE this statement, so the dispatch
+				// guard must NOT be what answers there. Asserted, not assumed:
+				// the round-1 review found this branch returning here, which
+				// is how a false claim about CREATE SNAPSHOT survived.
+				for _, d := range []struct {
+					name string
+					run  func(string) error
+				}{
+					{"pgwire", func(sql string) error {
+						res := conn.ExecParams(ctx, sql, nil, nil, nil, nil).Read()
+						return res.Err
+					}},
+					{"embedded", func(sql string) error {
+						_, err := db.Query(ctx, sql)
+						return err
+					}},
+				} {
+					err := d.run(tc.sql)
+					if err == nil {
+						continue // the handler ran it; that is the claim too
+					}
+					if strings.HasSuffix(err.Error(), "is not supported") {
+						t.Errorf("the %s door answers %q with the DISPATCH refusal (%v); "+
+							"this cell claims that door has a handler for it", d.name, tc.sql, err)
+					}
+					if !strings.Contains(err.Error(), tc.otherDoorsSay) {
+						t.Errorf("the %s door answers %q with %v; want its handler's own "+
+							"reason, containing %q", d.name, tc.sql, err, tc.otherDoorsSay)
+					}
+				}
 				return
 			}
 
@@ -190,6 +238,67 @@ func TestEveryUnsupportedStatementRefusesTheSameWayOnEveryDoor(t *testing.T) {
 					tc.sql, err.Error(), tc.refusal)
 			}
 		})
+	}
+}
+
+// TestTheAlertStatementsRunOnTheDoorsThatHandleThem is what makes the census's
+// httpRefusal cells a claim about HANDLERS rather than about a configuration.
+//
+// The census rig leaves alerts off, so the embedded and pgwire doors decline
+// CREATE / ALTER / DROP ALERT with `alerts are disabled` — which distinguishes
+// them from the dispatch refusal but does not by itself show a handler exists.
+// With Config.EnableAlerts set, they run. The HTTP query endpoint refuses them
+// either way: it has no alert handler at all.
+//
+// The same measurement is what corrected the docs about CREATE SNAPSHOT
+// (round-1 B2): with alerts ON, the embedded door still answers
+// `CREATE SNAPSHOT is not supported`, because its only handler is
+// Coordinator.ExecuteSQL.
+func TestTheAlertStatementsRunOnTheDoorsThatHandleThem(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := wadjet.Open(ctx, wadjet.Config{
+		Store: store, Bucket: "test", EnableAlerts: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	if err := db.CreateTable(ctx, "alerthd",
+		wadjet.Schema{Columns: []wadjet.Column{{Name: "id", Type: wadjet.TypeInt64}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Config{Addr: ":0", Catalog: db.Catalog()}, nil)
+	hs := httptest.NewServer(srv.Mux())
+	t.Cleanup(hs.Close)
+
+	for _, sql := range []string{
+		"CREATE ALERT f5a AS SELECT id FROM alerthd EVERY 5 MINUTES WEBHOOK 'https://x.invalid'",
+		"ALTER ALERT f5a DISABLE",
+		"DROP ALERT f5a",
+	} {
+		if _, err := db.Query(ctx, sql); err != nil {
+			t.Errorf("the embedded door refused %q with alerts ENABLED: %v\n"+
+				"the census claims this door has a handler for it", sql, err)
+		}
+		_, state, msg := hdPost(t, hs.URL, sql)
+		if state != "0A000" || !strings.HasSuffix(msg, "is not supported") {
+			t.Errorf("the HTTP door answered %q with %s %q; it has no alert handler and "+
+				"must refuse at dispatch", sql, state, msg)
+		}
+	}
+
+	// CREATE SNAPSHOT, for contrast: no handler on this door either, alerts
+	// on or off.
+	if _, err := db.Query(ctx, "CREATE SNAPSHOT"); err == nil {
+		t.Error("the embedded door RAN CREATE SNAPSHOT; if it has a handler now, the " +
+			"census cell and docs/api-reference.md both have to say so")
+	} else if !strings.HasSuffix(err.Error(), "CREATE SNAPSHOT is not supported") {
+		t.Errorf("the embedded door refused CREATE SNAPSHOT with %v, want the dispatch refusal", err)
 	}
 }
 

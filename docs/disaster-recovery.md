@@ -10,7 +10,7 @@ Catalog snapshots are **opt-in**. Start the coordinator (or standalone) with
 written.
 
 - **Enabled by**: `--catalog-snapshot-s3-prefix` (or `WADJET_CATALOG_SNAPSHOT_PREFIX`)
-- **Interval**: `--catalog-snapshot-interval`, default 5m (or `WADJET_CATALOG_SNAPSHOT_INTERVAL`). `0` disables the timer; explicit `CREATE SNAPSHOT` still works
+- **Interval**: `--catalog-snapshot-interval`, default 5m (or `WADJET_CATALOG_SNAPSHOT_INTERVAL`). `0` disables the timer; an explicit `CREATE SNAPSHOT` still works, but only through the gRPC `Query` RPC against a coordinator — `psql` and `POST /v1/queries` both refuse the statement `0A000` (see [SQL reference](sql-reference.md#parsed-and-not-executed))
 - **Retention**: the GC after each tick keeps the 10 newest snapshots plus every snapshot younger than 24h. Not configurable
 - **Layout**: one directory per snapshot, not one file — `<prefix>snapshots/<ts>/manifest.json` is the index, `<prefix>snapshots/<ts>/<kind>/<name>.json` is one file per KV key, and `<prefix>latest` holds the newest `<ts>`
 - **Timestamp format**: `20060102T150405Z` (e.g. `20260327T063000Z`), UTC
@@ -138,7 +138,7 @@ or environment variable only:
 
 Retention (10 newest plus everything under 24h) is fixed in code and has no
 knob. There is no mutation-triggered snapshot: the only triggers are the
-interval ticker and an explicit `CREATE SNAPSHOT`.
+interval ticker and an explicit `CREATE SNAPSHOT` over gRPC.
 
 ## Recovery Time Objectives
 
