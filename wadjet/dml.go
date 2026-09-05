@@ -2705,6 +2705,17 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// relation and raising 42703 where this raises 42601; both refuse,
 		// and the statement writes nothing either way. MERGE spells its own
 		// qualified targets and strips them in applySetClauses.
+		// The reference is FOLDED and the schema is not: an unquoted
+		// identifier lower-cases at the lexer (#731) while a catalog schema
+		// keeps the spelling the parquet file gave it, and CamelCase column
+		// names are ordinary there. `byName` already concedes that on the
+		// LOOKUP — but the assignment carried the FOLDED name forward, and
+		// the row it writes into is `batch.RecordBatch.RowAt`, keyed by the
+		// SCHEMA's spelling. So `SET UserAgent = 'x'` added a second key
+		// `useragent` beside the untouched `UserAgent`, the writer's
+		// byte-exact `row[col.Name]` read the OLD value, and the statement
+		// reported `UPDATE 1` having changed nothing. Carry the schema's
+		// spelling, the way the statistics path does (#881).
 		name := strings.ToLower(strings.TrimSpace(sc.Column))
 		col, ok := byName[name]
 		if !ok {
@@ -2725,7 +2736,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 			if err != nil {
 				return nil, fmt.Errorf("SET %s: %w", name, err)
 			}
-			out = append(out, DMLAssignment{Column: name, col: col, constant: v})
+			out = append(out, DMLAssignment{Column: col.Name, col: col, constant: v})
 			continue
 		}
 		if err := checkDMLColumns(node, target, schema); err != nil {
@@ -2749,7 +2760,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// The AST is still in hand here, and it is the only place the source's
 		// DECLARED family can be read — one line above where it used to be
 		// thrown away at expr.Compile (#699).
-		out = append(out, DMLAssignment{Column: name, col: col, expr: compiled,
+		out = append(out, DMLAssignment{Column: col.Name, col: col, expr: compiled,
 			srcFloat: dmlSourceIsFloat(node, schema)})
 	}
 	return out, nil
