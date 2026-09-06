@@ -35,6 +35,16 @@ func NewResultCleaner(store objstore.Store, bucket string, ttl time.Duration, lo
 	}
 }
 
+// Configured reports whether this cleaner has an object store to clean.
+//
+// `Coordinator.Cleaner` memoises on first call, so a caller that passes no
+// store (the ops HTTP handlers do, expecting the store the startup path
+// already registered) gets a cleaner with a nil store back on a coordinator
+// where that registration never happened — and every method on it nil-derefs.
+// The handlers ask this instead, and answer 503 the way their own dead
+// "result cleaner not available" branch always claimed they would.
+func (rc *ResultCleaner) Configured() bool { return rc != nil && rc.store != nil }
+
 // SetActiveQueriesFunc registers a callback that returns the set of
 // query IDs currently in-flight. CleanStale will skip files belonging
 // to these queries regardless of age.

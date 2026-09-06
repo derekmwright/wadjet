@@ -68,7 +68,7 @@ func (o *OpsAPI) handleDeleteResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleaner := o.coord.Cleaner(nil, "")
-	if cleaner == nil {
+	if !cleaner.Configured() {
 		writeError(w, http.StatusServiceUnavailable, "result cleaner not available")
 		return
 	}
@@ -93,7 +93,7 @@ func (o *OpsAPI) handleCleanupResults(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&req)
 
 	cleaner := o.coord.Cleaner(nil, "")
-	if cleaner == nil {
+	if !cleaner.Configured() {
 		writeError(w, http.StatusServiceUnavailable, "result cleaner not available")
 		return
 	}
