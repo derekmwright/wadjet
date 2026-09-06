@@ -292,3 +292,95 @@ func TestParameterInferenceIgnoresADeniedRelation(t *testing.T) {
 			desc.ParamOIDs)
 	}
 }
+
+// The inference path carries the trusted ENVIRONMENT as well as the identity
+// (round-1 review P8).
+//
+// `visibleCatalogTables` asks `auth.TableAccess`, which reads the environment
+// from the context. A deny conditioned on `env.source_ip` or `env.protocol`
+// therefore decides nothing on a context that carries no environment — so the
+// denied relation's column types would have reached the wire anyway, for
+// exactly the deployments that write conditioned denies.
+func TestParameterInferenceCarriesTheEnvironment(t *testing.T) {
+	// `analyst` may read both relations UNLESS the request arrives over
+	// pgwire from this address, which is where the test connects from.
+	evaluator := auth.NewPolicyEvaluator([]auth.AccessControlPolicy{{
+		Name: "sec3-env", Version: 1, Enabled: true,
+		Rules: []auth.PolicyRule{
+			{
+				ID: "analyst-all", EffectStr: "allow", Priority: 10,
+				Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+				Actions:  []auth.Action{auth.ActionRead},
+			},
+			{
+				ID: "deny-from-here", EffectStr: "deny", Priority: 100,
+				Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+				Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: "secret"}},
+				Environment: []auth.Condition{
+					{Attribute: "env.protocol", Op: "eq", Value: "pgwire"},
+					{Attribute: "env.source_ip", Op: "contains", Value: "127.0.0.1"},
+				},
+				Actions: []auth.Action{auth.ActionRead, auth.ActionWrite},
+			},
+		},
+	}})
+	authn, authz := auth.New(auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{{Key: "analyst-key", Name: "analyst-user", Role: "analyst"}},
+		Roles:   []auth.RoleConfig{{Name: "analyst", Tables: []string{"*"}, Allow: []string{"read"}}},
+	})
+	provider := auth.NewProvider(authn, authz, nil, nil)
+	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
+
+	db := sec3CatalogDB(t)
+	db.SetAuthProvider(provider)
+	srv := startTestServerWithAuth(t, db, provider)
+
+	conn := sec3Pgconn(t, srv.Addr(), "analyst-user", "analyst-key")
+	desc, err := conn.Prepare(context.Background(), "",
+		`SELECT id FROM public_t WHERE secret_col = $1 AND 'secret' <> ''`, nil)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(desc.ParamOIDs) != 1 || desc.ParamOIDs[0] != 0 {
+		t.Errorf("an env-conditioned deny did not reach the inference path: OIDs %v, want [0] "+
+			"— the environment is not being carried into the decision", desc.ParamOIDs)
+	}
+	// The other side of the same claim: a deny whose environment condition
+	// does NOT match this connection leaves inference working. Without it the
+	// test could pass by refusing everything, which would prove nothing about
+	// the environment being read.
+	provider.UpdateWithEvaluator(authn, authz, nil,
+		auth.NewPolicyEvaluator([]auth.AccessControlPolicy{{
+			Name: "sec3-env-elsewhere", Version: 1, Enabled: true,
+			Rules: []auth.PolicyRule{
+				{
+					ID: "analyst-all", EffectStr: "allow", Priority: 10,
+					Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+					Actions:  []auth.Action{auth.ActionRead},
+				},
+				{
+					// Same deny, conditioned on a protocol this connection is not.
+					ID: "deny-from-http", EffectStr: "deny", Priority: 100,
+					Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+					Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: "secret"}},
+					Environment: []auth.Condition{
+						{Attribute: "env.protocol", Op: "eq", Value: "http"},
+					},
+					Actions: []auth.Action{auth.ActionRead, auth.ActionWrite},
+				},
+			},
+		}}))
+
+	elsewhere := sec3Pgconn(t, srv.Addr(), "analyst-user", "analyst-key")
+	desc, err = elsewhere.Prepare(context.Background(), "",
+		`SELECT id FROM public_t WHERE secret_col = $1 AND 'secret' <> ''`, nil)
+	if err != nil {
+		t.Fatalf("Prepare under the non-matching deny: %v", err)
+	}
+	if len(desc.ParamOIDs) != 1 || desc.ParamOIDs[0] == 0 {
+		t.Errorf("a deny conditioned on a DIFFERENT environment suppressed inference: "+
+			"OIDs %v — the condition is not being evaluated, everything is just refused",
+			desc.ParamOIDs)
+	}
+}

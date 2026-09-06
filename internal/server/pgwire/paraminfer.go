@@ -209,7 +209,30 @@ func (c *pgConn) inferenceContext() (context.Context, context.CancelFunc) {
 	if c.identity != nil {
 		ctx = auth.ContextWithIdentity(ctx, c.identity)
 	}
+	// The TRUSTED environment, as well as the identity: a policy conditioned
+	// on `env.source_ip` or `env.protocol` decides nothing without it, so a
+	// deny that names one would not have matched here and the denied
+	// relation's column types would have gone back on the wire anyway
+	// (round-1 review P8). Both facts come from the SOCKET — what the
+	// protocol boundary observed — never from anything the client can assert.
+	//
+	// `Time` is deliberately left zero: the decision stamps it, because a
+	// connection lives for hours and an `env.hour` condition means the hour
+	// the statement ran (see auth.ContextWithEnvironment).
+	ctx = auth.ContextWithEnvironment(ctx, c.decisionEnvironment())
 	return context.WithTimeout(ctx, 5*time.Second)
+}
+
+// decisionEnvironment is this connection's trusted environment: the peer
+// address the listener accepted and the protocol it speaks.
+func (c *pgConn) decisionEnvironment() auth.Environment {
+	env := auth.Environment{Protocol: "pgwire"}
+	if c.conn != nil {
+		if addr := c.conn.RemoteAddr(); addr != nil {
+			env.SourceIP = addr.String()
+		}
+	}
+	return env
 }
 
 // columnParamOIDs resolves the wire type OID of every column of every catalog
