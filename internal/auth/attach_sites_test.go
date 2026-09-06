@@ -60,6 +60,10 @@ var attachAllowed = map[string]string{
 	// is listed explicitly rather than skipped by a rule, so that one which
 	// LATER gains a catalog shows up here instead of staying quiet.
 	"server.NewAdminAPI": "the admin API holds no catalog; it edits the config whose reload binds",
+	// Same shape: the ops API authorizes operational endpoints and holds no
+	// catalog of its own — the coordinator it is built over carries the bound
+	// one (#937).
+	"server.NewOpsAPI": "the ops API holds no catalog; it authorizes against an already-bound provider",
 }
 
 // attachFieldsKnown is the census of provider-bearing fields, with what each
@@ -75,6 +79,7 @@ var attachFieldsKnown = map[string]string{
 	"server.GRPCServer.authProvider":       "runtime — NewGRPCServer binds",
 	"server.Server.provider":               "runtime — server.New binds",
 	"server.AdminAPI.provider":             "runtime — holds no catalog (see attachAllowed)",
+	"server.OpsAPI.provider":               "runtime — holds no catalog (see attachAllowed)",
 	"wadjet.Config.AuthProvider":           "config input — wadjet.Open binds what it carries",
 	"wadjet.DB.authProvider":               "runtime — wadjet.Open and DB.SetAuthProvider bind",
 }
