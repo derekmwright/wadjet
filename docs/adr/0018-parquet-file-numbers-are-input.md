@@ -663,6 +663,18 @@ page header left the earlier columns' leaf buffers already reset, `numRows`
 retained, and `Close` returning nil over a file the reader opened happily with
 one column simply gone.
 
+A failure is not only a non-nil error. `io.Writer.Write` returning
+`(n < len(b), nil)` is a short write — the Go docs say a conforming writer
+SHOULD report it with a non-nil error, but many do not, so `writeBytes` (the
+one seam every byte leaves through) counts the bytes it handed over and treats
+`n != len(b)` as `io.ErrShortWrite`, latched exactly like an errored write. The
+count-blind version dropped the tail of a chunk out of the file's middle and
+still advanced `written` by the partial count, so `WriteRows` and `Close` both
+returned nil over a truncated file — the same silent corruption as the errored
+case, reached through the nil-error door (#926). A short write is proven
+unrecoverable and unretried at every output position by
+`TestAShortNilWriteIsLatchedAndNeverRetried`, the #888 sweep's nil-error twin.
+
 None of this replaces the checks above the writer. `ingest.checkType` still
 refuses a bad row where the INSERT that carried it can be named, rather than
 at the flush that would otherwise fail a whole buffer of good rows — the same

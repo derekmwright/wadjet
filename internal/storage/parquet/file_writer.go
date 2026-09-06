@@ -1028,6 +1028,16 @@ func (nw *NativeWriter) writeBytes(b []byte) error {
 		nw.fail(fmt.Errorf("writing to the output stream: %w", err))
 		return nw.err
 	}
+	// A conforming io.Writer that returns nil MUST have consumed all of b; the
+	// Go docs say a short write should carry a non-nil error, but many writers
+	// do not, so the caller defends the boundary. A partial write with a nil
+	// error dropped the tail of b out of the file's middle and left the leaf
+	// buffers already reset — exactly as unrecoverable as an errored write —
+	// so it is latched the same way (#926).
+	if n != len(b) {
+		nw.fail(fmt.Errorf("writing to the output stream: wrote %d of %d bytes: %w", n, len(b), io.ErrShortWrite))
+		return nw.err
+	}
 	return nil
 }
 
