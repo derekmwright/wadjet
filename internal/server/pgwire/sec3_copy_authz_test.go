@@ -2,6 +2,7 @@ package pgwire
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/auth"
@@ -268,5 +269,55 @@ func TestPGWireCopyIsUnchangedWithoutAuth(t *testing.T) {
 	}
 	if n := sec3RowCount(t, db); n != 1 {
 		t.Fatalf("row count %d; want 1", n)
+	}
+}
+
+// The write decision comes BEFORE the relation's existence is reported, so a
+// COPY refusal is not an existence or column oracle (round-1 review P3).
+//
+// `handleCopyIn` used to resolve the name (42P01), then the column list
+// (42703), and only then ask the table decision — three distinguishable
+// answers, so a caller that may not write the relation could still decide
+// whether it exists and whether a guessed column exists on it.
+func TestPGWireCopyRefusalIsNotAnExistenceOracle(t *testing.T) {
+	db := sec3CopyDB(t)
+	provider := sec3LegacyProvider()
+	db.SetAuthProvider(provider)
+	srv := startTestServerWithAuth(t, db, provider)
+
+	// One answer for the unauthorized identity, whatever it names.
+	for _, tc := range []struct{ name, sql string }{
+		{"a real relation", "COPY emp (id) FROM STDIN"},
+		{"a real relation, a column it does not have", "COPY emp (nosuchcol) FROM STDIN"},
+		{"a relation that does not exist", "COPY nosuchtable (id) FROM STDIN"},
+	} {
+		t.Run("reader/"+tc.name, func(t *testing.T) {
+			got := sec3Copy(t, srv.Addr(), "reader-user", "reader-key", tc.sql, "")
+			if got.msgType != 'E' {
+				t.Fatalf("got message %q; want a refusal", got.msgType)
+			}
+			if got.code != "42501" {
+				t.Errorf("SQLSTATE %q (%s); want 42501 for every relation — a different "+
+					"class here tells an unauthorized caller what exists", got.code, got.msg)
+			}
+			if strings.Contains(got.msg, "nosuchcol") {
+				t.Errorf("the refusal named a column of a relation the caller may not "+
+					"write: %s", got.msg)
+			}
+		})
+	}
+
+	// The identity that MAY write still gets the real, useful classes.
+	for _, tc := range []struct{ name, sql, wantCode string }{
+		{"a column the relation does not have", "COPY emp (nosuchcol) FROM STDIN", "42703"},
+		{"a relation that does not exist", "COPY nosuchtable (id) FROM STDIN", "42P01"},
+	} {
+		t.Run("writer/"+tc.name, func(t *testing.T) {
+			got := sec3Copy(t, srv.Addr(), "writer-user", "writer-key", tc.sql, "")
+			if got.msgType != 'E' || got.code != tc.wantCode {
+				t.Errorf("got %q %s (%s); want an 'E' with %s — an authorized caller still "+
+					"gets the class it needs", got.msgType, got.code, got.msg, tc.wantCode)
+			}
+		})
 	}
 }

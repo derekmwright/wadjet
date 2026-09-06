@@ -714,6 +714,26 @@ func (c *pgConn) handleCopyIn(sql string) {
 	// stays reachable unquoted (catalog.ResolveTableName) — and the resolved
 	// spelling is what the rows are written under.
 	tableName = c.db.Catalog().ResolveTableName(tableName)
+
+	// The WRITE decision comes FIRST — before the relation's existence is
+	// reported and before its column list is resolved (#938, round-1 review).
+	//
+	// The 42P01 below and the 42703 further down are metadata about a relation
+	// this identity may not touch: asked after them, the authorization refusal
+	// left three distinguishable answers where there should be one, so an
+	// unauthorized caller could decide whether a relation exists and whether a
+	// guessed column exists on it. Asked here, a caller that may not write the
+	// relation learns only that, whether or not the relation is real; a caller
+	// the decision permits then gets the real 42P01 / 42703 it needs.
+	//
+	// `auth.TableAccess` is the one effective table decision every door asks
+	// (ADR-0034): the evaluator decides where one is installed, and the legacy
+	// role rule (HasPermission("write") AND CanAccessTable) where none is.
+	if err := auth.TableAccess(ctx, c.authProvider, tableName, auth.ActionWrite); err != nil {
+		c.sendQueryError(ctx, "42501", err)
+		return
+	}
+
 	tableMeta, err := c.db.Catalog().GetTable(ctx, tableName)
 	if err != nil {
 		c.sendError("ERROR", "42P01", fmt.Sprintf("table %q does not exist", tableName))
@@ -769,25 +789,17 @@ func (c *pgConn) handleCopyIn(sql string) {
 	// bulk-ingest path: the largest write on this door was the one with no
 	// decision on it.
 	//
-	// Two questions, both asked here and neither of them new:
-	//
-	//  1. May this identity WRITE this relation? `auth.TableAccess` is the
-	//     one effective table decision every door asks (ADR-0034) — the
-	//     evaluator decides where one is installed, and the legacy role rule
-	//     (`HasPermission("write")` AND `CanAccessTable`) where none is.
-	//  2. Does the COLUMN LIST survive the identity's column policy?
-	//     `auth.EnforceDMLPolicies` over a synthesized INSERT: a COPY column
-	//     list is an INSERT target list, so it earns INSERT's answer —
-	//     naming a DENIED column is 42703 — and no other. Forking a
-	//     COPY-only rule here would be a second reading of one question.
+	// The SECOND question: does the COLUMN LIST survive the identity's column
+	// policy? `auth.EnforceDMLPolicies` over a synthesized INSERT — a COPY
+	// column list is an INSERT target list, so it earns INSERT's answer
+	// (naming a DENIED column is 42703) and no other. Forking a COPY-only rule
+	// here would be a second reading of one question. The first question — may
+	// this identity WRITE this relation — was asked above, before the
+	// relation's existence was reported.
 	//
 	// A refusal is sent INSTEAD of CopyInResponse, so the connection stays in
 	// the ordinary message loop and the caller gets its ReadyForQuery; no row
 	// is consumed and the ingester is never constructed.
-	if err := auth.TableAccess(ctx, c.authProvider, tableName, auth.ActionWrite); err != nil {
-		c.sendQueryError(ctx, "42501", err)
-		return
-	}
 	if err := auth.EnforceDMLPolicies(ctx, c.authProvider, c.db.Catalog(), &plansql.ParsedQuery{
 		Type: plansql.QueryInsert,
 		// The column list as the STATEMENT gave it (resolved to the schema's
