@@ -720,6 +720,15 @@ mask rather than copying the stored value into a column the identity may read.
 `MERGE` against a table carrying a column policy is refused (`0A000`): its
 `WHEN` clauses carry raw text the rewriter does not decompose.
 
+`COPY … FROM STDIN` on the PostgreSQL wire protocol is a write and takes the
+same two decisions, both of them **before** the server sends `CopyInResponse`
+and before any row is consumed: the identity must be allowed to write the
+relation (`42501 permission denied for table "…"`, sent instead of the
+invitation to stream, with the connection staying in the ordinary message
+loop), and a **denied** column named in the `COPY` column list does not exist
+for it (`42703`) exactly as an `INSERT` target list. A `COPY` with no column
+list names no targets, the way an `INSERT` with no column list does not.
+
 ### Policy Evaluation Order
 
 1. Column references are bound against the schema **this identity** can see, so

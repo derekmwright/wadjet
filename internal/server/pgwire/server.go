@@ -756,6 +756,46 @@ func (c *pgConn) handleCopyIn(sql string) {
 		}
 	}
 
+	// COPY is a WRITE, and it authorizes BEFORE it invites the client to
+	// stream — before `G` and before the ingester exists (#938).
+	//
+	// It used to authorize nowhere at all. Unlike INSERT, which reaches
+	// `wadjet.DB.ExecuteParsed` and its `auth.EnforceDMLPolicies` call, COPY
+	// writes through `ingest.Ingester` directly, so a role granted only
+	// `read` was handed CopyInResponse and its rows landed. That is the
+	// bulk-ingest path: the largest write on this door was the one with no
+	// decision on it.
+	//
+	// Two questions, both asked here and neither of them new:
+	//
+	//  1. May this identity WRITE this relation? `auth.TableAccess` is the
+	//     one effective table decision every door asks (ADR-0034) — the
+	//     evaluator decides where one is installed, and the legacy role rule
+	//     (`HasPermission("write")` AND `CanAccessTable`) where none is.
+	//  2. Does the COLUMN LIST survive the identity's column policy?
+	//     `auth.EnforceDMLPolicies` over a synthesized INSERT: a COPY column
+	//     list is an INSERT target list, so it earns INSERT's answer —
+	//     naming a DENIED column is 42703 — and no other. Forking a
+	//     COPY-only rule here would be a second reading of one question.
+	//
+	// A refusal is sent INSTEAD of CopyInResponse, so the connection stays in
+	// the ordinary message loop and the caller gets its ReadyForQuery; no row
+	// is consumed and the ingester is never constructed.
+	if err := auth.TableAccess(ctx, c.authProvider, tableName, auth.ActionWrite); err != nil {
+		c.sendQueryError(ctx, "42501", err)
+		return
+	}
+	if err := auth.EnforceDMLPolicies(ctx, c.authProvider, c.db.Catalog(), &plansql.ParsedQuery{
+		Type: plansql.QueryInsert,
+		// The column list as the STATEMENT gave it (resolved to the schema's
+		// spelling), not the expansion: an INSERT with no column list names
+		// no targets either, and COPY answers what INSERT answers.
+		Insert: &plansql.InsertInfo{Table: tableName, Columns: copyTargets(copyColumns, columns)},
+	}, "pgwire"); err != nil {
+		c.sendQueryError(ctx, "42501", err)
+		return
+	}
+
 	// Build type map for value conversion
 	// The whole COLUMN, not its TypeID: a DECIMAL field is judged against the
 	// declared (p, s) as the row is read, so COPY names the row that carried
@@ -886,6 +926,20 @@ func (c *pgConn) handleCopyIn(sql string) {
 			return
 		}
 	}
+}
+
+// copyTargets is the column list the write DECISION sees: the resolved
+// spelling when the statement named columns, and nothing when it did not.
+//
+// `COPY t FROM STDIN` with no list is `INSERT INTO t VALUES (…)` with no list,
+// and it earns the same answer — handing the expansion to the column check
+// instead would make COPY refuse where INSERT permits, which is a fork of one
+// rule into two.
+func copyTargets(stated, resolved []string) []string {
+	if len(stated) == 0 {
+		return nil
+	}
+	return resolved
 }
 
 // drainCopy reads and discards messages until CopyDone or CopyFail is received.
