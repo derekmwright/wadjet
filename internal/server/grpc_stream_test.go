@@ -53,7 +53,7 @@ func TestStreamResultBatches_PerBatch(t *testing.T) {
 
 	fs := &fakeQueryStream{}
 	cs := &chunkStreamer{stream: fs, columns: result.Columns, stats: stats}
-	if err := streamResultBatches(cs, result); err != nil {
+	if err := streamResultBatches(cs, result.Stream()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,7 +89,7 @@ func TestStreamResultBatches_Empty(t *testing.T) {
 
 	fs := &fakeQueryStream{}
 	cs := &chunkStreamer{stream: fs, columns: result.Columns, stats: stats}
-	if err := streamResultBatches(cs, result); err != nil {
+	if err := streamResultBatches(cs, result.Stream()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -116,7 +116,7 @@ func TestChunkStreamer_SplitsLargeBatch(t *testing.T) {
 
 	fs := &fakeQueryStream{}
 	cs := &chunkStreamer{stream: fs, columns: result.Columns, stats: &wadjetv1.QueryStats{}}
-	if err := streamResultBatches(cs, result); err != nil {
+	if err := streamResultBatches(cs, result.Stream()); err != nil {
 		t.Fatal(err)
 	}
 

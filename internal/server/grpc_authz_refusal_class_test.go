@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
 	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -109,5 +111,56 @@ func TestGRPCResultDrainRefusalCarriesItsClass(t *testing.T) {
 	// And the query prefix is still the query prefix.
 	if q := grpcQueryError(errors.New("boom")); !strings.Contains(q.Error(), "query error: boom") {
 		t.Errorf("grpcQueryError = %v, want the query prefix preserved", q)
+	}
+}
+
+// grpcFakeBatchStream is a result stream that fails on the first Next. It is
+// what lets the streaming drain be driven without a coordinator.
+type grpcFakeBatchStream struct {
+	err    error
+	closed bool
+}
+
+func (s *grpcFakeBatchStream) Next(context.Context) (*batch.RecordBatch, error) { return nil, s.err }
+func (s *grpcFakeBatchStream) Close() error                                     { s.closed = true; return nil }
+
+// TestStreamResultBatchesMapsTheDrainRefusal gates the WIRING, not the mapping.
+//
+// TestGRPCResultDrainRefusalCarriesItsClass asserts grpcResultError in
+// isolation, so restoring this drain's call site to a bare
+// `status.Errorf(codes.Internal, …)` passed the entire package: the fix's
+// mapping half was gated and the half that is the actual point — that THIS loop
+// routes through it — was not (round-1 review P1). Driving the real loop with a
+// stream that refuses closes that.
+func TestStreamResultBatchesMapsTheDrainRefusal(t *testing.T) {
+	refused := &grpcFakeBatchStream{err: sqlerr.New("42501", `permission denied for table "secret"`)}
+	err := streamResultBatches(&chunkStreamer{}, refused)
+	if got := grpcAuthzCode(err); got != codes.PermissionDenied {
+		t.Errorf("streamResultBatches over a refusing stream: code %v, want PermissionDenied (err %v)", got, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), `permission denied for table "secret"`) {
+		t.Errorf("streamResultBatches refusal = %v\n  want the refusal's own text", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "reading result batches") {
+		t.Errorf("streamResultBatches refusal = %v\n  a refusal must not wear the drain's prefix", err)
+	}
+	// The stream is closed on the error exit: an undrained spill-backed stream
+	// pins its scratch file until Close runs, and a refusal is an early exit.
+	if !refused.closed {
+		t.Error("streamResultBatches did not close the stream on the refusal path")
+	}
+
+	// A genuine drain failure still carries Internal and the message operators
+	// already see — this narrows that bucket, it does not empty it.
+	broken := &grpcFakeBatchStream{err: errors.New("scratch file vanished")}
+	err = streamResultBatches(&chunkStreamer{}, broken)
+	if got := grpcAuthzCode(err); got != codes.Internal {
+		t.Errorf("streamResultBatches over a broken stream: code %v, want Internal (err %v)", got, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "reading result batches: scratch file vanished") {
+		t.Errorf("streamResultBatches failure = %v\n  want the drain's own message", err)
+	}
+	if !broken.closed {
+		t.Error("streamResultBatches did not close the stream on the failure path")
 	}
 }

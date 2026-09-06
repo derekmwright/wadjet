@@ -195,7 +195,7 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 				Plan:      result.Plan,
 			},
 		}
-		return streamResultBatches(cs, result)
+		return streamResultBatches(cs, result.Stream())
 	}
 
 	if g.db != nil {
@@ -231,8 +231,14 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 // one held-back chunk, and each batch reference is dropped after boxing so
 // the columnar copy can be reclaimed while the stream proceeds. Lazy
 // (gather-spilled) results replay from local scratch one batch at a time.
-func streamResultBatches(cs *chunkStreamer, result *coordinator.SQLResult) error {
-	stream := result.Stream()
+// It takes the STREAM rather than the SQLResult so the drain loop — including
+// its error mapping — can be driven by a test with a stream of its own. Taking
+// the result meant the only way in was a live coordinator, so the class mapping
+// on this path was assertable only at the mapping function and the WIRING here
+// was not gated at all: restoring this line to a bare codes.Internal passed the
+// whole package (round-1 review P1). Ownership is unchanged — this function
+// closes the stream it is handed, on every exit.
+func streamResultBatches(cs *chunkStreamer, stream coordinator.BatchStream) error {
 	defer stream.Close()
 	ctx := context.Background()
 	for {
