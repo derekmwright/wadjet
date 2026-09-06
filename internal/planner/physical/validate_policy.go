@@ -92,33 +92,84 @@ func ValidateColumnsUnderPolicy(ctx context.Context, cat *catalog.Catalog, info 
 	return validateColumns(ctx, policedColumnSource{src: cat, deniedFor: deniedFor}, info)
 }
 
-// applyContextColumnPolicies enforces the query's column policies on a plan
-// this planner built for itself — the expression-subquery path, which never
-// passes through auth.EnforcePlanPolicies.
+// applyContextColumnPolicies enforces the query's policy on a plan this
+// planner built for ITSELF — the expression-subquery path and the DAG's
+// scalar-producer path, neither of which passes through
+// auth.EnforcePlanPolicies.
 //
-// It returns an error when a policed scan could not be covered, because the
-// alternative is answering that subquery from the raw column.
+// EVERY RELATION THIS PLAN READS ASKS THE CONTEXT LOOKUP (#945). That is the
+// same decision `EnforcePlanPolicies` asks for the relations the statement's
+// own plan named and `EnforceOptimizedPlan` asks for a scan the optimizer
+// minted — access first, then the obligations that follow from it. A scalar
+// subquery in the SELECT list is SQL TEXT when enforcement runs, so
+// `policedRelations` cannot see it and this is the FIRST place its relation is
+// known; before this pass asked, `SELECT (SELECT MAX(id) FROM other)` answered
+// the value on every door, under both provider shapes, for an identity whose
+// role does not list `other` and for one an ABAC policy denies it to. The
+// spelling does not matter — SELECT list, WHERE, CASE, CTE body — because the
+// refusal is at the site that turns the text into a plan, not at a walk of the
+// text.
+//
+// The pass used to return early whenever the RESOLVED policy set was empty,
+// which is exactly the case a subquery-only relation produces: the outer
+// statement carries no policed relation, so there is nothing in the set and
+// the lookup — the one carrier that knows about the relation — went unasked.
+// The obligations follow the same seam: a row filter bound to a relation
+// reached only from a subquery restricted nothing, and a masked relation
+// reached only from a subquery refused (no projection could be found above its
+// scan) instead of answering the mask.
+//
+// It returns an error when the identity may not read a relation this plan
+// reads, and when a policed scan could not be covered — the alternative to
+// both is answering that subquery from the raw column.
 func (p *Planner) applyContextColumnPolicies(ctx context.Context, plan *logical.Node) (*logical.Node, error) {
 	pol := logical.ColumnPoliciesFromContext(ctx)
-	if len(pol) == 0 {
+	lookup := logical.PolicyLookupFromContext(ctx)
+	if plan == nil || (len(pol) == 0 && lookup == nil) {
 		return plan, nil
 	}
-	plan, unprotected := pol.Apply(plan, func(table string) []string {
-		if p.catalog == nil {
-			return nil
+	// A SLICE, not a map, for the same reason EnforcePlanPolicies keeps one:
+	// the filters are injected below and a map would order the Filter nodes
+	// differently from run to run.
+	type tableFilter struct{ table, filter string }
+	var rowFilters []tableFilter
+	merged, copied := pol, false
+	if lookup != nil {
+		for _, table := range logical.PolicedScanTables(plan) {
+			cols, rowFilter, err := lookup(table)
+			if err != nil {
+				// The shared decision's own refusal — sqlerr 42501,
+				// `permission denied for table "x"`, no rule id. Returned
+				// BEFORE any pipeline is built, so nothing is read.
+				return nil, err
+			}
+			if len(cols) > 0 && len(merged.For(table)) == 0 {
+				if !copied {
+					m := make(logical.TablePolicies, len(pol)+1)
+					for k, v := range pol {
+						m[k] = v
+					}
+					merged, copied = m, true
+				}
+				merged[strings.ToLower(table)] = cols
+			}
+			if rowFilter != "" {
+				rowFilters = append(rowFilters, tableFilter{table, rowFilter})
+			}
 		}
-		meta, err := p.catalog.GetTable(ctx, table)
-		if err != nil || meta == nil {
-			return nil
-		}
-		cols := make([]string, len(meta.Schema.Columns))
-		for i, c := range meta.Schema.Columns {
-			cols[i] = c.Name
-		}
-		return cols
+	}
+	plan, unprotected := merged.Apply(plan, func(table string) []string {
+		return p.policyTableColumns(ctx, table)
 	})
 	if unprotected > 0 {
 		return nil, logical.ErrColumnPolicyUnenforceable
+	}
+	// AFTER the security projection so they land BELOW it, directly above the
+	// scan: the policy's own predicate reads the row as stored (ADR-0033
+	// decision 6), which is the order EnforcePlanPolicies uses for the
+	// statement's own plan.
+	for _, rf := range rowFilters {
+		plan = logical.InjectRowFilter(plan, rf.table, rf.filter)
 	}
 	return plan, nil
 }
@@ -127,14 +178,20 @@ func (p *Planner) applyContextColumnPolicies(ctx context.Context, plan *logical.
 // scans the OPTIMIZER minted — decorrelation re-parses a subquery and builds a
 // fresh Scan, after the policy went in. A scan already under a security
 // barrier is skipped.
+//
+// The LOOKUP alone is enough to run this pass: a subquery whose relation the
+// resolved set never saw has no entry in that set, and the scan the optimizer
+// mints for a nested `IN (SELECT …)` INSIDE that subquery is exactly the scan
+// this pass exists for (#945).
 func (p *Planner) applyContextColumnPoliciesToNewScans(ctx context.Context, plan *logical.Node) (*logical.Node, error) {
 	pol := logical.ColumnPoliciesFromContext(ctx)
-	if len(pol) == 0 {
+	lookup := logical.PolicyLookupFromContext(ctx)
+	if len(pol) == 0 && lookup == nil {
 		return plan, nil
 	}
 	plan, unprotected, err := pol.ApplyToNewScansWithLookup(plan, func(table string) []string {
 		return p.policyTableColumns(ctx, table)
-	}, logical.PolicyLookupFromContext(ctx))
+	}, lookup)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +242,12 @@ func (p *Planner) checkPolicyPlanOrderFromContext(ctx context.Context, plan *log
 		}
 		cols, _, err := lookup(table)
 		if err != nil {
+			// An ACCESS denial, not an ordering fault. It was the only place
+			// this path ever met the lookup, and dropping it here is how a
+			// denied relation reached a scalar subquery (#945); the refusal
+			// now happens in applyContextColumnPolicies, above, before this
+			// plan is optimized — so by the time control reaches here the
+			// relation is one the identity may read.
 			return nil
 		}
 		return cols
