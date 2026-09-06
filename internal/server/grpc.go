@@ -571,9 +571,11 @@ func grpcQueryError(err error) error {
 // and deliberately not a decision of its own: the identity's permissions are
 // read by the Authorizer and nowhere else, so a door cannot drift from the
 // rule the HTTP DDL handlers and the embedded DB apply. The message is
-// RequirePermission's own text, so the three doors say the same sentence for
-// the same refusal; only the transport's class differs (403 / 42501 /
-// PermissionDenied).
+// RequirePermission's own text — it names the permission and the identity —
+// rather than a sentence invented here, so a door that later adopts the same
+// call says the same thing. The HTTP DDL handlers still carry their own older
+// wording ("insufficient permissions to create tables"); converging on this one
+// is theirs to do, and it is a message, not a decision.
 //
 // A missing identity under enabled auth is PermissionDenied here rather than
 // Unauthenticated because it cannot arise on this door — the interceptor
