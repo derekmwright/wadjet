@@ -321,3 +321,61 @@ func TestPGWireCopyRefusalIsNotAnExistenceOracle(t *testing.T) {
 		})
 	}
 }
+
+// A refused COPY ends the STATEMENT, not the connection (round-1 review P4).
+//
+// The refusal arrives instead of CopyInResponse, but a client that had already
+// queued its rows sends them anyway. Those CopyData/CopyDone messages used to
+// fall into handleMessage's default case — 08P01 AND `skipUntilSync` — and a
+// simple-protocol client never sends Sync, so nothing it sent afterwards was
+// ever answered. PostgreSQL accepts and ignores `d`/`c`/`f` outside copy mode
+// for exactly this case.
+func TestConnectionSurvivesAStreamAfterARefusedCopy(t *testing.T) {
+	db := sec3CopyDB(t)
+	provider := sec3LegacyProvider()
+	db.SetAuthProvider(provider)
+	srv := startTestServerWithAuth(t, db, provider)
+
+	client := newPGClient(t, srv.Addr())
+	defer client.terminate()
+	if errMsg := client.startupWithPassword("reader-user", "testdb", "reader-key"); errMsg != "" {
+		t.Fatalf("authenticating: %s", errMsg)
+	}
+
+	client.writeMsg('Q', append([]byte("COPY emp (id, name) FROM STDIN"), 0))
+	typ, payload, err := client.readMsg()
+	if err != nil {
+		t.Fatalf("reading the COPY response: %v", err)
+	}
+	if typ != 'E' {
+		t.Fatalf("got message %q; want the refusal", typ)
+	}
+	if code, _ := parseErrorFields(payload); code != "42501" {
+		t.Fatalf("SQLSTATE %q; want 42501", code)
+	}
+	for {
+		mt, _, rerr := client.readMsg()
+		if rerr != nil {
+			t.Fatalf("no ReadyForQuery after the refusal: %v", rerr)
+		}
+		if mt == 'Z' {
+			break
+		}
+	}
+
+	// The client streams what it had already queued, as libpq would.
+	client.writeMsg('d', []byte("99\tmallory\n"))
+	client.writeMsg('c', nil)
+
+	// And the connection answers the next statement.
+	_, rows, tag := client.simpleQuery("SELECT id FROM emp")
+	if strings.HasPrefix(tag, "ERROR") {
+		t.Fatalf("the connection did not survive the refused COPY: %s", tag)
+	}
+	if len(rows) != 0 {
+		t.Errorf("the ignored CopyData landed rows: %v", rows)
+	}
+	if n := sec3RowCount(t, db); n != 0 {
+		t.Errorf("row count %d after a refused COPY; want 0", n)
+	}
+}

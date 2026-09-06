@@ -393,6 +393,16 @@ func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
 		c.sendReadyForQuery()
 	case 'C': // Close (prepared statement or portal)
 		c.handleClose(payload)
+	case 'd', 'c', 'f': // CopyData / CopyDone / CopyFail outside copy mode
+		// Accepted and IGNORED, which is what PostgreSQL does: "we probably
+		// got here because a COPY failed, and the frontend is still sending
+		// data" (PostgresMain). A COPY that is refused before CopyInResponse
+		// leaves a client that had already queued its rows sending them
+		// anyway, and routing those into the default case below answered
+		// 08P01 AND set skipUntilSync — so a simple-protocol client, which
+		// never sends Sync, got no answer to anything it sent afterwards
+		// (round-1 review P4). The refusal must end the statement, not the
+		// connection.
 	case 'X': // Terminate
 		return false
 	default:
