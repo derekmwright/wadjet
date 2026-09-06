@@ -494,14 +494,16 @@ The full 43-query ClickBench suite on the official listing hardware —
 `hits` Parquet data in place (14.7 GB, no import step). Official
 methodology: page-cache drop before each query, cold + 2 hot tries,
 one process per query. Every query result is cell-exact against DuckDB
-on the same data (`benchmarks/clickbench/`). 2026-08-22 at
-v0.17.0-clawback, `benchmarks/clickbench/results-c6a-20260822-v0170.json`
-— **last measured at v0.17.0-clawback and not re-run since**; the
-numbers below are carried forward unchanged and are not a claim about
-v0.18.x on this suite. The releases since then targeted the distributed
-SF100 TPC-H path, but v0.18.12's scan-projection fix reaches worker-side
-Parquet reads, so this suite is due a re-run rather than another
-carry-forward.
+on the same data (`benchmarks/clickbench/`). 2026-09-06 at v0.18.50
+(`benchmarks/clickbench/results-c6a-20260906-v01850.json`): all 43
+queries return with zero nulls; suite cold 179.7 s, hot 107.1 s. That is
+**+11 % cold / +27 % hot** slower than the v0.17.0-clawback window
+(161.5 s / 84.6 s, 2026-08-22) — the 0.18.x correctness line traded some
+throughput for correctness, concentrated in the ~90-way integer
+`SUM(ResolutionWidth+k)` query (now an exact `bigint` accumulator, not a
+`float64`, ADR-0024) and the `DATE_TRUNC('minute')`-grouped query (now a
+`TIMESTAMP`, v0.18.44); recovering it is 0.19+ work
+([memo](docs/benchmarks/clickbench-v0.18.50-2026-09-06.md)).
 
 | Query | Cold | Hot | Query | Cold | Hot |
 |---|---:|---:|---|---:|---:|
