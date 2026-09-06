@@ -10,49 +10,36 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A MAP KEY is corrupted by the parquet round trip, and the axis is the KEY
-// POSITION rather than the DECIMAL type (rescoped 2026-09-05 after review, P5).
+// A MAP KEY must survive the parquet round trip for every family whose key is
+// carried as its own text — the axis is the KEY POSITION, not the type (#883).
 //
-//	MAP(DECIMAL(18,4), STRING) key 12.75        -> "127500.0000"  scaled twice
-//	MAP(DECIMAL(9,2),  STRING) key 12.75        -> "1275.00"      the same, x10^2
-//	MAP(DECIMAL(18,0), STRING) key 13           -> "13"           right (10^0)
+//	MAP(DECIMAL(18,4), STRING) key 12.75        -> "12.7500"    (was "127500.0000")
+//	MAP(DECIMAL(9,2),  STRING) key 12.75        -> "12.75"      (was "1275.00")
+//	MAP(DECIMAL(18,0), STRING) key 13           -> "13"         (always right, scale 0)
+//	MAP(DATE, STRING)          key 2023-11-14   -> "2023-11-14" (was NULL, key lost)
+//	MAP(TIMESTAMP, STRING)     key <ts>         -> epoch millis (right on both paths)
 //
-// The DATE and TIMESTAMP faces of "a map key is handed to the child as text"
-// are NOT gated here and this file makes no claim about them: a probe found
-// `MAP(DATE, STRING)` losing its key, but it is lost in `batch.FromRows`,
-// BEFORE parquet — a different layer from the one this test pins, and one
-// whose in-memory control is the thing that fails. Naming them here without a
-// cell would be a claim with no fixture; they are in the arc report as a lead.
+// Root cause (fixed): on read, a nested-map DECIMAL key leaf decodes to the
+// UNSCALED integer and a DATE key to the day count; the record assembler
+// printed that CARRIER with fmt.Sprint and re-ingested it, so the DECIMAL child
+// re-scaled it a second time and the DATE child could not parse "19675" as a
+// date. The assembler now renders a map key at the key column's own type and
+// scale (parquet.recordAssembler.mapKeyString), the canonical text the child
+// re-parses — the same spelling batch.Vector.GetValue produces. A map VALUE was
+// always right because it stays the typed box; only the key is forced through
+// text because a Go map's key must be a string.
 //
-// while the DECIMAL map VALUE, a ROW field, an ARRAY-of-ROW field and an ARRAY
-// of ARRAY all round-trip correctly. The defect is every family whose map key
-// is handed to the child as its own TEXT (batch.mapKeyValue: "every other
-// family parses its own string form already") and something below reads that
-// text as an already-scaled carrier.
+// The in-memory batch.FromRows path is the CONTROL and was already right for
+// DECIMAL/DATE; a TIMESTAMP key given as wall-clock text was dropped there
+// (batch.mapKeyValue ParseInt'd it) and is now handed to the child's own
+// timestamp-text parse.
 //
-// Found while fixing #669, whose decimal-keyed-map lookup had to be gated at
-// the expr layer over a constructed batch because of this — an end-to-end
-// fixture cannot tell a lookup defect from a storage one when the stored value
-// is already wrong.
-//
-// The defect is SPECIFIC to a map KEY, which is what makes it locatable: the
-// in-memory path is right, a DECIMAL map VALUE is right, and a DECIMAL ARRAY
-// element is right. All four are asserted below, so a fix that moves the wrong
-// one is caught here.
-//
-// `batch.mapKeyValue` hands a map key's own TEXT to the DECIMAL child (every
-// non-numeric family "parses its own string form already", as its doc says),
-// and something below reads that text as an already-scaled carrier — the
-// ADR-0018 §4 hand-off, applied to a value that has not been through it.
-//
-// TODO(parquet): delete this pin when a DECIMAL map key round-trips. The
-// residual cell FAILS when it starts agreeing, which is what makes deleting it
-// the proof.
+// The right-position siblings — DECIMAL map VALUE, DECIMAL ARRAY element — are
+// asserted beside the keys so a fix that moved the wrong one is caught.
 func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
-	// The IN-MEMORY path, which is the control: no parquet, same schema, same
-	// row. It is right, so the defect is at the storage boundary.
+	// The IN-MEMORY path, the control: no parquet, same schema, same row.
 	keyCol := parquet.Column{Name: "mk", Type: parquet.TypeMap, Nullable: true,
 		ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
 			{Name: "key", Type: parquet.TypeDecimal, Precision: 18, Scale: 4},
@@ -66,8 +53,7 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 	}
 	row, _ := entries[0].(map[string]any)
 	if got := row["key"]; got != "12.7500" {
-		t.Errorf("in-memory DECIMAL map key = %#v, want \"12.7500\" — the CONTROL moved, "+
-			"so this is no longer a storage-only defect", got)
+		t.Errorf("in-memory DECIMAL map key = %#v, want \"12.7500\"", got)
 	}
 
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -102,8 +88,24 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 
-	// The two siblings that are RIGHT, and must stay right: a DECIMAL map
-	// VALUE and a DECIMAL ARRAY element through the same writer and reader.
+	// The DECIMAL map KEY now round-trips: 12.7500, not the double-scaled
+	// 127500.0000 the writer stored before the assembler rendered it at scale.
+	t.Run("decimal_map_key_round_trips", func(t *testing.T) {
+		res, err := db.Query(ctx, `SELECT mk AS v FROM decmapkey WHERE id = 1`)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		got, _ := res.Rows[0]["v"].([]any)
+		if len(got) != 1 {
+			t.Fatalf("MAP came back as %#v", res.Rows[0]["v"])
+		}
+		entry, _ := got[0].(map[string]any)
+		if key, _ := entry["key"].(string); key != "12.7500" {
+			t.Errorf("DECIMAL map key reads back %q, want \"12.7500\"", key)
+		}
+	})
+
+	// The two siblings that were always RIGHT and must stay right.
 	for _, c := range []struct{ name, sql, want string }{
 		{"map_value", `SELECT ELEMENT_AT(mv, 'a') AS v FROM decmapkey WHERE id = 1`, "12.7500"},
 		{"array_element", `SELECT ELEMENT_AT(ad, 1) AS v FROM decmapkey WHERE id = 1`, "12.7500"},
@@ -119,11 +121,10 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 		})
 	}
 
-	// The SCALE is what the corruption is proportional to, so a second scale
-	// is a second cell: at (9,2) the same 12.75 reads back 1275.00, and at
-	// (18,0) — where 10^0 is 1 — it is right. Two of the three would agree
-	// with a fix that only moved the (18,4) case.
-	t.Run("residual_scale_is_the_multiplier", func(t *testing.T) {
+	// The SCALE is the multiplier the corruption was proportional to, so a
+	// second scale is a second cell: (9,2), and the (18,0) control where
+	// 10^0 = 1 was right all along. Both must now read back the written value.
+	t.Run("scale_is_the_multiplier", func(t *testing.T) {
 		sc2 := parquet.Schema{Columns: []parquet.Column{
 			{Name: "id", Type: parquet.TypeInt64},
 			{Name: "mk92", Type: parquet.TypeMap, Nullable: true,
@@ -152,8 +153,8 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 			t.Fatalf("flush: %v", err)
 		}
 		for _, c := range []struct{ col, want string }{
-			{"mk92", "1275.00"}, // 12.75 x 10^2 — the pin
-			{"mk180", "13"},     // scale 0, so the multiplier is 1 — right
+			{"mk92", "12.75"},
+			{"mk180", "13"},
 		} {
 			res, err := db.Query(ctx, `SELECT `+c.col+` AS v FROM decmapkey2 WHERE id = 1`)
 			if err != nil {
@@ -165,29 +166,80 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 			}
 			entry, _ := got[0].(map[string]any)
 			if key, _ := entry["key"].(string); key != c.want {
-				t.Errorf("%s key reads back %q, this pin records %q — the multiplier is the "+
-					"column's SCALE, so re-measure the whole family", c.col, key, c.want)
+				t.Errorf("%s key reads back %q, want %q", c.col, key, c.want)
 			}
 		}
 	})
 
-	// The RESIDUAL, pinned fail-on-agree.
-	t.Run("residual_map_key_is_scaled_twice", func(t *testing.T) {
-		res, err := db.Query(ctx, `SELECT mk AS v FROM decmapkey WHERE id = 1`)
-		if err != nil {
-			t.Fatalf("%v", err)
+	// The DATE and TIMESTAMP faces of the same defect (#883). A DATE key was
+	// LOST — its day-count carrier is not a date string — and now round-trips;
+	// a TIMESTAMP key crosses as its epoch-millis carrier on both the parquet
+	// and the (previously key-dropping) in-memory path.
+	t.Run("date_and_timestamp_map_keys", func(t *testing.T) {
+		sc3 := parquet.Schema{Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "md", Type: parquet.TypeMap, Nullable: true,
+				ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+					{Name: "key", Type: parquet.TypeDate},
+					{Name: "value", Type: parquet.TypeString, Nullable: true},
+				}}},
+			{Name: "mts", Type: parquet.TypeMap, Nullable: true,
+				ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+					{Name: "key", Type: parquet.TypeTimestamp},
+					{Name: "value", Type: parquet.TypeString, Nullable: true},
+				}}},
+		}}
+		if err := db.CreateTable(ctx, "dtmapkey", sc3, nil); err != nil {
+			t.Fatalf("create: %v", err)
 		}
-		got, _ := res.Rows[0]["v"].([]any)
-		if len(got) != 1 {
-			t.Fatalf("MAP came back as %#v", res.Rows[0]["v"])
+		ing := db.NewIngester("dtmapkey", sc3, nil, ingest.Config{MaxBufferRows: 8, RowGroupSize: 4})
+		if err := ing.Ingest(ctx, []map[string]any{{
+			"id":  int64(1),
+			"md":  map[string]any{"2023-11-14": "b"},
+			"mts": map[string]any{"2023-11-14 00:00:00": "c"},
+		}}); err != nil {
+			t.Fatalf("ingest: %v", err)
 		}
-		entry, _ := got[0].(map[string]any)
-		key, _ := entry["key"].(string)
-		if key != "127500.0000" {
-			t.Errorf("the DECIMAL map key reads back %q; this pin records \"127500.0000\", "+
-				"the value scaled a second time, and \"12.7500\" is what was written. If it "+
-				"has moved, the parquet round trip carries a DECIMAL map key correctly now: "+
-				"delete this pin and give #669's decimal-key lookup an end-to-end cell", key)
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		for _, c := range []struct {
+			col  string
+			want any
+		}{
+			{"md", "2023-11-14"},
+			{"mts", int64(1699920000000)},
+		} {
+			res, err := db.Query(ctx, `SELECT `+c.col+` AS v FROM dtmapkey WHERE id = 1`)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			got, _ := res.Rows[0]["v"].([]any)
+			if len(got) != 1 {
+				t.Fatalf("%s came back as %#v", c.col, res.Rows[0]["v"])
+			}
+			entry, _ := got[0].(map[string]any)
+			if entry["key"] != c.want {
+				t.Errorf("%s key reads back %#v, want %#v", c.col, entry["key"], c.want)
+			}
+		}
+
+		// The in-memory control for the TIMESTAMP key, which was dropped
+		// before (batch.mapKeyValue ParseInt on wall-clock text).
+		tsCol := parquet.Column{Name: "mts", Type: parquet.TypeMap, Nullable: true,
+			ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+				{Name: "key", Type: parquet.TypeTimestamp},
+				{Name: "value", Type: parquet.TypeString, Nullable: true},
+			}}}
+		bb := batch.FromRows([]parquet.Column{tsCol},
+			[]map[string]any{{"mts": map[string]any{"2023-11-14 00:00:00": "c"}}})
+		ents, _ := bb.Columns[0].GetValue(0).([]any)
+		if len(ents) != 1 {
+			t.Fatalf("in-memory TIMESTAMP map came back as %#v", bb.Columns[0].GetValue(0))
+		}
+		e, _ := ents[0].(map[string]any)
+		if e["key"] != int64(1699920000000) {
+			t.Errorf("in-memory TIMESTAMP map key = %#v, want epoch 1699920000000 (was dropped)", e["key"])
 		}
 	})
 }

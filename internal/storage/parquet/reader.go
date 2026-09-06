@@ -367,6 +367,11 @@ type leafColumnData struct {
 	maxDef    int32
 	maxRep    int32
 	typeID    TypeID
+	// decScale is the DECIMAL leaf's declared scale, needed to render a
+	// DECIMAL map KEY back to its canonical text (#883): the decoded box is
+	// the UNSCALED integer, and a map key must cross as a string, so the
+	// assembler renders it at this scale instead of printing the raw carrier.
+	decScale int32
 }
 
 // readLeafColumn reads all pages for a leaf column and returns raw values with
@@ -393,9 +398,10 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int, col Column) (leafColumnDa
 	typeID := col.Type
 
 	lcd := leafColumnData{
-		maxDef: int32(leaf.MaxDefLevel),
-		maxRep: int32(leaf.MaxRepLevel),
-		typeID: typeID,
+		maxDef:   int32(leaf.MaxDefLevel),
+		maxRep:   int32(leaf.MaxRepLevel),
+		typeID:   typeID,
+		decScale: int32(col.Scale),
 	}
 
 	pr := fr.ColumnPages(rgIdx, colIdx)

@@ -1721,12 +1721,23 @@ func mapKeyValue(child *Vector, k string) any {
 		return k
 	}
 	switch child.Children[0].Type {
-	case TypeInt32, TypeInt64, TypePort, TypeProtocol, TypeDuration, TypeTimestamp:
+	case TypeInt32, TypeInt64, TypePort, TypeProtocol, TypeDuration:
 		n, err := strconv.ParseInt(k, 10, 64)
 		if err != nil {
 			return nil
 		}
 		return n
+	case TypeTimestamp:
+		// A TIMESTAMP map key crosses as EITHER epoch-milliseconds text (the
+		// parquet reader's assembled carrier — fmt.Sprint of the leaf's int64)
+		// or a WALL-CLOCK string (a user's row into FromRows). Take the integer
+		// form; otherwise hand the string on for the TIMESTAMP child's own
+		// timestamp-text parse (SetValue's string arm). Before this a wall-clock
+		// key failed ParseInt and the whole entry was dropped (#883).
+		if n, err := strconv.ParseInt(k, 10, 64); err == nil {
+			return n
+		}
+		return k
 	case TypeFloat32, TypeFloat64:
 		f, err := strconv.ParseFloat(k, 64)
 		if err != nil {

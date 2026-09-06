@@ -312,19 +312,56 @@ func (a *recordAssembler) read(node *nestedNode) any {
 			a.skipOne(node)
 			return map[string]any{}
 		}
+		keyNode := node.children[0]
 		m := map[string]any{}
 		for {
-			k := a.read(node.children[0])
+			k := a.read(keyNode)
 			// A NULL VALUE is kept, unlike a null struct field: a map entry
 			// whose value is NULL is a key that IS in the map.
 			v := a.read(node.children[1])
-			m[fmt.Sprint(k)] = v
+			m[a.mapKeyString(keyNode, k)] = v
 			if a.peekRep(node) != node.rep {
 				return m
 			}
 		}
 	}
 	return nil
+}
+
+// mapKeyString renders a decoded map-KEY leaf value into the canonical text a
+// map key crosses the boundary as — the same spelling batch.Vector.GetValue
+// produces for the key column's type — so re-ingesting the assembled map
+// (batch.mapKeyValue -> SetValue) reconstructs the value that was stored.
+//
+// The raw box fmt.Sprint would print is the leaf's CARRIER, not its value: for
+// a DECIMAL it is the UNSCALED integer, which the DECIMAL child then re-parses
+// as scaled text and multiplies by 10^scale a SECOND time; for a DATE it is the
+// day count, which is not a date string at all and reads back as a lost key
+// (#883). A map VALUE is unaffected because it stays the typed box and
+// SetValue reads it directly — only the key is forced through text because a
+// Go map's key must be a string. Every other family's carrier already prints
+// as the text its child re-parses, so they keep fmt.Sprint.
+func (a *recordAssembler) mapKeyString(keyNode *nestedNode, k any) string {
+	if keyNode.kind == kindLeaf && keyNode.leafIdx >= 0 && keyNode.leafIdx < len(a.pages) {
+		lcd := &a.pages[keyNode.leafIdx]
+		switch lcd.typeID {
+		case TypeDecimal:
+			switch v := k.(type) {
+			case int64:
+				return Decimal128From(v).Text(int(lcd.decScale))
+			case Decimal128:
+				return v.Text(int(lcd.decScale))
+			}
+		case TypeDate:
+			switch v := k.(type) {
+			case int32:
+				return FormatDateDays(v)
+			case int64:
+				return FormatDateDays(int32(v))
+			}
+		}
+	}
+	return fmt.Sprint(k)
 }
 
 // checkDrained reports a leaf whose level stream still holds entries after
