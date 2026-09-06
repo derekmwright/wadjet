@@ -24,12 +24,12 @@ import (
 // today rather than omitting them. A pin that starts disagreeing fails, and
 // deleting it is the fix's proof:
 //
-//   - PIN-B: a SELECT the policy engine denies at the TABLE level comes back
+//   - pinSelectDeny: a SELECT the policy engine denies at the TABLE level comes back
 //     Internal, not PermissionDenied, because internal/auth/plan_enforce.go
 //     returns that refusal with no SQLSTATE on ANY door (unlike its DML twin,
 //     which carries 42501 and does map here). Fixing it is an internal/auth
 //     change; grpcQueryError needs no edit when it lands.
-//   - PIN-C: with a provider built WITHOUT an ABAC evaluator
+//   - pinLegacyDML: with a provider built WITHOUT an ABAC evaluator
 //     (auth.NewProvider(authn, authz, nil, nil)), EnforcePlanPolicies and
 //     EnforceDMLPolicies both return early, so the reader reads and writes a
 //     table its role does not list. The doors that ship always migrate `roles:`
@@ -44,7 +44,7 @@ type grpcCensusCell struct {
 	rpc string
 	key string // "" = no credential
 	// The two shapes, always both spelled out: a cell that differed silently
-	// between them is how PIN-C hid.
+	// between them is how the no-evaluator gap hid.
 	wantABAC   codes.Code
 	wantLegacy codes.Code
 	pin        string // non-empty: a known-wrong cell, with what makes it right
@@ -52,6 +52,20 @@ type grpcCensusCell struct {
 	// satisfies any code-only assertion.
 	after func(t *testing.T, rig grpcAuthzRig)
 }
+
+// The pin texts. Each names the FIX that makes its cell right, not the pin's
+// own label: the whole contract is that a failing run tells the person reading
+// it what just landed, and "PIN-B" tells them to go find a doc comment
+// (round-1 review P5).
+const (
+	pinSelectDeny = "SEC1, two fixes reach this cell: (abac shape) " +
+		"internal/auth/plan_enforce.go's SELECT table refusal carries no SQLSTATE — when it " +
+		"returns sqlerr 42501, as its DML twin already does, grpcQueryError maps it and this " +
+		"cell becomes PermissionDenied; (legacy shape) " + pinLegacyDML
+	pinLegacyDML = "SEC1: a provider with no ABAC evaluator returns early from " +
+		"EnforcePlanPolicies/EnforceDMLPolicies; when the no-evaluator provider enforces the " +
+		"legacy role rule on SELECT and DML, this cell becomes PermissionDenied on the legacy shape"
+)
 
 func grpcCensus() []grpcCensusCell {
 	const (
@@ -112,10 +126,10 @@ func grpcCensus() []grpcCensusCell {
 
 		// --- reader: read on its own table, nothing else -------------------
 		{"Query/select-allowed", "reader-key", OK, OK, "", nil},
-		{"Query/select-secret", "reader-key", Intern, OK, "PIN-B (abac) / PIN-C (legacy)", nil},
-		{"Query/delete-allowed", "reader-key", Denied, OK, "PIN-C (legacy): no evaluator, no DML enforcement", nil},
+		{"Query/select-secret", "reader-key", Intern, OK, pinSelectDeny, nil},
+		{"Query/delete-allowed", "reader-key", Denied, OK, pinLegacyDML, nil},
 		{"QueryStream/select-allowed", "reader-key", OK, OK, "", nil},
-		{"QueryStream/select-secret", "reader-key", Intern, OK, "PIN-B (abac) / PIN-C (legacy)", nil},
+		{"QueryStream/select-secret", "reader-key", Intern, OK, pinSelectDeny, nil},
 		{"SubmitQuery", "reader-key", Unavl, Unavl, "SEC3 changes these", nil},
 		{"GetQueryStatus", "reader-key", Unavl, Unavl, "SEC3 changes these", nil},
 		{"CancelQuery", "reader-key", Unavl, Unavl, "SEC3 changes these", nil},
