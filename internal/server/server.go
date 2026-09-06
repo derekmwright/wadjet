@@ -387,7 +387,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 					// client's message for the reason the other doors never
 					// carried it: it names the matched RULE.
 					writeError(w, http.StatusForbidden,
-						s.tableAccessRefusal(r.Context(), tableName, auth.ActionRead))
+						tableAccessRefusal(tableName))
 					return
 				}
 				tableDecisions[tableName] = td
@@ -417,14 +417,14 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			for _, table := range selectInfo.Tables {
 				if !authz.CanAccessTable(identity, table.Name) {
 					writeError(w, http.StatusForbidden,
-						s.tableAccessRefusal(r.Context(), table.Name, auth.ActionRead))
+						tableAccessRefusal(table.Name))
 					return
 				}
 			}
 			for _, join := range selectInfo.Joins {
 				if !authz.CanAccessTable(identity, join.RightTable) {
 					writeError(w, http.StatusForbidden,
-						s.tableAccessRefusal(r.Context(), join.RightTable, auth.ActionRead))
+						tableAccessRefusal(join.RightTable))
 					return
 				}
 			}
@@ -748,16 +748,21 @@ func (s *Server) visibleTables(ctx context.Context, tables []string) []string {
 }
 
 // tableAccessRefusal is what this door SAYS when a relation is refused: the
-// shared decision's own message, so one refusal of one relation reads the same
-// here, on pgwire and on gRPC.
+// message the shared decision carries, so one refusal of one relation reads
+// the same here, on pgwire (42501) and on gRPC (PermissionDenied).
 //
-// The checks above have already decided; this only renders. It asks
-// `tableAccess` for the text rather than formatting one, so a change to the
-// decision's wording carries this door with it.
-func (s *Server) tableAccessRefusal(ctx context.Context, table string, action auth.Action) string {
-	if err := s.tableAccess(ctx, s.catalog.ResolveTableName(table), action); err != nil {
-		return err.Error()
-	}
+// It FORMATS; it does not decide. The caller has already decided and is
+// holding that answer — asking `tableAccess` again just to render a string
+// would run a SECOND decision, on a re-resolved name and a re-stamped clock,
+// which can disagree with the one that actually refused: an `env.hour`
+// condition that turned over between the two, or a hot reload landing between
+// them, would print a refusal for a request the second decision permits, or
+// the reverse (round-1 review P9). One decision per request.
+//
+// A caller holding the decision's ERROR renders `err.Error()` directly —
+// handleGetTable and mayWriteExistingTable do — and this is for the two
+// preliminary checks that hold a `TableDecision` or a legacy bool instead.
+func tableAccessRefusal(table string) string {
 	return sqlerr.New("42501", "permission denied for table %q", table).Error()
 }
 
