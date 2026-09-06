@@ -120,7 +120,10 @@ func TestAWorkingConfigIsUnchanged(t *testing.T) {
 	}
 
 	// api_keys WITHOUT `enabled: true` has always been enforced; it still is.
-	implicit, _, err := Build(Config{APIKeys: []APIKeyDef{{Key: "k", Name: "r", Role: "reader"}}})
+	implicit, _, err := Build(Config{
+		APIKeys: []APIKeyDef{{Key: "k", Name: "r", Role: "reader"}},
+		Roles:   []RoleConfig{{Name: "reader", Tables: []string{"*"}, Allow: []string{"read"}}},
+	})
 	if err != nil {
 		t.Fatalf("an implicit-enable config was refused: %v", err)
 	}

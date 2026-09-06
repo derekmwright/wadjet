@@ -107,6 +107,15 @@ func New(cfg Config) (*Authenticator, *Authorizer) {
 //   - `enabled: true` with no usable mechanism at all: no API keys, no JWT, no
 //     mTLS. An operator who wrote `enabled: true` did not ask for an open
 //     server.
+//   - A credential naming a role the configuration does not define — an
+//     `api_keys` entry, an mTLS `role_map` value, an mTLS `default_role` — and
+//     `enabled: true` with credentials but no `roles:` at all. Such a
+//     credential authenticates and then holds NO permission, so it can do
+//     nothing; before this batch it could read everything, because the data
+//     path did not consult the role at all. Either way the configuration
+//     cannot mean what the operator wrote, and the doctrine is that such a
+//     configuration refuses at LOAD rather than behaving surprisingly at
+//     runtime.
 //
 // On error the returned Authenticator is not a disabled one. It reports
 // Enabled() and refuses EVERY credential with the configuration error, so a
@@ -171,6 +180,9 @@ func Build(cfg Config) (*Authenticator, *Authorizer, error) {
 		buildErr = errors.New("auth.enabled is true but no credential mechanism is " +
 			"configured: give it api_keys, jwt or mtls, or set auth.enabled: false")
 	}
+	if buildErr == nil {
+		buildErr = checkRoleReferences(cfg, roles)
+	}
 
 	authz := &Authorizer{roles: roles}
 	if buildErr != nil {
@@ -182,6 +194,56 @@ func Build(cfg Config) (*Authenticator, *Authorizer, error) {
 		return authn, authz, buildErr
 	}
 	return authn, authz, nil
+}
+
+// checkRoleReferences refuses a configuration whose credentials name a role
+// that does not exist, or that defines no roles at all beside credentials.
+//
+// An identity built from such a credential carries an empty `Perms` and an
+// empty `Tables`: it authenticates, and then every decision refuses it,
+// because the role's `allow` list is the coarse gate every door applies. That
+// is the right RUNTIME answer and a terrible thing to discover in production —
+// the operator wrote a working-looking config and got a credential that can do
+// nothing. On base it was worse than surprising: the data path consulted no
+// role at all when no ABAC evaluator was installed, so exactly this credential
+// could read every table while the metadata doors refused it.
+//
+// A JWT is not checked here: its role arrives in the token's claim at verify
+// time, and the configuration carries no list of them to check against. A
+// token naming an undefined role authenticates with no permissions and is
+// refused by the coarse gate, which is the only place that decision can be
+// made.
+func checkRoleReferences(cfg Config, roles map[string]*RoleDef) error {
+	credentialed := len(cfg.APIKeys) > 0 || cfg.JWT.Enabled || cfg.MTLS.Enabled
+	if cfg.Enabled && credentialed && len(roles) == 0 {
+		return errors.New("auth.enabled is true and credentials are configured, but no " +
+			"roles are defined: every credential would authenticate and then hold no " +
+			"permission at all; define roles (and, if you use them, abac_policies " +
+			"scoped to those roles)")
+	}
+	for _, ak := range cfg.APIKeys {
+		if ak.Role == "" {
+			return fmt.Errorf("api key %q names no role; a credential with no role holds "+
+				"no permission", ak.Name)
+		}
+		if roles[ak.Role] == nil {
+			return fmt.Errorf("api key %q names role %q, which is not defined in roles",
+				ak.Name, ak.Role)
+		}
+	}
+	if cfg.MTLS.Enabled {
+		for subject, role := range cfg.MTLS.RoleMap {
+			if roles[role] == nil {
+				return fmt.Errorf("mtls role_map maps %q to role %q, which is not defined "+
+					"in roles", subject, role)
+			}
+		}
+		if cfg.MTLS.DefaultRole != "" && roles[cfg.MTLS.DefaultRole] == nil {
+			return fmt.Errorf("mtls default_role %q is not defined in roles",
+				cfg.MTLS.DefaultRole)
+		}
+	}
+	return nil
 }
 
 // Enabled reports whether authentication is active.

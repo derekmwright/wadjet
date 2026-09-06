@@ -268,7 +268,14 @@ query:
 auth:
   enabled: true
 
-  # API key definitions
+  # API key definitions.
+  #
+  # Every `role:` here — and every value in the mTLS `role_map`, and
+  # `default_role` — must name a role defined under `roles:` below. A
+  # credential naming a role that does not exist authenticates and then holds
+  # NO permission at all, so it refuses at config load rather than becoming a
+  # key nobody can use. `auth.enabled: true` with credentials and no `roles:`
+  # section refuses for the same reason.
   api_keys:
     - key: "wadjet-key-abc123"
       name: "ingest-service"

@@ -92,6 +92,33 @@ func TestBuildProviderFromConfigLeavesAnUnauthenticatedDeploymentAlone(t *testin
 	}
 }
 
+// A credential naming a role the configuration does not define refuses at
+// STARTUP, not at the first query: such a key authenticates and then holds no
+// permission at all.
+func TestStartupRefusesAnAPIKeyNamingAnUndefinedRole(t *testing.T) {
+	_, err := buildProviderFromConfig(&config.Config{Auth: config.Auth{
+		Enabled: true,
+		APIKeys: []config.AuthAPIKey{{Key: "k", Name: "ingest-pipeline", Role: "writter"}},
+		Roles:   []config.AuthRole{{Name: "writer", Tables: []string{"*"}, Allow: []string{"write"}}},
+	}}, nil)
+	if err == nil {
+		t.Fatal("the server would have started with a key naming an undefined role")
+	}
+	if !strings.Contains(err.Error(), "writter") {
+		t.Fatalf("startup refusal %q does not name the undefined role", err)
+	}
+}
+
+// And credentials with no roles at all.
+func TestStartupRefusesCredentialsWithNoRoles(t *testing.T) {
+	if _, err := buildProviderFromConfig(&config.Config{Auth: config.Auth{
+		Enabled: true,
+		APIKeys: []config.AuthAPIKey{{Key: "k", Name: "anyone", Role: "reader"}},
+	}}, nil); err == nil {
+		t.Fatal("the server would have started with credentials and no roles")
+	}
+}
+
 // The MCP door reads the same `Provider.Enabled()` the other three do, so a
 // broken configuration must not let it serve unauthenticated.
 func TestMCPRefusesToServeUnderABrokenAuthConfig(t *testing.T) {
