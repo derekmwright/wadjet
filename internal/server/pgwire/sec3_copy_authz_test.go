@@ -52,15 +52,24 @@ func sec3CopyDB(t *testing.T) *wadjet.DB {
 //
 // It reads under the WRITER identity, not a bare context: with an auth
 // provider installed, a context carrying no identity is refused on the plan
-// path ("permission denied: authentication required"), which is the
-// fail-closed rule and not something a fixture should route around. `writer`
-// holds `read` on this table in both provider shapes and carries no column
-// obligation that a `count(*)` would meet, so what it counts is what is
-// stored. With no provider the stamp is inert.
-func sec3RowCount(t *testing.T, db *wadjet.DB) int64 {
+// path, which is the fail-closed rule and not something a fixture should route
+// around. `writer` holds `read` on this table in both provider shapes and
+// carries no column obligation a `count(*)` would meet, so what it counts is
+// what is stored. Pass nil where the server has no provider.
+func sec3RowCount(t *testing.T, db *wadjet.DB, provider *auth.Provider) int64 {
 	t.Helper()
-	ctx := auth.ContextWithIdentity(context.Background(),
-		&auth.Identity{Name: "writer-user", Role: "writer"})
+	ctx := context.Background()
+	if provider != nil {
+		// AUTHENTICATE the key rather than hand-building an Identity: the
+		// legacy checks read `id.Perms` and `id.Tables`, which only the
+		// authenticator fills in from the role, so a hand-built identity is
+		// refused by the very rule this fixture is not testing.
+		id, err := provider.Authenticator().AuthenticateToken("writer-key")
+		if err != nil {
+			t.Fatalf("authenticating the fixture's reader: %v", err)
+		}
+		ctx = auth.ContextWithIdentity(ctx, id)
+	}
 	res, err := db.Query(ctx, "SELECT count(*) AS n FROM "+sec3CopyTable)
 	if err != nil {
 		t.Fatalf("counting rows: %v", err)
@@ -213,7 +222,7 @@ func TestPGWireCopyRequiresWritePermission(t *testing.T) {
 
 			// The read-only identity is refused BEFORE CopyInResponse, and
 			// the table is untouched afterwards.
-			before := sec3RowCount(t, db)
+			before := sec3RowCount(t, db, provider)
 			got := sec3Copy(t, srv.Addr(), "reader-user", "reader-key",
 				"COPY emp (id, name) FROM STDIN", "99\tmallory\n")
 			if got.msgType != 'E' {
@@ -225,7 +234,7 @@ func TestPGWireCopyRequiresWritePermission(t *testing.T) {
 			if want := `permission denied for table "emp"`; got.msg != want {
 				t.Errorf("refusal message %q; want %q — the same text INSERT's refusal carries", got.msg, want)
 			}
-			if after := sec3RowCount(t, db); after != before {
+			if after := sec3RowCount(t, db, provider); after != before {
 				t.Fatalf("the refused COPY appended rows: %d -> %d", before, after)
 			}
 
@@ -238,7 +247,7 @@ func TestPGWireCopyRequiresWritePermission(t *testing.T) {
 			if got.tag != "COPY 1" {
 				t.Errorf("writer COPY tag %q; want %q", got.tag, "COPY 1")
 			}
-			if after := sec3RowCount(t, db); after != before+1 {
+			if after := sec3RowCount(t, db, provider); after != before+1 {
 				t.Fatalf("the authorized COPY did not land: %d -> %d", before, after)
 			}
 		})
@@ -253,7 +262,7 @@ func TestPGWireCopyRefusesADeniedColumn(t *testing.T) {
 	db.SetAuthProvider(provider)
 	srv := startTestServerWithAuth(t, db, provider)
 
-	before := sec3RowCount(t, db)
+	before := sec3RowCount(t, db, provider)
 	got := sec3Copy(t, srv.Addr(), "writer-user", "writer-key",
 		"COPY emp (id, salary) FROM STDIN", "1\t100.0\n")
 	if got.msgType != 'E' {
@@ -262,7 +271,7 @@ func TestPGWireCopyRefusesADeniedColumn(t *testing.T) {
 	if got.code != "42703" {
 		t.Errorf("SQLSTATE %q; want 42703 — a denied column does not exist (msg %q)", got.code, got.msg)
 	}
-	if after := sec3RowCount(t, db); after != before {
+	if after := sec3RowCount(t, db, provider); after != before {
 		t.Fatalf("the refused COPY appended rows: %d -> %d", before, after)
 	}
 }
@@ -277,7 +286,7 @@ func TestPGWireCopyIsUnchangedWithoutAuth(t *testing.T) {
 		t.Fatalf("unauthenticated COPY got %q tag %q (%s: %s); want 'G' and COPY 1",
 			got.msgType, got.tag, got.code, got.msg)
 	}
-	if n := sec3RowCount(t, db); n != 1 {
+	if n := sec3RowCount(t, db, nil); n != 1 {
 		t.Fatalf("row count %d; want 1", n)
 	}
 }
@@ -385,7 +394,7 @@ func TestConnectionSurvivesAStreamAfterARefusedCopy(t *testing.T) {
 	if len(rows) != 0 {
 		t.Errorf("the ignored CopyData landed rows: %v", rows)
 	}
-	if n := sec3RowCount(t, db); n != 0 {
+	if n := sec3RowCount(t, db, provider); n != 0 {
 		t.Errorf("row count %d after a refused COPY; want 0", n)
 	}
 }
