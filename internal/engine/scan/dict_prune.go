@@ -55,15 +55,17 @@ func CanDictPruneRowGroup(fr *pqt.FileReader, rgIdx int, probes []EqProbe) bool 
 		return false
 	}
 	leaves := fr.Leaves()
+	// Resolve the probe's column by the same full-path discipline the native
+	// reader uses (TopLevelLeafIndex), not by the first basename match. A nested
+	// leaf and a top-level column can share a basename (`a.id` and `id`); the
+	// old `leaf.Name == p.ColName` scan probed the nested leaf's dictionary for a
+	// predicate that names the top-level column, so `id = 42` pruned a row whose
+	// top-level id=42 using a nested a.id=99, dropping a matching row (#915). A
+	// top-level column always wins the collision, exactly as the decode does.
+	byName := pqt.TopLevelLeafIndex(leaves)
 	for _, p := range probes {
-		colIdx := -1
-		for i, leaf := range leaves {
-			if leaf.Name == p.ColName {
-				colIdx = i
-				break
-			}
-		}
-		if colIdx < 0 {
+		colIdx, ok := byName.Lookup(p.ColName)
+		if !ok {
 			continue
 		}
 		// Dictionary entries are RAW FILE values, but the probe is an

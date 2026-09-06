@@ -940,6 +940,16 @@ duplicate or a foreign path is refused by name; a row group short a chunk keeps
 its existing per-column "carries no chunk for it" refusal, and a middle drop
 that shifts the survivors is caught here as a contradicting path.
 
+**The scan's dictionary prune and pushed predicates shadowed a top-level column
+with a nested leaf.** `CanDictPruneRowGroup` and `EvalRowGroupPreds` resolved a
+predicate's column against the FIRST leaf whose basename matched, ignoring its
+path — the scan-side twin of #925. For file leaves `a.id` and top-level `id`,
+`id = 42` probed `a.id`'s dictionary (99) and pruned a row whose top-level id
+was 42, and the pushed row predicate dropped the same matching row, while the
+unpruned native reader returned it correctly (#915). Both prune paths resolve by
+the full-path `TopLevelLeafIndex` now, the same resolver the decode uses, so the
+three read paths agree on which leaf a name means (§3).
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

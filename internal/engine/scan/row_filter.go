@@ -104,15 +104,14 @@ func EvalRowGroupPreds(fr *pqt.FileReader, rgIdx int, preds []RowPred, numRows i
 	defer rowBitsPool.Put(bm)
 	bm.reset(numRows)
 	leaves := fr.Leaves()
+	// Resolve by full path (TopLevelLeafIndex), consistently with the native
+	// reader and the dictionary probe: a nested leaf sharing a top-level
+	// column's basename must not shadow it, or a pushed `id = 42` evaluates
+	// against a nested a.id and drops a matching top-level row (#915).
+	byName := pqt.TopLevelLeafIndex(leaves)
 	for _, p := range preds {
-		colIdx := -1
-		for i, leaf := range leaves {
-			if leaf.Name == p.Col {
-				colIdx = i
-				break
-			}
-		}
-		if colIdx < 0 {
+		colIdx, ok := byName.Lookup(p.Col)
+		if !ok {
 			return nil, FilterNone, fmt.Errorf("scan filter: column %q not in file", p.Col)
 		}
 		if err := andPredOverColumn(fr, rgIdx, colIdx, p, bm); err != nil {
