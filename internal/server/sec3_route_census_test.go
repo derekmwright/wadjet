@@ -391,6 +391,43 @@ func TestHTTPOperationalRefusalCarriesTheSharedText(t *testing.T) {
 	}
 }
 
+// The DDL refusals carry the shared text too.
+//
+// Each of the five write entry points on this door used to refuse with its own
+// wording ("insufficient permissions to create tables") while gRPC's DDL, the
+// alert DDL and the embedded door all carried `auth.RequirePermission`'s. One
+// operation refused several ways is several readings of one decision, so the
+// text is pinned here (ADR-0034).
+func TestHTTPWriteRefusalCarriesTheSharedText(t *testing.T) {
+	ts, _, _ := censusServer(t)
+	want := `unauthorized: "write" permission required (identity "reader-user", role "reader")`
+	for _, tc := range []struct{ name, method, path, body string }{
+		{"REST create table", http.MethodPost, "/v1/tables",
+			`{"name":"t","columns":[{"name":"id","type":"INT64"}]}`},
+		{"REST drop table", http.MethodDelete, "/v1/tables/whatever", ""},
+		{"CREATE TABLE", http.MethodPost, "/v1/queries",
+			`{"sql":"CREATE TABLE t (id INT64)"}`},
+		{"DROP TABLE", http.MethodPost, "/v1/queries", `{"sql":"DROP TABLE t"}`},
+		{"ANALYZE TABLE", http.MethodPost, "/v1/queries", `{"sql":"ANALYZE TABLE t"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := censusDo(t, ts, tc.method, tc.path, "reader-key", tc.body)
+			if code != http.StatusForbidden {
+				t.Fatalf("status %d; want 403 (body %s)", code, clip(body))
+			}
+			var payload struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(body), &payload); err != nil {
+				t.Fatalf("body %s is not JSON: %v", clip(body), err)
+			}
+			if payload.Error != want {
+				t.Errorf("refusal text %q; want %q", payload.Error, want)
+			}
+		})
+	}
+}
+
 // A refused operational mutation has NO side effect: the DLQ a reader tried to
 // purge is still there for the admin that may read it.
 func TestHTTPRefusedPurgeLeavesTheDLQIntact(t *testing.T) {

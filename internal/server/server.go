@@ -712,6 +712,58 @@ func (s *Server) dml() *wadjet.DB {
 	return db
 }
 
+// visibleTables filters a listing to the tables this caller may READ, through
+// the ONE table-access decision every door asks (auth.VisibleTables,
+// ADR-0034).
+//
+// It used to be `Authorizer.FilterTables`, which is the LEGACY role rule and
+// only that: with an ABAC evaluator installed, an explicit deny on a relation
+// did not remove it from `GET /v1/tables` or `SHOW TABLES`, because the role's
+// `tables:` list — which a `roles:`-to-ABAC migration leaves as `["*"]` — was
+// the only thing consulted.
+func (s *Server) visibleTables(ctx context.Context, tables []string) []string {
+	if s.provider == nil && s.authz != nil {
+		// Static Auth/Authz with no Provider; see requireWrite.
+		if id := auth.IdentityFromContext(ctx); id != nil {
+			return s.authz.FilterTables(id, tables)
+		}
+		return tables
+	}
+	return auth.VisibleTables(ctx, s.provider, tables)
+}
+
+// mayWriteExistingTable is the second half of DDL authorization on an
+// EXISTING relation: the `write` permission says the identity may write
+// SOMETHING, and this says it may write THIS.
+//
+// DROP and ANALYZE name a relation that already exists, so an identity holding
+// `write` whom a policy explicitly DENIES on `secret` could drop `secret` —
+// the permission check never consulted the policy. CREATE takes no such check:
+// it mints a name, and there is nothing yet to decide about (PostgreSQL treats
+// CREATE as a schema privilege for the same reason).
+func (s *Server) mayWriteExistingTable(w http.ResponseWriter, r *http.Request, name string) bool {
+	if err := s.tableAccess(r.Context(), s.catalog.ResolveTableName(name),
+		auth.ActionWrite); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return false
+	}
+	return true
+}
+
+// tableAccess is the same decision for ONE named relation. `table` must be the
+// catalog-resolved spelling: an unquoted identifier folds at the lexer (#731)
+// and a policy bound to `Users` must police a request that spelled it `users`.
+func (s *Server) tableAccess(ctx context.Context, table string, action auth.Action) error {
+	if s.provider == nil && s.authz != nil {
+		id := auth.IdentityFromContext(ctx)
+		if id != nil && !s.authz.CanAccessTable(id, table) {
+			return sqlerr.New("42501", "permission denied for table %q", table)
+		}
+		return nil
+	}
+	return auth.TableAccess(ctx, s.provider, table, action)
+}
+
 func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
 	tables, err := s.catalog.ListTables(r.Context())
 	if err != nil {
@@ -719,26 +771,21 @@ func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Filter tables by role access
-	if identity := auth.IdentityFromContext(r.Context()); identity != nil {
-		if authz := s.getAuthz(); authz != nil {
-			tables = authz.FilterTables(identity, tables)
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"tables": tables})
+	writeJSON(w, http.StatusOK,
+		map[string]any{"tables": s.visibleTables(r.Context(), tables)})
 }
 
 func (s *Server) handleGetTable(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	// Check table access
-	if identity := auth.IdentityFromContext(r.Context()); identity != nil {
-		if authz := s.getAuthz(); authz != nil && !authz.CanAccessTable(identity, name) {
-			writeError(w, http.StatusForbidden,
-				fmt.Sprintf("access denied to table %q", name))
-			return
-		}
+	// Metadata follows the effective table-access decision (ADR-0034): a
+	// relation an identity may not read is one it may not describe either.
+	// That is a deliberate divergence from PostgreSQL, which shows `\d` to
+	// anyone (ADR-0012's divergence list).
+	if err := s.tableAccess(r.Context(), s.catalog.ResolveTableName(name),
+		auth.ActionRead); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
 	}
 
 	table, err := s.catalog.GetTable(r.Context(), name)
@@ -780,6 +827,40 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, code, resp)
+}
+
+// requireWrite refuses a caller that does not hold the `write` permission,
+// with the shared authorizer's own text.
+//
+// The five DDL entry points on this door each carried their own wording
+// ("insufficient permissions to create tables") while gRPC's DDL, the alert
+// DDL and the embedded door all carry `auth.RequirePermission`'s. One
+// operation refused three ways is three readings of one decision, and the
+// door census pins the text now (ADR-0034).
+//
+// It also fails CLOSED on a missing identity, which the inline
+// `if identity != nil` checks did not: with auth enabled, nobody is not
+// somebody who may write.
+func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) bool {
+	if s.provider == nil && s.authz != nil {
+		// Static Auth/Authz (Config.Authz with no Provider). Nothing in the
+		// product constructs it any more, but the field is still exported, so
+		// the legacy check stays — with require.go's wording, not a second
+		// one.
+		id := auth.IdentityFromContext(r.Context())
+		if id != nil && !s.authz.HasPermission(id, "write") {
+			writeError(w, http.StatusForbidden, fmt.Sprintf(
+				"unauthorized: %q permission required (identity %q, role %q)",
+				"write", id.Name, id.Role))
+			return false
+		}
+		return true
+	}
+	if err := auth.RequirePermission(s.provider, r.Context(), "write"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return false
+	}
+	return true
 }
 
 // requireAdmin refuses a caller that does not hold the `admin` permission and
@@ -1197,13 +1278,8 @@ func (s *Server) handleShowFunctions(w http.ResponseWriter, r *http.Request, sta
 func (s *Server) handleCreateTableSQL(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
 	ct := parsed.CreateTable
 
-	// Check write permission
-	identity := auth.IdentityFromContext(r.Context())
-	if identity != nil {
-		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
-			writeError(w, http.StatusForbidden, "insufficient permissions to create tables")
-			return
-		}
+	if !s.requireWrite(w, r) {
+		return
 	}
 
 	schema, err := columnDefsToSchema(ct.Columns)
@@ -1239,12 +1315,11 @@ func (s *Server) handleCreateTableSQL(w http.ResponseWriter, r *http.Request, pa
 func (s *Server) handleAnalyzeTableSQL(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
 	at := parsed.AnalyzeTable
 
-	identity := auth.IdentityFromContext(r.Context())
-	if identity != nil {
-		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
-			writeError(w, http.StatusForbidden, "insufficient permissions to analyze tables")
-			return
-		}
+	if !s.requireWrite(w, r) {
+		return
+	}
+	if !s.mayWriteExistingTable(w, r, at.Name) {
+		return
 	}
 
 	n, err := s.catalog.AnalyzeTable(r.Context(), at.Name)
@@ -1264,13 +1339,11 @@ func (s *Server) handleAnalyzeTableSQL(w http.ResponseWriter, r *http.Request, p
 func (s *Server) handleDropTableSQL(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
 	dt := parsed.DropTable
 
-	// Check write permission
-	identity := auth.IdentityFromContext(r.Context())
-	if identity != nil {
-		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
-			writeError(w, http.StatusForbidden, "insufficient permissions to drop tables")
-			return
-		}
+	if !s.requireWrite(w, r) {
+		return
+	}
+	if !s.mayWriteExistingTable(w, r, dt.Name) {
+		return
 	}
 
 	err := s.catalog.DropTable(r.Context(), dt.Name)
@@ -1339,13 +1412,8 @@ type CreateTableColumn struct {
 
 // handleCreateTable handles POST /v1/tables (REST endpoint).
 func (s *Server) handleCreateTable(w http.ResponseWriter, r *http.Request) {
-	// Check write permission
-	identity := auth.IdentityFromContext(r.Context())
-	if identity != nil {
-		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
-			writeError(w, http.StatusForbidden, "insufficient permissions to create tables")
-			return
-		}
+	if !s.requireWrite(w, r) {
+		return
 	}
 
 	var req CreateTableRequest
@@ -1397,13 +1465,11 @@ func (s *Server) handleCreateTable(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteTable(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	// Check write permission
-	identity := auth.IdentityFromContext(r.Context())
-	if identity != nil {
-		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
-			writeError(w, http.StatusForbidden, "insufficient permissions to drop tables")
-			return
-		}
+	if !s.requireWrite(w, r) {
+		return
+	}
+	if !s.mayWriteExistingTable(w, r, name) {
+		return
 	}
 
 	if err := s.catalog.DropTable(r.Context(), name); err != nil {
