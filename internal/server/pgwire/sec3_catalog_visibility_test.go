@@ -191,13 +191,17 @@ func TestPsqlDescribeFindsNoDeniedRelation(t *testing.T) {
 	db.SetAuthProvider(provider)
 	srv := startTestServerWithAuth(t, db, provider)
 
-	// The two lookups psql's \d makes, in order. The relation lookup is
-	// spelled with `=` rather than psql's own
-	// `relname OPERATOR(pg_catalog.~) '^(secret)$'`: this server's catalog
-	// emulation does not model the regex operator and answers ZERO rows to
-	// that spelling for every identity, so asserting on it would prove
-	// nothing about the filter. The equality spelling is what the emulation
-	// answers, and what a client that resolved the name already sends.
+	// The two lookups psql's \d makes, in order, spelled with `=`.
+	//
+	// This USED to be the only spelling that could carry the assertion: the
+	// emulation did not model psql's own
+	// `relname OPERATOR(pg_catalog.~) '^(secret)$'` and answered ZERO rows to
+	// it for every identity, so a filter test over that spelling would have
+	// passed on a server that filtered nothing (#944). The anchored regex is
+	// modelled now, and the filter is asserted over psql's REAL statements in
+	// `TestPsqlDescribeFollowsTheTableDecision`. This case stays as the
+	// equality arm: it is what a client that already resolved the name sends,
+	// and the filter has to hold on both spellings.
 	const relLookup = `SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c ` +
 		`LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace ` +
 		`WHERE c.relname = 'secret' ORDER BY 2, 3`
