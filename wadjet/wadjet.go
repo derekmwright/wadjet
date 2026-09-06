@@ -732,9 +732,16 @@ func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, log
 // The decision is asked on the CATALOG-RESOLVED spelling, because a policy
 // bound to `Users` must police a reference the lexer folded to `users` (#731).
 func (db *DB) describe(ctx context.Context, tableName string) (*QueryResult, error) {
-	tableName = strings.ToLower(tableName)
-	if err := auth.TableAccess(ctx, db.authProvider,
-		db.catalog.ResolveTableName(tableName), auth.ActionRead); err != nil {
+	// ONE spelling for both halves of this operation. The authorization
+	// decision already asked on the CATALOG-RESOLVED name while the catalog
+	// READ below asked on the folded one, so a relation the catalog holds as
+	// `Ledger` was authorized as `Ledger` and then looked up as `ledger` —
+	// and DESCRIBE / SHOW COLUMNS answered "table \"ledger\" not found" for a
+	// relation `SELECT * FROM Ledger` reads without complaint, on every door.
+	// `\d "Ledger"` printed its header and no columns for the same reason
+	// (#731, found gating #944).
+	tableName = db.catalog.ResolveTableName(strings.ToLower(tableName))
+	if err := auth.TableAccess(ctx, db.authProvider, tableName, auth.ActionRead); err != nil {
 		return nil, err
 	}
 	table, err := db.catalog.GetTable(ctx, tableName)
