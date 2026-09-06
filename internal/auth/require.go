@@ -31,9 +31,12 @@ func RequirePermission(provider *Provider, ctx context.Context, perm string) err
 // role/name/method plus attributes). It is stored with definer's-rights
 // resources — an alert runs under its creator's identity on every scheduled
 // tick, so the creator's role and attributes must survive in the catalog.
-// Tables/Perms are intentionally omitted: they gate RBAC operations (table
-// access, DDL) that the scheduled-query path does not perform — that path
-// applies only ABAC plan enforcement, which reads role/attributes.
+// Tables/Perms are intentionally omitted, and that is now load-bearing rather
+// than an economy: they are pure configuration, resolved from the ROLE, so
+// persisting them would freeze a grant at creation time. `StampDefiner`
+// re-resolves them from the Authorizer's current roles on every tick
+// (`Authorizer.ResolveRole`), which is what makes a narrowed or deleted role
+// take effect on the alerts its holder created.
 type IdentitySnapshot struct {
 	Name       string            `json:"name,omitempty"`
 	Role       string            `json:"role,omitempty"`
@@ -77,16 +80,26 @@ func (s IdentitySnapshot) Empty() bool {
 //   - provider nil / auth disabled: ctx is returned unchanged with true —
 //     there is no policy to enforce (dev/embedded).
 //   - auth enabled: snap.ToIdentity() is ALWAYS stamped, even for an empty
-//     (legacy) snapshot. This is deliberate: EnforcePlanPolicies fail-OPENS on
-//     a nil identity, so stamping a non-nil role-less identity instead routes
-//     an unattributed alert into ABAC default-deny (fail closed) rather than
-//     unfiltered execution. attributed is false in that case so the caller can
-//     warn that the alert needs recreating under an identity.
+//     (legacy) snapshot. A nil identity is refused outright now (ADR-0034
+//     item 7), and an unattributed alert should say WHY rather than fail as
+//     "authentication required": stamping a role-less identity routes it into
+//     the same default-deny with attributed=false, so the caller can warn that
+//     the alert needs recreating under an identity.
+//
+// The stamped identity's GRANTS are re-resolved from the Authorizer's current
+// role definitions (`Authorizer.ResolveRole`). A snapshot records who the
+// definer was and not what they could do, so the grants cannot be stale: an
+// alert whose creator's role has since lost `write`, or been deleted, is
+// refused on its next tick. Without this the definer carried an empty `Perms`
+// and `Tables`, which the coarse gate and `CanAccessTable` read — so on a
+// `roles:`-only deployment every scheduled alert stopped running.
 func StampDefiner(ctx context.Context, provider *Provider, snap IdentitySnapshot) (context.Context, bool) {
 	if provider == nil || !provider.Enabled() {
 		return ctx, true
 	}
-	return ContextWithIdentity(ctx, snap.ToIdentity()), !snap.Empty()
+	id := snap.ToIdentity()
+	provider.Authorizer().ResolveRole(id)
+	return ContextWithIdentity(ctx, id), !snap.Empty()
 }
 
 // ToIdentity reconstructs an *Identity for context stamping. Attributes are
