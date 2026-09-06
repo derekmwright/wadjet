@@ -52,7 +52,7 @@ Authentication proves who the caller is. The RPCs listed below then check what t
 | `DescribeTable` | read access to that table |
 | `Query`, `QueryStream` | whatever the statement needs: a policy refusal (SQLSTATE `42501`) is returned as `PERMISSION_DENIED`, not `INTERNAL` |
 
-The message names the missing permission, or the table, and the identity. Branch on the code, not on the text — the wording is not part of the contract.
+The message names the missing permission and the identity, or the table. Branch on the code, not on the text — the wording is not part of the contract.
 
 The rules above are the `CreateTable` and `DropTable` RPCs. A `CREATE TABLE` or `DROP TABLE` sent as SQL text through `Query` takes the engine's statement path instead, and is not covered by this table.
 
