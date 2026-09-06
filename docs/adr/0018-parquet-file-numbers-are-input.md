@@ -519,8 +519,8 @@ ADR-0024's already-gated grammar rather than growing a second scaling rule;
 `batch.TestDecimalRescaleAgreesWithBatchRescale` holds it to the engine's
 `batch.Rescale` so the two cannot drift.
 
-The reconciliation reaches four places, and the fourth is the one that is easy
-to miss:
+The reconciliation reaches five places, and the last two are the ones that are
+easy to miss:
 
 - the native columnar decode (`scan.rescaleDecimalChunk`, the shape
   `rescaleTimestampChunk` already had for the same reason one type over);
@@ -546,6 +546,21 @@ to miss:
   ANALYZE records its persisted bounds in the CATALOG's domain for the same
   reason, since a consumer of persisted metadata has no footer left to
   reconcile against.
+- **the dictionary-probe prune** (`scan.dictProbeDecimalAbsent`), the twin of
+  the statistics reconcile one rung down the pushdown ladder. An equality probe
+  over a pure-dictionary DECIMAL chunk compares the predicate's carrier — at the
+  catalog scale — against the file's dictionary entries, which are carriers at
+  the FILE's scale. Leaving them unreconciled prunes a matching row group:
+  `WHERE d = 12.00` over a `(9,2)` catalog column arrived as 1200 and searched a
+  `(18,0)` file's dictionary holding 12, declared the group empty, and dropped
+  the row `scan.rescaleDecimalChunk` would have decoded to `12.00` (#916). The
+  probe now carries the catalog `(p, s)` and each dictionary carrier is moved to
+  the catalog scale by the SAME `DecimalRescale` the decode uses — so a row
+  whose decoded value equals the predicate has a dictionary carrier that
+  reconciles to exactly the predicate, and a genuine match is never pruned. A
+  carrier that cannot be moved (past int64, or outside the catalog's band) or a
+  wide FIXED_LEN_BYTE_ARRAY dictionary WITHHOLDS the prune (§5's rule), never
+  guesses. `scan.TestAdversarialScanDecimalDictionaryScale` is the gate.
 
 Compaction needs no rule of its own and gets the property for free: it already
 reads through `ReadRowGroupAs` with the table's schema and writes under the

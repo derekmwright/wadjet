@@ -17065,7 +17065,17 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		// high-cardinality columns). Dictionary entries are raw file
 		// values too, so they take the same converted literal.
 		if pred.Op == "=" && scan.DictPrune.On() {
-			eqProbes = append(eqProbes, scan.EqProbe{ColName: col.Name, Value: val})
+			// A DECIMAL probe's carrier is at the CATALOG scale; the file's
+			// dictionary is at the file's own scale. Carry the catalog
+			// declaration so the probe layer can reconcile the two before
+			// comparing (dictProbeDecimalAbsent), the dictionary twin of the
+			// stats-path reconcile (#707/#916). Non-DECIMAL probes leave these
+			// zero and the probe layer never reads them.
+			ep := scan.EqProbe{ColName: col.Name, Value: val}
+			if col.Type == parquet.TypeDecimal {
+				ep.Scale, ep.Precision = int(col.Scale), int(col.Precision)
+			}
+			eqProbes = append(eqProbes, ep)
 		}
 	}
 
