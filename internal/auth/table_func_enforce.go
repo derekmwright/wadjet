@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -88,23 +87,12 @@ func AuthorizeTableFunction(ctx context.Context, provider *Provider, protocol st
 		return refuseTableFunction(funcName, "authentication required")
 	}
 	if ev := provider.Evaluator(); ev != nil {
-		// The environment the protocol boundary attached, with `Time` stamped
-		// at DECISION time — the same shape `TableAccess` builds, so an
-		// `env.*` condition on a table_function resource means what it means
-		// on a table.
-		//
-		// SEC1's `auth.DecisionEnvironment(ctx, protocol)` is the ONE builder
-		// for this, and it does not exist on this branch yet. At landing these
-		// eight lines become `env := DecisionEnvironment(ctx, protocol)` (and
-		// the `time` import goes with them) — the two are behaviourally
-		// identical today, so this is de-duplication, not a fix.
-		env := EnvironmentFromContext(ctx)
-		if env.Time.IsZero() {
-			env.Time = time.Now()
-		}
-		if protocol != "" && env.Protocol == "" {
-			env.Protocol = protocol
-		}
+		// The ONE environment builder every shared enforcement path uses, so
+		// an `env.*` condition on a `table_function` resource means exactly
+		// what it means on a table: the environment the PROTOCOL BOUNDARY
+		// attached, with `Time` stamped at DECISION time rather than at
+		// attach time (#933).
+		env := DecisionEnvironment(ctx, protocol)
 		res := TableFunctionResource(funcName, args, namedArgs)
 		if d := ev.Evaluate(id.ToSubject(), res, ActionRead, env); d.Allowed {
 			return nil
