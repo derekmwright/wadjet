@@ -248,3 +248,47 @@ func sec3Pgconn(t *testing.T, addr, user, key string) *pgconn.PgConn {
 	t.Cleanup(func() { conn.Close(context.Background()) })
 	return conn
 }
+
+// Parameter-type inference is a metadata read too, and it draws from the same
+// filtered relation set (#941's pgwire half, round-1 P2).
+//
+// `columnParamOIDs` and `nestedColumnSchemas` folded the columns of every
+// catalog table the STATEMENT TEXT mentions — `containsIdentWord` over the raw
+// SQL, so a string literal is enough — into the ParameterDescription. A denied
+// relation's declared column type therefore reached the wire on the extended
+// protocol, which is the path every JDBC and pgx driver prepares through.
+func TestParameterInferenceIgnoresADeniedRelation(t *testing.T) {
+	db := sec3CatalogDB(t)
+	provider := sec3CatalogProvider()
+	db.SetAuthProvider(provider)
+	srv := startTestServerWithAuth(t, db, provider)
+
+	// `secret_col` is `secret`'s STRING column and `public_t_col` is
+	// `public_t`'s; the statement mentions `secret` only inside a literal.
+	const probe = `SELECT id FROM public_t WHERE secret_col = $1 AND 'secret' <> ''`
+
+	analyst := sec3Pgconn(t, srv.Addr(), "analyst-user", "analyst-key")
+	desc, err := analyst.Prepare(context.Background(), "", probe, nil)
+	if err != nil {
+		t.Fatalf("Prepare as the denied identity: %v", err)
+	}
+	if len(desc.ParamOIDs) != 1 {
+		t.Fatalf("ParameterDescription has %d OIDs, want 1", len(desc.ParamOIDs))
+	}
+	if desc.ParamOIDs[0] != 0 {
+		t.Errorf("the denied relation's column type reached the wire: OID %d, want 0 "+
+			"(untyped — its schema must not be consulted)", desc.ParamOIDs[0])
+	}
+
+	// The same statement for an identity that MAY read the relation still
+	// infers: the filter is the decision, not a blanket refusal to infer.
+	admin := sec3Pgconn(t, srv.Addr(), "admin-user", "admin-key")
+	desc, err = admin.Prepare(context.Background(), "", probe, nil)
+	if err != nil {
+		t.Fatalf("Prepare as the permitted identity: %v", err)
+	}
+	if len(desc.ParamOIDs) != 1 || desc.ParamOIDs[0] == 0 {
+		t.Errorf("inference stopped working for an identity that may read the relation: %v",
+			desc.ParamOIDs)
+	}
+}

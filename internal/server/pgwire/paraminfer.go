@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -191,15 +192,35 @@ func normalizeIdent(ident string) string {
 	return lower
 }
 
+// inferenceContext is the context the two schema-reading inference passes below
+// run under: a short timeout, carrying THIS CONNECTION'S IDENTITY.
+//
+// The identity is the load-bearing half. Both passes used a bare
+// context.Background(), so the table list they drew from was unfiltered and a
+// statement that merely MENTIONED a relation — a string literal is enough,
+// containsIdentWord reads the raw SQL — folded that relation's column types
+// into the ParameterDescription. A denied relation's declared type reached the
+// wire on the extended-protocol path every JDBC and pgx driver prepares
+// through. Without the identity, `visibleCatalogTables` would instead refuse
+// EVERY relation under auth (a nil identity is a refusal), which would silently
+// un-type every parameter for every caller.
+func (c *pgConn) inferenceContext() (context.Context, context.CancelFunc) {
+	ctx := context.Background()
+	if c.identity != nil {
+		ctx = auth.ContextWithIdentity(ctx, c.identity)
+	}
+	return context.WithTimeout(ctx, 5*time.Second)
+}
+
 // columnParamOIDs resolves the wire type OID of every column of every catalog
 // table the statement mentions, keyed by lower-cased column name. A name two
 // tables carry at DIFFERENT types is dropped: a wrong confident answer would
 // re-create the very defect this exists to fix.
 func (c *pgConn) columnParamOIDs(sql string) map[string]uint32 {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.inferenceContext()
 	defer cancel()
 
-	tables, err := c.db.ListTables(ctx)
+	tables, err := c.visibleCatalogTables(ctx)
 	if err != nil {
 		return nil
 	}
@@ -284,10 +305,10 @@ func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nes
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.inferenceContext()
 	defer cancel()
 
-	tables, err := c.db.ListTables(ctx)
+	tables, err := c.visibleCatalogTables(ctx)
 	if err != nil {
 		return nil
 	}
