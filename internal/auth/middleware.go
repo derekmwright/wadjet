@@ -83,9 +83,25 @@ func Middleware(authn *Authenticator, logger *slog.Logger) func(http.Handler) ht
 			)
 
 			ctx := ContextWithIdentity(r.Context(), id)
+			ctx = ContextWithEnvironment(ctx, requestEnvironment(r))
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// requestEnvironment is the TRUSTED environment of an HTTP request: the peer
+// address the server itself observed, and the protocol this door is.
+//
+// `X-Forwarded-For` is NOT read. A forwarded-for header is client-supplied
+// text — anyone who can reach the port can set it — so trusting it would let
+// the caller choose which `env.source_ip` rule applies to them, which is the
+// opposite of a control. Behind a proxy, `env.source_ip` is the proxy's
+// address; policing the real client address there needs a trusted-proxy
+// configuration the product does not have yet (docs/security.md).
+//
+// The port is stripped by ContextWithEnvironment, where every door's is.
+func requestEnvironment(r *http.Request) Environment {
+	return Environment{SourceIP: r.RemoteAddr, Protocol: "http"}
 }
 
 // ProviderMiddleware returns HTTP middleware that reads the current Authenticator
@@ -135,6 +151,7 @@ func ProviderMiddleware(provider *Provider, logger *slog.Logger) func(http.Handl
 			)
 
 			ctx := ContextWithIdentity(r.Context(), id)
+			ctx = ContextWithEnvironment(ctx, requestEnvironment(r))
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

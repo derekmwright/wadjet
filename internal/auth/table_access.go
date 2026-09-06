@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
@@ -41,9 +40,10 @@ import (
 // `Users` must police a statement that spelled it `users`.
 //
 // The environment comes from the context — attached at the protocol boundary,
-// never from a caller below it (see ContextWithEnvironment) — and `Time` is
-// stamped HERE, at decision time. A pgwire connection lives for hours; an
-// `env.hour` condition means the hour the statement ran.
+// never from a caller below it — through the one builder every enforcement
+// path uses (`DecisionEnvironment`), so `Time` is stamped at DECISION time. A
+// pgwire connection lives for hours; an `env.hour` condition means the hour
+// the statement ran.
 //
 // The refusal is a `sqlerr` 42501, which every door renders in its own class:
 // pgwire SQLSTATE 42501, HTTP 403, gRPC codes.PermissionDenied, and the same
@@ -59,10 +59,7 @@ func TableAccess(ctx context.Context, provider *Provider, table string, action A
 	if id == nil {
 		return sqlerr.New("42501", "permission denied for table %q: authentication required", table)
 	}
-	env := EnvironmentFromContext(ctx)
-	if env.Time.IsZero() {
-		env.Time = time.Now()
-	}
+	env := DecisionEnvironment(ctx, "")
 	if ev := provider.Evaluator(); ev != nil {
 		if td := ev.EvaluateTableAccess(id.ToSubject(), table, action, env); td != nil && td.Allowed {
 			return nil

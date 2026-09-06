@@ -1,6 +1,10 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"net"
+	"time"
+)
 
 type environmentKey struct{}
 
@@ -17,9 +21,54 @@ type environmentKey struct{}
 // `Time` is deliberately NOT stamped at attach time. A pgwire connection lives
 // for hours and a policy conditioned on `env.hour` has to mean the hour the
 // STATEMENT ran, not the hour the socket opened; the decision stamps it (see
-// TableAccess).
+// DecisionEnvironment).
+//
+// A `SourceIP` carrying a PORT is reduced to its host here, once, so no door
+// has to remember: `net.Conn.RemoteAddr()` and `http.Request.RemoteAddr` are
+// `host:port`, while `env.source_ip` is documented and written as an IP. The
+// HTTP door passed `r.RemoteAddr` straight through, so a documented
+// `env.source_ip eq "127.0.0.1"` rule compared against `127.0.0.1:54321` and
+// never matched (#933).
 func ContextWithEnvironment(ctx context.Context, env Environment) context.Context {
+	env.SourceIP = hostOnly(env.SourceIP)
 	return context.WithValue(ctx, environmentKey{}, env)
+}
+
+// DecisionEnvironment is the Environment a policy decision is evaluated
+// against: what the protocol boundary attached, with `Time` stamped NOW and
+// `protocol` as the fallback label when no boundary named one.
+//
+// Every shared enforcement path builds its environment through this and
+// through nothing else. They used to build `Environment{Protocol: protocol}`
+// by hand — no time, no address — so `env.time`, `env.hour` and
+// `env.source_ip` were never published to the evaluator and every
+// environment-conditioned rule matched nothing. Beside a broad allow, a deny
+// that matches nothing is a grant (#933).
+//
+// The attached protocol WINS over the label when there is one: the label
+// describes the execution path (`"embedded"` even for a statement that arrived
+// over pgwire), and `env.protocol` means the door the client used.
+func DecisionEnvironment(ctx context.Context, protocol string) Environment {
+	env := EnvironmentFromContext(ctx)
+	if env.Time.IsZero() {
+		env.Time = time.Now()
+	}
+	if env.Protocol == "" {
+		env.Protocol = protocol
+	}
+	return env
+}
+
+// hostOnly strips the port from a socket address, leaving an address that has
+// none untouched (a bare IPv4, a bare IPv6, an empty string).
+func hostOnly(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
 }
 
 // EnvironmentFromContext returns the environment attached by the protocol

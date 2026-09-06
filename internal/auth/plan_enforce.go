@@ -64,7 +64,8 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		return ctx, plan, nil
 	}
 
-	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(), Environment{Protocol: protocol})
+	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(),
+		DecisionEnvironment(ctx, protocol))
 
 	policies := make(logical.TablePolicies)
 	// A SLICE, not a map: the filters are injected below, and iterating a map
@@ -233,7 +234,7 @@ func ValidateStatementColumns(ctx context.Context, provider *Provider, cat *cata
 		if identity := IdentityFromContext(ctx); identity != nil {
 			if evaluator := provider.Evaluator(); evaluator != nil {
 				r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(),
-					Environment{Protocol: protocol})
+					DecisionEnvironment(ctx, protocol))
 				deniedFor = r.deniedColumns
 			}
 		}

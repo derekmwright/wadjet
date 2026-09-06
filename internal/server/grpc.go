@@ -27,6 +27,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	wadjetdb "github.com/derekmwright/wadjet/wadjet"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 )
 
 const streamBatchSize = 1000
@@ -557,6 +558,14 @@ func (g *GRPCServer) grpcAuthenticateContext(ctx context.Context, fullMethod str
 	}
 
 	g.logger.Debug("gRPC authenticated", "identity", id.String(), "method", fullMethod)
+	// The trusted environment this call arrived on (SEC1/#933): the peer
+	// address the server observed, never anything the caller sent as
+	// metadata. The port is stripped by auth.
+	var source string
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		source = p.Addr.String()
+	}
+	ctx = auth.ContextWithEnvironment(ctx, auth.Environment{SourceIP: source, Protocol: "grpc"})
 	return auth.ContextWithIdentity(ctx, id), nil
 }
 

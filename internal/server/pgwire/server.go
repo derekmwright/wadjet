@@ -556,6 +556,13 @@ func (c *pgConn) queryContext() (context.Context, context.CancelFunc) {
 	ctx := context.Background()
 	if c.identity != nil {
 		ctx = auth.ContextWithIdentity(ctx, c.identity)
+		// The trusted environment this statement arrived on (SEC1/#933): the
+		// peer address the listener observed, and the protocol this door is.
+		// It is attached HERE, not at authentication, because this is the
+		// context enforcement reads; the port is stripped by auth.
+		ctx = auth.ContextWithEnvironment(ctx, auth.Environment{
+			SourceIP: peerAddr(c.conn), Protocol: "pgwire",
+		})
 	}
 	// Session-level statement_timeout overrides server default
 	timeout := c.queryTimeout
@@ -565,6 +572,19 @@ func (c *pgConn) queryContext() (context.Context, context.CancelFunc) {
 		}
 	}
 	return c.beginStatement(ctx, timeout)
+}
+
+// peerAddr is the connection's remote address, or "" for a conn that has
+// none (a pipe in a test). The port is stripped where every door's is, in
+// auth.ContextWithEnvironment.
+func peerAddr(c net.Conn) string {
+	if c == nil {
+		return ""
+	}
+	if a := c.RemoteAddr(); a != nil {
+		return a.String()
+	}
+	return ""
 }
 
 // handleSet parses "SET key = value" / "SET key TO value" and stores the session variable.

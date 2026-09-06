@@ -283,6 +283,12 @@ An attribute with no namespace — `attribute: role` rather than `attribute: sub
 
 A `subject.` attribute may name anything the identity carries; `resource.` and `env.` names are the fixed lists above.
 
+**The environment is the boundary's observation, not the caller's claim.** Each protocol door attaches it where the connection is — the HTTP middleware, the pgwire connection handler, the gRPC authentication interceptor — and every enforcement path reads it from there:
+
+- `env.source_ip` is the **peer address the server observed**, with the port stripped, so it is written as a plain IP: `value: "10.0.0.9"`. `X-Forwarded-For` is **not** trusted — it is client-supplied text, and honouring it would let a caller choose which source-address rule applies to them. Behind a reverse proxy, `env.source_ip` is the proxy's address; policing the real client address there needs a trusted-proxy setting the product does not have yet.
+- `env.time` and `env.hour` are stamped when the **statement is decided**, not when the connection opened — a pgwire session can live for hours.
+- `env.protocol` names the **door the client used** (`http`, `pgwire`, `grpc`), or `embedded` for a caller of the Go API.
+
 #### Obligation Types
 
 Obligations are side-effects attached to **allow** rules. They constrain how data is returned even when access is granted.

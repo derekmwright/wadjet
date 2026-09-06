@@ -358,10 +358,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		if evaluator != nil {
 			// ABAC path: evaluate policies per table
 			subject := identity.ToSubject()
-			env := auth.Environment{
-				SourceIP: r.RemoteAddr,
-				Protocol: "http",
-			}
+			// The trusted environment the middleware attached, with the
+			// decision's own clock (SEC1/#933). It used to be built here from
+			// `r.RemoteAddr`, which carries the PORT, so a documented
+			// `env.source_ip` rule never matched — and it carried no Time at
+			// all, so `env.hour` and `env.time` were never published.
+			env := auth.DecisionEnvironment(r.Context(), "http")
 			tableDecisions = make(auth.TableDecisions)
 
 			// Only the FROM-list names the catalog knows as TABLES: a

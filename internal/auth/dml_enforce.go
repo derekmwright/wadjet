@@ -84,7 +84,8 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 	if cat != nil {
 		table = cat.ResolveTableName(table)
 	}
-	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(), Environment{Protocol: protocol})
+	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(),
+		DecisionEnvironment(ctx, protocol))
 
 	// 1. The write itself.
 	if !evaluator.EvaluateTableAccess(r.subject, table, ActionWrite, r.env).Allowed {
