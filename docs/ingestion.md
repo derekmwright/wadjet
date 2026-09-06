@@ -100,7 +100,9 @@ of each row it buffers — the map, and the mutable values inside it (`[]byte`
 leaves, nested `ARRAY`/`ROW`/`MAP` containers, `VECTOR` slices). You may reuse
 or mutate the maps and byte buffers you passed in as soon as `Ingest` returns;
 the not-yet-flushed rows are unaffected. Only rows that are actually retained are
-copied, so a rejected batch costs no copy.
+copied: a batch rejected at its first row costs no copy, and one rejected partway
+copies only the accepted prefix, which is then discarded so a retry cannot
+duplicate it.
 
 An ingester is bound to the **table incarnation** it first buffered a row for. If
 the table is dropped and recreated under the same name while an ingester still
