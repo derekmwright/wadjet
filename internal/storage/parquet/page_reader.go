@@ -232,6 +232,13 @@ func (r *ColumnPageReader) checkColumnComplete() error {
 }
 
 //go:noinline
+func dictionaryPageInDataWalkErr(col string, off int) error {
+	return fmt.Errorf("column %s: a dictionary page appears at offset %d in the data-page walk, "+
+		"where a dictionary page cannot be (it is consumed only as a chunk's first page); "+
+		"its rows were charged but produced no values (corrupt or contradictory parquet metadata)", col, off)
+}
+
+//go:noinline
 func unknownPageTypeErr(col string, off int, t PageType) error {
 	return fmt.Errorf("column %s: the page at offset %d declares %v, which this reader "+
 		"cannot decode; its rows cannot be accounted for", col, off, t)
@@ -677,9 +684,21 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 			r.noteRows(p)
 			return p, nil
 		case PageDictionary:
-			// Dictionary pages are handled separately via NextDictionary,
-			// and carry no rows, so passing over one accounts for nothing.
-			continue
+			// A dictionary page belongs at the START of a column chunk and is
+			// consumed by NextDictionary before this data-page walk begins —
+			// every caller does exactly that (row reader, native scan, the
+			// sel/lengths decodes, the row filter). Reaching one HERE is a
+			// dictionary page in an impossible position: a second dictionary
+			// page, or a data page whose top-level type field was relabeled
+			// DICTIONARY_PAGE while it kept its data-page header and body.
+			// chargeRows above has ALREADY charged this page's rows from that
+			// surviving header, so the old `continue` accounted for rows whose
+			// values were never produced and shifted every later page's values
+			// onto this one's offsets: 300 required INT64 rows read back as
+			// [128..299] then NULLs, nil error (#924, the residual of #907's
+			// unknown-type refusal). The page CRC cannot catch it — crc covers
+			// the body, not the header type — so the disposition has to.
+			return nil, dictionaryPageInDataWalkErr(r.columnLabel(), bodyOff)
 		default:
 			// A page type this reader does not decode, in the middle of a
 			// column chunk. This used to `continue`, and that was a silent
@@ -774,6 +793,7 @@ func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
 		return nil, false, err
 	}
 	var dict *DictionaryData
+	sawData := false
 	off := r.off
 	for off < r.endOff {
 		ph, bodyOff, err := r.nextHeader(off)
@@ -788,8 +808,13 @@ func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
 
 		switch ph.Type {
 		case PageDictionary:
-			if dict != nil {
-				return nil, false, nil // second dictionary page: malformed, be conservative
+			// A dictionary page is only valid as the chunk's FIRST page, the
+			// same placement the ordinary reader now enforces
+			// (dictionaryPageInDataWalkErr). A second one, or one that follows a
+			// data page, is a malformed chunk: decline to prune rather than draw
+			// a conclusion from a dictionary in an impossible position (#924).
+			if dict != nil || sawData {
+				return nil, false, nil
 			}
 			// A row group is PRUNED from these values. A corrupt dictionary
 			// prunes rows that belong in the answer, so this page's checksum
@@ -811,6 +836,7 @@ func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
 			}
 			dict = &DictionaryData{NumValues: n, Data: vals}
 		case PageDataV1:
+			sawData = true
 			if ph.DataPageHeader == nil {
 				return nil, false, nil
 			}
@@ -818,6 +844,7 @@ func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
 				return nil, false, nil
 			}
 		case PageDataV2:
+			sawData = true
 			if ph.DataPageHeaderV2 == nil {
 				return nil, false, nil
 			}

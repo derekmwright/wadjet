@@ -895,6 +895,24 @@ where `num_values` and the schema levels are both known
 (`decodeDataPageV1`/`checkV1Levels`), not in the general RLE decoder, which
 cannot know either.
 
+**A dictionary page in the data-page walk is skipped after its rows were
+charged.** §11 refused an UNDECODABLE page type mid-chunk. A KNOWN type in an
+impossible position stayed silent: a data page whose top-level `type` field is
+relabeled DICTIONARY_PAGE keeps its data-page header and body, so `chargeRows`
+charges its rows from that surviving header and the `case PageDictionary` arm
+then `continue`d — the chunk reconciled against the row group while the page's
+values were never produced and every later page's values landed at the skipped
+page's offsets (300 required INT64 rows read back as [128..299] then NULLs, nil
+error, #924). The page CRC cannot catch it — crc covers the body, not the
+header type. A dictionary page is valid ONLY as a chunk's first page, consumed
+by NextDictionary before the data-page walk begins (every caller does exactly
+that); one reached in the walk is now refused. `DictionaryIfPure` enforces the
+same placement — a dictionary page that follows a data page, or a second one,
+declines the prune rather than concluding from a dictionary in an impossible
+position.
+
+## Consequences
+
 - Files that were read before and are refused now: a footer whose row groups
   do not sum to its total; a chunk whose `total_compressed_size` overstates by
   one byte or more; a page claiming more values than its row group has rows; a
