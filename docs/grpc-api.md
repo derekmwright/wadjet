@@ -47,8 +47,12 @@ Authentication proves who the caller is; each RPC still checks what that identit
 | RPC | Requires |
 |-----|----------|
 | `CreateTable`, `DropTable` | the `write` permission (`allow: [write]` or `[admin]` on the caller's role) |
+| `ListTables` | nothing — but the listing contains only the tables the identity may read |
+| `DescribeTable` | read access to that table |
 
 The message names the missing permission and the identity, and it is the same sentence the HTTP API returns with 403 and the SQL doors return with SQLSTATE `42501` for the same refusal.
+
+Table metadata follows the same access decision as the data: a role restricted to `tables: [flow_logs]` sees only `flow_logs` in `ListTables`, and `DescribeTable` on any other table is `PERMISSION_DENIED`. Where ABAC policies are configured they decide, so an explicit `deny` rule hides a table even when the role's `tables:` list names it. This is deliberately unlike PostgreSQL, where `\d` shows every relation to every user.
 
 When auth is disabled or no provider is configured, nothing is enforced.
 
@@ -135,11 +139,13 @@ rpc CancelQuery(CancelQueryRequest) returns (CancelQueryResponse);
 
 ### ListTables
 
-List all tables in the catalog.
+List the tables in the catalog that the caller may read.
 
 ```protobuf
 rpc ListTables(ListTablesRequest) returns (ListTablesResponse);
 ```
+
+With auth enabled the response is filtered by the caller's effective table access, so it can be shorter than the catalog — and empty for an identity that may read nothing.
 
 ---
 
@@ -150,6 +156,8 @@ Return a table's schema and partition keys.
 ```protobuf
 rpc DescribeTable(DescribeTableRequest) returns (DescribeTableResponse);
 ```
+
+Requires read access to that table. A caller without it gets `PERMISSION_DENIED` before the catalog is read; a table that does not exist is `NOT_FOUND` for a caller allowed to ask about it.
 
 ---
 

@@ -419,19 +419,53 @@ func (g *GRPCServer) CancelQuery(ctx context.Context, req *wadjetv1.CancelQueryR
 	}, nil
 }
 
-// ListTables returns all table names.
+// ListTables returns the table names this identity may read.
+//
+// The listing is filtered by the SAME decision that governs reading the table
+// (auth.VisibleTables → auth.TableAccess), so a name an identity may not read
+// is not published to it either. That is the product's position rather than
+// PostgreSQL's — `\d` shows every relation to anyone — and it is the behavior
+// the HTTP door already had (`FilterTables` on /v1/tables and SHOW TABLES)
+// while this door published the whole catalog to any authenticated caller
+// (#935). Explicit ABAC denies govern it, because the evaluator is what
+// TableAccess asks whenever one is installed.
 func (g *GRPCServer) ListTables(ctx context.Context, _ *wadjetv1.ListTablesRequest) (*wadjetv1.ListTablesResponse, error) {
 	tables, err := g.catalog.ListTables(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "listing tables: %v", err)
 	}
-	return &wadjetv1.ListTablesResponse{Tables: tables}, nil
+	return &wadjetv1.ListTablesResponse{Tables: auth.VisibleTables(ctx, g.authProvider, tables)}, nil
 }
 
-// DescribeTable returns a table's schema.
+// DescribeTable returns a table's schema to an identity that may read it.
+//
+// Column names, types and the partition design are an exact target map, and
+// this door handed them to any authenticated caller for any table (#935). The
+// decision is the table's own — auth.TableAccess with ActionRead — so it agrees
+// with what a SELECT on the same relation would be told, and it is taken BEFORE
+// the catalog read: a refusal reveals nothing, not even whether the table is
+// there.
+//
+// The shape check comes first here, unlike the DDL RPCs: those ask a
+// permission-only question that needs no request, while this one cannot decide
+// anything without a table name.
 func (g *GRPCServer) DescribeTable(ctx context.Context, req *wadjetv1.DescribeTableRequest) (*wadjetv1.DescribeTableResponse, error) {
 	if req.TableName == "" {
 		return nil, status.Error(codes.InvalidArgument, "table_name is required")
+	}
+
+	// Decide on the CATALOG spelling: an unquoted identifier folds at the
+	// lexer (#731) and a policy bound to `Users` must police a request that
+	// spelled it `users`. The catalog read below keeps the caller's spelling,
+	// which is byte-exact (GetTable) — resolving there too would make this RPC
+	// newly find tables it used to miss, a functional change that is not this
+	// fix. Where the two disagree the read simply misses, exactly as before.
+	name := req.TableName
+	if g.catalog != nil {
+		name = g.catalog.ResolveTableName(req.TableName)
+	}
+	if err := auth.TableAccess(ctx, g.authProvider, name, auth.ActionRead); err != nil {
+		return nil, status.Error(codes.PermissionDenied, err.Error())
 	}
 
 	table, err := g.catalog.GetTable(ctx, req.TableName)

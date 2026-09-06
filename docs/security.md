@@ -143,7 +143,7 @@ grpcurl -H "authorization: Bearer wadjet-key-abc123" \
   localhost:9090 wadjet.v1.WadjetService/Query
 ```
 
-**gRPC authorization.** Proving the token is only the first half: every gRPC method also checks what the identity may do, and refuses with `PERMISSION_DENIED` before it acts. `CreateTable` and `DropTable` require the `write` permission — a role with `allow: [read]` cannot create or drop a table over gRPC, exactly as it cannot over HTTP or SQL, and a refused call leaves the catalog untouched. See [gRPC API — Authorization](grpc-api.md#authorization).
+**gRPC authorization.** Proving the token is only the first half: every gRPC method also checks what the identity may do, and refuses with `PERMISSION_DENIED` before it acts. `CreateTable` and `DropTable` require the `write` permission — a role with `allow: [read]` cannot create or drop a table over gRPC, exactly as it cannot over HTTP or SQL, and a refused call leaves the catalog untouched. Table metadata follows the same access decision as the data: `ListTables` returns only the tables the identity may read, and `DescribeTable` refuses one it may not. Where ABAC policies are configured they decide, so an explicit `deny` hides a table from both even when the role's `tables:` list names it. See [gRPC API — Authorization](grpc-api.md#authorization).
 
 ## Authorization
 
