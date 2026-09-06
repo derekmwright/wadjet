@@ -362,7 +362,7 @@ func TestHTTPRouteCensusAuthorizesEveryRoute(t *testing.T) {
 // same on every door (pgwire 42501, gRPC PermissionDenied carry it too).
 func TestHTTPOperationalRefusalCarriesTheSharedText(t *testing.T) {
 	ts, _, _ := censusServer(t)
-	want := `unauthorized: "admin" permission required (identity "reader-user", role "reader")`
+	want := sharedRefusalText(t, "admin")
 	for _, r := range []struct{ method, path string }{
 		{http.MethodGet, "/v1/dlq"},
 		{http.MethodGet, "/v1/dlq/x"},
@@ -400,7 +400,7 @@ func TestHTTPOperationalRefusalCarriesTheSharedText(t *testing.T) {
 // text is pinned here (ADR-0034).
 func TestHTTPWriteRefusalCarriesTheSharedText(t *testing.T) {
 	ts, _, _ := censusServer(t)
-	want := `unauthorized: "write" permission required (identity "reader-user", role "reader")`
+	want := sharedRefusalText(t, "write")
 	for _, tc := range []struct{ name, method, path, body string }{
 		{"REST create table", http.MethodPost, "/v1/tables",
 			`{"name":"t","columns":[{"name":"id","type":"INT64"}]}`},
@@ -441,6 +441,22 @@ func TestHTTPRefusedPurgeLeavesTheDLQIntact(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("admin list after the refused purge: status %d (%s); want 200", code, body)
 	}
+}
+
+// sharedRefusalText is what auth.RequirePermission SAYS for the reader
+// identity — not a literal copy of it. The point of these gates is that every
+// door carries ONE text for one refusal; pinning the wording here as well
+// would make a deliberate rewording of that one text look like a door
+// divergence in four places.
+func sharedRefusalText(t *testing.T, perm string) string {
+	t.Helper()
+	ctx := auth.ContextWithIdentity(context.Background(),
+		&auth.Identity{Name: "reader-user", Role: "reader"})
+	err := auth.RequirePermission(censusProvider(), ctx, perm)
+	if err == nil {
+		t.Fatalf("auth.RequirePermission permitted %q for the reader identity", perm)
+	}
+	return err.Error()
 }
 
 func censusDo(t *testing.T, ts *httptest.Server, method, path, key, body string) (int, string) {
