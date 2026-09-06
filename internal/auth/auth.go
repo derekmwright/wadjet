@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Errors returned by authentication.
@@ -208,11 +209,12 @@ func Build(cfg Config) (*Authenticator, *Authorizer, error) {
 // role at all when no ABAC evaluator was installed, so exactly this credential
 // could read every table while the metadata doors refused it.
 //
-// A JWT is not checked here: its role arrives in the token's claim at verify
-// time, and the configuration carries no list of them to check against. A
-// token naming an undefined role authenticates with no permissions and is
-// refused by the coarse gate, which is the only place that decision can be
-// made.
+// A JWT is not checked here for a different and simpler reason: the VERIFIER
+// already refuses one. Its role arrives in the token's claim at verify time,
+// and `JWTVerifier.Verify` looks that claim up in the same role table and
+// returns `unknown role %q from JWT` when it is not there — so such a token
+// never authenticates at all. There is nothing at load to check, and nothing
+// downstream to catch.
 func checkRoleReferences(cfg Config, roles map[string]*RoleDef) error {
 	credentialed := len(cfg.APIKeys) > 0 || cfg.JWT.Enabled || cfg.MTLS.Enabled
 	if cfg.Enabled && credentialed && len(roles) == 0 {
@@ -222,6 +224,16 @@ func checkRoleReferences(cfg Config, roles map[string]*RoleDef) error {
 			"scoped to those roles)")
 	}
 	for _, ak := range cfg.APIKeys {
+		if strings.TrimSpace(ak.Key) == "" {
+			// An entry with no key is not a credential. It cannot be presented
+			// — every door refuses an empty token before the lookup — but it
+			// DOES satisfy the "some mechanism is configured" check above, so
+			// `enabled: true` with only such an entry loads with nothing that
+			// can authenticate anyone. And `lookupAPIKey("")` resolves to it,
+			// which is one removed `if token == ""` away from a bypass.
+			return fmt.Errorf("api key %q has an empty key; it can authenticate nobody",
+				ak.Name)
+		}
 		if ak.Role == "" {
 			return fmt.Errorf("api key %q names no role; a credential with no role holds "+
 				"no permission", ak.Name)
