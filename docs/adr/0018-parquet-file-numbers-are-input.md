@@ -1005,15 +1005,23 @@ Three invariants, each a claim a gate proves on revert:
 
 - **A container's map KEY crosses as its typed value, not its raw carrier.** §4
   settles that the writer's box for a value is the reader's box for it; a nested
-  MAP key broke it, because a Go map's key must be a string and the assembler
-  printed the leaf's CARRIER (an unscaled DECIMAL integer, a DATE day count)
-  rather than the value. The DECIMAL child then re-scaled the text a second time
-  and the DATE child could not parse it. The assembler renders a map key at the
-  key column's own type and scale — the canonical text the child re-parses, the
-  same spelling `batch.Vector.GetValue` produces — so a map key round-trips like
-  any other leaf. Gate:
+  MAP key broke it for EVERY family whose carrier is not already its own text,
+  because a Go map's key must be a string and the assembler printed the leaf's
+  CARRIER with `fmt.Sprint` — an unscaled DECIMAL integer, a DATE day count, the
+  int64 an IPv4/MAC decodes to, the raw bytes an IPv6/UUID decodes to
+  (`StorageClassOf`'s classes). The DECIMAL child then re-scaled the text a
+  second time and the DATE/IPv4/MAC/IPv6/UUID children could not parse
+  `"3232235786"` / `"[10 0 0 5]"` / `"19675"` and dropped the key to a zero
+  value. Every map-key carrier now goes through ONE canonical, parseable
+  rendering (`parquet.MapKeyCarrierText`); the child reconstructs the value and
+  `GetValue` re-renders its display form, so the rendered text need only PARSE,
+  not match the display spelling (IPv6 is emitted uncompressed so it round-trips
+  to the exact sixteen bytes). CIDR was always right — its carrier is already
+  text. `batch.mapKeyValue` additionally accepts a wall-clock TIMESTAMP key on
+  the in-memory `FromRows` path, which had dropped it. Gate:
   `wadjet.TestDecimalMapKeySurvivesTheParquetRoundTrip` (flipped from a
-  fail-on-agree pin to a passing regression test).
+  fail-on-agree pin to a passing regression test over DECIMAL, DATE, TIMESTAMP,
+  IPv4, IPv6, MAC, UUID and CIDR map keys).
 
 ## Consequences
 

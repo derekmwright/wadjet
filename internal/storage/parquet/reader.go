@@ -2,10 +2,12 @@ package parquet
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
 	"math/big"
+	"net"
 )
 
 // RowGroupStats contains min/max statistics for a row group.
@@ -652,6 +654,112 @@ func PhysicalReadableAs(t TypeID, pt PhysicalType) bool {
 	default:
 		return true
 	}
+}
+
+// MapKeyCarrierText renders a decoded map-KEY leaf CARRIER into a canonical,
+// PARSEABLE text — the string a Go map's key must be, from which the key child
+// (batch.Vector.SetValue) or a re-write (decomposeMap) reconstructs the exact
+// value.
+//
+// The nested leaf decode hands back CARRIERS, not display values
+// (StorageClassOf's classes: IPv4/MAC as int64, IPv6/UUID as raw 16-byte
+// slices, DECIMAL as the unscaled integer, DATE as the day count). fmt.Sprint
+// of those is a lossy carrier print — "3232235786", "[10 0 0 5]", "127500" —
+// that the key child cannot re-parse, so EVERY family whose carrier is not
+// already its own text (issue #883's title) was corrupted or lost on the round
+// trip: DECIMAL re-scaled, DATE/IPv4/MAC/IPv6/UUID lost to a zero value. A map
+// VALUE is unaffected because it stays the typed box and SetValue reads it
+// directly; only the key is forced through text because a Go map's key must be
+// a string.
+//
+// The final user-visible key is re-rendered by GetValue from the RECONSTRUCTED
+// carrier, so this text need only PARSE to the right carrier — it is not the
+// display spelling. IPv6 is emitted as the uncompressed eight-group form so it
+// round-trips to the exact sixteen bytes (net.ParseIP of a v4-mapped display
+// form would not), and GetValue re-compresses it on the way out.
+func MapKeyCarrierText(typeID TypeID, decScale int32, k any) string {
+	switch typeID {
+	case TypeDecimal:
+		switch v := k.(type) {
+		case int64:
+			return Decimal128From(v).Text(int(decScale))
+		case Decimal128:
+			return v.Text(int(decScale))
+		}
+	case TypeDate:
+		if v, ok := mapKeyInt64(k); ok {
+			return FormatDateDays(int32(v))
+		}
+	case TypeIPv4:
+		if v, ok := mapKeyInt64(k); ok {
+			ip := make(net.IP, 4)
+			binary.BigEndian.PutUint32(ip, uint32(v))
+			return ip.String()
+		}
+	case TypeMAC:
+		if v, ok := mapKeyInt64(k); ok {
+			hw := make(net.HardwareAddr, 6)
+			for i := 0; i < 6; i++ {
+				hw[i] = byte(uint64(v) >> uint((5-i)*8))
+			}
+			return hw.String()
+		}
+	case TypeIPv6:
+		if b, ok := k.([]byte); ok && len(b) == 16 {
+			return ipv6UncompressedText(b)
+		}
+	case TypeUUID:
+		if b, ok := k.([]byte); ok && len(b) == 16 {
+			return uuidText(b)
+		}
+	}
+	return fmt.Sprint(k)
+}
+
+// mapKeyInt64 accepts the int64/int32 carrier a fixed-width leaf decodes to.
+func mapKeyInt64(k any) (int64, bool) {
+	switch v := k.(type) {
+	case int64:
+		return v, true
+	case int32:
+		return int64(v), true
+	}
+	return 0, false
+}
+
+// ipv6UncompressedText writes the sixteen bytes as eight colon-separated hex
+// groups, the form net.ParseIP always parses back to the exact bytes.
+func ipv6UncompressedText(b []byte) string {
+	const hexd = "0123456789abcdef"
+	var out [39]byte
+	n := 0
+	for i := 0; i < 8; i++ {
+		if i > 0 {
+			out[n] = ':'
+			n++
+		}
+		hi, lo := b[i*2], b[i*2+1]
+		out[n], out[n+1] = hexd[hi>>4], hexd[hi&0xf]
+		out[n+2], out[n+3] = hexd[lo>>4], hexd[lo&0xf]
+		n += 4
+	}
+	return string(out[:n])
+}
+
+// uuidText hyphenates sixteen bytes as 8-4-4-4-12 hex, the form batch.parseUUID
+// (and parseUUIDForWrite) reads back.
+func uuidText(b []byte) string {
+	var buf [36]byte
+	hex.Encode(buf[0:8], b[0:4])
+	buf[8] = '-'
+	hex.Encode(buf[9:13], b[4:6])
+	buf[13] = '-'
+	hex.Encode(buf[14:18], b[6:8])
+	buf[18] = '-'
+	hex.Encode(buf[19:23], b[8:10])
+	buf[23] = '-'
+	hex.Encode(buf[24:36], b[10:16])
+	return string(buf[:])
 }
 
 // StorageClassOf returns the vector backing a decoded value lands in: types

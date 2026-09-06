@@ -18,16 +18,23 @@ import (
 //	MAP(DECIMAL(18,0), STRING) key 13           -> "13"         (always right, scale 0)
 //	MAP(DATE, STRING)          key 2023-11-14   -> "2023-11-14" (was NULL, key lost)
 //	MAP(TIMESTAMP, STRING)     key <ts>         -> epoch millis (right on both paths)
+//	MAP(IPv4, STRING)          key 192.168.1.10 -> same         (was 0.0.0.0)
+//	MAP(MAC, STRING)           key aa:bb:..:ff  -> same         (was 00:00:..:00)
+//	MAP(IPv6, STRING)          key 2001:db8::1  -> same         (was lost)
+//	MAP(UUID, STRING)          key <uuid>       -> same         (was "")
+//	MAP(CIDR, STRING)          key 10.0.0.0/8   -> same         (always right, text carrier)
 //
-// Root cause (fixed): on read, a nested-map DECIMAL key leaf decodes to the
-// UNSCALED integer and a DATE key to the day count; the record assembler
-// printed that CARRIER with fmt.Sprint and re-ingested it, so the DECIMAL child
-// re-scaled it a second time and the DATE child could not parse "19675" as a
-// date. The assembler now renders a map key at the key column's own type and
-// scale (parquet.recordAssembler.mapKeyString), the canonical text the child
-// re-parses — the same spelling batch.Vector.GetValue produces. A map VALUE was
-// always right because it stays the typed box; only the key is forced through
-// text because a Go map's key must be a string.
+// Root cause (fixed): on read, a nested-map key leaf decodes to its CARRIER,
+// not its display value — an UNSCALED DECIMAL integer, a DATE day count, an
+// int64 for IPv4/MAC, raw bytes for IPv6/UUID (parquet.StorageClassOf). The
+// record assembler printed that carrier with fmt.Sprint and re-ingested it, so
+// the DECIMAL child re-scaled "127500" a SECOND time and the DATE/IPv4/MAC/
+// IPv6/UUID children could not parse "19675" / "3232235786" / "[10 0 0 5]" and
+// dropped the key to a zero value. The assembler now renders EVERY map-key
+// carrier through one canonical, parseable path (parquet.MapKeyCarrierText), so
+// the child reconstructs the value and GetValue re-renders its display form. A
+// map VALUE was always right because it stays the typed box; only the key is
+// forced through text because a Go map's key must be a string.
 //
 // The in-memory batch.FromRows path is the CONTROL and was already right for
 // DECIMAL/DATE; a TIMESTAMP key given as wall-clock text was dropped there
@@ -240,6 +247,69 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 		e, _ := ents[0].(map[string]any)
 		if e["key"] != int64(1699920000000) {
 			t.Errorf("in-memory TIMESTAMP map key = %#v, want epoch 1699920000000 (was dropped)", e["key"])
+		}
+	})
+
+	// The network families: the same defect, one per StorageClassOf carrier.
+	// A leaf that decodes to an int64 (IPv4, MAC) or raw bytes (IPv6, UUID)
+	// was fmt.Sprint'd to "3232235786" / "[10 0 0 5]" and lost to a zero value
+	// on the round trip; the assembler now renders every carrier canonically.
+	// CIDR was always right (its carrier is already text) and is kept as the
+	// control. The read-out re-renders each key with GetValue, so the asserted
+	// text is the canonical display form regardless of the parseable spelling
+	// the assembler produced.
+	t.Run("network_map_keys", func(t *testing.T) {
+		netMap := func(name string, kt parquet.TypeID) parquet.Column {
+			return parquet.Column{Name: name, Type: parquet.TypeMap, Nullable: true,
+				ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+					{Name: "key", Type: kt},
+					{Name: "value", Type: parquet.TypeString, Nullable: true},
+				}}}
+		}
+		sc4 := parquet.Schema{Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			netMap("m4", parquet.TypeIPv4),
+			netMap("m6", parquet.TypeIPv6),
+			netMap("mmac", parquet.TypeMAC),
+			netMap("muuid", parquet.TypeUUID),
+			netMap("mcidr", parquet.TypeCIDR),
+		}}
+		if err := db.CreateTable(ctx, "netmapkey", sc4, nil); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		ing := db.NewIngester("netmapkey", sc4, nil, ingest.Config{MaxBufferRows: 8, RowGroupSize: 4})
+		if err := ing.Ingest(ctx, []map[string]any{{
+			"id":    int64(1),
+			"m4":    map[string]any{"192.168.1.10": "a"},
+			"m6":    map[string]any{"2001:db8::1": "b"},
+			"mmac":  map[string]any{"aa:bb:cc:dd:ee:ff": "c"},
+			"muuid": map[string]any{"12345678-1234-1234-1234-1234567890ab": "d"},
+			"mcidr": map[string]any{"10.0.0.0/8": "e"},
+		}}); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		for _, c := range []struct{ col, want string }{
+			{"m4", "192.168.1.10"},
+			{"m6", "2001:db8::1"},
+			{"mmac", "aa:bb:cc:dd:ee:ff"},
+			{"muuid", "12345678-1234-1234-1234-1234567890ab"},
+			{"mcidr", "10.0.0.0/8"},
+		} {
+			res, err := db.Query(ctx, `SELECT `+c.col+` AS v FROM netmapkey WHERE id = 1`)
+			if err != nil {
+				t.Fatalf("%s: %v", c.col, err)
+			}
+			got, _ := res.Rows[0]["v"].([]any)
+			if len(got) != 1 {
+				t.Fatalf("%s came back as %#v", c.col, res.Rows[0]["v"])
+			}
+			entry, _ := got[0].(map[string]any)
+			if key, _ := entry["key"].(string); key != c.want {
+				t.Errorf("%s key reads back %q, want %q", c.col, key, c.want)
+			}
 		}
 	})
 }

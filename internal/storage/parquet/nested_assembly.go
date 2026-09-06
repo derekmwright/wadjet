@@ -328,38 +328,17 @@ func (a *recordAssembler) read(node *nestedNode) any {
 	return nil
 }
 
-// mapKeyString renders a decoded map-KEY leaf value into the canonical text a
-// map key crosses the boundary as — the same spelling batch.Vector.GetValue
-// produces for the key column's type — so re-ingesting the assembled map
-// (batch.mapKeyValue -> SetValue) reconstructs the value that was stored.
-//
-// The raw box fmt.Sprint would print is the leaf's CARRIER, not its value: for
-// a DECIMAL it is the UNSCALED integer, which the DECIMAL child then re-parses
-// as scaled text and multiplies by 10^scale a SECOND time; for a DATE it is the
-// day count, which is not a date string at all and reads back as a lost key
-// (#883). A map VALUE is unaffected because it stays the typed box and
-// SetValue reads it directly — only the key is forced through text because a
-// Go map's key must be a string. Every other family's carrier already prints
-// as the text its child re-parses, so they keep fmt.Sprint.
+// mapKeyString renders a decoded map-KEY leaf value into the canonical,
+// parseable text a map key crosses the boundary as, so re-ingesting the
+// assembled map (batch.mapKeyValue -> SetValue) reconstructs the value that
+// was stored. The whole conversion is MapKeyCarrierText, which every family's
+// carrier goes through; see its doc for why fmt.Sprint of a carrier corrupts a
+// DECIMAL/DATE/IPv4/MAC/IPv6/UUID key (#883). A non-leaf key (the format's map
+// keys are always primitive leaves) falls back to fmt.Sprint.
 func (a *recordAssembler) mapKeyString(keyNode *nestedNode, k any) string {
 	if keyNode.kind == kindLeaf && keyNode.leafIdx >= 0 && keyNode.leafIdx < len(a.pages) {
 		lcd := &a.pages[keyNode.leafIdx]
-		switch lcd.typeID {
-		case TypeDecimal:
-			switch v := k.(type) {
-			case int64:
-				return Decimal128From(v).Text(int(lcd.decScale))
-			case Decimal128:
-				return v.Text(int(lcd.decScale))
-			}
-		case TypeDate:
-			switch v := k.(type) {
-			case int32:
-				return FormatDateDays(v)
-			case int64:
-				return FormatDateDays(int32(v))
-			}
-		}
+		return MapKeyCarrierText(lcd.typeID, lcd.decScale, k)
 	}
 	return fmt.Sprint(k)
 }
