@@ -2101,7 +2101,49 @@ DROP FUNCTION classify_port
 DROP FUNCTION IF EXISTS classify_port
 ```
 
-UDFs can be locked by their owner so only the creator (or an admin) can modify or remove them.
+A UDF is **process-global**: it is registered once per server process and every
+session resolves it, whatever identity opened that session. Replacing one
+changes what other people's queries mean, which is why mutating the registry is
+a privileged operation.
+
+### Who may create, replace and drop a function
+
+The registry is guarded by the same permissions as everything else this engine
+mutates, and by the same rule on every door — the embedded API, the PostgreSQL
+wire protocol and `POST /v1/queries`:
+
+| Statement | Requires |
+|---|---|
+| `CREATE [OR REPLACE] FUNCTION`, `DROP FUNCTION [IF EXISTS]` | the `write` permission |
+| replacing or dropping a function **another** owner created `WITH LOCK` | the `admin` permission |
+| `SHOW FUNCTIONS` | any authenticated identity |
+
+`WITH LOCK` records the creating identity as the function's owner:
+
+```sql
+CREATE FUNCTION classify_port(p) AS ... WITH LOCK
+```
+
+After that only that owner, or an identity holding `admin`, may replace or drop
+it; anyone else is refused `42501` (HTTP 403) and the definition is left
+exactly as it was — `DROP FUNCTION IF EXISTS` included, which forgives a
+function that is *absent* and never one that is present and locked by somebody
+else. Whether an identity is an administrator is read from the permissions its
+role grants, never from the role's *name*: a role called `admin` whose `allow:`
+list is `[read]` is not one, and a role called anything else whose list holds
+`admin` is.
+
+`SHOW FUNCTIONS` returns every function's name, parameters, body and owner to
+any authenticated caller. That matches PostgreSQL, which shows `pg_proc.prosrc`
+and `\sf` to a role with no privileges on the function at all.
+
+With **no auth provider** — the default embedded and CLI use — none of this is
+enforced, functions are created with no owner, and `WITH LOCK` records the flag
+without an owner to check it against.
+
+> `SHOW FUNCTIONS` is not reachable through the PostgreSQL wire protocol: that
+> door answers an unrecognised `SHOW <name>` as a session variable. Use the
+> embedded API or the HTTP endpoint.
 
 ## Query Examples for Network Analytics
 

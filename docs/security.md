@@ -238,6 +238,8 @@ and the HTTP handlers' own checks are early refusals of the same rule.
 | `SELECT`, `EXPLAIN` | `read` on every relation the query reads (RBAC `tables`, or the ABAC decision) |
 | `INSERT`, `UPDATE`, `DELETE`, `MERGE` | `write` on the target table |
 | `CREATE TABLE`, `DROP TABLE`, `ANALYZE` | `write` |
+| `CREATE [OR REPLACE] FUNCTION`, `DROP FUNCTION` | `write`; `admin` to override another owner's `WITH LOCK` |
+| `SHOW FUNCTIONS` | any authenticated identity |
 | `CREATE ALERT`, `DROP ALERT`, `ALTER ALERT` | `admin` |
 
 Refusals are PostgreSQL's `42501` (`insufficient_privilege`) on the wire and
@@ -247,6 +249,23 @@ With **auth enabled**, a call carrying no identity is refused at this boundary
 as well — an unattributed statement is not an anonymous one, it is one nothing
 authorized. With **no provider attached** (the default embedded and CLI use)
 nothing is enforced and every statement behaves as it always has.
+
+#### User-defined function ownership
+
+The UDF registry is process-global: a function installed by one session is
+resolved by every other one, so replacing a function changes what other
+identities' queries mean.
+
+`CREATE FUNCTION … WITH LOCK` records the creating identity as the function's
+owner. Only that owner, or an identity holding the `admin` permission, may
+replace or drop it; anyone else is refused and the definition is unchanged.
+Administrator status comes from `Authorizer.HasPermission(identity, "admin")` —
+the permissions the role grants — and never from the role's *name*. A role
+literally called `admin` whose `allow:` list is `[read]` is not an
+administrator, and a role called `ops` whose list holds `admin` is.
+
+With no provider attached, functions are created with no owner and the lock has
+nothing to check against — the pre-existing embedded behaviour.
 
 ### ABAC (Attribute-Based Access Control)
 

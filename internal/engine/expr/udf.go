@@ -134,7 +134,12 @@ func (s *UDFStore) Register(def UDFDef, isAdmin bool) error {
 		if existing.def.Locked && existing.def.Owner != "" &&
 			existing.def.Owner != def.Owner && !isAdmin {
 			s.mu.RUnlock()
-			return fmt.Errorf("function %q is locked by %q — only the owner or an admin can replace it",
+			// 42501 insufficient_privilege: this is an AUTHORIZATION refusal
+			// — the caller is not the owner and does not hold `admin` — and
+			// it crossed pgwire as the blanket 42000 without a class, which
+			// a client cannot tell from a syntax error.
+			return sqlerr.New("42501",
+				"function %q is locked by %q — only the owner or an admin can replace it",
 				def.Name, existing.def.Owner)
 		}
 	}
@@ -226,7 +231,9 @@ func (s *UDFStore) Unregister(name, caller string, isAdmin bool) error {
 	if existing.def.Locked && existing.def.Owner != "" &&
 		existing.def.Owner != caller && !isAdmin {
 		s.mu.Unlock()
-		return fmt.Errorf("function %q is locked by %q — only the owner or an admin can drop it",
+		// 42501, for the reason Register's twin records.
+		return sqlerr.New("42501",
+			"function %q is locked by %q — only the owner or an admin can drop it",
 			name, existing.def.Owner)
 	}
 	delete(s.udfs, name)

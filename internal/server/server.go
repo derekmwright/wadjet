@@ -23,7 +23,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/metrics"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -1070,106 +1069,76 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 	})
 }
 
+// handleCreateFunction runs CREATE FUNCTION through the ONE secured UDF
+// boundary, `wadjet.DB.CreateFunction` — the same call `DB.Query` makes for
+// the embedded and pgwire doors.
+//
+// It used to register the function itself, with no permission check of any
+// kind and with `isAdmin` computed as `identity.Role == "admin"`: the role's
+// NAME instead of its permissions. A role literally named `admin` holding only
+// `read` therefore overrode another owner's `WITH LOCK`, a role named `ops`
+// that actually held `admin` could not, and any authenticated identity at all
+// could install a function into the PROCESS-GLOBAL registry every other
+// session's queries resolve against (#942). The decision now lives in
+// `auth.AuthorizeUDFMutation` and this handler renders its result.
 func (s *Server) handleCreateFunction(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
-	cf := parsed.CreateFunction
-	identity := auth.IdentityFromContext(r.Context())
-
-	owner := ""
-	isAdmin := false
-	if identity != nil {
-		owner = identity.Name
-		isAdmin = identity.Role == "admin"
-	}
-
-	def := expr.UDFDef{
-		Name:   cf.Name,
-		Params: cf.Params,
-		Body:   cf.Body,
-		Owner:  owner,
-		Locked: cf.Locked,
-	}
-
-	// Check if function exists and this is not OR REPLACE
-	if !cf.Replace {
-		if err := expr.DefaultUDFs.RefuseIfDefined(cf.Name); err != nil {
-			writeSQLError(w, http.StatusConflict, err.Error(), err)
-			return
-		}
-	}
-
-	if err := expr.DefaultUDFs.Register(def, isAdmin); err != nil {
-		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, QueryResponse{
-		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
-		Columns: []string{"result"},
-		Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q created", cf.Name)}},
-		Stats:   QueryStats{Elapsed: time.Since(start).String()},
-	})
-}
-
-func (s *Server) handleDropFunction(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
-	df := parsed.DropFunction
-	identity := auth.IdentityFromContext(r.Context())
-
-	caller := ""
-	isAdmin := false
-	if identity != nil {
-		caller = identity.Name
-		isAdmin = identity.Role == "admin"
-	}
-
-	err := expr.DefaultUDFs.Unregister(df.Name, caller, isAdmin)
+	// s.dml() is this server's `wadjet.DB` over its own catalog, with the
+	// provider attached — the same one the DML door uses; the UDF registry it
+	// mutates is process-global and not catalog-bound.
+	res, err := s.dml().CreateFunction(r.Context(), parsed.CreateFunction)
 	if err != nil {
-		if df.IfExists {
-			// IF EXISTS — don't error if not found
-			writeJSON(w, http.StatusOK, QueryResponse{
-				QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
-				Columns: []string{"result"},
-				Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q does not exist (no-op)", df.Name)}},
-				Stats:   QueryStats{Elapsed: time.Since(start).String()},
-			})
-			return
-		}
-		writeSQLError(w, http.StatusBadRequest, err.Error(), err)
+		writeSQLError(w, udfErrorStatus(err), err.Error(), err)
 		return
 	}
+	writeUDFResult(w, res, start)
+}
 
+// udfErrorStatus maps a UDF refusal's SQLSTATE onto this door's status, so the
+// same refusal is 403 here and 42501 on the wire.
+func udfErrorStatus(err error) int {
+	switch sqlerr.StateOf(err) {
+	case "42501":
+		return http.StatusForbidden
+	case "42723": // duplicate_function — the NAME is taken
+		return http.StatusConflict
+	default:
+		return http.StatusBadRequest
+	}
+}
+
+// writeUDFResult renders a wadjet.QueryResult as this endpoint's JSON shape.
+func writeUDFResult(w http.ResponseWriter, res *wadjet.QueryResult, start time.Time) {
 	writeJSON(w, http.StatusOK, QueryResponse{
 		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
-		Columns: []string{"result"},
-		Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q dropped", df.Name)}},
+		Columns: res.Columns,
+		Rows:    res.Rows,
 		Stats:   QueryStats{Elapsed: time.Since(start).String()},
 	})
 }
 
-func (s *Server) handleShowFunctions(w http.ResponseWriter, _ *http.Request, start time.Time) {
-	udfs := expr.DefaultUDFs.List()
-
-	rows := make([]map[string]any, len(udfs))
-	for i, udf := range udfs {
-		params := "(" + strings.Join(udf.Params, ", ") + ")"
-		locked := "NO"
-		if udf.Locked {
-			locked = "YES"
-		}
-		rows[i] = map[string]any{
-			"name":   udf.Name,
-			"params": params,
-			"body":   udf.Body,
-			"owner":  udf.Owner,
-			"locked": locked,
-		}
+// handleDropFunction runs DROP FUNCTION through the shared secured boundary.
+// See handleCreateFunction. IF EXISTS is handled there too, and it forgives
+// only a function that is ABSENT (42883) — never one that is present and
+// locked by somebody else (#942).
+func (s *Server) handleDropFunction(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	res, err := s.dml().DropFunction(r.Context(), parsed.DropFunction)
+	if err != nil {
+		writeSQLError(w, udfErrorStatus(err), err.Error(), err)
+		return
 	}
+	writeUDFResult(w, res, start)
+}
 
-	writeJSON(w, http.StatusOK, QueryResponse{
-		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
-		Columns: []string{"name", "params", "body", "owner", "locked"},
-		Rows:    rows,
-		Stats:   QueryStats{Elapsed: time.Since(start).String()},
-	})
+// handleShowFunctions runs SHOW FUNCTIONS through the shared boundary, which
+// requires an AUTHENTICATED identity and no particular permission — what
+// PostgreSQL grants over `pg_proc.prosrc` and `\\sf`.
+func (s *Server) handleShowFunctions(w http.ResponseWriter, r *http.Request, start time.Time) {
+	res, err := s.dml().ShowFunctions(r.Context())
+	if err != nil {
+		writeSQLError(w, udfErrorStatus(err), err.Error(), err)
+		return
+	}
+	writeUDFResult(w, res, start)
 }
 
 // handleCreateTableSQL handles CREATE TABLE via SQL.

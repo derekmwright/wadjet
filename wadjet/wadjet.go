@@ -402,11 +402,11 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	case plansql.QueryDescribe:
 		return db.describe(ctx, parsed.Describe.TableName)
 	case plansql.QueryCreateFunction:
-		return db.createFunction(parsed.CreateFunction)
+		return db.CreateFunction(ctx, parsed.CreateFunction)
 	case plansql.QueryDropFunction:
-		return db.dropFunction(parsed.DropFunction)
+		return db.DropFunction(ctx, parsed.DropFunction)
 	case plansql.QueryShowFunctions:
-		return db.showFunctions()
+		return db.ShowFunctions(ctx)
 	case plansql.QueryCreateTable:
 		return db.createTableSQL(ctx, parsed.CreateTable)
 	case plansql.QueryDropTable:
@@ -1033,12 +1033,26 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 	return metas
 }
 
-func (db *DB) createFunction(cf *plansql.CreateFunctionInfo) (*QueryResult, error) {
-	def := expr.UDFDef{
-		Name:   cf.Name,
-		Params: cf.Params,
-		Body:   cf.Body,
-		Locked: cf.Locked,
+// CreateFunction is the ONE secured entry point for CREATE [OR REPLACE]
+// FUNCTION, and every door runs it: `DB.Query` dispatches here (so the
+// embedded caller and pgwire reach it), and the HTTP query endpoint's
+// `handleCreateFunction` calls it instead of registering the function itself.
+//
+// It is exported for the same reason `ExecuteParsed` is: a door that has
+// already parsed the statement hands over the parsed form, and the decision
+// below is made once rather than once per frontend. Before this, the two doors
+// each made it separately and each made it wrong — `DB.Query` recorded no
+// owner and passed `isAdmin = true` unconditionally (#940), the HTTP handler
+// read `identity.Role == "admin"` (#942). `expr.DefaultUDFs` is process-global,
+// so both defeated `WITH LOCK` for every session in the process.
+//
+// The order is: AUTHORIZE, then the duplicate-name refusal, then the register.
+// A caller who may not mutate the registry is not told whether the name is
+// taken.
+func (db *DB) CreateFunction(ctx context.Context, cf *plansql.CreateFunctionInfo) (*QueryResult, error) {
+	m, err := auth.AuthorizeUDFMutation(ctx, db.authProvider)
+	if err != nil {
+		return nil, err
 	}
 
 	if !cf.Replace {
@@ -1047,7 +1061,14 @@ func (db *DB) createFunction(cf *plansql.CreateFunctionInfo) (*QueryResult, erro
 		}
 	}
 
-	if err := expr.DefaultUDFs.Register(def, true); err != nil {
+	def := expr.UDFDef{
+		Name:   cf.Name,
+		Params: cf.Params,
+		Body:   cf.Body,
+		Owner:  m.Owner,
+		Locked: cf.Locked,
+	}
+	if err := expr.DefaultUDFs.Register(def, m.IsAdmin); err != nil {
 		return nil, err
 	}
 
@@ -1057,10 +1078,25 @@ func (db *DB) createFunction(cf *plansql.CreateFunctionInfo) (*QueryResult, erro
 	}, nil
 }
 
-func (db *DB) dropFunction(df *plansql.DropFunctionInfo) (*QueryResult, error) {
-	err := expr.DefaultUDFs.Unregister(df.Name, "", true)
+// DropFunction is the ONE secured entry point for DROP FUNCTION [IF EXISTS].
+// See CreateFunction.
+//
+// The permission check precedes the existence lookup, so `DROP FUNCTION IF
+// EXISTS f` under an identity that may not mutate the registry is a refusal
+// and not a no-op — the no-op answer reports registry contents to a caller
+// whose statement was never going to run.
+func (db *DB) DropFunction(ctx context.Context, df *plansql.DropFunctionInfo) (*QueryResult, error) {
+	m, err := auth.AuthorizeUDFMutation(ctx, db.authProvider)
 	if err != nil {
-		if df.IfExists {
+		return nil, err
+	}
+
+	if err := expr.DefaultUDFs.Unregister(df.Name, m.Owner, m.IsAdmin); err != nil {
+		// IF EXISTS forgives a function that is NOT THERE (42883). It does
+		// not forgive one that is there and locked by somebody else (42501):
+		// answering "does not exist (no-op)" to that would be a lie about the
+		// registry and would hide the refusal.
+		if df.IfExists && sqlerr.StateOf(err) == "42883" {
 			return &QueryResult{
 				Columns: []string{"result"},
 				Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q does not exist (no-op)", df.Name)}},
@@ -1075,7 +1111,18 @@ func (db *DB) dropFunction(df *plansql.DropFunctionInfo) (*QueryResult, error) {
 	}, nil
 }
 
-func (db *DB) showFunctions() (*QueryResult, error) {
+// ShowFunctions lists the registered user-defined functions with their bodies
+// and owners.
+//
+// Any AUTHENTICATED identity may read it, and that is deliberate: PostgreSQL
+// hands `pg_proc.prosrc` and `\sf` to a role with no privileges on the
+// function at all. A function body is part of the schema the server publishes,
+// not data the policy layer governs. Under auth enabled a caller with no
+// identity is refused.
+func (db *DB) ShowFunctions(ctx context.Context) (*QueryResult, error) {
+	if err := auth.AuthorizeUDFRead(ctx, db.authProvider); err != nil {
+		return nil, err
+	}
 	udfs := expr.DefaultUDFs.List()
 	rows := make([]map[string]any, len(udfs))
 	for i, udf := range udfs {
