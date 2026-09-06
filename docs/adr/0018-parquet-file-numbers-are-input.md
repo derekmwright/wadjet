@@ -32,7 +32,13 @@ under a REQUIRED schema (#892).
 The gate written for §11 then found three more of its own in the page HEADER,
 which no checksum covers: an undecodable page type silently skipped, a v2
 null count taken on trust, and two v2 level lengths used as slice bounds
-unchecked.
+unchecked. Amended 2026-09-06 with §12 (ARC P-READER), five residuals of the
+§11 family: a v1 level section short of `num_values` (the v1 twin of the v2
+reconciliation), a data page relabeled DICTIONARY_PAGE and skipped after its
+rows were charged, a same-named nested leaf overwriting a top-level column's
+statistics, a swapped column-chunk metadata entry read by slice position, and
+the scan-side twin of that basename collision in dictionary pruning
+(#923 #924 #925 #927 #915).
 
 ## Context
 
@@ -869,8 +875,25 @@ on wadjet's own data and on every pyarrow file measured (pyarrow's
 carries none in any of its 728 pages). Emitting them is a writer decision and
 is not settled here.
 
+### 12. Five residuals of the same discipline (2026-09-06, ARC P-READER)
 
-## Consequences
+§11 established the rule; a follow-up review found five more places the reader
+believed a number the file states. Each is the same shape — a self-describing
+value used before it is verified — in a corner the §11 gates did not reach.
+
+**A v1 level section short of `num_values` shifts the values.** §11 reconciled
+the v2 level sections against `num_values` and the declared byte length. The v1
+path was left with only its length PREFIX, which places the value section
+correctly but says nothing about how many levels the section encodes. A page
+whose definition-level length prefix is zeroed decoded ZERO levels, the reader
+read that as "no nulls", and the value decode started in the old level bytes: an
+optional INT64 `[11, 22]` read back as `[721156, 1441792]`, nil error (#923).
+The fix is §11's v2 rule applied to v1: a leaf that has levels must decode
+EXACTLY `num_values` of them on each stream present, every one within the
+schema maximum for that stream. The invariant lives at the decoder's caller,
+where `num_values` and the schema levels are both known
+(`decodeDataPageV1`/`checkV1Levels`), not in the general RLE decoder, which
+cannot know either.
 
 - Files that were read before and are refused now: a footer whose row groups
   do not sum to its total; a chunk whose `total_compressed_size` overstates by

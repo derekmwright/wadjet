@@ -850,15 +850,31 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 	off := 0
 
 	// Decode repetition levels.
+	//
+	// A v1 level section is length-prefixed, so DecodeRLEInt32WithLength places
+	// the value section by the PREFIX (consumed) and a short section cannot
+	// shift it the way a v2 section can. What was never checked is the decoded
+	// COUNT: the decoder sizes its destination to num_values and stops when the
+	// prefixed bytes run out, so a section that encodes FEWER than num_values
+	// levels — the degenerate case being a zeroed length prefix, which encodes
+	// none — returned a short slice the caller read as "this page has zero
+	// nulls", then decoded the value section out of the level bytes (#923, the
+	// v1 twin of #891's v2 reconciliation). Exactly num_values levels, every
+	// one within the schema maximum, on both streams.
 	var repLevels []int32
 	if r.maxRepLevel > 0 {
 		bitWidth := bitsRequired(r.maxRepLevel)
 		decoded, consumed, err := DecodeRLEInt32WithLength(pageData[off:], bitWidth, numValues)
 		if err != nil {
+			ReleaseDecompressed(r.codec, pageData)
 			return nil, fmt.Errorf("decoding repetition levels: %w", err)
 		}
 		repLevels = decoded
 		off += consumed
+		if err := r.checkV1Levels("repetition", repLevels, numValues, r.maxRepLevel); err != nil {
+			ReleaseDecompressed(r.codec, pageData)
+			return nil, err
+		}
 	}
 
 	// Decode definition levels.
@@ -872,6 +888,7 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 		}
 		decoded, consumed, err := DecodeRLEInt32WithLengthInto(scratch, pageData[off:], bitWidth, numValues)
 		if err != nil {
+			ReleaseDecompressed(r.codec, pageData)
 			return nil, fmt.Errorf("decoding definition levels: %w", err)
 		}
 		if r.scratchOn {
@@ -880,7 +897,11 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 		defLevels = decoded
 		off += consumed
 
-		// Count non-null values.
+		if err := r.checkV1Levels("definition", defLevels, numValues, r.maxDefLevel); err != nil {
+			ReleaseDecompressed(r.codec, pageData)
+			return nil, err
+		}
+		// Count non-null values (domain already checked by checkV1Levels).
 		for _, dl := range defLevels {
 			if dl < int32(r.maxDefLevel) {
 				numNulls++
@@ -1134,6 +1155,28 @@ func (r *ColumnPageReader) checkV2LevelSection(kind string, declared, used, got,
 	if got != want {
 		return fmt.Errorf("column %s: data page v2 declares %d values but its %s levels "+
 			"decode to %d", r.columnLabel(), want, kind, got)
+	}
+	return nil
+}
+
+// checkV1Levels holds a data page v1 level section to the two things its
+// declared num_values claims: that it decodes to exactly num_values levels, and
+// that every level is within the schema maximum for the stream. Unlike the v2
+// counterpart there is no consumed-bytes check — a v1 section is length-prefixed
+// and the prefix, not the decode, places the value section — so the COUNT is the
+// whole defence (#923). A level above the maximum is a second impossibility that
+// means the bytes were misread as levels.
+func (r *ColumnPageReader) checkV1Levels(kind string, levels []int32, want, maxLevel int) error {
+	if len(levels) != want {
+		return fmt.Errorf("column %s: data page v1 declares %d values but its %s levels decode to %d "+
+			"(the level section is short, so the values would be read from the level bytes)",
+			r.columnLabel(), want, kind, len(levels))
+	}
+	for _, l := range levels {
+		if l < 0 || int(l) > maxLevel {
+			return fmt.Errorf("column %s: data page v1 %s level %d is outside [0, %d]",
+				r.columnLabel(), kind, l, maxLevel)
+		}
 	}
 	return nil
 }
