@@ -414,17 +414,20 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			if !s.requirePermission(w, r, "read") {
 				return
 			}
-			for _, table := range selectInfo.Tables {
-				if !authz.CanAccessTable(identity, table.Name) {
-					writeError(w, http.StatusForbidden,
-						tableAccessRefusal(table.Name))
-					return
-				}
-			}
-			for _, join := range selectInfo.Joins {
-				if !authz.CanAccessTable(identity, join.RightTable) {
-					writeError(w, http.StatusForbidden,
-						tableAccessRefusal(join.RightTable))
+			// The SAME name filter the evaluator branch above applies, and
+			// for the same reason (#859): `selectInfo.Tables` is not a list
+			// of tables. A derived table is listed under its own subquery
+			// TEXT and a CTE reference under the CTE's name, and a legacy
+			// role's `tables:` list names neither — so this door refused
+			// `WITH c AS (SELECT id FROM t) SELECT id FROM c` as
+			// `permission denied for table "c"` while embedded and pgwire
+			// answered it. The base tables behind those names are policed by
+			// auth.EnforcePlanPolicies, which walks the PLAN, so nothing is
+			// let through: the filter drops names that are NOT relations,
+			// not relations that are not permitted.
+			for _, table := range auth.StatementBaseTables(r.Context(), s.catalog, selectInfo) {
+				if !authz.CanAccessTable(identity, table) {
+					writeError(w, http.StatusForbidden, tableAccessRefusal(table))
 					return
 				}
 			}
