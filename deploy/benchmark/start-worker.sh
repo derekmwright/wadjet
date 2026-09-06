@@ -20,11 +20,16 @@ S3_ENDPOINT="s3.${REGION}.amazonaws.com"
 
 echo "[$(date +%H:%M:%S)] Starting worker, connecting to coordinator at ${COORD_IP}..."
 
+# A benchmark node must never mutate its read bucket. --mode=worker does not
+# run the compaction sweep today (only standalone/coordinator do), so this is
+# defence in depth against a future change or a mis-set mode — see #921, where
+# a harness STANDALONE coordinator's default-on sweep tripled the SF10 fixture.
 exec wadjet serve \
   --mode=worker \
   --nats-url="${NATS_URL}" \
   --storage.endpoint="${S3_ENDPOINT}" \
   --bucket="${BUCKET}" \
   --storage-type=s3 \
+  --background-compaction=false \
   ${MEMORY_BUDGET:+--memory-budget=$MEMORY_BUDGET} \
   ${SPILL_DIR:+--spill-dir=$SPILL_DIR}

@@ -1014,6 +1014,7 @@ resource "aws_instance" "worker" {
             --nats-url="nats://$COORD_IP:4222" \
             --endpoint="s3.${local.eff_region}.amazonaws.com" \
             --ssl \
+            --background-compaction=false \
             --bucket="${local.bucket_name}" \
             --region="${local.eff_region}" \
             --storage-type=s3 \

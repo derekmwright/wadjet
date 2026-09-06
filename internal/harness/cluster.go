@@ -162,6 +162,30 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 	c.grpcPort = freePort()
 	c.natsURL = fmt.Sprintf("nats://127.0.0.1:%d", c.natsPort)
 
+	coordArgs := c.coordinatorServeArgs()
+	coord, err := c.spawn("coord", coordArgs)
+	if err != nil {
+		return fmt.Errorf("spawning coordinator: %w", err)
+	}
+	c.coord = coord
+
+	// Wait for NATS and pgwire to accept connections.
+	if err := c.waitNATSReady(ctx, 15*time.Second); err != nil {
+		return fmt.Errorf("coordinator NATS not ready: %w", err)
+	}
+	if err := c.waitPortReady(ctx, c.cfg.PgAddr, 15*time.Second); err != nil {
+		return fmt.Errorf("coordinator pgwire not ready: %w", err)
+	}
+
+	c.cfg.Logger.Info("coordinator up", "nats", c.natsURL, "pg", c.cfg.PgAddr)
+	return nil
+}
+
+// coordinatorServeArgs builds the full `wadjet serve` argument list for the
+// standalone coordinator. Extracted from StartCoordinator so a gate can assert
+// the invariant flags are present without spawning a process (#921). Requires
+// c.natsPort/httpPort/grpcPort/natsURL already set.
+func (c *Cluster) coordinatorServeArgs() []string {
 	// Use standalone mode: it starts pgwire + embedded NATS + 1 internal
 	// worker. External workers join via --nats-url in StartWorkers.
 	coordArgs := []string{
@@ -179,6 +203,19 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		// Disable it. Callers can re-enable via ExtraServeArgs (later
 		// flags win) to run the same suite through the fast path.
 		"--local-fastpath-bytes=0",
+		// A benchmark harness must never MUTATE the bucket it reads. The
+		// background compaction sweep (default ON, every `wadjet serve`;
+		// standalone/coordinator start it, cmd/wadjet/main.go) merges a
+		// table's small registered files into engine-written compacted_*
+		// copies and removes the inputs from the run's ephemeral manifest —
+		// but the physical delete is deferred behind a 30-minute
+		// process-local grace, and the harness kills the cluster first. The
+		// outputs then survive with the inputs, and the NEXT run's
+		// primeS3Catalog registers BOTH from the raw listing, so lineitem
+		// gained a full extra copy per burst until the SF10 fixture held ~3×
+		// its rows (#921; #278 is the same duplication class from the other
+		// direction). Off, unconditionally, for every harness cluster.
+		"--background-compaction=false",
 	}
 	if c.cfg.MemoryBudget > 0 {
 		// Standalone mode also runs an internal worker (see comment above),
@@ -201,22 +238,7 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 	}
 	coordArgs = append(coordArgs, storageArgs(c.cfg)...)
 	coordArgs = append(coordArgs, c.cfg.ExtraServeArgs...)
-	coord, err := c.spawn("coord", coordArgs)
-	if err != nil {
-		return fmt.Errorf("spawning coordinator: %w", err)
-	}
-	c.coord = coord
-
-	// Wait for NATS and pgwire to accept connections.
-	if err := c.waitNATSReady(ctx, 15*time.Second); err != nil {
-		return fmt.Errorf("coordinator NATS not ready: %w", err)
-	}
-	if err := c.waitPortReady(ctx, c.cfg.PgAddr, 15*time.Second); err != nil {
-		return fmt.Errorf("coordinator pgwire not ready: %w", err)
-	}
-
-	c.cfg.Logger.Info("coordinator up", "nats", c.natsURL, "pg", c.cfg.PgAddr)
-	return nil
+	return coordArgs
 }
 
 // NATSURL returns the coordinator's NATS URL. Only valid after StartCoordinator.
@@ -229,6 +251,41 @@ func (c *Cluster) ConnectNATS() (*nats.Conn, error) {
 	return distributed.Connect(c.natsURL, nil)
 }
 
+// workerServeArgs builds the full `wadjet serve --mode=worker` argument list.
+// Extracted from StartWorkers so a gate can assert the invariant flags without
+// spawning (#921).
+func (c *Cluster) workerServeArgs(role string, metricsPort int) []string {
+	workerArgs := []string{
+		"serve",
+		"--mode=worker",
+		"--nats-url=" + c.natsURL,
+		"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", role),
+		"--metrics-addr=:" + strconv.Itoa(metricsPort),
+		// Never mutate the read bucket (#921). --mode=worker does not start
+		// the compaction sweep today (only standalone/coordinator do,
+		// cmd/wadjet/main.go), so this is defence in depth against a future
+		// change or a mis-set mode — cheap, and the whole class of #921 is a
+		// benchmark node writing to the bucket it is only meant to read.
+		"--background-compaction=false",
+	}
+	if c.cfg.MemoryBudget > 0 {
+		budget := strconv.FormatInt(c.cfg.MemoryBudget, 10)
+		workerArgs = append(workerArgs,
+			"--memory-budget="+budget,
+			"--shared-pool-budget="+budget,
+		)
+	}
+	if c.cfg.DataPlane == "grpc" {
+		workerArgs = append(workerArgs,
+			"--data-plane=grpc",
+			"--coord-data-plane=127.0.0.1:"+strconv.Itoa(c.dataPlanePort),
+		)
+	}
+	workerArgs = append(workerArgs, storageArgs(c.cfg)...)
+	workerArgs = append(workerArgs, c.cfg.ExtraServeArgs...)
+	return workerArgs
+}
+
 // StartWorkers spawns worker processes and waits for them to register.
 // Must be called after StartCoordinator and after seeding the catalog.
 func (c *Cluster) StartWorkers(ctx context.Context) error {
@@ -238,28 +295,7 @@ func (c *Cluster) StartWorkers(ctx context.Context) error {
 	for i := 0; i < c.cfg.NumWorkers; i++ {
 		role := fmt.Sprintf("worker-%d", i)
 		metricsPort := freePort()
-		workerArgs := []string{
-			"serve",
-			"--mode=worker",
-			"--nats-url=" + c.natsURL,
-			"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", role),
-			"--metrics-addr=:" + strconv.Itoa(metricsPort),
-		}
-		if c.cfg.MemoryBudget > 0 {
-			budget := strconv.FormatInt(c.cfg.MemoryBudget, 10)
-			workerArgs = append(workerArgs,
-				"--memory-budget="+budget,
-				"--shared-pool-budget="+budget,
-			)
-		}
-		if c.cfg.DataPlane == "grpc" {
-			workerArgs = append(workerArgs,
-				"--data-plane=grpc",
-				"--coord-data-plane=127.0.0.1:"+strconv.Itoa(c.dataPlanePort),
-			)
-		}
-		workerArgs = append(workerArgs, storageArgs(c.cfg)...)
-		workerArgs = append(workerArgs, c.cfg.ExtraServeArgs...)
+		workerArgs := c.workerServeArgs(role, metricsPort)
 		w, err := c.spawn(role, workerArgs)
 		if err != nil {
 			return fmt.Errorf("spawning %s: %w", role, err)

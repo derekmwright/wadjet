@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path"
 	"strings"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
@@ -13,6 +15,45 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
+
+// compactedObjectPrefix is the basename prefix the background compactor gives
+// every file it writes (internal/storage/compaction/compactor.go). A STAGED
+// benchmark dataset never contains one: the loaders write chunk_* / ingest
+// names. So a compacted_* object under a table prefix can only be the residue
+// of an earlier `wadjet serve` that ran its 5-minute compaction sweep against
+// this bucket and was killed before its 30-minute deferred delete removed the
+// inputs — the run's manifest knew the compacted copy REPLACED the chunks, but
+// that manifest was ephemeral and died with the process, so both the copy and
+// the originals are still here. Priming from the raw object listing then loads
+// BOTH, and the table gains a full extra copy of every row the compaction
+// touched. That is exactly how wadjet-bench-sf10-use2 came to hold ~3× its
+// lineitem rows (#921; #278 is the same duplication class). The harness now
+// disables background compaction on every cluster it spawns
+// (cluster.go), so no NEW orphan is created; this guard refuses to load an
+// EXISTING one, because a corrupted bucket must never again be silently primed
+// as duplicated data.
+const compactedObjectPrefix = "compacted_"
+
+// allowCompactedEnv opts out of the guard for the rare legitimate case: a
+// dataset whose canonical files were themselves produced by compaction and
+// staged deliberately. Off by default; a corrupted bucket is the far more
+// likely explanation, and a silent one is what cost us #921.
+const allowCompactedEnv = "WADJET_HARNESS_ALLOW_COMPACTED"
+
+// compactedOrphans returns the keys of any compacted_* parquet objects in a
+// table's listing — the objects a staged dataset never contains.
+func compactedOrphans(objects []objstore.ObjectInfo) []string {
+	var orphans []string
+	for _, obj := range objects {
+		if !strings.HasSuffix(obj.Key, ".parquet") {
+			continue
+		}
+		if strings.HasPrefix(path.Base(obj.Key), compactedObjectPrefix) {
+			orphans = append(orphans, obj.Key)
+		}
+	}
+	return orphans
+}
 
 // primeS3Catalog lists parquet files under bucket/dataPrefix/<table>/ for each
 // of the 8 TPC-H tables, probes the first file for its real schema, and
@@ -70,6 +111,24 @@ func primeS3Catalog(
 		objects, err := store.List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
 		if err != nil {
 			return fmt.Errorf("listing s3://%s/%s: %w", bucket, prefix, err)
+		}
+		// Refuse a bucket carrying background-compaction residue. See
+		// compactedObjectPrefix: a compacted_* object under a table prefix is
+		// a duplicated-data hazard, not staged data, and priming it silently
+		// is how #921 happened. Hard-fail unless the operator opts in.
+		if orphans := compactedOrphans(objects); len(orphans) > 0 {
+			if os.Getenv(allowCompactedEnv) == "" {
+				return fmt.Errorf(
+					"s3://%s/%s holds %d compacted_* object(s) (e.g. %s) — these are residue "+
+						"from a prior cluster's background compaction, not staged data, and priming "+
+						"them alongside the original files loads DUPLICATED rows (#921, #278). "+
+						"Remove the compacted_* objects (keep one canonical generation) or set %s=1 "+
+						"to prime anyway",
+					bucket, prefix, len(orphans), orphans[0], allowCompactedEnv)
+			}
+			logger.Warn("priming a bucket with background-compaction residue — rows may be DUPLICATED",
+				"table", name, "prefix", prefix, "compacted_objects", len(orphans),
+				"override", allowCompactedEnv)
 		}
 		var pqObjects []objstore.ObjectInfo
 		for _, obj := range objects {
