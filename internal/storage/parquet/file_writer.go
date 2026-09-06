@@ -1224,6 +1224,23 @@ func (nw *NativeWriter) writeColumnChunk(lb *leafBuffer) (uncompressed, compress
 	return totU, totC, nil
 }
 
+// checkPageSize refuses a page body that cannot be described by the Thrift
+// page header's int32 UncompressedPageSize/CompressedPageSize fields. The
+// Parquet spec caps a page at 2^31-1 bytes; without this guard the int32 cast
+// below wrapped a >=2GB page to a negative/wrong size and the file was
+// finalized as success — silent corruption any reader would then read past
+// (#929). A page reaches this size only from a single value in the 2GB-4GB
+// range (a BYTE_ARRAY/FLBA/VECTOR value, whose own length prefix is uint32);
+// decomposition refuses such a value first, so the message there names the
+// row, and this is the structural backstop at the cast itself. ADR-0018 §10.
+func checkPageSize(colName string, n int) error {
+	if n > math.MaxInt32 {
+		return fmt.Errorf("column %q: page body is %d bytes, exceeds the %d-byte "+
+			"parquet page limit (int32 page-size header field)", colName, n, math.MaxInt32)
+	}
+	return nil
+}
+
 // writeDataPage emits one PLAIN data page covering pr. A single-page
 // chunk is byte-identical to the pre-split writer (chunk-level stats in
 // the page header included); multi-page chunks omit per-page stats — the
@@ -1266,12 +1283,18 @@ func (nw *NativeWriter) writeDataPage(lb *leafBuffer, pr pageRange, single bool)
 	pageBuf.Write(lb.pagePlainData(pr, single))
 
 	uncompressedData := pageBuf.Bytes()
+	if err := checkPageSize(lb.col.Name, len(uncompressedData)); err != nil {
+		return 0, 0, err
+	}
 	uncompressedSize := int32(len(uncompressedData))
 
 	// Compress.
 	compressedData, err := compressPage(uncompressedData, nw.codec)
 	if err != nil {
 		return 0, 0, fmt.Errorf("compressing page: %w", err)
+	}
+	if err := checkPageSize(lb.col.Name, len(compressedData)); err != nil {
+		return 0, 0, err
 	}
 	compressedSize := int32(len(compressedData))
 
@@ -1635,6 +1658,14 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) er
 	}
 	if err != nil {
 		return err
+	}
+	// A single BYTE_ARRAY/FLBA/VECTOR value in the 2GB-4GB range (its own
+	// length prefix is uint32) alone overflows a page's int32 size field. Refuse
+	// it HERE, where the caller still names the column and the row, rather than
+	// let it reach checkPageSize with only the page to point at (#929).
+	if len(raw) > math.MaxInt32 {
+		return fmt.Errorf("value is %d bytes, exceeds the %d-byte parquet page limit",
+			len(raw), math.MaxInt32)
 	}
 
 	lb.defLevels = append(lb.defLevels, defLevel)
