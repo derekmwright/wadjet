@@ -399,7 +399,7 @@ SHOW COLUMNS FROM flow_logs
 ```
 
 With auth enabled, `DESCRIBE` follows the same decision that governs *reading*
-the table: an identity that may not read `flow_logs` is refused `42501`
+the table: an identity that may not read the table is refused `42501`
 (HTTP 403) and learns nothing about its columns. `SHOW TABLES` likewise lists
 only the tables the calling identity may read; it is never a refusal, and the
 list may be empty. Explicit ABAC denies apply. This is deliberately unlike

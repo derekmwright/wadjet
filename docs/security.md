@@ -490,9 +490,12 @@ Notes an operator needs:
   where the filesystem is writable by untrusted users.
 - A glob is matched as the **pattern the caller wrote** (`/srv/exports/*.csv`),
   not as the files it expands to. A rule that must allow globs has to say so.
-- An allow rule with **no** `resources:` conditions matches every resource,
-  table functions included. Scope your rules with `resource.type` — the rules
-  `MigrateRBACToABAC` emits already do.
+- **Grant the capability with a rule that NAMES it.** A rule that scopes
+  nothing, or scopes only `resource.name`, matches a table function by breadth
+  and hands out server-local file reads to a role you meant to limit to tables.
+  Every rule that grants the capability carries
+  `resource.type: table_function`, and every rule written for TABLES carries
+  `resource.type: table` — the rules `MigrateRBACToABAC` emits already do both.
 - `generate_series` and `unnest` open nothing and are never policed.
 - The refusal is `42501` / HTTP 403 and happens before the file is opened or
   the request is sent, in every position a table function can appear: a CTE, a

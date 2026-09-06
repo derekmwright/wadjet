@@ -192,7 +192,24 @@ func TestTableFunctionsAreACapabilityOnEveryDoor(t *testing.T) {
 		}
 	}
 
-	// An identity holding `admin` keeps today's behaviour on every door.
+	// The capability is held by a rule that NAMES it, never by breadth. Two
+	// identities that hold permissions and are granted every RELATION are
+	// refused it: `writer` (holds `write`) and `namedadmin` — the role
+	// literally called `admin`, which holds only `read`. Before the rig's
+	// rules were scoped, all three of these were granted the capability by
+	// rules written for tables, and the `ops` cell below passed for the wrong
+	// reason (P1).
+	for _, d := range doors {
+		for _, key := range []string{sec4Writer, sec4NamedAdmin} {
+			_, class, err := d.run(t, key, fmt.Sprintf("SELECT * FROM read_csv('%s')", real))
+			sec4Refused(t, d, "read_csv/"+key+" (permissions but no capability rule)",
+				class, err, "42501")
+		}
+	}
+
+	// An identity holding `admin` keeps today's behaviour on every door —
+	// through the `ops-table-functions` rule, which is the only rule in the
+	// fixture that names the capability. Delete that rule and this fails.
 	for _, d := range doors {
 		rows, _, err := d.run(t, sec4Ops, fmt.Sprintf("SELECT * FROM read_csv('%s')", real))
 		if err != nil {

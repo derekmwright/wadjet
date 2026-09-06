@@ -53,32 +53,50 @@ const (
 // sec4Provider builds the provider with an ABAC evaluator installed. The
 // reader's rule is SCOPED to `users`, so `secret` is default-denied for it,
 // which is what separates the metadata doors from the data door.
+//
+// Every RELATION rule carries `resource.type eq table` and the table-function
+// capability is a rule of its own, granted to `ops` alone. That is not
+// decoration: a rule with no resource condition matches by BREADTH, so an
+// unscoped `ops-all` would have granted `read_csv` without the evaluator ever
+// consulting `HasPermission` — the census's "an admin keeps today's behaviour"
+// cell would have passed for the wrong reason, and `namedadmin` (the identity
+// this fixture exists to prove is NOT an administrator) would have held the
+// capability while allowing only `read`.
 func sec4Provider(t *testing.T) *auth.Provider {
 	t.Helper()
+	relation := func(id, role string, actions []auth.Action, extra ...auth.Condition) auth.PolicyRule {
+		res := append([]auth.Condition{
+			{Attribute: "resource.type", Op: "eq", Value: auth.ResourceTable},
+		}, extra...)
+		return auth.PolicyRule{
+			ID: id, EffectStr: "allow", Priority: 10,
+			Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: role}},
+			Resources: res,
+			Actions:   actions,
+		}
+	}
 	evaluator := auth.NewPolicyEvaluator([]auth.AccessControlPolicy{{
 		Name: "sec4", Version: 1, Enabled: true,
 		Rules: []auth.PolicyRule{
+			relation("reader-users", "reader", []auth.Action{auth.ActionRead},
+				auth.Condition{Attribute: "resource.name", Op: "eq", Value: "users"}),
+			relation("writer-all", "writer",
+				[]auth.Action{auth.ActionRead, auth.ActionWrite}),
+			relation("ops-all", "ops",
+				[]auth.Action{auth.ActionRead, auth.ActionWrite, auth.ActionAdmin,
+					auth.ActionCreate, auth.ActionDrop, auth.ActionDescribe}),
+			// The role literally NAMED `admin`, holding only `read`. It gets
+			// relations and NOT the capability — the whole point of the
+			// identity.
+			relation("namedadmin-read", "admin", []auth.Action{auth.ActionRead}),
 			{
-				ID: "reader-users", EffectStr: "allow", Priority: 10,
-				Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "reader"}},
-				Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: "users"}},
-				Actions:   []auth.Action{auth.ActionRead},
-			},
-			{
-				ID: "writer-all", EffectStr: "allow", Priority: 10,
-				Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "writer"}},
-				Actions:  []auth.Action{auth.ActionRead, auth.ActionWrite},
-			},
-			{
-				ID: "ops-all", EffectStr: "allow", Priority: 10,
+				// The capability, to `ops` alone, by a rule that NAMES it.
+				ID: "ops-table-functions", EffectStr: "allow", Priority: 10,
 				Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "ops"}},
-				Actions: []auth.Action{auth.ActionRead, auth.ActionWrite, auth.ActionAdmin,
-					auth.ActionCreate, auth.ActionDrop, auth.ActionDescribe},
-			},
-			{
-				ID: "namedadmin-read", EffectStr: "allow", Priority: 10,
-				Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "admin"}},
-				Actions:  []auth.Action{auth.ActionRead},
+				Resources: []auth.Condition{
+					{Attribute: "resource.type", Op: "eq", Value: auth.ResourceTableFunction},
+				},
+				Actions: []auth.Action{auth.ActionRead},
 			},
 		},
 	}})
