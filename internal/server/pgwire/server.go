@@ -2112,6 +2112,13 @@ func (c *pgConn) claimsSystemRelations(refs []string) bool {
 	}
 	// A real table wins over the reserved-prefix rule: this layer must never
 	// swallow a query the engine can actually answer.
+	//
+	// Deliberately the UNFILTERED list, unlike visibleCatalogTables, which is
+	// what every synthetic ROW is built from: this is a name-existence check
+	// that decides which layer answers, not a row source. Filtering it would
+	// route a denied table named `pg_something` into the synthetic layer,
+	// which would answer catalog rows about it instead of letting the engine
+	// refuse the read — a weaker answer, not a stronger one.
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	tables, err := c.db.ListTables(ctx)
@@ -2584,6 +2591,30 @@ func pgTypeOID(typeName string) int {
 	}
 }
 
+// visibleCatalogTables is the relation set every synthetic catalog view is
+// built from, filtered to the ones this identity may READ.
+//
+// It is ONE filter at the source rather than one per view, and that is the
+// point: `pg_class`, `pg_tables`, `pg_attribute`, `information_schema.tables`
+// and `information_schema.columns` all render from the same list, so a view
+// that hid `pg_class` and not `pg_attribute` would leave `\d` — which joins
+// them — still answering. `psql`'s `\d`, DataGrip's tree and every BI tool's
+// schema discovery come through exactly this route, so it is the door on
+// which "metadata follows the effective table decision" (ADR-0034) is worth
+// most: before this, `SELECT relname FROM pg_catalog.pg_class WHERE
+// relname='secret'` answered `secret` to an identity whose policy denies it,
+// and the pg_attribute join handed over its column names and types.
+//
+// Provider nil / auth disabled: `auth.VisibleTables` returns the list
+// unchanged, so nothing changes for the embedded and dev paths.
+func (c *pgConn) visibleCatalogTables(ctx context.Context) ([]string, error) {
+	tables, err := c.db.ListTables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return auth.VisibleTables(ctx, c.authProvider, tables), nil
+}
+
 // matchCatalogQuery returns real catalog data for specific pg_catalog queries
 // that SQLAlchemy/Superset uses for schema introspection. sql is the statement
 // being answered; normalized is its uppercased, whitespace-collapsed form.
@@ -2631,7 +2662,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	// pg_tables — the user-facing table listing (SELECT * FROM pg_tables).
 	// An empty answer while tables exist is a wrong answer (#305 item 6).
 	if subject == "PG_TABLES" {
-		tables, err := c.db.ListTables(ctx)
+		tables, err := c.visibleCatalogTables(ctx)
 		if err != nil {
 			return nil
 		}
@@ -2710,7 +2741,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	// one column and sent one, which is how DataGrip's table tree came back
 	// without the kind it uses to tell a table from a view.
 	if subject == "PG_CLASS" && strings.Contains(normalized, "RELNAME") {
-		tables, err := c.db.ListTables(ctx)
+		tables, err := c.visibleCatalogTables(ctx)
 		if err != nil {
 			return nil
 		}
@@ -2745,7 +2776,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 
 // matchAttributeQuery returns column metadata from our catalog for pg_attribute queries.
 func (c *pgConn) matchAttributeQuery(ctx context.Context, sql, normalized string) *synthAnswer {
-	tables, err := c.db.ListTables(ctx)
+	tables, err := c.visibleCatalogTables(ctx)
 	if err != nil || len(tables) == 0 {
 		return nil
 	}
@@ -3004,7 +3035,7 @@ func (c *pgConn) matchPgType(sql, normalized string) *synthAnswer {
 // client's own SELECT list (getTables() asks for its columns by name and
 // label; a fixed vocabulary answered a different shape — #305 item 2).
 func (c *pgConn) matchInfoSchemaTables(ctx context.Context, sql string) *synthAnswer {
-	tables, err := c.db.ListTables(ctx)
+	tables, err := c.visibleCatalogTables(ctx)
 	if err != nil {
 		return nil
 	}
@@ -3032,7 +3063,7 @@ func (c *pgConn) matchInfoSchemaTables(ctx context.Context, sql string) *synthAn
 // the client's own SELECT list (#305 item 2), scoped to the table its WHERE
 // names.
 func (c *pgConn) matchInfoSchemaColumns(ctx context.Context, sql, normalized string) *synthAnswer {
-	tables, err := c.db.ListTables(ctx)
+	tables, err := c.visibleCatalogTables(ctx)
 	if err != nil {
 		return nil
 	}

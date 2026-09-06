@@ -906,6 +906,19 @@ The check belongs to the operation, not to the door: the query endpoints on the
 same HTTP mux accept ordinary identities, so no authentication middleware
 could carry it.
 
+### The PostgreSQL catalog views follow the same decision
+
+`pg_catalog.pg_class`, `pg_catalog.pg_attribute`, `pg_tables`,
+`information_schema.tables` and `information_schema.columns` are rendered from
+the relations the connected identity may read. A relation its policy denies is
+absent from all of them, so `psql`'s `\d`, a BI tool's schema tree and a
+driver's `DatabaseMetaData` discovery see what the data path would let that
+identity read, and nothing else.
+
+The filter is applied once, to the relation set the views are built from, not
+per view: `\d` joins `pg_class` and `pg_attribute`, so hiding one and not the
+other would hide nothing.
+
 ### A query belongs to the identity that submitted it
 
 Every query records its submitting principal, immutably, at the moment it is
