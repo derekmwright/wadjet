@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -134,7 +135,7 @@ func (g *GRPCServer) Query(ctx context.Context, req *wadjetv1.QueryRequest) (*wa
 	if g.coord != nil {
 		result, err := g.coord.ExecuteSQL(ctx, req.Sql)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "query error: %v", err)
+			return nil, grpcQueryError(err)
 		}
 		rows, rowsErr := result.Rows()
 		if rowsErr != nil {
@@ -155,7 +156,7 @@ func (g *GRPCServer) Query(ctx context.Context, req *wadjetv1.QueryRequest) (*wa
 	if g.db != nil {
 		result, err := g.db.Query(ctx, req.Sql)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "query error: %v", err)
+			return nil, grpcQueryError(err)
 		}
 		return &wadjetv1.QueryResponse{
 			Columns: result.Columns,
@@ -181,7 +182,7 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 	if g.coord != nil {
 		result, err := g.coord.ExecuteSQL(stream.Context(), req.Sql)
 		if err != nil {
-			return status.Errorf(codes.Internal, "query error: %v", err)
+			return grpcQueryError(err)
 		}
 		cs := &chunkStreamer{
 			stream:  stream,
@@ -198,7 +199,7 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 	if g.db != nil {
 		result, err := g.db.Query(stream.Context(), req.Sql)
 		if err != nil {
-			return status.Errorf(codes.Internal, "query error: %v", err)
+			return grpcQueryError(err)
 		}
 		// Legacy embedded path: db.Query returns pre-boxed rows, so the
 		// full materialization already happened inside it — chunk as-is.
@@ -533,6 +534,34 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 	}
 
 	return &wadjetv1.CreateTableResponse{Name: req.Name}, nil
+}
+
+// grpcQueryError maps an engine error onto this door's status code.
+//
+// An authorization refusal is codes.PermissionDenied, not codes.Internal. Both
+// SQL RPCs wrapped EVERY engine error as Internal, so a reader whose DELETE was
+// refused with SQLSTATE 42501 before a single row was touched was told the
+// server had failed — a client cannot tell "you may not do that" from "we
+// broke", retries the second and gives up on the first, and an operator reading
+// the code alone sees an outage where there is a working control. The other
+// doors carry the class: HTTP 403, pgwire 42501 (SECURITY ADDENDUM 6).
+//
+// It branches on the CLASS the error CARRIES — the SQLSTATE 42501 that
+// auth.EnforceDMLPolicies / auth.TableAccess attach, or auth.ErrUnauthorized
+// that auth.RequirePermission wraps — never on message text. A door that
+// pattern-matched sentences would silently reopen the day a message is
+// reworded, and would be a second copy of the decision besides.
+//
+// One refusal does NOT reach this yet: a SELECT denied at the table level
+// returns a plain error from internal/auth/plan_enforce.go, with no class on
+// any door, so it still crosses as Internal here. Attaching 42501 there is an
+// internal/auth change (it moves pgwire's SQLSTATE too); when it lands this
+// mapping needs no edit.
+func grpcQueryError(err error) error {
+	if sqlerr.StateOf(err) == "42501" || errors.Is(err, auth.ErrUnauthorized) {
+		return status.Error(codes.PermissionDenied, err.Error())
+	}
+	return status.Errorf(codes.Internal, "query error: %v", err)
 }
 
 // grpcRequireWrite is this door's DDL authorization: the caller in ctx must

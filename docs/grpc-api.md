@@ -49,6 +49,7 @@ Authentication proves who the caller is; each RPC still checks what that identit
 | `CreateTable`, `DropTable` | the `write` permission (`allow: [write]` or `[admin]` on the caller's role) |
 | `ListTables` | nothing — but the listing contains only the tables the identity may read |
 | `DescribeTable` | read access to that table |
+| `Query`, `QueryStream` | whatever the statement needs: a policy refusal (SQLSTATE `42501`) is returned as `PERMISSION_DENIED`, not `INTERNAL` |
 
 The message names the missing permission and the identity, and it is the same sentence the HTTP API returns with 403 and the SQL doors return with SQLSTATE `42501` for the same refusal.
 
