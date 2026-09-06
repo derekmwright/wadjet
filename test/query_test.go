@@ -728,14 +728,15 @@ func TestABACRowFilterAtPlanLevel(t *testing.T) {
 		t.Fatalf("attaching the policy set: %v", err)
 	}
 
-	// Query WITHOUT identity — should see all rows
-	result, err := db.Query(ctx, "SELECT * FROM events")
-	if err != nil {
-		t.Fatal(err)
+	// Query WITHOUT identity — refused. With an attached, enabled provider an
+	// in-process caller must carry an identity (ADR-0034 item 7); it used to
+	// be served every row, which made the embedded door the one boundary that
+	// answered a caller the others refused.
+	if _, err := db.Query(ctx, "SELECT * FROM events"); err == nil {
+		t.Fatal("a query with no identity was served under an enabled provider")
 	}
-	if len(result.Rows) != 5 {
-		t.Fatalf("unauthenticated: expected 5 rows, got %d", len(result.Rows))
-	}
+
+	result := &wadjet.QueryResult{}
 
 	// Query WITH analyst identity — should only see 'click' rows
 	id, err := authn.AuthenticateToken("secret-key")

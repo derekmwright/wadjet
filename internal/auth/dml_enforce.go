@@ -56,7 +56,9 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 	}
 	identity := IdentityFromContext(ctx)
 	if identity == nil {
-		return nil
+		// The same refusal the read path makes: auth is enabled and nobody is
+		// here. See EnforcePlanPolicies.
+		return sqlerr.New("42501", "permission denied: authentication required")
 	}
 	table, alias := dmlTarget(parsed)
 	if table == "" {

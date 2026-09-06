@@ -57,7 +57,14 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	}
 	identity := IdentityFromContext(ctx)
 	if identity == nil {
-		return ctx, plan, nil
+		// Auth is ENABLED and nobody is here. This used to return the plan
+		// unchanged, so an embedded caller that attached a provider and then
+		// queried without stamping an identity could SELECT and INSERT while
+		// DESCRIBE, DDL and the shared table-access decision all refused it —
+		// one boundary giving two answers. A caller that runs under a provider
+		// stamps an identity (a scheduled alert does, through StampDefiner);
+		// one that has none is not authorized to read.
+		return ctx, plan, sqlerr.New("42501", "permission denied: authentication required")
 	}
 	evaluator := provider.Evaluator()
 	if evaluator == nil {

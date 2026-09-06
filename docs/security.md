@@ -571,8 +571,17 @@ An expression subquery (`(SELECT MAX(col) FROM t)`, an `IN` set, an `EXISTS`)
 is planned under the same policies as its enclosing statement.
 
 Admin roles are typically exempt from all policies (they see the raw data). An
-identity with no matching column obligations is unaffected, and an in-process
-embedded caller with no identity at all sees the raw table.
+identity with no matching column obligations is unaffected.
+
+**An enabled provider requires an identity, on every door including the
+embedded one.** With an auth provider attached and enabled, an in-process
+caller must carry one — stamp it with `auth.ContextWithIdentity`, as the
+network doors do after authenticating — or the query is refused with 42501
+`permission denied: authentication required`. Reads, writes, DDL, metadata and
+the table-access decision all answer that caller the same way. **With no
+provider attached, or with `auth.enabled: false`, nothing is enforced and
+nothing changes**: that is the embedded and development shape, and it is
+untouched.
 
 ### Distributed Enforcement
 

@@ -1239,10 +1239,15 @@ func TestPolicyMaskingIsPlanTimeOnEveryDoor(t *testing.T) {
 }
 
 // TestPolicyMaskingLeavesUnpolicedIdentitiesAlone is the other half of the
-// claim: an admin identity, and a connection with NO identity at all, keep
-// seeing the raw table. A masking layer that masks everybody is not
-// enforcement, and the no-identity behaviour is the historical contract
-// EnforcePlanPolicies documents.
+// claim: an ADMIN identity keeps seeing the raw table. A masking layer that
+// masks everybody is not enforcement.
+//
+// A caller with NO identity at all is now REFUSED rather than served the raw
+// table (ADR-0034 item 7). With an attached, enabled provider an in-process
+// caller must carry an identity; the network doors already refused an
+// unauthenticated request before any planning happened, and the embedded door
+// answering it was the one boundary that gave two answers — DESCRIBE and DDL
+// refused it while SELECT and INSERT did not.
 func TestPolicyMaskingLeavesUnpolicedIdentitiesAlone(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster and three servers")
@@ -1263,12 +1268,22 @@ func TestPolicyMaskingLeavesUnpolicedIdentitiesAlone(t *testing.T) {
 				// HTTP, 28P01 on pgwire — so "no identity" is a state only the
 				// in-process callers (the embedded API and the coordinator's
 				// ExecuteSQL, which are handed the context directly) can
-				// present. That is the historical contract
-				// EnforcePlanPolicies documents and this arc keeps.
+				// present.
 				continue
 			}
 			t.Run(who+"/"+door.name, func(t *testing.T) {
 				got, err := door.run(t, key, `SELECT ssn, acct, salary FROM e7emp WHERE id = 3`)
+				if key == "" {
+					// The in-process door with a provider attached and nobody
+					// in the context: refused, like every other boundary.
+					if err == nil {
+						t.Fatalf("%s: a caller with no identity was served %v", door.name, got.rows)
+					}
+					if !strings.Contains(err.Error(), "authentication required") {
+						t.Fatalf("%s: refusal %q does not name the missing identity", door.name, err)
+					}
+					return
+				}
 				if err != nil {
 					t.Fatalf("%s: %v", door.name, err)
 				}

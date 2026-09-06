@@ -101,12 +101,20 @@ than by a census.
 The SAME operation refuses with the SAME class on every door, and a door census
 is the gate that says so.
 
-**7. Fail closed on a missing identity.** With auth ENABLED, a context carrying
-no identity is refused at every boundary above. With auth DISABLED, or with no
-provider (dev, embedded without `SetAuthProvider`), nothing is enforced and
-NOTHING changes — every existing no-auth caller stays working. That second half
-is not a courtesy: a security change that breaks working deployments is
-reverted, and a reverted control protects nobody.
+**7. Fail closed on a missing identity — on the DATA paths too.** With auth
+ENABLED, a context carrying no identity is refused at every boundary: metadata,
+DDL, the shared table-access decision, AND the shared plan and DML paths. The
+last two used to return early and enforce nothing, so an embedded caller that
+attached a provider and then queried without stamping an identity could SELECT
+and INSERT while DESCRIBE and DDL refused it — one boundary, two answers. A
+caller that runs under a provider stamps an identity (a scheduled alert does,
+through `auth.StampDefiner`).
+
+With auth DISABLED, or with no provider (dev, embedded without
+`SetAuthProvider`), nothing is enforced and NOTHING changes — every existing
+no-auth caller stays working. That second half is not a courtesy: a security
+change that breaks working deployments is reverted, and a reverted control
+protects nobody.
 
 **8. The environment is the boundary's observation, never the caller's claim.**
 Each protocol door attaches a trusted `Environment` where the connection is —
@@ -215,16 +223,6 @@ landing.
   address, and policing the real client needs a trusted-proxy setting with a
   hop count — a configuration surface that is itself a security control, and
   one that is worse than useless if it is added carelessly.
-- **The nil-identity fail-open on the embedded door.** With a provider attached
-  and auth enabled, `EnforcePlanPolicies` and `EnforceDMLPolicies` still return
-  early when the context carries no identity. Every network door refuses such a
-  request before it reaches them, so the reachable shape is an embedded caller
-  that attached a provider and then queried without stamping an identity — the
-  documented embedded shape — and `auth.StampDefiner` deliberately depends on
-  that behaviour to route an unattributed alert into ABAC default-deny. Closing
-  it means deciding what an embedded caller with a provider and no identity IS,
-  which is a product question, and re-working the definer's-rights path around
-  the answer.
 
 ## Gates
 
@@ -239,7 +237,8 @@ landing.
   and still narrows one that holds the permission),
   `TestTheCoarseGateLetsAdminThrough`,
   `TestAnIdentityWithNoPermissionsIsRefusedBeforeThePolicy` — item 5's coarse
-  gate.
+  gate — and `TestAMissingIdentityIsRefusedOnTheDataPathsToo` for item 7, with
+  its control that a nil provider still enforces nothing.
 - `internal/auth/capability_scope_test.go` —
   `TestAnUnscopedAllowDoesNotGrantACapability` (the table it was written for is
   still allowed; the capability is refused),

@@ -484,24 +484,34 @@ func TestMCPQueryEnforcesABAC(t *testing.T) {
 		}
 	})
 
-	t.Run("without_identity_no_enforcement_context", func(t *testing.T) {
-		// Sanity anchor: enforcement is identity-driven. A server with no
-		// stamped identity (which mcpCmd only permits when no AuthProvider is
-		// configured) does not gain policy from the DB alone — proving the
-		// stamp in serve() is what carries security, so an unauthenticated
-		// network path could never inherit it by accident.
+	t.Run("without_identity_the_query_is_refused", func(t *testing.T) {
+		// Enforcement is identity-driven, and a server with no stamped
+		// identity against a DB that HAS a provider is now REFUSED rather
+		// than served the raw table (ADR-0034 item 7). It used to be served,
+		// which is why this subtest carried a warning to re-audit mcpCmd's
+		// guard if it ever started enforcing: that guard —
+		// `resolveMCPAuth`, which refuses to start when auth is enabled and
+		// no credential is supplied — is what makes this state unreachable
+		// from the command in the first place, and it still holds. The
+		// refusal here is the second lock.
 		srv := NewServer(db, nil)
-		cols, rowCount := queryRows(t, srv)
-		leaked := false
-		for _, c := range cols {
-			if c == "secret_col" {
-				leaked = true
-			}
+		in := &bytes.Buffer{}
+		sendRPC(t, in, "tools/call", callToolParams{
+			Name:      "query",
+			Arguments: map[string]any{"sql": "SELECT * FROM findings"},
+		}, 1)
+		out := runStdio(t, srv, in)
+		resp := readResponse(t, out)
+		data, _ := json.Marshal(resp.Result)
+		var result callToolResult
+		json.Unmarshal(data, &result)
+		text := ""
+		if len(result.Content) > 0 {
+			text = result.Content[0].Text
 		}
-		if !leaked || rowCount != 3 {
-			t.Fatalf("expected unenforced result (secret_col present, 3 rows); got cols=%v rows=%d — "+
-				"if this now enforces, the identity-driven invariant changed and mcpCmd's fail-closed guard must be re-audited",
-				cols, rowCount)
+		if resp.Error == nil && !result.IsError && !strings.Contains(text, "authentication required") {
+			t.Fatalf("a query with no stamped identity was served against a DB with an "+
+				"auth provider: %s", text)
 		}
 	})
 }
