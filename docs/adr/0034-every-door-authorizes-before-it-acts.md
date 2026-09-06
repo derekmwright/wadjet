@@ -2,7 +2,7 @@
 
 Status: Accepted
 Date: 2026-09-06
-Issues: #930 #931 #932 #933 (SEC1); the SEC2/SEC3/SEC4 door arcs of the same batch
+Issues: #930 #931 #932 #933 (the authentication and policy core); #934 #935 (gRPC); #936 #937 #938 (HTTP and pgwire doors); #939 #940 #941 #942 #943 (the embedded API and SQL statement door)
 
 ## Context
 
@@ -192,10 +192,135 @@ operational endpoints, purges, and overriding a resource another identity owns.
 
 ## Where the decision is asked
 
-Filled for SEC1. The other three arcs' rows arrive from the coordinator at
-landing.
+The rows below cover every door the batch settled: the authentication and
+policy core first, then each protocol door.
 
-<!-- COORDINATOR: fold in the SEC2 / SEC3 / SEC4 rows here at landing. -->
+
+### The gRPC door
+
+The gRPC service authorizes **per method**, explicitly, in the method body. The interceptor stays authentication-only: it proves who the caller is and stamps the identity, and decides nothing else. A method-name allowlist inside the interceptor was rejected — it would be a second place the rule lives, and it cannot be enumerated by the door census, which is what makes the per-method rule checkable.
+
+| operation | decision asked | refusal |
+|---|---|---|
+| `CreateTable` | `auth.RequirePermission(provider, ctx, "write")` | `codes.PermissionDenied`, before request validation and before the catalog |
+| `DropTable` | `RequirePermission(…, "write")` **and** `auth.TableAccess(ctx, provider, ResolveTableName(name), ActionWrite)` | `codes.PermissionDenied`, before the catalog and before `if_exists` |
+| `DescribeTable` | `auth.TableAccess(…, ActionRead)` | `codes.PermissionDenied`, before the catalog read |
+| `ListTables` | `auth.VisibleTables(ctx, provider, names)` | not a refusal: the name is absent from the listing |
+| `Query`, `QueryStream` | the plan/DML enforcement inside the engine | `codes.PermissionDenied` whenever the refusal carries SQLSTATE 42501 or wraps `auth.ErrUnauthorized`, on the reject paths **and** the result-drain paths |
+| health `Check` | none, by design | — |
+
+**DDL asks two questions, and which two depends on whether the relation exists.** A mutation needs the `write` PERMISSION; a mutation of an EXISTING relation additionally needs write access to THAT RELATION. `DropTable` asks both — otherwise an identity the evaluator refuses to show one column of can destroy every row of it, the narrowest operation refused while the widest succeeds. `CreateTable` asks only the permission: the name does not resolve to a relation, so a table-scoped rule has nothing to match. PostgreSQL draws the same line.
+
+**Code mapping.** Authentication failures are `codes.Unauthenticated` (the interceptor, before any method body). Authorization refusals are `codes.PermissionDenied`. `codes.Internal` is reserved for execution and storage failures; the door maps on the CLASS the error carries (SQLSTATE 42501, or a wrapped `auth.ErrUnauthorized`), never on message text — matching sentences would silently reopen when a message is reworded, and would be a second copy of the decision. The mapping covers the drain paths as well as the reject paths, so *where* a refusal surfaces does not change what it is called.
+
+**Message text.** The refusal carries the shared decision's own message: `RequirePermission`'s (naming permission, identity and role) for the DDL permission check, and `TableAccess`'s `permission denied for table "x"` for the table decision, metadata and data. Naming the table is not a disclosure: the data door already names it in 42501.
+
+**Fail-closed on a missing identity.** With auth enabled the interceptor refuses a credential-less call before any method runs, so the nil-identity arm of `RequirePermission`/`TableAccess` is a second floor rather than the first. With no provider, or auth disabled, nothing is enforced and the door behaves exactly as it did.
+
+**PostgreSQL divergence (ADR-0012 list).** `ListTables` and `DescribeTable` follow the effective table-access decision. PostgreSQL does not: `\d` and the `pg_catalog` views show every relation to every user, and only the DATA is protected. Wadjet's position is that metadata follows the data decision — object names, column names and partition design are an exact target map for a lower-privilege caller — and the HTTP door already behaved this way. Deliberate; applies to `SHOW TABLES` / `DESCRIBE` on every door.
+
+**Not settled by this section.**
+- Query submission, status and cancellation (`SubmitQuery`, `GetQueryStatus`, `CancelQuery`) — query ownership, in "The HTTP and PostgreSQL wire doors" below.
+- **Metadata follows `ActionRead`, so a WRITE-ONLY role sees no metadata.** `allow: [write]` with no `read` gets an empty `ListTables` and a `PermissionDenied` `DescribeTable` on gRPC, while the HTTP door still answers for the same identity until it moves to the shared helper. Whether a role that may write a table should see its schema is open.
+- DDL sent as SQL text through `Query` takes the engine's statement path, not this table (#939).
+
+---
+
+### The HTTP and PostgreSQL wire doors
+
+#### The HTTP door
+
+| operation | route | who may | refusal |
+|---|---|---|---|
+| run a query | POST /v1/queries, POST /v1/queries/async | any authenticated identity, subject to the table decision per relation | 403 |
+| query status / results | GET /v1/queries/{id}, .../results | the query's OWNER, or admin | 403 permission denied: query "<id>" belongs to another principal |
+| cancel a query | DELETE /v1/queries/{id} | owner or admin | 403, and the query keeps running |
+| list queries | GET /v1/queries | the caller's own; every USER query for admin; internal stage entries never | — |
+| delete a query's result files | DELETE /v1/results/{id} | owner or admin (an ID the tracker no longer holds: admin) | 403 |
+| purge stale results | POST /v1/results/cleanup | admin | 403 unauthorized: "admin" permission required ... |
+| read / purge the DLQ | GET/DELETE /v1/dlq, GET /v1/dlq/{id} | admin | 403, same text, and the check precedes the "no DLQ configured" shortcut |
+| list workers | GET /v1/workers | admin | 403 |
+| runtime config, keys, roles, policies, tuning | /v1/admin/... | admin | 403 |
+| list tables | GET /v1/tables | auth.VisibleTables — the effective table decision, per name | the name is absent, not refused |
+| describe a table | GET /v1/tables/{name} | auth.TableAccess(ActionRead) on the CATALOG-RESOLVED name | 403 permission denied for table "x" |
+| SHOW TABLES / DESCRIBE | POST /v1/queries | the same two decisions (#941) | as above |
+| run a SELECT on a denied relation | POST /v1/queries | the table decision, per base relation | 403 permission denied for table "x" — the decision's own text, not a door-local wording |
+| CREATE TABLE | POST /v1/tables, CREATE TABLE | write permission | 403 unauthorized: "write" permission required ... |
+| DROP / ANALYZE an existing table | DELETE /v1/tables/{name}, DROP TABLE, ANALYZE TABLE | write permission AND auth.TableAccess(ActionWrite) on the resolved name | 403 |
+| liveness | GET /v1/health | anyone, no credential (a liveness probe has none) | — |
+| profiling | /debug/pprof/* | admin | 403 (401 without a credential) |
+| Prometheus scrape | /metrics | NOT SETTLED: any authenticated identity, as before this batch | 401 without a credential |
+
+#### The pgwire door
+
+| operation | who may | refusal |
+|---|---|---|
+| COPY ... FROM STDIN | auth.TableAccess(ActionWrite) on the resolved table AND the identity's column policy over the COPY column list (INSERT's rule, auth.EnforceDMLPolicies) | SQLSTATE 42501 permission denied for table "x" (or 42703 for a denied column), sent INSTEAD of CopyInResponse; no row is consumed, the ingester is never constructed, the connection stays in the message loop |
+| is_superuser ParameterStatus | reports HasPermission(identity, "admin") | — (with no provider the session is unrestricted and it stays on) |
+
+#### The positions these rows encode
+
+1. Authorization is per OPERATION, never per door. The query endpoints on the
+   HTTP mux accept ordinary identities, so authentication middleware can never
+   be the place an operational permission is checked. The comment claiming
+   otherwise (handleDeleteResults) was the whole of #937's defense.
+2. A resource created under an identity is OWNED by it. A query's status, SQL,
+   results, cancellation and result files are the submitter's and an
+   administrator's. An entry with no recorded owner is the administrator's:
+   nobody can claim what nobody owns. Listings are filtered by the same rule
+   that governs reading one entry, because a listing publishes what reading one
+   publishes.
+3. A handle is not a capability. Query IDs are full UUIDs; the eight-hex prefix
+   was 32 bits, guessable by an identity that may run queries.
+4. The refusal has one class and one text per operation. HTTP 403 body == gRPC
+   PermissionDenied message == pgwire 42501 message. A refusal is never a 404:
+   the data door already names the table it refuses, and hiding one resource
+   behind "not found" while naming another is two answers to one question.
+5. Metadata follows the effective table decision — a deliberate divergence from
+   PostgreSQL, which shows \d to anyone (ADR-0012's divergence list). The HTTP
+   door already behaved this way under the legacy role rule; it now asks the
+   shared decision, so an ABAC deny governs it too.
+6. DDL on an EXISTING relation asks the table decision, not only the
+   permission. `write` says the identity may write something;
+   TableAccess(..., ActionWrite) says it may write THIS. CREATE is
+   permission-only, because minting a name decides nothing about an existing
+   relation — PostgreSQL treats CREATE as a schema privilege for the same
+   reason.
+
+#### PostgreSQL divergences recorded (for ADR-0012's list)
+
+- Metadata visibility follows the table-access decision: SHOW TABLES /
+  GET /v1/tables omit a relation the identity may not read, and DESCRIBE /
+  GET /v1/tables/{name} refuse 42501 where PostgreSQL's \d answers anyone.
+  Deliberate.
+- COPY ... FROM STDIN refuses 42501 before CopyInResponse; PostgreSQL refuses
+  with 42501 too — same class, same point in the protocol.
+- is_superuser reports a permission, not a role name. PostgreSQL reports
+  rolsuper; the analogue here is the admin permission.
+
+### The embedded API and the SQL statement door
+
+**The embedded API and the PostgreSQL wire protocol are one door.** `wadjet.DB.Query`'s statement switch is not an implementation detail of the embedded API: pgwire's non-SELECT path *is* that call with the connection's identity on the context, and the standalone gRPC `Query` RPC reaches it too. Every decision for a statement that switch dispatches belongs in its handlers, not in a frontend — before this batch the HTTP door alone checked DDL and metadata, so the product's own rule held on one door out of four.
+
+| operation | permission | additional decision | refusal |
+|---|---|---|---|
+| `CREATE TABLE` | `write` | — (no relation yet; PG treats CREATE as a schema privilege) | 42501 / 403 |
+| `DROP TABLE`, `ANALYZE` | `write` | `TableAccess(ActionWrite)` on the relation | 42501 / 403 |
+| `CREATE`/`DROP FUNCTION` | `write` | `admin` to override another owner's `WITH LOCK` | 42501 / 403 |
+| `SHOW FUNCTIONS` | — | an authenticated identity | 42501 / 403 |
+| `DESCRIBE`, `SHOW COLUMNS FROM` | — | `TableAccess(ActionRead)` | 42501 / 403 |
+| `SHOW TABLES` | — | `VisibleTables` filters the listing | never a refusal |
+| a table function in `FROM` | — | the `table_function` capability | 42501 / 403 |
+| `CREATE`/`DROP`/`ALTER ALERT` | `admin` | — | 42501 / 403 |
+
+With auth enabled a context carrying no identity is refused at every row; with no provider nothing is enforced and nothing changes.
+
+**UDF ownership.** `expr.DefaultUDFs` is process-global — replacing a function changes what other identities' queries mean. `WITH LOCK` records the creating identity; only that owner or an identity holding `admin` may replace or drop it. Administrator status comes from `Authorizer.HasPermission(id, "admin")`, never from the role's NAME: both directions were wrong before (a role named `admin` with only `read` overrode a lock; a role named `ops` holding `admin` was refused), and `DB.Query` was worse still, passing a literal `isAdmin = true` so the lock did not exist on its doors. `DROP FUNCTION IF EXISTS` forgives an ABSENT function (42883) and never one that is present and locked by somebody else — "does not exist (no-op)" there is a lie about the registry that also hides the refusal. `SHOW FUNCTIONS` stays readable by any authenticated identity; **PG-consistent**, verified on the oracle server where a role with no privileges reads `pg_proc.prosrc` and prints the definition with `\sf`.
+
+**A table function is a capability, and an external read is not a relation.** `read_csv`, `read_json`, `read_parquet`, `postgres_scan`, `postgres_query`, `mysql_scan`, `mysql_query` read what the catalog does not hold. `PolicedScanTables` and `StatementBaseTables` both skip a function scan — correctly, since a column policy binds to a relation's schema — and the consequence was that such a scan was not a resource of ANY kind. It is one now: `Resource{Type:"table_function", Name:"<func>", Attributes:{path (~/-expanded, Clean'd), url, host, arg_<k>}}` evaluated with `ActionRead`; the connection string is never an attribute because it carries a password. Default DENY under auth (deny-overrides' closed world doing its job), `admin` under legacy roles, unchanged with auth disabled. Enforcement is in two places and both are load-bearing: the plan-time pass so a denial opens no file and sends no request, and the context guard `physical.buildScan` asks, which covers the scalar/`IN`/`EXISTS` subquery and CTE body that are SQL *text* when the statement's plan is enforced. **PG divergence and precedent**: PostgreSQL has no analogue, but its equivalent primitives are privileged — an ordinary role gets `42501 permission denied for function pg_read_file`, and `COPY … FROM PROGRAM` answers `42501 permission denied to COPY to or from an external program` (only `pg_execute_server_program`). Server-side file and program access being a privilege is PostgreSQL's own position.
+
+**Metadata follows the effective table decision — a deliberate PG divergence.** `DESCRIBE`, `SHOW COLUMNS FROM` and `SHOW TABLES` ask what the data door asks: `TableAccess` for a named relation, `VisibleTables` for a listing, on the catalog-resolved spelling so a policy bound to `Ledger` polices `DESCRIBE ledger`. Explicit ABAC denies govern, which legacy `CanAccessTable`/`FilterTables` cannot express (`tables:["*"]` says yes to everything). **PostgreSQL says otherwise and we diverge on purpose** — measured: `\d` and `\dt` as a role with no privileges print the full column list and all 95 tables. Metadata visibility is a product decision, not a wire-compatibility one; an entry in ADR-0012's divergence list. **Not covered, recorded rather than implied**: a client introspecting through `pg_catalog` is answered by `internal/server/pgwire/catalog_rows.go`, which is not filtered.
+
 
 | door | operation | decision asked | refusal |
 |---|---|---|---|
@@ -308,3 +433,5 @@ landing.
 - `internal/auth/attach_sites_test.go` (ADR-0033) stays the source census: a
   provider reaches a catalog through the binding function and through nothing
   else.
+
+
