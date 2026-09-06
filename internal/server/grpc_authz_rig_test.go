@@ -11,6 +11,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
@@ -47,6 +49,7 @@ const (
 
 type grpcAuthzRig struct {
 	client   wadjetv1.WadjetServiceClient
+	health   healthpb.HealthClient
 	cat      *catalog.Catalog
 	provider *auth.Provider
 }
@@ -126,6 +129,12 @@ func grpcAuthzUp(t *testing.T, shape string, cfg auth.Config, extraABAC ...auth.
 		grpc.StreamInterceptor(srv.streamAuthInterceptor()),
 	)
 	wadjetv1.RegisterWadjetServiceServer(srv.server, srv)
+	// The health service too, exactly as Start() registers it: the census has
+	// to be able to call the one method that bypasses authentication by
+	// design, or "health is exempt" would be an untested claim.
+	hs := health.NewServer()
+	healthpb.RegisterHealthServer(srv.server, hs)
+	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	go func() { _ = srv.server.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -139,7 +148,12 @@ func grpcAuthzUp(t *testing.T, shape string, cfg auth.Config, extraABAC ...auth.
 	}
 	t.Cleanup(func() { conn.Close(); srv.server.GracefulStop() })
 
-	return grpcAuthzRig{client: wadjetv1.NewWadjetServiceClient(conn), cat: cat, provider: provider}
+	return grpcAuthzRig{
+		client:   wadjetv1.NewWadjetServiceClient(conn),
+		health:   healthpb.NewHealthClient(conn),
+		cat:      cat,
+		provider: provider,
+	}
 }
 
 // grpcAuthzCtx is a client context carrying the API key as a bearer token, the
