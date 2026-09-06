@@ -256,22 +256,37 @@ func TestADeniedSelectDisclosesNoRuleID(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 
-	_, qerr := conn.Exec(ctx, "SELECT id FROM "+pmTable)
-	if qerr == nil {
-		t.Fatal("the denied SELECT was served")
-	}
-	var pgErr *pgconn.PgError
-	if !errors.As(qerr, &pgErr) {
-		t.Fatalf("refusal is not a PostgreSQL error: %v", qerr)
-	}
-	want := fmt.Sprintf("permission denied for table %q", pmTable)
-	if pgErr.Message != want {
-		t.Errorf("message = %q, want exactly %q", pgErr.Message, want)
-	}
-	for _, leak := range []string{"secret-internal-rule-name", "denied by rule",
-		"an operator note"} {
-		if strings.Contains(pgErr.Message, leak) {
-			t.Errorf("refusal discloses %q: %s", leak, pgErr.Message)
+	// Two refusal SITES, and both must say the same thing. The first is the
+	// loop over the relations the plan names. The second is the resolver's
+	// late `lookup`, which every pass that meets a scan the resolved set never
+	// saw asks — a relation reached through an `IN` or `EXISTS` subquery
+	// arrives there, not through the loop. Only the loop was gated, so
+	// restoring the rule id in `lookup` alone passed the whole arc.
+	for _, sql := range []string{
+		"SELECT id FROM " + pmTable,
+		"SELECT id FROM " + pmOther + " WHERE id IN (SELECT id FROM " + pmTable + ")",
+		"SELECT id FROM " + pmOther + " WHERE EXISTS (SELECT 1 FROM " + pmTable +
+			" WHERE " + pmTable + ".id = " + pmOther + ".id)",
+	} {
+		_, qerr := conn.Exec(ctx, sql)
+		if qerr == nil {
+			t.Errorf("the denied relation was served: %s", sql)
+			continue
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(qerr, &pgErr) {
+			t.Errorf("%s: refusal is not a PostgreSQL error: %v", sql, qerr)
+			continue
+		}
+		want := fmt.Sprintf("permission denied for table %q", pmTable)
+		if pgErr.Message != want {
+			t.Errorf("%s: message = %q, want exactly %q", sql, pgErr.Message, want)
+		}
+		for _, leak := range []string{"secret-internal-rule-name", "denied by rule",
+			"an operator note"} {
+			if strings.Contains(pgErr.Message, leak) {
+				t.Errorf("%s: refusal discloses %q: %s", sql, leak, pgErr.Message)
+			}
 		}
 	}
 }
