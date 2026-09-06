@@ -971,12 +971,17 @@ func (s *Server) getEvaluator() *auth.PolicyEvaluator {
 func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
 	tableName := parsed.Describe.TableName
 
-	// Check table access
-	if identity := auth.IdentityFromContext(r.Context()); identity != nil {
-		if authz := s.getAuthz(); authz != nil && !authz.CanAccessTable(identity, tableName) {
-			writeError(w, http.StatusForbidden, fmt.Sprintf("access denied to table %q", tableName))
-			return
-		}
+	// The SHARED table-access decision, not this door's own reading of it.
+	// `CanAccessTable` is the legacy ROLE rule alone: with `tables: ["*"]` it
+	// says yes to everything, so an explicit ABAC deny — which takes
+	// precedence over the role's table list everywhere else — did not hide the
+	// schema here (#941). `auth.TableAccess` asks the evaluator when one is
+	// installed and the legacy rule when one is not, on the catalog-resolved
+	// spelling, and refuses a missing identity under auth enabled.
+	if err := auth.TableAccess(r.Context(), s.provider,
+		s.catalog.ResolveTableName(tableName), auth.ActionRead); err != nil {
+		writeSQLError(w, http.StatusForbidden, err.Error(), err)
+		return
 	}
 
 	table, err := s.catalog.GetTable(r.Context(), tableName)
@@ -1261,12 +1266,11 @@ func (s *Server) handleShowTables(w http.ResponseWriter, r *http.Request, start 
 		return
 	}
 
-	// Filter by role access
-	if identity := auth.IdentityFromContext(r.Context()); identity != nil {
-		if authz := s.getAuthz(); authz != nil {
-			tables = authz.FilterTables(identity, tables)
-		}
-	}
+	// The SHARED listing filter. `FilterTables` is the legacy role rule alone
+	// and returns EVERYTHING for a role whose `tables:` list is `["*"]`, so an
+	// explicit ABAC deny did not remove the name from the listing even though
+	// the same policy refuses the table itself (#941).
+	tables = auth.VisibleTables(r.Context(), s.provider, tables)
 
 	rows := make([]map[string]any, len(tables))
 	for i, t := range tables {

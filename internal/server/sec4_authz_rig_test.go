@@ -159,7 +159,14 @@ type sec4Rig struct {
 // real HTTP mux over its catalog, all sharing one provider.
 func sec4NewRig(t *testing.T, ctx context.Context) *sec4Rig {
 	t.Helper()
-	provider := sec4Provider(t)
+	return sec4RigWithProvider(t, ctx, sec4Provider(t))
+}
+
+// sec4RigWithProvider is sec4NewRig over a provider the caller built, for the
+// cells that need a different policy set (an explicit ABAC deny, a
+// capability-scoped rule) on all three doors rather than only the embedded one.
+func sec4RigWithProvider(t *testing.T, ctx context.Context, provider *auth.Provider) *sec4Rig {
+	t.Helper()
 	db := sec4DB(t, ctx)
 	if err := db.SetAuthProvider(provider); err != nil {
 		t.Fatalf("SetAuthProvider: %v", err)

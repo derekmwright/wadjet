@@ -699,8 +699,31 @@ func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, log
 	}, nil
 }
 
+// describe answers DESCRIBE / SHOW COLUMNS FROM at the embedded door.
+//
+// Metadata follows the effective TABLE-ACCESS decision (ADR-0034): an identity
+// that may not read a relation may not read its schema either, and the check
+// runs before the catalog is touched. Before this, `DB.Query` dispatched
+// DESCRIBE ahead of the plan-enforcement path and this function consulted
+// nothing — so a role scoped to `users` read `secret`'s column names and types
+// through psql, while `SELECT * FROM secret` under the same identity was
+// refused (#941). The HTTP door already refused it; the boundary pgwire and
+// the embedded caller share did not.
+//
+// This is a deliberate divergence from PostgreSQL, which shows `\d` to any
+// role (verified on the oracle server: `\d` on a table the role cannot SELECT
+// prints the full column list). Metadata visibility is not PG's rule to
+// decide for this product; the HTTP door has behaved this way since it was
+// written, and now every door does.
+//
+// The decision is asked on the CATALOG-RESOLVED spelling, because a policy
+// bound to `Users` must police a reference the lexer folded to `users` (#731).
 func (db *DB) describe(ctx context.Context, tableName string) (*QueryResult, error) {
 	tableName = strings.ToLower(tableName)
+	if err := auth.TableAccess(ctx, db.authProvider,
+		db.catalog.ResolveTableName(tableName), auth.ActionRead); err != nil {
+		return nil, err
+	}
 	table, err := db.catalog.GetTable(ctx, tableName)
 	if err != nil {
 		// Fallback: discover schema from Parquet files in object storage.
@@ -1224,11 +1247,21 @@ func (db *DB) analyzeTableSQL(ctx context.Context, at *plansql.AnalyzeTableInfo)
 	}, nil
 }
 
+// showTables answers SHOW TABLES at the embedded door, listing only the
+// relations this identity may READ.
+//
+// A listing is a metadata read like DESCRIBE, and it followed no decision at
+// all: a role scoped to `users` got the whole catalog back through psql (#941).
+// `auth.VisibleTables` is the shared filter — the same decision `describe`
+// asks, applied per name, order preserved — so an explicit ABAC deny removes
+// a name here exactly as it refuses the table itself. With no provider the
+// input list is returned unchanged.
 func (db *DB) showTables(ctx context.Context) (*QueryResult, error) {
 	tables, err := db.catalog.ListTables(ctx)
 	if err != nil {
 		return nil, err
 	}
+	tables = auth.VisibleTables(ctx, db.authProvider, tables)
 	rows := make([]map[string]any, len(tables))
 	for i, t := range tables {
 		rows[i] = map[string]any{"table_name": t}

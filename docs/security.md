@@ -241,6 +241,8 @@ and the HTTP handlers' own checks are early refusals of the same rule.
 | `CREATE [OR REPLACE] FUNCTION`, `DROP FUNCTION` | `write`; `admin` to override another owner's `WITH LOCK` |
 | `SHOW FUNCTIONS` | any authenticated identity |
 | a table function in any `FROM` clause (`read_csv`, `postgres_query`, …) | an ABAC policy granting the `table_function` capability; `admin` under legacy roles — see [Table functions as a capability](#table-functions-as-a-capability) |
+| `DESCRIBE` / `SHOW COLUMNS FROM` | the same decision that governs reading the table |
+| `SHOW TABLES` | any authenticated identity; the listing shows only the tables that identity may read |
 | `CREATE ALERT`, `DROP ALERT`, `ALTER ALERT` | `admin` |
 
 Refusals are PostgreSQL's `42501` (`insufficient_privilege`) on the wire and
@@ -250,6 +252,27 @@ With **auth enabled**, a call carrying no identity is refused at this boundary
 as well — an unattributed statement is not an anonymous one, it is one nothing
 authorized. With **no provider attached** (the default embedded and CLI use)
 nothing is enforced and every statement behaves as it always has.
+
+#### Metadata follows the table decision
+
+`DESCRIBE`, `SHOW COLUMNS FROM` and `SHOW TABLES` ask the same question the data
+door asks. An identity that may not read a relation may not read its schema
+either, and the listing does not publish its name. The check runs before the
+catalog is touched, and it honours **explicit ABAC denies**, which take
+precedence over the role's `tables:` list here exactly as they do everywhere
+else — a role with `tables: ["*"]` and a deny rule on `secret` sees neither
+`secret`'s schema nor its name.
+
+`DESCRIBE` on a relation this identity may not read is `42501` / HTTP 403,
+naming the table. `SHOW TABLES` is never a refusal: it returns the visible
+subset, which may be empty.
+
+This is a deliberate divergence from PostgreSQL, which shows `\d` and `\dt` to
+any role regardless of privileges. Metadata visibility is a product decision
+rather than a wire-compatibility one, and it is recorded as such in ADR-0012's
+divergence list. Note that a client using `pg_catalog` introspection rather
+than `DESCRIBE` is answered by the wire protocol's catalog emulation, which is
+not filtered.
 
 #### User-defined function ownership
 

@@ -10,7 +10,7 @@ Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom
 | `EXPLAIN [VERBOSE]` | Show the query execution plan without running it |
 | `DESCRIBE table_name` | Show the schema of a table |
 | `SHOW COLUMNS FROM table_name` | Alias for DESCRIBE |
-| `SHOW TABLES` | List all tables |
+| `SHOW TABLES` | List the tables the calling identity may read |
 | `SHOW FUNCTIONS` | List registered user-defined functions |
 | `CREATE TABLE` | Create a table with schema and optional partitioning |
 | `DROP TABLE [IF EXISTS]` | Remove a table |
@@ -397,6 +397,14 @@ SHOW COLUMNS FROM flow_logs
 
 -- Output: column names, types, nullable
 ```
+
+With auth enabled, `DESCRIBE` follows the same decision that governs *reading*
+the table: an identity that may not read `flow_logs` is refused `42501`
+(HTTP 403) and learns nothing about its columns. `SHOW TABLES` likewise lists
+only the tables the calling identity may read; it is never a refusal, and the
+list may be empty. Explicit ABAC denies apply. This is deliberately unlike
+PostgreSQL, which shows `\d` to any role — see
+[Security](security.md#metadata-follows-the-table-decision).
 
 ## CREATE TABLE
 
