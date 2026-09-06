@@ -9,10 +9,20 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// taIdentity is the authenticated caller every cell below runs as: a role that
-// the legacy authorizer knows and that the ABAC policies name.
+// taIdentity is the authenticated caller every cell below runs as, resolved
+// the way the Authenticator resolves one: a role the configuration defines
+// carries that role's `tables` and `allow`, and a role it does not define
+// carries neither. That matters — the role's `allow` list is a COARSE GATE in
+// BOTH provider shapes, so an identity fixture that carries no permissions is
+// not the identity a door would hand to the decision.
 func taIdentity(role string) *Identity {
-	return &Identity{Name: "caller", Role: role, Method: "apikey"}
+	id := &Identity{Name: "caller", Role: role, Method: "apikey"}
+	for _, r := range taRoles() {
+		if r.Name == role {
+			id.Tables, id.Perms = r.Tables, r.Allow
+		}
+	}
+	return id
 }
 
 // taProvider builds a provider whose Authenticator is enabled (one API key),
@@ -51,6 +61,14 @@ func taABAC() []AccessControlPolicy {
 				Subjects:  []Condition{{Attribute: "subject.role", Op: "eq", Value: "reader"}},
 				Resources: []Condition{{Attribute: "resource.name", Op: "eq", Value: "scratch"}},
 				Actions:   []Action{ActionWrite}},
+			// `writer` may read and write the two relations it holds, and
+			// nothing else — so `secrets` is the "no rule" cell for an
+			// identity that HAS both permissions.
+			{ID: "writer-both", EffectStr: "allow", Priority: 100,
+				Subjects: []Condition{{Attribute: "subject.role", Op: "eq", Value: "writer"}},
+				Resources: []Condition{{Attribute: "resource.name", Op: "in",
+					Value: []any{"events", "scratch"}}},
+				Actions: []Action{ActionRead, ActionWrite}},
 			{ID: "contractor-broad-allow", EffectStr: "allow", Priority: 100,
 				Subjects: []Condition{{Attribute: "subject.role", Op: "eq", Value: "contractor"}},
 				Actions:  []Action{ActionRead, ActionWrite}},
@@ -72,18 +90,6 @@ func taRoles() []RoleConfig {
 		{Name: "writer", Tables: []string{"events", "scratch"}, Allow: []string{"read", "write"}},
 		{Name: "contractor", Tables: []string{"public"}, Allow: []string{"read", "write"}},
 	}
-}
-
-// legacyIdentity resolves an identity the way the Authenticator would: an
-// unknown role carries no tables and no permissions.
-func legacyIdentity(role string) *Identity {
-	id := taIdentity(role)
-	for _, r := range taRoles() {
-		if r.Name == role {
-			id.Tables, id.Perms = r.Tables, r.Allow
-		}
-	}
-	return id
 }
 
 // TestTableAccessDecidesEveryCell drives the matrix the shared decision has to
@@ -115,27 +121,29 @@ func TestTableAccessDecidesEveryCell(t *testing.T) {
 	}{
 		// ---- evaluator arm -------------------------------------------------
 		{"evaluator/allow/read", abacProvider, taIdentity("reader"), "events", ActionRead, false},
-		{"evaluator/allow/write", abacProvider, taIdentity("reader"), "scratch", ActionWrite, false},
+		{"evaluator/allow/write", abacProvider, taIdentity("writer"), "scratch", ActionWrite, false},
 		{"evaluator/explicit-deny/read", abacProvider, taIdentity("contractor"), "events", ActionRead, true},
 		{"evaluator/explicit-deny/write", abacProvider, taIdentity("contractor"), "events", ActionWrite, true},
-		{"evaluator/no-rule/read", abacProvider, taIdentity("stranger"), "events", ActionRead, true},
-		{"evaluator/no-rule/write", abacProvider, taIdentity("reader"), "events", ActionWrite, true},
+		// The identity holds both permissions; no rule names this relation,
+		// so the evaluator's default deny answers.
+		{"evaluator/no-rule/read", abacProvider, taIdentity("writer"), "secrets", ActionRead, true},
+		{"evaluator/no-rule/write", abacProvider, taIdentity("writer"), "secrets", ActionWrite, true},
 		{"evaluator/nil-identity/read", abacProvider, nil, "events", ActionRead, true},
 		{"evaluator/nil-identity/write", abacProvider, nil, "events", ActionWrite, true},
 		{"evaluator/disabled/read", disabledProvider, nil, "events", ActionRead, false},
 		{"evaluator/disabled/write", disabledProvider, nil, "events", ActionWrite, false},
 
 		// ---- legacy arm ----------------------------------------------------
-		{"legacy/allow/read", legacyProvider, legacyIdentity("reader"), "events", ActionRead, false},
-		{"legacy/allow/write", legacyProvider, legacyIdentity("writer"), "scratch", ActionWrite, false},
+		{"legacy/allow/read", legacyProvider, taIdentity("reader"), "events", ActionRead, false},
+		{"legacy/allow/write", legacyProvider, taIdentity("writer"), "scratch", ActionWrite, false},
 		// The relation is not in the role's table list: the permission alone
 		// is not access to THIS relation.
-		{"legacy/explicit-deny/read", legacyProvider, legacyIdentity("contractor"), "events", ActionRead, true},
-		{"legacy/explicit-deny/write", legacyProvider, legacyIdentity("contractor"), "events", ActionWrite, true},
+		{"legacy/explicit-deny/read", legacyProvider, taIdentity("contractor"), "events", ActionRead, true},
+		{"legacy/explicit-deny/write", legacyProvider, taIdentity("contractor"), "events", ActionWrite, true},
 		// The role is not configured at all — no tables, no permissions.
-		{"legacy/no-rule/read", legacyProvider, legacyIdentity("stranger"), "events", ActionRead, true},
+		{"legacy/no-rule/read", legacyProvider, taIdentity("stranger"), "events", ActionRead, true},
 		// The relation IS in the role's list, but `read` is not `write`.
-		{"legacy/no-rule/write", legacyProvider, legacyIdentity("reader"), "events", ActionWrite, true},
+		{"legacy/no-rule/write", legacyProvider, taIdentity("reader"), "events", ActionWrite, true},
 		{"legacy/nil-identity/read", legacyProvider, nil, "events", ActionRead, true},
 		{"legacy/nil-identity/write", legacyProvider, nil, "events", ActionWrite, true},
 		{"legacy/disabled/read", disabledProvider, nil, "events", ActionRead, false},
@@ -348,7 +356,7 @@ func TestVisibleTablesOnTheLegacyArm(t *testing.T) {
 	p := taProvider(t, taRoles(), nil)
 	all := []string{"events", "scratch", "secrets"}
 
-	ctx := ContextWithIdentity(context.Background(), legacyIdentity("reader"))
+	ctx := ContextWithIdentity(context.Background(), taIdentity("reader"))
 	got := VisibleTables(ctx, p, all)
 	if len(got) != 2 || got[0] != "events" || got[1] != "scratch" {
 		t.Fatalf("legacy reader sees %v, want [events scratch]", got)

@@ -27,13 +27,16 @@ import (
 //   - Auth enabled with NO identity in the context: refused. Authentication
 //     proves who; a door that reaches here with nobody has no one to
 //     authorize.
-//   - An ABAC evaluator installed: the EVALUATOR decides
+//   - The role's `allow` list, in BOTH provider shapes:
+//     `HasPermission(id, perm(action))`. It is a COARSE GATE — a policy
+//     narrows what a role may do and never widens it — and `admin` grants
+//     everything, as it always has.
+//   - Then, with an ABAC evaluator installed: the EVALUATOR decides
 //     (`EvaluateTableAccess`), which is deny-overrides with a default deny —
 //     explicit denies win, an unmatched request is refused.
-//   - No evaluator: the legacy role rule, both halves of it —
-//     `HasPermission(id, perm(action))` AND `CanAccessTable(id, table)`. The
-//     permission alone is not access to a relation, and the relation alone is
-//     not permission to write it.
+//   - With no evaluator: `CanAccessTable(id, table)`, the other half of the
+//     legacy rule. The permission alone is not access to a relation, and the
+//     relation alone is not permission to write it.
 //
 // `table` must be the CATALOG-RESOLVED spelling (`catalog.ResolveTableName`):
 // an unquoted identifier folds at the lexer (#731), and a policy bound to
@@ -59,6 +62,21 @@ func TableAccess(ctx context.Context, provider *Provider, table string, action A
 	if id == nil {
 		return sqlerr.New("42501", "permission denied for table %q: authentication required", table)
 	}
+	// The role's `allow` list is a COARSE GATE, and it is applied in BOTH
+	// provider shapes, before anything else looks at the relation. A policy
+	// NARROWS what a role may do; it never widens it.
+	//
+	// It did not hold under an explicit `abac_policies:` block: the evaluator
+	// answered alone, so a role written `allow: [read]` that a policy
+	// permitted to write could write — while DDL on the same door, which asks
+	// `RequirePermission`, demanded the permission. Two doors disagreeing about
+	// the same identity is the shape this ADR exists to remove.
+	//
+	// `admin` still grants everything, because `HasPermission` says so.
+	authz := provider.Authorizer()
+	if authz == nil || !authz.HasPermission(id, permissionForAction(action)) {
+		return sqlerr.New("42501", "permission denied for table %q", table)
+	}
 	env := DecisionEnvironment(ctx, "")
 	if ev := provider.Evaluator(); ev != nil {
 		if td := ev.EvaluateTableAccess(id.ToSubject(), table, action, env); td != nil && td.Allowed {
@@ -66,11 +84,7 @@ func TableAccess(ctx context.Context, provider *Provider, table string, action A
 		}
 		return sqlerr.New("42501", "permission denied for table %q", table)
 	}
-	authz := provider.Authorizer()
-	if authz == nil {
-		return sqlerr.New("42501", "permission denied for table %q", table)
-	}
-	if authz.HasPermission(id, permissionForAction(action)) && authz.CanAccessTable(id, table) {
+	if authz.CanAccessTable(id, table) {
 		return nil
 	}
 	return sqlerr.New("42501", "permission denied for table %q", table)

@@ -203,6 +203,8 @@ There are exactly three permissions, and `admin` implies the other two.
 
 Both halves are required: a role holding `write` may only write the tables its `tables` list names, and a role that lists a table may only do to it what its `allow` list permits. This is the decision every door asks for — see ADR-0034.
 
+**With ABAC policies configured, the role's `allow` list remains a coarse gate: a policy NARROWS what a role may do, and never widens it.** A role written `allow: [read]` cannot write a relation even if a policy rule permits the write; grant the role `write` and let the policy decide which relations and which rows.
+
 ### ABAC (Attribute-Based Access Control)
 
 ABAC policies evaluate subject attributes (who), resource attributes (what), action (how), and environment conditions (when/where) to make access decisions. This enables policies like "users with clearance=SECRET can read classified tables during business hours, but SSN columns are masked."

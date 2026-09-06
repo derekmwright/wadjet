@@ -67,13 +67,21 @@ func VisibleTables(ctx context.Context, provider *Provider, tables []string) []s
 
 with, in order: provider nil or auth disabled → nil, nothing to enforce; a
 policy set that could not be BOUND to the catalog → refused (ADR-0033 rule 3);
-auth enabled and no identity → refused; an ABAC evaluator installed → the
-EVALUATOR decides (deny-overrides, default deny); no evaluator → the legacy
-role rule, BOTH halves of it (`HasPermission(perm(action))` AND
-`CanAccessTable(table)`), because a permission alone is not access to a
-relation and a relation alone is not permission to write it. `table` is the
-CATALOG-RESOLVED spelling (`catalog.ResolveTableName`), so a policy bound to
-`Users` polices a statement that spelled it `users` (#731, #882).
+auth enabled and no identity → refused; **the role's `allow` list**
+(`HasPermission(perm(action))`) in BOTH provider shapes; then, with an ABAC
+evaluator installed → the EVALUATOR decides (deny-overrides, default deny), and
+with no evaluator → `CanAccessTable(table)`. `table` is the CATALOG-RESOLVED
+spelling (`catalog.ResolveTableName`), so a policy bound to `Users` polices a
+statement that spelled it `users` (#731, #882).
+
+The `allow` list is a COARSE GATE, and it is applied first in both shapes: **a
+policy narrows what a role may do and never widens it.** That did not hold —
+under an explicit `abac_policies:` block the evaluator answered alone, so a
+role written `allow: [read]` that a policy permitted to write could write,
+while DDL on the same door demanded the permission. `admin` still grants
+everything, because `HasPermission` says so. Both halves remain required in the
+legacy shape: a permission alone is not access to a relation, and a relation
+alone is not permission to write it.
 
 A door that re-implements any of this — `TableAccess`, `VisibleTables`,
 `RequirePermission`, `EnforcePlanPolicies`, `EnforceDMLPolicies`,
@@ -226,6 +234,12 @@ landing.
   PostgreSQL's message; plus the missing-identity, unbound-policy-set,
   decision-time-clock and attached-environment cells, and the `VisibleTables`
   filter on both arms including its no-auth pass-through.
+- `internal/auth/coarse_gate_test.go` —
+  `TestTheRolesAllowListIsACoarseGateUnderABAC` (a policy cannot widen a role,
+  and still narrows one that holds the permission),
+  `TestTheCoarseGateLetsAdminThrough`,
+  `TestAnIdentityWithNoPermissionsIsRefusedBeforeThePolicy` — item 5's coarse
+  gate.
 - `internal/auth/capability_scope_test.go` —
   `TestAnUnscopedAllowDoesNotGrantACapability` (the table it was written for is
   still allowed; the capability is refused),
