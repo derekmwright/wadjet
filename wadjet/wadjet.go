@@ -670,6 +670,12 @@ func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, log
 	// keeps its spill scratch (#625 M1).
 	defer pipeline.Close()
 	if err := pipeline.Run(ctx); err != nil {
+		// The same rule as the Query path above: an authorization refusal is
+		// the shared decision's own sentence on every door and under every
+		// statement that raises it, with nothing in front of it.
+		if refusal := (*sqlerr.Error)(nil); errors.As(err, &refusal) && refusal.Code == "42501" {
+			return nil, refusal
+		}
 		return nil, fmt.Errorf("executing query for EXPLAIN ANALYZE: %w", err)
 	}
 

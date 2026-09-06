@@ -390,7 +390,7 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 		for _, file := range part.Files {
 			deleted, err := db.scanFileForDeletes(ctx, file.Path, schema, predicate, gone[file.Path])
 			if err != nil {
-				return nil, fmt.Errorf("scanning file %s: %w", file.Path, err)
+				return nil, dmlScanError(file.Path, err)
 			}
 			if len(deleted) > 0 {
 				markers = append(markers, catalog.DeleteMarker{
@@ -502,7 +502,7 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 		for _, file := range part.Files {
 			b, err := db.readParquetFile(ctx, file.Path, schema)
 			if err != nil {
-				return nil, fmt.Errorf("scanning file %s: %w", file.Path, err)
+				return nil, dmlScanError(file.Path, err)
 			}
 			if b == nil {
 				continue
@@ -3501,4 +3501,21 @@ func (db *DB) dmlSubqueryRunner(ctx context.Context) expr.SubqueryRunner {
 		}
 		return res.Rows, nil
 	}
+}
+
+// dmlScanError names the file a DML statement could not read — except when the
+// failure is an AUTHORIZATION refusal, which is not about the file.
+//
+// A DML predicate is COMPILED, not planned (ADR-0031), so a subquery inside it
+// is evaluated while the statement scans, and a relation the identity may not
+// read refuses THERE. Wrapped, that refusal reached the client as
+// `scanning file tables/t/chunk_<uuid>.parquet: permission denied for table
+// "other"` — the shared decision's text behind a storage path, which is both a
+// second wording for one refusal (ADR-0034 item 6) and an internal object key
+// handed to a caller who has just been told they may not read the data (#945).
+func dmlScanError(path string, err error) error {
+	if sqlerr.StateOf(err) == "42501" {
+		return err
+	}
+	return fmt.Errorf("scanning file %s: %w", path, err)
 }
