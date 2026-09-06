@@ -1163,6 +1163,20 @@ type Planner struct {
 	// pipeline would only reach the same error one layer down after doing
 	// the work twice. Reset at the start of generateStages.
 	scalarRowsErr error
+	// authzErr records an AUTHORIZATION refusal raised while stages were
+	// generated — a scalar subquery's producer plan asking the context lookup
+	// about a relation the identity may not read (#945).
+	//
+	// Its own field, and the FIRST one PlanDistributed returns, because it is
+	// the opposite of a routing refusal: the other four say "this planner
+	// cannot express the shape here, run it somewhere else", and every site
+	// that raises one falls back or declines. An authorization refusal must
+	// never be fallen back on — the fallbacks re-run the same subquery on the
+	// coordinator, and when that refused too the ORIGINAL subquery text was
+	// spliced back into a worker's filter, which reached the client as
+	// `subqueries require a SubqueryRunner` after three task attempts instead
+	// of as the refusal. Reset at the start of generateStages.
+	authzErr error
 
 	// aggStageRenames maps a name an Aggregate node reads in the LOGICAL plan
 	// to the name the aggregate STAGE emits for it, for every group key
@@ -1615,6 +1629,11 @@ func (p *Planner) buildSubqueryPipelineFor(ctx context.Context, info *plansql.Se
 	// enclosing SELECT list. The policies travel on the context; the
 	// projection goes in before the optimizer, exactly as it does for the
 	// statement's own plan.
+	//
+	// And the ACCESS decision with them (#945): every relation THIS plan
+	// reads asks the context lookup inside applyContextColumnPolicies, which
+	// refuses before a pipeline is built. The lookup alone is enough to enter
+	// — a relation named only inside a subquery is in no resolved set.
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		// The name-binding pass runs only when something is DENIED. A
 		// correlated subquery rebuilds this pipeline once per outer row, and
@@ -2017,8 +2036,11 @@ func (p *Planner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL str
 
 	// The DAG's counterpart of buildSubqueryPipeline: this is a whole second
 	// query, planned here, and it must carry the same column policy as its
-	// enclosing statement (#859). The barrier is absorbed into the scan stage
-	// by walkStages below, exactly as it is for the outer plan.
+	// enclosing statement (#859) and ask the same ACCESS decision for every
+	// relation it reads (#945). The barrier is absorbed into the scan stage by
+	// walkStages below, exactly as it is for the outer plan; the refusal
+	// happens here, before a stage is emitted, so a denied relation never
+	// becomes a task.
 	if pol := logical.ColumnPoliciesFromContext(ctx); len(pol) > 0 || logical.PolicyLookupFromContext(ctx) != nil {
 		if denied := pol.DeniedColumns(); len(denied) > 0 {
 			if err := ValidateColumnsUnderPolicy(ctx, p.catalog, info, func(table string) map[string]bool {
@@ -3140,6 +3162,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		return nil, err
 	}
 	stages := p.generateStages(node)
+	// FIRST: an authorization refusal is the query's answer on every path,
+	// never a reason to route it to another one (#945).
+	if p.authzErr != nil {
+		return nil, p.authzErr
+	}
 	if p.setOpErr != nil {
 		return nil, p.setOpErr
 	}
@@ -3432,6 +3459,9 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// A correlated subquery parked while the SELECT list was lowered: the
 	// pre-pass ran before stage generation, and this is the only site that
 	// can see one found after it.
+	if p.authzErr != nil {
+		return nil, p.authzErr
+	}
 	if p.correlatedErr != nil {
 		return nil, p.correlatedErr
 	}
@@ -5312,6 +5342,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.joinCondErr = nil
 	p.correlatedErr = nil
 	p.scalarRowsErr = nil
+	p.authzErr = nil
 	p.inSubqueryErr = nil
 	p.aggStageRenames = nil
 	p.attachedFilterExprs = nil
@@ -7501,6 +7532,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				for _, d := range deferred {
 					producerID, err := p.emitScalarProducerStages(stages, d.SubquerySQL)
 					if err != nil {
+						// An AUTHORIZATION refusal is not a shape this
+						// planner could not express here: it is the query's
+						// answer, and there is no other path that answers it
+						// differently. Park it — PlanDistributed returns it —
+						// rather than run the same subquery on the
+						// coordinator and then splice its TEXT back into a
+						// worker's filter, which is what turned this refusal
+						// into `subqueries require a SubqueryRunner` after
+						// three task attempts (#945).
+						if p.parkAuthorizationRefusal(err) {
+							continue
+						}
 						// Fall back: evaluate the subquery eagerly and splice
 						// a literal in place of the placeholder. Loses
 						// correctness for CTE-drift cases but keeps the query

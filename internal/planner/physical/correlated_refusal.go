@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // ErrCorrelatedSubqueryDistributed marks a plan the stage DAG refuses because
@@ -220,4 +221,26 @@ func describeOuterRefs(refs []plansql.OuterRef) string {
 		return "column " + parts[0]
 	}
 	return "columns " + strings.Join(parts, ", ")
+}
+
+// parkAuthorizationRefusal parks err when it is an AUTHORIZATION refusal, and
+// reports whether it did.
+//
+// It is what every producer-emission fallback asks first. Those fallbacks
+// exist because a shape this planner cannot express as stages should still be
+// answered — by the coordinator, or by declining the lowering and letting the
+// local route take it. An authorization refusal is not such a shape: the
+// decision is the same on every path, the fallback re-runs the same refused
+// subquery, and what reached the client when both halves failed was the
+// filter's original TEXT shipped to a worker that cannot compile a subquery
+// (#945). Parked here, PlanDistributed returns it ahead of every routing
+// refusal.
+func (p *Planner) parkAuthorizationRefusal(err error) bool {
+	if err == nil || sqlerr.StateOf(err) != "42501" {
+		return false
+	}
+	if p.authzErr == nil {
+		p.authzErr = err
+	}
+	return true
 }

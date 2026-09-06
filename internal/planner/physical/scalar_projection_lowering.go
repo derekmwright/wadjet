@@ -118,6 +118,14 @@ func (p *Planner) lowerProjectionSubquery(stages *[]Stage, item *logical.Project
 	for _, d := range deferred {
 		producerID, valueType, typeKnown, err := p.emitScalarProducerStagesTyped(stages, d.SubquerySQL)
 		if err != nil {
+			// A DECLINE routes the query to a path that can answer it. An
+			// authorization refusal has no such path — every one of them
+			// reaches the same decision — so it is parked and returned
+			// instead of being read as "this shape does not lower here"
+			// (#945). The local route does refuse it too, which is why this
+			// is belt and braces rather than the fix; a refusal must not
+			// depend on where a decline happens to land.
+			p.parkAuthorizationRefusal(err)
 			return "", decl, false, false
 		}
 		if !typeKnown || !scalarProducerValueIsLiteralSafe(valueType) {
