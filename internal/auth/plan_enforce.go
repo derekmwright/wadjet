@@ -55,6 +55,15 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	if err := provider.BindError(); err != nil {
 		return ctx, plan, sqlerr.Wrap("42501", err)
 	}
+	// Table functions are a CAPABILITY, not a relation, and are decided here
+	// — above the identity and evaluator checks below, because both of those
+	// fail OPEN and a server-side file read must not (#943, ADR-0034). See
+	// table_func_enforce.go: this refuses the scans this plan carries and
+	// installs the guard the subquery and CTE plans ask.
+	ctx, err := enforceTableFunctionScans(ctx, provider, plan, protocol)
+	if err != nil {
+		return ctx, nil, err
+	}
 	identity := IdentityFromContext(ctx)
 	if identity == nil {
 		// Auth is ENABLED and nobody is here. This used to return the plan

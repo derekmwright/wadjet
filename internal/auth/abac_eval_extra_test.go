@@ -251,7 +251,12 @@ func TestEvaluateTableAccessQueryLimitObligation(t *testing.T) {
 }
 
 func TestMigrateRBACWildcardTable(t *testing.T) {
-	// Wildcard table should not add resource conditions
+	// A wildcard `tables:` list scopes the rule to no RELATION — and to
+	// exactly one thing besides: not the table-function capability. Before
+	// #943 the rule carried no resource condition at all, so it matched every
+	// resource, and `read_csv` is a resource: a migrated role with
+	// `tables: ["*"]` was granted server-local file reads by the rule that was
+	// meant to say which tables it may read.
 	roles := []RoleConfig{
 		{Name: "admin", Tables: []string{"*"}, Allow: []string{"admin"}},
 	}
@@ -264,8 +269,19 @@ func TestMigrateRBACWildcardTable(t *testing.T) {
 		t.Fatalf("expected 1 policy, got %d", len(policies))
 	}
 	rule := policies[0].Rules[0]
-	if len(rule.Resources) != 0 {
-		t.Error("wildcard table should have no resource conditions")
+	if len(rule.Resources) != 1 {
+		t.Fatalf("wildcard table should carry exactly the table-function exclusion, got %+v",
+			rule.Resources)
+	}
+	cond := rule.Resources[0]
+	if cond.Attribute != "resource.type" || cond.Op != "neq" || cond.Value != ResourceTableFunction {
+		t.Errorf("condition = %+v, want resource.type neq %q", cond, ResourceTableFunction)
+	}
+	// The capability itself is a SECOND rule, present only because this role
+	// holds `admin`.
+	if len(policies[0].Rules) != 2 {
+		t.Fatalf("an admin role should also carry the table-function rule, got %d rules",
+			len(policies[0].Rules))
 	}
 }
 

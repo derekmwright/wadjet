@@ -895,6 +895,15 @@ func writeSQLError(w http.ResponseWriter, status int, msg string, err error) {
 		writeError(w, status, msg)
 		return
 	}
+	// An AUTHORIZATION refusal is 403 on this door wherever it was raised.
+	// 42501 is a `42` class, so the rule below would have made it a 400 — and
+	// it did, for every refusal that surfaces from inside planning rather than
+	// from the handler's own check: a table-function denial inside a scalar
+	// subquery came back `400` while the identical statement without the
+	// subquery came back `403` (#943). The same refusal is one status.
+	if state == "42501" {
+		status = http.StatusForbidden
+	}
 	if status >= http.StatusInternalServerError && sqlStateIsClientFault(state) {
 		status = http.StatusBadRequest
 	}

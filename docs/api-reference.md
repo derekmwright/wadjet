@@ -138,11 +138,13 @@ the statement did not cause — a malformed request body, a missing `sql` field 
 carries no SQLSTATE and answers with the `error` key alone, under `400` or
 `401`.
 
-An **authorization** denial answers `403` on this endpoint. Through the
-PostgreSQL wire protocol and through the embedded API the same denial is
-PostgreSQL's `42501` (`insufficient_privilege`): a role holding only `read`
-that runs `CREATE TABLE`, `DROP TABLE` or `ANALYZE` is refused with that class
-and the catalog is not touched. See
+An **authorization** denial is PostgreSQL's `42501` (`insufficient_privilege`)
+on the wire and through the embedded API, and `403` on this endpoint —
+including when it is raised deep inside planning rather than by the handler,
+so one refusal has one status. A role holding only `read` that runs
+`CREATE TABLE`, `DROP TABLE`, `ANALYZE`, `CREATE FUNCTION` or a table function
+such as `read_csv` is refused with that class and nothing is created, dropped,
+registered, opened or fetched. See
 [Security](security.md#embedded-api-and-sql-statement-authorization) for which
 permission each statement needs.
 

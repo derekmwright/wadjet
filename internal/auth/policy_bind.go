@@ -142,6 +142,15 @@ func bindPoliciesInPlace(ctx context.Context, cat *catalog.Catalog,
 // return means the rule names no relation — it applies to every one, which is
 // what the broad allow does, and there is nothing to resolve.
 func bindRuleResources(ctx context.Context, cat *catalog.Catalog, where string, rule *PolicyRule) ([]string, error) {
+	// A rule scoped to a resource TYPE that is not a catalog relation names no
+	// relation, and its `resource.name` is not one either: on a
+	// `table_function` rule that field holds a FUNCTION name (`read_csv`), and
+	// resolving it against the catalog refused the whole policy set — so the
+	// capability #943 introduced could not be granted by any policy an
+	// operator could write. Nothing here to resolve, and nothing to refuse.
+	if ruleScopesANonRelationResource(rule) {
+		return nil, nil
+	}
 	var named []string
 	for ci := range rule.Resources {
 		cond := &rule.Resources[ci]
@@ -187,6 +196,50 @@ func bindRuleResources(ctx context.Context, cat *catalog.Catalog, where string, 
 		}
 	}
 	return named, nil
+}
+
+// ruleScopesANonRelationResource reports whether the rule's own conditions say
+// it is about something other than a catalog table — today, the
+// `table_function` capability. Only `resource.type` can say so; a rule that
+// does not mention it is about relations, which is the pre-#943 world and
+// every policy written before it.
+func ruleScopesANonRelationResource(rule *PolicyRule) bool {
+	for _, cond := range rule.Resources {
+		if cond.Attribute != "resource.type" {
+			continue
+		}
+		switch cond.Op {
+		case "eq":
+			if s, ok := cond.Value.(string); ok && s != "table" {
+				return true
+			}
+		case "in":
+			for _, it := range relationSetItemsAny(cond.Value) {
+				if it != "table" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// relationSetItemsAny is relationSetItems without the "every item must be a
+// string" requirement — a non-string item simply is not "table".
+func relationSetItemsAny(v any) []string {
+	switch s := v.(type) {
+	case []string:
+		return s
+	case []any:
+		out := make([]string, 0, len(s))
+		for _, it := range s {
+			if str, ok := it.(string); ok {
+				out = append(out, str)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // bindRuleObligations rewrites every column an obligation names to the

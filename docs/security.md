@@ -240,6 +240,7 @@ and the HTTP handlers' own checks are early refusals of the same rule.
 | `CREATE TABLE`, `DROP TABLE`, `ANALYZE` | `write` |
 | `CREATE [OR REPLACE] FUNCTION`, `DROP FUNCTION` | `write`; `admin` to override another owner's `WITH LOCK` |
 | `SHOW FUNCTIONS` | any authenticated identity |
+| a table function in any `FROM` clause (`read_csv`, `postgres_query`, …) | an ABAC policy granting the `table_function` capability; `admin` under legacy roles — see [Table functions as a capability](#table-functions-as-a-capability) |
 | `CREATE ALERT`, `DROP ALERT`, `ALTER ALERT` | `admin` |
 
 Refusals are PostgreSQL's `42501` (`insufficient_privilege`) on the wire and
@@ -400,8 +401,79 @@ When `abac_policies` is not configured but `roles` are defined, Wadjet automatic
 - Table lists become `resource.name in <tables>` conditions
 - Permission lists become action conditions
 - Cell-level `policies` become obligations (row_filter, mask_column, deny_column)
+- Every role rule carries `resource.type neq table_function`, and a role whose
+  `allow:` list holds `admin` gets a second rule granting the table-function
+  capability (see below)
 
 This means existing RBAC configurations work unchanged — they get ABAC evaluation semantics (deny-overrides, attribute matching) automatically.
+
+### Table functions as a capability
+
+`read_csv`, `read_json`, `read_parquet`, `postgres_scan`, `postgres_query`,
+`mysql_scan` and `mysql_query` read something that is **not in the catalog**: a
+file on the server's own disk, an HTTP URL the server fetches, or an outbound
+database connection. Table permissions cannot describe that, so a table
+function is its own ABAC resource:
+
+| Field | Value |
+|---|---|
+| `resource.type` | `table_function` |
+| `resource.name` | the function, lower-cased (`read_csv`) |
+| `resource.path` | a local path or glob, with `~/` expanded and the result cleaned |
+| `resource.url` | an `http(s)` source, verbatim |
+| `resource.host` | the host of `resource.url`, or of a connector's connection string |
+| `resource.arg_<name>` | any named argument (`delimiter`, `header`, …) |
+| action | `read` |
+
+The connection string itself is never an attribute — it carries a password.
+
+With auth enabled the capability is **denied by default**: an evaluator that
+has never been told about table functions refuses them (deny-overrides is
+closed-world), and a deployment with only legacy `roles:` grants them to the
+roles holding `admin`. With no provider attached nothing is enforced.
+
+```yaml
+abac_policies:
+  - name: analytics
+    enabled: true
+    rules:
+      # An analyst may read two exports and nothing else off the disk.
+      - id: analyst-exports
+        effect: allow
+        actions: [read]
+        subjects:
+          - attribute: subject.role
+            operator: eq
+            value: analyst
+        resources:
+          - attribute: resource.type
+            operator: eq
+            value: table_function
+          - attribute: resource.name
+            operator: in
+            value: [read_csv, read_parquet]
+          - attribute: resource.path
+            operator: regex
+            value: "^/srv/exports/[^/]+\\.(csv|parquet)$"
+```
+
+Notes an operator needs:
+
+- Scope with `eq` or `in` for an exact allowlist and `regex` / `contains` for a
+  prefix. `resource.path` is cleaned before the comparison, so `/srv/exports/a`
+  and `/srv/../srv/exports/a` are the same string; a **symlink** inside an
+  allowed directory is not something a path rule can see, so do not rely on one
+  where the filesystem is writable by untrusted users.
+- A glob is matched as the **pattern the caller wrote** (`/srv/exports/*.csv`),
+  not as the files it expands to. A rule that must allow globs has to say so.
+- An allow rule with **no** `resources:` conditions matches every resource,
+  table functions included. Scope your rules with `resource.type` — the rules
+  `MigrateRBACToABAC` emits already do.
+- `generate_series` and `unnest` open nothing and are never policed.
+- The refusal is `42501` / HTTP 403 and happens before the file is opened or
+  the request is sent, in every position a table function can appear: a CTE, a
+  derived table, a join or `UNION` arm, a scalar / `IN` / `EXISTS` subquery,
+  the subquery in a DML predicate, and `EXPLAIN`.
 
 ## Cell-Level Policies
 

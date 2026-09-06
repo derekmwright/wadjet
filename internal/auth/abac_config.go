@@ -54,6 +54,18 @@ func MigrateRBACToABAC(roles []RoleConfig, cellPolicies []PolicyConfig) ([]Acces
 			}
 		}
 
+		// A role rule grants CATALOG relations, never the table-function
+		// capability. Without this condition a role with `tables: ["*"]`
+		// emitted a rule carrying NO resource condition at all, so it matched
+		// every resource — including `read_csv` — and a migrated `reader`
+		// would have been granted server-local file reads by the very rule
+		// that was meant to limit it to tables (#943).
+		resourceConds = append(resourceConds, Condition{
+			Attribute: "resource.type",
+			Op:        "neq",
+			Value:     ResourceTableFunction,
+		})
+
 		rules = append(rules, PolicyRule{
 			ID:        fmt.Sprintf("migrated-role-%s", role.Name),
 			EffectStr: "allow",
@@ -66,6 +78,30 @@ func MigrateRBACToABAC(roles []RoleConfig, cellPolicies []PolicyConfig) ([]Acces
 			Resources: resourceConds,
 			Actions:   actions,
 		})
+
+		// The capability itself goes to the roles that hold `admin`, so an
+		// administrator keeps the behaviour every deployment has today:
+		// reading a local file or an external database through a table
+		// function. PostgreSQL scopes the analogous `pg_read_file` and
+		// `COPY … FROM PROGRAM` to superusers and to a dedicated role.
+		if roleAllows(role.Allow, "admin") {
+			rules = append(rules, PolicyRule{
+				ID:        fmt.Sprintf("migrated-role-%s-table-functions", role.Name),
+				EffectStr: "allow",
+				Priority:  100,
+				Subjects: []Condition{{
+					Attribute: "subject.role",
+					Op:        "eq",
+					Value:     role.Name,
+				}},
+				Resources: []Condition{{
+					Attribute: "resource.type",
+					Op:        "eq",
+					Value:     ResourceTableFunction,
+				}},
+				Actions: []Action{ActionRead},
+			})
+		}
 
 		policies = append(policies, AccessControlPolicy{
 			Name:    fmt.Sprintf("migrated-role-%s", role.Name),
@@ -144,4 +180,14 @@ func MigrateRBACToABAC(roles []RoleConfig, cellPolicies []PolicyConfig) ([]Acces
 	}
 
 	return policies, nil
+}
+
+// roleAllows reports whether a role's `allow:` list holds perm.
+func roleAllows(allow []string, perm string) bool {
+	for _, p := range allow {
+		if p == perm {
+			return true
+		}
+	}
+	return false
 }

@@ -8128,6 +8128,19 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 
 	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
 	if node.IsTableFunc {
+		// ...and so they bypassed every access check, which is why they are
+		// authorized HERE, at the one place a table-function source is built.
+		// A subquery and a CTE body are planned as SEPARATE plans inside this
+		// planner, so an authorization pass over the statement's plan alone
+		// cannot see the `read_csv` inside `(SELECT COUNT(*) FROM read_csv(…))`
+		// — the same bypass #859's column policies had. The decision itself
+		// lives in `internal/auth`, which imports this package, so it arrives
+		// as a guard on the context (#943).
+		if guard := logical.TableFuncGuardFromContext(ctx); guard != nil {
+			if err := guard(node.FuncName, node.FuncArgs, node.FuncNamedArgs); err != nil {
+				return nil, nil, nil, err
+			}
+		}
 		if node.FuncName == "unnest" {
 			source, err := newUnnestSource(node.FuncArgs, node.WithOrdinality, node.FuncColAliases)
 			if err != nil {

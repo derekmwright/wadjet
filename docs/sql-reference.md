@@ -165,6 +165,38 @@ FROM table_name [alias]
 
 Query files directly from SQL without prior ingestion. Table functions appear in the `FROM` clause and support positional arguments, named parameters (`key=value`), and glob patterns.
 
+### Table functions are a privileged capability
+
+A table function is not a table. `read_csv('/etc/shadow')` reads a file off the
+server's own disk, `read_json('http://10.0.0.5/x')` makes the **server** issue
+an HTTP request from inside its network, and `postgres_query(dsn, sql)` opens
+an outbound database connection to wherever the caller points it. None of that
+is in the catalog, so the permissions that govern tables do not describe it.
+
+- With **no auth provider** — the embedded engine, the CLI, `wadjet query` —
+  nothing is enforced and table functions work exactly as this section
+  describes. That is the single-user use they were built for.
+- With **auth enabled** they are **denied by default**. An identity is granted
+  the capability by an ABAC policy that names it, or — in a deployment with
+  only legacy `roles:` and no hand-written ABAC — by holding the `admin`
+  permission. A role restricted to a set of tables no longer reaches the
+  filesystem through this door.
+
+This is PostgreSQL's disposition for the equivalent primitives: `pg_read_file`
+is superuser-only and `COPY … FROM PROGRAM` requires the
+`pg_execute_server_program` role.
+
+A denial is `42501` (HTTP 403) and happens **before** anything is opened: the
+file is never read and the URL is never fetched. It applies wherever the
+function appears — a CTE, a derived table, a join arm, a `UNION` arm, a scalar
+/ `IN` / `EXISTS` subquery, the subquery in a DML predicate, and `EXPLAIN`.
+
+`generate_series` and `unnest` compute over their own arguments and open
+nothing, so they are not part of this and remain available to every identity.
+
+See [Security](security.md#table-functions-as-a-capability) for how to write
+the policy, including scoping it to a path or a host.
+
 ### read_json
 
 Reads JSON files (JSONL or JSON array) with automatic schema inference and a custom direct-to-columnar byte scanner.
