@@ -123,7 +123,76 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 	if err := ValidateChunkLayout(md, footerOffset); err != nil {
 		return nil, fmt.Errorf("parquet: %w", err)
 	}
+	if err := ValidateColumnChunkPaths(md); err != nil {
+		return nil, fmt.Errorf("parquet: %w", err)
+	}
 	return md, nil
+}
+
+// ValidateColumnChunkPaths binds each row group's column chunks to the schema
+// leaves by FULL path, refusing a footer whose column metadata contradicts the
+// schema it belongs to.
+//
+// The reader resolves a leaf to its chunk by SLICE POSITION: FileReader.ColumnPages
+// reads rg.Columns[leafIdx] for schema leaf leafIdx, and every read path (the
+// row reader, the native scan) resolves a column NAME to that leafIdx first.
+// That is correct only while rg.Columns[j].PathInSchema names schema leaf j —
+// which the format requires (a row group lists one column chunk per leaf, in
+// schema-leaf order) and every writer honours. Nothing checked it. Swapping two
+// ColumnChunk entries in the footer therefore handed each leaf its neighbour's
+// chunk; for two columns of the same physical type the decode met no mismatch
+// and ReadRows returned the values under the wrong names, nil error (#927).
+// ValidateChunkLayout cannot catch it — it sorts extents by byte offset, so a
+// swap that keeps every byte range valid passes. The binding is checked here, at
+// open, by full path: a position whose chunk names a different leaf than the
+// schema puts there — a swap, a duplicate, or a foreign path — is refused by
+// name. A row group SHORT a chunk keeps its existing per-column refusal
+// ("carries no chunk for it", column_completeness.go), which names the absent
+// column; every position this file DOES carry is validated here, so a middle
+// drop that shifts the survivors is caught as a contradicting path.
+func ValidateColumnChunkPaths(md *FileMetaData) error {
+	if md == nil {
+		return nil
+	}
+	_, leaves := BuildSchemaTree(md.Schema)
+	for i := range md.RowGroups {
+		cols := md.RowGroups[i].Columns
+		for j := range cols {
+			if j >= len(leaves) {
+				break
+			}
+			cm := cols[j].MetaData
+			if cm == nil {
+				continue
+			}
+			if leaves[j] == nil || !pathsEqual(cm.PathInSchema, leaves[j].Path) {
+				var want []string
+				if leaves[j] != nil {
+					want = leaves[j].Path
+				}
+				return fmt.Errorf("row group %d column %d carries path %v but schema leaf %d is %v "+
+					"(swapped, duplicate or foreign column metadata)",
+					i, j, cm.PathInSchema, j, want)
+			}
+		}
+	}
+	return nil
+}
+
+// pathsEqual reports whether two schema paths name the same leaf, component for
+// component. Paths are compared byte-exact: this is a structural binding of a
+// chunk to its declared leaf, not a query-time name resolution, so the folding
+// FoldName applies to identifiers does not enter here.
+func pathsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateFileMetaData holds a decoded footer to the claims it makes about

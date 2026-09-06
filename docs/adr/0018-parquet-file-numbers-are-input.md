@@ -924,6 +924,22 @@ every consumer that names a top-level column is unchanged, and a nested leaf is
 addressable as `r.id`, colliding with nothing. This is the metadata-API twin of
 §12's scan-side collision below.
 
+**A swapped column-chunk metadata entry is read by slice position.** The reader
+binds a schema leaf to its column chunk by POSITION — `ColumnPages(rg, leafIdx)`
+reads `rg.Columns[leafIdx]`, and every read path resolves a column name to
+`leafIdx` first. That is correct only while `rg.Columns[j].PathInSchema` names
+schema leaf j, which the format requires and every writer honours, and nothing
+checked. Swapping two `ColumnChunk` entries in the footer fed each leaf its
+neighbour's chunk; for two columns of the same physical type the decode met no
+mismatch and `ReadRows` returned the values under the wrong names, nil error
+(#927). `ValidateChunkLayout` cannot catch it — it sorts extents by byte
+offset, so a swap with valid ranges passes. `ValidateColumnChunkPaths` now binds
+every chunk to its declared leaf by full path at open (`ReadFileMetaData`, the
+one chokepoint every reader and the footer cache pass through): a swap, a
+duplicate or a foreign path is refused by name; a row group short a chunk keeps
+its existing per-column "carries no chunk for it" refusal, and a middle drop
+that shifts the survivors is caught here as a contradicting path.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups
