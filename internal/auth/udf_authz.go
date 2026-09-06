@@ -44,18 +44,25 @@ type UDFMutation struct {
 // needs `admin`. No new permission words (ADR-0034).
 //
 // Fail-closed contract, the one `RequirePermission` already keeps: provider
-// nil or auth disabled → allowed, with no owner to record and nothing to
-// enforce, which is the embedded/CLI default and leaves every no-auth caller
-// exactly as it was. Auth enabled and no identity → refused 42501.
+// nil or auth disabled → the mutation is ALLOWED (there is no permission to
+// require), but the caller is NOT an administrator and records no owner. Auth
+// enabled and no identity → refused 42501.
 func AuthorizeUDFMutation(ctx context.Context, provider *Provider) (UDFMutation, error) {
 	if provider == nil || !provider.Enabled() {
-		// Nothing is enforced here, so nothing may be enforced BELOW here
-		// either: with no provider every definition carries the empty owner,
-		// and a lock check that fires on an empty owner would refuse the
-		// unauthenticated caller a right the previous code gave it. This is
-		// the same "auth disabled changes nothing" contract, said for the
-		// ownership rule.
-		return UDFMutation{IsAdmin: true}, nil
+		// `IsAdmin: false`, deliberately. A caller with no identity is not an
+		// administrator, and this is not the "auth disabled enforces nothing"
+		// case it looks like: the UDF registry is PERSISTED (cmd/wadjet wires
+		// `SetPersister` / `LoadDefs`), so it can hold a definition whose
+		// owner was recorded while auth was ON. Returning true here let an
+		// unauthenticated caller replace and drop THAT — the HTTP door refused
+		// it before this batch, and unifying the two doors on `DB.Query`'s old
+		// literal `true` would have unified them on half of #940.
+		//
+		// Nothing an unauthenticated deployment does breaks: a definition
+		// created in this state carries the empty owner, and `UDFStore`'s lock
+		// check only fires on a NON-EMPTY owner (`existing.def.Owner != ""`),
+		// so the same caller can still replace and drop everything it made.
+		return UDFMutation{}, nil
 	}
 	if err := RequirePermission(provider, ctx, "write"); err != nil {
 		return UDFMutation{}, err

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 )
 
@@ -227,4 +228,101 @@ func anyContains(rows []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// P2. With NO provider — or a provider whose auth is DISABLED — the caller is
+// not an administrator.
+//
+// The UDF registry is PERSISTED (`cmd/wadjet` wires `UDFStore.SetPersister` and
+// `LoadDefs`), so it can hold a definition whose owner was recorded while auth
+// was ON. Returning `IsAdmin: true` for a caller with no identity let that
+// caller replace and drop such a definition — which the HTTP door refused
+// before this batch, because it computed `isAdmin = identity.Role == "admin"`
+// and a nil identity is not "admin". Unifying the two doors on `DB.Query`'s old
+// unconditional `true` would have unified them on half of #940.
+//
+// The other half of the claim is what keeps every no-auth deployment working:
+// a definition CREATED without an identity carries the empty owner, and
+// `UDFStore`'s lock check fires only on a non-empty owner, so the same caller
+// still replaces and drops everything it made.
+func TestWithoutAProviderTheCallerIsNotAnAdministrator(t *testing.T) {
+	ctx := context.Background()
+	cleanupUDFs(t, "u940_loaded", "u940_selfmade")
+
+	// Seeded exactly as LoadDefs would from persisted state: an owner recorded
+	// under a previous, authenticated configuration.
+	if err := expr.DefaultUDFs.Register(expr.UDFDef{
+		Name: "u940_loaded", Params: []string{"x"}, Body: "x + 1",
+		Owner: "writer", Locked: true,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	db := sec4DB(t, ctx) // no provider at all
+	for _, sql := range []string{
+		"CREATE OR REPLACE FUNCTION u940_loaded(x) AS x + 99 WITH LOCK",
+		"DROP FUNCTION u940_loaded",
+	} {
+		if _, err := db.Query(ctx, sql); err == nil {
+			t.Errorf("no-provider caller must not override an owner recorded while auth was on: %q succeeded", sql)
+		}
+	}
+	got, ok := expr.DefaultUDFs.Get("u940_loaded")
+	if !ok {
+		t.Fatal("the locked, owned function was removed by an unauthenticated caller")
+	}
+	if got.Owner != "writer" || got.Body != "x + 1" {
+		t.Fatalf("the definition changed: owner=%q body=%q", got.Owner, got.Body)
+	}
+
+	// ...and nothing an unauthenticated deployment does for itself breaks.
+	if _, err := db.Query(ctx, "CREATE FUNCTION u940_selfmade(x) AS x + 1 WITH LOCK"); err != nil {
+		t.Fatalf("no-provider CREATE … WITH LOCK: %v", err)
+	}
+	if d, _ := expr.DefaultUDFs.Get("u940_selfmade"); d.Owner != "" {
+		t.Errorf("no-provider owner = %q, want empty", d.Owner)
+	}
+	if _, err := db.Query(ctx, "CREATE OR REPLACE FUNCTION u940_selfmade(x) AS x + 2 WITH LOCK"); err != nil {
+		t.Fatalf("no-provider REPLACE of its OWN locked function: %v", err)
+	}
+	if _, err := db.Query(ctx, "DROP FUNCTION u940_selfmade"); err != nil {
+		t.Fatalf("no-provider DROP of its OWN locked function: %v", err)
+	}
+}
+
+// The same rule on the HTTP door, with a provider that is present but DISABLED
+// — the configuration that reaches `ProviderMiddleware`'s `!provider.Enabled()`
+// passthrough, so the request arrives with no identity.
+func TestHTTPWithAuthDisabledCannotOverrideARecordedOwner(t *testing.T) {
+	ctx := context.Background()
+	cleanupUDFs(t, "u940_httpdisabled")
+
+	if err := expr.DefaultUDFs.Register(expr.UDFDef{
+		Name: "u940_httpdisabled", Params: []string{"x"}, Body: "x + 1",
+		Owner: "writer", Locked: true,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// auth.New with no keys and no roles yields an Authenticator that is not
+	// Enabled(), which is how a deployment turns auth off.
+	authn, authz := auth.New(auth.Config{Enabled: false})
+	provider := auth.NewProvider(authn, authz, nil, nil)
+	if provider.Enabled() {
+		t.Fatal("fixture error: the provider must be disabled for this cell")
+	}
+	rig := sec4RigWithProvider(t, ctx, provider)
+	http := rig.door("http")
+
+	for _, sql := range []string{
+		"CREATE OR REPLACE FUNCTION u940_httpdisabled(x) AS x + 99 WITH LOCK",
+		"DROP FUNCTION u940_httpdisabled",
+	} {
+		if _, _, err := http.run(t, "", sql); err == nil {
+			t.Errorf("HTTP with auth disabled must not override a recorded owner: %q succeeded", sql)
+		}
+	}
+	if got, ok := expr.DefaultUDFs.Get("u940_httpdisabled"); !ok || got.Body != "x + 1" {
+		t.Fatalf("the definition changed or was removed: %+v", got)
+	}
 }
