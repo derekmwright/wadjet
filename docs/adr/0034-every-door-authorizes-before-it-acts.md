@@ -2,7 +2,7 @@
 
 Status: Accepted
 Date: 2026-09-06
-Issues: #930 #931 #932 #933 (the authentication and policy core); #934 #935 (gRPC); #936 #937 #938 (HTTP and pgwire doors); #939 #940 #941 #942 #943 (the embedded API and SQL statement door)
+Issues: #930 #931 #932 #933 (the authentication and policy core); #934 #935 (gRPC); #936 #937 #938 (HTTP and pgwire doors); #939 #940 #941 #942 #943 (the embedded API and SQL statement door); #945 (the subquery a planner writes for itself); #944 (the relation lookup psql sends)
 
 ## Context
 
@@ -257,6 +257,8 @@ The gRPC service authorizes **per method**, explicitly, in the method body. The 
 |---|---|---|
 | COPY ... FROM STDIN | auth.TableAccess(ActionWrite) on the resolved table AND the identity's column policy over the COPY column list (INSERT's rule, auth.EnforceDMLPolicies) | SQLSTATE 42501 permission denied for table "x" (or 42703 for a denied column), sent INSTEAD of CopyInResponse; no row is consumed, the ingester is never constructed, the connection stays in the message loop |
 | is_superuser ParameterStatus | reports HasPermission(identity, "admin") | — (with no provider the session is unrestricted and it stays on) |
+| psql `\d <name>` — the anchored relation lookup `relname OPERATOR(pg_catalog.~) '^(name)$'` | the same relation set every synthetic catalog view is built from (`auth.VisibleTables`) | not a refusal: a denied relation answers ZERO ROWS and psql prints "Did not find any relation named …" |
+| a pg_class `relname` regex this server does not model (an unanchored or wildcard pattern, `!~`, `~*`) | — | SQLSTATE 0A000 naming the form that works; never a silent empty answer |
 
 #### The positions these rows encode
 
@@ -319,6 +321,25 @@ With auth enabled a context carrying no identity is refused at every row; with n
 
 **A table function is a capability, and an external read is not a relation.** `read_csv`, `read_json`, `read_parquet`, `postgres_scan`, `postgres_query`, `mysql_scan`, `mysql_query` read what the catalog does not hold. `PolicedScanTables` and `StatementBaseTables` both skip a function scan — correctly, since a column policy binds to a relation's schema — and the consequence was that such a scan was not a resource of ANY kind. It is one now: `Resource{Type:"table_function", Name:"<func>", Attributes:{path (~/-expanded, Clean'd), url, host, arg_<k>}}` evaluated with `ActionRead`; the connection string is never an attribute because it carries a password. Default DENY under auth (deny-overrides' closed world doing its job), `admin` under legacy roles, unchanged with auth disabled. Enforcement is in two places and both are load-bearing: the plan-time pass so a denial opens no file and sends no request, and the context guard `physical.buildScan` asks, which covers the scalar/`IN`/`EXISTS` subquery and CTE body that are SQL *text* when the statement's plan is enforced. **PG divergence and precedent**: PostgreSQL has no analogue, but its equivalent primitives are privileged — an ordinary role gets `42501 permission denied for function pg_read_file`, and `COPY … FROM PROGRAM` answers `42501 permission denied to COPY to or from an external program` (only `pg_execute_server_program`). Server-side file and program access being a privilege is PostgreSQL's own position.
 
+**A subquery is a second query, and it asks the same decision.** The physical
+planner turns an expression subquery's TEXT into a plan of its own — after
+`EnforcePlanPolicies` has run over the statement's plan, which cannot contain
+it — and so does the DAG's scalar-producer path. Both ask the context LOOKUP
+for every relation that plan reads, which is the same body `EnforcePlanPolicies`
+asks for the relations the statement named and `EnforceOptimizedPlan` asks for a
+scan the optimizer minted: access first, then the obligations. Until they did,
+`SELECT (SELECT MAX(id) FROM other)` answered the value on every door and under
+both provider shapes for an identity that may not read `other`, while eight
+other spellings of the same read refused (#945). The refusal is at the site
+that BUILDS the plan and not at a walk of the statement's text, so the spelling
+— SELECT item, `WHERE`, `CASE`, CTE body, correlated — decides nothing; the
+same pass carries the row filter and the mask into that plan, which a row
+filter bound to a relation reached only from a subquery had not been. **An
+authorization refusal is never fallen back on**: the producer-emission
+fallbacks exist to route a shape the stage DAG cannot express, and a refusal is
+not such a shape — parked and returned, it reaches the client as 42501 instead
+of as the worker error the re-spliced subquery text produced.
+
 **Metadata follows the effective table decision — a deliberate PG divergence.** `DESCRIBE`, `SHOW COLUMNS FROM` and `SHOW TABLES` ask what the data door asks: `TableAccess` for a named relation, `VisibleTables` for a listing, on the catalog-resolved spelling so a policy bound to `Ledger` polices `DESCRIBE ledger`. Explicit ABAC denies govern, which legacy `CanAccessTable`/`FilterTables` cannot express (`tables:["*"]` says yes to everything). **PostgreSQL says otherwise and we diverge on purpose** — measured: `\d` and `\dt` as a role with no privileges print the full column list and all 95 tables. Metadata visibility is a product decision, not a wire-compatibility one; an entry in ADR-0012's divergence list. **Not covered, recorded rather than implied**: a client introspecting through `pg_catalog` is answered by `internal/server/pgwire/catalog_rows.go`, which is not filtered.
 
 
@@ -328,6 +349,7 @@ With auth enabled a context carrying no identity is refused at every row; with n
 | all | column binding (`SELECT nosuchcol`), per relation | `ValidateStatementColumns` → the same resolver, same environment | 42703, over the schema the identity can see |
 | all | INSERT / UPDATE / DELETE / MERGE | `EnforceDMLPolicies` → the shared decision, `ActionWrite` on the target — plus `ActionRead` when the statement observes it (a WHERE or SET naming a column, or MERGE) | 42501 `permission denied for table "x"` |
 | all | a scan the resolved set never saw (decorrelation, late passes) | the resolver's `lookup` — the same decision | 42501 |
+| all | every relation an EXPRESSION SUBQUERY reads — a SELECT-list item, a `WHERE`, a `CASE`, a CTE body, correlated or not | the same `lookup`, asked by the physical planner where it turns the subquery's TEXT into a plan (`applyContextColumnPolicies`), before the pipeline is built and before a stage is emitted | 42501 `permission denied for table "x"` |
 | all | CREATE / DROP ALERT | `RequirePermission(provider, ctx, "admin")` | authorization error, rendered per door |
 | HTTP | authentication | `ProviderMiddleware` → `Authenticator.Authenticate`; the trusted environment is attached here | 401 |
 | pgwire | authentication | `authenticate` → `AuthenticateToken`; the environment is attached in `queryContext`, which is the context enforcement reads | 28000 / 28P01 |
@@ -355,7 +377,15 @@ With auth enabled a context carrying no identity is refused at every row; with n
    as a subject attribute nothing populates — a rule that never matches, which
    beside a broad allow is a grant.
 
-3. **`auth.enabled: true` with no credential mechanism refuses startup.**
+3. **`psql`'s `\d` answers ZERO ROWS for a relation the identity may not read**
+   — "Did not find any relation named …" — where the same identity asking for
+   the relation by name through `DESCRIBE` is refused 42501. Both follow the
+   one decision; what differs is the ANSWER SHAPE, and it differs because this
+   path is a LISTING (`\d` filters `pg_class`), and a listing publishes
+   absence, not a refusal. PostgreSQL shows `\d` to anyone, so the divergence
+   is the filtering itself; the empty answer is how it is spelled on this path.
+
+4. **`auth.enabled: true` with no credential mechanism refuses startup.**
    PostgreSQL would start with whatever `pg_hba.conf` says, including `trust`.
    Wadjet treats "the operator asked for authentication and it cannot be
    performed" as a configuration error rather than a mode.
@@ -430,6 +460,27 @@ With auth enabled a context carrying no identity is refused at every row; with n
   lets the identity read.
 - `internal/server/denied_read_class_door_test.go` — a denied SELECT and a
   denied DELETE both leave pgwire as SQLSTATE 42501 with PostgreSQL's message.
+- `internal/server/sec5_subquery_relation_test.go` —
+  `TestAScalarSubqueryAsksTheTableDecisionOnEveryDoor`: eight doors (embedded
+  single and spilled, the DAG and the shuffled DAG, pgwire on both, HTTP on
+  both) × both provider shapes × seven spellings, from BOTH sides;
+  `TestADeniedScalarSubqueryRefusesBeforeAnyStageIsDispatched` (the store holds
+  no stage output after the refusal), `TestAScalarSubqueryCarriesTheObligationsToo`
+  (the row filter reaches the subquery's plan, and a masked relation named only
+  there answers the mask instead of refusing),
+  `TestADeniedScalarSubqueryLeavesPgwireAs42501` (the class and the exact text),
+  and the no-auth control — #945. The ninth spelling is also in
+  `TestADeniedSelectDisclosesNoRuleID` and
+  `TestTheLegacyShapePolicesTheRelationsThePlanGROWS`, beside the eight that
+  already refused.
+- `internal/server/pgwire/sec5_psql_describe_test.go` —
+  `TestPsqlDescribeResolvesItsRelation` runs the three statements psql 17.5
+  sends for `\d`, in order, feeding each the OID the previous answered;
+  `TestPsqlDescribeFollowsTheTableDecision` asserts the visibility filter on
+  psql's REAL spelling (the equality arm in
+  `sec3_catalog_visibility_test.go` could not);
+  `TestAnUnsupportedRelnameRegexRefuses` and
+  `TestAnchoredRelnameRegexReadsWhatPsqlSends` — #944.
 - `internal/auth/attach_sites_test.go` (ADR-0033) stays the source census: a
   provider reaches a catalog through the binding function and through nothing
   else.

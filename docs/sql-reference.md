@@ -406,6 +406,29 @@ list may be empty. Explicit ABAC denies apply. This is deliberately unlike
 PostgreSQL, which shows `\d` to any role — see
 [Security](security.md#metadata-follows-the-table-decision).
 
+A relation is described under the spelling the CATALOG holds: an unquoted
+identifier folds at the lexer, and `DESCRIBE Ledger` finds the relation created
+as `Ledger` exactly as `SELECT * FROM Ledger` does.
+
+### psql's `\d` and the pg_catalog emulation
+
+`psql`'s `\d <name>` does not look a relation up by equality: it sends the
+anchored pattern `c.relname OPERATOR(pg_catalog.~) '^(name)$'`. The wire
+protocol's catalog emulation models THAT form — the whole-name pattern `psql`
+emits for a literal identifier, including the `E'^(a\\.b)$'` spelling for a
+quoted name containing a metacharacter — so `\d`, `\dt` and a BI tool's
+schema tree resolve the relation and print its columns.
+
+The GENERAL regular-expression operator is not implemented. A pattern this
+server cannot answer — an unanchored or wildcard one such as `\dt sec5*`, or
+the `!~` / `~*` operators — is refused with SQLSTATE `0A000` naming the form
+that works, rather than answered with the predicate silently ignored. List
+relations with `SHOW TABLES`, or spell the lookup `relname = 'name'`.
+
+With auth enabled the emulation renders only the relations the identity may
+read, so `\d` on a denied relation answers nothing and `psql` reports "Did not
+find any relation named …".
+
 ## CREATE TABLE
 
 ```sql
@@ -550,6 +573,11 @@ SELECT src_ip, bytes_in,
        bytes_in - (SELECT AVG(bytes_in) FROM flow_logs) AS diff_from_avg
 FROM flow_logs
 ```
+
+With auth enabled, a subquery's relations are authorized like any others: an
+identity that may not read `flow_logs` is refused `42501` whether it names the
+table in the `FROM` clause or only inside a subquery, and a mask or row filter
+that applies to the table applies inside the subquery too.
 
 ### IN Subqueries
 

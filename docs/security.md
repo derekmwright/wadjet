@@ -257,7 +257,9 @@ nothing is enforced and every statement behaves as it always has.
 #### Metadata follows the table decision
 
 `DESCRIBE`, `SHOW COLUMNS FROM` and `SHOW TABLES` ask the same question the data
-door asks. An identity that may not read a relation may not read its schema
+door asks, on the relation the catalog holds — a `CamelCase` relation is
+described under the spelling the catalog stores, the same one the read path
+resolves. An identity that may not read a relation may not read its schema
 either, and the listing does not publish its name. The check runs before the
 catalog is touched, and it honours **explicit ABAC denies**, which take
 precedence over the role's `tables:` list here exactly as they do everywhere
@@ -271,9 +273,11 @@ subset, which may be empty.
 This is a deliberate divergence from PostgreSQL, which shows `\d` and `\dt` to
 any role regardless of privileges. Metadata visibility is a product decision
 rather than a wire-compatibility one, and it is recorded as such in ADR-0012's
-divergence list. Note that a client using `pg_catalog` introspection rather
-than `DESCRIBE` is answered by the wire protocol's catalog emulation, which is
-not filtered.
+divergence list. A client using `pg_catalog` introspection rather than
+`DESCRIBE` is answered by the wire protocol's catalog emulation, which follows
+the same decision — including the anchored relation lookup `psql`'s `\d`
+sends, where a denied relation answers no rows and `psql` reports "Did not find
+any relation".
 
 #### User-defined function ownership
 
@@ -747,7 +751,13 @@ list names no targets, the way an `INSERT` with no column list does not.
 7. Query executes — restricted values never leave the scan
 
 An expression subquery (`(SELECT MAX(col) FROM t)`, an `IN` set, an `EXISTS`)
-is planned under the same policies as its enclosing statement.
+is a second query with a plan of its own, and every relation it reads asks the
+same three questions in the same order: **table access first**, then the
+column obligations, then the row filter. It does not matter whether the
+enclosing statement names that relation, or where the subquery sits — a SELECT
+item, a `WHERE`, a `CASE`, a CTE body. A relation the identity may not read
+refuses `42501` before the subquery's pipeline is built, on every door and on
+the distributed path, where the refusal precedes stage dispatch.
 
 Admin roles are typically exempt from all policies (they see the raw data). An
 identity with no matching column obligations is unaffected.
@@ -917,7 +927,12 @@ identity read, and nothing else.
 
 The filter is applied once, to the relation set the views are built from, not
 per view: `\d` joins `pg_class` and `pg_attribute`, so hiding one and not the
-other would hide nothing.
+other would hide nothing. It applies on the RELATION LOOKUP too — `psql` finds
+a relation with the anchored pattern `relname OPERATOR(pg_catalog.~)
+'^(name)$'` rather than by equality — so a denied relation answers zero rows
+there and `psql` prints "Did not find any relation named …". That is the
+anti-enumeration answer on this path, deliberately not `42501`: the refusal a
+caller gets by NAME is the data door's.
 
 ### A query belongs to the identity that submitted it
 
