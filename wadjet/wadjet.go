@@ -1179,6 +1179,12 @@ func (db *DB) ShowFunctions(ctx context.Context) (*QueryResult, error) {
 // own `HasPermission(identity, "write")` check refused the identical statement
 // (#939). The HTTP handlers keep their checks as early refusals; this is the
 // one that cannot be gone around.
+//
+// CREATE is permission-only, unlike DROP and ANALYZE, which additionally ask
+// `auth.TableAccess` about the relation they act on. There is no relation to
+// decide about yet: the name does not exist, so no policy is bound to it, and
+// PostgreSQL treats CREATE as a privilege on the SCHEMA (`permission denied
+// for schema public`) rather than on the object.
 func (db *DB) createTableSQL(ctx context.Context, ct *plansql.CreateTableInfo) (*QueryResult, error) {
 	if err := auth.RequirePermission(db.authProvider, ctx, "write"); err != nil {
 		return nil, err
@@ -1210,6 +1216,15 @@ func (db *DB) dropTableSQL(ctx context.Context, dt *plansql.DropTableInfo) (*Que
 	if err := auth.RequirePermission(db.authProvider, ctx, "write"); err != nil {
 		return nil, err
 	}
+	// ...and the decision about THIS relation. The permission alone never
+	// consulted the policy, so an identity holding `write` that an explicit
+	// ABAC deny covers could drop the very table the policy protects. A
+	// statement that destroys a relation asks at least what a statement that
+	// reads it asks (batch-wide position, ADR-0034).
+	if err := auth.TableAccess(ctx, db.authProvider,
+		db.catalog.ResolveTableName(dt.Name), auth.ActionWrite); err != nil {
+		return nil, err
+	}
 	err := db.catalog.DropTable(ctx, dt.Name)
 	if err != nil {
 		if dt.IfExists {
@@ -1235,6 +1250,13 @@ func (db *DB) dropTableSQL(ctx context.Context, dt *plansql.DropTableInfo) (*Que
 // CREATE and DROP (#939).
 func (db *DB) analyzeTableSQL(ctx context.Context, at *plansql.AnalyzeTableInfo) (*QueryResult, error) {
 	if err := auth.RequirePermission(db.authProvider, ctx, "write"); err != nil {
+		return nil, err
+	}
+	// The decision about THIS relation too — ANALYZE reads every parquet file
+	// the table has and writes its statistics record, so it is a write to a
+	// named relation and not a schema-level operation (see dropTableSQL).
+	if err := auth.TableAccess(ctx, db.authProvider,
+		db.catalog.ResolveTableName(at.Name), auth.ActionWrite); err != nil {
 		return nil, err
 	}
 	n, err := db.catalog.AnalyzeTable(ctx, at.Name)

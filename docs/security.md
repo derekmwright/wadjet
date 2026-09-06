@@ -237,7 +237,8 @@ and the HTTP handlers' own checks are early refusals of the same rule.
 |---|---|
 | `SELECT`, `EXPLAIN` | `read` on every relation the query reads (RBAC `tables`, or the ABAC decision) |
 | `INSERT`, `UPDATE`, `DELETE`, `MERGE` | `write` on the target table |
-| `CREATE TABLE`, `DROP TABLE`, `ANALYZE` | `write` |
+| `CREATE TABLE` | `write` |
+| `DROP TABLE`, `ANALYZE` | `write`, **and** the table decision for that relation — an explicit ABAC deny refuses even an identity that holds `write` |
 | `CREATE [OR REPLACE] FUNCTION`, `DROP FUNCTION` | `write`; `admin` to override another owner's `WITH LOCK` |
 | `SHOW FUNCTIONS` | any authenticated identity |
 | a table function in any `FROM` clause (`read_csv`, `postgres_query`, …) | an ABAC policy granting the `table_function` capability; `admin` under legacy roles — see [Table functions as a capability](#table-functions-as-a-capability) |
