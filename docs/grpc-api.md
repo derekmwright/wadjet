@@ -46,7 +46,8 @@ Authentication proves who the caller is; each RPC still checks what that identit
 
 | RPC | Requires |
 |-----|----------|
-| `CreateTable`, `DropTable` | the `write` permission (`allow: [write]` or `[admin]` on the caller's role) |
+| `CreateTable` | the `write` permission (`allow: [write]` or `[admin]` on the caller's role) |
+| `DropTable` | the `write` permission **and** write access to that table |
 | `ListTables` | nothing — but the listing contains only the tables the identity may read |
 | `DescribeTable` | read access to that table |
 | `Query`, `QueryStream` | whatever the statement needs: a policy refusal (SQLSTATE `42501`) is returned as `PERMISSION_DENIED`, not `INTERNAL` |
@@ -180,6 +181,8 @@ An unparseable declaration is refused with `INVALID_ARGUMENT`, carrying the SQLS
 
 Requires the `write` permission. A caller without it gets `PERMISSION_DENIED` before the request is inspected, so a refused call creates nothing.
 
+The permission is the whole check here: the name being created does not resolve to an existing relation, so there is no table-scoped rule to apply. `DropTable`, which acts on a relation that does exist, additionally asks that table's access decision.
+
 ---
 
 ### DropTable
@@ -190,7 +193,9 @@ Drop a table. Set `if_exists = true` to suppress errors if the table doesn't exi
 rpc DropTable(DropTableRequest) returns (DropTableResponse);
 ```
 
-Requires the `write` permission. The check runs before the catalog and before `if_exists` is considered: a caller without `write` gets `PERMISSION_DENIED` whether or not the table exists, and the table survives.
+Requires the `write` permission **and** write access to the named table. Both checks run before the catalog and before `if_exists` is considered: a caller that fails either gets `PERMISSION_DENIED` whether or not the table exists, and the table survives.
+
+The second check is what stops a role scoped to `tables: [flow_logs]` from dropping any other table, and what makes an ABAC `deny` on a table govern its destruction — the same rule that decides whether the caller may read a row of it.
 
 ---
 

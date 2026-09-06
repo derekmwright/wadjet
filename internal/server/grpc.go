@@ -495,6 +495,13 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 	// and it asks BEFORE the request is even inspected — a refusal must
 	// precede every side effect, and an unauthorized caller learns nothing
 	// about the request it was not allowed to make (#934).
+	//
+	// Permission ONLY, deliberately — unlike DropTable, which also asks
+	// auth.TableAccess. CREATE has no existing relation to decide about: the
+	// name does not resolve to anything yet, so a table-scoped rule has
+	// nothing to match and asking would decide about a relation that does not
+	// exist. PostgreSQL draws the same line — CREATE is a privilege on the
+	// SCHEMA, DROP is checked against the object (round-1 review P1).
 	if err := grpcRequireWrite(g.authProvider, ctx); err != nil {
 		return nil, err
 	}
@@ -610,6 +617,30 @@ func (g *GRPCServer) DropTable(ctx context.Context, req *wadjetv1.DropTableReque
 	}
 	if req.Name == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+
+	// DROP acts on an EXISTING relation, so the permission is only half the
+	// question: this identity must also be allowed to write THAT TABLE. Asking
+	// only `HasPermission(write)` let a role scoped to `tables: [allowed]`
+	// destroy `secret`, and let an EXPLICIT ABAC deny on a relation be
+	// out-argued by the one operation that removes it — the same evaluator
+	// that refused to show the caller a column of it. A control that governs
+	// reading a row must govern destroying every row (round-1 review P1).
+	//
+	// ActionWrite, not a new word: the permission vocabulary is read/write/admin
+	// and TableAccess maps write→create→drop onto `write` for the legacy arm,
+	// which is the grouping MigrateRBACToABAC already emits.
+	//
+	// Decided on the CATALOG spelling, dropped on the caller's — the same split
+	// DescribeTable makes and for the same reason: the catalog keys a drop
+	// byte-exact, so where the two disagree the drop misses rather than landing
+	// on a relation the decision was not taken about.
+	name := req.Name
+	if g.catalog != nil {
+		name = g.catalog.ResolveTableName(req.Name)
+	}
+	if err := auth.TableAccess(ctx, g.authProvider, name, auth.ActionWrite); err != nil {
+		return nil, status.Error(codes.PermissionDenied, err.Error())
 	}
 
 	if err := g.catalog.DropTable(ctx, req.Name); err != nil {
