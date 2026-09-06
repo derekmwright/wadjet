@@ -77,7 +77,14 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	for _, tableName := range policedRelations(ctx, cat, selectInfo, plan) {
 		td := r.decide(tableName)
 		if !td.Allowed {
-			return ctx, nil, fmt.Errorf("access denied to table %q: %s", tableName, td.Reason)
+			// The SAME class and the SAME text the DML door and the shared
+			// table-access decision use. This was a bare fmt.Errorf, so a
+			// denied SELECT reached pgwire with NO SQLSTATE (the generic
+			// 42000) and gRPC as codes.Internal — an authorization refusal
+			// that no client could tell from a server fault, while the
+			// identical refusal on a DELETE was a clean 42501 (ADR-0034).
+			return ctx, nil, sqlerr.New("42501", "permission denied for table %q: %s",
+				tableName, td.Reason)
 		}
 		if td.RowFilter != "" {
 			rowFilters = append(rowFilters, tableFilter{tableName, td.RowFilter})
@@ -376,7 +383,8 @@ func (r *policyResolver) columnPolicies(table string) ([]logical.ColumnPolicy, e
 func (r *policyResolver) lookup(table string) ([]logical.ColumnPolicy, string, error) {
 	td := r.decide(table)
 	if !td.Allowed {
-		return nil, "", fmt.Errorf("access denied to table %q: %s", table, td.Reason)
+		return nil, "", sqlerr.New("42501", "permission denied for table %q: %s",
+			table, td.Reason)
 	}
 	cols, err := r.columnPolicies(table)
 	if err != nil {
