@@ -71,9 +71,17 @@ Load-bearing properties:
    late-materialization gathers use different column sets). A
    whole-row-group cache keyed by column set would thrash; a per-column
    cache accumulates union coverage.
-4. **Decode output depends on the catalog type**, not just the file
-   type (`coerce`, `columnar_native.go:229`; DECIMAL scale) — the type
-   belongs in the cache key.
+4. **Decode output — and its VALIDITY — depend on the catalog
+   declaration**, not just the file type (`coerce`,
+   `columnar_native.go:229`; DECIMAL scale AND precision). A DECIMAL is
+   admitted only after the cold decode validated its carriers against
+   the destination precision (`rescaleDecimalChunk` raises `22003` for a
+   value that overflows it, #707), so the precision a hit was validated
+   at is part of what the hit promises: `DECIMAL(9,2)` admits `1234.00`
+   and `DECIMAL(3,2)` refuses it. Both scale and precision belong in the
+   cache key; omitting precision let a chunk validated under a wide
+   declaration be served for a narrow one, bypassing the overflow check
+   the cold path applies (#914).
 5. **Identity does not reach the decode layer.** `parquet.FileReader`
    carries no path/key. Identity is available one level up at the open
    sites (`stream_source.go:978/1003`: bucket, object key, size). ETag
@@ -99,7 +107,7 @@ Load-bearing properties:
 Cache **decoded column chunks**: one entry per
 
 ```
-key   = (bucket, objectKey, fileSize, rowGroupIdx, leafColIdx, catalogTypeID, decimalScale)
+key   = (bucket, objectKey, fileSize, rowGroupIdx, leafColIdx, catalogTypeID, decimalScale, decimalPrecision)
 value = cache-owned *batch.Vector clone (Len == rg.NumRows) + byte size
 ```
 

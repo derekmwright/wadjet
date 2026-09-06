@@ -90,6 +90,17 @@ type decodedChunkKey struct {
 	colIdx      int // leaf column index in the file schema
 	catalogType pqt.TypeID
 	scale       int // DECIMAL scale (0 otherwise)
+	// precision is the DECLARED DECIMAL precision (0 otherwise). A cached
+	// chunk is admitted only AFTER the cold decode validated its values
+	// against the destination precision (rescaleDecimalChunk raises 22003 for
+	// a value that overflows it, #707), so precision is part of what a hit
+	// promises. Two catalog declarations that share a scale but differ in
+	// precision are NOT the same validated chunk: DECIMAL(9,2) admits 1234.00
+	// and DECIMAL(3,2) refuses it. Omitting precision let a chunk validated
+	// under a wide declaration be served for a narrow one, bypassing the
+	// overflow check the cold path applies (#914). Keying by precision means a
+	// narrow read misses, re-decodes, and raises — both paths agree.
+	precision int
 }
 
 const (
@@ -201,6 +212,7 @@ func (c *DecodedChunkCache) keyFor(fr *pqt.FileReader, rgIdx, colIdx int, col pq
 		colIdx:      colIdx,
 		catalogType: col.Type,
 		scale:       col.Scale,
+		precision:   col.Precision,
 	}, true
 }
 
