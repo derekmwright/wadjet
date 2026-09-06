@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
@@ -41,7 +42,7 @@ func TestQueryTrackerRegisterAndGet(t *testing.T) {
 		"s0": {StageID: "s0", Type: distributed.TaskType("scan"), TotalTasks: 3},
 		"s1": {StageID: "s1", Type: distributed.TaskType("aggregate"), TotalTasks: 1, Dependencies: []string{"s0"}},
 	}
-	qt.Register("q1", "SELECT * FROM t", stages, []string{"s0", "s1"})
+	qt.Register("q1", "SELECT * FROM t", auth.IdentitySnapshot{}, stages, []string{"s0", "s1"})
 
 	info := qt.Get("q1")
 	if info == nil {
@@ -71,7 +72,7 @@ func TestQueryTrackerGetMissing(t *testing.T) {
 
 func TestQueryTrackerStart(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SELECT 1", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q1")
 
 	info := qt.Get("q1")
@@ -87,7 +88,7 @@ func TestQueryTrackerStartMissing(t *testing.T) {
 
 func TestQueryTrackerComplete(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SELECT 1", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q1")
 	qt.Complete("q1")
 
@@ -107,7 +108,7 @@ func TestQueryTrackerCompleteMissing(t *testing.T) {
 
 func TestQueryTrackerFail(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SELECT 1", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q1")
 	qt.Fail("q1", "something went wrong")
 
@@ -130,7 +131,7 @@ func TestQueryTrackerFailMissing(t *testing.T) {
 
 func TestQueryTrackerCancel(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SELECT 1", map[string]*StageInfo{
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 1},
 	}, []string{"s0"})
 	qt.Start("q1")
@@ -157,7 +158,7 @@ func TestRecordResult(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 2},
 	}
-	qt.Register("q1", "SELECT 1", stages, []string{"s0"})
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q1")
 
 	// First result
@@ -200,7 +201,7 @@ func TestRecordResultFailed(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 1},
 	}
-	qt.Register("q1", "SELECT 1", stages, []string{"s0"})
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q1")
 
 	complete := qt.RecordResult(distributed.ResultNotification{
@@ -235,7 +236,7 @@ func TestRecordResultMissingQuery(t *testing.T) {
 
 func TestRecordResultMissingStage(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SELECT 1", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q1")
 
 	complete := qt.RecordResult(distributed.ResultNotification{
@@ -254,7 +255,7 @@ func TestRecordResultDedup(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 2},
 	}
-	qt.Register("q1", "SELECT 1", stages, []string{"s0"})
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q1")
 
 	result := distributed.ResultNotification{
@@ -304,7 +305,7 @@ func TestIsComplete(t *testing.T) {
 		"s0": {StageID: "s0", TotalTasks: 1},
 		"s1": {StageID: "s1", TotalTasks: 1, Dependencies: []string{"s0"}},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0", "s1"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0", "s1"})
 	qt.Start("q1")
 
 	if qt.IsComplete("q1") {
@@ -343,7 +344,7 @@ func TestGetReadyStages(t *testing.T) {
 		"s2": {StageID: "s2", TotalTasks: 1, Dependencies: []string{"s0"}},
 		"s3": {StageID: "s3", TotalTasks: 1, Dependencies: []string{"s1", "s2"}},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0", "s1", "s2", "s3"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0", "s1", "s2", "s3"})
 	qt.Start("q1")
 
 	// Initially only s0 should be ready (no deps)
@@ -398,7 +399,7 @@ func TestSetStageTasks(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 0}, // initially unknown
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0"})
 
 	qt.SetStageTasks("q1", "s0", 5)
 
@@ -415,7 +416,7 @@ func TestSetStageTasksMissingQuery(t *testing.T) {
 
 func TestSetStageTasksMissingStage(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SQL", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.SetStageTasks("q1", "nonexistent", 5) // should not panic
 }
 
@@ -426,7 +427,7 @@ func TestUpdateResultPath(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 1},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q1")
 
 	qt.RecordResult(distributed.ResultNotification{
@@ -456,7 +457,7 @@ func TestUpdateResultPathMissingQuery(t *testing.T) {
 
 func TestUpdateResultPathMissingStage(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SQL", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.UpdateResultPath("q1", "nonexistent", "t1", "path") // should not panic
 }
 
@@ -465,7 +466,7 @@ func TestUpdateResultPathMissingTask(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 1},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.UpdateResultPath("q1", "s0", "nonexistent", "path") // should not panic
 }
 
@@ -473,9 +474,9 @@ func TestUpdateResultPathMissingTask(t *testing.T) {
 
 func TestList(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SELECT 1", map[string]*StageInfo{}, nil)
-	qt.Register("q2", "SELECT 2", map[string]*StageInfo{}, nil)
-	qt.Register("q3", "SELECT 3", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
+	qt.Register("q2", "SELECT 2", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
+	qt.Register("q3", "SELECT 3", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q1")
 	qt.Complete("q1")
 	qt.Start("q2")
@@ -517,7 +518,7 @@ func TestStageResults(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 2},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q1")
 
 	qt.RecordResult(distributed.ResultNotification{
@@ -543,7 +544,7 @@ func TestStageResultsMissingQuery(t *testing.T) {
 
 func TestStageResultsMissingStage(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SQL", map[string]*StageInfo{}, nil)
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	results := qt.StageResults("q1", "nonexistent")
 	if results != nil {
 		t.Errorf("expected nil, got %v", results)
@@ -557,7 +558,7 @@ func TestQueryTrackerConcurrentAccess(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 100},
 	}
-	qt.Register("q-concurrent", "SQL", stages, []string{"s0"})
+	qt.Register("q-concurrent", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q-concurrent")
 
 	done := make(chan struct{})
@@ -617,7 +618,7 @@ func TestQueryTrackerGetSnapshotIsRaceFree(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: totalTasks},
 	}
-	qt.Register("q-poll", "SQL", stages, []string{"s0"})
+	qt.Register("q-poll", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q-poll")
 
 	writerDone := make(chan struct{})
@@ -675,13 +676,13 @@ func TestQueryTrackerGetSnapshotIsRaceFree(t *testing.T) {
 
 func TestActiveQueryIDs(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q-pending", "SQL", map[string]*StageInfo{}, nil)
-	qt.Register("q-running", "SQL", map[string]*StageInfo{}, nil)
+	qt.Register("q-pending", "SQL", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
+	qt.Register("q-running", "SQL", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q-running")
-	qt.Register("q-done", "SQL", map[string]*StageInfo{}, nil)
+	qt.Register("q-done", "SQL", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q-done")
 	qt.Complete("q-done")
-	qt.Register("q-failed", "SQL", map[string]*StageInfo{}, nil)
+	qt.Register("q-failed", "SQL", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Start("q-failed")
 	qt.Fail("q-failed", "err")
 
@@ -719,7 +720,7 @@ func TestCollectResultPaths(t *testing.T) {
 		"s0": {StageID: "s0", TotalTasks: 2},
 		"s1": {StageID: "s1", TotalTasks: 1, Dependencies: []string{"s0"}},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0", "s1"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0", "s1"})
 	qt.Start("q1")
 
 	// Record s0 results — one with path, one inline (no path yet)
@@ -763,7 +764,7 @@ func TestStalledStages(t *testing.T) {
 		"s0": {StageID: "s0", TotalTasks: 2},
 		"s1": {StageID: "s1", TotalTasks: 1, Dependencies: []string{"s0"}},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0", "s1"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0", "s1"})
 	qt.Start("q1")
 	qt.SetStageTasks("q1", "s0", 2)
 	qt.MarkScheduled("q1", "s0")
@@ -814,7 +815,7 @@ func TestRecordResultNoResultPath(t *testing.T) {
 	stages := map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 1},
 	}
-	qt.Register("q1", "SQL", stages, []string{"s0"})
+	qt.Register("q1", "SQL", auth.IdentitySnapshot{}, stages, []string{"s0"})
 	qt.Start("q1")
 
 	qt.RecordResult(distributed.ResultNotification{

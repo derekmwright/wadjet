@@ -390,9 +390,9 @@ func (g *GRPCServer) GetQueryStatus(ctx context.Context, req *wadjetv1.GetQueryS
 		return nil, status.Error(codes.InvalidArgument, "query_id is required")
 	}
 
-	qs, err := g.coord.GetQueryStatus(req.QueryId)
+	qs, err := g.coord.GetQueryStatus(ctx, req.QueryId)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "%v", err)
+		return nil, queryAccessError(err, codes.NotFound)
 	}
 
 	resp := &wadjetv1.GetQueryStatusResponse{
@@ -425,14 +425,25 @@ func (g *GRPCServer) CancelQuery(ctx context.Context, req *wadjetv1.CancelQueryR
 		return nil, status.Error(codes.InvalidArgument, "query_id is required")
 	}
 
-	if err := g.coord.CancelQuery(req.QueryId); err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+	if err := g.coord.CancelQuery(ctx, req.QueryId); err != nil {
+		return nil, queryAccessError(err, codes.Internal)
 	}
 
 	return &wadjetv1.CancelQueryResponse{
 		QueryId: req.QueryId,
 		State:   "cancelled",
 	}, nil
+}
+
+// queryAccessError maps a query-lifecycle error to its gRPC code: an
+// ownership refusal is PermissionDenied — the same class the HTTP door's 403
+// and pgwire's 42501 carry for the same refusal — and everything else keeps
+// the code the RPC already used (#936, ADR-0034).
+func queryAccessError(err error, fallback codes.Code) error {
+	if sqlerr.StateOf(err) == "42501" {
+		return status.Error(codes.PermissionDenied, err.Error())
+	}
+	return status.Errorf(fallback, "%v", err)
 }
 
 // ListTables returns the table names this identity may read.

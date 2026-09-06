@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -305,7 +306,7 @@ func (c *Coordinator) executeStageDAG(
 		}
 		stageOrder = append(stageOrder, s.ID)
 	}
-	c.tracker.Register(queryID, sql, trackerStages, stageOrder)
+	c.tracker.Register(queryID, sql, auth.SnapshotIdentity(ctx), trackerStages, stageOrder)
 	c.tracker.Start(queryID)
 	// Mark Complete (not Delete) so GetQueryStatus / GetQueryResults can
 	// observe the finished query. ReapCompleted (cleanup.go) prunes old
@@ -1862,7 +1863,7 @@ func (c *Coordinator) materializeReplicate(
 	trackerStages := map[string]*StageInfo{
 		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: 1},
 	}
-	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.RegisterInternal(stageQueryID, "", trackerStages, []string{stage.ID})
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 	task.QueryID = stageQueryID
@@ -2326,7 +2327,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	trackerStages := map[string]*StageInfo{
 		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: len(tasks)},
 	}
-	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.RegisterInternal(stageQueryID, "", trackerStages, []string{stage.ID})
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 
@@ -2700,7 +2701,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 	trackerStages := map[string]*StageInfo{
 		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: len(tasks)},
 	}
-	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.RegisterInternal(stageQueryID, "", trackerStages, []string{stage.ID})
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 
@@ -3524,7 +3525,7 @@ func (c *Coordinator) dispatchComputeStage(
 			TotalTasks: len(tasks),
 		},
 	}
-	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.RegisterInternal(stageQueryID, "", trackerStages, []string{stage.ID})
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 
@@ -4966,7 +4967,7 @@ func (c *Coordinator) runStageTasks(
 	trackerStages := map[string]*StageInfo{
 		stageLabel: {StageID: stageLabel, Type: distributed.TaskTypeStage, TotalTasks: len(tasks)},
 	}
-	c.tracker.Register(stageQueryID, "", trackerStages, []string{stageLabel})
+	c.tracker.RegisterInternal(stageQueryID, "", trackerStages, []string{stageLabel})
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 

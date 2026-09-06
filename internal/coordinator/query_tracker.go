@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
@@ -52,8 +53,21 @@ type StageInfo struct {
 
 // QueryInfo tracks the full state of a query.
 type QueryInfo struct {
-	QueryID     string
-	SQL         string
+	QueryID string
+	SQL     string
+	// Owner is the principal that SUBMITTED this query, captured from the
+	// context at registration and never rewritten afterwards. A query's
+	// status, its SQL, its results and its cancellation belong to that
+	// principal and to an administrator, and to nobody else (#936).
+	//
+	// The zero snapshot means no identity was attached — auth disabled, or
+	// an internal entry. With auth enabled an unowned entry is reachable
+	// only by an administrator, which is the fail-closed reading.
+	Owner auth.IdentitySnapshot
+	// Internal marks a coordinator-internal entry: the ephemeral per-stage
+	// query IDs, the build-cache scan and the aggregate-cache compute. They
+	// carry no SQL a user submitted and are never listed.
+	Internal    bool
 	State       QueryState
 	Stages      map[string]*StageInfo
 	StageOrder  []string // topological order
@@ -77,14 +91,39 @@ func NewQueryTracker() *QueryTracker {
 	}
 }
 
-// Register registers a new query.
-func (qt *QueryTracker) Register(queryID, sql string, stages map[string]*StageInfo, stageOrder []string) {
+// Register registers a USER query — one a principal submitted — under the
+// identity that submitted it. `owner` comes from the submitting context
+// (auth.SnapshotIdentity) and is immutable from here on.
+//
+// There are two registration functions rather than one with an optional
+// owner because the distinction cannot be left to whoever adds the next call
+// site: an entry registered with no owner is one an administrator can read
+// and nobody else can, and an internal entry is one no listing publishes.
+// Omitting an argument should not be able to decide either.
+func (qt *QueryTracker) Register(queryID, sql string, owner auth.IdentitySnapshot,
+	stages map[string]*StageInfo, stageOrder []string) {
+	qt.register(queryID, sql, owner, false, stages, stageOrder)
+}
+
+// RegisterInternal registers a coordinator-internal entry: the ephemeral
+// per-stage query IDs the dispatcher creates, the build-cache scan and the
+// aggregate-cache compute. They carry no user SQL, have no owner, and no
+// listing publishes them.
+func (qt *QueryTracker) RegisterInternal(queryID, sql string,
+	stages map[string]*StageInfo, stageOrder []string) {
+	qt.register(queryID, sql, auth.IdentitySnapshot{}, true, stages, stageOrder)
+}
+
+func (qt *QueryTracker) register(queryID, sql string, owner auth.IdentitySnapshot,
+	internal bool, stages map[string]*StageInfo, stageOrder []string) {
 	qt.mu.Lock()
 	defer qt.mu.Unlock()
 
 	qt.queries[queryID] = &QueryInfo{
 		QueryID:    queryID,
 		SQL:        sql,
+		Owner:      owner,
+		Internal:   internal,
 		State:      QueryStatePending,
 		Stages:     stages,
 		StageOrder: stageOrder,
@@ -464,16 +503,24 @@ func (qt *QueryTracker) ActiveQueryIDs() map[string]struct{} {
 	return active
 }
 
-// List returns all tracked queries as snapshots (see snapshotStages) — no
+// List returns the USER queries as snapshots (see snapshotStages) — no
 // exported caller currently reads a listed query's Stages, but List has the
 // exact same shallow-copy shape Get had, so it gets the same fix rather
 // than waiting for its own #514-shaped report.
+//
+// Internal entries are excluded: they are the dispatcher's per-stage
+// bookkeeping, carry no SQL anybody submitted, and listing them told a caller
+// about work it did not ask for. Filtering by OWNER is the caller's job — see
+// Coordinator.ListQueries, which has the identity.
 func (qt *QueryTracker) List() []*QueryInfo {
 	qt.mu.RLock()
 	defer qt.mu.RUnlock()
 
 	result := make([]*QueryInfo, 0, len(qt.queries))
 	for _, q := range qt.queries {
+		if q.Internal {
+			continue
+		}
 		copy := *q
 		copy.Stages = snapshotStages(q.Stages)
 		result = append(result, &copy)

@@ -79,14 +79,19 @@ func (o *OpsAPI) handleWorkers(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /v1/results/{queryID} — delete all result files for a query.
+//
+// Owner-or-admin, not admin: these are one query's artifacts, and the
+// principal that submitted it may drop them. It is the same decision status,
+// results and cancellation take (#936) — asked of the coordinator, which is
+// where that decision lives, rather than re-derived here.
 func (o *OpsAPI) handleDeleteResults(w http.ResponseWriter, r *http.Request) {
-	if !o.requireAdmin(w, r) {
-		return
-	}
-
 	queryID := chi.URLParam(r, "queryID")
 	if queryID == "" {
 		writeError(w, http.StatusBadRequest, "queryID is required")
+		return
+	}
+	if err := o.coord.AuthorizeQueryAccess(r.Context(), queryID); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 

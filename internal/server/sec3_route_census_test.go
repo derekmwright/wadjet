@@ -113,7 +113,10 @@ func censusRows() []censusRow {
 
 		{method: "GET", pattern: "/v1/workers", path: "/v1/workers", want: adminOnly(200)},
 		{method: "DELETE", pattern: "/v1/results/{queryID}", path: "/v1/results/no-such-query",
-			want: adminOnly(503), note: "503: this fixture's coordinator has no result store"},
+			want: adminOnly(503),
+			note: "owner-or-admin: an ID the tracker no longer holds has no owner left " +
+				"to check, so it is the administrator's. 503 because this fixture's " +
+				"coordinator has no result store"},
 		{method: "POST", pattern: "/v1/results/cleanup", path: "/v1/results/cleanup",
 			body: "{}", want: adminOnly(503)},
 
@@ -186,7 +189,7 @@ func censusProvider() *auth.Provider {
 
 // censusServer is the whole door: the base mux plus the ops and admin routes,
 // behind ProviderMiddleware, with a real coordinator and DLQ.
-func censusServer(t *testing.T) (*httptest.Server, *coordinator.Coordinator) {
+func censusServer(t *testing.T) (*httptest.Server, *coordinator.Coordinator, *catalog.Catalog) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -231,6 +234,12 @@ func censusServer(t *testing.T) (*httptest.Server, *coordinator.Coordinator) {
 	}, cat, nc, js, logger)
 
 	provider := censusProvider()
+	// The coordinator carries the provider too — that is what makes the
+	// query-lifecycle methods enforce ownership, and cmd/wadjet does it at
+	// startup for the same reason.
+	if err := coord.SetAuthProvider(provider); err != nil {
+		t.Fatalf("attaching the auth provider: %v", err)
+	}
 	srv := server.New(server.Config{
 		Addr: ":0", Catalog: cat, Coordinator: coord,
 		DLQ: coordinator.NewDLQ(js), Provider: provider,
@@ -241,7 +250,7 @@ func censusServer(t *testing.T) (*httptest.Server, *coordinator.Coordinator) {
 
 	ts := httptest.NewServer(srv.Mux())
 	t.Cleanup(ts.Close)
-	return ts, coord
+	return ts, coord, cat
 }
 
 // registeredRoutes walks the mux. A route registered for every method (chi's
@@ -286,7 +295,7 @@ func normalizeRoute(route string) string {
 }
 
 func TestHTTPRouteCensusAuthorizesEveryRoute(t *testing.T) {
-	ts, _ := censusServer(t)
+	ts, _, _ := censusServer(t)
 
 	rows := append(censusRows(), pprofRows()...)
 
@@ -339,10 +348,10 @@ func TestHTTPRouteCensusAuthorizesEveryRoute(t *testing.T) {
 				switch {
 				case want == anyAllowed:
 					if got == http.StatusUnauthorized || got == http.StatusForbidden {
-						t.Errorf("%s refused an authorized identity with %d: %s", name, got, body)
+						t.Errorf("%s refused an authorized identity with %d: %s", name, got, clip(body))
 					}
 				case got != want:
-					t.Errorf("status %d; want %d (body %s)", got, want, body)
+					t.Errorf("status %d; want %d (body %s)", got, want, clip(body))
 				}
 			})
 		}
@@ -352,7 +361,7 @@ func TestHTTPRouteCensusAuthorizesEveryRoute(t *testing.T) {
 // The refusal text is the shared authorizer's, so the same operation reads the
 // same on every door (pgwire 42501, gRPC PermissionDenied carry it too).
 func TestHTTPOperationalRefusalCarriesTheSharedText(t *testing.T) {
-	ts, _ := censusServer(t)
+	ts, _, _ := censusServer(t)
 	want := `unauthorized: "admin" permission required (identity "reader-user", role "reader")`
 	for _, r := range []struct{ method, path string }{
 		{http.MethodGet, "/v1/dlq"},
@@ -360,7 +369,9 @@ func TestHTTPOperationalRefusalCarriesTheSharedText(t *testing.T) {
 		{http.MethodDelete, "/v1/dlq"},
 		{http.MethodGet, "/v1/workers"},
 		{http.MethodPost, "/v1/results/cleanup"},
-		{http.MethodDelete, "/v1/results/x"},
+		// DELETE /v1/results/{id} is not here: it is owner-or-admin, so its
+		// refusal is the query-ownership one, pinned in
+		// TestQueryRefusalTextIsTheSameOnEveryDoor.
 	} {
 		code, body := censusDo(t, ts, r.method, r.path, "reader-key", "{}")
 		if code != http.StatusForbidden {
@@ -383,7 +394,7 @@ func TestHTTPOperationalRefusalCarriesTheSharedText(t *testing.T) {
 // A refused operational mutation has NO side effect: the DLQ a reader tried to
 // purge is still there for the admin that may read it.
 func TestHTTPRefusedPurgeLeavesTheDLQIntact(t *testing.T) {
-	ts, _ := censusServer(t)
+	ts, _, _ := censusServer(t)
 
 	if code, body := censusDo(t, ts, http.MethodDelete, "/v1/dlq", "reader-key", ""); code != 403 {
 		t.Fatalf("reader purge: status %d (%s); want 403", code, body)
@@ -412,11 +423,16 @@ func censusDo(t *testing.T, ts *httptest.Server, method, path, key, body string)
 	defer resp.Body.Close()
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(resp.Body)
-	out := buf.String()
-	if len(out) > 200 {
-		out = out[:200] + "…"
+	return resp.StatusCode, buf.String()
+}
+
+// clip shortens a body for an error message. censusDo returns it whole,
+// because a caller that decodes the listing needs all of it.
+func clip(s string) string {
+	if len(s) > 200 {
+		return s[:200] + "…"
 	}
-	return resp.StatusCode, out
+	return s
 }
 
 func orNone(id string) string {

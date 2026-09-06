@@ -91,9 +91,9 @@ func (s *Server) handleGetQueryStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := s.coord.GetQueryStatus(queryID)
+	status, err := s.coord.GetQueryStatus(r.Context(), queryID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, queryAccessStatus(err, http.StatusNotFound), err.Error())
 		return
 	}
 
@@ -134,7 +134,7 @@ func (s *Server) handleGetQueryResults(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.coord.GetQueryResults(r.Context(), queryID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, queryAccessStatus(err, http.StatusNotFound), err.Error())
 		return
 	}
 
@@ -181,8 +181,8 @@ func (s *Server) handleCancelQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.coord.CancelQuery(queryID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.coord.CancelQuery(r.Context(), queryID); err != nil {
+		writeError(w, queryAccessStatus(err, http.StatusBadRequest), err.Error())
 		return
 	}
 
@@ -192,15 +192,30 @@ func (s *Server) handleCancelQuery(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleListQueries returns all tracked queries.
-func (s *Server) handleListQueries(w http.ResponseWriter, _ *http.Request) {
+// queryAccessStatus maps a query-lifecycle error to its HTTP status: an
+// ownership refusal is 403, and everything else keeps the status the endpoint
+// already used for a failure.
+//
+// 403 and not 404: the data door already names a table it refuses, so hiding
+// a query behind "not found" would answer a different question than the one
+// asked, and would be the only refusal on this door that does (#936).
+func queryAccessStatus(err error, fallback int) int {
+	if sqlerr.StateOf(err) == "42501" {
+		return http.StatusForbidden
+	}
+	return fallback
+}
+
+// handleListQueries returns the caller's tracked queries — every user query
+// for an administrator, and nothing internal for anyone.
+func (s *Server) handleListQueries(w http.ResponseWriter, r *http.Request) {
 	if s.coord == nil {
 		writeError(w, http.StatusServiceUnavailable,
 			"query listing requires distributed mode (coordinator)")
 		return
 	}
 
-	queries := s.coord.ListQueries()
+	queries := s.coord.ListQueries(r.Context())
 	views := make([]QueryStatusResponse, 0, len(queries))
 	for _, q := range queries {
 		views = append(views, QueryStatusResponse{

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -62,7 +63,7 @@ func TestCoordinatorListQueries(t *testing.T) {
 	ctx, coord, _ := setupDistributed(t)
 	_ = ctx
 
-	queries := coord.ListQueries()
+	queries := coord.ListQueries(context.Background())
 	if queries == nil {
 		t.Fatal("expected non-nil list")
 	}
@@ -74,7 +75,7 @@ func TestGetQueryStatusMissing(t *testing.T) {
 	ctx, coord, _ := setupDistributed(t)
 	_ = ctx
 
-	_, err := coord.GetQueryStatus("nonexistent")
+	_, err := coord.GetQueryStatus(context.Background(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing query")
 	}
@@ -98,7 +99,7 @@ func TestGetQueryStatusAfterScan(t *testing.T) {
 		t.Fatalf("SubmitScanQuery: %v", err)
 	}
 
-	status, err := coord.GetQueryStatus(result.QueryID)
+	status, err := coord.GetQueryStatus(context.Background(), result.QueryID)
 	if err != nil {
 		t.Fatalf("GetQueryStatus: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestCancelQueryMissing(t *testing.T) {
 	ctx, coord, _ := setupDistributed(t)
 	_ = ctx
 
-	err := coord.CancelQuery("nonexistent")
+	err := coord.CancelQuery(context.Background(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing query")
 	}
@@ -148,7 +149,7 @@ func TestCancelQueryAlreadyCompleted(t *testing.T) {
 		t.Fatalf("SubmitScanQuery: %v", err)
 	}
 
-	err = coord.CancelQuery(result.QueryID)
+	err = coord.CancelQuery(context.Background(), result.QueryID)
 	if err == nil {
 		t.Fatal("expected error cancelling completed query")
 	}
@@ -182,7 +183,7 @@ func TestSubmitSQLNoStages(t *testing.T) {
 	// Wait for completion
 	time.Sleep(2 * time.Second)
 
-	status, err := coord.GetQueryStatus(queryID)
+	status, err := coord.GetQueryStatus(context.Background(), queryID)
 	if err != nil {
 		t.Fatalf("GetQueryStatus: %v", err)
 	}
@@ -564,7 +565,7 @@ func TestGetQueryStatusWithStages(t *testing.T) {
 		t.Fatalf("ExecuteSQL: %v", err)
 	}
 
-	status, err := coord.GetQueryStatus(result.QueryID)
+	status, err := coord.GetQueryStatus(context.Background(), result.QueryID)
 	if err != nil {
 		t.Fatalf("GetQueryStatus: %v", err)
 	}
@@ -595,10 +596,10 @@ func TestCancelQueryRunning(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Try to cancel (may already be completed)
-	err = coord.CancelQuery(queryID)
+	err = coord.CancelQuery(context.Background(), queryID)
 	// Either succeeds or the query already completed
 	if err != nil {
-		status, _ := coord.GetQueryStatus(queryID)
+		status, _ := coord.GetQueryStatus(context.Background(), queryID)
 		if status != nil && status.State != "completed" {
 			t.Fatalf("CancelQuery: %v", err)
 		}
@@ -681,7 +682,7 @@ func TestListQueriesAfterSubmit(t *testing.T) {
 		t.Fatalf("ExecuteSQL: %v", err)
 	}
 
-	queries := coord.ListQueries()
+	queries := coord.ListQueries(context.Background())
 	if len(queries) < 1 {
 		t.Error("expected at least one query in list")
 	}
@@ -703,7 +704,7 @@ func TestListQueriesAfterSubmit(t *testing.T) {
 
 func TestQueryTrackerDelete(t *testing.T) {
 	qt := NewQueryTracker()
-	qt.Register("q1", "SELECT 1", map[string]*StageInfo{
+	qt.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 1},
 	}, []string{"s0"})
 
@@ -727,13 +728,13 @@ func TestQueryTrackerReapCompleted(t *testing.T) {
 	qt := NewQueryTracker()
 
 	// Register three queries in different states
-	qt.Register("old-done", "SELECT 1", map[string]*StageInfo{}, nil)
+	qt.Register("old-done", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Complete("old-done")
 
-	qt.Register("old-failed", "SELECT bad", map[string]*StageInfo{}, nil)
+	qt.Register("old-failed", "SELECT bad", auth.IdentitySnapshot{}, map[string]*StageInfo{}, nil)
 	qt.Fail("old-failed", "syntax error")
 
-	qt.Register("still-running", "SELECT 2", map[string]*StageInfo{
+	qt.Register("still-running", "SELECT 2", auth.IdentitySnapshot{}, map[string]*StageInfo{
 		"s0": {StageID: "s0", TotalTasks: 1},
 	}, []string{"s0"})
 	qt.Start("still-running")

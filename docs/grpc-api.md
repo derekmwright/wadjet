@@ -129,6 +129,12 @@ States: `pending`, `running`, `completed`, `failed`, `cancelled`.
 
 The response includes per-stage progress (`StageStatus`) with task counts.
 
+A query belongs to the identity that submitted it: with authentication
+enabled, another identity gets `PERMISSION_DENIED` with
+`permission denied: query "<id>" belongs to another principal` — the same
+refusal the HTTP door answers `403` with. See
+[Security](security.md#a-query-belongs-to-the-identity-that-submitted-it).
+
 ---
 
 ### CancelQuery
@@ -138,6 +144,9 @@ Cancel a running async query.
 ```protobuf
 rpc CancelQuery(CancelQueryRequest) returns (CancelQueryResponse);
 ```
+
+Owner-or-admin, like `GetQueryStatus`: another identity gets
+`PERMISSION_DENIED` and the query keeps running.
 
 ---
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
@@ -17,7 +18,7 @@ import (
 func TestReadFinalResults_BudgetCap(t *testing.T) {
 	tracker := NewQueryTracker()
 	stages := []physical.Stage{{ID: "s1", Type: "pipeline", Tasks: 1}}
-	tracker.Register("q1", "SELECT 1", map[string]*StageInfo{
+	tracker.Register("q1", "SELECT 1", auth.IdentitySnapshot{}, map[string]*StageInfo{
 		"s1": {StageID: "s1", TotalTasks: 1},
 	}, []string{"s1"})
 

@@ -278,7 +278,7 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 			TotalTasks: 1,
 		},
 	}
-	c.tracker.Register(cacheQueryID, scanSQL, trackerStages, []string{"build-cache-scan"})
+	c.tracker.RegisterInternal(cacheQueryID, scanSQL, trackerStages, []string{"build-cache-scan"})
 	c.tracker.Start(cacheQueryID)
 	defer c.tracker.Delete(cacheQueryID)
 

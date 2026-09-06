@@ -256,7 +256,7 @@ func (c *Coordinator) runShuffleSide(
 			TotalTasks: actualTasks,
 		},
 	}
-	c.tracker.Register(shuffleQueryID, "", trackerStages, []string{stageID})
+	c.tracker.RegisterInternal(shuffleQueryID, "", trackerStages, []string{stageID})
 	c.tracker.Start(shuffleQueryID)
 	defer c.tracker.Delete(shuffleQueryID)
 

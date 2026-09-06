@@ -938,7 +938,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}
 
 	start := time.Now()
-	queryID := uuid.New().String()[:8]
+	// The FULL uuid — see SubmitSQL for why the eight-character prefix is
+	// gone and why nothing downstream depends on the width (#936).
+	queryID := uuid.New().String()
 	// Every panic boundary below this point — the pipeline, its workers, the
 	// scan goroutines — logs the query it belongs to (#511).
 	ctx = exec.WithQueryID(ctx, queryID)
@@ -3449,7 +3451,20 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		return "", "", fmt.Errorf("not leader: coordinator %s is leader", leaderID)
 	}
 
-	queryID = uuid.New().String()[:8]
+	// The FULL uuid, not its first eight characters. A query ID is the
+	// handle by which its status, its SQL and its results are fetched and by
+	// which it is cancelled, and eight hex characters are 32 bits — guessable
+	// by a caller who may run queries but may not read this one's (#936).
+	// Nothing depends on the width: the object layout is `queries/<id>/…` and
+	// both parsers cut on the `/` delimiter (distributed.ScratchQueryID,
+	// worker.rootQueryFromKey), the NATS subjects interpolate the id as one
+	// token, and the KV key is a prefix plus the id — a uuid's hex-and-hyphen
+	// alphabet is legal in all of them.
+	queryID = uuid.New().String()
+	// The principal that submitted the query OWNS it, from here to its
+	// reaping: status, SQL, results and cancellation are the owner's and an
+	// administrator's (#936).
+	owner := auth.SnapshotIdentity(ctx)
 	// See ExecuteSQL: pins each table's manifest to one catalog read for
 	// this statement (#502) across every physical.Planner built below.
 	ctx = physical.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
@@ -3572,7 +3587,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 
 	if len(physStages) == 0 {
 		// No work to do — register as immediately completed
-		c.tracker.Register(queryID, sql, map[string]*StageInfo{}, nil)
+		c.tracker.Register(queryID, sql, owner, map[string]*StageInfo{}, nil)
 		c.tracker.Start(queryID)
 		c.tracker.Complete(queryID)
 		c.mu.Lock()
@@ -3599,7 +3614,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		}
 		stageOrder = append(stageOrder, s.ID)
 	}
-	c.tracker.Register(queryID, sql, trackerStages, stageOrder)
+	c.tracker.Register(queryID, sql, owner, trackerStages, stageOrder)
 	c.tracker.Start(queryID)
 
 	// Use a timeout context so stuck queries don't leak resources forever.
@@ -3695,11 +3710,74 @@ type StageStatus struct {
 	FailedTasks int    `json:"failed_tasks"`
 }
 
-// GetQueryStatus returns the current status of a query.
-func (c *Coordinator) GetQueryStatus(queryID string) (*QueryStatus, error) {
+// authorizeQueryAccess is the ONE owner-or-admin decision for a tracked
+// query, and every door asks it here rather than at its own handler: the
+// lifecycle methods below take a context so a door cannot reach a query
+// without the question being asked (#936, ADR-0034).
+//
+// The rule:
+//
+//   - No provider, or auth disabled: nil. Owners are empty and every caller
+//     may act, which is what the embedded and dev paths have always done.
+//   - No identity in the context under auth enabled: refused. Every door
+//     that reaches here has authenticated its caller.
+//   - The identity's NAME equals the recorded owner's: allowed. The name is
+//     the principal the authenticator resolved; how they proved it (an API
+//     key on one call, a JWT on the next) is not an ownership property, and
+//     PostgreSQL's own rule for cancelling a backend is the same one.
+//   - Otherwise the `admin` permission: allowed.
+//   - An UNOWNED entry (the zero snapshot under auth enabled — a query
+//     registered before this arc, or an internal entry reached by its id) is
+//     therefore administrator-only. That is the fail-closed reading: nobody
+//     can claim what nobody owns.
+//
+// The refusal is a `sqlerr` 42501 so each door renders it in its own class:
+// HTTP 403, gRPC PermissionDenied, pgwire SQLSTATE 42501 — never 404, which
+// would answer a different question than the one that was asked.
+func (c *Coordinator) authorizeQueryAccess(ctx context.Context, info *QueryInfo) error {
+	if c.authProvider == nil || !c.authProvider.Enabled() {
+		return nil
+	}
+	id := auth.IdentityFromContext(ctx)
+	if id == nil {
+		return sqlerr.New("42501",
+			"permission denied: query %q requires an authenticated identity", info.QueryID)
+	}
+	if id.Name != "" && id.Name == info.Owner.Name {
+		return nil
+	}
+	if authz := c.authProvider.Authorizer(); authz != nil && authz.HasPermission(id, "admin") {
+		return nil
+	}
+	return sqlerr.New("42501",
+		"permission denied: query %q belongs to another principal", info.QueryID)
+}
+
+// AuthorizeQueryAccess is the same owner-or-admin decision for a door that
+// acts on a query's ARTIFACTS rather than through the lifecycle methods below
+// — the result-file delete endpoint is the one such door.
+//
+// A query ID the tracker no longer holds is an administrator's: the reaper
+// drops a completed entry long before its result files age out, and after
+// that there is no recorded owner left to check against. That is the
+// fail-closed reading, and it is the same one an entry with no owner gets.
+func (c *Coordinator) AuthorizeQueryAccess(ctx context.Context, queryID string) error {
+	info := c.tracker.Get(queryID)
+	if info == nil {
+		info = &QueryInfo{QueryID: queryID}
+	}
+	return c.authorizeQueryAccess(ctx, info)
+}
+
+// GetQueryStatus returns the current status of a query, to its owner or to an
+// administrator.
+func (c *Coordinator) GetQueryStatus(ctx context.Context, queryID string) (*QueryStatus, error) {
 	info := c.tracker.Get(queryID)
 	if info == nil {
 		return nil, fmt.Errorf("query not found: %s", queryID)
+	}
+	if err := c.authorizeQueryAccess(ctx, info); err != nil {
+		return nil, err
 	}
 
 	status := &QueryStatus{
@@ -3738,6 +3816,12 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 	info := c.tracker.Get(queryID)
 	if info == nil {
 		return nil, fmt.Errorf("query not found: %s", queryID)
+	}
+	// Before the batches are read, not after: a materialized result was
+	// produced under its OWNER's policies, so handing it to another identity
+	// hands over rows that identity's own policies never decided on (#936).
+	if err := c.authorizeQueryAccess(ctx, info); err != nil {
+		return nil, err
 	}
 
 	c.mu.Lock()
@@ -3863,10 +3947,15 @@ func columnsOrDeclared(gathered []string, schema []parquet.Column) []string {
 }
 
 // CancelQuery cancels a running query.
-func (c *Coordinator) CancelQuery(queryID string) error {
+func (c *Coordinator) CancelQuery(ctx context.Context, queryID string) error {
 	info := c.tracker.Get(queryID)
 	if info == nil {
 		return fmt.Errorf("query not found: %s", queryID)
+	}
+	// Before anything is published or reclaimed: a refused cancel must leave
+	// the query running (#936).
+	if err := c.authorizeQueryAccess(ctx, info); err != nil {
+		return err
 	}
 
 	if info.State != QueryStateRunning && info.State != QueryStatePending {
@@ -3908,10 +3997,18 @@ func (c *Coordinator) CancelQuery(queryID string) error {
 }
 
 // ListQueries returns recent query statuses.
-func (c *Coordinator) ListQueries() []QueryStatus {
+func (c *Coordinator) ListQueries(ctx context.Context) []QueryStatus {
 	queries := c.tracker.List()
 	statuses := make([]QueryStatus, 0, len(queries))
 	for _, info := range queries {
+		// A listing publishes the query ID and the SQL TEXT of everything it
+		// lists, so it is filtered by the same rule that governs reading one
+		// of them: the caller's own queries, and every user query for an
+		// administrator (#936). Internal stage entries are already excluded
+		// by the tracker.
+		if err := c.authorizeQueryAccess(ctx, info); err != nil {
+			continue
+		}
 		status := QueryStatus{
 			QueryID:   info.QueryID,
 			SQL:       info.SQL,

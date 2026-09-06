@@ -906,6 +906,46 @@ The check belongs to the operation, not to the door: the query endpoints on the
 same HTTP mux accept ordinary identities, so no authentication middleware
 could carry it.
 
+### A query belongs to the identity that submitted it
+
+Every query records its submitting principal, immutably, at the moment it is
+registered. Its status, its SQL text, its results, its cancellation and its
+result files are the owner's and an administrator's:
+
+| Operation | HTTP | gRPC | Who |
+|---|---|---|---|
+| status | `GET /v1/queries/{id}` | `GetQueryStatus` | owner or `admin` |
+| results | `GET /v1/queries/{id}/results` | — | owner or `admin` |
+| cancel | `DELETE /v1/queries/{id}` | `CancelQuery` | owner or `admin` |
+| result files | `DELETE /v1/results/{id}` | — | owner or `admin` |
+| listing | `GET /v1/queries` | — | the caller's own; all user queries for `admin` |
+
+Another identity is refused — HTTP `403 Forbidden`, gRPC
+`codes.PermissionDenied`, both carrying
+`permission denied: query "<id>" belongs to another principal` — and the
+refusal has no effect: a cancel that is refused does not cancel. The refusal is
+**not** a `404`: the data door already names a table it refuses, and one
+refusal class per door is the rule.
+
+Two consequences worth stating:
+
+- A **result** was materialized under its owner's policies. Handing it to
+  another identity by ID would hand over rows that identity's own policies
+  never decided on, which is why fetching results is an ownership question and
+  not only a read permission.
+- A query with **no recorded owner** — one registered before this rule existed,
+  or the coordinator's internal per-stage bookkeeping — is reachable only by an
+  administrator. Nobody can claim what nobody owns. Internal entries are never
+  listed at all.
+
+Query IDs are full UUIDs. They used to be the first eight characters of one,
+which is 32 bits: guessable by a caller who may run queries but may not read
+this one's.
+
+With authentication disabled nothing is enforced: queries have no owner and
+every caller may act, which is what the embedded and single-user paths have
+always done.
+
 ## Audit Logging
 
 Wadjet logs security-relevant events as structured slog entries with the `component=audit` attribute. These events are emitted automatically and can be filtered and forwarded to your SIEM or log aggregation system.

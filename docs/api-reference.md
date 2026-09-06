@@ -285,6 +285,15 @@ Submit a query for asynchronous execution. Returns immediately with a query ID t
 
 > **Note:** The async endpoints (`POST /v1/queries/async`, `GET /v1/queries`, `GET /v1/queries/{queryID}`, `GET /v1/queries/{queryID}/results`, `DELETE /v1/queries/{queryID}`) need a coordinator. Every `wadjet serve` mode has one — standalone embeds a coordinator, a worker and NATS in one process — so these work there too. They return `503 Service Unavailable` only when the HTTP server is constructed without a coordinator, which is the embedded-library path.
 
+> **A query belongs to the identity that submitted it.** With authentication
+> enabled, its status, its SQL, its results, its cancellation and its result
+> files are readable and actionable by that principal and by an identity
+> holding `admin`, and by nobody else: another identity gets `403 Forbidden`
+> with `permission denied: query "<id>" belongs to another principal`, and a
+> refused cancel does not cancel. `GET /v1/queries` lists only the caller's own
+> queries — every user query for an administrator — and never the coordinator's
+> internal per-stage entries. The query ID is a full UUID.
+
 **Request:**
 
 ```json
@@ -297,7 +306,7 @@ Submit a query for asynchronous execution. Returns immediately with a query ID t
 
 ```json
 {
-  "query_id": "q-9e8d7c6b"
+  "query_id": "9e8d7c6b-4b21-4f0e-9c3a-0d9f7e2a1c55"
 }
 ```
 
@@ -315,7 +324,7 @@ Check the status of an async query.
 
 ```json
 {
-  "query_id": "q-9e8d7c6b",
+  "query_id": "9e8d7c6b-4b21-4f0e-9c3a-0d9f7e2a1c55",
   "state": "completed",
   "total_rows": 150,
   "elapsed": "340ms"
@@ -352,7 +361,7 @@ Cancel a running query.
 
 ```json
 {
-  "query_id": "q-9e8d7c6b",
+  "query_id": "9e8d7c6b-4b21-4f0e-9c3a-0d9f7e2a1c55",
   "state": "cancelled"
 }
 ```

@@ -150,7 +150,7 @@ func psdCheckSubmit(t *testing.T, ctx context.Context, coord *Coordinator, sql, 
 	deadline := time.Now().Add(30 * time.Second)
 	var status *QueryStatus
 	for time.Now().Before(deadline) {
-		status, err = coord.GetQueryStatus(queryID)
+		status, err = coord.GetQueryStatus(context.Background(), queryID)
 		if err != nil {
 			t.Fatalf("GetQueryStatus(%q): %v", sql, err)
 		}

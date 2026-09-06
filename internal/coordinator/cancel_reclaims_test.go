@@ -9,6 +9,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
@@ -56,7 +57,7 @@ func TestCancelQueryRunsTheSameCleanupAsACompletion(t *testing.T) {
 
 	const queryID = "cancel-reclaims-1"
 	stages := map[string]*StageInfo{"scan-0": {StageID: "scan-0", Type: "scan"}}
-	coord.tracker.Register(queryID, "SELECT 1", stages, []string{"scan-0"})
+	coord.tracker.Register(queryID, "SELECT 1", auth.IdentitySnapshot{}, stages, []string{"scan-0"})
 	coord.tracker.Start(queryID)
 
 	// The stage output a cancelled query leaves behind.
@@ -69,7 +70,7 @@ func TestCancelQueryRunsTheSameCleanupAsACompletion(t *testing.T) {
 		}
 	}
 
-	if err := coord.CancelQuery(queryID); err != nil {
+	if err := coord.CancelQuery(context.Background(), queryID); err != nil {
 		t.Fatalf("CancelQuery: %v", err)
 	}
 

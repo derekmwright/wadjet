@@ -115,7 +115,7 @@ func (c *Coordinator) preComputeDerivedAggregate(
 			TotalTasks: 1,
 		},
 	}
-	c.tracker.Register(cacheQueryID, sqlText, trackerStages, []string{"aggregate-cache-compute"})
+	c.tracker.RegisterInternal(cacheQueryID, sqlText, trackerStages, []string{"aggregate-cache-compute"})
 	c.tracker.Start(cacheQueryID)
 	defer c.tracker.Delete(cacheQueryID)
 
