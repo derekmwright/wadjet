@@ -58,14 +58,30 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 	if identity == nil {
 		return nil
 	}
-	evaluator := provider.Evaluator()
-	if evaluator == nil {
-		return nil
-	}
-
 	table, alias := dmlTarget(parsed)
 	if table == "" {
 		return nil
+	}
+	evaluator := provider.Evaluator()
+	if evaluator == nil {
+		// No ABAC set installed is not "no authorization" — see the same
+		// guard in EnforcePlanPolicies. A provider built from `roles:` alone
+		// enforced nothing here, so a role allowed only `read` could DELETE
+		// every row of a table its role does not even list. The legacy rule
+		// decides, through the SAME shared decision the read path and the
+		// metadata doors ask (ADR-0034).
+		//
+		// The relation is resolved to the catalog's spelling first — the same
+		// resolution the evaluator branch does below — so both branches decide
+		// on the name the READ decides on (#731, #882).
+		resolved := table
+		if cat != nil {
+			resolved = cat.ResolveTableName(table)
+		}
+		if err := TableAccess(ctx, provider, resolved, ActionWrite); err != nil {
+			return err
+		}
+		return TableAccess(ctx, provider, resolved, ActionRead)
 	}
 	// The RELATION is named as the statement spelled it, and an unquoted
 	// identifier folds to lower case at the lexer (#731). A catalog table

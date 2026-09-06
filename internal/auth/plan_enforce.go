@@ -61,6 +61,20 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	}
 	evaluator := provider.Evaluator()
 	if evaluator == nil {
+		// No ABAC set installed is not "no authorization". A provider built
+		// from `roles:` alone — `auth.NewProvider(authn, authz, nil, nil)`,
+		// which is what an embedded caller of SetAuthProvider and several
+		// server shapes produce — used to return here and enforce NOTHING:
+		// a role listing `events` could read `secrets`, and a role allowed
+		// only `read` could DELETE. The legacy rule still exists and the
+		// shared decision already applies it; the data path asks the SAME
+		// question, per relation, so metadata and data cannot disagree
+		// (ADR-0034).
+		for _, tableName := range policedRelations(ctx, cat, selectInfo, plan) {
+			if err := TableAccess(ctx, provider, tableName, ActionRead); err != nil {
+				return ctx, nil, err
+			}
+		}
 		return ctx, plan, nil
 	}
 
