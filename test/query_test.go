@@ -736,8 +736,6 @@ func TestABACRowFilterAtPlanLevel(t *testing.T) {
 		t.Fatal("a query with no identity was served under an enabled provider")
 	}
 
-	result := &wadjet.QueryResult{}
-
 	// Query WITH analyst identity — should only see 'click' rows
 	id, err := authn.AuthenticateToken("secret-key")
 	if err != nil {
@@ -745,7 +743,7 @@ func TestABACRowFilterAtPlanLevel(t *testing.T) {
 	}
 	authCtx := auth.ContextWithIdentity(ctx, id)
 
-	result, err = db.Query(authCtx, "SELECT * FROM events")
+	result, err := db.Query(authCtx, "SELECT * FROM events")
 	if err != nil {
 		t.Fatal(err)
 	}

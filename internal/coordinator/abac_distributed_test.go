@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,7 +165,11 @@ func TestCoordinatorABACEnforcement(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	db.SetAuthProvider(provider)
 
-	identity := &auth.Identity{Name: "analyst", Role: "analyst", Method: "apikey"}
+	// The grants the Authenticator resolves for this role. The identity a
+	// door hands to enforcement carries them, and the coarse gate every
+	// decision applies reads them (ADR-0034 item 5).
+	identity := &auth.Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read"}}
 	authCtx := auth.ContextWithIdentity(ctx, identity)
 
 	canonRows := func(rs []map[string]any, cols []string) []string {
@@ -253,15 +258,30 @@ func TestCoordinatorABACEnforcement(t *testing.T) {
 		}
 	})
 
-	// Without an identity, the provider does not restrict (matches the
-	// embedded engine's contract) — full table visible.
-	t.Run("no identity unrestricted", func(t *testing.T) {
+	// Without an identity the provider REFUSES (ADR-0034 item 7). This used to
+	// assert the opposite — "the provider does not restrict … full table
+	// visible", the embedded engine's old contract — and it is the fifth test
+	// that carried that claim. With an attached, enabled provider every
+	// boundary answers a caller with no identity the same way: metadata, DDL,
+	// the shared table-access decision, and now the plan and DML paths the
+	// coordinator runs on.
+	//
+	// The assertion is written so a nil `res` cannot panic: it used to
+	// dereference `res.Error` in the same `if` that tested `err != nil`, so a
+	// refusal aborted the whole package binary and every later test in it.
+	t.Run("no identity is refused", func(t *testing.T) {
 		res, err := dag.ExecuteSQL(ctx, "SELECT COUNT(*) AS c FROM findings")
-		if err != nil || res.Error != "" {
-			t.Fatalf("%v %s", err, res.Error)
+		if err == nil && (res == nil || res.Error == "") {
+			t.Fatalf("a query with no identity ran under an enabled provider: res=%+v", res)
 		}
-		if got := fmt.Sprint(mustRows(t, res)[0]["c"]); got != "900" {
-			t.Errorf("unauthed count = %s, want 900", got)
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		} else {
+			msg = res.Error
+		}
+		if !strings.Contains(msg, "authentication required") {
+			t.Errorf("refusal %q does not name the missing identity", msg)
 		}
 	})
 }
