@@ -316,6 +316,166 @@ func TestAScalarSubqueryCarriesTheObligationsToo(t *testing.T) {
 	})
 }
 
+// TestASubqueryInADMLPredicateAsksTheTableDecision — the WRITE path.
+//
+// A DML predicate is COMPILED, not planned (ADR-0031), so a subquery inside it
+// is evaluated while the statement scans and reaches the same builder. The
+// identity here MAY write the target and may NOT read the relation the
+// subquery names, so the refusal cannot come from the target's own decision —
+// and the boundary is asserted as a SIDE EFFECT: every row is still there
+// afterwards.
+//
+// The refusal is the shared decision's sentence and nothing else. It used to
+// arrive as `scanning file tables/e7emp/chunk_<uuid>.parquet: permission
+// denied for table "e7other"` — a second wording for one refusal, and an
+// internal object key handed to a caller who has just been told they may not
+// read the data.
+func TestASubqueryInADMLPredicateAsksTheTableDecision(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	t.Cleanup(cancel)
+
+	authn, authz, err := auth.Build(auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{{Key: "w-key", Name: "w", Role: "w"}},
+		Roles: []auth.RoleConfig{
+			{Name: "w", Tables: []string{pmTable, pmBal}, Allow: []string{"read", "write"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := auth.NewProvider(authn, authz, nil, nil)
+	db := pmEmbeddedDB(t, ctx, 0)
+	if err := db.SetAuthProvider(p); err != nil {
+		t.Fatal(err)
+	}
+	id, aerr := p.Authenticator().AuthenticateToken("w-key")
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	idCtx := auth.ContextWithIdentity(ctx, id)
+
+	// The control: this identity really may write the target.
+	if _, err := db.Execute(idCtx, "DELETE FROM "+pmTable+" WHERE 1=0"); err != nil {
+		t.Fatalf("test setup: the writer was refused a write it may make: %v", err)
+	}
+	want := fmt.Sprintf("permission denied for table %q", pmOther)
+	for _, sql := range []string{
+		"DELETE FROM " + pmTable + " WHERE id = (SELECT MAX(id) FROM " + pmOther + ")",
+		"DELETE FROM " + pmTable + " WHERE id IN (SELECT id FROM " + pmOther + ")",
+		"UPDATE " + pmTable + " SET dept = 'x' WHERE id = (SELECT MAX(id) FROM " + pmOther + ")",
+	} {
+		_, qerr := db.Execute(idCtx, sql)
+		if qerr == nil {
+			t.Errorf("a write predicated on a relation the identity may not read RAN: %s", sql)
+		} else if qerr.Error() != want {
+			t.Errorf("%s\n  refusal = %q\n  want exactly %q", sql, qerr.Error(), want)
+		}
+		res, rerr := db.Query(idCtx, "SELECT COUNT(*) AS c FROM "+pmTable)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if got := fmt.Sprint(res.Rows[0]["c"]); got != fmt.Sprint(pmRows) {
+			t.Fatalf("the refused write changed the table: %s rows remain, want %d", got, pmRows)
+		}
+	}
+}
+
+// TestEXPLAINANALYZEOfADeniedSubqueryRefuses — EXPLAIN ANALYZE runs the
+// statement, so it meets the same decision and carries the same sentence.
+//
+// Plain EXPLAIN does NOT: it neither plans nor runs the subquery — the plan it
+// prints carries no scan of the relation and does not name it — so there is
+// nothing for it to authorize and nothing it discloses. That boundary is
+// deliberate; the alternative is a walk of the statement's expression text,
+// which is the bounded model this arc exists to avoid.
+func TestEXPLAINANALYZEOfADeniedSubqueryRefuses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	t.Cleanup(cancel)
+	p := sec5ABACProvider(t)
+	db := pmEmbeddedDB(t, ctx, 0)
+	if err := db.SetAuthProvider(p); err != nil {
+		t.Fatal(err)
+	}
+	id, err := p.Authenticator().AuthenticateToken("reader-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idCtx := auth.ContextWithIdentity(ctx, id)
+	want := fmt.Sprintf("permission denied for table %q", pmOther)
+	for _, sql := range []string{
+		"EXPLAIN ANALYZE SELECT (SELECT MAX(id) FROM " + pmOther + ") AS m",
+		"EXPLAIN ANALYZE SELECT id FROM " + pmTable + " WHERE id = (SELECT MAX(id) FROM " +
+			pmOther + ")",
+	} {
+		_, qerr := db.Query(idCtx, sql)
+		if qerr == nil {
+			t.Errorf("EXPLAIN ANALYZE ran a subquery over a denied relation: %s", sql)
+		} else if qerr.Error() != want {
+			t.Errorf("%s\n  refusal = %q\n  want exactly %q", sql, qerr.Error(), want)
+		}
+	}
+	// Plain EXPLAIN answers, and what it answers names no denied relation.
+	out, err := db.Query(idCtx, "EXPLAIN SELECT id, (SELECT MAX(id) FROM "+pmOther+
+		") AS m FROM "+pmTable)
+	if err != nil {
+		t.Fatalf("plain EXPLAIN was refused: %v", err)
+	}
+	for _, row := range out.Rows {
+		if strings.Contains(fmt.Sprint(row["plan"]), pmOther) {
+			t.Errorf("the EXPLAIN output names the denied relation: %v", row)
+		}
+	}
+}
+
+// TestASubqueryIsPolicedWhereverItSits — the shapes a reviewer reaches for
+// once the obvious ones refuse. None of them is taught to the fix; they all
+// arrive at the same builder.
+func TestASubqueryIsPolicedWhereverItSits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	t.Cleanup(cancel)
+	for _, shape := range []struct {
+		name     string
+		provider func(*testing.T) *auth.Provider
+	}{{"legacy", sec5LegacyProvider}, {"abac", sec5ABACProvider}} {
+		t.Run(shape.name, func(t *testing.T) {
+			p := shape.provider(t)
+			db := pmEmbeddedDB(t, ctx, 0)
+			if err := db.SetAuthProvider(p); err != nil {
+				t.Fatal(err)
+			}
+			id, err := p.Authenticator().AuthenticateToken("reader-key")
+			if err != nil {
+				t.Fatal(err)
+			}
+			idCtx := auth.ContextWithIdentity(ctx, id)
+			want := fmt.Sprintf("permission denied for table %q", pmOther)
+			for _, tc := range []struct{ name, sql string }{
+				{"nested two deep", "SELECT (SELECT MAX(id) FROM " + pmTable +
+					" WHERE id = (SELECT MAX(id) FROM " + pmOther + ")) AS m"},
+				{"an aggregate's argument", "SELECT SUM((SELECT MAX(id) FROM " + pmOther +
+					")) AS m FROM " + pmTable},
+				{"ORDER BY", "SELECT id FROM " + pmTable + " ORDER BY (SELECT MAX(id) FROM " +
+					pmOther + "), id"},
+				{"HAVING", "SELECT dept, COUNT(*) AS c FROM " + pmTable +
+					" GROUP BY dept HAVING COUNT(*) > (SELECT MAX(id) FROM " + pmOther + ")"},
+				{"a derived table's SELECT list", "SELECT d.m FROM (SELECT (SELECT MAX(id) FROM " +
+					pmOther + ") AS m FROM " + pmTable + ") d"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					out, qerr := db.Query(idCtx, tc.sql)
+					if qerr == nil {
+						t.Fatalf("the denied relation was served: %v", out.Rows)
+					}
+					if qerr.Error() != want {
+						t.Errorf("refusal = %q, want exactly %q", qerr.Error(), want)
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestAScalarSubqueryIsUnchangedWithoutAuth — the other half of every
 // security change: with no provider nothing is enforced and nothing moves.
 func TestAScalarSubqueryIsUnchangedWithoutAuth(t *testing.T) {
