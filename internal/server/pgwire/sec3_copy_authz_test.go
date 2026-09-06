@@ -47,11 +47,21 @@ func sec3CopyDB(t *testing.T) *wadjet.DB {
 	return db
 }
 
-// sec3RowCount reads what is STORED, under no identity, so the assertion sees
-// the table rather than what a policy would show.
+// sec3RowCount reads what is STORED, so the assertion sees the table rather
+// than what a policy would show.
+//
+// It reads under the WRITER identity, not a bare context: with an auth
+// provider installed, a context carrying no identity is refused on the plan
+// path ("permission denied: authentication required"), which is the
+// fail-closed rule and not something a fixture should route around. `writer`
+// holds `read` on this table in both provider shapes and carries no column
+// obligation that a `count(*)` would meet, so what it counts is what is
+// stored. With no provider the stamp is inert.
 func sec3RowCount(t *testing.T, db *wadjet.DB) int64 {
 	t.Helper()
-	res, err := db.Query(context.Background(), "SELECT count(*) AS n FROM "+sec3CopyTable)
+	ctx := auth.ContextWithIdentity(context.Background(),
+		&auth.Identity{Name: "writer-user", Role: "writer"})
+	res, err := db.Query(ctx, "SELECT count(*) AS n FROM "+sec3CopyTable)
 	if err != nil {
 		t.Fatalf("counting rows: %v", err)
 	}
