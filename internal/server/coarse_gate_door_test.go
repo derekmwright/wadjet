@@ -262,11 +262,19 @@ func TestADeniedSelectDisclosesNoRuleID(t *testing.T) {
 	// saw asks — a relation reached through an `IN` or `EXISTS` subquery
 	// arrives there, not through the loop. Only the loop was gated, so
 	// restoring the rule id in `lookup` alone passed the whole arc.
+	// A THIRD refusal site joins the two below: the physical planner's own
+	// subquery pipeline, which turns a scalar expression subquery's TEXT into
+	// a plan after enforcement has run and asks the same lookup for every
+	// relation it plans (#945). It refuses while the outer pipeline RUNS, so
+	// it is also the site where a wrapper could prepend "executing query:" or
+	// "scalar subquery could not be executed:" to the one text — this
+	// assertion is on the message EXACTLY, which is what says it does not.
 	for _, sql := range []string{
 		"SELECT id FROM " + pmTable,
 		"SELECT id FROM " + pmOther + " WHERE id IN (SELECT id FROM " + pmTable + ")",
 		"SELECT id FROM " + pmOther + " WHERE EXISTS (SELECT 1 FROM " + pmTable +
 			" WHERE " + pmTable + ".id = " + pmOther + ".id)",
+		"SELECT (SELECT MAX(id) FROM " + pmTable + ") AS m",
 	} {
 		_, qerr := conn.Exec(ctx, sql)
 		if qerr == nil {

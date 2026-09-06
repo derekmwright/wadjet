@@ -212,10 +212,17 @@ func TestTheLegacyShapePolicesTheRelationsThePlanGROWS(t *testing.T) {
 
 	// `reader` lists only e7emp; e7other is not in its `tables`.
 	idCtx := legacyIdentityCtx(t, ctx, p, "reader-key")
+	// The ninth spelling: a SCALAR expression subquery. It never enters the
+	// plan at all — it is SQL text the physical planner builds a SECOND plan
+	// from, later — so it reaches the lookup through
+	// `applyContextColumnPolicies` and not through the optimizer's minted
+	// scans (#945).
 	for _, sql := range []string{
 		"SELECT id FROM " + pmTable + " WHERE id IN (SELECT id FROM " + pmOther + ")",
 		"SELECT id FROM " + pmTable + " WHERE EXISTS (SELECT 1 FROM " + pmOther +
 			" WHERE " + pmOther + ".id = " + pmTable + ".id)",
+		"SELECT (SELECT MAX(id) FROM " + pmOther + ") AS m",
+		"SELECT id, (SELECT MAX(id) FROM " + pmOther + ") AS m FROM " + pmTable,
 	} {
 		if _, err := db.Query(idCtx, sql); err == nil {
 			t.Errorf("a relation the role does not list was reached: %s", sql)

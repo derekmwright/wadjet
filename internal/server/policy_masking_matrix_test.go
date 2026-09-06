@@ -283,6 +283,10 @@ type pmRig struct {
 	// asyncBase is the HTTP base URL of the coordinator-backed server, the
 	// one that carries POST /v1/queries/async.
 	asyncBase string
+	// store is the DAG arms' object store. Every stage's output materializes
+	// under `queries/<id>/`, so an empty listing there is the evidence that a
+	// refusal happened BEFORE anything was dispatched (#945).
+	store objstore.Store
 }
 
 func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog) {
@@ -635,7 +639,7 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 		pmDoor{"http/local", httpRun(hsLocal.URL)},
 		pmDoor{"http/dag", httpRun(hsDAG.URL)})
 
-	return pmRig{doors: doors, provider: provider, asyncBase: hsDAG.URL}
+	return pmRig{doors: doors, provider: provider, asyncBase: hsDAG.URL, store: store}
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,24 +1035,36 @@ func pmCells() []pmCell {
 		// query is SQL TEXT when enforcement runs, so what it contains — a
 		// derived table, a set operation, a correlation — is the client's
 		// choice and no per-shape teaching can enumerate it (#859 round 4).
-		// Every one of them REFUSES 0A000, uniformly on all eight runners: the
-		// planner cannot show that the subquery's own plan keeps its
-		// predicates above the projection, and the branch's doctrine for a
-		// shape it cannot order safely is to refuse.
+		// Every one of them used to REFUSE 0A000 on all eight runners, and six
+		// of them now ANSWER — with the MASK, uniformly on all eight. That is
+		// a change in what the branch promises and it is recorded here rather
+		// than absorbed: the refusal was never the right answer, it was the
+		// only safe one available while the subquery's plan carried no
+		// security projection at all. It carried none because the pass that
+		// injects it returned early whenever the RESOLVED policy set was
+		// empty — which is what an outer statement over an UNPOLICED relation
+		// (`e7other`) leaves — so the plan-order invariant found a policed
+		// scan with no barrier above it and refused. The subquery's plan asks
+		// the context LOOKUP for every relation it reads now (#945), the
+		// projection goes in, and the predicate reads the mask: `bal > 300`
+		// is false on every row, which is why the six answer empty and
+		// `except_inside_in` — whose masked reading keeps every id — answers
+		// all three of e7other's.
 		//
 		// The line is drawn by the INNER PLAN, not by the outer statement's
 		// FROM list. A subquery the optimizer folds into the outer plan — a
 		// plain `IN (SELECT col FROM policed WHERE …)`, an `EXISTS`, a
 		// derived table or CTE in the FROM clause — is one plan, ordered and
 		// answered: that is the ten `inner_predicate_over_masked_*` cells
-		// above. A subquery that keeps a plan of its own refuses, and it
-		// refuses whether or not the outer statement reads the same relation
-		// — the three `*_outer_reads_it` cells below are the same three
-		// spellings with `e7bal` on both sides, and they refuse identically.
+		// above. A subquery that keeps a plan of its OWN and whose relation
+		// the outer statement ALSO reads still refuses — the two
+		// `*_outer_reads_it` cells below — because there the resolved set
+		// already covers the outer scan and the inner one is ordered against
+		// a projection the outer plan owns.
 		{name: "hidden_relation_union_all_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
 				`SELECT id FROM e7bal WHERE bal > 300 UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: nil},
 		// UNION-distinct inside the subquery. Spelled with IN rather than
 		// EXISTS: an EXISTS over a set operation is refused on the DAG arms
 		// for a pre-existing reason of its own ("EXISTS subquery requires a
@@ -1058,33 +1074,40 @@ func pmCells() []pmCell {
 		{name: "hidden_relation_union_distinct_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
 				`SELECT id FROM e7bal WHERE bal > 300 UNION SELECT id FROM e7bal WHERE bal > 500) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: nil},
 		{name: "hidden_relation_intersect_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
 				`SELECT id FROM e7bal WHERE bal > 300 INTERSECT SELECT id FROM e7bal) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: nil},
+		// The one cell of this group whose masked answer is NOT empty, and it
+		// is the discriminating one: `EXCEPT` over an inner predicate that
+		// the mask makes false removes NOTHING, so every id survives and all
+		// three of e7other's rows match. A stored read would remove the ids
+		// whose true `bal` exceeds 300.
 		{name: "hidden_relation_except_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
 				`SELECT id FROM e7bal EXCEPT SELECT id FROM e7bal WHERE bal > 300) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: []string{"id=1", "id=2", "id=3"}},
 		{name: "hidden_relation_correlated_scalar",
 			sql: `SELECT d.id FROM e7other d WHERE d.id = (` +
 				`SELECT b.id FROM e7bal b WHERE b.id = d.id AND b.bal > 300) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: nil},
 		{name: "hidden_relation_derived_inside_union_inside_in",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
 				`SELECT t.id FROM (SELECT id, bal FROM e7bal) t WHERE t.bal > 300 ` +
 				`UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: nil},
 		{name: "hidden_relation_correlated_scalar_over_a_cte",
 			sql: `WITH u AS (SELECT id, bal FROM e7bal) SELECT d.id FROM e7other d WHERE d.id = (` +
 				`SELECT u.id FROM u WHERE u.id = d.id AND u.bal > 300) ORDER BY d.id`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: nil},
 		// The same spellings with the POLICED relation on BOTH sides. An
 		// earlier revision of docs/security.md drew the boundary at the outer
 		// statement's FROM list — "a subquery over a table the outer statement
 		// also reads answers normally" — and these cells are why that sentence
-		// is gone (#859 round 5, review P1).
+		// is gone (#859 round 5, review P1). They still refuse, and they are
+		// the control that says the six cells above did not start answering
+		// because the invariant stopped being asked.
 		{name: "hidden_relation_union_all_inside_in_outer_reads_it",
 			sql: `SELECT id FROM e7bal WHERE id IN (` +
 				`SELECT id FROM e7bal WHERE bal > 300 UNION ALL SELECT id FROM e7bal WHERE bal > 500) ORDER BY id`,
