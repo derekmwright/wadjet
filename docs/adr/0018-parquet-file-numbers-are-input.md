@@ -1008,20 +1008,33 @@ Three invariants, each a claim a gate proves on revert:
   MAP key broke it for EVERY family whose carrier is not already its own text,
   because a Go map's key must be a string and the assembler printed the leaf's
   CARRIER with `fmt.Sprint` — an unscaled DECIMAL integer, a DATE day count, the
-  int64 an IPv4/MAC decodes to, the raw bytes an IPv6/UUID decodes to
+  int64 an IPv4/MAC decodes to, the raw bytes an IPv6/UUID/BYTES decodes to
   (`StorageClassOf`'s classes). The DECIMAL child then re-scaled the text a
-  second time and the DATE/IPv4/MAC/IPv6/UUID children could not parse
-  `"3232235786"` / `"[10 0 0 5]"` / `"19675"` and dropped the key to a zero
-  value. Every map-key carrier now goes through ONE canonical, parseable
-  rendering (`parquet.MapKeyCarrierText`); the child reconstructs the value and
-  `GetValue` re-renders its display form, so the rendered text need only PARSE,
-  not match the display spelling (IPv6 is emitted uncompressed so it round-trips
-  to the exact sixteen bytes). CIDR was always right — its carrier is already
-  text. `batch.mapKeyValue` additionally accepts a wall-clock TIMESTAMP key on
-  the in-memory `FromRows` path, which had dropped it. Gate:
+  second time and the DATE/IPv4/MAC/IPv6/UUID/BYTES children could not parse
+  `"3232235786"` / `"[10 0 0 5]"` / `"19675"` / `"[104 101 108 108 111]"` and
+  dropped the key to a zero value. Every map-key carrier now goes through ONE
+  canonical, parseable rendering (`parquet.MapKeyCarrierText`), which is
+  EXHAUSTIVE over the 22 TypeIDs by construction — a `default: fmt.Sprint`
+  fall-through was what let the switch forget DECIMAL, then the network types,
+  then BYTES in turn. The child reconstructs the value and `GetValue` re-renders
+  its display form, so the rendered text need only PARSE, not match the display
+  spelling (IPv6 is emitted uncompressed so it round-trips to the exact sixteen
+  bytes; BYTES is the raw bytes as a string). CIDR, STRING and the integer/
+  float/TIMESTAMP carriers were always right — their carrier is already the text
+  the child re-parses. `batch.mapKeyValue` additionally accepts a wall-clock
+  TIMESTAMP key on the in-memory `FromRows` path, which had dropped it.
+
+  Out of scope, by construction not by omission: ARRAY, ROW and MAP are
+  containers, never a leaf, so a key node of one is not a primitive leaf and
+  never reaches this renderer; VECTOR is a leaf but `batch.SetValue` refuses a
+  VECTOR from a string map key on every path (the #361 silent-write guard
+  panics), so a VECTOR-keyed map cannot be constructed or ingested at all. Both
+  are named cases in the renderer with no silent print. Gates:
   `wadjet.TestDecimalMapKeySurvivesTheParquetRoundTrip` (flipped from a
   fail-on-agree pin to a passing regression test over DECIMAL, DATE, TIMESTAMP,
-  IPv4, IPv6, MAC, UUID and CIDR map keys).
+  IPv4, IPv6, MAC, UUID, CIDR and BYTES map keys) and
+  `parquet.TestMapKeyCarrierTextCoversEveryType` (every one of the 22 TypeIDs
+  has a decision; a new type with none fails the exhaustiveness loop).
 
 ## Consequences
 

@@ -23,15 +23,17 @@ import (
 //	MAP(IPv6, STRING)          key 2001:db8::1  -> same         (was lost)
 //	MAP(UUID, STRING)          key <uuid>       -> same         (was "")
 //	MAP(CIDR, STRING)          key 10.0.0.0/8   -> same         (always right, text carrier)
+//	MAP(BYTES, STRING)         key "hello"      -> []byte("hello") (was "[104 101 ...]")
 //
 // Root cause (fixed): on read, a nested-map key leaf decodes to its CARRIER,
 // not its display value — an UNSCALED DECIMAL integer, a DATE day count, an
-// int64 for IPv4/MAC, raw bytes for IPv6/UUID (parquet.StorageClassOf). The
-// record assembler printed that carrier with fmt.Sprint and re-ingested it, so
-// the DECIMAL child re-scaled "127500" a SECOND time and the DATE/IPv4/MAC/
-// IPv6/UUID children could not parse "19675" / "3232235786" / "[10 0 0 5]" and
-// dropped the key to a zero value. The assembler now renders EVERY map-key
-// carrier through one canonical, parseable path (parquet.MapKeyCarrierText), so
+// int64 for IPv4/MAC, raw bytes for IPv6/UUID/BYTES (parquet.StorageClassOf).
+// The record assembler printed that carrier with fmt.Sprint and re-ingested it,
+// so the DECIMAL child re-scaled "127500" a SECOND time and the DATE/IPv4/MAC/
+// IPv6/UUID/BYTES children could not parse "19675" / "3232235786" / "[10 0 0 5]"
+// and dropped the key to a zero value. The assembler now renders EVERY map-key
+// carrier through one canonical, parseable path (parquet.MapKeyCarrierText,
+// exhaustive over the 22 TypeIDs — see TestMapKeyCarrierTextCoversEveryType), so
 // the child reconstructs the value and GetValue re-renders its display form. A
 // map VALUE was always right because it stays the typed box; only the key is
 // forced through text because a Go map's key must be a string.
@@ -273,18 +275,20 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 			netMap("mmac", parquet.TypeMAC),
 			netMap("muuid", parquet.TypeUUID),
 			netMap("mcidr", parquet.TypeCIDR),
+			netMap("mbytes", parquet.TypeBytes),
 		}}
 		if err := db.CreateTable(ctx, "netmapkey", sc4, nil); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		ing := db.NewIngester("netmapkey", sc4, nil, ingest.Config{MaxBufferRows: 8, RowGroupSize: 4})
 		if err := ing.Ingest(ctx, []map[string]any{{
-			"id":    int64(1),
-			"m4":    map[string]any{"192.168.1.10": "a"},
-			"m6":    map[string]any{"2001:db8::1": "b"},
-			"mmac":  map[string]any{"aa:bb:cc:dd:ee:ff": "c"},
-			"muuid": map[string]any{"12345678-1234-1234-1234-1234567890ab": "d"},
-			"mcidr": map[string]any{"10.0.0.0/8": "e"},
+			"id":     int64(1),
+			"m4":     map[string]any{"192.168.1.10": "a"},
+			"m6":     map[string]any{"2001:db8::1": "b"},
+			"mmac":   map[string]any{"aa:bb:cc:dd:ee:ff": "c"},
+			"muuid":  map[string]any{"12345678-1234-1234-1234-1234567890ab": "d"},
+			"mcidr":  map[string]any{"10.0.0.0/8": "e"},
+			"mbytes": map[string]any{"hello": "f"},
 		}}); err != nil {
 			t.Fatalf("ingest: %v", err)
 		}
@@ -310,6 +314,24 @@ func TestDecimalMapKeySurvivesTheParquetRoundTrip(t *testing.T) {
 			if key, _ := entry["key"].(string); key != c.want {
 				t.Errorf("%s key reads back %q, want %q", c.col, key, c.want)
 			}
+		}
+
+		// A BYTES key reads back as the raw []byte a scalar BYTES column gives
+		// (not a string), so it is asserted apart from the string-keyed families
+		// above. On revert (fmt.Sprint of the carrier) it read back the bytes of
+		// "[104 101 108 108 111]".
+		res, err := db.Query(ctx, `SELECT mbytes AS v FROM netmapkey WHERE id = 1`)
+		if err != nil {
+			t.Fatalf("mbytes: %v", err)
+		}
+		got, _ := res.Rows[0]["v"].([]any)
+		if len(got) != 1 {
+			t.Fatalf("mbytes came back as %#v", res.Rows[0]["v"])
+		}
+		entry, _ := got[0].(map[string]any)
+		key, _ := entry["key"].([]byte)
+		if string(key) != "hello" {
+			t.Errorf("BYTES map key reads back %#v, want []byte(\"hello\")", entry["key"])
 		}
 	})
 }

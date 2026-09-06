@@ -678,7 +678,14 @@ func PhysicalReadableAs(t TypeID, pt PhysicalType) bool {
 // round-trips to the exact sixteen bytes (net.ParseIP of a v4-mapped display
 // form would not), and GetValue re-compresses it on the way out.
 func MapKeyCarrierText(typeID TypeID, decScale int32, k any) string {
+	// EXHAUSTIVE over the 22 TypeIDs by design: the previous per-type switch
+	// with a `default: fmt.Sprint` silently mangled every carrier the switch
+	// forgot (DECIMAL, then the network types, then BYTES). Every type is named
+	// here — either it renders its carrier, or it is in the carrier-is-its-own-
+	// text group whose fmt.Sprint round-trips, or it cannot be a valid map key.
+	// TestMapKeyCarrierTextCoversEveryType asserts no type is missing.
 	switch typeID {
+	// Carrier is NOT its own text — render it, or a re-parse corrupts/loses it.
 	case TypeDecimal:
 		switch v := k.(type) {
 		case int64:
@@ -712,6 +719,32 @@ func MapKeyCarrierText(typeID TypeID, decScale int32, k any) string {
 		if b, ok := k.([]byte); ok && len(b) == 16 {
 			return uuidText(b)
 		}
+	case TypeBytes:
+		// The carrier is the raw []byte; fmt.Sprint of it is "[104 101 ...]".
+		// The value's own text is the bytes AS a string — the key child
+		// (SetValue) reads it back to the same []byte, and GetValue renders the
+		// same []byte for a scalar BYTES column, so there is no drift (#883).
+		if b, ok := k.([]byte); ok {
+			return string(b)
+		}
+
+	// Carrier is ALREADY its own text: the leaf decodes to a bool, an integer
+	// (INT32/INT64/PORT/PROTOCOL/DURATION and TIMESTAMP as epoch millis), a
+	// float, or a string (STRING/CIDR), and fmt.Sprint of it is exactly the
+	// text batch.mapKeyValue -> SetValue re-parses. Named explicitly so a new
+	// carrier here is a compile-time decision, not a silent fall-through.
+	case TypeBool, TypeInt32, TypeInt64, TypeFloat32, TypeFloat64,
+		TypeString, TypeTimestamp, TypeCIDR, TypePort, TypeProtocol, TypeDuration:
+		// fmt.Sprint below.
+
+	// Cannot be a valid flat MAP KEY. ARRAY/ROW/MAP are containers and are
+	// never a leaf, so a key node of one is not a kindLeaf and this function is
+	// never reached for it. VECTOR is a leaf, but batch.SetValue refuses a
+	// VECTOR from a string map key on every path (the #361 silent-write guard
+	// panics), so a VECTOR-keyed map cannot be constructed or ingested at all.
+	// ADR-0018 §13 records them as out of scope for this reason.
+	case TypeArray, TypeRow, TypeMap, TypeVector:
+		// fmt.Sprint below (unreachable for a real key; kept for exhaustiveness).
 	}
 	return fmt.Sprint(k)
 }
