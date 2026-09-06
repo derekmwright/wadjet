@@ -17,6 +17,7 @@ package pgwire
 // coherence invariant in describe_execute_test.go.
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -436,6 +437,32 @@ func pgClassAttrs(name string) map[string]any {
 		"reloptions":     nil,
 		"relacl":         nil,
 		"description":    nil,
+		// The columns `\d`'s SECOND statement reads, once the first has
+		// resolved the OID: the truthful constants for a server with no check
+		// constraints, no row security, no TOAST relation and no access method
+		// of its own. Absent, they came back NULL, and psql reads them
+		// POSITIONALLY to decide what it is describing (#944).
+		//
+		// `reloftype` is deliberately NOT here. psql does not read the column;
+		// it reads `CASE WHEN c.reloftype = 0 THEN '' ELSE …::regtype END`,
+		// and this emulation answers a select item by the attribute it names
+		// rather than by evaluating the expression around it — so a 0 under
+		// that item is read as a TYPE NAME and psql prints "Typed table of
+		// type: 0". The honest rendering of an expression this server does not
+		// evaluate is NULL.
+		//
+		// `nspname` belongs to pg_namespace, and it is here because `\d`'s
+		// lookup JOINS the two and this emulation renders one row from one
+		// map — the same concession the pg_attribute query makes for the
+		// pg_class columns it joins. Without it the header read `Table
+		// ".sec5_t"`, with the schema half of the qualified name empty.
+		"relchecks":           0,
+		"relrowsecurity":      false,
+		"relforcerowsecurity": false,
+		"relreplident":        "d",
+		"reltoastrelid":       0,
+		"relam":               0,
+		"nspname":             expr.SessionSchema,
 	}
 }
 
@@ -817,4 +844,112 @@ func outerSelect(sql string) string {
 		}
 	}
 	return sql
+}
+
+// The anchored relation-name regex psql sends.
+//
+// `\d <name>` does not look a relation up by equality. It emits
+//
+//	WHERE c.relname OPERATOR(pg_catalog.~) '^(sec5_t)$' COLLATE pg_catalog.default
+//
+// with the name escaped for a regex, and a name carrying a metacharacter comes
+// as the E-string form E'^(a\\.b)$'. The emulation matched pg_class predicates
+// by EQUALITY alone, so this spelling matched nothing, the branch declined,
+// and the statement fell through to the generic empty answer: psql printed
+// "Did not find any relation named ..." for a table that exists and that the
+// caller can select from — for every identity, with and without
+// authentication (#944).
+//
+// Only THIS form is modelled: the anchored, whole-name pattern psql emits for
+// a literal identifier. The general regex operator is not implemented, and an
+// unanchored or wildcard pattern — what a psql PATTERN argument produces —
+// is REFUSED with 0A000 naming the form that works, rather than answered with
+// a row set that silently ignores the predicate. `!~` and `~*` are other
+// operators and are refused the same way.
+var relnameRegexPredicate = regexp.MustCompile(
+	`(?is)\brelname\s*(?:operator\s*\(\s*pg_catalog\.(!?~\*?)\s*\)|(!?~\*?))\s*(E?)'((?:[^']|'')*)'`)
+
+// anchoredRelnameRegex reads the relation name out of that predicate.
+//
+// found says the statement filters pg_class.relname with a REGEX at all;
+// supported says this server can answer it, and only then is name meaningful.
+// The name keeps the case the client wrote — a quoted identifier reaches the
+// pattern verbatim — so the caller matches it case-insensitively against the
+// catalog's own spelling, the concession every read door makes (#731).
+func anchoredRelnameRegex(sql string) (name string, found, supported bool) {
+	m := relnameRegexPredicate.FindStringSubmatch(sql)
+	if m == nil {
+		return "", false, false
+	}
+	op := m[1]
+	if op == "" {
+		op = m[2]
+	}
+	if op != "~" {
+		return "", true, false
+	}
+	body := strings.ReplaceAll(m[4], "''", "'")
+	if strings.EqualFold(m[3], "E") {
+		var ok bool
+		if body, ok = decodeEStringEscapes(body); !ok {
+			return "", true, false
+		}
+	}
+	if !strings.HasPrefix(body, "^(") || !strings.HasSuffix(body, ")$") {
+		return "", true, false
+	}
+	lit, ok := literalRegexBody(body[2 : len(body)-2])
+	if !ok {
+		return "", true, false
+	}
+	return lit, true, true
+}
+
+// decodeEStringEscapes reads PostgreSQL's E” backslash escapes, which is how
+// psql spells a pattern containing a backslash. Only the escapes psql itself
+// emits for an identifier are read; anything else declines, because guessing
+// at an escape would turn one pattern into a different one.
+func decodeEStringEscapes(s string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		if i >= len(s) {
+			return "", false
+		}
+		switch s[i] {
+		case '\\', '\'', '"':
+			b.WriteByte(s[i])
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// literalRegexBody reads a regex body that matches exactly ONE literal string
+// — every character either an ordinary one or a backslash-escaped
+// metacharacter, which is what psql's own escaping produces for an identifier.
+// A body carrying an UNESCAPED metacharacter matches more than one name and is
+// not this form.
+func literalRegexBody(body string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(body); i++ {
+		switch ch := body[i]; ch {
+		case '\\':
+			i++
+			if i >= len(body) {
+				return "", false
+			}
+			b.WriteByte(body[i])
+		case '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$':
+			return "", false
+		default:
+			b.WriteByte(ch)
+		}
+	}
+	return b.String(), true
 }

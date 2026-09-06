@@ -1126,7 +1126,7 @@ func (c *pgConn) checkSimpleStatement(sql string) error {
 		return nil
 	}
 	if ans := c.matchIntrospection(sql, strings.ToUpper(sql)); ans != nil {
-		return nil
+		return ans.err
 	}
 	_, err := plansql.Parse(sql)
 	return err
@@ -1186,6 +1186,10 @@ func (c *pgConn) runSimpleStatement(sql string) bool {
 
 	// Handle introspection/synthetic queries (SELECT 1, version(), pg_catalog, etc.)
 	if ans := c.matchIntrospection(sql, upper); ans != nil {
+		if ans.err != nil {
+			c.sendSynthRefusal(ans.err)
+			return true
+		}
 		c.sendSynthAnswer(ans)
 		return true
 	}
@@ -1563,6 +1567,15 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	// that trusts the description then misreads the tuples.
 	upper := strings.ToUpper(sql)
 	if ans := c.matchIntrospection(sql, upper); ans != nil {
+		if ans.err != nil {
+			// A shape the emulation refuses is refused HERE too, not
+			// described and then refused at Execute: a client that holds a
+			// RowDescription expects tuples under it.
+			c.closeDescribeCache()
+			c.sendSynthRefusal(ans.err)
+			c.skipUntilSync = true
+			return
+		}
 		c.closeDescribeCache()
 		c.describeSynth = ans
 		c.describedSQL = sql
@@ -1769,6 +1782,11 @@ func (c *pgConn) handleExecute(payload []byte) {
 		// introspection layer answers it — dropping it here keeps a stale
 		// error from replaying on the NEXT statement of this connection.
 		c.closeDescribeCache()
+		if ans.err != nil {
+			c.sendSynthRefusal(ans.err)
+			c.skipUntilSync = true
+			return
+		}
 		if !c.shapeAgrees(len(ans.cols), sql) {
 			return
 		}
@@ -1969,6 +1987,15 @@ func (c *pgConn) handleClose(payload []byte) {
 type synthAnswer struct {
 	cols []string
 	rows []map[string]any
+	// err REFUSES the statement instead of answering it. The catalog
+	// emulation models a bounded set of introspection shapes, and a shape it
+	// does not model must say so rather than answer the columns with no rows:
+	// an empty answer is indistinguishable from "there is no such relation",
+	// which is exactly how `\d` reported a table that exists (#944). Carried
+	// on the answer rather than returned beside it because `matchIntrospection`
+	// is consulted from four places and every one of them already branches on
+	// nil-or-not.
+	err error
 }
 
 func singleRow(cols []string, row map[string]any) *synthAnswer {
@@ -2456,6 +2483,18 @@ func (c *pgConn) sendSynthAnswer(ans *synthAnswer) {
 	c.sendSynthRows(ans, nil)
 }
 
+// sendSynthRefusal reports an introspection shape the emulation does not
+// model, with the SQLSTATE the refusal carries (0A000 by default, the class
+// this branch uses for "not implemented here" the way
+// plansql.RefuseUnsupportedStatement does).
+func (c *pgConn) sendSynthRefusal(err error) {
+	code := sqlerr.StateOf(err)
+	if code == "" {
+		code = "0A000"
+	}
+	c.sendError("ERROR", code, err.Error())
+}
+
 // sendSynthRowDescription writes the RowDescription for a synthetic answer with
 // each column's OID inferred from its values (see colOID). fmtCodes: see
 // sendRowDescription — a portal Describe declares the Bind's format codes.
@@ -2762,18 +2801,48 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	// single column each — a client selecting `relname, relkind` was described
 	// one column and sent one, which is how DataGrip's table tree came back
 	// without the kind it uses to tell a table from a view.
-	if subject == "PG_CLASS" && strings.Contains(normalized, "RELNAME") {
+	// A pg_class statement is claimed when it names `relname` — the listing
+	// and the lookups — or when it carries a LITERAL `oid = '<n>'`.
+	//
+	// The second half is `\d`'s SECOND statement, which reads relchecks,
+	// relkind and the flag columns once the first has resolved the OID and
+	// names no `relname` at all: it never reached the OID branch below and
+	// answered zero rows, and psql reports "Did not find any relation with
+	// OID …" on an empty result, so BOTH statements have to answer for `\d`
+	// to work (#944). It is a LITERAL and not a join condition on purpose —
+	// `\d`'s pg_inherits queries say `WHERE c.oid = i.inhparent`, name no
+	// relname, and must keep falling through to the empty answer rather than
+	// being handed every visible relation as this table's parent.
+	if subject == "PG_CLASS" &&
+		(strings.Contains(normalized, "RELNAME") || extractParamValue(normalized, "OID") != "") {
 		tables, err := c.visibleCatalogTables(ctx)
 		if err != nil {
 			return nil
 		}
 
 		keep := func(string) bool { return true }
+		regexName, regexFound, regexOK := anchoredRelnameRegex(sql)
 		switch {
 		case extractParamValue(normalized, "RELNAME") != "":
 			// Specific table lookup: relname = '<value>' in WHERE.
 			want := extractParamValue(normalized, "RELNAME")
 			keep = func(t string) bool { return t == want }
+		case regexFound:
+			// The anchored regex psql's `\d <name>` sends. A pattern this
+			// server does not model is REFUSED and never answered with the
+			// predicate ignored: a listing that quietly drops a filter is a
+			// wrong answer, and a silent empty one is what #944 was.
+			if !regexOK {
+				return &synthAnswer{
+					cols: extractSelectColumns(sql),
+					err: sqlerr.New("0A000", "this server matches pg_class.relname "+
+						"against the anchored whole-name pattern psql sends for "+
+						`\d ('^(name)$'), not the general regular-expression `+
+						"operator; spell the lookup relname = 'name', or list the "+
+						"relations with SHOW TABLES"),
+				}
+			}
+			keep = func(t string) bool { return strings.EqualFold(t, regexName) }
 		case extractParamValue(normalized, "OID") != "":
 			// Reverse lookup: WHERE oid = '<value>'.
 			want := extractParamValue(normalized, "OID")
