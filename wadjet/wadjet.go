@@ -4,6 +4,7 @@ package wadjet
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -513,6 +514,18 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	// internal/coordinator/local_fastpath.go and was never applied here.
 	defer pipeline.Close()
 	if err := pipeline.Run(ctx); err != nil {
+		// An AUTHORIZATION refusal raised while the pipeline runs is the same
+		// refusal as one raised while it was planned, and it carries the same
+		// text: the shared decision's, with nothing in front of it (ADR-0034
+		// item 6). A scalar subquery is a second query whose relations are
+		// decided when ITS plan is built, and that happens during the outer
+		// pipeline's run — so the identical statement refused on this door
+		// with `executing query: permission denied for table "x"` while the
+		// DAG's producer stage, planned up front, refused with the bare
+		// sentence. One operation, one message (#945).
+		if refusal := (*sqlerr.Error)(nil); errors.As(err, &refusal) && refusal.Code == "42501" {
+			return nil, refusal
+		}
 		return nil, fmt.Errorf("executing query: %w", err)
 	}
 

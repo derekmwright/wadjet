@@ -47,7 +47,7 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 		// NOT NULL. A scalar subquery that could not be run has no value,
 		// and NULL is a value — one that makes every comparison above it
 		// UNKNOWN and the row silently vanish.
-		failEval(&SubqueryRunFailedError{Kind: "scalar", SQL: sql, Err: runErr})
+		failEval(subqueryRunFailed("scalar", sql, runErr))
 	}
 	if len(rows) > 1 {
 		// Reported with no count: the read stopped on purpose, so this site
@@ -119,7 +119,7 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 		// NOT `e.Not`. A membership test whose set could not be built has no
 		// answer, and returning "not a member" is the third of the three
 		// different wrong answers these evaluators gave to one event.
-		failEval(&SubqueryRunFailedError{Kind: "IN", SQL: sql, Err: runErr})
+		failEval(subqueryRunFailed("IN", sql, runErr))
 	}
 	if e.SetBound > 0 && len(rows) > e.SetBound {
 		failEval(&InSetTooLargeError{SQL: sql, Rows: len(rows), Bound: e.SetBound})
@@ -196,7 +196,7 @@ func (e *CorrelatedExistsSubquery) EvalBool(b *batch.RecordBatch, row int) bool 
 		// failure as FALSE, so a re-run that raised — #679's quoted DECIMAL
 		// against a BIGINT raises 22P02 — answered a confident 0 rows for
 		// PostgreSQL's 3, and its NOT EXISTS twin answered every row.
-		failEval(&SubqueryRunFailedError{Kind: "EXISTS", SQL: sql, Err: runErr})
+		failEval(subqueryRunFailed("EXISTS", sql, runErr))
 	}
 	exists := len(rows) > 0
 	if e.Not {
@@ -451,6 +451,28 @@ type SubqueryRunFailedError struct {
 func (e *SubqueryRunFailedError) Error() string {
 	return fmt.Sprintf("%s subquery could not be executed: %v\n  subquery: %s",
 		e.Kind, e.Err, e.SQL)
+}
+
+// subqueryRunFailed is what a subquery's failed run raises — EXCEPT when the
+// failure is an AUTHORIZATION refusal, which is not an execution failure and
+// does not wear that sentence.
+//
+// The identity may not read a relation the subquery names. That refusal is the
+// product's one refusal: SQLSTATE 42501 carrying the shared decision's own text
+// and nothing else, identical on every door (ADR-0034 item 6). Wrapping it gave
+// the SAME operation two different messages depending on which arm answered —
+// the DAG plans a scalar subquery into producer stages and refuses at PLAN
+// time, unwrapped, while the single-process arm refuses while EVALUATING and
+// wore "scalar subquery could not be executed: …" in front of it — and told the
+// caller where the check fired rather than what it decided (#945).
+//
+// It travels as fatalEval so the pipeline drivers still recover it: a bare
+// error carries no FatalEvalPanic marker and would re-raise as a panic.
+func subqueryRunFailed(kind, sql string, err error) error {
+	if sqlerr.StateOf(err) == "42501" {
+		return fatalEval{err}
+	}
+	return &SubqueryRunFailedError{Kind: kind, SQL: sql, Err: err}
 }
 
 func (e *SubqueryRunFailedError) Unwrap() error { return e.Err }

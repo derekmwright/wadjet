@@ -6123,7 +6123,7 @@ func (e *ScalarSubquery) resolveSlow() {
 	// the bound is this engine's business and the query is the user's.
 	rows, err := e.Runner(plansql.WithRowLimit(e.SQL, 2))
 	if err != nil {
-		failEval(&SubqueryRunFailedError{Kind: "scalar", SQL: e.SQL, Err: err})
+		failEval(subqueryRunFailed("scalar", e.SQL, err))
 	}
 	if len(rows) > 1 {
 		// Reported with no count: the read stopped on purpose, so this site
@@ -6465,7 +6465,7 @@ func (e *InSubquery) resolveSlow() {
 		// the same fold the correlated evaluators made, one construct over:
 		// a membership set that could not be built has no answer, and
 		// answering FALSE for every row is a confident wrong one.
-		failEval(&SubqueryRunFailedError{Kind: "IN", SQL: e.SQL, Err: err})
+		failEval(subqueryRunFailed("IN", e.SQL, err))
 	}
 	if e.SetBound > 0 && len(rows) > e.SetBound {
 		failEval(&InSetTooLargeError{SQL: e.SQL, Rows: len(rows), Bound: e.SetBound})
@@ -6734,7 +6734,7 @@ func (e *ExistsSubquery) resolveSlow() {
 	if err != nil {
 		// `err == nil && len(rows) > 0` made a failure indistinguishable
 		// from an empty result. They are not the same thing.
-		failEval(&SubqueryRunFailedError{Kind: "EXISTS", SQL: e.SQL, Err: err})
+		failEval(subqueryRunFailed("EXISTS", e.SQL, err))
 	}
 	e.exists = len(rows) > 0
 	e.resolved.Store(true)
