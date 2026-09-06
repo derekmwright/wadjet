@@ -29,6 +29,17 @@ import (
 // refuse a describe: the identity could read the schema of a table every data
 // path refuses it.
 
+// pinSEC4Metadata names the two cells below that assert the LEAK rather than
+// the fix, because the handler behind each is SEC4's hunk in this same file
+// (#941, commit a5ccc5a4) and SEC3 lands after it.
+//
+// They are pins in the ADR-0013 sense: the moment SEC4's `handleShowTables` /
+// `handleDescribe` land, these two cells FAIL, and deleting them is the proof
+// the fix arrived. The coordinator deletes them in the landing that carries
+// SEC4's #941 — they are not expectations anyone should preserve.
+const pinSEC4Metadata = "PIN: asserts today's leak on the SEC3 branch; SEC4's #941 " +
+	"(a5ccc5a4) makes this a refusal — DELETE this cell when SEC4 lands"
+
 // metadataProvider: `analyst` is allowed to read `public_t` and explicitly
 // DENIED `secret_t`, while its legacy role still lists every table.
 func metadataProvider() *auth.Provider {
@@ -154,7 +165,7 @@ func TestHTTPTableListingHidesAnABACDeniedRelation(t *testing.T) {
 		// (#941); this arc leaves them on the legacy rule and asserts
 		// today's behaviour, so the two branches do not both rewrite the
 		// same handler. SEC4 changes these cells.
-		{name: "SHOW TABLES (SEC4 changes this)", method: http.MethodPost,
+		{name: "SHOW TABLES " + pinSEC4Metadata, method: http.MethodPost,
 			path: "/v1/queries", body: `{"sql":"SHOW TABLES"}`, sec4Owns: true,
 			extract: func(body string) []string {
 				var out struct {
@@ -185,8 +196,8 @@ func TestHTTPTableListingHidesAnABACDeniedRelation(t *testing.T) {
 			}
 			switch {
 			case tc.sec4Owns && !seen["secret_t"]:
-				t.Errorf("this cell records TODAY'S behaviour on this branch (SEC4 owns the "+
-					"handler): secret_t should still be listed here, got %v", names)
+				t.Errorf("%s\n  secret_t is no longer listed (got %v) — SEC4's fix has "+
+					"landed, so DELETE this cell", pinSEC4Metadata, names)
 			case !tc.sec4Owns && seen["secret_t"]:
 				t.Errorf("an explicitly DENIED relation is published by the listing: %v", names)
 			}
@@ -204,6 +215,41 @@ func TestHTTPTableListingHidesAnABACDeniedRelation(t *testing.T) {
 				t.Errorf("the administrator's listing lost a table: %v", tc.extract(body))
 			}
 		})
+	}
+}
+
+// The SELECT refusal on this door says what the shared decision says
+// (round-1, position 4).
+//
+// The preliminary check in handleQuery carried its own wording — `access
+// denied to table "x": <the matched rule>` in the ABAC branch and `access
+// denied to table "x"` in the legacy one, beside `insufficient permissions`
+// for the read permission — while pgwire's 42501 and gRPC's PermissionDenied
+// carry `permission denied for table "x"` for the same refusal. One refusal
+// with three wordings is three readings of one decision, and the rule name in
+// the ABAC message published the policy besides.
+func TestHTTPSelectRefusalCarriesTheSharedText(t *testing.T) {
+	ts := metadataServer(t)
+
+	code, body := metadataDo(t, ts, http.MethodPost, "/v1/queries", "analyst-key",
+		`{"sql":"SELECT id FROM secret_t"}`)
+	if code != http.StatusForbidden {
+		t.Fatalf("status %d; want 403 (%s)", code, body)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("body %s is not JSON: %v", body, err)
+	}
+	if want := `permission denied for table "secret_t"`; payload.Error != want {
+		t.Errorf("refusal text %q; want %q — the text pgwire and gRPC carry for the "+
+			"same refusal", payload.Error, want)
+	}
+	// And the permitted relation still answers.
+	if code, body := metadataDo(t, ts, http.MethodPost, "/v1/queries", "analyst-key",
+		`{"sql":"SELECT id FROM public_t"}`); code == http.StatusForbidden {
+		t.Errorf("the permitted relation was refused: %d (%s)", code, body)
 	}
 }
 
@@ -264,7 +310,7 @@ func TestHTTPDescribeRefusesAnABACDeniedRelation(t *testing.T) {
 		sec4Owns bool
 	}{
 		{name: "GET /v1/tables/{name}", method: http.MethodGet, path: "/v1/tables/secret_t"},
-		{name: "DESCRIBE (SEC4 changes this)", method: http.MethodPost, path: "/v1/queries",
+		{name: "DESCRIBE " + pinSEC4Metadata, method: http.MethodPost, path: "/v1/queries",
 			body: `{"sql":"DESCRIBE secret_t"}`, sec4Owns: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,8 +319,8 @@ func TestHTTPDescribeRefusesAnABACDeniedRelation(t *testing.T) {
 				// Today the legacy role rule lists every table, so the
 				// describe answers. SEC4's #941 makes this a 403.
 				if code != http.StatusOK {
-					t.Fatalf("this cell records TODAY'S behaviour on this branch: "+
-						"status %d, want 200 (%s)", code, body)
+					t.Fatalf("%s\n  DESCRIBE answered %d, not 200 — SEC4's fix has landed, "+
+						"so DELETE this cell (%s)", pinSEC4Metadata, code, body)
 				}
 				return
 			}

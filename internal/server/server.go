@@ -380,8 +380,14 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			for _, tableName := range auth.StatementBaseTables(r.Context(), s.catalog, selectInfo) {
 				td := evaluator.EvaluateTableAccess(subject, tableName, auth.ActionRead, env)
 				if !td.Allowed {
+					// The refusal TEXT is the shared decision's own, so one
+					// refusal of one relation reads the same on this door, on
+					// pgwire (42501) and on gRPC (PermissionDenied) —
+					// ADR-0034. The evaluator's `Reason` is dropped from the
+					// client's message for the reason the other doors never
+					// carried it: it names the matched RULE.
 					writeError(w, http.StatusForbidden,
-						fmt.Sprintf("access denied to table %q: %s", tableName, td.Reason))
+						s.tableAccessRefusal(r.Context(), tableName, auth.ActionRead))
 					return
 				}
 				tableDecisions[tableName] = td
@@ -400,22 +406,25 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else if authz := s.getAuthz(); authz != nil {
-			// Legacy RBAC fallback
-			if !authz.HasPermission(identity, "read") {
-				writeError(w, http.StatusForbidden, "insufficient permissions")
+			// Legacy RBAC fallback. Both halves say what the shared
+			// authorizer says: the permission refusal carries
+			// auth.RequirePermission's text and each relation refusal carries
+			// the table decision's, so this door reads like the others
+			// (ADR-0034).
+			if !s.requirePermission(w, r, "read") {
 				return
 			}
 			for _, table := range selectInfo.Tables {
 				if !authz.CanAccessTable(identity, table.Name) {
 					writeError(w, http.StatusForbidden,
-						fmt.Sprintf("access denied to table %q", table.Name))
+						s.tableAccessRefusal(r.Context(), table.Name, auth.ActionRead))
 					return
 				}
 			}
 			for _, join := range selectInfo.Joins {
 				if !authz.CanAccessTable(identity, join.RightTable) {
 					writeError(w, http.StatusForbidden,
-						fmt.Sprintf("access denied to table %q", join.RightTable))
+						s.tableAccessRefusal(r.Context(), join.RightTable, auth.ActionRead))
 					return
 				}
 			}
@@ -738,6 +747,20 @@ func (s *Server) visibleTables(ctx context.Context, tables []string) []string {
 	return auth.VisibleTables(ctx, s.provider, tables)
 }
 
+// tableAccessRefusal is what this door SAYS when a relation is refused: the
+// shared decision's own message, so one refusal of one relation reads the same
+// here, on pgwire and on gRPC.
+//
+// The checks above have already decided; this only renders. It asks
+// `tableAccess` for the text rather than formatting one, so a change to the
+// decision's wording carries this door with it.
+func (s *Server) tableAccessRefusal(ctx context.Context, table string, action auth.Action) string {
+	if err := s.tableAccess(ctx, s.catalog.ResolveTableName(table), action); err != nil {
+		return err.Error()
+	}
+	return sqlerr.New("42501", "permission denied for table %q", table).Error()
+}
+
 // mayWriteExistingTable is the second half of DDL authorization on an
 // EXISTING relation: the `write` permission says the identity may write
 // SOMETHING, and this says it may write THIS.
@@ -848,21 +871,27 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 // `if identity != nil` checks did not: with auth enabled, nobody is not
 // somebody who may write.
 func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) bool {
+	return s.requirePermission(w, r, "write")
+}
+
+// requirePermission is requireWrite for any of the three permissions, so the
+// read check on the legacy SELECT path carries the same text.
+func (s *Server) requirePermission(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if s.provider == nil && s.authz != nil {
 		// Static Auth/Authz (Config.Authz with no Provider). Nothing in the
 		// product constructs it any more, but the field is still exported, so
 		// the legacy check stays — with require.go's wording, not a second
 		// one.
 		id := auth.IdentityFromContext(r.Context())
-		if id != nil && !s.authz.HasPermission(id, "write") {
+		if id != nil && !s.authz.HasPermission(id, perm) {
 			writeError(w, http.StatusForbidden, fmt.Sprintf(
 				"unauthorized: %q permission required (identity %q, role %q)",
-				"write", id.Name, id.Role))
+				perm, id.Name, id.Role))
 			return false
 		}
 		return true
 	}
-	if err := auth.RequirePermission(s.provider, r.Context(), "write"); err != nil {
+	if err := auth.RequirePermission(s.provider, r.Context(), perm); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return false
 	}

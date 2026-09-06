@@ -19,6 +19,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/metrics"
 	"github.com/derekmwright/wadjet/internal/server"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -138,6 +139,15 @@ func censusRows() []censusRow {
 			body: "{}", want: adminOnly(anyAllowed)},
 		{method: "PUT", pattern: "/v1/admin/tuning", path: "/v1/admin/tuning",
 			body: "{}", want: adminOnly(anyAllowed)},
+
+		// NOT SETTLED by this batch: the Prometheus endpoint is readable by
+		// any authenticated identity. It publishes operational counters, not
+		// rows, and a scrape credential is usually a distinct low-privilege
+		// key — but whether it belongs behind `admin` like /v1/workers is an
+		// open question. The row records TODAY'S answer, so changing it is a
+		// deliberate edit here rather than a silent drift.
+		{method: "*", pattern: "/metrics", path: "/metrics", want: openToAll,
+			note: "not settled: readable by any authenticated identity"},
 	}
 }
 
@@ -240,9 +250,13 @@ func censusServer(t *testing.T) (*httptest.Server, *coordinator.Coordinator, *ca
 	if err := coord.SetAuthProvider(provider); err != nil {
 		t.Fatalf("attaching the auth provider: %v", err)
 	}
+	// Metrics is configured, which every `wadjet serve` does: without it
+	// server.New never registers /metrics, so the route escaped the walk
+	// entirely — the census can only see what the FIXTURE's Config turns on
+	// (round-1 review P1).
 	srv := server.New(server.Config{
 		Addr: ":0", Catalog: cat, Coordinator: coord,
-		DLQ: coordinator.NewDLQ(js), Provider: provider,
+		DLQ: coordinator.NewDLQ(js), Provider: provider, Metrics: metrics.New(),
 	}, logger)
 	server.NewOpsAPI(coord, provider).RegisterRoutes(srv.Mux())
 	server.NewAdminAPI(config.NewManager(&config.Config{Mode: "standalone"}, logger),
