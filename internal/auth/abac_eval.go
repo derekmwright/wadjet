@@ -218,8 +218,55 @@ func (pe *PolicyEvaluator) buildAttrMap(subject Subject, resource Resource, acti
 	return attrs
 }
 
+// ruleNamesResourceType reports whether the rule scopes itself to rtype with
+// an `eq` or an `in` on `resource.type`. Those are the two operators that
+// AFFIRM a type; `neq` and `not_in` exclude one, and excluding a type is not
+// naming it.
+func ruleNamesResourceType(rule PolicyRule, rtype string) bool {
+	for _, cond := range rule.Resources {
+		if cond.Attribute != "resource.type" {
+			continue
+		}
+		switch cond.Op {
+		case "eq":
+			if compareEq(rtype, cond.Value) {
+				return true
+			}
+		case "in":
+			if compareIn(rtype, cond.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ruleMatches returns true if all conditions in the rule match the attribute map.
 func (pe *PolicyEvaluator) ruleMatches(rule PolicyRule, attrs map[string]any, action Action) bool {
+	// A resource that is not a TABLE is a CAPABILITY, and a capability is
+	// granted only by a rule that NAMES it (ADR-0034 item 11).
+	//
+	// Table functions (`read_csv`, `read_parquet`, `postgres_scan`) present a
+	// resource whose type is `table_function`, and they read the server's own
+	// filesystem and make outbound connections. Under ordinary matching an
+	// unscoped `allow` written about TABLES — which is what every
+	// `roles:`-to-ABAC migration emits, and what an operator writes when they
+	// mean "this role may query" — matched that resource too, so a role
+	// granted `read` on some tables silently also held "read any file this
+	// process can open" and "connect anywhere this process can reach".
+	//
+	// The gate applies to ALLOW rules only. An unscoped DENY still matches a
+	// capability, because a rule that takes access away should reach further
+	// than one that grants it, never less far: making a deny not match would
+	// be a widening dressed as a restriction.
+	if rule.Effect != EffectDeny {
+		if rtype, _ := attrs["resource.type"].(string); rtype != "" && rtype != "table" {
+			if !ruleNamesResourceType(rule, rtype) {
+				return false
+			}
+		}
+	}
+
 	// Check action filter (OR semantics — any action matches)
 	if len(rule.Actions) > 0 {
 		matched := false

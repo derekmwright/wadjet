@@ -104,10 +104,18 @@ var (
 	// chose — but the other two are produced here, so a name outside them
 	// reads nothing.
 	//
+	// `path`, `url` and `host` are the attributes a TABLE-FUNCTION resource
+	// carries (its destination, derived from the arguments before anything is
+	// opened), and `resource.arg_<name>` is any named reader option; those are
+	// accepted by prefix, in validateCondition.
+	//
 	// `resource.table` is absent on purpose: `relationAttributes` in
 	// abac_eval.go names it as an identifier-valued attribute, but nothing
 	// publishes it, so a condition on it matches nothing.
-	resourceAttributes    = map[string]bool{"resource.type": true, "resource.name": true}
+	resourceAttributes = map[string]bool{
+		"resource.type": true, "resource.name": true,
+		"resource.path": true, "resource.url": true, "resource.host": true,
+	}
 	environmentAttributes = map[string]bool{
 		"env.time": true, "env.hour": true, "env.source_ip": true, "env.protocol": true,
 	}
@@ -166,8 +174,16 @@ func validateCondition(where string, c Condition) error {
 		if resourceAttributes[c.Attribute] {
 			return nil
 		}
+		// A table function's named arguments are published as
+		// `resource.arg_<name>`, and the set of them is the reader's option
+		// list rather than anything this package can enumerate.
+		if strings.HasPrefix(c.Attribute, "resource.arg_") &&
+			len(c.Attribute) > len("resource.arg_") {
+			return nil
+		}
 		return fmt.Errorf("%s: condition attribute %q is not one of resource.type, "+
-			"resource.name", where, c.Attribute)
+			"resource.name, resource.path, resource.url, resource.host or "+
+			"resource.arg_<name>", where, c.Attribute)
 	case strings.HasPrefix(c.Attribute, "env."):
 		if environmentAttributes[c.Attribute] {
 			return nil

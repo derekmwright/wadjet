@@ -121,7 +121,29 @@ closes anyway: an effect that does not resolve to `allow` is DENY, and an
 obligation that cannot be applied DENIES the relation rather than allowing it
 with the restriction missing.
 
-**10. No new permission vocabulary.** The permissions are `read`, `write` and
+**10. A capability is granted only by a rule that NAMES it.** A resource whose
+`resource.type` is not `table` is a CAPABILITY, not a relation — a table
+function (`read_csv`, `read_parquet`, `postgres_scan`) reads the server's own
+filesystem and opens outbound connections on the process's behalf. An ALLOW
+rule matches such a resource only when it names the type with
+`resource.type eq <type>` or `resource.type in [...]`; an unscoped allow, or
+one scoped to relations, does not.
+
+Without that, ordinary deny-overrides matching granted the capability to every
+rule written about tables — including the broad allow every `roles:`-to-ABAC
+migration emits — so a role holding `read` on two tables silently also held
+"read any file this process can open" and "connect anywhere this process can
+reach". `neq` and `not_in` EXCLUDE a type; excluding one is not naming it.
+
+The gate is on ALLOW rules only. An unscoped DENY still matches a capability,
+because a rule that takes access away must reach further than one that grants
+it, never less far: a deny that stopped matching would be a widening dressed
+as a restriction. The capability MODEL — which functions present which
+resource, what attributes their destination carries (`path`, `url`, `host`,
+`arg_<name>`), and what refuses them at the scan — is the embedded-authz arc's;
+this item is only the matching rule underneath it.
+
+**11. No new permission vocabulary.** The permissions are `read`, `write` and
 `admin`, and `admin` implies the other two. A mutation needs `write` — ingest
 and COPY, DML, CREATE and DROP TABLE, UDF mutation. `admin` covers the
 operational endpoints, purges, and overriding a resource another identity owns.
@@ -204,6 +226,14 @@ landing.
   PostgreSQL's message; plus the missing-identity, unbound-policy-set,
   decision-time-clock and attached-environment cells, and the `VisibleTables`
   filter on both arms including its no-auth pass-through.
+- `internal/auth/capability_scope_test.go` —
+  `TestAnUnscopedAllowDoesNotGrantACapability` (the table it was written for is
+  still allowed; the capability is refused),
+  `TestARuleThatNamesTheCapabilityGrantsIt` (`eq` and `in`),
+  `TestACapabilityRuleStillHonoursItsOtherConditions` (a destination scope
+  still decides once the type is named), `TestAnUnscopedDenyStillReachesACapability`,
+  `TestExcludingATypeIsNotNamingIt`, `TestAnUntypedResourceIsNotACapability`,
+  and `TestTheValidatorAcceptsTableFunctionResourceAttributes` — item 10.
 - `internal/auth/refusal_class_test.go` —
   `TestADeniedReadAndADeniedWriteRefuseInTheSameClass`: the same identity's
   read and write on the same relation carry the same SQLSTATE and the same
