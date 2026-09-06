@@ -143,6 +143,8 @@ grpcurl -H "authorization: Bearer wadjet-key-abc123" \
   localhost:9090 wadjet.v1.WadjetService/Query
 ```
 
+**gRPC authorization.** Proving the token is only the first half: every gRPC method also checks what the identity may do, and refuses with `PERMISSION_DENIED` before it acts. `CreateTable` and `DropTable` require the `write` permission — a role with `allow: [read]` cannot create or drop a table over gRPC, exactly as it cannot over HTTP or SQL, and a refused call leaves the catalog untouched. See [gRPC API — Authorization](grpc-api.md#authorization).
+
 ## Authorization
 
 Wadjet supports two authorization models: RBAC (role-based) and ABAC (attribute-based). RBAC is simpler and sufficient for most deployments. ABAC provides fine-grained control for government, clearance-level, and multi-tenant environments.

@@ -40,6 +40,18 @@ Health check RPCs (`grpc.health.v1.Health/Check`) bypass authentication.
 
 Unauthenticated requests return gRPC code `UNAUTHENTICATED`. When auth is disabled, no credentials are required.
 
+## Authorization
+
+Authentication proves who the caller is; each RPC still checks what that identity may do. A refusal is gRPC code `PERMISSION_DENIED`, and it happens **before** the operation — nothing is created, dropped or read on a refused call.
+
+| RPC | Requires |
+|-----|----------|
+| `CreateTable`, `DropTable` | the `write` permission (`allow: [write]` or `[admin]` on the caller's role) |
+
+The message names the missing permission and the identity, and it is the same sentence the HTTP API returns with 403 and the SQL doors return with SQLSTATE `42501` for the same refusal.
+
+When auth is disabled or no provider is configured, nothing is enforced.
+
 ## RPCs
 
 ### Query (unary)
@@ -157,6 +169,8 @@ Column types are resolved by the same declaration parser the SQL DDL uses, which
 
 An unparseable declaration is refused with `INVALID_ARGUMENT`, carrying the SQLSTATE in the message. Every partition key must also be a column of the schema.
 
+Requires the `write` permission. A caller without it gets `PERMISSION_DENIED` before the request is inspected, so a refused call creates nothing.
+
 ---
 
 ### DropTable
@@ -166,6 +180,8 @@ Drop a table. Set `if_exists = true` to suppress errors if the table doesn't exi
 ```protobuf
 rpc DropTable(DropTableRequest) returns (DropTableResponse);
 ```
+
+Requires the `write` permission. The check runs before the catalog and before `if_exists` is considered: a caller without `write` gets `PERMISSION_DENIED` whether or not the table exists, and the table survives.
 
 ---
 
@@ -284,6 +300,7 @@ Requires `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc`.
 | gRPC Code | When |
 |-----------|------|
 | `UNAUTHENTICATED` | Missing or invalid bearer token (when auth enabled) |
+| `PERMISSION_DENIED` | The identity authenticated but may not perform the operation (see [Authorization](#authorization)) |
 | `INVALID_ARGUMENT` | Empty SQL, missing table name, invalid column type |
 | `NOT_FOUND` (note: `CancelQuery` maps an unknown query ID to `INTERNAL`) | Table does not exist, query ID not found |
 | `UNAVAILABLE` | No query engine configured, async RPCs in standalone mode |

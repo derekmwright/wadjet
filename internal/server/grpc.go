@@ -456,6 +456,13 @@ func (g *GRPCServer) DescribeTable(ctx context.Context, req *wadjetv1.DescribeTa
 
 // CreateTable creates a new table.
 func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableRequest) (*wadjetv1.CreateTableResponse, error) {
+	// The interceptor proved WHO; creating a relation still has to ask MAY,
+	// and it asks BEFORE the request is even inspected — a refusal must
+	// precede every side effect, and an unauthorized caller learns nothing
+	// about the request it was not allowed to make (#934).
+	if err := grpcRequireWrite(g.authProvider, ctx); err != nil {
+		return nil, err
+	}
 	if req.Name == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
@@ -494,6 +501,29 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 	return &wadjetv1.CreateTableResponse{Name: req.Name}, nil
 }
 
+// grpcRequireWrite is this door's DDL authorization: the caller in ctx must
+// hold `write`, and a refusal is codes.PermissionDenied.
+//
+// It is a two-line wrapper over auth.RequirePermission — the SHARED decision —
+// and deliberately not a decision of its own: the identity's permissions are
+// read by the Authorizer and nowhere else, so a door cannot drift from the
+// rule the HTTP DDL handlers and the embedded DB apply. The message is
+// RequirePermission's own text, so the three doors say the same sentence for
+// the same refusal; only the transport's class differs (403 / 42501 /
+// PermissionDenied).
+//
+// A missing identity under enabled auth is PermissionDenied here rather than
+// Unauthenticated because it cannot arise on this door — the interceptor
+// refuses an unauthenticated call with Unauthenticated before any method runs
+// — so reaching it means an identity was expected and is not there, which is
+// RequirePermission's fail-closed arm, not an authentication challenge.
+func grpcRequireWrite(provider *auth.Provider, ctx context.Context) error {
+	if err := auth.RequirePermission(provider, ctx, "write"); err != nil {
+		return status.Error(codes.PermissionDenied, err.Error())
+	}
+	return nil
+}
+
 // sqlErrorText renders an error with its SQLSTATE when it carries one, so a
 // gRPC message says the same thing the HTTP body and the pgwire ErrorResponse
 // do for the same refusal.
@@ -506,6 +536,13 @@ func sqlErrorText(err error) string {
 
 // DropTable removes a table.
 func (g *GRPCServer) DropTable(ctx context.Context, req *wadjetv1.DropTableRequest) (*wadjetv1.DropTableResponse, error) {
+	// Before the catalog, and before `if_exists` gets a say: a refusal that
+	// came after the drop attempt would have already destroyed the table, and
+	// one that came after `if_exists` swallowed the miss would answer OK to a
+	// caller who may not drop anything at all (#934).
+	if err := grpcRequireWrite(g.authProvider, ctx); err != nil {
+		return nil, err
+	}
 	if req.Name == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
