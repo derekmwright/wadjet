@@ -42,7 +42,7 @@ Unauthenticated requests return gRPC code `UNAUTHENTICATED`. When auth is disabl
 
 ## Authorization
 
-Authentication proves who the caller is; each RPC still checks what that identity may do. A refusal is gRPC code `PERMISSION_DENIED`, and it happens **before** the operation — nothing is created, dropped or read on a refused call.
+Authentication proves who the caller is. The RPCs listed below then check what that identity may do: a refusal is gRPC code `PERMISSION_DENIED`, and it happens **before** the operation — nothing is created, dropped or read on a refused call. RPCs not listed here (`SubmitQuery`, `GetQueryStatus`, `CancelQuery`) accept any authenticated identity.
 
 | RPC | Requires |
 |-----|----------|
@@ -52,7 +52,9 @@ Authentication proves who the caller is; each RPC still checks what that identit
 | `DescribeTable` | read access to that table |
 | `Query`, `QueryStream` | whatever the statement needs: a policy refusal (SQLSTATE `42501`) is returned as `PERMISSION_DENIED`, not `INTERNAL` |
 
-The message names the missing permission and the identity. The same refusal on the other protocols carries that protocol's class — HTTP 403, SQLSTATE `42501` on pgwire and the embedded API — so a client branches on the code, not on the text.
+The message names the missing permission, or the table, and the identity. Branch on the code, not on the text — the wording is not part of the contract.
+
+The rules above are the `CreateTable` and `DropTable` RPCs. A `CREATE TABLE` or `DROP TABLE` sent as SQL text through `Query` takes the engine's statement path instead, and is not covered by this table.
 
 Table metadata follows the same access decision as the data: a role restricted to `tables: [flow_logs]` sees only `flow_logs` in `ListTables`, and `DescribeTable` on any other table is `PERMISSION_DENIED`. Where ABAC policies are configured they decide, so an explicit `deny` rule hides a table even when the role's `tables:` list names it. This is deliberately unlike PostgreSQL, where `\d` shows every relation to every user.
 

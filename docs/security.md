@@ -143,7 +143,14 @@ grpcurl -H "authorization: Bearer wadjet-key-abc123" \
   localhost:9090 wadjet.v1.WadjetService/Query
 ```
 
-**gRPC authorization.** Proving the token is only the first half: every gRPC method also checks what the identity may do, and refuses with `PERMISSION_DENIED` before it acts. `CreateTable` and `DropTable` require the `write` permission — a role with `allow: [read]` cannot create or drop a table over gRPC, exactly as it cannot over HTTP or SQL, and a refused call leaves the catalog untouched. Table metadata follows the same access decision as the data: `ListTables` returns only the tables the identity may read, and `DescribeTable` refuses one it may not. Where ABAC policies are configured they decide, so an explicit `deny` hides a table from both even when the role's `tables:` list names it. See [gRPC API — Authorization](grpc-api.md#authorization).
+**gRPC authorization.** Proving the token is only the first half. These RPCs also check what the identity may do, and refuse with `PERMISSION_DENIED` before they act — a refused call leaves the catalog untouched:
+
+- `CreateTable` requires the `write` permission, so a role with `allow: [read]` cannot create a table through it.
+- `DropTable` requires the `write` permission **and** write access to that table, so a role scoped to `tables: [flow_logs]` cannot drop anything else, and an ABAC `deny` on a table governs its destruction.
+- `ListTables` returns only the tables the identity may read; `DescribeTable` refuses one it may not. Where ABAC policies are configured they decide, so an explicit `deny` hides a table from both even when the role's `tables:` list names it.
+- `Query` and `QueryStream` are enforced by the policy engine, and a refusal it raises (SQLSTATE `42501`) is returned as `PERMISSION_DENIED` rather than `INTERNAL`.
+
+Query submission, status and cancellation (`SubmitQuery`, `GetQueryStatus`, `CancelQuery`) are settled separately and are not covered by the list above. See [gRPC API — Authorization](grpc-api.md#authorization).
 
 ## Authorization
 
