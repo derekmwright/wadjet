@@ -269,6 +269,20 @@ auth:
 | `exists` | Attribute is present | `subject.clearance exists` |
 | `not_exists` | Attribute is absent | `subject.clearance not_exists` |
 
+#### Condition Attributes
+
+Every condition attribute is **namespaced**, and the namespace is part of the name. There are exactly three:
+
+| Namespace | Attributes | Source |
+|-----------|------------|--------|
+| `subject.` | `role`, `name`, `method` (always populated), plus every enrichment attribute — JWT claims, mTLS certificate fields (see Identity Enrichment) | the authenticated identity |
+| `resource.` | `type` (`table`), `name` (the catalog's spelling of the relation) | what is being accessed |
+| `env.` | `time` (`HH:MM:SS`), `hour` (0–23), `source_ip`, `protocol` (`http`, `pgwire`, `grpc`, `embedded`) | the protocol boundary the request arrived on |
+
+An attribute with no namespace — `attribute: role` rather than `attribute: subject.role` — **refuses at config load**. It cannot be interpreted: it matches nothing, and a rule that matches nothing is a grant when it sits beside a broader allow.
+
+A `subject.` attribute may name anything the identity carries; `resource.` and `env.` names are the fixed lists above.
+
 #### Obligation Types
 
 Obligations are side-effects attached to **allow** rules. They constrain how data is returned even when access is granted.

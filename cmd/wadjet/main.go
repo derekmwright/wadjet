@@ -2255,7 +2255,12 @@ func wireAuthFromConfig(ctx context.Context, configFile string, logger *slog.Log
 	cfgMgr.SubscribeKeys([]string{"auth"}, func(event config.ChangeEvent) {
 		authCfg := buildAuthConfig(event.New.Auth)
 		policyCfgs := buildPolicyConfigs(event.New.Auth.Policies)
-		abacPolicies := buildABACPolicies(event.New.Auth.ABACPolicies)
+		abacPolicies, err := buildABACPolicies(event.New.Auth.ABACPolicies)
+		if err != nil {
+			logger.Error("auth hot-reload REFUSED — keeping the previous configuration",
+				"path", configFile, "error", err)
+			return
+		}
 		if err := provider.UpdateFromConfig(authCfg, policyCfgs, abacPolicies...); err != nil {
 			logger.Error("auth hot-reload REFUSED — keeping the previous configuration",
 				"path", configFile, "error", err)
@@ -2301,7 +2306,10 @@ func buildProviderFromConfig(cfg *config.Config, logger *slog.Logger) (*auth.Pro
 	}
 	provider := auth.NewProvider(authn, authz, policies, logger)
 	if len(cfg.Auth.ABACPolicies) > 0 {
-		abac := buildABACPolicies(cfg.Auth.ABACPolicies)
+		abac, err := buildABACPolicies(cfg.Auth.ABACPolicies)
+		if err != nil {
+			return nil, fmt.Errorf("auth policies: %w", err)
+		}
 		if err := provider.UpdateFromConfig(buildAuthConfig(cfg.Auth), buildPolicyConfigs(cfg.Auth.Policies), abac...); err != nil {
 			return nil, fmt.Errorf("auth policies: %w", err)
 		}
@@ -2350,7 +2358,26 @@ func buildPolicies(cfgs []config.AuthPolicy) (*auth.PolicySet, error) {
 }
 
 // buildABACPolicies converts config ABAC policies to auth ABAC policies.
-func buildABACPolicies(cfgs []config.ABACPolicy) []auth.AccessControlPolicy {
+//
+// A condition's ATTRIBUTE is stored exactly as the operator wrote it. The
+// evaluator's attribute map is keyed by the namespaced spelling — `subject.`,
+// `resource.`, `env.` (auth.PolicyEvaluator.buildAttrMap) — and that spelling
+// is the only one there has ever been. This function used to slice the
+// namespace OFF (`c.Attribute[8:]`), so every documented condition looked up
+// an attribute that does not exist and no condition ever matched. A
+// conditional ALLOW then failed closed (it simply never granted), but a
+// conditional DENY beside a broad allow — which is what every `roles:`-to-ABAC
+// migration emits — failed OPEN: the deny disappeared and the grant won
+// (#930). The Subjects / Resources / Environment slice a condition lands in is
+// a grouping for readability; it never restored the prefix and was never
+// consulted for it.
+//
+// An UNPREFIXED attribute is an error at load rather than a subject attribute
+// "by default": `attribute: hour` reads a subject attribute called `hour` that
+// nothing populates, so the rule silently never matches — and a security rule
+// that silently never matches is the defect this whole function had. Refusing
+// tells the operator which line to fix.
+func buildABACPolicies(cfgs []config.ABACPolicy) ([]auth.AccessControlPolicy, error) {
 	policies := make([]auth.AccessControlPolicy, len(cfgs))
 	for i, p := range cfgs {
 		enabled := true
@@ -2363,23 +2390,24 @@ func buildABACPolicies(cfgs []config.ABACPolicy) []auth.AccessControlPolicy {
 			if r.Effect == "deny" {
 				effect = auth.EffectDeny
 			}
-			// Categorize conditions into subject/resource/environment
+			// Group the conditions by namespace, keeping the attribute the
+			// operator wrote — that IS the evaluator's key.
 			var subjects, resources, envConds []auth.Condition
 			for _, c := range r.Conditions {
 				cond := auth.Condition{Attribute: c.Attribute, Op: c.Operator, Value: c.Value}
 				switch {
-				case len(c.Attribute) > 8 && c.Attribute[:8] == "subject.":
-					cond.Attribute = c.Attribute[8:]
+				case strings.HasPrefix(c.Attribute, "subject."):
 					subjects = append(subjects, cond)
-				case len(c.Attribute) > 9 && c.Attribute[:9] == "resource.":
-					cond.Attribute = c.Attribute[9:]
+				case strings.HasPrefix(c.Attribute, "resource."):
 					resources = append(resources, cond)
-				case len(c.Attribute) > 4 && c.Attribute[:4] == "env.":
-					cond.Attribute = c.Attribute[4:]
+				case strings.HasPrefix(c.Attribute, "env."):
 					envConds = append(envConds, cond)
 				default:
-					// Put unprefixed conditions in subjects by default
-					subjects = append(subjects, cond)
+					return nil, fmt.Errorf("auth policy %q rule %d: condition attribute %q "+
+						"has no namespace; write subject.<name>, resource.<name> or env.<name> "+
+						"(an unnamespaced attribute matches nothing, and a rule that matches "+
+						"nothing is a grant beside a broad allow)",
+						p.Name, j+1, c.Attribute)
 				}
 			}
 			obligs := make([]auth.Obligation, len(r.Obligations))
@@ -2407,7 +2435,7 @@ func buildABACPolicies(cfgs []config.ABACPolicy) []auth.AccessControlPolicy {
 			Rules:   rules,
 		}
 	}
-	return policies
+	return policies, nil
 }
 
 // loadGeoIP loads the MaxMind GeoIP databases named by the RESOLVED

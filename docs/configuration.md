@@ -320,6 +320,12 @@ auth:
   # ABAC policies (attribute-based access control)
   # When defined, these take precedence over RBAC roles.
   # When omitted, RBAC roles are auto-migrated to ABAC at startup.
+  #
+  # Every condition `attribute` is NAMESPACED — `subject.`, `resource.` or
+  # `env.` — and the namespace is part of the name the evaluator looks up.
+  # An attribute without one refuses at load: it matches nothing, and a rule
+  # that matches nothing is a grant beside a broader allow.
+  # See docs/security.md, "Condition Attributes", for the three lists.
   abac_policies:
     - name: classified-access
       description: "Clearance-based access to classified tables"
