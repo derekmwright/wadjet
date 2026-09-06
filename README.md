@@ -411,8 +411,12 @@ runs 2-4 of 4; caches populated — cold run 1 of the same session was
 2m40s). Row counts are validated per run and the answers are additionally
 verifiable value-level against a committed DuckDB fingerprint ground
 truth (`benchmarks/tpch/fingerprint-sf100.json`, captured in-region).
-2026-09-02 at v0.18.12 (main `8b693f30`), run `20260902-215039`
-(same-window control run `20260902-210947`, engine `550bb20`).
+2026-09-06 at v0.18.50 (main `e6c6bdad`), run `20260906-100336`; steady
+suite mean **118.2 s**, cold 152.1 s. Measured same-window against the
+v0.18.12 control (`8b693f30`, run `20260906-095046`): every query returns
+an identical row count and value fingerprint, so the 0.18.x correctness
+line (38 releases) is answer-identical and performance-neutral on SF100
+([A/B memo](docs/benchmarks/sf100-baseline-v0.18.50-2026-09-06.md)).
 
 | Query | Time | | Query | Time |
 |---|---:|---|---|---:|
