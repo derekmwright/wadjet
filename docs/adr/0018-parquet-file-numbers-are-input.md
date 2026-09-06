@@ -39,6 +39,10 @@ rows were charged, a same-named nested leaf overwriting a top-level column's
 statistics, a swapped column-chunk metadata entry read by slice position, and
 the scan-side twin of that basename collision in dictionary pruning
 (#923 #924 #925 #927 #915).
+Amended 2026-09-06 with §13 (ARC P-WRITER2), three write-side corruptions
+reported as success: a NaN float min/max statistic, a page whose int32 size
+wrapped negative on a >=2GB value, and a nested MAP key carried as its raw
+carrier text and re-scaled or lost on the round trip (#928 #929 #883).
 
 ## Context
 
@@ -964,6 +968,52 @@ was 42, and the pushed row predicate dropped the same matching row, while the
 unpruned native reader returned it correctly (#915). Both prune paths resolve by
 the full-path `TopLevelLeafIndex` now, the same resolver the decode uses, so the
 three read paths agree on which leaf a name means (§3).
+
+### 13. The written number is the value, at every leaf and every size (2026-09-06, ARC P-WRITER2)
+
+(Added 2026-09-06, #928 #929 #883.)
+
+§10 refuses a box the writer cannot store. Three more write-side defects wrote
+or read a WRONG number while `WriteRows`/`Close` returned nil — the intolerable
+class, silent corruption reported as success. Measured at `e17e2b92`:
+
+| what happened | what the file/read held |
+|---|---|
+| float column with a leading or all-NaN run | `Statistics.MinValue`/`MaxValue` = NaN (#928) |
+| a single `BYTE_ARRAY` value in the 2GB-4GB range | `UncompressedPageSize` int32 wrapped negative (#929) |
+| `MAP(DECIMAL(18,4), STRING)` key `12.75` | read back `127500.0000`, scaled a second time (#883) |
+| `MAP(DATE, STRING)` key `2023-11-14` | read back NULL, the key lost (#883) |
+
+Three invariants, each a claim a gate proves on revert:
+
+- **A statistics min/max never records a value the spec excludes from it.** NaN
+  is a value a float leaf HAS but which min/max omits: the writer skips it, and
+  a column of only NaN (plus nulls) writes null_count but NO float bound (a
+  separate `hasFloatBound` flag gates the float min/max so null_count is
+  unaffected). The ±0.0 rule is honoured — min prefers -0.0, max prefers +0.0.
+  A NaN bound is not merely wrong here; it prunes differently in another reader,
+  so the same file drops matching rows in one engine and not another (§5's twin
+  on the write side). Gate: `parquet.TestWriterNeverEmitsNaNFloatStats`.
+
+- **A page that cannot be sized is refused, never truncated.** The Thrift page
+  header carries the page length as int32, so a page over `math.MaxInt32` bytes
+  has no honest size. The writer refuses an oversize single `BYTE_ARRAY`/`FLBA`/
+  `VECTOR` value at decomposition — where the row is still named — and
+  `checkPageSize` is the structural backstop at the cast, so no file is
+  finalized with a wrapped size. Gate: `parquet.TestCheckPageSizeBoundary` and
+  the `-short`-guarded large-value arm.
+
+- **A container's map KEY crosses as its typed value, not its raw carrier.** §4
+  settles that the writer's box for a value is the reader's box for it; a nested
+  MAP key broke it, because a Go map's key must be a string and the assembler
+  printed the leaf's CARRIER (an unscaled DECIMAL integer, a DATE day count)
+  rather than the value. The DECIMAL child then re-scaled the text a second time
+  and the DATE child could not parse it. The assembler renders a map key at the
+  key column's own type and scale — the canonical text the child re-parses, the
+  same spelling `batch.Vector.GetValue` produces — so a map key round-trips like
+  any other leaf. Gate:
+  `wadjet.TestDecimalMapKeySurvivesTheParquetRoundTrip` (flipped from a
+  fail-on-agree pin to a passing regression test).
 
 ## Consequences
 
