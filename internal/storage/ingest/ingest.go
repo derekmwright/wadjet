@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -56,6 +57,15 @@ type Ingester struct {
 	buffers map[string]*partitionBuffer // partition path -> buffer
 	done    chan struct{}
 	wg      sync.WaitGroup
+
+	// incarnation is the table identity this ingester bound to the first time
+	// it retained a row (#919, ADR-0030). Every flush commits against it via
+	// AddNewFilesForIncarnation, so a flush whose table was dropped and
+	// recreated under the same name is refused rather than written into the
+	// new table. incarnationBound records that the (possibly empty, for a
+	// legacy manifest) binding was taken, so it is captured exactly once.
+	incarnation      string
+	incarnationBound bool
 
 	// deferCommit holds every flushed file OUT of the manifest so the caller
 	// can commit them together with something else. See DeferManifestCommit.
@@ -287,12 +297,23 @@ func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
 	ing.mu.Lock()
 	defer ing.mu.Unlock()
 
+	// Ingest is all-or-nothing per call (#917). Validate, route, and take an
+	// owned deep copy of the WHOLE batch before touching any persistent
+	// buffer: a row rejected partway (bad type, missing partition key) must
+	// leave the buffers exactly as they were, so a retry of the corrected
+	// batch cannot duplicate an accepted prefix. Staging first is what makes
+	// the accepted-prefix duplication impossible; a mid-loop append could not.
+	type stagedRow struct {
+		partPath   string
+		partValues map[string]string
+		row        map[string]any
+		size       int
+	}
+	staged := make([]stagedRow, 0, len(rows))
 	for _, row := range rows {
-		// Validate row against schema
 		if err := ing.validateRow(row); err != nil {
 			return fmt.Errorf("schema validation: %w", err)
 		}
-
 		partValues := make(map[string]string, len(ing.strategy.Keys))
 		for _, key := range ing.strategy.Keys {
 			v, ok := row[key]
@@ -301,19 +322,47 @@ func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
 			}
 			partValues[key] = ing.formatPartitionValue(key, v)
 		}
+		// The accumulator OWNS what it retains (#918): copy the row (maps,
+		// []byte leaves, containers, VECTOR slices) here, so a caller reusing
+		// its maps or byte buffers after Ingest returns cannot mutate a
+		// not-yet-flushed row. Only retained rows are copied — nothing is
+		// copied for a batch that is rejected above.
+		owned := copyRow(row)
+		staged = append(staged, stagedRow{
+			partPath:   ing.strategy.PartitionPath(partValues),
+			partValues: partValues,
+			row:        owned,
+			size:       estimateRowSize(owned),
+		})
+	}
 
-		partPath := ing.strategy.PartitionPath(partValues)
-		buf, ok := ing.buffers[partPath]
+	// Bind this ingester to the table incarnation it is buffering against, the
+	// first time it retains a row (#919, ADR-0030). The flush validates it
+	// against the live manifest inside the CAS; a table dropped and recreated
+	// under the same name gives the flush a different incarnation and it is
+	// refused, never written into the new table.
+	if len(staged) > 0 && !ing.incarnationBound {
+		inc, err := ing.catalog.TableIncarnation(ctx, ing.tableName)
+		if err != nil {
+			return fmt.Errorf("binding table incarnation: %w", err)
+		}
+		ing.incarnation = inc
+		ing.incarnationBound = true
+	}
+
+	// Commit the staged rows to the persistent buffers. Nothing below can
+	// fail, so the batch lands whole or not at all.
+	for _, s := range staged {
+		buf, ok := ing.buffers[s.partPath]
 		if !ok {
 			buf = &partitionBuffer{
-				values: partValues,
-				path:   partPath,
+				values: s.partValues,
+				path:   s.partPath,
 			}
-			ing.buffers[partPath] = buf
+			ing.buffers[s.partPath] = buf
 		}
-
-		buf.rows = append(buf.rows, row)
-		buf.size += estimateRowSize(row)
+		buf.rows = append(buf.rows, s.row)
+		buf.size += s.size
 	}
 
 	// Check if any buffer needs flushing
@@ -482,7 +531,14 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 			PartPath:   partPath,
 			Entry:      fileEntry,
 		})
-	} else if err := ing.catalog.AddNewFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
+	} else if err := ing.catalog.AddNewFilesForIncarnation(ctx, ing.tableName, ing.incarnation, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
+		// A cross-identity flush (#919): the table was dropped and recreated
+		// under this name while these rows were buffered. Leave the rows in
+		// the buffer (do NOT reset below) so the error reaches the owner and
+		// nothing is silently discarded; the object we uploaded is an
+		// unreferenced orphan, which is bytes not rows (ADR-0030). Every
+		// subsequent flush on this ingester refuses the same way — the
+		// ingester is bound to an incarnation that no longer exists.
 		return fmt.Errorf("updating manifest: %w", err)
 	}
 
@@ -581,6 +637,81 @@ func extractColumnStats(data []byte) map[string]catalog.FileColumnStats {
 		return nil
 	}
 	return merged
+}
+
+// copyRow returns a deep-enough copy of a caller's row for the accumulator to
+// OWN past the Ingest call (#918). It snapshots the top-level map and
+// recursively copies every MUTABLE value the row can carry — []byte leaves,
+// nested maps and slices (ARRAY / ROW / MAP storage shapes), and typed VECTOR
+// slices like []float32. Immutable values (numbers, bool, string, time.Time,
+// time.Duration) are shared by value, which is safe: a caller cannot mutate
+// them in place. The map keys are strings, immutable, so they are not copied.
+//
+// This is the copy the ownership contract requires: only rows the accumulator
+// RETAINS are copied, and each exactly once, at buffer-append time.
+func copyRow(row map[string]any) map[string]any {
+	out := make(map[string]any, len(row))
+	for k, v := range row {
+		out[k] = deepCopyRowValue(v)
+	}
+	return out
+}
+
+// deepCopyRowValue copies a single row value deeply enough that no mutation of
+// the caller's original can reach the accumulator's copy. See copyRow.
+func deepCopyRowValue(v any) any {
+	switch val := v.(type) {
+	case nil:
+		return nil
+	case []byte:
+		c := make([]byte, len(val))
+		copy(c, val)
+		return c
+	case map[string]any:
+		m := make(map[string]any, len(val))
+		for k, e := range val {
+			m[k] = deepCopyRowValue(e)
+		}
+		return m
+	case []any:
+		s := make([]any, len(val))
+		for i, e := range val {
+			s[i] = deepCopyRowValue(e)
+		}
+		return s
+	case string, bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64,
+		time.Time, time.Duration:
+		// Immutable by value — nothing the caller can mutate in place.
+		return v
+	}
+	// Fallback for any other mutable container the row shape can carry — most
+	// importantly a typed VECTOR slice (e.g. []float32), but also any typed
+	// numeric slice or string-keyed map used by a nested declaration. A copy
+	// of the backing array/map is enough: the leaves these hold are numbers or
+	// strings, which are immutable.
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice:
+		if rv.IsNil() {
+			return v
+		}
+		c := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
+		reflect.Copy(c, rv)
+		return c.Interface()
+	case reflect.Map:
+		if rv.IsNil() {
+			return v
+		}
+		c := reflect.MakeMapWithSize(rv.Type(), rv.Len())
+		for _, k := range rv.MapKeys() {
+			c.SetMapIndex(k, rv.MapIndex(k))
+		}
+		return c.Interface()
+	}
+	return v
 }
 
 func estimateRowSize(row map[string]any) int {

@@ -86,6 +86,30 @@ ingester.FlushAll(ctx)
 ingester.Stop(ctx)
 ```
 
+### The `Ingest` call contract
+
+A single `Ingest(ctx, rows)` call is **all-or-nothing**. Every row is validated
+and routed to its partition before any row is buffered, so a call that fails
+partway — a value the schema cannot hold, or a row missing a partition key —
+buffers *nothing*. Retrying the corrected batch cannot duplicate the rows that
+were accepted before the failure, because none were kept. The call returns an
+error and leaves the accumulator exactly as it was.
+
+Accepted rows are **owned by the accumulator**. `Ingest` takes its own deep copy
+of each row it buffers — the map, and the mutable values inside it (`[]byte`
+leaves, nested `ARRAY`/`ROW`/`MAP` containers, `VECTOR` slices). You may reuse
+or mutate the maps and byte buffers you passed in as soon as `Ingest` returns;
+the not-yet-flushed rows are unaffected. Only rows that are actually retained are
+copied, so a rejected batch costs no copy.
+
+An ingester is bound to the **table incarnation** it first buffered a row for. If
+the table is dropped and recreated under the same name while an ingester still
+holds buffered rows, that ingester's next flush is refused (it does not write the
+old rows into the new table); the error reaches you so you can discard or re-route
+the buffered rows. A fresh ingester created after the recreate writes normally.
+This is the ingest-side of ADR-0030 — a write commits against the table identity
+it read.
+
 ### Partitioning Strategy
 
 Partition keys determine how data is organized on storage:
