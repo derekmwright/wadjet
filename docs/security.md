@@ -490,12 +490,21 @@ Notes an operator needs:
   where the filesystem is writable by untrusted users.
 - A glob is matched as the **pattern the caller wrote** (`/srv/exports/*.csv`),
   not as the files it expands to. A rule that must allow globs has to say so.
-- **Grant the capability with a rule that NAMES it.** A rule that scopes
-  nothing, or scopes only `resource.name`, matches a table function by breadth
-  and hands out server-local file reads to a role you meant to limit to tables.
-  Every rule that grants the capability carries
-  `resource.type: table_function`, and every rule written for TABLES carries
-  `resource.type: table` — the rules `MigrateRBACToABAC` emits already do both.
+- **Grant the capability with a rule that NAMES it**, spelled exactly
+  `resource.type` `eq` `table_function`. A rule that scopes nothing, or scopes
+  only `resource.name`, matches a table function by breadth and hands out
+  server-local file reads to a role you meant to limit to tables. Two other
+  spellings do NOT work and refuse at load rather than misbehaving quietly:
+  `resource.type not_in [table]`, and pairing `eq table_function` with a
+  separate `neq table` — neither pins the rule to one type, so the policy
+  binder treats its `resource.name` as a relation and refuses a name the
+  catalog does not hold.
+- Rules written for TABLES need no `resource.type` of their own to stay away
+  from the capability, though naming `eq table` is the clearest form.
+  `MigrateRBACToABAC` puts `resource.type neq table_function` on every role
+  rule it emits, which is what keeps a migrated `tables: ["*"]` role from
+  reaching `read_csv`, and emits one `eq table_function` rule per role holding
+  `admin`.
 - `generate_series` and `unnest` open nothing and are never policed.
 - The refusal is `42501` / HTTP 403 and happens before the file is opened or
   the request is sent, in every position a table function can appear: a CTE, a
