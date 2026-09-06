@@ -197,8 +197,8 @@ There are exactly three permissions, and `admin` implies the other two.
 | Permission | Allows |
 |-----------|-------|
 | `read` | SELECT the table, and read its metadata (list, describe) |
-| `write` | Every mutation of the table: ingest and COPY, INSERT / UPDATE / DELETE / MERGE, CREATE and DROP TABLE, and creating or replacing a UDF |
-| `admin` | Everything `read` and `write` allow, plus the operational endpoints (admin config, DLQ, purges) and overriding a resource another identity owns |
+| `write` | Every mutation of the table: ingest and COPY, INSERT / UPDATE / DELETE / MERGE, CREATE and DROP TABLE, ANALYZE, and creating or replacing a UDF |
+| `admin` | Everything `read` and `write` allow, plus alert DDL, the operational endpoints (admin config, DLQ, purges) and overriding a resource another identity owns |
 
 `admin` is a permission the Authorizer grants, not a role NAME: a role called `admin` that does not list `admin` in its `allow` is not an administrator, and a role called anything at all that does is.
 
@@ -224,6 +224,29 @@ A statement needs the permission for what it DOES, which is PostgreSQL's rule:
 A role holding only `write` can therefore load a table it may not read, and cannot use that table's own values to decide what to change.
 
 **With ABAC policies configured, the role's `allow` list remains a coarse gate: a policy NARROWS what a role may do, and never widens it.** A role written `allow: [read]` cannot write a relation even if a policy rule permits the write; grant the role `write` and let the policy decide which relations and which rows.
+
+### Embedded API and SQL statement authorization
+
+The permission a statement needs is decided once, at the boundary the embedded
+API (`wadjet.DB.Query`) and the PostgreSQL wire protocol both reach — not
+separately in each frontend. An embedded caller that has attached a provider
+(`db.SetAuthProvider(p)`) therefore gets the same answer a `psql` session gets,
+and the HTTP handlers' own checks are early refusals of the same rule.
+
+| Statement | Permission required |
+|---|---|
+| `SELECT`, `EXPLAIN` | `read` on every relation the query reads (RBAC `tables`, or the ABAC decision) |
+| `INSERT`, `UPDATE`, `DELETE`, `MERGE` | `write` on the target table |
+| `CREATE TABLE`, `DROP TABLE`, `ANALYZE` | `write` |
+| `CREATE ALERT`, `DROP ALERT`, `ALTER ALERT` | `admin` |
+
+Refusals are PostgreSQL's `42501` (`insufficient_privilege`) on the wire and
+through the embedded error, and HTTP 403.
+
+With **auth enabled**, a call carrying no identity is refused at this boundary
+as well — an unattributed statement is not an anonymous one, it is one nothing
+authorized. With **no provider attached** (the default embedded and CLI use)
+nothing is enforced and every statement behaves as it always has.
 
 ### ABAC (Attribute-Based Access Control)
 

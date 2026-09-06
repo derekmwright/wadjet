@@ -134,9 +134,17 @@ that can name one.
 
 A statement refused for what it *contains* is the client's error, not the
 server's, which is why those four classes answer `400 Bad Request`. An error
-the statement did not cause — a malformed request body, a missing `sql` field,
-an authorization denial — carries no SQLSTATE and answers with the `error` key
-alone, under `400`, `401` or `403`.
+the statement did not cause — a malformed request body, a missing `sql` field —
+carries no SQLSTATE and answers with the `error` key alone, under `400` or
+`401`.
+
+An **authorization** denial answers `403` on this endpoint. Through the
+PostgreSQL wire protocol and through the embedded API the same denial is
+PostgreSQL's `42501` (`insufficient_privilege`): a role holding only `read`
+that runs `CREATE TABLE`, `DROP TABLE` or `ANALYZE` is refused with that class
+and the catalog is not touched. See
+[Security](security.md#embedded-api-and-sql-statement-authorization) for which
+permission each statement needs.
 
 The message for a classified error is the engine's own, the same text the
 PostgreSQL wire protocol puts in its `ErrorResponse`:

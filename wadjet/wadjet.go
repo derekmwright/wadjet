@@ -1099,7 +1099,20 @@ func (db *DB) showFunctions() (*QueryResult, error) {
 	}, nil
 }
 
+// createTableSQL handles CREATE TABLE DDL at the embedded door.
+//
+// The permission check is FIRST, and it is here rather than in the frontends,
+// because this — `DB.Query`'s statement switch — is the boundary every
+// non-HTTP door reaches: pgwire's non-SELECT path calls `c.db.Query(ctx, sql)`
+// with the connection's identity on the context, so a role holding only `read`
+// created and permanently dropped tables through psql while the HTTP handler's
+// own `HasPermission(identity, "write")` check refused the identical statement
+// (#939). The HTTP handlers keep their checks as early refusals; this is the
+// one that cannot be gone around.
 func (db *DB) createTableSQL(ctx context.Context, ct *plansql.CreateTableInfo) (*QueryResult, error) {
+	if err := auth.RequirePermission(db.authProvider, ctx, "write"); err != nil {
+		return nil, err
+	}
 	schema, err := columnDefsToSchema(ct.Columns)
 	if err != nil {
 		return nil, err
@@ -1117,7 +1130,16 @@ func (db *DB) createTableSQL(ctx context.Context, ct *plansql.CreateTableInfo) (
 	}, nil
 }
 
+// dropTableSQL handles DROP TABLE [IF EXISTS] DDL at the embedded door.
+//
+// The permission check precedes the existence probe, so `DROP TABLE IF EXISTS
+// nosuchtable` under a read-only identity is a refusal and not a silent no-op:
+// the no-op answer is a statement of catalog contents to a caller that may not
+// read them.
 func (db *DB) dropTableSQL(ctx context.Context, dt *plansql.DropTableInfo) (*QueryResult, error) {
+	if err := auth.RequirePermission(db.authProvider, ctx, "write"); err != nil {
+		return nil, err
+	}
 	err := db.catalog.DropTable(ctx, dt.Name)
 	if err != nil {
 		if dt.IfExists {
@@ -1137,7 +1159,14 @@ func (db *DB) dropTableSQL(ctx context.Context, dt *plansql.DropTableInfo) (*Que
 // analyzeTableSQL refreshes the planner's column statistics (per-column HLL NDV
 // + reservoir-sample histograms) for a table by walking its parquet files. The
 // stats engine already exists (catalog.AnalyzeTable); this is its SQL surface.
+//
+// It is a catalog MUTATION — it writes the table's stats record and reads
+// every parquet file the table has — so it takes the same `write` gate as
+// CREATE and DROP (#939).
 func (db *DB) analyzeTableSQL(ctx context.Context, at *plansql.AnalyzeTableInfo) (*QueryResult, error) {
+	if err := auth.RequirePermission(db.authProvider, ctx, "write"); err != nil {
+		return nil, err
+	}
 	n, err := db.catalog.AnalyzeTable(ctx, at.Name)
 	if err != nil {
 		return nil, err

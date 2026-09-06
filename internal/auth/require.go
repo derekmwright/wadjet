@@ -3,27 +3,39 @@ package auth
 import (
 	"context"
 	"fmt"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // RequirePermission enforces that the caller in ctx holds perm, but only when
 // the provider is present and auth is enabled. It is the gate for privileged
-// DDL (e.g. CREATE/DROP/ALTER ALERT) that has no per-row ABAC surface of its
-// own. Fail-closed contract: with auth enabled, a missing identity or an
-// identity lacking perm is rejected; with auth absent/disabled it returns nil
-// (dev/embedded, nothing to enforce).
+// DDL (e.g. CREATE/DROP/ALTER ALERT, CREATE/DROP TABLE, ANALYZE, CREATE/DROP
+// FUNCTION) that has no per-row ABAC surface of its own. Fail-closed contract:
+// with auth enabled, a missing identity or an identity lacking perm is
+// rejected; with auth absent/disabled it returns nil (dev/embedded, nothing to
+// enforce).
+//
+// The refusal carries PostgreSQL's 42501 (insufficient_privilege), because a
+// client branches on the CLASS and this is the only thing it can branch on: an
+// authorization refusal that crossed pgwire without a code arrived as the
+// blanket 42000, indistinguishable from a syntax error, and through the HTTP
+// door as a bare message. `sqlerr.Wrap` keeps the chain, so
+// `errors.Is(err, ErrUnauthorized)` still holds for the in-process callers.
 func RequirePermission(provider *Provider, ctx context.Context, perm string) error {
 	if provider == nil || !provider.Enabled() {
 		return nil
 	}
 	id := IdentityFromContext(ctx)
 	if id == nil {
-		return fmt.Errorf("%w: authentication required for this operation", ErrUnauthorized)
+		return sqlerr.Wrap("42501", fmt.Errorf(
+			"%w: authentication required for this operation", ErrUnauthorized))
 	}
 	if authz := provider.Authorizer(); authz != nil && authz.HasPermission(id, perm) {
 		return nil
 	}
-	return fmt.Errorf("%w: %q permission required (identity %q, role %q)",
-		ErrUnauthorized, perm, id.Name, id.Role)
+	return sqlerr.Wrap("42501", fmt.Errorf(
+		"%w: permission denied: %q permission required (identity %q, role %q)",
+		ErrUnauthorized, perm, id.Name, id.Role))
 }
 
 // IdentitySnapshot is the persistable subset of an Identity sufficient to
