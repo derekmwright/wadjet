@@ -59,6 +59,35 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    to begin with, and are recorded here so a future gate does not mistake
    them for undecided.)
 
+   - **Metadata visibility follows the effective table-access decision, where
+     PostgreSQL shows it to anyone.** (Added 2026-09-06, ADR-0034.) PostgreSQL
+     lets any role that can connect read `pg_catalog` and `information_schema`
+     and run `\d`, whether or not it can SELECT the relation. Wadjet filters:
+     a relation an identity may not read is not listed by `SHOW TABLES` or the
+     table-listing endpoints, and DESCRIBE on it refuses with the same 42501
+     the read would. The reasoning is the deployments this engine is built for
+     — a table's NAME is itself sensitive there, `classified_events` names an
+     operation whether or not its rows can be read — and no PostgreSQL client
+     behaviour depends on seeing a relation it cannot select from. One
+     decision implements it on every door, `auth.VisibleTables` /
+     `auth.TableAccess`; see ADR-0034 for the full door table.
+
+   - **`auth.enabled: true` with no usable credential mechanism refuses
+     startup, and a broken auth configuration refuses a hot reload.** (Added
+     2026-09-06, #931, ADR-0034.) PostgreSQL starts with whatever
+     `pg_hba.conf` says, `trust` included, and a bad reload leaves the old
+     rules in place silently. Wadjet treats "the operator asked for
+     authentication and it cannot be performed" as a configuration ERROR:
+     startup exits with it, and a reload is refused with the running
+     configuration kept. It is not a mode.
+
+   - **A policy condition attribute with no namespace is a load error.**
+     (Added 2026-09-06, #930, ADR-0034.) PostgreSQL has no equivalent surface;
+     this is Wadjet's own configuration. `attribute: role` used to be filed
+     under subjects "by default", which read an attribute nothing populates —
+     a rule that silently never matches, and beside a broad allow that is a
+     grant. It refuses at load and names the line.
+
    - **A set operation over two VECTOR columns of different declared widths
      is REFUSED, where PostgreSQL answers.** (Added 2026-09-05, #900's
      round-2 review.) PostgreSQL's `vector` extension makes `vector(2)` and

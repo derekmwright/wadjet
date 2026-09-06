@@ -51,3 +51,4 @@ Conventions:
 | [0031](0031-a-dml-predicate-is-not-planned.md) | A DML predicate is compiled, not planned; closing that needs a row identity the planner can project | Accepted |
 | [0032](0032-a-query-block-is-parsed-once.md) | A query block is parsed once, and every layer reasons about the same tree | Accepted |
 | [0033](0033-a-column-policy-is-a-plan-time-projection-at-the-scan.md) | A column policy is a plan-time projection at the scan, on every door; a denied column does not exist | Accepted |
+| [0034](0034-every-door-authorizes-before-it-acts.md) | Every door authorizes before it acts: one shared table-access decision, fail-closed configuration, and one refusal class per protocol | Accepted |
