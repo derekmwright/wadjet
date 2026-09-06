@@ -294,6 +294,16 @@ Obligations are side-effects attached to **allow** rules. They constrain how dat
 | `deny_column` | column name | — | The column does not exist for this identity: absent from `SELECT *`, and naming it is 42703 |
 | `query_limit` | one of `max_scan_rows` (the default when empty), `max_scan_bytes`, `max_scan_files` | a positive integer | A cost ceiling for this identity on this relation, merged into the same guard `query_limits:` uses. A policy can only NARROW: the tighter of the two applies, and a statement reading two policed relations is held to the tighter of theirs. An obligation whose value is not a positive integer, or whose target is not one of the three, refuses at config load. |
 
+#### The Vocabulary Is Closed
+
+`effect`, `action`, condition `operator`, condition `attribute` and obligation `type` are closed sets — the ones listed in this section, and nothing else. A word outside them **refuses the whole policy load**: startup exits with the error, and a hot reload is refused with the running policy set kept.
+
+This is fail-closed, and it has to be, because an unrecognized security word is not inert:
+
+- an `effect` that is neither `allow` nor `deny` cannot be resolved, and an unresolvable one is treated as **deny**;
+- an obligation `type` that is not one of the four cannot be applied, and the table it appears on is **denied** rather than served without the restriction;
+- an unrecognized `action`, `operator` or `attribute` makes its rule match nothing — and a deny that matches nothing, sitting beside a broader allow, is a grant.
+
 #### Deny-Overrides Combining
 
 ABAC uses a **deny-overrides** combining algorithm:

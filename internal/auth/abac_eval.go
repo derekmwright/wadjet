@@ -14,15 +14,23 @@ type PolicyEvaluator struct {
 }
 
 // NewPolicyEvaluator creates an evaluator from a set of policies.
+//
+// An effect that resolves to neither "allow" nor "deny" becomes a DENY. It
+// used to become an ALLOW — every string but a case-insensitive "deny" did,
+// the empty string included — so `effect: dney` granted exactly the action the
+// operator had written a deny for (#932). `ValidateABACPolicies` refuses such
+// a rule at load and is the message an operator sees; this is the floor under
+// a programmatic caller who never ran the validator, and a floor under a
+// security decision falls the safe way.
 func NewPolicyEvaluator(policies []AccessControlPolicy) *PolicyEvaluator {
 	// Resolve EffectStr → Effect on all rules
 	for i := range policies {
 		for j := range policies[i].Rules {
 			r := &policies[i].Rules[j]
-			if strings.EqualFold(r.EffectStr, "deny") {
-				r.Effect = EffectDeny
-			} else {
+			if strings.EqualFold(strings.TrimSpace(r.EffectStr), "allow") {
 				r.Effect = EffectAllow
+			} else {
+				r.Effect = EffectDeny
 			}
 		}
 	}
@@ -151,6 +159,21 @@ func (pe *PolicyEvaluator) EvaluateTableAccess(subject Subject, tableName string
 			// obligation used to be dropped here, so docs/security.md said
 			// "Not enforced" and a policy that named a ceiling had none.
 			td.QueryLimits = applyQueryLimit(td.QueryLimits, ob)
+		default:
+			// An obligation this cannot apply is a REFUSAL, not a silence.
+			// There was no default arm: `type: deny_colum` produced a
+			// matching allow with no column restriction at all, so the column
+			// the rule was written to hide came back in plaintext on every
+			// door (#932). ValidateABACPolicies refuses the type at load;
+			// this is the floor under a caller who skipped it, and it closes
+			// rather than opens.
+			return &TableDecision{
+				Allowed: false,
+				RuleID:  decision.MatchedRule,
+				Reason: fmt.Sprintf("policy obligation type %q on rule %q cannot be "+
+					"enforced (not one of deny_column, mask_column, row_filter, query_limit)",
+					ob.Type, decision.MatchedRule),
+			}
 		}
 	}
 
