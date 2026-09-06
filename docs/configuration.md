@@ -371,6 +371,13 @@ the file is modified:
 3. Active connections continue with their existing credentials
 4. New requests use the updated configuration
 
+A reload whose `auth` block cannot be BUILT — a JWT key the process cannot
+read, `enabled: true` with no credential mechanism, an unknown word in a
+policy, a relation the catalog does not hold — is **refused**, and nothing is
+swapped: the running configuration keeps serving and the refusal is logged.
+The same configuration at STARTUP refuses to start. Authentication is never
+degraded to "disabled" by an error.
+
 **`auth` is the hot-reloadable section.** A key is hot-reloadable only when
 something in the running process re-reads it, and the auth provider is the
 one subscriber there is. Everything else — `mode`, `storage`, `nats`, `http`,

@@ -2295,10 +2295,14 @@ func wireAuthFromConfig(ctx context.Context, configFile string, logger *slog.Log
 // disabled in config yields an enabled==false provider, which enforcement
 // treats as a no-op. logger may be nil.
 func buildProviderFromConfig(cfg *config.Config, logger *slog.Logger) (*auth.Provider, error) {
-	authn, authz := buildAuth(cfg.Auth)
+	authn, authz, err := buildAuth(cfg.Auth)
+	if err != nil {
+		// Refuse to START. An operator who asked for authentication and
+		// misconfigured it must not get a server that serves everyone.
+		return nil, fmt.Errorf("auth configuration: %w", err)
+	}
 	var policies *auth.PolicySet
 	if len(cfg.Auth.Policies) > 0 {
-		var err error
 		policies, err = buildPolicies(cfg.Auth.Policies)
 		if err != nil {
 			return nil, fmt.Errorf("auth policies: %w", err)
@@ -2321,7 +2325,11 @@ func buildProviderFromConfig(cfg *config.Config, logger *slog.Logger) (*auth.Pro
 	return provider, nil
 }
 
-func buildAuth(cfg config.Auth) (*auth.Authenticator, *auth.Authorizer) {
+// buildAuth constructs the authenticator and authorizer from the resolved
+// auth block, REPORTING a configuration it cannot honour. It used to swallow
+// that error, so `jwt: enabled: true` with an unreadable key started the
+// server with authentication OFF on every frontend (#931).
+func buildAuth(cfg config.Auth) (*auth.Authenticator, *auth.Authorizer, error) {
 	authCfg := auth.Config{
 		Enabled: cfg.Enabled,
 		Roles:   make([]auth.RoleConfig, len(cfg.Roles)),
@@ -2350,7 +2358,7 @@ func buildAuth(cfg config.Auth) (*auth.Authenticator, *auth.Authorizer) {
 			DefaultRole: cfg.MTLS.DefaultRole,
 		}
 	}
-	return auth.New(authCfg)
+	return auth.Build(authCfg)
 }
 
 func buildPolicies(cfgs []config.AuthPolicy) (*auth.PolicySet, error) {

@@ -326,10 +326,17 @@ func (p *Provider) UpdateWithEvaluator(authn *Authenticator, authz *Authorizer, 
 // alternative to refusing an unreadable `columns:` action is installing a
 // weaker policy set than the operator asked for (#802).
 func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacPolicies ...AccessControlPolicy) error {
-	authn, authz := New(cfg)
+	// A configuration that cannot be BUILT refuses the reload and swaps
+	// nothing. `New` used to be called here and its error did not exist, so a
+	// reload naming a JWT key the process cannot read replaced a working
+	// authenticator with a disabled one and every door started serving
+	// unauthenticated requests (#931).
+	authn, authz, err := Build(cfg)
+	if err != nil {
+		return fmt.Errorf("authentication configuration: %w", err)
+	}
 	var legacyPolicies *PolicySet
 	if len(policyCfgs) > 0 {
-		var err error
 		legacyPolicies, err = ParsePolicies(policyCfgs)
 		if err != nil {
 			return err

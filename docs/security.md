@@ -672,6 +672,15 @@ This enables operations like:
 - Updating cell-level policies in response to incidents
 - Revoking access immediately
 
+### A Configuration That Cannot Be Built Is Refused
+
+Security configuration fails **closed**, at both ends:
+
+- **At startup**, a broken `auth` block refuses to start. `jwt.enabled: true` with no secret and no readable `public_key_file`, an unparseable key, or `auth.enabled: true` with no credential mechanism at all (no `api_keys`, no `jwt`, no `mtls`) exits with the error. It never starts with authentication silently off.
+- **On hot reload**, a config the process cannot build is refused and **nothing is swapped**: the running authenticator, authorizer and policy set keep serving, and the refusal is logged as `auth hot-reload REFUSED — keeping the previous configuration`. This is the same contract a policy set that cannot be bound to the catalog already has.
+
+The same applies to the policy set: an unknown security word, an unenforceable obligation, or a relation the catalog does not hold refuses the whole load.
+
 ## Audit Logging
 
 Wadjet logs security-relevant events as structured slog entries with the `component=audit` attribute. These events are emitted automatically and can be filtered and forwarded to your SIEM or log aggregation system.

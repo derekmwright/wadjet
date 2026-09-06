@@ -120,8 +120,13 @@ func TestUpdateFromConfigRefusesAnUnenforceablePolicySet(t *testing.T) {
 		APIKeys: []APIKeyDef{{Key: "k", Name: "a", Role: "analyst"}},
 		Roles:   []RoleConfig{{Name: "analyst", Tables: []string{"*"}, Allow: []string{"read"}}}})
 	p := NewProvider(authn, authz, nil, nil)
+	// The reload carries a usable credential mechanism: `enabled: true` with
+	// none is itself a refusal now (#931), and this test is about POLICIES.
+	reloadCfg := Config{Enabled: true,
+		APIKeys: []APIKeyDef{{Key: "k", Name: "a", Role: "analyst"}},
+		Roles:   []RoleConfig{{Name: "analyst", Tables: []string{"*"}, Allow: []string{"read"}}}}
 	good := maskRule(Obligation{Type: "mask_column", Target: "ssn", Value: "'***'"})
-	if err := p.UpdateFromConfig(Config{Enabled: true}, nil, good...); err != nil {
+	if err := p.UpdateFromConfig(reloadCfg, nil, good...); err != nil {
 		t.Fatalf("good policy set: %v", err)
 	}
 	before := p.Evaluator()
@@ -130,7 +135,7 @@ func TestUpdateFromConfigRefusesAnUnenforceablePolicySet(t *testing.T) {
 	}
 
 	bad := maskRule(Obligation{Type: "mask_column", Target: "ssn"})
-	if err := p.UpdateFromConfig(Config{Enabled: true}, nil, bad...); err == nil {
+	if err := p.UpdateFromConfig(reloadCfg, nil, bad...); err == nil {
 		t.Fatal("an unenforceable policy set was installed")
 	}
 	if p.Evaluator() != before {
