@@ -159,14 +159,16 @@ func TestAlertRunsUnderCreatorIdentity(t *testing.T) {
 		t.Errorf("denied column secret_col leaked under creator identity")
 	}
 
-	// Contrast: without the decorator (bare context, no identity) ABAC
-	// fail-opens — this is exactly the pre-fix unfiltered behavior.
-	nBare, colsBare, err := alertQuery(t, db, ctx, m.QueryText)
-	if err != nil {
-		t.Fatalf("bare alert query failed: %v", err)
-	}
-	if nBare != 3 || !colsBare["secret_col"] {
-		t.Fatalf("expected unfiltered result on a bare context (3 rows, secret_col present); got %d rows, cols=%v", nBare, colsBare)
+	// Contrast: without the decorator the context carries NO identity, and an
+	// attached, enabled provider refuses that (ADR-0034 item 7). It used to
+	// fail OPEN and return the unfiltered rows, which is what made the
+	// decorator load-bearing for security rather than merely for correctness;
+	// it is load-bearing either way, and the contrast is now a refusal rather
+	// than a leak.
+	if _, _, err := alertQuery(t, db, ctx, m.QueryText); err == nil {
+		t.Fatal("a bare context with no identity ran the alert query under an enabled provider")
+	} else if !strings.Contains(err.Error(), "authentication required") {
+		t.Fatalf("bare-context refusal %q does not name the missing identity", err)
 	}
 }
 
