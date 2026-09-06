@@ -261,3 +261,73 @@ way. It passed 3/3 reverted. It now asserts that the 40001 carries
 `ErrDMLRowSuperseded`, that its text is the STATEMENT's give-up rather than the
 catalog's, and that the statement redid itself its full bound; reverted, it
 fails 3/3 naming all three.
+
+## Amendment (2026-09-06, arc INGEST-CORR, #919): the ingest flush commits against the incarnation it buffered
+
+### What the rule missed
+
+The rule read "a DML *statement* commits against the manifest it read". The
+micro-batch ingester (`internal/storage/ingest.Ingester`) is the other writer,
+and it held no incarnation identity at all. It carries a table NAME and a
+schema, and its flush called `Catalog.AddNewFiles` by name; `addFiles` loaded
+whichever manifest currently answers to that name and CAS-updated it, with no
+check that it is the table the buffered rows were accepted for.
+
+`DROP TABLE t` deletes `manifest.t`; `CREATE TABLE t` writes a fresh empty one
+under the same key. An ingester that buffered rows for the first incarnation,
+then flushed after the drop-and-recreate, registered its file into the *new*
+table's manifest — the new table now contained rows nobody inserted into it.
+Reproduced deterministically (`TestReviewOldIngesterWritesRecreatedTable`): the
+flush returned `nil` and `events` held the stale `id:123`. This is distinct
+from closed #483 (a stale manifest *cache*): revision freshness works, and
+reading the *newest* manifest is exactly why the stale producer reaches the new
+table.
+
+### The decision
+
+**A table's manifest carries a per-CREATE `Incarnation` identity, stamped by
+`CreateTable`, and an ingest flush commits against the incarnation the rows were
+buffered for.** An ingester binds to the incarnation the first time it retains a
+row (`TableIncarnation`), and its flush goes through
+`Catalog.AddNewFilesForIncarnation`, which — INSIDE the CAS, atomic with the
+write — refuses with `ErrTableIncarnationChanged` if the live manifest's
+incarnation is not the one bound. The check is inside the CAS on purpose: a
+lookup before the upload would still race a DROP+CREATE landing between the
+check and the commit. A refused flush writes nothing into the new table; the
+error reaches the ingester's owner, which discards or re-routes the buffered
+rows. The uploaded parquet object is an unreferenced orphan — bytes, never rows,
+the same residual this record already accepts for a refused DML retry.
+
+An empty expected incarnation skips the check: a manifest written before this
+field existed carries none, and refusing every legacy ingest would be worse than
+the bug this closes for the new tables that do carry one. `AddNewFiles` keeps
+its unguarded behaviour for compaction and delete-marker GC, which mint their
+paths against a manifest they are holding right now — the same split this record
+draws between `CommitDML` and `AddDeleteMarkers`.
+
+### Alternatives rejected
+
+- **Check the table exists before uploading.** A pre-upload lookup is not atomic
+  with the commit: a DROP+CREATE landing between the lookup and the CAS passes
+  the lookup and still writes into the new table. The guard must be inside the
+  CAS, which is where the incarnation is compared.
+- **Carry the incarnation in `TableMeta` and compare that.** The flush already
+  reads and writes the *manifest* under CAS; the incarnation belongs where the
+  atomic write is. Comparing `TableMeta` would be a second read of a second key,
+  not atomic with the manifest CAS.
+- **Bind at `New()`.** The constructor reports no error and reads no catalog. An
+  ingester that is constructed, sits idle across a recreate, and only then
+  buffers its first row should bind to the incarnation it actually buffered
+  against — so the binding is taken lazily, at the first retained row.
+
+### Gate
+
+`TestReviewOldIngesterWritesRecreatedTable`
+(`internal/storage/ingest/adversarial_review_test.go`) — the same-schema
+recreate, asserting the new table is empty; confirmed to fail reverted (the
+flush wrote `id:123`). `TestReviewOldIngesterRefusedOnIncompatibleRecreate`
+asserts the refusal is BY incarnation (`errors.Is(err,
+catalog.ErrTableIncarnationChanged)`), not by a schema clash, over an
+incompatible recreate. `TestReviewFreshIngesterAfterRecreateWrites` is the
+boundary: a fresh ingester after the recreate writes normally, so the guard
+refuses only the stale producer, not every ingest.

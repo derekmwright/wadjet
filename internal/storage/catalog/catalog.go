@@ -27,6 +27,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/storage/partition"
+	"github.com/google/uuid"
 )
 
 const (
@@ -143,6 +144,18 @@ type PartitionManifest struct {
 	// it and fall back to footer reads — the key stays valid across
 	// ingest. Empty until the table is first analyzed.
 	RGMetaKey string `json:"rg_meta_key,omitempty"`
+
+	// Incarnation is a per-CREATE identity stamped by CreateTable, distinct
+	// for every incarnation of a table NAME. It is what an ingest flush
+	// commits against (ADR-0030): an ingester binds to the incarnation it
+	// first buffered a row for, and AddNewFilesForIncarnation refuses a flush
+	// whose incarnation no longer matches the live manifest — a table that
+	// was dropped and recreated under the same name (#919). A read-modify-
+	// write of the manifest preserves it (it is a field of the struct every
+	// commit path reloads), so it survives ingest, compaction and DML.
+	// Empty on manifests written before this field existed; an empty expected
+	// incarnation skips the check, so legacy tables keep their old behaviour.
+	Incarnation string `json:"incarnation,omitempty"`
 }
 
 // DeleteMarker records rows to skip during scan (merge-on-read).
@@ -353,6 +366,10 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 		Table:      name,
 		Partitions: []PartitionEntry{},
 		UpdatedAt:  now,
+		// A fresh identity for THIS incarnation of the name. A later
+		// DROP+CREATE of the same name mints a new one, so an ingester bound
+		// to the old incarnation is refused at flush (#919, ADR-0030).
+		Incarnation: uuid.NewString(),
 	}
 	if err := c.putJSON(c.key("manifest."+name), manifest); err != nil {
 		return err
@@ -398,6 +415,16 @@ func checkDistinctColumnNames(schema parquet.Schema) error {
 // transport failure, where the table's existence is unknown — the planner
 // rejects a query on the former (42P01) and stays conservative on the latter.
 var ErrTableNotFound = errors.New("not found")
+
+// ErrTableIncarnationChanged marks a write refused because the manifest's
+// incarnation no longer matches the one the caller bound to — the table was
+// dropped and recreated under the same name while the caller held buffered
+// rows for the earlier incarnation (#919). It is raised INSIDE the CAS, so the
+// check is atomic with the commit and cannot be raced by a DROP+CREATE that
+// lands between a pre-check and the write (ADR-0030). Callers distinguish it
+// (errors.Is) to hand the buffered rows back to their owner rather than write
+// them into a table those rows were never accepted for.
+var ErrTableIncarnationChanged = errors.New("table incarnation changed since these rows were accepted")
 
 // isFoldedTableName reports whether a name is its OWN folded form — no ASCII
 // upper-case letter. PostgreSQL folds only A-Z in a UTF8 database, so this is
@@ -744,7 +771,7 @@ func mergeNewFileEntries(existing, incoming []FileEntry) ([]FileEntry, error) {
 // merge decides how a Path collision within one partition's file list is
 // resolved.
 func (c *Catalog) addFiles(tableName string, partValues map[string]string, partPath string, files []FileEntry,
-	merge func(existing, incoming []FileEntry) ([]FileEntry, error)) error {
+	merge func(existing, incoming []FileEntry) ([]FileEntry, error), expectIncarnation string) error {
 	// Declared BEFORE the manifest write, released after it: a retirement
 	// sweep must not be able to delete the bytes at a path this call is in
 	// the middle of registering, and must not be able to start deciding
@@ -771,6 +798,18 @@ func (c *Catalog) addFiles(tableName string, partValues map[string]string, partP
 		var manifest PartitionManifest
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			return fmt.Errorf("unmarshaling manifest: %w", err)
+		}
+
+		// Incarnation check, atomic with the commit (#919, ADR-0030): the
+		// caller bound to a specific incarnation of this name; if the live
+		// manifest is a different one, the name was dropped and recreated and
+		// these rows belong to a table that no longer exists. Refuse rather
+		// than register the file into the new table's manifest. An empty
+		// expectation (legacy caller, or a manifest predating the field)
+		// skips the check.
+		if expectIncarnation != "" && manifest.Incarnation != expectIncarnation {
+			return fmt.Errorf("%w: table %q now incarnation %q, rows bound to %q",
+				ErrTableIncarnationChanged, tableName, manifest.Incarnation, expectIncarnation)
 		}
 
 		found := false
@@ -821,7 +860,7 @@ func (c *Catalog) addFiles(tableName string, partValues map[string]string, partP
 func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
 	return c.addFiles(tableName, partValues, partPath, files, func(existing, incoming []FileEntry) ([]FileEntry, error) {
 		return mergeFileEntries(existing, incoming), nil
-	})
+	}, "")
 }
 
 // AddNewFiles adds newly-created file entries to the manifest for a given
@@ -844,7 +883,42 @@ func (c *Catalog) AddNewFiles(_ context.Context, tableName string, partValues ma
 	for i := range owned {
 		owned[i].EngineWritten = true
 	}
-	return c.addFiles(tableName, partValues, partPath, owned, mergeNewFileEntries)
+	return c.addFiles(tableName, partValues, partPath, owned, mergeNewFileEntries, "")
+}
+
+// AddNewFilesForIncarnation is AddNewFiles with an incarnation guard: the
+// commit is refused with ErrTableIncarnationChanged (INSIDE the CAS, so the
+// check is atomic with the write) if the live manifest's Incarnation is not
+// expectIncarnation. It is the ingest flush's write path (#919, ADR-0030): an
+// ingester binds to the incarnation it first buffered a row for, and a flush
+// whose table was dropped and recreated under the same name lands here against
+// a manifest with a different incarnation and is refused — the buffered rows
+// are never written into the new table.
+//
+// An empty expectIncarnation degrades to AddNewFiles (no guard): a manifest
+// written before the Incarnation field existed carries none, and refusing
+// every legacy ingest would be worse than the bug this closes for the new
+// tables that do carry one.
+func (c *Catalog) AddNewFilesForIncarnation(_ context.Context, tableName, expectIncarnation string, partValues map[string]string, partPath string, files []FileEntry) error {
+	owned := make([]FileEntry, len(files))
+	copy(owned, files)
+	for i := range owned {
+		owned[i].EngineWritten = true
+	}
+	return c.addFiles(tableName, partValues, partPath, owned, mergeNewFileEntries, expectIncarnation)
+}
+
+// TableIncarnation returns the incarnation identity of the table's current
+// manifest — the value an ingester binds to when it first buffers a row so its
+// flush can be validated against the identity it read (#919). An empty string
+// means the manifest predates the Incarnation field (a legacy table), and the
+// caller treats that as "no guard".
+func (c *Catalog) TableIncarnation(_ context.Context, tableName string) (string, error) {
+	manifest, err := c.GetManifest(context.Background(), tableName)
+	if err != nil {
+		return "", err
+	}
+	return manifest.Incarnation, nil
 }
 
 // DeletedRowsByFile indexes a manifest's delete markers by file path, as the
