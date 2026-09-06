@@ -129,6 +129,16 @@ type TableMeta struct {
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
 	Version       int            `json:"version"`
+	// Incarnation is the per-CREATE identity of this table, the SAME value
+	// CreateTable stamps on the manifest (#919). It lives on the table RECORD
+	// too because that record exists from CreateTable onward, while the
+	// manifest an ingest flush validates against may not — an embedder can
+	// NewIngester and buffer rows before any manifest is written. An ingester
+	// binds to this (TableIncarnation reads it), and the manifest-side copy is
+	// what AddNewFilesForIncarnation compares inside the CAS; the two are
+	// written once, together, and never diverge. Empty on records written
+	// before this field existed.
+	Incarnation string `json:"incarnation,omitempty"`
 }
 
 // PartitionManifest tracks all partitions and their files for a table.
@@ -349,6 +359,13 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 	}
 
 	now := time.Now().UTC()
+	// One fresh identity for THIS incarnation of the name, stamped on BOTH the
+	// table record and the manifest (#919). A later DROP+CREATE mints a new
+	// one, so an ingester bound to the old incarnation is refused at flush
+	// (ADR-0030). The table record carries it because it exists from here on,
+	// while the manifest an ingest flush validates against may not yet — an
+	// embedder can NewIngester and buffer before any manifest exists.
+	incarnation := uuid.NewString()
 	tableMeta := TableMeta{
 		Name:          name,
 		Schema:        schema,
@@ -356,6 +373,7 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		Version:       1,
+		Incarnation:   incarnation,
 	}
 
 	if err := c.putJSON(c.key("table."+name), tableMeta); err != nil {
@@ -363,13 +381,10 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 	}
 
 	manifest := PartitionManifest{
-		Table:      name,
-		Partitions: []PartitionEntry{},
-		UpdatedAt:  now,
-		// A fresh identity for THIS incarnation of the name. A later
-		// DROP+CREATE of the same name mints a new one, so an ingester bound
-		// to the old incarnation is refused at flush (#919, ADR-0030).
-		Incarnation: uuid.NewString(),
+		Table:       name,
+		Partitions:  []PartitionEntry{},
+		UpdatedAt:   now,
+		Incarnation: incarnation,
 	}
 	if err := c.putJSON(c.key("manifest."+name), manifest); err != nil {
 		return err
@@ -908,17 +923,22 @@ func (c *Catalog) AddNewFilesForIncarnation(_ context.Context, tableName, expect
 	return c.addFiles(tableName, partValues, partPath, owned, mergeNewFileEntries, expectIncarnation)
 }
 
-// TableIncarnation returns the incarnation identity of the table's current
-// manifest — the value an ingester binds to when it first buffers a row so its
-// flush can be validated against the identity it read (#919). An empty string
-// means the manifest predates the Incarnation field (a legacy table), and the
-// caller treats that as "no guard".
-func (c *Catalog) TableIncarnation(_ context.Context, tableName string) (string, error) {
-	manifest, err := c.GetManifest(context.Background(), tableName)
+// TableIncarnation returns the incarnation identity of a table — the value an
+// ingester binds to when it first buffers a row so its flush can be validated
+// against the identity it read (#919). It is read from the table RECORD, not
+// the manifest: the record exists from CreateTable onward, while an embedder
+// can NewIngester and buffer rows for a table whose manifest does not exist yet
+// (the ordinary create-later or flush-creates flow). A caller that gets
+// ErrTableNotFound leaves the ingester unbound and retries at flush, when the
+// table exists; it does NOT error the buffering. An empty string means the
+// record predates the field (a legacy table), which the caller treats as "no
+// guard".
+func (c *Catalog) TableIncarnation(ctx context.Context, tableName string) (string, error) {
+	meta, err := c.GetTable(ctx, tableName)
 	if err != nil {
 		return "", err
 	}
-	return manifest.Incarnation, nil
+	return meta.Incarnation, nil
 }
 
 // DeletedRowsByFile indexes a manifest's delete markers by file path, as the

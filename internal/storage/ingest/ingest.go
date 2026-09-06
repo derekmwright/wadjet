@@ -4,6 +4,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -341,13 +342,16 @@ func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
 	// against the live manifest inside the CAS; a table dropped and recreated
 	// under the same name gives the flush a different incarnation and it is
 	// refused, never written into the new table.
+	//
+	// A table that does NOT exist yet (an embedder that NewIngester's and
+	// buffers before CreateTable, or before a flush that will create it) leaves
+	// the ingester unbound and does NOT error the buffering — the binding is
+	// retried at flush, when the table exists. Only a real catalog failure is
+	// surfaced here.
 	if len(staged) > 0 && !ing.incarnationBound {
-		inc, err := ing.catalog.TableIncarnation(ctx, ing.tableName)
-		if err != nil {
-			return fmt.Errorf("binding table incarnation: %w", err)
+		if err := ing.bindIncarnation(ctx); err != nil {
+			return err
 		}
-		ing.incarnation = inc
-		ing.incarnationBound = true
 	}
 
 	// Commit the staged rows to the persistent buffers. Nothing below can
@@ -417,9 +421,37 @@ func (ing *Ingester) flushReady(ctx context.Context) error {
 	return nil
 }
 
+// bindIncarnation captures the table incarnation this ingester writes against,
+// once (#919). Caller holds ing.mu. A table that does not exist yet is not an
+// error: the ingester stays unbound and the binding is retried later (the next
+// Ingest, or the flush). A real catalog failure is returned.
+func (ing *Ingester) bindIncarnation(ctx context.Context) error {
+	if ing.incarnationBound {
+		return nil
+	}
+	inc, err := ing.catalog.TableIncarnation(ctx, ing.tableName)
+	if err != nil {
+		if errors.Is(err, catalog.ErrTableNotFound) {
+			// Table not created yet — bind lazily when it exists.
+			return nil
+		}
+		return fmt.Errorf("binding table incarnation: %w", err)
+	}
+	ing.incarnation = inc
+	ing.incarnationBound = true
+	return nil
+}
+
 func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *partitionBuffer) error {
 	if len(buf.rows) == 0 {
 		return nil
+	}
+
+	// Last chance to bind the incarnation, for an ingester that buffered its
+	// rows before the table existed (#919): by flush time it must, or the
+	// AddNewFilesForIncarnation below will fail on the missing manifest anyway.
+	if err := ing.bindIncarnation(ctx); err != nil {
+		return err
 	}
 
 	// Full UUIDv7, not a truncated prefix (#494): a v4 UUID's first 8 hex

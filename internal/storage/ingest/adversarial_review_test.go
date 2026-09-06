@@ -184,6 +184,38 @@ func TestReviewNestedValueMutationAfterIngest(t *testing.T) {
 	}
 }
 
+// TestReviewFirstIngestBeforeTableExistsSucceeds guards the #919 binding
+// against being over-broad: an ingester constructed for a table that does not
+// exist yet (an embedder that buffers before CreateTable) must NOT be refused
+// at the first Ingest — the incarnation binds lazily when the table exists.
+// This is the create-then-first-ingest lane the combined battery caught
+// (wadjet.TestReservedSlotNamespaceDoors/the_Ingester), pinned in-package.
+func TestReviewFirstIngestBeforeTableExistsSucceeds(t *testing.T) {
+	s := pqt.Schema{Columns: []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}}
+	ctx := context.Background()
+	c := catalog.NewWithStore(objstore.NewMemStore(), "review")
+	if e := c.Init(ctx); e != nil {
+		t.Fatal(e)
+	}
+	// Table "events" does NOT exist yet. Buffering must still succeed.
+	ing := New(c, "events", s, nil, DefaultConfig())
+	if e := ing.Ingest(ctx, []map[string]any{{"id": int64(5)}}); e != nil {
+		t.Fatalf("first ingest into a not-yet-created table was refused: %v", e)
+	}
+	// Now create the table and flush: the binding is taken lazily and the row
+	// is written normally.
+	if e := c.CreateTable(ctx, "events", s, nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := ing.FlushAll(ctx); e != nil {
+		t.Fatalf("flush after the table was created was refused: %v", e)
+	}
+	rows := reviewRows(t, c)
+	if len(rows) != 1 || rows[0]["id"] != int64(5) {
+		t.Fatalf("create-later flush wrote wrong rows: %v", rows)
+	}
+}
+
 // TestReviewOldIngesterWritesRecreatedTable is the #919 regression: an ingester
 // holding buffered rows for a dropped-and-recreated table must not flush them
 // into the new table's manifest (ADR-0030: commit against the identity read).
