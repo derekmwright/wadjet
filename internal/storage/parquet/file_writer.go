@@ -86,7 +86,14 @@ type leafBuffer struct {
 	count     int // total entries (values + nulls/absent markers)
 
 	// Statistics tracking.
-	hasStats           bool
+	hasStats bool
+	// hasFloatBound is the float leaves' own "a min/max exists" flag, kept
+	// separate from hasStats because a NaN is a value the leaf HAS but which
+	// the Parquet spec excludes from min/max: a float column of only NaN (and
+	// nulls) must write null_count but NO float bound. hasStats still records
+	// that the leaf saw a value (so null_count is unaffected), and buildStats
+	// gates the float MinValue/MaxValue on THIS flag instead (#928).
+	hasFloatBound      bool
 	minI32, maxI32     int32
 	minI64, maxI64     int64
 	minF32, maxF32     float32
@@ -1730,6 +1737,7 @@ func (lb *leafBuffer) reset() {
 	lb.numNulls = 0
 	lb.count = 0
 	lb.hasStats = false
+	lb.hasFloatBound = false
 	lb.minBytes = nil
 	lb.maxBytes = nil
 	lb.minCidrKey = ""
@@ -1766,23 +1774,45 @@ func (lb *leafBuffer) updateStatsI64(v int64) {
 }
 
 func (lb *leafBuffer) updateStatsF32(v float32) {
-	if !lb.hasStats || v < lb.minF32 {
+	// NaN is excluded from min/max (Parquet spec): it seeds neither bound and
+	// never displaces one. hasStats still records the value so null_count is
+	// unaffected; a leaf of only NaN leaves hasFloatBound false and writes no
+	// float min/max (#928).
+	lb.hasStats = true
+	if math.IsNaN(float64(v)) {
+		return
+	}
+	if !lb.hasFloatBound {
+		lb.minF32, lb.maxF32 = v, v
+		lb.hasFloatBound = true
+		return
+	}
+	// The ±0.0 spec rule: -0.0 and +0.0 compare equal, so a bare `<`/`>` never
+	// moves the bound between them. min prefers -0.0, max prefers +0.0.
+	if v < lb.minF32 || (v == lb.minF32 && math.Signbit(float64(v)) && !math.Signbit(float64(lb.minF32))) {
 		lb.minF32 = v
 	}
-	if !lb.hasStats || v > lb.maxF32 {
+	if v > lb.maxF32 || (v == lb.maxF32 && !math.Signbit(float64(v)) && math.Signbit(float64(lb.maxF32))) {
 		lb.maxF32 = v
 	}
-	lb.hasStats = true
 }
 
 func (lb *leafBuffer) updateStatsF64(v float64) {
-	if !lb.hasStats || v < lb.minF64 {
+	lb.hasStats = true
+	if math.IsNaN(v) {
+		return
+	}
+	if !lb.hasFloatBound {
+		lb.minF64, lb.maxF64 = v, v
+		lb.hasFloatBound = true
+		return
+	}
+	if v < lb.minF64 || (v == lb.minF64 && math.Signbit(v) && !math.Signbit(lb.minF64)) {
 		lb.minF64 = v
 	}
-	if !lb.hasStats || v > lb.maxF64 {
+	if v > lb.maxF64 || (v == lb.maxF64 && !math.Signbit(v) && math.Signbit(lb.maxF64)) {
 		lb.maxF64 = v
 	}
-	lb.hasStats = true
 }
 
 func (lb *leafBuffer) updateStatsBytes(b []byte) {
@@ -1935,11 +1965,19 @@ func (lb *leafBuffer) buildStats() *Statistics {
 		binary.LittleEndian.PutUint64(s.MinValue, uint64(lb.minI64))
 		binary.LittleEndian.PutUint64(s.MaxValue, uint64(lb.maxI64))
 	case PhysicalFloat:
+		// No float bound means every value was NaN (or null): the spec says
+		// such a column carries null_count but no min/max, so leave them unset.
+		if !lb.hasFloatBound {
+			return s
+		}
 		s.MinValue = make([]byte, 4)
 		s.MaxValue = make([]byte, 4)
 		binary.LittleEndian.PutUint32(s.MinValue, math.Float32bits(lb.minF32))
 		binary.LittleEndian.PutUint32(s.MaxValue, math.Float32bits(lb.maxF32))
 	case PhysicalDouble:
+		if !lb.hasFloatBound {
+			return s
+		}
 		s.MinValue = make([]byte, 8)
 		s.MaxValue = make([]byte, 8)
 		binary.LittleEndian.PutUint64(s.MinValue, math.Float64bits(lb.minF64))
