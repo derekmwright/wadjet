@@ -1,12 +1,16 @@
 package server
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
 
 	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // TestGRPCQueryRefusalCarriesPermissionDenied holds the refusal CLASS on the
@@ -60,5 +64,50 @@ func TestGRPCQueryRefusalCarriesPermissionDenied(t *testing.T) {
 		&wadjetv1.QueryRequest{Sql: "SELECT * FROM no_such_table"})
 	if got := grpcAuthzCode(err); got != codes.Internal {
 		t.Errorf("admin Query(missing table): code %v, want Internal (err %v)", got, err)
+	}
+}
+
+// TestGRPCResultDrainRefusalCarriesItsClass covers the DRAIN paths — the
+// streaming loop in streamResultBatches and its unary twin, result.Rows() —
+// which raise a failure after the result handle already exists.
+//
+// Nothing produces a 42501 there today: the cost guard's ceilings are plan-time
+// estimates, so a `query_limit` obligation refuses before the result is built,
+// and a bufconn cell cannot drive one. That is exactly why the mapping is
+// asserted at the function: the two drains were the last place in the two SQL
+// RPCs where a refusal would have crossed as codes.Internal, and a class that
+// holds on three paths out of four is not a class (round-1 review P4). The
+// wiring itself is one line in each drain and visible in the diff.
+func TestGRPCResultDrainRefusalCarriesItsClass(t *testing.T) {
+	refusals := []error{
+		sqlerr.New("42501", `permission denied for table "secret"`),
+		fmt.Errorf("wrapped: %w", sqlerr.New("42501", `permission denied for table "secret"`)),
+		fmt.Errorf("%w: %q permission required", auth.ErrUnauthorized, "write"),
+	}
+	for _, err := range refusals {
+		got := grpcResultError(err, "reading result batches")
+		if code := grpcAuthzCode(got); code != codes.PermissionDenied {
+			t.Errorf("grpcResultError(%v) = %v, want PermissionDenied", err, code)
+		}
+		// The refusal keeps its own words on BOTH drains: an identity told
+		// "permission denied" mid-stream and "reading result batches:
+		// permission denied" up front is two answers to one question.
+		if strings.Contains(got.Error(), "reading result batches") {
+			t.Errorf("grpcResultError(%v) = %v\n  a refusal must not wear the drain's prefix", err, got)
+		}
+	}
+
+	// A real drain failure keeps codes.Internal AND the caller's own prefix —
+	// the message "reading result batches" clients and operators already see.
+	got := grpcResultError(errors.New("scratch file vanished"), "reading result batches")
+	if code := grpcAuthzCode(got); code != codes.Internal {
+		t.Errorf("grpcResultError(drain failure) = %v, want Internal", code)
+	}
+	if !strings.Contains(got.Error(), "reading result batches: scratch file vanished") {
+		t.Errorf("grpcResultError(drain failure) = %v\n  want the drain's own message preserved", got)
+	}
+	// And the query prefix is still the query prefix.
+	if q := grpcQueryError(errors.New("boom")); !strings.Contains(q.Error(), "query error: boom") {
+		t.Errorf("grpcQueryError = %v, want the query prefix preserved", q)
 	}
 }

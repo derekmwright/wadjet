@@ -139,7 +139,9 @@ func (g *GRPCServer) Query(ctx context.Context, req *wadjetv1.QueryRequest) (*wa
 		}
 		rows, rowsErr := result.Rows()
 		if rowsErr != nil {
-			return nil, status.Errorf(codes.Internal, "reading result batches: %v", rowsErr)
+			// The unary twin of streamResultBatches' drain, and the same rule:
+			// a refusal raised while the result is materialised keeps its class.
+			return nil, grpcResultError(rowsErr, "reading result batches")
 		}
 		return &wadjetv1.QueryResponse{
 			QueryId: result.QueryID,
@@ -236,7 +238,14 @@ func streamResultBatches(cs *chunkStreamer, result *coordinator.SQLResult) error
 	for {
 		b, err := stream.Next(ctx)
 		if err != nil {
-			return status.Errorf(codes.Internal, "reading result batches: %v", err)
+			// Through the same class mapping the two SQL RPCs use: a refusal
+			// that surfaces WHILE the result is drained is still a refusal.
+			// Nothing raises a 42501 here today — the cost guard's ceilings are
+			// plan-time estimates, so a `query_limit` obligation refuses before
+			// the result exists — but this was the one path in the two SQL RPCs
+			// where a 42501 would have crossed as Internal, and leaving one such
+			// path is how a class becomes "usually" (round-1 review P4).
+			return grpcResultError(err, "reading result batches")
 		}
 		if b == nil {
 			break
@@ -565,10 +574,29 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 // internal/auth change (it moves pgwire's SQLSTATE too); when it lands this
 // mapping needs no edit.
 func grpcQueryError(err error) error {
-	if sqlerr.StateOf(err) == "42501" || errors.Is(err, auth.ErrUnauthorized) {
+	return grpcResultError(err, "query error")
+}
+
+// grpcResultError is grpcQueryError with the caller's own Internal prefix, for
+// the two places a failure is raised AFTER the result handle exists — the
+// streaming drain and its unary twin, which already said "reading result
+// batches" and must keep saying it for the errors that really are failures.
+//
+// It is one function rather than two because the refusal arm must not differ by
+// where the refusal surfaced: an identity told "permission denied" mid-stream
+// and "query error: permission denied" up front is two answers to one question.
+func grpcResultError(err error, prefix string) error {
+	if isAuthorizationRefusal(err) {
 		return status.Error(codes.PermissionDenied, err.Error())
 	}
-	return status.Errorf(codes.Internal, "query error: %v", err)
+	return status.Errorf(codes.Internal, "%s: %v", prefix, err)
+}
+
+// isAuthorizationRefusal reports whether err is a refusal to authorize rather
+// than a failure to execute. It reads the CLASS the error carries and nothing
+// else — see grpcQueryError.
+func isAuthorizationRefusal(err error) bool {
+	return sqlerr.StateOf(err) == "42501" || errors.Is(err, auth.ErrUnauthorized)
 }
 
 // grpcRequireWrite is this door's DDL authorization: the caller in ctx must
