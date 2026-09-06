@@ -482,11 +482,14 @@ func (c *pgConn) handleStartup() error {
 	c.sendParamStatus("standard_conforming_strings", "on")
 	c.sendParamStatus("TimeZone", "UTC")
 	c.sendParamStatus("IntervalStyle", "postgres")
-	if c.identity != nil && c.identity.Role != "admin" {
-		c.sendParamStatus("is_superuser", "off")
-	} else {
-		c.sendParamStatus("is_superuser", "on")
-	}
+	// `is_superuser` is what the AUTHORIZER says, never what the role is
+	// CALLED. A role named `admin` that holds only `read` reported
+	// `is_superuser=on`, and a role named `ops` holding `admin` reported
+	// `off` — a psql prompt and every client that branches on this parameter
+	// read a privilege nobody granted (#938, ADR-0034: no admin by
+	// inference). With no provider (auth disabled) the session is
+	// unrestricted, which is what `on` has always meant there.
+	c.sendParamStatus("is_superuser", boolParam(c.isAdmin()))
 
 	// Send BackendKeyData (session handle + secret key for cancellation).
 	// The pair must be real: it is the only way a client can later stop a
@@ -926,6 +929,27 @@ func (c *pgConn) handleCopyIn(sql string) {
 			return
 		}
 	}
+}
+
+// isAdmin reports whether this connection's identity holds the `admin`
+// PERMISSION. With no provider or auth disabled every session is
+// unrestricted, so it reports true.
+func (c *pgConn) isAdmin() bool {
+	if c.authProvider == nil || !c.authProvider.Enabled() {
+		return true
+	}
+	if c.identity == nil {
+		return false
+	}
+	authz := c.authProvider.Authorizer()
+	return authz != nil && authz.HasPermission(c.identity, "admin")
+}
+
+func boolParam(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 // copyTargets is the column list the write DECISION sees: the resolved
