@@ -59,10 +59,11 @@ type censusRow struct {
 	// want maps an API key name to the expected status. Keys: "", "reader",
 	// "writer", "admin".
 	want map[string]int
-	// noRequest marks a route the census ENUMERATES but does not call
-	// (pprof's profile and trace block for seconds by design).
-	noRequest string
-	note      string
+	// noRequestForAdmin marks a route whose ALLOWED cell is enumerated but not
+	// called: pprof's profile and trace block for seconds by design. The
+	// refusal cells still run — they are the ones this census exists for.
+	noRequestForAdmin string
+	note              string
 }
 
 func censusRows() []censusRow {
@@ -140,26 +141,25 @@ func censusRows() []censusRow {
 	}
 }
 
-// pprofRows are the profiling routes. They are RECORDED, not changed by this
-// arc: today any authenticated identity may read them, which is a separate
-// exposure from #937's (a profile carries stack traces, not stored rows) and
-// is filed rather than silently widened into this fix.
+// pprofRows are the profiling routes. They take the `admin` permission: a
+// profile describes what the process is doing and /debug/pprof/cmdline
+// publishes the argv it was started with — bucket names, NATS URLs, every flag
+// value — which is an operational read of the same class as /v1/workers.
 func pprofRows() []censusRow {
-	anyAuthenticated := map[string]int{"": 401, "reader": anyAllowed, "writer": anyAllowed, "admin": anyAllowed}
-	rows := []censusRow{
-		{method: "*", pattern: "/debug/pprof/", path: "/debug/pprof/", want: anyAuthenticated},
-		{method: "*", pattern: "/debug/pprof/cmdline", path: "/debug/pprof/cmdline", want: anyAuthenticated},
+	adminOnly := map[string]int{"": 401, "reader": 403, "writer": 403, "admin": anyAllowed}
+	return []censusRow{
+		{method: "*", pattern: "/debug/pprof/", path: "/debug/pprof/", want: adminOnly},
+		{method: "*", pattern: "/debug/pprof/cmdline", path: "/debug/pprof/cmdline", want: adminOnly},
 		{method: "*", pattern: "/debug/pprof/profile", path: "/debug/pprof/profile",
-			want: anyAuthenticated, noRequest: "a CPU profile blocks for 30s"},
-		{method: "*", pattern: "/debug/pprof/symbol", path: "/debug/pprof/symbol", want: anyAuthenticated},
+			want: adminOnly, noRequestForAdmin: "a CPU profile blocks for 30s"},
+		{method: "*", pattern: "/debug/pprof/symbol", path: "/debug/pprof/symbol", want: adminOnly},
 		{method: "*", pattern: "/debug/pprof/trace", path: "/debug/pprof/trace",
-			want: anyAuthenticated, noRequest: "an execution trace blocks for 1s"},
+			want: adminOnly, noRequestForAdmin: "an execution trace blocks for 1s"},
 		{method: "*", pattern: "/debug/pprof/goroutine", path: "/debug/pprof/goroutine?debug=1",
-			want: anyAuthenticated},
-		{method: "*", pattern: "/debug/pprof/heap", path: "/debug/pprof/heap?debug=1", want: anyAuthenticated},
-		{method: "*", pattern: "/debug/pprof/allocs", path: "/debug/pprof/allocs?debug=1", want: anyAuthenticated},
+			want: adminOnly},
+		{method: "*", pattern: "/debug/pprof/heap", path: "/debug/pprof/heap?debug=1", want: adminOnly},
+		{method: "*", pattern: "/debug/pprof/allocs", path: "/debug/pprof/allocs?debug=1", want: adminOnly},
 	}
-	return rows
 }
 
 var censusKeys = map[string]string{
@@ -329,11 +329,11 @@ func TestHTTPRouteCensusAuthorizesEveryRoute(t *testing.T) {
 
 	// 2. Every row × every identity.
 	for _, row := range rows {
-		if row.noRequest != "" {
-			continue
-		}
 		for _, id := range []string{"", "reader", "writer", "admin"} {
 			want, ok := row.want[id]
+			if row.noRequestForAdmin != "" && want == anyAllowed {
+				continue // see noRequestForAdmin
+			}
 			if !ok {
 				t.Fatalf("census row %s %s has no expectation for identity %q",
 					row.method, row.pattern, id)

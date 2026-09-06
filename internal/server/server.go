@@ -133,14 +133,20 @@ func New(cfg Config, logger *slog.Logger) *Server {
 		s.mux.Handle("/metrics", s.metrics.Handler())
 	}
 
-	s.mux.HandleFunc("/debug/pprof/", pprof.Index)
-	s.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	s.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	s.mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	s.mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	s.mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	s.mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	s.mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	// The profiling endpoints are an operational read of the process, in the
+	// same class as /v1/workers: /debug/pprof/cmdline publishes the argv this
+	// server was started with — bucket names, NATS URLs, every flag value —
+	// and the profiles describe what it is doing. They take the `admin`
+	// permission (ADR-0034). With no provider or auth disabled nothing is
+	// enforced and they answer as they always did.
+	s.mux.Handle("/debug/pprof/", s.adminOnly(http.HandlerFunc(pprof.Index)))
+	s.mux.Handle("/debug/pprof/cmdline", s.adminOnly(http.HandlerFunc(pprof.Cmdline)))
+	s.mux.Handle("/debug/pprof/profile", s.adminOnly(http.HandlerFunc(pprof.Profile)))
+	s.mux.Handle("/debug/pprof/symbol", s.adminOnly(http.HandlerFunc(pprof.Symbol)))
+	s.mux.Handle("/debug/pprof/trace", s.adminOnly(http.HandlerFunc(pprof.Trace)))
+	s.mux.Handle("/debug/pprof/goroutine", s.adminOnly(pprof.Handler("goroutine")))
+	s.mux.Handle("/debug/pprof/heap", s.adminOnly(pprof.Handler("heap")))
+	s.mux.Handle("/debug/pprof/allocs", s.adminOnly(pprof.Handler("allocs")))
 
 	return s
 }
@@ -861,6 +867,17 @@ func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// adminOnly gates a handler this server did not write — the pprof handlers —
+// behind the same admin check its own operational handlers make.
+func (s *Server) adminOnly(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireAdmin(w, r) {
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // requireAdmin refuses a caller that does not hold the `admin` permission and

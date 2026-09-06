@@ -269,6 +269,26 @@ The catalog uses NATS KV with revision-based optimistic concurrency, so corrupti
 
 2. **Rebuild from Parquet files:** The Parquet files on S3 are the source of truth. If the catalog is lost, re-register the tables and rebuild manifests by listing the Parquet files.
 
+### Profiling a running server
+
+The Go profiling endpoints are served under `/debug/pprof/` — `heap`,
+`allocs`, `goroutine`, `profile` (30-second CPU), `trace`, `cmdline` and
+`symbol`:
+
+```bash
+# With auth enabled these need the admin permission, like /v1/workers
+go tool pprof "http://localhost:8080/debug/pprof/heap" \
+  -http=: -source-header "Authorization: Bearer $WADJET_ADMIN_KEY"
+curl -H "Authorization: Bearer $WADJET_ADMIN_KEY" \
+  "http://localhost:8080/debug/pprof/goroutine?debug=2"
+```
+
+They are an operational read of the process: `cmdline` publishes the argv the
+server was started with — bucket names, NATS URLs and every flag value — and
+the profiles describe what it is doing. Any identity that does not hold
+`admin` gets `403 Forbidden`; with authentication disabled they answer without
+credentials, as before.
+
 ## Data Retention
 
 Wadjet supports `UPDATE` and `DELETE` (merge-on-read), but they rewrite whole Parquet files and are not a retention mechanism. Manage bulk data lifecycle through S3 policies:
