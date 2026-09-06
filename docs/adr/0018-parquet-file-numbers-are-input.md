@@ -911,6 +911,19 @@ same placement — a dictionary page that follows a data page, or a second one,
 declines the prune rather than concluding from a dictionary in an impossible
 position.
 
+**A nested leaf's statistics overwrite a same-named top-level column's bounds.**
+`FileReader.RowGroupStats` keyed each leaf's min/max by the FINAL component of
+its path, so a file with top-level `id` and nested `r.id` reported
+`Columns["id"]` as the nested leaf's bounds — the leaf decoded last won. That is
+not a crash or a refusal shape; it is §5's territory (a statistics bound that
+misleads the prune), reached through a name collision rather than a NaN. Static
+row-group pruning for `id = 42` discarded the matching group, and the same map
+feeds the per-file stats ingest and compaction persist to the catalog (#925).
+Keyed by the FULL leaf path now: a top-level column's path IS its basename, so
+every consumer that names a top-level column is unchanged, and a nested leaf is
+addressable as `r.id`, colliding with nothing. This is the metadata-API twin of
+§12's scan-side collision below.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

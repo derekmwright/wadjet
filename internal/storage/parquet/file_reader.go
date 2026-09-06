@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"sync"
 )
 
@@ -303,7 +304,20 @@ func (f *FileReader) RowGroupStats(index int) RowGroupStats {
 			continue
 		}
 		cm := cc.MetaData
-		colName := cm.PathInSchema[len(cm.PathInSchema)-1]
+		if len(cm.PathInSchema) == 0 {
+			continue
+		}
+		// Key by the FULL leaf path, not the basename. A nested leaf and a
+		// top-level column can share a basename (`id` and `r.id`), and keying
+		// by the final component let the leaf decoded LAST overwrite the other:
+		// a file with top-level id=42 and nested r.id=99 reported
+		// Columns["id"] as 99/99, so static pruning for `id = 42` discarded the
+		// matching row group, and ingest/compaction persisted the wrong bound
+		// to the catalog (#925). A top-level column's full path IS its
+		// basename (one component), so consumers naming top-level columns are
+		// unaffected; a nested leaf is now addressable as `r.id` and collides
+		// with nothing.
+		colName := strings.Join(cm.PathInSchema, ".")
 
 		cs := ColumnStats{HasStats: cm.Statistics != nil}
 		if cs.HasStats {
