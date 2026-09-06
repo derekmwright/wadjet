@@ -21,13 +21,19 @@ import (
 // HTTP metadata asks the ONE table-access decision (#941/#935's HTTP half,
 // ADR-0034).
 //
-// `handleListTables`, `handleGetTable`, `handleDescribe` and `handleShowTables`
-// called `Authorizer.FilterTables` / `CanAccessTable`, which is the LEGACY
-// role rule and only that. With an ABAC evaluator installed — the shape a
-// `roles:`-to-ABAC migration produces, where the role keeps `tables: ["*"]` —
-// an explicit DENY on a relation did not hide it from the listing and did not
-// refuse a describe: the identity could read the schema of a table every data
-// path refuses it.
+// All four of `handleListTables`, `handleGetTable`, `handleDescribe` and
+// `handleShowTables` called `Authorizer.FilterTables` / `CanAccessTable`, which
+// is the LEGACY role rule and only that. With an ABAC evaluator installed —
+// the shape a `roles:`-to-ABAC migration produces, where the role keeps
+// `tables: ["*"]` — an explicit DENY on a relation did not hide it from the
+// listing and did not refuse a describe: the identity could read the schema of
+// a table every data path refuses it.
+//
+// The four moved to `auth.TableAccess` / `auth.VisibleTables` in two arcs —
+// the REST pair here, the two statement handlers in #941 — and this file gates
+// all four together, because "metadata follows the effective table decision"
+// is one claim and a reader should be able to see it hold on every spelling of
+// the question.
 
 // metadataProvider: `analyst` is allowed to read `public_t` and explicitly
 // DENIED `secret_t`, while its legacy role still lists every table.

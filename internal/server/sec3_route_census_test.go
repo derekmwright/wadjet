@@ -39,11 +39,15 @@ import (
 // test, so a route ADDED later without a row here fails this test. That is the
 // point of it: the defect was three handlers nobody had written a row for.
 //
-// Not covered here, deliberately: the UDF surface (`CREATE FUNCTION` /
-// `DROP FUNCTION` / `SHOW FUNCTIONS`) is a STATEMENT TYPE on POST /v1/queries,
-// not a route, and SEC4 owns its authorization; and query OWNERSHIP (a
-// non-owner reading another principal's status or results) needs two
-// identities against one query, which sec3_query_owner_test.go carries.
+// What a ROUTE census cannot see, and where each of those is asserted instead:
+// the statement types POST /v1/queries dispatches on — `CREATE FUNCTION` /
+// `DROP FUNCTION` / `SHOW FUNCTIONS` (#942), `DESCRIBE` and `SHOW TABLES`
+// (#941), the DDL statements (#939) — are one route with many answers, and
+// they are gated per statement in sec3_metadata_decision_test.go and in the
+// embedded door's own tests; and query OWNERSHIP (a non-owner reading another
+// principal's status or results) needs two identities against one query, which
+// sec3_query_owner_test.go carries. The rows below are what the ROUTE answers
+// before any of that: a route with no row here fails this test.
 
 const (
 	// anyAllowed: the identity is authorized — the exact status depends on
