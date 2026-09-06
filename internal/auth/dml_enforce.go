@@ -65,26 +65,6 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 		return nil
 	}
 	evaluator := provider.Evaluator()
-	if evaluator == nil {
-		// No ABAC set installed is not "no authorization" — see the same
-		// guard in EnforcePlanPolicies. A provider built from `roles:` alone
-		// enforced nothing here, so a role allowed only `read` could DELETE
-		// every row of a table its role does not even list. The legacy rule
-		// decides, through the SAME shared decision the read path and the
-		// metadata doors ask (ADR-0034).
-		//
-		// The relation is resolved to the catalog's spelling first — the same
-		// resolution the evaluator branch does below — so both branches decide
-		// on the name the READ decides on (#731, #882).
-		resolved := table
-		if cat != nil {
-			resolved = cat.ResolveTableName(table)
-		}
-		if err := TableAccess(ctx, provider, resolved, ActionWrite); err != nil {
-			return err
-		}
-		return TableAccess(ctx, provider, resolved, ActionRead)
-	}
 	// The RELATION is named as the statement spelled it, and an unquoted
 	// identifier folds to lower case at the lexer (#731). A catalog table
 	// keeps the spelling it was registered under, and a mixed-case one is
@@ -102,18 +82,40 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 	if cat != nil {
 		table = cat.ResolveTableName(table)
 	}
+
+	// 1. The write itself — the SHARED decision, in both provider shapes, so
+	// the answer a metadata door gives about this relation and the answer this
+	// door gives are one answer (ADR-0034 item 5). With an evaluator installed
+	// this used to ask the evaluator alone, which skipped the role's `allow`
+	// list; with none it enforced nothing at all.
+	if err := tableAccess(ctx, provider, table, ActionWrite, protocol); err != nil {
+		return err
+	}
+
+	// 2. Reading it — but ONLY when the statement reads it.
+	//
+	// This was a blanket requirement, so a role holding `write` and not `read`
+	// was refused an INSERT and an unqualified DELETE that PostgreSQL allows:
+	// PostgreSQL requires SELECT for the PREDICATE, not for the write (measured
+	// on the oracle — `INSERT` and `DELETE FROM t` succeed on INSERT/DELETE
+	// alone, `DELETE FROM t WHERE id=1` does not). `TableAccess(ActionWrite)`
+	// said one thing and this door said another about the same identity, which
+	// is the disagreement this ADR exists to remove.
+	//
+	// A statement that DOES read the relation still needs the read: a
+	// predicate is a way to observe a stored value, which is the whole of
+	// rule 2 below.
+	readErr := tableAccess(ctx, provider, table, ActionRead, protocol)
+	if readErr != nil && dmlReadsTarget(parsed) {
+		return readErr
+	}
+	if evaluator == nil || readErr != nil {
+		// No obligations to apply: either no policy set is installed, or the
+		// identity may not read this relation and the statement does not.
+		return nil
+	}
 	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(),
 		DecisionEnvironment(ctx, protocol))
-
-	// 1. The write itself.
-	if !evaluator.EvaluateTableAccess(r.subject, table, ActionWrite, r.env).Allowed {
-		return sqlerr.New("42501", "permission denied for table %q", table)
-	}
-	// Reading the table at all is still a read decision: a statement that may
-	// not read it may not use it as a predicate either.
-	if td := r.decide(table); !td.Allowed {
-		return sqlerr.New("42501", "permission denied for table %q: %s", table, td.Reason)
-	}
 
 	policies, err := r.columnPolicies(table)
 	if err != nil {
@@ -215,6 +217,56 @@ func EnforceDMLPolicies(ctx context.Context, provider *Provider, cat *catalog.Ca
 				"and the statement's clauses are not rewritten to honour it", table))
 	}
 	return nil
+}
+
+// dmlReadsTarget reports whether the statement OBSERVES the relation it
+// writes — the condition PostgreSQL attaches the SELECT privilege to, and the
+// only way a stored value can leave through a write.
+//
+//   - DELETE reads it when its WHERE names a column. `WHERE 1=0` names none,
+//     and PostgreSQL asks for SELECT on the COLUMNS a statement references.
+//   - UPDATE reads it when its WHERE names a column, or when a SET value is an
+//     expression naming one (`SET a = b`, `SET n = n + 1`). `SET a = 1` names
+//     none and reads nothing.
+//   - INSERT does not: its value expressions have no row to read from. (An
+//     `INSERT … SELECT` source is a different relation and the plan path
+//     polices it with `read`.)
+//   - MERGE reads it: the ON condition and every WHEN clause do.
+func dmlReadsTarget(parsed *plansql.ParsedQuery) bool {
+	reads := func(exprSQL string) bool {
+		if strings.TrimSpace(exprSQL) == "" {
+			return false
+		}
+		ast, err := plansql.ParseExpression(exprSQL)
+		if err != nil || ast == nil {
+			return true // unreadable: assume it reads, and require the read
+		}
+		refs, rerr := plansql.ColumnRefs(ast)
+		if rerr != nil {
+			return true
+		}
+		return len(refs) > 0
+	}
+	switch parsed.Type {
+	case plansql.QueryDelete:
+		return parsed.Delete != nil && reads(parsed.Delete.WhereSQL)
+	case plansql.QueryUpdate:
+		if parsed.Update == nil {
+			return false
+		}
+		if reads(parsed.Update.WhereSQL) {
+			return true
+		}
+		for _, sc := range parsed.Update.SetClauses {
+			if reads(sc.Value) {
+				return true
+			}
+		}
+		return false
+	case plansql.QueryMerge:
+		return true
+	}
+	return false
 }
 
 // dmlTarget is the table a DML statement writes, and the alias that hides its

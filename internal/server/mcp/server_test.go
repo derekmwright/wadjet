@@ -441,7 +441,10 @@ func TestMCPQueryEnforcesABAC(t *testing.T) {
 	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
 	db.SetAuthProvider(provider)
 
-	identity := &auth.Identity{Name: "analyst", Role: "analyst", Method: "apikey"}
+	// The grants the Authenticator resolves for the role, which the coarse
+	// gate every decision applies reads (ADR-0034 item 5).
+	identity := &auth.Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read"}}
 
 	queryRows := func(t *testing.T, srv *Server) (cols []any, rowCount int) {
 		t.Helper()

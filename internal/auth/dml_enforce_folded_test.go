@@ -74,7 +74,8 @@ func dfProvider(t *testing.T, resourceName string) *Provider {
 }
 
 func dfIdentityCtx(ctx context.Context) context.Context {
-	return ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst"})
+	return ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst",
+		Tables: []string{"*"}, Perms: []string{"read", "write"}})
 }
 
 // TestDMLPoliciesDecideOnTheCatalogsTableName is the regression gate for a

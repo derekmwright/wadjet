@@ -85,7 +85,8 @@ func peEnforce(t *testing.T, ctx context.Context, provider *Provider, cat *catal
 // all-NULL column, which is #859's own defect.
 func TestEnforcePlanPoliciesRefusesADeniedColumnOnItsOwn(t *testing.T) {
 	ctx := ContextWithIdentity(context.Background(),
-		&Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+		&Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+			Tables: []string{"*"}, Perms: []string{"read", "write"}})
 	cat := peCatalog(t, ctx)
 	provider := peProvider(t, []Obligation{{Type: "deny_column", Target: "salary"}})
 
@@ -112,7 +113,8 @@ func TestEnforcePlanPoliciesRefusesADeniedColumnOnItsOwn(t *testing.T) {
 // would make SUM(col) an error.
 func TestEnforcePlanPoliciesPicksTheMaskFromTheColumnType(t *testing.T) {
 	ctx := ContextWithIdentity(context.Background(),
-		&Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+		&Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+			Tables: []string{"*"}, Perms: []string{"read", "write"}})
 	cat := peCatalog(t, ctx)
 	provider := peProvider(t, []Obligation{
 		{Type: "mask_column", Target: "ssn", MaskFunc: "redact"},
@@ -155,7 +157,8 @@ func TestEnforcePlanPoliciesPicksTheMaskFromTheColumnType(t *testing.T) {
 // answered from the bare scan.
 func TestEnforcePlanPoliciesRefusesWhenTheProjectionCannotBeBuilt(t *testing.T) {
 	ctx := ContextWithIdentity(context.Background(),
-		&Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+		&Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+			Tables: []string{"*"}, Perms: []string{"read", "write"}})
 	cat := peCatalog(t, ctx)
 	provider := peProvider(t, []Obligation{
 		{Type: "deny_column", Target: "id"},
@@ -179,7 +182,8 @@ func TestEnforcePlanPoliciesRefusesWhenTheProjectionCannotBeBuilt(t *testing.T) 
 // way (#859 round 2, review P3).
 func TestRowFilterNamingANonexistentColumnRefuses(t *testing.T) {
 	ctx := ContextWithIdentity(context.Background(),
-		&Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+		&Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+			Tables: []string{"*"}, Perms: []string{"read", "write"}})
 	cat := peCatalog(t, ctx)
 
 	for _, tc := range []struct {
@@ -228,7 +232,8 @@ func TestRowFilterNamingANonexistentColumnRefuses(t *testing.T) {
 // not in the statement's FROM list at all.
 func TestPolicedRelationsComeFromThePlanNotTheStatement(t *testing.T) {
 	ctx := ContextWithIdentity(context.Background(),
-		&Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+		&Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+			Tables: []string{"*"}, Perms: []string{"read", "write"}})
 	cat := peCatalog(t, ctx)
 
 	for _, sql := range []string{

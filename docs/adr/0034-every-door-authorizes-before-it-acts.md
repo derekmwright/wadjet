@@ -75,13 +75,28 @@ spelling (`catalog.ResolveTableName`), so a policy bound to `Users` polices a
 statement that spelled it `users` (#731, #882).
 
 The `allow` list is a COARSE GATE, and it is applied first in both shapes: **a
-policy narrows what a role may do and never widens it.** That did not hold —
-under an explicit `abac_policies:` block the evaluator answered alone, so a
-role written `allow: [read]` that a policy permitted to write could write,
-while DDL on the same door demanded the permission. `admin` still grants
-everything, because `HasPermission` says so. Both halves remain required in the
-legacy shape: a permission alone is not access to a relation, and a relation
-alone is not permission to write it.
+policy narrows what a role may do and never widens it.** `admin` still grants
+everything, because `HasPermission` says so. Both halves remain required: a
+permission alone is not access to a relation, and a relation alone is not
+permission to do a thing to it.
+
+**Every door reaches this one body.** `EnforcePlanPolicies` asks it per relation
+the plan reads and `EnforceDMLPolicies` asks it for the target; the evaluator
+decides the OBLIGATIONS — masks, row filters, ceilings — and no longer decides
+access on its own. That is not a detail: while the plan and DML paths called the
+evaluator directly, the coarse gate existed only on the metadata decision that
+no data door asks, so a role written `allow: [read]` DELETED rows under a
+permissive policy while `TableAccess(write)` refused, and an identity whose role
+the configuration does not define was served by a rule matching everyone.
+
+**A statement needs the permission for what it DOES.** A read needs `read` on
+every relation the plan reads. A write needs `write` on its target — and `read`
+as well only when the statement OBSERVES that target (a `WHERE` naming a column,
+a `SET` value naming one, a `MERGE`). That is PostgreSQL's rule, measured on the
+oracle: `INSERT` and an unqualified `DELETE` succeed on the write privilege
+alone, a predicated `DELETE` does not. A blanket read requirement would refuse
+what PostgreSQL allows and would make this decision disagree with itself
+between the metadata door and the DML door.
 
 A door that re-implements any of this — `TableAccess`, `VisibleTables`,
 `RequirePermission`, `EnforcePlanPolicies`, `EnforceDMLPolicies`,
@@ -101,6 +116,11 @@ than by a census.
 The SAME operation refuses with the SAME class on every door, and a door census
 is the gate that says so.
 
+The text carries the relation and NOTHING ELSE — not the rule that denied, not
+its description, not the reason. Which control fired is operator information
+and goes to the audit log; telling the refused caller names the control that
+stopped them, and a policy rule id is a rule an attacker can then probe around.
+
 **7. Fail closed on a missing identity — on the DATA paths too.** With auth
 ENABLED, a context carrying no identity is refused at every boundary: metadata,
 DDL, the shared table-access decision, AND the shared plan and DML paths. The
@@ -109,6 +129,12 @@ attached a provider and then queried without stamping an identity could SELECT
 and INSERT while DESCRIBE and DDL refused it — one boundary, two answers. A
 caller that runs under a provider stamps an identity (a scheduled alert does,
 through `auth.StampDefiner`).
+
+A stamped definer's GRANTS are re-resolved from the CURRENT role definitions,
+never replayed from the stored snapshot: a snapshot records who the definer was
+and not what they could do, so an alert whose creator's role has since lost
+`write`, or been deleted, is refused on its next tick — and a persisted grant
+can never go stale, because none is persisted.
 
 With auth DISABLED, or with no provider (dev, embedded without
 `SetAuthProvider`), nothing is enforced and NOTHING changes — every existing
@@ -173,9 +199,9 @@ landing.
 
 | door | operation | decision asked | refusal |
 |---|---|---|---|
-| all | SELECT, per policed relation in the plan | `EnforcePlanPolicies` → evaluator, or `TableAccess(ActionRead)` when no evaluator is installed | 42501 `permission denied for table "x": <reason>` |
+| all | SELECT, per policed relation in the plan | `EnforcePlanPolicies` → the shared decision, `ActionRead`, in both provider shapes; the evaluator then supplies the obligations | 42501 `permission denied for table "x"` |
 | all | column binding (`SELECT nosuchcol`), per relation | `ValidateStatementColumns` → the same resolver, same environment | 42703, over the schema the identity can see |
-| all | INSERT / UPDATE / DELETE / MERGE | `EnforceDMLPolicies` → evaluator (ActionWrite, then the read decision), or `TableAccess(ActionWrite)` then `TableAccess(ActionRead)` | 42501 `permission denied for table "x"` |
+| all | INSERT / UPDATE / DELETE / MERGE | `EnforceDMLPolicies` → the shared decision, `ActionWrite` on the target — plus `ActionRead` when the statement observes it (a WHERE or SET naming a column, or MERGE) | 42501 `permission denied for table "x"` |
 | all | a scan the resolved set never saw (decorrelation, late passes) | the resolver's `lookup` — the same decision | 42501 |
 | all | CREATE / DROP ALERT | `RequirePermission(provider, ctx, "admin")` | authorization error, rendered per door |
 | HTTP | authentication | `ProviderMiddleware` → `Authenticator.Authenticate`; the trusted environment is attached here | 401 |

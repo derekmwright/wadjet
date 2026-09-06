@@ -33,7 +33,8 @@ func TestADeniedReadAndADeniedWriteRefuseInTheSameClass(t *testing.T) {
 			Actions:  []Action{ActionRead, ActionWrite},
 		}},
 	}})
-	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read", "write"}})
 
 	_, _, readErr := envEnforce(t, idCtx, p, cat, "SELECT id FROM pe_emp")
 	if readErr == nil {

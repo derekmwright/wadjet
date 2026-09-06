@@ -681,10 +681,15 @@ func TestExplainAnalyzeABACEnforcement(t *testing.T) {
 	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
 	db.SetAuthProvider(provider)
 
+	// The grants the Authenticator resolves for this role: the identity a door
+	// hands to enforcement carries them, and the coarse gate every decision
+	// applies reads them (ADR-0034 item 5).
 	identity := &auth.Identity{
 		Name:   "analyst",
 		Role:   "analyst",
 		Method: "apikey",
+		Tables: []string{"*"},
+		Perms:  []string{"read"},
 	}
 	authCtx := auth.ContextWithIdentity(ctx, identity)
 

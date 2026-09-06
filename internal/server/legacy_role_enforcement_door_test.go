@@ -197,3 +197,33 @@ func TestTheLegacyShapeChangesNothingWithoutAuth(t *testing.T) {
 		t.Fatalf("a database with no auth provider refused a write: %v", err)
 	}
 }
+
+// TestTheLegacyShapePolicesTheRelationsThePlanGROWS.
+//
+// The plan grows after enforcement runs: the decorrelation passes mint a Scan
+// for a relation named only inside `IN (SELECT ...)`. The ABAC arm has always
+// installed a policy LOOKUP for those; the legacy arm installs one too, so a
+// `roles:`-only deployment polices what the plan grows as well as what it
+// named.
+func TestTheLegacyShapePolicesTheRelationsThePlanGROWS(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	t.Cleanup(cancel)
+	db, p, _ := legacyRig(t, ctx)
+
+	// `reader` lists only e7emp; e7other is not in its `tables`.
+	idCtx := legacyIdentityCtx(t, ctx, p, "reader-key")
+	for _, sql := range []string{
+		"SELECT id FROM " + pmTable + " WHERE id IN (SELECT id FROM " + pmOther + ")",
+		"SELECT id FROM " + pmTable + " WHERE EXISTS (SELECT 1 FROM " + pmOther +
+			" WHERE " + pmOther + ".id = " + pmTable + ".id)",
+	} {
+		if _, err := db.Query(idCtx, sql); err == nil {
+			t.Errorf("a relation the role does not list was reached: %s", sql)
+		}
+	}
+	// The relation it DOES list still answers.
+	if _, err := db.Query(idCtx, "SELECT id FROM "+pmTable+" WHERE id IN (SELECT id FROM "+
+		pmTable+")"); err != nil {
+		t.Fatalf("the authorized subquery was refused: %v", err)
+	}
+}

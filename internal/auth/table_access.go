@@ -50,8 +50,25 @@ import (
 //
 // The refusal is a `sqlerr` 42501, which every door renders in its own class:
 // pgwire SQLSTATE 42501, HTTP 403, gRPC codes.PermissionDenied, and the same
-// error verbatim on the embedded API.
+// error verbatim on the embedded API. Its TEXT is PostgreSQL's and carries
+// nothing else — not the rule that denied, not the reason. Which rule fired is
+// operator information and goes to the audit log; telling the refused caller
+// is a disclosure, and a policy rule id names the control that stopped them.
 func TableAccess(ctx context.Context, provider *Provider, table string, action Action) error {
+	return tableAccess(ctx, provider, table, action, "")
+}
+
+// tableAccess is THE rule, and the only implementation of it. TableAccess is
+// its exported form for a caller that has no protocol label of its own; the
+// shared plan and DML paths call it with theirs, so `env.protocol` means the
+// same thing to the metadata decision and to the data decision about the same
+// relation.
+//
+// It exists as a separate function only because the exported one cannot take
+// the label: the point of ADR-0034 item 5 is that there is ONE rule in ONE
+// place, and every door — metadata, plan, DML — reaches this body.
+func tableAccess(ctx context.Context, provider *Provider, table string, action Action,
+	protocol string) error {
 	if provider == nil || !provider.Enabled() {
 		return nil
 	}
@@ -77,7 +94,7 @@ func TableAccess(ctx context.Context, provider *Provider, table string, action A
 	if authz == nil || !authz.HasPermission(id, permissionForAction(action)) {
 		return sqlerr.New("42501", "permission denied for table %q", table)
 	}
-	env := DecisionEnvironment(ctx, "")
+	env := DecisionEnvironment(ctx, protocol)
 	if ev := provider.Evaluator(); ev != nil {
 		if td := ev.EvaluateTableAccess(id.ToSubject(), table, action, env); td != nil && td.Allowed {
 			return nil

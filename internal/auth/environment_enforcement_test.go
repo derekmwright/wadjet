@@ -60,7 +60,8 @@ func TestEnforcePlanPoliciesCarriesTheRequestTime(t *testing.T) {
 	}
 
 	p := envProvider(t, timeGatedPolicies())
-	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read", "write"}})
 	if _, _, err := envEnforce(t, idCtx, p, cat, "SELECT id FROM pe_emp"); err == nil {
 		t.Fatal("time-conditioned deny vanished on the shared plan path")
 	}
@@ -71,7 +72,8 @@ func TestEnforceDMLPoliciesCarriesTheRequestTime(t *testing.T) {
 	ctx := context.Background()
 	cat := peCatalog(t, ctx)
 	p := envProvider(t, timeGatedPolicies(ActionWrite))
-	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read", "write"}})
 
 	parsed, err := plansql.Parse("DELETE FROM pe_emp WHERE id = 1")
 	if err != nil {
@@ -92,7 +94,8 @@ func TestValidateStatementColumnsCarriesTheEnvironment(t *testing.T) {
 	// The deny is over the whole table, so the column binder resolves no
 	// policy for it and the plan path refuses; both must agree.
 	p := envProvider(t, timeGatedPolicies())
-	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey"})
+	idCtx := ContextWithIdentity(ctx, &Identity{Name: "analyst", Role: "analyst", Method: "apikey",
+		Tables: []string{"*"}, Perms: []string{"read", "write"}})
 
 	parsed, err := plansql.Parse("SELECT ssn FROM pe_emp")
 	if err != nil {

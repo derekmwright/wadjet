@@ -66,27 +66,26 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		// one that has none is not authorized to read.
 		return ctx, plan, sqlerr.New("42501", "permission denied: authentication required")
 	}
+	// The ACCESS decision for every relation the plan reads is the shared one,
+	// in BOTH provider shapes: `tableAccess` — the body `auth.TableAccess`
+	// exports. There is no second reading of it here.
+	//
+	// Two holes lived in this function because there was. With no evaluator it
+	// enforced NOTHING, so a role listing `events` could read `secrets`. With
+	// an evaluator it asked the evaluator ALONE, so the role's `allow` list —
+	// the coarse gate the metadata decision applies — never reached a query:
+	// a role written `allow: [read]` that a policy permitted to write could
+	// write, and an identity whose role the configuration does not define (no
+	// permissions at all) was served by a policy that matches everyone while
+	// `TableAccess` refused it. The evaluator is still what decides the
+	// OBLIGATIONS — masks, row filters, ceilings — but it no longer decides
+	// access on its own (ADR-0034 item 5).
 	evaluator := provider.Evaluator()
-	if evaluator == nil {
-		// No ABAC set installed is not "no authorization". A provider built
-		// from `roles:` alone — `auth.NewProvider(authn, authz, nil, nil)`,
-		// which is what an embedded caller of SetAuthProvider and several
-		// server shapes produce — used to return here and enforce NOTHING:
-		// a role listing `events` could read `secrets`, and a role allowed
-		// only `read` could DELETE. The legacy rule still exists and the
-		// shared decision already applies it; the data path asks the SAME
-		// question, per relation, so metadata and data cannot disagree
-		// (ADR-0034).
-		for _, tableName := range policedRelations(ctx, cat, selectInfo, plan) {
-			if err := TableAccess(ctx, provider, tableName, ActionRead); err != nil {
-				return ctx, nil, err
-			}
-		}
-		return ctx, plan, nil
+	var r *policyResolver
+	if evaluator != nil {
+		r = newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(),
+			DecisionEnvironment(ctx, protocol))
 	}
-
-	r := newPolicyResolver(ctx, cat, evaluator, identity.ToSubject(),
-		DecisionEnvironment(ctx, protocol))
 
 	policies := make(logical.TablePolicies)
 	// A SLICE, not a map: the filters are injected below, and iterating a map
@@ -96,17 +95,21 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	var rowFilters []tableFilter
 	var limits *config.QueryLimits
 	for _, tableName := range policedRelations(ctx, cat, selectInfo, plan) {
-		td := r.decide(tableName)
-		if !td.Allowed {
-			// The SAME class and the SAME text the DML door and the shared
-			// table-access decision use. This was a bare fmt.Errorf, so a
-			// denied SELECT reached pgwire with NO SQLSTATE (the generic
-			// 42000) and gRPC as codes.Internal — an authorization refusal
-			// that no client could tell from a server fault, while the
-			// identical refusal on a DELETE was a clean 42501 (ADR-0034).
-			return ctx, nil, sqlerr.New("42501", "permission denied for table %q: %s",
-				tableName, td.Reason)
+		// One rule, one place, one refusal text (ADR-0034 items 5 and 6).
+		// This was a bare fmt.Errorf, so a denied SELECT reached pgwire with
+		// NO SQLSTATE (the generic 42000) and gRPC as codes.Internal — an
+		// authorization refusal no client could tell from a server fault,
+		// while the identical refusal on a DELETE was a clean 42501. It then
+		// carried the RULE ID, which tells a refused caller the name of the
+		// control that stopped them; that belongs in the audit log and
+		// nowhere else.
+		if err := tableAccess(ctx, provider, tableName, ActionRead, protocol); err != nil {
+			return ctx, nil, err
 		}
+		if r == nil {
+			continue // no evaluator: access decided, no obligations to apply
+		}
+		td := r.decide(tableName)
 		if td.RowFilter != "" {
 			rowFilters = append(rowFilters, tableFilter{tableName, td.RowFilter})
 		}
@@ -122,6 +125,28 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 			policies[strings.ToLower(tableName)] = cp
 			auditColumnDecision(provider, identity, tableName, cp)
 		}
+	}
+
+	if r == nil {
+		// The LOOKUP, for the legacy shape too. The plan GROWS after this
+		// function returns — the decorrelation passes mint a Scan for a table
+		// named only inside `IN (SELECT …)` — and every pass that meets a new
+		// scan asks the lookup who may read it. Without one here, a
+		// `roles:`-only deployment policed the relations the plan named and
+		// not the ones it grew.
+		//
+		// It carries no obligations, because a legacy provider has none: the
+		// answer it gives is the ACCESS decision, the same one the loop above
+		// asked.
+		base := ctx
+		ctx = logical.ContextWithPolicyLookup(ctx,
+			func(table string) ([]logical.ColumnPolicy, string, error) {
+				if err := tableAccess(base, provider, table, ActionRead, protocol); err != nil {
+					return nil, "", err
+				}
+				return nil, "", nil
+			})
+		return ctx, plan, nil
 	}
 
 	if len(policies) > 0 {
@@ -404,8 +429,7 @@ func (r *policyResolver) columnPolicies(table string) ([]logical.ColumnPolicy, e
 func (r *policyResolver) lookup(table string) ([]logical.ColumnPolicy, string, error) {
 	td := r.decide(table)
 	if !td.Allowed {
-		return nil, "", sqlerr.New("42501", "permission denied for table %q: %s",
-			table, td.Reason)
+		return nil, "", sqlerr.New("42501", "permission denied for table %q", table)
 	}
 	cols, err := r.columnPolicies(table)
 	if err != nil {

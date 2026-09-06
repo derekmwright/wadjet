@@ -203,6 +203,17 @@ There are exactly three permissions, and `admin` implies the other two.
 
 Both halves are required: a role holding `write` may only write the tables its `tables` list names, and a role that lists a table may only do to it what its `allow` list permits. This is the decision every door asks for — see ADR-0034.
 
+A statement needs the permission for what it DOES, which is PostgreSQL's rule:
+
+| statement | needs |
+|---|---|
+| `SELECT`, and every relation the plan reads (derived tables, CTE bodies, set-operation arms, subquery sources) | `read` |
+| `INSERT`, and a `DELETE` / `UPDATE` whose predicate names no column | `write` |
+| a `DELETE` / `UPDATE` that READS the relation — a `WHERE` naming a column, a `SET` value naming one — and `MERGE` | `write` **and** `read`, because a predicate is how a stored value is observed |
+| `CREATE TABLE`, `DROP TABLE`, `COPY`, creating or replacing a UDF | `write` |
+
+A role holding only `write` can therefore load a table it may not read, and cannot use that table's own values to decide what to change.
+
 **With ABAC policies configured, the role's `allow` list remains a coarse gate: a policy NARROWS what a role may do, and never widens it.** A role written `allow: [read]` cannot write a relation even if a policy rule permits the write; grant the role `write` and let the policy decide which relations and which rows.
 
 ### ABAC (Attribute-Based Access Control)
@@ -284,12 +295,12 @@ Every condition attribute is **namespaced**, and the namespace is part of the na
 | Namespace | Attributes | Source |
 |-----------|------------|--------|
 | `subject.` | `role`, `name`, `method` (always populated), plus every enrichment attribute — JWT claims, mTLS certificate fields (see Identity Enrichment) | the authenticated identity |
-| `resource.` | `type` (`table`), `name` (the catalog's spelling of the relation) | what is being accessed |
+| `resource.` | `type`, `name` (the catalog's spelling of the relation); for a resource that is not a table, the attributes that resource carries | what is being accessed |
 | `env.` | `time` (`HH:MM:SS`), `hour` (0–23), `source_ip`, `protocol` (`http`, `pgwire`, `grpc`, `embedded`) | the protocol boundary the request arrived on |
 
 An attribute with no namespace — `attribute: role` rather than `attribute: subject.role` — **refuses at config load**. It cannot be interpreted: it matches nothing, and a rule that matches nothing is a grant when it sits beside a broader allow.
 
-A `subject.` attribute may name anything the identity carries; `resource.` and `env.` names are the fixed lists above.
+A `subject.` attribute may name anything the identity carries; `env.` names are the fixed list above. `resource.` names are fixed per resource TYPE — `type` and `name` for a table — and the load refusal names the full accepted set when one is wrong.
 
 **The environment is the boundary's observation, not the caller's claim.** Each protocol door attaches it where the connection is — the HTTP middleware, the pgwire connection handler, the gRPC authentication interceptor — and every enforcement path reads it from there:
 
