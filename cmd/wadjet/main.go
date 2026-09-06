@@ -1463,7 +1463,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	}
 
 	// Register ops API (workers, cleanup)
-	ops := server.NewOpsAPI(coord)
+	ops := server.NewOpsAPI(coord, provider)
 	ops.RegisterRoutes(srv.Mux())
 
 	// Start gRPC server
@@ -1742,7 +1742,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	}
 
 	// Register ops API
-	ops := server.NewOpsAPI(coord)
+	ops := server.NewOpsAPI(coord, provider)
 	ops.RegisterRoutes(srv.Mux())
 
 	// Start gRPC server

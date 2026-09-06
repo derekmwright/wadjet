@@ -29,7 +29,7 @@ func TestOpsResultEndpointsRefuseWithNoStoreInsteadOfPanicking(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	// No catalog, no NATS: this coordinator exists only to answer Cleaner().
 	coord := coordinator.New(coordinator.Config{}, nil, nil, nil, logger)
-	ops := NewOpsAPI(coord)
+	ops := NewOpsAPI(coord, nil)
 
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/results/q1", nil)
 	rctx := chi.NewRouteContext()

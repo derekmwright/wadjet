@@ -782,7 +782,35 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, code, resp)
 }
 
+// requireAdmin refuses a caller that does not hold the `admin` permission and
+// answers 403 with the shared authorizer's own text, so the refusal reads the
+// same on this door, on pgwire (42501) and on gRPC (PermissionDenied).
+//
+// The check belongs to the OPERATION, not to the door: the query endpoints on
+// this same mux accept ordinary identities, so `auth.ProviderMiddleware` —
+// which resolves an identity and checks no permission at all — could never
+// have carried it (#937).
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if err := auth.RequirePermission(s.provider, r.Context(), "admin"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return false
+	}
+	return true
+}
+
+// GET /v1/dlq — the dead-letter queue.
+//
+// Admin, and BEFORE the `s.dlq == nil` shortcut below: a DLQ entry carries
+// `TaskData`, the original serialized distributed task, which holds the
+// statement's SQL and expression text, the identity fields it ran under,
+// object paths, trace IDs and serialized policy decisions. That is every other
+// identity's query text, published to whoever asks (#937). Answering the empty
+// list when no DLQ is configured would also tell an unauthorized caller that
+// much about the deployment.
 func (s *Server) handleListDLQ(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	if s.dlq == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}, "count": 0})
 		return
@@ -804,7 +832,12 @@ func (s *Server) handleListDLQ(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "count": len(entries)})
 }
 
+// GET /v1/dlq/{entryID} — one dead-letter entry. Admin, for the reason
+// handleListDLQ gives.
 func (s *Server) handleGetDLQ(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	if s.dlq == nil {
 		writeError(w, http.StatusNotFound, "DLQ not available")
 		return
@@ -818,7 +851,12 @@ func (s *Server) handleGetDLQ(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entry)
 }
 
+// DELETE /v1/dlq — purge the whole queue. Admin: it is a destructive
+// operational mutation, and it destroys the record of every failed task.
 func (s *Server) handlePurgeDLQ(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	if s.dlq == nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return

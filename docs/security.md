@@ -876,6 +876,35 @@ Security configuration fails **closed**, at both ends:
 - **On hot reload**, a config the process cannot build is refused and **nothing is swapped**: the running authenticator, authorizer and policy set keep serving, and the refusal is logged as `auth hot-reload REFUSED — keeping the previous configuration`. This is the same contract a policy set that cannot be bound to the catalog already has.
 
 The same applies to the policy set: an unknown security word, an unenforceable obligation, or a relation the catalog does not hold refuses the whole load.
+## Operational endpoints and query ownership
+
+Authentication proves who a caller is. Every operation still asks whether that
+caller **may**, and the two answers are not the same: an identity that may run
+queries is not thereby an administrator, and an identity that submitted one
+query has no claim on another principal's.
+
+### Operational endpoints need `admin`
+
+The endpoints that read the cluster's operational state or destroy stored
+artifacts require the `admin` permission, and refuse anything else with
+`403 Forbidden`:
+
+| Endpoint | Permission |
+|---|---|
+| `GET /v1/dlq`, `GET /v1/dlq/{entryID}`, `DELETE /v1/dlq` | `admin` |
+| `GET /v1/workers` | `admin` |
+| `POST /v1/results/cleanup` | `admin` |
+| `DELETE /v1/results/{queryID}` | the query's owner, or `admin` |
+| everything under `/v1/admin/…` | `admin` |
+
+A dead-letter entry carries the serialized distributed task the worker failed
+on — that statement's SQL and expression text, the identity fields it ran
+under, object paths and trace IDs — so reading the queue publishes other
+principals' query text. Purging it destroys the record of every failed task.
+
+The check belongs to the operation, not to the door: the query endpoints on the
+same HTTP mux accept ordinary identities, so no authentication middleware
+could carry it.
 
 ## Audit Logging
 

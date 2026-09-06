@@ -225,10 +225,10 @@ readinessProbe:
 
 6. **Check worker count:** In distributed mode, add more workers for parallelism:
    ```bash
-   # Check worker count
-   curl http://localhost:8080/v1/workers | jq .
-   # or, as a readiness signal that includes the count
-   curl http://localhost:8080/v1/ready | jq .
+   # Check worker count (requires the admin permission when auth is enabled)
+   curl -H "Authorization: Bearer $WADJET_ADMIN_KEY" http://localhost:8080/v1/workers | jq .
+   # or, as a readiness signal that includes the count — any authenticated identity
+   curl -H "Authorization: Bearer $WADJET_API_KEY" http://localhost:8080/v1/ready | jq .
    ```
 
 7. **Check join order:** For JOINs, place the smaller table on the right side (it becomes the hash table build side).

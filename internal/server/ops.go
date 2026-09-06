@@ -11,13 +11,36 @@ import (
 )
 
 // OpsAPI provides operational endpoints for monitoring and cleanup.
+//
+// Every route it registers requires the `admin` permission, the way the admin
+// API's do: they read the cluster's operational state or destroy stored
+// artifacts, and neither is something an ordinary query identity may do.
 type OpsAPI struct {
-	coord *coordinator.Coordinator
+	coord    *coordinator.Coordinator
+	provider *auth.Provider // nil = no auth enforcement
 }
 
-// NewOpsAPI creates operational API endpoints.
-func NewOpsAPI(coord *coordinator.Coordinator) *OpsAPI {
-	return &OpsAPI{coord: coord}
+// NewOpsAPI creates operational API endpoints. The provider is what the
+// routes authorize against; nil (or auth disabled) enforces nothing.
+func NewOpsAPI(coord *coordinator.Coordinator, provider *auth.Provider) *OpsAPI {
+	return &OpsAPI{coord: coord, provider: provider}
+}
+
+// requireAdmin refuses a caller that does not hold the `admin` permission,
+// and answers 403 with the shared authorizer's own text so the refusal reads
+// the same here, on pgwire (42501) and on gRPC (PermissionDenied).
+//
+// It cannot live in the authentication middleware: the query endpoints on the
+// same mux accept ordinary identities, so the check belongs to the operation,
+// not to the door. The comment that claimed otherwise sat in
+// handleDeleteResults and was never true — `auth.ProviderMiddleware` resolves
+// an identity and checks no permission at all (#937).
+func (o *OpsAPI) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if err := auth.RequirePermission(o.provider, r.Context(), "admin"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return false
+	}
+	return true
 }
 
 // RegisterRoutes adds operational routes to the given router.
@@ -27,8 +50,12 @@ func (o *OpsAPI) RegisterRoutes(r chi.Router) {
 	r.Post("/v1/results/cleanup", o.handleCleanupResults)
 }
 
-// GET /v1/workers — list active workers.
+// GET /v1/workers — list active workers. Admin: it publishes the cluster's
+// membership and each worker's memory, which is operational state.
 func (o *OpsAPI) handleWorkers(w http.ResponseWriter, r *http.Request) {
+	if !o.requireAdmin(w, r) {
+		return
+	}
 	workers := o.coord.Workers().ActiveWorkers()
 	type workerView struct {
 		WorkerID    string `json:"worker_id"`
@@ -53,12 +80,8 @@ func (o *OpsAPI) handleWorkers(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /v1/results/{queryID} — delete all result files for a query.
 func (o *OpsAPI) handleDeleteResults(w http.ResponseWriter, r *http.Request) {
-	id := auth.IdentityFromContext(r.Context())
-	if id != nil {
-		if authz := o.coord.Workers(); authz != nil {
-			// Just check auth exists — admin check happens at middleware level
-			_ = authz
-		}
+	if !o.requireAdmin(w, r) {
+		return
 	}
 
 	queryID := chi.URLParam(r, "queryID")
@@ -87,6 +110,10 @@ func (o *OpsAPI) handleDeleteResults(w http.ResponseWriter, r *http.Request) {
 
 // POST /v1/results/cleanup — trigger stale result cleanup.
 func (o *OpsAPI) handleCleanupResults(w http.ResponseWriter, r *http.Request) {
+	if !o.requireAdmin(w, r) {
+		return
+	}
+
 	var req struct {
 		TTLHours int `json:"ttl_hours"`
 	}

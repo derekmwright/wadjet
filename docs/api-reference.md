@@ -404,6 +404,37 @@ wadjet_query_duration_seconds_bucket{le="10"} 1523
 
 ---
 
+## Operational Endpoints
+
+These read the cluster's operational state or destroy stored artifacts. With
+authentication enabled every one of them requires the **`admin`** permission
+and answers `403 Forbidden` to any other identity — including one that may run
+queries. The refusal names the permission it wanted:
+
+```json
+{"error":"unauthorized: \"admin\" permission required (identity \"reader-user\", role \"reader\")"}
+```
+
+| Endpoint | Permission | What it does |
+|---|---|---|
+| `GET /v1/dlq?limit=N` | `admin` | Lists dead-letter entries, most recent first |
+| `GET /v1/dlq/{entryID}` | `admin` | One dead-letter entry |
+| `DELETE /v1/dlq` | `admin` | Purges the whole dead-letter queue |
+| `GET /v1/workers` | `admin` | Active workers with their memory usage |
+| `POST /v1/results/cleanup` | `admin` | Deletes stale query result files past the TTL |
+| `DELETE /v1/results/{queryID}` | owner or `admin` | Deletes one query's result files |
+
+A dead-letter entry carries `task_data`, the serialized distributed task the
+worker failed on: it holds that statement's SQL and expression text, the
+identity fields it ran under, object paths and trace IDs. It is other
+principals' query text, which is why reading the queue is an administrator's
+operation and not a reader's.
+
+The result endpoints answer `503 Service Unavailable` when the coordinator has
+no object store configured for results.
+
+---
+
 ## Client Integration Examples
 
 ### Python
