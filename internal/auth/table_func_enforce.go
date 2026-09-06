@@ -13,9 +13,15 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// ResourceTableFunction is the ABAC resource TYPE a table-function scan
-// presents itself as. A catalog table is `"table"`; this is not one.
-const ResourceTableFunction = "table_function"
+// The ABAC resource TYPEs. `ResourceTable` is what `EvaluateTableAccess`
+// stamps for a catalog relation; `ResourceTableFunction` is what a
+// table-function scan presents itself as, and it is not a relation — the
+// policy binder must not resolve its `resource.name` against the catalog, and
+// a rule written for tables must not reach it by breadth.
+const (
+	ResourceTable         = "table"
+	ResourceTableFunction = "table_function"
+)
 
 // pureTableFunctions are the table functions that open NOTHING — no file, no
 // URL, no database connection. They compute over their own arguments, so they

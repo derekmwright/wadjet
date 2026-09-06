@@ -200,28 +200,50 @@ func bindRuleResources(ctx context.Context, cat *catalog.Catalog, where string, 
 
 // ruleScopesANonRelationResource reports whether the rule's own conditions say
 // it is about something other than a catalog table — today, the
-// `table_function` capability. Only `resource.type` can say so; a rule that
-// does not mention it is about relations, which is the pre-#943 world and
-// every policy written before it.
+// `table_function` capability — and about NOTHING that is a relation. Only
+// `resource.type` can say so; a rule that does not mention it is about
+// relations, which is the pre-#943 world and every policy written before it.
+//
+// "and about nothing that is a relation" is the load-bearing half. A rule
+// scoped `resource.type in [table, table_function]` names BOTH, and skipping
+// the bind for it would leave its `resource.name` unresolved against the
+// catalog — which is #882's fail-open exactly: an unbound scoped DENY matches
+// nothing, and a deny that matches nothing is a grant beside the broad allow
+// every `roles:` migration emits. So a mixed rule binds its names, and a
+// misspelled relation in one refuses the load, the same as any other rule.
 func ruleScopesANonRelationResource(rule *PolicyRule) bool {
+	sawTypeCondition := false
 	for _, cond := range rule.Resources {
 		if cond.Attribute != "resource.type" {
 			continue
 		}
+		var named []string
 		switch cond.Op {
 		case "eq":
-			if s, ok := cond.Value.(string); ok && s != "table" {
-				return true
+			s, ok := cond.Value.(string)
+			if !ok {
+				return false
 			}
+			named = []string{s}
 		case "in":
-			for _, it := range relationSetItemsAny(cond.Value) {
-				if it != "table" {
-					return true
-				}
+			named = relationSetItemsAny(cond.Value)
+			if len(named) == 0 {
+				return false
+			}
+		default:
+			// `neq`, `not_in`, `regex`, … do not pin the rule to one type.
+			// The migration's role rule is `resource.type neq table_function`
+			// and it very much names relations, so it must bind.
+			return false
+		}
+		for _, t := range named {
+			if t == ResourceTable {
+				return false
 			}
 		}
+		sawTypeCondition = true
 	}
-	return false
+	return sawTypeCondition
 }
 
 // relationSetItemsAny is relationSetItems without the "every item must be a
