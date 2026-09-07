@@ -87,10 +87,14 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 		return nil, err
 	}
 
+	// The native writer deep-copies the schema (#973); this one holds THAT
+	// copy, not the caller's and not a second copy of its own, so prepareRows
+	// and the decomposition below it read one and the same schema.
+	nw := NewNativeWriter(w, schema, cfg)
 	return &Writer{
-		schema: schema,
+		schema: nw.schema,
 		config: cfg,
-		nw:     NewNativeWriter(w, schema, cfg),
+		nw:     nw,
 	}, nil
 }
 

@@ -163,10 +163,29 @@ type leafBuffer struct {
 }
 
 // NewNativeWriter creates a Parquet writer that writes to the given io.Writer.
+//
+// The writer takes a DEEP COPY of schema and uses only that copy afterwards, so
+// a caller amending a reusable Schema while a writer is alive changes nothing
+// about the file. Before this, Columns, nested Fields and ElementType were all
+// still the caller's memory, and the writer reads the schema at two separate
+// moments: leaf buffers and leaf PATHS are frozen at construction, and the
+// footer's schema tree is built again at Close. A mutation between the two made
+// them disagree, with WriteRows and Close both returning nil (#973, measured at
+// f415faba):
+//
+//	Columns[0].Name = "b"     -> "row group 0 column 0 carries path [a] but
+//	                             schema leaf 0 is [b]"; unreadable here, and
+//	                             pyarrow reads the file as column "b".
+//	Fields[0].Name = "b"      -> the same, one level down ([r a] vs [r b]).
+//	Columns[0].Type -> FLOAT64 -> opens, then "FLOAT64 cannot be decoded from
+//	                             an INT64 page"; pyarrow refuses the file.
+//	ElementType.Type -> STRING -> pyarrow OPENS it as list<element: string>
+//	                             and hands back the INT64 bytes as strings.
 func NewNativeWriter(w io.Writer, schema Schema, cfg WriterConfig) *NativeWriter {
 	if cfg.RowGroupSize <= 0 {
 		cfg.RowGroupSize = 128 * 1024
 	}
+	schema = schema.Clone()
 
 	codec := CodecSnappy
 	switch cfg.Compression {

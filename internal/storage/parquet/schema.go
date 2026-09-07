@@ -650,6 +650,43 @@ type Schema struct {
 	Columns []Column `json:"columns"`
 }
 
+// Clone returns a DEEP copy of c: the Fields slice and the ElementType
+// pointer are new memory, recursively, so no part of the result is shared with
+// the receiver.
+//
+// A Column is a value, but only its scalar fields travel by value; Fields and
+// ElementType are a slice and a pointer, and copying the struct shares both.
+// The writer keeps a schema for the life of a file and builds the leaf paths
+// once and the footer's schema tree again at Close, so a caller amending a
+// reusable schema between those two moments made the two disagree about the
+// same file (#973). See NewNativeWriter.
+func (c Column) Clone() Column {
+	out := c
+	if c.ElementType != nil {
+		e := c.ElementType.Clone()
+		out.ElementType = &e
+	}
+	if c.Fields != nil {
+		out.Fields = make([]Column, len(c.Fields))
+		for i := range c.Fields {
+			out.Fields[i] = c.Fields[i].Clone()
+		}
+	}
+	return out
+}
+
+// Clone returns a deep copy of s. See Column.Clone.
+func (s Schema) Clone() Schema {
+	if s.Columns == nil {
+		return Schema{}
+	}
+	out := Schema{Columns: make([]Column, len(s.Columns))}
+	for i := range s.Columns {
+		out.Columns[i] = s.Columns[i].Clone()
+	}
+	return out
+}
+
 // ColumnIndex returns the index of a named column, or -1 if not found.
 func (s *Schema) ColumnIndex(name string) int {
 	for i, c := range s.Columns {
