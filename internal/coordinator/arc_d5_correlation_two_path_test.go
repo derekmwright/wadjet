@@ -870,22 +870,24 @@ func arcD5LateralCells() []arcD5Cell {
 			wantUnreachableRoutes: 1,
 			pgSays:                "3, 3, 1 as BIGINT — the values and now the box too (#849)"},
 
-		// THE `SELECT *` BOUNDARY, pinned for real this time. A star expands
-		// in a later pass over the plan's own schema, so there is nothing in
-		// the SelectInfo for the rewrite to reach and the padded COUNT reads
-		// NULL where PostgreSQL reads 0 — and the decorrelation's injected
-		// join key (`order_id`) is in the star's output, which PostgreSQL's
-		// is not. On the DAG the shape is LOUD, and that is a shuffle
-		// name-consistency refusal (ADR-0010) rather than a value.
+		// THE `SELECT *` BOUNDARY, and it is one cell narrower than it was.
+		// The decorrelation's join key is dropped by the join that made it
+		// (arc J1, ADR-0026 3c), so the star publishes PostgreSQL's four
+		// columns and the DAG's ADR-0010 refusal is gone with it: every arm
+		// ANSWERS now, and the ONE cell that still differs is Carol's `n`.
+		//
+		// That cell is the empty-input default, which a star cannot reach: a
+		// star expands in a later pass over the plan's own schema, so there
+		// is nothing in the SelectInfo for the rewrite to reach and the
+		// padded COUNT reads NULL where PostgreSQL reads 0. Naming the
+		// columns gets the default (the cells above).
 		{issue: "#767", name: "boundary_select_star_over_an_aggregated_lateral",
 			sql: `SELECT * FROM lat_ord o ` + lat + `ON true ORDER BY o.customer`,
 			want: []string{
-				"id=int64:1|customer=Alice|total=float:150|__key_0=int64:1|n=int64:2",
-				"id=int64:2|customer=Bob|total=float:200|__key_0=int64:2|n=int64:2",
-				"id=int64:3|customer=Carol|total=float:0|__key_0=NULL|n=NULL"},
-			wantErrLikeDAG: "one stage's files describe one relation",
-			pgSays: "three rows with columns (id, customer, total, n) and Carol at n = 0 — " +
-				"no key column, and no refusal on any arm"},
+				"id=int64:1|customer=Alice|total=float:150|n=int64:2",
+				"id=int64:2|customer=Bob|total=float:200|n=int64:2",
+				"id=int64:3|customer=Carol|total=float:0|n=NULL"},
+			pgSays: "the same three rows and columns with Carol at n = 0, not NULL"},
 
 		// The NON-aggregated lateral, which none of this may touch.
 		// THE NESTED SHAPES the filing asks for, and the third of them is a

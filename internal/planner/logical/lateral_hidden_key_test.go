@@ -24,6 +24,18 @@ import (
 //   - it does not publish the key at all, or publishes something ELSE under
 //     the key's name — the key is minted into `__key_N` and the join keys on
 //     that. `__key_N` is reserved, so no alias can shadow it.
+//
+// The slot and the INJECTION are two decisions, not one. Where the list
+// already carries the key, the join keys on the list's name and nothing is
+// added to the output — but the AGGREGATE below still publishes its key under
+// a name the query did not choose, and that name can collide with an
+// aggregate the list aliased the same way (`SELECT t.g AS gk, MAX(t.id) AS g`
+// — #956 in the spelling round 0 did not reach). That one takes the slot as
+// its GroupByPublish and injects nothing.
+//
+// ONLY where the names really collide: `SELECT t.g, COUNT(*) AS c` has its
+// projection ELIDED over the aggregate, so the join keys on what the AGGREGATE
+// emits, and renaming the key there took it out of the shuffle's schema.
 func TestALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql string
@@ -44,14 +56,23 @@ func TestALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			`SELECT d.k, s.c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			"s.__key_0", "__key_0"},
-		{"ctl the key under its OWN name keys on the lateral's alias",
+		{"the list publishes the key AND an aggregate answers to its name (#956)",
+			`SELECT d.k, s.gk, s.g FROM typemx_dim d JOIN LATERAL (` +
+				`SELECT t.g AS gk, MAX(t.id) AS g FROM typemx t WHERE t.g = d.k ` +
+				`GROUP BY t.g) s ON true`,
+			"s.gk", "__key_0"},
+		{"ctl the key under its OWN name, nothing colliding, keeps its name",
 			`SELECT d.k, s.g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			"s.g", ""},
-		{"ctl the key under an ALIAS keys on the alias",
+		{"ctl the key under an ALIAS, nothing colliding, keeps its name",
 			`SELECT d.k, s.gg FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			"s.gg", ""},
+		{"ctl a NON-aggregated lateral that publishes the key mints nothing",
+			`SELECT o.customer, li.gg FROM lat_ord o JOIN LATERAL (` +
+				`SELECT order_id AS gg, amount FROM lat_item WHERE order_id = o.id) li ON true`,
+			"li.gg", ""},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

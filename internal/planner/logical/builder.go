@@ -2,6 +2,7 @@ package logical
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -1317,7 +1318,7 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// LATERAL subquery: decorrelate by extracting correlated
 				// WHERE predicates and moving them to the join condition.
 				left := crossFold(idx)
-				right, joinCond, empty, err := buildLateralSubquery(left, join, ctes)
+				right, joinCond, empty, hiddenCols, err := buildLateralSubquery(left, join, ctes)
 				if err != nil {
 					return nil, err
 				}
@@ -1356,7 +1357,16 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				case lateralNoRepair:
 					// Left as written. See lateralEmptyInputPlan.
 				}
-				items[idx] = NewJoin(left, right, jt, joinCond)
+				lat := NewJoin(left, right, jt, joinCond)
+				// The correlation key this lowering MATERIALIZED is the
+				// join's to key on and nobody else's to see: the enclosing
+				// query never named it, so a `SELECT *` over the join would
+				// publish a column PostgreSQL does not have, under a name no
+				// user can spell. The join drops it from its OUTPUT — the one
+				// place below every star, derived star and CTE star, so the
+				// trim cannot be reached around (ADR-0026 3c).
+				lat.HiddenJoinCols = hiddenCols
+				items[idx] = lat
 			} else {
 				rightRef := &plansql.TableRef{
 					Name:  join.RightTable,
@@ -1799,7 +1809,7 @@ func getOutputColNames(info *plansql.SelectInfo) []string {
 // 2. Parsing the subquery and splitting WHERE into correlated vs local predicates
 // 3. Building the inner plan with only local predicates
 // 4. Returning the inner plan and the combined join condition
-func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, error) {
+func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, []string, error) {
 	// Collect left-side table aliases to detect correlated references
 	leftAliases := collectLogicalAliases(left)
 
@@ -1807,11 +1817,11 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	inner := join.RightTable[1 : len(join.RightTable)-1]
 	parsed, err := plansql.Parse(inner)
 	if err != nil {
-		return nil, "", lateralEmptyInput{}, fmt.Errorf("parsing LATERAL subquery: %w", err)
+		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("parsing LATERAL subquery: %w", err)
 	}
 	subInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil, "", lateralEmptyInput{}, fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
+		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
 	}
 
 	// Split WHERE clause into correlated and local predicates
@@ -1859,6 +1869,12 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// mintedKeys maps a correlated inner column to the HIDDEN SLOT this
 	// lowering materialized it into, for the GroupByPublish stamp below.
 	var mintedKeys map[string]string
+	// injectedSlots are the slots this lowering added as OUTPUT COLUMNS of
+	// the lateral — the ones the enclosing query never asked for and must
+	// never see. The join drops them from its output (Node.HiddenJoinCols);
+	// a slot that only RENAMES a column the list already carries is not one
+	// of them, because no column was added.
+	var injectedSlots []string
 	if len(correlatedParts) > 0 {
 		// The key must be SELECTED — and, for an aggregated subquery, grouped.
 		// The rewrite above promotes the correlated equality into the join
@@ -1955,6 +1971,53 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 					subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
 				}
 			}
+			// THE AGGREGATE'S KEY OUTPUT IS NOT THE USER'S TO NAME (#956).
+			//
+			// The two branches below leave the key where the SELECT list put
+			// it, which is right for the JOIN — it keys on what the lateral
+			// publishes — and says nothing about what the AGGREGATE one
+			// operator lower publishes the key as. That name is the source
+			// column's stripped text, and it collides with an aggregate the
+			// list aliased the same way:
+			//
+			//   SELECT t.g AS gk, MAX(t.id) AS g … WHERE t.g = d.k GROUP BY t.g
+			//     the aggregate emits [g(key), g(max)], the projection
+			//     resolves `g` by name, ColumnIndex answers with the FIRST
+			//     match, and `s.g` read the KEY — `0,0,0…` where PostgreSQL 17
+			//     answers `0,0,4998…`, on the single-process path AND on both
+			//     DAG arms.
+			//
+			// So the slot is minted here too, and stamped onto the aggregate
+			// as the key's PUBLISHED name. Nothing is INJECTED: the list
+			// already carries the key, the join already keys on the name the
+			// list publishes, and an extra output column would be a second
+			// leak to fix. Only the aggregate's own name for the key moves.
+			//
+			// ONLY where the names really collide. Renaming the aggregate's
+			// key output when nothing answers to that name has a cost of its
+			// own: `SELECT t.g, COUNT(*) AS c` has its projection ELIDED over
+			// the aggregate (the shapes match), so what the lateral emits IS
+			// the aggregate's output, and moving the key to a slot while the
+			// join still keys on `s.g` left the shuffle with a key that is
+			// not in its schema. A rename that breaks no collision buys
+			// nothing, so it is not made.
+			//
+			// And only where the list publishes the key under ANOTHER name.
+			// Under its OWN name (`SELECT t.g, MAX(t.id) AS g`) the lateral
+			// publishes two columns called `g`, PostgreSQL refuses the outer
+			// `s.g` as ambiguous (42702), and this engine answers the key —
+			// a superset. Moving the key to a slot THERE made both DAG arms
+			// answer NO ROWS: a superset traded for an empty result, which is
+			// worse than the divergence it closes. That spelling is left
+			// where it is and recorded in the census.
+			if published && hasAgg && lateralKeyNameCollides(subInfo.Columns, innerCol) {
+				if slot, allocated := alloc.Next(plansql.SlotCorrKey); allocated {
+					if mintedKeys == nil {
+						mintedKeys = map[string]string{}
+					}
+					mintedKeys[strings.ToLower(strings.TrimSpace(innerCol))] = slot
+				}
+			}
 			if published {
 				continue
 			}
@@ -2020,6 +2083,7 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			}
 			col.Alias = slot
 			injected = append(injected, col)
+			injectedSlots = append(injectedSlots, slot)
 			if keyRename == nil {
 				keyRename = map[string]string{}
 			}
@@ -2034,9 +2098,13 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 		subInfo.Columns = append(injected, subInfo.Columns...)
 	}
 
+	if err := refuseDecorrelatedWindow(subInfo, correlatedParts, leftAliases); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, err
+	}
+
 	right, err := BuildFromSelectWithCTEs(subInfo, scopeCTEs(ctes, subInfo.CTEs))
 	if err != nil {
-		return nil, "", lateralEmptyInput{}, fmt.Errorf("building LATERAL subquery plan: %w", err)
+		return nil, "", lateralEmptyInput{}, nil, fmt.Errorf("building LATERAL subquery plan: %w", err)
 	}
 	// An AGGREGATED lateral groups on the key, and an aggregate publishes a
 	// group key under the key's own text -- which is the collision the slot
@@ -2080,7 +2148,7 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	}
 	empty.correlationCond = corrCond
 
-	return right, joinCond, empty, nil
+	return right, joinCond, empty, injectedSlots, nil
 }
 
 // collectLogicalAliases collects table names and aliases from scan nodes.
@@ -2193,6 +2261,107 @@ func lateralKeySelectItem(innerCol string) (plansql.SelectColumn, bool) {
 		col.TableRef = ref.Table
 	}
 	return col, true
+}
+
+// lateralKeyNameCollides reports whether the name an AGGREGATE would publish
+// the correlation key under — the source column's bare text, which is
+// exec.PublishedGroupKeyNames' qualifier strip — is also the output name of
+// an AGGREGATE in the same SELECT list.
+//
+// That is #956's shape in the spelling where the list carries the key itself:
+// `SELECT t.g AS gk, MAX(t.id) AS g … WHERE t.g = d.k GROUP BY t.g` makes the
+// aggregate emit two columns called `g`, and the projection above resolves by
+// name.
+func lateralKeyNameCollides(cols []plansql.SelectColumn, innerCol string) bool {
+	bare := lateralBareKeyName(innerCol)
+	if bare == "" {
+		bare = strings.TrimSpace(innerCol)
+	}
+	for _, c := range cols {
+		if !c.IsAgg && !c.IsWindow {
+			continue
+		}
+		if strings.EqualFold(plansql.OutputColumnName(c), bare) {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseDecorrelatedWindow refuses a LATERAL whose WINDOW FRAME the
+// decorrelation would silently change.
+//
+// Decorrelation moves the correlated predicate OUT of the subquery and into
+// the join condition, so the subquery runs over the WHOLE inner relation and
+// the join selects rows afterwards. For a filter that is exact. For a WINDOW
+// it is not: a window is computed over the rows the subquery sees, and after
+// the move it sees every row.
+//
+//	SELECT o.customer, s.w FROM lat_ord o JOIN LATERAL
+//	  (SELECT SUM(amount) OVER () AS w FROM lat_item WHERE order_id = o.id) s ON true
+//	-- PostgreSQL 17: 150,150,200,200 — the sum PER ORDER
+//	-- decorrelated:  350,350,350,350 — the sum over the whole table
+//
+// 350 is not a near miss, it is a different question's answer, and it was
+// given on every arm in silence. A window whose PARTITION BY carries the
+// correlation key is the one case the move preserves — each output row still
+// reads exactly its own correlated group — so that one is allowed and
+// everything else is refused. Answering it would need the window evaluated
+// per outer row, which this lowering does not express (0A000, the class for
+// "valid SQL this engine does not implement").
+func refuseDecorrelatedWindow(info *plansql.SelectInfo, correlatedParts []string, leftAliases map[string]bool) error {
+	if info == nil || len(correlatedParts) == 0 {
+		return nil
+	}
+	keys := make(map[string]bool, len(correlatedParts))
+	for _, cp := range correlatedParts {
+		inner := extractInnerColumn(cp, leftAliases)
+		if inner == "" {
+			continue
+		}
+		keys[strings.ToLower(strings.TrimSpace(inner))] = true
+		if bare := lateralBareKeyName(inner); bare != "" {
+			keys[strings.ToLower(bare)] = true
+		}
+	}
+	for _, c := range info.Columns {
+		if !c.IsWindow || c.WindowSpec == nil {
+			continue
+		}
+		partitioned := false
+		for _, pb := range c.WindowSpec.PartitionBy {
+			p := strings.ToLower(strings.TrimSpace(pb))
+			if keys[p] {
+				partitioned = true
+				break
+			}
+			if bare := lateralBareKeyName(pb); bare != "" && keys[strings.ToLower(bare)] {
+				partitioned = true
+				break
+			}
+		}
+		if partitioned {
+			continue
+		}
+		return sqlerr.New("0A000",
+			"window function %q inside a LATERAL subquery correlated on %s is not supported: "+
+				"the correlation is evaluated as a join, so the window would be computed over the "+
+				"whole inner relation rather than over the correlated rows, which is a different "+
+				"answer — add the correlation column to the window's PARTITION BY, or compute the "+
+				"window outside the LATERAL",
+			plansql.WindowOutputName(c), strings.Join(sortedKeyNames(keys), ", "))
+	}
+	return nil
+}
+
+// sortedKeyNames renders a correlation-key set in a stable order for a message.
+func sortedKeyNames(keys map[string]bool) []string {
+	out := make([]string, 0, len(keys))
+	for k := range keys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // lateralBareKeyName is the unqualified column a correlated equality's inner

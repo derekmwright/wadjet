@@ -227,6 +227,7 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 			BuildFilterExprs:    c.BuildFilterExprs,
 			QualifyAllBuildCols: c.QualifyAllBuildCols,
 			Columns:             c.Columns,
+			HiddenJoinCols:      c.HiddenJoinCols,
 			Partitioned:         c.Type == StageHashJoin,
 			JoinBuildSchema:     c.JoinBuildSchema,
 		})

@@ -431,7 +431,12 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// interchangeable. Hashed for the same reason JoinLeftKeys is.
 		"JoinKeyTypes":    "hashed",
 		"BuildTableAlias": "hashed", "BuildColOrigins": "hashed",
-		"JoinFilter": "hashed", "BuildFilterExprs": "hashed",
+		// The join's own materialized columns change what the stage EMITS —
+		// a stage that hides its LATERAL correlation key publishes a
+		// different relation than one that does not — so two stages that
+		// differ here are not interchangeable.
+		"HiddenJoinCols": "hashed",
+		"JoinFilter":     "hashed", "BuildFilterExprs": "hashed",
 		// NOT IN's three-valued rule changes which rows the stage EMITS
 		// (#507), so an anti join that owes it is not interchangeable with
 		// one that does not.

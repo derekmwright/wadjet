@@ -307,11 +307,12 @@ type HashJoin struct {
 	// partitioned and spilled to disk due to memory pressure.
 	spillState *spillState
 
-	// spillOutputFilter and spillLeftSchema are captured during the first
-	// probe Execute() so spilled partition processing can reproduce the
-	// output schema. Only set when spillState is non-nil.
-	spillOutputFilter map[string]bool
-	spillLeftSchema   []parquet.Column
+	// spillOutputFilter, spillOutputExclude and spillLeftSchema are captured
+	// during the first probe Execute() so spilled partition processing can
+	// reproduce the output schema. Only set when spillState is non-nil.
+	spillOutputFilter  map[string]bool
+	spillOutputExclude map[string]bool
+	spillLeftSchema    []parquet.Column
 }
 
 // BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
@@ -2693,6 +2694,24 @@ type HashJoinProbe struct {
 	// in multi-way join pipelines.
 	OutputFilter map[string]bool
 
+	// OutputExclude names columns this join materialized FOR ITSELF and must
+	// not publish, whatever any consumer asks for. It is not the inverse of
+	// OutputFilter: a filter is an optimization ("nothing above needs these,
+	// so do not gather them") and an absent filter means "emit everything",
+	// while this is a correctness rule that holds when there is no filter at
+	// all — which is exactly the `SELECT *` case.
+	//
+	// The decorrelation of a LATERAL subquery mints one: it materializes the
+	// correlation key into `__key_N` so the join it manufactures has a column
+	// to key on, and the enclosing query never wrote that column. Emitting it
+	// puts a name no user can spell into the result set and into the wire's
+	// RowDescription — five columns where PostgreSQL sends four — and leaves
+	// it readable through a derived-table or CTE star. Dropping it HERE, in
+	// the operator that made it, is what puts the drop below every one of
+	// those doors (ADR-0026 §3c). Set by the planner from
+	// logical.Node.HiddenJoinCols.
+	OutputExclude map[string]bool
+
 	// LateMaterialize emits inner/left join output as view (dictionary)
 	// columns over the probe input and build batches instead of gathering
 	// copies — the deferred gather happens at the first consumer that needs
@@ -2986,6 +3005,7 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		if p.join.spillLeftSchema == nil {
 			p.join.spillLeftSchema = in.Schema
 			p.join.spillOutputFilter = p.OutputFilter
+			p.join.spillOutputExclude = p.OutputExclude
 		}
 
 		inMemSel, err := p.partitionProbeBatch(in)
@@ -4753,6 +4773,7 @@ func (h *HashJoin) Close() error {
 func (p *HashJoinProbe) Clone() UnaryOperator {
 	c := p.join.Probe()
 	c.OutputFilter = p.OutputFilter
+	c.OutputExclude = p.OutputExclude
 	c.LateMaterialize = p.LateMaterialize
 	c.boundOutput = p.boundOutput
 	return c
@@ -4771,7 +4792,8 @@ func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Colu
 
 func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]parquet.Column, []outColSource) {
 	return joinOutputSchemaWithMapping(p.join.JoinType, leftSchema, p.join.buildSchema,
-		p.join.BuildTableAlias, p.join.BuildColOrigins, p.join.QualifyAllBuildCols, p.OutputFilter)
+		p.join.BuildTableAlias, p.join.BuildColOrigins, p.join.QualifyAllBuildCols,
+		p.OutputFilter, p.OutputExclude)
 }
 
 // outputFilterMatcher answers "does the consumer need this join output column"
@@ -4847,7 +4869,7 @@ func splitJoinQualifier(name string) (qual, bare string) {
 // first, then build columns with duplicate-name qualification — and the
 // per-output-column source mapping. Shared by HashJoinProbe and SortMergeJoin
 // so both emit identical schemas for the same join shape.
-func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, buildColOrigins map[string]string, qualifyAllBuildCols bool, outputFilter map[string]bool) ([]parquet.Column, []outColSource) {
+func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, buildColOrigins map[string]string, qualifyAllBuildCols bool, outputFilter, outputExclude map[string]bool) ([]parquet.Column, []outColSource) {
 	var out []parquet.Column
 	var mapping []outColSource
 
@@ -4926,6 +4948,26 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
 			seen[batch.FoldIdent(col.Name)] = true
 		}
+	}
+
+	// Drop the columns this join materialized for itself (OutputExclude).
+	// BEFORE the filter, so a filter that names one of them cannot re-admit
+	// it, and so the filter's "did it narrow anything" test compares against
+	// the list the join really publishes. The name is matched on its BARE
+	// half: a build column that collided with a probe column is emitted
+	// qualified ("s.__key_0"), and it is the same column either way.
+	if len(outputExclude) > 0 {
+		var keptSchema []parquet.Column
+		var keptMapping []outColSource
+		for i, col := range out {
+			_, bare := splitJoinQualifier(col.Name)
+			if outputExclude[bare] || outputExclude[col.Name] {
+				continue
+			}
+			keptSchema = append(keptSchema, col)
+			keptMapping = append(keptMapping, mapping[i])
+		}
+		out, mapping = keptSchema, keptMapping
 	}
 
 	// Apply output filter: skip columns not needed by downstream operators.

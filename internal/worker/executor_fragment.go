@@ -2296,6 +2296,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 		}
 		j.OutputFilter = filter
 	}
+	j.OutputExclude = hiddenColumnSet(spec.HiddenColumns)
 	if sm := e.spillFor(ctx); sm != nil {
 		j.Spill = sm
 	}
@@ -3038,7 +3039,23 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		}
 		probe.OutputFilter = filter
 	}
+	// The join's OWN materialized columns are dropped on this path exactly
+	// as the single-process planner drops them, so both paths publish one
+	// column set for one query (exec.HashJoinProbe.OutputExclude).
+	probe.OutputExclude = hiddenColumnSet(spec.HiddenColumns)
 	return []exec.UnaryOperator{probe}, cleanup, nil
+}
+
+// hiddenColumnSet is OpSpec.HiddenColumns as the probe's OutputExclude set.
+func hiddenColumnSet(cols []string) map[string]bool {
+	if len(cols) == 0 {
+		return nil
+	}
+	excl := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		excl[c] = true
+	}
+	return excl
 }
 
 // fragmentSink is the internal interface every fragment-sink kind implements:

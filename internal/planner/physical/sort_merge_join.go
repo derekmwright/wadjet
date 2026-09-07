@@ -81,6 +81,7 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 		}
 		j.OutputFilter = filter
 	}
+	j.OutputExclude = joinProbeOutputExclude(node)
 
 	rightSource, rightOps, _, err := p.buildPipeline(ctx, node.Children[1])
 	if err != nil {

@@ -475,41 +475,34 @@ func arcACells() []arcACell {
 			want: []string{
 				"c=Alice|a=float:50", "c=Alice|a=float:100",
 				"c=Bob|a=float:75", "c=Bob|a=float:125"}},
-		// THE BOUNDARY, pinned rather than described (protocol rule 11). The
-		// injected key is a real output column of the lateral side, so an
-		// OUTER `SELECT *` sees it: PostgreSQL publishes only `amount` here
-		// and wadjet publishes one column more. That is NOT new — the
-		// AGGREGATED arm has injected and leaked the same way since #591 —
-		// and arc J1 RENAMED the leaked column rather than removing it: the
-		// key is minted into `__key_0`, the reserved namespace no query can
-		// spell, so it can no longer be mistaken for the relation's own
-		// `order_id` (#956, ADR-0026 §3c). On the DAG the star still shows
-		// the SCAN's own `order_id`, which the wantDAG below records.
+		// THE BOUNDARY, and it now differs BY ARM. The key the decorrelation
+		// materializes is dropped by the join that made it (ADR-0026 §3c), so
+		// the single-process arms publish PostgreSQL's four columns — in a
+		// different ORDER, because a join emits its probe side first and this
+		// lateral is the probe. On the DAG the lateral's projection emits no
+		// stage of its own, so the stream carries the SCAN's names, the
+		// slot's alias never lands, and the source column rides out under its
+		// own name: five columns there. Recorded in ADR-0012 with the
+		// mechanism; the wantDAG below is what it answers.
 		//
-		// Before this commit this shape answered ZERO ROWS AND NO COLUMNS, so
-		// the move is catastrophically-wrong → right-rows-plus-a-column. The
-		// day the extra column goes (the decorrelation stops publishing its
-		// join key, or a projection above the join prunes it) this pin FAILS,
-		// which is how it should end.
+		// Before arc J1 this shape answered ZERO ROWS AND NO COLUMNS on every
+		// arm, so the move is catastrophically-wrong → right (single) and →
+		// right-plus-one-column (DAG).
 		{issue: "#767", name: "boundary_outer_star_sees_the_injected_key",
 			sql: `SELECT * FROM lat_ord o ` +
 				`JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
 				`ORDER BY o.customer, li.amount`,
 			want: []string{
-				"__key_0=int64:1|amount=float:100|id=int64:1|customer=Alice|total=float:150",
-				"__key_0=int64:1|amount=float:50|id=int64:1|customer=Alice|total=float:150",
-				"__key_0=int64:2|amount=float:125|id=int64:2|customer=Bob|total=float:200",
-				"__key_0=int64:2|amount=float:75|id=int64:2|customer=Bob|total=float:200"},
-			// The DAG shows the SOURCE column, not the slot: a star gives the
-			// join node no NeededColumns, so the stage carries the scan's own
-			// list and `order_id` is lat_item's own column there. Same value,
-			// two names, one extra column either way.
+				"amount=float:100|id=int64:1|customer=Alice|total=float:150",
+				"amount=float:50|id=int64:1|customer=Alice|total=float:150",
+				"amount=float:125|id=int64:2|customer=Bob|total=float:200",
+				"amount=float:75|id=int64:2|customer=Bob|total=float:200"},
 			wantDAG: []string{
 				"order_id=int64:1|amount=float:100|id=int64:1|customer=Alice|total=float:150",
 				"order_id=int64:1|amount=float:50|id=int64:1|customer=Alice|total=float:150",
 				"order_id=int64:2|amount=float:125|id=int64:2|customer=Bob|total=float:200",
 				"order_id=int64:2|amount=float:75|id=int64:2|customer=Bob|total=float:200"},
-			pgSays: "the same four rows with columns (id, customer, total, amount) — no key column"},
+			pgSays: "the same four rows with columns (id, customer, total, amount)"},
 		// P2's shape, CLOSED by arc J1's hidden slot (#767's mirror, #956).
 		// `lateralSelectsColumn` used to decide "the subquery already
 		// publishes the key" by matching the key's name against a select
@@ -546,11 +539,11 @@ func arcACells() []arcACell {
 				`LEFT JOIN LATERAL (SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
 				`ORDER BY o.customer, li.amount`,
 			want: []string{
-				"id=int64:1|customer=Alice|total=float:150|__key_0=int64:1|amount=float:100",
-				"id=int64:1|customer=Alice|total=float:150|__key_0=int64:1|amount=float:50",
-				"id=int64:2|customer=Bob|total=float:200|__key_0=int64:2|amount=float:125",
-				"id=int64:2|customer=Bob|total=float:200|__key_0=int64:2|amount=float:75",
-				"id=int64:3|customer=Carol|total=float:0|__key_0=NULL|amount=NULL"},
+				"id=int64:1|customer=Alice|total=float:150|amount=float:100",
+				"id=int64:1|customer=Alice|total=float:150|amount=float:50",
+				"id=int64:2|customer=Bob|total=float:200|amount=float:125",
+				"id=int64:2|customer=Bob|total=float:200|amount=float:75",
+				"id=int64:3|customer=Carol|total=float:0|amount=NULL"},
 			// As above: the DAG's star output names the SCAN's own column.
 			wantDAG: []string{
 				"id=int64:1|customer=Alice|total=float:150|order_id=int64:1|amount=float:100",
@@ -558,7 +551,14 @@ func arcACells() []arcACell {
 				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|amount=float:125",
 				"id=int64:2|customer=Bob|total=float:200|order_id=int64:2|amount=float:75",
 				"id=int64:3|customer=Carol|total=float:0|order_id=NULL|amount=NULL"},
-			wantErrLikeDAGShuffled: "where an earlier file of the same stage input named it",
+			// The shuffled arm's refusal is a WIDTH mismatch now, not a NAME
+			// one: with the key dropped from the join's output, a task whose
+			// build partition is empty declares the lateral's projected
+			// columns while a task with rows carries the scan's own list —
+			// which is the DAG's un-materialized lateral projection (the
+			// wantDAG above), one file wide and one file narrow. Loud at
+			// base, loud here, different sentence.
+			wantErrLikeDAGShuffled: "one stage's files describe one relation",
 			pgSays: "five rows with columns (id, customer, total, amount) — no order_id, " +
 				"and no refusal on any arm"},
 		// ------------------------------------------------------------------

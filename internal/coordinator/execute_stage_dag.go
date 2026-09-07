@@ -3157,6 +3157,7 @@ func (c *Coordinator) dispatchComputeStage(
 				BuildFilterExprs:    append([]string(nil), cj.BuildFilterExprs...),
 				QualifyAllBuildCols: cj.QualifyAllBuildCols,
 				OutputColumns:       append([]string(nil), cj.Columns...),
+				HiddenColumns:       append([]string(nil), cj.HiddenJoinCols...),
 				LateMaterialize:     c.config.LateMaterialization,
 				BuildSchema:         wireColumnSpecs(cj.JoinBuildSchema),
 			})
@@ -3206,6 +3207,7 @@ func (c *Coordinator) dispatchComputeStage(
 			BuildFilterExprs:    append([]string(nil), stage.BuildFilterExprs...),
 			JoinProbeSchema:     wireColumnSpecs(stage.JoinProbeSchema),
 			JoinBuildSchema:     wireColumnSpecs(stage.JoinBuildSchema),
+			HiddenJoinColumns:   append([]string(nil), stage.HiddenJoinCols...),
 			FusedJoins:          wireFused,
 			GroupByCols:         stage.GroupByCols,
 			Aggregates:          aggs,
@@ -3901,6 +3903,7 @@ func buildJoinFragment(
 		QualifyAllBuildCols: t.QualifyAllBuildCols,
 		BuildColOrigins:     t.BuildColOrigins,
 		OutputColumns:       append([]string(nil), t.Columns...),
+		HiddenColumns:       append([]string(nil), t.HiddenJoinColumns...),
 		LateMaterialize:     lateMat,
 		BuildSchema:         append([]distributed.ColumnSpec(nil), t.JoinBuildSchema...),
 		ProbeSchema:         append([]distributed.ColumnSpec(nil), t.JoinProbeSchema...),
@@ -3987,6 +3990,7 @@ func buildSortMergeJoinFragment(
 	ops = append(ops, distributed.OpSpec{
 		Type:                distributed.OpSortMergeJoin,
 		JoinType:            t.JoinType,
+		HiddenColumns:       append([]string(nil), t.HiddenJoinColumns...),
 		LeftKeys:            t.JoinLeftKeys,
 		RightKeys:           t.JoinRightKeys,
 		KeyTypes:            t.JoinKeyTypes,

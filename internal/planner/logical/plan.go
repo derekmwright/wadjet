@@ -222,7 +222,20 @@ type Node struct {
 	// `MAX(t.id) AS g` under one name `g`, where `batch.RecordBatch.ColumnIndex`
 	// answers with the first match and the query returned the KEY for the
 	// aggregate (#956).
-	GroupByPublish   []string
+	GroupByPublish []string
+	// HiddenJoinCols, on a JOIN node, names the output columns the join
+	// materialized for ITSELF and must not publish: the decorrelated
+	// correlation key of a LATERAL subquery (`__key_N`), which the enclosing
+	// query never wrote and PostgreSQL's answer does not contain.
+	//
+	// It is dropped at the JOIN rather than at the statement's output
+	// because the statement's output is not the only door: `SELECT *` over
+	// the join, over a DERIVED TABLE around it, or over a CTE that wraps it
+	// all publish whatever the join emits, and a reference to the slot
+	// through one of those stars would read it by name. One drop below every
+	// star is what makes the slot unreachable rather than usually-hidden
+	// (ADR-0026 §3c). Empty on every other join.
+	HiddenJoinCols   []string
 	AggExprs         []AggExpr
 	GroupingSetNulls []string   // columns that should be NULL in this grouping set (legacy, per-node)
 	GroupingSets     [][]string // single-pass grouping sets: each entry lists the columns in that set

@@ -76,7 +76,11 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		"BuildColOrigins": notFile,
 		"JoinFilter":      notFile, "BuildFilterExprs": notFile,
 		"JoinBuildSchema": notFile, "JoinProbeSchema": notFile,
-		"ShuffleKeys": notFile, "ShuffleKeyTypes": notFile, "NumPartitions": notFile,
+		// The join's own materialized columns (a decorrelated LATERAL's
+		// correlation key) — a column-name list the worker applies as the
+		// probe's OutputExclude, never a file path.
+		"HiddenJoinColumns": notFile,
+		"ShuffleKeys":       notFile, "ShuffleKeyTypes": notFile, "NumPartitions": notFile,
 		"ComputedCols": notFile, "DropCols": notFile,
 		"PartialAggKeys": notFile, "PartialAggSpecs": notFile, "PartitionID": notFile,
 		// DynamicFilterSpec.BloomBucket/BloomKey DO name an S3 object, but

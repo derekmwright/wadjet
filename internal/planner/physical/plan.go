@@ -247,7 +247,15 @@ type Stage struct {
 	// BuildTableAlias is already exact. The join executor qualifies duplicate
 	// build columns with the OWNING alias instead of BuildTableAlias.
 	BuildColOrigins map[string]string
-	JoinFilter      string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
+	// HiddenJoinCols is logical.Node.HiddenJoinCols for this join stage: the
+	// columns the join MATERIALIZED for itself — a decorrelated LATERAL's
+	// correlation key — which it must not publish, however wide the
+	// consumer's ask is. The worker applies it as the probe's OutputExclude,
+	// and declaredJoinSchema leaves them out of the declaration, so the
+	// stage's empty-side files and its full ones describe the same relation
+	// (ADR-0010). Nil on every other join.
+	HiddenJoinCols []string
+	JoinFilter     string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 	// NullAwareAnti carries logical.Node.NullAwareAnti to the worker: this
 	// anti join came from a NOT IN and owes its three-valued rule, not the
 	// two-valued "did nothing match" an anti join asks on its own (#507).
@@ -712,6 +720,10 @@ type ChainedJoinSpec struct {
 	// chained probe's OutputFilter so the fused stage emits exactly what
 	// the absorbed stage emitted.
 	Columns []string
+	// HiddenJoinCols is the absorbed stage's own materialized columns (see
+	// Stage.HiddenJoinCols): fusing a join into its parent must not turn a
+	// column the join hid into one the fused stage publishes.
+	HiddenJoinCols []string
 	// JoinBuildSchema is the absorbed join's declared build columns, read
 	// only when that build turns out to be empty (#348).
 	JoinBuildSchema []parquet.Column
@@ -8014,6 +8026,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				stage.BuildColOrigins = buildNaming.buildColOrigins()
 			}
 		}
+		// The join's own materialized columns travel with the stage: the
+		// worker drops them from the probe's output exactly as the
+		// single-process planner does, so the two paths publish one column
+		// set (ADR-0026 3c).
+		if len(node.HiddenJoinCols) > 0 {
+			stage.HiddenJoinCols = append([]string(nil), node.HiddenJoinCols...)
+		}
 		// Propagate semi/anti join inequality filters
 		if node.JoinFilter != "" {
 			stage.JoinFilter = node.JoinFilter
@@ -9125,6 +9144,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if f := joinProbeOutputFilter(node); f != nil {
 			probe.OutputFilter = f
 		}
+		probe.OutputExclude = joinProbeOutputExclude(node)
 
 		bridge := &reverseBloomBridge{
 			childSource:   leftSource,
@@ -9152,6 +9172,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if f := joinProbeOutputFilter(node); f != nil {
 			probe.OutputFilter = f
 		}
+		probe.OutputExclude = joinProbeOutputExclude(node)
 
 		bridge := &deferredJoinBridge{
 			childSource: leftSource,
@@ -9227,6 +9248,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if f := joinProbeOutputFilter(node); f != nil {
 		probe.OutputFilter = f
 	}
+	probe.OutputExclude = joinProbeOutputExclude(node)
 	leftOps = append(leftOps, probe)
 
 	// For RIGHT and FULL OUTER joins, unmatched build-side rows must be
@@ -18413,6 +18435,20 @@ func limitPushdownSafe(node *logical.Node) bool {
 // narrows there. An OutputFilter can only NARROW, so adding a qualifier that
 // names no column costs nothing; the expansion is unconditional for that
 // reason rather than guessing which qualifiers are ROW columns.
+// joinProbeOutputExclude is the join's own materialized columns — the ones it
+// must not publish however wide the consumer's ask is. See
+// exec.HashJoinProbe.OutputExclude and logical.Node.HiddenJoinCols.
+func joinProbeOutputExclude(node *logical.Node) map[string]bool {
+	if len(node.HiddenJoinCols) == 0 {
+		return nil
+	}
+	excl := make(map[string]bool, len(node.HiddenJoinCols))
+	for _, c := range node.HiddenJoinCols {
+		excl[c] = true
+	}
+	return excl
+}
+
 func joinProbeOutputFilter(node *logical.Node) map[string]bool {
 	if len(node.NeededColumns) == 0 {
 		return nil

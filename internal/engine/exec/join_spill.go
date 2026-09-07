@@ -1568,6 +1568,7 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 	}
 	probe := tmpJoin.Probe()
 	probe.OutputFilter = p.join.spillOutputFilter
+	probe.OutputExclude = p.join.spillOutputExclude
 	probe.LateMaterialize = p.LateMaterialize
 	// nextSpilledProbeBatch drains NextOutput before reading the next probe
 	// batch, so the partition probe may bound its fan-out exactly like the
