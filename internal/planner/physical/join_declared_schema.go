@@ -98,46 +98,6 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 				})
 			}
 		}
-		// A PROJECTION THAT LISTS ITS COLUMNS *IS* THE SIDE'S OUTPUT, and
-		// under a STAR that is the whole answer: with no `want` list to
-		// narrow by, walking past it declares every column of the scans
-		// BELOW it — the columns the projection dropped included. A task
-		// whose build partition was empty then wrote a file seven columns
-		// wide beside files carrying the five the projection publishes, and
-		// the shuffle read refused the pair (ADR-0010).
-		//
-		// Only in the star case (`len(wantSet) == 0`). With a want list the
-		// narrowing is already done by it, and the fall-through to the scans
-		// is what names a renamed column the way the DAG spells it.
-		if cur.Type == logical.NodeProject && len(wantSet) == 0 && len(cur.Children) == 1 &&
-			projectionListsItsColumns(cur.Projections) {
-			in := emittedColTypes(cur.Children[0])
-			for _, pr := range cur.Projections {
-				name := pr.Alias
-				if name == "" {
-					name = pr.Column
-				}
-				lc := strings.ToLower(name)
-				if seen[lc] {
-					continue
-				}
-				src := pr.Column
-				if src == "" {
-					src = pr.Alias
-				}
-				t, ok := lookupColType(in, src)
-				if !ok {
-					// No plan-time type for this column. Declaring one that
-					// is merely plausible is what ADR-0010's guard exists to
-					// catch, so it is left out and the runtime's own schema
-					// stands wherever the side is not empty.
-					continue
-				}
-				seen[lc] = true
-				out = append(out, parquet.Column{Name: name, Type: t, Nullable: true})
-			}
-			return
-		}
 		if cur.Type == logical.NodeAggregate && len(cur.Children) == 1 {
 			// AN AGGREGATE'S OUTPUT IS NOT ITS INPUT, so the walk stops here
 			// rather than describing this side by the columns of the scan
@@ -245,24 +205,6 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 	}
 	walk(n)
 	return out
-}
-
-// projectionListsItsColumns reports whether every projection names an output
-// column this pass can declare — no star, no unnamed expression.
-func projectionListsItsColumns(projs []logical.Projection) bool {
-	if len(projs) == 0 {
-		return false
-	}
-	for _, pr := range projs {
-		name := pr.Alias
-		if name == "" {
-			name = pr.Column
-		}
-		if name == "" || name == "*" || strings.HasSuffix(name, ".*") {
-			return false
-		}
-	}
-	return true
 }
 
 // joinSideSchemas returns the declared probe- and build-side schemas for a
