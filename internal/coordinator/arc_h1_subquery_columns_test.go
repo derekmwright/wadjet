@@ -60,6 +60,43 @@ func TestArcH1AMultiColumnSubqueryIsRefused(t *testing.T) {
 			`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN ` +
 				`(SELECT t.id, t.c_i64 FROM typemx t WHERE t.id = d.id)`,
 			"subquery has too many columns"},
+
+		// TWO COLUMNS UNDER ONE NAME. The row a subquery hands its reducer is
+		// a Go MAP keyed by column name, and PostgreSQL lets two output
+		// columns share one — `SELECT ABS(a), ABS(b)` is two columns both
+		// called `abs` — so the map held ONE entry for TWO columns and the
+		// count walked straight through this refusal. Measured before the
+		// fix: `12.7500` on every arm and every door where PostgreSQL raises,
+		// and `n | 0` for the IN twin. The count now comes from the SCHEMA,
+		// which is positional and cannot collapse.
+		{"scalar-two-columns-one-name",
+			`SELECT d.id AS did, (SELECT ABS(x.a), ABS(x.b) FROM decpair x WHERE x.id = 1) AS v ` +
+				`FROM decpair d WHERE d.id < 2`,
+			"subquery must return only one column"},
+		{"scalar-two-columns-one-alias",
+			`SELECT d.id AS did, (SELECT x.id AS q, x.c_i64 AS q FROM typemx x WHERE x.id = 3) AS v ` +
+				`FROM decpair d WHERE d.id < 2`,
+			"subquery must return only one column"},
+		{"scalar-the-same-column-twice",
+			`SELECT d.id AS did, (SELECT x.id, x.id FROM typemx x WHERE x.id = 3) AS v ` +
+				`FROM decpair d WHERE d.id < 2`,
+			"subquery must return only one column"},
+		{"scalar-star-over-a-two-column-relation",
+			`SELECT d.id AS did, (SELECT * FROM typemx_dim x WHERE x.k = 1) AS v ` +
+				`FROM decpair d WHERE d.id < 2`,
+			"subquery must return only one column"},
+		{"scalar-a-union-of-two-column-arms",
+			`SELECT d.id AS did, (SELECT x.id, x.c_i64 FROM typemx x WHERE x.id = 3 ` +
+				`UNION ALL SELECT y.id, y.c_i64 FROM typemx y WHERE y.id = 4) AS v ` +
+				`FROM decpair d WHERE d.id < 2`,
+			"subquery must return only one column"},
+		{"in-two-columns-one-name",
+			`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN ` +
+				`(SELECT x.id AS q, x.c_i64 AS q FROM typemx x WHERE x.id < 5)`,
+			"subquery has too many columns"},
+		{"in-star-over-a-two-column-relation",
+			`SELECT COUNT(*) AS n FROM decpair d WHERE d.id IN (SELECT * FROM typemx_dim)`,
+			"subquery has too many columns"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

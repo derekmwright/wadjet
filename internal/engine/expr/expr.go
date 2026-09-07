@@ -6125,6 +6125,8 @@ func (e *ScalarSubquery) resolveSlow() {
 	if err != nil {
 		failEval(subqueryRunFailed("scalar", e.SQL, err))
 	}
+	// COLUMNS BEFORE ROWS — PostgreSQL's order; see refuseMultiColumnSubquery.
+	refuseMultiColumnSubquery(e.SQL, rows, false)
 	if len(rows) > 1 {
 		// Reported with no count: the read stopped on purpose, so this site
 		// knows "more than one" and not how many more.

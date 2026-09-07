@@ -49,6 +49,11 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 		// UNKNOWN and the row silently vanish.
 		failEval(subqueryRunFailed("scalar", sql, runErr))
 	}
+	// COLUMNS BEFORE ROWS, which is PostgreSQL's order: how many columns a
+	// subquery has is a property of its SELECT LIST and is decided at
+	// analysis time there, before any row is read, so `(SELECT a, b FROM t)`
+	// over a two-row `t` is 42601 and not 21000.
+	refuseMultiColumnSubquery(sql, rows, false)
 	if len(rows) > 1 {
 		// Reported with no count: the read stopped on purpose, so this site
 		// knows "more than one" and not how many more.
@@ -395,6 +400,27 @@ func ScalarSubqueryValue(sql string, rows []map[string]any) (any, error) {
 		return v, nil
 	}
 	return nil, nil
+}
+
+// refuseMultiColumnSubquery raises PostgreSQL's 42601 when a subquery used
+// where ONE column is required returned more than one.
+//
+// It is called BEFORE the cardinality rule at every site that has both,
+// because that is PostgreSQL's order: the column count is a property of the
+// SELECT LIST and is decided at analysis time, so a two-column subquery over a
+// two-row relation is `subquery must return only one column` and not
+// `more than one row returned by a subquery used as an expression`.
+//
+// A ZERO-ROW result is the bound and it is stated rather than pretended away:
+// with no row there is no map to count, so a multi-column subquery over an
+// empty input keeps the SQL NULL it always answered where PostgreSQL still
+// refuses. Deciding it needs the SELECT list's arity at compile time, which is
+// the planner's to hand over.
+func refuseMultiColumnSubquery(sql string, rows []map[string]any, inPredicate bool) {
+	if len(rows) == 0 || len(rows[0]) <= 1 {
+		return
+	}
+	failEval(&SubqueryColumnsError{SQL: sql, Columns: len(rows[0]), InPredicate: inPredicate})
 }
 
 // SubqueryColumnsError reports a subquery used where ONE column is required
