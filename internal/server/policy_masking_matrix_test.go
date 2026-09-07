@@ -1035,8 +1035,10 @@ func pmCells() []pmCell {
 		// query is SQL TEXT when enforcement runs, so what it contains — a
 		// derived table, a set operation, a correlation — is the client's
 		// choice and no per-shape teaching can enumerate it (#859 round 4).
-		// Every one of them used to REFUSE 0A000 on all eight runners, and six
-		// of them now ANSWER — with the MASK, uniformly on all eight. That is
+		// Every one of them used to REFUSE 0A000 on all eight runners, and
+		// SEVEN of them now ANSWER — with the MASK, uniformly on all eight
+		// (7 cells x 8 runners is the 56 failures a base measurement shows;
+		// these notes first said six). That is
 		// a change in what the branch promises and it is recorded here rather
 		// than absorbed: the refusal was never the right answer, it was the
 		// only safe one available while the subquery's plan carried no
@@ -1047,9 +1049,15 @@ func pmCells() []pmCell {
 		// scan with no barrier above it and refused. The subquery's plan asks
 		// the context LOOKUP for every relation it reads now (#945), the
 		// projection goes in, and the predicate reads the mask: `bal > 300`
-		// is false on every row, which is why the six answer empty and
+		// is false on every row, which is why six of them answer empty and
 		// `except_inside_in` — whose masked reading keeps every id — answers
 		// all three of e7other's.
+		//
+		// Those six answer EMPTY under a stored reading too (e7other holds ids
+		// 1-3, which the stored predicate excludes anyway), so they DETECT a
+		// leak rather than discriminating one; `except_inside_in` is the cell
+		// that discriminates, and the `_outer_reads_it` pair below is the
+		// control that the invariant is still being asked at all.
 		//
 		// The line is drawn by the INNER PLAN, not by the outer statement's
 		// FROM list. A subquery the optimizer folds into the outer plan — a

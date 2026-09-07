@@ -340,6 +340,15 @@ fallbacks exist to route a shape the stage DAG cannot express, and a refusal is
 not such a shape — parked and returned, it reaches the client as 42501 instead
 of as the worker error the re-spliced subquery text produced.
 
+**A refusal carries the relation and not the ROUTE.** The coordinator route —
+the one `wadjet serve` puts pgwire and HTTP on — wrapped every planning and
+local-execution failure with the internal path it took, so one refusal read
+`physical plan: permission denied for table "x"` or `table-less SELECT with no
+distributed stage local execution: permission denied for table "x"` there and
+the bare sentence on the single-process doors. Every such wrapper passes a
+42501 through untouched (`coordinator.authorizationRefusal`): which route ran
+is operator information, and it belongs in the log beside the rule id.
+
 **Metadata follows the effective table decision — a deliberate PG divergence.** `DESCRIBE`, `SHOW COLUMNS FROM` and `SHOW TABLES` ask what the data door asks: `TableAccess` for a named relation, `VisibleTables` for a listing, on the catalog-resolved spelling so a policy bound to `Ledger` polices `DESCRIBE ledger`. Explicit ABAC denies govern, which legacy `CanAccessTable`/`FilterTables` cannot express (`tables:["*"]` says yes to everything). **PostgreSQL says otherwise and we diverge on purpose** — measured: `\d` and `\dt` as a role with no privileges print the full column list and all 95 tables. Metadata visibility is a product decision, not a wire-compatibility one; an entry in ADR-0012's divergence list. **Not covered, recorded rather than implied**: a client introspecting through `pg_catalog` is answered by `internal/server/pgwire/catalog_rows.go`, which is not filtered.
 
 
@@ -469,7 +478,18 @@ of as the worker error the re-spliced subquery text produced.
   (the row filter reaches the subquery's plan, and a masked relation named only
   there answers the mask instead of refusing),
   `TestADeniedScalarSubqueryLeavesPgwireAs42501` (the class and the exact text),
-  and the no-auth control — #945. The ninth spelling is also in
+  and the no-auth control — #945. The census asserts the message by EQUALITY on
+  the in-process doors, the two DAG ones included: `Contains` cannot see a
+  ROUTE NAME in front of the decision's sentence, which is how
+  `physical plan: permission denied for table "x"` and `table-less SELECT with
+  no distributed stage local execution: …` survived a clean round on the door a
+  deployed server uses.
+- `internal/server/sec5_subquery_grpc_test.go` — the gRPC cell of the same
+  census, through the bufconn server with the production interceptors, both
+  provider shapes, from both sides, plus `QueryStream`. Its fixture is SEEDED
+  first and a control asserts the outer relation is non-empty: the
+  single-process arm decides a scalar subquery's relation while EVALUATING it,
+  so a census over an empty fixture would pass without ever evaluating one. The ninth spelling is also in
   `TestADeniedSelectDisclosesNoRuleID` and
   `TestTheLegacyShapePolicesTheRelationsThePlanGROWS`, beside the eight that
   already refused.
