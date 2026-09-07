@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -629,5 +630,47 @@ func TestNewRunMerger_UnsupportedTypeErrors(t *testing.T) {
 	keys := []SortKey{{Column: "v", Order: Ascending}}
 	if _, err := newRunMerger(b.Schema, keys, []*runCursor{c}); err == nil {
 		t.Fatal("expected an error for an unsupported key type, got nil")
+	}
+}
+
+// A key the merged runs do not CARRY is an error, not a panic (#904).
+//
+// newRunMerger tested only the UPPER bound — `idx >= len(first.Columns)` —
+// and key.index answers -1 for a name the run does not carry, so the -1 fell
+// straight through to `first.Columns[-1].Type` and took the task down with an
+// index-out-of-range panic. The twin in window_external.go has guarded both
+// bounds since #585 and documents the fix on its own copy; this is the same
+// -1, one file over.
+//
+// The disposition is a REFUSAL rather than a skipped key because this
+// function's own doc says so: a key dropped from the comparison merges the
+// runs as if every value tied, which scrambles the k-way merge order with
+// nothing downstream able to see it.
+func TestNewRunMergerRefusesAKeyTheRunsDoNotCarry(t *testing.T) {
+	b := batch.NewRecordBatch([]parquet.Column{{Name: "v", Type: parquet.TypeInt64}}, 3)
+	for i := 0; i < 3; i++ {
+		b.Columns[0].SetValue(i, int64(i))
+	}
+	b.Len = 3
+	c := &runCursor{cur: b}
+	keys := []SortKey{{Column: "not_a_column", Order: Ascending}}
+	m, err := newRunMerger(b.Schema, keys, []*runCursor{c})
+	if err == nil {
+		t.Fatalf("newRunMerger accepted a key the runs do not carry (%v); every value "+
+			"on that key ties and the merge order is whatever the heap happens to do", m)
+	}
+	if !strings.Contains(err.Error(), "not_a_column") {
+		t.Errorf("refusal %q does not name the key", err)
+	}
+	// The key the runs DO carry still merges, so the refusal is about the
+	// missing name and not about the merger having been withdrawn.
+	b2 := batch.NewRecordBatch([]parquet.Column{{Name: "v", Type: parquet.TypeInt64}}, 3)
+	for i := 0; i < 3; i++ {
+		b2.Columns[0].SetValue(i, int64(i))
+	}
+	b2.Len = 3
+	if _, err := newRunMerger(b2.Schema, []SortKey{{Column: "v", Order: Ascending}},
+		[]*runCursor{{cur: b2}}); err != nil {
+		t.Fatalf("newRunMerger refused a key the runs carry: %v", err)
 	}
 }

@@ -192,10 +192,17 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 	// leaf [r, s, c] both hashed to "s.c" (the later leaf in file order
 	// silently won), so reading top-level ROW s could resolve to the
 	// leaf inside r instead, whose group has a different MaxDefLevel.
+	// FOLDED, like every other lookup in this package (#904). leaf.Path
+	// carries the FILE's capitalization and col.Name/field.Name the
+	// CATALOG's, so a byte-exact key read a ROW field written as `Name`
+	// against a column declared `name` as a MISS — and a miss here takes the
+	// all-NULL arm below, which is #448 one level down: the field is read
+	// away rather than reported. parquet.LeafIndex is a struct precisely so a
+	// caller cannot index it unfolded, and this second map bypassed it.
 	leafByPath := make(map[string]int, len(leaves))
 	for i, leaf := range leaves {
 		if len(leaf.Path) >= 2 {
-			leafByPath[strings.Join(leaf.Path, ".")] = i
+			leafByPath[foldLeafPath(leaf.Path)] = i
 		}
 	}
 
@@ -231,7 +238,7 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 				// the same page walk that decodes it.
 				measured := false
 				for j, field := range col.Fields {
-					key := col.Name + "." + field.Name
+					key := pqt.FoldName(col.Name) + "." + pqt.FoldName(field.Name)
 					childIdx, ok := leafByPath[key]
 					if !ok {
 						// The field is absent from THIS file — a field added
@@ -249,7 +256,8 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 					// this leaf-by-path map went wrong once already),
 					// checked before either the presence or the data read
 					// touches the resolved leaf.
-					if leaf := leaves[childIdx]; len(leaf.Path) == 0 || leaf.Path[0] != col.Name {
+					if leaf := leaves[childIdx]; len(leaf.Path) == 0 ||
+						pqt.FoldName(leaf.Path[0]) != pqt.FoldName(col.Name) {
 						return fmt.Errorf("reading ROW field %s.%s: resolved leaf path %v does not start with column %q", col.Name, field.Name, leaf.Path, col.Name)
 					}
 					// Only the FIRST leaf read carries the recorder: every
@@ -1633,4 +1641,20 @@ func copyNativeCoercedScatter(vec *batch.Vector, offset int, data pqt.Values, de
 		return fmt.Errorf("unsupported type coercion: %v → %v", fileType, catalogType)
 	}
 	return nil
+}
+
+// foldLeafPath is parquet.FoldName applied to every segment of a leaf's path,
+// joined — the key leafByPath is built and probed with (#904).
+//
+// It exists because the FILE spells a nested field the way its writer did and
+// the CATALOG spells it the way the table was declared, and this package's
+// rule for reconciling the two is FoldName everywhere else: parquet.LeafIndex
+// is a struct so that a caller cannot index it unfolded, and the by-path map
+// is the one lookup that was not built through it.
+func foldLeafPath(path []string) string {
+	parts := make([]string, len(path))
+	for i, p := range path {
+		parts[i] = pqt.FoldName(p)
+	}
+	return strings.Join(parts, ".")
 }

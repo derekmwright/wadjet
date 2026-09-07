@@ -87,10 +87,27 @@ func TimePartitionValues(t time.Time, keys []string) map[string]string {
 	return values
 }
 
-// MatchesFilter returns true if the partition values match all of the given filter values.
+// MatchesFilter returns true if the partition values match all of the given
+// filter values.
+//
+// A key the partition does not CARRY is not a mismatch (#904). Reading an
+// absent key out of the map yields "", which `!= v` for every non-empty filter
+// value, so a filter naming a column this partitioning scheme does not use
+// pruned EVERY partition — an empty answer for a query that has rows. The live
+// prune (`physical.matchesPartitionFilter`) skips an absent key and keeps the
+// partition, and the two arms may not disagree about what an absent partition
+// key means: one of them decides which files a query reads.
+//
+// This is the safe direction of the two. Keeping a partition the filter cannot
+// speak about costs a read the scan's own predicate then discards; dropping it
+// deletes rows from the answer with nothing downstream able to notice.
 func MatchesFilter(partValues map[string]string, filter map[string]string) bool {
 	for k, v := range filter {
-		if partValues[k] != v {
+		pv, ok := partValues[k]
+		if !ok {
+			continue
+		}
+		if pv != v {
 			return false
 		}
 	}

@@ -149,11 +149,42 @@ func TestMatchesFilterEmptyFilter(t *testing.T) {
 	}
 }
 
-func TestMatchesFilterMissingKey(t *testing.T) {
+// A key the partition does not CARRY is not a mismatch (#904).
+//
+// This test used to assert the opposite, which is how the defect was encoded:
+// reading an absent key yields "", `"" != "03"`, and EVERY partition was
+// pruned — an empty answer for a query that has rows. The live prune
+// (physical.matchesPartitionFilter) skips an absent key and keeps the
+// partition, and physical.TestBothPartitionPrunesAgreeOnAnAbsentKey holds the
+// two to the same answer.
+func TestMatchesFilterMissingKeyKeepsThePartition(t *testing.T) {
 	part := map[string]string{"year": "2026"}
 	filter := map[string]string{"month": "03"}
-	if MatchesFilter(part, filter) {
-		t.Error("MatchesFilter() = true for missing key, want false")
+	if !MatchesFilter(part, filter) {
+		t.Error("MatchesFilter() = false for a key this partitioning scheme does not " +
+			"carry; an absent key says nothing about the partition, and pruning on it " +
+			"drops rows the query asked for")
+	}
+	// The keys it DOES carry still decide, so this is not "an absent key
+	// disables the filter".
+	if MatchesFilter(part, map[string]string{"year": "2025", "month": "03"}) {
+		t.Error("MatchesFilter() = true where the key the partition DOES carry mismatches")
+	}
+	if !MatchesFilter(part, map[string]string{"year": "2026", "month": "03"}) {
+		t.Error("MatchesFilter() = false where the carried key matches")
+	}
+}
+
+// PrunePartitions over a filter naming a key no partition carries keeps them
+// all rather than returning nothing.
+func TestPrunePartitionsOnAnAbsentKeyKeepsEverything(t *testing.T) {
+	partitions := []PartitionInfo{
+		{Path: "year=2026", Values: map[string]string{"year": "2026"}},
+		{Path: "year=2025", Values: map[string]string{"year": "2025"}},
+	}
+	if got := PrunePartitions(partitions, map[string]string{"region": "us"}); len(got) != 2 {
+		t.Errorf("PrunePartitions() kept %d of 2 partitions for a key none of them "+
+			"carries; every row under them would be missing from the answer", len(got))
 	}
 }
 

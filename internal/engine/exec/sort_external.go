@@ -436,8 +436,26 @@ func newRunMerger(schema []parquet.Column, keys []SortKey, cursors []*runCursor)
 		}
 		first := live[0].cur
 		idx := key.index(first)
-		if idx >= len(first.Columns) {
-			continue
+		// BOTH bounds. key.index answers -1 for a name the merged run does
+		// not carry (columnIndexFallback), and testing only the upper one let
+		// that -1 through to `first.Columns[-1].Type` on the next line, which
+		// panics the task (#904). The twin in window_external.go has guarded
+		// both since #585 and documents this on its own copy.
+		//
+		// A miss is an ERROR here rather than a skipped key, for the reason
+		// this function's own doc gives: a key dropped from the comparison
+		// merges its runs as if every value tied, which scrambles the k-way
+		// merge order silently. The run WRITER (resolveSortKeysForBatches)
+		// still skips such a key and emits a run sorted on fewer of them —
+		// that skip is a deliberate, recorded choice for a missing COLUMN —
+		// so this raise is what keeps the spilled path from answering rows in
+		// an order nothing produced.
+		if idx < 0 || idx >= len(first.Columns) {
+			for _, c := range live {
+				c.close()
+			}
+			return nil, fmt.Errorf("sort merge: key %q is not a column of its spilled runs",
+				key.Column)
 		}
 		cmp := resolveSortCompareForKey(first.Columns[idx].Type, key, false)
 		if cmp == nil {
