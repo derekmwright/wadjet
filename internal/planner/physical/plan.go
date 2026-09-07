@@ -2812,14 +2812,26 @@ func (p *Planner) inferCTESchema(sql string, rows []map[string]any) []parquet.Co
 		return nil
 	}
 	schema := make([]parquet.Column, len(info.Columns))
+	names := make([]string, len(info.Columns))
 	for i, col := range info.Columns {
-		name := col.Alias
-		if name == "" {
-			name = col.Expr
+		names[i] = col.Alias
+		if names[i] == "" {
+			names[i] = col.Expr
 		}
+	}
+	// The key each POSITION appears under in the rows executeSubquery
+	// returns. Two output columns may share a name — `SELECT 1 AS x, 10 AS x`
+	// is legal SQL — and a row is a Go map, so the second would overwrite the
+	// first; subqueryRowsPerColumn suffixes every later duplicate with its
+	// position for exactly that reason. Reading by the bare NAME here made
+	// both positions answer with the FIRST column's value, which is #957.
+	keys := subqueryRowKeys(names)
+	for i := range info.Columns {
+		name := names[i]
+		key := keys[i]
 		typ := parquet.TypeString
 		if len(rows) > 0 {
-			if v, ok := rows[0][name]; ok {
+			if v, ok := rows[0][key]; ok {
 				switch v.(type) {
 				case int64:
 					typ = parquet.TypeInt64
@@ -2837,18 +2849,18 @@ func (p *Planner) inferCTESchema(sql string, rows []map[string]any) []parquet.Co
 						typ = parquet.TypeInt64
 						// Convert all rows' values from string to int64
 						for _, row := range rows {
-							if sv, ok := row[name].(string); ok {
+							if sv, ok := row[key].(string); ok {
 								if iv, err := strconv.ParseInt(sv, 10, 64); err == nil {
-									row[name] = iv
+									row[key] = iv
 								}
 							}
 						}
 					} else if _, err := strconv.ParseFloat(s, 64); err == nil {
 						typ = parquet.TypeFloat64
 						for _, row := range rows {
-							if sv, ok := row[name].(string); ok {
+							if sv, ok := row[key].(string); ok {
 								if fv, err := strconv.ParseFloat(sv, 64); err == nil {
-									row[name] = fv
+									row[key] = fv
 								}
 							}
 						}
@@ -2905,8 +2917,16 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 	}
 
 	// Apply column aliases if specified: WITH t(a, b) AS (...)
+	//
+	// POSITIONALLY, through the key each column really appears under. A
+	// column list is what makes a duplicate-name body legal and useful —
+	// `WITH RECURSIVE t(a, b) AS (SELECT 1 AS x, 10 AS x …)` — and reading
+	// both positions by the bare name `x` gave both aliases the FIRST
+	// column's value, so the working row collapsed and every later iteration
+	// read it: `1,10 | 2,100 | 3,10000` in PostgreSQL 17 came back
+	// `1,1 | 2,1 | 3,1` (#957).
 	if len(cte.Columns) > 0 && len(cte.Columns) <= len(schema) {
-		anchorRows = renameRowColumns(anchorRows, schema, cte.Columns)
+		anchorRows = renameRowColumnsPositional(anchorRows, schema, cte.Columns)
 		for i, name := range cte.Columns {
 			schema[i].Name = name
 		}
@@ -2959,6 +2979,9 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 			}
 		}
 	}
+	// …and the keys those names really occupy, for the same reason the anchor
+	// needs them: two recursive-term outputs may share a name.
+	recursiveRowKeys := subqueryRowKeys(recursiveColNames)
 
 	// Step 2: Fixed-point iteration
 	workTable := anchorRows
@@ -2977,7 +3000,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 
 		// Rename output columns to match CTE schema. The recursive SQL may
 		// produce different column names (e.g., "n + 1" vs "n").
-		newRows = renameRowColumnsFromTo(newRows, recursiveColNames, schemaNames)
+		newRows = renameRowColumnsFromTo(newRows, recursiveRowKeys, schemaNames)
 
 		if err := appendRowsColumnar(newRows); err != nil {
 			// Spill scratch failure mid-iteration: abandon materialization.
@@ -3208,6 +3231,54 @@ func renameRowColumnsFromTo(rows []map[string]any, srcNames, dstNames []string) 
 		result[ri] = newRow
 	}
 	return result
+}
+
+// subqueryRowKeys is the map key each POSITION of a result occupies in the
+// rows executeSubquery returns.
+//
+// It states subqueryRowsPerColumn's rule once so the readers cannot drift from
+// the writer: the first occurrence of a name keeps the name, and every later
+// column of that name carries `:<position>`. A colon cannot appear in an
+// identifier the binder resolves, so a disambiguated key collides with
+// nothing.
+func subqueryRowKeys(names []string) []string {
+	keys := make([]string, len(names))
+	seen := make(map[string]bool, len(names))
+	for i, n := range names {
+		k := n
+		if seen[k] {
+			k = fmt.Sprintf("%s:%d", n, i)
+		}
+		seen[k] = true
+		keys[i] = k
+	}
+	return keys
+}
+
+// renameRowColumnsPositional rebuilds each row under the target aliases,
+// reading column i by the key POSITION i occupies rather than by the schema's
+// name. A shorter alias list renames the LEADING columns and the rest keep
+// their own names, which is PostgreSQL's rule for a column list.
+func renameRowColumnsPositional(rows []map[string]any, schema []parquet.Column, aliases []string) []map[string]any {
+	keys := make([]string, len(schema))
+	names := make([]string, len(schema))
+	for i, c := range schema {
+		names[i] = c.Name
+	}
+	copy(keys, subqueryRowKeys(names))
+	out := make([]map[string]any, len(rows))
+	for ri, row := range rows {
+		nr := make(map[string]any, len(schema))
+		for i := range schema {
+			name := schema[i].Name
+			if i < len(aliases) {
+				name = aliases[i]
+			}
+			nr[name] = row[keys[i]]
+		}
+		out[ri] = nr
+	}
+	return out
 }
 
 // renameRowColumns remaps row keys from schema column names to the target aliases.
