@@ -1852,6 +1852,10 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// What an EMPTY inner input means for this lateral, decided BEFORE the
 	// key injection below adds a GROUP BY of its own. See lateralEmptyInput.
 	empty := lateralEmptyInputOf(subInfo, hasAgg, len(correlatedParts) > 0)
+	// keyRename maps a correlated inner column to the name the subquery's
+	// SELECT list publishes it under, when the two differ. See the comment on
+	// lateralPublishedKeyName below.
+	var keyRename map[string]string
 	if len(correlatedParts) > 0 {
 		// The key must be SELECTED — and, for an aggregated subquery, grouped.
 		// The rewrite above promotes the correlated equality into the join
@@ -1901,6 +1905,33 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 			if innerCol == "" {
 				continue
 			}
+			// THE JOIN KEYS ON THE NAME THE SUBQUERY PUBLISHES (#767).
+			//
+			// The key may be selected under an ALIAS — `SELECT t.g AS gg,
+			// COUNT(*) FROM t WHERE t.g = d.k GROUP BY t.g`. lateralSelects-
+			// Column sees the SOURCE and declines the injection, correctly:
+			// the value IS published. But the promoted equality still names
+			// `t.g`, which the subquery's output does not carry, so
+			// exec.HashJoin resolved the build key to index -1 — the
+			// degenerate all-rows-equal key — and the join answered ZERO
+			// rows where PostgreSQL 17 answers seven. Silent, on the
+			// single-process path only: both DAG arms answered correctly,
+			// which is what made it a two-path divergence nothing gated.
+			//
+			// Recording the published name here and rewriting the equality
+			// below is the whole repair. It is deliberately NOT the mirror
+			// case: an item whose ALIAS matches the key's name while its
+			// SOURCE is something else (`SELECT amount AS order_id`)
+			// publishes a different value under that name, and pointing the
+			// join at it would answer a plausible wrong number for an
+			// obvious zero. That one stays pinned and needs a hidden slot
+			// (ADR-0026 3a).
+			if pub, ok := lateralPublishedKeyName(subInfo.Columns, innerCol); ok {
+				if keyRename == nil {
+					keyRename = map[string]string{}
+				}
+				keyRename[strings.ToLower(strings.TrimSpace(innerCol))] = pub
+			}
 			if hasAgg {
 				// Add to GROUP BY if not already present
 				found := false
@@ -1940,6 +1971,11 @@ func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTED
 	// and build keys (right child = inner table) correctly.
 	for i, part := range correlatedParts {
 		correlatedParts[i] = normalizeCorrelatedEquality(part, leftAliases)
+	}
+	// …and then spell the INNER side with the name the subquery publishes,
+	// which normalization has just put on the right of the equality.
+	for i, part := range correlatedParts {
+		correlatedParts[i] = renameCorrelatedInnerRef(part, keyRename, join.RightAlias)
 	}
 
 	// The correlation the DECORRELATION produced and the ON the QUERY WROTE
@@ -2075,6 +2111,73 @@ func lateralKeySelectItem(innerCol string) (plansql.SelectColumn, bool) {
 		col.TableRef = ref.Table
 	}
 	return col, true
+}
+
+// lateralPublishedKeyName returns the name a LATERAL subquery's SELECT list
+// publishes innerCol under, when that name is NOT innerCol's own.
+//
+// The decorrelation promotes the correlated equality into the join condition,
+// where it names the INNER column — so the join can only key on it if the
+// subquery's output carries a column of that name. `SELECT t.g AS gg …` does
+// carry the value and does not carry the name, which is the gap this closes.
+//
+// ok=false covers three things, all of which need no rewrite: the list does
+// not publish the key at all (lateralSelectsColumn's caller injects it), it
+// publishes it under its own name, or it publishes it through a star.
+//
+// The item's SOURCE has to be the key. An item whose ALIAS merely matches the
+// key's name (`SELECT amount AS order_id`) publishes a DIFFERENT value under
+// that name, and keying on it would answer a plausible wrong number where the
+// engine answers an obvious zero today — protocol item 8's rule, and the
+// boundary pinned as `boundary_inner_alias_shadowing_the_key_answers_nothing`.
+func lateralPublishedKeyName(cols []plansql.SelectColumn, innerCol string) (string, bool) {
+	inner := strings.TrimSpace(innerCol)
+	bare := inner
+	if node, err := plansql.ParseExpression(innerCol); err == nil {
+		if ref, ok := node.(*plansql.ColRef); ok {
+			bare = ref.Column
+		}
+	}
+	for _, c := range cols {
+		if c.Star || c.IsAgg || c.Alias == "" {
+			continue
+		}
+		sourceIsKey := strings.EqualFold(strings.TrimSpace(c.Expr), inner) ||
+			(c.ColumnRef != "" && (strings.EqualFold(c.ColumnRef, inner) ||
+				strings.EqualFold(c.ColumnRef, bare)))
+		if !sourceIsKey {
+			continue
+		}
+		if strings.EqualFold(c.Alias, bare) {
+			return "", false // published under its own name
+		}
+		return c.Alias, true
+	}
+	return "", false
+}
+
+// renameCorrelatedInnerRef rewrites a NORMALIZED correlated equality's inner
+// side — the right of the `=`, which normalizeCorrelatedEquality has just put
+// there — to the name the subquery publishes, qualified by the lateral's own
+// alias when it has one so the reference cannot bind to an outer column of the
+// same name.
+func renameCorrelatedInnerRef(part string, keyRename map[string]string, rightAlias string) string {
+	if len(keyRename) == 0 {
+		return part
+	}
+	eq := strings.Index(part, "=")
+	if eq <= 0 || part[eq-1] == '!' || part[eq-1] == '<' || part[eq-1] == '>' {
+		return part
+	}
+	inner := strings.TrimSpace(part[eq+1:])
+	pub, ok := keyRename[strings.ToLower(inner)]
+	if !ok {
+		return part
+	}
+	if rightAlias != "" {
+		pub = rightAlias + "." + pub
+	}
+	return strings.TrimSpace(part[:eq]) + " = " + pub
 }
 
 // lateralSelectsColumn reports whether a subquery's select list already
