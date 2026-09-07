@@ -671,6 +671,40 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 			out[strings.ToLower(name)] = true
 		}
 		return out
+	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+		// A set operation whose arms disagree about a DECIMAL's (p,s) emits
+		// that column with NO typmod, and a projection ABOVE it must not
+		// "keep" one (#884 round-1 B1).
+		//
+		// This arm is what makes ADR-0024's sentence true. `emittedColDecimal`
+		// now names such a column with `DecimalCommon`'s reconciled (p,s),
+		// because the arithmetic walk needs a scale to compute exactly on —
+		// and that same map is what `declaredTypmod`'s ColRef arm reads for a
+		// bare projection over the set operation. So the wire started sending
+		// numeric(20,6) for `SELECT v FROM (numeric(9,2) UNION ALL
+		// numeric(20,6)) x` where PostgreSQL sends numeric with typmod -1
+		// (measured through pg_attribute), on the derived-table, CTE, ORDER
+		// BY, EXCEPT and NULL-arm spellings. The CARRIER and the WIRE want
+		// different answers about the same node, and this is the seam that
+		// separates them: the carrier keeps the reconciled scale, the wire is
+		// told the column carries no modifier.
+		//
+		// `setOpWireUnconstrainedDecimal` already answers this when the set
+		// operation IS the query's output; the disagreeing set is the SAME
+		// function, so the two spellings cannot drift apart.
+		//
+		// Only the DISAGREEING columns: `numeric(9,2) UNION ALL numeric(9,2)`
+		// keeps numeric(9,2) on the server, and this map is "not a bare copy
+		// of a stored column", not "under a set operation".
+		dis := setOpArmDecimalDisagreements(n)
+		if len(dis) == 0 {
+			return nil
+		}
+		out := make(map[string]bool, len(dis))
+		for name := range dis {
+			out[strings.ToLower(name)] = true
+		}
+		return out
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil

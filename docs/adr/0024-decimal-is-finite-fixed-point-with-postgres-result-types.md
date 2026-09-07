@@ -400,13 +400,44 @@ not bigint — an unknown arm contributes no type), folds the rest through
 Two walks over one question now answer from one place, and the declared schema
 and the emitted-type map cannot disagree about a column they both describe.
 
-The TYPMOD divergence ADR-0012 item 12 records is unchanged and is the reason
-the two answers differ in what they claim: PostgreSQL's `numeric(9,2) ∪
-numeric(18,4)` is `numeric` with typmod −1 and prints each value at its own
-scale, and a wadjet DECIMAL vector has exactly one scale, so the CARRIER takes
-`DecimalCommon`'s (18,4) while the WIRE keeps declaring unconstrained through
-`setOpArmDecimalDisagreements`. The digits are PostgreSQL's; the trailing zeros
-are the open item (#764, below).
+**The CARRIER and the WIRE want DIFFERENT answers about the same node, and the
+seam that separates them is `emittedComputedCols`.** (Corrected 2026-09-06,
+round-1 review B1 — the first version of this paragraph asserted the outcome
+without the mechanism, and the code did not have it.)
+
+PostgreSQL's `numeric(9,2) ∪ numeric(20,6)` is `numeric` with typmod −1 —
+measured through `pg_attribute` for the root spelling AND for a projection over
+it, a CTE, an ORDER BY, an EXCEPT and a NULL arm — and it prints each value at
+its own scale. A wadjet DECIMAL vector has exactly one scale, so the CARRIER
+must take `DecimalCommon`'s (20,6) for the arithmetic above it to be exact.
+That is why `emittedColDecimal` names the column: the arithmetic walk reads
+that map.
+
+`declaredTypmod`'s ColRef arm reads the SAME map, so naming the column made a
+bare projection over the set operation "keep" a modifier PostgreSQL drops: the
+wire sent `numeric(20,6)` (typmod 1310730) on all five non-root spellings,
+where base and PostgreSQL both send −1. A right → wrong move on the wire, and
+it is exactly the defect `setOpArmDecimalDisagreements` (#542, #587, item 5's
+"one −1 anywhere in the fold makes the result −1") exists to prevent — invisible
+to the corpus and to both oracle arms, because the existing pin covers only the
+spelling where the set operation IS the query's output.
+
+The separation is a set-operation arm in `emittedComputedCols`, the walk that
+already names "columns a subtree emits that are NOT a bare copy of a stored
+column" for a window output, an aggregate output and a computed projection. A
+DECIMAL column whose set-operation arms DISAGREE about (p,s) is the same kind of
+thing, and the disagreeing set is `setOpArmDecimalDisagreements` itself — the
+same function `setOpWireUnconstrainedDecimal` already asks when the set
+operation is the root, so the two spellings cannot drift apart. Only the
+DISAGREEING columns: `numeric(9,2) ∪ numeric(9,2)` keeps `numeric(9,2)` on the
+server (typmod 589830, measured) and keeps it here.
+
+Gated on the WIRE by `pgwire.TestASetOperationDeclaresAnUnconstrainedNumericOnTheWire`,
+which reads `FieldDescriptions[0].TypeModifier` through pgx for all six
+spellings plus the agreeing control, and asserts the rendered VALUE beside each
+one — so a "fix" that restored the typmod by dropping the reconciliation fails
+it. The digits are PostgreSQL's; the trailing zeros are the open item (#764,
+below).
 
 **"At every value-producing site" includes every POSITION the same expression
 can be written in.** (Added 2026-09-03, #841.) An expression has ONE
