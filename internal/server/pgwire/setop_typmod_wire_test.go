@@ -88,9 +88,15 @@ func TestASetOperationDeclaresAnUnconstrainedNumericOnTheWire(t *testing.T) {
 		// The five spellings B1 measured as numeric(20,6) after #884.
 		{"derived_table", `SELECT v FROM (` + mixed + `) x ORDER BY v LIMIT 1`,
 			-1, "0.000001", "0.000001"},
+		// `pgRow` is a TIE here and is annotated as one: 12.75 and 12.750000
+		// are the same number, so `ORDER BY v DESC LIMIT 1` may return either
+		// row on the server and both spellings have been observed (ADR-0013's
+		// legal nondeterminism). This engine's text is stable at the
+		// carrier's single scale whichever row wins, which is why `want` is
+		// an assertion and `pgRow` is a note.
 		{"derived_table_order_by",
 			`SELECT v FROM (` + mixed + `) x ORDER BY v DESC LIMIT 1`,
-			-1, "12.750000", "12.75"},
+			-1, "12.750000", "12.75 or 12.750000 — a tie"},
 		{"cte", `WITH c AS (` + mixed + `) SELECT v FROM c ORDER BY v LIMIT 1`,
 			-1, "0.000001", "0.000001"},
 		{"except",
