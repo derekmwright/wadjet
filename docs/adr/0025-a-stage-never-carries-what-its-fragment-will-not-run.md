@@ -1,6 +1,6 @@
 # ADR-0025: A stage never carries a predicate or a projection its fragment will not run
 
-Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a consumer that resolves a column by a SECOND spelling is NOT SETTLED, and #770 is deferred with its census)
+Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a consumer that resolves a column by a SECOND spelling is NOT SETTLED, and #770 is deferred with its census; SETTLED 2026-09-07 by arc J2 — a consumer binds through the identity its PRODUCER published, and the payload is widened only for a value no published spelling reaches (#770, #947, #949))
 
 ## Context
 
@@ -317,18 +317,21 @@ still wrong. It refuses with the sentinel, so the coordinator answers the query
 locally instead of panicking — verified by disabling the type repair and
 watching the same SQL answer correctly through the refusal.
 
-## NOT SETTLED: a consumer that resolves a column by a SECOND spelling (2026-09-06, #770)
+## SETTLED: a consumer binds through the identity its PRODUCER published (2026-09-07, #770, #947, #949)
 
 The sections above are about a stage carrying a predicate or a projection its
-fragment will not RUN. This is the mirror, and it is an OPEN position rather
-than a decided one: a stage whose fragment WILL run something, over a column
-its payload does not carry.
+fragment will not RUN. This is the mirror: a stage whose fragment WILL run
+something, over a column its payload does not carry — or carries under another
+name. It was recorded here as an OPEN position on 2026-09-06 and is settled by
+arc J2.
 
 A join stage's `Columns` is an OutputFilter and its exchanges' are payload
 manifests, both built from the join node's `NeededColumns` at stage emission.
-`NeededColumns` spells the name the QUERY wrote. Four consumers spell something
-else, and where the two differ the column is dropped and the consumer reads
-NULL — or fails:
+`NeededColumns` spells the name the QUERY wrote. A JOIN, meanwhile, publishes
+names of its own: `joinOutputSchemaWithMapping` emits the probe's columns and
+then the build's with every DUPLICATE bare name QUALIFIED by its owning alias.
+Six consumers spell something else, and where the two differ the value is
+dropped, or found under a name that belongs to the other arm:
 
 - a GROUP BY key has a PUBLISHED name and a RESOLUTION spelling (ADR-0026 §2),
   and where the two differ the resolution spelling is a name no payload list
@@ -337,26 +340,63 @@ NULL — or fails:
   the EXPRESSION that builds it (#554), so it reads the definition's sources;
 - an aggregate ARGUMENT naming the alias is re-spelled to the source;
 - a WINDOW argument naming it is re-spelled the same way, and there the
-  DECLARATION goes with the value — FLOAT64 where every other arm says numeric.
+  DECLARATION goes with the value;
+- an ORDER BY term names an OUTPUT column, and the fold that puts the sort on
+  the producing aggregate leaves it addressing the producer's SOURCE names
+  (#947);
+- and the DECLARATION itself: a producer that publishes an expression under
+  its own text is read as arithmetic by the consumer above it, which then
+  types the value from columns that producer no longer emits (#949).
 
-All four are one query at #770:
+### The decision
 
-	SELECT DISTINCT x.w AS xw, y.w AS yw
-	  FROM (SELECT id, a AS w FROM t) x
-	  JOIN (SELECT id, b*100 AS w FROM t) y ON x.id = y.id
-	  JOIN t u ON x.id = u.id
-	 WHERE x.w > 1
+**A consumer binds a column through the identity its PRODUCER published. The
+payload is widened only for a value that NO published spelling reaches.**
 
-PostgreSQL answers five rows. The DISTINCT spelling fails the SHUFFLED arm
-outright (`GROUP BY key "w" is not a column of its input`) and the UNION
-spelling answers 2 rows with `yw` NULL on BOTH DAG arms, silently, the dedup
-collapsing five distinct pairs into two. The broadcast arm fuses all three
-relations into ONE join, never crosses the boundary, and is right — which is
-why the arms disagree rather than both being wrong.
+`physical.bindConsumersToPublishedIdentity` runs at the end of planning, after
+`ensureJoinCarriesEvaluatedColumns` and `ensureJoinCarriesGatherOutputs`, and
+asks the stream the fragment will really see — `aggregateInputStreamColumns`
+with the narrowing lists APPLIED. That is a different question from the one
+`resolveStageGroupKeys` asks: that pass runs BEFORE the payload is settled and
+asks what the arms can SUPPLY, and it must, because the carry pass is what
+makes a chosen value reachable. Both are needed. The first picks the VALUE,
+the second picks its NAME.
 
-### Why the obvious repair is not the decision
+Two phases, and the order is the whole of the argument that it costs nothing:
 
-Two have been built and withdrawn.
+1. **CARRY** every value no spelling on the stream reaches, cheapest candidate
+   first — the ALIAS the arm's fragment may publish, then the SOURCE column a
+   plain rename reads. A definition's columns are never carried: recomputing a
+   value the arm already computed is a second carry AND a second evaluation.
+2. **RESPELL** every consumer against the stream those carries produced.
+
+`bindStreamColumn` is the plan-time mirror of the runtime resolver
+(`exec.columnIndexFallback`, which the group keys, the aggregate inputs, the
+sort keys and the join keys all come through): the exact spelling, then the
+BARE part of a qualified reference, then a UNIQUE `.bare` suffix. Ambiguity
+DECLINES, which is the half `columnResolves` does not have and the half that
+decides whether a value is really reachable — that checker answers "could
+anything here be this name" and accepts two arms spelling `.w`, while the
+engine refuses to guess an arm (#742). A plan-time test that accepts what the
+runtime rejects reports a reachable value where the task will fail.
+
+`bindStreamColumnFromArm` adds the constraint that makes a SUCCESSFUL bind
+still wrong. `SUM(y.w + x.w)` over two arms that both publish `w` binds both
+references to the probe's `w` through the strip-the-qualifier step and answers
+2 x SUM(y.w) — 9650.0000 where PostgreSQL answers 4865.2500, silently. Asking
+whether the bind landed on the arm the reference NAMES is what separates "the
+payload has this value" from "the payload has a value of this name".
+
+Each consumer records its candidate spellings at emission and settles them
+here, which is ADR-0026 §2's carrier generalized: `AggSpec.InputRefs` and
+`WindowColSpec.InputRefs` hold the alias, its source column and its defining
+expression (planner-only; the wire carries neither), and
+`SortKeySpec.WrittenTerm` holds the ORDER BY term exactly as the query wrote
+it, because `Column` is rewritten by several passes before planning ends and
+"which OUTPUT column does this term name" cannot be asked of the rewritten
+field.
+
+### Why the two earlier repairs were not the decision
 
 **Materializing the contested rename** was withdrawn earlier: a resolver that
 returns the qualified name and a stream that ships the probe's copy bare stop
@@ -364,37 +404,60 @@ agreeing, and it moves three shapes in
 `TestAWindowBetweenTheSelectListAndItsJoinThreeArms` from right to wrong.
 
 **Carrying the second spelling down, bounded by "the consuming stage already
-names it"**, was built in arc H2 and withdrawn in the same branch. It closed the
-filed query at exactly THREE relations and reopened at four: the bound is a
-MODEL of where the value can be needed, not a fact about it, and rule 11 does
-not ship a fix bounded by a model the same commit knows to be incomplete. Add
-one more relation on the same key and the stage the key is computed on no longer
-names the spelling itself, so the push-down never starts.
+names it"**, was built in arc H2 and withdrawn in the same branch. It closed
+the filed query at exactly THREE relations and reopened at four: the bound is a
+MODEL of where the value can be needed, not a fact about it. Nothing in the
+decision above asks whether a stage already names anything — it asks the
+stream what it will ship, and the four- and five-relation shapes are gate cells.
 
 **Carrying it unconditionally** does close every shape and is a payload
-widening: measured, it put `n_name` / `n1.n_name` / `n2.n_name` onto eight TPC-H
-joins and exchanges across Q05/Q07/Q08/Q09/Q10 and `c_name` / `l_quantity` onto
-two Q18 joins, each a second carry of a value the chained link's own `Columns`
-already supplies.
+widening: measured, it put `n_name` / `n1.n_name` / `n2.n_name` onto eight
+TPC-H joins and exchanges across Q05/Q07/Q08/Q09/Q10 and `c_name` /
+`l_quantity` onto two Q18 joins. The decision above pays none of it, and the
+measurement is the gate: `TestTPCHStageDumpGolden` is byte-identical across
+every commit of arc J2, because every TPC-H consumer's spelling already binds
+and a respell costs no bytes.
 
-### What the decision has to be
+### What is gated
 
-Either the consumer resolves through the link's PUBLISHED IDENTITY — ADR-0026's
-two names applied to join and exchange consumers, so a consumer asks the
-producer what it calls the value instead of guessing a spelling and hoping the
-payload carries it — or a general carry whose payload cost is MEASURED rather
-than assumed prohibitive. Bytes on the wire is a metric, not a veto: the eight
-lines above are a number to weigh, and no one has weighed them against the
-queries the carry makes answerable.
+`coordinator.TestJ2AJoinConsumerBindsThePublishedIdentity` (the DISTINCT,
+GROUP BY, UNION, UNION ALL, aggregate-argument, HAVING, expression-argument and
+window-argument spellings, at three, four and five relations and with three
+derived arms, plus six controls), `TestJ2AnOrderByTermNamesAnOutputColumn`
+(#947) and `TestJ2ADistinctArmComputedColumnKeepsItsType` (#949), each on four
+arms against live PostgreSQL 17.11.
+`coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred`, the fifteen-cell
+census the deferral was recorded as, is DELETED: every shape in it answers.
 
-That is an arc with its own brief. Until it lands, the whole shape family is
-censused fail-on-agree in
-`coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred` — thirteen pinned
-cells (the DISTINCT / GROUP BY / UNION / UNION ALL / swapped-arms spellings, the
-four- and three-arm boundary shapes, COUNT(DISTINCT) and a HAVING term, the bare
-and EXPRESSION aggregate arguments, the window arm, and the window over the
-alias with its declaration) and four controls that answer. Closing #770 means deleting cells from that
-table.
+### NOT settled: a window's PARTITION BY key, and a SELECT list nothing runs
+
+Two shapes this decision does not reach, both pinned fail-on-agree.
+
+**A window's PARTITION BY key** is the sixth consumer and it is bound at
+EMISSION, because the key is also the stage's DISTRIBUTION and rewriting it
+after `EnsureDistribution` would leave the two disagreeing. `resolveWindowKeys`
+settles it ARM-BLIND, so `PARTITION BY x.w` over two arms that both publish `w`
+binds the other arm's column; that column is distinct on every row, so each row
+becomes its own partition and the window answers its own value where
+PostgreSQL answers the partition's total. Wrong on ALL FOUR arms, so a
+wadjet-vs-PostgreSQL divergence rather than a two-path one. Pinned in
+`TestJ2AJoinConsumerBindsThePublishedIdentity` with PostgreSQL's answer beside
+it, together with the distinct-alias twin — right on the local path, refused on
+both DAG arms — as the control that says the first is about the collision. The
+repair has to make the arm-aware choice at emission time, where the stream
+model this decision uses is not yet available; that is its own arc.
+
+**A SELECT list no stage runs** is #813 item 1's residual, and it is ADR-0025's
+own first question rather than this one. `CAST(SUM(x) OVER () AS BIGINT) AS v`
+is computed by no stage: `attachScanSelectProjections` attaches the outermost
+list over a window producer but not this item, so `sort-2` orders on `v` and
+its input carries no such column, and `assertSortKeysResolve` refuses the plan.
+The coordinator then answers on its local pipeline, which declares INT64 and
+gives PostgreSQL's digits — so the DIVERGENCE the issue filed is closed and
+what remains is a routing counter, asserted as one in
+`coordinator.TestH2TheWindowDeclaredTypeCensus`. Making the DAG declare it
+means making some fragment RUN the item, which is the attach pass's decision
+and not a spelling.
 
 ## A carrier is never handed what it cannot evaluate
 

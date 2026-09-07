@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day after review — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -1498,3 +1498,42 @@ fails the paren-nested, identifier-case and ORDER BY entries; stubbing
 `TestStageCarriesOneGroupKeyList`; and making `resolveStageGroupKeys` a no-op
 fails `TestEveryComputedKeyResolvesAgainstItsProducer` on the join shapes and
 `TestWindowOutputAsAGroupKeyMatchesPostgres` on every #777 and #781 entry.
+
+## §6. The two names are not a property of GROUP BY keys (2026-09-07, arc J2)
+
+§2 gave a GROUP BY key a PUBLISHED name and a RESOLUTION spelling and carried
+both on the Stage. The two names stopped at the aggregate, and every consumer
+below or beside one was left guessing a spelling and hoping the payload
+carried it under exactly that text. Five more consumers have the same two
+names, and #770, #947 and #949 are what that cost:
+
+| consumer | its second spelling |
+|---|---|
+| a UNION arm's projection | the derived alias rewritten into the expression that DEFINES it (#554) |
+| an aggregate ARGUMENT | the alias re-spelled to its source, or left as the alias |
+| a WINDOW argument | the same, and the DECLARATION goes with the value |
+| an ORDER BY term | the OUTPUT column it names, versus the producer's SOURCE names the fold leaves it addressing |
+| a projection's DECLARED TYPE | the producer's own declaration, versus the expression re-read as arithmetic |
+
+The rule is the same one, stated once: **a consumer binds through the identity
+its PRODUCER published**, and where the producer publishes nothing for the
+value, the payload carries it. The mechanism, its two phases, its plan-time
+mirror of the runtime resolver and its measured payload cost (zero — the TPC-H
+stage-dump golden is byte-identical) are in ADR-0025's SETTLED section, which
+is where a payload question belongs; this section records only that §2's
+carrier is the pattern the others follow.
+
+Each consumer records its candidates at emission and settles them at the end
+of planning, exactly as `GroupKeyResolution.Alias`/`Def` does:
+`AggSpec.InputRefs` and `WindowColSpec.InputRefs` (the written spelling, the
+source column, the defining expression) and `SortKeySpec.WrittenTerm` (the
+ORDER BY term as the query wrote it). None of the three reaches the wire.
+
+§2c holds one node further out than it was written. "A name is never re-read
+as structure" was about a GROUP BY key's text; #949 is the same sentence about
+a DECLARATION. The DISTINCT lowering makes every SELECT item a group key, so
+`SELECT DISTINCT a * 2 AS v` publishes `a * 2` as a COLUMN and emits no `a` at
+all — and the projection above it, read as arithmetic, looked for `a`, found
+nothing and fell to the float rule. An exact DECIMAL declared FLOAT64 on every
+arm, and on the DAG a DECIMAL value written into a float vector, which is what
+#361's guard is for.

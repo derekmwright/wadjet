@@ -877,6 +877,11 @@ A name that is NOT an input column still binds the output alias in `GROUP BY`:
 `SELECT g*0 AS kk, COUNT(*) FROM t GROUP BY kk` is one group. The rules apply
 inside a derived table and a CTE exactly as at the top level.
 
+`ORDER BY` binds the output column even when the SELECT list SWAPS two names,
+and on every execution path: `SELECT DISTINCT a AS b, b AS a FROM t ORDER BY a`
+orders by the output `a`, whose value is the source `b`. The distributed path
+ordered by the source `a` before v0.18.58.
+
 ### GROUPING SETS
 
 Generate multiple levels of aggregation in a single query:

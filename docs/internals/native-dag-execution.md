@@ -404,15 +404,22 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
   so the spelling names neither. That one is NOT materialized — the repair was
   built and withdrawn, because a resolver that returns the qualified name and a
   stream that ships the probe's copy bare stop agreeing (ADR-0025's section
-  names the four shapes it moved from right to wrong). **#770 is OPEN**, and it
-  is the mirror of this file's convention rather than a case of it: four
+  names the four shapes it moved from right to wrong). It is answered the OTHER
+  way round instead, and that is **the mirror of this file's convention**: the
+  consumer asks the PRODUCER what it calls the value rather than guessing a
+  spelling and hoping the payload carries it. `bindConsumersToPublishedIdentity`
+  (`published_identity.go`, ADR-0025's SETTLED section, #770/#947/#949) runs
+  last, over the stream each fragment will really see, and re-spells six
   consumers — a GROUP BY key's resolution spelling, a UNION arm's rewritten
-  projection, an aggregate argument and a window argument — resolve the alias to
-  a name `NeededColumns` never mentions, and the join underneath drops it. A
-  carry bounded by "the consuming stage already names it" was built in arc H2
-  and withdrawn: it closes the filed query at three relations and reopens at
-  four. See ADR-0025's NOT SETTLED section and the thirteen pinned cells in
-  `coordinator.TestH2TwoJoinArmsPublishingOneAliasIsDeferred`.
+  projection, an aggregate argument, a window argument, an ORDER BY term and a
+  projection's declared TYPE — carrying a value only where NO published
+  spelling reaches it. `TestTPCHStageDumpGolden` is byte-identical across the
+  whole arc: every TPC-H consumer already binds, so a respell costs no bytes.
+  The two shapes it does not reach — a window's PARTITION BY key, which is bound
+  at emission because it is also the stage's distribution, and a SELECT list no
+  stage RUNS (#813 item 1) — are pinned fail-on-agree in
+  `coordinator.TestJ2AJoinConsumerBindsThePublishedIdentity` and
+  `coordinator.TestH2TheWindowDeclaredTypeCensus`.
 - once an arm's SELECT list is materialized its stream is the arm's OUTPUT, so
   the join names it with `joinArmAlias` and `materializedBuildColOrigins` — the
   MATERIALIZED answers — rather than `stageBuildTableAlias`'s raw one. The
@@ -433,6 +440,7 @@ is MATERIALIZED instead" (`join_input_projection.go`, ADR-0025):
 | the gather's result schema | `resolveOutputRenameSource` | `output_rename_resolve.go` |
 | a WHERE above the Project | `logical.ResolveFilterThroughProjects` | `logical/filter_project_pushdown.go` |
 | WHICH GROUP KEY a SELECT item / HAVING term / sort key IS | `plansql.ExprIdentity` → `groupKeyOutputs` / `groupKeyByIdentity` | `group_key_identity.go` |
+| what the PRODUCER calls the value any of the above resolves to, over the finished stage graph | `bindConsumersToPublishedIdentity` → `bindStreamColumn` / `publishedSpellingFor` / `producerSpellingForRef` | `published_identity.go` |
 
 The last one is the answer to a question every resolver above an aggregate
 has to ask first, and until #720/#723/#725 each of them answered it on its
