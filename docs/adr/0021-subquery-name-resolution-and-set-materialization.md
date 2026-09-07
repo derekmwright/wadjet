@@ -1004,7 +1004,7 @@ after, on all four arms (`CorrelatedLocalRoutes` delta in brackets):
 | an inner BARE name beside an outer QUALIFIED one, over a CTE and over a base table | 0 per outer row [1] | 1,2,3 [1] | 1,2,3 |
 | `EXISTS` under `OR` / `NOT` / `CASE`, uncorrelated | loud on both DAG arms | right [0] | right |
 | ctl qualified / aliased / base table / top level | right | right | right |
-| ctl a bare star over a join, and the qualified star naming the side that HAS the name | right | right | right |
+| a bare star over a join, and the qualified star naming the side that HAS the name | 4616 [1] | 10 [0] | 10 |
 | ctl genuinely correlated (4 spellings) | right [1] | right [1] | right |
 
 The three controls are the boundary. Their VALUES were right before this change
@@ -1047,9 +1047,11 @@ column literally named `dim.*`, which no executor schema carries — all four ar
 failed that way before), a RECURSIVE CTE named inside a subquery (§1b: it has no
 stage lowering, and the DAG meets that as an unbuildable stage rather than as
 §1c's routed refusal), and a UNION of two `SELECT *` arms as the subquery's FROM
-(the union stage's column pruning drops a column its own arms declare). wrong →
-right on two arms and loud on two is within doctrine; each pin fails the day its
-gap closes.
+(the union stage's column pruning drops a column its own arms declare), and a
+star over a JOIN inside a derived table that is then FILTERED — the builder does
+not publish that star's columns to the filter above it, on all four arms. wrong
+→ right on two arms and loud on two, or wrong → loud on four, is within
+doctrine; each pin fails the day its gap closes.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
@@ -1130,6 +1132,40 @@ task still failed while this section claimed the shape worked. Walking the
 boolean tree is what makes the rule true of a PREDICATE rather than of one shape
 of predicate; a `HAVING` and a `JOIN … ON` reach the same walk and are cells of
 the gate.
+
+**In a boolean position the walk hoists ONLY the EXISTS leaves, and that bound
+is semantic rather than cautious.** A boolean connective SHORT-CIRCUITS, and
+hoisting is UNCONDITIONAL evaluation: it turns a subquery the query may never
+reach into one the query always runs, so every way that subquery can fail
+becomes the query's answer. Measured on PostgreSQL 17 over the same five-row
+subquery:
+
+```sql
+… WHERE d.id < 100 OR d.id > (SELECT id FROM t WHERE id < 5)   -- 9 rows
+… WHERE d.id < 0   OR d.id > (SELECT id FROM t WHERE id < 5)   -- 21000
+```
+
+The first answers because the left arm is true for every row and the right one
+is never needed; the second raises because it IS needed. **The semantics
+settled here are PostgreSQL's, and they are LAZY**: the subquery in a
+short-circuitable arm is evaluated only where the arm is reached, so a
+cardinality violation in an arm that is never reached is not this query's
+answer. This engine's single-process path agrees with PostgreSQL on both,
+because it evaluates per row and lazily rather than as an InitPlan — the two
+disagree about WHEN the subquery runs, and agree about every observable of it.
+Hoisting made the first 21000 as well, which is a query PostgreSQL answers,
+refused.
+
+An `EXISTS` is the leaf where hoisting is sound: it reads no outer row, it is a
+BOOLEAN rather than a value, and it cannot raise the cardinality violation that
+is the failure at issue. A SCALAR or `IN` leaf in a short-circuitable position
+therefore keeps whatever disposition its path had — right on the single-process
+arms, a loud task failure on the DAG, pinned per arm beside PostgreSQL's answer
+in `coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation`. Answering it
+there needs the DAG to evaluate a subquery lazily per row, which is a lowering
+and not a scope repair. The one place a hoisted EXISTS's failure IS the query's
+answer is an authorization refusal, and that is ADR-0034's rule rather than an
+exception to this one.
 
 **A refusal keeps its own sentence.** The evaluation asks the shared access
 lookup for every relation the subquery's plan reads, and discarding its error

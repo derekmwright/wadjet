@@ -89,6 +89,10 @@ type i1Cell struct {
 	// want is what PostgreSQL 17 answers over these rows, rendered by
 	// e3Render: "cols | r0c0,r0c1 | …".
 	want string
+	// wantErr, when set, says PostgreSQL 17 RAISES on this shape and names a
+	// substring of the sentence every unpinned arm must raise too. A right
+	// answer where PostgreSQL refuses is as much a divergence as a wrong one.
+	wantErr string
 	// routes is the routing delta each DAG arm must produce for this one
 	// query. The zero value says the DAG EXECUTED the shape as stages.
 	routes a2Routes
@@ -320,9 +324,14 @@ func i1Cells() []i1Cell {
 			sql: `SELECT (SELECT COUNT(*) FROM (SELECT dim.* FROM typemx_dim dim JOIN typemx tx ` +
 				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
 			want: `n | 4616`, routes: a2Routes{Correlated: 1}},
-		// The other side of the same join DOES publish `id`, so the same
-		// spelling one alias over is INNER — the discriminator that separates
-		// "we read the qualifier" from "we stopped expanding stars".
+		// CONTROLS, and what they attempt. The other side of the same join
+		// DOES publish `id`, so the same spelling one alias over is INNER.
+		// They do not gate the star commit — the over-claim it replaced also
+		// called `id` inner here, so they pass with it reverted — they gate
+		// the LAZY repair of it: a fix that answered cells 30/31 by making
+		// every qualified star UNKNOWN would send `id` to the outer scope here
+		// and answer 4616 for PostgreSQL's 10. Both were 4616 at the arc's
+		// base and are gated as values by the arc's first commit.
 		{name: "32_ctl_the_qualified_star_names_the_side_that_has_the_name",
 			sql: `WITH c AS (SELECT tx.* FROM typemx_dim dim JOIN typemx tx ON tx.g = dim.k) ` +
 				`SELECT (SELECT COUNT(*) FROM c WHERE id < 10) AS n FROM decpair WHERE id < 2`,
@@ -467,6 +476,84 @@ func i1Cells() []i1Cell {
 			},
 			pinWhy: "the union stage's column pruning drops a column its own arms still " +
 				"declare (all four arms answered 0 for PostgreSQL's 10 at base)"},
+
+		// The fourth member of that family, and the DERIVED-TABLE spelling of
+		// controls 32 and 33: a star over a JOIN inside a derived table, then
+		// FILTERED. The builder does not give the derived plan the column the
+		// filter names. All four arms answered 4616 for PostgreSQL's 10 at
+		// base — silently wrong, because the mis-correlated subquery dropped
+		// the predicate — and are loud now that the predicate is kept.
+		{name: "53_pin_a_derived_qualified_star_over_a_join_is_filtered",
+			sql: `SELECT (SELECT COUNT(*) FROM (SELECT tx.* FROM typemx_dim dim JOIN typemx tx ` +
+				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 10`,
+			pinArms: map[string]string{
+				"single": `filter column "id" does not exist in the input schema`, spilledArm: `filter column "id" does not exist in the input schema`,
+				"dag": `filter column "id" does not exist in the input schema`, "dagshuf": `filter column "id" does not exist in the input schema`,
+			},
+			pinWhy: "a derived table whose body is a star over a JOIN does not publish that " +
+				"star's columns to a filter above it (all four arms answered 4616 at base)",
+			routes: a2Routes{UnreachableOutput: 1}},
+		{name: "54_pin_a_derived_bare_star_over_a_join_is_filtered",
+			sql: `SELECT (SELECT COUNT(*) FROM (SELECT * FROM typemx_dim dim JOIN typemx tx ` +
+				`ON tx.g = dim.k) t WHERE id < 10) AS n FROM decpair WHERE id < 2`,
+			want: `n | 10`,
+			pinArms: map[string]string{
+				"single": `filter column "id" does not exist in the input schema`, spilledArm: `filter column "id" does not exist in the input schema`,
+				"dag": `filter column "id" does not exist in the input schema`, "dagshuf": `filter column "id" does not exist in the input schema`,
+			},
+			pinWhy: "the bare-star twin of 53, same site (all four arms answered 4616 at base)",
+			routes: a2Routes{UnreachableOutput: 1}},
+
+		// --- A BOOLEAN CONNECTIVE SHORT-CIRCUITS ---------------------------
+		//
+		// Hoisting is UNCONDITIONAL evaluation, so hoisting a SCALAR out of an
+		// arm the query may never reach makes that arm's failure the query's
+		// answer. Measured on PostgreSQL 17: the same five-row subquery is
+		// never needed in the first cell and needed in the second, so the
+		// first ANSWERS and only the second raises. Hoisting made both 21000
+		// (round-1 review P2), which is a query PostgreSQL answers, refused.
+		//
+		// Only the EXISTS leaves are hoisted now, and a scalar leaf in a
+		// boolean position keeps the disposition it had: right on the
+		// single-process arms, and a loud task failure on the DAG, pinned.
+		// Answering it there needs the DAG to evaluate a subquery lazily per
+		// row, which is a lowering, not a scope repair.
+		{name: "55_a_multirow_scalar_under_OR_that_is_never_needed",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE d.id < 100 OR d.id > ` +
+				`(SELECT id FROM typemx WHERE id < 5)`,
+			want: `n | 9`,
+			pinArms: map[string]string{
+				"dag": "subqueries require a SubqueryRunner", "dagshuf": "subqueries require a SubqueryRunner",
+			},
+			pinWhy: "the DAG has no lazy per-row scalar evaluation, so a scalar leaf in a " +
+				"short-circuitable position ships to a worker that cannot compile it"},
+		{name: "56_ctl_a_multirow_scalar_under_OR_that_IS_needed_raises",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE d.id < 0 OR d.id > ` +
+				`(SELECT id FROM typemx WHERE id < 5)`,
+			wantErr: "more than one row returned by a subquery used as an expression",
+			pinArms: map[string]string{
+				"dag": "subqueries require a SubqueryRunner", "dagshuf": "subqueries require a SubqueryRunner",
+			},
+			pinWhy: "same site as 55; the single-process arms raise PostgreSQL's own 21000 here, " +
+				"which is what makes 55's answer a short circuit rather than a missing check"},
+		{name: "57_ctl_a_one_row_scalar_under_OR_that_IS_needed",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE d.id < 0 OR d.id > ` +
+				`(SELECT MAX(id) FROM typemx WHERE id < 5)`,
+			want: `n | 5`,
+			pinArms: map[string]string{
+				"dag": "subqueries require a SubqueryRunner", "dagshuf": "subqueries require a SubqueryRunner",
+			},
+			pinWhy: "same site as 55, with a subquery that could be hoisted safely — the rule is " +
+				"about the POSITION, not about this subquery's row count"},
+		{name: "58_ctl_a_one_row_scalar_under_NOT",
+			sql: `SELECT COUNT(*) AS n FROM decpair d WHERE NOT (d.id > ` +
+				`(SELECT MAX(id) FROM typemx WHERE id < 5))`,
+			want: `n | 4`,
+			pinArms: map[string]string{
+				"dag": "subqueries require a SubqueryRunner", "dagshuf": "subqueries require a SubqueryRunner",
+			},
+			pinWhy: "the NOT spelling of 57"},
 	}
 }
 
@@ -519,6 +606,17 @@ func TestArcI1AnUnqualifiedNameBindsTheInnerRelation(t *testing.T) {
 					default:
 						t.Errorf("%s arm answers %v%s, which is neither PostgreSQL's %s nor the "+
 							"pinned %q\n  SQL: %s", arm.name, got, i1ErrText(err), tc.want, want, tc.sql)
+					}
+					continue
+				}
+				if tc.wantErr != "" {
+					switch {
+					case err == nil:
+						t.Errorf("%s arm ANSWERED %s where PostgreSQL 17 raises %q\n  SQL: %s",
+							arm.name, got, tc.wantErr, tc.sql)
+					case !strings.Contains(err.Error(), tc.wantErr):
+						t.Errorf("%s arm raises a different refusal\n  got  %v\n  want a sentence "+
+							"containing %q (PostgreSQL 17)\n  SQL: %s", arm.name, err, tc.wantErr, tc.sql)
 					}
 					continue
 				}

@@ -603,9 +603,15 @@ decides this during parse analysis.
 `EXISTS` reads no value, so `EXISTS (SELECT 1, 2 FROM t)` is legal, whatever
 its column count. An `EXISTS` that reads no outer row is a constant for the
 whole query: the coordinator evaluates it once and the predicate becomes that
-boolean, on the stage DAG as on the single-process path. A CORRELATED `EXISTS`
-that does not become a semi join is answered by the coordinator's own
-single-process pipeline instead.
+boolean, on the stage DAG as on the single-process path — including under
+`OR`, `NOT` and inside a `CASE`. A CORRELATED `EXISTS` that does not become a
+semi join is answered by the coordinator's own single-process pipeline instead.
+
+A SCALAR subquery in one arm of `OR`, `NOT` or `CASE` is evaluated LAZILY, as
+PostgreSQL evaluates it: an arm the query never reaches is never run, so
+`WHERE true OR x > (SELECT id FROM t)` answers even where that subquery would
+return several rows, while the same subquery in an arm that IS reached raises
+`21000`. On the distributed engine that shape is refused rather than answered.
 
 With auth enabled, a subquery's relations are authorized like any others: an
 identity that may not read `flow_logs` is refused `42501` whether it names the
