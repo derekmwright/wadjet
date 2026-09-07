@@ -6474,13 +6474,23 @@ func (e *InSubquery) resolveSlow() {
 	var rawVals []any
 	{
 		for _, r := range rows {
+			// PostgreSQL refuses a multi-column IN subquery outright (42601,
+			// `subquery has too many columns`). Taking "the first column" out
+			// of a Go MAP instead built the set from a DIFFERENT column on
+			// different runs of the same query, because map iteration order is
+			// randomized per range statement. A one-column subquery whose
+			// pipeline emitted a hidden ORDER BY key beside it is #875 and is
+			// trimmed where the pipeline is built, so a row with two entries
+			// here is a genuine two-column SELECT list.
+			if len(r) > 1 {
+				failEval(&SubqueryColumnsError{SQL: e.SQL, Columns: len(r), InPredicate: true})
+			}
 			for _, v := range r {
 				if v != nil {
 					rawVals = append(rawVals, v)
 				} else {
 					e.setNull = true
 				}
-				break // first column only
 			}
 		}
 		// Build typed hash set. Use toInt64Safe/toFloat64Safe to normalize

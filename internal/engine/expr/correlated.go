@@ -142,13 +142,23 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 
 	sawNull := false
 	for _, r := range rows {
+		// PostgreSQL refuses a multi-column IN subquery outright (42601,
+		// `subquery has too many columns`). Reading one column out of a Go
+		// map instead answered a DIFFERENT column on different runs of the
+		// same query, because map iteration order is randomized per range
+		// statement. A one-column subquery whose pipeline emitted a hidden
+		// ORDER BY key beside it is #875 and is trimmed where the pipeline
+		// is built, so a row with two entries here is a genuine two-column
+		// SELECT list.
+		if len(r) > 1 {
+			failEval(&SubqueryColumnsError{SQL: sql, Columns: len(r), InPredicate: true})
+		}
 		for _, v := range r {
 			if v == nil {
 				sawNull = true
 			} else if compare(lv, v, CmpEq) {
 				return !e.Not, false
 			}
-			break // first column only
 		}
 	}
 	if sawNull {
@@ -359,23 +369,66 @@ func failEval(err error) {
 // n < (SELECT n FROM src)` emptied the table where PostgreSQL raises and
 // deletes nothing.
 //
-// The MULTI-COLUMN case is deliberately not decided here. PostgreSQL refuses
-// it at analysis time with 42601 (`subquery must return only one column`) and
-// this engine does not; that is a separate gap, and picking a column out of a
-// Go map — which is what the loop below does — is arbitrary for it either
-// way. Nothing here makes that better or worse.
+// The MULTI-COLUMN case is decided here too, and it is PostgreSQL's rule:
+// 42601, `subquery must return only one column`. It used to be left alone —
+// the loop below picked one out of a Go map, whose iteration order is
+// randomized per range statement, so `SELECT (SELECT id, c_i64 FROM t LIMIT
+// 1)` answered a different column on different runs of the same query. An
+// arbitrary column is not a smaller answer than a refusal, it is a wrong one,
+// and PostgreSQL refuses this shape at analysis time (measured, 17.5).
+//
+// A ONE-column subquery whose PIPELINE emits more than one column is a
+// different thing and is not this refusal: it was the hidden ORDER BY key
+// (#875), and it is trimmed where the pipeline is built
+// (physical.buildSubqueryPipelineFor), so what reaches here is the SELECT
+// list.
 func ScalarSubqueryValue(sql string, rows []map[string]any) (any, error) {
 	switch {
 	case len(rows) == 0:
 		return nil, nil // a genuine empty result IS SQL NULL
 	case len(rows) > 1:
 		return nil, &ScalarSubqueryRowsError{SQL: sql, Rows: len(rows)}
+	case len(rows[0]) > 1:
+		return nil, &SubqueryColumnsError{SQL: sql, Columns: len(rows[0])}
 	}
 	for _, v := range rows[0] {
 		return v, nil
 	}
 	return nil, nil
 }
+
+// SubqueryColumnsError reports a subquery used where ONE column is required
+// that returns more than one.
+//
+// PostgreSQL's own two sentences and its 42601: `subquery must return only
+// one column` for a scalar expression subquery, `subquery has too many
+// columns` for an IN / NOT IN one. A client branches on the code, and the two
+// wordings are what a user sees on the server this engine speaks for.
+type SubqueryColumnsError struct {
+	SQL     string
+	Columns int
+	// InPredicate selects PostgreSQL's IN wording. False is the scalar
+	// expression's.
+	InPredicate bool
+}
+
+func (e *SubqueryColumnsError) Error() string {
+	pg := "subquery must return only one column"
+	if e.InPredicate {
+		pg = "subquery has too many columns"
+	}
+	if e.SQL == "" {
+		return pg
+	}
+	return fmt.Sprintf("%s\n  subquery returned %d columns: %s", pg, e.Columns, e.SQL)
+}
+
+// SQLState is PostgreSQL's 42601 (syntax_error).
+func (e *SubqueryColumnsError) SQLState() string { return "42601" }
+
+// FatalEvalError satisfies the marker the pipeline drivers recover on, so
+// this reaches the client as a query error rather than taking the process.
+func (e *SubqueryColumnsError) FatalEvalError() error { return e }
 
 // ScalarSubqueryRowsError reports a scalar subquery that returned more than
 // one row.
