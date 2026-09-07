@@ -426,7 +426,8 @@ func (j *SortMergeJoin) Finalize(_ context.Context) error {
 	}
 
 	j.outSchema, j.outMapping = joinOutputSchemaWithMapping(j.JoinType, j.probe.schema, j.build.schema,
-		j.BuildTableAlias, j.BuildColOrigins, j.QualifyAllBuildCols, j.OutputFilter, j.OutputExclude)
+		j.BuildTableAlias, j.BuildColOrigins, j.QualifyAllBuildCols, j.OutputFilter, j.OutputExclude,
+		j.LeftKeys, j.RightKeys)
 
 	if err := j.resolveCompareKernels(); err != nil {
 		j.mu.Lock()

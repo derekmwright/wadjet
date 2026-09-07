@@ -36,6 +36,12 @@ import (
 // ONLY where the names really collide: `SELECT t.g, COUNT(*) AS c` has its
 // projection ELIDED over the aggregate, so the join keys on what the AGGREGATE
 // emits, and renaming the key there took it out of the shuffle's schema.
+//
+// And a colliding shape takes the FULL mint — the slot is INJECTED and the
+// join keys on the SLOT, not on the list's own name for the key. Keying on
+// the list's name worked on the single-process path, where a projection does
+// the rename, and answered ZERO ROWS on both DAG arms, where a Project emits
+// no stage and the build stream is the aggregate's own output.
 func TestALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql string
@@ -60,7 +66,7 @@ func TestALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			`SELECT d.k, s.gk, s.g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gk, MAX(t.id) AS g FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true`,
-			"s.gk", "__key_0"},
+			"s.__key_0", "__key_0"},
 		{"ctl the key under its OWN name, nothing colliding, keeps its name",
 			`SELECT d.k, s.g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,

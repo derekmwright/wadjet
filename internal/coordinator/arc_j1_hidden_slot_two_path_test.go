@@ -227,15 +227,20 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			want: `k,g,c | 0,0,660 | 1,1,660 | 2,2,659 | 3,3,659 | 4,4,659 | 5,5,659 | 6,6,660`},
 		// RECORDED, NOT CLOSED: the key under its OWN name BESIDE an
 		// aggregate of that name. The lateral publishes two columns called
-		// `g`, PostgreSQL refuses the outer `s.g` as ambiguous (42702), and
-		// this engine answers the key — a superset, unchanged by this arc.
-		// Moving the key to a slot here made both DAG arms answer NO ROWS,
-		// which is a superset traded for an empty result.
-		{name: "956/pinned-ambiguous-own-name-answers-the-key", budgeted: true,
+		// `g` and PostgreSQL refuses the outer `s.g` as ambiguous (42702);
+		// this engine answers one of them, which is a superset either way.
+		//
+		// WHICH one moved in round 2: the collision now takes the full mint,
+		// so the key leaves under the slot and the only `g` the projection
+		// publishes is the AGGREGATE's. It was the KEY before. Both are
+		// divergences from a refusal and this one is the more useful reading
+		// — `MAX(t.id) AS g` is what the query wrote `g` for — but it is
+		// recorded as a MOVE rather than presented as a fix.
+		{name: "956/pinned-ambiguous-own-name-answers-the-aggregate", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, MAX(t.id) AS g FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
-			want: `k,g | 0,0 | 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6`},
+			want: `k,g | 0,4998 | 1,4999 | 2,4993 | 3,4994 | 4,4995 | 5,4996 | 6,4997`},
 		{name: "767/ctl-aliased-key-H1-s-published-name-path", budgeted: true,
 			sql: `SELECT d.k AS k, s.gg AS gg, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
@@ -359,7 +364,14 @@ func TestArcJ1AStarOverALateralPublishesPostgresColumns(t *testing.T) {
 			want:    `leaked | NULL | NULL | NULL`,
 			wantDAG: "ERR",
 			pgSays:  "42703, column x.__key_0 does not exist"},
-		{name: "ctl-an-unknown-column-through-a-derived-star",
+		// NOT the intended answer, and filed rather than presented as one: a
+		// column that does not exist should be 42703 here as it is over a
+		// PLAIN derived table (`unknown column "x.nosuchcol"`). A derived
+		// table whose body is a STAR OVER A JOIN has no computable column
+		// list — the planner refuses to guess one — so nothing validates the
+		// reference and it reads NULL. Pinned in both spellings so the day it
+		// starts refusing, both move together.
+		{name: "pinned-an-unknown-column-through-a-derived-star-reads-NULL",
 			sql:    `SELECT x.nosuchcol AS leaked FROM (SELECT * ` + lat + `) x ORDER BY 1`,
 			want:   `leaked | NULL | NULL | NULL`,
 			pgSays: "42703, column x.nosuchcol does not exist"},
@@ -423,6 +435,10 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, want string
 		refused         bool
+		// budgeted tolerates the SPILLED arm's `memory budget exceeded` —
+		// a CROSS-shaped lateral build over the 5 000-row fixture does not
+		// fit 512 KiB and refuses rather than spilling (ADR-0006).
+		budgeted bool
 	}{
 		{name: "an-output-alias-in-the-new-family-is-refused",
 			sql:     `SELECT amount AS __key_0 FROM lat_item ORDER BY 1`,
@@ -436,11 +452,33 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 		{name: "ctl-a-single-underscore-is-not-reserved",
 			sql:  `SELECT amount AS _key_0 FROM lat_item ORDER BY 1`,
 			want: `_key_0 | 50 | 75 | 100 | 125`},
+		// THE READING HALF, which this gate's name claims and its first
+		// draft did not have — all four cells above MINT. `wintab0` stores
+		// `__win_0`, written through the catalog door because the DDL door
+		// refuses the schema; a table an older binary wrote stays readable
+		// (ADR-0012), star included, and a LATERAL over it does not take the
+		// column away (arc J1 round 2 — the drop is by identity).
+		{name: "reading-a-stored-slot-name-is-not-refused",
+			sql:  `SELECT __win_0 AS w FROM wintab0 ORDER BY id`,
+			want: `w | 100 | 200 | 300 | 400`},
+		{name: "reading-it-through-a-star",
+			sql:  `SELECT * FROM wintab0 ORDER BY id`,
+			want: `id,__win_0,plain | 1,100,1000 | 2,200,2000 | 3,300,3000 | 4,400,4000`},
+		{name: "reading-it-across-a-lateral-that-mints-a-slot",
+			sql: `SELECT * FROM wintab0 w JOIN LATERAL (SELECT MAX(t.id) AS mx ` +
+				`FROM typemx t WHERE t.g = w.id) s ON true ORDER BY w.id`,
+			budgeted: true,
+			want: `id,__win_0,plain,mx | 1,100,1000,4999 | 2,200,2000,4993 | ` +
+				`3,300,3000,4994 | 4,400,4000,4995`},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				cols, rows, err := arm.run(tc.sql)
+				if tc.budgeted && arm.name == spilledArm && err != nil &&
+					strings.Contains(err.Error(), "memory budget exceeded") {
+					continue
+				}
 				if tc.refused {
 					if err == nil {
 						t.Fatalf("%s arm ANSWERED %s — the reservation is gone, and every "+

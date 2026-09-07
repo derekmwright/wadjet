@@ -870,24 +870,28 @@ func arcD5LateralCells() []arcD5Cell {
 			wantUnreachableRoutes: 1,
 			pgSays:                "3, 3, 1 as BIGINT — the values and now the box too (#849)"},
 
-		// THE `SELECT *` BOUNDARY, and it is one cell narrower than it was.
-		// The decorrelation's join key is dropped by the join that made it
-		// (arc J1, ADR-0026 3c), so the star publishes PostgreSQL's four
-		// columns and the DAG's ADR-0010 refusal is gone with it: every arm
-		// ANSWERS now, and the ONE cell that still differs is Carol's `n`.
+		// THE `SELECT *` BOUNDARY IS REFUSED, on every arm (arc J1 round 2).
 		//
-		// That cell is the empty-input default, which a star cannot reach: a
-		// star expands in a later pass over the plan's own schema, so there
-		// is nothing in the SelectInfo for the rewrite to reach and the
-		// padded COUNT reads NULL where PostgreSQL reads 0. Naming the
-		// columns gets the default (the cells above).
+		// The empty-input default is applied by rewriting the enclosing
+		// query's REFERENCES to `COALESCE(<ref>, 0)`, and a star has no
+		// reference to rewrite: it expands in a later pass over the plan's
+		// own schema, and a star over a JOIN is never expanded at all. So the
+		// padded COUNT read NULL where PostgreSQL reads 0 — a plausible wrong
+		// number for exactly the rows a LEFT pad manufactures, which is the
+		// hardest kind to notice.
+		//
+		// It reached this cell's DAG arms when the correlation slot stopped
+		// widening the star (round 1: they had been refusing the shape for an
+		// unrelated reason), and a loud→wrong-value move is not a
+		// disposition. The shape is refused instead and the message names the
+		// spelling that answers, which is the cells above. MAX over an empty
+		// input IS NULL, so a star over THAT lateral needs no default and
+		// still answers (arc J1's own star census).
 		{issue: "#767", name: "boundary_select_star_over_an_aggregated_lateral",
-			sql: `SELECT * FROM lat_ord o ` + lat + `ON true ORDER BY o.customer`,
-			want: []string{
-				"id=int64:1|customer=Alice|total=float:150|n=int64:2",
-				"id=int64:2|customer=Bob|total=float:200|n=int64:2",
-				"id=int64:3|customer=Carol|total=float:0|n=NULL"},
-			pgSays: "the same three rows and columns with Carol at n = 0, not NULL"},
+			sql:         `SELECT * FROM lat_ord o ` + lat + `ON true ORDER BY o.customer`,
+			wantErrLike: "cannot be answered: an ungrouped COUNT over an empty input is 0",
+			pgSays: "three rows with columns (id, customer, total, n) and Carol at n = 0 — " +
+				"PostgreSQL answers it; this engine refuses rather than printing NULL"},
 
 		// The NON-aggregated lateral, which none of this may touch.
 		// THE NESTED SHAPES the filing asks for, and the third of them is a

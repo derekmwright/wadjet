@@ -66,6 +66,28 @@ func setupJ1LateralDB(t *testing.T) *Server {
 		{"id": int64(2), "customer": "Bob", "total": 200.0},
 		{"id": int64(3), "customer": "Carol", "total": 0.0},
 	})
+	// A table that already STORES a reserved name, through the CATALOG door —
+	// the way a binary older than the reservation wrote one, and the only way
+	// to make one now (the DDL, API and ingest doors answer 42939).
+	stored := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "__key_0", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.Catalog().CreateTable(ctx, "j1stored", stored, nil); err != nil {
+		t.Fatal(err)
+	}
+	sing := ingest.New(db.Catalog(), "j1stored", stored, nil,
+		ingest.Config{MaxBufferRows: 8, RowGroupSize: 8})
+	if err := sing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "__key_0": "mine-1"},
+		{"id": int64(2), "__key_0": "mine-2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
 	load("j1item", item, []map[string]any{
 		{"id": int64(1), "order_id": int64(1), "product": "Widget", "amount": 50.0},
 		{"id": int64(2), "order_id": int64(1), "product": "Gadget", "amount": 100.0},
@@ -120,6 +142,21 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 			[]string{"id", "order_id", "product", "amount", "o.id", "customer", "total"},
 			"(id, customer, total, id, order_id, product, amount) — the join's own " +
 				"duplicate-name qualification, pre-existing and unrelated"},
+		// A STORED column in the reserved namespace is a USER's column and
+		// reaches the wire: the drop is by identity — the slot this join
+		// minted, on the side it minted it for — never by a name a table
+		// could also own (arc J1 round 2). `j1ord` is loaded through the
+		// CATALOG door below, because the DDL door refuses the schema.
+		{"a_stored_reserved_name_is_on_the_wire",
+			`SELECT * FROM j1stored o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM j1item WHERE order_id = o.id) s ON true`,
+			[]string{"id", "__key_0", "mx"}, ""},
+		{"a_stored_reserved_name_by_name",
+			`SELECT o.__key_0 AS mine FROM j1stored o JOIN LATERAL (` +
+				`SELECT MAX(amount) AS mx FROM j1item WHERE order_id = o.id) s ON true`,
+			[]string{"mine"}, ""},
+		{"ctl_the_stored_table_with_no_lateral", `SELECT * FROM j1stored`,
+			[]string{"id", "__key_0"}, ""},
 		{"ctl_an_explicit_list_over_the_lateral",
 			`SELECT o.customer AS c, s.mx AS m ` + aggLateral,
 			[]string{"c", "m"}, ""},
@@ -141,8 +178,12 @@ func TestArcJ1AHiddenSlotIsNotInTheRowDescription(t *testing.T) {
 			}
 			// The property, independent of the exact list: nothing the
 			// planner minted for itself is on the wire. A name a user cannot
-			// spell is a name a client cannot use.
+			// spell is a name a client cannot use — but a name a table
+			// STORES is the user's, and the cells above assert it stays.
 			for _, name := range got {
+				if strings.HasPrefix(c.name, "a_stored_") || strings.HasPrefix(c.name, "ctl_the_stored_") {
+					continue
+				}
 				if fam := plansql.ReservedSlotFamily(name); fam != "" {
 					t.Errorf("%s\n  RowDescription carries %q, which is in the reserved "+
 						"slot namespace %q* — the planner's own column reached the client",

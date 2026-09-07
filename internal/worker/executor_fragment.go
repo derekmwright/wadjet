@@ -2296,7 +2296,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 		}
 		j.OutputFilter = filter
 	}
-	j.OutputExclude = hiddenColumnSet(spec.HiddenColumns)
+	j.OutputExclude = hiddenColumnSet(spec.HiddenColumns, spec.OutputColumns)
 	if sm := e.spillFor(ctx); sm != nil {
 		j.Spill = sm
 	}
@@ -3042,18 +3042,45 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// The join's OWN materialized columns are dropped on this path exactly
 	// as the single-process planner drops them, so both paths publish one
 	// column set for one query (exec.HashJoinProbe.OutputExclude).
-	probe.OutputExclude = hiddenColumnSet(spec.HiddenColumns)
+	probe.OutputExclude = hiddenColumnSet(spec.HiddenColumns, spec.OutputColumns)
 	return []exec.UnaryOperator{probe}, cleanup, nil
 }
 
-// hiddenColumnSet is OpSpec.HiddenColumns as the probe's OutputExclude set.
-func hiddenColumnSet(cols []string) map[string]bool {
+// hiddenColumnSet is OpSpec.HiddenColumns as the probe's OutputExclude set,
+// minus anything this stage's OWN column list asks for.
+//
+// A LATERAL's projection emits no stage of its own, so on this path it is
+// materialized ABOVE the join — and that projection is exactly the operator
+// that reads the correlation slot and republishes it under the query's name.
+// Dropping the slot underneath it left `column "__key_0" does not exist in
+// the input schema` on both DAG arms for a lateral whose SELECT list carries
+// the key (#956's colliding spelling).
+//
+// The subtraction is made HERE and not in the operator because it is true
+// HERE and not there: on the single-process path the same projection sits
+// BELOW the join, nothing above may name the slot, and a reference to it
+// through a derived star reads a column that does not exist — which is what
+// PostgreSQL answers as well.
+func hiddenColumnSet(cols, asked []string) map[string]bool {
 	if len(cols) == 0 {
 		return nil
 	}
+	needed := make(map[string]bool, len(asked))
+	for _, a := range asked {
+		needed[strings.ToLower(a)] = true
+		if _, bare, ok := strings.Cut(a, "."); ok {
+			needed[strings.ToLower(bare)] = true
+		}
+	}
 	excl := make(map[string]bool, len(cols))
 	for _, c := range cols {
+		if needed[strings.ToLower(c)] {
+			continue
+		}
 		excl[c] = true
+	}
+	if len(excl) == 0 {
+		return nil
 	}
 	return excl
 }

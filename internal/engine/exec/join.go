@@ -2710,6 +2710,19 @@ type HashJoinProbe struct {
 	// the operator that made it, is what puts the drop below every one of
 	// those doors (ADR-0026 §3c). Set by the planner from
 	// logical.Node.HiddenJoinCols.
+	//
+	// A NAME IS NOT THE IDENTITY. Reading is not minting, so a table may
+	// already STORE a column called `__key_0` (ADR-0012), and matching the
+	// exclusion by bare name over the whole output dropped the USER's column
+	// — `SELECT * FROM o JOIN LATERAL (…) s` lost `o.__key_0` entirely and
+	// `SELECT o.__key_0` read NULL where the base and PostgreSQL read its
+	// values. The column this join minted is the one it KEYS ON, on the side
+	// it minted it for, so the exclusion holds only where the name is a JOIN
+	// KEY of the column's own side. A stored column of that name on the other
+	// side is not a key there and survives; on the SAME side the allocator
+	// steps around the names it can see (logical.lateralScopeNames /
+	// outerScopeNames), and the one it cannot is pinned LOUD rather than
+	// answered wrongly.
 	OutputExclude map[string]bool
 
 	// LateMaterialize emits inner/left join output as view (dictionary)
@@ -4793,7 +4806,7 @@ func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Colu
 func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]parquet.Column, []outColSource) {
 	return joinOutputSchemaWithMapping(p.join.JoinType, leftSchema, p.join.buildSchema,
 		p.join.BuildTableAlias, p.join.BuildColOrigins, p.join.QualifyAllBuildCols,
-		p.OutputFilter, p.OutputExclude)
+		p.OutputFilter, p.OutputExclude, p.join.LeftKeys, p.join.RightKeys)
 }
 
 // outputFilterMatcher answers "does the consumer need this join output column"
@@ -4855,6 +4868,21 @@ func (m outputFilterMatcher) wants(colName string) bool {
 	return false
 }
 
+// joinKeySet is one side's join keys as a set of FOLDED BARE names, for the
+// output exclusion's side test. A key may be written qualified ("s.__key_0")
+// or bare depending on which pass spelled it; the column it names is the same.
+func joinKeySet(keys []string) map[string]bool {
+	if len(keys) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		_, bare := splitJoinQualifier(k)
+		set[batch.FoldIdent(bare)] = true
+	}
+	return set
+}
+
 // splitJoinQualifier splits "rel.col" into its two halves, leaving a name with
 // no dot — or a leading/trailing one, which is a flat-JSON column name and not
 // a qualifier — alone as an unqualified name.
@@ -4869,7 +4897,7 @@ func splitJoinQualifier(name string) (qual, bare string) {
 // first, then build columns with duplicate-name qualification — and the
 // per-output-column source mapping. Shared by HashJoinProbe and SortMergeJoin
 // so both emit identical schemas for the same join shape.
-func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, buildColOrigins map[string]string, qualifyAllBuildCols bool, outputFilter, outputExclude map[string]bool) ([]parquet.Column, []outColSource) {
+func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, buildColOrigins map[string]string, qualifyAllBuildCols bool, outputFilter, outputExclude map[string]bool, probeKeys, buildKeys []string) ([]parquet.Column, []outColSource) {
 	var out []parquet.Column
 	var mapping []outColSource
 
@@ -4951,18 +4979,40 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 	}
 
 	// Drop the columns this join materialized for itself (OutputExclude).
-	// BEFORE the filter, so a filter that names one of them cannot re-admit
-	// it, and so the filter's "did it narrow anything" test compares against
-	// the list the join really publishes. The name is matched on its BARE
-	// half: a build column that collided with a probe column is emitted
-	// qualified ("s.__key_0"), and it is the same column either way.
+	// BEFORE the filter, so the filter's "did it narrow anything" test
+	// compares against the list the join really publishes.
+	//
+	// Matched on the bare name AND on the SIDE: a build column that collided
+	// with a probe column is emitted qualified ("s.__key_0") and is the same
+	// column either way, but a column of that name on the OTHER side is a
+	// different column — a user's stored one — and the join keys on the one
+	// it minted. So the exclusion holds only where the name is a join key of
+	// the column's own side.
+	//
+	// WHO may ask for the column back is decided by the CALLER, not here. On
+	// the distributed path the lateral's own projection is materialized ABOVE
+	// this join (a Project emits no stage), so the fragment builder removes
+	// the slot from the exclusion when the stage's own column list names it;
+	// on the single-process path that projection is BELOW the join and
+	// nothing above may name the slot — a user's `x.__key_0` through a
+	// derived star reads a column that does not exist, which is what
+	// PostgreSQL says too. Making the exclusion yield to OutputFilter here
+	// applied the distributed rule to both and re-opened that read.
 	if len(outputExclude) > 0 {
+		probeKeySet := joinKeySet(probeKeys)
+		buildKeySet := joinKeySet(buildKeys)
 		var keptSchema []parquet.Column
 		var keptMapping []outColSource
 		for i, col := range out {
 			_, bare := splitJoinQualifier(col.Name)
 			if outputExclude[bare] || outputExclude[col.Name] {
-				continue
+				keys := buildKeySet
+				if mapping[i].fromProbe {
+					keys = probeKeySet
+				}
+				if keys[batch.FoldIdent(bare)] {
+					continue
+				}
 			}
 			keptSchema = append(keptSchema, col)
 			keptMapping = append(keptMapping, mapping[i])
