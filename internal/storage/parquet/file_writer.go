@@ -11,6 +11,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/snappy"
@@ -57,7 +58,14 @@ type NativeWriter struct {
 	// closed latches the FINALIZATION, which err cannot express: a Close
 	// that succeeded leaves err nil, and the writer then looked exactly like
 	// a fresh one to WriteMapRows. See ErrWriterClosed.
-	closed bool
+	//
+	// Atomic, and claimed with CompareAndSwap, for one reason: two goroutines
+	// racing to Close must not BOTH finalize. Everything else in this struct
+	// is unsynchronized and the writer is not safe for concurrent use (see
+	// ErrWriterClosed); this one field is, because the damage a lost race does
+	// here is a second footer written over a complete file rather than a
+	// merely garbled one (round-1 N1).
+	closed atomic.Bool
 }
 
 // ErrWriterClosed is returned by every call on a writer whose file has
@@ -88,6 +96,13 @@ type NativeWriter struct {
 // error having touched neither the leaf buffers nor the output. A writer
 // whose Close FAILED keeps returning that failure instead, because it is the
 // more specific answer and it is what #888's latch already promised.
+//
+// A writer is NOT safe for concurrent use: its leaf buffers, its error latch
+// and its byte count are all unsynchronized, and two goroutines writing rows
+// to one writer will corrupt the file. The single exception is this latch,
+// which is claimed atomically, so two goroutines racing to Close cannot both
+// finalize — exactly one writes the footer and the other is told the file is
+// already finalized.
 var ErrWriterClosed = errors.New("parquet: writer is closed (the file was already finalized)")
 
 // checkWritable is the one gate every write door asks before it accepts
@@ -97,7 +112,7 @@ func (nw *NativeWriter) checkWritable() error {
 	if nw.err != nil {
 		return nw.err
 	}
-	if nw.closed {
+	if nw.closed.Load() {
 		return ErrWriterClosed
 	}
 	return nil
@@ -220,7 +235,12 @@ func NewNativeWriter(w io.Writer, schema Schema, cfg WriterConfig) *NativeWriter
 	// the way a decomposition failure is: the first WriteMapRows or Close
 	// returns it, before any output.
 	if err := ValidateWriteSchema(schema); err != nil {
+		// Validate FIRST, allocate after: a schema this writer has just
+		// refused is not one to flatten into leaf buffers, and every write
+		// door returns the latched error before it could read them anyway
+		// (round-1 N2).
 		nw.fail(err)
+		return nw
 	}
 	nw.initLeafBuffers()
 	return nw
@@ -400,6 +420,18 @@ func validateWriteColumn(c Column, path string) error {
 	return nil
 }
 
+// MaxVectorDimension is the widest VECTOR this format can carry: a leaf's
+// FIXED_LEN_BYTE_ARRAY type_length is a signed int32 and a component is four
+// bytes, so 2^31-1 bytes is 536,870,911 components.
+//
+// It is ONE constant for the whole engine on purpose. The writer's bound and
+// the DDL's bound disagreed at 0a3da4ff — `CREATE TABLE t (v
+// VECTOR(4611686018427387905))` was accepted by ResolveColumn and produced a
+// file whose declared width had wrapped — and a declaration a door accepts
+// that the writer cannot store is a table that fails at its first flush at
+// best, and a file nobody can read at worst.
+const MaxVectorDimension = math.MaxInt32 / 4
+
 // vectorTypeLength is the FIXED_LEN_BYTE_ARRAY width a VECTOR(dimension) leaf
 // declares — and the only way to obtain one.
 //
@@ -423,14 +455,21 @@ func vectorTypeLength(dimension int) (int32, error) {
 	if dimension <= 0 {
 		return 0, fmt.Errorf("a VECTOR needs a positive Dimension, got %d", dimension)
 	}
-	// int64 throughout: dimension*4 in int arithmetic wraps on a 32-bit build
-	// before any check could see it.
-	width := int64(dimension) * 4
-	if width > math.MaxInt32 {
-		return 0, fmt.Errorf("a VECTOR of %d float32 components is %d bytes wide, past the %d a "+
-			"FIXED_LEN_BYTE_ARRAY type_length can carry", dimension, width, int64(math.MaxInt32))
+	// The OPERAND is bounded, not the product. Widening to int64 first was the
+	// round-0 fix and it fixed nothing: on a 64-bit build `int` IS int64, so
+	// `int64(dimension) * 4` overflows before any check on the product can see
+	// it. Measured at 0a3da4ff, all with NewWriter and Close returning nil:
+	// 2^61 and 2^62 wrote type_length 0 (pyarrow: "Invalid
+	// FIXED_LEN_BYTE_ARRAY length: 0"), MaxInt wrote -4, and 2^62+1 wrote 4 —
+	// a file pyarrow OPENS as fixed_size_binary[4] and wadjet reads back as
+	// VECTOR(1). Dividing the ceiling instead of multiplying the operand
+	// cannot overflow for any int (round-1 B1).
+	if dimension > math.MaxInt32/4 {
+		return 0, fmt.Errorf("a VECTOR of %d float32 components is 4x that many bytes wide, past "+
+			"the %d a FIXED_LEN_BYTE_ARRAY type_length can carry (at most %d components)",
+			dimension, int64(math.MaxInt32), MaxVectorDimension)
 	}
-	return int32(width), nil
+	return int32(dimension * 4), nil
 }
 
 // checkDecimalDeclaration returns the (precision, scale) a DECIMAL column's
@@ -1157,19 +1196,24 @@ func countLeaves(col Column) int {
 //
 // It is terminal: see ErrWriterClosed. A second Close appends nothing.
 func (nw *NativeWriter) Close() error {
+	// Claimed BEFORE the first byte of the finalization goes out, so a Close
+	// that dies half way through the footer cannot be retried into a second
+	// one — and, because the claim is a CAS, so that two goroutines racing to
+	// Close cannot both write a footer: exactly one wins and the other is told
+	// the file is already finalized.
+	if !nw.closed.CompareAndSwap(false, true) {
+		// A writer whose finalization FAILED keeps returning that failure: it
+		// is the more specific answer and it is what #888's latch promised.
+		if err := nw.err; err != nil {
+			return err
+		}
+		return ErrWriterClosed
+	}
 	if nw.err != nil {
 		// A failed writer stays failed, and stays closed: the finalization
 		// is over either way, so no later call may write.
-		nw.closed = true
 		return nw.err
 	}
-	if nw.closed {
-		return ErrWriterClosed
-	}
-	// Latched BEFORE the first byte of the finalization goes out, so a Close
-	// that dies half way through the footer cannot be retried into a second
-	// one.
-	nw.closed = true
 
 	// Write magic header if this is the first write.
 	if nw.written == 0 {
@@ -1706,11 +1750,16 @@ func buildArraySchemaElements(col Column, elements *[]SchemaElement) error {
 	*elements = append(*elements, listGroup)
 
 	// Element column.
-	elemCol := Column{Name: "element", Type: TypeString, Nullable: true}
-	if col.ElementType != nil {
-		elemCol = *col.ElementType
-		elemCol.Nullable = true // elements are always optional in LIST
+	// The backstop, not a default. Substituting a STRING element for a missing
+	// ElementType emitted a LIST whose element does not describe what the leaf
+	// buffers hold; ValidateWriteSchema refuses the shape at construction, and
+	// if the two ever disagree the file is not written at all (round-1 P1).
+	if col.ElementType == nil {
+		return fmt.Errorf("column %q: an ARRAY needs an ElementType; the footer's schema tree "+
+			"cannot be built without it", col.Name)
 	}
+	elemCol := *col.ElementType
+	elemCol.Nullable = true // elements are always optional in LIST
 	return buildColumnSchemaElements(elemCol, elements)
 }
 
@@ -1746,18 +1795,25 @@ func buildMapSchemaElements(col Column, elements *[]SchemaElement) error {
 	}
 	*elements = append(*elements, kvGroup)
 
-	if col.ElementType != nil && col.ElementType.Type == TypeRow && len(col.ElementType.Fields) == 2 {
-		keyCol := col.ElementType.Fields[0]
-		keyCol.Nullable = false // keys are required
-		if err := buildColumnSchemaElements(keyCol, elements); err != nil {
-			return err
-		}
-
-		valCol := col.ElementType.Fields[1]
-		valCol.Nullable = true // values are optional
-		return buildColumnSchemaElements(valCol, elements)
+	// The backstop the ADR claims. Returning nil here emitted a "key_value"
+	// group promising two children and giving none, which BuildSchemaTree reads
+	// back as a group borrowing the next two TOP-LEVEL columns — the #970
+	// corruption, still finalizable through this path with the validator
+	// removed (a 424-byte unreadable file, measured by the round-0 review).
+	// A truncated tree is never emitted now (round-1 P1).
+	if col.ElementType == nil || col.ElementType.Type != TypeRow || len(col.ElementType.Fields) != 2 {
+		return fmt.Errorf("column %q: a MAP needs ElementType = ROW with exactly two fields "+
+			"(key, value); the footer's key_value group cannot be built without them", col.Name)
 	}
-	return nil
+	keyCol := col.ElementType.Fields[0]
+	keyCol.Nullable = false // keys are required
+	if err := buildColumnSchemaElements(keyCol, elements); err != nil {
+		return err
+	}
+
+	valCol := col.ElementType.Fields[1]
+	valCol.Nullable = true // values are optional
+	return buildColumnSchemaElements(valCol, elements)
 }
 
 // buildRowSchemaElements emits the Parquet STRUCT schema:
@@ -1768,6 +1824,15 @@ func buildMapSchemaElements(col Column, elements *[]SchemaElement) error {
 //	  ...
 //	}
 func buildRowSchemaElements(col Column, elements *[]SchemaElement) error {
+	// Uniform with the MAP and ARRAY backstops above: the validator refuses a
+	// field-less ROW, and the builder does not emit a group the validator
+	// would not have allowed (round-1 P1). This one is self-consistent rather
+	// than truncated — NumChildren would be 0 and 0 children follow — but the
+	// two walks disagreeing is the failure class, not the shape of the damage.
+	if len(col.Fields) == 0 {
+		return fmt.Errorf("column %q: a ROW needs at least one field; the footer's schema tree "+
+			"cannot describe an empty group", col.Name)
+	}
 	rep := FieldOptional
 	if !col.Nullable {
 		rep = FieldRequired
@@ -1915,6 +1980,19 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) er
 	if len(raw) > math.MaxInt32 {
 		return fmt.Errorf("value is %d bytes, exceeds the %d-byte parquet page limit",
 			len(raw), math.MaxInt32)
+	}
+	// The row group's byte-array RUN is addressed by a uint32 offset table
+	// (leafBuffer.offsets), so the SUM has a ceiling the individual value
+	// check above cannot see: appendByteArray narrows len(lb.packed) with no
+	// bound, and past 4 GiB in one row group every offset after the wrap
+	// points at the wrong value — a silently corrupt column, not a short one.
+	// Found by the round-1 sweep for unchecked narrowings that B1 asked for;
+	// refused here, where the row can still be named, and reachable only with
+	// a RowGroupSize large enough to accumulate 4 GiB of one column.
+	if phys == PhysicalByteArray && int64(len(lb.packed))+int64(len(raw)) > math.MaxUint32 {
+		return fmt.Errorf("this row group already holds %d bytes for this column and the value adds "+
+			"%d, past the %d a leaf's uint32 offset table can address; lower RowGroupSize",
+			len(lb.packed), len(raw), int64(math.MaxUint32))
 	}
 
 	lb.defLevels = append(lb.defLevels, defLevel)

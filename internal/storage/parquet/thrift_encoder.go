@@ -292,11 +292,25 @@ func (e *thriftEncoder) encodeLogicalType(lt *LogicalType) {
 		e.writeFieldHeader(14, thriftStruct, &lastFieldID)
 		e.writeStop()
 	case LogicalVector:
-		// Wadjet extension: field 100 with dimension as i32
+		// Wadjet extension: field 100 with dimension as i32.
+		//
+		// The narrowing is bounded HERE as well as at the schema builder,
+		// because this encoder is a second door onto the same field and the
+		// round-0 sweep for unchecked casts missed it: a Dimension of
+		// 4611686018427387905 wrote 1 into the footer, which is the number the
+		// reader hands back (#971, round-1 B1/N3). A dimension past what a
+		// FIXED_LEN_BYTE_ARRAY can carry is written as 0 — an obviously absent
+		// annotation the reader already refuses to trust — rather than as a
+		// wrapped number that looks like a real declaration. ValidateWriteSchema
+		// refuses such a column before any of this runs; this is the backstop.
 		e.writeFieldHeader(100, thriftStruct, &lastFieldID)
 		var vecLast int16
 		e.writeFieldHeader(1, thriftI32, &vecLast)
-		e.writeI32(int32(lt.Dimension))
+		dim := int32(0)
+		if lt.Dimension > 0 && lt.Dimension <= MaxVectorDimension {
+			dim = int32(lt.Dimension)
+		}
+		e.writeI32(dim)
 		e.writeStop()
 	}
 	e.writeStop()

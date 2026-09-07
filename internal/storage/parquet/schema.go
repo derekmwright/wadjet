@@ -521,9 +521,17 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 			return Column{Name: name, Type: TypeDecimal, Nullable: true, Precision: p, Scale: s}, nil
 
 		case "VECTOR":
+			// The WRITER's own rule, not a second one. A dimension this door
+			// accepts and the writer cannot store is a table that fails at its
+			// first flush — and at 0a3da4ff it was worse than that:
+			// VECTOR(4611686018427387905) was accepted here and wrote a file
+			// declaring a four-byte leaf (#971, round-1 B1).
 			dim := parseVectorDim(inner)
-			if dim <= 0 {
-				return Column{}, fmt.Errorf("VECTOR requires positive dimension, got %q", inner)
+			if _, err := vectorTypeLength(dim); err != nil {
+				if dim <= 0 {
+					return Column{}, fmt.Errorf("VECTOR requires positive dimension, got %q", inner)
+				}
+				return Column{}, fmt.Errorf("VECTOR dimension %s: %w", inner, err)
 			}
 			return Column{Name: name, Type: TypeVector, Nullable: true, Dimension: dim}, nil
 		}

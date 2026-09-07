@@ -1079,17 +1079,43 @@ cannot read.** Four rules:
   keeps the documented `Precision <= 0` unconstrained sentinel working; scale
   below zero, scale past that precision, and a precision above 38 or below zero
   are refused by name. `scale == precision` stays legal, because pyarrow opens
-  `DECIMAL(38,38)`. A VECTOR's width is computed in int64 (the `int` form wraps
-  on a 32-bit build before any check could see it) and refused past
-  `math.MaxInt32`; `MaxInt32/4` components is the widest legal dimension and
+  `DECIMAL(38,38)`. A VECTOR is bounded by its OPERAND — `Dimension >
+  MaxVectorDimension` (`math.MaxInt32/4`, one constant for the whole engine) —
+  not by its product: the first cut of this section widened the multiplication
+  to int64 and fixed nothing, because on a 64-bit build `int` IS int64 and
+  `int64(dimension) * 4` overflows before any check on the product can see it.
+  Dimensions of 2^61, 2^62 and `MaxInt` then wrote a `type_length` of 0 or -4
+  (pyarrow: "Invalid FIXED_LEN_BYTE_ARRAY length: 0") and 2^62+1 wrote 4 — a
+  file pyarrow OPENS as `fixed_size_binary[4]` and wadjet reads back as
+  VECTOR(1). `MaxVectorDimension` components is the widest legal dimension and
   writes a file pyarrow opens as `fixed_size_binary[2147483644]`. Both rules
   apply at every depth, because `validateWriteColumn` recurses and #969's
   `ROW(DECIMAL(9,-1))` reached a file.
 
+  **The bound belongs to the format, so every door shares it.** `ResolveColumn`
+  accepted `VECTOR(4611686018427387905)` from ordinary DDL and handed the
+  writer the column that wrapped, so the parser asks `vectorTypeLength` itself
+  now — one function, not two agreeing constants. The footer's own encoder
+  narrowed the same field a second time
+  (`thrift_encoder.go`, outside `buildLeafSchemaElement`, which is why a sweep
+  of that function alone missed it); it writes 0 — an obviously absent
+  annotation — rather than a wrapped number that reads back as a real
+  declaration. The same sweep found the row group's byte-array run: its offset
+  table is `uint32`, so a column accumulating more than 4 GiB in one row group
+  wrapped every offset after the boundary, and `appendEntryWithValue` now
+  refuses that value where the row can still be named.
+
   The schema-element builders return an error rather than emit a field they had
-  to narrow. That is the structural backstop at the cast, in the same position
-  as `checkPageSize` (§13): if the validator and the builder ever disagree, the
-  file is not written at all.
+  to narrow — AND rather than emit a truncated tree. That is the structural
+  backstop, in the same position as `checkPageSize` (§13): if the validator and
+  the builder ever disagree, the file is not written at all. It has to be in
+  every builder, not only at the two narrowing casts: the MAP builder used to
+  return nil after emitting a `key_value` group promising two children and
+  giving none, which `BuildSchemaTree` reads back as a group borrowing the next
+  two TOP-LEVEL columns — #970's corruption, still finalizable through that
+  path with the validator removed (a 424-byte unreadable file). The ARRAY
+  builder substituted a STRING element for a missing `ElementType`; the ROW
+  builder emitted an empty group.
 
 - **The writer owns its schema.** Both constructors deep-copy the caller's
   `Schema` — `Columns`, nested `Fields`, `ElementType`, recursively — and use
@@ -1110,6 +1136,14 @@ cannot read.** Four rules:
   writer whose `Close` FAILED keeps returning that failure, which is the more
   specific answer and what §10's latch already promised.
 
+  The latch is claimed with a CompareAndSwap and is the ONE synchronized field
+  in the writer. A writer is not safe for concurrent use — leaf buffers, error
+  latch and byte count are all unsynchronized, and two goroutines writing rows
+  to one writer corrupt the file — but the damage a lost race does at THIS
+  field is a second footer written over a complete one, which is the sequential
+  defect reached through another door, so exactly one caller finalizes and
+  every other is told the file is already finalized.
+
   The footer's own size is bounded the same way and BEFORE any footer byte goes
   out: `footerTrailerLength` is the only source of a trailer value, and it
   refuses past `math.MaxUint32` (the format's width) and past `footerMaxSize`
@@ -1121,16 +1155,23 @@ cannot read.** Four rules:
 Gates, each proven to fail on revert: `TestAClosedWriterIsClosed` (both
 row-group sizes x both doors; the file is byte-identical after the refused write
 and the refused second `Close`), `TestARefusedWriteDoesNotTouchTheCallersRows`,
-`TestFooterTrailerLengthBoundary` and `TestAnOversizeFooterIsRefusedBeforeItIs
-Written` (a real >64 MiB footer; no gate allocates a 4 GB one),
-`TestTheWriterOwnsItsSchema` (seven mutation shapes x both doors, byte-identical
-files), `TestColumnCloneSharesNothing`,
-`TestEveryConstructorRefusesASchemaItCannotWrite` (17 shapes x both doors, zero
-bytes), `TestTheValidBoundaryDeclarationsStillWrite` and
+`TestOnlyOneConcurrentCloseFinalizesTheFile` (under `-race`),
+`TestFooterTrailerLengthBoundary`, `TestAFooterExactlyAtTheCeilingWritesAnd
+Reopens` and `TestAnOversizeFooterIsRefusedBeforeItIsWritten` (a real >64 MiB
+footer; no gate allocates a 4 GB one), `TestTheWriterOwnsItsSchema` (seven
+mutation shapes x both doors, byte-identical files),
+`TestColumnCloneSharesNothing`,
+`TestEveryConstructorRefusesASchemaItCannotWrite` (22 shapes x both doors, zero
+bytes), `TestTheDDLDoorAndTheWriterBoundVectorTheSameWay`,
+`TestAnAcceptedVectorDimensionSurvivesTheFile`,
+`TestTheFooterNeverDeclaresAWrappedVectorDimension`,
+`TestTheSchemaElementBuildersRefuseWhatTheValidatorRefuses` and its
+accepts-everything-legal twin, `TestTheValidBoundaryDeclarationsStillWrite` and
 `TestVectorAndDecimalBoundaries` (the legal side, opened in pyarrow), and
 `FuzzWriteSchemaShape`, which feeds the writer its OWN untrusted input class — an
-arbitrary schema declaration — and asserts the disposition is refused-with-
-nothing-written or finalized-and-reopenable, never a third thing.
+arbitrary schema declaration, over the FULL width of every field it decodes —
+and asserts the disposition is refused-with-nothing-written, or finalized,
+reopenable and carrying no fixed-width leaf of zero width; never a third thing.
 
 ## Consequences
 

@@ -122,18 +122,22 @@ embedded API, a custom tool, or a test:
 - **An impossible declaration is refused when the writer is constructed**, not
   when the file is read back. A `DECIMAL` with a negative scale, a scale past
   the precision the file will declare, or a precision above 38 or below zero; a
-  `VECTOR` whose `Dimension × 4` does not fit the format's fixed-width field; a
-  `MAP` spelled with `Fields` instead of an `ElementType` `ROW`; an `ARRAY`
-  without an element type; an empty `ROW` — each is an error naming the column,
-  from `parquet.NewWriter` and from the first call on a
-  `parquet.NewNativeWriter`, with no bytes written. `Precision: 0` is still the
-  "unconstrained" spelling and means 38.
+  `VECTOR` of more than `parquet.MaxVectorDimension` (536,870,911) components,
+  the widest whose bytes fit the format's fixed-width field; a `MAP` spelled
+  with `Fields` instead of an `ElementType` `ROW`; an `ARRAY` without an element
+  type; an empty `ROW` — each is an error naming the column, from
+  `parquet.NewWriter` and from the first call on a `parquet.NewNativeWriter`,
+  with no bytes written. `Precision: 0` is still the "unconstrained" spelling and
+  means 38. `CREATE TABLE … VECTOR(n)` applies the same bound, so a dimension no
+  writer can store is refused at the DDL rather than at the first flush.
 - **The writer copies the schema you hand it.** Reusing and amending a schema
   object while a writer is alive is safe; the file follows the schema as it was
   at construction.
 - **`Close` is final.** A later `WriteRows` or `Close` returns
   `parquet.ErrWriterClosed` and leaves the finalized file byte-for-byte as it
-  was, so a stray second `Close` cannot append a second footer.
+  was, so a stray second `Close` cannot append a second footer — including when
+  the second one is on another goroutine, which is the only part of the writer
+  that is safe to use concurrently.
 
 None of this changes what `Ingest` accepts: `ingest.checkType` still refuses a
 bad row where the INSERT that carried it can be named, and it asks the writer's

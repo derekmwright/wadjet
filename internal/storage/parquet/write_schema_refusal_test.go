@@ -42,6 +42,25 @@ var writeSchemaRefusalCases = []struct {
 	{"VECTOR at MaxInt32 components", Column{
 		Name: "v", Type: TypeVector, Nullable: true, Dimension: math.MaxInt32,
 	}, "FIXED_LEN_BYTE_ARRAY type_length"},
+	// The round-1 B1 cells: the round-0 fix multiplied the operand into an
+	// int64 that OVERFLOWS on this build (int IS int64), so each of these
+	// wrote a wrapped type_length and Close returned nil. 2^62+1 is the worst
+	// of them — type_length 4, a file pyarrow OPENS as fixed_size_binary[4].
+	{"VECTOR at 2^61 components", Column{
+		Name: "v", Type: TypeVector, Nullable: true, Dimension: 1 << 61,
+	}, "FIXED_LEN_BYTE_ARRAY type_length"},
+	{"VECTOR at 2^62 components", Column{
+		Name: "v", Type: TypeVector, Nullable: true, Dimension: 1 << 62,
+	}, "FIXED_LEN_BYTE_ARRAY type_length"},
+	{"VECTOR at 2^62+1 components", Column{
+		Name: "v", Type: TypeVector, Nullable: true, Dimension: (1 << 62) + 1,
+	}, "FIXED_LEN_BYTE_ARRAY type_length"},
+	{"VECTOR at MaxInt components", Column{
+		Name: "v", Type: TypeVector, Nullable: true, Dimension: math.MaxInt,
+	}, "FIXED_LEN_BYTE_ARRAY type_length"},
+	{"VECTOR at MinInt components", Column{
+		Name: "v", Type: TypeVector, Nullable: true, Dimension: math.MinInt,
+	}, "positive Dimension"},
 
 	{"DECIMAL with a negative scale", Column{
 		Name: "d", Type: TypeDecimal, Nullable: true, Precision: 9, Scale: -1,
@@ -223,11 +242,19 @@ func TestVectorAndDecimalBoundaries(t *testing.T) {
 	}{
 		{dim: 1, want: 4},
 		{dim: 3, want: 12},
-		{dim: math.MaxInt32 / 4, want: math.MaxInt32 - 3}, // 2147483644
-		{dim: math.MaxInt32/4 + 1, wantErr: true},
+		{dim: MaxVectorDimension, want: math.MaxInt32 - 3}, // 536870911 -> 2147483644
+		{dim: MaxVectorDimension + 1, wantErr: true},
 		{dim: math.MaxInt32, wantErr: true},
+		// The operand, not the product: each of these overflowed the round-0
+		// fix's own int64 multiplication and produced a type_length of 0, -4
+		// or 4 with Close returning nil (round-1 B1).
+		{dim: 1 << 61, wantErr: true},
+		{dim: 1 << 62, wantErr: true},
+		{dim: (1 << 62) + 1, wantErr: true},
+		{dim: math.MaxInt, wantErr: true},
 		{dim: 0, wantErr: true},
 		{dim: -1, wantErr: true},
+		{dim: math.MinInt, wantErr: true},
 	}
 	for _, c := range vectorCases {
 		got, err := vectorTypeLength(c.dim)

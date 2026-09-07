@@ -348,10 +348,13 @@ can open. Three rules make that a guarantee rather than a habit — see
   (key/value on `Fields` rather than an `ElementType` `ROW`), an `ARRAY` with no
   element type, an empty `ROW`, a `DECIMAL` whose declaration the file cannot
   carry (negative scale, scale past the precision the file will declare,
-  precision above 38 or negative), and a `VECTOR` whose width in bytes
-  (`Dimension × 4`) does not fit the format's `FIXED_LEN_BYTE_ARRAY`
-  `type_length`. `Precision: 0` remains the "unconstrained" spelling and means
-  38.
+  precision above 38 or negative), and a `VECTOR` of more than
+  `parquet.MaxVectorDimension` (536,870,911) components — the widest whose bytes
+  fit the format's `FIXED_LEN_BYTE_ARRAY` `type_length`. `Precision: 0` remains
+  the "unconstrained" spelling and means 38. The VECTOR bound is one constant
+  for the whole engine: `CREATE TABLE t (v VECTOR(n))` refuses exactly what the
+  writer refuses, so a declaration no door can store is rejected where it is
+  typed.
 - **The writer owns its schema.** Both constructors take a deep copy, so
   amending a reusable `parquet.Schema` while a writer is alive changes nothing
   about the file it produces.
@@ -359,7 +362,9 @@ can open. Three rules make that a guarantee rather than a habit — see
   every later `WriteRows`, `WriteMapRows` and `Close` returns
   `parquet.ErrWriterClosed` without touching the output, so the finalized file
   is exactly what the first `Close` wrote. A `Close` that fails keeps returning
-  its own failure.
+  its own failure. A writer is not safe for concurrent use, with one exception:
+  the closed latch is atomic, so two goroutines racing to `Close` cannot both
+  finalize — one writes the footer and the other is refused.
 
 The footer is bounded the same way: it must fit both the format's four-byte
 trailer length and the 64 MiB footer this package will read back, checked before
